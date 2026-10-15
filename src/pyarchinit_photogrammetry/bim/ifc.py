@@ -50,7 +50,9 @@ def export_ifc(path: str | Path, elements: list[IfcElement], crs: str | None = N
 
     model = ifcopenshell.file(schema="IFC4")
     proj = ifcopenshell.api.root.create_entity(model, ifc_class="IfcProject", name=project)
-    ifcopenshell.api.unit.assign_unit(model)
+    ifcopenshell.api.unit.assign_unit(model, length={"is_metric": True, "raw": "METERS"},
+                                      area={"is_metric": True, "raw": "METERS"},
+                                      volume={"is_metric": True, "raw": "METERS"})  # coordinates are metres
     ctx = ifcopenshell.api.context.add_context(model, context_type="Model")
     body = ifcopenshell.api.context.add_context(model, context_type="Model", context_identifier="Body",
                                                 target_view="MODEL_VIEW", parent=ctx)
