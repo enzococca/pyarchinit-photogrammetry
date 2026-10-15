@@ -700,7 +700,7 @@ class UsFormDialog(QDialog):
     def __init__(self, pa, sito: str, area: str = "1", us: str = "", unita_tipo: str = "US", parent=None,
                  defaults: dict | None = None):
         super().__init__(parent)
-        from PySide6.QtWidgets import QPlainTextEdit, QTableWidget, QTabWidget
+        from PySide6.QtWidgets import QTableWidget, QTabWidget
 
         from ..pyarchinit.bridge import parse_relationships
 
@@ -726,27 +726,28 @@ class UsFormDialog(QDialog):
             row.addWidget(QLabel(label))
             row.addWidget(w, 2 if label == "Sito" else 1)
         lay.addLayout(row)
-        tabs = QTabWidget()
+        # an older or reduced us_table (e.g. the demo database of version 0.2) lacks fields of the
+        # PyArchInit 5 form: say so and offer to add them instead of showing empty pages
+        self.banner = QWidget()
+        self.banner.setObjectName("warningBanner")
+        self.banner.setStyleSheet("#warningBanner { background: rgba(245, 158, 11, 0.16); "
+                                  "border: 1px solid rgba(245, 158, 11, 0.6); border-radius: 6px; }")
+        bl = QHBoxLayout(self.banner)
+        bl.setContentsMargins(10, 6, 10, 6)
+        self.banner_text = QLabel("")
+        self.banner_text.setWordWrap(True)
+        self.b_upgrade = QPushButton("Aggiorna struttura del database")
+        self.b_upgrade.clicked.connect(lambda _=False: self.upgrade_structure())
+        bl.addWidget(self.banner_text, 1)
+        bl.addWidget(self.b_upgrade)
+        lay.addWidget(self.banner)
+        self.tabs = QTabWidget()
         self.fields: dict[str, QWidget] = {}
         data = dict(self.record or {})
         data.update({k: v for k, v in (defaults or {}).items() if not data.get(k)})
-        for page, fields in US_FORM_PAGES:
-            w = QWidget()
-            form = QFormLayout(w)
-            for name, label in fields:
-                if name not in self.cols:
-                    continue
-                multi = label.endswith("*")
-                val = "" if data.get(name) is None else str(data.get(name))
-                edit = QPlainTextEdit(val) if multi else QLineEdit(val)
-                if multi:
-                    edit.setMaximumHeight(90)
-                form.addRow(label.rstrip("*"), edit)
-                self.fields[name] = edit
-            tabs.addTab(w, page)
-        # relationships
-        rel_w = QWidget()
-        rl = QVBoxLayout(rel_w)
+        # relationships: the table is kept across rebuilds of the pages
+        self.rel_page = QWidget()
+        rl = QVBoxLayout(self.rel_page)
         self.rel = QTableWidget(0, 4)
         self.rel.setHorizontalHeaderLabels(["Rapporto", "US", "Area", "Sito"])
         self.rel.horizontalHeader().setStretchLastSection(True)
@@ -762,16 +763,96 @@ class UsFormDialog(QDialog):
         btns.addStretch(1)
         rl.addWidget(self.rel, 1)
         rl.addLayout(btns)
-        if "rapporti" in self.cols:
-            tabs.addTab(rel_w, "Rapporti")
-        lay.addWidget(tabs, 1)
+        lay.addWidget(self.tabs, 1)
         self.status = QLabel("")
+        self.status.setWordWrap(True)
         lay.addWidget(self.status)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self.save)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
+        self._build_pages(data)
         self.saved_id: int | None = None
+
+    def _build_pages(self, data: dict) -> None:
+        """Pages of the form for the columns the database has; pages without any are left out."""
+        from PySide6.QtWidgets import QPlainTextEdit
+
+        while self.tabs.count():
+            page = self.tabs.widget(0)
+            self.tabs.removeTab(0)
+            if page is not self.rel_page:
+                page.deleteLater()
+        self.fields = {}
+        for page, fields in US_FORM_PAGES:
+            present = [(n, label) for n, label in fields if n in self.cols]
+            if not present:
+                continue
+            w = QWidget()
+            form = QFormLayout(w)
+            for name, label in present:
+                multi = label.endswith("*")
+                val = "" if data.get(name) is None else str(data.get(name))
+                edit = QPlainTextEdit(val) if multi else QLineEdit(val)
+                if multi:
+                    edit.setMaximumHeight(90)
+                form.addRow(label.rstrip("*"), edit)
+                self.fields[name] = edit
+            self.tabs.addTab(w, page)
+        if "rapporti" in self.cols:
+            self.tabs.addTab(self.rel_page, "Rapporti")
+        try:
+            self.missing = self.pa.missing_us_columns()
+        except Exception:  # a database without the reference columns at all: nothing to offer
+            self.missing = []
+        if self.missing:
+            what = ", tra cui i rapporti stratigrafici" if "rapporti" in self.missing else ""
+            copy = (" Prima viene fatta una copia di sicurezza del file." if self.pa.db.sqlite_path is not None
+                    else " Su PostgreSQL fai prima un backup del database.")
+            self.banner_text.setText(f"Questo database ha una scheda US ridotta (struttura di una versione precedente): "
+                                     f"mancano {len(self.missing)} campi di PyArchInit 5{what}. «Aggiorna struttura» "
+                                     f"li aggiunge senza modificare i dati.{copy}")
+        self.banner.setVisible(bool(self.missing))
+
+    def _texts(self) -> dict:
+        out = {}
+        for name, w in self.fields.items():
+            text = w.toPlainText() if hasattr(w, "toPlainText") else w.text()
+            if text.strip():
+                out[name] = text
+        return out
+
+    def upgrade_structure(self, confirm: bool = True) -> bool:
+        """Add the missing PyArchInit 5 columns (see ``PyArchInit.upgrade_us_table``) and show
+        the complete form, keeping what was typed."""
+        from PySide6.QtWidgets import QMessageBox
+
+        if confirm:
+            ans = message(self, "question", "Aggiorna struttura del database",
+                          f"Aggiungere a us_table i {len(self.missing)} campi mancanti della scheda US di PyArchInit 5? "
+                          "I record esistenti non vengono modificati.",
+                          buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                          default=QMessageBox.StandardButton.No)
+            if ans != QMessageBox.StandardButton.Yes:
+                return False
+        typed = self._texts()
+        try:
+            res = self.pa.upgrade_us_table()
+        except Exception as exc:
+            self.status.setText(f"Aggiornamento non riuscito: {exc}")
+            return False
+        self.cols = self.pa.us_columns()
+        if self.record:
+            self.record = self.pa.us_record(self.record["sito"], self.record["area"], self.record["us"],
+                                            self.record.get("unita_tipo")) or self.record
+        data = dict(self.record or {})
+        data.update(typed)
+        self._build_pages(data)
+        msg = f"Aggiunti {len(res['added'])} campi alla scheda US."
+        if res.get("backup"):
+            msg += f" Copia di sicurezza: {Path(res['backup']).name}"
+        self.status.setText(msg)
+        return True
 
     def _add_rel(self, r) -> None:
         from PySide6.QtWidgets import QTableWidgetItem

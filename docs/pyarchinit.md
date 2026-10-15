@@ -42,6 +42,12 @@ SpatiaLite first can crash GDAL-based code in the same process.
 | `publish_volume(sito, nome_calcolo, result)` | `computo_metrico_table` |
 | `create_us(sito, area, us, unita_tipo, **fields)` | a new `us_table` record (`id_us` = max+1, `entity_uuid`, `node_uuid`); the site record is created when missing; `FileExistsError` if sito/area/US/type exists. Unknown fields are ignored |
 | `update_us(id_us, **fields)` | the given columns of a `us_table` record |
+| `upgrade_us_table()` | adds the PyArchInit 5 columns that `us_table` lacks (`missing_us_columns()`), as PyArchInit's own updater does: a copy `<file>.backup_<date>_<time>` of a SQLite file, then `ALTER TABLE ... ADD COLUMN`; records are untouched. Column names and types come from the bundled schema (`reference_us_columns()`) |
+| `update_unit(gid, geometry=None, crs=None, **fields)` | attributes and/or geometry of a `pyunitastratigrafiche` polygon (geometry reprojected from `crs` to the layer SRID) |
+| `delete_unit(gid)` | removes a `pyunitastratigrafiche` polygon (the US form is not touched) |
+
+`us_polygons(sito, crs=...)` returns the polygons in the given CRS (the chunk's), reprojected
+from the layer SRID when they differ.
 
 `rapporti` is stored as PyArchInit does (`"[['Copre', '2', '1', 'Sito'], ...]"`);
 `parse_relationships` reads it (also the short `[rel, us]` form and plain text such as

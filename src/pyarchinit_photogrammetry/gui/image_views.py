@@ -79,7 +79,8 @@ class _ZoomView(QGraphicsView):
 class RasterView(_ZoomView):
     """Orthomosaic or DEM in world coordinates, with drawing tools.
 
-    Modes: ``pan``; ``polygon`` (click vertices, double click to close: a unit);
+    Modes: ``pan``; ``select`` (click, shift/cmd-click or drag a box to select features,
+    Delete to remove them); ``polygon`` (click vertices, double click to close: a unit);
     ``line`` (two clicks: a section trace); ``measure`` (two clicks: distance and
     height difference); ``point`` (one click: elevation / SAM prompt)."""
 
@@ -90,6 +91,9 @@ class RasterView(_ZoomView):
     measured = Signal(str)
     layers_changed = Signal()
     feature_clicked = Signal(str, dict)  # layer name, attributes (query in pan mode)
+    selection_changed = Signal(int)  # number of selected features
+    delete_requested = Signal()  # Delete/Backspace or context menu in select mode
+    merge_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -104,16 +108,26 @@ class RasterView(_ZoomView):
         self.overlays: list = []
         self.layers: dict[str, dict] = {}  # name -> {"kind", "visible", "features": [(item, label_item, attrs)]}
         self.layer_order: list[str] = []
+        self.selection: list = []  # graphics items of the selected features
+        self._sel_marks: list = []  # highlight items drawn over the selection
+        self._band_origin: QPointF | None = None
+        self._band = None
+        self._press_mods = Qt.KeyboardModifier.NoModifier
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # Delete / Esc in select mode
 
     # ----------------------------------------------------------- data
     def load(self, path: str | Path, kind: str, max_side: int = 6000) -> None:
         import rasterio
         from rasterio.enums import Resampling
 
+        had_selection = bool(self.selection)
+        self.selection, self._sel_marks, self._band, self._band_origin = [], [], None, None  # deleted by clear()
         self.scene().clear()
         self.overlays, self._clicks, self._rubber = [], [], None
         self.layers, self.layer_order = {}, []
         self.layers_changed.emit()
+        if had_selection:
+            self.selection_changed.emit(0)
         self.path, self.kind = Path(path), kind
         with rasterio.open(path) as src:
             f = max(1.0, max(src.width, src.height) / max_side)
@@ -288,6 +302,9 @@ class RasterView(_ZoomView):
         if lay is None:
             return
         self.layer_order.remove(name)
+        gone = {id(f[0]) for f in lay["features"]}
+        if any(id(it) in gone for it in self.selection):
+            self.select_items([it for it in self.selection if id(it) not in gone])
         for item, label_item, _ in lay["features"]:
             for it in (item, label_item):
                 if it is not None:
@@ -334,6 +351,7 @@ class RasterView(_ZoomView):
         return None
 
     def clear_overlays(self) -> None:
+        self.clear_selection()
         for it in self.overlays:
             self.scene().removeItem(it)
         self.overlays = []
@@ -341,13 +359,127 @@ class RasterView(_ZoomView):
         self.layers_changed.emit()
 
     def set_mode(self, mode: str) -> None:
+        if mode != "select" and self.selection:
+            self.clear_selection()
         self.mode = mode
         self._clicks = []
         if self._rubber is not None:
             self.scene().removeItem(self._rubber)
             self._rubber = None
+        self._end_band()
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag if mode == "pan" else QGraphicsView.DragMode.NoDrag)
-        self.viewport().setCursor(Qt.CursorShape.OpenHandCursor if mode == "pan" else Qt.CursorShape.CrossCursor)
+        cursor = {"pan": Qt.CursorShape.OpenHandCursor, "select": Qt.CursorShape.ArrowCursor}
+        self.viewport().setCursor(cursor.get(mode, Qt.CursorShape.CrossCursor))
+
+    # ----------------------------------------------------------- selection
+    def _feature_items(self, items) -> list:
+        """Feature items (not labels, highlights or the raster) among graphics items, visible only."""
+        return [it for it in items if it.data(0) in self.layers and it.isVisible()]
+
+    def item_at(self, scene_pos: QPointF, radius_px: float = 8.0):
+        r = radius_px / max(self.transform().m11(), 1e-9)
+        area = QRectF(scene_pos.x() - r, scene_pos.y() - r, 2 * r, 2 * r)
+        found = self._feature_items(self.scene().items(area, Qt.ItemSelectionMode.IntersectsItemShape,
+                                                       Qt.SortOrder.DescendingOrder, self.viewportTransform()))
+        return found[0] if found else None
+
+    def items_in_rect(self, rect: QRectF) -> list:
+        return self._feature_items(self.scene().items(rect.normalized(), Qt.ItemSelectionMode.IntersectsItemShape,
+                                                      Qt.SortOrder.AscendingOrder, self.viewportTransform()))
+
+    def select_items(self, items, mode: str = "replace") -> None:
+        """``mode``: replace, add or toggle."""
+        items = list(dict.fromkeys(items))
+        if mode == "replace":
+            sel = items
+        elif mode == "add":
+            sel = self.selection + [it for it in items if it not in self.selection]
+        else:
+            sel = [it for it in self.selection if it not in items] + [it for it in items if it not in self.selection]
+        self.selection = sel
+        self._draw_selection()
+        self.selection_changed.emit(len(self.selection))
+
+    def select_at(self, scene_pos: QPointF, toggle: bool = False) -> None:
+        it = self.item_at(scene_pos)
+        if it is None:
+            if not toggle:
+                self.select_items([])
+            return
+        self.select_items([it], "toggle" if toggle else "replace")
+        if len(self.selection) == 1:  # one feature: show its attributes like a click in navigation mode
+            ref = self.selected_features()[0]
+            self.feature_clicked.emit(ref[0], {**ref[2], "_index": ref[1]})
+
+    def select_in_rect(self, rect: QRectF, add: bool = False) -> None:
+        self.select_items(self.items_in_rect(rect), "add" if add else "replace")
+
+    def clear_selection(self) -> None:
+        if self.selection or self._sel_marks:
+            self.selection = []
+            self._draw_selection()
+            self.selection_changed.emit(0)
+
+    def selected_features(self) -> list[tuple[str, int, dict]]:
+        """``(layer, index, attributes)`` of the selected features, in selection order."""
+        out = []
+        for it in self.selection:
+            lay = self.layers.get(it.data(0))
+            if lay is None:
+                continue
+            idx = next((i for i, f in enumerate(lay["features"]) if f[0] is it), -1)
+            if idx >= 0:
+                out.append((it.data(0), idx, lay["features"][idx][2]))
+        return out
+
+    def _draw_selection(self) -> None:
+        for m in self._sel_marks:
+            if m.scene() is self.scene():
+                self.scene().removeItem(m)
+        self._sel_marks = []
+        pen = self._pen("#00e5ff", 3.0)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        for it in self.selection:
+            if isinstance(it, QGraphicsPathItem):
+                polygon = self.layers.get(it.data(0), {}).get("kind") == "polygon"
+                m = self.scene().addPath(it.path(), pen, QBrush(QColor(0, 229, 255, 70)) if polygon else QBrush())
+            else:  # a point marker: a ring around it, constant size on screen
+                m = QGraphicsEllipseItem(-10, -10, 20, 20)
+                m.setPos(it.pos())
+                m.setFlag(m.GraphicsItemFlag.ItemIgnoresTransformations)
+                m.setPen(pen)
+                self.scene().addItem(m)
+            m.setZValue(10000)
+            self._sel_marks.append(m)
+
+    def _end_band(self) -> None:
+        if self._band is not None and self._band.scene() is self.scene():
+            self.scene().removeItem(self._band)
+        self._band, self._band_origin = None, None
+
+    def _selection_menu(self, global_pos) -> None:
+        menu = QMenu(self)
+        a_del = menu.addAction(f"Elimina selezionati ({len(self.selection)})")
+        a_merge = menu.addAction("Unisci selezionati")
+        a_merge.setEnabled(len(self.selection) > 1)
+        a_clear = menu.addAction("Deseleziona tutto")
+        chosen = menu.exec(global_pos)
+        if chosen is a_del:
+            self.delete_requested.emit()
+        elif chosen is a_merge:
+            self.merge_requested.emit()
+        elif chosen is a_clear:
+            self.clear_selection()
+
+    def keyPressEvent(self, ev) -> None:
+        if self.mode == "select":
+            if ev.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and self.selection:
+                self.delete_requested.emit()
+                return
+            if ev.key() == Qt.Key.Key_Escape:
+                self.clear_selection()
+                return
+        super().keyPressEvent(ev)
 
     # ----------------------------------------------------------- events
     def _update_rubber(self, cursor: QPointF | None = None) -> None:
@@ -371,6 +503,31 @@ class RasterView(_ZoomView):
         self.mouse_world.emit(x, y, self.elevation(x, y))
         if self._clicks:
             self._update_rubber(sp)
+        if self.mode == "select" and self._band_origin is not None:
+            start = self.mapFromScene(self._band_origin)
+            if self._band is None and (ev.position().toPoint() - start).manhattanLength() > 4:
+                pen = self._pen("#00e5ff", 1.5)
+                pen.setStyle(Qt.PenStyle.DashLine)
+                self._band = self.scene().addRect(QRectF(self._band_origin, sp), pen, QBrush(QColor(0, 229, 255, 40)))
+                self._band.setZValue(10001)
+            elif self._band is not None:
+                self._band.setRect(QRectF(self._band_origin, sp).normalized())
+
+    def mouseReleaseEvent(self, ev) -> None:
+        if self.mode == "select" and self._band_origin is not None and ev.button() == Qt.MouseButton.LeftButton:
+            mods = self._press_mods
+            extend = bool(mods & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier
+                                  | Qt.KeyboardModifier.MetaModifier))
+            if self._band is not None:
+                rect = self._band.rect()
+                self._end_band()
+                self.select_in_rect(rect, add=extend)
+            else:
+                origin = self._band_origin
+                self._end_band()
+                self.select_at(origin, toggle=extend)
+            return
+        super().mouseReleaseEvent(ev)
 
     def mousePressEvent(self, ev) -> None:
         if self.mode == "pan" and self.tr is not None and ev.button() == Qt.MouseButton.LeftButton:
@@ -380,6 +537,13 @@ class RasterView(_ZoomView):
         if self.mode == "pan" or self.tr is None or ev.button() == Qt.MouseButton.MiddleButton:
             return super().mousePressEvent(ev)
         sp = self.mapToScene(ev.position().toPoint())
+        if self.mode == "select":
+            if ev.button() == Qt.MouseButton.LeftButton:
+                self.setFocus()
+                self._band_origin, self._press_mods = sp, ev.modifiers()
+            elif ev.button() == Qt.MouseButton.RightButton and self.selection:
+                self._selection_menu(ev.globalPosition().toPoint())
+            return
         if self.mode == "point":
             x, y = self.world(sp)
             ok = ev.button() != Qt.MouseButton.RightButton

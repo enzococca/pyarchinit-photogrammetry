@@ -247,7 +247,7 @@ def ifc(project: Path, out: Path, sito: Optional[str] = None, pyarchinit_units: 
         from .pyarchinit import PyArchInit
 
         pa = PyArchInit.connect()
-        units, records = pa.us_polygons(sito), pa.us_records(sito)
+        units, records = pa.us_polygons(sito, crs=ch.crs), pa.us_records(sito)
     typer.echo(str(export_chunk_ifc(ch, out, units=units, us_records=records, site=sito)))
 
 

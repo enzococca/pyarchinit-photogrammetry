@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 
 import uuid
 from contextlib import contextmanager
@@ -144,6 +145,36 @@ class PyArchInitDB:
     def columns(self, name: str) -> set[str]:
         return set(self.table(name).c.keys())
 
+    def forget(self, name: str) -> None:
+        """Drop the cached reflection of a table (after its structure changed)."""
+        t = self._tables.pop(name, None)
+        if t is not None:
+            self.metadata.remove(t)
+
+    @property
+    def sqlite_path(self) -> Path | None:
+        """The database file for SQLite, None for PostgreSQL."""
+        if self.is_postgres or not self.engine.url.database:
+            return None
+        return Path(self.engine.url.database)
+
+    def add_columns(self, table: str, columns) -> list[str]:
+        """``ALTER TABLE ... ADD COLUMN`` for each ``(name, declaration)`` the table lacks;
+        returns the names added. Existing data are not touched."""
+        have = {c.lower() for c in self.columns(table)}
+        added = []
+        with self.engine.begin() as conn:
+            for name, decl in columns:
+                if name.lower() in have:
+                    continue
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                    raise ValueError(f"invalid column name {name!r}")
+                guard = "IF NOT EXISTS " if self.is_postgres else ""
+                conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN {guard}"{name}" {decl}'))
+                added.append(name)
+        self.forget(table)
+        return added
+
     @contextmanager
     def begin(self):
         with self.engine.begin() as conn:
@@ -228,6 +259,22 @@ class PyArchInitDB:
             return int(conn.execute(text(sql), {**row, "wkt": wkt, "srid": int(target)}).scalar())
         conn.execute(text(sql), {**row, "wkt": wkt, "srid": int(target)})
         return new_id
+
+    def update_geometry(self, conn, table: str, id_value, wkt: str, id_column: str = "gid",
+                        geom_column: str = "the_geom", source_srid: int | None = None, multi: bool = False) -> int:
+        """Replace the geometry of one row (WKT in ``source_srid``, default = layer SRID)."""
+        if not self.is_postgres and not self.spatialite:
+            raise RuntimeError("writing geometries in SQLite needs mod_spatialite; set SPATIALITE_LIBRARY_PATH "
+                               "to the library shipped with QGIS")
+        target = self.srid(table, geom_column)
+        if source_srid and target and target > 0 and source_srid != target:
+            wkt = reproject_wkt(wkt, source_srid, target)
+        fn = "ST_GeomFromText" if self.is_postgres else "GeomFromText"
+        expr = f"{fn}(:wkt, :srid)"
+        if multi:
+            expr = f"ST_Multi({expr})" if self.is_postgres else f"CastToMulti({expr})"
+        sql = f'UPDATE "{table}" SET "{geom_column}" = {expr} WHERE "{id_column}" = :id'
+        return conn.execute(text(sql), {"wkt": wkt, "srid": int(target), "id": id_value}).rowcount
 
     def geometry_columns(self, table: str) -> set[str]:
         """Names of the geometry columns of a table (excluded from plain queries:

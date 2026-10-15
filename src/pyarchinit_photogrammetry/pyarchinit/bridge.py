@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from ..core import crs as crs_mod
-from .database import PyArchInitDB, connect
+from .database import PyArchInitDB, connect, reproject_wkt
 from .media import register_media
 
 US_FIELDS = ["sito", "area", "us", "unita_tipo", "d_stratigrafica", "d_interpretativa", "descrizione",
@@ -93,6 +93,35 @@ class PyArchInit:
     def us_columns(self) -> set[str]:
         return self.db.columns("us_table")
 
+    def missing_us_columns(self) -> list[str]:
+        """Columns of the PyArchInit 5 US form that this database lacks (older or reduced
+        ``us_table``, e.g. the demo database of version 0.2 of this program)."""
+        have = {c.lower() for c in self.us_columns()}
+        return [n for n, _ in reference_us_columns() if n.lower() not in have]
+
+    def upgrade_us_table(self, backup: bool = True) -> dict:
+        """Add the missing PyArchInit 5 columns to ``us_table``, as PyArchInit's own updater
+        does: a copy of a SQLite file first (``<file>.backup_<date>_<time>``), then
+        ``ALTER TABLE ... ADD COLUMN``. Records are not touched. Returns ``{"added", "backup"}``."""
+        missing = set(self.missing_us_columns())
+        if not missing:
+            return {"added": [], "backup": None}
+        bak = None
+        path = self.db.sqlite_path
+        if backup and path is not None and path.exists():
+            import sqlite3
+            from datetime import datetime
+
+            bak = path.with_name(f"{path.name}.backup_{datetime.now():%Y%m%d_%H%M%S}")
+            src, dst = sqlite3.connect(str(path)), sqlite3.connect(str(bak))
+            try:
+                src.backup(dst)  # consistent copy, WAL included
+            finally:
+                dst.close()
+                src.close()
+        added = self.db.add_columns("us_table", [(n, d) for n, d in reference_us_columns() if n in missing])
+        return {"added": added, "backup": str(bak) if bak else None}
+
     def create_us(self, sito: str, area: str, us: str, unita_tipo: str = "US", **fields) -> int:
         """New ``us_table`` record (the site record is created when missing). Unknown fields
         are ignored; ``rapporti`` may be a list of ``(relation, us, area, sito)``."""
@@ -144,16 +173,26 @@ class PyArchInit:
         links = self.db.query("media_to_entity_table", entity_type=entity_type, id_entity=id_entity)
         return [m for link in links for m in self.db.query("media_table", id_media=link["id_media"])]
 
-    def us_polygons(self, sito: str, area: str | None = None):
-        """Stratigraphic unit polygons (``pyunitastratigrafiche``) as shapely geometries."""
+    def us_polygons(self, sito: str, area: str | None = None, crs: str | None = None):
+        """Stratigraphic unit polygons (``pyunitastratigrafiche``) as shapely geometries, in
+        ``crs`` (e.g. the chunk CRS) when given, otherwise in the layer's SRID."""
         from shapely import wkt as swkt
 
         from ..archaeo.stratigraphy import UnitPolygon
 
         rows = self.db.geometries_wkt("pyunitastratigrafiche", scavo_s=sito, area_s=area)
-        return [UnitPolygon(swkt.loads(r["wkt"]), us=str(r["us_s"]), area=str(r["area_s"]),
-                            tipo=r.get("unita_tipo_s") or "US", attributes={"gid": r["gid"]})
-                for r in rows if r.get("wkt")]
+        dst = crs_mod.epsg_code(crs) if crs else None
+        src = self.srid() if dst else None
+        out = []
+        for r in rows:
+            wkt = r.get("wkt")
+            if not wkt:
+                continue
+            if dst and src and src > 0 and src != dst:
+                wkt = reproject_wkt(wkt, src, dst)
+            out.append(UnitPolygon(swkt.loads(wkt), us=str(r["us_s"]), area=str(r["area_s"]),
+                                   tipo=r.get("unita_tipo_s") or "US", attributes={"gid": r["gid"]}))
+        return out
 
     def srid(self) -> int:
         return self.db.srid("pyunitastratigrafiche")
@@ -296,18 +335,31 @@ class PyArchInit:
                     u.geometry.wkt, source_srid=crs_mod.epsg_code(crs), multi=True))
         return gids
 
-    def update_unit(self, gid: int, **fields) -> int:
-        """Change the attributes of a polygon already in ``pyunitastratigrafiche`` (``us``,
-        ``area``, ``tipo``, or any column name). Returns the number of rows updated."""
+    def update_unit(self, gid: int, geometry=None, crs: str | None = None, **fields) -> int:
+        """Change a polygon already in ``pyunitastratigrafiche``: attributes (``us``,
+        ``area``, ``tipo``, or any column name) and/or its ``geometry`` (shapely, in ``crs``;
+        e.g. after merging units). Returns the number of rows updated."""
         names = {"us": "us_s", "area": "area_s", "tipo": "unita_tipo_s", "sito": "scavo_s"}
         cols = self.db.columns("pyunitastratigrafiche")
         values = {names.get(k, k): (None if v is None else str(v)) for k, v in fields.items()}
         values = {k: v for k, v in values.items() if k in cols and k not in ("gid", "the_geom")}
-        if not values:
+        if not values and geometry is None:
             return 0
         t = self.db.table("pyunitastratigrafiche")
+        n = 0
         with self.db.begin() as conn:
-            return conn.execute(t.update().where(t.c.gid == int(gid)).values(**values)).rowcount
+            if values:
+                n = conn.execute(t.update().where(t.c.gid == int(gid)).values(**values)).rowcount
+            if geometry is not None:
+                n = max(n, self.db.update_geometry(conn, "pyunitastratigrafiche", int(gid), geometry.wkt,
+                                                   source_srid=crs_mod.epsg_code(crs), multi=True))
+        return n
+
+    def delete_unit(self, gid: int) -> int:
+        """Remove a polygon from ``pyunitastratigrafiche`` (the US form is not touched)."""
+        t = self.db.table("pyunitastratigrafiche")
+        with self.db.begin() as conn:
+            return conn.execute(t.delete().where(t.c.gid == int(gid))).rowcount
 
     def publish_elevations(self, chunk, sito: str, area: str, us: str, points_xy, unita_tipo: str = "US",
                            disegnatore: str = "") -> list[int]:
@@ -364,6 +416,32 @@ RELATION_WORDS = {"copre": "Copre", "coperto da": "Coperto da", "taglia": "Tagli
                   "riempie": "Riempie", "riempito da": "Riempito da", "si appoggia a": "Si appoggia a",
                   "gli si appoggia": "Gli si appoggia", "si lega a": "Si lega a", "uguale a": "Uguale a",
                   "anteriore a": "Anteriore a", "posteriore a": "Posteriore a"}
+
+
+_US_REFERENCE: list[tuple[str, str]] | None = None
+
+
+def reference_us_columns() -> list[tuple[str, str]]:
+    """``us_table`` columns of PyArchInit 5 as ``(name, SQL declaration)``, read from the
+    bundled schema (``pyarchinit5_schema.sql``); the primary key is left out."""
+    global _US_REFERENCE
+    if _US_REFERENCE is None:
+        import re
+        import sqlite3
+
+        ddl = Path(__file__).with_name("pyarchinit5_schema.sql").read_text(encoding="utf-8")
+        m = re.search(r'^CREATE TABLE "?us_table"?\s*\((.*)\);\s*$', ddl, re.M)
+        if m is None:
+            raise RuntimeError("us_table not found in pyarchinit5_schema.sql")
+        con = sqlite3.connect(":memory:")
+        try:
+            con.execute(f"CREATE TABLE us_table ({m.group(1)})")
+            cols = con.execute("PRAGMA table_info(us_table)").fetchall()
+        finally:
+            con.close()
+        _US_REFERENCE = [(name, (ctype or "TEXT") + (f" DEFAULT {dflt}" if dflt is not None else ""))
+                         for _cid, name, ctype, _nn, dflt, pk in cols if not pk]
+    return list(_US_REFERENCE)
 
 
 def parse_relationships(text: str | None) -> list[list[str]]:

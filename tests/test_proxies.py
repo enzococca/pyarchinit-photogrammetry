@@ -138,3 +138,46 @@ def test_gui_proxies_and_us_form(processed, pa_db, tmp_path):
     finally:
         w.setWindowModified(False)
         w.close()
+
+
+OLD_US_TABLE = """CREATE TABLE us_table (id_us INTEGER PRIMARY KEY, sito TEXT, area TEXT, us TEXT, d_stratigrafica TEXT,
+  d_interpretativa TEXT, descrizione TEXT, interpretazione TEXT, periodo_iniziale TEXT, fase_iniziale TEXT,
+  periodo_finale TEXT, fase_finale TEXT, unita_tipo TEXT, entity_uuid TEXT)"""
+
+
+def test_us_form_upgrades_an_old_reduced_schema(tmp_path):
+    """The demo database of version 0.2 had a 14-column us_table: the form says so, hides the
+    pages without fields and adds the PyArchInit 5 columns on request (records untouched)."""
+    import sqlite3
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from pyarchinit_photogrammetry.gui.dialogs import UsFormDialog
+    from pyarchinit_photogrammetry.pyarchinit import PyArchInit
+
+    QApplication.instance() or QApplication([])
+    db = tmp_path / "old.sqlite"
+    con = sqlite3.connect(db)
+    con.execute(OLD_US_TABLE)
+    con.execute("INSERT INTO us_table VALUES (1, 'Scavo', '1', '1', 'Strato', '', 'terra', '', 'I', '1', '', '', "
+                "'US', NULL)")
+    con.commit()
+    con.close()
+    pa = PyArchInit.connect(url=str(db))
+    assert {"rapporti", "colore", "quota_max_abs"} <= set(pa.missing_us_columns())
+    d = UsFormDialog(pa, "Scavo", "1", "1", "US")
+    pages = [d.tabs.tabText(i) for i in range(d.tabs.count())]
+    assert not d.banner.isHidden() and "Rapporti" not in pages and "Caratteri" not in pages
+    assert d.upgrade_structure(confirm=False)
+    pages = [d.tabs.tabText(i) for i in range(d.tabs.count())]
+    assert {"Caratteri", "Quote e misure", "Rapporti"} <= set(pages) and d.banner.isHidden()
+    assert list(tmp_path.glob("old.sqlite.backup_*")) and pa.missing_us_columns() == []
+    d._add_rel(["Copre", "2", "1", "Scavo"])
+    d.fields["colore"].setText("bruno")
+    d.save()
+    rec = pa.us_record("Scavo", "1", "1")
+    assert rec["d_stratigrafica"] == "Strato" and rec["colore"] == "bruno"
+    assert parse_relationships(rec["rapporti"]) == [["Copre", "2", "1", "Scavo"]]
+    assert pa.upgrade_us_table() == {"added": [], "backup": None}

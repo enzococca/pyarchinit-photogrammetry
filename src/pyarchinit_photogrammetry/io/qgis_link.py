@@ -100,13 +100,17 @@ def classify_layer(name: str, kind: str) -> str:
 def export_layers(folder: str | Path, layers: dict[str, dict], crs: str) -> dict[str, Path]:
     """Write the live GeoJSON files from the layers of the raster view.
 
-    ``layers``: ``{name: {"kind": "polygon"|"line"|"point", "features": [attrs with "_geom"]}}``.
+    ``layers``: ``{name: {"kind": "polygon"|"line"|"point", "features": [attrs with "_geom"]}}``;
+    the ``(item, label, attrs)`` triples of :class:`gui.image_views.RasterView` are accepted too.
     Every file is written even when empty, so QGIS sees deletions."""
     folder = Path(folder)
     out = {stem: [] for stem in LIVE_FILES}
     for name, lay in layers.items():
         stem = classify_layer(name, lay["kind"])
-        for attrs in lay["features"]:
+        for feat in lay["features"]:
+            attrs = feat[-1] if isinstance(feat, (tuple, list)) else feat
+            if not isinstance(attrs, dict):
+                continue
             geom = attrs.get("_geom")
             if not geom:
                 continue

@@ -92,6 +92,9 @@ class MainWindow(QMainWindow):
         self.ortho_view.measured.connect(lambda t: (self.statusBar().showMessage(t, 30000),
                                                     self.log_pane.info(t)))
         self.ortho_view.point_clicked.connect(self._ortho_point)
+        self.ortho_view.selection_changed.connect(self._selection_changed)
+        self.ortho_view.delete_requested.connect(lambda: self.delete_selected())
+        self.ortho_view.merge_requested.connect(lambda: self.merge_selected())
         self.photo_view.markers_changed.connect(self._markers_edited)
         self.photo_view.sam_prompt.connect(self._photo_sam_prompt)
 
@@ -131,6 +134,8 @@ class MainWindow(QMainWindow):
         self.layers_pane.set_view(self.ortho_view)
         self.layers_pane.attribute_edited.connect(self._attribute_edited)
         self.pa_pending: dict[int, object] = {}  # gid -> UnitPolygon edited, to write back to PyArchInit
+        self.pa_deleted: set[int] = set()  # gid of polygons deleted or merged away here
+        self.pa_geom_changed: set[int] = set()  # gid whose geometry changed (merge, part removed)
         self.b_pa_save = QPushButton(icon("publish"), "Salva modifiche in PyArchInit")
         self.b_pa_save.clicked.connect(self.save_pending_units)
         self.b_pa_save.hide()
@@ -252,7 +257,8 @@ class MainWindow(QMainWindow):
         dm = m.addMenu(icon("polygon"), "Disegno su ortofoto")
         self.draw_group = QActionGroup(self)
         self.draw_actions: dict[str, QAction] = {}
-        for mode, label, ic in (("pan", "Sposta / interroga", "pan"), ("polygon", "Disegna unita' stratigrafica", "polygon"),
+        for mode, label, ic in (("pan", "Sposta / interroga", "pan"), ("select", "Seleziona", "select"),
+                                ("polygon", "Disegna unita' stratigrafica", "polygon"),
                                 ("line", "Traccia sezione", "line"), ("measure", "Misura distanza", "measure"),
                                 ("point", "Quota puntuale / prompt SAM", "point")):
             a = QAction(icon(ic), label, self, checkable=True)
@@ -262,6 +268,12 @@ class MainWindow(QMainWindow):
             self.draw_group.addAction(a)
             dm.addAction(a)
             self.draw_actions[mode] = a
+        self.a_sel_delete = self._act(dm, "Elimina selezionati", lambda: self.delete_selected(), icon_name="delete")
+        self.a_sel_delete.setToolTip("Elimina gli elementi selezionati (tasto Canc nella modalita' Seleziona)")
+        self.a_sel_merge = self._act(dm, "Unisci selezionati", lambda: self.merge_selected(), icon_name="merge")
+        self.a_sel_merge.setToolTip("Unisce le unita' selezionate in un solo poligono, o linee contigue dello stesso layer")
+        for a in (self.a_sel_delete, self.a_sel_merge):
+            a.setEnabled(False)
         self.a_clear_drawings = self._act(dm, "Cancella disegni", self.clear_drawings, icon_name="eraser")
         m.addSeparator()
         self.a_contours = self._act(m, "Curve di livello...", self.contours, processing=True, icon_name="contours")
@@ -291,6 +303,7 @@ class MainWindow(QMainWindow):
         self._act(m, "Nuovo sito...", self.pyarchinit_new_site, icon_name="site")
         self._act(m, "Nuova scheda US...", lambda: self.open_us_form(self.pa_pane.current_site() or "", "1", "", "US"),
                   icon_name="us")
+        self._act(m, "Aggiorna struttura del database...", self.pyarchinit_upgrade, icon_name="database")
         self.a_autoconnect = QAction("Connetti all'avvio al database di PyArchInit", self, checkable=True)
         self.a_autoconnect.setChecked(self.settings.value("pa_autoconnect", "true") in ("true", True, 1, "1"))
         self.a_autoconnect.toggled.connect(lambda on: self.settings.setValue("pa_autoconnect", "true" if on else "false"))
@@ -391,8 +404,20 @@ class MainWindow(QMainWindow):
         lab = QLabel(" Disegno: ")
         lab.setObjectName("pageSubtitle")
         db.addWidget(lab)
-        for mode in ("pan", "polygon", "line", "measure", "point"):
+        # short texts in the bar (menus keep the full names, tooltips show them)
+        for a, short in ((self.draw_actions["pan"], "Sposta"), (self.draw_actions["polygon"], "Disegna US"),
+                         (self.draw_actions["line"], "Sezione"), (self.draw_actions["measure"], "Misura"),
+                         (self.draw_actions["point"], "Quota / SAM"), (self.a_sel_delete, "Elimina"),
+                         (self.a_sel_merge, "Unisci"), (self.a_clear_drawings, "Cancella tutto"),
+                         (self.a_contours, "Curve"), (self.a_volume, "Volume"), (self.a_slice, "Pianta a quota"),
+                         (self.a_qgis_open, "QGIS")):
+            if a.toolTip() == a.text().replace("...", "").replace("&", ""):
+                a.setToolTip(a.text().replace("...", ""))
+            a.setIconText(short)
+        for mode in ("pan", "select", "polygon", "line", "measure", "point"):
             db.addAction(self.draw_actions[mode])
+        db.addAction(self.a_sel_delete)
+        db.addAction(self.a_sel_merge)
         db.addAction(self.a_clear_drawings)
         db.addSeparator()
         for a in (self.a_contours, self.a_volume, self.a_slice):
@@ -1106,6 +1131,8 @@ class MainWindow(QMainWindow):
         self.draw_actions[mode].setChecked(True)
         self.show_view(self.ortho_view)
         hints = {"pan": "Trascina per spostare, rotella per lo zoom, clic su un elemento per i suoi attributi",
+                 "select": "Clic per selezionare, Maiusc/Cmd+clic per aggiungere o togliere, trascina per un riquadro; "
+                           "Canc elimina, Unisci fonde le unita', Esc deseleziona",
                  "polygon": "Clic per i vertici, doppio clic per chiudere, tasto destro per annullare",
                  "line": "Due clic: inizio e fine della sezione", "measure": "Due clic per misurare",
                  "point": "Clic sinistro: punto positivo, destro: negativo (prompt SAM); quote nel log"}
@@ -1255,12 +1282,13 @@ class MainWindow(QMainWindow):
                       lambda gid: self._info("PyArchInit", f"Traccia '{sdict['label']}' scritta in pyarchinit_sezioni (gid {gid})"),
                       refresh=False, save=False)
 
-    def _delete_section(self, sdict: dict) -> None:
-        r = message(self, "question", "Elimina sezione", f"Eliminare {sdict['label']} e i suoi file?",
-                    buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    default=QMessageBox.StandardButton.No)
-        if r != QMessageBox.StandardButton.Yes:
-            return
+    def _delete_section(self, sdict: dict, confirm: bool = True, redraw: bool = True) -> None:
+        if confirm:
+            r = message(self, "question", "Elimina sezione", f"Eliminare {sdict['label']} e i suoi file?",
+                        buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        default=QMessageBox.StandardButton.No)
+            if r != QMessageBox.StandardButton.Yes:
+                return
         for key in ("svg", "dxf", "dxf3d"):
             try:
                 Path(sdict.get(key, "")).unlink(missing_ok=True)
@@ -1269,8 +1297,9 @@ class MainWindow(QMainWindow):
         self.sections = [x for x in self.sections if x is not sdict and x.get("label") != sdict.get("label")]
         self._save_sections() if self.sections else self._sections_file().unlink(missing_ok=True)
         self.sections_pane.set_sections(self.sections)
-        self.ortho_view.remove_layer("Sezioni")
-        self._draw_sections()
+        if redraw:
+            self.ortho_view.remove_layer("Sezioni")
+            self._draw_sections()
 
     def _attribute_edited(self, layer: str, idx: int, key: str, value) -> None:
         """An attribute changed in the Layers pane: update the unit / section behind it."""
@@ -1292,8 +1321,7 @@ class MainWindow(QMainWindow):
             gid = (u.attributes or {}).get("gid")
             if gid is not None:
                 self.pa_pending[int(gid)] = u
-                self.b_pa_save.setText(f"Salva modifiche in PyArchInit ({len(self.pa_pending)})")
-                self.b_pa_save.show()
+                self._update_pa_save_button()
         elif layer == "Sezioni" and key == "etichetta":
             p1 = attrs.get("_geom", (None, [[None]]))[1][0]
             for sdict in self.sections:
@@ -1305,24 +1333,283 @@ class MainWindow(QMainWindow):
         self._schedule_qgis()
         self.log_pane.info(f"{layer}: {key} = {value}")
 
-    def save_pending_units(self) -> None:
-        if not self.pa_pending or not self._need_pa():
+    def _update_pa_save_button(self) -> None:
+        n = len(set(self.pa_pending) | self.pa_deleted)
+        self.b_pa_save.setText(f"Salva modifiche in PyArchInit ({n})")
+        self.b_pa_save.setVisible(n > 0)
+
+    def save_pending_units(self, confirm: bool = True) -> None:
+        """Write to ``pyunitastratigrafiche`` the changes made here to polygons loaded from
+        PyArchInit: attributes, geometries (merges) and deletions."""
+        if not (self.pa_pending or self.pa_deleted) or not self._need_pa():
             return
-        pending = dict(self.pa_pending)
+        pending, deleted, geom = dict(self.pa_pending), set(self.pa_deleted), set(self.pa_geom_changed)
+        if deleted and confirm:
+            r = message(self, "question", "Salva modifiche in PyArchInit",
+                        f"Eliminare {len(deleted)} poligoni da pyunitastratigrafiche e aggiornarne "
+                        f"{len(set(pending) - deleted)}? Le schede US non vengono toccate.",
+                        buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        default=QMessageBox.StandardButton.No)
+            if r != QMessageBox.StandardButton.Yes:
+                return
+        crs = self.chunk.crs if self.chunk is not None else None
 
         def job(p):
-            n = 0
+            n_del = sum(self.pa.delete_unit(gid) for gid in deleted)
+            n_upd = 0
             for gid, u in pending.items():
-                n += self.pa.update_unit(gid, us=u.us, area=u.area, tipo=u.tipo)
-            return n
+                if gid not in deleted:
+                    n_upd += self.pa.update_unit(gid, geometry=u.geometry if gid in geom else None, crs=crs,
+                                                 us=u.us, area=u.area, tipo=u.tipo)
+            return n_upd, n_del
 
-        def done(n):
+        def done(r):
             self.pa_pending.clear()
-            self.b_pa_save.hide()
+            self.pa_deleted.clear()
+            self.pa_geom_changed.clear()
+            self._update_pa_save_button()
             self.pa_pane.refresh()
-            self._info("PyArchInit", f"{n} poligoni aggiornati in pyunitastratigrafiche")
+            n_upd, n_del = r
+            self._info("PyArchInit", f"pyunitastratigrafiche: {n_upd} poligoni aggiornati"
+                       + (f", {n_del} eliminati" if n_del else ""))
 
         self.run_task("Aggiornamento unita' in PyArchInit", job, done, refresh=False, save=False)
+
+    # ---------------------------------------------------------------- selection: delete and merge
+    def _selection_changed(self, n: int) -> None:
+        self.a_sel_delete.setEnabled(n > 0)
+        self.a_sel_merge.setEnabled(n > 1)
+        if self.ortho_view.mode == "select":
+            self.statusBar().showMessage(f"{n} elementi selezionati: Canc per eliminare, Unisci per fonderli"
+                                         if n else "Nessun elemento selezionato", 8000)
+
+    def _unit_part(self, layer: str, attrs: dict) -> tuple[int, int] | None:
+        """(unit index, part index) of a feature drawn for a unit (one feature per polygon part)."""
+        i = attrs.get("_unit")
+        if i is None or not 0 <= i < len(self.units):
+            return None
+        k = 0
+        for f in self.ortho_view.features(layer):
+            if f is attrs:
+                return i, k
+            if f.get("_unit") == i:
+                k += 1
+        return None
+
+    def _forget_pa_unit(self, u, deleted: bool) -> None:
+        gid = (u.attributes or {}).get("gid")
+        if gid is None:
+            return
+        gid = int(gid)
+        if deleted:
+            self.pa_deleted.add(gid)
+            self.pa_pending.pop(gid, None)
+            self.pa_geom_changed.discard(gid)
+        else:
+            self.pa_pending[gid] = u
+            self.pa_geom_changed.add(gid)
+
+    def delete_selected(self, confirm: bool = True) -> int:
+        """Delete the selected features: units (whole, or single parts of a multipolygon),
+        section traces with their drawings, lines of the line layers, points. Polygons loaded
+        from PyArchInit leave the database only with *Salva modifiche in PyArchInit*."""
+        from shapely.geometry import MultiPolygon
+
+        sel = self.ortho_view.selected_features()
+        if not sel:
+            return 0
+        parts: dict[int, set[int]] = {}
+        sections, lines, skip = [], {}, set()
+        for layer, idx, attrs in sel:
+            if "_unit" in attrs:
+                ref = self._unit_part(layer, attrs)
+                if ref is not None:
+                    parts.setdefault(ref[0], set()).add(ref[1])
+            elif layer == "Sezioni":
+                p1 = attrs.get("_geom", (None, [[None]]))[1][0]
+                sdict = next((x for x in self.sections if x["p1"] == p1), None)
+                if sdict is not None:
+                    sections.append(sdict)
+            elif layer in self.line_layers:
+                lines.setdefault(layer, set()).add(idx)
+            else:  # points and anything else drawn only in the view
+                skip.add(id(attrs))
+                if attrs.get("_geom", ("",))[0] == "Point":
+                    x, y = attrs["_geom"][1]
+                    self.sam_points = [p for p in self.sam_points if abs(p[0] - x) > 1e-6 or abs(p[1] - y) > 1e-6]
+        if confirm:
+            from_pa = sum(1 for i in parts if (self.units[i].attributes or {}).get("gid") is not None)
+            text = f"Eliminare {len(sel)} elementi selezionati?"
+            if sections:
+                text += f"\n{len(sections)} tracce di sezione: anche i loro disegni (SVG/DXF)."
+            if from_pa:
+                text += (f"\n{from_pa} poligoni vengono da PyArchInit: escono dal database solo con "
+                         "«Salva modifiche in PyArchInit».")
+            r = message(self, "question", "Elimina selezionati", text,
+                        buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        default=QMessageBox.StandardButton.Yes)
+            if r != QMessageBox.StandardButton.Yes:
+                return 0
+        removed = set()
+        for i, ks in parts.items():
+            u = self.units[i]
+            geoms = list(getattr(u.geometry, "geoms", [u.geometry]))
+            keep = [g for k, g in enumerate(geoms) if k not in ks]
+            if keep:
+                u.geometry = keep[0] if len(keep) == 1 else MultiPolygon(keep)
+            else:
+                removed.add(i)
+            self._forget_pa_unit(u, deleted=not keep)
+        self.units = [u for i, u in enumerate(self.units) if i not in removed]
+        for sdict in sections:
+            self._delete_section(sdict, confirm=False, redraw=False)
+        for layer, idxs in lines.items():
+            kept = [ln for k, ln in enumerate(self.line_layers[layer]) if k not in idxs]
+            if kept:
+                self.line_layers[layer] = kept
+            else:
+                del self.line_layers[layer]
+        self._update_pa_save_button()
+        self._redraw_overlays(skip=skip)
+        self._dirty(True)
+        self.log_pane.info(f"Eliminati {len(sel)} elementi")
+        return len(sel)
+
+    def merge_selected(self) -> bool:
+        """Merge the selected units into one polygon (the attributes of one of them are kept),
+        or contiguous lines of the same line layer into one line."""
+        v = self.ortho_view
+        sel = v.selected_features()
+        if len(sel) < 2:
+            self._warn("Seleziona almeno due elementi da unire (Maiusc+clic, oppure trascina un riquadro).")
+            return False
+        kinds = {v.layers[layer]["kind"] for layer, _, _ in sel}
+        if kinds == {"polygon"} and all("_unit" in a for _, _, a in sel):
+            return self._merge_units(sel)
+        layers = {layer for layer, _, _ in sel}
+        if kinds == {"line"} and len(layers) == 1 and next(iter(layers)) in self.line_layers:
+            return self._merge_lines(next(iter(layers)), sorted({i for _, i, _ in sel}))
+        self._warn("Si possono unire unita' (poligoni) tra loro, oppure linee contigue dello stesso layer "
+                   "(curve, piante a quota). Tracce di sezione e punti non si uniscono.")
+        return False
+
+    def _merge_units(self, sel) -> bool:
+        from shapely.geometry import MultiPolygon
+        from shapely.ops import unary_union
+
+        order = []
+        for _layer, _idx, attrs in sel:
+            i = attrs.get("_unit")
+            if i is not None and 0 <= i < len(self.units) and i not in order:
+                order.append(i)
+        if not order:
+            return False
+        keep = order[0]
+        if len({(self.units[i].tipo, self.units[i].us, self.units[i].area) for i in order}) > 1:
+            choices = [(str(i), f"{self.units[i].tipo} {self.units[i].us or '?'} (area {self.units[i].area or '-'})"
+                        + (" - da PyArchInit" if (self.units[i].attributes or {}).get("gid") is not None else ""))
+                       for i in order]
+            vals = ParamDialog.ask(self, "Unisci unita'", [
+                Field("keep", "Numero, area e tipo di", choices[0][0], choices=choices)],
+                intro="Le unita' selezionate diventano un solo poligono. Scegli l'unita' di cui mantenere "
+                      "numero, area e tipo: le altre vengono eliminate.")
+            if not vals:
+                return False
+            keep = int(vals["keep"])
+        # close the hairline gaps left between units digitised side by side (half a display pixel)
+        eps = max(0.001, 0.5 * abs(self.ortho_view.tr.a)) if self.ortho_view.tr is not None else 0.001
+        merged = unary_union([self.units[i].geometry.buffer(eps, join_style=2) for i in order]).buffer(-eps, join_style=2)
+        polys = [g for g in getattr(merged, "geoms", [merged]) if g.geom_type == "Polygon" and not g.is_empty]
+        if not polys:
+            self._warn("L'unione non ha prodotto un poligono valido.")
+            return False
+        target = self.units[keep]
+        target.geometry = polys[0] if len(polys) == 1 else MultiPolygon(polys)
+        self._forget_pa_unit(target, deleted=False)
+        for i in order:
+            if i != keep:
+                self._forget_pa_unit(self.units[i], deleted=True)
+        self.units = [u for i, u in enumerate(self.units) if i == keep or i not in order]
+        self._update_pa_save_button()
+        self._redraw_overlays()
+        self._dirty(True)
+        self.log_pane.info(f"Unite {len(order)} unita' in {target.tipo} {target.us or '?'}: area "
+                           f"{target.geometry.area:.3f} m2" + (f", {len(polys)} parti separate" if len(polys) > 1 else ""))
+        return True
+
+    def _merge_lines(self, layer: str, idxs: list[int]) -> bool:
+        from shapely.geometry import LineString, MultiLineString
+        from shapely.ops import linemerge
+
+        entries = self.line_layers[layer]
+        lines = [np.asarray(entries[i][0], float)[:, :2].copy() for i in idxs]
+        eps = max(0.001, abs(self.ortho_view.tr.a)) if self.ortho_view.tr is not None else 0.001
+        ends = [ln[[0, -1]] for ln in lines]
+        for a, ln in enumerate(lines):  # snap end points that almost touch
+            for end in (0, -1):
+                for b, other in enumerate(ends):
+                    if b == a:
+                        continue
+                    d = np.linalg.norm(other - ln[end], axis=1)
+                    if d.min() <= eps:
+                        ln[end] = other[int(d.argmin())]
+                        break
+        merged = linemerge(MultiLineString([LineString(ln) for ln in lines]))
+        if merged.geom_type != "LineString":
+            self._warn("Le linee selezionate non sono contigue: non si possono unire in una sola linea.")
+            return False
+        first = idxs[0]
+        _coords, color, label, attrs, width = entries[first]
+        entries[first] = (np.asarray(merged.coords)[:, :2], color, label, attrs, width)
+        self.line_layers[layer] = [e for k, e in enumerate(entries) if k == first or k not in idxs]
+        self._redraw_overlays()
+        self._dirty(True)
+        self.log_pane.info(f"{layer}: unite {len(idxs)} linee, lunghezza {merged.length:.3f} m")
+        return True
+
+    def _redraw_overlays(self, skip: set | None = None) -> None:
+        """Draw again every layer from the project data (units, sections, line layers) without
+        reloading the raster; features only in the view (points) are kept unless in ``skip``.
+        Layer visibility and order are preserved."""
+        v = self.ortho_view
+        if v.tr is None:
+            return
+        skip = skip or set()
+        visible = {n: lay["visible"] for n, lay in v.layers.items()}
+        order = list(v.layer_order)
+        modelled = set(self.line_layers) | {"Sezioni"}
+        others = []
+        for name in order:
+            lay = v.layers[name]
+            if name in modelled or any("_unit" in f[2] for f in lay["features"]):
+                continue
+            for item, _label, attrs in lay["features"]:
+                if id(attrs) in skip:
+                    continue
+                color = (item.brush().color() if lay["kind"] == "point" else item.pen().color()).name()
+                others.append((name, lay["kind"], dict(attrs), color))
+        v.clear_overlays()
+        for i, u in enumerate(self.units):
+            self._draw_unit(u, i)
+        self._draw_sections()
+        for name, lines in self.line_layers.items():
+            for coords, color, label, attrs, width in lines:
+                v.add_line(coords, color, label, layer=name, attrs=attrs, width=width)
+        for name, kind, attrs, color in others:
+            gtype, coords = attrs.get("_geom", (None, None))
+            label = attrs.get("etichetta", "")
+            extra = {k: val for k, val in attrs.items() if not k.startswith("_") and k not in ("etichetta", "x", "y")}
+            if gtype == "Point":
+                v.add_point(coords[0], coords[1], color, label, layer=name, attrs=extra)
+            elif gtype == "LineString":
+                v.add_line(coords, color, label, layer=name, attrs=extra)
+            elif gtype == "Polygon":
+                v.add_polygon(coords, label, color, layer=name, attrs=extra)
+        v.layer_order = [n for n in order if n in v.layers] + [n for n in v.layer_order if n not in order]
+        for name, vis in visible.items():
+            if not vis and name in v.layers:
+                v.set_layer_visible(name, False)
+        v.layers_changed.emit()
 
     # ---------------------------------------------------------------- PyArchInit US form
     def open_us_form(self, sito: str, area: str = "1", us: str = "", tipo: str = "US", defaults: dict | None = None) -> bool:
@@ -1411,7 +1698,7 @@ class MainWindow(QMainWindow):
         site = v["units"][3:] if v["units"].startswith("pa:") else (sites[0] if sites else "")
 
         def job(p):
-            units = drawn if v["units"] == "drawn" else self.pa.us_polygons(site)
+            units = drawn if v["units"] == "drawn" else self.pa.us_polygons(site, crs=self.chunk.crs)
             proxies = proxies_for_units(self.chunk.dem_path, units, base=base, thickness=thickness,
                                         progress=p.sub(0, 0.9))
             folder = self.chunk.data_dir / "proxies"
@@ -1547,10 +1834,12 @@ class MainWindow(QMainWindow):
     def _export_qgis_layers(self) -> dict:
         from ..io.qgis_link import export_layers
 
+        view = self.ortho_view
+        layers = {name: {"kind": lay["kind"], "features": view.features(name)} for name, lay in view.layers.items()}
         try:
-            return export_layers(self._qgis_dir(), self.ortho_view.layers, self.chunk.crs if self.chunk else "")
-        except OSError as exc:
-            log.warning("Aggiornamento dei layer per QGIS non riuscito: %s", exc)
+            return export_layers(self._qgis_dir(), layers, self.chunk.crs if self.chunk else "")
+        except Exception as exc:  # a live refresh must never interrupt drawing with an error window
+            log.warning("Aggiornamento dei layer per QGIS non riuscito: %s", exc, exc_info=True)
             return {}
 
     def open_in_qgis(self) -> None:
@@ -1950,7 +2239,7 @@ class MainWindow(QMainWindow):
             elif choice.startswith("pa:"):
                 site = choice[3:]
                 p(0.02, f"Lettura dei poligoni US di {site}")
-                units = self.pa.us_polygons(site)
+                units = self.pa.us_polygons(site, crs=self.chunk.crs if self.chunk else None)
             if self.pa is not None and site:
                 try:
                     records = self.pa.us_records(site)
@@ -2022,6 +2311,14 @@ class MainWindow(QMainWindow):
             self.pa_pane.set_connection(pa, pa.label)
             log.info("PyArchInit connesso: %s", pa.label)
             self.d_pa.show()
+            try:
+                missing = pa.missing_us_columns()
+            except Exception:
+                missing = []
+            if missing:
+                self.log_pane.warning(f"La scheda US di questo database e' ridotta: mancano {len(missing)} campi di "
+                                      "PyArchInit 5" + (", tra cui i rapporti" if "rapporti" in missing else "")
+                                      + ". PyArchInit > Aggiorna struttura del database li aggiunge.")
 
         def failed(summary, details):
             self.pa_pane.set_disconnected("Non connesso")
@@ -2031,6 +2328,40 @@ class MainWindow(QMainWindow):
                 self._error(summary, details)
 
         self.runner.run("Connessione a PyArchInit", job, done, failed, quiet=quiet)
+
+    def pyarchinit_upgrade(self) -> None:
+        """Add the PyArchInit 5 columns that ``us_table`` lacks (older or reduced databases)."""
+        if not self._need_pa():
+            return
+        try:
+            missing = self.pa.missing_us_columns()
+        except Exception as exc:
+            self._exc("Controllo della struttura del database non riuscito", exc)
+            return
+        if not missing:
+            self._info("PyArchInit", "La scheda US del database ha gia' tutti i campi di PyArchInit 5.")
+            return
+        sqlite = self.pa.db.sqlite_path is not None
+        r = message(self, "question", "Aggiorna struttura del database",
+                    f"Alla tabella us_table mancano {len(missing)} campi della scheda US di PyArchInit 5"
+                    + (", tra cui i rapporti stratigrafici" if "rapporti" in missing else "") + ".\n\n"
+                    + "Aggiungerli? I record esistenti non vengono modificati."
+                    + ("\nPrima viene fatta una copia di sicurezza del file." if sqlite
+                       else "\nSu PostgreSQL fai prima un backup del database."),
+                    buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    default=QMessageBox.StandardButton.No)
+        if r != QMessageBox.StandardButton.Yes:
+            return
+
+        def done(res):
+            self.pa_pane.refresh()
+            text = f"Aggiunti {len(res['added'])} campi alla scheda US."
+            if res.get("backup"):
+                text += f"\nCopia di sicurezza: {res['backup']}"
+            self._info("PyArchInit", text)
+
+        self.run_task("Aggiornamento della struttura PyArchInit", lambda p: self.pa.upgrade_us_table(), done,
+                      refresh=False, save=False)
 
     def _autoconnect_pyarchinit(self) -> None:
         from ..pyarchinit.config import pyarchinit_home
@@ -2137,7 +2468,7 @@ class MainWindow(QMainWindow):
         if not ok:
             return
         try:
-            polys = self.pa.us_polygons(site)
+            polys = self.pa.us_polygons(site, crs=self.chunk.crs if self.chunk else None)
         except Exception as exc:
             self._exc("Lettura delle unita' non riuscita", exc)
             return

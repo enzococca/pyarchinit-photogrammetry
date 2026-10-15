@@ -170,3 +170,147 @@ def test_attribute_editing_updates_unit_and_pending(window, qapp):
     from PySide6.QtCore import Qt
 
     assert not (pane.attrs.item(area_row, 1).flags() & Qt.ItemFlag.ItemIsEditable)  # computed field
+
+
+def test_qgis_live_export_from_view_layers(window, qapp, tmp_path):
+    """The live export reads the layers of the raster view (features are (item, label, attrs))."""
+    from shapely.geometry import box
+
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+
+    w = window
+    x0, y0 = 2480000.0, 4500000.0
+    u = UnitPolygon(box(x0 + 1.2, y0 + 1.2, x0 + 1.8, y0 + 1.6), us="5", area="1", tipo="US")
+    w.units = [u]
+    w._draw_unit(u, 0)
+    w._add_line_feature("Curve di livello (0.1 m)", [[x0 + 1.0, y0 + 1.0], [x0 + 2.0, y0 + 1.0]], "#ffffff",
+                        attrs={"quota": 99.7})
+    w.ortho_view.add_point(x0 + 1.5, y0 + 1.5, layer="Punti", attrs={"z": 99.8})
+    w._qgis_dir = lambda: tmp_path
+    files = w._export_qgis_layers()
+    counts = {k: len(json.loads(p.read_text())["features"]) for k, p in files.items()}
+    assert counts["unita"] == 1 and counts["curve"] == 1 and counts["punti"] == 1
+    unit = json.loads(files["unita"].read_text())["features"][0]
+    assert unit["properties"]["us"] == "5" and unit["geometry"]["type"] == "Polygon"
+
+
+def _units_side_by_side(w, n=4, gap_after=3):
+    from shapely.geometry import box
+
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+
+    x0, y0 = 2480000.0, 4500000.0
+    w.units = []
+    for k in range(n):
+        a = 1.0 + 0.4 * k + (0.4 if k >= gap_after else 0.0)
+        u = UnitPolygon(box(x0 + a, y0 + 1.2, x0 + a + 0.4, y0 + 1.6), us=str(k + 1), area="1", tipo="US")
+        w.units.append(u)
+        w._draw_unit(u, k)
+    return x0, y0
+
+
+def test_select_merge_and_delete_units(window, qapp, monkeypatch):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QMessageBox
+
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    w = window
+    v = w.ortho_view
+    x0, y0 = _units_side_by_side(w)
+    for name in list(v.layers):  # hidden layers (here the section of another test) are not selectable
+        if name != "Unita' stratigrafiche":
+            v.set_layer_visible(name, False)
+    w.set_draw_mode("select")
+    v.zoom_to(v.layer_rect("Unita' stratigrafiche"), 0.4)
+    qapp.processEvents()
+
+    def vp(x, y):
+        return v.mapFromScene(v.scene_pt(x0 + x, y0 + y))
+
+    QTest.mouseClick(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, vp(1.2, 1.4))
+    QTest.mouseClick(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, vp(1.6, 1.4))
+    assert [a["us"] for _, _, a in v.selected_features()] == ["1", "2"]
+    assert w.a_sel_merge.isEnabled() and w.a_sel_delete.isEnabled()
+    monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(lambda cls, *a, **k: {"keep": "1"}))  # keep US 2
+    assert w.merge_selected()
+    assert [u.us for u in w.units] == ["2", "3", "4"]
+    assert w.units[0].geometry.geom_type == "Polygon" and abs(w.units[0].geometry.area - 0.32) < 1e-6
+    # a box over US 3 and US 4, then the Delete key
+    QTest.mousePress(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, vp(1.9, 1.7))
+    QTest.mouseMove(v.viewport(), vp(2.5, 1.4))
+    QTest.mouseMove(v.viewport(), vp(3.0, 1.3))
+    QTest.mouseRelease(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, vp(3.0, 1.3))
+    assert sorted(a["us"] for _, _, a in v.selected_features()) == ["3", "4"]
+    monkeypatch.setattr(mw, "message", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    QTest.keyClick(v, Qt.Key.Key_Delete)
+    assert [u.us for u in w.units] == ["2"] and not v.selection
+    assert len(v.features("Unita' stratigrafiche")) == 1
+    assert all(not v.layers[n]["visible"] for n in v.layers if n != "Unita' stratigrafiche")  # kept hidden
+    QTest.mouseClick(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, vp(0.3, 0.3))
+    assert not v.selection  # a click on empty ground clears the selection
+
+
+def test_merge_lines_and_delete_point(window, qapp):
+    w = window
+    v = w.ortho_view
+    x0, y0 = 2480000.0, 4500000.0
+    name = "Pianta a quota 99.70 m"
+    w._add_line_feature(name, [[x0 + 1.0, y0 + 1.0], [x0 + 1.5, y0 + 1.0]], "#ff00ff")
+    w._add_line_feature(name, [[x0 + 1.5, y0 + 1.0], [x0 + 2.0, y0 + 1.1]], "#ff00ff")
+    w._add_line_feature(name, [[x0 + 3.0, y0 + 3.0], [x0 + 3.5, y0 + 3.0]], "#ff00ff")
+    w.set_draw_mode("select")
+    items = [f[0] for f in v.layers[name]["features"]]
+    v.select_items(items[:2])
+    assert w.merge_selected()
+    assert len(w.line_layers[name]) == 2 and len(w.line_layers[name][0][0]) == 3
+    v.select_items([f[0] for f in v.layers[name]["features"]])  # not contiguous: refused
+    warned = []
+    w._warn = warned.append
+    assert not w.merge_selected() and warned
+    w.ortho_view.add_point(x0 + 1.2, y0 + 0.8, layer="Punti", attrs={"tipo": "positivo"})
+    w.sam_points = [(x0 + 1.2, y0 + 0.8, 1)]
+    v.select_items([v.layers["Punti"]["features"][0][0]])
+    assert w.delete_selected(confirm=False) == 1
+    assert "Punti" not in v.layers and w.sam_points == []
+    assert name in v.layer_order  # other layers survive the redraw
+
+
+def test_merge_and_delete_write_back_to_pyarchinit(window, qapp, pa_db, monkeypatch):
+    from shapely.geometry import box
+
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+    from pyarchinit_photogrammetry.gui import main_window as mw
+    from pyarchinit_photogrammetry.pyarchinit import PyArchInit
+
+    w = window
+    ch = w.chunk
+    pa = PyArchInit.connect()
+    x0, y0 = 2480000.0, 4500000.0
+    gids = pa.publish_units([UnitPolygon(box(x0 + 1.0 + 0.4 * k, y0 + 1.2, x0 + 1.4 + 0.4 * k, y0 + 1.6), us=str(k + 1),
+                                         area="1", tipo="US") for k in range(3)], "Saggio", crs=ch.crs)
+    w.pa = pa
+    w.units = []
+    for u in pa.us_polygons("Saggio", crs=ch.crs):
+        w.units.append(u)
+        w._draw_unit(u, len(w.units) - 1, layer="US da PyArchInit - Saggio")
+    layer = w.ortho_view.layers["US da PyArchInit - Saggio"]
+    by_us = {f[2]["us"]: f[0] for f in layer["features"]}
+    w.set_draw_mode("select")
+    w.ortho_view.select_items([by_us["1"], by_us["2"]])
+    monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(lambda cls, *a, **k: {"keep": "0"}))
+    assert w.merge_selected()
+    w.ortho_view.select_items([f[0] for f in w.ortho_view.layers["US da PyArchInit - Saggio"]["features"]
+                               if f[2]["us"] == "3"])
+    assert w.delete_selected(confirm=False) == 1
+    assert w.pa_deleted == {gids[1], gids[2]} and w.pa_geom_changed == {gids[0]}
+    assert not w.b_pa_save.isHidden()
+    monkeypatch.setattr(w, "_info", lambda *a, **k: None)
+    w.save_pending_units(confirm=False)
+    w.runner.wait()
+    qapp.processEvents()
+    rows = pa.us_polygons("Saggio")
+    assert [int(r.attributes["gid"]) for r in rows] == [gids[0]]
+    assert abs(rows[0].geometry.area - 0.32) < 1e-4 and rows[0].us == "1"
+    assert not w.pa_pending and not w.pa_deleted and w.b_pa_save.isHidden()

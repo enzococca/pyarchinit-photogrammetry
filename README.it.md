@@ -111,7 +111,14 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
 
 * **Schede US**: doppio clic su una US nel pannello PyArchInit apre la scheda (`us_table`) con
   descrizione, cronologia, dati di scavo, quote e rapporti stratigrafici modificabili;
-  *Nuova US* crea un nuovo record. I rapporti sono salvati nel formato di PyArchInit.
+  *Nuova US* crea un nuovo record. I rapporti sono salvati nel formato di PyArchInit. Se il
+  database ha una scheda US ridotta (per esempio il database demo della versione 0.2), la scheda
+  lo segnala e *Aggiorna struttura del database* aggiunge i campi mancanti, dopo una copia di
+  sicurezza del file, senza toccare i record.
+* **Selezione dei vettori**: *Seleziona* nella barra Disegno (clic, Maiusc/Cmd+clic, riquadro);
+  *Elimina* (o Canc) cancella unità, parti, tracce di sezione, linee e punti; *Unisci* fonde le
+  unità in un solo poligono o linee contigue dello stesso layer. Per i poligoni caricati da
+  PyArchInit le modifiche vanno nel database con *Salva modifiche in PyArchInit*.
 * **Proxy 3D**: *Strumenti > Proxy 3D delle US* trasforma ogni poligono US in un solido chiuso
   tra il DEM e una base (piano, DEM dopo lo scavo, spessore o quota minima), con volume, area
   e quote; esportazione OBJ per l'Extended Matrix, pubblicazione come media 3D collegato alla US.
