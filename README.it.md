@@ -9,52 +9,100 @@ curve di livello, volumi di scavo, classificazione della nuvola, Segment Anythin
 esportazione IFC e salvataggio diretto nel database di PyArchInit. Tutto è utilizzabile da
 Python e gira su CPU, anche su Mac Apple Silicon.
 
-> Stato: **alpha (0.2)**. Libreria Python, riga di comando e interfaccia desktop (sulla stessa
+> Stato: **alpha (0.3)**. Libreria Python, riga di comando e applicazione desktop (sulla stessa
 > API, con console Python integrata).
 
-## Installazione
+## Applicazione desktop (senza installare Python)
+
+Scarica la versione per il tuo sistema dalla pagina
+[Releases](https://github.com/enzococca/pyarchinit-photogrammetry/releases):
+
+| Sistema | File |
+| --- | --- |
+| macOS (Apple Silicon) | `PyArchInit-Photogrammetry-<versione>-macos-arm64.dmg` |
+| Windows 10/11 (64 bit) | `PyArchInit-Photogrammetry-<versione>-windows-x64.zip` |
+
+Su macOS apri l'immagine disco e trascina l'app in *Applicazioni*; su Windows estrai la
+cartella e avvia `PyArchInit Photogrammetry.exe`. L'applicazione si apre su una pagina con
+*Nuovo progetto*, *Apri progetto* e *Progetto demo*: la demo crea un saggio di scavo
+sintetico e lo elabora in un paio di minuti. Le build non sono firmate: su macOS la prima
+volta tasto destro > *Apri* (oppure `xattr -dr com.apple.quarantine "/Applications/PyArchInit Photogrammetry.app"`),
+su Windows *Ulteriori informazioni > Esegui comunque*. Dettagli in [docs/packaging.md](docs/packaging.md).
+
+## Installazione con pip
+
+Usa un ambiente virtuale dedicato, non l'ambiente `base` di Anaconda (vedi *Problemi
+frequenti*). Con [uv](https://docs.astral.sh/uv/):
 
 ```bash
-pip install "pyarchinit-photogrammetry[all]"   # mesh, IFC, PostGIS, interfaccia grafica
-pip install "pyarchinit-photogrammetry[sam]"   # opzionale: Segment Anything 2.1
+uv venv --seed --python 3.12 ~/venvs/ppg && source ~/venvs/ppg/bin/activate
+uv pip install "pyarchinit-photogrammetry[all]"      # motore, mesh (Open3D), IFC, PostGIS, interfaccia
 ```
 
-## Provare subito con i dati demo
+Con gli strumenti standard:
 
 ```bash
-ppg demo ~/ppg_demo --process     # foto sintetiche di un saggio con 8 target, ceramica, database PyArchInit
-ppg-gui ~/ppg_demo/scavo.ppg      # apre l'interfaccia sul progetto elaborato
-```
-
-Oppure dall'interfaccia: **File > Crea e apri progetto demo**. Il file `LEGGIMI.txt` nella
-cartella spiega cosa provare (sezioni, curve di livello, profilo ceramico del frammento,
-pubblicazione in PyArchInit).
-
-## Interfaccia grafica
-
-`ppg-gui` (o `ppg gui`) apre l'applicazione desktop: area di lavoro con chunk, camere,
-marker e prodotti; vista 3D (VTK, con un renderer software di riserva); ortofoto e DEM con
-strumenti di disegno (unità stratigrafiche, tracce di sezione, misure, quote, prompt per
-SAM 2.1); foto con posizionamento manuale dei marker; pannello riferimenti con errori sui
-GCP e sui punti di controllo; console Python collegata al progetto (`doc`, `chunk`);
-elaborazioni in background con avanzamento e annulla; menu PyArchInit per connettersi al
-database, pubblicare ortofoto/DEM/modelli, scrivere i poligoni delle US e le quote. Guida in
-[docs/gui.md](docs/gui.md).
-
-Meglio un ambiente virtuale dedicato invece dell'ambiente `base` di Anaconda: le vecchie
-build di SciPy lì presenti possono non caricarsi sui macOS recenti
-(`ImportError ... __thread_bss ... zero-fill section`).
-
-```bash
-python3 -m venv ~/venvs/ppg && source ~/venvs/ppg/bin/activate
+python3 -m venv ~/venvs/ppg && source ~/venvs/ppg/bin/activate   # Windows: ~\venvs\ppg\Scripts\activate
 pip install -U pip && pip install "pyarchinit-photogrammetry[all]"
 ```
 
-Le variabili `PROJ_LIB`/`PROJ_DATA` impostate da Anaconda o QGIS sono gestite in automatico.
+Opzionale: `pip install "pyarchinit-photogrammetry[sam]"` aggiunge Segment Anything 2.1 (PyTorch).
+Per avere `ppg` e `ppg-gui` sempre disponibili senza attivare nulla:
+`uv tool install "pyarchinit-photogrammetry[all]"` (o `pipx install`).
 
-Per scrivere geometrie in un database PyArchInit **SQLite** serve `mod_spatialite`: viene
-cercato automaticamente nelle installazioni di QGIS, MacPorts, Homebrew e Linux, oppure si
-indica con la variabile `SPATIALITE_LIBRARY_PATH`.
+Python 3.10-3.12. Per scrivere geometrie in un database PyArchInit **SQLite** serve
+`mod_spatialite`: viene cercato automaticamente nelle installazioni di QGIS, MacPorts,
+Homebrew e Linux, oppure si indica con la variabile `SPATIALITE_LIBRARY_PATH`.
+
+## Avvio
+
+```bash
+ppg doctor                        # controlla l'ambiente e dice cosa sistemare
+ppg demo ~/ppg_demo --process     # foto sintetiche di un saggio con 8 target, ceramica, database PyArchInit
+ppg-gui ~/ppg_demo/scavo.ppg      # apre l'interfaccia sul progetto elaborato
+ppg-gui                           # pagina iniziale: nuovo, apri, demo, progetti recenti
+```
+
+`ppg-gui` equivale a `ppg gui` e a `python -m pyarchinit_photogrammetry.gui`. L'interfaccia
+scrive un log in `~/Library/Logs/pyarchinit-photogrammetry` (macOS),
+`%LOCALAPPDATA%\pyarchinit-photogrammetry\logs` (Windows) o
+`~/.local/state/pyarchinit-photogrammetry/logs` (Linux); *Aiuto > Apri cartella dei log* la apre.
+
+## Problemi frequenti
+
+* **`ppg-gui` non fa nulla o si chiude all'avvio.** Esegui `ppg doctor`. Spesso la causa è
+  una vecchia copia del pacchetto installata in un altro Python (per esempio l'ambiente `base`
+  di Anaconda) che viene prima nel `PATH`: attiva l'ambiente giusto (`which ppg-gui` deve
+  puntare al suo interno) oppure rimuovi l'altra copia
+  (`/opt/anaconda3/bin/python -m pip uninstall pyarchinit-photogrammetry`).
+* **Ambiente `base` di Anaconda**: le sue librerie SciPy possono non caricarsi sui macOS
+  recenti (`ImportError ... __thread_bss ... zero-fill section`) e i suoi dati PROJ vengono
+  letti da rasterio. Usa un ambiente virtuale dedicato; le variabili `PROJ_LIB`/`PROJ_DATA`/
+  `GDAL_DATA` esportate da Anaconda o QGIS vengono reindirizzate ai dati inclusi in rasterio.
+* **Il passo "Modello" scrive "Poisson reconstruction failed... height field instead".** La
+  ricostruzione Poisson gira in un processo separato perché PoissonRecon (Open3D) può
+  interrompersi su alcune nuvole; la pipeline riprova e poi costruisce una superficie 2.5D.
+  Open3D 0.20.0 si blocca sistematicamente su macOS ed è escluso (`open3d!=0.20.0`); la 0.19 funziona.
+* **Finestre di dialogo native che chiudono l'app su macOS 26/27**
+  (`NSInternalInconsistencyException ... targetSizeInPoints`): l'interfaccia usa le finestre di
+  messaggio di Qt, non serve fare nulla.
+* **La vista 3D si blocca su macOS**: pyvistaqt precedente alla 0.13 si blocca all'avvio;
+  `pip install -U pyvistaqt`.
+
+## Interfaccia grafica
+
+`ppg-gui` apre l'applicazione desktop: pagina iniziale con i progetti recenti; barra degli
+strumenti con il flusso di lavoro (foto, marker, allineamento, riferimenti, nuvola densa,
+modello, texture, DEM, ortofoto, *Elabora tutto*); area di lavoro con chunk, camere, marker e
+prodotti; vista 3D (VTK, con un renderer software di riserva); ortofoto e DEM con strumenti di
+disegno (unità stratigrafiche, tracce di sezione, misure, quote, prompt per SAM 2.1); foto
+con posizionamento manuale dei marker; pannello riferimenti con errori sui GCP e sui punti di
+controllo; console Python collegata al progetto (`doc`, `chunk`); elaborazioni in background
+con avanzamento, annulla e indicatore nella barra di stato; pannello log con filtro per
+livello, ricerca, copia e salvataggio; finestre di errore con suggerimento, traceback e
+pulsante *Copia*; tema chiaro e scuro; *Aiuto > Diagnostica ambiente* (gli stessi controlli di
+`ppg doctor`); menu PyArchInit per connettersi al database, pubblicare ortofoto/DEM/modelli,
+scrivere i poligoni delle US e le quote. Guida in [docs/gui.md](docs/gui.md).
 
 ## Uso da Python
 

@@ -6,7 +6,16 @@ Workspace tree, 3D view (VTK or software), orthomosaic/DEM view with drawing too
 view with marker placement and SAM prompts, reference pane, Python console, background
 processing with cancel, PyArchInit menu, demo data (`ppg demo`).
 
-## 0.3 - Interface
+## 0.3 - Robust desktop release (done)
+
+Coloured icons (qtawesome), light/dark theme, start page, log pane with filters and
+copy/save, error windows with hints and traceback, `ppg doctor` / *Aiuto > Diagnostica*,
+log and crash files, non-native message boxes (macOS 26/27), Poisson reconstruction in an
+isolated process with retries and height-field fallback, Open3D 0.20.0 excluded, PROJ data
+redirected to rasterio's own in worker threads, packaged applications for macOS and Windows
+(PyInstaller, `desktop` workflow).
+
+## 0.4 - Interface
 
 * Batch processing over several chunks; chunk alignment and merging.
 * Section and plan-slice tools drawn directly in the 3D view; editable markers in 3D.
