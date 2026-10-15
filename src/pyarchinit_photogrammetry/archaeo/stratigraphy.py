@@ -1,0 +1,82 @@
+"""From raster masks (SAM, classification) to stratigraphic-unit polygons."""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+
+
+@dataclass
+class UnitPolygon:
+    """A stratigraphic unit drawn on the orthomosaic (world coordinates)."""
+
+    geometry: object  # shapely (Multi)Polygon
+    us: str | None = None
+    area: str | None = None
+    tipo: str = "US"  # US / USM / USR ...
+    attributes: dict = field(default_factory=dict)
+
+    @property
+    def wkt(self) -> str:
+        return self.geometry.wkt
+
+
+def mask_to_polygons(mask: np.ndarray, transform, simplify: float = 0.0, min_area: float = 0.0):
+    """Binary mask (rows x cols) + raster transform -> shapely MultiPolygon in world coordinates."""
+    from rasterio.features import shapes
+    from shapely.geometry import MultiPolygon, shape
+    from shapely.ops import unary_union
+
+    polys = [shape(geom) for geom, val in shapes(mask.astype(np.uint8), mask=mask.astype(bool), transform=transform)
+             if val == 1]
+    if not polys:
+        return MultiPolygon()
+    geom = unary_union(polys)
+    if simplify > 0:
+        geom = geom.simplify(simplify, preserve_topology=True)
+    parts = [geom] if geom.geom_type == "Polygon" else list(geom.geoms)
+    parts = [p for p in parts if p.area >= min_area]
+    return MultiPolygon(parts)
+
+
+def orthomosaic_window(path: str | Path):
+    """Read an orthomosaic as RGB uint8 array plus its transform and CRS."""
+    import rasterio
+
+    with rasterio.open(path) as src:
+        arr = src.read([1, 2, 3])
+        alpha = src.read(4) if src.count >= 4 else np.full(arr.shape[1:], 255, np.uint8)
+        return np.moveaxis(arr, 0, -1), alpha, src.transform, src.crs
+
+
+def export_units(units: list[UnitPolygon], path: str | Path, crs: str | None = None) -> Path:
+    """GeoJSON or DXF of the unit polygons."""
+    import json
+
+    from shapely.geometry import mapping
+
+    path = Path(path)
+    if path.suffix.lower() == ".dxf":
+        import ezdxf
+
+        doc = ezdxf.new("R2010")
+        msp = doc.modelspace()
+        for u in units:
+            layer = f"US_{u.us}" if u.us else "US"
+            if layer not in doc.layers:
+                doc.layers.add(layer)
+            parts = [u.geometry] if u.geometry.geom_type == "Polygon" else list(u.geometry.geoms)
+            for p in parts:
+                msp.add_lwpolyline(list(p.exterior.coords), close=True, dxfattribs={"layer": layer})
+                for ring in p.interiors:
+                    msp.add_lwpolyline(list(ring.coords), close=True, dxfattribs={"layer": layer})
+        doc.saveas(path)
+        return path
+    fc = {"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"us": u.us, "area": u.area, "tipo": u.tipo, **u.attributes},
+         "geometry": mapping(u.geometry)} for u in units]}
+    if crs:
+        fc["crs"] = {"type": "name", "properties": {"name": crs}}
+    path.write_text(json.dumps(fc))
+    return path
