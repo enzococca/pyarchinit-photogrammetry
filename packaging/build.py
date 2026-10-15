@@ -95,10 +95,12 @@ def smoke_test(bundle: Path) -> None:
     print("smoke test:", exe, flush=True)
     r = subprocess.run([str(exe), "--check"], env=env, timeout=600, capture_output=True, text=True)
     print(r.stdout[-2000:], r.stderr[-2000:])
-    if r.returncode != 0 or "GUI check: ok" not in r.stdout or "vtk: ok" not in r.stdout:
+    if r.returncode != 0 or not all(k in r.stdout for k in ("GUI check: ok", "vtk: ok", "libs: ok")):
         raise SystemExit(f"smoke test failed (exit {r.returncode})")
     r = subprocess.run([str(exe), "--doctor"], env=env, timeout=600, capture_output=True, text=True)
     print(r.stdout[-3000:])
+    if r.returncode not in (0, 1) or "[OK] Python" not in r.stdout:
+        raise SystemExit(f"doctor failed in the packaged application (exit {r.returncode})")
 
 
 def package(bundle: Path) -> Path:

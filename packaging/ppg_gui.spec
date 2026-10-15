@@ -46,8 +46,12 @@ excludes = ["torch", "torchvision", "sam2", "tkinter", "PyQt5", "PyQt6", "PySide
 
 a = Analysis([str(ROOT / "packaging" / "launcher.py")], pathex=[str(ROOT / "src")], binaries=binaries, datas=datas,
              hiddenimports=hidden, hookspath=[], runtime_hooks=[], excludes=excludes, noarchive=False)
-# Open3D's TensorFlow/PyTorch operator libraries are useless here and pull missing dependencies
-a.binaries = [b for b in a.binaries if not any(k in b[0] for k in ("open3d_tf_ops", "open3d_torch_ops"))]
+# Open3D's TensorFlow/PyTorch operator libraries are useless here and pull missing dependencies.
+# rasterio and pyproj both ship libproj with the same name; PyInstaller resolves @rpath through one
+# top-level link, and rasterio's copy does not export the C API that pyproj's extension needs, so
+# only pyproj's copy is kept (GDAL links the same PROJ version through it).
+a.binaries = [b for b in a.binaries if not any(k in b[0] for k in ("open3d_tf_ops", "open3d_torch_ops"))
+              and not (b[0].replace("\\", "/").startswith("rasterio/") and "libproj" in b[0])]
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name=NAME, debug=False, bootloader_ignore_signals=False,
           strip=False, upx=False, console=False, icon=ICON)

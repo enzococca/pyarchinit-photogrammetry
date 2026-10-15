@@ -82,8 +82,17 @@ def main(argv: list[str] | None = None) -> int:
                 vtk = "ok"
             except Exception as exc:
                 vtk = f"missing ({exc})"
+            try:  # libraries the smoke test of the packaged application must find
+                import laspy  # noqa: F401
+                import pyproj  # noqa: F401
+
+                from ..core import crs as _crs  # noqa: F401
+
+                libs = "ok"
+            except Exception as exc:
+                libs = f"missing ({str(exc).splitlines()[0][:120]})"
             print(f"GUI check: {'ok' if ok else 'FAILED'} | window: {win.windowTitle()} | 3D backend: "
-                  f"{win.model_view.backend} | vtk: {vtk} | log: {log_path}", flush=True)
+                  f"{win.model_view.backend} | vtk: {vtk} | libs: {libs} | log: {log_path}", flush=True)
             qapp.exit(0 if ok else 2)
 
         QTimer.singleShot(1500, check)

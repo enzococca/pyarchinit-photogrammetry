@@ -145,14 +145,20 @@ def run_checks(gui: bool = True) -> Report:
     r.add("PyTorch (SAM 2.1)", OK if v else WARN, v or "missing (Segment Anything disabled)",
           "" if v else "pip install \"pyarchinit-photogrammetry[sam]\"")
 
-    # PyArchInit SQLite geometries
+    # PyArchInit SQLite geometries: probed in a separate process, so that loading the extension
+    # (which brings its own PROJ/GEOS/sqlite) can never destabilise this one
     try:
+        from .engine.isolate import IsolatedCrash, run_isolated
         from .pyarchinit.database import spatialite_path
 
-        p = spatialite_path()
+        p = run_isolated(spatialite_path, timeout=120)
         r.add("SpatiaLite", OK if p else WARN, p or "mod_spatialite not found",
               "" if p else "Needed only to write geometries into a PyArchInit SQLite database: install libspatialite "
                            "(QGIS, Homebrew, MacPorts, apt) or set SPATIALITE_LIBRARY_PATH.")
+    except IsolatedCrash as exc:
+        r.add("SpatiaLite", WARN, f"loading mod_spatialite crashes (exit {exc.exit_code})",
+              "The installed mod_spatialite is incompatible with the libraries of this environment: writing "
+              "geometries into a PyArchInit SQLite database will not work (PostGIS is unaffected).")
     except Exception as exc:  # pragma: no cover
         r.add("SpatiaLite", WARN, str(exc)[:90])
 
@@ -163,7 +169,12 @@ def run_checks(gui: bool = True) -> Report:
         r.add("qtawesome (icons)", OK if v else WARN, v or "missing (interface without icons)",
               "" if v else "pip install qtawesome")
         pq = _version("pyvistaqt")
-        vtk = _version("vtk") or _version("vtkmodules")
+        try:  # not "import vtk": the full package also loads VTK's PROJ/SQL modules
+            from vtkmodules.vtkCommonCore import vtkVersion
+
+            vtk = vtkVersion.GetVTKVersion()
+        except Exception:
+            vtk = None
         if pq is None or vtk is None:
             r.add("3D view (VTK)", WARN, "pyvistaqt/VTK missing: software renderer",
                   "pip install \"pyarchinit-photogrammetry[gui]\"")

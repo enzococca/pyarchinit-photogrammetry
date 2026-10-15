@@ -246,7 +246,7 @@ def _vtk_usable() -> bool:
         return False
     try:
         import pyvistaqt  # noqa: F401
-        import vtk  # noqa: F401
+        import vtkmodules.vtkRenderingOpenGL2  # noqa: F401  (not "import vtk": the full package loads every module)
     except Exception:
         return False
     return True
