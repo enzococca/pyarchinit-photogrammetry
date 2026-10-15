@@ -136,3 +136,61 @@ def _spatialite():
     from conftest import _spatialite_available
 
     return _spatialite_available()
+
+
+def test_window_fits_a_laptop_screen(window, qapp):
+    """The panels wrap their buttons and scroll, the toolbars drop their texts: the window
+    goes down to a small laptop screen without hiding commands (it was 1940 px wide)."""
+    from PySide6.QtWidgets import QToolBar, QToolButton
+
+    w = window
+    for page in (w.layers_pane, w.proxies_pane, w.reference):  # the widest panes
+        w._show_pane(w.left_tabs, page)
+        qapp.processEvents()
+        hint = w.minimumSizeHint()
+        assert hint.width() <= 900 and hint.height() <= 640, (page, hint)
+    styles = {}
+    for width in (2200, 1280):
+        w.resize(width, 720)
+        for _ in range(3):
+            qapp.processEvents()
+        for tb in w.findChildren(QToolBar):
+            buttons = [b for b in (tb.widgetForAction(a) for a in tb.actions()) if isinstance(b, QToolButton)]
+            assert all(b.isVisible() for b in buttons), (width, tb.objectName())  # none behind >>
+            assert tb.sizeHint().width() <= width
+            styles[width, tb.objectName()] = [b.toolButtonStyle() for b in buttons]
+    icon_only = styles[1280, "drawing_toolbar"][-1]
+    assert icon_only not in styles[2200, "drawing_toolbar"]  # texts everywhere on a wide screen
+    pan = styles[1280, "drawing_toolbar"][0]
+    assert pan != icon_only  # the first drawing tools keep their names
+
+
+def test_flow_layout_wraps_and_makes_room(qapp):
+    from PySide6.QtWidgets import QListWidget, QPushButton, QVBoxLayout, QWidget
+
+    from pyarchinit_photogrammetry.gui.flow_layout import FlowLayout
+
+    page = QWidget()
+    lay = QVBoxLayout(page)
+    row = FlowLayout()
+    buttons = [QPushButton(t) for t in ("Primo pulsante", "Secondo", "Terzo pulsante lungo", "Quarto")]
+    for b in buttons:
+        row.addWidget(b)
+    lay.addLayout(row)
+    below = QListWidget()
+    lay.addWidget(below, 1)
+    page.resize(900, 400)
+    page.show()
+    for _ in range(3):
+        qapp.processEvents()
+    assert len({b.y() for b in buttons}) == 1  # one line
+    widest = max(b.sizeHint().width() for b in buttons)
+    assert page.minimumSizeHint().width() <= widest + 40
+    page.resize(widest + 30, 400)
+    for _ in range(3):
+        qapp.processEvents()
+    ys = [b.y() for b in buttons]
+    assert ys == sorted(ys) and len(set(ys)) == 4  # one per line
+    assert below.y() >= buttons[-1].geometry().bottom()  # room made for the lines, nothing drawn over them
+    assert page.minimumSizeHint().height() >= buttons[-1].geometry().bottom()
+    page.close()

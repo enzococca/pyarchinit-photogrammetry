@@ -4,10 +4,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton, QSizePolicy,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
+                               QSizePolicy, QVBoxLayout, QWidget)
 
 from .. import __version__
+from .flow_layout import FlowLayout
 from .icons import app_icon, icon
 
 
@@ -33,12 +34,22 @@ class StartPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("startPage")
-        outer = QVBoxLayout(self)
+        # the page scrolls on a small screen instead of widening the main window
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        page = QWidget()
+        page.setObjectName("startPage")
+        scroll.setWidget(page)
+        top = QVBoxLayout(self)
+        top.setContentsMargins(0, 0, 0, 0)
+        top.addWidget(scroll)
+        outer = QVBoxLayout(page)
         outer.setContentsMargins(40, 30, 40, 30)
         outer.addStretch(1)
         column = QFrame()
         column.setObjectName("card")
-        column.setMaximumWidth(820)
+        column.setMaximumWidth(760)
         col = QVBoxLayout(column)
         col.setContentsMargins(36, 32, 36, 28)
         col.setSpacing(14)
@@ -51,14 +62,14 @@ class StartPage(QWidget):
         t.setObjectName("pageTitle")
         s = QLabel(f"Fotogrammetria open source per l'archeologia e il BIM  -  versione {__version__}")
         s.setObjectName("pageSubtitle")
+        s.setWordWrap(True)
         titles.addWidget(t)
         titles.addWidget(s)
         titles.addStretch(1)
         head.addSpacing(16)
         head.addLayout(titles, 1)
         col.addLayout(head)
-        cards = QHBoxLayout()
-        cards.setSpacing(12)
+        cards = FlowLayout(spacing=12)  # side by side, one under the other on a narrow window
         self.b_new = _card("new", "Nuovo progetto", "Crea un progetto vuoto e aggiungi le foto")
         self.b_open = _card("open", "Apri progetto...", "Apri un file .ppg")
         self.b_demo = _card("demo", "Progetto demo", "Crea e apri il saggio di scavo dimostrativo")
@@ -78,18 +89,17 @@ class StartPage(QWidget):
         self.empty.setObjectName("pageSubtitle")
         self.empty.setWordWrap(True)
         col.addWidget(self.empty)
-        foot = QHBoxLayout()
+        foot = FlowLayout(spacing=12)
         self.b_help = QPushButton(icon("help"), "Guida")
         self.b_doctor = QPushButton(icon("doctor"), "Diagnostica ambiente")
         self.b_log = QPushButton(icon("log"), "Cartella dei log")
         for b in (self.b_help, self.b_doctor, self.b_log):
             b.setFlat(True)
             foot.addWidget(b)
-        foot.addStretch(1)
         col.addLayout(foot)
         row = QHBoxLayout()
         row.addStretch(1)
-        row.addWidget(column)
+        row.addWidget(column, 8)  # as wide as the page allows, up to its maximum width
         row.addStretch(1)
         outer.addLayout(row)
         outer.addStretch(2)

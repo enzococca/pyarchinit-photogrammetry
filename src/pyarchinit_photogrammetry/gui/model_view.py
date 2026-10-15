@@ -7,9 +7,10 @@ import os
 import numpy as np
 from PySide6.QtCore import QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QLabel, QPushButton, QSizePolicy, QVBoxLayout,
                                QWidget)
 
+from .flow_layout import FlowLayout
 from .scene import OrbitCamera, SceneData, available_views, build_scene, sample_mesh_colors, splat
 
 VIEW_LABELS = {"cameras": "Camere", "tie_points": "Punti di legame", "point_cloud": "Nuvola densa",
@@ -21,7 +22,7 @@ class SoftwareCanvas(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumSize(320, 240)
+        self.setMinimumSize(200, 150)
         self.setMouseTracking(True)
         self.sd = SceneData(np.zeros(3))
         self.cam = OrbitCamera(np.zeros(3), 5.0)
@@ -261,8 +262,9 @@ class ModelView(QWidget):
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(2, 2, 2, 2)
-        bar = QHBoxLayout()
+        bar = FlowLayout()
         self.combo = QComboBox()
+        self.combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.combo.currentIndexChanged.connect(self._combo_changed)
         self.cb_cams = QCheckBox("Camere")
         self.cb_cams.setChecked(True)
@@ -273,7 +275,7 @@ class ModelView(QWidget):
         b_reset = QPushButton("Vista iniziale")
         b_top = QPushButton("Dall'alto")
         bar.addWidget(QLabel("Mostra:"))
-        bar.addWidget(self.combo, 1)
+        bar.addWidget(self.combo)
         bar.addWidget(self.cb_cams)
         bar.addWidget(self.cb_marks)
         bar.addWidget(b_top)

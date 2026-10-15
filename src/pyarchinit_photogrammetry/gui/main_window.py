@@ -11,9 +11,9 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
-from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QDockWidget, QFileDialog, QInputDialog,
-                               QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget,
-                               QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QDockWidget, QFileDialog, QFrame,
+                               QInputDialog, QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
+                               QScrollArea, QStackedWidget, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from .. import __version__
 from ..app import app as application
@@ -43,7 +43,8 @@ class MainWindow(QMainWindow):
         self._autoconnect = autoconnect
         self.setWindowTitle(APP_TITLE)
         self.setWindowIcon(app_icon())
-        self.resize(1500, 950)
+        avail = self.screen().availableGeometry()  # a laptop screen is smaller than the default size
+        self.resize(min(1500, avail.width() - 40), min(950, avail.height() - 60))
         from . import app_settings
 
         self.settings = app_settings()
@@ -103,7 +104,12 @@ class MainWindow(QMainWindow):
     def _dock(self, title: str, widget: QWidget, area, name: str) -> QDockWidget:
         d = QDockWidget(title, self)
         d.setObjectName(name)
-        d.setWidget(widget)
+        # on a short screen the pane scrolls instead of making the window taller than the screen
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(widget)
+        d.setWidget(scroll)
         self.addDockWidget(area, d)
         return d
 
@@ -399,6 +405,8 @@ class MainWindow(QMainWindow):
         tb.setIconSize(QSize(26, 26))
         tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.addToolBar(tb)
+        self._toolbar_styles = {tb: Qt.ToolButtonStyle.ToolButtonTextUnderIcon}
+        self._toolbar_sizes: dict = {}  # toolbar -> (width besides the buttons, [(with text, icon only)])
         groups = [
             [("open", "Apri", lambda: self.open_document(), "Apri un progetto", False),
              ("save", "Salva", self.save_document, "Salva il progetto", False)],
@@ -435,6 +443,7 @@ class MainWindow(QMainWindow):
         db.setIconSize(QSize(20, 20))
         db.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.addToolBar(db)
+        self._toolbar_styles[db] = Qt.ToolButtonStyle.ToolButtonTextBesideIcon
         lab = QLabel(" Disegno: ")
         lab.setObjectName("pageSubtitle")
         db.addWidget(lab)
@@ -656,6 +665,46 @@ class MainWindow(QMainWindow):
         if r == QMessageBox.StandardButton.Save:
             return self.save_document()
         return r == QMessageBox.StandardButton.Discard
+
+    def resizeEvent(self, ev) -> None:
+        super().resizeEvent(ev)
+        self._fit_toolbars()
+
+    def _fit_toolbars(self) -> None:
+        """A toolbar that would not fit the window with its texts (laptop screens) loses them
+        instead of hiding its last buttons behind the >> menu: the workflow bar all at once,
+        the drawing bar from its last button, so that the drawing tools keep their names as
+        long as possible. The tooltips keep the names."""
+        icon_only = Qt.ToolButtonStyle.ToolButtonIconOnly
+        for tb, style in getattr(self, "_toolbar_styles", {}).items():
+            buttons = [b for b in (tb.widgetForAction(a) for a in tb.actions()) if isinstance(b, QToolButton)]
+            sizes = self._toolbar_sizes.get(tb)
+            if sizes is None or len(sizes[1]) != len(buttons):
+                sizes = self._toolbar_sizes[tb] = self._measure_toolbar(tb, style, buttons)
+            other, widths = sizes
+            need, avail = other + sum(full for full, _ in widths), self.width() - 16
+            short = [False] * len(buttons)
+            for i in reversed(range(len(buttons))):
+                if need <= avail:
+                    break
+                short[i] = True
+                need -= widths[i][0] - widths[i][1]
+            if any(short) and style == Qt.ToolButtonStyle.ToolButtonTextUnderIcon:
+                short = [True] * len(buttons)  # mixed heights would look broken
+            for b, sh in zip(buttons, short):
+                if b.toolButtonStyle() != (icon_only if sh else style):
+                    b.setToolButtonStyle(icon_only if sh else style)
+
+    @staticmethod
+    def _measure_toolbar(tb: QToolBar, style, buttons: list) -> tuple[int, list]:
+        widths = []
+        for b in buttons:
+            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            small = b.sizeHint().width()
+            b.setToolButtonStyle(style)
+            widths.append((b.sizeHint().width(), small))
+        tb.layout().invalidate()
+        return tb.sizeHint().width() - sum(full for full, _ in widths), widths
 
     def closeEvent(self, ev) -> None:
         if self.runner.busy:

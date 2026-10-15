@@ -38,6 +38,12 @@ environment diagnosis and the log folder. *File > Pagina iniziale* brings it bac
 | Right: **PyArchInit** | connection, sites, stratigraphic units and documentation |
 | Status bar | task progress with a stop button while something runs; cursor coordinates |
 
+The window fits a laptop screen, down to about 1000 x 650 pixels: the buttons of the panes
+wrap onto more lines when a pane is narrow, a pane that is too short for its content
+scrolls, and a toolbar that does not fit drops its texts (the workflow bar all at once,
+the drawing bar from its last buttons, so the drawing tools keep their names longest; the
+tooltips keep the names).
+
 The 3D view uses VTK (pyvista/pyvistaqt) when OpenGL is available, otherwise a software
 renderer (force it with `PPG_RENDERER=software`, or VTK with `PPG_RENDERER=vtk`).
 *Vista > Tema* switches between the light and the dark theme (remembered).

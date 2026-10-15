@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QHBoxL
                                QTableWidget, QTableWidgetItem, QToolButton, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
+from .flow_layout import FlowLayout
 from .icons import PALETTE, icon
 from .image_views import to_qimage
 
@@ -200,19 +201,19 @@ class ReferencePane(QWidget):
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
-        bar = QHBoxLayout()
+        bar = FlowLayout()
         self.b_import = _tool("reference", "Importa CSV...", "Importa le coordinate dei marker")
         self.b_update = _tool("georef", "Aggiorna", "Ricalcola la georeferenziazione")
         self.b_opt = _tool("optimize", "Ottimizza camere", "Bundle adjustment con i riferimenti")
         bar.addWidget(self.b_import)
         bar.addWidget(self.b_update)
         bar.addWidget(self.b_opt)
-        bar.addStretch(1)
         lay.addLayout(bar)
         self.b_import.clicked.connect(self.import_requested)
         self.b_update.clicked.connect(self.update_requested)
         self.b_opt.clicked.connect(self.optimize_requested)
         self.crs_label = QLabel("")
+        self.crs_label.setWordWrap(True)
         lay.addWidget(self.crs_label)
         split = QSplitter(Qt.Orientation.Vertical)
         self.table = QTableWidget(0, len(self.COLS))
@@ -439,7 +440,7 @@ class LogPane(QWidget):
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
-        bar = QHBoxLayout()
+        bar = FlowLayout()
         self.level = QComboBox()
         self.level.addItem("Tutto", logging.DEBUG)
         self.level.addItem("Avvisi ed errori", logging.WARNING)
@@ -459,7 +460,7 @@ class LogPane(QWidget):
         self.b_clear.clicked.connect(self.clear)
         bar.addWidget(QLabel("Mostra:"))
         bar.addWidget(self.level)
-        bar.addWidget(self.search, 1)
+        bar.addWidget(self.search)  # expanding: takes the free space of its line
         for b in (self.b_copy, self.b_save, self.b_folder, self.b_clear):
             bar.addWidget(b)
         lay.addLayout(bar)
@@ -591,7 +592,7 @@ class PyArchInitPane(QWidget):
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
-        row = QHBoxLayout()
+        row = FlowLayout()
         self.b_connect = _tool("database", "Connetti...", "Connetti al database di PyArchInit (config.cfg, SQLite, PostgreSQL)")
         self.b_demo = _tool("demo_db", "Database demo", "Usa il database dimostrativo")
         self.b_new_site = _tool("site", "Nuovo sito...", "Crea la scheda Sito in PyArchInit")
@@ -600,7 +601,6 @@ class PyArchInitPane(QWidget):
         row.addWidget(self.b_demo)
         row.addWidget(self.b_new_site)
         row.addWidget(self.b_new_us)
-        row.addStretch(1)
         lay.addLayout(row)
         self.b_connect.clicked.connect(self.connect_requested)
         self.b_demo.clicked.connect(self.demo_requested)
@@ -617,6 +617,7 @@ class PyArchInitPane(QWidget):
         lay.addWidget(self.tree, 1)
         hint = QLabel("Doppio clic su una US per aprire la scheda")
         hint.setObjectName("pageSubtitle")
+        hint.setWordWrap(True)
         lay.addWidget(hint)
         self.pa = None
 
@@ -702,7 +703,7 @@ class LayersPane(QWidget):
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
-        bar = QHBoxLayout()
+        bar = FlowLayout()
         self.b_all = _tool("ok", "Tutti", "Mostra tutti i layer")
         self.b_none = _tool("eraser", "Nessuno", "Nascondi tutti i layer")
         self.b_zoom = _tool("search", "Zoom", "Zoom sul layer o sull'elemento selezionato")
@@ -711,7 +712,6 @@ class LayersPane(QWidget):
         self.b_us.clicked.connect(lambda: self.us_form_requested.emit(*self._current) if self._current else None)
         for b in (self.b_all, self.b_none, self.b_zoom, self.b_remove, self.b_us):
             bar.addWidget(b)
-        bar.addStretch(1)
         lay.addLayout(bar)
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
@@ -733,6 +733,7 @@ class LayersPane(QWidget):
         lay.addWidget(self.attrs)
         hint = QLabel("Doppio clic su un valore per modificarlo")
         hint.setObjectName("pageSubtitle")
+        hint.setWordWrap(True)
         lay.addWidget(hint)
         self.view = None
         self._filling = False
@@ -867,20 +868,22 @@ class SectionsPane(QWidget):
         from PySide6.QtWidgets import QScrollArea
         from PySide6.QtSvgWidgets import QSvgWidget
 
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(4, 4, 4, 4)
-        left = QVBoxLayout()
-        self.list = QListWidget()
-        self.list.setIconSize(QSize(16, 16))
-        self.list.currentItemChanged.connect(lambda cur, _p: self._show(cur))
-        left.addWidget(self.list, 1)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(4, 4, 4, 4)
+        bar = FlowLayout()
         self.b_zoom = _tool("search", "Zoom sulla traccia")
         self.b_folder = _tool("folder", "Apri cartella")
         self.b_publish = _tool("publish", "Pubblica in PyArchInit", "Scrive la traccia in pyarchinit_sezioni")
         self.b_delete = _tool("clear", "Elimina")
         for b in (self.b_zoom, self.b_folder, self.b_publish, self.b_delete):
-            left.addWidget(b)
-        lay.addLayout(left)
+            bar.addWidget(b)
+        outer.addLayout(bar)
+        lay = QHBoxLayout()
+        outer.addLayout(lay, 1)
+        self.list = QListWidget()
+        self.list.setIconSize(QSize(16, 16))
+        self.list.currentItemChanged.connect(lambda cur, _p: self._show(cur))
+        lay.addWidget(self.list)
         right = QVBoxLayout()
         self.info = QLabel("Traccia una sezione: Disegno > Traccia sezione, poi due clic sull'ortofoto.")
         self.info.setWordWrap(True)
@@ -959,13 +962,12 @@ class ProxiesPane(QWidget):
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
-        bar = QHBoxLayout()
+        bar = FlowLayout()
         self.b_new = _tool("model", "Crea proxy...", "Solidi delle US tra la superficie e una base")
         self.b_show = _tool("view3d", "Vedi in 3D")
         self.b_export = _tool("export", "Esporta (Extended Matrix)", "Un OBJ con un oggetto per US (US12, USM3...)")
         for b in (self.b_new, self.b_show, self.b_export):
             bar.addWidget(b)
-        bar.addStretch(1)
         lay.addLayout(bar)
         self.table = QTableWidget(0, len(self.COLS))
         self.table.setHorizontalHeaderLabels(self.COLS)
@@ -976,16 +978,16 @@ class ProxiesPane(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.itemDoubleClicked.connect(lambda it: self.us_requested.emit(it.row()))
         lay.addWidget(self.table, 1)
-        bar2 = QHBoxLayout()
+        bar2 = FlowLayout()
         self.b_pub = _tool("publish", "Pubblica in PyArchInit", "Modello 3D collegato alla scheda US (media)")
         self.b_quote = _tool("dem", "Quote nella scheda US", "Scrive quota minima e massima assolute nella scheda")
         self.b_us = _tool("us", "Scheda US")
         self.b_del = _tool("clear", "Elimina")
         for b in (self.b_pub, self.b_quote, self.b_us, self.b_del):
             bar2.addWidget(b)
-        bar2.addStretch(1)
         lay.addLayout(bar2)
         self.total = QLabel("")
+        self.total.setWordWrap(True)
         lay.addWidget(self.total)
         self.b_new.clicked.connect(self.create_requested)
         self.b_show.clicked.connect(self.show_requested)
