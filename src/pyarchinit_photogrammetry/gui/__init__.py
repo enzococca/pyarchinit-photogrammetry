@@ -16,6 +16,22 @@ import sys
 APP_TITLE = "PyArchInit Photogrammetry"
 
 
+def _hard_exit(code: int) -> None:
+    """Leave the packaged application without interpreter finalisation and, on Windows,
+    without the DLL detach callbacks (both can crash after the work is done: 0xC0000005 on
+    Windows, segmentation faults on macOS with VTK/Open3D/SpatiaLite loaded)."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    if os.name == "nt":
+        import ctypes
+
+        ctypes.windll.kernel32.TerminateProcess(ctypes.windll.kernel32.GetCurrentProcess(), int(code))
+    os._exit(int(code))
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     from ..engine.isolate import WORKER_FLAG, freeze_support, worker_main
@@ -30,9 +46,7 @@ def main(argv: list[str] | None = None) -> int:
 
         code = doctor_main()
         if getattr(sys, "frozen", False):  # skip interpreter finalisation: it can crash the packaged app
-            sys.stdout.flush()
-            sys.stderr.flush()
-            os._exit(code)
+            _hard_exit(code)
         return code
     try:
         from PySide6.QtCore import QSettings, QTimer, Qt
@@ -102,8 +116,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"GUI check: {'ok' if ok else 'FAILED'} | window: {win.windowTitle()} | 3D backend: "
                   f"{win.model_view.backend} | vtk: {vtk} | libs: {libs} | log: {log_path}", flush=True)
             if getattr(sys, "frozen", False):  # see --doctor
-                sys.stderr.flush()
-                os._exit(0 if ok else 2)
+                _hard_exit(0 if ok else 2)
             qapp.exit(0 if ok else 2)
 
         QTimer.singleShot(1500, check)
