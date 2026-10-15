@@ -199,6 +199,9 @@ def package(bundle: Path) -> Path:
         os.symlink("/Applications", staging / "Applications")
         subprocess.run(["hdiutil", "create", "-volname", NAME, "-srcfolder", str(staging), "-ov", "-format",
                         "UDZO", str(out)], check=True)
+        # the staged copy would stay registered with Launch Services: a second app in Spotlight
+        # and in "Open with" for .ppg files
+        shutil.rmtree(staging, ignore_errors=True)
     elif os.name == "nt":
         base = DIST / f"PyArchInit-Photogrammetry-{ver}-windows-{arch}"
         out = Path(shutil.make_archive(str(base), "zip", root_dir=DIST, base_dir=bundle.name))

@@ -20,6 +20,10 @@ jobs:
           python -m pip install --upgrade build twine
           python -m build
           twine check dist/*
+          # data files read at run time must be inside the wheel
+          for f in pyarchinit/pyarchinit5_schema.sql gui/resources/logo.svg; do
+            python -m zipfile -l dist/*.whl | grep -q "pyarchinit_photogrammetry/$f" || { echo "missing $f in the wheel"; exit 1; }
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: dist
