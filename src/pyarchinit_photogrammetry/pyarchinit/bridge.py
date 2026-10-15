@@ -27,12 +27,43 @@ US_FIELDS = ["sito", "area", "us", "unita_tipo", "d_stratigrafica", "d_interpret
 
 
 class PyArchInit:
-    def __init__(self, db: PyArchInitDB):
+    def __init__(self, db: PyArchInitDB, media_root: str | Path | None = None):
         self.db = db
+        self.media_root = Path(media_root) if media_root else None
 
     @classmethod
-    def connect(cls, url: str | None = None, config_path: str | Path | None = None) -> "PyArchInit":
-        return cls(connect(url, config_path))
+    def connect(cls, url: str | None = None, config_path: str | Path | None = None,
+                media_root: str | Path | None = None) -> "PyArchInit":
+        """``url``: SQLite path or SQLAlchemy URL; ``config_path``: a PyArchInit ``config.cfg``;
+        ``media_root``: where media, thumbnails and resized copies go (default: the folders
+        of ``config.cfg``, as PyArchInit itself)."""
+        return cls(connect(url, config_path), media_root=media_root)
+
+    @property
+    def label(self) -> str:
+        cfg = self.db.config
+        if self.db.is_postgres:
+            return self.db.url.split("@")[-1].split("?")[0]
+        return str(cfg.sqlite_path) if cfg and not self.db.url.startswith("sqlite") else self.db.url.replace("sqlite:///", "")
+
+    # ------------------------------------------------------------------ sites
+    def site_exists(self, sito: str) -> bool:
+        return bool(self.db.query("site_table", sito=sito))
+
+    def ensure_site(self, sito: str, nazione: str = "", regione: str = "", comune: str = "", provincia: str = "",
+                    descrizione: str = "", definizione_sito: str = "") -> int:
+        """Return the id of the site record, creating it when the site is not in ``site_table``
+        (PyArchInit shows a site only when its *scheda Sito* exists)."""
+        rows = self.db.query("site_table", sito=sito)
+        if rows:
+            return int(rows[0]["id_sito"])
+        values = {"sito": sito, "nazione": nazione, "regione": regione, "comune": comune, "provincia": provincia,
+                  "descrizione": descrizione or "Creato da pyarchinit-photogrammetry",
+                  "definizione_sito": definizione_sito, "find_check": 0}
+        cols = self.db.columns("site_table")
+        values = {k: v for k, v in values.items() if k in cols}
+        with self.db.begin() as conn:
+            return int(self.db.insert(conn, "site_table", values, id_column="id_sito"))
 
     # ------------------------------------------------------------------ read
     def sites(self) -> list[dict]:
@@ -84,8 +115,17 @@ class PyArchInit:
     # ----------------------------------------------------------------- write
     def _media_folder(self, sito: str, sub: str = "fotogrammetria") -> Path:
         cfg = self.db.config
-        base = Path(cfg.media_dir) if cfg else Path.home() / "pyarchinit_media"
+        if self.media_root is not None:
+            base = self.media_root
+        else:
+            base = Path(cfg.media_dir) if cfg else Path.home() / "pyarchinit_media"
         return base / sub / sito.replace("/", "_")
+
+    def _media_dirs(self) -> dict:
+        """thumb/resize folder overrides for :func:`register_media` when ``media_root`` is set."""
+        if self.media_root is None:
+            return {}
+        return {"thumb_dir": str(self.media_root / "thumb") + "/", "resize_dir": str(self.media_root / "resize") + "/"}
 
     def _links(self, sito: str, link_us) -> list[tuple[str, int]]:
         links = []
@@ -131,10 +171,11 @@ class PyArchInit:
         import rasterio
         from shapely.geometry import box
 
+        self.ensure_site(sito)
         dest = self._media_folder(sito)
         rid = register_media(self.db, raster, mediatype="image", descrizione=f"{tipo_documentazione}: {nome_doc}",
                              tags="['fotogrammetria', 'raster']", links=self._links(sito, link_us), copy_to=dest,
-                             overwrite=overwrite)
+                             overwrite=overwrite, **self._media_dirs())
         did = self.add_documentation(sito, nome_doc, tipo_documentazione, sorgente, scala, disegnatore, note)
         gid = None
         already = [r for r in self.db.query("pyarchinit_documentazione", sito=sito, nome_doc=nome_doc,
@@ -180,12 +221,13 @@ class PyArchInit:
     def publish_model(self, chunk, sito: str, nome_doc: str, link_us=None, out_dir: str | Path | None = None,
                       **kw) -> dict:
         """Export the (textured) model in world coordinates and register it as ``3d_model`` media."""
+        self.ensure_site(sito)
         dest = Path(out_dir) if out_dir else self._media_folder(sito, "modelli_3d")
         dest.mkdir(parents=True, exist_ok=True)
         obj = chunk.export_model(dest / (_safe(nome_doc) + ".obj"))
         rid = register_media(self.db, obj, mediatype="3d_model", descrizione=f"Modello 3D: {nome_doc}",
                              tags="['fotogrammetria', '3d']", links=self._links(sito, link_us),
-                             overwrite=kw.get("overwrite", False))
+                             overwrite=kw.get("overwrite", False), **self._media_dirs())
         did = self.add_documentation(sito, nome_doc, "Modello tridimensionale", kw.get("sorgente", "Fotogrammetria"),
                                      kw.get("scala", ""), kw.get("disegnatore", ""), kw.get("note", ""))
         return {"id_media": rid, "id_documentazione": did, "path": str(obj)}
@@ -194,6 +236,7 @@ class PyArchInit:
                       rilievo_originale: str = "Fotogrammetria", disegnatore: str = "", nome_doc: str = "",
                       tipo_doc: str = "Fotopiano") -> list[int]:
         """Write unit polygons into ``pyunitastratigrafiche`` (US must be set on each unit)."""
+        self.ensure_site(sito)
         gids = []
         with self.db.begin() as conn:
             for u in units:
@@ -213,6 +256,7 @@ class PyArchInit:
         from ..engine.dem import read_dem
 
         z, tr, _, _ = read_dem(chunk.dem_path)
+        self.ensure_site(sito)
         gids = []
         with self.db.begin() as conn:
             for x, y in np.asarray(points_xy, float):
@@ -234,6 +278,7 @@ class PyArchInit:
         from shapely.geometry import LineString
 
         line = LineString([section.p1[:2], section.p2[:2]])
+        self.ensure_site(sito)
         with self.db.begin() as conn:
             return self.db.insert_geometry(conn, "pyarchinit_sezioni", {
                 "id_sezione": id_sezione, "sito": sito, "area": area, "descr": descr or section.label,
@@ -244,6 +289,7 @@ class PyArchInit:
                        dem_pre: str = "", dem_post: str = "", layer_poligono: str = "", fase_scavo: str = "",
                        note: str = "") -> int:
         """Store a cut/fill result (see :func:`archaeo.terrain.volume`) in ``computo_metrico_table``."""
+        self.ensure_site(sito)
         with self.db.begin() as conn:
             return self.db.insert(conn, "computo_metrico_table", {
                 "sito": sito, "nome_calcolo": nome_calcolo, "tipo_calcolo": tipo_calcolo, "dem_pre": dem_pre,

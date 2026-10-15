@@ -153,7 +153,9 @@ class TaskRunner(QObject):
         return self.thread is not None
 
     def run(self, label: str, fn: Callable[[Progress], Any], on_done: Callable[[Any], None] | None = None,
-            on_error: Callable[[str, str], None] | None = None) -> bool:
+            on_error: Callable[[str, str], None] | None = None, quiet: bool = False) -> bool:
+        """Run ``fn(progress)`` in the worker thread. ``quiet``: no modal progress window, only
+        the status-bar indicator (for short background jobs such as database connections)."""
         if self.busy:
             self.status.emit("Un'elaborazione e' gia' in corso")
             return False
@@ -164,7 +166,7 @@ class TaskRunner(QObject):
         self.thread = QThread()
         self.task.moveToThread(self.thread)
         self.thread.started.connect(self.task.run)
-        if self.show_dialog:
+        if self.show_dialog and not quiet:
             self.dialog = ProgressDialog(label, self.parent_widget)
             self.dialog.cancel_button.clicked.connect(self.cancel)
             self.dialog.show()

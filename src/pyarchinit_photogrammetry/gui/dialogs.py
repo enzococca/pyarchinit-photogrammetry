@@ -31,8 +31,8 @@ class _PathEdit(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         self.edit = QLineEdit(str(f.default or ""))
-        b = QPushButton("...")
-        b.setFixedWidth(32)
+        b = QPushButton("Sfoglia")
+        b.setFixedWidth(72)
         lay.addWidget(self.edit, 1)
         lay.addWidget(b)
         self.f = f
@@ -148,8 +148,14 @@ class PublishDialog(QDialog):
         form = QFormLayout()
         lay.addLayout(form)
         self.site = QComboBox()
+        self.site.setEditable(True)
         self.site.addItems(sites if sites is not None else [str(s.get("sito")) for s in pa.sites()])
         self.site.currentTextChanged.connect(self._load_us)
+        self.b_new_site = QPushButton("Nuovo sito...")
+        self.b_new_site.clicked.connect(self._new_site)
+        site_row = QHBoxLayout()
+        site_row.addWidget(self.site, 1)
+        site_row.addWidget(self.b_new_site)
         self.name = QLineEdit(chunk.label if chunk is not None else "Rilievo")
         self.author = QLineEdit("")
         self.cb_ortho = QCheckBox("Ortofoto")
@@ -164,7 +170,7 @@ class PublishDialog(QDialog):
         prods = QHBoxLayout()
         for cb in (self.cb_ortho, self.cb_dem, self.cb_model):
             prods.addWidget(cb)
-        form.addRow("Sito", self.site)
+        form.addRow("Sito", site_row)
         form.addRow("Nome documento", self.name)
         form.addRow("Disegnatore / operatore", self.author)
         form.addRow("Prodotti", prods)
@@ -179,11 +185,25 @@ class PublishDialog(QDialog):
         lay.addWidget(bb)
         self._load_us(self.site.currentText())
 
+    def _new_site(self) -> None:
+        dlg = SiteDialog(self, self.site.currentText().strip())
+        if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.values()["sito"]:
+            return
+        v = dlg.values()
+        self.pa.ensure_site(**v)
+        if self.site.findText(v["sito"]) < 0:
+            self.site.addItem(v["sito"])
+        self.site.setCurrentText(v["sito"])
+
     def _load_us(self, site: str) -> None:
         self.us_list.clear()
         if not site:
             return
-        for u in self.pa.stratigraphic_units(site):
+        try:
+            units = self.pa.stratigraphic_units(site)
+        except Exception:
+            units = []
+        for u in units:
             it = QListWidgetItem(f"Area {u.get('area')} - {u.get('unita_tipo') or 'US'} {u.get('us')}  "
                                  f"{u.get('d_stratigrafica') or ''}")
             it.setData(Qt.ItemDataRole.UserRole, (str(u.get("area")), str(u.get("us"))))
@@ -410,3 +430,174 @@ class ErrorDialog(QDialog):
         from PySide6.QtGui import QDesktopServices
 
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self.log_path).parent)))
+
+
+# ---------------------------------------------------------------- PyArchInit connection and sites
+class ConnectDialog(QDialog):
+    """Choose how to reach PyArchInit: its ``config.cfg``, a SQLite file or a PostgreSQL server.
+
+    ``values()`` returns ``{"mode": "config"|"sqlite"|"postgres", "config": path, "url": ...}``;
+    the PostgreSQL fields (except the password, unless asked) are remembered in QSettings."""
+
+    def __init__(self, parent=None, settings=None):
+        super().__init__(parent)
+        from PySide6.QtCore import QSettings
+        from PySide6.QtWidgets import QGroupBox, QRadioButton, QSpinBox
+
+        from ..pyarchinit.config import PyArchInitConfig, pyarchinit_home
+        from .icons import icon
+
+        from PySide6.QtWidgets import QButtonGroup
+
+        self.setWindowTitle("Connessione a PyArchInit")
+        self.setMinimumWidth(560)
+        self.settings = settings or QSettings("pyarchinit", "pyarchinit-photogrammetry")
+        lay = QVBoxLayout(self)
+        self._group = QButtonGroup(self)  # the radio buttons live in different group boxes
+        # --- PyArchInit installation
+        self.r_config = QRadioButton("Database configurato in PyArchInit (config.cfg)")
+        cfg_path = pyarchinit_home() / "pyarchinit_DB_folder" / "config.cfg"
+        self.cfg_edit = _PathEdit(Field("config", "config.cfg", str(cfg_path), kind="file_open",
+                                        filter="config.cfg (config.cfg);;Tutti (*)"))
+        self.cfg_info = QLabel("")
+        self.cfg_info.setObjectName("pageSubtitle")
+        self.cfg_info.setWordWrap(True)
+        g1 = QGroupBox()
+        l1 = QVBoxLayout(g1)
+        l1.addWidget(self.r_config)
+        l1.addWidget(self.cfg_edit)
+        l1.addWidget(self.cfg_info)
+        lay.addWidget(g1)
+        # --- SQLite file
+        self.r_sqlite = QRadioButton("File SQLite / SpatiaLite")
+        self.sqlite_edit = _PathEdit(Field("sqlite", "Database", str(self.settings.value("pa_sqlite", "")),
+                                           kind="file_open", filter="SQLite (*.sqlite *.db *.sqlite3);;Tutti (*)"))
+        g2 = QGroupBox()
+        l2 = QVBoxLayout(g2)
+        l2.addWidget(self.r_sqlite)
+        l2.addWidget(self.sqlite_edit)
+        lay.addWidget(g2)
+        # --- PostgreSQL
+        self.r_pg = QRadioButton("PostgreSQL / PostGIS")
+        g3 = QGroupBox()
+        l3 = QVBoxLayout(g3)
+        l3.addWidget(self.r_pg)
+        form = QFormLayout()
+        self.host = QLineEdit(str(self.settings.value("pa_pg_host", "localhost")))
+        self.port = QSpinBox()
+        self.port.setRange(1, 65535)
+        self.port.setValue(int(self.settings.value("pa_pg_port", 5432)))
+        self.dbname = QLineEdit(str(self.settings.value("pa_pg_db", "pyarchinit")))
+        self.user = QLineEdit(str(self.settings.value("pa_pg_user", "postgres")))
+        self.password = QLineEdit(str(self.settings.value("pa_pg_password", "")))
+        self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.remember = QCheckBox("Ricorda la password (in chiaro nelle impostazioni)")
+        self.remember.setChecked(bool(self.settings.value("pa_pg_password", "")))
+        self.sslmode = QComboBox()
+        for m in ("allow", "prefer", "require", "disable"):
+            self.sslmode.addItem(m, m)
+        self.sslmode.setCurrentText(str(self.settings.value("pa_pg_sslmode", "allow")))
+        form.addRow("Host", self.host)
+        form.addRow("Porta", self.port)
+        form.addRow("Database", self.dbname)
+        form.addRow("Utente", self.user)
+        form.addRow("Password", self.password)
+        form.addRow("SSL", self.sslmode)
+        form.addRow("", self.remember)
+        l3.addLayout(form)
+        lay.addWidget(g3)
+        self.status = QLabel("")
+        self.status.setWordWrap(True)
+        lay.addWidget(self.status)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.b_test = QPushButton(icon("ok"), "Prova connessione")
+        self.b_test.clicked.connect(self.test)
+        bb.addButton(self.b_test, QDialogButtonBox.ButtonRole.ActionRole)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        for r in (self.r_config, self.r_sqlite, self.r_pg):
+            self._group.addButton(r)
+        mode = str(self.settings.value("pa_mode", "config"))
+        {"config": self.r_config, "sqlite": self.r_sqlite, "postgres": self.r_pg}.get(mode, self.r_config).setChecked(True)
+        if cfg_path.exists():
+            try:
+                c = PyArchInitConfig.load(cfg_path)
+                self.cfg_info.setText(f"{'PostgreSQL ' + c.host + '/' + c.database if c.is_postgres else c.sqlite_path}"
+                                      f"  -  sito corrente: {c.site_set or '-'}")
+            except Exception as exc:
+                self.cfg_info.setText(f"config.cfg non leggibile: {exc}")
+        else:
+            self.cfg_info.setText("config.cfg non trovato: indica il file di PyArchInit o usa un'altra connessione")
+
+    def values(self) -> dict:
+        if self.r_config.isChecked():
+            return {"mode": "config", "config": self.cfg_edit.value(), "url": None}
+        if self.r_sqlite.isChecked():
+            return {"mode": "sqlite", "config": None, "url": self.sqlite_edit.value()}
+        from urllib.parse import quote_plus
+
+        url = (f"postgresql://{quote_plus(self.user.text())}:{quote_plus(self.password.text())}@{self.host.text()}:"
+               f"{self.port.value()}/{self.dbname.text()}?sslmode={self.sslmode.currentData()}")
+        return {"mode": "postgres", "config": None, "url": url}
+
+    def remember_settings(self) -> None:
+        v = self.values()
+        self.settings.setValue("pa_mode", v["mode"])
+        if v["mode"] == "sqlite":
+            self.settings.setValue("pa_sqlite", v["url"])
+        elif v["mode"] == "postgres":
+            for key, val in (("pa_pg_host", self.host.text()), ("pa_pg_port", self.port.value()),
+                             ("pa_pg_db", self.dbname.text()), ("pa_pg_user", self.user.text()),
+                             ("pa_pg_sslmode", self.sslmode.currentData())):
+                self.settings.setValue(key, val)
+            self.settings.setValue("pa_pg_password", self.password.text() if self.remember.isChecked() else "")
+
+    def test(self) -> None:
+        from ..pyarchinit import PyArchInit
+
+        v = self.values()
+        try:
+            pa = PyArchInit.connect(url=v["url"], config_path=v["config"])
+            sites = pa.sites()
+            self.status.setText(f"Connessione riuscita: {len(sites)} siti"
+                                + (f" ({', '.join(str(s['sito']) for s in sites[:4])}...)" if sites else "")
+                                + ("" if pa.db.is_postgres or pa.db.spatialite else
+                                   "  -  mod_spatialite non trovato: lettura ok, scrittura di geometrie no"))
+        except Exception as exc:
+            self.status.setText(f"Connessione non riuscita: {str(exc).splitlines()[0][:200]}")
+
+    def accept(self) -> None:
+        self.remember_settings()
+        super().accept()
+
+
+class SiteDialog(QDialog):
+    """Fields of a new PyArchInit site record (``site_table``)."""
+
+    def __init__(self, parent=None, name: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("Nuovo sito")
+        self.setMinimumWidth(460)
+        form = QFormLayout(self)
+        self.sito = QLineEdit(name)
+        self.nazione = QLineEdit("Italia")
+        self.regione = QLineEdit("")
+        self.provincia = QLineEdit("")
+        self.comune = QLineEdit("")
+        self.definizione = QLineEdit("scavo stratigrafico")
+        self.descrizione = QLineEdit("")
+        for label, w in (("Sito", self.sito), ("Nazione", self.nazione), ("Regione", self.regione),
+                         ("Provincia", self.provincia), ("Comune", self.comune), ("Definizione", self.definizione),
+                         ("Descrizione", self.descrizione)):
+            form.addRow(label, w)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        form.addRow(bb)
+
+    def values(self) -> dict:
+        return {"sito": self.sito.text().strip(), "nazione": self.nazione.text().strip(),
+                "regione": self.regione.text().strip(), "provincia": self.provincia.text().strip(),
+                "comune": self.comune.text().strip(), "definizione_sito": self.definizione.text().strip(),
+                "descrizione": self.descrizione.text().strip()}

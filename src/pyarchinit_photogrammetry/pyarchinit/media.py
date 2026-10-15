@@ -102,7 +102,8 @@ def _save_preview(img: Image.Image, out: str, max_size, dpi) -> None:
 
 def register_media(db, path: str | Path, mediatype: str | None = None, descrizione: str = "",
                    tags: str = "['fotogrammetria']", links: list[tuple[str, int]] | None = None,
-                   copy_to: str | Path | None = None, overwrite: bool = False) -> int:
+                   copy_to: str | Path | None = None, overwrite: bool = False, thumb_dir: str | None = None,
+                   resize_dir: str | None = None) -> int:
     """Register a file as PyArchInit media and link it to entities.
 
     ``links``: ``[(entity_type, id_entity)]`` e.g. ``[("US", 12)]``.
@@ -119,8 +120,8 @@ def register_media(db, path: str | Path, mediatype: str | None = None, descrizio
     if mediatype is None:
         mediatype = "3d_model" if ext in MODEL_EXT else "image"
     cfg = db.config
-    thumb_dir = cfg.thumb_dir if cfg else str(target.parent / "thumbs") + "/"
-    resize_dir = cfg.resize_dir if cfg else str(target.parent / "resize") + "/"
+    thumb_dir = thumb_dir or (cfg.thumb_dir if cfg else str(target.parent / "thumbs") + "/")
+    resize_dir = resize_dir or (cfg.resize_dir if cfg else str(target.parent / "resize") + "/")
     if is_remote(thumb_dir) or is_remote(resize_dir):
         raise NotImplementedError("remote media storage is handled by PyArchInit itself; use a local path")
     existing = db.query("media_table", filepath=str(target))
