@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -186,6 +187,20 @@ def smoke_test(bundle: Path) -> None:
         raise SystemExit(f"doctor failed in the packaged application (exit {r.returncode})")
 
 
+def make_dmg(folder: Path, out: Path, attempts: int = 5) -> None:
+    """``hdiutil create`` with retries: on CI runners it fails now and then with "Resource
+    busy" while the system scans the new volume."""
+    cmd = ["hdiutil", "create", "-volname", NAME, "-srcfolder", str(folder), "-ov", "-format", "UDZO", str(out)]
+    for attempt in range(1, attempts + 1):
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0:
+            return
+        print(f"hdiutil create, attempt {attempt}/{attempts}: {(r.stderr or r.stdout).strip()}", flush=True)
+        out.unlink(missing_ok=True)
+        time.sleep(10 * attempt)
+    raise SystemExit(f"hdiutil create failed {attempts} times")
+
+
 def package(bundle: Path) -> Path:
     ver = version()
     arch = platform.machine().lower().replace("x86_64", "x64").replace("amd64", "x64")
@@ -195,13 +210,14 @@ def package(bundle: Path) -> Path:
         staging = BUILD / "dmg"
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir(parents=True)
-        subprocess.run(["ditto", str(bundle), str(staging / bundle.name)], check=True)
-        os.symlink("/Applications", staging / "Applications")
-        subprocess.run(["hdiutil", "create", "-volname", NAME, "-srcfolder", str(staging), "-ov", "-format",
-                        "UDZO", str(out)], check=True)
-        # the staged copy would stay registered with Launch Services: a second app in Spotlight
-        # and in "Open with" for .ppg files
-        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            subprocess.run(["ditto", str(bundle), str(staging / bundle.name)], check=True)
+            os.symlink("/Applications", staging / "Applications")
+            make_dmg(staging, out)
+        finally:
+            # the staged copy would stay registered with Launch Services: a second app in
+            # Spotlight and in "Open with" for .ppg files
+            shutil.rmtree(staging, ignore_errors=True)
     elif os.name == "nt":
         base = DIST / f"PyArchInit-Photogrammetry-{ver}-windows-{arch}"
         out = Path(shutil.make_archive(str(base), "zip", root_dir=DIST, base_dir=bundle.name))
