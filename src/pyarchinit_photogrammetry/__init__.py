@@ -19,7 +19,10 @@ Quick start::
     chunk.build_orthomosaic()
     doc.save("scavo.ppg")
 """
+from ._env import load_open3d_first as _load_open3d_first
 from ._env import use_bundled_proj_data as _use_bundled_proj_data
+
+_load_open3d_first()  # Open3D's OpenMP runtime must be bound before rasterio/scipy (see _env.py)
 
 _use_bundled_proj_data()  # before anything opens a CRS (see _env.py)
 
@@ -29,7 +32,7 @@ from .core import (ARCHAEO_CLASSES, ASPRS_CLASSES, Camera, Chunk, Document, Mark
 from .core.progress import Cancelled, Progress, print_progress
 from . import demo  # noqa: E402  (ppg.demo.create_demo)
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = ["app", "Document", "Chunk", "Camera", "Sensor", "Marker", "Projection", "Reference", "ScaleBar",
            "PointCloud", "ASPRS_CLASSES", "ARCHAEO_CLASSES", "Progress", "Cancelled", "print_progress", "__version__"]

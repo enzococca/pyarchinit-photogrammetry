@@ -89,7 +89,7 @@ def build_depth_maps(chunk: Chunk, quality: str = "medium", filter_mode: str = "
         pycolmap.patch_match_stereo(str(ws), options=popts)
     elif backend == "openmvs":
         subprocess.run(["InterfaceCOLMAP", "-i", str(ws), "-o", str(ws / "scene.mvs"), "--image-folder",
-                        str(ws / "images")], check=True)
+                        str(ws / "images")], check=True, close_fds=False)
     else:
         raise ValueError(f"unknown dense backend {backend!r}")
     progress(1.0, "Depth maps ready")
@@ -105,7 +105,7 @@ def build_point_cloud(chunk: Chunk, point_colors: bool = True, progress: Progres
         raise RuntimeError("build depth maps first")
     progress(0.0, "Fusing depth maps")
     if info["backend"] == "openmvs":
-        subprocess.run(["DensifyPointCloud", str(ws / "scene.mvs"), "-w", str(ws)], check=True)
+        subprocess.run(["DensifyPointCloud", str(ws / "scene.mvs"), "-w", str(ws)], check=True, close_fds=False)
         pc = PointCloud.load(ws / "scene_dense.ply")
     else:
         fopts = pycolmap.StereoFusionOptions()

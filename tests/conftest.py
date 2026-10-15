@@ -102,3 +102,37 @@ def pa_db(tmp_path, monkeypatch):
     return db
 
 
+
+
+# ---------------------------------------------------------------- exit guard (macOS)
+# After the GUI tests, interpreter finalisation can crash in native destructors (Qt, VTK,
+# Open3D, SpatiaLite loaded in one process: "Segmentation fault ... <no Python frame>")
+# although every test passed. Leave through os._exit once pytest has printed its summary.
+_exit_status = {"code": 0}
+
+
+def pytest_sessionfinish(session, exitstatus):
+    _exit_status["code"] = int(exitstatus)
+
+
+def pytest_unconfigure(config):
+    import os
+    import sys
+
+    if sys.platform != "darwin":
+        return
+    try:
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+    except Exception:
+        app = None
+    if app is None:
+        return
+    app.processEvents()
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    os._exit(_exit_status["code"])

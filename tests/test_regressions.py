@@ -136,7 +136,10 @@ def test_spatialite_before_pycolmap_keeps_jpeg_decoding(tmp_path):
         import pycolmap
         print("OK" if pycolmap.Bitmap.read({str(img)!r}, True) is not None else "FAIL")
     """)
-    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120).stdout
+    # close_fds=False: posix_spawn instead of fork (a fork of this process crashes on macOS once
+    # SpatiaLite and rasterio/PROJ are loaded, see engine/isolate.py)
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120,
+                         close_fds=False).stdout
     if "SKIP" in out:
         pytest.skip("mod_spatialite not available")
     assert "OK" in out, out
@@ -162,5 +165,6 @@ def test_foreign_proj_lib_does_not_break_epsg_lookup(tmp_path):
             "print('OK' if 'Monte Mario' in CRS.from_epsg(3004).to_wkt() else 'FAIL')")
     env = dict(os.environ, PROJ_LIB=str(old))
     env.pop("PROJ_DATA", None)
-    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120)
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120,
+                         close_fds=False)
     assert "OK" in out.stdout, out.stderr[-2000:]
