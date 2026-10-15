@@ -28,7 +28,12 @@ def main(argv: list[str] | None = None) -> int:
     if "--doctor" in argv:
         from ..doctor import main as doctor_main
 
-        return doctor_main()
+        code = doctor_main()
+        if getattr(sys, "frozen", False):  # skip interpreter finalisation: it can crash the packaged app
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(code)
+        return code
     try:
         from PySide6.QtCore import QSettings, QTimer, Qt
         from PySide6.QtWidgets import QApplication
@@ -85,14 +90,20 @@ def main(argv: list[str] | None = None) -> int:
             try:  # libraries the smoke test of the packaged application must find
                 import laspy  # noqa: F401
                 import pyproj  # noqa: F401
+                from rasterio.crs import CRS
 
                 from ..core import crs as _crs  # noqa: F401
 
+                CRS.from_epsg(4326).to_wkt()
+                pyproj.CRS.from_epsg(4326).to_wkt()
                 libs = "ok"
             except Exception as exc:
                 libs = f"missing ({str(exc).splitlines()[0][:120]})"
             print(f"GUI check: {'ok' if ok else 'FAILED'} | window: {win.windowTitle()} | 3D backend: "
                   f"{win.model_view.backend} | vtk: {vtk} | libs: {libs} | log: {log_path}", flush=True)
+            if getattr(sys, "frozen", False):  # see --doctor
+                sys.stderr.flush()
+                os._exit(0 if ok else 2)
             qapp.exit(0 if ok else 2)
 
         QTimer.singleShot(1500, check)

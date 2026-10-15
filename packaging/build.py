@@ -89,6 +89,45 @@ def executable(bundle: Path) -> Path:
     return bundle / NAME
 
 
+def fix_private_dylibs(bundle: Path) -> int:
+    """macOS: make every package load the libraries of its own ``.dylibs`` folder.
+
+    Wheels built with delocate reference their private libraries as
+    ``@loader_path/.dylibs/<name>``; PyInstaller rewrites them to ``@rpath/<name>`` and adds
+    one top-level link per name, so two packages that ship a library with the same name
+    (rasterio and pyproj both have ``libproj.25.*.dylib``, with different exports) end up
+    sharing one copy and fail to import. Rewriting the references back to ``@loader_path``
+    restores the layout of the wheels. Returns the number of patched binaries."""
+    if sys.platform != "darwin":
+        return 0
+    fw = bundle / "Contents" / "Frameworks"
+    patched = 0
+    for pkg in sorted(p for p in fw.iterdir() if p.is_dir()):
+        private = pkg / "__dot__dylibs"
+        if not private.is_dir():
+            continue
+        names = {p.name for p in private.iterdir() if p.suffix == ".dylib"}
+        targets = [p for p in pkg.rglob("*") if p.suffix in (".so", ".dylib") and p.is_file()]
+        for t in targets:
+            out = subprocess.run(["otool", "-L", str(t)], capture_output=True, text=True).stdout
+            deps = [ln.split()[0] for ln in out.splitlines()[1:] if ln.strip().startswith("@rpath/")]
+            deps = [d for d in deps if d[len("@rpath/"):] in names and (t.parent != private or d[len("@rpath/"):] != t.name)]
+            if not deps:
+                continue
+            rel = os.path.relpath(private, t.parent)
+            prefix = "@loader_path/" + ("" if rel == "." else rel + "/")
+            cmd = ["install_name_tool"]
+            for d in deps:
+                cmd += ["-change", d, prefix + d[len("@rpath/"):]]
+            subprocess.run(cmd + [str(t)], check=True, capture_output=True)
+            subprocess.run(["codesign", "--force", "--sign", "-", str(t)], check=True, capture_output=True)
+            patched += 1
+    if patched:
+        subprocess.run(["codesign", "--force", "--sign", "-", "--deep", str(bundle)], check=True, capture_output=True)
+    print(f"private dylib references fixed in {patched} binaries", flush=True)
+    return patched
+
+
 def smoke_test(bundle: Path) -> None:
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen", PPG_RENDERER="software")
     exe = executable(bundle)
@@ -117,9 +156,8 @@ def package(bundle: Path) -> Path:
         subprocess.run(["hdiutil", "create", "-volname", NAME, "-srcfolder", str(staging), "-ov", "-format",
                         "UDZO", str(out)], check=True)
     elif os.name == "nt":
-        out = DIST / f"PyArchInit-Photogrammetry-{ver}-windows-{arch}"
-        shutil.make_archive(str(out), "zip", root_dir=DIST, base_dir=bundle.name)
-        out = out.with_suffix(".zip")
+        base = DIST / f"PyArchInit-Photogrammetry-{ver}-windows-{arch}"
+        out = Path(shutil.make_archive(str(base), "zip", root_dir=DIST, base_dir=bundle.name))
     else:
         out = DIST / f"PyArchInit-Photogrammetry-{ver}-linux-{arch}.tar.gz"
         with tarfile.open(out, "w:gz") as tar:
@@ -135,6 +173,7 @@ def main() -> int:
     args = ap.parse_args()
     render_icons()
     bundle = (DIST / f"{NAME}.app" if sys.platform == "darwin" else DIST / NAME) if args.skip_build else run_pyinstaller()
+    fix_private_dylibs(bundle)
     if not args.no_smoke:
         smoke_test(bundle)
     package(bundle)

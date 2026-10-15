@@ -47,8 +47,10 @@ python packaging/build.py --no-smoke
 * `packaging/launcher.py`: entry point; calls `multiprocessing.freeze_support()` first so the
   isolated worker processes (Poisson reconstruction) work in the frozen application.
 * `packaging/build.py`: renders the icons from `gui/resources/logo.svg`, runs PyInstaller,
-  starts the result with `--check` (offscreen) and `--doctor`, then writes the `.dmg`
-  (`hdiutil`) or the `.zip`.
+  rewrites the references of each package's private libraries back to `@loader_path`
+  (macOS: rasterio and pyproj ship different builds of `libproj` under the same name, and
+  PyInstaller would otherwise make them share one copy), starts the result with `--check`
+  (offscreen) and `--doctor`, then writes the `.dmg` (`hdiutil`) or the `.zip`.
 
 The smoke test opens the main window, renders it and exits with code 0; the build fails
 when the window does not appear.
