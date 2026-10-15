@@ -110,6 +110,7 @@ class RasterView(_ZoomView):
         self.tr = None  # rasterio Affine of the displayed (decimated) array
         self.z = None  # DEM values at display resolution
         self._clicks: list[QPointF] = []
+        self._click_xy: list[tuple[float, float]] = []  # the same points in world coordinates, exact when snapped
         self._rubber: QGraphicsPathItem | None = None
         self.overlays: list = []
         self.layers: dict[str, dict] = {}  # name -> {"kind", "visible", "features": [(item, label_item, attrs)]}
@@ -137,7 +138,7 @@ class RasterView(_ZoomView):
         self.selection, self._sel_marks, self._band, self._band_origin = [], [], None, None  # deleted by clear()
         self._snap_marks, self._snap_cache, self._stroking = {}, None, False
         self.scene().clear()
-        self.overlays, self._clicks, self._rubber = [], [], None
+        self.overlays, self._clicks, self._click_xy, self._rubber = [], [], [], None
         self.layers, self.layer_order = {}, []
         self.layers_changed.emit()
         if had_selection:
@@ -380,7 +381,7 @@ class RasterView(_ZoomView):
         if mode != "select" and self.selection:
             self.clear_selection()
         self.mode = mode
-        self._clicks = []
+        self._clicks, self._click_xy = [], []
         self._stroking = False
         self._show_snap(None, None)
         if self._rubber is not None:
@@ -419,16 +420,23 @@ class RasterView(_ZoomView):
     def snap(self, scene_pos: QPointF):
         """``(position, kind)``: the nearest vertex (preferred) or point on a segment within
         ``snap_px`` screen pixels, ``kind`` "vertex"/"segment"; the position itself otherwise."""
-        if self.tr is None or not (self.snap_vertex or self.snap_segment):
-            return scene_pos, None
+        pos, kind, _xy = self.snap_world(scene_pos)
+        return pos, kind
+
+    def snap_world(self, scene_pos: QPointF):
+        """:meth:`snap` plus the world coordinates of the result: those of the vertex or of the
+        point on the segment exactly (a round trip through the view would move them by a
+        fraction of a nanometre, enough to leave a gap between units that share an edge)."""
         p = np.array(self.world(scene_pos))
+        if self.tr is None or not (self.snap_vertex or self.snap_segment):
+            return scene_pos, None, (float(p[0]), float(p[1]))
         tol = self.snap_px / max(self.transform().m11(), 1e-12) * abs(self.tr.a)  # screen px -> world units
         verts, segs = self._snap_data()
         if self.snap_vertex and len(verts):
             d = np.hypot(*(verts - p).T)
             i = int(np.argmin(d))
             if d[i] <= tol:
-                return self.scene_pt(*verts[i]), "vertex"
+                return self.scene_pt(*verts[i]), "vertex", (float(verts[i][0]), float(verts[i][1]))
         if self.snap_segment and len(segs):
             a, b = segs[:, 0], segs[:, 1]
             near = ((np.minimum(a[:, 0], b[:, 0]) - tol <= p[0]) & (p[0] <= np.maximum(a[:, 0], b[:, 0]) + tol)
@@ -441,8 +449,8 @@ class RasterView(_ZoomView):
                 d = np.hypot(*(q - p).T)
                 i = int(np.argmin(d))
                 if d[i] <= tol:
-                    return self.scene_pt(*q[i]), "segment"
-        return scene_pos, None
+                    return self.scene_pt(*q[i]), "segment", (float(q[i][0]), float(q[i][1]))
+        return scene_pos, None, (float(p[0]), float(p[1]))
 
     def _show_snap(self, pos: QPointF | None, kind: str | None) -> None:
         """A magenta square on a vertex, a circle on a segment."""
@@ -469,9 +477,8 @@ class RasterView(_ZoomView):
         """End of a freehand stroke: the traced polygon, simplified within half a pixel (the
         kept points are original ones, so snapped points stay on their target)."""
         self._stroking = False
-        pts = list(self._clicks)
-        if len(pts) >= 3:
-            xy = np.array([self.world(p) for p in pts])
+        if len(self._click_xy) >= 3:
+            xy = np.array(self._click_xy)
             from shapely.geometry import LineString
 
             tol = 0.5 / max(self.transform().m11(), 1e-12) * abs(self.tr.a)
@@ -613,12 +620,13 @@ class RasterView(_ZoomView):
         x, y = self.world(sp)
         self.mouse_world.emit(x, y, self.elevation(x, y))
         if self.mode in self.DRAW_MODES:
-            snapped, kind = self.snap(sp)
+            snapped, kind, xy = self.snap_world(sp)
             self._show_snap(snapped if kind else None, kind)
             if self._stroking:
                 last = self.mapFromScene(self._clicks[-1])
                 if (ev.position().toPoint() - last).manhattanLength() >= 3:
                     self._clicks.append(snapped)
+                    self._click_xy.append(xy)
                     self._update_rubber()
             elif self._clicks:
                 self._update_rubber(snapped)
@@ -668,10 +676,11 @@ class RasterView(_ZoomView):
             elif ev.button() == Qt.MouseButton.RightButton and self.selection:
                 self._selection_menu(ev.globalPosition().toPoint())
             return
+        xy = self.world(sp)
         if self.mode in self.DRAW_MODES and ev.button() != Qt.MouseButton.RightButton:
-            sp = self.snap(sp)[0]
+            sp, _kind, xy = self.snap_world(sp)
         if self.mode == "point":
-            x, y = self.world(sp)
+            x, y = xy
             ok = ev.button() != Qt.MouseButton.RightButton
             z = self.elevation(x, y)
             self.add_point(x, y, "#30ff60" if ok else "#ff3030", layer="Punti",
@@ -682,14 +691,15 @@ class RasterView(_ZoomView):
             self.set_mode(self.mode)
             return
         if self.mode == "polygon" and self.freehand:  # start a stroke; release closes it
-            self._clicks = [sp]
+            self._clicks, self._click_xy = [sp], [xy]
             self._stroking = True
             self._update_rubber()
             return
         self._clicks.append(sp)
+        self._click_xy.append(xy)
         self._update_rubber()
         if self.mode in ("line", "measure") and len(self._clicks) == 2:
-            a, b = (np.array(self.world(p)) for p in self._clicks)
+            a, b = (np.array(p) for p in self._click_xy)
             if self.mode == "line":
                 self.line_finished.emit(a, b)
             else:
@@ -701,8 +711,8 @@ class RasterView(_ZoomView):
             self.set_mode(self.mode)
 
     def mouseDoubleClickEvent(self, ev) -> None:
-        if self.mode == "polygon" and len(self._clicks) >= 3:
-            xy = np.array([self.world(p) for p in self._clicks])
+        if self.mode == "polygon" and len(self._click_xy) >= 3:
+            xy = np.array(self._click_xy)
             self.set_mode("polygon")
             self.polygon_finished.emit(xy)
         else:

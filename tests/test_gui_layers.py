@@ -384,8 +384,8 @@ def test_freehand_and_snapping(window, qapp, monkeypatch):
     assert v._snap_marks["vertex"].isVisible()
     QTest.mouseClick(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, vp(1.604, 1.797))
     QTest.mouseClick(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, vp(1.597, 1.5))
-    c = [v.world(p) for p in v._clicks]
-    assert np.allclose(c[0], [x0 + 1.6, y0 + 1.8], atol=1e-9) and abs(c[1][0] - (x0 + 1.6)) < 1e-9
+    c = v._click_xy
+    assert c[0] == (x0 + 1.6, y0 + 1.8) and c[1][0] == x0 + 1.6  # exactly the vertex, exactly on the edge
     w.a_snap_vertex.setChecked(False)  # segments only: the corner is no longer preferred
     assert not v.snap_vertex and v.snap_segment
     w.a_snap_vertex.setChecked(True)
@@ -395,6 +395,8 @@ def test_freehand_and_snapping(window, qapp, monkeypatch):
     w.set_draw_mode("polygon")
     stroke([(1.6 + 0.004 * np.sin(k), 1.25 + 0.5 * k / 30) for k in range(31)] + [(1.9, 1.75), (1.9, 1.25)])
     g = w.units[-1].geometry
+    edge = [pt for pt in g.exterior.coords if abs(pt[0] - (x0 + 1.6)) < 1e-6]
+    assert len(edge) >= 2 and all(pt[0] == x0 + 1.6 for pt in edge)  # snapped coordinates kept exactly
     assert g.intersection(w.units[0].geometry).area < 1e-12
     assert w.units[0].geometry.union(g).geom_type == "Polygon"
     assert w.settings.value("draw/snap") in ("true", True) and w.settings.value("draw/freehand") in ("true", True)
