@@ -32,8 +32,7 @@ class Scene:
         h, w = self.heights.shape
         col = np.clip(x_local / self.texel, 0, w - 1.001)
         row = np.clip((self.size[1] - y_local) / self.texel, 0, h - 1.001)
-        return cv2.remap(self.heights.astype(np.float32), col.astype(np.float32).reshape(-1, 1),
-                         row.astype(np.float32).reshape(-1, 1), cv2.INTER_LINEAR).ravel()
+        return _sample(self.heights.astype(np.float32), np.ravel(col), np.ravel(row)).ravel()
 
     def world_height(self, X: np.ndarray, Y: np.ndarray) -> np.ndarray:
         return self.height_at(np.asarray(X) - self.origin[0], np.asarray(Y) - self.origin[1]) + self.origin[2]

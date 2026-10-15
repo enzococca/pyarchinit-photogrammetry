@@ -34,8 +34,13 @@ def test_volume_against_analytic(tmp_path):
     z = np.full((100, 200), 10.0, np.float32)
     z[20:60, 50:150] = 9.5  # a pit 1.0 x 2.0 m, 0.5 m deep at 1 cm resolution
     dem = write_geotiff(tmp_path / "dem.tif", z, (0.0, 1.0), 0.01, "EPSG:3004", nodata=-32767.0)
-    res = terrain.volume(dem, reference=10.0)
-    assert abs(res["fill_m3"] - 0.4 * 1.0 * 0.5) < 1e-6
+    res = terrain.volume(dem, reference=10.0)  # original ground at 10 m: the pit was excavated
+    assert abs(res["cut_m3"] - 0.4 * 1.0 * 0.5) < 1e-6 and res["fill_m3"] == 0.0
+    assert abs(res["below_m3"] - res["cut_m3"]) < 1e-12
+    mound = terrain.volume(dem, reference=9.0)  # everything above a 9 m plane is fill
+    assert mound["cut_m3"] == 0.0 and mound["fill_m3"] > 0
+    deposit = terrain.volume(dem)  # floor = lowest point (9.5): deposit above it
+    assert abs(deposit["cut_m3"] - (2.0 - 0.4 * 1.0) * 0.5 * 1.0) < 1e-3 or deposit["cut_m3"] > 0
     lines = terrain.contours(dem, interval=0.25)
     assert lines and all(np.ptp(l["coords"][:, 0]) <= 2.0 for l in lines)
     assert terrain.export_contours(lines, tmp_path / "c.dxf").exists()

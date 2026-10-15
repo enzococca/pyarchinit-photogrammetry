@@ -56,18 +56,23 @@ def export_contours(lines: list[dict], path: str | Path, crs: str | None = None)
 
 def volume(dem_path: str | Path, reference: str | Path | float | None = None, polygon=None,
            difference_path: str | Path | None = None) -> dict:
-    """Cut/fill between a DEM and a reference (another DEM on the same grid, a
-    horizontal plane at a given elevation, or the lowest point of the polygon).
+    """Excavated and filled volume between the current surface (``dem_path``) and a reference.
+
+    ``reference``: the surface *before* the work (another DEM, resampled onto this grid)
+    or a horizontal plane at a given elevation (the original ground level). Then
+    ``cut_m3`` ("scavo") is the volume removed, where the current surface lies *below* the
+    reference, and ``fill_m3`` ("riporto") the volume added, where it lies above.
+    ``reference=None`` uses the lowest point inside the area as a floor: ``cut_m3`` is the
+    deposit standing above it (what would be excavated to reach that level), fill is 0.
 
     ``polygon`` (shapely geometry in world coordinates) restricts the computation.
-    Positive difference = material above the reference (to be excavated, "scavo").
+    ``above_m3``/``below_m3`` give the raw volumes of the surface above/below the reference.
     """
     z, tr, _, res = read_dem(Path(dem_path))
-    area_mask = np.isfinite(z)
+    weight = np.isfinite(z).astype(np.float64)
     if polygon is not None:
-        from rasterio.features import geometry_mask
-
-        area_mask &= geometry_mask([polygon], out_shape=z.shape, transform=tr, invert=True)
+        weight *= _coverage(polygon, z.shape, tr)
+    area_mask = weight > 0
     if not area_mask.any():
         raise ValueError("the polygon does not overlap the DEM")
     if reference is None:
@@ -78,15 +83,43 @@ def volume(dem_path: str | Path, reference: str | Path | float | None = None, po
         ref = _resample_to(Path(reference), z.shape, tr)
     mask = area_mask & np.isfinite(ref)
     diff = np.where(mask, z - ref, np.nan)
+    w = np.where(mask, weight, 0.0)  # fraction of each cell inside the polygon
     cell = abs(tr.a * tr.e)
-    above = np.nansum(np.clip(diff, 0, None)) * cell
-    below = -np.nansum(np.clip(diff, None, 0)) * cell
+    above = float(np.nansum(np.clip(diff, 0, None) * w) * cell)
+    below = float(-np.nansum(np.clip(diff, None, 0) * w) * cell)
     if difference_path:
         write_geotiff(Path(difference_path), np.where(mask, diff, NODATA).astype(np.float32), (tr.c, tr.f), res,
                       None, nodata=NODATA)
-    return {"area_m2": float(mask.sum() * cell), "cut_m3": float(above), "fill_m3": float(below),
-            "net_m3": float(above - below), "quota_min": float(np.nanmin(z[mask])),
+    if reference is None:  # deposit above the floor of the area
+        cut, fill = above, 0.0
+    else:  # the reference is the earlier surface: removed where we are now below it
+        cut, fill = below, above
+    return {"area_m2": float(w.sum() * cell), "cut_m3": cut, "fill_m3": fill, "net_m3": cut - fill,
+            "above_m3": above, "below_m3": below, "quota_min": float(np.nanmin(z[mask])),
             "quota_max": float(np.nanmax(z[mask]))}
+
+
+def _coverage(polygon, shape, tr, sub: int = 8) -> np.ndarray:
+    """Fraction (0..1) of each DEM cell covered by ``polygon``, from a ``sub`` x ``sub``
+    supersampled rasterisation (cell-centre rasterisation loses a strip along the edges)."""
+    from rasterio.features import geometry_mask
+    from rasterio.transform import Affine
+
+    minx, miny, maxx, maxy = polygon.bounds
+    inv = ~tr
+    c0, r0 = inv * (minx, maxy)
+    c1, r1 = inv * (maxx, miny)
+    ca, cb = sorted((c0, c1))
+    ra, rb = sorted((r0, r1))
+    ca, ra = max(int(np.floor(ca)) - 1, 0), max(int(np.floor(ra)) - 1, 0)
+    cb, rb = min(int(np.ceil(cb)) + 1, shape[1]), min(int(np.ceil(rb)) + 1, shape[0])
+    out = np.zeros(shape, np.float64)
+    if cb <= ca or rb <= ra:
+        return out
+    fine_tr = tr * Affine.translation(ca, ra) * Affine.scale(1.0 / sub)
+    fine = geometry_mask([polygon], out_shape=((rb - ra) * sub, (cb - ca) * sub), transform=fine_tr, invert=True)
+    out[ra:rb, ca:cb] = fine.reshape(rb - ra, sub, cb - ca, sub).mean(axis=(1, 3))
+    return out
 
 
 def _resample_to(path: Path, shape, tr) -> np.ndarray:
