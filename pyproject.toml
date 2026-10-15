@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyarchinit-photogrammetry"
-version = "0.3.0"
+version = "0.4.0"
 description = "Open-source photogrammetry engine for archaeology and BIM, integrated with PyArchInit"
 readme = "README.md"
 license = "GPL-2.0-or-later"
@@ -31,7 +31,7 @@ dependencies = [
     "trimesh>=4.0",
     "contourpy>=1.1",
     "ezdxf>=1.1",
-    "laspy>=2.4",
+    "laspy[lazrs]>=2.4",
     "sqlalchemy>=2.0",
     "typer>=0.9",
 ]

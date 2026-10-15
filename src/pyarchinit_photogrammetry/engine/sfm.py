@@ -209,6 +209,76 @@ def import_reconstruction(chunk: Chunk, rec) -> int:
     return n
 
 
+def _g(v) -> str:
+    return format(float(v), ".17g")
+
+
+def write_reconstruction_from_chunk(chunk: Chunk, max_points: int = 60000, max_obs_per_image: int = 4000) -> Path:
+    """COLMAP model of a chunk whose poses come from elsewhere (Metashape, Photo3D...):
+    cameras from the sensors, images with the camera poses, and the tie points as 3D points
+    observed by every camera that sees them inside its frame (visibility by projection).
+    Lets the dense step run without aligning again. Returns the model folder."""
+    import pycolmap
+
+    root, names = image_root_and_names(chunk)
+    chunk.meta.setdefault("sfm", {})["image_root"] = str(root)
+    chunk.meta["sfm"]["names"] = {str(k): v for k, v in names.items()}
+    out = _sfm_dir(chunk) / "model"
+    shutil.rmtree(out, ignore_errors=True)
+    txt = out.parent / "model_txt"
+    shutil.rmtree(txt, ignore_errors=True)
+    txt.mkdir(parents=True)
+    cams = [c for c in chunk.cameras if c.aligned and c.key in names]
+    if not cams:
+        raise RuntimeError("no aligned camera to write")
+    sensor_ids = {}
+    with open(txt / "cameras.txt", "w") as f:
+        for i, key in enumerate(sorted({c.sensor_key for c in cams}), 1):
+            s = chunk.sensors[key]
+            sensor_ids[key] = i
+            f.write(f"{i} {s.model} {int(s.width)} {int(s.height)} " + " ".join(_g(v) for v in s.params) + "\n")
+    pts = chunk.tie_points.xyz if chunk.tie_points is not None else np.zeros((0, 3))
+    rgb = chunk.tie_points.rgb if chunk.tie_points is not None and chunk.tie_points.rgb is not None else None
+    if len(pts) > max_points:
+        idx = np.random.default_rng(0).choice(len(pts), max_points, replace=False)
+        pts = pts[idx]
+        rgb = rgb[idx] if rgb is not None else None
+    tracks: dict[int, list[tuple[int, int]]] = {}
+    image_lines = []
+    for img_id, c in enumerate(cams, 1):
+        s = chunk.sensors[c.sensor_key]
+        cfw = np.linalg.inv(c.transform)
+        obs = []
+        if len(pts):
+            px, depth = c.project(s, pts)
+            ok = np.nonzero((depth > 0) & (px[:, 0] >= 0) & (px[:, 1] >= 0) & (px[:, 0] < s.width) & (px[:, 1] < s.height))[0]
+            if len(ok) > max_obs_per_image:
+                ok = np.random.default_rng(img_id).choice(ok, max_obs_per_image, replace=False)
+            for j, pid in enumerate(ok):
+                obs.append((px[pid, 0], px[pid, 1], int(pid) + 1))
+                tracks.setdefault(int(pid) + 1, []).append((img_id, j))
+        q = pycolmap.Rotation3d(cfw[:3, :3]).quat  # x, y, z, w
+        t = cfw[:3, 3]
+        image_lines.append(f"{img_id} " + " ".join(_g(v) for v in (q[3], q[0], q[1], q[2], t[0], t[1], t[2]))
+                           + f" {sensor_ids[c.sensor_key]} {names[c.key]}\n"
+                           + " ".join(f"{_g(x)} {_g(y)} {p}" for x, y, p in obs) + "\n")
+    with open(txt / "images.txt", "w") as f:
+        f.writelines(image_lines)
+    with open(txt / "points3D.txt", "w") as f:
+        for pid, tr in tracks.items():
+            if len(tr) < 2:
+                continue
+            x, y, z = pts[pid - 1]
+            r, g, b = (rgb[pid - 1] if rgb is not None else (128, 128, 128))
+            f.write(f"{pid} {_g(x)} {_g(y)} {_g(z)} {int(r)} {int(g)} {int(b)} 0.5 " + " ".join(f"{i} {j}" for i, j in tr) + "\n")
+    rec = pycolmap.Reconstruction()
+    rec.read_text(str(txt))
+    out.mkdir(parents=True)
+    rec.write(str(out))
+    chunk._set_product("reconstruction", out)
+    return out
+
+
 def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, progress: Progress | None = None) -> float:
     import pycolmap
 
