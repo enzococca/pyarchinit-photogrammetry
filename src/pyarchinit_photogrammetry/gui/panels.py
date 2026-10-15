@@ -667,7 +667,10 @@ LAYER_ICONS = {"polygon": "polygon", "line": "line", "point": "point"}
 
 class LayersPane(QWidget):
     """Layers drawn on the orthomosaic/DEM view: show/hide, zoom, remove, attributes of the
-    clicked feature."""
+    clicked feature (editable: double click a value, Enter to confirm)."""
+
+    attribute_edited = Signal(str, int, str, object)  # layer, feature index, field, new value
+    READ_ONLY = {"layer", "x", "y", "area_m2", "lunghezza_m", "z", "svg", "dxf"}
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -694,11 +697,18 @@ class LayersPane(QWidget):
         self.attrs.setHorizontalHeaderLabels(["Campo", "Valore"])
         self.attrs.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.attrs.verticalHeader().setVisible(False)
-        self.attrs.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.attrs.setMaximumHeight(170)
+        self.attrs.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked
+                                   | QAbstractItemView.EditTrigger.EditKeyPressed
+                                   | QAbstractItemView.EditTrigger.AnyKeyPressed)
+        self.attrs.setMaximumHeight(200)
+        self.attrs.itemChanged.connect(self._attr_changed)
         lay.addWidget(self.attrs)
+        hint = QLabel("Doppio clic su un valore per modificarlo")
+        hint.setObjectName("pageSubtitle")
+        lay.addWidget(hint)
         self.view = None
         self._filling = False
+        self._current: tuple[str, int] | None = None  # layer, feature index shown in the table
         self.tree.itemChanged.connect(self._changed)
         self.tree.itemDoubleClicked.connect(lambda it, _c: self._zoom_item(it))
         self.tree.itemClicked.connect(self._clicked)
@@ -729,7 +739,8 @@ class LayersPane(QWidget):
             top.setData(0, Qt.ItemDataRole.UserRole, (name, -1))
             self.tree.addTopLevelItem(top)
             for i, (_item, _label, attrs) in enumerate(lay["features"]):
-                text = str(attrs.get("etichetta") or "") or ", ".join(f"{k} {v}" for k, v in list(attrs.items())[:2])
+                shown = [(k, v) for k, v in attrs.items() if not str(k).startswith("_")]
+                text = str(attrs.get("etichetta") or "") or ", ".join(f"{k} {v}" for k, v in shown[:2])
                 child = QTreeWidgetItem([text or f"elemento {i + 1}"])
                 child.setData(0, Qt.ItemDataRole.UserRole, (name, i))
                 top.addChild(child)
@@ -764,7 +775,7 @@ class LayersPane(QWidget):
             return
         name, idx = item.data(0, Qt.ItemDataRole.UserRole)
         if idx >= 0:
-            self.show_attributes(name, self.view.layers[name]["features"][idx][2])
+            self.show_attributes(name, {**self.view.layers[name]["features"][idx][2], "_index": idx})
 
     def _remove_current(self) -> None:
         item = self.tree.currentItem()
@@ -774,11 +785,44 @@ class LayersPane(QWidget):
         self.view.remove_layer(name)
 
     def show_attributes(self, layer: str, attrs: dict) -> None:
-        rows = [("layer", layer)] + [(k, v) for k, v in attrs.items() if v not in (None, "")]
+        idx = int(attrs.get("_index", -1))
+        self._current = (layer, idx) if idx >= 0 else None
+        rows = [("layer", layer)] + [(k, v) for k, v in attrs.items() if not str(k).startswith("_")]
+        self._filling = True
         self.attrs.setRowCount(len(rows))
         for r, (k, v) in enumerate(rows):
-            self.attrs.setItem(r, 0, QTableWidgetItem(str(k)))
-            self.attrs.setItem(r, 1, QTableWidgetItem(str(v)))
+            key = QTableWidgetItem(str(k))
+            key.setFlags(key.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            val = QTableWidgetItem("" if v is None else str(v))
+            if k in self.READ_ONLY or self._current is None:
+                val.setFlags(val.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                val.setForeground(QColor(PALETTE["grey"]))
+            self.attrs.setItem(r, 0, key)
+            self.attrs.setItem(r, 1, val)
+        self._filling = False
+
+    def _attr_changed(self, item) -> None:
+        if self._filling or item.column() != 1 or self._current is None or self.view is None:
+            return
+        key = self.attrs.item(item.row(), 0).text()
+        layer, idx = self._current
+        old = self.view.features(layer)[idx].get(key) if idx < len(self.view.features(layer)) else None
+        value = _typed(item.text(), old)
+        self.view.set_feature_attribute(layer, idx, key, value)
+        self.attribute_edited.emit(layer, idx, key, value)
+
+
+def _typed(text: str, old):
+    """Keep numbers numeric when the field was numeric."""
+    text = text.strip()
+    if isinstance(old, bool):
+        return text.lower() in ("1", "true", "si", "sì", "vero", "yes")
+    if isinstance(old, (int, float)) and not isinstance(old, bool):
+        try:
+            return type(old)(float(text.replace(",", "."))) if isinstance(old, float) else int(float(text.replace(",", ".")))
+        except ValueError:
+            return old
+    return text
 
 
 # ---------------------------------------------------------------- sections

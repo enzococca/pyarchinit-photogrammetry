@@ -185,7 +185,7 @@ class RasterView(_ZoomView):
 
     def _register(self, layer: str, kind: str, item, label_item, attrs: dict | None) -> None:
         lay = self._layer(layer, kind)
-        attrs = dict(attrs or {})
+        attrs = dict(attrs or {})  # the same dict is shared with the item: edits are visible everywhere
         item.setData(0, layer)
         item.setData(1, attrs)
         lay["features"].append((item, label_item, attrs))
@@ -213,7 +213,8 @@ class RasterView(_ZoomView):
             t.setFlag(t.GraphicsItemFlag.ItemIgnoresTransformations)
             t.setPos(poly.boundingRect().center())
             self.scene().addItem(t)
-        self._register(layer, "polygon", item, t, {"etichetta": label, **(attrs or {})})
+        self._register(layer, "polygon", item, t, {"etichetta": label, **(attrs or {}),
+                                                     "_geom": ("Polygon", [[float(x), float(y)] for x, y in xy])})
         return item
 
     def add_line(self, xy, color: str = "#ffd000", label: str = "", layer: str = "Linee", attrs: dict | None = None,
@@ -231,7 +232,8 @@ class RasterView(_ZoomView):
             t.setFlag(t.GraphicsItemFlag.ItemIgnoresTransformations)
             t.setPos(pts[0])
             self.scene().addItem(t)
-        self._register(layer, "line", item, t, {"etichetta": label, **(attrs or {})})
+        self._register(layer, "line", item, t, {"etichetta": label, **(attrs or {}),
+                                                  "_geom": ("LineString", [[float(x), float(y)] for x, y in xy])})
         return item
 
     def add_point(self, x: float, y: float, color: str = "#30ff60", label: str = "", layer: str = "Punti",
@@ -250,8 +252,26 @@ class RasterView(_ZoomView):
             t.setPos(self.scene_pt(x, y))
             self.scene().addItem(t)
         self._register(layer, "point", mark, t, {"etichetta": label, "x": round(x, 3), "y": round(y, 3),
-                                                   **(attrs or {})})
+                                                   **(attrs or {}), "_geom": ("Point", [float(x), float(y)])})
         return mark
+
+    def set_feature_attribute(self, name: str, index: int, key: str, value) -> dict | None:
+        """Change one attribute of a feature; ``etichetta`` also changes the label on the map."""
+        lay = self.layers.get(name)
+        if lay is None or not 0 <= index < len(lay["features"]):
+            return None
+        item, label_item, attrs = lay["features"][index]
+        attrs[key] = value
+        item.setData(1, attrs)
+        if key == "etichetta" and label_item is not None:
+            label_item.setText(str(value))
+        self.layers_changed.emit()
+        return attrs
+
+    def features(self, name: str) -> list[dict]:
+        """Attribute dicts (with the hidden ``_geom``) of a layer, in drawing order."""
+        lay = self.layers.get(name)
+        return [attrs for _i, _l, attrs in lay["features"]] if lay else []
 
     def set_layer_visible(self, name: str, visible: bool) -> None:
         lay = self.layers.get(name)
@@ -306,7 +326,11 @@ class RasterView(_ZoomView):
         for it in self.scene().items(area):
             layer = it.data(0)
             if layer and it.isVisible():
-                return layer, dict(it.data(1) or {})
+                lay = self.layers.get(layer, {"features": []})
+                idx = next((i for i, f in enumerate(lay["features"]) if f[0] is it), -1)
+                attrs = dict(it.data(1) or {})
+                attrs["_index"] = idx
+                return layer, attrs
         return None
 
     def clear_overlays(self) -> None:

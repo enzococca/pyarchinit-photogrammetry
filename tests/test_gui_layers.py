@@ -146,3 +146,27 @@ def test_demo_database_large_and_publish_dialog_site_creation(qapp, tmp_path):
     assert dlg.site.isEditable() and dlg.site.count() == 3
     assert pa.ensure_site("Nuovo sito", comune="Benevento") == 4 and pa.site_exists("Nuovo sito")
     assert pa.ensure_site("Nuovo sito") == 4  # existing: same id, no duplicate
+
+
+def test_attribute_editing_updates_unit_and_pending(window, qapp):
+    from shapely.geometry import box
+
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+
+    w = window
+    u = UnitPolygon(box(2480001.2, 4500001.2, 2480001.8, 4500001.6), us="5", area="1", tipo="US",
+                    attributes={"gid": 42})
+    w.units = [u]
+    w._draw_unit(u, 0, layer="US da PyArchInit - X")
+    pane = w.layers_pane
+    feats = w.ortho_view.features("US da PyArchInit - X")
+    pane.show_attributes("US da PyArchInit - X", {**feats[0], "_index": 0})
+    row = next(r for r in range(pane.attrs.rowCount()) if pane.attrs.item(r, 0).text() == "us")
+    pane.attrs.item(row, 1).setText("12")  # as if typed in the table
+    qapp.processEvents()
+    assert u.us == "12" and feats[0]["etichetta"] == "US 12"
+    assert 42 in w.pa_pending and not w.b_pa_save.isHidden()  # the pane tab itself may be hidden
+    area_row = next(r for r in range(pane.attrs.rowCount()) if pane.attrs.item(r, 0).text() == "area_m2")
+    from PySide6.QtCore import Qt
+
+    assert not (pane.attrs.item(area_row, 1).flags() & Qt.ItemFlag.ItemIsEditable)  # computed field

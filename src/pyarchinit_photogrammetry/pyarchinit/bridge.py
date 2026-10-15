@@ -250,6 +250,19 @@ class PyArchInit:
                     u.geometry.wkt, source_srid=crs_mod.epsg_code(crs), multi=True))
         return gids
 
+    def update_unit(self, gid: int, **fields) -> int:
+        """Change the attributes of a polygon already in ``pyunitastratigrafiche`` (``us``,
+        ``area``, ``tipo``, or any column name). Returns the number of rows updated."""
+        names = {"us": "us_s", "area": "area_s", "tipo": "unita_tipo_s", "sito": "scavo_s"}
+        cols = self.db.columns("pyunitastratigrafiche")
+        values = {names.get(k, k): (None if v is None else str(v)) for k, v in fields.items()}
+        values = {k: v for k, v in values.items() if k in cols and k not in ("gid", "the_geom")}
+        if not values:
+            return 0
+        t = self.db.table("pyunitastratigrafiche")
+        with self.db.begin() as conn:
+            return conn.execute(t.update().where(t.c.gid == int(gid)).values(**values)).rowcount
+
     def publish_elevations(self, chunk, sito: str, area: str, us: str, points_xy, unita_tipo: str = "US",
                            disegnatore: str = "") -> list[int]:
         """Spot heights (``pyarchinit_quote``) sampled on the DEM at the given world XY points."""
