@@ -17,6 +17,20 @@ def test_alignment_and_georeferencing(processed):
     assert report["control_rmse"] < 0.002  # 2 mm
 
 
+def test_alignment_with_square_pixels(processed):
+    """Photos are aligned with one focal length (two can drift apart, see engine/sfm.py);
+    the sensor keeps its OPENCV model, also in the saved reconstruction."""
+    from pyarchinit_photogrammetry.engine.sfm import load_reconstruction
+
+    _doc, ch, _ = processed
+    (sensor,) = ch.sensors.values()
+    fx, fy, _cx, _cy, k1, _k2, p1, p2 = sensor.params
+    assert sensor.model == "OPENCV" and fx == fy and p1 == p2 == 0.0
+    assert abs(fx / 1000 - 1) < 0.005 and abs(k1 + 0.04) < 0.005  # the synthetic camera
+    (cam,) = load_reconstruction(ch).cameras.values()
+    assert cam.model.name == "OPENCV" and list(cam.params) == sensor.params
+
+
 def test_checkpoints(processed):
     doc, ch, _ = processed
     # use two targets as independent check points

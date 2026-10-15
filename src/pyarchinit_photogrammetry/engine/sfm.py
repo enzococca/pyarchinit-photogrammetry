@@ -3,6 +3,13 @@
 Photos are registered in a COLMAP database inside ``<chunk>/sfm``; the best
 (largest) reconstruction is kept in ``<chunk>/sfm/model`` and imported into
 the chunk (camera poses, refined intrinsics, tie points).
+
+Photos are aligned with square pixels (one focal length) unless their sensor carries a
+calibration that needs two: self-calibrating ``fx`` and ``fy`` separately can end in a
+degenerate solution (on the turntable test scene, 1 alignment in 6 converged to
+fy = 0.3 x the true focal length, with a folded camera ring and a wrong scale). The
+result is written back in the model of the sensor (``OPENCV`` with fx = fy and no
+tangential distortion); *Optimize cameras* refines every parameter afterwards.
 """
 from __future__ import annotations
 
@@ -32,6 +39,48 @@ def set_engine_verbosity(verbose: bool = False) -> None:
 
 
 set_engine_verbosity()
+
+
+def mapping_camera(sensor) -> tuple[str, list[float]]:
+    """COLMAP model and parameters used to align the photos of ``sensor``: a single focal
+    length (``RADIAL`` for ``OPENCV``, ``SIMPLE_PINHOLE`` for ``PINHOLE``) unless the
+    sensor has fx != fy or tangential distortion, which only a calibration can give."""
+    p = [float(v) for v in sensor.params]
+    square = sensor.model in ("OPENCV", "PINHOLE") and abs(p[0] - p[1]) <= 1e-9 * abs(p[0])
+    if square and sensor.model == "OPENCV" and p[6] == 0.0 and p[7] == 0.0:
+        return "RADIAL", [p[0], p[2], p[3], p[4], p[5]]
+    if square and sensor.model == "PINHOLE":
+        return "SIMPLE_PINHOLE", [p[0], p[2], p[3]]
+    return sensor.model, p
+
+
+def sensor_model_params(model: str, params, sensor_model: str) -> tuple[str, list[float]]:
+    """The parameters of a camera aligned with :func:`mapping_camera` in the model of its
+    sensor (the two describe the same projection)."""
+    p = [float(v) for v in params]
+    if model == "RADIAL" and sensor_model == "OPENCV":
+        return "OPENCV", [p[0], p[0], p[1], p[2], p[3], p[4], 0.0, 0.0]
+    if model == "SIMPLE_PINHOLE" and sensor_model == "PINHOLE":
+        return "PINHOLE", [p[0], p[0], p[1], p[2]]
+    return model, p
+
+
+def _restore_sensor_models(chunk: Chunk, rec) -> None:
+    """Cameras of a reconstruction aligned with square pixels back to their sensor model."""
+    import pycolmap
+
+    names = {v: int(k) for k, v in chunk.meta["sfm"]["names"].items()}
+    models: dict[int, str] = {}
+    for image in rec.images.values():
+        key = names.get(image.name)
+        if key is not None:
+            models[image.camera_id] = chunk.sensors[chunk.camera(key).sensor_key].model
+    for cid, sensor_model in models.items():
+        cam = rec.cameras[cid]
+        model, params = sensor_model_params(cam.model.name, cam.params, sensor_model)
+        if model != cam.model.name:
+            cam.model = getattr(pycolmap.CameraModelId, model)
+            cam.params = params
 
 
 def _sfm_dir(chunk: Chunk) -> Path:
@@ -98,8 +147,9 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
         ext.max_image_size = int(max(sensor.width, sensor.height) / downscale)
         ext.sift.max_num_features = int(keypoint_limit)
         reader = pycolmap.ImageReaderOptions()
-        reader.camera_model = sensor.model
-        reader.camera_params = ",".join(f"{p:.10g}" for p in sensor.params)
+        model, params = mapping_camera(sensor)
+        reader.camera_model = model
+        reader.camera_params = ",".join(f"{p:.10g}" for p in params)
         pycolmap.extract_features(str(db_path), str(root), image_names=image_names,
                                   camera_mode=pycolmap.CameraMode.SINGLE, reader_options=reader,
                                   extraction_options=ext)
@@ -155,6 +205,7 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None) -> int:
     if not recs:
         raise RuntimeError("alignment failed: no reconstruction could be initialised")
     best = max(recs.values(), key=lambda r: r.num_reg_images())
+    _restore_sensor_models(chunk, best)
     model_dir = work / "model"
     shutil.rmtree(model_dir, ignore_errors=True)
     model_dir.mkdir()

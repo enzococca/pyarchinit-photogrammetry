@@ -171,3 +171,22 @@ def test_foreign_proj_lib_does_not_break_epsg_lookup(tmp_path):
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120,
                          close_fds=False)
     assert "OK" in out.stdout, out.stderr[-2000:]
+
+
+def test_mapping_camera_has_square_pixels_unless_calibrated():
+    from pyarchinit_photogrammetry.core.camera import Sensor
+    from pyarchinit_photogrammetry.engine.sfm import mapping_camera, sensor_model_params
+
+    s = Sensor(key=0, label="c", width=1200, height=900)  # OPENCV, fx = fy, no distortion
+    model, params = mapping_camera(s)
+    assert model == "RADIAL" and params == [1440.0, 600.0, 450.0, 0.0, 0.0]
+    assert sensor_model_params("RADIAL", [1100.0, 601.0, 449.0, 0.01, -0.002], "OPENCV") == (
+        "OPENCV", [1100.0, 1100.0, 601.0, 449.0, 0.01, -0.002, 0.0, 0.0])
+    pin = Sensor(key=1, label="p", width=1200, height=900, model="PINHOLE")
+    assert mapping_camera(pin)[0] == "SIMPLE_PINHOLE"
+    assert sensor_model_params("SIMPLE_PINHOLE", [900.0, 600.0, 450.0], "PINHOLE") == (
+        "PINHOLE", [900.0, 900.0, 600.0, 450.0])
+    for params in ([1100.0, 1101.0, 600.0, 450.0, 0, 0, 0, 0],  # a calibration: kept as it is
+                   [1100.0, 1100.0, 600.0, 450.0, 0, 0, 1e-4, 0]):
+        cal = Sensor(key=2, label="k", width=1200, height=900, params=params)
+        assert mapping_camera(cal) == ("OPENCV", [float(v) for v in params])

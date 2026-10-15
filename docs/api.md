@@ -19,7 +19,7 @@ import pyarchinit_photogrammetry as ppg
 | `add_photos(paths, recursive=False)` | files or folders; sensors grouped by body, lens and resolution; EXIF GPS becomes camera reference |
 | `detect_markers(target_type="aruco_4x4_50")` | creates markers `target <code>` with projections |
 | `match_photos(quality, keypoint_limit, pair_selection)` | quality: ultra/high/medium/low/lowest; pairs: auto/exhaustive/sequential/reference |
-| `align_cameras()` | resets the transform; re-georeferences automatically when references exist |
+| `align_cameras()` | resets the transform; re-georeferences automatically when references exist. Photos are aligned with one focal length (square pixels): fitting fx and fy separately can drift into a degenerate solution. The result stays in the sensor model (`OPENCV` with fx = fy, no tangential distortion); a sensor calibrated with fx != fy or tangential distortion is aligned as it is, and `optimize_cameras()` refines every parameter |
 | `optimize_cameras(fit_principal_point=False)` | bundle adjustment, returns the reprojection error (px) |
 | `import_reference(csv, crs, columns="nxyz")`, `export_reference(csv)` | `n` label, `x y z`, `a` accuracy, `-` skip |
 | `add_marker`, `add_marker_projection`, `add_scalebar`, `triangulate_markers` | manual markers and scale bars |
