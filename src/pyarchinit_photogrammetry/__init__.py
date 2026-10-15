@@ -19,7 +19,11 @@ Quick start::
     chunk.build_orthomosaic()
     doc.save("scavo.ppg")
 """
-from .app import app
+from ._env import use_bundled_proj_data as _use_bundled_proj_data
+
+_use_bundled_proj_data()  # before anything opens a CRS (see _env.py)
+
+from .app import app  # noqa: E402
 from .core import (ARCHAEO_CLASSES, ASPRS_CLASSES, Camera, Chunk, Document, Marker, PointCloud, Projection,
                    Reference, ScaleBar, Sensor)
 from .core.progress import Cancelled, Progress, print_progress

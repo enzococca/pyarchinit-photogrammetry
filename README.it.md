@@ -41,6 +41,17 @@ elaborazioni in background con avanzamento e annulla; menu PyArchInit per connet
 database, pubblicare ortofoto/DEM/modelli, scrivere i poligoni delle US e le quote. Guida in
 [docs/gui.md](docs/gui.md).
 
+Meglio un ambiente virtuale dedicato invece dell'ambiente `base` di Anaconda: le vecchie
+build di SciPy lì presenti possono non caricarsi sui macOS recenti
+(`ImportError ... __thread_bss ... zero-fill section`).
+
+```bash
+python3 -m venv ~/venvs/ppg && source ~/venvs/ppg/bin/activate
+pip install -U pip && pip install "pyarchinit-photogrammetry[all]"
+```
+
+Le variabili `PROJ_LIB`/`PROJ_DATA` impostate da Anaconda o QGIS sono gestite in automatico.
+
 Per scrivere geometrie in un database PyArchInit **SQLite** serve `mod_spatialite`: viene
 cercato automaticamente nelle installazioni di QGIS, MacPorts, Homebrew e Linux, oppure si
 indica con la variabile `SPATIALITE_LIBRARY_PATH`.

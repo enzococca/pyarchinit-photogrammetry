@@ -131,7 +131,8 @@ def render(scene: Scene, world_from_cam: np.ndarray, K: np.ndarray, size=(1200, 
         r2 = xu ** 2 + yu ** 2
         xu, yu = xn / (1 + k1 * r2), yn / (1 + k1 * r2)
     dirs_cam = np.dstack([xu, yu, np.ones_like(xu)]).reshape(-1, 3)
-    dirs = dirs_cam @ world_from_cam[:3, :3].T
+    with np.errstate(all="ignore"):  # numpy + Apple Accelerate can raise spurious FP warnings in matmul
+        dirs = dirs_cam @ world_from_cam[:3, :3].T
     dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
     origins = np.repeat(world_from_cam[:3, 3][None], len(dirs), 0)
     ans = scene._rc.cast_rays(o3d.core.Tensor(np.hstack([origins, dirs]).astype(np.float32)))

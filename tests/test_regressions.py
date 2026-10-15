@@ -1,5 +1,6 @@
 """Regression tests for issues found in review."""
 import shutil
+from pathlib import Path
 import sqlite3
 
 import numpy as np
@@ -139,3 +140,27 @@ def test_spatialite_before_pycolmap_keeps_jpeg_decoding(tmp_path):
     if "SKIP" in out:
         pytest.skip("mod_spatialite not available")
     assert "OK" in out, out
+
+
+def test_foreign_proj_lib_does_not_break_epsg_lookup(tmp_path):
+    """Anaconda/QGIS export PROJ_LIB pointing at an older proj.db: EPSG codes must still resolve."""
+    import os
+    import subprocess
+    import sys
+
+    bundled = Path(rasterio.__file__).parent / "proj_data" / "proj.db"
+    if not bundled.exists():
+        pytest.skip("rasterio without bundled PROJ data (conda build)")
+    old = tmp_path / "proj"
+    old.mkdir()
+    shutil.copy(bundled, old / "proj.db")
+    con = sqlite3.connect(old / "proj.db")
+    con.execute("UPDATE metadata SET value='2' WHERE key='DATABASE.LAYOUT.VERSION.MINOR'")
+    con.commit()
+    con.close()
+    code = ("import pyarchinit_photogrammetry\nfrom rasterio.crs import CRS\n"
+            "print('OK' if 'Monte Mario' in CRS.from_epsg(3004).to_wkt() else 'FAIL')")
+    env = dict(os.environ, PROJ_LIB=str(old))
+    env.pop("PROJ_DATA", None)
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120)
+    assert "OK" in out.stdout, out.stderr[-2000:]

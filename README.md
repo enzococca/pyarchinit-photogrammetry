@@ -35,6 +35,17 @@ Python 3.10+. Writing geometries into a PyArchInit **SQLite** database needs `mo
 On headless Linux servers Open3D needs the EGL/GL libraries:
 `sudo apt-get install libegl1 libgl1 libgomp1`.
 
+Use a dedicated virtual environment, not the Anaconda `base` environment: old SciPy builds
+there can fail to load on recent macOS (`ImportError ... __thread_bss ... zero-fill section`).
+
+```bash
+python3 -m venv ~/venvs/ppg && source ~/venvs/ppg/bin/activate
+pip install -U pip && pip install "pyarchinit-photogrammetry[all]"
+```
+
+`PROJ_LIB`/`PROJ_DATA` exported by Anaconda or QGIS are handled automatically (the PROJ data
+bundled with rasterio is used).
+
 ## Try it with the demo data
 
 ```bash
