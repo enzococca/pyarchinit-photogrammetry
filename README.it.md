@@ -107,6 +107,17 @@ scrive un log in `~/Library/Logs/pyarchinit-photogrammetry` (macOS),
 Dettagli in [docs/integrations.md](docs/integrations.md). Nell'applicazione pacchettizzata SAM 2.1
 si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
 
+## Schede US, proxy 3D e BIM
+
+* **Schede US**: doppio clic su una US nel pannello PyArchInit apre la scheda (`us_table`) con
+  descrizione, cronologia, dati di scavo, quote e rapporti stratigrafici modificabili;
+  *Nuova US* crea un nuovo record. I rapporti sono salvati nel formato di PyArchInit.
+* **Proxy 3D**: *Strumenti > Proxy 3D delle US* trasforma ogni poligono US in un solido chiuso
+  tra il DEM e una base (piano, DEM dopo lo scavo, spessore o quota minima), con volume, area
+  e quote; esportazione OBJ per l'Extended Matrix, pubblicazione come media 3D collegato alla US.
+* **BIM**: l'IFC dei proxy contiene quantità per il computo (volume, area, altezza, quote),
+  materiali, gruppi per periodo/fase e rapporti stratigrafici. Dettagli in [docs/bim.md](docs/bim.md).
+
 ## Interfaccia grafica
 
 `ppg-gui` apre l'applicazione desktop: pagina iniziale con i progetti recenti; barra degli

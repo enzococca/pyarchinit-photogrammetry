@@ -144,7 +144,14 @@ def create_demo_database(home: str | Path, srid: int = 3004, site: str = DEMO_SI
     units = [(sites[0][0],) + u for u in us_list]
     if size == "large":
         units += [(SITES[1][0],) + u for u in _villa_units()] + [(SITES[2][0],) + u for u in _necropolis_units()]
+    from .bridge import RELATION_WORDS, format_relationships
+
+    def rel(text: str, sito: str, area: str) -> str:  # "copre 3" -> PyArchInit [['Copre', '3', area, sito]]
+        words, num = text.rsplit(" ", 1) if " " in text else (text, "")
+        return format_relationships([[RELATION_WORDS.get(words.lower(), words.capitalize()), num, area, sito]])
+
     for i, (sito, area, us, tipo, d_strat, d_int, per, fase, rapp) in enumerate(units, 1):
+        rapp = rel(rapp, sito, area) if rapp else ""
         con.execute("INSERT INTO us_table (id_us, sito, area, us, unita_tipo, d_stratigrafica, d_interpretativa, "
                     "periodo_iniziale, fase_iniziale, periodo_finale, fase_finale, rapporti, anno_scavo, "
                     "schedatore, data_schedatura, scavato, metodo_di_scavo) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",

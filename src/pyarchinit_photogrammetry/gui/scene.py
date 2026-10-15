@@ -56,7 +56,14 @@ def available_views(chunk) -> list[str]:
         out.append("model")
     if chunk.product_path("model_textured"):
         out.append("model_textured")
+    if chunk.meta.get("proxies"):
+        out.append("proxies")
     return out
+
+
+PROXY_COLORS = np.array([[230, 25, 75], [60, 180, 75], [255, 225, 25], [67, 99, 216], [245, 130, 49], [145, 30, 180],
+                         [70, 240, 240], [240, 50, 230], [188, 246, 12], [0, 128, 128], [154, 99, 36], [128, 0, 0]],
+                        np.uint8)
 
 
 def best_view(chunk) -> str:
@@ -121,6 +128,21 @@ def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_f
             sd.texture = tex if tex.exists() else None
         else:
             sd.mesh_vertices, sd.mesh_faces = W(verts), faces
+    elif kind == "proxies":
+        import trimesh
+
+        V, F, C, n = [], [], [], 0
+        for i, entry in enumerate(chunk.meta.get("proxies", [])):
+            path = chunk.data_dir / entry["file"]
+            if not path.exists():
+                continue
+            m = trimesh.load(str(path), process=False, force="mesh")
+            V.append((np.asarray(m.vertices, float) - off).astype(np.float32))
+            F.append(np.asarray(m.faces) + n)
+            C.append(np.repeat(PROXY_COLORS[i % len(PROXY_COLORS)][None], len(m.vertices), 0))
+            n += len(m.vertices)
+        if V:
+            sd.mesh_vertices, sd.mesh_faces, sd.mesh_colors = np.vstack(V), np.vstack(F), np.vstack(C)
     elif kind in ("model", "model_textured"):
         mesh = chunk.model
         if mesh is not None:

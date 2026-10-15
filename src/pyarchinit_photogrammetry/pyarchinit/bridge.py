@@ -78,6 +78,52 @@ class PyArchInit:
             raise KeyError(f"US {us} (area {area}) not found in site {sito}")
         return int(rows[0]["id_us"])
 
+    # ------------------------------------------------------------------ US form
+    RELATIONS = ["Copre", "Coperto da", "Taglia", "Tagliato da", "Riempie", "Riempito da", "Si appoggia a",
+                 "Gli si appoggia", "Si lega a", "Uguale a", "Anteriore a", "Posteriore a"]
+    INVERSE = {"Copre": "Coperto da", "Coperto da": "Copre", "Taglia": "Tagliato da", "Tagliato da": "Taglia",
+               "Riempie": "Riempito da", "Riempito da": "Riempie", "Si appoggia a": "Gli si appoggia",
+               "Gli si appoggia": "Si appoggia a", "Si lega a": "Si lega a", "Uguale a": "Uguale a",
+               "Anteriore a": "Posteriore a", "Posteriore a": "Anteriore a"}
+
+    def us_record(self, sito: str, area: str, us: str, unita_tipo: str | None = None) -> dict | None:
+        rows = self.db.query("us_table", sito=sito, area=str(area), us=str(us), unita_tipo=unita_tipo)
+        return rows[0] if rows else None
+
+    def us_columns(self) -> set[str]:
+        return self.db.columns("us_table")
+
+    def create_us(self, sito: str, area: str, us: str, unita_tipo: str = "US", **fields) -> int:
+        """New ``us_table`` record (the site record is created when missing). Unknown fields
+        are ignored; ``rapporti`` may be a list of ``(relation, us, area, sito)``."""
+        if self.us_record(sito, area, us, unita_tipo) is not None:
+            raise FileExistsError(f"{unita_tipo} {us} (area {area}) esiste gia' in {sito}")
+        self.ensure_site(sito)
+        values = self._us_values({"sito": sito, "area": str(area), "us": str(us), "unita_tipo": unita_tipo, **fields},
+                                 default_site=sito)
+        with self.db.begin() as conn:
+            return int(self.db.insert(conn, "us_table", values, id_column="id_us"))
+
+    def update_us(self, id_us: int, **fields) -> int:
+        values = self._us_values(fields, default_site=fields.get("sito"))
+        values.pop("id_us", None)
+        if not values:
+            return 0
+        t = self.db.table("us_table")
+        with self.db.begin() as conn:
+            return conn.execute(t.update().where(t.c.id_us == int(id_us)).values(**values)).rowcount
+
+    def _us_values(self, fields: dict, default_site: str | None = None) -> dict:
+        cols = self.us_columns()
+        out = {}
+        for k, v in fields.items():
+            if k not in cols:
+                continue
+            if k == "rapporti" and isinstance(v, (list, tuple)):
+                v = format_relationships(v, default_site)
+            out[k] = None if v is None else str(v)
+        return out
+
     def us_records(self, sito: str) -> dict[str, dict]:
         """US number -> selected attributes (for IFC property sets and labels)."""
         out = {}
@@ -312,6 +358,52 @@ class PyArchInit:
                 "fase_scavo": fase_scavo, "note": note or f"scavo {result.get('cut_m3', 0):.3f} m3, "
                                                           f"riporto {result.get('fill_m3', 0):.3f} m3"},
                 id_column="id_computo")
+
+
+RELATION_WORDS = {"copre": "Copre", "coperto da": "Coperto da", "taglia": "Taglia", "tagliato da": "Tagliato da",
+                  "riempie": "Riempie", "riempito da": "Riempito da", "si appoggia a": "Si appoggia a",
+                  "gli si appoggia": "Gli si appoggia", "si lega a": "Si lega a", "uguale a": "Uguale a",
+                  "anteriore a": "Anteriore a", "posteriore a": "Posteriore a"}
+
+
+def parse_relationships(text: str | None) -> list[list[str]]:
+    """PyArchInit ``rapporti`` (``"[['Copre', '2', '1', 'Sito'], ...]"``) as a list of
+    ``[relation, us, area, sito]``; tolerant of the short ``[relation, us]`` form and of
+    plain text such as ``"copre 3; tagliato da 7"``."""
+    import ast
+    import re
+
+    if not text or not str(text).strip():
+        return []
+    try:
+        data = ast.literal_eval(str(text))
+    except (ValueError, SyntaxError):
+        out = []
+        for part in re.split(r"[;,\n]+", str(text)):
+            m = re.match(r"\s*([A-Za-z' ]+?)\s+(\S+)\s*$", part)
+            if m and m.group(1).lower() in RELATION_WORDS:
+                out.append([RELATION_WORDS[m.group(1).lower()], m.group(2), "", ""])
+        return out
+    if not isinstance(data, (list, tuple)):
+        return []
+    out = []
+    for item in data or []:
+        item = [str(x) for x in (item or [])]
+        if len(item) >= 2:
+            out.append((item + ["", ""])[:4])
+    return out
+
+
+def format_relationships(rels, default_site: str | None = None, default_area: str | None = None) -> str:
+    """``[[relation, us, area, sito], ...]`` as PyArchInit stores it."""
+    rows = []
+    for r in rels:
+        r = [str(x) if x is not None else "" for x in r]
+        rel, us = r[0], r[1]
+        area = r[2] if len(r) > 2 and r[2] else (default_area or "")
+        site = r[3] if len(r) > 3 and r[3] else (default_site or "")
+        rows.append([rel, us, area, site])
+    return repr(rows)
 
 
 def _safe(name: str) -> str:

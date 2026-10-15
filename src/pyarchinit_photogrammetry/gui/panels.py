@@ -585,6 +585,7 @@ class PyArchInitPane(QWidget):
     connect_requested = Signal()
     demo_requested = Signal()
     new_site_requested = Signal()
+    us_requested = Signal(str, str, str, str)  # sito, area, us, unita_tipo ("" us = new record)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -594,14 +595,17 @@ class PyArchInitPane(QWidget):
         self.b_connect = _tool("database", "Connetti...", "Connetti al database di PyArchInit (config.cfg, SQLite, PostgreSQL)")
         self.b_demo = _tool("demo_db", "Database demo", "Usa il database dimostrativo")
         self.b_new_site = _tool("site", "Nuovo sito...", "Crea la scheda Sito in PyArchInit")
+        self.b_new_us = _tool("us", "Nuova US...", "Crea una scheda US nel sito selezionato")
         row.addWidget(self.b_connect)
         row.addWidget(self.b_demo)
         row.addWidget(self.b_new_site)
+        row.addWidget(self.b_new_us)
         row.addStretch(1)
         lay.addLayout(row)
         self.b_connect.clicked.connect(self.connect_requested)
         self.b_demo.clicked.connect(self.demo_requested)
         self.b_new_site.clicked.connect(self.new_site_requested)
+        self.b_new_us.clicked.connect(lambda: self.us_requested.emit(self.current_site() or "", "1", "", "US"))
         self.status = QLabel("Non connesso")
         self.status.setWordWrap(True)
         lay.addWidget(self.status)
@@ -609,7 +613,11 @@ class PyArchInitPane(QWidget):
         self.tree.setHeaderLabels(["Elemento", "Descrizione"])
         self.tree.setIconSize(QSize(16, 16))
         self.tree.setAlternatingRowColors(True)
+        self.tree.itemDoubleClicked.connect(self._open_us)
         lay.addWidget(self.tree, 1)
+        hint = QLabel("Doppio clic su una US per aprire la scheda")
+        hint.setObjectName("pageSubtitle")
+        lay.addWidget(hint)
         self.pa = None
 
     def set_connection(self, pa, label: str) -> None:
@@ -642,8 +650,11 @@ class PyArchInitPane(QWidget):
             si.addChild(us_root)
             try:
                 for u in self.pa.stratigraphic_units(name):
-                    us_root.addChild(QTreeWidgetItem([f"{u.get('unita_tipo') or 'US'} {u.get('us')} (area {u.get('area')})",
-                                                      str(u.get("d_stratigrafica") or "")]))
+                    it = QTreeWidgetItem([f"{u.get('unita_tipo') or 'US'} {u.get('us')} (area {u.get('area')})",
+                                          str(u.get("d_stratigrafica") or "")])
+                    it.setData(0, Qt.ItemDataRole.UserRole, (str(name), str(u.get("area") or ""), str(u.get("us")),
+                                                             str(u.get("unita_tipo") or "US")))
+                    us_root.addChild(it)
                 doc_root = QTreeWidgetItem(["Documentazione", ""])
                 doc_root.setIcon(0, icon("doc"))
                 si.addChild(doc_root)
@@ -660,6 +671,20 @@ class PyArchInitPane(QWidget):
             return []
         return [str(s.get("sito")) for s in self.pa.sites()]
 
+    def current_site(self) -> str | None:
+        it = self.tree.currentItem()
+        while it is not None and it.parent() is not None:
+            it = it.parent()
+        if it is not None:
+            return it.text(0)
+        names = self.site_names()
+        return names[0] if names else None
+
+    def _open_us(self, item, _col) -> None:
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if data:
+            self.us_requested.emit(*data)
+
 
 # ---------------------------------------------------------------- layers
 LAYER_ICONS = {"polygon": "polygon", "line": "line", "point": "point"}
@@ -670,6 +695,7 @@ class LayersPane(QWidget):
     clicked feature (editable: double click a value, Enter to confirm)."""
 
     attribute_edited = Signal(str, int, str, object)  # layer, feature index, field, new value
+    us_form_requested = Signal(str, int)  # layer, feature index
     READ_ONLY = {"layer", "x", "y", "area_m2", "lunghezza_m", "z", "svg", "dxf"}
 
     def __init__(self, parent=None):
@@ -681,7 +707,9 @@ class LayersPane(QWidget):
         self.b_none = _tool("eraser", "Nessuno", "Nascondi tutti i layer")
         self.b_zoom = _tool("search", "Zoom", "Zoom sul layer o sull'elemento selezionato")
         self.b_remove = _tool("clear", "Rimuovi", "Rimuovi il layer selezionato dalla vista")
-        for b in (self.b_all, self.b_none, self.b_zoom, self.b_remove):
+        self.b_us = _tool("us", "Scheda US", "Apri (o crea) la scheda PyArchInit dell'unita' selezionata")
+        self.b_us.clicked.connect(lambda: self.us_form_requested.emit(*self._current) if self._current else None)
+        for b in (self.b_all, self.b_none, self.b_zoom, self.b_remove, self.b_us):
             bar.addWidget(b)
         bar.addStretch(1)
         lay.addLayout(bar)
@@ -911,3 +939,80 @@ class SectionsPane(QWidget):
         self.info.setText(f"<b>{s['label']}</b>  lunghezza {s.get('length', 0):.3f} m  -  da "
                           f"({p1[0]:.2f}, {p1[1]:.2f}) a ({p2[0]:.2f}, {p2[1]:.2f})<br>"
                           f"SVG: {s.get('svg', '')}<br>DXF: {s.get('dxf', '')}  -  3D: {s.get('dxf3d', '')}")
+
+
+
+class ProxiesPane(QWidget):
+    """3D proxies of the stratigraphic units: list, 3D view, export, link to PyArchInit."""
+
+    create_requested = Signal()
+    show_requested = Signal()
+    export_requested = Signal()
+    publish_requested = Signal(list)  # indices
+    quote_requested = Signal(list)
+    us_requested = Signal(int)
+    delete_requested = Signal(list)
+
+    COLS = ["Proxy", "US", "Area", "Volume m3", "Pianta m2", "Quota sup.", "Quota inf.", "PyArchInit"]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(4, 4, 4, 4)
+        bar = QHBoxLayout()
+        self.b_new = _tool("model", "Crea proxy...", "Solidi delle US tra la superficie e una base")
+        self.b_show = _tool("view3d", "Vedi in 3D")
+        self.b_export = _tool("export", "Esporta (Extended Matrix)", "Un OBJ con un oggetto per US (US12, USM3...)")
+        for b in (self.b_new, self.b_show, self.b_export):
+            bar.addWidget(b)
+        bar.addStretch(1)
+        lay.addLayout(bar)
+        self.table = QTableWidget(0, len(self.COLS))
+        self.table.setHorizontalHeaderLabels(self.COLS)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setAlternatingRowColors(True)
+        self.table.itemDoubleClicked.connect(lambda it: self.us_requested.emit(it.row()))
+        lay.addWidget(self.table, 1)
+        bar2 = QHBoxLayout()
+        self.b_pub = _tool("publish", "Pubblica in PyArchInit", "Modello 3D collegato alla scheda US (media)")
+        self.b_quote = _tool("dem", "Quote nella scheda US", "Scrive quota minima e massima assolute nella scheda")
+        self.b_us = _tool("us", "Scheda US")
+        self.b_del = _tool("clear", "Elimina")
+        for b in (self.b_pub, self.b_quote, self.b_us, self.b_del):
+            bar2.addWidget(b)
+        bar2.addStretch(1)
+        lay.addLayout(bar2)
+        self.total = QLabel("")
+        lay.addWidget(self.total)
+        self.b_new.clicked.connect(self.create_requested)
+        self.b_show.clicked.connect(self.show_requested)
+        self.b_export.clicked.connect(self.export_requested)
+        self.b_pub.clicked.connect(lambda: self.publish_requested.emit(self.selected()))
+        self.b_quote.clicked.connect(lambda: self.quote_requested.emit(self.selected()))
+        self.b_us.clicked.connect(lambda: self.us_requested.emit(self.selected()[0]) if self.selected() else None)
+        self.b_del.clicked.connect(lambda: self.delete_requested.emit(self.selected()))
+
+    def selected(self) -> list[int]:
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
+        return rows or list(range(self.table.rowCount()))
+
+    def set_proxies(self, entries: list[dict]) -> None:
+        from .scene import PROXY_COLORS
+
+        self.table.setRowCount(len(entries))
+        for r, e in enumerate(entries):
+            vals = [e["name"], e.get("us") or "", e.get("area") or "", f"{e['volume_m3']:.3f}", f"{e['area_m2']:.3f}",
+                    f"{e['z_top'][1]:.3f}", f"{e['z_bottom'][0]:.3f}",
+                    ("collegato" if e.get("id_media") else "")]
+            for c, v in enumerate(vals):
+                it = QTableWidgetItem(v)
+                if c == 0:
+                    col = PROXY_COLORS[r % len(PROXY_COLORS)]
+                    it.setForeground(QColor(int(col[0]), int(col[1]), int(col[2])))
+                self.table.setItem(r, c, it)
+        vol = sum(e["volume_m3"] for e in entries)
+        self.total.setText(f"{len(entries)} proxy, volume totale {vol:.3f} m3" if entries else
+                           "Nessun proxy: crea i solidi delle US con 'Crea proxy'")

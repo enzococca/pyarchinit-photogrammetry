@@ -32,6 +32,21 @@ def _frozen_posix() -> bool:
     return bool(getattr(sys, "frozen", False)) and os.name != "nt"
 
 
+def install_translations(qapp) -> bool:
+    """Italian texts for Qt's own widgets (OK/Annulla/Salva buttons, file dialogs)."""
+    from PySide6.QtCore import QLibraryInfo, QTranslator
+
+    path = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+    ok = False
+    for name in ("qtbase_it", "qt_it"):
+        tr = QTranslator(qapp)
+        if tr.load(name, path):
+            qapp.installTranslator(tr)
+            ok = True
+            break
+    return ok
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     from ..engine.isolate import WORKER_FLAG, freeze_support, worker_main
@@ -68,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
     qapp.setApplicationDisplayName(APP_TITLE)
     qapp.setOrganizationName("pyarchinit")
     qapp.setWindowIcon(app_icon())
+    install_translations(qapp)
     settings = QSettings("pyarchinit", "pyarchinit-photogrammetry")
     theme.apply(qapp, str(settings.value("theme", "light")))
     from .main_window import MainWindow

@@ -24,6 +24,10 @@ class IfcElement:
     predefined_type: str | None = "TERRAIN"
     psets: dict[str, dict] = field(default_factory=dict)
     color: tuple[float, float, float] | None = None  # 0..1 RGB
+    quantities: dict[str, float] = field(default_factory=dict)  # Qto: NetVolume, GrossArea, Height...
+    material: str | None = None
+    group: str | None = None  # IfcGroup (e.g. "Periodo 1 - Fase 2")
+    key: str | None = None  # identifier used by ``relations``
 
 
 def _require():
@@ -34,8 +38,16 @@ def _require():
         raise ImportError("IFC export needs ifcopenshell: pip install 'pyarchinit-photogrammetry[bim]'") from e
 
 
+QTO_UNITS = {"NetVolume": "IfcQuantityVolume", "GrossVolume": "IfcQuantityVolume", "GrossArea": "IfcQuantityArea",
+             "NetArea": "IfcQuantityArea", "Height": "IfcQuantityLength", "TopElevationMax": "IfcQuantityLength",
+             "TopElevationMin": "IfcQuantityLength", "BottomElevationMin": "IfcQuantityLength"}
+
+
 def export_ifc(path: str | Path, elements: list[IfcElement], crs: str | None = None, project: str = "Rilievo",
-               site: str = "Sito", origin: np.ndarray | None = None, progress=None) -> Path:
+               site: str = "Sito", origin: np.ndarray | None = None, progress=None,
+               relations: list[tuple[str, str, str]] | None = None) -> Path:
+    """Write IFC4. ``relations``: ``(key_a, relation, key_b)`` between elements (stratigraphic
+    relationships), written as ``IfcRelConnectsElements`` named after the relation."""
     from ..core.progress import as_progress
 
     progress = as_progress(progress)
@@ -76,6 +88,11 @@ def export_ifc(path: str | Path, elements: list[IfcElement], crs: str | None = N
     site_e = ifcopenshell.api.root.create_entity(model, ifc_class="IfcSite", name=site)
     ifcopenshell.api.aggregate.assign_object(model, products=[site_e], relating_object=proj)
 
+    import ifcopenshell.api.group
+    import ifcopenshell.api.material
+    import ifcopenshell.guid
+
+    products, groups, materials = {}, {}, {}
     for k, el in enumerate(elements):
         progress(0.1 + 0.85 * k / max(len(elements), 1), f"IFC: elemento {k + 1}/{len(elements)} - {el.name}")
         kwargs = {"ifc_class": el.ifc_class, "name": el.name}
@@ -102,6 +119,35 @@ def export_ifc(path: str | Path, elements: list[IfcElement], crs: str | None = N
         for pset_name, props in el.psets.items():
             pset = ifcopenshell.api.pset.add_pset(model, product=prod, name=pset_name)
             ifcopenshell.api.pset.edit_pset(model, pset=pset, properties={k: v for k, v in props.items() if v is not None})
+        if el.quantities:
+            qs = []
+            for qname, val in el.quantities.items():
+                cls = QTO_UNITS.get(qname, "IfcQuantityLength")
+                attr = {"IfcQuantityVolume": "VolumeValue", "IfcQuantityArea": "AreaValue"}.get(cls, "LengthValue")
+                qs.append(model.create_entity(cls, Name=qname, **{attr: float(val)}))
+            qto = model.create_entity("IfcElementQuantity", GlobalId=ifcopenshell.guid.new(), Name="Qto_PyArchInit_US",
+                                      MethodOfMeasurement="pyarchinit-photogrammetry: proxy solido dal DEM",
+                                      Quantities=qs)
+            model.create_entity("IfcRelDefinesByProperties", GlobalId=ifcopenshell.guid.new(), RelatedObjects=[prod],
+                                RelatingPropertyDefinition=qto)
+        if el.material:
+            mat = materials.get(el.material)
+            if mat is None:
+                mat = materials[el.material] = ifcopenshell.api.material.add_material(model, name=el.material,
+                                                                                         category="soil")
+            ifcopenshell.api.material.assign_material(model, products=[prod], material=mat)
+        if el.group:
+            grp = groups.get(el.group)
+            if grp is None:
+                grp = groups[el.group] = ifcopenshell.api.group.add_group(model, name=el.group)
+            ifcopenshell.api.group.assign_group(model, products=[prod], group=grp)
+        if el.key:
+            products[el.key] = prod
+    for a, rel, b in relations or []:
+        if a in products and b in products and a != b:
+            model.create_entity("IfcRelConnectsElements", GlobalId=ifcopenshell.guid.new(), Name=rel,
+                                Description="rapporto stratigrafico (PyArchInit)",
+                                RelatingElement=products[a], RelatedElement=products[b])
     path = Path(path)
     model.write(str(path))
     return path
@@ -179,3 +225,37 @@ def _plain(v):
     if v is None or isinstance(v, (str, int, float, bool)):
         return v
     return str(v)
+
+
+def export_proxies_ifc(proxies, path: str | Path, crs: str | None = None, us_records: dict | None = None,
+                       site: str | None = None, survey_mesh=None, project: str = "Rilievo", progress=None) -> Path:
+    """IFC4 with one solid ``IfcGeographicElement`` per unit proxy (see :mod:`archaeo.proxies`):
+    quantities for the bill of quantities (``Qto_PyArchInit_US``: NetVolume, GrossArea, Height,
+    elevations), the US form in ``Pset_PyArchInit_US``, a material per formation, groups per
+    period/phase and the stratigraphic relationships as ``IfcRelConnectsElements``.
+    ``survey_mesh`` (world coordinates) adds the photogrammetric surface as context."""
+    from ..pyarchinit.bridge import parse_relationships
+
+    us_records = us_records or {}
+    elements, relations = [], []
+    palette = [(0.9, 0.1, 0.29), (0.24, 0.71, 0.29), (1.0, 0.88, 0.1), (0.26, 0.39, 0.85), (0.96, 0.51, 0.19),
+               (0.57, 0.12, 0.71), (0.27, 0.94, 0.94), (0.94, 0.2, 0.9)]
+    if survey_mesh is not None:
+        elements.append(IfcElement(survey_mesh, f"Rilievo fotogrammetrico - {project}", color=(0.8, 0.8, 0.8)))
+    for i, p in enumerate(proxies):
+        rec = us_records.get(str(p.us), {})
+        props = {"Sito": site, "Area": p.area, "US": p.us, "Tipo": p.tipo, **{k: _plain(v) for k, v in rec.items()}}
+        per = rec.get("periodo_iniziale")
+        fase = rec.get("fase_iniziale")
+        group = f"Periodo {per} - Fase {fase}" if per else None
+        material = rec.get("formazione") or rec.get("d_stratigrafica") or None
+        qty = {"NetVolume": p.volume_m3, "GrossArea": p.area_m2, "Height": p.z_top[1] - p.z_bottom[0],
+               "TopElevationMax": p.z_top[1], "TopElevationMin": p.z_top[0], "BottomElevationMin": p.z_bottom[0]}
+        elements.append(IfcElement(p.mesh, p.name, ifc_class="IfcGeographicElement", predefined_type="USERDEFINED",
+                                   psets={"Pset_PyArchInit_US": props}, color=palette[i % len(palette)],
+                                   quantities=qty, material=str(material) if material else None, group=group,
+                                   key=str(p.us)))
+        for rel, other, _area, _site in parse_relationships(rec.get("rapporti")):
+            relations.append((str(p.us), rel, str(other)))
+    return export_ifc(path, elements, crs=crs, project=project, site=site or project, progress=progress,
+                      relations=relations)

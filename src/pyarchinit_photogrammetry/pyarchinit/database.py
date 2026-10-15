@@ -169,6 +169,8 @@ class PyArchInitDB:
         row = {k: v for k, v in values.items() if k in cols}
         if "entity_uuid" in cols and not row.get("entity_uuid"):
             row["entity_uuid"] = str(uuid.uuid4())
+        if "node_uuid" in cols and not row.get("node_uuid"):  # s3dgraphy / Extended Matrix node id
+            row["node_uuid"] = str(uuid.uuid4())
         return row
 
     def _uses_sequence(self, table: str, id_column: str) -> bool:

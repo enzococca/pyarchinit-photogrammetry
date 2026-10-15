@@ -40,6 +40,13 @@ SpatiaLite first can crash GDAL-based code in the same process.
 | `publish_elevations(chunk, sito, area, us, points)` | `pyarchinit_quote`, heights sampled on the DEM |
 | `publish_section_trace(section, sito, id_sezione)` | `pyarchinit_sezioni` |
 | `publish_volume(sito, nome_calcolo, result)` | `computo_metrico_table` |
+| `create_us(sito, area, us, unita_tipo, **fields)` | a new `us_table` record (`id_us` = max+1, `entity_uuid`, `node_uuid`); the site record is created when missing; `FileExistsError` if sito/area/US/type exists. Unknown fields are ignored |
+| `update_us(id_us, **fields)` | the given columns of a `us_table` record |
+
+`rapporti` is stored as PyArchInit does (`"[['Copre', '2', '1', 'Sito'], ...]"`);
+`parse_relationships` reads it (also the short `[rel, us]` form and plain text such as
+`copre 3; tagliato da 7`) and `format_relationships` writes it. `RELATIONS` lists the
+relationship names and `INVERSE` their inverse (*Copre* / *Coperto da*...).
 
 Conventions:
 

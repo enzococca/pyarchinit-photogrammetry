@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QHBoxLayout, 
 from .scene import OrbitCamera, SceneData, available_views, build_scene, sample_mesh_colors, splat
 
 VIEW_LABELS = {"cameras": "Camere", "tie_points": "Punti di legame", "point_cloud": "Nuvola densa",
-               "model": "Modello (ombreggiato)", "model_textured": "Modello con texture"}
+               "model": "Modello (ombreggiato)", "model_textured": "Modello con texture", "proxies": "Proxy delle US"}
 
 
 class SoftwareCanvas(QWidget):

@@ -20,12 +20,12 @@ from ..app import app as application
 from ..core.document import Document
 from . import theme
 from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, IfcPreviewDialog, ImageDialog, ParamDialog,
-                      PublishDialog, SiteDialog, UnitDialog, message)
+                      PublishDialog, SiteDialog, UnitDialog, UsFormDialog, message)
 from .icons import app_icon, icon
 from .image_views import US_COLORS, PhotoView, RasterView
 from .model_view import ModelView
-from .panels import (ConsolePane, LayersPane, LogPane, PhotosPane, PyArchInitPane, ReferencePane, SectionsPane,
-                     WorkspaceTree)
+from .panels import (ConsolePane, LayersPane, LogPane, PhotosPane, ProxiesPane, PyArchInitPane, ReferencePane,
+                     SectionsPane, WorkspaceTree)
 from .start_page import StartPage
 from .worker import StatusProgress, TaskRunner
 
@@ -121,6 +121,7 @@ class MainWindow(QMainWindow):
         self.pa_pane.connect_requested.connect(lambda: self.pyarchinit_connect(ask=True))
         self.pa_pane.demo_requested.connect(self.pyarchinit_demo)
         self.pa_pane.new_site_requested.connect(self.pyarchinit_new_site)
+        self.pa_pane.us_requested.connect(lambda sito, area, us, tipo: self.open_us_form(sito, area, us, tipo))
         # tab widgets inside docks (more robust than tabified docks across Qt platforms)
         self.left_tabs = QTabWidget()
         self.left_tabs.setIconSize(QSize(16, 16))
@@ -135,6 +136,16 @@ class MainWindow(QMainWindow):
         self.b_pa_save.hide()
         self.layers_pane.layout().addWidget(self.b_pa_save)
         self.left_tabs.addTab(self.layers_pane, icon("slice"), "Layer")
+        self.layers_pane.us_form_requested.connect(self._us_form_from_feature)
+        self.proxies_pane = ProxiesPane()
+        self.left_tabs.addTab(self.proxies_pane, icon("us"), "Proxy US")
+        self.proxies_pane.create_requested.connect(self.create_proxies)
+        self.proxies_pane.show_requested.connect(lambda: self._show_model("proxies"))
+        self.proxies_pane.export_requested.connect(self.export_proxies)
+        self.proxies_pane.publish_requested.connect(self.publish_proxies)
+        self.proxies_pane.quote_requested.connect(self.quote_proxies)
+        self.proxies_pane.us_requested.connect(self._us_form_from_proxy)
+        self.proxies_pane.delete_requested.connect(self.delete_proxies)
         self.sections_pane = SectionsPane()
         self.sections_pane.zoom_requested.connect(self._zoom_section)
         self.sections_pane.publish_requested.connect(self._publish_section)
@@ -258,6 +269,7 @@ class MainWindow(QMainWindow):
         self.a_slice = self._act(m, "Pianta a quota (slice orizzontale)...", self.plan_slice, processing=True,
                                  icon_name="slice")
         self._act(m, "Profilo ceramico da mesh...", self.pottery_profile, processing=True, icon_name="pottery")
+        self._act(m, "Proxy 3D delle US...", self.create_proxies, processing=True, icon_name="us")
         m.addSeparator()
         self._act(m, "Classifica nuvola di punti", self.classify, processing=True, icon_name="classify")
         sm = m.addMenu(icon("sam"), "Segment Anything 2.1")
@@ -277,6 +289,8 @@ class MainWindow(QMainWindow):
                   icon_name="database")
         self._act(m, "Usa il database demo", self.pyarchinit_demo, icon_name="demo_db")
         self._act(m, "Nuovo sito...", self.pyarchinit_new_site, icon_name="site")
+        self._act(m, "Nuova scheda US...", lambda: self.open_us_form(self.pa_pane.current_site() or "", "1", "", "US"),
+                  icon_name="us")
         self.a_autoconnect = QAction("Connetti all'avvio al database di PyArchInit", self, checkable=True)
         self.a_autoconnect.setChecked(self.settings.value("pa_autoconnect", "true") in ("true", True, 1, "1"))
         self.a_autoconnect.toggled.connect(lambda on: self.settings.setValue("pa_autoconnect", "true" if on else "false"))
@@ -437,6 +451,7 @@ class MainWindow(QMainWindow):
         self.line_layers = {}
         self.refresh_all(reset_views=True)
         self._load_sections()
+        self.proxies_pane.set_proxies(self.chunk.meta.get("proxies", []) if self.chunk else [])
         if doc.path:
             self._add_recent(doc.path)
 
@@ -1309,6 +1324,216 @@ class MainWindow(QMainWindow):
 
         self.run_task("Aggiornamento unita' in PyArchInit", job, done, refresh=False, save=False)
 
+    # ---------------------------------------------------------------- PyArchInit US form
+    def open_us_form(self, sito: str, area: str = "1", us: str = "", tipo: str = "US", defaults: dict | None = None) -> bool:
+        if not self._need_pa():
+            return False
+        if not sito:
+            sites = self.pa_pane.site_names()
+            sito, ok = QInputDialog.getItem(self, "Sito", "Sito PyArchInit:", sites or [""], 0, True)
+            if not ok or not sito:
+                return False
+        dlg = UsFormDialog(self.pa, sito, area, us, tipo, self, defaults=defaults)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return False
+        self.pa_pane.refresh()
+        self.log_pane.info(f"Scheda {dlg.tipo.currentText()} {dlg.us.text()} salvata in PyArchInit ({sito})")
+        return True
+
+    def _unit_site(self, layer: str) -> str:
+        prefix = "US da PyArchInit - "
+        if layer.startswith(prefix):
+            return layer[len(prefix):]
+        return self.pa_pane.current_site() or ""
+
+    def _quote_defaults(self, geometry) -> dict:
+        """Lowest and highest DEM elevation inside a unit: defaults for a new US form."""
+        if self.chunk is None or not self.chunk.dem_path or geometry is None:
+            return {}
+        try:
+            from ..archaeo import terrain
+
+            r = terrain.volume(self.chunk.dem_path, None, geometry)
+            return {"quota_min_abs": f"{r['quota_min']:.3f}", "quota_max_abs": f"{r['quota_max']:.3f}"}
+        except Exception:
+            return {}
+
+    def _us_form_from_feature(self, layer: str, idx: int) -> None:
+        feats = self.ortho_view.features(layer)
+        if not 0 <= idx < len(feats):
+            return
+        attrs = feats[idx]
+        u = self.units[attrs["_unit"]] if "_unit" in attrs and attrs["_unit"] < len(self.units) else None
+        us = str(attrs.get("us") or "").replace("?", "")
+        area = str(attrs.get("area") or "1")
+        tipo = str(attrs.get("tipo") or "US")
+        self.open_us_form(self._unit_site(layer), area, us, tipo,
+                          defaults=self._quote_defaults(u.geometry if u is not None else None))
+
+    def _us_form_from_proxy(self, row: int) -> None:
+        entries = self.chunk.meta.get("proxies", [])
+        if 0 <= row < len(entries):
+            e = entries[row]
+            self.open_us_form(e.get("sito") or self.pa_pane.current_site() or "", e.get("area") or "1",
+                              e.get("us") or "", e.get("tipo") or "US",
+                              defaults={"quota_min_abs": f"{e['z_bottom'][0]:.3f}", "quota_max_abs": f"{e['z_top'][1]:.3f}"})
+
+    # ---------------------------------------------------------------- proxies
+    def create_proxies(self) -> None:
+        if not self._need_chunk(product="dem"):
+            return
+        drawn = [u for u in self.units if u.us]
+        sites = self.pa_pane.site_names() if self.pa is not None else []
+        choices = ([("drawn", f"Unita' disegnate ({len(drawn)})")] if drawn else []) + \
+            [("pa:" + s, f"Poligoni US da PyArchInit - {s}") for s in sites]
+        if not choices:
+            self._warn("Disegna delle unita' (con il numero di US) o connetti PyArchInit per usare i poligoni delle US.")
+            return
+        v = ParamDialog.ask(self, "Proxy 3D delle US", [
+            Field("units", "Unita'", choices[0][0], choices=choices),
+            Field("base", "Base del solido", "plane",
+                  choices=[("plane", "Piano a quota data"), ("dem", "DEM dopo la rimozione dell'unita'"),
+                           ("thickness", "Spessore costante"), ("min", "Quota minima dell'unita'")]),
+            Field("z", "Quota del piano (m)", 0.0, minimum=-10000, maximum=10000, decimals=3),
+            Field("thickness", "Spessore (m)", 0.1, minimum=0.001, maximum=100, decimals=3),
+            Field("dem", "DEM dopo la rimozione", "", kind="file_open", filter="GeoTIFF (*.tif *.tiff)")],
+            intro="Ogni US diventa un solido chiuso: la pianta e' il poligono dell'unita', la superficie superiore "
+                  "il DEM del progetto, quella inferiore la base scelta. Il volume e' quello del computo.")
+        if not v:
+            return
+        from ..archaeo.proxies import proxies_for_units, save_proxy
+
+        base = {"plane": v["z"], "dem": v["dem"] or None, "min": None, "thickness": None}[v["base"]]
+        thickness = v["thickness"] if v["base"] == "thickness" else None
+        if v["base"] == "dem" and not v["dem"]:
+            self._warn("Indica il DEM dopo la rimozione dell'unita'.")
+            return
+        site = v["units"][3:] if v["units"].startswith("pa:") else (sites[0] if sites else "")
+
+        def job(p):
+            units = drawn if v["units"] == "drawn" else self.pa.us_polygons(site)
+            proxies = proxies_for_units(self.chunk.dem_path, units, base=base, thickness=thickness,
+                                        progress=p.sub(0, 0.9))
+            folder = self.chunk.data_dir / "proxies"
+            entries = []
+            for px in proxies:
+                path = save_proxy(px, folder, "ply")
+                entries.append({"name": px.name, "us": px.us, "area": px.area, "tipo": px.tipo, "sito": site,
+                                "file": str(path.relative_to(self.chunk.data_dir)), "volume_m3": px.volume_m3,
+                                "area_m2": px.area_m2, "z_top": list(px.z_top), "z_bottom": list(px.z_bottom),
+                                "base": v["base"]})
+            return entries
+
+        def done(entries):
+            old = {e["name"]: e for e in self.chunk.meta.get("proxies", [])}
+            for e in entries:
+                old[e["name"]] = e
+            self.chunk.meta["proxies"] = list(old.values())
+            self.proxies_pane.set_proxies(self.chunk.meta["proxies"])
+            self._show_pane(self.left_tabs, self.proxies_pane)
+            self._show_model("proxies")
+            self.log_pane.info(f"{len(entries)} proxy creati, volume {sum(e['volume_m3'] for e in entries):.3f} m3")
+
+        self.run_task("Proxy delle US", job, done)
+
+    def _proxy_objects(self, rows=None):
+        import trimesh
+
+        from ..archaeo.proxies import UnitProxy
+
+        entries = self.chunk.meta.get("proxies", [])
+        out = []
+        for i, e in enumerate(entries):
+            if rows is not None and i not in rows:
+                continue
+            m = trimesh.load(str(self.chunk.data_dir / e["file"]), process=False, force="mesh")
+            out.append((i, e, UnitProxy(e["name"], e.get("us"), e.get("area"), e.get("tipo") or "US", m, e["volume_m3"],
+                                        e["area_m2"], tuple(e["z_top"]), tuple(e["z_bottom"]))))
+        return out
+
+    def export_proxies(self) -> None:
+        if not self.chunk.meta.get("proxies"):
+            self._warn("Crea prima i proxy delle US.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Proxy per Extended Matrix", self._last_dir() + "/proxy_us.obj",
+                                              "OBJ (*.obj)")
+        if not path:
+            return
+        from ..archaeo.proxies import export_extended_matrix
+
+        objs = [o[2] for o in self._proxy_objects()]
+        allv = np.vstack([np.asarray(o.mesh.vertices) for o in objs])
+        out = export_extended_matrix(objs, path, offset=np.floor(allv.min(0)))
+        self._info("Proxy esportati", f"{len(objs)} oggetti in {out}\nOffset delle coordinate in {out.name}.offset.txt")
+
+    def publish_proxies(self, rows: list) -> None:
+        if not self._need_pa():
+            return
+        from ..archaeo.proxies import save_proxy
+        from ..pyarchinit.media import register_media
+
+        items = self._proxy_objects(set(rows))
+
+        def job(p):
+            done_ = []
+            for k, (i, e, px) in enumerate(items):
+                p(k / max(len(items), 1), f"Pubblicazione {px.name}")
+                site = e.get("sito") or self.pa_pane.current_site()
+                if not site:
+                    raise RuntimeError("indica il sito (pubblica dai poligoni di un sito PyArchInit)")
+                folder = self.pa._media_folder(site, "proxy_us")
+                obj = save_proxy(px, folder, "obj")
+                links = []
+                if px.us and self.pa.us_record(site, px.area or "1", px.us, px.tipo) is not None:
+                    links = self.pa._links(site, [(px.area or "1", px.us, px.tipo)])
+                rid = register_media(self.pa.db, obj, mediatype="3d_model", descrizione=f"Proxy 3D {px.name}",
+                                     tags="['proxy', 'extended matrix']", links=links, overwrite=True,
+                                     **self.pa._media_dirs())
+                done_.append((i, rid, bool(links)))
+            return done_
+
+        def done(res):
+            entries = self.chunk.meta["proxies"]
+            for i, rid, linked in res:
+                entries[i]["id_media"] = rid
+                entries[i]["linked"] = linked
+            self.proxies_pane.set_proxies(entries)
+            missing = [entries[i]["name"] for i, _r, linked in res if not linked]
+            self._info("PyArchInit", f"{len(res)} proxy pubblicati come modelli 3D"
+                       + (f"; senza scheda US (crea la scheda e ripubblica): {', '.join(missing)}" if missing else ""))
+
+        self.run_task("Pubblicazione dei proxy", job, done)
+
+    def quote_proxies(self, rows: list) -> None:
+        if not self._need_pa():
+            return
+        entries = self.chunk.meta.get("proxies", [])
+        n, missing = 0, []
+        for i in rows:
+            e = entries[i]
+            site = e.get("sito") or self.pa_pane.current_site()
+            rec = self.pa.us_record(site, e.get("area") or "1", e.get("us") or "", e.get("tipo")) if e.get("us") else None
+            if rec is None:
+                missing.append(e["name"])
+                continue
+            n += self.pa.update_us(int(rec["id_us"]), quota_min_abs=round(e["z_bottom"][0], 3),
+                                   quota_max_abs=round(e["z_top"][1], 3))
+        self.pa_pane.refresh()
+        self._info("PyArchInit", f"Quote scritte in {n} schede US"
+                   + (f"; schede mancanti: {', '.join(missing)}" if missing else ""))
+
+    def delete_proxies(self, rows: list) -> None:
+        entries = self.chunk.meta.get("proxies", [])
+        keep = [e for i, e in enumerate(entries) if i not in set(rows)]
+        for i in rows:
+            try:
+                (self.chunk.data_dir / entries[i]["file"]).unlink()
+            except (OSError, IndexError):
+                pass
+        self.chunk.meta["proxies"] = keep
+        self.proxies_pane.set_proxies(keep)
+        self._dirty(True)
+
     # ---------------------------------------------------------------- QGIS
     def _qgis_dir(self) -> Path:
         if self.doc.path:
@@ -1679,6 +1904,9 @@ class MainWindow(QMainWindow):
         drawn = [u for u in self.units if u.us]
         sites = self.pa_pane.site_names() if self.pa is not None else []
         choices = []
+        if self.chunk.meta.get("proxies"):
+            choices.append(("proxies", f"Proxy solidi delle US ({len(self.chunk.meta['proxies'])}): volumi e quantita' "
+                                       "per il computo"))
         if drawn:
             choices.append(("drawn", f"Unita' disegnate in questo progetto ({len(drawn)})"))
         choices += [("pa:" + s, f"Poligoni US da PyArchInit - {s}") for s in sites]
@@ -1697,6 +1925,24 @@ class MainWindow(QMainWindow):
 
         def job(p):
             units, records, site = None, None, None
+            if choice == "proxies":
+                from ..bim.ifc import export_proxies_ifc
+
+                objs = [o[2] for o in self._proxy_objects()]
+                site = next((e.get("sito") for e in self.chunk.meta["proxies"] if e.get("sito")), None)
+                if self.pa is not None and site:
+                    try:
+                        records = self.pa.us_records(site)
+                    except Exception:
+                        records = None
+                survey = None
+                if v["survey"] and self.chunk.model is not None:
+                    survey = self.chunk.model
+                    survey.apply_transform(self.chunk.transform)
+                out = export_proxies_ifc(objs, path, crs=self.chunk.crs, us_records=records, site=site,
+                                         survey_mesh=survey, project=self.chunk.label, progress=p.sub(0.05, 0.85))
+                p(0.92, "Verifica del file IFC")
+                return out, read_ifc_elements(out), len(objs)
             if choice == "drawn":
                 units = drawn
                 if self.pa is not None and sites:

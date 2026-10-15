@@ -626,9 +626,11 @@ class IfcPreviewDialog(QDialog):
         table.setHorizontalHeaderLabels(["Elemento", "Classe IFC", "Triangoli", "Attributi"])
         palette = [(205, 205, 205), (230, 80, 80), (80, 160, 230), (90, 200, 110), (240, 180, 60), (160, 100, 220)]
         for r, e in enumerate(elements):
-            props = {k: v for pset in e["psets"].values() for k, v in pset.items()}
+            props = {k: v for name, pset in e["psets"].items() if not name.startswith("Qto") for k, v in pset.items()}
+            qto = e["psets"].get("Qto_PyArchInit_US", {})
+            q = (f"V {qto['NetVolume']:.3f} m3, A {qto.get('GrossArea', 0):.2f} m2; " if "NetVolume" in qto else "")
             vals = [e["name"], e["ifc_class"], f"{len(e['faces']):,}",
-                    ", ".join(f"{k}={v}" for k, v in list(props.items())[:6])]
+                    q + ", ".join(f"{k}={v}" for k, v in list(props.items())[:6])]
             for c, v in enumerate(vals):
                 it = QTableWidgetItem(str(v))
                 if c == 0:
@@ -665,3 +667,158 @@ class IfcPreviewDialog(QDialog):
         bb.addButton(b_dir, QDialogButtonBox.ButtonRole.ActionRole)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
+
+
+# ---------------------------------------------------------------- PyArchInit US form
+US_TYPES = ["US", "USM", "USR", "USD", "USV", "USVs", "USVn", "SF", "VSF", "CON", "DOC", "TSU", "SE"]
+US_FORM_PAGES = [
+    ("Descrizione", [("d_stratigrafica", "Definizione stratigrafica"), ("d_interpretativa", "Definizione interpretativa"),
+                     ("descrizione", "Descrizione*"), ("interpretazione", "Interpretazione*"),
+                     ("osservazioni", "Osservazioni*")]),
+    ("Cronologia", [("periodo_iniziale", "Periodo iniziale"), ("fase_iniziale", "Fase iniziale"),
+                    ("periodo_finale", "Periodo finale"), ("fase_finale", "Fase finale"), ("datazione", "Datazione"),
+                    ("elem_datanti", "Elementi datanti*"), ("affidabilita", "Affidabilita'")]),
+    ("Dati di scavo", [("anno_scavo", "Anno di scavo"), ("data_schedatura", "Data schedatura"),
+                       ("schedatore", "Schedatore"), ("direttore_us", "Direttore"), ("responsabile_us", "Responsabile"),
+                       ("metodo_di_scavo", "Metodo di scavo"), ("scavato", "Scavato"), ("attivita", "Attivita'"),
+                       ("settore", "Settore"), ("saggio", "Saggio"), ("ambient", "Ambiente")]),
+    ("Caratteri", [("formazione", "Formazione"), ("modo_formazione", "Modo di formazione"),
+                   ("stato_di_conservazione", "Stato di conservazione"), ("colore", "Colore"),
+                   ("consistenza", "Consistenza"), ("criteri_distinzione", "Criteri di distinzione*")]),
+    ("Quote e misure", [("quota_min_abs", "Quota minima assoluta"), ("quota_max_abs", "Quota massima assoluta"),
+                        ("quota_min_rel", "Quota minima relativa"), ("quota_max_rel", "Quota massima relativa"),
+                        ("lunghezza_max", "Lunghezza max"), ("larghezza_media", "Larghezza media"),
+                        ("altezza_max", "Altezza max"), ("altezza_min", "Altezza min"),
+                        ("profondita_max", "Profondita' max"), ("profondita_min", "Profondita' min")]),
+]
+
+
+class UsFormDialog(QDialog):
+    """The US form of PyArchInit (us_table): open, edit or create a record. Only the columns
+    present in the database are shown; text fields marked * are multi-line."""
+
+    def __init__(self, pa, sito: str, area: str = "1", us: str = "", unita_tipo: str = "US", parent=None,
+                 defaults: dict | None = None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QPlainTextEdit, QTableWidget, QTabWidget
+
+        from ..pyarchinit.bridge import parse_relationships
+
+        self.pa = pa
+        self.cols = pa.us_columns()
+        self.record = pa.us_record(sito, area, us, unita_tipo) if us else None
+        self.setWindowTitle(("Scheda US - " if self.record else "Nuova US - ") + sito)
+        self.resize(760, 640)
+        lay = QVBoxLayout(self)
+        head = QFormLayout()
+        self.sito = QLineEdit(sito)
+        self.area = QLineEdit(str(area))
+        self.us = QLineEdit(str(us))
+        self.tipo = QComboBox()
+        self.tipo.setEditable(True)
+        self.tipo.addItems(US_TYPES)
+        self.tipo.setCurrentText(unita_tipo or "US")
+        for w in (self.sito, self.area, self.us):
+            w.setReadOnly(self.record is not None)
+        self.tipo.setEnabled(self.record is None)
+        row = QHBoxLayout()
+        for label, w in (("Sito", self.sito), ("Area", self.area), ("US", self.us), ("Tipo", self.tipo)):
+            row.addWidget(QLabel(label))
+            row.addWidget(w, 2 if label == "Sito" else 1)
+        lay.addLayout(row)
+        tabs = QTabWidget()
+        self.fields: dict[str, QWidget] = {}
+        data = dict(self.record or {})
+        data.update({k: v for k, v in (defaults or {}).items() if not data.get(k)})
+        for page, fields in US_FORM_PAGES:
+            w = QWidget()
+            form = QFormLayout(w)
+            for name, label in fields:
+                if name not in self.cols:
+                    continue
+                multi = label.endswith("*")
+                val = "" if data.get(name) is None else str(data.get(name))
+                edit = QPlainTextEdit(val) if multi else QLineEdit(val)
+                if multi:
+                    edit.setMaximumHeight(90)
+                form.addRow(label.rstrip("*"), edit)
+                self.fields[name] = edit
+            tabs.addTab(w, page)
+        # relationships
+        rel_w = QWidget()
+        rl = QVBoxLayout(rel_w)
+        self.rel = QTableWidget(0, 4)
+        self.rel.setHorizontalHeaderLabels(["Rapporto", "US", "Area", "Sito"])
+        self.rel.horizontalHeader().setStretchLastSection(True)
+        self.rel.setColumnWidth(0, 190)
+        for r in parse_relationships(data.get("rapporti")):
+            self._add_rel(r)
+        btns = QHBoxLayout()
+        b_add, b_del = QPushButton("Aggiungi rapporto"), QPushButton("Rimuovi")
+        b_add.clicked.connect(lambda: self._add_rel(["Copre", "", self.area.text(), self.sito.text()]))
+        b_del.clicked.connect(lambda: self.rel.removeRow(self.rel.currentRow()) if self.rel.currentRow() >= 0 else None)
+        btns.addWidget(b_add)
+        btns.addWidget(b_del)
+        btns.addStretch(1)
+        rl.addWidget(self.rel, 1)
+        rl.addLayout(btns)
+        if "rapporti" in self.cols:
+            tabs.addTab(rel_w, "Rapporti")
+        lay.addWidget(tabs, 1)
+        self.status = QLabel("")
+        lay.addWidget(self.status)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self.save)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self.saved_id: int | None = None
+
+    def _add_rel(self, r) -> None:
+        from PySide6.QtWidgets import QTableWidgetItem
+
+        from ..pyarchinit.bridge import PyArchInit
+
+        i = self.rel.rowCount()
+        self.rel.insertRow(i)
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.addItems(PyArchInit.RELATIONS)
+        combo.setCurrentText(r[0])
+        self.rel.setCellWidget(i, 0, combo)
+        for c, v in enumerate(r[1:4], 1):
+            self.rel.setItem(i, c, QTableWidgetItem(v))
+
+    def relationships(self) -> list[list[str]]:
+        out = []
+        for i in range(self.rel.rowCount()):
+            rel = self.rel.cellWidget(i, 0).currentText().strip()
+            vals = [(self.rel.item(i, c).text().strip() if self.rel.item(i, c) else "") for c in (1, 2, 3)]
+            if rel and vals[0]:
+                out.append([rel] + vals)
+        return out
+
+    def values(self) -> dict:
+        out = {}
+        for name, w in self.fields.items():
+            text = w.toPlainText() if hasattr(w, "toPlainText") else w.text()
+            out[name] = text.strip() or None
+        if "rapporti" in self.cols:
+            out["rapporti"] = self.relationships()
+        return out
+
+    def save(self) -> None:
+        vals = self.values()
+        try:
+            if self.record:
+                self.pa.update_us(int(self.record["id_us"]), **vals)
+                self.saved_id = int(self.record["id_us"])
+            else:
+                if not self.us.text().strip():
+                    self.status.setText("Indica il numero di US")
+                    return
+                self.saved_id = self.pa.create_us(self.sito.text().strip(), self.area.text().strip(),
+                                                  self.us.text().strip(), self.tipo.currentText().strip() or "US", **vals)
+        except Exception as exc:
+            self.status.setText(f"Salvataggio non riuscito: {exc}")
+            return
+        self.accept()

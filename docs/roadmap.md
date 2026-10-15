@@ -20,14 +20,16 @@ redirected to rasterio's own in worker threads, packaged applications for macOS 
 Editable layer attributes (write-back to PyArchInit), live QGIS project, imports from
 Metashape `.psx`, WebODM/ODM and Photo3D, Photo3D engine entry point (`ppg photo3d-job`),
 SAM 2.1 installed on demand in the packaged app, IFC export with progress/preview and units
-in metres, corrected cut/fill volumes, signing and notarization in the build.
+in metres, corrected cut/fill volumes, signing and notarization in the build. US forms (create/edit `us_table` records with
+relationships), 3D proxies of stratigraphic units (Extended Matrix OBJ, 3D media in PyArchInit),
+IFC proxies with quantities, materials, phase groups and relationships.
 
 ## 0.5 - Interface
 
 * Batch processing over several chunks; chunk alignment and merging.
 * Section and plan-slice tools drawn directly in the 3D view; editable markers in 3D.
 * Point-cloud class editing (lasso) and filtering by class or confidence.
-* PyArchInit panel: browsing media and opening linked US forms; attribute editing of units.
+* PyArchInit panel: browsing media linked to US.
 * English/Italian interface translation.
 
 ## Engine

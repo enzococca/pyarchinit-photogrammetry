@@ -190,10 +190,10 @@ then `ppg.app.document` inside the script (in the GUI: **Strumenti > Esegui scri
 | Dense | Depth maps and fusion on CPU (built-in), COLMAP PatchMatch on NVIDIA GPUs, OpenMVS when installed |
 | Products | Point cloud (PLY/LAS 1.4 with classes), mesh (Poisson in an isolated process with automatic fallback, or 2.5D), texture atlas (OBJ+MTL+JPG), DEM, orthomosaic, hillshade, slope, HTML report |
 | Markers | Printable ArUco/AprilTag sheets with scale bar, turntable mats with known layout, sub-pixel detection, triangulation, GCP/check points, scale bars, weighted 7-parameter transformation, any EPSG CRS (geographic GCPs go to the UTM zone) |
-| Archaeology | Vertical sections and parallel cross sections, plan slices at a given elevation, DXF/SVG drawings at scale, contour lines, cut/fill volumes, pottery: rotation axis from sherds, profile, rim/base diameter, height, wall thickness, drawing with filled section |
-| BIM | IFC4 export with IfcMapConversion + IfcProjectedCRS georeferencing, one element per stratigraphic unit with `Pset_PyArchInit_US` |
+| Archaeology | Vertical sections and parallel cross sections, plan slices at a given elevation, DXF/SVG drawings at scale, contour lines, cut/fill volumes, 3D proxies of stratigraphic units (closed solids, Extended Matrix OBJ), pottery: rotation axis from sherds, profile, rim/base diameter, height, wall thickness, drawing with filled section |
+| BIM | IFC4 export with IfcMapConversion + IfcProjectedCRS georeferencing, one element per stratigraphic unit with `Pset_PyArchInit_US`; with US proxies, closed solids carrying quantities (`Qto_PyArchInit_US`: volume, area, height, elevations), materials, period/phase groups and stratigraphic relationships (see [docs/bim.md](docs/bim.md)) |
 | AI | Rule-based classification (ground, vegetation, masonry, noise) with archaeological LAS classes 64-71; Segment Anything 2.1 on orthomosaics and photos, masks projected to the point cloud, automatic candidate units |
-| PyArchInit | Reads `config.cfg` and the database (SQLite/SpatiaLite or PostgreSQL/PostGIS) without QGIS; publishes orthophotos, DEMs and 3D models as media with PyArchInit thumbnails, documentation records and footprints, US links, US polygons, spot heights, section traces, volumes |
+| PyArchInit | Reads `config.cfg` and the database (SQLite/SpatiaLite or PostgreSQL/PostGIS) without QGIS; creates and edits US forms with their stratigraphic relationships; publishes orthophotos, DEMs, 3D models and US proxies as media with PyArchInit thumbnails, documentation records and footprints, US links, US polygons, spot heights, section traces, volumes |
 
 ## PyArchInit integration
 
