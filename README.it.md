@@ -98,8 +98,10 @@ scrive un log in `~/Library/Logs/pyarchinit-photogrammetry` (macOS),
 * **QGIS dal vivo**: *QGIS > Apri in QGIS* apre ortofoto, DEM e tutti i layer disegnati in un
   progetto QGIS; disegni e attributi modificati compaiono in QGIS entro un secondo.
 * **Metashape**: *File > Importa > Progetto Metashape* legge direttamente il `.psx` (camere
-  calibrate, marker, punti di legame, modello, DEM e ortofoto esportati) e si prosegue qui
-  (nuvola densa, sezioni, PyArchInit, IFC) senza riallineare.
+  calibrate anche nei gruppi, marker, punti di legame di tutte le componenti, mesh anche di
+  milioni di facce con anteprima per la vista 3D, DEM e ortofoto esportati) e si prosegue qui
+  (nuvola densa, sezioni, PyArchInit, IFC) senza riallineare. Se il progetto non ha una nuvola
+  densa, i vertici colorati della mesh diventano la nuvola densa.
 * **WebODM/ODM**: la cartella del task o `all.zip` diventa un progetto con ortofoto, DEM,
   nuvola e mesh.
 * **Photo3D**: `ppg photo3d-job` è un motore pronto per Photo3D; le sessioni si possono anche importare.
@@ -115,6 +117,9 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
   database ha una scheda US ridotta (per esempio il database demo della versione 0.2), la scheda
   lo segnala e *Aggiorna struttura del database* aggiunge i campi mancanti, dopo una copia di
   sicurezza del file, senza toccare i record.
+* **Disegno**: *Disegna US* con clic sui vertici o *Mano libera* (tieni premuto, traccia, rilascia);
+  *Snap* aggancia i punti a vertici e/o segmenti dei layer visibili (tolleranza 6/12/20 px), così
+  le unità disegnate lungo un confine lo condividono senza buchi né sovrapposizioni.
 * **Selezione dei vettori**: *Seleziona* nella barra Disegno (clic, Maiusc/Cmd+clic, riquadro);
   *Elimina* (o Canc) cancella unità, parti, tracce di sezione, linee e punti; *Unisci* fonde le
   unità in un solo poligono o linee contigue dello stesso layer. Per i poligoni caricati da

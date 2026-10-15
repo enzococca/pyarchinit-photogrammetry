@@ -9,11 +9,11 @@ import traceback
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QSettings, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QDockWidget, QFileDialog, QInputDialog,
-                               QLabel, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget,
-                               QTabWidget, QToolBar, QVBoxLayout, QWidget)
+                               QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget,
+                               QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from .. import __version__
 from ..app import app as application
@@ -44,7 +44,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_TITLE)
         self.setWindowIcon(app_icon())
         self.resize(1500, 950)
-        self.settings = QSettings("pyarchinit", "pyarchinit-photogrammetry")
+        from . import app_settings
+
+        self.settings = app_settings()
         self.runner = TaskRunner(self)
         self.runner.status.connect(lambda s: self.statusBar().showMessage(s, 8000))
         self.runner.busy_changed.connect(self._busy)
@@ -268,6 +270,35 @@ class MainWindow(QMainWindow):
             self.draw_group.addAction(a)
             dm.addAction(a)
             self.draw_actions[mode] = a
+        # drawing options: freehand units, snapping to vertices / segments of the visible layers
+        self.a_freehand = QAction(icon("freehand"), "Mano libera", self, checkable=True)
+        self.a_freehand.setToolTip("Disegno a mano libera delle unita': tieni premuto, traccia e rilascia per chiudere")
+        self.a_freehand.setChecked(self.settings.value("draw/freehand", "false") in ("true", True))
+        self.a_freehand.toggled.connect(lambda _on: self._apply_draw_options())
+        dm.addAction(self.a_freehand)
+        self.snap_menu = QMenu("Snap", self)
+        self.a_snap = QAction(icon("snap"), "Snap", self, checkable=True)
+        self.a_snap.setToolTip("Aggancia i punti ai vertici e/o ai segmenti dei layer visibili (scegli dal menu)")
+        self.a_snap.setChecked(self.settings.value("draw/snap", "false") in ("true", True))
+        self.a_snap.setMenu(self.snap_menu)
+        self.a_snap_vertex = self.snap_menu.addAction("Vertici")
+        self.a_snap_segment = self.snap_menu.addAction("Segmenti")
+        for a, key in ((self.a_snap_vertex, "draw/snap_vertex"), (self.a_snap_segment, "draw/snap_segment")):
+            a.setCheckable(True)
+            a.setChecked(self.settings.value(key, "true") in ("true", True))
+        self.snap_menu.addSeparator()
+        tol_group = QActionGroup(self)
+        self.snap_tol_actions = {}
+        for px in (6, 12, 20):
+            a = self.snap_menu.addAction(f"Tolleranza {px} px")
+            a.setCheckable(True)
+            a.setChecked(int(self.settings.value("draw/snap_px", 12)) == px)
+            tol_group.addAction(a)
+            self.snap_tol_actions[px] = a
+        for a in [self.a_snap, self.a_snap_vertex, self.a_snap_segment, *self.snap_tol_actions.values()]:
+            a.toggled.connect(lambda _on: self._apply_draw_options())
+        dm.addAction(self.a_snap)
+        dm.addSeparator()
         self.a_sel_delete = self._act(dm, "Elimina selezionati", lambda: self.delete_selected(), icon_name="delete")
         self.a_sel_delete.setToolTip("Elimina gli elementi selezionati (tasto Canc nella modalita' Seleziona)")
         self.a_sel_merge = self._act(dm, "Unisci selezionati", lambda: self.merge_selected(), icon_name="merge")
@@ -393,6 +424,9 @@ class MainWindow(QMainWindow):
                 a.triggered.connect(lambda _=False, s=slot: s())
                 if processing:
                     self._processing_actions.append(a)
+        tb.addSeparator()  # analyses of the DEM and of the model, next to the products they use
+        for a in (self.a_contours, self.a_volume, self.a_slice):
+            tb.addAction(a)
         # drawing and layer tools, always visible under the workflow
         self.addToolBarBreak()
         db = QToolBar("Disegno e layer")
@@ -414,14 +448,18 @@ class MainWindow(QMainWindow):
             if a.toolTip() == a.text().replace("...", "").replace("&", ""):
                 a.setToolTip(a.text().replace("...", ""))
             a.setIconText(short)
-        for mode in ("pan", "select", "polygon", "line", "measure", "point"):
+        for mode in ("pan", "select", "polygon"):
+            db.addAction(self.draw_actions[mode])
+        db.addAction(self.a_freehand)
+        db.addAction(self.a_snap)
+        snap_button = db.widgetForAction(self.a_snap)
+        if snap_button is not None:
+            snap_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        for mode in ("line", "measure", "point"):
             db.addAction(self.draw_actions[mode])
         db.addAction(self.a_sel_delete)
         db.addAction(self.a_sel_merge)
         db.addAction(self.a_clear_drawings)
-        db.addSeparator()
-        for a in (self.a_contours, self.a_volume, self.a_slice):
-            db.addAction(a)
         db.addSeparator()
         a = db.addAction(icon("slice"), "Layer")
         a.setToolTip("Pannello dei layer: mostra, nascondi, zoom, attributi")
@@ -435,6 +473,7 @@ class MainWindow(QMainWindow):
         a.triggered.connect(lambda _=False: self.pyarchinit_publish_units())
         self._processing_actions.append(a)
         self._refresh_recent()
+        self._apply_draw_options()
 
     def _show_pane(self, tabs: QTabWidget, widget: QWidget) -> None:
         dock = self.d_work if tabs is self.left_tabs else self.d_photos
@@ -760,11 +799,13 @@ class MainWindow(QMainWindow):
         def done(doc):
             self._started = True
             self.set_document(doc)
-            warn = [w for ch in doc.chunks for w in ch.meta.get("import", {}).get("warnings", [])]
+            warn = list(dict.fromkeys(w for ch in doc.chunks for w in ch.meta.get("import", {}).get("warnings", [])))
             ch = doc.chunk
             text = (f"{len(doc.chunks)} chunk, {len(ch.cameras)} foto ({len(ch.aligned_cameras)} allineate), "
                     f"prodotti: {', '.join(sorted(k for k in ch.products if k != 'reconstruction')) or 'nessuno'}, "
                     f"CRS {ch.crs}")
+            if ch.meta.get("point_cloud_source"):
+                text += f"\nNuvola densa: {ch.meta['point_cloud_source']} ({len(ch.point_cloud)} punti)"
             self.log_pane.info(f"Importato {src}: {text}")
             for w in warn:
                 self.log_pane.warning(w)
@@ -1122,6 +1163,21 @@ class MainWindow(QMainWindow):
                 f"<a href='{DOCS_URL}'>{DOCS_URL}</a>")
 
     # ---------------------------------------------------------------- drawing tools
+    def _apply_draw_options(self) -> None:
+        """Freehand and snapping options to the raster view, remembered between sessions."""
+        v = self.ortho_view
+        v.freehand = self.a_freehand.isChecked()
+        on = self.a_snap.isChecked()
+        v.snap_vertex = on and self.a_snap_vertex.isChecked()
+        v.snap_segment = on and self.a_snap_segment.isChecked()
+        v.snap_px = float(next((px for px, a in self.snap_tol_actions.items() if a.isChecked()), 12))
+        for key, value in (("draw/freehand", v.freehand), ("draw/snap", on),
+                           ("draw/snap_vertex", self.a_snap_vertex.isChecked()),
+                           ("draw/snap_segment", self.a_snap_segment.isChecked()), ("draw/snap_px", int(v.snap_px))):
+            self.settings.setValue(key, "true" if value is True else "false" if value is False else value)
+        if v.mode == "polygon":
+            self.set_draw_mode("polygon")  # refresh the hint
+
     def set_draw_mode(self, mode: str) -> None:
         if mode != "pan" and self.ortho_view.tr is None:
             self.draw_actions["pan"].setChecked(True)
@@ -1133,7 +1189,9 @@ class MainWindow(QMainWindow):
         hints = {"pan": "Trascina per spostare, rotella per lo zoom, clic su un elemento per i suoi attributi",
                  "select": "Clic per selezionare, Maiusc/Cmd+clic per aggiungere o togliere, trascina per un riquadro; "
                            "Canc elimina, Unisci fonde le unita', Esc deseleziona",
-                 "polygon": "Clic per i vertici, doppio clic per chiudere, tasto destro per annullare",
+                 "polygon": ("Tieni premuto e traccia l'unita' a mano libera, rilascia per chiudere; tasto destro per annullare"
+                             if self.ortho_view.freehand else
+                             "Clic per i vertici, doppio clic per chiudere, tasto destro per annullare"),
                  "line": "Due clic: inizio e fine della sezione", "measure": "Due clic per misurare",
                  "point": "Clic sinistro: punto positivo, destro: negativo (prompt SAM); quote nel log"}
         self.statusBar().showMessage(hints.get(mode, ""), 15000)

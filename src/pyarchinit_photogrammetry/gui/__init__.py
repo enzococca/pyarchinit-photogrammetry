@@ -32,6 +32,16 @@ def _frozen_posix() -> bool:
     return bool(getattr(sys, "frozen", False)) and os.name != "nt"
 
 
+def app_settings():
+    """The preferences of the interface. In the application they live in the native store
+    (``~/Library/Preferences/com.pyarchinit.pyarchinit-photogrammetry.plist``, the Windows
+    registry); ``QSettings.setDefaultFormat``/``setPath`` redirect them (tests do), which the
+    two-argument ``QSettings(organization, application)`` constructor would ignore."""
+    from PySide6.QtCore import QSettings
+
+    return QSettings(QSettings.defaultFormat(), QSettings.Scope.UserScope, "pyarchinit", "pyarchinit-photogrammetry")
+
+
 def install_translations(qapp) -> bool:
     """Italian texts for Qt's own widgets (OK/Annulla/Salva buttons, file dialogs)."""
     from PySide6.QtCore import QLibraryInfo, QTranslator
@@ -64,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
             _hard_exit(code)
         return code
     try:
-        from PySide6.QtCore import QSettings, QTimer, Qt
+        from PySide6.QtCore import QTimer, Qt
         from PySide6.QtWidgets import QApplication
     except ImportError:  # pragma: no cover - depends on the installation
         print("The interface needs PySide6: pip install \"pyarchinit-photogrammetry[gui]\"", file=sys.stderr)
@@ -84,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     qapp.setOrganizationName("pyarchinit")
     qapp.setWindowIcon(app_icon())
     install_translations(qapp)
-    settings = QSettings("pyarchinit", "pyarchinit-photogrammetry")
+    settings = app_settings()
     theme.apply(qapp, str(settings.value("theme", "light")))
     from .main_window import MainWindow
 

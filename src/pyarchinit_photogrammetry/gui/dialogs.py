@@ -441,7 +441,6 @@ class ConnectDialog(QDialog):
 
     def __init__(self, parent=None, settings=None):
         super().__init__(parent)
-        from PySide6.QtCore import QSettings
         from PySide6.QtWidgets import QGroupBox, QRadioButton, QSpinBox
 
         from ..pyarchinit.config import PyArchInitConfig, pyarchinit_home
@@ -451,7 +450,9 @@ class ConnectDialog(QDialog):
 
         self.setWindowTitle("Connessione a PyArchInit")
         self.setMinimumWidth(560)
-        self.settings = settings or QSettings("pyarchinit", "pyarchinit-photogrammetry")
+        from . import app_settings
+
+        self.settings = settings or app_settings()
         lay = QVBoxLayout(self)
         self._group = QButtonGroup(self)  # the radio buttons live in different group boxes
         # --- PyArchInit installation

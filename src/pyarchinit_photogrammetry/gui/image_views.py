@@ -80,9 +80,15 @@ class RasterView(_ZoomView):
     """Orthomosaic or DEM in world coordinates, with drawing tools.
 
     Modes: ``pan``; ``select`` (click, shift/cmd-click or drag a box to select features,
-    Delete to remove them); ``polygon`` (click vertices, double click to close: a unit);
+    Delete to remove them); ``polygon`` (click vertices, double click to close: a unit; with
+    ``freehand`` press, draw and release);
     ``line`` (two clicks: a section trace); ``measure`` (two clicks: distance and
-    height difference); ``point`` (one click: elevation / SAM prompt)."""
+    height difference); ``point`` (one click: elevation / SAM prompt).
+
+    Snapping (``snap_vertex``, ``snap_segment``, tolerance ``snap_px`` in screen pixels) moves
+    the points of every drawing tool onto the vertices or the segments of the visible layers."""
+
+    DRAW_MODES = ("polygon", "line", "measure", "point")
 
     mouse_world = Signal(float, float, object)  # x, y, z or None
     polygon_finished = Signal(object)  # (N,2) world XY
@@ -114,6 +120,13 @@ class RasterView(_ZoomView):
         self._band = None
         self._press_mods = Qt.KeyboardModifier.NoModifier
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # Delete / Esc in select mode
+        self.freehand = False  # polygon tool: press, draw, release
+        self._stroking = False
+        self.snap_vertex = False
+        self.snap_segment = False
+        self.snap_px = 12.0
+        self._snap_cache = None  # (vertices (n, 2), segments (m, 2, 2)) in world coordinates
+        self._snap_marks: dict = {}
 
     # ----------------------------------------------------------- data
     def load(self, path: str | Path, kind: str, max_side: int = 6000) -> None:
@@ -122,6 +135,7 @@ class RasterView(_ZoomView):
 
         had_selection = bool(self.selection)
         self.selection, self._sel_marks, self._band, self._band_origin = [], [], None, None  # deleted by clear()
+        self._snap_marks, self._snap_cache, self._stroking = {}, None, False
         self.scene().clear()
         self.overlays, self._clicks, self._rubber = [], [], None
         self.layers, self.layer_order = {}, []
@@ -203,6 +217,7 @@ class RasterView(_ZoomView):
         item.setData(0, layer)
         item.setData(1, attrs)
         lay["features"].append((item, label_item, attrs))
+        self._snap_cache = None
         for it in (item, label_item):
             if it is not None:
                 it.setVisible(lay["visible"])
@@ -292,6 +307,7 @@ class RasterView(_ZoomView):
         if lay is None:
             return
         lay["visible"] = bool(visible)
+        self._snap_cache = None
         for item, label_item, _ in lay["features"]:
             item.setVisible(visible)
             if label_item is not None:
@@ -302,6 +318,7 @@ class RasterView(_ZoomView):
         if lay is None:
             return
         self.layer_order.remove(name)
+        self._snap_cache = None
         gone = {id(f[0]) for f in lay["features"]}
         if any(id(it) in gone for it in self.selection):
             self.select_items([it for it in self.selection if id(it) not in gone])
@@ -352,6 +369,7 @@ class RasterView(_ZoomView):
 
     def clear_overlays(self) -> None:
         self.clear_selection()
+        self._snap_cache = None
         for it in self.overlays:
             self.scene().removeItem(it)
         self.overlays = []
@@ -363,6 +381,8 @@ class RasterView(_ZoomView):
             self.clear_selection()
         self.mode = mode
         self._clicks = []
+        self._stroking = False
+        self._show_snap(None, None)
         if self._rubber is not None:
             self.scene().removeItem(self._rubber)
             self._rubber = None
@@ -370,6 +390,97 @@ class RasterView(_ZoomView):
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag if mode == "pan" else QGraphicsView.DragMode.NoDrag)
         cursor = {"pan": Qt.CursorShape.OpenHandCursor, "select": Qt.CursorShape.ArrowCursor}
         self.viewport().setCursor(cursor.get(mode, Qt.CursorShape.CrossCursor))
+
+    # ----------------------------------------------------------- snapping
+    def _snap_data(self):
+        """Vertices and segments of the visible layers, in world coordinates (cached)."""
+        if self._snap_cache is None:
+            verts, segs = [], []
+            for lay in self.layers.values():
+                if not lay["visible"]:
+                    continue
+                for _item, _label, attrs in lay["features"]:
+                    gtype, coords = attrs.get("_geom", (None, None))
+                    if gtype is None:
+                        continue
+                    if gtype == "Point":
+                        verts.append(np.asarray([coords], float)[:, :2])
+                        continue
+                    c = np.asarray(coords, float)[:, :2]
+                    if gtype == "Polygon" and len(c) > 2 and not np.allclose(c[0], c[-1]):
+                        c = np.vstack([c, c[:1]])
+                    verts.append(c)
+                    if len(c) >= 2:
+                        segs.append(np.stack([c[:-1], c[1:]], axis=1))
+            self._snap_cache = (np.vstack(verts) if verts else np.zeros((0, 2)),
+                                np.vstack(segs) if segs else np.zeros((0, 2, 2)))
+        return self._snap_cache
+
+    def snap(self, scene_pos: QPointF):
+        """``(position, kind)``: the nearest vertex (preferred) or point on a segment within
+        ``snap_px`` screen pixels, ``kind`` "vertex"/"segment"; the position itself otherwise."""
+        if self.tr is None or not (self.snap_vertex or self.snap_segment):
+            return scene_pos, None
+        p = np.array(self.world(scene_pos))
+        tol = self.snap_px / max(self.transform().m11(), 1e-12) * abs(self.tr.a)  # screen px -> world units
+        verts, segs = self._snap_data()
+        if self.snap_vertex and len(verts):
+            d = np.hypot(*(verts - p).T)
+            i = int(np.argmin(d))
+            if d[i] <= tol:
+                return self.scene_pt(*verts[i]), "vertex"
+        if self.snap_segment and len(segs):
+            a, b = segs[:, 0], segs[:, 1]
+            near = ((np.minimum(a[:, 0], b[:, 0]) - tol <= p[0]) & (p[0] <= np.maximum(a[:, 0], b[:, 0]) + tol)
+                    & (np.minimum(a[:, 1], b[:, 1]) - tol <= p[1]) & (p[1] <= np.maximum(a[:, 1], b[:, 1]) + tol))
+            if near.any():
+                a, b = a[near], b[near]
+                ab = b - a
+                t = np.clip(np.sum((p - a) * ab, axis=1) / np.maximum(np.sum(ab * ab, axis=1), 1e-24), 0.0, 1.0)
+                q = a + t[:, None] * ab
+                d = np.hypot(*(q - p).T)
+                i = int(np.argmin(d))
+                if d[i] <= tol:
+                    return self.scene_pt(*q[i]), "segment"
+        return scene_pos, None
+
+    def _show_snap(self, pos: QPointF | None, kind: str | None) -> None:
+        """A magenta square on a vertex, a circle on a segment."""
+        for k, it in list(self._snap_marks.items()):
+            if it.scene() is not self.scene():
+                del self._snap_marks[k]
+        for k in ("vertex", "segment"):
+            it = self._snap_marks.get(k)
+            if k != kind or pos is None:
+                if it is not None:
+                    it.setVisible(False)
+                continue
+            if it is None:
+                pen = self._pen("#ff00ff", 2.0)
+                it = (self.scene().addRect(QRectF(-6, -6, 12, 12), pen) if k == "vertex"
+                      else self.scene().addEllipse(QRectF(-6, -6, 12, 12), pen))
+                it.setFlag(it.GraphicsItemFlag.ItemIgnoresTransformations)
+                it.setZValue(10002)
+                self._snap_marks[k] = it
+            it.setPos(pos)
+            it.setVisible(True)
+
+    def _finish_stroke(self) -> None:
+        """End of a freehand stroke: the traced polygon, simplified within half a pixel (the
+        kept points are original ones, so snapped points stay on their target)."""
+        self._stroking = False
+        pts = list(self._clicks)
+        if len(pts) >= 3:
+            xy = np.array([self.world(p) for p in pts])
+            from shapely.geometry import LineString
+
+            tol = 0.5 / max(self.transform().m11(), 1e-12) * abs(self.tr.a)
+            simple = np.asarray(LineString(xy).simplify(tol, preserve_topology=False).coords)
+            if len(simple) >= 3:
+                self.set_mode("polygon")
+                self.polygon_finished.emit(simple)
+                return
+        self.set_mode(self.mode)
 
     # ----------------------------------------------------------- selection
     def _feature_items(self, items) -> list:
@@ -501,7 +612,17 @@ class RasterView(_ZoomView):
         sp = self.mapToScene(ev.position().toPoint())
         x, y = self.world(sp)
         self.mouse_world.emit(x, y, self.elevation(x, y))
-        if self._clicks:
+        if self.mode in self.DRAW_MODES:
+            snapped, kind = self.snap(sp)
+            self._show_snap(snapped if kind else None, kind)
+            if self._stroking:
+                last = self.mapFromScene(self._clicks[-1])
+                if (ev.position().toPoint() - last).manhattanLength() >= 3:
+                    self._clicks.append(snapped)
+                    self._update_rubber()
+            elif self._clicks:
+                self._update_rubber(snapped)
+        elif self._clicks:
             self._update_rubber(sp)
         if self.mode == "select" and self._band_origin is not None:
             start = self.mapFromScene(self._band_origin)
@@ -514,6 +635,9 @@ class RasterView(_ZoomView):
                 self._band.setRect(QRectF(self._band_origin, sp).normalized())
 
     def mouseReleaseEvent(self, ev) -> None:
+        if self._stroking and ev.button() == Qt.MouseButton.LeftButton:
+            self._finish_stroke()
+            return
         if self.mode == "select" and self._band_origin is not None and ev.button() == Qt.MouseButton.LeftButton:
             mods = self._press_mods
             extend = bool(mods & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier
@@ -544,6 +668,8 @@ class RasterView(_ZoomView):
             elif ev.button() == Qt.MouseButton.RightButton and self.selection:
                 self._selection_menu(ev.globalPosition().toPoint())
             return
+        if self.mode in self.DRAW_MODES and ev.button() != Qt.MouseButton.RightButton:
+            sp = self.snap(sp)[0]
         if self.mode == "point":
             x, y = self.world(sp)
             ok = ev.button() != Qt.MouseButton.RightButton
@@ -554,6 +680,11 @@ class RasterView(_ZoomView):
             return
         if ev.button() == Qt.MouseButton.RightButton:  # cancel the current drawing
             self.set_mode(self.mode)
+            return
+        if self.mode == "polygon" and self.freehand:  # start a stroke; release closes it
+            self._clicks = [sp]
+            self._stroking = True
+            self._update_rubber()
             return
         self._clicks.append(sp)
         self._update_rubber()

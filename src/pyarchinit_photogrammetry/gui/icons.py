@@ -42,7 +42,7 @@ ICONS = {
     "line": ("mdi6.vector-line", "indigo"), "measure": ("mdi6.ruler", "teal"),
     "point": ("mdi6.map-marker-plus-outline", "green"), "eraser": ("mdi6.eraser", "grey"),
     "select": ("mdi6.select-drag", "indigo"), "delete": ("mdi6.delete-outline", "red"),
-    "merge": ("mdi6.vector-union", "violet"),
+    "merge": ("mdi6.vector-union", "violet"), "freehand": ("mdi6.draw", "red"), "snap": ("mdi6.magnet", "violet"),
     "contours": ("mdi6.waves", "brown"), "volume": ("mdi6.shovel", "brown"),
     "slice": ("mdi6.layers-outline", "orange"), "pottery": ("mdi6.pot-outline", "orange"),
     "classify": ("mdi6.tag-multiple-outline", "lime"), "sam": ("mdi6.auto-fix", "violet"),

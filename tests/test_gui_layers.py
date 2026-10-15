@@ -314,3 +314,87 @@ def test_merge_and_delete_write_back_to_pyarchinit(window, qapp, pa_db, monkeypa
     assert [int(r.attributes["gid"]) for r in rows] == [gids[0]]
     assert abs(rows[0].geometry.area - 0.32) < 1e-4 and rows[0].us == "1"
     assert not w.pa_pending and not w.pa_deleted and w.b_pa_save.isHidden()
+
+
+def test_preferences_stay_in_the_test_folder(window, tmp_path):
+    """The window must not read or write the user's real preferences while tested."""
+    assert str(tmp_path) in window.settings.fileName()
+
+
+class _AcceptUnit:
+    """UnitDialog stand-in: accepts with US 9."""
+
+    class DialogCode:
+        Accepted = 1
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def exec(self):
+        return 1
+
+    def values(self):
+        return {"us": "9", "area": "1", "tipo": "US"}
+
+
+def test_freehand_and_snapping(window, qapp, monkeypatch):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from shapely.geometry import box
+
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    monkeypatch.setattr(mw, "UnitDialog", _AcceptUnit)
+    w = window
+    v = w.ortho_view
+    for name in list(v.layers):
+        v.set_layer_visible(name, False)
+    x0, y0 = 2480000.0, 4500000.0
+    u = UnitPolygon(box(x0 + 1.0, y0 + 1.2, x0 + 1.6, y0 + 1.8), us="1", area="1", tipo="US")
+    w.units = [u]
+    w._draw_unit(u, 0)
+    v.zoom_to(v.layer_rect("Unita' stratigrafiche"), 0.8)
+    qapp.processEvents()
+
+    def vp(x, y):
+        return v.mapFromScene(v.scene_pt(x0 + x, y0 + y))
+
+    def stroke(points):
+        QTest.mousePress(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, vp(*points[0]))
+        for p in points[1:]:
+            QTest.mouseMove(v.viewport(), vp(*p))
+        QTest.mouseRelease(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, vp(*points[-1]))
+        qapp.processEvents()
+
+    # freehand: press, draw, release closes the unit (simplified, original points kept)
+    w.a_freehand.setChecked(True)
+    w.set_draw_mode("polygon")
+    ring = [(2.0, 1.2), (2.3, 1.2), (2.5, 1.3), (2.5, 1.7), (2.2, 1.8), (2.0, 1.6)]
+    trace = [(a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])) for a, b in zip(ring, ring[1:])
+             for t in np.linspace(0, 1, 12, endpoint=False)]
+    stroke(trace)
+    assert len(w.units) == 2 and w.units[1].us == "9" and 3 <= len(w.units[1].geometry.exterior.coords) - 1 < len(trace)
+    # snapping: clicks land exactly on a vertex and on a segment
+    w.a_freehand.setChecked(False)
+    w.a_snap.setChecked(True)
+    assert v.snap_vertex and v.snap_segment
+    w.set_draw_mode("polygon")
+    QTest.mouseMove(v.viewport(), vp(1.604, 1.797))
+    assert v._snap_marks["vertex"].isVisible()
+    QTest.mouseClick(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, vp(1.604, 1.797))
+    QTest.mouseClick(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, vp(1.597, 1.5))
+    c = [v.world(p) for p in v._clicks]
+    assert np.allclose(c[0], [x0 + 1.6, y0 + 1.8], atol=1e-9) and abs(c[1][0] - (x0 + 1.6)) < 1e-9
+    w.a_snap_vertex.setChecked(False)  # segments only: the corner is no longer preferred
+    assert not v.snap_vertex and v.snap_segment
+    w.a_snap_vertex.setChecked(True)
+    # freehand along the edge of US 1 with a small wobble: a shared edge, no gap and no overlap
+    w.set_draw_mode("pan")
+    w.a_freehand.setChecked(True)
+    w.set_draw_mode("polygon")
+    stroke([(1.6 + 0.004 * np.sin(k), 1.25 + 0.5 * k / 30) for k in range(31)] + [(1.9, 1.75), (1.9, 1.25)])
+    g = w.units[-1].geometry
+    assert g.intersection(w.units[0].geometry).area < 1e-12
+    assert w.units[0].geometry.union(g).geom_type == "Polygon"
+    assert w.settings.value("draw/snap") in ("true", True) and w.settings.value("draw/freehand") in ("true", True)
