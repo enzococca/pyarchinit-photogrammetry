@@ -30,9 +30,30 @@ zone for geographic projects (similarity fitted through Metashape's geocentric f
 
 A COLMAP model is written from the imported poses, so *Nuvola densa*, *Modello*, *DEM* and
 *Ortofoto* run here without aligning again (photos must be where the project says).
-Checked on a 659-photo drone project: tie points against Metashape's DEM, median 4 mm;
-model against the DEM, median 6 mm. Not read: Metashape's own tiled DEM/orthomosaic storage
-(export them as GeoTIFF), dense point clouds of 2.x (`point_clouds/`), masks, skew `b2`, `k4`.
+
+Details of the import:
+
+* cameras and markers inside groups (folders of Metashape's Workspace) are read; empty
+  chunks are skipped and the chunk with most aligned cameras becomes the active one;
+* tie points are read from every alignment component, each through its own transform;
+  points left by components that no longer exist in the project (a stale frame, hundreds
+  of metres away) are left out with a warning;
+* cameras, tie points and model vertices are converted to the CRS point by point (camera
+  rotations follow the local rotation of the conversion), not through one similarity;
+* the model (`mesh.ply` in `model.zip`, up to tens of millions of faces) is extracted as a
+  stream and a coarse copy made by vertex clustering (`model_preview.ply`, about 600,000
+  faces) is what the 3D view shows; the texture is not imported (vertex colours are);
+* Metashape 2.x builds the mesh from depth maps, so most projects have no dense cloud: the
+  coloured mesh vertices become the dense cloud (at most 8 million points). For a real dense
+  cloud run *Nuvola densa* here (it uses Metashape's poses), or build it in Metashape;
+* exported DEM/orthomosaic GeoTIFFs are searched next to the project, not inside other
+  projects' folders, and linked only if they cover the cameras.
+
+Checked on the drone projects of a survey season (29-3265 photos): Tell Dlamah imported in
+6 s (tie points +3 mm and mesh vertices +4 mm from Metashape's DEM, median), a 425-photo
+project with a camera group, a 3265-photo project with a deleted component (+13 mm). Not
+read: Metashape's own tiled DEM/orthomosaic storage (export them as GeoTIFF), dense clouds
+in Metashape's octree format, masks, skew `b2`, `k4`.
 
 ## WebODM / ODM
 

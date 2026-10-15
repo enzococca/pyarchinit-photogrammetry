@@ -234,3 +234,171 @@ def test_ifc_reader_round_trip(processed, tmp_path):
     v = els[1]["vertices"]
     assert 2480001.0 < v[:, 0].min() and v[:, 0].max() < 2480003.0  # metres, in the CRS
     assert steps and max(steps) > 0.5
+
+
+# ---------------------------------------------------------------- Metashape: synthetic project
+def _ply_bytes(fields, records, faces=None):
+    head = ["ply", "format binary_little_endian 1.0", f"element vertex {len(records)}"]
+    names = {"<f4": "float", "u1": "uchar", "<u4": "uint"}
+    head += [f"property {names[t]} {n}" for n, t in fields]
+    body = records.tobytes()
+    if faces is not None:
+        head += [f"element face {len(faces)}", "property list uchar int vertex_indices",
+                 "property list uchar float texcoord"]
+        body += faces.tobytes()
+    return ("\n".join(head + ["end_header"]) + "\n").encode() + body
+
+
+def _fl(values) -> str:
+    return " ".join(repr(float(v)) for v in np.ravel(values))
+
+
+def _zip(path, members):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, data in members.items():
+            z.writestr(name, data)
+
+
+def make_psx(root: Path, n_grid: int = 41):
+    """A Metashape 2.x-like project near Tell Tuqan: chunk transform internal -> geocentric
+    (ENU axes, 0.5 m per internal unit), 4 nadir cameras inside a camera group, tie points of
+    the live component 0 plus stale points of a deleted component 1, and a model with
+    texture coordinates. Returns (psx path, site geocentric origin, east/north/up axes)."""
+    from pyproj import CRS, Transformer
+
+    lon, lat, h = 36.8, 35.8, 300.0
+    origin = np.array(Transformer.from_crs("EPSG:4979", "EPSG:4978", always_xy=True).transform(lon, lat, h))
+    lo, la = np.radians(lon), np.radians(lat)
+    east = np.array([-np.sin(lo), np.cos(lo), 0.0])
+    north = np.array([-np.sin(la) * np.cos(lo), -np.sin(la) * np.sin(lo), np.cos(la)])
+    up = np.array([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo), np.sin(la)])
+    R = np.column_stack([east, north, up])
+    scale = 0.5
+    tr_xml = (f"<transform><rotation>{_fl(R)}</rotation>"
+              f"<translation>{_fl(origin)}</translation><scale>{scale}</scale></transform>")
+    files = root / "scavo.files"
+    cams = ""
+    frame_cams = ""
+    for i, (x, y) in enumerate([(-20, -20), (20, -20), (-20, 20), (20, 20)]):
+        T = np.eye(4)
+        T[:3, :3] = np.diag([1.0, -1.0, -1.0])  # looking down: camera z = -up
+        T[:3, 3] = [x, y, 100.0]  # 50 m above the ground (internal units of 0.5 m)
+        cams += (f'<camera id="{i}" sensor_id="0" component_id="0" label="IMG_{i}">'
+                 f'<transform>{_fl(T)}</transform></camera>')
+        frame_cams += f'<camera camera_id="{i}"><photo path="../../../photos/IMG_{i}.jpg"/></camera>'
+    wkt = CRS.from_epsg(4326).to_wkt("WKT1_GDAL")
+    chunk = (f'<chunk version="1.2.0" label="Chunk 1"><sensors><sensor id="0" label="cam" type="frame">'
+             f'<resolution width="4000" height="3000"/><calibration type="frame" class="adjusted">'
+             f'<resolution width="4000" height="3000"/><f>3000</f><cx>0</cx><cy>0</cy></calibration></sensor></sensors>'
+             f'<components next_id="2" active_id="0"><component id="0" label="Component 1">{tr_xml}</component></components>'
+             f'<cameras><group label="DJI_001">{cams}</group></cameras>'
+             f'<frames><frame id="0" path="0/frame.zip"/></frames>{tr_xml}<reference>{wkt}</reference></chunk>')
+    _zip(files / "project.zip", {"doc.xml": '<document version="1.2.0"><chunks><chunk id="0" path="0/chunk.zip"/></chunks></document>'})
+    _zip(files / "0" / "chunk.zip", {"doc.xml": chunk})
+    _zip(files / "0" / "0" / "frame.zip", {"doc.xml": f'<frame version="1.2.0"><cameras>{frame_cams}</cameras>'
+                                                        '<point_cloud path="point_cloud/point_cloud.zip"/>'
+                                                        '<model id="0" path="model/model.zip"/></frame>'})
+    rng = np.random.default_rng(0)
+    good = np.zeros(1000, dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("id", "<u4")])
+    good["x"], good["y"] = rng.uniform(-50, 50, 1000), rng.uniform(-50, 50, 1000)
+    good["id"] = np.arange(1000)
+    stale = np.zeros(500, dtype=good.dtype)
+    stale["x"], stale["y"], stale["z"] = rng.uniform(-5000, 5000, (3, 500))
+    tracks = np.zeros(1500, dtype=[("red", "u1"), ("green", "u1"), ("blue", "u1")])
+    tracks["red"] = 200
+    fields = [("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("id", "<u4")]
+    _zip(files / "0" / "0" / "point_cloud" / "point_cloud.zip", {
+        "doc.xml": '<point_cloud version="1.7.0"><tracks path="tracks.ply" count="1500"/>'
+                   '<points component_id="0" path="points0.ply" count="1000"/>'
+                   '<points component_id="1" path="points1.ply" count="500"/></point_cloud>',
+        "tracks.ply": _ply_bytes([("red", "u1"), ("green", "u1"), ("blue", "u1")], tracks),
+        "points0.ply": _ply_bytes(fields, good), "points1.ply": _ply_bytes(fields, stale)})
+    g = np.linspace(-50, 50, n_grid)
+    gx, gy = np.meshgrid(g, g)
+    vfields = [("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("red", "u1"), ("green", "u1"), ("blue", "u1"),
+               ("confidence", "<f4")]
+    verts = np.zeros(gx.size, dtype=vfields)
+    verts["x"], verts["y"], verts["z"] = gx.ravel(), gy.ravel(), 0.02 * gx.ravel()
+    verts["green"] = 150
+    idx = np.arange(gx.size).reshape(gx.shape)
+    a, b, c, d = idx[:-1, :-1].ravel(), idx[:-1, 1:].ravel(), idx[1:, 1:].ravel(), idx[1:, :-1].ravel()
+    tri = np.vstack([np.column_stack([a, b, c]), np.column_stack([a, c, d])])
+    faces = np.zeros(len(tri), dtype=[("n", "u1"), ("v", "<i4", (3,)), ("nt", "u1"), ("t", "<f4", (6,))])
+    faces["n"], faces["v"], faces["nt"] = 3, tri, 6
+    _zip(files / "0" / "0" / "model" / "model.zip", {
+        "doc.xml": f'<model version="1.2.0"><mesh path="mesh.ply"><faceCount>{len(tri)}</faceCount></mesh>'
+                   '<texture path="texture.tif"/></model>',
+        "mesh.ply": _ply_bytes(vfields, verts, faces), "texture.tif": b"II*\x00"})
+    psx = root / "scavo.psx"
+    psx.write_text('<document version="1.2.0" path="{projectname}.files/project.zip"/>')
+    return psx, origin, (east, north, up)
+
+
+def test_metashape_groups_components_mesh_and_exact_frame(tmp_path, monkeypatch):
+    from pyproj import Transformer
+
+    from pyarchinit_photogrammetry.integrations import metashape as ms
+    from pyarchinit_photogrammetry.io.mesh_ply import PlyMesh, face_count
+
+    psx, origin, _ = make_psx(tmp_path / "src")
+    monkeypatch.setattr(ms, "PREVIEW_FACES", 1000)  # the 3200-face model gets its display copy
+    doc = ms.import_psx(psx, tmp_path / "out" / "p.ppg")
+    ch = doc.chunk
+    warnings = " | ".join(ch.meta["import"]["warnings"])
+    assert len(ch.aligned_cameras) == 4  # inside a camera group
+    assert len(ch.tie_points) == 1000 and "500 punti di legame" in warnings  # stale component left out
+    assert ch.crs == "EPSG:32637" and ch.meta["import"]["frame"] == "exact"
+    # the ground plane of the internal frame lies at 300 m (ellipsoidal) in UTM
+    e0, n0 = Transformer.from_crs("EPSG:4326", "EPSG:32637", always_xy=True).transform(36.8, 35.8)
+    tw = ch.to_world(ch.tie_points.xyz)
+    assert np.abs(tw[:, 2] - 300.0).max() < 0.005
+    assert abs(np.median(tw[:, 0]) - e0) < 2.0 and abs(np.median(tw[:, 1]) - n0) < 2.0
+    centres = ch.to_world(np.array([c.center for c in ch.aligned_cameras]))
+    assert np.allclose(centres[:, 2], 350.0, atol=0.005)  # 100 internal units of 0.5 m above
+    # the converted poses see the converted points where the original poses saw the originals
+    mc = ms.read_psx(psx)[0]
+    parts, _, _ = ms._read_clouds(mc)
+    P_int = parts[0][1][:200]
+    P_new = ms.crs_mapper(mc, ch.crs)(P_int) - ch.transform[:3, 3]
+    for cam, orig in zip(ch.aligned_cameras, mc.cameras):
+        s = ch.sensor(cam)
+        old = type(cam)(key=cam.key, label=cam.label, path=cam.path, sensor_key=cam.sensor_key)
+        old.transform = orig.transform
+        a, da = old.project(s, P_int)
+        b, _ = cam.project(s, P_new)
+        assert np.abs(a - b)[da > 0].max() < 0.15  # a wrong rotation would give hundreds of pixels
+    # model: extracted, converted in place, display copy, coloured vertices as dense cloud
+    model = ch.product_path("model")
+    mesh = PlyMesh(model)
+    assert mesh.n_faces == 3200 and abs(ch.to_world(mesh.xyz()[:1])[0, 2] - (300.0 - 0.5)) < 0.01
+    assert face_count(ch.data_dir / "model_preview.ply") < 3200
+    assert len(ch.point_cloud) == mesh.n_vertices and ch.meta["point_cloud_source"].startswith("vertici")
+    assert "texture" in warnings
+
+
+def test_metashape_local_frame_with_components(tmp_path):
+    """No reference system: the chunk keeps Metashape's frame; a second live component with
+    its own transform is brought into it."""
+    from pyarchinit_photogrammetry.integrations import metashape as ms
+
+    psx, _, _ = make_psx(tmp_path / "src", n_grid=5)
+    chunk_zip = psx.with_suffix(".files") / "0" / "chunk.zip"
+    with zipfile.ZipFile(chunk_zip) as z:
+        xml = z.read("doc.xml").decode()
+    xml = xml.split("<reference>")[0] + "</chunk>"  # no CRS
+    # component 1 is alive again, shifted by 10 internal units along x
+    shifted = xml[xml.index("<transform>", xml.index("<component ")):xml.index("</transform>", xml.index("<component ")) + 12]
+    m = ms._transform(__import__("xml.etree.ElementTree", fromlist=["fromstring"]).fromstring(shifted))
+    m2 = m.copy()
+    m2[:3, 3] = m[:3, 3] + m[:3, :3] @ np.array([10.0, 0.0, 0.0])
+    t2 = (f"<transform><rotation>{_fl(m2[:3, :3] / 0.5)}</rotation><translation>"
+          f"{_fl(m2[:3, 3])}</translation><scale>0.5</scale></transform>")
+    xml = xml.replace("</component></components>", f'</component><component id="1">{t2}</component></components>')
+    xml = xml.replace('component_id="0" label="IMG_3"', 'component_id="1" label="IMG_3"')
+    _zip(chunk_zip, {"doc.xml": xml})
+    ch = ms.import_psx(psx, tmp_path / "out" / "p.ppg", with_model=False).chunk
+    assert ch.crs == "LOCAL" and len(ch.tie_points) == 1500  # both components are live now
+    moved = next(c for c in ch.aligned_cameras if c.label == "IMG_3")
+    assert np.allclose(moved.transform[:3, 3], [30.0, 20.0, 100.0], atol=1e-6)  # 20 + 10 along x
+    assert np.allclose(moved.transform[:3, :3] @ moved.transform[:3, :3].T, np.eye(3), atol=1e-9)

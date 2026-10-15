@@ -144,7 +144,7 @@ def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_f
         if V:
             sd.mesh_vertices, sd.mesh_faces, sd.mesh_colors = np.vstack(V), np.vstack(F), np.vstack(C)
     elif kind in ("model", "model_textured"):
-        mesh = chunk.model
+        mesh = display_model(chunk, max_faces)
         if mesh is not None:
             faces = np.asarray(mesh.faces)
             if len(faces) > max_faces:
@@ -171,6 +171,31 @@ def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_f
         if m.position is not None:
             sd.markers.append((m.label, W(m.position[None])[0], bool(m.checkpoint)))
     return sd
+
+
+def display_model(chunk, max_faces: int = 600_000):
+    """The model for the 3D view: a cached coarse copy (``model_preview.ply``, vertex
+    clustering) when the model has more than ``max_faces`` faces, made once and refreshed
+    when the model changes; the model itself otherwise."""
+    import logging
+
+    import trimesh
+
+    path = chunk.product_path("model")
+    if not path or not path.exists():
+        return None
+    preview = chunk.data_dir / "model_preview.ply"
+    if preview.exists() and preview.stat().st_mtime >= path.stat().st_mtime:
+        return trimesh.load(str(preview), process=False, force="mesh")
+    from ..io.mesh_ply import face_count, make_preview
+
+    n = face_count(path)
+    if n is not None and n > max_faces:
+        try:
+            return trimesh.load(str(make_preview(path, preview, max_faces)), process=False, force="mesh")
+        except (ValueError, MemoryError, OSError) as exc:
+            logging.getLogger(__name__).warning("Anteprima del modello non creata: %s", exc)
+    return chunk.model
 
 
 def _up_internal(chunk, T) -> np.ndarray:
