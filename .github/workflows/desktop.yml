@@ -7,8 +7,6 @@ on:
   workflow_dispatch:
   push:
     tags: ["v*"]
-    branches: [gui-redesign]   # the branch of the 0.3 desktop work; manual dispatch needs the file on main
-    paths-ignore: ["docs/**", "*.md"]
   release:
     types: [published]
 
