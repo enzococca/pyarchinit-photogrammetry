@@ -17,19 +17,19 @@ APP_TITLE = "PyArchInit Photogrammetry"
 
 
 def _hard_exit(code: int) -> None:
-    """Leave the packaged application without interpreter finalisation and, on Windows,
-    without the DLL detach callbacks (both can crash after the work is done: 0xC0000005 on
-    Windows, segmentation faults on macOS with VTK/Open3D/SpatiaLite loaded)."""
+    """Leave the packaged application on macOS/Linux without interpreter finalisation
+    (segmentation faults with VTK/Open3D/SpatiaLite loaded). On Windows the normal exit is
+    the safe one: skipping it ends in an access violation in the DLL detach callbacks."""
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.flush()
         except Exception:
             pass
-    if os.name == "nt":
-        import ctypes
-
-        ctypes.windll.kernel32.TerminateProcess(ctypes.windll.kernel32.GetCurrentProcess(), int(code))
     os._exit(int(code))
+
+
+def _frozen_posix() -> bool:
+    return bool(getattr(sys, "frozen", False)) and os.name != "nt"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         from ..doctor import main as doctor_main
 
         code = doctor_main()
-        if getattr(sys, "frozen", False):  # skip interpreter finalisation: it can crash the packaged app
+        if _frozen_posix():  # skip interpreter finalisation: it can crash the packaged app
             _hard_exit(code)
         return code
     try:
@@ -115,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
                 libs = f"missing ({str(exc).splitlines()[0][:120]})"
             print(f"GUI check: {'ok' if ok else 'FAILED'} | window: {win.windowTitle()} | 3D backend: "
                   f"{win.model_view.backend} | vtk: {vtk} | libs: {libs} | log: {log_path}", flush=True)
-            if getattr(sys, "frozen", False):  # see --doctor
+            if _frozen_posix():  # see --doctor
                 _hard_exit(0 if ok else 2)
             qapp.exit(0 if ok else 2)
 
