@@ -32,6 +32,9 @@ Python 3.10+. Writing geometries into a PyArchInit **SQLite** database needs `mo
 (found automatically in QGIS, MacPorts, Homebrew and Linux locations, or set
 `SPATIALITE_LIBRARY_PATH`).
 
+On headless Linux servers Open3D needs the EGL/GL libraries:
+`sudo apt-get install libegl1 libgl1 libgomp1`.
+
 ## Quick start (Python)
 
 ```python
