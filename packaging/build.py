@@ -201,6 +201,18 @@ def make_dmg(folder: Path, out: Path, attempts: int = 5) -> None:
     raise SystemExit(f"hdiutil create failed {attempts} times")
 
 
+LSREGISTER = ("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework"
+              "/Support/lsregister")
+
+
+def unregister_app(app: Path) -> None:
+    """Forget an application bundle in Launch Services: macOS registers every ``.app`` that
+    appears on disk, and the registration outlives the deleted folder (a second app in
+    Spotlight and in "Open with" for .ppg files)."""
+    if sys.platform == "darwin" and Path(LSREGISTER).exists():
+        subprocess.run([LSREGISTER, "-u", str(app)], capture_output=True)
+
+
 def package(bundle: Path) -> Path:
     ver = version()
     arch = platform.machine().lower().replace("x86_64", "x64").replace("amd64", "x64")
@@ -215,9 +227,8 @@ def package(bundle: Path) -> Path:
             os.symlink("/Applications", staging / "Applications")
             make_dmg(staging, out)
         finally:
-            # the staged copy would stay registered with Launch Services: a second app in
-            # Spotlight and in "Open with" for .ppg files
             shutil.rmtree(staging, ignore_errors=True)
+            unregister_app(staging / bundle.name)
     elif os.name == "nt":
         base = DIST / f"PyArchInit-Photogrammetry-{ver}-windows-{arch}"
         out = Path(shutil.make_archive(str(base), "zip", root_dir=DIST, base_dir=bundle.name))
