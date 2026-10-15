@@ -23,7 +23,8 @@ for optional in ("open3d", "ifcopenshell", "psycopg2"):
         continue
     hidden += collect_submodules(optional)
 
-datas = (collect_data_files("pyarchinit_photogrammetry") + collect_data_files("qtawesome")
+datas = ([(str(ROOT / "src" / "pyarchinit_photogrammetry" / "ai" / "sam_worker.py"), "pyarchinit_photogrammetry/ai")]
+         + collect_data_files("pyarchinit_photogrammetry") + collect_data_files("qtawesome")
          + collect_data_files("pyvista") + collect_data_files("rasterio") + collect_data_files("pyproj")
          + collect_data_files("ezdxf") + collect_data_files("trimesh"))
 binaries = collect_dynamic_libs("pycolmap")

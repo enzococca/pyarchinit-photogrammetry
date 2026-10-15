@@ -141,9 +141,17 @@ def run_checks(gui: bool = True) -> Report:
     v = _version("ifcopenshell")
     r.add("IfcOpenShell", OK if v else WARN, v or "missing (IFC export disabled)",
           "" if v else "pip install \"pyarchinit-photogrammetry[bim]\"")
-    v = _version("torch")
-    r.add("PyTorch (SAM 2.1)", OK if v else WARN, v or "missing (Segment Anything disabled)",
-          "" if v else "pip install \"pyarchinit-photogrammetry[sam]\"")
+    from .ai import sam_env
+
+    mode = sam_env.available()
+    if mode == "inprocess":
+        r.add("SAM 2.1", OK, f"PyTorch {_version('torch')} in this environment")
+    elif mode == "external":
+        r.add("SAM 2.1", OK, f"separate environment {sam_env.env_dir()}")
+    else:
+        r.add("SAM 2.1", WARN, "not installed",
+              "Strumenti > Segment Anything 2.1 > Installa (the application installs PyTorch and SAM 2.1 "
+              "in a separate environment), or pip install \"pyarchinit-photogrammetry[sam]\"")
 
     # PyArchInit SQLite geometries: probed in a separate process, so that loading the extension
     # (which brings its own PROJ/GEOS/sqlite) can never destabilise this one
