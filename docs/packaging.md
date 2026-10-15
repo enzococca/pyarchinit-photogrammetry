@@ -5,11 +5,11 @@ by PyInstaller:
 
 | Platform | File | Run |
 | --- | --- | --- |
-| macOS (Apple Silicon) | `PyArchInit-Photogrammetry-<version>-macos-arm64.dmg` | open the disk image, drag the app to *Applications* |
+| macOS 15 or newer (Apple Silicon) | `PyArchInit-Photogrammetry-<version>-macos-arm64.dmg` | open the disk image, drag the app to *Applications* |
 | Windows 10/11 (64 bit) | `PyArchInit-Photogrammetry-<version>-windows-x64.zip` | unzip, run `PyArchInit Photogrammetry.exe` |
 
 They are attached to every [GitHub Release](https://github.com/enzococca/pyarchinit-photogrammetry/releases)
-and produced by the `desktop` workflow (`.github/workflows/desktop.yml`, runners `macos-14`
+and produced by the `desktop` workflow (`.github/workflows/desktop.yml`, runners `macos-15`
 and `windows-latest`). The packaged application contains the same code as the `pip`
 package: Open3D, VTK, qtawesome and IfcOpenShell are included; Segment Anything (PyTorch)
 is not, so the SAM tools are disabled there.

@@ -19,7 +19,7 @@ Download the build for your system from the
 
 | Platform | File |
 | --- | --- |
-| macOS (Apple Silicon) | `PyArchInit-Photogrammetry-<version>-macos-arm64.dmg` |
+| macOS 15 or newer (Apple Silicon) | `PyArchInit-Photogrammetry-<version>-macos-arm64.dmg` |
 | Windows 10/11 (64 bit) | `PyArchInit-Photogrammetry-<version>-windows-x64.zip` |
 
 Open the disk image and drag the app to *Applications* (macOS), or unzip and run

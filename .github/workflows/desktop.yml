@@ -1,6 +1,6 @@
 name: desktop
 
-# Builds the packaged desktop application (PyInstaller) for macOS and Windows.
+# Builds the packaged desktop application (PyInstaller) for macOS (15+, Apple Silicon) and Windows.
 # Runs on demand, on version tags and when a release is published; the archives are
 # uploaded as workflow artifacts and attached to the release.
 on:
@@ -18,7 +18,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15   # rasterio wheels need macOS 15+
             label: macos-arm64
           - os: windows-latest
             label: windows-x64

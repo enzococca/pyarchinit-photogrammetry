@@ -19,7 +19,7 @@ Scarica la versione per il tuo sistema dalla pagina
 
 | Sistema | File |
 | --- | --- |
-| macOS (Apple Silicon) | `PyArchInit-Photogrammetry-<versione>-macos-arm64.dmg` |
+| macOS 15 o successivo (Apple Silicon) | `PyArchInit-Photogrammetry-<versione>-macos-arm64.dmg` |
 | Windows 10/11 (64 bit) | `PyArchInit-Photogrammetry-<versione>-windows-x64.zip` |
 
 Su macOS apri l'immagine disco e trascina l'app in *Applicazioni*; su Windows estrai la
