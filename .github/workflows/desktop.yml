@@ -12,6 +12,9 @@ on:
   release:
     types: [published]
 
+permissions:
+  contents: write   # attach the archives to the release
+
 jobs:
   build:
     strategy:
@@ -46,4 +49,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
-        run: gh release upload "${{ github.event.release.tag_name }}" dist/*.dmg dist/*.zip --clobber
+        run: |
+          shopt -s nullglob
+          files=(dist/*.dmg dist/*.zip)   # macOS builds a dmg, Windows a zip
+          gh release upload "${{ github.event.release.tag_name }}" "${files[@]}" --clobber
