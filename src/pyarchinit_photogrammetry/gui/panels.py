@@ -5,18 +5,32 @@ import code
 import contextlib
 import io
 import logging
+import time
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QKeyEvent, QPainter, QPixmap, QTextCursor
-from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QSplitter, QTableWidget,
-                               QTableWidgetItem, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QKeyEvent, QPainter, QPixmap, QTextCursor
+from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QSplitter,
+                               QTableWidget, QTableWidgetItem, QToolButton, QTreeWidget, QTreeWidgetItem,
+                               QVBoxLayout, QWidget)
 
+from .icons import PALETTE, icon
 from .image_views import to_qimage
 
 PRODUCT_LABELS = {"tie_points": "Punti di legame", "point_cloud": "Nuvola densa", "model": "Modello 3D",
                   "model_textured": "Modello con texture", "dem": "DEM", "orthomosaic": "Ortofoto",
                   "hillshade": "Ombreggiatura", "report": "Report"}
+
+
+def _tool(name: str, text: str, tip: str = "") -> QToolButton:
+    b = QToolButton()
+    b.setIcon(icon(name))
+    b.setText(text)
+    b.setToolTip(tip or text)
+    b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+    b.setAutoRaise(True)
+    return b
 
 
 class WorkspaceTree(QTreeWidget):
@@ -28,6 +42,8 @@ class WorkspaceTree(QTreeWidget):
         super().__init__(parent)
         self.setHeaderHidden(True)
         self.setColumnCount(1)
+        self.setIconSize(QSize(18, 18))
+        self.setIndentation(16)
         self.itemDoubleClicked.connect(self._double)
         self.itemClicked.connect(self._single)
         self.document = None
@@ -36,46 +52,57 @@ class WorkspaceTree(QTreeWidget):
         self.document = document
         self.clear()
         name = document.path.name if document.path else "Progetto senza nome"
-        root = QTreeWidgetItem([f"Progetto: {name} ({len(document.chunks)} chunk)"])
+        root = QTreeWidgetItem([f"{name}  ({len(document.chunks)} chunk)"])
+        root.setIcon(0, icon("project"))
         root.setData(0, Qt.ItemDataRole.UserRole, ("document", None, None))
         self.addTopLevelItem(root)
         for ch in document.chunks:
             n_al = len(ch.aligned_cameras)
-            active = " [attivo]" if ch is document.chunk else ""
-            ci = QTreeWidgetItem([f"{ch.label}{active}  ({len(ch.cameras)} foto, {n_al} allineate)"])
+            active = "  [attivo]" if ch is document.chunk else ""
+            ci = QTreeWidgetItem([f"{ch.label}{active}   {len(ch.cameras)} foto, {n_al} allineate"])
+            ci.setIcon(0, icon("chunk", "blue" if ch is document.chunk else None))
             ci.setData(0, Qt.ItemDataRole.UserRole, ("chunk", ch, None))
             f = ci.font(0)
             f.setBold(ch is document.chunk)
             ci.setFont(0, f)
             root.addChild(ci)
             info = QTreeWidgetItem([f"Sistema di riferimento: {ch.crs}"])
+            info.setIcon(0, icon("crs"))
             info.setData(0, Qt.ItemDataRole.UserRole, ("crs", ch, None))
+            info.setToolTip(0, "Doppio clic per cambiare il sistema di riferimento")
             ci.addChild(info)
-            cams = QTreeWidgetItem([f"Camere ({n_al}/{len(ch.cameras)})"])
+            cams = QTreeWidgetItem([f"Camere  ({n_al}/{len(ch.cameras)} allineate)"])
+            cams.setIcon(0, icon("cameras"))
             cams.setData(0, Qt.ItemDataRole.UserRole, ("cameras", ch, None))
             ci.addChild(cams)
             for cam in ch.cameras:
-                it = QTreeWidgetItem([("✔ " if cam.aligned else "✖ ") + cam.label])
+                it = QTreeWidgetItem([cam.label])
+                it.setIcon(0, icon("camera_ok" if cam.aligned else "camera_bad"))
                 it.setData(0, Qt.ItemDataRole.UserRole, ("camera", ch, cam))
                 if not cam.aligned:
-                    it.setForeground(0, QColor("#c06060"))
+                    it.setForeground(0, QColor(PALETTE["red"]))
+                    it.setToolTip(0, "Non allineata")
                 cams.addChild(it)
-            mk = QTreeWidgetItem([f"Marker ({len(ch.markers)})"])
+            mk = QTreeWidgetItem([f"Marker  ({len(ch.markers)})"])
+            mk.setIcon(0, icon("marker"))
             mk.setData(0, Qt.ItemDataRole.UserRole, ("markers", ch, None))
             ci.addChild(mk)
             for m in ch.markers:
                 kind = "check" if m.checkpoint else ("GCP" if m.reference.location else "")
-                it = QTreeWidgetItem([f"{m.label}  {kind}  ({len(m.projections)} proiezioni)"])
+                it = QTreeWidgetItem([f"{m.label}   {kind}   {len(m.projections)} proiezioni".replace("    ", "  ")])
+                it.setIcon(0, icon("checkpoint" if m.checkpoint else ("gcp" if m.reference.location else "marker")))
                 it.setData(0, Qt.ItemDataRole.UserRole, ("marker", ch, m))
                 mk.addChild(it)
             if ch.scalebars:
-                sb = QTreeWidgetItem([f"Barre di scala ({len(ch.scalebars)})"])
+                sb = QTreeWidgetItem([f"Barre di scala  ({len(ch.scalebars)})"])
+                sb.setIcon(0, icon("scalebar"))
                 ci.addChild(sb)
                 for s in ch.scalebars:
                     sb.addChild(QTreeWidgetItem([f"{s.label}: {s.distance:.4f} m"]))
             for key in ("tie_points", "point_cloud", "model", "model_textured", "dem", "orthomosaic"):
                 if ch.product_path(key):
                     it = QTreeWidgetItem([PRODUCT_LABELS[key]])
+                    it.setIcon(0, icon(key))
                     it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, key))
                     ci.addChild(it)
             ci.setExpanded(ch is document.chunk)
@@ -103,7 +130,8 @@ class PhotosPane(QListWidget):
         self.setIconSize(QSize(150, 112))
         self.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.setMovement(QListWidget.Movement.Static)
-        self.setSpacing(4)
+        self.setSpacing(6)
+        self.setUniformItemSizes(True)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.itemDoubleClicked.connect(lambda it: self.open_camera.emit(it.data(Qt.ItemDataRole.UserRole)))
         self._cache: dict[str, QPixmap] = {}
@@ -125,12 +153,16 @@ class PhotosPane(QListWidget):
             self._cache[path] = pm
         out = QPixmap(pm)
         p = QPainter(out)
-        p.setPen(QColor("#30e050") if aligned else QColor("#ff5050"))
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        col = QColor(PALETTE["green"] if aligned else PALETTE["red"])
+        p.setBrush(QBrush(col))
+        p.setPen(QColor("white"))
+        p.drawEllipse(5, 5, 18, 18)
         f = p.font()
         f.setBold(True)
-        f.setPointSize(12)
+        f.setPointSize(11)
         p.setFont(f)
-        p.drawText(6, 18, "✔" if aligned else "✖")
+        p.drawText(5, 5, 18, 18, Qt.AlignmentFlag.AlignCenter, "✓" if aligned else "✕")
         p.end()
         return QIcon(out)
 
@@ -167,11 +199,11 @@ class ReferencePane(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setContentsMargins(4, 4, 4, 4)
         bar = QHBoxLayout()
-        self.b_import = QPushButton("Importa CSV...")
-        self.b_update = QPushButton("Aggiorna")
-        self.b_opt = QPushButton("Ottimizza camere")
+        self.b_import = _tool("reference", "Importa CSV...", "Importa le coordinate dei marker")
+        self.b_update = _tool("georef", "Aggiorna", "Ricalcola la georeferenziazione")
+        self.b_opt = _tool("optimize", "Ottimizza camere", "Bundle adjustment con i riferimenti")
         bar.addWidget(self.b_import)
         bar.addWidget(self.b_update)
         bar.addWidget(self.b_opt)
@@ -186,12 +218,16 @@ class ReferencePane(QWidget):
         self.table = QTableWidget(0, len(self.COLS))
         self.table.setHorizontalHeaderLabels(self.COLS)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
         self.table.itemChanged.connect(self._edited)
         split.addWidget(self.table)
         self.cams = QTableWidget(0, 7)
         self.cams.setHorizontalHeaderLabels(["Camera", "Allineata", "X", "Y", "Z", "Rif. X", "Rif. Y"])
         self.cams.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.cams.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.cams.setAlternatingRowColors(True)
+        self.cams.verticalHeader().setVisible(False)
         split.addWidget(self.cams)
         lay.addWidget(split, 1)
         self.summary = QLabel("")
@@ -226,7 +262,9 @@ class ReferencePane(QWidget):
             chk = QTableWidgetItem()
             chk.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
             chk.setCheckState(Qt.CheckState.Checked if m.checkpoint else Qt.CheckState.Unchecked)
-            vals = [use, QTableWidgetItem(m.label), chk] + [QTableWidgetItem(_fmt(v)) for v in loc] + [
+            label = QTableWidgetItem(m.label)
+            label.setIcon(icon("checkpoint" if m.checkpoint else ("gcp" if m.reference.location else "marker")))
+            vals = [use, label, chk] + [QTableWidgetItem(_fmt(v)) for v in loc] + [
                 QTableWidgetItem(_fmt(acc, 4)), QTableWidgetItem(_fmt(e.get("error"), 4)),
                 QTableWidgetItem(_fmt(e.get("dx"), 4)), QTableWidgetItem(_fmt(e.get("dy"), 4)),
                 QTableWidgetItem(_fmt(e.get("dz"), 4)), QTableWidgetItem(str(e.get("projections", ""))),
@@ -235,7 +273,7 @@ class ReferencePane(QWidget):
                 if c in (1, 7, 8, 9, 10, 11, 12):
                     it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 if c == 7 and e.get("error") is not None and e["error"] > 0.02:
-                    it.setForeground(QColor("#ff6060"))
+                    it.setForeground(QColor(PALETTE["red"]))
                 self.table.setItem(r, c, it)
         self.cams.setRowCount(len(chunk.cameras))
         for r, cam in enumerate(chunk.cameras):
@@ -244,12 +282,15 @@ class ReferencePane(QWidget):
             row = [cam.label, "si" if cam.aligned else "no", _fmt(c[0], 3), _fmt(c[1], 3), _fmt(c[2], 3),
                    _fmt(ref[0], 3), _fmt(ref[1], 3)]
             for k, v in enumerate(row):
-                self.cams.setItem(r, k, QTableWidgetItem(v))
+                it = QTableWidgetItem(v)
+                if k == 0:
+                    it.setIcon(icon("camera_ok" if cam.aligned else "camera_bad"))
+                self.cams.setItem(r, k, it)
         rep = self.last_report or {}
         parts = []
         for key, name in (("control_rmse", "RMSE controllo"), ("check_rmse", "RMSE check")):
             if rep.get(key) is not None:
-                parts.append(f"{name}: {rep[key] * 1000:.1f} mm")
+                parts.append(f"{name}: <b>{rep[key] * 1000:.1f} mm</b>")
         sb = gcp.scalebar_errors(chunk)
         if sb:
             parts.append("barre di scala: " + ", ".join(f"{s['label']} {_fmt(s['error'], 4)} m" for s in sb))
@@ -299,15 +340,16 @@ class ConsolePane(QWidget):
     def __init__(self, namespace_factory, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setContentsMargins(4, 4, 4, 4)
         self.out = QPlainTextEdit()
+        self.out.setObjectName("consoleOut")
         self.out.setReadOnly(True)
         mono = QFont("Menlo")
         mono.setStyleHint(QFont.StyleHint.Monospace)
         self.out.setFont(mono)
         self.inp = _HistoryLine()
         self.inp.setFont(mono)
-        self.inp.setPlaceholderText("Python: chunk.build_dem(resolution=0.01)   (doc, chunk, app, ppg)")
+        self.inp.setPlaceholderText(">>>  chunk.build_dem(resolution=0.01)      (doc, chunk, app, ppg, np, window)")
         self.inp.returnPressed.connect(self._run)
         lay.addWidget(self.out, 1)
         lay.addWidget(self.inp)
@@ -315,7 +357,7 @@ class ConsolePane(QWidget):
         self.console = code.InteractiveConsole(self._factory())
         self.prompt = ">>> "
         self.write("pyarchinit-photogrammetry - console Python\n"
-                   "Variabili: doc (progetto), chunk (chunk attivo), app (ppg.app), ppg (modulo)\n")
+                   "Variabili: doc (progetto), chunk (chunk attivo), app (ppg.app), ppg (modulo), np, window\n")
 
     def write(self, s: str) -> None:
         self.out.moveCursor(QTextCursor.MoveOperation.End)
@@ -362,8 +404,9 @@ class _HistoryLine(QLineEdit):
             super().keyPressEvent(ev)
 
 
+# ---------------------------------------------------------------- log
 class _LogBridge(QObject):
-    message = Signal(str)
+    message = Signal(int, str, str)  # level, text, details
 
 
 class LogHandler(logging.Handler):
@@ -372,27 +415,168 @@ class LogHandler(logging.Handler):
     def __init__(self):
         super().__init__(logging.INFO)
         self.bridge = _LogBridge()
-        self.setFormatter(logging.Formatter("%(asctime)s  %(message)s", "%H:%M:%S"))
 
     def emit(self, record) -> None:
         try:
-            self.bridge.message.emit(self.format(record))
+            text, _, details = record.getMessage().partition("\n")
+            if record.exc_info:
+                details = (details + "\n" if details else "") + logging.Formatter().formatException(record.exc_info)
+            self.bridge.message.emit(record.levelno, text, details.strip())
         except RuntimeError:
             pass
 
 
-class LogPane(QPlainTextEdit):
+LEVELS = {logging.DEBUG: ("debug", "info"), logging.INFO: ("info", "info"), logging.WARNING: ("avviso", "warning"),
+          logging.ERROR: ("errore", "error"), logging.CRITICAL: ("errore", "error")}
+
+
+class LogPane(QWidget):
+    """Messages of the session: time, level and text, with filter, search, copy and save.
+
+    Errors keep their traceback as the row tooltip and in the saved file."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setReadOnly(True)
-        self.setMaximumBlockCount(5000)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(4, 4, 4, 4)
+        bar = QHBoxLayout()
+        self.level = QComboBox()
+        self.level.addItem("Tutto", logging.DEBUG)
+        self.level.addItem("Avvisi ed errori", logging.WARNING)
+        self.level.addItem("Solo errori", logging.ERROR)
+        self.level.currentIndexChanged.connect(lambda _: self._refilter())
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Cerca nel log")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(lambda _: self._refilter())
+        self.b_copy = _tool("copy", "Copia", "Copia le righe visibili")
+        self.b_save = _tool("save", "Salva...", "Salva il log in un file di testo")
+        self.b_folder = _tool("folder", "Cartella log", "Apri la cartella dei file di log")
+        self.b_clear = _tool("clear", "Pulisci")
+        self.b_copy.clicked.connect(self.copy_visible)
+        self.b_save.clicked.connect(self.save_as)
+        self.b_folder.clicked.connect(self.open_folder)
+        self.b_clear.clicked.connect(self.clear)
+        bar.addWidget(QLabel("Mostra:"))
+        bar.addWidget(self.level)
+        bar.addWidget(self.search, 1)
+        for b in (self.b_copy, self.b_save, self.b_folder, self.b_clear):
+            bar.addWidget(b)
+        lay.addLayout(bar)
+        self.table = QTableWidget(0, 3)
+        self.table.setObjectName("logTable")
+        self.table.setHorizontalHeaderLabels(["Ora", "Livello", "Messaggio"])
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(False)
+        self.table.setShowGrid(False)
+        lay.addWidget(self.table, 1)
+        self.entries: list[tuple[float, int, str, str]] = []
+        self.counts = {"error": 0, "warning": 0}
         self.handler = LogHandler()
-        self.handler.bridge.message.connect(self.appendPlainText)
+        self.handler.bridge.message.connect(self.log)
         logging.getLogger("pyarchinit_photogrammetry").addHandler(self.handler)
         logging.getLogger("pyarchinit_photogrammetry").setLevel(logging.INFO)
 
+    # ------------------------------------------------------------ API
+    def log(self, level: int, text: str, details: str = "") -> None:
+        self.entries.append((time.time(), int(level), text, details))
+        if len(self.entries) > 5000:
+            del self.entries[:1000]
+            self._refilter()
+            return
+        if level >= logging.ERROR:
+            self.counts["error"] += 1
+        elif level >= logging.WARNING:
+            self.counts["warning"] += 1
+        if self._visible(level, text):
+            self._add_row(self.entries[-1])
+
+    def info(self, text: str) -> None:
+        self.log(logging.INFO, text)
+
+    def warning(self, text: str) -> None:
+        self.log(logging.WARNING, text)
+
+    def error(self, text: str, details: str = "") -> None:
+        self.log(logging.ERROR, text, details)
+
+    def appendPlainText(self, text: str) -> None:  # compatibility with the previous pane
+        self.info(text)
+
+    def clear(self) -> None:
+        self.entries = []
+        self.counts = {"error": 0, "warning": 0}
+        self.table.setRowCount(0)
+
+    def text(self, visible_only: bool = True) -> str:
+        rows = []
+        for ts, level, text, details in self.entries:
+            if visible_only and not self._visible(level, text):
+                continue
+            rows.append(f"{time.strftime('%H:%M:%S', time.localtime(ts))}  {LEVELS.get(level, ('?', ''))[0]:7s} {text}")
+            if details:
+                rows.append(details.rstrip())
+        return "\n".join(rows)
+
     def detach(self) -> None:
         logging.getLogger("pyarchinit_photogrammetry").removeHandler(self.handler)
+
+    # ------------------------------------------------------------ actions
+    def copy_visible(self) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        QApplication.clipboard().setText(self.text())
+
+    def save_as(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Salva log", str(Path.home() / "ppg-log.txt"), "Testo (*.txt)")
+        if path:
+            Path(path).write_text(self.text(visible_only=False), encoding="utf-8")
+
+    def open_folder(self) -> None:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        from .logging_setup import log_dir
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_dir())))
+
+    # ------------------------------------------------------------ internals
+    def _visible(self, level: int, text: str) -> bool:
+        if level < (self.level.currentData() or logging.DEBUG):
+            return False
+        q = self.search.text().strip().lower()
+        return not q or q in text.lower()
+
+    def _refilter(self) -> None:
+        self.table.setRowCount(0)
+        for e in self.entries:
+            if self._visible(e[1], e[2]):
+                self._add_row(e)
+
+    def _add_row(self, entry) -> None:
+        ts, level, text, details = entry
+        name, iname = LEVELS.get(level, ("info", "info"))
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        items = [QTableWidgetItem(time.strftime("%H:%M:%S", time.localtime(ts))), QTableWidgetItem(name),
+                 QTableWidgetItem(text.splitlines()[0] if text else "")]
+        items[1].setIcon(icon(iname))
+        tip = text + ("\n\n" + details if details else "")
+        for it in items:
+            it.setToolTip(tip)
+            if level >= logging.ERROR:
+                it.setForeground(QColor(PALETTE["red"]))
+            elif level >= logging.WARNING:
+                it.setForeground(QColor(PALETTE["orange"]))
+        for c, it in enumerate(items):
+            self.table.setItem(r, c, it)
+        self.table.scrollToBottom()
 
 
 class PyArchInitPane(QWidget):
@@ -404,12 +588,13 @@ class PyArchInitPane(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setContentsMargins(4, 4, 4, 4)
         row = QHBoxLayout()
-        self.b_connect = QPushButton("Connetti...")
-        self.b_demo = QPushButton("Database demo")
+        self.b_connect = _tool("database", "Connetti...", "Connetti al database di PyArchInit")
+        self.b_demo = _tool("demo_db", "Database demo", "Usa il database dimostrativo")
         row.addWidget(self.b_connect)
         row.addWidget(self.b_demo)
+        row.addStretch(1)
         lay.addLayout(row)
         self.b_connect.clicked.connect(self.connect_requested)
         self.b_demo.clicked.connect(self.demo_requested)
@@ -418,6 +603,8 @@ class PyArchInitPane(QWidget):
         lay.addWidget(self.status)
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Elemento", "Descrizione"])
+        self.tree.setIconSize(QSize(16, 16))
+        self.tree.setAlternatingRowColors(True)
         lay.addWidget(self.tree, 1)
         self.pa = None
 
@@ -438,14 +625,17 @@ class PyArchInitPane(QWidget):
         for s in sites:
             name = s.get("sito")
             si = QTreeWidgetItem([str(name), str(s.get("comune") or "")])
+            si.setIcon(0, icon("site"))
             self.tree.addTopLevelItem(si)
             us_root = QTreeWidgetItem(["Unita' stratigrafiche", ""])
+            us_root.setIcon(0, icon("us"))
             si.addChild(us_root)
             try:
                 for u in self.pa.stratigraphic_units(name):
                     us_root.addChild(QTreeWidgetItem([f"{u.get('unita_tipo') or 'US'} {u.get('us')} (area {u.get('area')})",
                                                       str(u.get("d_stratigrafica") or "")]))
                 doc_root = QTreeWidgetItem(["Documentazione", ""])
+                doc_root.setIcon(0, icon("doc"))
                 si.addChild(doc_root)
                 for d in self.pa.documentation(name):
                     doc_root.addChild(QTreeWidgetItem([str(d.get("nome_doc")), str(d.get("tipo_documentazione") or "")]))

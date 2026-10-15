@@ -123,7 +123,7 @@ def test_pyarchinit_publish_from_gui(window, qapp, tmp_path, monkeypatch):
     assert w.pa is not None and w.pa_pane.site_names() == ["Saggio dimostrativo"]
     w.units = [UnitPolygon(box(2480001.7, 4500001.3, 2480002.3, 4500001.5), us="2", area="1", tipo="USM")]
     monkeypatch.setattr(mw.QInputDialog, "getItem", lambda *a, **k: ("Saggio dimostrativo", True))
-    monkeypatch.setattr(mw.QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(mw, "message", lambda *a, **k: None)
     w.pyarchinit_publish_units()
     w.runner.wait()
     polys = w.pa.us_polygons("Saggio dimostrativo")
@@ -143,3 +143,122 @@ def _spatialite():
         return True
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------- 0.3: icons, theme, log, errors, start page
+def test_icons_and_theme(qapp):
+    from pyarchinit_photogrammetry.gui import theme
+    from pyarchinit_photogrammetry.gui.icons import ICONS, app_icon, available, icon
+
+    assert not app_icon().isNull()
+    if available():
+        for name in ("align", "dense", "error", "camera_ok"):
+            assert not icon(name).isNull()
+        assert len(ICONS) > 60
+    for mode in ("dark", "light"):
+        theme.apply(qapp, mode)
+        assert theme.current(qapp) == mode and qapp.styleSheet()
+
+
+def test_log_pane_levels_filter_and_text(qapp):
+    import logging
+
+    from pyarchinit_photogrammetry.gui.panels import LogPane
+
+    pane = LogPane()
+    try:
+        logging.getLogger("pyarchinit_photogrammetry").info("allineamento finito")
+        qapp.processEvents()
+        pane.warning("attenzione")
+        pane.error("fallito", "Traceback: boom")
+        assert pane.table.rowCount() == 3 and pane.counts == {"error": 1, "warning": 1}
+        pane.level.setCurrentIndex(2)  # only errors
+        assert pane.table.rowCount() == 1 and pane.table.item(0, 2).text() == "fallito"
+        assert "boom" in pane.table.item(0, 2).toolTip()
+        pane.level.setCurrentIndex(0)
+        pane.search.setText("atten")
+        assert pane.table.rowCount() == 1
+        pane.search.setText("")
+        txt = pane.text(visible_only=False)
+        assert "allineamento finito" in txt and "Traceback: boom" in txt
+    finally:
+        pane.detach()
+
+
+def test_error_dialog_is_non_native_and_has_hint(qapp):
+    from pyarchinit_photogrammetry.gui.dialogs import ErrorDialog, suggestion_for
+
+    tb = "Traceback\nIsolatedCrash: _poisson_worker crashed in the worker process (exit code -11)"
+    assert suggestion_for(tb) is not None
+    d = ErrorDialog("Errore", "Modello: fallito", tb)
+    d.toggle.setChecked(True)
+    assert d.box.isVisible() or d.box.toPlainText() == tb
+    assert "fallito" in d.report_text() and "exit code -11" in d.report_text()
+    d.close()
+
+
+def test_message_helper_uses_qt_dialog(qapp, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from pyarchinit_photogrammetry.gui import dialogs
+
+    seen = {}
+
+    def fake_exec(self):
+        seen["native_off"] = self.testOption(QMessageBox.Option.DontUseNativeDialog)
+        seen["text"] = self.text()
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    dialogs.message(None, "warning", "Titolo", "Attenzione")
+    assert seen == {"native_off": True, "text": "Attenzione"}
+
+
+def test_start_page_without_project(qapp, tmp_path):
+    from PySide6.QtCore import QSettings
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path))
+    from pyarchinit_photogrammetry.app import app as application
+    from pyarchinit_photogrammetry.core.document import Document
+    from pyarchinit_photogrammetry.gui.main_window import MainWindow
+
+    application.document = Document()  # as when the interface starts without a project
+    w = MainWindow(None)
+    w.runner.show_dialog = False
+    w.show()
+    qapp.processEvents()
+    assert w.stack.currentWidget() is w.start_page
+    w.new_document()
+    assert w.stack.currentWidget() is w.tabs
+    w.show_start_page()
+    assert w.stack.currentWidget() is w.start_page
+    w.setWindowModified(False)
+    w.close()
+
+
+def test_task_failure_goes_to_log_and_dialog(window, qapp, monkeypatch):
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    shown = []
+    monkeypatch.setattr(mw.ErrorDialog, "exec", lambda self: shown.append((self.summary, self.details)) or 0)
+
+    def job(p):
+        raise RuntimeError("not enough points in point_cloud to build a mesh")
+
+    w = window
+    before = w.log_pane.counts["error"]
+    w.run_task("Modello", job, refresh=False, save=False)
+    w.runner.wait()
+    assert w.log_pane.counts["error"] == before + 1
+    assert shown and "not enough points" in shown[0][0] and "RuntimeError" in shown[0][1]
+
+
+def test_doctor_report(qapp):
+    from pyarchinit_photogrammetry.doctor import run_checks
+
+    rep = run_checks(gui=True)
+    names = [c.name for c in rep.checks]
+    assert "SciPy" in names and "PySide6 (Qt)" in names and "Open3D" in names
+    assert not rep.failures, rep.text()
+    assert "PySide6" in rep.text()

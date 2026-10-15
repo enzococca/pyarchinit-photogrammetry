@@ -264,3 +264,149 @@ class ImageDialog(QDialog):
         bb.rejected.connect(self.reject)
         bb.accepted.connect(self.accept)
         lay.addWidget(bb)
+
+
+# ---------------------------------------------------------------- messages and errors
+# Native message boxes (NSAlert) crash on recent macOS with Qt 6.x: every message box
+# of the interface goes through these helpers, which force the Qt implementation.
+
+def message(parent, kind: str, title: str, text: str, details: str = "", buttons=None, default=None):
+    """Non-native message box. ``kind``: info, warning, critical, question. Returns the button."""
+    from PySide6.QtWidgets import QMessageBox
+
+    icons = {"info": QMessageBox.Icon.Information, "warning": QMessageBox.Icon.Warning,
+             "critical": QMessageBox.Icon.Critical, "question": QMessageBox.Icon.Question}
+    box = QMessageBox(icons.get(kind, QMessageBox.Icon.NoIcon), title, text, parent=parent)
+    box.setOption(QMessageBox.Option.DontUseNativeDialog, True)
+    box.setTextFormat(Qt.TextFormat.RichText if text.lstrip().startswith("<") else Qt.TextFormat.PlainText)
+    if details:
+        box.setDetailedText(details)
+    if buttons is not None:
+        box.setStandardButtons(buttons)
+    if default is not None:
+        box.setDefaultButton(default)
+    box.exec()
+    return box.standardButton(box.clickedButton())
+
+
+_SUGGESTIONS = [
+    ("crashed in the worker process", "La ricostruzione e' stata eseguita in un processo separato che si e' interrotto. "
+                                      "Il modello viene ricostruito con il metodo alternativo (campo di altezze); "
+                                      "con Open3D 0.19 o 0.21+ la Poisson e' piu' stabile."),
+    ("mod_spatialite", "Scrivere geometrie in un database SQLite di PyArchInit richiede mod_spatialite: "
+                       "installalo (QGIS, Homebrew 'brew install libspatialite', MacPorts) oppure imposta "
+                       "SPATIALITE_LIBRARY_PATH."),
+    ("No module named 'torch'", "Segment Anything 2.1 richiede PyTorch: pip install \"pyarchinit-photogrammetry[sam]\"."),
+    ("__thread_bss", "Le librerie compilate di questo ambiente Python (Anaconda) non si caricano su questa "
+                     "versione di macOS: usa l'ambiente virtuale del progetto o l'applicazione pacchettizzata."),
+    ("not enough points", "Servono piu' punti: costruisci prima la nuvola densa o usa una qualita' piu' alta."),
+    ("Allinea prima", "Esegui Flusso di lavoro > Allinea foto."),
+    ("BITMAP_ERROR", "COLMAP non riesce a leggere le foto: controlla che siano JPEG/PNG/TIFF validi e riavvia "
+                     "l'interfaccia (la libreria JPEG di sistema e' stata caricata prima di pycolmap)."),
+    ("No space left", "Spazio su disco esaurito: libera spazio nella cartella del progetto."),
+    ("Permission denied", "Permessi insufficienti sulla cartella: scegli un'altra posizione per il progetto."),
+]
+
+
+def suggestion_for(text: str) -> str | None:
+    """A hint in Italian for known error signatures, or None."""
+    for key, hint in _SUGGESTIONS:
+        if key in text:
+            return hint
+    return None
+
+
+class ErrorDialog(QDialog):
+    """Error window: summary, optional hint, expandable traceback, copy and log buttons."""
+
+    def __init__(self, title: str, summary: str, details: str = "", suggestion: str | None = None,
+                 parent=None, log_path=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QPlainTextEdit, QStyle, QToolButton
+
+        from .icons import icon
+
+        self.setWindowTitle(title)
+        self.setMinimumWidth(560)
+        self.details = details
+        self.summary = summary
+        if suggestion is None:
+            suggestion = suggestion_for(details or summary)
+        lay = QVBoxLayout(self)
+        top = QHBoxLayout()
+        pic = QLabel()
+        ic = icon("error")
+        if ic.isNull():
+            ic = self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxCritical)
+        pic.setPixmap(ic.pixmap(48, 48))
+        pic.setAlignment(Qt.AlignmentFlag.AlignTop)
+        top.addWidget(pic)
+        text = QLabel(summary)
+        text.setWordWrap(True)
+        text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        text.setObjectName("errorSummary")
+        top.addWidget(text, 1)
+        lay.addLayout(top)
+        if suggestion:
+            hint = QLabel(suggestion)
+            hint.setWordWrap(True)
+            hint.setObjectName("hintBox")
+            lay.addWidget(hint)
+        self.toggle = QToolButton()
+        self.toggle.setText("Dettagli")
+        self.toggle.setCheckable(True)
+        self.toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.toggle.toggled.connect(self._toggle)
+        self.box = QPlainTextEdit(details)
+        self.box.setReadOnly(True)
+        self.box.setObjectName("tracebackBox")
+        self.box.setMinimumHeight(220)
+        self.box.hide()
+        if details:
+            lay.addWidget(self.toggle)
+        lay.addWidget(self.box, 1)
+        row = QHBoxLayout()
+        self.b_copy = QPushButton(icon("copy"), "Copia")
+        self.b_copy.clicked.connect(self.copy)
+        row.addWidget(self.b_copy)
+        self.log_path = log_path
+        if log_path is None:
+            try:
+                from .logging_setup import log_file
+
+                self.log_path = log_file()
+            except Exception:  # pragma: no cover
+                self.log_path = None
+        if self.log_path is not None:
+            self.b_log = QPushButton(icon("folder"), "Apri cartella log")
+            self.b_log.clicked.connect(self.open_log_folder)
+            row.addWidget(self.b_log)
+        row.addStretch(1)
+        self.b_close = QPushButton("Chiudi")
+        self.b_close.setDefault(True)
+        self.b_close.clicked.connect(self.accept)
+        row.addWidget(self.b_close)
+        lay.addLayout(row)
+
+    def _toggle(self, on: bool) -> None:
+        self.toggle.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
+        self.box.setVisible(on)
+        self.adjustSize()
+
+    def report_text(self) -> str:
+        from .. import __version__
+
+        return f"pyarchinit-photogrammetry {__version__}\n{self.summary}\n\n{self.details}".strip()
+
+    def copy(self) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        QApplication.clipboard().setText(self.report_text())
+        self.b_copy.setText("Copiato")
+
+    def open_log_folder(self) -> None:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self.log_path).parent)))

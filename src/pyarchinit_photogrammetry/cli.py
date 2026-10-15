@@ -285,6 +285,14 @@ def gui(project: Optional[Path] = typer.Argument(None)):
     raise SystemExit(gui_main([str(project)] if project else []))
 
 
+@app.command()
+def doctor():
+    """Check the environment (libraries, known pitfalls) and print what to fix."""
+    from .doctor import main as doctor_main
+
+    raise SystemExit(doctor_main())
+
+
 # ------------------------------------------------------------------ markers
 @markers_app.command("sheet")
 def markers_sheet(out: Path, target_type: str = "aruco_4x4_50", codes: str = "0-11", size_mm: float = 40.0,

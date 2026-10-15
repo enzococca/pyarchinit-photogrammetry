@@ -47,6 +47,23 @@ def _spatialite_paths() -> list[str]:
     return out
 
 
+def spatialite_path() -> str | None:
+    """First mod_spatialite that sqlite3 can load, or None (used by ``ppg doctor``)."""
+    import sqlite3
+
+    _warm_up_proj()
+    for cand in _spatialite_paths():
+        try:
+            con = sqlite3.connect(":memory:")
+            con.enable_load_extension(True)
+            con.load_extension(cand)
+            con.close()
+            return cand
+        except Exception:
+            continue
+    return None
+
+
 def _warm_up_proj() -> None:
     """Initialise the PROJ/GDAL bundled with rasterio and pyproj *before* SpatiaLite.
 

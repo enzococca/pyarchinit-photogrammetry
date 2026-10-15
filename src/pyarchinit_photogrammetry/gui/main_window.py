@@ -3,24 +3,33 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import traceback
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QSettings, Qt, QUrl
+from PySide6.QtCore import QSettings, QSize, Qt, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
-from PySide6.QtWidgets import (QDockWidget, QFileDialog, QInputDialog, QLabel, QMainWindow,
-                               QMessageBox, QTabWidget, QToolBar, QWidget)
+from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QDockWidget, QFileDialog, QInputDialog,
+                               QLabel, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget,
+                               QTabWidget, QToolBar, QVBoxLayout, QWidget)
 
 from .. import __version__
 from ..app import app as application
 from ..core.document import Document
-from .dialogs import QUALITY, Field, ImageDialog, ParamDialog, PublishDialog, UnitDialog
+from . import theme
+from .dialogs import QUALITY, ErrorDialog, Field, ImageDialog, ParamDialog, PublishDialog, UnitDialog, message
+from .icons import app_icon, icon
 from .image_views import US_COLORS, PhotoView, RasterView
 from .model_view import ModelView
 from .panels import ConsolePane, LogPane, PhotosPane, PyArchInitPane, ReferencePane, WorkspaceTree
-from .worker import TaskRunner
+from .start_page import StartPage
+from .worker import StatusProgress, TaskRunner
 
+log = logging.getLogger("pyarchinit_photogrammetry.gui")
+APP_TITLE = "PyArchInit Photogrammetry"
+DOCS_URL = "https://github.com/enzococca/pyarchinit-photogrammetry"
 TARGET_TYPES = [("aruco_4x4_50", "ArUco 4x4 (50 codici)"), ("aruco_4x4_250", "ArUco 4x4 (250 codici)"),
                 ("aruco_5x5_100", "ArUco 5x5 (100 codici)"), ("aruco_6x6_250", "ArUco 6x6 (250 codici)"),
                 ("apriltag_36h11", "AprilTag 36h11")]
@@ -29,7 +38,8 @@ TARGET_TYPES = [("aruco_4x4_50", "ArUco 4x4 (50 codici)"), ("aruco_4x4_250", "Ar
 class MainWindow(QMainWindow):
     def __init__(self, document: Document | None = None):
         super().__init__()
-        self.setWindowTitle("pyarchinit-photogrammetry")
+        self.setWindowTitle(APP_TITLE)
+        self.setWindowIcon(app_icon())
         self.resize(1500, 950)
         self.settings = QSettings("pyarchinit", "pyarchinit-photogrammetry")
         self.runner = TaskRunner(self)
@@ -40,41 +50,50 @@ class MainWindow(QMainWindow):
         self.sam = None
         self.sam_points: list = []
         self.last_report: dict | None = None
+        self._started = document is not None
         self._build_views()
         self._build_docks()
         self._build_actions()
-        self.coord_label = QLabel("")
-        self.statusBar().addPermanentWidget(self.coord_label)
+        self._build_statusbar()
         self.set_document(document or application.document)
 
     # ================================================================ layout
     def _build_views(self) -> None:
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
+        self.tabs.setIconSize(QSize(18, 18))
         self.model_view = ModelView()
         self.ortho_view = RasterView()
         self.photo_view = PhotoView()
-        self.tabs.addTab(self.model_view, "Modello")
-        self.tabs.addTab(self.ortho_view, "Ortofoto / DEM")
-        self.tabs.addTab(self.photo_view, "Foto")
-        self.setCentralWidget(self.tabs)
+        self.tabs.addTab(self.model_view, icon("view3d"), "Modello")
+        self.tabs.addTab(self.ortho_view, icon("view_ortho"), "Ortofoto / DEM")
+        self.tabs.addTab(self.photo_view, icon("view_photo"), "Foto")
+        self.start_page = StartPage()
+        self.start_page.new_requested.connect(self.new_document)
+        self.start_page.open_requested.connect(lambda: self.open_document())
+        self.start_page.demo_requested.connect(self.open_demo)
+        self.start_page.recent_requested.connect(self.open_document)
+        self.start_page.doctor_requested.connect(self.show_doctor)
+        self.start_page.log_requested.connect(self.open_log_folder)
+        self.start_page.help_requested.connect(self.open_docs)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.start_page)
+        self.stack.addWidget(self.tabs)
+        self.setCentralWidget(self.stack)
         self.ortho_view.mouse_world.connect(self._show_coords)
         self.ortho_view.polygon_finished.connect(self._unit_drawn)
         self.ortho_view.line_finished.connect(self._section_drawn)
         self.ortho_view.measured.connect(lambda t: (self.statusBar().showMessage(t, 30000),
-                                                    self.log_pane.appendPlainText(t)))
+                                                    self.log_pane.info(t)))
         self.ortho_view.point_clicked.connect(self._ortho_point)
         self.photo_view.markers_changed.connect(self._markers_edited)
         self.photo_view.sam_prompt.connect(self._photo_sam_prompt)
 
-    def _dock(self, title: str, widget: QWidget, area, name: str, tab_with: QDockWidget | None = None) -> QDockWidget:
+    def _dock(self, title: str, widget: QWidget, area, name: str) -> QDockWidget:
         d = QDockWidget(title, self)
         d.setObjectName(name)
         d.setWidget(widget)
-        if tab_with is None:
-            self.addDockWidget(area, d)
-        else:
-            self.tabifyDockWidget(tab_with, d)
+        self.addDockWidget(area, d)
         return d
 
     def _build_docks(self) -> None:
@@ -95,22 +114,35 @@ class MainWindow(QMainWindow):
         self.pa_pane = PyArchInitPane()
         self.pa_pane.connect_requested.connect(self.pyarchinit_connect)
         self.pa_pane.demo_requested.connect(self.pyarchinit_demo)
-        # tab widgets inside two docks (more robust than tabified docks across Qt platforms)
+        # tab widgets inside docks (more robust than tabified docks across Qt platforms)
         self.left_tabs = QTabWidget()
-        self.left_tabs.addTab(self.workspace, "Area di lavoro")
-        self.left_tabs.addTab(self.reference, "Riferimenti")
+        self.left_tabs.setIconSize(QSize(16, 16))
+        self.left_tabs.addTab(self.workspace, icon("workspace"), "Area di lavoro")
+        self.left_tabs.addTab(self.reference, icon("reference_pane"), "Riferimenti")
         self.bottom_tabs = QTabWidget()
-        self.bottom_tabs.addTab(self.photos, "Foto")
-        self.bottom_tabs.addTab(self.console, "Console Python")
-        self.bottom_tabs.addTab(self.log_pane, "Log")
+        self.bottom_tabs.setIconSize(QSize(16, 16))
+        self.bottom_tabs.addTab(self.photos, icon("photos"), "Foto")
+        self.bottom_tabs.addTab(self.console, icon("console"), "Console Python")
+        self.bottom_tabs.addTab(self.log_pane, icon("log"), "Log")
         self.d_work = self._dock("Progetto", self.left_tabs, L, "workspace")
         self.d_pa = self._dock("PyArchInit", self.pa_pane, R, "pyarchinit")
         self.d_photos = self._dock("Foto, console e log", self.bottom_tabs, B, "bottom")
         self.resizeDocks([self.d_work, self.d_pa], [360, 300], Qt.Orientation.Horizontal)
         self.resizeDocks([self.d_photos], [230], Qt.Orientation.Vertical)
 
-    def _act(self, menu, text: str, slot, shortcut=None, tip: str = "", processing: bool = False) -> QAction:
+    def _build_statusbar(self) -> None:
+        self.progress_widget = StatusProgress()
+        self.progress_widget.cancel_requested.connect(self.runner.cancel)
+        self.runner.status_widget = self.progress_widget
+        self.coord_label = QLabel("")
+        self.statusBar().addPermanentWidget(self.progress_widget)
+        self.statusBar().addPermanentWidget(self.coord_label)
+
+    def _act(self, menu, text: str, slot, shortcut=None, tip: str = "", processing: bool = False,
+             icon_name: str | None = None) -> QAction:
         a = QAction(text, self)
+        if icon_name:
+            a.setIcon(icon(icon_name))
         if shortcut:
             a.setShortcut(QKeySequence(shortcut))
         if tip:
@@ -126,122 +158,174 @@ class MainWindow(QMainWindow):
         mb = self.menuBar()
         # ------------------------------------------------------------ File
         m = mb.addMenu("&File")
-        self._act(m, "Nuovo progetto", self.new_document, QKeySequence.StandardKey.New)
-        self._act(m, "Apri...", self.open_document, QKeySequence.StandardKey.Open)
-        self.recent_menu = m.addMenu("Progetti recenti")
-        self._act(m, "Salva", self.save_document, QKeySequence.StandardKey.Save)
-        self._act(m, "Salva con nome...", lambda: self.save_document(ask=True), QKeySequence.StandardKey.SaveAs)
+        self._act(m, "Nuovo progetto", self.new_document, QKeySequence.StandardKey.New, icon_name="new")
+        self._act(m, "Apri...", self.open_document, QKeySequence.StandardKey.Open, icon_name="open")
+        self.recent_menu = m.addMenu(icon("recent"), "Progetti recenti")
+        self._act(m, "Salva", self.save_document, QKeySequence.StandardKey.Save, icon_name="save")
+        self._act(m, "Salva con nome...", lambda: self.save_document(ask=True), QKeySequence.StandardKey.SaveAs,
+                  icon_name="save_as")
         m.addSeparator()
-        exp = m.addMenu("Esporta")
-        self._act(exp, "Nuvola di punti (LAS/PLY)...", lambda: self.export("cloud"))
-        self._act(exp, "Modello (OBJ/PLY)...", lambda: self.export("model"))
-        self._act(exp, "DEM (GeoTIFF)...", lambda: self.export("dem"))
-        self._act(exp, "Ortofoto (GeoTIFF)...", lambda: self.export("ortho"))
-        self._act(exp, "Camere (CSV / COLMAP)...", lambda: self.export("cameras"))
-        self._act(exp, "Riferimenti (CSV)...", lambda: self.export("reference"))
-        self._act(m, "Genera report HTML...", self.generate_report, processing=True)
+        exp = m.addMenu(icon("export"), "Esporta")
+        self._act(exp, "Nuvola di punti (LAS/PLY)...", lambda: self.export("cloud"), icon_name="point_cloud")
+        self._act(exp, "Modello (OBJ/PLY)...", lambda: self.export("model"), icon_name="model")
+        self._act(exp, "DEM (GeoTIFF)...", lambda: self.export("dem"), icon_name="dem")
+        self._act(exp, "Ortofoto (GeoTIFF)...", lambda: self.export("ortho"), icon_name="ortho")
+        self._act(exp, "Camere (CSV / COLMAP)...", lambda: self.export("cameras"), icon_name="cameras")
+        self._act(exp, "Riferimenti (CSV)...", lambda: self.export("reference"), icon_name="reference")
+        self._act(m, "Genera report HTML...", self.generate_report, processing=True, icon_name="report")
         m.addSeparator()
-        self._act(m, "Crea e apri progetto demo...", self.open_demo, processing=True)
+        self._act(m, "Crea e apri progetto demo...", self.open_demo, processing=True, icon_name="demo")
+        self._act(m, "Pagina iniziale", self.show_start_page, icon_name="home_view")
         m.addSeparator()
-        self._act(m, "Esci", self.close, QKeySequence.StandardKey.Quit)
+        self._act(m, "Esci", self.close, QKeySequence.StandardKey.Quit, icon_name="quit")
         # ------------------------------------------------------------ Workflow
         m = mb.addMenu("Flusso di &lavoro")
-        self._act(m, "Aggiungi foto...", self.add_photos, processing=True)
-        self._act(m, "Aggiungi cartella...", lambda: self.add_photos(folder=True), processing=True)
-        self._act(m, "Aggiungi chunk", self.add_chunk)
+        self._act(m, "Aggiungi foto...", self.add_photos, processing=True, icon_name="photos")
+        self._act(m, "Aggiungi cartella...", lambda: self.add_photos(folder=True), processing=True,
+                  icon_name="folder_photos")
+        self._act(m, "Aggiungi chunk", self.add_chunk, icon_name="chunk_add")
         m.addSeparator()
-        self._act(m, "Rileva marker codificati...", self.detect_markers, processing=True)
-        self._act(m, "Allinea foto...", self.align_photos, processing=True)
-        self._act(m, "Importa riferimenti...", self.import_reference)
-        self._act(m, "Aggiorna georeferenziazione", self.update_transform, processing=True)
-        self._act(m, "Ottimizza camere", self.optimize_cameras, processing=True)
+        self._act(m, "Rileva marker codificati...", self.detect_markers, processing=True, icon_name="markers")
+        self._act(m, "Allinea foto...", self.align_photos, processing=True, icon_name="align")
+        self._act(m, "Importa riferimenti...", self.import_reference, icon_name="reference")
+        self._act(m, "Aggiorna georeferenziazione", self.update_transform, processing=True, icon_name="georef")
+        self._act(m, "Ottimizza camere", self.optimize_cameras, processing=True, icon_name="optimize")
         m.addSeparator()
-        self._act(m, "Costruisci nuvola densa...", self.build_dense, processing=True)
-        self._act(m, "Costruisci modello...", self.build_model, processing=True)
-        self._act(m, "Costruisci texture...", self.build_texture, processing=True)
-        self._act(m, "Costruisci DEM...", self.build_dem, processing=True)
-        self._act(m, "Costruisci ortofoto...", self.build_ortho, processing=True)
+        self._act(m, "Costruisci nuvola densa...", self.build_dense, processing=True, icon_name="dense")
+        self._act(m, "Costruisci modello...", self.build_model, processing=True, icon_name="model")
+        self._act(m, "Costruisci texture...", self.build_texture, processing=True, icon_name="texture")
+        self._act(m, "Costruisci DEM...", self.build_dem, processing=True, icon_name="dem")
+        self._act(m, "Costruisci ortofoto...", self.build_ortho, processing=True, icon_name="ortho")
         m.addSeparator()
-        self._act(m, "Elabora tutto...", self.process_all, "Ctrl+R", processing=True)
+        self._act(m, "Elabora tutto...", self.process_all, "Ctrl+R", processing=True, icon_name="process_all")
         # ------------------------------------------------------------ Tools
         m = mb.addMenu("&Strumenti")
-        tm = m.addMenu("Target")
-        self._act(tm, "Stampa fogli di target...", self.print_targets)
-        self._act(tm, "Tappetino per turntable...", self.print_turntable)
-        dm = m.addMenu("Disegno su ortofoto")
+        tm = m.addMenu(icon("print"), "Target")
+        self._act(tm, "Stampa fogli di target...", self.print_targets, icon_name="print")
+        self._act(tm, "Tappetino per turntable...", self.print_turntable, icon_name="turntable")
+        dm = m.addMenu(icon("polygon"), "Disegno su ortofoto")
         group = QActionGroup(self)
-        for mode, label in (("pan", "Sposta (navigazione)"), ("polygon", "Disegna unita' stratigrafica"),
-                            ("line", "Traccia sezione"), ("measure", "Misura distanza"),
-                            ("point", "Quota puntuale / prompt SAM")):
-            a = QAction(label, self, checkable=True)
+        for mode, label, ic in (("pan", "Sposta (navigazione)", "pan"), ("polygon", "Disegna unita' stratigrafica", "polygon"),
+                                ("line", "Traccia sezione", "line"), ("measure", "Misura distanza", "measure"),
+                                ("point", "Quota puntuale / prompt SAM", "point")):
+            a = QAction(icon(ic), label, self, checkable=True)
             a.setChecked(mode == "pan")
             a.triggered.connect(lambda _=False, md=mode: self.set_draw_mode(md))
             group.addAction(a)
             dm.addAction(a)
-        self._act(dm, "Cancella disegni", self.clear_drawings)
+        self._act(dm, "Cancella disegni", self.clear_drawings, icon_name="eraser")
         m.addSeparator()
-        self._act(m, "Curve di livello...", self.contours, processing=True)
-        self._act(m, "Volume scavo / riporto...", self.compute_volume, processing=True)
-        self._act(m, "Pianta a quota (slice orizzontale)...", self.plan_slice, processing=True)
-        self._act(m, "Profilo ceramico da mesh...", self.pottery_profile, processing=True)
+        self._act(m, "Curve di livello...", self.contours, processing=True, icon_name="contours")
+        self._act(m, "Volume scavo / riporto...", self.compute_volume, processing=True, icon_name="volume")
+        self._act(m, "Pianta a quota (slice orizzontale)...", self.plan_slice, processing=True, icon_name="slice")
+        self._act(m, "Profilo ceramico da mesh...", self.pottery_profile, processing=True, icon_name="pottery")
         m.addSeparator()
-        self._act(m, "Classifica nuvola di punti", self.classify, processing=True)
-        sm = m.addMenu("Segment Anything 2.1")
-        self._act(sm, "Unita' automatiche sull'ortofoto", self.sam_auto_units, processing=True)
-        self._act(sm, "Segmenta dai punti cliccati sull'ortofoto", self.sam_from_points, processing=True)
-        self._act(sm, "Prompt sulle foto (attiva/disattiva)", self.toggle_photo_sam)
+        self._act(m, "Classifica nuvola di punti", self.classify, processing=True, icon_name="classify")
+        sm = m.addMenu(icon("sam"), "Segment Anything 2.1")
+        self._act(sm, "Unita' automatiche sull'ortofoto", self.sam_auto_units, processing=True, icon_name="sam")
+        self._act(sm, "Segmenta dai punti cliccati sull'ortofoto", self.sam_from_points, processing=True,
+                  icon_name="point")
+        self._act(sm, "Prompt sulle foto (attiva/disattiva)", self.toggle_photo_sam, icon_name="view_photo")
         m.addSeparator()
-        self._act(m, "Esporta IFC (BIM)...", self.export_ifc, processing=True)
-        self._act(m, "Esegui script Python...", self.run_script)
+        self._act(m, "Esporta IFC (BIM)...", self.export_ifc, processing=True, icon_name="ifc")
+        self._act(m, "Esegui script Python...", self.run_script, icon_name="script")
         # ------------------------------------------------------------ PyArchInit
         m = mb.addMenu("&PyArchInit")
-        self._act(m, "Connetti (config.cfg)...", self.pyarchinit_connect)
-        self._act(m, "Connetti a un database (SQLite / PostgreSQL)...", lambda: self.pyarchinit_connect(ask_url=True))
-        self._act(m, "Usa il database demo", self.pyarchinit_demo)
+        self._act(m, "Connetti (config.cfg)...", self.pyarchinit_connect, icon_name="database")
+        self._act(m, "Connetti a un database (SQLite / PostgreSQL)...", lambda: self.pyarchinit_connect(ask_url=True),
+                  icon_name="database")
+        self._act(m, "Usa il database demo", self.pyarchinit_demo, icon_name="demo_db")
         m.addSeparator()
-        self._act(m, "Pubblica ortofoto / DEM / modello...", self.pyarchinit_publish, processing=True)
+        self._act(m, "Pubblica ortofoto / DEM / modello...", self.pyarchinit_publish, processing=True,
+                  icon_name="publish")
         self._act(m, "Pubblica unita' disegnate (pyunitastratigrafiche)", self.pyarchinit_publish_units,
-                  processing=True)
-        self._act(m, "Carica poligoni US sull'ortofoto", self.pyarchinit_load_units)
-        self._act(m, "Pubblica quote dei punti cliccati", self.pyarchinit_publish_points, processing=True)
-        self._act(m, "Aggiorna pannello", lambda: self.pa_pane.refresh())
+                  processing=True, icon_name="publish")
+        self._act(m, "Carica poligoni US sull'ortofoto", self.pyarchinit_load_units, icon_name="load")
+        self._act(m, "Pubblica quote dei punti cliccati", self.pyarchinit_publish_points, processing=True,
+                  icon_name="publish")
+        self._act(m, "Aggiorna pannello", lambda: self.pa_pane.refresh(), icon_name="refresh")
         # ------------------------------------------------------------ View
         m = mb.addMenu("&Vista")
         for d in (self.d_work, self.d_photos, self.d_pa):
             m.addAction(d.toggleViewAction())
         m.addSeparator()
-        self._act(m, "Area di lavoro", lambda: self._show_pane(self.left_tabs, self.workspace))
-        self._act(m, "Riferimenti", lambda: self._show_pane(self.left_tabs, self.reference))
-        self._act(m, "Foto (miniature)", lambda: self._show_pane(self.bottom_tabs, self.photos))
-        self._act(m, "Console Python", lambda: self._show_pane(self.bottom_tabs, self.console), "Ctrl+Shift+P")
-        self._act(m, "Log", lambda: self._show_pane(self.bottom_tabs, self.log_pane))
+        self._act(m, "Area di lavoro", lambda: self._show_pane(self.left_tabs, self.workspace), icon_name="workspace")
+        self._act(m, "Riferimenti", lambda: self._show_pane(self.left_tabs, self.reference), icon_name="reference_pane")
+        self._act(m, "Foto (miniature)", lambda: self._show_pane(self.bottom_tabs, self.photos), icon_name="photos")
+        self._act(m, "Console Python", lambda: self._show_pane(self.bottom_tabs, self.console), "Ctrl+Shift+P",
+                  icon_name="console")
+        self._act(m, "Log", lambda: self._show_pane(self.bottom_tabs, self.log_pane), icon_name="log")
         m.addSeparator()
-        self._act(m, "Modello", lambda: self.tabs.setCurrentWidget(self.model_view), "F2")
-        self._act(m, "Ortofoto / DEM", lambda: self.tabs.setCurrentWidget(self.ortho_view), "F3")
-        self._act(m, "Foto", lambda: self.tabs.setCurrentWidget(self.photo_view), "F4")
+        self._act(m, "Modello", lambda: self.show_view(self.model_view), "F2", icon_name="view3d")
+        self._act(m, "Ortofoto / DEM", lambda: self.show_view(self.ortho_view), "F3", icon_name="view_ortho")
+        self._act(m, "Foto", lambda: self.show_view(self.photo_view), "F4", icon_name="view_photo")
+        m.addSeparator()
+        tmenu = m.addMenu(icon("theme"), "Tema")
+        tgroup = QActionGroup(self)
+        self.theme_actions = {}
+        for mode, label in (("light", "Chiaro"), ("dark", "Scuro")):
+            a = QAction(label, self, checkable=True)
+            a.setChecked(theme.current() == mode)
+            a.triggered.connect(lambda _=False, md=mode: self.set_theme(md))
+            tgroup.addAction(a)
+            tmenu.addAction(a)
+            self.theme_actions[mode] = a
         # ------------------------------------------------------------ Help
         m = mb.addMenu("&Aiuto")
-        self._act(m, "Documentazione online", lambda: QDesktopServices.openUrl(
-            QUrl("https://github.com/enzococca/pyarchinit-photogrammetry")))
-        self._act(m, "Informazioni", self.about)
+        self._act(m, "Documentazione online", self.open_docs, icon_name="help")
+        self._act(m, "Diagnostica ambiente...", self.show_doctor, icon_name="doctor")
+        self._act(m, "Apri cartella dei log", self.open_log_folder, icon_name="folder")
+        m.addSeparator()
+        self._act(m, "Informazioni", self.about, icon_name="about")
         # ------------------------------------------------------------ toolbar
         tb = QToolBar("Flusso di lavoro")
         tb.setObjectName("workflow_toolbar")
+        tb.setMovable(False)
+        tb.setIconSize(QSize(26, 26))
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.addToolBar(tb)
-        for text, slot in (("Aggiungi foto", self.add_photos), ("Marker", self.detect_markers),
-                           ("Allinea", self.align_photos), ("Riferimenti", self.import_reference),
-                           ("Nuvola densa", self.build_dense), ("Modello", self.build_model),
-                           ("Texture", self.build_texture), ("DEM", self.build_dem), ("Ortofoto", self.build_ortho),
-                           ("Elabora tutto", self.process_all)):
-            a = tb.addAction(text)
-            a.triggered.connect(lambda _=False, s=slot: s())
-            self._processing_actions.append(a)
+        groups = [
+            [("open", "Apri", lambda: self.open_document(), "Apri un progetto", False),
+             ("save", "Salva", self.save_document, "Salva il progetto", False)],
+            [("photos", "Foto", self.add_photos, "Aggiungi foto al chunk", True),
+             ("markers", "Marker", self.detect_markers, "Rileva i target codificati", True),
+             ("align", "Allinea", self.align_photos, "Allinea le foto (SfM)", True),
+             ("reference", "Riferimenti", self.import_reference, "Importa le coordinate dei marker", True)],
+            [("dense", "Nuvola densa", self.build_dense, "Depth map e nuvola densa", True),
+             ("model", "Modello", self.build_model, "Mesh 3D", True),
+             ("texture", "Texture", self.build_texture, "Texture del modello", True),
+             ("dem", "DEM", self.build_dem, "Modello digitale di elevazione", True),
+             ("ortho", "Ortofoto", self.build_ortho, "Ortofoto (true ortho)", True)],
+            [("process_all", "Elabora tutto", self.process_all, "Tutti i passi in sequenza (Ctrl+R)", True)],
+            [("publish", "PyArchInit", self.pyarchinit_publish, "Pubblica in PyArchInit", True)],
+        ]
+        for gi, group in enumerate(groups):
+            if gi:
+                tb.addSeparator()
+            for name, text, slot, tip, processing in group:
+                a = tb.addAction(icon(name), text)
+                a.setStatusTip(tip)
+                a.setToolTip(tip)
+                a.triggered.connect(lambda _=False, s=slot: s())
+                if processing:
+                    self._processing_actions.append(a)
         self._refresh_recent()
 
     def _show_pane(self, tabs: QTabWidget, widget: QWidget) -> None:
         dock = self.d_work if tabs is self.left_tabs else self.d_photos
         dock.show()
         tabs.setCurrentWidget(widget)
+
+    def show_view(self, widget: QWidget) -> None:
+        self.stack.setCurrentWidget(self.tabs)
+        self.tabs.setCurrentWidget(widget)
+
+    def show_start_page(self) -> None:
+        self.stack.setCurrentWidget(self.start_page)
+
+    def _update_stack(self) -> None:
+        has_data = self.doc.path is not None or any(ch.cameras for ch in self.doc.chunks)
+        self.stack.setCurrentWidget(self.tabs if (self._started or has_data) else self.start_page)
 
     # ================================================================ document
     @property
@@ -269,13 +353,14 @@ class MainWindow(QMainWindow):
 
     def refresh_all(self, reset_views: bool = False) -> None:
         name = self.doc.path.name if self.doc.path else "senza nome"
-        self.setWindowTitle(f"pyarchinit-photogrammetry {__version__} - {name}[*]")
+        self.setWindowTitle(f"{APP_TITLE} {__version__} - {name}[*]")
         self.workspace.populate(self.doc)
         self.reference.set_chunk(self.chunk, self.last_report)
         self.photos.set_chunk(self.chunk)
         self.model_view.set_chunk(self.chunk) if reset_views else self.model_view.set_chunk(self.chunk,
                                                                                              self.model_view.kind)
         self._load_raster()
+        self._update_stack()
 
     def _load_raster(self, kind: str | None = None) -> None:
         ch = self.chunk
@@ -315,15 +400,27 @@ class MainWindow(QMainWindow):
             return False
         return True
 
+    # ---------------------------------------------------------------- messages
     def _warn(self, text: str) -> None:
-        QMessageBox.warning(self, "pyarchinit-photogrammetry", text)
+        self.log_pane.warning(text)
+        message(self, "warning", APP_TITLE, text)
 
-    def _error(self, err: str) -> None:
-        first = err.strip().splitlines()[0] if err.strip() else "Errore"
-        box = QMessageBox(QMessageBox.Icon.Critical, "Errore", first, parent=self)
-        box.setDetailedText(err)
-        box.exec()
-        self.log_pane.appendPlainText(err)
+    def _info(self, title: str, text: str) -> None:
+        self.log_pane.info(text)
+        message(self, "info", title, text)
+
+    def _error(self, summary: str, details: str = "", logged: bool = True) -> None:
+        """Report a failure: error dialog with hint and traceback; the log pane shows the
+        row written by the logger (the task runner and :meth:`_exc` log before calling)."""
+        first = summary.strip().splitlines()[0] if summary.strip() else "Errore"
+        if not logged:
+            log.error("%s\n%s", first, details.rstrip())
+        if details:
+            self._show_pane(self.bottom_tabs, self.log_pane)
+        ErrorDialog("Errore", first, details, parent=self).exec()
+
+    def _exc(self, prefix: str, exc: BaseException) -> None:
+        self._error(f"{prefix}: {exc}", traceback.format_exc(), logged=False)
 
     def run_task(self, label: str, fn, on_done=None, refresh: bool = True, save: bool = True) -> bool:
         def done(result):
@@ -331,7 +428,7 @@ class MainWindow(QMainWindow):
                 try:
                     self.doc.save()
                 except Exception as exc:
-                    self.log_pane.appendPlainText(f"Salvataggio non riuscito: {exc}")
+                    log.error("Salvataggio non riuscito: %s\n%s", exc, traceback.format_exc())
             elif not self.doc.path:
                 self._dirty(True)
             if refresh:
@@ -345,7 +442,9 @@ class MainWindow(QMainWindow):
     def new_document(self) -> None:
         if not self._confirm_discard():
             return
+        self._started = True
         self.set_document(Document())
+        self.statusBar().showMessage("Nuovo progetto: aggiungi le foto (Flusso di lavoro > Aggiungi foto)", 10000)
 
     def open_document(self, path: str | None = None) -> None:
         if path is None:
@@ -355,9 +454,10 @@ class MainWindow(QMainWindow):
         try:
             doc = Document.open(path)
         except Exception as exc:
-            self._error(f"Impossibile aprire {path}: {exc}")
+            self._exc(f"Impossibile aprire {path}", exc)
             return
         self.last_report = None
+        self._started = True
         self.set_document(doc)
         self.statusBar().showMessage(f"Aperto {path}", 5000)
 
@@ -378,9 +478,9 @@ class MainWindow(QMainWindow):
     def _confirm_discard(self) -> bool:
         if not self.isWindowModified():
             return True
-        r = QMessageBox.question(self, "Modifiche non salvate", "Salvare il progetto prima di continuare?",
-                                 QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
-                                 | QMessageBox.StandardButton.Cancel)
+        r = message(self, "question", "Modifiche non salvate", "Salvare il progetto prima di continuare?",
+                    buttons=QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+                    | QMessageBox.StandardButton.Cancel, default=QMessageBox.StandardButton.Save)
         if r == QMessageBox.StandardButton.Save:
             return self.save_document()
         return r == QMessageBox.StandardButton.Discard
@@ -412,10 +512,11 @@ class MainWindow(QMainWindow):
 
     def _refresh_recent(self) -> None:
         self.recent_menu.clear()
-        for p in self.settings.value("recent", []) or []:
-            if Path(p).exists():
-                a = self.recent_menu.addAction(p)
-                a.triggered.connect(lambda _=False, pp=p: self.open_document(pp))
+        rec = [p for p in (self.settings.value("recent", []) or []) if Path(p).exists()]
+        for p in rec:
+            a = self.recent_menu.addAction(icon("project"), p)
+            a.triggered.connect(lambda _=False, pp=p: self.open_document(pp))
+        self.start_page.set_recent(rec)
 
     def export(self, what: str) -> None:
         ch = self.chunk
@@ -441,8 +542,9 @@ class MainWindow(QMainWindow):
             elif what == "reference":
                 ch.export_reference(path)
         except Exception as exc:
-            self._error(str(exc))
+            self._exc("Esportazione non riuscita", exc)
             return
+        self.log_pane.info(f"Esportato {path}")
         self.statusBar().showMessage(f"Esportato {path}", 8000)
 
     def generate_report(self) -> None:
@@ -467,9 +569,8 @@ class MainWindow(QMainWindow):
         def done(d):
             self.open_document(str(d.project))
             self.pyarchinit_connect(config=d.pyarchinit_config)
-            QMessageBox.information(self, "Demo pronta",
-                                    f"Progetto: {d.project}\nCeramica: {d.vessel.parent}\n"
-                                    f"Leggi {d.folder / 'LEGGIMI.txt'} per cosa provare.")
+            self._info("Demo pronta", f"Progetto: {d.project}\nCeramica: {d.vessel.parent}\n"
+                                      f"Leggi {d.folder / 'LEGGIMI.txt'} per cosa provare.")
 
         self.run_task("Creazione dati demo", lambda p: create_demo(v["folder"], process=v["process"], progress=p),
                       done, refresh=False, save=False)
@@ -492,7 +593,9 @@ class MainWindow(QMainWindow):
             paths, _ = QFileDialog.getOpenFileNames(self, "Foto", self._last_dir(),
                                                     "Immagini (*.jpg *.jpeg *.png *.tif *.tiff *.JPG *.JPEG *.PNG *.TIF)")
         if paths:
-            self.run_task("Aggiunta foto", lambda p: self.chunk.add_photos(paths, recursive=folder))
+            self._started = True
+            self.run_task("Aggiunta foto", lambda p: self.chunk.add_photos(paths, recursive=folder),
+                          lambda cams: self.statusBar().showMessage(f"{len(cams)} foto aggiunte", 8000))
 
     def detect_markers(self) -> None:
         if not self._need_chunk():
@@ -546,9 +649,10 @@ class MainWindow(QMainWindow):
             n = self.chunk.import_reference(v["path"], crs=v["crs"] or None, columns=v["columns"],
                                             skip_rows=v["skip_rows"])
         except Exception as exc:
-            self._error(str(exc))
+            self._exc("Importazione dei riferimenti non riuscita", exc)
             return
         self.statusBar().showMessage(f"{n} riferimenti importati", 8000)
+        self.log_pane.info(f"{n} riferimenti importati da {v['path']}")
         self._dirty(True)
         self.refresh_all()
         if self.chunk.aligned_cameras:
@@ -706,11 +810,11 @@ class MainWindow(QMainWindow):
 
     def _show_model(self, kind) -> None:
         self.model_view.set_chunk(self.chunk, kind)
-        self.tabs.setCurrentWidget(self.model_view)
+        self.show_view(self.model_view)
 
     def _show_raster(self, kind: str) -> None:
         self._load_raster(kind)
-        self.tabs.setCurrentWidget(self.ortho_view)
+        self.show_view(self.ortho_view)
 
     # ---------------------------------------------------------------- views and workspace
     def _workspace_item(self, kind: str, chunk, payload) -> None:
@@ -742,15 +846,15 @@ class MainWindow(QMainWindow):
 
     def open_photo(self, camera) -> None:
         self.photo_view.show_camera(self.chunk, camera)
-        self.tabs.setCurrentWidget(self.photo_view)
+        self.show_view(self.photo_view)
         self.statusBar().showMessage(f"{camera.label}: tasto destro per posizionare un marker", 8000)
 
     def _markers_edited(self) -> None:
         self._dirty(True)
         try:
             self.chunk.triangulate_markers()
-        except Exception:
-            pass
+        except Exception as exc:
+            self.log_pane.warning(f"Triangolazione dei marker non riuscita: {exc}")
         self.reference.set_chunk(self.chunk)
         self.workspace.populate(self.doc)
 
@@ -765,13 +869,41 @@ class MainWindow(QMainWindow):
             self.workspace.populate(self.doc)
             self.reference.set_chunk(self.chunk)
 
+    # ---------------------------------------------------------------- appearance and help
+    def set_theme(self, mode: str) -> None:
+        theme.apply(QApplication.instance(), mode)
+        self.settings.setValue("theme", mode)
+        for k, a in self.theme_actions.items():
+            a.setChecked(k == mode)
+
+    def open_docs(self) -> None:
+        QDesktopServices.openUrl(QUrl(DOCS_URL))
+
+    def open_log_folder(self) -> None:
+        from .logging_setup import log_dir
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_dir())))
+
+    def show_doctor(self) -> DoctorDialog:
+        dlg = DoctorDialog(self)
+        dlg.exec()
+        return dlg
+
+    def about(self) -> None:
+        message(self, "info", "Informazioni",
+                f"<b>{APP_TITLE} {__version__}</b><br>"
+                "Fotogrammetria open source per l'archeologia e il BIM, integrata con PyArchInit.<br><br>"
+                f"Visualizzatore 3D: {self.model_view.backend}<br>"
+                "Licenza GNU GPL v2 o successiva<br>Autore: Enzo Cocca<br>"
+                f"<a href='{DOCS_URL}'>{DOCS_URL}</a>")
+
     # ---------------------------------------------------------------- drawing tools
     def set_draw_mode(self, mode: str) -> None:
         if mode != "pan" and self.ortho_view.tr is None:
             self._warn("Costruisci prima l'ortofoto o il DEM.")
             return
         self.ortho_view.set_mode(mode)
-        self.tabs.setCurrentWidget(self.ortho_view)
+        self.show_view(self.ortho_view)
         hints = {"polygon": "Clic per i vertici, doppio clic per chiudere, tasto destro per annullare",
                  "line": "Due clic: inizio e fine della sezione", "measure": "Due clic per misurare",
                  "point": "Clic sinistro: punto positivo, destro: negativo (prompt SAM); quote nel log"}
@@ -805,7 +937,7 @@ class MainWindow(QMainWindow):
         u = UnitPolygon(poly, us=v["us"] or None, area=v["area"] or None, tipo=v["tipo"])
         self.units.append(u)
         self._draw_unit(u, len(self.units) - 1)
-        self.log_pane.appendPlainText(f"{u.tipo} {u.us}: area {poly.area:.3f} m2")
+        self.log_pane.info(f"{u.tipo} {u.us}: area {poly.area:.3f} m2")
 
     def _draw_unit(self, u, i: int) -> None:
         geoms = getattr(u.geometry, "geoms", [u.geometry])
@@ -842,8 +974,8 @@ class MainWindow(QMainWindow):
     def _ortho_point(self, x: float, y: float, label: int) -> None:
         z = self.ortho_view.elevation(x, y)
         self.sam_points.append((x, y, label))
-        self.log_pane.appendPlainText(f"Punto {len(self.sam_points)}: X {x:.3f} Y {y:.3f}"
-                                      + (f" Z {z:.3f}" if z is not None else ""))
+        self.log_pane.info(f"Punto {len(self.sam_points)}: X {x:.3f} Y {y:.3f}"
+                           + (f" Z {z:.3f}" if z is not None else ""))
 
     # ---------------------------------------------------------------- tools
     def print_targets(self) -> None:
@@ -869,7 +1001,7 @@ class MainWindow(QMainWindow):
         try:
             files = generate_sheet(v["path"], v["target_type"], codes, v["size"], v["page"])
         except Exception as exc:
-            self._error(str(exc))
+            self._exc("Generazione dei target non riuscita", exc)
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(files[0])))
 
@@ -892,7 +1024,7 @@ class MainWindow(QMainWindow):
             csv = Path(v["path"]).with_suffix(".csv")
             csv.write_text("".join(f"{k},{x:.5f},{y:.5f},{z:.5f}\n" for k, (x, y, z) in layout.items()))
         except Exception as exc:
-            self._error(str(exc))
+            self._exc("Generazione del tappetino non riuscita", exc)
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(files[0])))
         self.statusBar().showMessage(f"Coordinate dei target: {csv}", 15000)
@@ -948,8 +1080,7 @@ class MainWindow(QMainWindow):
             self._last_volume = r
             txt = (f"Area {r['area_m2']:.3f} m2 - scavo {r['cut_m3']:.3f} m3 - riporto {r['fill_m3']:.3f} m3 - "
                    f"netto {r['net_m3']:.3f} m3 - quote {r['quota_min']:.3f} / {r['quota_max']:.3f}")
-            self.log_pane.appendPlainText(txt)
-            QMessageBox.information(self, "Volume", txt)
+            self._info("Volume", txt)
 
         self.run_task("Volume", lambda p: terrain.volume(self.chunk.dem_path, ref, poly), done, refresh=False,
                       save=False)
@@ -1012,11 +1143,11 @@ class MainWindow(QMainWindow):
             names = {"height_m": "Altezza", "max_diameter_m": "Diametro massimo", "rim_diameter_m": "Diametro orlo",
                      "base_diameter_m": "Diametro fondo", "wall_thickness_m": "Spessore parete"}
             txt = "  -  ".join(f"{names.get(k, k)} {val * 100:.1f} cm" for k, val in meas.items())
-            self.log_pane.appendPlainText(f"Profilo ceramico: {txt}")
+            self.log_pane.info(f"Profilo ceramico: {txt}")
             if str(out).lower().endswith(".svg"):
                 ImageDialog("Profilo ceramico", out, txt, self).exec()
             else:
-                QMessageBox.information(self, "Profilo ceramico", f"{txt}\n\nSalvato in {out}")
+                self._info("Profilo ceramico", f"{txt}\n\nSalvato in {out}")
 
         self.run_task("Profilo ceramico", job, done, refresh=False, save=False)
 
@@ -1027,7 +1158,7 @@ class MainWindow(QMainWindow):
 
         def done(pc):
             st = class_statistics(pc)
-            self.log_pane.appendPlainText("Classi: " + ", ".join(f"{k}: {n}" for k, n in sorted(st.items())))
+            self.log_pane.info("Classi: " + ", ".join(f"{k}: {n}" for k, n in sorted(st.items())))
             self._show_model("point_cloud")
 
         self.run_task("Classificazione", lambda p: classify_chunk(self.chunk), done)
@@ -1142,8 +1273,6 @@ class MainWindow(QMainWindow):
             with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
                 exec(compile(src, path, "exec"), ns)
         except Exception:
-            import traceback
-
             self.console.write(traceback.format_exc())
         self._after_console()
         self.refresh_all()
@@ -1172,9 +1301,10 @@ class MainWindow(QMainWindow):
             self.pa = PyArchInit.connect(url=url, config_path=config)
             label = url or str(config or "config.cfg di PyArchInit")
             self.pa_pane.set_connection(self.pa, label)
+            self.log_pane.info(f"PyArchInit connesso: {label}")
             self.d_pa.show()
         except Exception as exc:
-            self._error(f"Connessione a PyArchInit non riuscita: {exc}")
+            self._exc("Connessione a PyArchInit non riuscita", exc)
 
     def pyarchinit_demo(self) -> None:
         from ..pyarchinit.demo_db import create_demo_database
@@ -1185,7 +1315,7 @@ class MainWindow(QMainWindow):
             try:
                 cfg = create_demo_database(home)
             except Exception as exc:
-                self._error(str(exc))
+                self._exc("Creazione del database demo non riuscita", exc)
                 return
         self.pyarchinit_connect(config=cfg)
 
@@ -1222,7 +1352,7 @@ class MainWindow(QMainWindow):
 
         def done(out):
             self.pa_pane.refresh()
-            QMessageBox.information(self, "PyArchInit", "Pubblicato:\n" + json.dumps(out, indent=1, default=str))
+            self._info("PyArchInit", "Pubblicato:\n" + json.dumps(out, indent=1, default=str))
 
         self.run_task("Pubblicazione in PyArchInit", job, done, refresh=False, save=False)
 
@@ -1238,8 +1368,7 @@ class MainWindow(QMainWindow):
         if not ok:
             return
         self.run_task("Pubblicazione unita'", lambda p: self.pa.publish_units(units, site, crs=self.chunk.crs),
-                      lambda g: QMessageBox.information(self, "PyArchInit",
-                                                        f"{len(g)} poligoni scritti in pyunitastratigrafiche"),
+                      lambda g: self._info("PyArchInit", f"{len(g)} poligoni scritti in pyunitastratigrafiche"),
                       refresh=False, save=False)
 
     def pyarchinit_load_units(self) -> None:
@@ -1252,12 +1381,12 @@ class MainWindow(QMainWindow):
         try:
             polys = self.pa.us_polygons(site)
         except Exception as exc:
-            self._error(str(exc))
+            self._exc("Lettura delle unita' non riuscita", exc)
             return
         for u in polys:
             self.units.append(u)
             self._draw_unit(u, len(self.units) - 1)
-        self.tabs.setCurrentWidget(self.ortho_view)
+        self.show_view(self.ortho_view)
 
     def pyarchinit_publish_points(self) -> None:
         if not self._need_pa() or not self._need_chunk(product="dem"):
@@ -1274,13 +1403,34 @@ class MainWindow(QMainWindow):
         self.sam_points = []
         self.run_task("Pubblicazione quote", lambda p: self.pa.publish_elevations(self.chunk, site, v["area"], v["us"],
                                                                                  pts, unita_tipo=v["tipo"]),
-                      lambda g: QMessageBox.information(self, "PyArchInit", f"{len(g)} quote scritte"),
+                      lambda g: self._info("PyArchInit", f"{len(g)} quote scritte"),
                       refresh=False, save=False)
 
-    # ---------------------------------------------------------------- help
-    def about(self) -> None:
-        QMessageBox.about(self, "pyarchinit-photogrammetry",
-                          f"<b>pyarchinit-photogrammetry {__version__}</b><br>"
-                          "Fotogrammetria open source per l'archeologia e il BIM, integrata con PyArchInit.<br><br>"
-                          f"Visualizzatore 3D: {self.model_view.backend}<br>"
-                          "Licenza GNU GPL v2 o successiva<br>Autore: Enzo Cocca")
+
+class DoctorDialog(QDialog):
+    """Environment diagnosis (``ppg doctor``) with copy button."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from ..doctor import run_checks
+
+        self.setWindowTitle("Diagnostica ambiente")
+        self.resize(760, 560)
+        lay = QVBoxLayout(self)
+        self.report = run_checks(gui=True)
+        head = QLabel(("Nessun problema bloccante." if not self.report.failures else
+                       f"{len(self.report.failures)} problemi impediscono il funzionamento.")
+                      + (f"  {len(self.report.warnings)} avvisi." if self.report.warnings else ""))
+        head.setObjectName("errorSummary")
+        lay.addWidget(head)
+        self.box = QPlainTextEdit(self.report.text())
+        self.box.setObjectName("tracebackBox")
+        self.box.setReadOnly(True)
+        lay.addWidget(self.box, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        b_copy = QPushButton(icon("copy"), "Copia")
+        b_copy.clicked.connect(lambda: QApplication.clipboard().setText(self.report.text()))
+        bb.addButton(b_copy, QDialogButtonBox.ButtonRole.ActionRole)
+        bb.rejected.connect(self.reject)
+        bb.accepted.connect(self.accept)
+        lay.addWidget(bb)
