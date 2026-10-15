@@ -12,6 +12,35 @@ import pytest
 os.environ.setdefault("GLOG_minloglevel", "2")
 
 
+@pytest.fixture(autouse=True)
+def _no_modal_dialogs(monkeypatch):
+    """A modal dialog in an offscreen test would wait forever (the CI job hangs without a
+    log). Once Qt widgets are loaded, ``exec()`` returns "rejected" at once and the test
+    fails with the dialog's text."""
+    import sys
+
+    qw = sys.modules.get("PySide6.QtWidgets")
+    opened = []
+    if qw is not None:
+        def fake_exec(self, *args):
+            texts = [self.windowTitle()]
+            for cls in (qw.QLabel, qw.QPlainTextEdit):
+                for child in self.findChildren(cls):
+                    t = child.text() if cls is qw.QLabel else child.toPlainText()
+                    if t:
+                        texts.append(t[-1500:])
+            if isinstance(self, qw.QMessageBox):
+                texts += [self.text(), self.detailedText()[-1500:]]
+            opened.append(" | ".join(t for t in texts if t))
+            return 0
+
+        monkeypatch.setattr(qw.QDialog, "exec", fake_exec)
+        monkeypatch.setattr(qw.QMessageBox, "exec", fake_exec)
+    yield
+    if opened:
+        pytest.fail("modal dialog opened during the test: " + "\n".join(opened), pytrace=False)
+
+
 @pytest.fixture(scope="session")
 def scene_dir(tmp_path_factory) -> Path:
     from pyarchinit_photogrammetry.testing.synthetic import write_dataset

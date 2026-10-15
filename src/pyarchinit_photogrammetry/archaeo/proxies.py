@@ -102,9 +102,11 @@ def unit_proxy(dem_path: str | Path, polygon, base=None, thickness: float | None
         faces += [(ta, td, tc), (ta, tc, tb), (ba, bb, bc), (ba, bc, bd)]
         for (nr, nc), (p, q) in (((r - 1, c), (a, b)), ((r, c + 1), (b, cr)), ((r + 1, c), (cr, d)), ((r, c - 1), (d, a))):
             if not (0 <= nr < h and 0 <= nc < w and mask[nr, nc]):
-                faces += [(idx_t[p], idx_b[p], idx_b[q]), (idx_t[p], idx_b[q], idx_t[q])]
+                faces += [(idx_t[p], idx_b[q], idx_b[p]), (idx_t[p], idx_t[q], idx_b[q])]
+    # top faces are counter-clockwise seen from above for a north-up grid (e < 0), bottom
+    # and wall faces follow, so the winding is consistent by construction; a south-up grid
+    # turns everything inside out, which the volume sign reveals
     mesh = trimesh.Trimesh(verts, np.asarray(faces, np.int64), process=True)
-    trimesh.repair.fix_normals(mesh)
     if mesh.volume < 0:
         mesh.invert()
     cell = abs(tr.a * tr.e)

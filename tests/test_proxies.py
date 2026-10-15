@@ -22,7 +22,7 @@ def pit_dem(tmp_path):
 def test_proxy_is_a_closed_solid_with_the_cut_volume(pit_dem, tmp_path):
     poly = box(0.3, 0.2, 1.7, 0.9)  # x 0.3-1.7, y 0.2-0.9 (rows 10-80, cols 30-170)
     p = proxies.unit_proxy(pit_dem, poly, base=9.0, us="12", tipo="US")
-    assert p.name == "US12" and p.mesh.is_watertight
+    assert p.name == "US12" and p.mesh.is_watertight and p.mesh.is_winding_consistent
     expected = 1.4 * 0.7 * 1.0 - 1.0 * 0.4 * 0.5  # 1 m above the base, minus the pit
     assert abs(p.volume_m3 - expected) / expected < 0.01
     assert abs(p.area_m2 - 1.4 * 0.7) < 1e-6
