@@ -9,7 +9,7 @@ import traceback
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QSettings, QSize, Qt, QUrl
+from PySide6.QtCore import QSettings, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QDockWidget, QFileDialog, QInputDialog,
                                QLabel, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget,
@@ -19,11 +19,13 @@ from .. import __version__
 from ..app import app as application
 from ..core.document import Document
 from . import theme
-from .dialogs import QUALITY, ErrorDialog, Field, ImageDialog, ParamDialog, PublishDialog, UnitDialog, message
+from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, ImageDialog, ParamDialog, PublishDialog,
+                      SiteDialog, UnitDialog, message)
 from .icons import app_icon, icon
 from .image_views import US_COLORS, PhotoView, RasterView
 from .model_view import ModelView
-from .panels import ConsolePane, LogPane, PhotosPane, PyArchInitPane, ReferencePane, WorkspaceTree
+from .panels import (ConsolePane, LayersPane, LogPane, PhotosPane, PyArchInitPane, ReferencePane, SectionsPane,
+                     WorkspaceTree)
 from .start_page import StartPage
 from .worker import StatusProgress, TaskRunner
 
@@ -36,8 +38,9 @@ TARGET_TYPES = [("aruco_4x4_50", "ArUco 4x4 (50 codici)"), ("aruco_4x4_250", "Ar
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, document: Document | None = None):
+    def __init__(self, document: Document | None = None, autoconnect: bool = True):
         super().__init__()
+        self._autoconnect = autoconnect
         self.setWindowTitle(APP_TITLE)
         self.setWindowIcon(app_icon())
         self.resize(1500, 950)
@@ -47,6 +50,8 @@ class MainWindow(QMainWindow):
         self.runner.busy_changed.connect(self._busy)
         self.pa = None  # PyArchInit bridge
         self.units: list = []  # stratigraphic units drawn on the orthomosaic
+        self.sections: list[dict] = []  # sections of the open project (sezioni/sezioni.json)
+        self.line_layers: dict[str, list] = {}  # contour lines, plan slices: redrawn after raster reloads
         self.sam = None
         self.sam_points: list = []
         self.last_report: dict | None = None
@@ -56,6 +61,7 @@ class MainWindow(QMainWindow):
         self._build_actions()
         self._build_statusbar()
         self.set_document(document or application.document)
+        QTimer.singleShot(0, self._autoconnect_pyarchinit)
 
     # ================================================================ layout
     def _build_views(self) -> None:
@@ -112,16 +118,27 @@ class MainWindow(QMainWindow):
         self.console = ConsolePane(self._namespace)
         self.console.executed.connect(self._after_console)
         self.pa_pane = PyArchInitPane()
-        self.pa_pane.connect_requested.connect(self.pyarchinit_connect)
+        self.pa_pane.connect_requested.connect(lambda: self.pyarchinit_connect(ask=True))
         self.pa_pane.demo_requested.connect(self.pyarchinit_demo)
+        self.pa_pane.new_site_requested.connect(self.pyarchinit_new_site)
         # tab widgets inside docks (more robust than tabified docks across Qt platforms)
         self.left_tabs = QTabWidget()
         self.left_tabs.setIconSize(QSize(16, 16))
         self.left_tabs.addTab(self.workspace, icon("workspace"), "Area di lavoro")
         self.left_tabs.addTab(self.reference, icon("reference_pane"), "Riferimenti")
+        self.layers_pane = LayersPane()
+        self.layers_pane.set_view(self.ortho_view)
+        self.left_tabs.addTab(self.layers_pane, icon("slice"), "Layer")
+        self.sections_pane = SectionsPane()
+        self.sections_pane.zoom_requested.connect(self._zoom_section)
+        self.sections_pane.publish_requested.connect(self._publish_section)
+        self.sections_pane.delete_requested.connect(self._delete_section)
+        self.sections_pane.folder_requested.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._sections_dir()))))
+        self.ortho_view.feature_clicked.connect(self._feature_clicked)
         self.bottom_tabs = QTabWidget()
         self.bottom_tabs.setIconSize(QSize(16, 16))
         self.bottom_tabs.addTab(self.photos, icon("photos"), "Foto")
+        self.bottom_tabs.addTab(self.sections_pane, icon("line"), "Sezioni")
         self.bottom_tabs.addTab(self.console, icon("console"), "Console Python")
         self.bottom_tabs.addTab(self.log_pane, icon("log"), "Log")
         self.d_work = self._dock("Progetto", self.left_tabs, L, "workspace")
@@ -192,6 +209,7 @@ class MainWindow(QMainWindow):
         self._act(m, "Ottimizza camere", self.optimize_cameras, processing=True, icon_name="optimize")
         m.addSeparator()
         self._act(m, "Costruisci nuvola densa...", self.build_dense, processing=True, icon_name="dense")
+        self._act(m, "Ritaglia nuvola densa...", self.crop_cloud, processing=True, icon_name="eraser")
         self._act(m, "Costruisci modello...", self.build_model, processing=True, icon_name="model")
         self._act(m, "Costruisci texture...", self.build_texture, processing=True, icon_name="texture")
         self._act(m, "Costruisci DEM...", self.build_dem, processing=True, icon_name="dem")
@@ -204,20 +222,24 @@ class MainWindow(QMainWindow):
         self._act(tm, "Stampa fogli di target...", self.print_targets, icon_name="print")
         self._act(tm, "Tappetino per turntable...", self.print_turntable, icon_name="turntable")
         dm = m.addMenu(icon("polygon"), "Disegno su ortofoto")
-        group = QActionGroup(self)
-        for mode, label, ic in (("pan", "Sposta (navigazione)", "pan"), ("polygon", "Disegna unita' stratigrafica", "polygon"),
+        self.draw_group = QActionGroup(self)
+        self.draw_actions: dict[str, QAction] = {}
+        for mode, label, ic in (("pan", "Sposta / interroga", "pan"), ("polygon", "Disegna unita' stratigrafica", "polygon"),
                                 ("line", "Traccia sezione", "line"), ("measure", "Misura distanza", "measure"),
                                 ("point", "Quota puntuale / prompt SAM", "point")):
             a = QAction(icon(ic), label, self, checkable=True)
             a.setChecked(mode == "pan")
+            a.setStatusTip(label)
             a.triggered.connect(lambda _=False, md=mode: self.set_draw_mode(md))
-            group.addAction(a)
+            self.draw_group.addAction(a)
             dm.addAction(a)
-        self._act(dm, "Cancella disegni", self.clear_drawings, icon_name="eraser")
+            self.draw_actions[mode] = a
+        self.a_clear_drawings = self._act(dm, "Cancella disegni", self.clear_drawings, icon_name="eraser")
         m.addSeparator()
-        self._act(m, "Curve di livello...", self.contours, processing=True, icon_name="contours")
-        self._act(m, "Volume scavo / riporto...", self.compute_volume, processing=True, icon_name="volume")
-        self._act(m, "Pianta a quota (slice orizzontale)...", self.plan_slice, processing=True, icon_name="slice")
+        self.a_contours = self._act(m, "Curve di livello...", self.contours, processing=True, icon_name="contours")
+        self.a_volume = self._act(m, "Volume scavo / riporto...", self.compute_volume, processing=True, icon_name="volume")
+        self.a_slice = self._act(m, "Pianta a quota (slice orizzontale)...", self.plan_slice, processing=True,
+                                 icon_name="slice")
         self._act(m, "Profilo ceramico da mesh...", self.pottery_profile, processing=True, icon_name="pottery")
         m.addSeparator()
         self._act(m, "Classifica nuvola di punti", self.classify, processing=True, icon_name="classify")
@@ -231,10 +253,14 @@ class MainWindow(QMainWindow):
         self._act(m, "Esegui script Python...", self.run_script, icon_name="script")
         # ------------------------------------------------------------ PyArchInit
         m = mb.addMenu("&PyArchInit")
-        self._act(m, "Connetti (config.cfg)...", self.pyarchinit_connect, icon_name="database")
-        self._act(m, "Connetti a un database (SQLite / PostgreSQL)...", lambda: self.pyarchinit_connect(ask_url=True),
+        self._act(m, "Connetti (config.cfg, SQLite o PostgreSQL)...", lambda: self.pyarchinit_connect(ask=True),
                   icon_name="database")
         self._act(m, "Usa il database demo", self.pyarchinit_demo, icon_name="demo_db")
+        self._act(m, "Nuovo sito...", self.pyarchinit_new_site, icon_name="site")
+        self.a_autoconnect = QAction("Connetti all'avvio al database di PyArchInit", self, checkable=True)
+        self.a_autoconnect.setChecked(self.settings.value("pa_autoconnect", "true") in ("true", True, 1, "1"))
+        self.a_autoconnect.toggled.connect(lambda on: self.settings.setValue("pa_autoconnect", "true" if on else "false"))
+        m.addAction(self.a_autoconnect)
         m.addSeparator()
         self._act(m, "Pubblica ortofoto / DEM / modello...", self.pyarchinit_publish, processing=True,
                   icon_name="publish")
@@ -251,7 +277,9 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self._act(m, "Area di lavoro", lambda: self._show_pane(self.left_tabs, self.workspace), icon_name="workspace")
         self._act(m, "Riferimenti", lambda: self._show_pane(self.left_tabs, self.reference), icon_name="reference_pane")
+        self._act(m, "Layer", lambda: self._show_pane(self.left_tabs, self.layers_pane), icon_name="slice")
         self._act(m, "Foto (miniature)", lambda: self._show_pane(self.bottom_tabs, self.photos), icon_name="photos")
+        self._act(m, "Sezioni", lambda: self._show_pane(self.bottom_tabs, self.sections_pane), icon_name="line")
         self._act(m, "Console Python", lambda: self._show_pane(self.bottom_tabs, self.console), "Ctrl+Shift+P",
                   icon_name="console")
         self._act(m, "Log", lambda: self._show_pane(self.bottom_tabs, self.log_pane), icon_name="log")
@@ -309,6 +337,34 @@ class MainWindow(QMainWindow):
                 a.triggered.connect(lambda _=False, s=slot: s())
                 if processing:
                     self._processing_actions.append(a)
+        # drawing and layer tools, always visible under the workflow
+        self.addToolBarBreak()
+        db = QToolBar("Disegno e layer")
+        db.setObjectName("drawing_toolbar")
+        db.setMovable(False)
+        db.setIconSize(QSize(20, 20))
+        db.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.addToolBar(db)
+        lab = QLabel(" Disegno: ")
+        lab.setObjectName("pageSubtitle")
+        db.addWidget(lab)
+        for mode in ("pan", "polygon", "line", "measure", "point"):
+            db.addAction(self.draw_actions[mode])
+        db.addAction(self.a_clear_drawings)
+        db.addSeparator()
+        for a in (self.a_contours, self.a_volume, self.a_slice):
+            db.addAction(a)
+        db.addSeparator()
+        a = db.addAction(icon("slice"), "Layer")
+        a.setToolTip("Pannello dei layer: mostra, nascondi, zoom, attributi")
+        a.triggered.connect(lambda _=False: self._show_pane(self.left_tabs, self.layers_pane))
+        a = db.addAction(icon("line"), "Sezioni")
+        a.setToolTip("Pannello delle sezioni")
+        a.triggered.connect(lambda _=False: self._show_pane(self.bottom_tabs, self.sections_pane))
+        a = db.addAction(icon("publish"), "Pubblica unita'")
+        a.setToolTip("Scrive le unita' disegnate in pyunitastratigrafiche")
+        a.triggered.connect(lambda _=False: self.pyarchinit_publish_units())
+        self._processing_actions.append(a)
         self._refresh_recent()
 
     def _show_pane(self, tabs: QTabWidget, widget: QWidget) -> None:
@@ -347,7 +403,10 @@ class MainWindow(QMainWindow):
             doc.add_chunk("Chunk 1")
         self.units = []
         self.sam_points = []
+        self.sections = []
+        self.line_layers = {}
         self.refresh_all(reset_views=True)
+        self._load_sections()
         if doc.path:
             self._add_recent(doc.path)
 
@@ -376,6 +435,10 @@ class MainWindow(QMainWindow):
             self.ortho_view.set_dem(ch.dem_path)
         for i, u in enumerate(self.units):
             self._draw_unit(u, i)
+        self._draw_sections()
+        for name, lines in self.line_layers.items():
+            for coords, color, label, attrs, width in lines:
+                self.ortho_view.add_line(coords, color, label, layer=name, attrs=attrs, width=width)
 
     def _dirty(self, flag: bool = True) -> None:
         self.setWindowModified(flag)
@@ -559,20 +622,28 @@ class MainWindow(QMainWindow):
         default = str(Path.home() / "ppg_demo")
         v = ParamDialog.ask(self, "Progetto demo", [
             Field("folder", "Cartella", default, kind="dir"),
-            Field("process", "Elabora subito tutto (circa 1-2 minuti)", True)],
+            Field("which", "Apri alla fine", "scavo", choices=[("scavo", "Saggio di scavo"), ("ceramica", "Ciotola su turntable")]),
+            Field("pottery", "Crea anche la demo ceramica (turntable con target)", True),
+            Field("process", "Elabora subito tutto (circa 2-3 minuti)", True)],
             intro="Crea foto sintetiche di un saggio di scavo con 8 target georeferenziati (EPSG:3004), "
-                  "mesh di ceramica e un database PyArchInit di prova.")
+                  "una ciotola fotografata su un tappetino turntable con 12 target, mesh di ceramica e un "
+                  "database PyArchInit di prova.")
         if not v:
             return
         from ..demo import create_demo
 
         def done(d):
-            self.open_document(str(d.project))
-            self.pyarchinit_connect(config=d.pyarchinit_config)
-            self._info("Demo pronta", f"Progetto: {d.project}\nCeramica: {d.vessel.parent}\n"
-                                      f"Leggi {d.folder / 'LEGGIMI.txt'} per cosa provare.")
+            which = d.pottery_project if (v["which"] == "ceramica" and d.pottery_project) else d.project
+            self.open_document(str(which))
+            if d.pyarchinit_config:
+                self.pyarchinit_connect(config=d.pyarchinit_config, quiet=True)
+            text = (f"Saggio di scavo: {d.project}\nCiotola su turntable: {d.pottery_project or '-'}\n"
+                    + (f"Profilo della ciotola: {d.pottery_profile}\n" if d.pottery_profile else "")
+                    + f"Leggi {d.folder / 'LEGGIMI.txt'} per cosa provare.")
+            self._info("Demo pronta", text)
 
-        self.run_task("Creazione dati demo", lambda p: create_demo(v["folder"], process=v["process"], progress=p),
+        self.run_task("Creazione dati demo", lambda p: create_demo(v["folder"], process=v["process"],
+                                                                   with_pottery=v["pottery"], progress=p),
                       done, refresh=False, save=False)
 
     # ---------------------------------------------------------------- workflow
@@ -699,6 +770,33 @@ class MainWindow(QMainWindow):
             return self.chunk.build_point_cloud(progress=p.sub(0.8, 0.2))
 
         self.run_task("Nuvola densa", job, lambda pc: self._show_model("point_cloud"))
+
+    def crop_cloud(self) -> None:
+        """Keep the dense points inside a height range and/or a cylinder (turntable scans: the
+        mat and the targets are not part of the object)."""
+        if not self._need_chunk(product="point_cloud"):
+            return
+        v = ParamDialog.ask(self, "Ritaglia nuvola densa", [
+            Field("zmin", "Quota minima (m)", 0.003, minimum=-1e6, maximum=1e6, decimals=3),
+            Field("use_zmax", "Limita anche la quota massima", False),
+            Field("zmax", "Quota massima (m)", 1.0, minimum=-1e6, maximum=1e6, decimals=3),
+            Field("use_radius", "Limita a un cilindro attorno all'asse", True),
+            Field("radius", "Raggio del cilindro (m)", 0.1, minimum=0.001, maximum=1e6, decimals=3),
+            Field("cx", "Centro X", 0.0, minimum=-1e9, maximum=1e9, decimals=3),
+            Field("cy", "Centro Y", 0.0, minimum=-1e9, maximum=1e9, decimals=3)],
+            intro="Coordinate del sistema di riferimento del chunk. Per un oggetto su turntable: quota minima "
+                  "pochi millimetri sopra il tappetino e raggio appena maggiore dell'oggetto, centro (0, 0).")
+        if not v:
+            return
+
+        def job(p):
+            p(0.2, "Ritaglio")
+            return self.chunk.crop_point_cloud(zmin=v["zmin"], zmax=v["zmax"] if v["use_zmax"] else None,
+                                               radius=v["radius"] if v["use_radius"] else None,
+                                               center=(v["cx"], v["cy"]))
+
+        self.run_task("Ritaglio nuvola", job, lambda pc: (self.statusBar().showMessage(f"{len(pc):,} punti", 8000),
+                                                           self._show_model("point_cloud")))
 
     def build_model(self) -> None:
         if not self._need_chunk(aligned=True):
@@ -900,11 +998,14 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- drawing tools
     def set_draw_mode(self, mode: str) -> None:
         if mode != "pan" and self.ortho_view.tr is None:
+            self.draw_actions["pan"].setChecked(True)
             self._warn("Costruisci prima l'ortofoto o il DEM.")
             return
         self.ortho_view.set_mode(mode)
+        self.draw_actions[mode].setChecked(True)
         self.show_view(self.ortho_view)
-        hints = {"polygon": "Clic per i vertici, doppio clic per chiudere, tasto destro per annullare",
+        hints = {"pan": "Trascina per spostare, rotella per lo zoom, clic su un elemento per i suoi attributi",
+                 "polygon": "Clic per i vertici, doppio clic per chiudere, tasto destro per annullare",
                  "line": "Due clic: inizio e fine della sezione", "measure": "Due clic per misurare",
                  "point": "Clic sinistro: punto positivo, destro: negativo (prompt SAM); quote nel log"}
         self.statusBar().showMessage(hints.get(mode, ""), 15000)
@@ -912,7 +1013,17 @@ class MainWindow(QMainWindow):
     def clear_drawings(self) -> None:
         self.units = []
         self.sam_points = []
+        self.line_layers = {}
         self.ortho_view.clear_overlays()
+        self._draw_sections()
+
+    def _add_line_feature(self, layer: str, coords, color: str, label: str = "", attrs: dict | None = None,
+                          width: float = 2.0) -> None:
+        """A line on the raster view that is kept across DEM/orthomosaic reloads."""
+        coords = np.asarray(coords, float)[:, :2]
+        self.line_layers.setdefault(layer, []).append((coords, color, label, dict(attrs or {}), width))
+        if self.ortho_view.tr is not None:
+            self.ortho_view.add_line(coords, color, label, layer=layer, attrs=attrs, width=width)
 
     def _us_choices(self) -> list:
         if self.pa is None:
@@ -939,37 +1050,128 @@ class MainWindow(QMainWindow):
         self._draw_unit(u, len(self.units) - 1)
         self.log_pane.info(f"{u.tipo} {u.us}: area {poly.area:.3f} m2")
 
-    def _draw_unit(self, u, i: int) -> None:
+    def _draw_unit(self, u, i: int, layer: str | None = None) -> None:
+        if u.attributes is None:
+            u.attributes = {}
+        layer = layer or u.attributes.get("_layer") or "Unita' stratigrafiche"
+        u.attributes["_layer"] = layer  # survives raster reloads (DEM <-> orthomosaic)
         geoms = getattr(u.geometry, "geoms", [u.geometry])
+        attrs = {"tipo": u.tipo, "us": u.us or "?", "area": u.area or "", "area_m2": round(u.geometry.area, 3),
+                 **{k: v for k, v in (u.attributes or {}).items() if k != "gid" and not k.startswith("_")}}
         for g in geoms:
             self.ortho_view.add_polygon(np.asarray(g.exterior.coords)[:, :2], f"{u.tipo} {u.us or '?'}",
-                                        US_COLORS[i % len(US_COLORS)])
+                                        US_COLORS[i % len(US_COLORS)], layer=layer, attrs=attrs)
+
+    def _sections_dir(self) -> Path:
+        return (self.doc.path.parent if self.doc.path else Path.home()) / "sezioni"
+
+    def _sections_file(self) -> Path:
+        return self._sections_dir() / "sezioni.json"
+
+    def _save_sections(self) -> None:
+        if not self.sections:
+            return
+        self._sections_dir().mkdir(parents=True, exist_ok=True)
+        self._sections_file().write_text(json.dumps(self.sections, indent=1, ensure_ascii=False), encoding="utf-8")
+
+    def _load_sections(self) -> None:
+        """Sections of the open project (``sezioni/sezioni.json``) into the pane and the layer."""
+        self.sections = []
+        f = self._sections_file()
+        if f.exists():
+            try:
+                self.sections = [dict(x) for x in json.loads(f.read_text(encoding="utf-8"))]
+            except (OSError, ValueError) as exc:
+                log.warning("sezioni.json non leggibile: %s", exc)
+        self.sections_pane.set_sections(self.sections)
+        self._draw_sections()
+
+    def _draw_sections(self) -> None:
+        if self.ortho_view.tr is None:
+            return
+        for sdict in self.sections:
+            self.ortho_view.add_line([sdict["p1"], sdict["p2"]], "#ffd000", sdict["label"], layer="Sezioni",
+                                     attrs={"lunghezza_m": round(sdict.get("length", 0), 3), "svg": sdict.get("svg", "")})
 
     def _section_drawn(self, a, b) -> None:
         if not self._need_chunk(product="model"):
             return
         from ..archaeo import sections
 
-        out_dir = (self.doc.path.parent if self.doc.path else Path.home()) / "sezioni"
-        n = len(list(out_dir.glob("sezione_*.svg"))) + 1 if out_dir.exists() else 1
+        out_dir = self._sections_dir()
+        n = len(self.sections) + 1
+        while (out_dir / f"sezione_{n}.svg").exists():
+            n += 1
         label = f"Sezione {n}"
 
         def job(p):
             p(0.1, "Taglio del modello")
-            s = sections.section(self.chunk, a, b, label=label)
+            sec = sections.section(self.chunk, a, b, label=label)
             out_dir.mkdir(parents=True, exist_ok=True)
-            svg = s.to_svg(out_dir / f"sezione_{n}.svg")
-            s.to_dxf(out_dir / f"sezione_{n}.dxf", world=False)
-            s.to_dxf(out_dir / f"sezione_{n}_3d.dxf", world=True)
-            return s, svg
+            svg = sec.to_svg(out_dir / f"sezione_{n}.svg")
+            dxf = sec.to_dxf(out_dir / f"sezione_{n}.dxf", world=False)
+            dxf3d = sec.to_dxf(out_dir / f"sezione_{n}_3d.dxf", world=True)
+            return sec, svg, dxf, dxf3d
 
         def done(r):
-            s, svg = r
-            self.ortho_view.add_line([a, b], label=label)
-            self._last_section = s
-            ImageDialog(label, svg, f"Lunghezza {s.length:.3f} m - DXF in {out_dir}", self).exec()
+            sec, svg, dxf, dxf3d = r
+            self._last_section = sec
+            sdict = {"label": label, "p1": [float(a[0]), float(a[1])], "p2": [float(b[0]), float(b[1])],
+                     "length": float(sec.length), "svg": str(svg), "dxf": str(dxf), "dxf3d": str(dxf3d),
+                     "kind": "vertical"}
+            self.sections.append(sdict)
+            self._save_sections()
+            self.ortho_view.add_line([a, b], "#ffd000", label, layer="Sezioni",
+                                     attrs={"lunghezza_m": round(sec.length, 3), "svg": str(svg)})
+            self.sections_pane.add(sdict)
+            self._show_pane(self.bottom_tabs, self.sections_pane)
+            self.log_pane.info(f"{label}: lunghezza {sec.length:.3f} m, disegni in {out_dir}")
 
         self.run_task("Sezione", job, done, refresh=False, save=False)
+
+    def _zoom_section(self, sdict: dict) -> None:
+        from PySide6.QtCore import QRectF
+
+        p1, p2 = self.ortho_view.scene_pt(*sdict["p1"]), self.ortho_view.scene_pt(*sdict["p2"])
+        self.show_view(self.ortho_view)
+        self.ortho_view.zoom_to(QRectF(p1, p2).normalized())
+
+    def _publish_section(self, sdict: dict) -> None:
+        if not self._need_pa():
+            return
+        from ..archaeo.sections import Section
+
+        sites = self.pa_pane.site_names()
+        site, ok = QInputDialog.getItem(self, "Sito", "Sito PyArchInit:", sites, 0, True)
+        if not ok or not site:
+            return
+        sec = Section(np.array(sdict["p1"] + [0.0]), np.array(sdict["p2"] + [0.0]), label=sdict["label"])
+        self.run_task("Pubblicazione sezione",
+                      lambda p: self.pa.publish_section_trace(sec, site, sdict["label"], crs=self.chunk.crs),
+                      lambda gid: self._info("PyArchInit", f"Traccia '{sdict['label']}' scritta in pyarchinit_sezioni (gid {gid})"),
+                      refresh=False, save=False)
+
+    def _delete_section(self, sdict: dict) -> None:
+        r = message(self, "question", "Elimina sezione", f"Eliminare {sdict['label']} e i suoi file?",
+                    buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    default=QMessageBox.StandardButton.No)
+        if r != QMessageBox.StandardButton.Yes:
+            return
+        for key in ("svg", "dxf", "dxf3d"):
+            try:
+                Path(sdict.get(key, "")).unlink(missing_ok=True)
+            except OSError:
+                pass
+        self.sections = [x for x in self.sections if x is not sdict and x.get("label") != sdict.get("label")]
+        self._save_sections() if self.sections else self._sections_file().unlink(missing_ok=True)
+        self.sections_pane.set_sections(self.sections)
+        self.ortho_view.remove_layer("Sezioni")
+        self._draw_sections()
+
+    def _feature_clicked(self, layer: str, attrs: dict) -> None:
+        text = "  ".join(f"{k}: {v}" for k, v in attrs.items() if v not in (None, ""))
+        self.statusBar().showMessage(f"{layer}: {text}", 15000)
+        self.layers_pane.show_attributes(layer, attrs)
 
     def _ortho_point(self, x: float, y: float, label: int) -> None:
         z = self.ortho_view.elevation(x, y)
@@ -1048,9 +1250,15 @@ class MainWindow(QMainWindow):
 
         def done(lines):
             self._show_raster("dem")
+            name = f"Curve di livello ({v['interval']} m)"
+            self.line_layers.pop(name, None)
+            self.ortho_view.remove_layer(name)
             for ln in lines:
-                self.ortho_view.add_line(ln["coords"], "#ffffff" if ln.get("index") else "#202020")
+                self._add_line_feature(name, ln["coords"], "#ffffff" if ln.get("index") else "#202020",
+                                       attrs={"quota": round(float(ln.get("elevation", 0)), 3),
+                                              "direttrice": bool(ln.get("index"))}, width=1.6 if ln.get("index") else 1.0)
             self.statusBar().showMessage(f"{len(lines)} curve salvate in {v['path']}", 10000)
+            self._show_pane(self.left_tabs, self.layers_pane)
 
         self.run_task("Curve di livello", job, done, refresh=False, save=False)
 
@@ -1100,9 +1308,11 @@ class MainWindow(QMainWindow):
             s.to_dxf(out, world=True)
             return s
 
-        def done(s):
-            for pl in s.polylines:
-                self.ortho_view.add_line(pl[:, :2], "#ff00ff")
+        def done(sec):
+            for pl in sec.polylines:
+                self._add_line_feature(f"Pianta a quota {z0:.2f} m", pl[:, :2], "#ff00ff",
+                                       attrs={"quota": z0, "dxf": str(out)})
+            self.show_view(self.ortho_view)
             self.statusBar().showMessage(f"Pianta salvata in {out}", 10000)
 
         self.run_task("Pianta a quota", job, done, refresh=False, save=False)
@@ -1278,46 +1488,87 @@ class MainWindow(QMainWindow):
         self.refresh_all()
 
     # ---------------------------------------------------------------- PyArchInit
-    def pyarchinit_connect(self, ask_url: bool = False, config: str | Path | None = None) -> None:
+    def pyarchinit_connect(self, ask: bool = False, config: str | Path | None = None, url: str | None = None,
+                           quiet: bool = False) -> None:
+        """Connect to PyArchInit: ``config`` (a config.cfg) or ``url`` (SQLite path / SQLAlchemy URL);
+        ``ask`` opens the connection dialog. The connection runs in the background."""
         from ..pyarchinit import PyArchInit
+        from ..pyarchinit.config import pyarchinit_home
 
-        url = None
-        if ask_url:
-            url, ok = QInputDialog.getText(self, "Database PyArchInit",
-                                           "Percorso SQLite o URL (postgresql://utente@host:5432/db):")
-            if not ok or not url:
+        if ask:
+            dlg = ConnectDialog(self, self.settings)
+            if dlg.exec() != dlg.DialogCode.Accepted:
                 return
-        elif config is None and not os.environ.get("PYARCHINIT_HOME"):
-            from ..pyarchinit.config import pyarchinit_home
+            v = dlg.values()
+            config, url = v["config"], v["url"]
+        elif config is None and url is None:
+            config = pyarchinit_home() / "pyarchinit_DB_folder" / "config.cfg"
+            if not Path(config).exists():
+                return self.pyarchinit_connect(ask=True)
 
-            default = pyarchinit_home() / "pyarchinit_DB_folder" / "config.cfg"
-            if not default.exists():
-                path, _ = QFileDialog.getOpenFileName(self, "config.cfg di PyArchInit", str(Path.home()),
-                                                      "config.cfg (config.cfg);;Tutti (*)")
-                if not path:
-                    return
-                config = path
-        try:
-            self.pa = PyArchInit.connect(url=url, config_path=config)
-            label = url or str(config or "config.cfg di PyArchInit")
-            self.pa_pane.set_connection(self.pa, label)
-            self.log_pane.info(f"PyArchInit connesso: {label}")
+        def job(p):
+            p(0.2, "Connessione")
+            return PyArchInit.connect(url=url, config_path=config)
+
+        def done(pa):
+            self.pa = pa
+            self.pa_pane.set_connection(pa, pa.label)
+            log.info("PyArchInit connesso: %s", pa.label)
             self.d_pa.show()
-        except Exception as exc:
-            self._exc("Connessione a PyArchInit non riuscita", exc)
+
+        def failed(summary, details):
+            self.pa_pane.set_disconnected("Non connesso")
+            if quiet:
+                log.warning("Connessione automatica a PyArchInit non riuscita: %s", summary)
+            else:
+                self._error(summary, details)
+
+        self.runner.run("Connessione a PyArchInit", job, done, failed, quiet=quiet)
+
+    def _autoconnect_pyarchinit(self) -> None:
+        from ..pyarchinit.config import pyarchinit_home
+
+        cfg = pyarchinit_home() / "pyarchinit_DB_folder" / "config.cfg"
+        if (self._autoconnect and self.a_autoconnect.isChecked() and cfg.exists() and self.pa is None
+                and not self.runner.busy):
+            self.pyarchinit_connect(config=cfg, quiet=True)
 
     def pyarchinit_demo(self) -> None:
+        """Create (once) and open the demo database. When a PyArchInit 5 installation exists
+        (``~/pyarchinit_5/pyarchinit_DB_folder``) the database is written there as ``demo.sqlite``,
+        so that QGIS/PyArchInit can open the same file; its ``config.cfg`` is left untouched."""
+        from ..pyarchinit.config import pyarchinit_home
         from ..pyarchinit.demo_db import create_demo_database
 
-        home = Path.home() / "ppg_demo" / "pyarchinit"
-        cfg = home / "pyarchinit_DB_folder" / "config.cfg"
-        if not cfg.exists():
-            try:
-                cfg = create_demo_database(home)
-            except Exception as exc:
-                self._exc("Creazione del database demo non riuscita", exc)
-                return
-        self.pyarchinit_connect(config=cfg)
+        pa_home = pyarchinit_home()
+        in_pyarchinit = (pa_home / "pyarchinit_DB_folder").exists()
+        home = pa_home if in_pyarchinit else Path.home() / "ppg_demo" / "pyarchinit"
+        try:
+            cfg = create_demo_database(home, size="large")
+        except Exception as exc:
+            self._exc("Creazione del database demo non riuscita", exc)
+            return
+        db = home / "pyarchinit_DB_folder" / "demo.sqlite"
+        if in_pyarchinit:
+            self.pyarchinit_connect(url=str(db))
+            self.log_pane.info(f"Database demo in {db}: per vederlo in QGIS seleziona demo.sqlite nelle "
+                               "impostazioni di PyArchInit")
+        else:
+            self.pyarchinit_connect(config=cfg)
+
+    def pyarchinit_new_site(self) -> None:
+        if not self._need_pa():
+            return
+        dlg = SiteDialog(self)
+        if dlg.exec() != dlg.DialogCode.Accepted or not dlg.values()["sito"]:
+            return
+        try:
+            self.pa.ensure_site(**dlg.values())
+        except Exception as exc:
+            self._exc("Creazione del sito non riuscita", exc)
+            return
+        self.pa_pane.refresh()
+        self.log_pane.info(f"Sito creato in PyArchInit: {dlg.values()['sito']}")
 
     def _need_pa(self) -> bool:
         if self.pa is None:
@@ -1385,8 +1636,9 @@ class MainWindow(QMainWindow):
             return
         for u in polys:
             self.units.append(u)
-            self._draw_unit(u, len(self.units) - 1)
+            self._draw_unit(u, len(self.units) - 1, layer=f"US da PyArchInit - {site}")
         self.show_view(self.ortho_view)
+        self._show_pane(self.left_tabs, self.layers_pane)
 
     def pyarchinit_publish_points(self) -> None:
         if not self._need_pa() or not self._need_chunk(product="dem"):

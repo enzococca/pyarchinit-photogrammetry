@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
             application.document = Document.open(project)
         except Exception as exc:
             open_error = f"Impossibile aprire {project}: {exc}"
-    win = MainWindow(application.document if project and not open_error else None)
+    win = MainWindow(application.document if project and not open_error else None, autoconnect="--check" not in argv)
     geo = win.settings.value("geometry")
     if geo is not None:
         win.restoreGeometry(geo)

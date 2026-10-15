@@ -313,6 +313,32 @@ class Chunk:
 
         return dense.build_point_cloud(self, point_colors=point_colors, progress=as_progress(progress))
 
+    def crop_point_cloud(self, zmin: float | None = None, zmax: float | None = None, radius: float | None = None,
+                         center=(0.0, 0.0), bounds=None) -> "PointCloud":
+        """Keep only the dense points inside the given limits (world coordinates): a height
+        range, a cylinder around ``center`` (the turntable axis), or ``bounds`` (xmin, ymin,
+        xmax, ymax). Returns and stores the cropped cloud."""
+        pc = self.point_cloud
+        if pc is None:
+            raise RuntimeError("build the dense cloud first")
+        world = self.to_world(pc.xyz)
+        keep = np.ones(len(pc), bool)
+        if zmin is not None:
+            keep &= world[:, 2] >= zmin
+        if zmax is not None:
+            keep &= world[:, 2] <= zmax
+        if radius is not None:
+            keep &= np.hypot(world[:, 0] - center[0], world[:, 1] - center[1]) <= radius
+        if bounds is not None:
+            x0, y0, x1, y1 = bounds
+            keep &= (world[:, 0] >= x0) & (world[:, 0] <= x1) & (world[:, 1] >= y0) & (world[:, 1] <= y1)
+        if keep.sum() < 100:
+            raise RuntimeError(f"only {int(keep.sum())} points would remain inside the crop")
+        self.point_cloud = pc.subset(keep)
+        self.products.pop("model", None)
+        self.products.pop("model_textured", None)
+        return self.point_cloud
+
     def build_model(self, source: str = "point_cloud", surface: str = "arbitrary", face_count: int | str = "medium",
                     progress: ProgressCallback | None = None):
         """Build a mesh. ``surface='arbitrary'`` (Poisson, true 3D) or ``'height_field'`` (2.5D, for terrain)."""

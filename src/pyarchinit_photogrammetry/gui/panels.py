@@ -584,20 +584,24 @@ class PyArchInitPane(QWidget):
 
     connect_requested = Signal()
     demo_requested = Signal()
+    new_site_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         row = QHBoxLayout()
-        self.b_connect = _tool("database", "Connetti...", "Connetti al database di PyArchInit")
+        self.b_connect = _tool("database", "Connetti...", "Connetti al database di PyArchInit (config.cfg, SQLite, PostgreSQL)")
         self.b_demo = _tool("demo_db", "Database demo", "Usa il database dimostrativo")
+        self.b_new_site = _tool("site", "Nuovo sito...", "Crea la scheda Sito in PyArchInit")
         row.addWidget(self.b_connect)
         row.addWidget(self.b_demo)
+        row.addWidget(self.b_new_site)
         row.addStretch(1)
         lay.addLayout(row)
         self.b_connect.clicked.connect(self.connect_requested)
         self.b_demo.clicked.connect(self.demo_requested)
+        self.b_new_site.clicked.connect(self.new_site_requested)
         self.status = QLabel("Non connesso")
         self.status.setWordWrap(True)
         lay.addWidget(self.status)
@@ -610,8 +614,14 @@ class PyArchInitPane(QWidget):
 
     def set_connection(self, pa, label: str) -> None:
         self.pa = pa
-        self.status.setText(f"Connesso: {label}")
+        kind = "PostgreSQL" if pa.db.is_postgres else ("SpatiaLite" if pa.db.spatialite else "SQLite (senza mod_spatialite)")
+        self.status.setText(f"Connesso ({kind}): {label}")
         self.refresh()
+
+    def set_disconnected(self, text: str = "Non connesso") -> None:
+        self.pa = None
+        self.status.setText(text)
+        self.tree.clear()
 
     def refresh(self) -> None:
         self.tree.clear()
@@ -649,3 +659,211 @@ class PyArchInitPane(QWidget):
         if self.pa is None:
             return []
         return [str(s.get("sito")) for s in self.pa.sites()]
+
+
+# ---------------------------------------------------------------- layers
+LAYER_ICONS = {"polygon": "polygon", "line": "line", "point": "point"}
+
+
+class LayersPane(QWidget):
+    """Layers drawn on the orthomosaic/DEM view: show/hide, zoom, remove, attributes of the
+    clicked feature."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(4, 4, 4, 4)
+        bar = QHBoxLayout()
+        self.b_all = _tool("ok", "Tutti", "Mostra tutti i layer")
+        self.b_none = _tool("eraser", "Nessuno", "Nascondi tutti i layer")
+        self.b_zoom = _tool("search", "Zoom", "Zoom sul layer o sull'elemento selezionato")
+        self.b_remove = _tool("clear", "Rimuovi", "Rimuovi il layer selezionato dalla vista")
+        for b in (self.b_all, self.b_none, self.b_zoom, self.b_remove):
+            bar.addWidget(b)
+        bar.addStretch(1)
+        lay.addLayout(bar)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.setIconSize(QSize(16, 16))
+        self.tree.setAlternatingRowColors(True)
+        lay.addWidget(self.tree, 1)
+        title = QLabel("ATTRIBUTI")
+        title.setObjectName("sectionTitle")
+        lay.addWidget(title)
+        self.attrs = QTableWidget(0, 2)
+        self.attrs.setHorizontalHeaderLabels(["Campo", "Valore"])
+        self.attrs.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.attrs.verticalHeader().setVisible(False)
+        self.attrs.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.attrs.setMaximumHeight(170)
+        lay.addWidget(self.attrs)
+        self.view = None
+        self._filling = False
+        self.tree.itemChanged.connect(self._changed)
+        self.tree.itemDoubleClicked.connect(lambda it, _c: self._zoom_item(it))
+        self.tree.itemClicked.connect(self._clicked)
+        self.b_all.clicked.connect(lambda: self._set_all(True))
+        self.b_none.clicked.connect(lambda: self._set_all(False))
+        self.b_zoom.clicked.connect(lambda: self._zoom_item(self.tree.currentItem()))
+        self.b_remove.clicked.connect(self._remove_current)
+
+    def set_view(self, view) -> None:
+        self.view = view
+        view.layers_changed.connect(self.rebuild)
+        view.feature_clicked.connect(self.show_attributes)
+        self.rebuild()
+
+    def rebuild(self) -> None:
+        if self.view is None:
+            return
+        self._filling = True
+        expanded = {self.tree.topLevelItem(i).text(0).split("  (")[0] for i in range(self.tree.topLevelItemCount())
+                    if self.tree.topLevelItem(i).isExpanded()}
+        self.tree.clear()
+        for name in self.view.layer_order:
+            lay = self.view.layers[name]
+            top = QTreeWidgetItem([f"{name}  ({len(lay['features'])})"])
+            top.setIcon(0, icon(LAYER_ICONS.get(lay["kind"], "line")))
+            top.setFlags(top.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            top.setCheckState(0, Qt.CheckState.Checked if lay["visible"] else Qt.CheckState.Unchecked)
+            top.setData(0, Qt.ItemDataRole.UserRole, (name, -1))
+            self.tree.addTopLevelItem(top)
+            for i, (_item, _label, attrs) in enumerate(lay["features"]):
+                text = str(attrs.get("etichetta") or "") or ", ".join(f"{k} {v}" for k, v in list(attrs.items())[:2])
+                child = QTreeWidgetItem([text or f"elemento {i + 1}"])
+                child.setData(0, Qt.ItemDataRole.UserRole, (name, i))
+                top.addChild(child)
+            top.setExpanded(name in expanded or len(lay["features"]) <= 12)
+        self._filling = False
+
+    def _changed(self, item, _col) -> None:
+        if self._filling or self.view is None:
+            return
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if data and data[1] == -1:
+            self.view.set_layer_visible(data[0], item.checkState(0) == Qt.CheckState.Checked)
+
+    def _set_all(self, visible: bool) -> None:
+        if self.view is None:
+            return
+        for name in self.view.layer_order:
+            self.view.set_layer_visible(name, visible)
+        self.rebuild()
+
+    def _zoom_item(self, item) -> None:
+        if item is None or self.view is None:
+            return
+        name, idx = item.data(0, Qt.ItemDataRole.UserRole)
+        if idx < 0:
+            self.view.zoom_to_layer(name)
+        else:
+            self.view.zoom_to_feature(name, idx)
+
+    def _clicked(self, item, _col) -> None:
+        if self.view is None:
+            return
+        name, idx = item.data(0, Qt.ItemDataRole.UserRole)
+        if idx >= 0:
+            self.show_attributes(name, self.view.layers[name]["features"][idx][2])
+
+    def _remove_current(self) -> None:
+        item = self.tree.currentItem()
+        if item is None or self.view is None:
+            return
+        name, _ = item.data(0, Qt.ItemDataRole.UserRole)
+        self.view.remove_layer(name)
+
+    def show_attributes(self, layer: str, attrs: dict) -> None:
+        rows = [("layer", layer)] + [(k, v) for k, v in attrs.items() if v not in (None, "")]
+        self.attrs.setRowCount(len(rows))
+        for r, (k, v) in enumerate(rows):
+            self.attrs.setItem(r, 0, QTableWidgetItem(str(k)))
+            self.attrs.setItem(r, 1, QTableWidgetItem(str(v)))
+
+
+# ---------------------------------------------------------------- sections
+class SectionsPane(QWidget):
+    """Sections drawn on the orthomosaic: list, preview of the drawing, files, actions."""
+
+    zoom_requested = Signal(dict)
+    publish_requested = Signal(dict)
+    delete_requested = Signal(dict)
+    folder_requested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QScrollArea
+        from PySide6.QtSvgWidgets import QSvgWidget
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(4, 4, 4, 4)
+        left = QVBoxLayout()
+        self.list = QListWidget()
+        self.list.setIconSize(QSize(16, 16))
+        self.list.currentItemChanged.connect(lambda cur, _p: self._show(cur))
+        left.addWidget(self.list, 1)
+        self.b_zoom = _tool("search", "Zoom sulla traccia")
+        self.b_folder = _tool("folder", "Apri cartella")
+        self.b_publish = _tool("publish", "Pubblica in PyArchInit", "Scrive la traccia in pyarchinit_sezioni")
+        self.b_delete = _tool("clear", "Elimina")
+        for b in (self.b_zoom, self.b_folder, self.b_publish, self.b_delete):
+            left.addWidget(b)
+        lay.addLayout(left)
+        right = QVBoxLayout()
+        self.info = QLabel("Traccia una sezione: Disegno > Traccia sezione, poi due clic sull'ortofoto.")
+        self.info.setWordWrap(True)
+        self.info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        right.addWidget(self.info)
+        self.svg = QSvgWidget()
+        self.svg.setStyleSheet("background: white;")
+        scroll = QScrollArea()
+        scroll.setWidget(self.svg)
+        scroll.setWidgetResizable(False)
+        scroll.setStyleSheet("background: white;")
+        right.addWidget(scroll, 1)
+        lay.addLayout(right, 1)
+        self.sections: list[dict] = []
+        self.b_zoom.clicked.connect(lambda: self._emit(self.zoom_requested))
+        self.b_publish.clicked.connect(lambda: self._emit(self.publish_requested))
+        self.b_delete.clicked.connect(lambda: self._emit(self.delete_requested))
+        self.b_folder.clicked.connect(self.folder_requested)
+
+    def current(self) -> dict | None:
+        it = self.list.currentItem()
+        return it.data(Qt.ItemDataRole.UserRole) if it is not None else None
+
+    def _emit(self, signal) -> None:
+        s = self.current()
+        if s is not None:
+            signal.emit(s)
+
+    def set_sections(self, sections: list[dict]) -> None:
+        self.sections = list(sections)
+        self.list.clear()
+        for s in self.sections:
+            it = QListWidgetItem(icon("line" if s.get("kind", "vertical") == "vertical" else "slice"),
+                                 f"{s['label']}  ({s.get('length', 0):.2f} m)")
+            it.setData(Qt.ItemDataRole.UserRole, s)
+            self.list.addItem(it)
+        if self.sections:
+            self.list.setCurrentRow(len(self.sections) - 1)
+
+    def add(self, section: dict) -> None:
+        self.set_sections(self.sections + [section])
+
+    def _show(self, item) -> None:
+        if item is None:
+            self.svg.load(b"")
+            return
+        s = item.data(Qt.ItemDataRole.UserRole)
+        svg = s.get("svg")
+        if svg and Path(svg).exists():
+            self.svg.load(str(svg))
+            size = self.svg.renderer().defaultSize()
+            if size.width() > 0:
+                f = min(1.0, 1400 / size.width())
+                self.svg.setFixedSize(int(size.width() * f), int(size.height() * f))
+        p1, p2 = s.get("p1", [0, 0]), s.get("p2", [0, 0])
+        self.info.setText(f"<b>{s['label']}</b>  lunghezza {s.get('length', 0):.3f} m  -  da "
+                          f"({p1[0]:.2f}, {p1[1]:.2f}) a ({p2[0]:.2f}, {p2[1]:.2f})<br>"
+                          f"SVG: {s.get('svg', '')}<br>DXF: {s.get('dxf', '')}  -  3D: {s.get('dxf3d', '')}")

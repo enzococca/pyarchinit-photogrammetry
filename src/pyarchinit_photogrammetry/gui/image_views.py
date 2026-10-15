@@ -88,6 +88,8 @@ class RasterView(_ZoomView):
     line_finished = Signal(object, object)
     point_clicked = Signal(float, float, int)  # x, y, label (1 left / 0 right)
     measured = Signal(str)
+    layers_changed = Signal()
+    feature_clicked = Signal(str, dict)  # layer name, attributes (query in pan mode)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -100,6 +102,8 @@ class RasterView(_ZoomView):
         self._clicks: list[QPointF] = []
         self._rubber: QGraphicsPathItem | None = None
         self.overlays: list = []
+        self.layers: dict[str, dict] = {}  # name -> {"kind", "visible", "features": [(item, label_item, attrs)]}
+        self.layer_order: list[str] = []
 
     # ----------------------------------------------------------- data
     def load(self, path: str | Path, kind: str, max_side: int = 6000) -> None:
@@ -108,6 +112,8 @@ class RasterView(_ZoomView):
 
         self.scene().clear()
         self.overlays, self._clicks, self._rubber = [], [], None
+        self.layers, self.layer_order = {}, []
+        self.layers_changed.emit()
         self.path, self.kind = Path(path), kind
         with rasterio.open(path) as src:
             f = max(1.0, max(src.width, src.height) / max_side)
@@ -165,8 +171,32 @@ class RasterView(_ZoomView):
             return float(arr[r, c])
         return None
 
-    # ----------------------------------------------------------- overlays
-    def add_polygon(self, xy, label: str = "", color: str = "#ff3030", fill_alpha: int = 50):
+    # ----------------------------------------------------------- overlays and layers
+    # Everything drawn on the raster belongs to a named layer (units, section traces, contour
+    # lines, spot heights...). Layers can be hidden, zoomed to, removed, and their features
+    # carry attributes shown when clicked in navigation mode.
+    def _layer(self, name: str, kind: str) -> dict:
+        lay = self.layers.get(name)
+        if lay is None:
+            lay = {"kind": kind, "visible": True, "features": []}
+            self.layers[name] = lay
+            self.layer_order.append(name)
+        return lay
+
+    def _register(self, layer: str, kind: str, item, label_item, attrs: dict | None) -> None:
+        lay = self._layer(layer, kind)
+        attrs = dict(attrs or {})
+        item.setData(0, layer)
+        item.setData(1, attrs)
+        lay["features"].append((item, label_item, attrs))
+        for it in (item, label_item):
+            if it is not None:
+                it.setVisible(lay["visible"])
+                self.overlays.append(it)
+        self.layers_changed.emit()
+
+    def add_polygon(self, xy, label: str = "", color: str = "#ff3030", fill_alpha: int = 50,
+                    layer: str = "Unita' stratigrafiche", attrs: dict | None = None):
         path = QPainterPath()
         poly = QPolygonF([self.scene_pt(x, y) for x, y in xy])
         path.addPolygon(poly)
@@ -175,7 +205,7 @@ class RasterView(_ZoomView):
         c = QColor(color)
         c.setAlpha(fill_alpha)
         item.setBrush(QBrush(c))
-        self.overlays.append(item)
+        t = None
         if label:
             t = QGraphicsSimpleTextItem(label)
             t.setBrush(QColor("white"))
@@ -183,30 +213,108 @@ class RasterView(_ZoomView):
             t.setFlag(t.GraphicsItemFlag.ItemIgnoresTransformations)
             t.setPos(poly.boundingRect().center())
             self.scene().addItem(t)
-            self.overlays.append(t)
+        self._register(layer, "polygon", item, t, {"etichetta": label, **(attrs or {})})
         return item
 
-    def add_line(self, xy, color: str = "#ffd000", label: str = ""):
+    def add_line(self, xy, color: str = "#ffd000", label: str = "", layer: str = "Linee", attrs: dict | None = None,
+                 width: float = 2.5):
         path = QPainterPath()
         pts = [self.scene_pt(x, y) for x, y in xy]
         path.moveTo(pts[0])
         for p in pts[1:]:
             path.lineTo(p)
-        item = self.scene().addPath(path, self._pen(color, 2.5))
-        self.overlays.append(item)
+        item = self.scene().addPath(path, self._pen(color, width))
+        t = None
         if label:
             t = QGraphicsSimpleTextItem(label)
             t.setBrush(QColor(color))
             t.setFlag(t.GraphicsItemFlag.ItemIgnoresTransformations)
             t.setPos(pts[0])
             self.scene().addItem(t)
-            self.overlays.append(t)
+        self._register(layer, "line", item, t, {"etichetta": label, **(attrs or {})})
         return item
+
+    def add_point(self, x: float, y: float, color: str = "#30ff60", label: str = "", layer: str = "Punti",
+                  attrs: dict | None = None):
+        mark = QGraphicsEllipseItem(-5, -5, 10, 10)
+        mark.setPos(self.scene_pt(x, y))
+        mark.setFlag(mark.GraphicsItemFlag.ItemIgnoresTransformations)
+        mark.setBrush(QColor(color))
+        mark.setPen(self._pen("white", 1))
+        self.scene().addItem(mark)
+        t = None
+        if label:
+            t = QGraphicsSimpleTextItem(label)
+            t.setBrush(QColor(color))
+            t.setFlag(t.GraphicsItemFlag.ItemIgnoresTransformations)
+            t.setPos(self.scene_pt(x, y))
+            self.scene().addItem(t)
+        self._register(layer, "point", mark, t, {"etichetta": label, "x": round(x, 3), "y": round(y, 3),
+                                                   **(attrs or {})})
+        return mark
+
+    def set_layer_visible(self, name: str, visible: bool) -> None:
+        lay = self.layers.get(name)
+        if lay is None:
+            return
+        lay["visible"] = bool(visible)
+        for item, label_item, _ in lay["features"]:
+            item.setVisible(visible)
+            if label_item is not None:
+                label_item.setVisible(visible)
+
+    def remove_layer(self, name: str) -> None:
+        lay = self.layers.pop(name, None)
+        if lay is None:
+            return
+        self.layer_order.remove(name)
+        for item, label_item, _ in lay["features"]:
+            for it in (item, label_item):
+                if it is not None:
+                    self.scene().removeItem(it)
+                    if it in self.overlays:
+                        self.overlays.remove(it)
+        self.layers_changed.emit()
+
+    def layer_rect(self, name: str) -> QRectF | None:
+        lay = self.layers.get(name)
+        if not lay or not lay["features"]:
+            return None
+        rect = QRectF()
+        for item, _, _ in lay["features"]:
+            rect = rect.united(item.sceneBoundingRect())
+        return rect
+
+    def zoom_to(self, rect: QRectF | None, margin: float = 0.25) -> None:
+        if rect is None or rect.isNull():
+            return
+        m = max(rect.width(), rect.height(), 20) * margin
+        self.fitInView(rect.adjusted(-m, -m, m, m), Qt.AspectRatioMode.KeepAspectRatio)
+
+    def zoom_to_layer(self, name: str) -> None:
+        self.zoom_to(self.layer_rect(name))
+
+    def zoom_to_feature(self, name: str, index: int) -> None:
+        lay = self.layers.get(name)
+        if lay and 0 <= index < len(lay["features"]):
+            self.zoom_to(lay["features"][index][0].sceneBoundingRect())
+
+    def feature_at(self, scene_pos: QPointF, radius_px: float = 8.0):
+        """(layer, attributes) of the topmost visible feature under a scene position."""
+        r = radius_px / max(self.transform().m11(), 1e-9)
+        area = QRectF(scene_pos.x() - r, scene_pos.y() - r, 2 * r, 2 * r)
+        for it in self.scene().items(area):
+            layer = it.data(0)
+            if layer and it.isVisible():
+                return layer, dict(it.data(1) or {})
+        return None
 
     def clear_overlays(self) -> None:
         for it in self.overlays:
             self.scene().removeItem(it)
         self.overlays = []
+        self.layers, self.layer_order = {}, []
+        self.layers_changed.emit()
 
     def set_mode(self, mode: str) -> None:
         self.mode = mode
@@ -241,19 +349,20 @@ class RasterView(_ZoomView):
             self._update_rubber(sp)
 
     def mousePressEvent(self, ev) -> None:
+        if self.mode == "pan" and self.tr is not None and ev.button() == Qt.MouseButton.LeftButton:
+            hit = self.feature_at(self.mapToScene(ev.position().toPoint()))
+            if hit is not None:
+                self.feature_clicked.emit(*hit)
         if self.mode == "pan" or self.tr is None or ev.button() == Qt.MouseButton.MiddleButton:
             return super().mousePressEvent(ev)
         sp = self.mapToScene(ev.position().toPoint())
         if self.mode == "point":
             x, y = self.world(sp)
-            self.point_clicked.emit(x, y, 0 if ev.button() == Qt.MouseButton.RightButton else 1)
-            mark = QGraphicsEllipseItem(-5, -5, 10, 10)
-            mark.setPos(sp)
-            mark.setFlag(mark.GraphicsItemFlag.ItemIgnoresTransformations)
             ok = ev.button() != Qt.MouseButton.RightButton
-            mark.setBrush(QColor("#30ff60" if ok else "#ff3030"))
-            self.scene().addItem(mark)
-            self.overlays.append(mark)
+            z = self.elevation(x, y)
+            self.add_point(x, y, "#30ff60" if ok else "#ff3030", layer="Punti",
+                           attrs={"tipo": "positivo" if ok else "negativo", "z": None if z is None else round(z, 3)})
+            self.point_clicked.emit(x, y, 1 if ok else 0)
             return
         if ev.button() == Qt.MouseButton.RightButton:  # cancel the current drawing
             self.set_mode(self.mode)
@@ -263,7 +372,6 @@ class RasterView(_ZoomView):
         if self.mode in ("line", "measure") and len(self._clicks) == 2:
             a, b = (np.array(self.world(p)) for p in self._clicks)
             if self.mode == "line":
-                self.add_line([a, b])
                 self.line_finished.emit(a, b)
             else:
                 za, zb = self.elevation(*a), self.elevation(*b)
