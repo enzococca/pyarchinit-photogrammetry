@@ -207,3 +207,173 @@ def make_vessel(rim_r: float = 0.08, height: float = 0.12, thickness: float = 0.
     if noise > 0:
         v = v + np.random.default_rng(seed).normal(0, noise, v.shape)
     return trimesh.Trimesh(v, np.array(f), process=True)
+
+
+# ---------------------------------------------------------------- pottery on a turntable
+@dataclass
+class MeshScene:
+    """A textured triangle mesh scene rendered by ray casting (local metric frame).
+
+    ``mat_faces`` triangles take their colour from ``mat_texture`` by XY position (a flat
+    mat with coded targets at z = 0); the other triangles use ``surface_color(points)``."""
+    vertices: np.ndarray
+    faces: np.ndarray
+    mat_faces: int  # the first ``mat_faces`` triangles are the mat
+    mat_size: float
+    mat_texel: float
+    mat_texture: np.ndarray  # BGR, row 0 = +y edge of the mat
+    surface_color: object  # callable (N,3) points -> (N,3) BGR float
+    targets: dict[int, tuple[float, float, float]] = field(default_factory=dict)
+    cameras: list[dict] = field(default_factory=list)
+
+
+def _sample(texture: np.ndarray, col: np.ndarray, row: np.ndarray) -> np.ndarray:
+    """Bilinear lookup of ``texture`` at float pixel coordinates for any number of samples
+    (cv2.remap wants maps with fewer than 32767 rows, so the samples are laid out in rows)."""
+    n = len(col)
+    width = 1024
+    rows = (n + width - 1) // width
+    pad = rows * width - n
+    c = np.concatenate([col, np.zeros(pad)]).astype(np.float32).reshape(rows, width)
+    r = np.concatenate([row, np.zeros(pad)]).astype(np.float32).reshape(rows, width)
+    out = cv2.remap(texture, c, r, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    return out.reshape(rows * width, -1)[:n]
+
+
+def _pottery_texture(rng: np.random.Generator, h: int = 768, w: int = 1536) -> np.ndarray:
+    """Terracotta surface with fired-colour variations, inclusions and speckles (BGR float).
+
+    Full-contrast multi-scale noise, as the trench texture: the matchers need it."""
+    tex = _noise_texture(h, w, rng).astype(np.float32)  # 30..230, earthy tint
+    gray = tex.mean(axis=2, keepdims=True) / 255.0
+    for _ in range(4000):  # grog and lime inclusions
+        r, c = int(rng.integers(0, h)), int(rng.integers(0, w))
+        cv2.circle(gray, (c, r), int(rng.integers(1, 4)), float(rng.choice([0.08, 0.98])), -1)
+    base = np.array([55, 90, 170], np.float32)
+    return np.clip(base[None, None, :] * (0.35 + 0.95 * gray), 0, 255)
+
+
+def make_turntable_scene(n_targets: int = 12, diameter_mm: float = 180.0, marker_mm: float = 22.0,
+                         mat_size: float = 0.32, texel: float = 0.0004, vessel=None, seed: int = 11) -> MeshScene:
+    """A bowl (``make_vessel``) standing on a turntable mat with a ring of ArUco targets,
+    the same layout as ``ppg markers turntable`` (``turntable_layout``)."""
+    from ..markers.targets import turntable_layout
+
+    rng = np.random.default_rng(seed)
+    n = int(round(mat_size / texel))
+    tex = _noise_texture(n, n, rng).astype(np.float32)
+    tex = np.clip(tex.mean(axis=2, keepdims=True) * 0.7 + 70, 0, 255)  # printed grey grain, full contrast
+    tex = np.repeat(tex, 3, axis=2)
+    speck = rng.random((n, n)) < 0.006  # printed speckles between the targets
+    tex[speck] = 25
+    tex = tex.astype(np.uint8)
+    layout = turntable_layout(n_targets, diameter_mm)
+    tpx = int(round(marker_mm / 1000.0 / texel))
+    for code, (tx, ty, _) in layout.items():
+        pat = target_image("aruco_4x4_50", code, tpx)
+        quiet = int(tpx * 0.3)
+        tile = np.full((tpx + 2 * quiet, tpx + 2 * quiet), 255, np.uint8)
+        tile[quiet:quiet + tpx, quiet:quiet + tpx] = pat
+        c = int((tx + mat_size / 2) / texel)
+        r = int((mat_size / 2 - ty) / texel)
+        r0, c0 = r - tile.shape[0] // 2, c - tile.shape[1] // 2
+        tex[r0:r0 + tile.shape[0], c0:c0 + tile.shape[1]] = tile[..., None]
+    # a printed ring and some ink marks give the matcher texture between the targets
+    yy, xx = np.mgrid[0:n, 0:n]
+    rr = np.hypot((xx + 0.5) * texel - mat_size / 2, mat_size / 2 - (yy + 0.5) * texel)
+    ring = np.abs(rr - diameter_mm / 2000.0) < texel * 1.5
+    tex[ring] = (40, 40, 40)
+    half = mat_size / 2
+    mat_v = np.array([[-half, -half, 0], [half, -half, 0], [half, half, 0], [-half, half, 0]], np.float32)
+    mat_f = np.array([[0, 1, 2], [0, 2, 3]], np.uint32)
+    vessel = vessel if vessel is not None else make_vessel()
+    vv = np.asarray(vessel.vertices, np.float32)
+    vf = np.asarray(vessel.faces, np.uint32) + len(mat_v)
+    pottery = _pottery_texture(rng)
+
+    def surface_color(p: np.ndarray) -> np.ndarray:
+        theta = np.arctan2(p[:, 1], p[:, 0])
+        u = (theta + np.pi) / (2 * np.pi) * (pottery.shape[1] - 1)
+        v = np.clip(p[:, 2], 0, 0.13) / 0.13 * (pottery.shape[0] - 1)
+        return _sample(pottery, u, v)
+
+    return MeshScene(np.vstack([mat_v, vv]), np.vstack([mat_f, vf]), len(mat_f), mat_size, texel, tex,
+                     surface_color, targets=dict(layout))
+
+
+def turntable_poses(radius: float = 0.42, elevations=(24.0, 50.0), counts=(20, 12), target=(0.0, 0.0, 0.05)):
+    """Camera rings around the object, looking at ``target``: a low ring for the body and a
+    high one for the rim and the inside (32 photos by default). The base on the mat is never
+    seen, as on a real turntable."""
+    poses = []
+    for elev, count in zip(elevations, counts):
+        e = np.radians(elev)
+        for k in range(count):
+            a = 2 * np.pi * k / count + (0.1 if elev > 45 else 0.0)
+            eye = np.array([radius * np.cos(e) * np.cos(a), radius * np.cos(e) * np.sin(a), radius * np.sin(e) + target[2]])
+            poses.append(look_at(eye, np.asarray(target, float), up=(0, 0, 1)))
+    return poses
+
+
+def render_mesh(scene: MeshScene, world_from_cam: np.ndarray, K: np.ndarray, size=(1200, 900), k1: float = -0.03,
+                light=(0.3, -0.5, 0.8)) -> np.ndarray:
+    """Ray-cast a :class:`MeshScene` with Lambert shading (radial distortion ``k1``)."""
+    import open3d as o3d
+
+    if not hasattr(scene, "_rc"):
+        rc = o3d.t.geometry.RaycastingScene()
+        rc.add_triangles(o3d.core.Tensor(scene.vertices.astype(np.float32)), o3d.core.Tensor(scene.faces.astype(np.uint32)))
+        scene._rc = rc
+    W, H = size
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
+    xn = (xx + 0.5 - K[0, 2]) / K[0, 0]
+    yn = (yy + 0.5 - K[1, 2]) / K[1, 1]
+    xu, yu = xn.copy(), yn.copy()
+    for _ in range(8):
+        r2 = xu ** 2 + yu ** 2
+        xu, yu = xn / (1 + k1 * r2), yn / (1 + k1 * r2)
+    dirs_cam = np.dstack([xu, yu, np.ones_like(xu)]).reshape(-1, 3)
+    with np.errstate(all="ignore"):
+        dirs = dirs_cam @ world_from_cam[:3, :3].T
+    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+    origins = np.repeat(world_from_cam[:3, 3][None], len(dirs), 0)
+    ans = scene._rc.cast_rays(o3d.core.Tensor(np.hstack([origins, dirs]).astype(np.float32)))
+    t = ans["t_hit"].numpy()
+    hit = np.isfinite(t)
+    p = origins + dirs * np.where(hit, t, 0)[:, None]
+    prim = ans["primitive_ids"].numpy()
+    normals = ans["primitive_normals"].numpy()
+    img = np.full((len(dirs), 3), (120, 120, 120), np.float32)
+    on_mat = hit & (prim < scene.mat_faces)
+    if on_mat.any():
+        col = (p[on_mat, 0] + scene.mat_size / 2) / scene.mat_texel - 0.5
+        row = (scene.mat_size / 2 - p[on_mat, 1]) / scene.mat_texel - 0.5
+        img[on_mat] = _sample(scene.mat_texture, col, row)
+    on_obj = hit & ~on_mat
+    if on_obj.any():
+        img[on_obj] = scene.surface_color(p[on_obj])
+    lv = np.asarray(light, float)
+    lv /= np.linalg.norm(lv)
+    shade = np.abs(normals @ lv)
+    shade = np.where(hit, 0.45 + 0.55 * shade, 1.0)
+    img = np.clip(img * shade[:, None], 0, 255).astype(np.uint8)
+    return img.reshape(H, W, 3)
+
+
+def write_pottery_dataset(out_dir: str | Path, scene: MeshScene | None = None, size=(1200, 900), focal: float = 1100.0,
+                          k1: float = -0.03) -> MeshScene:
+    """Render turntable photos of a bowl to ``out_dir/photos`` and write ``out_dir/targets.csv``
+    (code, X, Y, Z in metres, local frame: origin on the rotation axis, z up)."""
+    out = Path(out_dir)
+    (out / "photos").mkdir(parents=True, exist_ok=True)
+    scene = scene or make_turntable_scene()
+    K = np.array([[focal, 0, size[0] / 2], [0, focal, size[1] / 2], [0, 0, 1]])
+    for i, pose in enumerate(turntable_poses()):
+        img = render_mesh(scene, pose, K, size, k1)
+        cv2.imwrite(str(out / "photos" / f"VASO_{i:04d}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        scene.cameras.append({"label": f"VASO_{i:04d}", "world_from_cam": pose.copy()})
+    with open(out / "targets.csv", "w") as fh:
+        fh.write("# label,X,Y,Z (LOCAL, metres)\n")
+        for code, (x, y, z) in scene.targets.items():
+            fh.write(f"{code},{x:.5f},{y:.5f},{z:.5f}\n")
+    return scene

@@ -264,14 +264,17 @@ def run(script: Path, project: Optional[Path] = None, args: list[str] = typer.Ar
 
 @app.command()
 def demo(folder: Path = typer.Argument(Path("ppg_demo"), help="destination folder"),
-         process: bool = typer.Option(False, help="also run the whole pipeline (about two minutes)"),
-         pyarchinit: bool = typer.Option(True, help="create the demo PyArchInit database")):
-    """Write demo data: trench photos + GCPs, a ready project, pottery meshes, a PyArchInit database."""
+         process: bool = typer.Option(False, help="also run the whole pipeline (about three minutes)"),
+         pyarchinit: bool = typer.Option(True, help="create the demo PyArchInit database"),
+         pottery: bool = typer.Option(True, help="also the turntable photos and project of the bowl")):
+    """Write demo data: trench photos + GCPs, a ready project, pottery meshes and turntable photos, a PyArchInit database."""
     from .demo import create_demo
 
-    d = create_demo(folder, process=process, with_pyarchinit=pyarchinit, progress=print_progress)
+    d = create_demo(folder, process=process, with_pyarchinit=pyarchinit, with_pottery=pottery, progress=print_progress)
     typer.echo(f"Project:    {d.project}")
     typer.echo(f"Pottery:    {d.vessel}  {d.sherd}")
+    if d.pottery_project:
+        typer.echo(f"Turntable:  {d.pottery_project}" + (f"  profile: {d.pottery_profile}" if d.pottery_profile else ""))
     if d.pyarchinit_home:
         typer.echo(f"PyArchInit: export PYARCHINIT_HOME={d.pyarchinit_home}")
     typer.echo(f"Read {d.folder / 'LEGGIMI.txt'}; open it in the interface with: ppg-gui {d.project}")
