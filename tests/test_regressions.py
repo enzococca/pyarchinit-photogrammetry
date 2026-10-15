@@ -100,8 +100,11 @@ def test_publish_is_idempotent_and_footprint_valid(pa_db, processed, tmp_path):
     again = pa.publish_orthomosaic(ch, "Saggio", "Orto", overwrite=True, link_us=[("1", "1")])
     assert again["id_media"] == 1
     con = sqlite3.connect(pa_db)
-    con.enable_load_extension(True)
-    con.load_extension("mod_spatialite")
+    from conftest import load_spatialite
+
+    if not load_spatialite(con):
+
+        pytest.skip("mod_spatialite not available")
     assert con.execute("SELECT count(*) FROM media_table").fetchone()[0] == 1
     wkt = con.execute("SELECT AsText(the_geom) FROM pyarchinit_documentazione").fetchone()[0]
     assert wkt and wkt.startswith("LINESTRING")

@@ -54,3 +54,22 @@ Conventions:
 * publishing the same file twice raises `FileExistsError`; `overwrite=True` refreshes the
   file and previews and keeps the same `id_media`;
 * media registration is a single transaction: if a preview fails nothing is left behind.
+
+
+## Connections, sites and the demo database (0.3)
+
+* `PyArchInit.connect()` reads `~/pyarchinit_5/pyarchinit_DB_folder/config.cfg` (PyArchInit 5) or
+  `~/pyarchinit/...`, or `PYARCHINIT_HOME`. `connect(url="path.sqlite")`, `connect(url="postgresql://user:pw@host:5432/db?sslmode=allow")`
+  and `connect(config_path=...)` are the other ways; `media_root=` sends media, thumbnails and
+  resized copies to a folder of your choice instead of the PyArchInit ones (used by the tests).
+* A site must exist in `site_table` for PyArchInit to show its records: `ensure_site(sito, nazione=..., comune=...)`
+  creates the *scheda Sito* when missing, and every `publish_*` method calls it.
+* `pyarchinit.demo_db.create_demo_database(home, size="large")` builds `demo.sqlite` with the
+  table definitions of PyArchInit 5 (`pyarchinit5_schema.sql`, 60 tables, 21 geometry layers
+  registered in EPSG:3004 when `mod_spatialite` is available): three sites, 73 units, polygons,
+  spot heights, a section trace, pottery and finds for the demo site. Existing files are kept
+  (`overwrite=True` to rebuild) and `config.cfg` is written only when absent, so the interface
+  can create the demo inside a real PyArchInit installation without changing its settings.
+* The bridge was exercised against real PyArchInit 5 databases (87 tables, 11 sites, 4820 unit
+  polygons, 2779 media): reading sites, units, polygons, documentation, finds and media, and
+  writing sites, unit polygons and documentation records.

@@ -24,8 +24,11 @@ Download the build for your system from the
 
 Open the disk image and drag the app to *Applications* (macOS), or unzip and run
 `PyArchInit Photogrammetry.exe` (Windows). The application starts on a page with *Nuovo
-progetto*, *Apri progetto* and *Progetto demo*: the demo creates a synthetic trench and
-processes it in a couple of minutes. The builds are unsigned: on macOS right-click > *Open*
+progetto*, *Apri progetto* and *Progetto demo*: the demo creates a synthetic trench and a
+bowl on a turntable and processes them in a few minutes. If PyArchInit 5 is installed
+(`~/pyarchinit_5`), the interface connects to its database at start and the demo database is
+written inside `pyarchinit_DB_folder` so that QGIS can open it too; PostgreSQL/PostGIS servers
+are reachable from *PyArchInit > Connetti*. The builds are unsigned: on macOS right-click > *Open*
 the first time (or `xattr -dr com.apple.quarantine "/Applications/PyArchInit Photogrammetry.app"`),
 on Windows choose *More info > Run anyway*. Details in [docs/packaging.md](docs/packaging.md).
 
@@ -69,8 +72,9 @@ Python 3.10-3.12. Writing geometries into a PyArchInit **SQLite** database needs
 
 ```bash
 ppg doctor                        # checks the environment and says what to fix
-ppg demo ~/ppg_demo --process     # synthetic trench photos + 8 targets, pottery meshes, PyArchInit DB
-ppg-gui ~/ppg_demo/scavo.ppg      # open the processed project in the interface
+ppg demo ~/ppg_demo --process     # synthetic trench + 8 targets, bowl on a turntable, pottery meshes, PyArchInit DB
+ppg-gui ~/ppg_demo/scavo.ppg      # open the processed trench in the interface
+ppg-gui ~/ppg_demo/ceramica/ceramica.ppg   # the bowl (local metric frame from the turntable targets)
 ppg-gui                           # start page: new, open, demo, recent projects
 ```
 
@@ -97,6 +101,20 @@ interface writes a log in `~/Library/Logs/pyarchinit-photogrammetry` (macOS),
   targetSizeInPoints`): the interface uses Qt's own message boxes, no action needed.
 * **The 3D view hangs on macOS**: pyvistaqt older than 0.13 hangs on start; `pip install -U pyvistaqt`.
 
+## Screenshots
+
+| | |
+| --- | --- |
+| ![Start page](docs/img/gui-start.png) | ![Layers, sections and PyArchInit](docs/img/gui-layers.png) |
+| ![Connection to PyArchInit](docs/img/connect.png) | ![IFC elements per stratigraphic unit](docs/img/ifc-units.png) |
+| ![Bowl from the turntable demo](docs/img/gui-pottery.png) | ![Profile drawing of the bowl](docs/img/demo-profile.png) |
+
+Top right: the orthomosaic/DEM view with the US polygons loaded from PyArchInit, contour lines
+and a section trace as layers, the *Sezioni* pane with the drawing, and the PyArchInit pane.
+Middle right: the IFC export opened with IfcOpenShell, one element per unit. Bottom: the bowl
+of the turntable demo reconstructed from 32 synthetic photos and its profile drawing (rim
+16.0 cm measured against 16.0 cm true).
+
 ## Desktop interface
 
 `ppg-gui` opens the desktop application (Italian UI): start page with recent projects; a
@@ -106,7 +124,9 @@ products; 3D view (VTK, with a software fallback renderer); orthomosaic and DEM 
 drawing tools (stratigraphic units, section traces, measurements, spot heights, SAM 2.1
 prompts); photo view with manual marker placement; reference pane with GCP and check point
 errors; Python console bound to the project (`doc`, `chunk`); background processing with
-progress, cancel and a status-bar indicator; a log pane with level filter, search, copy and
+progress, cancel and a status-bar indicator; a drawing toolbar and a *Layer* pane (show/hide,
+zoom, attributes on click) for units, sections, contour lines and spot heights; a *Sezioni*
+pane with the drawings; a log pane with level filter, search, copy and
 save; error windows with a hint, the traceback and a *Copia* button; light and dark themes;
 *Aiuto > Diagnostica ambiente* (the same checks as `ppg doctor`); a PyArchInit menu to
 connect, publish orthophotos, DEMs and models, and write unit polygons and spot heights.

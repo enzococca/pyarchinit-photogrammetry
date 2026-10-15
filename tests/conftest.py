@@ -57,49 +57,55 @@ def rng():
     return np.random.default_rng(0)
 
 
+def load_spatialite(con) -> bool:
+    """Load mod_spatialite into a sqlite3 connection from the known locations; False if none works."""
+    from pyarchinit_photogrammetry.pyarchinit.database import _spatialite_paths
+
+    con.enable_load_extension(True)
+    for cand in _spatialite_paths():
+        try:
+            con.load_extension(cand)
+            return True
+        except Exception:
+            continue
+    return False
+
+
 def _spatialite_available():
+    """mod_spatialite loadable (bare name or the known locations, after the PROJ warm-up)."""
     try:
-        import rasterio.crs  # PROJ first (see database._warm_up_proj)
+        from pyarchinit_photogrammetry.pyarchinit.database import _spatialite_paths, _warm_up_proj
 
-        rasterio.crs.CRS.from_epsg(4326).to_wkt()
-        con = sqlite3.connect(":memory:")
-        con.enable_load_extension(True)
-        con.load_extension("mod_spatialite")
-        return True
+        _warm_up_proj()
+        for cand in _spatialite_paths():
+            try:
+                con = sqlite3.connect(":memory:")
+                con.enable_load_extension(True)
+                con.load_extension(cand)
+                con.close()
+                return True
+            except Exception:
+                continue
     except Exception:
-        return False
-
-
-from pyarchinit_photogrammetry.pyarchinit.demo_db import SCHEMA  # noqa: E402
-
+        pass
+    return False
 
 
 @pytest.fixture
 def pa_db(tmp_path, monkeypatch):
+    """A PyArchInit 5 database (full schema, SpatiaLite) with the site 'Saggio' and US 1-3."""
     if not _spatialite_available():
         pytest.skip("mod_spatialite not available")
+    from pyarchinit_photogrammetry.pyarchinit.demo_db import create_demo_database
+
     home = tmp_path / "pyarchinit_5"
-    (home / "pyarchinit_DB_folder").mkdir(parents=True)
-    db = home / "pyarchinit_DB_folder" / "scavo.sqlite"
-    con = sqlite3.connect(db)
-    con.enable_load_extension(True)
-    con.load_extension("mod_spatialite")
-    con.execute("SELECT InitSpatialMetadata(1)")
-    con.executescript(SCHEMA)
-    for table, gtype in (("pyunitastratigrafiche", "MULTIPOLYGON"), ("pyarchinit_documentazione", "LINESTRING"),
-                         ("pyarchinit_quote", "POINT"), ("pyarchinit_sezioni", "LINESTRING")):
-        con.execute(f"SELECT AddGeometryColumn('{table}', 'the_geom', 3004, '{gtype}', 'XY')")
-    con.execute("INSERT INTO site_table (id_sito, sito, comune) VALUES (1, 'Saggio', 'Baselice')")
-    for i, us in enumerate(("1", "2", "3"), 1):
-        con.execute("INSERT INTO us_table (id_us, sito, area, us, unita_tipo, d_stratigrafica) VALUES (?,?,?,?,?,?)",
-                    (i, "Saggio", "1", us, "US", f"Strato {us}"))
-    con.commit()
-    con.close()
-    (home / "pyarchinit_DB_folder" / "config.cfg").write_text(
+    us_list = tuple(("1", us, "US", f"Strato {us}", "", "I", "1", "") for us in ("1", "2", "3"))
+    cfg = create_demo_database(home, site="Saggio", us_list=us_list, name="scavo.sqlite", demo_content=False)
+    cfg.write_text(
         "{'DATABASE': 'scavo.sqlite', 'SERVER': 'sqlite', 'HOST': '', 'USER': '', 'PASSWORD': '', 'PORT': '', "
         f"'THUMB_PATH': '{tmp_path}/media/thumb/', 'THUMB_RESIZE': '{tmp_path}/media/resize/', 'SITE_SET': ''}}")
     monkeypatch.setenv("PYARCHINIT_HOME", str(home))
-    return db
+    return home / "pyarchinit_DB_folder" / "scavo.sqlite"
 
 
 

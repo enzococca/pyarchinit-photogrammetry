@@ -25,7 +25,10 @@ Scarica la versione per il tuo sistema dalla pagina
 Su macOS apri l'immagine disco e trascina l'app in *Applicazioni*; su Windows estrai la
 cartella e avvia `PyArchInit Photogrammetry.exe`. L'applicazione si apre su una pagina con
 *Nuovo progetto*, *Apri progetto* e *Progetto demo*: la demo crea un saggio di scavo
-sintetico e lo elabora in un paio di minuti. Le build non sono firmate: su macOS la prima
+sintetico e una ciotola su turntable e li elabora in pochi minuti. Se PyArchInit 5 è
+installato (`~/pyarchinit_5`), l'interfaccia si collega al suo database all'avvio e il database
+demo viene scritto dentro `pyarchinit_DB_folder`, così lo apre anche QGIS; i server
+PostgreSQL/PostGIS si raggiungono da *PyArchInit > Connetti*. Le build non sono firmate: su macOS la prima
 volta tasto destro > *Apri* (oppure `xattr -dr com.apple.quarantine "/Applications/PyArchInit Photogrammetry.app"`),
 su Windows *Ulteriori informazioni > Esegui comunque*. Dettagli in [docs/packaging.md](docs/packaging.md).
 
@@ -58,8 +61,9 @@ Homebrew e Linux, oppure si indica con la variabile `SPATIALITE_LIBRARY_PATH`.
 
 ```bash
 ppg doctor                        # controlla l'ambiente e dice cosa sistemare
-ppg demo ~/ppg_demo --process     # foto sintetiche di un saggio con 8 target, ceramica, database PyArchInit
-ppg-gui ~/ppg_demo/scavo.ppg      # apre l'interfaccia sul progetto elaborato
+ppg demo ~/ppg_demo --process     # saggio sintetico con 8 target, ciotola su turntable, ceramica, database PyArchInit
+ppg-gui ~/ppg_demo/scavo.ppg      # apre l'interfaccia sul saggio elaborato
+ppg-gui ~/ppg_demo/ceramica/ceramica.ppg   # la ciotola (sistema locale in metri dai target del tappetino)
 ppg-gui                           # pagina iniziale: nuovo, apri, demo, progetti recenti
 ```
 
@@ -98,7 +102,9 @@ prodotti; vista 3D (VTK, con un renderer software di riserva); ortofoto e DEM co
 disegno (unità stratigrafiche, tracce di sezione, misure, quote, prompt per SAM 2.1); foto
 con posizionamento manuale dei marker; pannello riferimenti con errori sui GCP e sui punti di
 controllo; console Python collegata al progetto (`doc`, `chunk`); elaborazioni in background
-con avanzamento, annulla e indicatore nella barra di stato; pannello log con filtro per
+con avanzamento, annulla e indicatore nella barra di stato; barra degli strumenti di disegno
+e pannello *Layer* (mostra/nascondi, zoom, attributi al clic) per unità, sezioni, curve di
+livello e quote; pannello *Sezioni* con i disegni; pannello log con filtro per
 livello, ricerca, copia e salvataggio; finestre di errore con suggerimento, traceback e
 pulsante *Copia*; tema chiaro e scuro; *Aiuto > Diagnostica ambiente* (gli stessi controlli di
 `ppg doctor`); menu PyArchInit per connettersi al database, pubblicare ortofoto/DEM/modelli,

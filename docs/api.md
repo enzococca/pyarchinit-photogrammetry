@@ -60,3 +60,17 @@ Every processing method accepts `progress=callback(fraction, message)`.
 | `ppg.demo.create_demo(folder, process=False)` | synthetic trench photos + GCPs, project, pottery meshes, PyArchInit DB (`DemoData`) |
 | `pyarchinit_photogrammetry.gui.main(argv)` | starts the desktop interface (`ppg-gui`) |
 | `ppg.core.progress.Progress` | progress callback with `sub()` ranges; `cancel()` stops every sub-step |
+
+
+## Added in 0.3
+
+* `chunk.crop_point_cloud(zmin=, zmax=, radius=, center=(x, y), bounds=(xmin, ymin, xmax, ymax))`
+  keeps the dense points inside the limits (world coordinates) and drops the model products.
+* `PyArchInit.connect(url=None, config_path=None, media_root=None)`, `pa.ensure_site(sito, ...)`,
+  `pa.site_exists(sito)`, `pa.label`.
+* `pyarchinit.demo_db.create_demo_database(home, size="small"|"large", overwrite=False, demo_content=True)`
+  with the PyArchInit 5 schema (`pyarchinit5_schema.sql`).
+* `demo.create_demo(..., with_pottery=True)` and `demo.process_pottery_demo(doc, profile_svg)`;
+  `testing.synthetic.make_turntable_scene()`, `render_mesh()`, `write_pottery_dataset()`.
+* `engine.isolate.run_isolated(fn, *args, timeout=, cancel_check=)` runs a module-level
+  function in a fresh interpreter (used by the Poisson reconstruction).

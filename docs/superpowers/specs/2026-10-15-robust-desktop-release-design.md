@@ -141,3 +141,24 @@ executables, troubleshooting (Anaconda shadowing, SciPy, Open3D 0.20, native dia
   PyArchInit, or in the test suite after `ppg doctor`), that fork crashes the *parent*
   with SIGSEGV/SIGBUS, deterministically. `subprocess` with `close_fds=False` uses
   `posix_spawn` and is unaffected: the isolation now uses it (`tests/test_isolate.py`).
+
+
+## Second round (review of the author, same day)
+
+Requests: the demo database inside `~/pyarchinit_5/pyarchinit_DB_folder` so QGIS reads it;
+the site must exist in its *scheda*; sections should be drawn as a line and shown in a
+widget; every drawn layer (contours...) must be queryable, switchable and zoomable; editing
+tools visible without the menu; PostgreSQL connections; verify BIM with a screenshot; test
+with larger databases; a pottery demo.
+
+Design: full PyArchInit 5 schema in the demo database (`pyarchinit5_schema.sql`, extracted
+from a PyArchInit-created database; `RecoverGeometryColumn` for the 21 layers), sizes
+small/large, never overwriting; `ensure_site` in every publish; `ConnectDialog`
+(config / SQLite / PostgreSQL) and background connection with auto-connect at start;
+`RasterView` layers (`add_polygon/add_line/add_point(layer=, attrs=)`, visibility, zoom,
+removal, `feature_at` query) with `LayersPane`; `SectionsPane` fed by the line tool and
+persisted in `sezioni/sezioni.json`; a second toolbar with the drawing modes and layer
+tools; IFC units fixed to metres (the exporter declared millimetres: geometry 1000x too
+small); turntable pottery demo (`make_turntable_scene`, `render_mesh`, two camera rings,
+`crop_point_cloud` to drop the mat, Poisson at 40k faces, profile SVG) with a slow metric
+test; the bridge exercised on copies of the author's real databases.
