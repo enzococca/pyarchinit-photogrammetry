@@ -115,6 +115,20 @@ Middle right: the IFC export opened with IfcOpenShell, one element per unit. Bot
 of the turntable demo reconstructed from 32 synthetic photos and its profile drawing (rim
 16.0 cm measured against 16.0 cm true).
 
+## Working with QGIS, Metashape, WebODM and Photo3D
+
+* **QGIS, live**: *QGIS > Apri in QGIS* opens orthophoto, DEM and every drawn layer in a QGIS
+  project; drawings and attribute edits appear in QGIS within a second.
+* **Metashape**: *File > Importa > Progetto Metashape* reads a `.psx` directly (calibrated
+  cameras, markers, tie points, model, exported DEM/orthophoto) and continues here (dense
+  cloud, sections, PyArchInit, IFC) without aligning again.
+* **WebODM/ODM**: the task folder or `all.zip` becomes a project with orthophoto, DEM, point
+  cloud and mesh.
+* **Photo3D**: `ppg photo3d-job` is a ready Photo3D engine; sessions can also be imported.
+
+Details in [docs/integrations.md](docs/integrations.md). In the packaged application, SAM 2.1
+is installed on first use (PyTorch in a separate environment, see the same page).
+
 ## Desktop interface
 
 `ppg-gui` opens the desktop application (Italian UI): start page with recent projects; a

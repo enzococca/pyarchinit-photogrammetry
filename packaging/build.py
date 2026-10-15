@@ -8,6 +8,11 @@ Produces, in ``dist/``:
 * Windows: ``PyArchInit-Photogrammetry-<version>-windows-x64.zip``
 * Linux:   ``PyArchInit-Photogrammetry-<version>-linux-x64.tar.gz``
 
+macOS signing: ``PPG_CODESIGN_IDENTITY="Developer ID Application: Name (TEAMID)"`` signs every
+binary with the hardened runtime (``packaging/entitlements.plist``); with
+``PPG_NOTARY_PROFILE=<keychain profile>`` the dmg is also notarized and stapled.
+``PPG_CODESIGN_IDENTITY=-`` makes an ad-hoc signature (local tests).
+
 The icons (``.icns``, ``.ico``, ``.png``) are rendered from ``gui/resources/logo.svg``.
 After building, the application is started with ``--check`` (offscreen) as a smoke test.
 """
@@ -128,6 +133,45 @@ def fix_private_dylibs(bundle: Path) -> int:
     return patched
 
 
+def _macho_files(root: Path) -> list[Path]:
+    out = []
+    for p in root.rglob("*"):
+        if p.is_symlink() or not p.is_file():
+            continue
+        if p.suffix in (".so", ".dylib") or os.access(p, os.X_OK):
+            with open(p, "rb") as f:
+                magic = f.read(4)
+            if magic in (b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xfe\xed\xfa\xcf"):
+                out.append(p)
+    return out
+
+
+def sign_bundle(bundle: Path, identity: str, entitlements: Path | None = None) -> None:
+    """Sign every Mach-O inside out with the hardened runtime, then the bundle (macOS).
+
+    ``identity``: a "Developer ID Application: ..." certificate for distribution outside
+    the App Store (notarization), or "-" for an ad-hoc signature."""
+    entitlements = entitlements or ROOT / "packaging" / "entitlements.plist"
+    base = ["codesign", "--force", "--options", "runtime", "--entitlements", str(entitlements), "--sign", identity]
+    if identity != "-":
+        base.insert(2, "--timestamp")
+    files = sorted(_macho_files(bundle / "Contents"), key=lambda p: -len(p.parts))  # deepest first
+    for f in files:
+        subprocess.run(base + [str(f)], check=True, capture_output=True)
+    subprocess.run(base + [str(bundle)], check=True, capture_output=True)
+    subprocess.run(["codesign", "--verify", "--strict", "--verbose=2", str(bundle)], check=True)
+    print(f"signed {len(files)} binaries and the bundle with {identity!r}", flush=True)
+
+
+def notarize(path: Path, keychain_profile: str) -> None:
+    """Submit to Apple's notary service and staple the ticket (``xcrun notarytool store-credentials``
+    creates the keychain profile once, with an app-specific password or an API key)."""
+    subprocess.run(["xcrun", "notarytool", "submit", str(path), "--keychain-profile", keychain_profile, "--wait"],
+                   check=True)
+    subprocess.run(["xcrun", "stapler", "staple", str(path)], check=True)
+    print(f"notarized and stapled {path.name}", flush=True)
+
+
 def smoke_test(bundle: Path) -> None:
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen", PPG_RENDERER="software")
     exe = executable(bundle)
@@ -174,9 +218,17 @@ def main() -> int:
     render_icons()
     bundle = (DIST / f"{NAME}.app" if sys.platform == "darwin" else DIST / NAME) if args.skip_build else run_pyinstaller()
     fix_private_dylibs(bundle)
+    identity = os.environ.get("PPG_CODESIGN_IDENTITY")
+    if sys.platform == "darwin" and identity:
+        sign_bundle(bundle, identity)
     if not args.no_smoke:
         smoke_test(bundle)
-    package(bundle)
+    out = package(bundle)
+    profile = os.environ.get("PPG_NOTARY_PROFILE")
+    if sys.platform == "darwin" and identity and identity != "-" and profile:
+        if out.suffix == ".dmg":
+            subprocess.run(["codesign", "--force", "--timestamp", "--sign", identity, str(out)], check=True)
+        notarize(out, profile)
     return 0
 
 

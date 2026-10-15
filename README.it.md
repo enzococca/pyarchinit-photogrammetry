@@ -93,6 +93,20 @@ scrive un log in `~/Library/Logs/pyarchinit-photogrammetry` (macOS),
 * **La vista 3D si blocca su macOS**: pyvistaqt precedente alla 0.13 si blocca all'avvio;
   `pip install -U pyvistaqt`.
 
+## Lavorare con QGIS, Metashape, WebODM e Photo3D
+
+* **QGIS dal vivo**: *QGIS > Apri in QGIS* apre ortofoto, DEM e tutti i layer disegnati in un
+  progetto QGIS; disegni e attributi modificati compaiono in QGIS entro un secondo.
+* **Metashape**: *File > Importa > Progetto Metashape* legge direttamente il `.psx` (camere
+  calibrate, marker, punti di legame, modello, DEM e ortofoto esportati) e si prosegue qui
+  (nuvola densa, sezioni, PyArchInit, IFC) senza riallineare.
+* **WebODM/ODM**: la cartella del task o `all.zip` diventa un progetto con ortofoto, DEM,
+  nuvola e mesh.
+* **Photo3D**: `ppg photo3d-job` è un motore pronto per Photo3D; le sessioni si possono anche importare.
+
+Dettagli in [docs/integrations.md](docs/integrations.md). Nell'applicazione pacchettizzata SAM 2.1
+si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
+
 ## Interfaccia grafica
 
 `ppg-gui` apre l'applicazione desktop: pagina iniziale con i progetti recenti; barra degli

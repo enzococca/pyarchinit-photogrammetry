@@ -54,3 +54,21 @@ python packaging/build.py --no-smoke
 
 The smoke test opens the main window, renders it and exits with code 0; the build fails
 when the window does not appear.
+
+
+## Signing, notarization, TestFlight
+
+The builds are unsigned. Two Apple routes exist:
+
+* **Developer ID + notarization** (download from the web/GitHub, no warnings): needs a
+  *Developer ID Application* certificate (created by the Account Holder of the Apple
+  Developer team) and a notary profile (`xcrun notarytool store-credentials`). Then
+  `PPG_CODESIGN_IDENTITY="Developer ID Application: ... (TEAMID)" PPG_NOTARY_PROFILE=<profile> python packaging/build.py`
+  signs every binary with the hardened runtime (`packaging/entitlements.plist`), signs and
+  notarizes the dmg, and staples the ticket.
+* **TestFlight / Mac App Store**: needs an *Apple Distribution* certificate, a provisioning
+  profile and the **App Sandbox**. The sandbox forbids what this application relies on:
+  loading `mod_spatialite` from Homebrew/QGIS, starting worker processes from other
+  interpreters (isolated Poisson, SAM environment), downloading and running `uv`, writing
+  next to the user's projects without a file dialog, opening QGIS. A sandboxed edition would
+  need those parts redesigned, so Developer ID is the recommended channel.

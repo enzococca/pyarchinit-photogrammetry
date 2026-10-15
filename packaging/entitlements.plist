@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Python, NumPy and Open3D generate code at run time -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <!-- mod_spatialite from Homebrew/QGIS and the libraries of the wheels are signed by others -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <!-- PROJ_DATA / GDAL_DATA / QT_* are set for the bundled libraries -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+</dict>
+</plist>

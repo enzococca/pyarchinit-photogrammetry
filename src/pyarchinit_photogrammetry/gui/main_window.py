@@ -19,8 +19,8 @@ from .. import __version__
 from ..app import app as application
 from ..core.document import Document
 from . import theme
-from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, ImageDialog, ParamDialog, PublishDialog,
-                      SiteDialog, UnitDialog, message)
+from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, IfcPreviewDialog, ImageDialog, ParamDialog,
+                      PublishDialog, SiteDialog, UnitDialog, message)
 from .icons import app_icon, icon
 from .image_views import US_COLORS, PhotoView, RasterView
 from .model_view import ModelView
@@ -128,6 +128,12 @@ class MainWindow(QMainWindow):
         self.left_tabs.addTab(self.reference, icon("reference_pane"), "Riferimenti")
         self.layers_pane = LayersPane()
         self.layers_pane.set_view(self.ortho_view)
+        self.layers_pane.attribute_edited.connect(self._attribute_edited)
+        self.pa_pending: dict[int, object] = {}  # gid -> UnitPolygon edited, to write back to PyArchInit
+        self.b_pa_save = QPushButton(icon("publish"), "Salva modifiche in PyArchInit")
+        self.b_pa_save.clicked.connect(self.save_pending_units)
+        self.b_pa_save.hide()
+        self.layers_pane.layout().addWidget(self.b_pa_save)
         self.left_tabs.addTab(self.layers_pane, icon("slice"), "Layer")
         self.sections_pane = SectionsPane()
         self.sections_pane.zoom_requested.connect(self._zoom_section)
@@ -154,6 +160,10 @@ class MainWindow(QMainWindow):
         self.coord_label = QLabel("")
         self.statusBar().addPermanentWidget(self.progress_widget)
         self.statusBar().addPermanentWidget(self.coord_label)
+        self._qgis_timer = QTimer(self)
+        self._qgis_timer.setSingleShot(True)
+        self._qgis_timer.timeout.connect(self._export_qgis_layers)
+        self.ortho_view.layers_changed.connect(self._schedule_qgis)
 
     def _act(self, menu, text: str, slot, shortcut=None, tip: str = "", processing: bool = False,
              icon_name: str | None = None) -> QAction:
@@ -189,6 +199,13 @@ class MainWindow(QMainWindow):
         self._act(exp, "Ortofoto (GeoTIFF)...", lambda: self.export("ortho"), icon_name="ortho")
         self._act(exp, "Camere (CSV / COLMAP)...", lambda: self.export("cameras"), icon_name="cameras")
         self._act(exp, "Riferimenti (CSV)...", lambda: self.export("reference"), icon_name="reference")
+        imp = m.addMenu(icon("open"), "Importa")
+        self._act(imp, "Progetto Metashape (.psx)...", lambda: self.import_external("metashape"), processing=True,
+                  icon_name="open")
+        self._act(imp, "Progetto WebODM / ODM (cartella o all.zip)...", lambda: self.import_external("webodm"),
+                  processing=True, icon_name="open")
+        self._act(imp, "Sessione Photo3D...", lambda: self.import_external("photo3d"), processing=True,
+                  icon_name="photos")
         self._act(m, "Genera report HTML...", self.generate_report, processing=True, icon_name="report")
         m.addSeparator()
         self._act(m, "Crea e apri progetto demo...", self.open_demo, processing=True, icon_name="demo")
@@ -248,6 +265,9 @@ class MainWindow(QMainWindow):
         self._act(sm, "Segmenta dai punti cliccati sull'ortofoto", self.sam_from_points, processing=True,
                   icon_name="point")
         self._act(sm, "Prompt sulle foto (attiva/disattiva)", self.toggle_photo_sam, icon_name="view_photo")
+        sm.addSeparator()
+        self._act(sm, "Installa / aggiorna SAM 2.1...", lambda: self.install_sam(), processing=True, icon_name="export")
+        self._act(sm, "Rimuovi SAM 2.1", self.remove_sam, icon_name="clear")
         m.addSeparator()
         self._act(m, "Esporta IFC (BIM)...", self.export_ifc, processing=True, icon_name="ifc")
         self._act(m, "Esegui script Python...", self.run_script, icon_name="script")
@@ -270,6 +290,15 @@ class MainWindow(QMainWindow):
         self._act(m, "Pubblica quote dei punti cliccati", self.pyarchinit_publish_points, processing=True,
                   icon_name="publish")
         self._act(m, "Aggiorna pannello", lambda: self.pa_pane.refresh(), icon_name="refresh")
+        # ------------------------------------------------------------ QGIS
+        m = mb.addMenu("&QGIS")
+        self.a_qgis_open = self._act(m, "Apri in QGIS (collegamento dal vivo)", self.open_in_qgis, icon_name="view_ortho")
+        self.a_qgis_live = QAction("Aggiorna QGIS mentre disegno", self, checkable=True)
+        self.a_qgis_live.setChecked(False)
+        self.a_qgis_live.toggled.connect(lambda on: self._schedule_qgis() if on else None)
+        m.addAction(self.a_qgis_live)
+        self._act(m, "Apri la cartella dei layer per QGIS", lambda: QDesktopServices.openUrl(
+            QUrl.fromLocalFile(str(self._qgis_dir()))), icon_name="folder")
         # ------------------------------------------------------------ View
         m = mb.addMenu("&Vista")
         for d in (self.d_work, self.d_photos, self.d_pa):
@@ -361,6 +390,7 @@ class MainWindow(QMainWindow):
         a = db.addAction(icon("line"), "Sezioni")
         a.setToolTip("Pannello delle sezioni")
         a.triggered.connect(lambda _=False: self._show_pane(self.bottom_tabs, self.sections_pane))
+        db.addAction(self.a_qgis_open)
         a = db.addAction(icon("publish"), "Pubblica unita'")
         a.setToolTip("Scrive le unita' disegnate in pyunitastratigrafiche")
         a.triggered.connect(lambda _=False: self.pyarchinit_publish_units())
@@ -645,6 +675,62 @@ class MainWindow(QMainWindow):
         self.run_task("Creazione dati demo", lambda p: create_demo(v["folder"], process=v["process"],
                                                                    with_pottery=v["pottery"], progress=p),
                       done, refresh=False, save=False)
+
+    def import_external(self, kind: str) -> None:
+        """Open a project made by Metashape, WebODM/ODM or a Photo3D capture session."""
+        if not self._confirm_discard():
+            return
+        if kind == "metashape":
+            src, _ = QFileDialog.getOpenFileName(self, "Progetto Metashape", self._last_dir(), "Metashape (*.psx)")
+        elif kind == "webodm":
+            r = message(self, "question", "WebODM", "Importi l'archivio scaricato da WebODM (all.zip)?\n"
+                        "Si = scegli all.zip, No = scegli la cartella del task ODM.",
+                        buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                        | QMessageBox.StandardButton.Cancel)
+            if r == QMessageBox.StandardButton.Cancel:
+                return
+            if r == QMessageBox.StandardButton.Yes:
+                src, _ = QFileDialog.getOpenFileName(self, "all.zip di WebODM", self._last_dir(), "Zip (*.zip)")
+            else:
+                src = QFileDialog.getExistingDirectory(self, "Cartella del task ODM", self._last_dir())
+        else:
+            src = QFileDialog.getExistingDirectory(self, "Cartella della sessione Photo3D", self._last_dir())
+        if not src:
+            return
+        stem = Path(src).stem if kind != "photo3d" else Path(src).name
+        default = Path(src).parent / f"{stem}_ppg.ppg" if kind != "photo3d" else Path(src) / f"{stem}.ppg"
+        out, _ = QFileDialog.getSaveFileName(self, "Salva il progetto importato", str(default), "Progetti (*.ppg)")
+        if not out:
+            return
+
+        def job(p):
+            if kind == "metashape":
+                from ..integrations.metashape import import_psx
+
+                return import_psx(src, out, progress=p)
+            if kind == "webodm":
+                from ..integrations.webodm import import_task
+
+                return import_task(src, out, progress=p)
+            from ..integrations.photo3d import import_session
+
+            p(0.3, "Lettura della sessione Photo3D")
+            return import_session(src, out)
+
+        def done(doc):
+            self._started = True
+            self.set_document(doc)
+            warn = [w for ch in doc.chunks for w in ch.meta.get("import", {}).get("warnings", [])]
+            ch = doc.chunk
+            text = (f"{len(doc.chunks)} chunk, {len(ch.cameras)} foto ({len(ch.aligned_cameras)} allineate), "
+                    f"prodotti: {', '.join(sorted(k for k in ch.products if k != 'reconstruction')) or 'nessuno'}, "
+                    f"CRS {ch.crs}")
+            self.log_pane.info(f"Importato {src}: {text}")
+            for w in warn:
+                self.log_pane.warning(w)
+            self._info("Importazione completata", text + ("\n\n" + "\n".join(warn[:6]) if warn else ""))
+
+        self.run_task("Importazione", job, done, refresh=False, save=False)
 
     # ---------------------------------------------------------------- workflow
     def add_chunk(self) -> None:
@@ -1057,7 +1143,10 @@ class MainWindow(QMainWindow):
         u.attributes["_layer"] = layer  # survives raster reloads (DEM <-> orthomosaic)
         geoms = getattr(u.geometry, "geoms", [u.geometry])
         attrs = {"tipo": u.tipo, "us": u.us or "?", "area": u.area or "", "area_m2": round(u.geometry.area, 3),
-                 **{k: v for k, v in (u.attributes or {}).items() if k != "gid" and not k.startswith("_")}}
+                 **{k: v for k, v in (u.attributes or {}).items() if k != "gid" and not k.startswith("_")},
+                 "_unit": i}
+        if (u.attributes or {}).get("gid") is not None:
+            attrs["_gid"] = u.attributes["gid"]
         for g in geoms:
             self.ortho_view.add_polygon(np.asarray(g.exterior.coords)[:, :2], f"{u.tipo} {u.us or '?'}",
                                         US_COLORS[i % len(US_COLORS)], layer=layer, attrs=attrs)
@@ -1168,8 +1257,115 @@ class MainWindow(QMainWindow):
         self.ortho_view.remove_layer("Sezioni")
         self._draw_sections()
 
+    def _attribute_edited(self, layer: str, idx: int, key: str, value) -> None:
+        """An attribute changed in the Layers pane: update the unit / section behind it."""
+        feats = self.ortho_view.features(layer)
+        if not 0 <= idx < len(feats):
+            return
+        attrs = feats[idx]
+        if "_unit" in attrs and 0 <= attrs["_unit"] < len(self.units):
+            u = self.units[attrs["_unit"]]
+            if key in ("us", "area", "tipo"):
+                setattr(u, key, None if value in ("", None) else str(value))
+                label = f"{u.tipo} {u.us or '?'}"
+                for j, other in enumerate(feats):  # every part of a multipolygon
+                    if other.get("_unit") == attrs["_unit"]:
+                        self.ortho_view.set_feature_attribute(layer, j, key, value)
+                        self.ortho_view.set_feature_attribute(layer, j, "etichetta", label)
+            elif key != "etichetta":
+                u.attributes[key] = value
+            gid = (u.attributes or {}).get("gid")
+            if gid is not None:
+                self.pa_pending[int(gid)] = u
+                self.b_pa_save.setText(f"Salva modifiche in PyArchInit ({len(self.pa_pending)})")
+                self.b_pa_save.show()
+        elif layer == "Sezioni" and key == "etichetta":
+            p1 = attrs.get("_geom", (None, [[None]]))[1][0]
+            for sdict in self.sections:
+                if sdict["p1"] == p1:
+                    sdict["label"] = str(value)
+            self._save_sections()
+            self.sections_pane.set_sections(self.sections)
+        self._dirty(True)
+        self._schedule_qgis()
+        self.log_pane.info(f"{layer}: {key} = {value}")
+
+    def save_pending_units(self) -> None:
+        if not self.pa_pending or not self._need_pa():
+            return
+        pending = dict(self.pa_pending)
+
+        def job(p):
+            n = 0
+            for gid, u in pending.items():
+                n += self.pa.update_unit(gid, us=u.us, area=u.area, tipo=u.tipo)
+            return n
+
+        def done(n):
+            self.pa_pending.clear()
+            self.b_pa_save.hide()
+            self.pa_pane.refresh()
+            self._info("PyArchInit", f"{n} poligoni aggiornati in pyunitastratigrafiche")
+
+        self.run_task("Aggiornamento unita' in PyArchInit", job, done, refresh=False, save=False)
+
+    # ---------------------------------------------------------------- QGIS
+    def _qgis_dir(self) -> Path:
+        if self.doc.path:
+            return self.doc.path.parent / f"{self.doc.path.stem}_qgis"
+        return Path.home() / "ppg_qgis"
+
+    def _schedule_qgis(self) -> None:
+        if getattr(self, "a_qgis_live", None) is not None and self.a_qgis_live.isChecked():
+            self._qgis_timer.start(400)
+
+    def _export_qgis_layers(self) -> dict:
+        from ..io.qgis_link import export_layers
+
+        try:
+            return export_layers(self._qgis_dir(), self.ortho_view.layers, self.chunk.crs if self.chunk else "")
+        except OSError as exc:
+            log.warning("Aggiornamento dei layer per QGIS non riuscito: %s", exc)
+            return {}
+
+    def open_in_qgis(self) -> None:
+        """QGIS project with orthomosaic, DEM and the drawn layers, which QGIS reloads every
+        second while the drawings change here."""
+        from ..io import qgis_link
+
+        q = qgis_link.find_qgis()
+        if q is None:
+            self._warn("QGIS non trovato. Installalo da qgis.org (oppure indica il percorso con la variabile PPG_QGIS).")
+            return
+        ch = self.chunk
+        files = self._export_qgis_layers()
+        name = self.doc.path.stem if self.doc.path else "progetto"
+        project = self._qgis_dir() / f"{name}_ppg.qgs"
+        rasters = []
+        if ch is not None and ch.orthomosaic_path:
+            rasters.append({"name": "Ortofoto", "path": str(ch.orthomosaic_path)})
+        if ch is not None and ch.dem_path:
+            rasters.append({"name": "DEM (ombreggiato)", "path": str(ch.dem_path), "hillshade": True,
+                            "opacity": 0.6, "hidden": True})
+            rasters.append({"name": "DEM", "path": str(ch.dem_path), "hidden": True})
+
+        def job(p):
+            p(0.2, "Creazione del progetto QGIS")
+            rep = qgis_link.build_project(project, ch.crs if ch else "", files, rasters, title=name, qgis=q)
+            qgis_link.open_in_qgis(project, q)
+            return rep
+
+        def done(rep):
+            self.a_qgis_live.setChecked(True)
+            bad = [v["name"] for v in rep["vectors"] + rep["rasters"] if not v["valid"]]
+            self.log_pane.info(f"Progetto QGIS: {project} ({len(rep['vectors'])} layer vettoriali aggiornati dal vivo, "
+                               f"{len(rep['rasters'])} raster)" + (f"; non validi: {', '.join(bad)}" if bad else ""))
+            self.statusBar().showMessage("QGIS aperto: i disegni si aggiornano in QGIS ogni secondo", 15000)
+
+        self.run_task("Apertura in QGIS", job, done, refresh=False, save=False)
+
     def _feature_clicked(self, layer: str, attrs: dict) -> None:
-        text = "  ".join(f"{k}: {v}" for k, v in attrs.items() if v not in (None, ""))
+        text = "  ".join(f"{k}: {v}" for k, v in attrs.items() if v not in (None, "") and not str(k).startswith("_"))
         self.statusBar().showMessage(f"{layer}: {text}", 15000)
         self.layers_pane.show_attributes(layer, attrs)
 
@@ -1270,9 +1466,10 @@ class MainWindow(QMainWindow):
             Field("polygon", "Area di calcolo", "last" if polys else "all",
                   choices=([("last", "Ultima unita' disegnata"), ("union", "Unione delle unita' disegnate")]
                            if polys else []) + [("all", "Tutto il DEM")]),
-            Field("reference", "Riferimento", "min", choices=[("min", "Quota minima dell'area"),
-                                                             ("plane", "Piano a quota data"),
-                                                             ("dem", "Altro DEM (prima dello scavo)")]),
+            Field("reference", "Superficie di riferimento", "plane",
+                  choices=[("plane", "Piano alla quota del terreno originario"),
+                           ("dem", "DEM prima dello scavo"),
+                           ("min", "Quota minima dell'area (deposito sopra il fondo)")]),
             Field("elevation", "Quota del piano (m)", 0.0, minimum=-10000, maximum=10000, decimals=3),
             Field("dem", "DEM di confronto", "", kind="file_open", filter="GeoTIFF (*.tif *.tiff)")])
         if not v:
@@ -1286,8 +1483,11 @@ class MainWindow(QMainWindow):
 
         def done(r):
             self._last_volume = r
-            txt = (f"Area {r['area_m2']:.3f} m2 - scavo {r['cut_m3']:.3f} m3 - riporto {r['fill_m3']:.3f} m3 - "
-                   f"netto {r['net_m3']:.3f} m3 - quote {r['quota_min']:.3f} / {r['quota_max']:.3f}")
+            what = ("deposito sopra il fondo" if v["reference"] == "min" else
+                    "rispetto al " + ("piano a " + f"{v['elevation']:.3f} m" if v["reference"] == "plane" else "DEM precedente"))
+            txt = (f"Area {r['area_m2']:.3f} m2 ({what}): scavo (volume asportato) {r['cut_m3']:.3f} m3, "
+                   f"riporto {r['fill_m3']:.3f} m3, netto {r['net_m3']:.3f} m3; quote attuali "
+                   f"{r['quota_min']:.3f} / {r['quota_max']:.3f} m")
             self._info("Volume", txt)
 
         self.run_task("Volume", lambda p: terrain.volume(self.chunk.dem_path, ref, poly), done, refresh=False,
@@ -1375,22 +1575,49 @@ class MainWindow(QMainWindow):
 
     def _segmenter(self):
         if self.sam is None:
-            from ..ai.sam import Sam2Segmenter
+            from ..ai.sam_env import make_segmenter
 
-            self.sam = Sam2Segmenter("small")
+            self.sam = make_segmenter("small")
         return self.sam
 
-    def _sam_available(self) -> bool:
-        try:
-            import torch  # noqa: F401
+    def _sam_available(self, then=None) -> bool:
+        """True when SAM 2.1 can run; otherwise offer to install it (then call ``then``)."""
+        from ..ai import sam_env
 
+        if sam_env.available():
             return True
-        except Exception:
-            self._warn("Segment Anything 2.1 richiede PyTorch:\npip install \"pyarchinit-photogrammetry[sam]\"")
-            return False
+        r = message(self, "question", "Segment Anything 2.1",
+                    "SAM 2.1 non e' ancora installato.\n\nL'applicazione puo' scaricare e installare ora PyTorch e "
+                    "SAM 2.1 in un ambiente separato (circa 1-2 GB, alcuni minuti; serve la connessione). "
+                    "I pesi del modello si scaricano al primo uso.\n\nInstallare adesso?",
+                    buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    default=QMessageBox.StandardButton.Yes)
+        if r == QMessageBox.StandardButton.Yes:
+            self.install_sam(then=then)
+        return False
+
+    def install_sam(self, then=None) -> None:
+        from ..ai import sam_env
+
+        def done(env):
+            self.sam = None
+            self._info("Segment Anything 2.1", f"SAM 2.1 installato in {env}.")
+            if then is not None:
+                then()
+
+        self.run_task("Installazione di SAM 2.1", lambda p: sam_env.install(progress=p), done, refresh=False, save=False)
+
+    def remove_sam(self) -> None:
+        from ..ai import sam_env
+
+        if self.sam is not None and hasattr(self.sam, "close"):
+            self.sam.close()
+        self.sam = None
+        sam_env.remove()
+        self._info("Segment Anything 2.1", "Ambiente di SAM 2.1 rimosso.")
 
     def sam_auto_units(self) -> None:
-        if not self._need_chunk(product="orthomosaic") or not self._sam_available():
+        if not self._need_chunk(product="orthomosaic") or not self._sam_available(then=self.sam_auto_units):
             return
         from ..ai.sam import auto_units
 
@@ -1405,7 +1632,7 @@ class MainWindow(QMainWindow):
                       refresh=False, save=False)
 
     def sam_from_points(self) -> None:
-        if not self._need_chunk(product="orthomosaic") or not self._sam_available():
+        if not self._need_chunk(product="orthomosaic") or not self._sam_available(then=self.sam_from_points):
             return
         if not self.sam_points:
             self._warn("Attiva Strumenti > Disegno su ortofoto > Quota puntuale / prompt SAM e clicca sull'unita'.")
@@ -1428,7 +1655,7 @@ class MainWindow(QMainWindow):
                                                                labels=labels), done, refresh=False, save=False)
 
     def toggle_photo_sam(self) -> None:
-        if not self.photo_view.sam_mode and not self._sam_available():
+        if not self.photo_view.sam_mode and not self._sam_available(then=self.toggle_photo_sam):
             return
         self.photo_view.sam_mode = not self.photo_view.sam_mode
         self.statusBar().showMessage("Prompt SAM sulle foto " + ("attivi: clic sinistro sull'oggetto"
@@ -1445,24 +1672,58 @@ class MainWindow(QMainWindow):
                       refresh=False, save=False)
 
     def export_ifc(self) -> None:
+        """IFC4 of the model, one element per stratigraphic unit (drawn here or loaded from
+        PyArchInit), with progress and a preview of what was written."""
         if not self._need_chunk(product="model"):
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Esporta IFC", self._last_dir() + "/rilievo.ifc", "IFC (*.ifc)")
-        if not path:
+        drawn = [u for u in self.units if u.us]
+        sites = self.pa_pane.site_names() if self.pa is not None else []
+        choices = []
+        if drawn:
+            choices.append(("drawn", f"Unita' disegnate in questo progetto ({len(drawn)})"))
+        choices += [("pa:" + s, f"Poligoni US da PyArchInit - {s}") for s in sites]
+        choices.append(("none", "Solo il modello del rilievo (un elemento)"))
+        v = ParamDialog.ask(self, "Esporta IFC (BIM)", [
+            Field("path", "File IFC", str(Path(self._last_dir()) / "rilievo.ifc"), kind="file_save", filter="IFC (*.ifc)"),
+            Field("units", "Elementi per unita' stratigrafica", choices[0][0], choices=choices),
+            Field("survey", "Includi anche il modello intero", True)],
+            intro="Il modello viene tagliato in pianta con i poligoni delle US: ogni US diventa un IfcGeographicElement "
+                  "con gli attributi della scheda (Pset_PyArchInit_US). Georeferenziazione con IfcMapConversion.")
+        if not v or not v["path"]:
             return
-        from ..bim.ifc import export_chunk_ifc
+        from ..bim.ifc import export_chunk_ifc, read_ifc_elements
 
-        units = [u for u in self.units if u.us] or None
-        records = None
-        site = None
-        if self.pa is not None and units:
-            try:
-                site = self.pa_pane.site_names()[0]
-                records = {str(r.get("us")): r for r in self.pa.stratigraphic_units(site)}
-            except Exception:
-                records = None
-        self.run_task("IFC", lambda p: export_chunk_ifc(self.chunk, path, units=units, us_records=records, site=site),
-                      lambda r: self.statusBar().showMessage(f"IFC salvato in {r}", 10000), refresh=False, save=False)
+        path, choice = v["path"], v["units"]
+
+        def job(p):
+            units, records, site = None, None, None
+            if choice == "drawn":
+                units = drawn
+                if self.pa is not None and sites:
+                    site = sites[0]
+            elif choice.startswith("pa:"):
+                site = choice[3:]
+                p(0.02, f"Lettura dei poligoni US di {site}")
+                units = self.pa.us_polygons(site)
+            if self.pa is not None and site:
+                try:
+                    records = self.pa.us_records(site)
+                except Exception:
+                    records = None
+            out = export_chunk_ifc(self.chunk, path, units=units, us_records=records, site=site,
+                                   include_survey=v["survey"], progress=p.sub(0.05, 0.85))
+            p(0.92, "Verifica del file IFC")
+            return out, read_ifc_elements(out), len(units or [])
+
+        def done(r):
+            out, elements, n_units = r
+            self.log_pane.info(f"IFC salvato in {out}: {len(elements)} elementi")
+            if n_units and len(elements) <= (1 if v["survey"] else 0):
+                self._warn("Nessuna US interseca il modello: controlla che i poligoni stiano sull'area rilevata "
+                           "e nello stesso sistema di riferimento.")
+            IfcPreviewDialog(out, elements, self).exec()
+
+        self.run_task("Esportazione IFC", job, done, refresh=False, save=False)
 
     def run_script(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Script Python", self._last_dir(), "Python (*.py)")

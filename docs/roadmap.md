@@ -15,7 +15,14 @@ isolated process with retries and height-field fallback, Open3D 0.20.0 excluded,
 redirected to rasterio's own in worker threads, packaged applications for macOS and Windows
 (PyInstaller, `desktop` workflow).
 
-## 0.4 - Interface
+## 0.4 - Integrations (done)
+
+Editable layer attributes (write-back to PyArchInit), live QGIS project, imports from
+Metashape `.psx`, WebODM/ODM and Photo3D, Photo3D engine entry point (`ppg photo3d-job`),
+SAM 2.1 installed on demand in the packaged app, IFC export with progress/preview and units
+in metres, corrected cut/fill volumes, signing and notarization in the build.
+
+## 0.5 - Interface
 
 * Batch processing over several chunks; chunk alignment and merging.
 * Section and plan-slice tools drawn directly in the 3D view; editable markers in 3D.

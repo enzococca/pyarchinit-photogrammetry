@@ -601,3 +601,67 @@ class SiteDialog(QDialog):
                 "regione": self.regione.text().strip(), "provincia": self.provincia.text().strip(),
                 "comune": self.comune.text().strip(), "definizione_sito": self.definizione.text().strip(),
                 "descrizione": self.descrizione.text().strip()}
+
+
+class IfcPreviewDialog(QDialog):
+    """Result of an IFC export: the elements with their PyArchInit attributes and a 3D view."""
+
+    def __init__(self, path, elements: list[dict], parent=None):
+        super().__init__(parent)
+        import numpy as np
+        from PySide6.QtWidgets import QSplitter, QTableWidget, QTableWidgetItem
+
+        from .model_view import SoftwareCanvas
+        from .scene import SceneData
+
+        self.setWindowTitle("IFC esportato")
+        self.resize(1100, 680)
+        lay = QVBoxLayout(self)
+        n_faces = sum(len(e["faces"]) for e in elements)
+        head = QLabel(f"<b>{Path(path).name}</b> - {len(elements)} elementi, {n_faces:,} triangoli<br>{path}")
+        head.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(head)
+        split = QSplitter()
+        table = QTableWidget(len(elements), 4)
+        table.setHorizontalHeaderLabels(["Elemento", "Classe IFC", "Triangoli", "Attributi"])
+        palette = [(205, 205, 205), (230, 80, 80), (80, 160, 230), (90, 200, 110), (240, 180, 60), (160, 100, 220)]
+        for r, e in enumerate(elements):
+            props = {k: v for pset in e["psets"].values() for k, v in pset.items()}
+            vals = [e["name"], e["ifc_class"], f"{len(e['faces']):,}",
+                    ", ".join(f"{k}={v}" for k, v in list(props.items())[:6])]
+            for c, v in enumerate(vals):
+                it = QTableWidgetItem(str(v))
+                if c == 0:
+                    from PySide6.QtGui import QColor
+
+                    it.setForeground(QColor(*palette[r % len(palette)]) if r else QColor("#555"))
+                table.setItem(r, c, it)
+        table.resizeColumnsToContents()
+        split.addWidget(table)
+        self.canvas = SoftwareCanvas()
+        self.canvas.show_cameras = False
+        self.canvas.show_markers = False
+        if elements:
+            show = elements[1:] if len(elements) > 1 else elements  # the per-US elements, not the whole survey
+            V, F, C, off = [], [], [], 0
+            for i, e in enumerate(show, 1 if len(elements) > 1 else 0):
+                V.append(e["vertices"]); F.append(e["faces"] + off)
+                C.append(np.repeat(np.array([palette[i % len(palette)]], np.uint8), len(e["vertices"]), 0))
+                off += len(e["vertices"])
+            V = np.vstack(V)
+            centre = V.mean(0)
+            sd = SceneData(centre, kind="model", mesh_vertices=V - centre, mesh_faces=np.vstack(F),
+                           mesh_colors=np.vstack(C), up=np.array([0.0, 0.0, 1.0]))
+            self.canvas.set_scene(sd)
+            self.canvas.cam.pitch = 50
+            self.canvas.cam.distance *= 1.6  # whole set of elements in view
+        split.addWidget(self.canvas)
+        split.setSizes([480, 620])
+        lay.addWidget(split, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        b_dir = QPushButton("Apri cartella")
+        b_dir.clicked.connect(lambda: __import__("PySide6.QtGui", fromlist=["QDesktopServices"]).QDesktopServices.openUrl(
+            __import__("PySide6.QtCore", fromlist=["QUrl"]).QUrl.fromLocalFile(str(Path(path).parent))))
+        bb.addButton(b_dir, QDialogButtonBox.ButtonRole.ActionRole)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)

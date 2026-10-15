@@ -35,8 +35,12 @@ def _require():
 
 
 def export_ifc(path: str | Path, elements: list[IfcElement], crs: str | None = None, project: str = "Rilievo",
-               site: str = "Sito", origin: np.ndarray | None = None) -> Path:
+               site: str = "Sito", origin: np.ndarray | None = None, progress=None) -> Path:
+    from ..core.progress import as_progress
+
+    progress = as_progress(progress)
     _require()
+    progress(0.05, "IFC: progetto, unita' di misura e georeferenziazione")
     import ifcopenshell
     import ifcopenshell.api.aggregate
     import ifcopenshell.api.context
@@ -72,7 +76,8 @@ def export_ifc(path: str | Path, elements: list[IfcElement], crs: str | None = N
     site_e = ifcopenshell.api.root.create_entity(model, ifc_class="IfcSite", name=site)
     ifcopenshell.api.aggregate.assign_object(model, products=[site_e], relating_object=proj)
 
-    for el in elements:
+    for k, el in enumerate(elements):
+        progress(0.1 + 0.85 * k / max(len(elements), 1), f"IFC: elemento {k + 1}/{len(elements)} - {el.name}")
         kwargs = {"ifc_class": el.ifc_class, "name": el.name}
         if el.predefined_type:
             kwargs["predefined_type"] = el.predefined_type
@@ -116,7 +121,7 @@ def split_mesh_by_units(mesh_world, units) -> list[tuple[object, object]]:
 
 
 def export_chunk_ifc(chunk, path: str | Path, units=None, us_records: dict | None = None,
-                     site: str | None = None, include_survey: bool = True) -> Path:
+                     site: str | None = None, include_survey: bool = True, progress=None) -> Path:
     """Export the chunk model to IFC. ``units`` (list of :class:`UnitPolygon`) splits the
     mesh into one element per stratigraphic unit; ``us_records`` maps US numbers to the
     PyArchInit attributes to store in ``Pset_PyArchInit_US``."""
@@ -136,7 +141,38 @@ def export_chunk_ifc(chunk, path: str | Path, units=None, us_records: dict | Non
         elements.append(IfcElement(sub, f"{u.tipo} {u.us}", ifc_class="IfcGeographicElement",
                                    predefined_type="USERDEFINED", psets={"Pset_PyArchInit_US": props},
                                    color=tuple(rng.uniform(0.3, 0.9, 3))))
-    return export_ifc(path, elements, crs=chunk.crs, project=chunk.label, site=site or chunk.label)
+    return export_ifc(path, elements, crs=chunk.crs, project=chunk.label, site=site or chunk.label,
+                      progress=progress)
+
+
+def read_ifc_elements(path: str | Path) -> list[dict]:
+    """Elements of an IFC file with their mesh in world coordinates and property sets
+    (``[{"name", "ifc_class", "vertices", "faces", "psets"}]``): for previews and checks."""
+    _require()
+    import ifcopenshell
+    import ifcopenshell.geom
+    import ifcopenshell.util.element as ue
+
+    f = ifcopenshell.open(str(path))
+    settings = ifcopenshell.geom.settings()
+    settings.set(settings.USE_WORLD_COORDS, True)
+    offset = np.zeros(3)
+    for mc in f.by_type("IfcMapConversion"):
+        offset = np.array([mc.Eastings or 0.0, mc.Northings or 0.0, mc.OrthogonalHeight or 0.0], float)
+    out = []
+    for e in f.by_type("IfcProduct"):
+        if e.Representation is None or e.is_a("IfcSite"):
+            continue
+        try:
+            shp = ifcopenshell.geom.create_shape(settings, e)
+        except Exception:
+            continue
+        v = np.array(shp.geometry.verts, float).reshape(-1, 3) + offset
+        fc = np.array(shp.geometry.faces, int).reshape(-1, 3)
+        out.append({"name": e.Name, "ifc_class": e.is_a(), "vertices": v, "faces": fc,
+                    "psets": {k: {kk: vv for kk, vv in val.items() if kk != "id"}
+                              for k, val in ue.get_psets(e).items()}})
+    return out
 
 
 def _plain(v):

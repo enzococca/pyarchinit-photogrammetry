@@ -288,6 +288,47 @@ def gui(project: Optional[Path] = typer.Argument(None)):
     raise SystemExit(gui_main([str(project)] if project else []))
 
 
+@app.command("import-metashape")
+def import_metashape(psx: Path, project: Path, chunk: Optional[int] = typer.Option(None, help="only this chunk (index)")):
+    """Project from a Metashape .psx: aligned cameras, calibration, markers, tie points, model, exported DEM/ortho."""
+    from .integrations.metashape import import_psx
+
+    doc = import_psx(psx, project, chunk_index=chunk, progress=print_progress)
+    for ch in doc.chunks:
+        typer.echo(f"{ch.label}: {len(ch.aligned_cameras)}/{len(ch.cameras)} cameras, CRS {ch.crs}, "
+                   f"products {sorted(ch.products)}")
+
+
+@app.command("import-webodm")
+def import_webodm(source: Path, project: Path):
+    """Project from a WebODM/ODM task folder or its all.zip (orthophoto, DEM, point cloud, mesh)."""
+    from .integrations.webodm import import_task
+
+    doc = import_task(source, project, progress=print_progress)
+    ch = doc.chunk
+    typer.echo(f"{ch.label}: CRS {ch.crs}, products {sorted(ch.products)}")
+
+
+@app.command("import-photo3d")
+def import_photo3d(session: Path, project: Optional[Path] = typer.Argument(None)):
+    """Project from a Photo3D capture session folder (photos, targets, GCPs), ready to process."""
+    from .integrations.photo3d import import_session
+
+    doc = import_session(session, project)
+    typer.echo(f"Project {doc.path}: {len(doc.chunk.cameras)} photos, {len(doc.chunk.markers)} markers")
+
+
+@app.command("photo3d-job")
+def photo3d_job(session: Optional[Path] = typer.Argument(None), preset: Optional[str] = typer.Argument(None)):
+    """Engine entry point for the Photo3D server (PROGRESS lines, metashape/result.json)."""
+    from .integrations.photo3d import main as p3d_main
+
+    args = [str(session)] if session else []
+    if preset:
+        args.append(preset)
+    raise SystemExit(p3d_main(args))
+
+
 @app.command()
 def doctor():
     """Check the environment (libraries, known pitfalls) and print what to fix."""
