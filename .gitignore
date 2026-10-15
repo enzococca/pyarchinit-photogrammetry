@@ -10,3 +10,4 @@ venv/
 *.ppg.files/
 *.ppg.tmp
 .DS_Store
+packaging/build/
