@@ -1,10 +1,11 @@
 name: publish
 
-# Publishes to PyPI when a version tag (v*) is pushed.
+# Publishes to PyPI when a GitHub Release is published (or when run by hand).
 # Uses PyPI trusted publishing: no token is stored in the repository.
 on:
-  push:
-    tags: ["v*"]
+  release:
+    types: [published]
+  workflow_dispatch:
 
 jobs:
   build:
