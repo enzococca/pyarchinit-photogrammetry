@@ -9,15 +9,37 @@ curve di livello, volumi di scavo, classificazione della nuvola, Segment Anythin
 esportazione IFC e salvataggio diretto nel database di PyArchInit. Tutto è utilizzabile da
 Python e gira su CPU, anche su Mac Apple Silicon.
 
-> Stato: **alpha (0.1)**. La libreria Python e la riga di comando sono pronte; l'interfaccia
-> grafica desktop, costruita sulla stessa API, è il prossimo passo.
+> Stato: **alpha (0.2)**. Libreria Python, riga di comando e interfaccia desktop (sulla stessa
+> API, con console Python integrata).
 
 ## Installazione
 
 ```bash
-pip install "pyarchinit-photogrammetry[all]"
+pip install "pyarchinit-photogrammetry[all]"   # mesh, IFC, PostGIS, interfaccia grafica
 pip install "pyarchinit-photogrammetry[sam]"   # opzionale: Segment Anything 2.1
 ```
+
+## Provare subito con i dati demo
+
+```bash
+ppg demo ~/ppg_demo --process     # foto sintetiche di un saggio con 8 target, ceramica, database PyArchInit
+ppg-gui ~/ppg_demo/scavo.ppg      # apre l'interfaccia sul progetto elaborato
+```
+
+Oppure dall'interfaccia: **File > Crea e apri progetto demo**. Il file `LEGGIMI.txt` nella
+cartella spiega cosa provare (sezioni, curve di livello, profilo ceramico del frammento,
+pubblicazione in PyArchInit).
+
+## Interfaccia grafica
+
+`ppg-gui` (o `ppg gui`) apre l'applicazione desktop: area di lavoro con chunk, camere,
+marker e prodotti; vista 3D (VTK, con un renderer software di riserva); ortofoto e DEM con
+strumenti di disegno (unità stratigrafiche, tracce di sezione, misure, quote, prompt per
+SAM 2.1); foto con posizionamento manuale dei marker; pannello riferimenti con errori sui
+GCP e sui punti di controllo; console Python collegata al progetto (`doc`, `chunk`);
+elaborazioni in background con avanzamento e annulla; menu PyArchInit per connettersi al
+database, pubblicare ortofoto/DEM/modelli, scrivere i poligoni delle US e le quote. Guida in
+[docs/gui.md](docs/gui.md).
 
 Per scrivere geometrie in un database PyArchInit **SQLite** serve `mod_spatialite`: viene
 cercato automaticamente nelle installazioni di QGIS, MacPorts, Homebrew e Linux, oppure si

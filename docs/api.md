@@ -9,7 +9,7 @@ import pyarchinit_photogrammetry as ppg
 | Call | Description |
 | --- | --- |
 | `ppg.Document(path=None)`, `Document.open(path)`, `doc.save(path=None)` | project file `.ppg` + folder `.ppg.files/` |
-| `doc.add_chunk(label)`, `doc.chunks`, `doc.chunk` | chunks; `doc.chunk` is the active one |
+| `doc.add_chunk(label)`, `doc.chunks`, `doc.chunk` | chunks; `doc.chunk` is the active one (assign to change it) |
 | `ppg.app.document` | the project shared by scripts, CLI (`ppg run`) and GUI |
 
 ## Chunk workflow
@@ -52,3 +52,11 @@ Every processing method accepts `progress=callback(fraction, message)`.
 * Image coordinates follow COLMAP: the centre of the first pixel is (0.5, 0.5).
 * Cameras: OpenCV axes (+X right, +Y down, +Z forward); `camera.transform` is
   `world_from_cam` in the internal frame.
+
+## Demo data and interface
+
+| Call | Description |
+| --- | --- |
+| `ppg.demo.create_demo(folder, process=False)` | synthetic trench photos + GCPs, project, pottery meshes, PyArchInit DB (`DemoData`) |
+| `pyarchinit_photogrammetry.gui.main(argv)` | starts the desktop interface (`ppg-gui`) |
+| `ppg.core.progress.Progress` | progress callback with `sub()` ranges; `cancel()` stops every sub-step |

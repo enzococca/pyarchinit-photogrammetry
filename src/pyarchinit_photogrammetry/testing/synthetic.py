@@ -165,3 +165,44 @@ def write_dataset(out_dir: str | Path, scene: Scene | None = None, n_x: int = 5,
         for code, (x, y, z) in scene.targets.items():
             fh.write(f"{code},{x:.4f},{y:.4f},{z:.4f}\n")
     return scene
+
+
+def make_vessel(rim_r: float = 0.08, height: float = 0.12, thickness: float = 0.006, sectors: int = 128,
+                sherd: tuple[float, float] | None = None, noise: float = 0.0, seed: int = 3):
+    """A wheel-made bowl as a closed :class:`trimesh.Trimesh` (metres, axis = +Z).
+
+    ``sherd=(a0, a1)`` keeps only the angular sector between ``a0`` and ``a1``
+    degrees (a fragment); ``noise`` adds Gaussian roughness (metres).
+    """
+    import trimesh
+
+    hs = np.linspace(0, height, 60)
+    r_out = 0.04 + (rim_r - 0.04) * np.sin(hs / height * np.pi / 2) ** 0.7 + 0.01 * np.sin(hs / height * np.pi)
+    prof = np.vstack([[0, 0], np.column_stack([r_out, hs]), np.column_stack([(r_out - thickness)[::-1], hs[::-1]]),
+                      [0, thickness]])
+    if sherd is None:
+        a = np.linspace(0, 2 * np.pi, sectors, endpoint=False)
+        closed = True
+    else:
+        a = np.radians(np.linspace(sherd[0], sherd[1], max(8, int(sectors * abs(sherd[1] - sherd[0]) / 360))))
+        prof = prof[1:-1]  # a fragment has no base centre
+        closed = False
+    v = np.vstack([np.column_stack([prof[:, 0] * np.cos(x), prof[:, 0] * np.sin(x), prof[:, 1]]) for x in a])
+    m = len(prof)
+    f = []
+    n_seg = len(a) if closed else len(a) - 1
+    for i in range(n_seg):
+        j = (i + 1) % len(a)
+        for k in range(m - 1):
+            f += [[i * m + k, j * m + k, i * m + k + 1], [i * m + k + 1, j * m + k, j * m + k + 1]]
+        if not closed:
+            continue
+    if not closed:  # cap the two fracture faces
+        for i, flip in ((0, False), (len(a) - 1, True)):
+            for k in range(m // 2 - 1):
+                p, q, r, s_ = i * m + k, i * m + k + 1, i * m + m - 1 - k, i * m + m - 2 - k
+                t1, t2 = [p, q, r], [q, s_, r]
+                f += [t1[::-1], t2[::-1]] if not flip else [t1, t2]
+    if noise > 0:
+        v = v + np.random.default_rng(seed).normal(0, noise, v.shape)
+    return trimesh.Trimesh(v, np.array(f), process=True)

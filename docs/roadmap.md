@@ -1,19 +1,18 @@
 # Roadmap
 
-## 0.2 - Desktop interface
+## 0.2 - Desktop interface (done)
 
-A Qt (PySide6) application on top of the same Python API, so everything done in the
-GUI can be scripted and vice versa:
+Workspace tree, 3D view (VTK or software), orthomosaic/DEM view with drawing tools, photo
+view with marker placement and SAM prompts, reference pane, Python console, background
+processing with cancel, PyArchInit menu, demo data (`ppg demo`).
 
-* workspace tree (document, chunks, photos, markers, scale bars, products);
-* photo pane with marker placement and SAM 2.1 point/box prompts;
-* 3D view of tie points, dense cloud, mesh and texture (VTK/pyvista), with section and
-  plan-slice tools drawn directly on the model;
-* ortho/DEM view with stratigraphic-unit drawing and PyArchInit labels;
-* reference pane: GCP/check points, errors, scale bars, CRS;
-* processing dialogs with progress and cancel, batch processing;
-* Python console bound to `ppg.app.document`;
-* PyArchInit panel: site/area/US selection, publishing, browsing media.
+## 0.3 - Interface
+
+* Batch processing over several chunks; chunk alignment and merging.
+* Section and plan-slice tools drawn directly in the 3D view; editable markers in 3D.
+* Point-cloud class editing (lasso) and filtering by class or confidence.
+* PyArchInit panel: browsing media and opening linked US forms; attribute editing of units.
+* English/Italian interface translation.
 
 ## Engine
 

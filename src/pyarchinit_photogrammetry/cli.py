@@ -262,6 +262,29 @@ def run(script: Path, project: Optional[Path] = None, args: list[str] = typer.Ar
     runpy.run_path(str(script), run_name="__main__")
 
 
+@app.command()
+def demo(folder: Path = typer.Argument(Path("ppg_demo"), help="destination folder"),
+         process: bool = typer.Option(False, help="also run the whole pipeline (about two minutes)"),
+         pyarchinit: bool = typer.Option(True, help="create the demo PyArchInit database")):
+    """Write demo data: trench photos + GCPs, a ready project, pottery meshes, a PyArchInit database."""
+    from .demo import create_demo
+
+    d = create_demo(folder, process=process, with_pyarchinit=pyarchinit, progress=print_progress)
+    typer.echo(f"Project:    {d.project}")
+    typer.echo(f"Pottery:    {d.vessel}  {d.sherd}")
+    if d.pyarchinit_home:
+        typer.echo(f"PyArchInit: export PYARCHINIT_HOME={d.pyarchinit_home}")
+    typer.echo(f"Read {d.folder / 'LEGGIMI.txt'}; open it in the interface with: ppg-gui {d.project}")
+
+
+@app.command()
+def gui(project: Optional[Path] = typer.Argument(None)):
+    """Open the desktop interface (needs the [gui] extra)."""
+    from .gui import main as gui_main
+
+    raise SystemExit(gui_main([str(project)] if project else []))
+
+
 # ------------------------------------------------------------------ markers
 @markers_app.command("sheet")
 def markers_sheet(out: Path, target_type: str = "aruco_4x4_50", codes: str = "0-11", size_mm: float = 40.0,

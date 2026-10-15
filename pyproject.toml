@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyarchinit-photogrammetry"
-version = "0.1.0"
+version = "0.2.0"
 description = "Open-source photogrammetry engine for archaeology and BIM, integrated with PyArchInit"
 readme = "README.md"
 license = "GPL-2.0-or-later"
@@ -41,11 +41,16 @@ mesh = ["open3d>=0.18"]
 bim = ["ifcopenshell>=0.8"]
 postgis = ["psycopg2-binary>=2.9"]
 sam = ["torch>=2.3", "sam2>=1.1"]
-all = ["open3d>=0.18", "ifcopenshell>=0.8", "psycopg2-binary>=2.9"]
+gui = ["PySide6>=6.6", "pyvista>=0.43", "pyvistaqt>=0.11"]
+all = ["open3d>=0.18", "ifcopenshell>=0.8", "psycopg2-binary>=2.9", "PySide6>=6.6", "pyvista>=0.43",
+       "pyvistaqt>=0.11"]
 dev = ["pytest>=7"]
 
 [project.scripts]
 ppg = "pyarchinit_photogrammetry.cli:main"
+
+[project.gui-scripts]
+ppg-gui = "pyarchinit_photogrammetry.gui:main"
 
 [project.urls]
 Homepage = "https://github.com/enzococca/pyarchinit-photogrammetry"

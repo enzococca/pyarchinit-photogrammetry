@@ -18,11 +18,25 @@ class Cancelled(RuntimeError):
 
 
 class Progress:
+    """Callback wrapper with sub-ranges and cancellation.
+
+    Children made with :meth:`sub` share the cancellation flag of their root,
+    so cancelling the reporter given to a long step stops all of its sub-steps."""
+
     def __init__(self, callback: ProgressCallback | None = None, start: float = 0.0, span: float = 1.0):
         self.callback = callback
         self.start = start
         self.span = span
-        self.cancel_requested = False
+        self._root: Progress = self
+        self._cancel = False
+
+    @property
+    def cancel_requested(self) -> bool:
+        return self._root._cancel
+
+    @cancel_requested.setter
+    def cancel_requested(self, value: bool) -> None:
+        self._root._cancel = bool(value)
 
     def __call__(self, fraction: float, message: str = "") -> None:
         if self.cancel_requested:
@@ -35,11 +49,16 @@ class Progress:
     def sub(self, start: float, span: float) -> "Progress":
         """Child reporter mapping its 0..1 range into ``[start, start+span]`` of this one."""
         child = Progress(self.callback, self.start + self.span * start, self.span * span)
-        child.cancel_requested = self.cancel_requested
+        child._root = self._root
         return child
 
     def cancel(self) -> None:
         self.cancel_requested = True
+
+    def check(self) -> None:
+        """Raise :class:`Cancelled` if cancellation was requested."""
+        if self.cancel_requested:
+            raise Cancelled("cancelled")
 
 
 def as_progress(cb: ProgressCallback | Progress | None) -> Progress:

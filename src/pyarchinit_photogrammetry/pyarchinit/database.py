@@ -53,7 +53,16 @@ def _warm_up_proj() -> None:
     mod_spatialite (system or QGIS build) brings its own PROJ; if it is loaded first,
     the PROJ context of the rasterio wheel can crash the process (std::bad_alloc).
     Initialising rasterio/pyproj first avoids the clash.
+
+    The same holds for image libraries: mod_spatialite pulls in the system libjpeg,
+    and if it is loaded before pycolmap, COLMAP can no longer decode JPEG photos
+    ("BITMAP_ERROR: Failed to read the image file format"). pycolmap is imported
+    here so that its own libraries are bound first.
     """
+    try:
+        import pycolmap  # noqa: F401
+    except Exception:  # pragma: no cover
+        pass
     try:
         import pyproj
         from rasterio.crs import CRS

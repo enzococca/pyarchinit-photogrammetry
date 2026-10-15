@@ -9,13 +9,13 @@ cut/fill volumes, point-cloud classification, Segment Anything 2.1, IFC export, 
 publishing into a PyArchInit database. Everything is scriptable in Python and runs on CPU,
 Apple Silicon included.
 
-> Status: **alpha (0.1)**. The Python library and the command line are ready; a desktop GUI
-> built on the same API is the next step. Italian version: [README.it.md](README.it.md).
+> Status: **alpha (0.2)**. Python library, command line and desktop interface (on the same API,
+> with a built-in Python console). Italian version: [README.it.md](README.it.md).
 
 ## Installation
 
 ```bash
-pip install "pyarchinit-photogrammetry[all]"      # mesh (Open3D), IFC, PostGIS
+pip install "pyarchinit-photogrammetry[all]"      # mesh (Open3D), IFC, PostGIS, desktop GUI
 pip install "pyarchinit-photogrammetry[sam]"      # optional: Segment Anything 2.1 (PyTorch)
 ```
 
@@ -34,6 +34,26 @@ Python 3.10+. Writing geometries into a PyArchInit **SQLite** database needs `mo
 
 On headless Linux servers Open3D needs the EGL/GL libraries:
 `sudo apt-get install libegl1 libgl1 libgomp1`.
+
+## Try it with the demo data
+
+```bash
+ppg demo ~/ppg_demo --process     # synthetic trench photos + 8 targets, pottery meshes, PyArchInit DB
+ppg-gui ~/ppg_demo/scavo.ppg      # open the processed project in the interface
+```
+
+Or from the interface: **File > Crea e apri progetto demo**. `LEGGIMI.txt` in the folder lists
+what to try (sections, contours, pottery profile of the sherd, publishing to PyArchInit).
+
+## Desktop interface
+
+`ppg-gui` (or `ppg gui`) opens the desktop application (Italian UI): workspace with chunks,
+cameras, markers and products; 3D view (VTK, with a software fallback renderer); orthomosaic
+and DEM view with drawing tools (stratigraphic units, section traces, measurements, spot
+heights, SAM 2.1 prompts); photo view with manual marker placement; reference pane with
+GCP and check point errors; Python console bound to the project (`doc`, `chunk`); background
+processing with progress and cancel; a PyArchInit menu to connect, publish orthophotos, DEMs
+and models, and write unit polygons and spot heights. See [docs/gui.md](docs/gui.md).
 
 ## Quick start (Python)
 
@@ -69,7 +89,7 @@ ppg export scavo.ppg --ortho ortho.tif --dem dem.tif --model model.obj --cloud c
 ```
 
 Scripts can work on an open project, as in the GUI: `ppg run myscript.py --project scavo.ppg`,
-then `ppg.app.document` inside the script.
+then `ppg.app.document` inside the script (in the GUI: **Strumenti > Esegui script Python**).
 
 ## What it does
 
@@ -141,6 +161,8 @@ pyarchinit_photogrammetry/
   ai/          classification, SAM 2.1
   pyarchinit/  config.cfg, database, media, high-level bridge
   io/          EXIF, exports, report
+  gui/         desktop interface (PySide6, pyvista)
+  demo.py      demo data set
   cli.py       `ppg` command
 ```
 

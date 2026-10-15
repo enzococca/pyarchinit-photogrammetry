@@ -106,3 +106,36 @@ def test_publish_is_idempotent_and_footprint_valid(pa_db, processed, tmp_path):
     assert wkt and wkt.startswith("LINESTRING")
     x0, y0 = 2480000.0, 4500000.0
     assert pa.publish_elevations(ch, "Saggio", "1", "1", [(x0 - 5.0, y0 + 1.0)]) == []
+
+
+def test_spatialite_before_pycolmap_keeps_jpeg_decoding(tmp_path):
+    """Loading SpatiaLite (system libjpeg) must not break COLMAP's JPEG reader."""
+    import subprocess
+    import sys
+    import textwrap
+
+    import cv2
+
+    img = tmp_path / "a.jpg"
+    cv2.imwrite(str(img), (np.random.default_rng(0).random((64, 64, 3)) * 255).astype(np.uint8))
+    code = textwrap.dedent(f"""
+        import sqlite3, sys
+        from pyarchinit_photogrammetry.pyarchinit.database import _warm_up_proj, _spatialite_paths
+        _warm_up_proj()
+        con = sqlite3.connect(":memory:")
+        con.enable_load_extension(True)
+        for p in _spatialite_paths():
+            try:
+                con.load_extension(p)
+                break
+            except Exception:
+                continue
+        else:
+            print("SKIP"); sys.exit(0)
+        import pycolmap
+        print("OK" if pycolmap.Bitmap.read({str(img)!r}, True) is not None else "FAIL")
+    """)
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120).stdout
+    if "SKIP" in out:
+        pytest.skip("mod_spatialite not available")
+    assert "OK" in out, out

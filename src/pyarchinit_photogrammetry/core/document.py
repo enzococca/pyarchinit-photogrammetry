@@ -45,8 +45,21 @@ class Document:
     # ------------------------------------------------------------- chunks
     @property
     def chunk(self) -> Chunk | None:
-        """The active chunk (the first enabled one)."""
+        """The active chunk (set by assignment, as in the GUI; default: the first enabled one)."""
+        key = self.meta.get("active_chunk")
+        for c in self.chunks:
+            if c.key == key:
+                return c
         return next((c for c in self.chunks if c.enabled), None)
+
+    @chunk.setter
+    def chunk(self, chunk: Chunk | None) -> None:
+        if chunk is None:
+            self.meta.pop("active_chunk", None)
+        elif chunk not in self.chunks:
+            raise ValueError("the chunk does not belong to this document")
+        else:
+            self.meta["active_chunk"] = chunk.key
 
     def add_chunk(self, label: str | None = None) -> Chunk:
         key = max((c.key for c in self.chunks), default=-1) + 1

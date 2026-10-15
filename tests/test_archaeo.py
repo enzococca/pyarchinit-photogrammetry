@@ -4,21 +4,11 @@ import trimesh
 
 from pyarchinit_photogrammetry.archaeo import pottery, sections, terrain
 from pyarchinit_photogrammetry.engine.dem import write_geotiff
+from pyarchinit_photogrammetry.testing.synthetic import make_vessel
 
 
-def _vessel(rim_r=0.08, h=0.12, t=0.006):
-    hs = np.linspace(0, h, 60)
-    r_out = 0.04 + (rim_r - 0.04) * np.sin(hs / h * np.pi / 2) ** 0.7 + 0.01 * np.sin(hs / h * np.pi)
-    prof = np.vstack([[0, 0], np.column_stack([r_out, hs]), np.column_stack([(r_out - t)[::-1], hs[::-1]]), [0, t]])
-    a = np.linspace(0, 2 * np.pi, 128, endpoint=False)
-    v = np.vstack([np.column_stack([prof[:, 0] * np.cos(x), prof[:, 0] * np.sin(x), prof[:, 1]]) for x in a])
-    m = len(prof)
-    f = []
-    for i in range(len(a)):
-        j = (i + 1) % len(a)
-        for k in range(m - 1):
-            f += [[i * m + k, j * m + k, i * m + k + 1], [i * m + k + 1, j * m + k, j * m + k + 1]]
-    return trimesh.Trimesh(v, np.array(f), process=True)
+def _vessel(**kw):
+    return make_vessel(**kw)
 
 
 def test_pottery_axis_profile_and_drawing(tmp_path):
@@ -66,3 +56,16 @@ def test_section_through_wall(processed, tmp_path):
     assert len(cloud.points) > 100
     plan = sections.plan_slice(ch, 99.85)
     assert plan.polylines
+
+
+def test_pottery_axis_from_noisy_sherd():
+    from scipy.spatial.transform import Rotation
+
+    mesh = make_vessel(sherd=(10, 70), noise=0.0002)
+    t = np.eye(4)
+    t[:3, :3] = Rotation.random(random_state=11).as_matrix()
+    mesh.apply_transform(t)
+    axis = pottery.estimate_axis(mesh)
+    assert np.degrees(np.arccos(abs(axis.direction @ t[:3, 2]))) < 3.0
+    meas = pottery.best_profile(mesh, axis).measurements()
+    assert abs(meas["rim_diameter_m"] - 0.16) < 0.004

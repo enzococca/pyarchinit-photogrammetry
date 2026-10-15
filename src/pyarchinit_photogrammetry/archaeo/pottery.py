@@ -57,6 +57,11 @@ class Profile:
         return out
 
 
+def _dir(params):
+    theta, phi = params[0], params[1]
+    return np.array([np.sin(theta) * np.cos(phi), np.sin(theta) * np.sin(phi), np.cos(theta)])
+
+
 def _normal_line_distances(params, centers, normals):
     theta, phi, a, b = params
     d = np.array([np.sin(theta) * np.cos(phi), np.sin(theta) * np.sin(phi), np.cos(theta)])
@@ -69,30 +74,117 @@ def _normal_line_distances(params, centers, normals):
     return ((centers - p) * c).sum(1) / np.maximum(nc, 1e-9)
 
 
-def estimate_axis(mesh, samples: int = 4000, seed: int = 0) -> Axis:
-    """Rotation axis of a (possibly fragmentary) vessel from its normals."""
+def _uv(d):
+    u = np.cross(d, [1.0, 0, 0]) if abs(d[0]) < 0.9 else np.cross(d, [0, 1.0, 0])
+    u /= np.linalg.norm(u)
+    return u, np.cross(d, u)
+
+
+def _axis_point_for(d, centers, normals, min_angle: float = 0.25):
+    """Best axis position for a fixed direction ``d`` (robust linear fit).
+
+    Each normal line must cross the axis: the signed distance between the two
+    lines is linear in the axis position, so it is solved directly (IRLS)."""
+    m = np.cross(normals, d)
+    nm = np.linalg.norm(m, axis=1)
+    ok = nm > min_angle  # normals almost parallel to the axis carry no information
+    if ok.mean() < 0.4:
+        return None, np.inf
+    mh = m[ok] / nm[ok, None]
+    u, v = _uv(d)
+    A = np.column_stack([mh @ u, mh @ v])
+    y = (centers[ok] * mh).sum(1)
+    w = np.ones(len(y))
+    scale = None
+    for _ in range(4):
+        sol, *_ = np.linalg.lstsq(A * w[:, None], y * w, rcond=None)
+        res = y - A @ sol
+        scale = 1.4826 * np.median(np.abs(res)) + 1e-12
+        w = 1.0 / np.maximum(1.0, np.abs(res) / (2.0 * scale))  # Huber weights
+    return sol, float(np.median(np.abs(res)))
+
+
+def _smooth_normals(mesh, points, face_normals, k: int = 48):
+    """Normals from a local plane fit (k nearest vertices): photogrammetric
+    meshes are noisy at the triangle scale, the axis needs the shape."""
+    from scipy.spatial import cKDTree
+
+    verts = np.asarray(mesh.vertices)
+    vn = np.asarray(mesh.vertex_normals)
+    k = min(k, len(verts))
+    _, nn = cKDTree(verts).query(points, k=k)
+    # same-side neighbours only: the opposite wall of a thin sherd is a few mm away
+    w = ((vn[nn] * face_normals[:, None, :]).sum(2) > 0.5).astype(float)
+    cnt = w.sum(1, keepdims=True)
+    mean = (verts[nn] * w[..., None]).sum(1) / np.maximum(cnt, 1)
+    nb = (verts[nn] - mean[:, None, :]) * w[..., None]
+    cov = np.einsum("nki,nkj->nij", nb, nb)
+    _, vecs = np.linalg.eigh(cov)
+    n = vecs[:, :, 0]
+    n *= np.where((n * face_normals).sum(1) < 0, -1.0, 1.0)[:, None]
+    bad = (cnt[:, 0] < 8) | ((n * face_normals).sum(1) < 0.5)
+    n[bad] = face_normals[bad]
+    return n
+
+
+def _fibonacci_hemisphere(n: int) -> np.ndarray:
+    i = np.arange(n) + 0.5
+    z = i / n
+    r = np.sqrt(1 - z ** 2)
+    phi = np.pi * (1 + 5 ** 0.5) * i
+    return np.column_stack([r * np.cos(phi), r * np.sin(phi), z])
+
+
+def estimate_axis(mesh, samples: int = 4000, seed: int = 0, directions: int = 1500) -> Axis:
+    """Rotation axis of a (possibly fragmentary) vessel from its normals.
+
+    On a surface of revolution every normal line meets the axis. A search over
+    all directions (axis position solved linearly for each) avoids the local
+    minima of small sherds; fracture faces and noise are down-weighted, then the
+    best candidates are refined by robust least squares."""
     from scipy.optimize import least_squares
 
     rng = np.random.default_rng(seed)
-    idx = rng.choice(len(mesh.faces), min(samples, len(mesh.faces)), replace=False)
-    centers = mesh.triangles_center[idx] - mesh.triangles_center.mean(0)
-    normals = mesh.face_normals[idx]
-    offset = mesh.triangles_center.mean(0)
-    _, _, vt = np.linalg.svd(centers - centers.mean(0), full_matrices=False)
+    area = mesh.area_faces
+    idx = rng.choice(len(mesh.faces), min(samples, len(mesh.faces)), replace=False, p=area / area.sum())
+    offset = mesh.triangles_center[idx].mean(0)
+    centers = mesh.triangles_center[idx] - offset
+    normals = _smooth_normals(mesh, mesh.triangles_center[idx], mesh.face_normals[idx])
+    size = float(np.ptp(centers, axis=0).max())
+    cand = []
+    for d in _fibonacci_hemisphere(directions):
+        ab, cost = _axis_point_for(d, centers, normals)
+        if ab is not None and np.hypot(*ab) < 20 * size:
+            cand.append((cost, d, ab))
+    cand.sort(key=lambda c: c[0])
     best = None
-    for d0 in vt:
+    for cost0, d0, (a0, b0) in cand[:6]:
         theta = np.arccos(np.clip(d0[2], -1, 1))
         phi = np.arctan2(d0[1], d0[0])
-        res = least_squares(_normal_line_distances, [theta, phi, 0.0, 0.0], args=(centers, normals),
-                            loss="soft_l1", f_scale=np.ptp(centers) * 0.01)
-        cost = np.sqrt(np.mean(_normal_line_distances(res.x, centers, normals) ** 2))
+        x = np.array([theta, phi, a0, b0])
+        for _ in range(3):  # refine on the inliers of the current estimate (fracture faces drop out)
+            r0 = _normal_line_distances(x, centers, normals)
+            m = np.linalg.norm(np.cross(normals, _dir(x)), axis=1) > 0.25
+            sigma = 1.4826 * np.median(np.abs(r0[m])) + 1e-9
+            m &= np.abs(r0) < 4 * sigma
+            if m.sum() < 20:
+                break
+            try:
+                x = least_squares(_normal_line_distances, x, args=(centers[m], normals[m]), loss="cauchy",
+                                  f_scale=sigma).x
+            except Exception:
+                break
+        d = np.array([np.sin(x[0]) * np.cos(x[1]), np.sin(x[0]) * np.sin(x[1]), np.cos(x[0])])
+        # re-solve the position in the canonical (u, v) frame of the refined direction
+        ab, cost = _axis_point_for(d, centers, normals)
+        if ab is None:
+            continue
         if best is None or cost < best[0]:
-            best = (cost, res.x)
-    cost, (theta, phi, a, b) = best
-    d = np.array([np.sin(theta) * np.cos(phi), np.sin(theta) * np.sin(phi), np.cos(theta)])
-    u = np.cross(d, [1.0, 0, 0]) if abs(d[0]) < 0.9 else np.cross(d, [0, 1.0, 0])
-    u /= np.linalg.norm(u)
-    v = np.cross(d, u)
+            best = (cost, d, ab)
+    if best is None:
+        raise ValueError("cannot estimate the rotation axis (surface too flat or too small)")
+    cost, d, (a, b) = best
+    u, v = _uv(d)
     point = offset + a * u + b * v
     # orient the axis from base to rim: the mouth is usually the wider end
     h = (mesh.vertices - point) @ d
