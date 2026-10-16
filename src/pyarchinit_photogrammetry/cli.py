@@ -109,6 +109,62 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
     typer.echo(text)
 
 
+@app.command("clean-tie-points")
+def clean_tie_points(project: Path,
+                     max_reprojection_error: Optional[float] = typer.Option(
+                         None, help="px: remove the points with a larger mean reprojection error"),
+                     min_image_count: Optional[int] = typer.Option(
+                         None, help="remove the points seen by fewer photos"),
+                     max_reconstruction_uncertainty: Optional[float] = typer.Option(
+                         None, help="remove the points with a more elongated error ellipsoid (Metashape: 10-15)"),
+                     max_projection_accuracy: Optional[float] = typer.Option(
+                         None, help="px: remove the points measured on larger keypoints (own alignments only)"),
+                     optimize: bool = typer.Option(False, help="optimize the cameras afterwards"),
+                     dry_run: bool = typer.Option(False, help="only show the metrics and what would be removed"),
+                     chunk: Optional[str] = None):
+    """Gradual selection of the tie points (as in Metashape): remove the worst ones."""
+    import numpy as np
+
+    from .engine.tiepoints import select_tie_points, tie_point_metrics
+
+    criteria = dict(max_reprojection_error=max_reprojection_error, min_image_count=min_image_count,
+                    max_reconstruction_uncertainty=max_reconstruction_uncertainty,
+                    max_projection_accuracy=max_projection_accuracy)
+    if all(v is None for v in criteria.values()):
+        raise typer.BadParameter("give at least one criterion (see --help)")
+    doc, ch = _open(project, chunk)
+    metrics = tie_point_metrics(ch)
+    typer.echo(f"{len(metrics['ids']):,} tie points in {metrics['images']} photos, mean reprojection error "
+               f"{metrics['mean_reprojection_error']:.3f} px" + (" (model written from imported poses)"
+                                                                  if metrics["synthetic"] else ""))
+    for name in ("reprojection_error", "image_count", "reconstruction_uncertainty", "projection_accuracy"):
+        v = metrics[name]
+        if v is None:
+            typer.echo(f"  {name}: not available")
+            continue
+        v = v[np.isfinite(v)]
+        if len(v):
+            q = np.percentile(v, [50, 95])
+            typer.echo(f"  {name}: median {q[0]:.3g}, 95% {q[1]:.3g}, max {v.max():.3g}")
+    sel = select_tie_points(ch, metrics=metrics, **criteria)
+    for name, n in sel["by_criterion"].items():
+        typer.echo(f"  selected by {name}: " + ("not available" if n is None else f"{n:,}"))
+    typer.echo(f"selected {sel['selected']:,} of {sel['total']:,} ({sel['percent']:.1f}%)"
+               + (f"; {sel['images_below_minimum']} photos would keep too few points" if sel["images_below_minimum"]
+                  else ""))
+    if dry_run:
+        return
+    out = ch.clean_tie_points(optimize=optimize, progress=print_progress, **criteria)
+    doc.save()
+    text = (f"removed {out['removed']:,}, {out['remaining']:,} left; reprojection error "
+            f"{out['reprojection_error_before']:.3f} -> {out['reprojection_error_after']:.3f} px")
+    if "optimize_error" in out:
+        text += f"; after the optimization {out['optimize_error']:.3f} px"
+    if out.get("georeference", {}).get("control_rmse") is not None:
+        text += f", control RMSE {out['georeference']['control_rmse']:.4f} m"
+    typer.echo(text)
+
+
 @app.command()
 def reference(project: Path, csv_file: Path, crs: Optional[str] = None, columns: str = "nxyz",
               delimiter: Optional[str] = None, skip_rows: int = 0, chunk: Optional[str] = None):
