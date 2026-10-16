@@ -1385,7 +1385,7 @@ class MainWindow(QMainWindow):
             if r == 1:
                 self.log_pane.warning(f"{step} senza {len(bad)} foto non leggibili")
                 return True
-            if not self.relink_photos(only_unreadable=True):
+            if not self.relink_photos():  # every photo found there: a complete copy replaces the folder
                 return None
 
     def relink_photos(self, only_unreadable: bool = False) -> bool:
