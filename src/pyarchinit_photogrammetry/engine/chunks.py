@@ -863,7 +863,10 @@ def _concat_clouds(clouds: list[PointCloud]) -> PointCloud | None:
     labels = {}
     for c in clouds:
         labels.update(c.labels)
-    return PointCloud(xyz, rgb, normals, cls, conf, labels)
+    manual = None
+    if any(c.manual is not None for c in clouds):  # classes corrected by hand
+        manual = np.concatenate([c.manual if c.manual is not None else np.zeros(len(c), bool) for c in clouds])
+    return PointCloud(xyz, rgb, normals, cls, conf, labels, manual)
 
 
 def _cloud_info(path: Path) -> tuple[int, set[str]]:
@@ -885,16 +888,19 @@ def _cloud_info(path: Path) -> tuple[int, set[str]]:
 def _write_merged_cloud(parts: list[tuple[Path, np.ndarray]], out: Path, progress: Progress) -> int:
     """Dense clouds moved into one frame and written one after the other (one cloud in
     memory at a time), with colours (grey where a cloud has none), normals (when every
-    cloud has them) and classes."""
+    cloud has them), classes and the flags of the classes corrected by hand."""
     infos = [_cloud_info(p) for p, _ in parts]
     with_normals = all({"nx", "ny", "nz"} <= props for _, props in infos)
     with_rgb = any({"red", "green", "blue"} <= props for _, props in infos)
+    with_manual = any("manual" in props for _, props in infos)
     fields = [("x", "<f8"), ("y", "<f8"), ("z", "<f8")]
     if with_normals:
         fields += [("nx", "<f4"), ("ny", "<f4"), ("nz", "<f4")]
     if with_rgb:
         fields += [("red", "u1"), ("green", "u1"), ("blue", "u1")]
     fields += [("classification", "u1")]
+    if with_manual:
+        fields += [("manual", "u1")]
     names = {"<f8": "double", "<f4": "float", "u1": "uchar"}
     total = sum(n for n, _ in infos)
     header = ["ply", "format binary_little_endian 1.0", f"element vertex {total}"]
@@ -916,6 +922,8 @@ def _write_merged_cloud(parts: list[tuple[Path, np.ndarray]], out: Path, progres
                 rgb = pc.rgb if pc.rgb is not None else np.full((len(pc), 3), 128, np.uint8)
                 arr["red"], arr["green"], arr["blue"] = rgb.T
             arr["classification"] = pc.classification
+            if with_manual:
+                arr["manual"] = pc.manual if pc.manual is not None else 0
             fh.write(arr.tobytes())
             written += len(pc)
             del pc, arr

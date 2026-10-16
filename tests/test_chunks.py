@@ -238,7 +238,10 @@ def test_merge_options_clouds_and_models(doc, tmp_path):
     a, b = doc.chunks
     doc.align_chunks(a, [b], method="cameras")
     S = chunks_mod.affine_inverse(a.transform) @ b.transform  # B internal -> A internal
-    a.point_cloud = ppg.PointCloud(a.tie_points.xyz, a.tie_points.rgb, classification=np.full(len(a.tie_points), 2))
+    hand = np.zeros(len(a.tie_points), bool)
+    hand[:10] = True  # classes corrected by hand in A only
+    a.point_cloud = ppg.PointCloud(a.tie_points.xyz, a.tie_points.rgb, classification=np.full(len(a.tie_points), 2),
+                                   manual=hand)
     b.point_cloud = ppg.PointCloud(b.tie_points.xyz[:500])
     for ch, size in ((a, 1.0), (b, 2.0)):
         box = trimesh.creation.box(extents=(size, size, size))
@@ -253,6 +256,7 @@ def test_merge_options_clouds_and_models(doc, tmp_path):
     assert np.allclose(pc.xyz[:len(a.tie_points)], a.tie_points.xyz)
     assert np.allclose(pc.xyz[len(a.tie_points):], geometry.apply(S, b.tie_points.xyz[:500]))
     assert (pc.rgb[len(a.tie_points):] == 128).all() and (pc.classification[:len(a.tie_points)] == 2).all()
+    assert pc.manual is not None and pc.manual.sum() == 10 and pc.manual[:10].all()
     mesh = merged.model
     assert len(mesh.vertices) == 16 and len(mesh.faces) == 24
     box_b = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
