@@ -99,11 +99,16 @@ def dense(project: Path, quality: str = "medium", filter_mode: str = "moderate",
 
 
 @app.command()
-def mesh(project: Path, surface: str = "arbitrary", faces: str = "medium", texture: bool = True,
-         texture_size: int = 4096, chunk: Optional[str] = None):
-    """Mesh (Poisson or height field) and texture."""
+def mesh(project: Path,
+         source: str = typer.Option("point_cloud", help="point_cloud, tie_points or depth_maps (TSDF fusion)"),
+         surface: str = "arbitrary", faces: str = "medium",
+         voxel_size: Optional[float] = typer.Option(None, help="depth_maps: voxel in the chunk units "
+                                                               "(default: twice the depth-map pixel)"),
+         texture: bool = True, texture_size: int = 4096, chunk: Optional[str] = None):
+    """Mesh (Poisson, height field or fusion of the depth maps) and texture."""
     doc, ch = _open(project, chunk)
-    m = ch.build_model(surface=surface, face_count=int(faces) if faces.isdigit() else faces, progress=print_progress)
+    m = ch.build_model(source=source, surface=surface, face_count=int(faces) if faces.isdigit() else faces,
+                       voxel_size=voxel_size, progress=print_progress)
     if texture:
         ch.build_texture(texture_size=texture_size, progress=print_progress)
     doc.save()
