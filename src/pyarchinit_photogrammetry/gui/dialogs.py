@@ -20,7 +20,7 @@ class Field:
     minimum: float = 0.0
     maximum: float = 1e9
     decimals: int = 4
-    kind: str | None = None  # "file_save", "file_open", "dir", "text", "optional_float"
+    kind: str | None = None  # "file_save", "file_open", "dir", "text", "optional_float", "checklist"
     filter: str = ""
     tip: str = ""
 
@@ -78,13 +78,33 @@ class ParamDialog(QDialog):
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        hint = self.sizeHint()  # the combo boxes know their width only once polished
+        if self.width() < hint.width():
+            self.resize(hint.width(), max(self.height(), hint.height()))
+
     def _widget(self, f: Field) -> QWidget:
+        if f.kind == "checklist":  # several of the choices: default = the values ticked
+            w = QListWidget()
+            for v, lab in f.choices or []:
+                it = QListWidgetItem(lab)
+                it.setData(Qt.ItemDataRole.UserRole, v)
+                it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                it.setCheckState(Qt.CheckState.Checked if v in (f.default or []) else Qt.CheckState.Unchecked)
+                w.addItem(it)
+            rows = min(max(w.count(), 1), 8)  # every row visible (up to 8, then it scrolls)
+            w.setFixedHeight(w.sizeHintForRow(0) * rows + 2 * w.frameWidth() + 6)
+            w.setMinimumWidth(min(600, w.sizeHintForColumn(0) + 2 * w.frameWidth() + 24))
+            return w
         if f.choices is not None:
             w = QComboBox()
+            w.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)  # the dialog widens, no cut text
             for v, lab in f.choices:
                 w.addItem(lab, v)
             i = next((k for k, (v, _) in enumerate(f.choices) if v == f.default), 0)
             w.setCurrentIndex(i)
+            w.setMinimumWidth(min(600, w.sizeHint().width()))
             return w
         if f.kind in ("file_save", "file_open", "dir"):
             return _PathEdit(f)
@@ -112,7 +132,10 @@ class ParamDialog(QDialog):
     def values(self) -> dict:
         out = {}
         for name, (f, w) in self.widgets.items():
-            if isinstance(w, QComboBox):
+            if f.kind == "checklist":
+                out[name] = [w.item(i).data(Qt.ItemDataRole.UserRole) for i in range(w.count())
+                             if w.item(i).checkState() == Qt.CheckState.Checked]
+            elif isinstance(w, QComboBox):
                 out[name] = w.currentData()
             elif isinstance(w, _PathEdit):
                 out[name] = w.value()

@@ -257,6 +257,8 @@ class MainWindow(QMainWindow):
         self._act(m, "Aggiungi cartella...", lambda: self.add_photos(folder=True), processing=True,
                   icon_name="folder_photos")
         self._act(m, "Aggiungi chunk", self.add_chunk, icon_name="chunk_add")
+        self._act(m, "Allinea chunk...", self.align_chunks, processing=True, icon_name="chunk")
+        self._act(m, "Unisci chunk...", self.merge_chunks, processing=True, icon_name="merge")
         m.addSeparator()
         self._act(m, "Rileva marker codificati...", self.detect_markers, processing=True, icon_name="markers")
         self._act(m, "Allinea foto...", self.align_photos, processing=True, icon_name="align")
@@ -1011,6 +1013,102 @@ class MainWindow(QMainWindow):
             self.doc.chunk = self.doc.add_chunk(label)
             self._dirty(True)
             self.refresh_all(reset_views=True)
+
+    def _two_chunks(self) -> bool:
+        if len(self.doc.chunks) < 2:
+            self._warn("Servono almeno due chunk (Flusso di lavoro > Aggiungi chunk), ognuno allineato per conto suo.")
+            return False
+        return True
+
+    def align_chunks(self) -> None:
+        """Bring the other chunks into the frame of a reference chunk (markers, photos or points)."""
+        if not self._two_chunks():
+            return
+        doc = self.doc
+        ref0 = self.chunk if self.chunk is not None else doc.chunks[0]
+        choices = [(ch.key, f"{ch.label} ({len(ch.aligned_cameras)} foto allineate)") for ch in doc.chunks]
+        v = ParamDialog.ask(self, "Allinea chunk", [
+            Field("reference", "Chunk di riferimento", ref0.key, choices=choices),
+            Field("chunks", "Chunk da allineare", [ch.key for ch in doc.chunks if ch is not ref0 and ch.enabled],
+                  choices=choices, kind="checklist"),
+            Field("method", "Metodo", "markers",
+                  choices=[("markers", "Marker con lo stesso nome (almeno 3)"),
+                           ("cameras", "Foto in comune tra i chunk"),
+                           ("points", "Punti (nuvole che si sovrappongono)")]),
+            Field("fix_scale", "Scala fissa (solo rototraslazione: chunk gia' in metri)", False)],
+            intro="Ogni chunk resta com'e' (foto, nuvole, mesh): cambia solo la sua trasformazione, che lo porta nel "
+                  "sistema del chunk di riferimento. Con i punti la posizione iniziale viene da marker, "
+                  "georeferenziazione o foto in comune, altrimenti dalla forma delle nuvole. DEM e ortofoto dei "
+                  "chunk allineati vanno ricostruiti.")
+        if not v:
+            return
+        ref = next(ch for ch in doc.chunks if ch.key == v["reference"])
+        targets = [ch for ch in doc.chunks if ch.key in v["chunks"] and ch is not ref]
+        if not targets:
+            self._warn("Scegli almeno un chunk da allineare diverso dal riferimento.")
+            return
+        from ..engine.chunks import _is_scaled
+
+        metric = _is_scaled(ref)
+
+        def done(report):
+            lines = []
+            for e in report["chunks"]:
+                rmse = e.get("rmse")
+                err = "" if rmse is None else (f", errore medio {rmse * 1000:.1f} mm" if metric else f", RMSE {rmse:.4g}")
+                lines.append(f"{e['label']}: {e.get('correspondences', 0)} corrispondenze{err}, scala {e['scale']:.4f}"
+                             + (f"; da ricostruire: {', '.join(e['stale_products'])}" if e.get("stale_products") else ""))
+            if report.get("levelled_reference"):
+                lines.append(f"Il chunk {ref.label} e' stato prima messo in bolla (come per il DEM).")
+            text = f"Allineati a {ref.label} ({dict(markers='marker', cameras='foto', points='punti')[v['method']]}):\n" \
+                + "\n".join(lines)
+            self._info("Allinea chunk", text)
+
+        self.run_task("Allineamento dei chunk",
+                      lambda p: doc.align_chunks(ref, targets, method=v["method"], fix_scale=v["fix_scale"], progress=p),
+                      done)
+
+    def merge_chunks(self) -> None:
+        """A new chunk with the photos, markers and clouds of the chosen chunks (already aligned)."""
+        if not self._two_chunks():
+            return
+        doc = self.doc
+        choices = [(ch.key, ch.label) for ch in doc.chunks]
+        v = ParamDialog.ask(self, "Unisci chunk", [
+            Field("chunks", "Chunk da unire (il primo da' il sistema di riferimento)",
+                  [ch.key for ch in doc.chunks if ch.enabled], choices=choices, kind="checklist"),
+            Field("label", "Nome del nuovo chunk", "Chunk unito", kind="text"),
+            Field("markers", "Unisci i marker con lo stesso nome", True),
+            Field("tie_points", "Unisci i punti di legame", True),
+            Field("clouds", "Unisci le nuvole dense", True),
+            Field("models", "Unisci le mesh", False),
+            Field("activate", "Rendi attivo il nuovo chunk", True)],
+            intro="I chunk devono essere nello stesso sistema: allineali prima (Allinea chunk) o georeferenziali. "
+                  "Il nuovo chunk ha tutte le foto (quelle presenti in piu' chunk una volta sola), i marker e le "
+                  "nuvole; i chunk di partenza restano. DEM e ortofoto si ricostruiscono sul chunk unito.")
+        if not v:
+            return
+        sources = [ch for ch in doc.chunks if ch.key in v["chunks"]]
+        if len(sources) < 2:
+            self._warn("Scegli almeno due chunk da unire.")
+            return
+
+        def done(merged):
+            info = merged.meta.get("merge", {})
+            if v["activate"]:
+                doc.chunk = merged
+                self.refresh_all(reset_views=True)
+            text = (f"Creato «{merged.label}»: {len(merged.cameras)} foto, {len(merged.markers)} marker"
+                    + (f", nuvola densa di {len(merged.point_cloud):,} punti".replace(",", ".")
+                       if merged.point_cloud is not None else ""))
+            for w in info.get("warnings", []):
+                self.log_pane.warning(w)
+            self._info("Unisci chunk", text)
+
+        self.run_task("Unione dei chunk",
+                      lambda p: doc.merge_chunks(sources, label=v["label"].strip() or None, merge_markers=v["markers"],
+                                                 merge_tie_points=v["tie_points"], merge_point_clouds=v["clouds"],
+                                                 merge_models=v["models"], progress=p), done)
 
     def add_photos(self, folder: bool = False) -> None:
         if not self._need_chunk():

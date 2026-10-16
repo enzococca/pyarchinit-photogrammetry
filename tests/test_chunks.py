@@ -363,3 +363,51 @@ def test_ransac_is_deterministic(rng):
     M2, n2 = chunks_mod.ransac_rigid(a, b, 0.01)
     assert np.array_equal(M1, M2) and n1 == n2 == 100
     assert np.allclose(M1, T, atol=1e-9)
+
+
+def test_align_and_merge_from_the_interface(two_chunks, tmp_path, monkeypatch):
+    """Flusso di lavoro > Allinea chunk / Unisci chunk: the dialogs choose the chunks, the
+    tasks run in the background and the merged chunk becomes the active one."""
+    pytest.importorskip("PySide6")
+    import shutil
+
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
+    app = QApplication.instance() or QApplication([])
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    copy = tmp_path / "gui" / "two.ppg"
+    copy.parent.mkdir()
+    shutil.copy(two_chunks, copy)
+    shutil.copytree(str(two_chunks) + ".files", str(copy) + ".files")
+    doc = ppg.Document.open(copy)
+    a, b = doc.chunks
+    w = mw.MainWindow(doc, autoconnect=False)
+    w.runner.show_dialog = False
+    infos = []
+    monkeypatch.setattr(w, "_info", lambda title, text: infos.append(text))
+    try:
+        monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(lambda cls, *args, **kw: {
+            "reference": a.key, "chunks": [b.key], "method": "cameras", "fix_scale": False}))
+        before = b.transform.copy()
+        w.align_chunks()
+        w.runner.wait()
+        app.processEvents()
+        assert not np.allclose(b.transform, before) and b.meta["chunk_alignment"]
+        assert infos and "B: " in infos[-1] and "corrispondenze" in infos[-1]
+        monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(lambda cls, *args, **kw: {
+            "chunks": [a.key, b.key], "label": "Saggio unito", "markers": True, "tie_points": True,
+            "clouds": True, "models": False, "activate": True}))
+        w.merge_chunks()
+        w.runner.wait()
+        app.processEvents()
+        merged = doc.chunks[-1]
+        assert len(doc.chunks) == 3 and merged.label == "Saggio unito" and doc.chunk is merged
+        assert len(merged.cameras) == len({c.label for c in a.cameras} | {c.label for c in b.cameras})
+        assert "Saggio unito" in infos[-1]
+    finally:
+        w.setWindowModified(False)
+        w.close()
