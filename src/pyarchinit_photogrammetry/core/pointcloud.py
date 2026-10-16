@@ -45,6 +45,7 @@ class PointCloud:
     classification: np.ndarray | None = None  # uint8 (N,)
     confidence: np.ndarray | None = None   # number of views / quality
     labels: dict[int, str] = field(default_factory=dict)  # class code -> name (user classes)
+    manual: np.ndarray | None = None       # bool (N,): class assigned by hand, kept by automatic classifiers
 
     def __post_init__(self):
         self.xyz = np.asarray(self.xyz, dtype=np.float64).reshape(-1, 3)
@@ -57,6 +58,8 @@ class PointCloud:
             self.classification = np.ones(n, dtype=np.uint8)
         else:
             self.classification = np.array(self.classification, dtype=np.uint8).reshape(n)
+        if self.manual is not None:
+            self.manual = np.array(self.manual, dtype=bool).reshape(n)
 
     def __len__(self) -> int:
         return len(self.xyz)
@@ -64,7 +67,7 @@ class PointCloud:
     def subset(self, mask: np.ndarray) -> "PointCloud":
         pick = lambda a: None if a is None else a[mask]  # noqa: E731
         return PointCloud(self.xyz[mask], pick(self.rgb), pick(self.normals), pick(self.classification),
-                          pick(self.confidence), dict(self.labels))
+                          pick(self.confidence), dict(self.labels), pick(self.manual))
 
     def transformed(self, m: np.ndarray) -> "PointCloud":
         xyz = self.xyz @ m[:3, :3].T + m[:3, 3]
@@ -72,7 +75,9 @@ class PointCloud:
         if self.normals is not None:
             r = m[:3, :3] / np.cbrt(np.linalg.det(m[:3, :3]))
             normals = (self.normals @ r.T).astype(np.float32)
-        return PointCloud(xyz, self.rgb, normals, self.classification.copy(), self.confidence, dict(self.labels))
+        manual = None if self.manual is None else self.manual.copy()
+        return PointCloud(xyz, self.rgb, normals, self.classification.copy(), self.confidence, dict(self.labels),
+                          manual)
 
     def bounds(self) -> tuple[np.ndarray, np.ndarray]:
         return self.xyz.min(0), self.xyz.max(0)
@@ -87,6 +92,8 @@ class PointCloud:
         if self.rgb is not None:
             fields += [("red", "u1"), ("green", "u1"), ("blue", "u1")]
         fields += [("classification", "u1")]
+        if self.manual is not None:
+            fields += [("manual", "u1")]  # extra property: readers that do not know it skip it
         arr = np.empty(n, dtype=fields)
         arr["x"], arr["y"], arr["z"] = self.xyz.T
         if self.normals is not None:
@@ -94,6 +101,8 @@ class PointCloud:
         if self.rgb is not None:
             arr["red"], arr["green"], arr["blue"] = self.rgb.T
         arr["classification"] = self.classification
+        if self.manual is not None:
+            arr["manual"] = self.manual
         type_names = {"f8": "double", "f4": "float", "u1": "uchar"}
         header = ["ply", "format binary_little_endian 1.0", f"element vertex {n}"]
         header += [f"property {type_names[t]} {name}" for name, t in fields]
@@ -119,7 +128,8 @@ class PointCloud:
         normals = np.column_stack([props["nx"], props["ny"], props["nz"]]) if {"nx", "ny", "nz"} <= names else None
         rgb = np.column_stack([props["red"], props["green"], props["blue"]]) if {"red", "green", "blue"} <= names else None
         cls_arr = props["classification"] if "classification" in names else None
-        return cls(xyz, rgb, normals, cls_arr)
+        manual = props["manual"] != 0 if "manual" in names else None  # older files have no such property
+        return cls(xyz, rgb, normals, cls_arr, manual=manual)
 
     # ---------------------------------------------------------------- LAS
     def save_las(self, path: str | Path, crs_wkt: str | None = None) -> Path:

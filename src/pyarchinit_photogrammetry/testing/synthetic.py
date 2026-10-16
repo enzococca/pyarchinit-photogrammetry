@@ -380,3 +380,76 @@ def write_pottery_dataset(out_dir: str | Path, scene: MeshScene | None = None, s
         for code, (x, y, z) in scene.targets.items():
             fh.write(f"{code},{x:.5f},{y:.5f},{z:.5f}\n")
     return scene
+
+
+def make_classified_cloud(size=(6.0, 4.0), spacing: float = 0.02, origin=(2480000.0, 4500000.0, 100.0),
+                          noise_fraction: float = 0.005, seed: int = 0):
+    """Dense cloud of a small excavation with known classes, for the trainable classifier.
+
+    Gently undulating ground (class 2), a masonry wall 3 x 0.4 m standing to 0.75 m (64),
+    five bushes (3) and isolated noise points above and below the surfaces (7), sampled at
+    random about ``spacing`` metres apart. Returns ``(xyz, rgb, codes)``, ``xyz`` in world
+    coordinates (``origin`` + local metres, z up), points in random order.
+    """
+    rng = np.random.default_rng(seed)
+    sx, sy = size
+    density = 1.0 / spacing ** 2
+
+    def ground_z(x, y):
+        return 0.05 * np.sin(1.1 * x) + 0.04 * np.cos(0.9 * y)
+
+    def count(area):
+        return int(rng.poisson(area * density))
+
+    parts = []  # (xyz, rgb, class)
+    wx0, wx1, wy0, wy1, top = 1.5, 4.5, 1.8, 2.2, 0.75
+    bushes = [((0.8, 0.8), 0.30), ((5.2, 3.2), 0.35), ((0.8, 3.2), 0.25), ((5.2, 0.8), 0.30), ((3.0, 0.7), 0.28)]
+    # ground, without the wall footprint and the soil hidden under the bushes
+    n = count(sx * sy)
+    x, y = rng.uniform(0, sx, n), rng.uniform(0, sy, n)
+    keep = ~((x > wx0) & (x < wx1) & (y > wy0) & (y < wy1))
+    for (cx, cy), r in bushes:
+        keep &= np.hypot(x - cx, y - cy) > 0.7 * r
+    x, y = x[keep], y[keep]
+    soil = np.array([125.0, 95.0, 65.0]) + 25 * np.sin(3 * x + 2 * y)[:, None] + rng.normal(0, 14, (len(x), 3))
+    parts.append((np.column_stack([x, y, ground_z(x, y) + rng.normal(0, 0.002, len(x))]), soil, 2))
+    # wall: two long faces, two short faces and the top, stones of slightly different colour
+    tints = rng.uniform(-30, 30, (64, 3))
+    faces = []
+    for yf in (wy0, wy1):
+        t = rng.uniform(wx0, wx1, count((wx1 - wx0) * top))
+        faces.append((t, np.full_like(t, yf), t))
+    for xf in (wx0, wx1):
+        t = rng.uniform(wy0, wy1, count((wy1 - wy0) * top))
+        faces.append((np.full_like(t, xf), t, t))
+    for fx, fy, along in faces:
+        z = rng.uniform(ground_z(fx, fy), top)
+        stone = (np.floor(along / 0.25) * 31 + np.floor(z / 0.15) * 17).astype(int) % 64
+        rgb = np.array([160.0, 150.0, 135.0]) + tints[stone] + rng.normal(0, 10, (len(z), 3))
+        parts.append((np.column_stack([fx, fy, z]) + rng.normal(0, 0.003, (len(z), 3)), rgb, 64))
+    n = count((wx1 - wx0) * (wy1 - wy0))
+    fx, fy = rng.uniform(wx0, wx1, n), rng.uniform(wy0, wy1, n)
+    stone = (np.floor(fx / 0.25) * 31 + np.floor(fy / 0.2) * 17).astype(int) % 64
+    rgb = np.array([160.0, 150.0, 135.0]) + tints[stone] + rng.normal(0, 10, (n, 3))
+    parts.append((np.column_stack([fx, fy, np.full(n, top)]) + rng.normal(0, 0.003, (n, 3)), rgb, 64))
+    # bushes: thick, irregular shells of leaves resting on the ground
+    for (cx, cy), r in bushes:
+        n = count(4 * np.pi * r ** 2 * 1.3)
+        d = rng.normal(size=(n, 3))
+        d /= np.linalg.norm(d, axis=1, keepdims=True)
+        p = d * (r * rng.uniform(0.75, 1.0, n))[:, None] * np.array([1.0, 1.0, 0.8])
+        p += np.array([cx, cy, ground_z(cx, cy) + 0.8 * r])
+        p = p[p[:, 2] > ground_z(p[:, 0], p[:, 1]) + 0.01]
+        rgb = np.array([55.0, 125.0, 45.0]) + rng.uniform(-15, 15, 3) + rng.normal(0, 18, (len(p), 3))
+        parts.append((p, rgb, 3))
+    # isolated noise above and below the surfaces
+    n = int(noise_fraction * sum(len(p[0]) for p in parts))
+    x, y = rng.uniform(0, sx, n), rng.uniform(0, sy, n)
+    below = rng.random(n) < 0.5
+    z = np.where(below, ground_z(x, y) - rng.uniform(0.1, 0.4, n), rng.uniform(0.95, 1.5, n))
+    parts.append((np.column_stack([x, y, z]), rng.uniform(0, 255, (n, 3)), 7))
+    xyz = np.concatenate([p[0] for p in parts]) + np.asarray(origin, float)
+    rgb = np.clip(np.concatenate([p[1] for p in parts]), 0, 255).astype(np.uint8)
+    codes = np.concatenate([np.full(len(p[0]), p[2], np.uint8) for p in parts])
+    order = rng.permutation(len(xyz))
+    return xyz[order], rgb[order], codes[order]

@@ -7,14 +7,17 @@ Geometric/radiometric rules that need no training data:
 * vegetation      excess-green index + height above ground     -> 3 / 4 / 5
 * structures      above ground, near-vertical planar surfaces  -> 64 (masonry)
 
-Classes can also be assigned from stratigraphic-unit polygons or from image
-masks (SAM 2.1, see :mod:`pyarchinit_photogrammetry.ai.sam`).
+Classes can also be assigned from stratigraphic-unit polygons, from image
+masks (SAM 2.1, see :mod:`pyarchinit_photogrammetry.ai.sam`) or by hand
+(:func:`set_class`). Points labelled by hand are flagged (``PointCloud.manual``):
+the automatic classifiers keep their class, and a classifier can be trained on
+them (:mod:`pyarchinit_photogrammetry.ai.learn`).
 """
 from __future__ import annotations
 
 import numpy as np
 
-from ..core.pointcloud import ARCHAEO_CLASSES, PointCloud
+from ..core.pointcloud import ARCHAEO_CLASSES, ASPRS_CLASSES, PointCloud
 
 NOISE, GROUND, LOW_VEG, MED_VEG, HIGH_VEG, BUILDING = 7, 2, 3, 4, 5, 6
 MASONRY = 64
@@ -33,6 +36,17 @@ def ground_mask(xyz: np.ndarray, cell: float = 0.05, max_window: float = 1.0, sl
     """Progressive morphological filter (Zhang et al. 2003) on a minimum-elevation grid.
 
     Returns ``(is_ground, height_above_ground)``.
+    """
+    surface, origin, cell = ground_surface(xyz, cell, max_window, slope, dh0, dh_max)
+    hag = height_above_surface(xyz, surface, origin, cell)
+    return hag <= max(dh0 * 1.5, 0.03), hag
+
+
+def ground_surface(xyz: np.ndarray, cell: float = 0.05, max_window: float = 1.0, slope: float = 0.3,
+                   dh0: float = 0.02, dh_max: float = 0.5) -> tuple[np.ndarray, tuple[float, float], float]:
+    """Bare-earth grid of the progressive morphological filter: ``(surface, (xmin, ymax), cell)``.
+
+    The cell grows when needed to keep the grid below ~16 M cells; the cell used is returned.
     """
     from scipy import ndimage
 
@@ -55,10 +69,16 @@ def ground_mask(xyz: np.ndarray, cell: float = 0.05, max_window: float = 1.0, sl
         dh = min(dh_max, slope * (win - prev) * cell + dh0)
         prev = win
         win = 2 * win - 1
+    return ground_surf, (x0, y1), cell
+
+
+def height_above_surface(xyz: np.ndarray, surface: np.ndarray, origin: tuple[float, float], cell: float) -> np.ndarray:
+    """Height of points above a grid from :func:`ground_surface` (points outside take the border cell)."""
+    h, w = surface.shape
+    x0, y1 = origin
     col = np.clip(((xyz[:, 0] - x0) / cell).astype(int), 0, w - 1)
     row = np.clip(((y1 - xyz[:, 1]) / cell).astype(int), 0, h - 1)
-    hag = xyz[:, 2] - ground_surf[row, col]
-    return hag <= max(dh0 * 1.5, 0.03), hag
+    return xyz[:, 2] - surface[row, col]
 
 
 def excess_green(rgb: np.ndarray) -> np.ndarray:
@@ -110,8 +130,10 @@ def classify(pc_world: PointCloud, cell: float = 0.05, vegetation: bool = True, 
     return out
 
 
-def classify_chunk(chunk, **kwargs) -> PointCloud:
-    """Classify the chunk dense cloud in place (world frame used for "up")."""
+def classify_chunk(chunk, overwrite_manual: bool = False, **kwargs) -> PointCloud:
+    """Classify the chunk dense cloud in place (world frame used for "up").
+
+    Points labelled by hand keep their class unless ``overwrite_manual``."""
     from ..engine.dem import ensure_level
 
     ensure_level(chunk)
@@ -120,10 +142,80 @@ def classify_chunk(chunk, **kwargs) -> PointCloud:
         raise RuntimeError("build the point cloud first")
     world = pc.transformed(chunk.transform)
     classified = classify(world, **kwargs)
+    keep_manual_labels(pc, classified.classification, overwrite_manual)
     pc.classification = classified.classification
     chunk.point_cloud = pc
     chunk.meta.setdefault("classes", {}).update({str(k): v for k, v in classified.labels.items()})
     return pc
+
+
+def keep_manual_labels(pc: PointCloud, codes: np.ndarray, overwrite: bool = False) -> None:
+    """Merge new automatic ``codes`` (modified in place) with the labels given by hand in ``pc``.
+
+    Hand-labelled points keep their class; with ``overwrite`` they take the new one and stay
+    flagged only where it is the same."""
+    if pc.manual is None:
+        return
+    if overwrite:
+        pc.manual &= codes == pc.classification
+    else:
+        codes[pc.manual] = pc.classification[pc.manual]
+
+
+def _selection(mask, n: int) -> np.ndarray:
+    sel = np.asarray(mask)
+    if sel.dtype == bool:
+        if sel.shape != (n,):
+            raise ValueError(f"the mask has {sel.size} values, the cloud {n} points")
+        return sel
+    out = np.zeros(n, bool)
+    out[sel.astype(np.int64).reshape(-1)] = True
+    return out
+
+
+def set_class(chunk, mask, code: int, manual: bool = True, label: str | None = None) -> int:
+    """Give the selected dense points (boolean mask or indices) the class ``code``.
+
+    With ``manual=True`` (a lasso selection in the interface) the points are flagged as
+    labelled by hand: automatic classifications keep them and :func:`.learn.train_on_chunk`
+    learns from them. ``manual=False`` assigns the class and removes the flag. ``label``
+    names the class in the chunk. Returns the number of selected points."""
+    if not 0 <= int(code) <= 255:
+        raise ValueError("class codes go from 0 to 255")
+    pc = chunk.point_cloud
+    if pc is None:
+        raise RuntimeError("build the point cloud first")
+    sel = _selection(mask, len(pc))
+    pc.classification[sel] = int(code)
+    if manual and pc.manual is None:
+        pc.manual = np.zeros(len(pc), bool)
+    if pc.manual is not None:
+        pc.manual[sel] = manual
+    chunk.point_cloud = pc
+    if label:
+        chunk.meta.setdefault("classes", {})[str(int(code))] = label
+    return int(sel.sum())
+
+
+def clear_manual(chunk, mask=None) -> int:
+    """Forget that the selected points (all when ``mask`` is None) were labelled by hand; their
+    class does not change. Returns how many flags were removed."""
+    pc = chunk.point_cloud
+    if pc is None or pc.manual is None:
+        return 0
+    sel = np.ones(len(pc), bool) if mask is None else _selection(mask, len(pc))
+    n = int((pc.manual & sel).sum())
+    pc.manual[sel] = False
+    chunk.point_cloud = pc
+    return n
+
+
+def class_names(chunk=None) -> dict[int, str]:
+    """Class code -> name: ASPRS and archaeological classes, then the names given in the chunk."""
+    names = {**ASPRS_CLASSES, **ARCHAEO_CLASSES}
+    if chunk is not None:
+        names.update({int(k): str(v) for k, v in chunk.meta.get("classes", {}).items()})
+    return names
 
 
 def assign_class_by_polygons(chunk, units, class_code: int | None = None, base_code: int = 100) -> dict[str, int]:
