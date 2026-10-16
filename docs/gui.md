@@ -12,6 +12,18 @@ Or the packaged application for macOS and Windows: [packaging.md](packaging.md).
 The interface is in Italian, like PyArchInit. Every action calls the same Python API that
 scripts use, so anything done with the mouse can be repeated in the console or in a script.
 
+## Start and opening a project
+
+`ppg-gui` (and the packaged application) shows at once a splash in the colours of the logo
+with a progress bar in the middle: the percentage and what is loading (NumPy and Open3D, PROJ
+and GDAL, COLMAP, the VTK 3D view, the interface). The window appears in about a second
+(the packaged application took eleven); the log records how long the start took. Opening a
+project shows the same card over the window (project, workspace, 3D view, orthophoto and
+DEM); the photo thumbnails come afterwards in the background, from the small previews the
+cameras store in the EXIF (a few milliseconds per photo; the status bar counts them), so
+hundreds of drone photos no longer freeze the window. Photos that cannot be read (empty
+files kept online only by Dropbox or iCloud) get a dark thumbnail and a tooltip.
+
 ## Start page
 
 Without a project the central area shows the start page: *Nuovo progetto*, *Apri
