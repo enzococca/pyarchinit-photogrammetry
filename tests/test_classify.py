@@ -57,5 +57,8 @@ def test_rule_based_classification_keeps_hand_labels(tmp_path):
     classify.set_class(ch, ground[:5], 3, manual=False)
     pc = ch.point_cloud
     assert (pc.classification[ground[:5]] == 3).all() and not pc.manual[ground[:5]].any()
+    assert classify.label_points(pc, wall[:4], 64) == 4 and pc.manual[wall[:4]].all()  # in memory only
+    assert not ch.point_cloud.manual[wall[:4]].any()
+    ch.point_cloud = pc
     remaining = int(pc.manual.sum())
     assert classify.clear_manual(ch) == remaining and not ch.point_cloud.manual.any()

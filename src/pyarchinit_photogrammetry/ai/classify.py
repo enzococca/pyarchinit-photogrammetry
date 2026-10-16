@@ -173,28 +173,36 @@ def _selection(mask, n: int) -> np.ndarray:
     return out
 
 
-def set_class(chunk, mask, code: int, manual: bool = True, label: str | None = None) -> int:
-    """Give the selected dense points (boolean mask or indices) the class ``code``.
-
-    With ``manual=True`` (a lasso selection in the interface) the points are flagged as
-    labelled by hand: automatic classifications keep them and :func:`.learn.train_on_chunk`
-    learns from them. ``manual=False`` assigns the class and removes the flag. ``label``
-    names the class in the chunk. Returns the number of selected points."""
+def label_points(pc: PointCloud, mask, code: int, manual: bool = True) -> int:
+    """:func:`set_class` on a cloud in memory (store it with ``chunk.point_cloud = pc``):
+    several selections can be labelled before the cloud is written once."""
     if not 0 <= int(code) <= 255:
         raise ValueError("class codes go from 0 to 255")
-    pc = chunk.point_cloud
-    if pc is None:
-        raise RuntimeError("build the point cloud first")
     sel = _selection(mask, len(pc))
     pc.classification[sel] = int(code)
     if manual and pc.manual is None:
         pc.manual = np.zeros(len(pc), bool)
     if pc.manual is not None:
         pc.manual[sel] = manual
+    return int(sel.sum())
+
+
+def set_class(chunk, mask, code: int, manual: bool = True, label: str | None = None) -> int:
+    """Give the selected dense points (boolean mask or indices) the class ``code``.
+
+    With ``manual=True`` (a lasso selection in the interface) the points are flagged as
+    labelled by hand: automatic classifications keep them and :func:`.learn.train_on_chunk`
+    learns from them. ``manual=False`` assigns the class and removes the flag. ``label``
+    names the class in the chunk. Returns the number of selected points. The dense cloud
+    is read and written at each call: see :func:`label_points` for many selections."""
+    pc = chunk.point_cloud
+    if pc is None:
+        raise RuntimeError("build the point cloud first")
+    n = label_points(pc, mask, code, manual)
     chunk.point_cloud = pc
     if label:
         chunk.meta.setdefault("classes", {})[str(int(code))] = label
-    return int(sel.sum())
+    return n
 
 
 def clear_manual(chunk, mask=None) -> int:

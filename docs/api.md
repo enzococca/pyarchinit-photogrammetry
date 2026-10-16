@@ -121,6 +121,7 @@ other = learn.ClassifierModel.load("scavo.ppgclf")          # apply it to anothe
 | Call | Description |
 | --- | --- |
 | `classify.set_class(chunk, mask, code, manual=True, label=None)` | gives the selected dense points (boolean mask or indices) a class and flags them as labelled by hand; `manual=False` removes the flag; returns the count |
+| `classify.label_points(pc, mask, code, manual=True)` | the same on a `PointCloud` in memory: label several selections, then store the cloud once (`chunk.point_cloud = pc`) |
 | `classify.clear_manual(chunk, mask=None)` | forgets the hand-labelled flag (classes unchanged) |
 | `learn.point_features(xyz, rgb=None, normals=None, scales=None, ground=None, progress=None)` | `(N, F)` float32 feature matrix and feature names; world coordinates, z up |
 | `learn.suggest_scales(xyz)`, `learn.estimate_spacing(xyz)` | default core voxel and radii: 5, 14 and 40 times the point spacing |
