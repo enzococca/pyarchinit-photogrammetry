@@ -152,6 +152,38 @@ is installed on first use (PyTorch in a separate environment, see the same page)
 * **Mesh from the depth maps** (TSDF fusion), **camera optimisation on the control points**, and
   **chunks aligned and merged** (by markers, common photos or overlapping clouds).
 
+## Cleaning, confidence and cropping
+
+* **Confidence**, as Metashape calls it: how many depth maps confirm each point of the dense
+  cloud and each vertex of the model. The fused cloud gets it at once; *Flusso di lavoro >
+  Pulizia e confidenza > Calcola la confidenza* adds it to any other cloud (cropped, merged,
+  imported) and to the model. The 3D view colours by confidence with a legend whose rows hide
+  a range; PLY and LAS files keep it (CloudCompare reads it as a scalar field).
+* **Clean the dense cloud**: low confidence, isolated points, points without neighbours, small
+  groups detached from the surface (birds, dust, the sky), chosen classes or a colour; the
+  points found are shown in red in the 3D view before they are removed.
+* **Clean the model**: faces no depth map saw (vertex confidence), detached pieces, stretched
+  triangles, broken topology, holes closed up to a radius, smoothing that keeps the borders,
+  decimation.
+* **Gradual selection of the tie points**: reprojection error, image count, reconstruction
+  uncertainty and projection accuracy, with live counts, then the camera optimisation.
+* **Lasso** in the 3D view: give points a class, delete them or keep only them; on the model,
+  delete or keep faces.
+* **Crop with a box or a polygon** drawn on the orthophoto or the DEM (or a selected unit): the
+  DEM, orthophoto, model and dense cloud exported cut to a folder (with the polygon as GeoJSON)
+  or cut in the project with the originals kept as versions. Files of other programs (the DEM
+  and orthophoto exported by Metashape an imported project points to) are never changed.
+* **Photos kept online only** (Dropbox, iCloud, OneDrive placeholders): every step that reads
+  the photos lists them and offers to link them to another copy (*Flusso di lavoro > Ricollega
+  foto*, e.g. the mission folder on an external disk) or to go on without them.
+* **Large orthophotos**: built tile by tile, in parallel, with overviews; a 45,000 x 46,000 px
+  orthophoto of a tell at 1.35 cm/px takes 4-6 minutes on an Apple M4 Pro. Cells seen only at
+  grazing angles (more than 70 degrees from the vertical, adjustable) stay transparent instead
+  of smearing the photos.
+
+Command line: `ppg confidence`, `ppg clean-cloud`, `ppg clean-model`, `ppg clean-tie-points`,
+`ppg crop`, `ppg relink`, `ppg export --bbox/--wkt` (see `--help`).
+
 ## Desktop interface
 
 `ppg-gui` opens the desktop application (Italian UI): start page with recent projects; a

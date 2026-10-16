@@ -157,10 +157,32 @@ listed in `chunk.meta["versions"]` with name, date and the parameters they were 
 | `versions.dem_difference(chunk, id, out=None)` | active DEM minus a kept one on the grid of the active one (GeoTIFF float32): surface minus terrain = height of walls and vegetation, after minus before = excavated depth |
 
 `chunk.build_depth_maps(..., skip_unreadable=True)` leaves out photos that cannot be read
-(`engine.dense.unreadable_photos(chunk)`: missing, empty placeholders of files kept online only,
-not images); without it they raise `engine.dense.UnreadablePhotos`. The COLMAP model written
+(`chunk.unreadable_photos()`: missing, empty placeholders of files kept online only, not
+images); without it they raise `engine.visibility.UnreadablePhotos` (also importable from
+`engine.dense`). `build_texture` and `build_orthomosaic` take the same option;
+`chunk.relink_photos(folder, only_unreadable=False)` points the photos to the files with the same
+names in another folder (COLMAP then reads them from their common folder, or from a folder of
+links when they are split, `engine.sfm.photo_folder`). The COLMAP model written
 from imported poses refers only to points with two observations; `engine.sfm.repair_reconstruction(chunk)`
 fixes models written by earlier versions (done before the depth maps and the camera optimisation).
+
+## Confidence, cleaning and cropping
+
+| Call | Description |
+| --- | --- |
+| `chunk.compute_confidence("point_cloud" or "model", tol=0.01)` | depth maps agreeing on each point or vertex (within `tol` of the distance; half an edge for a vertex), stored as the `confidence` property of the PLY (and an extra bytes dimension of LAS exports); returns the statistics |
+| `engine.confidence.depth_map_support(chunk, points, tol, abs_tol=None)` | the same count for any points of the internal frame |
+| `chunk.clean_point_cloud(min_confidence=, remove_classes=, statistical=(k, std), sparse=(radius, n), groups=(distance, n), color=((r, g, b), tol))` | removes what `engine.cleaning.point_filters` selects (distances 0 = automatic from the point spacing); returns the counts per filter |
+| `chunk.clean_model(min_confidence=, min_component=, max_edge=, repair=True, fill_holes=, smooth=, target_faces=)` | model cleaning (`engine.cleaning.face_filters` for the counts) |
+| `chunk.clean_tie_points(max_reprojection_error=, min_image_count=, max_reconstruction_uncertainty=, max_projection_accuracy=, optimize=False)` | gradual selection (`engine.tiepoints.tie_point_metrics`, `select_tie_points`, `remove_tie_points`) |
+| `engine.cleaning.delete_points(chunk, mask, keep_selected=False)`, `delete_faces(...)` | Metashape's delete / crop selection |
+| `chunk.export_dem(path, region=)`, `export_orthomosaic(path, region=)`, `export_model(path, region=, zmin=, zmax=)`, `export_point_cloud(path, region=, zmin=, zmax=)` | exports cut by a polygon in the chunk CRS (an `(N, 2)` ring, a box, WKT, GeoJSON or a shapely geometry: `engine.crop.as_polygon`) |
+| `chunk.crop_dem(region)`, `crop_orthomosaic(region)`, `crop_model(region, zmin, zmax)`, `crop_point_cloud(region=)` | the same in the project; a product that is a file of another program is never overwritten (`chunk.own_product_path`) |
+
+`chunk.build_orthomosaic(..., workers=None, max_angle=70.0)` builds the orthomosaic tile by tile
+(the surface read one window at a time, every tile written at once, overviews at the end): any
+size, the tiles in parallel, each from the photos that see it best; cells that every photo sees
+from further than `max_angle` degrees from the vertical stay transparent.
 
 ## Modules
 

@@ -31,13 +31,15 @@ and `pyarchinit_quote`, saved in the project and published once; spot-height too
 from SAM; SAM 2.1 by tap, box, area or the whole orthomosaic in tiles, with corrections, on
 CUDA or the Apple GPU; point classes shown, hidden and corrected with a lasso in the 3D view;
 trainable point classifier with reusable models; mesh from the depth maps (TSDF fusion);
-camera optimisation constrained by the control points; chunk alignment and merging.
+camera optimisation constrained by the control points; chunk alignment and merging; confidence
+of the dense cloud and of the model; cleaning of the dense cloud, the model and the tie points
+(gradual selection); cropping and cropped exports; photos relinked to another folder; large
+orthomosaics built tile by tile.
 
 ## 0.6 - Interface
 
 * Batch processing over several chunks.
 * Section and plan-slice tools drawn directly in the 3D view; editable markers in 3D.
-* Filtering the cloud by confidence.
 * PyArchInit panel: browsing media linked to US.
 * English/Italian interface translation.
 

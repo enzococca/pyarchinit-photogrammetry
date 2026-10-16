@@ -138,6 +138,40 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
   camere sui punti di controllo** (compensazione vincolata ai GCP), **allinea e unisci chunk**
   (con i marker, le foto in comune o le nuvole che si sovrappongono).
 
+## Pulizia, confidenza e ritaglio
+
+* **Confidenza**, come in Metashape: quante mappe di profondità confermano ogni punto della
+  nuvola densa e ogni vertice del modello. La nuvola fusa la ha subito; *Flusso di lavoro >
+  Pulizia e confidenza > Calcola la confidenza* la aggiunge a qualsiasi altra nuvola (ritagliata,
+  unita, importata) e al modello. La vista 3D colora per confidenza con una legenda le cui righe
+  nascondono una fascia; i file PLY e LAS la conservano (CloudCompare la legge come campo scalare).
+* **Pulire la nuvola densa**: confidenza bassa, punti isolati, punti senza vicini, piccoli gruppi
+  staccati dalla superficie (uccelli, polvere, cielo), classi scelte o un colore; i punti trovati
+  sono mostrati in rosso nella vista 3D prima di toglierli.
+* **Pulire il modello**: facce che nessuna mappa ha visto (confidenza dei vertici), parti
+  staccate, triangoli stirati, topologia rotta, buchi chiusi fino a un raggio, levigatura che
+  lascia fermi i bordi, semplificazione.
+* **Selezione graduale dei punti di legame**: errore di riproiezione, numero di foto, incertezza
+  di ricostruzione e accuratezza di proiezione, con i conteggi mentre cambi le soglie, poi
+  l'ottimizzazione delle camere.
+* **Lazo** nella vista 3D: dare una classe ai punti, eliminarli o tenere solo quelli; sul
+  modello, eliminare o tenere facce.
+* **Ritaglio con un riquadro o un poligono** disegnato sull'ortofoto o sul DEM (o un'unità
+  selezionata): DEM, ortofoto, modello e nuvola densa esportati ritagliati in una cartella (con
+  il poligono in GeoJSON) oppure ritagliati nel progetto, con gli originali conservati come
+  versioni. I file di altri programmi (DEM e ortofoto esportati da Metashape a cui punta un
+  progetto importato) non vengono mai modificati.
+* **Foto tenute «solo online»** (segnaposto di Dropbox, iCloud, OneDrive): ogni passo che legge
+  le foto le elenca e propone di collegarle a un'altra copia (*Flusso di lavoro > Ricollega
+  foto*, per esempio la cartella della missione su un disco esterno) o di procedere senza.
+* **Ortofoto grandi**: costruite a tasselli, in parallelo, con le piramidi (overview); un'ortofoto
+  di 45.000 x 46.000 pixel di un tell a 1,35 cm/px richiede 4-6 minuti su un Apple M4 Pro. Le celle
+  viste solo di traverso (oltre 70 gradi dalla verticale, regolabile) restano trasparenti invece di
+  stirare le foto.
+
+Da terminale: `ppg confidence`, `ppg clean-cloud`, `ppg clean-model`, `ppg clean-tie-points`,
+`ppg crop`, `ppg relink`, `ppg export --bbox/--wkt` (vedi `--help`).
+
 ## Schede US, proxy 3D e BIM
 
 * **Schede US**: doppio clic su una US nel pannello PyArchInit apre la scheda (`us_table`) con
