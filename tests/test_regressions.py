@@ -277,6 +277,8 @@ def test_depth_maps_with_photos_kept_online_only(processed, tmp_path):
     assert [c.key for c in dense.unreadable_photos(ch)] == [empty.key]
     with pytest.raises(dense.UnreadablePhotos, match="1 photos cannot be read"):
         ch.build_depth_maps(quality="low")
+    ch.meta["point_cloud_source"] = "vertici del modello Metashape"  # as after an import
     ch.build_depth_maps(quality="low", skip_unreadable=True)
     assert ch.meta["dense"]["skipped_photos"] == [empty.label]
     assert len(ch.build_point_cloud()) > 1000
+    assert ch.meta["point_cloud_source"] == "mappe di profondita' (qualita' low)"

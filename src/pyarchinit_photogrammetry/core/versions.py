@@ -53,11 +53,11 @@ def _describe(chunk, product: str) -> str:
     """Short description of how the active product was built (for a default name)."""
     meta = chunk.meta.get(PARAMS[product]) or {}
     bits = []
-    if product == "point_cloud":
-        if meta.get("quality"):
-            bits.append(f"qualita' {meta['quality']}")
+    if product == "point_cloud":  # where the active cloud comes from (the depth-map settings may be of a later try)
         if chunk.meta.get("point_cloud_source"):
             bits.append(str(chunk.meta["point_cloud_source"]))
+        elif meta.get("quality"):
+            bits.append(f"qualita' {meta['quality']}")
     elif product == "model" and meta.get("source"):
         bits.append({"depth_maps": "mappe di profondita'", "point_cloud": "nuvola densa",
                      "tie_points": "punti di legame"}.get(meta["source"], meta["source"]))
