@@ -144,6 +144,9 @@ is installed on first use (PyTorch in a separate environment, see the same page)
 * **Point classes you can see and correct**: the 3D view colours the cloud by class with a
   legend, the lasso gives groups of points the right class, and a classifier trained on those
   corrections classifies the rest (models reusable on other excavations).
+* **Classes drive the products**: a terrain model (DTM) from the ground alone, an orthophoto
+  without tools, people or vegetation, models, sections and exports of chosen classes, and one
+  class per stratigraphic unit with its points, plan area and elevations (CSV).
 * **Mesh from the depth maps** (TSDF fusion), **camera optimisation on the control points**, and
   **chunks aligned and merged** (by markers, common photos or overlapping clouds).
 

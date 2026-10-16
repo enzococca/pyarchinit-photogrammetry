@@ -117,6 +117,28 @@ the CRS, transform and internal frame of the first chunk, and contains:
 DEMs, orthomosaics and textures are not merged. `merged.meta["merge"]` lists the source
 chunks, the photos found in more than one chunk and warnings.
 
+## Products from chosen point classes
+
+The classes of the dense cloud (rules, lasso, trained classifier or stratigraphic units)
+choose what goes into the products. Noise (`NOISE_CLASSES` = 7, 18) never makes a DEM or a mesh.
+
+| Call | Description |
+| --- | --- |
+| `chunk.point_classes()` | points per class of the dense cloud, reading only its class column (`PointCloud.read_class_counts(path)`) |
+| `chunk.build_dem(..., classes=[2])` | DEM from these classes only: `[2]` gives a terrain model (DTM) without vegetation, people or tools; the gaps under what is left out are interpolated; `meta["dem"]["classes"]` |
+| `chunk.build_orthomosaic(..., hide_classes=[3, 71])` | transparent where the visible surface (highest dense point, gridded at the point spacing and widened by one cell) is of these classes; `engine.ortho.hidden_cells(chunk, origin, shape, resolution, classes)`; `meta["orthomosaic"]["hidden_classes"]` |
+| `chunk.build_model(source="point_cloud", ..., classes=[2, 64])` | mesh from these classes (the surface closes over what is left out); only with the dense cloud as source; `meta["model"]["classes"]` |
+| `sections.section(chunk, p1, p2, source=, classes=)`, `sections_along(..., classes=)`, `plan_slice(chunk, z, classes=)` | from the dense cloud, only the points of these classes; from the model, only the stretches of the cut whose middle is nearest to a point of these classes and whose ends lie on such points (not the parts the mesh interpolates over what is left out) |
+| `chunk.export_point_cloud(path, classes=[64])` | only these classes (LAS keeps the class codes) |
+| `PointCloud.class_mask(classes=None, exclude=())` | boolean mask of the points to use |
+| `classify.classify_by_units(chunk, units, base_code=100, keep_manual=True)` | one class per stratigraphic unit (`unit_class_name`: `US 12 (area 1)`), points on the edge included; free codes from 100, the same code when run again (the old extent goes back to 1); returns per unit `name`, `code`, `sito`, `area_s`, `us`, `points`, `area_m2` (plan, of the polygons), `z_min`, `z_mean`, `z_max`; `units_table_csv(rows, path)` writes them (semicolons) |
+
+Command line: `ppg dem scavo.ppg --classes 2`, `ppg ortho scavo.ppg --hide-classes 3,71`,
+`ppg mesh scavo.ppg --classes 2,64`, `ppg section scavo.ppg x1 y1 x2 y2 --classes 2`,
+`ppg export scavo.ppg --cloud muri.las --classes 64`,
+`ppg classify-units scavo.ppg [--pyarchinit-site SITO] [--csv us.csv] [--no-keep-manual]`
+(the units drawn in the project, or the US polygons of a PyArchInit site).
+
 ## Modules
 
 | Module | Main functions |
@@ -128,7 +150,7 @@ chunks, the photos found in more than one chunk and warnings.
 | `archaeo.terrain` | `contours` (simplified, optional smoothing), `suggest_interval`, `dem_range`, `export_contours`, `volume`, `hillshade`, `slope_degrees` |
 | `archaeo.stratigraphy` | `UnitPolygon`, `mask_to_polygons`, `export_units` |
 | `bim.ifc` | `export_ifc`, `export_chunk_ifc`, `split_mesh_by_units` |
-| `ai.classify` | `classify_chunk`, `assign_class_by_polygons`, `class_statistics`, `set_class`, `clear_manual`, `class_names` |
+| `ai.classify` | `classify_chunk`, `classify_by_units`, `unit_class_name`, `units_table_csv`, `assign_class_by_polygons`, `class_statistics`, `set_class`, `clear_manual`, `class_names` |
 | `ai.learn` | `point_features`, `train`, `predict`, `ClassifierModel`, `train_on_chunk`, `classify_chunk_with_model` (see below) |
 | `ai.sam` | `Sam2Segmenter`, `segment_orthomosaic`, `auto_units`, `classify_from_masks`, `segment_photo_and_classify` |
 | `pyarchinit` | `PyArchInit`, `register_media`, `connect` |

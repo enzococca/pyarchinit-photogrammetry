@@ -128,6 +128,9 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
   gruppi di punti; un classificatore addestrato su queste correzioni (random forest su
   geometria a tre scale, altezza sul terreno e colore) classifica il resto, e il modello
   (`.ppgclf`) si riusa su altri scavi.
+* **Le classi guidano i prodotti**: modello del terreno (DTM) dal solo terreno, ortofoto senza
+  attrezzi, persone o vegetazione, mesh, sezioni ed esportazioni delle classi scelte, e una
+  classe per ogni US con punti, area e quote (anche in CSV).
 * **Mesh dalle mappe di profondità** (fusione TSDF, come in Metashape), **ottimizzazione delle
   camere sui punti di controllo** (compensazione vincolata ai GCP), **allinea e unisci chunk**
   (con i marker, le foto in comune o le nuvole che si sovrappongono).
