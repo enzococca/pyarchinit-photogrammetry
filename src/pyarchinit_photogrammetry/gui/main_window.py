@@ -3545,10 +3545,11 @@ class MainWindow(QMainWindow):
         if not v:
             return
         mask = inside if v["through"] else visible
-        if v["action"] in ("delete", "keep"):
+        action = v.get("action", "class")  # the class unless asked otherwise
+        if action in ("delete", "keep"):
             from ..engine.cleaning import delete_points
 
-            keep_selected = v["action"] == "keep"
+            keep_selected = action == "keep"
             self.run_task("Lazo sulla nuvola", self._versioned_edit(
                 "point_cloud", v, lambda p: delete_points(self.chunk, mask, keep_selected=keep_selected),
                 "Nuvola modificata con il lazo"),
@@ -3583,7 +3584,7 @@ class MainWindow(QMainWindow):
         from ..engine.cleaning import delete_faces
 
         mask = inside if v["through"] else visible
-        keep_selected = v["action"] == "keep"
+        keep_selected = v.get("action", "delete") == "keep"
         self.run_task("Lazo sul modello", self._versioned_edit(
             "model", v, lambda p: delete_faces(self.chunk, mask, keep_selected=keep_selected),
             "Modello modificato con il lazo"),

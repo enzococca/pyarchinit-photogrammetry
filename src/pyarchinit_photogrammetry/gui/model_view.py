@@ -431,11 +431,12 @@ class ModelView(QWidget):
         b_top = QPushButton("Dall'alto")
         self.color_combo = QComboBox()
         self._color_modes: tuple = ()
+        self._wanted_mode = "rgb"  # the colours asked for: kept while a view without them is shown
         self._filling = False
         self._fill_color_combo("point_cloud")
         self.color_combo.setToolTip("Colori: quelli delle foto, le classi (con la legenda per nasconderle), la quota "
                                     "o la confidenza (quante mappe di profondita' confermano ogni punto o vertice)")
-        self.color_combo.currentIndexChanged.connect(lambda _i: None if self._filling else self.refresh(reset=False))
+        self.color_combo.currentIndexChanged.connect(self._color_chosen)
         self.b_lasso = QPushButton("Lazo")
         self.b_lasso.setToolTip("Seleziona con un lazo punti della nuvola (classe, elimina, tieni) o facce del "
                                 "modello (elimina, tieni)")
@@ -549,19 +550,26 @@ class ModelView(QWidget):
                    "tie_points": ("rgb", "class", "elevation"), "model": ("rgb", "confidence")}
     COLOR_LABELS = {"rgb": "Colori RGB", "class": "Classi", "elevation": "Quota", "confidence": "Confidenza"}
 
+    def _color_chosen(self, _i) -> None:
+        if self._filling:
+            return
+        self._wanted_mode = self.color_combo.currentData() or "rgb"
+        self.refresh(reset=False)
+
     def _fill_color_combo(self, kind) -> None:
         modes = self.COLOR_MODES.get(kind, ())
-        if modes == self._color_modes:
-            return
-        current = self.color_combo.currentData()
         was = self._filling
         self._filling = True
-        self.color_combo.clear()
-        for key in modes:
-            self.color_combo.addItem(self.COLOR_LABELS[key], key)
-        i = self.color_combo.findData(current)
-        self.color_combo.setCurrentIndex(i if i >= 0 else 0)
-        self._color_modes = modes
+        if modes != self._color_modes:
+            self.color_combo.clear()
+            for key in modes:
+                self.color_combo.addItem(self.COLOR_LABELS[key], key)
+            self._color_modes = modes
+        i = self.color_combo.findData(self._wanted_mode)  # e.g. classes asked while the model was shown
+        if i >= 0:
+            self.color_combo.setCurrentIndex(i)
+        elif self.color_combo.currentIndex() < 0 and self.color_combo.count():
+            self.color_combo.setCurrentIndex(0)
         self._filling = was
 
     def color_mode(self) -> str:
@@ -577,10 +585,15 @@ class ModelView(QWidget):
                                or (self.kind in ("point_cloud", "model") and mode == "confidence"))
 
     def set_color_mode(self, mode: str) -> None:
+        """Colours by ``mode``; when the current view has no such colours they are used as soon
+        as a view that has them is shown."""
+        self._wanted_mode = mode
         self._fill_color_combo(self.kind)
         i = self.color_combo.findData(mode)
-        if i >= 0:
+        if i >= 0 and self.color_combo.currentIndex() != i:
             self.color_combo.setCurrentIndex(i)
+        elif i >= 0:
+            self.refresh(reset=False)
 
     def _hidden(self, mode: str) -> set:
         """Rows unticked in the legend, when the legend shows ``mode`` (classes or ranges)."""
