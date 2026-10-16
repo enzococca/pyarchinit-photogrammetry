@@ -264,11 +264,13 @@ def _g(v) -> str:
     return format(float(v), ".17g")
 
 
-def write_reconstruction_from_chunk(chunk: Chunk, max_points: int = 60000, max_obs_per_image: int = 4000) -> Path:
-    """COLMAP model of a chunk whose poses come from elsewhere (Metashape, Photo3D...):
-    cameras from the sensors, images with the camera poses, and the tie points as 3D points
-    observed by every camera that sees them inside its frame (visibility by projection).
-    Lets the dense step run without aligning again. Returns the model folder."""
+def write_reconstruction_from_chunk(chunk: Chunk, max_points: int = 60000, max_obs_per_image: int = 4000,
+                                    points: PointCloud | None = None) -> Path:
+    """COLMAP model of a chunk whose poses come from elsewhere (Metashape, Photo3D, merged
+    chunks...): cameras from the sensors, images with the camera poses, and the tie points
+    (or ``points``, internal coordinates) as 3D points observed by every camera that sees
+    them inside its frame (visibility by projection). Lets the dense step run without
+    aligning again. Returns the model folder."""
     import pycolmap
 
     root, names = image_root_and_names(chunk)
@@ -288,8 +290,9 @@ def write_reconstruction_from_chunk(chunk: Chunk, max_points: int = 60000, max_o
             s = chunk.sensors[key]
             sensor_ids[key] = i
             f.write(f"{i} {s.model} {int(s.width)} {int(s.height)} " + " ".join(_g(v) for v in s.params) + "\n")
-    pts = chunk.tie_points.xyz if chunk.tie_points is not None else np.zeros((0, 3))
-    rgb = chunk.tie_points.rgb if chunk.tie_points is not None and chunk.tie_points.rgb is not None else None
+    cloud = chunk.tie_points if points is None else points
+    pts = cloud.xyz if cloud is not None else np.zeros((0, 3))
+    rgb = cloud.rgb if cloud is not None and cloud.rgb is not None else None
     if len(pts) > max_points:
         idx = np.random.default_rng(0).choice(len(pts), max_points, replace=False)
         pts = pts[idx]
