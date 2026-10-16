@@ -112,6 +112,11 @@ def crop_raster(src, dst, region, strip: int = 2048) -> Path:
                 else:
                     data[:, ~inside] = nodata
                 out.write(data, window=Window(0, r0, width, h))
+            factors = [f for f in (2, 4, 8, 16, 32, 64) if min(width, height) // f >= 64]
+            if factors and max(width, height) >= 2048:  # quick to display, here and in QGIS
+                from rasterio.enums import Resampling
+
+                out.build_overviews(factors, Resampling.average if rgba else Resampling.nearest)
         if not inside_any:
             tmp.unlink(missing_ok=True)
             raise ValueError("the region does not cover any pixel of the raster")
