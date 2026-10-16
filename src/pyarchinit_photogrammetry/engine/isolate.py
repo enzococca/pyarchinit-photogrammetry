@@ -11,7 +11,8 @@ SpatiaLite crashes in that fork (the ``atfork`` handlers of the mixed native
 libraries). ``subprocess`` uses ``posix_spawn`` when ``close_fds`` is False, which does
 not run them. The request (function, arguments, ``sys.path``) travels as a pickle file;
 the result comes back the same way; stdout/stderr of the child go to a log file whose
-tail is reported when the child dies.
+tail is reported when the child dies. A long function can report its progress with
+:func:`report`: the child writes it to a small file that the parent polls.
 """
 from __future__ import annotations
 
@@ -27,6 +28,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 WORKER_FLAG = "--ppg-worker"
+
+_progress_file: Path | None = None  # set in the child when the parent relays progress
 
 
 class IsolatedCrash(RuntimeError):
@@ -46,7 +49,8 @@ def _command(request: Path, result: Path) -> list[str]:
 
 
 def run_isolated(fn: Callable[..., Any], *args, timeout: float | None = None,
-                 cancel_check: Callable[[], bool] | None = None, **kwargs) -> Any:
+                 cancel_check: Callable[[], bool] | None = None,
+                 progress: Callable[[float, str], None] | None = None, **kwargs) -> Any:
     """Call ``fn(*args, **kwargs)`` in a child process and return its result.
 
     ``fn`` must be a module-level function; arguments and result must be picklable
@@ -54,18 +58,24 @@ def run_isolated(fn: Callable[..., Any], *args, timeout: float | None = None,
     a result, re-raises a ``RuntimeError`` with the child's traceback when ``fn``
     raised, ``TimeoutError`` when ``timeout`` seconds pass and ``InterruptedError``
     when ``cancel_check()`` returns True (polled four times a second).
+    ``progress(fraction, message)`` receives what ``fn`` passes to :func:`report`
+    (polled with the cancellation); an exception it raises stops the child.
     """
     with tempfile.TemporaryDirectory(prefix="ppg-worker-") as tmp:
         request, result, log_path = Path(tmp) / "request.pkl", Path(tmp) / "result.pkl", Path(tmp) / "worker.log"
+        progress_path = Path(tmp) / "progress.txt"
         with open(request, "wb") as f:
             pickle.dump({"module": fn.__module__, "name": fn.__qualname__, "args": args, "kwargs": kwargs,
-                         "sys_path": list(sys.path), "cwd": os.getcwd()}, f, protocol=pickle.HIGHEST_PROTOCOL)
+                         "sys_path": list(sys.path), "cwd": os.getcwd(),
+                         "progress": None if progress is None else str(progress_path)},
+                        f, protocol=pickle.HIGHEST_PROTOCOL)
         env = dict(os.environ)
         env["PPG_WORKER"] = "1"
         with open(log_path, "wb") as log:
             proc = subprocess.Popen(_command(request, result), stdin=subprocess.DEVNULL, stdout=log,
                                     stderr=subprocess.STDOUT, env=env, close_fds=False)
         t0 = time.monotonic()
+        last = None
         try:
             while proc.poll() is None:
                 if cancel_check is not None and cancel_check():
@@ -74,9 +84,13 @@ def run_isolated(fn: Callable[..., Any], *args, timeout: float | None = None,
                 if timeout is not None and time.monotonic() - t0 > timeout:
                     _kill(proc)
                     raise TimeoutError(f"{_name(fn)} did not finish within {timeout} s")
+                if progress is not None:
+                    last = _relay_progress(progress_path, last, progress)
                 time.sleep(0.25)
+            if progress is not None:
+                _relay_progress(progress_path, last, progress)
         finally:
-            if proc.poll() is None:  # pragma: no cover
+            if proc.poll() is None:  # the progress callback raised (cancelled)
                 _kill(proc)
         if result.exists():
             with open(result, "rb") as f:
@@ -99,6 +113,8 @@ def worker_main(argv: list[str] | None = None) -> int:
     for p in reversed(req.get("sys_path", [])):
         if p not in sys.path:
             sys.path.insert(0, p)
+    global _progress_file
+    _progress_file = Path(req["progress"]) if req.get("progress") else None
     try:
         import importlib
 
@@ -114,6 +130,33 @@ def worker_main(argv: list[str] | None = None) -> int:
         pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
     os.replace(tmp, result)  # the parent only trusts a complete file
     return 0
+
+
+def report(fraction: float, message: str = "") -> None:
+    """Progress of the function running in the worker, for the ``progress`` callback
+    of :func:`run_isolated`. Does nothing outside a worker or without a callback."""
+    if _progress_file is None:
+        return
+    tmp = _progress_file.with_suffix(".tmp")
+    tmp.write_text(f"{float(fraction):.6f}\t{message}", encoding="utf-8")
+    os.replace(tmp, _progress_file)  # the parent never reads half a line
+
+
+def _relay_progress(path: Path, last: str | None, progress: Callable[[float, str], None]) -> str | None:
+    """Pass the latest report of the child to ``progress`` (once per new report)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return last
+    if text == last:
+        return last
+    fraction, _, message = text.partition("\t")
+    try:
+        value = float(fraction)
+    except ValueError:
+        return last
+    progress(value, message)
+    return text
 
 
 def _kill(proc: subprocess.Popen) -> None:
@@ -145,4 +188,4 @@ def freeze_support() -> None:
     mp.freeze_support()
 
 
-__all__ = ["IsolatedCrash", "run_isolated", "worker_main", "freeze_support", "WORKER_FLAG"]
+__all__ = ["IsolatedCrash", "run_isolated", "report", "worker_main", "freeze_support", "WORKER_FLAG"]
