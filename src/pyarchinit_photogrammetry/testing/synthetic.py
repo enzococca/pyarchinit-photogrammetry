@@ -37,6 +37,20 @@ class Scene:
     def world_height(self, X: np.ndarray, Y: np.ndarray) -> np.ndarray:
         return self.height_at(np.asarray(X) - self.origin[0], np.asarray(Y) - self.origin[1]) + self.origin[2]
 
+    def surface(self, step: int = 2) -> tuple[np.ndarray, np.ndarray]:
+        """The triangulated height field the photos are rendered from: vertices (local
+        coordinates, float32) and faces (uint32), one vertex every ``step`` texels."""
+        hs = self.heights[::step, ::step]
+        gh, gw = hs.shape
+        yy, xx = np.mgrid[0:gh, 0:gw]
+        X = (xx * step + 0.5) * self.texel
+        Y = self.size[1] - (yy * step + 0.5) * self.texel
+        verts = np.column_stack([X.ravel(), Y.ravel(), hs.ravel()]).astype(np.float32)
+        idx = np.arange(gh * gw).reshape(gh, gw)
+        a, b, c, d = idx[:-1, :-1].ravel(), idx[:-1, 1:].ravel(), idx[1:, :-1].ravel(), idx[1:, 1:].ravel()
+        faces = np.vstack([np.column_stack([a, c, b]), np.column_stack([b, c, d])]).astype(np.uint32)
+        return verts, faces
+
 
 def _noise_texture(h: int, w: int, rng: np.random.Generator) -> np.ndarray:
     tex = np.zeros((h, w, 3), np.float32)
@@ -106,17 +120,7 @@ def render(scene: Scene, world_from_cam: np.ndarray, K: np.ndarray, size=(1200, 
     import open3d as o3d
 
     if not hasattr(scene, "_rc"):
-        h, w = scene.heights.shape
-        step = 2
-        hs = scene.heights[::step, ::step]
-        gh, gw = hs.shape
-        yy, xx = np.mgrid[0:gh, 0:gw]
-        X = (xx * step + 0.5) * scene.texel
-        Y = scene.size[1] - (yy * step + 0.5) * scene.texel
-        verts = np.column_stack([X.ravel(), Y.ravel(), hs.ravel()]).astype(np.float32)
-        idx = np.arange(gh * gw).reshape(gh, gw)
-        a, b, c, d = idx[:-1, :-1].ravel(), idx[:-1, 1:].ravel(), idx[1:, :-1].ravel(), idx[1:, 1:].ravel()
-        faces = np.vstack([np.column_stack([a, c, b]), np.column_stack([b, c, d])]).astype(np.uint32)
+        verts, faces = scene.surface(step=2)
         rc = o3d.t.geometry.RaycastingScene()
         rc.add_triangles(o3d.core.Tensor(verts), o3d.core.Tensor(faces))
         scene._rc = rc
