@@ -102,3 +102,18 @@ def test_cancelled_orthomosaic_leaves_no_file(processed, tmp_path):
         ch.build_orthomosaic(resolution=0.002, progress=prog)
     assert not (ch.data_dir / "orthomosaic.tmp.tif").exists()
     assert ch.orthomosaic_path.read_bytes() == before  # the orthomosaic of before is still there
+
+
+def test_grazing_views_leave_the_cells_transparent(processed, tmp_path):
+    """Cells seen only from far from the vertical (an orbit of oblique photos, a DEM interpolated
+    beyond the reconstruction) smeared the photo over the surface: they stay transparent."""
+    doc, ch = _copy(processed, tmp_path)
+
+    def coverage(path):
+        with rasterio.open(path) as src:
+            return float((src.read(4) > 0).mean())
+
+    normal = coverage(ch.build_orthomosaic(resolution=0.008))
+    strict = coverage(ch.build_orthomosaic(resolution=0.008, max_angle=12.0))
+    assert ch.meta["orthomosaic"]["max_angle"] == 12.0
+    assert normal > 0.7 and strict < normal - 0.05

@@ -480,16 +480,18 @@ class Chunk:
 
     def build_orthomosaic(self, resolution: float | None = None, surface: str = "dem", blending: str = "mosaic",
                           hide_classes=None, progress: ProgressCallback | None = None,
-                          skip_unreadable: bool = False, workers: int | None = None) -> Path:
+                          skip_unreadable: bool = False, workers: int | None = None,
+                          max_angle: float = 70.0) -> Path:
         """Orthomosaic (GeoTIFF RGBA), made tile by tile (any size). ``hide_classes``: where the
         visible surface belongs to these classes of the dense cloud the orthomosaic is
         transparent. Photos that cannot be read stop the step unless ``skip_unreadable``.
-        ``workers``: tiles made at once (default: the cores but two)."""
+        ``workers``: tiles made at once (default: the cores but two). ``max_angle``: cells seen
+        only from further than this from the vertical (degrees) stay transparent."""
         from ..engine import ortho
 
         return ortho.build_orthomosaic(self, resolution=resolution, surface=surface, blending=blending,
                                        hide_classes=hide_classes, progress=as_progress(progress),
-                                       skip_unreadable=skip_unreadable, workers=workers)
+                                       skip_unreadable=skip_unreadable, workers=workers, max_angle=max_angle)
 
     # ---------------------------------------------------------------- export
     def export_point_cloud(self, path: str | os.PathLike, source: str = "point_cloud", classes=None, region=None,

@@ -226,12 +226,15 @@ def dem(project: Path, resolution: Optional[float] = None, source: str = "point_
 def ortho(project: Path, resolution: Optional[float] = None, surface: str = "dem", blending: str = "mosaic",
           hide_classes: Optional[str] = typer.Option(None, help="transparent where the surface is of these "
                                                                 + CLASSES_HELP),
-          skip_unreadable: bool = typer.Option(False, help=SKIP_HELP), chunk: Optional[str] = None):
-    """Orthomosaic (GeoTIFF RGBA)."""
+          skip_unreadable: bool = typer.Option(False, help=SKIP_HELP),
+          max_angle: float = typer.Option(70.0, help="cells seen only from further than this from the vertical "
+                                                     "(degrees) stay transparent"),
+          chunk: Optional[str] = None):
+    """Orthomosaic (GeoTIFF RGBA), any size: made tile by tile."""
     doc, ch = _open(project, chunk)
     p = ch.build_orthomosaic(resolution=resolution, surface=surface, blending=blending,
                              hide_classes=_classes(hide_classes), progress=print_progress,
-                             skip_unreadable=skip_unreadable)
+                             skip_unreadable=skip_unreadable, max_angle=max_angle)
     doc.save()
     typer.echo(str(p))
 

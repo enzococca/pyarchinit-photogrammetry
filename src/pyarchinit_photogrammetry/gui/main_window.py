@@ -2073,7 +2073,10 @@ class MainWindow(QMainWindow):
             Field("surface", "Superficie", "dem" if self.chunk.dem_path else "model",
                   choices=[("dem", "DEM"), ("model", "Modello (true ortho)")]),
             Field("blending", "Fusione", "mosaic", choices=[("mosaic", "Mosaico"), ("average", "Media")]),
-            Field("resolution", "Risoluzione (m/pixel)", None, kind="optional_float")]
+            Field("resolution", "Risoluzione (m/pixel)", None, kind="optional_float"),
+            Field("max_angle", "Angolo massimo di vista dalla verticale (gradi)", 70.0, minimum=10.0, maximum=90.0,
+                  decimals=0, tip="Dove tutte le foto guardano piu' di traverso la cella resta trasparente: viste "
+                                  "radenti (foto oblique ai bordi del rilievo) stirano la foto sulla superficie")]
             + ([Field("hide", "Classi da rendere trasparenti", [], choices=choices, kind="checklist")]
                if len(choices) > 1 else []) + self._version_fields("orthomosaic"),
             intro=self._class_hint("Le classi scelte (attrezzi, persone, vegetazione) diventano trasparenti dove sono "
@@ -2085,7 +2088,8 @@ class MainWindow(QMainWindow):
             return
         hide = sorted(v.get("hide") or []) or None
         self.run_task("Ortofoto", self._versioned("orthomosaic", v, lambda p: self.chunk.build_orthomosaic(
-            v["resolution"], v["surface"], v["blending"], hide_classes=hide, progress=p, skip_unreadable=skip)),
+            v["resolution"], v["surface"], v["blending"], hide_classes=hide, progress=p, skip_unreadable=skip,
+            max_angle=v.get("max_angle", 70.0))),
             lambda _r: self._show_raster("ortho"))
 
     def process_all(self) -> None:

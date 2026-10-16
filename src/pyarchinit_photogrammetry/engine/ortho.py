@@ -292,8 +292,9 @@ def hidden_cells(chunk: Chunk, origin, shape, resolution: float, hide_classes) -
 
 
 # ---------------------------------------------------------------- one tile
-def _scores(chunk: Chunk, cam, pts, centres, up_int):
-    """Pixels and score (frontal, central, fine) of points in a photo; -inf where not seen."""
+def _scores(chunk: Chunk, cam, pts, centres, up_int, min_cos: float = 0.0):
+    """Pixels and score (frontal, central, fine) of points in a photo; -inf where not seen, or
+    seen from further than the vertical than the angle whose cosine is ``min_cos``."""
     px, depth, ok = project_valid(chunk, cam, pts)
     score = np.full(len(pts), -np.inf, np.float32)
     if ok.any():
@@ -303,7 +304,8 @@ def _scores(chunk: Chunk, cam, pts, centres, up_int):
         nadir = np.clip(-(ray @ up_int), 0, 1)  # 1 when looking straight down onto the surface
         off = np.hypot((px[ok, 0] / sensor.width - 0.5), (px[ok, 1] / sensor.height - 0.5))
         gsd = depth[ok] / sensor.focal_px
-        score[ok] = (nadir ** 2) * (1 - off) / np.maximum(gsd, 1e-12)
+        s = (nadir ** 2) * (1 - off) / np.maximum(gsd, 1e-12)
+        score[ok] = np.where(nadir >= min_cos, s, -np.inf)
     return px, score
 
 
@@ -332,7 +334,7 @@ def _tile(ctx, r0: int, c0: int) -> np.ndarray | None:
     probe = pts[:: max(1, n // 400)]
     ranked = []
     for cam in near:
-        _px, s = _scores(chunk, cam, probe, ctx.centres, ctx.up_int)
+        _px, s = _scores(chunk, cam, probe, ctx.centres, ctx.up_int, ctx.min_cos)
         seen = np.isfinite(s)
         if seen.any():
             ranked.append((float(np.where(seen, s, 0).sum()), cam, seen))
@@ -350,7 +352,7 @@ def _tile(ctx, r0: int, c0: int) -> np.ndarray | None:
     scores = np.full((len(tcams), n), -np.inf, np.float32)
     pix = np.full((len(tcams), n, 2), np.nan, np.float32)
     for k, cam in enumerate(tcams):
-        px, s = _scores(chunk, cam, pts, ctx.centres, ctx.up_int)
+        px, s = _scores(chunk, cam, pts, ctx.centres, ctx.up_int, ctx.min_cos)
         scores[k] = s
         ok = np.isfinite(s)
         pix[k, ok] = px[ok]
@@ -412,13 +414,17 @@ def _tile(ctx, r0: int, c0: int) -> np.ndarray | None:
 
 def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: str = "dem", blending: str = "mosaic",
                       hide_classes=None, progress: Progress | None = None, tile: int = 512,
-                      skip_unreadable: bool = False, workers: int | None = None, max_cameras: int = 8) -> Path:
+                      skip_unreadable: bool = False, workers: int | None = None, max_cameras: int = 8,
+                      max_angle: float = 70.0) -> Path:
     """``hide_classes``: classes of the dense cloud left out of the orthomosaic (transparent
     where they are the visible surface: excavation tools, people, vegetation). Photos that
     cannot be read (e.g. kept online only by Dropbox) stop the step
     (:class:`~.visibility.UnreadablePhotos`) unless ``skip_unreadable``. Every tile takes its
     colours from the ``max_cameras`` photos that see it best (more where they leave cells
-    uncovered); ``workers`` tiles are made at once (default: the cores but two)."""
+    uncovered); ``workers`` tiles are made at once (default: the cores but two). Cells that
+    every photo sees from further than ``max_angle`` degrees from the vertical stay
+    transparent: grazing views (an orbit of oblique photos around the survey, the edge of a
+    DEM interpolated beyond the reconstruction) only smear the photo over the surface."""
     from rasterio.transform import from_origin
 
     from ..core import crs as crs_mod
@@ -432,6 +438,7 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     ctx = _Context()
     ctx.chunk, ctx.resolution, ctx.blending, ctx.tile, ctx.max_cameras = chunk, resolution, blending, tile, max_cameras
     ctx.cams = cams
+    ctx.min_cos = float(np.cos(np.radians(min(max(float(max_angle), 0.0), 90.0))))
     ctx.lock = threading.Lock()  # ray casting, one query at a time (each one is parallel inside)
     progress(0.01, "Surface for the orthomosaic")
     ctx.raycaster = raycaster_for_chunk(chunk)
@@ -467,7 +474,7 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     tmp.replace(out_path)
     chunk._set_product("orthomosaic", out_path)
     chunk.meta["orthomosaic"] = {"resolution": resolution, "surface": surface, "blending": blending,
-                                 "hidden_classes": hidden_classes}
+                                 "hidden_classes": hidden_classes, "max_angle": float(max_angle)}
     if bad:
         chunk.meta["orthomosaic"]["skipped_photos"] = [c.label for c in bad]
     progress(1.0, f"Orthomosaic {w}x{h} px")
