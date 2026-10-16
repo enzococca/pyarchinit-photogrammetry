@@ -168,8 +168,47 @@ def _world_mesh(chunk):
     return mesh
 
 
-def section(chunk, p1, p2, source: str = "model", thickness: float = 0.01, label: str = "Sezione") -> Section:
-    """Vertical section along the trace ``p1 -> p2`` (world XY, optional Z ignored)."""
+def _segments_of_classes(chunk, segs: np.ndarray, classes, normal, origin) -> np.ndarray:
+    """The segments of a mesh cut (``(n, 2, 3)``, world) that lie on dense points of ``classes``:
+    each segment takes the class of the nearest point of the cloud (noise ignored) among
+    those near the cutting plane, so the parts the mesh interpolates (the sides of a bush
+    in a 2.5D model) go with the object they come from."""
+    from scipy.spatial import cKDTree
+
+    from ..core.pointcloud import NOISE_CLASSES
+
+    pc = chunk.point_cloud
+    if pc is None:
+        raise RuntimeError("the classes come from the dense cloud: build it first")
+    seg_len = np.linalg.norm(segs[:, 1] - segs[:, 0], axis=1)
+    slab = 20.0 * float(np.median(seg_len))  # mesh edges on either side of the plane: the ground below too
+    keep_pts = pc.class_mask(exclude=NOISE_CLASSES)
+    xyz = chunk.to_world(pc.xyz[keep_pts])
+    codes = pc.classification[keep_pts]
+    near = np.abs((xyz - np.asarray(origin, float)) @ np.asarray(normal, float)) <= slab
+    wanted = np.isin(codes, np.asarray([int(c) for c in classes]))
+    if not (near & wanted).any():
+        return segs[:0] if near.any() else segs
+    tree = cKDTree(xyz[near])
+    sample = xyz[near][:: max(1, int(near.sum()) // 2000)]
+    spacing = float(np.median(tree.query(sample, k=2)[0][:, 1]))
+    mids = segs.mean(axis=1)
+    _, i = tree.query(mids)
+    # the nearest point is of a chosen class, and both ends lie on points of the chosen
+    # classes (not on a stretch the mesh interpolates over an object left out)
+    wanted_tree = cKDTree(xyz[near & wanted])
+    reach = max(2.0 * spacing, float(np.median(seg_len)))
+    ends = np.maximum(wanted_tree.query(segs[:, 0])[0], wanted_tree.query(segs[:, 1])[0])
+    return segs[wanted[near][i] & (ends <= reach)]
+
+
+def section(chunk, p1, p2, source: str = "model", thickness: float = 0.01, label: str = "Sezione",
+            classes=None) -> Section:
+    """Vertical section along the trace ``p1 -> p2`` (world XY, optional Z ignored).
+
+    ``classes``: only the dense points of these classes; on the model, only the parts of the
+    cut next to points of these classes (the class of a stretch is that of the nearest
+    point), e.g. a profile without vegetation or tools."""
     p1 = np.asarray(p1, float)[:2]
     p2 = np.asarray(p2, float)[:2]
     length = np.linalg.norm(p2 - p1)
@@ -185,6 +224,8 @@ def section(chunk, p1, p2, source: str = "model", thickness: float = 0.01, label
         mesh = _world_mesh(chunk)
         origin[2] = mesh.vertices[:, 2].mean()
         segs = trimesh.intersections.mesh_plane(mesh, normal, origin)
+        if len(segs) and classes is not None:
+            segs = _segments_of_classes(chunk, segs, classes, normal, origin)
         if len(segs):
             s = (segs[..., :2] - p1) @ d
             seg2d = np.stack([s, segs[..., 2]], -1)
@@ -193,6 +234,8 @@ def section(chunk, p1, p2, source: str = "model", thickness: float = 0.01, label
             sec.polylines = _join_segments(seg2d[keep], tol=scale * 1e-7)
     else:
         pc = chunk.point_cloud if source == "point_cloud" else chunk.tie_points
+        if classes is not None:
+            pc = pc.subset(pc.class_mask(classes))
         xyz = chunk.to_world(pc.xyz)
         off = (xyz - origin) @ normal
         s = (xyz[:, :2] - p1) @ d
@@ -210,7 +253,7 @@ def section(chunk, p1, p2, source: str = "model", thickness: float = 0.01, label
 
 
 def sections_along(chunk, baseline, interval: float, half_width: float, source: str = "model",
-                   prefix: str = "Sez.") -> list[Section]:
+                   prefix: str = "Sez.", classes=None) -> list[Section]:
     """Cross sections perpendicular to a baseline polyline (world XY), every ``interval`` metres."""
     base = np.asarray(baseline, float)[:, :2]
     seg_len = np.linalg.norm(np.diff(base, axis=0), axis=1)
@@ -224,16 +267,19 @@ def sections_along(chunk, baseline, interval: float, half_width: float, source: 
         dirv = (base[k + 1] - base[k]) / seg_len[k]
         perp = np.array([-dirv[1], dirv[0]])
         out.append(section(chunk, p - perp * half_width, p + perp * half_width, source=source,
-                           label=f"{prefix} {i + 1}"))
+                           label=f"{prefix} {i + 1}", classes=classes))
     return out
 
 
-def plan_slice(chunk, elevation: float, label: str | None = None) -> Section:
-    """Horizontal slice of the model at ``elevation`` (e.g. the plan of a wall at a given level)."""
+def plan_slice(chunk, elevation: float, label: str | None = None, classes=None) -> Section:
+    """Horizontal slice of the model at ``elevation`` (e.g. the plan of a wall at a given level);
+    ``classes``: only the parts next to dense points of these classes (see :func:`section`)."""
     import trimesh
 
     mesh = _world_mesh(chunk)
     segs = trimesh.intersections.mesh_plane(mesh, [0, 0, 1.0], [0, 0, float(elevation)])
+    if len(segs) and classes is not None:
+        segs = _segments_of_classes(chunk, segs, classes, [0, 0, 1.0], [0, 0, float(elevation)])
     sec = Section(np.array([0, 0, elevation], float), np.array([1, 0, elevation], float),
                   label=label or f"Pianta a quota {elevation:.3f}", kind="plan")
     if len(segs):

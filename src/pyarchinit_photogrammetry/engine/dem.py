@@ -8,6 +8,7 @@ import numpy as np
 from ..core import crs as crs_mod
 from ..core import geometry
 from ..core.chunk import Chunk
+from ..core.pointcloud import NOISE_CLASSES
 from ..core.progress import Progress
 
 NODATA = -32767.0
@@ -49,7 +50,11 @@ def estimate_gsd(chunk: Chunk) -> float:
     return float(np.median(vals) * chunk.scale)
 
 
-def surface_points_world(chunk: Chunk, source: str) -> np.ndarray:
+def surface_points_world(chunk: Chunk, source: str, classes=None) -> np.ndarray:
+    """Surface points in world coordinates; ``classes`` filters the dense cloud (noise never
+    counts)."""
+    if classes is not None and source != "point_cloud":
+        raise ValueError("the classes are those of the dense cloud: use source='point_cloud'")
     if source == "model":
         mesh = chunk.model
         if mesh is None:
@@ -65,7 +70,9 @@ def surface_points_world(chunk: Chunk, source: str) -> np.ndarray:
         pc = chunk.point_cloud
         if pc is None:
             raise RuntimeError("build the point cloud first")
-        keep = pc.classification != 7  # skip noise
+        keep = pc.class_mask(classes, exclude=NOISE_CLASSES)
+        if not keep.any():
+            raise RuntimeError("the dense cloud has no point of the chosen classes")
         pts = pc.xyz[keep]
     return chunk.to_world(pts)
 
@@ -137,11 +144,15 @@ def write_geotiff(path: Path, array: np.ndarray, origin, resolution: float, crs:
 
 
 def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "point_cloud", interpolate: bool = True,
-              progress: Progress | None = None) -> Path:
+              classes=None, progress: Progress | None = None) -> Path:
+    """DEM of the highest surface point in each cell. ``classes`` (dense cloud): only these
+    classes, e.g. the ground for a terrain model (DTM); the gaps they leave (under a removed
+    tool or bush) are interpolated from around."""
     progress = progress or Progress()
     ensure_level(chunk)
     progress(0.05, "Collecting surface points")
-    pts = surface_points_world(chunk, source)
+    classes = None if classes is None else sorted({int(c) for c in classes})
+    pts = surface_points_world(chunk, source, classes)
     if resolution is None:
         area = np.ptp(pts[:, 0]) * np.ptp(pts[:, 1])
         resolution = float(max(2 * estimate_gsd(chunk), np.sqrt(area / max(len(pts), 1)) * 1.5))
@@ -151,8 +162,8 @@ def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "poin
         from rasterio.fill import fillnodata
 
         mask = np.isfinite(dem).astype(np.uint8)
-        filled = fillnodata(np.nan_to_num(dem, nan=0).astype(np.float32), mask=mask, max_search_distance=30,
-                            smoothing_iterations=0)
+        filled = fillnodata(np.nan_to_num(dem, nan=0).astype(np.float32), mask=mask,
+                            max_search_distance=30 if classes is None else 100, smoothing_iterations=0)
         dem = np.where(mask > 0, dem, filled)
         # keep holes outside the surveyed footprint empty
         from scipy import ndimage
@@ -163,7 +174,7 @@ def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "poin
     out = np.where(np.isfinite(dem), dem, NODATA).astype(np.float32)
     path = write_geotiff(chunk.data_dir / "dem.tif", out, origin, resolution, chunk.crs, nodata=NODATA)
     chunk._set_product("dem", path)
-    chunk.meta["dem"] = {"resolution": resolution, "source": source}
+    chunk.meta["dem"] = {"resolution": resolution, "source": source, "classes": classes}
     progress(1.0, f"DEM {out.shape[1]}x{out.shape[0]} px")
     return path
 

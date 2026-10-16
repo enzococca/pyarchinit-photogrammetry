@@ -16,6 +16,7 @@ import numpy as np
 
 from ..core import geometry
 from ..core.chunk import Chunk
+from ..core.pointcloud import NOISE_CLASSES
 from ..core.progress import Progress
 from .isolate import IsolatedCrash, run_isolated
 
@@ -52,7 +53,8 @@ def poisson_depth(target_faces: int) -> int:
 
 
 def build_model(chunk: Chunk, source: str = "point_cloud", surface: str = "arbitrary", face_count="medium",
-                voxel_size: float | None = None, vertex_colors: bool = True, progress: Progress | None = None):
+                voxel_size: float | None = None, vertex_colors: bool = True, classes=None,
+                progress: Progress | None = None):
     """Build the mesh and save it as the ``model`` product (``model.ply``, internal frame).
 
     ``source``: ``"point_cloud"``, ``"tie_points"`` or ``"depth_maps"`` (TSDF fusion of
@@ -60,15 +62,23 @@ def build_model(chunk: Chunk, source: str = "point_cloud", surface: str = "arbit
     size of a depth-map pixel on the surface). ``face_count``: ``"high"``/``"medium"``/
     ``"low"`` (1/5, 1/15, 1/45 of the points; for depth maps, of the points they give at
     their own resolution) or a number of faces. ``vertex_colors``: paint the vertices
-    with the colours of the points (of the photos for depth maps).
+    with the colours of the points (of the photos for depth maps). ``classes``: only the
+    dense points of these classes (the surface closes over what is left out); points
+    classified as noise are never used.
     """
     progress = progress or Progress()
+    if classes is not None and source != "point_cloud":
+        raise ValueError("the classes are those of the dense cloud: use source='point_cloud'")
     if source == "depth_maps":
         mesh = _model_from_depth_maps(chunk, surface, face_count, voxel_size, vertex_colors, progress)
+        chunk.meta["model"] = {"source": source, "surface": surface, "classes": None}
         return _save_model(chunk, mesh, progress)
     pc = chunk.point_cloud if source == "point_cloud" else chunk.tie_points
+    if pc is not None and (classes is not None or np.isin(pc.classification, NOISE_CLASSES).any()):
+        pc = pc.subset(pc.class_mask(classes, exclude=NOISE_CLASSES))  # noise never makes a surface
     if pc is None or len(pc) < 100:
-        raise RuntimeError(f"not enough points in {source} to build a mesh")
+        raise RuntimeError(f"not enough points in {source}" + (" of the chosen classes" if classes is not None else "")
+                           + " to build a mesh")
     target = _target_faces(len(pc), face_count)
     progress(0.0, f"Building {surface} mesh from {len(pc):,} points")
     up = up_vector_internal(chunk)
@@ -86,6 +96,8 @@ def build_model(chunk: Chunk, source: str = "point_cloud", surface: str = "arbit
         mesh = _decimate(mesh, target)
     if pc.rgb is not None and vertex_colors:
         _paint(mesh, pc.xyz, pc.rgb)
+    chunk.meta["model"] = {"source": source, "surface": surface,
+                           "classes": None if classes is None else sorted({int(c) for c in classes})}
     return _save_model(chunk, mesh, progress)
 
 

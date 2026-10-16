@@ -90,6 +90,11 @@ class Chunk:
         path = value.save_ply(self.data_dir / "point_cloud.ply")
         self._set_product("point_cloud", path)
 
+    def point_classes(self) -> dict[int, int]:
+        """Points per class of the dense cloud (empty without one); reads only the class column."""
+        p = self.product_path("point_cloud")
+        return PointCloud.read_class_counts(p) if p and p.exists() else {}
+
     @property
     def model(self):
         """The mesh as a ``trimesh.Trimesh`` in internal coordinates (or ``None``)."""
@@ -345,17 +350,18 @@ class Chunk:
         return self.point_cloud
 
     def build_model(self, source: str = "point_cloud", surface: str = "arbitrary", face_count: int | str = "medium",
-                    voxel_size: float | None = None, vertex_colors: bool = True,
+                    voxel_size: float | None = None, vertex_colors: bool = True, classes=None,
                     progress: ProgressCallback | None = None):
         """Build a mesh. ``surface='arbitrary'`` (Poisson, true 3D) or ``'height_field'`` (2.5D, for terrain).
 
         ``source='depth_maps'`` fuses the depth maps of :meth:`build_depth_maps` (TSDF, no
         dense cloud needed); ``voxel_size`` (chunk CRS units, e.g. metres) sets its detail,
-        by default twice the size of a depth-map pixel on the surface."""
+        by default twice the size of a depth-map pixel on the surface. ``classes``: only the
+        dense points of these classes (e.g. without vegetation and excavation tools)."""
         from ..engine import meshing
 
         return meshing.build_model(self, source=source, surface=surface, face_count=face_count,
-                                   voxel_size=voxel_size, vertex_colors=vertex_colors,
+                                   voxel_size=voxel_size, vertex_colors=vertex_colors, classes=classes,
                                    progress=as_progress(progress))
 
     def build_texture(self, texture_size: int = 4096, progress: ProgressCallback | None = None) -> Path:
@@ -364,24 +370,35 @@ class Chunk:
         return texturing.build_texture(self, texture_size=texture_size, progress=as_progress(progress))
 
     def build_dem(self, resolution: float | None = None, source: str = "point_cloud", interpolate: bool = True,
-                  progress: ProgressCallback | None = None) -> Path:
+                  classes=None, progress: ProgressCallback | None = None) -> Path:
+        """DEM (GeoTIFF). ``classes``: only the dense points of these classes, e.g. ``[2]`` for a
+        terrain model (DTM) without vegetation, people or tools; noise never counts."""
         from ..engine import dem
 
-        return dem.build_dem(self, resolution=resolution, source=source, interpolate=interpolate,
+        return dem.build_dem(self, resolution=resolution, source=source, interpolate=interpolate, classes=classes,
                              progress=as_progress(progress))
 
     def build_orthomosaic(self, resolution: float | None = None, surface: str = "dem", blending: str = "mosaic",
-                          progress: ProgressCallback | None = None) -> Path:
+                          hide_classes=None, progress: ProgressCallback | None = None) -> Path:
+        """Orthomosaic (GeoTIFF RGBA). ``hide_classes``: where the visible surface belongs to
+        these classes of the dense cloud the orthomosaic is transparent."""
         from ..engine import ortho
 
         return ortho.build_orthomosaic(self, resolution=resolution, surface=surface, blending=blending,
-                                       progress=as_progress(progress))
+                                       hide_classes=hide_classes, progress=as_progress(progress))
 
     # ---------------------------------------------------------------- export
-    def export_point_cloud(self, path: str | os.PathLike, source: str = "point_cloud") -> Path:
+    def export_point_cloud(self, path: str | os.PathLike, source: str = "point_cloud", classes=None) -> Path:
+        """Write the cloud in world coordinates (LAS keeps the classes); ``classes``: only
+        the points of these classes."""
         pc = self.point_cloud if source == "point_cloud" else self.tie_points
         if pc is None:
             raise RuntimeError(f"no {source} in chunk {self.label}")
+        if classes is not None:
+            keep = pc.class_mask(classes)
+            if not keep.any():
+                raise ValueError("no point of the chosen classes")
+            pc = pc.subset(keep)
         return pc.transformed(self.transform).save(path, crs_wkt=crs_mod.wkt(self.crs))
 
     def export_model(self, path: str | os.PathLike) -> Path:

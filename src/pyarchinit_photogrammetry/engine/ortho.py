@@ -49,8 +49,49 @@ def _surface_grid(chunk: Chunk, resolution: float, surface: str):
     return z.astype(np.float64), origin
 
 
+def hidden_cells(chunk: Chunk, origin, shape, resolution: float, hide_classes) -> np.ndarray:
+    """Cells of a grid (``origin`` = top-left corner, ``shape``, ``resolution``) whose visible
+    surface - the highest point of the dense cloud there - belongs to ``hide_classes``.
+
+    The classes are gridded at the point spacing (or the pixel, when coarser), widened by one
+    cell so that the edges of a hidden object go too; cells without points stay visible."""
+    from scipy import ndimage
+
+    from ..core.pointcloud import NOISE_CLASSES
+
+    pc = chunk.point_cloud
+    if pc is None:
+        raise RuntimeError("the classes come from the dense cloud: build it first")
+    keep = pc.class_mask(exclude=NOISE_CLASSES)
+    xyz = chunk.to_world(pc.xyz[keep])
+    codes = pc.classification[keep]
+    h, w = shape
+    spacing = (chunk.meta.get("dem") or {}).get("resolution") or 0.0
+    if not spacing:
+        area = max(np.ptp(xyz[:, 0]) * np.ptp(xyz[:, 1]), 1e-12)
+        spacing = 1.5 * np.sqrt(area / max(len(xyz), 1))
+    cs = max(float(spacing), resolution)
+    hc, wc = int(np.ceil(h * resolution / cs)) + 1, int(np.ceil(w * resolution / cs)) + 1
+    col = np.floor((xyz[:, 0] - origin[0]) / cs).astype(np.int64)
+    row = np.floor((origin[1] - xyz[:, 1]) / cs).astype(np.int64)
+    ok = (col >= 0) & (col < wc) & (row >= 0) & (row < hc)
+    idx, z, codes = row[ok] * wc + col[ok], xyz[ok, 2], codes[ok]
+    top = np.full(hc * wc, -np.inf)
+    np.maximum.at(top, idx, z)
+    grid = np.zeros(hc * wc, np.int16) - 1  # -1: no point
+    first = z >= top[idx]
+    grid[idx[first]] = codes[first]
+    hidden = np.isin(grid, np.asarray([int(c) for c in hide_classes])).reshape(hc, wc)
+    hidden = ndimage.binary_dilation(hidden)
+    rows = np.minimum(((np.arange(h) + 0.5) * resolution / cs).astype(np.int64), hc - 1)
+    cols = np.minimum(((np.arange(w) + 0.5) * resolution / cs).astype(np.int64), wc - 1)
+    return hidden[np.ix_(rows, cols)]
+
+
 def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: str = "dem", blending: str = "mosaic",
-                      progress: Progress | None = None, tile: int = 512) -> Path:
+                      hide_classes=None, progress: Progress | None = None, tile: int = 512) -> Path:
+    """``hide_classes``: classes of the dense cloud left out of the orthomosaic (transparent
+    where they are the visible surface: excavation tools, people, vegetation)."""
     progress = progress or Progress()
     ensure_level(chunk)
     if resolution is None:
@@ -146,12 +187,17 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
         tile_rgba[2, rr[got], cc[got]] = bgr[:, 0]
         tile_rgba[3, rr[got], cc[got]] = 255
         progress(0.05 + 0.9 * (t_i + 1) / len(tiles), f"Orthomosaic tile {t_i + 1}/{len(tiles)}")
+    hidden_classes = sorted({int(c) for c in hide_classes}) if hide_classes else None
+    if hidden_classes:
+        progress(0.96, "Hiding the chosen classes")
+        rgba[:, hidden_cells(chunk, origin, (h, w), resolution, hidden_classes)] = 0
     path = write_geotiff(chunk.data_dir / "orthomosaic.tif", rgba, origin, resolution, chunk.crs,
                          photometric="RGB")
     chunk._set_product("orthomosaic", path)
-    chunk.meta["orthomosaic"] = {"resolution": resolution, "surface": surface, "blending": blending}
+    chunk.meta["orthomosaic"] = {"resolution": resolution, "surface": surface, "blending": blending,
+                                 "hidden_classes": hidden_classes}
     progress(1.0, f"Orthomosaic {w}x{h} px")
     return path
 
 
-__all__ = ["build_orthomosaic", "NODATA"]
+__all__ = ["build_orthomosaic", "hidden_cells", "NODATA"]

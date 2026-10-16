@@ -24,6 +24,8 @@ ASPRS_CLASSES = {
     18: "High noise",
 }
 
+NOISE_CLASSES = (7, 18)  # low and high noise (ASPRS): never part of a surface
+
 # User-defined classes for archaeological contexts (LAS codes 64-255).
 ARCHAEO_CLASSES = {
     64: "Struttura muraria / Masonry structure",
@@ -63,6 +65,28 @@ class PointCloud:
 
     def __len__(self) -> int:
         return len(self.xyz)
+
+    def class_mask(self, classes=None, exclude=()) -> np.ndarray:
+        """True for the points whose class is in ``classes`` (every class when None) and not
+        in ``exclude``: the points a product built "from the chosen classes" uses."""
+        keep = np.ones(len(self), bool) if classes is None else np.isin(self.classification, _codes(classes))
+        if len(exclude):
+            keep &= ~np.isin(self.classification, _codes(exclude))
+        return keep
+
+    @staticmethod
+    def read_class_counts(path: str | Path) -> dict[int, int]:
+        """Points per class of a point cloud file, reading only its class column when it is a
+        binary PLY (a large dense cloud is not loaded)."""
+        arr = _read_binary_ply_vertices(Path(path), mmap=True)
+        if arr is None:
+            codes = PointCloud.load(path).classification
+        elif "classification" not in arr.dtype.names:
+            return {1: len(arr)}
+        else:
+            codes = arr["classification"]
+        counts = np.bincount(np.asarray(codes, np.uint8), minlength=256)
+        return {int(c): int(n) for c, n in enumerate(counts) if n}
 
     def subset(self, mask: np.ndarray) -> "PointCloud":
         pick = lambda a: None if a is None else a[mask]  # noqa: E731
@@ -192,8 +216,13 @@ _PLY_TYPES = {
 }
 
 
-def _read_binary_ply_vertices(path: Path) -> np.ndarray | None:
-    """Read the vertex element of a binary little-endian PLY as a structured array.
+def _codes(classes) -> np.ndarray:
+    return np.asarray([int(c) for c in classes], np.uint8)
+
+
+def _read_binary_ply_vertices(path: Path, mmap: bool = False) -> np.ndarray | None:
+    """Read the vertex element of a binary little-endian PLY as a structured array
+    (memory-mapped, read only, with ``mmap``).
 
     Returns ``None`` for ASCII files or files where vertices are not the first element.
     """
@@ -226,4 +255,6 @@ def _read_binary_ply_vertices(path: Path) -> np.ndarray | None:
         if line != "end_header":
             while fh.readline().strip() != b"end_header":
                 pass
+        if mmap:
+            return np.memmap(path, dtype=fields, mode="r", offset=fh.tell(), shape=(count,))
         return np.frombuffer(fh.read(count * np.dtype(fields).itemsize), dtype=fields, count=count).copy()
