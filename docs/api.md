@@ -53,11 +53,76 @@ the fused surface (`FusedMesh`, internal frame) without saving it. On the synthe
 mesh of the dense cloud: median distance 0.9 mm, 90th percentile 2.2 mm (Poisson 1.0 and 2.8 mm).
 CLI: `ppg mesh project.ppg --source depth_maps [--voxel-size 0.005]`.
 
+## Align and merge chunks
+
+Chunks are aligned separately (each in its own arbitrary frame), brought into one frame,
+then merged, as with *Workflow > Align Chunks* and *Merge Chunks*.
+
+| Call | Description |
+| --- | --- |
+| `doc.align_chunks(reference, chunks=None, method="markers", fix_scale=False, initial="auto", max_points=200_000, progress=None)` | moves `chunks` (Chunk objects, keys or labels; default: the other enabled chunks) into the world frame and CRS of `reference`; returns a report |
+| `doc.merge_chunks(chunks, label=None, merge_markers=True, merge_tie_points=True, merge_point_clouds=True, merge_models=False, progress=None)` | new chunk (default label `Merged chunk`) in the frame of the first chunk; the inputs are kept |
+| `ppg align-chunks project.ppg [CHUNKS...] -r REF --method markers\|points\|cameras [--fix-scale] [--initial ...] [--json]` | command line (default reference: the active chunk) |
+| `ppg merge-chunks project.ppg [CHUNKS...] [--label L] [--no-markers] [--no-tie-points] [--no-point-clouds] [--models] [--activate]` | command line (default: all enabled chunks) |
+
+Methods of `align_chunks`:
+
+* `markers`: markers with the same label in both chunks (at least 3, with a position),
+  least squares (Umeyama).
+* `cameras`: photos present in both chunks (the same file, or the same label when it is
+  unique in each chunk). Least squares on the camera centres; with 1-2 common photos, or
+  photos along a line, the rotation comes from the camera orientations.
+* `points`: registration of the dense clouds (tie points for a chunk without one). Initial
+  position from the common markers, else the georeference (both chunks in a projected CRS,
+  or referenced in the same local grid), else the common photos, else a global registration
+  (FPFH descriptors from Open3D, matched with a seeded RANSAC: needs the `[mesh]` extra);
+  `initial="markers"|"reference"|"cameras"|"global"` forces one. A scaled point-to-plane
+  ICP refines it; the result is accepted when most overlapping points fit and, with colours,
+  the brightness of matched points agrees (else `ValueError`).
+* `fix_scale=True`: rigid alignment that keeps the scale of each chunk; only for chunks already
+  in metres (CRS, references or scale bars), else `ValueError`.
+
+Only `chunk.transform` and `chunk.crs` change; photos, tie points, dense cloud and mesh stay
+in the chunk's internal frame. Estimates use local frames (world coordinates minus a rounded
+offset), so national grid/UTM coordinates lose no precision. An unlevelled local reference is
+levelled first (as `build_dem` would do later). If one chunk cannot be aligned, nothing changes.
+Marker references of a chunk in another projected CRS are converted to the new one. The
+DEM and orthomosaic of an aligned chunk are in its old frame: build them again
+(`stale_products` in the report).
+
+The report: `{"reference": {"key", "label"}, "method", "fix_scale", "crs", "levelled_reference",
+"chunks": [...]}`, one entry per chunk with `key`, `label`, `method`, `correspondences`, `rmse`
+(reference world units, metres once georeferenced or scaled), `scale` (scale applied),
+`transform` (the new `chunk.transform`), `delta` (old world -> reference world), `stale_products`;
+`residuals` (per marker or photo: `error`, `dx`, `dy`, `dz`; `angle_deg` for photos) and
+`max_error` for markers/cameras; `initial`, `source`/`target` (`point_cloud` or `tie_points`),
+`fitness`, `overlap`, `inlier_ratio`, `color_corr`, `attempts` and `check` (residuals of the
+common markers, not used by the registration) for points. `chunk.meta["chunk_alignment"]`
+keeps a summary.
+
+`merge_chunks` needs chunks in one frame (aligned, or georeferenced in projected CRSs; another
+CRS is converted through a fitted similarity, with a warning above 5 mm). The merged chunk has
+the CRS, transform and internal frame of the first chunk, and contains:
+
+* sensors and cameras with new keys; a photo present in several chunks is kept once (the
+  first aligned copy). Identical calibrations stay separate sensors.
+* markers merged by label (projections combined, positions triangulated again), or all
+  kept with `merge_markers=False`; scale bars remapped.
+* tie points, dense clouds (colours, normals, classes) and, with `merge_models=True`,
+  meshes (vertex colours) concatenated in the common frame.
+* a COLMAP model of the merged cameras (`engine.sfm.write_reconstruction_from_chunk`,
+  with the merged tie points as 3D points), so depth maps, dense cloud, mesh, DEM and
+  orthomosaic can be built again on the merged chunk.
+
+DEMs, orthomosaics and textures are not merged. `merged.meta["merge"]` lists the source
+chunks, the photos found in more than one chunk and warnings.
+
 ## Modules
 
 | Module | Main functions |
 | --- | --- |
 | `markers.targets` | `generate_sheet`, `generate_turntable_mat`, `turntable_layout`, `detect` |
+| `engine.chunks` | `align_chunks`, `merge_chunks`, `common_markers`, `common_cameras`, `pose_similarity`, `icp`, `global_guesses`, `ransac_rigid`, `registration_quality` |
 | `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |
 | `archaeo.pottery` | `estimate_axis`, `profile_at`, `best_profile`, `Profile.measurements`, `draw` |
 | `archaeo.terrain` | `contours` (simplified, optional smoothing), `suggest_interval`, `dem_range`, `export_contours`, `volume`, `hillshade`, `slope_degrees` |
