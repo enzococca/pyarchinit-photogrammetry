@@ -654,6 +654,46 @@ def _import_model(mc: MsChunk, ch, warnings: list, progress, dense_from_mesh: bo
     return True
 
 
+def reimport_model(ch, psx: str | os.PathLike | None = None, progress=None) -> dict:
+    """The model of the Metashape project again - with its vertex colours, its confidence and
+    its texture - into a chunk imported earlier (projects imported before the texture was read,
+    or whose model lost its colours). The model in use is kept among the versions. Returns
+    ``{"warnings", "faces", "texture"}``."""
+    from ..core import versions
+    from ..core.progress import as_progress
+
+    progress = as_progress(progress)
+    info = ch.meta.get("import") or {}
+    psx = Path(psx or info.get("psx") or "")
+    if not psx.name or not psx.exists():
+        raise FileNotFoundError(f"Metashape project not found: {psx}")
+    progress(0.02, "Lettura del progetto Metashape")
+    chunks = [mc for mc in read_psx(psx) if "model" in mc.frame_paths and mc.frame_dir is not None]
+    mc = next((m for m in chunks if m.label == ch.label), None) or (chunks[0] if len(chunks) == 1 else None)
+    if mc is None:
+        raise RuntimeError(f"no model in the chunk {ch.label!r} of the Metashape project")
+    frame = None
+    if info.get("frame") == "exact":  # the same point-by-point conversion as the import
+        if not np.allclose(ch.transform[:3, :3], np.eye(3), atol=1e-9):
+            raise RuntimeError("the reference of the chunk changed after the import: import the project again")
+        offset = ch.transform[:3, 3].copy()
+        mapper = crs_mapper(mc, ch.crs, mc.component_transform(None))
+
+        def frame(pts):
+            return mapper(np.asarray(pts, float)) - offset
+
+    versions.keep_active(ch, "model", move=True)
+    warnings: list = []
+    if not _import_model(mc, ch, warnings, progress.sub(0.05, 0.95), dense_from_mesh=False, frame=frame):
+        raise RuntimeError("; ".join(warnings) or "model not imported")
+    versions.set_active_name(ch, "model", "Modello di Metashape")
+    from ..io.mesh_ply import face_count
+
+    progress(1.0, "Modello di Metashape reimportato")
+    return {"warnings": warnings, "faces": face_count(ch.product_path("model")),
+            "texture": ch.product_path("model_textured")}
+
+
 def import_psx(psx: str | os.PathLike, project: str | os.PathLike, chunk_index: int | None = None,
                dem: str | os.PathLike | None = None, orthomosaic: str | os.PathLike | None = None,
                with_model: bool = True, progress=None):

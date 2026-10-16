@@ -259,6 +259,9 @@ class MainWindow(QMainWindow):
         imp = m.addMenu(icon("open"), "Importa")
         self._act(imp, "Progetto Metashape (.psx)...", lambda: self.import_external("metashape"), processing=True,
                   icon_name="open")
+        self._act(imp, "Modello e texture dal progetto Metashape (reimporta)...", self.reimport_metashape_model,
+                  processing=True, icon_name="model_textured",
+                  tip="Rilegge dal .psx il modello con colori, confidenza e texture (progetti importati prima)")
         self._act(imp, "Progetto WebODM / ODM (cartella o all.zip)...", lambda: self.import_external("webodm"),
                   processing=True, icon_name="open")
         self._act(imp, "Sessione Photo3D...", lambda: self.import_external("photo3d"), processing=True,
@@ -1445,6 +1448,38 @@ class MainWindow(QMainWindow):
 
         self.run_task("Ritaglio nuvola", job, lambda pc: (self.statusBar().showMessage(f"{len(pc):,} punti", 8000),
                                                            self._show_model("point_cloud")))
+
+    def reimport_metashape_model(self) -> None:
+        """The model of the Metashape project again, with its colours and texture (the model in
+        use is kept among the versions)."""
+        if not self._need_chunk():
+            return
+        ch = self.chunk
+        info = ch.meta.get("import") or {}
+        psx = info.get("psx") if info.get("source") == "metashape" else None
+        if not psx or not Path(psx).exists():
+            path, _ = QFileDialog.getOpenFileName(self, "Progetto Metashape del chunk", self._last_dir(),
+                                                  "Metashape (*.psx)")
+            if not path:
+                return
+            psx = path
+
+        def job(p):
+            from ..integrations.metashape import reimport_model
+
+            return reimport_model(ch, psx, progress=p)
+
+        def done(r):
+            text = f"Modello di Metashape reimportato: {_it(r['faces'] or 0)} facce" + \
+                (", con la texture" if r["texture"] else ", senza texture") + \
+                " (il modello di prima e' tra le versioni)"
+            for w in r["warnings"]:
+                self.log_pane.warning(w)
+            self.log_pane.info(text)
+            self.statusBar().showMessage(text, 15000)
+            self._show_model("model_textured" if r["texture"] else "model")
+
+        self.run_task("Modello di Metashape", job, done)
 
     # ---------------------------------------------------------------- confidence and cleaning
     def _has_depth_maps(self) -> bool:

@@ -671,3 +671,24 @@ def test_metashape_internal_dem(tmp_path):
     assert nw == src.nodata  # the no-data corner stays empty
     after = sorted(p.name for p in (psx.with_suffix(".files") / "0" / "0" / "elevation").iterdir())
     assert after == before  # no .aux.xml or other file left in the Metashape project
+
+
+def test_metashape_model_reimported_with_texture(tmp_path):
+    """A project imported before the texture was read (or whose model lost its colours) gets the
+    model of Metashape back with colours and texture; the model in use stays as a version."""
+    from pyarchinit_photogrammetry.core import versions
+    from pyarchinit_photogrammetry.integrations import metashape as ms
+    from pyarchinit_photogrammetry.io.mesh_ply import read_mesh
+
+    psx, _origin, _ = make_psx(tmp_path / "src", texture=True)
+    doc = ms.import_psx(psx, tmp_path / "out" / "p.ppg")
+    ch = doc.chunk
+    first = read_mesh(ch.product_path("model"))
+    ch.products.pop("model_textured")  # as imported by version 0.5.0: no texture
+    ch.clean_model(target_faces=1000)  # and a model changed since
+    r = ms.reimport_model(ch)
+    again = read_mesh(ch.product_path("model"))
+    assert r["faces"] == len(first.faces) and r["texture"] is not None and again.texcoords is not None
+    assert np.allclose(again.xyz, first.xyz) and again.colors is not None
+    (kept,) = versions.versions(ch, "model")
+    assert versions.active_info(ch, "model")["name"] == "Modello di Metashape" and kept["files"]["model"]
