@@ -71,6 +71,33 @@ class Document:
         self.chunks.remove(chunk)
         shutil.rmtree(self.files_dir / f"chunk_{chunk.key}", ignore_errors=True)
 
+    def align_chunks(self, reference, chunks=None, method: str = "markers", fix_scale: bool = False,
+                     initial: str = "auto", max_points: int = 200_000, progress=None) -> dict:
+        """Bring ``chunks`` (Chunk objects, keys or labels; default: the other enabled ones) into the
+        world frame of ``reference``: their ``transform`` and CRS change, their products stay.
+        ``method``: ``"markers"`` (same labels), ``"points"`` (dense clouds or tie points:
+        initial position from markers, georeference or common photos, else FPFH + RANSAC;
+        ``initial`` forces one of ``"markers"``, ``"reference"``, ``"cameras"``, ``"global"``),
+        ``"cameras"`` (photos in both chunks). ``fix_scale``: rigid, without scale.
+        Returns a report with residuals, correspondences and transforms (see
+        :func:`engine.chunks.align_chunks`)."""
+        from ..engine.chunks import align_chunks
+
+        return align_chunks(self, reference, chunks, method=method, fix_scale=fix_scale, initial=initial,
+                            max_points=max_points, progress=progress)
+
+    def merge_chunks(self, chunks, label: str | None = None, merge_markers: bool = True,
+                     merge_tie_points: bool = True, merge_point_clouds: bool = True, merge_models: bool = False,
+                     progress=None) -> Chunk:
+        """A new chunk with the photos, markers, tie points, dense clouds (and models) of
+        ``chunks``, in the frame and CRS of the first one; the inputs are kept. A COLMAP model
+        is written so that dense cloud, mesh, DEM and orthomosaic can be built again (see
+        :func:`engine.chunks.merge_chunks`)."""
+        from ..engine.chunks import merge_chunks
+
+        return merge_chunks(self, chunks, label=label, merge_markers=merge_markers, merge_tie_points=merge_tie_points,
+                            merge_point_clouds=merge_point_clouds, merge_models=merge_models, progress=progress)
+
     # ---------------------------------------------------------------- I/O
     def save(self, path: str | Path | None = None) -> Path:
         if path is not None:
