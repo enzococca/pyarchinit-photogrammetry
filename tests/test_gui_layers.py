@@ -743,3 +743,117 @@ def test_train_and_apply_classifier(window, qapp, monkeypatch, tmp_path):
         (ch.data_dir / mw.CLASSIFIER_FILE).unlink(missing_ok=True)
         w.classifier = None
         w.model_view.set_color_mode("rgb")
+
+
+def test_products_from_chosen_classes(window, qapp, monkeypatch, tmp_path):
+    """DEM, orthophoto, model, export, sections and plan slices offer the classes of the dense
+    cloud and pass the chosen ones on; the US polygons become classes with their statistics."""
+    from PySide6.QtWidgets import QFileDialog
+    from shapely.geometry import box
+
+    from pyarchinit_photogrammetry.archaeo import sections
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+    from pyarchinit_photogrammetry.core.pointcloud import PointCloud
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    w = window
+    ch = w.chunk
+    original = ch.point_cloud
+    classes = dict(ch.meta.get("classes", {}))
+    try:
+        pc = ch.point_cloud
+        world = ch.to_world(pc.xyz)
+        cx, cy = np.median(world[:, 0]), np.median(world[:, 1])
+        tool = (np.abs(world[:, 0] - cx) < 0.2) & (np.abs(world[:, 1] - cy) < 0.2)
+        pc.classification[:] = 2
+        pc.classification[tool] = 71
+        ch.point_cloud = pc
+        asked, built = [], {}
+
+        def ask(answers):
+            def fake(cls, parent, title, fields, intro=""):
+                asked.append((title, {f.name: f for f in fields}, intro))
+                return answers
+            return classmethod(fake)
+
+        for name in ("build_dem", "build_orthomosaic", "build_model"):
+            monkeypatch.setattr(ch, name, lambda *a, _n=name, **k: built.__setitem__(_n, k))
+        monkeypatch.setattr(w, "_show_raster", lambda *a: None)
+        monkeypatch.setattr(w, "_show_model", lambda *a: None)
+        monkeypatch.setattr(mw.ParamDialog, "ask", ask({"source": "point_cloud", "resolution": None,
+                                                         "interpolate": True, "classes": [2]}))
+        w.build_dem()
+        w.runner.wait()
+        field = asked[-1][1]["classes"]
+        assert field.kind == "checklist" and [c for c, _ in field.choices] == [2, 71] and "DTM" in asked[-1][2]
+        assert built["build_dem"]["classes"] == [2]
+        monkeypatch.setattr(mw.ParamDialog, "ask", ask({"source": "point_cloud", "resolution": None,
+                                                         "interpolate": True, "classes": [2, 71]}))
+        w.build_dem()
+        w.runner.wait()
+        assert built["build_dem"]["classes"] is None  # every class: the usual DEM
+        monkeypatch.setattr(mw.ParamDialog, "ask", ask({"surface": "dem", "blending": "mosaic", "resolution": None,
+                                                         "hide": [71]}))
+        w.build_ortho()
+        w.runner.wait()
+        assert built["build_orthomosaic"]["hide_classes"] == [71]
+        monkeypatch.setattr(mw.ParamDialog, "ask", ask({"source": "point_cloud", "surface": "arbitrary",
+                                                         "face_count": "medium", "voxel": 0.0, "classes": [2]}))
+        w.build_model()
+        w.runner.wait()
+        assert built["build_model"]["classes"] == [2]
+        # export of one class
+        out = tmp_path / "attrezzi.las"
+        monkeypatch.setattr(mw.ParamDialog, "ask", ask({"classes": [71]}))
+        monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))
+        w.export("cloud")
+        exported = PointCloud.load(out)
+        assert len(exported) == tool.sum() and set(np.unique(exported.classification)) == {71}
+        # sections from the dense cloud without the tool; plan slice of class 2 only
+        monkeypatch.setattr(mw.ParamDialog, "ask", ask({"source": "point_cloud", "thickness": 0.05, "classes": [2]}))
+        w.section_options()
+        assert ch.meta["section_options"] == {"source": "point_cloud", "thickness": 0.05, "classes": [2]}
+        cut = []
+        real_section, real_slice = sections.section, sections.plan_slice
+        monkeypatch.setattr(sections, "section", lambda *a, **k: cut.append(k) or real_section(*a, **k))
+        monkeypatch.setattr(sections, "plan_slice", lambda *a, **k: cut.append(k) or real_slice(*a, **k))
+        n = len(w.sections)
+        w._section_drawn(np.array([cx - 1.0, cy]), np.array([cx + 1.0, cy]))
+        w.runner.wait()
+        qapp.processEvents()
+        assert len(w.sections) == n + 1 and cut[-1]["classes"] == [2] and cut[-1]["source"] == "point_cloud"
+        top = np.median(world[tool, 2])
+        monkeypatch.setattr(mw.ParamDialog, "ask", ask({"z": float(top), "classes": [2]}))
+        w.plan_slice()
+        w.runner.wait()
+        assert cut[-1]["classes"] == [2]
+        # classes from the units drawn on the orthophoto
+        x0, y0 = np.min(world[:, 0]), np.min(world[:, 1])
+        w.units = [UnitPolygon(box(x0, y0, cx, cy + 5), us="7", area="1", sito="Saggio"),
+                   UnitPolygon(box(cx, y0, cx + 5, cy + 5), us="8", area="1", sito="Saggio")]
+        monkeypatch.setattr(mw.ParamDialog, "ask", ask({"units": ["US 7 (area 1)", "US 8 (area 1)"],
+                                                         "keep_manual": True}))
+        tables = []
+
+        class Table:
+            def __init__(self, title, headers, rows, *a, **k):
+                tables.append((headers, rows, k))
+
+            def exec(self):
+                return 0
+
+        monkeypatch.setattr(mw, "TableDialog", Table)
+        w.units_to_classes()
+        w.runner.wait()
+        qapp.processEvents()
+        headers, rows, kw = tables[-1]
+        assert headers[0] == "US" and [r[0] for r in rows] == ["US 7 (area 1)", "US 8 (area 1)"]
+        assert sum(r[2] for r in rows) == len(world)  # every point is in one of the two units
+        assert kw["save"](tmp_path / "us.csv").exists()
+        assert {100, 101} <= set(ch.point_classes()) and ch.meta["classes"]["100"] == "US 7 (area 1)"
+    finally:
+        ch.point_cloud = original
+        ch.meta["classes"] = classes
+        ch.meta.pop("section_options", None)
+        w.units = []
+        w.model_view.set_color_mode("rgb")

@@ -1101,3 +1101,53 @@ class UsFormDialog(QDialog):
             self.status.setText(f"Salvataggio non riuscito: {exc}")
             return
         self.accept()
+
+
+class TableDialog(QDialog):
+    """Results as a table (numbers right aligned) with *Salva CSV...* when ``save(path)`` is given."""
+
+    def __init__(self, title: str, headers: list[str], rows: list[list], parent=None, intro: str = "",
+                 save=None, csv_name: str = "tabella.csv"):
+        from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem
+
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumSize(560, 320)
+        self._save, self._csv_name = save, csv_name
+        lay = QVBoxLayout(self)
+        if intro:
+            lab = QLabel(intro)
+            lab.setWordWrap(True)
+            lay.addWidget(lab)
+        self.table = QTableWidget(len(rows), len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        for r, row in enumerate(rows):
+            for c, value in enumerate(row):
+                text = "" if value is None else str(value)
+                if isinstance(value, int) and not isinstance(value, bool) and abs(value) >= 10000:
+                    text = f"{value:,}".replace(",", ".")  # 114.835 points
+                it = QTableWidgetItem(text)
+                if isinstance(value, (int, float)):
+                    it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(r, c, it)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        lay.addWidget(self.table)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        bb.rejected.connect(self.reject)
+        if save is not None:
+            b = bb.addButton("Salva CSV...", QDialogButtonBox.ButtonRole.ActionRole)
+            b.clicked.connect(self._save_csv)
+        lay.addWidget(bb)
+        self.status = QLabel("")
+        lay.addWidget(self.status)
+
+    def _save_csv(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Salva CSV", self._csv_name, "CSV (*.csv)")
+        if path:
+            try:
+                self.status.setText(f"Salvato {self._save(path)}")
+            except Exception as exc:
+                self.status.setText(f"Salvataggio non riuscito: {exc}")

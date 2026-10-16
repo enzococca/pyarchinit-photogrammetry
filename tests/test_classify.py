@@ -173,7 +173,7 @@ def test_mesh_and_sections_without_classes(excavation):
 
 
 def test_classes_from_stratigraphic_units(excavation, tmp_path):
-    from shapely import contains_xy
+    from shapely import intersects_xy
     from shapely.geometry import box
 
     from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
@@ -184,7 +184,7 @@ def test_classes_from_stratigraphic_units(excavation, tmp_path):
                       sito="Saggio")
     rows = classify.classify_by_units(ch, [us1, us2])
     assert [r["name"] for r in rows] == ["US 1 (area 1)", "US 2 (area 1)"] and [r["code"] for r in rows] == [100, 101]
-    in1 = contains_xy(us1.geometry, xyz[:, 0], xyz[:, 1])
+    in1 = intersects_xy(us1.geometry, xyz[:, 0], xyz[:, 1])
     pc = ch.point_cloud
     assert rows[0]["points"] == in1.sum() and (pc.classification[in1] == 100).all()
     assert rows[0]["area_m2"] == pytest.approx(1.4 * 4.0) and rows[0]["sito"] == "Saggio"
@@ -196,7 +196,7 @@ def test_classes_from_stratigraphic_units(excavation, tmp_path):
     small = UnitPolygon(box(ORIGIN[0], ORIGIN[1], ORIGIN[0] + 0.7, ORIGIN[1] + 4.0), us="1", area="1", sito="Saggio")
     rows = classify.classify_by_units(ch, [small])
     pc = ch.point_cloud
-    now = contains_xy(small.geometry, xyz[:, 0], xyz[:, 1])
+    now = intersects_xy(small.geometry, xyz[:, 0], xyz[:, 1])
     assert rows[0]["code"] == 100 and (pc.classification[hand] == 70).all()
     assert (pc.classification[now & ~pc.manual] == 100).all() and (pc.classification[in1 & ~now & ~pc.manual] == 1).all()
     out = classify.units_table_csv(rows, tmp_path / "us.csv")

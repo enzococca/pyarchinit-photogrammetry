@@ -246,7 +246,7 @@ def classify_by_units(chunk, units, base_code: int = 100, keep_manual: bool = Tr
 
     Returns, per class: ``name``, ``code``, ``sito``, ``area_s``, ``us``, ``points``,
     ``area_m2`` (of the polygons), ``z_min``/``z_mean``/``z_max`` (of its points, CRS units)."""
-    from shapely import contains_xy
+    from shapely import intersects_xy
     from shapely.ops import unary_union
 
     pc = chunk.point_cloud
@@ -274,7 +274,7 @@ def classify_by_units(chunk, units, base_code: int = 100, keep_manual: bool = Tr
     shapes = {}
     for name, members in groups.items():
         shapes[name] = unary_union([u.geometry for u in members])
-        inside = contains_xy(shapes[name], world[:, 0], world[:, 1]) & free
+        inside = intersects_xy(shapes[name], world[:, 0], world[:, 1]) & free  # the edge too
         pc.classification[inside] = codes[name]
     chunk.point_cloud = pc
     table = chunk.meta.setdefault("classes", {})
@@ -298,12 +298,12 @@ def assign_class_by_polygons(chunk, units, class_code: int | None = None, base_c
         rows = classify_by_units(chunk, units, base_code=base_code)
         by_name = {r["name"]: r["code"] for r in rows}
         return {str(u.us): by_name[unit_class_name(u, i)] for i, u in enumerate(units)}
-    from shapely import contains_xy
+    from shapely import intersects_xy
 
     pc = chunk.point_cloud
     world = chunk.to_world(pc.xyz)
     for u in units:
-        pc.classification[contains_xy(u.geometry, world[:, 0], world[:, 1])] = class_code
+        pc.classification[intersects_xy(u.geometry, world[:, 0], world[:, 1])] = class_code
     chunk.point_cloud = pc
     return {str(u.us): class_code for u in units}
 

@@ -20,7 +20,8 @@ from ..app import app as application
 from ..core.document import Document
 from . import theme
 from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, IfcPreviewDialog, ImageDialog, ParamDialog,
-                      PublishDialog, QuotaDialog, SiteChoiceDialog, SiteDialog, UnitDialog, UsFormDialog, message)
+                      PublishDialog, QuotaDialog, SiteChoiceDialog, SiteDialog, TableDialog, UnitDialog, UsFormDialog,
+                      message)
 from .icons import app_icon, icon
 from .image_views import US_COLORS, PhotoView, RasterView
 from .model_view import ModelView
@@ -348,6 +349,11 @@ class MainWindow(QMainWindow):
             model_group.addAction(a)
             self.sam_model_actions[key] = a
         self.draw_actions["sam"].setMenu(self.sam_menu)
+        # sections: what is cut (model or dense cloud) and which point classes
+        self.section_menu = QMenu("Sezione", self)
+        self._act(self.section_menu, "Opzioni delle sezioni (modello o nuvola, classi)...", self.section_options,
+                  icon_name="line")
+        self.draw_actions["line"].setMenu(self.section_menu)
         self.draw_actions["sam"].setToolTip("Segment Anything 2.1: clic su un oggetto (tocco), un riquadro per un "
                                             "oggetto o per tutte le unita' di un'area; dal menu anche tutta l'ortofoto")
         self.ortho_view.sam_tool = current_tool if current_tool in SAM_TOOLS else "tap"
@@ -362,6 +368,7 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self.a_contours = self._act(m, "Curve di livello...", self.contours, processing=True, icon_name="contours")
         self.a_volume = self._act(m, "Volume scavo / riporto...", self.compute_volume, processing=True, icon_name="volume")
+        self._act(m, "Opzioni delle sezioni...", self.section_options, icon_name="line")
         self.a_slice = self._act(m, "Pianta a quota (slice orizzontale)...", self.plan_slice, processing=True,
                                  icon_name="slice")
         self._act(m, "Profilo ceramico da mesh...", self.pottery_profile, processing=True, icon_name="pottery")
@@ -371,6 +378,7 @@ class MainWindow(QMainWindow):
         self._act(cm, "Classificazione automatica (regole)", self.classify, processing=True, icon_name="classify")
         self._act(cm, "Mostra la nuvola per classi", self.show_classes, icon_name="classify")
         self._act(cm, "Correggi a mano con il lazo (vista 3D)", self.classify_with_lasso, icon_name="select")
+        self._act(cm, "Classi dalle US (poligoni)...", self.units_to_classes, processing=True, icon_name="us")
         cm.addSeparator()
         self._act(cm, "Addestra il classificatore sui punti corretti...", self.train_classifier, processing=True,
                   icon_name="classify")
@@ -530,9 +538,10 @@ class MainWindow(QMainWindow):
             snap_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         for mode in ("line", "measure", "quota", "sam"):
             db.addAction(self.draw_actions[mode])
-        sam_button = db.widgetForAction(self.draw_actions["sam"])
-        if sam_button is not None:
-            sam_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        for mode in ("sam", "line"):
+            button = db.widgetForAction(self.draw_actions[mode])
+            if button is not None:
+                button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         db.addAction(self.a_sel_delete)
         db.addAction(self.a_sel_merge)
         db.addAction(self.a_clear_drawings)
@@ -888,12 +897,25 @@ class MainWindow(QMainWindow):
         filters = {"cloud": "LAS (*.las);;PLY (*.ply)", "model": "OBJ con texture (*.obj);;PLY (*.ply)",
                    "dem": "GeoTIFF (*.tif)", "ortho": "GeoTIFF (*.tif)", "cameras": "CSV (*.csv);;COLMAP (*.txt)",
                    "reference": "CSV (*.csv)"}
+        classes = None
+        if what == "cloud":
+            choices, codes = self._cloud_class_choices(noise=True)
+            if len(codes) > 1:
+                v = ParamDialog.ask(self, "Esporta nuvola", [
+                    Field("classes", "Classi da esportare", codes, choices=choices, kind="checklist")],
+                    intro="Il file LAS conserva le classi; puoi esportarne solo alcune (per esempio le murature).")
+                if not v:
+                    return
+                if not v["classes"]:
+                    self._warn("Scegli almeno una classe.")
+                    return
+                classes = None if set(v["classes"]) >= set(codes) else sorted(v["classes"])
         path, flt = QFileDialog.getSaveFileName(self, "Esporta", self._last_dir(), filters[what])
         if not path:
             return
         try:
             if what == "cloud":
-                ch.export_point_cloud(path)
+                ch.export_point_cloud(path, classes=classes)
             elif what == "model":
                 ch.export_model(path)
             elif what == "dem":
@@ -1308,14 +1330,24 @@ class MainWindow(QMainWindow):
             Field("face_count", "Numero di facce", "medium",
                   choices=[("high", "Alto"), ("medium", "Medio"), ("low", "Basso")]),
             Field("voxel", "Voxel per le mappe di profondita' (m, 0 = automatico)", 0.0, minimum=0.0, maximum=100.0,
-                  decimals=4, tip="Lato del voxel della fusione: 0 = due volte il pixel delle mappe sulla superficie")],
+                  decimals=4, tip="Lato del voxel della fusione: 0 = due volte il pixel delle mappe sulla superficie")]
+            + self._class_fields("Classi (solo dalla nuvola densa)"),
             intro=("Con le mappe di profondita' la superficie nasce dalla fusione volumetrica delle mappe (TSDF), "
                    "senza passare dalla nuvola densa: piu' fedele e con i colori delle foto." if depth_maps else
-                   "Costruisci le mappe di profondita' (Nuvola densa) per avere anche la fusione delle mappe."))
+                   "Costruisci le mappe di profondita' (Nuvola densa) per avere anche la fusione delle mappe.")
+            + self._class_hint("Dalla nuvola densa puoi togliere delle classi (vegetazione, attrezzi): la superficie "
+                               "si richiude sopra quello che manca."))
         if v:
             kw = {"voxel_size": v["voxel"] or None} if v["source"] == "depth_maps" else {}
+            classes = self._chosen_classes(v)
+            if classes is not None and v["source"] != "point_cloud":
+                self.log_pane.warning("Le classi valgono solo per il modello dalla nuvola densa: uso tutti i dati.")
+                classes = None
+            if classes == []:
+                self._warn("Scegli almeno una classe.")
+                return
             self.run_task("Modello", lambda p: self.chunk.build_model(v["source"], v["surface"], v["face_count"],
-                                                                    progress=p, **kw),
+                                                                    classes=classes, progress=p, **kw),
                           lambda _m: self._show_model("model"))
 
     def build_texture(self) -> None:
@@ -1334,10 +1366,17 @@ class MainWindow(QMainWindow):
             Field("source", "Dati sorgente", "point_cloud" if self.chunk.product_path("point_cloud") else "model",
                   choices=[("point_cloud", "Nuvola densa"), ("model", "Modello"), ("tie_points", "Punti di legame")]),
             Field("resolution", "Risoluzione (m/pixel)", None, kind="optional_float"),
-            Field("interpolate", "Interpola i vuoti", True)])
+            Field("interpolate", "Interpola i vuoti", True)] + self._class_fields("Classi (solo dalla nuvola densa)"),
+            intro=self._class_hint("Con la nuvola densa scegli le classi: solo Terreno da' il modello del terreno (DTM), "
+                                   "senza vegetazione, persone o attrezzi; i vuoti che lasciano vengono interpolati. "
+                                   "Curve di livello e volumi useranno questo DEM."))
         if v:
+            classes = self._chosen_classes(v) if v["source"] == "point_cloud" else None
+            if classes == []:
+                self._warn("Scegli almeno una classe.")
+                return
             self.run_task("DEM", lambda p: self.chunk.build_dem(v["resolution"], v["source"], v["interpolate"],
-                                                               progress=p),
+                                                               classes=classes, progress=p),
                           lambda _r: self._show_raster("dem"))
 
     def build_ortho(self) -> None:
@@ -1346,14 +1385,21 @@ class MainWindow(QMainWindow):
         if not (self.chunk.dem_path or self.chunk.product_path("model")):
             self._warn("Costruisci prima il DEM o il modello.")
             return
+        choices, _codes = self._cloud_class_choices()
         v = ParamDialog.ask(self, "Ortofoto", [
             Field("surface", "Superficie", "dem" if self.chunk.dem_path else "model",
                   choices=[("dem", "DEM"), ("model", "Modello (true ortho)")]),
             Field("blending", "Fusione", "mosaic", choices=[("mosaic", "Mosaico"), ("average", "Media")]),
-            Field("resolution", "Risoluzione (m/pixel)", None, kind="optional_float")])
+            Field("resolution", "Risoluzione (m/pixel)", None, kind="optional_float")]
+            + ([Field("hide", "Classi da rendere trasparenti", [], choices=choices, kind="checklist")]
+               if len(choices) > 1 else []),
+            intro=self._class_hint("Le classi scelte (attrezzi, persone, vegetazione) diventano trasparenti dove sono "
+                                   "la superficie visibile. Su un DEM del solo terreno l'ortofoto e' quella classica."))
         if v:
+            hide = sorted(v.get("hide") or []) or None
             self.run_task("Ortofoto", lambda p: self.chunk.build_orthomosaic(v["resolution"], v["surface"],
-                                                                            v["blending"], progress=p),
+                                                                            v["blending"], hide_classes=hide,
+                                                                            progress=p),
                           lambda _r: self._show_raster("ortho"))
 
     def process_all(self) -> None:
@@ -1759,8 +1805,39 @@ class MainWindow(QMainWindow):
                                          attrs={"lunghezza_m": round(sdict.get("length", 0), 3),
                                                 "svg": sdict.get("svg", "")})
 
+    def _section_options(self) -> dict:
+        return dict((self.chunk.meta.get("section_options") or {}) if self.chunk is not None else {})
+
+    def section_options(self) -> None:
+        """How the next sections are cut: model or dense cloud, band of points, classes."""
+        if not self._need_chunk():
+            return
+        cur = self._section_options()
+        choices, codes = self._cloud_class_choices()
+        v = ParamDialog.ask(self, "Opzioni delle sezioni", [
+            Field("source", "Taglia", cur.get("source", "model"),
+                  choices=[("model", "Il modello 3D (profilo continuo)"), ("point_cloud", "La nuvola densa (punti)")]),
+            Field("thickness", "Fascia di punti attorno alla traccia (m)", float(cur.get("thickness", 0.02)),
+                  minimum=0.001, maximum=10.0, decimals=3)]
+            + ([Field("classes", "Classi", cur.get("classes") or codes, choices=choices, kind="checklist")]
+               if len(codes) > 1 else []),
+            intro="Valgono per le prossime sezioni. Togliendo delle classi (vegetazione, attrezzi) la sezione mostra "
+                  "solo cio' che resta: dal modello restano i tratti che poggiano su punti delle classi scelte.")
+        if not v:
+            return
+        classes = self._chosen_classes(v)
+        if classes == []:
+            self._warn("Scegli almeno una classe.")
+            return
+        self.chunk.meta["section_options"] = {"source": v["source"], "thickness": float(v["thickness"]),
+                                              "classes": classes}
+        self._dirty(True)
+        self.statusBar().showMessage("Opzioni delle sezioni salvate: traccia la sezione sull'ortofoto", 8000)
+
     def _section_drawn(self, a, b) -> None:
-        if not self._need_chunk(product="model"):
+        opts = self._section_options()
+        source = opts.get("source", "model")
+        if not self._need_chunk(product="model" if source == "model" else "point_cloud"):
             return
         from ..archaeo import sections
 
@@ -1771,8 +1848,11 @@ class MainWindow(QMainWindow):
         label = f"Sezione {n}"
 
         def job(p):
-            p(0.1, "Taglio del modello")
-            sec = sections.section(self.chunk, a, b, label=label)
+            p(0.1, "Taglio del modello" if source == "model" else "Punti della nuvola lungo la traccia")
+            sec = sections.section(self.chunk, a, b, label=label, source=source,
+                                   thickness=float(opts.get("thickness", 0.02)), classes=opts.get("classes"))
+            if not sec.polylines:
+                raise RuntimeError("la sezione e' vuota: nessun dato delle classi scelte lungo la traccia")
             out_dir.mkdir(parents=True, exist_ok=True)
             svg = sec.to_svg(out_dir / f"sezione_{n}.svg")
             dxf = sec.to_dxf(out_dir / f"sezione_{n}.dxf", world=False)
@@ -2613,15 +2693,35 @@ class MainWindow(QMainWindow):
     def plan_slice(self) -> None:
         if not self._need_chunk(product="model"):
             return
-        z0, ok = QInputDialog.getDouble(self, "Pianta a quota", "Quota (m):", 0.0, -10000, 10000, 3)
-        if not ok:
+        z_default = 0.0
+        if self.chunk.dem_path:
+            from ..archaeo.terrain import dem_range
+
+            try:
+                lo, hi = dem_range(self.chunk.dem_path)[:2]
+                z_default = round((lo + hi) / 2, 3)
+            except Exception:
+                pass
+        choices, codes = self._cloud_class_choices()
+        v = ParamDialog.ask(self, "Pianta a quota", [
+            Field("z", "Quota (m)", float(z_default), minimum=-10000.0, maximum=100000.0, decimals=3)]
+            + ([Field("classes", "Classi", codes, choices=choices, kind="checklist")] if len(codes) > 1 else []),
+            intro="Il modello viene tagliato con un piano orizzontale alla quota scelta (per esempio la pianta di un "
+                  "muro)." + (" Togliendo delle classi restano solo i tratti che poggiano sulle classi scelte."
+                              if len(codes) > 1 else ""))
+        if not v:
+            return
+        z0 = float(v["z"])
+        classes = self._chosen_classes(v)
+        if classes == []:
+            self._warn("Scegli almeno una classe.")
             return
         from ..archaeo import sections
 
         out = (self.doc.path.parent if self.doc.path else Path.home()) / f"pianta_{z0:.3f}.dxf"
 
         def job(p):
-            s = sections.plan_slice(self.chunk, z0)
+            s = sections.plan_slice(self.chunk, z0, classes=classes)
             s.to_dxf(out, world=True)
             return s
 
@@ -2745,6 +2845,87 @@ class MainWindow(QMainWindow):
         from ..ai.classify import set_class
 
         set_class(self.chunk, mask, code, label=label)
+
+    # ---------------------------------------------------------------- products from chosen classes
+    def _cloud_class_choices(self, noise: bool = False) -> tuple[list, list[int]]:
+        """Classes of the dense cloud as checklist choices (``"2 Terreno (1.234 punti)"``) and
+        their codes; noise left out unless ``noise``."""
+        from ..core.pointcloud import NOISE_CLASSES
+        from .scene import class_name
+
+        path = self.chunk.product_path("point_cloud") if self.chunk is not None else None
+        if path is None or not path.exists():
+            return [], []
+        key = (str(path), path.stat().st_mtime_ns, path.stat().st_size)
+        if getattr(self, "_class_counts_key", None) != key:  # read the class column once per version of the file
+            try:
+                self._class_counts = self.chunk.point_classes()
+            except Exception as exc:  # unreadable cloud: products without class choice
+                log.warning("Classi della nuvola non lette: %s", exc)
+                return [], []
+            self._class_counts_key = key
+        counts = self._class_counts
+        labels = self.chunk.meta.get("classes", {})
+        codes = [c for c in sorted(counts) if noise or c not in NOISE_CLASSES]
+        return [(c, f"{c} {class_name(c, labels)} ({counts[c]:,} punti)".replace(",", ".")) for c in codes], codes
+
+    def _class_fields(self, label: str) -> list:
+        """A checklist of the classes of the dense cloud (all ticked), when it has more than one."""
+        choices, codes = self._cloud_class_choices()
+        return [Field("classes", label, codes, choices=choices, kind="checklist")] if len(codes) > 1 else []
+
+    def _class_hint(self, text: str) -> str:
+        return text if len(self._cloud_class_choices()[1]) > 1 else ""
+
+    def _chosen_classes(self, values: dict):
+        """None when every class is ticked (the product as always), else the ticked codes."""
+        if "classes" not in values:
+            return None
+        codes = self._cloud_class_choices()[1]
+        chosen = sorted(int(c) for c in values["classes"])
+        return None if set(chosen) >= set(codes) else chosen
+
+    def units_to_classes(self) -> None:
+        """One class per stratigraphic unit (points inside its polygon), with points, area and
+        elevations per unit."""
+        if not self._need_chunk(product="point_cloud"):
+            return
+        units = [u for u in self.units if u.geometry is not None and not u.geometry.is_empty]
+        if not units:
+            self._warn("Non ci sono US sull'ortofoto: disegnale (Disegna US) o caricale da PyArchInit "
+                       "(PyArchInit > Carica poligoni US).")
+            return
+        from ..ai.classify import classify_by_units, unit_class_name, units_table_csv
+
+        names = [unit_class_name(u, i) for i, u in enumerate(units)]
+        unique = list(dict.fromkeys(names))
+        v = ParamDialog.ask(self, "Classi dalle US", [
+            Field("units", "US", unique, choices=[(n, n) for n in unique], kind="checklist"),
+            Field("keep_manual", "Mantieni le correzioni fatte a mano", True)],
+            intro="I punti della nuvola densa dentro il poligono di ogni US (in pianta) prendono la classe di quella "
+                  "US, con codici da 100. Poi puoi vedere la nuvola per US, nasconderle, esportarle o farne DEM e "
+                  "mesh; per ogni US ottieni punti, area e quote.")
+        if not v or not v["units"]:
+            return
+        chosen = [u for u, n in zip(units, names) if n in v["units"]]
+        chunk = self.chunk
+
+        def done(rows):
+            self.show_classes()
+            f = lambda x: "" if x is None else round(x, 3)  # noqa: E731
+            table = [[r["name"], r["code"], r["points"], round(r["area_m2"], 3), f(r["z_min"]), f(r["z_mean"]),
+                      f(r["z_max"])] for r in rows]
+            self.log_pane.info("Classi dalle US: " + ", ".join(f"{r['name']} = {r['code']} ({r['points']} punti)"
+                                                               for r in rows))
+            TableDialog("Classi dalle US", ["US", "Classe", "Punti", "Area (m²)", "Quota min", "Quota media",
+                                            "Quota max"], table, self,
+                        intro="La nuvola e' colorata per classi: ogni US ha la sua. Area = superficie del poligono in "
+                              "pianta; quote dei punti della US.",
+                        save=lambda path: units_table_csv(rows, path),
+                        csv_name=str(Path(self._last_dir()) / "us_statistiche.csv")).exec()
+
+        self.run_task("Classi dalle US", lambda p: classify_by_units(chunk, chosen, keep_manual=v["keep_manual"]),
+                      done)
 
     # ---------------------------------------------------------------- trainable classifier
     def _classifier_path(self) -> Path:

@@ -98,7 +98,8 @@ def class_name(code: int, labels: dict | None = None) -> str:
         return ARCHAEO_CLASSES[code].split(" / ")[0]
     if code in ASPRS_CLASSES:
         return ASPRS_CLASSES[code]
-    return str((labels or {}).get(str(code)) or f"Classe {code}")
+    name = str((labels or {}).get(str(code)) or "")
+    return f"Classe {code}" if not name or name == f"Class {code}" else name  # unnamed in a trained model
 
 
 def elevation_colors(z: np.ndarray) -> np.ndarray:
