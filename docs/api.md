@@ -105,7 +105,7 @@ CLI: `ppg mesh project.ppg --source depth_maps [--voxel-size 0.005]`.
 
 Label some points by hand, train a classifier on them, classify the rest of the cloud and,
 with the saved model, the clouds of other projects (like CloudCompare's 3DMASC/CANUPO).
-Needs scikit-learn (`pip install "pyarchinit-photogrammetry[learn]"`, included in `[all]`).
+Needs scikit-learn (`pip install "pyarchinit-photogrammetry[learn]"`, included in `[gui]` and `[all]`).
 
 ```python
 from pyarchinit_photogrammetry.ai import classify, learn

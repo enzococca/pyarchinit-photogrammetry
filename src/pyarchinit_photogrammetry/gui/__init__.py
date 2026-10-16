@@ -136,6 +136,9 @@ def main(argv: list[str] | None = None) -> int:
 
                 CRS.from_epsg(4326).to_wkt()
                 pyproj.CRS.from_epsg(4326).to_wkt()
+                from sklearn.ensemble import RandomForestClassifier  # trainable point classifier
+
+                RandomForestClassifier(n_estimators=2).fit([[0.0], [1.0]], [0, 1])
                 libs = "ok"
             except Exception as exc:
                 libs = f"missing ({str(exc).splitlines()[0][:120]})"

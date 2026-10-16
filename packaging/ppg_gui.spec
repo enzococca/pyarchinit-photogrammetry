@@ -22,6 +22,13 @@ for optional in ("open3d", "ifcopenshell", "psycopg2"):
     except Exception:
         continue
     hidden += collect_submodules(optional)
+try:  # trainable point classifier: estimators imported lazily and unpickled from .ppgclf files
+    import sklearn  # noqa: F401
+
+    hidden += ["sklearn.ensemble", "sklearn.ensemble._forest", "sklearn.tree._classes",
+               "sklearn.ensemble._hist_gradient_boosting.gradient_boosting"]
+except Exception:
+    pass
 
 datas = ([(str(ROOT / "src" / "pyarchinit_photogrammetry" / "ai" / "sam_worker.py"), "pyarchinit_photogrammetry/ai")]
          + collect_data_files("pyarchinit_photogrammetry") + collect_data_files("qtawesome")
