@@ -47,7 +47,7 @@ CLASSIFIER_FILE = "classificatore.ppgclf"  # classifier trained in a chunk, kept
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, document: Document | None = None, autoconnect: bool = True):
+    def __init__(self, document: Document | None = None, autoconnect: bool = True, progress=None):
         super().__init__()
         self._autoconnect = autoconnect
         self.setWindowTitle(APP_TITLE)
@@ -74,7 +74,7 @@ class MainWindow(QMainWindow):
         self._build_docks()
         self._build_actions()
         self._build_statusbar()
-        self.set_document(document or application.document)
+        self.set_document(document or application.document, progress=progress)
         QTimer.singleShot(0, self._autoconnect_pyarchinit)
 
     # ================================================================ layout
@@ -140,6 +140,7 @@ class MainWindow(QMainWindow):
         self.reference.optimize_requested.connect(self.optimize_cameras)
         self.reference.changed.connect(lambda: self._dirty(True))
         self.photos = PhotosPane()
+        self.photos.thumbs_progress.connect(self._thumbs_progress)
         self.photos.open_camera.connect(self.open_photo)
         self.log_pane = LogPane()
         self.console = ConsolePane(self._namespace)
@@ -591,7 +592,9 @@ class MainWindow(QMainWindow):
 
         return {"doc": self.doc, "chunk": self.chunk, "app": application, "ppg": ppg, "np": np, "window": self}
 
-    def set_document(self, doc: Document) -> None:
+    def set_document(self, doc: Document, progress=None) -> None:
+        """Show a project. ``progress(fraction, text)`` follows the loading of the views."""
+        step = progress or (lambda *_a, **_k: None)
         application.document = doc
         if not doc.chunks:
             doc.add_chunk("Chunk 1")
@@ -603,7 +606,8 @@ class MainWindow(QMainWindow):
         self.line_layers = {}
         self._restore_drawings()
         self.pa_pane.set_project_site(self.project_site())
-        self.refresh_all(reset_views=True)
+        self.refresh_all(reset_views=True, progress=step)
+        step(0.95, "Sezioni e disegni")
         self._load_sections()
         self.proxies_pane.set_proxies(self.chunk.meta.get("proxies", []) if self.chunk else [])
         if doc.path:
@@ -617,13 +621,18 @@ class MainWindow(QMainWindow):
         elif linked:
             self._schedule_qgis()
 
-    def refresh_all(self, reset_views: bool = False) -> None:
+    def refresh_all(self, reset_views: bool = False, progress=None) -> None:
+        step = progress or (lambda *_a, **_k: None)
         self._update_title()
+        step(0.05, "Area di lavoro")
         self.workspace.populate(self.doc)
         self.reference.set_chunk(self.chunk, self.last_report)
+        step(0.15, "Foto (le miniature arrivano mentre lavori)")
         self.photos.set_chunk(self.chunk)
+        step(0.25, "Vista 3D")
         self.model_view.set_chunk(self.chunk) if reset_views else self.model_view.set_chunk(self.chunk,
                                                                                              self.model_view.kind)
+        step(0.6, "Ortofoto e DEM")
         self._load_raster()
         self._update_stack()
 
@@ -786,15 +795,36 @@ class MainWindow(QMainWindow):
             path, _ = QFileDialog.getOpenFileName(self, "Apri progetto", self._last_dir(), "Progetti (*.ppg)")
             if not path:
                 return
+        card = self._progress_card("Apertura del progetto", Path(path).name)
+        step = card.progress(0, 100) if card is not None else (lambda *_a, **_k: None)
         try:
-            doc = Document.open(path)
-        except Exception as exc:
-            self._exc(f"Impossibile aprire {path}", exc)
-            return
-        self.last_report = None
-        self._started = True
-        self.set_document(doc)
+            step(0.02, "Lettura del progetto")
+            try:
+                doc = Document.open(path)
+            except Exception as exc:
+                if card is not None:
+                    card.close()
+                    card = None
+                self._exc(f"Impossibile aprire {path}", exc)
+                return
+            self.last_report = None
+            self._started = True
+            self.set_document(doc, progress=lambda f, text=None: step(0.08 + 0.9 * f, text))
+            step(1.0, "Pronto")
+        finally:
+            if card is not None:
+                card.close()
         self.statusBar().showMessage(f"Aperto {path}", 5000)
+
+    def _progress_card(self, title: str, subtitle: str = ""):
+        """The splash card over the window, for a long step that is not a background task."""
+        try:
+            from ppg_launcher import Splash
+        except Exception:  # pragma: no cover - launcher module missing
+            return None
+        card = Splash(title, subtitle, parent=self)
+        card.step(0, "")
+        return card
 
     def save_document(self, ask: bool = False) -> bool:
         if ask or self.doc.path is None:
@@ -870,6 +900,7 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard():
             ev.ignore()
             return
+        self.photos.stop()
         self.log_pane.detach()
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("state", self.saveState())
@@ -1532,6 +1563,11 @@ class MainWindow(QMainWindow):
             self.log_pane.warning(f"Triangolazione dei marker non riuscita: {exc}")
         self.reference.set_chunk(self.chunk)
         self.workspace.populate(self.doc)
+
+    def _thumbs_progress(self, done: int, total: int) -> None:
+        if total >= 30:  # a few photos load at once: no message
+            self.statusBar().showMessage(f"Miniature delle foto: {done}/{total}" if done < total
+                                         else f"Miniature delle foto pronte ({total})", 3000)
 
     def _show_coords(self, x: float, y: float, z) -> None:
         label = "dZ" if getattr(self.ortho_view, "kind", None) == "diff" else "Z"

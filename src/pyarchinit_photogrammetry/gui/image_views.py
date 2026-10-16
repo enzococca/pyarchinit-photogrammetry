@@ -193,6 +193,9 @@ class RasterView(_ZoomView):
         self.path, self.kind = Path(path), kind
         with rasterio.open(path) as src:
             f = max(1.0, max(src.width, src.height) / max_side)
+            levels = src.overviews(1) if f > 1 else []
+            if levels:  # a whole overview level: averaging a larger one took seconds (41000 px orthophoto)
+                f = float(min((o for o in levels if o >= f), default=f))
             h, w = int(round(src.height / f)), int(round(src.width / f))
             self.tr = src.transform @ src.transform.scale(src.width / w, src.height / h)
             if kind in ("dem", "diff"):

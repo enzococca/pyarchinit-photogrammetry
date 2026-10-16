@@ -8,8 +8,8 @@ import logging
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSize, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QKeyEvent, QPainter, QPixmap, QTextCursor
+from PySide6.QtCore import QObject, QSize, Qt, QThread, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QImage, QKeyEvent, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QSizePolicy,
                                QSplitter, QTableWidget, QTableWidgetItem, QToolButton, QTreeWidget, QTreeWidgetItem,
@@ -149,10 +149,62 @@ class WorkspaceTree(QTreeWidget):
             self.context_requested.emit(*data, self.viewport().mapToGlobal(pos))
 
 
+def read_thumbnail(path: str, width: int = 150) -> QImage:
+    """Small image of a photo: the preview the camera stores in the EXIF (a few milliseconds,
+    also for a large drone photo on a slow disk), else the photo decoded at 1/8 of its size.
+    Safe in a worker thread (QImage, not QPixmap); a null image when the file cannot be read."""
+    import io
+
+    import numpy as np
+
+    try:
+        from PIL import ExifTags, Image
+
+        with Image.open(path) as im:
+            ifd1 = im.getexif().get_ifd(ExifTags.IFD.IFD1)
+            raw = im.info.get("exif", b"")
+        off, n = ifd1.get(0x0201), ifd1.get(0x0202)  # JPEGInterchangeFormat(Length)
+        if off and n and raw[:6] == b"Exif\x00\x00":
+            with Image.open(io.BytesIO(raw[6 + off:6 + off + n])) as th:
+                return to_qimage(np.asarray(th.convert("RGB")))
+    except Exception:
+        pass
+    import cv2
+
+    img = cv2.imread(path, cv2.IMREAD_REDUCED_COLOR_8 | cv2.IMREAD_IGNORE_ORIENTATION)
+    if img is None:
+        return QImage()
+    f = width / max(img.shape[1], 1)
+    img = cv2.resize(img, (width, max(1, int(img.shape[0] * f))), interpolation=cv2.INTER_AREA)
+    return to_qimage(img[:, :, ::-1])
+
+
+class _ThumbLoader(QThread):
+    """Reads the thumbnails of a list of photos in the background."""
+
+    loaded = Signal(int, str, QImage)  # generation, path, image (null: unreadable)
+
+    def __init__(self, generation: int, paths: list[str], parent=None):
+        super().__init__(parent)
+        self.generation, self.paths = generation, paths
+
+    def run(self) -> None:
+        for path in self.paths:
+            if self.isInterruptionRequested():
+                return
+            try:
+                img = read_thumbnail(path)
+            except Exception:
+                img = QImage()
+            self.loaded.emit(self.generation, path, img)
+
+
 class PhotosPane(QListWidget):
-    """Thumbnails of the active chunk's photos (double click opens the photo)."""
+    """Thumbnails of the active chunk's photos (double click opens the photo). They are read in
+    the background (hundreds of drone photos took minutes, with the window frozen)."""
 
     open_camera = Signal(object)
+    thumbs_progress = Signal(int, int)  # read, total
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -165,22 +217,21 @@ class PhotosPane(QListWidget):
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.itemDoubleClicked.connect(lambda it: self.open_camera.emit(it.data(Qt.ItemDataRole.UserRole)))
         self._cache: dict[str, QPixmap] = {}
+        self._items: dict[str, list[QListWidgetItem]] = {}
+        self._generation = 0
+        self._loader: _ThumbLoader | None = None
+        self._stale: list[_ThumbLoader] = []
+        self._done = self._total = 0
         self.chunk = None
 
-    def _thumb(self, path: str, aligned: bool) -> QIcon:
-        import cv2
+    @staticmethod
+    def _placeholder(broken: bool = False) -> QPixmap:
+        pm = QPixmap(150, 112)
+        pm.fill(QColor("#6b5050" if broken else "#555"))
+        return pm
 
-        pm = self._cache.get(path)
-        if pm is None:
-            img = cv2.imread(path, cv2.IMREAD_REDUCED_COLOR_4 | cv2.IMREAD_IGNORE_ORIENTATION)
-            if img is None:
-                pm = QPixmap(150, 112)
-                pm.fill(QColor("#555"))
-            else:
-                f = 150 / max(img.shape[1], 1)
-                img = cv2.resize(img, (150, max(1, int(img.shape[0] * f))), interpolation=cv2.INTER_AREA)
-                pm = QPixmap.fromImage(to_qimage(img[:, :, ::-1]))
-            self._cache[path] = pm
+    @staticmethod
+    def _icon(pm: QPixmap, aligned: bool) -> QIcon:
         out = QPixmap(pm)
         p = QPainter(out)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -197,15 +248,54 @@ class PhotosPane(QListWidget):
         return QIcon(out)
 
     def set_chunk(self, chunk) -> None:
+        self.stop()
+        self._generation += 1
         self.chunk = chunk
         self.clear()
+        self._items = {}
         if chunk is None:
             return
+        todo = []
         for cam in chunk.cameras:
-            it = QListWidgetItem(self._thumb(cam.path, cam.aligned), cam.label)
+            pm = self._cache.get(cam.path)
+            it = QListWidgetItem(self._icon(pm if pm is not None else self._placeholder(), cam.aligned), cam.label)
             it.setData(Qt.ItemDataRole.UserRole, cam)
             it.setToolTip(f"{cam.path}\n{'allineata' if cam.aligned else 'non allineata'}")
             self.addItem(it)
+            self._items.setdefault(cam.path, []).append(it)
+            if pm is None and cam.path not in todo:
+                todo.append(cam.path)
+        self._done, self._total = 0, len(todo)
+        if todo:
+            self._loader = _ThumbLoader(self._generation, todo, self)
+            self._loader.loaded.connect(self._loaded)
+            self._loader.start()
+
+    def _loaded(self, generation: int, path: str, img: QImage) -> None:
+        if generation != self._generation:
+            return
+        if img.isNull():
+            pm = self._placeholder(broken=True)
+        else:
+            pm = QPixmap.fromImage(img.scaledToWidth(150, Qt.TransformationMode.SmoothTransformation)
+                                   if img.width() != 150 else img)
+        self._cache[path] = pm
+        for it in self._items.get(path, []):
+            cam = it.data(Qt.ItemDataRole.UserRole)
+            it.setIcon(self._icon(pm, cam.aligned))
+            if img.isNull():
+                it.setToolTip(f"{cam.path}\nfoto non leggibile (file vuoto o mancante)")
+        self._done += 1
+        self.thumbs_progress.emit(self._done, self._total)
+
+    def stop(self) -> None:
+        """Stop reading thumbnails (another chunk, the window closing)."""
+        if self._loader is not None:
+            self._loader.requestInterruption()
+            if not self._loader.wait(3000):  # a photo on a slow disk: let it finish on its own
+                self._stale.append(self._loader)
+            self._loader = None
+        self._stale = [t for t in self._stale if t.isRunning()]
 
     def selected_cameras(self) -> list:
         return [it.data(Qt.ItemDataRole.UserRole) for it in self.selectedItems()]
