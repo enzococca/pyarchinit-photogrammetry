@@ -133,6 +133,7 @@ class MainWindow(QMainWindow):
                    Qt.DockWidgetArea.RightDockWidgetArea)
         self.workspace = WorkspaceTree()
         self.workspace.activated_item.connect(self._workspace_item)
+        self.workspace.context_requested.connect(self._workspace_menu)
         self.reference = ReferencePane()
         self.reference.import_requested.connect(self.import_reference)
         self.reference.update_requested.connect(self.update_transform)
@@ -626,10 +627,13 @@ class MainWindow(QMainWindow):
         self._load_raster()
         self._update_stack()
 
-    def _load_raster(self, kind: str | None = None) -> None:
+    def _load_raster(self, kind: str | None = None, path=None) -> None:
+        """The orthomosaic or the DEM of the chunk in the raster view (``path``: another file of
+        that kind, e.g. a kept version or a difference of DEMs) with the drawings on top."""
         ch = self.chunk
         kind = kind or ("ortho" if ch is not None and ch.orthomosaic_path else "dem")
-        path = (ch.orthomosaic_path if kind == "ortho" else ch.dem_path) if ch is not None else None
+        if path is None:
+            path = (ch.orthomosaic_path if kind == "ortho" else ch.dem_path) if ch is not None else None
         if path is None or not Path(path).exists():
             self.ortho_view.scene().clear()
             self.ortho_view.tr = None
@@ -638,6 +642,7 @@ class MainWindow(QMainWindow):
         self.ortho_view.load(path, kind)
         if kind == "ortho" and ch.dem_path:
             self.ortho_view.set_dem(ch.dem_path)
+        self._raster_version = None
         with self.ortho_view.batch():  # thousands of contour lines: one update of panes and QGIS
             for i, u in enumerate(self.units):
                 self._draw_unit(u, i)
@@ -1268,7 +1273,8 @@ class MainWindow(QMainWindow):
                   choices=[("mild", "Lieve"), ("moderate", "Moderato"), ("aggressive", "Aggressivo")]),
             Field("backend", "Motore", "auto", choices=[("auto", "Automatico"), ("cpu", "CPU (integrato)"),
                                                         ("colmap", "COLMAP (GPU NVIDIA)"), ("openmvs", "OpenMVS")]),
-            Field("only_depth", "Solo le mappe di profondita' (per il modello fuso, senza nuvola densa)", False)])
+            Field("only_depth", "Solo le mappe di profondita' (per il modello fuso, senza nuvola densa)", False)]
+            + self._version_fields("point_cloud"))
         if not v:
             return
         from ..engine.dense import unreadable_photos
@@ -1294,6 +1300,9 @@ class MainWindow(QMainWindow):
             if v["only_depth"]:
                 return None
             return self.chunk.build_point_cloud(progress=p.sub(0.8, 0.2))
+
+        if not v["only_depth"]:
+            job = self._versioned("point_cloud", v, job)
 
         def done(pc):
             if pc is None:
@@ -1347,7 +1356,7 @@ class MainWindow(QMainWindow):
                   choices=[("high", "Alto"), ("medium", "Medio"), ("low", "Basso")]),
             Field("voxel", "Voxel per le mappe di profondita' (m, 0 = automatico)", 0.0, minimum=0.0, maximum=100.0,
                   decimals=4, tip="Lato del voxel della fusione: 0 = due volte il pixel delle mappe sulla superficie")]
-            + self._class_fields("Classi (solo dalla nuvola densa)"),
+            + self._class_fields("Classi (solo dalla nuvola densa)") + self._version_fields("model"),
             intro=("Con le mappe di profondita' la superficie nasce dalla fusione volumetrica delle mappe (TSDF), "
                    "senza passare dalla nuvola densa: piu' fedele e con i colori delle foto." if depth_maps else
                    "Costruisci le mappe di profondita' (Nuvola densa) per avere anche la fusione delle mappe.")
@@ -1362,9 +1371,9 @@ class MainWindow(QMainWindow):
             if classes == []:
                 self._warn("Scegli almeno una classe.")
                 return
-            self.run_task("Modello", lambda p: self.chunk.build_model(v["source"], v["surface"], v["face_count"],
-                                                                    classes=classes, progress=p, **kw),
-                          lambda _m: self._show_model("model"))
+            self.run_task("Modello", self._versioned("model", v, lambda p: self.chunk.build_model(
+                v["source"], v["surface"], v["face_count"], classes=classes, progress=p, **kw)),
+                lambda _m: self._show_model("model"))
 
     def build_texture(self) -> None:
         if not self._need_chunk(aligned=True, product="model"):
@@ -1382,7 +1391,8 @@ class MainWindow(QMainWindow):
             Field("source", "Dati sorgente", "point_cloud" if self.chunk.product_path("point_cloud") else "model",
                   choices=[("point_cloud", "Nuvola densa"), ("model", "Modello"), ("tie_points", "Punti di legame")]),
             Field("resolution", "Risoluzione (m/pixel)", None, kind="optional_float"),
-            Field("interpolate", "Interpola i vuoti", True)] + self._class_fields("Classi (solo dalla nuvola densa)"),
+            Field("interpolate", "Interpola i vuoti", True)] + self._class_fields("Classi (solo dalla nuvola densa)")
+            + self._version_fields("dem"),
             intro=self._class_hint("Con la nuvola densa scegli le classi: solo Terreno da' il modello del terreno (DTM), "
                                    "senza vegetazione, persone o attrezzi; i vuoti che lasciano vengono interpolati. "
                                    "Curve di livello e volumi useranno questo DEM."))
@@ -1391,9 +1401,9 @@ class MainWindow(QMainWindow):
             if classes == []:
                 self._warn("Scegli almeno una classe.")
                 return
-            self.run_task("DEM", lambda p: self.chunk.build_dem(v["resolution"], v["source"], v["interpolate"],
-                                                               classes=classes, progress=p),
-                          lambda _r: self._show_raster("dem"))
+            self.run_task("DEM", self._versioned("dem", v, lambda p: self.chunk.build_dem(
+                v["resolution"], v["source"], v["interpolate"], classes=classes, progress=p)),
+                lambda _r: self._show_raster("dem"))
 
     def build_ortho(self) -> None:
         if not self._need_chunk(aligned=True):
@@ -1408,15 +1418,14 @@ class MainWindow(QMainWindow):
             Field("blending", "Fusione", "mosaic", choices=[("mosaic", "Mosaico"), ("average", "Media")]),
             Field("resolution", "Risoluzione (m/pixel)", None, kind="optional_float")]
             + ([Field("hide", "Classi da rendere trasparenti", [], choices=choices, kind="checklist")]
-               if len(choices) > 1 else []),
+               if len(choices) > 1 else []) + self._version_fields("orthomosaic"),
             intro=self._class_hint("Le classi scelte (attrezzi, persone, vegetazione) diventano trasparenti dove sono "
                                    "la superficie visibile. Su un DEM del solo terreno l'ortofoto e' quella classica."))
         if v:
             hide = sorted(v.get("hide") or []) or None
-            self.run_task("Ortofoto", lambda p: self.chunk.build_orthomosaic(v["resolution"], v["surface"],
-                                                                            v["blending"], hide_classes=hide,
-                                                                            progress=p),
-                          lambda _r: self._show_raster("ortho"))
+            self.run_task("Ortofoto", self._versioned("orthomosaic", v, lambda p: self.chunk.build_orthomosaic(
+                v["resolution"], v["surface"], v["blending"], hide_classes=hide, progress=p)),
+                lambda _r: self._show_raster("ortho"))
 
     def process_all(self) -> None:
         if not self._need_chunk():
@@ -1493,6 +1502,8 @@ class MainWindow(QMainWindow):
                 self._show_raster("dem" if payload == "dem" else "ortho")
             else:
                 self._show_model(payload)
+        elif kind == "version":
+            self.show_version(*payload)
         elif kind == "marker":
             cams = [chunk.camera(k) for k in payload.projections]
             if cams:
@@ -1523,7 +1534,8 @@ class MainWindow(QMainWindow):
         self.workspace.populate(self.doc)
 
     def _show_coords(self, x: float, y: float, z) -> None:
-        zt = f"  Z {z:.3f}" if z is not None else ""
+        label = "dZ" if getattr(self.ortho_view, "kind", None) == "diff" else "Z"
+        zt = f"  {label} {z:+.3f}" if z is not None and label == "dZ" else (f"  Z {z:.3f}" if z is not None else "")
         self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}{zt}   [{self.chunk.crs if self.chunk else ''}]")
 
     def _after_console(self) -> None:
@@ -2861,6 +2873,180 @@ class MainWindow(QMainWindow):
         from ..ai.classify import set_class
 
         set_class(self.chunk, mask, code, label=label)
+
+    # ---------------------------------------------------------------- versions of the products
+    def _version_fields(self, product: str) -> list:
+        """Keep the active version of ``product`` (when there is one) or overwrite it, and the
+        name of the version built now."""
+        from ..core import versions
+
+        fields = []
+        if self.chunk is not None and versions.active_files(self.chunk, product):
+            name = versions.active_info(self.chunk, product)["name"]
+            fields.append(Field("keep", "Versione attuale", "keep",
+                                choices=[("keep", f"Conservala per confrontarla ({name})"),
+                                         ("overwrite", "Sovrascrivila")]))
+        fields.append(Field("version_name", "Nome di questa versione (facoltativo)", "", kind="text"))
+        return fields
+
+    def _versioned(self, product: str, v: dict, job):
+        """``job(p)`` keeping first the active version of ``product`` when asked (it comes back if
+        the job fails) and naming the one it builds."""
+        from ..core import versions
+
+        chunk = self.chunk
+        keep = v.get("keep") == "keep"
+        name = (v.get("version_name") or "").strip() or None
+
+        def wrapped(p):
+            kept = versions.keep_active(chunk, product, move=True) if keep else None
+            try:
+                result = job(p)
+            except BaseException:
+                if kept is not None:
+                    versions.restore(chunk, product, kept)
+                raise
+            versions.set_active_name(chunk, product, name)
+            return result
+
+        return wrapped
+
+    def _workspace_menu(self, kind: str, chunk, payload, pos) -> None:
+        """Right click in the workspace: the versions of the dense cloud, model, DEM, orthomosaic."""
+        from ..core import versions
+
+        if chunk is not self.chunk or kind not in ("product", "version"):
+            return
+        product, vid = (payload, None) if kind == "product" else payload
+        if product not in versions.PRODUCTS:
+            return
+        menu = QMenu(self)
+        if vid is None:
+            menu.addAction(icon("view"), "Mostra", lambda: self._workspace_item("product", chunk, product))
+            menu.addAction(icon("recent"), "Conserva una copia come versione",
+                           lambda: self.keep_version_copy(product))
+            menu.addAction(icon("edit"), "Rinomina questa versione...", lambda: self.rename_version(product, None))
+        else:
+            menu.addAction(icon("view"), "Mostra", lambda: self.show_version(product, vid))
+            menu.addAction(icon("ok"), "Rendi attiva (la usano gli altri strumenti)",
+                           lambda: self.activate_version(product, vid))
+            if product == "dem" and chunk.dem_path:
+                menu.addAction(icon("dem"), "Differenza con il DEM attivo", lambda: self.dem_difference(vid))
+            menu.addAction(icon("export"), "Esporta...", lambda: self.export_version(product, vid))
+            menu.addAction(icon("edit"), "Rinomina...", lambda: self.rename_version(product, vid))
+            menu.addSeparator()
+            menu.addAction(icon("delete"), "Elimina", lambda: self.delete_version(product, vid))
+        menu.exec(pos)
+
+    def _version_title(self, product: str, vid: str) -> str:
+        from ..core import versions
+
+        e = next(e for e in versions.versions(self.chunk, product) if e["id"] == vid)
+        return e["name"]
+
+    def show_version(self, product: str, vid: str) -> None:
+        """Show a kept version without making it active."""
+        from ..core import versions
+
+        path = versions.version_file(self.chunk, product, vid)
+        title = self._version_title(product, vid)
+        if product in ("dem", "orthomosaic"):
+            self._load_raster("dem" if product == "dem" else "ortho", path)
+            self._raster_version = (product, vid)
+            self.show_view(self.ortho_view)
+        else:
+            self.model_view.show_version(product, path, title)
+            self.show_view(self.model_view)
+        self.statusBar().showMessage(f"Versione «{title}» (non attiva): doppio clic sul prodotto nell'area di lavoro "
+                                     "per tornare a quella attiva", 15000)
+
+    def keep_version_copy(self, product: str) -> None:
+        """Keep a copy of the active version (e.g. before classifying the cloud again)."""
+        from ..core import versions
+
+        chunk = self.chunk
+        self.run_task("Copia della versione", lambda p: versions.keep_active(chunk, product),
+                      lambda e: self.log_pane.info(f"Conservata una copia: «{e['name']}»") if e else None)
+
+    def activate_version(self, product: str, vid: str) -> None:
+        from ..core import versions
+
+        chunk = self.chunk
+        title = self._version_title(product, vid)
+
+        def done(_previous):
+            self.log_pane.info(f"Versione attiva: «{title}»")
+            if product in ("dem", "orthomosaic"):
+                self._show_raster("dem" if product == "dem" else "ortho")
+            else:
+                self.model_view.set_chunk(chunk, product)
+                self.show_view(self.model_view)
+
+        self.run_task("Cambio di versione", lambda p: versions.activate(chunk, product, vid), done)
+
+    def rename_version(self, product: str, vid: str | None) -> None:
+        from ..core import versions
+
+        old = versions.active_info(self.chunk, product)["name"] if vid is None else self._version_title(product, vid)
+        name, ok = QInputDialog.getText(self, "Rinomina versione", "Nome:", text=old)
+        if ok and name.strip():
+            versions.rename(self.chunk, product, vid, name.strip())
+            self._dirty(True)
+            self.workspace.populate(self.doc)
+
+    def delete_version(self, product: str, vid: str) -> None:
+        from ..core import versions
+
+        title = self._version_title(product, vid)
+        r = message(self, "question", "Elimina versione", f"Eliminare la versione «{title}» e i suoi file?",
+                    buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if r != QMessageBox.StandardButton.Yes:
+            return
+        if getattr(self, "_raster_version", None) == (product, vid) or self.model_view.paths:
+            self.model_view.set_chunk(self.chunk, self.model_view.kind)
+            self._load_raster()
+        versions.delete(self.chunk, product, vid)
+        self._dirty(True)
+        self.workspace.populate(self.doc)
+        self.log_pane.info(f"Versione «{title}» eliminata")
+
+    def export_version(self, product: str, vid: str) -> None:
+        import shutil
+
+        from ..core import versions
+
+        src = versions.version_file(self.chunk, product, vid)
+        path, _ = QFileDialog.getSaveFileName(self, "Esporta versione", str(Path(self._last_dir()) / src.name),
+                                              f"*{src.suffix}")
+        if path:
+            shutil.copy2(src, path)
+            self.log_pane.info(f"Versione «{self._version_title(product, vid)}» esportata in {path}")
+
+    def dem_difference(self, vid: str) -> None:
+        """Active DEM minus a kept one, shown with diverging colours (e.g. surface minus terrain =
+        height of walls and vegetation; after minus before an excavation = removed depth)."""
+        from ..core import versions
+
+        chunk = self.chunk
+        title = self._version_title("dem", vid)
+        active = versions.active_info(chunk, "dem")["name"]
+        kept = next(e for e in versions.versions(chunk, "dem") if e["id"] == vid)
+        r1, r2 = (chunk.meta.get("dem") or {}).get("resolution"), (kept.get("params") or {}).get("resolution")
+
+        def done(path):
+            self._load_raster("diff", path)
+            lim = getattr(self.ortho_view, "diff_limit", 0.0)
+            self.show_view(self.ortho_view)
+            text = (f"Differenza «{active}» - «{title}»: rosso dove l'attivo e' piu' alto, blu dove e' piu' basso "
+                    f"(colori pieni a +/-{lim:.2f} m); dZ sotto il cursore")
+            if r1 and r2 and abs(r1 - r2) > 1e-6 * max(r1, r2):
+                text += (f". Attenzione: risoluzioni diverse ({r1:.3g} e {r2:.3g} m), i bordi ripidi risultano diversi; "
+                         "per un confronto pulito usa la stessa risoluzione")
+            self.log_pane.info(text)
+            self.statusBar().showMessage(text, 30000)
+
+        self.run_task("Differenza tra DEM", lambda p: versions.dem_difference(chunk, vid), done, refresh=False,
+                      save=False)
 
     # ---------------------------------------------------------------- products from chosen classes
     def _cloud_class_choices(self, noise: bool = False) -> tuple[list, list[int]]:

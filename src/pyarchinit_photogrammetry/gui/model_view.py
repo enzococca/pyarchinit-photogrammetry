@@ -423,8 +423,13 @@ class ModelView(QWidget):
         self.b_lasso = QPushButton("Lazo")
         self.b_lasso.setToolTip("Seleziona dei punti con un lazo per cambiarne la classe")
         self.b_lasso.clicked.connect(self.start_lasso)
+        self.version_label = QLabel("")
+        self.version_label.setObjectName("versionLabel")
+        self.version_label.setStyleSheet("color: #b45309; font-weight: bold")
+        self.version_label.setVisible(False)
         bar.addWidget(QLabel("Mostra:"))
         bar.addWidget(self.combo)
+        bar.addWidget(self.version_label)
         bar.addWidget(self.color_combo)
         bar.addWidget(self.b_lasso)
         bar.addWidget(self.cb_cams)
@@ -457,6 +462,7 @@ class ModelView(QWidget):
         self.chunk = None
         self.kind = None
         self.sd = None
+        self.paths: dict = {}  # files shown instead of the active products (a kept version)
         self._project = None
         self._filling = False
         self._update_tools()
@@ -465,7 +471,29 @@ class ModelView(QWidget):
     def backend(self) -> str:
         return "vtk" if isinstance(self.canvas, VtkCanvas) else "software"
 
+    def show_version(self, kind: str, path, title: str) -> None:
+        """Show a kept version (``path``) of the dense cloud or the model; choosing a view in
+        the list goes back to the active products."""
+        self.paths = {kind: str(path)}
+        self.version_label.setText(f"Versione: {title} (non attiva)")
+        self.version_label.setVisible(True)
+        if self.kind == kind:
+            self.refresh(reset=False)
+        else:
+            self._filling = True
+            i = self.combo.findData(kind)
+            if i >= 0:
+                self.combo.setCurrentIndex(i)
+            self._filling = False
+            self.kind = kind
+            self.refresh(reset=True)
+
+    def _clear_version(self) -> None:
+        self.paths = {}
+        self.version_label.setVisible(False)
+
     def set_chunk(self, chunk, kind: str | None = None) -> None:
+        self._clear_version()
         self.chunk = chunk
         views = ["cameras"] + available_views(chunk) if chunk is not None else []
         self._filling = True
@@ -489,6 +517,7 @@ class ModelView(QWidget):
     def _combo_changed(self, _i) -> None:
         if self._filling:
             return
+        self._clear_version()
         self.kind = self.combo.currentData()
         self.refresh(reset=True)
         self.view_changed.emit(self.kind or "")
@@ -496,7 +525,7 @@ class ModelView(QWidget):
     def _update_tools(self) -> None:
         points = self.kind in ("point_cloud", "tie_points")
         self.color_combo.setVisible(points)
-        self.b_lasso.setVisible(self.kind == "point_cloud")
+        self.b_lasso.setVisible(self.kind == "point_cloud" and not self.paths)  # edits go to the active cloud
         self.legend.setVisible(points and self.color_combo.currentData() == "class")
 
     def set_color_mode(self, mode: str) -> None:
@@ -557,8 +586,8 @@ class ModelView(QWidget):
         self._update_tools()
         mode = self.color_combo.currentData() if self.kind in ("point_cloud", "tie_points") else "rgb"
         hidden = self.legend.hidden() if mode == "class" else set()
-        sd = (build_scene(self.chunk, self.kind, color_mode=mode, hidden_classes=hidden) if self.chunk is not None
-              else SceneData(np.zeros(3)))
+        sd = (build_scene(self.chunk, self.kind, color_mode=mode, hidden_classes=hidden, paths=self.paths)
+              if self.chunk is not None else SceneData(np.zeros(3)))
         self.sd = sd
         if mode == "class":
             self.legend.set_counts(sd.class_counts, hidden, sd.class_labels)

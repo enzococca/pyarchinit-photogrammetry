@@ -50,6 +50,22 @@ def dem_colors(z: np.ndarray, res: float) -> np.ndarray:
     return rgba
 
 
+def diff_colors(d: np.ndarray) -> tuple[np.ndarray, float]:
+    """Differences between two DEMs: blue below zero, white at zero, red above (symmetric,
+    saturated at the 98th percentile of the absolute differences). Returns RGBA and that limit."""
+    valid = np.isfinite(d)
+    rgba = np.zeros(d.shape + (4,), np.uint8)
+    if not valid.any():
+        return rgba, 0.0
+    lim = float(max(np.percentile(np.abs(d[valid]), 98), 1e-6))
+    t = np.clip(np.where(valid, d, 0) / lim, -1, 1)
+    stops = np.array([[-1.0, 33, 102, 172], [-0.5, 103, 169, 207], [0.0, 247, 247, 247], [0.5, 239, 138, 98],
+                      [1.0, 178, 24, 43]])
+    rgba[..., :3] = np.stack([np.interp(t, stops[:, 0], stops[:, k]) for k in (1, 2, 3)], -1).astype(np.uint8)
+    rgba[..., 3] = np.where(valid, 255, 0)
+    return rgba, lim
+
+
 class _ZoomView(QGraphicsView):
     """Wheel zoom around the cursor, middle/space drag to pan."""
 
@@ -179,10 +195,13 @@ class RasterView(_ZoomView):
             f = max(1.0, max(src.width, src.height) / max_side)
             h, w = int(round(src.height / f)), int(round(src.width / f))
             self.tr = src.transform @ src.transform.scale(src.width / w, src.height / h)
-            if kind == "dem":
+            if kind in ("dem", "diff"):
                 z = src.read(1, out_shape=(h, w), resampling=Resampling.average, masked=True).astype(np.float64)
                 self.z = z.filled(np.nan)
-                rgba = dem_colors(self.z, abs(self.tr.a))
+                if kind == "diff":  # a difference of DEMs: diverging colours, the limit for the legend
+                    rgba, self.diff_limit = diff_colors(self.z)
+                else:
+                    rgba = dem_colors(self.z, abs(self.tr.a))
             else:
                 self.z = None
                 n = min(src.count, 4)

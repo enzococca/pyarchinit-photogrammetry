@@ -155,7 +155,10 @@ def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "poin
     pts = surface_points_world(chunk, source, classes)
     if resolution is None:
         area = np.ptp(pts[:, 0]) * np.ptp(pts[:, 1])
-        resolution = float(max(2 * estimate_gsd(chunk), np.sqrt(area / max(len(pts), 1)) * 1.5))
+        n = len(pts)
+        if classes is not None:  # the density of the whole cloud: DEMs of other classes on the same grid
+            n = max(n, sum(v for k, v in chunk.point_classes().items() if k not in NOISE_CLASSES))
+        resolution = float(max(2 * estimate_gsd(chunk), np.sqrt(area / max(n, 1)) * 1.5))
     progress(0.3, f"Rasterising DEM at {resolution:.4g} m/px")
     dem, origin, _ = grid_points(pts, resolution, reducer="max" if source != "tie_points" else "mean")
     if interpolate:

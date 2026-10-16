@@ -63,7 +63,8 @@ ICONS = {
     "warning": ("mdi6.alert", "amber"), "info": ("mdi6.information", "blue"),
     "copy": ("mdi6.content-copy", "grey"), "folder": ("mdi6.folder-outline", "amber"),
     "search": ("mdi6.magnify", "grey"), "clear": ("mdi6.delete-sweep-outline", "grey"),
-    "ok": ("mdi6.check-circle", "green"),
+    "ok": ("mdi6.check-circle", "green"), "view": ("mdi6.eye-outline", "blue"), "edit": ("mdi6.pencil-outline", "slate"),
+    "version": ("mdi6.layers-outline", "amber"),
     # tree items
     "camera_ok": ("mdi6.camera", "green"), "camera_bad": ("mdi6.camera-off", "red"),
     "cameras": ("mdi6.camera-burst", "blue"), "marker": ("mdi6.map-marker", "violet"),

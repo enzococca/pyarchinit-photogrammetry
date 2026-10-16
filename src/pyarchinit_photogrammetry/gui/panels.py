@@ -38,6 +38,7 @@ class WorkspaceTree(QTreeWidget):
     """Document > chunks > photos / markers / scale bars / products."""
 
     activated_item = Signal(str, object, object)  # kind, chunk, payload
+    context_requested = Signal(str, object, object, object)  # kind, chunk, payload, global position
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -47,6 +48,8 @@ class WorkspaceTree(QTreeWidget):
         self.setIndentation(16)
         self.itemDoubleClicked.connect(self._double)
         self.itemClicked.connect(self._single)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._context)
         self.document = None
 
     def populate(self, document) -> None:
@@ -100,12 +103,32 @@ class WorkspaceTree(QTreeWidget):
                 ci.addChild(sb)
                 for s in ch.scalebars:
                     sb.addChild(QTreeWidgetItem([f"{s.label}: {s.distance:.4f} m"]))
+            from ..core import versions
+
             for key in ("tie_points", "point_cloud", "model", "model_textured", "dem", "orthomosaic"):
-                if ch.product_path(key):
-                    it = QTreeWidgetItem([PRODUCT_LABELS[key]])
-                    it.setIcon(0, icon(key))
-                    it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, key))
-                    ci.addChild(it)
+                kept = versions.versions(ch, key) if key in versions.PRODUCTS else []
+                if not ch.product_path(key) and not kept:
+                    continue
+                label = PRODUCT_LABELS[key]
+                named = key in versions.PRODUCTS and (kept or (ch.meta.get("active_versions") or {}).get(key))
+                if named:
+                    label += (f"  -  {versions.active_info(ch, key)['name']}" if ch.product_path(key)
+                              else "  -  nessuna versione attiva")
+                it = QTreeWidgetItem([label])
+                it.setIcon(0, icon(key))
+                it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, key))
+                if key in versions.PRODUCTS:
+                    it.setToolTip(0, "Doppio clic per vederlo; tasto destro: versioni (conserva, rinomina...)")
+                ci.addChild(it)
+                for e in reversed(kept):
+                    when = e["created"][:16].replace("T", " ")
+                    vi = QTreeWidgetItem([f"{e['name']}   ({when})"])
+                    vi.setIcon(0, icon("version"))
+                    vi.setData(0, Qt.ItemDataRole.UserRole, ("version", ch, (key, e["id"])))
+                    vi.setToolTip(0, "Versione conservata: doppio clic per vederla; tasto destro per renderla "
+                                     "attiva, confrontarla, rinominarla o eliminarla")
+                    it.addChild(vi)
+                it.setExpanded(bool(kept))
             ci.setExpanded(ch is document.chunk)
         root.setExpanded(True)
 
@@ -118,6 +141,12 @@ class WorkspaceTree(QTreeWidget):
         data = item.data(0, Qt.ItemDataRole.UserRole)
         if data and data[0] == "chunk":
             self.activated_item.emit("select_chunk", data[1], None)
+
+    def _context(self, pos) -> None:
+        item = self.itemAt(pos)
+        data = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        if data:
+            self.context_requested.emit(*data, self.viewport().mapToGlobal(pos))
 
 
 class PhotosPane(QListWidget):

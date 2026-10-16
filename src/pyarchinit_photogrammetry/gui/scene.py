@@ -135,10 +135,13 @@ def _offset(chunk) -> np.ndarray:
 
 
 def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_faces: int = 600_000,
-                frustum_size: float | None = None, color_mode: str = "rgb", hidden_classes=()) -> SceneData:
+                frustum_size: float | None = None, color_mode: str = "rgb", hidden_classes=(),
+                paths: dict | None = None) -> SceneData:
     """Collect what the 3D view shows for ``kind`` (tie_points, point_cloud, model,
     model_textured, cameras). Point clouds are coloured by ``color_mode`` ("rgb", "class",
-    "elevation"); points of ``hidden_classes`` are left out."""
+    "elevation"); points of ``hidden_classes`` are left out. ``paths`` shows other files
+    than the active products (``{"point_cloud": ..., "model": ...}``: a kept version)."""
+    paths = paths or {}
     if chunk is None:
         return SceneData(np.zeros(3))
     kind = kind or best_view(chunk)
@@ -155,7 +158,12 @@ def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_f
         return (np.asarray(p, float) @ T[:3, :3].T + T[:3, 3] - off).astype(np.float32)
 
     if kind in ("tie_points", "point_cloud"):
-        pc = chunk.tie_points if kind == "tie_points" else chunk.point_cloud
+        if kind == "point_cloud" and paths.get("point_cloud"):
+            from ..core.pointcloud import PointCloud
+
+            pc = PointCloud.load(paths["point_cloud"])
+        else:
+            pc = chunk.tie_points if kind == "tie_points" else chunk.point_cloud
         if pc is not None and len(pc):
             codes = getattr(pc, "classification", None)
             codes = np.asarray(codes, np.uint8) if codes is not None and len(codes) == len(pc) else np.zeros(len(pc),
@@ -211,7 +219,7 @@ def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_f
         if V:
             sd.mesh_vertices, sd.mesh_faces, sd.mesh_colors = np.vstack(V), np.vstack(F), np.vstack(C)
     elif kind in ("model", "model_textured"):
-        mesh = display_model(chunk, max_faces)
+        mesh = display_model(chunk, max_faces, paths.get("model"))
         if mesh is not None:
             faces = np.asarray(mesh.faces)
             if len(faces) > max_faces:
@@ -240,18 +248,20 @@ def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_f
     return sd
 
 
-def display_model(chunk, max_faces: int = 600_000):
+def display_model(chunk, max_faces: int = 600_000, path=None):
     """The model for the 3D view: a cached coarse copy (``model_preview.ply``, vertex
     clustering) when the model has more than ``max_faces`` faces, made once and refreshed
-    when the model changes; the model itself otherwise."""
+    when the model changes; the model itself otherwise. ``path``: another mesh file (a
+    kept version, with its preview next to it)."""
     import logging
 
     import trimesh
 
-    path = chunk.product_path("model")
+    other = path is not None
+    path = Path(path) if other else chunk.product_path("model")
     if not path or not path.exists():
         return None
-    preview = chunk.data_dir / "model_preview.ply"
+    preview = path.parent / "model_preview.ply"
     if preview.exists() and preview.stat().st_mtime >= path.stat().st_mtime:
         return trimesh.load(str(preview), process=False, force="mesh")
     from ..io.mesh_ply import face_count, make_preview
@@ -262,7 +272,7 @@ def display_model(chunk, max_faces: int = 600_000):
             return trimesh.load(str(make_preview(path, preview, max_faces)), process=False, force="mesh")
         except (ValueError, MemoryError, OSError) as exc:
             logging.getLogger(__name__).warning("Anteprima del modello non creata: %s", exc)
-    return chunk.model
+    return trimesh.load(str(path), process=False, force="mesh") if other else chunk.model
 
 
 def _up_internal(chunk, T) -> np.ndarray:
