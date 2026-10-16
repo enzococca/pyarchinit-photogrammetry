@@ -276,6 +276,29 @@ class Chunk:
         for k in ("tie_points", "reconstruction"):
             self.products.pop(k, None)
 
+    def clean_tie_points(self, max_reprojection_error: float | None = None, min_image_count: int | None = None,
+                         max_reconstruction_uncertainty: float | None = None,
+                         max_projection_accuracy: float | None = None, optimize: bool = False,
+                         progress: ProgressCallback | None = None) -> dict:
+        """Gradual selection of the tie points, as in Metashape: remove the points whose mean
+        reprojection error (px) or reconstruction uncertainty is above the threshold, that fewer
+        photos than ``min_image_count`` see, or measured on keypoints larger than
+        ``max_projection_accuracy`` (px); ``optimize`` runs :meth:`optimize_cameras` afterwards.
+        Criteria left ``None`` are not used. Returns the counts per criterion, the points
+        removed and left and the reprojection error before and after (see
+        :mod:`engine.tiepoints`)."""
+        from ..engine import tiepoints
+
+        progress = as_progress(progress)
+        progress(0.0, "Measuring the tie points")
+        sel = tiepoints.select_tie_points(self, max_reprojection_error=max_reprojection_error,
+                                          min_image_count=min_image_count,
+                                          max_reconstruction_uncertainty=max_reconstruction_uncertainty,
+                                          max_projection_accuracy=max_projection_accuracy)
+        out = tiepoints.remove_tie_points(self, sel["ids"], optimize=optimize, progress=progress.sub(0.1, 0.9))
+        out.update({"selected": sel["selected"], "by_criterion": sel["by_criterion"], "total": sel["total"]})
+        return out
+
     # ---------------------------------------------------------------- markers
     def detect_markers(self, target_type: str = "aruco_4x4_50", cameras: Iterable[Camera] | None = None,
                        progress: ProgressCallback | None = None) -> list[Marker]:
