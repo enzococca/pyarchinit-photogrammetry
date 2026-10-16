@@ -195,20 +195,28 @@ def cluster_decimate(xyz: np.ndarray, face_chunks, colors: np.ndarray | None = N
     return V[used], remap[G], (C[used] if C is not None else None)
 
 
-def write_mesh_ply(path: str | Path, vertices: np.ndarray, faces: np.ndarray, colors: np.ndarray | None = None) -> Path:
-    """Binary little-endian PLY with float32 vertices, optional uchar colours, int faces."""
+def write_mesh_ply(path: str | Path, vertices: np.ndarray, faces: np.ndarray, colors: np.ndarray | None = None,
+                   double: bool = False, extra: dict | None = None) -> Path:
+    """Binary little-endian PLY with float32 vertices (float64 with ``double``: map coordinates
+    such as UTM lose centimetres in float32), optional uchar colours and uchar vertex
+    properties ``extra`` (e.g. ``{"confidence": ...}``), int faces."""
     path = Path(path)
-    vfields = [("x", "<f4"), ("y", "<f4"), ("z", "<f4")] + ([("red", "u1"), ("green", "u1"), ("blue", "u1")]
-                                                            if colors is not None else [])
+    ft = "<f8" if double else "<f4"
+    vfields = [("x", ft), ("y", ft), ("z", ft)] + ([("red", "u1"), ("green", "u1"), ("blue", "u1")]
+                                                  if colors is not None else [])
+    vfields += [(name, "u1") for name in (extra or {})]
     v = np.empty(len(vertices), dtype=vfields)
     v["x"], v["y"], v["z"] = (np.asarray(vertices)[:, k] for k in range(3))
     if colors is not None:
         v["red"], v["green"], v["blue"] = (np.asarray(colors)[:, k] for k in range(3))
+    for name, values in (extra or {}).items():
+        v[name] = np.clip(np.asarray(values), 0, 255)
     f = np.empty(len(faces), dtype=[("n", "u1"), ("v", "<i4", (3,))])
     f["n"] = 3
     f["v"] = faces
+    names = {"<f4": "float", "<f8": "double", "u1": "uchar"}
     head = ["ply", "format binary_little_endian 1.0", f"element vertex {len(v)}"]
-    head += [f"property {'float' if t == '<f4' else 'uchar'} {n}" for n, t in vfields]
+    head += [f"property {names[t]} {n}" for n, t in vfields]
     head += [f"element face {len(f)}", "property list uchar int vertex_indices", "end_header"]
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "wb") as out:
@@ -220,11 +228,18 @@ def write_mesh_ply(path: str | Path, vertices: np.ndarray, faces: np.ndarray, co
 
 
 def make_preview(model: str | Path, out: str | Path, max_faces: int = 600_000, progress=None) -> Path:
-    """A display copy of a large binary PLY mesh with about ``max_faces`` faces."""
+    """A display copy of a large binary PLY mesh with about ``max_faces`` faces (with the vertex
+    confidence of the nearest vertex when the model has one)."""
     mesh = PlyMesh(model)
     xyz = mesh.xyz()
     V, F, C = cluster_decimate(xyz, mesh.face_chunks, mesh.colors(), max_faces, progress=progress)
-    return write_mesh_ply(out, V, F, C)
+    extra = None
+    if "confidence" in mesh.vertex_dtype.names:
+        from scipy.spatial import cKDTree
+
+        idx = cKDTree(xyz).query(V, workers=-1)[1]
+        extra = {"confidence": np.asarray(mesh.vertices["confidence"])[idx]}
+    return write_mesh_ply(out, V, F, C, extra=extra)
 
 
 __all__ = ["PlyMesh", "read_header", "face_count", "transform_vertices", "cluster_decimate", "write_mesh_ply",

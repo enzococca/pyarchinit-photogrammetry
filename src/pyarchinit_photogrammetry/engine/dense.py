@@ -143,6 +143,13 @@ def build_point_cloud(chunk: Chunk, point_colors: bool = True, progress: Progres
         out = ws / "fused.ply"
         pycolmap.stereo_fusion(str(out), str(ws), input_type="geometric", options=fopts, output_type="PLY")
         pc = PointCloud.load(out)
+        if len(pc):  # confidence: how many depth maps agree on each point
+            from .confidence import depth_map_support
+
+            try:
+                pc.confidence = depth_map_support(chunk, pc.xyz, progress=progress.sub(0.85, 0.13))
+            except Exception as exc:  # pragma: no cover - unreadable depth maps: a cloud without confidence
+                progress(0.98, f"Confidence not computed: {exc}")
     if not point_colors:
         pc.rgb = None
     if len(pc) == 0:

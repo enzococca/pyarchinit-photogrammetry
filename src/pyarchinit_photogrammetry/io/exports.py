@@ -10,24 +10,76 @@ import numpy as np
 from ..core import geometry
 
 
-def export_model(chunk, path) -> Path:
-    """Export the mesh in world coordinates. ``.obj`` keeps the texture when built."""
+def _subset(verts: np.ndarray, faces: np.ndarray, keep: np.ndarray):
+    """Faces ``keep`` and only the vertices they use: (vertices, faces, used vertex mask)."""
+    faces = faces[keep]
+    used = np.zeros(len(verts), bool)
+    used[faces.ravel()] = True
+    remap = np.cumsum(used) - 1
+    return verts[used], remap[faces], used
+
+
+def export_model(chunk, path, region=None, zmin: float | None = None, zmax: float | None = None) -> Path:
+    """Export the mesh in world coordinates. ``.obj`` keeps the texture when built; ``.ply``
+    keeps the vertex colours and confidence, with double-precision coordinates (UTM and other
+    map coordinates lose centimetres in single precision). ``region`` (a polygon in the chunk
+    CRS, see :func:`engine.crop.as_polygon`) and ``zmin``/``zmax``: only the faces inside."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    cropping = region is not None or zmin is not None or zmax is not None
     textured = chunk.product_path("model_textured")
     if path.suffix.lower() == ".obj" and textured is not None and textured.exists():
         from ..engine.texturing import write_obj
 
         verts, faces, uv = _read_textured_obj(textured)
+        if cropping:
+            from ..engine.crop import faces_inside
+
+            keep = faces_inside(chunk, verts, faces, _region(region), zmin, zmax)
+            if not keep.any():
+                raise ValueError("no face of the model lies inside the region")
+            uv = None if uv is None else uv[keep]
+            verts, faces, _ = _subset(verts, faces, keep)
         write_obj(path, verts, faces, uv, path.stem + "_texture.jpg", transform=chunk.transform)
         shutil.copy2(textured.parent / "texture.jpg", path.with_name(path.stem + "_texture.jpg"))
         return path
-    mesh = chunk.model
-    if mesh is None:
+    model_path = chunk.product_path("model")
+    if model_path is None or not model_path.exists():
         raise RuntimeError("no model in chunk")
-    mesh.apply_transform(chunk.transform)
-    mesh.export(str(path))
+    import trimesh
+
+    from ..engine.confidence import read_model_confidence
+
+    mesh = trimesh.load(str(model_path), process=False, force="mesh")
+    verts, faces = np.asarray(mesh.vertices, np.float64), np.asarray(mesh.faces, np.int64)
+    colors = np.asarray(mesh.visual.vertex_colors, np.uint8)[:, :3] if mesh.visual.kind == "vertex" else None
+    conf = read_model_confidence(model_path)
+    if cropping:
+        from ..engine.crop import faces_inside
+
+        keep = faces_inside(chunk, verts, faces, _region(region), zmin, zmax)
+        if not keep.any():
+            raise ValueError("no face of the model lies inside the region")
+        verts, faces, used = _subset(verts, faces, keep)
+        colors = None if colors is None else colors[used]
+        conf = None if conf is None else conf[used]
+    world = verts @ chunk.transform[:3, :3].T + chunk.transform[:3, 3]
+    if path.suffix.lower() == ".ply":
+        from .mesh_ply import write_mesh_ply
+
+        return write_mesh_ply(path, world, faces, colors, double=True,
+                              extra={"confidence": conf} if conf is not None else None)
+    out = trimesh.Trimesh(world, faces, vertex_colors=colors, process=False)
+    out.export(str(path))
     return path
+
+
+def _region(region):
+    if region is None:
+        return None
+    from ..engine.crop import as_polygon
+
+    return as_polygon(region)
 
 
 def _read_textured_obj(path: Path):

@@ -45,7 +45,7 @@ class PointCloud:
     rgb: np.ndarray | None = None          # uint8 (N,3)
     normals: np.ndarray | None = None      # float (N,3)
     classification: np.ndarray | None = None  # uint8 (N,)
-    confidence: np.ndarray | None = None   # number of views / quality
+    confidence: np.ndarray | None = None   # uint8 (N,): depth maps that agree on the point (0 = unknown)
     labels: dict[int, str] = field(default_factory=dict)  # class code -> name (user classes)
     manual: np.ndarray | None = None       # bool (N,): class assigned by hand, kept by automatic classifiers
 
@@ -62,6 +62,8 @@ class PointCloud:
             self.classification = np.array(self.classification, dtype=np.uint8).reshape(n)
         if self.manual is not None:
             self.manual = np.array(self.manual, dtype=bool).reshape(n)
+        if self.confidence is not None:
+            self.confidence = np.clip(np.asarray(self.confidence), 0, 255).astype(np.uint8).reshape(n)
 
     def __len__(self) -> int:
         return len(self.xyz)
@@ -73,6 +75,15 @@ class PointCloud:
         if len(exclude):
             keep &= ~np.isin(self.classification, _codes(exclude))
         return keep
+
+    @staticmethod
+    def read_column(path: str | Path, name: str) -> np.ndarray | None:
+        """One property of the points of a binary PLY (e.g. ``confidence``), read without loading
+        the cloud; ``None`` when the file has no such property."""
+        arr = _read_binary_ply_vertices(Path(path), mmap=True)
+        if arr is None:
+            return getattr(PointCloud.load(path), name, None)
+        return np.array(arr[name]) if name in arr.dtype.names else None
 
     @staticmethod
     def read_class_counts(path: str | Path) -> dict[int, int]:
@@ -100,8 +111,8 @@ class PointCloud:
             r = m[:3, :3] / np.cbrt(np.linalg.det(m[:3, :3]))
             normals = (self.normals @ r.T).astype(np.float32)
         manual = None if self.manual is None else self.manual.copy()
-        return PointCloud(xyz, self.rgb, normals, self.classification.copy(), self.confidence, dict(self.labels),
-                          manual)
+        confidence = None if self.confidence is None else self.confidence.copy()
+        return PointCloud(xyz, self.rgb, normals, self.classification.copy(), confidence, dict(self.labels), manual)
 
     def bounds(self) -> tuple[np.ndarray, np.ndarray]:
         return self.xyz.min(0), self.xyz.max(0)
@@ -116,6 +127,8 @@ class PointCloud:
         if self.rgb is not None:
             fields += [("red", "u1"), ("green", "u1"), ("blue", "u1")]
         fields += [("classification", "u1")]
+        if self.confidence is not None:
+            fields += [("confidence", "u1")]  # as Metashape writes it: CloudCompare shows it as a scalar field
         if self.manual is not None:
             fields += [("manual", "u1")]  # extra property: readers that do not know it skip it
         arr = np.empty(n, dtype=fields)
@@ -125,6 +138,8 @@ class PointCloud:
         if self.rgb is not None:
             arr["red"], arr["green"], arr["blue"] = self.rgb.T
         arr["classification"] = self.classification
+        if self.confidence is not None:
+            arr["confidence"] = self.confidence
         if self.manual is not None:
             arr["manual"] = self.manual
         type_names = {"f8": "double", "f4": "float", "u1": "uchar"}
@@ -153,7 +168,10 @@ class PointCloud:
         rgb = np.column_stack([props["red"], props["green"], props["blue"]]) if {"red", "green", "blue"} <= names else None
         cls_arr = props["classification"] if "classification" in names else None
         manual = props["manual"] != 0 if "manual" in names else None  # older files have no such property
-        return cls(xyz, rgb, normals, cls_arr, manual=manual)
+        confidence = None
+        if "confidence" in names:  # ours and Metashape's (uchar), or a float written by other programs
+            confidence = np.clip(np.round(props["confidence"].astype(np.float64)), 0, 255).astype(np.uint8)
+        return cls(xyz, rgb, normals, cls_arr, confidence=confidence, manual=manual)
 
     # ---------------------------------------------------------------- LAS
     def save_las(self, path: str | Path, crs_wkt: str | None = None) -> Path:
@@ -175,6 +193,10 @@ class PointCloud:
         if self.rgb is not None:
             las.red, las.green, las.blue = (self.rgb.astype(np.uint16) * 257).T
         las.classification = self.classification
+        if self.confidence is not None:  # extra bytes dimension, as Metashape exports it
+            las.add_extra_dim(laspy.ExtraBytesParams(name="confidence", type=np.uint8,
+                                                     description="depth maps agreeing on the point"))
+            las.confidence = self.confidence
         las.write(str(path))
         return path
 
@@ -187,7 +209,10 @@ class PointCloud:
         rgb = None
         if hasattr(las, "red"):
             rgb = (np.column_stack([las.red, las.green, las.blue]) // 257).astype(np.uint8)
-        return cls(xyz, rgb, None, np.asarray(las.classification))
+        confidence = None
+        if "confidence" in las.point_format.extra_dimension_names:
+            confidence = np.clip(np.asarray(las.confidence, np.float64), 0, 255).astype(np.uint8)
+        return cls(xyz, rgb, None, np.asarray(las.classification), confidence=confidence)
 
     @classmethod
     def load(cls, path: str | Path) -> "PointCloud":

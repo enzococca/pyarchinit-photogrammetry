@@ -62,6 +62,15 @@ class Chunk:
     def _set_product(self, name: str, path: Path) -> None:
         self.products[name] = os.path.relpath(path, self.data_dir)
 
+    def own_product_path(self, name: str) -> Path:
+        """Where a product changed in place (cleaned, cropped, with its confidence) is written:
+        always the chunk folder. A product that is a file of another program - the DEM or the
+        orthomosaic exported by Metashape - is never overwritten: the changed copy replaces
+        it in the project only."""
+        files = {"point_cloud": "point_cloud.ply", "model": "model.ply", "dem": "dem.tif",
+                 "orthomosaic": "orthomosaic.tif"}
+        return self.data_dir / files.get(name, f"{name}.dat")
+
     # ------------------------------------------------------------ properties
     @property
     def aligned_cameras(self) -> list[Camera]:
@@ -342,15 +351,20 @@ class Chunk:
         return dense.build_point_cloud(self, point_colors=point_colors, progress=as_progress(progress))
 
     def crop_point_cloud(self, zmin: float | None = None, zmax: float | None = None, radius: float | None = None,
-                         center=(0.0, 0.0), bounds=None) -> "PointCloud":
+                         center=(0.0, 0.0), bounds=None, region=None) -> "PointCloud":
         """Keep only the dense points inside the given limits (world coordinates): a height
-        range, a cylinder around ``center`` (the turntable axis), or ``bounds`` (xmin, ymin,
-        xmax, ymax). Returns and stores the cropped cloud."""
+        range, a cylinder around ``center`` (the turntable axis), ``bounds`` (xmin, ymin,
+        xmax, ymax) or a polygon ``region`` (see :func:`engine.crop.as_polygon`). Returns and
+        stores the cropped cloud."""
         pc = self.point_cloud
         if pc is None:
             raise RuntimeError("build the dense cloud first")
         world = self.to_world(pc.xyz)
         keep = np.ones(len(pc), bool)
+        if region is not None:
+            from ..engine.crop import inside_xy
+
+            keep &= inside_xy(region, world[:, 0], world[:, 1])
         if zmin is not None:
             keep &= world[:, 2] >= zmin
         if zmax is not None:
@@ -362,10 +376,53 @@ class Chunk:
             keep &= (world[:, 0] >= x0) & (world[:, 0] <= x1) & (world[:, 1] >= y0) & (world[:, 1] <= y1)
         if keep.sum() < 100:
             raise RuntimeError(f"only {int(keep.sum())} points would remain inside the crop")
-        self.point_cloud = pc.subset(keep)
-        self.products.pop("model", None)
-        self.products.pop("model_textured", None)
+        self.point_cloud = pc.subset(keep)  # the model stays: crop it too (crop_model) or build it again
         return self.point_cloud
+
+    # ------------------------------------------------------------ cleaning
+    def compute_confidence(self, target: str = "point_cloud", tol: float = 0.01,
+                           progress: ProgressCallback | None = None) -> dict:
+        """Confidence (depth maps agreeing on each point) of the dense cloud (``target=
+        "point_cloud"``) or of the vertices of the model (``"model"``), stored in their files."""
+        from ..engine import confidence
+
+        fn = confidence.compute_model_confidence if target == "model" else confidence.compute_point_confidence
+        return fn(self, tol=tol, progress=as_progress(progress))
+
+    def clean_point_cloud(self, progress: ProgressCallback | None = None, **filters) -> dict:
+        """Remove noise from the dense cloud: ``min_confidence``, ``remove_classes``,
+        ``statistical=(neighbours, std_ratio)``, ``sparse=(radius, min_neighbours)``,
+        ``groups=(distance, min_points)``, ``color=((r, g, b), tolerance)`` (see
+        :func:`engine.cleaning.point_filters`). Returns the counts."""
+        from ..engine import cleaning
+
+        return cleaning.clean_point_cloud(self, progress=as_progress(progress), **filters)
+
+    def clean_model(self, progress: ProgressCallback | None = None, **options) -> dict:
+        """Clean the model: ``min_confidence``, ``min_component`` (fraction of the largest piece
+        or faces), ``max_edge`` (times the median edge), ``repair``, ``fill_holes`` (radius),
+        ``smooth`` (iterations), ``target_faces`` (see :func:`engine.cleaning.clean_model`)."""
+        from ..engine import cleaning
+
+        return cleaning.clean_model(self, progress=as_progress(progress), **options)
+
+    def crop_model(self, region, zmin: float | None = None, zmax: float | None = None) -> dict:
+        """Keep only the faces of the model inside a polygon (chunk CRS) and height range."""
+        from ..engine import crop
+
+        return crop.crop_model(self, region, zmin, zmax)
+
+    def crop_dem(self, region) -> Path:
+        """Crop the DEM to a polygon (no data outside it)."""
+        from ..engine import crop
+
+        return crop.crop_raster_product(self, "dem", region)
+
+    def crop_orthomosaic(self, region) -> Path:
+        """Crop the orthomosaic to a polygon (transparent outside it)."""
+        from ..engine import crop
+
+        return crop.crop_raster_product(self, "orthomosaic", region)
 
     def build_model(self, source: str = "point_cloud", surface: str = "arbitrary", face_count: int | str = "medium",
                     voxel_size: float | None = None, vertex_colors: bool = True, classes=None,
@@ -411,9 +468,11 @@ class Chunk:
                                        skip_unreadable=skip_unreadable)
 
     # ---------------------------------------------------------------- export
-    def export_point_cloud(self, path: str | os.PathLike, source: str = "point_cloud", classes=None) -> Path:
-        """Write the cloud in world coordinates (LAS keeps the classes); ``classes``: only
-        the points of these classes."""
+    def export_point_cloud(self, path: str | os.PathLike, source: str = "point_cloud", classes=None, region=None,
+                           zmin: float | None = None, zmax: float | None = None) -> Path:
+        """Write the cloud in world coordinates (LAS keeps the classes and the confidence);
+        ``classes``: only the points of these classes; ``region`` (a polygon in the chunk CRS)
+        and ``zmin``/``zmax``: only the points inside."""
         pc = self.point_cloud if source == "point_cloud" else self.tie_points
         if pc is None:
             raise RuntimeError(f"no {source} in chunk {self.label}")
@@ -422,24 +481,48 @@ class Chunk:
             if not keep.any():
                 raise ValueError("no point of the chosen classes")
             pc = pc.subset(keep)
+        if region is not None or zmin is not None or zmax is not None:
+            from ..engine.crop import points_inside
+
+            keep = points_inside(self, pc.xyz, region, zmin, zmax)
+            if not keep.any():
+                raise ValueError("no point lies inside the region")
+            pc = pc.subset(keep)
         return pc.transformed(self.transform).save(path, crs_wkt=crs_mod.wkt(self.crs))
 
-    def export_model(self, path: str | os.PathLike) -> Path:
+    def export_model(self, path: str | os.PathLike, region=None, zmin: float | None = None,
+                     zmax: float | None = None) -> Path:
+        """The model in world coordinates (OBJ with the texture when built, PLY with colours and
+        confidence); ``region``/``zmin``/``zmax``: only the faces inside."""
         from ..io import exports
 
-        return exports.export_model(self, path)
+        return exports.export_model(self, path, region=region, zmin=zmin, zmax=zmax)
 
     def export_cameras(self, path: str | os.PathLike, fmt: str = "colmap") -> Path:
         from ..io import exports
 
         return exports.export_cameras(self, path, fmt=fmt)
 
-    def export_dem(self, path: str | os.PathLike) -> Path:
+    def export_dem(self, path: str | os.PathLike, region=None) -> Path:
+        """The DEM (GeoTIFF); ``region``: only the window of the polygon, no data outside it."""
+        if region is not None:
+            from ..engine.crop import crop_raster
+
+            if self.dem_path is None:
+                raise RuntimeError("no DEM in chunk")
+            return crop_raster(self.dem_path, path, region)
         from ..io import exports
 
         return exports.copy_raster(self.dem_path, path)
 
-    def export_orthomosaic(self, path: str | os.PathLike) -> Path:
+    def export_orthomosaic(self, path: str | os.PathLike, region=None) -> Path:
+        """The orthomosaic (GeoTIFF); ``region``: only the polygon, transparent outside it."""
+        if region is not None:
+            from ..engine.crop import crop_raster
+
+            if self.orthomosaic_path is None:
+                raise RuntimeError("no orthomosaic in chunk")
+            return crop_raster(self.orthomosaic_path, path, region)
         from ..io import exports
 
         return exports.copy_raster(self.orthomosaic_path, path)
