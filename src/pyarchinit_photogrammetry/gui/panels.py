@@ -11,8 +11,8 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QKeyEvent, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QSplitter,
-                               QTableWidget, QTableWidgetItem, QToolButton, QTreeWidget, QTreeWidgetItem,
+                               QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QSizePolicy,
+                               QSplitter, QTableWidget, QTableWidgetItem, QToolButton, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
 from .flow_layout import FlowLayout
@@ -587,11 +587,24 @@ class PyArchInitPane(QWidget):
     demo_requested = Signal()
     new_site_requested = Signal()
     us_requested = Signal(str, str, str, str)  # sito, area, us, unita_tipo ("" us = new record)
+    site_changed = Signal(str)  # the site of the project chosen in the combo
 
     def __init__(self, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
+        site_row = QHBoxLayout()
+        site_row.addWidget(QLabel("Sito del progetto:"))
+        self.site_combo = QComboBox()
+        self.site_combo.setEditable(True)
+        self.site_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.site_combo.setToolTip("Lo scavo a cui appartengono le US e le quote disegnate in questo progetto "
+                                   "(un database PyArchInit puo' contenere piu' siti)")
+        self.site_combo.activated.connect(lambda _i: self._site_edited())
+        self.site_combo.lineEdit().editingFinished.connect(self._site_edited)
+        site_row.addWidget(self.site_combo, 1)
+        lay.addLayout(site_row)
+        self._project_site = ""
         row = FlowLayout()
         self.b_connect = _tool("database", "Connetti...", "Connetti al database di PyArchInit (config.cfg, SQLite, PostgreSQL)")
         self.b_demo = _tool("demo_db", "Database demo", "Usa il database dimostrativo")
@@ -632,8 +645,30 @@ class PyArchInitPane(QWidget):
         self.status.setText(text)
         self.tree.clear()
 
+    def set_project_site(self, sito: str) -> None:
+        """Show the site of the project (no signal); the tree then lists only that site."""
+        self._project_site = sito or ""
+        self.site_combo.blockSignals(True)
+        self.site_combo.setCurrentText(self._project_site)
+        self.site_combo.blockSignals(False)
+        self.refresh()
+
+    def _site_edited(self) -> None:
+        text = self.site_combo.currentText().strip()
+        if text != self._project_site:
+            self._project_site = text
+            self.site_changed.emit(text)
+            self.refresh()
+
     def refresh(self) -> None:
         self.tree.clear()
+        names = self.site_names() if self.pa is not None else []
+        self.site_combo.blockSignals(True)
+        self.site_combo.clear()
+        self.site_combo.addItems(names if not self._project_site or self._project_site in names
+                                 else [self._project_site, *names])
+        self.site_combo.setCurrentText(self._project_site)
+        self.site_combo.blockSignals(False)
         if self.pa is None:
             return
         try:
@@ -641,6 +676,8 @@ class PyArchInitPane(QWidget):
         except Exception as exc:
             self.status.setText(f"Errore: {exc}")
             return
+        if self._project_site and any(str(s.get("sito")) == self._project_site for s in sites):
+            sites = [s for s in sites if str(s.get("sito")) == self._project_site]
         for s in sites:
             name = s.get("sito")
             si = QTreeWidgetItem([str(name), str(s.get("comune") or "")])
@@ -670,9 +707,14 @@ class PyArchInitPane(QWidget):
     def site_names(self) -> list[str]:
         if self.pa is None:
             return []
-        return [str(s.get("sito")) for s in self.pa.sites()]
+        try:
+            return [str(s.get("sito")) for s in self.pa.sites() if s.get("sito")]
+        except Exception:
+            return []
 
     def current_site(self) -> str | None:
+        if self._project_site:
+            return self._project_site
         it = self.tree.currentItem()
         while it is not None and it.parent() is not None:
             it = it.parent()

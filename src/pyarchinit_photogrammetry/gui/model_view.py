@@ -6,9 +6,9 @@ import os
 
 import numpy as np
 from PySide6.QtCore import QPointF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QLabel, QPushButton, QSizePolicy, QVBoxLayout,
-                               QWidget)
+from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel, QListWidget,
+                               QListWidgetItem, QPushButton, QSizePolicy, QStackedLayout, QVBoxLayout, QWidget)
 
 from .flow_layout import FlowLayout
 from .scene import OrbitCamera, SceneData, available_views, build_scene, sample_mesh_colors, splat
@@ -152,6 +152,15 @@ class SoftwareCanvas(QWidget):
         self.update()
         self._full_timer.start(200)
 
+    def snapshot(self):
+        """The current frame and the projection of scene points to widget pixels at this moment:
+        ``(QImage, project(pts) -> (x, y, depth, ok))``."""
+        import copy
+
+        cam = copy.deepcopy(self.cam)
+        w, h = max(self.width(), 1), max(self.height(), 1)
+        return self.grab().toImage(), lambda pts: cam.project(pts, w, h)
+
     def grab_array(self) -> np.ndarray:
         img = self.grab().toImage().convertToFormat(QImage.Format.Format_RGB888)
         ptr = img.constBits()
@@ -232,11 +241,140 @@ class VtkCanvas(QWidget):
     def grab_array(self) -> np.ndarray:
         return np.asarray(self.plotter.screenshot(return_img=True))[:, :, :3]
 
+    def snapshot(self):
+        """The current frame and the projection of scene points to widget pixels (VTK camera)."""
+        ren = self.plotter.renderer
+        cam = ren.GetActiveCamera()
+        w, h = max(self.width(), 1), max(self.height(), 1)
+        m = cam.GetCompositeProjectionTransformMatrix(ren.GetTiledAspectRatio(), -1, 1)
+        M = np.array([[m.GetElement(i, j) for j in range(4)] for i in range(4)])
+        arr = np.ascontiguousarray(self.grab_array())
+        img = QImage(arr.data, arr.shape[1], arr.shape[0], 3 * arr.shape[1], QImage.Format.Format_RGB888).copy()
+        img = img.scaled(w, h)
+
+        def project(pts):
+            P = np.c_[np.asarray(pts, float), np.ones(len(pts))] @ M.T
+            wv = P[:, 3]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ndc = P[:, :3] / wv[:, None]
+            ok = (wv > 0) & (np.abs(ndc[:, 0]) <= 1) & (np.abs(ndc[:, 1]) <= 1) & (np.abs(ndc[:, 2]) <= 1)
+            return (ndc[:, 0] + 1) / 2 * w, (1 - ndc[:, 1]) / 2 * h, wv, ok
+
+        return img, project
+
     def close(self):
         try:
             self.plotter.close()
         finally:
             return super().close()
+
+
+class LassoOverlay(QWidget):
+    """A frozen frame of the 3D view on which a lasso is drawn: click for vertices (or drag for
+    a freehand line), double click or Enter to close, right click removes the last vertex,
+    Esc cancels."""
+
+    finished = Signal(object)  # list of (x, y) in widget pixels, or None when cancelled
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.image: QImage | None = None
+        self.pts: list[QPointF] = []
+        self.cursor_pos: QPointF | None = None
+        self._down = False
+
+    def start(self, image: QImage) -> None:
+        self.image, self.pts, self.cursor_pos = image, [], None
+        self.setFocus()
+        self.update()
+
+    def paintEvent(self, _ev) -> None:
+        p = QPainter(self)
+        if self.image is not None:
+            p.drawImage(self.rect(), self.image)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pts = self.pts + ([self.cursor_pos] if self.cursor_pos is not None and self.pts else [])
+        if len(pts) >= 2:
+            path = QPainterPath()
+            path.addPolygon(QPolygonF(pts))
+            path.closeSubpath()
+            p.fillPath(path, QBrush(QColor(0, 229, 255, 50)))
+            pen = QPen(QColor("#00e5ff"), 2)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            p.drawPath(path)
+        p.setPen(QColor("white"))
+        p.drawText(10, 20, "Lazo: clic per i vertici (o trascina), doppio clic o Invio per chiudere, "
+                           "clic destro toglie l'ultimo, Esc annulla")
+        p.end()
+
+    def mousePressEvent(self, ev) -> None:
+        if ev.button() == Qt.MouseButton.RightButton:
+            if self.pts:
+                self.pts.pop()
+        elif ev.button() == Qt.MouseButton.LeftButton:
+            self.pts.append(ev.position())
+            self._down = True
+        self.update()
+
+    def mouseMoveEvent(self, ev) -> None:
+        self.cursor_pos = ev.position()
+        if self._down and self.pts and (ev.position() - self.pts[-1]).manhattanLength() > 4:
+            self.pts.append(ev.position())  # freehand
+        self.update()
+
+    def mouseReleaseEvent(self, ev) -> None:
+        self._down = False
+
+    def mouseDoubleClickEvent(self, ev) -> None:
+        self._close()
+
+    def keyPressEvent(self, ev) -> None:
+        if ev.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._close()
+        elif ev.key() == Qt.Key.Key_Escape:
+            self.pts = []
+            self.finished.emit(None)
+
+    def _close(self) -> None:
+        pts = [(p.x(), p.y()) for p in self.pts]
+        self.pts = []
+        self.finished.emit(pts if len(pts) >= 3 else None)
+
+
+class ClassLegend(QListWidget):
+    """The classes of the cloud with their colour and number of points; unticked = hidden."""
+
+    visibility_changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMaximumWidth(240)
+        self.itemChanged.connect(lambda _it: None if self._filling else self.visibility_changed.emit())
+        self._filling = False
+
+    def set_counts(self, counts: dict, hidden: set) -> None:
+        from .scene import class_name, class_palette
+
+        pal = class_palette()
+        self._filling = True
+        self.clear()
+        for code in sorted(counts):
+            pm = QPixmap(14, 14)
+            pm.fill(QColor(*[int(v) for v in pal[code]]))
+            it = QListWidgetItem(QIcon(pm), f"{code}  {class_name(code)}  ({counts[code]:,})".replace(",", "."))
+            it.setData(Qt.ItemDataRole.UserRole, int(code))
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Unchecked if code in hidden else Qt.CheckState.Checked)
+            self.addItem(it)
+        self._filling = False
+
+    def hidden(self) -> set[int]:
+        return {self.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.count())
+                if self.item(i).checkState() != Qt.CheckState.Checked}
 
 
 def _vtk_usable() -> bool:
@@ -254,9 +392,11 @@ def _vtk_usable() -> bool:
 
 
 class ModelView(QWidget):
-    """The Model tab: view selector, display toggles and the canvas."""
+    """The Model tab: view selector, display toggles and the canvas; point clouds can be
+    coloured by class (with a legend to hide classes) and points selected with a lasso."""
 
     view_changed = Signal(str)
+    points_selected = Signal(object, object)  # boolean masks over the whole cloud: visible only, all inside
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -274,8 +414,19 @@ class ModelView(QWidget):
         self.cb_marks.toggled.connect(lambda _: self.refresh(reset=False))
         b_reset = QPushButton("Vista iniziale")
         b_top = QPushButton("Dall'alto")
+        self.color_combo = QComboBox()
+        for key, label in (("rgb", "Colori RGB"), ("class", "Classi"), ("elevation", "Quota")):
+            self.color_combo.addItem(label, key)
+        self.color_combo.setToolTip("Colori della nuvola: quelli delle foto, le classi (con la legenda per "
+                                    "nasconderle) o la quota")
+        self.color_combo.currentIndexChanged.connect(lambda _i: self.refresh(reset=False))
+        self.b_lasso = QPushButton("Lazo")
+        self.b_lasso.setToolTip("Seleziona dei punti con un lazo per cambiarne la classe")
+        self.b_lasso.clicked.connect(self.start_lasso)
         bar.addWidget(QLabel("Mostra:"))
         bar.addWidget(self.combo)
+        bar.addWidget(self.color_combo)
+        bar.addWidget(self.b_lasso)
         bar.addWidget(self.cb_cams)
         bar.addWidget(self.cb_marks)
         bar.addWidget(b_top)
@@ -291,10 +442,24 @@ class ModelView(QWidget):
             self.canvas = SoftwareCanvas(self)
         b_reset.clicked.connect(lambda: self.canvas.reset_view())
         b_top.clicked.connect(lambda: self.canvas.top_view())
-        lay.addWidget(self.canvas, 1)
+        self.lasso = LassoOverlay(self)
+        self.lasso.finished.connect(self._lasso_finished)
+        holder = QWidget()
+        self.stack = QStackedLayout(holder)
+        self.stack.addWidget(self.canvas)
+        self.stack.addWidget(self.lasso)
+        self.legend = ClassLegend()
+        self.legend.visibility_changed.connect(lambda: self.refresh(reset=False))
+        row = QHBoxLayout()
+        row.addWidget(holder, 1)
+        row.addWidget(self.legend)
+        lay.addLayout(row, 1)
         self.chunk = None
         self.kind = None
+        self.sd = None
+        self._project = None
         self._filling = False
+        self._update_tools()
 
     @property
     def backend(self) -> str:
@@ -328,8 +493,73 @@ class ModelView(QWidget):
         self.refresh(reset=True)
         self.view_changed.emit(self.kind or "")
 
+    def _update_tools(self) -> None:
+        points = self.kind in ("point_cloud", "tie_points")
+        self.color_combo.setVisible(points)
+        self.b_lasso.setVisible(self.kind == "point_cloud")
+        self.legend.setVisible(points and self.color_combo.currentData() == "class")
+
+    def set_color_mode(self, mode: str) -> None:
+        i = self.color_combo.findData(mode)
+        if i >= 0:
+            self.color_combo.setCurrentIndex(i)
+
+    # ----------------------------------------------------------- lasso selection
+    def start_lasso(self) -> None:
+        if self.kind != "point_cloud" or self.chunk is None:
+            return
+        image, self._project = self.canvas.snapshot()
+        self.lasso.start(image)
+        self.stack.setCurrentWidget(self.lasso)
+
+    def _lasso_finished(self, pts) -> None:
+        self.stack.setCurrentWidget(self.canvas)
+        if pts is None or self._project is None or self.sd is None:
+            return
+        visible, inside = self.select_points(pts, self._project)
+        self.points_selected.emit(visible, inside)
+
+    def select_points(self, polygon, project, depth_tol: float = 0.02, cell: int = 3):
+        """Points of the whole dense cloud inside a screen ``polygon`` (widget pixels) for the
+        projection ``project``: (visible ones, all of them). Hidden classes are never taken;
+        "visible" = not behind the nearest surface at that pixel (2 % of the distance)."""
+        import shapely
+
+        pc = self.chunk.point_cloud
+        if pc is None:
+            n = 0
+            return np.zeros(n, bool), np.zeros(n, bool)
+        world = self.chunk.to_world(pc.xyz) - self.sd.offset
+        x, y, z, ok = project(world)
+        hidden = self.legend.hidden() if self.color_combo.currentData() == "class" else set()
+        codes = getattr(pc, "classification", None)
+        if hidden and codes is not None:
+            ok &= ~np.isin(np.asarray(codes), list(hidden))
+        poly = shapely.Polygon(polygon)
+        inside = np.zeros(len(world), bool)
+        idx = np.nonzero(ok)[0]
+        inside[idx] = shapely.contains_xy(poly, x[idx], y[idx])
+        # depth buffer of everything shown, on a coarse grid
+        cx, cy = (x[idx] // cell).astype(np.int64), (y[idx] // cell).astype(np.int64)
+        key = cx * 1_000_003 + cy
+        order = np.argsort(key, kind="stable")
+        ks, zs = key[order], z[idx][order]
+        start = np.r_[0, np.nonzero(np.diff(ks))[0] + 1]
+        zmin = np.minimum.reduceat(zs, start)
+        cell_of = np.searchsorted(ks[start], key)
+        visible = np.zeros(len(world), bool)
+        visible[idx] = inside[idx] & (z[idx] <= zmin[cell_of] * (1 + depth_tol))
+        return visible, inside
+
     def refresh(self, reset: bool = False) -> None:
         self.canvas.show_cameras = self.cb_cams.isChecked()
         self.canvas.show_markers = self.cb_marks.isChecked()
-        sd = build_scene(self.chunk, self.kind) if self.chunk is not None else SceneData(np.zeros(3))
+        self._update_tools()
+        mode = self.color_combo.currentData() if self.kind in ("point_cloud", "tie_points") else "rgb"
+        hidden = self.legend.hidden() if mode == "class" else set()
+        sd = (build_scene(self.chunk, self.kind, color_mode=mode, hidden_classes=hidden) if self.chunk is not None
+              else SceneData(np.zeros(3)))
+        self.sd = sd
+        if mode == "class":
+            self.legend.set_counts(sd.class_counts, hidden)
         self.canvas.set_scene(sd, reset=reset)

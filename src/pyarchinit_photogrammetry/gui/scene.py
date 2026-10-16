@@ -23,6 +23,8 @@ class SceneData:
     markers: list[tuple[str, np.ndarray, bool]] = field(default_factory=list)  # label, xyz, is_check
     up: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 1.0]))
     kind: str = "empty"
+    point_codes: np.ndarray | None = None  # class code of each displayed point
+    class_counts: dict = field(default_factory=dict)  # class code -> points in the whole cloud
 
     @property
     def extent(self) -> float:
@@ -61,6 +63,51 @@ def available_views(chunk) -> list[str]:
     return out
 
 
+# colours of the point classes: ASPRS (as in most LAS viewers) and the archaeological 64-71
+CLASS_COLORS = {0: (170, 170, 170), 1: (200, 200, 200), 2: (166, 118, 60), 3: (170, 230, 110), 4: (80, 190, 70),
+                5: (20, 120, 40), 6: (220, 60, 50), 7: (255, 0, 255), 9: (40, 120, 255), 17: (120, 120, 160),
+                18: (255, 120, 255), 64: (230, 140, 40), 65: (190, 160, 110), 66: (120, 40, 160),
+                67: (240, 220, 80), 68: (0, 220, 220), 69: (255, 90, 140), 70: (110, 110, 110), 71: (255, 255, 255)}
+
+
+def class_palette() -> np.ndarray:
+    """(256, 3) uint8: a colour for every LAS class code (fixed ones above, the others
+    spread around the colour wheel)."""
+    import colorsys
+
+    pal = np.zeros((256, 3), np.uint8)
+    for code in range(256):
+        h = (code * 0.618034) % 1.0
+        pal[code] = np.array(colorsys.hsv_to_rgb(h, 0.65, 0.95)) * 255
+    for code, rgb in CLASS_COLORS.items():
+        pal[code] = rgb
+    return pal
+
+
+def class_name(code: int) -> str:
+    from ..core.pointcloud import ARCHAEO_CLASSES, ASPRS_CLASSES
+
+    names = {0: "Mai classificati", 1: "Non classificati", 2: "Terreno", 3: "Vegetazione bassa",
+             4: "Vegetazione media", 5: "Vegetazione alta", 6: "Edificio", 7: "Rumore (basso)", 9: "Acqua",
+             17: "Ponte", 18: "Rumore (alto)"}
+    if code in names:
+        return names[code]
+    if code in ARCHAEO_CLASSES:
+        return ARCHAEO_CLASSES[code].split(" / ")[0]
+    return ASPRS_CLASSES.get(code, f"Classe {code}")
+
+
+def elevation_colors(z: np.ndarray) -> np.ndarray:
+    """Hypsometric colours (blue-green-yellow-brown-white) for heights, 2-98 percentile stretch."""
+    lo, hi = np.percentile(z, [2, 98]) if len(z) else (0.0, 1.0)
+    t = np.clip((z - lo) / max(hi - lo, 1e-9), 0, 1)
+    stops = np.array([[30, 90, 200], [40, 170, 120], [230, 220, 90], [150, 100, 50], [250, 250, 250]], float)
+    pos = t * (len(stops) - 1)
+    i = np.clip(pos.astype(int), 0, len(stops) - 2)
+    f = (pos - i)[:, None]
+    return (stops[i] * (1 - f) + stops[i + 1] * f).astype(np.uint8)
+
+
 PROXY_COLORS = np.array([[230, 25, 75], [60, 180, 75], [255, 225, 25], [67, 99, 216], [245, 130, 49], [145, 30, 180],
                          [70, 240, 240], [240, 50, 230], [188, 246, 12], [0, 128, 128], [154, 99, 36], [128, 0, 0]],
                         np.uint8)
@@ -83,9 +130,10 @@ def _offset(chunk) -> np.ndarray:
 
 
 def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_faces: int = 600_000,
-                frustum_size: float | None = None) -> SceneData:
+                frustum_size: float | None = None, color_mode: str = "rgb", hidden_classes=()) -> SceneData:
     """Collect what the 3D view shows for ``kind`` (tie_points, point_cloud, model,
-    model_textured, cameras)."""
+    model_textured, cameras). Point clouds are coloured by ``color_mode`` ("rgb", "class",
+    "elevation"); points of ``hidden_classes`` are left out."""
     if chunk is None:
         return SceneData(np.zeros(3))
     kind = kind or best_view(chunk)
@@ -104,13 +152,26 @@ def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_f
     if kind in ("tie_points", "point_cloud"):
         pc = chunk.tie_points if kind == "tie_points" else chunk.point_cloud
         if pc is not None and len(pc):
+            codes = getattr(pc, "classification", None)
+            codes = np.asarray(codes, np.uint8) if codes is not None and len(codes) == len(pc) else np.zeros(len(pc),
+                                                                                                          np.uint8)
+            found, counts = np.unique(codes, return_counts=True)
+            sd.class_counts = {int(c): int(n) for c, n in zip(found, counts)}
             idx = np.arange(len(pc))
-            if len(pc) > max_points:
-                idx = np.random.default_rng(0).choice(len(pc), max_points, replace=False)
+            if hidden_classes:
+                idx = idx[~np.isin(codes, np.asarray(list(hidden_classes), np.uint8))]
+            if len(idx) > max_points:
+                idx = np.sort(np.random.default_rng(0).choice(idx, max_points, replace=False))
             sd.points = W(pc.xyz[idx])
+            sd.point_codes = codes[idx]
             rgb = getattr(pc, "rgb", None)
-            sd.colors = (np.asarray(rgb)[idx].astype(np.uint8) if rgb is not None and len(rgb)
-                         else np.full((len(idx), 3), 200, np.uint8))
+            if color_mode == "class":
+                sd.colors = class_palette()[sd.point_codes]
+            elif color_mode == "elevation":
+                sd.colors = elevation_colors(sd.points.astype(float) @ sd.up if len(idx) else np.zeros(0))
+            else:
+                sd.colors = (np.asarray(rgb)[idx].astype(np.uint8) if rgb is not None and len(rgb)
+                             else np.full((len(idx), 3), 200, np.uint8))
     elif kind == "model_textured" and chunk.product_path("model_textured"):
         from ..io.exports import _read_textured_obj
 

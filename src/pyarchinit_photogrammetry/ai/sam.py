@@ -15,7 +15,7 @@ from typing import Protocol
 
 import numpy as np
 
-from ..archaeo.stratigraphy import UnitPolygon, mask_to_polygons, orthomosaic_window
+from ..archaeo.stratigraphy import UnitPolygon, mask_to_polygons
 
 MODELS = {
     "tiny": "facebook/sam2.1-hiera-tiny",
@@ -34,6 +34,9 @@ class Segmenter(Protocol):
 
 
 def best_device() -> str:
+    import os
+
+    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     import torch
 
     if torch.cuda.is_available():
@@ -88,79 +91,261 @@ class Sam2Segmenter:
             masks, scores, _ = self.predictor.predict(box=np.asarray(box, float)[None], multimask_output=False)
         return masks[0].astype(bool)
 
-    def segment_auto(self, image, points_per_side: int = 32, min_area: int = 500):
+    def segment_points_box(self, image, points, labels, box):
+        """A box with points that add (1) or remove (0) parts of the object."""
+        import torch
+
+        self._set(image)
+        with torch.inference_mode():
+            masks, scores, _ = self.predictor.predict(point_coords=np.asarray(points, float),
+                                                      point_labels=np.asarray(labels, int),
+                                                      box=np.asarray(box, float)[None], multimask_output=False)
+        return masks[0].astype(bool)
+
+    def segment_auto(self, image, points_per_side: int = 32, min_area: int = 500, **options):
+        """Every object of the image. ``options`` go to ``SAM2AutomaticMaskGenerator``
+        (``crop_n_layers``, ``pred_iou_thresh``, ``stability_score_thresh``, ``use_m2m``...)."""
         import torch
         from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 
-        gen = SAM2AutomaticMaskGenerator(self._model, points_per_side=points_per_side, min_mask_region_area=min_area)
+        gen = SAM2AutomaticMaskGenerator(self._model, points_per_side=points_per_side, min_mask_region_area=min_area,
+                                         **options)
         with torch.inference_mode():
             res = gen.generate(image)
         return [r["segmentation"].astype(bool) for r in sorted(res, key=lambda r: -r["area"])]
 
 
 # ------------------------------------------------------------ orthomosaic
+# how thoroughly the automatic mode looks for objects: SAM2AutomaticMaskGenerator settings
+THOROUGHNESS = {
+    "normale": {"points_per_side": 32},
+    "alta": {"points_per_side": 32, "crop_n_layers": 1, "pred_iou_thresh": 0.75, "stability_score_thresh": 0.9},
+    "massima": {"points_per_side": 48, "crop_n_layers": 1, "pred_iou_thresh": 0.7, "stability_score_thresh": 0.88,
+                "use_m2m": True},
+}
+
+
 def _world_to_pixel(transform, xy: np.ndarray) -> np.ndarray:
     """World XY -> fractional (col, row) for north-up rasters (pixel corners on integers)."""
     xy = np.asarray(xy, float)
     return np.column_stack([(xy[:, 0] - transform.c) / transform.a, (xy[:, 1] - transform.f) / transform.e])
 
 
+def read_orthomosaic(path, bounds, max_side: int | None = None, resolution: float | None = None):
+    """The orthomosaic inside world ``bounds`` (xmin, ymin, xmax, ymax): RGB uint8 (H, W, 3),
+    valid-data mask and transform, resampled (from the overviews) so that the long side is at
+    most ``max_side`` pixels or the pixel is ``resolution`` metres; never finer than the
+    source. Only that window is read: a whole drone orthomosaic does not fit in memory."""
+    import rasterio
+    from affine import Affine
+    from rasterio.enums import Resampling
+    from rasterio.windows import Window
+
+    with rasterio.open(path) as src:
+        inv = ~src.transform
+        cols, rows = zip(*((inv.a * x + inv.b * y + inv.c, inv.d * x + inv.e * y + inv.f)
+                           for x, y in ((bounds[0], bounds[3]), (bounds[2], bounds[1]))))
+        c0, c1 = int(np.floor(max(min(cols), 0))), int(np.ceil(min(max(cols), src.width)))
+        r0, r1 = int(np.floor(max(min(rows), 0))), int(np.ceil(min(max(rows), src.height)))
+        if c1 <= c0 or r1 <= r0:
+            raise ValueError("the area is outside the orthomosaic")
+        w, h = c1 - c0, r1 - r0
+        f = 1.0
+        if resolution:
+            f = max(f, resolution / abs(src.res[0]))
+        if max_side:
+            f = max(f, max(w, h) / max_side)
+        ow, oh = max(1, int(round(w / f))), max(1, int(round(h / f)))
+        win = Window(c0, r0, w, h)
+        rs = Resampling.average if f > 1.0 else Resampling.nearest
+        rgb = src.read([1, 2, 3], window=win, out_shape=(3, oh, ow), resampling=rs)
+        if src.count >= 4:
+            valid = src.read(4, window=win, out_shape=(oh, ow), resampling=Resampling.nearest) > 0
+        else:
+            valid = src.read_masks(1, window=win, out_shape=(oh, ow), resampling=Resampling.nearest) > 0
+        tr = src.window_transform(win) @ Affine.scale(w / ow, h / oh)
+    return np.ascontiguousarray(np.moveaxis(rgb, 0, -1)), valid, tr
+
+
 def segment_orthomosaic(chunk, segmenter: Segmenter, points=None, labels=None, box=None, window: int = 2048,
-                        simplify: float | None = None, us: str | None = None, area: str | None = None) -> UnitPolygon:
+                        simplify: float | None = None, us: str | None = None, area: str | None = None,
+                        bounds=None, max_side: int = 1536) -> UnitPolygon:
     """Segment one unit on the orthomosaic from world-coordinate prompts.
 
-    ``points``: (N,2) world XY with ``labels`` (1 = inside, 0 = outside); or ``box`` =
-    (xmin, ymin, xmax, ymax) world. Only a window around the prompts is processed.
+    ``points``: (N,2) world XY with ``labels`` (1 = inside, 0 = outside); and/or ``box`` =
+    (xmin, ymin, xmax, ymax) world. With ``bounds`` (e.g. the part of the orthomosaic shown
+    on screen) SAM sees that area, reduced to ``max_side`` pixels: what is visible can be
+    segmented at any zoom, and keeping the same bounds while adding points reuses the image
+    already encoded. Without it, a ``window`` of pixels at full resolution around the prompts.
     """
-    from rasterio.windows import Window
-    from rasterio.windows import transform as win_transform
-
-    import rasterio
-
     path = chunk.orthomosaic_path
     if path is None:
         raise RuntimeError("build the orthomosaic first")
-    with rasterio.open(path) as src:
-        prompt_xy = np.asarray(points if points is not None else np.reshape(box, (2, 2)), float)
-        px = _world_to_pixel(src.transform, prompt_xy)
-        c0 = int(np.clip(px[:, 0].mean() - window / 2, 0, max(src.width - window, 0)))
-        r0 = int(np.clip(px[:, 1].mean() - window / 2, 0, max(src.height - window, 0)))
-        w = Window(c0, r0, min(window, src.width), min(window, src.height))
-        img = np.moveaxis(src.read([1, 2, 3], window=w), 0, -1).copy()
-        wtr = win_transform(w, src.transform)
-        res = src.res[0]
-    local = px - [c0, r0] - 0.5  # corner-based -> pixel-centre coordinates expected by SAM
+    prompts = [np.asarray(points, float).reshape(-1, 2)] if points is not None else []
+    if box is not None:
+        prompts.append(np.reshape(np.asarray(box, float), (2, 2)))
+    prompt_xy = np.vstack(prompts)
+    if bounds is None:
+        import rasterio
+
+        with rasterio.open(path) as src:
+            px = _world_to_pixel(src.transform, prompt_xy)
+            c0 = int(np.clip(px[:, 0].mean() - window / 2, 0, max(src.width - window, 0)))
+            r0 = int(np.clip(px[:, 1].mean() - window / 2, 0, max(src.height - window, 0)))
+            t = src.transform
+            bounds = (t.c + c0 * t.a, t.f + (r0 + min(window, src.height)) * t.e,
+                      t.c + (c0 + min(window, src.width)) * t.a, t.f + r0 * t.e)
+        img, valid, wtr = read_orthomosaic(path, bounds)
+    else:
+        img, valid, wtr = read_orthomosaic(path, bounds, max_side=max_side)
+    local = _world_to_pixel(wtr, prompt_xy) - 0.5  # corner-based -> pixel-centre coordinates expected by SAM
     if points is not None:
-        mask = segmenter.segment_points(img, local, np.ones(len(local)) if labels is None else labels)
+        n = len(prompts[0])
+        lab = np.ones(n) if labels is None else np.asarray(labels)
+        if box is not None and hasattr(segmenter, "segment_points_box"):
+            mask = segmenter.segment_points_box(img, local[:n], lab, local[n:].ravel())
+        else:
+            mask = segmenter.segment_points(img, local[:n], lab)
     else:
         mask = segmenter.segment_box(img, local.ravel())
-    geom = mask_to_polygons(mask, wtr, simplify=simplify if simplify is not None else 2 * res,
+    res = abs(wtr.a)
+    geom = mask_to_polygons(mask & valid, wtr, simplify=simplify if simplify is not None else 2 * res,
                             min_area=(10 * res) ** 2)
     return UnitPolygon(geom, us=us, area=area)
 
 
-def auto_units(chunk, segmenter: Segmenter, max_side: int = 2048, simplify: float | None = None,
-               min_area_m2: float = 0.01) -> list[UnitPolygon]:
-    """Automatic segmentation of the whole orthomosaic into candidate units (unlabelled)."""
-    import cv2
-    from affine import Affine
+def _tiles(bounds, res: float, tile: int, overlap: int):
+    """World bounds of square tiles of ``tile`` pixels at ``res`` overlapping by ``overlap`` px."""
+    x0, y0, x1, y1 = bounds
+    size, step = tile * res, (tile - overlap) * res
+    nx = max(1, int(np.ceil(max(x1 - x0 - size, 0) / step)) + 1)
+    ny = max(1, int(np.ceil(max(y1 - y0 - size, 0) / step)) + 1)
+    for j in range(ny):
+        for i in range(nx):
+            tx0 = min(x0 + i * step, max(x1 - size, x0))
+            ty1 = max(y1 - j * step, min(y0 + size, y1))
+            yield (tx0, max(ty1 - size, y0), min(tx0 + size, x1), ty1)
 
-    img, alpha, tr, _ = orthomosaic_window(chunk.orthomosaic_path)
-    f = max(1.0, max(img.shape[:2]) / max_side)
-    small = cv2.resize(img, (int(img.shape[1] / f), int(img.shape[0] / f)), interpolation=cv2.INTER_AREA) if f > 1 else img
-    sx, sy = img.shape[1] / small.shape[1], img.shape[0] / small.shape[0]
-    tr_small = tr @ Affine.scale(sx, sy)
-    res = abs(tr.a) * max(sx, sy)
-    units = []
-    a_small = cv2.resize(alpha, (small.shape[1], small.shape[0]), interpolation=cv2.INTER_NEAREST) > 0
-    for m in segmenter.segment_auto(small):
-        m = m & a_small
-        if m.sum() * res * res < min_area_m2:
+
+def _segment_auto(segmenter, img, options: dict):
+    try:
+        return segmenter.segment_auto(img, **options)
+    except TypeError:  # a segmenter without the options (custom models, tests)
+        return segmenter.segment_auto(img)
+
+
+def auto_units(chunk, segmenter: Segmenter, max_side: int = 2048, simplify: float | None = None,
+               min_area_m2: float = 0.01, bounds=None, resolution: float | None = None, tile: int = 1024,
+               overlap: int = 128, thoroughness: str = "normale", max_tiles: int = 64, exclusive: bool = True,
+               progress=None) -> list[UnitPolygon]:
+    """Automatic segmentation of the orthomosaic (or of world ``bounds``) into candidate
+    units (no US yet), scanning it in overlapping tiles of ``tile`` pixels at ``resolution``
+    (m/px; default: the finest that keeps at most ``max_tiles`` tiles), so that SAM sees the
+    details everywhere instead of a whole drone orthomosaic squeezed into one image.
+
+    Objects cut by a tile border are joined with their other part from the next tile (they
+    agree where the tiles overlap); duplicates are dropped. With ``exclusive`` the result is
+    a partition: smaller units are kept whole and cut out of the larger ones (stones out of
+    a layer), as on a stratigraphic plan. ``thoroughness``: see :data:`THOROUGHNESS`."""
+    import rasterio
+    from shapely.strtree import STRtree
+
+    from ..core.progress import as_progress
+
+    progress = as_progress(progress)
+    path = chunk.orthomosaic_path
+    if path is None:
+        raise RuntimeError("build the orthomosaic first")
+    with rasterio.open(path) as src:
+        native = abs(src.res[0])
+        b = src.bounds
+        full = (b.left, b.bottom, b.right, b.top)
+    bx = full if bounds is None else (max(bounds[0], full[0]), max(bounds[1], full[1]),
+                                      min(bounds[2], full[2]), min(bounds[3], full[3]))
+    if bx[2] <= bx[0] or bx[3] <= bx[1]:
+        raise ValueError("the area is outside the orthomosaic")
+    if resolution is None:  # the finest pixel that keeps the number of tiles within max_tiles
+        side = max(bx[2] - bx[0], bx[3] - bx[1])
+        per_axis = max(1, int(np.floor(np.sqrt(max_tiles))))
+        resolution = max(native, side / (per_axis * (tile - overlap) + overlap))
+        if bounds is None and max_side and side / resolution < max_side:
+            resolution = max(native, side / max_side)  # small orthomosaics: as before, one image
+    res = max(float(resolution), native)
+    options = dict(THOROUGHNESS.get(thoroughness, THOROUGHNESS["normale"]))
+    tiles = list(_tiles(bx, res, tile, overlap))
+    found = []  # (tile index, polygon)
+    for k, tb in enumerate(tiles):
+        progress(0.9 * k / len(tiles), f"SAM: tassello {k + 1} di {len(tiles)}")
+        try:
+            img, valid, tr = read_orthomosaic(path, tb, resolution=res)
+        except ValueError:
             continue
-        geom = mask_to_polygons(m, tr_small, simplify=simplify if simplify is not None else 2 * res)
-        if not geom.is_empty:
-            units.append(UnitPolygon(geom))
-    return units
+        if valid.mean() < 0.02:
+            continue
+        r = abs(tr.a)
+        for m in _segment_auto(segmenter, img, options):
+            m = m & valid
+            if m.sum() * r * r < min_area_m2:
+                continue
+            geom = mask_to_polygons(m, tr, simplify=simplify if simplify is not None else 1.5 * r)
+            for g in getattr(geom, "geoms", [geom]):
+                if not g.is_empty and g.area >= min_area_m2:
+                    found.append((k, g.buffer(0)))
+    progress(0.92, f"SAM: unione di {len(found)} oggetti tra i tasselli")
+    geoms = [g for _, g in found]
+    owner = [k for k, _ in found]
+    parent = list(range(len(geoms)))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    from shapely.geometry import box as sbox
+    from shapely.ops import unary_union
+
+    tree = STRtree(geoms) if geoms else None
+    for i, g in enumerate(geoms):
+        for j in tree.query(g, predicate="intersects") if tree is not None else []:
+            j = int(j)
+            if j <= i or owner[i] == owner[j]:
+                continue
+            ta, tb = tiles[owner[i]], tiles[owner[j]]
+            common = sbox(max(ta[0], tb[0]), max(ta[1], tb[1]), min(ta[2], tb[2]), min(ta[3], tb[3]))
+            if common.is_empty:
+                continue
+            a, c = g.intersection(common), geoms[j].intersection(common)
+            if a.is_empty or c.is_empty:
+                continue
+            if a.intersection(c).area > 0.5 * min(a.area, c.area):  # the same object seen by both tiles
+                parent[root(j)] = root(i)
+    groups: dict[int, list] = {}
+    for i, g in enumerate(geoms):
+        groups.setdefault(root(i), []).append(g)
+    merged = sorted((unary_union(gs).buffer(0) for gs in groups.values()), key=lambda g: g.area)
+    kept = np.zeros(len(merged), bool)
+    tree = STRtree(merged) if merged else None
+    for i, g in enumerate(merged):  # duplicates: masks of the same object at different granularities
+        dup = False
+        for j in tree.query(g, predicate="intersects") if tree is not None else []:
+            h = merged[int(j)]
+            if int(j) < i and kept[int(j)] and abs(g.area - h.area) < 0.15 * g.area \
+                    and g.intersection(h).area > 0.85 * h.area:
+                dup = True
+                break
+        kept[i] = not dup
+    final: dict[int, object] = {}
+    for i in np.nonzero(kept)[0]:  # smallest first: with ``exclusive`` they cut their place out of larger ones
+        g = merged[i]
+        if exclusive:
+            near = [final[int(j)] for j in tree.query(g, predicate="intersects") if int(j) in final]
+            if near:
+                g = g.difference(unary_union(near)).buffer(0)
+        if not g.is_empty and g.area >= min_area_m2:
+            final[int(i)] = g
+    progress(1.0, f"SAM: {len(final)} unita' candidate")
+    return [UnitPolygon(g) for g in sorted(final.values(), key=lambda g: -g.area)]
 
 
 # ------------------------------------------------------------- photos -> cloud

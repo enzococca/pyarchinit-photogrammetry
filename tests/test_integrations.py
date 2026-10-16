@@ -197,7 +197,7 @@ def test_qgis_live_geopackage(tmp_path):
     assert "_unit" not in u and u["geom"].geom_type == "Polygon" and u["geom"].area == 0.5  # ring closed
     (c,) = _gpkg_rows(tmp_path / LIVE_DB, "curve")
     assert c["quota"] == 99.5 and c["direttrice"] == 1
-    assert link.counts() == {"unita": 1, "sezioni": 0, "curve": 1, "linee": 0, "punti": 1}
+    assert link.counts() == {"unita": 1, "sezioni": 0, "curve": 1, "linee": 0, "punti": 1, "quote": 0}
 
     def changes():
         con = sqlite3.connect(tmp_path / LIVE_DB)

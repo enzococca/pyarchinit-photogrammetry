@@ -166,6 +166,7 @@ class ExternalSam2Segmenter:
         worker = Path(__file__).with_name("sam_worker.py")
         env = {k: v for k, v in os.environ.items() if not k.startswith(("PYTHON", "VIRTUAL_ENV"))}
         env["PYTHONNOUSERSITE"] = "1"
+        env.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")  # Apple GPU, CPU for the few operations it lacks
         self._lock = threading.Lock()
         self._proc = subprocess.Popen([python, "-u", str(worker)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=subprocess.PIPE, env=env, close_fds=False)
@@ -200,12 +201,16 @@ class ExternalSam2Segmenter:
         return self._call({"op": "points", "image": np.ascontiguousarray(image), "points": np.asarray(points, float),
                            "labels": np.asarray(labels, int)})["mask"]
 
+    def segment_points_box(self, image, points, labels, box):
+        return self._call({"op": "points", "image": np.ascontiguousarray(image), "points": np.asarray(points, float),
+                           "labels": np.asarray(labels, int), "box": np.asarray(box, float)})["mask"]
+
     def segment_box(self, image, box):
         return self._call({"op": "box", "image": np.ascontiguousarray(image), "box": np.asarray(box, float)})["mask"]
 
-    def segment_auto(self, image, points_per_side: int = 32, min_area: int = 500):
+    def segment_auto(self, image, points_per_side: int = 32, min_area: int = 500, **options):
         r = self._call({"op": "auto", "image": np.ascontiguousarray(image), "points_per_side": points_per_side,
-                        "min_area": min_area})
+                        "min_area": min_area, "options": options})
         h, w = r["shape"]
         return [np.unpackbits(m)[: h * w].reshape(h, w).astype(bool) for m in r["masks"]]
 

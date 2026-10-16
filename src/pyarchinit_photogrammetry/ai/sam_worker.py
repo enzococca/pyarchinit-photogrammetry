@@ -6,10 +6,14 @@ pyarchinit_photogrammetry. Protocol on stdin/stdout: each message is an 8-byte
 big-endian length followed by a pickle. Requests are dicts with ``op``:
 
 * ``init``   ``{"model", "device"?}`` -> ``{"device"}``
-* ``points`` ``{"image", "points", "labels"}`` -> ``{"mask"}`` (bool HxW)
+* ``points`` ``{"image", "points", "labels", "box"?}`` -> ``{"mask"}`` (bool HxW)
 * ``box``    ``{"image", "box"}`` -> ``{"mask"}``
-* ``auto``   ``{"image", "points_per_side", "min_area"}`` -> ``{"masks"}`` (packed bits)
+* ``auto``   ``{"image", "points_per_side", "min_area", "options"?}`` -> ``{"masks"}`` (packed bits);
+  ``options`` go to ``SAM2AutomaticMaskGenerator`` (``crop_n_layers``, ``pred_iou_thresh``...)
 * ``quit``
+
+The device is CUDA, else Apple's GPU (MPS, with ``PYTORCH_ENABLE_MPS_FALLBACK`` for the few
+operations Metal lacks), else the CPU.
 
 Replies are ``{"ok": True, ...}`` or ``{"ok": False, "error": traceback}``.
 ``PPG_SAM_FAKE=1`` answers with simple synthetic masks without loading torch (tests).
@@ -44,7 +48,7 @@ def _write(stream, obj) -> None:
 class _Fake:
     device = "fake"
 
-    def points(self, image, points, labels):
+    def points(self, image, points, labels, box=None):
         import numpy as np
 
         h, w = image.shape[:2]
@@ -60,7 +64,7 @@ class _Fake:
         m[y0:y1, x0:x1] = True
         return m
 
-    def auto(self, image, points_per_side, min_area):
+    def auto(self, image, points_per_side, min_area, **options):
         h, w = image.shape[:2]
         return [self.box(image, (w * 0.1, h * 0.1, w * 0.4, h * 0.4)), self.box(image, (w * 0.5, h * 0.5, w * 0.9, h * 0.9))]
 
@@ -84,14 +88,17 @@ class _Sam:
             self.predictor.set_image(image)
             self._key = key
 
-    def points(self, image, points, labels):
+    def points(self, image, points, labels, box=None):
         import numpy as np
         import torch
 
         self._set(image)
+        many = box is None and len(points) == 1  # one click is ambiguous: take SAM's best of three
         with torch.inference_mode():
             masks, scores, _ = self.predictor.predict(point_coords=np.asarray(points, float),
-                                                      point_labels=np.asarray(labels, int), multimask_output=True)
+                                                      point_labels=np.asarray(labels, int),
+                                                      box=None if box is None else np.asarray(box, float)[None],
+                                                      multimask_output=many)
         return masks[int(np.argmax(scores))].astype(bool)
 
     def box(self, image, box):
@@ -103,17 +110,19 @@ class _Sam:
             masks, _, _ = self.predictor.predict(box=np.asarray(box, float)[None], multimask_output=False)
         return masks[0].astype(bool)
 
-    def auto(self, image, points_per_side, min_area):
+    def auto(self, image, points_per_side, min_area, **options):
         import torch
         from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 
-        gen = SAM2AutomaticMaskGenerator(self.model, points_per_side=points_per_side, min_mask_region_area=min_area)
+        gen = SAM2AutomaticMaskGenerator(self.model, points_per_side=points_per_side, min_mask_region_area=min_area,
+                                         **options)
         with torch.inference_mode():
             res = gen.generate(image)
         return [r["segmentation"].astype(bool) for r in sorted(res, key=lambda r: -r["area"])]
 
 
 def main() -> int:
+    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")  # before torch is imported
     proto_in = os.fdopen(os.dup(0), "rb")
     proto_out = os.fdopen(os.dup(1), "wb")
     os.dup2(2, 1)  # anything printed by torch/huggingface goes to stderr, not into the protocol
@@ -130,13 +139,14 @@ def main() -> int:
             elif engine is None:
                 raise RuntimeError("init first")
             elif op == "points":
-                reply = {"mask": engine.points(req["image"], req["points"], req["labels"])}
+                reply = {"mask": engine.points(req["image"], req["points"], req["labels"], req.get("box"))}
             elif op == "box":
                 reply = {"mask": engine.box(req["image"], req["box"])}
             elif op == "auto":
                 import numpy as np
 
-                masks = engine.auto(req["image"], req.get("points_per_side", 32), req.get("min_area", 500))
+                masks = engine.auto(req["image"], req.get("points_per_side", 32), req.get("min_area", 500),
+                                    **(req.get("options") or {}))
                 reply = {"masks": [np.packbits(m) for m in masks], "shape": req["image"].shape[:2]}
             else:
                 raise ValueError(f"unknown op {op}")

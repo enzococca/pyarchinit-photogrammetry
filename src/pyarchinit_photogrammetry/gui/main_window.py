@@ -20,7 +20,7 @@ from ..app import app as application
 from ..core.document import Document
 from . import theme
 from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, IfcPreviewDialog, ImageDialog, ParamDialog,
-                      PublishDialog, SiteDialog, UnitDialog, UsFormDialog, message)
+                      PublishDialog, QuotaDialog, SiteChoiceDialog, SiteDialog, UnitDialog, UsFormDialog, message)
 from .icons import app_icon, icon
 from .image_views import US_COLORS, PhotoView, RasterView
 from .model_view import ModelView
@@ -35,6 +35,11 @@ DOCS_URL = "https://github.com/enzococca/pyarchinit-photogrammetry"
 TARGET_TYPES = [("aruco_4x4_50", "ArUco 4x4 (50 codici)"), ("aruco_4x4_250", "ArUco 4x4 (250 codici)"),
                 ("aruco_5x5_100", "ArUco 5x5 (100 codici)"), ("aruco_6x6_250", "ArUco 6x6 (250 codici)"),
                 ("apriltag_36h11", "AprilTag 36h11")]
+QUOTE_LAYER = "Quote"  # spot heights (pyarchinit_quote)
+SAM_TOOLS = {"tap": "Tocco: clic sull'oggetto", "box": "Riquadro: un oggetto nel riquadro",
+             "area": "Area: tutte le unita' nel riquadro"}
+SAM_MODELS = [("tiny", "Molto veloce (tiny)"), ("small", "Veloce (small)"), ("base_plus", "Accurato (base+)"),
+              ("large", "Molto accurato (large)")]
 
 
 class MainWindow(QMainWindow):
@@ -56,7 +61,8 @@ class MainWindow(QMainWindow):
         self.sections: list[dict] = []  # sections of the open project (sezioni/sezioni.json)
         self.line_layers: dict[str, list] = {}  # contour lines, plan slices: redrawn after raster reloads
         self.sam = None
-        self.sam_points: list = []
+        self.quote: list[dict] = []  # spot heights: x, y and the columns of pyarchinit_quote
+        self._sam_obj: dict | None = None  # SAM mask being edited (prompts, bounds, preview)
         self.last_report: dict | None = None
         self._started = document is not None
         self._build_views()
@@ -72,6 +78,7 @@ class MainWindow(QMainWindow):
         self.tabs.setDocumentMode(True)
         self.tabs.setIconSize(QSize(18, 18))
         self.model_view = ModelView()
+        self.model_view.points_selected.connect(self._points_selected)
         self.ortho_view = RasterView()
         self.photo_view = PhotoView()
         self.tabs.addTab(self.model_view, icon("view3d"), "Modello")
@@ -94,7 +101,10 @@ class MainWindow(QMainWindow):
         self.ortho_view.line_finished.connect(self._section_drawn)
         self.ortho_view.measured.connect(lambda t: (self.statusBar().showMessage(t, 30000),
                                                     self.log_pane.info(t)))
-        self.ortho_view.point_clicked.connect(self._ortho_point)
+        self.ortho_view.quota_clicked.connect(self._quota_clicked)
+        self.ortho_view.sam_click.connect(self._sam_click)
+        self.ortho_view.sam_rect.connect(self._sam_rect)
+        self.ortho_view.sam_key.connect(self._sam_key)
         self.ortho_view.selection_changed.connect(self._selection_changed)
         self.ortho_view.delete_requested.connect(lambda: self.delete_selected())
         self.ortho_view.merge_requested.connect(lambda: self.merge_selected())
@@ -133,6 +143,7 @@ class MainWindow(QMainWindow):
         self.pa_pane.demo_requested.connect(self.pyarchinit_demo)
         self.pa_pane.new_site_requested.connect(self.pyarchinit_new_site)
         self.pa_pane.us_requested.connect(lambda sito, area, us, tipo: self.open_us_form(sito, area, us, tipo))
+        self.pa_pane.site_changed.connect(self.set_project_site)
         # tab widgets inside docks (more robust than tabified docks across Qt platforms)
         self.left_tabs = QTabWidget()
         self.left_tabs.setIconSize(QSize(16, 16))
@@ -268,7 +279,8 @@ class MainWindow(QMainWindow):
         for mode, label, ic in (("pan", "Sposta / interroga", "pan"), ("select", "Seleziona", "select"),
                                 ("polygon", "Disegna unita' stratigrafica", "polygon"),
                                 ("line", "Traccia sezione", "line"), ("measure", "Misura distanza", "measure"),
-                                ("point", "Quota puntuale / prompt SAM", "point")):
+                                ("quota", "Quota puntuale (pyarchinit_quote)", "point"),
+                                ("sam", "Segment Anything (SAM)", "sam")):
             a = QAction(icon(ic), label, self, checkable=True)
             a.setChecked(mode == "pan")
             a.setStatusTip(label)
@@ -304,6 +316,35 @@ class MainWindow(QMainWindow):
         for a in [self.a_snap, self.a_snap_vertex, self.a_snap_segment, *self.snap_tol_actions.values()]:
             a.toggled.connect(lambda _on: self._apply_draw_options())
         dm.addAction(self.a_snap)
+        # SAM: how the clicks are used, model and thoroughness of the automatic scan
+        self.sam_menu = QMenu("SAM", self)
+        sam_tools = QActionGroup(self)
+        self.sam_tool_actions = {}
+        current_tool = self.settings.value("sam/tool", "tap")
+        for key, label in SAM_TOOLS.items():
+            a = self.sam_menu.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(key == current_tool)
+            a.triggered.connect(lambda _=False, k=key: self._set_sam_tool(k))
+            sam_tools.addAction(a)
+            self.sam_tool_actions[key] = a
+        self.sam_menu.addSeparator()
+        self._act(self.sam_menu, "Tutta l'ortofoto (scansione a tasselli)...", lambda: self.sam_whole_orthomosaic(),
+                  processing=True, icon_name="sam")
+        model_menu = self.sam_menu.addMenu("Modello")
+        model_group = QActionGroup(self)
+        self.sam_model_actions = {}
+        for key, label in SAM_MODELS:
+            a = model_menu.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(key == self.settings.value("sam/model", "small"))
+            a.triggered.connect(lambda _=False, k=key: self._set_sam_model(k))
+            model_group.addAction(a)
+            self.sam_model_actions[key] = a
+        self.draw_actions["sam"].setMenu(self.sam_menu)
+        self.draw_actions["sam"].setToolTip("Segment Anything 2.1: clic su un oggetto (tocco), un riquadro per un "
+                                            "oggetto o per tutte le unita' di un'area; dal menu anche tutta l'ortofoto")
+        self.ortho_view.sam_tool = current_tool if current_tool in SAM_TOOLS else "tap"
         dm.addSeparator()
         self.a_sel_delete = self._act(dm, "Elimina selezionati", lambda: self.delete_selected(), icon_name="delete")
         self.a_sel_delete.setToolTip("Elimina gli elementi selezionati (tasto Canc nella modalita' Seleziona)")
@@ -320,11 +361,16 @@ class MainWindow(QMainWindow):
         self._act(m, "Profilo ceramico da mesh...", self.pottery_profile, processing=True, icon_name="pottery")
         self._act(m, "Proxy 3D delle US...", self.create_proxies, processing=True, icon_name="us")
         m.addSeparator()
-        self._act(m, "Classifica nuvola di punti", self.classify, processing=True, icon_name="classify")
+        cm = m.addMenu(icon("classify"), "Classificazione della nuvola")
+        self._act(cm, "Classificazione automatica (regole)", self.classify, processing=True, icon_name="classify")
+        self._act(cm, "Mostra la nuvola per classi", self.show_classes, icon_name="classify")
+        self._act(cm, "Correggi a mano con il lazo (vista 3D)", self.classify_with_lasso, icon_name="select")
         sm = m.addMenu(icon("sam"), "Segment Anything 2.1")
-        self._act(sm, "Unita' automatiche sull'ortofoto", self.sam_auto_units, processing=True, icon_name="sam")
-        self._act(sm, "Segmenta dai punti cliccati sull'ortofoto", self.sam_from_points, processing=True,
-                  icon_name="point")
+        for key, label in SAM_TOOLS.items():
+            self._act(sm, f"Ortofoto - {label}", lambda _=False, k=key: (self._set_sam_tool(k), self.set_draw_mode("sam")),
+                      icon_name="sam")
+        self._act(sm, "Ortofoto - tutta, scansione a tasselli...", lambda: self.sam_whole_orthomosaic(), processing=True,
+                  icon_name="sam")
         self._act(sm, "Prompt sulle foto (attiva/disattiva)", self.toggle_photo_sam, icon_name="view_photo")
         sm.addSeparator()
         self._act(sm, "Installa / aggiorna SAM 2.1...", lambda: self.install_sam(), processing=True, icon_name="export")
@@ -337,8 +383,9 @@ class MainWindow(QMainWindow):
         self._act(m, "Connetti (config.cfg, SQLite o PostgreSQL)...", lambda: self.pyarchinit_connect(ask=True),
                   icon_name="database")
         self._act(m, "Usa il database demo", self.pyarchinit_demo, icon_name="demo_db")
+        self._act(m, "Sito del progetto...", lambda: self.choose_project_site(), icon_name="site")
         self._act(m, "Nuovo sito...", self.pyarchinit_new_site, icon_name="site")
-        self._act(m, "Nuova scheda US...", lambda: self.open_us_form(self.pa_pane.current_site() or "", "1", "", "US"),
+        self._act(m, "Nuova scheda US...", lambda: self.open_us_form(self.project_site(), "1", "", "US"),
                   icon_name="us")
         self._act(m, "Aggiorna struttura del database...", self.pyarchinit_upgrade, icon_name="database")
         self.a_autoconnect = QAction("Connetti all'avvio al database di PyArchInit", self, checkable=True)
@@ -348,11 +395,13 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self._act(m, "Pubblica ortofoto / DEM / modello...", self.pyarchinit_publish, processing=True,
                   icon_name="publish")
-        self._act(m, "Pubblica unita' disegnate (pyunitastratigrafiche)", self.pyarchinit_publish_units,
-                  processing=True, icon_name="publish")
-        self._act(m, "Carica poligoni US sull'ortofoto", self.pyarchinit_load_units, icon_name="load")
-        self._act(m, "Pubblica quote dei punti cliccati", self.pyarchinit_publish_points, processing=True,
+        self._act(m, "Pubblica unita' e quote disegnate", self.pyarchinit_publish_drawings, processing=True,
                   icon_name="publish")
+        self._act(m, "Pubblica solo le unita' (pyunitastratigrafiche)", self.pyarchinit_publish_units,
+                  processing=True, icon_name="publish")
+        self._act(m, "Pubblica solo le quote (pyarchinit_quote)", self.pyarchinit_publish_points, processing=True,
+                  icon_name="publish")
+        self._act(m, "Carica poligoni US sull'ortofoto", self.pyarchinit_load_units, icon_name="load")
         self._act(m, "Aggiorna pannello", lambda: self.pa_pane.refresh(), icon_name="refresh")
         # ------------------------------------------------------------ QGIS
         m = mb.addMenu("&QGIS")
@@ -450,7 +499,8 @@ class MainWindow(QMainWindow):
         # short texts in the bar (menus keep the full names, tooltips show them)
         for a, short in ((self.draw_actions["pan"], "Sposta"), (self.draw_actions["polygon"], "Disegna US"),
                          (self.draw_actions["line"], "Sezione"), (self.draw_actions["measure"], "Misura"),
-                         (self.draw_actions["point"], "Quota / SAM"), (self.a_sel_delete, "Elimina"),
+                         (self.draw_actions["quota"], "Quota"), (self.draw_actions["sam"], "SAM"),
+                         (self.a_sel_delete, "Elimina"),
                          (self.a_sel_merge, "Unisci"), (self.a_clear_drawings, "Cancella tutto"),
                          (self.a_contours, "Curve"), (self.a_volume, "Volume"), (self.a_slice, "Pianta a quota"),
                          (self.a_qgis_open, "QGIS")):
@@ -464,8 +514,11 @@ class MainWindow(QMainWindow):
         snap_button = db.widgetForAction(self.a_snap)
         if snap_button is not None:
             snap_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        for mode in ("line", "measure", "point"):
+        for mode in ("line", "measure", "quota", "sam"):
             db.addAction(self.draw_actions[mode])
+        sam_button = db.widgetForAction(self.draw_actions["sam"])
+        if sam_button is not None:
+            sam_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         db.addAction(self.a_sel_delete)
         db.addAction(self.a_sel_merge)
         db.addAction(self.a_clear_drawings)
@@ -477,9 +530,9 @@ class MainWindow(QMainWindow):
         a.setToolTip("Pannello delle sezioni")
         a.triggered.connect(lambda _=False: self._show_pane(self.bottom_tabs, self.sections_pane))
         db.addAction(self.a_qgis_open)
-        a = db.addAction(icon("publish"), "Pubblica unita'")
-        a.setToolTip("Scrive le unita' disegnate in pyunitastratigrafiche")
-        a.triggered.connect(lambda _=False: self.pyarchinit_publish_units())
+        a = db.addAction(icon("publish"), "Pubblica")
+        a.setToolTip("Scrive in PyArchInit le unita' disegnate (pyunitastratigrafiche) e le quote (pyarchinit_quote)")
+        a.triggered.connect(lambda _=False: self.pyarchinit_publish_drawings())
         self._processing_actions.append(a)
         self._refresh_recent()
         self._apply_draw_options()
@@ -519,9 +572,12 @@ class MainWindow(QMainWindow):
         if not doc.chunks:
             doc.add_chunk("Chunk 1")
         self.units = []
-        self.sam_points = []
+        self.quote = []
+        self._sam_obj = None
         self.sections = []
         self.line_layers = {}
+        self._restore_drawings()
+        self.pa_pane.set_project_site(self.project_site())
         self.refresh_all(reset_views=True)
         self._load_sections()
         self.proxies_pane.set_proxies(self.chunk.meta.get("proxies", []) if self.chunk else [])
@@ -537,8 +593,7 @@ class MainWindow(QMainWindow):
             self._schedule_qgis()
 
     def refresh_all(self, reset_views: bool = False) -> None:
-        name = self.doc.path.name if self.doc.path else "senza nome"
-        self.setWindowTitle(f"{APP_TITLE} {__version__} - {name}[*]")
+        self._update_title()
         self.workspace.populate(self.doc)
         self.reference.set_chunk(self.chunk, self.last_report)
         self.photos.set_chunk(self.chunk)
@@ -562,6 +617,8 @@ class MainWindow(QMainWindow):
         with self.ortho_view.batch():  # thousands of contour lines: one update of panes and QGIS
             for i, u in enumerate(self.units):
                 self._draw_unit(u, i)
+            for i, q in enumerate(self.quote):
+                self._draw_quota(q, i)
             self._draw_sections()
             for name, lines in self.line_layers.items():
                 for coords, color, label, attrs, width in lines:
@@ -569,6 +626,64 @@ class MainWindow(QMainWindow):
 
     def _dirty(self, flag: bool = True) -> None:
         self.setWindowModified(flag)
+
+    def _update_title(self) -> None:
+        name = self.doc.path.name if self.doc.path else "senza nome"
+        site = self.project_site()
+        self.setWindowTitle(f"{APP_TITLE} {__version__} - {name}" + (f" - sito {site}" if site else "") + "[*]")
+
+    # ---------------------------------------------------------------- site of the project
+    def project_site(self) -> str:
+        """The excavation (PyArchInit site) every unit and spot height of the project belongs to."""
+        return str(self.doc.meta.get("sito") or "")
+
+    def set_project_site(self, sito: str) -> None:
+        sito = (sito or "").strip()
+        if sito == self.project_site():
+            return
+        if sito:
+            self.doc.meta["sito"] = sito
+        else:
+            self.doc.meta.pop("sito", None)
+        for u in self.units:  # the drawings of the project follow it (units loaded from a site keep theirs)
+            if (u.attributes or {}).get("gid") is None:
+                u.sito = sito or None
+        for q in self.quote:
+            if q.get("gid") is None:
+                q["sito_q"] = sito
+        self.pa_pane.set_project_site(sito)
+        self._update_title()
+        self._dirty(True)
+        self._redraw_drawings()
+        self.log_pane.info(f"Sito del progetto: {sito or '(nessuno)'}")
+
+    def _project_open(self) -> bool:
+        return self.doc.path is not None or any(ch.cameras for ch in self.doc.chunks)
+
+    def choose_project_site(self, reason: str = "") -> str:
+        """Ask which site the project belongs to: the sites of the PyArchInit database, or a new name."""
+        sites = self.pa_pane.site_names() if self.pa is not None else []
+        text = (reason + "\n\n" if reason else "") + ("Sito dello scavo: tutte le US e le quote di questo progetto "
+                                                       "appartengono a questo sito.")
+        dlg = SiteChoiceDialog(self, sites, self.project_site(), text)
+        if dlg.exec() == dlg.DialogCode.Accepted and dlg.value():
+            self.set_project_site(dlg.value())
+        return self.project_site()
+
+    def _ensure_site(self, reason: str = "") -> str:
+        """The site of the project, asked once when it is not set yet ("" when cancelled)."""
+        return self.project_site() or self.choose_project_site(reason or "Scegli prima il sito del progetto.")
+
+    def _sync_site_with_db(self, ask: bool) -> None:
+        """After connecting: a database with one site gives the project its site; with more
+        sites the user chooses (when a project is open)."""
+        if self.pa is None or self.project_site():
+            return
+        sites = self.pa_pane.site_names()
+        if len(sites) == 1:
+            self.set_project_site(sites[0])
+        elif sites and ask:
+            self.choose_project_site(f"Il database contiene {len(sites)} siti (scavi).")
 
     def _busy(self, busy: bool) -> None:
         for a in self._processing_actions:
@@ -616,6 +731,7 @@ class MainWindow(QMainWindow):
         def done(result):
             if save and self.doc.path:
                 try:
+                    self._store_drawings()
                     self.doc.save()
                 except Exception as exc:
                     log.error("Salvataggio non riuscito: %s\n%s", exc, traceback.format_exc())
@@ -656,9 +772,11 @@ class MainWindow(QMainWindow):
             path, _ = QFileDialog.getSaveFileName(self, "Salva progetto", self._last_dir(), "Progetti (*.ppg)")
             if not path:
                 return False
+            self._store_drawings()
             self.doc.save(path)
             self._add_recent(self.doc.path)
         else:
+            self._store_drawings()
             self.doc.save()
         self._dirty(False)
         self.refresh_all()
@@ -1243,6 +1361,13 @@ class MainWindow(QMainWindow):
             self.draw_actions["pan"].setChecked(True)
             self._warn("Costruisci prima l'ortofoto o il DEM.")
             return
+        self._quota_keep = None
+        if mode != "sam":
+            self._sam_cancel()
+        if mode == "sam" and not self._sam_available(then=lambda: self.set_draw_mode("sam")):
+            self.draw_actions["pan"].setChecked(True)
+            self.ortho_view.set_mode("pan")
+            return
         self.ortho_view.set_mode(mode)
         self.draw_actions[mode].setChecked(True)
         self.show_view(self.ortho_view)
@@ -1253,15 +1378,53 @@ class MainWindow(QMainWindow):
                              if self.ortho_view.freehand else
                              "Clic per i vertici, doppio clic per chiudere, tasto destro per annullare"),
                  "line": "Due clic: inizio e fine della sezione", "measure": "Due clic per misurare",
-                 "point": "Clic sinistro: punto positivo, destro: negativo (prompt SAM); quote nel log"}
-        self.statusBar().showMessage(hints.get(mode, ""), 15000)
+                 "quota": "Clic su un punto: la quota viene letta dal DEM, poi area, US e gli altri campi di "
+                          "pyarchinit_quote",
+                 "sam": self._sam_hint()}
+        self.statusBar().showMessage(hints.get(mode, ""), 20000)
 
     def clear_drawings(self) -> None:
         self.units = []
-        self.sam_points = []
+        self.quote = []
+        self._sam_cancel()
         self.line_layers = {}
         self.ortho_view.clear_overlays()
         self._draw_sections()
+        self._dirty(True)
+
+    # ---------------------------------------------------------------- drawings saved with the project
+    def _store_drawings(self) -> None:
+        """Units drawn here (not those loaded from PyArchInit) and spot heights go into the
+        active chunk, so they come back when the project is reopened."""
+        ch = self.chunk
+        if ch is None:
+            return
+        units = [{**u.to_dict(), "layer": (u.attributes or {}).get("_layer")} for u in self.units
+                 if not str((u.attributes or {}).get("_layer") or "").startswith("US da PyArchInit - ")]
+        quote = [{k: v for k, v in q.items() if not str(k).startswith("_")} for q in self.quote]
+        if units or quote:
+            ch.meta["drawings"] = {"units": units, "quote": quote}
+        else:
+            ch.meta.pop("drawings", None)
+
+    def _restore_drawings(self) -> None:
+        from ..archaeo.stratigraphy import UnitPolygon
+
+        ch = self.chunk
+        data = (ch.meta.get("drawings") or {}) if ch is not None else {}
+        self.units, self.quote = [], []
+        for d in data.get("units", []):
+            try:
+                u = UnitPolygon.from_dict(d)
+                if d.get("layer"):
+                    u.attributes["_layer"] = d["layer"]
+                self.units.append(u)
+            except Exception as exc:  # a broken record must not stop the project from opening
+                log.warning("Unita' non letta dal progetto: %s", exc)
+        self.quote = [dict(q) for q in data.get("quote", []) if "x" in q and "y" in q]
+
+    def _redraw_drawings(self) -> None:
+        self._redraw_overlays()
 
     def _add_line_feature(self, layer: str, coords, color: str, label: str = "", attrs: dict | None = None,
                           width: float = 2.0) -> None:
@@ -1272,29 +1435,56 @@ class MainWindow(QMainWindow):
             self.ortho_view.add_line(coords, color, label, layer=layer, attrs=attrs, width=width)
 
     def _us_choices(self) -> list:
-        if self.pa is None:
+        if self.pa is None or not self.project_site():
             return []
         try:
-            sito = self.pa_pane.site_names()[0] if self.pa_pane.site_names() else None
             return [(str(u.get("area")), str(u.get("us")), str(u.get("d_stratigrafica") or ""))
-                    for u in self.pa.stratigraphic_units(sito)] if sito else []
+                    for u in self.pa.stratigraphic_units(self.project_site())]
         except Exception:
             return []
+
+    def _unit_defaults(self) -> dict:
+        d = dict(getattr(self, "_last_unit", {}) or {})
+        d.setdefault("disegnatore", self.settings.value("pa/disegnatore", "") or "")
+        d.pop("us", None)  # a new unit has a new number
+        return d
+
+    def _ask_unit(self, refine: bool = False, title: str = "Unita' stratigrafica"):
+        """The unit dialog with the last values; returns (result, values)."""
+        dlg = UnitDialog(self, self._us_choices(), sito=self.project_site(), defaults=self._unit_defaults(),
+                         refine=refine, title=title)
+        r = dlg.exec()
+        v = dlg.values() if r else {}
+        if r == 1 or (refine and r == UnitDialog.REFINE):
+            keep = {k: v.get(k) for k in ("area", "tipo", "stratigraph_index_us", "tipo_us_s", "disegnatore", "data",
+                                          "rilievo_originale") if v.get(k) is not None}
+            self._last_unit = keep
+            if v.get("disegnatore"):
+                self.settings.setValue("pa/disegnatore", v["disegnatore"])
+        return r, v
+
+    def _make_unit(self, geometry, v: dict):
+        from ..archaeo.stratigraphy import UNIT_FIELDS, UnitPolygon
+
+        extra = {k: v[k] for k in UNIT_FIELDS if v.get(k) not in (None, "")}
+        return UnitPolygon(geometry, us=v.get("us") or None, area=v.get("area") or None, tipo=v.get("tipo") or "US",
+                           attributes=extra, sito=self.project_site() or None)
+
+    def _add_unit(self, u) -> None:
+        self.units.append(u)
+        self._draw_unit(u, len(self.units) - 1)
+        self._dirty(True)
+        self.log_pane.info(f"{u.tipo} {u.us or '?'}: area {u.geometry.area:.3f} m2"
+                           + (f" (sito {u.sito})" if u.sito else ""))
 
     def _unit_drawn(self, xy) -> None:
         from shapely.geometry import Polygon
 
-        from ..archaeo.stratigraphy import UnitPolygon
-
-        dlg = UnitDialog(self, self._us_choices())
-        if dlg.exec() != dlg.DialogCode.Accepted:
+        self._ensure_site("Le US disegnate appartengono a un sito: sceglilo una volta per il progetto.")
+        r, v = self._ask_unit()
+        if r != 1:
             return
-        v = dlg.values()
-        poly = Polygon(xy).buffer(0)
-        u = UnitPolygon(poly, us=v["us"] or None, area=v["area"] or None, tipo=v["tipo"])
-        self.units.append(u)
-        self._draw_unit(u, len(self.units) - 1)
-        self.log_pane.info(f"{u.tipo} {u.us}: area {poly.area:.3f} m2")
+        self._add_unit(self._make_unit(Polygon(xy).buffer(0), v))
 
     def _draw_unit(self, u, i: int, layer: str | None = None) -> None:
         if u.attributes is None:
@@ -1302,14 +1492,80 @@ class MainWindow(QMainWindow):
         layer = layer or u.attributes.get("_layer") or "Unita' stratigrafiche"
         u.attributes["_layer"] = layer  # survives raster reloads (DEM <-> orthomosaic)
         geoms = getattr(u.geometry, "geoms", [u.geometry])
-        attrs = {"tipo": u.tipo, "us": u.us or "?", "area": u.area or "", "area_m2": round(u.geometry.area, 3),
-                 **{k: v for k, v in (u.attributes or {}).items() if k != "gid" and not k.startswith("_")},
+        # the columns of pyunitastratigrafiche, as in PyArchInit's layer
+        attrs = {**u.layer_attributes(), "area_m2": round(u.geometry.area, 3),
+                 **{k: v for k, v in (u.attributes or {}).items()
+                    if k not in ("gid",) and not k.startswith("_") and k not in u.layer_attributes()},
                  "_unit": i}
         if (u.attributes or {}).get("gid") is not None:
             attrs["_gid"] = u.attributes["gid"]
         for g in geoms:
             self.ortho_view.add_polygon(np.asarray(g.exterior.coords)[:, :2], f"{u.tipo} {u.us or '?'}",
                                         US_COLORS[i % len(US_COLORS)], layer=layer, attrs=attrs)
+
+    # ---------------------------------------------------------------- spot heights (pyarchinit_quote)
+    def _draw_quota(self, q: dict, i: int) -> None:
+        from ..archaeo.stratigraphy import QUOTE_FIELDS
+
+        attrs = {k: q.get(k, "") for k in QUOTE_FIELDS}
+        attrs["_quota"] = i
+        if q.get("gid") is not None:
+            attrs["_gid"] = q["gid"]
+        z = q.get("quota_q")
+        label = f"{float(z):.2f}" if z not in (None, "") else "?"
+        self.ortho_view.add_point(float(q["x"]), float(q["y"]), "#ffd166", label, layer=QUOTE_LAYER, attrs=attrs)
+
+    def _quota_clicked(self, x: float, y: float) -> None:
+        """A spot height at the clicked point: elevation from the DEM, then the columns of
+        pyarchinit_quote (asked once; "non chiedere piu'" keeps the values for the next points)."""
+        z = self._dem_value(x, y)
+        keep = getattr(self, "_quota_keep", None)
+        if keep is not None:
+            v = dict(keep)
+            if z is None:
+                self.statusBar().showMessage("Fuori dal DEM: quota non letta", 8000)
+                return
+            v["quota_q"] = round(z, 3)
+        else:
+            self._ensure_site("Le quote appartengono a un sito: sceglilo una volta per il progetto.")
+            defaults = dict(getattr(self, "_last_quota", {}) or {})
+            defaults.setdefault("disegnatore", self.settings.value("pa/disegnatore", "") or "")
+            dlg = QuotaDialog(self, self._us_choices(), sito=self.project_site(), quota=z, defaults=defaults)
+            if dlg.exec() != dlg.DialogCode.Accepted:
+                return
+            v = dlg.values()
+            self._last_quota = {k: val for k, val in v.items() if k not in ("quota_q", "keep")}
+            if v.pop("keep", False):
+                self._quota_keep = dict(self._last_quota)
+                self.statusBar().showMessage("Quote: valori fissati per i prossimi punti (Esc o un altro "
+                                             "strumento per tornare a chiederli)", 15000)
+            if v.get("disegnatore"):
+                self.settings.setValue("pa/disegnatore", v["disegnatore"])
+        self._add_quota({"x": float(x), "y": float(y), "sito_q": self.project_site(), **v})
+
+    def _add_quota(self, q: dict) -> None:
+        q.pop("keep", None)
+        self.quote.append(q)
+        self._draw_quota(q, len(self.quote) - 1)
+        self._dirty(True)
+        self.log_pane.info(f"Quota {q.get('quota_q')} {q.get('unita_misu_q', '')} - US {q.get('us_q') or '?'} "
+                           f"(area {q.get('area_q') or '?'}) in X {q['x']:.3f} Y {q['y']:.3f}")
+
+    def _dem_value(self, x: float, y: float) -> float | None:
+        """Elevation of the DEM at full resolution (the view keeps a reduced copy)."""
+        ch = self.chunk
+        if ch is None or not ch.dem_path:
+            return self.ortho_view.elevation(x, y)
+        try:
+            import rasterio
+
+            with rasterio.open(ch.dem_path) as src:
+                val = float(next(src.sample([(x, y)]))[0])
+                if (src.nodata is not None and val == src.nodata) or not np.isfinite(val):
+                    return None
+                return val
+        except Exception:
+            return self.ortho_view.elevation(x, y)
 
     def _sections_dir(self) -> Path:
         return (self.doc.path.parent if self.doc.path else Path.home()) / "sezioni"
@@ -1427,16 +1683,33 @@ class MainWindow(QMainWindow):
         if not 0 <= idx < len(feats):
             return
         attrs = feats[idx]
-        if "_unit" in attrs and 0 <= attrs["_unit"] < len(self.units):
+        if "_quota" in attrs and 0 <= attrs["_quota"] < len(self.quote):
+            q = self.quote[attrs["_quota"]]
+            if key == "quota_q":
+                try:
+                    value = round(float(value), 3)
+                except (TypeError, ValueError):
+                    value = None
+                self.ortho_view.set_feature_attribute(layer, idx, "etichetta", "?" if value is None else f"{value:.2f}")
+            if key != "etichetta":
+                q[key] = value
+        elif "_unit" in attrs and 0 <= attrs["_unit"] < len(self.units):
             u = self.units[attrs["_unit"]]
-            if key in ("us", "area", "tipo"):
-                setattr(u, key, None if value in ("", None) else str(value))
+            fields = {"us_s": "us", "area_s": "area", "unita_tipo_s": "tipo", "scavo_s": "sito",
+                      "us": "us", "area": "area", "tipo": "tipo"}  # pyunitastratigrafiche -> UnitPolygon
+            if key in fields:
+                setattr(u, fields[key], None if value in ("", None) else str(value))
                 label = f"{u.tipo} {u.us or '?'}"
                 for j, other in enumerate(feats):  # every part of a multipolygon
                     if other.get("_unit") == attrs["_unit"]:
                         self.ortho_view.set_feature_attribute(layer, j, key, value)
                         self.ortho_view.set_feature_attribute(layer, j, "etichetta", label)
             elif key != "etichetta":
+                if key == "stratigraph_index_us":
+                    try:
+                        value = int(value)
+                    except (TypeError, ValueError):
+                        value = 1
                 u.attributes[key] = value
             gid = (u.attributes or {}).get("gid")
             if gid is not None:
@@ -1539,7 +1812,7 @@ class MainWindow(QMainWindow):
         if not sel:
             return 0
         parts: dict[int, set[int]] = {}
-        sections, lines, skip = [], {}, set()
+        sections, lines, skip, quote_gone = [], {}, set(), set()
         for layer, idx, attrs in sel:
             if "_unit" in attrs:
                 ref = self._unit_part(layer, attrs)
@@ -1552,11 +1825,10 @@ class MainWindow(QMainWindow):
                     sections.append(sdict)
             elif layer in self.line_layers:
                 lines.setdefault(layer, set()).add(idx)
+            elif "_quota" in attrs:
+                quote_gone.add(int(attrs["_quota"]))
             else:  # points and anything else drawn only in the view
                 skip.add(id(attrs))
-                if attrs.get("_geom", ("",))[0] == "Point":
-                    x, y = attrs["_geom"][1]
-                    self.sam_points = [p for p in self.sam_points if abs(p[0] - x) > 1e-6 or abs(p[1] - y) > 1e-6]
         if confirm:
             from_pa = sum(1 for i in parts if (self.units[i].attributes or {}).get("gid") is not None)
             text = f"Eliminare {len(sel)} elementi selezionati?"
@@ -1581,6 +1853,7 @@ class MainWindow(QMainWindow):
                 removed.add(i)
             self._forget_pa_unit(u, deleted=not keep)
         self.units = [u for i, u in enumerate(self.units) if i not in removed]
+        self.quote = [q for i, q in enumerate(self.quote) if i not in quote_gone]
         for sdict in sections:
             self._delete_section(sdict, confirm=False, redraw=False)
         for layer, idxs in lines.items():
@@ -1694,10 +1967,15 @@ class MainWindow(QMainWindow):
         v = self.ortho_view
         if v.tr is None:
             return
+        with v.batch():
+            self._redraw_overlays_now(skip)
+
+    def _redraw_overlays_now(self, skip: set | None) -> None:
+        v = self.ortho_view
         skip = skip or set()
         visible = {n: lay["visible"] for n, lay in v.layers.items()}
         order = list(v.layer_order)
-        modelled = set(self.line_layers) | {"Sezioni"}
+        modelled = set(self.line_layers) | {"Sezioni", QUOTE_LAYER}
         others = []
         for name in order:
             lay = v.layers[name]
@@ -1711,6 +1989,8 @@ class MainWindow(QMainWindow):
         v.clear_overlays()
         for i, u in enumerate(self.units):
             self._draw_unit(u, i)
+        for i, q in enumerate(self.quote):
+            self._draw_quota(q, i)
         self._draw_sections()
         for name, lines in self.line_layers.items():
             for coords, color, label, attrs, width in lines:
@@ -1735,11 +2015,9 @@ class MainWindow(QMainWindow):
     def open_us_form(self, sito: str, area: str = "1", us: str = "", tipo: str = "US", defaults: dict | None = None) -> bool:
         if not self._need_pa():
             return False
+        sito = sito or self._ensure_site("La scheda US appartiene a un sito.")
         if not sito:
-            sites = self.pa_pane.site_names()
-            sito, ok = QInputDialog.getItem(self, "Sito", "Sito PyArchInit:", sites or [""], 0, True)
-            if not ok or not sito:
-                return False
+            return False
         dlg = UsFormDialog(self.pa, sito, area, us, tipo, self, defaults=defaults)
         if dlg.exec() != dlg.DialogCode.Accepted:
             return False
@@ -1751,7 +2029,7 @@ class MainWindow(QMainWindow):
         prefix = "US da PyArchInit - "
         if layer.startswith(prefix):
             return layer[len(prefix):]
-        return self.pa_pane.current_site() or ""
+        return self.project_site() or self.pa_pane.current_site() or ""
 
     def _quote_defaults(self, geometry) -> dict:
         """Lowest and highest DEM elevation inside a unit: defaults for a new US form."""
@@ -1771,11 +2049,11 @@ class MainWindow(QMainWindow):
             return
         attrs = feats[idx]
         u = self.units[attrs["_unit"]] if "_unit" in attrs and attrs["_unit"] < len(self.units) else None
-        us = str(attrs.get("us") or "").replace("?", "")
-        area = str(attrs.get("area") or "1")
-        tipo = str(attrs.get("tipo") or "US")
-        self.open_us_form(self._unit_site(layer), area, us, tipo,
-                          defaults=self._quote_defaults(u.geometry if u is not None else None))
+        us = str(attrs.get("us_s") or attrs.get("us") or "").replace("?", "")
+        area = str(attrs.get("area_s") or attrs.get("area") or "1")
+        tipo = str(attrs.get("unita_tipo_s") or attrs.get("tipo") or "US")
+        site = (u.sito if u is not None and u.sito else "") or self._unit_site(layer)
+        self.open_us_form(site, area, us, tipo, defaults=self._quote_defaults(u.geometry if u is not None else None))
 
     def _us_form_from_proxy(self, row: int) -> None:
         entries = self.chunk.meta.get("proxies", [])
@@ -2017,12 +2295,6 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{layer}: {text}", 15000)
         self.layers_pane.show_attributes(layer, attrs)
 
-    def _ortho_point(self, x: float, y: float, label: int) -> None:
-        z = self.ortho_view.elevation(x, y)
-        self.sam_points.append((x, y, label))
-        self.log_pane.info(f"Punto {len(self.sam_points)}: X {x:.3f} Y {y:.3f}"
-                           + (f" Z {z:.3f}" if z is not None else ""))
-
     # ---------------------------------------------------------------- tools
     def print_targets(self) -> None:
         v = ParamDialog.ask(self, "Fogli di target", [
@@ -2255,15 +2527,76 @@ class MainWindow(QMainWindow):
         def done(pc):
             st = class_statistics(pc)
             self.log_pane.info("Classi: " + ", ".join(f"{k}: {n}" for k, n in sorted(st.items())))
-            self._show_model("point_cloud")
+            self.show_classes()
 
         self.run_task("Classificazione", lambda p: classify_chunk(self.chunk), done)
+
+    def show_classes(self) -> None:
+        """The dense cloud coloured by class, with the legend (untick a class to hide it)."""
+        if not self._need_chunk(product="point_cloud"):
+            return
+        self.model_view.set_color_mode("class")
+        self._show_model("point_cloud")
+        self.statusBar().showMessage("Nuvola per classi: togli la spunta nella legenda per nascondere una classe; "
+                                     "«Lazo» per correggere la classe di un gruppo di punti", 15000)
+
+    def classify_with_lasso(self) -> None:
+        if not self._need_chunk(product="point_cloud"):
+            return
+        self.show_classes()
+        self.model_view.start_lasso()
+
+    def _points_selected(self, visible, inside) -> None:
+        """Points chosen with the lasso in the 3D view: give them a class."""
+        from ..core.pointcloud import ARCHAEO_CLASSES, ASPRS_CLASSES
+        from .scene import class_name
+
+        n_vis, n_all = int(np.count_nonzero(visible)), int(np.count_nonzero(inside))
+        if not n_all:
+            self.statusBar().showMessage("Nessun punto nel lazo", 8000)
+            return
+        codes = sorted(set(ASPRS_CLASSES) | set(ARCHAEO_CLASSES) | set(self.model_view.sd.class_counts if
+                                                                         self.model_view.sd else {}))
+        last = int(self.settings.value("classes/last", 64) or 64)
+        v = ParamDialog.ask(self, "Classe dei punti selezionati", [
+            Field("code", "Classe", last if last in codes else codes[0],
+                  choices=[(c, f"{c} - {class_name(c)}") for c in codes]),
+            Field("other", "...oppure un altro codice (0 = usa la classe sopra)", 0, minimum=0, maximum=255),
+            Field("through", f"Anche i punti nascosti dietro la superficie ({n_all} invece di {n_vis})", False)],
+            intro=f"Nel lazo ci sono {n_vis} punti visibili ({n_all} contando quelli nascosti). Le classi date a mano "
+                  "vengono ricordate: un classificatore addestrato non le cambia.")
+        if not v:
+            return
+        code = int(v["other"] or v["code"])
+        mask = inside if v["through"] else visible
+        self.settings.setValue("classes/last", code)
+        self._set_point_class(mask, code)
+        self.log_pane.info(f"Classe {code} ({class_name(code)}) assegnata a mano a {int(np.count_nonzero(mask))} punti")
+        self.model_view.refresh(reset=False)
+        self._dirty(True)
+
+    def _set_point_class(self, mask, code: int) -> None:
+        """Assign a class by hand (remembered as a manual label when the cloud supports it)."""
+        try:
+            from ..ai import learn
+        except ImportError:
+            learn = None
+        if learn is not None and hasattr(learn, "set_class"):
+            learn.set_class(self.chunk, mask, code)
+            return
+        pc = self.chunk.point_cloud
+        pc.classification[np.asarray(mask, bool)] = int(code)
+        self.chunk.point_cloud = pc
 
     def _segmenter(self):
         if self.sam is None:
             from ..ai.sam_env import make_segmenter
 
-            self.sam = make_segmenter("small")
+            self.sam = make_segmenter(str(self.settings.value("sam/model", "small") or "small"))
+            device = getattr(self.sam, "device", None)
+            if device:
+                log.info("SAM 2.1 (%s) su %s", self.settings.value("sam/model", "small"),
+                         {"mps": "GPU del Mac (MPS)", "cuda": "GPU NVIDIA (CUDA)"}.get(device, device))
         return self.sam
 
     def _sam_available(self, then=None) -> bool:
@@ -2302,43 +2635,186 @@ class MainWindow(QMainWindow):
         sam_env.remove()
         self._info("Segment Anything 2.1", "Ambiente di SAM 2.1 rimosso.")
 
-    def sam_auto_units(self) -> None:
-        if not self._need_chunk(product="orthomosaic") or not self._sam_available(then=self.sam_auto_units):
-            return
-        from ..ai.sam import auto_units
+    # ---------------------------------------------------------------- SAM on the orthomosaic
+    def _set_sam_tool(self, key: str) -> None:
+        self.settings.setValue("sam/tool", key)
+        self.ortho_view.sam_tool = key
+        if key in self.sam_tool_actions:
+            self.sam_tool_actions[key].setChecked(True)
+        self._sam_cancel()
+        if self.ortho_view.mode == "sam":
+            self.statusBar().showMessage(self._sam_hint(), 20000)
 
-        def done(units):
-            start = len(self.units)
-            self.units += units
-            for i, u in enumerate(units):
-                self._draw_unit(u, start + i)
-            self.statusBar().showMessage(f"{len(units)} unita' candidate (assegna le US prima di pubblicarle)", 15000)
+    def _set_sam_model(self, key: str) -> None:
+        self.settings.setValue("sam/model", key)
+        if self.sam is not None and hasattr(self.sam, "close"):
+            self.sam.close()
+        self.sam = None
 
-        self.run_task("SAM 2.1 - unita' automatiche", lambda p: auto_units(self.chunk, self._segmenter()), done,
-                      refresh=False, save=False)
+    def _sam_hint(self) -> str:
+        edit = " Maiusc+clic aggiunge una parte, clic destro la toglie; Invio salva, Esc annulla."
+        return {"tap": "SAM, tocco: clic sull'oggetto. SAM guarda l'area visibile: avvicinati per i dettagli, "
+                       "allontanati per gli oggetti grandi." + edit,
+                "box": "SAM, riquadro: trascina un riquadro attorno all'oggetto." + edit,
+                "area": "SAM, area: trascina un riquadro; SAM cerca tutte le unita' al suo interno."}.get(
+            self.ortho_view.sam_tool, "")
 
-    def sam_from_points(self) -> None:
-        if not self._need_chunk(product="orthomosaic") or not self._sam_available(then=self.sam_from_points):
+    def _sam_cancel(self) -> None:
+        self._sam_obj = None
+        if hasattr(self, "ortho_view"):
+            self.ortho_view.clear_sam_preview()
+
+    @staticmethod
+    def _grow(bounds, x: float, y: float, margin: float = 0.25):
+        """``bounds`` grown to contain (x, y) with a margin (a click outside the area SAM saw)."""
+        x0, y0, x1, y1 = bounds
+        if x0 <= x <= x1 and y0 <= y <= y1:
+            return bounds
+        w, h = x1 - x0, y1 - y0
+        return (min(x0, x - margin * w), min(y0, y - margin * h), max(x1, x + margin * w), max(y1, y + margin * h))
+
+    def _sam_click(self, x: float, y: float, label: int, new: bool) -> None:
+        if not self._need_chunk(product="orthomosaic"):
             return
-        if not self.sam_points:
-            self._warn("Attiva Strumenti > Disegno su ortofoto > Quota puntuale / prompt SAM e clicca sull'unita'.")
+        obj = self._sam_obj
+        if new or obj is None:
+            if not label:
+                return  # nothing to remove from yet
+            self._ensure_site("Le US trovate da SAM appartengono a un sito: sceglilo una volta per il progetto.")
+            obj = {"points": [(x, y, 1)], "box": None, "bounds": self.ortho_view.visible_world_bounds()}
+            self._sam_run(obj, ask=True)
+        else:
+            obj = {**obj, "points": obj["points"] + [(x, y, int(label))], "bounds": self._grow(obj["bounds"], x, y)}
+            self._sam_run(obj, ask=False)
+
+    def _sam_rect(self, x0: float, y0: float, x1: float, y1: float) -> None:
+        if not self._need_chunk(product="orthomosaic"):
             return
+        self._ensure_site("Le US trovate da SAM appartengono a un sito: sceglilo una volta per il progetto.")
+        if self.ortho_view.sam_tool == "area":
+            self._sam_cancel()
+            self._sam_auto((x0, y0, x1, y1), title="SAM - unita' nell'area")
+            return
+        view = self.ortho_view.visible_world_bounds()
+        w, h = x1 - x0, y1 - y0
+        bounds = (x0 - 0.3 * w, y0 - 0.3 * h, x1 + 0.3 * w, y1 + 0.3 * h)  # the object and some context
+        if view is not None and view[0] <= bounds[0] and view[1] <= bounds[1] and view[2] >= bounds[2] \
+                and view[3] >= bounds[3]:
+            bounds = view
+        self._sam_run({"points": [], "box": (x0, y0, x1, y1), "bounds": bounds}, ask=True)
+
+    def _sam_run(self, obj: dict, ask: bool) -> None:
+        """Segment the current object (prompts in ``obj``) in the background, show the mask,
+        then (``ask``) open the unit form: Salva / Correggi / Annulla."""
         from ..ai.sam import segment_orthomosaic
 
-        pts = np.array([(x, y) for x, y, _ in self.sam_points])
-        labels = np.array([lab for _, _, lab in self.sam_points])
-        self.sam_points = []
+        pts = obj["points"]
 
-        def done(u):
-            dlg = UnitDialog(self, self._us_choices())
-            if dlg.exec() == dlg.DialogCode.Accepted:
-                vals = dlg.values()
-                u.us, u.area, u.tipo = vals["us"] or None, vals["area"] or None, vals["tipo"]
-            self.units.append(u)
-            self._draw_unit(u, len(self.units) - 1)
+        def job(p):
+            p(0.2, "SAM 2.1")
+            seg = self._segmenter()
+            return segment_orthomosaic(self.chunk, seg, points=[(x, y) for x, y, _ in pts] if pts else None,
+                                       labels=[lab for _, _, lab in pts] if pts else None, box=obj["box"],
+                                       bounds=obj["bounds"])
 
-        self.run_task("SAM 2.1", lambda p: segment_orthomosaic(self.chunk, self._segmenter(), points=pts,
-                                                               labels=labels), done, refresh=False, save=False)
+        def done(unit):
+            if unit.geometry.is_empty:
+                self.statusBar().showMessage("SAM non ha trovato un oggetto qui: prova un altro punto o cambia lo "
+                                             "zoom", 10000)
+                if ask:
+                    self._sam_cancel()
+                return
+            self._sam_obj = {**obj, "geom": unit.geometry}
+            self.ortho_view.show_sam_preview(unit.geometry, pts, obj["box"])
+            if ask:
+                self._sam_accept()
+            else:
+                self.statusBar().showMessage(f"Maschera aggiornata ({unit.geometry.area:.3f} m2): Invio per salvare, "
+                                             "Esc per annullare", 15000)
+
+        if not self.runner.run("SAM 2.1", job, done, self._error, quiet=True):
+            self.statusBar().showMessage("SAM sta ancora lavorando: attendi il risultato", 5000)
+
+    def _sam_key(self, key: str) -> None:
+        if key == "accept" and self._sam_obj is not None and self._sam_obj.get("geom") is not None:
+            self._sam_accept()
+        elif key == "cancel":
+            self._sam_cancel()
+            self.statusBar().showMessage("Maschera di SAM annullata", 5000)
+
+    def _sam_accept(self) -> None:
+        obj = self._sam_obj
+        if obj is None or obj.get("geom") is None:
+            return
+        r, v = self._ask_unit(refine=True, title="Unita' da SAM")
+        if r == 1:
+            self._sam_cancel()
+            self._add_unit(self._make_unit(obj["geom"], v))
+        elif r == UnitDialog.REFINE:
+            self.statusBar().showMessage("Correggi la maschera: Maiusc+clic aggiunge, clic destro toglie; "
+                                         "Invio per salvare, Esc per annullare", 30000)
+        else:
+            self._sam_cancel()
+
+    def _sam_auto(self, bounds=None, title: str = "SAM - unita' automatiche", **kw) -> None:
+        """Every unit SAM finds in ``bounds`` (None: the whole orthomosaic), added without US
+        to the layer *Unita' da SAM* of the project's site."""
+        from ..ai.sam import auto_units
+
+        def job(p):
+            seg = self._segmenter()
+            return auto_units(self.chunk, seg, bounds=bounds, progress=p, **kw)
+
+        def done(units):
+            site = self.project_site() or None
+            with self.ortho_view.batch():
+                for u in units:
+                    u.sito = site
+                    u.attributes = {"_layer": "Unita' da SAM", "stratigraph_index_us": 1}
+                    self.units.append(u)
+                    self._draw_unit(u, len(self.units) - 1)
+            self._dirty(True)
+            self.statusBar().showMessage(f"{len(units)} unita' candidate nel layer «Unita' da SAM»: assegna le US "
+                                         "(pannello Layer) prima di pubblicarle", 20000)
+            self.log_pane.info(f"SAM: {len(units)} unita' candidate")
+            self._show_pane(self.left_tabs, self.layers_pane)
+
+        self.run_task(title, job, done, refresh=False, save=False)
+
+    def sam_whole_orthomosaic(self) -> None:
+        """Automatic SAM on the whole orthomosaic, scanned in tiles at a resolution the user picks."""
+        if not self._need_chunk(product="orthomosaic") or not self._sam_available(then=self.sam_whole_orthomosaic):
+            return
+        import rasterio
+
+        from ..ai.sam import THOROUGHNESS
+
+        with rasterio.open(self.chunk.orthomosaic_path) as src:
+            native = abs(src.res[0])
+            side = max(src.width, src.height) * native
+        per_axis = 8
+        suggested = max(native, side / (per_axis * 896 + 128))
+
+        def tiles(res):
+            n = max(1, int(np.ceil(max(side / res - 1024, 0) / 896)) + 1)
+            return n * n
+
+        v = ParamDialog.ask(self, "SAM - tutta l'ortofoto", [
+            Field("resolution", "Risoluzione di lavoro (m/pixel)", round(suggested, 3), minimum=native, maximum=10.0,
+                  decimals=3, tip="Piu' fine = piu' dettagli e piu' tasselli (piu' tempo)"),
+            Field("thoroughness", "Scansione", "normale", choices=[(k, k.capitalize()) for k in THOROUGHNESS]),
+            Field("min_area", "Area minima di un'unita' (m2)", round(max(0.01, (12 * suggested) ** 2), 3),
+                  minimum=0.0001, maximum=10000.0, decimals=4),
+            Field("exclusive", "Unita' non sovrapposte (le piccole ritagliano le grandi)", True)],
+            intro=f"L'ortofoto ({side:.0f} m di lato, pixel di {native * 100:.1f} cm) viene esaminata a tasselli di 1024 "
+                  f"pixel che si sovrappongono: alla risoluzione proposta sono circa {tiles(suggested)} tasselli. "
+                  "Con la GPU del Mac (MPS) un tassello richiede circa 10 s in scansione normale, 40-90 s in alta o "
+                  "massima. Le unita' trovate vanno nel layer «Unita' da SAM», senza numero di US.")
+        if not v:
+            return
+        self._ensure_site("Le US trovate da SAM appartengono a un sito: sceglilo una volta per il progetto.")
+        self._sam_auto(None, title="SAM - tutta l'ortofoto", resolution=v["resolution"], thoroughness=v["thoroughness"],
+                       min_area_m2=v["min_area"], exclusive=v["exclusive"])
 
     def toggle_photo_sam(self) -> None:
         if not self.photo_view.sam_mode and not self._sam_available(then=self.toggle_photo_sam):
@@ -2483,6 +2959,7 @@ class MainWindow(QMainWindow):
             self.pa_pane.set_connection(pa, pa.label)
             log.info("PyArchInit connesso: %s", pa.label)
             self.d_pa.show()
+            self._sync_site_with_db(ask=self._project_open() and not quiet)
             try:
                 missing = pa.missing_us_columns()
             except Exception:
@@ -2617,56 +3094,82 @@ class MainWindow(QMainWindow):
 
         self.run_task("Pubblicazione in PyArchInit", job, done, refresh=False, save=False)
 
+    def _publishable(self) -> tuple[list, list, int]:
+        """Units drawn here with a US and not yet in PyArchInit, spot heights not yet written,
+        and the number of units still without a US."""
+        units = [u for u in self.units if u.us and (u.attributes or {}).get("gid") is None]
+        no_us = sum(1 for u in self.units if not u.us and (u.attributes or {}).get("gid") is None)
+        quote = [q for q in self.quote if q.get("gid") is None]
+        return units, quote, no_us
+
+    def pyarchinit_publish_drawings(self, what: str = "both") -> None:
+        """Write the units drawn here into ``pyunitastratigrafiche`` and the spot heights into
+        ``pyarchinit_quote``, in the site of the project. Written features keep their ``gid``:
+        later changes go through *Salva modifiche in PyArchInit*, nothing is written twice."""
+        if not self._need_pa() or not self._need_chunk():
+            return
+        site = self._ensure_site("Unita' e quote vengono scritte nel sito del progetto.")
+        if not site:
+            return
+        units, quote, no_us = self._publishable()
+        if what == "units":
+            quote = []
+        elif what == "quote":
+            units = []
+        if not units and not quote:
+            self._warn("Niente da pubblicare: disegna (o segmenta con SAM) delle unita' con il numero di US, o delle "
+                       "quote" + (f" ({no_us} unita' sono ancora senza US)" if no_us else "") + ".")
+            return
+        crs = self.chunk.crs
+
+        def job(p):
+            p(0.1, "Unita' stratigrafiche")
+            gu = self.pa.publish_units(units, site, crs=crs) if units else []
+            p(0.6, "Quote")
+            gq = self.pa.publish_quote(quote, site, crs=crs) if quote else []
+            return gu, gq
+
+        def done(r):
+            gu, gq = r
+            for u, g in zip(units, gu):
+                u.attributes["gid"] = g
+            for q, g in zip(quote, gq):
+                q["gid"] = g
+            self._redraw_overlays()
+            self._dirty(True)
+            self.pa_pane.refresh()
+            self._info("PyArchInit", f"Sito {site}: {len(gu)} poligoni scritti in pyunitastratigrafiche, {len(gq)} quote "
+                       "in pyarchinit_quote." + (f"\n{no_us} unita' senza numero di US non sono state pubblicate."
+                                                 if no_us and units else ""))
+
+        self.run_task("Pubblicazione in PyArchInit", job, done, refresh=False, save=False)
+
     def pyarchinit_publish_units(self) -> None:
-        if not self._need_pa():
-            return
-        units = [u for u in self.units if u.us]
-        if not units:
-            self._warn("Disegna (o segmenta con SAM) almeno un'unita' con il numero di US.")
-            return
-        sites = self.pa_pane.site_names()
-        site, ok = QInputDialog.getItem(self, "Sito", "Sito PyArchInit:", sites, 0, False)
-        if not ok:
-            return
-        self.run_task("Pubblicazione unita'", lambda p: self.pa.publish_units(units, site, crs=self.chunk.crs),
-                      lambda g: self._info("PyArchInit", f"{len(g)} poligoni scritti in pyunitastratigrafiche"),
-                      refresh=False, save=False)
+        self.pyarchinit_publish_drawings("units")
+
+    def pyarchinit_publish_points(self) -> None:
+        self.pyarchinit_publish_drawings("quote")
 
     def pyarchinit_load_units(self) -> None:
         if not self._need_pa():
             return
-        sites = self.pa_pane.site_names()
-        site, ok = QInputDialog.getItem(self, "Sito", "Sito PyArchInit:", sites, 0, False)
-        if not ok:
+        site = self._ensure_site("Carica i poligoni US del sito del progetto.")
+        if not site:
             return
         try:
             polys = self.pa.us_polygons(site, crs=self.chunk.crs if self.chunk else None)
         except Exception as exc:
             self._exc("Lettura delle unita' non riuscita", exc)
             return
-        for u in polys:
-            self.units.append(u)
-            self._draw_unit(u, len(self.units) - 1, layer=f"US da PyArchInit - {site}")
+        have = {int(u.attributes["gid"]) for u in self.units if (u.attributes or {}).get("gid") is not None}
+        polys = [u for u in polys if int(u.attributes.get("gid", -1)) not in have]  # already here
+        with self.ortho_view.batch():
+            for u in polys:
+                self.units.append(u)
+                self._draw_unit(u, len(self.units) - 1, layer=f"US da PyArchInit - {site}")
         self.show_view(self.ortho_view)
         self._show_pane(self.left_tabs, self.layers_pane)
-
-    def pyarchinit_publish_points(self) -> None:
-        if not self._need_pa() or not self._need_chunk(product="dem"):
-            return
-        if not self.sam_points:
-            self._warn("Clicca prima dei punti sull'ortofoto (Strumenti > Disegno > Quota puntuale).")
-            return
-        dlg = UnitDialog(self, self._us_choices())
-        if dlg.exec() != dlg.DialogCode.Accepted:
-            return
-        v = dlg.values()
-        site = self.pa_pane.site_names()[0] if self.pa_pane.site_names() else ""
-        pts = [(x, y) for x, y, _ in self.sam_points]
-        self.sam_points = []
-        self.run_task("Pubblicazione quote", lambda p: self.pa.publish_elevations(self.chunk, site, v["area"], v["us"],
-                                                                                 pts, unita_tipo=v["tipo"]),
-                      lambda g: self._info("PyArchInit", f"{len(g)} quote scritte"),
-                      refresh=False, save=False)
+        self.statusBar().showMessage(f"{len(polys)} poligoni US caricati dal sito {site}", 10000)
 
 
 class DoctorDialog(QDialog):

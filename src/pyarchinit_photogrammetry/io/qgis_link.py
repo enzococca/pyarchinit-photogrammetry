@@ -37,9 +37,11 @@ LIVE_TABLES = {  # table -> (title in QGIS, geometry type)
     "sezioni": ("Sezioni (ppg)", "LINESTRING"),
     "curve": ("Curve di livello (ppg)", "LINESTRING"),
     "linee": ("Linee (ppg)", "LINESTRING"),
-    "punti": ("Punti e quote (ppg)", "POINT"),
+    "punti": ("Punti (ppg)", "POINT"),
+    "quote": ("Quote (ppg)", "POINT"),  # the columns of pyarchinit_quote
 }
-NUMERIC_FIELDS = {"quota", "z", "x", "y", "lunghezza_m", "area_m2", "volume_m3"}  # REAL columns; the rest is TEXT
+NUMERIC_FIELDS = {"quota", "z", "x", "y", "lunghezza_m", "area_m2", "volume_m3", "quota_q"}  # REAL; the rest is TEXT
+INTEGER_FIELDS = {"stratigraph_index_us"}
 FLAG_FIELDS = {"direttrice"}  # INTEGER 0/1
 
 
@@ -88,7 +90,7 @@ def classify_layer(name: str, kind: str) -> str:
     if kind == "polygon":
         return "unita"
     if kind == "point":
-        return "punti"
+        return "quote" if name == "Quote" else "punti"
     if name.startswith("Sezioni"):
         return "sezioni"
     if name.startswith("Curve di livello"):
@@ -102,15 +104,20 @@ def _column(key: str) -> str:
 
 
 def _sql_type(key: str) -> str:
-    return "REAL" if key in NUMERIC_FIELDS else "INTEGER" if key in FLAG_FIELDS else "TEXT"
+    return "REAL" if key in NUMERIC_FIELDS else "INTEGER" if key in FLAG_FIELDS | INTEGER_FIELDS else "TEXT"
 
 
 def _value(key: str, v):
     if v is None or v == "":
         return None
-    kind = _sql_type(key)
     try:
-        return float(v) if kind == "REAL" else int(bool(v)) if kind == "INTEGER" else str(v)
+        if key in NUMERIC_FIELDS:
+            return float(v)
+        if key in INTEGER_FIELDS:
+            return int(float(v))
+        if key in FLAG_FIELDS:
+            return int(bool(v))
+        return str(v)
     except (TypeError, ValueError):
         return None
 
@@ -298,7 +305,8 @@ STYLES = {  # table -> (colour, label field, label colour)
     "sezioni": ("#ffd000", "etichetta", "#7a5c00"),
     "curve": ("#4a3b2a", "quota", "#4a3b2a"),
     "linee": ("#00a0ff", "etichetta", "#003a66"),
-    "punti": ("#27ae60", "z", "#14532d"),
+    "punti": ("#27ae60", "etichetta", "#14532d"),
+    "quote": ("#f59e0b", "quota_q", "#7c2d12"),
 }
 
 

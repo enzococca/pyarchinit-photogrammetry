@@ -165,8 +165,8 @@ def _coverage(polygon, shape, tr, sub: int = 8) -> np.ndarray:
 
     minx, miny, maxx, maxy = polygon.bounds
     inv = ~tr
-    c0, r0 = inv * (minx, maxy)
-    c1, r1 = inv * (maxx, miny)
+    c0, r0 = inv @ (minx, maxy)
+    c1, r1 = inv @ (maxx, miny)
     ca, cb = sorted((c0, c1))
     ra, rb = sorted((r0, r1))
     ca, ra = max(int(np.floor(ca)) - 1, 0), max(int(np.floor(ra)) - 1, 0)
@@ -174,7 +174,7 @@ def _coverage(polygon, shape, tr, sub: int = 8) -> np.ndarray:
     out = np.zeros(shape, np.float64)
     if cb <= ca or rb <= ra:
         return out
-    fine_tr = tr * Affine.translation(ca, ra) * Affine.scale(1.0 / sub)
+    fine_tr = tr @ Affine.translation(ca, ra) @ Affine.scale(1.0 / sub)
     fine = geometry_mask([polygon], out_shape=((rb - ra) * sub, (cb - ca) * sub), transform=fine_tr, invert=True)
     out[ra:rb, ca:cb] = fine.reshape(rb - ra, sub, cb - ca, sub).mean(axis=(1, 3))
     return out

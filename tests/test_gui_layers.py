@@ -29,6 +29,8 @@ def window(qapp, processed, tmp_path):
     from pyarchinit_photogrammetry.gui.main_window import MainWindow
 
     doc, ch, _ = processed
+    ch.meta.pop("drawings", None)  # the processed project is shared: no drawings left by other tests
+    doc.meta["sito"] = "Saggio"  # the site of the project: drawing does not ask for it
     w = MainWindow(doc, autoconnect=False)
     w.runner.show_dialog = False
     w.resize(1400, 900)
@@ -219,7 +221,7 @@ def test_attribute_editing_updates_unit_and_pending(window, qapp):
     pane = w.layers_pane
     feats = w.ortho_view.features("US da PyArchInit - X")
     pane.show_attributes("US da PyArchInit - X", {**feats[0], "_index": 0})
-    row = next(r for r in range(pane.attrs.rowCount()) if pane.attrs.item(r, 0).text() == "us")
+    row = next(r for r in range(pane.attrs.rowCount()) if pane.attrs.item(r, 0).text() == "us_s")
     pane.attrs.item(row, 1).setText("12")  # as if typed in the table
     qapp.processEvents()
     assert u.us == "12" and feats[0]["etichetta"] == "US 12"
@@ -251,7 +253,7 @@ def test_qgis_live_export_from_view_layers(window, qapp, tmp_path):
     import sqlite3
 
     con = sqlite3.connect(files["unita"])
-    assert con.execute('SELECT us FROM "unita"').fetchone()[0] == "5"
+    assert con.execute('SELECT us_s, stratigraph_index_us FROM "unita"').fetchone() == ("5", 1)
     con.close()
     # live: a new drawing reaches the GeoPackage by itself, a moment later
     w.a_qgis_live.setChecked(True)
@@ -304,7 +306,7 @@ def test_select_merge_and_delete_units(window, qapp, monkeypatch):
 
     QTest.mouseClick(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, vp(1.2, 1.4))
     QTest.mouseClick(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, vp(1.6, 1.4))
-    assert [a["us"] for _, _, a in v.selected_features()] == ["1", "2"]
+    assert [a["us_s"] for _, _, a in v.selected_features()] == ["1", "2"]
     assert w.a_sel_merge.isEnabled() and w.a_sel_delete.isEnabled()
     monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(lambda cls, *a, **k: {"keep": "1"}))  # keep US 2
     assert w.merge_selected()
@@ -315,7 +317,7 @@ def test_select_merge_and_delete_units(window, qapp, monkeypatch):
     QTest.mouseMove(v.viewport(), vp(2.5, 1.4))
     QTest.mouseMove(v.viewport(), vp(3.0, 1.3))
     QTest.mouseRelease(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, vp(3.0, 1.3))
-    assert sorted(a["us"] for _, _, a in v.selected_features()) == ["3", "4"]
+    assert sorted(a["us_s"] for _, _, a in v.selected_features()) == ["3", "4"]
     monkeypatch.setattr(mw, "message", lambda *a, **k: QMessageBox.StandardButton.Yes)
     QTest.keyClick(v, Qt.Key.Key_Delete)
     assert [u.us for u in w.units] == ["2"] and not v.selection
@@ -342,11 +344,10 @@ def test_merge_lines_and_delete_point(window, qapp):
     warned = []
     w._warn = warned.append
     assert not w.merge_selected() and warned
-    w.ortho_view.add_point(x0 + 1.2, y0 + 0.8, layer="Punti", attrs={"tipo": "positivo"})
-    w.sam_points = [(x0 + 1.2, y0 + 0.8, 1)]
-    v.select_items([v.layers["Punti"]["features"][0][0]])
+    w._add_quota({"x": x0 + 1.2, "y": y0 + 0.8, "sito_q": "Saggio", "area_q": "1", "us_q": "3", "quota_q": 99.85})
+    v.select_items([v.layers["Quote"]["features"][0][0]])
     assert w.delete_selected(confirm=False) == 1
-    assert "Punti" not in v.layers and w.sam_points == []
+    assert "Quote" not in v.layers and w.quote == []
     assert name in v.layer_order  # other layers survive the redraw
 
 
@@ -369,13 +370,13 @@ def test_merge_and_delete_write_back_to_pyarchinit(window, qapp, pa_db, monkeypa
         w.units.append(u)
         w._draw_unit(u, len(w.units) - 1, layer="US da PyArchInit - Saggio")
     layer = w.ortho_view.layers["US da PyArchInit - Saggio"]
-    by_us = {f[2]["us"]: f[0] for f in layer["features"]}
+    by_us = {f[2]["us_s"]: f[0] for f in layer["features"]}
     w.set_draw_mode("select")
     w.ortho_view.select_items([by_us["1"], by_us["2"]])
     monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(lambda cls, *a, **k: {"keep": "0"}))
     assert w.merge_selected()
     w.ortho_view.select_items([f[0] for f in w.ortho_view.layers["US da PyArchInit - Saggio"]["features"]
-                               if f[2]["us"] == "3"])
+                               if f[2]["us_s"] == "3"])
     assert w.delete_selected(confirm=False) == 1
     assert w.pa_deleted == {gids[1], gids[2]} and w.pa_geom_changed == {gids[0]}
     assert not w.b_pa_save.isHidden()
@@ -473,3 +474,207 @@ def test_freehand_and_snapping(window, qapp, monkeypatch):
     assert g.intersection(w.units[0].geometry).area < 1e-12
     assert w.units[0].geometry.union(g).geom_type == "Polygon"
     assert w.settings.value("draw/snap") in ("true", True) and w.settings.value("draw/freehand") in ("true", True)
+
+
+class _UnitForm:
+    """UnitDialog stand-in: answers the queued results (1 = Salva, 2 = Correggi) with fixed values."""
+
+    answers: list = []
+    values_given = {"area": "2", "us": "15", "tipo": "US", "stratigraph_index_us": 2, "tipo_us_s": "negativa",
+                    "disegnatore": "E. Cocca", "data": "2026-10-16", "rilievo_originale": "Fotogrammetria"}
+    REFINE = 2
+
+    class DialogCode:
+        Accepted = 1
+
+    def __init__(self, *args, **kwargs):
+        self.kwargs = kwargs
+
+    def exec(self):
+        return _UnitForm.answers.pop(0) if _UnitForm.answers else 1
+
+    def values(self):
+        return dict(_UnitForm.values_given)
+
+
+def test_units_carry_the_fields_of_pyunitastratigrafiche_and_stay_in_the_project(window, qapp, monkeypatch):
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    monkeypatch.setattr(mw, "UnitDialog", _UnitForm)
+    w = window
+    x0, y0 = 2480001.0, 4500001.0
+    w._unit_drawn(np.array([[x0, y0], [x0 + 0.4, y0], [x0 + 0.4, y0 + 0.3], [x0, y0 + 0.3]]))
+    u = w.units[-1]
+    assert (u.sito, u.area, u.us, u.tipo) == ("Saggio", "2", "15", "US")
+    attrs = w.ortho_view.features("Unita' stratigrafiche")[-1]
+    for key, value in (("scavo_s", "Saggio"), ("area_s", "2"), ("us_s", "15"), ("unita_tipo_s", "US"),
+                       ("stratigraph_index_us", 2), ("tipo_us_s", "negativa"), ("disegnatore", "E. Cocca"),
+                       ("data", "2026-10-16"), ("rilievo_originale", "Fotogrammetria")):
+        assert attrs[key] == value, key
+    assert attrs["etichetta"] == "US 15"
+    w._store_drawings()
+    saved = w.chunk.meta["drawings"]["units"][-1]
+    assert saved["sito"] == "Saggio" and saved["attributes"]["stratigraph_index_us"] == 2
+    w.set_document(w.doc)  # reopened: the unit is back with its fields
+    assert any(x.us == "15" and x.attributes.get("tipo_us_s") == "negativa" for x in w.units)
+    assert any(f.get("us_s") == "15" for f in w.ortho_view.features("Unita' stratigrafiche"))
+    w.chunk.meta.pop("drawings", None)
+
+
+class _QuotaForm:
+    calls = 0
+
+    class DialogCode:
+        Accepted = 1
+
+    def __init__(self, parent=None, us_choices=None, sito="", quota=None, defaults=None):
+        _QuotaForm.calls += 1
+        self.quota = quota
+
+    def exec(self):
+        return 1
+
+    def values(self):
+        return {"area_q": "1", "us_q": "2", "unita_tipo_q": "US", "quota_q": round(self.quota, 3),
+                "unita_misu_q": "m s.l.m.", "disegnatore": "E. Cocca", "data": "2026-10-16",
+                "rilievo_originale": "Fotogrammetria", "keep": True}
+
+
+def test_spot_heights_read_the_dem_and_go_to_pyarchinit_quote(window, qapp, pa_db, monkeypatch):
+    import rasterio
+
+    from pyarchinit_photogrammetry.gui import main_window as mw
+    from pyarchinit_photogrammetry.pyarchinit import PyArchInit
+
+    monkeypatch.setattr(mw, "QuotaDialog", _QuotaForm)
+    w = window
+    w.quote = []
+    x0, y0 = 2480001.5, 4500001.5
+    with rasterio.open(w.chunk.dem_path) as src:
+        z1, z2 = (float(v[0]) for v in src.sample([(x0, y0), (x0 + 0.5, y0 + 0.4)]))
+    _QuotaForm.calls = 0
+    w.set_draw_mode("quota")
+    w._quota_clicked(x0, y0)
+    w._quota_clicked(x0 + 0.5, y0 + 0.4)  # "non chiedere piu'": same fields, new elevation
+    assert _QuotaForm.calls == 1 and len(w.quote) == 2
+    assert w.quote[0]["quota_q"] == pytest.approx(z1, abs=1e-3) and w.quote[1]["quota_q"] == pytest.approx(z2, abs=1e-3)
+    assert w.quote[1]["us_q"] == "2" and w.quote[1]["sito_q"] == "Saggio"
+    feats = w.ortho_view.features("Quote")
+    assert len(feats) == 2 and feats[0]["quota_q"] == pytest.approx(z1, abs=1e-3)
+    w.pa = PyArchInit.connect()
+    monkeypatch.setattr(w, "_info", lambda *a, **k: None)
+    w.pyarchinit_publish_drawings("quote")
+    w.runner.wait()
+    qapp.processEvents()
+    rows = w.pa.db.query("pyarchinit_quote", sito_q="Saggio")
+    assert len(rows) == 2 and sorted(float(r["quota_q"]) for r in rows) == pytest.approx(sorted([z1, z2]), abs=1e-3)
+    assert {r["us_q"] for r in rows} == {"2"} and all(q.get("gid") is not None for q in w.quote)
+    warned = []
+    monkeypatch.setattr(w, "_warn", warned.append)
+    w.pyarchinit_publish_drawings("quote")  # nothing is written twice
+    assert warned and len(w.pa.db.query("pyarchinit_quote", sito_q="Saggio")) == 2
+    w.set_draw_mode("pan")
+    w.quote = []
+
+
+class _FakeSam:
+    """A disc around the first click, made smaller by a negative point; a box fills the box."""
+
+    def segment_points(self, image, points, labels):
+        h, w = image.shape[:2]
+        yy, xx = np.mgrid[0:h, 0:w]
+        x, y = points[0]
+        r = 40 if all(lab == 1 for lab in labels) else 25
+        return (xx - x) ** 2 + (yy - y) ** 2 < r * r
+
+    def segment_box(self, image, box):
+        m = np.zeros(image.shape[:2], bool)
+        x0, y0, x1, y1 = (int(round(v)) for v in box)
+        m[y0:y1, x0:x1] = True
+        return m
+
+    def segment_auto(self, image, **options):
+        h, w = image.shape[:2]
+        return [self.segment_box(image, (w * 0.1, h * 0.1, w * 0.3, h * 0.3)),
+                self.segment_box(image, (w * 0.6, h * 0.6, w * 0.8, h * 0.8))]
+
+
+def test_sam_tap_refine_and_area(window, qapp, monkeypatch):
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    monkeypatch.setattr(mw, "UnitDialog", _UnitForm)
+    w = window
+    monkeypatch.setattr(w, "_sam_available", lambda then=None: True)
+    w.sam = _FakeSam()
+    v = w.ortho_view
+    x0, y0 = 2480001.5, 4500001.5
+    v.zoom_to(__import__("PySide6.QtCore", fromlist=["QRectF"]).QRectF(v.scene_pt(x0 - 1, y0 + 1), v.scene_pt(x0 + 1, y0 - 1)), 0)
+    qapp.processEvents()
+    w._set_sam_tool("tap")
+    w.set_draw_mode("sam")
+    n = len(w.units)
+    _UnitForm.answers = [_UnitForm.REFINE]  # first: Correggi
+    w._sam_click(x0, y0, 1, True)
+    w.runner.wait()
+    qapp.processEvents()
+    assert len(w.units) == n and w._sam_obj is not None and v._sam_items  # mask shown, being corrected
+    big = w._sam_obj["geom"].area
+    w._sam_click(x0 + 0.3, y0, 0, False)  # remove a part
+    w.runner.wait()
+    qapp.processEvents()
+    assert w._sam_obj["geom"].area < big and len(w._sam_obj["points"]) == 2
+    _UnitForm.answers = [1]
+    w._sam_key("accept")
+    assert len(w.units) == n + 1 and w._sam_obj is None and not v._sam_items
+    u = w.units[-1]
+    assert u.us == "15" and u.sito == "Saggio" and u.geometry.area == pytest.approx(w.units[-1].geometry.area)
+    # area: every object inside the rectangle, without US, in their own layer
+    w._set_sam_tool("area")
+    w._sam_rect(x0 - 0.8, y0 - 0.8, x0 + 0.8, y0 + 0.8)
+    w.runner.wait()
+    qapp.processEvents()
+    found = [x for x in w.units if (x.attributes or {}).get("_layer") == "Unita' da SAM"]
+    assert len(found) == 2 and all(x.us is None and x.sito == "Saggio" for x in found)
+    assert "Unita' da SAM" in v.layers
+    w._set_sam_tool("tap")
+    w.set_draw_mode("pan")
+    w.sam = None
+
+
+def test_cloud_by_class_legend_and_lasso(window, qapp, monkeypatch):
+    """After classification the cloud is shown by class; a class can be hidden in the legend;
+    points chosen with the lasso get the class picked by hand."""
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    w = window
+    ch = w.chunk
+    original = ch.point_cloud
+    try:
+        pc = ch.point_cloud
+        world = ch.to_world(pc.xyz)
+        pc.classification[:] = 2
+        pc.classification[world[:, 2] > np.median(world[:, 2])] = 1
+        ch.point_cloud = pc
+        w.show_classes()
+        qapp.processEvents()
+        mv = w.model_view
+        assert mv.kind == "point_cloud" and mv.color_combo.currentData() == "class" and mv.legend.isVisibleTo(mv)
+        assert mv.sd.class_counts == {1: int((pc.classification == 1).sum()), 2: int((pc.classification == 2).sum())}
+        shown = len(mv.sd.points)
+        mv.legend.item(0).setCheckState(__import__("PySide6.QtCore", fromlist=["Qt"]).Qt.CheckState.Unchecked)  # hide 1
+        qapp.processEvents()
+        assert mv.legend.hidden() == {1} and len(mv.sd.points) < shown and set(np.unique(mv.sd.point_codes)) == {2}
+        image, project = mv.canvas.snapshot()
+        W, H = mv.canvas.width(), mv.canvas.height()
+        visible, inside = mv.select_points([(0, 0), (W, 0), (W, H), (0, H)], project)
+        assert inside.sum() > 0 and visible.sum() <= inside.sum()
+        assert not (inside & (pc.classification == 1)).any()  # hidden classes are not selected
+        monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(lambda cls, *a, **k: {"code": 68, "other": 0,
+                                                                                      "through": False}))
+        w._points_selected(visible, inside)
+        after = ch.point_cloud.classification
+        assert (after[visible] == 68).all() and (after[~visible & (pc.classification == 1)] == 1).all()
+        assert 68 in mv.sd.class_counts
+    finally:
+        ch.point_cloud = original
+        w.model_view.set_color_mode("rgb")

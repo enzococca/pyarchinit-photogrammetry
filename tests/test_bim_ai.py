@@ -80,3 +80,34 @@ def test_masks_to_point_classes(processed):
     mask = seg._bright(img)
     n = sam.classify_from_masks(ch, {cam.key: mask}, 68, label="Targets")
     assert n > 50
+
+
+class BlobSegmenter:
+    """Connected components of the coloured (non-grey) pixels, like SAM's automatic masks."""
+
+    def segment_auto(self, image, **options):
+        n, lab = cv2.connectedComponents((np.ptp(image.astype(int), axis=2) > 40).astype(np.uint8))
+        return [lab == i for i in range(1, n)]
+
+
+def test_sam_scan_in_tiles_joins_objects_cut_by_the_tiles(tmp_path):
+    """The automatic scan works on overlapping tiles: an object crossing tile borders comes
+    back once and whole, small objects are kept, and the result does not overlap."""
+    from types import SimpleNamespace
+
+    from pyarchinit_photogrammetry.engine.dem import write_geotiff
+
+    img = np.full((700, 700, 3), 128, np.uint8)
+    img[100:600, 200:300] = (200, 40, 40)  # a long trench wall crossing several tiles
+    img[50:120, 50:120] = (40, 160, 60)  # a small object inside one tile
+    img[400:470, 450:520] = (40, 60, 200)
+    path = write_geotiff(tmp_path / "ortho.tif", np.moveaxis(img, -1, 0), (1000.0, 2000.0), 0.01, "EPSG:32633")
+    chunk = SimpleNamespace(orthomosaic_path=path)
+    units = sam.auto_units(chunk, BlobSegmenter(), tile=256, overlap=64, resolution=0.01, min_area_m2=0.001)
+    areas = sorted(round(u.geometry.area, 2) for u in units)
+    assert areas == [0.49, 0.49, 5.0]  # 0.7 x 0.7 m twice and the 1 x 5 m wall, each once
+    wall = max(units, key=lambda u: u.geometry.area).geometry
+    assert abs(wall.bounds[1] - (2000.0 - 6.0)) < 0.02 and abs(wall.bounds[3] - (2000.0 - 1.0)) < 0.02
+    from shapely.ops import unary_union
+
+    assert unary_union([u.geometry for u in units]).area == pytest.approx(sum(u.geometry.area for u in units))

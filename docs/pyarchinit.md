@@ -27,7 +27,7 @@ SpatiaLite first can crash GDAL-based code in the same process.
 | `us_records(sito)` | US -> attributes (used for IFC property sets) |
 | `finds(sito)`, `pottery(sito)`, `documentation(sito)` | `inventario_materiali_table`, `pottery_table`, `documentazione_table` |
 | `media_for(entity_type, id_entity)` | `media_to_entity_table` + `media_table` |
-| `us_polygons(sito, area=None)` | `pyunitastratigrafiche` as `UnitPolygon` (shapely) |
+| `us_polygons(sito, area=None)` | `pyunitastratigrafiche` as `UnitPolygon` (shapely) with `sito` (`scavo_s`) and the other columns in `attributes` (`stratigraph_index_us`, `tipo_us_s`, `disegnatore`, `data`, `rilievo_originale`, `tipo_doc`, `nome_doc`) |
 
 ## Writing
 
@@ -36,7 +36,8 @@ SpatiaLite first can crash GDAL-based code in the same process.
 | `publish_orthomosaic(chunk, sito, nome_doc, link_us=[(area, us)])` | GeoTIFF copied to `<media>/fotogrammetria/<sito>/`, `media_table` (`image`, `tif`), thumbnails, `media_to_entity_table` (`US`, `us_table`), `documentazione_table` (`Fotopiano`, `Fotogrammetria`, GSD and CRS in `note`), extent in `pyarchinit_documentazione` |
 | `publish_dem(...)` | as above with `tipo_documentazione = "DEM"` |
 | `publish_model(...)` | textured OBJ in world coordinates, `mediatype = "3d_model"`, `{id}_{name}_3d_thumb.png`, model copied to the resize folder, `Modello tridimensionale` |
-| `publish_units(units, sito, area, crs)` | `pyunitastratigrafiche` (MULTIPOLYGON) |
+| `publish_units(units, sito, area, crs)` | `pyunitastratigrafiche` (MULTIPOLYGON): `scavo_s`, `area_s`, `us_s`, `unita_tipo_s`, `stratigraph_index_us` (1 characterization, 2 US outline, as PyArchInit's layer style reads it), `tipo_us_s`, `rilievo_originale`, `disegnatore`, `data`, `tipo_doc`, `nome_doc` from the unit (the arguments are the defaults) |
+| `publish_quote(points, sito, crs)` | `pyarchinit_quote` from dicts with `x`, `y`, `area_q`, `us_q`, `unita_tipo_q`, `quota_q`, `unita_misu_q`, `data`, `disegnatore`, `rilievo_originale` |
 | `publish_elevations(chunk, sito, area, us, points)` | `pyarchinit_quote`, heights sampled on the DEM |
 | `publish_section_trace(section, sito, id_sezione)` | `pyarchinit_sezioni` |
 | `publish_volume(sito, nome_calcolo, result)` | `computo_metrico_table` |

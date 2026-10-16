@@ -27,6 +27,8 @@ def window(qapp, processed, tmp_path, monkeypatch):
     from pyarchinit_photogrammetry.gui.main_window import MainWindow
 
     doc, ch, _ = processed
+    ch.meta.pop("drawings", None)  # the processed project is shared: no drawings left by other tests
+    doc.meta["sito"] = "Saggio"
     w = MainWindow(doc, autoconnect=False)
     w.runner.show_dialog = False
     w.resize(1400, 900)
@@ -123,13 +125,17 @@ def test_pyarchinit_publish_from_gui(window, qapp, tmp_path, monkeypatch):
     w.runner.wait()
     assert w.pa is not None and w.pa_pane.site_names() == ["Saggio dimostrativo"]
     before = len(w.pa.us_polygons("Saggio dimostrativo"))  # the demo database already has unit polygons
+    w.set_project_site("Saggio dimostrativo")  # the project's excavation among the sites of the database
     w.units = [UnitPolygon(box(2480001.7, 4500001.3, 2480002.3, 4500001.5), us="2", area="1", tipo="USM")]
-    monkeypatch.setattr(mw.QInputDialog, "getItem", lambda *a, **k: ("Saggio dimostrativo", True))
     monkeypatch.setattr(mw, "message", lambda *a, **k: None)
     w.pyarchinit_publish_units()
     w.runner.wait()
     polys = w.pa.us_polygons("Saggio dimostrativo")
-    assert len(polys) == before + 1 and polys[-1].us == "2"
+    assert len(polys) == before + 1 and polys[-1].us == "2" and polys[-1].attributes["stratigraph_index_us"] == 1
+    assert w.units[0].attributes["gid"] == polys[-1].attributes["gid"]  # written once: changes go to the pending list
+    w.pyarchinit_publish_units()
+    w.runner.wait()
+    assert len(w.pa.us_polygons("Saggio dimostrativo")) == before + 1
 
 
 def _spatialite():

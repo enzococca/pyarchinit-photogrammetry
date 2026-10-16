@@ -180,6 +180,8 @@ class PyArchInit:
 
         from ..archaeo.stratigraphy import UnitPolygon
 
+        from ..archaeo.stratigraphy import UNIT_FIELDS
+
         rows = self.db.geometries_wkt("pyunitastratigrafiche", scavo_s=sito, area_s=area)
         dst = crs_mod.epsg_code(crs) if crs else None
         src = self.srid() if dst else None
@@ -190,8 +192,9 @@ class PyArchInit:
                 continue
             if dst and src and src > 0 and src != dst:
                 wkt = reproject_wkt(wkt, src, dst)
+            attrs = {"gid": r["gid"], **{k: r[k] for k in UNIT_FIELDS if r.get(k) not in (None, "")}}
             out.append(UnitPolygon(swkt.loads(wkt), us=str(r["us_s"]), area=str(r["area_s"]),
-                                   tipo=r.get("unita_tipo_s") or "US", attributes={"gid": r["gid"]}))
+                                   tipo=r.get("unita_tipo_s") or "US", attributes=attrs, sito=r.get("scavo_s") or sito))
         return out
 
     def srid(self) -> int:
@@ -320,18 +323,28 @@ class PyArchInit:
     def publish_units(self, units, sito: str, area: str | None = None, crs: str | None = None,
                       rilievo_originale: str = "Fotogrammetria", disegnatore: str = "", nome_doc: str = "",
                       tipo_doc: str = "Fotopiano") -> list[int]:
-        """Write unit polygons into ``pyunitastratigrafiche`` (US must be set on each unit)."""
+        """Write unit polygons into ``pyunitastratigrafiche`` (US must be set on each unit).
+        The columns a unit carries in its attributes (``stratigraph_index_us``, ``tipo_us_s``,
+        ``disegnatore``, ``data``...) win over the arguments, which are the defaults."""
         self.ensure_site(sito)
         gids = []
         with self.db.begin() as conn:
             for u in units:
                 if not u.us:
                     raise ValueError("every unit needs its US number before publishing")
+                a = u.attributes or {}
+                try:
+                    index = int(a.get("stratigraph_index_us") or 1)
+                except (TypeError, ValueError):
+                    index = 1
                 gids.append(self.db.insert_geometry(conn, "pyunitastratigrafiche", {
-                    "scavo_s": sito, "area_s": str(u.area or area or ""), "us_s": str(u.us),
-                    "unita_tipo_s": u.tipo or "US", "tipo_us_s": u.attributes.get("tipo_us_s", ""),
-                    "rilievo_originale": rilievo_originale, "disegnatore": disegnatore,
-                    "data": date.today().isoformat(), "tipo_doc": tipo_doc, "nome_doc": nome_doc},
+                    "scavo_s": u.sito or sito, "area_s": str(u.area or area or ""), "us_s": str(u.us),
+                    "unita_tipo_s": u.tipo or "US", "stratigraph_index_us": index,
+                    "tipo_us_s": a.get("tipo_us_s") or "",
+                    "rilievo_originale": a.get("rilievo_originale") or rilievo_originale,
+                    "disegnatore": a.get("disegnatore") or disegnatore,
+                    "data": a.get("data") or date.today().isoformat(),
+                    "tipo_doc": a.get("tipo_doc") or tipo_doc, "nome_doc": a.get("nome_doc") or nome_doc},
                     u.geometry.wkt, source_srid=crs_mod.epsg_code(crs), multi=True))
         return gids
 
@@ -360,6 +373,27 @@ class PyArchInit:
         t = self.db.table("pyunitastratigrafiche")
         with self.db.begin() as conn:
             return conn.execute(t.delete().where(t.c.gid == int(gid))).rowcount
+
+    def publish_quote(self, points: list[dict], sito: str, crs: str | None = None) -> list[int]:
+        """Spot heights into ``pyarchinit_quote``: ``points`` are dicts with ``x``, ``y`` and the
+        columns of the layer (``area_q``, ``us_q``, ``unita_tipo_q``, ``quota_q``,
+        ``unita_misu_q``, ``data``, ``disegnatore``, ``rilievo_originale``; ``sito_q`` defaults
+        to ``sito``)."""
+        self.ensure_site(sito)
+        cols = self.db.columns("pyarchinit_quote")
+        gids = []
+        with self.db.begin() as conn:
+            for p in points:
+                rec = {"sito_q": p.get("sito_q") or sito, "area_q": str(p.get("area_q") or ""),
+                       "us_q": str(p.get("us_q") or ""), "unita_tipo_q": p.get("unita_tipo_q") or "US",
+                       "quota_q": None if p.get("quota_q") in (None, "") else round(float(p["quota_q"]), 3),
+                       "unita_misu_q": p.get("unita_misu_q") or "m s.l.m.",
+                       "data": p.get("data") or date.today().isoformat(), "disegnatore": p.get("disegnatore") or "",
+                       "rilievo_originale": p.get("rilievo_originale") or "Fotogrammetria"}
+                gids.append(self.db.insert_geometry(conn, "pyarchinit_quote", {k: v for k, v in rec.items() if k in cols},
+                                                    f"POINT ({float(p['x'])} {float(p['y'])})",
+                                                    source_srid=crs_mod.epsg_code(crs)))
+        return gids
 
     def publish_elevations(self, chunk, sito: str, area: str, us: str, points_xy, unita_tipo: str = "US",
                            disegnatore: str = "") -> list[int]:

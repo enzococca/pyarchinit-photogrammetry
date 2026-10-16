@@ -217,26 +217,173 @@ class PublishDialog(QDialog):
                 "link_us": [it.data(Qt.ItemDataRole.UserRole) for it in self.us_list.selectedItems()]}
 
 
-class UnitDialog(QDialog):
-    """Attributes of a drawn stratigraphic unit (area, US, type)."""
+UNIT_TYPES = ["US", "USM", "USR", "USD", "USV"]
+TIPO_US_SUGGESTIONS = ["", "positiva", "negativa", "struttura", "riempimento", "taglio"]
 
-    def __init__(self, parent=None, us_choices: list[tuple[str, str, str]] | None = None, default_area: str = "1"):
+
+def _today() -> str:
+    from datetime import date
+
+    return date.today().isoformat()
+
+
+class _SiteHeader(QLabel):
+    def __init__(self, sito: str):
+        super().__init__(f"Sito: <b>{sito}</b>" if sito else "Sito: <i>non scelto (menu PyArchInit > Sito del progetto)</i>")
+        self.setTextFormat(Qt.TextFormat.RichText)
+
+
+class UnitDialog(QDialog):
+    """Attributes of a drawn stratigraphic unit, the columns of PyArchInit's
+    ``pyunitastratigrafiche``: area, US, unit type, stratigraphic index, type, draughtsman,
+    date, original survey. The site is the one of the project. ``refine=True`` adds a
+    *Correggi* button (SAM masks: add or remove parts before saving)."""
+
+    REFINE = 2  # exec() result of the Correggi button
+
+    def __init__(self, parent=None, us_choices: list[tuple[str, str, str]] | None = None, default_area: str = "1",
+                 sito: str = "", defaults: dict | None = None, refine: bool = False, title: str = "Unita' stratigrafica"):
         super().__init__(parent)
-        self.setWindowTitle("Unita' stratigrafica")
+        self.setWindowTitle(title)
+        d = dict(defaults or {})
         form = QFormLayout(self)
+        form.addRow(_SiteHeader(sito))
         self.combo = QComboBox()
         self.combo.addItem("(nuova / scrivi sotto)", None)
         for area, us, desc in us_choices or []:
             self.combo.addItem(f"Area {area} - US {us} {desc}", (area, us))
-        self.area = QLineEdit(default_area)
-        self.us = QLineEdit("")
+        self.area = QLineEdit(str(d.get("area") or default_area))
+        self.us = QLineEdit(str(d.get("us") or ""))
         self.tipo = QComboBox()
-        self.tipo.addItems(["US", "USM", "USR", "USD", "USV"])
+        self.tipo.setEditable(True)
+        self.tipo.addItems(UNIT_TYPES)
+        self.tipo.setCurrentText(str(d.get("tipo") or "US"))
+        self.index = QComboBox()
+        for k, label in ((1, "1 - Caratterizzazione"), (2, "2 - Contorno US")):
+            self.index.addItem(label, k)
+        self.index.setCurrentIndex(1 if str(d.get("stratigraph_index_us") or "1") == "2" else 0)
+        self.index.setToolTip("stratigraph_index_us di pyunitastratigrafiche: 1 = caratterizzazione (riempita nel "
+                              "layer di PyArchInit), 2 = contorno dell'US")
+        self.tipo_us = QComboBox()
+        self.tipo_us.setEditable(True)
+        self.tipo_us.addItems(TIPO_US_SUGGESTIONS)
+        self.tipo_us.setCurrentText(str(d.get("tipo_us_s") or ""))
+        self.disegnatore = QLineEdit(str(d.get("disegnatore") or ""))
+        self.data = QLineEdit(str(d.get("data") or _today()))
+        self.rilievo = QLineEdit(str(d.get("rilievo_originale") or "Fotogrammetria"))
         self.combo.currentIndexChanged.connect(self._pick)
         form.addRow("US esistente", self.combo)
         form.addRow("Area", self.area)
         form.addRow("US", self.us)
-        form.addRow("Tipo", self.tipo)
+        form.addRow("Tipo unita'", self.tipo)
+        form.addRow("Indice stratigrafico", self.index)
+        form.addRow("Tipo (tipo_us_s)", self.tipo_us)
+        form.addRow("Disegnatore", self.disegnatore)
+        form.addRow("Data", self.data)
+        form.addRow("Rilievo originale", self.rilievo)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.button(QDialogButtonBox.StandardButton.Ok).setText("Salva")
+        if refine:
+            b = bb.addButton("Correggi...", QDialogButtonBox.ButtonRole.ActionRole)
+            b.setToolTip("Torna sulla mappa: Maiusc+clic aggiunge, clic destro toglie; Invio per salvare, Esc per scartare")
+            b.clicked.connect(lambda: self.done(self.REFINE))
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        form.addRow(bb)
+        self.us.setFocus()
+
+    def _pick(self, _i) -> None:
+        d = self.combo.currentData()
+        if d:
+            self.area.setText(d[0])
+            self.us.setText(d[1])
+
+    def values(self) -> dict:
+        return {"area": self.area.text().strip(), "us": self.us.text().strip(), "tipo": self.tipo.currentText().strip(),
+                "stratigraph_index_us": int(self.index.currentData() or 1), "tipo_us_s": self.tipo_us.currentText().strip(),
+                "disegnatore": self.disegnatore.text().strip(), "data": self.data.text().strip(),
+                "rilievo_originale": self.rilievo.text().strip()}
+
+
+class SiteChoiceDialog(QDialog):
+    """The site (excavation) the project belongs to: one of the database's sites or a new name."""
+
+    def __init__(self, parent=None, sites: list[str] | None = None, current: str = "", text: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("Sito del progetto")
+        lay = QVBoxLayout(self)
+        lab = QLabel(text or "Sito dello scavo: tutte le US e le quote di questo progetto appartengono a questo sito.")
+        lab.setWordWrap(True)
+        lay.addWidget(lab)
+        self.combo = QComboBox()
+        self.combo.setEditable(True)
+        names = list(sites or [])
+        if current and current not in names:
+            names.insert(0, current)
+        self.combo.addItems(names)
+        self.combo.setCurrentText(current or (names[0] if names else ""))
+        lay.addWidget(self.combo)
+        if not names:
+            hint = QLabel("Nessun sito nel database (o database non connesso): scrivi il nome del sito.")
+            hint.setObjectName("pageSubtitle")
+            hint.setWordWrap(True)
+            lay.addWidget(hint)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def value(self) -> str:
+        return self.combo.currentText().strip()
+
+
+class QuotaDialog(QDialog):
+    """A spot height with the columns of PyArchInit's ``pyarchinit_quote``: area, US, unit
+    type, elevation (read on the DEM, editable), unit of measure, draughtsman, date,
+    original survey. *Non chiedere piu'* keeps these values for the next points."""
+
+    def __init__(self, parent=None, us_choices: list[tuple[str, str, str]] | None = None, sito: str = "",
+                 quota: float | None = None, defaults: dict | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("Quota")
+        d = dict(defaults or {})
+        form = QFormLayout(self)
+        form.addRow(_SiteHeader(sito))
+        self.combo = QComboBox()
+        self.combo.addItem("(nuova / scrivi sotto)", None)
+        for area, us, desc in us_choices or []:
+            self.combo.addItem(f"Area {area} - US {us} {desc}", (area, us))
+        self.area = QLineEdit(str(d.get("area_q") or "1"))
+        self.us = QLineEdit(str(d.get("us_q") or ""))
+        self.tipo = QComboBox()
+        self.tipo.setEditable(True)
+        self.tipo.addItems(UNIT_TYPES)
+        self.tipo.setCurrentText(str(d.get("unita_tipo_q") or "US"))
+        self.quota = QDoubleSpinBox()
+        self.quota.setDecimals(3)
+        self.quota.setRange(-100000.0, 100000.0)
+        self.quota.setValue(float(quota) if quota is not None else 0.0)
+        self.misura = QComboBox()
+        self.misura.setEditable(True)
+        self.misura.addItems(["m s.l.m.", "m (quota relativa)"])
+        self.misura.setCurrentText(str(d.get("unita_misu_q") or "m s.l.m."))
+        self.disegnatore = QLineEdit(str(d.get("disegnatore") or ""))
+        self.data = QLineEdit(str(d.get("data") or _today()))
+        self.rilievo = QLineEdit(str(d.get("rilievo_originale") or "Fotogrammetria"))
+        self.keep = QCheckBox("Non chiedere piu': usa questi valori per i prossimi punti")
+        self.combo.currentIndexChanged.connect(self._pick)
+        form.addRow("US esistente", self.combo)
+        form.addRow("Area", self.area)
+        form.addRow("US", self.us)
+        form.addRow("Tipo unita'", self.tipo)
+        form.addRow("Quota", self.quota)
+        form.addRow("Unita' di misura", self.misura)
+        form.addRow("Disegnatore", self.disegnatore)
+        form.addRow("Data", self.data)
+        form.addRow("Rilievo originale", self.rilievo)
+        form.addRow(self.keep)
+        if quota is None:
+            form.addRow(QLabel("Fuori dal DEM: scrivi la quota a mano."))
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -249,7 +396,11 @@ class UnitDialog(QDialog):
             self.us.setText(d[1])
 
     def values(self) -> dict:
-        return {"area": self.area.text().strip(), "us": self.us.text().strip(), "tipo": self.tipo.currentText()}
+        return {"area_q": self.area.text().strip(), "us_q": self.us.text().strip(),
+                "unita_tipo_q": self.tipo.currentText().strip(), "quota_q": round(self.quota.value(), 3),
+                "unita_misu_q": self.misura.currentText().strip(), "disegnatore": self.disegnatore.text().strip(),
+                "data": self.data.text().strip(), "rilievo_originale": self.rilievo.text().strip(),
+                "keep": self.keep.isChecked()}
 
 
 class ImageDialog(QDialog):
@@ -694,6 +845,28 @@ US_FORM_PAGES = [
 ]
 
 
+class _SiteCombo(QComboBox):
+    """Editable list of the sites of the database, with ``text()`` like a line edit."""
+
+    def __init__(self, pa, sito: str):
+        super().__init__()
+        self.setEditable(True)
+        try:
+            names = [str(r.get("sito")) for r in pa.sites() if r.get("sito")]
+        except Exception:
+            names = []
+        if sito and sito not in names:
+            names.insert(0, sito)
+        self.addItems(names)
+        self.setCurrentText(sito)
+
+    def text(self) -> str:
+        return self.currentText()
+
+    def setText(self, text: str) -> None:
+        self.setCurrentText(text)
+
+
 class UsFormDialog(QDialog):
     """The US form of PyArchInit (us_table): open, edit or create a record. Only the columns
     present in the database are shown; text fields marked * are multi-line."""
@@ -712,15 +885,16 @@ class UsFormDialog(QDialog):
         self.resize(760, 640)
         lay = QVBoxLayout(self)
         head = QFormLayout()
-        self.sito = QLineEdit(sito)
+        self.sito = _SiteCombo(pa, sito)  # the site of the project; the other sites of the database to choose from
         self.area = QLineEdit(str(area))
         self.us = QLineEdit(str(us))
         self.tipo = QComboBox()
         self.tipo.setEditable(True)
         self.tipo.addItems(US_TYPES)
         self.tipo.setCurrentText(unita_tipo or "US")
-        for w in (self.sito, self.area, self.us):
+        for w in (self.area, self.us):
             w.setReadOnly(self.record is not None)
+        self.sito.setEnabled(self.record is None)
         self.tipo.setEnabled(self.record is None)
         row = QHBoxLayout()
         for label, w in (("Sito", self.sito), ("Area", self.area), ("US", self.us), ("Tipo", self.tipo)):

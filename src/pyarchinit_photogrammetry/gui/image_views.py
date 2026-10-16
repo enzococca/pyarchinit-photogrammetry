@@ -89,12 +89,16 @@ class RasterView(_ZoomView):
     Snapping (``snap_vertex``, ``snap_segment``, tolerance ``snap_px`` in screen pixels) moves
     the points of every drawing tool onto the vertices or the segments of the visible layers."""
 
-    DRAW_MODES = ("polygon", "line", "measure", "point")
+    DRAW_MODES = ("polygon", "line", "measure", "quota")
+    SAM_TOOLS = ("tap", "box", "area")
 
     mouse_world = Signal(float, float, object)  # x, y, z or None
     polygon_finished = Signal(object)  # (N,2) world XY
     line_finished = Signal(object, object)
-    point_clicked = Signal(float, float, int)  # x, y, label (1 left / 0 right)
+    quota_clicked = Signal(float, float)  # spot height at world x, y
+    sam_click = Signal(float, float, int, bool)  # x, y, label (1 add / 0 remove), True = a new object
+    sam_rect = Signal(float, float, float, float)  # world xmin, ymin, xmax, ymax dragged with the box/area tool
+    sam_key = Signal(str)  # "accept" (Enter) or "cancel" (Esc)
     measured = Signal(str)
     layers_changed = Signal()
     feature_clicked = Signal(str, dict)  # layer name, attributes (query in pan mode)
@@ -132,6 +136,8 @@ class RasterView(_ZoomView):
         self._batch = 0  # > 0 inside batch(): one layers_changed at the end
         self._batch_changed = False
         self._inv_of = self._inv = None  # self.tr and its inverse
+        self.sam_tool = "tap"  # SAM mode: tap (points), box (one object), area (every object inside)
+        self._sam_items: list = []  # preview of the current SAM mask and its prompts
 
     @contextmanager
     def batch(self):
@@ -161,6 +167,7 @@ class RasterView(_ZoomView):
         had_selection = bool(self.selection)
         self.selection, self._sel_marks, self._band, self._band_origin = [], [], None, None  # deleted by clear()
         self._snap_marks, self._snap_cache, self._stroking = {}, None, False
+        self._sam_items = []
         self.scene().clear()
         self.overlays, self._clicks, self._click_xy, self._rubber = [], [], [], None
         self.layers, self.layer_order = {}, []
@@ -409,9 +416,61 @@ class RasterView(_ZoomView):
         self.layers, self.layer_order = {}, []
         self._changed()
 
+    # ----------------------------------------------------------- SAM preview
+    def show_sam_preview(self, geom=None, points=None, box=None) -> None:
+        """The SAM mask being edited (dashed, not a layer feature yet) with its prompts:
+        ``points`` = [(x, y, label)], ``box`` = (xmin, ymin, xmax, ymax), world coordinates."""
+        self.clear_sam_preview()
+        if self.tr is None:
+            return
+        pen = self._pen("#00e5ff", 2.0)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        if geom is not None and not geom.is_empty:
+            path = QPainterPath()
+            for g in getattr(geom, "geoms", [geom]):
+                for ring in [g.exterior, *g.interiors]:
+                    path.addPolygon(QPolygonF([self.scene_pt(x, y) for x, y in np.asarray(ring.coords)[:, :2]]))
+                    path.closeSubpath()
+            item = self.scene().addPath(path, pen, QBrush(QColor(0, 229, 255, 60)))
+            item.setZValue(9000)
+            self._sam_items.append(item)
+        if box is not None:
+            x0, y0, x1, y1 = box
+            item = self.scene().addRect(QRectF(self.scene_pt(x0, y1), self.scene_pt(x1, y0)).normalized(), pen)
+            item.setZValue(9001)
+            self._sam_items.append(item)
+        for x, y, label in points or []:
+            mark = QGraphicsEllipseItem(-5, -5, 10, 10)
+            mark.setPos(self.scene_pt(x, y))
+            mark.setFlag(mark.GraphicsItemFlag.ItemIgnoresTransformations)
+            mark.setBrush(QColor("#30ff60" if label else "#ff3030"))
+            mark.setPen(self._pen("white", 1))
+            mark.setZValue(9002)
+            self.scene().addItem(mark)
+            self._sam_items.append(mark)
+
+    def clear_sam_preview(self) -> None:
+        for it in self._sam_items:
+            if it.scene() is self.scene():
+                self.scene().removeItem(it)
+        self._sam_items = []
+
+    def visible_world_bounds(self) -> tuple[float, float, float, float] | None:
+        """World extent of what the view shows, within the raster."""
+        if self.tr is None:
+            return None
+        rect = self.mapToScene(self.viewport().rect()).boundingRect().intersected(self.sceneRect())
+        if rect.isEmpty():
+            rect = self.sceneRect()
+        x0, y0 = self.world(rect.bottomLeft())
+        x1, y1 = self.world(rect.topRight())
+        return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+
     def set_mode(self, mode: str) -> None:
         if mode != "select" and self.selection:
             self.clear_selection()
+        if mode != "sam":
+            self.clear_sam_preview()
         self.mode = mode
         self._clicks, self._click_xy = [], []
         self._stroking = False
@@ -622,6 +681,13 @@ class RasterView(_ZoomView):
             self.clear_selection()
 
     def keyPressEvent(self, ev) -> None:
+        if self.mode == "sam":
+            if ev.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.sam_key.emit("accept")
+                return
+            if ev.key() == Qt.Key.Key_Escape:
+                self.sam_key.emit("cancel")
+                return
         if self.mode == "select":
             if ev.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and self.selection:
                 self.delete_requested.emit()
@@ -664,7 +730,7 @@ class RasterView(_ZoomView):
                 self._update_rubber(snapped)
         elif self._clicks:
             self._update_rubber(sp)
-        if self.mode == "select" and self._band_origin is not None:
+        if self.mode in ("select", "sam") and self._band_origin is not None:
             start = self.mapFromScene(self._band_origin)
             if self._band is None and (ev.position().toPoint() - start).manhattanLength() > 4:
                 pen = self._pen("#00e5ff", 1.5)
@@ -677,6 +743,18 @@ class RasterView(_ZoomView):
     def mouseReleaseEvent(self, ev) -> None:
         if self._stroking and ev.button() == Qt.MouseButton.LeftButton:
             self._finish_stroke()
+            return
+        if self.mode == "sam" and self._band_origin is not None and ev.button() == Qt.MouseButton.LeftButton:
+            origin = self._band_origin
+            rect = self._band.rect() if self._band is not None else None
+            self._end_band()
+            if rect is not None and rect.width() > 0 and rect.height() > 0:
+                x0, y0 = self.world(rect.bottomLeft())
+                x1, y1 = self.world(rect.topRight())
+                self.sam_rect.emit(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+            elif self.sam_tool == "box":  # a click without dragging: a point prompt
+                x, y = self.world(origin)
+                self.sam_click.emit(x, y, 1, True)
             return
         if self.mode == "select" and self._band_origin is not None and ev.button() == Qt.MouseButton.LeftButton:
             mods = self._press_mods
@@ -708,16 +786,26 @@ class RasterView(_ZoomView):
             elif ev.button() == Qt.MouseButton.RightButton and self.selection:
                 self._selection_menu(ev.globalPosition().toPoint())
             return
+        if self.mode == "sam":
+            self.setFocus()
+            x, y = self.world(sp)
+            shift = bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            if ev.button() == Qt.MouseButton.RightButton:
+                self.sam_click.emit(x, y, 0, False)  # remove this part from the current mask
+            elif ev.button() == Qt.MouseButton.LeftButton:
+                if shift:
+                    self.sam_click.emit(x, y, 1, False)  # add this part to the current mask
+                elif self.sam_tool == "tap":
+                    self.sam_click.emit(x, y, 1, True)
+                else:
+                    self._band_origin, self._press_mods = sp, ev.modifiers()
+            return
         xy = self.world(sp)
         if self.mode in self.DRAW_MODES and ev.button() != Qt.MouseButton.RightButton:
             sp, _kind, xy = self.snap_world(sp)
-        if self.mode == "point":
-            x, y = xy
-            ok = ev.button() != Qt.MouseButton.RightButton
-            z = self.elevation(x, y)
-            self.add_point(x, y, "#30ff60" if ok else "#ff3030", layer="Punti",
-                           attrs={"tipo": "positivo" if ok else "negativo", "z": None if z is None else round(z, 3)})
-            self.point_clicked.emit(x, y, 1 if ok else 0)
+        if self.mode == "quota":
+            if ev.button() == Qt.MouseButton.LeftButton:
+                self.quota_clicked.emit(*xy)
             return
         if ev.button() == Qt.MouseButton.RightButton:  # cancel the current drawing
             self.set_mode(self.mode)
@@ -743,6 +831,8 @@ class RasterView(_ZoomView):
             self.set_mode(self.mode)
 
     def mouseDoubleClickEvent(self, ev) -> None:
+        if self.mode == "sam":  # a second press: nothing more (Enter accepts the mask)
+            return
         if self.mode == "polygon" and len(self._click_xy) >= 3:
             xy = np.array(self._click_xy)
             self.set_mode("polygon")
