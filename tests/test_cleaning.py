@@ -267,3 +267,45 @@ def test_changes_never_touch_files_of_other_programs(processed, tmp_path):
         assert ch.product_path(product).parent == ch.data_dir
     assert hashlib.sha256(model_out.read_bytes()).hexdigest() == model_hash
     assert ch.product_path("model") == ch.data_dir / "model.ply"
+
+
+def test_command_line(processed, tmp_path):
+    """ppg confidence, clean-cloud, clean-model, crop and relink."""
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    doc, ch = _copy(processed, tmp_path)
+    project = str(doc.path)
+    run = CliRunner()
+
+    def ok(*args):
+        r = run.invoke(app, list(args))
+        assert r.exit_code == 0, r.output + repr(r.exception)
+        return r.output
+
+    out = ok("confidence", project, "--model")
+    assert "point_cloud:" in out and "model:" in out
+    out = ok("clean-cloud", project, "--min-confidence", "3", "--statistical", "16,2", "--dry-run")
+    assert "would remove" in out
+    n = len(PointCloud.load(ch.product_path("point_cloud")))
+    out = ok("clean-cloud", project, "--min-confidence", "3", "--groups", "0,50")
+    assert "removed" in out and len(PointCloud.load(ch.product_path("point_cloud"))) < n
+    out = ok("clean-model", project, "--min-component", "1", "--smooth", "1")
+    assert "faces" in out
+    tri = _trench_box(ch)
+    poly = " ".join(f"{x},{y}" for x, y in tri)
+    out = ok("crop", project, "--polygon", poly, "--out", str(tmp_path / "ritagli"), "--name", "prova")
+    assert {p.name for p in (tmp_path / "ritagli").iterdir()} >= {"prova_dem.tif", "prova_ortofoto.tif",
+                                                                   "prova_modello.ply", "prova_nuvola.las"}
+    lo, hi = tri.min(axis=0), tri.max(axis=0)
+    out = ok("export", project, "--dem", str(tmp_path / "dem_box.tif"), "--bbox", f"{lo[0]},{lo[1]},{hi[0]},{hi[1]}")
+    assert (tmp_path / "dem_box.tif").exists()
+    ok("crop", project, "--bbox", f"{lo[0]},{lo[1]},{hi[0]},{hi[1]}", "--in-project", "--products", "dem,point_cloud")
+    r = run.invoke(app, ["crop", project, "--bbox", "1,2,3"])
+    assert r.exit_code != 0
+    # relink to a copy of the photos elsewhere
+    other = tmp_path / "copia_foto"
+    shutil.copytree(doc.path.parent / "photos", other)
+    out = ok("relink", project, str(other))
+    assert out.startswith(f"{len(ch.cameras)} photos linked")

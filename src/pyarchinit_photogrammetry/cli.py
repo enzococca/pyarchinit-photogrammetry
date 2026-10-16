@@ -177,12 +177,16 @@ def reference(project: Path, csv_file: Path, crs: Optional[str] = None, columns:
                f"control RMSE {report['control_rmse']}, check RMSE {report['check_rmse']}")
 
 
+SKIP_HELP = "leave out the photos that cannot be read (e.g. kept online only by Dropbox) instead of stopping"
+
+
 @app.command()
 def dense(project: Path, quality: str = "medium", filter_mode: str = "moderate", backend: str = "auto",
-          chunk: Optional[str] = None):
-    """Depth maps and dense point cloud."""
+          skip_unreadable: bool = typer.Option(False, help=SKIP_HELP), chunk: Optional[str] = None):
+    """Depth maps and dense point cloud (with the confidence of every point)."""
     doc, ch = _open(project, chunk)
-    ch.build_depth_maps(quality=quality, filter_mode=filter_mode, backend=backend, progress=print_progress)
+    ch.build_depth_maps(quality=quality, filter_mode=filter_mode, backend=backend, progress=print_progress,
+                        skip_unreadable=skip_unreadable)
     pc = ch.build_point_cloud(progress=print_progress)
     doc.save()
     typer.echo(f"{len(pc):,} points")
@@ -195,13 +199,14 @@ def mesh(project: Path,
          voxel_size: Optional[float] = typer.Option(None, help="depth_maps: voxel in the chunk units "
                                                                "(default: twice the depth-map pixel)"),
          classes: Optional[str] = typer.Option(None, help="dense cloud: only these " + CLASSES_HELP),
-         texture: bool = True, texture_size: int = 4096, chunk: Optional[str] = None):
+         texture: bool = True, texture_size: int = 4096,
+         skip_unreadable: bool = typer.Option(False, help=SKIP_HELP), chunk: Optional[str] = None):
     """Mesh (Poisson, height field or fusion of the depth maps) and texture."""
     doc, ch = _open(project, chunk)
     m = ch.build_model(source=source, surface=surface, face_count=int(faces) if faces.isdigit() else faces,
                        voxel_size=voxel_size, classes=_classes(classes), progress=print_progress)
     if texture:
-        ch.build_texture(texture_size=texture_size, progress=print_progress)
+        ch.build_texture(texture_size=texture_size, progress=print_progress, skip_unreadable=skip_unreadable)
     doc.save()
     typer.echo(f"{len(m.faces):,} faces")
 
@@ -221,11 +226,12 @@ def dem(project: Path, resolution: Optional[float] = None, source: str = "point_
 def ortho(project: Path, resolution: Optional[float] = None, surface: str = "dem", blending: str = "mosaic",
           hide_classes: Optional[str] = typer.Option(None, help="transparent where the surface is of these "
                                                                 + CLASSES_HELP),
-          chunk: Optional[str] = None):
+          skip_unreadable: bool = typer.Option(False, help=SKIP_HELP), chunk: Optional[str] = None):
     """Orthomosaic (GeoTIFF RGBA)."""
     doc, ch = _open(project, chunk)
     p = ch.build_orthomosaic(resolution=resolution, surface=surface, blending=blending,
-                             hide_classes=_classes(hide_classes), progress=print_progress)
+                             hide_classes=_classes(hide_classes), progress=print_progress,
+                             skip_unreadable=skip_unreadable)
     doc.save()
     typer.echo(str(p))
 
@@ -329,16 +335,210 @@ def export(project: Path, ortho: Optional[Path] = None, dem: Optional[Path] = No
            cloud: Optional[Path] = None, cameras: Optional[Path] = None, markers: Optional[Path] = None,
            report: Optional[Path] = None,
            classes: Optional[str] = typer.Option(None, help="--cloud: only these " + CLASSES_HELP),
+           bbox: Optional[str] = typer.Option(None, help="only inside 'xmin,ymin,xmax,ymax' (ortho, dem, model, "
+                                                         "cloud)"),
+           wkt: Optional[str] = typer.Option(None, help="only inside this WKT polygon"),
            chunk: Optional[str] = None):
-    """Export products in world coordinates."""
+    """Export products in world coordinates (optionally cut by a box or a polygon: see also `ppg crop`)."""
     _, ch = _open(project, chunk)
-    for value, fn in ((ortho, ch.export_orthomosaic), (dem, ch.export_dem), (model, ch.export_model),
-                      (cloud, lambda path: ch.export_point_cloud(path, classes=_classes(classes))),
+    region = _region(None, bbox, wkt, None) if (bbox or wkt) else None
+    for value, fn in ((ortho, lambda path: ch.export_orthomosaic(path, region=region)),
+                      (dem, lambda path: ch.export_dem(path, region=region)),
+                      (model, lambda path: ch.export_model(path, region=region)),
+                      (cloud, lambda path: ch.export_point_cloud(path, classes=_classes(classes), region=region)),
                       (markers, ch.export_reference), (report, ch.generate_report)):
         if value:
             typer.echo(str(fn(value)))
     if cameras:
         typer.echo(str(ch.export_cameras(cameras, fmt="csv" if cameras.suffix == ".csv" else "colmap")))
+
+
+def _numbers(text: Optional[str], count: int, what: str) -> Optional[tuple]:
+    """``"16,2.0"`` -> ``(16.0, 2.0)`` (None when not given)."""
+    if not text:
+        return None
+    try:
+        values = tuple(float(v) for v in text.replace(";", ",").split(",") if v.strip())
+    except ValueError as exc:
+        raise typer.BadParameter(f"{what}: numbers separated by commas, got {text!r}") from exc
+    if len(values) != count:
+        raise typer.BadParameter(f"{what}: {count} numbers separated by commas, got {text!r}")
+    return values
+
+
+def _region(polygon: Optional[str], bbox: Optional[str], wkt: Optional[str], geojson: Optional[Path]):
+    """The crop polygon from one of the options (chunk CRS coordinates)."""
+    from .engine.crop import as_polygon
+
+    given = [v for v in (polygon, bbox, wkt, geojson) if v]
+    if len(given) != 1:
+        raise typer.BadParameter("give exactly one of --polygon, --bbox, --wkt, --geojson")
+    if polygon:
+        try:
+            ring = [tuple(float(c) for c in pt.split(",")) for pt in polygon.split()]
+        except ValueError as exc:
+            raise typer.BadParameter("--polygon: 'x1,y1 x2,y2 x3,y3 ...'") from exc
+        return as_polygon(ring)
+    if bbox:
+        return as_polygon(_numbers(bbox, 4, "--bbox"))
+    if wkt:
+        return as_polygon(wkt)
+    data = json.loads(Path(geojson).read_text())
+    if data.get("type") == "FeatureCollection":
+        from shapely.geometry import shape
+        from shapely.ops import unary_union
+
+        return as_polygon(unary_union([shape(f["geometry"]) for f in data["features"]]))
+    return as_polygon(data)
+
+
+@app.command()
+def relink(project: Path, folder: Path, only_unreadable: bool = typer.Option(
+               False, help="only the photos that cannot be read now"), chunk: Optional[str] = None):
+    """Point the photos to the files with the same names in FOLDER (and its subfolders)."""
+    doc, ch = _open(project, chunk)
+    r = ch.relink_photos(folder, only_unreadable=only_unreadable)
+    doc.save()
+    typer.echo(f"{r['relinked']} photos linked, {len(r['not_found'])} not found, {r['unreadable']} still unreadable; "
+               f"photo folder {r['image_root']}")
+
+
+@app.command()
+def confidence(project: Path, cloud: bool = typer.Option(True, help="the dense cloud"),
+               model: bool = typer.Option(False, help="the vertices of the model"),
+               tol: float = typer.Option(1.0, help="depth tolerance, percent of the distance"),
+               chunk: Optional[str] = None):
+    """Confidence (depth maps agreeing on each point), as Metashape: stored in the PLY files."""
+    doc, ch = _open(project, chunk)
+    for target, wanted in (("point_cloud", cloud), ("model", model)):
+        if wanted:
+            info = ch.compute_confidence(target, tol=tol / 100.0, progress=print_progress)
+            hist = " ".join(f"{c}:{n}" for c, n in sorted(info["histogram"].items()))
+            typer.echo(f"{target}: {info['points']:,} points, mean {info['mean']:.1f}, "
+                       f"{info['low_percent']:.1f}% at 2 or less ({hist})")
+    doc.save()
+
+
+@app.command("clean-cloud")
+def clean_cloud(project: Path,
+                min_confidence: int = typer.Option(0, help="remove the points confirmed by fewer depth maps"),
+                statistical: Optional[str] = typer.Option(None, help="isolated points: 'neighbours,std_ratio' "
+                                                                       "(e.g. 16,2)"),
+                groups: Optional[str] = typer.Option(None, help="detached groups: 'distance,min_points' "
+                                                                "(distance 0 = automatic, e.g. 0,1000)"),
+                sparse: Optional[str] = typer.Option(None, help="points without neighbours: 'radius,min_neighbours' "
+                                                                "(radius 0 = automatic)"),
+                remove_classes: Optional[str] = typer.Option(None, help="remove the " + CLASSES_HELP),
+                color: Optional[str] = typer.Option(None, help="remove a colour: 'r,g,b,tolerance'"),
+                dry_run: bool = typer.Option(False, help="only count what would be removed"),
+                chunk: Optional[str] = None):
+    """Remove noise from the dense cloud (Metashape's filters)."""
+    from .engine.cleaning import point_filters, summarize
+
+    filters = {}
+    if min_confidence:
+        filters["min_confidence"] = min_confidence
+    st = _numbers(statistical, 2, "--statistical")
+    if st:
+        filters["statistical"] = (int(st[0]), st[1])
+    gr = _numbers(groups, 2, "--groups")
+    if gr:
+        filters["groups"] = (gr[0], int(gr[1]))
+    sp = _numbers(sparse, 2, "--sparse")
+    if sp:
+        filters["sparse"] = (sp[0], int(sp[1]))
+    if remove_classes:
+        filters["remove_classes"] = _classes(remove_classes)
+    col = _numbers(color, 4, "--color")
+    if col:
+        filters["color"] = (col[:3], col[3])
+    if not filters:
+        raise typer.BadParameter("give at least one filter (see --help)")
+    doc, ch = _open(project, chunk)
+    if dry_run:
+        pc = ch.point_cloud
+        info = summarize(point_filters(ch, pc, progress=print_progress, **filters), len(pc))
+    else:
+        info = ch.clean_point_cloud(progress=print_progress, **filters)
+        doc.save()
+    typer.echo(f"{'would remove' if dry_run else 'removed'} {info['removed']:,} of {info['total']:,} points "
+               + ", ".join(f"{k} {n:,}" for k, n in info["by_filter"].items()))
+
+
+@app.command("clean-model")
+def clean_model(project: Path,
+                min_component: float = typer.Option(1.0, help="remove pieces below this percent of the largest "
+                                                              "(0: keep them)"),
+                min_confidence: int = typer.Option(0, help="remove faces with a vertex confirmed by fewer depth maps"),
+                max_edge: float = typer.Option(0.0, help="remove faces with an edge this many times the median"),
+                repair: bool = typer.Option(True, help="degenerate and duplicate faces"),
+                fill_holes: float = typer.Option(0.0, help="close holes up to this radius (chunk units)"),
+                smooth: int = typer.Option(0, help="Taubin smoothing iterations"),
+                target_faces: int = typer.Option(0, help="decimate to this number of faces"),
+                chunk: Optional[str] = None):
+    """Clean the model (Metashape's gradual selection, close holes, smooth, decimate)."""
+    doc, ch = _open(project, chunk)
+    info = ch.clean_model(min_component=min_component / 100.0 or None, min_confidence=min_confidence or None,
+                          max_edge=max_edge or None, repair=repair, fill_holes=fill_holes or None, smooth=smooth,
+                          target_faces=target_faces or None, progress=print_progress)
+    doc.save()
+    typer.echo(f"{info['faces']:,} faces (before {info['faces_before']:,}); removed "
+               + ", ".join(f"{k} {n:,}" for k, n in info["by_filter"].items()))
+
+
+@app.command()
+def crop(project: Path,
+         polygon: Optional[str] = typer.Option(None, help="'x1,y1 x2,y2 x3,y3 ...' in the chunk CRS"),
+         bbox: Optional[str] = typer.Option(None, help="'xmin,ymin,xmax,ymax'"),
+         wkt: Optional[str] = typer.Option(None, help="a WKT polygon"),
+         geojson: Optional[Path] = typer.Option(None, help="a GeoJSON file (its polygons, merged)"),
+         out: Optional[Path] = typer.Option(None, help="folder for the cropped exports"),
+         in_project: bool = typer.Option(False, help="crop the products of the project instead (the originals "
+                                                     "are kept as versions)"),
+         products: str = typer.Option("dem,orthomosaic,model,point_cloud", help="what to crop"),
+         zmin: Optional[float] = None, zmax: Optional[float] = None,
+         name: str = typer.Option("ritaglio", help="start of the file names"),
+         model_format: str = typer.Option("ply", help="ply or obj"),
+         cloud_format: str = typer.Option("las", help="las or ply"),
+         chunk: Optional[str] = None):
+    """Cut the DEM, orthomosaic, model and dense cloud with a polygon: exported, or in the project."""
+    from .core import versions
+
+    region = _region(polygon, bbox, wkt, geojson)
+    wanted = [p.strip() for p in products.split(",") if p.strip()]
+    unknown = set(wanted) - {"dem", "orthomosaic", "model", "point_cloud"}
+    if unknown:
+        raise typer.BadParameter(f"unknown products: {', '.join(sorted(unknown))}")
+    if bool(out) == in_project:
+        raise typer.BadParameter("give --out FOLDER to export, or --in-project")
+    doc, ch = _open(project, chunk)
+    wanted = [k for k in wanted if ch.product_path(k) is not None and ch.product_path(k).exists()]
+    if in_project:
+        for k in wanted:
+            versions.keep_active(ch, k, move=False)
+            if k == "dem":
+                ch.crop_dem(region)
+            elif k == "orthomosaic":
+                ch.crop_orthomosaic(region)
+            elif k == "model":
+                ch.crop_model(region, zmin=zmin, zmax=zmax)
+            else:
+                ch.crop_point_cloud(region=region, zmin=zmin, zmax=zmax)
+            versions.set_active_name(ch, k, "Ritagliato")
+            typer.echo(f"{k}: cropped in the project")
+        doc.save()
+        return
+    out.mkdir(parents=True, exist_ok=True)
+    for k in wanted:
+        if k == "dem":
+            path = ch.export_dem(out / f"{name}_dem.tif", region=region)
+        elif k == "orthomosaic":
+            path = ch.export_orthomosaic(out / f"{name}_ortofoto.tif", region=region)
+        elif k == "model":
+            path = ch.export_model(out / f"{name}_modello.{model_format}", region=region, zmin=zmin, zmax=zmax)
+        else:
+            path = ch.export_point_cloud(out / f"{name}_nuvola.{cloud_format}", region=region, zmin=zmin, zmax=zmax)
+        typer.echo(str(path))
 
 
 @app.command()
