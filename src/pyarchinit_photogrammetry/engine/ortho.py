@@ -419,10 +419,7 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     (:class:`~.visibility.UnreadablePhotos`) unless ``skip_unreadable``. Every tile takes its
     colours from the ``max_cameras`` photos that see it best (more where they leave cells
     uncovered); ``workers`` tiles are made at once (default: the cores but two)."""
-    import rasterio
-    from rasterio.enums import ColorInterp, Resampling
     from rasterio.transform import from_origin
-    from rasterio.windows import Window
 
     from ..core import crs as crs_mod
 
@@ -462,6 +459,28 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
         profile["crs"] = crs_mod.to_pyproj(chunk.crs).to_wkt()
     out_path = chunk.data_dir / "orthomosaic.tif"
     tmp = out_path.with_name("orthomosaic.tmp.tif")
+    try:
+        _write_tiles(ctx, tmp, profile, tiles, workers, progress)
+    except BaseException:
+        tmp.unlink(missing_ok=True)  # cancelled or failed: no half-written file left behind
+        raise
+    tmp.replace(out_path)
+    chunk._set_product("orthomosaic", out_path)
+    chunk.meta["orthomosaic"] = {"resolution": resolution, "surface": surface, "blending": blending,
+                                 "hidden_classes": hidden_classes}
+    if bad:
+        chunk.meta["orthomosaic"]["skipped_photos"] = [c.label for c in bad]
+    progress(1.0, f"Orthomosaic {w}x{h} px")
+    return out_path
+
+
+def _write_tiles(ctx, tmp: Path, profile: dict, tiles, workers: int, progress: Progress) -> None:
+    """Make the tiles in parallel and write each one as soon as it is ready, then the overviews."""
+    import rasterio
+    from rasterio.enums import ColorInterp, Resampling
+    from rasterio.windows import Window
+
+    h, w = ctx.shape
     done = 0
     with rasterio.open(tmp, "w", **profile) as dst:
         dst.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
@@ -493,14 +512,6 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
         if factors:
             progress(0.95, "Overviews of the orthomosaic")
             dst.build_overviews(factors, Resampling.average)
-    tmp.replace(out_path)
-    chunk._set_product("orthomosaic", out_path)
-    chunk.meta["orthomosaic"] = {"resolution": resolution, "surface": surface, "blending": blending,
-                                 "hidden_classes": hidden_classes}
-    if bad:
-        chunk.meta["orthomosaic"]["skipped_photos"] = [c.label for c in bad]
-    progress(1.0, f"Orthomosaic {w}x{h} px")
-    return out_path
 
 
 __all__ = ["build_orthomosaic", "hidden_cells", "NODATA"]

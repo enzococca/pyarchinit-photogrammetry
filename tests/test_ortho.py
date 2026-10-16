@@ -82,3 +82,23 @@ def test_dem_surface_wider_than_opencv_maps(tmp_path):
     assert half.shape == (2 * h, 2 * w)
     t2 = half.tile(0, 70000, 2, 100)
     assert np.all(np.diff(t2[1][np.isfinite(t2[1])]) > 0)
+
+
+def test_cancelled_orthomosaic_leaves_no_file(processed, tmp_path):
+    import pytest
+
+    from pyarchinit_photogrammetry.core.progress import Cancelled, Progress
+
+    doc, ch = _copy(processed, tmp_path)
+    before = ch.orthomosaic_path.read_bytes()
+    prog = Progress()
+
+    def stop(fraction, _text=""):
+        if fraction > 0.1:
+            prog.cancel_requested = True
+
+    prog.callback = stop
+    with pytest.raises(Cancelled):
+        ch.build_orthomosaic(resolution=0.002, progress=prog)
+    assert not (ch.data_dir / "orthomosaic.tmp.tif").exists()
+    assert ch.orthomosaic_path.read_bytes() == before  # the orthomosaic of before is still there
