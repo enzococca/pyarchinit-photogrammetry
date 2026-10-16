@@ -111,7 +111,8 @@ def test_model_vertex_confidence_and_cleaning(processed, tmp_path):
     delete_faces(ch, mask)
     holed = ch.model
     open_border = boundary_vertices(np.asarray(holed.faces), len(holed.vertices)).sum()
-    report = ch.clean_model(fill_holes=0.05, smooth=3, target_faces=len(holed.faces) // 2)
+    radius = 2.5 * ch.scale * float(np.linalg.norm(tri_c[hole] - centre, axis=1).max())  # the mesh varies by run
+    report = ch.clean_model(fill_holes=radius, smooth=3, target_faces=len(holed.faces) // 2)
     final = ch.model
     assert report["filled_faces"] > 0
     assert boundary_vertices(np.asarray(final.faces), len(final.vertices)).sum() < open_border
@@ -309,3 +310,45 @@ def test_command_line(processed, tmp_path):
     shutil.copytree(doc.path.parent / "photos", other)
     out = ok("relink", project, str(other))
     assert out.startswith(f"{len(ch.cameras)} photos linked")
+
+
+def test_seams_of_a_textured_mesh_are_not_detached_pieces(tmp_path):
+    """Metashape repeats the vertices along the seams of the texture: every chart looked like a
+    detached piece and the 1 % filter removed 17 % of a real tell. Vertices at the same position
+    now join the pieces; repair welds them, so smoothing opens no cracks."""
+    import trimesh
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.engine.cleaning import boundary_vertices, face_filters, weld
+    from pyarchinit_photogrammetry.engine.confidence import write_model
+
+    grid = trimesh.creation.box(extents=[1, 1, 1]).subdivide().subdivide().subdivide()
+    v, f = np.asarray(grid.vertices), np.asarray(grid.faces)
+    # split the surface in two charts at x = 0.3: they share positions, not vertices
+    right = v[f].mean(axis=1)[:, 0] > 0.3
+    v2 = np.vstack([v, v])
+    f2 = np.where(right[:, None], f + len(v), f)
+    used = np.zeros(len(v2), bool)
+    used[f2.ravel()] = True
+    remap = np.cumsum(used) - 1
+    v2, f2 = v2[used], remap[f2]
+    first, inverse = weld(v2)
+    assert len(first) == len(v) and len(v2) > len(v)
+    # a real detached piece far away
+    crumb = trimesh.creation.icosphere(subdivisions=0, radius=0.01)
+    vv = np.vstack([v2, crumb.vertices + 5.0])
+    ff = np.vstack([f2, crumb.faces + len(v2)])
+    small_chart = int(min(right.sum(), (~right).sum()))
+    assert small_chart > len(crumb.faces)
+    masks = face_filters(vv, ff, min_component=small_chart + 1, repair=False)
+    assert masks["components"].sum() == len(crumb.faces)  # only the crumb, not the smaller chart
+    doc = ppg.Document()
+    ch = doc.add_chunk("Seams")
+    doc.save(tmp_path / "seams.ppg")
+    path = write_model(ch.data_dir / "model.ply", trimesh.Trimesh(vv, ff, process=False),
+                       np.full(len(vv), 7, np.uint8))
+    ch._set_product("model", path)
+    info = ch.clean_model(min_component=small_chart + 1, smooth=2)
+    out = ch.model
+    assert info["welded_vertices"] == len(v2) - len(v) and info["faces"] == len(f)
+    assert boundary_vertices(np.asarray(out.faces), len(out.vertices)).sum() == 0  # closed: no crack opened

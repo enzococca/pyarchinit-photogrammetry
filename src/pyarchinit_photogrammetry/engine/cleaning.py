@@ -219,6 +219,16 @@ def delete_points(chunk: Chunk, mask: np.ndarray, keep_selected: bool = False) -
 
 
 # ---------------------------------------------------------------- model
+def weld(vertices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Vertices at the same position counted once: ``(first index of each position, index of
+    every vertex among them)``. Textured meshes (Metashape) repeat the vertices along the seams
+    of the texture: without welding, every texture chart looks like a detached piece."""
+    v = np.ascontiguousarray(np.asarray(vertices, np.float64))
+    _, first, inverse = np.unique(v.view(np.dtype((np.void, v.dtype.itemsize * 3))).ravel(),
+                                  return_index=True, return_inverse=True)
+    return first, inverse.ravel()
+
+
 def _vertex_components(n_vertices: int, faces: np.ndarray) -> np.ndarray:
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
@@ -238,8 +248,9 @@ def face_filters(vertices: np.ndarray, faces: np.ndarray, confidence: np.ndarray
 
     ``min_confidence``: faces with a vertex below it; ``min_component``: pieces with fewer
     faces than this fraction of the largest piece (e.g. 0.01) - or than this number of faces
-    when >= 1; ``max_edge``: faces with an edge longer than this many times the median edge;
-    ``repair``: degenerate faces (repeated vertices or no area) and duplicates."""
+    when >= 1 (vertices at the same position join the pieces: the seams of a textured mesh);
+    ``max_edge``: faces with an edge longer than this many times the median edge; ``repair``:
+    degenerate faces (repeated vertices or no area) and duplicates."""
     faces = np.asarray(faces, np.int64)
     vertices = np.asarray(vertices, np.float64)
     out: dict[str, np.ndarray] = {}
@@ -266,8 +277,10 @@ def face_filters(vertices: np.ndarray, faces: np.ndarray, confidence: np.ndarray
         alive = np.ones(len(faces), bool)
         for m in out.values():
             alive &= ~m
-        label = _vertex_components(len(vertices), faces[alive])
-        comp = label[faces[:, 0]]
+        first, inverse = weld(vertices)  # pieces joined only through repeated vertices are one piece
+        welded = inverse[faces]
+        label = _vertex_components(len(first), welded[alive])
+        comp = label[welded[:, 0]]
         size = np.bincount(comp[alive], minlength=int(label.max()) + 1)
         limit = float(min_component) if min_component >= 1 else float(min_component) * float(size.max())
         out["components"] = alive & (size[comp] < limit)
@@ -310,9 +323,11 @@ def clean_model(chunk: Chunk, min_confidence: int | None = None, min_component: 
                 smooth: int = 0, target_faces: int | None = None, progress: Progress | None = None) -> dict:
     """Clean the model and store it: :func:`face_filters` (same keywords), then holes closed up
     to ``fill_holes`` (radius, chunk units, e.g. metres), ``smooth`` Taubin iterations (the
-    borders stay where they are) and decimation to ``target_faces``. Vertex colours and
-    confidence are kept (the confidence of new or moved vertices comes from the nearest old
-    vertex). The textured model, made from the old faces, is left out: build the texture again."""
+    borders stay where they are) and decimation to ``target_faces``. ``repair`` also welds the
+    vertices repeated at the same position (the seams of a textured mesh), so that smoothing
+    does not open cracks and the seams are not taken for holes. Vertex colours and confidence
+    are kept (the confidence of new or moved vertices comes from the nearest old vertex). The
+    textured model, made from the old faces, is left out: build the texture again."""
     import trimesh
 
     from .confidence import read_model_confidence, write_model
@@ -342,6 +357,14 @@ def clean_model(chunk: Chunk, min_confidence: int | None = None, min_component: 
     f = f[~remove]
     info = {"faces_before": n_faces0, "vertices_before": n_vertices0,
             "by_filter": {k: int(np.count_nonzero(m)) for k, m in masks.items()}, "removed_faces": int(remove.sum())}
+    if repair:
+        first, inverse = weld(v)
+        if len(first) < len(v):
+            info["welded_vertices"] = int(len(v) - len(first))
+            v, f = v[first], inverse[f]
+            conf = None if conf is None else conf[first]
+            colors = None if colors is None else colors[first]
+            f = f[(f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2])]
     if fill_holes:
         progress(0.35, "Chiusura dei buchi")
         import open3d as o3d
@@ -437,4 +460,4 @@ def delete_faces(chunk: Chunk, face_mask: np.ndarray, keep_selected: bool = Fals
 
 __all__ = ["clean_model", "clean_point_cloud", "color_mask", "connected_groups", "delete_faces", "delete_points",
            "face_filters", "point_filters", "point_spacing", "small_groups", "sparse_points", "statistical_outliers",
-           "summarize"]
+           "summarize", "weld"]
