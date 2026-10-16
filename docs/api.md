@@ -63,7 +63,8 @@ CLI: `ppg mesh project.ppg --source depth_maps [--voxel-size 0.005]`.
 | `archaeo.terrain` | `contours` (simplified, optional smoothing), `suggest_interval`, `dem_range`, `export_contours`, `volume`, `hillshade`, `slope_degrees` |
 | `archaeo.stratigraphy` | `UnitPolygon`, `mask_to_polygons`, `export_units` |
 | `bim.ifc` | `export_ifc`, `export_chunk_ifc`, `split_mesh_by_units` |
-| `ai.classify` | `classify_chunk`, `assign_class_by_polygons`, `class_statistics` |
+| `ai.classify` | `classify_chunk`, `assign_class_by_polygons`, `class_statistics`, `set_class`, `clear_manual`, `class_names` |
+| `ai.learn` | `point_features`, `train`, `predict`, `ClassifierModel`, `train_on_chunk`, `classify_chunk_with_model` (see below) |
 | `ai.sam` | `Sam2Segmenter`, `segment_orthomosaic`, `auto_units`, `classify_from_masks`, `segment_photo_and_classify` |
 | `pyarchinit` | `PyArchInit`, `register_media`, `connect` |
 
@@ -98,3 +99,62 @@ CLI: `ppg mesh project.ppg --source depth_maps [--voxel-size 0.005]`.
   function in a fresh interpreter (used by the Poisson reconstruction). With `progress=callback`
   it relays what `fn` passes to `engine.isolate.report(fraction, message)` (used by the fusion of
   the depth maps).
+
+
+## Trainable point classification
+
+Label some points by hand, train a classifier on them, classify the rest of the cloud and,
+with the saved model, the clouds of other projects (like CloudCompare's 3DMASC/CANUPO).
+Needs scikit-learn (`pip install "pyarchinit-photogrammetry[learn]"`, included in `[all]`).
+
+```python
+from pyarchinit_photogrammetry.ai import classify, learn
+
+classify.set_class(chunk, lasso_mask, 64, label="Muro")   # class + "labelled by hand" flag
+model = learn.train_on_chunk(chunk)                        # learns from the hand-labelled points
+print(model.summary())                                     # out-of-bag accuracy, precision/recall per class
+pc, confidence = learn.classify_chunk_with_model(chunk, model, min_confidence=0.6)
+model.save("scavo.ppgclf")
+other = learn.ClassifierModel.load("scavo.ppgclf")          # apply it to another project
+```
+
+| Call | Description |
+| --- | --- |
+| `classify.set_class(chunk, mask, code, manual=True, label=None)` | gives the selected dense points (boolean mask or indices) a class and flags them as labelled by hand; `manual=False` removes the flag; returns the count |
+| `classify.clear_manual(chunk, mask=None)` | forgets the hand-labelled flag (classes unchanged) |
+| `learn.point_features(xyz, rgb=None, normals=None, scales=None, ground=None, progress=None)` | `(N, F)` float32 feature matrix and feature names; world coordinates, z up |
+| `learn.suggest_scales(xyz)`, `learn.estimate_spacing(xyz)` | default core voxel and radii: 5, 14 and 40 times the point spacing |
+| `learn.train(xyz, codes, rgb=None, ..., method="random_forest", n_estimators=None, max_per_class=20000, random_state=0)` | `ClassifierModel`; `codes` 1-255, 0 or negative = unlabelled; `method="gradient_boosting"` for smaller files |
+| `learn.predict(model, xyz, rgb=None, ..., min_confidence=0.0)` | `(codes uint8, confidence float32)`; points below `min_confidence` become 1 (unclassified) |
+| `learn.train_on_chunk(chunk, labels="manual")` | trains on the hand-labelled points (`labels="all"`: every point with a class above 1) |
+| `learn.classify_chunk_with_model(chunk, model, overwrite_manual=False, min_confidence=0.0)` | classifies and stores the dense cloud; returns `(point_cloud, confidence)` |
+| `model.save(path)`, `ClassifierModel.load(path)`, `learn.read_model_info(path)`, `model.summary()` | model files; `read_model_info` reads the metadata only |
+| `model.classes`, `class_names`, `feature_names`, `scales`, `oob_score`, `training_accuracy`, `confusion_matrix`, `stats` | training results (confusion matrix: rows true class, columns predicted) |
+
+* **Features** (per radius): linearity, planarity, sphericity, omnivariance, eigenentropy,
+  change of curvature, verticality of the normal and of the main axis, density, height above
+  the lowest and below the highest neighbour, vertical spread, roughness; then height above
+  ground (progressive morphological filter, or `ground=` a DTM GeoTIFF / ground elevations),
+  colour (normalised RGB, HSV, excess green) and colour contrast with the neighbours.
+  They are computed on a *core* cloud (one point per voxel; voxel = point spacing, coarser
+  above `max_core_points`, default 1 M) and every point takes the values of its voxel; each
+  radius uses its own voxel level and at most 64 neighbours. About 15 s per million core
+  points on 4 threads (`n_jobs`).
+* **Hand labels**: `PointCloud.manual` (boolean per point, `None` when nothing was labelled)
+  is stored as the PLY property `manual`; files without it load as before. The rule-based
+  `classify_chunk` and `classify_chunk_with_model` keep the class of these points unless
+  `overwrite_manual=True` (then the flag stays where the new class agrees).
+* **Training**: one sample per core voxel (the class most of its labelled points carry), at most
+  `max_per_class` per class, classes weighted inversely to their size; the random forest
+  (100 trees, each on at most 10,000 samples) is validated out of bag, gradient boosting on
+  20 % held out. Deterministic for a given `random_state`.
+* **Model file** (`.ppgclf`): a ZIP with `model.json` (format version, classes and names,
+  feature names, radii and settings, core voxel, statistics, versions of the package,
+  scikit-learn and NumPy, training chunk and CRS) and `estimator.pkl` (the scikit-learn
+  estimator). The estimator is unpickled with an allow-list of scikit-learn and NumPy types,
+  so a file that tries to run other code is refused. The radii are in metres: apply a model to
+  clouds with a similar point spacing and a metric CRS (a local chunk without scale has
+  arbitrary units).
+* **CLI**: `ppg classify-train scavo.ppg modello.ppgclf [--labels manual|all] [--method
+  random_forest|gradient_boosting] [--scales 0.05,0.15,0.4] [--trees 100]` and
+  `ppg classify-apply scavo.ppg modello.ppgclf [--min-confidence 0.6] [--overwrite-manual]`.
