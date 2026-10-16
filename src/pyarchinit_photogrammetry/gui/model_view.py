@@ -356,7 +356,7 @@ class ClassLegend(QListWidget):
         self.itemChanged.connect(lambda _it: None if self._filling else self.visibility_changed.emit())
         self._filling = False
 
-    def set_counts(self, counts: dict, hidden: set) -> None:
+    def set_counts(self, counts: dict, hidden: set, labels: dict | None = None) -> None:
         from .scene import class_name, class_palette
 
         pal = class_palette()
@@ -365,7 +365,7 @@ class ClassLegend(QListWidget):
         for code in sorted(counts):
             pm = QPixmap(14, 14)
             pm.fill(QColor(*[int(v) for v in pal[code]]))
-            it = QListWidgetItem(QIcon(pm), f"{code}  {class_name(code)}  ({counts[code]:,})".replace(",", "."))
+            it = QListWidgetItem(QIcon(pm), f"{code}  {class_name(code, labels)}  ({counts[code]:,})".replace(",", "."))
             it.setData(Qt.ItemDataRole.UserRole, int(code))
             it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             it.setCheckState(Qt.CheckState.Unchecked if code in hidden else Qt.CheckState.Checked)
@@ -561,5 +561,5 @@ class ModelView(QWidget):
               else SceneData(np.zeros(3)))
         self.sd = sd
         if mode == "class":
-            self.legend.set_counts(sd.class_counts, hidden)
+            self.legend.set_counts(sd.class_counts, hidden, sd.class_labels)
         self.canvas.set_scene(sd, reset=reset)

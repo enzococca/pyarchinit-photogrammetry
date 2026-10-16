@@ -678,3 +678,68 @@ def test_cloud_by_class_legend_and_lasso(window, qapp, monkeypatch):
     finally:
         ch.point_cloud = original
         w.model_view.set_color_mode("rgb")
+
+
+def test_train_and_apply_classifier(window, qapp, monkeypatch, tmp_path):
+    """Points corrected by hand train the classifier, which then classifies the rest; the
+    model is kept in the project and can be saved and loaded."""
+    pytest.importorskip("sklearn")
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    w = window
+    ch = w.chunk
+    original = ch.point_cloud
+    classes = dict(ch.meta.get("classes", {}))
+    try:
+        pc = ch.point_cloud
+        pc.classification[:] = 1
+        pc.manual = None
+        ch.point_cloud = pc
+        z = ch.to_world(pc.xyz)[:, 2]
+        high = z > np.median(z)
+        rng = np.random.default_rng(0)
+        pick = rng.random(len(z)) < 0.05
+        w._set_point_class(pick & ~high, 2)
+        w._set_point_class(pick & high, 120, "Crollo")
+        assert ch.point_cloud.manual.sum() == pick.sum() and ch.meta["classes"]["120"] == "Crollo"
+        infos = []
+        monkeypatch.setattr(w, "_info", lambda title, text: infos.append(text))
+        monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(lambda cls, *a, **k: {
+            "labels": "manual", "method": "random_forest", "trees": 20, "apply": True}))
+        w.train_classifier()
+        w.runner.wait()
+        qapp.processEvents()
+        assert w.classifier is not None and sorted(w.classifier.classes) == [2, 120]
+        assert (ch.data_dir / mw.CLASSIFIER_FILE).exists() and infos
+        after = ch.point_cloud.classification
+        assert set(np.unique(after)) == {2, 120}
+        assert (after[high] == 120).mean() > 0.9 and (after[~high] == 2).mean() > 0.9
+        assert (after[pick & high] == 120).all()  # hand labels kept
+        mv = w.model_view
+        assert mv.color_combo.currentData() == "class"
+        assert any("Crollo" in mv.legend.item(i).text() for i in range(mv.legend.count()))
+        # save, forget, apply again from the file kept in the project
+        out = tmp_path / "modello.ppgclf"
+        monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))
+        w.save_classifier()
+        assert out.exists()
+        w.classifier = None
+        monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(lambda cls, *a, **k: {
+            "min_confidence": 0.0, "overwrite": False}))
+        w.apply_classifier()
+        w.runner.wait()
+        qapp.processEvents()
+        assert w.classifier is not None and set(np.unique(ch.point_cloud.classification)) == {2, 120}
+        monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (str(out), ""))
+        assert w.load_classifier() and sorted(w.classifier.classes) == [2, 120]
+        monkeypatch.setattr(mw, "message", lambda *a, **k: QMessageBox.StandardButton.Yes)
+        w.clear_manual_labels()
+        assert not ch.point_cloud.manual.any()
+    finally:
+        ch.point_cloud = original
+        ch.meta["classes"] = classes
+        (ch.data_dir / mw.CLASSIFIER_FILE).unlink(missing_ok=True)
+        w.classifier = None
+        w.model_view.set_color_mode("rgb")

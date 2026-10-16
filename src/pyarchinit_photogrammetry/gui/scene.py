@@ -25,6 +25,7 @@ class SceneData:
     kind: str = "empty"
     point_codes: np.ndarray | None = None  # class code of each displayed point
     class_counts: dict = field(default_factory=dict)  # class code -> points in the whole cloud
+    class_labels: dict = field(default_factory=dict)  # names of the project classes (chunk.meta["classes"])
 
     @property
     def extent(self) -> float:
@@ -84,7 +85,8 @@ def class_palette() -> np.ndarray:
     return pal
 
 
-def class_name(code: int) -> str:
+def class_name(code: int, labels: dict | None = None) -> str:
+    """Italian name of a class; ``labels`` (``chunk.meta["classes"]``) names the codes of the project."""
     from ..core.pointcloud import ARCHAEO_CLASSES, ASPRS_CLASSES
 
     names = {0: "Mai classificati", 1: "Non classificati", 2: "Terreno", 3: "Vegetazione bassa",
@@ -94,7 +96,9 @@ def class_name(code: int) -> str:
         return names[code]
     if code in ARCHAEO_CLASSES:
         return ARCHAEO_CLASSES[code].split(" / ")[0]
-    return ASPRS_CLASSES.get(code, f"Classe {code}")
+    if code in ASPRS_CLASSES:
+        return ASPRS_CLASSES[code]
+    return str((labels or {}).get(str(code)) or f"Classe {code}")
 
 
 def elevation_colors(z: np.ndarray) -> np.ndarray:
@@ -157,6 +161,7 @@ def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_f
                                                                                                           np.uint8)
             found, counts = np.unique(codes, return_counts=True)
             sd.class_counts = {int(c): int(n) for c, n in zip(found, counts)}
+            sd.class_labels = dict(chunk.meta.get("classes", {}))
             idx = np.arange(len(pc))
             if hidden_classes:
                 idx = idx[~np.isin(codes, np.asarray(list(hidden_classes), np.uint8))]

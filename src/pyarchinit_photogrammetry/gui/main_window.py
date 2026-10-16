@@ -42,6 +42,9 @@ SAM_MODELS = [("tiny", "Molto veloce (tiny)"), ("small", "Veloce (small)"), ("ba
               ("large", "Molto accurato (large)")]
 
 
+CLASSIFIER_FILE = "classificatore.ppgclf"  # classifier trained in a chunk, kept in its data folder
+
+
 class MainWindow(QMainWindow):
     def __init__(self, document: Document | None = None, autoconnect: bool = True):
         super().__init__()
@@ -61,6 +64,7 @@ class MainWindow(QMainWindow):
         self.sections: list[dict] = []  # sections of the open project (sezioni/sezioni.json)
         self.line_layers: dict[str, list] = {}  # contour lines, plan slices: redrawn after raster reloads
         self.sam = None
+        self.classifier = None  # trained point classifier (ai.learn.ClassifierModel) in use
         self.quote: list[dict] = []  # spot heights: x, y and the columns of pyarchinit_quote
         self._sam_obj: dict | None = None  # SAM mask being edited (prompts, bounds, preview)
         self.last_report: dict | None = None
@@ -365,6 +369,14 @@ class MainWindow(QMainWindow):
         self._act(cm, "Classificazione automatica (regole)", self.classify, processing=True, icon_name="classify")
         self._act(cm, "Mostra la nuvola per classi", self.show_classes, icon_name="classify")
         self._act(cm, "Correggi a mano con il lazo (vista 3D)", self.classify_with_lasso, icon_name="select")
+        cm.addSeparator()
+        self._act(cm, "Addestra il classificatore sui punti corretti...", self.train_classifier, processing=True,
+                  icon_name="classify")
+        self._act(cm, "Classifica con il classificatore addestrato...", self.apply_classifier, processing=True,
+                  icon_name="classify")
+        self._act(cm, "Carica un classificatore (.ppgclf)...", self.load_classifier, icon_name="open")
+        self._act(cm, "Salva il classificatore...", self.save_classifier, icon_name="save")
+        self._act(cm, "Dimentica le correzioni a mano", self.clear_manual_labels, icon_name="clear")
         sm = m.addMenu(icon("sam"), "Segment Anything 2.1")
         for key, label in SAM_TOOLS.items():
             self._act(sm, f"Ortofoto - {label}", lambda _=False, k=key: (self._set_sam_tool(k), self.set_draw_mode("sam")),
@@ -574,6 +586,7 @@ class MainWindow(QMainWindow):
         self.units = []
         self.quote = []
         self._sam_obj = None
+        self.classifier = None
         self.sections = []
         self.line_layers = {}
         self._restore_drawings()
@@ -2603,38 +2616,205 @@ class MainWindow(QMainWindow):
         if not n_all:
             self.statusBar().showMessage("Nessun punto nel lazo", 8000)
             return
-        codes = sorted(set(ASPRS_CLASSES) | set(ARCHAEO_CLASSES) | set(self.model_view.sd.class_counts if
-                                                                         self.model_view.sd else {}))
+        labels = self.chunk.meta.get("classes", {})
+        codes = sorted(set(ASPRS_CLASSES) | set(ARCHAEO_CLASSES) | {int(k) for k in labels}
+                       | set(self.model_view.sd.class_counts if self.model_view.sd else {}))
         last = int(self.settings.value("classes/last", 64) or 64)
         v = ParamDialog.ask(self, "Classe dei punti selezionati", [
             Field("code", "Classe", last if last in codes else codes[0],
-                  choices=[(c, f"{c} - {class_name(c)}") for c in codes]),
-            Field("other", "...oppure un altro codice (0 = usa la classe sopra)", 0, minimum=0, maximum=255),
+                  choices=[(c, f"{c} - {class_name(c, labels)}") for c in codes]),
+            Field("other", "...oppure un nuovo codice (0 = usa la classe sopra)", 0, minimum=0, maximum=255),
+            Field("name", "Nome del nuovo codice (es. Crollo)", "", kind="text"),
             Field("through", f"Anche i punti nascosti dietro la superficie ({n_all} invece di {n_vis})", False)],
             intro=f"Nel lazo ci sono {n_vis} punti visibili ({n_all} contando quelli nascosti). Le classi date a mano "
-                  "vengono ricordate: un classificatore addestrato non le cambia.")
+                  "vengono ricordate: le classificazioni automatiche non le cambiano e il classificatore impara "
+                  "da loro (Classificazione della nuvola > Addestra il classificatore).")
         if not v:
             return
         code = int(v["other"] or v["code"])
+        name = str(v.get("name") or "").strip() if v["other"] else ""
         mask = inside if v["through"] else visible
         self.settings.setValue("classes/last", code)
-        self._set_point_class(mask, code)
-        self.log_pane.info(f"Classe {code} ({class_name(code)}) assegnata a mano a {int(np.count_nonzero(mask))} punti")
+        self._set_point_class(mask, code, name or None)
+        self.log_pane.info(f"Classe {code} ({class_name(code, self.chunk.meta.get('classes'))}) assegnata a mano a "
+                           f"{int(np.count_nonzero(mask))} punti")
         self.model_view.refresh(reset=False)
         self._dirty(True)
 
-    def _set_point_class(self, mask, code: int) -> None:
-        """Assign a class by hand (remembered as a manual label when the cloud supports it)."""
+    def _set_point_class(self, mask, code: int, label: str | None = None) -> None:
+        """Assign a class by hand: the points are flagged as labelled by hand (kept by the
+        automatic classifiers, used to train the classifier)."""
+        from ..ai.classify import set_class
+
+        set_class(self.chunk, mask, code, label=label)
+
+    # ---------------------------------------------------------------- trainable classifier
+    def _classifier_path(self) -> Path:
+        """Where the classifier trained in this chunk is kept (next to its data)."""
+        return self.chunk.data_dir / CLASSIFIER_FILE
+
+    def _need_sklearn(self) -> bool:
         try:
-            from ..ai import learn
+            import sklearn  # noqa: F401
+
+            return True
         except ImportError:
-            learn = None
-        if learn is not None and hasattr(learn, "set_class"):
-            learn.set_class(self.chunk, mask, code)
+            self._warn("Il classificatore addestrabile richiede scikit-learn:\n"
+                       "pip install \"pyarchinit-photogrammetry[learn]\"")
+            return False
+
+    def _current_classifier(self):
+        """The classifier in use, or the one trained in this chunk (read from its file)."""
+        if self.classifier is None and self.chunk is not None and self._classifier_path().exists():
+            from ..ai.learn import ClassifierModel
+
+            self.classifier = ClassifierModel.load(self._classifier_path())
+        return self.classifier
+
+    def _log_classes(self, pc) -> None:
+        from ..ai.classify import class_statistics
+
+        st = class_statistics(pc)
+        self.log_pane.info("Classi: " + ", ".join(f"{k}: {n}" for k, n in sorted(st.items())))
+
+    def train_classifier(self) -> None:
+        """Learn the classes from the points corrected by hand, then classify the rest."""
+        if not self._need_chunk(product="point_cloud") or not self._need_sklearn():
             return
+        from .scene import class_name
+
         pc = self.chunk.point_cloud
-        pc.classification[np.asarray(mask, bool)] = int(code)
-        self.chunk.point_cloud = pc
+        labels = self.chunk.meta.get("classes", {})
+        manual = pc.manual if pc.manual is not None else np.zeros(len(pc), bool)
+        by_hand = sorted(int(c) for c in np.unique(pc.classification[manual])) if manual.any() else []
+        classified = sorted(int(c) for c in np.unique(pc.classification) if c > 1)
+        names = lambda codes: ", ".join(f"{c} {class_name(c, labels)}" for c in codes) or "nessuna"  # noqa: E731
+        v = ParamDialog.ask(self, "Addestra il classificatore", [
+            Field("labels", "Impara da", "manual" if len(by_hand) >= 2 else "all",
+                  choices=[("manual", f"Punti corretti a mano ({int(manual.sum()):,} punti)".replace(",", ".")),
+                           ("all", "Tutti i punti con una classe (sopra 1)")]),
+            Field("method", "Metodo", "random_forest",
+                  choices=[("random_forest", "Random forest (consigliato)"),
+                           ("gradient_boosting", "Gradient boosting (file piu' piccolo)")]),
+            Field("trees", "Alberi (o iterazioni)", 100, minimum=10, maximum=1000),
+            Field("apply", "Poi classifica il resto della nuvola", True)],
+            intro="Il classificatore impara dai punti di cui conosci la classe: con il lazo (vista 3D) assegna la "
+                  "classe giusta ad alcuni gruppi di punti di ogni tipo (almeno due classi), poi addestralo. Usa la "
+                  "geometria attorno a ogni punto a tre scale, l'altezza sul terreno e il colore.\n\n"
+                  f"Classi corrette a mano: {names(by_hand)}.\nClassi presenti: {names(classified)}.")
+        if not v:
+            return
+        if len(by_hand if v["labels"] == "manual" else classified) < 2:
+            self._warn("Servono punti di almeno due classi diverse: assegnale con il lazo nella vista 3D "
+                       "(Classificazione della nuvola > Correggi a mano con il lazo).")
+            return
+        from ..ai import learn
+
+        path = self._classifier_path()
+        chunk = self.chunk
+
+        def job(p):
+            model = learn.train_on_chunk(chunk, labels=v["labels"], method=v["method"], n_estimators=int(v["trees"]),
+                                         progress=p.sub(0.0, 0.6 if v["apply"] else 1.0))
+            model.save(path)
+            result = None
+            if v["apply"]:
+                result = learn.classify_chunk_with_model(chunk, model, progress=p.sub(0.6, 0.4))
+            return model, result
+
+        def done(res):
+            model, result = res
+            self.classifier = model
+            self.log_pane.info(model.summary())
+            if result is not None:
+                self._log_classes(result[0])
+                self.show_classes()
+            self._info("Classificatore addestrato", model.summary() + f"\n\nSalvato nel progetto ({path.name}): "
+                       "Salva il classificatore per usarlo in altri progetti.")
+
+        self.run_task("Addestramento del classificatore", job, done)
+
+    def apply_classifier(self) -> None:
+        """Classify the dense cloud with the trained (or loaded) classifier."""
+        if not self._need_chunk(product="point_cloud") or not self._need_sklearn():
+            return
+        try:
+            model = self._current_classifier()
+        except Exception as exc:
+            self._exc("Classificatore non leggibile", exc)
+            return
+        if model is None:
+            r = message(self, "question", "Classificatore", "Questo progetto non ha ancora un classificatore "
+                        "addestrato.\n\nCaricarne uno da file (.ppgclf)?",
+                        buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if r != QMessageBox.StandardButton.Yes or not self.load_classifier():
+                return
+            model = self.classifier
+        from .scene import class_name
+
+        v = ParamDialog.ask(self, "Classifica con il classificatore", [
+            Field("min_confidence", "Confidenza minima (sotto resta 1, non classificato)", 0.0, minimum=0.0,
+                  maximum=0.99, decimals=2),
+            Field("overwrite", "Riclassifica anche i punti corretti a mano", False)],
+            intro="Classi del classificatore: " + ", ".join(f"{c} {model.class_names.get(c) or class_name(c)}"
+                                                             for c in model.classes) + ".")
+        if not v:
+            return
+        from ..ai import learn
+
+        chunk = self.chunk
+
+        def done(res):
+            self._log_classes(res[0])
+            self.show_classes()
+
+        self.run_task("Classificazione con il classificatore",
+                      lambda p: learn.classify_chunk_with_model(chunk, model, overwrite_manual=v["overwrite"],
+                                                                min_confidence=float(v["min_confidence"]), progress=p),
+                      done)
+
+    def load_classifier(self) -> bool:
+        path, _ = QFileDialog.getOpenFileName(self, "Carica classificatore", self._last_dir(),
+                                              "Classificatori (*.ppgclf)")
+        if not path or not self._need_sklearn():
+            return False
+        from ..ai.learn import ClassifierModel
+
+        try:
+            self.classifier = ClassifierModel.load(path)
+        except Exception as exc:
+            self._exc("Classificatore non leggibile", exc)
+            return False
+        self.log_pane.info(f"Classificatore caricato da {path}\n{self.classifier.summary()}")
+        return True
+
+    def save_classifier(self) -> None:
+        try:
+            model = self._current_classifier() if self._need_sklearn() else None
+        except Exception as exc:
+            self._exc("Classificatore non leggibile", exc)
+            return
+        if model is None:
+            self._warn("Nessun classificatore: addestralo prima (Classificazione della nuvola > Addestra).")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Salva classificatore", self._last_dir() + "/classificatore.ppgclf",
+                                              "Classificatori (*.ppgclf)")
+        if path:
+            self.log_pane.info(f"Classificatore salvato in {model.save(path)}")
+
+    def clear_manual_labels(self) -> None:
+        if not self._need_chunk(product="point_cloud"):
+            return
+        r = message(self, "question", "Correzioni a mano", "Dimenticare quali punti sono stati corretti a mano? "
+                    "Le classi restano, ma le prossime classificazioni automatiche potranno cambiarle.",
+                    buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if r != QMessageBox.StandardButton.Yes:
+            return
+        from ..ai.classify import clear_manual
+
+        n = clear_manual(self.chunk)
+        self.log_pane.info(f"Correzioni a mano dimenticate su {n} punti (le classi restano)")
+        self._dirty(True)
 
     def _segmenter(self):
         if self.sam is None:
