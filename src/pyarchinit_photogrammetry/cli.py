@@ -187,6 +187,68 @@ def process(project: Path, photos: list[Path], gcp: Optional[Path] = None, crs: 
     typer.echo(f"done - report: {report}")
 
 
+@app.command("align-chunks")
+def align_chunks(project: Path,
+                 chunks: Optional[list[str]] = typer.Argument(None, help="chunks to align (labels or keys); "
+                                                                         "default: the other enabled chunks"),
+                 reference: Optional[str] = typer.Option(None, "--reference", "-r",
+                                                         help="reference chunk (label or key); default: the active one"),
+                 method: str = typer.Option("markers", help="markers, points or cameras"),
+                 fix_scale: bool = typer.Option(False, help="rigid: keep the scale of each chunk (chunks already scaled)"),
+                 initial: str = typer.Option("auto", help="points: initial position (auto, markers, reference, "
+                                                          "cameras, global)"),
+                 as_json: bool = typer.Option(False, "--json", help="print the whole report as JSON")):
+    """Align chunks to the frame and CRS of a reference chunk (markers, points or cameras)."""
+    doc = Document.open(project)
+    if doc.chunk is None:
+        raise typer.BadParameter("the project has no chunks")
+    try:
+        report = doc.align_chunks(reference if reference is not None else doc.chunk, chunks or None, method=method,
+                                  fix_scale=fix_scale, initial=initial, progress=print_progress)
+    except (ValueError, KeyError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+    doc.save()
+    if as_json:
+        typer.echo(json.dumps(report, indent=1))
+        return
+    for c in report["chunks"]:
+        rmse = "-" if c.get("rmse") is None else f"{c['rmse']:.4g}"
+        extra = f", initial position {c['initial']}" if c.get("initial") else ""
+        typer.echo(f"{c['label']} -> {report['reference']['label']}: {c['method']}, {c['correspondences']} "
+                   f"correspondences, RMSE {rmse}, scale {c['scale']:.6g}{extra}")
+        if c.get("stale_products"):
+            typer.echo(f"  build again: {', '.join(c['stale_products'])}")
+
+
+@app.command("merge-chunks")
+def merge_chunks(project: Path,
+                 chunks: Optional[list[str]] = typer.Argument(None, help="chunks to merge (labels or keys), the first "
+                                                                         "gives frame and CRS; default: all enabled"),
+                 label: Optional[str] = typer.Option(None, help="label of the new chunk"),
+                 markers: bool = typer.Option(True, help="merge the markers with the same label"),
+                 tie_points: bool = typer.Option(True, help="merge the tie points"),
+                 point_clouds: bool = typer.Option(True, help="merge the dense clouds"),
+                 models: bool = typer.Option(False, help="merge the models (meshes)"),
+                 activate: bool = typer.Option(False, help="make the merged chunk the active one")):
+    """Merge chunks into a new one (photos, markers, tie points, dense clouds, models)."""
+    doc = Document.open(project)
+    items = chunks or [c for c in doc.chunks if c.enabled]
+    try:
+        merged = doc.merge_chunks(items, label=label, merge_markers=markers, merge_tie_points=tie_points,
+                                  merge_point_clouds=point_clouds, merge_models=models, progress=print_progress)
+    except (ValueError, KeyError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+    if activate:
+        doc.chunk = merged
+    doc.save()
+    typer.echo(f"[{merged.key}] {merged.label}: {len(merged.cameras)} photos, {len(merged.markers)} markers, "
+               f"CRS {merged.crs}, products: {', '.join(sorted(merged.products)) or '-'}")
+    for w in merged.meta["merge"]["warnings"]:
+        typer.echo(f"  warning: {w}")
+
+
 @app.command()
 def export(project: Path, ortho: Optional[Path] = None, dem: Optional[Path] = None, model: Optional[Path] = None,
            cloud: Optional[Path] = None, cameras: Optional[Path] = None, markers: Optional[Path] = None,
