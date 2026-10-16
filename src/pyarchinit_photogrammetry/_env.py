@@ -56,7 +56,29 @@ def load_open3d_first() -> None:
 
     if os.environ.get("PPG_NO_OPEN3D"):
         return
+    skip_open3d_extras()
     try:
         import open3d  # noqa: F401
     except Exception:  # pragma: no cover - optional dependency
         pass
+
+
+def skip_open3d_extras() -> None:
+    """``import open3d`` also loads Open3D-ML (its datasets import scikit-learn, SciPy's
+    statistics and pandas) and the plotly viewer (dash): most of its import time, a few
+    seconds in the packaged application. Nothing here uses them: placeholders take their
+    place (scikit-learn is still imported when the classifier needs it)."""
+    import sys
+    import types
+
+    if "open3d" in sys.modules:
+        return
+    sys.modules.setdefault("open3d.ml", types.ModuleType("open3d.ml"))
+    if "open3d.visualization.draw_plotly" not in sys.modules:
+        plotly = types.ModuleType("open3d.visualization.draw_plotly")
+
+        def unavailable(*_args, **_kwargs):
+            raise RuntimeError("Open3D's plotly viewer is not loaded by pyarchinit-photogrammetry")
+
+        plotly.draw_plotly = plotly.draw_plotly_server = unavailable
+        sys.modules[plotly.__name__] = plotly
