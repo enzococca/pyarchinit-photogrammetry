@@ -169,6 +169,19 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
                 from sklearn.ensemble import RandomForestClassifier  # trainable point classifier
 
                 RandomForestClassifier(n_estimators=2).fit([[0.0], [1.0]], [0, 1])
+                import numpy as np  # cleaning and cropping: scipy graphs and trees, shapely, Open3D holes
+
+                from ..engine.cleaning import connected_groups, statistical_outliers
+                from ..engine.crop import as_polygon, inside_xy
+
+                pts = np.random.default_rng(0).random((200, 3))
+                connected_groups(pts, 0.2)
+                statistical_outliers(pts, 8, 2.0)
+                inside_xy(as_polygon([[0, 0], [1, 0], [0, 1]]), pts[:, 0], pts[:, 1])
+                import open3d as o3d
+
+                box = o3d.t.geometry.TriangleMesh.create_box()
+                box.fill_holes(hole_size=1.0)
                 libs = "ok"
             except Exception as exc:
                 libs = f"missing ({str(exc).splitlines()[0][:120]})"
