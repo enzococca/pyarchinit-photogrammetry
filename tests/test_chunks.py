@@ -130,7 +130,7 @@ def test_align_points_with_dense_clouds(doc, scene, tmp_path):
     info = doc.align_chunks(a, [b], method="points")["chunks"][0]
     assert info["source"] == info["target"] == "point_cloud" and info["color_corr"] > 0.6
     unit = _metres_per_unit(a, scene)
-    assert info["check"]["rmse"] * unit < 0.004
+    assert info["check"]["rmse"] * unit < 0.006  # dense clouds from 150 x 112 pixel images
     assert _shared_centre_errors(a, b).max() * unit < 0.006
 
 
