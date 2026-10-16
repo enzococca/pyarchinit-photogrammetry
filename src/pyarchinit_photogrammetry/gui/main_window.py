@@ -1088,15 +1088,43 @@ class MainWindow(QMainWindow):
     def optimize_cameras(self) -> None:
         if not self._need_chunk(aligned=True):
             return
+        ch = self.chunk
+        controls = [m for m in ch.markers if not m.checkpoint and m.reference.enabled and m.reference.location]
+        checks = [m for m in ch.markers if m.checkpoint and m.reference.location]
+        v = ParamDialog.ask(self, "Ottimizza camere", [
+            Field("markers", f"Usa i punti di controllo nell'ottimizzazione ({len(controls)} GCP)", len(controls) >= 3),
+            Field("weight", "Peso di una misura di marker (in osservazioni di punti di legame)", 4, minimum=1, maximum=50),
+            Field("pp", "Ottimizza anche il punto principale (cx, cy)", False)],
+            intro="Bundle adjustment globale di posizioni, orientamenti e calibrazione. Con 3 o piu' punti di controllo "
+                  "i GCP entrano nel calcolo come punti fissi alle loro coordinate: il blocco si piega per passarci "
+                  "(corregge anche deformazioni come la cupola di una distorsione sbagliata, non solo la "
+                  f"rototraslazione). I check point ({len(checks)}) restano fuori e misurano il risultato.")
+        if not v:
+            return
 
         def job(p):
-            err = self.chunk.optimize_cameras(progress=p)
-            if any(m.reference.location for m in self.chunk.markers):
-                self.last_report = self.chunk.update_transform()
+            err = ch.optimize_cameras(fit_principal_point=v["pp"], use_markers=v["markers"],
+                                      marker_weight=int(v["weight"]), progress=p)
+            if any(m.reference.location for m in ch.markers):
+                self.last_report = ch.update_transform()
             return err
 
-        self.run_task("Ottimizzazione camere", job,
-                      lambda e: self.statusBar().showMessage(f"Errore di riproiezione {e:.3f} px", 10000))
+        def done(err):
+            rep = ch.meta.get("sfm", {}).get("optimize", {})
+            text = f"Errore di riproiezione {err:.3f} px"
+            if rep.get("control_points"):
+                b, a = rep.get("before", {}), rep.get("after", {})
+
+                def mm(x):
+                    return "-" if x is None else f"{x * 1000:.1f} mm"
+
+                text += (f"; {rep['control_points']} punti di controllo: errore {mm(b.get('control'))} -> "
+                         f"{mm(a.get('control'))}" + (f", check point {mm(b.get('check'))} -> {mm(a.get('check'))}"
+                                                     if a.get("check") is not None else ""))
+            self.log_pane.info("Ottimizzazione camere: " + text)
+            self.statusBar().showMessage(text, 15000)
+
+        self.run_task("Ottimizzazione camere", job, done)
 
     def build_dense(self) -> None:
         if not self._need_chunk(aligned=True):
@@ -1106,15 +1134,26 @@ class MainWindow(QMainWindow):
             Field("filter_mode", "Filtro profondita'", "moderate",
                   choices=[("mild", "Lieve"), ("moderate", "Moderato"), ("aggressive", "Aggressivo")]),
             Field("backend", "Motore", "auto", choices=[("auto", "Automatico"), ("cpu", "CPU (integrato)"),
-                                                        ("colmap", "COLMAP (GPU NVIDIA)"), ("openmvs", "OpenMVS")])])
+                                                        ("colmap", "COLMAP (GPU NVIDIA)"), ("openmvs", "OpenMVS")]),
+            Field("only_depth", "Solo le mappe di profondita' (per il modello fuso, senza nuvola densa)", False)])
         if not v:
             return
 
         def job(p):
-            self.chunk.build_depth_maps(v["quality"], v["filter_mode"], v["backend"], progress=p.sub(0, 0.8))
+            self.chunk.build_depth_maps(v["quality"], v["filter_mode"], v["backend"],
+                                        progress=p.sub(0, 1.0 if v["only_depth"] else 0.8))
+            if v["only_depth"]:
+                return None
             return self.chunk.build_point_cloud(progress=p.sub(0.8, 0.2))
 
-        self.run_task("Nuvola densa", job, lambda pc: self._show_model("point_cloud"))
+        def done(pc):
+            if pc is None:
+                self.statusBar().showMessage("Mappe di profondita' pronte: Modello > Dati sorgente «Mappe di "
+                                             "profondita'»", 15000)
+            else:
+                self._show_model("point_cloud")
+
+        self.run_task("Nuvola densa" if not v["only_depth"] else "Mappe di profondita'", job, done)
 
     def crop_cloud(self) -> None:
         """Keep the dense points inside a height range and/or a cylinder (turntable scans: the
@@ -1146,17 +1185,26 @@ class MainWindow(QMainWindow):
     def build_model(self) -> None:
         if not self._need_chunk(aligned=True):
             return
-        src = "point_cloud" if self.chunk.product_path("point_cloud") else "tie_points"
+        dense = self.chunk.meta.get("dense") or {}
+        depth_maps = bool(dense) and dense.get("backend") != "openmvs" and (self.chunk.data_dir / "dense").exists()
+        sources = ([("depth_maps", "Mappe di profondita' (fusione, come Metashape)")] if depth_maps else []) + \
+            [("point_cloud", "Nuvola densa"), ("tie_points", "Punti di legame")]
+        src = "depth_maps" if depth_maps else ("point_cloud" if self.chunk.product_path("point_cloud") else "tie_points")
         v = ParamDialog.ask(self, "Modello 3D", [
-            Field("source", "Dati sorgente", src, choices=[("point_cloud", "Nuvola densa"),
-                                                          ("tie_points", "Punti di legame")]),
+            Field("source", "Dati sorgente", src, choices=sources),
             Field("surface", "Tipo di superficie", "arbitrary",
                   choices=[("arbitrary", "Arbitraria (3D)"), ("height_field", "Campo di altezze (2.5D, terreno)")]),
             Field("face_count", "Numero di facce", "medium",
-                  choices=[("high", "Alto"), ("medium", "Medio"), ("low", "Basso")])])
+                  choices=[("high", "Alto"), ("medium", "Medio"), ("low", "Basso")]),
+            Field("voxel", "Voxel per le mappe di profondita' (m, 0 = automatico)", 0.0, minimum=0.0, maximum=100.0,
+                  decimals=4, tip="Lato del voxel della fusione: 0 = due volte il pixel delle mappe sulla superficie")],
+            intro=("Con le mappe di profondita' la superficie nasce dalla fusione volumetrica delle mappe (TSDF), "
+                   "senza passare dalla nuvola densa: piu' fedele e con i colori delle foto." if depth_maps else
+                   "Costruisci le mappe di profondita' (Nuvola densa) per avere anche la fusione delle mappe."))
         if v:
+            kw = {"voxel_size": v["voxel"] or None} if v["source"] == "depth_maps" else {}
             self.run_task("Modello", lambda p: self.chunk.build_model(v["source"], v["surface"], v["face_count"],
-                                                                    progress=p),
+                                                                    progress=p, **kw),
                           lambda _m: self._show_model("model"))
 
     def build_texture(self) -> None:

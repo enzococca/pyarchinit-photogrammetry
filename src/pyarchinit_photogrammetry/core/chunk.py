@@ -221,11 +221,16 @@ class Chunk:
             self.update_transform()
         return n
 
-    def optimize_cameras(self, fit_principal_point: bool = False, progress: ProgressCallback | None = None) -> float:
-        """Global bundle adjustment. Returns the mean reprojection error in pixels."""
+    def optimize_cameras(self, fit_principal_point: bool = False, use_markers: bool = True, marker_weight: int = 4,
+                         progress: ProgressCallback | None = None) -> float:
+        """Global bundle adjustment; with 3 or more control points they are part of it (the
+        block bends to fit them; see :func:`engine.sfm.optimize_cameras`). Returns the mean
+        reprojection error in pixels; the control/check point report is in
+        ``meta["sfm"]["optimize"]``."""
         from ..engine import sfm
 
-        err = sfm.optimize_cameras(self, fit_principal_point=fit_principal_point, progress=as_progress(progress))
+        err = sfm.optimize_cameras(self, fit_principal_point=fit_principal_point, use_markers=use_markers,
+                                   marker_weight=marker_weight, progress=as_progress(progress))
         if any(m.projections for m in self.markers):
             self.triangulate_markers()
         return err

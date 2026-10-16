@@ -190,3 +190,44 @@ def test_mapping_camera_has_square_pixels_unless_calibrated():
                    [1100.0, 1100.0, 600.0, 450.0, 0, 0, 1e-4, 0]):
         cal = Sensor(key=2, label="k", width=1200, height=900, params=params)
         assert mapping_camera(cal) == ("OPENCV", [float(v) for v in params])
+
+
+def test_optimize_cameras_on_control_points(processed, tmp_path):
+    """The control points take part in the adjustment (fixed points observed in the photos):
+    the block bends towards them, check points stay out and are reported before/after."""
+    import shutil
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.markers import gcp
+
+    doc, _ch, _ = processed
+
+    def copy(name):
+        d = tmp_path / name
+        d.mkdir()
+        shutil.copy2(doc.path, d / doc.path.name)
+        shutil.copytree(doc.files_dir, d / doc.files_dir.name)
+        out = ppg.Document.open(d / doc.path.name).chunk
+        for m in out.markers:
+            if m.label in ("target 2", "target 5"):
+                m.checkpoint = True
+        off = next(m for m in out.markers if m.label == "target 0")  # measured 1 cm off on purpose
+        off.reference.location = list(np.asarray(off.reference.location, float) + [0.010, 0.0, 0.0])
+        return out
+
+    shifted = {}
+    for mode in ("plain", "markers"):
+        ch = copy(mode)
+        err = ch.optimize_cameras(use_markers=mode == "markers")
+        rows = {r["label"]: r for r in gcp.update_transform(ch)["markers"]}
+        shifted[mode] = rows["target 0"]["error"]
+        assert err < 0.5
+        checks = [rows[k]["error"] for k in ("target 2", "target 5")]
+        assert max(checks) < 0.003, checks
+        report = ch.meta["sfm"]["optimize"]
+        if mode == "markers":
+            assert report["control_points"] == len(ch.markers) - 2  # check points are not used
+            assert report["before"]["check"] is not None and report["after"]["check"] < 0.003
+        else:
+            assert report["control_points"] == 0
+    assert shifted["markers"] < shifted["plain"] - 0.0002  # the block bent towards the control point

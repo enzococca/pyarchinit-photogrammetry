@@ -330,22 +330,138 @@ def write_reconstruction_from_chunk(chunk: Chunk, max_points: int = 60000, max_o
     return out
 
 
-def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, progress: Progress | None = None) -> float:
+def _square_pixels(chunk: Chunk, rec) -> None:
+    """Cameras of a reconstruction with one focal length for the adjustment (see
+    :func:`mapping_camera`): fx and fy left free drift apart on some blocks."""
     import pycolmap
+
+    names = {v: int(k) for k, v in chunk.meta["sfm"]["names"].items()}
+    done = set()
+    for image in rec.images.values():
+        key = names.get(image.name)
+        if key is None or image.camera_id in done:
+            continue
+        done.add(image.camera_id)
+        cam = rec.cameras[image.camera_id]
+
+        class _S:  # the camera as a sensor for mapping_camera
+            model, params = cam.model.name, list(cam.params)
+
+        model, params = mapping_camera(_S)
+        if model != cam.model.name:
+            cam.model = getattr(pycolmap.CameraModelId, model)
+            cam.params = params
+
+
+def _control_points(chunk: Chunk, rec, copies: int) -> list[int]:
+    """Markers with an enabled reference (not check points) as fixed 3D points of the
+    reconstruction, observed where they were measured in the photos. Each is added
+    ``copies`` times: a marker measurement weighs that many tie point observations."""
+    import pycolmap
+
+    names = chunk.meta["sfm"]["names"]
+    by_name = {img.name: iid for iid, img in rec.images.items() if img.has_pose}
+    pids = []
+    for m in chunk.markers:
+        if m.checkpoint or not m.reference.enabled or not m.reference.location:
+            continue
+        obs = []
+        for cam_key, proj in m.projections.items():
+            iid = by_name.get(names.get(str(cam_key), ""))
+            if iid is not None:
+                obs.append((iid, proj.x, proj.y))
+        if len(obs) < 2:
+            continue
+        X = chunk.to_internal(np.asarray([m.reference.location], float))[0]
+        for _ in range(copies):
+            track = pycolmap.Track()
+            for iid, x, y in obs:  # marker projections are in COLMAP's pixel convention
+                pts = rec.images[iid].points2D
+                pts.append(pycolmap.Point2D(np.array([x, y], float)))
+                track.add_element(iid, len(pts) - 1)
+            pids.append(rec.add_point3D(X, track, np.array([255, 0, 0], np.uint8)))
+    return pids
+
+
+def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_markers: bool = True,
+                     marker_weight: int = 4, progress: Progress | None = None) -> float:
+    """Global bundle adjustment of poses, calibration and tie points.
+
+    With ``use_markers`` and at least 3 control points (markers with an enabled reference
+    and two or more projections; check points are left out) the markers enter the
+    adjustment as fixed points at their reference coordinates, so the block bends to fit
+    them (a deformation such as the "dome" of a wrong radial distortion is corrected, not
+    only the similarity of the georeference). The report (reprojection error, control
+    and check point errors before and after) goes into ``chunk.meta["sfm"]["optimize"]``.
+    Returns the mean reprojection error in pixels."""
+    import pycolmap
+
+    from ..markers import gcp
 
     progress = progress or Progress()
     rec = load_reconstruction(chunk)
-    progress(0.1, "Optimizing camera alignment")
+
+    def errors():
+        rows = gcp.marker_errors(chunk)
+        out = {}
+        for kind in ("control", "check"):
+            e = [r["error"] for r in rows if r["type"] == kind and r["error"] is not None]
+            out[kind] = float(np.sqrt(np.mean(np.square(e)))) if e else None
+        return out
+
+    controls = [m for m in chunk.markers if not m.checkpoint and m.reference.enabled and m.reference.location]
+    constrained = use_markers and len(controls) >= 3
+    if constrained:
+        gcp.update_transform(chunk)  # the reference coordinates in the internal frame
+    before = errors() if constrained else {}
+    progress(0.1, "Optimizing camera alignment" + (" on the control points" if constrained else ""))
+    _square_pixels(chunk, rec)
     opts = pycolmap.BundleAdjustmentOptions()
     try:
         opts.refine_principal_point = fit_principal_point
     except AttributeError:  # pragma: no cover - option name differs between versions
         pass
-    pycolmap.bundle_adjustment(rec, opts)
+    if constrained:  # the block first finds its own shape and calibration, then bends to the control points
+        pycolmap.bundle_adjustment(rec, opts)
+        _restore_sensor_models(chunk, rec)
+        import_reconstruction(chunk, rec)
+        gcp.update_transform(chunk)
+        _square_pixels(chunk, rec)
+        progress(0.5, "Optimizing camera alignment on the control points")
+    pids = _control_points(chunk, rec, max(1, int(marker_weight))) if constrained else []
+    if len(pids) >= 3 * max(1, int(marker_weight)):
+        config = pycolmap.BundleAdjustmentConfig()
+        for iid, image in rec.images.items():
+            if image.has_pose:
+                config.add_image(iid)
+        for pid in pids:
+            config.add_constant_point(pid)  # with three or more fixed points the gauge is fixed too
+        pycolmap.create_default_bundle_adjuster(opts, config, rec).solve()
+        added: dict[int, int] = {}
+        for pid in pids:
+            for el in rec.points3D[pid].track.elements:
+                added[el.image_id] = added.get(el.image_id, 0) + 1
+            rec.delete_point3D(pid)
+        for iid, n in added.items():  # the marker observations were appended last
+            pts = rec.images[iid].points2D
+            for _ in range(n):
+                pts.pop()
+    else:
+        pids = []
+        pycolmap.bundle_adjustment(rec, opts)
+    _restore_sensor_models(chunk, rec)
+    rec.update_point_3d_errors()  # the adjustment does not refresh the stored errors
     rec.write(str(chunk.product_path("reconstruction")))
     import_reconstruction(chunk, rec)
     err = float(rec.compute_mean_reprojection_error())
+    report = {"reprojection_error": err, "control_points": len(pids) // max(1, int(marker_weight))}
+    if pids:
+        gcp.update_transform(chunk)
+        report.update({"before": before, "after": errors()})
+    else:
+        chunk.triangulate_markers()
     chunk.meta.setdefault("sfm", {})["reprojection_error"] = err
+    chunk.meta["sfm"]["optimize"] = report
     progress(1.0, f"Mean reprojection error {err:.3f} px")
     return err
 

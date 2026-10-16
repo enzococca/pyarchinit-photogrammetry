@@ -76,6 +76,27 @@ def align(project: Path, quality: str = "high", pairs: str = "auto", keypoints: 
 
 
 @app.command()
+def optimize(project: Path, markers: bool = typer.Option(True, help="control points (3 or more) take part in the "
+                                                                   "adjustment; check points are reported"),
+             marker_weight: int = typer.Option(4, help="a marker measurement counts as this many tie point observations"),
+             principal_point: bool = False, chunk: Optional[str] = None):
+    """Optimize the cameras (global bundle adjustment), on the control points when there are any."""
+    doc, ch = _open(project, chunk)
+    err = ch.optimize_cameras(fit_principal_point=principal_point, use_markers=markers, marker_weight=marker_weight,
+                              progress=print_progress)
+    if any(m.reference.location for m in ch.markers):
+        ch.update_transform()
+    doc.save()
+    rep = ch.meta["sfm"]["optimize"]
+    text = f"reprojection error {err:.3f} px"
+    if rep.get("control_points"):
+        b, a = rep["before"], rep["after"]
+        text += (f", {rep['control_points']} control points: RMSE {b['control']} -> {a['control']} m"
+                 + (f", check {b['check']} -> {a['check']} m" if a.get("check") is not None else ""))
+    typer.echo(text)
+
+
+@app.command()
 def reference(project: Path, csv_file: Path, crs: Optional[str] = None, columns: str = "nxyz",
               delimiter: Optional[str] = None, skip_rows: int = 0, chunk: Optional[str] = None):
     """Import marker coordinates (GCP) and georeference the chunk."""

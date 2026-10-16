@@ -20,7 +20,7 @@ import pyarchinit_photogrammetry as ppg
 | `detect_markers(target_type="aruco_4x4_50")` | creates markers `target <code>` with projections |
 | `match_photos(quality, keypoint_limit, pair_selection)` | quality: ultra/high/medium/low/lowest; pairs: auto/exhaustive/sequential/reference |
 | `align_cameras()` | resets the transform; re-georeferences automatically when references exist. Photos are aligned with one focal length (square pixels): fitting fx and fy separately can drift into a degenerate solution. The result stays in the sensor model (`OPENCV` with fx = fy, no tangential distortion); a sensor calibrated with fx != fy or tangential distortion is aligned as it is, and `optimize_cameras()` refines every parameter |
-| `optimize_cameras(fit_principal_point=False)` | bundle adjustment, returns the reprojection error (px) |
+| `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4)` | bundle adjustment, returns the reprojection error (px). With 3 or more control points (markers with an enabled reference, not check points) a free adjustment is followed by one where the markers are fixed points at their reference coordinates, observed in the photos (each measurement weighs `marker_weight` tie point observations): the block bends to fit them, which a similarity alone cannot do. `meta["sfm"]["optimize"]` reports control and check point RMSE before and after (`ppg optimize`) |
 | `import_reference(csv, crs, columns="nxyz")`, `export_reference(csv)` | `n` label, `x y z`, `a` accuracy, `-` skip |
 | `add_marker`, `add_marker_projection`, `add_scalebar`, `triangulate_markers` | manual markers and scale bars |
 | `update_transform()` | weighted 7-parameter fit; returns control/check RMSE and per-marker errors |
