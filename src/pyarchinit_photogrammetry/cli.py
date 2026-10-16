@@ -264,6 +264,47 @@ def classify(project: Path, chunk: Optional[str] = None):
     typer.echo(json.dumps(class_statistics(pc)))
 
 
+@app.command("classify-train")
+def classify_train(project: Path, model: Path = typer.Argument(..., help="classifier file to write (.ppgclf)"),
+                   labels: str = typer.Option("manual", help="manual: points labelled by hand; "
+                                                             "all: every classified point"),
+                   method: str = typer.Option("random_forest", help="random_forest or gradient_boosting"),
+                   scales: Optional[str] = typer.Option(None, help="neighbourhood radii in metres, e.g. 0.05,0.15,0.4 "
+                                                                    "(default: 5, 14 and 40 times the point spacing)"),
+                   trees: int = typer.Option(100, help="trees of the forest (boosting: iterations)"),
+                   max_per_class: int = typer.Option(20000, help="training samples per class at most"),
+                   jobs: int = typer.Option(4, help="parallel threads"), seed: int = 0, chunk: Optional[str] = None):
+    """Train a point classifier on the points labelled by hand and save it."""
+    from .ai.learn import train_on_chunk
+
+    doc, ch = _open(project, chunk)
+    radii = [float(v) for v in scales.split(",")] if scales else None
+    clf = train_on_chunk(ch, labels=labels, method=method, scales=radii, n_estimators=trees,
+                         max_per_class=max_per_class, n_jobs=jobs, random_state=seed, progress=print_progress)
+    path = clf.save(model)
+    doc.save()
+    typer.echo(clf.summary())
+    typer.echo(f"saved {path}")
+
+
+@app.command("classify-apply")
+def classify_apply(project: Path, model: Path = typer.Argument(..., help="classifier file (.ppgclf)"),
+                   min_confidence: float = typer.Option(0.0, help="below this probability a point stays "
+                                                                  "unclassified (1)"),
+                   overwrite_manual: bool = typer.Option(False, help="reclassify the points labelled by hand as well"),
+                   jobs: int = typer.Option(4, help="parallel threads"), chunk: Optional[str] = None):
+    """Classify the dense cloud with a saved classifier (points labelled by hand are kept)."""
+    from .ai.classify import class_statistics
+    from .ai.learn import ClassifierModel, classify_chunk_with_model
+
+    doc, ch = _open(project, chunk)
+    clf = ClassifierModel.load(model)
+    pc, _ = classify_chunk_with_model(ch, clf, overwrite_manual=overwrite_manual, min_confidence=min_confidence,
+                                      n_jobs=jobs, progress=print_progress)
+    doc.save()
+    typer.echo(json.dumps(class_statistics(pc)))
+
+
 @app.command()
 def ifc(project: Path, out: Path, sito: Optional[str] = None, pyarchinit_units: bool = False,
         chunk: Optional[str] = None):
