@@ -156,9 +156,26 @@ def _offset(chunk) -> np.ndarray:
     return np.zeros(3)
 
 
+def _textured_model(chunk, max_faces: int) -> bool:
+    """True when the model carries texture coordinates, its image exists and it is not too
+    large to show whole (reading only the header of model.ply)."""
+    from ..io.mesh_ply import PlyMesh
+
+    path, image = chunk.product_path("model"), chunk.product_path("model_textured")
+    if path is None or not path.exists() or image is None or not image.exists():
+        return False
+    try:
+        mesh = PlyMesh(path, check=0)
+    except (ValueError, OSError, KeyError):
+        return False
+    shape = mesh.face_dtype["texcoord"].shape if "texcoord" in (mesh.face_dtype.names or ()) else None
+    return shape == (6,) and mesh.n_faces <= max_faces
+
+
 def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_faces: int = 600_000,
                 frustum_size: float | None = None, color_mode: str = "rgb", hidden_classes=(),
-                paths: dict | None = None, hidden_bins=(), highlight: np.ndarray | None = None) -> SceneData:
+                paths: dict | None = None, hidden_bins=(), highlight: np.ndarray | None = None,
+                max_textured_faces: int = 8_000_000) -> SceneData:
     """Collect what the 3D view shows for ``kind`` (tie_points, point_cloud, model,
     model_textured, cameras). Point clouds are coloured by ``color_mode`` ("rgb", "class",
     "elevation", "confidence"), the model by "rgb" or "confidence"; points of ``hidden_classes``
@@ -234,7 +251,8 @@ def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_f
             if marked is not None:
                 sd.colors = np.array(sd.colors, np.uint8)
                 sd.colors[marked] = (255, 20, 60)
-    elif kind == "model_textured" and chunk.product_path("model_textured"):
+    elif kind == "model_textured" and chunk.product_path("model_textured") and \
+            chunk.product_path("model_textured").suffix.lower() == ".obj":  # a texture of version 0.5 and earlier
         from ..io.exports import _read_textured_obj
 
         path = chunk.product_path("model_textured")
@@ -251,6 +269,16 @@ def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_f
             sd.texture = tex if tex.exists() else None
         else:
             sd.mesh_vertices, sd.mesh_faces = W(verts), faces
+    elif kind == "model_textured" and chunk.product_path("model_textured") and _textured_model(chunk, max_textured_faces):
+        # the texture coordinates are in model.ply: every face with its corners in the image
+        from ..io.mesh_ply import read_mesh
+
+        mesh = read_mesh(chunk.product_path("model"))
+        corners = W(mesh.xyz)[mesh.faces]
+        sd.mesh_vertices = corners.reshape(-1, 3)
+        sd.mesh_faces = np.arange(len(mesh.faces) * 3).reshape(-1, 3)
+        sd.mesh_uv = mesh.texcoords.reshape(-1, 2).astype(np.float32)
+        sd.texture = chunk.product_path("model_textured")
     elif kind == "proxies":
         import trimesh
 
@@ -266,7 +294,7 @@ def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_f
             n += len(m.vertices)
         if V:
             sd.mesh_vertices, sd.mesh_faces, sd.mesh_colors = np.vstack(V), np.vstack(F), np.vstack(C)
-    elif kind in ("model", "model_textured"):
+    elif kind in ("model", "model_textured"):  # a texture too large to show: the coloured model
         mesh = display_model(chunk, max_faces, paths.get("model"))
         if mesh is not None:
             faces = np.asarray(mesh.faces)
@@ -326,7 +354,10 @@ def display_model(chunk, max_faces: int = 600_000, path=None):
         return None
 
     def load(p):
-        mesh = trimesh.load(str(p), process=False, force="mesh")
+        from ..io.mesh_ply import read_mesh
+
+        m = read_mesh(p)  # vertex colours kept also when the faces carry texture coordinates
+        mesh = trimesh.Trimesh(m.xyz, m.faces, vertex_colors=m.colors, process=False)
         mesh.metadata["ppg_source"] = str(p)  # where the vertex confidence of what is shown is read
         return mesh
 

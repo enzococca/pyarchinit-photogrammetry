@@ -481,6 +481,36 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     return out_path
 
 
+def _run_tiles(ctx, tiles, workers: int, progress: Progress, put, start: float = 0.03, span: float = 0.9) -> None:
+    """Make the tiles in parallel (at most twice the workers waiting) and hand each one to
+    ``put(r0, c0, block)`` in this thread as soon as it is ready."""
+    done = 0
+    with ThreadPoolExecutor(workers) as pool:
+        queue = iter(tiles)
+        running = {}
+        try:
+            while True:
+                while len(running) < 2 * workers:
+                    nxt = next(queue, None)
+                    if nxt is None:
+                        break
+                    running[pool.submit(_tile, ctx, *nxt)] = nxt
+                if not running:
+                    break
+                finished, _ = wait(running, return_when=FIRST_COMPLETED)
+                for fut in finished:
+                    r0, c0 = running.pop(fut)
+                    block = fut.result()
+                    if block is not None:
+                        put(r0, c0, block)
+                    done += 1
+                progress(start + span * done / len(tiles), f"Orthomosaic tile {done}/{len(tiles)}")
+        except BaseException:
+            for fut in running:
+                fut.cancel()
+            raise
+
+
 def _write_tiles(ctx, tmp: Path, profile: dict, tiles, workers: int, progress: Progress) -> None:
     """Make the tiles in parallel and write each one as soon as it is ready, then the overviews."""
     import rasterio
@@ -488,37 +518,53 @@ def _write_tiles(ctx, tmp: Path, profile: dict, tiles, workers: int, progress: P
     from rasterio.windows import Window
 
     h, w = ctx.shape
-    done = 0
     with rasterio.open(tmp, "w", **profile) as dst:
         dst.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
-        with ThreadPoolExecutor(workers) as pool:
-            queue = iter(tiles)
-            running = {}
-            try:
-                while True:
-                    while len(running) < 2 * workers:
-                        nxt = next(queue, None)
-                        if nxt is None:
-                            break
-                        running[pool.submit(_tile, ctx, *nxt)] = nxt
-                    if not running:
-                        break
-                    finished, _ = wait(running, return_when=FIRST_COMPLETED)
-                    for fut in finished:
-                        r0, c0 = running.pop(fut)
-                        block = fut.result()
-                        if block is not None:
-                            dst.write(block, window=Window(c0, r0, block.shape[2], block.shape[1]))
-                        done += 1
-                    progress(0.03 + 0.9 * done / len(tiles), f"Orthomosaic tile {done}/{len(tiles)}")
-            except BaseException:
-                for fut in running:
-                    fut.cancel()
-                raise
+        _run_tiles(ctx, tiles, workers, progress,
+                   lambda r0, c0, block: dst.write(block, window=Window(c0, r0, block.shape[2], block.shape[1])))
         factors = [f for f in (2, 4, 8, 16, 32, 64, 128) if min(h, w) // f >= 64]
         if factors:
             progress(0.95, "Overviews of the orthomosaic")
             dst.build_overviews(factors, Resampling.average)
 
 
-__all__ = ["build_orthomosaic", "hidden_cells", "NODATA"]
+def render_surface(chunk: Chunk, origin, shape, resolution: float, cams=None, raycaster=None,
+                   progress: Progress | None = None, workers: int | None = None, max_cameras: int = 8,
+                   max_angle: float = 88.0, tile: int = 512) -> np.ndarray:
+    """RGBA ``(4, h, w)`` of the model seen from above over a grid (``origin`` = top-left corner,
+    world units): the orthophoto engine in memory, used for the texture of a terrain model."""
+    progress = progress or Progress()
+    cams = list(chunk.aligned_cameras if cams is None else cams)
+    ctx = _Context()
+    ctx.chunk, ctx.resolution, ctx.blending, ctx.tile, ctx.max_cameras = chunk, resolution, "mosaic", tile, max_cameras
+    ctx.cams = cams
+    ctx.min_cos = float(np.cos(np.radians(min(max(float(max_angle), 0.0), 90.0))))
+    ctx.lock = threading.Lock()
+    ctx.raycaster = raycaster if raycaster is not None else raycaster_for_chunk(chunk)
+    if ctx.raycaster is None:
+        raise RuntimeError("build the model first")
+    surface = _MeshSurface(chunk, ctx.raycaster, resolution, ctx.lock)
+    surface.origin, surface.shape = (float(origin[0]), float(origin[1])), (int(shape[0]), int(shape[1]))
+    ctx.surface = surface
+    ctx.origin, ctx.shape = surface.origin, surface.shape
+    ctx.inv = np.linalg.inv(chunk.transform)
+    ctx.centres = {c.key: c.center for c in cams}
+    ctx.abs_tol = 3.0 * resolution / chunk.scale
+    up_int = ctx.inv[:3, :3] @ np.array([0.0, 0.0, 1.0])
+    ctx.up_int = up_int / np.linalg.norm(up_int)
+    ctx.footprints = _Footprints(chunk, cams)
+    workers = int(workers or max(1, min(8, (os.cpu_count() or 4) - 2)))
+    ctx.cache = _PhotoCache(max(12, 3 * workers))
+    ctx.hidden = None
+    h, w = ctx.shape
+    out = np.zeros((4, h, w), np.uint8)
+
+    def put(r0, c0, block):
+        out[:, r0:r0 + block.shape[1], c0:c0 + block.shape[2]] = block
+
+    _run_tiles(ctx, [(r, c) for r in range(0, h, tile) for c in range(0, w, tile)], workers, progress, put,
+               start=0.0, span=1.0)
+    return out
+
+
+__all__ = ["build_orthomosaic", "hidden_cells", "render_surface", "NODATA"]

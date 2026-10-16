@@ -45,7 +45,10 @@ def active_files(chunk, product: str) -> dict[str, Path]:
             files["preview"] = preview
         textured = chunk.product_path("model_textured")
         if textured is not None and textured.exists():
-            files["textured"] = textured.parent
+            if textured.suffix.lower() == ".obj":  # a texture of version 0.5 and earlier: a folder with its OBJ
+                files["textured"] = textured.parent
+            else:  # the texture image of the model (texture coordinates inside model.ply)
+                files["texture"] = textured
     return files
 
 
@@ -162,6 +165,8 @@ def _activate_files(chunk, product: str, entry: dict) -> None:
             dst = chunk.data_dir / "model_preview.ply"
         elif role == "textured":
             dst = chunk.data_dir / "textured"
+        elif role == "texture":
+            dst = chunk.data_dir / Path(rel).name
         else:
             continue
         if dst.is_dir():
@@ -173,6 +178,8 @@ def _activate_files(chunk, product: str, entry: dict) -> None:
             chunk._set_product(product, dst)
         elif role == "textured" and "model_textured" in entry["files"]:
             chunk._set_product("model_textured", dst / Path(entry["files"]["model_textured"]).name)
+        elif role == "texture":
+            chunk._set_product("model_textured", dst)
     if entry.get("params"):
         chunk.meta[PARAMS[product]] = dict(entry["params"])
     chunk.meta.setdefault("active_versions", {})[product] = {"name": entry["name"], "created": entry["created"]}

@@ -585,6 +585,17 @@ def _dem_offset(dem: Path, xyz: np.ndarray) -> float | None:
 PREVIEW_FACES = 600_000  # models larger than this get a coarse copy for the 3D view
 
 
+def _import_texture(data: bytes, out: Path) -> Path | None:
+    """The texture image of a Metashape model (TIFF, PNG or JPEG) as a JPEG next to the model."""
+    import cv2
+
+    img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        return None
+    cv2.imwrite(str(out), img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    return out
+
+
 def _import_model(mc: MsChunk, ch, warnings: list, progress, dense_from_mesh: bool, frame=None,
                   max_cloud: int = 8_000_000):
     """``mesh.ply`` of the model archive -> ``model.ply`` (streamed; vertices converted in
@@ -608,8 +619,18 @@ def _import_model(mc: MsChunk, ch, warnings: list, progress, dense_from_mesh: bo
         dst = ch.data_dir / "model.ply"
         with z.open(mesh_name) as src, open(dst, "wb") as out:
             shutil.copyfileobj(src, out, 16 << 20)
-        if any(n.lower().startswith("texture") for n in names):
-            warnings.append(f"{mc.label}: la texture del modello Metashape non viene importata (mesh con colori ai vertici)")
+        textures = [n for n in names if Path(n).name.lower().startswith("texture")
+                    and Path(n).suffix.lower() in (".tif", ".tiff", ".png", ".jpg", ".jpeg")]
+        if len(textures) == 1:  # the texture of the model: the faces carry its coordinates
+            progress(0.15, f"{mc.label}: texture del modello")
+            texture = _import_texture(z.read(textures[0]), ch.data_dir / "model_texture.jpg")
+            if texture is not None:
+                ch._set_product("model_textured", texture)
+            else:
+                warnings.append(f"{mc.label}: texture del modello non leggibile ({textures[0]})")
+        elif textures:
+            warnings.append(f"{mc.label}: texture del modello in {len(textures)} pagine: non importata "
+                            "(il modello ha i colori ai vertici)")
     ch._set_product("model", dst)
     try:
         if frame is not None:

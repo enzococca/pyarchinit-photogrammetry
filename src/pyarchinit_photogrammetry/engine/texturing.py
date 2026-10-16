@@ -1,8 +1,19 @@
-"""Texture atlas generation (OBJ + MTL + JPG).
+"""Texture of the model: an image beside ``model.ply``, whose faces get the texture
+coordinates of their three corners (exported as OBJ + MTL + image, or PLY + image).
 
-Each face takes its colours from the photo that sees it best (frontal, close,
-not occluded). Faces are packed two per square cell of the atlas; the colour of
-every atlas texel is obtained by projecting its 3D position into the chosen photo.
+Two mappings, as in Metashape:
+
+``generic``
+    every face takes its colours from the photo that sees it best (frontal, close, not
+    occluded); faces are packed two per square cell of the atlas and the colour of every texel
+    comes from projecting its 3D position into that photo. Good for objects and small models.
+``orthophoto`` (adaptive)
+    for terrain from the air (a tell, a trench seen from a drone): most of the surface faces the
+    sky, so the texture is its orthophoto - the plan position of a corner is its texture
+    coordinate, the colours come from the orthophoto engine - and the steep faces (walls,
+    sections) get their own cells, as in the generic mapping, in a band below.
+``auto``
+    the orthophoto mapping for large models that mostly face up, the generic one otherwise.
 """
 from __future__ import annotations
 
@@ -14,6 +25,8 @@ import numpy as np
 from ..core.chunk import Chunk
 from ..core.progress import Progress
 from .visibility import ImageCache, Raycaster, project_valid, readable_cameras, sample
+
+MAPPINGS = ("auto", "orthophoto", "generic")
 
 
 def _cell_layout(s: int):
@@ -85,78 +98,177 @@ def _face_camera_choice(chunk: Chunk, verts, faces, raycaster, progress: Progres
     return choice
 
 
-def build_texture(chunk: Chunk, texture_size: int = 4096, progress: Progress | None = None,
-                  skip_unreadable: bool = False) -> Path:
-    """Photos that cannot be read stop the step (:class:`~.visibility.UnreadablePhotos`) unless
-    ``skip_unreadable``: then the faces take their colours from the other photos."""
-    progress = progress or Progress()
-    mesh = chunk.model
-    if mesh is None:
-        raise RuntimeError("build the model first")
-    progress(0.0, "Checking the photos")
-    cams, bad = readable_cameras(chunk, skip_unreadable)
-    verts = np.asarray(mesh.vertices, float)
-    faces = np.asarray(mesh.faces, np.int64)
-    raycaster = Raycaster(verts, faces)
-    choice = _face_camera_choice(chunk, verts, faces, raycaster, progress.sub(0, 0.5), cams=cams)
-
-    n = len(faces)
-    cells = int(np.ceil(n / 2))
-    per_side = int(np.ceil(np.sqrt(cells)))
-    s = max(4, texture_size // per_side)
-    size = per_side * s
+def _bake_cells(chunk: Chunk, verts, faces, face_ids, choice, cams, atlas, y0: int, per_row: int, s: int,
+                progress: Progress, cache=None) -> np.ndarray:
+    """Colours of the faces ``face_ids`` in cells of ``s`` px (two faces a cell, ``per_row``
+    cells a row from row ``y0`` of the atlas), each from its photo ``cams[choice]``. Returns the
+    texture coordinates of their corners ``(len(face_ids), 3, 2)``."""
+    height, width = atlas.shape[:2]
+    n = len(face_ids)
     which, bary, tri = _cell_layout(s)
-    atlas = np.full((size, size, 3), 127, np.uint8)
-    face_ids = np.arange(n)
-    cell = face_ids // 2
-    t = face_ids % 2
-    cy, cx = np.divmod(cell, per_side)
-
-    # UVs of the three corners of each face
+    local = np.arange(n)
+    cell = local // 2
+    t = local % 2
+    cy, cx = np.divmod(cell, per_row)
     corners = np.stack([tri[0], tri[1]])[t]  # (n, 3, 2)
-    uv_px = corners + np.stack([cx * s, cy * s], 1)[:, None, :]
-    uv = np.stack([uv_px[..., 0] / size, 1.0 - uv_px[..., 1] / size], -1)
-
-    cache = ImageCache(chunk, max_items=3)
+    uv_px = corners + np.stack([cx * s, y0 + cy * s], 1)[:, None, :]
+    uv = np.stack([uv_px[..., 0] / width, 1.0 - uv_px[..., 1] / height], -1)
+    cache = cache or ImageCache(chunk, max_items=3)
     local_pix = np.column_stack(np.divmod(np.arange(s * s), s)[::-1])  # (x, y) inside a cell
-    for k in np.unique(choice[choice >= 0]):
+    used = np.unique(choice[choice >= 0])
+    for done, k in enumerate(used):
         fsel = np.nonzero(choice == k)[0]
         batch = max(1, 2_000_000 // max(1, (s * s) // 2))  # ~2 M texels per batch bounds memory
         for start in range(0, len(fsel), batch):
             part = fsel[start:start + batch]
-            # texels belonging to each face of the batch
             rows = []
             for tt in (0, 1):
                 fp = part[t[part] == tt]
                 if len(fp) == 0:
                     continue
                 px_idx = np.nonzero(which == tt)[0]
-                f_rep = np.repeat(fp, len(px_idx))
-                p_rep = np.tile(px_idx, len(fp))
-                rows.append((f_rep, p_rep))
+                rows.append((np.repeat(fp, len(px_idx)), np.tile(px_idx, len(fp))))
             if not rows:
                 continue
             f_all = np.concatenate([r[0] for r in rows])
             p_all = np.concatenate([r[1] for r in rows])
-            pts = (bary[p_all][:, :, None] * verts[faces[f_all]]).sum(1)
+            pts = (bary[p_all][:, :, None] * verts[faces[face_ids[f_all]]]).sum(1)
             px, _, _ = project_valid(chunk, cams[k], pts, margin=0)
             good = np.isfinite(px).all(1)
             col = np.zeros((len(pts), 3), np.uint8)
             col[good] = sample(cache.get(cams[k]), px[good])
-            ax = cx[f_all] * s + local_pix[p_all, 0]
-            ay = cy[f_all] * s + local_pix[p_all, 1]
-            atlas[ay, ax] = col
-        progress(0.5 + 0.45 * (k + 1) / max(len(cams), 1), f"Texturing from {cams[k].label}")
+            atlas[y0 + cy[f_all] * s + local_pix[p_all, 1], cx[f_all] * s + local_pix[p_all, 0]] = col
+        progress((done + 1) / max(len(used), 1), f"Texturing from {cams[k].label}")
+    return uv
 
-    out_dir = chunk.data_dir / "textured"
-    out_dir.mkdir(exist_ok=True)
-    tex_path = out_dir / "texture.jpg"
+
+def _upward(chunk: Chunk, verts, faces) -> tuple[np.ndarray, np.ndarray]:
+    """For every face: the vertical component of its normal (world frame) and its area."""
+    w = chunk.to_world(verts)
+    tri = w[faces]
+    n = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    area = np.linalg.norm(n, axis=1)
+    return n[:, 2] / np.maximum(area, 1e-20), 0.5 * area
+
+
+def choose_mapping(chunk: Chunk, verts, faces) -> str:
+    """``orthophoto`` for large models that mostly face the sky (85 % of the area within 60
+    degrees of horizontal), ``generic`` otherwise."""
+    if len(faces) < 200_000:
+        return "generic"
+    nz, area = _upward(chunk, verts, faces)
+    return "orthophoto" if area[nz > 0.5].sum() >= 0.85 * max(area.sum(), 1e-20) else "generic"
+
+
+def _fill_empty(rgb: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """Texels without a colour take the colour around them (wider and wider), so that faces at
+    the edge of the orthophoto do not sample black."""
+    out = rgb.astype(np.float32)
+    have = valid.astype(np.float32)
+    todo = ~valid
+    for k in (5, 17, 65, 257):
+        if not todo.any():
+            break
+        num = cv2.blur(out * have[..., None], (k, k))
+        den = cv2.blur(have, (k, k))
+        fill = todo & (den > 1e-6)
+        out[fill] = num[fill] / den[fill][:, None]
+        have[fill] = 1.0
+        todo &= ~fill
+    if todo.any():
+        out[todo] = out[~todo].mean(axis=0) if (~todo).any() else 127
+    return np.clip(out + 0.5, 0, 255).astype(np.uint8)
+
+
+def _orthophoto_atlas(chunk: Chunk, verts, faces, cams, texture_size: int, raycaster, progress: Progress):
+    from .ortho import render_surface
+
+    nz, _area = _upward(chunk, verts, faces)
+    steep = np.nonzero(nz < 0.5)[0]
+    flat = np.nonzero(nz >= 0.5)[0]
+    w = chunk.to_world(verts)
+    corners = w[faces[flat]].reshape(-1, 3) if len(flat) else w
+    x0, y0 = corners[:, 0].min(), corners[:, 1].min()
+    x1, y1 = corners[:, 0].max(), corners[:, 1].max()
+    size = int(texture_size)
+    res = max(x1 - x0, y1 - y0, 1e-9) / size
+    wo = min(size, int(np.ceil((x1 - x0) / res)) + 1)
+    ho = min(size, int(np.ceil((y1 - y0) / res)) + 1)
+    cell, per_row = 8, size // 8
+    rows = int(np.ceil(np.ceil(len(steep) / 2) / per_row)) if len(steep) else 0
+    while rows * cell > size // 2 and cell > 4:  # the walls take at most half more of the texture
+        cell //= 2
+        per_row = size // cell
+        rows = int(np.ceil(np.ceil(len(steep) / 2) / per_row))
+    height = ho + rows * cell
+    atlas = np.full((height, size, 3), 127, np.uint8)
+    progress(0.02, f"Orthophoto of the model {wo}x{ho} px at {res * 100:.2f} cm/px")
+    rgba = render_surface(chunk, (x0, y1), (ho, wo), res, cams=cams, raycaster=raycaster,
+                          progress=progress.sub(0.02, 0.68))
+    rgb = np.moveaxis(rgba[:3], 0, -1)[..., ::-1]  # BGR, as OpenCV writes it
+    atlas[:ho, :wo] = _fill_empty(rgb, rgba[3] > 0)
+    uv = np.zeros((len(faces), 3, 2))
+    if len(flat):
+        pw = w[faces[flat]]  # (k, 3, 3)
+        uv[flat, :, 0] = (pw[..., 0] - x0) / res / size
+        uv[flat, :, 1] = 1.0 - ((y1 - pw[..., 1]) / res) / height
+    if len(steep):
+        progress(0.72, f"Walls and steep faces: {len(steep):,} faces in cells of {cell} px")
+        choice = _face_camera_choice(chunk, verts, faces[steep], raycaster, progress.sub(0.72, 0.13), cams=cams)
+        uv[steep] = _bake_cells(chunk, verts, faces, steep, choice, cams, atlas, ho, per_row, cell,
+                                progress.sub(0.85, 0.13))
+    return atlas, uv
+
+
+def _generic_atlas(chunk: Chunk, verts, faces, cams, texture_size: int, raycaster, progress: Progress):
+    n = len(faces)
+    choice = _face_camera_choice(chunk, verts, faces, raycaster, progress.sub(0, 0.5), cams=cams)
+    cells = int(np.ceil(n / 2))
+    per_side = int(np.ceil(np.sqrt(cells)))
+    s = max(4, texture_size // per_side)
+    size = per_side * s
+    atlas = np.full((size, size, 3), 127, np.uint8)
+    uv = _bake_cells(chunk, verts, faces, np.arange(n), choice, cams, atlas, 0, per_side, s, progress.sub(0.5, 0.45))
+    return atlas, uv
+
+
+def build_texture(chunk: Chunk, texture_size: int = 4096, progress: Progress | None = None,
+                  skip_unreadable: bool = False, mapping: str = "auto") -> Path:
+    """Texture of the model (see the module docstring for ``mapping``), written as
+    ``model_texture.jpg`` with the texture coordinates in ``model.ply`` (every other property of
+    the model kept). Photos that cannot be read stop the step
+    (:class:`~.visibility.UnreadablePhotos`) unless ``skip_unreadable``: then the faces take
+    their colours from the other photos."""
+    from ..io.mesh_ply import read_mesh, write_mesh
+
+    progress = progress or Progress()
+    path = chunk.product_path("model")
+    if path is None or not path.exists():
+        raise RuntimeError("build the model first")
+    if mapping not in MAPPINGS:
+        raise ValueError(f"mapping: one of {', '.join(MAPPINGS)}")
+    progress(0.0, "Checking the photos")
+    cams, bad = readable_cameras(chunk, skip_unreadable)
+    mesh = read_mesh(path)
+    verts, faces = mesh.xyz, mesh.faces
+    raycaster = Raycaster(verts, faces)
+    if mapping == "auto":
+        mapping = choose_mapping(chunk, verts, faces)
+    progress(0.01, f"Texture: {mapping} mapping of {len(faces):,} faces")
+    if mapping == "orthophoto":
+        atlas, uv = _orthophoto_atlas(chunk, verts, faces, cams, texture_size, raycaster, progress.sub(0.01, 0.95))
+    else:
+        atlas, uv = _generic_atlas(chunk, verts, faces, cams, texture_size, raycaster, progress.sub(0.01, 0.95))
+    tex_path = chunk.data_dir / "model_texture.jpg"
     cv2.imwrite(str(tex_path), atlas, [cv2.IMWRITE_JPEG_QUALITY, 92])
-    obj_path = out_dir / "model.obj"
-    write_obj(obj_path, verts, faces, uv, "texture.jpg")
-    chunk._set_product("model_textured", obj_path)
-    progress(1.0, f"Texture {size}x{size} px")
-    return obj_path
+    mesh.texcoords = uv.reshape(-1, 6).astype(np.float32)
+    mesh.set_texture_file(tex_path.name)
+    chunk._set_product("model", write_mesh(chunk.own_product_path("model"), mesh))
+    chunk._set_product("model_textured", tex_path)
+    chunk.meta["texture"] = {"mapping": mapping, "size": [int(atlas.shape[1]), int(atlas.shape[0])],
+                             "skipped_photos": [c.label for c in bad] or None}
+    progress(1.0, f"Texture {atlas.shape[1]}x{atlas.shape[0]} px ({mapping})")
+    return tex_path
 
 
 def write_obj(path: Path, verts: np.ndarray, faces: np.ndarray, uv: np.ndarray | None, texture: str | None,

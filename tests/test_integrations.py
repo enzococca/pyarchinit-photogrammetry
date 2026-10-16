@@ -416,7 +416,7 @@ def _zip(path, members):
             z.writestr(name, data)
 
 
-def make_psx(root: Path, n_grid: int = 41):
+def make_psx(root: Path, n_grid: int = 41, texture: bool = False):
     """A Metashape 2.x-like project near Tell Tuqan: chunk transform internal -> geocentric
     (ENU axes, 0.5 m per internal unit), 4 nadir cameras inside a camera group, tie points of
     the live component 0 plus stale points of a deleted component 1, and a model with
@@ -482,10 +482,20 @@ def make_psx(root: Path, n_grid: int = 41):
     tri = np.vstack([np.column_stack([a, b, c]), np.column_stack([a, c, d])])
     faces = np.zeros(len(tri), dtype=[("n", "u1"), ("v", "<i4", (3,)), ("nt", "u1"), ("t", "<f4", (6,))])
     faces["n"], faces["v"], faces["nt"] = 3, tri, 6
+    tif = b"II*\x00"  # not an image: the import warns and goes on
+    if texture:  # planar texture coordinates and a real image, red on the left, blue on the right
+        import cv2
+
+        uv = (np.column_stack([verts["x"], verts["y"]]) + 50.0) / 100.0
+        faces["t"] = uv[tri].reshape(-1, 6)
+        img = np.zeros((64, 64, 3), np.uint8)
+        img[:, :32] = (0, 0, 255)
+        img[:, 32:] = (255, 0, 0)
+        tif = cv2.imencode(".tif", img)[1].tobytes()
     _zip(files / "0" / "0" / "model" / "model.zip", {
         "doc.xml": f'<model version="1.2.0"><mesh path="mesh.ply"><faceCount>{len(tri)}</faceCount></mesh>'
                    '<texture path="texture.tif"/></model>',
-        "mesh.ply": _ply_bytes(vfields, verts, faces), "texture.tif": b"II*\x00"})
+        "mesh.ply": _ply_bytes(vfields, verts, faces), "texture.tif": tif})
     psx = root / "scavo.psx"
     psx.write_text('<document version="1.2.0" path="{projectname}.files/project.zip"/>')
     return psx, origin, (east, north, up)
@@ -531,6 +541,42 @@ def test_metashape_groups_components_mesh_and_exact_frame(tmp_path, monkeypatch)
     assert face_count(ch.data_dir / "model_preview.ply") < 3200
     assert len(ch.point_cloud) == mesh.n_vertices and ch.meta["point_cloud_source"].startswith("vertici")
     assert "texture" in warnings
+
+
+def test_metashape_model_keeps_its_texture_and_colours(tmp_path):
+    """The model of Metashape comes with its colours, its confidence and its texture; computing
+    the confidence, cleaning and cropping keep them (trimesh used to drop the colours of a mesh
+    with texture coordinates and to split its vertices along the seams)."""
+    from pyarchinit_photogrammetry.gui.scene import available_views, build_scene
+    from pyarchinit_photogrammetry.integrations import metashape as ms
+    from pyarchinit_photogrammetry.io.mesh_ply import read_mesh
+
+    psx, _origin, _ = make_psx(tmp_path / "src", texture=True)
+    doc = ms.import_psx(psx, tmp_path / "out" / "p.ppg")
+    ch = doc.chunk
+    tex = ch.product_path("model_textured")
+    assert tex is not None and tex.suffix == ".jpg" and "model_textured" in available_views(ch)
+    mesh = read_mesh(ch.product_path("model"))
+    assert mesh.texcoords is not None and mesh.colors is not None and (mesh.colors[:, 1] == 150).all()
+    assert ch.model.visual.kind == "vertex"  # chunk.model keeps the colours too
+    sd = build_scene(ch, "model_textured")
+    assert sd.mesh_uv is not None and sd.texture == tex and len(sd.mesh_faces) == len(mesh.faces)
+    # cleaning and cropping keep colours, texture coordinates and the texture
+    ch.clean_model(min_component=0.01)
+    after = read_mesh(ch.product_path("model"))
+    assert after.texcoords is not None and after.colors is not None and ch.product_path("model_textured") == tex
+    w = ch.to_world(after.xyz)
+    lo, hi = w.min(axis=0), w.max(axis=0)
+    ch.crop_model((lo[0], lo[1], (lo[0] + hi[0]) / 2, hi[1]))  # the left half: red in the texture
+    half = read_mesh(ch.product_path("model"))
+    assert len(half.faces) < len(after.faces) and half.texcoords.reshape(-1, 2)[:, 0].max() <= 0.5 + 0.026  # one cell
+    out = ch.export_model(tmp_path / "metà.obj")
+    assert (tmp_path / "metà_texture.jpg").exists() and "vt " in out.read_text()[:10_000_000]
+    ply = ch.export_model(tmp_path / "metà.ply")
+    assert read_mesh(ply).texture_file == "metà_texture.jpg" and (tmp_path / "metà_texture.jpg").exists()
+    # smoothing keeps the texture, closing holes or decimating leave it out
+    ch.clean_model(target_faces=len(half.faces) // 2)
+    assert ch.product_path("model_textured") is None and read_mesh(ch.product_path("model")).colors is not None
 
 
 def test_metashape_local_frame_with_components(tmp_path):

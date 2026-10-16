@@ -206,13 +206,26 @@ def read_model_confidence(path) -> np.ndarray | None:
 
 
 def write_model(path, mesh, confidence: np.ndarray | None = None) -> Path:
-    """Write a model PLY (internal frame) keeping the vertex confidence as a vertex property."""
+    """Write a model PLY (internal frame) keeping every vertex property, the texture coordinates
+    and the vertex confidence (``mesh``: :class:`~..io.mesh_ply.MeshData`, or a trimesh mesh)."""
+    from ..io.mesh_ply import MeshData, write_mesh
+
+    if not isinstance(mesh, MeshData):
+        v = np.asarray(mesh.vertices, np.float64)
+        fields = [("x", "<f4"), ("y", "<f4"), ("z", "<f4")]
+        vc = mesh.visual.vertex_colors if getattr(mesh.visual, "kind", None) == "vertex" else None
+        if vc is not None:
+            fields += [("red", "u1"), ("green", "u1"), ("blue", "u1")]
+        arr = np.empty(len(v), fields)
+        arr["x"], arr["y"], arr["z"] = v.T
+        if vc is not None:
+            arr["red"], arr["green"], arr["blue"] = np.asarray(vc)[:, :3].T
+        mesh = MeshData(arr, np.asarray(mesh.faces, np.int64))
     if confidence is not None:
-        mesh.vertex_attributes["confidence"] = np.minimum(np.asarray(confidence), 255).astype(np.uint8)
-    else:
-        mesh.vertex_attributes.pop("confidence", None)
-    mesh.export(str(path))
-    return Path(path)
+        mesh.set_field("confidence", np.minimum(np.asarray(confidence), 255))
+        if mesh.vertices.dtype["confidence"].kind != "f":
+            mesh.set_field("confidence", np.minimum(np.asarray(confidence), 255).astype(np.uint8), np.uint8)
+    return write_mesh(path, mesh)
 
 
 def half_edges(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
@@ -231,14 +244,14 @@ def compute_model_confidence(chunk: Chunk, tol: float = 0.01, progress: Progress
     """Confidence of the vertices of the model (stored in ``model.ply``): the depth maps that
     agree on each vertex, within 1 % of the distance or half the edges around the vertex; 0 where
     no depth map saw the surface there (a hole the mesh closed, a 2.5D surface across a wall)."""
-    import trimesh
+    from ..io.mesh_ply import read_mesh
 
     progress = progress or Progress()
     path = chunk.product_path("model")
     if path is None or not path.exists():
         raise RuntimeError("build the model first")
-    mesh = trimesh.load(str(path), process=False, force="mesh")
-    verts, faces = np.asarray(mesh.vertices, np.float64), np.asarray(mesh.faces, np.int64)
+    mesh = read_mesh(path)  # colours, texture coordinates and every other property are kept
+    verts, faces = mesh.xyz, mesh.faces
     conf = depth_map_support(chunk, verts, tol, progress.sub(0.0, 0.9), abs_tol=half_edges(verts, faces))
     progress(0.92, "Salvataggio del modello")
     chunk._set_product("model", write_model(chunk.own_product_path("model"), mesh, conf))

@@ -24,6 +24,67 @@ PRODUCT_LABELS = {"tie_points": "Punti di legame", "point_cloud": "Nuvola densa"
                   "hillshade": "Ombreggiatura", "report": "Report"}
 
 
+_SUMMARIES: dict = {}
+
+
+def _it(value: float, decimals: int = 0) -> str:
+    text = f"{value:,.{decimals}f}"
+    return text.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+
+
+def product_summary(key: str, path) -> str:
+    """How large a product is, as Metashape shows it in the workspace: points, faces, pixels
+    (read from the headers of the files only, and remembered until the file changes)."""
+    from pathlib import Path
+
+    if path is None:
+        return ""
+    path = Path(path)
+    try:
+        st = path.stat()
+    except OSError:
+        return ""
+    cache_key = (str(path), st.st_mtime_ns, st.st_size, key)
+    if cache_key in _SUMMARIES:
+        return _SUMMARIES[cache_key]
+    text = ""
+    try:
+        if key in ("tie_points", "point_cloud"):
+            if path.suffix.lower() in (".las", ".laz"):
+                import laspy
+
+                with laspy.open(str(path)) as f:
+                    n = f.header.point_count
+            else:
+                from ..io.mesh_ply import read_header
+
+                with open(path, "rb") as f:
+                    n = next(e["count"] for e in read_header(f)[1] if e["name"] == "vertex")
+            text = f"{_it(n)} punti"
+        elif key == "model":
+            from ..io.mesh_ply import face_count
+
+            n = face_count(path)
+            text = f"{_it(n)} facce" if n is not None else ""
+        elif key == "model_textured":
+            from PIL import Image
+
+            image = path.parent / "texture.jpg" if path.suffix.lower() == ".obj" else path
+            with Image.open(image) as im:
+                text = f"texture {_it(im.size[0])} x {_it(im.size[1])} px"
+        elif key in ("dem", "orthomosaic"):
+            import rasterio
+
+            with rasterio.open(path) as src:
+                res = abs(src.res[0])
+                size = f"{_it(res * 100, 2)} cm/px" if res < 1 else f"{_it(res, 2)} m/px"
+                text = f"{_it(src.width)} x {_it(src.height)} px, {size}"
+    except Exception:
+        text = ""
+    _SUMMARIES[cache_key] = text
+    return text
+
+
 def _tool(name: str, text: str, tip: str = "") -> QToolButton:
     b = QToolButton()
     b.setIcon(icon(name))
@@ -110,6 +171,9 @@ class WorkspaceTree(QTreeWidget):
                 if not ch.product_path(key) and not kept:
                     continue
                 label = PRODUCT_LABELS[key]
+                size = product_summary(key, ch.product_path(key))
+                if size:
+                    label += f"  ({size})"
                 named = key in versions.PRODUCTS and (kept or (ch.meta.get("active_versions") or {}).get(key))
                 if named:
                     label += (f"  -  {versions.active_info(ch, key)['name']}" if ch.product_path(key)
@@ -122,7 +186,11 @@ class WorkspaceTree(QTreeWidget):
                 ci.addChild(it)
                 for e in reversed(kept):
                     when = e["created"][:16].replace("T", " ")
-                    vi = QTreeWidgetItem([f"{e['name']}   ({when})"])
+                    try:
+                        size = product_summary(key, versions.version_file(ch, key, e["id"]))
+                    except Exception:
+                        size = ""
+                    vi = QTreeWidgetItem([f"{e['name']}   ({size + ', ' if size else ''}{when})"])
                     vi.setIcon(0, icon("version"))
                     vi.setData(0, Qt.ItemDataRole.UserRole, ("version", ch, (key, e["id"])))
                     vi.setToolTip(0, "Versione conservata: doppio clic per vederla; tasto destro per renderla "

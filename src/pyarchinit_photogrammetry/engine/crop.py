@@ -158,20 +158,22 @@ def points_inside(chunk: Chunk, xyz: np.ndarray, region=None, zmin: float | None
 
 
 def crop_model(chunk: Chunk, region, zmin: float | None = None, zmax: float | None = None) -> dict:
-    """Keep in the project only the faces of the model inside the region (colours and
-    confidence kept; the textured model is left out until the texture is built again)."""
-    import trimesh
-
-    from .cleaning import delete_faces
+    """Keep in the project only the faces of the model inside the region (colours, confidence
+    and texture kept)."""
+    from ..io.mesh_ply import read_mesh
+    from .cleaning import store_model
 
     path = chunk.product_path("model")
     if path is None or not path.exists():
         raise RuntimeError("build the model first")
-    mesh = trimesh.load(str(path), process=False, force="mesh")
-    keep = faces_inside(chunk, np.asarray(mesh.vertices), np.asarray(mesh.faces), region, zmin, zmax)
+    mesh = read_mesh(path)
+    keep = faces_inside(chunk, mesh.xyz, mesh.faces, region, zmin, zmax)
     if not keep.any():
         raise ValueError("no face of the model lies inside the region")
-    return delete_faces(chunk, keep, keep_selected=True)
+    out = mesh.subset_faces(keep)
+    store_model(chunk, out, texture_kept=True)  # the texture stays: the faces keep their coordinates
+    return {"faces_before": int(len(mesh.faces)), "faces": int(len(out.faces)),
+            "removed_faces": int(len(mesh.faces) - len(out.faces))}
 
 
 def crop_point_cloud(chunk: Chunk, region, zmin: float | None = None, zmax: float | None = None) -> dict:

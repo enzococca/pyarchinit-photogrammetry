@@ -10,6 +10,7 @@ leaves holes everywhere.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -242,5 +243,188 @@ def make_preview(model: str | Path, out: str | Path, max_faces: int = 600_000, p
     return write_mesh_ply(out, V, F, C, extra=extra)
 
 
-__all__ = ["PlyMesh", "read_header", "face_count", "transform_vertices", "cluster_decimate", "write_mesh_ply",
-           "make_preview"]
+# ---------------------------------------------------------------- whole meshes, nothing lost
+_TYPE_NAMES = {"f4": "float", "f8": "double", "u1": "uchar", "i1": "char", "u2": "ushort", "i2": "short",
+               "u4": "uint", "i4": "int"}
+
+
+@dataclass
+class MeshData:
+    """A triangle mesh as a PLY holds it: every vertex property (colours, confidence, ...) in a
+    structured array, the faces, the texture coordinates of the three corners of each face
+    (``(F, 6)``: u0 v0 u1 v1 u2 v2, as Metashape writes them) and the header comments.
+
+    Reading and writing through this class keeps everything: a mesh with a texture loaded by
+    trimesh loses its vertex colours and gets its vertices split along the seams."""
+
+    vertices: np.ndarray
+    faces: np.ndarray
+    texcoords: np.ndarray | None = None
+    comments: list = field(default_factory=list)
+
+    @property
+    def xyz(self) -> np.ndarray:
+        v = self.vertices
+        return np.column_stack([v["x"], v["y"], v["z"]]).astype(np.float64)
+
+    def field(self, name: str) -> np.ndarray | None:
+        return np.asarray(self.vertices[name]) if name in (self.vertices.dtype.names or ()) else None
+
+    @property
+    def colors(self) -> np.ndarray | None:
+        names = set(self.vertices.dtype.names or ())
+        if not {"red", "green", "blue"} <= names:
+            return None
+        v = self.vertices
+        return np.column_stack([v["red"], v["green"], v["blue"]]).astype(np.uint8)
+
+    def set_field(self, name: str, values, dtype=None) -> None:
+        """Set (or add) a vertex property; an existing one keeps its type unless ``dtype``."""
+        values = np.asarray(values)
+        names = self.vertices.dtype.names or ()
+        if name in names and dtype is None:
+            self.vertices[name] = values.astype(self.vertices.dtype[name])
+            return
+        descr = [(n, self.vertices.dtype[n]) for n in names if n != name]
+        descr.append((name, np.dtype(dtype or values.dtype)))
+        out = np.empty(len(self.vertices), dtype=descr)
+        for n in names:
+            if n != name:
+                out[n] = self.vertices[n]
+        out[name] = values
+        self.vertices = out
+
+    def set_colors(self, rgb) -> None:
+        rgb = np.asarray(rgb)
+        for k, n in enumerate(("red", "green", "blue")):
+            self.set_field(n, rgb[:, k], None if n in (self.vertices.dtype.names or ()) else np.uint8)
+
+    def set_xyz(self, xyz, double: bool | None = None) -> None:
+        """New positions; ``double``: store them in double (map coordinates) or single precision."""
+        xyz = np.asarray(xyz, np.float64)
+        if double is None:
+            for k, n in enumerate("xyz"):
+                self.vertices[n] = xyz[:, k]
+            return
+        ft = "<f8" if double else "<f4"
+        others = [n for n in self.vertices.dtype.names if n not in ("x", "y", "z")]
+        out = np.empty(len(self.vertices), dtype=[("x", ft), ("y", ft), ("z", ft)]
+                       + [(n, self.vertices.dtype[n]) for n in others])
+        out["x"], out["y"], out["z"] = xyz.T
+        for n in others:
+            out[n] = self.vertices[n]
+        self.vertices = out
+
+    @property
+    def texture_file(self) -> str | None:
+        for c in self.comments:
+            parts = c.split(None, 1)
+            if len(parts) == 2 and parts[0].lower() == "texturefile":
+                return parts[1].strip()
+        return None
+
+    def set_texture_file(self, name: str | None) -> None:
+        self.comments = [c for c in self.comments if not c.lower().startswith("texturefile")]
+        if name:
+            self.comments.append(f"TextureFile {name}")
+
+    def subset_faces(self, keep) -> "MeshData":
+        """The faces of ``keep`` (mask or indices) and only the vertices they use."""
+        faces = self.faces[keep]
+        used = np.zeros(len(self.vertices), bool)
+        used[faces.ravel()] = True
+        remap = np.cumsum(used) - 1
+        tex = None if self.texcoords is None else self.texcoords[keep]
+        return MeshData(self.vertices[used], remap[faces], tex, list(self.comments))
+
+    def copy(self) -> "MeshData":
+        return MeshData(self.vertices.copy(), self.faces.copy(),
+                        None if self.texcoords is None else self.texcoords.copy(), list(self.comments))
+
+
+def _header_comments(path: Path) -> list[str]:
+    out = []
+    with open(path, "rb") as f:
+        for _ in range(10000):
+            line = f.readline()
+            if not line:
+                break
+            text = line.decode("utf-8", "replace").strip()
+            if text == "end_header":
+                break
+            if text.startswith("comment "):
+                out.append(text[8:])
+    return out
+
+
+def read_mesh(path: str | Path) -> MeshData:
+    """A mesh with all its vertex properties and per-face texture coordinates (binary PLY as
+    written by Metashape, Open3D, trimesh or this program; other files through trimesh, with
+    positions and vertex colours only)."""
+    path = Path(path)
+    try:
+        pm = PlyMesh(path)
+    except (ValueError, KeyError, OSError):
+        import trimesh
+
+        m = trimesh.load(str(path), process=False, force="mesh")
+        v = np.asarray(m.vertices, np.float64)
+        fields = [("x", "<f4"), ("y", "<f4"), ("z", "<f4")]
+        vc = getattr(m.visual, "vertex_colors", None) if m.visual.kind == "vertex" else None
+        if vc is not None:
+            fields += [("red", "u1"), ("green", "u1"), ("blue", "u1")]
+        arr = np.empty(len(v), fields)
+        arr["x"], arr["y"], arr["z"] = v.T
+        if vc is not None:
+            arr["red"], arr["green"], arr["blue"] = np.asarray(vc)[:, :3].T
+        return MeshData(arr, np.asarray(m.faces, np.int64))
+    rec = pm._faces
+    faces = np.asarray(rec[pm.index_field], np.int64)
+    tex = None
+    for name in ("texcoord", "texcoords"):
+        if name in rec.dtype.names and rec.dtype[name].shape == (6,):
+            tex = np.asarray(rec[name], np.float32)
+            break
+    return MeshData(np.array(pm.vertices), faces, tex, _header_comments(path))
+
+
+def write_mesh(path: str | Path, mesh: MeshData) -> Path:
+    """Binary little-endian PLY with every vertex property, the faces and their texture
+    coordinates (written to a temporary file first: the old one stays until the new one is done)."""
+    path = Path(path)
+    v = mesh.vertices
+    names = v.dtype.names
+    header = ["ply", "format binary_little_endian 1.0"] + [f"comment {c}" for c in mesh.comments]
+    header.append(f"element vertex {len(v)}")
+    vdescr = []
+    for n in names:
+        base = np.dtype(v.dtype[n]).str.lstrip("<>|=")
+        header.append(f"property {_TYPE_NAMES[base]} {n}")
+        vdescr.append((n, "<" + base if base[1:] != "1" else base))
+    header.append(f"element face {len(mesh.faces)}")
+    header.append("property list uchar int vertex_indices")
+    fdescr = [("n", "u1"), ("v", "<i4", (3,))]
+    if mesh.texcoords is not None:
+        header.append("property list uchar float texcoord")
+        fdescr += [("nt", "u1"), ("t", "<f4", (6,))]
+    header.append("end_header")
+    vout = np.empty(len(v), dtype=vdescr)
+    for n in names:
+        vout[n] = v[n]
+    fout = np.empty(len(mesh.faces), dtype=fdescr)
+    fout["n"] = 3
+    fout["v"] = mesh.faces
+    if mesh.texcoords is not None:
+        fout["nt"] = 6
+        fout["t"] = mesh.texcoords
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as out:
+        out.write(("\n".join(header) + "\n").encode("utf-8"))  # comments (a texture named "metà") in UTF-8
+        out.write(vout.tobytes())
+        out.write(fout.tobytes())
+    tmp.replace(path)
+    return path
+
+
+__all__ = ["PlyMesh", "MeshData", "read_header", "read_mesh", "write_mesh", "face_count", "transform_vertices",
+           "cluster_decimate", "write_mesh_ply", "make_preview"]

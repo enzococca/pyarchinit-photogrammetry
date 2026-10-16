@@ -20,15 +20,17 @@ def _subset(verts: np.ndarray, faces: np.ndarray, keep: np.ndarray):
 
 
 def export_model(chunk, path, region=None, zmin: float | None = None, zmax: float | None = None) -> Path:
-    """Export the mesh in world coordinates. ``.obj`` keeps the texture when built; ``.ply``
-    keeps the vertex colours and confidence, with double-precision coordinates (UTM and other
-    map coordinates lose centimetres in single precision). ``region`` (a polygon in the chunk
-    CRS, see :func:`engine.crop.as_polygon`) and ``zmin``/``zmax``: only the faces inside."""
+    """Export the mesh in world coordinates. ``.ply`` keeps every vertex property (colours,
+    confidence) with double-precision coordinates (UTM and other map coordinates lose
+    centimetres in single precision) and the texture coordinates, with the texture next to it;
+    ``.obj`` keeps the texture. ``region`` (a polygon in the chunk CRS, see
+    :func:`engine.crop.as_polygon`) and ``zmin``/``zmax``: only the faces inside."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     cropping = region is not None or zmin is not None or zmax is not None
     textured = chunk.product_path("model_textured")
-    if path.suffix.lower() == ".obj" and textured is not None and textured.exists():
+    legacy = textured is not None and textured.suffix.lower() == ".obj" and textured.exists()
+    if path.suffix.lower() == ".obj" and legacy:  # a texture of version 0.5 and earlier: its own OBJ
         from ..engine.texturing import write_obj
 
         verts, faces, uv = _read_textured_obj(textured)
@@ -46,30 +48,42 @@ def export_model(chunk, path, region=None, zmin: float | None = None, zmax: floa
     model_path = chunk.product_path("model")
     if model_path is None or not model_path.exists():
         raise RuntimeError("no model in chunk")
-    import trimesh
+    from .mesh_ply import read_mesh, write_mesh
 
-    from ..engine.confidence import read_model_confidence
-
-    mesh = trimesh.load(str(model_path), process=False, force="mesh")
-    verts, faces = np.asarray(mesh.vertices, np.float64), np.asarray(mesh.faces, np.int64)
-    colors = np.asarray(mesh.visual.vertex_colors, np.uint8)[:, :3] if mesh.visual.kind == "vertex" else None
-    conf = read_model_confidence(model_path)
+    mesh = read_mesh(model_path)
     if cropping:
         from ..engine.crop import faces_inside
 
-        keep = faces_inside(chunk, verts, faces, _region(region), zmin, zmax)
+        keep = faces_inside(chunk, mesh.xyz, mesh.faces, _region(region), zmin, zmax)
         if not keep.any():
             raise ValueError("no face of the model lies inside the region")
-        verts, faces, used = _subset(verts, faces, keep)
-        colors = None if colors is None else colors[used]
-        conf = None if conf is None else conf[used]
-    world = verts @ chunk.transform[:3, :3].T + chunk.transform[:3, 3]
+        mesh = mesh.subset_faces(keep)
+    texture = textured if textured is not None and not legacy and textured.exists() else None
+    if mesh.texcoords is None:
+        texture = None
+    world = mesh.xyz @ chunk.transform[:3, :3].T + chunk.transform[:3, 3]
     if path.suffix.lower() == ".ply":
-        from .mesh_ply import write_mesh_ply
+        out = mesh.copy()
+        out.set_xyz(world, double=True)
+        if texture is not None:
+            name = path.stem + "_texture" + texture.suffix
+            shutil.copy2(texture, path.with_name(name))
+            out.set_texture_file(name)
+        else:
+            out.texcoords = None
+            out.set_texture_file(None)
+        return write_mesh(path, out)
+    if path.suffix.lower() == ".obj" and texture is not None:
+        from ..engine.texturing import write_obj
 
-        return write_mesh_ply(path, world, faces, colors, double=True,
-                              extra={"confidence": conf} if conf is not None else None)
-    out = trimesh.Trimesh(world, faces, vertex_colors=colors, process=False)
+        name = path.stem + "_texture" + texture.suffix
+        write_obj(path, mesh.xyz, mesh.faces, mesh.texcoords.reshape(-1, 3, 2), name, transform=chunk.transform)
+        shutil.copy2(texture, path.with_name(name))
+        return path
+    import trimesh
+
+    colors = mesh.colors
+    out = trimesh.Trimesh(world, mesh.faces, vertex_colors=colors, process=False)
     out.export(str(path))
     return path
 

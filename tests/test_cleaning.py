@@ -206,7 +206,12 @@ def test_cropped_exports_and_crops(processed, tmp_path):
     assert len(ch.point_cloud) == len(las) < n
     faces_before = len(ch.model.faces)
     rep = ch.crop_model(tri)
-    assert rep["faces"] < faces_before and ch.product_path("model_textured") is None
+    from pyarchinit_photogrammetry.io.mesh_ply import read_mesh
+
+    kept = read_mesh(ch.product_path("model"))
+    assert rep["faces"] < faces_before and len(kept.faces) == rep["faces"]
+    assert ch.product_path("model_textured") is not None and kept.texcoords is not None  # the texture stays
+    assert kept.colors is not None
     ch.crop_dem(tri)
     with rasterio.open(ch.dem_path) as src:
         assert src.width < 2 * src.height + 10_000  # cropped in place, still readable

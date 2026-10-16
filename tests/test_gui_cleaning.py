@@ -136,7 +136,8 @@ def test_crop_products_export_and_in_the_project(win, monkeypatch, tmp_path):
     w.crop_products(geom)
     w.runner.wait()
     assert {k for k, _ in seen[0][1]["what"].choices} == {"dem", "orthomosaic", "model", "point_cloud"}
-    assert sorted(p.name for p in out.iterdir()) == ["saggio_1_dem.tif", "saggio_1_modello.ply", "saggio_1_nuvola.las",
+    assert sorted(p.name for p in out.iterdir()) == ["saggio_1_dem.tif", "saggio_1_modello.ply",
+                                                     "saggio_1_modello_texture.jpg", "saggio_1_nuvola.las",
                                                      "saggio_1_ortofoto.tif", "saggio_1_poligono.geojson"]
     assert infos and "saggio_1_dem.tif" in infos[-1]
     n_points = len(ch.point_cloud)

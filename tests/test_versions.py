@@ -136,7 +136,9 @@ def test_versions_in_the_interface(excavation, tmp_path, monkeypatch):
                 walk(item.child(i))
 
         walk(w.workspace.topLevelItem(0))
-        assert any(t.startswith("DEM  -  Terreno") for t in labels) and any(t.startswith("Superficie") for t in labels)
+        # name (size, as Metashape shows it)  -  name of the active version; kept versions under it
+        assert any(t.startswith("DEM  (121 x 81 px, 5,00 cm/px)  -  Terreno") for t in labels), labels
+        assert any(t.startswith("Superficie   (121 x 81 px, 5,00 cm/px, ") for t in labels), labels
         w.show_version("dem", kept["id"])
         assert w.ortho_view.path == versions.version_file(ch, "dem", kept["id"])
         w.dem_difference(kept["id"])

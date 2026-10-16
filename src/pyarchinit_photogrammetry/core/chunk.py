@@ -106,13 +106,18 @@ class Chunk:
 
     @property
     def model(self):
-        """The mesh as a ``trimesh.Trimesh`` in internal coordinates (or ``None``)."""
+        """The mesh as a ``trimesh.Trimesh`` in internal coordinates with its vertex colours (or
+        ``None``). Read with :func:`io.mesh_ply.read_mesh`: trimesh alone drops the colours of a
+        mesh with texture coordinates and splits its vertices along the seams."""
         p = self.product_path("model")
         if not p or not p.exists():
             return None
         import trimesh
 
-        return trimesh.load(str(p), process=False, force="mesh")
+        from ..io.mesh_ply import read_mesh
+
+        m = read_mesh(p)
+        return trimesh.Trimesh(m.xyz, m.faces, vertex_colors=m.colors, process=False)
 
     @property
     def dem_path(self) -> Path | None:
@@ -463,11 +468,14 @@ class Chunk:
                                    progress=as_progress(progress))
 
     def build_texture(self, texture_size: int = 4096, progress: ProgressCallback | None = None,
-                      skip_unreadable: bool = False) -> Path:
+                      skip_unreadable: bool = False, mapping: str = "auto") -> Path:
+        """Texture of the model: ``mapping`` "orthophoto" (adaptive, for terrain seen from the
+        air), "generic" (objects) or "auto". Returns the texture image (beside ``model.ply``,
+        which gets the texture coordinates)."""
         from ..engine import texturing
 
         return texturing.build_texture(self, texture_size=texture_size, progress=as_progress(progress),
-                                       skip_unreadable=skip_unreadable)
+                                       skip_unreadable=skip_unreadable, mapping=mapping)
 
     def build_dem(self, resolution: float | None = None, source: str = "point_cloud", interpolate: bool = True,
                   classes=None, progress: ProgressCallback | None = None) -> Path:

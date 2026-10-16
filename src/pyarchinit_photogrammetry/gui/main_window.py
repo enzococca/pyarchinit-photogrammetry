@@ -2031,14 +2031,27 @@ class MainWindow(QMainWindow):
     def build_texture(self) -> None:
         if not self._need_chunk(aligned=True, product="model"):
             return
-        v = ParamDialog.ask(self, "Texture", [Field("size", "Dimensione texture", 4096,
-                                                    choices=[(2048, "2048"), (4096, "4096"), (8192, "8192")])])
+        from ..io.mesh_ply import face_count
+
+        faces = face_count(self.chunk.product_path("model")) or 0
+        v = ParamDialog.ask(self, "Texture", [
+            Field("mapping", "Mappatura", "auto",
+                  choices=[("auto", "Automatica"), ("orthophoto", "Ortofoto adattiva (terreno, rilievi da drone)"),
+                           ("generic", "Generica (oggetti, modelli piccoli)")]),
+            Field("size", "Dimensione texture", 8192 if faces > 1_000_000 else 4096,
+                  choices=[(2048, "2048"), (4096, "4096"), (8192, "8192")])],
+            intro=f"Modello di {faces:,} facce. ".replace(",", ".")
+                  + "Ortofoto adattiva: la texture e' l'ortofoto del modello e le pareti ripide hanno spazi propri "
+                    "(come in Metashape, per i rilievi dall'alto); generica: ogni faccia ha il suo spazio "
+                    "nell'immagine (per oggetti 3D; su milioni di facce ognuna resta di pochi pixel). "
+                    "Automatica sceglie l'ortofoto per i modelli grandi rivolti verso l'alto.")
         if not v:
             return
         skip = self._photos_to_skip("Texture")
         if skip is None:
             return
-        self.run_task("Texture", lambda p: self.chunk.build_texture(v["size"], progress=p, skip_unreadable=skip),
+        self.run_task("Texture", lambda p: self.chunk.build_texture(v["size"], progress=p, skip_unreadable=skip,
+                                                                    mapping=v.get("mapping", "auto")),
                       lambda _r: self._show_model("model_textured"))
 
     def build_dem(self) -> None:

@@ -17,6 +17,8 @@ can show the counts first.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 from ..core.chunk import Chunk
@@ -318,32 +320,61 @@ def boundary_vertices(faces: np.ndarray, n_vertices: int) -> np.ndarray:
     return out
 
 
+def store_model(chunk: Chunk, mesh, texture_kept: bool = True) -> Path:
+    """Write a changed model in the chunk folder (every vertex property kept). The texture stays
+    when the faces kept their texture coordinates (faces removed only); otherwise, or when the
+    texture is a separate OBJ made from the old faces, it is left out: build it again."""
+    from ..io.mesh_ply import write_mesh
+
+    textured = chunk.product_path("model_textured")
+    legacy = textured is not None and textured.suffix.lower() == ".obj"
+    if not texture_kept or mesh.texcoords is None or legacy:
+        mesh.texcoords = None
+        mesh.set_texture_file(None)
+        chunk.products.pop("model_textured", None)
+    path = write_mesh(chunk.own_product_path("model"), mesh)
+    chunk._set_product("model", path)
+    preview = chunk.data_dir / "model_preview.ply"
+    if preview.exists():
+        preview.unlink()
+    return path
+
+
+def _model(chunk: Chunk):
+    from ..io.mesh_ply import read_mesh
+
+    path = chunk.product_path("model")
+    if path is None or not path.exists():
+        raise RuntimeError("build the model first")
+    return read_mesh(path)
+
+
+def _nearest_fields(mesh, old_xyz: np.ndarray, new_xyz: np.ndarray):
+    """Vertex properties for new vertices from the nearest old vertex (positions replaced)."""
+    from scipy.spatial import cKDTree
+
+    idx = cKDTree(old_xyz).query(new_xyz, workers=-1)[1]
+    out = mesh.vertices[idx].copy()
+    for k, n in enumerate("xyz"):
+        out[n] = new_xyz[:, k]
+    return out
+
+
 def clean_model(chunk: Chunk, min_confidence: int | None = None, min_component: float | None = None,
                 max_edge: float | None = None, repair: bool = True, fill_holes: float | None = None,
                 smooth: int = 0, target_faces: int | None = None, progress: Progress | None = None) -> dict:
     """Clean the model and store it: :func:`face_filters` (same keywords), then holes closed up
     to ``fill_holes`` (radius, chunk units, e.g. metres), ``smooth`` Taubin iterations (the
     borders stay where they are) and decimation to ``target_faces``. ``repair`` also welds the
-    vertices repeated at the same position (the seams of a textured mesh), so that smoothing
-    does not open cracks and the seams are not taken for holes. Vertex colours and confidence
-    are kept (the confidence of new or moved vertices comes from the nearest old vertex). The
-    textured model, made from the old faces, is left out: build the texture again."""
-    import trimesh
-
-    from .confidence import read_model_confidence, write_model
-
+    vertices repeated at the same position, so that smoothing does not open cracks and seams are
+    not taken for holes. Every vertex property (colours, confidence...) is kept; new vertices
+    take those of the nearest old one. The texture stays when only faces were removed (and
+    smoothing moved the vertices a little); closing holes or decimating leaves it out."""
     progress = progress or Progress()
-    path = chunk.product_path("model")
-    if path is None or not path.exists():
-        raise RuntimeError("build the model first")
     progress(0.02, "Lettura del modello")
-    mesh = trimesh.load(str(path), process=False, force="mesh")
-    conf = read_model_confidence(path)
-    v = np.asarray(mesh.vertices, np.float64)
-    f = np.asarray(mesh.faces, np.int64)
-    colors = None
-    if mesh.visual.kind == "vertex":
-        colors = np.asarray(mesh.visual.vertex_colors, np.uint8)
+    mesh = _model(chunk)
+    v, f = mesh.xyz, mesh.faces
+    conf = mesh.field("confidence")
     n_faces0, n_vertices0 = len(f), len(v)
     scale = chunk.scale or 1.0
     progress(0.1, "Filtri sulle facce")
@@ -354,72 +385,61 @@ def clean_model(chunk: Chunk, min_confidence: int | None = None, min_component: 
         remove |= m
     if remove.all():
         raise RuntimeError("every face would be removed: the filters are too strict")
-    f = f[~remove]
+    mesh = mesh.subset_faces(~remove)
     info = {"faces_before": n_faces0, "vertices_before": n_vertices0,
             "by_filter": {k: int(np.count_nonzero(m)) for k, m in masks.items()}, "removed_faces": int(remove.sum())}
+    texture_kept = True
     if repair:
-        first, inverse = weld(v)
-        if len(first) < len(v):
-            info["welded_vertices"] = int(len(v) - len(first))
-            v, f = v[first], inverse[f]
-            conf = None if conf is None else conf[first]
-            colors = None if colors is None else colors[first]
-            f = f[(f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2])]
+        first, inverse = weld(mesh.xyz)
+        if len(first) < len(mesh.vertices):
+            info["welded_vertices"] = int(len(mesh.vertices) - len(first))
+            f = inverse[mesh.faces]
+            ok = (f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2])
+            from ..io.mesh_ply import MeshData
+
+            mesh = MeshData(mesh.vertices[first], f[ok], None if mesh.texcoords is None else mesh.texcoords[ok],
+                            mesh.comments)
     if fill_holes:
         progress(0.35, "Chiusura dei buchi")
         import open3d as o3d
 
+        v, f = mesh.xyz, mesh.faces
         t = o3d.t.geometry.TriangleMesh(o3d.core.Tensor(v.astype(np.float32)), o3d.core.Tensor(f.astype(np.int32)))
         filled = t.fill_holes(hole_size=float(fill_holes) / scale)
         nv = filled.vertex.positions.numpy().astype(np.float64)
         nf = filled.triangle.indices.numpy().astype(np.int64)
-        if len(nv) == len(v):  # the filter adds faces on the existing border vertices
-            info["filled_faces"] = int(len(nf) - len(f))
-            f = nf
-        else:  # pragma: no cover - other versions of Open3D: map the attributes to the new vertices
-            info["filled_faces"] = int(len(nf) - len(f))
-            from scipy.spatial import cKDTree
-
-            idx = cKDTree(v).query(nv)[1]
-            conf = None if conf is None else conf[idx]
-            colors = None if colors is None else colors[idx]
-            v, f = nv, nf
+        info["filled_faces"] = int(len(nf) - len(f))
+        if info["filled_faces"]:
+            texture_kept = False  # the new faces have no texture coordinates
+            mesh.texcoords = None
+            if len(nv) != len(v):  # pragma: no cover - other versions of Open3D add vertices
+                mesh.vertices = _nearest_fields(mesh, v, nv)
+            mesh.faces = nf
     if smooth:
         progress(0.55, f"Levigatura ({smooth} passi)")
-        v = _taubin(v, f, int(smooth), fixed=boundary_vertices(f, len(v)))
+        mesh.set_xyz(_taubin(mesh.xyz, mesh.faces, int(smooth), fixed=boundary_vertices(mesh.faces, len(mesh.vertices))))
         info["smooth"] = int(smooth)
-    if target_faces and len(f) > int(target_faces):
+    if target_faces and len(mesh.faces) > int(target_faces):
         progress(0.7, f"Semplificazione a {int(target_faces):,} facce")
         import open3d as o3d
-        from scipy.spatial import cKDTree
 
+        v, f = mesh.xyz, mesh.faces
+        colors = mesh.colors
         m = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(v), o3d.utility.Vector3iVector(f.astype(np.int32)))
         if colors is not None:
-            m.vertex_colors = o3d.utility.Vector3dVector(colors[:, :3].astype(np.float64) / 255.0)
+            m.vertex_colors = o3d.utility.Vector3dVector(colors.astype(np.float64) / 255.0)
         m = m.simplify_quadric_decimation(int(target_faces))
         nv, nf = np.asarray(m.vertices), np.asarray(m.triangles, np.int64)
-        idx = cKDTree(v).query(nv, workers=-1)[1]
-        conf = None if conf is None else conf[idx]
-        if m.has_vertex_colors():
-            rgb = np.clip(np.asarray(m.vertex_colors) * 255.0 + 0.5, 0, 255).astype(np.uint8)
-            colors = np.column_stack([rgb, np.full(len(rgb), 255, np.uint8)])
-        else:
-            colors = None if colors is None else colors[idx]
-        v, f = nv, nf
+        mesh.vertices = _nearest_fields(mesh, v, nv)
+        if colors is not None and m.has_vertex_colors():
+            mesh.set_colors(np.clip(np.asarray(m.vertex_colors) * 255.0 + 0.5, 0, 255).astype(np.uint8))
+        mesh.faces, mesh.texcoords = nf, None
+        texture_kept = False
     progress(0.85, "Salvataggio del modello")
-    used = np.zeros(len(v), bool)
-    used[f.ravel()] = True
-    remap = np.cumsum(used) - 1
-    v, f = v[used], remap[f]
-    conf = None if conf is None else conf[used]
-    colors = None if colors is None else colors[used]
-    out = trimesh.Trimesh(v, f, vertex_colors=colors, process=False)
-    chunk._set_product("model", write_model(chunk.own_product_path("model"), out, conf))
-    preview = chunk.data_dir / "model_preview.ply"
-    if preview.exists():
-        preview.unlink()
-    chunk.products.pop("model_textured", None)
-    info.update({"faces": int(len(f)), "vertices": int(len(v))})
+    mesh = mesh.subset_faces(np.ones(len(mesh.faces), bool))  # unused vertices out
+    store_model(chunk, mesh, texture_kept)
+    info.update({"faces": int(len(mesh.faces)), "vertices": int(len(mesh.vertices)),
+                 "texture_kept": bool(texture_kept and mesh.texcoords is not None)})
     meta = chunk.meta.setdefault("model", {})
     meta["cleaned"] = {k: val for k, val in info.items() if k != "by_filter"}
     progress(1.0, f"Modello pulito: {info['faces']:,} facce (prima {n_faces0:,})")
@@ -428,36 +448,19 @@ def clean_model(chunk: Chunk, min_confidence: int | None = None, min_component: 
 
 def delete_faces(chunk: Chunk, face_mask: np.ndarray, keep_selected: bool = False) -> dict:
     """Delete the faces of ``face_mask`` from the model (or keep only them), Metashape's
-    delete / crop selection; colours and confidence are kept."""
-    import trimesh
-
-    from .confidence import read_model_confidence, write_model
-
-    path = chunk.product_path("model")
-    if path is None or not path.exists():
-        raise RuntimeError("build the model first")
-    mesh = trimesh.load(str(path), process=False, force="mesh")
-    conf = read_model_confidence(path)
+    delete / crop selection; every vertex property and the texture are kept."""
+    mesh = _model(chunk)
     mask = np.asarray(face_mask, bool)
     if len(mask) != len(mesh.faces):
         raise ValueError("the selection does not match the model")
     keep = mask if keep_selected else ~mask
     if not keep.any():
         raise RuntimeError("no face would remain")
-    f = np.asarray(mesh.faces, np.int64)[keep]
-    used = np.zeros(len(mesh.vertices), bool)
-    used[f.ravel()] = True
-    remap = np.cumsum(used) - 1
-    colors = np.asarray(mesh.visual.vertex_colors, np.uint8)[used] if mesh.visual.kind == "vertex" else None
-    out = trimesh.Trimesh(np.asarray(mesh.vertices)[used], remap[f], vertex_colors=colors, process=False)
-    chunk._set_product("model", write_model(chunk.own_product_path("model"), out, None if conf is None else conf[used]))
-    preview = chunk.data_dir / "model_preview.ply"
-    if preview.exists():
-        preview.unlink()
-    chunk.products.pop("model_textured", None)
-    return {"faces_before": int(len(mask)), "faces": int(len(f)), "removed_faces": int(len(mask) - len(f))}
+    out = mesh.subset_faces(keep)
+    store_model(chunk, out, texture_kept=True)
+    return {"faces_before": int(len(mask)), "faces": int(len(out.faces)), "removed_faces": int(len(mask) - len(out.faces))}
 
 
 __all__ = ["clean_model", "clean_point_cloud", "color_mask", "connected_groups", "delete_faces", "delete_points",
            "face_filters", "point_filters", "point_spacing", "small_groups", "sparse_points", "statistical_outliers",
-           "summarize", "weld"]
+           "store_model", "summarize", "weld"]

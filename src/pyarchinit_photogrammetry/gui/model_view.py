@@ -8,7 +8,8 @@ import numpy as np
 from PySide6.QtCore import QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel, QListWidget,
-                               QListWidgetItem, QPushButton, QSizePolicy, QStackedLayout, QVBoxLayout, QWidget)
+                               QListWidgetItem, QPushButton, QSizePolicy, QSpinBox, QStackedLayout, QVBoxLayout,
+                               QWidget)
 
 from .flow_layout import FlowLayout
 from .scene import OrbitCamera, SceneData, available_views, build_scene, sample_mesh_colors, splat
@@ -30,6 +31,7 @@ class SoftwareCanvas(QWidget):
         self.preview = None
         self.show_cameras = True
         self.show_markers = True
+        self.point_size = 2  # screen pixels of a point
         self._image: QImage | None = None
         self._dirty = True
         self._dragging = False
@@ -57,6 +59,11 @@ class SoftwareCanvas(QWidget):
         self._dirty = True
         self.update()
 
+    def set_point_size(self, px: float) -> None:
+        self.point_size = max(1, int(round(px)))
+        self._dirty = True
+        self.update()
+
     def reset_view(self) -> None:
         self.cam = OrbitCamera(self.sd.center.astype(float), self.sd.extent * 1.1, up=self.sd.up)
         self._dirty = True
@@ -74,7 +81,8 @@ class SoftwareCanvas(QWidget):
         ratio = self.devicePixelRatioF()
         W, H = int(w * ratio), int(h * ratio)
         pts, cols = (self.preview if (preview and self.preview is not None) else (self.pts, self.cols))
-        size = 3 if (preview and self.preview is not None) else 2
+        base = max(1, int(round(self.point_size * ratio)))
+        size = base + 1 if (preview and self.preview is not None) else base
         img = splat(pts, cols, self.cam, W, H, size=size)
         self._image = QImage(img.data, W, H, 3 * W, QImage.Format.Format_RGB888).copy()
         self._image.setDevicePixelRatio(ratio)
@@ -183,6 +191,14 @@ class VtkCanvas(QWidget):
         self.sd = SceneData(np.zeros(3))
         self.show_cameras = True
         self.show_markers = True
+        self.point_size = 2.0  # screen pixels of a point
+        self._cloud_actor = None
+
+    def set_point_size(self, px: float) -> None:
+        self.point_size = float(px)
+        if self._cloud_actor is not None:
+            self._cloud_actor.GetProperty().SetPointSize(self.point_size)
+            self.plotter.render()
 
     def set_scene(self, sd: SceneData, reset: bool = True) -> None:
         import pyvista as pv
@@ -190,10 +206,12 @@ class VtkCanvas(QWidget):
         self.sd = sd
         pl = self.plotter
         pl.clear()
+        self._cloud_actor = None
         if sd.points is not None and len(sd.points):
             cloud = pv.PolyData(sd.points)
             cloud["rgb"] = sd.colors
-            pl.add_mesh(cloud, scalars="rgb", rgb=True, point_size=2.5, render_points_as_spheres=False)
+            self._cloud_actor = pl.add_mesh(cloud, scalars="rgb", rgb=True, point_size=self.point_size,
+                                            render_points_as_spheres=False, show_scalar_bar=False)
         if sd.mesh_vertices is not None:
             faces = np.hstack([np.full((len(sd.mesh_faces), 1), 3), sd.mesh_faces]).astype(np.int64).ravel()
             mesh = pv.PolyData(sd.mesh_vertices, faces)
@@ -437,6 +455,12 @@ class ModelView(QWidget):
         self.color_combo.setToolTip("Colori: quelli delle foto, le classi (con la legenda per nasconderle), la quota "
                                     "o la confidenza (quante mappe di profondita' confermano ogni punto o vertice)")
         self.color_combo.currentIndexChanged.connect(self._color_chosen)
+        self.point_spin = QSpinBox()
+        self.point_spin.setRange(1, 8)
+        self.point_spin.setValue(2)
+        self.point_spin.setSuffix(" px")
+        self.point_spin.setToolTip("Dimensione dei punti sullo schermo")
+        self.point_label = QLabel("Punti:")
         self.b_lasso = QPushButton("Lazo")
         self.b_lasso.setToolTip("Seleziona con un lazo punti della nuvola (classe, elimina, tieni) o facce del "
                                 "modello (elimina, tieni)")
@@ -452,6 +476,8 @@ class ModelView(QWidget):
         bar.addWidget(self.combo)
         bar.addWidget(self.version_label)
         bar.addWidget(self.color_combo)
+        bar.addWidget(self.point_label)
+        bar.addWidget(self.point_spin)
         bar.addWidget(self.info_label)
         bar.addWidget(self.b_lasso)
         bar.addWidget(self.cb_cams)
@@ -468,6 +494,7 @@ class ModelView(QWidget):
         if self.canvas is None:
             self.canvas = SoftwareCanvas(self)
         b_reset.clicked.connect(lambda: self.canvas.reset_view())
+        self.point_spin.valueChanged.connect(lambda v: self.canvas.set_point_size(v))
         b_top.clicked.connect(lambda: self.canvas.top_view())
         self.lasso = LassoOverlay(self)
         self.lasso.finished.connect(self._lasso_finished)
@@ -578,6 +605,9 @@ class ModelView(QWidget):
     def _update_tools(self) -> None:
         self._fill_color_combo(self.kind)
         self.color_combo.setVisible(self.kind in self.COLOR_MODES)
+        points = self.kind in ("point_cloud", "tie_points")
+        self.point_label.setVisible(points)
+        self.point_spin.setVisible(points)
         # edits go to the active cloud or model, not to a kept version
         self.b_lasso.setVisible(self.kind in ("point_cloud", "model") and not self.paths)
         mode = self.color_mode()
@@ -692,8 +722,10 @@ class ModelView(QWidget):
         hidden = self._hidden("class") if mode == "class" else set()
         bins = self._hidden("confidence") if mode == "confidence" else set()
         highlight = self.highlight if self.kind == "point_cloud" and not self.paths else None
+        vtk = self.backend == "vtk"  # the graphics card draws millions of points; numpy a few hundred thousand
         sd = (build_scene(self.chunk, self.kind, color_mode=mode, hidden_classes=hidden, paths=self.paths,
-                          hidden_bins=bins, highlight=highlight)
+                          hidden_bins=bins, highlight=highlight, max_points=3_000_000 if vtk else 400_000,
+                          max_textured_faces=8_000_000 if vtk else 3_000_000)
               if self.chunk is not None else SceneData(np.zeros(3)))
         self.sd = sd
         if mode == "class":
