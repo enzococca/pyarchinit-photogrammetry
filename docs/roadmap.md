@@ -24,18 +24,27 @@ in metres, corrected cut/fill volumes, signing and notarization in the build. US
 relationships), 3D proxies of stratigraphic units (Extended Matrix OBJ, 3D media in PyArchInit),
 IFC proxies with quantities, materials, phase groups and relationships.
 
-## 0.5 - Interface
+## 0.5 - Excavation records, point classes, engine (done)
 
-* Batch processing over several chunks; chunk alignment and merging.
+One site per project; drawn units and spot heights with the fields of `pyunitastratigrafiche`
+and `pyarchinit_quote`, saved in the project and published once; spot-height tool separate
+from SAM; SAM 2.1 by tap, box, area or the whole orthomosaic in tiles, with corrections, on
+CUDA or the Apple GPU; point classes shown, hidden and corrected with a lasso in the 3D view;
+trainable point classifier with reusable models; mesh from the depth maps (TSDF fusion);
+camera optimisation constrained by the control points; chunk alignment and merging.
+
+## 0.6 - Interface
+
+* Batch processing over several chunks.
 * Section and plan-slice tools drawn directly in the 3D view; editable markers in 3D.
-* Point-cloud class editing (lasso) and filtering by class or confidence.
+* Filtering the cloud by confidence.
 * PyArchInit panel: browsing media linked to US.
 * English/Italian interface translation.
 
 ## Engine
 
-* GCP-constrained bundle adjustment (markers as observations in the adjustment).
-* Plane-sweep MVS backend for strongly converging close-range photos.
+* Plane-sweep MVS backend for strongly converging close-range photos (a first prototype on the
+  Apple GPU found the same depths as the CPU path but ran 30 times slower than OpenCV SGBM).
 * Seamless texture blending and multi-page atlases.
 * Rig and multi-camera support, rolling-shutter compensation for drones.
 * E57 import/export, Cloud Optimized GeoTIFF output, tiled 3D (3D Tiles/I3S).

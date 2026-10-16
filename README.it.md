@@ -128,8 +128,9 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
   gruppi di punti; un classificatore addestrato su queste correzioni (random forest su
   geometria a tre scale, altezza sul terreno e colore) classifica il resto, e il modello
   (`.ppgclf`) si riusa su altri scavi.
-* **Mesh dalle mappe di profondità** (fusione TSDF, come in Metashape) e **ottimizzazione delle
-  camere sui punti di controllo** (compensazione vincolata ai GCP).
+* **Mesh dalle mappe di profondità** (fusione TSDF, come in Metashape), **ottimizzazione delle
+  camere sui punti di controllo** (compensazione vincolata ai GCP), **allinea e unisci chunk**
+  (con i marker, le foto in comune o le nuvole che si sovrappongono).
 
 ## Schede US, proxy 3D e BIM
 

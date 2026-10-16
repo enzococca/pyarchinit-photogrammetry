@@ -67,7 +67,7 @@ clipboard.
 
 * **File**: new/open/save, recent projects, export (cloud, model, DEM, orthomosaic, cameras,
   references), HTML report, *Crea e apri progetto demo*, *Pagina iniziale*.
-* **Flusso di lavoro**: add photos/folder, add chunk, detect coded markers, align (quality,
+* **Flusso di lavoro**: add photos/folder, add chunk, *Allinea chunk* (bring other chunks into the frame of a reference chunk by markers with the same name, photos in common or overlapping clouds), *Unisci chunk* (a new chunk with the photos, markers, tie points, clouds and optionally meshes of aligned chunks), detect coded markers, align (quality,
   pair selection, limits), import references, update georeferencing, optimise cameras, dense
   cloud (quality, filter, engine), *Ritaglia nuvola densa* (height range and/or a cylinder
   around the turntable axis: removes the mat and the targets before meshing an object), model

@@ -144,7 +144,8 @@ is installed on first use (PyTorch in a separate environment, see the same page)
 * **Point classes you can see and correct**: the 3D view colours the cloud by class with a
   legend, the lasso gives groups of points the right class, and a classifier trained on those
   corrections classifies the rest (models reusable on other excavations).
-* **Mesh from the depth maps** (TSDF fusion) and **camera optimisation on the control points**.
+* **Mesh from the depth maps** (TSDF fusion), **camera optimisation on the control points**, and
+  **chunks aligned and merged** (by markers, common photos or overlapping clouds).
 
 ## Desktop interface
 
@@ -203,7 +204,7 @@ then `ppg.app.document` inside the script (in the GUI: **Strumenti > Esegui scri
 
 | Area | Features |
 | --- | --- |
-| Alignment | SIFT features and matching, incremental SfM (COLMAP via pycolmap), camera calibration, bundle adjustment (optionally constrained by the control points), tie points, pair selection (exhaustive, sequential, by GNSS position) |
+| Alignment | SIFT features and matching, incremental SfM (COLMAP via pycolmap), camera calibration, bundle adjustment (optionally constrained by the control points), tie points, pair selection (exhaustive, sequential, by GNSS position), chunk alignment (markers, common photos or point clouds) and merging |
 | Dense | Depth maps and fusion on CPU (built-in), COLMAP PatchMatch on NVIDIA GPUs (Linux, `pycolmap-cuda12`), OpenMVS when installed |
 | Products | Point cloud (PLY/LAS 1.4 with classes), mesh (from the depth maps by TSDF fusion, Poisson in an isolated process with automatic fallback, or 2.5D), texture atlas (OBJ+MTL+JPG), DEM, orthomosaic, hillshade, slope, HTML report |
 | Markers | Printable ArUco/AprilTag sheets with scale bar, turntable mats with known layout, sub-pixel detection, triangulation, GCP/check points, scale bars, weighted 7-parameter transformation, any EPSG CRS (geographic GCPs go to the UTM zone) |
