@@ -120,8 +120,9 @@ of the turntable demo reconstructed from 32 synthetic photos and its profile dra
 * **QGIS, live**: *QGIS > Apri in QGIS* opens orthophoto, DEM and every drawn layer in a QGIS
   project; drawings and attribute edits appear in QGIS within a second.
 * **Metashape**: *File > Importa > Progetto Metashape* reads a `.psx` directly (calibrated
-  cameras, markers, tie points, model, exported DEM/orthophoto) and continues here (dense
-  cloud, sections, PyArchInit, IFC) without aligning again.
+  cameras, markers, tie points, model with its colours and texture, exported DEM/orthophoto)
+  and continues here (dense cloud, sections, PyArchInit, IFC) without aligning again; *Modello e
+  texture dal progetto Metashape* brings the textured model into projects imported earlier.
 * **WebODM/ODM**: the task folder or `all.zip` becomes a project with orthophoto, DEM, point
   cloud and mesh.
 * **Photo3D**: `ppg photo3d-job` is a ready Photo3D engine; sessions can also be imported.
@@ -176,6 +177,12 @@ is installed on first use (PyTorch in a separate environment, see the same page)
 * **Photos kept online only** (Dropbox, iCloud, OneDrive placeholders): every step that reads
   the photos lists them and offers to link them to another copy (*Flusso di lavoro > Ricollega
   foto*, e.g. the mission folder on an external disk) or to go on without them.
+* **Textures that can be read**: for terrain seen from the air the texture of the model is its
+  orthophoto, with separate cells for walls and sections (adaptive orthophoto mapping, as
+  Metashape; chosen by itself for large models facing up); colours and texture survive the
+  cleaning, the cropping and the confidence.
+* **3D view and workspace**: small points with an adjustable size, millions of points on the
+  graphics card; points, faces or pixels in brackets next to every product, as Metashape shows them.
 * **Large orthophotos**: built tile by tile, in parallel, with overviews; a 45,000 x 46,000 px
   orthophoto of a tell at 1.35 cm/px takes 4-6 minutes on an Apple M4 Pro. Cells seen only at
   grazing angles (more than 70 degrees from the vertical, adjustable) stay transparent instead

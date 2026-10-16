@@ -164,6 +164,13 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
 * **Foto tenute «solo online»** (segnaposto di Dropbox, iCloud, OneDrive): ogni passo che legge
   le foto le elenca e propone di collegarle a un'altra copia (*Flusso di lavoro > Ricollega
   foto*, per esempio la cartella della missione su un disco esterno) o di procedere senza.
+* **Texture leggibili**: per i rilievi dall'alto la texture del modello è la sua ortofoto, con
+  spazi propri per pareti e sezioni (mappatura a ortofoto adattiva, come in Metashape; scelta da sola
+  per i modelli grandi rivolti verso l'alto); colori e texture restano dopo pulizia, ritaglio e
+  calcolo della confidenza. L'import di Metashape porta anche la texture del modello; *File > Importa >
+  Modello e texture dal progetto Metashape* la aggiunge ai progetti importati prima.
+* **Vista 3D e area di lavoro**: punti piccoli con la dimensione regolabile, milioni di punti con la
+  scheda grafica; accanto a ogni prodotto, come in Metashape, punti, facce o pixel tra parentesi.
 * **Ortofoto grandi**: costruite a tasselli, in parallelo, con le piramidi (overview); un'ortofoto
   di 45.000 x 46.000 pixel di un tell a 1,35 cm/px richiede 4-6 minuti su un Apple M4 Pro. Le celle
   viste solo di traverso (oltre 70 gradi dalla verticale, regolabile) restano trasparenti invece di
