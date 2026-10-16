@@ -1,4 +1,5 @@
-"""Mesh generation: Poisson (arbitrary 3D) or 2.5D height field (terrain).
+"""Mesh generation: Poisson (arbitrary 3D) or 2.5D height field (terrain), from the
+dense cloud or the tie points, or volumetric fusion of the depth maps (:mod:`.tsdf`).
 
 Poisson reconstruction (PoissonRecon inside Open3D) can terminate the whole process
 on some clouds: it runs in an isolated child process (:mod:`.isolate`), with smooth
@@ -51,10 +52,20 @@ def poisson_depth(target_faces: int) -> int:
 
 
 def build_model(chunk: Chunk, source: str = "point_cloud", surface: str = "arbitrary", face_count="medium",
-                progress: Progress | None = None):
-    import trimesh
+                voxel_size: float | None = None, vertex_colors: bool = True, progress: Progress | None = None):
+    """Build the mesh and save it as the ``model`` product (``model.ply``, internal frame).
 
+    ``source``: ``"point_cloud"``, ``"tie_points"`` or ``"depth_maps"`` (TSDF fusion of
+    the depth maps, :mod:`.tsdf`; ``voxel_size`` in chunk CRS units, default twice the
+    size of a depth-map pixel on the surface). ``face_count``: ``"high"``/``"medium"``/
+    ``"low"`` (1/5, 1/15, 1/45 of the points; for depth maps, of the points they give at
+    their own resolution) or a number of faces. ``vertex_colors``: paint the vertices
+    with the colours of the points (of the photos for depth maps).
+    """
     progress = progress or Progress()
+    if source == "depth_maps":
+        mesh = _model_from_depth_maps(chunk, surface, face_count, voxel_size, vertex_colors, progress)
+        return _save_model(chunk, mesh, progress)
     pc = chunk.point_cloud if source == "point_cloud" else chunk.tie_points
     if pc is None or len(pc) < 100:
         raise RuntimeError(f"not enough points in {source} to build a mesh")
@@ -73,12 +84,46 @@ def build_model(chunk: Chunk, source: str = "point_cloud", surface: str = "arbit
             mesh = _height_field(pc.xyz, up)
     if len(mesh.faces) > target * 1.2:
         mesh = _decimate(mesh, target)
-    if pc.rgb is not None:
-        from scipy.spatial import cKDTree
+    if pc.rgb is not None and vertex_colors:
+        _paint(mesh, pc.xyz, pc.rgb)
+    return _save_model(chunk, mesh, progress)
 
-        _, idx = cKDTree(pc.xyz).query(mesh.vertices, k=1)
-        colors = np.column_stack([pc.rgb[idx], np.full(len(idx), 255, np.uint8)])
-        mesh.visual = trimesh.visual.ColorVisuals(mesh, vertex_colors=colors)
+
+def _model_from_depth_maps(chunk: Chunk, surface: str, face_count, voxel_size: float | None, vertex_colors: bool,
+                           progress: Progress):
+    """Surface fused from the depth maps, as a height field if asked, decimated and painted
+    with the fused colours."""
+    import trimesh
+
+    from .tsdf import fuse_depth_maps
+
+    voxel = None if voxel_size is None else float(voxel_size) / chunk.scale
+    fused = fuse_depth_maps(chunk, voxel_size=voxel, colors=vertex_colors, progress=progress.sub(0.0, 0.85))
+    target = _target_faces(fused.equivalent_points, face_count)
+    if surface == "height_field":
+        progress(0.86, "Height field from the fused surface")
+        mesh = _height_field(fused.vertices, up_vector_internal(chunk))
+    else:
+        mesh = trimesh.Trimesh(fused.vertices, fused.faces, process=True)
+    if len(mesh.faces) > target * 1.2:
+        progress(0.88, f"Decimating to {target:,} faces")
+        mesh = _decimate(mesh, target)
+    if fused.colors is not None:
+        _paint(mesh, fused.vertices, fused.colors)
+    return mesh
+
+
+def _paint(mesh, xyz: np.ndarray, rgb: np.ndarray) -> None:
+    """Vertex colours of the nearest coloured point."""
+    import trimesh
+    from scipy.spatial import cKDTree
+
+    _, idx = cKDTree(xyz).query(mesh.vertices, k=1)
+    colors = np.column_stack([rgb[idx], np.full(len(idx), 255, np.uint8)])
+    mesh.visual = trimesh.visual.ColorVisuals(mesh, vertex_colors=colors)
+
+
+def _save_model(chunk: Chunk, mesh, progress: Progress):
     path = chunk.data_dir / "model.ply"
     mesh.export(str(path))
     chunk._set_product("model", path)

@@ -340,11 +340,17 @@ class Chunk:
         return self.point_cloud
 
     def build_model(self, source: str = "point_cloud", surface: str = "arbitrary", face_count: int | str = "medium",
+                    voxel_size: float | None = None, vertex_colors: bool = True,
                     progress: ProgressCallback | None = None):
-        """Build a mesh. ``surface='arbitrary'`` (Poisson, true 3D) or ``'height_field'`` (2.5D, for terrain)."""
+        """Build a mesh. ``surface='arbitrary'`` (Poisson, true 3D) or ``'height_field'`` (2.5D, for terrain).
+
+        ``source='depth_maps'`` fuses the depth maps of :meth:`build_depth_maps` (TSDF, no
+        dense cloud needed); ``voxel_size`` (chunk CRS units, e.g. metres) sets its detail,
+        by default twice the size of a depth-map pixel on the surface."""
         from ..engine import meshing
 
         return meshing.build_model(self, source=source, surface=surface, face_count=face_count,
+                                   voxel_size=voxel_size, vertex_colors=vertex_colors,
                                    progress=as_progress(progress))
 
     def build_texture(self, texture_size: int = 4096, progress: ProgressCallback | None = None) -> Path:
