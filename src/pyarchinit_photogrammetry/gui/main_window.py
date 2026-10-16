@@ -2671,6 +2671,32 @@ class MainWindow(QMainWindow):
             self.classifier = ClassifierModel.load(self._classifier_path())
         return self.classifier
 
+    def _classifier_report(self, model) -> str:
+        """What the classifier learnt, in Italian: method, radii, accuracy, figures per class."""
+        from .scene import class_name
+
+        st = model.stats or {}
+        labels = self.chunk.meta.get("classes", {}) if self.chunk is not None else {}
+        num = lambda n: f"{int(n):,}".replace(",", ".")  # noqa: E731
+        method = "Random forest" if model.method == "random_forest" else "Gradient boosting"
+        lines = [f"{method}: {len(model.feature_names)} caratteristiche per punto, raggi "
+                 + " / ".join(f"{r:.3g}" for r in model.scales) + " m."]
+        acc = st.get("validation_accuracy")
+        if st:
+            check = "sui campioni esclusi da ogni albero" if st.get("validation") == "out-of-bag" else \
+                "su un quinto dei campioni tenuto da parte"
+            lines.append(f"Addestrato su {num(st.get('n_samples', 0))} campioni ({num(st.get('n_labelled_points', 0))} "
+                         "punti con la classe nota)" + ("" if acc is None else f"; accuratezza {check}: {acc:.1%}."))
+        for c in model.classes:
+            fig = st.get("per_class", {}).get(str(c), {})
+            name = class_name(c, labels)
+            if name == f"Classe {c}" and model.class_names.get(c, f"Class {c}") != f"Class {c}":
+                name = model.class_names[c]  # named in the project where the classifier was trained
+            pr, rc = fig.get("precision"), fig.get("recall")
+            lines.append(f"  {c} {name}: {num(fig.get('samples', 0))} campioni"
+                         + ("" if pr is None else f", precisione {pr:.1%}") + ("" if rc is None else f", richiamo {rc:.1%}"))
+        return "\n".join(lines)
+
     def _log_classes(self, pc) -> None:
         from ..ai.classify import class_statistics
 
@@ -2725,12 +2751,11 @@ class MainWindow(QMainWindow):
         def done(res):
             model, result = res
             self.classifier = model
-            self.log_pane.info(model.summary())
             if result is not None:
                 self._log_classes(result[0])
                 self.show_classes()
-            self._info("Classificatore addestrato", model.summary() + f"\n\nSalvato nel progetto ({path.name}): "
-                       "Salva il classificatore per usarlo in altri progetti.")
+            self._info("Classificatore addestrato", self._classifier_report(model) + "\n\nSalvato nel progetto; "
+                       "con «Salva il classificatore» si usa anche in altri scavi.")
 
         self.run_task("Addestramento del classificatore", job, done)
 
@@ -2785,7 +2810,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._exc("Classificatore non leggibile", exc)
             return False
-        self.log_pane.info(f"Classificatore caricato da {path}\n{self.classifier.summary()}")
+        self.log_pane.info(f"Classificatore caricato da {path}\n{self._classifier_report(self.classifier)}")
         return True
 
     def save_classifier(self) -> None:
