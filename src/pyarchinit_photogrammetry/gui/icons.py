@@ -75,6 +75,10 @@ ICONS = {
     "tie_points": ("mdi6.dots-grid", "teal"), "point_cloud": ("mdi6.dots-hexagon", "green"),
     "model_textured": ("mdi6.texture-box", "pink"), "orthomosaic": ("mdi6.map-outline", "amber"),
     "hillshade": ("mdi6.weather-sunny", "amber"),
+    # cleaning and cropping
+    "crop": ("mdi6.crop", "cyan"), "confidence": ("mdi6.chart-bell-curve-cumulative", "teal"),
+    "clean": ("mdi6.broom", "green"), "tie_clean": ("mdi6.filter-variant-remove", "teal"),
+    "relink": ("mdi6.link-variant", "blue"),
 }
 
 

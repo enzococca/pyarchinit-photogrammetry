@@ -26,6 +26,9 @@ class SceneData:
     point_codes: np.ndarray | None = None  # class code of each displayed point
     class_counts: dict = field(default_factory=dict)  # class code -> points in the whole cloud
     class_labels: dict = field(default_factory=dict)  # names of the project classes (chunk.meta["classes"])
+    bin_counts: dict = field(default_factory=dict)  # confidence range (index in BINS) -> points or vertices
+    confidence_missing: bool = False  # confidence colours asked for a cloud or model without confidence
+    shown_index: np.ndarray | None = None  # rows of the whole cloud that are displayed
 
     @property
     def extent(self) -> float:
@@ -113,6 +116,25 @@ def elevation_colors(z: np.ndarray) -> np.ndarray:
     return (stops[i] * (1 - f) + stops[i + 1] * f).astype(np.uint8)
 
 
+# confidence ranges (engine.confidence.BINS): grey for 0, red for what one map saw, then to blue
+CONFIDENCE_COLORS = np.array([(120, 120, 120), (215, 48, 39), (244, 109, 67), (253, 216, 110), (166, 217, 106),
+                              (26, 152, 80), (49, 104, 173)], np.uint8)
+
+
+def confidence_bins(confidence: np.ndarray) -> np.ndarray:
+    """Index of the range of :data:`engine.confidence.BINS` of every confidence value."""
+    from ..engine.confidence import BINS
+
+    edges = np.array([hi for _lo, hi in BINS])
+    return np.searchsorted(edges, np.asarray(confidence, np.int64), side="left").astype(np.uint8)
+
+
+def confidence_legend() -> list[tuple[int, str]]:
+    from ..engine.confidence import BINS, bin_label
+
+    return [(i, bin_label(lo, hi)) for i, (lo, hi) in enumerate(BINS)]
+
+
 PROXY_COLORS = np.array([[230, 25, 75], [60, 180, 75], [255, 225, 25], [67, 99, 216], [245, 130, 49], [145, 30, 180],
                          [70, 240, 240], [240, 50, 230], [188, 246, 12], [0, 128, 128], [154, 99, 36], [128, 0, 0]],
                         np.uint8)
@@ -136,11 +158,14 @@ def _offset(chunk) -> np.ndarray:
 
 def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_faces: int = 600_000,
                 frustum_size: float | None = None, color_mode: str = "rgb", hidden_classes=(),
-                paths: dict | None = None) -> SceneData:
+                paths: dict | None = None, hidden_bins=(), highlight: np.ndarray | None = None) -> SceneData:
     """Collect what the 3D view shows for ``kind`` (tie_points, point_cloud, model,
     model_textured, cameras). Point clouds are coloured by ``color_mode`` ("rgb", "class",
-    "elevation"); points of ``hidden_classes`` are left out. ``paths`` shows other files
-    than the active products (``{"point_cloud": ..., "model": ...}``: a kept version)."""
+    "elevation", "confidence"), the model by "rgb" or "confidence"; points of ``hidden_classes``
+    and points or faces in the confidence ranges ``hidden_bins`` are left out. ``highlight``
+    (a mask over the whole dense cloud) shows those points in red, all of them. ``paths``
+    shows other files than the active products (``{"point_cloud": ..., "model": ...}``: a
+    kept version)."""
     paths = paths or {}
     if chunk is None:
         return SceneData(np.zeros(3))
@@ -171,11 +196,29 @@ def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_f
             found, counts = np.unique(codes, return_counts=True)
             sd.class_counts = {int(c): int(n) for c, n in zip(found, counts)}
             sd.class_labels = dict(chunk.meta.get("classes", {}))
+            conf = getattr(pc, "confidence", None)
+            bins = None
+            if color_mode == "confidence":
+                if conf is not None and len(conf) == len(pc):
+                    bins = confidence_bins(conf)
+                    sd.bin_counts = {int(b): int(n) for b, n in enumerate(np.bincount(bins)) if n}
+                else:
+                    sd.confidence_missing = True
             idx = np.arange(len(pc))
-            if hidden_classes:
+            if hidden_classes and color_mode == "class":
                 idx = idx[~np.isin(codes, np.asarray(list(hidden_classes), np.uint8))]
+            if hidden_bins and bins is not None:
+                idx = idx[~np.isin(bins[idx], np.asarray(list(hidden_bins), np.uint8))]
             if len(idx) > max_points:
                 idx = np.sort(np.random.default_rng(0).choice(idx, max_points, replace=False))
+            marked = None
+            if highlight is not None and len(highlight) == len(pc) and highlight.any():
+                extra = np.nonzero(highlight)[0]  # every point to highlight is shown (up to max_points)
+                if len(extra) > max_points:
+                    extra = np.sort(np.random.default_rng(1).choice(extra, max_points, replace=False))
+                idx = np.union1d(idx, extra)
+                marked = highlight[idx]
+            sd.shown_index = idx
             sd.points = W(pc.xyz[idx])
             sd.point_codes = codes[idx]
             rgb = getattr(pc, "rgb", None)
@@ -183,9 +226,14 @@ def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_f
                 sd.colors = class_palette()[sd.point_codes]
             elif color_mode == "elevation":
                 sd.colors = elevation_colors(sd.points.astype(float) @ sd.up if len(idx) else np.zeros(0))
+            elif color_mode == "confidence" and bins is not None:
+                sd.colors = CONFIDENCE_COLORS[bins[idx]]
             else:
                 sd.colors = (np.asarray(rgb)[idx].astype(np.uint8) if rgb is not None and len(rgb)
                              else np.full((len(idx), 3), 200, np.uint8))
+            if marked is not None:
+                sd.colors = np.array(sd.colors, np.uint8)
+                sd.colors[marked] = (255, 20, 60)
     elif kind == "model_textured" and chunk.product_path("model_textured"):
         from ..io.exports import _read_textured_obj
 
@@ -224,9 +272,24 @@ def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_f
             faces = np.asarray(mesh.faces)
             if len(faces) > max_faces:
                 faces = faces[np.random.default_rng(0).choice(len(faces), max_faces, replace=False)]
+            bins = None
+            if color_mode == "confidence" and kind == "model":
+                from ..engine.confidence import read_model_confidence
+
+                src = mesh.metadata.get("ppg_source")
+                conf = read_model_confidence(src) if src else None
+                if conf is not None and len(conf) == len(mesh.vertices):
+                    bins = confidence_bins(conf)
+                    sd.bin_counts = {int(b): int(n) for b, n in enumerate(np.bincount(bins)) if n}
+                    if hidden_bins:
+                        faces = faces[~np.isin(bins[faces], np.asarray(list(hidden_bins), np.uint8)).any(axis=1)]
+                else:
+                    sd.confidence_missing = True
             sd.mesh_vertices, sd.mesh_faces = W(mesh.vertices), faces
             vc = getattr(mesh.visual, "vertex_colors", None)
-            if vc is not None and len(vc) == len(mesh.vertices) and np.ptp(vc[:, :3]) > 0:
+            if bins is not None:
+                sd.mesh_colors = CONFIDENCE_COLORS[bins]
+            elif vc is not None and len(vc) == len(mesh.vertices) and np.ptp(vc[:, :3]) > 0:
                 sd.mesh_colors = np.asarray(vc)[:, :3].astype(np.uint8)
     # cameras as small frusta
     cams = chunk.aligned_cameras
@@ -261,18 +324,24 @@ def display_model(chunk, max_faces: int = 600_000, path=None):
     path = Path(path) if other else chunk.product_path("model")
     if not path or not path.exists():
         return None
+
+    def load(p):
+        mesh = trimesh.load(str(p), process=False, force="mesh")
+        mesh.metadata["ppg_source"] = str(p)  # where the vertex confidence of what is shown is read
+        return mesh
+
     preview = path.parent / "model_preview.ply"
     if preview.exists() and preview.stat().st_mtime >= path.stat().st_mtime:
-        return trimesh.load(str(preview), process=False, force="mesh")
+        return load(preview)
     from ..io.mesh_ply import face_count, make_preview
 
     n = face_count(path)
     if n is not None and n > max_faces:
         try:
-            return trimesh.load(str(make_preview(path, preview, max_faces)), process=False, force="mesh")
+            return load(make_preview(path, preview, max_faces))
         except (ValueError, MemoryError, OSError) as exc:
             logging.getLogger(__name__).warning("Anteprima del modello non creata: %s", exc)
-    return trimesh.load(str(path), process=False, force="mesh") if other else chunk.model
+    return load(path)
 
 
 def _up_internal(chunk, T) -> np.ndarray:

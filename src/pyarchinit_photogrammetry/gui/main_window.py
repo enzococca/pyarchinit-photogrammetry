@@ -19,7 +19,8 @@ from .. import __version__
 from ..app import app as application
 from ..core.document import Document
 from . import theme
-from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, IfcPreviewDialog, ImageDialog, ParamDialog,
+from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelectionDialog, IfcPreviewDialog,
+                      ImageDialog, ParamDialog,
                       PublishDialog, QuotaDialog, SiteChoiceDialog, SiteDialog, TableDialog, UnitDialog, UsFormDialog,
                       choice, message)
 from .icons import app_icon, icon
@@ -37,6 +38,14 @@ TARGET_TYPES = [("aruco_4x4_50", "ArUco 4x4 (50 codici)"), ("aruco_4x4_250", "Ar
                 ("aruco_5x5_100", "ArUco 5x5 (100 codici)"), ("aruco_6x6_250", "ArUco 6x6 (250 codici)"),
                 ("apriltag_36h11", "AprilTag 36h11")]
 QUOTE_LAYER = "Quote"  # spot heights (pyarchinit_quote)
+CROP_LAYER = "Ritaglio"  # the polygon drawn with the crop tool
+
+
+def _it(value: float, decimals: int = 0) -> str:
+    """A number written the Italian way: 1.234.567 or 1.234,56."""
+    text = f"{value:,.{decimals}f}"
+    return text.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+CROP_PRODUCTS = [("dem", "DEM"), ("orthomosaic", "Ortofoto"), ("model", "Modello"), ("point_cloud", "Nuvola densa")]
 SAM_TOOLS = {"tap": "Tocco: clic sull'oggetto", "box": "Riquadro: un oggetto nel riquadro",
              "area": "Area: tutte le unita' nel riquadro"}
 SAM_MODELS = [("tiny", "Molto veloce (tiny)"), ("small", "Veloce (small)"), ("base_plus", "Accurato (base+)"),
@@ -84,6 +93,7 @@ class MainWindow(QMainWindow):
         self.tabs.setIconSize(QSize(18, 18))
         self.model_view = ModelView()
         self.model_view.points_selected.connect(self._points_selected)
+        self.model_view.faces_selected.connect(self._faces_selected)
         self.ortho_view = RasterView()
         self.photo_view = PhotoView()
         self.tabs.addTab(self.model_view, icon("view3d"), "Modello")
@@ -103,6 +113,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.stack)
         self.ortho_view.mouse_world.connect(self._show_coords)
         self.ortho_view.polygon_finished.connect(self._unit_drawn)
+        self.ortho_view.crop_finished.connect(self._crop_drawn)
+        self.ortho_view.crop_requested.connect(self.crop_with_selection)
         self.ortho_view.line_finished.connect(self._section_drawn)
         self.ortho_view.measured.connect(lambda t: (self.statusBar().showMessage(t, 30000),
                                                     self.log_pane.info(t)))
@@ -241,6 +253,9 @@ class MainWindow(QMainWindow):
         self._act(exp, "Ortofoto (GeoTIFF)...", lambda: self.export("ortho"), icon_name="ortho")
         self._act(exp, "Camere (CSV / COLMAP)...", lambda: self.export("cameras"), icon_name="cameras")
         self._act(exp, "Riferimenti (CSV)...", lambda: self.export("reference"), icon_name="reference")
+        exp.addSeparator()
+        self._act(exp, "Ritagliati con un poligono o un riquadro (DEM, ortofoto, modello, nuvola)...",
+                  self.start_crop, icon_name="crop")
         imp = m.addMenu(icon("open"), "Importa")
         self._act(imp, "Progetto Metashape (.psx)...", lambda: self.import_external("metashape"), processing=True,
                   icon_name="open")
@@ -259,7 +274,7 @@ class MainWindow(QMainWindow):
         self._act(m, "Aggiungi foto...", self.add_photos, processing=True, icon_name="photos")
         self._act(m, "Aggiungi cartella...", lambda: self.add_photos(folder=True), processing=True,
                   icon_name="folder_photos")
-        self._act(m, "Ricollega foto (altra cartella)...", lambda: self.relink_photos(), icon_name="folder_photos",
+        self._act(m, "Ricollega foto (altra cartella)...", lambda: self.relink_photos(), icon_name="relink",
                   tip="Collega le foto ai file con lo stesso nome in un'altra cartella (copia su un altro disco, "
                       "cartella spostata o tenuta «solo online» da Dropbox)")
         self._act(m, "Aggiungi chunk", self.add_chunk, icon_name="chunk_add")
@@ -274,6 +289,18 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self._act(m, "Costruisci nuvola densa...", self.build_dense, processing=True, icon_name="dense")
         self._act(m, "Ritaglia nuvola densa...", self.crop_cloud, processing=True, icon_name="eraser")
+        cl = m.addMenu(icon("clean"), "Pulizia e confidenza")
+        self._act(cl, "Calcola la confidenza (nuvola densa, modello)...", self.compute_confidence, processing=True,
+                  icon_name="confidence")
+        self._act(cl, "Mostra la confidenza nella vista 3D", self.show_confidence, icon_name="confidence")
+        cl.addSeparator()
+        self._act(cl, "Pulisci la nuvola densa...", self.clean_cloud, processing=True, icon_name="clean")
+        self._act(cl, "Pulisci il modello...", self.clean_model, processing=True, icon_name="clean")
+        self._act(cl, "Pulisci i punti di legame (selezione graduale)...", self.clean_tie_points, processing=True,
+                  icon_name="tie_clean")
+        cl.addSeparator()
+        self._act(cl, "Seleziona con il lazo nella vista 3D (elimina, tieni)", self.lasso_edit, icon_name="select")
+        self._act(cl, "Ritaglia con un poligono o un riquadro...", self.start_crop, icon_name="crop")
         self._act(m, "Costruisci modello...", self.build_model, processing=True, icon_name="model")
         self._act(m, "Costruisci texture...", self.build_texture, processing=True, icon_name="texture")
         self._act(m, "Costruisci DEM...", self.build_dem, processing=True, icon_name="dem")
@@ -292,6 +319,7 @@ class MainWindow(QMainWindow):
                                 ("polygon", "Disegna unita' stratigrafica", "polygon"),
                                 ("line", "Traccia sezione", "line"), ("measure", "Misura distanza", "measure"),
                                 ("quota", "Quota puntuale (pyarchinit_quote)", "point"),
+                                ("crop", "Ritaglio: riquadro o poligono (esporta o ritaglia i prodotti)", "crop"),
                                 ("sam", "Segment Anything (SAM)", "sam")):
             a = QAction(icon(ic), label, self, checkable=True)
             a.setChecked(mode == "pan")
@@ -370,6 +398,7 @@ class MainWindow(QMainWindow):
         for a in (self.a_sel_delete, self.a_sel_merge):
             a.setEnabled(False)
         self.a_clear_drawings = self._act(dm, "Cancella disegni", self.clear_drawings, icon_name="eraser")
+        self._act(dm, "Ritaglia o esporta con il poligono selezionato...", self.crop_with_selection, icon_name="crop")
         m.addSeparator()
         self.a_contours = self._act(m, "Curve di livello...", self.contours, processing=True, icon_name="contours")
         self.a_volume = self._act(m, "Volume scavo / riporto...", self.compute_volume, processing=True, icon_name="volume")
@@ -1417,6 +1446,553 @@ class MainWindow(QMainWindow):
         self.run_task("Ritaglio nuvola", job, lambda pc: (self.statusBar().showMessage(f"{len(pc):,} punti", 8000),
                                                            self._show_model("point_cloud")))
 
+    # ---------------------------------------------------------------- confidence and cleaning
+    def _has_depth_maps(self) -> bool:
+        ch = self.chunk
+        if ch is None or (ch.meta.get("dense") or {}).get("backend") == "openmvs":
+            return False
+        folder = ch.data_dir / "dense" / "stereo" / "depth_maps"
+        return folder.exists() and any(folder.iterdir())
+
+    def _no_depth_maps(self) -> None:
+        self._warn("La confidenza si calcola dalle mappe di profondita': costruiscile con Flusso di lavoro > "
+                   "Costruisci nuvola densa (con «Solo le mappe di profondita'» la nuvola attuale non cambia).")
+
+    def _model_confidence(self):
+        from ..engine.confidence import read_model_confidence
+
+        path = self.chunk.product_path("model")
+        return read_model_confidence(path) if path is not None and path.exists() else None
+
+    def _cloud_confidence(self):
+        from ..core.pointcloud import PointCloud
+
+        path = self.chunk.product_path("point_cloud")
+        try:
+            return PointCloud.read_column(path, "confidence") if path is not None and path.exists() else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _confidence_text(hist: dict) -> str:
+        from ..engine.confidence import BINS, bin_label
+
+        total = max(sum(hist.values()), 1)
+        parts = []
+        for lo, hi in BINS:
+            n = sum(v for c, v in hist.items() if lo <= c <= hi)
+            if n:
+                parts.append(f"{bin_label(lo, hi)}: {_it(n)} ({_it(100 * n / total, 1)}%)")
+        return "; ".join(parts)
+
+    def compute_confidence(self) -> None:
+        """Confidence of the dense points and / or of the model vertices: how many depth maps
+        confirm each of them (as Metashape)."""
+        if not self._need_chunk(aligned=True):
+            return
+        ch = self.chunk
+        targets = [(k, lab) for k, lab in (("point_cloud", "Nuvola densa"), ("model", "Modello (vertici)"))
+                   if ch.product_path(k) and ch.product_path(k).exists()]
+        if not targets:
+            self._warn("Costruisci prima la nuvola densa o il modello.")
+            return
+        if not self._has_depth_maps():
+            self._no_depth_maps()
+            return
+        v = ParamDialog.ask(self, "Calcola la confidenza", [
+            Field("what", "Calcola per", [k for k, _ in targets], choices=targets, kind="checklist"),
+            Field("tol", "Tolleranza di profondita' (% della distanza)", 1.0, minimum=0.1, maximum=10.0, decimals=1,
+                  tip="Una mappa conferma un punto se la sua superficie e' a meno di questa frazione della distanza "
+                      "dalla camera (1% come nella fusione delle mappe)")],
+            intro="La confidenza di un punto (o di un vertice del modello) e' il numero di mappe di profondita' che "
+                  "lo confermano, come in Metashape: valori bassi indicano rumore, riflessi, bordi del rilievo o "
+                  "superfici inventate per chiudere un buco. Si vede nella vista 3D (Colori > Confidenza) e si usa "
+                  "per pulire la nuvola e il modello.")
+        if not v or not v["what"]:
+            return
+
+        def job(p):
+            out = {}
+            for i, k in enumerate(v["what"]):
+                out[k] = ch.compute_confidence(k, tol=v["tol"] / 100.0,
+                                               progress=p.sub(i / len(v["what"]), 1 / len(v["what"])))
+            return out
+
+        def done(res):
+            names = dict(targets)
+            for k, info in res.items():
+                self.log_pane.info(f"Confidenza {names[k].lower()} (media {_it(info['mean'], 1)}): "
+                                   + self._confidence_text(info["histogram"]))
+            first = "point_cloud" if "point_cloud" in res else "model"
+            self.show_confidence(first)
+            self.statusBar().showMessage("Confidenza calcolata: nella legenda togli la spunta a una fascia per "
+                                         "nasconderla; Pulisci toglie i punti o le facce sotto una soglia", 15000)
+
+        self.run_task("Confidenza", job, done, refresh=False)
+
+    def show_confidence(self, kind: str | None = None) -> None:
+        """The dense cloud (or the model) coloured by confidence, with the legend of the ranges."""
+        if not self._need_chunk():
+            return
+        ch = self.chunk
+        kind = kind or ("point_cloud" if ch.product_path("point_cloud") else "model")
+        if not ch.product_path(kind):
+            self._warn("Costruisci prima la nuvola densa o il modello.")
+            return
+        self._show_model(kind)
+        self.model_view.set_color_mode("confidence")
+
+    def clean_cloud(self) -> None:
+        """Remove noise from the dense cloud (Metashape's filters): low confidence, isolated points,
+        small detached groups, classes, a colour. The points found are shown in red before."""
+        if not self._need_chunk(product="point_cloud"):
+            return
+        ch = self.chunk
+        conf = self._cloud_confidence()
+        hist_text = ""
+        if conf is not None:
+            from ..engine.confidence import histogram
+
+            hist_text = "\n\nConfidenza attuale - " + self._confidence_text(histogram(conf))
+        choices, codes = self._cloud_class_choices(noise=True)
+        noise = [c for c in codes if c in (7, 18)]
+        fields = [
+            Field("min_confidence", "Togli i punti con confidenza minore di (0 = no)", 3 if conf is not None else 0,
+                  minimum=0, maximum=255,
+                  tip="Numero di mappe di profondita' che confermano il punto: 2-3 toglie il rumore piu' evidente"),
+            Field("statistical", "Togli i punti isolati (filtro statistico)", True),
+            Field("neighbors", "    vicini considerati", 16, minimum=4, maximum=200),
+            Field("std_ratio", "    soglia (deviazioni standard)", 2.0, minimum=0.5, maximum=10.0, decimals=1),
+            Field("groups", "Togli i gruppi staccati dalla superficie", True),
+            Field("group_points", "    punti minimi di un gruppo", 1000, minimum=2, maximum=100_000_000),
+            Field("group_distance", "    distanza che separa i gruppi (m, 0 = automatica)", 0.0, minimum=0.0,
+                  maximum=1000.0, decimals=3),
+            Field("sparse", "Togli i punti senza vicini", False),
+            Field("radius", "    raggio (m, 0 = automatico)", 0.0, minimum=0.0, maximum=1000.0, decimals=3),
+            Field("min_neighbors", "    vicini minimi nel raggio", 4, minimum=1, maximum=1000)]
+        if len(codes) > 1:
+            fields.append(Field("classes", "Togli le classi", noise, choices=choices, kind="checklist"))
+        fields += [Field("use_color", "Togli i punti di un colore (cielo, bordi neri)", False),
+                   Field("color", "    colore", (135, 190, 235), kind="color"),
+                   Field("color_tol", "    tolleranza (0-255)", 40, minimum=1, maximum=255)]
+        fields += self._version_fields("point_cloud")
+        v = ParamDialog.ask(self, "Pulisci la nuvola densa", fields,
+                            intro=f"{_it(self._cloud_size())} punti. Prima vengono contati i punti da togliere e "
+                                  "mostrati in rosso nella vista 3D; poi confermi." + hist_text)
+        if not v:
+            return
+        filters = {}
+        if v["min_confidence"]:
+            filters["min_confidence"] = int(v["min_confidence"])
+        if v["statistical"]:
+            filters["statistical"] = (int(v["neighbors"]), float(v["std_ratio"]))
+        if v["groups"]:
+            filters["groups"] = (float(v["group_distance"]), int(v["group_points"]))
+        if v["sparse"]:
+            filters["sparse"] = (float(v["radius"]), int(v["min_neighbors"]))
+        if v.get("classes"):
+            filters["remove_classes"] = list(v["classes"])
+        if v["use_color"]:
+            filters["color"] = (tuple(v["color"]), float(v["color_tol"]))
+        if not filters:
+            self._warn("Scegli almeno un filtro.")
+            return
+        need_conf = "min_confidence" in filters and conf is None
+        if need_conf and not self._has_depth_maps():
+            self._no_depth_maps()
+            return
+
+        def analyse(p):
+            from ..engine.cleaning import point_filters
+
+            if need_conf:
+                ch.compute_confidence("point_cloud", progress=p.sub(0.0, 0.4))
+                p = p.sub(0.4, 0.6)
+            pc = ch.point_cloud
+            return len(pc), point_filters(ch, pc, progress=p, **filters)
+
+        def confirm(result):
+            from ..engine.cleaning import summarize
+
+            n, masks = result
+            info = summarize(masks, n)
+            if not info["removed"]:
+                self._info("Pulisci la nuvola densa", "Nessun punto da togliere con questi filtri.")
+                return
+            remove = np.zeros(n, bool)
+            for m in masks.values():
+                remove |= m
+            names = {"confidence": "confidenza bassa", "statistical": "isolati", "groups": "gruppi staccati",
+                     "sparse": "senza vicini", "classes": "classi", "color": "colore"}
+            parts = ", ".join(f"{names.get(k, k)} {_it(c)}" for k, c in info["by_filter"].items() if c)
+            self._show_model("point_cloud")
+            self.model_view.highlight = remove  # shown in red while the question is open
+            self.model_view.refresh(reset=False)
+            r = choice(self, "question", "Pulisci la nuvola densa",
+                       f"Da togliere: {_it(info['removed'])} punti su {_it(info['total'])} "
+                       f"({_it(100 * info['removed'] / n, 2)}%) - {parts}.\n\nSono mostrati in rosso nella vista 3D.",
+                       ["Togli i punti"])
+            self.model_view.highlight = None
+            if r != 0:
+                self.model_view.refresh(reset=False)
+                return
+
+            def apply(p):
+                from ..engine.cleaning import delete_points
+
+                p(0.3, "Salvataggio della nuvola pulita")
+                out = delete_points(ch, remove)
+                source = ch.meta.get("point_cloud_source") or ""
+                if "pulita" not in source:
+                    ch.meta["point_cloud_source"] = (source + ", pulita").lstrip(", ")
+                ch.meta["point_cloud_cleaning"] = info
+                return out
+
+            self.run_task("Pulizia della nuvola", self._versioned_edit("point_cloud", v, apply, "Nuvola pulita"),
+                          lambda out: (self.log_pane.info(f"Nuvola pulita: tolti {_it(out['removed'])} punti, restano "
+                                                          f"{_it(out['kept'])} ({parts})"),
+                                       self._show_model("point_cloud")))
+
+        self.run_task("Analisi della nuvola", analyse, confirm, refresh=False)
+
+    def _cloud_size(self) -> int:
+        from ..io.mesh_ply import read_header
+
+        path = self.chunk.product_path("point_cloud")
+        try:
+            with open(path, "rb") as f:
+                return next(e["count"] for e in read_header(f)[1] if e["name"] == "vertex")
+        except Exception:
+            return 0
+
+    def clean_model(self) -> None:
+        """Metashape's model cleaning: detached pieces, low-confidence faces, stretched triangles,
+        topology, holes, smoothing, decimation."""
+        if not self._need_chunk(product="model"):
+            return
+        ch = self.chunk
+        conf = self._model_confidence()
+        from ..io.mesh_ply import face_count
+
+        n_faces = face_count(ch.product_path("model")) or 0
+        v = ParamDialog.ask(self, "Pulisci il modello", [
+            Field("min_component", "Togli le parti staccate sotto il ...% della parte piu' grande (0 = no)", 1.0,
+                  minimum=0.0, maximum=100.0, decimals=2),
+            Field("min_confidence", "Togli le facce con vertici di confidenza minore di (0 = no)",
+                  1 if conf is not None else 0, minimum=0, maximum=255,
+                  tip="1 toglie le superfici che nessuna mappa di profondita' ha visto (buchi chiusi dal modello)"),
+            Field("max_edge", "Togli i triangoli stirati: lato oltre N volte la mediana (0 = no)", 0.0, minimum=0.0,
+                  maximum=1000.0, decimals=1),
+            Field("repair", "Ripara la topologia (facce degeneri e doppie)", True),
+            Field("fill_holes", "Chiudi i buchi fino a un raggio di (m, 0 = no)", 0.0, minimum=0.0, maximum=1000.0,
+                  decimals=3),
+            Field("smooth", "Levigatura (passi, 0 = no; i bordi restano fermi)", 0, minimum=0, maximum=100),
+            Field("target_faces", "Semplifica a un numero di facce (0 = no)", 0, minimum=0, maximum=2_000_000_000)]
+            + self._version_fields("model"),
+            intro=f"Modello di {_it(n_faces)} facce"
+                  + ("; confidenza dei vertici calcolata." if conf is not None else
+                     "; la confidenza dei vertici verra' calcolata dalle mappe di profondita' se usi quel filtro.")
+                  + " La texture va ricostruita dopo la pulizia.")
+        if not v:
+            return
+        need_conf = v["min_confidence"] > 0 and conf is None
+        if need_conf and not self._has_depth_maps():
+            self._no_depth_maps()
+            return
+        kw = {"min_component": v["min_component"] / 100.0 or None, "min_confidence": int(v["min_confidence"]) or None,
+              "max_edge": v["max_edge"] or None, "repair": v["repair"], "fill_holes": v["fill_holes"] or None,
+              "smooth": int(v["smooth"]), "target_faces": int(v["target_faces"]) or None}
+
+        def job(p):
+            if need_conf:
+                ch.compute_confidence("model", progress=p.sub(0.0, 0.5))
+                p = p.sub(0.5, 0.5)
+            return ch.clean_model(progress=p, **kw)
+
+        def done(info):
+            names = {"confidence": "confidenza bassa", "components": "parti staccate", "long_edges": "triangoli stirati",
+                     "topology": "topologia"}
+            parts = ", ".join(f"{names.get(k, k)} {_it(c)}" for k, c in info["by_filter"].items() if c)
+            text = (f"Modello pulito: {_it(info['faces'])} facce (prima {_it(info['faces_before'])})"
+                    + (f"; tolte {parts}" if parts else "")
+                    + (f"; {_it(info['filled_faces'])} facce per chiudere i buchi" if info.get("filled_faces") else ""))
+            self.log_pane.info(text)
+            self.statusBar().showMessage(text, 15000)
+            self._show_model("model")
+
+        self.run_task("Pulizia del modello", self._versioned_edit("model", v, job, "Modello pulito"), done)
+
+    def clean_tie_points(self) -> None:
+        """Gradual selection of the tie points: thresholds with live counts, removal, optimization."""
+        if not self._need_chunk(aligned=True):
+            return
+        ch = self.chunk
+        if not ch.product_path("reconstruction"):
+            self._warn("Il chunk non ha un modello di allineamento (punti di legame).")
+            return
+
+        def measure(p):
+            from ..engine.tiepoints import tie_point_metrics
+
+            p(0.1, "Misura dei punti di legame")
+            return tie_point_metrics(ch)
+
+        def choose(metrics):
+            from PySide6.QtWidgets import QDialog
+
+            from ..engine.tiepoints import remove_tie_points, select_tie_points
+
+            d = GradualSelectionDialog(metrics, lambda **kw: select_tie_points(ch, metrics=metrics, **kw), self)
+            if d.exec() != QDialog.DialogCode.Accepted or d.selection is None:
+                return
+            vals, sel = d.values(), d.selection
+
+            def job(p):
+                return remove_tie_points(ch, sel["ids"], optimize=vals["optimize"], progress=p)
+
+            def done(out):
+                text = (f"Punti di legame: tolti {_it(out['removed'])}, restano {_it(out['remaining'])}; errore di "
+                        f"riproiezione {_it(out['reprojection_error_before'], 3)} -> "
+                        f"{_it(out['reprojection_error_after'], 3)} px")
+                if "optimize_error" in out:
+                    text += f"; dopo l'ottimizzazione {_it(out['optimize_error'], 3)} px"
+                self.log_pane.info(text)
+                self.statusBar().showMessage(text, 15000)
+                self._show_model("tie_points")
+
+            self.run_task("Pulizia dei punti di legame", job, done)
+
+        self.run_task("Misura dei punti di legame", measure, choose, refresh=False, save=False)
+
+    def lasso_edit(self) -> None:
+        """The lasso in the 3D view on the dense cloud (or the model when it is shown)."""
+        if not self._need_chunk():
+            return
+        kind = self.model_view.kind if self.model_view.kind in ("point_cloud", "model") else None
+        kind = kind or ("point_cloud" if self.chunk.product_path("point_cloud") else
+                        "model" if self.chunk.product_path("model") else None)
+        if kind is None:
+            self._warn("Costruisci prima la nuvola densa o il modello.")
+            return
+        if self.model_view.kind != kind or self.model_view.paths:
+            self._show_model(kind)
+        self.show_view(self.model_view)
+        self.model_view.start_lasso()
+
+    def _versioned_edit(self, product: str, v: dict, job, name: str):
+        """``job(p)`` changing the active ``product`` in place, after keeping a copy of it as a
+        version when asked (dropped again if the job fails: nothing was changed)."""
+        from ..core import versions
+
+        chunk = self.chunk
+        keep = v.get("keep") == "keep" or v.get("keep_copy") is True
+        label = (v.get("version_name") or "").strip() or name
+
+        def wrapped(p):
+            kept = versions.keep_active(chunk, product, move=False) if keep else None
+            try:
+                result = job(p)
+            except BaseException:
+                if kept is not None:
+                    versions.delete(chunk, product, kept["id"])
+                raise
+            versions.set_active_name(chunk, product, label)
+            return result
+
+        return wrapped
+
+    # ---------------------------------------------------------------- crop with a polygon
+    def start_crop(self) -> None:
+        """The crop tool on the orthophoto or the DEM: drag a box or click a polygon."""
+        if not self._need_chunk():
+            return
+        ch = self.chunk
+        if self.ortho_view.tr is None:
+            if ch.orthomosaic_path is not None:
+                self._show_raster("ortho")
+            elif ch.dem_path is not None:
+                self._show_raster("dem")
+            else:
+                self._warn("Il ritaglio si disegna sull'ortofoto o sul DEM: costruiscine uno prima.")
+                return
+        self.set_draw_mode("crop")
+
+    def _selected_polygon(self):
+        """The polygons selected in the orthophoto view, merged (a unit, a section of a layer)."""
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+
+        polys = []
+        for layer, _i, attrs in self.ortho_view.selected_features():
+            if self.ortho_view.layers.get(layer, {}).get("kind") != "polygon":
+                continue
+            u = attrs.get("_unit")
+            if isinstance(u, int) and 0 <= u < len(self.units) and getattr(self.units[u], "geometry", None) is not None:
+                polys.append(self.units[u].geometry)
+            elif attrs.get("_geom") and attrs["_geom"][0] == "Polygon" and len(attrs["_geom"][1]) >= 3:
+                polys.append(Polygon(attrs["_geom"][1]))
+        polys = [g for g in polys if g is not None and not g.is_empty]
+        return unary_union(polys) if polys else None
+
+    def crop_with_selection(self) -> None:
+        geom = self._selected_polygon()
+        if geom is None:
+            self._warn("Seleziona un poligono (strumento Seleziona: per esempio un'unita' stratigrafica) oppure "
+                       "disegnalo con lo strumento Ritaglio.")
+            return
+        self.crop_products(geom)
+
+    def _crop_drawn(self, xy) -> None:
+        from shapely.geometry import Polygon
+
+        geom = Polygon(np.asarray(xy, float)[:, :2])
+        if not geom.is_valid or geom.area <= 0:
+            self._warn("Il poligono di ritaglio non e' valido (i lati si incrociano o non ha area): ridisegnalo.")
+            return
+        self.ortho_view.remove_layer(CROP_LAYER)
+        self.ortho_view.add_polygon(np.asarray(geom.exterior.coords)[:-1], color="#00b0ff", fill_alpha=25,
+                                    layer=CROP_LAYER)
+        self.crop_products(geom)
+
+    def _dem_range(self) -> tuple[float, float]:
+        """Lowest and highest DEM value (from an overview: quick), or 0, 0."""
+        path = self.chunk.dem_path if self.chunk is not None else None
+        if path is None or not path.exists():
+            return 0.0, 0.0
+        try:
+            import rasterio
+
+            with rasterio.open(path) as src:
+                f = max(1, max(src.width, src.height) // 1024)
+                z = src.read(1, out_shape=(max(1, src.height // f), max(1, src.width // f)), masked=True)
+            z = z.compressed() if np.ma.isMaskedArray(z) else np.ravel(z)
+            z = z[np.isfinite(z)]
+            return (float(z.min()), float(z.max())) if len(z) else (0.0, 0.0)
+        except Exception:
+            return 0.0, 0.0
+
+    def crop_products(self, geom) -> None:
+        """Export the products cut by a polygon, or cut them in the project (the originals kept as
+        versions). Files of other programs are never changed."""
+        if not self._need_chunk():
+            return
+        ch = self.chunk
+        avail = [(k, lab) for k, lab in CROP_PRODUCTS if ch.product_path(k) and ch.product_path(k).exists()]
+        if not avail:
+            self._warn("Non ci sono prodotti da ritagliare (DEM, ortofoto, modello o nuvola densa).")
+            return
+        x0, y0, x1, y1 = geom.bounds
+        zlo, zhi = self._dem_range()
+        v = ParamDialog.ask(self, "Ritaglia con un poligono", [
+            Field("what", "Prodotti", [k for k, _ in avail], choices=avail, kind="checklist"),
+            Field("action", "Cosa fare", "export",
+                  choices=[("export", "Esporta in una cartella"), ("project", "Ritaglia nel progetto")],
+                  tip="Esportando, il progetto non cambia; ritagliando nel progetto gli originali possono restare "
+                      "come versioni"),
+            Field("folder", "Cartella per l'esportazione", str(Path(self._last_dir()) / "ritagli"), kind="dir"),
+            Field("name", "Inizio del nome dei file", "ritaglio", kind="text"),
+            Field("model_format", "Formato del modello", "ply",
+                  choices=[("ply", "PLY (colori e confidenza)"), ("obj", "OBJ (con la texture)")],
+                  tip="PLY con coordinate in doppia precisione; OBJ con la texture se e' stata costruita"),
+            Field("cloud_format", "Formato della nuvola", "las",
+                  choices=[("las", "LAS (classi e confidenza)"), ("ply", "PLY")]),
+            Field("use_z", "Limita anche le quote (modello e nuvola)", False),
+            Field("zmin", "    quota minima", round(zlo, 3), minimum=-1e6, maximum=1e6, decimals=3),
+            Field("zmax", "    quota massima", round(zhi, 3), minimum=-1e6, maximum=1e6, decimals=3),
+            Field("keep", "Nel progetto: conserva gli originali come versioni", True)],
+            intro=(f"Poligono di {_it(geom.area, 2)} m2 ({_it(x1 - x0, 2)} x {_it(y1 - y0, 2)} m). DEM e ortofoto "
+                   "tengono la finestra del poligono, vuota (trasparente) fuori; il modello le facce con il centro "
+                   "dentro; la nuvola i punti dentro."))
+        if not v:
+            return
+        if not v["what"]:
+            self._warn("Scegli almeno un prodotto.")
+            return
+        zmin, zmax = (v["zmin"], v["zmax"]) if v["use_z"] else (None, None)
+        if zmin is not None and zmax is not None and zmin >= zmax:
+            self._warn("La quota minima deve essere minore della massima.")
+            return
+        names = dict(CROP_PRODUCTS)
+        if v["action"] == "export":
+            import re
+
+            folder = Path(v["folder"] or Path(self._last_dir()) / "ritagli")
+            stem = re.sub(r"[^\w.-]+", "_", (v["name"] or "ritaglio").strip()) or "ritaglio"
+            ext = {"dem": "_dem.tif", "orthomosaic": "_ortofoto.tif", "model": f"_modello.{v['model_format']}",
+                   "point_cloud": f"_nuvola.{v['cloud_format']}"}
+            targets = {k: folder / f"{stem}{ext[k]}" for k in v["what"]}
+            existing = [t.name for t in targets.values() if t.exists()]
+            if existing and choice(self, "question", "Ritaglia con un poligono",
+                                   f"Nella cartella ci sono gia': {', '.join(existing)}. Sovrascriverli?",
+                                   ["Sovrascrivi"]) != 0:
+                return
+
+            def job(p):
+                import json
+
+                folder.mkdir(parents=True, exist_ok=True)
+                out = []
+                for i, k in enumerate(v["what"]):
+                    p(i / len(v["what"]), f"Ritaglio: {names[k]}")
+                    if k == "dem":
+                        out.append(ch.export_dem(targets[k], region=geom))
+                    elif k == "orthomosaic":
+                        out.append(ch.export_orthomosaic(targets[k], region=geom))
+                    elif k == "model":
+                        out.append(ch.export_model(targets[k], region=geom, zmin=zmin, zmax=zmax))
+                    else:
+                        out.append(ch.export_point_cloud(targets[k], region=geom, zmin=zmin, zmax=zmax))
+                from shapely.geometry import mapping
+
+                poly = folder / f"{stem}_poligono.geojson"
+                poly.write_text(json.dumps({"type": "FeatureCollection", "features": [
+                    {"type": "Feature", "properties": {"nome": stem, "crs": ch.crs}, "geometry": mapping(geom)}]}))
+                out.append(poly)
+                return out
+
+            def done(paths):
+                for path in paths:
+                    self.log_pane.info(f"Esportato {path}")
+                self.statusBar().showMessage(f"Ritagli esportati in {folder}", 15000)
+                self._info("Ritaglia con un poligono", f"File scritti in {folder}:\n" +
+                           "\n".join(Path(x).name for x in paths))
+
+            self.run_task("Esportazione dei ritagli", job, done, refresh=False, save=False)
+            return
+
+        def job(p):
+            from ..core import versions
+
+            done = []
+            for i, k in enumerate(v["what"]):
+                p(i / len(v["what"]), f"Ritaglio: {names[k]}")
+                kept = versions.keep_active(ch, k, move=False) if v["keep"] else None
+                try:
+                    if k == "dem":
+                        ch.crop_dem(geom)
+                    elif k == "orthomosaic":
+                        ch.crop_orthomosaic(geom)
+                    elif k == "model":
+                        ch.crop_model(geom, zmin=zmin, zmax=zmax)
+                    else:
+                        ch.crop_point_cloud(region=geom, zmin=zmin, zmax=zmax)
+                except BaseException:
+                    if kept is not None:
+                        versions.delete(ch, k, kept["id"])
+                    raise
+                versions.set_active_name(ch, k, "Ritagliato")
+                done.append(k)
+            return done
+
+        def finished(products):
+            text = "Ritagliati nel progetto: " + ", ".join(names[k] for k in products)
+            if v["keep"]:
+                text += " (gli originali sono tra le versioni: tasto destro nell'area di lavoro)"
+            self.log_pane.info(text)
+            self.statusBar().showMessage(text, 15000)
+
+        self.run_task("Ritaglio dei prodotti", job, finished)
+
     def build_model(self) -> None:
         if not self._need_chunk(aligned=True):
             return
@@ -1711,6 +2287,8 @@ class MainWindow(QMainWindow):
                  "line": "Due clic: inizio e fine della sezione", "measure": "Due clic per misurare",
                  "quota": "Clic su un punto: la quota viene letta dal DEM, poi area, US e gli altri campi di "
                           "pyarchinit_quote",
+                 "crop": "Trascina un riquadro, oppure clic per i vertici e doppio clic per chiudere il poligono: poi "
+                         "scegli i prodotti da esportare ritagliati o da ritagliare nel progetto",
                  "sam": self._sam_hint()}
         self.statusBar().showMessage(hints.get(mode, ""), 20000)
 
@@ -2932,7 +3510,8 @@ class MainWindow(QMainWindow):
         self.model_view.start_lasso()
 
     def _points_selected(self, visible, inside) -> None:
-        """Points chosen with the lasso in the 3D view: give them a class."""
+        """Points chosen with the lasso in the 3D view: give them a class, delete them or keep
+        only them (Metashape's delete / crop selection)."""
         from ..core.pointcloud import ARCHAEO_CLASSES, ASPRS_CLASSES
         from .scene import class_name
 
@@ -2944,26 +3523,68 @@ class MainWindow(QMainWindow):
         codes = sorted(set(ASPRS_CLASSES) | set(ARCHAEO_CLASSES) | {int(k) for k in labels}
                        | set(self.model_view.sd.class_counts if self.model_view.sd else {}))
         last = int(self.settings.value("classes/last", 64) or 64)
-        v = ParamDialog.ask(self, "Classe dei punti selezionati", [
+        v = ParamDialog.ask(self, "Punti selezionati con il lazo", [
+            Field("action", "Cosa fare", "class",
+                  choices=[("class", "Assegna una classe"), ("delete", "Elimina questi punti"),
+                           ("keep", "Tieni solo questi punti (ritaglia)")]),
             Field("code", "Classe", last if last in codes else codes[0],
                   choices=[(c, f"{c} - {class_name(c, labels)}") for c in codes]),
             Field("other", "...oppure un nuovo codice (0 = usa la classe sopra)", 0, minimum=0, maximum=255),
             Field("name", "Nome del nuovo codice (es. Crollo)", "", kind="text"),
-            Field("through", f"Anche i punti nascosti dietro la superficie ({n_all} invece di {n_vis})", False)],
-            intro=f"Nel lazo ci sono {n_vis} punti visibili ({n_all} contando quelli nascosti). Le classi date a mano "
-                  "vengono ricordate: le classificazioni automatiche non le cambiano e il classificatore impara "
-                  "da loro (Classificazione della nuvola > Addestra il classificatore).")
+            Field("through", f"Anche i punti nascosti dietro la superficie ({_it(n_all)} invece di {_it(n_vis)})",
+                  False),
+            Field("keep_copy", "Elimina / tieni: conserva prima una copia della nuvola (versione)", False)],
+            intro=f"Nel lazo ci sono {_it(n_vis)} punti visibili ({_it(n_all)} contando quelli nascosti). Le classi "
+                  "date a mano vengono ricordate: le classificazioni automatiche non le cambiano e il classificatore "
+                  "impara da loro (Classificazione della nuvola > Addestra il classificatore). Eliminare o tenere "
+                  "cambia la nuvola attuale: senza la copia non si torna indietro.")
         if not v:
+            return
+        mask = inside if v["through"] else visible
+        if v["action"] in ("delete", "keep"):
+            from ..engine.cleaning import delete_points
+
+            keep_selected = v["action"] == "keep"
+            self.run_task("Lazo sulla nuvola", self._versioned_edit(
+                "point_cloud", v, lambda p: delete_points(self.chunk, mask, keep_selected=keep_selected),
+                "Nuvola modificata con il lazo"),
+                lambda out: (self.log_pane.info(f"Lazo: tolti {_it(out['removed'])} punti, restano {_it(out['kept'])}"),
+                             self.model_view.refresh(reset=False)), refresh=False)
             return
         code = int(v["other"] or v["code"])
         name = str(v.get("name") or "").strip() if v["other"] else ""
-        mask = inside if v["through"] else visible
         self.settings.setValue("classes/last", code)
         self._set_point_class(mask, code, name or None)
         self.log_pane.info(f"Classe {code} ({class_name(code, self.chunk.meta.get('classes'))}) assegnata a mano a "
                            f"{int(np.count_nonzero(mask))} punti")
         self.model_view.refresh(reset=False)
         self._dirty(True)
+
+    def _faces_selected(self, visible, inside) -> None:
+        """Faces of the model chosen with the lasso: delete them or keep only them."""
+        n_vis, n_all = int(np.count_nonzero(visible)), int(np.count_nonzero(inside))
+        if not n_all:
+            self.statusBar().showMessage("Nessuna faccia nel lazo", 8000)
+            return
+        v = ParamDialog.ask(self, "Facce selezionate con il lazo", [
+            Field("action", "Cosa fare", "delete",
+                  choices=[("delete", "Elimina queste facce"), ("keep", "Tieni solo queste facce (ritaglia)")]),
+            Field("through", f"Anche le facce nascoste dietro la superficie ({_it(n_all)} invece di {_it(n_vis)})",
+                  False),
+            Field("keep_copy", "Conserva prima una copia del modello (versione)", False)],
+            intro=f"Nel lazo ci sono {_it(n_vis)} facce visibili ({_it(n_all)} contando quelle nascoste). Colori e "
+                  "confidenza restano; la texture va ricostruita.")
+        if not v:
+            return
+        from ..engine.cleaning import delete_faces
+
+        mask = inside if v["through"] else visible
+        keep_selected = v["action"] == "keep"
+        self.run_task("Lazo sul modello", self._versioned_edit(
+            "model", v, lambda p: delete_faces(self.chunk, mask, keep_selected=keep_selected),
+            "Modello modificato con il lazo"),
+            lambda out: (self.log_pane.info(f"Lazo: tolte {_it(out['removed_faces'])} facce, restano {_it(out['faces'])}"),
+                         self._show_model("model")))
 
     def _set_point_class(self, mask, code: int, label: str | None = None) -> None:
         """Assign a class by hand: the points are flagged as labelled by hand (kept by the

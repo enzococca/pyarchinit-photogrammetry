@@ -356,19 +356,33 @@ class ClassLegend(QListWidget):
         self.itemChanged.connect(lambda _it: None if self._filling else self.visibility_changed.emit())
         self._filling = False
 
+    mode = "class"  # what the rows are: "class" codes or "confidence" ranges
+
     def set_counts(self, counts: dict, hidden: set, labels: dict | None = None) -> None:
         from .scene import class_name, class_palette
 
         pal = class_palette()
+        self._fill("class", [(code, f"{code}  {class_name(code, labels)}", pal[code], counts[code])
+                             for code in sorted(counts)], hidden)
+
+    def set_bins(self, counts: dict, hidden: set) -> None:
+        """Rows for the confidence ranges (depth maps agreeing on a point or vertex)."""
+        from .scene import CONFIDENCE_COLORS, confidence_legend
+
+        self._fill("confidence", [(b, label, CONFIDENCE_COLORS[b], counts.get(b, 0))
+                                  for b, label in confidence_legend() if counts.get(b, 0)], hidden)
+
+    def _fill(self, mode: str, rows, hidden: set) -> None:
+        self.mode = mode
         self._filling = True
         self.clear()
-        for code in sorted(counts):
+        for key, text, rgb, n in rows:
             pm = QPixmap(14, 14)
-            pm.fill(QColor(*[int(v) for v in pal[code]]))
-            it = QListWidgetItem(QIcon(pm), f"{code}  {class_name(code, labels)}  ({counts[code]:,})".replace(",", "."))
-            it.setData(Qt.ItemDataRole.UserRole, int(code))
+            pm.fill(QColor(*[int(v) for v in rgb]))
+            it = QListWidgetItem(QIcon(pm), f"{text}  ({n:,})".replace(",", "."))
+            it.setData(Qt.ItemDataRole.UserRole, int(key))
             it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            it.setCheckState(Qt.CheckState.Unchecked if code in hidden else Qt.CheckState.Checked)
+            it.setCheckState(Qt.CheckState.Unchecked if key in hidden else Qt.CheckState.Checked)
             self.addItem(it)
         self._filling = False
 
@@ -397,6 +411,7 @@ class ModelView(QWidget):
 
     view_changed = Signal(str)
     points_selected = Signal(object, object)  # boolean masks over the whole cloud: visible only, all inside
+    faces_selected = Signal(object, object)  # boolean masks over the faces of the model: visible only, all inside
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -415,22 +430,28 @@ class ModelView(QWidget):
         b_reset = QPushButton("Vista iniziale")
         b_top = QPushButton("Dall'alto")
         self.color_combo = QComboBox()
-        for key, label in (("rgb", "Colori RGB"), ("class", "Classi"), ("elevation", "Quota")):
-            self.color_combo.addItem(label, key)
-        self.color_combo.setToolTip("Colori della nuvola: quelli delle foto, le classi (con la legenda per "
-                                    "nasconderle) o la quota")
-        self.color_combo.currentIndexChanged.connect(lambda _i: self.refresh(reset=False))
+        self._color_modes: tuple = ()
+        self._filling = False
+        self._fill_color_combo("point_cloud")
+        self.color_combo.setToolTip("Colori: quelli delle foto, le classi (con la legenda per nasconderle), la quota "
+                                    "o la confidenza (quante mappe di profondita' confermano ogni punto o vertice)")
+        self.color_combo.currentIndexChanged.connect(lambda _i: None if self._filling else self.refresh(reset=False))
         self.b_lasso = QPushButton("Lazo")
-        self.b_lasso.setToolTip("Seleziona dei punti con un lazo per cambiarne la classe")
+        self.b_lasso.setToolTip("Seleziona con un lazo punti della nuvola (classe, elimina, tieni) o facce del "
+                                "modello (elimina, tieni)")
         self.b_lasso.clicked.connect(self.start_lasso)
         self.version_label = QLabel("")
         self.version_label.setObjectName("versionLabel")
         self.version_label.setStyleSheet("color: #b45309; font-weight: bold")
         self.version_label.setVisible(False)
+        self.info_label = QLabel("Senza confidenza: Flusso di lavoro > Calcola la confidenza")
+        self.info_label.setStyleSheet("color: #b45309")
+        self.info_label.setVisible(False)
         bar.addWidget(QLabel("Mostra:"))
         bar.addWidget(self.combo)
         bar.addWidget(self.version_label)
         bar.addWidget(self.color_combo)
+        bar.addWidget(self.info_label)
         bar.addWidget(self.b_lasso)
         bar.addWidget(self.cb_cams)
         bar.addWidget(self.cb_marks)
@@ -463,6 +484,7 @@ class ModelView(QWidget):
         self.kind = None
         self.sd = None
         self.paths: dict = {}  # files shown instead of the active products (a kept version)
+        self.highlight = None  # mask over the dense cloud shown in red (what a cleaning would remove)
         self._project = None
         self._filling = False
         self._update_tools()
@@ -494,6 +516,7 @@ class ModelView(QWidget):
 
     def set_chunk(self, chunk, kind: str | None = None) -> None:
         self._clear_version()
+        self.highlight = None
         self.chunk = chunk
         views = ["cameras"] + available_views(chunk) if chunk is not None else []
         self._filling = True
@@ -522,20 +545,50 @@ class ModelView(QWidget):
         self.refresh(reset=True)
         self.view_changed.emit(self.kind or "")
 
+    COLOR_MODES = {"point_cloud": ("rgb", "class", "elevation", "confidence"),
+                   "tie_points": ("rgb", "class", "elevation"), "model": ("rgb", "confidence")}
+    COLOR_LABELS = {"rgb": "Colori RGB", "class": "Classi", "elevation": "Quota", "confidence": "Confidenza"}
+
+    def _fill_color_combo(self, kind) -> None:
+        modes = self.COLOR_MODES.get(kind, ())
+        if modes == self._color_modes:
+            return
+        current = self.color_combo.currentData()
+        was = self._filling
+        self._filling = True
+        self.color_combo.clear()
+        for key in modes:
+            self.color_combo.addItem(self.COLOR_LABELS[key], key)
+        i = self.color_combo.findData(current)
+        self.color_combo.setCurrentIndex(i if i >= 0 else 0)
+        self._color_modes = modes
+        self._filling = was
+
+    def color_mode(self) -> str:
+        return self.color_combo.currentData() or "rgb" if self.kind in self.COLOR_MODES else "rgb"
+
     def _update_tools(self) -> None:
-        points = self.kind in ("point_cloud", "tie_points")
-        self.color_combo.setVisible(points)
-        self.b_lasso.setVisible(self.kind == "point_cloud" and not self.paths)  # edits go to the active cloud
-        self.legend.setVisible(points and self.color_combo.currentData() == "class")
+        self._fill_color_combo(self.kind)
+        self.color_combo.setVisible(self.kind in self.COLOR_MODES)
+        # edits go to the active cloud or model, not to a kept version
+        self.b_lasso.setVisible(self.kind in ("point_cloud", "model") and not self.paths)
+        mode = self.color_mode()
+        self.legend.setVisible((self.kind in ("point_cloud", "tie_points") and mode == "class")
+                               or (self.kind in ("point_cloud", "model") and mode == "confidence"))
 
     def set_color_mode(self, mode: str) -> None:
+        self._fill_color_combo(self.kind)
         i = self.color_combo.findData(mode)
         if i >= 0:
             self.color_combo.setCurrentIndex(i)
 
+    def _hidden(self, mode: str) -> set:
+        """Rows unticked in the legend, when the legend shows ``mode`` (classes or ranges)."""
+        return self.legend.hidden() if self.legend.mode == mode and self.legend.count() else set()
+
     # ----------------------------------------------------------- lasso selection
     def start_lasso(self) -> None:
-        if self.kind != "point_cloud" or self.chunk is None:
+        if self.kind not in ("point_cloud", "model") or self.chunk is None:
             return
         image, self._project = self.canvas.snapshot()
         self.lasso.start(image)
@@ -545,30 +598,29 @@ class ModelView(QWidget):
         self.stack.setCurrentWidget(self.canvas)
         if pts is None or self._project is None or self.sd is None:
             return
-        visible, inside = self.select_points(pts, self._project)
-        self.points_selected.emit(visible, inside)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            if self.kind == "model":
+                visible, inside = self.select_faces(pts, self._project)
+            else:
+                visible, inside = self.select_points(pts, self._project)
+        finally:
+            QApplication.restoreOverrideCursor()
+        (self.faces_selected if self.kind == "model" else self.points_selected).emit(visible, inside)
 
-    def select_points(self, polygon, project, depth_tol: float = 0.02, cell: int = 3):
-        """Points of the whole dense cloud inside a screen ``polygon`` (widget pixels) for the
-        projection ``project``: (visible ones, all of them). Hidden classes are never taken;
-        "visible" = not behind the nearest surface at that pixel (2 % of the distance)."""
+    @staticmethod
+    def _inside_and_visible(polygon, x, y, z, ok, depth_tol: float = 0.02, cell: int = 3):
+        """(visible, inside) masks of projected points: inside the screen ``polygon`` and, for
+        "visible", not behind the nearest of them at that pixel (``depth_tol`` of the distance)."""
         import shapely
 
-        pc = self.chunk.point_cloud
-        if pc is None:
-            n = 0
-            return np.zeros(n, bool), np.zeros(n, bool)
-        world = self.chunk.to_world(pc.xyz) - self.sd.offset
-        x, y, z, ok = project(world)
-        hidden = self.legend.hidden() if self.color_combo.currentData() == "class" else set()
-        codes = getattr(pc, "classification", None)
-        if hidden and codes is not None:
-            ok &= ~np.isin(np.asarray(codes), list(hidden))
         poly = shapely.Polygon(polygon)
-        inside = np.zeros(len(world), bool)
+        inside = np.zeros(len(x), bool)
         idx = np.nonzero(ok)[0]
+        visible = np.zeros(len(x), bool)
+        if not len(idx):
+            return visible, inside
         inside[idx] = shapely.contains_xy(poly, x[idx], y[idx])
-        # depth buffer of everything shown, on a coarse grid
         cx, cy = (x[idx] // cell).astype(np.int64), (y[idx] // cell).astype(np.int64)
         key = cx * 1_000_003 + cy
         order = np.argsort(key, kind="stable")
@@ -576,19 +628,65 @@ class ModelView(QWidget):
         start = np.r_[0, np.nonzero(np.diff(ks))[0] + 1]
         zmin = np.minimum.reduceat(zs, start)
         cell_of = np.searchsorted(ks[start], key)
-        visible = np.zeros(len(world), bool)
         visible[idx] = inside[idx] & (z[idx] <= zmin[cell_of] * (1 + depth_tol))
         return visible, inside
+
+    def select_faces(self, polygon, project, depth_tol: float = 0.02):
+        """Faces of the whole model whose centre is inside a screen ``polygon``: (visible ones,
+        all of them). Faces hidden by the confidence legend are never taken."""
+        mesh = self.chunk.model
+        if mesh is None:
+            return np.zeros(0, bool), np.zeros(0, bool)
+        v, f = np.asarray(mesh.vertices, np.float64), np.asarray(mesh.faces, np.int64)
+        centres = self.chunk.to_world((v[f[:, 0]] + v[f[:, 1]] + v[f[:, 2]]) / 3.0) - self.sd.offset
+        x, y, z, ok = project(centres)
+        hidden = self._hidden("confidence") if self.color_mode() == "confidence" else set()
+        if hidden:
+            from ..engine.confidence import read_model_confidence
+            from .scene import confidence_bins
+
+            conf = read_model_confidence(self.chunk.product_path("model"))
+            if conf is not None and len(conf) == len(v):
+                ok &= ~np.isin(confidence_bins(conf)[f], list(hidden)).any(axis=1)
+        return self._inside_and_visible(polygon, x, y, z, ok, depth_tol)
+
+    def select_points(self, polygon, project, depth_tol: float = 0.02, cell: int = 3):
+        """Points of the whole dense cloud inside a screen ``polygon`` (widget pixels) for the
+        projection ``project``: (visible ones, all of them). Hidden classes are never taken;
+        "visible" = not behind the nearest surface at that pixel (2 % of the distance)."""
+        pc = self.chunk.point_cloud
+        if pc is None:
+            n = 0
+            return np.zeros(n, bool), np.zeros(n, bool)
+        world = self.chunk.to_world(pc.xyz) - self.sd.offset
+        x, y, z, ok = project(world)
+        mode = self.color_mode()
+        hidden = self._hidden(mode) if mode in ("class", "confidence") else set()
+        codes = getattr(pc, "classification", None)
+        if hidden and mode == "class" and codes is not None:
+            ok &= ~np.isin(np.asarray(codes), list(hidden))
+        if hidden and mode == "confidence" and pc.confidence is not None:
+            from .scene import confidence_bins
+
+            ok &= ~np.isin(confidence_bins(pc.confidence), list(hidden))
+        return self._inside_and_visible(polygon, x, y, z, ok, depth_tol, cell)
 
     def refresh(self, reset: bool = False) -> None:
         self.canvas.show_cameras = self.cb_cams.isChecked()
         self.canvas.show_markers = self.cb_marks.isChecked()
         self._update_tools()
-        mode = self.color_combo.currentData() if self.kind in ("point_cloud", "tie_points") else "rgb"
-        hidden = self.legend.hidden() if mode == "class" else set()
-        sd = (build_scene(self.chunk, self.kind, color_mode=mode, hidden_classes=hidden, paths=self.paths)
+        mode = self.color_mode()
+        hidden = self._hidden("class") if mode == "class" else set()
+        bins = self._hidden("confidence") if mode == "confidence" else set()
+        highlight = self.highlight if self.kind == "point_cloud" and not self.paths else None
+        sd = (build_scene(self.chunk, self.kind, color_mode=mode, hidden_classes=hidden, paths=self.paths,
+                          hidden_bins=bins, highlight=highlight)
               if self.chunk is not None else SceneData(np.zeros(3)))
         self.sd = sd
         if mode == "class":
             self.legend.set_counts(sd.class_counts, hidden, sd.class_labels)
+        elif mode == "confidence":
+            self.legend.set_bins(sd.bin_counts, bins)
+            self.legend.setVisible(bool(sd.bin_counts))
+        self.info_label.setVisible(bool(sd.confidence_missing))
         self.canvas.set_scene(sd, reset=reset)

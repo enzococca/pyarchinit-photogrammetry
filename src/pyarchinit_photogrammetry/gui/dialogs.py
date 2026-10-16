@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
                                QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
@@ -20,9 +21,35 @@ class Field:
     minimum: float = 0.0
     maximum: float = 1e9
     decimals: int = 4
-    kind: str | None = None  # "file_save", "file_open", "dir", "text", "optional_float", "checklist"
+    kind: str | None = None  # "file_save", "file_open", "dir", "text", "optional_float", "checklist", "color"
     filter: str = ""
     tip: str = ""
+
+
+class _ColorButton(QPushButton):
+    """A button showing a colour; a click opens the (non-native) colour chooser."""
+
+    def __init__(self, rgb, parent=None):
+        super().__init__(parent)
+        self.rgb = tuple(int(v) for v in (rgb or (135, 206, 235))[:3])
+        self.clicked.connect(self._choose)
+        self._show()
+
+    def _show(self) -> None:
+        r, g, b = self.rgb
+        text = "#000000" if (0.299 * r + 0.587 * g + 0.114 * b) > 140 else "#ffffff"
+        self.setText(f"RGB {r}, {g}, {b}")
+        self.setStyleSheet(f"background: rgb({r}, {g}, {b}); color: {text}; padding: 4px 10px;")
+
+    def _choose(self) -> None:
+        from PySide6.QtGui import QColor
+        from PySide6.QtWidgets import QColorDialog
+
+        c = QColorDialog.getColor(QColor(*self.rgb), self, "Colore",
+                                  QColorDialog.ColorDialogOption.DontUseNativeDialog)
+        if c.isValid():
+            self.rgb = (c.red(), c.green(), c.blue())
+            self._show()
 
 
 class _PathEdit(QWidget):
@@ -108,6 +135,8 @@ class ParamDialog(QDialog):
             return w
         if f.kind in ("file_save", "file_open", "dir"):
             return _PathEdit(f)
+        if f.kind == "color":
+            return _ColorButton(f.default)
         if f.kind == "optional_float":
             w = QLineEdit("" if f.default is None else str(f.default))
             w.setPlaceholderText("automatico")
@@ -139,6 +168,8 @@ class ParamDialog(QDialog):
                 out[name] = w.currentData()
             elif isinstance(w, _PathEdit):
                 out[name] = w.value()
+            elif isinstance(w, _ColorButton):
+                out[name] = w.rgb
             elif isinstance(w, QCheckBox):
                 out[name] = w.isChecked()
             elif isinstance(w, (QSpinBox, QDoubleSpinBox)):
@@ -154,6 +185,121 @@ class ParamDialog(QDialog):
     def ask(cls, parent, title: str, fields: list[Field], intro: str = "") -> dict | None:
         d = cls(title, fields, parent, intro)
         return d.values() if d.exec() == QDialog.DialogCode.Accepted else None
+
+
+def _it(value: float, decimals: int = 0) -> str:
+    """A number written the Italian way: 1.234.567 or 1.234,56."""
+    text = f"{value:,.{decimals}f}"
+    return text.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+
+
+class GradualSelectionDialog(QDialog):
+    """Gradual selection of the tie points (as in Metashape): a threshold per criterion, the
+    points it would remove counted at once, and the optimization of the cameras afterwards.
+
+    ``metrics``: :func:`engine.tiepoints.tie_point_metrics`; ``select(**criteria)`` returns
+    :func:`engine.tiepoints.select_tie_points` for those thresholds."""
+
+    CRITERIA = [  # key, label, metric, default, decimals, maximum
+        ("max_reprojection_error", "Errore di riproiezione oltre (px)", "reprojection_error", 0.5, 2, 1e6),
+        ("min_image_count", "Visti da meno foto di", "image_count", 3, 0, 1e4),
+        ("max_reconstruction_uncertainty", "Incertezza di ricostruzione oltre", "reconstruction_uncertainty", 15.0, 1, 1e9),
+        ("max_projection_accuracy", "Accuratezza di proiezione oltre (px)", "projection_accuracy", 3.0, 2, 1e6),
+    ]
+
+    def __init__(self, metrics: dict, select, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Selezione graduale dei punti di legame")
+        self.setMinimumWidth(700)
+        self.metrics, self.select = metrics, select
+        lay = QVBoxLayout(self)
+        n = len(metrics["ids"])
+        text = (f"{_it(n)} punti di legame in {metrics['images']} foto, errore medio di riproiezione "
+                f"{_it(metrics['mean_reprojection_error'], 3)} px. Spunta i criteri: i punti peggiori vengono tolti "
+                "dal modello e, se scegli, le camere vengono ottimizzate senza di loro.")
+        if metrics.get("synthetic"):
+            text += ("\n\nAttenzione: questo modello e' stato scritto da pose importate (Metashape, WebODM o chunk "
+                     "uniti): gli errori di riproiezione sono quasi nulli e conta solo l'incertezza di ricostruzione. "
+                     "Per una selezione completa allinea di nuovo le foto qui.")
+        intro = QLabel(text)
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        form = QFormLayout()
+        lay.addLayout(form)
+        self.rows = {}
+        for key, label, metric, default, decimals, maximum in self.CRITERIA:
+            values = metrics.get(metric)
+            box = QCheckBox(label)
+            spin = QDoubleSpinBox()
+            spin.setDecimals(decimals)
+            spin.setRange(0.0, maximum)
+            spin.setValue(default)
+            stats = QLabel("non disponibile")
+            if values is None:
+                box.setEnabled(False)
+                spin.setEnabled(False)
+            else:
+                v = np.asarray(values, float)
+                v = v[np.isfinite(v)]
+                if len(v):
+                    q = np.percentile(v, [50, 95])
+                    stats.setText(f"mediana {q[0]:.3g}, 95% {q[1]:.3g}, max {v.max():.3g}".replace(".", ","))
+            stats.setStyleSheet("color: #6c7a89")
+            row = QHBoxLayout()
+            row.addWidget(spin)
+            row.addWidget(stats, 1)
+            form.addRow(box, row)
+            box.toggled.connect(lambda _on: self._update())
+            spin.valueChanged.connect(lambda _v: self._update())
+            self.rows[key] = (box, spin)
+        self.optimize = QCheckBox("Ottimizza le camere dopo la rimozione")
+        self.optimize.setChecked(True)
+        lay.addWidget(self.optimize)
+        self.status = QLabel("")
+        self.status.setWordWrap(True)
+        self.status.setStyleSheet("font-weight: bold")
+        lay.addWidget(self.status)
+        note = QLabel("I punti tolti non tornano indietro: per ricominciare allinea di nuovo le foto.")
+        note.setStyleSheet("color: #b45309")
+        lay.addWidget(note)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.button(QDialogButtonBox.StandardButton.Ok).setText("Togli i punti selezionati")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        self.ok_button = bb.button(QDialogButtonBox.StandardButton.Ok)
+        lay.addWidget(bb)
+        self.selection = None
+        self._update()
+
+    def criteria(self) -> dict:
+        out = {}
+        for key, (box, spin) in self.rows.items():
+            if box.isChecked():
+                out[key] = int(spin.value()) if key == "min_image_count" else float(spin.value())
+        return out
+
+    def _update(self) -> None:
+        crit = self.criteria()
+        if not crit:
+            self.selection = None
+            self.status.setText("Spunta almeno un criterio.")
+            self.ok_button.setEnabled(False)
+            return
+        sel = self.select(**crit)
+        self.selection = sel
+        names = {"reprojection_error": "errore", "image_count": "poche foto",
+                 "reconstruction_uncertainty": "incertezza", "projection_accuracy": "accuratezza"}
+        parts = [f"{names.get(name, name)} {_it(n)}" for name, n in (sel.get("by_criterion") or {}).items()
+                 if n is not None]
+        text = (f"Selezionati {_it(sel['selected'])} punti su {_it(sel['total'])} ({_it(sel['percent'], 1)}%)"
+                + (f" - {', '.join(parts)}" if parts else ""))
+        if sel.get("images_below_minimum"):
+            text += f"\n{sel['images_below_minimum']} foto resterebbero con troppi pochi punti: alza le soglie."
+        self.status.setText(text)
+        self.ok_button.setEnabled(sel["selected"] > 0 and not sel.get("images_below_minimum"))
+
+    def values(self) -> dict:
+        return {**self.criteria(), "optimize": self.optimize.isChecked()}
 
 
 QUALITY = [("highest", "Massima"), ("high", "Alta"), ("medium", "Media"), ("low", "Bassa"), ("lowest", "Minima")]
