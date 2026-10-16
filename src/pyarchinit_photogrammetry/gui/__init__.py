@@ -106,6 +106,12 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
     if QApplication.instance() is None:
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     qapp = QApplication.instance() or QApplication([sys.argv[0]] + argv)
+    import locale
+
+    try:  # Qt took the locale of the system: numbers for the C/C++ libraries in the C locale (see ppg_launcher)
+        locale.setlocale(locale.LC_NUMERIC, "C")
+    except locale.Error:  # pragma: no cover
+        pass
     qapp.setApplicationName("pyarchinit-photogrammetry")
     qapp.setApplicationDisplayName(APP_TITLE)
     qapp.setOrganizationName("pyarchinit")

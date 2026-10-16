@@ -41,6 +41,16 @@ def _no_modal_dialogs(monkeypatch):
         pytest.fail("modal dialog opened during the test: " + "\n".join(opened), pytrace=False)
 
 
+@pytest.fixture(autouse=True)
+def _c_numbers():
+    """As the application does after creating the QApplication (which takes the locale of the
+    system): numbers in the C locale for the C/C++ libraries (IfcOpenShell's geometry)."""
+    yield
+    import locale
+
+    locale.setlocale(locale.LC_NUMERIC, "C")
+
+
 @pytest.fixture(scope="session")
 def scene_dir(tmp_path_factory) -> Path:
     from pyarchinit_photogrammetry.testing.synthetic import write_dataset

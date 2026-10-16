@@ -188,6 +188,19 @@ STEPS = [
 ]  # the others (OpenCV, trimesh, scikit-learn...) load when first needed
 
 
+def c_numbers() -> None:
+    """Numbers in the C locale for the C and C++ libraries. Qt sets the locale of the system when
+    the application starts (on macOS and Linux): with an Italian system the libraries reading
+    numbers with strtod - IfcOpenShell's geometry - read "1.5" as 1 and the IFC preview came out
+    empty. The interface keeps formatting numbers the Italian way (QLocale is not affected)."""
+    import locale
+
+    try:
+        locale.setlocale(locale.LC_NUMERIC, "C")
+    except locale.Error:  # pragma: no cover
+        pass
+
+
 def _persistent_matplotlib_cache() -> None:
     """The 3D view (pyvistaqt) loads matplotlib. In the packaged application PyInstaller points
     matplotlib to a new temporary folder at every start, so its font cache was built again each
@@ -228,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     if QApplication.instance() is None:
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
         QApplication([sys.argv[0]] + argv)
+    c_numbers()
     splash = Splash()
     splash.step(2, "Avvio")
     times = {}

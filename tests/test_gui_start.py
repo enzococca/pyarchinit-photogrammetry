@@ -136,3 +136,19 @@ def test_launcher_starts_the_window(tmp_path):
     log = (tmp_path / "ppg-gui.log").read_text()
     assert "Avvio in" in log
     assert np.isfinite(float(log.split("Avvio in ")[1].split(" s")[0]))
+
+
+def test_numbers_stay_in_the_c_locale(qapp):
+    """Qt takes the locale of the system: with an Italian one IfcOpenShell read "1.5" as 1 and
+    the IFC preview was empty. The start puts the numbers back in the C locale."""
+    import locale
+
+    import ppg_launcher
+
+    try:
+        locale.setlocale(locale.LC_NUMERIC, "it_IT.UTF-8")
+    except locale.Error:
+        pytest.skip("no Italian locale on this system")
+    assert locale.localeconv()["decimal_point"] == ","
+    ppg_launcher.c_numbers()
+    assert locale.localeconv()["decimal_point"] == "."
