@@ -33,6 +33,7 @@ import logging
 import math
 import os
 import pickle
+import sys
 import time
 import warnings
 import zipfile
@@ -71,7 +72,28 @@ def _sklearn():
     except ImportError as exc:  # pragma: no cover - depends on the installation
         raise ImportError("the trainable classifier needs scikit-learn: "
                           "pip install 'pyarchinit-photogrammetry[learn]'") from exc
+    _count_cores_for_joblib()
     return sklearn
+
+
+def _count_cores_for_joblib() -> None:
+    """joblib counts the physical cores once by running ``sysctl`` in a forked child. On macOS a
+    child forked after SpatiaLite has used its PROJ dies before running anything (PROJ's atfork
+    handler), so joblib would warn and print a traceback: read the count with sysctlbyname."""
+    if sys.platform != "darwin":
+        return
+    try:
+        import ctypes
+
+        from joblib.externals.loky.backend import context
+    except Exception:  # pragma: no cover - joblib comes with scikit-learn
+        return
+    if getattr(context, "physical_cores_cache", 0) is not None:
+        return
+    n, size = ctypes.c_int(0), ctypes.c_size_t(ctypes.sizeof(ctypes.c_int))
+    libc = ctypes.CDLL(None)
+    if libc.sysctlbyname(b"hw.physicalcpu", ctypes.byref(n), ctypes.byref(size), None, 0) == 0 and n.value > 0:
+        context.physical_cores_cache = n.value
 
 
 def _round2(x: float) -> float:

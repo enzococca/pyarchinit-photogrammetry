@@ -88,12 +88,13 @@ def rng():
 
 def load_spatialite(con) -> bool:
     """Load mod_spatialite into a sqlite3 connection from the known locations; False if none works."""
-    from pyarchinit_photogrammetry.pyarchinit.database import _spatialite_paths
+    from pyarchinit_photogrammetry.pyarchinit.database import _spatialite_paths, pin_spatialite
 
     con.enable_load_extension(True)
     for cand in _spatialite_paths():
         try:
             con.load_extension(cand)
+            pin_spatialite(cand)
             return True
         except Exception:
             continue
@@ -103,21 +104,11 @@ def load_spatialite(con) -> bool:
 def _spatialite_available():
     """mod_spatialite loadable (bare name or the known locations, after the PROJ warm-up)."""
     try:
-        from pyarchinit_photogrammetry.pyarchinit.database import _spatialite_paths, _warm_up_proj
+        from pyarchinit_photogrammetry.pyarchinit.database import spatialite_path
 
-        _warm_up_proj()
-        for cand in _spatialite_paths():
-            try:
-                con = sqlite3.connect(":memory:")
-                con.enable_load_extension(True)
-                con.load_extension(cand)
-                con.close()
-                return True
-            except Exception:
-                continue
+        return spatialite_path() is not None  # keeps the library loaded (see pin_spatialite)
     except Exception:
-        pass
-    return False
+        return False
 
 
 @pytest.fixture

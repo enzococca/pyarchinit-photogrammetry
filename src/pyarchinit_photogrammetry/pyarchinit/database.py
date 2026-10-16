@@ -14,6 +14,7 @@ from __future__ import annotations
 import glob
 import os
 import re
+import sys
 
 import uuid
 from contextlib import contextmanager
@@ -48,6 +49,29 @@ def _spatialite_paths() -> list[str]:
     return out
 
 
+_PINNED: dict[str, object] = {}
+
+
+def pin_spatialite(path: str) -> None:
+    """Keep a loaded mod_spatialite (and the PROJ it links) mapped for the life of the process.
+
+    SQLite unloads an extension when the connection that loaded it is closed. Once PROJ has
+    opened its database it has registered ``pthread_atfork`` handlers, and after the library
+    is unloaded (or loaded again) every ``fork()`` of the process crashes or hangs in them: a
+    subprocess started after a PyArchInit database had been opened and closed killed the
+    application, or hung it in the middle of a task. A ctypes handle keeps the library loaded."""
+    if path in _PINNED or os.name == "nt":
+        return
+    import ctypes
+
+    for name in (path, path + (".dylib" if sys.platform == "darwin" else ".so")):
+        try:
+            _PINNED[path] = ctypes.CDLL(name)
+            return
+        except OSError:
+            continue
+
+
 def spatialite_path() -> str | None:
     """First mod_spatialite that sqlite3 can load, or None (used by ``ppg doctor``)."""
     import sqlite3
@@ -58,6 +82,7 @@ def spatialite_path() -> str | None:
             con = sqlite3.connect(":memory:")
             con.enable_load_extension(True)
             con.load_extension(cand)
+            pin_spatialite(cand)
             con.close()
             return cand
         except Exception:
@@ -89,6 +114,17 @@ def _warm_up_proj() -> None:
         pyproj.CRS.from_epsg(4326).to_wkt()
     except Exception:  # pragma: no cover
         pass
+    if os.name == "posix":
+        # Once SpatiaLite has loaded its PROJ, a child made with fork() dies before running
+        # anything (PROJ's atfork handler, see pin_spatialite). multiprocessing starts its
+        # resource tracker that way the first time a lock is created (joblib's thread pools,
+        # the trainable classifier): start it now, while forking is still safe.
+        try:
+            from multiprocessing import resource_tracker
+
+            resource_tracker.ensure_running()
+        except Exception:  # pragma: no cover
+            pass
 
 
 class PyArchInitDB:
@@ -122,6 +158,7 @@ class PyArchInitDB:
         for path in _spatialite_paths():
             try:
                 dbapi_conn.load_extension(path)
+                pin_spatialite(path)
                 self.spatialite = True
                 break
             except Exception:

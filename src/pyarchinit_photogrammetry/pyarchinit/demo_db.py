@@ -91,7 +91,7 @@ def _polygon(x0, y0, w, h) -> str:
 
 
 def _load_spatialite(con: sqlite3.Connection) -> bool:
-    from .database import _spatialite_paths
+    from .database import _spatialite_paths, pin_spatialite
 
     try:
         con.enable_load_extension(True)
@@ -100,6 +100,7 @@ def _load_spatialite(con: sqlite3.Connection) -> bool:
     for p in _spatialite_paths():
         try:
             con.load_extension(p)
+            pin_spatialite(p)
             return True
         except Exception:
             continue

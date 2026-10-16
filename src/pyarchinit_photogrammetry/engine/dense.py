@@ -46,6 +46,12 @@ def _fusion_cache_gb() -> float:
     return float(max(1.0, min(32.0, total * 0.5)))
 
 
+def _tool(name: str) -> str:
+    """Full path of a program: with it (and ``close_fds=False``) subprocess starts it with
+    posix_spawn instead of fork(), whose atfork handlers crash after SpatiaLite has used PROJ."""
+    return shutil.which(name) or name
+
+
 def choose_backend(backend: str) -> str:
     if backend != "auto":
         return backend
@@ -88,7 +94,7 @@ def build_depth_maps(chunk: Chunk, quality: str = "medium", filter_mode: str = "
         popts.geom_consistency = True
         pycolmap.patch_match_stereo(str(ws), options=popts)
     elif backend == "openmvs":
-        subprocess.run(["InterfaceCOLMAP", "-i", str(ws), "-o", str(ws / "scene.mvs"), "--image-folder",
+        subprocess.run([_tool("InterfaceCOLMAP"), "-i", str(ws), "-o", str(ws / "scene.mvs"), "--image-folder",
                         str(ws / "images")], check=True, close_fds=False)
     else:
         raise ValueError(f"unknown dense backend {backend!r}")
@@ -105,7 +111,8 @@ def build_point_cloud(chunk: Chunk, point_colors: bool = True, progress: Progres
         raise RuntimeError("build depth maps first")
     progress(0.0, "Fusing depth maps")
     if info["backend"] == "openmvs":
-        subprocess.run(["DensifyPointCloud", str(ws / "scene.mvs"), "-w", str(ws)], check=True, close_fds=False)
+        subprocess.run([_tool("DensifyPointCloud"), str(ws / "scene.mvs"), "-w", str(ws)], check=True,
+                       close_fds=False)
         pc = PointCloud.load(ws / "scene_dense.ply")
     else:
         fopts = pycolmap.StereoFusionOptions()

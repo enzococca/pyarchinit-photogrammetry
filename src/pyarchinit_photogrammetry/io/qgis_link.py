@@ -369,7 +369,7 @@ def open_in_qgis(project_path: str | Path, qgis: QgisInstall | None = None) -> N
     if qgis is None:
         raise RuntimeError("QGIS non trovato")
     if sys.platform == "darwin":
-        subprocess.Popen(["open", "-a", qgis.app, str(project_path)], close_fds=False)
+        subprocess.Popen(["/usr/bin/open", "-a", qgis.app, str(project_path)], close_fds=False)  # posix_spawn
     else:
         subprocess.Popen([qgis.app, "--project", str(project_path)], close_fds=False)
 
