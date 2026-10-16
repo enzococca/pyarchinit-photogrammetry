@@ -57,8 +57,10 @@ def is_installed(env: Path | None = None) -> bool:
 
 
 def in_process_available() -> bool:
-    """PyTorch and sam2 importable in this interpreter (pip installs with the [sam] extra)."""
+    """PyTorch and sam2 importable in this interpreter (pip installs with the [sam] extra),
+    with huggingface_hub that downloads the weights (sam2 does not require it)."""
     try:
+        import huggingface_hub  # noqa: F401
         import sam2  # noqa: F401
         import torch  # noqa: F401
 

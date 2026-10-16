@@ -340,6 +340,17 @@ def test_sam_env_paths(monkeypatch, tmp_path):
     assert sam_env.installed_device() == "mps"
 
 
+def test_sam_in_process_needs_huggingface_hub(monkeypatch):
+    """sam2 does not require huggingface_hub, which downloads the weights: without it SAM runs
+    in its own environment (or is offered for installation) instead of failing at first use."""
+    import sys
+
+    from pyarchinit_photogrammetry.ai import sam_env
+
+    monkeypatch.setitem(sys.modules, "huggingface_hub", None)  # the import fails
+    assert not sam_env.in_process_available()
+
+
 def test_sam_env_torch_backend(tmp_path):
     """uv picks the PyTorch build for the graphics card when it knows --torch-backend."""
     import sys
