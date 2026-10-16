@@ -129,6 +129,23 @@ of the turntable demo reconstructed from 32 synthetic photos and its profile dra
 Details in [docs/integrations.md](docs/integrations.md). In the packaged application, SAM 2.1
 is installed on first use (PyTorch in a separate environment, see the same page).
 
+## Excavation records, point classes and SAM
+
+* **One site per project**: the excavation is chosen once (*PyArchInit > Sito del progetto* or
+  the combo at the top of the PyArchInit pane) and used by every drawing, form and publication;
+  a PyArchInit database with several sites shows only the project's one.
+* **Units and spot heights with the PyArchInit fields**: drawn units carry the columns of
+  `pyunitastratigrafiche` (site, area, US, unit type, stratigraphic index, type, draughtsman,
+  date, original survey); the *Quota* tool (separate from SAM) reads the elevation on the DEM
+  and fills in `pyarchinit_quote`. Both are saved in the project and published once.
+* **Segment Anything 2.1**: *Tocco* (click an object), *Riquadro* (one object in a box),
+  *Area* (every object in a box) or the whole orthomosaic scanned in overlapping tiles; a mask
+  can be corrected with more clicks before it is saved.
+* **Point classes you can see and correct**: the 3D view colours the cloud by class with a
+  legend, the lasso gives groups of points the right class, and a classifier trained on those
+  corrections classifies the rest (models reusable on other excavations).
+* **Mesh from the depth maps** (TSDF fusion) and **camera optimisation on the control points**.
+
 ## Desktop interface
 
 `ppg-gui` opens the desktop application (Italian UI): start page with recent projects; a
@@ -186,13 +203,13 @@ then `ppg.app.document` inside the script (in the GUI: **Strumenti > Esegui scri
 
 | Area | Features |
 | --- | --- |
-| Alignment | SIFT features and matching, incremental SfM (COLMAP via pycolmap), camera calibration, bundle adjustment, tie points, pair selection (exhaustive, sequential, by GNSS position) |
-| Dense | Depth maps and fusion on CPU (built-in), COLMAP PatchMatch on NVIDIA GPUs, OpenMVS when installed |
-| Products | Point cloud (PLY/LAS 1.4 with classes), mesh (Poisson in an isolated process with automatic fallback, or 2.5D), texture atlas (OBJ+MTL+JPG), DEM, orthomosaic, hillshade, slope, HTML report |
+| Alignment | SIFT features and matching, incremental SfM (COLMAP via pycolmap), camera calibration, bundle adjustment (optionally constrained by the control points), tie points, pair selection (exhaustive, sequential, by GNSS position) |
+| Dense | Depth maps and fusion on CPU (built-in), COLMAP PatchMatch on NVIDIA GPUs (Linux, `pycolmap-cuda12`), OpenMVS when installed |
+| Products | Point cloud (PLY/LAS 1.4 with classes), mesh (from the depth maps by TSDF fusion, Poisson in an isolated process with automatic fallback, or 2.5D), texture atlas (OBJ+MTL+JPG), DEM, orthomosaic, hillshade, slope, HTML report |
 | Markers | Printable ArUco/AprilTag sheets with scale bar, turntable mats with known layout, sub-pixel detection, triangulation, GCP/check points, scale bars, weighted 7-parameter transformation, any EPSG CRS (geographic GCPs go to the UTM zone) |
 | Archaeology | Vertical sections and parallel cross sections, plan slices at a given elevation, DXF/SVG drawings at scale, contour lines, cut/fill volumes, freehand drawing and snapping to vertices/segments, 3D proxies of stratigraphic units (closed solids, Extended Matrix OBJ), pottery: rotation axis from sherds, profile, rim/base diameter, height, wall thickness, drawing with filled section |
 | BIM | IFC4 export with IfcMapConversion + IfcProjectedCRS georeferencing, one element per stratigraphic unit with `Pset_PyArchInit_US`; with US proxies, closed solids carrying quantities (`Qto_PyArchInit_US`: volume, area, height, elevations), materials, period/phase groups and stratigraphic relationships (see [docs/bim.md](docs/bim.md)) |
-| AI | Rule-based classification (ground, vegetation, masonry, noise) with archaeological LAS classes 64-71; Segment Anything 2.1 on orthomosaics and photos, masks projected to the point cloud, automatic candidate units |
+| AI | Rule-based classification (ground, vegetation, masonry, noise) with archaeological LAS classes 64-71; classes shown, hidden and corrected with a lasso in the 3D view; trainable classifier (random forest on multi-scale geometry, height above ground and colour) learning from the corrections, models reusable on other projects; Segment Anything 2.1 on orthomosaics (tap, box, area, whole orthomosaic in tiles) and photos, on CUDA or the Apple GPU, masks projected to the point cloud, automatic candidate units |
 | PyArchInit | Reads `config.cfg` and the database (SQLite/SpatiaLite or PostgreSQL/PostGIS) without QGIS; creates and edits US forms with their stratigraphic relationships (adding the PyArchInit 5 columns to reduced databases); deletes and merges unit polygons drawn or loaded from `pyunitastratigrafiche`; publishes orthophotos, DEMs, 3D models and US proxies as media with PyArchInit thumbnails, documentation records and footprints, US links, US polygons, spot heights, section traces, volumes |
 
 ## PyArchInit integration

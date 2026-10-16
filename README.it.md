@@ -109,6 +109,28 @@ scrive un log in `~/Library/Logs/pyarchinit-photogrammetry` (macOS),
 Dettagli in [docs/integrations.md](docs/integrations.md). Nell'applicazione pacchettizzata SAM 2.1
 si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
 
+## Rilievo di scavo, classi della nuvola e SAM
+
+* **Un sito per progetto**: lo scavo si sceglie una volta (*PyArchInit > Sito del progetto* o
+  la casella in cima al pannello PyArchInit) e vale per disegni, schede e pubblicazioni; se il
+  database di PyArchInit ha più siti, si vedono solo quelli del sito del progetto.
+* **US e quote con i campi di PyArchInit**: le unità disegnate hanno le colonne di
+  `pyunitastratigrafiche` (sito, area, US, tipo di unità, indice stratigrafico, tipo,
+  disegnatore, data, rilievo originale); lo strumento *Quota* (separato da SAM) legge la quota
+  sul DEM e compila i campi di `pyarchinit_quote`. Restano salvate nel progetto e si pubblicano
+  una sola volta.
+* **Segment Anything 2.1**: *Tocco* (clic sull'oggetto), *Riquadro* (un oggetto nel riquadro),
+  *Area* (tutti gli oggetti nel riquadro) o tutta l'ortofoto scandita a tasselli sovrapposti;
+  la maschera si corregge con altri clic prima di salvarla. PyTorch usa la scheda grafica:
+  GPU Apple (Metal) sul Mac, CUDA sulle schede NVIDIA (scelto dall'installazione su Windows e Linux).
+* **Classi della nuvola visibili e modificabili**: la vista 3D colora la nuvola per classi con
+  la legenda (togli la spunta per nascondere una classe); il lazo assegna la classe giusta a
+  gruppi di punti; un classificatore addestrato su queste correzioni (random forest su
+  geometria a tre scale, altezza sul terreno e colore) classifica il resto, e il modello
+  (`.ppgclf`) si riusa su altri scavi.
+* **Mesh dalle mappe di profondità** (fusione TSDF, come in Metashape) e **ottimizzazione delle
+  camere sui punti di controllo** (compensazione vincolata ai GCP).
+
 ## Schede US, proxy 3D e BIM
 
 * **Schede US**: doppio clic su una US nel pannello PyArchInit apre la scheda (`us_table`) con
