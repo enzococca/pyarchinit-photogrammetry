@@ -183,14 +183,35 @@ STEPS = [
     (28, "Geodesia (PROJ, GDAL)", "rasterio"),
     (38, "Sistemi di riferimento", "pyproj"),
     (48, "Fotogrammetria (COLMAP)", "pycolmap"),
-    (62, "Vista 3D (VTK)", "pyvista"),
+    (62, "Vista 3D (VTK)", "pyvistaqt"),
     (76, "Interfaccia", "pyarchinit_photogrammetry.gui.main_window"),
 ]  # the others (OpenCV, trimesh, scikit-learn...) load when first needed
+
+
+def _persistent_matplotlib_cache() -> None:
+    """The 3D view (pyvistaqt) loads matplotlib. In the packaged application PyInstaller points
+    matplotlib to a new temporary folder at every start, so its font cache was built again each
+    time (seconds): keep it in the user's cache folder instead."""
+    if not getattr(sys, "frozen", False):
+        return
+    if sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Caches")
+    elif os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    else:
+        base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    folder = os.path.join(base, "pyarchinit-photogrammetry", "matplotlib")
+    try:
+        os.makedirs(folder, exist_ok=True)
+        os.environ["MPLCONFIGDIR"] = folder
+    except OSError:
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:
     started = time.perf_counter()
     argv = list(sys.argv[1:] if argv is None else argv)
+    _persistent_matplotlib_cache()
     if (argv and argv[0].startswith("--ppg-")) or "--doctor" in argv:  # worker processes, diagnosis: no window
         from pyarchinit_photogrammetry.gui import main as gui_main
 
@@ -211,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     splash.step(2, "Avvio")
     times = {}
     for percent, text, module in STEPS:
-        if module == "pyvista" and os.environ.get("PPG_RENDERER") == "software":
+        if module == "pyvistaqt" and os.environ.get("PPG_RENDERER") == "software":
             continue  # no VTK view
         splash.step(percent, text)
         t = time.perf_counter()
