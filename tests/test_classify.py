@@ -236,3 +236,33 @@ def test_orthomosaic_without_a_class(processed, tmp_path):
 
     assert a(cx, cy) == 0 and a(cx + 0.6, cy) == 255 and a(cx - 0.6, cy - 0.3) == 255
     assert ch.meta["orthomosaic"]["hidden_classes"] == [71]
+
+
+def test_command_line_with_classes(excavation, tmp_path):
+    from shapely.geometry import box
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+    from pyarchinit_photogrammetry.cli import app
+
+    ch, _, codes = excavation
+    unit = UnitPolygon(box(ORIGIN[0], ORIGIN[1], ORIGIN[0] + 1.4, ORIGIN[1] + 4.0), us="5", area="2", sito="Saggio")
+    ch.meta["drawings"] = {"units": [unit.to_dict()], "quote": []}
+    ch.document.save()
+    project = str(ch.document.path)
+    run = CliRunner().invoke
+    res = run(app, ["dem", project, "--resolution", "0.05", "--classes", "2"])
+    assert res.exit_code == 0, res.output
+    res = run(app, ["export", project, "--cloud", str(tmp_path / "muro.las"), "--classes", "64"])
+    assert res.exit_code == 0, res.output
+    assert len(PointCloud.load(tmp_path / "muro.las")) == (codes == 64).sum()
+    res = run(app, ["classify-units", project, "--csv", str(tmp_path / "us.csv")])
+    assert res.exit_code == 0, res.output
+    assert "100 US 5 (area 2)" in res.output and (tmp_path / "us.csv").exists()
+    import pyarchinit_photogrammetry as ppg
+
+    again = ppg.Document.open(project).chunks[0]
+    assert again.meta["dem"]["classes"] == [2] and again.meta["classes"]["100"] == "US 5 (area 2)"
+    assert 100 in again.point_classes()
+    res = run(app, ["dem", project, "--classes", "2,x"])
+    assert res.exit_code != 0

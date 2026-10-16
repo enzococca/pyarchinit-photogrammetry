@@ -24,6 +24,19 @@ app.add_typer(markers_app, name="markers")
 app.add_typer(pa_app, name="pyarchinit")
 
 
+CLASSES_HELP = "point classes, e.g. 2,64 (2 ground, 3-5 vegetation, 64 masonry, 71 equipment)"
+
+
+def _classes(text: Optional[str]) -> Optional[list[int]]:
+    """``"2,64"`` -> ``[2, 64]`` (None when not given)."""
+    if not text:
+        return None
+    try:
+        return [int(v) for v in text.replace(";", ",").replace(" ", ",").split(",") if v]
+    except ValueError as exc:
+        raise typer.BadParameter(f"class codes are numbers 0-255: {text}") from exc
+
+
 def _open(project: Path, chunk: Optional[str] = None):
     doc = Document.open(project)
     if not doc.chunks:
@@ -125,11 +138,12 @@ def mesh(project: Path,
          surface: str = "arbitrary", faces: str = "medium",
          voxel_size: Optional[float] = typer.Option(None, help="depth_maps: voxel in the chunk units "
                                                                "(default: twice the depth-map pixel)"),
+         classes: Optional[str] = typer.Option(None, help="dense cloud: only these " + CLASSES_HELP),
          texture: bool = True, texture_size: int = 4096, chunk: Optional[str] = None):
     """Mesh (Poisson, height field or fusion of the depth maps) and texture."""
     doc, ch = _open(project, chunk)
     m = ch.build_model(source=source, surface=surface, face_count=int(faces) if faces.isdigit() else faces,
-                       voxel_size=voxel_size, progress=print_progress)
+                       voxel_size=voxel_size, classes=_classes(classes), progress=print_progress)
     if texture:
         ch.build_texture(texture_size=texture_size, progress=print_progress)
     doc.save()
@@ -137,20 +151,25 @@ def mesh(project: Path,
 
 
 @app.command()
-def dem(project: Path, resolution: Optional[float] = None, source: str = "point_cloud", chunk: Optional[str] = None):
+def dem(project: Path, resolution: Optional[float] = None, source: str = "point_cloud",
+        classes: Optional[str] = typer.Option(None, help="only these " + CLASSES_HELP + "; 2 alone: terrain model"),
+        chunk: Optional[str] = None):
     """Digital elevation model (GeoTIFF)."""
     doc, ch = _open(project, chunk)
-    p = ch.build_dem(resolution=resolution, source=source, progress=print_progress)
+    p = ch.build_dem(resolution=resolution, source=source, classes=_classes(classes), progress=print_progress)
     doc.save()
     typer.echo(str(p))
 
 
 @app.command()
 def ortho(project: Path, resolution: Optional[float] = None, surface: str = "dem", blending: str = "mosaic",
+          hide_classes: Optional[str] = typer.Option(None, help="transparent where the surface is of these "
+                                                                + CLASSES_HELP),
           chunk: Optional[str] = None):
     """Orthomosaic (GeoTIFF RGBA)."""
     doc, ch = _open(project, chunk)
-    p = ch.build_orthomosaic(resolution=resolution, surface=surface, blending=blending, progress=print_progress)
+    p = ch.build_orthomosaic(resolution=resolution, surface=surface, blending=blending,
+                             hide_classes=_classes(hide_classes), progress=print_progress)
     doc.save()
     typer.echo(str(p))
 
@@ -252,11 +271,14 @@ def merge_chunks(project: Path,
 @app.command()
 def export(project: Path, ortho: Optional[Path] = None, dem: Optional[Path] = None, model: Optional[Path] = None,
            cloud: Optional[Path] = None, cameras: Optional[Path] = None, markers: Optional[Path] = None,
-           report: Optional[Path] = None, chunk: Optional[str] = None):
+           report: Optional[Path] = None,
+           classes: Optional[str] = typer.Option(None, help="--cloud: only these " + CLASSES_HELP),
+           chunk: Optional[str] = None):
     """Export products in world coordinates."""
     _, ch = _open(project, chunk)
     for value, fn in ((ortho, ch.export_orthomosaic), (dem, ch.export_dem), (model, ch.export_model),
-                      (cloud, ch.export_point_cloud), (markers, ch.export_reference), (report, ch.generate_report)):
+                      (cloud, lambda path: ch.export_point_cloud(path, classes=_classes(classes))),
+                      (markers, ch.export_reference), (report, ch.generate_report)):
         if value:
             typer.echo(str(fn(value)))
     if cameras:
@@ -276,12 +298,13 @@ def info(project: Path):
 def section(project: Path, x1: float, y1: float, x2: float, y2: float, out: Path = Path("sezione.dxf"),
             source: str = "model", label: str = "Sezione",
             scale: float = typer.Option(0.0, help="SVG drawing scale 1:N (0: chosen from the size of the section)"),
+            classes: Optional[str] = typer.Option(None, help="only the parts on these " + CLASSES_HELP),
             chunk: Optional[str] = None):
     """Vertical section along a trace (world coordinates) to DXF/SVG."""
     from .archaeo import sections as sec_mod
 
     _, ch = _open(project, chunk)
-    s = sec_mod.section(ch, (x1, y1), (x2, y2), source=source, label=label)
+    s = sec_mod.section(ch, (x1, y1), (x2, y2), source=source, label=label, classes=_classes(classes))
     p = s.to_svg(out, scale=scale or None) if out.suffix.lower() == ".svg" else s.to_dxf(out)
     typer.echo(f"{p} ({len(s.polylines)} polylines, length {s.length:.3f} m)")
 
@@ -324,6 +347,35 @@ def classify(project: Path, chunk: Optional[str] = None):
     pc = classify_chunk(ch)
     doc.save()
     typer.echo(json.dumps(class_statistics(pc)))
+
+
+@app.command("classify-units")
+def classify_units(project: Path,
+                   pyarchinit_site: Optional[str] = typer.Option(None, help="the US polygons of this PyArchInit site "
+                                                                            "(default: the units drawn in the project)"),
+                   csv: Optional[Path] = typer.Option(None, help="write the statistics per US to this CSV"),
+                   keep_manual: bool = typer.Option(True, help="keep the classes corrected by hand"),
+                   chunk: Optional[str] = None):
+    """One class per stratigraphic unit (points inside its polygon) and statistics per US."""
+    from .ai.classify import classify_by_units, units_table_csv
+    from .archaeo.stratigraphy import UnitPolygon
+
+    doc, ch = _open(project, chunk)
+    if pyarchinit_site:
+        from .pyarchinit import PyArchInit
+
+        units = PyArchInit.connect().us_polygons(pyarchinit_site, crs=ch.crs)
+    else:
+        units = [UnitPolygon.from_dict(d) for d in (ch.meta.get("drawings") or {}).get("units", [])]
+    if not units:
+        raise typer.BadParameter("no units: draw them in the project or give --pyarchinit-site")
+    rows = classify_by_units(ch, units, keep_manual=keep_manual)
+    doc.save()
+    for r in rows:
+        z = "" if r["z_min"] is None else f", z {r['z_min']:.3f} - {r['z_max']:.3f}"
+        typer.echo(f"{r['code']:>3} {r['name']}: {r['points']:,} points, {r['area_m2']:.2f} m2{z}")
+    if csv:
+        typer.echo(str(units_table_csv(rows, csv)))
 
 
 @app.command("classify-train")
