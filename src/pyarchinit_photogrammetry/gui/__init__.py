@@ -57,7 +57,23 @@ def install_translations(qapp) -> bool:
     return ok
 
 
-def main(argv: list[str] | None = None) -> int:
+def _splash():
+    """The start splash of :mod:`ppg_launcher` (None when it cannot be shown)."""
+    try:
+        from ppg_launcher import Splash
+
+        return Splash()
+    except Exception:  # pragma: no cover - launcher module missing: no splash
+        return None
+
+
+def main(argv: list[str] | None = None, splash=None, started: float | None = None,
+         import_times: dict | None = None) -> int:
+    """Start the interface. ``splash`` (from :mod:`ppg_launcher`, which shows it before the
+    heavy imports) goes on showing the progress until the window appears."""
+    import time
+
+    started = time.perf_counter() if started is None else started
     argv = list(sys.argv[1:] if argv is None else argv)
     from ..engine.isolate import WORKER_FLAG, freeze_support, worker_main
 
@@ -87,7 +103,8 @@ def main(argv: list[str] | None = None) -> int:
     from ..core.document import Document
     from .icons import app_icon
 
-    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
+    if QApplication.instance() is None:
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     qapp = QApplication.instance() or QApplication([sys.argv[0]] + argv)
     qapp.setApplicationName("pyarchinit-photogrammetry")
     qapp.setApplicationDisplayName(APP_TITLE)
@@ -96,16 +113,21 @@ def main(argv: list[str] | None = None) -> int:
     install_translations(qapp)
     settings = app_settings()
     theme.apply(qapp, str(settings.value("theme", "light")))
+    splash = splash if splash is not None else _splash()
+    step = splash.step if splash is not None else (lambda *_a, **_k: None)
+    step(84, "Finestra principale")
     from .main_window import MainWindow
 
     project = next((a for a in argv if a.endswith(".ppg")), None)
     open_error = None
     if project:
+        step(88, f"Apertura di {os.path.basename(project)}")
         try:
             application.document = Document.open(project)
         except Exception as exc:
             open_error = f"Impossibile aprire {project}: {exc}"
-    win = MainWindow(application.document if project and not open_error else None, autoconnect="--check" not in argv)
+    win = MainWindow(application.document if project and not open_error else None, autoconnect="--check" not in argv,
+                     progress=splash.progress(88, 99) if splash is not None else None)
     geo = win.settings.value("geometry")
     if geo is not None:
         win.restoreGeometry(geo)
@@ -113,6 +135,14 @@ def main(argv: list[str] | None = None) -> int:
         if state is not None:
             win.restoreState(state)
     win.show()
+    if splash is not None:
+        step(100, "Pronto")
+        splash.close()
+    import logging
+
+    times = ", ".join(f"{k} {v:.1f} s" for k, v in (import_times or {}).items() if v >= 0.1)
+    logging.getLogger("pyarchinit_photogrammetry.gui").info(
+        "Avvio in %.1f s%s", time.perf_counter() - started, f" ({times})" if times else "")
     if open_error:
         from .dialogs import ErrorDialog
 

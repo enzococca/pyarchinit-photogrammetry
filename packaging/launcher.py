@@ -4,6 +4,6 @@ import sys
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
-    from pyarchinit_photogrammetry.gui import main  # handles --ppg-worker (isolated Poisson) itself
+    import ppg_launcher  # splash at once; worker processes (--ppg-worker) and --doctor go straight on
 
-    sys.exit(main())
+    sys.exit(ppg_launcher.main())

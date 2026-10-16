@@ -52,11 +52,14 @@ build = ["pyinstaller>=6.10", "pyinstaller-hooks-contrib>=2024.8", "pillow>=9.1"
 ppg = "pyarchinit_photogrammetry.cli:main"
 
 [project.gui-scripts]
-ppg-gui = "pyarchinit_photogrammetry.gui:main"
+ppg-gui = "ppg_launcher:main"  # splash with progress before the heavy imports
 
 [project.urls]
 Homepage = "https://github.com/enzococca/pyarchinit-photogrammetry"
 Issues = "https://github.com/enzococca/pyarchinit-photogrammetry/issues"
+
+[tool.setuptools]
+py-modules = ["ppg_launcher"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
