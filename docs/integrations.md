@@ -6,13 +6,28 @@
 writes a QGIS project next to the `.ppg` (`<name>_qgis/<name>_ppg.qgs`) and opens it:
 
 * rasters: the orthomosaic, the DEM (hillshade, hidden at first) and the DEM values;
-* vectors, in the group *Disegni (aggiornati dal vivo)*: `unita.geojson` (unit polygons,
-  label = `etichetta`), `sezioni.geojson`, `curve.geojson` (contour lines, label = elevation),
-  `linee.geojson` (other lines), `punti.geojson` (spot heights, label = `z`).
+* vectors, in the group *Disegni (aggiornati dal vivo)*: the tables of one GeoPackage,
+  `disegni_ppg.gpkg`: `unita` (unit polygons, label = `etichetta`), `sezioni` (section
+  traces), `curve` (contour lines, label = elevation), `linee` (other lines), `punti` (spot
+  heights, label = `z`).
 
-The vector files are rewritten 0.4 s after every change in the interface (new drawing,
-removed layer, edited attribute) and the QGIS layers are set to *reload data every second*,
-so what you draw here appears in QGIS while you draw. The project is created by QGIS's own
+The GeoPackage is updated 0.4 s after every change in the interface (new drawing, removed
+layer, edited attribute), in place and one transaction per changed table, and the project
+asks QGIS to redraw those layers every second: QGIS reads a GeoPackage again at every
+redraw, so what you draw here appears in QGIS by itself, without *Refresh*.
+
+Up to 0.4.1 the drawings were GeoJSON files set to *reload data every second*, and new
+drawings appeared only after *Refresh*: QGIS keeps GeoJSON in memory, and QGIS 3.34-3.42
+does not start the refresh timer of a layer read from a project saved with
+`autoRefreshMode` (the style, read first, sets the mode while the interval is still 0;
+the mode is then set again unchanged), so the map kept showing its cached image. The
+project is therefore written with the older `autoRefreshEnabled` attribute, which QGIS
+reads in the right order. A project saved again by those QGIS versions gets the new
+attribute and loses the automatic redraw on the next opening: open it from here (*Apri in
+QGIS* rewrites it). Use *Apri in QGIS* once to move a project linked with 0.4.1 to the
+GeoPackage. A project that has been opened in QGIS stays linked when it is reopened here;
+rasters made after the QGIS project (a new DEM, a new orthomosaic) appear after *Apri in
+QGIS* again. The project is created by QGIS's own
 Python (`/Applications/QGIS*.app`, `C:\Program Files\QGIS*`, `/usr/bin/qgis`, or `PPG_QGIS`),
 so styles and labels are native QGIS ones. Units published to PyArchInit
 (`pyunitastratigrafiche`) are of course visible in the PyArchInit layers of QGIS too.
@@ -24,7 +39,12 @@ The project is read directly (no Metashape needed): sensors with their calibrati
 (converted to COLMAP `FULL_OPENCV`: `f`, `cx/cy` from the centre, `b1`, `k1..k3`, `p1/p2`
 swapped to OpenCV order), aligned cameras, markers with references and projections, tie
 points with colours, the model (`model.zip`), and the DEM/orthomosaic GeoTIFFs exported next
-to the project (folders or names containing *dem/dsm* and *orto/ortho*). The chunk is placed
+to the project (folders or names containing *dem/dsm* and *orto/ortho*). Without a usable
+exported DEM (none, or an empty file left by a failed export, which is reported), the DEM
+kept inside the project is used: Metashape stores it as GeoTIFF tiles listed in
+`elevation.zip`, which are mosaicked and warped to the CRS of the chunk at Metashape's
+resolution (`dem.tif` in the project; Tell Abu adh-Dhuhur: 8 tiles, 10,241 x 10,545 px at
+5.9 cm in 30 s, 2 cm from the tie points, median). The chunk is placed
 in the CRS of those GeoTIFFs, otherwise in the projected CRS of the project, or in the UTM
 zone for geographic projects (similarity fitted through Metashape's geocentric frame).
 
@@ -52,8 +72,8 @@ Details of the import:
 Checked on the drone projects of a survey season (29-3265 photos): Tell Dlamah imported in
 6 s (tie points +3 mm and mesh vertices +4 mm from Metashape's DEM, median), a 425-photo
 project with a camera group, a 3265-photo project with a deleted component (+13 mm). Not
-read: Metashape's own tiled DEM/orthomosaic storage (export them as GeoTIFF), dense clouds
-in Metashape's octree format, masks, skew `b2`, `k4`.
+read: Metashape's own orthomosaic storage (image blocks and seamlines: export it as
+GeoTIFF), dense clouds in Metashape's octree format, masks, skew `b2`, `k4`.
 
 ## WebODM / ODM
 

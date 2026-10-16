@@ -11,6 +11,26 @@ from pathlib import Path
 
 import numpy as np
 
+DRAWING_SCALES = (20, 50, 100, 200, 500, 1000, 2000, 5000, 10000)  # 1:20, the usual scale of sections, at most
+MAX_DRAWING_MM = 1000.0  # widest drawing chosen automatically (about an A0 sheet)
+
+
+def drawing_scale(width_m: float, height_m: float = 0.0, max_mm: float = MAX_DRAWING_MM) -> int:
+    """The most detailed standard scale (1:20, 1:50, 1:100...) at which a drawing of
+    ``width_m`` x ``height_m`` metres fits in ``max_mm`` millimetres of paper: 1:20 for a
+    trench section, 1:200 for a section across a tell."""
+    size = max(float(width_m), float(height_m))
+    return next((s for s in DRAWING_SCALES if size * 1000.0 / s <= max_mm), DRAWING_SCALES[-1])
+
+
+def grid_step(span_m: float, lines: int = 12) -> float:
+    """Spacing of an elevation grid: a round value giving at most about ``lines`` lines over
+    ``span_m`` (10 cm for a trench, 1 or 2 m on a tell)."""
+    for step in (0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1.0, 2.0, 2.5, 5.0, 10.0, 20.0, 25.0, 50.0, 100.0):
+        if span_m / step <= lines:
+            return step
+    return float(10 ** np.ceil(np.log10(span_m / lines)))
+
 
 @dataclass
 class Section:
@@ -34,17 +54,21 @@ class Section:
         return np.column_stack([xy, poly[:, 1]])
 
     # ----------------------------------------------------------- drawing
-    def to_dxf(self, path: str | Path, world: bool = False, grid: float | None = 0.1) -> Path:
-        """DXF in metres. ``world=False``: section coordinates (x = distance, y = elevation);
-        ``world=True``: true 3D polylines placed in the CRS."""
+    def to_dxf(self, path: str | Path, world: bool = False, grid: float | bool | None = True) -> Path:
+        """DXF in metres. ``world=False``: section coordinates (x = distance, y = elevation)
+        with an elevation grid (``grid``: spacing in metres, True for a round spacing that
+        suits the height of the section, None for no grid); ``world=True``: true 3D
+        polylines placed in the CRS. The profile has a 0.5 mm line weight, the grid 0.13 mm."""
         import ezdxf
 
         doc = ezdxf.new("R2010", setup=True)
         doc.units = ezdxf.units.M
+        doc.header["$LWDISPLAY"] = 1  # show line weights
         msp = doc.modelspace()
-        for name, color in (("SEZ_PROFILO", 7), ("SEZ_PUNTI", 8), ("SEZ_GRIGLIA", 9), ("SEZ_TESTI", 1)):
+        for name, color, weight in (("SEZ_PROFILO", 7, 50), ("SEZ_PUNTI", 8, 18), ("SEZ_GRIGLIA", 9, 13),
+                                    ("SEZ_TESTI", 1, 18)):
             if name not in doc.layers:
-                doc.layers.add(name, color=color)
+                doc.layers.add(name, color=color, lineweight=weight)
         for poly in self.polylines:
             if len(poly) < 2:
                 continue
@@ -55,6 +79,8 @@ class Section:
         if not world and self.polylines:
             allp = np.vstack(self.polylines)
             (x0, y0), (x1, y1) = allp.min(0), allp.max(0)
+            if grid is True:
+                grid = grid_step(y1 - y0)
             if grid:
                 for z in np.arange(np.floor(y0 / grid) * grid, y1 + grid, grid):
                     msp.add_line((x0, z), (x1, z), dxfattribs={"layer": "SEZ_GRIGLIA"})
@@ -66,12 +92,16 @@ class Section:
         doc.saveas(path)
         return path
 
-    def to_svg(self, path: str | Path, scale: float = 20.0, stroke_mm: float = 0.35) -> Path:
-        """SVG at the given drawing scale (1:``scale``), units in millimetres."""
+    def to_svg(self, path: str | Path, scale: float | None = None, stroke_mm: float = 0.5) -> Path:
+        """SVG at the drawing scale 1:``scale`` (None: the most detailed standard scale at
+        which the section fits about an A0 sheet, see :func:`drawing_scale`), units in
+        millimetres of paper; the profile is drawn with a ``stroke_mm`` line."""
         if not self.polylines:
             raise ValueError("empty section")
         allp = np.vstack(self.polylines)
         lo, hi = allp.min(0), allp.max(0)
+        if not scale:
+            scale = drawing_scale(hi[0] - lo[0], hi[1] - lo[1])
         k = 1000.0 / scale  # metres -> paper millimetres
         margin = 10
         w = (hi[0] - lo[0]) * k + 2 * margin

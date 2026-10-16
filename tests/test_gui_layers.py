@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 import numpy as np
 import pytest
@@ -88,6 +89,32 @@ def test_section_goes_to_pane_and_is_persisted(window, qapp):
     w._delete_section(w.sections[-1]) if False else None  # deletion asks a question: covered manually
 
 
+def test_section_preview_lines_are_visible(qapp, tmp_path):
+    """A drawing metres long on paper is reduced many times in the pane: its lines and
+    label are thickened for the preview (the SVG file stays as it is)."""
+    import re
+
+    from pyarchinit_photogrammetry.archaeo.sections import Section
+    from pyarchinit_photogrammetry.gui.panels import SectionsPane, svg_preview
+
+    d = np.linspace(0.0, 174.0, 300)
+    sec = Section(np.zeros(3), np.array([174.0, 0.0, 0.0]), polylines=[np.column_stack([d, 300 + np.sin(d)])])
+    path = sec.to_svg(tmp_path / "s.svg", scale=20)  # 8.7 m of paper, as the sections of 0.4.1
+    data, size = svg_preview(path, max_width=1200)
+    text = data.decode()
+    width_units = float(re.search(r'viewBox="0 0 ([\d.]+)', text).group(1))
+    stroke = float(re.search(r'stroke-width="([\d.]+)"', text).group(1))
+    assert size.width() == 1200 and stroke * size.width() / width_units >= 1.5  # at least 1.5 px on screen
+    assert 'stroke-width="0.5"' in path.read_text()
+    pane = SectionsPane()
+    pane.resize(900, 300)
+    pane.show()
+    pane.set_sections([{"label": "Sezione 1", "p1": [0, 0], "p2": [174, 0], "length": 174.0, "svg": str(path)}])
+    qapp.processEvents()
+    assert 300 <= pane.svg.width() <= 900  # fits the pane instead of a fixed 1400 px
+    pane.close()
+
+
 def test_line_layers_survive_raster_reload(window, qapp):
     w = window
     w._add_line_feature("Curve prova", [(2480001.0, 4500001.0), (2480002.0, 4500001.5)], "#ffffff",
@@ -99,6 +126,37 @@ def test_line_layers_survive_raster_reload(window, qapp):
     assert "Curve prova" in w.ortho_view.layers
     w.clear_drawings()
     assert "Curve prova" not in w.ortho_view.layers
+
+
+def test_many_contour_lines_are_drawn_at_once(window, qapp, tmp_path):
+    """Tens of thousands of contour lines (a 5 cm interval on a tell) used to freeze the
+    window: the layer pane was rebuilt, with every line, after each line added."""
+    w = window
+    rebuilt = []
+    w.layers_pane.tree.model().modelReset.connect(lambda: rebuilt.append(1))
+    x0, y0 = 2480000.5, 4500000.5
+    t = np.linspace(0, 2 * np.pi, 12)
+    lines = [{"elevation": 99.0 + 0.01 * (k % 50), "index": k % 5 == 0,
+              "coords": np.column_stack([x0 + 1.5 + 0.0004 * k * np.cos(t), y0 + 1.5 + 0.0004 * k * np.sin(t)])}
+             for k in range(1, 3001)]
+    w._qgis_dir = lambda: tmp_path
+    w.a_qgis_live.setChecked(True)
+    start = time.time()
+    w._draw_contours("Curve di livello (0.01 m)", lines)
+    elapsed = time.time() - start
+    assert len(w.ortho_view.layers["Curve di livello (0.01 m)"]["features"]) == 3000
+    assert elapsed < 15 and len(rebuilt) <= 2  # one rebuild of the layer pane, not 3000
+    top = next(w.layers_pane.tree.topLevelItem(i) for i in range(w.layers_pane.tree.topLevelItemCount())
+               if w.layers_pane.tree.topLevelItem(i).text(0).startswith("Curve di livello (0.01 m)"))
+    assert top.childCount() == w.layers_pane.MAX_LISTED + 1 and "altri 2500" in top.child(top.childCount() - 1).text(0)
+    deadline = time.time() + 10
+    while w._qgis_live_link().counts()["curve"] < 3000 and time.time() < deadline:
+        qapp.processEvents()
+        time.sleep(0.05)
+    assert w._qgis_live_link().counts()["curve"] == 3000
+    w.a_qgis_live.setChecked(False)
+    w.ortho_view.remove_layer("Curve di livello (0.01 m)")
+    w.line_layers.pop("Curve di livello (0.01 m)", None)
 
 
 def test_connect_and_site_dialogs(qapp, tmp_path):
@@ -188,10 +246,25 @@ def test_qgis_live_export_from_view_layers(window, qapp, tmp_path):
     w.ortho_view.add_point(x0 + 1.5, y0 + 1.5, layer="Punti", attrs={"z": 99.8})
     w._qgis_dir = lambda: tmp_path
     files = w._export_qgis_layers()
-    counts = {k: len(json.loads(p.read_text())["features"]) for k, p in files.items()}
+    counts = w._qgis_live_link().counts()
     assert counts["unita"] == 1 and counts["curve"] == 1 and counts["punti"] == 1
-    unit = json.loads(files["unita"].read_text())["features"][0]
-    assert unit["properties"]["us"] == "5" and unit["geometry"]["type"] == "Polygon"
+    import sqlite3
+
+    con = sqlite3.connect(files["unita"])
+    assert con.execute('SELECT us FROM "unita"').fetchone()[0] == "5"
+    con.close()
+    # live: a new drawing reaches the GeoPackage by itself, a moment later
+    w.a_qgis_live.setChecked(True)
+    w.ortho_view.add_point(x0 + 1.6, y0 + 1.6, layer="Punti", attrs={"z": 99.9})
+    deadline = time.time() + 5
+    while w._qgis_live_link().counts()["punti"] < 2 and time.time() < deadline:
+        qapp.processEvents()
+        time.sleep(0.05)
+    assert w._qgis_live_link().counts()["punti"] == 2
+    w.a_qgis_live.setChecked(False)
+    w.set_document(w.doc)  # reopening a project already linked to QGIS keeps the link live
+    assert w.a_qgis_live.isChecked()
+    w.a_qgis_live.setChecked(False)
 
 
 def _units_side_by_side(w, n=4, gap_after=3):

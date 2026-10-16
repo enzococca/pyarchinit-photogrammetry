@@ -1,6 +1,7 @@
 """2D views: orthomosaic/DEM with drawing tools, and photos with marker placement."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -128,6 +129,29 @@ class RasterView(_ZoomView):
         self.snap_px = 12.0
         self._snap_cache = None  # (vertices (n, 2), segments (m, 2, 2)) in world coordinates
         self._snap_marks: dict = {}
+        self._batch = 0  # > 0 inside batch(): one layers_changed at the end
+        self._batch_changed = False
+        self._inv_of = self._inv = None  # self.tr and its inverse
+
+    @contextmanager
+    def batch(self):
+        """Add or remove many features (contour lines, a reloaded drawing) with a single
+        ``layers_changed`` at the end, instead of one per feature: the layer pane and the
+        QGIS link then update once."""
+        self._batch += 1
+        try:
+            yield self
+        finally:
+            self._batch -= 1
+            if not self._batch and self._batch_changed:
+                self._batch_changed = False
+                self.layers_changed.emit()
+
+    def _changed(self) -> None:
+        if self._batch:
+            self._batch_changed = True
+        else:
+            self.layers_changed.emit()
 
     # ----------------------------------------------------------- data
     def load(self, path: str | Path, kind: str, max_side: int = 6000) -> None:
@@ -140,7 +164,7 @@ class RasterView(_ZoomView):
         self.scene().clear()
         self.overlays, self._clicks, self._click_xy, self._rubber = [], [], [], None
         self.layers, self.layer_order = {}, []
-        self.layers_changed.emit()
+        self._changed()
         if had_selection:
             self.selection_changed.emit(0)
         self.path, self.kind = Path(path), kind
@@ -182,13 +206,20 @@ class RasterView(_ZoomView):
         x, y = _apply(self.tr, p.x(), p.y())
         return float(x), float(y)
 
+    def _inverse(self):
+        """World -> pixel transform of the displayed raster (cached: inverting it for every
+        vertex of thousands of contour lines took seconds)."""
+        if self._inv_of is not self.tr:
+            self._inv_of, self._inv = self.tr, ~self.tr
+        return self._inv
+
     def scene_pt(self, x: float, y: float) -> QPointF:
-        c, r = _apply(~self.tr, x, y)
+        c, r = _apply(self._inverse(), x, y)
         return QPointF(c, r)
 
     def elevation(self, x: float, y: float) -> float | None:
         if self.z is not None:
-            c, r = _apply(~self.tr, x, y)
+            c, r = _apply(self._inverse(), x, y)
             arr = self.z
         elif getattr(self, "_dem_lookup", None) is not None:
             arr, t = self._dem_lookup
@@ -223,7 +254,7 @@ class RasterView(_ZoomView):
             if it is not None:
                 it.setVisible(lay["visible"])
                 self.overlays.append(it)
-        self.layers_changed.emit()
+        self._changed()
 
     def add_polygon(self, xy, label: str = "", color: str = "#ff3030", fill_alpha: int = 50,
                     layer: str = "Unita' stratigrafiche", attrs: dict | None = None):
@@ -249,11 +280,13 @@ class RasterView(_ZoomView):
 
     def add_line(self, xy, color: str = "#ffd000", label: str = "", layer: str = "Linee", attrs: dict | None = None,
                  width: float = 2.5):
+        xy = np.asarray(xy, float)[:, :2]
+        inv = self._inverse()  # all the vertices at once: contour layers have hundreds of thousands
+        cols = inv.a * xy[:, 0] + inv.b * xy[:, 1] + inv.c
+        rows = inv.d * xy[:, 0] + inv.e * xy[:, 1] + inv.f
+        pts = [QPointF(c, r) for c, r in zip(cols.tolist(), rows.tolist())]
         path = QPainterPath()
-        pts = [self.scene_pt(x, y) for x, y in xy]
-        path.moveTo(pts[0])
-        for p in pts[1:]:
-            path.lineTo(p)
+        path.addPolygon(QPolygonF(pts))  # an open subpath
         item = self.scene().addPath(path, self._pen(color, width))
         t = None
         if label:
@@ -262,8 +295,7 @@ class RasterView(_ZoomView):
             t.setFlag(t.GraphicsItemFlag.ItemIgnoresTransformations)
             t.setPos(pts[0])
             self.scene().addItem(t)
-        self._register(layer, "line", item, t, {"etichetta": label, **(attrs or {}),
-                                                  "_geom": ("LineString", [[float(x), float(y)] for x, y in xy])})
+        self._register(layer, "line", item, t, {"etichetta": label, **(attrs or {}), "_geom": ("LineString", xy.tolist())})
         return item
 
     def add_point(self, x: float, y: float, color: str = "#30ff60", label: str = "", layer: str = "Punti",
@@ -295,7 +327,7 @@ class RasterView(_ZoomView):
         item.setData(1, attrs)
         if key == "etichetta" and label_item is not None:
             label_item.setText(str(value))
-        self.layers_changed.emit()
+        self._changed()
         return attrs
 
     def features(self, name: str) -> list[dict]:
@@ -329,7 +361,7 @@ class RasterView(_ZoomView):
                     self.scene().removeItem(it)
                     if it in self.overlays:
                         self.overlays.remove(it)
-        self.layers_changed.emit()
+        self._changed()
 
     def layer_rect(self, name: str) -> QRectF | None:
         lay = self.layers.get(name)
@@ -375,7 +407,7 @@ class RasterView(_ZoomView):
             self.scene().removeItem(it)
         self.overlays = []
         self.layers, self.layer_order = {}, []
-        self.layers_changed.emit()
+        self._changed()
 
     def set_mode(self, mode: str) -> None:
         if mode != "select" and self.selection:

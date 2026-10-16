@@ -527,6 +527,14 @@ class MainWindow(QMainWindow):
         self.proxies_pane.set_proxies(self.chunk.meta.get("proxies", []) if self.chunk else [])
         if doc.path:
             self._add_recent(doc.path)
+        # a project already opened in QGIS stays linked: its drawings keep updating there
+        from ..io.qgis_link import LIVE_DB
+
+        linked = doc.path is not None and (self._qgis_dir() / LIVE_DB).exists()
+        if linked != self.a_qgis_live.isChecked():
+            self.a_qgis_live.setChecked(linked)
+        elif linked:
+            self._schedule_qgis()
 
     def refresh_all(self, reset_views: bool = False) -> None:
         name = self.doc.path.name if self.doc.path else "senza nome"
@@ -551,12 +559,13 @@ class MainWindow(QMainWindow):
         self.ortho_view.load(path, kind)
         if kind == "ortho" and ch.dem_path:
             self.ortho_view.set_dem(ch.dem_path)
-        for i, u in enumerate(self.units):
-            self._draw_unit(u, i)
-        self._draw_sections()
-        for name, lines in self.line_layers.items():
-            for coords, color, label, attrs, width in lines:
-                self.ortho_view.add_line(coords, color, label, layer=name, attrs=attrs, width=width)
+        with self.ortho_view.batch():  # thousands of contour lines: one update of panes and QGIS
+            for i, u in enumerate(self.units):
+                self._draw_unit(u, i)
+            self._draw_sections()
+            for name, lines in self.line_layers.items():
+                for coords, color, label, attrs, width in lines:
+                    self.ortho_view.add_line(coords, color, label, layer=name, attrs=attrs, width=width)
 
     def _dirty(self, flag: bool = True) -> None:
         self.setWindowModified(flag)
@@ -855,6 +864,8 @@ class MainWindow(QMainWindow):
                     f"CRS {ch.crs}")
             if ch.meta.get("point_cloud_source"):
                 text += f"\nNuvola densa: {ch.meta['point_cloud_source']} ({len(ch.point_cloud)} punti)"
+            if ch.meta.get("import", {}).get("dem"):
+                text += f"\nDEM: {ch.meta['import']['dem']}"
             self.log_pane.info(f"Importato {src}: {text}")
             for w in warn:
                 self.log_pane.warning(w)
@@ -1327,9 +1338,11 @@ class MainWindow(QMainWindow):
     def _draw_sections(self) -> None:
         if self.ortho_view.tr is None:
             return
-        for sdict in self.sections:
-            self.ortho_view.add_line([sdict["p1"], sdict["p2"]], "#ffd000", sdict["label"], layer="Sezioni",
-                                     attrs={"lunghezza_m": round(sdict.get("length", 0), 3), "svg": sdict.get("svg", "")})
+        with self.ortho_view.batch():
+            for sdict in self.sections:
+                self.ortho_view.add_line([sdict["p1"], sdict["p2"]], "#ffd000", sdict["label"], layer="Sezioni",
+                                         attrs={"lunghezza_m": round(sdict.get("length", 0), 3),
+                                                "svg": sdict.get("svg", "")})
 
     def _section_drawn(self, a, b) -> None:
         if not self._need_chunk(product="model"):
@@ -1938,15 +1951,26 @@ class MainWindow(QMainWindow):
         if getattr(self, "a_qgis_live", None) is not None and self.a_qgis_live.isChecked():
             self._qgis_timer.start(400)
 
-    def _export_qgis_layers(self) -> dict:
-        from ..io.qgis_link import export_layers
+    def _qgis_live_link(self):
+        """The GeoPackage of the drawings read by QGIS (one per project folder and CRS; it
+        remembers what it wrote, so only the changed tables are rewritten)."""
+        from ..io.qgis_link import LiveLink
 
+        folder, crs = self._qgis_dir(), self.chunk.crs if self.chunk else ""
+        link = getattr(self, "_live_link", None)
+        if link is None or link.path.parent != folder or link.crs != (crs or ""):
+            link = self._live_link = LiveLink(folder, crs)
+        return link
+
+    def _export_qgis_layers(self, force: bool = False) -> dict:
         view = self.ortho_view
         layers = {name: {"kind": lay["kind"], "features": view.features(name)} for name, lay in view.layers.items()}
         try:
-            return export_layers(self._qgis_dir(), layers, self.chunk.crs if self.chunk else "")
+            return self._qgis_live_link().write(layers, force=force)
         except Exception as exc:  # a live refresh must never interrupt drawing with an error window
             log.warning("Aggiornamento dei layer per QGIS non riuscito: %s", exc, exc_info=True)
+            if "locked" in str(exc) or "busy" in str(exc):
+                self._qgis_timer.start(3000)  # QGIS or a sync client holds the file a moment: try again
             return {}
 
     def open_in_qgis(self) -> None:
@@ -1959,7 +1983,10 @@ class MainWindow(QMainWindow):
             self._warn("QGIS non trovato. Installalo da qgis.org (oppure indica il percorso con la variabile PPG_QGIS).")
             return
         ch = self.chunk
-        files = self._export_qgis_layers()
+        files = self._export_qgis_layers(force=True)
+        if not files:
+            self._warn(f"Non riesco a scrivere i disegni per QGIS in {self._qgis_dir()}: vedi il log.")
+            return
         name = self.doc.path.stem if self.doc.path else "progetto"
         project = self._qgis_dir() / f"{name}_ppg.qgs"
         rasters = []
@@ -1981,7 +2008,7 @@ class MainWindow(QMainWindow):
             bad = [v["name"] for v in rep["vectors"] + rep["rasters"] if not v["valid"]]
             self.log_pane.info(f"Progetto QGIS: {project} ({len(rep['vectors'])} layer vettoriali aggiornati dal vivo, "
                                f"{len(rep['rasters'])} raster)" + (f"; non validi: {', '.join(bad)}" if bad else ""))
-            self.statusBar().showMessage("QGIS aperto: i disegni si aggiornano in QGIS ogni secondo", 15000)
+            self.statusBar().showMessage("QGIS aperto: i disegni si aggiornano in QGIS da soli, ogni secondo", 15000)
 
         self.run_task("Apertura in QGIS", job, done, refresh=False, save=False)
 
@@ -2051,33 +2078,71 @@ class MainWindow(QMainWindow):
     def contours(self) -> None:
         if not self._need_chunk(product="dem"):
             return
-        v = ParamDialog.ask(self, "Curve di livello", [
-            Field("interval", "Equidistanza (m)", 0.05, minimum=0.001, maximum=100, decimals=3),
-            Field("index_every", "Curva direttrice ogni", 5, minimum=1, maximum=50),
-            Field("path", "Salva (DXF, GeoJSON, SHP, GPKG)", str(Path(self._last_dir()) / "curve.dxf"),
-                  kind="file_save", filter="DXF (*.dxf);;GeoJSON (*.geojson);;GeoPackage (*.gpkg)")])
-        if not v:
-            return
         from ..archaeo import terrain
 
+        dem = self.chunk.dem_path
+        try:
+            lo, hi = terrain.dem_range(dem)
+            suggested = terrain.suggest_interval(dem)
+        except Exception as exc:
+            self._exc("DEM non leggibile", exc)
+            return
+        v = ParamDialog.ask(self, "Curve di livello", [
+            Field("interval", "Equidistanza (m)", suggested, minimum=0.001, maximum=100, decimals=3),
+            Field("index_every", "Curva direttrice ogni", 5, minimum=1, maximum=50),
+            Field("smooth", "Levigatura del DEM (m, 0 = nessuna)", 0.0, minimum=0.0, maximum=50, decimals=2),
+            Field("path", "Salva (DXF, GeoPackage, GeoJSON)", str(Path(self._last_dir()) / "curve.dxf"),
+                  kind="file_save", filter="DXF (*.dxf);;GeoPackage (*.gpkg);;GeoJSON (*.geojson)")],
+            intro=f"Quote del DEM da {lo:.2f} a {hi:.2f} m (dislivello {hi - lo:.2f} m): con {suggested:g} m "
+                  f"sono circa {int((hi - lo) / suggested)} livelli. Su un DSM da drone (vegetazione, zolle) "
+                  "una levigatura di 0,2-0,5 m toglie i piccoli anelli e da' curve piu' pulite.")
+        if not v:
+            return
+        levels = (hi - lo) / v["interval"]
+        if levels > 300:
+            r = message(self, "question", "Curve di livello",
+                        f"Con equidistanza {v['interval']:g} m il DEM (dislivello {hi - lo:.1f} m) da' {int(levels)} "
+                        f"livelli di curve: decine di migliaia di linee, lente da disegnare e da usare. "
+                        f"Un'equidistanza di {suggested:g} m ne da' circa {int((hi - lo) / suggested)}.\n\nContinuare "
+                        f"con {v['interval']:g} m?",
+                        buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        default=QMessageBox.StandardButton.No)
+            if r != QMessageBox.StandardButton.Yes:
+                return
+
         def job(p):
-            lines = terrain.contours(self.chunk.dem_path, v["interval"], index_every=v["index_every"])
+            p(0.1, "Curve di livello")
+            lines = terrain.contours(dem, v["interval"], index_every=v["index_every"], smooth=v["smooth"])
+            p(0.7, f"Salvataggio di {len(lines)} curve")
             terrain.export_contours(lines, v["path"], crs=self.chunk.crs)
             return lines
 
         def done(lines):
             self._show_raster("dem")
-            name = f"Curve di livello ({v['interval']} m)"
-            self.line_layers.pop(name, None)
-            self.ortho_view.remove_layer(name)
-            for ln in lines:
-                self._add_line_feature(name, ln["coords"], "#ffffff" if ln.get("index") else "#202020",
-                                       attrs={"quota": round(float(ln.get("elevation", 0)), 3),
-                                              "direttrice": bool(ln.get("index"))}, width=1.6 if ln.get("index") else 1.0)
+            name = f"Curve di livello ({v['interval']:g} m)"
+            self._draw_contours(name, lines)
+            self.log_pane.info(f"{name}: {len(lines)} linee, {sum(len(ln['coords']) for ln in lines)} vertici, "
+                               f"salvate in {v['path']}")
             self.statusBar().showMessage(f"{len(lines)} curve salvate in {v['path']}", 10000)
             self._show_pane(self.left_tabs, self.layers_pane)
 
         self.run_task("Curve di livello", job, done, refresh=False, save=False)
+
+    def _draw_contours(self, name: str, lines: list[dict]) -> None:
+        """Contour lines as a layer of the raster view (replacing a layer with the same name),
+        added in one batch: tens of thousands of lines update the panes and QGIS once."""
+        self.line_layers.pop(name, None)
+        self.ortho_view.remove_layer(name)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            with self.ortho_view.batch():
+                for ln in lines:
+                    self._add_line_feature(name, ln["coords"], "#ffffff" if ln.get("index") else "#202020",
+                                           attrs={"quota": round(float(ln.get("elevation", 0)), 3),
+                                                  "direttrice": bool(ln.get("index"))},
+                                           width=1.6 if ln.get("index") else 1.0)
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def compute_volume(self) -> None:
         if not self._need_chunk(product="dem"):

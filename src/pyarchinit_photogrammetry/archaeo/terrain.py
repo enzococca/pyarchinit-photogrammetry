@@ -9,20 +9,68 @@ import numpy as np
 from ..engine.dem import NODATA, read_dem, write_geotiff
 
 
-def contours(dem_path: str | Path, interval: float, base: float = 0.0, index_every: int = 5) -> list[dict]:
-    """Contour lines of a DEM. Returns ``[{"elevation", "index", "coords" (N,2) world}]``."""
+CONTOUR_INTERVALS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1.0, 2.0, 2.5, 5.0, 10.0, 20.0, 25.0, 50.0, 100.0)
+
+
+def dem_range(dem_path: str | Path) -> tuple[float, float]:
+    """Lowest and highest elevation of a DEM, from a reduced reading (fast on large DEMs)."""
+    import rasterio
+
+    with rasterio.open(dem_path) as src:
+        f = max(1, max(src.width, src.height) // 1500)
+        a = src.read(1, out_shape=(max(1, src.height // f), max(1, src.width // f)), masked=True).astype(float)
+    a = np.ma.masked_invalid(a)
+    if a.count() == 0:
+        raise ValueError("DEM senza quote valide")
+    return float(a.min()), float(a.max())
+
+
+def suggest_interval(dem_path: str | Path, levels: int = 50) -> float:
+    """A round contour interval giving at most about ``levels`` levels over the relief of the
+    DEM: 5 cm on a trench with 1 m of relief, 50 cm on a tell 20 m high."""
+    lo, hi = dem_range(dem_path)
+    return next((iv for iv in CONTOUR_INTERVALS if (hi - lo) / iv <= levels), CONTOUR_INTERVALS[-1])
+
+
+def contours(dem_path: str | Path, interval: float, base: float = 0.0, index_every: int = 5,
+             simplify: bool = True, min_area_px: float = 25.0, smooth: float = 0.0) -> list[dict]:
+    """Contour lines of a DEM. Returns ``[{"elevation", "index", "coords" (N,2) world}]``.
+
+    With ``simplify`` every line keeps only the vertices needed to stay within half a pixel
+    of the traced line (a DEM traced pixel by pixel gives a vertex every pixel), and closed
+    rings smaller than ``min_area_px`` pixels (noise of the surface) are left out: on a
+    real DEM that is about a sixth of the vertices for the same drawing. ``smooth`` (metres)
+    smooths the DEM first with a Gaussian of that width, ignoring the cells without data:
+    on a drone DSM (vegetation, clods) 0.2-0.5 m removes most of the small rings."""
     import contourpy
+    import shapely
 
     z, tr, _, res = read_dem(Path(dem_path))
     lo, hi = np.nanmin(z), np.nanmax(z)
+    if smooth > 0:
+        from scipy import ndimage
+
+        empty = np.isnan(z)
+        sigma = smooth / abs(res)
+        num = ndimage.gaussian_filter(np.where(empty, 0.0, z).astype(np.float32), sigma)
+        den = ndimage.gaussian_filter((~empty).astype(np.float32), sigma)
+        z = np.where(empty, np.nan, num / np.maximum(den, 1e-6))
+        del num, den
     gen = contourpy.contour_generator(z=np.ma.masked_invalid(z), line_type=contourpy.LineType.Separate)
     out = []
-    first = np.ceil((lo - base) / interval) * interval + base
-    for k, level in enumerate(np.arange(first, hi, interval)):
-        n = int(round((level - base) / interval))
+    for n in range(int(np.ceil((lo - base) / interval)), int(np.floor((hi - base) / interval)) + 1):
+        level = round(base + n * interval, 9)  # 294.15, not 294.15000000000003
         for line in gen.lines(level):
             if len(line) < 2:
                 continue
+            if simplify:
+                if len(line) > 3 and np.array_equal(line[0], line[-1]):
+                    x, y = line[:, 0], line[:, 1]
+                    if 0.5 * abs(np.dot(x[:-1], y[1:]) - np.dot(x[1:], y[:-1])) < min_area_px:
+                        continue
+                line = shapely.get_coordinates(shapely.simplify(shapely.linestrings(line), 0.5))
+                if len(line) < 2:
+                    continue
             col, row = line[:, 0], line[:, 1]
             x = tr.c + (col + 0.5) * tr.a
             y = tr.f + (row + 0.5) * tr.e
@@ -31,8 +79,18 @@ def contours(dem_path: str | Path, interval: float, base: float = 0.0, index_eve
 
 
 def export_contours(lines: list[dict], path: str | Path, crs: str | None = None) -> Path:
-    """Write contours as DXF (2.5D polylines with elevation) or GeoJSON."""
+    """Write contours as DXF (2.5D polylines with elevation), GeoPackage (``.gpkg``: table
+    ``curve_di_livello`` with ``quota`` and ``direttrice``) or GeoJSON (any other name)."""
     path = Path(path)
+    if path.suffix.lower() == ".gpkg":
+        from shapely.geometry import LineString
+
+        from ..io import gpkg
+
+        feats = [(LineString(c["coords"]) if len(c["coords"]) >= 2 else None,
+                  {"quota": float(c["elevation"]), "direttrice": int(bool(c["index"]))}) for c in lines]
+        return gpkg.write_table(path, "curve_di_livello", "LINESTRING", {"quota": "REAL", "direttrice": "INTEGER"},
+                                feats, crs, identifier="Curve di livello")
     if path.suffix.lower() == ".dxf":
         import ezdxf
 

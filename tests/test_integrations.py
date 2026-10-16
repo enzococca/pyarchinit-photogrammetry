@@ -156,36 +156,157 @@ def test_metashape_real_project(tmp_path):
 
 
 # ---------------------------------------------------------------- QGIS
-def test_qgis_export_layers(tmp_path):
-    from pyarchinit_photogrammetry.io.qgis_link import LIVE_FILES, export_layers
+def _gpkg_rows(path, table):
+    import sqlite3
 
-    layers = {"Unita' stratigrafiche": {"kind": "polygon", "features": [
-                  {"etichetta": "US 1", "us": "1", "_unit": 0, "_geom": ("Polygon", [[0, 0], [1, 0], [1, 1]])}]},
-              "Curve di livello (0.1 m)": {"kind": "line", "features": [{"quota": 99.5, "_geom": ("LineString", [[0, 0], [2, 2]])}]},
+    import shapely
+
+    con = sqlite3.connect(path)
+    con.row_factory = sqlite3.Row
+    rows = [dict(r) for r in con.execute(f'SELECT * FROM "{table}" ORDER BY fid')]
+    for r in rows:
+        blob = r.pop("geom")
+        assert blob[:2] == b"GP" and blob[3] == 0b011  # little endian, xy envelope
+        r["geom"] = shapely.from_wkb(blob[8 + 32:])
+    con.close()
+    return rows
+
+
+def test_qgis_live_geopackage(tmp_path):
+    """The drawings for QGIS: one GeoPackage, a table per kind, rewritten in place and only
+    where something changed."""
+    import sqlite3
+
+    from pyarchinit_photogrammetry.io.qgis_link import LIVE_DB, LIVE_TABLES, LiveLink
+
+    unit = {"etichetta": "US 1", "us": "1", "_unit": 0, "_geom": ("Polygon", [[0, 0], [1, 0], [1, 1]])}
+    layers = {"Unita' stratigrafiche": {"kind": "polygon", "features": [unit]},
+              "Curve di livello (0.1 m)": {"kind": "line", "features": [
+                  {"quota": 99.5, "direttrice": True, "_geom": ("LineString", [[0, 0], [2, 2]])}]},
               "Punti": {"kind": "point", "features": [{"z": 1.0, "_geom": ("Point", [0.5, 0.5])}]}}
-    files = export_layers(tmp_path, layers, "EPSG:3004")
-    assert set(files) == set(LIVE_FILES)
-    unita = json.loads(files["unita"].read_text())
-    f = unita["features"][0]
-    assert f["geometry"]["coordinates"][0][0] == f["geometry"]["coordinates"][0][-1]  # ring closed
-    assert f["properties"] == {"layer": "Unita' stratigrafiche", "etichetta": "US 1", "us": "1"}  # no hidden keys
-    assert unita["crs"]["properties"]["name"].endswith("EPSG::3004")
-    assert json.loads(files["linee"].read_text())["features"] == []
-    assert json.loads(files["curve"].read_text())["features"][0]["properties"]["quota"] == 99.5
+    link = LiveLink(tmp_path, "EPSG:3004")
+    files = link.write(layers)
+    assert set(files) == set(LIVE_TABLES) and files["unita"] == tmp_path / LIVE_DB
+    con = sqlite3.connect(tmp_path / LIVE_DB)
+    assert con.execute("PRAGMA application_id").fetchone()[0] == 0x47504B47  # 'GPKG'
+    assert con.execute("SELECT srs_id FROM gpkg_contents WHERE table_name='unita'").fetchone()[0] == 3004
+    assert con.execute("SELECT COUNT(*) FROM gpkg_spatial_ref_sys WHERE srs_id=3004").fetchone()[0] == 1
+    con.close()
+    (u,) = _gpkg_rows(tmp_path / LIVE_DB, "unita")
+    assert u["layer"] == "Unita' stratigrafiche" and u["etichetta"] == "US 1" and u["us"] == "1"
+    assert "_unit" not in u and u["geom"].geom_type == "Polygon" and u["geom"].area == 0.5  # ring closed
+    (c,) = _gpkg_rows(tmp_path / LIVE_DB, "curve")
+    assert c["quota"] == 99.5 and c["direttrice"] == 1
+    assert link.counts() == {"unita": 1, "sezioni": 0, "curve": 1, "linee": 0, "punti": 1}
+
+    def changes():
+        con = sqlite3.connect(tmp_path / LIVE_DB)
+        n = con.total_changes, {t: con.execute("SELECT last_change FROM gpkg_contents WHERE table_name=?", (t,)).fetchone()[0]
+                                for t in LIVE_TABLES}
+        con.close()
+        return n[1]
+
+    before = changes()
+    link.write(layers)  # nothing changed: nothing written
+    assert changes() == before
+    unit["us"] = "2"  # an attribute edited in place
+    layers["Sezioni"] = {"kind": "line", "features": [{"etichetta": "Sezione 1", "lunghezza_m": 2.0,
+                                                       "_geom": ("LineString", [[0, 0], [0, 2]])}]}
+    link.write(layers)
+    after = changes()
+    assert after["unita"] != before["unita"] and after["sezioni"] != before["sezioni"]
+    assert after["curve"] == before["curve"] and after["punti"] == before["punti"]
+    assert _gpkg_rows(tmp_path / LIVE_DB, "unita")[0]["us"] == "2"
+    assert _gpkg_rows(tmp_path / LIVE_DB, "sezioni")[0]["lunghezza_m"] == 2.0
 
 
-def test_qgis_project(processed, tmp_path):
-    from pyarchinit_photogrammetry.io.qgis_link import build_project, export_layers, find_qgis
+_QGIS_LIVE = r"""
+import json, sys
+from qgis.core import QgsApplication, QgsPointXY, QgsProject, QgsRectangle
+from qgis.gui import QgsMapCanvas
+from qgis.PyQt.QtCore import QEventLoop, QTimer
+from qgis.PyQt.QtGui import QColor
+app = QgsApplication([], True)
+app.initQgis()
+proj = QgsProject.instance()
+proj.read(sys.argv[1])
+layers = {l.name(): l for l in proj.mapLayers().values()}
+x, y, x2, y2 = (float(v) for v in sys.argv[2:6])
+canvas = QgsMapCanvas()
+canvas.setCachingEnabled(True)  # as in QGIS desktop: unchanged layers are drawn from the cache
+canvas.resize(300, 300)
+canvas.show()
+canvas.setCanvasColor(QColor("white"))
+canvas.setDestinationCrs(proj.crs())
+canvas.setLayers([l for n, l in layers.items() if n.endswith("(ppg)")])
+canvas.setExtent(QgsRectangle(x - 1, y - 1, x2 + 1, y2 + 1))
+def spin(sec):
+    loop = QEventLoop()
+    QTimer.singleShot(int(sec * 1000), loop.quit)
+    loop.exec()
+def colour(px, py):
+    pt = canvas.getCoordinateTransform().transform(QgsPointXY(px, py))
+    return QColor(canvas.grab().toImage().pixel(int(pt.x()), int(pt.y()))).name()
+def state():
+    return json.dumps({"counts": {n: sum(1 for _ in l.getFeatures()) for n, l in layers.items() if n.endswith("(ppg)")},
+                       "first": colour(x + 0.25, y + 0.25), "second": colour(x2 - 0.25, y2 - 0.25)})
+spin(1.0)
+print("STATE " + state(), flush=True)
+sys.stdin.readline()
+spin(3.0)
+print("STATE " + state(), flush=True)
+app.exitQgis()
+"""
+
+
+def test_qgis_project_shows_new_drawings_by_itself(processed, tmp_path):
+    """The project made with QGIS's Python: valid layers, and QGIS sees what is drawn after
+    it opened the project, without any reload (0.4.1 needed QGIS's Refresh button)."""
+    import subprocess
+
+    from pyarchinit_photogrammetry.io.qgis_link import LiveLink, build_project, find_qgis
 
     q = find_qgis()
     if q is None or not q.python or not Path(q.python).exists():
         pytest.skip("QGIS not installed")
     _doc, ch, _ = processed
-    files = export_layers(tmp_path, {}, ch.crs)
+    x0, y0, x1, y1 = 2480001.0, 4500001.0, 2480003.0, 4500003.0
+
+    def square(x, y):
+        return ("Polygon", [[x, y], [x + 0.5, y], [x + 0.5, y + 0.5], [x, y + 0.5]])
+
+    layers = {"Unita' stratigrafiche": {"kind": "polygon", "features": [{"etichetta": "", "_geom": square(x0, y0)}]}}
+    link = LiveLink(tmp_path, ch.crs)
+    files = link.write(layers)
     rep = build_project(tmp_path / "p.qgs", ch.crs, files, [{"name": "Ortofoto", "path": str(ch.orthomosaic_path)}], qgis=q)
     assert rep["written"] and all(v["valid"] for v in rep["vectors"] + rep["rasters"])
     text = (tmp_path / "p.qgs").read_text(encoding="utf-8")
-    assert text.count('autoRefreshMode="ReloadData"') == len(files)
+    assert text.count('autoRefreshEnabled="1"') == len(files) and "layername=sezioni" in text
+    assert 'autoRefreshMode="ReloadData"' not in text and 'autoRefreshMode="RedrawOnly"' not in text
+    assert "<authid>EPSG:3004</authid>" in text  # the project has its CRS (QGIS's Python found its database)
+    script = tmp_path / "live.py"
+    script.write_text(_QGIS_LIVE, encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("PYTHON", "PROJ_", "GDAL_", "QT_"))}
+    env.update(q.env)
+    proc = subprocess.Popen([q.python, str(script), str(tmp_path / "p.qgs"), str(x0), str(y0), str(x1 + 0.5),
+                             str(y1 + 0.5)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            text=True, env=env, close_fds=False)
+    try:
+        first = json.loads(next(ln for ln in proc.stdout if ln.startswith("STATE ")).split(" ", 1)[1])
+        assert first["counts"]["Unita' stratigrafiche (ppg)"] == 1
+        assert first["first"] != "#ffffff" and first["second"] == "#ffffff"  # one unit drawn, the other not yet
+        layers["Unita' stratigrafiche"]["features"].append({"etichetta": "", "_geom": square(x1, y1)})
+        layers["Sezioni"] = {"kind": "line", "features": [{"etichetta": "Sezione 1",
+                                                           "_geom": ("LineString", [[x0, y1], [x1, y0]])}]}
+        link.write(layers)  # QGIS has the project open
+        proc.stdin.write("next\n")
+        proc.stdin.flush()
+        second = json.loads(next(ln for ln in proc.stdout if ln.startswith("STATE ")).split(" ", 1)[1])
+        assert second["counts"]["Unita' stratigrafiche (ppg)"] == 2 and second["counts"]["Sezioni (ppg)"] == 1
+        assert second["second"] == first["first"]  # the new unit is on the map, nobody pressed Refresh
+    finally:
+        proc.kill()
+        proc.wait(timeout=30)
 
 
 # ---------------------------------------------------------------- SAM worker (protocol, fake model)
@@ -402,3 +523,70 @@ def test_metashape_local_frame_with_components(tmp_path):
     moved = next(c for c in ch.aligned_cameras if c.label == "IMG_3")
     assert np.allclose(moved.transform[:3, 3], [30.0, 20.0, 100.0], atol=1e-6)  # 20 + 10 along x
     assert np.allclose(moved.transform[:3, :3] @ moved.transform[:3, :3].T, np.eye(3), atol=1e-9)
+
+
+def _add_internal_dem(psx: Path, lon: float = 36.8, lat: float = 35.8) -> None:
+    """Metashape's own DEM: 2 x 2 GeoTIFF tiles in WGS 84 listed in ``elevation.zip`` (height
+    300 m rising 1 m per 0.001 degrees eastwards), a coarser level that must be ignored, and
+    an empty exported DEM next to the project (a failed export)."""
+    import rasterio
+    from rasterio.transform import from_origin
+
+    frame_dir = psx.with_suffix(".files") / "0" / "0"
+    elev = frame_dir / "elevation"
+    elev.mkdir(parents=True, exist_ok=True)
+    n, step = 64, 0.0005 / 64  # 2 x 2 tiles of 64 px over 0.001 x 0.001 degrees
+    left, top = lon - 0.0005, lat + 0.0005
+    tiles = ""
+    for ty in range(2):
+        for tx in range(2):
+            x0, y0 = left + tx * n * step, top - ty * n * step
+            cols = np.arange(n)[None, :] + 0.5
+            z = (300.0 + (x0 + cols * step - lon) * 1000.0).repeat(n, axis=0).astype("float32")
+            if (tx, ty) == (0, 0):
+                z[:8, :8] = -32767  # no data
+            name = f"tile-{ty}-{tx}.tif"
+            with rasterio.open(elev / name, "w", driver="GTiff", width=n, height=n, count=1, dtype="float32",
+                               crs="EPSG:4326", transform=from_origin(x0, y0, step, step), nodata=-32767) as dst:
+                dst.write(z, 1)
+            tiles += f'<tile x="{tx}" y="{ty}"><path>{name}</path></tile>'
+    with rasterio.open(elev / "tile-l1-0-0.tif", "w", driver="GTiff", width=n, height=n, count=1, dtype="float32",
+                       crs="EPSG:4326", transform=from_origin(left, top, 2 * step, 2 * step)) as dst:
+        dst.write(np.full((1, n, n), 999.0, "float32"))
+    tiles += '<tile x="0" y="0" level="1"><path>tile-l1-0-0.tif</path></tile>'
+    _zip(elev / "elevation.zip", {"doc.xml": (
+        '<elevation version="1.2.0"><params><crs>GEOGCS["WGS 84"]</crs><nodataValue>-32767</nodataValue></params>'
+        f'<tiles>{tiles}</tiles><meta><property name="BuildDem/resolution" value="0.5"/></meta></elevation>')})
+    with zipfile.ZipFile(frame_dir / "frame.zip") as z:
+        xml = z.read("doc.xml").decode()
+    _zip(frame_dir / "frame.zip", {"doc.xml": xml.replace("</frame>", '<elevation id="0" path="elevation/elevation.zip"/></frame>')})
+    (psx.parent / "dem").mkdir(exist_ok=True)
+    (psx.parent / "dem" / "scavo_dem.tif").write_bytes(b"")
+
+
+def test_metashape_internal_dem(tmp_path):
+    """No usable exported DEM: the tiles of Metashape's own DEM become the DEM of the chunk,
+    in its CRS, without writing anything into the Metashape project."""
+    import rasterio
+    from pyproj import Transformer
+
+    from pyarchinit_photogrammetry.integrations import metashape as ms
+
+    psx, _, _ = make_psx(tmp_path / "src", n_grid=5)
+    _add_internal_dem(psx)
+    before = sorted(p.name for p in (psx.with_suffix(".files") / "0" / "0" / "elevation").iterdir())
+    ch = ms.import_psx(psx, tmp_path / "out" / "p.ppg", with_model=False).chunk
+    warnings = " | ".join(ch.meta["import"]["warnings"])
+    assert "scavo_dem.tif e' vuoto" in warnings and "quote del DEM" not in warnings
+    assert ch.meta["import"]["dem"] == "DEM interno del progetto Metashape"
+    assert ch.dem_path is not None and ch.dem_path.parent == ch.data_dir
+    to_utm = Transformer.from_crs("EPSG:4326", "EPSG:32637", always_xy=True)
+    with rasterio.open(ch.dem_path) as src:
+        assert src.crs.to_epsg() == 32637 and abs(src.res[0] - 0.5) < 1e-9  # Metashape's resolution kept
+        pts = [to_utm.transform(36.8 + dx, 35.8 + dy) for dx, dy in ((0.0, 0.0), (0.0003, 0.0002), (-0.0002, -0.0003))]
+        vals = [v[0] for v in src.sample(pts)]
+        nw = next(src.sample([to_utm.transform(36.8 - 0.00049, 35.8 + 0.00049)]))[0]
+    assert np.allclose(vals, [300.0, 300.3, 299.8], atol=0.02)  # not the 999 of the coarse level
+    assert nw == src.nodata  # the no-data corner stays empty
+    after = sorted(p.name for p in (psx.with_suffix(".files") / "0" / "0" / "elevation").iterdir())
+    assert after == before  # no .aux.xml or other file left in the Metashape project

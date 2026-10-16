@@ -44,7 +44,44 @@ def test_volume_against_analytic(tmp_path):
     lines = terrain.contours(dem, interval=0.25)
     assert lines and all(np.ptp(l["coords"][:, 0]) <= 2.0 for l in lines)
     assert terrain.export_contours(lines, tmp_path / "c.dxf").exists()
+    import sqlite3
+
+    gp = terrain.export_contours(lines, tmp_path / "c.gpkg", crs="EPSG:3004")
+    con = sqlite3.connect(gp)
+    assert con.execute("SELECT COUNT(*) FROM curve_di_livello").fetchone()[0] == len(lines)
+    assert con.execute("SELECT srs_id FROM gpkg_geometry_columns").fetchone()[0] == 3004
+    con.close()
     assert terrain.hillshade(dem, tmp_path / "hs.tif").exists()
+
+
+def test_contours_of_a_rough_mound(tmp_path):
+    """A mound 20 m high with a rough surface (a drone DSM): the suggested interval gives a
+    few tens of levels, levels are round numbers, lines are simplified and the noise rings
+    are left out; smoothing removes most of the rest."""
+    rng = np.random.default_rng(1)
+    yy, xx = np.mgrid[0:400, 0:400] * 0.25  # 100 x 100 m at 25 cm
+    z = 300.0 + 20.0 * np.exp(-((xx - 50) ** 2 + (yy - 50) ** 2) / 900.0) + rng.normal(0, 0.05, xx.shape)
+    z[:40, :40] = np.nan  # no data in a corner
+    dem = write_geotiff(tmp_path / "dem.tif", np.nan_to_num(z, nan=-32767.0).astype(np.float32), (0.0, 100.0), 0.25,
+                        "EPSG:32637", nodata=-32767.0)
+    lo, hi = terrain.dem_range(dem)
+    assert 299.5 < lo < 300.5 and 319.5 < hi < 320.5
+    assert terrain.suggest_interval(dem) == 0.5  # 20 m of relief: 40 levels
+    raw = terrain.contours(dem, 0.5, simplify=False)
+    lines = terrain.contours(dem, 0.5)
+    levels = sorted({ln["elevation"] for ln in lines})
+    assert levels[:3] == [300.0, 300.5, 301.0] and levels[-1] == 319.5
+    assert all(lv == round(lv, 3) for lv in levels)  # 300.5, not 300.50000000000006
+    assert all(ln["index"] == (round(ln["elevation"] / 0.5) % 5 == 0) for ln in lines)
+    n_raw, n = sum(len(ln["coords"]) for ln in raw), sum(len(ln["coords"]) for ln in lines)
+    assert n < 0.5 * n_raw and len(lines) < len(raw)
+    smooth = terrain.contours(dem, 0.5, smooth=1.0)
+    assert len(smooth) < len(lines) and len({ln["elevation"] for ln in smooth}) >= 35
+    # the 310 m line of the mound is a circle about (50, 50): simplification keeps it within half a pixel
+    ring = max((ln for ln in lines if ln["elevation"] == 310.0), key=lambda ln: len(ln["coords"]))["coords"]
+    r = np.hypot(ring[:, 0] - 50.0, ring[:, 1] - 50.0)
+    expected = np.sqrt(-900.0 * np.log(0.5))
+    assert abs(np.median(r) - expected) < 0.25
 
 
 @pytest.mark.slow
@@ -61,6 +98,26 @@ def test_section_through_wall(processed, tmp_path):
     assert len(cloud.points) > 100
     plan = sections.plan_slice(ch, 99.85)
     assert plan.polylines
+
+
+def test_section_drawing_scale_and_grid(tmp_path):
+    """A section across a tell is drawn at 1:200 (not 8 m of paper at 1:20) with a heavy
+    profile line; the DXF grid has a round spacing that suits the height."""
+    import ezdxf
+
+    assert sections.drawing_scale(3.0, 1.0) == 20 and sections.drawing_scale(16.0, 2.0) == 20
+    assert sections.drawing_scale(40.0, 3.0) == 50 and sections.drawing_scale(174.0, 13.0) == 200
+    assert sections.grid_step(1.2) == 0.1 and sections.grid_step(13.0) == 2.0
+    d = np.linspace(0.0, 174.0, 500)
+    s = sections.Section(np.array([0.0, 0.0, 0.0]), np.array([174.0, 0.0, 0.0]),
+                         polylines=[np.column_stack([d, 300.0 + 6.0 * np.sin(d / 30.0)])], label="Sezione 1")
+    svg = s.to_svg(tmp_path / "s.svg").read_text()
+    assert "Sezione 1 - 1:200" in svg and 'stroke-width="0.5"' in svg
+    assert abs(float(svg.split('width="')[1].split("mm")[0]) - (174.0 * 5 + 20)) < 0.5
+    assert "1:20<" in s.to_svg(tmp_path / "s20.svg", scale=20).read_text()  # an explicit scale is kept
+    doc = ezdxf.readfile(s.to_dxf(tmp_path / "s.dxf"))
+    grid = [e for e in doc.modelspace() if e.dxf.layer == "SEZ_GRIGLIA"]
+    assert 4 <= len(grid) <= 13 and doc.layers.get("SEZ_PROFILO").dxf.lineweight == 50
 
 
 def test_pottery_axis_from_noisy_sherd():

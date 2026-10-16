@@ -186,23 +186,26 @@ def info(project: Path):
 
 @app.command()
 def section(project: Path, x1: float, y1: float, x2: float, y2: float, out: Path = Path("sezione.dxf"),
-            source: str = "model", label: str = "Sezione", scale: float = 20.0, chunk: Optional[str] = None):
+            source: str = "model", label: str = "Sezione",
+            scale: float = typer.Option(0.0, help="SVG drawing scale 1:N (0: chosen from the size of the section)"),
+            chunk: Optional[str] = None):
     """Vertical section along a trace (world coordinates) to DXF/SVG."""
     from .archaeo import sections as sec_mod
 
     _, ch = _open(project, chunk)
     s = sec_mod.section(ch, (x1, y1), (x2, y2), source=source, label=label)
-    p = s.to_svg(out, scale=scale) if out.suffix.lower() == ".svg" else s.to_dxf(out)
+    p = s.to_svg(out, scale=scale or None) if out.suffix.lower() == ".svg" else s.to_dxf(out)
     typer.echo(f"{p} ({len(s.polylines)} polylines, length {s.length:.3f} m)")
 
 
 @app.command()
-def contours(project: Path, interval: float = 0.05, out: Path = Path("curve.dxf"), chunk: Optional[str] = None):
-    """Contour lines from the DEM (DXF or GeoJSON)."""
+def contours(project: Path, interval: float = typer.Option(0.0, help="metres (0: a round value for the relief)"),
+             out: Path = Path("curve.dxf"), chunk: Optional[str] = None):
+    """Contour lines from the DEM (DXF, GeoPackage or GeoJSON)."""
     from .archaeo import terrain
 
     _, ch = _open(project, chunk)
-    lines = terrain.contours(ch.dem_path, interval)
+    lines = terrain.contours(ch.dem_path, interval or terrain.suggest_interval(ch.dem_path))
     typer.echo(f"{terrain.export_contours(lines, out, crs=ch.crs)} ({len(lines)} lines)")
 
 

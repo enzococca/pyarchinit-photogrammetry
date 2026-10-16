@@ -36,9 +36,9 @@ Every processing method accepts `progress=callback(fraction, message)`.
 | Module | Main functions |
 | --- | --- |
 | `markers.targets` | `generate_sheet`, `generate_turntable_mat`, `turntable_layout`, `detect` |
-| `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg` |
+| `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |
 | `archaeo.pottery` | `estimate_axis`, `profile_at`, `best_profile`, `Profile.measurements`, `draw` |
-| `archaeo.terrain` | `contours`, `export_contours`, `volume`, `hillshade`, `slope_degrees` |
+| `archaeo.terrain` | `contours` (simplified, optional smoothing), `suggest_interval`, `dem_range`, `export_contours`, `volume`, `hillshade`, `slope_degrees` |
 | `archaeo.stratigraphy` | `UnitPolygon`, `mask_to_polygons`, `export_units` |
 | `bim.ifc` | `export_ifc`, `export_chunk_ifc`, `split_mesh_by_units` |
 | `ai.classify` | `classify_chunk`, `assign_class_by_polygons`, `class_statistics` |

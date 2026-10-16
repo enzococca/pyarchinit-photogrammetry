@@ -698,6 +698,7 @@ class LayersPane(QWidget):
     attribute_edited = Signal(str, int, str, object)  # layer, feature index, field, new value
     us_form_requested = Signal(str, int)  # layer, feature index
     READ_ONLY = {"layer", "x", "y", "area_m2", "lunghezza_m", "z", "svg", "dxf"}
+    MAX_LISTED = 500  # features listed under a layer
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -767,13 +768,19 @@ class LayersPane(QWidget):
             top.setCheckState(0, Qt.CheckState.Checked if lay["visible"] else Qt.CheckState.Unchecked)
             top.setData(0, Qt.ItemDataRole.UserRole, (name, -1))
             self.tree.addTopLevelItem(top)
-            for i, (_item, _label, attrs) in enumerate(lay["features"]):
+            feats = lay["features"]
+            for i, (_item, _label, attrs) in enumerate(feats[:self.MAX_LISTED]):
                 shown = [(k, v) for k, v in attrs.items() if not str(k).startswith("_")]
                 text = str(attrs.get("etichetta") or "") or ", ".join(f"{k} {v}" for k, v in shown[:2])
                 child = QTreeWidgetItem([text or f"elemento {i + 1}"])
                 child.setData(0, Qt.ItemDataRole.UserRole, (name, i))
                 top.addChild(child)
-            top.setExpanded(name in expanded or len(lay["features"]) <= 12)
+            if len(feats) > self.MAX_LISTED:  # thousands of contour lines: listing them would only slow down
+                more = QTreeWidgetItem([f"... altri {len(feats) - self.MAX_LISTED} elementi (clic sulla mappa "
+                                        "per interrogarli)"])
+                more.setData(0, Qt.ItemDataRole.UserRole, (name, -2))  # not a feature, not the layer
+                top.addChild(more)
+            top.setExpanded(name in expanded or len(feats) <= 12)
         self._filling = False
 
     def _changed(self, item, _col) -> None:
@@ -891,7 +898,7 @@ class SectionsPane(QWidget):
         right.addWidget(self.info)
         self.svg = QSvgWidget()
         self.svg.setStyleSheet("background: white;")
-        scroll = QScrollArea()
+        scroll = self._scroll = QScrollArea()
         scroll.setWidget(self.svg)
         scroll.setWidgetResizable(False)
         scroll.setStyleSheet("background: white;")
@@ -926,6 +933,11 @@ class SectionsPane(QWidget):
     def add(self, section: dict) -> None:
         self.set_sections(self.sections + [section])
 
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt name
+        super().resizeEvent(event)
+        if event.oldSize().width() != event.size().width():
+            self._show(self.list.currentItem())  # the preview follows the width of the pane
+
     def _show(self, item) -> None:
         if item is None:
             self.svg.load(b"")
@@ -933,16 +945,52 @@ class SectionsPane(QWidget):
         s = item.data(Qt.ItemDataRole.UserRole)
         svg = s.get("svg")
         if svg and Path(svg).exists():
-            self.svg.load(str(svg))
-            size = self.svg.renderer().defaultSize()
-            if size.width() > 0:
-                f = min(1.0, 1400 / size.width())
-                self.svg.setFixedSize(int(size.width() * f), int(size.height() * f))
+            data, size = svg_preview(Path(svg), max_width=max(400, self._scroll.viewport().width() - 4))
+            self.svg.load(data)
+            if size is not None:
+                self.svg.setFixedSize(size)
         p1, p2 = s.get("p1", [0, 0]), s.get("p2", [0, 0])
         self.info.setText(f"<b>{s['label']}</b>  lunghezza {s.get('length', 0):.3f} m  -  da "
                           f"({p1[0]:.2f}, {p1[1]:.2f}) a ({p2[0]:.2f}, {p2[1]:.2f})<br>"
                           f"SVG: {s.get('svg', '')}<br>DXF: {s.get('dxf', '')}  -  3D: {s.get('dxf3d', '')}")
 
+
+
+def svg_preview(path: Path, max_width: int = 1400, min_line_px: float = 1.6, min_text_px: float = 11.0):
+    """An SVG drawing for an on-screen preview: reduced to ``max_width`` pixels, with its
+    lines and texts made thick enough to be seen at that size (a section drawn at scale is
+    often metres long on paper: reduced 20 times, a 0.5 mm line is a twentieth of a pixel).
+    Returns ``(bytes, QSize or None)``."""
+    import re
+
+    from PySide6.QtCore import QByteArray
+    from PySide6.QtSvg import QSvgRenderer
+
+    text = path.read_text(encoding="utf-8", errors="replace")
+    size = QSvgRenderer(QByteArray(text.encode("utf-8"))).defaultSize()
+    box = re.search(r'viewBox="\s*[-\d.eE+]+[\s,]+[-\d.eE+]+[\s,]+([\d.eE+]+)[\s,]+([\d.eE+]+)', text)
+    if size.width() <= 0 or box is None or float(box.group(1)) <= 0:
+        return text.encode("utf-8"), None
+    f = min(1.0, max_width / size.width())
+    shown = QSize(max(1, int(size.width() * f)), max(1, int(size.height() * f)))
+    px_per_unit = shown.width() / float(box.group(1))
+
+    def line(m):
+        return f'stroke-width="{max(float(m.group(1)), min_line_px / px_per_unit):.4g}"'
+
+    def label(m):  # larger, but not above the top of the drawing
+        attrs = m.group(1)
+        y = re.search(r'\by="([\d.eE+-]+)"', attrs)
+        room = float(y.group(1)) * 0.95 if y else float("inf")
+
+        def size(fm):
+            return f'font-size="{max(float(fm.group(1)), min(min_text_px / px_per_unit, room)):.4g}"'
+
+        return "<text " + re.sub(r'font-size="([\d.eE+-]+)"', size, attrs) + ">"
+
+    text = re.sub(r'stroke-width="([\d.eE+-]+)"', line, text)
+    text = re.sub(r"<text ([^>]*)>", label, text)
+    return text.encode("utf-8"), shown
 
 
 class ProxiesPane(QWidget):

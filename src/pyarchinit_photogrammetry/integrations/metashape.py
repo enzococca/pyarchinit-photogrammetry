@@ -16,7 +16,10 @@ Conventions (Metashape 1.x/2.x):
   ``k1..k4`` radial, ``p1, p2`` tangential with Metashape's order (OpenCV's p2, p1).
 
 Exported products (DEM and orthomosaic GeoTIFFs) found next to the project are linked
-as well; Metashape's own tiled DEM/orthomosaic storage is not read.
+as well. When no exported DEM is usable (none, or an empty file left by a failed export),
+the DEM kept inside the project is used: Metashape stores it as GeoTIFF tiles listed in
+``elevation.zip``; they are mosaicked and warped to the CRS of the chunk. The orthomosaic
+inside the project (image blocks and seamlines) is not read: export it as GeoTIFF.
 
 The model (``mesh.ply`` in ``model.zip``, often millions of faces) is extracted as a stream
 and a coarse copy is made for the 3D view; when the project has no dense cloud (Metashape
@@ -26,6 +29,7 @@ Cameras and markers inside groups (folders of the Workspace) are read too.
 from __future__ import annotations
 
 import io
+import logging
 import os
 import re
 import shutil
@@ -35,6 +39,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -387,10 +393,11 @@ def _ply_vertices(data: bytes) -> np.ndarray:
     return np.frombuffer(data, dtype=np.dtype(props), count=n, offset=head_end)
 
 
-def _find_exported(psx: Path, max_depth: int = 3) -> dict[str, Path]:
+def _find_exported(psx: Path, max_depth: int = 3, empty: list | None = None) -> dict[str, Path]:
     """DEM and orthomosaic GeoTIFFs exported next to the project (common folder names).
     Project data folders (``*.files``) and sub-folders holding another ``.psx`` (another
-    project) are not searched; files named after the project come first."""
+    project) are not searched; files named after the project come first. Empty files (an
+    export that failed) are skipped and listed in ``empty``."""
     base = psx.parent
     tifs = []
     for root, dirs, files in os.walk(base):
@@ -406,6 +413,8 @@ def _find_exported(psx: Path, max_depth: int = 3) -> dict[str, Path]:
                 try:
                     if p.stat().st_size > 0:
                         tifs.append(p)
+                    elif empty is not None and re.search(r"(dem|dsm|dtm|elev|ortho|orto)", str(p.relative_to(base)).lower()):
+                        empty.append(p)
                 except OSError:
                     continue
     stem = re.sub(r"[^a-z0-9]+", "", psx.stem.lower())
@@ -441,6 +450,136 @@ def _raster_covers(path: Path, xy: np.ndarray, crs: str) -> bool:
         return False
     inside = (pts[:, 0] >= b.left) & (pts[:, 0] <= b.right) & (pts[:, 1] >= b.bottom) & (pts[:, 1] <= b.top)
     return bool(len(pts)) and inside.mean() >= 0.5
+
+
+def internal_dem(mc: MsChunk) -> dict | None:
+    """The DEM kept inside the project (``elevation.zip`` of the frame): its CRS (WKT),
+    no-data value, resolution and the GeoTIFF tiles of the full-resolution level, or None."""
+    rel = mc.frame_paths.get("elevation")
+    if not rel or mc.frame_dir is None:
+        return None
+    archive = mc.frame_dir / rel
+    try:
+        root = _xml_from_zip(archive)
+    except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError):
+        return None
+    tiles = []
+    for t in root.findall("tiles/tile"):
+        path = t.findtext("path")
+        if t.get("level") in (None, "0") and path and (archive.parent / path).is_file():
+            tiles.append(archive.parent / path)  # other levels are coarser copies for display
+    if not tiles:
+        return None
+    params = root.find("params")
+    meta = {p.get("name"): p.get("value") for p in root.findall("meta/property")}
+    try:
+        res = float(meta.get("BuildDem/resolution") or 0) or None
+    except ValueError:
+        res = None
+    nodata = params.findtext("nodataValue") if params is not None else None
+    return {"crs": (params.findtext("crs") or "").strip() if params is not None else "",
+            "nodata": float(nodata) if nodata else -32767.0, "resolution": res, "tiles": tiles}
+
+
+def mosaic_dem(info: dict, out: str | os.PathLike, crs: str, progress=None) -> Path:
+    """Metashape's tiled DEM (see :func:`internal_dem`) as one GeoTIFF in ``crs``, written by
+    blocks of rows, so its size is not limited by memory. Bilinear resampling; the grid
+    keeps Metashape's resolution. Nothing is written next to the tiles."""
+    import tempfile
+
+    import rasterio
+    from rasterio.enums import Resampling
+    from rasterio.transform import from_origin
+    from rasterio.vrt import WarpedVRT
+    from rasterio.warp import calculate_default_transform, transform_bounds
+    from rasterio.windows import Window
+
+    from ..core import crs as crs_mod
+    from ..core.progress import as_progress
+    from ..engine.dem import NODATA
+
+    progress = as_progress(progress)
+    out = Path(out)
+    nodata = float(info.get("nodata", -32767.0))
+    # GDAL_PAM_ENABLED=NO: no .aux.xml next to the tiles (the Metashape project is left as it is)
+    with rasterio.Env(GDAL_PAM_ENABLED="NO"), tempfile.TemporaryDirectory(prefix="ppg-dem-") as tmp:
+        tiles = []
+        for p in info["tiles"]:
+            with rasterio.open(p) as src:
+                tiles.append((Path(p), src.transform, src.width, src.height, src.crs))
+        t0 = tiles[0][1]
+        rx, ry = t0.a, -t0.e  # tiles share pixel size and alignment
+        left = min(t.c for _, t, *_ in tiles)
+        top = max(t.f for _, t, *_ in tiles)
+        right = max(t.c + w * t.a for _, t, w, _, _ in tiles)
+        bottom = min(t.f + h * t.e for _, t, _, h, _ in tiles)
+        width, height = int(round((right - left) / rx)), int(round((top - bottom) / ry))
+        src_crs = tiles[0][4] or (rasterio.crs.CRS.from_wkt(info["crs"]) if info.get("crs") else None)
+        sources = "".join(
+            f'<ComplexSource><SourceFilename relativeToVRT="0">{_xml_escape(str(p))}</SourceFilename>'
+            f"<SourceBand>1</SourceBand><SrcRect xOff=\"0\" yOff=\"0\" xSize=\"{w}\" ySize=\"{h}\"/>"
+            f'<DstRect xOff="{int(round((t.c - left) / rx))}" yOff="{int(round((top - t.f) / ry))}" '
+            f'xSize="{w}" ySize="{h}"/><NODATA>{nodata:g}</NODATA></ComplexSource>'
+            for p, t, w, h, _ in tiles)
+        vrt = Path(tmp) / "mosaic.vrt"
+        vrt.write_text(
+            f'<VRTDataset rasterXSize="{width}" rasterYSize="{height}">'
+            + (f"<SRS>{_xml_escape(src_crs.to_wkt())}</SRS>" if src_crs is not None else "")
+            + f"<GeoTransform>{left!r}, {rx!r}, 0, {top!r}, 0, {-ry!r}</GeoTransform>"
+            f'<VRTRasterBand dataType="Float32" band="1"><NoDataValue>{nodata:g}</NoDataValue>{sources}'
+            "</VRTRasterBand></VRTDataset>", encoding="utf-8")
+        with rasterio.open(vrt) as mosaic:
+            local = crs_mod.is_local(crs) or src_crs is None
+            if local:
+                dst_crs, dst_tr, dst_w, dst_h = src_crs, mosaic.transform, width, height
+            else:
+                dst_crs = rasterio.crs.CRS.from_user_input(crs)
+                res = info.get("resolution")
+                if not res:
+                    tr, _, _ = calculate_default_transform(src_crs, dst_crs, width, height, *mosaic.bounds)
+                    res = abs(tr.a)
+                l, b, r, t = transform_bounds(src_crs, dst_crs, *mosaic.bounds, densify_pts=21)
+                x0, y1 = np.floor(l / res) * res, np.ceil(t / res) * res
+                dst_w, dst_h = int(np.ceil((r - x0) / res)), int(np.ceil((y1 - b) / res))
+                dst_tr = from_origin(x0, y1, res, res)
+            profile = {"driver": "GTiff", "width": dst_w, "height": dst_h, "count": 1, "dtype": "float32",
+                       "transform": dst_tr, "nodata": NODATA, "compress": "deflate", "tiled": True,
+                       "blockxsize": 256, "blockysize": 256, "BIGTIFF": "IF_SAFER"}
+            if dst_crs is not None:
+                profile["crs"] = dst_crs
+            out.parent.mkdir(parents=True, exist_ok=True)
+            vrt_args = {} if local else {"crs": dst_crs, "transform": dst_tr, "width": dst_w, "height": dst_h,
+                                         "resampling": Resampling.bilinear,
+                                         "NUM_THREADS": "ALL_CPUS"}
+            with WarpedVRT(mosaic, src_nodata=nodata, nodata=NODATA, dtype="float32", **vrt_args) as src, \
+                    rasterio.open(out, "w", **profile) as dst:
+                rows = 1024
+                for row in range(0, dst_h, rows):
+                    win = Window(0, row, dst_w, min(rows, dst_h - row))
+                    dst.write(src.read(1, window=win), 1, window=win)
+                    progress(0.95 * min(1.0, (row + rows) / dst_h), f"DEM di Metashape: riga {row} di {dst_h}")
+                factors = [f for f in (2, 4, 8, 16, 32) if min(dst_w, dst_h) // f >= 64]
+                if factors:
+                    dst.build_overviews(factors, Resampling.average)
+    progress(1.0, "DEM di Metashape pronto")
+    return out
+
+
+def _xml_escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def _dem_offset(dem: Path, xyz: np.ndarray) -> float | None:
+    """Median of (point z - DEM z) at the points inside the DEM: a check that the DEM heights
+    are in the same vertical reference as the imported points."""
+    import rasterio
+
+    with rasterio.open(dem) as src:
+        vals = np.array([v[0] for v in src.sample(xyz[:, :2])], float)
+        if src.nodata is not None:
+            vals[vals == src.nodata] = np.nan
+    ok = np.isfinite(vals)
+    return float(np.median(xyz[ok, 2] - vals[ok])) if ok.sum() >= 20 else None
 
 
 PREVIEW_FACES = 600_000  # models larger than this get a coarse copy for the 3D view
@@ -512,7 +651,8 @@ def import_psx(psx: str | os.PathLike, project: str | os.PathLike, chunk_index: 
         chunks = [chunks[chunk_index]]
     doc = Document()
     doc.save(project)
-    exported = _find_exported(psx)
+    empty_exports: list[Path] = []
+    exported = _find_exported(psx, empty=empty_exports)
     if dem:
         exported["dem"] = Path(dem)
     if orthomosaic:
@@ -670,6 +810,7 @@ def import_psx(psx: str | os.PathLike, project: str | os.PathLike, chunk_index: 
             from ..core.geometry import apply
 
             centres = apply(ch.transform, np.array([c.transform[:3, 3] for c in aligned]))[:, :2]
+        dem_source = None
         for key in ("dem", "orthomosaic"):
             if key in exported:
                 path = Path(exported[key]).resolve()
@@ -677,8 +818,33 @@ def import_psx(psx: str | os.PathLike, project: str | os.PathLike, chunk_index: 
                     warnings.append(f"{mc.label}: {path.name} non copre l'area del progetto, non collegato")
                     continue
                 ch._set_product(key, path)
+                if key == "dem":
+                    dem_source = f"esportato da Metashape ({path.name})"
+        for p in empty_exports:
+            warnings.append(f"{mc.label}: {p.name} e' vuoto (0 byte): esportazione da Metashape non riuscita?")
+        if "dem" not in ch.products:
+            info = internal_dem(mc)
+            if info is not None:
+                sub(0.9, f"{mc.label}: DEM interno di Metashape ({len(info['tiles'])} tasselli)")
+                try:
+                    out_dem = mosaic_dem(info, ch.data_dir / "dem.tif", ch.crs,
+                                         progress=progress.sub(0.05 + 0.9 * (ci + 0.9) / len(chunks), 0.09 / len(chunks)))
+                except Exception as exc:  # the rest of the import is still good
+                    log.warning("DEM interno di Metashape non letto: %s", exc, exc_info=True)
+                    warnings.append(f"{mc.label}: DEM interno di Metashape non letto ({exc})")
+                else:
+                    ch._set_product("dem", out_dem)
+                    dem_source = "DEM interno del progetto Metashape"
+                    pts = ch.tie_points
+                    off = _dem_offset(out_dem, ch.to_world(pts.xyz[:: max(1, len(pts) // 5000)])) \
+                        if pts is not None and len(pts) else None
+                    if off is not None and abs(off) > 0.5:
+                        warnings.append(f"{mc.label}: le quote del DEM di Metashape differiscono di {off:+.2f} m dai "
+                                        "punti di legame (altro riferimento verticale?)")
         ch.meta["import"] = {"source": "metashape", "psx": str(psx), "warnings": list(dict.fromkeys(warnings)),
                              "frame": "exact" if frame is not None else "similarity"}
+        if dem_source:
+            ch.meta["import"]["dem"] = dem_source
         if len(aligned) > best_n:
             best, best_n = ch, len(aligned)
     if best is not None:
@@ -688,4 +854,5 @@ def import_psx(psx: str | os.PathLike, project: str | os.PathLike, chunk_index: 
     return doc
 
 
-__all__ = ["read_psx", "import_psx", "sensor_params", "crs_mapper", "reframe_cameras", "MsChunk"]
+__all__ = ["read_psx", "import_psx", "sensor_params", "crs_mapper", "reframe_cameras", "internal_dem", "mosaic_dem",
+           "MsChunk"]
