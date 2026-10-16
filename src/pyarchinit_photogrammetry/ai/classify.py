@@ -15,6 +15,8 @@ them (:mod:`pyarchinit_photogrammetry.ai.learn`).
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 from ..core.pointcloud import ARCHAEO_CLASSES, ASPRS_CLASSES, PointCloud
@@ -226,22 +228,99 @@ def class_names(chunk=None) -> dict[int, str]:
     return names
 
 
+def unit_class_name(unit, index: int = 0) -> str:
+    """Name of the class of a stratigraphic unit: ``US 12`` (``US 12 (area 1)`` with an area)."""
+    us = str(unit.us).strip() if unit.us not in (None, "") else ""
+    name = f"{unit.tipo or 'US'} {us}" if us else f"Unita' {index + 1}"
+    if unit.area not in (None, ""):
+        name += f" (area {unit.area})"
+    return name
+
+
+def classify_by_units(chunk, units, base_code: int = 100, keep_manual: bool = True) -> list[dict]:
+    """One class per stratigraphic unit: the dense points inside its polygon (plan view) get
+    the class ``US 12`` (polygons of the same unit share it). Codes from ``base_code`` up
+    that are free (a unit classified before keeps its code; the points of its old extent
+    that are no longer inside go back to 1, unclassified). With ``keep_manual`` the points
+    corrected by hand keep their class.
+
+    Returns, per class: ``name``, ``code``, ``sito``, ``area_s``, ``us``, ``points``,
+    ``area_m2`` (of the polygons), ``z_min``/``z_mean``/``z_max`` (of its points, CRS units)."""
+    from shapely import contains_xy
+    from shapely.ops import unary_union
+
+    pc = chunk.point_cloud
+    if pc is None:
+        raise RuntimeError("build the point cloud first")
+    names = {int(k): str(v) for k, v in chunk.meta.get("classes", {}).items()}
+    groups: dict[str, list] = {}
+    for i, u in enumerate(units):
+        groups.setdefault(unit_class_name(u, i), []).append(u)
+    used = set(ARCHAEO_CLASSES) | set(np.unique(pc.classification).tolist()) | set(names)
+    codes = {}
+    for name in groups:
+        code = next((c for c, n in names.items() if n == name), None)
+        if code is None:
+            code = max(int(base_code), 64)
+            while code in used or code in codes.values():
+                code += 1
+            if code > 255:
+                raise ValueError("no free class codes left (they go up to 255)")
+        codes[name] = code
+    world = chunk.to_world(pc.xyz)
+    free = np.ones(len(pc), bool) if not keep_manual or pc.manual is None else ~pc.manual
+    old = np.isin(pc.classification, np.asarray(list(codes.values()), np.uint8)) & free
+    pc.classification[old] = 1  # extents of an earlier run: drawn again below
+    shapes = {}
+    for name, members in groups.items():
+        shapes[name] = unary_union([u.geometry for u in members])
+        inside = contains_xy(shapes[name], world[:, 0], world[:, 1]) & free
+        pc.classification[inside] = codes[name]
+    chunk.point_cloud = pc
+    table = chunk.meta.setdefault("classes", {})
+    out = []
+    for name, members in groups.items():
+        code = codes[name]
+        table[str(code)] = name
+        z = world[pc.classification == code, 2]
+        u = members[0]
+        out.append({"name": name, "code": code, "sito": getattr(u, "sito", None), "area_s": u.area, "us": u.us,
+                     "points": int(len(z)), "area_m2": float(shapes[name].area),
+                     "z_min": float(z.min()) if len(z) else None, "z_mean": float(z.mean()) if len(z) else None,
+                     "z_max": float(z.max()) if len(z) else None})
+    return sorted(out, key=lambda r: r["code"])
+
+
 def assign_class_by_polygons(chunk, units, class_code: int | None = None, base_code: int = 100) -> dict[str, int]:
     """Give points inside each unit polygon (plan view) a class. Without ``class_code``
-    each unit gets its own code (``base_code``, ``base_code + 1``...). Returns US -> code."""
+    each unit gets its own class (see :func:`classify_by_units`). Returns US -> code."""
+    if class_code is None:
+        rows = classify_by_units(chunk, units, base_code=base_code)
+        by_name = {r["name"]: r["code"] for r in rows}
+        return {str(u.us): by_name[unit_class_name(u, i)] for i, u in enumerate(units)}
     from shapely import contains_xy
 
     pc = chunk.point_cloud
     world = chunk.to_world(pc.xyz)
-    mapping = {}
-    for i, u in enumerate(units):
-        code = class_code if class_code is not None else base_code + i
-        inside = contains_xy(u.geometry, world[:, 0], world[:, 1])
-        pc.classification[inside] = code
-        mapping[str(u.us)] = code
-        chunk.meta.setdefault("classes", {})[str(code)] = f"{u.tipo} {u.us}"
+    for u in units:
+        pc.classification[contains_xy(u.geometry, world[:, 0], world[:, 1])] = class_code
     chunk.point_cloud = pc
-    return mapping
+    return {str(u.us): class_code for u in units}
+
+
+def units_table_csv(rows: list[dict], path) -> Path:
+    """The statistics of :func:`classify_by_units` as a CSV (semicolon separated, for Excel/LibreOffice)."""
+    import csv
+
+    path = Path(path)
+    cols = ["sito", "area_s", "us", "name", "code", "points", "area_m2", "z_min", "z_mean", "z_max"]
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh, delimiter=";")
+        w.writerow(cols)
+        for r in rows:
+            w.writerow(["" if r.get(c) is None else (f"{r[c]:.4f}" if isinstance(r.get(c), float) else r[c])
+                        for c in cols])
+    return path
 
 
 def class_statistics(pc: PointCloud) -> dict[int, int]:
