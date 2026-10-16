@@ -66,6 +66,57 @@ def raycaster_for_chunk(chunk: Chunk) -> Raycaster | None:
     return Raycaster(np.asarray(mesh.vertices), np.asarray(mesh.faces))
 
 
+class UnreadablePhotos(RuntimeError):
+    """Photos of aligned cameras that cannot be read (``cameras``)."""
+
+    def __init__(self, cameras):
+        self.cameras = list(cameras)
+        names = ", ".join(Path(c.path).name for c in self.cameras[:3])
+        super().__init__(f"{len(self.cameras)} photos cannot be read ({names}{'...' if len(self.cameras) > 3 else ''}): "
+                         "an empty file is usually a Dropbox, iCloud or OneDrive file kept online only. Make the "
+                         "folder available offline, link the photos to another folder, or build without these photos")
+
+
+def unreadable_photos(chunk: Chunk, cameras=None) -> list:
+    """Cameras (the aligned ones by default) whose photo cannot be read: missing, empty
+    (Dropbox, iCloud and OneDrive keep "online only" files as empty placeholders) or not an
+    image (only the header is read)."""
+    from PIL import Image
+
+    bad = []
+    for cam in chunk.aligned_cameras if cameras is None else cameras:
+        try:
+            if Path(cam.path).stat().st_size == 0:
+                bad.append(cam)
+                continue
+            with Image.open(cam.path) as im:
+                im.size  # noqa: B018 - the header only
+        except Exception:
+            bad.append(cam)
+    return bad
+
+
+def readable_cameras(chunk: Chunk, skip_unreadable: bool = False, cameras=None) -> tuple[list, list]:
+    """The aligned cameras (or ``cameras``) whose photo can be read, and the others. Unreadable
+    photos raise :class:`UnreadablePhotos` unless ``skip_unreadable`` (never when no photo
+    at all can be read)."""
+    cams = list(chunk.aligned_cameras if cameras is None else cameras)
+    bad = unreadable_photos(chunk, cams)
+    if bad and (not skip_unreadable or len(bad) == len(cams)):
+        raise UnreadablePhotos(bad)
+    skipped = {c.key for c in bad}
+    return [c for c in cams if c.key not in skipped], bad
+
+
+def read_photo(cam, flags: int = cv2.IMREAD_COLOR) -> np.ndarray:
+    """The photo of ``cam`` as OpenCV reads it (BGR), ignoring the EXIF orientation as the
+    camera models do; :class:`UnreadablePhotos` when it cannot be decoded."""
+    img = cv2.imread(str(Path(cam.path)), flags | cv2.IMREAD_IGNORE_ORIENTATION)
+    if img is None:
+        raise UnreadablePhotos([cam])
+    return img
+
+
 class ImageCache:
     """Small LRU of decoded photos (BGR, optionally downscaled)."""
 
@@ -78,10 +129,7 @@ class ImageCache:
         if cam.key not in self._items:
             if len(self._items) >= self.max_items:
                 self._items.pop(next(iter(self._items)))
-            img = cv2.imread(str(Path(cam.path)), cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
-            if img is None:
-                raise FileNotFoundError(cam.path)
-            self._items[cam.key] = img
+            self._items[cam.key] = read_photo(cam)
         return self._items[cam.key]
 
 

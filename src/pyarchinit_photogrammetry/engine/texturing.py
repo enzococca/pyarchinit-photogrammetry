@@ -13,7 +13,7 @@ import numpy as np
 
 from ..core.chunk import Chunk
 from ..core.progress import Progress
-from .visibility import ImageCache, Raycaster, project_valid, sample
+from .visibility import ImageCache, Raycaster, project_valid, readable_cameras, sample
 
 
 def _cell_layout(s: int):
@@ -36,8 +36,8 @@ def _cell_layout(s: int):
     return which, bary, tri
 
 
-def _face_camera_choice(chunk: Chunk, verts, faces, raycaster, progress: Progress):
-    cams = chunk.aligned_cameras
+def _face_camera_choice(chunk: Chunk, verts, faces, raycaster, progress: Progress, cams=None):
+    cams = chunk.aligned_cameras if cams is None else cams
     tri = verts[faces]
     centroid = tri.mean(1)
     normal = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
@@ -85,16 +85,20 @@ def _face_camera_choice(chunk: Chunk, verts, faces, raycaster, progress: Progres
     return choice
 
 
-def build_texture(chunk: Chunk, texture_size: int = 4096, progress: Progress | None = None) -> Path:
+def build_texture(chunk: Chunk, texture_size: int = 4096, progress: Progress | None = None,
+                  skip_unreadable: bool = False) -> Path:
+    """Photos that cannot be read stop the step (:class:`~.visibility.UnreadablePhotos`) unless
+    ``skip_unreadable``: then the faces take their colours from the other photos."""
     progress = progress or Progress()
     mesh = chunk.model
     if mesh is None:
         raise RuntimeError("build the model first")
+    progress(0.0, "Checking the photos")
+    cams, bad = readable_cameras(chunk, skip_unreadable)
     verts = np.asarray(mesh.vertices, float)
     faces = np.asarray(mesh.faces, np.int64)
     raycaster = Raycaster(verts, faces)
-    choice = _face_camera_choice(chunk, verts, faces, raycaster, progress.sub(0, 0.5))
-    cams = chunk.aligned_cameras
+    choice = _face_camera_choice(chunk, verts, faces, raycaster, progress.sub(0, 0.5), cams=cams)
 
     n = len(faces)
     cells = int(np.ceil(n / 2))

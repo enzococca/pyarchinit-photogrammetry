@@ -14,7 +14,7 @@ import numpy as np
 from ..core.chunk import Chunk
 from ..core.progress import Progress
 from .dem import NODATA, ensure_level, estimate_gsd, read_dem, write_geotiff
-from .visibility import ImageCache, project_valid, raycaster_for_chunk, sample
+from .visibility import ImageCache, project_valid, raycaster_for_chunk, readable_cameras, sample
 
 
 def _surface_grid(chunk: Chunk, resolution: float, surface: str):
@@ -89,14 +89,18 @@ def hidden_cells(chunk: Chunk, origin, shape, resolution: float, hide_classes) -
 
 
 def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: str = "dem", blending: str = "mosaic",
-                      hide_classes=None, progress: Progress | None = None, tile: int = 512) -> Path:
+                      hide_classes=None, progress: Progress | None = None, tile: int = 512,
+                      skip_unreadable: bool = False) -> Path:
     """``hide_classes``: classes of the dense cloud left out of the orthomosaic (transparent
-    where they are the visible surface: excavation tools, people, vegetation)."""
+    where they are the visible surface: excavation tools, people, vegetation). Photos that
+    cannot be read (e.g. kept online only by Dropbox) stop the step
+    (:class:`~.visibility.UnreadablePhotos`) unless ``skip_unreadable``."""
     progress = progress or Progress()
+    progress(0.0, "Checking the photos")
+    cams, bad = readable_cameras(chunk, skip_unreadable)
     ensure_level(chunk)
     if resolution is None:
         resolution = estimate_gsd(chunk)
-    cams = chunk.aligned_cameras
     progress(0.02, f"Orthomosaic at {resolution:.4g} m/px from {len(cams)} photos")
     z, origin = _surface_grid(chunk, resolution, surface)
     h, w = z.shape
@@ -196,6 +200,8 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     chunk._set_product("orthomosaic", path)
     chunk.meta["orthomosaic"] = {"resolution": resolution, "surface": surface, "blending": blending,
                                  "hidden_classes": hidden_classes}
+    if bad:
+        chunk.meta["orthomosaic"]["skipped_photos"] = [c.label for c in bad]
     progress(1.0, f"Orthomosaic {w}x{h} px")
     return path
 

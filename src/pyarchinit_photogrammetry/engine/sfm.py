@@ -102,6 +102,106 @@ def image_root_and_names(chunk: Chunk) -> tuple[Path, dict[int, str]]:
     return root, names
 
 
+def _same_file(a: str | Path, b: str | Path) -> bool:
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except OSError:
+        return False
+
+
+def photo_folder(chunk: Chunk) -> str:
+    """Folder from which COLMAP reads the photos by their image names (``meta["sfm"]["names"]``).
+
+    It is the common folder of the photos (``meta["sfm"]["image_root"]``) unless some photos
+    were linked elsewhere (:func:`relink_photos`): then a folder of links named after the
+    image names, inside the chunk data, points to every photo where it is now."""
+    sfm = chunk.meta.get("sfm") or {}
+    root, names = sfm.get("image_root"), sfm.get("names") or {}
+    cams = {str(c.key): c for c in chunk.cameras}
+    moved = {k: cams[k].path for k, name in names.items()
+             if k in cams and not (root and _same_file(Path(root) / name, cams[k].path))}
+    if root and not moved:
+        return str(root)
+    links = chunk.data_dir / "photo_links"
+    shutil.rmtree(links, ignore_errors=True)
+    for k, name in names.items():
+        if k not in cams:
+            continue
+        target, link = Path(cams[k].path), links / name
+        link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(target, link)
+        except OSError:  # Windows without the right to create links: a hard link, else a copy
+            try:
+                os.link(target, link)
+            except OSError:
+                if target.exists():
+                    shutil.copy2(target, link)
+    return str(links)
+
+
+def relink_photos(chunk: Chunk, folder, only_unreadable: bool = False) -> dict:
+    """Point the cameras to the photos with the same file name in ``folder`` and its
+    subfolders (empty files are not taken). When a name is found more than once, the copy
+    whose parent folders match the old path best wins. The common folder of the photos
+    (``meta["sfm"]["image_root"]``) follows when every photo of the model is now under one
+    folder with the same relative names; otherwise :func:`photo_folder` links them."""
+    from .visibility import unreadable_photos
+
+    folder = Path(folder)
+    if not folder.is_dir():
+        raise FileNotFoundError(folder)
+    index: dict[str, list[Path]] = {}
+    for dirpath, _dirs, files in os.walk(folder):
+        for f in files:
+            path = Path(dirpath) / f
+            if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp", ".dng"}:
+                index.setdefault(f.lower(), []).append(path)
+    cams = chunk.unreadable_photos(chunk.cameras) if only_unreadable else list(chunk.cameras)
+    relinked, not_found = 0, []
+    for cam in cams:
+        old = Path(cam.path)
+        found = []
+        for cand in index.get(old.name.lower(), []):
+            try:
+                if cand.stat().st_size > 0:
+                    found.append(cand)
+            except OSError:
+                pass
+        if not found:
+            not_found.append(cam.label)
+            continue
+
+        def common_tail(p: Path) -> int:
+            n = 0
+            for a, b in zip(reversed(p.parent.parts), reversed(old.parent.parts)):
+                if a.lower() != b.lower():
+                    break
+                n += 1
+            return n
+
+        best = max(found, key=common_tail)
+        if not _same_file(best, old):
+            cam.path = str(best.resolve())
+            relinked += 1
+    sfm = chunk.meta.get("sfm")
+    if sfm and sfm.get("names"):
+        by_key = {str(c.key): Path(c.path).resolve() for c in chunk.cameras}
+        roots = set()
+        for k, name in sfm["names"].items():
+            if k in by_key:
+                path, parts = by_key[k], PurePosixPath(name).parts
+                if tuple(p.lower() for p in path.parts[-len(parts):]) != tuple(p.lower() for p in parts):
+                    roots = set()
+                    break
+                roots.add(Path(*path.parts[:-len(parts)]))
+        if len(roots) == 1:
+            sfm["image_root"] = str(roots.pop())
+    left = unreadable_photos(chunk)
+    return {"relinked": relinked, "not_found": not_found, "unreadable": len(left),
+            "image_root": (chunk.meta.get("sfm") or {}).get("image_root")}
+
+
 def _reference_pairs(chunk: Chunk, names: dict[int, str], neighbors: int = 20) -> list[tuple[str, str]] | None:
     """Candidate pairs from camera reference positions (k nearest neighbours)."""
     cams = [c for c in chunk.cameras if c.enabled and c.key in names and c.reference.location]

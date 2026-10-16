@@ -22,6 +22,7 @@ import numpy as np
 from ..core.chunk import QUALITY_DOWNSCALE, Chunk
 from ..core.pointcloud import PointCloud
 from ..core.progress import Progress
+from .visibility import UnreadablePhotos, unreadable_photos  # noqa: F401 - part of this module's API
 
 FILTER_MODES = {  # min agreeing neighbours, relative depth tolerance, fusion min pixels
     "none": (0, 0.0, 2),
@@ -67,35 +68,6 @@ def choose_backend(backend: str) -> str:
     return "cpu"
 
 
-class UnreadablePhotos(RuntimeError):
-    """Photos of aligned cameras that cannot be read (``cameras``)."""
-
-    def __init__(self, cameras):
-        self.cameras = list(cameras)
-        names = ", ".join(Path(c.path).name for c in self.cameras[:3])
-        super().__init__(f"{len(self.cameras)} photos cannot be read ({names}{'...' if len(self.cameras) > 3 else ''}): "
-                         "an empty file is usually a Dropbox, iCloud or OneDrive file kept online only. Make the "
-                         "folder available offline, or build without these photos")
-
-
-def unreadable_photos(chunk: Chunk) -> list:
-    """Aligned cameras whose photo cannot be read: missing, empty (Dropbox, iCloud and OneDrive
-    keep "online only" files as empty placeholders) or not an image (only the header is read)."""
-    from PIL import Image
-
-    bad = []
-    for cam in chunk.aligned_cameras:
-        try:
-            if Path(cam.path).stat().st_size == 0:
-                bad.append(cam)
-                continue
-            with Image.open(cam.path) as im:
-                im.size  # noqa: B018 - the header only
-        except Exception:
-            bad.append(cam)
-    return bad
-
-
 def build_depth_maps(chunk: Chunk, quality: str = "medium", filter_mode: str = "moderate", backend: str = "auto",
                      progress: Progress | None = None, skip_unreadable: bool = False) -> None:
     """Depth maps of the aligned photos. Photos that cannot be read stop the step
@@ -127,8 +99,9 @@ def build_depth_maps(chunk: Chunk, quality: str = "medium", filter_mode: str = "
     if bad:  # only the readable photos
         skipped = {c.key for c in bad}
         keep = [names[str(c.key)] for c in chunk.aligned_cameras if c.key not in skipped and str(c.key) in names]
-    pycolmap.undistort_images(str(ws), str(rec_dir), chunk.meta["sfm"]["image_root"], image_names=keep,
-                              undistort_options=uopts)
+    from .sfm import photo_folder
+
+    pycolmap.undistort_images(str(ws), str(rec_dir), photo_folder(chunk), image_names=keep, undistort_options=uopts)
     chunk.meta["dense"] = {"backend": backend, "quality": quality, "filter": filter_mode}
     if bad:
         chunk.meta["dense"]["skipped_photos"] = [c.label for c in bad]

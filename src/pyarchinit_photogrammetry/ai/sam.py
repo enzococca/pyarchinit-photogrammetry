@@ -399,9 +399,9 @@ def segment_photo_and_classify(chunk, segmenter: Segmenter, camera, points_px, c
     """
     import cv2
 
-    from ..engine.visibility import project_valid
+    from ..engine.visibility import project_valid, read_photo
 
-    img = cv2.cvtColor(cv2.imread(str(camera.path), cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION), cv2.COLOR_BGR2RGB)
+    img = cv2.cvtColor(read_photo(camera), cv2.COLOR_BGR2RGB)
     pts = np.asarray(points_px, float) - 0.5  # COLMAP -> array coordinates for SAM
     mask = segmenter.segment_points(img, pts, np.ones(len(pts)) if labels is None else labels)
     masks = {camera.key: mask}
@@ -417,7 +417,8 @@ def segment_photo_and_classify(chunk, segmenter: Segmenter, camera, points_px, c
                     continue
                 p = px[ok] - 0.5
                 box = np.r_[np.percentile(p, 1, axis=0), np.percentile(p, 99, axis=0)]
-                other = cv2.cvtColor(cv2.imread(str(cam.path), cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION),
-                                     cv2.COLOR_BGR2RGB)
-                masks[cam.key] = segmenter.segment_box(other, box)
+                other = cv2.imread(str(cam.path), cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
+                if other is None:  # a photo kept online only: the others vote
+                    continue
+                masks[cam.key] = segmenter.segment_box(cv2.cvtColor(other, cv2.COLOR_BGR2RGB), box)
     return classify_from_masks(chunk, masks, class_code, label=label)

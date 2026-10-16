@@ -21,7 +21,7 @@ from ..core.document import Document
 from . import theme
 from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, IfcPreviewDialog, ImageDialog, ParamDialog,
                       PublishDialog, QuotaDialog, SiteChoiceDialog, SiteDialog, TableDialog, UnitDialog, UsFormDialog,
-                      message)
+                      choice, message)
 from .icons import app_icon, icon
 from .image_views import US_COLORS, PhotoView, RasterView
 from .model_view import ModelView
@@ -259,6 +259,9 @@ class MainWindow(QMainWindow):
         self._act(m, "Aggiungi foto...", self.add_photos, processing=True, icon_name="photos")
         self._act(m, "Aggiungi cartella...", lambda: self.add_photos(folder=True), processing=True,
                   icon_name="folder_photos")
+        self._act(m, "Ricollega foto (altra cartella)...", lambda: self.relink_photos(), icon_name="folder_photos",
+                  tip="Collega le foto ai file con lo stesso nome in un'altra cartella (copia su un altro disco, "
+                      "cartella spostata o tenuta «solo online» da Dropbox)")
         self._act(m, "Aggiungi chunk", self.add_chunk, icon_name="chunk_add")
         self._act(m, "Allinea chunk...", self.align_chunks, processing=True, icon_name="chunk")
         self._act(m, "Unisci chunk...", self.merge_chunks, processing=True, icon_name="merge")
@@ -1308,26 +1311,13 @@ class MainWindow(QMainWindow):
             + self._version_fields("point_cloud"))
         if not v:
             return
-        from ..engine.dense import unreadable_photos
-
-        bad = unreadable_photos(self.chunk)
-        if len(bad) == len(self.chunk.aligned_cameras):
-            self._warn("Nessuna foto e' leggibile: controlla che la cartella delle foto sia collegata e scaricata.")
+        skip = self._photos_to_skip("Nuvola densa")
+        if skip is None:
             return
-        if bad:
-            names = "\n".join(Path(c.path).name for c in bad[:5]) + ("\n..." if len(bad) > 5 else "")
-            r = message(self, "question", "Foto non leggibili",
-                        f"{len(bad)} foto su {len(self.chunk.aligned_cameras)} non si possono leggere:\n{names}\n\n"
-                        "Un file vuoto (0 byte) di solito e' un file di Dropbox, iCloud o OneDrive tenuto «solo online»: "
-                        "rendi la cartella disponibile offline e riprova.\n\nContinuare senza queste foto?",
-                        buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if r != QMessageBox.StandardButton.Yes:
-                return
-            self.log_pane.warning(f"Nuvola densa senza {len(bad)} foto non leggibili")
 
         def job(p):
             self.chunk.build_depth_maps(v["quality"], v["filter_mode"], v["backend"],
-                                        progress=p.sub(0, 1.0 if v["only_depth"] else 0.8), skip_unreadable=bool(bad))
+                                        progress=p.sub(0, 1.0 if v["only_depth"] else 0.8), skip_unreadable=skip)
             if v["only_depth"]:
                 return None
             return self.chunk.build_point_cloud(progress=p.sub(0.8, 0.2))
@@ -1343,6 +1333,62 @@ class MainWindow(QMainWindow):
                 self._show_model("point_cloud")
 
         self.run_task("Nuvola densa" if not v["only_depth"] else "Mappe di profondita'", job, done)
+
+    def _photos_to_skip(self, step: str, all_photos: bool = False) -> bool | None:
+        """Before a step that reads the photos (the aligned ones, or every enabled one with
+        ``all_photos``): when some cannot be read (a Dropbox folder kept online only), link
+        them to another copy, go on without them or give up. Returns the ``skip_unreadable``
+        flag for the step, ``None`` to give up."""
+        while True:
+            cams = [c for c in self.chunk.cameras if c.enabled] if all_photos else self.chunk.aligned_cameras
+            bad = self.chunk.unreadable_photos(cams)
+            if not bad:
+                return False
+            names = "\n".join(Path(c.path).name for c in bad[:5]) + ("\n..." if len(bad) > 5 else "")
+            text = (f"{len(bad)} foto su {len(cams)} non si possono leggere:\n{names}\n\nUn file vuoto (0 byte) di "
+                    "solito e' un file di Dropbox, iCloud o OneDrive tenuto «solo online»: rendi la cartella disponibile "
+                    "offline, oppure collega le foto a un'altra copia (per esempio sul disco esterno).")
+            every = len(bad) == len(cams)
+            options = ["Ricollega a un'altra cartella..."] + ([] if every else ["Continua senza queste foto"])
+            r = choice(self, "warning" if every else "question", f"{step}: foto non leggibili", text, options)
+            if r is None:
+                return None
+            if r == 1:
+                self.log_pane.warning(f"{step} senza {len(bad)} foto non leggibili")
+                return True
+            if not self.relink_photos(only_unreadable=True):
+                return None
+
+    def relink_photos(self, only_unreadable: bool = False) -> bool:
+        """Point the photos to the files with the same names in another folder (and its
+        subfolders): a copy on another disk, a folder moved or renamed."""
+        if not self._need_chunk():
+            return False
+        folder = QFileDialog.getExistingDirectory(self, "Cartella con le foto (anche nelle sottocartelle)",
+                                                  self._last_dir())
+        if not folder:
+            return False
+        try:
+            r = self.chunk.relink_photos(folder, only_unreadable=only_unreadable)
+        except Exception as exc:
+            self._exc("Ricollegamento delle foto non riuscito", exc)
+            return False
+        text = f"{r['relinked']} foto collegate a {folder}"
+        if r["not_found"]:
+            text += f"; {len(r['not_found'])} non trovate ({', '.join(r['not_found'][:3])}" + \
+                ("...)" if len(r["not_found"]) > 3 else ")")
+        if r["unreadable"]:
+            text += f"; ancora {r['unreadable']} non leggibili"
+        self.log_pane.info(text)
+        self.statusBar().showMessage(text, 15000)
+        self._dirty(True)
+        if self.doc.path:
+            try:
+                self.doc.save()
+            except Exception as exc:
+                log.error("Salvataggio non riuscito: %s", exc)
+        self.photos.set_chunk(self.chunk)
+        return True
 
     def crop_cloud(self) -> None:
         """Keep the dense points inside a height range and/or a cylinder (turntable scans: the
@@ -1411,9 +1457,13 @@ class MainWindow(QMainWindow):
             return
         v = ParamDialog.ask(self, "Texture", [Field("size", "Dimensione texture", 4096,
                                                     choices=[(2048, "2048"), (4096, "4096"), (8192, "8192")])])
-        if v:
-            self.run_task("Texture", lambda p: self.chunk.build_texture(v["size"], progress=p),
-                          lambda _r: self._show_model("model_textured"))
+        if not v:
+            return
+        skip = self._photos_to_skip("Texture")
+        if skip is None:
+            return
+        self.run_task("Texture", lambda p: self.chunk.build_texture(v["size"], progress=p, skip_unreadable=skip),
+                      lambda _r: self._show_model("model_textured"))
 
     def build_dem(self) -> None:
         if not self._need_chunk(aligned=True):
@@ -1452,11 +1502,15 @@ class MainWindow(QMainWindow):
                if len(choices) > 1 else []) + self._version_fields("orthomosaic"),
             intro=self._class_hint("Le classi scelte (attrezzi, persone, vegetazione) diventano trasparenti dove sono "
                                    "la superficie visibile. Su un DEM del solo terreno l'ortofoto e' quella classica."))
-        if v:
-            hide = sorted(v.get("hide") or []) or None
-            self.run_task("Ortofoto", self._versioned("orthomosaic", v, lambda p: self.chunk.build_orthomosaic(
-                v["resolution"], v["surface"], v["blending"], hide_classes=hide, progress=p)),
-                lambda _r: self._show_raster("ortho"))
+        if not v:
+            return
+        skip = self._photos_to_skip("Ortofoto")
+        if skip is None:
+            return
+        hide = sorted(v.get("hide") or []) or None
+        self.run_task("Ortofoto", self._versioned("orthomosaic", v, lambda p: self.chunk.build_orthomosaic(
+            v["resolution"], v["surface"], v["blending"], hide_classes=hide, progress=p, skip_unreadable=skip)),
+            lambda _r: self._show_raster("ortho"))
 
     def process_all(self) -> None:
         if not self._need_chunk():
@@ -1475,6 +1529,14 @@ class MainWindow(QMainWindow):
             Field("report", "Report HTML", True)])
         if not v:
             return
+        skip = self._photos_to_skip("Elabora tutto", all_photos=True)
+        if skip is None:
+            return
+        if skip:  # the photos that cannot be read are not aligned at all
+            bad = {c.key for c in self.chunk.unreadable_photos([c for c in self.chunk.cameras if c.enabled])}
+            for c in self.chunk.cameras:
+                if c.key in bad:
+                    c.enabled = False
 
         def job(p):
             ch = self.chunk
@@ -1496,15 +1558,15 @@ class MainWindow(QMainWindow):
             if any(m.reference.location for m in ch.markers):
                 self.last_report = ch.update_transform()
             q = sp()
-            ch.build_depth_maps(v["dense_quality"], progress=q.sub(0, 0.8))
+            ch.build_depth_maps(v["dense_quality"], progress=q.sub(0, 0.8), skip_unreadable=skip)
             ch.build_point_cloud(progress=q.sub(0.8, 0.2))
             ch.build_model(surface=v["surface"], progress=sp())
             if v["texture"]:
-                ch.build_texture(progress=sp())
+                ch.build_texture(progress=sp(), skip_unreadable=skip)
             if v["dem"]:
                 ch.build_dem(progress=sp())
             if v["ortho"]:
-                ch.build_orthomosaic(progress=sp())
+                ch.build_orthomosaic(progress=sp(), skip_unreadable=skip)
             if v["report"] and self.doc.path:
                 sp()(0.5, "Report")
                 ch.generate_report(self.doc.path.with_name(self.doc.path.stem + "_report.html"))
@@ -3596,9 +3658,9 @@ class MainWindow(QMainWindow):
 
     def _photo_sam_prompt(self, camera, x, y, label) -> None:
         def job(p):
-            import cv2
+            from ..engine.visibility import read_photo
 
-            img = cv2.imread(camera.path, cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)[:, :, ::-1]
+            img = read_photo(camera)[:, :, ::-1]
             return self._segmenter().segment_points(img, np.array([[x - 0.5, y - 0.5]]), np.array([label]))
 
         self.run_task("SAM 2.1 sulla foto", job, lambda m: self.photo_view.show_mask(np.asarray(m, bool)),

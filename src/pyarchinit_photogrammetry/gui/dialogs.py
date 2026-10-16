@@ -483,6 +483,27 @@ def message(parent, kind: str, title: str, text: str, details: str = "", buttons
     return box.standardButton(box.clickedButton())
 
 
+def choice(parent, kind: str, title: str, text: str, options: list[str], default: int = 0,
+           cancel: str | None = "Annulla") -> int | None:
+    """Non-native message box with buttons named ``options``: the index of the one pressed, or
+    ``None`` for ``cancel`` (Esc) or a closed box."""
+    from PySide6.QtWidgets import QMessageBox
+
+    icons = {"info": QMessageBox.Icon.Information, "warning": QMessageBox.Icon.Warning,
+             "critical": QMessageBox.Icon.Critical, "question": QMessageBox.Icon.Question}
+    box = QMessageBox(icons.get(kind, QMessageBox.Icon.NoIcon), title, text, parent=parent)
+    box.setOption(QMessageBox.Option.DontUseNativeDialog, True)
+    buttons = [box.addButton(o, QMessageBox.ButtonRole.AcceptRole) for o in options]
+    esc = box.addButton(cancel, QMessageBox.ButtonRole.RejectRole) if cancel else None
+    if esc is not None:
+        box.setEscapeButton(esc)
+    if 0 <= default < len(buttons):
+        box.setDefaultButton(buttons[default])
+    box.exec()
+    clicked = box.clickedButton()
+    return buttons.index(clicked) if clicked in buttons else None
+
+
 _SUGGESTIONS = [
     ("crashed in the worker process", "La ricostruzione e' stata eseguita in un processo separato che si e' interrotto. "
                                       "Il modello viene ricostruito con il metodo alternativo (campo di altezze); "
@@ -495,8 +516,9 @@ _SUGGESTIONS = [
                      "versione di macOS: usa l'ambiente virtuale del progetto o l'applicazione pacchettizzata."),
     ("not enough points", "Servono piu' punti: costruisci prima la nuvola densa o usa una qualita' piu' alta."),
     ("photos cannot be read", "Alcune foto non si leggono: un file vuoto (0 byte) di solito e' un file di Dropbox, "
-                              "iCloud o OneDrive tenuto «solo online». Rendi la cartella disponibile offline, oppure "
-                              "conferma di procedere senza quelle foto."),
+                              "iCloud o OneDrive tenuto «solo online». Rendi la cartella disponibile offline, collega "
+                              "le foto a un'altra copia (Flusso di lavoro > Ricollega foto) oppure conferma di procedere "
+                              "senza quelle foto."),
     ("Allinea prima", "Esegui Flusso di lavoro > Allinea foto."),
     ("BITMAP_ERROR", "COLMAP non riesce a leggere le foto: controlla che siano JPEG/PNG/TIFF validi e riavvia "
                      "l'interfaccia (la libreria JPEG di sistema e' stata caricata prima di pycolmap)."),

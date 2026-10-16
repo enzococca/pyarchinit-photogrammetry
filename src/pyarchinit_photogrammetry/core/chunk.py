@@ -190,6 +190,22 @@ class Chunk:
         keys = [i.key for i in items]
         return max(keys, default=-1) + 1
 
+    def unreadable_photos(self, cameras: Iterable[Camera] | None = None) -> list[Camera]:
+        """Aligned cameras (or ``cameras``) whose photo cannot be read: missing, empty (a
+        Dropbox / iCloud / OneDrive file kept online only) or not an image."""
+        from ..engine.visibility import unreadable_photos
+
+        return unreadable_photos(self, None if cameras is None else list(cameras))
+
+    def relink_photos(self, folder: str | os.PathLike, only_unreadable: bool = False) -> dict:
+        """Point the cameras to the photos with the same names in ``folder`` (searched with its
+        subfolders), e.g. a copy on another disk of a folder kept online only by Dropbox.
+        ``only_unreadable``: only the photos that cannot be read now. Returns
+        ``{"relinked", "not_found", "image_root"}``."""
+        from ..engine.sfm import relink_photos
+
+        return relink_photos(self, folder, only_unreadable=only_unreadable)
+
     def remove_cameras(self, cameras: Iterable[Camera]) -> None:
         drop = {c.key for c in cameras}
         self.cameras = [c for c in self.cameras if c.key not in drop]
@@ -366,10 +382,12 @@ class Chunk:
                                    voxel_size=voxel_size, vertex_colors=vertex_colors, classes=classes,
                                    progress=as_progress(progress))
 
-    def build_texture(self, texture_size: int = 4096, progress: ProgressCallback | None = None) -> Path:
+    def build_texture(self, texture_size: int = 4096, progress: ProgressCallback | None = None,
+                      skip_unreadable: bool = False) -> Path:
         from ..engine import texturing
 
-        return texturing.build_texture(self, texture_size=texture_size, progress=as_progress(progress))
+        return texturing.build_texture(self, texture_size=texture_size, progress=as_progress(progress),
+                                       skip_unreadable=skip_unreadable)
 
     def build_dem(self, resolution: float | None = None, source: str = "point_cloud", interpolate: bool = True,
                   classes=None, progress: ProgressCallback | None = None) -> Path:
@@ -381,13 +399,16 @@ class Chunk:
                              progress=as_progress(progress))
 
     def build_orthomosaic(self, resolution: float | None = None, surface: str = "dem", blending: str = "mosaic",
-                          hide_classes=None, progress: ProgressCallback | None = None) -> Path:
+                          hide_classes=None, progress: ProgressCallback | None = None,
+                          skip_unreadable: bool = False) -> Path:
         """Orthomosaic (GeoTIFF RGBA). ``hide_classes``: where the visible surface belongs to
-        these classes of the dense cloud the orthomosaic is transparent."""
+        these classes of the dense cloud the orthomosaic is transparent. Photos that cannot be
+        read stop the step unless ``skip_unreadable``."""
         from ..engine import ortho
 
         return ortho.build_orthomosaic(self, resolution=resolution, surface=surface, blending=blending,
-                                       hide_classes=hide_classes, progress=as_progress(progress))
+                                       hide_classes=hide_classes, progress=as_progress(progress),
+                                       skip_unreadable=skip_unreadable)
 
     # ---------------------------------------------------------------- export
     def export_point_cloud(self, path: str | os.PathLike, source: str = "point_cloud", classes=None) -> Path:
