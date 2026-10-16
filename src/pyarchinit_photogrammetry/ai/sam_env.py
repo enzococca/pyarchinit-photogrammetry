@@ -127,17 +127,46 @@ def install(progress=None, env: Path | None = None, packages: list[str] | None =
     progress(0.05, "Creazione dell'ambiente Python per SAM 2.1")
     _run([str(uv), "venv", "--python", "3.12", "--allow-existing", str(env)], clean, progress, 0.05, 0.15)
     progress(0.15, "Installazione di PyTorch e SAM 2.1 (alcuni minuti)")
-    _run([str(uv), "pip", "install", "--python", str(env_python(env))] + (packages or PACKAGES), clean,
+    args = torch_backend_args(uv, clean)
+    if args and sys.platform != "darwin" and installed_device(env) == "cpu":
+        args += ["--reinstall-package", "torch"]  # an older install got the CPU build: look for the GPU again
+    _run([str(uv), "pip", "install", "--python", str(env_python(env))] + args + (packages or PACKAGES), clean,
          progress, 0.15, 0.95)
-    out = subprocess.run([str(env_python(env)), "-c",
-                          "import torch, sam2, json; print(json.dumps({'torch': torch.__version__}))"],
-                         capture_output=True, text=True, env=clean, close_fds=False, timeout=600)
+    out = subprocess.run([str(env_python(env)), "-c", _CHECK], capture_output=True, text=True, env=clean,
+                         close_fds=False, timeout=600)
     if out.returncode != 0:
         raise RuntimeError("SAM 2.1 installato ma non si importa:\n" + out.stderr[-1500:])
     info = json.loads(out.stdout.strip().splitlines()[-1])
     (env / "ppg-sam.json").write_text(json.dumps({"packages": packages or PACKAGES, **info}), encoding="utf-8")
-    progress(1.0, f"SAM 2.1 pronto (PyTorch {info['torch']})")
+    progress(1.0, f"SAM 2.1 pronto (PyTorch {info['torch']}, {DEVICE_NAMES.get(info.get('device'), 'CPU')})")
     return env
+
+
+# what the environment can run on: NVIDIA (CUDA), Apple GPU (MPS) or the processor
+_CHECK = ("import torch, sam2, json; mps = getattr(torch.backends, 'mps', None); "
+          "print(json.dumps({'torch': torch.__version__, 'device': 'cuda' if torch.cuda.is_available() else "
+          "'mps' if mps is not None and mps.is_available() else 'cpu'}))")
+DEVICE_NAMES = {"cuda": "GPU NVIDIA (CUDA)", "mps": "GPU Apple (Metal)", "cpu": "CPU"}
+
+
+def torch_backend_args(uv: str | Path, env: dict | None = None) -> list[str]:
+    """``--torch-backend auto`` when ``uv`` knows it: uv then picks the PyTorch build for the
+    graphics card (CUDA on Windows and Linux with an NVIDIA driver; the PyPI wheels for
+    Windows are CPU only). Older ``uv`` versions get no option."""
+    try:
+        out = subprocess.run([str(uv), "pip", "install", "--help"], capture_output=True, text=True, env=env,
+                             close_fds=False, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return ["--torch-backend", "auto"] if "--torch-backend" in out.stdout else []
+
+
+def installed_device(env: Path | None = None) -> str | None:
+    """Device recorded when the environment was installed (``cuda``, ``mps``, ``cpu``)."""
+    try:
+        return json.loads(((env or env_dir()) / "ppg-sam.json").read_text(encoding="utf-8")).get("device")
+    except (OSError, ValueError):
+        return None
 
 
 def _run(cmd, env, progress, start: float, end: float) -> None:
@@ -244,4 +273,4 @@ def make_segmenter(model: str = "small"):
 
 
 __all__ = ["available", "install", "is_installed", "env_dir", "env_python", "make_segmenter",
-           "ExternalSam2Segmenter", "remove", "find_uv"]
+           "ExternalSam2Segmenter", "remove", "find_uv", "torch_backend_args", "installed_device", "DEVICE_NAMES"]

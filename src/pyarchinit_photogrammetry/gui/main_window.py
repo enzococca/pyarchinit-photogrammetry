@@ -2668,7 +2668,8 @@ class MainWindow(QMainWindow):
 
         def done(env):
             self.sam = None
-            self._info("Segment Anything 2.1", f"SAM 2.1 installato in {env}.")
+            device = sam_env.DEVICE_NAMES.get(sam_env.installed_device(env) or "cpu")
+            self._info("Segment Anything 2.1", f"SAM 2.1 installato in {env}.\n\nCalcolo su: {device}.")
             if then is not None:
                 then()
 

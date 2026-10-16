@@ -334,6 +334,30 @@ def test_sam_env_paths(monkeypatch, tmp_path):
     assert sam_env.env_dir() == tmp_path / "env" and not sam_env.is_installed()
     target, ext = sam_env._uv_target()
     assert target and ext in ("zip", "tar.gz")
+    assert sam_env.installed_device() is None
+    (tmp_path / "env").mkdir()
+    (tmp_path / "env" / "ppg-sam.json").write_text('{"torch": "2.9", "device": "mps"}')
+    assert sam_env.installed_device() == "mps"
+
+
+def test_sam_env_torch_backend(tmp_path):
+    """uv picks the PyTorch build for the graphics card when it knows --torch-backend."""
+    import sys
+
+    from pyarchinit_photogrammetry.ai import sam_env
+
+    fake = tmp_path / "uv.py"
+    fake.write_text("import sys; print('--torch-backend <TORCH_BACKEND>' if 'new' in sys.argv[0] else '--python')")
+    new = tmp_path / "new_uv.py"
+    new.write_text(fake.read_text())
+    if sys.platform == "win32":
+        pytest.skip("scripts are not executable on Windows")
+    for f in (fake, new):
+        f.write_text("#!" + sys.executable + "\n" + f.read_text())
+        f.chmod(0o755)
+    assert sam_env.torch_backend_args(new) == ["--torch-backend", "auto"]
+    assert sam_env.torch_backend_args(fake) == []
+    assert sam_env.torch_backend_args(tmp_path / "missing") == []
 
 
 # ---------------------------------------------------------------- IFC
