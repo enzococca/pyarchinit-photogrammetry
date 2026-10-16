@@ -139,6 +139,29 @@ Command line: `ppg dem scavo.ppg --classes 2`, `ppg ortho scavo.ppg --hide-class
 `ppg classify-units scavo.ppg [--pyarchinit-site SITO] [--csv us.csv] [--no-keep-manual]`
 (the units drawn in the project, or the US polygons of a PyArchInit site).
 
+## Versions of the products
+
+`core.versions` keeps earlier results of the dense cloud, the model, the DEM and the
+orthomosaic to compare them. The *active* version is the product every tool uses (the usual
+files of the chunk); kept versions are in `versions/<product>/<id>/` inside the chunk folder,
+listed in `chunk.meta["versions"]` with name, date and the parameters they were built with.
+
+| Call | Description |
+| --- | --- |
+| `versions.keep_active(chunk, product, move=False)` | puts the active version among the kept ones (copied; moved with `move` when its files are inside the chunk folder: a file of another program is always copied); returns the entry |
+| `versions.restore(chunk, product, entry)` | undoes a `keep_active(move=True)` (a build that failed) |
+| `versions.set_active_name(chunk, product, name)`, `active_info(chunk, product)` | name and date of the active version (by default `DEM del 16/10 11:20 (classi 2)`) |
+| `versions.versions(chunk, product)`, `version_file(chunk, product, id)` | kept versions, main file of one |
+| `versions.activate(chunk, product, id)` | makes a kept version active; the active one is kept in its place |
+| `versions.rename(chunk, product, id_or_None, name)`, `delete(chunk, product, id)` | |
+| `versions.dem_difference(chunk, id, out=None)` | active DEM minus a kept one on the grid of the active one (GeoTIFF float32): surface minus terrain = height of walls and vegetation, after minus before = excavated depth |
+
+`chunk.build_depth_maps(..., skip_unreadable=True)` leaves out photos that cannot be read
+(`engine.dense.unreadable_photos(chunk)`: missing, empty placeholders of files kept online only,
+not images); without it they raise `engine.dense.UnreadablePhotos`. The COLMAP model written
+from imported poses refers only to points with two observations; `engine.sfm.repair_reconstruction(chunk)`
+fixes models written by earlier versions (done before the depth maps and the camera optimisation).
+
 ## Modules
 
 | Module | Main functions |

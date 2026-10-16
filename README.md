@@ -147,6 +147,8 @@ is installed on first use (PyTorch in a separate environment, see the same page)
 * **Classes drive the products**: a terrain model (DTM) from the ground alone, an orthophoto
   without tools, people or vegetation, models, sections and exports of chosen classes, and one
   class per stratigraphic unit with its points, plan area and elevations (CSV).
+* **Versions of the products**: dense clouds, models, DEMs and orthophotos built again keep the
+  earlier ones, listed in the workspace; show, make active or compare them (difference of two DEMs).
 * **Mesh from the depth maps** (TSDF fusion), **camera optimisation on the control points**, and
   **chunks aligned and merged** (by markers, common photos or overlapping clouds).
 
