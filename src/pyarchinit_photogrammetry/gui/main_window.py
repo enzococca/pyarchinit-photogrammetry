@@ -1271,10 +1271,26 @@ class MainWindow(QMainWindow):
             Field("only_depth", "Solo le mappe di profondita' (per il modello fuso, senza nuvola densa)", False)])
         if not v:
             return
+        from ..engine.dense import unreadable_photos
+
+        bad = unreadable_photos(self.chunk)
+        if len(bad) == len(self.chunk.aligned_cameras):
+            self._warn("Nessuna foto e' leggibile: controlla che la cartella delle foto sia collegata e scaricata.")
+            return
+        if bad:
+            names = "\n".join(Path(c.path).name for c in bad[:5]) + ("\n..." if len(bad) > 5 else "")
+            r = message(self, "question", "Foto non leggibili",
+                        f"{len(bad)} foto su {len(self.chunk.aligned_cameras)} non si possono leggere:\n{names}\n\n"
+                        "Un file vuoto (0 byte) di solito e' un file di Dropbox, iCloud o OneDrive tenuto «solo online»: "
+                        "rendi la cartella disponibile offline e riprova.\n\nContinuare senza queste foto?",
+                        buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if r != QMessageBox.StandardButton.Yes:
+                return
+            self.log_pane.warning(f"Nuvola densa senza {len(bad)} foto non leggibili")
 
         def job(p):
             self.chunk.build_depth_maps(v["quality"], v["filter_mode"], v["backend"],
-                                        progress=p.sub(0, 1.0 if v["only_depth"] else 0.8))
+                                        progress=p.sub(0, 1.0 if v["only_depth"] else 0.8), skip_unreadable=bool(bad))
             if v["only_depth"]:
                 return None
             return self.chunk.build_point_cloud(progress=p.sub(0.8, 0.2))

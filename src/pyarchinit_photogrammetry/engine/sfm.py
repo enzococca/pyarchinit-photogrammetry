@@ -13,6 +13,7 @@ tangential distortion); *Optimize cameras* refines every parameter afterwards.
 """
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 from pathlib import Path, PurePosixPath
@@ -23,6 +24,8 @@ from ..core import crs as crs_mod
 from ..core.chunk import QUALITY_DOWNSCALE, Chunk
 from ..core.pointcloud import PointCloud
 from ..core.progress import Progress
+
+log = logging.getLogger(__name__)
 
 
 def set_engine_verbosity(verbose: bool = False) -> None:
@@ -217,6 +220,33 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None) -> int:
     return n
 
 
+def drop_missing_points(rec) -> int:
+    """Unlink the observations of 3D points that a model does not hold (the models written
+    from imported poses before version 0.5 referred to points seen by a single photo, which
+    were not written); returns how many were unlinked."""
+    n = 0
+    for iid in list(rec.images):
+        image = rec.images[iid]
+        for idx in image.get_observation_point2D_idxs():
+            if not rec.exists_point3D(image.points2D[idx].point3D_id):
+                image.reset_point3D_for_point2D(idx)
+                n += 1
+    return n
+
+
+def repair_reconstruction(chunk: Chunk) -> int:
+    """:func:`drop_missing_points` on the chunk's model, rewritten when something changed."""
+    p = chunk.product_path("reconstruction")
+    if p is None or not p.exists():
+        return 0
+    rec = load_reconstruction(chunk)
+    n = drop_missing_points(rec)
+    if n:
+        rec.write(str(p))
+        log.info("COLMAP model repaired: %d observations of missing points removed", n)
+    return n
+
+
 def load_reconstruction(chunk: Chunk):
     import pycolmap
 
@@ -297,20 +327,29 @@ def write_reconstruction_from_chunk(chunk: Chunk, max_points: int = 60000, max_o
         idx = np.random.default_rng(0).choice(len(pts), max_points, replace=False)
         pts = pts[idx]
         rgb = rgb[idx] if rgb is not None else None
-    tracks: dict[int, list[tuple[int, int]]] = {}
-    image_lines = []
+    seen = []  # per camera: (indices of the visible points, their pixels)
     for img_id, c in enumerate(cams, 1):
         s = chunk.sensors[c.sensor_key]
+        if not len(pts):
+            seen.append((np.zeros(0, int), np.zeros((0, 2))))
+            continue
+        px, depth = c.project(s, pts)
+        ok = np.nonzero((depth > 0) & (px[:, 0] >= 0) & (px[:, 1] >= 0) & (px[:, 0] < s.width) & (px[:, 1] < s.height))[0]
+        if len(ok) > max_obs_per_image:
+            ok = np.sort(np.random.default_rng(img_id).choice(ok, max_obs_per_image, replace=False))
+        seen.append((ok, px[ok]))
+    # a 3D point needs two observations: the photos refer only to points that are written
+    views = np.bincount(np.concatenate([ok for ok, _ in seen]), minlength=len(pts)) if len(pts) else np.zeros(0, int)
+    tracks: dict[int, list[tuple[int, int]]] = {}
+    image_lines = []
+    for img_id, (c, (ok, uv)) in enumerate(zip(cams, seen), 1):
         cfw = np.linalg.inv(c.transform)
         obs = []
-        if len(pts):
-            px, depth = c.project(s, pts)
-            ok = np.nonzero((depth > 0) & (px[:, 0] >= 0) & (px[:, 1] >= 0) & (px[:, 0] < s.width) & (px[:, 1] < s.height))[0]
-            if len(ok) > max_obs_per_image:
-                ok = np.random.default_rng(img_id).choice(ok, max_obs_per_image, replace=False)
-            for j, pid in enumerate(ok):
-                obs.append((px[pid, 0], px[pid, 1], int(pid) + 1))
-                tracks.setdefault(int(pid) + 1, []).append((img_id, j))
+        for pid, (x, y) in zip(ok, uv):
+            if views[pid] < 2:
+                continue
+            tracks.setdefault(int(pid) + 1, []).append((img_id, len(obs)))
+            obs.append((x, y, int(pid) + 1))
         q = pycolmap.Rotation3d(cfw[:3, :3]).quat  # x, y, z, w
         t = cfw[:3, 3]
         image_lines.append(f"{img_id} " + " ".join(_g(v) for v in (q[3], q[0], q[1], q[2], t[0], t[1], t[2]))
@@ -320,8 +359,6 @@ def write_reconstruction_from_chunk(chunk: Chunk, max_points: int = 60000, max_o
         f.writelines(image_lines)
     with open(txt / "points3D.txt", "w") as f:
         for pid, tr in tracks.items():
-            if len(tr) < 2:
-                continue
             x, y, z = pts[pid - 1]
             r, g, b = (rgb[pid - 1] if rgb is not None else (128, 128, 128))
             f.write(f"{pid} {_g(x)} {_g(y)} {_g(z)} {int(r)} {int(g)} {int(b)} 0.5 " + " ".join(f"{i} {j}" for i, j in tr) + "\n")
@@ -403,6 +440,7 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
 
     progress = progress or Progress()
     rec = load_reconstruction(chunk)
+    drop_missing_points(rec)  # models written from imported poses by earlier versions
 
     def errors():
         rows = gcp.marker_errors(chunk)

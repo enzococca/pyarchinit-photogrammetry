@@ -494,6 +494,9 @@ _SUGGESTIONS = [
     ("__thread_bss", "Le librerie compilate di questo ambiente Python (Anaconda) non si caricano su questa "
                      "versione di macOS: usa l'ambiente virtuale del progetto o l'applicazione pacchettizzata."),
     ("not enough points", "Servono piu' punti: costruisci prima la nuvola densa o usa una qualita' piu' alta."),
+    ("photos cannot be read", "Alcune foto non si leggono: un file vuoto (0 byte) di solito e' un file di Dropbox, "
+                              "iCloud o OneDrive tenuto «solo online». Rendi la cartella disponibile offline, oppure "
+                              "conferma di procedere senza quelle foto."),
     ("Allinea prima", "Esegui Flusso di lavoro > Allinea foto."),
     ("BITMAP_ERROR", "COLMAP non riesce a leggere le foto: controlla che siano JPEG/PNG/TIFF validi e riavvia "
                      "l'interfaccia (la libreria JPEG di sistema e' stata caricata prima di pycolmap)."),

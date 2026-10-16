@@ -231,3 +231,52 @@ def test_optimize_cameras_on_control_points(processed, tmp_path):
         else:
             assert report["control_points"] == 0
     assert shifted["markers"] < shifted["plain"] - 0.0002  # the block bent towards the control point
+
+
+def test_model_from_imported_poses_refers_only_to_written_points(processed, tmp_path):
+    """The COLMAP model written from imported poses (Metashape, WebODM, merged chunks) must
+    not refer to points seen by a single photo: they are not written, and the depth maps
+    failed with KeyError on them. A model written that way by earlier versions is repaired."""
+    import pycolmap
+
+    from pyarchinit_photogrammetry.engine import dense, sfm
+
+    doc0, _, _ = processed
+    src = Path(doc0.path)
+    shutil.copytree(src.parent, tmp_path / "copia", ignore=shutil.ignore_patterns("dense"))
+    ch = ppg.Document.open(tmp_path / "copia" / src.name).chunks[0]
+    out = sfm.write_reconstruction_from_chunk(ch, max_obs_per_image=60)  # many points seen once
+    rec = sfm.load_reconstruction(ch)
+    refs = [p.point3D_id for img in rec.images.values() for p in img.points2D if p.has_point3D()]
+    assert refs and all(rec.exists_point3D(i) for i in refs)
+    assert all(len(p.track.elements) >= 2 for p in rec.points3D.values())
+    # an old model with a dangling reference: repaired, and the neighbours of the depth maps work
+    txt = out.parent / "model_txt"
+    lines = (txt / "images.txt").read_text().splitlines(keepends=True)
+    lines[1] = lines[1].rstrip("\n") + " 10.5 10.5 999999\n"
+    (txt / "images.txt").write_text("".join(lines))
+    broken = pycolmap.Reconstruction()
+    broken.read_text(str(txt))
+    broken.write(str(out))
+    assert sfm.repair_reconstruction(ch) == 1 and sfm.repair_reconstruction(ch) == 0
+    assert dense._neighbors(sfm.load_reconstruction(ch))
+
+
+def test_depth_maps_with_photos_kept_online_only(processed, tmp_path):
+    """Dropbox/iCloud keep "online only" photos as empty files: the depth maps say so, and
+    with skip_unreadable they are built from the other photos."""
+    from pyarchinit_photogrammetry.engine import dense
+
+    doc0, _, _ = processed
+    src = Path(doc0.path)
+    shutil.copytree(src.parent, tmp_path / "copia", ignore=shutil.ignore_patterns("dense"))
+    doc = ppg.Document.open(tmp_path / "copia" / src.name)
+    ch = doc.chunks[0]
+    empty = ch.aligned_cameras[3]
+    Path(empty.path).write_bytes(b"")
+    assert [c.key for c in dense.unreadable_photos(ch)] == [empty.key]
+    with pytest.raises(dense.UnreadablePhotos, match="1 photos cannot be read"):
+        ch.build_depth_maps(quality="low")
+    ch.build_depth_maps(quality="low", skip_unreadable=True)
+    assert ch.meta["dense"]["skipped_photos"] == [empty.label]
+    assert len(ch.build_point_cloud()) > 1000

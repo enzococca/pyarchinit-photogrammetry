@@ -67,11 +67,46 @@ def choose_backend(backend: str) -> str:
     return "cpu"
 
 
+class UnreadablePhotos(RuntimeError):
+    """Photos of aligned cameras that cannot be read (``cameras``)."""
+
+    def __init__(self, cameras):
+        self.cameras = list(cameras)
+        names = ", ".join(Path(c.path).name for c in self.cameras[:3])
+        super().__init__(f"{len(self.cameras)} photos cannot be read ({names}{'...' if len(self.cameras) > 3 else ''}): "
+                         "an empty file is usually a Dropbox, iCloud or OneDrive file kept online only. Make the "
+                         "folder available offline, or build without these photos")
+
+
+def unreadable_photos(chunk: Chunk) -> list:
+    """Aligned cameras whose photo cannot be read: missing, empty (Dropbox, iCloud and OneDrive
+    keep "online only" files as empty placeholders) or not an image (only the header is read)."""
+    from PIL import Image
+
+    bad = []
+    for cam in chunk.aligned_cameras:
+        try:
+            if Path(cam.path).stat().st_size == 0:
+                bad.append(cam)
+                continue
+            with Image.open(cam.path) as im:
+                im.size  # noqa: B018 - the header only
+        except Exception:
+            bad.append(cam)
+    return bad
+
+
 def build_depth_maps(chunk: Chunk, quality: str = "medium", filter_mode: str = "moderate", backend: str = "auto",
-                     progress: Progress | None = None) -> None:
+                     progress: Progress | None = None, skip_unreadable: bool = False) -> None:
+    """Depth maps of the aligned photos. Photos that cannot be read stop the step
+    (:class:`UnreadablePhotos`) unless ``skip_unreadable``: then they are left out."""
     import pycolmap
 
     progress = progress or Progress()
+    progress(0.0, "Checking the photos")
+    bad = unreadable_photos(chunk)
+    if bad and (not skip_unreadable or len(bad) == len(chunk.aligned_cameras)):
+        raise UnreadablePhotos(bad)
     backend = choose_backend(backend)
     ws = _workspace(chunk)
     shutil.rmtree(ws, ignore_errors=True)
@@ -79,13 +114,24 @@ def build_depth_maps(chunk: Chunk, quality: str = "medium", filter_mode: str = "
     rec_dir = chunk.product_path("reconstruction")
     if rec_dir is None:
         raise RuntimeError("align the cameras before building depth maps")
+    from .sfm import repair_reconstruction
+
+    repair_reconstruction(chunk)  # a model written from imported poses by earlier versions
     downscale = QUALITY_DOWNSCALE.get(quality, 4)
     max_side = max(max(s.width, s.height) for s in chunk.sensors.values())
     uopts = pycolmap.UndistortCameraOptions()
     uopts.max_image_size = int(max_side / downscale)
     progress(0.0, "Undistorting photos")
-    pycolmap.undistort_images(str(ws), str(rec_dir), chunk.meta["sfm"]["image_root"], undistort_options=uopts)
+    names = chunk.meta["sfm"].get("names", {})
+    keep = []
+    if bad:  # only the readable photos
+        skipped = {c.key for c in bad}
+        keep = [names[str(c.key)] for c in chunk.aligned_cameras if c.key not in skipped and str(c.key) in names]
+    pycolmap.undistort_images(str(ws), str(rec_dir), chunk.meta["sfm"]["image_root"], image_names=keep,
+                              undistort_options=uopts)
     chunk.meta["dense"] = {"backend": backend, "quality": quality, "filter": filter_mode}
+    if bad:
+        chunk.meta["dense"]["skipped_photos"] = [c.label for c in bad]
     sub = progress.sub(0.1, 0.9)
     if backend == "cpu":
         _cpu_depth_maps(chunk, ws, filter_mode, sub)
@@ -179,7 +225,8 @@ def _neighbors(rec, max_neighbors: int = 4) -> dict[int, list[int]]:
     poses = {i: _pose(img) for i, img in rec.images.items()}
     centers = {i: np.linalg.inv(m)[:3, 3] for i, m in poses.items()}
     axes = {i: m[2, :3] for i, m in poses.items()}  # optical axis in world frame
-    pts = {i: np.array([rec.points3D[pid].xyz for pid in _point_ids(img)]).reshape(-1, 3) for i, img in rec.images.items()}
+    pts = {i: np.array([rec.points3D[pid].xyz for pid in _point_ids(img, rec)]).reshape(-1, 3)
+           for i, img in rec.images.items()}
     out = {}
     for i, cand in shared.items():
         if len(pts[i]) == 0:
@@ -201,12 +248,15 @@ def _neighbors(rec, max_neighbors: int = 4) -> dict[int, list[int]]:
     return out
 
 
-def _point_ids(image) -> list[int]:
-    return [p.point3D_id for p in image.points2D if p.has_point3D()]
+def _point_ids(image, rec=None) -> list[int]:
+    """3D points seen by an image; with ``rec`` only those it holds (a model written by
+    earlier versions from imported poses could refer to points it does not contain)."""
+    ids = [p.point3D_id for p in image.points2D if p.has_point3D()]
+    return ids if rec is None else [i for i in ids if rec.exists_point3D(i)]
 
 
 def _depth_range(rec, image, pose) -> tuple[float, float] | None:
-    ids = _point_ids(image)
+    ids = _point_ids(image, rec)
     if len(ids) < 10:
         return None
     xyz = np.array([rec.points3D[i].xyz for i in ids])
@@ -320,10 +370,11 @@ def _cpu_depth_maps(chunk: Chunk, ws: Path, filter_mode: str, progress: Progress
     (ws / "stereo" / "normal_maps").mkdir(parents=True, exist_ok=True)
     gray_cache: dict[int, np.ndarray] = {}
 
-    def gray(iid):
+    def gray(iid):  # None for a photo left out of the undistortion (unreadable)
         if iid not in gray_cache:
-            gray_cache[iid] = cv2.imread(str(ws / "images" / rec.images[iid].name),
-                                         cv2.IMREAD_GRAYSCALE | cv2.IMREAD_IGNORE_ORIENTATION)
+            path = ws / "images" / rec.images[iid].name
+            gray_cache[iid] = (cv2.imread(str(path), cv2.IMREAD_GRAYSCALE | cv2.IMREAD_IGNORE_ORIENTATION)
+                               if path.exists() else None)
         return gray_cache[iid]
 
     done = []
@@ -333,8 +384,10 @@ def _cpu_depth_maps(chunk: Chunk, ws: Path, filter_mode: str, progress: Progress
         pose_i, K_i = _pose(image), _K(rec.cameras[image.camera_id])
         zr = _depth_range(rec, image, pose_i)
         estimates = []
-        if zr is not None:
+        if zr is not None and gray(iid) is not None:
             for jid in neigh.get(iid, []):
+                if gray(jid) is None:
+                    continue
                 other = rec.images[jid]
                 d = _pair_depth(gray(iid), gray(jid), K_i, _K(rec.cameras[other.camera_id]), pose_i, _pose(other), zr)
                 if d is not None:

@@ -312,11 +312,13 @@ class Chunk:
 
     # ------------------------------------------------------------ dense & mesh
     def build_depth_maps(self, quality: str = "medium", filter_mode: str = "moderate", backend: str = "auto",
-                         progress: ProgressCallback | None = None) -> None:
+                         progress: ProgressCallback | None = None, skip_unreadable: bool = False) -> None:
+        """Depth maps of the aligned photos; photos that cannot be read (e.g. kept online only
+        by Dropbox) stop the step unless ``skip_unreadable``."""
         from ..engine import dense
 
         dense.build_depth_maps(self, quality=quality, filter_mode=filter_mode, backend=backend,
-                               progress=as_progress(progress))
+                               progress=as_progress(progress), skip_unreadable=skip_unreadable)
 
     def build_point_cloud(self, point_colors: bool = True, progress: ProgressCallback | None = None) -> PointCloud:
         from ..engine import dense
