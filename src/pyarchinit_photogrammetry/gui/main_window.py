@@ -9,7 +9,7 @@ import traceback
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QDockWidget, QFileDialog, QFrame,
                                QInputDialog, QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
@@ -20,7 +20,7 @@ from ..app import app as application
 from ..core.document import Document
 from . import theme
 from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelectionDialog, IfcPreviewDialog,
-                      ImageDialog, ParamDialog,
+                      ImageDialog, ParamDialog, PatchDialog,
                       PublishDialog, QuotaDialog, SiteChoiceDialog, SiteDialog, TableDialog, UnitDialog, UsFormDialog,
                       choice, message)
 from .icons import app_icon, icon
@@ -39,6 +39,20 @@ TARGET_TYPES = [("aruco_4x4_50", "ArUco 4x4 (50 codici)"), ("aruco_4x4_250", "Ar
                 ("apriltag_36h11", "AprilTag 36h11")]
 QUOTE_LAYER = "Quote"  # spot heights (pyarchinit_quote)
 CROP_LAYER = "Ritaglio"  # the polygon drawn with the crop tool
+PATCH_LAYER = "Patch ortofoto"  # areas of the orthomosaic coloured from photos chosen by hand
+
+
+def _outlined(rgba: np.ndarray, polygon, bounds) -> np.ndarray:
+    """A preview of an area with the outline of its polygon (world coordinates) drawn on it."""
+    import cv2
+
+    h, w = rgba.shape[:2]
+    x0, y0, x1, y1 = bounds
+    xy = np.asarray(polygon, float)[:, :2]
+    px = np.column_stack([(xy[:, 0] - x0) / (x1 - x0) * w, (y1 - xy[:, 1]) / (y1 - y0) * h])
+    out = np.ascontiguousarray(rgba.copy())
+    cv2.polylines(out, [np.round(px * 4).astype(np.int32)], True, (232, 67, 147, 255), 2, cv2.LINE_AA, shift=2)
+    return out
 
 
 def _it(value: float, decimals: int = 0) -> str:
@@ -115,6 +129,8 @@ class MainWindow(QMainWindow):
         self.ortho_view.polygon_finished.connect(self._unit_drawn)
         self.ortho_view.crop_finished.connect(self._crop_drawn)
         self.ortho_view.crop_requested.connect(self.crop_with_selection)
+        self.ortho_view.patch_finished.connect(self._patch_drawn)
+        self.ortho_view.patch_requested.connect(self.patch_with_selection)
         self.ortho_view.line_finished.connect(self._section_drawn)
         self.ortho_view.measured.connect(lambda t: (self.statusBar().showMessage(t, 30000),
                                                     self.log_pane.info(t)))
@@ -323,6 +339,7 @@ class MainWindow(QMainWindow):
                                 ("line", "Traccia sezione", "line"), ("measure", "Misura distanza", "measure"),
                                 ("quota", "Quota puntuale (pyarchinit_quote)", "point"),
                                 ("crop", "Ritaglio: riquadro o poligono (esporta o ritaglia i prodotti)", "crop"),
+                                ("patch", "Patch dell'ortofoto: assegna le immagini a un'area", "patch"),
                                 ("sam", "Segment Anything (SAM)", "sam")):
             a = QAction(icon(ic), label, self, checkable=True)
             a.setChecked(mode == "pan")
@@ -402,6 +419,12 @@ class MainWindow(QMainWindow):
             a.setEnabled(False)
         self.a_clear_drawings = self._act(dm, "Cancella disegni", self.clear_drawings, icon_name="eraser")
         self._act(dm, "Ritaglia o esporta con il poligono selezionato...", self.crop_with_selection, icon_name="crop")
+        pm = m.addMenu(icon("patch"), "Patch dell'ortofoto (assegna immagini)")
+        self._act(pm, "Disegna un'area e scegli le sue foto", self.start_patch, icon_name="patch")
+        self._act(pm, "Assegna immagini al poligono selezionato...", self.patch_with_selection, icon_name="patch")
+        self.a_patch_update = self._act(pm, "Aggiorna l'ortofoto con le patch", self.update_ortho_patches,
+                                        processing=True, icon_name="patch_update")
+        self._act(pm, "Rimuovi tutte le patch...", self.clear_ortho_patches, processing=True, icon_name="patch_remove")
         m.addSeparator()
         self.a_contours = self._act(m, "Curve di livello...", self.contours, processing=True, icon_name="contours")
         self.a_volume = self._act(m, "Volume scavo / riporto...", self.compute_volume, processing=True, icon_name="volume")
@@ -559,6 +582,7 @@ class MainWindow(QMainWindow):
         for a, short in ((self.draw_actions["pan"], "Sposta"), (self.draw_actions["polygon"], "Disegna US"),
                          (self.draw_actions["line"], "Sezione"), (self.draw_actions["measure"], "Misura"),
                          (self.draw_actions["quota"], "Quota"), (self.draw_actions["sam"], "SAM"),
+                         (self.draw_actions["patch"], "Patch"),
                          (self.a_sel_delete, "Elimina"),
                          (self.a_sel_merge, "Unisci"), (self.a_clear_drawings, "Cancella tutto"),
                          (self.a_contours, "Curve"), (self.a_volume, "Volume"), (self.a_slice, "Pianta a quota"),
@@ -573,7 +597,7 @@ class MainWindow(QMainWindow):
         snap_button = db.widgetForAction(self.a_snap)
         if snap_button is not None:
             snap_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        for mode in ("line", "measure", "quota", "sam"):
+        for mode in ("line", "measure", "quota", "sam", "patch"):
             db.addAction(self.draw_actions[mode])
         for mode in ("sam", "line"):
             button = db.widgetForAction(self.draw_actions[mode])
@@ -696,6 +720,7 @@ class MainWindow(QMainWindow):
             for name, lines in self.line_layers.items():
                 for coords, color, label, attrs, width in lines:
                     self.ortho_view.add_line(coords, color, label, layer=name, attrs=attrs, width=width)
+            self._draw_patches()
 
     def _dirty(self, flag: bool = True) -> None:
         self.setWindowModified(flag)
@@ -2320,6 +2345,12 @@ class MainWindow(QMainWindow):
             self.draw_actions["pan"].setChecked(True)
             self._warn("Costruisci prima l'ortofoto o il DEM.")
             return
+        if mode == "patch" and self.ortho_view.kind != "ortho":
+            if self.chunk is None or self.chunk.orthomosaic_path is None:
+                self.draw_actions["pan"].setChecked(True)
+                self._warn("Le patch si disegnano sull'ortofoto: costruiscila prima.")
+                return
+            self._show_raster("ortho")
         self._quota_keep = None
         if mode != "sam":
             self._sam_cancel()
@@ -2341,6 +2372,8 @@ class MainWindow(QMainWindow):
                           "pyarchinit_quote",
                  "crop": "Trascina un riquadro, oppure clic per i vertici e doppio clic per chiudere il poligono: poi "
                          "scegli i prodotti da esportare ritagliati o da ritagliare nel progetto",
+                 "patch": "Trascina un riquadro, oppure clic per i vertici e doppio clic per chiudere: poi scegli da "
+                          "quali foto prendere i colori dell'area (alberi, veicoli, persone, cuciture)",
                  "sam": self._sam_hint()}
         self.statusBar().showMessage(hints.get(mode, ""), 20000)
 
@@ -2807,9 +2840,11 @@ class MainWindow(QMainWindow):
         if not sel:
             return 0
         parts: dict[int, set[int]] = {}
-        sections, lines, skip, quote_gone = [], {}, set(), set()
+        sections, lines, skip, quote_gone, patch_ids = [], {}, set(), set(), set()
         for layer, idx, attrs in sel:
-            if "_unit" in attrs:
+            if layer == PATCH_LAYER:
+                patch_ids.add(attrs.get("patch"))
+            elif "_unit" in attrs:
                 ref = self._unit_part(layer, attrs)
                 if ref is not None:
                     parts.setdefault(ref[0], set()).add(ref[1])
@@ -2832,6 +2867,8 @@ class MainWindow(QMainWindow):
             if from_pa:
                 text += (f"\n{from_pa} poligoni vengono da PyArchInit: escono dal database solo con "
                          "«Salva modifiche in PyArchInit».")
+            if patch_ids:
+                text += f"\n{len(patch_ids)} patch dell'ortofoto: l'ortofoto viene aggiornata senza di esse."
             r = message(self, "question", "Elimina selezionati", text,
                         buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                         default=QMessageBox.StandardButton.Yes)
@@ -2857,10 +2894,20 @@ class MainWindow(QMainWindow):
                 self.line_layers[layer] = kept
             else:
                 del self.line_layers[layer]
+        if patch_ids and self.chunk is not None:
+            from ..engine import patches as P
+
+            for pid in patch_ids:
+                try:
+                    P.remove_patch(self.chunk, pid)
+                except KeyError:
+                    pass
         self._update_pa_save_button()
         self._redraw_overlays(skip=skip)
         self._dirty(True)
         self.log_pane.info(f"Eliminati {len(sel)} elementi")
+        if patch_ids:
+            self.update_ortho_patches()
         return len(sel)
 
     def merge_selected(self) -> bool:
@@ -2970,7 +3017,7 @@ class MainWindow(QMainWindow):
         skip = skip or set()
         visible = {n: lay["visible"] for n, lay in v.layers.items()}
         order = list(v.layer_order)
-        modelled = set(self.line_layers) | {"Sezioni", QUOTE_LAYER}
+        modelled = set(self.line_layers) | {"Sezioni", QUOTE_LAYER, PATCH_LAYER}
         others = []
         for name in order:
             lay = v.layers[name]
@@ -2990,6 +3037,7 @@ class MainWindow(QMainWindow):
         for name, lines in self.line_layers.items():
             for coords, color, label, attrs, width in lines:
                 v.add_line(coords, color, label, layer=name, attrs=attrs, width=width)
+        self._draw_patches()
         for name, kind, attrs, color in others:
             gtype, coords = attrs.get("_geom", (None, None))
             label = attrs.get("etichetta", "")
@@ -3619,9 +3667,11 @@ class MainWindow(QMainWindow):
         if not n_all:
             self.statusBar().showMessage("Nessuna faccia nel lazo", 8000)
             return
+        textured = self._texture_image() is not None
         v = ParamDialog.ask(self, "Facce selezionate con il lazo", [
             Field("action", "Cosa fare", "delete",
-                  choices=[("delete", "Elimina queste facce"), ("keep", "Tieni solo queste facce (ritaglia)")]),
+                  choices=[("delete", "Elimina queste facce"), ("keep", "Tieni solo queste facce (ritaglia)")]
+                  + ([("texture", "Correggi la texture di queste facce (assegna le immagini)")] if textured else [])),
             Field("through", f"Anche le facce nascoste dietro la superficie ({_it(n_all)} invece di {_it(n_vis)})",
                   False),
             Field("keep_copy", "Conserva prima una copia del modello (versione)", False)],
@@ -3632,6 +3682,9 @@ class MainWindow(QMainWindow):
         from ..engine.cleaning import delete_faces
 
         mask = inside if v["through"] else visible
+        if v.get("action") == "texture":
+            self._texture_patch(np.nonzero(mask)[0])
+            return
         keep_selected = v.get("action", "delete") == "keep"
         self.run_task("Lazo sul modello", self._versioned_edit(
             "model", v, lambda p: delete_faces(self.chunk, mask, keep_selected=keep_selected),
@@ -3645,6 +3698,212 @@ class MainWindow(QMainWindow):
         from ..ai.classify import set_class
 
         set_class(self.chunk, mask, code, label=label)
+
+    # ---------------------------------------------------------------- patches of the orthomosaic and texture
+    def _texture_image(self):
+        """The texture image of the model (None without one, or with an old OBJ texture)."""
+        tex = self.chunk.product_path("model_textured") if self.chunk is not None else None
+        if tex is None or not tex.exists() or tex.suffix.lower() not in (".jpg", ".jpeg", ".png", ".tif", ".tiff"):
+            return None
+        return tex
+
+    def start_patch(self) -> None:
+        if not self._need_chunk():
+            return
+        if self.chunk.orthomosaic_path is None:
+            self._warn("Le patch si disegnano sull'ortofoto: costruiscila prima.")
+            return
+        self.set_draw_mode("patch")
+
+    def patch_with_selection(self) -> None:
+        geom = self._selected_polygon()
+        if geom is None:
+            self._warn("Seleziona un poligono (strumento Seleziona) oppure disegna l'area con lo strumento Patch.")
+            return
+        self._patch_area(geom)
+
+    def _patch_drawn(self, xy) -> None:
+        from shapely.geometry import Polygon
+
+        geom = Polygon(np.asarray(xy, float)[:, :2])
+        if not geom.is_valid or geom.area <= 0:
+            self._warn("L'area non e' valida (i lati si incrociano o non ha area): ridisegnala.")
+            return
+        self._patch_area(geom)
+
+    def _patch_area(self, geom) -> None:
+        """The photos that see an area of the orthomosaic, each with the area seen from it: the
+        user chooses, then the patch is saved and the orthomosaic updated there."""
+        if not self._need_chunk():
+            return
+        ch = self.chunk
+        if ch.orthomosaic_path is None:
+            self._warn("Costruisci prima l'ortofoto.")
+            return
+        if geom.geom_type != "Polygon":  # several polygons selected: the largest one
+            geom = max(getattr(geom, "geoms", [geom]), key=lambda g: g.area)
+        polygon = np.asarray(geom.exterior.coords)[:-1, :2]
+
+        def job(p):
+            from ..engine import patches as P
+
+            p(0.02, "Foto che vedono l'area")
+            cands = P.photos_for_area(ch, polygon, limit=12)
+            imgs, now, bounds = P.previews(ch, polygon, [c["label"] for c in cands], 320, progress=p.sub(0.15, 0.85))
+            for c in cands:
+                c["previews"] = {s: _outlined(imgs[(c["label"], s)], polygon, bounds) for s in P.SURFACES}
+                c["preview"] = c["previews"]["dem"]
+            return cands, None if now is None else _outlined(now, polygon, bounds)
+
+        def done(result):
+            cands, now = result
+            if not cands:
+                self._warn("Nessuna foto vede quest'area dell'ortofoto.")
+                return
+            intro = (f"Area di {_it(geom.area, 2)} m2. Scegli da quali foto prendere i colori: per esempio una sola "
+                     "foto per alberi, veicoli o persone che l'ortofoto mostra a vortici o tagliati, oppure escludi la "
+                     "foto con un'ombra o un oggetto che si muove. La patch resta nel progetto (layer «Patch "
+                     "ortofoto») e vale anche per le prossime costruzioni dell'ortofoto.")
+            dlg = PatchDialog("Assegna immagini (patch dell'ortofoto)", now, cands, intro, "ortho",
+                              texture=False if self._texture_image() is not None else None, parent=self)
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                self._apply_patch(polygon, dlg.values())
+
+        self.run_task("Foto dell'area", job, done, refresh=False, save=False)
+
+    def _apply_patch(self, polygon, v: dict) -> None:
+        skip = self._photos_to_skip("Patch dell'ortofoto")
+        if skip is None:
+            return
+        ch = self.chunk
+        view = self.ortho_view.visible_world_bounds()
+
+        def job(p):
+            from ..engine import patches as P
+
+            patch = P.add_patch(ch, polygon, v["photos"], v["mode"], v.get("surface", "dem"))
+            ch.update_orthomosaic(progress=p.sub(0.0, 0.8 if v["texture"] else 1.0), skip_unreadable=skip)
+            tex = ch.patch_texture(v["photos"], polygon=polygon, mode=v["mode"], progress=p.sub(0.8, 0.2)) \
+                if v["texture"] else None
+            return patch, tex
+
+        def done(result):
+            patch, tex = result
+            how = "solo da " if patch["mode"] == "assign" else "senza "
+            where = " sul suolo attorno all'area" if patch.get("surface") == "ground" else ""
+            self.log_pane.info(f"Patch {patch['id']}: colori {how}{', '.join(patch['photos'])}{where}")
+            if tex:
+                self.log_pane.info(f"Texture corretta su {_it(tex['faces'])} facce")
+            self._reload_ortho(view)
+
+        self.run_task("Patch dell'ortofoto", job, done, refresh=False)
+
+    def update_ortho_patches(self) -> None:
+        """Apply the patches added, changed or removed since the orthomosaic was written."""
+        if not self._need_chunk():
+            return
+        from ..engine import patches as P
+
+        ch = self.chunk
+        if ch.orthomosaic_path is None:
+            self._warn("Costruisci prima l'ortofoto.")
+            return
+        if not P.changed_patches(ch):
+            self.statusBar().showMessage("L'ortofoto e' gia' aggiornata con le patch", 8000)
+            return
+        skip = self._photos_to_skip("Aggiorna l'ortofoto")
+        if skip is None:
+            return
+        view = self.ortho_view.visible_world_bounds() if self.ortho_view.kind == "ortho" else None
+        self.run_task("Aggiorna l'ortofoto (patch)", lambda p: ch.update_orthomosaic(progress=p, skip_unreadable=skip),
+                      lambda _r: self._reload_ortho(view), refresh=False)
+
+    def clear_ortho_patches(self) -> None:
+        if not self._need_chunk():
+            return
+        from ..engine import patches as P
+
+        n = len(P.patches(self.chunk))
+        if not n:
+            self.statusBar().showMessage("Nessuna patch nell'ortofoto", 8000)
+            return
+        if choice(self, "question", "Rimuovi le patch", f"Togliere le {n} patch dell'ortofoto? Le loro aree tornano "
+                  "come senza patch (per un'ortofoto di un altro programma, i suoi pixel originali).",
+                  ["Rimuovi"]) != 0:
+            return
+        P.clear_patches(self.chunk)
+        self._dirty(True)
+        self.update_ortho_patches()
+
+    def _draw_patches(self) -> None:
+        """The patches of the orthomosaic as a layer over it (selectable: Delete takes them away)."""
+        v = self.ortho_view
+        if PATCH_LAYER in v.layers:
+            v.remove_layer(PATCH_LAYER)
+        if self.chunk is None or v.kind != "ortho" or v.tr is None:
+            return
+        from ..engine import patches as P
+
+        for patch in P.patches(self.chunk):
+            names = ", ".join(patch["photos"][:2]) + (" ..." if len(patch["photos"]) > 2 else "")
+            label = f"{patch['id']}: " + (names if patch["mode"] == "assign" else f"senza {names}")
+            ground = patch.get("surface") == "ground"
+            v.add_polygon(patch["polygon"], label=label + (" (suolo)" if ground else ""), color="#e84393",
+                          fill_alpha=18, layer=PATCH_LAYER,
+                          attrs={"patch": patch["id"], "foto": ", ".join(patch["photos"]),
+                                 "modalita": "usa solo" if patch["mode"] == "assign" else "escludi",
+                                 "superficie": "suolo attorno all'area" if ground else "DEM"})
+
+    def _reload_ortho(self, view_bounds=None) -> None:
+        """The orthomosaic again after an update, on the same area as before."""
+        self._load_raster("ortho")
+        self.show_view(self.ortho_view)
+        if view_bounds is not None and self.ortho_view.tr is not None:
+            x0, y0, x1, y1 = view_bounds
+            rect = QRectF(self.ortho_view.scene_pt(x0, y1), self.ortho_view.scene_pt(x1, y0)).normalized()
+            self.ortho_view.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
+        self.workspace.populate(self.doc)
+
+    def _texture_patch(self, faces) -> None:
+        """Faces of the model chosen in the 3D view: the photos that see them, then the texture
+        of those faces again from the chosen ones."""
+        ch = self.chunk
+        faces = np.asarray(faces, int)
+        if self._texture_image() is None:
+            self._warn("Costruisci prima la texture del modello.")
+            return
+        try:
+            now = np.ascontiguousarray(self.model_view.canvas.grab_array())
+            now = np.dstack([now, np.full(now.shape[:2], 255, np.uint8)])
+        except Exception:  # pragma: no cover - a view that cannot be grabbed
+            now = None
+
+        def job(p):
+            from ..engine import patches as P
+
+            p(0.02, "Foto che vedono le facce")
+            cands = P.photos_for_faces(ch, faces, limit=12)
+            for i, c in enumerate(cands):
+                p(0.1 + 0.85 * i / max(len(cands), 1), f"Facce viste da {c['label']}")
+                c["preview"] = P.preview_faces(ch, faces, c["label"], max_side=320)
+            return cands
+
+        def done(cands):
+            if not cands:
+                self._warn("Nessuna foto vede queste facce.")
+                return
+            dlg = PatchDialog("Assegna immagini alla texture", now, cands,
+                              f"{_it(len(faces))} facce del modello. Scegli le foto da cui prendere i loro colori: ogni "
+                              "faccia prende la migliore di quelle che la vedono.", "faces", parent=self)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            v = dlg.values()
+            self.run_task("Texture delle facce", lambda p: ch.patch_texture(v["photos"], faces=faces, mode=v["mode"],
+                                                                            progress=p),
+                          lambda r: (self.log_pane.info(f"Texture corretta su {_it(r['faces'])} facce"),
+                                     self._show_model("model_textured")), refresh=False)
+
+        self.run_task("Foto delle facce", job, done, refresh=False, save=False)
 
     # ---------------------------------------------------------------- versions of the products
     def _version_fields(self, product: str) -> list:

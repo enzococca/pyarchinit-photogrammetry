@@ -157,7 +157,8 @@ class RasterView(_ZoomView):
     Delete to remove them); ``polygon`` (click vertices, double click to close: a unit; with
     ``freehand`` press, draw and release);
     ``line`` (two clicks: a section trace); ``measure`` (two clicks: distance and
-    height difference); ``point`` (one click: elevation / SAM prompt).
+    height difference); ``point`` (one click: elevation / SAM prompt); ``crop`` and ``patch``
+    (drag a box, or click the vertices of a polygon: an area to cut, or whose photos to choose).
 
     Snapping (``snap_vertex``, ``snap_segment``, tolerance ``snap_px`` in screen pixels) moves
     the points of every drawing tool onto the vertices or the segments of the visible layers.
@@ -166,13 +167,16 @@ class RasterView(_ZoomView):
     file) so that it opens at once; zooming in further, the visible part is read again from the
     file at the resolution of the screen, up to the full one (``detail``), in a thread."""
 
-    DRAW_MODES = ("polygon", "line", "measure", "quota", "crop")
+    DRAW_MODES = ("polygon", "line", "measure", "quota", "crop", "patch")
+    AREA_MODES = ("crop", "patch")  # drag a box or click a polygon
     SAM_TOOLS = ("tap", "box", "area")
 
     mouse_world = Signal(float, float, object)  # x, y, z or None
     polygon_finished = Signal(object)  # (N,2) world XY
     crop_finished = Signal(object)  # (N,2) world XY: a polygon or a box drawn with the crop tool
     crop_requested = Signal()  # "crop with the selected polygon" from the selection menu
+    patch_finished = Signal(object)  # (N,2) world XY: the area of a patch of the orthomosaic
+    patch_requested = Signal()  # "assign photos to the selected polygon" from the selection menu
     line_finished = Signal(object, object)
     quota_clicked = Signal(float, float)  # spot height at world x, y
     sam_click = Signal(float, float, int, bool)  # x, y, label (1 add / 0 remove), True = a new object
@@ -881,9 +885,11 @@ class RasterView(_ZoomView):
         a_del = menu.addAction(f"Elimina selezionati ({len(self.selection)})")
         a_merge = menu.addAction("Unisci selezionati")
         a_merge.setEnabled(len(self.selection) > 1)
+        polygon = any(layer and self.layers[layer]["kind"] == "polygon" for layer, _i, _a in self.selected_features())
         a_crop = menu.addAction("Ritaglia o esporta con questo poligono...")
-        a_crop.setEnabled(any(layer and self.layers[layer]["kind"] == "polygon" for layer, _i, _a in
-                              self.selected_features()))
+        a_crop.setEnabled(polygon)
+        a_patch = menu.addAction("Assegna immagini a quest'area (patch dell'ortofoto)...")
+        a_patch.setEnabled(polygon and self.kind == "ortho")
         a_clear = menu.addAction("Deseleziona tutto")
         chosen = menu.exec(global_pos)
         if chosen is a_del:
@@ -892,6 +898,8 @@ class RasterView(_ZoomView):
             self.merge_requested.emit()
         elif chosen is a_crop:
             self.crop_requested.emit()
+        elif chosen is a_patch:
+            self.patch_requested.emit()
         elif chosen is a_clear:
             self.clear_selection()
 
@@ -945,7 +953,7 @@ class RasterView(_ZoomView):
                 self._update_rubber(snapped)
         elif self._clicks:
             self._update_rubber(sp)
-        if self.mode in ("select", "sam", "crop") and self._band_origin is not None:
+        if self.mode in ("select", "sam", *self.AREA_MODES) and self._band_origin is not None:
             start = self.mapFromScene(self._band_origin)
             if self._band is None and (ev.position().toPoint() - start).manhattanLength() > 4:
                 pen = self._pen("#00e5ff", 1.5)
@@ -959,7 +967,7 @@ class RasterView(_ZoomView):
         if self._stroking and ev.button() == Qt.MouseButton.LeftButton:
             self._finish_stroke()
             return
-        if self.mode == "crop" and self._band_origin is not None and ev.button() == Qt.MouseButton.LeftButton:
+        if self.mode in self.AREA_MODES and self._band_origin is not None and ev.button() == Qt.MouseButton.LeftButton:
             rect = self._band.rect() if self._band is not None else None
             origin, xy = self._band_origin, self._crop_press_xy
             self._end_band()
@@ -968,8 +976,9 @@ class RasterView(_ZoomView):
                 x1, y1 = self.world(rect.topRight())
                 box = np.array([[min(x0, x1), min(y0, y1)], [max(x0, x1), min(y0, y1)],
                                 [max(x0, x1), max(y0, y1)], [min(x0, x1), max(y0, y1)]])
-                self.set_mode("crop")
-                self.crop_finished.emit(box)
+                mode = self.mode
+                self.set_mode(mode)
+                self._area_signal(mode).emit(box)
             else:  # a click: the first vertex of a polygon
                 self._clicks.append(origin)
                 self._click_xy.append(xy)
@@ -1041,7 +1050,7 @@ class RasterView(_ZoomView):
         if ev.button() == Qt.MouseButton.RightButton:  # cancel the current drawing
             self.set_mode(self.mode)
             return
-        if self.mode == "crop" and not self._clicks:  # drag a box, or click the first vertex of a polygon
+        if self.mode in self.AREA_MODES and not self._clicks:  # drag a box, or click the first vertex of a polygon
             self._band_origin, self._press_mods, self._crop_press_xy = sp, ev.modifiers(), xy
             return
         if self.mode == "polygon" and self.freehand:  # start a stroke; release closes it
@@ -1067,13 +1076,16 @@ class RasterView(_ZoomView):
     def mouseDoubleClickEvent(self, ev) -> None:
         if self.mode == "sam":  # a second press: nothing more (Enter accepts the mask)
             return
-        if self.mode in ("polygon", "crop") and len(self._click_xy) >= 3:
+        if self.mode in ("polygon", *self.AREA_MODES) and len(self._click_xy) >= 3:
             xy = np.array(self._click_xy)
             mode = self.mode
             self.set_mode(mode)
-            (self.polygon_finished if mode == "polygon" else self.crop_finished).emit(xy)
+            (self.polygon_finished if mode == "polygon" else self._area_signal(mode)).emit(xy)
         else:
             super().mouseDoubleClickEvent(ev)
+
+    def _area_signal(self, mode: str):
+        return self.patch_finished if mode == "patch" else self.crop_finished
 
 
 class PhotoView(_ZoomView):

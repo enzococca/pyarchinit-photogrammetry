@@ -76,7 +76,9 @@ ICONS = {
     "model_textured": ("mdi6.texture-box", "pink"), "orthomosaic": ("mdi6.map-outline", "amber"),
     "hillshade": ("mdi6.weather-sunny", "amber"),
     # cleaning and cropping
-    "crop": ("mdi6.crop", "cyan"), "confidence": ("mdi6.chart-bell-curve-cumulative", "teal"),
+    "crop": ("mdi6.crop", "cyan"), "patch": ("mdi6.image-edit-outline", "pink"),
+    "patch_update": ("mdi6.image-refresh-outline", "pink"), "patch_remove": ("mdi6.image-remove-outline", "pink"),
+    "confidence": ("mdi6.chart-bell-curve-cumulative", "teal"),
     "clean": ("mdi6.broom", "green"), "tie_clean": ("mdi6.filter-variant-remove", "teal"),
     "relink": ("mdi6.link-variant", "blue"),
 }

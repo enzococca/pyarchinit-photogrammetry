@@ -606,6 +606,180 @@ class ImageDialog(QDialog):
         lay.addWidget(bb)
 
 
+class PatchDialog(QDialog):
+    """Choose the photos of an area: a patch of the orthomosaic (``kind="ortho"``) or faces of
+    the textured model (``kind="faces"``). The area as it is now beside the area seen from the
+    photo chosen in the list; the list shows every photo that sees it, best first, with what
+    it covers, its angle from the vertical (or from the faces), its pixel on the ground and
+    how much of the area the orthomosaic takes from it now. For the orthomosaic the previews
+    (``candidate["previews"][surface]``) show the result: the area from that photo, the rest as
+    it is, on the DEM or on the ground around the area. ``texture``: offer to correct the
+    texture of the model there too (None: no textured model)."""
+
+    def __init__(self, title: str, current, candidates: list[dict], intro: str = "", kind: str = "ortho",
+                 texture: bool | None = None, parent=None):
+        from PySide6.QtCore import QSize
+        from PySide6.QtGui import QIcon, QPixmap
+        from PySide6.QtWidgets import QAbstractItemView, QButtonGroup, QRadioButton
+
+        from .image_views import to_qimage
+
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(980, 760)
+        self.kind = kind
+        self.candidates = candidates
+        lay = QVBoxLayout(self)
+        if intro:
+            lab = QLabel(intro)
+            lab.setWordWrap(True)
+            lay.addWidget(lab)
+        row = QHBoxLayout()
+        self._side = 380
+
+        def panel(caption: str):
+            box = QVBoxLayout()
+            cap = QLabel(caption)
+            cap.setObjectName("pageSubtitle")
+            img = QLabel()
+            img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            img.setMinimumSize(self._side, self._side * 3 // 4)
+            img.setStyleSheet("background: #2b2f36; border-radius: 4px;")
+            box.addWidget(cap)
+            box.addWidget(img, 1)
+            row.addLayout(box, 1)
+            return img
+
+        self.now_label = panel("Adesso" if kind == "ortho" else "Le facce scelte")
+        self.preview_label = panel("Con la foto scelta" if kind == "ortho" else "Dalla foto scelta")
+        lay.addLayout(row, 3)
+        self._pix = lambda rgba: QPixmap.fromImage(to_qimage(rgba))
+        if current is not None:
+            self._show(self.now_label, current)
+        else:
+            self.now_label.setText("(nessuna ortofoto)")
+        self.list = QListWidget()
+        self.list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.list.setIconSize(QSize(150, 150))
+        self.list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.list.setMovement(QListWidget.Movement.Static)
+        self.list.setSpacing(6)
+        self.list.setWordWrap(True)
+        self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        for c in candidates:
+            gsd = c.get("gsd") or 0.0
+            text = (f"{c['label']}\n{_it(100 * c['coverage'])}% · {_it(c['angle'])}° · "
+                    f"{_it(100 * gsd, 1)} cm/px")
+            if c.get("used"):
+                text += f"\nusata ora: {_it(100 * c['used'])}%"
+            item = QListWidgetItem(text)
+            prev = c.get("preview")
+            if prev is not None:
+                item.setIcon(QIcon(self._pix(prev)))
+            hidden = 1.0 - c.get("visible", 1.0)
+            item.setToolTip(f"{c['label']}: inquadra il {_it(100 * c['coverage'])}% dell'area, a {_it(c['angle'])} gradi "
+                            + ("dalla verticale" if kind == "ortho" else "dalla perpendicolare alle facce")
+                            + f", {_it(100 * gsd, 2)} cm per pixel"
+                            + (f"; il {_it(100 * hidden)}% e' nascosto dal modello (chiome, muri)" if hidden > 0.05
+                               else "")
+                            + (f"; l'ortofoto ora ne prende il {_it(100 * c['used'])}%" if c.get("used") else ""))
+            item.setData(Qt.ItemDataRole.UserRole, c["label"])
+            self.list.addItem(item)
+        self.list.itemSelectionChanged.connect(self._selection_changed)
+        self._icons = {}
+        for c in candidates:
+            for surf, img in (c.get("previews") or {}).items():
+                self._icons[(c["label"], surf)] = QIcon(self._pix(img))
+        lay.addWidget(QLabel("Foto che vedono l'area (le migliori prima; Maiusc o Cmd per sceglierne piu' d'una):"))
+        lay.addWidget(self.list, 2)
+        modes = QHBoxLayout()
+        self.r_assign = QRadioButton("Usa solo le foto scelte")
+        self.r_exclude = QRadioButton("Escludi le foto scelte (usa tutte le altre)")
+        self.r_assign.setChecked(True)
+        group = QButtonGroup(self)
+        group.addButton(self.r_assign)
+        group.addButton(self.r_exclude)
+        modes.addWidget(self.r_assign)
+        modes.addWidget(self.r_exclude)
+        modes.addStretch(1)
+        lay.addLayout(modes)
+        surfaces = QHBoxLayout()
+        self.r_dem = QRadioButton("Sul DEM (ortofoto vera)")
+        self.r_ground = QRadioButton("Sul suolo attorno all'area: alberi, veicoli e persone come nella foto, "
+                                     "senza vortici (riempie anche i buchi del DEM)")
+        self.r_dem.setChecked(True)
+        sgroup = QButtonGroup(self)
+        for r in (self.r_dem, self.r_ground):
+            sgroup.addButton(r)
+            surfaces.addWidget(r)
+            r.toggled.connect(lambda _on: self._surface_changed())
+        surfaces.addStretch(1)
+        self._surfaces_offered = kind == "ortho" and any(c.get("previews") for c in candidates)
+        if self._surfaces_offered:
+            lay.addLayout(surfaces)
+        else:
+            for r in (self.r_dem, self.r_ground):
+                r.setVisible(False)
+        self.c_texture = QCheckBox("Correggi anche la texture del modello in quest'area")
+        self._texture_offered = kind == "ortho" and texture is not None
+        self.c_texture.setVisible(self._texture_offered)
+        self.c_texture.setChecked(bool(texture))
+        lay.addWidget(self.c_texture)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.ok = bb.button(QDialogButtonBox.StandardButton.Ok)
+        self.ok.setText("Applica")
+        self.ok.setEnabled(False)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        if candidates:
+            self.list.setCurrentRow(0)
+            self.list.item(0).setSelected(True)
+        else:
+            self.preview_label.setText("Nessuna foto vede quest'area")
+
+    def _show(self, label: QLabel, rgba) -> None:
+        pix = self._pix(rgba)
+        label.setPixmap(pix.scaled(self._side, self._side * 3 // 4, Qt.AspectRatioMode.KeepAspectRatio,
+                                   Qt.TransformationMode.SmoothTransformation))
+
+    def surface(self) -> str:
+        return "ground" if self.r_ground.isChecked() else "dem"
+
+    def _preview_of(self, label: str):
+        c = next((c for c in self.candidates if c["label"] == label), None)
+        if c is None:
+            return None
+        return (c.get("previews") or {}).get(self.surface(), c.get("preview"))
+
+    def _surface_changed(self) -> None:
+        surf = self.surface()
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            ic = self._icons.get((item.data(Qt.ItemDataRole.UserRole), surf))
+            if ic is not None:
+                item.setIcon(ic)
+        self._selection_changed()
+
+    def _selection_changed(self) -> None:
+        items = self.list.selectedItems()
+        self.ok.setEnabled(bool(items))
+        if not items:
+            return
+        label = items[-1].data(Qt.ItemDataRole.UserRole)
+        prev = self._preview_of(label)
+        if prev is not None:
+            self._show(self.preview_label, prev)
+        else:
+            self.preview_label.setText(label)
+
+    def values(self) -> dict:
+        return {"photos": [it.data(Qt.ItemDataRole.UserRole) for it in self.list.selectedItems()],
+                "mode": "exclude" if self.r_exclude.isChecked() else "assign",
+                "surface": self.surface() if self._surfaces_offered else "dem",
+                "texture": self._texture_offered and self.c_texture.isChecked()}
+
+
 # ---------------------------------------------------------------- messages and errors
 # Native message boxes (NSAlert) crash on recent macOS with Qt 6.x: every message box
 # of the interface goes through these helpers, which force the Qt implementation.
