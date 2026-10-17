@@ -226,6 +226,13 @@ Command line: `ppg patch PROJECT --bbox ... --suggest` lists the photos of an ar
   *Riferimenti* pane, right click > *Crea barra di scala tra A e B...* (or *Barra di scala...*),
   write their distance in metres and update. No coordinates are needed: an object on a
   turntable, a find, a wall or a trench without GNSS is scaled in local coordinates.
+* **Markers where Metashape puts them**: a marker measured in one photo only lies where its ray
+  meets the surface (dense cloud or tie points), so it has coordinates, shows on the model and the
+  orthophoto and can end a scale bar at once; measured in a second photo it is triangulated. A
+  marker can also be added without a photo, as Metashape's *Add Marker*: *Marker* in the 3D view
+  (a click on the model or the cloud) and in the drawing bar (a click on the orthophoto, height
+  from the DEM); it is projected on the photos that see it. *Coordinate stimate* in *Riferimenti*
+  shows the estimated X, Y, Z of the markers (on by itself when they have no reference ones).
 * **Several bars**: each control bar asks for a scale and the bars are averaged, weighted by
   the accuracy of each distance. A **check** bar does not scale: it measures how far the model
   is from the true distance. The table lists, for every bar, the distance given, the distance
@@ -238,7 +245,10 @@ Command line: `ppg patch PROJECT --bbox ... --suggest` lists the photos of an ar
   flight over a site), or with three or more control points, photos, points and bars are fitted
   together, each weighted by its accuracy, as in Metashape: the photos and the points place and
   turn the survey, and the scale comes from all of them (a bar measured to the millimetre
-  outweighs a phone GPS, RTK positions over a whole site outweigh a short bar).
+  outweighs a phone GPS, RTK positions over a whole site outweigh a short bar). On a
+  georeferenced chunk a new bar is proposed as a check; a control bar on a chunk georeferenced
+  elsewhere (an imported project) with no reference to fit it again scales it about the bar, in
+  its CRS, and the DEM and orthophoto are to be built again.
 * **Bars from a file** (*Importa barre...*): one bar per line, `marker_a, marker_b, distance[,
   accuracy[, check]]`, markers by name or target code, distances in metres. **Printable scale
   bars** (*Strumenti > Target > Barra di scala stampabile...*): two coded targets at a known

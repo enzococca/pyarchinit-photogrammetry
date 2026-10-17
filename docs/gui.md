@@ -37,7 +37,7 @@ environment diagnosis and the log folder. *File > Pagina iniziale* brings it bac
 | Toolbar | the workflow with coloured icons: open/save, photos, markers, alignment, references, dense cloud, model, texture, DEM, orthophoto, *Elabora tutto*, publish to PyArchInit. Processing actions are disabled while a task runs |
 | Drawing toolbar | always visible under the workflow: the drawing modes (*Sposta / interroga*, *Disegna US*, *Traccia sezione*, *Misura*, *Quota*, *SAM* with its menu), *Cancella disegni*, contour lines, volumes, plan slices, and shortcuts to the *Layer* and *Sezioni* panes and to *Pubblica* (units and spot heights) |
 | Left: **Area di lavoro** | project, chunks (click to make one active), CRS (double click to change), cameras (green camera = aligned, red = not aligned), markers (GCP, check points), products; double click opens a photo or a product |
-| Left: **Riferimenti** | markers with use/check flags, editable coordinates and accuracy, errors (m and px), camera positions; *Importa CSV*, *Aggiorna* (georeferencing), *Ottimizza camere* (with 3 or more control points they take part in the bundle adjustment and bend the block; check points stay out; control/check errors before and after in the log); *Barra di scala...* and *Importa barre...*; the scale bars below the markers (see *Scale bars*); control and check RMSE of points and bars |
+| Left: **Riferimenti** | markers with use/check flags, editable coordinates and accuracy, errors (m and px), camera positions; *Importa CSV*, *Aggiorna* (georeferencing), *Ottimizza camere* (with 3 or more control points they take part in the bundle adjustment and bend the block; check points stay out; control/check errors before and after in the log); *Barra di scala...* and *Importa barre...*; *Coordinate stimate* (as Metashape's *View Estimated*: the X, Y, Z columns show the estimated coordinates of the markers instead of the reference ones; on by itself when no marker has reference coordinates); the scale bars below the markers (see *Scale bars*); control and check RMSE of points and bars. The tooltip of a marker tells how it is placed: triangulated from N photos, on the surface from one photo, or added on the model or the orthophoto |
 | Left: **Layer** (editing) | double click a value in *Attributi* to change it (US, area, type, label, any free field; computed fields such as m2 and length are read-only). Units loaded from PyArchInit keep their `gid`: *Salva modifiche in PyArchInit* writes the changes back to `pyunitastratigrafiche`; drawn units and spot heights are written with *Pubblica*; written features keep their `gid`, so nothing is written twice |
 | Left: **Layer** | everything drawn on the orthomosaic/DEM is a layer: stratigraphic units, US polygons loaded from PyArchInit, section traces, contour lines, plan slices, spot heights. Tick to show/hide, double click to zoom (layer or single feature), *Rimuovi*; in *Sposta / interroga* mode a click on a feature shows its attributes (US, area, m2, elevation of a contour...) in the pane and in the status bar |
 | Centre: **Modello** | tie points, dense cloud, shaded or textured mesh, camera frusta, markers. Left drag orbits, right/middle drag pans, wheel zooms |
@@ -140,15 +140,34 @@ clipboard.
 
 ## Scale bars
 
+**Markers.** A marker measured in one photo only lies where its ray meets the surface (the dense
+cloud, else the tie points: a local plane fitted around the ray, about 20 pixels wide), so it has
+coordinates, shows on the model and on the orthophoto and can end a scale bar at once; measured
+in a second photo it is triangulated (on the synthetic trench, one-photo markers are within
+0.6 mm of the surveyed targets). Markers can also be added without a photo, as Metashape's *Add
+Marker*: *Marker* in the 3D view (the view freezes; click a point of the model or the cloud: the
+nearest shown point under the cursor, refined along the line of sight on the full dense cloud)
+and *Marker* in the drawing bar (click the orthophoto or the DEM: the height from the DEM at full
+resolution, else from the cloud along the vertical). The new marker (`point 1`, `point 2`, ...) is
+projected on the photos that see it, not hidden by the surface (blue flags: drag one in a photo to
+pin it); the markers are drawn on the orthophoto as the *Marker* layer.
+
 A scale bar is the known distance between two markers, as in Metashape. In *Riferimenti* select two
 markers (Cmd/Shift click) and choose *Crea barra di scala tra A e B...* from the right-click menu, or
 press *Barra di scala...* (the selected markers come first in the dialog). The dialog asks for the
 distance in metres (between the centres of the targets), its accuracy (it weighs the bar when there
 are several), whether it is a check bar, and whether to update the scale at once.
 
-* **Control bars** scale the chunk: each asks for the ratio between its distance and the distance of
-  its markers in the model, and the ratios are averaged with weights `1 / accuracy²`. Without control
-  points the chunk is scaled in local coordinates (CRS `LOCAL`): an object, a find, a wall, a trench.
+* **Control bars** scale the chunk: the scale is the least-squares solution of *scale x length in the
+  model = distance*, each bar weighted by `1 / accuracy²` (of two bars measured equally well, the
+  longer one counts more). Without control points the chunk is scaled in local coordinates (CRS
+  `LOCAL`): an object, a find, a wall, a trench.
+  The distance of a bar is the 3D one: with a height difference it is more than the distance in
+  plan measured on the orthophoto.
+* **Georeferenced chunks**: a new bar is proposed as a check (it measures the scale without
+  changing it). A control bar on a chunk georeferenced elsewhere (an imported project) with no
+  reference to fit it again scales it about the bar, in its CRS; when the scale changes, the log
+  says that the DEM and the orthophoto are still in the old one and are to be built again.
 * **Check bars** (*Check* ticked) do not scale: their error tells how good the scale is.
 * The table under the markers has a row per bar: *Usa* (untick to leave it out), name, markers,
   *Distanza* and *Accur.* (double click to change them: the error follows at once), *Check*, the

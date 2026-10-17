@@ -223,6 +223,9 @@ A scale bar is the known distance between two markers (`core.marker.ScaleBar`: `
   `scale * |a - b| = distance` weighted by `1 / accuracy²` (of two bars measured equally well, the
   longer one counts more); the orientation stays, the origin is the internal one and the CRS
   becomes `LOCAL` (`method == "scalebars"`);
+* the same on a chunk georeferenced elsewhere (an imported project, CRS not `LOCAL`) with no
+  enabled reference: the bars scale it about their centre, keeping its position, orientation
+  and CRS;
 * three or more control points, or camera references: the similarity is the joint weighted
   least-squares fit of the points (`1 / accuracy²` on their 3D residuals) and of the bars
   (`1 / accuracy²` on `scale * length - distance`), `markers.gcp.similarity_with_bars`: the
@@ -232,6 +235,17 @@ A scale bar is the known distance between two markers (`core.marker.ScaleBar`: `
 
 The report adds `scale` (world units per internal unit), `scalebars` (as `scalebar_errors`),
 `scalebar_control_rmse` and `scalebar_check_rmse` (metres, None without bars of that type).
+
+Markers are placed by `chunk.triangulate_markers()` (`markers.gcp.triangulate_markers`): from two
+photos or more they are triangulated; measured in one photo only they lie where its ray meets the
+surface, `gcp.surface_point(chunk, camera, x, y)` (the dense cloud, else the tie points, through
+`core.geometry.point_on_ray`: a plane fitted to the points around the ray, first in a wide cylinder,
+then in one of about 20 pixels at the depth found; kept per measurement); a marker with no
+projection keeps its position. `gcp.views_of(chunk, marker)` counts the aligned photos that measure
+it, `gcp.camera_ray(chunk, camera, x, y)` is the ray of a pixel. A marker placed in 3D (internal
+frame) is projected on the photos that see it with `gcp.project_marker(chunk, marker, point,
+max_photos=60)`: inside the frame, in front of the camera, not hidden by the surface near the
+marker, as projections not pinned.
 
 In the camera optimisation (`chunk.optimize_cameras`) the control bars are fixed points as the
 control points are: `engine.sfm.bar_anchors(chunk, bars, fixed=None)` moves the markers at their

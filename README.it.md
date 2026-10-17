@@ -210,6 +210,14 @@ Da terminale: `ppg patch PROGETTO --bbox ... --suggest` elenca le foto di un'are
   *Riferimenti*, tasto destro > *Crea barra di scala tra A e B...* (oppure *Barra di scala...*),
   scrivi la distanza in metri e aggiorna. Non servono coordinate: un oggetto sul turntable, un
   reperto, un muro o uno scavo senza GNSS vengono messi in scala in coordinate locali.
+* **Marker dove li mette Metashape**: un marker misurato su una sola foto sta dove il suo raggio
+  incontra la superficie (nuvola densa o punti di legame), quindi ha subito le coordinate, si vede
+  sul modello e sull'ortofoto e può fare da estremo di una barra di scala; misurato su una seconda
+  foto viene triangolato. Un marker si può anche aggiungere senza foto, come *Aggiungi marker* di
+  Metashape: *Marker* nella vista 3D (clic sul modello o sulla nuvola) e nella barra di disegno
+  (clic sull'ortofoto, quota dal DEM); viene proiettato sulle foto che lo vedono. *Coordinate
+  stimate* nel pannello *Riferimenti* mostra le X, Y, Z stimate dei marker (si accende da solo
+  quando non hanno coordinate di riferimento).
 * **Più barre**: ogni barra di controllo chiede una scala e le barre si mediano, pesate con
   l'accuratezza di ciascuna distanza. Una barra di **check** non scala: misura quanto il modello
   si discosta dalla distanza vera. La tabella riporta per ogni barra la distanza data, quella
@@ -222,7 +230,10 @@ Da terminale: `ppg patch PROGETTO --bbox ... --suggest` elenca le foto di un'are
   volo su un sito), o con tre o più punti di controllo, foto, punti e barre si stimano insieme,
   ognuno pesato con la sua accuratezza, come in Metashape: foto e punti posizionano e orientano il
   rilievo e la scala viene da tutti (una barra misurata al millimetro pesa più del GPS di un
-  telefono, posizioni RTK su tutto un sito pesano più di una barra corta).
+  telefono, posizioni RTK su tutto un sito pesano più di una barra corta). Su un chunk
+  georeferenziato una barra nuova è proposta come check; una barra di controllo su un chunk
+  georeferenziato altrove (un progetto importato) senza riferimenti per ricalcolarlo lo scala
+  attorno alla barra, nel suo sistema, e DEM e ortofoto vanno poi ricostruiti.
 * **Barre da un file** (*Importa barre...*): una barra per riga, `marker_a, marker_b, distanza[,
   accuratezza[, check]]`, marker per nome o codice del target, distanze in metri. **Barre di scala
   stampabili** (*Strumenti > Target > Barra di scala stampabile...*): due target codificati a
