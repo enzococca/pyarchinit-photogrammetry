@@ -76,7 +76,8 @@ def test_the_gps_of_the_photos_does_not_move_an_object_or_a_trench(doc, scene):
 
 def test_bars_give_the_scale_to_gnss_cameras(doc, scene):
     """Precise camera positions (RTK) with a scale 3 % off: the cameras place and turn the
-    survey, a control bar fixes its scale, a check bar measures it."""
+    survey, a control bar measured to the millimetre outweighs them on the scale (each by its
+    accuracy), a check bar measures it."""
     ch = doc.chunks[0]
     pairs = _pairs(ch, scene)
     (a, b), (x, y) = pairs[0], pairs[1]
@@ -97,9 +98,61 @@ def test_bars_give_the_scale_to_gnss_cameras(doc, scene):
     rep = ch.update_transform()
     assert rep["method"] == "cameras+scalebars" and ch.crs == "EPSG:3004"
     assert abs({e["label"]: e["error"] for e in rep["scalebars"]}[check.label]) < 0.004
-    # the bars keep their place: the cameras still fit where they were
+    # the survey stays where the cameras put it
     ends = np.array([ch.to_world(m.position) for m in (a, b)])
     assert np.linalg.norm(ends.mean(0) - np.array([_gcp(scene, m.label) for m in (a, b)]).mean(0)) < 0.1
+
+
+def test_bars_and_control_points_weigh_by_their_accuracy(doc, scene):
+    """With control points the bars join the fit, as in Metashape's reference adjustment: a
+    precise bar corrects the scale of loose points, a loose bar does not move precise ones."""
+    ch = doc.chunks[0]
+    (a, b), (x, y) = _pairs(ch, scene)[:2]
+    gcps = [m for m in ch.markers if m.position is not None]
+    truth = {m.label: _gcp(scene, m.label) for m in gcps}
+    centre = np.mean(list(truth.values()), axis=0)
+    for m in gcps:  # points surveyed with a scale 2 % off, 5 cm accuracy
+        m.reference.location = list(centre + 1.02 * (truth[m.label] - centre))
+        m.reference.accuracy, m.reference.enabled = [0.05, 0.05, 0.05], True
+    check = ch.add_scalebar(x, y, _true(scene, x, y), checkpoint=True)
+    rep = ch.update_transform()
+    assert rep["method"] == "markers"
+
+    def error(r):
+        return {e["label"]: e["error"] for e in r["scalebars"]}[check.label]
+
+    assert abs(error(rep)) > 0.015 * _true(scene, x, y)
+    bar = ch.add_scalebar(a, b, _true(scene, a, b), accuracy=0.0005)
+    rep = ch.update_transform()
+    assert rep["method"] == "markers+scalebars" and abs(error(rep)) < 0.003
+    # precise points, a loose bar 3 % off: the points keep their scale
+    for m in gcps:
+        m.reference.location, m.reference.accuracy = list(truth[m.label]), [0.001] * 3
+    ch.remove_scalebar(bar.label)
+    ch.update_transform()
+    s = ch.scale
+    ch.add_scalebar(a, b, 1.03 * _true(scene, a, b), accuracy=0.05)
+    rep = ch.update_transform()
+    assert rep["method"] == "markers+scalebars" and abs(ch.scale / s - 1) < 0.001
+    assert rep["control_rmse"] < 0.003
+
+
+def test_joint_fit_of_points_and_bars():
+    """The scale of the joint fit: Umeyama's without bars, the bars' when they weigh far more."""
+    from pyarchinit_photogrammetry.core import geometry
+    from pyarchinit_photogrammetry.markers.gcp import similarity_with_bars
+
+    rng = np.random.default_rng(3)
+    src = rng.normal(0, 1, (8, 3))
+    truth = geometry.compose_similarity(2.0, geometry.rotation_from_euler_ypr(30.0, -10.0, 5.0),
+                                        np.array([10.0, 20.0, 5.0]))
+    dst = geometry.apply(truth, src) + rng.normal(0, 0.01, (8, 3))
+    w = np.full(8, 1 / 0.01 ** 2)
+    plain = geometry.decompose_similarity(geometry.umeyama(src, dst, weights=w))[0]
+    joint = geometry.decompose_similarity(similarity_with_bars(src, dst, w, [1.0], [2.5], [1e-12]))[0]
+    assert joint == pytest.approx(plain, rel=1e-9)
+    joint = geometry.decompose_similarity(similarity_with_bars(src, dst, w, [1.0], [2.5], [1e12]))[0]
+    assert joint == pytest.approx(2.5, rel=1e-6)
 
 
 def test_scale_bars_from_a_file(doc, scene, tmp_path):

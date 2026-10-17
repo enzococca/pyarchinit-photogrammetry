@@ -538,7 +538,7 @@ class ReferencePane(QWidget):
         if rep.get("method") == "scalebars":
             parts.append("scala dalle barre, coordinate locali")
         elif str(rep.get("method", "")).endswith("+scalebars"):
-            parts.append("posizione dalle foto, scala dalle barre")
+            parts.append("scala da riferimenti e barre insieme, pesati con l'accuratezza")
         self.summary.setText("  |  ".join(parts) if parts else "Importa i riferimenti o crea una barra di scala, poi "
                              "premi Aggiorna.")
         self._filling = False

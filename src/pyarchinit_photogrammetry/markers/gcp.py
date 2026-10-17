@@ -203,18 +203,47 @@ def resolve_marker(chunk, ref) -> Marker:
     raise KeyError(f"no marker {ref!r} in chunk {chunk.label}")
 
 
-def _bar_scale(chunk, bars) -> float | None:
-    """The scale (world units per internal unit) the control scale bars ask for, weighted by
-    ``1 / accuracy**2``; None without usable bars."""
-    ratios, weights = [], []
+def _bar_observations(chunk, bars) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(lengths in the internal frame, distances, weights ``1 / accuracy**2``) of the bars whose
+    two markers are placed."""
+    lengths, distances, weights = [], [], []
     for sb in bars:
         a, b = chunk.marker_by_key(sb.marker_a), chunk.marker_by_key(sb.marker_b)
         if a.position is not None and b.position is not None:
             d = float(np.linalg.norm(a.position - b.position))
             if d > 0:
-                ratios.append(sb.distance / d)
+                lengths.append(d)
+                distances.append(sb.distance)
                 weights.append(1.0 / max(sb.accuracy, 1e-6) ** 2)
-    return float(np.average(ratios, weights=weights)) if ratios else None
+    return np.array(lengths), np.array(distances), np.array(weights)
+
+
+def _bar_scale(chunk, bars) -> float | None:
+    """The scale (world units per internal unit) the control scale bars ask for: least squares of
+    ``scale * length - distance`` weighted by ``1 / accuracy**2`` (of two bars measured equally
+    well, the longer one gives the scale more precisely); None without usable bars."""
+    d, dist, w = _bar_observations(chunk, bars)
+    return float(np.sum(w * dist * d) / np.sum(w * d * d)) if len(d) else None
+
+
+def similarity_with_bars(src, dst, weights, lengths=(), distances=(), bar_weights=()) -> np.ndarray:
+    """Weighted similarity mapping the points ``src`` onto ``dst`` with scale bars as further
+    observations of the scale (``scale * length = distance``): the joint least-squares solution,
+    every observation weighted by ``1 / accuracy**2``. The rotation and the centroid come from the
+    points, the scale from points and bars together: a bar measured to the millimetre outweighs
+    camera positions known to metres, positions known to centimetres over a whole site outweigh
+    a short bar."""
+    src, dst, w = np.asarray(src, float), np.asarray(dst, float), np.asarray(weights, float)
+    m = geometry.umeyama(src, dst, with_scale=True, weights=w)
+    d, dist, wb = (np.asarray(v, float) for v in (lengths, distances, bar_weights))
+    if not len(d):
+        return m
+    _, rot, _ = geometry.decompose_similarity(m)  # the best rotation for any positive scale
+    mu_s, mu_d = w @ src / w.sum(), w @ dst / w.sum()
+    xs, xd = src - mu_s, dst - mu_d
+    scale = ((np.sum(w * np.einsum("ij,ij->i", xd, xs @ rot.T)) + np.sum(wb * dist * d))
+             / (np.sum(w * np.einsum("ij,ij->i", xs, xs)) + np.sum(wb * d * d)))
+    return geometry.compose_similarity(float(scale), rot, mu_d - scale * rot @ mu_s)
 
 
 def control_scalebars(chunk) -> list:
@@ -226,10 +255,12 @@ def update_transform(chunk, use_cameras: bool | None = None) -> dict:
 
     Priority: control markers (>= 3) -> camera references (>= 3) -> scale bars
     (scale only). Observations are weighted by ``1 / accuracy**2``, so millimetric
-    GCPs dominate metre-level GNSS camera positions. With camera references and no control
-    point, the control scale bars set the scale (GNSS positions place and turn the survey; over
-    a trench their metre-level noise would make its scale wrong). Check bars and check points
-    only measure the result. The report lists control/check point and scale-bar errors.
+    GCPs dominate metre-level GNSS camera positions, and the control scale bars join the fit
+    as observations of the scale (:func:`similarity_with_bars`). With scale bars, camera
+    positions that cover less than ten times their accuracy (a phone or a drone over an object
+    or a trench) are left out: the bars scale the chunk in local coordinates. Check bars and
+    check points only measure the result. The report lists control/check point and scale-bar
+    errors.
     """
     if crs_mod.is_geographic(chunk.crs):
         raise ValueError(f"chunk CRS {chunk.crs} is geographic; use a projected CRS (e.g. the UTM zone)")
@@ -251,18 +282,10 @@ def update_transform(chunk, use_cameras: bool | None = None) -> dict:
         src, dst, acc = np.vstack([src, cs]), np.vstack([dst, cd]), np.r_[acc, ca]
     bars = control_scalebars(chunk)
     if _non_collinear(dst) and len(src) >= 3:
-        chunk.transform = geometry.umeyama(src, dst, with_scale=True, weights=1.0 / np.maximum(acc, 1e-6) ** 2)
+        d, dist, wb = _bar_observations(chunk, bars)
+        chunk.transform = similarity_with_bars(src, dst, 1.0 / np.maximum(acc, 1e-6) ** 2, d, dist, wb)
         method = "markers+cameras" if use_cameras and len(ctrl) else ("cameras" if use_cameras else "markers")
-        s = _bar_scale(chunk, bars) if (use_cameras and not len(ctrl)) else None
-        if s:  # the GNSS cameras place and turn the survey, the bars give its scale
-            ends = [chunk.marker_by_key(k).position for sb in bars for k in (sb.marker_a, sb.marker_b)
-                    if chunk.marker_by_key(k).position is not None]
-            c = chunk.to_world(np.mean(ends, axis=0)[None])[0]  # the bars keep their place
-            k = s / chunk.scale
-            about = np.eye(4)
-            about[:3, :3] *= k
-            about[:3, 3] = c - k * c
-            chunk.transform = about @ chunk.transform
+        if len(d):
             method += "+scalebars"
     elif bars:
         s = _bar_scale(chunk, bars)
