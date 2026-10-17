@@ -108,6 +108,7 @@ class MainWindow(QMainWindow):
         self.model_view = ModelView()
         self.model_view.points_selected.connect(self._points_selected)
         self.model_view.faces_selected.connect(self._faces_selected)
+        self.model_view.marker_requested.connect(self._marker_picked_in_3d)
         self.ortho_view = RasterView()
         self.photo_view = PhotoView()
         self.tabs.addTab(self.model_view, icon("view3d"), "Modello")
@@ -135,6 +136,7 @@ class MainWindow(QMainWindow):
         self.ortho_view.measured.connect(lambda t: (self.statusBar().showMessage(t, 30000),
                                                     self.log_pane.info(t)))
         self.ortho_view.quota_clicked.connect(self._quota_clicked)
+        self.ortho_view.marker_clicked.connect(self._marker_clicked_on_raster)
         self.ortho_view.sam_click.connect(self._sam_click)
         self.ortho_view.sam_rect.connect(self._sam_rect)
         self.ortho_view.sam_key.connect(self._sam_key)
@@ -344,6 +346,7 @@ class MainWindow(QMainWindow):
                                 ("polygon", "Disegna unita' stratigrafica", "polygon"),
                                 ("line", "Traccia sezione", "line"), ("measure", "Misura distanza", "measure"),
                                 ("quota", "Quota puntuale (pyarchinit_quote)", "point"),
+                                ("marker", "Marker: clic su un punto, proiettato sulle foto che lo vedono", "marker"),
                                 ("crop", "Ritaglio: riquadro o poligono (esporta o ritaglia i prodotti)", "crop"),
                                 ("patch", "Patch dell'ortofoto: assegna le immagini a un'area", "patch"),
                                 ("sam", "Segment Anything (SAM)", "sam")):
@@ -587,7 +590,8 @@ class MainWindow(QMainWindow):
         # short texts in the bar (menus keep the full names, tooltips show them)
         for a, short in ((self.draw_actions["pan"], "Sposta"), (self.draw_actions["polygon"], "Disegna US"),
                          (self.draw_actions["line"], "Sezione"), (self.draw_actions["measure"], "Misura"),
-                         (self.draw_actions["quota"], "Quota"), (self.draw_actions["sam"], "SAM"),
+                         (self.draw_actions["quota"], "Quota"), (self.draw_actions["marker"], "Marker"),
+                         (self.draw_actions["sam"], "SAM"),
                          (self.draw_actions["patch"], "Patch"),
                          (self.a_sel_delete, "Elimina"),
                          (self.a_sel_merge, "Unisci"), (self.a_clear_drawings, "Cancella tutto"),
@@ -603,7 +607,7 @@ class MainWindow(QMainWindow):
         snap_button = db.widgetForAction(self.a_snap)
         if snap_button is not None:
             snap_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        for mode in ("line", "measure", "quota", "sam", "patch"):
+        for mode in ("line", "measure", "quota", "marker", "sam", "patch"):
             db.addAction(self.draw_actions[mode])
         for mode in ("sam", "line"):
             button = db.widgetForAction(self.draw_actions[mode])
@@ -727,6 +731,7 @@ class MainWindow(QMainWindow):
                 for coords, color, label, attrs, width in lines:
                     self.ortho_view.add_line(coords, color, label, layer=name, attrs=attrs, width=width)
             self._draw_patches()
+            self._draw_markers_on_raster()
 
     def _dirty(self, flag: bool = True) -> None:
         self.setWindowModified(flag)
@@ -1427,13 +1432,60 @@ class MainWindow(QMainWindow):
     def update_transform(self) -> None:
         if not self._need_chunk(aligned=True):
             return
+        ch = self.chunk
+        before = float(ch.scale)
 
         def done(rep):
             self.last_report = rep
-            self.reference.set_chunk(self.chunk, rep)
+            self.reference.set_chunk(ch, rep)
             self._show_pane(self.left_tabs, self.reference)
+            self._draw_markers_on_raster()
+            change = float(ch.scale) / before - 1 if before else 0.0
+            stale = [n for k, n in (("dem", "DEM"), ("orthomosaic", "ortofoto")) if k in ch.products]
+            if abs(change) > 1e-6 and stale:
+                text = (f"La scala del rilievo e' cambiata del {change * 100:+.3f} %: {' e '.join(stale)} sono ancora "
+                        "nella scala di prima, ricostruiscili (Flusso di lavoro).")
+                self.log_pane.warning(text)
+                self.statusBar().showMessage(text, 20000)
 
-        self.run_task("Georeferenziazione", lambda p: self.chunk.update_transform(), done)
+        self.run_task("Georeferenziazione", lambda p: ch.update_transform(), done)
+
+    def add_marker_at(self, point, where: str = "sul modello") -> None:
+        """A marker at a point of the model, the cloud or the orthophoto (internal frame), as
+        Metashape's *Add Marker*: it is projected on the photos that see it (not pinned) and is
+        then triangulated like the others."""
+        from ..markers import gcp
+
+        ch = self.chunk
+        if ch is None:
+            return
+        names = {m.label for m in ch.markers}
+        n = 1
+        while f"point {n}" in names:
+            n += 1
+        m = ch.add_marker(f"point {n}", position=np.asarray(point, float))
+        seen = gcp.project_marker(ch, m, m.position)
+        world = ch.to_world(m.position[None])[0]
+        self.log_pane.info(f"Marker {m.label} {where}: X {world[0]:.3f} Y {world[1]:.3f} Z {world[2]:.3f}; "
+                           + (f"proiettato su {seen} foto (bandierine da confermare trascinandole)" if seen else
+                              "nessuna foto lo vede: resta dove l'hai messo"))
+        self.statusBar().showMessage(f"Marker {m.label}: {seen} foto lo vedono", 10000)
+        self._markers_edited()
+        self.model_view.refresh(reset=False)
+
+    def _draw_markers_on_raster(self) -> None:
+        """The markers with a position as a layer of the orthophoto/DEM view."""
+        view = self.ortho_view
+        view.remove_layer("Marker")
+        ch = self.chunk
+        if ch is None or view.tr is None:
+            return
+        for m in ch.markers:
+            if m.position is None:
+                continue
+            x, y, z = ch.to_world(m.position[None])[0]
+            view.add_point(float(x), float(y), color="#00e5ff" if not m.checkpoint else "#ff9f1c", label=m.label,
+                           layer="Marker", attrs={"marker": m.label, "z": round(float(z), 3)})
 
     def optimize_cameras(self) -> None:
         if not self._need_chunk(aligned=True):
@@ -2412,6 +2464,7 @@ class MainWindow(QMainWindow):
             self.log_pane.warning(f"Triangolazione dei marker non riuscita: {exc}")
         self.reference.set_chunk(self.chunk)
         self.workspace.populate(self.doc)
+        self._draw_markers_on_raster()
 
     def _thumbs_progress(self, done: int, total: int) -> None:
         if total >= 30:  # a few photos load at once: no message
@@ -2504,6 +2557,8 @@ class MainWindow(QMainWindow):
                  "line": "Due clic: inizio e fine della sezione", "measure": "Due clic per misurare",
                  "quota": "Clic su un punto: la quota viene letta dal DEM, poi area, US e gli altri campi di "
                           "pyarchinit_quote",
+                 "marker": "Clic su un punto: un marker con la quota del DEM, proiettato sulle foto che lo vedono "
+                           "(come Aggiungi marker in Metashape); con due marker si fa una barra di scala",
                  "crop": "Trascina un riquadro, oppure clic per i vertici e doppio clic per chiudere il poligono: poi "
                          "scegli i prodotti da esportare ritagliati o da ritagliare nel progetto",
                  "patch": "Trascina un riquadro, oppure clic per i vertici e doppio clic per chiudere: poi scegli da "
@@ -2670,6 +2725,42 @@ class MainWindow(QMainWindow):
             if v.get("disegnatore"):
                 self.settings.setValue("pa/disegnatore", v["disegnatore"])
         self._add_quota({"x": float(x), "y": float(y), "sito_q": self.project_site(), **v})
+
+    def _marker_picked_in_3d(self, point) -> None:
+        if point is None:
+            self.statusBar().showMessage("Nessun punto del modello o della nuvola sotto il cursore", 8000)
+            return
+        if self.chunk is None or not self.chunk.aligned_cameras:
+            self._warn("Servono le foto allineate: il marker si proietta sulle foto che lo vedono.")
+            return
+        kind = self.model_view.kind or ""
+        self.add_marker_at(point, "sul modello" if kind.startswith("model") else
+                           "sulla nuvola densa" if kind == "point_cloud" else "sui punti di legame")
+
+    def _marker_clicked_on_raster(self, x: float, y: float) -> None:
+        """A marker where the orthophoto or the DEM was clicked: the height from the DEM at full
+        resolution, else from the surface (dense cloud or tie points) along the vertical."""
+        from ..core import geometry
+        from ..markers import gcp
+
+        ch = self.chunk
+        if ch is None or not ch.aligned_cameras:
+            self._warn("Servono le foto allineate: il marker si proietta sulle foto che lo vedono.")
+            return
+        z = self._dem_value(x, y)
+        if z is not None:
+            point = ch.to_internal(np.array([[x, y, z]], float))[0]
+        else:
+            xyz = gcp._SurfacePoints(ch).xyz()
+            point = None
+            if xyz is not None:
+                top = ch.to_internal(np.array([[x, y, 1e4], [x, y, 0.0]], float))
+                d = (top[1] - top[0]) / np.linalg.norm(top[1] - top[0])
+                point = geometry.point_on_ray(xyz, top[0], d, 0.005 * float(np.linalg.norm(np.ptp(xyz, axis=0))))
+            if point is None:
+                self.statusBar().showMessage("Qui non c'e' superficie (fuori dal DEM e dalla nuvola)", 8000)
+                return
+        self.add_marker_at(point, "sull'ortofoto" if self.ortho_view.kind == "ortho" else "sul DEM")
 
     def _add_quota(self, q: dict) -> None:
         q.pop("keep", None)
@@ -3151,7 +3242,7 @@ class MainWindow(QMainWindow):
         skip = skip or set()
         visible = {n: lay["visible"] for n, lay in v.layers.items()}
         order = list(v.layer_order)
-        modelled = set(self.line_layers) | {"Sezioni", QUOTE_LAYER, PATCH_LAYER}
+        modelled = set(self.line_layers) | {"Sezioni", QUOTE_LAYER, PATCH_LAYER, "Marker"}
         others = []
         for name in order:
             lay = v.layers[name]
@@ -3172,6 +3263,7 @@ class MainWindow(QMainWindow):
             for coords, color, label, attrs, width in lines:
                 v.add_line(coords, color, label, layer=name, attrs=attrs, width=width)
         self._draw_patches()
+        self._draw_markers_on_raster()
         for name, kind, attrs, color in others:
             gtype, coords = attrs.get("_geom", (None, None))
             label = attrs.get("etichetta", "")
@@ -3419,7 +3511,8 @@ class MainWindow(QMainWindow):
 
     def _export_qgis_layers(self, force: bool = False) -> dict:
         view = self.ortho_view
-        layers = {name: {"kind": lay["kind"], "features": view.features(name)} for name, lay in view.layers.items()}
+        layers = {name: {"kind": lay["kind"], "features": view.features(name)} for name, lay in view.layers.items()
+                  if name != "Marker"}  # the markers are the survey's control, not excavation drawings
         try:
             return self._qgis_live_link().write(layers, force=force)
         except Exception as exc:  # a live refresh must never interrupt drawing with an error window

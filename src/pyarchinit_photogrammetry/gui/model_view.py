@@ -180,6 +180,14 @@ class SoftwareCanvas(QWidget):
         w, h = max(self.width(), 1), max(self.height(), 1)
         return self.grab().toImage(), lambda pts: cam.project(pts, w, h)
 
+    def view_ray(self, x: float, y: float):
+        """Line of sight through widget pixel (x, y): origin and unit direction in scene
+        coordinates, and the size of a pixel at a distance (a function of the distance)."""
+        w, h = max(self.width(), 1), max(self.height(), 1)
+        f = 0.5 * h / np.tan(np.radians(self.cam.fov) / 2)
+        d = self.cam.basis().T @ np.array([(x - w / 2) / f, (y - h / 2) / f, 1.0])
+        return self.cam.eye.copy(), d / np.linalg.norm(d), (lambda dist: dist / f)
+
     def grab_array(self) -> np.ndarray:
         img = self.grab().toImage().convertToFormat(QImage.Format.Format_RGB888)
         ptr = img.constBits()
@@ -302,6 +310,24 @@ class VtkCanvas(QWidget):
 
         return img, project
 
+    def view_ray(self, x: float, y: float):
+        """Line of sight through widget pixel (x, y) (scene coordinates) and the size of a pixel
+        at a distance, from the same projection as :meth:`snapshot`."""
+        ren = self.plotter.renderer
+        cam = ren.GetActiveCamera()
+        w, h = max(self.width(), 1), max(self.height(), 1)
+        m = cam.GetCompositeProjectionTransformMatrix(ren.GetTiledAspectRatio(), -1, 1)
+        inv = np.linalg.inv(np.array([[m.GetElement(i, j) for j in range(4)] for i in range(4)]))
+        nx, ny = 2 * x / w - 1, 1 - 2 * y / h
+        a, b = inv @ np.array([nx, ny, -1.0, 1.0]), inv @ np.array([nx, ny, 1.0, 1.0])
+        a, b = a[:3] / a[3], b[:3] / b[3]
+        d = (b - a) / np.linalg.norm(b - a)
+        if cam.GetParallelProjection():
+            size = 2 * cam.GetParallelScale() / h
+            return a, d, (lambda dist: size)
+        k = 2 * np.tan(np.radians(cam.GetViewAngle()) / 2) / h
+        return a, d, (lambda dist: dist * k)
+
     def close(self):
         try:
             self.plotter.close()
@@ -385,6 +411,44 @@ class LassoOverlay(QWidget):
         self.finished.emit(pts if len(pts) >= 3 else None)
 
 
+class PickOverlay(QWidget):
+    """A frozen frame of the 3D view on which one point is clicked (a new marker); right click or
+    Esc cancels."""
+
+    finished = Signal(object)  # (x, y) in widget pixels, or None when cancelled
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.image: QImage | None = None
+        self.text = ""
+
+    def start(self, image: QImage, text: str) -> None:
+        self.image, self.text = image, text
+        self.setFocus()
+        self.update()
+
+    def paintEvent(self, _ev) -> None:
+        p = QPainter(self)
+        if self.image is not None:
+            p.drawImage(self.rect(), self.image)
+        p.setPen(QColor("white"))
+        p.drawText(10, 20, self.text)
+        p.end()
+
+    def mousePressEvent(self, ev) -> None:
+        if ev.button() == Qt.MouseButton.LeftButton:
+            self.finished.emit((ev.position().x(), ev.position().y()))
+        else:
+            self.finished.emit(None)
+
+    def keyPressEvent(self, ev) -> None:
+        if ev.key() == Qt.Key.Key_Escape:
+            self.finished.emit(None)
+
+
 class ClassLegend(QListWidget):
     """The classes of the cloud with their colour and number of points; unticked = hidden."""
 
@@ -452,6 +516,7 @@ class ModelView(QWidget):
     view_changed = Signal(str)
     points_selected = Signal(object, object)  # boolean masks over the whole cloud: visible only, all inside
     faces_selected = Signal(object, object)  # boolean masks over the faces of the model: visible only, all inside
+    marker_requested = Signal(object)  # a point of the model or the cloud (internal frame), None: nothing there
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -487,6 +552,10 @@ class ModelView(QWidget):
         self.b_lasso.setToolTip("Seleziona con un lazo punti della nuvola (classe, elimina, tieni) o facce del "
                                 "modello (elimina, tieni)")
         self.b_lasso.clicked.connect(self.start_lasso)
+        self.b_marker = QPushButton("Marker")
+        self.b_marker.setToolTip("Aggiungi un marker: clic su un punto del modello o della nuvola, come in Metashape. "
+                                 "Si proietta sulle foto che lo vedono; con due marker si fa una barra di scala")
+        self.b_marker.clicked.connect(self.start_pick)
         self.version_label = QLabel("")
         self.version_label.setObjectName("versionLabel")
         self.version_label.setStyleSheet("color: #b45309; font-weight: bold")
@@ -502,6 +571,7 @@ class ModelView(QWidget):
         bar.addWidget(self.point_spin)
         bar.addWidget(self.info_label)
         bar.addWidget(self.b_lasso)
+        bar.addWidget(self.b_marker)
         bar.addWidget(self.cb_cams)
         bar.addWidget(self.cb_marks)
         bar.addWidget(b_top)
@@ -520,10 +590,13 @@ class ModelView(QWidget):
         b_top.clicked.connect(lambda: self.canvas.top_view())
         self.lasso = LassoOverlay(self)
         self.lasso.finished.connect(self._lasso_finished)
+        self.picker = PickOverlay(self)
+        self.picker.finished.connect(self._pick_finished)
         holder = QWidget()
         self.stack = QStackedLayout(holder)
         self.stack.addWidget(self.canvas)
         self.stack.addWidget(self.lasso)
+        self.stack.addWidget(self.picker)
         self.legend = ClassLegend()
         self.legend.visibility_changed.connect(lambda: self.refresh(reset=False))
         row = QHBoxLayout()
@@ -632,6 +705,7 @@ class ModelView(QWidget):
         self.point_spin.setVisible(points)
         # edits go to the active cloud or model, not to a kept version
         self.b_lasso.setVisible(self.kind in ("point_cloud", "model") and not self.paths)
+        self.b_marker.setVisible(self.kind in self.PICK_KINDS)
         mode = self.color_mode()
         self.legend.setVisible((self.kind in ("point_cloud", "tie_points") and mode == "class")
                                or (self.kind in ("point_cloud", "model") and mode == "confidence"))
@@ -652,6 +726,61 @@ class ModelView(QWidget):
         return self.legend.hidden() if self.legend.mode == mode and self.legend.count() else set()
 
     # ----------------------------------------------------------- lasso selection
+    PICK_KINDS = ("point_cloud", "tie_points", "model", "model_textured")
+
+    def start_pick(self) -> None:
+        """Freeze the view and wait for a click on the model or the cloud (a new marker)."""
+        if self.kind not in self.PICK_KINDS or self.chunk is None or self.sd is None:
+            return
+        image, self._project = self.canvas.snapshot()
+        self._ray = self.canvas.view_ray
+        self.picker.start(image, "Marker: clic su un punto del modello o della nuvola - Esc o tasto destro annulla")
+        self.stack.setCurrentWidget(self.picker)
+
+    def _pick_finished(self, pos) -> None:
+        self.stack.setCurrentWidget(self.canvas)
+        if pos is None or self._project is None:
+            return
+        self.marker_requested.emit(self.pick_point(pos[0], pos[1], self._project, self._ray))
+
+    def pick_point(self, x: float, y: float, project, ray=None, reach: float = 8.0):
+        """The point of the surface under widget pixel (x, y), internal frame: of the points and
+        vertices shown within ``reach`` pixels, the nearest to the viewer; then, along the line of
+        sight, the plane of the chunk's dense cloud (or tie points) at full resolution there.
+        None when nothing is shown under the cursor."""
+        from ..core import geometry
+        from ..markers import gcp
+
+        sd = self.sd
+        arrs = [np.asarray(a, np.float64) for a in (sd.points, sd.mesh_vertices) if a is not None and len(a)]
+        if not arrs or self.chunk is None:
+            return None
+        pts = np.vstack(arrs)
+        px, py, depth, ok = project(pts)
+        d2 = (px - x) ** 2 + (py - y) ** 2
+        idx = np.nonzero(ok & (d2 <= reach ** 2))[0]
+        if not len(idx):
+            return None
+        front = idx[depth[idx] <= depth[idx].min() * 1.02 + 1e-12]  # the surface in front, not what is behind it
+        picked = self.chunk.to_internal((pts[front[np.argmin(d2[front])]] + sd.offset)[None])[0]
+        if ray is None:
+            return picked
+        origin, direction, pixel = ray(x, y)
+        o, e = self.chunk.to_internal(np.array([origin + sd.offset, origin + direction + sd.offset]))
+        d = (e - o) / np.linalg.norm(e - o)
+        dist = float(np.linalg.norm(picked - o))
+        scale = float(np.linalg.norm(e - o))  # internal units per scene unit
+        radius = 6 * pixel(dist / scale) * scale  # about six pixels of the screen there
+        xyz = gcp._SurfacePoints(self.chunk).xyz()
+        if xyz is None or radius <= 0:
+            return picked
+        near = xyz[np.einsum("ij,ij->i", xyz - picked, xyz - picked) < (40 * radius) ** 2]
+        for k in (1, 2, 4):
+            hit = geometry.point_on_ray(near, o, d, k * radius) if len(near) >= 15 else None
+            if hit is not None and np.linalg.norm(hit - picked) < 20 * radius:
+                return hit
+        return picked
+
     def start_lasso(self) -> None:
         if self.kind not in ("point_cloud", "model") or self.chunk is None:
             return

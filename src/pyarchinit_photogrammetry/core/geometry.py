@@ -116,6 +116,30 @@ def triangulate(views: list[PinholeView], normalized: np.ndarray, refine: bool =
     return least_squares(residuals, point, method="lm").x
 
 
+def point_on_ray(points: np.ndarray, origin, direction, radius: float, min_points: int = 15) -> np.ndarray | None:
+    """Where the ray meets the surface: the points within ``radius`` of the ray that belong to
+    the first surface it crosses define a local plane (least squares), and the ray is
+    intersected with it. Robust on textureless spots (targets, rulers) where the dense cloud
+    is thin, as long as the neighbourhood is locally flat."""
+    v = points - origin
+    t = v @ direction
+    perp = np.linalg.norm(v - np.outer(t, direction), axis=1)
+    ok = (t > 0) & (perp < radius)
+    if ok.sum() < min_points:
+        return None
+    near, tn = points[ok], t[ok]
+    t0 = np.percentile(tn, 5)
+    first = near[tn <= t0 + 2 * radius]
+    if len(first) < min_points:
+        first = near[np.argsort(tn)[:min_points]]
+    c = first.mean(axis=0)
+    normal = np.linalg.svd(first - c)[2][-1]
+    denom = float(normal @ direction)
+    if abs(denom) < 1e-6:  # grazing ray: fall back to the depth of the first points
+        return origin + float(np.median(tn[tn <= t0 + 2 * radius])) * direction
+    return origin + float(normal @ (c - origin) / denom) * direction
+
+
 def rotation_from_euler_ypr(yaw: float, pitch: float, roll: float) -> np.ndarray:
     """Rotation matrix from yaw/pitch/roll in degrees (Z-Y-X convention)."""
     y, p, r = np.radians([yaw, pitch, roll])

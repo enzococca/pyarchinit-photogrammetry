@@ -406,11 +406,18 @@ class ReferencePane(QWidget):
                                                            "(anche in coordinate locali, come per gli oggetti)")
         self.b_bar_import = _tool("scalebar", "Importa barre...", "Barre di scala da un CSV (marker A, marker B, "
                                                                   "distanza in metri)")
+        self.b_est = _tool("markers", "Coordinate stimate", "X, Y, Z dei marker stimate dal rilievo (triangolate dalle "
+                                                            "foto o, con una foto sola, sulla superficie) al posto di "
+                                                            "quelle di riferimento, come 'View Estimated' di Metashape")
+        self.b_est.setCheckable(True)
+        self._est_chosen = False  # chosen by hand: no longer follows the project
+        self.b_est.toggled.connect(self._estimated_toggled)
         bar.addWidget(self.b_import)
         bar.addWidget(self.b_update)
         bar.addWidget(self.b_opt)
         bar.addWidget(self.b_bar)
         bar.addWidget(self.b_bar_import)
+        bar.addWidget(self.b_est)
         lay.addLayout(bar)
         self.b_import.clicked.connect(self.import_requested)
         self.b_update.clicked.connect(self.update_requested)
@@ -471,10 +478,30 @@ class ReferencePane(QWidget):
             return
         self.crs_label.setText(f"Sistema di riferimento: <b>{chunk.crs}</b>  -  scala {chunk.scale:.6g}")
         errs = {e["label"]: e for e in gcp.marker_errors(chunk)}
+        if not self._est_chosen:  # no reference coordinates: the estimated ones are what there is to see
+            self.b_est.blockSignals(True)
+            self.b_est.setChecked(not any(m.reference.location for m in chunk.markers)
+                                  and any(m.position is not None for m in chunk.markers))
+            self.b_est.blockSignals(False)
+        estimated = self.b_est.isChecked()
+        names = ["X stimata", "Y stimata", "Z stimata"] if estimated else ["X / Est", "Y / Nord", "Z"]
+        for c, name in enumerate(names, 3):
+            self.table.setHorizontalHeaderItem(c, QTableWidgetItem(name))
         self.table.setRowCount(len(chunk.markers))
+        one_photo = 0
         for r, m in enumerate(chunk.markers):
             e = errs.get(m.label, {})
             loc = m.reference.location or [None, None, None]
+            if estimated:
+                loc = chunk.to_world(m.position[None])[0] if m.position is not None else [None, None, None]
+            views = gcp.views_of(chunk, m)
+            one_photo += views == 1
+            how = (f"triangolato da {views} foto" if views >= 2 else
+                   "su una foto sola: posizione dove il suo raggio incontra la superficie (nuvola densa o punti di "
+                   "legame); mettilo su una seconda foto per triangolarlo" if views == 1 else
+                   "messo sul modello, sulla nuvola o sull'ortofoto" if m.position is not None else
+                   "non ancora posizionato: tasto destro su una foto, oppure strumento Marker sul modello o "
+                   "sull'ortofoto")
             acc = m.reference.accuracy[0] if m.reference.accuracy else None
             use = QTableWidgetItem()
             use.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
@@ -490,8 +517,16 @@ class ReferencePane(QWidget):
                 QTableWidgetItem(_fmt(e.get("dz"), 4)), QTableWidgetItem(str(e.get("projections", ""))),
                 QTableWidgetItem(_fmt(e.get("pixel_error"), 2))]
             for c, it in enumerate(vals):
-                if c in (1, 7, 8, 9, 10, 11, 12):
+                if c in (1, 7, 8, 9, 10, 11, 12) or (estimated and c in (3, 4, 5)):
                     it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if estimated and c in (3, 4, 5):
+                    it.setForeground(QColor(PALETTE["grey"]))
+                    font = it.font()
+                    font.setItalic(True)
+                    it.setFont(font)
+                    it.setToolTip(f"Coordinata stimata: {how}")
+                if c in (1, 11):
+                    it.setToolTip(how)
                 if c == 7 and e.get("error") is not None and e["error"] > 0.02:
                     it.setForeground(QColor(PALETTE["red"]))
                 self.table.setItem(r, c, it)
@@ -539,9 +574,16 @@ class ReferencePane(QWidget):
             parts.append("scala dalle barre, coordinate locali")
         elif str(rep.get("method", "")).endswith("+scalebars"):
             parts.append("scala da riferimenti e barre insieme, pesati con l'accuratezza")
+        if one_photo:
+            parts.append(f"{one_photo} marker su una foto sola: posizione sulla superficie, su una seconda foto "
+                         "vengono triangolati")
         self.summary.setText("  |  ".join(parts) if parts else "Importa i riferimenti o crea una barra di scala, poi "
                              "premi Aggiorna.")
         self._filling = False
+
+    def _estimated_toggled(self, _on: bool) -> None:
+        self._est_chosen = True
+        self.set_chunk(self.chunk)
 
     def selected_markers(self) -> list:
         """Keys of the markers whose rows are selected."""

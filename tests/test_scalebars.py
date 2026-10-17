@@ -155,6 +155,60 @@ def test_joint_fit_of_points_and_bars():
     assert joint == pytest.approx(2.5, rel=1e-6)
 
 
+def test_a_marker_in_one_photo_lies_on_the_surface(processed):
+    """A marker measured in one photo only is placed where its ray meets the surface (the dense
+    cloud, else the tie points), as Metashape places it on the model: it gets coordinates and can
+    end a scale bar. On the trench: within a few millimetres of the surveyed target."""
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.markers import gcp
+
+    doc, _ch, _ = processed
+    ch = ppg.Document.open(doc.path).chunk  # in memory: nothing is saved
+    for use_cloud in (True, False):
+        if not use_cloud:
+            ch.products.pop("point_cloud")  # the tie points become the surface
+        for m in ch.markers:
+            truth = np.asarray(m.reference.location, float)
+            saved = m.projections
+            m.projections = {k: saved[k] for k in list(saved)[:1]}
+            ch.triangulate_markers()
+            assert gcp.views_of(ch, m) == 1 and m.position is not None
+            assert np.linalg.norm(ch.to_world(m.position[None])[0] - truth) < 0.003
+            m.projections = saved
+    ch.triangulate_markers()
+
+
+def test_a_marker_placed_in_3d_is_seen_in_the_photos(processed):
+    """A marker added on the model, the cloud or the orthophoto is projected on the photos that
+    see it (not pinned, as Metashape's), so it is triangulated like the others: on the trench its
+    projections fall within a pixel of where the target was detected."""
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.markers import gcp
+
+    doc, _ch, _ = processed
+    ch = ppg.Document.open(doc.path).chunk
+    target = ch.markers[0]
+    truth = ch.to_internal(np.asarray([target.reference.location], float))[0]
+    m = ch.add_marker("point 1")
+    n = gcp.project_marker(ch, m, truth)
+    assert n >= 2 and not any(p.pinned for p in m.projections.values())
+    common = set(m.projections) & set(target.projections)
+    assert len(common) >= 2
+    for k in common:
+        a, b = m.projections[k], target.projections[k]
+        assert np.hypot(a.x - b.x, a.y - b.y) < 1.0
+    ch.triangulate_markers()
+    assert np.linalg.norm(ch.to_world(m.position[None])[0] - target.reference.location) < 0.003
+    look = np.mean([c.transform[:3, 2] for c in ch.aligned_cameras], axis=0)  # where the photos look
+    side = np.cross(look, [1.0, 0.0, 0.0] if abs(look[0]) < 0.9 else [0.0, 1.0, 0.0])
+    span = float(np.linalg.norm(np.ptp([c.transform[:3, 3] for c in ch.aligned_cameras], axis=0)))
+    far = truth + 100 * span * side / np.linalg.norm(side)  # far to the side: no photo frames it
+    lone = ch.add_marker("point 2", position=far)
+    assert gcp.project_marker(ch, lone, lone.position) == 0
+    ch.triangulate_markers()
+    assert np.allclose(lone.position, far)  # kept
+
+
 def test_scale_bars_from_a_file(doc, scene, tmp_path):
     ch = doc.chunks[0]
     pairs = _pairs(ch, scene)
@@ -328,6 +382,72 @@ def test_optimize_with_scale_bars_in_the_interface(two_chunks, scene, qapp_bars,
     log = " ".join(e[2] for e in w.log_pane.entries)
     assert "2 barre di scala: errore" in log
     assert w.last_report["method"] == "scalebars"
+    w.setWindowModified(False)
+    w.photos.stop()
+    w.close()
+
+
+def test_markers_on_the_orthophoto_and_the_model(processed, qapp_bars, monkeypatch, tmp_path):
+    """Markers placed as in Metashape without a photo: a click with the Marker tool on the
+    orthophoto (height from the DEM) and a click on the dense cloud in the 3D view. Both are
+    projected on the photos that see them, show their estimated X, Y, Z in Riferimenti and are
+    drawn on the orthophoto; a scale bar between them measures their distance."""
+    import shutil
+
+    from PySide6.QtCore import QSettings
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.gui import main_window as mw
+    from pyarchinit_photogrammetry.markers import gcp
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
+    doc0, _ch, _ = processed
+    copy = tmp_path / "copia"
+    copy.mkdir()
+    shutil.copy2(doc0.path, copy / doc0.path.name)
+    shutil.copytree(doc0.files_dir, copy / doc0.files_dir.name)
+    doc = ppg.Document.open(copy / doc0.path.name)
+    ch = doc.chunk
+    truth = {m.label: np.asarray(m.reference.location, float) for m in ch.markers}
+    ch.markers = []  # no marker yet: they are placed here
+    w = mw.MainWindow(doc, autoconnect=False)
+    w.runner.show_dialog = False
+    w.resize(1400, 900)
+    w.show()
+    qapp_bars.processEvents()
+    w._show_raster("ortho")
+    qapp_bars.processEvents()
+    a, b = truth["target 0"], truth["target 4"]
+    w.set_draw_mode("marker")
+    w.ortho_view.marker_clicked.emit(float(a[0]), float(a[1]))
+    qapp_bars.processEvents()
+    m1 = ch.marker("point 1")
+    assert gcp.views_of(ch, m1) >= 2 and np.linalg.norm(ch.to_world(m1.position[None])[0] - a) < 0.006
+    # the 3D view: a click where target 4 is on the screen
+    mv = w.model_view
+    w.show_view(mv)
+    mv.show_kind("point_cloud")
+    qapp_bars.processEvents()
+    image, project = mv.canvas.snapshot()
+    x, y, _z, ok = project((b - mv.sd.offset)[None])
+    assert ok[0]
+    point = mv.pick_point(float(x[0]), float(y[0]), project, mv.canvas.view_ray)
+    assert point is not None and np.linalg.norm(ch.to_world(point[None])[0] - b) < 0.01
+    mv._project, mv._ray = project, mv.canvas.view_ray
+    mv._pick_finished((float(x[0]), float(y[0])))  # as a click on the frozen frame
+    qapp_bars.processEvents()
+    m2 = ch.marker("point 2")
+    assert gcp.views_of(ch, m2) >= 2 and np.linalg.norm(ch.to_world(m2.position[None])[0] - b) < 0.01
+    # Riferimenti shows their estimated coordinates (there are no reference ones)
+    pane = w.reference
+    pane.set_chunk(ch)
+    assert pane.b_est.isChecked() and pane.table.horizontalHeaderItem(3).text() == "X stimata"
+    assert float(pane.table.item(0, 3).text()) == pytest.approx(ch.to_world(m1.position[None])[0][0], abs=1e-3)
+    assert {f["marker"] for f in w.ortho_view.features("Marker")} == {"point 1", "point 2"}
+    bar = ch.add_scalebar(m1, m2, float(np.linalg.norm(a - b)), checkpoint=True)
+    e = next(r for r in gcp.scalebar_errors(ch) if r["label"] == bar.label)
+    assert abs(e["error"]) < 0.01
     w.setWindowModified(False)
     w.photos.stop()
     w.close()

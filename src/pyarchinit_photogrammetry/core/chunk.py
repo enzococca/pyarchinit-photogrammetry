@@ -45,6 +45,7 @@ class Chunk:
     products: dict[str, str] = field(default_factory=dict)  # name -> file relative to data_dir
     meta: dict = field(default_factory=dict)
     _tie_points: PointCloud | None = field(default=None, repr=False)
+    _surface_cache: dict = field(default_factory=dict, repr=False)  # markers measured in one photo
 
     # ------------------------------------------------------------------ paths
     @property

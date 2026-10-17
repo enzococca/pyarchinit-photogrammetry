@@ -13,9 +13,16 @@ from ..core.marker import Marker
 
 
 def triangulate_markers(chunk, min_views: int = 2) -> None:
-    """Triangulate every marker seen in at least ``min_views`` aligned photos."""
+    """Triangulate every marker seen in at least ``min_views`` aligned photos. A marker measured
+    in fewer photos is placed where the ray of its measurement meets the surface
+    (:func:`surface_point`), as Metashape does on its model: it gets coordinates, shows on the
+    model and on the orthophoto and can end a scale bar; measured in a second photo it becomes a
+    triangulated point."""
+    points = _SurfacePoints(chunk)
     for m in chunk.markers:
-        views, obs = [], []
+        if not m.projections:  # placed in 3D where no photo sees it (or given a position): kept
+            continue
+        views, obs, first = [], [], None
         for cam_key, proj in m.projections.items():
             try:
                 cam = chunk.camera(cam_key)
@@ -26,7 +33,141 @@ def triangulate_markers(chunk, min_views: int = 2) -> None:
             norm = chunk.sensor(cam).unproject([[proj.x, proj.y]])[0]
             views.append(geometry.PinholeView(cam.transform))
             obs.append(norm)
-        m.position = geometry.triangulate(views, np.asarray(obs)) if len(views) >= min_views else None
+            first = first or (cam, proj)
+        if len(views) >= min_views:
+            m.position = geometry.triangulate(views, np.asarray(obs))
+        else:
+            m.position = surface_point(chunk, first[0], first[1].x, first[1].y, points) if first else None
+
+
+def views_of(chunk, marker) -> int:
+    """How many aligned photos measure a marker (two or more: triangulated; one: on the surface)."""
+    n = 0
+    for cam_key in marker.projections:
+        try:
+            cam = chunk.camera(cam_key)
+        except KeyError:
+            continue
+        n += bool(cam.enabled and cam.aligned)
+    return n
+
+
+_LAST_SURFACE: dict = {}  # the last surface read ({"key", "xyz"}): placing markers one after another reads it once
+
+
+class _SurfacePoints:
+    """The surface markers measured in one photo are placed on: the dense cloud, else the tie
+    points (internal frame), read when first needed and kept until the file changes."""
+
+    def __init__(self, chunk):
+        self.chunk, self._xyz, self.key = chunk, None, None
+        for name in ("point_cloud", "tie_points"):
+            path = chunk.product_path(name)
+            if path is not None and path.exists():
+                st = path.stat()
+                self.name, self.key = name, (name, str(path), st.st_mtime_ns, st.st_size)
+                break
+
+    def xyz(self) -> np.ndarray | None:
+        if self._xyz is None and self.key is not None:
+            if _LAST_SURFACE.get("key") == self.key:
+                self._xyz = _LAST_SURFACE["xyz"]
+            else:
+                cloud = self.chunk.point_cloud if self.name == "point_cloud" else self.chunk.tie_points
+                xyz = None if cloud is None or len(cloud) < 15 else np.asarray(cloud.xyz)
+                if xyz is not None:  # internal coordinates are small: single precision halves the memory
+                    xyz = xyz.astype(np.float32 if np.abs(xyz).max() < 1e4 else np.float64)
+                _LAST_SURFACE.clear()
+                _LAST_SURFACE.update(key=self.key, xyz=xyz)
+                self._xyz = xyz
+        return self._xyz
+
+
+def project_marker(chunk, marker, point, max_photos: int = 60) -> int:
+    """Projections (not pinned) of a marker placed in 3D at ``point`` (internal frame) on the
+    photos that see it, as Metashape shows a marker added on the model or the orthomosaic: inside
+    the frame, in front of the camera and not hidden by the surface (the dense cloud, else the
+    tie points, near the marker); the photos where it falls nearest the centre first, at most
+    ``max_photos``. Pinning one in a photo (moving it there) makes it a measurement. Returns how
+    many photos see it."""
+    point = np.asarray(point, float).reshape(3)
+    found = []
+    for cam in chunk.aligned_cameras:
+        sensor = chunk.sensor(cam)
+        px, depth = cam.project(sensor, point[None])
+        u, v = float(px[0, 0]), float(px[0, 1])
+        if depth[0] <= 0 or not (0 <= u < sensor.width and 0 <= v < sensor.height):
+            continue
+        off = np.hypot(u - sensor.width / 2, v - sensor.height / 2) / np.hypot(sensor.width / 2, sensor.height / 2)
+        found.append((off, cam, u, v, float(depth[0])))
+    found.sort(key=lambda f: f[0])
+    xyz = _SurfacePoints(chunk).xyz()
+    near = None
+    if xyz is not None and found:
+        reach = 0.2 * float(np.median([d for *_, d in found]))  # occluders that matter lie near the marker
+        near = xyz[np.einsum("ij,ij->i", xyz - point, xyz - point) < reach ** 2]
+    added = 0
+    for _off, cam, u, v, depth in found:
+        if added >= max_photos:
+            break
+        if near is not None and len(near) >= 15:
+            origin, direction = camera_ray(chunk, cam, u, v)
+            radius = depth * 20.0 / max(chunk.sensor(cam).focal_px, 1e-9)
+            hit = geometry.point_on_ray(near, origin, direction, radius)
+            dist = float(np.linalg.norm(point - origin))
+            if hit is not None and float(np.linalg.norm(hit - origin)) < dist - max(0.01 * dist, 3 * radius):
+                continue  # something stands between the camera and the marker
+        chunk.add_marker_projection(marker, cam, u, v, pinned=False)
+        added += 1
+    return added
+
+
+def camera_ray(chunk, cam, x: float, y: float) -> tuple[np.ndarray, np.ndarray]:
+    """Origin and unit direction (internal frame) of the ray of pixel (x, y) of a photo."""
+    xn, yn = chunk.sensor(cam).unproject(np.array([[x, y]]))[0]
+    d = cam.transform[:3, :3] @ np.array([xn, yn, 1.0])
+    return cam.transform[:3, 3].copy(), d / np.linalg.norm(d)
+
+
+def surface_point(chunk, cam, x: float, y: float, points: _SurfacePoints | None = None) -> np.ndarray | None:
+    """Where the ray of pixel (x, y) of a photo meets the surface, in the internal frame: a local
+    plane fitted to the points of the dense cloud (else of the tie points) around the ray
+    (:func:`geometry.point_on_ray`), first in a wide cylinder to find the depth, then in one of
+    about 20 pixels at that depth. None when the ray meets no surface. Kept per measurement."""
+    points = points or _SurfacePoints(chunk)
+    if points.key is None:
+        return None
+    sensor = chunk.sensor(cam)
+    key = (cam.key, round(float(x), 3), round(float(y), 3), np.asarray(cam.transform).tobytes(),
+           tuple(map(float, sensor.params)), points.key)
+    cache = chunk._surface_cache
+    if key in cache:
+        return None if cache[key] is None else cache[key].copy()
+    xyz = points.xyz()
+    found = None
+    if xyz is not None:
+        origin, direction = camera_ray(chunk, cam, x, y)
+        diag = float(np.linalg.norm(np.ptp(xyz, axis=0)))
+        v = xyz - origin
+        t = v @ direction
+        near = (t > 0) & (np.einsum("ij,ij->i", v, v) - t * t < (0.03 * diag) ** 2)
+        sub = xyz[near]  # the points around the ray: every later pass looks only at them
+        for frac in (0.01, 0.03):
+            found = geometry.point_on_ray(sub, origin, direction, frac * diag)
+            if found is not None:
+                break
+        if found is not None:
+            depth = float((found - origin) @ direction)
+            radius = depth * 20.0 / max(sensor.focal_px, 1e-9)  # about 20 pixels at that depth
+            for k in (1, 2, 4, 8):
+                fine = geometry.point_on_ray(sub, origin, direction, k * radius)
+                if fine is not None:
+                    found = fine
+                    break
+    if len(cache) > 1000:
+        cache.clear()
+    cache[key] = found
+    return None if found is None else found.copy()
 
 
 def marker_reprojection_errors(chunk, marker: Marker) -> dict[int, float]:
