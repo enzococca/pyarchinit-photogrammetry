@@ -233,6 +233,69 @@ def test_optimize_cameras_on_control_points(processed, tmp_path):
     assert shifted["markers"] < shifted["plain"] - 0.0002  # the block bent towards the control point
 
 
+def test_optimize_cameras_with_scale_bars(processed, tmp_path):
+    """Scale bars take part in the adjustment, as in Metashape: in local coordinates (no control
+    point) precise bars (0.1 mm), one measured 6 mm too long, bend the block towards their
+    lengths as far as the photos allow (thousands of tie points hold it: a fraction of a
+    millimetre), check bars stay within the photogrammetric error and the report has the bar
+    errors before and after."""
+    import shutil
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.core import crs as crs_mod
+
+    doc, _ch, _ = processed
+
+    def copy(name):
+        d = tmp_path / name
+        d.mkdir()
+        shutil.copy2(doc.path, d / doc.path.name)
+        shutil.copytree(doc.files_dir, d / doc.files_dir.name)
+        out = ppg.Document.open(d / doc.path.name).chunk
+        truth = {m.label: np.asarray(m.reference.location, float) for m in out.markers}
+        for m in out.markers:  # no coordinates: an object, a trench without a total station
+            m.reference.enabled, m.checkpoint = False, False
+        for c in out.cameras:
+            c.reference.enabled = False
+        ms = sorted(out.markers, key=lambda m: m.label)
+        pairs = sorted(((a, b) for i, a in enumerate(ms) for b in ms[i + 1:]),
+                       key=lambda p: -np.linalg.norm(truth[p[0].label] - truth[p[1].label]))
+        chosen, ends = [], set()
+        for a, b in pairs:  # bars without common ends, the longest first
+            if a.key not in ends and b.key not in ends:
+                chosen.append((a, b))
+                ends |= {a.key, b.key}
+        assert len(chosen) >= 4
+
+        def true(a, b):
+            return float(np.linalg.norm(truth[a.label] - truth[b.label]))
+
+        wrong = out.add_scalebar(*chosen[0], true(*chosen[0]) + 0.006, accuracy=0.0001)
+        for a, b in chosen[1:3]:
+            out.add_scalebar(a, b, true(a, b), accuracy=0.0001)
+        checks = [out.add_scalebar(a, b, true(a, b), checkpoint=True).label for a, b in chosen[3:5]]
+        rep = out.update_transform()
+        assert rep["method"] == "scalebars" and crs_mod.is_local(out.crs)
+        return out, wrong.label, checks
+
+    errors = {}
+    for mode in ("plain", "bars"):
+        ch, wrong, checks = copy(mode)
+        err = ch.optimize_cameras(use_markers=mode == "bars")
+        rows = {e["label"]: e for e in ch.update_transform()["scalebars"]}
+        errors[mode] = abs(rows[wrong]["error"])
+        assert err < 0.5
+        assert max(abs(rows[c]["error"]) for c in checks) < 0.003, [rows[c]["error"] for c in checks]
+        report = ch.meta["sfm"]["optimize"]
+        if mode == "bars":
+            assert report["scale_bars"] == 3 and report["control_points"] == 0
+            assert report["after"]["scalebar_control"] < report["before"]["scalebar_control"]
+            assert report["after"]["scalebar_check"] < 0.003
+        else:
+            assert report["scale_bars"] == 0 and "before" not in report
+    assert errors["bars"] < errors["plain"] - 0.0001  # the block bent towards the bars
+
+
 def test_model_from_imported_poses_refers_only_to_written_points(processed, tmp_path):
     """The COLMAP model written from imported poses (Metashape, WebODM, merged chunks) must
     not refer to points seen by a single photo: they are not written, and the depth maps

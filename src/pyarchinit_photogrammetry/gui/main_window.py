@@ -1433,38 +1433,51 @@ class MainWindow(QMainWindow):
         if not self._need_chunk(aligned=True):
             return
         ch = self.chunk
+        from ..markers import gcp
+
         controls = [m for m in ch.markers if not m.checkpoint and m.reference.enabled and m.reference.location]
         checks = [m for m in ch.markers if m.checkpoint and m.reference.location]
+        bars = gcp.control_scalebars(ch)
         v = ParamDialog.ask(self, "Ottimizza camere", [
-            Field("markers", f"Usa i punti di controllo nell'ottimizzazione ({len(controls)} GCP)", len(controls) >= 3),
+            Field("markers", f"Usa punti di controllo e barre di scala nell'ottimizzazione ({len(controls)} GCP, "
+                             f"{len(bars)} barre)", len(controls) >= 3 or len(bars) >= 2),
             Field("weight", "Peso di una misura di marker (in osservazioni di punti di legame)", 4, minimum=1, maximum=50),
             Field("pp", "Ottimizza anche il punto principale (cx, cy)", False)],
             intro="Bundle adjustment globale di posizioni, orientamenti e calibrazione. Con 3 o piu' punti di controllo "
                   "i GCP entrano nel calcolo come punti fissi alle loro coordinate: il blocco si piega per passarci "
                   "(corregge anche deformazioni come la cupola di una distorsione sbagliata, non solo la "
-                  f"rototraslazione). I check point ({len(checks)}) restano fuori e misurano il risultato.")
+                  f"rototraslazione). I check point ({len(checks)}) restano fuori e misurano il risultato.\n\n"
+                  "Le barre di scala (due o piu', oppure insieme ai GCP) entrano come in Metashape: i marker alle loro "
+                  "estremita' vengono fissati dove le barre hanno la loro lunghezza, spostati quanto permette la loro "
+                  "precisione nelle foto, e il blocco si piega verso di loro quanto le foto lo consentono. Una sola "
+                  "barra da' soltanto la scala. Le barre di check misurano il risultato.")
         if not v:
             return
 
         def job(p):
             err = ch.optimize_cameras(fit_principal_point=v["pp"], use_markers=v["markers"],
                                       marker_weight=int(v["weight"]), progress=p)
-            if any(m.reference.location for m in ch.markers):
+            if any(m.reference.location for m in ch.markers) or ch.scalebars:
                 self.last_report = ch.update_transform()
             return err
 
         def done(err):
             rep = ch.meta.get("sfm", {}).get("optimize", {})
             text = f"Errore di riproiezione {err:.3f} px"
+            b, a = rep.get("before", {}), rep.get("after", {})
+
+            def mm(x):
+                return "-" if x is None else f"{x * 1000:.1f} mm"
+
             if rep.get("control_points"):
-                b, a = rep.get("before", {}), rep.get("after", {})
-
-                def mm(x):
-                    return "-" if x is None else f"{x * 1000:.1f} mm"
-
                 text += (f"; {rep['control_points']} punti di controllo: errore {mm(b.get('control'))} -> "
                          f"{mm(a.get('control'))}" + (f", check point {mm(b.get('check'))} -> {mm(a.get('check'))}"
                                                      if a.get("check") is not None else ""))
+            if rep.get("scale_bars"):
+                text += (f"; {rep['scale_bars']} barre di scala: errore {mm(b.get('scalebar_control'))} -> "
+                         f"{mm(a.get('scalebar_control'))}" + (
+                             f", barre check {mm(b.get('scalebar_check'))} -> {mm(a.get('scalebar_check'))}"
+                             if a.get("scalebar_check") is not None else ""))
             self.log_pane.info("Ottimizzazione camere: " + text)
             self.statusBar().showMessage(text, 15000)
 

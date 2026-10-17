@@ -89,23 +89,28 @@ def align(project: Path, quality: str = "high", pairs: str = "auto", keypoints: 
 
 
 @app.command()
-def optimize(project: Path, markers: bool = typer.Option(True, help="control points (3 or more) take part in the "
-                                                                   "adjustment; check points are reported"),
+def optimize(project: Path, markers: bool = typer.Option(True, help="control points (3 or more) and control scale "
+                                                                   "bars (2 or more, or with control points) take part "
+                                                                   "in the adjustment; check points and bars are reported"),
              marker_weight: int = typer.Option(4, help="a marker measurement counts as this many tie point observations"),
              principal_point: bool = False, chunk: Optional[str] = None):
-    """Optimize the cameras (global bundle adjustment), on the control points when there are any."""
+    """Optimize the cameras (global bundle adjustment), on the control points and scale bars when there are any."""
     doc, ch = _open(project, chunk)
     err = ch.optimize_cameras(fit_principal_point=principal_point, use_markers=markers, marker_weight=marker_weight,
                               progress=print_progress)
-    if any(m.reference.location for m in ch.markers):
+    if any(m.reference.location for m in ch.markers) or ch.scalebars:
         ch.update_transform()
     doc.save()
     rep = ch.meta["sfm"]["optimize"]
     text = f"reprojection error {err:.3f} px"
+    b, a = rep.get("before", {}), rep.get("after", {})
     if rep.get("control_points"):
-        b, a = rep["before"], rep["after"]
         text += (f", {rep['control_points']} control points: RMSE {b['control']} -> {a['control']} m"
                  + (f", check {b['check']} -> {a['check']} m" if a.get("check") is not None else ""))
+    if rep.get("scale_bars"):
+        text += (f", {rep['scale_bars']} scale bars: RMSE {b['scalebar_control']} -> {a['scalebar_control']} m"
+                 + (f", check bars {b['scalebar_check']} -> {a['scalebar_check']} m"
+                    if a.get("scalebar_check") is not None else ""))
     typer.echo(text)
 
 

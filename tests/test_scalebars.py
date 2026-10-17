@@ -289,6 +289,50 @@ def test_scale_bars_in_the_interface(two_chunks, scene, qapp_bars, monkeypatch, 
     w.close()
 
 
+def test_optimize_with_scale_bars_in_the_interface(two_chunks, scene, qapp_bars, monkeypatch, tmp_path):
+    """*Ottimizza camere* with two control bars: the dialog offers the bars, the adjustment holds
+    them and the log reports their errors before and after."""
+    import shutil
+
+    from PySide6.QtCore import QSettings
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
+    copy = tmp_path / "copia"
+    shutil.copytree(two_chunks.parent, copy)  # the adjustment writes the model of the chunk
+    doc = ppg.Document.open(copy / two_chunks.name)
+    w = mw.MainWindow(doc, autoconnect=False)
+    w.runner.show_dialog = False
+    ch = w.chunk
+    pairs = _pairs(ch, scene)
+    a, b = pairs[0]
+    x, y = next(p for p in pairs if not {p[0].key, p[1].key} & {a.key, b.key})  # two bars without common ends
+    ch.add_scalebar(a, b, _true(scene, a, b))
+    ch.add_scalebar(x, y, _true(scene, x, y))
+    seen = []
+
+    def ask(cls, parent, title, fields, intro=""):
+        seen.append(({f.name: f for f in fields}, intro))
+        return {"markers": True, "weight": 4, "pp": False}
+
+    monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(ask))
+    w.optimize_cameras()
+    w.runner.wait()
+    qapp_bars.processEvents()
+    fields, intro = seen[-1]
+    assert "2 barre" in fields["markers"].label and fields["markers"].default is True and "barre di scala" in intro
+    assert ch.meta["sfm"]["optimize"]["scale_bars"] == 2
+    log = " ".join(e[2] for e in w.log_pane.entries)
+    assert "2 barre di scala: errore" in log
+    assert w.last_report["method"] == "scalebars"
+    w.setWindowModified(False)
+    w.photos.stop()
+    w.close()
+
+
 @pytest.fixture(scope="module")
 def qapp_bars():
     import os

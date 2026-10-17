@@ -493,18 +493,20 @@ def _square_pixels(chunk: Chunk, rec) -> None:
             cam.params = params
 
 
-def _control_points(chunk: Chunk, rec, copies: int) -> list[int]:
-    """Markers with an enabled reference (not check points) as fixed 3D points of the
-    reconstruction, observed where they were measured in the photos. Each is added
-    ``copies`` times: a marker measurement weighs that many tie point observations."""
+MARKER_PIXEL_ACCURACY = 0.5  # px: how well a marker is measured in a photo (Metashape's default)
+
+
+def _fixed_points(chunk: Chunk, rec, copies: int, points) -> tuple[list[int], set[int]]:
+    """Markers as fixed 3D points of the reconstruction at the given positions (internal frame),
+    observed where they were measured in the photos; ``points`` is a list of (marker, position).
+    Each is added ``copies`` times: a marker measurement weighs that many tie point observations.
+    Returns the point ids and the keys of the markers added (two photos or more)."""
     import pycolmap
 
     names = chunk.meta["sfm"]["names"]
     by_name = {img.name: iid for iid, img in rec.images.items() if img.has_pose}
-    pids = []
-    for m in chunk.markers:
-        if m.checkpoint or not m.reference.enabled or not m.reference.location:
-            continue
+    pids, added = [], set()
+    for m, X in points:
         obs = []
         for cam_key, proj in m.projections.items():
             iid = by_name.get(names.get(str(cam_key), ""))
@@ -512,28 +514,107 @@ def _control_points(chunk: Chunk, rec, copies: int) -> list[int]:
                 obs.append((iid, proj.x, proj.y))
         if len(obs) < 2:
             continue
-        X = chunk.to_internal(np.asarray([m.reference.location], float))[0]
+        added.add(m.key)
         for _ in range(copies):
             track = pycolmap.Track()
             for iid, x, y in obs:  # marker projections are in COLMAP's pixel convention
                 pts = rec.images[iid].points2D
                 pts.append(pycolmap.Point2D(np.array([x, y], float)))
                 track.add_element(iid, len(pts) - 1)
-            pids.append(rec.add_point3D(X, track, np.array([255, 0, 0], np.uint8)))
-    return pids
+            pids.append(rec.add_point3D(np.asarray(X, float), track, np.array([255, 0, 0], np.uint8)))
+    return pids, added
+
+
+def _control_markers(chunk: Chunk) -> dict:
+    """Markers with an enabled reference (not check points) -> their reference in the internal frame."""
+    out = {}
+    for m in chunk.markers:
+        if not m.checkpoint and m.reference.enabled and m.reference.location:
+            out[m.key] = chunk.to_internal(np.asarray([m.reference.location], float))[0]
+    return out
+
+
+def _control_points(chunk: Chunk, rec, copies: int) -> list[int]:
+    """Markers with an enabled reference (not check points) as fixed 3D points of the
+    reconstruction at their reference coordinates, observed where they were measured in the
+    photos (see :func:`_fixed_points`)."""
+    fixed = _control_markers(chunk)
+    return _fixed_points(chunk, rec, copies, [(chunk.marker_by_key(k), X) for k, X in fixed.items()])[0]
+
+
+def marker_precision(chunk: Chunk, marker) -> float | None:
+    """Precision of a triangulated marker (internal units): the accuracy of its measurements in
+    the photos (:data:`MARKER_PIXEL_ACCURACY`) carried to its distance from each camera and
+    combined over the photos that see it; None when it is not placed."""
+    if marker.position is None:
+        return None
+    inv = 0.0
+    for cam_key in marker.projections:
+        try:
+            cam = chunk.camera(cam_key)
+        except KeyError:
+            continue
+        sensor = chunk.sensors.get(cam.sensor_key)
+        if cam.transform is None or sensor is None or not sensor.params:
+            continue
+        depth = float((marker.position - cam.transform[:3, 3]) @ cam.transform[:3, 2])
+        if depth > 0:
+            inv += (float(sensor.params[0]) / (MARKER_PIXEL_ACCURACY * depth)) ** 2
+    return 1.0 / np.sqrt(inv) if inv > 0 else None
+
+
+def bar_anchors(chunk: Chunk, bars, fixed: dict | None = None) -> dict:
+    """Positions (internal frame) of the markers at the ends of control scale bars that give the
+    bars their lengths, each marker moved as little as its precision allows: least squares of
+    ``scale * length - distance`` (weighted by ``1 / accuracy**2``) and of the shifts (weighted by
+    :func:`marker_precision`). Markers in ``fixed`` (control points: key -> internal position)
+    stay where they are. Returns {marker key: position}."""
+    from scipy.optimize import least_squares
+
+    fixed = dict(fixed or {})
+    s = float(chunk.scale)
+    usable = [sb for sb in bars
+              if all(chunk.marker_by_key(k).position is not None or k in fixed for k in (sb.marker_a, sb.marker_b))]
+    keys = sorted({k for sb in usable for k in (sb.marker_a, sb.marker_b)} - set(fixed))
+    if not usable or not keys:
+        return {}
+    start = {k: np.asarray(chunk.marker_by_key(k).position, float) for k in keys}
+    sigma = {k: marker_precision(chunk, chunk.marker_by_key(k)) for k in keys}
+    known = [v for v in sigma.values() if v]
+    for k in keys:  # a marker without photos to judge it by: as the others
+        sigma[k] = sigma[k] or (float(np.median(known)) if known else 1e-3 / s)
+    idx = {k: i for i, k in enumerate(keys)}
+
+    def pos(x, k):
+        return fixed[k] if k in fixed else x[3 * idx[k]:3 * idx[k] + 3]
+
+    def residuals(x):
+        r = [(s * np.linalg.norm(pos(x, sb.marker_a) - pos(x, sb.marker_b)) - sb.distance) / max(sb.accuracy, 1e-6)
+             for sb in usable]
+        for k in keys:
+            r.extend((x[3 * idx[k]:3 * idx[k] + 3] - start[k]) / sigma[k])
+        return np.asarray(r)
+
+    x0 = np.concatenate([start[k] for k in keys])
+    x = least_squares(residuals, x0, x_scale=np.repeat([sigma[k] for k in keys], 3)).x
+    return {k: x[3 * idx[k]:3 * idx[k] + 3] for k in keys}
 
 
 def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_markers: bool = True,
                      marker_weight: int = 4, progress: Progress | None = None) -> float:
     """Global bundle adjustment of poses, calibration and tie points.
 
-    With ``use_markers`` and at least 3 control points (markers with an enabled reference
-    and two or more projections; check points are left out) the markers enter the
-    adjustment as fixed points at their reference coordinates, so the block bends to fit
-    them (a deformation such as the "dome" of a wrong radial distortion is corrected, not
-    only the similarity of the georeference). The report (reprojection error, control
-    and check point errors before and after) goes into ``chunk.meta["sfm"]["optimize"]``.
-    Returns the mean reprojection error in pixels."""
+    With ``use_markers`` the control points and the control scale bars take part in it, as in
+    Metashape. Control points (markers with an enabled reference and two or more projections;
+    check points are left out) are fixed points at their reference coordinates, so the block
+    bends to fit them (a deformation such as the "dome" of a wrong radial distortion is
+    corrected, not only the similarity of the georeference). Scale bars: the markers at their
+    ends are fixed where the bars get their lengths, moved as little as the precision of each
+    marker allows (:func:`bar_anchors`): with two bars or more, or with control points, the block
+    bends towards the lengths (a single bar only gives the scale, set by the georeference). The
+    constrained adjustment needs three fixed points or more, not on a line. The report
+    (reprojection error, control/check point and bar errors before and after) goes into
+    ``chunk.meta["sfm"]["optimize"]``. Returns the mean reprojection error in pixels."""
     import pycolmap
 
     from ..markers import gcp
@@ -543,34 +624,46 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     drop_missing_points(rec)  # models written from imported poses by earlier versions
 
     def errors():
-        rows = gcp.marker_errors(chunk)
         out = {}
+        rows = gcp.marker_errors(chunk)
+        bar_rows = [r for r in gcp.scalebar_errors(chunk) if r["enabled"]]
         for kind in ("control", "check"):
             e = [r["error"] for r in rows if r["type"] == kind and r["error"] is not None]
             out[kind] = float(np.sqrt(np.mean(np.square(e)))) if e else None
+            e = [r["error"] for r in bar_rows if r["type"] == kind and r["error"] is not None]
+            out[f"scalebar_{kind}"] = float(np.sqrt(np.mean(np.square(e)))) if e else None
         return out
 
     controls = [m for m in chunk.markers if not m.checkpoint and m.reference.enabled and m.reference.location]
-    constrained = use_markers and len(controls) >= 3
+    bars = gcp.control_scalebars(chunk) if use_markers else []
+    with_gcps = use_markers and len(controls) >= 3
+    constrained = with_gcps or len(bars) >= 2  # fewer control points do not place the chunk
     if constrained:
-        gcp.update_transform(chunk)  # the reference coordinates in the internal frame
+        gcp.update_transform(chunk)  # the reference coordinates and the bars in the internal frame
     before = errors() if constrained else {}
-    progress(0.1, "Optimizing camera alignment" + (" on the control points" if constrained else ""))
+    progress(0.1, "Optimizing camera alignment" + (" on the control points and scale bars" if constrained else ""))
     _square_pixels(chunk, rec)
     opts = pycolmap.BundleAdjustmentOptions()
     try:
         opts.refine_principal_point = fit_principal_point
     except AttributeError:  # pragma: no cover - option name differs between versions
         pass
-    if constrained:  # the block first finds its own shape and calibration, then bends to the control points
+    if constrained:  # the block first finds its own shape and calibration, then bends to the references
         pycolmap.bundle_adjustment(rec, opts)
         _restore_sensor_models(chunk, rec)
         import_reconstruction(chunk, rec)
         gcp.update_transform(chunk)
         _square_pixels(chunk, rec)
-        progress(0.5, "Optimizing camera alignment on the control points")
-    pids = _control_points(chunk, rec, max(1, int(marker_weight))) if constrained else []
-    if len(pids) >= 3 * max(1, int(marker_weight)):
+        progress(0.5, "Optimizing camera alignment on the control points and scale bars")
+    copies = max(1, int(marker_weight))
+    points = []
+    if constrained:
+        fixed = _control_markers(chunk) if with_gcps else {}
+        anchors = bar_anchors(chunk, bars, fixed) if bars else {}
+        points = [(chunk.marker_by_key(k), X) for k, X in {**fixed, **anchors}.items()]
+    pids, used = _fixed_points(chunk, rec, copies, points) if points else ([], set())
+    placed = np.array([rec.points3D[pid].xyz for pid in pids[::copies]]) if pids else np.zeros((0, 3))
+    if len(placed) >= 3 and gcp._non_collinear(placed):
         config = pycolmap.BundleAdjustmentConfig()
         for iid, image in rec.images.items():
             if image.has_pose:
@@ -578,33 +671,44 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
         for pid in pids:
             config.add_constant_point(pid)  # with three or more fixed points the gauge is fixed too
         pycolmap.create_default_bundle_adjuster(opts, config, rec).solve()
-        added: dict[int, int] = {}
-        for pid in pids:
-            for el in rec.points3D[pid].track.elements:
-                added[el.image_id] = added.get(el.image_id, 0) + 1
-            rec.delete_point3D(pid)
-        for iid, n in added.items():  # the marker observations were appended last
-            pts = rec.images[iid].points2D
-            for _ in range(n):
-                pts.pop()
     else:
-        pids = []
+        pids, points = _drop_points(rec, pids), []
         pycolmap.bundle_adjustment(rec, opts)
+    pids = _drop_points(rec, pids)
     _restore_sensor_models(chunk, rec)
     rec.update_point_3d_errors()  # the adjustment does not refresh the stored errors
     rec.write(str(chunk.product_path("reconstruction")))
     import_reconstruction(chunk, rec)
     err = float(rec.compute_mean_reprojection_error())
-    report = {"reprojection_error": err, "control_points": len(pids) // max(1, int(marker_weight))}
-    if pids:
-        gcp.update_transform(chunk)
-        report.update({"before": before, "after": errors()})
+    used = used if points else set()
+    report = {"reprojection_error": err,
+              "control_points": sum(1 for m in controls if m.key in used) if with_gcps else 0,
+              "scale_bars": sum(1 for sb in bars if {sb.marker_a, sb.marker_b} <= used)}
+    if points or gcp.control_scalebars(chunk):
+        gcp.update_transform(chunk)  # the bars and the control points on the adjusted block
     else:
         chunk.triangulate_markers()
+    if points:
+        report.update({"before": before, "after": errors()})
     chunk.meta.setdefault("sfm", {})["reprojection_error"] = err
     chunk.meta["sfm"]["optimize"] = report
     progress(1.0, f"Mean reprojection error {err:.3f} px")
     return err
+
+
+def _drop_points(rec, pids: list[int]) -> list[int]:
+    """Take the fixed marker points out of the reconstruction again (their observations were
+    appended last to their images). Returns []."""
+    added: dict[int, int] = {}
+    for pid in pids:
+        for el in rec.points3D[pid].track.elements:
+            added[el.image_id] = added.get(el.image_id, 0) + 1
+        rec.delete_point3D(pid)
+    for iid, n in added.items():
+        pts = rec.images[iid].points2D
+        for _ in range(n):
+            pts.pop()
+    return []
 
 
 def camera_view_graph(chunk: Chunk) -> dict[int, dict[int, int]]:
