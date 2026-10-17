@@ -37,8 +37,8 @@ so styles and labels are native QGIS ones. Units published to PyArchInit
 *File > Importa > Progetto Metashape* or `ppg import-metashape progetto.psx nuovo.ppg`.
 The project is read directly (no Metashape needed): sensors with their calibration
 (converted to COLMAP `FULL_OPENCV`: `f`, `cx/cy` from the centre, `b1`, `k1..k3`, `p1/p2`
-swapped to OpenCV order), aligned cameras, markers with references and projections, tie
-points with colours, the model (`model.zip`), and the DEM/orthomosaic GeoTIFFs exported next
+swapped to OpenCV order), aligned cameras, markers with references, accuracies and
+projections, scale bars, tie points with colours, the model (`model.zip`), and the DEM/orthomosaic GeoTIFFs exported next
 to the project (folders or names containing *dem/dsm* and *orto/ortho*). Without a usable
 exported DEM (none, or an empty file left by a failed export, which is reported), the DEM
 kept inside the project is used: Metashape stores it as GeoTIFF tiles listed in
@@ -53,6 +53,15 @@ A COLMAP model is written from the imported poses, so *Nuvola densa*, *Modello*,
 
 Details of the import:
 
+* scale bars between markers come with their distance, their accuracy (the bar's, else the
+  chunk's *Scale bar accuracy*) and their type: a bar unticked in Metashape's Reference pane is a
+  check bar. Metashape already scaled the chunk with them, so the transform is not fitted again:
+  the *Riferimenti* pane shows every bar with its error (on four object projects of a season,
+  0.5 m bars came back at 0.5000 m). Bars between cameras, or without a distance, are reported
+  and left out. Marker accuracies come from the markers or from the chunk's *Marker accuracy*;
+* a chunk in local coordinates scaled by scale bars has a transform with the scale alone (no
+  rotation, no translation): it is applied (up to 0.5.1 the scale was dropped and such projects
+  came in 3-14 times too large);
 * cameras and markers inside groups (folders of Metashape's Workspace) are read; empty
   chunks are skipped and the chunk with most aligned cameras becomes the active one;
 * tie points are read from every alignment component, each through its own transform;
@@ -82,7 +91,19 @@ GeoTIFF), dense clouds in Metashape's octree format, masks, skew `b2`, `k4`.
 *File > Importa > Progetto WebODM* or `ppg import-webodm all.zip nuovo.ppg` (or the task
 folder). Orthophoto, DSM (or DTM), georeferenced point cloud (`.laz`/`.las`/`.ply`) and the
 textured mesh (`odm_textured_model_geo.obj`, relative to the offset in `coords.txt`) become
-the products of a chunk in the CRS of the rasters. Camera poses are not imported.
+the products of a chunk in the CRS of the rasters.
+
+The cameras come with their calibration and pose (`cameras.json` and
+`odm_report/shots.geojson`, both in `all.zip`), and the GCPs ODM used become markers
+(`odm_georeferencing/ground_control_points.geojson`, or `gcp_list_utm.txt`), with their
+surveyed coordinates and where they were measured in the photos. They are triangulated at
+once: the *Riferimenti* pane shows their errors (the same ODM computed; its own figure is in
+the import report), and scale bars can be drawn between them to check the scale. ODM has no
+scale bars of its own: the scale of a task comes from the GPS of the photos or from its GCPs.
+With the photos (the task folder has them, `all.zip` does not) the dense cloud, model and
+texture can be built again here from ODM's poses. OpenSfM camera models: `perspective`,
+`brown`, `radial`, `simple_radial`; fisheye and spherical cameras are left out. Poses of a
+task that is not georeferenced are not imported.
 
 ## Photo3D
 

@@ -20,7 +20,7 @@ import pyarchinit_photogrammetry as ppg
 | `detect_markers(target_type="aruco_4x4_50")` | creates markers `target <code>` with projections |
 | `match_photos(quality, keypoint_limit, pair_selection)` | quality: ultra/high/medium/low/lowest; pairs: auto/exhaustive/sequential/reference |
 | `align_cameras()` | resets the transform; re-georeferences automatically when references exist. Photos are aligned with one focal length (square pixels): fitting fx and fy separately can drift into a degenerate solution. The result stays in the sensor model (`OPENCV` with fx = fy, no tangential distortion); a sensor calibrated with fx != fy or tangential distortion is aligned as it is, and `optimize_cameras()` refines every parameter |
-| `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4)` | bundle adjustment, returns the reprojection error (px). With 3 or more control points (markers with an enabled reference, not check points) a free adjustment is followed by one where the markers are fixed points at their reference coordinates, observed in the photos (each measurement weighs `marker_weight` tie point observations): the block bends to fit them, which a similarity alone cannot do. `meta["sfm"]["optimize"]` reports control and check point RMSE before and after (`ppg optimize`) |
+| `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4)` | bundle adjustment, returns the reprojection error (px). With 3 or more control points (markers with an enabled reference, not check points) a free adjustment is followed by one where the markers are fixed points at their reference coordinates, observed in the photos (each measurement weighs `marker_weight` tie point observations): the block bends to fit them, which a similarity alone cannot do. Control scale bars (2 or more, or with control points) enter the same way: their markers are fixed at `engine.sfm.bar_anchors` (see *Scale bars*). `meta["sfm"]["optimize"]` reports `control_points`, `scale_bars` and the control/check point and bar RMSE before and after (`ppg optimize`) |
 | `import_reference(csv, crs, columns="nxyz")`, `export_reference(csv)` | `n` label, `x y z`, `a` accuracy, `-` skip |
 | `add_marker`, `add_marker_projection`, `add_scalebar`, `triangulate_markers` | manual markers and scale bars (see *Scale bars*) |
 | `update_transform(use_cameras=None)` | weighted 7-parameter fit; returns control/check RMSE, per-marker and per-bar errors |
@@ -232,6 +232,22 @@ A scale bar is the known distance between two markers (`core.marker.ScaleBar`: `
 
 The report adds `scale` (world units per internal unit), `scalebars` (as `scalebar_errors`),
 `scalebar_control_rmse` and `scalebar_check_rmse` (metres, None without bars of that type).
+
+In the camera optimisation (`chunk.optimize_cameras`) the control bars are fixed points as the
+control points are: `engine.sfm.bar_anchors(chunk, bars, fixed=None)` moves the markers at their
+ends so that the bars get their lengths, least squares of `scale * length - distance` (weighted
+by `1 / accuracy²`) and of the shifts, weighted by `engine.sfm.marker_precision(chunk, marker)`
+(the pixel accuracy of its measurements, 0.5 px, carried to its distance from each camera and
+combined over the photos); the adjustment then holds those positions, observed in the photos.
+It needs three fixed points or more, not on a line: two bars, or bars and control points. On
+the synthetic trench, markers measured to 0.5 mm, a bar 6 mm too long with an accuracy of
+0.1 mm bends the block by 0.2 mm: the photos hold it, as in a joint adjustment.
+
+Imports: `integrations.metashape.import_psx` brings the scale bars of the project
+(`MsScaleBar`: two `endpoint marker_id`, `reference d`, accuracy `sd` or the chunk's
+`accuracy_scalebars`, unticked = check bar); `integrations.webodm.import_task` brings the camera
+poses (`read_cameras`: `cameras.json`, `odm_report/shots.geojson`) and the GCPs as markers
+(`read_gcps`), triangulated at once.
 
 ## Modules
 

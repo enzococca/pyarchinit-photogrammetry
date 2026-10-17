@@ -228,6 +228,15 @@ Da terminale: `ppg patch PROGETTO --bbox ... --suggest` elenca le foto di un'are
   stampabili** (*Strumenti > Target > Barra di scala stampabile...*): due target codificati a
   distanza nota su un foglio, un righello di 10 cm per controllare la stampa e il CSV delle barre
   da importare dopo aver rilevato i target.
+* **Nell'ottimizzazione delle camere**, come in Metashape: con due o più barre di controllo (o
+  insieme ai punti di controllo) *Ottimizza camere* fissa i marker alle estremità delle barre dove
+  le barre hanno la loro lunghezza, ognuno spostato quanto permette la sua precisione nelle foto, e
+  il blocco si piega verso di loro quanto le foto lo consentono; gli errori delle barre prima e
+  dopo sono nel resoconto.
+* **Da Metashape e WebODM**: le barre di scala di un progetto Metashape arrivano con l'import
+  (distanza, accuratezza, barre di check). WebODM non ha barre di scala, ma i suoi task ora portano
+  le pose delle camere e i GCP come marker misurati nelle foto, così si possono tracciare barre tra
+  di loro.
 
 Da terminale: `ppg scalebar PROGETTO --markers "target 3,target 9" --distance 0.18` (`--check`,
 `--accuracy`, `--import barre.csv`, `--list`, `--remove ETICHETTA|all`); `ppg markers scalebar

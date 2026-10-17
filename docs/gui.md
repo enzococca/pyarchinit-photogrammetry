@@ -167,6 +167,13 @@ are several), whether it is a check bar, and whether to update the scale at once
   `marker_a, marker_b, distance[, accuracy[, check]]` per line, separated by commas, semicolons,
   tabs or spaces; markers by name (`target 12`) or target code (`12`); a header line is skipped and
   pairs whose markers are not in the chunk are listed in the log.
+* *Ottimizza camere* uses the bars too, as Metashape does: with two control bars or more, or with
+  control points, the markers at the ends of the bars are fixed where the bars get their lengths
+  (each moved as little as its precision in the photos allows, `MARKER_PIXEL_ACCURACY` 0.5 px) and
+  the block bends towards them as far as the tie points allow; a single bar only gives the scale.
+  The log reports the bar errors before and after.
+* Projects imported from Metashape bring their scale bars (distance, accuracy, check bars); WebODM
+  tasks bring the camera poses and their GCPs as markers, so bars can be drawn between them.
 * *Strumenti > Target > Barra di scala stampabile...*: one page per bar with two coded targets at a
   known distance (the last codes of the dictionary, 48-49 for `aruco_4x4_50`, so they never clash
   with target sheets and turntable mats), a 10 cm ruler to check that it was printed at 100 %, and

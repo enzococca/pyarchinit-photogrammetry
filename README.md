@@ -244,6 +244,13 @@ Command line: `ppg patch PROJECT --bbox ... --suggest` lists the photos of an ar
   bars** (*Strumenti > Target > Barra di scala stampabile...*): two coded targets at a known
   distance on a page, a 10 cm ruler to check the print, and the CSV of the bars to import once
   the targets are detected.
+* **In the camera optimisation**, as in Metashape: with two control bars or more (or with
+  control points) *Ottimizza camere* fixes the markers at the ends of the bars where the bars
+  get their lengths, each moved as little as its precision in the photos allows, and the block
+  bends towards them as far as the photos allow; the bar errors before and after are reported.
+* **From Metashape and WebODM**: the scale bars of a Metashape project come with the import
+  (distance, accuracy, check bars). WebODM has no scale bars, but its tasks now bring the camera
+  poses and the GCPs as markers measured in the photos, so bars can be drawn between them.
 
 Command line: `ppg scalebar PROJECT --markers "target 3,target 9" --distance 0.18` (`--check`,
 `--accuracy`, `--import bars.csv`, `--list`, `--remove LABEL|all`); `ppg markers scalebar bar.pdf
