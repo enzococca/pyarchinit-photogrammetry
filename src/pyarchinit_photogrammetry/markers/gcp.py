@@ -387,6 +387,12 @@ def similarity_with_bars(src, dst, weights, lengths=(), distances=(), bar_weight
     return geometry.compose_similarity(float(scale), rot, mu_d - scale * rot @ mu_s)
 
 
+def _has_references(chunk) -> bool:
+    """The chunk has enabled coordinates to be placed by: control points or camera positions."""
+    return (any(not m.checkpoint and m.reference.enabled and m.reference.location for m in chunk.markers)
+            or any(c.reference.enabled and c.reference.location for c in chunk.aligned_cameras))
+
+
 def control_scalebars(chunk) -> list:
     return [sb for sb in chunk.scalebars if sb.enabled and not sb.checkpoint]
 
@@ -430,7 +436,19 @@ def update_transform(chunk, use_cameras: bool | None = None) -> dict:
             method += "+scalebars"
     elif bars:
         s = _bar_scale(chunk, bars)
-        if s:
+        if s and not crs_mod.is_local(chunk.crs) and not _has_references(chunk):
+            # georeferenced elsewhere (an imported project) with nothing to fit it again: the bars
+            # scale it where it is, about their centre, in its CRS
+            ends = [chunk.marker_by_key(k).position for sb in bars for k in (sb.marker_a, sb.marker_b)
+                    if chunk.marker_by_key(k).position is not None]
+            c = chunk.to_world(np.mean(ends, axis=0)[None])[0]
+            k = s / chunk.scale
+            about = np.eye(4)
+            about[:3, :3] *= k
+            about[:3, 3] = c - k * c
+            chunk.transform = about @ chunk.transform
+            method = "scalebars"
+        elif s:
             _, rot, _ = geometry.decompose_similarity(chunk.transform)
             chunk.transform = geometry.compose_similarity(s, rot, np.zeros(3))
             method = "scalebars"

@@ -257,6 +257,7 @@ def test_optimize_cameras_with_scale_bars(processed, tmp_path):
             m.reference.enabled, m.checkpoint = False, False
         for c in out.cameras:
             c.reference.enabled = False
+        out.crs = crs_mod.LOCAL  # a local chunk (a georeferenced one would be scaled where it is)
         ms = sorted(out.markers, key=lambda m: m.label)
         pairs = sorted(((a, b) for i, a in enumerate(ms) for b in ms[i + 1:]),
                        key=lambda p: -np.linalg.norm(truth[p[0].label] - truth[p[1].label]))

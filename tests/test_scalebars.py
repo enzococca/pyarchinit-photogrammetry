@@ -209,6 +209,28 @@ def test_a_marker_placed_in_3d_is_seen_in_the_photos(processed):
     assert np.allclose(lone.position, far)  # kept
 
 
+def test_a_georeferenced_chunk_is_scaled_where_it_is(processed):
+    """A chunk georeferenced elsewhere (an imported project) with no reference to fit it again:
+    a control bar scales it about the bar, in its CRS, instead of moving it to local coordinates."""
+    import pyarchinit_photogrammetry as ppg
+
+    doc, _ch, _ = processed
+    ch = ppg.Document.open(doc.path).chunk
+    for m in ch.markers:
+        m.reference.enabled = False
+    for c in ch.cameras:
+        c.reference.enabled = False
+    crs, a, b = ch.crs, ch.markers[0], ch.markers[1]
+    ends = ch.to_world(np.array([a.position, b.position]))
+    measured = float(np.linalg.norm(ends[0] - ends[1]))
+    ch.add_scalebar(a, b, 0.9 * measured)
+    rep = ch.update_transform()
+    assert rep["method"] == "scalebars" and ch.crs == crs  # still in its CRS
+    now = ch.to_world(np.array([a.position, b.position]))
+    assert abs(float(np.linalg.norm(now[0] - now[1])) - 0.9 * measured) < 1e-6
+    assert np.allclose(now.mean(axis=0), ends.mean(axis=0), atol=1e-6)  # about the bar
+
+
 def test_scale_bars_from_a_file(doc, scene, tmp_path):
     ch = doc.chunks[0]
     pairs = _pairs(ch, scene)

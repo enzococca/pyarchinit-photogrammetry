@@ -1336,14 +1336,31 @@ class MainWindow(QMainWindow):
         choices = [(m.key, m.label) for m in ch.markers]
         first = keys[0] if keys else ch.markers[0].key
         second = keys[1] if len(keys) > 1 else next(k for k, _ in choices if k != first)
+        try:
+            ch.triangulate_markers()  # markers on one photo get their place on the surface
+        except Exception as exc:
+            self.log_pane.warning(f"Triangolazione dei marker non riuscita: {exc}")
         a, b = ch.marker_by_key(first), ch.marker_by_key(second)
         now = ""
         if a.position is not None and b.position is not None:
             from ..engine.chunks import _is_scaled
 
             d = _it(ch.scale * float(np.linalg.norm(a.position - b.position)), 4)
-            now = (f" Ora {a.label} e {b.label} distano {d} m." if _is_scaled(ch) else
+            now = (f" Ora {a.label} e {b.label} distano {d} m (in 3D: con un dislivello e' piu' della distanza in "
+                   "pianta misurata sull'ortofoto)." if _is_scaled(ch) else
                    f" Ora {a.label} e {b.label} distano {d} unita' arbitrarie (il rilievo non e' ancora in scala).")
+        else:
+            missing = [m.label for m in (a, b) if m.position is None]
+            now = (f" {' e '.join(missing)} non ha ancora una posizione: mettilo su una foto (tasto destro nella "
+                   "vista Foto) o sul modello, sulla nuvola o sull'ortofoto (strumento Marker).")
+        from ..core import crs as crs_mod
+
+        georef = not crs_mod.is_local(ch.crs)
+        geo_text = (f"\n\nIl chunk e' georeferenziato ({ch.crs}): la barra e' proposta come verifica, misura "
+                    "l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di "
+                    "controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene "
+                    "scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti)."
+                    if georef else "")
         v = ParamDialog.ask(self, "Barra di scala", [
             Field("a", "Marker A", first, choices=choices),
             Field("b", "Marker B", second, choices=choices),
@@ -1351,11 +1368,11 @@ class MainWindow(QMainWindow):
                   tip="La distanza misurata tra i centri dei due target"),
             Field("accuracy", "Accuratezza (m)", 0.001, minimum=0.00001, maximum=10, decimals=5,
                   tip="Pesa la barra quando ce ne sono piu' d'una"),
-            Field("check", "Solo verifica (check): misura l'errore, non scala", False),
+            Field("check", "Solo verifica (check): misura l'errore, non scala", georef),
             Field("update", "Aggiorna subito la scala", True)],
             intro="Come in Metashape: la distanza nota tra due marker mette in scala il rilievo. Senza punti di "
                   "controllo resta in coordinate locali (oggetti, saggi senza stazione totale); piu' barre si "
-                  "mediano e quelle di verifica misurano l'errore." + now)
+                  "mediano e quelle di verifica misurano l'errore." + now + geo_text)
         if not v:
             return
         if v["a"] == v["b"]:
