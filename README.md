@@ -219,6 +219,35 @@ Command line: `ppg confidence`, `ppg clean-cloud`, `ppg clean-model`, `ppg clean
 Command line: `ppg patch PROJECT --bbox ... --suggest` lists the photos of an area, `--photos A,B`
 (with `--exclude`, `--ground`, `--texture`) adds a patch, `--list`, `--remove ID|all`.
 
+## Scale bars
+
+* **The distance between two markers scales the whole chunk**, as with the scale bars of
+  Metashape: select two markers (targets detected in the photos or placed by hand) in the
+  *Riferimenti* pane, right click > *Crea barra di scala tra A e B...* (or *Barra di scala...*),
+  write their distance in metres and update. No coordinates are needed: an object on a
+  turntable, a find, a wall or a trench without GNSS is scaled in local coordinates.
+* **Several bars**: each control bar asks for a scale and the bars are averaged, weighted by
+  the accuracy of each distance. A **check** bar does not scale: it measures how far the model
+  is from the true distance. The table lists, for every bar, the distance given, the distance
+  measured on the model and the error; the summary has the RMSE of the control bars and of the
+  check bars, and the 3D view draws the bars (control in cyan, check dashed in orange) with
+  their length and error.
+* **Photos with GPS** (a phone, a drone): over an object or a trench of a few metres the photo
+  positions are noise of several metres, so with scale bars they are left out and the chunk
+  stays in local coordinates; when the photos cover an area much larger than their accuracy (a
+  flight over a site) they place and turn the survey and the bars give its scale. With three or
+  more control points the points set position, orientation and scale, and the bars measure the
+  result.
+* **Bars from a file** (*Importa barre...*): one bar per line, `marker_a, marker_b, distance[,
+  accuracy[, check]]`, markers by name or target code, distances in metres. **Printable scale
+  bars** (*Strumenti > Target > Barra di scala stampabile...*): two coded targets at a known
+  distance on a page, a 10 cm ruler to check the print, and the CSV of the bars to import once
+  the targets are detected.
+
+Command line: `ppg scalebar PROJECT --markers "target 3,target 9" --distance 0.18` (`--check`,
+`--accuracy`, `--import bars.csv`, `--list`, `--remove LABEL|all`); `ppg markers scalebar bar.pdf
+--distance-mm 200` prints the bars.
+
 ## Desktop interface
 
 `ppg-gui` opens the desktop application (Italian UI): start page with recent projects; a
@@ -279,7 +308,7 @@ then `ppg.app.document` inside the script (in the GUI: **Strumenti > Esegui scri
 | Alignment | SIFT features and matching, incremental SfM (COLMAP via pycolmap), camera calibration, bundle adjustment (optionally constrained by the control points), tie points, pair selection (exhaustive, sequential, by GNSS position), chunk alignment (markers, common photos or point clouds) and merging |
 | Dense | Depth maps and fusion on CPU (built-in), COLMAP PatchMatch on NVIDIA GPUs (Linux, `pycolmap-cuda12`), OpenMVS when installed |
 | Products | Point cloud (PLY/LAS 1.4 with classes), mesh (from the depth maps by TSDF fusion, Poisson in an isolated process with automatic fallback, or 2.5D), texture atlas (OBJ+MTL+JPG), DEM, orthomosaic, hillshade, slope, HTML report |
-| Markers | Printable ArUco/AprilTag sheets with scale bar, turntable mats with known layout, sub-pixel detection, triangulation, GCP/check points, scale bars, weighted 7-parameter transformation, any EPSG CRS (geographic GCPs go to the UTM zone) |
+| Markers | Printable ArUco/AprilTag sheets with scale bar, turntable mats with known layout, sub-pixel detection, triangulation, GCP/check points, scale bars (control and check, also in local coordinates), weighted 7-parameter transformation, any EPSG CRS (geographic GCPs go to the UTM zone) |
 | Archaeology | Vertical sections and parallel cross sections, plan slices at a given elevation, DXF/SVG drawings at scale, contour lines, cut/fill volumes, freehand drawing and snapping to vertices/segments, 3D proxies of stratigraphic units (closed solids, Extended Matrix OBJ), pottery: rotation axis from sherds, profile, rim/base diameter, height, wall thickness, drawing with filled section |
 | BIM | IFC4 export with IfcMapConversion + IfcProjectedCRS georeferencing, one element per stratigraphic unit with `Pset_PyArchInit_US`; with US proxies, closed solids carrying quantities (`Qto_PyArchInit_US`: volume, area, height, elevations), materials, period/phase groups and stratigraphic relationships (see [docs/bim.md](docs/bim.md)) |
 | AI | Rule-based classification (ground, vegetation, masonry, noise) with archaeological LAS classes 64-71; classes shown, hidden and corrected with a lasso in the 3D view; trainable classifier (random forest on multi-scale geometry, height above ground and colour) learning from the corrections, models reusable on other projects; Segment Anything 2.1 on orthomosaics (tap, box, area, whole orthomosaic in tiles) and photos, on CUDA or the Apple GPU, masks projected to the point cloud, automatic candidate units |

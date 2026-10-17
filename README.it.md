@@ -203,6 +203,35 @@ Da terminale: `ppg confidence`, `ppg clean-cloud`, `ppg clean-model`, `ppg clean
 Da terminale: `ppg patch PROGETTO --bbox ... --suggest` elenca le foto di un'area, `--photos A,B`
 (con `--exclude`, `--ground`, `--texture`) aggiunge una patch, `--list`, `--remove ID|all`.
 
+## Barre di scala
+
+* **La distanza tra due marker mette in scala tutto il chunk**, come le barre di scala di
+  Metashape: seleziona due marker (target rilevati nelle foto o messi a mano) nel pannello
+  *Riferimenti*, tasto destro > *Crea barra di scala tra A e B...* (oppure *Barra di scala...*),
+  scrivi la distanza in metri e aggiorna. Non servono coordinate: un oggetto sul turntable, un
+  reperto, un muro o uno scavo senza GNSS vengono messi in scala in coordinate locali.
+* **Più barre**: ogni barra di controllo chiede una scala e le barre si mediano, pesate con
+  l'accuratezza di ciascuna distanza. Una barra di **check** non scala: misura quanto il modello
+  si discosta dalla distanza vera. La tabella riporta per ogni barra la distanza data, quella
+  misurata sul modello e l'errore; il riepilogo l'RMSE delle barre di controllo e di quelle di
+  check, e la vista 3D disegna le barre (controllo in azzurro, check tratteggiate in arancione)
+  con lunghezza ed errore.
+* **Foto con GPS** (telefono, drone): su un oggetto o uno scavo di pochi metri le posizioni delle
+  foto sono un rumore di diversi metri, quindi con le barre di scala non si usano e il chunk resta
+  in coordinate locali; quando le foto coprono un'area molto più grande della loro accuratezza (un
+  volo su un sito) posizionano e orientano il rilievo e le barre ne danno la scala. Con tre o più
+  punti di controllo sono i punti a dare posizione, orientamento e scala, e le barre misurano il
+  risultato.
+* **Barre da un file** (*Importa barre...*): una barra per riga, `marker_a, marker_b, distanza[,
+  accuratezza[, check]]`, marker per nome o codice del target, distanze in metri. **Barre di scala
+  stampabili** (*Strumenti > Target > Barra di scala stampabile...*): due target codificati a
+  distanza nota su un foglio, un righello di 10 cm per controllare la stampa e il CSV delle barre
+  da importare dopo aver rilevato i target.
+
+Da terminale: `ppg scalebar PROGETTO --markers "target 3,target 9" --distance 0.18` (`--check`,
+`--accuracy`, `--import barre.csv`, `--list`, `--remove ETICHETTA|all`); `ppg markers scalebar
+barra.pdf --distance-mm 200` stampa le barre.
+
 ## Schede US, proxy 3D e BIM
 
 * **Schede US**: doppio clic su una US nel pannello PyArchInit apre la scheda (`us_table`) con

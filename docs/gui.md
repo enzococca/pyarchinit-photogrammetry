@@ -37,7 +37,7 @@ environment diagnosis and the log folder. *File > Pagina iniziale* brings it bac
 | Toolbar | the workflow with coloured icons: open/save, photos, markers, alignment, references, dense cloud, model, texture, DEM, orthophoto, *Elabora tutto*, publish to PyArchInit. Processing actions are disabled while a task runs |
 | Drawing toolbar | always visible under the workflow: the drawing modes (*Sposta / interroga*, *Disegna US*, *Traccia sezione*, *Misura*, *Quota*, *SAM* with its menu), *Cancella disegni*, contour lines, volumes, plan slices, and shortcuts to the *Layer* and *Sezioni* panes and to *Pubblica* (units and spot heights) |
 | Left: **Area di lavoro** | project, chunks (click to make one active), CRS (double click to change), cameras (green camera = aligned, red = not aligned), markers (GCP, check points), products; double click opens a photo or a product |
-| Left: **Riferimenti** | markers with use/check flags, editable coordinates and accuracy, errors (m and px), camera positions; *Importa CSV*, *Aggiorna* (georeferencing), *Ottimizza camere* (with 3 or more control points they take part in the bundle adjustment and bend the block; check points stay out; control/check errors before and after in the log); control and check RMSE |
+| Left: **Riferimenti** | markers with use/check flags, editable coordinates and accuracy, errors (m and px), camera positions; *Importa CSV*, *Aggiorna* (georeferencing), *Ottimizza camere* (with 3 or more control points they take part in the bundle adjustment and bend the block; check points stay out; control/check errors before and after in the log); *Barra di scala...* and *Importa barre...*; the scale bars below the markers (see *Scale bars*); control and check RMSE of points and bars |
 | Left: **Layer** (editing) | double click a value in *Attributi* to change it (US, area, type, label, any free field; computed fields such as m2 and length are read-only). Units loaded from PyArchInit keep their `gid`: *Salva modifiche in PyArchInit* writes the changes back to `pyunitastratigrafiche`; drawn units and spot heights are written with *Pubblica*; written features keep their `gid`, so nothing is written twice |
 | Left: **Layer** | everything drawn on the orthomosaic/DEM is a layer: stratigraphic units, US polygons loaded from PyArchInit, section traces, contour lines, plan slices, spot heights. Tick to show/hide, double click to zoom (layer or single feature), *Rimuovi*; in *Sposta / interroga* mode a click on a feature shows its attributes (US, area, m2, elevation of a contour...) in the pane and in the status bar |
 | Centre: **Modello** | tie points, dense cloud, shaded or textured mesh, camera frusta, markers. Left drag orbits, right/middle drag pans, wheel zooms |
@@ -83,7 +83,7 @@ clipboard.
 * **Flusso di lavoro**: add photos/folder, *Ricollega foto* (the photos with the same names in
   another folder and its subfolders: a copy on an external disk of a Dropbox folder kept online
   only, a moved folder), add chunk, *Allinea chunk* (bring other chunks into the frame of a reference chunk by markers with the same name, photos in common or overlapping clouds), *Unisci chunk* (a new chunk with the photos, markers, tie points, clouds and optionally meshes of aligned chunks), detect coded markers, align (quality,
-  pair selection, limits), import references, update georeferencing, optimise cameras, dense
+  pair selection, limits), import references, update georeferencing, *Nuova barra di scala (distanza tra due marker)*, *Importa barre di scala (CSV)*, optimise cameras, dense
   cloud (quality, filter, engine), *Ritaglia nuvola densa* (height range and/or a cylinder
   around the turntable axis: removes the mat and the targets before meshing an object), model
   (source, surface, faces), texture, DEM, orthomosaic, *Elabora tutto* (Ctrl+R); *Pulizia e
@@ -93,8 +93,8 @@ clipboard.
   *Elabora tutto*) first list the photos that cannot be read (empty files kept online only by
   Dropbox, iCloud or OneDrive) and offer *Ricollega a un'altra cartella*, *Continua senza
   queste foto* or *Annulla*.
-* **Strumenti**: printable target sheets and turntable mats (with the CSV of the target
-  coordinates); drawing on the orthomosaic: stratigraphic units (click the vertices, double
+* **Strumenti**: printable target sheets, turntable mats (with the CSV of the target
+  coordinates) and scale bars; drawing on the orthomosaic: stratigraphic units (click the vertices, double
   click to close), section traces (two clicks: SVG drawing, DXF profile and 3D DXF in
   `sezioni/`), distance and height difference, spot heights / SAM prompts; contour lines;
   cut/fill volumes (drawn unit, plane or second DEM); plan slice at a given elevation;
@@ -137,6 +137,41 @@ clipboard.
 * **Texture**: in the 3D view, the lasso on the model offers *Correggi la texture di queste facce
   (assegna le immagini)*: the photos that see those faces, each with the part of the photo where
   they are; every face takes the best of the chosen photos that sees it.
+
+## Scale bars
+
+A scale bar is the known distance between two markers, as in Metashape. In *Riferimenti* select two
+markers (Cmd/Shift click) and choose *Crea barra di scala tra A e B...* from the right-click menu, or
+press *Barra di scala...* (the selected markers come first in the dialog). The dialog asks for the
+distance in metres (between the centres of the targets), its accuracy (it weighs the bar when there
+are several), whether it is a check bar, and whether to update the scale at once.
+
+* **Control bars** scale the chunk: each asks for the ratio between its distance and the distance of
+  its markers in the model, and the ratios are averaged with weights `1 / accuracy²`. Without control
+  points the chunk is scaled in local coordinates (CRS `LOCAL`): an object, a find, a wall, a trench.
+* **Check bars** (*Check* ticked) do not scale: their error tells how good the scale is.
+* The table under the markers has a row per bar: *Usa* (untick to leave it out), name, markers,
+  *Distanza* and *Accur.* (double click to change them: the error follows at once), *Check*, the
+  distance measured on the model (*Stimata*) and the error, in red when it exceeds three times the
+  accuracy (at least 5 mm). Right click on rows deletes the bars. The summary shows *RMSE barre*
+  (control) and *RMSE barre check*, and how the chunk was placed: *scala dalle barre, coordinate
+  locali* or *posizione dalle foto, scala dalle barre*.
+* **Photos with GPS**: when their positions cover less than ten times their accuracy (a phone or a
+  drone over an object or a trench) they are left out and the bars scale the chunk in local
+  coordinates; over a larger area (a flight over a site) they place and turn the survey and the bars
+  give its scale, about the centre of the bars. With three or more control points the points give
+  position, orientation and scale, and every bar is reported with its error.
+* The 3D view draws the bars between their markers, control bars in cyan and check bars dashed in
+  orange, with their length and error; the workspace lists them under the chunk.
+* *Importa barre...* (or *Flusso di lavoro > Importa barre di scala (CSV)*): a text file with
+  `marker_a, marker_b, distance[, accuracy[, check]]` per line, separated by commas, semicolons,
+  tabs or spaces; markers by name (`target 12`) or target code (`12`); a header line is skipped and
+  pairs whose markers are not in the chunk are listed in the log.
+* *Strumenti > Target > Barra di scala stampabile...*: one page per bar with two coded targets at a
+  known distance (the last codes of the dictionary, 48-49 for `aruco_4x4_50`, so they never clash
+  with target sheets and turntable mats), a 10 cm ruler to check that it was printed at 100 %, and
+  the CSV of the bars next to the PDF: glue the page on something rigid, photograph it with the
+  object, detect the markers and import the CSV.
 
 ## Demo
 

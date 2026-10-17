@@ -22,8 +22,8 @@ import pyarchinit_photogrammetry as ppg
 | `align_cameras()` | resets the transform; re-georeferences automatically when references exist. Photos are aligned with one focal length (square pixels): fitting fx and fy separately can drift into a degenerate solution. The result stays in the sensor model (`OPENCV` with fx = fy, no tangential distortion); a sensor calibrated with fx != fy or tangential distortion is aligned as it is, and `optimize_cameras()` refines every parameter |
 | `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4)` | bundle adjustment, returns the reprojection error (px). With 3 or more control points (markers with an enabled reference, not check points) a free adjustment is followed by one where the markers are fixed points at their reference coordinates, observed in the photos (each measurement weighs `marker_weight` tie point observations): the block bends to fit them, which a similarity alone cannot do. `meta["sfm"]["optimize"]` reports control and check point RMSE before and after (`ppg optimize`) |
 | `import_reference(csv, crs, columns="nxyz")`, `export_reference(csv)` | `n` label, `x y z`, `a` accuracy, `-` skip |
-| `add_marker`, `add_marker_projection`, `add_scalebar`, `triangulate_markers` | manual markers and scale bars |
-| `update_transform()` | weighted 7-parameter fit; returns control/check RMSE and per-marker errors |
+| `add_marker`, `add_marker_projection`, `add_scalebar`, `triangulate_markers` | manual markers and scale bars (see *Scale bars*) |
+| `update_transform(use_cameras=None)` | weighted 7-parameter fit; returns control/check RMSE, per-marker and per-bar errors |
 | `build_depth_maps(quality, filter_mode, backend)` | backends: auto/cpu/colmap/openmvs |
 | `build_point_cloud()`, `build_model(source, surface, face_count, voxel_size, vertex_colors)`, `build_texture(texture_size)` | source: `point_cloud`, `tie_points` or `depth_maps` (see below) |
 | `build_dem(resolution, source)`, `build_orthomosaic(resolution, surface, blending)` | GeoTIFF in the chunk CRS |
@@ -203,11 +203,40 @@ A patch takes the colours of an area of the orthomosaic from photos chosen by ha
 them out). The photos of every tile are ranked on all its cells, so an update gives the same
 pixels as a build.
 
+## Scale bars
+
+A scale bar is the known distance between two markers (`core.marker.ScaleBar`: `label`, `marker_a`,
+`marker_b` (marker keys), `distance` in metres, `accuracy`, `enabled`, `checkpoint`).
+
+| Call | Description |
+| --- | --- |
+| `chunk.add_scalebar(marker_a, marker_b, distance, accuracy=0.001, checkpoint=False, label=None)` | markers as objects, labels, keys or target codes; the same pair again changes the bar |
+| `chunk.scalebar(label_or_key)`, `chunk.remove_scalebar(label_or_key)`, `chunk.scalebars` | the bars |
+| `chunk.import_scalebars(path, accuracy=0.001, delimiter=None)` | `marker_a, marker_b, distance[, accuracy[, check]]` per line; returns `{"bars": [labels], "missing": ["A-B"]}` |
+| `markers.gcp.scalebar_errors(chunk)` | every bar: `label`, `marker_a`, `marker_b`, `distance`, `accuracy`, `type` (control/check), `enabled`, `estimated`, `error` (metres) |
+| `markers.targets.generate_scale_bar(path, target_type="aruco_4x4_50", codes=None, distance_mm=200, marker_size_mm=40, page="A4", count=1)` | printable bars and their CSV, `(pages, csv)` |
+
+`chunk.update_transform()` uses the control bars (enabled, not check) as follows:
+
+* no control point and no camera reference (or camera references that cover less than ten times
+  their accuracy, `cameras_span_their_accuracy`): the scale is the mean of `distance / |a - b|`
+  weighted by `1 / accuracy²`; the orientation stays, the origin is the internal one and the CRS
+  becomes `LOCAL` (`method == "scalebars"`);
+* camera references and no control point: the cameras place and turn the chunk, the bars set the
+  scale about the centre of their markers (`"cameras+scalebars"`); `use_cameras=True` or `False`
+  forces the choice;
+* three or more control points: the points fit position, orientation and scale; the bars are
+  only measured.
+
+The report adds `scale` (world units per internal unit), `scalebars` (as `scalebar_errors`),
+`scalebar_control_rmse` and `scalebar_check_rmse` (metres, None without bars of that type).
+
 ## Modules
 
 | Module | Main functions |
 | --- | --- |
-| `markers.targets` | `generate_sheet`, `generate_turntable_mat`, `turntable_layout`, `detect` |
+| `markers.targets` | `generate_sheet`, `generate_turntable_mat`, `turntable_layout`, `generate_scale_bar`, `scale_bar_codes`, `detect` |
+| `markers.gcp` | `import_reference`, `export_reference`, `triangulate_markers`, `update_transform`, `marker_errors`, `scalebar_errors`, `import_scalebars`, `resolve_marker`, `cameras_span_their_accuracy` |
 | `engine.chunks` | `align_chunks`, `merge_chunks`, `common_markers`, `common_cameras`, `pose_similarity`, `icp`, `global_guesses`, `ransac_rigid`, `registration_quality` |
 | `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |
 | `archaeo.pottery` | `estimate_axis`, `profile_at`, `best_profile`, `Profile.measurements`, `draw` |
