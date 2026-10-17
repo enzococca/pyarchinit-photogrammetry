@@ -282,3 +282,21 @@ def test_depth_maps_with_photos_kept_online_only(processed, tmp_path):
     assert ch.meta["dense"]["skipped_photos"] == [empty.label]
     assert len(ch.build_point_cloud()) > 1000
     assert ch.meta["point_cloud_source"] == "mappe di profondita' (qualita' low)"
+
+
+def test_dem_view_is_lit_from_the_north_west(tmp_path):
+    """The DEM view shades the relief like the exported hillshade, with the sun in the
+    north-west: a slope facing north-west is bright, one facing south-east is dark (the view
+    used the azimuth as the angle of the formula and lit the relief from the south-east)."""
+    from pyarchinit_photogrammetry.gui.image_views import dem_colors
+
+    rows, cols = np.mgrid[0:40, 0:40].astype(float)
+    slopes = {"nw": rows + cols, "se": -(rows + cols)}  # rows grow southwards, columns eastwards
+    view = {k: float(dem_colors(z, 1.0)[5:-5, 5:-5, :3].mean()) for k, z in slopes.items()}
+    assert view["nw"] > 1.5 * view["se"]
+    export = {}
+    for k, z in slopes.items():
+        dem = write_geotiff(tmp_path / f"{k}.tif", z.astype(np.float32), (0.0, 40.0), 1.0, None)
+        with rasterio.open(terrain.hillshade(dem, tmp_path / f"{k}_hs.tif")) as src:
+            export[k] = float(src.read(1)[5:-5, 5:-5].mean())
+    assert export["nw"] > 1.5 * export["se"]

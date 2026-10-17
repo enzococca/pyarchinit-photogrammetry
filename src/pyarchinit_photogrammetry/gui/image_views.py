@@ -42,7 +42,10 @@ def dem_colors(z: np.ndarray, res: float) -> np.ndarray:
     gy, gx = np.gradient(zf, res)
     slope = np.arctan(np.hypot(gx, gy))
     aspect = np.arctan2(gy, -gx)
-    az, alt = np.radians(315.0), np.radians(45.0)
+    # sun at azimuth 315 (north-west, the cartographic convention) and 45 degrees high: the
+    # compass azimuth becomes the angle of the aspect formula as in terrain.hillshade (using
+    # 315 directly lit the view from the south-east and the relief looked inverted)
+    az, alt = np.radians(360.0 - 315.0 + 90.0), np.radians(45.0)
     shade = np.sin(alt) * np.cos(slope) + np.cos(alt) * np.sin(slope) * np.cos(az - aspect)
     shade = np.clip(shade, 0, 1) * 0.7 + 0.3
     rgba[..., :3] = np.clip(col * shade[..., None], 0, 255).astype(np.uint8)
