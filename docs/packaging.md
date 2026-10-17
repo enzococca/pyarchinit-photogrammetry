@@ -12,7 +12,8 @@ They are attached to every [GitHub Release](https://github.com/enzococca/pyarchi
 and produced by the `desktop` workflow (`.github/workflows/desktop.yml`, runners `macos-15`
 and `windows-latest`). The packaged application contains the same code as the `pip`
 package: Open3D, VTK, qtawesome and IfcOpenShell are included; Segment Anything (PyTorch)
-is not, so the SAM tools are disabled there.
+is not, and is installed on first use in a separate environment (see
+[integrations.md](integrations.md#segment-anything-21-in-the-packaged-application)).
 
 ## First start
 

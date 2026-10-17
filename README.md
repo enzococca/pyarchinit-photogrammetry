@@ -9,7 +9,7 @@ cut/fill volumes, point-cloud classification, Segment Anything 2.1, IFC export, 
 publishing into a PyArchInit database. Everything is scriptable in Python and runs on CPU,
 Apple Silicon included.
 
-> Status: **alpha (0.3)**. Python library, command line and desktop application (on the same
+> Status: **alpha (0.5)**. Python library, command line and desktop application (on the same
 > API, with a built-in Python console). Italian version: [README.it.md](README.it.md).
 
 ## Desktop application (no Python needed)

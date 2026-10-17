@@ -62,7 +62,9 @@ Details of the import:
   rotations follow the local rotation of the conversion), not through one similarity;
 * the model (`mesh.ply` in `model.zip`, up to tens of millions of faces) is extracted as a
   stream and a coarse copy made by vertex clustering (`model_preview.ply`, about 600,000
-  faces) is what the 3D view shows; the texture is not imported (vertex colours are);
+  faces) is what the 3D view shows; the vertex colours and the texture (a single-page
+  `texture.tif`, written as `model_texture.jpg`) come with it, and *File > Importa > Modello
+  e texture dal progetto Metashape* adds them to projects imported before;
 * Metashape 2.x builds the mesh from depth maps, so most projects have no dense cloud: the
   coloured mesh vertices become the dense cloud (at most 8 million points). For a real dense
   cloud run *Nuvola densa* here (it uses Metashape's poses), or build it in Metashape;
