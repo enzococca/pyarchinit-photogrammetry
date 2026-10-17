@@ -70,6 +70,17 @@ class MsMarker:
     reference: list[float] | None = None
     enabled: bool = True
     projections: dict[int, tuple[float, float]] = field(default_factory=dict)  # camera id -> pixel
+    accuracy: list[float] | None = None  # of the reference; None: the chunk default
+
+
+@dataclass
+class MsScaleBar:
+    id: int
+    label: str
+    markers: tuple[int, int] | None  # marker ids of the two ends; None: a bar between cameras
+    distance: float | None  # None: a bar without a reference distance (a measurement only)
+    accuracy: float | None = None  # None: the chunk default
+    enabled: bool = True  # unticked in Metashape's Reference pane: a check bar
 
 
 @dataclass
@@ -84,6 +95,8 @@ class MsChunk:
     frame_dir: Path | None
     frame_paths: dict[str, str] = field(default_factory=dict)  # product -> archive path in the frame
     components: dict[int, np.ndarray] = field(default_factory=dict)  # alignment component -> world (4x4)
+    scalebars: list[MsScaleBar] = field(default_factory=list)
+    settings: dict[str, float] = field(default_factory=dict)  # reference settings (accuracy_markers, ...)
 
     def component_transform(self, cid: int | None) -> np.ndarray:
         """Frame of a camera or point part: its component's transform, else the chunk's."""
@@ -107,6 +120,18 @@ def _transform(te) -> np.ndarray | None:
     if len(trans) == 3:
         m[:3, 3] = trans
     return m
+
+
+def _accuracy(ref, names: tuple[str, ...], together: str) -> list[float] | None:
+    """Accuracy of a ``<reference>``: one value per axis (``sx``, ``sy``, ``sz``) or one for all
+    (``sxyz``; ``sd`` for the distance of a scale bar); None when not set (the chunk default)."""
+    if ref is None:
+        return None
+    if ref.get(together) is not None:
+        return [float(ref.get(together))] * max(1, len(names))
+    if names and all(ref.get(n) is not None for n in names):
+        return [float(ref.get(n)) for n in names]
+    return None
 
 
 def _xml_from_zip(path: Path) -> ET.Element:
@@ -152,7 +177,26 @@ def read_psx(psx: str | os.PathLike) -> list[MsChunk]:
             if ref is not None and ref.get("x") is not None:
                 loc = [float(ref.get("x")), float(ref.get("y")), float(ref.get("z", 0.0))]
             markers.append(MsMarker(int(mk.get("id")), mk.get("label", ""), loc,
-                                    ref is None or ref.get("enabled", "true") != "false"))
+                                    ref is None or ref.get("enabled", "true") != "false",
+                                    accuracy=_accuracy(ref, ("sx", "sy", "sz"), "sxyz")))
+        settings = {}
+        for prop in doc.findall("settings/property"):
+            try:
+                settings[prop.get("name", "")] = float(prop.get("value"))
+            except (TypeError, ValueError):
+                pass
+        scalebars = []
+        for sb in doc.findall("scalebars//scalebar"):  # also inside scale bar groups
+            ends = sb.findall("endpoint")
+            ids = [e.get("marker_id") for e in ends]
+            ref = sb.find("reference")
+            d = ref.get("d") if ref is not None else None
+            acc = _accuracy(ref, (), "sd")
+            scalebars.append(MsScaleBar(
+                int(sb.get("id", len(scalebars))), sb.get("label", ""),
+                (int(ids[0]), int(ids[1])) if len(ids) == 2 and None not in ids else None,
+                float(d) if d not in (None, "") else None, acc[0] if acc else None,
+                ref is None or ref.get("enabled", "true") != "false"))
         components = {int(c.get("id")): _transform(c.find("transform")) for c in doc.findall("components/component")
                       if c.find("transform") is not None}
         tr = _transform(doc.find("transform"))
@@ -161,7 +205,7 @@ def read_psx(psx: str | os.PathLike) -> list[MsChunk]:
             tr = components.get(int(active)) if active is not None and int(active) in components else np.eye(4)
         wkt = (doc.findtext("reference") or "").strip() or None
         ch = MsChunk(doc.get("label", f"Chunk {ce.get('id')}"), folder, sensors, cameras, markers, tr, wkt, None,
-                     components=components)
+                     components=components, scalebars=scalebars, settings=settings)
         frame = doc.find("frames/frame")
         if frame is not None:
             fpath = folder / frame.get("path")
@@ -654,6 +698,29 @@ def _import_model(mc: MsChunk, ch, warnings: list, progress, dense_from_mesh: bo
     return True
 
 
+def _import_scalebars(mc: MsChunk, ch, by_ms_id: dict) -> list[str]:
+    """The scale bars of a Metashape chunk between its markers: distance, accuracy (the bar's or
+    the chunk's ``accuracy_scalebars``) and, for a bar unticked in Metashape's Reference pane, a
+    check bar. Metashape already scaled the chunk with them: the transform is not fitted again,
+    the Reference pane shows every bar with its error. Returns warnings."""
+    warnings, skipped = [], {"cameras": 0, "distance": 0}
+    default = mc.settings.get("accuracy_scalebars", 0.001)
+    for sb in mc.scalebars:
+        if sb.markers is None or any(i not in by_ms_id for i in sb.markers):
+            skipped["cameras"] += 1
+            continue
+        if not sb.distance or sb.distance <= 0:
+            skipped["distance"] += 1
+            continue
+        a, b = (by_ms_id[i] for i in sb.markers)
+        ch.add_scalebar(a, b, sb.distance, sb.accuracy or default, checkpoint=not sb.enabled, label=sb.label or None)
+    if skipped["cameras"]:
+        warnings.append(f"{mc.label}: {skipped['cameras']} barre di scala tra camere non importate (servono due marker)")
+    if skipped["distance"]:
+        warnings.append(f"{mc.label}: {skipped['distance']} barre di scala senza distanza non importate")
+    return warnings
+
+
 def reimport_model(ch, psx: str | os.PathLike | None = None, progress=None) -> dict:
     """The model of the Metashape project again - with its vertex colours, its confidence and
     its texture - into a chunk imported earlier (projects imported before the texture was read,
@@ -831,8 +898,10 @@ def import_psx(psx: str | os.PathLike, project: str | os.PathLike, chunk_index: 
         ch.crs = crs
         if tie is not None:
             ch.tie_points = tie
+        by_ms_id = {}
         for m in mc.markers:
             mk = ch.add_marker(m.label)
+            by_ms_id[m.id] = mk
             if m.reference is not None:
                 ref = np.array([m.reference])
                 if crs != "LOCAL" and mc.crs_wkt:
@@ -842,11 +911,15 @@ def import_psx(psx: str | os.PathLike, project: str | os.PathLike, chunk_index: 
                     ref = np.array([t.transform(*m.reference)])
                 mk.reference.location = [float(v) for v in ref[0]]
                 mk.reference.enabled = m.enabled
+                acc = m.accuracy or ([mc.settings["accuracy_markers"]] * 3 if "accuracy_markers" in mc.settings else None)
+                if acc:
+                    mk.reference.accuracy = [float(v) for v in acc]
             for cam_id, (x, y) in m.projections.items():
                 try:
                     ch.add_marker_projection(mk, ch.camera(cam_id), x, y, pinned=True)
                 except KeyError:
                     pass
+        warnings += _import_scalebars(mc, ch, by_ms_id)
         if aligned:
             sub(0.3, f"{mc.label}: modello COLMAP per la nuvola densa")
             try:
@@ -916,4 +989,4 @@ def import_psx(psx: str | os.PathLike, project: str | os.PathLike, chunk_index: 
 
 
 __all__ = ["read_psx", "import_psx", "sensor_params", "crs_mapper", "reframe_cameras", "internal_dem", "mosaic_dem",
-           "MsChunk"]
+           "MsChunk", "MsScaleBar"]

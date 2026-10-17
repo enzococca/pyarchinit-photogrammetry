@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import zipfile
@@ -618,6 +619,57 @@ def test_metashape_transform_with_the_scale_alone():
     m = ms._transform(ET.fromstring(f"<transform><rotation>{_fl(np.eye(3))}</rotation>"
                                     "<translation>1 2 3</translation><scale>2</scale></transform>"))
     assert np.allclose(m[:3, :3], 2 * np.eye(3)) and np.allclose(m[:3, 3], [1, 2, 3])
+
+
+def test_metashape_scale_bars(tmp_path):
+    """The scale bars of a Metashape chunk come with the markers: distance, accuracy (the bar's
+    or the chunk default) and type (unticked in Metashape = check bar), each with its error;
+    bars between cameras or without a distance are reported, not imported."""
+    from pyarchinit_photogrammetry.integrations import metashape as ms
+    from pyarchinit_photogrammetry.markers import gcp
+
+    psx, _, _ = make_psx(tmp_path / "src", n_grid=5)
+    files = psx.with_suffix(".files")
+    with zipfile.ZipFile(files / "0" / "chunk.zip") as z:
+        xml = z.read("doc.xml").decode()
+    xml = xml.split("<reference>")[0] + "</chunk>"
+    # local coordinates scaled by the bars: Metashape writes a transform with the scale alone
+    xml = re.sub(r"<transform><rotation>.*?</transform>", '<transform><scale locked="true">0.5</scale></transform>', xml)
+    ground = {0: (-10.0, -10.0), 1: (10.0, -10.0), 2: (10.0, 10.0), 3: (-10.0, 10.0)}  # internal, z = 0
+    markers = ('<marker id="0" label="A"/><marker id="1" label="B"/>'
+               '<marker id="2" label="C"><reference x="5" y="5" z="0" enabled="true"/></marker>'
+               '<marker id="3" label="D"><reference x="-5" y="5" z="0" sxyz="0.01" enabled="false"/></marker>')
+    bars = ('<scalebar id="0" label="A_B"><endpoint marker_id="0"/><endpoint marker_id="1"/>'
+            '<reference d="10" enabled="true"/></scalebar>'
+            '<group label="checks"><scalebar id="1" label="B_C"><endpoint marker_id="1"/><endpoint marker_id="2"/>'
+            '<reference d="10.02" sd="0.005" enabled="false"/></scalebar></group>'
+            '<scalebar id="2" label="camere"><endpoint camera_id="0"/><endpoint camera_id="1"/>'
+            '<reference d="20" enabled="true"/></scalebar>'
+            '<scalebar id="3" label="C_D"><endpoint marker_id="2"/><endpoint marker_id="3"/></scalebar>')
+    settings = ('<settings><property name="accuracy_markers" value="0.002"/>'
+                '<property name="accuracy_scalebars" value="0.0005"/></settings>')
+    xml = xml.replace("<frames>", f'<markers next_id="4">{markers}</markers>'
+                                  f'<scalebars next_id="4">{bars}</scalebars><frames>').replace("</chunk>", settings + "</chunk>")
+    _zip(files / "0" / "chunk.zip", {"doc.xml": xml})
+    with zipfile.ZipFile(files / "0" / "0" / "frame.zip") as z:
+        frame = z.read("doc.xml").decode()
+    centres = [(-20, -20), (20, -20), (-20, 20), (20, 20)]  # cameras 100 units up, looking down, f 3000 px
+    seen = "".join(f'<marker marker_id="{i}">' + "".join(
+        f'<location camera_id="{c}" pinned="true" x="{2000 + 30 * (x - cx):.4f}" y="{1500 + 30 * (cy - y):.4f}"/>'
+        for c, (cx, cy) in enumerate(centres)) + "</marker>" for i, (x, y) in ground.items())
+    _zip(files / "0" / "0" / "frame.zip", {"doc.xml": frame.replace("</cameras>", f"</cameras><markers>{seen}</markers>")})
+    ch = ms.import_psx(psx, tmp_path / "out" / "p.ppg", with_model=False).chunk
+    assert ch.crs == "LOCAL" and ch.scale == pytest.approx(0.5)
+    rows = {e["label"]: e for e in gcp.scalebar_errors(ch)}
+    assert set(rows) == {"A_B", "B_C"}
+    assert rows["A_B"]["type"] == "control" and rows["A_B"]["accuracy"] == pytest.approx(0.0005)
+    assert abs(rows["A_B"]["error"]) < 1e-6  # 20 internal units of 0.5 m
+    assert rows["B_C"]["type"] == "check" and rows["B_C"]["accuracy"] == pytest.approx(0.005)
+    assert rows["B_C"]["error"] == pytest.approx(-0.02, abs=1e-6)
+    warnings = " ".join(ch.meta["import"]["warnings"])
+    assert "1 barre di scala tra camere" in warnings and "1 barre di scala senza distanza" in warnings
+    assert ch.marker("C").reference.accuracy == [0.002] * 3 and ch.marker("D").reference.accuracy == [0.01] * 3
+    assert not ch.marker("D").reference.enabled
 
 
 def _add_internal_dem(psx: Path, lon: float = 36.8, lat: float = 35.8) -> None:

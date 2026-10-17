@@ -839,13 +839,18 @@ def gui(project: Optional[Path] = typer.Argument(None)):
 
 @app.command("import-metashape")
 def import_metashape(psx: Path, project: Path, chunk: Optional[int] = typer.Option(None, help="only this chunk (index)")):
-    """Project from a Metashape .psx: aligned cameras, calibration, markers, tie points, model, exported DEM/ortho."""
+    """Project from a Metashape .psx: aligned cameras, calibration, markers, scale bars, tie points, model,
+    exported DEM/ortho."""
     from .integrations.metashape import import_psx
+    from .markers import gcp
 
     doc = import_psx(psx, project, chunk_index=chunk, progress=print_progress)
     for ch in doc.chunks:
         typer.echo(f"{ch.label}: {len(ch.aligned_cameras)}/{len(ch.cameras)} cameras, CRS {ch.crs}, "
-                   f"products {sorted(ch.products)}")
+                   f"products {sorted(ch.products)}" + (f", {len(ch.markers)} markers" if ch.markers else ""))
+        for e in gcp.scalebar_errors(ch):
+            err = "-" if e["error"] is None else f"{e['error'] * 1000:+.1f} mm"
+            typer.echo(f"  scale bar {e['label']}: {e['distance']:.4f} m, {e['type']}, error {err}")
 
 
 @app.command("import-webodm")
