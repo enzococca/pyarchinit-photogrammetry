@@ -1184,7 +1184,8 @@ def _merge_into(merged, sources, frames, warnings, merge_markers, merge_tie_poin
                 continue
             seen_bars.add(frozenset((a, b)))
             merged.scalebars.append(ScaleBar(key=len(merged.scalebars), label=sb.label, marker_a=a, marker_b=b,
-                                             distance=sb.distance, accuracy=sb.accuracy, enabled=sb.enabled))
+                                             distance=sb.distance, accuracy=sb.accuracy, enabled=sb.enabled,
+                                             checkpoint=sb.checkpoint))
 
     # tie points (also the 3D points of the COLMAP model)
     progress(0.1, "Tie points")

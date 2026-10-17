@@ -117,6 +117,51 @@ def generate_sheet(path: str | Path, target_type: str = "aruco_4x4_50", codes: I
     return _save_pages(pages, path, dpi)
 
 
+def scale_bar_codes(target_type: str = "aruco_4x4_50", count: int = 1) -> list[tuple[int, int]]:
+    """The code pairs of printed scale bars: the last codes of the dictionary (target sheets and
+    turntable mats start from 0)."""
+    n = dictionary_size(target_type)
+    return [(n - 2 - 2 * i, n - 1 - 2 * i) for i in range(count)]
+
+
+def generate_scale_bar(path: str | Path, target_type: str = "aruco_4x4_50", codes=None, distance_mm: float = 200.0,
+                       marker_size_mm: float = 40.0, page: str = "A4", dpi: int = 300,
+                       count: int = 1) -> tuple[list[Path], Path]:
+    """Printable scale bars: two coded targets whose centres are ``distance_mm`` apart on a
+    landscape page, a 10 cm ruler to check that it was printed at 100 %, and the CSV of the bars
+    (``marker_a,marker_b,distance`` with the target codes and metres) to import once the targets
+    are detected - glue the page on something rigid. ``codes``: the pairs of codes, default
+    :func:`scale_bar_codes`. Returns ``(pages, csv)``."""
+    path = Path(path)
+    pairs = [tuple(int(c) for c in pair) for pair in codes] if codes else scale_bar_codes(target_type, count)
+    ph_mm, pw_mm = PAGE_SIZES_MM[page]  # landscape
+    margin = 12.0
+    if distance_mm + 1.4 * marker_size_mm > pw_mm - 2 * margin:
+        raise ValueError(f"{distance_mm:g} mm between targets of {marker_size_mm:g} mm do not fit on {page}: "
+                         f"at most {pw_mm - 2 * margin - 1.4 * marker_size_mm:g} mm")
+    ppm = dpi / 25.4
+    pages = []
+    for a, b in pairs:
+        canvas = Image.new("L", (int(pw_mm * ppm), int(ph_mm * ppm)), 255)
+        cy = ph_mm / 2 * ppm
+        size = int(round(marker_size_mm * ppm))
+        for code, x_mm in ((a, pw_mm / 2 - distance_mm / 2), (b, pw_mm / 2 + distance_mm / 2)):
+            _draw_target(canvas, target_type, code, x_mm * ppm, cy, size, f"{code}")
+        d = ImageDraw.Draw(canvas)
+        d.text((pw_mm / 2 * ppm, margin * ppm), f"Barra di scala {a}-{b}: {distance_mm:g} mm tra i centri "
+               f"({target_type}, target di {marker_size_mm:g} mm)", fill=0, font=_font(int(4.5 * ppm)), anchor="mt")
+        d.text((pw_mm / 2 * ppm, (margin + 7) * ppm), "Stampa al 100% e incolla su un supporto rigido; se il "
+               "righello non misura 10 cm, correggi la distanza della barra", fill=0, font=_font(int(3.2 * ppm)),
+               anchor="mt")
+        _draw_scale_bar(canvas, margin * ppm, (ph_mm - margin) * ppm, ppm)
+        pages.append(canvas)
+    files = _save_pages(pages, path, dpi)
+    csv = path.with_suffix(".csv")
+    csv.write_text("marker_a,marker_b,distance\n" + "".join(f"{a},{b},{distance_mm / 1000:.5f}\n" for a, b in pairs),
+                   encoding="utf-8")
+    return files, csv
+
+
 def _save_pages(pages: list[Image.Image], path: Path, dpi: int) -> list[Path]:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.suffix.lower() == ".pdf":

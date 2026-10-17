@@ -330,11 +330,55 @@ class Chunk:
 
         gcp.triangulate_markers(self, min_views=min_views)
 
-    def add_scalebar(self, marker_a: Marker, marker_b: Marker, distance: float, accuracy: float = 0.001) -> ScaleBar:
-        sb = ScaleBar(key=self._next_key(self.scalebars), label=f"{marker_a.label}_{marker_b.label}",
-                      marker_a=marker_a.key, marker_b=marker_b.key, distance=float(distance), accuracy=accuracy)
+    def add_scalebar(self, marker_a, marker_b, distance: float, accuracy: float = 0.001,
+                     checkpoint: bool = False, label: str | None = None) -> ScaleBar:
+        """A scale bar: the known ``distance`` (metres) between two markers (objects, labels,
+        keys or target codes). A control bar scales the chunk at :meth:`update_transform`, a
+        check bar (``checkpoint``) only measures the error. The same pair again changes the bar."""
+        from ..markers.gcp import resolve_marker
+
+        a, b = resolve_marker(self, marker_a), resolve_marker(self, marker_b)
+        if a.key == b.key:
+            raise ValueError("a scale bar needs two different markers")
+        if not distance or float(distance) <= 0:
+            raise ValueError("the distance of a scale bar must be positive")
+        for sb in self.scalebars:
+            if {sb.marker_a, sb.marker_b} == {a.key, b.key}:
+                sb.distance, sb.accuracy, sb.checkpoint = float(distance), float(accuracy), bool(checkpoint)
+                if label:
+                    sb.label = label
+                return sb
+        sb = ScaleBar(key=self._next_key(self.scalebars), label=label or f"{a.label}_{b.label}",
+                      marker_a=a.key, marker_b=b.key, distance=float(distance), accuracy=float(accuracy),
+                      checkpoint=bool(checkpoint))
         self.scalebars.append(sb)
         return sb
+
+    def marker_by_key(self, key: int) -> Marker:
+        """The marker with this key (:meth:`marker` also takes labels and target codes, and a
+        code can be another marker's key)."""
+        for m in self.markers:
+            if m.key == key:
+                return m
+        raise KeyError(key)
+
+    def scalebar(self, label_or_key) -> ScaleBar:
+        for sb in self.scalebars:
+            if sb.key == label_or_key or sb.label == label_or_key:
+                return sb
+        raise KeyError(label_or_key)
+
+    def remove_scalebar(self, label_or_key) -> None:
+        sb = self.scalebar(label_or_key)
+        self.scalebars = [s for s in self.scalebars if s is not sb]
+
+    def import_scalebars(self, path: str | os.PathLike, accuracy: float = 0.001, delimiter: str | None = None) -> dict:
+        """Scale bars from a CSV/TXT file: ``marker_a, marker_b, distance[, accuracy[, check]]``
+        (markers by label or target code, metres; a header line is skipped), e.g. the file
+        written with a printable scale bar. Returns ``{"bars", "missing"}``."""
+        from ..markers import gcp
+
+        return gcp.import_scalebars(self, path, accuracy=accuracy, delimiter=delimiter)
 
     # -------------------------------------------------------------- reference
     def import_reference(self, path: str | os.PathLike, crs: str | None = None, delimiter: str | None = None,
@@ -353,7 +397,10 @@ class Chunk:
 
     def update_transform(self, use_cameras: bool | None = None) -> dict:
         """Georeference (or scale) the chunk from markers, scale bars and camera
-        references. Returns an accuracy report (see :func:`markers.gcp.update_transform`)."""
+        references. With scale bars and no control points the chunk stays in local coordinates
+        (an object, a trench) unless the GPS of the photos covers a much larger area than its
+        accuracy; ``use_cameras`` forces the choice. Returns an accuracy report (see
+        :func:`markers.gcp.update_transform`)."""
         from ..markers import gcp
 
         return gcp.update_transform(self, use_cameras=use_cameras)

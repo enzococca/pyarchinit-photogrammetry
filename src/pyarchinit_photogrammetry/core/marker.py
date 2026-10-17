@@ -59,7 +59,8 @@ class Marker:
 
 @dataclass
 class ScaleBar:
-    """Known distance between two markers (metres)."""
+    """Known distance between two markers (metres), as Metashape's scale bars: a control bar
+    gives the scale of the chunk, a check bar (``checkpoint``) only measures its error."""
 
     key: int
     label: str
@@ -68,6 +69,7 @@ class ScaleBar:
     distance: float
     accuracy: float = 0.001
     enabled: bool = True
+    checkpoint: bool = False
 
     def to_dict(self) -> dict:
         return self.__dict__.copy()

@@ -74,7 +74,8 @@ def generate_report(chunk, path) -> Path:
         parts += ["<h2>Markers</h2>", _table(marker_errors(chunk),
                                              ["label", "type", "projections", "pixel_error", "dx", "dy", "dz", "error"])]
     if chunk.scalebars:
-        parts += ["<h2>Scale bars</h2>", _table(scalebar_errors(chunk), ["label", "distance", "estimated", "error"])]
+        parts += ["<h2>Scale bars</h2>", _table(scalebar_errors(chunk), ["label", "type", "distance", "estimated",
+                                                                          "error"])]
     for name, key, dem in (("Digital elevation model", "dem", True), ("Orthomosaic", "orthomosaic", False)):
         b64 = _png_preview(chunk.product_path(key), dem=dem)
         if b64:

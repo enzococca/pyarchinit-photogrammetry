@@ -166,6 +166,56 @@ def clean_tie_points(project: Path,
 
 
 @app.command()
+def scalebar(project: Path,
+             markers: Optional[str] = typer.Option(None, help="the two markers 'A,B' (labels or target codes)"),
+             distance: Optional[float] = typer.Option(None, help="their distance in metres"),
+             accuracy: float = typer.Option(0.001, help="accuracy of the distance (m): weighs the bars"),
+             check: bool = typer.Option(False, help="a check bar: measures the error, does not scale"),
+             import_csv: Optional[Path] = typer.Option(None, "--import", help="scale bars from a CSV: marker_a, "
+                                                                               "marker_b, distance[, accuracy[, check]]"),
+             remove: Optional[str] = typer.Option(None, help="take a bar away: its label, or 'all'"),
+             list_bars: bool = typer.Option(False, "--list", help="list the scale bars with their errors"),
+             update: bool = typer.Option(True, help="scale the chunk after a change"),
+             chunk: Optional[str] = None):
+    """Scale bars, as in Metashape: the known distance between two markers scales the chunk -
+    in local coordinates without control points (objects, trenches) - and every bar gets its
+    error; several bars are averaged, check bars only measure."""
+    from .markers import gcp
+
+    doc, ch = _open(project, chunk)
+    changed = False
+    if remove:
+        if remove == "all":
+            ch.scalebars = []
+        else:
+            ch.remove_scalebar(remove)
+        changed = True
+    if import_csv:
+        out = ch.import_scalebars(import_csv, accuracy=accuracy)
+        typer.echo(f"{len(out['bars'])} scale bars imported" + (f"; markers missing for {', '.join(out['missing'])}"
+                                                                 if out["missing"] else ""))
+        changed = changed or bool(out["bars"])
+    if markers:
+        names = [m.strip() for m in markers.split(",") if m.strip()]
+        if len(names) != 2 or distance is None:
+            raise typer.BadParameter("give --markers A,B and --distance")
+        sb = ch.add_scalebar(names[0], names[1], distance, accuracy, checkpoint=check)
+        typer.echo(f"scale bar {sb.label}: {sb.distance} m" + (" (check)" if sb.checkpoint else ""))
+        changed = True
+    if changed and update and any(c.aligned for c in ch.cameras):
+        rep = ch.update_transform()
+        typer.echo(f"scale: method {rep['method']}, CRS {rep['crs']}, bar RMSE {rep['scalebar_control_rmse']}, "
+                   f"check bar RMSE {rep['scalebar_check_rmse']}")
+    if list_bars or changed:
+        for e in gcp.scalebar_errors(ch):
+            err = "-" if e["error"] is None else f"{e['error'] * 1000:+.1f} mm"
+            typer.echo(f"{e['label']}: {e['marker_a']}-{e['marker_b']} {e['distance']:.4f} m, {e['type']}, error {err}"
+                       + ("" if e["enabled"] else " (not used)"))
+    if changed:
+        doc.save()
+
+
+@app.command()
 def reference(project: Path, csv_file: Path, crs: Optional[str] = None, columns: str = "nxyz",
               delimiter: Optional[str] = None, skip_rows: int = 0, chunk: Optional[str] = None):
     """Import marker coordinates (GCP) and georeference the chunk."""
@@ -846,6 +896,19 @@ def markers_sheet(out: Path, target_type: str = "aruco_4x4_50", codes: str = "0-
     a, _, b = codes.partition("-")
     code_list = list(range(int(a), int(b or a) + 1))
     for p in generate_sheet(out, target_type, code_list, marker_size_mm=size_mm, page=page):
+        typer.echo(str(p))
+
+
+@markers_app.command("scalebar")
+def markers_scalebar(out: Path, target_type: str = "aruco_4x4_50", distance_mm: float = 200.0, size_mm: float = 40.0,
+                     page: str = "A4", count: int = 1):
+    """Printable scale bars: two coded targets at a known distance (and the CSV to import with
+    ppg scalebar --import once the targets are detected)."""
+    from .markers.targets import generate_scale_bar
+
+    files, csv = generate_scale_bar(out, target_type, distance_mm=distance_mm, marker_size_mm=size_mm, page=page,
+                                    count=count)
+    for p in files + [csv]:
         typer.echo(str(p))
 
 
