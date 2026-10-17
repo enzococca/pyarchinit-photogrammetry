@@ -606,6 +606,20 @@ def test_metashape_local_frame_with_components(tmp_path):
     assert np.allclose(moved.transform[:3, :3] @ moved.transform[:3, :3].T, np.eye(3), atol=1e-9)
 
 
+def test_metashape_transform_with_the_scale_alone():
+    """A chunk in local coordinates scaled by scale bars: Metashape writes the scale alone, no
+    rotation or translation; it was dropped and such projects came in many times too large."""
+    import xml.etree.ElementTree as ET
+
+    from pyarchinit_photogrammetry.integrations import metashape as ms
+
+    m = ms._transform(ET.fromstring('<transform><scale locked="true">0.0822</scale></transform>'))
+    assert np.allclose(m, np.diag([0.0822, 0.0822, 0.0822, 1.0]))
+    m = ms._transform(ET.fromstring(f"<transform><rotation>{_fl(np.eye(3))}</rotation>"
+                                    "<translation>1 2 3</translation><scale>2</scale></transform>"))
+    assert np.allclose(m[:3, :3], 2 * np.eye(3)) and np.allclose(m[:3, 3], [1, 2, 3])
+
+
 def _add_internal_dem(psx: Path, lon: float = 36.8, lat: float = 35.8) -> None:
     """Metashape's own DEM: 2 x 2 GeoTIFF tiles in WGS 84 listed in ``elevation.zip`` (height
     300 m rising 1 m per 0.001 degrees eastwards), a coarser level that must be ignored, and

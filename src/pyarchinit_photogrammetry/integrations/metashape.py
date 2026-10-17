@@ -95,15 +95,15 @@ def _floats(text: str | None) -> list[float]:
 
 
 def _transform(te) -> np.ndarray | None:
-    """4x4 from a ``<transform>`` (rotation, translation, scale) element."""
+    """4x4 from a ``<transform>`` (rotation, translation, scale) element. Each part may be
+    missing: a chunk in local coordinates scaled by scale bars has the scale alone."""
     if te is None:
         return None
     m = np.eye(4)
     rot = _floats(te.findtext("rotation"))
     trans = _floats(te.findtext("translation"))
     scale = float(te.findtext("scale") or 1.0)
-    if len(rot) == 9:
-        m[:3, :3] = np.array(rot).reshape(3, 3) * scale
+    m[:3, :3] = (np.array(rot).reshape(3, 3) if len(rot) == 9 else np.eye(3)) * scale
     if len(trans) == 3:
         m[:3, 3] = trans
     return m
