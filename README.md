@@ -233,6 +233,14 @@ Command line: `ppg patch PROJECT --bbox ... --suggest` lists the photos of an ar
   (a click on the model or the cloud) and in the drawing bar (a click on the orthophoto, height
   from the DEM); it is projected on the photos that see it. *Coordinate stimate* in *Riferimenti*
   shows the estimated X, Y, Z of the markers (on by itself when they have no reference ones).
+* **Guided placement, as in Metashape**: a marker placed on one photo (or in 3D) gets blue flags,
+  its estimated place, on the other photos that see it, and the *Foto* pane is filtered on it
+  (badges: green = measured, blue = to confirm). A double click opens a photo centred on the
+  marker: drag the blue flag onto the point (it turns green) or double click it when it is right;
+  Page Down/Up go through the photos. Photos can be filtered by marker (right click in
+  *Riferimenti*), by point (right click on the orthophoto, *Foto del punto* in the 3D view) or by
+  area (a selected polygon). Blue flags are not measurements: with two green ones the marker is
+  triangulated from them.
 * **Several bars**: each control bar asks for a scale and the bars are averaged, weighted by
   the accuracy of each distance. A **check** bar does not scale: it measures how far the model
   is from the true distance. The table lists, for every bar, the distance given, the distance

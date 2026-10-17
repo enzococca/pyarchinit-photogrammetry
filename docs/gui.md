@@ -42,8 +42,8 @@ environment diagnosis and the log folder. *File > Pagina iniziale* brings it bac
 | Left: **Layer** | everything drawn on the orthomosaic/DEM is a layer: stratigraphic units, US polygons loaded from PyArchInit, section traces, contour lines, plan slices, spot heights. Tick to show/hide, double click to zoom (layer or single feature), *Rimuovi*; in *Sposta / interroga* mode a click on a feature shows its attributes (US, area, m2, elevation of a contour...) in the pane and in the status bar |
 | Centre: **Modello** | tie points, dense cloud, shaded or textured mesh, camera frusta, markers. Left drag orbits, right/middle drag pans, wheel zooms |
 | Centre: **Ortofoto / DEM** | orthomosaic or DEM (hypsometric tint and hillshade) in world coordinates; cursor X, Y, Z in the status bar |
-| Centre: **Foto** | a photo with its marker projections (green = placed by hand, blue = detected) and reprojected marker positions (red crosses); right click to place or remove a marker |
-| Bottom: **Foto** | thumbnails with an aligned/not aligned badge |
+| Centre: **Foto** | a photo with its markers, as in Metashape: green flags are measured (placed by hand or detected), blue flags are estimated from the model and to be confirmed (labelled "?"), red crosses are where the survey puts a marker not placed in that photo. Drag a flag onto the point (it turns green; the flag moves as much as the mouse, whatever part of it is grabbed), double click a blue flag to confirm it where it is; right click to place, move, confirm or remove; Page Down/Up (or `]`/`[`) open the next/previous photo of the list shown, centred on the marker of the filter |
+| Bottom: **Foto** | thumbnails with an aligned/not aligned badge and, at the bottom, the markers on each photo (green: measured, blue: to confirm; the tooltip lists them). The bar shows the filter in use - *Foto di point 1*, *Foto con marker*, the photos of a point or of an area - with *Mostra tutte* and *Precedente*/*Successiva*. Filters come from the right click on markers in *Riferimenti* (*Filtra le foto di ...*), the right click on the orthophoto in *Sposta* mode (*Filtra le foto che vedono questo punto*, *Aggiungi un marker qui*), the selection menu of a polygon (*Filtra le foto che inquadrano quest'area*) and *Foto del punto* in the 3D view; a new marker filters the photos on itself |
 | Bottom: **Sezioni** | the sections of the project: list, preview of the SVG drawing (fitted to the pane, with lines and labels thickened so that a drawing metres long on paper stays readable), *Zoom sulla traccia*, *Apri cartella* (DXF profile and 3D DXF in `sezioni/`), *Pubblica in PyArchInit* (`pyarchinit_sezioni`), *Elimina*. Sections are saved in `sezioni/sezioni.json` next to the project and come back when it is reopened |
 | Bottom: **Console Python** | `doc`, `chunk`, `app`, `ppg`, `np`, `window` |
 | Bottom: **Log** | time, level and message of everything that happened; filter (all / warnings and errors / errors), search, *Copia*, *Salva...*, *Cartella log*, *Pulisci*; the traceback of an error is in the row tooltip and in the saved file |
@@ -151,6 +151,14 @@ and *Marker* in the drawing bar (click the orthophoto or the DEM: the height fro
 resolution, else from the cloud along the vertical). The new marker (`point 1`, `point 2`, ...) is
 projected on the photos that see it, not hidden by the surface (blue flags: drag one in a photo to
 pin it); the markers are drawn on the orthophoto as the *Marker* layer.
+
+**Guided placement.** As in Metashape, a marker placed on one photo (or in 3D) gets blue flags on
+the other photos that see it (at most 60, those where it falls nearest the centre first), and
+the *Foto* pane is filtered on it. Open a photo (double click): it is centred on the marker at full
+resolution; drag the blue flag onto the point or double click it when it is right, then Page Down
+for the next photo. Every confirmation places the marker again (two green flags: triangulated) and
+moves the blue flags of the other photos to where it is now. Blue flags are estimates, not
+measurements: they never move a marker that has a green one, nor enter the camera optimisation.
 
 A scale bar is the known distance between two markers, as in Metashape. In *Riferimenti* select two
 markers (Cmd/Shift click) and choose *Crea barra di scala tra A e B...* from the right-click menu, or

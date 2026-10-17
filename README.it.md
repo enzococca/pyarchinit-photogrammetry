@@ -218,6 +218,14 @@ Da terminale: `ppg patch PROGETTO --bbox ... --suggest` elenca le foto di un'are
   (clic sull'ortofoto, quota dal DEM); viene proiettato sulle foto che lo vedono. *Coordinate
   stimate* nel pannello *Riferimenti* mostra le X, Y, Z stimate dei marker (si accende da solo
   quando non hanno coordinate di riferimento).
+* **Posizionamento guidato, come in Metashape**: un marker messo su una foto (o in 3D) riceve le
+  bandierine blu, la sua posizione stimata, sulle altre foto che lo vedono, e il pannello *Foto*
+  si filtra su di lui (segni: verde = misurato, blu = da confermare). Doppio clic apre una foto
+  centrata sul marker: trascina la bandierina blu sul punto (diventa verde) o fai doppio clic se è
+  già giusta; Pagina giù/su passano alle altre foto. Le foto si filtrano per marker (tasto destro
+  in *Riferimenti*), per punto (tasto destro sull'ortofoto, *Foto del punto* nella vista 3D) o per
+  area (un poligono selezionato). Le bandierine blu non sono misure: con due verdi il marker viene
+  triangolato da quelle.
 * **Più barre**: ogni barra di controllo chiede una scala e le barre si mediano, pesate con
   l'accuratezza di ciascuna distanza. Una barra di **check** non scala: misura quanto il modello
   si discosta dalla distanza vera. La tabella riporta per ogni barra la distanza data, quella

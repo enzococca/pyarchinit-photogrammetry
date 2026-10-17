@@ -245,7 +245,17 @@ projection keeps its position. `gcp.views_of(chunk, marker)` counts the aligned 
 it, `gcp.camera_ray(chunk, camera, x, y)` is the ray of a pixel. A marker placed in 3D (internal
 frame) is projected on the photos that see it with `gcp.project_marker(chunk, marker, point,
 max_photos=60)`: inside the frame, in front of the camera, not hidden by the surface near the
-marker, as projections not pinned.
+marker, as estimated projections.
+
+A projection (`core.marker.Projection`) is `pinned` True when placed or confirmed by hand, False
+when detected (coded targets), None when only estimated from the model (Metashape's blue flags;
+older versions read None as a detection). `Projection.measured` is True for the first two: a
+marker with measured projections is placed from them only, estimates are used only for a marker
+placed in 3D, and they never enter the camera optimisation. `gcp.photos_seeing(chunk, point,
+occlusion=True)` lists `(camera, x, y, depth)` of the photos that see a point, nearest the centre
+first (*Filter Photos by Point*); `gcp.project_marker(chunk, marker, point=None, max_photos=60)`
+replaces the estimated projections of a marker from its position; `gcp.views_of(chunk, marker,
+estimated=False)` counts the photos that measure it (or, with `estimated`, that only estimate it).
 
 In the camera optimisation (`chunk.optimize_cameras`) the control bars are fixed points as the
 control points are: `engine.sfm.bar_anchors(chunk, bars, fixed=None)` moves the markers at their
