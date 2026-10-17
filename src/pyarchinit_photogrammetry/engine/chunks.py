@@ -472,6 +472,12 @@ def _accepted(q: dict) -> bool:
             and (q["color_corr"] is None or q["color_corr"] >= MIN_COLOR_CORR))
 
 
+def _convincing(q: dict) -> bool:
+    """A global registration good enough to stop looking: most points fit and, with colours,
+    the colours agree (a mirrored or rotated fit of a symmetric scene does not)."""
+    return _accepted(q) and q["inlier_ratio"] >= 0.75 and (q["color_corr"] is None or q["color_corr"] >= 0.5)
+
+
 def _rank(q: dict) -> tuple:
     return _accepted(q), q["color_corr"] if q["color_corr"] is not None else 0.0, q["fitness"]
 
@@ -563,17 +569,25 @@ def _feature_matches(fs: np.ndarray, fd: np.ndarray) -> np.ndarray:
     return pairs[mutual] if mutual.sum() >= 30 else pairs
 
 
-def ransac_rigid(src: np.ndarray, dst: np.ndarray, threshold: float, samples: int = 60_000,
-                 seed: int = 0) -> tuple[np.ndarray, int]:
-    """Rigid motion mapping most of the putative pairs ``src[i] -> dst[i]`` within
-    ``threshold``: random triplets with consistent side lengths, solved in batches (Kabsch)
-    and scored on every pair, the best refined on its inliers. Deterministic (``seed``).
-    Returns ``(matrix, inliers)``."""
+def _distinct(a: np.ndarray, b: np.ndarray, min_angle: float, min_shift: float) -> bool:
+    """Two rigid motions differ by more than ``min_angle`` degrees or ``min_shift``."""
+    c = (np.trace(a[:3, :3].T @ b[:3, :3]) - 1.0) / 2.0
+    angle = np.degrees(np.arccos(np.clip(c, -1.0, 1.0)))
+    return angle > min_angle or np.linalg.norm(a[:3, 3] - b[:3, 3]) > min_shift
+
+
+def ransac_hypotheses(src: np.ndarray, dst: np.ndarray, threshold: float, samples: int = 60_000, seed: int = 0,
+                      count: int = 3, min_angle: float = 15.0) -> list[tuple[np.ndarray, int]]:
+    """The ``count`` best rigid motions mapping the putative pairs ``src[i] -> dst[i]`` within
+    ``threshold`` that differ from each other (by ``min_angle`` degrees or ``10 x threshold``),
+    most inliers first: random triplets with consistent side lengths, solved in batches (Kabsch)
+    and scored on every pair, each kept motion refined on its inliers. Deterministic (``seed``).
+    A scene with a symmetry (a rectangular trench) gives a wrong motion with nearly as many
+    inliers as the right one: keeping several lets the ICP and the colours choose."""
     rng = np.random.default_rng(seed)
     m = len(src)
-    best, best_n = np.eye(4), -1
     if m < 3:
-        return best, 0
+        return [(np.eye(4), 0)]
     batch = max(16, int(4_000_000 // (3 * m)))  # about 100 MB of moved points per batch
     tri = rng.integers(0, m, size=(samples, 3))
     a, b = src[tri], dst[tri]
@@ -581,6 +595,7 @@ def ransac_rigid(src: np.ndarray, dst: np.ndarray, threshold: float, samples: in
     lb = np.linalg.norm(b - b[:, [1, 2, 0]], axis=2)
     ok = (np.minimum(la, lb) >= 0.9 * np.maximum(la, lb)).all(axis=1) & (la.min(axis=1) > 2 * threshold)
     a, b = a[ok], b[ok]
+    pool = []  # (inliers, order, matrix): the best motions of every batch
     for start in range(0, len(a), batch):
         aa, bb = a[start:start + batch], b[start:start + batch]
         ca, cb = aa.mean(axis=1), bb.mean(axis=1)
@@ -591,27 +606,54 @@ def ransac_rigid(src: np.ndarray, dst: np.ndarray, threshold: float, samples: in
         R = U @ Vt
         t = cb - np.einsum("kij,kj->ki", R, ca)
         moved = np.einsum("kij,nj->kni", R, src) + t[:, None, :]
-        count = (np.sum((moved - dst[None]) ** 2, axis=2) < threshold ** 2).sum(axis=1)
-        k = int(np.argmax(count))
-        if count[k] > best_n:
-            best_n = int(count[k])
-            best = np.eye(4)
-            best[:3, :3], best[:3, 3] = R[k], t[k]
-    for _ in range(2):  # least squares on the inliers
-        inl = np.sum((geometry.apply(best, src) - dst) ** 2, axis=1) < threshold ** 2
-        if inl.sum() < 3:
-            break
-        best = geometry.umeyama(src[inl], dst[inl], with_scale=False)
-        best_n = int(inl.sum())
-    return best, best_n
+        inl = (np.sum((moved - dst[None]) ** 2, axis=2) < threshold ** 2).sum(axis=1)
+        rest = np.argsort(-inl, kind="stable")
+        rest = rest[inl[rest] >= 3]
+        for _ in range(3 * count):  # the best motion, then the best one unlike it, and so on
+            if not len(rest):
+                break
+            k = rest[0]
+            M = np.eye(4)
+            M[:3, :3], M[:3, 3] = R[k], t[k]
+            pool.append((int(inl[k]), len(pool), M))
+            cos = (np.einsum("ij,kij->k", R[k], R[rest]) - 1.0) / 2.0
+            angle = np.degrees(np.arccos(np.clip(cos, -1.0, 1.0)))
+            rest = rest[(angle > min_angle) | (np.linalg.norm(t[rest] - t[k], axis=1) > 10 * threshold)]
+    pool.sort(key=lambda p: (-p[0], p[1]))
+    shift = 10 * threshold
+    picked = []
+    for n, _order, M in pool:
+        if all(_distinct(M, P, min_angle, shift) for P, _ in picked):
+            picked.append((M, n))
+            if len(picked) == 3 * count:
+                break
+    out = []
+    for M, n in picked:
+        for _ in range(2):  # least squares on the inliers
+            inl = np.sum((geometry.apply(M, src) - dst) ** 2, axis=1) < threshold ** 2
+            if inl.sum() < 3:
+                break
+            M = geometry.umeyama(src[inl], dst[inl], with_scale=False)
+            n = int(inl.sum())
+        if all(_distinct(M, P, min_angle, shift) for P, _ in out):
+            out.append((M, n))
+    out.sort(key=lambda p: -p[1])
+    return out[:count] or [(np.eye(4), 0)]
 
 
-def global_guesses(src: np.ndarray, dst: np.ndarray, ratio: float = 1.0, divisions=(50, 30, 80),
+def ransac_rigid(src: np.ndarray, dst: np.ndarray, threshold: float, samples: int = 60_000,
+                 seed: int = 0) -> tuple[np.ndarray, int]:
+    """The rigid motion mapping most of the putative pairs ``src[i] -> dst[i]`` within
+    ``threshold`` (see :func:`ransac_hypotheses`). Returns ``(matrix, inliers)``."""
+    return ransac_hypotheses(src, dst, threshold, samples, seed, count=1)[0]
+
+
+def global_guesses(src: np.ndarray, dst: np.ndarray, ratio: float = 1.0, divisions=(50, 30, 80, 40, 65, 20),
                    progress: Progress | None = None):
     """Coarse similarities ``src -> dst`` without any initial position: FPFH descriptors
     (Open3D) on voxel grids of ``extent / division``, matched and filtered with RANSAC. ``ratio``
     is the expected scale between the two clouds (RANSAC fits rigid motions; the ICP refines
-    the scale). Yields ``(matrix, voxel)``, one per division."""
+    the scale). Yields ``(matrix, voxel)``: the few best distinct motions of every division."""
     cs, cd = src.mean(0), dst.mean(0)
     s0, d0 = (src - cs) * ratio, dst - cd
     extent = float(max(np.ptp(d0, axis=0).max(), np.ptp(s0, axis=0).max()))
@@ -624,9 +666,9 @@ def global_guesses(src: np.ndarray, dst: np.ndarray, ratio: float = 1.0, divisio
         if len(ps) < 10 or len(pd) < 10:
             continue
         pairs = _feature_matches(fs, fd)
-        T, _ = ransac_rigid(ps[pairs[:, 0]], pd[pairs[:, 1]], 1.5 * voxel, seed=i)
-        M = _translation(cd) @ T @ geometry.compose_similarity(ratio, np.eye(3), -ratio * cs)
-        yield M, voxel
+        for T, _n in ransac_hypotheses(ps[pairs[:, 0]], pd[pairs[:, 1]], 1.5 * voxel, seed=i):
+            M = _translation(cd) @ T @ geometry.compose_similarity(ratio, np.eye(3), -ratio * cs)
+            yield M, voxel
 
 
 def _align_points(ch, ref, frame, ref_frame, fix_scale, initial, max_points, progress) -> tuple[np.ndarray, dict]:
@@ -693,7 +735,7 @@ def _align_points(ch, ref, frame, ref_frame, fix_scale, initial, max_points, pro
                                                             "scale_change")}})
         if best is None or _rank(q) > _rank(best[2]):
             best = (name, W, q)
-        if _accepted(q) and name != "global":  # the global candidates are all tried, the best one wins
+        if _accepted(q) and (name != "global" or _convincing(q)):  # else every global candidate is tried
             break
     if best is None:
         raise ValueError(f"{ch.label}: no way to place it on {ref.label} (no markers, georeference or photos "
@@ -1208,5 +1250,6 @@ def _without_position(m: Marker) -> Marker:
 
 
 __all__ = ["align_chunks", "merge_chunks", "resolve_chunk", "common_markers", "common_cameras", "marker_position",
-           "pose_similarity", "icp", "global_guesses", "fpfh_features", "ransac_rigid", "registration_quality",
+           "pose_similarity", "icp", "global_guesses", "fpfh_features", "ransac_rigid", "ransac_hypotheses",
+           "registration_quality",
            "registration_cloud", "scene_depth", "affine_inverse", "ALIGN_METHODS", "INITIAL_GUESSES"]

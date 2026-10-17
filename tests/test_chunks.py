@@ -365,6 +365,21 @@ def test_ransac_is_deterministic(rng):
     assert np.allclose(M1, T, atol=1e-9)
 
 
+def test_ransac_keeps_the_other_motion_of_a_symmetric_scene(rng):
+    """A symmetric scene (a rectangular trench) matches points to their mirror images too: the
+    motion with most pairs can be the wrong one, so RANSAC keeps the best distinct motions and
+    the ICP with the colours chooses (the global registration failed on Linux without it)."""
+    a = rng.uniform(-1, 1, (300, 3))
+    right = geometry.compose_similarity(1.0, geometry.rotation_from_euler_ypr(30, 0, 0), [0.5, 0.2, 0.0])
+    turned = geometry.compose_similarity(1.0, geometry.rotation_from_euler_ypr(210, 0, 0), [0.5, 0.2, 0.0])
+    b = np.vstack([geometry.apply(turned, a[:180]), geometry.apply(right, a[180:])])
+    best, n = chunks_mod.ransac_rigid(a, b, 0.01)
+    assert n == 180 and np.allclose(best, turned, atol=1e-9)
+    found = chunks_mod.ransac_hypotheses(a, b, 0.01)
+    assert [m for _M, m in found][:2] == [180, 120]
+    assert any(np.allclose(M, right, atol=1e-9) for M, _m in found)
+
+
 def test_align_and_merge_from_the_interface(two_chunks, tmp_path, monkeypatch):
     """Flusso di lavoro > Allinea chunk / Unisci chunk: the dialogs choose the chunks, the
     tasks run in the background and the merged chunk becomes the active one."""
