@@ -219,14 +219,16 @@ A scale bar is the known distance between two markers (`core.marker.ScaleBar`: `
 `chunk.update_transform()` uses the control bars (enabled, not check) as follows:
 
 * no control point and no camera reference (or camera references that cover less than ten times
-  their accuracy, `cameras_span_their_accuracy`): the scale is the mean of `distance / |a - b|`
-  weighted by `1 / accuracy²`; the orientation stays, the origin is the internal one and the CRS
+  their accuracy, `cameras_span_their_accuracy`): the scale is the least-squares solution of
+  `scale * |a - b| = distance` weighted by `1 / accuracy²` (of two bars measured equally well, the
+  longer one counts more); the orientation stays, the origin is the internal one and the CRS
   becomes `LOCAL` (`method == "scalebars"`);
-* camera references and no control point: the cameras place and turn the chunk, the bars set the
-  scale about the centre of their markers (`"cameras+scalebars"`); `use_cameras=True` or `False`
-  forces the choice;
-* three or more control points: the points fit position, orientation and scale; the bars are
-  only measured.
+* three or more control points, or camera references: the similarity is the joint weighted
+  least-squares fit of the points (`1 / accuracy²` on their 3D residuals) and of the bars
+  (`1 / accuracy²` on `scale * length - distance`), `markers.gcp.similarity_with_bars`: the
+  rotation and the position come from the points, the scale from points and bars together
+  (`"markers+scalebars"`, `"cameras+scalebars"`, `"markers+cameras+scalebars"`);
+  `use_cameras=True` or `False` forces the use of the camera references.
 
 The report adds `scale` (world units per internal unit), `scalebars` (as `scalebar_errors`),
 `scalebar_control_rmse` and `scalebar_check_rmse` (metres, None without bars of that type).
@@ -236,7 +238,7 @@ The report adds `scale` (world units per internal unit), `scalebars` (as `scaleb
 | Module | Main functions |
 | --- | --- |
 | `markers.targets` | `generate_sheet`, `generate_turntable_mat`, `turntable_layout`, `generate_scale_bar`, `scale_bar_codes`, `detect` |
-| `markers.gcp` | `import_reference`, `export_reference`, `triangulate_markers`, `update_transform`, `marker_errors`, `scalebar_errors`, `import_scalebars`, `resolve_marker`, `cameras_span_their_accuracy` |
+| `markers.gcp` | `import_reference`, `export_reference`, `triangulate_markers`, `update_transform`, `similarity_with_bars`, `marker_errors`, `scalebar_errors`, `import_scalebars`, `resolve_marker`, `cameras_span_their_accuracy` |
 | `engine.chunks` | `align_chunks`, `merge_chunks`, `common_markers`, `common_cameras`, `pose_similarity`, `icp`, `global_guesses`, `ransac_rigid`, `registration_quality` |
 | `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |
 | `archaeo.pottery` | `estimate_axis`, `profile_at`, `best_profile`, `Profile.measurements`, `draw` |

@@ -234,10 +234,11 @@ Command line: `ppg patch PROJECT --bbox ... --suggest` lists the photos of an ar
   their length and error.
 * **Photos with GPS** (a phone, a drone): over an object or a trench of a few metres the photo
   positions are noise of several metres, so with scale bars they are left out and the chunk
-  stays in local coordinates; when the photos cover an area much larger than their accuracy (a
-  flight over a site) they place and turn the survey and the bars give its scale. With three or
-  more control points the points set position, orientation and scale, and the bars measure the
-  result.
+  stays in local coordinates. When the photos cover an area much larger than their accuracy (a
+  flight over a site), or with three or more control points, photos, points and bars are fitted
+  together, each weighted by its accuracy, as in Metashape: the photos and the points place and
+  turn the survey, and the scale comes from all of them (a bar measured to the millimetre
+  outweighs a phone GPS, RTK positions over a whole site outweigh a short bar).
 * **Bars from a file** (*Importa barre...*): one bar per line, `marker_a, marker_b, distance[,
   accuracy[, check]]`, markers by name or target code, distances in metres. **Printable scale
   bars** (*Strumenti > Target > Barra di scala stampabile...*): two coded targets at a known

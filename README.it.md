@@ -218,10 +218,11 @@ Da terminale: `ppg patch PROGETTO --bbox ... --suggest` elenca le foto di un'are
   con lunghezza ed errore.
 * **Foto con GPS** (telefono, drone): su un oggetto o uno scavo di pochi metri le posizioni delle
   foto sono un rumore di diversi metri, quindi con le barre di scala non si usano e il chunk resta
-  in coordinate locali; quando le foto coprono un'area molto più grande della loro accuratezza (un
-  volo su un sito) posizionano e orientano il rilievo e le barre ne danno la scala. Con tre o più
-  punti di controllo sono i punti a dare posizione, orientamento e scala, e le barre misurano il
-  risultato.
+  in coordinate locali. Quando le foto coprono un'area molto più grande della loro accuratezza (un
+  volo su un sito), o con tre o più punti di controllo, foto, punti e barre si stimano insieme,
+  ognuno pesato con la sua accuratezza, come in Metashape: foto e punti posizionano e orientano il
+  rilievo e la scala viene da tutti (una barra misurata al millimetro pesa più del GPS di un
+  telefono, posizioni RTK su tutto un sito pesano più di una barra corta).
 * **Barre da un file** (*Importa barre...*): una barra per riga, `marker_a, marker_b, distanza[,
   accuratezza[, check]]`, marker per nome o codice del target, distanze in metri. **Barre di scala
   stampabili** (*Strumenti > Target > Barra di scala stampabile...*): due target codificati a

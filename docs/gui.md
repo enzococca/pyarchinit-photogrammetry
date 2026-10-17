@@ -155,12 +155,12 @@ are several), whether it is a check bar, and whether to update the scale at once
   distance measured on the model (*Stimata*) and the error, in red when it exceeds three times the
   accuracy (at least 5 mm). Right click on rows deletes the bars. The summary shows *RMSE barre*
   (control) and *RMSE barre check*, and how the chunk was placed: *scala dalle barre, coordinate
-  locali* or *posizione dalle foto, scala dalle barre*.
+  locali* or *scala da riferimenti e barre insieme*.
 * **Photos with GPS**: when their positions cover less than ten times their accuracy (a phone or a
   drone over an object or a trench) they are left out and the bars scale the chunk in local
-  coordinates; over a larger area (a flight over a site) they place and turn the survey and the bars
-  give its scale, about the centre of the bars. With three or more control points the points give
-  position, orientation and scale, and every bar is reported with its error.
+  coordinates. Over a larger area (a flight over a site), or with three or more control points, the
+  photo positions, the control points and the bars are fitted together, each weighted by
+  `1 / accuracy²`: positions and points place and turn the survey, the scale comes from all of them.
 * The 3D view draws the bars between their markers, control bars in cyan and check bars dashed in
   orange, with their length and error; the workspace lists them under the chunk.
 * *Importa barre...* (or *Flusso di lavoro > Importa barre di scala (CSV)*): a text file with
