@@ -501,6 +501,44 @@ class Chunk:
                                        hide_classes=hide_classes, progress=as_progress(progress),
                                        skip_unreadable=skip_unreadable, workers=workers, max_angle=max_angle)
 
+    def add_ortho_patch(self, polygon, photos, mode: str = "assign") -> dict:
+        """A patch of the orthomosaic: inside ``polygon`` (chunk CRS) the colours come only from
+        ``photos`` (labels), or from every photo but them with ``mode="exclude"`` - trees,
+        vehicles or seamlines the automatic choice renders badly. Applied by
+        :meth:`update_orthomosaic` and by every later build (see :mod:`..engine.patches`)."""
+        from ..engine import patches
+
+        return patches.add_patch(self, polygon, photos, mode)
+
+    def remove_ortho_patch(self, patch_id: str) -> None:
+        from ..engine import patches
+
+        patches.remove_patch(self, patch_id)
+
+    @property
+    def ortho_patches(self) -> list[dict]:
+        from ..engine import patches
+
+        return patches.patches(self)
+
+    def update_orthomosaic(self, progress: ProgressCallback | None = None, skip_unreadable: bool = False,
+                           workers: int | None = None) -> Path:
+        """Redraw only the cells of the patches added, changed or removed since the orthomosaic
+        was written (an orthomosaic of another program is copied into the chunk first)."""
+        from ..engine import patches
+
+        return patches.update_orthomosaic(self, progress=as_progress(progress), workers=workers,
+                                          skip_unreadable=skip_unreadable)
+
+    def patch_texture(self, photos, polygon=None, faces=None, mode: str = "assign",
+                      progress: ProgressCallback | None = None) -> dict:
+        """Colour again from ``photos`` the faces of the textured model inside ``polygon`` (seen
+        from above) or the faces ``faces`` (indices, e.g. chosen in the 3D view)."""
+        from ..engine import patches
+
+        return patches.retexture(self, photos, faces=faces, polygon=polygon, mode=mode,
+                                 progress=as_progress(progress))
+
     # ---------------------------------------------------------------- export
     def export_point_cloud(self, path: str | os.PathLike, source: str = "point_cloud", classes=None, region=None,
                            zmin: float | None = None, zmax: float | None = None) -> Path:

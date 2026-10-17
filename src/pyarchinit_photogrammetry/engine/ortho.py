@@ -9,6 +9,10 @@ The orthomosaic is made tile by tile and every tile is written at once, so its s
 by the disk, not by the memory (45,000 x 46,000 px for a tell at 1.35 cm/px): the surface is read
 one window at a time, every tile looks only at the few photos that see it best (found from the
 ground footprints of the photos), and tiles are processed in parallel.
+
+Patches (:mod:`.patches`) are polygons whose cells take their colours from photos chosen by
+hand (or from every photo but some): every build applies them, and an update redraws only the
+cells of the patches that changed.
 """
 from __future__ import annotations
 
@@ -313,33 +317,20 @@ class _Context:
     pass
 
 
-def _tile(ctx, r0: int, c0: int) -> np.ndarray | None:
-    """RGBA of one tile (4, th, tw), or None when the surface is empty there."""
-    chunk, res = ctx.chunk, ctx.resolution
-    th, tw = min(ctx.tile, ctx.shape[0] - r0), min(ctx.tile, ctx.shape[1] - c0)
-    zz = ctx.surface.tile(r0, c0, th, tw)
-    valid = np.isfinite(zz)
-    if not valid.any():
-        return None
-    rr, cc = np.nonzero(valid)
-    X = ctx.origin[0] + (c0 + cc + 0.5) * res
-    Y = ctx.origin[1] - (r0 + rr + 0.5) * res
-    world = np.column_stack([X, Y, zz[rr, cc]])
-    pts = world @ ctx.inv[:3, :3].T + ctx.inv[:3, 3]
-    n = len(pts)
-    # the photos of this tile: those whose footprint meets it, ranked on a sample of its cells
-    box = (ctx.origin[0] + c0 * res, ctx.origin[1] - (r0 + th) * res,
-           ctx.origin[0] + (c0 + tw) * res, ctx.origin[1] - r0 * res)
-    near = [ctx.cams[i] for i in ctx.footprints.candidates(box, float(np.median(world[:, 2])))]
-    probe = pts[:: max(1, n // 400)]
+def _probe(pts):
+    """A sample of the cells of a tile, to rank its photos."""
+    return pts[:: max(1, len(pts) // 400)]
+
+
+def _rank(ctx, probe, near) -> list:
+    """The photos of a tile: the ``max_cameras`` that see the cells of ``probe`` best, and
+    those that reach cells the best ones do not."""
     ranked = []
     for cam in near:
-        _px, s = _scores(chunk, cam, probe, ctx.centres, ctx.up_int, ctx.min_cos)
+        _px, s = _scores(ctx.chunk, cam, probe, ctx.centres, ctx.up_int, ctx.min_cos)
         seen = np.isfinite(s)
         if seen.any():
             ranked.append((float(np.where(seen, s, 0).sum()), cam, seen))
-    if not ranked:
-        return None
     ranked.sort(key=lambda r: -r[0])
     tcams = [r[1] for r in ranked[:ctx.max_cameras]]
     covered = np.zeros(len(probe), bool)
@@ -349,6 +340,27 @@ def _tile(ctx, r0: int, c0: int) -> np.ndarray | None:
         if (seen & ~covered).any():
             tcams.append(cam)
             covered |= seen
+    return tcams
+
+
+def _colour(ctx, pts, near, want_choice: bool = False, colours: bool = True):
+    """Colours ``(n, 3)`` (BGR) of surface points ``pts`` (internal frame) from the photos
+    ``near``, and which points got one; with ``want_choice`` also the key of the photo of every
+    point (-1 for none). ``colours=False`` only chooses the photos (none is read)."""
+    return _paint(ctx, pts, _rank(ctx, _probe(pts), near), want_choice, colours)
+
+
+def _paint(ctx, pts, tcams, want_choice: bool = False, colours: bool = True):
+    """Like :func:`_colour`, from the photos ``tcams`` already chosen for the tile: every point
+    takes its colour from the best of them that sees it (whatever other points are painted
+    with it, so a part of a tile comes out as in the whole tile)."""
+    chunk = ctx.chunk
+    n = len(pts)
+    colors = np.zeros((n, 3), np.float64)
+    got = np.zeros(n, bool)
+    keys = np.full(n, -1)
+    if not tcams or not n:
+        return (colors, got, keys) if want_choice else (colors, got)
     scores = np.full((len(tcams), n), -np.inf, np.float32)
     pix = np.full((len(tcams), n, 2), np.nan, np.float32)
     for k, cam in enumerate(tcams):
@@ -357,8 +369,6 @@ def _tile(ctx, r0: int, c0: int) -> np.ndarray | None:
         ok = np.isfinite(s)
         pix[k, ok] = px[ok]
     order = np.argsort(-scores, axis=0)
-    colors = np.zeros((n, 3), np.float64)
-    weight = np.zeros(n, np.float64)
     chosen = np.full(n, -1)
 
     def visible(cam, sel):
@@ -366,6 +376,7 @@ def _tile(ctx, r0: int, c0: int) -> np.ndarray | None:
             return ctx.raycaster.visible_from(ctx.centres[cam.key], pts[sel], abs_tol=ctx.abs_tol)
 
     if ctx.blending == "average":
+        weight = np.zeros(n, np.float64)
         for k, cam in enumerate(tcams):
             ok = np.isfinite(scores[k])
             if ctx.raycaster is not None and ok.any():
@@ -373,10 +384,12 @@ def _tile(ctx, r0: int, c0: int) -> np.ndarray | None:
                 ok[idx[~visible(cam, idx)]] = False
             if ok.any():
                 wgt = scores[k, ok].astype(np.float64)
-                colors[ok] += sample(ctx.cache.get(cam), pix[k, ok]) * wgt[:, None]
+                if colours:
+                    colors[ok] += sample(ctx.cache.get(cam), pix[k, ok]) * wgt[:, None]
                 weight[ok] += wgt
         got = weight > 0
         colors[got] /= weight[got, None]
+        chosen[got] = order[0, got]
     else:
         pending = np.arange(n)
         for rank in range(min(4, len(tcams))):
@@ -397,10 +410,103 @@ def _tile(ctx, r0: int, c0: int) -> np.ndarray | None:
         # cells hidden in every candidate photo (steep faces): take the best photo anyway
         fallback = (chosen < 0) & np.isfinite(scores.max(axis=0))
         chosen[fallback] = order[0, fallback]
-        for k in np.unique(chosen[chosen >= 0]):
+        for k in np.unique(chosen[chosen >= 0]) if colours else ():
             sel = np.nonzero(chosen == k)[0]
             colors[sel] = sample(ctx.cache.get(tcams[k]), pix[k, sel])
         got = chosen >= 0
+    if want_choice:
+        keys[got] = np.array([tcams[k].key for k in chosen[got]], dtype=keys.dtype) if got.any() else keys[got]
+        return colors, got, keys
+    return colors, got
+
+
+def _patch_owner(ctx, box, X, Y) -> np.ndarray:
+    """Index in ``ctx.patches`` of the patch every cell lies in (-1 outside; a later patch
+    covers an earlier one)."""
+    from shapely import contains_xy
+
+    owner = np.full(len(X), -1)
+    for i, patch in enumerate(ctx.patches):
+        b = patch.bounds
+        if b[0] > box[2] or b[2] < box[0] or b[1] > box[3] or b[3] < box[1]:
+            continue
+        owner[contains_xy(patch.geom, X, Y)] = i
+    return owner
+
+
+def _in_any(geoms, box, X, Y) -> np.ndarray:
+    from shapely import contains_xy
+
+    inside = np.zeros(len(X), bool)
+    for g in geoms:
+        b = g.bounds
+        if b[0] > box[2] or b[2] < box[0] or b[1] > box[3] or b[3] < box[1]:
+            continue
+        inside |= contains_xy(g, X, Y)
+    return inside
+
+
+def _tile(ctx, r0: int, c0: int):
+    """RGBA of one tile (4, th, tw), or None when the surface is empty there. When updating
+    patches (``ctx.redo``: the polygons that changed) only the cells inside them are made:
+    the result is then ``(rgba, done, from_base)``, the cells made and the cells that take
+    the pixels of the unpatched orthomosaic of another program (``ctx.base``)."""
+    res = ctx.resolution
+    th, tw = min(ctx.tile, ctx.shape[0] - r0), min(ctx.tile, ctx.shape[1] - c0)
+    box = (ctx.origin[0] + c0 * res, ctx.origin[1] - (r0 + th) * res,
+           ctx.origin[0] + (c0 + tw) * res, ctx.origin[1] - r0 * res)
+    redo = getattr(ctx, "redo", None)
+    zz = ctx.surface.tile(r0, c0, th, tw)
+    valid = np.isfinite(zz)
+    todo = None
+    if redo is not None:  # only the cells of the patches that changed
+        rows, cols = np.mgrid[0:th, 0:tw]
+        todo = _in_any(redo, box, ctx.origin[0] + (c0 + cols.ravel() + 0.5) * res,
+                       ctx.origin[1] - (r0 + rows.ravel() + 0.5) * res).reshape(th, tw)
+        if not todo.any():
+            return None
+        if not (valid & todo).any():
+            from_base = todo if ctx.base is not None else np.zeros_like(todo)
+            return np.zeros((4, th, tw), np.uint8), todo & ~from_base, from_base
+    if not valid.any():
+        return None
+    rr, cc = np.nonzero(valid)
+    X = ctx.origin[0] + (c0 + cc + 0.5) * res
+    Y = ctx.origin[1] - (r0 + rr + 0.5) * res
+    world = np.column_stack([X, Y, zz[rr, cc]])
+    pts = world @ ctx.inv[:3, :3].T + ctx.inv[:3, 3]
+    # the photos of this tile: those whose footprint meets it, ranked on a sample of all its
+    # cells - with or without patches, and when only some cells are made again
+    near = [ctx.cams[i] for i in ctx.footprints.candidates(box, float(np.median(world[:, 2])))]
+    probe = _probe(pts)
+    tcams = _rank(ctx, probe, near)
+    if todo is not None:  # from here on, the cells to make only
+        keep = todo[rr, cc]
+        rr, cc, X, Y, pts = rr[keep], cc[keep], X[keep], Y[keep], pts[keep]
+    n = len(pts)
+    owner = _patch_owner(ctx, box, X, Y) if ctx.patches else np.full(n, -1)
+    colors = np.zeros((n, 3), np.float64)
+    got = np.zeros(n, bool)
+    base = np.zeros(n, bool)  # cells left to the unpatched orthomosaic of another program
+    for i in np.unique(owner):
+        idx = np.nonzero(owner == i)[0]
+        if i < 0:
+            if redo is not None and ctx.base is not None:
+                base[idx] = True  # a patch taken away: the original pixels again
+                continue
+            cams = tcams
+        else:
+            patch = ctx.patches[i]
+            cams = patch.cams if patch.mode == "assign" else _rank(ctx, probe, patch.photos(near))
+        c, g = _paint(ctx, pts[idx], cams)
+        colors[idx[g]], got[idx[g]] = c[g], True
+        miss = idx[~g]
+        if i >= 0 and len(miss) and ctx.patches[i].mode == "assign":  # not seen by its photos: as without it
+            if redo is not None and ctx.base is not None:
+                base[miss] = True
+            else:
+                c, g = _paint(ctx, pts[miss], tcams)
+                colors[miss[g]], got[miss[g]] = c[g], True
     out = np.zeros((4, th, tw), np.uint8)
     bgr = np.clip(colors[got], 0, 255).astype(np.uint8)
     out[0, rr[got], cc[got]] = bgr[:, 2]
@@ -409,13 +515,55 @@ def _tile(ctx, r0: int, c0: int) -> np.ndarray | None:
     out[3, rr[got], cc[got]] = 255
     if ctx.hidden is not None:
         out[:, ctx.hidden.tile(r0, c0, th, tw)] = 0
-    return out
+    if redo is None:
+        return out
+    from_base = np.zeros((th, tw), bool)
+    from_base[rr[base], cc[base]] = True
+    if ctx.base is not None:  # cells of a changed patch without surface: the original pixels
+        from_base |= todo & ~valid
+    return out, todo & ~from_base, from_base
+
+
+def _context(chunk: Chunk, resolution: float, cams, surface, raycaster, blending: str = "mosaic",
+             max_angle: float = 70.0, max_cameras: int = 8, workers: int | None = None, hide_classes=None,
+             patches=None, tile: int = 512, lock=None):
+    """Everything a tile needs: ``surface`` gives the grid (its ``origin`` and ``shape``)."""
+    ctx = _Context()
+    ctx.chunk, ctx.resolution, ctx.blending, ctx.tile, ctx.max_cameras = chunk, resolution, blending, tile, max_cameras
+    ctx.cams = list(cams)
+    ctx.min_cos = float(np.cos(np.radians(min(max(float(max_angle), 0.0), 90.0))))
+    ctx.lock = lock or threading.Lock()  # ray casting, one query at a time (each one is parallel inside)
+    ctx.raycaster = raycaster
+    ctx.surface = surface
+    ctx.origin, ctx.shape = surface.origin, surface.shape
+    ctx.inv = np.linalg.inv(chunk.transform)
+    ctx.centres = {c.key: c.center for c in ctx.cams}
+    ctx.abs_tol = 3.0 * resolution / chunk.scale  # occlusion tolerance in internal units
+    up_int = ctx.inv[:3, :3] @ np.array([0.0, 0.0, 1.0])
+    ctx.up_int = up_int / np.linalg.norm(up_int)
+    ctx.footprints = _Footprints(chunk, ctx.cams)
+    ctx.workers = int(workers or max(1, min(8, (os.cpu_count() or 4) - 2)))
+    ctx.cache = _PhotoCache(max(12, 3 * ctx.workers))
+    ctx.hidden = _ClassGrid(chunk, ctx.origin, resolution, hide_classes) if hide_classes else None
+    from .patches import prepare
+
+    ctx.patches = prepare(chunk, patches or [], ctx.cams)
+    ctx.redo, ctx.base = None, None
+    return ctx
+
+
+def _on_grid(surface, origin, shape, resolution: float):
+    """The same surface on another grid (top-left ``origin``, ``shape``)."""
+    surface.origin = (float(origin[0]), float(origin[1]))
+    surface.shape = (int(shape[0]), int(shape[1]))
+    surface.resolution = resolution
+    return surface
 
 
 def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: str = "dem", blending: str = "mosaic",
                       hide_classes=None, progress: Progress | None = None, tile: int = 512,
                       skip_unreadable: bool = False, workers: int | None = None, max_cameras: int = 8,
-                      max_angle: float = 70.0) -> Path:
+                      max_angle: float = 70.0, patches=None) -> Path:
     """``hide_classes``: classes of the dense cloud left out of the orthomosaic (transparent
     where they are the visible surface: excavation tools, people, vegetation). Photos that
     cannot be read (e.g. kept online only by Dropbox) stop the step
@@ -424,7 +572,9 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     uncovered); ``workers`` tiles are made at once (default: the cores but two). Cells that
     every photo sees from further than ``max_angle`` degrees from the vertical stay
     transparent: grazing views (an orbit of oblique photos around the survey, the edge of a
-    DEM interpolated beyond the reconstruction) only smear the photo over the surface."""
+    DEM interpolated beyond the reconstruction) only smear the photo over the surface.
+    ``patches`` (default: the patches of the chunk, see :mod:`.patches`) take their colours
+    from the photos assigned to them."""
     from rasterio.transform import from_origin
 
     from ..core import crs as crs_mod
@@ -435,27 +585,19 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     ensure_level(chunk)
     if resolution is None:
         resolution = estimate_gsd(chunk)
-    ctx = _Context()
-    ctx.chunk, ctx.resolution, ctx.blending, ctx.tile, ctx.max_cameras = chunk, resolution, blending, tile, max_cameras
-    ctx.cams = cams
-    ctx.min_cos = float(np.cos(np.radians(min(max(float(max_angle), 0.0), 90.0))))
-    ctx.lock = threading.Lock()  # ray casting, one query at a time (each one is parallel inside)
+    old = dict(chunk.meta.get("orthomosaic") or {})
+    if patches is None:
+        patches = old.get("patches") or []
     progress(0.01, "Surface for the orthomosaic")
-    ctx.raycaster = raycaster_for_chunk(chunk)
-    ctx.surface = _surface(chunk, resolution, surface, ctx.raycaster, ctx.lock)
-    ctx.origin, ctx.shape = ctx.surface.origin, ctx.surface.shape
-    h, w = ctx.shape
-    progress(0.02, f"Orthomosaic {w}x{h} px at {resolution:.4g} m/px from {len(cams)} photos")
-    ctx.inv = np.linalg.inv(chunk.transform)
-    ctx.centres = {c.key: c.center for c in cams}
-    ctx.abs_tol = 3.0 * resolution / chunk.scale  # occlusion tolerance in internal units
-    up_int = ctx.inv[:3, :3] @ np.array([0.0, 0.0, 1.0])
-    ctx.up_int = up_int / np.linalg.norm(up_int)
-    ctx.footprints = _Footprints(chunk, cams)
-    workers = int(workers or max(1, min(8, (os.cpu_count() or 4) - 2)))
-    ctx.cache = _PhotoCache(max(12, 3 * workers))
+    raycaster = raycaster_for_chunk(chunk)
+    lock = threading.Lock()
+    surf = _surface(chunk, resolution, surface, raycaster, lock)
     hidden_classes = sorted({int(c) for c in hide_classes}) if hide_classes else None
-    ctx.hidden = _ClassGrid(chunk, ctx.origin, resolution, hidden_classes) if hidden_classes else None
+    ctx = _context(chunk, resolution, cams, surf, raycaster, blending, max_angle, max_cameras, workers,
+                   hidden_classes, patches, tile, lock)
+    h, w = ctx.shape
+    progress(0.02, f"Orthomosaic {w}x{h} px at {resolution:.4g} m/px from {len(cams)} photos"
+             + (f", {len(ctx.patches)} patches" if ctx.patches else ""))
     tiles = [(r, c) for r in range(0, h, tile) for c in range(0, w, tile)]
     profile = {"driver": "GTiff", "height": h, "width": w, "count": 4, "dtype": "uint8",
                "transform": from_origin(ctx.origin[0], ctx.origin[1], resolution, resolution),
@@ -467,14 +609,18 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     out_path = chunk.data_dir / "orthomosaic.tif"
     tmp = out_path.with_name("orthomosaic.tmp.tif")
     try:
-        _write_tiles(ctx, tmp, profile, tiles, workers, progress)
+        _write_tiles(ctx, tmp, profile, tiles, ctx.workers, progress)
     except BaseException:
         tmp.unlink(missing_ok=True)  # cancelled or failed: no half-written file left behind
         raise
     tmp.replace(out_path)
     chunk._set_product("orthomosaic", out_path)
     chunk.meta["orthomosaic"] = {"resolution": resolution, "surface": surface, "blending": blending,
-                                 "hidden_classes": hidden_classes, "max_angle": float(max_angle)}
+                                 "hidden_classes": hidden_classes, "max_angle": float(max_angle),
+                                 "max_cameras": int(max_cameras)}
+    if patches:
+        chunk.meta["orthomosaic"]["patches"] = [dict(p) for p in patches]
+        chunk.meta["orthomosaic"]["applied_patches"] = [dict(p) for p in patches]
     if bad:
         chunk.meta["orthomosaic"]["skipped_photos"] = [c.label for c in bad]
     progress(1.0, f"Orthomosaic {w}x{h} px")
@@ -530,41 +676,42 @@ def _write_tiles(ctx, tmp: Path, profile: dict, tiles, workers: int, progress: P
 
 def render_surface(chunk: Chunk, origin, shape, resolution: float, cams=None, raycaster=None,
                    progress: Progress | None = None, workers: int | None = None, max_cameras: int = 8,
-                   max_angle: float = 88.0, tile: int = 512) -> np.ndarray:
+                   max_angle: float = 88.0, tile: int = 512, patches=None) -> np.ndarray:
     """RGBA ``(4, h, w)`` of the model seen from above over a grid (``origin`` = top-left corner,
-    world units): the orthophoto engine in memory, used for the texture of a terrain model."""
+    world units): the orthophoto engine in memory, used for the texture of a terrain model.
+    ``patches`` take their colours from the photos assigned to them."""
     progress = progress or Progress()
     cams = list(chunk.aligned_cameras if cams is None else cams)
-    ctx = _Context()
-    ctx.chunk, ctx.resolution, ctx.blending, ctx.tile, ctx.max_cameras = chunk, resolution, "mosaic", tile, max_cameras
-    ctx.cams = cams
-    ctx.min_cos = float(np.cos(np.radians(min(max(float(max_angle), 0.0), 90.0))))
-    ctx.lock = threading.Lock()
-    ctx.raycaster = raycaster if raycaster is not None else raycaster_for_chunk(chunk)
-    if ctx.raycaster is None:
+    raycaster = raycaster if raycaster is not None else raycaster_for_chunk(chunk)
+    if raycaster is None:
         raise RuntimeError("build the model first")
-    surface = _MeshSurface(chunk, ctx.raycaster, resolution, ctx.lock)
-    surface.origin, surface.shape = (float(origin[0]), float(origin[1])), (int(shape[0]), int(shape[1]))
-    ctx.surface = surface
-    ctx.origin, ctx.shape = surface.origin, surface.shape
-    ctx.inv = np.linalg.inv(chunk.transform)
-    ctx.centres = {c.key: c.center for c in cams}
-    ctx.abs_tol = 3.0 * resolution / chunk.scale
-    up_int = ctx.inv[:3, :3] @ np.array([0.0, 0.0, 1.0])
-    ctx.up_int = up_int / np.linalg.norm(up_int)
-    ctx.footprints = _Footprints(chunk, cams)
-    workers = int(workers or max(1, min(8, (os.cpu_count() or 4) - 2)))
-    ctx.cache = _PhotoCache(max(12, 3 * workers))
-    ctx.hidden = None
+    lock = threading.Lock()
+    surface = _on_grid(_MeshSurface(chunk, raycaster, resolution, lock), origin, shape, resolution)
+    ctx = _context(chunk, resolution, cams, surface, raycaster, "mosaic", max_angle, max_cameras, workers,
+                   None, patches, tile, lock)
     h, w = ctx.shape
     out = np.zeros((4, h, w), np.uint8)
 
     def put(r0, c0, block):
         out[:, r0:r0 + block.shape[1], c0:c0 + block.shape[2]] = block
 
-    _run_tiles(ctx, [(r, c) for r in range(0, h, tile) for c in range(0, w, tile)], workers, progress, put,
+    _run_tiles(ctx, [(r, c) for r in range(0, h, tile) for c in range(0, w, tile)], ctx.workers, progress, put,
                start=0.0, span=1.0)
     return out
 
 
-__all__ = ["build_orthomosaic", "hidden_cells", "render_surface", "NODATA"]
+def render_area(chunk: Chunk, origin, shape, resolution: float, cams=None, surface: str = "dem", raycaster=None,
+                max_angle: float = 89.0, patches=None, blending: str = "mosaic", max_cameras: int = 8) -> np.ndarray:
+    """RGBA ``(4, h, w)`` of a small grid on the surface of the orthomosaic, in this thread
+    (the preview of a patch from one photo)."""
+    cams = list(readable_cameras(chunk, True)[0] if cams is None else cams)
+    raycaster = raycaster if raycaster is not None else raycaster_for_chunk(chunk)
+    lock = threading.Lock()
+    surf = _on_grid(_surface(chunk, resolution, surface, raycaster, lock), origin, shape, resolution)
+    ctx = _context(chunk, resolution, cams, surf, raycaster, blending, max_angle, max_cameras, 1, None,
+                   patches, max(int(shape[0]), int(shape[1]), 1), lock)
+    block = _tile(ctx, 0, 0)
+    return np.zeros((4, int(shape[0]), int(shape[1])), np.uint8) if block is None else block
+
+
+__all__ = ["build_orthomosaic", "hidden_cells", "render_area", "render_surface", "NODATA"]
