@@ -179,6 +179,30 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
 Da terminale: `ppg confidence`, `ppg clean-cloud`, `ppg clean-model`, `ppg clean-tie-points`,
 `ppg crop`, `ppg relink`, `ppg export --bbox/--wkt` (vedi `--help`).
 
+## Ortofoto a piena risoluzione e patch
+
+* **Piena risoluzione nella vista**: un'ortofoto o un DEM grandi si aprono da una copia ridotta (una
+  delle loro piramidi) e, ingrandendo, la parte visibile viene riletta dal file alla risoluzione dello
+  schermo, fino a quella piena: l'ortofoto di 45.000 pixel di un tell si apre in meno di un secondo e
+  mostra i suoi pixel da 1,35 cm in un terzo di secondo.
+* **Assegnare le foto a un'area** (patch, come in Metashape): disegna un'area sull'ortofoto (*Patch*
+  nella barra di disegno: trascina un riquadro o clicca un poligono) oppure usa un poligono
+  selezionato. Le foto che la inquadrano sono elencate dalla migliore, ognuna con l'area come
+  verrebbe, l'angolo dalla verticale, il pixel a terra e quanto dell'area l'ortofoto prende ora da
+  lei. Usa solo le foto scelte, oppure tutte tranne quelle; sul DEM (ortofoto vera) o sul suolo
+  attorno all'area: alberi, veicoli e persone vengono come li mostra la foto invece dei vortici su un
+  DEM che non li segue, e i buchi del DEM dentro l'area si riempiono.
+* Si ridisegnano solo le celle della patch, con le piramidi di quella finestra (2 secondi sul tell,
+  invece di un minuto per tutte le piramidi). Le patch restano nel progetto (layer *Patch ortofoto*:
+  selezionane una e premi Canc per toglierla) e valgono per ogni costruzione successiva; un'ortofoto
+  di un altro programma viene prima copiata, e togliendo una patch tornano i suoi pixel.
+* **Anche la texture**: la stessa patch può correggere la texture del modello nell'area, e il lazo
+  nella vista 3D propone *Correggi la texture di queste facce* (ogni faccia dalla migliore delle foto
+  scelte che la vede).
+
+Da terminale: `ppg patch PROGETTO --bbox ... --suggest` elenca le foto di un'area, `--photos A,B`
+(con `--exclude`, `--ground`, `--texture`) aggiunge una patch, `--list`, `--remove ID|all`.
+
 ## Schede US, proxy 3D e BIM
 
 * **Schede US**: doppio clic su una US nel pannello PyArchInit apre la scheda (`us_table`) con

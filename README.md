@@ -106,14 +106,17 @@ interface writes a log in `~/Library/Logs/pyarchinit-photogrammetry` (macOS),
 | | |
 | --- | --- |
 | ![Start page](docs/img/gui-start.png) | ![Layers, sections and PyArchInit](docs/img/gui-layers.png) |
-| ![Connection to PyArchInit](docs/img/connect.png) | ![IFC elements per stratigraphic unit](docs/img/ifc-units.png) |
+| ![Connection to PyArchInit](docs/img/connect.png) | ![Assign photos to an area of the orthophoto](docs/img/gui-patch.png) |
 | ![Bowl from the turntable demo](docs/img/gui-pottery.png) | ![Profile drawing of the bowl](docs/img/demo-profile.png) |
+| ![A synthetic turntable photo](docs/img/demo-turntable.jpg) | ![IFC elements per stratigraphic unit](docs/img/ifc-units.png) |
 
-Top right: the orthomosaic/DEM view with the US polygons loaded from PyArchInit, contour lines
-and a section trace as layers, the *Sezioni* pane with the drawing, and the PyArchInit pane.
-Middle right: the IFC export opened with IfcOpenShell, one element per unit. Bottom: the bowl
-of the turntable demo reconstructed from 32 synthetic photos and its profile drawing (rim
-16.0 cm measured against 16.0 cm true).
+First row, right: the DEM view with the US polygons loaded from PyArchInit, contour lines and a
+section trace as layers, the *Sezioni* pane with the drawing, and the PyArchInit pane. Second
+row, right: a patch of the orthophoto - the photos that frame the area, best first, each with
+the area as it would come out. Third row: the bowl of the turntable demo reconstructed from 32
+synthetic photos (one of them below) and its profile drawing (rim 16.3 cm measured against
+16.0 cm true, wall 6.2 mm against 6 mm). Last, right: the IFC export opened with IfcOpenShell,
+one element per unit.
 
 ## Working with QGIS, Metashape, WebODM and Photo3D
 
@@ -190,6 +193,31 @@ is installed on first use (PyTorch in a separate environment, see the same page)
 
 Command line: `ppg confidence`, `ppg clean-cloud`, `ppg clean-model`, `ppg clean-tie-points`,
 `ppg crop`, `ppg relink`, `ppg export --bbox/--wkt` (see `--help`).
+
+## Orthophoto at full resolution, and patches
+
+* **Full resolution in the view**: a large orthophoto or DEM opens from a reduced copy (one of
+  its overviews) and, when you zoom in, the visible part is read again from the file at the
+  resolution of the screen, up to the full one: the 45,000 px orthophoto of a tell opens in under
+  a second and shows its 1.35 cm pixels in a third of a second.
+* **Assign photos to an area** (patches, as in Metashape): draw an area on the orthophoto (*Patch*
+  in the drawing bar: drag a box or click a polygon) or use a selected polygon. The photos that
+  frame it are listed best first, each with the area as it would come out, its angle from the
+  vertical, its ground pixel and how much of the area the orthophoto takes from it now. Use only
+  the chosen photos, or every photo but them; on the DEM (a true orthophoto) or on the ground
+  around the area: trees, vehicles and people come out as the photo shows them instead of
+  swirls over a DEM that does not fit them, and holes of the DEM inside the area are filled.
+* Only the cells of the patch are drawn again, with the overviews of that window (2 seconds on
+  the tell, instead of a minute for all the overviews). Patches stay in the project (layer
+  *Patch ortofoto*: select one and press Delete to take it away) and apply to every later build;
+  an orthophoto of another program is copied first, and its pixels come back when a patch is
+  removed.
+* **The texture too**: the same patch can correct the texture of the model in the area, and the
+  lasso in the 3D view offers *Correggi la texture di queste facce* (each face from the best of
+  the chosen photos that sees it).
+
+Command line: `ppg patch PROJECT --bbox ... --suggest` lists the photos of an area, `--photos A,B`
+(with `--exclude`, `--ground`, `--texture`) adds a patch, `--list`, `--remove ID|all`.
 
 ## Desktop interface
 

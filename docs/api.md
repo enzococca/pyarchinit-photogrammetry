@@ -184,6 +184,25 @@ fixes models written by earlier versions (done before the depth maps and the cam
 size, the tiles in parallel, each from the photos that see it best; cells that every photo sees
 from further than `max_angle` degrees from the vertical stay transparent.
 
+## Patches of the orthomosaic and of the texture
+
+A patch takes the colours of an area of the orthomosaic from photos chosen by hand: a dict in
+`chunk.meta["orthomosaic"]["patches"]`, `{"id", "polygon" [[x, y], ...] (chunk CRS), "photos"
+[labels], "mode" "assign"|"exclude", "surface" "dem"|"ground"}` (a later patch covers an earlier one).
+
+| Call | Description |
+| --- | --- |
+| `chunk.add_ortho_patch(polygon, photos, mode="assign")`, `engine.patches.add_patch(chunk, polygon, photos, mode, surface="dem")` | a new patch; `surface="ground"` projects the area on the ground around it (heights along the polygon, inverse-distance weighted inside) instead of the DEM: trees and vehicles as the photo shows them, holes of the DEM filled |
+| `chunk.update_orthomosaic(progress=None, skip_unreadable=False)` | redraws only the cells of the patches added, changed or removed since the file was written, then the overviews of those windows (`engine.overviews.refresh`, through rasterio's GDAL; every overview again when it cannot); an orthomosaic of another program is copied into the chunk first and its pixels come back where a patch is removed |
+| `chunk.ortho_patches`, `chunk.remove_ortho_patch(id)`, `engine.patches.clear_patches(chunk)`, `changed_patches(chunk)` | the patches |
+| `engine.patches.photos_for_area(chunk, polygon, limit=12)` | the photos that frame the area, best first: `label`, `coverage`, `visible` (share not hidden by the model), `angle`, `gsd`, `score`, `used` (share the orthomosaic takes from it now) |
+| `engine.patches.previews(chunk, polygon, photos, max_side=320)` | `({(label, surface): RGBA}, now, bounds)`: the area from each photo on each surface, the rest as it is |
+| `chunk.patch_texture(photos, polygon=None, faces=None, mode="assign")`, `engine.patches.photos_for_faces(chunk, faces)`, `preview_faces(chunk, faces, photo)` | colour again the faces of the textured model inside a polygon (seen from above) or chosen by index from the chosen photos; texels no chosen photo sees keep their colour |
+
+`chunk.build_orthomosaic(..., patches=None)` applies the patches of the chunk (pass `[]` to leave
+them out). The photos of every tile are ranked on all its cells, so an update gives the same
+pixels as a build.
+
 ## Modules
 
 | Module | Main functions |

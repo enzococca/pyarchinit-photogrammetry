@@ -100,13 +100,43 @@ clipboard.
   cut/fill volumes (drawn unit, plane or second DEM); plan slice at a given elevation;
   pottery profile from a mesh (vessel or sherd); point-cloud classification; Segment Anything
   2.1 (automatic candidate units, units from clicked points, prompts on photos); IFC export
-  (one element per drawn unit, PyArchInit attributes when connected); run a Python script.
+  (one element per drawn unit, PyArchInit attributes when connected); run a Python script;
+  *Patch dell'ortofoto (assegna immagini)*: draw an area and choose its photos, assign photos to
+  the selected polygon, update the orthomosaic with the patches, remove every patch (see below).
 * **PyArchInit**: connect through `config.cfg` (or a SQLite path / PostgreSQL URL), use the
   demo database, publish orthomosaic/DEM/model with links to US, publish drawn units to
   `pyunitastratigrafiche`, load existing unit polygons onto the orthomosaic, publish spot
   heights to `pyarchinit_quote`.
 * **Vista**: panes, views (F2 model, F3 orthomosaic/DEM, F4 photo), console (Ctrl+Shift+P), theme.
 * **Aiuto**: online documentation, environment diagnosis, log folder, about.
+
+## Orthophoto at full resolution and patches
+
+* **Zoom**: the orthomosaic/DEM view opens a large raster from a reduced copy (at most 6,000 px a
+  side, one of the overviews of the file) and, when the zoom pauses beyond that resolution, reads
+  the visible area again (plus a margin) at the resolution of the screen, up to the full one, in a
+  thread. The DEM detail keeps the colour limits of the whole DEM. Tell Abu adh-Dhuhur (44,952 px):
+  0.7 s to open, 10.8 cm/px before the detail, 1.38 cm/px after 0.37 s.
+* **Patch** (drawing bar, or *Strumenti > Patch dell'ortofoto*): drag a box or click the vertices
+  of a polygon and double click, or select a polygon (a unit) and choose *Assegna immagini a
+  quest'area* from its menu. The dialog shows the area now and, for the photo chosen in the list,
+  the area as it would come out (the rest as it is); the list has the photos that frame the area,
+  best first (framed share x closeness, verticality and centrality), with the share framed, the
+  angle from the vertical, the ground pixel, the share of the area the orthomosaic takes from it
+  now, and in the tooltip how much of it the model hides (tree crowns, walls). Choose one or more
+  photos (Shift/Cmd), *Usa solo* or *Escludi*, *Sul DEM* (a true orthophoto) or *Sul suolo attorno
+  all'area* (heights along the polygon interpolated inside: trees, vehicles and people come out
+  as in the photo, and holes of the DEM are filled), and optionally the texture of the model in
+  the area. *Applica* saves the patch and redraws only its cells, then the overviews of that
+  window; the view stays where it was.
+* The patches are a layer, *Patch ortofoto*: select one and press Delete (or *Elimina selezionati*)
+  and the orthomosaic is redrawn there without it. A later build of the orthomosaic applies every
+  patch again; *Aggiorna l'ortofoto con le patch* applies the ones not applied yet (after an
+  interrupted update). An orthomosaic of another program (exported by Metashape) is copied into
+  the chunk folder at the first patch, and its pixels come back where a patch is removed.
+* **Texture**: in the 3D view, the lasso on the model offers *Correggi la texture di queste facce
+  (assegna le immagini)*: the photos that see those faces, each with the part of the photo where
+  they are; every face takes the best of the chosen photos that sees it.
 
 ## Demo
 

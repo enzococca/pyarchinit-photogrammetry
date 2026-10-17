@@ -34,7 +34,9 @@ trainable point classifier with reusable models; mesh from the depth maps (TSDF 
 camera optimisation constrained by the control points; chunk alignment and merging; confidence
 of the dense cloud and of the model; cleaning of the dense cloud, the model and the tie points
 (gradual selection); cropping and cropped exports; photos relinked to another folder; large
-orthomosaics built tile by tile.
+orthomosaics built tile by tile and shown at full resolution when zooming in; patches that
+assign photos to areas of the orthomosaic and of the texture (on the DEM or on the ground
+around the area), updated in place with their overviews.
 
 ## 0.6 - Interface
 
