@@ -1,12 +1,14 @@
 """2D views: orthomosaic/DEM with drawing tools, and photos with marker placement."""
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform
 from PySide6.QtWidgets import (QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsPixmapItem, QGraphicsScene,
                                QGraphicsSimpleTextItem, QGraphicsView, QInputDialog, QMenu)
 
@@ -27,13 +29,24 @@ def to_qimage(rgb: np.ndarray) -> QImage:
     return QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
 
 
-def dem_colors(z: np.ndarray, res: float) -> np.ndarray:
-    """Hypsometric tint x hillshade, RGBA (transparent where no data)."""
+def dem_limits(z: np.ndarray) -> tuple[float, float]:
+    """Heights mapped to the two ends of the colour ramp (1st and 99th percentile)."""
+    valid = np.isfinite(z)
+    if not valid.any():
+        return 0.0, 1.0
+    lo, hi = np.percentile(z[valid], [1, 99])
+    return float(lo), float(hi)
+
+
+def dem_colors(z: np.ndarray, res: float, limits: tuple[float, float] | None = None) -> np.ndarray:
+    """Hypsometric tint x hillshade, RGBA (transparent where no data). ``limits``: the heights
+    at the ends of the colour ramp (default: from ``z``; a detail window keeps those of the
+    whole DEM, so its colours match)."""
     valid = np.isfinite(z)
     rgba = np.zeros(z.shape + (4,), np.uint8)
     if not valid.any():
         return rgba
-    lo, hi = np.percentile(z[valid], [1, 99])
+    lo, hi = limits if limits is not None else dem_limits(z)
     t = np.clip((np.where(valid, z, lo) - lo) / max(hi - lo, 1e-9), 0, 1)
     stops = np.array([[0.0, 40, 90, 160], [0.25, 60, 160, 120], [0.5, 230, 220, 120], [0.75, 200, 130, 60],
                       [1.0, 250, 250, 250]])
@@ -53,20 +66,57 @@ def dem_colors(z: np.ndarray, res: float) -> np.ndarray:
     return rgba
 
 
-def diff_colors(d: np.ndarray) -> tuple[np.ndarray, float]:
+def diff_colors(d: np.ndarray, limit: float | None = None) -> tuple[np.ndarray, float]:
     """Differences between two DEMs: blue below zero, white at zero, red above (symmetric,
-    saturated at the 98th percentile of the absolute differences). Returns RGBA and that limit."""
+    saturated at ``limit``, default the 98th percentile of the absolute differences). Returns
+    RGBA and that limit."""
     valid = np.isfinite(d)
     rgba = np.zeros(d.shape + (4,), np.uint8)
     if not valid.any():
         return rgba, 0.0
-    lim = float(max(np.percentile(np.abs(d[valid]), 98), 1e-6))
+    lim = float(limit) if limit else float(max(np.percentile(np.abs(d[valid]), 98), 1e-6))
     t = np.clip(np.where(valid, d, 0) / lim, -1, 1)
     stops = np.array([[-1.0, 33, 102, 172], [-0.5, 103, 169, 207], [0.0, 247, 247, 247], [0.5, 239, 138, 98],
                       [1.0, 178, 24, 43]])
     rgba[..., :3] = np.stack([np.interp(t, stops[:, 0], stops[:, k]) for k in (1, 2, 3)], -1).astype(np.uint8)
     rgba[..., 3] = np.where(valid, 255, 0)
     return rgba, lim
+
+
+def read_window_rgba(path, kind: str, window: tuple[int, int, int, int], out_shape: tuple[int, int],
+                     dem_range: tuple[float, float] | None = None, diff_limit: float | None = None) -> np.ndarray:
+    """RGBA ``(h, w, 4)`` of a window ``(col, row, width, height)`` of a raster read at
+    ``out_shape`` (the overviews of the file are used when smaller), coloured like the whole
+    raster: orthomosaic bands as they are, DEM tinted and shaded, difference of DEMs diverging."""
+    import rasterio
+    from rasterio.enums import Resampling
+    from rasterio.windows import Window
+
+    col, row, width, height = window
+    h, w = out_shape
+    with rasterio.open(path) as src:
+        win = Window(col, row, width, height)
+        if kind in ("dem", "diff"):
+            z = src.read(1, window=win, out_shape=(h, w), resampling=Resampling.average,
+                         masked=True).astype(np.float64).filled(np.nan)
+            if kind == "diff":
+                return diff_colors(z, diff_limit)[0]
+            res = abs(src.transform.a) * width / max(w, 1)
+            return dem_colors(z, res, dem_range)
+        n = min(src.count, 4)
+        arr = np.moveaxis(src.read(list(range(1, n + 1)), window=win, out_shape=(n, h, w),
+                                   resampling=Resampling.average), 0, -1)
+    if n == 3:
+        arr = np.dstack([arr, np.full((h, w), 255, np.uint8)])
+    elif n < 3:
+        arr = np.dstack([arr[..., 0]] * 3 + [np.full((h, w), 255, np.uint8)])
+    return arr.astype(np.uint8)
+
+
+class _DetailRelay(QObject):
+    """Hands a detail image from the reading thread to the view (queued to the GUI thread)."""
+
+    ready = Signal(int, object, object)  # generation, QImage, QRectF in scene coordinates
 
 
 class _ZoomView(QGraphicsView):
@@ -85,6 +135,10 @@ class _ZoomView(QGraphicsView):
     def wheelEvent(self, ev) -> None:
         f = 1.2 ** (ev.angleDelta().y() / 120.0)
         self.scale(f, f)
+        self._view_changed()
+
+    def _view_changed(self) -> None:
+        """The visible area or the zoom changed (overridden by the raster view)."""
 
     def fit(self) -> None:
         if self.pixmap_item is not None:
@@ -106,7 +160,11 @@ class RasterView(_ZoomView):
     height difference); ``point`` (one click: elevation / SAM prompt).
 
     Snapping (``snap_vertex``, ``snap_segment``, tolerance ``snap_px`` in screen pixels) moves
-    the points of every drawing tool onto the vertices or the segments of the visible layers."""
+    the points of every drawing tool onto the vertices or the segments of the visible layers.
+
+    A large raster is shown from a reduced copy (at most ``max_side`` px, one overview of the
+    file) so that it opens at once; zooming in further, the visible part is read again from the
+    file at the resolution of the screen, up to the full one (``detail``), in a thread."""
 
     DRAW_MODES = ("polygon", "line", "measure", "quota", "crop")
     SAM_TOOLS = ("tap", "box", "area")
@@ -160,6 +218,24 @@ class RasterView(_ZoomView):
         self._inv_of = self._inv = None  # self.tr and its inverse
         self.sam_tool = "tap"  # SAM mode: tap (points), box (one object), area (every object inside)
         self._sam_items: list = []  # preview of the current SAM mask and its prompts
+        # full-resolution detail of the visible area (see the class docstring)
+        self.detail = True
+        self._detail_item: QGraphicsPixmapItem | None = None
+        self._detail_key = None  # (source window, output shape) of the detail shown or asked for
+        self._detail_gen = 0
+        self._src_size = self._base_size = (0, 0)
+        self._dem_range: tuple[float, float] | None = None
+        self.diff_limit = 0.0
+        self._detail_pool = ThreadPoolExecutor(1, thread_name_prefix="raster-detail")
+        self._detail_relay = _DetailRelay(self)
+        self._detail_relay.ready.connect(self._show_detail)
+        self._detail_timer = QTimer(self)
+        self._detail_timer.setSingleShot(True)
+        self._detail_timer.setInterval(120)
+        self._detail_timer.timeout.connect(self.update_detail)
+        for bar in (self.horizontalScrollBar(), self.verticalScrollBar()):
+            bar.valueChanged.connect(self._view_changed)
+            bar.rangeChanged.connect(self._view_changed)
 
     @contextmanager
     def batch(self):
@@ -190,6 +266,8 @@ class RasterView(_ZoomView):
         self.selection, self._sel_marks, self._band, self._band_origin = [], [], None, None  # deleted by clear()
         self._snap_marks, self._snap_cache, self._stroking = {}, None, False
         self._sam_items = []
+        self._detail_item, self._detail_key = None, None
+        self._detail_gen += 1  # a detail still being read belongs to the previous raster
         self.scene().clear()
         self.overlays, self._clicks, self._click_xy, self._rubber = [], [], [], None
         self.layers, self.layer_order = {}, []
@@ -204,13 +282,15 @@ class RasterView(_ZoomView):
                 f = float(min((o for o in levels if o >= f), default=f))
             h, w = int(round(src.height / f)), int(round(src.width / f))
             self.tr = src.transform @ src.transform.scale(src.width / w, src.height / h)
+            self._src_size, self._base_size = (src.width, src.height), (w, h)
             if kind in ("dem", "diff"):
                 z = src.read(1, out_shape=(h, w), resampling=Resampling.average, masked=True).astype(np.float64)
                 self.z = z.filled(np.nan)
                 if kind == "diff":  # a difference of DEMs: diverging colours, the limit for the legend
                     rgba, self.diff_limit = diff_colors(self.z)
                 else:
-                    rgba = dem_colors(self.z, abs(self.tr.a))
+                    self._dem_range = dem_limits(self.z)
+                    rgba = dem_colors(self.z, abs(self.tr.a), self._dem_range)
             else:
                 self.z = None
                 n = min(src.count, 4)
@@ -220,8 +300,110 @@ class RasterView(_ZoomView):
                     arr = np.dstack([arr, np.full((h, w), 255, np.uint8)])
                 rgba = arr.astype(np.uint8)
         self.pixmap_item = self.scene().addPixmap(QPixmap.fromImage(to_qimage(rgba)))
+        self.pixmap_item.setZValue(-2)  # the detail (-1) and the drawings go over it
         self.setSceneRect(QRectF(0, 0, w, h))
         self.fit()
+        self._view_changed()
+
+    # ----------------------------------------------------------- full-resolution detail
+    def _view_changed(self, *_args) -> None:
+        if self.detail and self.tr is not None and self.path is not None:
+            self._detail_timer.start()  # once the zoom or the panning pauses
+
+    def resizeEvent(self, ev) -> None:
+        super().resizeEvent(ev)
+        self._view_changed()
+
+    def _detail_request(self):
+        """(source window, output shape, scene rect) of the detail the view needs now, or None
+        when the reduced copy is fine enough (zoomed out, or a small raster)."""
+        if self.tr is None or self.path is None or not self._base_size[0]:
+            return None
+        (sw, sh), (bw, bh) = self._src_size, self._base_size
+        fx, fy = sw / bw, sh / bh  # source pixels in a pixel of the reduced copy
+        dpr = max(float(self.devicePixelRatioF()), 1.0)
+        screen = abs(self.transform().m11()) * dpr  # screen pixels per pixel of the reduced copy
+        if screen * 0.8 <= 1.0 or max(fx, fy) <= 1.0:
+            return None  # the reduced copy already has a pixel per screen pixel
+        vis = self.mapToScene(self.viewport().rect()).boundingRect()
+        m = 0.25 * max(vis.width(), vis.height())  # a margin: short pans need no new reading
+        rect = vis.adjusted(-m, -m, m, m).intersected(self.sceneRect())
+        if rect.isEmpty():
+            return None
+        c0, r0 = max(int(np.floor(rect.left() * fx)), 0), max(int(np.floor(rect.top() * fy)), 0)
+        c1, r1 = min(int(np.ceil(rect.right() * fx)), sw), min(int(np.ceil(rect.bottom() * fy)), sh)
+        if c1 <= c0 or r1 <= r0:
+            return None
+        # source pixels per screen pixel: never finer than the file
+        step = max(1.0, min(fx, fy) / screen)
+        ow, oh = max(1, int(np.ceil((c1 - c0) / step))), max(1, int(np.ceil((r1 - r0) / step)))
+        scene = QRectF(c0 / fx, r0 / fy, (c1 - c0) / fx, (r1 - r0) / fy)
+        return (c0, r0, c1 - c0, r1 - r0), (oh, ow), scene
+
+    def update_detail(self, wait: bool = False) -> None:
+        """Read the visible part of the raster again at the resolution of the screen (in a
+        thread; ``wait`` reads it here, for tests and snapshots)."""
+        req = self._detail_request()
+        if req is None:
+            if self._detail_item is not None:
+                self._detail_item.setVisible(False)
+            self._detail_key = None
+            return
+        window, shape, scene = req
+        if self._detail_key is not None:
+            (kc, kr, kw, kh), kshape = self._detail_key
+            inside = kc <= window[0] and kr <= window[1] and kc + kw >= window[0] + window[2] \
+                and kr + kh >= window[1] + window[3]
+            same_step = abs(np.log((kw / kshape[1]) / (window[2] / shape[1]))) < 0.35
+            if inside and same_step:
+                return  # what is shown (or being read) already covers this view
+        self._detail_key = (window, shape)
+        self._detail_gen += 1
+        job = (self._detail_gen, str(self.path), self.kind, window, shape, scene, self._dem_range,
+               self.diff_limit)
+        if wait:
+            self._show_detail(*self._read_detail(job))
+        else:
+            self._detail_pool.submit(self._read_detail_async, job)
+
+    @staticmethod
+    def _read_detail(job):
+        gen, path, kind, window, shape, scene, dem_range, diff_limit = job
+        rgba = read_window_rgba(path, "ortho" if kind not in ("dem", "diff") else kind, window, shape,
+                                dem_range, diff_limit)
+        return gen, to_qimage(rgba), scene
+
+    def _read_detail_async(self, job) -> None:
+        try:
+            result = self._read_detail(job)
+        except Exception:  # pragma: no cover - a file replaced while reading: the next view change retries
+            return
+        try:
+            self._detail_relay.ready.emit(*result)
+        except RuntimeError:  # pragma: no cover - the view was closed meanwhile
+            pass
+
+    def _show_detail(self, gen: int, image, scene: QRectF) -> None:
+        if gen != self._detail_gen or self.tr is None:
+            return  # an older request, or another raster
+        pix = QPixmap.fromImage(image)
+        if self._detail_item is None or self._detail_item.scene() is not self.scene():
+            self._detail_item = self.scene().addPixmap(pix)
+            self._detail_item.setZValue(-1)
+            self._detail_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        else:
+            self._detail_item.setPixmap(pix)
+        self._detail_item.setPos(scene.topLeft())
+        self._detail_item.setTransform(QTransform.fromScale(scene.width() / max(image.width(), 1),
+                                                            scene.height() / max(image.height(), 1)))
+        self._detail_item.setVisible(True)
+
+    def detail_resolution(self) -> float | None:
+        """Ground size of a pixel of the detail shown (world units), None without detail."""
+        if self._detail_item is None or not self._detail_item.isVisible() or self._detail_key is None:
+            return None
+        (_c, _r, width, _h), (_oh, ow) = self._detail_key
+        return abs(self.tr.a) * self._base_size[0] / self._src_size[0] * width / ow
 
     def set_dem(self, path: str | Path) -> None:
         """Elevations for the cursor readout while showing the orthomosaic."""
