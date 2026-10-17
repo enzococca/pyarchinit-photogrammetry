@@ -1123,6 +1123,12 @@ class MainWindow(QMainWindow):
                 text += f"\nNuvola densa: {ch.meta['point_cloud_source']} ({len(ch.point_cloud)} punti)"
             if ch.meta.get("import", {}).get("dem"):
                 text += f"\nDEM: {ch.meta['import']['dem']}"
+            if ch.markers:
+                text += f"\nMarker: {len(ch.markers)}" + (f", barre di scala: {len(ch.scalebars)}" if ch.scalebars else "")
+            odm = ch.meta.get("import", {}).get("gcp", {}).get("odm_errors")
+            if odm:
+                rmse = float(np.sqrt(np.mean(np.sum(np.square(list(odm.values())), axis=1))))
+                text += f" (GCP di ODM: errore medio {rmse * 1000:.1f} mm secondo ODM)"
             self.log_pane.info(f"Importato {src}: {text}")
             for w in warn:
                 self.log_pane.warning(w)

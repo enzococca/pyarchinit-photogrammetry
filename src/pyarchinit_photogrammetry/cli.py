@@ -860,12 +860,18 @@ def import_metashape(psx: Path, project: Path, chunk: Optional[int] = typer.Opti
 
 @app.command("import-webodm")
 def import_webodm(source: Path, project: Path):
-    """Project from a WebODM/ODM task folder or its all.zip (orthophoto, DEM, point cloud, mesh)."""
+    """Project from a WebODM/ODM task folder or its all.zip (orthophoto, DEM, point cloud, mesh, camera poses and
+    the GCPs as markers)."""
     from .integrations.webodm import import_task
 
     doc = import_task(source, project, progress=print_progress)
     ch = doc.chunk
-    typer.echo(f"{ch.label}: CRS {ch.crs}, products {sorted(ch.products)}")
+    imp = ch.meta.get("import", {})
+    typer.echo(f"{ch.label}: CRS {ch.crs}, products {sorted(ch.products)}"
+               + (f", {imp['cameras']} cameras" if imp.get("cameras") else "")
+               + (f", {imp['gcp']['markers']} GCPs" if imp.get("gcp") else ""))
+    for w in imp.get("warnings", []):
+        typer.echo(f"warning: {w}")
 
 
 @app.command("import-photo3d")

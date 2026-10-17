@@ -120,6 +120,80 @@ def test_webodm_all_zip(processed, tmp_path):
 
 
 # ---------------------------------------------------------------- Metashape
+def _opensfm_camera(s) -> dict:
+    """An OpenSfM ``brown`` camera of ``cameras.json`` (normalised by the larger image side) for
+    a sensor of the engine."""
+    k = s.K
+    size = max(s.width, s.height)
+    p = list(s.params)
+    dist = {"SIMPLE_RADIAL": p[3:4], "RADIAL": p[3:5], "OPENCV": p[4:8], "FULL_OPENCV": p[4:9]}.get(s.model, [])
+    dist = (list(dist) + [0.0] * 5)[:5]
+    if s.model in ("SIMPLE_RADIAL", "RADIAL"):
+        dist = [dist[0], dist[1], 0.0, 0.0, 0.0]
+    return {"projection_type": "brown", "width": s.width, "height": s.height, "focal_x": k[0, 0] / size,
+            "focal_y": k[1, 1] / size, "c_x": (k[0, 2] - s.width / 2) / size, "c_y": (k[1, 2] - s.height / 2) / size,
+            "k1": dist[0], "k2": dist[1], "p1": dist[2], "p2": dist[3], "k3": dist[4]}
+
+
+def test_webodm_cameras_and_gcps(processed, tmp_path):
+    """An ODM task with its cameras (``cameras.json``, ``odm_report/shots.geojson``) and the GCPs
+    it used (``ground_control_points.geojson``): the cameras come with poses and calibrations,
+    the GCPs become markers measured in the photos and triangulated at once with the errors ODM
+    computed, and scale bars can be drawn between them (ODM has no scale bars of its own)."""
+    from pyproj import Transformer
+    from scipy.spatial.transform import Rotation
+
+    from pyarchinit_photogrammetry.integrations.webodm import import_task
+    from pyarchinit_photogrammetry.markers import gcp
+
+    _doc, src, _ = processed
+    t = tmp_path / "task"
+    for d in ("odm_orthophoto", "odm_georeferencing", "odm_report"):
+        (t / d).mkdir(parents=True)
+    shutil.copy(src.orthomosaic_path, t / "odm_orthophoto" / "odm_orthophoto.tif")
+    (t / "odm_georeferencing" / "coords.txt").write_text("WGS84 UTM 32N\n2480000 4500000\n")
+    (t / "cameras.json").write_text(json.dumps({f"v2 cam{k}": _opensfm_camera(s) for k, s in src.sensors.items()}))
+    rot = src.transform[:3, :3] / src.scale  # internal -> world
+    shots = [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [0.0, 0.0, 0.0]},
+              "properties": {"filename": Path(c.path).name, "camera": f"v2 cam{c.sensor_key}",
+                             "rotation": Rotation.from_matrix((rot @ c.transform[:3, :3]).T).as_rotvec().tolist(),
+                             "translation": src.to_world(c.transform[:3, 3][None])[0].tolist()}}
+             for c in src.aligned_cameras]
+    (t / "odm_report" / "shots.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": shots}))
+    to_lonlat = Transformer.from_crs(src.crs, "EPSG:4326", always_xy=True)
+    features, odm_error = [], {}
+    for m in src.markers:
+        if not m.reference.location or m.position is None:
+            continue
+        ref = np.asarray(m.reference.location, float)
+        odm_error[m.label] = src.to_world(m.position[None])[0] - ref  # ODM: triangulated - surveyed
+        obs = []
+        for ck, pr in m.projections.items():
+            cam = src.camera(ck)
+            s = src.sensors[cam.sensor_key]
+            obs.append({"shot_id": Path(cam.path).name, "annotated": [(pr.x - 0.5) / s.width, (pr.y - 0.5) / s.height],
+                        "reprojected": [0.5, 0.5]})
+        features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [*to_lonlat.transform(*ref[:2]), ref[2]]},
+                         "properties": {"id": m.label, "observations": obs, "error": odm_error[m.label].tolist()}})
+    (t / "odm_georeferencing" / "ground_control_points.geojson").write_text(
+        json.dumps({"type": "FeatureCollection", "features": features}))
+    ch = import_task(t, tmp_path / "odm" / "odm.ppg").chunk
+    assert ch.crs == "EPSG:3004" and len(ch.aligned_cameras) == len(src.aligned_cameras)
+    for c in src.aligned_cameras:  # poses as ODM wrote them
+        mine = ch.camera(Path(c.path).stem)
+        assert np.allclose(ch.to_world(mine.transform[:3, 3][None])[0], src.to_world(c.transform[:3, 3][None])[0], atol=1e-6)
+        assert np.allclose(mine.transform[:3, :3], rot @ c.transform[:3, :3], atol=1e-9)
+    assert ch.meta["import"]["gcp"]["markers"] == len(odm_error) >= 4
+    for label, err in odm_error.items():  # triangulated here: the errors ODM computed
+        m = ch.marker(label)
+        assert np.allclose(ch.to_world(m.position[None])[0] - np.asarray(m.reference.location), err, atol=5e-4)
+    (a, b) = [ch.marker(k) for k in list(odm_error)[:2]]
+    bar = ch.add_scalebar(a, b, float(np.linalg.norm(np.subtract(a.reference.location, b.reference.location))),
+                          checkpoint=True)
+    e = next(r for r in gcp.scalebar_errors(ch) if r["label"] == bar.label)
+    assert abs(e["error"]) < 0.003
+
+
 def test_metashape_calibration_mapping():
     from pyarchinit_photogrammetry.integrations.metashape import MsSensor, sensor_params
 
