@@ -22,8 +22,9 @@ def triangulate_markers(chunk, min_views: int = 2) -> None:
     for m in chunk.markers:
         if not m.projections:  # placed in 3D where no photo sees it (or given a position): kept
             continue
+        measured = {k: p for k, p in m.projections.items() if p.measured}
         views, obs, first = [], [], None
-        for cam_key, proj in m.projections.items():
+        for cam_key, proj in (measured or m.projections).items():  # estimates count only without measures
             try:
                 cam = chunk.camera(cam_key)
             except KeyError:
@@ -36,20 +37,58 @@ def triangulate_markers(chunk, min_views: int = 2) -> None:
             first = first or (cam, proj)
         if len(views) >= min_views:
             m.position = geometry.triangulate(views, np.asarray(obs))
-        else:
+        elif measured:
             m.position = surface_point(chunk, first[0], first[1].x, first[1].y, points) if first else None
+        # estimated projections only, fewer than two photos (placed in 3D): the position stays
 
 
-def views_of(chunk, marker) -> int:
-    """How many aligned photos measure a marker (two or more: triangulated; one: on the surface)."""
+def views_of(chunk, marker, estimated: bool = False) -> int:
+    """How many aligned photos measure a marker (two or more: triangulated; one: on the surface);
+    with ``estimated`` the photos where it is only estimated instead (flags to confirm)."""
     n = 0
-    for cam_key in marker.projections:
+    for cam_key, proj in marker.projections.items():
+        if proj.measured == estimated:
+            continue
         try:
             cam = chunk.camera(cam_key)
         except KeyError:
             continue
         n += bool(cam.enabled and cam.aligned)
     return n
+
+
+def photos_seeing(chunk, point, occlusion: bool = True) -> list[tuple]:
+    """The aligned photos that see a point (internal frame): inside the frame, in front of the
+    camera and, with ``occlusion``, not hidden by the surface (the dense cloud, else the tie
+    points, near the point). ``[(camera, x, y, depth)]`` in COLMAP pixels, the photos where it
+    falls nearest the centre first (Metashape's *Filter Photos by Point*)."""
+    point = np.asarray(point, float).reshape(3)
+    found = []
+    for cam in chunk.aligned_cameras:
+        sensor = chunk.sensor(cam)
+        px, depth = cam.project(sensor, point[None])
+        u, v = float(px[0, 0]), float(px[0, 1])
+        if depth[0] <= 0 or not (0 <= u < sensor.width and 0 <= v < sensor.height):
+            continue
+        off = np.hypot(u - sensor.width / 2, v - sensor.height / 2) / np.hypot(sensor.width / 2, sensor.height / 2)
+        found.append((off, cam, u, v, float(depth[0])))
+    found.sort(key=lambda f: f[0])
+    xyz = _SurfacePoints(chunk).xyz() if occlusion and found else None
+    near = None
+    if xyz is not None:
+        reach = 0.2 * float(np.median([d for *_, d in found]))  # occluders that matter lie near the point
+        near = xyz[np.einsum("ij,ij->i", xyz - point, xyz - point) < reach ** 2]
+    out = []
+    for _off, cam, u, v, depth in found:
+        if near is not None and len(near) >= 15:
+            origin, direction = camera_ray(chunk, cam, u, v)
+            radius = depth * 20.0 / max(chunk.sensor(cam).focal_px, 1e-9)
+            hit = geometry.point_on_ray(near, origin, direction, radius)
+            dist = float(np.linalg.norm(point - origin))
+            if hit is not None and float(np.linalg.norm(hit - origin)) < dist - max(0.01 * dist, 3 * radius):
+                continue  # something stands between the camera and the point
+        out.append((cam, u, v, depth))
+    return out
 
 
 _LAST_SURFACE: dict = {}  # the last surface read ({"key", "xyz"}): placing markers one after another reads it once
@@ -95,41 +134,42 @@ class _SurfacePoints:
         return self._diag
 
 
-def project_marker(chunk, marker, point, max_photos: int = 60) -> int:
-    """Projections (not pinned) of a marker placed in 3D at ``point`` (internal frame) on the
-    photos that see it, as Metashape shows a marker added on the model or the orthomosaic: inside
-    the frame, in front of the camera and not hidden by the surface (the dense cloud, else the
-    tie points, near the marker); the photos where it falls nearest the centre first, at most
-    ``max_photos``. Pinning one in a photo (moving it there) makes it a measurement. Returns how
-    many photos see it."""
-    point = np.asarray(point, float).reshape(3)
-    found = []
-    for cam in chunk.aligned_cameras:
-        sensor = chunk.sensor(cam)
-        px, depth = cam.project(sensor, point[None])
-        u, v = float(px[0, 0]), float(px[0, 1])
-        if depth[0] <= 0 or not (0 <= u < sensor.width and 0 <= v < sensor.height):
-            continue
-        off = np.hypot(u - sensor.width / 2, v - sensor.height / 2) / np.hypot(sensor.width / 2, sensor.height / 2)
-        found.append((off, cam, u, v, float(depth[0])))
-    found.sort(key=lambda f: f[0])
-    xyz = _SurfacePoints(chunk).xyz()
-    near = None
-    if xyz is not None and found:
-        reach = 0.2 * float(np.median([d for *_, d in found]))  # occluders that matter lie near the marker
-        near = xyz[np.einsum("ij,ij->i", xyz - point, xyz - point) < reach ** 2]
+def excluded_photos(chunk, marker) -> set[int]:
+    """Photos where the projection of a marker was removed by hand: no estimate goes back there."""
+    return {int(k) for k in chunk.meta.get("marker_excluded", {}).get(str(marker.key), [])}
+
+
+def exclude_photo(chunk, marker, camera_key: int, excluded: bool = True) -> None:
+    """Remember (or forget) that a marker is not to be estimated on a photo (it was removed there)."""
+    table = chunk.meta.setdefault("marker_excluded", {})
+    keys = excluded_photos(chunk, marker)
+    keys = keys | {int(camera_key)} if excluded else keys - {int(camera_key)}
+    if keys:
+        table[str(marker.key)] = sorted(keys)
+    else:
+        table.pop(str(marker.key), None)
+
+
+def project_marker(chunk, marker, point=None, max_photos: int = 60) -> int:
+    """Estimated projections of a marker (``pinned`` None: Metashape's blue flags) on the photos
+    that see it (:func:`photos_seeing`), at most ``max_photos``, from ``point`` (internal frame;
+    default its position): for a marker placed in 3D, or measured in one photo and to be found in
+    the others. Photos where it is measured keep their measure; earlier estimates are replaced.
+    Dragging a flag in a photo (or confirming it) makes it a measure. Returns how many photos
+    show it now as an estimate."""
+    point = marker.position if point is None else point
+    for k in [k for k, p in marker.projections.items() if not p.measured]:
+        del marker.projections[k]
+    if point is None:
+        return 0
     added = 0
-    for _off, cam, u, v, depth in found:
+    skip = excluded_photos(chunk, marker)  # removed there by hand
+    for cam, u, v, _depth in photos_seeing(chunk, point):
         if added >= max_photos:
             break
-        if near is not None and len(near) >= 15:
-            origin, direction = camera_ray(chunk, cam, u, v)
-            radius = depth * 20.0 / max(chunk.sensor(cam).focal_px, 1e-9)
-            hit = geometry.point_on_ray(near, origin, direction, radius)
-            dist = float(np.linalg.norm(point - origin))
-            if hit is not None and float(np.linalg.norm(hit - origin)) < dist - max(0.01 * dist, 3 * radius):
-                continue  # something stands between the camera and the marker
-        chunk.add_marker_projection(marker, cam, u, v, pinned=False)
+        if cam.key in marker.projections or cam.key in skip:  # measured there, or removed by hand
+            continue
+        chunk.add_marker_projection(marker, cam, u, v, pinned=None)
         added += 1
     return added
 
@@ -188,6 +228,8 @@ def marker_reprojection_errors(chunk, marker: Marker) -> dict[int, float]:
     if marker.position is None:
         return out
     for cam_key, proj in marker.projections.items():
+        if not proj.measured:  # an estimate falls where the marker is: no error to speak of
+            continue
         cam = chunk.camera(cam_key)
         if not cam.aligned:
             continue
@@ -480,8 +522,8 @@ def marker_errors(chunk) -> list[dict]:
     out = []
     for m in chunk.markers:
         e = {"label": m.label, "type": "check" if m.checkpoint else "control", "error": None,
-             "dx": None, "dy": None, "dz": None, "projections": len(m.projections),
-             "pixel_error": None}
+             "dx": None, "dy": None, "dz": None, "projections": sum(p.measured for p in m.projections.values()),
+             "estimated": sum(not p.measured for p in m.projections.values()), "pixel_error": None}
         px = marker_reprojection_errors(chunk, m)
         if px:
             e["pixel_error"] = float(np.sqrt(np.mean(np.square(list(px.values())))))

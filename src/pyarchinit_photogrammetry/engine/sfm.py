@@ -510,7 +510,7 @@ def _fixed_points(chunk: Chunk, rec, copies: int, points) -> tuple[list[int], se
         obs = []
         for cam_key, proj in m.projections.items():
             iid = by_name.get(names.get(str(cam_key), ""))
-            if iid is not None:
+            if iid is not None and proj.measured:  # estimates from the model are not observations
                 obs.append((iid, proj.x, proj.y))
         if len(obs) < 2:
             continue

@@ -26,7 +26,7 @@ from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelecti
 from .icons import app_icon, icon
 from .image_views import US_COLORS, PhotoView, RasterView
 from .model_view import ModelView
-from .panels import (ConsolePane, LayersPane, LogPane, PhotosPane, ProxiesPane, PyArchInitPane, ReferencePane,
+from .panels import (ConsolePane, LayersPane, LogPane, PhotosPane, PhotosPanel, ProxiesPane, PyArchInitPane, ReferencePane,
                      SectionsPane, WorkspaceTree)
 from .start_page import StartPage
 from .worker import StatusProgress, TaskRunner
@@ -109,6 +109,7 @@ class MainWindow(QMainWindow):
         self.model_view.points_selected.connect(self._points_selected)
         self.model_view.faces_selected.connect(self._faces_selected)
         self.model_view.marker_requested.connect(self._marker_picked_in_3d)
+        self.model_view.photos_point_requested.connect(self.filter_photos_by_point)
         self.ortho_view = RasterView()
         self.photo_view = PhotoView()
         self.tabs.addTab(self.model_view, icon("view3d"), "Modello")
@@ -137,6 +138,8 @@ class MainWindow(QMainWindow):
                                                     self.log_pane.info(t)))
         self.ortho_view.quota_clicked.connect(self._quota_clicked)
         self.ortho_view.marker_clicked.connect(self._marker_clicked_on_raster)
+        self.ortho_view.photos_at_point.connect(lambda x, y: self.filter_photos_by_point(self._raster_point(x, y)))
+        self.ortho_view.photos_in_area_requested.connect(self._photos_in_selected_area)
         self.ortho_view.sam_click.connect(self._sam_click)
         self.ortho_view.sam_rect.connect(self._sam_rect)
         self.ortho_view.sam_key.connect(self._sam_key)
@@ -144,6 +147,8 @@ class MainWindow(QMainWindow):
         self.ortho_view.delete_requested.connect(lambda: self.delete_selected())
         self.ortho_view.merge_requested.connect(lambda: self.merge_selected())
         self.photo_view.markers_changed.connect(self._markers_edited)
+        self.photo_view.navigate.connect(self.photo_step)
+        self.photo_view.marker_created.connect(lambda m: self.filter_photos_by_markers([m.key]))
         self.photo_view.sam_prompt.connect(self._photo_sam_prompt)
 
     def _dock(self, title: str, widget: QWidget, area, name: str) -> QDockWidget:
@@ -171,6 +176,7 @@ class MainWindow(QMainWindow):
         self.reference.changed.connect(lambda: self._dirty(True))
         self.reference.scalebar_requested.connect(self.new_scalebar)
         self.reference.scalebar_import_requested.connect(self.import_scalebars)
+        self.reference.filter_photos_requested.connect(self.filter_photos_by_markers)
         self.photos = PhotosPane()
         self.photos.thumbs_progress.connect(self._thumbs_progress)
         self.photos.open_camera.connect(self.open_photo)
@@ -217,7 +223,10 @@ class MainWindow(QMainWindow):
         self.ortho_view.feature_clicked.connect(self._feature_clicked)
         self.bottom_tabs = QTabWidget()
         self.bottom_tabs.setIconSize(QSize(16, 16))
-        self.bottom_tabs.addTab(self.photos, icon("photos"), "Foto")
+        self.photos_panel = PhotosPanel(self.photos)
+        self.photos_panel.step.connect(self.photo_step)
+        self.photos_panel.with_markers.connect(self.filter_photos_with_markers)
+        self.bottom_tabs.addTab(self.photos_panel, icon("photos"), "Foto")
         self.bottom_tabs.addTab(self.sections_pane, icon("line"), "Sezioni")
         self.bottom_tabs.addTab(self.console, icon("console"), "Console Python")
         self.bottom_tabs.addTab(self.log_pane, icon("log"), "Log")
@@ -511,7 +520,7 @@ class MainWindow(QMainWindow):
         self._act(m, "Area di lavoro", lambda: self._show_pane(self.left_tabs, self.workspace), icon_name="workspace")
         self._act(m, "Riferimenti", lambda: self._show_pane(self.left_tabs, self.reference), icon_name="reference_pane")
         self._act(m, "Layer", lambda: self._show_pane(self.left_tabs, self.layers_pane), icon_name="slice")
-        self._act(m, "Foto (miniature)", lambda: self._show_pane(self.bottom_tabs, self.photos), icon_name="photos")
+        self._act(m, "Foto (miniature)", lambda: self._show_pane(self.bottom_tabs, self.photos_panel), icon_name="photos")
         self._act(m, "Sezioni", lambda: self._show_pane(self.bottom_tabs, self.sections_pane), icon_name="line")
         self._act(m, "Console Python", lambda: self._show_pane(self.bottom_tabs, self.console), "Ctrl+Shift+P",
                   icon_name="console")
@@ -1484,11 +1493,15 @@ class MainWindow(QMainWindow):
         seen = gcp.project_marker(ch, m, m.position)
         world = ch.to_world(m.position[None])[0]
         self.log_pane.info(f"Marker {m.label} {where}: X {world[0]:.3f} Y {world[1]:.3f} Z {world[2]:.3f}; "
-                           + (f"proiettato su {seen} foto (bandierine da confermare trascinandole)" if seen else
-                              "nessuna foto lo vede: resta dove l'hai messo"))
-        self.statusBar().showMessage(f"Marker {m.label}: {seen} foto lo vedono", 10000)
+                           + (f"stimato su {seen} foto: nel pannello Foto (filtrato su {m.label}) doppio clic su una "
+                              "foto, poi trascina la bandierina blu sul punto esatto o doppio clic se e' giusta"
+                              if seen else "nessuna foto lo vede: resta dove l'hai messo"))
         self._markers_edited()
         self.model_view.refresh(reset=False)
+        if seen:  # its photos, to confirm the flags as in Metashape
+            self.filter_photos_by_markers([m.key])
+        else:
+            self.statusBar().showMessage(f"Marker {m.label}: nessuna foto lo vede", 10000)
 
     def _draw_markers_on_raster(self) -> None:
         """The markers with a position as a layer of the orthophoto/DEM view."""
@@ -2468,20 +2481,114 @@ class MainWindow(QMainWindow):
             self._dirty(True)
             self.refresh_all()
 
-    def open_photo(self, camera) -> None:
-        self.photo_view.show_camera(self.chunk, camera)
+    def open_photo(self, camera, focus=None) -> None:
+        """Open a photo; with a filter by marker or point, centred on it at full resolution."""
+        focus = self.photos.focus if focus is None else focus
+        self.photo_view.show_camera(self.chunk, camera, focus=focus)
         self.show_view(self.photo_view)
-        self.statusBar().showMessage(f"{camera.label}: tasto destro per posizionare un marker", 8000)
+        self.photo_view.setFocus()
+        self.photos.select_camera(camera)
+        flags = sum(1 for m in self.chunk.markers if camera.key in m.projections)
+        self.statusBar().showMessage(
+            f"{camera.label}: " + ("bandierina blu = posizione stimata da confermare: trascinala sul punto esatto (o doppio "
+                                   "clic se e' gia' giusta), diventa verde; " if flags else "")
+            + "tasto destro per posizionare un marker; Pagina giu'/su: foto successiva/precedente", 20000)
 
-    def _markers_edited(self) -> None:
-        self._dirty(True)
+    def photo_step(self, step: int) -> None:
+        """The next (+1) or previous (-1) photo of the list shown (the filtered one), as Metashape's
+        Page Up/Down in the photo view."""
+        cams = self.photos.visible_cameras()
+        if not cams:
+            return
+        cur = self.photo_view.camera
+        i = next((j for j, c in enumerate(cams) if c is cur), None)
+        self.open_photo(cams[(i + step) % len(cams)] if i is not None else cams[0])
+
+    def filter_photos_by_markers(self, keys) -> None:
+        """Only the photos where these markers are (measured, estimated or in the frame where
+        the survey puts them), as Metashape's *Filter Photos by Markers*; opening one centres it
+        on the first marker."""
+        from ..markers import gcp
+
+        ch = self.chunk
+        if ch is None or not keys:
+            return
+        markers = [ch.marker_by_key(k) for k in keys]
+        cams = set()
+        for m in markers:
+            cams |= set(m.projections)
+            if m.position is not None:
+                cams |= {c.key for c, *_ in gcp.photos_seeing(ch, m.position)}
+        names = ", ".join(m.label for m in markers)
+        n = self.photos.set_filter(cams, f"Foto di {names}", focus=markers[0])
+        self._show_pane(self.bottom_tabs, self.photos_panel)
+        self.statusBar().showMessage(
+            f"{n} foto con {names}: doppio clic per aprirle centrate sul marker; bandierina blu = da confermare "
+            "(trascinala sul punto esatto o doppio clic se e' giusta); Pagina giu'/su per passare alle altre", 20000)
+
+    def filter_photos_with_markers(self) -> None:
+        ch = self.chunk
+        if ch is None:
+            return
+        n = self.photos.set_filter({k for m in ch.markers for k in m.projections}, "Foto con marker")
+        self.statusBar().showMessage(f"{n} foto con almeno un marker", 8000)
+
+    def filter_photos_by_point(self, point, title: str | None = None) -> None:
+        """Only the photos that see a point (internal frame), as Metashape's *Filter Photos by
+        Point*; opening one centres it on the point."""
+        from ..markers import gcp
+
+        ch = self.chunk
+        if ch is None or point is None:
+            self.statusBar().showMessage("Nessun punto del modello, della nuvola o del DEM qui", 8000)
+            return
+        point = np.asarray(point, float)
+        cams = {c.key for c, *_ in gcp.photos_seeing(ch, point)}
+        x, y, z = ch.to_world(point[None])[0]
+        n = self.photos.set_filter(cams, title or f"Foto del punto X {x:.2f} Y {y:.2f} Z {z:.2f}", focus=point)
+        self._show_pane(self.bottom_tabs, self.photos_panel)
+        self.statusBar().showMessage(f"{n} foto vedono il punto: doppio clic per aprirle centrate su di esso "
+                                     "(croce rossa)", 15000)
+
+    def _photos_in_selected_area(self) -> None:
+        from ..engine.patches import photos_for_area
+
+        geom = self._selected_polygon()
+        ch = self.chunk
+        if geom is None or ch is None:
+            self._warn("Seleziona un poligono (strumento Seleziona) per filtrare le foto che lo inquadrano.")
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            self.chunk.triangulate_markers()
+            rows = photos_for_area(ch, geom, limit=100_000)
+        finally:
+            QApplication.restoreOverrideCursor()
+        keys = {r["key"] for r in rows if r.get("coverage", 0) > 0}
+        n = self.photos.set_filter(keys, "Foto dell'area selezionata")
+        self._show_pane(self.bottom_tabs, self.photos_panel)
+        self.statusBar().showMessage(f"{n} foto inquadrano l'area", 8000)
+
+    def _markers_edited(self, marker=None) -> None:
+        """A marker was placed, moved, confirmed or removed in a photo: positions again and, for that
+        marker, its blue flags on the other photos from where it is now (Metashape's guided
+        placement)."""
+        from ..markers import gcp
+
+        self._dirty(True)
+        ch = self.chunk
+        try:
+            ch.triangulate_markers()
+            if marker is not None and any(m is marker for m in ch.markers) and \
+                    any(p.measured for p in marker.projections.values()):
+                gcp.project_marker(ch, marker)
         except Exception as exc:
             self.log_pane.warning(f"Triangolazione dei marker non riuscita: {exc}")
-        self.reference.set_chunk(self.chunk)
+        self.reference.set_chunk(ch)
         self.workspace.populate(self.doc)
         self._draw_markers_on_raster()
+        self.photos.update_flags()
+        if self.photo_view.camera is not None:
+            self.photo_view.draw_markers()
 
     def _thumbs_progress(self, done: int, total: int) -> None:
         if total >= 30:  # a few photos load at once: no message
@@ -2754,29 +2861,37 @@ class MainWindow(QMainWindow):
         self.add_marker_at(point, "sul modello" if kind.startswith("model") else
                            "sulla nuvola densa" if kind == "point_cloud" else "sui punti di legame")
 
-    def _marker_clicked_on_raster(self, x: float, y: float) -> None:
-        """A marker where the orthophoto or the DEM was clicked: the height from the DEM at full
-        resolution, else from the surface (dense cloud or tie points) along the vertical."""
+    def _raster_point(self, x: float, y: float):
+        """The point of the survey (internal frame) under world x, y of the orthophoto or the DEM:
+        the height from the DEM at full resolution, else from the surface (dense cloud or tie
+        points) along the vertical; None where there is neither."""
         from ..core import geometry
         from ..markers import gcp
 
         ch = self.chunk
+        if ch is None:
+            return None
+        z = self._dem_value(x, y)
+        if z is not None:
+            return ch.to_internal(np.array([[x, y, z]], float))[0]
+        surface = gcp._SurfacePoints(ch)
+        xyz = surface.xyz()
+        if xyz is None:
+            return None
+        top = ch.to_internal(np.array([[x, y, 1e4], [x, y, 0.0]], float))
+        d = (top[1] - top[0]) / np.linalg.norm(top[1] - top[0])
+        return geometry.point_on_ray(xyz, top[0], d, 0.005 * surface.diag())
+
+    def _marker_clicked_on_raster(self, x: float, y: float) -> None:
+        """A marker where the orthophoto or the DEM was clicked (see :meth:`_raster_point`)."""
+        ch = self.chunk
         if ch is None or not ch.aligned_cameras:
             self._warn("Servono le foto allineate: il marker si proietta sulle foto che lo vedono.")
             return
-        z = self._dem_value(x, y)
-        if z is not None:
-            point = ch.to_internal(np.array([[x, y, z]], float))[0]
-        else:
-            xyz = gcp._SurfacePoints(ch).xyz()
-            point = None
-            if xyz is not None:
-                top = ch.to_internal(np.array([[x, y, 1e4], [x, y, 0.0]], float))
-                d = (top[1] - top[0]) / np.linalg.norm(top[1] - top[0])
-                point = geometry.point_on_ray(xyz, top[0], d, 0.005 * float(np.linalg.norm(np.ptp(xyz, axis=0))))
-            if point is None:
-                self.statusBar().showMessage("Qui non c'e' superficie (fuori dal DEM e dalla nuvola)", 8000)
-                return
+        point = self._raster_point(x, y)
+        if point is None:
+            self.statusBar().showMessage("Qui non c'e' superficie (fuori dal DEM e dalla nuvola)", 8000)
+            return
         self.add_marker_at(point, "sull'ortofoto" if self.ortho_view.kind == "ortho" else "sul DEM")
 
     def _add_quota(self, q: dict) -> None:

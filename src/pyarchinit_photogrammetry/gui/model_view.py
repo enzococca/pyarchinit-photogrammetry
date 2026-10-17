@@ -517,6 +517,7 @@ class ModelView(QWidget):
     points_selected = Signal(object, object)  # boolean masks over the whole cloud: visible only, all inside
     faces_selected = Signal(object, object)  # boolean masks over the faces of the model: visible only, all inside
     marker_requested = Signal(object)  # a point of the model or the cloud (internal frame), None: nothing there
+    photos_point_requested = Signal(object)  # filter the photos that see this point (internal frame)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -555,7 +556,11 @@ class ModelView(QWidget):
         self.b_marker = QPushButton("Marker")
         self.b_marker.setToolTip("Aggiungi un marker: clic su un punto del modello o della nuvola, come in Metashape. "
                                  "Si proietta sulle foto che lo vedono; con due marker si fa una barra di scala")
-        self.b_marker.clicked.connect(self.start_pick)
+        self.b_marker.clicked.connect(lambda: self.start_pick("marker"))
+        self.b_photos = QPushButton("Foto del punto")
+        self.b_photos.setToolTip("Clic su un punto del modello o della nuvola: le foto che lo vedono, come Filter "
+                                 "Photos by Point di Metashape")
+        self.b_photos.clicked.connect(lambda: self.start_pick("photos"))
         self.version_label = QLabel("")
         self.version_label.setObjectName("versionLabel")
         self.version_label.setStyleSheet("color: #b45309; font-weight: bold")
@@ -572,6 +577,7 @@ class ModelView(QWidget):
         bar.addWidget(self.info_label)
         bar.addWidget(self.b_lasso)
         bar.addWidget(self.b_marker)
+        bar.addWidget(self.b_photos)
         bar.addWidget(self.cb_cams)
         bar.addWidget(self.cb_marks)
         bar.addWidget(b_top)
@@ -706,6 +712,7 @@ class ModelView(QWidget):
         # edits go to the active cloud or model, not to a kept version
         self.b_lasso.setVisible(self.kind in ("point_cloud", "model") and not self.paths)
         self.b_marker.setVisible(self.kind in self.PICK_KINDS)
+        self.b_photos.setVisible(self.kind in self.PICK_KINDS)
         mode = self.color_mode()
         self.legend.setVisible((self.kind in ("point_cloud", "tie_points") and mode == "class")
                                or (self.kind in ("point_cloud", "model") and mode == "confidence"))
@@ -728,20 +735,25 @@ class ModelView(QWidget):
     # ----------------------------------------------------------- lasso selection
     PICK_KINDS = ("point_cloud", "tie_points", "model", "model_textured")
 
-    def start_pick(self) -> None:
-        """Freeze the view and wait for a click on the model or the cloud (a new marker)."""
+    def start_pick(self, purpose: str = "marker") -> None:
+        """Freeze the view and wait for a click on the model or the cloud: a new marker, or the
+        photos that see the point (``purpose`` "photos")."""
         if self.kind not in self.PICK_KINDS or self.chunk is None or self.sd is None:
             return
         image, self._project = self.canvas.snapshot()
         self._ray = self.canvas.view_ray
-        self.picker.start(image, "Marker: clic su un punto del modello o della nuvola - Esc o tasto destro annulla")
+        self._purpose = purpose
+        what = "le foto che lo vedono" if purpose == "photos" else "un nuovo marker"
+        self.picker.start(image, f"Clic su un punto del modello o della nuvola: {what} - Esc o tasto destro annulla")
         self.stack.setCurrentWidget(self.picker)
 
     def _pick_finished(self, pos) -> None:
         self.stack.setCurrentWidget(self.canvas)
         if pos is None or self._project is None:
             return
-        self.marker_requested.emit(self.pick_point(pos[0], pos[1], self._project, self._ray))
+        point = self.pick_point(pos[0], pos[1], self._project, self._ray)
+        (self.photos_point_requested if getattr(self, "_purpose", "marker") == "photos"
+         else self.marker_requested).emit(point)
 
     def pick_point(self, x: float, y: float, project, ray=None, reach: float = 8.0):
         """The point of the surface under widget pixel (x, y), internal frame: of the points and

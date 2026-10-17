@@ -10,11 +10,19 @@ from .camera import Reference
 
 @dataclass
 class Projection:
-    """Observation of a marker in a photo, in pixels."""
+    """Observation of a marker in a photo, in pixels. ``pinned``: True when placed or confirmed
+    by hand, False when detected automatically (coded targets), None when only estimated from the
+    model (a marker placed in 3D or on another photo, as Metashape's blue flags): an estimate is
+    shown to be confirmed and is not a measurement (older versions read it as a detection)."""
 
     x: float
     y: float
-    pinned: bool = False  # True when placed/confirmed manually
+    pinned: bool | None = False
+
+    @property
+    def measured(self) -> bool:
+        """Placed by hand or detected: an observation, not an estimate from the model."""
+        return self.pinned is not None
 
     def to_list(self) -> list:
         return [self.x, self.y, self.pinned]

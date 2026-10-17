@@ -274,6 +274,7 @@ class PhotosPane(QListWidget):
 
     open_camera = Signal(object)
     thumbs_progress = Signal(int, int)  # read, total
+    filter_changed = Signal(str)  # what the photos shown are ("" = every photo)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -292,6 +293,10 @@ class PhotosPane(QListWidget):
         self._stale: list[_ThumbLoader] = []
         self._done = self._total = 0
         self.chunk = None
+        self._flags: dict[int, tuple[int, int, list]] = {}  # camera key -> (measured, estimated, labels)
+        self._filter: set | None = None
+        self.filter_title = ""
+        self.focus = None  # the marker (or internal point) the filtered photos are about
 
     @staticmethod
     def _placeholder(broken: bool = False) -> QPixmap:
@@ -300,7 +305,9 @@ class PhotosPane(QListWidget):
         return pm
 
     @staticmethod
-    def _icon(pm: QPixmap, aligned: bool) -> QIcon:
+    def _icon(pm: QPixmap, aligned: bool, flags: tuple = (0, 0)) -> QIcon:
+        """The thumbnail with the aligned badge and, at the bottom, the markers on the photo:
+        green = measured, blue = estimated and to be confirmed (as Metashape's flags)."""
         out = QPixmap(pm)
         p = QPainter(out)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -313,8 +320,70 @@ class PhotosPane(QListWidget):
         f.setPointSize(11)
         p.setFont(f)
         p.drawText(5, 5, 18, 18, Qt.AlignmentFlag.AlignCenter, "✓" if aligned else "✕")
+        x = 5
+        for count, colour in ((flags[0], "#30a050"), (flags[1], "#2f7fd8")):
+            if count:
+                text = f"⚑ {count}"
+                w = 14 + 8 * len(str(count))
+                p.setBrush(QBrush(QColor(colour)))
+                p.setPen(QColor("white"))
+                p.drawRoundedRect(x, out.height() - 23, w, 18, 4, 4)
+                p.drawText(x, out.height() - 23, w, 18, Qt.AlignmentFlag.AlignCenter, text)
+                x += w + 4
         p.end()
         return QIcon(out)
+
+    def _marker_flags(self) -> dict:
+        flags: dict[int, list] = {}
+        for m in getattr(self.chunk, "markers", None) or []:
+            for k, pr in m.projections.items():
+                f = flags.setdefault(k, [0, 0, []])
+                f[0 if pr.measured else 1] += 1
+                f[2].append(m.label + ("" if pr.measured else " (da confermare)"))
+        return {k: tuple(v) for k, v in flags.items()}
+
+    def _tooltip(self, cam) -> str:
+        f = self._flags.get(getattr(cam, "key", None))
+        text = f"{cam.path}\n{'allineata' if cam.aligned else 'non allineata'}"
+        return text + (f"\nMarker: {', '.join(f[2])}" if f else "")
+
+    def update_flags(self) -> None:
+        """Draw again the marker badges (after markers were placed, moved or removed)."""
+        self._flags = self._marker_flags()
+        for i in range(self.count()):
+            it = self.item(i)
+            cam = it.data(Qt.ItemDataRole.UserRole)
+            pm = self._cache.get(cam.path)
+            f = self._flags.get(getattr(cam, "key", None), (0, 0, []))
+            it.setIcon(self._icon(pm if pm is not None else self._placeholder(), cam.aligned, f[:2]))
+            it.setToolTip(self._tooltip(cam))
+
+    def set_filter(self, keys=None, title: str = "", focus=None) -> int:
+        """Show only the photos with these camera keys (None: every photo), as Metashape's
+        *Filter Photos*; ``focus`` (a marker or an internal point) is what opening them centres
+        on. Returns how many photos are shown."""
+        self._filter = None if keys is None else set(keys)
+        self.filter_title, self.focus = (title, focus) if keys is not None else ("", None)
+        shown = 0
+        for i in range(self.count()):
+            it = self.item(i)
+            hide = self._filter is not None and getattr(it.data(Qt.ItemDataRole.UserRole), "key", None) not in self._filter
+            it.setHidden(hide)
+            shown += not hide
+        self.filter_changed.emit(self.filter_title)
+        return shown
+
+    def visible_cameras(self) -> list:
+        """The cameras of the photos shown, in their order (the list Page Up/Down goes through)."""
+        return [self.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.count()) if not self.item(i).isHidden()]
+
+    def select_camera(self, camera) -> None:
+        for i in range(self.count()):
+            it = self.item(i)
+            if it.data(Qt.ItemDataRole.UserRole) is camera:
+                self.setCurrentItem(it)
+                self.scrollToItem(it)
+                return
 
     def set_chunk(self, chunk) -> None:
         self.stop()
@@ -325,11 +394,16 @@ class PhotosPane(QListWidget):
         if chunk is None:
             return
         todo = []
+        self._flags = self._marker_flags()
+        self._filter, self.filter_title, self.focus = None, "", None
+        self.filter_changed.emit("")
         for cam in chunk.cameras:
             pm = self._cache.get(cam.path)
-            it = QListWidgetItem(self._icon(pm if pm is not None else self._placeholder(), cam.aligned), cam.label)
+            f = self._flags.get(getattr(cam, "key", None), (0, 0, []))
+            it = QListWidgetItem(self._icon(pm if pm is not None else self._placeholder(), cam.aligned, f[:2]),
+                                 cam.label)
             it.setData(Qt.ItemDataRole.UserRole, cam)
-            it.setToolTip(f"{cam.path}\n{'allineata' if cam.aligned else 'non allineata'}")
+            it.setToolTip(self._tooltip(cam))
             self.addItem(it)
             self._items.setdefault(cam.path, []).append(it)
             if pm is None and cam.path not in todo:
@@ -351,7 +425,7 @@ class PhotosPane(QListWidget):
         self._cache[path] = pm
         for it in self._items.get(path, []):
             cam = it.data(Qt.ItemDataRole.UserRole)
-            it.setIcon(self._icon(pm, cam.aligned))
+            it.setIcon(self._icon(pm, cam.aligned, self._flags.get(getattr(cam, "key", None), (0, 0, []))[:2]))
             if img.isNull():
                 it.setToolTip(f"{cam.path}\nfoto non leggibile (file vuoto o mancante)")
         self._done += 1
@@ -370,6 +444,42 @@ class PhotosPane(QListWidget):
         return [it.data(Qt.ItemDataRole.UserRole) for it in self.selectedItems()]
 
 
+class PhotosPanel(QWidget):
+    """The thumbnails with a bar: the filter in use (by marker, point or area, as Metashape's
+    *Filter Photos*), *Mostra tutte*, *Foto con marker* and the previous/next photo."""
+
+    step = Signal(int)  # -1 previous photo of the list, +1 next
+    with_markers = Signal()
+
+    def __init__(self, pane: PhotosPane, parent=None):
+        super().__init__(parent)
+        self.pane = pane
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(2, 2, 2, 2)
+        bar = FlowLayout()
+        self.label = QLabel("Tutte le foto")
+        self.b_all = _tool("photos", "Mostra tutte", "Togli il filtro: tutte le foto del chunk")
+        self.b_markers = _tool("marker", "Foto con marker", "Solo le foto con almeno un marker (bandierina verde: "
+                                                             "misurato, blu: da confermare)")
+        self.b_prev = _tool("previous", "Precedente", "Apri la foto precedente dell'elenco (Pagina su nella foto)")
+        self.b_next = _tool("next", "Successiva", "Apri la foto successiva dell'elenco (Pagina giu' nella foto)")
+        for w in (self.label, self.b_all, self.b_markers, self.b_prev, self.b_next):
+            bar.addWidget(w)
+        lay.addLayout(bar)
+        lay.addWidget(pane, 1)
+        self.b_all.clicked.connect(lambda: pane.set_filter(None))
+        self.b_markers.clicked.connect(self.with_markers)
+        self.b_prev.clicked.connect(lambda: self.step.emit(-1))
+        self.b_next.clicked.connect(lambda: self.step.emit(1))
+        pane.filter_changed.connect(self._filter_changed)
+        self._filter_changed("")
+
+    def _filter_changed(self, title: str) -> None:
+        n = len(self.pane.visible_cameras())
+        self.label.setText(f"<b>{title}</b> ({n} foto)" if title else f"Tutte le foto ({n})")
+        self.b_all.setEnabled(bool(title))
+
+
 def _fmt(v, nd=4) -> str:
     return "" if v is None else f"{v:.{nd}f}"
 
@@ -386,6 +496,7 @@ class ReferencePane(QWidget):
     optimize_requested = Signal()
     changed = Signal()
     scalebar_requested = Signal(object)  # keys of the markers chosen (0, 1 or 2)
+    filter_photos_requested = Signal(object)  # keys of the markers whose photos are to be shown
     scalebar_import_requested = Signal()
 
     BAR_COLS = ["Usa", "Barra", "Marker A", "Marker B", "Distanza (m)", "Accur. (m)", "Check", "Stimata (m)",
@@ -496,12 +607,16 @@ class ReferencePane(QWidget):
                 loc = chunk.to_world(m.position[None])[0] if m.position is not None else [None, None, None]
             views = gcp.views_of(chunk, m)
             one_photo += views == 1
+            todo = gcp.views_of(chunk, m, estimated=True)
             how = (f"triangolato da {views} foto" if views >= 2 else
                    "su una foto sola: posizione dove il suo raggio incontra la superficie (nuvola densa o punti di "
                    "legame); mettilo su una seconda foto per triangolarlo" if views == 1 else
                    "messo sul modello, sulla nuvola o sull'ortofoto" if m.position is not None else
                    "non ancora posizionato: tasto destro su una foto, oppure strumento Marker sul modello o "
                    "sull'ortofoto")
+            if todo:
+                how += (f"; +{todo}: bandierine blu da confermare in altrettante foto (tasto destro > Filtra le foto, "
+                        "poi trascinale sul punto esatto)")
             acc = m.reference.accuracy[0] if m.reference.accuracy else None
             use = QTableWidgetItem()
             use.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
@@ -514,7 +629,8 @@ class ReferencePane(QWidget):
             vals = [use, label, chk] + [QTableWidgetItem(_fmt(v)) for v in loc] + [
                 QTableWidgetItem(_fmt(acc, 4)), QTableWidgetItem(_fmt(e.get("error"), 4)),
                 QTableWidgetItem(_fmt(e.get("dx"), 4)), QTableWidgetItem(_fmt(e.get("dy"), 4)),
-                QTableWidgetItem(_fmt(e.get("dz"), 4)), QTableWidgetItem(str(e.get("projections", ""))),
+                QTableWidgetItem(_fmt(e.get("dz"), 4)),
+                QTableWidgetItem(f"{e.get('projections', '')}" + (f" (+{e['estimated']})" if e.get("estimated") else "")),
                 QTableWidgetItem(_fmt(e.get("pixel_error"), 2))]
             for c, it in enumerate(vals):
                 if c in (1, 7, 8, 9, 10, 11, 12) or (estimated and c in (3, 4, 5)):
@@ -601,9 +717,14 @@ class ReferencePane(QWidget):
         a_bar = menu.addAction(f"Crea barra di scala tra {names[0]} e {names[1]}..." if len(keys) == 2
                                else "Crea barra di scala... (seleziona due marker)")
         a_bar.setIcon(icon("scalebar"))
+        a_photos = menu.addAction(icon("filter"), f"Filtra le foto di {', '.join(names)}" if names
+                                  else "Filtra le foto... (seleziona uno o piu' marker)")
+        a_photos.setEnabled(bool(keys))
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if chosen is a_bar:
             self.scalebar_requested.emit(keys)
+        elif chosen is a_photos:
+            self.filter_photos_requested.emit(keys)
 
     def _bar_menu(self, pos) -> None:
         from PySide6.QtWidgets import QMenu

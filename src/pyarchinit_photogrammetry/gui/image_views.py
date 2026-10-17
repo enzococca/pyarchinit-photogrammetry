@@ -180,6 +180,8 @@ class RasterView(_ZoomView):
     line_finished = Signal(object, object)
     quota_clicked = Signal(float, float)  # spot height at world x, y
     marker_clicked = Signal(float, float)  # a marker at world x, y (the height from the DEM)
+    photos_at_point = Signal(float, float)  # filter the photos that see world x, y
+    photos_in_area_requested = Signal()  # filter the photos that frame the selected polygon
     sam_click = Signal(float, float, int, bool)  # x, y, label (1 add / 0 remove), True = a new object
     sam_rect = Signal(float, float, float, float)  # world xmin, ymin, xmax, ymax dragged with the box/area tool
     sam_key = Signal(str)  # "accept" (Enter) or "cancel" (Esc)
@@ -891,6 +893,8 @@ class RasterView(_ZoomView):
         a_crop.setEnabled(polygon)
         a_patch = menu.addAction("Assegna immagini a quest'area (patch dell'ortofoto)...")
         a_patch.setEnabled(polygon and self.kind == "ortho")
+        a_photos = menu.addAction("Filtra le foto che inquadrano quest'area")
+        a_photos.setEnabled(polygon)
         a_clear = menu.addAction("Deseleziona tutto")
         chosen = menu.exec(global_pos)
         if chosen is a_del:
@@ -901,6 +905,8 @@ class RasterView(_ZoomView):
             self.crop_requested.emit()
         elif chosen is a_patch:
             self.patch_requested.emit()
+        elif chosen is a_photos:
+            self.photos_in_area_requested.emit()
         elif chosen is a_clear:
             self.clear_selection()
 
@@ -1012,11 +1018,25 @@ class RasterView(_ZoomView):
             return
         super().mouseReleaseEvent(ev)
 
+    def _point_menu(self, global_pos, x: float, y: float) -> None:
+        """Right click in pan mode: the photos that see the point, a marker there."""
+        menu = QMenu(self)
+        a_photos = menu.addAction("Filtra le foto che vedono questo punto")
+        a_marker = menu.addAction("Aggiungi un marker qui")
+        chosen = menu.exec(global_pos)
+        if chosen is a_photos:
+            self.photos_at_point.emit(x, y)
+        elif chosen is a_marker:
+            self.marker_clicked.emit(x, y)
+
     def mousePressEvent(self, ev) -> None:
         if self.mode == "pan" and self.tr is not None and ev.button() == Qt.MouseButton.LeftButton:
             hit = self.feature_at(self.mapToScene(ev.position().toPoint()))
             if hit is not None:
                 self.feature_clicked.emit(*hit)
+        if self.mode == "pan" and self.tr is not None and ev.button() == Qt.MouseButton.RightButton:
+            self._point_menu(ev.globalPosition().toPoint(), *self.world(self.mapToScene(ev.position().toPoint())))
+            return
         if self.mode == "pan" or self.tr is None or ev.button() == Qt.MouseButton.MiddleButton:
             return super().mousePressEvent(ev)
         sp = self.mapToScene(ev.position().toPoint())
@@ -1090,10 +1110,18 @@ class RasterView(_ZoomView):
 
 
 class PhotoView(_ZoomView):
-    """A photo with its marker projections; right click to place or remove markers."""
+    """A photo with its markers, as in Metashape: green flags are measured (placed by hand or
+    detected), blue ones only estimated from the model and to be confirmed - drag a flag onto the
+    point, or double click it when it is already right; the red cross is where the survey puts a
+    marker not yet placed here. Right click places, confirms or removes; Page Up/Down open the
+    previous/next photo of the list (the filtered one)."""
 
-    markers_changed = Signal()
+    markers_changed = Signal(object)  # the marker changed (None: not known)
+    marker_created = Signal(object)  # a new marker placed on this photo
+    navigate = Signal(int)  # -1 previous photo, +1 next
     sam_prompt = Signal(object, float, float, int)  # camera, x, y, label
+
+    MEASURED, ESTIMATED, PREDICTED = "#30e050", "#40a0ff", "#ff4040"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1101,8 +1129,12 @@ class PhotoView(_ZoomView):
         self.camera = None
         self.items: list = []
         self.sam_mode = False
+        self._drag = None  # the marker whose flag is being dragged
+        self._drag_offset = (0.0, 0.0)  # from the mouse to the foot of the flag (image pixels)
+        self.setMouseTracking(True)
 
-    def show_camera(self, chunk, camera) -> None:
+    def show_camera(self, chunk, camera, focus=None) -> None:
+        """Show a photo; with ``focus`` (a marker) centred on it at full resolution."""
         import cv2
 
         self.chunk, self.camera = chunk, camera
@@ -1117,6 +1149,42 @@ class PhotoView(_ZoomView):
         self.setSceneRect(QRectF(0, 0, img.shape[1], img.shape[0]))
         self.draw_markers()
         self.fit()
+        if focus is not None:
+            self.focus_marker(focus)
+
+    def marker_xy(self, marker):
+        """Where a marker (or an internal point) is in this photo: its flag, else where the survey
+        projects it; None when it is not in the frame."""
+        if self.chunk is None or self.camera is None:
+            return None
+        if isinstance(marker, np.ndarray):
+            position = marker
+        else:
+            pr = marker.projections.get(self.camera.key)
+            if pr is not None:
+                return pr.x, pr.y
+            position = marker.position
+        if position is None or not self.camera.aligned:
+            return None
+        sensor = self.chunk.sensor(self.camera)
+        px, depth = self.camera.project(sensor, np.asarray(position, float)[None])
+        u, v = px[0]
+        if depth[0] > 0 and 0 <= u <= sensor.width and 0 <= v <= sensor.height:
+            return float(u), float(v)
+        return None
+
+    def focus_marker(self, marker) -> bool:
+        """Centre the view on a marker (or an internal point, shown with a cross) at full
+        resolution, not less than the whole photo."""
+        xy = self.marker_xy(marker)
+        if xy is None or self.pixmap_item is None:
+            return False
+        if isinstance(marker, np.ndarray):
+            self._cross(*xy, self.PREDICTED)
+        fit = self.transform().m11()
+        self.setTransform(QTransform.fromScale(max(1.0, fit), max(1.0, fit)))
+        self.centerOn(QPointF(*xy))
+        return True
 
     def draw_markers(self) -> None:
         for it in self.items:
@@ -1128,14 +1196,12 @@ class PhotoView(_ZoomView):
         for m in self.chunk.markers:
             pr = m.projections.get(cam.key)
             if pr is not None:
-                col = "#30e050" if pr.pinned else "#40a0ff"
-                self._flag(pr.x, pr.y, m.label, col)
-            if m.position is not None and cam.aligned:
-                sensor = self.chunk.sensor(cam)
-                px, depth = cam.project(sensor, m.position[None])
-                u, v = px[0]
-                if depth[0] > 0 and 0 <= u <= sensor.width and 0 <= v <= sensor.height:
-                    self._cross(u, v, "#ff4040")
+                self._flag(pr.x, pr.y, m.label if pr.measured else f"{m.label} ?",
+                           self.MEASURED if pr.measured else self.ESTIMATED)
+            elif m.position is not None and cam.aligned:
+                xy = self.marker_xy(m)
+                if xy is not None:
+                    self._cross(*xy, self.PREDICTED)
 
     def _flag(self, x, y, label, color) -> None:
         pen = self._pen(color, 2)
@@ -1181,6 +1247,24 @@ class PhotoView(_ZoomView):
                     best, dmin = m, d
         return best
 
+    def flag_at(self, pos):
+        """The marker whose flag (pole or pennant) is under a point of the widget, or None."""
+        if self.chunk is None or self.camera is None:
+            return None
+        sp = self.mapToScene(pos)
+        s = max(self.transform().m11(), 1e-9)
+        best, dmin = None, None
+        for m in self.chunk.markers:
+            pr = m.projections.get(self.camera.key)
+            if pr is None:
+                continue
+            dx, dy = (sp.x() - pr.x) * s, (sp.y() - pr.y) * s  # screen pixels from the foot of the pole
+            if -8 <= dx <= 16 and -26 <= dy <= 8:
+                d = np.hypot(dx, dy)
+                if dmin is None or d < dmin:
+                    best, dmin = m, d
+        return best
+
     def mousePressEvent(self, ev) -> None:
         if self.sam_mode and self.camera is not None and ev.button() in (Qt.MouseButton.LeftButton,
                                                                          Qt.MouseButton.RightButton):
@@ -1188,7 +1272,56 @@ class PhotoView(_ZoomView):
             lab = 0 if ev.button() == Qt.MouseButton.RightButton else 1
             self.sam_prompt.emit(self.camera, sp.x(), sp.y(), lab)
             return
+        if ev.button() == Qt.MouseButton.LeftButton and not self.sam_mode:
+            m = self.flag_at(ev.position().toPoint())
+            if m is not None:  # drag the flag onto the point: it moves as much as the mouse
+                pr, sp = m.projections[self.camera.key], self.mapToScene(ev.position().toPoint())
+                self._drag, self._drag_offset = m, (pr.x - sp.x(), pr.y - sp.y())
+                self.setDragMode(QGraphicsView.DragMode.NoDrag)
+                self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+                return
         super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev) -> None:
+        if self._drag is not None:
+            sp = self.mapToScene(ev.position().toPoint())
+            pr = self._drag.projections.get(self.camera.key)
+            if pr is not None:
+                pr.x, pr.y = float(sp.x() + self._drag_offset[0]), float(sp.y() + self._drag_offset[1])
+                self.draw_markers()
+            return
+        if not self.sam_mode and ev.buttons() == Qt.MouseButton.NoButton:
+            if self.flag_at(ev.position().toPoint()) is not None:
+                self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+            else:
+                self.viewport().unsetCursor()
+        super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev) -> None:
+        if self._drag is not None:
+            m, self._drag = self._drag, None
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.viewport().unsetCursor()
+            sp = self.mapToScene(ev.position().toPoint())
+            self._place(m, sp.x() + self._drag_offset[0], sp.y() + self._drag_offset[1])
+            return
+        super().mouseReleaseEvent(ev)
+
+    def mouseDoubleClickEvent(self, ev) -> None:
+        m = self.flag_at(ev.position().toPoint()) if not self.sam_mode else None
+        if m is not None:
+            pr = m.projections[self.camera.key]
+            self._place(m, pr.x, pr.y)  # confirmed where it is
+            return
+        super().mouseDoubleClickEvent(ev)
+
+    def keyPressEvent(self, ev) -> None:
+        if ev.key() in (Qt.Key.Key_PageDown, Qt.Key.Key_BracketRight):
+            self.navigate.emit(1)
+        elif ev.key() in (Qt.Key.Key_PageUp, Qt.Key.Key_BracketLeft):
+            self.navigate.emit(-1)
+        else:
+            super().keyPressEvent(ev)
 
     def contextMenuEvent(self, ev) -> None:
         if self.chunk is None or self.camera is None or self.sam_mode:
@@ -1196,32 +1329,54 @@ class PhotoView(_ZoomView):
         sp = self.mapToScene(ev.pos())
         x, y = sp.x(), sp.y()  # scene units = pixels, first pixel centre at (0.5, 0.5) as in COLMAP
         menu = QMenu(self)
+        near = self.flag_at(ev.pos())
+        if near is None:
+            radius = 15 / max(self.transform().m11(), 1e-9)
+            near = self._nearest_projection(x, y, radius)
+        if near is not None:
+            pr = near.projections[self.camera.key]
+            if not pr.measured:
+                menu.addAction(f"Conferma {near.label} dov'e' (bandierina giusta)").triggered.connect(
+                    lambda: self._place(near, pr.x, pr.y))
+            menu.addAction(f"Sposta {near.label} qui").triggered.connect(lambda: self._place(near, x, y))
         place = menu.addMenu("Posiziona marker qui")
         for m in self.chunk.markers:
             place.addAction(m.label).triggered.connect(lambda _=False, mm=m: self._place(mm, x, y))
         place.addSeparator()
         place.addAction("Nuovo marker...").triggered.connect(lambda: self._new_marker(x, y))
-        radius = 15 / max(self.transform().m11(), 1e-9)
-        near = self._nearest_projection(x, y, radius)
         if near is not None:
             menu.addAction(f"Rimuovi proiezione di {near.label}").triggered.connect(lambda: self._remove(near))
+        menu.addSeparator()
+        menu.addAction("Foto successiva (Pagina giu')").triggered.connect(lambda: self.navigate.emit(1))
+        menu.addAction("Foto precedente (Pagina su)").triggered.connect(lambda: self.navigate.emit(-1))
         menu.exec(ev.globalPos())
 
     def _place(self, marker, x, y) -> None:
+        from ..markers import gcp
+
         self.chunk.add_marker_projection(marker, self.camera, x, y, pinned=True)
+        gcp.exclude_photo(self.chunk, marker, self.camera.key, excluded=False)
         self.draw_markers()
-        self.markers_changed.emit()
+        self.markers_changed.emit(marker)
 
     def _new_marker(self, x, y) -> None:
-        label, ok = QInputDialog.getText(self, "Nuovo marker", "Etichetta:", text=f"point {len(self.chunk.markers) + 1}")
+        names = {m.label for m in self.chunk.markers}
+        n = 1
+        while f"point {n}" in names:
+            n += 1
+        label, ok = QInputDialog.getText(self, "Nuovo marker", "Etichetta:", text=f"point {n}")
         if ok and label:
             m = self.chunk.add_marker(label)
             self._place(m, x, y)
+            self.marker_created.emit(m)
 
     def _remove(self, marker) -> None:
+        from ..markers import gcp
+
         marker.projections.pop(self.camera.key, None)
+        gcp.exclude_photo(self.chunk, marker, self.camera.key)  # no blue flag goes back there
         self.draw_markers()
-        self.markers_changed.emit()
+        self.markers_changed.emit(marker)
 
     def show_mask(self, mask: np.ndarray, color=(255, 60, 200)) -> None:
         rgba = np.zeros(mask.shape + (4,), np.uint8)

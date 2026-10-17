@@ -445,7 +445,7 @@ def test_markers_on_the_orthophoto_and_the_model(processed, qapp_bars, monkeypat
     w.ortho_view.marker_clicked.emit(float(a[0]), float(a[1]))
     qapp_bars.processEvents()
     m1 = ch.marker("point 1")
-    assert gcp.views_of(ch, m1) >= 2 and np.linalg.norm(ch.to_world(m1.position[None])[0] - a) < 0.006
+    assert gcp.views_of(ch, m1, estimated=True) >= 2 and np.linalg.norm(ch.to_world(m1.position[None])[0] - a) < 0.006
     # the 3D view: a click where target 4 is on the screen
     mv = w.model_view
     w.show_view(mv)
@@ -460,7 +460,7 @@ def test_markers_on_the_orthophoto_and_the_model(processed, qapp_bars, monkeypat
     mv._pick_finished((float(x[0]), float(y[0])))  # as a click on the frozen frame
     qapp_bars.processEvents()
     m2 = ch.marker("point 2")
-    assert gcp.views_of(ch, m2) >= 2 and np.linalg.norm(ch.to_world(m2.position[None])[0] - b) < 0.01
+    assert gcp.views_of(ch, m2, estimated=True) >= 2 and np.linalg.norm(ch.to_world(m2.position[None])[0] - b) < 0.01
     # Riferimenti shows their estimated coordinates (there are no reference ones)
     pane = w.reference
     pane.set_chunk(ch)
@@ -470,6 +470,92 @@ def test_markers_on_the_orthophoto_and_the_model(processed, qapp_bars, monkeypat
     bar = ch.add_scalebar(m1, m2, float(np.linalg.norm(a - b)), checkpoint=True)
     e = next(r for r in gcp.scalebar_errors(ch) if r["label"] == bar.label)
     assert abs(e["error"]) < 0.01
+    w.setWindowModified(False)
+    w.photos.stop()
+    w.close()
+
+
+def test_guided_marker_placement_in_the_photos(processed, qapp_bars, tmp_path):
+    """As in Metashape: a marker placed on one photo gets blue flags (estimated) on the other
+    photos that see it; the photos are filtered on it, with badges; *Successiva* opens the next
+    one centred on the marker; dragging a blue flag onto the point makes it green (measured) and
+    the marker is triangulated; a double click confirms a flag where it is."""
+    import shutil
+
+    from PySide6.QtCore import QPoint, QSettings, Qt
+    from PySide6.QtTest import QTest
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.gui import main_window as mw
+    from pyarchinit_photogrammetry.markers import gcp
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
+    doc0, _ch, _ = processed
+    copy = tmp_path / "copia"
+    copy.mkdir()
+    shutil.copy2(doc0.path, copy / doc0.path.name)
+    shutil.copytree(doc0.files_dir, copy / doc0.files_dir.name)
+    (copy / "photos").symlink_to(doc0.path.parent / "photos")  # the project names them relative to itself
+    doc = ppg.Document.open(copy / doc0.path.name)
+    ch = doc.chunk
+    target = ch.markers[0]
+    seen = dict(target.projections)  # where the target was detected: the truth in every photo
+    truth = np.asarray(target.reference.location, float)
+    ch.markers = []
+    w = mw.MainWindow(doc, autoconnect=False)
+    w.runner.show_dialog = False
+    w.resize(1400, 900)
+    w.show()
+    qapp_bars.processEvents()
+    first, second, third = (ch.camera(k) for k in list(seen)[:3])
+    w.open_photo(first)
+    m = ch.add_marker("point 1")
+    w.photo_view._place(m, seen[first.key].x, seen[first.key].y)  # right click > Posiziona marker qui
+    w.photo_view.marker_created.emit(m)
+    qapp_bars.processEvents()
+    assert gcp.views_of(ch, m) == 1 and gcp.views_of(ch, m, estimated=True) >= 2  # blue flags elsewhere
+    assert np.linalg.norm(ch.to_world(m.position[None])[0] - truth) < 0.003
+    shown = w.photos.visible_cameras()
+    assert w.photos.filter_title == "Foto di point 1" and {first.key, second.key, third.key} <= {c.key for c in shown}
+    assert w.photos._flags[second.key][:2] == (0, 1) and w.photos._flags[first.key][:2] == (1, 0)  # badges
+    # the next photo of the filtered list, centred on the marker
+    w.open_photo(second)
+    view = w.photo_view
+    assert view.camera is second and view.transform().m11() >= 1.0
+    pr = m.projections[second.key]
+    assert pr.pinned is None
+    # drag the blue flag onto the target (a few pixels off on purpose)
+    pr.x, pr.y = seen[second.key].x + 6.0, seen[second.key].y - 4.0
+    view.draw_markers()
+    qapp_bars.processEvents()
+    start = view.mapFromScene(pr.x, pr.y) + QPoint(3, -10)  # on the pole of the flag
+    end = view.mapFromScene(seen[second.key].x, seen[second.key].y) + QPoint(3, -10)
+    QTest.mousePress(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+    QTest.mouseMove(view.viewport(), end)
+    QTest.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
+    qapp_bars.processEvents()
+    got = m.projections[second.key]
+    assert got.pinned is True and np.hypot(got.x - seen[second.key].x, got.y - seen[second.key].y) < 1.5
+    assert gcp.views_of(ch, m) == 2 and np.linalg.norm(ch.to_world(m.position[None])[0] - truth) < 0.003
+    # a double click confirms a blue flag where it is
+    w.photo_step(1)
+    cam = view.camera
+    if cam.key in m.projections and not m.projections[cam.key].measured:
+        p3 = m.projections[cam.key]
+        QTest.mouseDClick(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                          view.mapFromScene(p3.x, p3.y) + QPoint(3, -10))
+        qapp_bars.processEvents()
+        assert m.projections[cam.key].pinned is True
+    # removed by hand from a photo: no blue flag goes back there when the marker moves
+    w.open_photo(third)
+    view._remove(m)
+    qapp_bars.processEvents()
+    assert third.key not in m.projections
+    gcp.project_marker(ch, m)
+    assert third.key not in m.projections and gcp.views_of(ch, m, estimated=True) >= 1
+    w.photos.set_filter(None)
+    assert len(w.photos.visible_cameras()) == len(ch.cameras)
     w.setWindowModified(False)
     w.photos.stop()
     w.close()
