@@ -167,6 +167,8 @@ class MainWindow(QMainWindow):
         self.reference.update_requested.connect(self.update_transform)
         self.reference.optimize_requested.connect(self.optimize_cameras)
         self.reference.changed.connect(lambda: self._dirty(True))
+        self.reference.scalebar_requested.connect(self.new_scalebar)
+        self.reference.scalebar_import_requested.connect(self.import_scalebars)
         self.photos = PhotosPane()
         self.photos.thumbs_progress.connect(self._thumbs_progress)
         self.photos.open_camera.connect(self.open_photo)
@@ -304,6 +306,9 @@ class MainWindow(QMainWindow):
         self._act(m, "Allinea foto...", self.align_photos, processing=True, icon_name="align")
         self._act(m, "Importa riferimenti...", self.import_reference, icon_name="reference")
         self._act(m, "Aggiorna georeferenziazione", self.update_transform, processing=True, icon_name="georef")
+        self._act(m, "Nuova barra di scala (distanza tra due marker)...", lambda: self.new_scalebar(),
+                  icon_name="scalebar")
+        self._act(m, "Importa barre di scala (CSV)...", self.import_scalebars, icon_name="scalebar")
         self._act(m, "Ottimizza camere", self.optimize_cameras, processing=True, icon_name="optimize")
         m.addSeparator()
         self._act(m, "Costruisci nuvola densa...", self.build_dense, processing=True, icon_name="dense")
@@ -331,6 +336,7 @@ class MainWindow(QMainWindow):
         tm = m.addMenu(icon("print"), "Target")
         self._act(tm, "Stampa fogli di target...", self.print_targets, icon_name="print")
         self._act(tm, "Tappetino per turntable...", self.print_turntable, icon_name="turntable")
+        self._act(tm, "Barra di scala stampabile...", self.print_scalebar, icon_name="scalebar")
         dm = m.addMenu(icon("polygon"), "Disegno su ortofoto")
         self.draw_group = QActionGroup(self)
         self.draw_actions: dict[str, QAction] = {}
@@ -1302,6 +1308,115 @@ class MainWindow(QMainWindow):
         self.refresh_all()
         if self.chunk.aligned_cameras:
             self.update_transform()
+
+    # ---------------------------------------------------------------- scale bars (as in Metashape)
+    def new_scalebar(self, keys=None) -> None:
+        """The known distance between two markers: it scales the survey (in local coordinates
+        without control points, as for objects); several bars are averaged, a check bar only
+        measures the error."""
+        if not self._need_chunk():
+            return
+        ch = self.chunk
+        if len(ch.markers) < 2:
+            self._warn("Servono almeno due marker: rileva i target (Flusso di lavoro > Rileva marker) o mettili "
+                       "sulle foto.")
+            return
+        keys = list(keys or [])
+        choices = [(m.key, m.label) for m in ch.markers]
+        first = keys[0] if keys else ch.markers[0].key
+        second = keys[1] if len(keys) > 1 else next(k for k, _ in choices if k != first)
+        a, b = ch.marker_by_key(first), ch.marker_by_key(second)
+        now = ""
+        if a.position is not None and b.position is not None:
+            from ..engine.chunks import _is_scaled
+
+            d = _it(ch.scale * float(np.linalg.norm(a.position - b.position)), 4)
+            now = (f" Ora {a.label} e {b.label} distano {d} m." if _is_scaled(ch) else
+                   f" Ora {a.label} e {b.label} distano {d} unita' arbitrarie (il rilievo non e' ancora in scala).")
+        v = ParamDialog.ask(self, "Barra di scala", [
+            Field("a", "Marker A", first, choices=choices),
+            Field("b", "Marker B", second, choices=choices),
+            Field("distance", "Distanza (m)", 1.0, minimum=0.0001, maximum=100000, decimals=4,
+                  tip="La distanza misurata tra i centri dei due target"),
+            Field("accuracy", "Accuratezza (m)", 0.001, minimum=0.00001, maximum=10, decimals=5,
+                  tip="Pesa la barra quando ce ne sono piu' d'una"),
+            Field("check", "Solo verifica (check): misura l'errore, non scala", False),
+            Field("update", "Aggiorna subito la scala", True)],
+            intro="Come in Metashape: la distanza nota tra due marker mette in scala il rilievo. Senza punti di "
+                  "controllo resta in coordinate locali (oggetti, saggi senza stazione totale); piu' barre si "
+                  "mediano e quelle di verifica misurano l'errore." + now)
+        if not v:
+            return
+        if v["a"] == v["b"]:
+            self._warn("Scegli due marker diversi.")
+            return
+        try:
+            sb = ch.add_scalebar(ch.marker_by_key(v["a"]), ch.marker_by_key(v["b"]), v["distance"], v["accuracy"],
+                                 checkpoint=v["check"])
+        except (KeyError, ValueError) as exc:
+            self._warn(str(exc))
+            return
+        self.log_pane.info(f"Barra di scala {sb.label}: {_it(sb.distance, 4)} m" + (" (check)" if sb.checkpoint else ""))
+        self._dirty(True)
+        self.workspace.populate(self.doc)
+        if v["update"] and any(c.aligned for c in ch.cameras):
+            self.update_transform()
+        else:
+            self.reference.set_chunk(ch)
+            self._show_pane(self.left_tabs, self.reference)
+
+    def import_scalebars(self) -> None:
+        if not self._need_chunk():
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Barre di scala", self._last_dir(),
+                                              "Testo (*.csv *.txt);;Tutti i file (*)")
+        if not path:
+            return
+        try:
+            out = self.chunk.import_scalebars(path)
+        except (OSError, ValueError) as exc:
+            self._exc("Lettura delle barre di scala non riuscita", exc)
+            return
+        text = f"{len(out['bars'])} barre di scala importate"
+        if out["missing"]:
+            text += (f"; {len(out['missing'])} senza i loro marker nel chunk ({', '.join(out['missing'][:6])}): "
+                     "rileva prima i target")
+        self.log_pane.info(text)
+        self.statusBar().showMessage(text, 15000)
+        self._dirty(True)
+        self.workspace.populate(self.doc)
+        if out["bars"] and any(c.aligned for c in self.chunk.cameras):
+            self.update_transform()
+        else:
+            self.reference.set_chunk(self.chunk)
+            self._show_pane(self.left_tabs, self.reference)
+
+    def print_scalebar(self) -> None:
+        from ..markers.targets import generate_scale_bar, scale_bar_codes
+
+        a, b = scale_bar_codes()[0]
+        v = ParamDialog.ask(self, "Barra di scala stampabile", [
+            Field("path", "File (PDF o PNG)", str(Path(self._last_dir()) / "barra_di_scala.pdf"), kind="file_save",
+                  filter="PDF (*.pdf);;PNG (*.png)"),
+            Field("target_type", "Tipo", "aruco_4x4_50", choices=TARGET_TYPES),
+            Field("distance", "Distanza tra i centri (mm)", 200.0, minimum=50, maximum=380, decimals=1),
+            Field("size", "Lato del target (mm)", 40.0, minimum=10, maximum=100, decimals=1),
+            Field("page", "Formato", "A4", choices=[("A4", "A4 orizzontale"), ("A3", "A3 orizzontale")]),
+            Field("count", "Numero di barre (una per pagina)", 1, minimum=1, maximum=10)],
+            intro=f"Due target codificati a distanza nota (codici {a}-{b} e seguenti a scendere): stampa al 100%, "
+                  "controlla il righello di 10 cm e incolla il foglio su un supporto rigido. Insieme al file viene "
+                  "scritto il CSV delle barre: dopo aver rilevato i target, importalo con Importa barre.")
+        if not v:
+            return
+        try:
+            files, csv = generate_scale_bar(v["path"], v["target_type"], distance_mm=v["distance"],
+                                            marker_size_mm=v["size"], page=v["page"], count=int(v["count"]))
+        except Exception as exc:
+            self._exc("Generazione della barra di scala non riuscita", exc)
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(files[0])))
+        self.statusBar().showMessage(f"Barre di scala: {csv}", 15000)
+        self.log_pane.info(f"Barra di scala stampabile: {files[0]} (CSV delle barre: {csv})")
 
     def update_transform(self) -> None:
         if not self._need_chunk(aligned=True):

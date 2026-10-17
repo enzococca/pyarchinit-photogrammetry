@@ -168,3 +168,80 @@ def test_command_line(two_chunks, scene, tmp_path):
     assert ", check, error " in line and abs(float(line.split("error ")[1].split(" mm")[0])) < 4
     ok("scalebar", str(project), "--remove", "all", "--chunk", ch.label)
     assert ppg.Document.open(project).chunks[0].scalebars == []
+
+
+def test_scale_bars_in_the_interface(two_chunks, scene, qapp_bars, monkeypatch, tmp_path):
+    """Riferimenti: two markers selected, *Crea barra di scala*, the distance; Aggiorna scales the
+    survey in local coordinates; a check bar edited in the table; the bars in the 3D view."""
+    from PySide6.QtCore import QItemSelectionModel, QSettings
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.gui import main_window as mw
+    from pyarchinit_photogrammetry.gui.scene import build_scene
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
+    doc = ppg.Document.open(two_chunks)
+    monkeypatch.setattr(doc, "save", lambda *a, **k: None)  # the shared project of the module stays as it is
+    w = mw.MainWindow(doc, autoconnect=False)
+    w.runner.show_dialog = False
+    w.show()
+    qapp_bars.processEvents()
+    ch = w.chunk
+    (a, b), (x, y) = _pairs(ch, scene)[:2]
+    pane = w.reference
+    pane.set_chunk(ch)
+    sel = pane.table.selectionModel()
+    for r, m in enumerate(ch.markers):
+        if m.key in (a.key, b.key):
+            sel.select(pane.table.model().index(r, 1),
+                       QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+    assert sorted(pane.selected_markers()) == sorted([a.key, b.key])
+    seen, answers = [], {}
+
+    def ask(cls, parent, title, fields, intro=""):
+        seen.append(({f.name: f for f in fields}, intro))
+        return dict(answers)
+
+    monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(ask))
+    answers.update(a=a.key, b=b.key, distance=_true(scene, a, b), accuracy=0.001, check=False, update=True)
+    pane.scalebar_requested.emit(pane.selected_markers())  # the context menu of the two markers
+    w.runner.wait()
+    qapp_bars.processEvents()
+    fields, intro = seen[-1]
+    assert {fields["a"].default, fields["b"].default} == {a.key, b.key} and "unita' arbitrarie" in intro
+    assert len(ch.scalebars) == 1 and w.last_report["method"] == "scalebars"
+    assert pane.bars.rowCount() == 1 and pane.bars.item(0, 8).text()  # its error
+    answers.update(a=x.key, b=y.key, distance=_true(scene, x, y), check=True)
+    pane.scalebar_requested.emit([x.key, y.key])
+    w.runner.wait()
+    qapp_bars.processEvents()
+    assert pane.bars.rowCount() == 2 and "RMSE barre check" in pane.summary.text()
+    check = next(e for e in w.last_report["scalebars"] if e["type"] == "check")
+    assert abs(check["error"]) < 0.004
+    # a new distance typed in the table: the error follows at once
+    pane.bars.item(1, 4).setText(f"{_true(scene, x, y) + 0.1:.4f}".replace(".", ","))
+    qapp_bars.processEvents()
+    assert ch.scalebars[1].distance == pytest.approx(_true(scene, x, y) + 0.1, abs=1e-4)
+    assert float(pane.bars.item(1, 8).text().replace(",", ".")) == pytest.approx(check["error"] - 0.1, abs=2e-4)
+    pane.bars.item(1, 4).setText("abc")  # not a length: the distance of the bar comes back
+    qapp_bars.processEvents()
+    assert float(pane.bars.item(1, 4).text().replace(",", ".")) == pytest.approx(ch.scalebars[1].distance, abs=1e-4)
+    sd = build_scene(ch, "tie_points")
+    assert len(sd.scalebars) == 2 and [s[3] for s in sd.scalebars] == [False, True]
+    pane.delete_bars([1])
+    assert len(ch.scalebars) == 1 and pane.bars.rowCount() == 1
+    w.setWindowModified(False)
+    w.photos.stop()
+    w.close()
+
+
+@pytest.fixture(scope="module")
+def qapp_bars():
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("PPG_RENDERER", "software")
+    from PySide6.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])

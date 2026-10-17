@@ -21,6 +21,7 @@ class SceneData:
     cameras: list[np.ndarray] = field(default_factory=list)  # 5x3: centre + 4 frustum corners
     camera_labels: list[str] = field(default_factory=list)
     markers: list[tuple[str, np.ndarray, bool]] = field(default_factory=list)  # label, xyz, is_check
+    scalebars: list[tuple[str, np.ndarray, np.ndarray, bool]] = field(default_factory=list)  # text, ends, is_check
     up: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 1.0]))
     kind: str = "empty"
     point_codes: np.ndarray | None = None  # class code of each displayed point
@@ -336,6 +337,16 @@ def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_f
     for m in chunk.markers:
         if m.position is not None:
             sd.markers.append((m.label, W(m.position[None])[0], bool(m.checkpoint)))
+    for sb in chunk.scalebars:
+        try:
+            a, b = chunk.marker_by_key(sb.marker_a), chunk.marker_by_key(sb.marker_b)
+        except KeyError:
+            continue
+        if a.position is not None and b.position is not None:
+            ends = W(np.array([a.position, b.position]))
+            error = chunk.scale * float(np.linalg.norm(a.position - b.position)) - sb.distance
+            text = f"{sb.distance:.3f} m  ({error * 1000:+.1f} mm)".replace(".", ",")
+            sd.scalebars.append((text, ends[0], ends[1], bool(sb.checkpoint)))
     return sd
 
 

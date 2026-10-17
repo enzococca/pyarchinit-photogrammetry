@@ -163,7 +163,8 @@ class WorkspaceTree(QTreeWidget):
                 sb.setIcon(0, icon("scalebar"))
                 ci.addChild(sb)
                 for s in ch.scalebars:
-                    sb.addChild(QTreeWidgetItem([f"{s.label}: {s.distance:.4f} m"]))
+                    sb.addChild(QTreeWidgetItem([f"{s.label}: {s.distance:.4f} m" + ("  check" if s.checkpoint else "")
+                                                 + ("" if s.enabled else "  (non usata)")]))
             from ..core import versions
 
             for key in ("tie_points", "point_cloud", "model", "model_textured", "dem", "orthomosaic"):
@@ -374,12 +375,21 @@ def _fmt(v, nd=4) -> str:
 
 
 class ReferencePane(QWidget):
-    """Markers (GCP / check points) with coordinates and errors, camera references, scale bars."""
+    """Markers (GCP / check points) with coordinates and errors, scale bars, camera references.
+
+    Scale bars as in Metashape: select two markers, right click *Crea barra di scala*, type the
+    distance; *Aggiorna* scales the survey (in local coordinates without control points) and
+    shows the error of every bar. A check bar only measures."""
 
     import_requested = Signal()
     update_requested = Signal()
     optimize_requested = Signal()
     changed = Signal()
+    scalebar_requested = Signal(object)  # keys of the markers chosen (0, 1 or 2)
+    scalebar_import_requested = Signal()
+
+    BAR_COLS = ["Usa", "Barra", "Marker A", "Marker B", "Distanza (m)", "Accur. (m)", "Check", "Stimata (m)",
+                "Errore (m)"]
 
     COLS = ["Usa", "Marker", "Check", "X / Est", "Y / Nord", "Z", "Accur. (m)", "Errore (m)", "dX", "dY", "dZ",
             "Proiez.", "Errore (px)"]
@@ -392,13 +402,21 @@ class ReferencePane(QWidget):
         self.b_import = _tool("reference", "Importa CSV...", "Importa le coordinate dei marker")
         self.b_update = _tool("georef", "Aggiorna", "Ricalcola la georeferenziazione")
         self.b_opt = _tool("optimize", "Ottimizza camere", "Bundle adjustment con i riferimenti")
+        self.b_bar = _tool("scalebar", "Barra di scala...", "Distanza nota tra due marker: scala il rilievo "
+                                                           "(anche in coordinate locali, come per gli oggetti)")
+        self.b_bar_import = _tool("scalebar", "Importa barre...", "Barre di scala da un CSV (marker A, marker B, "
+                                                                  "distanza in metri)")
         bar.addWidget(self.b_import)
         bar.addWidget(self.b_update)
         bar.addWidget(self.b_opt)
+        bar.addWidget(self.b_bar)
+        bar.addWidget(self.b_bar_import)
         lay.addLayout(bar)
         self.b_import.clicked.connect(self.import_requested)
         self.b_update.clicked.connect(self.update_requested)
         self.b_opt.clicked.connect(self.optimize_requested)
+        self.b_bar.clicked.connect(lambda: self.scalebar_requested.emit(self.selected_markers()))
+        self.b_bar_import.clicked.connect(self.scalebar_import_requested)
         self.crs_label = QLabel("")
         self.crs_label.setWordWrap(True)
         lay.addWidget(self.crs_label)
@@ -409,7 +427,20 @@ class ReferencePane(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.itemChanged.connect(self._edited)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._marker_menu)
         split.addWidget(self.table)
+        self.bars = QTableWidget(0, len(self.BAR_COLS))
+        self.bars.setHorizontalHeaderLabels(self.BAR_COLS)
+        self.bars.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.bars.setAlternatingRowColors(True)
+        self.bars.verticalHeader().setVisible(False)
+        self.bars.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.bars.itemChanged.connect(self._bar_edited)
+        self.bars.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.bars.customContextMenuRequested.connect(self._bar_menu)
+        split.addWidget(self.bars)
         self.cams = QTableWidget(0, 7)
         self.cams.setHorizontalHeaderLabels(["Camera", "Allineata", "X", "Y", "Z", "Rif. X", "Rif. Y"])
         self.cams.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
@@ -434,6 +465,7 @@ class ReferencePane(QWidget):
         self._filling = True
         self.table.setRowCount(0)
         self.cams.setRowCount(0)
+        self.bars.setRowCount(0)
         if chunk is None:
             self._filling = False
             return
@@ -463,6 +495,27 @@ class ReferencePane(QWidget):
                 if c == 7 and e.get("error") is not None and e["error"] > 0.02:
                     it.setForeground(QColor(PALETTE["red"]))
                 self.table.setItem(r, c, it)
+        bar_errors = {e["label"]: e for e in gcp.scalebar_errors(chunk)}
+        self.bars.setRowCount(len(chunk.scalebars))
+        for r, sb in enumerate(chunk.scalebars):
+            e = bar_errors.get(sb.label, {})
+            use = QTableWidgetItem()
+            use.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            use.setCheckState(Qt.CheckState.Checked if sb.enabled else Qt.CheckState.Unchecked)
+            chk = QTableWidgetItem()
+            chk.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            chk.setCheckState(Qt.CheckState.Checked if sb.checkpoint else Qt.CheckState.Unchecked)
+            label = QTableWidgetItem(sb.label)
+            label.setIcon(icon("scalebar"))
+            vals = [use, label, QTableWidgetItem(e.get("marker_a", "")), QTableWidgetItem(e.get("marker_b", "")),
+                    QTableWidgetItem(_fmt(sb.distance, 4)), QTableWidgetItem(_fmt(sb.accuracy, 4)), chk,
+                    QTableWidgetItem(_fmt(e.get("estimated"), 4)), QTableWidgetItem(_fmt(e.get("error"), 4))]
+            for c, it in enumerate(vals):
+                if c in (1, 2, 3, 7, 8):
+                    it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if c == 8 and e.get("error") is not None and abs(e["error"]) > max(3 * sb.accuracy, 0.005):
+                    it.setForeground(QColor(PALETTE["red"]))
+                self.bars.setItem(r, c, it)
         self.cams.setRowCount(len(chunk.cameras))
         for r, cam in enumerate(chunk.cameras):
             c = chunk.to_world(cam.center) if cam.aligned else [None] * 3
@@ -479,11 +532,86 @@ class ReferencePane(QWidget):
         for key, name in (("control_rmse", "RMSE controllo"), ("check_rmse", "RMSE check")):
             if rep.get(key) is not None:
                 parts.append(f"{name}: <b>{rep[key] * 1000:.1f} mm</b>")
-        sb = gcp.scalebar_errors(chunk)
-        if sb:
-            parts.append("barre di scala: " + ", ".join(f"{s['label']} {_fmt(s['error'], 4)} m" for s in sb))
-        self.summary.setText("  |  ".join(parts) if parts else "Importa i riferimenti e premi Aggiorna per georeferenziare.")
+        for key, name in (("scalebar_control_rmse", "RMSE barre"), ("scalebar_check_rmse", "RMSE barre check")):
+            if rep.get(key) is not None:
+                parts.append(f"{name}: <b>{rep[key] * 1000:.1f} mm</b>")
+        if rep.get("method") == "scalebars":
+            parts.append("scala dalle barre, coordinate locali")
+        elif str(rep.get("method", "")).endswith("+scalebars"):
+            parts.append("posizione dalle foto, scala dalle barre")
+        self.summary.setText("  |  ".join(parts) if parts else "Importa i riferimenti o crea una barra di scala, poi "
+                             "premi Aggiorna.")
         self._filling = False
+
+    def selected_markers(self) -> list:
+        """Keys of the markers whose rows are selected."""
+        if self.chunk is None:
+            return []
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
+        return [self.chunk.markers[r].key for r in rows if r < len(self.chunk.markers)]
+
+    def _marker_menu(self, pos) -> None:
+        from PySide6.QtWidgets import QMenu
+
+        keys = self.selected_markers()
+        menu = QMenu(self)
+        names = [self.chunk.marker_by_key(k).label for k in keys] if self.chunk is not None else []
+        a_bar = menu.addAction(f"Crea barra di scala tra {names[0]} e {names[1]}..." if len(keys) == 2
+                               else "Crea barra di scala... (seleziona due marker)")
+        a_bar.setIcon(icon("scalebar"))
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen is a_bar:
+            self.scalebar_requested.emit(keys)
+
+    def _bar_menu(self, pos) -> None:
+        from PySide6.QtWidgets import QMenu
+
+        rows = sorted({i.row() for i in self.bars.selectedIndexes()})
+        menu = QMenu(self)
+        a_del = menu.addAction(icon("delete"), f"Elimina {len(rows)} barre di scala" if len(rows) > 1
+                               else "Elimina la barra di scala")
+        a_del.setEnabled(bool(rows))
+        if menu.exec(self.bars.viewport().mapToGlobal(pos)) is a_del:
+            self.delete_bars(rows)
+
+    def delete_bars(self, rows) -> None:
+        if self.chunk is None:
+            return
+        gone = [self.chunk.scalebars[r].key for r in rows if r < len(self.chunk.scalebars)]
+        self.chunk.scalebars = [sb for sb in self.chunk.scalebars if sb.key not in gone]
+        self.set_chunk(self.chunk)
+        self.changed.emit()
+
+    def _bar_edited(self, item) -> None:
+        from PySide6.QtCore import QTimer
+
+        if self._filling or self.chunk is None:
+            return
+        r, c = item.row(), item.column()
+        if r >= len(self.chunk.scalebars):
+            return
+        sb = self.chunk.scalebars[r]
+        refill = lambda: QTimer.singleShot(0, lambda: self.set_chunk(self.chunk))  # noqa: E731
+        if c == 0:
+            sb.enabled = item.checkState() == Qt.CheckState.Checked
+        elif c == 6:
+            sb.checkpoint = item.checkState() == Qt.CheckState.Checked
+        elif c in (4, 5):
+            try:
+                v = float(item.text().replace(",", "."))
+            except ValueError:
+                v = 0.0
+            if v <= 0:  # not a length: the value of the bar comes back
+                refill()
+                return
+            if c == 4:
+                sb.distance = v
+            else:
+                sb.accuracy = v
+        else:
+            return
+        refill()  # the error of the bar with its new distance
+        self.changed.emit()
 
     def _edited(self, item) -> None:
         if self._filling or self.chunk is None:

@@ -124,6 +124,17 @@ class SoftwareCanvas(QWidget):
                 p.drawLine(pt + QPointF(0, -16), pt + QPointF(9, -12))
                 p.drawLine(pt + QPointF(9, -12), pt + QPointF(0, -8))
                 p.drawText(pt + QPointF(11, -10), label)
+            for text, a, b, check in self.sd.scalebars:  # scale bars between their markers
+                x, y, _, ok = self.cam.project(np.array([a, b]), w, h)
+                if not ok.all():
+                    continue
+                col = QColor(255, 160, 40) if check else QColor(0, 229, 255)
+                pen = QPen(col, 2)
+                pen.setStyle(Qt.PenStyle.DashLine if check else Qt.PenStyle.SolidLine)
+                p.setPen(pen)
+                pa, pb = QPointF(float(x[0]), float(y[0])), QPointF(float(x[1]), float(y[1]))
+                p.drawLine(pa, pb)
+                p.drawText(pa + (pb - pa) * 0.4 + QPointF(6, -6), text)  # off the middle: crossing bars
         p.setPen(QColor(200, 200, 200))
         p.drawText(8, h - 8, f"{VIEW_LABELS.get(self.sd.kind, self.sd.kind)} - renderer software")
         p.end()
@@ -235,6 +246,17 @@ class VtkCanvas(QWidget):
             xyz = np.array([m[1] for m in sd.markers])
             pl.add_point_labels(xyz, [m[0] for m in sd.markers], point_color="#50dc5a", point_size=10,
                                 font_size=12, text_color="white", shape_opacity=0.3, render_points_as_spheres=True)
+        if self.show_markers and sd.scalebars:  # scale bars between their markers
+            for check in (False, True):
+                bars = [s for s in sd.scalebars if s[3] == check]
+                if not bars:
+                    continue
+                ends = np.array([e for s in bars for e in (s[1], s[2])])
+                lines = np.hstack([[2, 2 * i, 2 * i + 1] for i in range(len(bars))])
+                pl.add_mesh(pv.PolyData(ends, lines=lines), color="#ffa028" if check else "#00e5ff", line_width=3)
+                pl.add_point_labels(np.array([s[1] + 0.4 * (s[2] - s[1]) for s in bars]), [s[0] for s in bars],
+                                    point_size=1, font_size=11, text_color="#ffa028" if check else "#00e5ff",
+                                    shape_opacity=0.25, always_visible=True)
         if reset:
             self.reset_view()
         pl.render()
