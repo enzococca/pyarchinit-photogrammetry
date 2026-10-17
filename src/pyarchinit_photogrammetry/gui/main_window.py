@@ -22,7 +22,7 @@ from . import theme
 from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelectionDialog, IfcPreviewDialog,
                       ImageDialog, ParamDialog, PatchDialog,
                       PublishDialog, QuotaDialog, SiteChoiceDialog, SiteDialog, TableDialog, UnitDialog, UsFormDialog,
-                      choice, message)
+                      choice, message, short_label)
 from .icons import app_icon, icon
 from .image_views import US_COLORS, PhotoView, RasterView
 from .model_view import ModelView
@@ -3845,7 +3845,7 @@ class MainWindow(QMainWindow):
         from ..engine import patches as P
 
         for patch in P.patches(self.chunk):
-            names = ", ".join(patch["photos"][:2]) + (" ..." if len(patch["photos"]) > 2 else "")
+            names = ", ".join(short_label(n) for n in patch["photos"][:2]) + (" ..." if len(patch["photos"]) > 2 else "")
             label = f"{patch['id']}: " + (names if patch["mode"] == "assign" else f"senza {names}")
             ground = patch.get("surface") == "ground"
             v.add_polygon(patch["polygon"], label=label + (" (suolo)" if ground else ""), color="#e84393",

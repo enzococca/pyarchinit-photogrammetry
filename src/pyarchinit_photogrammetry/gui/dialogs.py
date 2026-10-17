@@ -606,6 +606,12 @@ class ImageDialog(QDialog):
         lay.addWidget(bb)
 
 
+def short_label(label: str, size: int = 20) -> str:
+    """A photo name short enough for a list or a map label (drones write long ones): the end,
+    where the number of the photo is."""
+    return label if len(label) <= size else "..." + label[-(size - 3):]
+
+
 class PatchDialog(QDialog):
     """Choose the photos of an area: a patch of the orthomosaic (``kind="ortho"``) or faces of
     the textured model (``kind="faces"``). The area as it is now beside the area seen from the
@@ -661,6 +667,8 @@ class PatchDialog(QDialog):
         self.list = QListWidget()
         self.list.setViewMode(QListWidget.ViewMode.IconMode)
         self.list.setIconSize(QSize(150, 150))
+        self.list.setGridSize(QSize(172, 246))  # long photo names must not widen the cells
+        self.list.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.list.setMovement(QListWidget.Movement.Static)
         self.list.setSpacing(6)
@@ -668,7 +676,7 @@ class PatchDialog(QDialog):
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         for c in candidates:
             gsd = c.get("gsd") or 0.0
-            text = (f"{c['label']}\n{_it(100 * c['coverage'])}% · {_it(c['angle'])}° · "
+            text = (f"{short_label(c['label'])}\n{_it(100 * c['coverage'])}% · {_it(c['angle'])}° · "
                     f"{_it(100 * gsd, 1)} cm/px")
             if c.get("used"):
                 text += f"\nusata ora: {_it(100 * c['used'])}%"
