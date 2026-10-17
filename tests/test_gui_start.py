@@ -138,6 +138,49 @@ def test_launcher_starts_the_window(tmp_path):
     assert np.isfinite(float(log.split("Avvio in ")[1].split(" s")[0]))
 
 
+def test_the_crash_log_never_stops_the_start(tmp_path, monkeypatch):
+    """faulthandler refused by the system (the macOS runners of GitHub refused its signal
+    stack): the interface starts all the same, without the crash file."""
+    import faulthandler
+    import logging
+
+    from pyarchinit_photogrammetry.gui import logging_setup
+
+    def refuse(*_a, **_k):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setenv("PPG_LOG_DIR", str(tmp_path))
+    monkeypatch.setattr(logging_setup, "_state", {})
+    monkeypatch.setattr(faulthandler, "is_enabled", lambda: False)
+    monkeypatch.setattr(faulthandler, "enable", refuse)
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        path = logging_setup.install()
+        assert path == tmp_path / "ppg-gui.log" and logging_setup._state["crash_file"] is None
+        assert "crash.log not available" in path.read_text()
+    finally:
+        for h in root.handlers[:]:
+            if h not in before:
+                root.removeHandler(h)
+                h.close()
+    import ppg_launcher
+
+    assert ppg_launcher.crash_log() is False and ppg_launcher._crash_file is None
+
+
+def test_the_launcher_turns_the_crash_log_on_first(tmp_path):
+    """The crash file is on before the heavy libraries load (native crashes while loading)."""
+    env = dict(os.environ, PPG_LOG_DIR=str(tmp_path), PYTHONFAULTHANDLER="")
+    env.pop("PYTHONFAULTHANDLER")
+    code = ("import faulthandler, sys, ppg_launcher; ok = ppg_launcher.crash_log(); "
+            "print(ok, faulthandler.is_enabled(), 'pyarchinit_photogrammetry' in sys.modules)")
+    r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=120,
+                       close_fds=False)
+    assert r.stdout.split() == ["True", "True", "False"], r.stdout + r.stderr
+    assert (tmp_path / "crash.log").exists()
+
+
 def test_numbers_stay_in_the_c_locale(qapp):
     """Qt takes the locale of the system: with an Italian one IfcOpenShell read "1.5" as 1 and
     the IFC preview was empty. The start puts the numbers back in the C locale."""

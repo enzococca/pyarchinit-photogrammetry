@@ -221,6 +221,42 @@ def _persistent_matplotlib_cache() -> None:
         pass
 
 
+_crash_file = None  # kept open while the application runs
+
+
+def crash_log() -> bool:
+    """Native crashes (segfault, abort) written to ``crash.log`` in the log folder of the
+    interface (as ``gui.logging_setup``, ``PPG_LOG_DIR`` overrides it) from the very start,
+    before the heavy libraries load. A system that refuses it - the macOS runners of GitHub
+    refused faulthandler's signal stack once the libraries were loaded - only loses the crash
+    file: the application starts anyway. True when it is on."""
+    global _crash_file
+    import faulthandler
+
+    if faulthandler.is_enabled():
+        return True
+    folder = os.environ.get("PPG_LOG_DIR")
+    if not folder:
+        if sys.platform == "darwin":
+            folder = os.path.expanduser("~/Library/Logs/pyarchinit-photogrammetry")
+        elif os.name == "nt":
+            folder = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local"),
+                                  "pyarchinit-photogrammetry", "logs")
+        else:
+            folder = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+                                  "pyarchinit-photogrammetry", "logs")
+    try:
+        os.makedirs(folder, exist_ok=True)
+        _crash_file = open(os.path.join(folder, "crash.log"), "a", encoding="utf-8")
+        faulthandler.enable(file=_crash_file, all_threads=True)
+        return True
+    except OSError:
+        if _crash_file is not None:
+            _crash_file.close()
+        _crash_file = None
+        return False
+
+
 def main(argv: list[str] | None = None) -> int:
     started = time.perf_counter()
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -229,6 +265,7 @@ def main(argv: list[str] | None = None) -> int:
         from pyarchinit_photogrammetry.gui import main as gui_main
 
         return gui_main(argv)
+    crash_log()
     os.environ.setdefault("QT_API", "pyside6")  # qtpy (pyvistaqt) must not pick another binding
     os.environ.setdefault("GLOG_minloglevel", "2")
     try:

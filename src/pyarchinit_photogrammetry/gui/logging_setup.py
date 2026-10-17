@@ -52,8 +52,16 @@ def install(level: int = logging.INFO) -> Path:
     if root.level == logging.NOTSET or root.level > logging.WARNING:
         root.setLevel(logging.WARNING)
     logging.getLogger("pyarchinit_photogrammetry").setLevel(level)
-    crash = open(folder / "crash.log", "a", encoding="utf-8")
-    faulthandler.enable(file=crash, all_threads=True)
+    crash = None
+    if not faulthandler.is_enabled():  # ppg_launcher turns it on before the heavy imports
+        try:
+            crash = open(folder / "crash.log", "a", encoding="utf-8")
+            faulthandler.enable(file=crash, all_threads=True)
+        except OSError as exc:  # only the crash file is lost: never a reason not to start
+            logging.getLogger("pyarchinit_photogrammetry.gui").warning("crash.log not available: %s", exc)
+            if crash is not None:
+                crash.close()
+            crash = None
     _state.update(installed=True, handler=handler, crash_file=crash)
     sys.excepthook = _excepthook
     threading.excepthook = _thread_excepthook
