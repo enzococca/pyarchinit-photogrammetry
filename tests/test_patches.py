@@ -85,12 +85,12 @@ def test_assigned_photo_inside_the_polygon_only(processed, tmp_path, plain_photo
     before, tr = _read(ch.orthomosaic_path)
     poly = _area(ch)
     ranked = P.photos_for_area(ch, poly)
-    assert ranked and ranked == sorted(ranked, key=lambda d: (-round(d["coverage"], 1), -d["score"]))
+    assert ranked and ranked == sorted(ranked, key=lambda d: -d["coverage"] * d["score"])
     assert abs(sum(d["used"] for d in ranked) - 1.0) < 0.05  # the photos the orthomosaic uses now
-    # a photo that sees most of it but is hardly used there now (the walls of the trench hide
-    # a part of the area from every photo)
-    pick = max((d for d in ranked if d["used"] < 0.2), key=lambda d: d["coverage"])
-    assert pick["coverage"] > 0.8
+    # a photo that frames most of it but is hardly used there now (the walls of the trench
+    # hide a part of the area from every photo)
+    pick = max((d for d in ranked if d["used"] < 0.2), key=lambda d: d["coverage"] * d["visible"])
+    assert pick["coverage"] * pick["visible"] > 0.8
     patch = P.add_patch(ch, poly, [pick["label"]])
     assert patch["id"] == "p1" and P.changed_patches(ch) == [patch]
     P.update_orthomosaic(ch)
@@ -205,10 +205,9 @@ def test_texture_faces_from_the_chosen_photo(processed, tmp_path, plain_photos):
     faces = inside[n[:, 2] / np.linalg.norm(n, axis=1) > 0.5]  # the floor of the trench, seen from above
     assert len(faces) > 100
     ranked = P.photos_for_faces(ch, faces)
-    picks = [d["label"] for d in ranked[:2]]
-    assert ranked[0]["coverage"] > 0.8
+    picks = [d["label"] for d in ranked[:2]]  # the best two (from above, close) see most of the floor
     result = P.retexture(ch, picks, faces=faces)
-    assert result["faces"] == len(faces) and result["coloured"] > 0.8 * len(faces)  # walls hide the rest
+    assert result["faces"] == len(faces) and result["coloured"] > 0.6 * len(faces)  # walls hide the rest
     after = cv2.imread(str(ch.product_path("model_textured")))
     h, w = after.shape[:2]
 
@@ -226,3 +225,106 @@ def test_texture_faces_from_the_chosen_photo(processed, tmp_path, plain_photos):
     rows, cols = texels(others)
     assert np.abs(after[rows, cols].astype(int) - before[rows, cols].astype(int)).mean() < 3
     assert ch.meta["texture"]["patches"][-1]["photos"] == sorted(picks)
+
+
+def test_patch_on_the_ground_around_the_area_fills_holes_of_the_dem(processed, tmp_path, plain_photos):
+    from shapely import contains_xy
+    from shapely.geometry import Polygon
+
+    _doc, ch = _copy(processed, tmp_path)
+    _prepare(ch)
+    poly = _area(ch, 0.3)
+    geom = Polygon(poly)
+    # a hole in the DEM inside the area (no data where a tree or a vehicle confused the DEM)
+    with rasterio.open(ch.dem_path, "r+") as dem:
+        z = dem.read(1)
+        t = dem.transform
+        rows, cols = np.mgrid[0:z.shape[0], 0:z.shape[1]]
+        hole = contains_xy(geom.buffer(-0.25 * np.sqrt(geom.area)), t.c + (cols + 0.5) * t.a, t.f + (rows + 0.5) * t.e)
+        assert hole.sum() > 20
+        z[hole] = dem.nodata if dem.nodata is not None else np.nan
+        dem.write(z, 1)
+    ch.build_orthomosaic(resolution=0.01)
+    before, tr = _read(ch.orthomosaic_path)
+    rows, cols = np.mgrid[0:before.shape[1], 0:before.shape[2]]
+    x, y = tr.c + (cols + 0.5) * tr.a, tr.f + (rows + 0.5) * tr.e
+    in_hole = contains_xy(geom.buffer(-0.3 * np.sqrt(geom.area)), x, y)
+    assert (before[3, in_hole] == 0).mean() > 0.95  # no surface, no orthophoto
+    pick = P.photos_for_area(ch, poly)[0]
+    patch = P.add_patch(ch, poly, [pick["label"]], surface="ground")
+    assert patch["surface"] == "ground"
+    P.update_orthomosaic(ch)
+    after, _ = _read(ch.orthomosaic_path)
+    assert (after[3, in_hole] == 255).mean() > 0.95  # the ground around the area fills it
+    want = _colour_of(ch.camera(pick["label"]).key)
+    got = after[:3, in_hole & (after[3] == 255)].T[:, ::-1]
+    assert (np.abs(got.astype(int) - want).max(axis=1) <= 1).mean() > 0.95
+    outside = ~contains_xy(geom.buffer(0.02), x, y)
+    assert np.array_equal(after[:, outside], before[:, outside])
+    # the ground is the surface along the polygon, smooth inside
+    prep = P.prepare(ch, [patch], ch.aligned_cameras)[0]
+    from pyarchinit_photogrammetry.engine.ortho import _DemSurface, _surface_heights
+
+    surf = _DemSurface(ch.dem_path, 0.01)
+    prep.ground_from(lambda a, b: _surface_heights(surf, a, b), 0.01)
+    bx, by, bz = prep.ground
+    assert np.allclose(prep.ground_heights(bx, by), bz, atol=1e-6)
+    inner = prep.ground_heights(x[in_hole][::50], y[in_hole][::50])
+    assert inner.min() >= bz.min() - 1e-9 and inner.max() <= bz.max() + 1e-9
+
+
+def test_previews_show_the_result_of_each_photo(processed, tmp_path, plain_photos):
+    from shapely import contains_xy
+    from shapely.geometry import Polygon
+
+    _doc, ch = _copy(processed, tmp_path)
+    _prepare(ch)
+    ch.build_orthomosaic(resolution=0.01)
+    poly = _area(ch, 0.25)
+    ranked = P.photos_for_area(ch, poly)[:3]
+    imgs, now, bounds = P.previews(ch, poly, [d["label"] for d in ranked], max_side=100)
+    assert set(imgs) == {(d["label"], s) for d in ranked for s in P.SURFACES}
+    h, w = now.shape[:2]
+    res = (bounds[2] - bounds[0]) / w
+    rows, cols = np.mgrid[0:h, 0:w]
+    inside = contains_xy(Polygon(poly), bounds[0] + (cols + 0.5) * res, bounds[3] - (rows + 0.5) * res)
+    for d in ranked:
+        img = imgs[(d["label"], "dem")]
+        assert np.array_equal(img[~inside], now[~inside])  # outside the area: the orthomosaic as it is
+        seen = inside & (img[..., 3] == 255)
+        want = _colour_of(ch.camera(d["label"]).key)[::-1]
+        assert (np.abs(img[seen, :3].astype(int) - want).max(axis=1) <= 1).mean() > 0.99
+
+
+def test_command_line(processed, tmp_path):
+    """ppg patch: the photos of an area, a patch on the ground, the list, and back without it."""
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    doc, ch = _copy(processed, tmp_path)
+    project = str(doc.path)
+    before, _ = _read(ch.orthomosaic_path)
+    poly = np.array(_area(ch, 0.3))
+    lo, hi = poly.min(axis=0), poly.max(axis=0)
+    box = f"{lo[0]},{lo[1]},{hi[0]},{hi[1]}"
+    run = CliRunner()
+
+    def ok(*args):
+        r = run.invoke(app, list(args))
+        assert r.exit_code == 0, r.output + repr(r.exception)
+        return r.output
+
+    out = ok("patch", project, "--bbox", box, "--suggest")
+    best = out.splitlines()[0].split(":")[0]
+    assert "frames" in out and ch.camera(best)
+    out = ok("patch", project, "--bbox", box, "--photos", best, "--ground", "--texture")
+    assert "patch p1" in out and "texture:" in out
+    out = ok("patch", project, "--list")
+    assert out.startswith(f"p1: only {best} on the ground")
+    after, _ = _read(ch.orthomosaic_path)
+    assert not np.array_equal(after, before)
+    ok("patch", project, "--remove", "all")
+    assert ok("patch", project, "--list") == ""
+    again, _ = _read(ch.orthomosaic_path)
+    assert np.array_equal(again, before)

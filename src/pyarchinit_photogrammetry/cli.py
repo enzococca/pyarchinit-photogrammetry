@@ -545,6 +545,62 @@ def crop(project: Path,
 
 
 @app.command()
+def patch(project: Path,
+          photos: Optional[str] = typer.Option(None, help="labels of the photos for the area, comma separated"),
+          polygon: Optional[str] = typer.Option(None, help="'x1,y1 x2,y2 x3,y3 ...' in the chunk CRS"),
+          bbox: Optional[str] = typer.Option(None, help="'xmin,ymin,xmax,ymax'"),
+          wkt: Optional[str] = typer.Option(None, help="a WKT polygon"),
+          geojson: Optional[Path] = typer.Option(None, help="a GeoJSON file (its polygons, merged)"),
+          exclude: bool = typer.Option(False, help="every photo but these"),
+          ground: bool = typer.Option(False, help="project on the ground around the area instead of the DEM: trees, "
+                                                  "vehicles and people as the photo shows them; fills DEM holes"),
+          texture: bool = typer.Option(False, help="also colour the texture of the model in the area"),
+          suggest: bool = typer.Option(False, help="list the photos that frame the area, best first"),
+          remove: Optional[str] = typer.Option(None, help="take a patch away: its id, or 'all'"),
+          list_patches: bool = typer.Option(False, "--list", help="list the patches"),
+          chunk: Optional[str] = None):
+    """Patches of the orthomosaic: the colours of an area from chosen photos (as Metashape's
+    "assign images"). The orthomosaic is updated only where patches changed."""
+    from .engine import patches as P
+
+    doc, ch = _open(project, chunk)
+    if list_patches:
+        for p in P.patches(ch):
+            how = "only" if p["mode"] == "assign" else "all but"
+            typer.echo(f"{p['id']}: {how} {', '.join(p['photos'])} on the {p.get('surface', 'dem')}, "
+                       f"{len(p['polygon'])} vertices")
+        return
+    if remove:
+        if remove == "all":
+            P.clear_patches(ch)
+        else:
+            P.remove_patch(ch, remove)
+        typer.echo(str(ch.update_orthomosaic(progress=print_progress)))
+        doc.save()
+        return
+    region = _region(polygon, bbox, wkt, geojson)
+    if region.geom_type != "Polygon":
+        region = max(region.geoms, key=lambda g: g.area)
+    ring = [list(xy[:2]) for xy in region.exterior.coords[:-1]]
+    if suggest:
+        for d in P.photos_for_area(ch, ring):
+            typer.echo(f"{d['label']}: frames {100 * d['coverage']:.0f}% of the area, {d['angle']:.0f} deg from the "
+                       f"vertical, {100 * d['gsd']:.2f} cm/px, the orthomosaic takes {100 * d['used']:.0f}% from it")
+        return
+    if not photos:
+        raise typer.BadParameter("give --photos (--suggest lists the photos of the area)")
+    labels = [x.strip() for x in photos.split(",") if x.strip()]
+    mode = "exclude" if exclude else "assign"
+    p = P.add_patch(ch, ring, labels, mode, "ground" if ground else "dem")
+    typer.echo(f"patch {p['id']}")
+    typer.echo(str(ch.update_orthomosaic(progress=print_progress)))
+    if texture:
+        r = ch.patch_texture(labels, polygon=ring, mode=mode, progress=print_progress)
+        typer.echo(f"texture: {r['faces']} faces")
+    doc.save()
+
+
+@app.command()
 def info(project: Path):
     """Summary of the project."""
     doc = Document.open(project)

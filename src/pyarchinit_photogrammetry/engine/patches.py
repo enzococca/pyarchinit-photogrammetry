@@ -6,9 +6,13 @@ seamlines that the automatic choice of the photos renders badly - the editing of
 orthomosaic ("assign images" to a polygon), designed on this engine. A patch is a dict kept in
 ``chunk.meta["orthomosaic"]["patches"]``::
 
-    {"id": "p1", "polygon": [[x, y], ...], "photos": ["DJI_0236"], "mode": "assign"}
+    {"id": "p1", "polygon": [[x, y], ...], "photos": ["DJI_0236"], "mode": "assign", "surface": "dem"}
 
 (coordinates in the CRS of the chunk, photos by label; a later patch covers an earlier one).
+``surface`` is where the cells are projected from: ``"dem"`` (a true orthophoto, the default) or
+``"ground"``, the ground around the area - the heights of the surface along the polygon,
+interpolated inside it - so that trees, vehicles and people come out as the photo shows them
+instead of smeared over a DEM that does not fit them (and holes of the DEM are filled).
 Every build of the orthomosaic applies the patches, and :func:`update_orthomosaic` redraws only
 the cells of the patches added, changed or removed since the file was written. An orthomosaic
 of another program (exported by Metashape) is never changed: the first update copies it into
@@ -30,6 +34,7 @@ from ..core.chunk import Chunk
 from ..core.progress import Progress
 
 MODES = ("assign", "exclude")
+SURFACES = ("dem", "ground")
 
 
 # ---------------------------------------------------------------- the patches of a chunk
@@ -56,9 +61,11 @@ class _Patch:
 
         self.data = data
         self.mode = data.get("mode", "assign")
+        self.surface = data.get("surface", "dem")
         self.geom = _geometry(data["polygon"])
         prepare_geom(self.geom)
         self.bounds = self.geom.bounds
+        self.ground = None  # (x, y, z) of the surface along the polygon, for surface "ground"
         labels = set(data.get("photos") or [])
         self.cams = [c for c in cams if c.label in labels or str(c.key) in labels]
         self.keys = {c.key for c in self.cams}
@@ -68,6 +75,32 @@ class _Patch:
         if self.mode == "exclude":
             return [c for c in near if c.key not in self.keys]
         return self.cams
+
+    def ground_from(self, heights, resolution: float) -> None:
+        """Sample the surface (``heights(x, y)``) along the polygon, every few cells."""
+        from shapely import segmentize
+
+        rings = [self.geom.exterior, *self.geom.interiors] if self.geom.geom_type == "Polygon" else \
+            [r for g in self.geom.geoms for r in (g.exterior, *g.interiors)]
+        step = max(4 * resolution, sum(r.length for r in rings) / 600)
+        xy = np.vstack([np.asarray(segmentize(r, step).coords)[:-1, :2] for r in rings])
+        z = heights(xy[:, 0], xy[:, 1])
+        ok = np.isfinite(z)
+        if ok.sum() >= 3:
+            self.ground = (xy[ok, 0], xy[ok, 1], z[ok])
+
+    def ground_heights(self, x, y) -> np.ndarray:
+        """The ground inside the polygon: the heights along it, weighted by the inverse square
+        distance (smooth, and equal to the surface along the polygon)."""
+        bx, by, bz = self.ground
+        out = np.empty(len(x))
+        step = max(1, 4_000_000 // len(bx))
+        for s in range(0, len(x), step):
+            dx = x[s:s + step, None] - bx[None]
+            dy = y[s:s + step, None] - by[None]
+            w = 1.0 / np.maximum(dx * dx + dy * dy, 1e-12)
+            out[s:s + step] = (w * bz).sum(axis=1) / w.sum(axis=1)
+        return out
 
 
 def prepare(chunk: Chunk, patches, cams) -> list[_Patch]:
@@ -83,12 +116,15 @@ def patches(chunk: Chunk) -> list[dict]:
     return [dict(p) for p in (chunk.meta.get("orthomosaic") or {}).get("patches") or []]
 
 
-def add_patch(chunk: Chunk, polygon, photos, mode: str = "assign") -> dict:
+def add_patch(chunk: Chunk, polygon, photos, mode: str = "assign", surface: str = "dem") -> dict:
     """A new patch: inside ``polygon`` (CRS of the chunk) the colours come only from
-    ``photos`` (labels) with ``mode="assign"``, from every photo but them with ``"exclude"``.
-    Call :func:`update_orthomosaic` (or build the orthomosaic) to apply it."""
+    ``photos`` (labels) with ``mode="assign"``, from every photo but them with ``"exclude"``;
+    ``surface`` "dem" or "ground" (see the module). Call :func:`update_orthomosaic` (or build
+    the orthomosaic) to apply it."""
     if mode not in MODES:
         raise ValueError(f"mode: one of {', '.join(MODES)}")
+    if surface not in SURFACES:
+        raise ValueError(f"surface: one of {', '.join(SURFACES)}")
     labels = []
     for p in photos:
         labels.append(chunk.camera(p).label)  # KeyError for a photo that is not in the chunk
@@ -99,7 +135,7 @@ def add_patch(chunk: Chunk, polygon, photos, mode: str = "assign") -> dict:
     used = [int(p["id"][1:]) for p in patches(chunk) if str(p.get("id", "")).startswith("p")
             and str(p["id"])[1:].isdigit()]
     patch = {"id": f"p{max(used, default=0) + 1}", "polygon": ring.round(4).tolist(), "photos": labels,
-             "mode": mode}
+             "mode": mode, "surface": surface}
     _meta(chunk).setdefault("patches", []).append(patch)
     return dict(patch)
 
@@ -190,6 +226,7 @@ def update_orthomosaic(chunk: Chunk, progress: Progress | None = None, workers: 
             if any(b[0] <= x1 and b[2] >= x0 and b[1] <= y1 and b[3] >= y0 for b in boxes):
                 tiles.append((r, c))
     progress(0.02, f"Orthomosaic: {len(changed)} patches changed, {len(tiles)} tiles")
+    written = []
     with rasterio.Env(GDAL_NUM_THREADS="ALL_CPUS"), rasterio.open(own, "r+") as dst, \
             (rasterio.open(base) if base else nullcontext()) as bsrc:
 
@@ -206,14 +243,19 @@ def update_orthomosaic(chunk: Chunk, progress: Progress | None = None, workers: 
                 cur[:, from_base] = b[:4, from_base]
             cur[:, done] = rgba[:, done]
             dst.write(cur, window=win)
+            written.append((c0, r0, tw, th))
 
         if tiles:
             _run_tiles(ctx, tiles, ctx.workers, progress, put, start=0.03, span=0.82)
-        if not factors:
-            factors = [f for f in (2, 4, 8, 16, 32, 64, 128) if min(h, w) // f >= 64]
+    # the overviews of the changed tiles only (a minute for all of them on a 45,000 px orthomosaic)
+    from . import overviews
+
+    progress(0.86, "Overviews of the orthomosaic")
+    if not (factors and (not written or overviews.refresh(own, written, factors))):
+        factors = factors or [f for f in (2, 4, 8, 16, 32, 64, 128) if min(h, w) // f >= 64]
         if factors:
-            progress(0.86, "Overviews of the orthomosaic")
-            dst.build_overviews(factors, Resampling.average)
+            with rasterio.Env(GDAL_NUM_THREADS="ALL_CPUS"), rasterio.open(own, "r+") as dst:
+                dst.build_overviews(factors, Resampling.average)
     meta["applied_patches"] = current
     progress(1.0, f"Orthomosaic updated: {len(current)} patches")
     return own
@@ -233,9 +275,13 @@ def _area_grid(geom, cells: int):
 
 def photos_for_area(chunk: Chunk, polygon, limit: int = 12, skip_unreadable: bool = True,
                     cells: int = 32) -> list[dict]:
-    """The photos that see the surface inside ``polygon``, best first: ``{"label", "key",
-    "coverage" (share of the area seen), "angle" (degrees from the vertical), "gsd" (world
-    units per pixel), "score", "used" (share of the area the orthomosaic takes from it now)}``."""
+    """The photos that frame the surface inside ``polygon``, best first (the share of the area
+    framed times how well: close, from above, near the centre): ``{"label", "key", "coverage"
+    (share of the area in the photo), "visible" (share of it not hidden by the model, e.g. the
+    ground under trees), "angle" (degrees from the vertical), "gsd" (world units per pixel),
+    "score", "used" (share of the area the orthomosaic takes from it now)}``. A patch with one
+    photo takes it wherever the photo frames the area, hidden or not, so that a tree or a
+    vehicle comes out whole, as that photo shows it."""
     from shapely import contains_xy
 
     from .ortho import _colour, _context, _on_grid, _surface
@@ -268,25 +314,35 @@ def photos_for_area(chunk: Chunk, polygon, limit: int = 12, skip_unreadable: boo
         px, depth, inside = project_valid(chunk, cam, pts)
         if not inside.any():
             continue
-        seen = inside.copy()
+        visible = 1.0
         if raycaster is not None:
             idx = np.nonzero(inside)[0]
-            seen[idx[~raycaster.visible_from(cam.center, pts[idx], abs_tol=ctx.abs_tol)]] = False
-        if not seen.any():
-            continue
+            visible = float(raycaster.visible_from(cam.center, pts[idx], abs_tol=ctx.abs_tol).mean())
         sensor = chunk.sensor(cam)
-        ray = pts[seen] - cam.center
+        ray = pts[inside] - cam.center
         ray /= np.linalg.norm(ray, axis=1, keepdims=True)
         nadir = np.clip(-(ray @ ctx.up_int), 0, 1)
-        off = np.hypot(px[seen, 0] / sensor.width - 0.5, px[seen, 1] / sensor.height - 0.5)
-        gsd = depth[seen] / sensor.focal_px * chunk.scale
-        out.append({"label": cam.label, "key": cam.key, "coverage": float(seen.mean()),
+        off = np.hypot(px[inside, 0] / sensor.width - 0.5, px[inside, 1] / sensor.height - 0.5)
+        gsd = depth[inside] / sensor.focal_px * chunk.scale
+        out.append({"label": cam.label, "key": cam.key, "coverage": float(inside.mean()), "visible": visible,
                     "angle": float(np.degrees(np.arccos(np.clip(np.mean(nadir), 0, 1)))),
                     "gsd": float(np.median(gsd)),
                     "score": float(np.mean((nadir ** 2) * (1 - off) / np.maximum(gsd, 1e-12))),
                     "used": used.get(int(cam.key), 0.0)})
-    out.sort(key=lambda d: (-round(d["coverage"], 1), -d["score"]))
+    out.sort(key=lambda d: -d["coverage"] * d["score"])
     return out[:limit]
+
+
+def preview_grid(polygon, max_side: int = 320, margin: float = 0.1):
+    """The grid of the previews of an area: bounds (xmin, ymin, xmax, ymax) of ``polygon`` and
+    ``margin`` around it, shape (rows, columns) with at most ``max_side`` cells a side, cell size."""
+    geom = _geometry(polygon)
+    x0, y0, x1, y1 = geom.bounds
+    m = margin * max(x1 - x0, y1 - y0)
+    x0, y0, x1, y1 = x0 - m, y0 - m, x1 + m, y1 + m
+    res = max(x1 - x0, y1 - y0) / max_side
+    shape = (max(1, int(np.ceil((y1 - y0) / res - 1e-6))), max(1, int(np.ceil((x1 - x0) / res - 1e-6))))
+    return (x0, y1 - shape[0] * res, x0 + shape[1] * res, y1), shape, res
 
 
 def preview_area(chunk: Chunk, polygon, photos=None, max_side: int = 320, margin: float = 0.1,
@@ -296,20 +352,56 @@ def preview_area(chunk: Chunk, polygon, photos=None, max_side: int = 320, margin
     ``(h, w, 4)``, and its bounds (xmin, ymin, xmax, ymax)."""
     from .ortho import render_area
 
-    geom = _geometry(polygon)
-    x0, y0, x1, y1 = geom.bounds
-    m = margin * max(x1 - x0, y1 - y0)
-    x0, y0, x1, y1 = x0 - m, y0 - m, x1 + m, y1 + m
-    res = max(x1 - x0, y1 - y0) / max_side
-    shape = (max(1, int(np.ceil((y1 - y0) / res - 1e-6))), max(1, int(np.ceil((x1 - x0) / res - 1e-6))))
+    bounds, shape, res = preview_grid(polygon, max_side, margin)
     cams = None if photos is None else [chunk.camera(p) for p in photos]
     meta = chunk.meta.get("orthomosaic") or {}
-    rgba = render_area(chunk, (x0, y1), shape, res, cams=cams, surface=_surface_kind(chunk),
+    rgba = render_area(chunk, (bounds[0], bounds[3]), shape, res, cams=cams, surface=_surface_kind(chunk),
                        max_angle=89.0 if photos is not None else meta.get("max_angle", 70.0),
                        patches=patches(chunk) if (photos is None and patches_too) else None,
                        blending=meta.get("blending", "mosaic"),
                        max_cameras=len(cams) if cams else meta.get("max_cameras", 8))
-    return np.moveaxis(rgba, 0, -1), (x0, y1 - shape[0] * res, x0 + shape[1] * res, y1)
+    return np.moveaxis(rgba, 0, -1), bounds
+
+
+def previews(chunk: Chunk, polygon, photos, max_side: int = 320, surfaces=SURFACES, progress=None):
+    """What a patch of ``polygon`` would look like with each photo: ``({(label, surface): RGBA
+    (h, w, 4)}, now, bounds)`` - inside the polygon the area from that photo alone, outside it
+    the orthomosaic as it is (``now``, None without one), over :func:`preview_grid`. Quick: one
+    photo frames every cell it sees, so no occlusion is tested."""
+    from shapely import contains_xy
+
+    from .ortho import _context, _on_grid, _PhotoCache, _surface, _tile
+
+    progress = progress or (lambda *_a, **_k: None)
+    bounds, shape, res = preview_grid(polygon, max_side)
+    now = current_area(chunk, bounds, shape)
+    rows, cols = np.mgrid[0:shape[0], 0:shape[1]]
+    inside = contains_xy(_geometry(polygon), bounds[0] + (cols + 0.5) * res, bounds[3] - (rows + 0.5) * res)
+    kind = _surface_kind(chunk)
+    raycaster = None
+    if kind == "model" or chunk.dem_path is None:
+        from .visibility import raycaster_for_chunk
+
+        raycaster = raycaster_for_chunk(chunk)  # the surface itself is the model
+    lock = threading.Lock()
+    surf = _on_grid(_surface(chunk, res, kind, raycaster, lock), (bounds[0], bounds[3]), shape, res)
+    cams = [chunk.camera(p) for p in photos]
+    cache = _PhotoCache(len(cams) + 2)
+    out = {}
+    jobs = [(cam, s) for cam in cams for s in surfaces]
+    for i, (cam, s) in enumerate(jobs):
+        progress(i / max(len(jobs), 1), f"Area vista da {cam.label}")
+        patch = {"id": "anteprima", "polygon": np.asarray(polygon, float)[:, :2].tolist(), "photos": [cam.label],
+                 "mode": "assign", "surface": s}
+        ctx = _context(chunk, res, [cam], surf, raycaster, "mosaic", 89.0, 1, 1, None, [patch],
+                       max(shape), lock)
+        ctx.cache, ctx.occlusion = cache, False
+        block = _tile(ctx, 0, 0)
+        rgba = np.zeros((*shape, 4), np.uint8) if block is None else np.moveaxis(block, 0, -1)
+        img = (now.copy() if now is not None else np.zeros((*shape, 4), np.uint8))
+        img[inside] = rgba[inside]
+        out[(cam.label, s)] = img
+    return out, now, bounds
 
 
 def current_area(chunk: Chunk, bounds, shape) -> np.ndarray | None:
@@ -471,7 +563,7 @@ def photos_for_faces(chunk: Chunk, faces, limit: int = 12, skip_unreadable: bool
                     "angle": float(np.degrees(np.arccos(np.clip(np.mean(cos[seen]), -1, 1)))),
                     "gsd": float(np.median(gsd)),
                     "score": float(np.mean(cos[seen] * (sensor.focal_px / dist[seen]) ** 2))})
-    out.sort(key=lambda d: (-round(d["coverage"], 1), -d["score"]))
+    out.sort(key=lambda d: -d["coverage"] * d["score"])
     return out[:limit]
 
 
@@ -583,6 +675,6 @@ def retexture(chunk: Chunk, photos, faces=None, polygon=None, mode: str = "assig
     return {"faces": int(len(faces)), "coloured": int((choice >= 0).sum()), "texels": written}
 
 
-__all__ = ["MODES", "add_patch", "changed_patches", "clear_patches", "current_area", "faces_in_polygon",
-           "patches", "photos_for_area", "photos_for_faces", "preview_area", "preview_faces", "remove_patch",
-           "retexture", "update_orthomosaic"]
+__all__ = ["MODES", "SURFACES", "add_patch", "changed_patches", "clear_patches", "current_area", "faces_in_polygon",
+           "patches", "photos_for_area", "photos_for_faces", "preview_area", "preview_faces", "preview_grid", "previews",
+           "remove_patch", "retexture", "update_orthomosaic"]

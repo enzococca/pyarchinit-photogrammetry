@@ -154,6 +154,45 @@ class _MeshSurface:
         return z.reshape(th, tw)
 
 
+def _surface_heights(surface, x, y) -> np.ndarray:
+    """Heights of the surface of the orthomosaic at world points (NaN where it has none)."""
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    if isinstance(surface, _MeshSurface):
+        start = np.column_stack([x, y, np.full(len(x), surface.top)]) @ surface.inv[:3, :3].T + surface.inv[:3, 3]
+        with surface.lock:
+            t = surface.raycaster.hit_distance(start, np.repeat(surface.down[None], len(start), 0))
+        return np.where(np.isfinite(t), surface.top - t * surface.chunk.scale, np.nan)
+    from rasterio.windows import Window
+
+    t = surface.t
+    colf = (x - t.c) / t.a - 0.5  # fractional DEM pixel, centres on integers
+    rowf = (y - t.f) / t.e - 0.5
+    a0 = max(int(np.floor(colf.min())) - 1, 0)
+    a1 = min(int(np.ceil(colf.max())) + 2, surface.width)
+    b0 = max(int(np.floor(rowf.min())) - 1, 0)
+    b1 = min(int(np.ceil(rowf.max())) + 2, surface.height)
+    if a1 <= a0 or b1 <= b0:
+        return np.full(len(x), np.nan)
+    dem = np.asarray(surface._src().read(1, window=Window(a0, b0, a1 - a0, b1 - b0)), np.float64)
+    valid = np.isfinite(dem)
+    if surface.nodata is not None:
+        valid &= dem != surface.nodata
+    c, r = colf - a0, rowf - b0
+    c0, r0 = np.floor(c).astype(int), np.floor(r).astype(int)
+    num = np.zeros(len(x))
+    den = np.zeros(len(x))
+    for dr in (0, 1):
+        for dc in (0, 1):
+            rr, cc = r0 + dr, c0 + dc
+            w = (1 - np.abs(r - rr)) * (1 - np.abs(c - cc))
+            ok = (rr >= 0) & (rr < dem.shape[0]) & (cc >= 0) & (cc < dem.shape[1])
+            ok[ok] &= valid[rr[ok], cc[ok]]
+            num[ok] += w[ok] * dem[rr[ok], cc[ok]]
+            den[ok] += w[ok]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(den > 0.25, num / den, np.nan)
+
+
 def _model_world_bounds(chunk: Chunk) -> tuple[np.ndarray, np.ndarray]:
     """Lowest and highest corner of the model in world coordinates (vertices read in blocks)."""
     from ..core.pointcloud import _read_binary_ply_vertices
@@ -371,6 +410,8 @@ def _paint(ctx, pts, tcams, want_choice: bool = False, colours: bool = True):
     order = np.argsort(-scores, axis=0)
     chosen = np.full(n, -1)
 
+    occlusion = ctx.raycaster is not None and getattr(ctx, "occlusion", True)
+
     def visible(cam, sel):
         with ctx.lock:
             return ctx.raycaster.visible_from(ctx.centres[cam.key], pts[sel], abs_tol=ctx.abs_tol)
@@ -379,7 +420,7 @@ def _paint(ctx, pts, tcams, want_choice: bool = False, colours: bool = True):
         weight = np.zeros(n, np.float64)
         for k, cam in enumerate(tcams):
             ok = np.isfinite(scores[k])
-            if ctx.raycaster is not None and ok.any():
+            if occlusion and ok.any():
                 idx = np.nonzero(ok)[0]
                 ok[idx[~visible(cam, idx)]] = False
             if ok.any():
@@ -401,7 +442,7 @@ def _paint(ctx, pts, tcams, want_choice: bool = False, colours: bool = True):
             still = []
             for k in np.unique(cand):
                 sel = pending[cand == k]
-                if ctx.raycaster is not None:
+                if occlusion:
                     vis = visible(tcams[k], sel)
                     still.append(sel[~vis])
                     sel = sel[vis]
@@ -434,6 +475,26 @@ def _patch_owner(ctx, box, X, Y) -> np.ndarray:
     return owner
 
 
+def _ground_patches(ctx, box, r0: int, c0: int, zz: np.ndarray) -> None:
+    """Inside a patch on the ground around it, the heights of that ground (in place); a
+    later patch covers an earlier one."""
+    from shapely import contains_xy
+
+    patches = [p for p in ctx.patches if p.ground is not None and p.bounds[0] <= box[2] and p.bounds[2] >= box[0]
+               and p.bounds[1] <= box[3] and p.bounds[3] >= box[1]]
+    if not patches:
+        return
+    th, tw = zz.shape
+    rows, cols = np.mgrid[0:th, 0:tw]
+    X = ctx.origin[0] + (c0 + cols.ravel() + 0.5) * ctx.resolution
+    Y = ctx.origin[1] - (r0 + rows.ravel() + 0.5) * ctx.resolution
+    flat = zz.reshape(-1)
+    for patch in patches:
+        inside = contains_xy(patch.geom, X, Y)
+        if inside.any():
+            flat[inside] = patch.ground_heights(X[inside], Y[inside])
+
+
 def _in_any(geoms, box, X, Y) -> np.ndarray:
     from shapely import contains_xy
 
@@ -457,6 +518,7 @@ def _tile(ctx, r0: int, c0: int):
            ctx.origin[0] + (c0 + tw) * res, ctx.origin[1] - r0 * res)
     redo = getattr(ctx, "redo", None)
     zz = ctx.surface.tile(r0, c0, th, tw)
+    _ground_patches(ctx, box, r0, c0, zz)
     valid = np.isfinite(zz)
     todo = None
     if redo is not None:  # only the cells of the patches that changed
@@ -548,7 +610,11 @@ def _context(chunk: Chunk, resolution: float, cams, surface, raycaster, blending
     from .patches import prepare
 
     ctx.patches = prepare(chunk, patches or [], ctx.cams)
+    for patch in ctx.patches:
+        if patch.surface == "ground":
+            patch.ground_from(lambda x, y: _surface_heights(surface, x, y), resolution)
     ctx.redo, ctx.base = None, None
+    ctx.occlusion = True  # False: every photo sees every cell it frames (a preview from one photo)
     return ctx
 
 
