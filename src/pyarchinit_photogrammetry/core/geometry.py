@@ -133,7 +133,8 @@ def point_on_ray(points: np.ndarray, origin, direction, radius: float, min_point
     if len(first) < min_points:
         first = near[np.argsort(tn)[:min_points]]
     c = first.mean(axis=0)
-    normal = np.linalg.svd(first - c)[2][-1]
+    q = np.asarray(first - c, np.float64)
+    normal = np.linalg.eigh(q.T @ q)[1][:, 0]  # least-squares plane: the direction of least spread
     denom = float(normal @ direction)
     if abs(denom) < 1e-6:  # grazing ray: fall back to the depth of the first points
         return origin + float(np.median(tn[tn <= t0 + 2 * radius])) * direction

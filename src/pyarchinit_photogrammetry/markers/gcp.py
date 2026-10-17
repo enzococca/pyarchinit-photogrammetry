@@ -60,7 +60,7 @@ class _SurfacePoints:
     points (internal frame), read when first needed and kept until the file changes."""
 
     def __init__(self, chunk):
-        self.chunk, self._xyz, self.key = chunk, None, None
+        self.chunk, self._xyz, self.key, self._diag = chunk, None, None, None
         for name in ("point_cloud", "tie_points"):
             path = chunk.product_path(name)
             if path is not None and path.exists():
@@ -81,6 +81,18 @@ class _SurfacePoints:
                 _LAST_SURFACE.update(key=self.key, xyz=xyz)
                 self._xyz = xyz
         return self._xyz
+
+    def diag(self) -> float:
+        """Diagonal of the bounding box of the surface (0 without one)."""
+        if self._diag is None:
+            if _LAST_SURFACE.get("key") == self.key and "diag" in _LAST_SURFACE:
+                self._diag = _LAST_SURFACE["diag"]
+            else:
+                xyz = self.xyz()
+                self._diag = 0.0 if xyz is None else float(np.linalg.norm(np.ptp(xyz, axis=0)))
+                if _LAST_SURFACE.get("key") == self.key:
+                    _LAST_SURFACE["diag"] = self._diag
+        return self._diag
 
 
 def project_marker(chunk, marker, point, max_photos: int = 60) -> int:
@@ -147,7 +159,7 @@ def surface_point(chunk, cam, x: float, y: float, points: _SurfacePoints | None 
     found = None
     if xyz is not None:
         origin, direction = camera_ray(chunk, cam, x, y)
-        diag = float(np.linalg.norm(np.ptp(xyz, axis=0)))
+        diag = points.diag()
         v = xyz - origin
         t = v @ direction
         near = (t > 0) & (np.einsum("ij,ij->i", v, v) - t * t < (0.03 * diag) ** 2)
