@@ -3,9 +3,10 @@ dense cloud or the tie points, or volumetric fusion of the depth maps (:mod:`.ts
 
 Poisson reconstruction (PoissonRecon inside Open3D) can terminate the whole process
 on some clouds: it runs in an isolated child process (:mod:`.isolate`), with smooth
-PCA normals oriented by the dense normals, and falls back to a shallower depth and
-then to the height field, so a mesh is always produced and the log says which path
-was taken.
+PCA normals oriented by the dense normals. On several threads Open3D 0.19 often fails
+("Failed to close loop", segmentation faults); the reconstruction is then run again on
+one thread, which does not, then at a shallower depth, and only then the height field
+is used, so a mesh is always produced and the log says which path was taken.
 """
 from __future__ import annotations
 
@@ -151,9 +152,10 @@ class PoissonFailed(RuntimeError):
 def _poisson(pc, target_faces: int, progress: Progress, cam_centers: np.ndarray | None = None):
     """Poisson surface in an isolated process.
 
-    PoissonRecon fails non-deterministically on some clouds (``Failed to close loop``,
-    segmentation fault or a silent exit): each depth is tried twice, then a shallower
-    octree, before giving up with :class:`PoissonFailed`."""
+    PoissonRecon in Open3D 0.19 fails non-deterministically on several threads (``Failed
+    to close loop``, segmentation fault or a silent exit: 15 runs in 20 on the turntable
+    demo, none of 20 on one thread): all cores first, then one thread at the same depth,
+    then one thread with a shallower octree, before giving up with :class:`PoissonFailed`."""
     import trimesh
 
     try:
@@ -168,10 +170,11 @@ def _poisson(pc, target_faces: int, progress: Progress, cam_centers: np.ndarray 
         normals = np.ascontiguousarray(pc.normals, dtype=np.float64)
     depth = poisson_depth(target_faces)
     errors = []
-    for attempt, d in enumerate((depth, depth, depth - 1, depth - 1)):
-        progress(0.2, f"Poisson reconstruction (depth {d})" + (f", attempt {attempt + 1}" if attempt else ""))
+    for attempt, (d, threads) in enumerate(((depth, -1), (depth, 1), (depth - 1, 1))):
+        progress(0.2, f"Poisson reconstruction (depth {d})"
+                 + (f", attempt {attempt + 1}" + (" on one thread" if threads == 1 else "") if attempt else ""))
         try:
-            verts, faces = run_isolated(worker, xyz, normals, cam_centers, d,
+            verts, faces = run_isolated(worker, xyz, normals, cam_centers, d, threads,
                                         cancel_check=lambda: progress.cancel_requested)
         except InterruptedError:
             progress.check()
@@ -193,8 +196,10 @@ def _short(exc: BaseException) -> str:
     return text[-1] if text else type(exc).__name__
 
 
-def _poisson_worker(xyz: np.ndarray, normals: np.ndarray | None, cam_centers: np.ndarray | None, depth: int):
-    """Open3D Poisson in a child process: returns (vertices, triangles).
+def _poisson_worker(xyz: np.ndarray, normals: np.ndarray | None, cam_centers: np.ndarray | None, depth: int,
+                    threads: int = -1):
+    """Open3D Poisson in a child process on ``threads`` threads (-1: all): returns (vertices,
+    triangles).
 
     Normals are re-estimated with PCA (smooth, unit length) and oriented towards the
     camera that is nearest to each point (every point was seen from the side its
@@ -221,7 +226,8 @@ def _poisson_worker(xyz: np.ndarray, normals: np.ndarray | None, cam_centers: np
     else:
         pcd.orient_normals_consistent_tangent_plane(15)
     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=int(depth),
-                                                                                 linear_fit=False)
+                                                                                 linear_fit=False,
+                                                                                 n_threads=int(threads))
     densities = np.asarray(densities)
     if len(densities):
         mesh.remove_vertices_by_mask(densities < np.quantile(densities, 0.04))
@@ -233,7 +239,7 @@ def _poisson_worker(xyz: np.ndarray, normals: np.ndarray | None, cam_centers: np
 
 
 def _poisson_pycolmap_worker(xyz: np.ndarray, normals: np.ndarray | None, cam_centers: np.ndarray | None,
-                             depth: int):  # pragma: no cover
+                             depth: int, threads: int = -1):  # pragma: no cover
     """COLMAP's PoissonRecon (used only when Open3D is not installed)."""
     import tempfile
     from pathlib import Path
