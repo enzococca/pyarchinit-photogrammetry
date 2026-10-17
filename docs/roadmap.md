@@ -38,10 +38,20 @@ orthomosaics built tile by tile and shown at full resolution when zooming in; pa
 assign photos to areas of the orthomosaic and of the texture (on the DEM or on the ground
 around the area), updated in place with their overviews.
 
-## 0.6 - Interface
+## 0.6 - Scale bars and markers as in Metashape (done)
+
+Scale bars between markers (control and check, several averaged by their accuracy), also in
+local coordinates for objects and trenches, fitted together with control points and camera
+positions, inside the camera optimisation, from files and printable; scale bars and marker
+accuracies imported from Metashape (and the scale of local Metashape chunks applied); camera
+poses and GCPs imported from WebODM; markers placed on one photo (on the surface), on the model,
+the cloud or the orthophoto; guided placement with blue flags to confirm in the photos, photo
+filters by marker, point and area, estimated coordinates in the Reference pane.
+
+## 0.7 - Interface
 
 * Batch processing over several chunks.
-* Section and plan-slice tools drawn directly in the 3D view; editable markers in 3D.
+* Section and plan-slice tools drawn directly in the 3D view; markers moved in 3D.
 * PyArchInit panel: browsing media linked to US.
 * English/Italian interface translation.
 
