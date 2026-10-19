@@ -330,7 +330,10 @@ Da terminale: `ppg patch PROGETTO --bbox ... --suggest` elenca le foto di un'are
   insieme ai punti di controllo) *Ottimizza camere* fissa i marker alle estremità delle barre dove
   le barre hanno la loro lunghezza, ognuno spostato quanto permette la sua precisione nelle foto, e
   il blocco si piega verso di loro quanto le foto lo consentono; gli errori delle barre prima e
-  dopo sono nel resoconto.
+  dopo sono nel resoconto. Il motore di compensazione proprio (`ppg optimize --engine ppg`, *Motore:
+  Proprio*) tiene le barre come distanze e i punti di controllo secondo la loro accuratezza dentro
+  la compensazione, e aggiunge le posizioni GNSS delle foto con un bias per volo (`--gnss bias`) e
+  il rolling shutter dei droni (`--rolling-shutter`).
 * **Da Metashape e WebODM**: le barre di scala di un progetto Metashape arrivano con l'import
   (distanza, accuratezza, barre di check). WebODM non ha barre di scala, ma i suoi task ora portano
   le pose delle camere e i GCP come marker misurati nelle foto, così si possono tracciare barre tra

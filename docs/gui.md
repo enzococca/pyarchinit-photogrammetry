@@ -412,7 +412,14 @@ are several), whether it is a check bar, and whether to update the scale at once
   control points, the markers at the ends of the bars are fixed where the bars get their lengths
   (each moved as little as its precision in the photos allows, `MARKER_PIXEL_ACCURACY` 0.5 px) and
   the block bends towards them as far as the tie points allow; a single bar only gives the scale.
-  The log reports the bar errors before and after.
+  The log reports the bar errors before and after. With the engine *Proprio* the bars are distances
+  between their markers inside the adjustment itself, the control points are pulled to their
+  coordinates by their accuracy instead of being fixed, the GNSS positions of the photos can take
+  part (with a bias per flight estimated with the block: an RTK base on a wrong point, an antenna
+  offset) and so can the rolling shutter of drones (a velocity of every photo while its sensor is
+  read). Over flat ground with nadir photos only, a vertical bias trades off with the focal length:
+  GCPs or oblique photos are needed. The log reports the bias of every flight and the median
+  velocity.
 * Projects imported from Metashape bring their scale bars (distance, accuracy, check bars); WebODM
   tasks bring the camera poses and their GCPs as markers, so bars can be drawn between them.
 * *Strumenti > Target > Barra di scala stampabile...*: one page per bar with two coded targets at a

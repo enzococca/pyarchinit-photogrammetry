@@ -2479,7 +2479,13 @@ class MainWindow(QMainWindow):
             Field("markers", tr("Usa punti di controllo e barre di scala nell'ottimizzazione ({0} GCP, {1} barre)",
                                 len(controls), len(bars)), len(controls) >= 3 or len(bars) >= 2),
             Field("weight", "Peso di una misura di marker (in osservazioni di punti di legame)", 4, minimum=1, maximum=50),
-            Field("pp", "Ottimizza anche il punto principale (cx, cy)", False)],
+            Field("pp", "Ottimizza anche il punto principale (cx, cy)", False),
+            Field("engine", "Motore", "colmap", choices=[
+                ("colmap", "COLMAP"),
+                ("ppg", "Proprio: GCP secondo la loro accuratezza, barre come distanze, GNSS, rolling shutter")]),
+            Field("gnss", "Posizioni GNSS delle foto (motore proprio)", "off", choices=[
+                ("off", "non usate"), ("plain", "usate con la loro accuratezza"), ("bias", "usate, con un bias per volo")]),
+            Field("rolling", "Rolling shutter: la camera si muove mentre legge l'immagine (motore proprio)", False)],
             intro=tr("Bundle adjustment globale di posizioni, orientamenti e calibrazione. Con 3 o piu' punti di "
                      "controllo i GCP entrano nel calcolo come punti fissi alle loro coordinate: il blocco si piega "
                      "per passarci (corregge anche deformazioni come la cupola di una distorsione sbagliata, non "
@@ -2487,14 +2493,22 @@ class MainWindow(QMainWindow):
                      "barre di scala (due o piu', oppure insieme ai GCP) entrano come in Metashape: i marker alle "
                      "loro estremita' vengono fissati dove le barre hanno la loro lunghezza, spostati quanto "
                      "permette la loro precisione nelle foto, e il blocco si piega verso di loro quanto le foto lo "
-                     "consentono. Una sola barra da' soltanto la scala. Le barre di check misurano il risultato.",
+                     "consentono. Una sola barra da' soltanto la scala. Le barre di check misurano il risultato.\n\n"
+                     "Il motore proprio non fissa i GCP: li avvicina alle coordinate secondo la loro accuratezza, "
+                     "tiene le barre come distanze tra i marker, puo' usare le posizioni GNSS delle foto stimando "
+                     "un bias per volo (base RTK su un punto sbagliato, offset dell'antenna) e la velocita' di ogni "
+                     "foto durante la lettura del sensore (rolling shutter dei droni). Su terreno piatto con sole "
+                     "foto nadirali il bias verticale si confonde con la focale: servono GCP o foto oblique.",
                      len(checks)))
         if not v:
             return
 
         def job(p):
+            own = v.get("engine", "colmap") == "ppg"
             err = ch.optimize_cameras(fit_principal_point=v["pp"], use_markers=v["markers"],
-                                      marker_weight=int(v["weight"]), progress=p)
+                                      marker_weight=int(v["weight"]), progress=p, engine="ppg" if own else "colmap",
+                                      gnss=v.get("gnss", "off") if own else "off",
+                                      rolling_shutter=bool(v.get("rolling")) and own)
             if any(m.reference.location for m in ch.markers) or ch.scalebars:
                 self.last_report = ch.update_transform()
             return err
@@ -2517,6 +2531,10 @@ class MainWindow(QMainWindow):
                             rep['scale_bars'], mm(b.get('scalebar_control')), mm(a.get('scalebar_control'))) + (
                              tr(", barre check {0} -> {1}", mm(b.get('scalebar_check')), mm(a.get('scalebar_check')))
                              if a.get("scalebar_check") is not None else ""))
+            for flight, bias in (rep.get("gnss_bias") or {}).items():
+                text += tr("; bias GNSS del volo {0}: {1}", flight, " ".join(mm(x) for x in bias))
+            if rep.get("rolling_shutter_m"):
+                text += tr("; rolling shutter: {0} per immagine (mediana)", mm(rep["rolling_shutter_m"]["median"]))
             self.log_pane.info(tr("Ottimizzazione camere: ") + text)
             self.statusBar().showMessage(text, 15000)
 

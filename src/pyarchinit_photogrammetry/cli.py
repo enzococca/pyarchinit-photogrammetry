@@ -466,11 +466,17 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
                                                                    "bars (2 or more, or with control points) take part "
                                                                    "in the adjustment; check points and bars are reported"),
              marker_weight: int = typer.Option(4, help="a marker measurement counts as this many tie point observations"),
-             principal_point: bool = False, chunk: Optional[str] = None):
+             principal_point: bool = False,
+             engine: str = typer.Option("colmap", help="colmap, or ppg: our own adjustment (control points by their "
+                                                       "accuracy, bars as distances, GNSS, rolling shutter)"),
+             gnss: str = typer.Option("off", help="with --engine ppg: off, plain (the GNSS positions of the photos) or "
+                                                  "bias (with a bias per flight)"),
+             rolling_shutter: bool = typer.Option(False, help="with --engine ppg: a velocity per photo while it is read"),
+             chunk: Optional[str] = None):
     """Optimize the cameras (global bundle adjustment), on the control points and scale bars when there are any."""
     doc, ch = _open(project, chunk)
     err = ch.optimize_cameras(fit_principal_point=principal_point, use_markers=markers, marker_weight=marker_weight,
-                              progress=print_progress)
+                              progress=print_progress, engine=engine, gnss=gnss, rolling_shutter=rolling_shutter)
     if any(m.reference.location for m in ch.markers) or ch.scalebars:
         ch.update_transform()
     doc.save()
@@ -484,6 +490,10 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
         text += (f", {rep['scale_bars']} scale bars: RMSE {b['scalebar_control']} -> {a['scalebar_control']} m"
                  + (f", check bars {b['scalebar_check']} -> {a['scalebar_check']} m"
                     if a.get("scalebar_check") is not None else ""))
+    for flight, bias in (rep.get("gnss_bias") or {}).items():
+        text += f", GNSS bias of flight {flight}: " + " ".join(f"{v:+.3f}" for v in bias) + " m"
+    if rep.get("rolling_shutter_m"):
+        text += f", rolling shutter: median {rep['rolling_shutter_m']['median']:.3f} m per frame"
     typer.echo(text)
 
 

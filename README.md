@@ -347,6 +347,10 @@ Command line: `ppg patch PROJECT --bbox ... --suggest` lists the photos of an ar
   control points) *Ottimizza camere* fixes the markers at the ends of the bars where the bars
   get their lengths, each moved as little as its precision in the photos allows, and the block
   bends towards them as far as the photos allow; the bar errors before and after are reported.
+  The own adjustment engine (`ppg optimize --engine ppg`, *Motore: Proprio*) keeps the bars as
+  distances and the control points by their accuracy inside the adjustment, and adds the GNSS
+  positions of the photos with a bias per flight (`--gnss bias`) and the rolling shutter of drones
+  (`--rolling-shutter`).
 * **From Metashape and WebODM**: the scale bars of a Metashape project come with the import
   (distance, accuracy, check bars). WebODM has no scale bars, but its tasks now bring the camera
   poses and the GCPs as markers measured in the photos, so bars can be drawn between them.

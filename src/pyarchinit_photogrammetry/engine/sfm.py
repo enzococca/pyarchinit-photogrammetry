@@ -724,8 +724,67 @@ def bar_anchors(chunk: Chunk, bars, fixed: dict | None = None) -> dict:
     return {k: x[3 * idx[k]:3 * idx[k] + 3] for k in keys}
 
 
+def _marker_report(chunk: Chunk) -> dict:
+    """RMSE of the control and check points and of the control and check scale bars (None: none)."""
+    from ..markers import gcp
+
+    out = {}
+    rows = gcp.marker_errors(chunk)
+    bar_rows = [r for r in gcp.scalebar_errors(chunk) if r["enabled"]]
+    for kind in ("control", "check"):
+        e = [r["error"] for r in rows if r["type"] == kind and r["error"] is not None]
+        out[kind] = float(np.sqrt(np.mean(np.square(e)))) if e else None
+        e = [r["error"] for r in bar_rows if r["type"] == kind and r["error"] is not None]
+        out[f"scalebar_{kind}"] = float(np.sqrt(np.mean(np.square(e)))) if e else None
+    return out
+
+
+def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gnss: str, rolling_shutter: bool,
+                  progress: Progress) -> float:
+    """:func:`optimize_cameras` with our own adjustment (:mod:`.bundle`): control points weighted by
+    their accuracy, scale bars as distances, GNSS positions of the photos (with a bias per flight),
+    rolling shutter."""
+    from ..markers import gcp
+    from . import bundle
+
+    rec = load_reconstruction(chunk)
+    drop_missing_points(rec)
+    controls = [m for m in chunk.markers if not m.checkpoint and m.reference.enabled and m.reference.location]
+    bars = gcp.control_scalebars(chunk) if use_markers else []
+    referenced = (use_markers and (len(controls) >= 3 or bars)) or gnss != "off"
+    if referenced:
+        gcp.update_transform(chunk)  # references, bars and GNSS positions in the internal frame
+    before = _marker_report(chunk) if use_markers else {}
+    pb, ids = bundle.problem_from_chunk(chunk, rec, use_markers=use_markers, gnss=gnss,
+                                        rolling_shutter=rolling_shutter, fit_principal_point=fit_principal_point)
+    res = bundle.adjust(pb, max_iterations=200, progress=progress.sub(0.05, 0.85))
+    bundle.write_back(chunk, rec, ids, res)
+    rec.update_point_3d_errors()
+    rec.write(str(chunk.product_path("reconstruction")))
+    import_reconstruction(chunk, rec)
+    for n, key in enumerate(ids["markers"]):  # the adjusted marker positions, not a new triangulation
+        chunk.marker_by_key(key).position = np.asarray(res.markers[n], float)
+    if referenced:
+        gcp.update_transform(chunk)
+    err = float(rec.compute_mean_reprojection_error())
+    lin = chunk.transform[:3, :3] if chunk.transform is not None else np.eye(3)
+    report = {"engine": "ppg", "reprojection_error": err, "iterations": res.iterations, "converged": res.success,
+              "control_points": len(pb.gcps), "scale_bars": len(pb.bars), "gnss_positions": len(pb.gnss),
+              "gnss_bias": {str(f): [float(v) for v in lin @ b] for f, b in res.bias.items()}}
+    if res.rolling_shutter is not None:
+        speed = np.linalg.norm(lin @ res.rolling_shutter[:, :3].T, axis=0)
+        report["rolling_shutter_m"] = {"median": float(np.median(speed)), "max": float(speed.max())}
+    if use_markers:
+        report.update({"before": before, "after": _marker_report(chunk)})
+    chunk.meta.setdefault("sfm", {})["reprojection_error"] = err
+    chunk.meta["sfm"]["optimize"] = report
+    progress(1.0, f"Mean reprojection error {err:.3f} px")
+    return err
+
+
 def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_markers: bool = True,
-                     marker_weight: int = 4, progress: Progress | None = None) -> float:
+                     marker_weight: int = 4, progress: Progress | None = None, engine: str = "colmap",
+                     gnss: str = "off", rolling_shutter: bool = False) -> float:
     """Global bundle adjustment of poses, calibration and tie points.
 
     With ``use_markers`` the control points and the control scale bars take part in it, as in
@@ -738,12 +797,21 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     bends towards the lengths (a single bar only gives the scale, set by the georeference). The
     constrained adjustment needs three fixed points or more, not on a line. The report
     (reprojection error, control/check point and bar errors before and after) goes into
-    ``chunk.meta["sfm"]["optimize"]``. Returns the mean reprojection error in pixels."""
+    ``chunk.meta["sfm"]["optimize"]``. Returns the mean reprojection error in pixels.
+
+    ``engine="ppg"``: our own adjustment (:mod:`.bundle`) instead of COLMAP's, with the control
+    points pulled to their coordinates by their accuracy, the bars as distances between their
+    markers, the GNSS positions of the photos (``gnss`` "plain", or "bias" with a bias per
+    flight) and the ``rolling_shutter`` of the camera (a velocity per photo)."""
     import pycolmap
 
     from ..markers import gcp
 
     progress = as_progress(progress)
+    if engine == "ppg":
+        return _optimize_own(chunk, fit_principal_point, use_markers, gnss, rolling_shutter, progress)
+    if engine != "colmap":
+        raise ValueError(f"unknown adjustment engine {engine!r}: colmap or ppg")
     rec = load_reconstruction(chunk)
     drop_missing_points(rec)  # models written from imported poses by earlier versions
 

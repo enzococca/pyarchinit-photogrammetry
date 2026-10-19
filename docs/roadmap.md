@@ -134,6 +134,11 @@ markers in too few photos.
   the two-view maps also put points beyond the edges of the surface).
 * Own bundle adjustment in the native core: true distance constraints for scale bars,
   rolling-shutter compensation for drones, GNSS bias (pycolmap does not accept custom costs).
+  *Done* in Python (`engine.bundle`: scipy sparse least squares with the Jacobian grouped by the
+  structure of the problem; `optimize_cameras(engine="ppg")`, `ppg optimize --engine ppg`): on
+  synthetic blocks it recovers poses and calibration, the scale from two bars, a GNSS bias within
+  2 cm, and brings a rolling-shutter block from 1.75 px to 0.002 px; the trench keeps its
+  thresholds. Moving it to the native core is left for when blocks get too large for it.
 * Multi-page texture atlases, I3S.
 
 ## Not planned

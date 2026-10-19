@@ -272,16 +272,19 @@ class Chunk:
         return n
 
     def optimize_cameras(self, fit_principal_point: bool = False, use_markers: bool = True, marker_weight: int = 4,
-                         progress: ProgressCallback | None = None) -> float:
+                         progress: ProgressCallback | None = None, engine: str = "colmap", gnss: str = "off",
+                         rolling_shutter: bool = False) -> float:
         """Global bundle adjustment; with 3 or more control points, or 2 or more control scale
         bars, they are part of it (the block bends to fit them; see
-        :func:`engine.sfm.optimize_cameras`). Returns the mean reprojection error in pixels; the
-        control/check point and scale bar report is in ``meta["sfm"]["optimize"]``."""
+        :func:`engine.sfm.optimize_cameras`; ``engine="ppg"``: our own adjustment, with the GNSS
+        positions of the photos and the rolling shutter). Returns the mean reprojection error in
+        pixels; the control/check point and scale bar report is in ``meta["sfm"]["optimize"]``."""
         from ..engine import sfm
 
         err = sfm.optimize_cameras(self, fit_principal_point=fit_principal_point, use_markers=use_markers,
-                                   marker_weight=marker_weight, progress=as_progress(progress))
-        if any(m.projections for m in self.markers):
+                                   marker_weight=marker_weight, progress=as_progress(progress), engine=engine,
+                                   gnss=gnss, rolling_shutter=rolling_shutter)
+        if any(m.projections for m in self.markers) and engine != "ppg":  # ours adjusts them with the block
             self.triangulate_markers()
         self.forget_precision()
         return err
