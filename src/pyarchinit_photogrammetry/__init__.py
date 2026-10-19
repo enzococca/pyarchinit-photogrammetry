@@ -32,7 +32,7 @@ from .core import (ARCHAEO_CLASSES, ASPRS_CLASSES, Camera, Chunk, Document, Mark
 from .core.progress import Cancelled, Progress, print_progress
 from . import demo  # noqa: E402  (ppg.demo.create_demo)
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 __all__ = ["app", "Document", "Chunk", "Camera", "Sensor", "Marker", "Projection", "Reference", "ScaleBar",
            "PointCloud", "ASPRS_CLASSES", "ARCHAEO_CLASSES", "Progress", "Cancelled", "print_progress", "__version__"]
