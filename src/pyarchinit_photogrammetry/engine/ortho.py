@@ -2,8 +2,16 @@
 
 Every ground cell is lifted to the surface (the DEM, or the mesh with vertical rays), projected
 into the photos, and coloured from the best photo that really sees it (occlusion test against
-the mesh when one exists): ``mosaic`` keeps one photo per cell (sharp, like a true orthophoto),
-``average`` blends the valid photos.
+the mesh when one exists). Blending (``BLENDINGS``):
+
+* ``mosaic`` (default): the details of every cell come from its best photo, as in a true
+  orthophoto, while the low frequencies are blended across the seams between photos over a few
+  ``blend_sigma`` cells: different exposures leave no visible edge, nothing is blurred;
+* ``disabled``: one photo per cell, nothing blended (the seams show where exposures differ);
+* ``average``: every photo that sees a cell, weighted by how well it sees it (soft).
+
+With a colour correction (:mod:`.colour`: exposure gains of the photos, vignetting of the lenses)
+the photos are corrected as they are read.
 
 The orthomosaic is made tile by tile and every tile is written at once, so its size is limited
 by the disk, not by the memory (45,000 x 46,000 px for a tell at 1.35 cm/px): the surface is read
@@ -29,6 +37,35 @@ from ..core.chunk import Chunk
 from ..core.progress import Progress
 from .dem import NODATA, ensure_level, estimate_gsd
 from .visibility import project_valid, raycaster_for_chunk, read_photo, readable_cameras, sample
+
+
+BLENDINGS = ("mosaic", "disabled", "average")
+BLEND_SIGMA = 8.0  # cells: width of the transition between two photos (Gaussian sigma) in "mosaic"
+
+
+def correction_for(chunk: Chunk, enabled: bool | None = None, progress: Progress | None = None):
+    """The colour correction to apply (:class:`.colour.Correction`), or None. ``enabled``: None =
+    the one measured in the chunk, if any; True = that one, measured now when missing; False = none."""
+    from .colour import Correction, estimate
+
+    if enabled is False:
+        return None
+    if not chunk.meta.get("colour"):
+        if not enabled:
+            return None
+        estimate(chunk, progress=progress)
+    corr = Correction(chunk)
+    return corr if corr else None
+
+
+def stored_blending(meta: dict | None) -> tuple[str, float]:
+    """Blending and its width an orthomosaic was built with (from its ``chunk.meta`` entry):
+    files made before the seamless mosaic (no ``blend_sigma``) were one photo per cell."""
+    meta = meta or {}
+    blending = meta.get("blending", "mosaic")
+    if blending == "mosaic" and "blend_sigma" not in meta:
+        return "disabled", 0.0
+    return blending, float(meta.get("blend_sigma", BLEND_SIGMA))
 
 
 # ---------------------------------------------------------------- the surface under the cells
@@ -264,10 +301,12 @@ class _Footprints:
 
 
 class _PhotoCache:
-    """Decoded photos shared by the tile workers (least recently used ones dropped)."""
+    """Decoded photos shared by the tile workers (least recently used ones dropped), with the
+    colour correction applied (:class:`.colour.Correction`) when there is one."""
 
-    def __init__(self, max_items: int):
+    def __init__(self, max_items: int, correction=None):
         self.max_items = max_items
+        self.correction = correction or None
         self._items: OrderedDict[int, np.ndarray] = OrderedDict()
         self._lock = threading.Lock()
 
@@ -277,7 +316,9 @@ class _PhotoCache:
             if img is not None:
                 self._items.move_to_end(cam.key)
                 return img
-        img = read_photo(cam)  # decoded outside the lock: several photos at once
+        img = read_photo(cam)  # decoded (and corrected) outside the lock: several photos at once
+        if self.correction is not None:
+            img = self.correction.correct(cam, img)
         with self._lock:
             self._items[cam.key] = img
             self._items.move_to_end(cam.key)
@@ -337,14 +378,29 @@ def hidden_cells(chunk: Chunk, origin, shape, resolution: float, hide_classes) -
 
 # ---------------------------------------------------------------- one tile
 def _scores(chunk: Chunk, cam, pts, centres, up_int, min_cos: float = 0.0):
-    """Pixels and score (frontal, central, fine) of points in a photo; -inf where not seen, or
-    seen from further than the vertical than the angle whose cosine is ``min_cos``."""
+    """Pixels and score (frontal, central, fine) of points in a photo; -inf where not seen, where
+    its mask hides them, or seen from further than the vertical than the angle whose cosine is
+    ``min_cos``."""
+    from .masks import hidden_by_mask, mask_path
+
     sensor = chunk.sensor(cam)
     if _native.supports(sensor.model):
-        return _native.kernel("ortho_scores")(np.ascontiguousarray(pts, np.float64), cam.cam_from_world, sensor.model,
-                                              [float(v) for v in sensor.params], float(sensor.width),
-                                              float(sensor.height), [float(v) for v in centres[cam.key]],
-                                              [float(v) for v in up_int], float(min_cos))
+        px, score = _native.kernel("ortho_scores")(np.ascontiguousarray(pts, np.float64), cam.cam_from_world,
+                                                   sensor.model, [float(v) for v in sensor.params],
+                                                   float(sensor.width), float(sensor.height),
+                                                   [float(v) for v in centres[cam.key]], [float(v) for v in up_int],
+                                                   float(min_cos))
+        if mask_path(chunk, cam) is not None:
+            score[hidden_by_mask(chunk, cam, px)] = -np.inf
+        return px, score
+    px, score = _scores_numpy(chunk, cam, pts, centres, up_int, min_cos)
+    if mask_path(chunk, cam) is not None:
+        score[hidden_by_mask(chunk, cam, px)] = -np.inf
+    return px, score
+
+
+def _scores_numpy(chunk: Chunk, cam, pts, centres, up_int, min_cos: float = 0.0):
+    sensor = chunk.sensor(cam)
     px, depth, ok = project_valid(chunk, cam, pts)
     score = np.full(len(pts), -np.inf, np.float32)
     if ok.any():
@@ -389,17 +445,70 @@ def _rank(ctx, probe, near) -> list:
     return tcams
 
 
+CANDIDATES = 4  # photos tried for a cell, best first, before its best one is taken anyway (occlusions)
+GHOST_TOLERANCE = 30.0  # colour levels: a photo further than this from the others shows something that moved
+HOLE_CELLS = 100  # holes of at most this many cells are filled from their edges (fill_holes)
+
+
 def _colour(ctx, pts, near, want_choice: bool = False, colours: bool = True):
     """Colours ``(n, 3)`` (BGR) of surface points ``pts`` (internal frame) from the photos
     ``near``, and which points got one; with ``want_choice`` also the key of the photo of every
     point (-1 for none). ``colours=False`` only chooses the photos (none is read)."""
-    return _paint(ctx, pts, _rank(ctx, _probe(pts), near), want_choice, colours)
+    return _paint(ctx, pts, _rank(ctx, _probe(pts), near) if ctx.blending == "average" else near, want_choice,
+                  colours)
 
 
-def _paint(ctx, pts, tcams, want_choice: bool = False, colours: bool = True):
+def _candidates(ctx, pts, cams, k: int = CANDIDATES):
+    """The ``k`` best of ``cams`` for every point, each point on its own (so its photo never
+    depends on the tile around it): indices into ``cams`` (k, n; -1 for none), scores (float32,
+    best first, an equal score behind the earlier photo) and pixels (k, n, 2, float32)."""
+    from .masks import hidden_by_mask, mask_path
+
+    n = len(pts)
+    sensors = [ctx.chunk.sensor(c) for c in cams]
+    native = _native.kernel("ortho_candidates")
+    if native is not None and cams and all(_native.supports(s.model) for s in sensors):
+        masked = [j for j, c in enumerate(cams) if mask_path(ctx.chunk, c) is not None]
+        extra = 2 if masked else 0  # some candidates may be masked: a few more to fall back on
+        idx, sc, px = native(np.ascontiguousarray(pts, np.float64), np.stack([c.cam_from_world[:3] for c in cams]),
+                             [s.model for s in sensors], [[float(v) for v in s.params] for s in sensors],
+                             [(float(s.width), float(s.height)) for s in sensors],
+                             np.array([ctx.centres[c.key] for c in cams], np.float64), [float(v) for v in ctx.up_int],
+                             float(ctx.min_cos), k + extra)
+        if masked:
+            for j in masked:
+                r, c = np.nonzero(idx == j)
+                if len(r):
+                    hide = hidden_by_mask(ctx.chunk, cams[j], px[r, c].astype(np.float64))
+                    idx[r[hide], c[hide]], sc[r[hide], c[hide]] = -1, -np.inf
+            order = np.argsort(-sc, axis=0, kind="stable")[:k]
+            idx, sc = np.take_along_axis(idx, order, 0), np.take_along_axis(sc, order, 0)
+            px = np.take_along_axis(px, order[..., None], 0)
+        return idx, sc, px
+    idx = np.full((k, n), -1, np.int32)
+    sc = np.full((k, n), -np.inf, np.float32)
+    px = np.full((k, n, 2), np.nan, np.float32)
+    for j, cam in enumerate(cams):
+        p, s = _scores(ctx.chunk, cam, pts, ctx.centres, ctx.up_int, ctx.min_cos)
+        s = s.astype(np.float32)
+        cols = np.nonzero(s > sc[k - 1])[0]  # enters the best k
+        if not len(cols):
+            continue
+        all_s = np.vstack([sc[:, cols], s[None, cols]])
+        all_i = np.vstack([idx[:, cols], np.full((1, len(cols)), j, np.int32)])
+        all_p = np.concatenate([px[:, cols], p[None, cols].astype(np.float32)], axis=0)
+        order = np.argsort(-all_s, axis=0, kind="stable")[:k]  # the new photo last: behind equal scores
+        sc[:, cols] = np.take_along_axis(all_s, order, 0)
+        idx[:, cols] = np.take_along_axis(all_i, order, 0)
+        px[:, cols] = np.take_along_axis(all_p, order[..., None], 0)
+    return idx, sc, px
+
+
+def _paint(ctx, pts, tcams, want_choice: bool = False, colours: bool = True, info: dict | None = None):
     """Like :func:`_colour`, from the photos ``tcams`` already chosen for the tile: every point
     takes its colour from the best of them that sees it (whatever other points are painted
-    with it, so a part of a tile comes out as in the whole tile)."""
+    with it, so a part of a tile comes out as in the whole tile). ``info["fallback"]``: the
+    points that no candidate photo sees, painted from the best one anyway."""
     chunk = ctx.chunk
     n = len(pts)
     colors = np.zeros((n, 3), np.float64)
@@ -407,14 +516,6 @@ def _paint(ctx, pts, tcams, want_choice: bool = False, colours: bool = True):
     keys = np.full(n, -1)
     if not tcams or not n:
         return (colors, got, keys) if want_choice else (colors, got)
-    scores = np.full((len(tcams), n), -np.inf, np.float32)
-    pix = np.full((len(tcams), n, 2), np.nan, np.float32)
-    for k, cam in enumerate(tcams):
-        px, s = _scores(chunk, cam, pts, ctx.centres, ctx.up_int, ctx.min_cos)
-        scores[k] = s
-        ok = np.isfinite(s)
-        pix[k, ok] = px[ok]
-    order = np.argsort(-scores, axis=0)
     chosen = np.full(n, -1)
 
     occlusion = ctx.raycaster is not None and getattr(ctx, "occlusion", True)
@@ -424,6 +525,14 @@ def _paint(ctx, pts, tcams, want_choice: bool = False, colours: bool = True):
             return ctx.raycaster.visible_from(ctx.centres[cam.key], pts[sel], abs_tol=ctx.abs_tol)
 
     if ctx.blending == "average":
+        scores = np.full((len(tcams), n), -np.inf, np.float32)
+        pix = np.full((len(tcams), n, 2), np.nan, np.float32)
+        for k, cam in enumerate(tcams):
+            px, s = _scores(chunk, cam, pts, ctx.centres, ctx.up_int, ctx.min_cos)
+            scores[k] = s
+            ok = np.isfinite(s)
+            pix[k, ok] = px[ok]
+        order = np.argsort(-scores, axis=0)
         weight = np.zeros(n, np.float64)
         for k, cam in enumerate(tcams):
             ok = np.isfinite(scores[k])
@@ -438,13 +547,17 @@ def _paint(ctx, pts, tcams, want_choice: bool = False, colours: bool = True):
         got = weight > 0
         colors[got] /= weight[got, None]
         chosen[got] = order[0, got]
+    elif getattr(ctx, "ghosting", False):
+        return _paint_ghost_free(ctx, pts, tcams, colors, chosen, keys, want_choice, colours, info, occlusion, visible)
     else:
+        cand_i, _cand_s, cand_px = _candidates(ctx, pts, tcams)
+        rank_of = np.full(n, -1)
         pending = np.arange(n)
-        for rank in range(min(4, len(tcams))):
+        for rank in range(min(cand_i.shape[0], len(tcams))):
             if len(pending) == 0:
                 break
-            cand = order[rank, pending]
-            ok = np.isfinite(scores[cand, pending])
+            cand = cand_i[rank, pending]
+            ok = cand >= 0
             pending, cand = pending[ok], cand[ok]
             still = []
             for k in np.unique(cand):
@@ -453,19 +566,100 @@ def _paint(ctx, pts, tcams, want_choice: bool = False, colours: bool = True):
                     vis = visible(tcams[k], sel)
                     still.append(sel[~vis])
                     sel = sel[vis]
-                chosen[sel] = k
+                rank_of[sel] = rank
             pending = np.concatenate(still) if still else np.zeros(0, int)
         # cells hidden in every candidate photo (steep faces): take the best photo anyway
-        fallback = (chosen < 0) & np.isfinite(scores.max(axis=0))
-        chosen[fallback] = order[0, fallback]
-        for k in np.unique(chosen[chosen >= 0]) if colours else ():
-            sel = np.nonzero(chosen == k)[0]
-            colors[sel] = sample(ctx.cache.get(tcams[k]), pix[k, sel])
-        got = chosen >= 0
+        fallback = (rank_of < 0) & (cand_i[0] >= 0)
+        rank_of[fallback] = 0
+        if info is not None:
+            info["fallback"] = fallback
+        got = rank_of >= 0
+        cells = np.nonzero(got)[0]
+        chosen[cells] = cand_i[rank_of[cells], cells]
+        if colours and len(cells):
+            px_of = cand_px[rank_of[cells], cells]
+            for k in np.unique(chosen[cells]):
+                mine = chosen[cells] == k
+                colors[cells[mine]] = sample(ctx.cache.get(tcams[k]), px_of[mine])
     if want_choice:
         keys[got] = np.array([tcams[k].key for k in chosen[got]], dtype=keys.dtype) if got.any() else keys[got]
         return colors, got, keys
     return colors, got
+
+
+def _paint_ghost_free(ctx, pts, tcams, colors, chosen, keys, want_choice, colours, info, occlusion, visible):
+    """:func:`_paint` with the ghosting filter: every candidate photo that sees a cell gives its
+    colour; where three or more see it, the best one that agrees with their median colour (within
+    ``GHOST_TOLERANCE``) is taken, so a person or a vehicle seen by a few photos only is left out."""
+    n = len(pts)
+    cand_i, _cand_s, cand_px = _candidates(ctx, pts, tcams)
+    k_n = cand_i.shape[0]
+    vis = np.zeros((k_n, n), bool)
+    col = np.full((k_n, n, 3), np.nan)
+    for rank in range(k_n):
+        cand = cand_i[rank]
+        for k in np.unique(cand[cand >= 0]):
+            sel = np.nonzero(cand == k)[0]
+            if occlusion:
+                sel = sel[visible(tcams[k], sel)]
+            vis[rank, sel] = True
+            col[rank, sel] = sample(ctx.cache.get(tcams[k]), cand_px[rank, sel])
+    seen_by = vis.sum(axis=0)
+    some = seen_by > 0  # the median only where a photo sees the cell (no all-NaN slices)
+    med = np.full((n, 3), np.nan)
+    if some.any():
+        med[some] = np.nanmedian(np.where(vis[:, some, None], col[:, some], np.nan), axis=0)
+    with np.errstate(invalid="ignore"):
+        agree = vis & (np.abs(col - med[None]).max(axis=2) <= GHOST_TOLERANCE)
+    first_vis = np.where(vis.any(axis=0), vis.argmax(axis=0), -1)
+    first_agree = np.where(agree.any(axis=0), agree.argmax(axis=0), -1)
+    rank_of = np.where((seen_by >= 3) & (first_agree >= 0), first_agree, first_vis)
+    fallback = (rank_of < 0) & (cand_i[0] >= 0)
+    rank_of[fallback] = 0
+    if info is not None:
+        info["fallback"] = fallback
+    got = rank_of >= 0
+    cells = np.nonzero(got)[0]
+    chosen[cells] = cand_i[rank_of[cells], cells]
+    if colours and len(cells):
+        picked = col[rank_of[cells], cells]
+        need = np.isnan(picked).any(axis=1)  # the fallback: a photo that does not see the cell
+        picked[need] = 0.0
+        colors[cells] = picked
+        if need.any():
+            fb = cells[need]
+            for k in np.unique(chosen[fb]):
+                mine = fb[chosen[fb] == k]
+                colors[mine] = sample(ctx.cache.get(tcams[k]), cand_px[0, mine])
+    if want_choice:
+        keys[got] = np.array([tcams[k].key for k in chosen[got]], dtype=keys.dtype) if got.any() else keys[got]
+        return colors, got, keys
+    return colors, got
+
+
+def _fill_holes(rgb: np.ndarray, painted: np.ndarray, surface: np.ndarray, group: np.ndarray) -> np.ndarray:
+    """Cells of the surface no photo painted, in holes of at most ``HOLE_CELLS`` cells, filled from
+    the cells around them of the same group (a patch, or the rest): ``rgb`` (h, w, 3) float, the
+    cells filled set in ``painted``. Larger holes stay empty."""
+    import cv2
+
+    holes = surface & ~painted
+    if not holes.any():
+        return np.zeros_like(painted)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(holes.astype(np.uint8), connectivity=4)
+    small = np.zeros(count, bool)
+    small[1:] = stats[1:, cv2.CC_STAT_AREA] <= HOLE_CELLS
+    small &= ~np.isin(np.arange(count), np.unique(labels[[0, -1], :]).tolist() + np.unique(labels[:, [0, -1]]).tolist())
+    fill = small[labels] & holes  # holes touching the edge of the window may continue outside it
+    filled = np.zeros_like(painted)
+    img = np.clip(rgb, 0, 255).astype(np.uint8)
+    for g in np.unique(group[fill]):
+        target = fill & (group == g)
+        unknown = target | (group != g) | ~painted  # only the painted cells of the same group are known
+        out = cv2.inpaint(img, unknown.astype(np.uint8), 3, cv2.INPAINT_TELEA)
+        rgb[target] = out[target]
+        filled |= target
+    return filled
 
 
 def _patch_owner(ctx, box, X, Y) -> np.ndarray:
@@ -518,45 +712,79 @@ def _tile(ctx, r0: int, c0: int):
     """RGBA of one tile (4, th, tw), or None when the surface is empty there. When updating
     patches (``ctx.redo``: the polygons that changed) only the cells inside them are made:
     the result is then ``(rgba, done, from_base)``, the cells made and the cells that take
-    the pixels of the unpatched orthomosaic of another program (``ctx.base``)."""
+    the pixels of the unpatched orthomosaic of another program (``ctx.base``). With the
+    seamless mosaic the cells within ``ctx.margin`` around the tile are made too (not
+    written): the blending of the cells near its edge looks at them."""
     res = ctx.resolution
     th, tw = min(ctx.tile, ctx.shape[0] - r0), min(ctx.tile, ctx.shape[1] - c0)
     box = (ctx.origin[0] + c0 * res, ctx.origin[1] - (r0 + th) * res,
            ctx.origin[0] + (c0 + tw) * res, ctx.origin[1] - r0 * res)
+    m = ctx.margin
+    er0, ec0, eh, ew = r0 - m, c0 - m, th + 2 * m, tw + 2 * m
+    ebox = (box[0] - m * res, box[1] - m * res, box[2] + m * res, box[3] + m * res)
+    core = (slice(m, m + th), slice(m, m + tw))
     redo = getattr(ctx, "redo", None)
-    zz = ctx.surface.tile(r0, c0, th, tw)
-    _ground_patches(ctx, box, r0, c0, zz)
+    zz = ctx.surface.tile(er0, ec0, eh, ew)
+    _ground_patches(ctx, ebox, er0, ec0, zz)
     valid = np.isfinite(zz)
     todo = None
     if redo is not None:  # only the cells of the patches that changed
-        rows, cols = np.mgrid[0:th, 0:tw]
-        todo = _in_any(redo, box, ctx.origin[0] + (c0 + cols.ravel() + 0.5) * res,
-                       ctx.origin[1] - (r0 + rows.ravel() + 0.5) * res).reshape(th, tw)
-        if not todo.any():
+        rows, cols = np.mgrid[0:eh, 0:ew]
+        todo = _in_any(redo, ebox, ctx.origin[0] + (ec0 + cols.ravel() + 0.5) * res,
+                       ctx.origin[1] - (er0 + rows.ravel() + 0.5) * res).reshape(eh, ew)
+        if not todo[core].any():
             return None
-        if not (valid & todo).any():
-            from_base = todo if ctx.base is not None else np.zeros_like(todo)
-            return np.zeros((4, th, tw), np.uint8), todo & ~from_base, from_base
-    if not valid.any():
+        if not (valid & todo)[core].any():
+            t = todo[core]
+            from_base = t if ctx.base is not None else np.zeros_like(t)
+            return np.zeros((4, th, tw), np.uint8), t & ~from_base, from_base
+    if not valid[core].any():
         return None
     rr, cc = np.nonzero(valid)
-    X = ctx.origin[0] + (c0 + cc + 0.5) * res
-    Y = ctx.origin[1] - (r0 + rr + 0.5) * res
-    world = np.column_stack([X, Y, zz[rr, cc]])
+    X = ctx.origin[0] + (ec0 + cc + 0.5) * res
+    Y = ctx.origin[1] - (er0 + rr + 0.5) * res
+    frame = getattr(ctx, "frame", None)  # an elevation: cells on a plane or a cylinder (.elevation)
+    world = np.column_stack([X, Y, zz[rr, cc]]) if frame is None else frame.point(X, Y, zz[rr, cc])
     pts = world @ ctx.inv[:3, :3].T + ctx.inv[:3, 3]
-    # the photos of this tile: those whose footprint meets it, ranked on a sample of all its
-    # cells - with or without patches, and when only some cells are made again
-    near = [ctx.cams[i] for i in ctx.footprints.candidates(box, float(np.median(world[:, 2])))]
-    probe = _probe(pts)
-    tcams = _rank(ctx, probe, near)
-    if todo is not None:  # from here on, the cells to make only
+    in_core = (rr >= m) & (rr < m + th) & (cc >= m) & (cc < m + tw)
+    if frame is not None:  # the photos look at the surface from its viewer side, not from above
+        import copy
+
+        u_mid, v_mid = X[in_core].mean(), Y[in_core].mean()
+        view = ctx.inv[:3, :3] @ frame.view(np.array([u_mid]), np.array([v_mid]))[0]
+        ctx = copy.copy(ctx)
+        ctx.up_int = view / np.linalg.norm(view)
+        near = list(ctx.cams)
+    else:
+        # the photos of this tile: those whose footprint meets it, ranked on a sample of all its
+        # cells - with or without patches, and when only some cells are made again
+        near = [ctx.cams[i] for i in ctx.footprints.candidates(ebox, float(np.median(world[in_core, 2])))]
+    probe = _probe(pts[in_core])
+    average = ctx.blending == "average"
+    tcams = _rank(ctx, probe, near) if average else near  # mosaic: every cell picks among all its photos
+    blend = ctx.blend_sigma > 0
+    if todo is not None and m == 0:  # from here on, the cells to make only (the others matter around a seam)
         keep = todo[rr, cc]
-        rr, cc, X, Y, pts = rr[keep], cc[keep], X[keep], Y[keep], pts[keep]
+        rr, cc, X, Y, pts, in_core = rr[keep], cc[keep], X[keep], Y[keep], pts[keep], in_core[keep]
     n = len(pts)
-    owner = _patch_owner(ctx, box, X, Y) if ctx.patches else np.full(n, -1)
+    owner = _patch_owner(ctx, ebox, X, Y) if ctx.patches else np.full(n, -1)
+    group = owner.copy()  # blending: cells of a patch painted by its photos, the others with the rest
     colors = np.zeros((n, 3), np.float64)
     got = np.zeros(n, bool)
+    keys = np.full(n, -1)
+    seen = np.zeros(n, bool)  # painted from a photo that sees the point (not the fallback)
     base = np.zeros(n, bool)  # cells left to the unpatched orthomosaic of another program
+    cams_by_key = {c.key: c for c in tcams}
+
+    def paint(idx, cams):
+        info = {}
+        c, g, kk = _paint(ctx, pts[idx], cams, want_choice=True, info=info)
+        colors[idx[g]], got[idx[g]], keys[idx[g]] = c[g], True, kk[g]
+        fb = info.get("fallback", np.zeros(len(idx), bool))
+        seen[idx[g & ~fb]] = True
+        cams_by_key.update((c.key, c) for c in cams)
+        return g
+
     for i in np.unique(owner):
         idx = np.nonzero(owner == i)[0]
         if i < 0:
@@ -566,39 +794,177 @@ def _tile(ctx, r0: int, c0: int):
             cams = tcams
         else:
             patch = ctx.patches[i]
-            cams = patch.cams if patch.mode == "assign" else _rank(ctx, probe, patch.photos(near))
-        c, g = _paint(ctx, pts[idx], cams)
-        colors[idx[g]], got[idx[g]] = c[g], True
+            cams = (patch.cams if patch.mode == "assign"
+                    else _rank(ctx, probe, patch.photos(near)) if average else patch.photos(near))
+        g = paint(idx, cams)
         miss = idx[~g]
         if i >= 0 and len(miss) and ctx.patches[i].mode == "assign":  # not seen by its photos: as without it
             if redo is not None and ctx.base is not None:
                 base[miss] = True
             else:
-                c, g = _paint(ctx, pts[miss], tcams)
-                colors[miss[g]], got[miss[g]] = c[g], True
+                paint(miss, tcams)
+                group[miss] = -1
+    if blend and got.any():
+        colors = _blend(ctx, pts, rr, cc, (eh, ew), colors, got, keys, seen, group, tcams, cams_by_key)
+    if getattr(ctx, "fill_holes", False) and got.any() and not got.all():
+        rgb = np.zeros((eh, ew, 3), np.float64)
+        rgb[rr, cc] = colors
+        painted = np.zeros((eh, ew), bool)
+        painted[rr, cc] = got
+        groups = np.full((eh, ew), -2)
+        groups[rr, cc] = group
+        surface = np.zeros((eh, ew), bool)
+        surface[rr, cc] = ~base  # cells of another program's orthomosaic are not ours to fill
+        filled = _fill_holes(rgb, painted, surface, groups)
+        if filled.any():
+            colors = rgb[rr, cc]
+            got = got | filled[rr, cc]
+    sel = got & in_core
     out = np.zeros((4, th, tw), np.uint8)
-    bgr = np.clip(colors[got], 0, 255).astype(np.uint8)
-    out[0, rr[got], cc[got]] = bgr[:, 2]
-    out[1, rr[got], cc[got]] = bgr[:, 1]
-    out[2, rr[got], cc[got]] = bgr[:, 0]
-    out[3, rr[got], cc[got]] = 255
+    bgr = np.clip(colors[sel], 0, 255).astype(np.uint8)
+    r_out, c_out = rr[sel] - m, cc[sel] - m
+    out[0, r_out, c_out] = bgr[:, 2]
+    out[1, r_out, c_out] = bgr[:, 1]
+    out[2, r_out, c_out] = bgr[:, 0]
+    out[3, r_out, c_out] = 255
     if ctx.hidden is not None:
         out[:, ctx.hidden.tile(r0, c0, th, tw)] = 0
     if redo is None:
         return out
+    todo_core, valid_core = todo[core], valid[core]
     from_base = np.zeros((th, tw), bool)
-    from_base[rr[base], cc[base]] = True
+    b = base & in_core
+    from_base[rr[b] - m, cc[b] - m] = True
+    from_base &= todo_core
     if ctx.base is not None:  # cells of a changed patch without surface: the original pixels
-        from_base |= todo & ~valid
-    return out, todo & ~from_base, from_base
+        from_base |= todo_core & ~valid_core
+    return out, todo_core & ~from_base, from_base
+
+
+def _photo_colours(ctx, cam, pts):
+    """Colours (BGR) of ``pts`` in one photo and where the photo sees them, decided as
+    :func:`_paint` decides: the same colour whichever photo a cell takes."""
+    px, s = _scores(ctx.chunk, cam, pts, ctx.centres, ctx.up_int, ctx.min_cos)
+    ok = np.isfinite(s)
+    idx = np.nonzero(ok)[0]
+    if len(idx) and ctx.raycaster is not None and getattr(ctx, "occlusion", True):
+        with ctx.lock:
+            vis = ctx.raycaster.visible_from(ctx.centres[cam.key], pts[idx], abs_tol=ctx.abs_tol)
+        ok[idx[~vis]] = False
+    col = np.zeros((len(pts), 3), np.float64)
+    if ok.any():
+        col[ok] = sample(ctx.cache.get(cam), px[ok].astype(np.float32))
+    return col, ok
+
+
+def _blend(ctx, pts, rr, cc, shape, colors, got, keys, seen, group, tcams, cams_by_key) -> np.ndarray:
+    """Seamless colours of the cells (``rr``, ``cc`` on a grid of ``shape``): two bands. The
+    low band of every photo (its colours smoothed over ``ctx.blend_sigma`` cells where it sees
+    the surface) is averaged with weights that pass from one photo to the next across a seam;
+    the details stay those of the photo of the cell. Away from seams nothing changes.
+
+    ``group``: -1 for the cells outside the patches (and those of a patch its photos do not see),
+    else the patch. The cells of group -1 are weighted by the photos they would take without any
+    patch, those of a patch only by the cells of the same patch: a patch never changes the
+    pixels around it, and taking it away gives them back exactly."""
+    import cv2
+
+    sigma = float(ctx.blend_sigma)
+    ksize = 2 * int(np.ceil(3 * sigma)) + 1
+    h, w = shape
+    flat = rr * w + cc
+    n = len(flat)
+
+    def grid(values):
+        g = np.zeros((h * w,) + values.shape[1:], np.float32)
+        g[flat] = values
+        return g.reshape((h, w) + values.shape[1:])
+
+    def smooth(img):
+        return cv2.GaussianBlur(img, (ksize, ksize), sigma, borderType=cv2.BORDER_CONSTANT)
+
+    base_keys = keys.copy()  # the photo of every cell as if there were no patches
+    patched = (group >= 0) & got
+    if patched.any() and (group < 0).any():
+        idx = np.nonzero(patched)[0]
+        _c, g, kk = _paint(ctx, pts[idx], tcams, want_choice=True, colours=False)
+        base_keys[idx] = np.where(g, kk, -1)
+    out = colors.copy()
+    sampled: dict[int, tuple] = {}  # photo -> colours, sees, sampled yet (over the cells, filled as needed)
+
+    def photo(key, cells):
+        """Colours of photo ``key`` at ``cells`` and where it sees them: those already painted
+        from it (when it sees them), the others sampled."""
+        col = np.zeros((len(cells), 3), np.float64)
+        vis = np.zeros(len(cells), bool)
+        mine = (keys[cells] == key) & seen[cells]
+        col[mine], vis[mine] = colors[cells[mine]], True
+        rest = cells[~mine]
+        if len(rest):
+            c, ok = _photo_colours(ctx, cams_by_key[key], pts[rest])
+            col[~mine], vis[~mine] = c, ok
+        return col, vis
+
+    for g_id in np.unique(group):
+        members = group == g_id
+        target = members & got
+        if not target.any():
+            continue
+        field = base_keys if g_id < 0 else np.where(members & got, keys, -1)
+        cams = [int(k) for k in np.unique(field[field >= 0])]
+        if len(cams) < 2:
+            continue
+        num = np.zeros((n, 3), np.float64)
+        den = np.zeros(n, np.float64)
+        other = np.zeros(n, np.float64)  # weight of the photos that are not the cell's own
+        low_own = np.zeros((n, 3), np.float64)
+        has_own = np.zeros(n, bool)
+        for key in cams:
+            weight = smooth(grid((field == key).astype(np.float32))).reshape(-1)[flat]
+            need = target & (weight > 1e-3)
+            if not need.any():
+                continue
+            # the photo's colours wherever they enter its low band at those cells
+            reach = cv2.dilate(grid(need.astype(np.float32)), np.ones((ksize, ksize), np.uint8)).reshape(-1)[flat] > 0
+            cells = np.nonzero(reach)[0]
+            if key not in sampled:
+                sampled[key] = (np.zeros((n, 3), np.float64), np.zeros(n, bool), np.zeros(n, bool))
+            col, vis, known = sampled[key]
+            fresh = cells[~known[cells]]
+            if len(fresh):
+                c, v = photo(key, fresh)
+                col[fresh], vis[fresh] = c, v
+                known[fresh] = True
+            v_s = smooth(grid(vis.astype(np.float32))).reshape(-1)[flat]
+            c_s = smooth(grid((col * vis[:, None]).astype(np.float32))).reshape(-1, 3)[flat]
+            good = need & vis & (v_s > 1e-3)
+            low = c_s[good] / v_s[good, None]
+            num[good] += weight[good, None] * low
+            den[good] += weight[good]
+            own = keys[good] == key
+            other[good] += np.where(own, 0.0, weight[good])
+            gi = np.nonzero(good)[0]
+            low_own[gi[own]] = low[own]
+            has_own[gi[own]] = True
+        upd = target & has_own & (den > 1e-6) & (other > 1e-3 * den)  # another photo takes part
+        out[upd] = num[upd] / den[upd, None] + colors[upd] - low_own[upd]
+    return out
 
 
 def _context(chunk: Chunk, resolution: float, cams, surface, raycaster, blending: str = "mosaic",
              max_angle: float = 70.0, max_cameras: int = 8, workers: int | None = None, hide_classes=None,
-             patches=None, tile: int = 512, lock=None):
+             patches=None, tile: int = 512, lock=None, blend_sigma: float = BLEND_SIGMA, correction=None,
+             ghosting: bool = False, fill_holes: bool = False):
     """Everything a tile needs: ``surface`` gives the grid (its ``origin`` and ``shape``)."""
+    if blending not in BLENDINGS:
+        raise ValueError(f"blending: one of {', '.join(BLENDINGS)}")
     ctx = _Context()
     ctx.chunk, ctx.resolution, ctx.blending, ctx.tile, ctx.max_cameras = chunk, resolution, blending, tile, max_cameras
+    ctx.blend_sigma = float(blend_sigma) if blending == "mosaic" else 0.0
+    ctx.margin = int(np.ceil(3 * ctx.blend_sigma)) if ctx.blend_sigma > 0 else 0
+    ctx.ghosting, ctx.fill_holes = bool(ghosting) and blending != "average", bool(fill_holes)
+    if ctx.fill_holes:  # a hole is filled from the cells around it: they must be in the window
+        ctx.margin = max(ctx.margin, 8)
     ctx.cams = list(cams)
     ctx.min_cos = float(np.cos(np.radians(min(max(float(max_angle), 0.0), 90.0))))
     ctx.lock = lock or threading.Lock()  # ray casting, one query at a time (each one is parallel inside)
@@ -612,7 +978,7 @@ def _context(chunk: Chunk, resolution: float, cams, surface, raycaster, blending
     ctx.up_int = up_int / np.linalg.norm(up_int)
     ctx.footprints = _Footprints(chunk, ctx.cams)
     ctx.workers = int(workers or max(1, min(8, (os.cpu_count() or 4) - 2)))
-    ctx.cache = _PhotoCache(max(12, 3 * ctx.workers))
+    ctx.cache = _PhotoCache(max(12, 3 * ctx.workers), correction)
     ctx.hidden = _ClassGrid(chunk, ctx.origin, resolution, hide_classes) if hide_classes else None
     from .patches import prepare
 
@@ -636,7 +1002,9 @@ def _on_grid(surface, origin, shape, resolution: float):
 def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: str = "dem", blending: str = "mosaic",
                       hide_classes=None, progress: Progress | None = None, tile: int = 512,
                       skip_unreadable: bool = False, workers: int | None = None, max_cameras: int = 8,
-                      max_angle: float = 70.0, patches=None) -> Path:
+                      max_angle: float = 70.0, patches=None, blend_sigma: float = BLEND_SIGMA,
+                      colour_correction: bool | None = None, ghosting: bool = False,
+                      fill_holes: bool = False) -> Path:
     """``hide_classes``: classes of the dense cloud left out of the orthomosaic (transparent
     where they are the visible surface: excavation tools, people, vegetation). Photos that
     cannot be read (e.g. kept online only by Dropbox) stop the step
@@ -647,7 +1015,12 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     transparent: grazing views (an orbit of oblique photos around the survey, the edge of a
     DEM interpolated beyond the reconstruction) only smear the photo over the surface.
     ``patches`` (default: the patches of the chunk, see :mod:`.patches`) take their colours
-    from the photos assigned to them."""
+    from the photos assigned to them. ``blending``: see :data:`BLENDINGS`; ``blend_sigma``: the
+    width of the seams of the mosaic (cells). ``colour_correction``: gains of the photos and
+    vignetting (:mod:`.colour`): None = the one measured in the chunk if any, True = measured now
+    when missing, False = none. ``ghosting``: where three or more photos see a cell, the best one
+    that agrees with the others (people and vehicles seen by a few photos left out).
+    ``fill_holes``: holes of at most ``HOLE_CELLS`` cells no photo sees filled from their edges."""
     from rasterio.transform import from_origin
 
     from ..core import crs as crs_mod
@@ -661,13 +1034,14 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     old = dict(chunk.meta.get("orthomosaic") or {})
     if patches is None:
         patches = old.get("patches") or []
+    correction = correction_for(chunk, colour_correction, progress.sub(0.005, 0.005))
     progress(0.01, "Surface for the orthomosaic")
     raycaster = raycaster_for_chunk(chunk)
     lock = threading.Lock()
     surf = _surface(chunk, resolution, surface, raycaster, lock)
     hidden_classes = sorted({int(c) for c in hide_classes}) if hide_classes else None
     ctx = _context(chunk, resolution, cams, surf, raycaster, blending, max_angle, max_cameras, workers,
-                   hidden_classes, patches, tile, lock)
+                   hidden_classes, patches, tile, lock, blend_sigma, correction, ghosting, fill_holes)
     h, w = ctx.shape
     progress(0.02, f"Orthomosaic {w}x{h} px at {resolution:.4g} m/px from {len(cams)} photos"
              + (f", {len(ctx.patches)} patches" if ctx.patches else ""))
@@ -689,6 +1063,8 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     tmp.replace(out_path)
     chunk._set_product("orthomosaic", out_path)
     chunk.meta["orthomosaic"] = {"resolution": resolution, "surface": surface, "blending": blending,
+                                 "blend_sigma": float(ctx.blend_sigma), "colour_correction": correction is not None,
+                                 "ghosting": ctx.ghosting, "fill_holes": ctx.fill_holes,
                                  "hidden_classes": hidden_classes, "max_angle": float(max_angle),
                                  "max_cameras": int(max_cameras)}
     if patches:
@@ -749,10 +1125,11 @@ def _write_tiles(ctx, tmp: Path, profile: dict, tiles, workers: int, progress: P
 
 def render_surface(chunk: Chunk, origin, shape, resolution: float, cams=None, raycaster=None,
                    progress: Progress | None = None, workers: int | None = None, max_cameras: int = 8,
-                   max_angle: float = 88.0, tile: int = 512, patches=None) -> np.ndarray:
+                   max_angle: float = 88.0, tile: int = 512, patches=None, correction=None) -> np.ndarray:
     """RGBA ``(4, h, w)`` of the model seen from above over a grid (``origin`` = top-left corner,
-    world units): the orthophoto engine in memory, used for the texture of a terrain model.
-    ``patches`` take their colours from the photos assigned to them."""
+    world units): the orthophoto engine in memory (seamless mosaic), used for the texture of a
+    terrain model. ``patches`` take their colours from the photos assigned to them;
+    ``correction``: a colour correction (:func:`correction_for`)."""
     progress = progress or Progress()
     cams = list(chunk.aligned_cameras if cams is None else cams)
     raycaster = raycaster if raycaster is not None else raycaster_for_chunk(chunk)
@@ -761,7 +1138,7 @@ def render_surface(chunk: Chunk, origin, shape, resolution: float, cams=None, ra
     lock = threading.Lock()
     surface = _on_grid(_MeshSurface(chunk, raycaster, resolution, lock), origin, shape, resolution)
     ctx = _context(chunk, resolution, cams, surface, raycaster, "mosaic", max_angle, max_cameras, workers,
-                   None, patches, tile, lock)
+                   None, patches, tile, lock, correction=correction)
     h, w = ctx.shape
     out = np.zeros((4, h, w), np.uint8)
 
@@ -774,7 +1151,8 @@ def render_surface(chunk: Chunk, origin, shape, resolution: float, cams=None, ra
 
 
 def render_area(chunk: Chunk, origin, shape, resolution: float, cams=None, surface: str = "dem", raycaster=None,
-                max_angle: float = 89.0, patches=None, blending: str = "mosaic", max_cameras: int = 8) -> np.ndarray:
+                max_angle: float = 89.0, patches=None, blending: str = "mosaic", max_cameras: int = 8,
+                blend_sigma: float = BLEND_SIGMA, correction=None) -> np.ndarray:
     """RGBA ``(4, h, w)`` of a small grid on the surface of the orthomosaic, in this thread
     (the preview of a patch from one photo)."""
     cams = list(readable_cameras(chunk, True)[0] if cams is None else cams)
@@ -782,9 +1160,10 @@ def render_area(chunk: Chunk, origin, shape, resolution: float, cams=None, surfa
     lock = threading.Lock()
     surf = _on_grid(_surface(chunk, resolution, surface, raycaster, lock), origin, shape, resolution)
     ctx = _context(chunk, resolution, cams, surf, raycaster, blending, max_angle, max_cameras, 1, None,
-                   patches, max(int(shape[0]), int(shape[1]), 1), lock)
+                   patches, max(int(shape[0]), int(shape[1]), 1), lock, blend_sigma, correction)
     block = _tile(ctx, 0, 0)
     return np.zeros((4, int(shape[0]), int(shape[1])), np.uint8) if block is None else block
 
 
-__all__ = ["build_orthomosaic", "hidden_cells", "render_area", "render_surface", "NODATA"]
+__all__ = ["build_orthomosaic", "correction_for", "hidden_cells", "render_area", "render_surface",
+           "stored_blending", "BLENDINGS", "NODATA"]

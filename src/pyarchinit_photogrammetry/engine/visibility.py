@@ -119,18 +119,21 @@ def read_photo(cam, flags: int = cv2.IMREAD_COLOR) -> np.ndarray:
 
 
 class ImageCache:
-    """Small LRU of decoded photos (BGR, optionally downscaled)."""
+    """Small LRU of decoded photos (BGR), with a colour correction applied when given
+    (:class:`.colour.Correction`)."""
 
-    def __init__(self, chunk: Chunk, max_items: int = 6):
+    def __init__(self, chunk: Chunk, max_items: int = 6, correction=None):
         self.chunk = chunk
         self.max_items = max_items
+        self.correction = correction or None
         self._items: dict[int, np.ndarray] = {}
 
     def get(self, cam) -> np.ndarray:
         if cam.key not in self._items:
             if len(self._items) >= self.max_items:
                 self._items.pop(next(iter(self._items)))
-            self._items[cam.key] = read_photo(cam)
+            img = read_photo(cam)
+            self._items[cam.key] = img if self.correction is None else self.correction.correct(cam, img)
         return self._items[cam.key]
 
 

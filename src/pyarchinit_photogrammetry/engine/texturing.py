@@ -60,8 +60,12 @@ def _face_camera_choice(chunk: Chunk, verts, faces, raycaster, progress: Progres
     top_k = 3
     best_s = np.full((top_k, n), -np.inf)
     best_c = np.full((top_k, n), -1)
+    from .masks import hidden_by_mask, mask_path
+
     for i, cam in enumerate(cams):
         px, depth, ok = project_valid(chunk, cam, centroid, margin=8)
+        if mask_path(chunk, cam) is not None:
+            ok &= ~hidden_by_mask(chunk, cam, px)  # a photo does not see what its mask hides
         if not ok.any():
             continue
         to_cam = cam.center - centroid[ok]
@@ -180,7 +184,8 @@ def _fill_empty(rgb: np.ndarray, valid: np.ndarray) -> np.ndarray:
     return np.clip(out + 0.5, 0, 255).astype(np.uint8)
 
 
-def _orthophoto_atlas(chunk: Chunk, verts, faces, cams, texture_size: int, raycaster, progress: Progress):
+def _orthophoto_atlas(chunk: Chunk, verts, faces, cams, texture_size: int, raycaster, progress: Progress,
+                      correction=None):
     from .ortho import render_surface
 
     nz, _area = _upward(chunk, verts, faces)
@@ -204,7 +209,7 @@ def _orthophoto_atlas(chunk: Chunk, verts, faces, cams, texture_size: int, rayca
     atlas = np.full((height, size, 3), 127, np.uint8)
     progress(0.02, f"Orthophoto of the model {wo}x{ho} px at {res * 100:.2f} cm/px")
     rgba = render_surface(chunk, (x0, y1), (ho, wo), res, cams=cams, raycaster=raycaster,
-                          progress=progress.sub(0.02, 0.68))
+                          progress=progress.sub(0.02, 0.68), correction=correction)
     rgb = np.moveaxis(rgba[:3], 0, -1)[..., ::-1]  # BGR, as OpenCV writes it
     atlas[:ho, :wo] = _fill_empty(rgb, rgba[3] > 0)
     uv = np.zeros((len(faces), 3, 2))
@@ -216,11 +221,12 @@ def _orthophoto_atlas(chunk: Chunk, verts, faces, cams, texture_size: int, rayca
         progress(0.72, f"Walls and steep faces: {len(steep):,} faces in cells of {cell} px")
         choice = _face_camera_choice(chunk, verts, faces[steep], raycaster, progress.sub(0.72, 0.13), cams=cams)
         uv[steep] = _bake_cells(chunk, verts, faces, steep, choice, cams, atlas, ho, per_row, cell,
-                                progress.sub(0.85, 0.13))
+                                progress.sub(0.85, 0.13), ImageCache(chunk, 3, correction))
     return atlas, uv
 
 
-def _generic_atlas(chunk: Chunk, verts, faces, cams, texture_size: int, raycaster, progress: Progress):
+def _generic_atlas(chunk: Chunk, verts, faces, cams, texture_size: int, raycaster, progress: Progress,
+                   correction=None):
     n = len(faces)
     choice = _face_camera_choice(chunk, verts, faces, raycaster, progress.sub(0, 0.5), cams=cams)
     cells = int(np.ceil(n / 2))
@@ -228,18 +234,22 @@ def _generic_atlas(chunk: Chunk, verts, faces, cams, texture_size: int, raycaste
     s = max(4, texture_size // per_side)
     size = per_side * s
     atlas = np.full((size, size, 3), 127, np.uint8)
-    uv = _bake_cells(chunk, verts, faces, np.arange(n), choice, cams, atlas, 0, per_side, s, progress.sub(0.5, 0.45))
+    uv = _bake_cells(chunk, verts, faces, np.arange(n), choice, cams, atlas, 0, per_side, s, progress.sub(0.5, 0.45),
+                     ImageCache(chunk, 3, correction))
     return atlas, uv
 
 
 def build_texture(chunk: Chunk, texture_size: int = 4096, progress: Progress | None = None,
-                  skip_unreadable: bool = False, mapping: str = "auto") -> Path:
+                  skip_unreadable: bool = False, mapping: str = "auto", colour_correction: bool | None = None) -> Path:
     """Texture of the model (see the module docstring for ``mapping``), written as
     ``model_texture.jpg`` with the texture coordinates in ``model.ply`` (every other property of
     the model kept). Photos that cannot be read stop the step
     (:class:`~.visibility.UnreadablePhotos`) unless ``skip_unreadable``: then the faces take
-    their colours from the other photos."""
+    their colours from the other photos. ``colour_correction``: gains of the photos and
+    vignetting (:mod:`.colour`): None = the one measured in the chunk if any, True = measured
+    now when missing, False = none."""
     from ..io.mesh_ply import read_mesh, write_mesh
+    from .ortho import correction_for
 
     progress = progress or Progress()
     path = chunk.product_path("model")
@@ -249,6 +259,7 @@ def build_texture(chunk: Chunk, texture_size: int = 4096, progress: Progress | N
         raise ValueError(f"mapping: one of {', '.join(MAPPINGS)}")
     progress(0.0, "Checking the photos")
     cams, bad = readable_cameras(chunk, skip_unreadable)
+    correction = correction_for(chunk, colour_correction, progress.sub(0.0, 0.01))
     mesh = read_mesh(path)
     verts, faces = mesh.xyz, mesh.faces
     raycaster = Raycaster(verts, faces)
@@ -256,9 +267,11 @@ def build_texture(chunk: Chunk, texture_size: int = 4096, progress: Progress | N
         mapping = choose_mapping(chunk, verts, faces)
     progress(0.01, f"Texture: {mapping} mapping of {len(faces):,} faces")
     if mapping == "orthophoto":
-        atlas, uv = _orthophoto_atlas(chunk, verts, faces, cams, texture_size, raycaster, progress.sub(0.01, 0.95))
+        atlas, uv = _orthophoto_atlas(chunk, verts, faces, cams, texture_size, raycaster, progress.sub(0.01, 0.95),
+                                      correction)
     else:
-        atlas, uv = _generic_atlas(chunk, verts, faces, cams, texture_size, raycaster, progress.sub(0.01, 0.95))
+        atlas, uv = _generic_atlas(chunk, verts, faces, cams, texture_size, raycaster, progress.sub(0.01, 0.95),
+                                   correction)
     tex_path = chunk.data_dir / "model_texture.jpg"
     cv2.imwrite(str(tex_path), atlas, [cv2.IMWRITE_JPEG_QUALITY, 92])
     mesh.texcoords = uv.reshape(-1, 6).astype(np.float32)
@@ -266,7 +279,8 @@ def build_texture(chunk: Chunk, texture_size: int = 4096, progress: Progress | N
     chunk._set_product("model", write_mesh(chunk.own_product_path("model"), mesh))
     chunk._set_product("model_textured", tex_path)
     chunk.meta["texture"] = {"mapping": mapping, "size": [int(atlas.shape[1]), int(atlas.shape[0])],
-                             "skipped_photos": [c.label for c in bad] or None}
+                             "skipped_photos": [c.label for c in bad] or None,
+                             "colour_correction": correction is not None}
     progress(1.0, f"Texture {atlas.shape[1]}x{atlas.shape[0]} px ({mapping})")
     return tex_path
 

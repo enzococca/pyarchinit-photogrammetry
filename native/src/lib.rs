@@ -16,7 +16,7 @@ use rayon::prelude::*;
 use camera::{Camera, Pose};
 
 /// Version of the functions offered here: raised when one is added or changes meaning.
-const API: u32 = 1;
+const API: u32 = 2;
 
 fn matrix3(a: &PyReadonlyArray2<f64>, what: &str) -> PyResult<[[f64; 3]; 3]> {
     if a.shape() != [3, 3] {
@@ -215,6 +215,124 @@ fn ortho_scores<'py>(py: Python<'py>, points: PyReadonlyArray2<'py, f64>, cam_fr
     Ok((Array2::from_shape_vec((n, 2), px).unwrap().into_pyarray_bound(py), Array1::from_vec(score).into_pyarray_bound(py)))
 }
 
+/// The `k` best photos of every point of an orthomosaic tile among all the photos given, as
+/// `engine.ortho._candidates` ranks them: photo index (-1 for none), score (float32, best first,
+/// ties to the earlier photo) and pixel (float32). One pass over the points, every photo scored
+/// in turn, so the choice of a point never depends on the tile it belongs to.
+#[pyfunction]
+#[pyo3(signature = (points, poses, models, params, sizes, centres, up, min_cos, k=4, margin=2.0))]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn ortho_candidates<'py>(py: Python<'py>, points: PyReadonlyArray2<'py, f64>, poses: PyReadonlyArray3<'py, f64>,
+                         models: Vec<String>, params: Vec<Vec<f64>>, sizes: Vec<(f64, f64)>,
+                         centres: PyReadonlyArray2<'py, f64>, up: [f64; 3], min_cos: f64, k: usize, margin: f64)
+    -> PyResult<(Bound<'py, PyArray2<i32>>, Bound<'py, PyArray2<f32>>, Bound<'py, PyArray3<f32>>)> {
+    let pa = poses.as_array();
+    let m = pa.shape()[0];
+    if pa.shape()[1] < 3 || pa.shape()[2] != 4 || models.len() != m || params.len() != m || sizes.len() != m
+        || centres.shape() != [m, 3] {
+        return Err(PyValueError::new_err("one pose (3x4), model, parameters, size and centre per photo"));
+    }
+    let mut cams = Vec::with_capacity(m);
+    let mut mats = Vec::with_capacity(m);
+    let ca = centres.as_array();
+    let mut ctr = Vec::with_capacity(m);
+    for j in 0..m {
+        cams.push(camera(&models[j], &params[j], sizes[j].0, sizes[j].1)?);
+        let mut mat = [[0.0; 4]; 3];
+        for (r, row) in mat.iter_mut().enumerate() {
+            for (c, x) in row.iter_mut().enumerate() {
+                *x = pa[[j, r, c]];
+            }
+        }
+        mats.push(mat);
+        ctr.push([ca[[j, 0]], ca[[j, 1]], ca[[j, 2]]]);
+    }
+    check_points(&points)?;
+    let view = points.as_array();
+    let p = view.as_standard_layout();
+    let n = p.nrows();
+    let src = p.as_slice().unwrap();
+    let k = k.max(1);
+    let mut index = vec![-1i32; k * n];
+    let mut score = vec![f32::NEG_INFINITY; k * n];
+    let mut pix = vec![f32::NAN; 2 * k * n];
+    py.allow_threads(|| {
+        let block = 2048;
+        let results: Vec<(usize, Vec<i32>, Vec<f32>, Vec<f32>)> = (0..n.div_ceil(block))
+            .into_par_iter()
+            .map(|b| {
+                let lo = b * block;
+                let hi = (lo + block).min(n);
+                let len = hi - lo;
+                let mut bi = vec![-1i32; k * len];
+                let mut bs = vec![f32::NEG_INFINITY; k * len];
+                let mut bp = vec![f32::NAN; 2 * k * len];
+                for i in lo..hi {
+                    let o = i - lo;
+                    let (x, y, z) = (src[3 * i], src[3 * i + 1], src[3 * i + 2]);
+                    for j in 0..m {
+                        let cam = &cams[j];
+                        let (u, v, depth, ok) = camera::project_valid(cam, &mats[j], x, y, z, margin);
+                        if !ok {
+                            continue;
+                        }
+                        let c = &ctr[j];
+                        let (rx, ry, rz) = (x - c[0], y - c[1], z - c[2]);
+                        let len3 = (rx * rx + ry * ry + rz * rz).sqrt();
+                        let (rx, ry, rz) = (rx / len3, ry / len3, rz / len3);
+                        let nadir = (-(rx * up[0] + ry * up[1] + rz * up[2])).clamp(0.0, 1.0);
+                        if !(nadir >= min_cos) {
+                            continue;
+                        }
+                        let off = (u / cam.width - 0.5).hypot(v / cam.height - 0.5);
+                        let gsd = depth / cam.focal();
+                        let s = (nadir.powi(2) * (1.0 - off) / gsd.max(1e-12)) as f32;
+                        if !s.is_finite() {
+                            continue;
+                        }
+                        // insert keeping the best first; an equal score stays behind the earlier photo
+                        let mut at = k;
+                        for r in 0..k {
+                            if s > bs[r * len + o] {
+                                at = r;
+                                break;
+                            }
+                        }
+                        if at == k {
+                            continue;
+                        }
+                        for r in (at + 1..k).rev() {
+                            bs[r * len + o] = bs[(r - 1) * len + o];
+                            bi[r * len + o] = bi[(r - 1) * len + o];
+                            bp[2 * (r * len + o)] = bp[2 * ((r - 1) * len + o)];
+                            bp[2 * (r * len + o) + 1] = bp[2 * ((r - 1) * len + o) + 1];
+                        }
+                        bs[at * len + o] = s;
+                        bi[at * len + o] = j as i32;
+                        bp[2 * (at * len + o)] = u as f32;
+                        bp[2 * (at * len + o) + 1] = v as f32;
+                    }
+                }
+                (lo, bi, bs, bp)
+            })
+            .collect();
+        for (lo, bi, bs, bp) in results {
+            let len = bs.len() / k;
+            for r in 0..k {
+                for o in 0..len {
+                    index[r * n + lo + o] = bi[r * len + o];
+                    score[r * n + lo + o] = bs[r * len + o];
+                    pix[2 * (r * n + lo + o)] = bp[2 * (r * len + o)];
+                    pix[2 * (r * n + lo + o) + 1] = bp[2 * (r * len + o) + 1];
+                }
+            }
+        }
+    });
+    Ok((Array2::from_shape_vec((k, n), index).unwrap().into_pyarray_bound(py),
+        Array2::from_shape_vec((k, n), score).unwrap().into_pyarray_bound(py),
+        Array3::from_shape_vec((k, n, 2), pix).unwrap().into_pyarray_bound(py)))
+}
+
 /// Camera models the projection kernels know.
 #[pyfunction]
 fn supported_models() -> Vec<&'static str> {
@@ -231,6 +349,7 @@ fn ppg_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(depth_agree, m)?)?;
     m.add_function(wrap_pyfunction!(project_points, m)?)?;
     m.add_function(wrap_pyfunction!(ortho_scores, m)?)?;
+    m.add_function(wrap_pyfunction!(ortho_candidates, m)?)?;
     m.add_function(wrap_pyfunction!(supported_models, m)?)?;
     Ok(())
 }

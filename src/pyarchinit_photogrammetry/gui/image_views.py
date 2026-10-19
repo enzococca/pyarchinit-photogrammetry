@@ -1114,12 +1114,15 @@ class PhotoView(_ZoomView):
     detected), blue ones only estimated from the model and to be confirmed - drag a flag onto the
     point, or double click it when it is already right; the red cross is where the survey puts a
     marker not yet placed here. Right click places, confirms or removes; Page Up/Down open the
-    previous/next photo of the list (the filtered one)."""
+    previous/next photo of the list (the filtered one). Masks: the masked parts of the photo show
+    in red; in mask mode clicks draw a polygon (double click or Enter closes it, Esc drops it) that
+    is masked - or given back with "unmask" / Shift."""
 
     markers_changed = Signal(object)  # the marker changed (None: not known)
     marker_created = Signal(object)  # a new marker placed on this photo
     navigate = Signal(int)  # -1 previous photo, +1 next
     sam_prompt = Signal(object, float, float, int)  # camera, x, y, label
+    mask_changed = Signal(object)  # the camera whose mask was drawn
 
     MEASURED, ESTIMATED, PREDICTED = "#30e050", "#40a0ff", "#ff4040"
 
@@ -1129,6 +1132,11 @@ class PhotoView(_ZoomView):
         self.camera = None
         self.items: list = []
         self.sam_mode = False
+        self.mask_mode: str | None = None  # "mask" or "unmask": clicks draw a polygon
+        self.show_masks = True
+        self.mask_item = None
+        self._mask_poly: list[tuple[float, float]] = []
+        self._mask_poly_item = None
         self._drag = None  # the marker whose flag is being dragged
         self._drag_offset = (0.0, 0.0)  # from the mouse to the foot of the flag (image pixels)
         self.setMouseTracking(True)
@@ -1147,6 +1155,8 @@ class PhotoView(_ZoomView):
             return
         self.pixmap_item = self.scene().addPixmap(QPixmap.fromImage(to_qimage(img[:, :, ::-1])))
         self.setSceneRect(QRectF(0, 0, img.shape[1], img.shape[0]))
+        self.mask_item, self._mask_poly, self._mask_poly_item = None, [], None
+        self.draw_mask()
         self.draw_markers()
         self.fit()
         if focus is not None:
@@ -1265,7 +1275,78 @@ class PhotoView(_ZoomView):
                     best, dmin = m, d
         return best
 
+    # ---------------------------------------------------------------- masks
+    def draw_mask(self) -> None:
+        """The masked part of the photo in translucent red (at most 2048 px a side, stretched)."""
+        import cv2
+
+        if self.mask_item is not None:
+            self.scene().removeItem(self.mask_item)
+            self.mask_item = None
+        if not self.show_masks or self.chunk is None or self.camera is None or self.pixmap_item is None:
+            return
+        from ..engine.masks import read_mask
+
+        keep = read_mask(self.chunk, self.camera)
+        if keep is None:
+            return
+        h, w = keep.shape
+        f = min(1.0, 2048 / max(h, w))
+        small = cv2.resize(keep.astype(np.uint8), (max(1, int(w * f)), max(1, int(h * f))),
+                           interpolation=cv2.INTER_NEAREST) > 0 if f < 1 else keep
+        rgba = np.zeros(small.shape + (4,), np.uint8)
+        rgba[~small] = (230, 40, 40, 105)
+        item = self.scene().addPixmap(QPixmap.fromImage(to_qimage(rgba)))
+        item.setScale(w / small.shape[1])
+        item.setZValue(1)
+        self.mask_item = item
+
+    def set_mask_mode(self, mode: str | None) -> None:
+        """``mask`` / ``unmask``: clicks draw a polygon masked / given back; None: back to markers."""
+        self.mask_mode = mode if mode in ("mask", "unmask") else None
+        self._mask_cancel()
+        self.setDragMode(QGraphicsView.DragMode.NoDrag if self.mask_mode else QGraphicsView.DragMode.ScrollHandDrag)
+        if self.mask_mode:
+            self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.viewport().unsetCursor()
+
+    def _mask_click(self, x: float, y: float) -> None:
+        self._mask_poly.append((float(x), float(y)))
+        if self._mask_poly_item is not None:
+            self.scene().removeItem(self._mask_poly_item)
+        path = QPainterPath(QPointF(*self._mask_poly[0]))
+        for px, py in self._mask_poly[1:]:
+            path.lineTo(px, py)
+        pen = self._pen("#ff3030" if self.mask_mode != "unmask" else "#30d0ff", 2)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        self._mask_poly_item = self.scene().addPath(path, pen)
+        self._mask_poly_item.setZValue(5)
+
+    def _mask_close(self, unmask: bool = False) -> None:
+        poly = [p for i, p in enumerate(self._mask_poly) if i == 0 or p != self._mask_poly[i - 1]]
+        self._mask_cancel()
+        if len(poly) < 3 or self.chunk is None or self.camera is None:
+            return
+        from ..engine.masks import paint_polygon
+
+        paint_polygon(self.chunk, self.camera, poly, masked=not (unmask or self.mask_mode == "unmask"))
+        self.draw_mask()
+        self.mask_changed.emit(self.camera)
+
+    def _mask_cancel(self) -> None:
+        if self._mask_poly_item is not None:
+            self.scene().removeItem(self._mask_poly_item)
+        self._mask_poly, self._mask_poly_item = [], None
+
     def mousePressEvent(self, ev) -> None:
+        if self.mask_mode and self.camera is not None:
+            if ev.button() == Qt.MouseButton.LeftButton:
+                sp = self.mapToScene(ev.position().toPoint())
+                self._mask_click(sp.x(), sp.y())
+            elif ev.button() == Qt.MouseButton.RightButton:
+                self._mask_cancel()
+            return
         if self.sam_mode and self.camera is not None and ev.button() in (Qt.MouseButton.LeftButton,
                                                                          Qt.MouseButton.RightButton):
             sp = self.mapToScene(ev.position().toPoint())
@@ -1308,6 +1389,9 @@ class PhotoView(_ZoomView):
         super().mouseReleaseEvent(ev)
 
     def mouseDoubleClickEvent(self, ev) -> None:
+        if self.mask_mode:
+            self._mask_close(unmask=bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier))
+            return
         m = self.flag_at(ev.position().toPoint()) if not self.sam_mode else None
         if m is not None:
             pr = m.projections[self.camera.key]
@@ -1316,6 +1400,12 @@ class PhotoView(_ZoomView):
         super().mouseDoubleClickEvent(ev)
 
     def keyPressEvent(self, ev) -> None:
+        if self.mask_mode and ev.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._mask_close(unmask=bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier))
+            return
+        if self.mask_mode and ev.key() == Qt.Key.Key_Escape:
+            self._mask_cancel()
+            return
         if ev.key() in (Qt.Key.Key_PageDown, Qt.Key.Key_BracketRight):
             self.navigate.emit(1)
         elif ev.key() in (Qt.Key.Key_PageUp, Qt.Key.Key_BracketLeft):
@@ -1324,7 +1414,7 @@ class PhotoView(_ZoomView):
             super().keyPressEvent(ev)
 
     def contextMenuEvent(self, ev) -> None:
-        if self.chunk is None or self.camera is None or self.sam_mode:
+        if self.chunk is None or self.camera is None or self.sam_mode or self.mask_mode:
             return
         sp = self.mapToScene(ev.pos())
         x, y = sp.x(), sp.y()  # scene units = pixels, first pixel centre at (0.5, 0.5) as in COLMAP

@@ -198,9 +198,14 @@ is installed on first use (PyTorch in a separate environment, see the same page)
   orthophoto of a tell at 1.35 cm/px takes 4-6 minutes on an Apple M4 Pro. Cells seen only at
   grazing angles (more than 70 degrees from the vertical, adjustable) stay transparent instead
   of smearing the photos.
+* **No seams**: the orthomosaic takes the details of every cell from its best photo and fades the
+  differences of light along the seams (two-band blending); the exposure of every photo and the
+  vignetting of every lens are measured on points seen by several photos and corrected
+  (*Strumenti > Calibra i colori delle foto*, also in the texture); people and vehicles seen by a
+  few photos can be left out, small holes are filled.
 
 Command line: `ppg confidence`, `ppg clean-cloud`, `ppg clean-model`, `ppg clean-tie-points`,
-`ppg crop`, `ppg relink`, `ppg export --bbox/--wkt` (see `--help`).
+`ppg calibrate-colours`, `ppg crop`, `ppg relink`, `ppg export --bbox/--wkt` (see `--help`).
 
 ## Orthophoto at full resolution, and patches
 

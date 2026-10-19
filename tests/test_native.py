@@ -154,6 +154,37 @@ def test_orthomosaic_scores(monkeypatch, rng):
         assert np.max(np.abs(pa[ok] - pb[ok])) < 1e-8
 
 
+def test_best_photos_of_every_cell(monkeypatch, rng):
+    from scipy.spatial.transform import Rotation
+
+    class Ctx:
+        pass
+
+    n = 30000
+    pts = np.column_stack([rng.uniform(-20, 40, n), rng.uniform(-30, 20, n), rng.uniform(-2, 3, n)])
+    sensors, cams = {}, []
+    for j in range(7):
+        world_from_cam = np.eye(4)
+        world_from_cam[:3, :3] = Rotation.from_euler("xyz", [178.0 - 4 * j, 3.0 + j, 25.0 * j], degrees=True).as_matrix()
+        world_from_cam[:3, 3] = [10.0 + 3 * j, -4.0 + 2 * j, 30.0 + j]
+        cam = _Cam(world_from_cam)
+        cam.key = j
+        model = ("OPENCV", "SIMPLE_RADIAL", "FULL_OPENCV")[j % 3]
+        sensors[j] = _Sensor(model, MODELS[model]).s
+        cams.append(cam)
+    ctx = Ctx()
+    ctx.chunk = type("C", (), {"sensor": lambda self, cam: sensors[cam.key]})()
+    ctx.centres = {c.key: c.transform[:3, 3] for c in cams}
+    ctx.up_int, ctx.min_cos = np.array([0.0, 0.0, 1.0]), 0.34
+    (ia, sa, pa), (ib, sb, pb) = both(monkeypatch, lambda: ortho._candidates(ctx, pts, cams, 4))
+    assert (ia[0] >= 0).sum() > 5000 and (ia[1] >= 0).sum() > 1000
+    assert np.array_equal(ia, ib)
+    ok = ia >= 0
+    assert np.allclose(sa[ok], sb[ok], rtol=1e-6)
+    assert np.all(sa[:-1][ok[1:]] >= sa[1:][ok[1:]])  # best first
+    assert np.allclose(pa[ok], pb[ok], atol=1e-3)
+
+
 def test_confidence_and_orthomosaic_of_the_trench(processed, tmp_path, monkeypatch):
     import rasterio
 

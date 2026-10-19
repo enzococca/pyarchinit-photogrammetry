@@ -227,8 +227,14 @@ def _reference_pairs(chunk: Chunk, names: dict[int, str], neighbors: int = 20) -
 
 
 def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 40000, tiepoint_limit: int = 8000,
-                 pair_selection: str = "auto", progress: Progress | None = None) -> None:
+                 pair_selection: str = "auto", progress: Progress | None = None,
+                 exclude_stationary: bool = False) -> None:
+    """Detect and match the points of the photos (SIFT); the masked parts of the photos
+    (:mod:`.masks`) are left out. ``exclude_stationary``: matches that do not move between two
+    photos are dropped - the background of a turntable photographed from a fixed camera."""
     import pycolmap
+
+    from .masks import colmap_mask_folder
 
     progress = progress or Progress()
     work = _sfm_dir(chunk)
@@ -243,7 +249,8 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
         if c.enabled:
             by_sensor.setdefault(c.sensor_key, []).append(names[c.key])
 
-    progress(0.0, f"Detecting points in {len(names)} photos")
+    masks = colmap_mask_folder(chunk, names, work / "masks")
+    progress(0.0, f"Detecting points in {len(names)} photos" + (" (with masks)" if masks else ""))
     for i, (skey, image_names) in enumerate(by_sensor.items()):
         sensor = chunk.sensors[skey]
         ext = pycolmap.FeatureExtractionOptions()
@@ -253,6 +260,8 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
         model, params = mapping_camera(sensor)
         reader.camera_model = model
         reader.camera_params = ",".join(f"{p:.10g}" for p in params)
+        if masks is not None:
+            reader.mask_path = str(masks)
         pycolmap.extract_features(str(db_path), str(root), image_names=image_names,
                                   camera_mode=pycolmap.CameraMode.SINGLE, reader_options=reader,
                                   extraction_options=ext)
@@ -282,9 +291,49 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
         pycolmap.match_image_pairs(str(db_path), matching_options=mopts, pairing_options=popts)
     else:
         raise ValueError(f"unknown pair selection {pair_selection!r}")
+    removed = remove_stationary_matches(db_path) if exclude_stationary else None
     chunk.meta["sfm"] = {"image_root": str(root), "names": {str(k): v for k, v in names.items()},
-                         "quality": quality, "pair_selection": mode}
-    progress(1.0, "Matching finished")
+                         "quality": quality, "pair_selection": mode, "masks": masks is not None,
+                         "stationary_removed": removed}
+    progress(1.0, "Matching finished" + (f" ({removed:,} stationary matches left out)" if removed else ""))
+
+
+def remove_stationary_matches(db_path: Path, min_shift: float = 2.0, min_inliers: int = 15) -> int:
+    """Drop the verified matches whose point does not move between the two photos (less than
+    ``min_shift`` px, or 0.15 % of the photo): with a fixed camera and a turntable they are the
+    background. Pairs left with fewer than ``min_inliers`` are dropped. Edits the COLMAP
+    database (its documented sqlite layout); returns the matches removed."""
+    import sqlite3
+
+    con = sqlite3.connect(str(db_path))
+    try:
+        sizes = {i: max(w, h) for i, w, h in con.execute(
+            "SELECT images.image_id, cameras.width, cameras.height FROM images JOIN cameras USING (camera_id)")}
+        keypoints = {}
+        for image_id, rows, cols, data in con.execute("SELECT image_id, rows, cols, data FROM keypoints"):
+            if rows and data:
+                keypoints[image_id] = np.frombuffer(data, np.float32).reshape(rows, cols)[:, :2]
+        removed = 0
+        updates = []
+        for pair_id, rows, cols, data in con.execute(
+                "SELECT pair_id, rows, cols, data FROM two_view_geometries WHERE rows > 0"):
+            a, b = divmod(int(pair_id), 2147483647)
+            if a not in keypoints or b not in keypoints or not data:
+                continue
+            m = np.frombuffer(data, np.uint32).reshape(rows, cols)
+            shift = np.linalg.norm(keypoints[a][m[:, 0]] - keypoints[b][m[:, 1]], axis=1)
+            limit = max(min_shift, 0.0015 * max(sizes.get(a, 0), sizes.get(b, 0)))
+            keep = shift >= limit
+            if keep.all():
+                continue
+            removed += int((~keep).sum())
+            m = np.ascontiguousarray(m[keep]) if keep.sum() >= min_inliers else np.zeros((0, 2), np.uint32)
+            updates.append((len(m), 2, m.tobytes(), pair_id))
+        con.executemany("UPDATE two_view_geometries SET rows = ?, cols = ?, data = ? WHERE pair_id = ?", updates)
+        con.commit()
+        return removed
+    finally:
+        con.close()
 
 
 def align_cameras(chunk: Chunk, progress: Progress | None = None) -> int:

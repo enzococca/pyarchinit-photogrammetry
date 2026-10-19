@@ -113,6 +113,7 @@ def build_depth_maps(chunk: Chunk, quality: str = "medium", filter_mode: str = "
         popts = pycolmap.PatchMatchOptions()
         popts.geom_consistency = True
         pycolmap.patch_match_stereo(str(ws), options=popts)
+        mask_depth_maps(chunk, ws)
     elif backend == "openmvs":
         subprocess.run([_tool("InterfaceCOLMAP"), "-i", str(ws), "-o", str(ws / "scene.mvs"), "--image-folder",
                         str(ws / "images")], check=True, close_fds=False)
@@ -351,6 +352,46 @@ def read_colmap_array(path: Path) -> np.ndarray:
     return np.transpose(arr, (1, 0, 2)).squeeze()
 
 
+def _masked_cameras(chunk: Chunk) -> dict:
+    """Cameras with a mask by their COLMAP image name."""
+    from .masks import mask_path
+
+    names = (chunk.meta.get("sfm") or {}).get("names") or {}
+    out = {}
+    for c in chunk.cameras:
+        if str(c.key) in names and mask_path(chunk, c) is not None:
+            out[names[str(c.key)]] = c
+    return out
+
+
+def mask_depth_maps(chunk: Chunk, ws: Path) -> int:
+    """Depth (and normal) maps written by another engine set to zero where their photos are
+    masked; returns the maps changed."""
+    from .masks import mask_for_undistorted
+
+    masked = _masked_cameras(chunk)
+    if not masked:
+        return 0
+    rec = _read_workspace_model(ws)
+    n = 0
+    for image in rec.images.values():
+        cam = masked.get(image.name)
+        if cam is None:
+            continue
+        for kind in ("geometric", "photometric"):
+            path = ws / "stereo" / "depth_maps" / f"{image.name}.{kind}.bin"
+            if not path.exists():
+                continue
+            depth = read_colmap_array(path).astype(np.float32)
+            keep = mask_for_undistorted(chunk, cam, _K(rec.cameras[image.camera_id]), depth.shape)
+            if keep is None:
+                continue
+            depth[~keep] = 0
+            write_colmap_array(path, depth)
+            n += 1
+    return n
+
+
 class _GrayCache:
     """Grey photos of the workspace, shared by the threads (a photo is the partner of several)."""
 
@@ -398,6 +439,7 @@ def _cpu_depth_maps(chunk: Chunk, ws: Path, filter_mode: str, progress: Progress
         cam = max(rec.cameras.values(), key=lambda c: c.width * c.height)
         workers = depth_workers(cam.width, cam.height, max((len(v) for v in neigh.values()), default=1))
     gray = _GrayCache(ws, rec, max(12, 3 * workers))
+    masked = _masked_cameras(chunk)
 
     def one(iid) -> str | None:
         """Depth and normal maps of one photo; the name of the photo when written."""
@@ -419,6 +461,12 @@ def _cpu_depth_maps(chunk: Chunk, ws: Path, filter_mode: str, progress: Progress
         if not estimates:
             return None
         depth = _combine(estimates, min_agree, tol)
+        if image.name in masked:  # no depth where the photo is masked
+            from .masks import mask_for_undistorted
+
+            keep = mask_for_undistorted(chunk, masked[image.name], K_i, depth.shape)
+            if keep is not None:
+                depth[~keep] = 0
         if (depth > 0).sum() <= 100:
             return None
         name = image.name

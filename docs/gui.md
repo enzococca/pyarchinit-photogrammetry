@@ -135,6 +135,16 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
 
 ## Orthophoto at full resolution and patches
 
+* **Building it** (*Flusso di lavoro > Ortofoto*): *Fusione* *Mosaico senza cuciture* (default:
+  the details of each cell from its best photo, the differences of light faded along the seams),
+  *Nessuna (una foto per cella)* or *Media delle foto*; *Correzione colore* (exposure of each photo and
+  vignetting of each lens, measured the first time on points seen by several photos, or before with
+  *Strumenti > Calibra i colori delle foto*); *Togli persone e mezzi visti da poche foto* (where three
+  or more photos see a cell, the best one that agrees with the others); *Riempi i piccoli buchi* (up
+  to 100 pixels no photo sees, from their edges; larger holes stay transparent). Every cell picks
+  among all the photos that frame it, so no seam follows the tiles. On the synthetic trench with
+  half of the photos 30 % darker and every photo vignetted, the corrected mosaic differs from the
+  one of the untouched photos by 0.3 levels in the low frequencies (25 without correction).
 * **Zoom**: the orthomosaic/DEM view opens a large raster from a reduced copy (at most 6,000 px a
   side, one of the overviews of the file) and, when the zoom pauses beyond that resolution, reads
   the visible area again (plus a margin) at the resolution of the screen, up to the full one, in a

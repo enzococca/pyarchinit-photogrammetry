@@ -180,9 +180,14 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
   di 45.000 x 46.000 pixel di un tell a 1,35 cm/px richiede 4-6 minuti su un Apple M4 Pro. Le celle
   viste solo di traverso (oltre 70 gradi dalla verticale, regolabile) restano trasparenti invece di
   stirare le foto.
+* **Niente cuciture**: l'ortofoto prende i dettagli di ogni cella dalla foto migliore e sfuma le
+  differenze di luce lungo le cuciture (fusione a due bande); l'esposizione di ogni foto e la
+  vignettatura di ogni obiettivo si misurano sui punti visti da più foto e si correggono
+  (*Strumenti > Calibra i colori delle foto*, anche nella texture); si possono togliere persone e mezzi
+  visti da poche foto e riempire i piccoli buchi.
 
 Da terminale: `ppg confidence`, `ppg clean-cloud`, `ppg clean-model`, `ppg clean-tie-points`,
-`ppg crop`, `ppg relink`, `ppg export --bbox/--wkt` (vedi `--help`).
+`ppg calibrate-colours`, `ppg crop`, `ppg relink`, `ppg export --bbox/--wkt` (vedi `--help`).
 
 ## Ortofoto a piena risoluzione e patch
 

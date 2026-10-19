@@ -157,6 +157,8 @@ class MainWindow(QMainWindow):
         self.ortho_view.merge_requested.connect(lambda: self.merge_selected())
         self.photo_view.markers_changed.connect(self._markers_edited)
         self.photo_view.navigate.connect(self.photo_step)
+        self.photo_view.mask_changed.connect(lambda cam: (self._dirty(True), self.statusBar().showMessage(
+            f"Maschera di {cam.label} aggiornata", 5000)))
         self.photo_view.marker_created.connect(lambda m: self.filter_photos_by_markers([m.key]))
         self.photo_view.sam_prompt.connect(self._photo_sam_prompt)
 
@@ -357,6 +359,35 @@ class MainWindow(QMainWindow):
         self._act(tm, "Stampa fogli di target...", self.print_targets, icon_name="print")
         self._act(tm, "Tappetino per turntable...", self.print_turntable, icon_name="turntable")
         self._act(tm, "Barra di scala stampabile...", self.print_scalebar, icon_name="scalebar")
+        self._act(m, "Calibra i colori delle foto...", self.calibrate_colours, processing=True, icon_name="colour",
+                  tip="Esposizione di ogni foto e vignettatura degli obiettivi, corrette in ortofoto e texture")
+        km = m.addMenu(icon("mask"), "Maschere delle foto")
+        self.mask_actions: dict[str, QAction] = {}
+        mgroup = QActionGroup(self)
+        for mode, label in ((None, "Nessun disegno (marker)"),
+                            ("mask", "Disegna la maschera sulla foto (clic sui vertici, doppio clic chiude)"),
+                            ("unmask", "Togli la maschera (poligono; anche Maiusc + doppio clic)")):
+            a = QAction(label, self, checkable=True)
+            a.setChecked(mode is None)
+            a.triggered.connect(lambda _=False, md=mode: self.set_mask_mode(md))
+            mgroup.addAction(a)
+            km.addAction(a)
+            self.mask_actions[str(mode)] = a
+        self.a_show_masks = QAction("Mostra le maschere", self, checkable=True)
+        self.a_show_masks.setChecked(True)
+        self.a_show_masks.toggled.connect(self._show_masks)
+        km.addAction(self.a_show_masks)
+        km.addSeparator()
+        self._act(km, "Importa maschere (immagini)...", self.masks_import, processing=True)
+        self._act(km, "Maschere dal canale alfa delle foto", lambda: self.masks_import(alpha=True), processing=True)
+        self._act(km, "Maschere dallo sfondo (foto senza l'oggetto)...", self.masks_from_background, processing=True)
+        self._act(km, "Maschere da un colore (fondale)...", self.masks_from_colour, processing=True)
+        self._act(km, "Maschere dal modello (resta solo l'oggetto)", self.masks_from_model, processing=True)
+        self._act(km, "Maschere con SAM 2.1 (l'oggetto al centro della foto)", self.masks_with_sam, processing=True)
+        km.addSeparator()
+        self._act(km, "Esporta maschere...", self.masks_export)
+        self._act(km, "Rimuovi le maschere delle foto selezionate", lambda: self.masks_remove(selected=True))
+        self._act(km, "Rimuovi tutte le maschere", lambda: self.masks_remove(selected=False))
         dm = m.addMenu(icon("polygon"), "Disegno su ortofoto")
         self.draw_group = QActionGroup(self)
         self.draw_actions: dict[str, QAction] = {}
@@ -1306,13 +1337,16 @@ class MainWindow(QMainWindow):
                   choices=[("auto", "Automatica"), ("exhaustive", "Tutte le coppie"), ("sequential", "Sequenziale"),
                            ("reference", "Da posizione GNSS")]),
             Field("keypoint_limit", "Limite punti chiave", 40000, minimum=1000, maximum=200000),
-            Field("tiepoint_limit", "Limite punti di legame", 8000, minimum=500, maximum=100000)])
+            Field("tiepoint_limit", "Limite punti di legame", 8000, minimum=500, maximum=100000),
+            Field("stationary", "Escludi i punti fermi (turntable con fotocamera fissa)", False,
+                  tip="I punti che restano nello stesso pixel in due foto sono lo sfondo fermo: non contano")],
+            intro="Le parti mascherate delle foto (Strumenti > Maschere delle foto) non vengono usate.")
         if not v:
             return
 
         def job(p):
             self.chunk.match_photos(v["quality"], v["keypoint_limit"], v["tiepoint_limit"], v["pair_selection"],
-                                    progress=p.sub(0, 0.5))
+                                    progress=p.sub(0, 0.5), exclude_stationary=bool(v.get("stationary")))
             n = self.chunk.align_cameras(progress=p.sub(0.5, 0.5))
             if any(m.reference.location for m in self.chunk.markers):
                 self.last_report = self.chunk.update_transform()
@@ -2332,7 +2366,9 @@ class MainWindow(QMainWindow):
                   choices=[("auto", "Automatica"), ("orthophoto", "Ortofoto adattiva (terreno, rilievi da drone)"),
                            ("generic", "Generica (oggetti, modelli piccoli)")]),
             Field("size", "Dimensione texture", 8192 if faces > 1_000_000 else 4096,
-                  choices=[(2048, "2048"), (4096, "4096"), (8192, "8192")])],
+                  choices=[(2048, "2048"), (4096, "4096"), (8192, "8192")]),
+            Field("colour", "Correzione colore (esposizione delle foto, vignettatura)", True,
+                  tip="Misurata la prima volta sui punti visti da piu' foto (Strumenti > Calibra i colori)")],
             intro=f"Modello di {faces:,} facce. ".replace(",", ".")
                   + "Ortofoto adattiva: la texture e' l'ortofoto del modello e le pareti ripide hanno spazi propri "
                     "(come in Metashape, per i rilievi dall'alto); generica: ogni faccia ha il suo spazio "
@@ -2344,7 +2380,8 @@ class MainWindow(QMainWindow):
         if skip is None:
             return
         self.run_task("Texture", lambda p: self.chunk.build_texture(v["size"], progress=p, skip_unreadable=skip,
-                                                                    mapping=v.get("mapping", "auto")),
+                                                                    mapping=v.get("mapping", "auto"),
+                                                                    colour_correction=bool(v.get("colour", True))),
                       lambda _r: self._show_model("model_textured"))
 
     def build_dem(self) -> None:
@@ -2378,7 +2415,16 @@ class MainWindow(QMainWindow):
         v = ParamDialog.ask(self, "Ortofoto", [
             Field("surface", "Superficie", "dem" if self.chunk.dem_path else "model",
                   choices=[("dem", "DEM"), ("model", "Modello (true ortho)")]),
-            Field("blending", "Fusione", "mosaic", choices=[("mosaic", "Mosaico"), ("average", "Media")]),
+            Field("blending", "Fusione", "mosaic",
+                  choices=[("mosaic", "Mosaico senza cuciture"), ("disabled", "Nessuna (una foto per cella)"),
+                           ("average", "Media delle foto")],
+                  tip="Mosaico: i dettagli dalla foto migliore, le differenze di luce sfumate lungo le cuciture"),
+            Field("colour", "Correzione colore (esposizione delle foto, vignettatura)", True,
+                  tip="Misurata la prima volta sui punti visti da piu' foto (Strumenti > Calibra i colori)"),
+            Field("ghosting", "Togli persone e mezzi visti da poche foto", False,
+                  tip="Dove almeno tre foto vedono la cella si prende la migliore che concorda con le altre (piu' lento)"),
+            Field("fill_holes", "Riempi i piccoli buchi (fino a 100 pixel)", True,
+                  tip="Celle che nessuna foto vede, riempite dai bordi; i buchi grandi restano trasparenti"),
             Field("resolution", "Risoluzione (m/pixel)", None, kind="optional_float"),
             Field("max_angle", "Angolo massimo di vista dalla verticale (gradi)", 70.0, minimum=10.0, maximum=90.0,
                   decimals=0, tip="Dove tutte le foto guardano piu' di traverso la cella resta trasparente: viste "
@@ -2395,8 +2441,148 @@ class MainWindow(QMainWindow):
         hide = sorted(v.get("hide") or []) or None
         self.run_task("Ortofoto", self._versioned("orthomosaic", v, lambda p: self.chunk.build_orthomosaic(
             v["resolution"], v["surface"], v["blending"], hide_classes=hide, progress=p, skip_unreadable=skip,
-            max_angle=v.get("max_angle", 70.0))),
+            max_angle=v.get("max_angle", 70.0), colour_correction=bool(v.get("colour", True)),
+            ghosting=bool(v.get("ghosting")), fill_holes=bool(v.get("fill_holes", True)))),
             lambda _r: self._show_raster("ortho"))
+
+    # ---------------------------------------------------------------- masks
+    def set_mask_mode(self, mode: str | None) -> None:
+        """Draw masks on the photo view (``mask`` / ``unmask``) or go back to the markers."""
+        self.photo_view.set_mask_mode(mode)
+        self.mask_actions[str(mode)].setChecked(True)
+        if mode is not None:
+            self.show_view(self.photo_view)
+            self.statusBar().showMessage("Clic sui vertici dell'area, doppio clic (o Invio) chiude, Esc annulla",
+                                         10000)
+
+    def _show_masks(self, on: bool) -> None:
+        self.photo_view.show_masks = bool(on)
+        self.photo_view.draw_mask()
+
+    def _mask_targets(self):
+        cams = self.photos.selected_cameras()
+        return cams or list(self.chunk.cameras)
+
+    def _masks_done(self, what: str):
+        def done(n):
+            self.photo_view.draw_mask()
+            self._info("Maschere", f"{n} maschere {what}.")
+            self._dirty(True)
+        return done
+
+    def masks_import(self, alpha: bool = False) -> None:
+        if not self._need_chunk():
+            return
+        from ..engine import masks
+
+        folder = None
+        if not alpha:
+            folder = QFileDialog.getExistingDirectory(self, "Cartella delle maschere", self._last_dir())
+            if not folder:
+                return
+        self.run_task("Importazione delle maschere", lambda p: masks.import_masks(self.chunk, folder, progress=p),
+                      self._masks_done("importate" if folder else "dal canale alfa"), refresh=False)
+
+    def masks_export(self) -> None:
+        if not self._need_chunk():
+            return
+        from ..engine import masks
+
+        folder = QFileDialog.getExistingDirectory(self, "Cartella per le maschere", self._last_dir())
+        if folder:
+            n = masks.export_masks(self.chunk, folder)
+            self._info("Maschere", f"{n} maschere scritte in {folder} (nome della foto + _mask.png).")
+
+    def masks_from_background(self) -> None:
+        if not self._need_chunk():
+            return
+        from ..engine import masks
+
+        v = ParamDialog.ask(self, "Maschere dallo sfondo", [
+            Field("folder", "Cartella delle foto dello sfondo", "", kind="dir"),
+            Field("tolerance", "Tolleranza (livelli di colore)", 12.0, minimum=1.0, maximum=120.0, decimals=0)],
+            intro="Foto dello sfondo senza l'oggetto, dalle stesse posizioni (con lo stesso nome delle foto, o una "
+                  "sola foto per tutte se la fotocamera e' fissa): l'oggetto e' cio' che cambia.")
+        if not v or not v["folder"]:
+            return
+        cams = self._mask_targets()
+        self.run_task("Maschere dallo sfondo", lambda p: masks.masks_from_background(
+            self.chunk, v["folder"], v["tolerance"], cams=cams, progress=p), self._masks_done("dallo sfondo"),
+            refresh=False)
+
+    def masks_from_colour(self) -> None:
+        if not self._need_chunk():
+            return
+        from ..engine import masks
+
+        v = ParamDialog.ask(self, "Maschere da un colore", [
+            Field("colour", "Colore del fondale", (40, 160, 60), kind="color"),
+            Field("tolerance", "Tolleranza (distanza RGB)", 40.0, minimum=5.0, maximum=200.0, decimals=0)],
+            intro="Ogni pixel vicino al colore del fondale (un telo verde o blu) viene mascherato.")
+        if not v:
+            return
+        cams = self._mask_targets()
+        self.run_task("Maschere da un colore", lambda p: masks.masks_from_colour(
+            self.chunk, v["colour"], v["tolerance"], cams=cams, progress=p), self._masks_done("dal colore"),
+            refresh=False)
+
+    def masks_from_model(self) -> None:
+        if not self._need_chunk(aligned=True, product="model"):
+            return
+        from ..engine import masks
+
+        cams = [c for c in self._mask_targets() if c.aligned]
+        self.run_task("Maschere dal modello", lambda p: masks.masks_from_model(self.chunk, cams=cams, progress=p),
+                      self._masks_done("dal modello"), refresh=False)
+
+    def masks_with_sam(self) -> None:
+        if not self._need_chunk():
+            return
+        if not self._sam_available(then=self.masks_with_sam):
+            return
+        from ..engine import masks
+
+        cams = self._mask_targets()
+        segmenter = self._segmenter()
+        self.run_task("Maschere con SAM 2.1", lambda p: masks.masks_with_sam(self.chunk, segmenter, cams=cams,
+                                                                            progress=p),
+                      self._masks_done("con SAM 2.1"), refresh=False)
+
+    def masks_remove(self, selected: bool = True) -> None:
+        if not self._need_chunk():
+            return
+        from ..engine import masks
+
+        n = masks.remove_masks(self.chunk, self.photos.selected_cameras() if selected else None)
+        self.photo_view.draw_mask()
+        self.statusBar().showMessage(f"{n} maschere rimosse", 8000)
+        if n:
+            self._dirty(True)
+
+    def calibrate_colours(self) -> None:
+        """*Strumenti > Calibra i colori delle foto*: gains and vignetting, then a summary."""
+        if not self._need_chunk(aligned=True):
+            return
+        if not (self.chunk.product_path("point_cloud") or self.chunk.tie_points is not None):
+            self._warn("Serve la nuvola densa (o almeno i punti di legame).")
+            return
+
+        def done(info):
+            gains = [sum(g) / 3 for g in info["gains"].values()]
+            text = (f"Correzione misurata su {info['observations']:,} osservazioni di punti visti da piu' foto.\n\n"
+                    f"Differenza di colore tra le foto: {info['rms_before'] * 100:.1f}% prima, "
+                    f"{info['rms_after'] * 100:.1f}% dopo.\n"
+                    f"Esposizione delle foto: da {min(gains):.2f} a {max(gains):.2f} volte la media.").replace(",", ".")
+            import math
+
+            corner = [100 * (1 - math.exp(sum(b))) for b in info["vignetting"].values()]  # at the corners (r = 1)
+            if any(abs(c) >= 1 for c in corner):
+                text += "\nVignettatura agli angoli: " + ", ".join(
+                    f"{abs(c):.0f}% piu' {'scuri' if c > 0 else 'chiari'}" for c in corner)
+            self._info("Colori delle foto", text + "\n\nOrtofoto e texture costruite da ora in poi la usano.")
+
+        self.run_task("Calibrazione dei colori", lambda p: self.chunk.calibrate_colours(progress=p), done,
+                      refresh=False)
 
     def process_all(self) -> None:
         if not self._need_chunk():

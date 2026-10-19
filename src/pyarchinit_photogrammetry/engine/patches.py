@@ -176,7 +176,7 @@ def update_orthomosaic(chunk: Chunk, progress: Progress | None = None, workers: 
     from rasterio.enums import Resampling
     from rasterio.windows import Window
 
-    from .ortho import _context, _on_grid, _run_tiles, _surface
+    from .ortho import _context, _on_grid, _run_tiles, _surface, correction_for, stored_blending
     from .visibility import raycaster_for_chunk, readable_cameras
 
     progress = progress or Progress()
@@ -211,9 +211,10 @@ def update_orthomosaic(chunk: Chunk, progress: Progress | None = None, workers: 
     surf = _on_grid(_surface(chunk, resolution, meta.get("surface", "dem"), raycaster, lock), (t.c, t.f),
                     (h, w), resolution)
     current = [dict(p) for p in meta.get("patches") or []]
-    ctx = _context(chunk, resolution, cams, surf, raycaster, meta.get("blending", "mosaic"),
+    blending, sigma = stored_blending(meta)  # as the file was made, so that the patches match the rest
+    ctx = _context(chunk, resolution, cams, surf, raycaster, blending,
                    meta.get("max_angle", 70.0), meta.get("max_cameras", 8), workers, meta.get("hidden_classes"),
-                   current, 512, lock)
+                   current, 512, lock, sigma, correction_for(chunk, bool(meta.get("colour_correction"))))
     ctx.redo = [_geometry(p["polygon"]) for p in changed]
     ctx.base = base
     boxes = [g.bounds for g in ctx.redo]
@@ -284,7 +285,7 @@ def photos_for_area(chunk: Chunk, polygon, limit: int = 12, skip_unreadable: boo
     vehicle comes out whole, as that photo shows it."""
     from shapely import contains_xy
 
-    from .ortho import _colour, _context, _on_grid, _surface
+    from .ortho import _colour, _context, _on_grid, _surface, stored_blending
     from .visibility import project_valid, raycaster_for_chunk, readable_cameras
 
     geom = _geometry(polygon)
@@ -302,7 +303,7 @@ def photos_for_area(chunk: Chunk, polygon, limit: int = 12, skip_unreadable: boo
         return []
     world = np.column_stack([X[ok], Y[ok], z.ravel()[ok]])
     meta = chunk.meta.get("orthomosaic") or {}
-    ctx = _context(chunk, res, cams, surf, raycaster, meta.get("blending", "mosaic"), meta.get("max_angle", 70.0),
+    ctx = _context(chunk, res, cams, surf, raycaster, stored_blending(meta)[0], meta.get("max_angle", 70.0),
                    meta.get("max_cameras", 8), 1, None, None, 512, lock)
     pts = world @ ctx.inv[:3, :3].T + ctx.inv[:3, 3]
     x0, y0, x1, y1 = geom.bounds
@@ -350,16 +351,18 @@ def preview_area(chunk: Chunk, polygon, photos=None, max_side: int = 320, margin
     """The orthophoto of the area of ``polygon`` (and ``margin`` around it) from ``photos``
     only (labels; None: the photos the orthomosaic would choose, with its patches), RGBA
     ``(h, w, 4)``, and its bounds (xmin, ymin, xmax, ymax)."""
-    from .ortho import render_area
+    from .ortho import correction_for, render_area, stored_blending
 
     bounds, shape, res = preview_grid(polygon, max_side, margin)
     cams = None if photos is None else [chunk.camera(p) for p in photos]
     meta = chunk.meta.get("orthomosaic") or {}
+    blending, sigma = stored_blending(meta)
     rgba = render_area(chunk, (bounds[0], bounds[3]), shape, res, cams=cams, surface=_surface_kind(chunk),
                        max_angle=89.0 if photos is not None else meta.get("max_angle", 70.0),
                        patches=patches(chunk) if (photos is None and patches_too) else None,
-                       blending=meta.get("blending", "mosaic"),
-                       max_cameras=len(cams) if cams else meta.get("max_cameras", 8))
+                       blending=blending, blend_sigma=sigma,
+                       max_cameras=len(cams) if cams else meta.get("max_cameras", 8),
+                       correction=correction_for(chunk, bool(meta.get("colour_correction"))))
     return np.moveaxis(rgba, 0, -1), bounds
 
 
@@ -370,7 +373,7 @@ def previews(chunk: Chunk, polygon, photos, max_side: int = 320, surfaces=SURFAC
     photo frames every cell it sees, so no occlusion is tested."""
     from shapely import contains_xy
 
-    from .ortho import _context, _on_grid, _PhotoCache, _surface, _tile
+    from .ortho import _context, _on_grid, _PhotoCache, _surface, _tile, correction_for
 
     progress = progress or (lambda *_a, **_k: None)
     bounds, shape, res = preview_grid(polygon, max_side)
@@ -386,15 +389,16 @@ def previews(chunk: Chunk, polygon, photos, max_side: int = 320, surfaces=SURFAC
     lock = threading.Lock()
     surf = _on_grid(_surface(chunk, res, kind, raycaster, lock), (bounds[0], bounds[3]), shape, res)
     cams = [chunk.camera(p) for p in photos]
-    cache = _PhotoCache(len(cams) + 2)
+    meta = chunk.meta.get("orthomosaic") or {}
+    cache = _PhotoCache(len(cams) + 2, correction_for(chunk, bool(meta.get("colour_correction"))))
     out = {}
     jobs = [(cam, s) for cam in cams for s in surfaces]
     for i, (cam, s) in enumerate(jobs):
         progress(i / max(len(jobs), 1), f"Area vista da {cam.label}")
         patch = {"id": "anteprima", "polygon": np.asarray(polygon, float)[:, :2].tolist(), "photos": [cam.label],
                  "mode": "assign", "surface": s}
-        ctx = _context(chunk, res, [cam], surf, raycaster, "mosaic", 89.0, 1, 1, None, [patch],
-                       max(shape), lock)
+        ctx = _context(chunk, res, [cam], surf, raycaster, "disabled", 89.0, 1, 1, None, [patch],
+                       max(shape), lock)  # one photo: nothing to blend
         ctx.cache, ctx.occlusion = cache, False
         block = _tile(ctx, 0, 0)
         rgba = np.zeros((*shape, 4), np.uint8) if block is None else np.moveaxis(block, 0, -1)
@@ -644,7 +648,9 @@ def retexture(chunk: Chunk, photos, faces=None, polygon=None, mode: str = "assig
     tri_px = np.stack([uv[..., 0] * width, (1.0 - uv[..., 1]) * height], -1)
     progress(0.42, "Texels of the faces")
     fi, cols, rows, bary = _texels(tri_px, width, height)
-    cache = ImageCache(chunk, max_items=3)
+    from .ortho import correction_for
+
+    cache = ImageCache(chunk, 3, correction_for(chunk, bool((chunk.meta.get("texture") or {}).get("colour_correction"))))
     used = np.unique(choice[choice >= 0])
     written = 0
     for done, k in enumerate(used):

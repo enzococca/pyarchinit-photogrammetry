@@ -255,13 +255,16 @@ def mesh(project: Path,
                                                                "(default: twice the depth-map pixel)"),
          classes: Optional[str] = typer.Option(None, help="dense cloud: only these " + CLASSES_HELP),
          texture: bool = True, texture_size: int = 4096,
+         colour: Optional[bool] = typer.Option(None, "--colour/--no-colour",
+                                               help="colour correction of the photos (default: if calibrated)"),
          skip_unreadable: bool = typer.Option(False, help=SKIP_HELP), chunk: Optional[str] = None):
     """Mesh (Poisson, height field or fusion of the depth maps) and texture."""
     doc, ch = _open(project, chunk)
     m = ch.build_model(source=source, surface=surface, face_count=int(faces) if faces.isdigit() else faces,
                        voxel_size=voxel_size, classes=_classes(classes), progress=print_progress)
     if texture:
-        ch.build_texture(texture_size=texture_size, progress=print_progress, skip_unreadable=skip_unreadable)
+        ch.build_texture(texture_size=texture_size, progress=print_progress, skip_unreadable=skip_unreadable,
+                         colour_correction=colour)
     doc.save()
     typer.echo(f"{len(m.faces):,} faces")
 
@@ -278,7 +281,12 @@ def dem(project: Path, resolution: Optional[float] = None, source: str = "point_
 
 
 @app.command()
-def ortho(project: Path, resolution: Optional[float] = None, surface: str = "dem", blending: str = "mosaic",
+def ortho(project: Path, resolution: Optional[float] = None, surface: str = "dem",
+          blending: str = typer.Option("mosaic", help="mosaic (seamless), disabled (one photo per cell) or average"),
+          colour: Optional[bool] = typer.Option(None, "--colour/--no-colour",
+                                                help="colour correction of the photos (default: if calibrated)"),
+          ghosting: bool = typer.Option(False, help="leave out people and vehicles seen by a few photos"),
+          fill_holes: bool = typer.Option(True, help="fill holes of at most 100 cells from their edges"),
           hide_classes: Optional[str] = typer.Option(None, help="transparent where the surface is of these "
                                                                 + CLASSES_HELP),
           skip_unreadable: bool = typer.Option(False, help=SKIP_HELP),
@@ -289,7 +297,8 @@ def ortho(project: Path, resolution: Optional[float] = None, surface: str = "dem
     doc, ch = _open(project, chunk)
     p = ch.build_orthomosaic(resolution=resolution, surface=surface, blending=blending,
                              hide_classes=_classes(hide_classes), progress=print_progress,
-                             skip_unreadable=skip_unreadable, max_angle=max_angle)
+                             skip_unreadable=skip_unreadable, max_angle=max_angle, colour_correction=colour,
+                             ghosting=ghosting, fill_holes=fill_holes)
     doc.save()
     typer.echo(str(p))
 
@@ -900,6 +909,19 @@ def doctor():
     from .doctor import main as doctor_main
 
     raise SystemExit(doctor_main())
+
+
+@app.command("calibrate-colours")
+def calibrate_colours(project: Path, vignetting: bool = True, samples: int = 20000, chunk: Optional[str] = None):
+    """Exposure gain of every photo and vignetting of every lens (used by orthomosaic and texture)."""
+    doc, ch = _open(project, chunk)
+    info = ch.calibrate_colours(vignetting=vignetting, samples=samples, progress=print_progress)
+    doc.save()
+    gains = [sum(g) / 3 for g in info["gains"].values()]
+    typer.echo(f"{info['observations']:,} observations; colour scatter {info['rms_before']:.3f} -> "
+               f"{info['rms_after']:.3f}; gains {min(gains):.2f}-{max(gains):.2f}")
+    for sensor, b in info["vignetting"].items():
+        typer.echo(f"sensor {sensor}: falloff at the corners {sum(b):+.3f} (log)")
 
 
 @app.command()

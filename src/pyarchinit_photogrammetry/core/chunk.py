@@ -230,12 +230,16 @@ class Chunk:
 
     # ------------------------------------------------------------- alignment
     def match_photos(self, quality: str = "high", keypoint_limit: int = 40000, tiepoint_limit: int = 8000,
-                     pair_selection: str = "auto", progress: ProgressCallback | None = None) -> None:
-        """Detect and match features (SIFT) between photos."""
+                     pair_selection: str = "auto", progress: ProgressCallback | None = None,
+                     exclude_stationary: bool = False) -> None:
+        """Detect and match features (SIFT) between photos; masked areas are left out.
+        ``exclude_stationary``: matches that do not move between photos dropped (the background
+        of a turntable photographed from a fixed camera)."""
         from ..engine import sfm
 
         sfm.match_photos(self, quality=quality, keypoint_limit=keypoint_limit, tiepoint_limit=tiepoint_limit,
-                         pair_selection=pair_selection, progress=as_progress(progress))
+                         pair_selection=pair_selection, progress=as_progress(progress),
+                         exclude_stationary=exclude_stationary)
 
     def align_cameras(self, progress: ProgressCallback | None = None) -> int:
         """Estimate camera poses and sparse tie points. Returns the number of aligned photos.
@@ -516,14 +520,17 @@ class Chunk:
                                    progress=as_progress(progress))
 
     def build_texture(self, texture_size: int = 4096, progress: ProgressCallback | None = None,
-                      skip_unreadable: bool = False, mapping: str = "auto") -> Path:
+                      skip_unreadable: bool = False, mapping: str = "auto",
+                      colour_correction: bool | None = None) -> Path:
         """Texture of the model: ``mapping`` "orthophoto" (adaptive, for terrain seen from the
         air), "generic" (objects) or "auto". Returns the texture image (beside ``model.ply``,
-        which gets the texture coordinates)."""
+        which gets the texture coordinates). ``colour_correction``: see :meth:`calibrate_colours`
+        (None = the one measured in the chunk, if any)."""
         from ..engine import texturing
 
         return texturing.build_texture(self, texture_size=texture_size, progress=as_progress(progress),
-                                       skip_unreadable=skip_unreadable, mapping=mapping)
+                                       skip_unreadable=skip_unreadable, mapping=mapping,
+                                       colour_correction=colour_correction)
 
     def build_dem(self, resolution: float | None = None, source: str = "point_cloud", interpolate: bool = True,
                   classes=None, progress: ProgressCallback | None = None) -> Path:
@@ -537,17 +544,34 @@ class Chunk:
     def build_orthomosaic(self, resolution: float | None = None, surface: str = "dem", blending: str = "mosaic",
                           hide_classes=None, progress: ProgressCallback | None = None,
                           skip_unreadable: bool = False, workers: int | None = None,
-                          max_angle: float = 70.0) -> Path:
+                          max_angle: float = 70.0, blend_sigma: float = 8.0,
+                          colour_correction: bool | None = None, ghosting: bool = False,
+                          fill_holes: bool = False) -> Path:
         """Orthomosaic (GeoTIFF RGBA), made tile by tile (any size). ``hide_classes``: where the
         visible surface belongs to these classes of the dense cloud the orthomosaic is
         transparent. Photos that cannot be read stop the step unless ``skip_unreadable``.
         ``workers``: tiles made at once (default: the cores but two). ``max_angle``: cells seen
-        only from further than this from the vertical (degrees) stay transparent."""
+        only from further than this from the vertical (degrees) stay transparent. ``blending``:
+        ``mosaic`` (seamless), ``disabled`` or ``average``; ``colour_correction``: gains of the
+        photos and vignetting (None = the one measured in the chunk, see :meth:`calibrate_colours`);
+        ``ghosting``: people and vehicles seen by a few photos left out; ``fill_holes``: small holes
+        no photo sees filled from their edges."""
         from ..engine import ortho
 
         return ortho.build_orthomosaic(self, resolution=resolution, surface=surface, blending=blending,
                                        hide_classes=hide_classes, progress=as_progress(progress),
-                                       skip_unreadable=skip_unreadable, workers=workers, max_angle=max_angle)
+                                       skip_unreadable=skip_unreadable, workers=workers, max_angle=max_angle,
+                                       blend_sigma=blend_sigma, colour_correction=colour_correction,
+                                       ghosting=ghosting, fill_holes=fill_holes)
+
+    def calibrate_colours(self, vignetting: bool = True, samples: int = 20000,
+                          progress: ProgressCallback | None = None) -> dict:
+        """Measure the exposure gain of every photo and the vignetting of every lens on points of
+        the surface seen by several photos (:mod:`engine.colour`); the orthomosaic and the
+        texture use them from now on. Returns the gains, the falloff and the scatter before/after."""
+        from ..engine import colour
+
+        return colour.estimate(self, samples=samples, vignetting=vignetting, progress=as_progress(progress))
 
     def add_ortho_patch(self, polygon, photos, mode: str = "assign") -> dict:
         """A patch of the orthomosaic: inside ``polygon`` (chunk CRS) the colours come only from
