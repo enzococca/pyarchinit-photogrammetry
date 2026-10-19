@@ -220,6 +220,78 @@ def timeline(project: Path, csv: Optional[Path] = typer.Option(None, help="write
         typer.echo(f"written {csv}")
 
 
+@app.command("us-proposal")
+def us_proposal(project: Path, first_us: Optional[int] = typer.Option(None, help="first number (default: after the "
+                                                                                 "last US of the site and project)"),
+                area: str = typer.Option("1", help="area of the new units"),
+                step: float = typer.Option(0.02, help="least elevation step (m) to say which unit covers"),
+                cuts: bool = typer.Option(True, help="propose the cut of each fill"),
+                apply: bool = typer.Option(False, help="give the units their numbers in the project (and add the cuts)"),
+                write: bool = typer.Option(False, help="also write US forms, relations and polygons into PyArchInit"),
+                sito: Optional[str] = typer.Option(None, help="site (default: the site of the project)"),
+                url: Optional[str] = None, chunk: Optional[str] = None):
+    """US numbers, kinds and measurements for the units drawn without a number (SAM), and the
+    stratigraphic relations their contacts suggest, for the US forms and the Extended Matrix."""
+    from .archaeo import us_proposal as up
+    from .archaeo.timeline import units_of
+
+    doc, ch = _open(project, chunk)
+    sito = sito or str(doc.meta.get("sito") or "") or None
+    records = ((ch.meta or {}).get("drawings") or {}).get("units", [])
+    units = units_of(ch)
+    todo = [i for i, u in enumerate(units) if not u.us and (u.attributes or {}).get("gid") is None]
+    if not todo:
+        raise typer.BadParameter("no unit without a US number in the chunk")
+    pa = None
+    if write:
+        if not sito:
+            raise typer.BadParameter("--write needs the site: --sito, or the site of the project")
+        from .pyarchinit import PyArchInit
+
+        pa = PyArchInit.connect(url)
+    if first_us is None:
+        used = [u.us for c in doc.chunks for u in units_of(c)]
+        first_us = max([int(n) for n in used if n and str(n).isdigit()], default=0) + 1
+        if pa is not None:
+            first_us = max(first_us, pa.next_us(sito))
+    prop = up.propose_for_chunk(ch, [units[i] for i in todo], first_us, area=area, sito=sito, step=step, cuts=cuts,
+                                lang="en", progress=print_progress)
+    names = {it["key"]: up._name(it["unit"]) for it in prop["units"]}
+    for it in prop["units"]:
+        m, f = it["measures"], it["fields"]
+        z = f" z {m['z_min']:.3f}-{m['z_max']:.3f}" if m.get("z_min") is not None else ""
+        colour = f" {m['colour']['chip']}" if m.get("colour") else ""
+        typer.echo(f"{'' if it['use'] else '(not used) '}{names[it['key']]}: {f['d_stratigrafica']}, "
+                   f"{m['area_m2']:.2f} m2{z}{colour}")
+    for r in prop["relations"]:
+        step_text = f", step {r['step_m'] * 100:+.1f} cm" if r.get("step_m") is not None else ""
+        typer.echo(f"{names[r['upper']]} {r['relation']} {names[r['lower']]} ({r['why']}{step_text})")
+    if apply or write:
+        for it in prop["units"]:
+            if not it["use"]:
+                continue
+            u = it["unit"]
+            if it["kind"] == "unit":
+                rec = records[todo[it["source"]]]
+                rec.update(us=u.us, tipo=u.tipo, area=u.area, sito=u.sito)
+            else:
+                records.append(u.to_dict())
+                it["record"] = records[-1]
+        doc.save()
+        typer.echo(f"project: {sum(1 for it in prop['units'] if it['use'])} units numbered")
+    if pa is not None:
+        out = up.write_proposal(pa, prop, sito)
+        chosen = [it for it in prop["units"] if it["use"]]
+        polys = [it["unit"] for it in chosen]
+        gids = pa.publish_units(polys, sito, crs=ch.crs)
+        for it, g in zip(chosen, gids):
+            rec = it.get("record") if it["kind"] == "cut" else records[todo[it["source"]]]
+            rec.setdefault("attributes", {})["gid"] = g
+        doc.save()
+        typer.echo(f"PyArchInit: {len(out['created'])} US forms, {out['relations']} relations, {len(gids)} polygons"
+                   + (f"; already there: {', '.join(out['existing'])}" if out["existing"] else ""))
+
+
 @app.command()
 def stones(project: Path, out: Path = typer.Option(..., help="drawing: .dxf, .svg or .geojson"),
            elevation: Optional[str] = typer.Option(None, help="name of an elevation (default: the orthomosaic)"),

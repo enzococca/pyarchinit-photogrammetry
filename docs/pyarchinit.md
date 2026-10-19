@@ -24,6 +24,7 @@ SpatiaLite first can crash GDAL-based code in the same process.
 | `sites()` | `site_table` |
 | `stratigraphic_units(sito, area=None, us=None)` | `us_table` |
 | `us_id(sito, area, us)` | `us_table.id_us` |
+| `next_us(sito)` | the number after the highest (numeric) US of the site |
 | `us_records(sito)` | US -> attributes (used for IFC property sets) |
 | `finds(sito)`, `pottery(sito)`, `documentation(sito)` | `inventario_materiali_table`, `pottery_table`, `documentazione_table` |
 | `search_pottery(rim_cm, max_cm, base_cm, height_cm, signature, sito=None)` | `pottery_table` of every site (or one) ranked by the relative differences of the diameters and height a form shares with the query (rim weighted 2) and, for forms saved with `save_pottery`, by the distance of the profile shapes; `score`, `similarity_pct`, `compared` |

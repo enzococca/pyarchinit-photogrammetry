@@ -191,6 +191,24 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   exposed earlier *covers* the units it overlaps in plan exposed later; the ticked relations go into
   the US forms of PyArchInit in both directions (never twice). A double click on a phase shows it;
   *Salva CSV* writes the report.
+* **US proposal** (*Strumenti > Proponi US e rapporti (Extended Matrix)*, also in the menu of the SAM
+  tool): the units of the chunk without a number - those SAM found on the whole orthomosaic, or drawn -
+  get a US number, the highest units first, after the last US of the site in PyArchInit and of the
+  project; USM where most of the classified dense cloud inside is masonry (cut, floor, deposit and
+  bedrock give the stratigraphic definition; vegetation, finds and excavation equipment are proposed
+  unticked); area in plan, elevations from the DEM and the Munsell colour of the orthomosaic (with the
+  colour calibration) go into the description, the colour and the elevation fields of the form. The
+  relations come from the contacts in plan, with the step of the DEM across them: the unit higher
+  along the contact (by at least the step chosen, 2 cm) *Copre* the other; a unit enclosed in another
+  for three quarters of its outline and not higher is the fill of a cut, which is proposed with it
+  (fill *Riempie* cut, cut *Taglia* the unit around; a unit the cloud calls a cut cuts it directly); a
+  layer against masonry *Si appoggia a* it, or *Copre* it when higher. The window lists units and
+  relations with the reason of each; number, type and definition can be corrected, a double click
+  shows the unit. *Applica al progetto* numbers the units and adds the cuts (the outline of their
+  fill, *Contorno US*); *Applica e scrivi in PyArchInit* also creates the US forms (with `node_uuid`
+  and `entity_uuid`, existing forms left as they are), writes the relations in both directions and
+  the polygons in `pyunitastratigrafiche`: the Extended Matrix that PyArchInit and EMStudio build from
+  the forms then has these nodes and edges.
 * **Paradata**: every export of the cloud, the model, the DEM or the orthomosaic gets a
   `<file>.prov.jsonld` beside it, and so does the copy published in PyArchInit's media (whose
   documentation note gets a one-line summary: photos aligned, control and check RMSE, resolution, CRS,

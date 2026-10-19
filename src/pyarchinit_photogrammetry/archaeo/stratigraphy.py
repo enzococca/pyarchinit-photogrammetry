@@ -13,6 +13,27 @@ STRATIGRAPHIC_INDEX = {1: "Caratterizzazione", 2: "Contorno US"}
 # the kinds of unit of PyArchInit's US form (unita_tipo)
 US_TYPES = ["US", "USM", "USR", "USD", "USV", "USVs", "USVn", "SF", "VSF", "CON", "DOC", "TSU", "SE"]
 UNIT_FIELDS = ("stratigraph_index_us", "tipo_us_s", "rilievo_originale", "disegnatore", "data", "tipo_doc", "nome_doc")
+# the stratigraphic relations of PyArchInit's US forms (Italian, English, German, as its own table of
+# reciprocal relations) -> (the relation said from the start of the edge, the edge of the Extended
+# Matrix / s3dgraphy, declared from the other end: True; None for the relations without a direction)
+RELATION_EDGES = {
+    "copre": ("Copre", "overlies", False), "coperto da": ("Copre", "overlies", True),
+    "taglia": ("Taglia", "cuts", False), "tagliato da": ("Taglia", "cuts", True),
+    "riempie": ("Riempie", "fills", False), "riempito da": ("Riempie", "fills", True),
+    "si appoggia a": ("Si appoggia a", "abuts", False), "gli si appoggia": ("Si appoggia a", "abuts", True),
+    "posteriore a": ("Posteriore a", "is_after", False), "anteriore a": ("Posteriore a", "is_after", True),
+    "uguale a": ("Uguale a", "equals", None), "si lega a": ("Si lega a", "bonded_to", None),
+    "covers": ("Covers", "overlies", False), "covered by": ("Covers", "overlies", True),
+    "cuts": ("Cuts", "cuts", False), "cut by": ("Cuts", "cuts", True),
+    "fills": ("Fills", "fills", False), "filled by": ("Fills", "fills", True),
+    "abuts": ("Abuts", "abuts", False), "supports": ("Abuts", "abuts", True),
+    "same as": ("Same as", "equals", None), "connected to": ("Connected to", "bonded_to", None),
+    "liegt über": ("Liegt über", "overlies", False), "liegt unter": ("Liegt über", "overlies", True),
+    "schneidet": ("Schneidet", "cuts", False), "wird geschnitten": ("Schneidet", "cuts", True),
+    "verfüllt": ("Verfüllt", "fills", False), "wird verfüllt durch": ("Verfüllt", "fills", True),
+    "stützt sich auf": ("Stützt sich auf", "abuts", False), "wird gestüzt von": ("Stützt sich auf", "abuts", True),
+    "bindet an": ("Bindet an", "bonded_to", None), "entspricht": ("Entspricht", "equals", None),
+}
 # columns of pyarchinit_quote (spot heights)
 QUOTE_FIELDS = ("sito_q", "area_q", "us_q", "unita_tipo_q", "quota_q", "unita_misu_q", "data", "disegnatore",
                 "rilievo_originale")
@@ -63,6 +84,29 @@ class UnitPolygon:
 
         return cls(wkt.loads(d["wkt"]), us=d.get("us"), area=d.get("area"), tipo=d.get("tipo") or "US",
                    attributes=dict(d.get("attributes") or {}), sito=d.get("sito"))
+
+
+def stratigraphic_edges(declarations) -> list[tuple[str, str, str, str | None]]:
+    """The relations declared in the US forms as edges, each fact once. ``declarations``:
+    ``(us, [[relation, other us, ...], ...])`` (the ``rapporti`` of each form); returns ``(from,
+    relation, to, edge)``: the relation said from the start of the edge (``Coperto da 1`` in the
+    form of US 2 is ``1 Copre 2``, the same edge as ``Copre 2`` in the form of US 1) and its edge of
+    the Extended Matrix (:data:`RELATION_EDGES`; None for a relation it does not know, kept as it
+    was declared)."""
+    out, seen = [], set()
+    for us, rels in declarations:
+        us = str(us).strip()
+        for rel in rels or []:
+            name, other = str(rel[0]).strip(), str(rel[1]).strip() if len(rel) > 1 else ""
+            if not name or not other or other == us:
+                continue
+            forward, edge, inverse = RELATION_EDGES.get(name.lower(), (name, None, False))
+            a, b = (other, us) if inverse else (us, other)
+            key = (edge or forward, *sorted((a, b))) if inverse is None else (edge or forward, a, b)
+            if key not in seen:
+                seen.add(key)
+                out.append((a, forward, b, edge))
+    return out
 
 
 def mask_to_polygons(mask: np.ndarray, transform, simplify: float = 0.0, min_area: float = 0.0):

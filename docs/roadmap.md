@@ -116,8 +116,13 @@ markers in too few photos.
 * Pottery: rim diameter from a sherd, profile-based typology search against `pottery_table`. *Done*
   (*Strumenti > Profilo ceramico da mesh*: rim diameter and arc kept from the circle of the lip,
   *Cerca forme simili*, *Salva in PyArchInit*; `ppg pyarchinit pottery-search`, `pottery-save`).
-* Automatic US proposal from SAM masks + stratigraphic relations for the Extended Matrix.
-* IFC with stratigraphic relations and s3dgraphy/StratiGraph identifiers (`node_uuid`).
+* Automatic US proposal from SAM masks + stratigraphic relations for the Extended Matrix. *Done*
+  (*Strumenti > Proponi US e rapporti*: numbers, kinds and measurements, relations from the contacts
+  and the DEM, cuts of the fills; written into the US forms from which PyArchInit and EMStudio build
+  the matrix; `ppg us-proposal`).
+* IFC with stratigraphic relations and s3dgraphy/StratiGraph identifiers (`node_uuid`). *Done*
+  (the `node_uuid` of the US form is the `GlobalId` of its element; one `IfcRelConnectsElements` per
+  relation with its Extended Matrix edge; see [bim.md](bim.md)).
 
 ## Research
 

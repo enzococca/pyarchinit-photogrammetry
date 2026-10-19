@@ -134,6 +134,8 @@ class MainWindow(QMainWindow):
         self._timeline = None  # Strumenti > Fasi dello scavo, a window beside this one
         self._pottery_win = None  # Strumenti > Profilo ceramico: drawing, similar forms, save in PyArchInit
         self._pottery: dict | None = None  # the last profile measured (profile, measures, id_rep once saved)
+        self._proposal_win = None  # Strumenti > Proponi US e rapporti
+        self._proposal: dict | None = None
         if i18n.current() != "it":  # the menu bar of macOS is native: its menus are never shown as widgets
             i18n.translate_menus(self)
         if check_updates if check_updates is not None else not os.environ.get("PPG_NO_UPDATE_CHECK"):
@@ -565,6 +567,8 @@ class MainWindow(QMainWindow):
         self.sam_menu.addSeparator()
         self._act(self.sam_menu, tr("Tutta l'ortofoto (scansione a tasselli)..."), lambda: self.sam_whole_orthomosaic(),
                   processing=True, icon_name="sam")
+        self._act(self.sam_menu, tr("Proponi US e rapporti (Extended Matrix)..."), self.propose_units,
+                  processing=True, icon_name="timeline")
         model_menu = self.sam_menu.addMenu(tr("Modello"))
         model_group = QActionGroup(self)
         self.sam_model_actions = {}
@@ -607,6 +611,10 @@ class MainWindow(QMainWindow):
         self.a_contours = self._act(m, tr("Curve di livello..."), self.contours, processing=True, icon_name="contours")
         self.a_volume = self._act(m, tr("Volume scavo / riporto..."), self.compute_volume, processing=True,
                                   icon_name="volume")
+        self._act(m, tr("Proponi US e rapporti (Extended Matrix)..."), self.propose_units, processing=True,
+                  icon_name="timeline",
+                  tip=tr("Numero di US, tipo e misure per le unita' senza numero (SAM o disegnate) e i rapporti "
+                         "stratigrafici dei loro contatti, da controllare e scrivere nelle schede US"))
         self._act(m, tr("Fasi dello scavo (volumi e rapporti)..."), self.excavation_phases, processing=True,
                   icon_name="timeline",
                   tip=tr("Un chunk con il DEM per ogni rilievo dello scavo: volume asportato da una fase all'altra e "
@@ -4318,6 +4326,127 @@ class MainWindow(QMainWindow):
             self.reference.set_chunk(self.chunk)
 
     # ---------------------------------------------------------------- appearance and help
+    def propose_units(self) -> None:
+        """Strumenti > Proponi US e rapporti: a US number, a kind and the measurements for every unit
+        without a number (SAM, drawn) and the relations their contacts suggest
+        (:mod:`archaeo.us_proposal`), in a window where they are checked before being applied."""
+        from ..archaeo import us_proposal
+        from ..archaeo.timeline import units_of
+        from .us_proposal_dialog import UsProposalDialog
+
+        if not self._need_chunk():
+            return
+        todo = [i for i, u in enumerate(self.units) if not u.us and (u.attributes or {}).get("gid") is None]
+        if not todo:
+            self._warn("Nessuna unita' senza numero di US: segmenta l'ortofoto con SAM (Tutta l'ortofoto) o disegna "
+                       "le unita' prima.")
+            return
+        site = self.project_site()
+        used = [u.us for u in self.units] + [u.us for ch in self.doc.chunks if ch is not self.chunk
+                                             for u in units_of(ch)]
+        first = max([int(n) for n in used if n and str(n).isdigit()], default=0) + 1
+        if self.pa is not None and site:
+            try:
+                first = max(first, self.pa.next_us(site))
+            except Exception as exc:  # the database does not answer: the project's numbers
+                log.warning("Numeri di US di PyArchInit non letti: %s", exc)
+        areas = [u.area for u in self.units if u.area]
+        v = ParamDialog.ask(self, "Proponi US e rapporti", [
+            Field("first", "Primo numero di US", int(first), minimum=1, maximum=10 ** 6),
+            Field("area", "Area", max(set(areas), key=areas.count) if areas else "1"),
+            Field("step", "Dislivello minimo per dire chi copre (cm)", 2.0, minimum=0.1, maximum=100.0, decimals=1),
+            Field("cuts", "Proponi il taglio dei riempimenti", True)],
+            intro=tr("{0} unita' senza numero di US nel chunk {1}. I numeri partono dopo l'ultima US del sito {2} e "
+                     "del progetto.", len(todo), self.chunk.label, site or tr("(nessun sito scelto)")))
+        if not v:
+            return
+        units, chunk, lang = [self.units[i] for i in todo], self.chunk, i18n.current()
+
+        def job(p):
+            return us_proposal.propose_for_chunk(chunk, units, v["first"], area=v["area"].strip() or None,
+                                                 sito=site or None, step=v["step"] / 100.0, cuts=v["cuts"], lang=lang,
+                                                 progress=p)
+
+        def done(prop):
+            for it in prop["units"]:
+                it["index"] = todo[it["source"]] if it["source"] is not None else None
+            self._proposal = prop
+            if self._proposal_win is not None:
+                self._proposal_win.close()
+            self._proposal_win = UsProposalDialog(prop, can_write=self.pa is not None and bool(site), parent=self)
+            self._proposal_win.apply_requested.connect(self._apply_proposal)
+            self._proposal_win.unit_chosen.connect(self._show_proposed_unit)
+            self._proposal_win.show()
+            self._proposal_win.raise_()
+
+        self.run_task("Proposta di US", job, done, refresh=False, save=False)
+
+    def _show_proposed_unit(self, key: int) -> None:
+        it = self._proposal["units"][key]
+        if it["kind"] == "cut":
+            it = self._proposal["units"][it["fill"]]
+        rect = QRectF()
+        for lay in self.ortho_view.layers.values():
+            for item, _label, attrs in lay["features"]:
+                if attrs.get("_unit") == it["index"]:
+                    rect = rect.united(item.sceneBoundingRect())
+        self.show_view(self.ortho_view)
+        self.ortho_view.zoom_to(rect)
+
+    def _apply_proposal(self, keys, rels, write: bool) -> None:
+        """The units and relations ticked in the proposal: numbers and cuts in the project, and with
+        ``write`` the US forms, the relations and the polygons in PyArchInit."""
+        from ..archaeo import us_proposal
+
+        prop, chosen = self._proposal, set(keys)
+        for it in prop["units"]:
+            it["use"] = it["key"] in chosen
+            if not it["use"]:
+                continue
+            new = it["unit"]
+            if it["kind"] == "unit":
+                u = self.units[it["index"]]
+                u.us, u.tipo, u.area, u.sito = new.us, new.tipo, new.area, new.sito
+            else:  # a cut: a new unit with the outline of its fill, in the same layer
+                fill = self.units[prop["units"][it["fill"]]["index"]]
+                new.attributes = {"_layer": (fill.attributes or {}).get("_layer"), "stratigraph_index_us": 2}
+                self.units.append(new)
+                it["index"] = len(self.units) - 1
+        for i, rel in enumerate(prop["relations"]):
+            rel["use"] = i in set(rels)
+        self._redraw_overlays()
+        self._dirty(True)
+        if self._proposal_win is not None:
+            self._proposal_win.close()
+        n = len(chosen)
+        if not write:
+            self.statusBar().showMessage(tr("{0} unita' numerate nel progetto", n), 10000)
+            return
+        pa, site, crs = self.pa, self.project_site(), self.chunk.crs
+        units = [self.units[it["index"]] for it in prop["units"] if it["use"]]
+        units = [u for u in units if (u.attributes or {}).get("gid") is None]
+
+        def job(p):
+            p(0.1, "Schede US")
+            out = us_proposal.write_proposal(pa, prop, site)
+            p(0.7, "Unita' stratigrafiche")
+            return out, pa.publish_units(units, site, crs=crs) if units else []
+
+        def done(r):
+            out, gids = r
+            for u, g in zip(units, gids):
+                u.attributes["gid"] = g
+            self._redraw_overlays()
+            self._dirty(True)
+            self.pa_pane.refresh()
+            text = tr("Sito {0}: {1} schede US create, {2} rapporti aggiunti, {3} poligoni in pyunitastratigrafiche.",
+                      site, len(out["created"]), out["relations"], len(gids))
+            if out["existing"]:
+                text += "\n" + tr("Schede gia' presenti, lasciate come erano: {0}", ", ".join(out["existing"]))
+            self._info("PyArchInit", text)
+
+        self.run_task("Proposta di US in PyArchInit", job, done, refresh=False, save=False)
+
     def excavation_phases(self) -> None:
         """Strumenti > Fasi dello scavo (:mod:`archaeo.timeline`), in a window beside this one."""
         from ..archaeo import timeline

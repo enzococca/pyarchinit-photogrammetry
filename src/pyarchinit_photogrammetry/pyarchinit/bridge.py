@@ -24,7 +24,7 @@ from .media import register_media
 
 US_FIELDS = ["sito", "area", "us", "unita_tipo", "d_stratigrafica", "d_interpretativa", "descrizione",
              "interpretazione", "periodo_iniziale", "fase_iniziale", "periodo_finale", "fase_finale",
-             "anno_scavo", "schedatore", "rapporti", "quota_min_usm", "quota_max_usm"]
+             "anno_scavo", "schedatore", "rapporti", "quota_min_usm", "quota_max_usm", "node_uuid", "entity_uuid"]
 POTTERY_FIELDS = ["id_rep", "id_number", "sito", "area", "us", "form", "specific_form", "specific_shape", "ware",
                   "fabric", "datazione", "percent", "drawing"]
 POTTERY_WEIGHTS = {"diametro_rim": 2.0, "diametro_max": 1.0, "diametro_bottom": 1.0, "diametro_height": 1.0}
@@ -90,6 +90,11 @@ class PyArchInit:
                "Riempie": "Riempito da", "Riempito da": "Riempie", "Si appoggia a": "Gli si appoggia",
                "Gli si appoggia": "Si appoggia a", "Si lega a": "Si lega a", "Uguale a": "Uguale a",
                "Anteriore a": "Posteriore a", "Posteriore a": "Anteriore a"}
+
+    def next_us(self, sito: str) -> int:
+        """The number after the highest US of the site (numeric ones; 1 for a site without forms)."""
+        numbers = [_num(r.get("us")) for r in self.db.query("us_table", sito=sito)]
+        return int(max([n for n in numbers if n is not None], default=0)) + 1
 
     def us_record(self, sito: str, area: str, us: str, unita_tipo: str | None = None) -> dict | None:
         rows = self.db.query("us_table", sito=sito, area=str(area), us=str(us), unita_tipo=unita_tipo)

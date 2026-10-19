@@ -205,6 +205,10 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
   GeoJSON (`ppg stones`).
 * **Fasi dello scavo**: chunk per data, volume asportato da un rilievo all'altro e per US, rapporti
   stratigrafici suggeriti dall'ordine di asportazione e scritti nelle schede US (`ppg timeline`).
+* **Proposta di US per l'Extended Matrix**: le unita' trovate da SAM ricevono numero di US, tipo (USM
+  dalla nuvola classificata), area, quote e colore Munsell; contatti e DEM suggeriscono i rapporti
+  (copre, riempimento e taglio, si appoggia); dopo il controllo vanno nelle schede US di PyArchInit,
+  da cui si costruisce l'Extended Matrix (`ppg us-proposal`).
 * **Visualizzazioni del rilievo** del DEM: sky-view factor, openness positiva e negativa, rilievo locale
   e multiscala (MSRM), ombreggiatura da piu' direzioni (`ppg relief`), per muri e fossati appena accennati.
 * **Ceramica**: diametro dell'orlo e percentuale conservata dal cerchio del labbro anche su un frammento
@@ -352,7 +356,10 @@ barra.pdf --distance-mm 200` stampa le barre.
   tra il DEM e una base (piano, DEM dopo lo scavo, spessore o quota minima), con volume, area
   e quote; esportazione OBJ per l'Extended Matrix, pubblicazione come media 3D collegato alla US.
 * **BIM**: l'IFC dei proxy contiene quantità per il computo (volume, area, altezza, quote),
-  materiali, gruppi per periodo/fase e rapporti stratigrafici. Dettagli in [docs/bim.md](docs/bim.md).
+  materiali, gruppi per periodo/fase e rapporti stratigrafici, ognuno una volta con il suo arco
+  dell'Extended Matrix; ogni unità ha come `GlobalId` il `node_uuid` della sua scheda US (l'id del
+  suo nodo nell'Extended Matrix / s3dgraphy), quindi la stessa identità nel database, nel matrix e
+  nel modello BIM. Dettagli in [docs/bim.md](docs/bim.md).
 
 ## Interfaccia grafica
 

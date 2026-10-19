@@ -5,6 +5,13 @@ stratigraphic unit become one element per US with a ``Pset_PyArchInit_US``
 property set (site, area, US, type, description, periods). Coordinates are
 stored relative to a local origin and georeferenced with ``IfcMapConversion``
 + ``IfcProjectedCRS`` so that large map coordinates keep full precision.
+
+A unit whose US form has a ``node_uuid`` (the id of its node in the Extended
+Matrix / s3dgraphy, which StratiGraph shares) gets it as its ``GlobalId``
+(:func:`global_id`): the same unit has the same identifier in the matrix, in
+PyArchInit and in the BIM model. The stratigraphic relations of the forms are
+``IfcRelConnectsElements``, one per fact (:func:`archaeo.stratigraphy.stratigraphic_edges`),
+named after the relation and described by the edge of the Extended Matrix.
 """
 from __future__ import annotations
 
@@ -28,6 +35,21 @@ class IfcElement:
     material: str | None = None
     group: str | None = None  # IfcGroup (e.g. "Periodo 1 - Fase 2")
     key: str | None = None  # identifier used by ``relations``
+    global_id: str | None = None  # IFC GlobalId (default a new one)
+
+
+def global_id(node_uuid) -> str | None:
+    """The IFC ``GlobalId`` of a unit from the ``node_uuid`` of its US form (the 22 characters of
+    IFC for the same UUID), None when it is not a UUID."""
+    import uuid
+
+    _require()
+    import ifcopenshell.guid
+
+    try:
+        return ifcopenshell.guid.compress(uuid.UUID(str(node_uuid).strip()).hex)
+    except (TypeError, ValueError, AttributeError):
+        return None
 
 
 def _require():
@@ -46,8 +68,10 @@ QTO_UNITS = {"NetVolume": "IfcQuantityVolume", "GrossVolume": "IfcQuantityVolume
 def export_ifc(path: str | Path, elements: list[IfcElement], crs: str | None = None, project: str = "Rilievo",
                site: str = "Sito", origin: np.ndarray | None = None, progress=None,
                relations: list[tuple[str, str, str]] | None = None, spot_heights: list[dict] | None = None) -> Path:
-    """Write IFC4. ``relations``: ``(key_a, relation, key_b)`` between elements (stratigraphic
-    relationships), written as ``IfcRelConnectsElements`` named after the relation.
+    """Write IFC4. ``relations``: ``(key_a, relation, key_b[, edge])`` between elements
+    (stratigraphic relationships), written as ``IfcRelConnectsElements`` named after the relation
+    and described by ``edge`` (of the Extended Matrix) when given. Elements with a ``global_id``
+    keep it (once: a second element with the same id gets a new one).
     ``spot_heights``: points ``{"x", "y", "z", "name", "props"}`` (world) written as
     ``IfcAnnotation`` (object type ``SpotHeight``) with ``props`` in ``Pset_PyArchInit_Quota``."""
     from ..core.progress import as_progress
@@ -98,13 +122,16 @@ def export_ifc(path: str | Path, elements: list[IfcElement], crs: str | None = N
     import ifcopenshell.api.material
     import ifcopenshell.guid
 
-    products, groups, materials = {}, {}, {}
+    products, groups, materials, ids = {}, {}, {}, set()
     for k, el in enumerate(elements):
         progress(0.1 + 0.85 * k / max(len(elements), 1), f"IFC: elemento {k + 1}/{len(elements)} - {el.name}")
         kwargs = {"ifc_class": el.ifc_class, "name": el.name}
         if el.predefined_type:
             kwargs["predefined_type"] = el.predefined_type
         prod = ifcopenshell.api.root.create_entity(model, **kwargs)
+        if el.global_id and el.global_id not in ids:
+            prod.GlobalId = el.global_id
+        ids.add(prod.GlobalId)
         ifcopenshell.api.spatial.assign_container(model, products=[prod], relating_structure=site_e)
         v = np.asarray(el.mesh.vertices, float) - origin
         f = np.asarray(el.mesh.faces, int)
@@ -166,11 +193,12 @@ def export_ifc(path: str | Path, elements: list[IfcElement], crs: str | None = N
         if props:
             pset = ifcopenshell.api.pset.add_pset(model, product=prod, name="Pset_PyArchInit_Quota")
             ifcopenshell.api.pset.edit_pset(model, pset=pset, properties=props)
-    for a, rel, b in relations or []:
+    for a, rel, b, *edge in relations or []:
         if a in products and b in products and a != b:
+            edge = edge[0] if edge else None
+            text = f"{edge} (Extended Matrix)" if edge else "rapporto stratigrafico (PyArchInit)"
             model.create_entity("IfcRelConnectsElements", GlobalId=ifcopenshell.guid.new(), Name=rel,
-                                Description="rapporto stratigrafico (PyArchInit)",
-                                RelatingElement=products[a], RelatedElement=products[b])
+                                Description=text, RelatingElement=products[a], RelatedElement=products[b])
     path = Path(path)
     model.write(str(path))
     return path
@@ -215,6 +243,11 @@ def export_chunk_ifc(chunk, path: str | Path, units=None, us_records: dict | Non
     mesh into one element per stratigraphic unit; ``us_records`` maps US numbers to the
     PyArchInit attributes to store in ``Pset_PyArchInit_US``. ``quote``: the spot heights of
     the project (default those saved in the chunk), with their precision when estimated."""
+    import trimesh
+
+    from ..archaeo.stratigraphy import stratigraphic_edges
+    from ..pyarchinit.bridge import parse_relationships
+
     mesh = chunk.model
     if mesh is None:
         raise RuntimeError("build the model first")
@@ -225,16 +258,25 @@ def export_chunk_ifc(chunk, path: str | Path, units=None, us_records: dict | Non
                                    psets={"Pset_Photogrammetry": {"Chunk": chunk.label, "CRS": chunk.crs,
                                                                   "Faces": int(len(mesh.faces))}}))
     rng = np.random.default_rng(1)
+    parts: dict[tuple, list] = {}  # the polygons of one unit make one element
     for u, sub in split_mesh_by_units(mesh, units or []):
-        rec = (us_records or {}).get(str(u.us), {})
+        parts.setdefault((u.tipo, str(u.us)) if u.us else (u.tipo, None, id(u)), []).append((u, sub))
+    declared = []
+    for pieces in parts.values():
+        u = pieces[0][0]
+        sub = trimesh.util.concatenate([s for _, s in pieces]) if len(pieces) > 1 else pieces[0][1]
+        rec = (us_records or {}).get(str(u.us), {}) if u.us else {}
         props = {"Sito": site, "Area": u.area, "US": u.us, "Tipo": u.tipo, **{k: _plain(v) for k, v in rec.items()}}
-        elements.append(IfcElement(sub, f"{u.tipo} {u.us}", ifc_class="IfcGeographicElement",
+        elements.append(IfcElement(sub, f"{u.tipo} {u.us or '?'}", ifc_class="IfcGeographicElement",
                                    predefined_type="USERDEFINED", psets={"Pset_PyArchInit_US": props},
-                                   color=tuple(rng.uniform(0.3, 0.9, 3))))
+                                   color=tuple(rng.uniform(0.3, 0.9, 3)), key=str(u.us) if u.us else None,
+                                   global_id=global_id(rec.get("node_uuid"))))
+        if u.us:
+            declared.append((str(u.us), parse_relationships(rec.get("rapporti"))))
     if quote is None:
         quote = ((chunk.meta or {}).get("drawings") or {}).get("quote") or []
     return export_ifc(path, elements, crs=chunk.crs, project=chunk.label, site=site or chunk.label,
-                      progress=progress, spot_heights=spot_heights(quote))
+                      progress=progress, spot_heights=spot_heights(quote), relations=stratigraphic_edges(declared))
 
 
 def read_ifc_elements(path: str | Path) -> list[dict]:
@@ -261,7 +303,7 @@ def read_ifc_elements(path: str | Path) -> list[dict]:
             continue
         v = np.array(shp.geometry.verts, float).reshape(-1, 3) + offset
         fc = np.array(shp.geometry.faces, int).reshape(-1, 3)
-        out.append({"name": e.Name, "ifc_class": e.is_a(), "vertices": v, "faces": fc,
+        out.append({"name": e.Name, "ifc_class": e.is_a(), "global_id": e.GlobalId, "vertices": v, "faces": fc,
                     "psets": {k: {kk: vv for kk, vv in val.items() if kk != "id"}
                               for k, val in ue.get_psets(e).items()}})
     return out
@@ -278,12 +320,14 @@ def export_proxies_ifc(proxies, path: str | Path, crs: str | None = None, us_rec
     """IFC4 with one solid ``IfcGeographicElement`` per unit proxy (see :mod:`archaeo.proxies`):
     quantities for the bill of quantities (``Qto_PyArchInit_US``: NetVolume, GrossArea, Height,
     elevations), the US form in ``Pset_PyArchInit_US``, a material per formation, groups per
-    period/phase and the stratigraphic relationships as ``IfcRelConnectsElements``.
+    period/phase, the ``node_uuid`` of the form as ``GlobalId`` and the stratigraphic
+    relationships as ``IfcRelConnectsElements`` (see the module docstring).
     ``survey_mesh`` (world coordinates) adds the photogrammetric surface as context."""
+    from ..archaeo.stratigraphy import stratigraphic_edges
     from ..pyarchinit.bridge import parse_relationships
 
     us_records = us_records or {}
-    elements, relations = [], []
+    elements, declared = [], []
     palette = [(0.9, 0.1, 0.29), (0.24, 0.71, 0.29), (1.0, 0.88, 0.1), (0.26, 0.39, 0.85), (0.96, 0.51, 0.19),
                (0.57, 0.12, 0.71), (0.27, 0.94, 0.94), (0.94, 0.2, 0.9)]
     if survey_mesh is not None:
@@ -300,8 +344,7 @@ def export_proxies_ifc(proxies, path: str | Path, crs: str | None = None, us_rec
         elements.append(IfcElement(p.mesh, p.name, ifc_class="IfcGeographicElement", predefined_type="USERDEFINED",
                                    psets={"Pset_PyArchInit_US": props}, color=palette[i % len(palette)],
                                    quantities=qty, material=str(material) if material else None, group=group,
-                                   key=str(p.us)))
-        for rel, other, _area, _site in parse_relationships(rec.get("rapporti")):
-            relations.append((str(p.us), rel, str(other)))
+                                   key=str(p.us), global_id=global_id(rec.get("node_uuid"))))
+        declared.append((str(p.us), parse_relationships(rec.get("rapporti"))))
     return export_ifc(path, elements, crs=crs, project=project, site=site or project, progress=progress,
-                      relations=relations)
+                      relations=stratigraphic_edges(declared))
