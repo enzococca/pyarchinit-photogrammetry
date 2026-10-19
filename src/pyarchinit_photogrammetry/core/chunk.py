@@ -564,6 +564,18 @@ class Chunk:
                                        blend_sigma=blend_sigma, colour_correction=colour_correction,
                                        ghosting=ghosting, fill_holes=fill_holes)
 
+    def edit_dem(self, polygon, method: str = "plane", value: float | None = None, breaklines=None,
+                 keep_version: bool = True, version_name: str | None = None,
+                 progress: ProgressCallback | None = None) -> dict:
+        """New heights for the DEM inside ``polygon`` from the ground around it: ``method``
+        "plane", "constant" (``value``, default the median around), "idw" or "linear";
+        ``breaklines`` keep their heights. The DEM as it was is kept as a version first
+        (:mod:`engine.dem_edit`)."""
+        from ..engine import dem_edit
+
+        return dem_edit.fill_area(self, polygon, method, value, breaklines, keep_version, version_name,
+                                  progress=as_progress(progress))
+
     def calibrate_colours(self, vignetting: bool = True, samples: int = 20000,
                           progress: ProgressCallback | None = None) -> dict:
         """Measure the exposure gain of every photo and the vignetting of every lens on points of

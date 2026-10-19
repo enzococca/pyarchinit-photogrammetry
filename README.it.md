@@ -180,6 +180,9 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
   di 45.000 x 46.000 pixel di un tell a 1,35 cm/px richiede 4-6 minuti su un Apple M4 Pro. Le celle
   viste solo di traverso (oltre 70 gradi dalla verticale, regolabile) restano trasparenti invece di
   stirare le foto.
+* **Modifica del DEM**: un'area disegnata sul DEM riempita dal terreno attorno (piano, lineare, IDW o
+  quota costante, linee di discontinuità rispettate): alberi, tende e cumuli fuori da curve e volumi;
+  il DEM com'era resta come versione.
 * **Prospetti**: ortofoto e rilievo di un muro sul piano verticale di una traccia di sezione o di tre
   marker, sviluppo di un pozzo o di una torre su un cilindro; ciò che sta davanti al muro si può
   escludere.

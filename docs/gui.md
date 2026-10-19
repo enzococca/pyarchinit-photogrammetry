@@ -144,6 +144,12 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
 
 ## Orthophoto at full resolution and patches
 
+* **Editing the DEM** (drawing bar: *Modifica DEM*, drag a box or click a polygon; or *Modifica il DEM
+  in quest'area* in the menu of a selected polygon): the heights inside the area come again from the
+  ground just outside it - the plane that fits it, a linear interpolation, IDW or a constant height -
+  and the selected lines can be breaklines (the edge of a wall or of a step keeps its heights). Trees,
+  tents, vehicles, spoil heaps or holes of the reconstruction leave contour lines and volumes; the DEM
+  as it was stays among the versions (compare it, make it active again).
 * **Elevations** (*Flusso di lavoro > Prospetto o sviluppo cilindrico*, or *Prospetto* in the Sections
   pane): the orthophoto and the relief of a wall on the vertical plane of a section trace (seen from
   where the photos are, or the side chosen), on the plane of three or more selected markers, or the

@@ -167,8 +167,8 @@ class RasterView(_ZoomView):
     file) so that it opens at once; zooming in further, the visible part is read again from the
     file at the resolution of the screen, up to the full one (``detail``), in a thread."""
 
-    DRAW_MODES = ("polygon", "line", "measure", "quota", "marker", "crop", "patch")
-    AREA_MODES = ("crop", "patch")  # drag a box or click a polygon
+    DRAW_MODES = ("polygon", "line", "measure", "quota", "marker", "crop", "patch", "dem_edit")
+    AREA_MODES = ("crop", "patch", "dem_edit")  # drag a box or click a polygon
     SAM_TOOLS = ("tap", "box", "area")
 
     mouse_world = Signal(float, float, object)  # x, y, z or None
@@ -177,6 +177,8 @@ class RasterView(_ZoomView):
     crop_requested = Signal()  # "crop with the selected polygon" from the selection menu
     patch_finished = Signal(object)  # (N,2) world XY: the area of a patch of the orthomosaic
     patch_requested = Signal()  # "assign photos to the selected polygon" from the selection menu
+    dem_edit_finished = Signal(object)  # (N,2) world XY: an area of the DEM to fill again
+    dem_edit_requested = Signal()  # "edit the DEM in the selected polygon" from the selection menu
     line_finished = Signal(object, object)
     quota_clicked = Signal(float, float)  # spot height at world x, y
     marker_clicked = Signal(float, float)  # a marker at world x, y (the height from the DEM)
@@ -895,6 +897,8 @@ class RasterView(_ZoomView):
         a_patch.setEnabled(polygon and self.kind == "ortho")
         a_photos = menu.addAction("Filtra le foto che inquadrano quest'area")
         a_photos.setEnabled(polygon)
+        a_dem = menu.addAction("Modifica il DEM in quest'area (riempi dal terreno attorno)...")
+        a_dem.setEnabled(polygon)
         a_clear = menu.addAction("Deseleziona tutto")
         chosen = menu.exec(global_pos)
         if chosen is a_del:
@@ -907,6 +911,8 @@ class RasterView(_ZoomView):
             self.patch_requested.emit()
         elif chosen is a_photos:
             self.photos_in_area_requested.emit()
+        elif chosen is a_dem:
+            self.dem_edit_requested.emit()
         elif chosen is a_clear:
             self.clear_selection()
 
@@ -1106,7 +1112,7 @@ class RasterView(_ZoomView):
             super().mouseDoubleClickEvent(ev)
 
     def _area_signal(self, mode: str):
-        return self.patch_finished if mode == "patch" else self.crop_finished
+        return {"patch": self.patch_finished, "dem_edit": self.dem_edit_finished}.get(mode, self.crop_finished)
 
 
 class PhotoView(_ZoomView):

@@ -195,6 +195,13 @@ that every photo sees from further than `max_angle` degrees from the vertical st
 | `build_orthomosaic(ghosting=False)` | where three or more of the candidate photos see a cell, the best one that agrees with their median colour (within 30 levels): people and vehicles seen by a few photos left out |
 | `build_orthomosaic(fill_holes=False)` | holes of at most 100 cells that no photo sees filled from their edges (`cv2.inpaint`, the cells of the same group only); larger holes stay transparent |
 
+## Editing the DEM
+
+| Call | Description |
+| --- | --- |
+| `chunk.edit_dem(polygon, method="plane", value=None, breaklines=None, keep_version=True, version_name=None)`, `engine.dem_edit.fill_area(...)` | new heights for the cells inside `polygon` (chunk CRS) from those in a ring of three cells around it: `plane` (the best-fit plane), `linear` (triangulation of the ring, IDW outside it), `idw`, `constant` (`value`, default the median of the ring); `breaklines` (lines (N, 2) or (N, 3); without z the DEM at their vertices) keep their heights. The DEM as it was is kept as a version first; a DEM of another program is edited as a copy in the chunk folder; overviews refreshed in the window; `chunk.meta["dem_edits"]` lists the edits. Returns `cells`, `dz_mean`, `dz_max`, `version` |
+| `engine.dem_edit.new_heights(known, target, method, value=None)` | the interpolation alone |
+
 ## Elevations: orthophoto and relief on a plane or a cylinder
 
 A frame maps a raster cell `(u, v)` (u along the surface, left to right as the viewer sees it, v up,

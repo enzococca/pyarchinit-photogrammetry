@@ -141,6 +141,8 @@ class MainWindow(QMainWindow):
         self.ortho_view.crop_finished.connect(self._crop_drawn)
         self.ortho_view.crop_requested.connect(self.crop_with_selection)
         self.ortho_view.patch_finished.connect(self._patch_drawn)
+        self.ortho_view.dem_edit_finished.connect(self._dem_edit_drawn)
+        self.ortho_view.dem_edit_requested.connect(self._dem_edit_selected)
         self.ortho_view.patch_requested.connect(self.patch_with_selection)
         self.ortho_view.line_finished.connect(self._section_drawn)
         self.ortho_view.measured.connect(lambda t: (self.statusBar().showMessage(t, 30000),
@@ -401,6 +403,7 @@ class MainWindow(QMainWindow):
                                 ("marker", "Marker: clic su un punto, proiettato sulle foto che lo vedono", "marker"),
                                 ("crop", "Ritaglio: riquadro o poligono (esporta o ritaglia i prodotti)", "crop"),
                                 ("patch", "Patch dell'ortofoto: assegna le immagini a un'area", "patch"),
+                                ("dem_edit", "Modifica DEM: area da riempire dal terreno attorno", "dem"),
                                 ("sam", "Segment Anything (SAM)", "sam")):
             a = QAction(icon(ic), label, self, checkable=True)
             a.setChecked(mode == "pan")
@@ -2447,6 +2450,60 @@ class MainWindow(QMainWindow):
             max_angle=v.get("max_angle", 70.0), colour_correction=bool(v.get("colour", True)),
             ghosting=bool(v.get("ghosting")), fill_holes=bool(v.get("fill_holes", True)))),
             lambda _r: self._show_raster("ortho"))
+
+    # ---------------------------------------------------------------- DEM editing
+    def _dem_edit_drawn(self, xy) -> None:
+        from shapely.geometry import Polygon
+
+        geom = Polygon(np.asarray(xy, float)[:, :2])
+        if not geom.is_valid or geom.area <= 0:
+            self._warn("L'area non e' valida (i lati si incrociano o non ha area): ridisegnala.")
+            return
+        self.edit_dem_area(geom)
+
+    def _dem_edit_selected(self) -> None:
+        geom = self._selected_polygon()
+        if geom is None:
+            self._warn("Seleziona un poligono, oppure disegna l'area con lo strumento Modifica DEM.")
+            return
+        self.edit_dem_area(geom)
+
+    def _selected_lines(self) -> list:
+        """The lines selected in the raster view (world XY), e.g. as breaklines."""
+        out = []
+        for layer, _i, attrs in self.ortho_view.selected_features():
+            g = attrs.get("_geom")
+            if self.ortho_view.layers.get(layer, {}).get("kind") == "line" and g and len(g[1]) >= 2:
+                out.append(np.asarray(g[1], float)[:, :2])
+        return out
+
+    def edit_dem_area(self, geom) -> None:
+        """Fill the DEM inside ``geom`` from the ground around it (the DEM as it was is kept)."""
+        if not self._need_chunk(product="dem"):
+            return
+        lines = self._selected_lines()
+        v = ParamDialog.ask(self, "Modifica DEM", [f for f in [
+            Field("method", "Nuove quote", "plane",
+                  choices=[("plane", "Piano che si adatta al terreno attorno"),
+                           ("linear", "Interpolazione lineare dal bordo"),
+                           ("idw", "Media pesata con la distanza (IDW)"),
+                           ("constant", "Quota costante")]),
+            Field("value", "Quota costante (vuota: la mediana del bordo)", None, kind="optional_float"),
+            Field("breaklines", f"Usa le {len(lines)} linee selezionate come linee di discontinuita'", bool(lines))
+            if lines else None,
+            Field("name", "Nome del DEM modificato (facoltativo)", "", kind="text")] if f is not None],
+            intro=f"{geom.area:.2f} m2. Le quote dentro l'area vengono ricavate da quelle appena fuori (alberi, "
+                  "tende, mezzi, cumuli e buchi spariscono da curve di livello e volumi). Il DEM com'era resta tra le "
+                  "versioni per confrontarlo o tornare indietro.".replace(".", ",", 1))
+        if not v:
+            return
+        breaklines = lines if v.get("breaklines") else None
+        chunk = self.chunk
+        self.run_task("Modifica del DEM", lambda p: chunk.edit_dem(
+            geom, v["method"], v.get("value"), breaklines, True, (v.get("name") or "").strip() or None, progress=p),
+            lambda info: (self._show_raster("dem"), self.log_pane.info(
+                f"DEM modificato: {info['cells']:,} celle, variazione media {info['dz_mean'] * 100:+.1f} cm, "
+                f"massima {info['dz_max'] * 100:.1f} cm".replace(",", "."))))
 
     # ---------------------------------------------------------------- elevations
     def _elevation_fields(self, kind: str) -> list:
