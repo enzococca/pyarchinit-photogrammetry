@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 os.environ.setdefault("GLOG_minloglevel", "2")
+os.environ.setdefault("PPG_NO_UPDATE_CHECK", "1")  # the windows of the tests never ask GitHub
 
 
 @pytest.fixture(autouse=True)

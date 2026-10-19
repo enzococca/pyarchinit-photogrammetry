@@ -31,6 +31,8 @@ written inside `pyarchinit_DB_folder` so that QGIS can open it too; PostgreSQL/P
 are reachable from *PyArchInit > Connetti*. The builds are unsigned: on macOS right-click > *Open*
 the first time (or `xattr -dr com.apple.quarantine "/Applications/PyArchInit Photogrammetry.app"`),
 on Windows choose *More info > Run anyway*. Details in [docs/packaging.md](docs/packaging.md).
+The application looks for new versions at start-up (at most once a day) and, on macOS, installs
+them and restarts; see *Updates* in [docs/gui.md](docs/gui.md).
 
 ## Installation with pip
 
@@ -399,6 +401,7 @@ pyarchinit_photogrammetry/
   io/          EXIF, exports, report
   gui/         desktop interface (PySide6, pyvista, qtawesome icons, themes, log, start page)
   doctor.py    environment diagnosis (`ppg doctor`)
+  updates.py   new releases: check, download, macOS install (`ppg update`)
   demo.py      demo data set
   cli.py       `ppg` command
 packaging/     PyInstaller spec and build script for the desktop application

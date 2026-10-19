@@ -31,6 +31,8 @@ demo viene scritto dentro `pyarchinit_DB_folder`, così lo apre anche QGIS; i se
 PostgreSQL/PostGIS si raggiungono da *PyArchInit > Connetti*. Le build non sono firmate: su macOS la prima
 volta tasto destro > *Apri* (oppure `xattr -dr com.apple.quarantine "/Applications/PyArchInit Photogrammetry.app"`),
 su Windows *Ulteriori informazioni > Esegui comunque*. Dettagli in [docs/packaging.md](docs/packaging.md).
+L'applicazione cerca le nuove versioni all'avvio (al massimo una volta al giorno) e, su macOS, le
+installa e si riavvia; vedi *Updates* in [docs/gui.md](docs/gui.md).
 
 ## Installazione con pip
 

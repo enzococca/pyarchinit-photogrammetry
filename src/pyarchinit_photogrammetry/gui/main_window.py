@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QDockWid
                                QInputDialog, QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
                                QScrollArea, QStackedWidget, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget)
 
-from .. import __version__
+from .. import __version__, updates
 from ..app import app as application
 from ..core.document import Document
 from . import theme
@@ -29,6 +29,7 @@ from .model_view import ModelView
 from .panels import (ConsolePane, LayersPane, LogPane, PhotosPane, PhotosPanel, ProxiesPane, PyArchInitPane, ReferencePane,
                      SectionsPane, WorkspaceTree)
 from .start_page import StartPage
+from .update_dialog import UpdateChecker, UpdateDialog, error_text
 from .worker import StatusProgress, TaskRunner
 
 log = logging.getLogger("pyarchinit_photogrammetry.gui")
@@ -70,7 +71,10 @@ CLASSIFIER_FILE = "classificatore.ppgclf"  # classifier trained in a chunk, kept
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, document: Document | None = None, autoconnect: bool = True, progress=None):
+    def __init__(self, document: Document | None = None, autoconnect: bool = True, progress=None,
+                 check_updates: bool | None = None):
+        """``check_updates``: look for a new version a few seconds after start-up (once a day,
+        when enabled in *Aiuto*); ``None`` = unless ``PPG_NO_UPDATE_CHECK`` is set."""
         super().__init__()
         self._autoconnect = autoconnect
         self.setWindowTitle(APP_TITLE)
@@ -99,6 +103,11 @@ class MainWindow(QMainWindow):
         self._build_statusbar()
         self.set_document(document or application.document, progress=progress)
         QTimer.singleShot(0, self._autoconnect_pyarchinit)
+        self.update_checker = UpdateChecker(self)
+        self.update_checker.finished.connect(self._updates_checked)
+        self._pending_update: Path | None = None  # new application swapped in when the window closes
+        if check_updates if check_updates is not None else not os.environ.get("PPG_NO_UPDATE_CHECK"):
+            QTimer.singleShot(5000, self._auto_check_updates)
 
     # ================================================================ layout
     def _build_views(self) -> None:
@@ -546,6 +555,12 @@ class MainWindow(QMainWindow):
         self._act(m, "Diagnostica ambiente...", self.show_doctor, icon_name="doctor")
         self._act(m, "Apri cartella dei log", self.open_log_folder, icon_name="folder")
         m.addSeparator()
+        self._act(m, "Controlla aggiornamenti...", self.check_updates, icon_name="update")
+        self.a_update_auto = QAction("Controlla gli aggiornamenti all'avvio", self, checkable=True)
+        self.a_update_auto.setChecked(self.settings.value("updates_auto", "true") in ("true", True, 1, "1"))
+        self.a_update_auto.toggled.connect(lambda on: self.settings.setValue("updates_auto", "true" if on else "false"))
+        m.addAction(self.a_update_auto)
+        m.addSeparator()
         self._act(m, "Informazioni", self.about, icon_name="about")
         # ------------------------------------------------------------ toolbar
         tb = QToolBar("Flusso di lavoro")
@@ -985,6 +1000,8 @@ class MainWindow(QMainWindow):
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("state", self.saveState())
         super().closeEvent(ev)
+        if self._pending_update is not None:
+            self._install_pending_update()
 
     def _last_dir(self) -> str:
         if self.doc.path:
@@ -2626,6 +2643,103 @@ class MainWindow(QMainWindow):
         dlg = DoctorDialog(self)
         dlg.exec()
         return dlg
+
+    # ---------------------------------------------------------------- updates
+    def _auto_check_updates(self) -> None:
+        """The automatic check: at most once a day, when enabled in *Aiuto*."""
+        import datetime
+
+        if not self.a_update_auto.isChecked():
+            return
+        today = datetime.date.today().isoformat()
+        if self.settings.value("updates_last_check", "") == today:
+            return
+        self.settings.setValue("updates_last_check", today)
+        self.update_checker.start(manual=False, skip=self.settings.value("updates_skip", "") or None)
+
+    def check_updates(self) -> None:
+        """*Aiuto > Controlla aggiornamenti*: also the versions skipped before."""
+        started = self.update_checker.start(manual=True)
+        self.statusBar().showMessage("Controllo degli aggiornamenti..." if started
+                                     else "Controllo degli aggiornamenti gia' in corso", 5000)
+
+    def _updates_checked(self, release, error, manual: bool) -> None:
+        if error is not None:
+            log.info("Controllo degli aggiornamenti: %s", error)
+            if manual:
+                self._warn(f"{error_text(error)}\n\n({error})")
+            return
+        if release is None:
+            if manual:
+                self._info("Aggiornamenti", f"Questa e' l'ultima versione ({__version__}).")
+            return
+        self.log_pane.info(f"E' disponibile la versione {release.version} (questa e' la {__version__})")
+        dlg = UpdateDialog(release, parent=self)
+        dlg.exec()
+        if dlg.action == "skip":
+            self.settings.setValue("updates_skip", release.version)
+            self.log_pane.info(f"La versione {release.version} non verra' piu' proposta all'avvio")
+        elif dlg.action == "page":
+            QDesktopServices.openUrl(QUrl(release.url))
+        elif dlg.action == "copy" and dlg.command:
+            self.statusBar().showMessage(f"Comando copiato: {dlg.command}", 10000)
+        elif dlg.action in ("install", "download"):
+            self.download_update(release, install=dlg.action == "install")
+
+    def download_update(self, release, install: bool = False) -> bool:
+        """Download the installer of ``release`` for this system; with ``install`` (macOS
+        application) also copy the new application, swapped in when the window closes."""
+        asset = updates.asset_for_platform(release)
+        if asset is None:
+            self._warn(f"La versione {release.version} non ha un pacchetto per questo sistema: scaricalo dalla "
+                       "pagina della versione.")
+            QDesktopServices.openUrl(QUrl(release.url))
+            return False
+
+        def work(p):
+            try:
+                path = updates.download(asset, progress=p.sub(0.0, 0.85 if install else 1.0))
+            except updates.UpdateError as exc:
+                raise RuntimeError(f"{error_text(exc)} ({exc})") from exc
+            if not install:
+                return path, None, None
+            try:
+                new = updates.prepare_macos_update(path, expected_version=release.version, progress=p.sub(0.85, 0.15))
+            except updates.UpdateError as exc:
+                return path, None, exc
+            return path, new, None
+
+        def done(result):
+            path, new, problem = result
+            if new is None:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path if problem is not None else path.parent)))
+                if problem is not None:  # e.g. an application folder this user cannot write
+                    self._warn(f"La versione {release.version} e' stata scaricata ma non installata: {problem}.\n\n"
+                               "Si apre il disco: trascina l'applicazione nella cartella Applicazioni.")
+                else:
+                    self._info("Aggiornamento scaricato",
+                               f"{path.name} e' nella cartella {path.parent}.\n\nChiudi il programma, estrai lo zip "
+                               "e sostituisci la cartella del programma con quella nuova.")
+                return
+            self._pending_update = new
+            pick = choice(self, "question", "Aggiornamento pronto",
+                          f"La versione {release.version} e' pronta. Il programma si chiude (chiedendo di salvare il "
+                          "progetto se e' cambiato) e si riapre aggiornato.",
+                          ["Riavvia ora", "Alla chiusura del programma"], cancel=None)
+            if pick == 0:
+                self.close()
+            else:
+                self.statusBar().showMessage(f"La versione {release.version} verra' installata alla chiusura", 10000)
+
+        return self.runner.run("Download dell'aggiornamento", work, done, self._error)
+
+    def _install_pending_update(self) -> None:
+        try:
+            updates.finish_macos_update(self._pending_update)
+            log.info("Aggiornamento: installazione di %s alla chiusura", self._pending_update)
+        except Exception as exc:  # never block the exit
+            log.error("Aggiornamento non installato: %s", exc)
+        self._pending_update = None
 
     def about(self) -> None:
         message(self, "info", "Informazioni",

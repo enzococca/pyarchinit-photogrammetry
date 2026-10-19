@@ -75,6 +75,28 @@ pitfalls (another `ppg-gui` earlier on `PATH`, the Anaconda base environment, Op
 old pyvistaqt, missing SpatiaLite) and what to do about them; *Copia* puts the report on the
 clipboard.
 
+## Updates
+
+A few seconds after start-up the application asks GitHub for the latest release, at most once
+a day: one HTTPS request to the GitHub API carrying the version in its User-Agent and nothing
+else (*Aiuto > Controlla gli aggiornamenti all'avvio* switches it off; `PPG_NO_UPDATE_CHECK=1`
+too). When a newer version exists a window shows its notes and offers:
+
+* **Scarica e installa** (macOS application): the dmg is downloaded to the Downloads folder,
+  the new application is copied out of it and, when the program closes (at once with *Riavvia
+  ora*, after the usual request to save the project), it replaces the old one in its folder
+  and opens. The old copy is kept until the new one is in place. If the folder cannot be
+  written by the user, the disk image opens for a manual drag to *Applicazioni*;
+* **Scarica** (Windows application): the zip goes to the Downloads folder, to extract over the
+  program folder after closing it;
+* **Copia il comando** (Python installation): `pip install --upgrade pyarchinit-photogrammetry`
+  (or `git pull` in a source checkout);
+* *Pagina della versione*, *Salta questa versione* (not proposed again at start-up, still found
+  by *Aiuto > Controlla aggiornamenti*) and *Piu' tardi*.
+
+From the command line `ppg update` tells whether a newer version exists and `ppg update
+--download` fetches the installer of the system.
+
 ## Menus
 
 * **File**: new/open/save, recent projects, export (cloud, model, DEM, orthomosaic, cameras,
@@ -108,7 +130,8 @@ clipboard.
   `pyunitastratigrafiche`, load existing unit polygons onto the orthomosaic, publish spot
   heights to `pyarchinit_quote`.
 * **Vista**: panes, views (F2 model, F3 orthomosaic/DEM, F4 photo), console (Ctrl+Shift+P), theme.
-* **Aiuto**: online documentation, environment diagnosis, log folder, about.
+* **Aiuto**: online documentation, environment diagnosis, log folder, *Controlla aggiornamenti*,
+  *Controlla gli aggiornamenti all'avvio*, about.
 
 ## Orthophoto at full resolution and patches
 

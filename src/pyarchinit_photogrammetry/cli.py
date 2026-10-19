@@ -902,6 +902,35 @@ def doctor():
     raise SystemExit(doctor_main())
 
 
+@app.command()
+def update(download: bool = typer.Option(False, help="download the installer of this system"),
+           folder: Path = typer.Option(None, help="folder for the download (default: Downloads)")):
+    """Look for a newer release on GitHub and say how to install it."""
+    from . import __version__, updates
+    from .core.progress import print_progress
+
+    try:
+        release = updates.check(__version__)
+    except updates.UpdateError as exc:
+        typer.echo(f"Update check failed: {exc}", err=True)
+        raise typer.Exit(1)
+    if release is None:
+        typer.echo(f"{__version__} is the latest version.")
+        return
+    typer.echo(f"Version {release.version} is available (this is {__version__}): {release.url}")
+    kind = updates.install_kind()
+    if kind == "pip":
+        typer.echo(f"Update with: {updates.PIP_COMMAND}")
+    elif kind == "source":
+        typer.echo("Update with: git pull")
+    asset = updates.asset_for_platform(release)
+    if download:
+        if asset is None:
+            typer.echo("No installer for this system in the release.", err=True)
+            raise typer.Exit(1)
+        typer.echo(str(updates.download(asset, folder, progress=print_progress)))
+
+
 # ------------------------------------------------------------------ markers
 @markers_app.command("sheet")
 def markers_sheet(out: Path, target_type: str = "aruco_4x4_50", codes: str = "0-11", size_mm: float = 40.0,
