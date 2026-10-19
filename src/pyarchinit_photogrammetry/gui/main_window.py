@@ -310,6 +310,11 @@ class MainWindow(QMainWindow):
         self._act(exp, "Modello (OBJ/PLY/GLB)...", lambda: self.export("model"), icon_name="model")
         self._act(exp, "Modello in Cesium 3D Tiles...", self.export_3dtiles, processing=True, icon_name="globe",
                   tip="Cartella con tileset.json e i tasselli GLB: il modello sul globo di CesiumJS")
+        self._act(exp, "Modello leggero con normal map (GLB/OBJ)...", self.export_light_model, processing=True,
+                  icon_name="model", tip="Il modello con poche facce e due texture (colore e normal map) cotte dal "
+                                         "modello completo: per il web, Sketchfab e i motori di gioco")
+        self._act(exp, "Video di sorvolo (MP4)...", self.export_video, processing=True, icon_name="video",
+                  tip="Una camera che gira attorno al modello o alla nuvola, per presentazioni e musei")
         self._act(exp, "DEM (GeoTIFF/COG)...", lambda: self.export("dem"), icon_name="dem")
         self._act(exp, "Ortofoto (GeoTIFF/COG)...", lambda: self.export("ortho"), icon_name="ortho")
         self._act(exp, "Camere (CSV / COLMAP)...", lambda: self.export("cameras"), icon_name="cameras")
@@ -1207,6 +1212,65 @@ class MainWindow(QMainWindow):
             return
         self.log_pane.info(f"Esportato {path}")
         self.statusBar().showMessage(f"Esportato {path}", 8000)
+
+    def export_light_model(self) -> None:
+        if not self._need_chunk(product="model"):
+            return
+        v = ParamDialog.ask(self, "Modello leggero con normal map", [
+            Field("folder", "Cartella", str(Path(self._last_dir()) / f"{self.chunk.label.replace(' ', '_')}_leggero"),
+                  kind="dir"),
+            Field("faces", "Facce del modello leggero", 50_000, minimum=500, maximum=2_000_000),
+            Field("size", "Lato delle texture (px)", 4096, choices=[(2048, "2048"), (4096, "4096"), (8192, "8192")])],
+            intro="Il modello viene ridotto e i dettagli della superficie del modello completo finiscono nella normal "
+                  "map: la luce li mostra anche con poche facce. Si scrivono light.glb (colore e normal map), "
+                  "light.obj con il suo .mtl e le due immagini.")
+        if not v or not v["folder"]:
+            return
+        from ..engine.normalmap import light_model
+
+        ch = self.chunk
+        self.run_task("Modello leggero", lambda p: light_model(ch, int(v["faces"]), int(v["size"]), v["folder"], p),
+                      lambda out: self._info("Modello leggero", f"{_it(out['faces'])} facce, scritto in "
+                                                                f"{Path(out['glb']).parent}"),
+                      refresh=False, save=False)
+
+    def export_video(self) -> None:
+        if not self._need_chunk():
+            return
+        from ..gui.scene import available_views, best_view
+
+        views = [k for k in ("model_textured", "model", "point_cloud", "tie_points") if k in available_views(self.chunk)]
+        if not views:
+            self._warn("Costruisci prima la nuvola densa o il modello.")
+            return
+        names = {"model_textured": "Modello con texture", "model": "Modello (colori dei vertici)",
+                 "point_cloud": "Nuvola densa", "tie_points": "Punti di legame"}
+        v = ParamDialog.ask(self, "Video di sorvolo", [
+            Field("path", "File MP4", str(Path(self._last_dir()) / f"{self.chunk.label.replace(' ', '_')}_sorvolo.mp4"),
+                  kind="file_save", filter="Video MP4 (*.mp4)"),
+            Field("kind", "Cosa mostrare", best_view(self.chunk) if best_view(self.chunk) in views else views[0],
+                  choices=[(k, names[k]) for k in views]),
+            Field("size", "Risoluzione", "1280x720", choices=[("1280x720", "HD 1280 x 720"),
+                                                              ("1920x1080", "Full HD 1920 x 1080"),
+                                                              ("3840x2160", "4K 3840 x 2160")]),
+            Field("seconds", "Durata (secondi)", 12.0, minimum=2.0, maximum=600.0, decimals=0),
+            Field("turns", "Giri attorno al rilievo", 1.0, minimum=0.25, maximum=10.0, decimals=2),
+            Field("pitch", "Inclinazione della camera (gradi sopra l'orizzonte)", 35.0, minimum=5.0, maximum=89.0,
+                  decimals=0),
+            Field("zoom", "Avvicinamento (1 = tutto il rilievo nell'inquadratura)", 1.0, minimum=0.3, maximum=5.0,
+                  decimals=2)])
+        if not v or not v["path"]:
+            return
+        from ..io.flythrough import orbit_video
+
+        w, h = (int(x) for x in v["size"].split("x"))
+        ch = self.chunk
+        self.run_task("Video di sorvolo", lambda p: orbit_video(ch, v["path"], kind=v["kind"], seconds=v["seconds"],
+                                                                size=(w, h), pitch=v["pitch"], zoom=v["zoom"],
+                                                                turns=v["turns"], progress=p),
+                      lambda out: (self.log_pane.info(f"Video salvato in {out}"),
+                                   self.statusBar().showMessage(f"Video salvato in {out}", 10000)),
+                      refresh=False, save=False)
 
     def export_3dtiles(self) -> None:
         if not self._need_chunk(product="model"):

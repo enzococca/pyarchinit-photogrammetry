@@ -110,3 +110,28 @@ def test_command_line(processed, tmp_path):
                                  "--dem", str(tmp_path / "d.tif"), "--tiles", str(tmp_path / "t")])
     assert r.exit_code == 0, r.output + repr(r.exception)
     assert (tmp_path / "t" / "tileset.json").exists() and (tmp_path / "d.tif").exists()
+
+
+def test_fly_through_video(processed, tmp_path):
+    import cv2
+
+    from pyarchinit_photogrammetry.io.flythrough import orbit_video
+
+    _doc, ch = _copy(processed, tmp_path)
+    out = orbit_video(ch, tmp_path / "giro.mp4", kind="point_cloud", seconds=1.0, fps=8, size=(321, 241),
+                      backend="software")
+    cap = cv2.VideoCapture(str(out))
+    frames = []
+    while True:
+        ok, f = cap.read()
+        if not ok:
+            break
+        frames.append(f)
+    cap.release()
+    assert len(frames) == 8 and frames[0].shape == (240, 320, 3)  # even sides
+    assert frames[0].std() > 10 and np.abs(frames[0].astype(int) - frames[4].astype(int)).mean() > 2  # it turns
+    with pytest.raises(RuntimeError):
+        import pyarchinit_photogrammetry as ppg
+
+        empty = ppg.Document().add_chunk("vuoto")
+        orbit_video(empty, tmp_path / "x.mp4", backend="software")

@@ -202,7 +202,8 @@ is installed on first use (PyTorch in a separate environment, see the same page)
   reconstruction needs), with the GPS of DJI drones from their `.SRT`; blurred photos found and
   disabled.
 * **Exports for the web**: Cloud Optimized GeoTIFF (JPEG, WebP, ZSTD), Cloud Optimized Point Cloud
-  (COPC), binary glTF with the texture, Cesium 3D Tiles of the model placed on the globe.
+  (COPC), binary glTF with the texture, Cesium 3D Tiles of the model placed on the globe, light models
+  with a normal map baked from the full one, fly-through videos.
 * **Measures**: area in plan and of the surface (DEM and model), slope, aspect and height above the
   ground under the cursor, slope and aspect rasters, the dense cloud coloured by height above the
   ground.

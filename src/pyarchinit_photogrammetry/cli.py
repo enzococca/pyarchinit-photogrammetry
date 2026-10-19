@@ -77,6 +77,35 @@ def detect_markers(project: Path, target_type: str = "aruco_4x4_50", chunk: Opti
     typer.echo(f"{len(found)} targets: " + ", ".join(f"{m.label} ({len(m.projections)} photos)" for m in found))
 
 
+@app.command("light-model")
+def light_model_cmd(project: Path, out: Path = typer.Argument(..., help="folder for light.glb, light.obj and the "
+                                                                      "textures"),
+                    faces: int = typer.Option(50_000, help="faces of the light model"),
+                    texture: int = typer.Option(4096, help="side of the colour texture and of the normal map"),
+                    chunk: Optional[str] = None):
+    """The model reduced to a few faces with a colour texture and a normal map baked from the full one."""
+    from .engine.normalmap import light_model
+
+    _, ch = _open(project, chunk)
+    r = light_model(ch, faces, texture, out, progress=print_progress)
+    typer.echo(f"{r['faces']} faces, {r['hits'] * 100:.1f}% of the texels on the full model: {r['glb']}")
+
+
+@app.command()
+def video(project: Path, out: Path, kind: Optional[str] = typer.Option(None, help="model_textured, model, point_cloud"),
+          seconds: float = 12.0, fps: int = 25, size: str = typer.Option("1280x720", help="width x height"),
+          pitch: float = 35.0, zoom: float = 1.0, turns: float = 1.0,
+          backend: str = typer.Option("auto", help="vtk (graphics card), software or auto"),
+          chunk: Optional[str] = None):
+    """A fly-through video (MP4): a camera orbiting the model or the dense cloud."""
+    from .io.flythrough import orbit_video
+
+    _, ch = _open(project, chunk)
+    w, h = (int(v) for v in size.lower().split("x"))
+    typer.echo(str(orbit_video(ch, out, kind=kind, seconds=seconds, fps=fps, size=(w, h), pitch=pitch, zoom=zoom,
+                               turns=turns, backend=backend, progress=print_progress)))
+
+
 @app.command("batch")
 def batch_cmd(project: Path, steps: Path = typer.Argument(..., help="JSON file of the steps"),
               restart: bool = typer.Option(False, help="start again instead of resuming an unfinished batch"),

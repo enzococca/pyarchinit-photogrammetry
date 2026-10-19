@@ -87,7 +87,7 @@ markers in too few photos.
 * Measures: 3D area on the model, slope, aspect and height above ground under the cursor,
   height-above-ground view of the cloud, aspect raster. *Done.*
 * Exports: Cloud Optimized GeoTIFF (JPEG, WebP, ZSTD), COPC, Cesium 3D Tiles, GLB, normal maps
-  for light models, fly-through video.
+  for light models, fly-through video. *Done.*
 * Laser scans: E57 and PTX import, registration on the photogrammetric chunk, colours from the
   photos.
 * Section and plan-slice tools drawn directly in the 3D view; markers moved in 3D.
