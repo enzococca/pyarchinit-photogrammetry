@@ -104,12 +104,20 @@ jobs:
         with:
           python-version: "3.12"
           architecture: arm64
+      - name: Packages vcpkg built before
+        uses: actions/cache/restore@v4
+        with:
+          path: vcpkg-cache
+          key: vcpkg-arm64-windows-colmap-4.2.1-${{ github.run_id }}
+          restore-keys: vcpkg-arm64-windows-colmap-4.2.1-
       - name: COLMAP and pycolmap with vcpkg for arm64
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
           $root = $PWD.Path -replace '\\', '/'
+          New-Item -ItemType Directory -Force vcpkg-cache | Out-Null
+          $env:VCPKG_DEFAULT_BINARY_CACHE = "$root/vcpkg-cache"  # kept between runs (steps before and after)
           # COLMAP's script enters the x64 developer shell of Visual Studio
           (Get-Content scripts/shell/enter_vs_dev_shell.ps1) -replace '-host_arch=amd64 -arch=amd64', '-host_arch=arm64 -arch=arm64' |
             Set-Content scripts/shell/enter_vs_dev_shell.ps1
@@ -131,8 +139,12 @@ jobs:
           cmake --build build --target install
           python -m pip install --upgrade pip build delvewheel
           python python/ci/install-build-requirements.py
+          # CMAKE_PREFIX_PATH given here replaces the one scikit-build-core makes from the Python
+          # packages, so pybind11 is named on its own
+          $pybind11 = (python -m pybind11 --cmakedir) -replace '\\', '/'
           python -m build --wheel --no-isolation -o raw `
             -C cmake.define.CMAKE_TOOLCHAIN_FILE="$toolchain" `
+            -C cmake.define.pybind11_DIR="$pybind11" `
             -C cmake.define.VCPKG_TARGET_TRIPLET=arm64-windows-release `
             -C cmake.define.VCPKG_INSTALLED_DIR="$root/build/vcpkg_installed" `
             -C cmake.define.CMAKE_PREFIX_PATH="$root/install" `
@@ -141,6 +153,12 @@ jobs:
             (Get-ChildItem raw/*.whl).FullName
           pip install (Get-ChildItem wheels/*.whl).FullName
           python -c "import pycolmap; print(pycolmap.__version__, pycolmap.Reconstruction().summary())"
+      - name: Keep the packages vcpkg built
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg-cache
+          key: vcpkg-arm64-windows-colmap-4.2.1-${{ github.run_id }}
       - uses: actions/upload-artifact@v4
         with:
           name: win-arm64-pycolmap
