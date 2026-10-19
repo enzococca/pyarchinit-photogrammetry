@@ -249,6 +249,8 @@ resized copy (`resize`) - None where the file is not on this computer or on a re
 | `measures.slope_aspect_at(dem_path, x, y)` | slope and aspect (degrees; aspect clockwise from north, where the ground faces downhill, -1 flat) from the 3 x 3 cells (Horn) |
 | `measures.aspect_raster(dem_path, out)`, `archaeo.terrain.slope_degrees(dem_path, out)` | rasters of aspect and slope |
 | `measures.ground_surface(xyz, classes, cell=None)`, `height_above_ground(xyz, classes)` | the ground on a grid from the points of class 2 (median of each cell, holes interpolated) and the height of every point above it |
+| `chunk.build_relief(method="svf", radius=None, directions=16, min_size=None, max_size=None, scaling=2.0)` | relief visualisation of the DEM, product `method` in `<data>/terrain/` (parameters and the 2nd/98th percentiles in `meta["relief"]`): `svf` sky-view factor (1 - mean sin of the horizon angle), `openness_pos` / `openness_neg` (mean zenith angle of the horizon, degrees), `slrm` (DEM minus its mean over the radius, metres), `msrm` (multi-scale relief: mean difference of low-pass levels of radius `k ** scaling` from `min_size` to `max_size`), `multi_hillshade` (0-1); radius default about 20 cells |
+| `archaeo.relief.build_relief(dem_path, out, method, ...)`, `relief.compute(z, resolution, method, ...)` | the same on any DEM file (tiles with the margin each method needs, several threads; the result is that of the whole DEM) or array |
 | `measures.ground_dem(chunk)`, `ground_dem_at(path, x, y)` | a DTM kept as a version of the DEM (built from class 2 only) and its height at a point |
 
 ## Diagnostics of the alignment, calibration, markers

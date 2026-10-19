@@ -173,6 +173,24 @@ def field_check(project: Path, min_photos: int = typer.Option(3, help="photos a 
 
 
 @app.command()
+def relief(project: Path, method: str = typer.Option("svf", help="svf, openness_pos, openness_neg, slrm, msrm, "
+                                                                "multi_hillshade"),
+           radius: Optional[float] = typer.Option(None, help="search radius in metres (default about 20 cells)"),
+           directions: int = typer.Option(16, help="directions of the horizon and of the light"),
+           min_size: Optional[float] = typer.Option(None, help="msrm: smallest feature (metres)"),
+           max_size: Optional[float] = typer.Option(None, help="msrm: largest feature (metres)"),
+           chunk: Optional[str] = None):
+    """Relief visualisation of the DEM (sky-view factor, openness, local or multi-scale relief,
+    multi-directional hillshade): faint walls, ditches and terraces."""
+    doc, ch = _open(project, chunk)
+    path = ch.build_relief(method, radius=radius, directions=directions, min_size=min_size, max_size=max_size,
+                           progress=print_progress)
+    doc.save()
+    info = ch.meta["relief"][method]
+    typer.echo(f"{method}: {path} (radius {info['radius_m']:g} m, values {info['p2']:.4g} to {info['p98']:.4g})")
+
+
+@app.command()
 def precision(project: Path, marker_px: float = typer.Option(0.5, help="how well markers are measured (pixels)"),
               chunk: Optional[str] = None):
     """Precision of cameras, markers and tie points from the covariance of the bundle adjustment,

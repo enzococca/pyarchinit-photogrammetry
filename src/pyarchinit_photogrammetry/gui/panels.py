@@ -206,7 +206,11 @@ class WorkspaceTree(QTreeWidget):
                                         "attiva, confrontarla, rinominarla o eliminarla"))
                     it.addChild(vi)
                 it.setExpanded(bool(kept))
-            for key, text, tip in (("slope", "Pendenza", "gradi"), ("aspect", "Esposizione", "gradi dal nord")):
+            for key, text, tip in (("slope", "Pendenza", "gradi"), ("aspect", "Esposizione", "gradi dal nord"),
+                                   ("svf", "Sky-view factor", "SVF"), ("openness_pos", "Openness positiva", "gradi"),
+                                   ("openness_neg", "Openness negativa", "gradi"),
+                                   ("slrm", "Rilievo locale (SLRM)", "cm"), ("msrm", "Rilievo multiscala (MSRM)", "cm"),
+                                   ("multi_hillshade", "Ombreggiatura da 16 direzioni", "0-1")):
                 path = ch.product_path(key)
                 if path is not None and path.exists():
                     it = QTreeWidgetItem([tr(text)])

@@ -99,7 +99,8 @@ markers in too few photos.
 
 * Relief visualisation of DEMs: sky-view factor, positive and negative openness, local relief
   model, multi-directional hillshade, multi-scale relief (walls and ditches barely visible on a
-  tell).
+  tell). *Done* (in NumPy by tiles and threads: 2000 x 2400 cells in under a second per method, so
+  no native kernel was needed).
 * Excavation over time: phases (chunks by date) aligned together, volume removed for each US,
   timeline in the views, stratigraphic relations suggested from the order of removal.
 * Stone-by-stone drawing with SAM on orthomosaics and elevations.

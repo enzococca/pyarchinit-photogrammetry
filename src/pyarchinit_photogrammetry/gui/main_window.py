@@ -28,7 +28,7 @@ from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelecti
                       choice, message, short_label)
 from .i18n import decimal_comma, number, thousands_points, tr, translate
 from .icons import app_icon, icon
-from .image_views import US_COLORS, PhotoView, RasterView
+from .image_views import RELIEF_KINDS, US_COLORS, PhotoView, RasterView
 from .model_view import ModelView
 from .panels import (ConsolePane, LayersPane, LogPane, PhotosPane, PhotosPanel, ProxiesPane, PyArchInitPane, ReferencePane,
                      SectionsPane, WorkspaceTree)
@@ -600,6 +600,10 @@ class MainWindow(QMainWindow):
         self._act(m, tr("Esposizione del DEM"), lambda: self.terrain_raster("aspect"), processing=True,
                   icon_name="aspect",
                   tip=tr("Raster dell'esposizione (verso dove scende il terreno), gradi dal nord"))
+        self._act(m, tr("Visualizzazioni del rilievo..."), lambda: self.relief_visualisation(), processing=True,
+                  icon_name="relief",
+                  tip=tr("Sky-view factor, openness, rilievo locale e multiscala, ombreggiatura da piu' direzioni: "
+                         "muri, fossati e terrazzamenti appena accennati nel DEM"))
         self._act(m, tr("Opzioni delle sezioni..."), self.section_options, icon_name="line")
         self.a_slice = self._act(m, tr("Pianta a quota (slice orizzontale)..."), self.plan_slice, processing=True,
                                  icon_name="slice")
@@ -908,7 +912,7 @@ class MainWindow(QMainWindow):
         if path is None or not Path(path).exists():
             self.ortho_view.scene().clear()
             self.ortho_view.tr = None
-            self.ortho_view.scene().addText("Costruisci il DEM o l'ortofoto per vederli qui")
+            self.ortho_view.scene().addText(tr("Costruisci il DEM o l'ortofoto per vederli qui"))
             return
         self.ortho_view.load(path, kind)
         if kind == "ortho" and ch.dem_path:
@@ -3493,6 +3497,62 @@ class MainWindow(QMainWindow):
 
         self.run_task("Pendenza del DEM" if kind == "slope" else "Esposizione del DEM", job, done, refresh=False)
 
+    RELIEF_CHOICES = [("svf", "Sky-view factor (quanto cielo si vede)"),
+                      ("openness_pos", "Openness positiva (creste, muri)"),
+                      ("openness_neg", "Openness negativa (fossati, buche)"),
+                      ("slrm", "Rilievo locale (DEM meno la sua media)"),
+                      ("msrm", "Rilievo multiscala (MSRM)"),
+                      ("multi_hillshade", "Ombreggiatura da 16 direzioni")]
+    RELIEF_HINTS = {"svf": "Sky-view factor: bianco cielo aperto, scuro nei fossati e al piede dei muri",
+                    "openness_pos": "Openness positiva: chiari creste e muri, scuri i fondi (gradi sotto il cursore)",
+                    "openness_neg": "Openness negativa: scuri fossati e buche (gradi sotto il cursore)",
+                    "slrm": "Rilievo locale: rosso sopra i dintorni, blu sotto (cm sotto il cursore)",
+                    "msrm": "Rilievo multiscala: rosso sopra i dintorni, blu sotto (cm sotto il cursore)",
+                    "multi_hillshade": "Ombreggiatura da 16 direzioni: nessun elemento nascosto dalla luce"}
+
+    def relief_visualisation(self, method: str | None = None) -> None:
+        """Strumenti > Visualizzazioni del rilievo (:mod:`archaeo.relief`), shown at once."""
+        if not self._need_chunk(product="dem"):
+            return
+        import rasterio
+
+        from ..archaeo import relief
+
+        ch = self.chunk
+        with rasterio.open(ch.dem_path) as src:
+            res = abs(src.transform.a)
+        radius = relief.default_radius(res)
+        v = ParamDialog.ask(self, "Visualizzazioni del rilievo", [
+            Field("method", "Visualizzazione", method or "svf", choices=self.RELIEF_CHOICES),
+            Field("radius", "Raggio di ricerca (m)", radius, minimum=res, maximum=relief.MAX_RADIUS_CELLS * res,
+                  decimals=3, tip="Fin dove cercare l'orizzonte e la media dei dintorni: un po' piu' della meta' "
+                                  "degli elementi da vedere"),
+            Field("directions", "Direzioni", 16, minimum=4, maximum=64),
+            Field("min_size", "Rilievo multiscala: elementi da (m)", round(4 * res, 3), minimum=res, maximum=1e4,
+                  decimals=3),
+            Field("max_size", "Rilievo multiscala: fino a (m)", 2 * radius, minimum=res, maximum=1e4, decimals=3)],
+            intro=tr("DEM di {0} cm per cella. Muri, fossati, terrazzamenti e tracciati appena accennati, che i "
+                     "colori delle quote e un'ombreggiatura sola nascondono.", _it(res * 100, 1)))
+        if not v:
+            return
+
+        def done(_path):
+            self.workspace.populate(self.doc)
+            self.show_relief(v["method"])
+
+        self.run_task("Visualizzazione del rilievo", lambda p: ch.build_relief(
+            v["method"], radius=v["radius"], directions=int(v["directions"]), min_size=v["min_size"],
+            max_size=v["max_size"], progress=p), done, refresh=False)
+
+    def show_relief(self, kind: str) -> None:
+        path = self.chunk.product_path(kind) if self.chunk is not None else None
+        if path is None or not path.exists():
+            self.relief_visualisation(kind)
+            return
+        self._load_raster(kind, path)
+        self.show_view(self.ortho_view)
+        self.statusBar().showMessage(tr(self.RELIEF_HINTS[kind]), 20000)
+
     def show_terrain_raster(self, kind: str) -> None:
         path = self.chunk.product_path(kind) if self.chunk is not None else None
         if path is None or not path.exists():
@@ -3910,6 +3970,8 @@ class MainWindow(QMainWindow):
         elif kind == "product":
             if payload in ("slope", "aspect"):
                 self.show_terrain_raster(payload)
+            elif payload in RELIEF_KINDS:
+                self.show_relief(payload)
             elif payload == "dem_precision":
                 self.show_precision_map()
             elif payload == "coverage":
@@ -4059,6 +4121,13 @@ class MainWindow(QMainWindow):
 
     def _show_coords(self, x: float, y: float, z) -> None:
         kind = getattr(self.ortho_view, "kind", None)
+        if kind in RELIEF_KINDS:
+            zt = ""
+            if z is not None and np.isfinite(z):
+                zt = decimal_comma(f"  SVF {z:.3f}" if kind == "svf" else f"  {z:.1f}°" if kind.startswith("openness")
+                                   else f"  {z * 100:+.1f} cm" if kind in ("slrm", "msrm") else f"  {z:.2f}")
+            self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}{zt}   [{self.chunk.crs if self.chunk else ''}]")
+            return
         if kind in ("slope", "aspect"):
             zt = ""
             if z is not None and np.isfinite(z):

@@ -14,7 +14,8 @@ from PySide6.QtWidgets import (QGraphicsEllipseItem, QGraphicsPathItem, QGraphic
 
 from .i18n import tr
 
-SCALAR_KINDS = ("dem", "diff", "sigma", "coverage", "slope", "aspect")  # one band of values, coloured
+RELIEF_KINDS = ("svf", "openness_pos", "openness_neg", "slrm", "msrm", "multi_hillshade")  # archaeo.relief
+SCALAR_KINDS = ("dem", "diff", "sigma", "coverage", "slope", "aspect") + RELIEF_KINDS  # one band of values, coloured
 US_COLORS = ["#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231", "#911eb4", "#46f0f0", "#f032e6", "#bcf60c",
              "#fabebe", "#008080", "#e6beff", "#9a6324", "#800000", "#aaffc3", "#808000"]
 
@@ -153,6 +154,42 @@ def aspect_colors(a: np.ndarray) -> np.ndarray:
     return rgba
 
 
+def relief_limits(z: np.ndarray, kind: str) -> tuple[float, float]:
+    """The stretch of a relief visualisation: its 2nd and 98th percentiles; symmetric around zero
+    for the local relief models and around 90 degrees (flat ground) for the openness, so that
+    flat ground is a middle grey; up to 1 for the hillshade."""
+    v = z[np.isfinite(z)]
+    if not v.size:
+        return 0.0, 1.0
+    if kind.startswith("openness"):
+        d = max(float(np.percentile(np.abs(v - 90.0), 98)), 1.0)
+        return 90.0 - d, 90.0 + d
+    lo, hi = (float(x) for x in np.percentile(v, [2, 98]))
+    if kind in ("slrm", "msrm"):
+        lim = max(abs(lo), abs(hi), 1e-6)
+        return -lim, lim
+    if kind == "multi_hillshade":
+        hi = 1.0
+    return lo, max(hi, lo + 1e-9)
+
+
+def relief_colors(z: np.ndarray, kind: str, limits: tuple[float, float] | None = None) -> np.ndarray:
+    """Relief visualisations in grey from the 2nd percentile (black) to the 98th (white); the
+    negative openness the other way round (ditches dark); the local relief models diverging,
+    red above the surroundings and blue below."""
+    lo, hi = limits if limits is not None else relief_limits(z, kind)
+    if kind in ("slrm", "msrm"):
+        return diff_colors(z, max(abs(lo), abs(hi)))[0]
+    valid = np.isfinite(z)
+    t = np.clip((np.where(valid, z, lo) - lo) / max(hi - lo, 1e-12), 0, 1)
+    if kind == "openness_neg":
+        t = 1 - t
+    rgba = np.zeros(z.shape + (4,), np.uint8)
+    rgba[..., :3] = (t * 255).astype(np.uint8)[..., None]
+    rgba[..., 3] = np.where(valid, 255, 0)
+    return rgba
+
+
 def read_window_rgba(path, kind: str, window: tuple[int, int, int, int], out_shape: tuple[int, int],
                      dem_range: tuple[float, float] | None = None, diff_limit: float | None = None) -> np.ndarray:
     """RGBA ``(h, w, 4)`` of a window ``(col, row, width, height)`` of a raster read at
@@ -180,6 +217,8 @@ def read_window_rgba(path, kind: str, window: tuple[int, int, int, int], out_sha
                 return sigma_colors(z, diff_limit)[0]
             if kind == "coverage":
                 return coverage_colors(z)
+            if kind in RELIEF_KINDS:
+                return relief_colors(z, kind, dem_range)
             res = abs(src.transform.a) * width / max(w, 1)
             return dem_colors(z, res, dem_range)
         n = min(src.count, 4)
@@ -387,6 +426,9 @@ class RasterView(_ZoomView):
                     rgba, self.diff_limit = slope_colors(self.z)
                 elif kind == "aspect":  # degrees from north
                     rgba = aspect_colors(self.z)
+                elif kind in RELIEF_KINDS:  # the stretch of the whole raster, also for the detail
+                    self._dem_range = relief_limits(self.z, kind)
+                    rgba = relief_colors(self.z, kind, self._dem_range)
                 else:
                     self._dem_range = dem_limits(self.z)
                     rgba = dem_colors(self.z, abs(self.tr.a), self._dem_range)

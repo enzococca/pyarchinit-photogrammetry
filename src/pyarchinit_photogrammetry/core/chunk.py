@@ -654,6 +654,24 @@ class Chunk:
                                        blend_sigma=blend_sigma, colour_correction=colour_correction,
                                        ghosting=ghosting, fill_holes=fill_holes)
 
+    def build_relief(self, method: str = "svf", radius: float | None = None, directions: int = 16,
+                     min_size: float | None = None, max_size: float | None = None, scaling: float = 2.0,
+                     progress: ProgressCallback | None = None) -> Path:
+        """A relief visualisation of the DEM (:mod:`archaeo.relief`: ``svf``, ``openness_pos``,
+        ``openness_neg``, ``slrm``, ``msrm``, ``multi_hillshade``): product ``method`` in
+        ``<data>/terrain/``, its parameters and the stretch of its values in ``meta["relief"]``."""
+        from ..archaeo import relief
+
+        if self.dem_path is None or not self.dem_path.exists():
+            raise RuntimeError("build the DEM first")
+        out = self.data_dir / "terrain" / f"{method}.tif"
+        info = relief.build_relief(self.dem_path, out, method, radius=radius, directions=directions,
+                                   min_size=min_size, max_size=max_size, scaling=scaling,
+                                   crs=None if crs_mod.is_local(self.crs) else self.crs, progress=as_progress(progress))
+        self._set_product(method, out)
+        self.meta.setdefault("relief", {})[method] = {k: v for k, v in info.items() if k != "path"}
+        return out
+
     @property
     def region(self):
         """The reconstruction region (:class:`engine.region.Region`, world coordinates) or None:
