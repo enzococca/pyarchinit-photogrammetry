@@ -124,7 +124,10 @@ jobs:
           $toolchain = "$root/vcpkg/scripts/buildsystems/vcpkg.cmake"
           cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$root/install" `
             -DCMAKE_TOOLCHAIN_FILE="$toolchain" -DVCPKG_TARGET_TRIPLET=arm64-windows-release `
-            -DCUDA_ENABLED=OFF -DONNX_ENABLED=OFF -DGUI_ENABLED=OFF -DCGAL_ENABLED=OFF -DLSD_ENABLED=OFF
+            -DCUDA_ENABLED=OFF -DONNX_ENABLED=OFF -DGUI_ENABLED=OFF -DCGAL_ENABLED=OFF -DLSD_ENABLED=OFF `
+            -DDOWNLOAD_ENABLED=OFF
+          # (download support on MSVC ARM64 looks for its CryptoPP target under another name in 4.2.1 and
+          # falls back to an OpenSSL that is not there; this program downloads nothing through COLMAP)
           cmake --build build --target install
           python -m pip install --upgrade pip build delvewheel
           python python/ci/install-build-requirements.py
