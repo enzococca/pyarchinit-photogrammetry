@@ -332,6 +332,33 @@ def export_reference(chunk, path) -> Path:
     return path
 
 
+def camera_reference_errors(chunk) -> dict:
+    """``{camera key: {"reference", "estimated", "delta", "error"}}`` for the cameras with a
+    reference position (the GPS of the photos): the reference in the chunk CRS (converted from
+    the CRS it was read in, as the georeferencing does) and, for an aligned camera of a
+    georeferenced chunk, the estimated centre and ``estimated - reference`` in metres. Nothing
+    of the chunk changes; references that cannot be compared yet (a chunk still in local
+    coordinates) are left out."""
+    groups: dict[str, list] = {}
+    for cam in chunk.cameras:
+        if cam.reference.location:
+            groups.setdefault(cam.meta.get("reference_crs", chunk.crs), []).append(cam)
+    out = {}
+    for ref_crs, cams in groups.items():
+        locs = np.array([cam.reference.location for cam in cams], float).reshape(-1, 3)
+        if ref_crs != chunk.crs:
+            if crs_mod.is_local(ref_crs) or crs_mod.is_local(chunk.crs) or crs_mod.is_geographic(chunk.crs):
+                continue
+            locs = crs_mod.transform_points(locs, ref_crs, chunk.crs)
+        for cam, loc in zip(cams, locs):
+            entry = {"reference": loc}
+            if cam.aligned and not crs_mod.is_local(chunk.crs):
+                est = np.asarray(chunk.to_world(cam.center), float)
+                entry.update(estimated=est, delta=est - loc, error=float(np.linalg.norm(est - loc)))
+            out[cam.key] = entry
+    return out
+
+
 def _camera_reference_pairs(chunk) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """(internal centres, reference positions in chunk CRS, accuracies) of referenced cameras."""
     src, dst, acc = [], [], []

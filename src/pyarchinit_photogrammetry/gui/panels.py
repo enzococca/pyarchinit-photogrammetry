@@ -635,9 +635,9 @@ class ReferencePane(QWidget):
         self.bars.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.bars.customContextMenuRequested.connect(self._bar_menu)
         split.addWidget(self.bars)
-        self.cams = QTableWidget(0, 7)
+        self.cams = QTableWidget(0, 10)
         self.cams.setHorizontalHeaderLabels(["Camera", tr("Allineata"), "X", "Y", "Z", tr("Rif. X"), tr("Rif. Y"),
-                                             tr("Precisione X/Y/Z (mm)")])
+                                             tr("Rif. Z"), tr("Errore (m)"), tr("Precisione X/Y/Z (mm)")])
         self.cams.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.cams.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.cams.setAlternatingRowColors(True)
@@ -751,11 +751,22 @@ class ReferencePane(QWidget):
                     it.setForeground(QColor(PALETTE["red"]))
                 self.bars.setItem(r, c, it)
         self.cams.setRowCount(len(chunk.cameras))
+        import numpy as np
+
+        from ..markers.gcp import camera_reference_errors
+
+        try:  # the GPS of the photos in the chunk CRS, as the georeferencing uses it
+            cam_refs = camera_reference_errors(chunk)
+        except Exception:  # an unknown CRS: the references as they were read
+            cam_refs = {}
         for r, cam in enumerate(chunk.cameras):
             c = chunk.to_world(cam.center) if cam.aligned else [None] * 3
-            ref = cam.reference.location or [None, None, None]
+            entry = cam_refs.get(cam.key, {})
+            ref = entry.get("reference")
+            ref = ref if ref is not None else (cam.reference.location or [None, None, None])
             row = [cam.label, "si" if cam.aligned else "no", _fmt(c[0], 3), _fmt(c[1], 3), _fmt(c[2], 3),
-                   _fmt(ref[0], 3), _fmt(ref[1], 3), _precision(cam.meta.get("precision"))]
+                   _fmt(ref[0], 3), _fmt(ref[1], 3), _fmt(ref[2], 3), _fmt(entry.get("error"), 3),
+                   _precision(cam.meta.get("precision"))]
             for k, v in enumerate(row):
                 it = QTableWidgetItem(v)
                 if k == 0:
@@ -763,6 +774,12 @@ class ReferencePane(QWidget):
                 self.cams.setItem(r, k, it)
         rep = self.last_report or {}
         parts = []
+        cam_errors = [e["delta"] for e in cam_refs.values() if "delta" in e]
+        if cam_errors:  # as the total error of the cameras in Metashape
+            d = np.asarray(cam_errors)
+            parts.append(tr("Camere (GPS): errore {0} m (X {1}, Y {2}, Z {3})", _fmt(float(np.sqrt((d ** 2).sum(1).mean())), 2),
+                            _fmt(float(np.sqrt((d[:, 0] ** 2).mean())), 2), _fmt(float(np.sqrt((d[:, 1] ** 2).mean())), 2),
+                            _fmt(float(np.sqrt((d[:, 2] ** 2).mean())), 2)))
         for key, name in (("control_rmse", "RMSE controllo"), ("check_rmse", "RMSE check")):
             if rep.get(key) is not None:
                 parts.append(f"{tr(name)}: <b>{rep[key] * 1000:.1f} mm</b>")
