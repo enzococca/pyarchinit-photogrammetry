@@ -103,7 +103,8 @@ def test_interface_and_command_line(processed, tmp_path):
     w._show_coords(0.0, 0.0, 0.0012)
     assert "sigma Z 1.2 mm" in w.coord_label.text()
     # a spot height takes the precision of the DEM where it is
-    x, y, _z = doc.chunk.to_world(doc.chunk.tie_points.xyz[:1])[0]
+    # the middle of the tie points, inside the DEM (one at the border can fall on an empty cell)
+    x, y = np.median(doc.chunk.to_world(doc.chunk.tie_points.xyz)[:, :2], axis=0)
     w._quota_keep = {"area_q": "1", "us_q": "2", "unita_misu_q": "m", "rilievo_originale": "Fotogrammetria"}
     w._quota_clicked(float(x), float(y))
     q = w.quote[-1]
