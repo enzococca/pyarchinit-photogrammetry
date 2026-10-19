@@ -3,7 +3,7 @@ name: windows-arm
 # Toward a native Windows ARM64 application (Snapdragon laptops, Windows 11 on a Mac with Apple
 # Silicon; the x64 application already runs there under emulation). Several libraries publish no
 # win_arm64 wheels and are built here, each in its own job: lazrs (LAZ point clouds), the native
-# core of this project, OpenCV with the contrib modules and pycolmap (COLMAP with vcpkg, as
+# core of this project, OpenCV (the modules this program uses) and pycolmap (COLMAP with vcpkg, as
 # COLMAP's own Windows wheels). On demand; the wheels stay as artifacts.
 on:
   workflow_dispatch:
@@ -65,7 +65,7 @@ jobs:
         with:
           python-version: "3.12"
           architecture: arm64
-      - name: OpenCV with the contrib modules from its source
+      - name: OpenCV from its source, the modules this program uses
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -75,16 +75,37 @@ jobs:
           New-Item -ItemType Directory -Force C:\t | Out-Null
           $env:TEMP = "C:\t"; $env:TMP = "C:\t"
           $env:ENABLE_CONTRIB = "1"; $env:ENABLE_HEADLESS = "1"
+          # OpenCV 5 has all this program uses in its main modules (ArUco, the colour chart detector and
+          # the colour correction too): only those are built, under the package name of the dependency.
+          # Videos are read by Media Foundation, off in the headless packages: OpenCV has no FFmpeg for ARM64.
+          $env:CMAKE_ARGS = "-DBUILD_LIST=core,imgproc,imgcodecs,videoio,calib,stereo,features,flann,geometry,objdetect,photo,python3 -DWITH_MSMF=ON"
+          $env:CMAKE_BUILD_PARALLEL_LEVEL = $env:NUMBER_OF_PROCESSORS
           python -m pip install --upgrade pip
           # its build requirements pin numpy 2.0.2, which has no win_arm64 wheel: a numpy 2 that has one
           # (a module built against numpy 2.x works with every 2.x)
           pip install numpy packaging "scikit-build>=0.14.0" "setuptools<70" wheel
-          pip download "opencv-contrib-python-headless==5.0.0.93" --no-binary :all: --no-deps -d C:\t\sdist
-          tar -xzf (Get-ChildItem C:\t\sdist\*.tar.gz).FullName -C C:\t
+          # the source archive straight from PyPI: "pip download --no-binary :all:" builds the build
+          # requirements from source too (numpy 2.0.2, cmake) and spent the six hours of the job there
+          $release = Invoke-RestMethod "https://pypi.org/pypi/opencv-contrib-python-headless/5.0.0.93/json"
+          $sdist = $release.urls | Where-Object { $_.packagetype -eq "sdist" } | Select-Object -First 1
+          Invoke-WebRequest $sdist.url -OutFile C:\t\opencv.tar.gz
+          tar -xzf C:\t\opencv.tar.gz -C C:\t
           Move-Item (Get-ChildItem C:\t -Directory -Filter "opencv*").FullName C:\cv
           pip wheel C:\cv --no-deps --no-build-isolation -w wheels
           pip install (Get-ChildItem wheels/*.whl).FullName numpy
-          python -c "import cv2; print(cv2.__version__, hasattr(cv2, 'mcc'), hasattr(cv2, 'ccm'))"
+          python -c @'
+          import cv2, numpy as np
+          image = np.zeros((64, 64, 3), np.uint8)
+          cv2.mcc.CCheckerDetector_create(); cv2.ccm.ColorCorrectionModel
+          cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50))
+          cv2.StereoSGBM_create(0, 16, 5); cv2.ORB_create().detect(image); cv2.BFMatcher(cv2.NORM_HAMMING)
+          cv2.inpaint(image, np.zeros((64, 64), np.uint8), 3, cv2.INPAINT_TELEA)
+          ok, data = cv2.imencode(".jpg", image); cv2.imdecode(data, cv2.IMREAD_COLOR)
+          backends = [cv2.videoio_registry.getBackendName(b) for b in cv2.videoio_registry.getBackends()]
+          print(cv2.__version__, backends)
+          if "MSMF" not in backends:
+              print("::warning::OpenCV without Media Foundation: videos cannot be read")
+          '@
       - uses: actions/upload-artifact@v4
         with:
           name: win-arm64-opencv
