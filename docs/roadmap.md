@@ -77,7 +77,7 @@ with their precision in PyArchInit and in the IFC (IfcAnnotation). Field check r
 alignment: coverage map (areas seen by fewer than three photos), photos not aligned or blurred,
 markers in too few photos.
 
-## 0.9 - Everyday work
+## 0.9 - Everyday work (done)
 
 * Batch processing over several chunks, saving after each step, resuming after a power cut,
   retrying a failed step. *Done.*
@@ -95,7 +95,7 @@ markers in too few photos.
 * English/Italian interface translation: catalog of the texts, messages with values, the
   messages of the engine and of the log recognised when shown, *Vista > Lingua / Language*. *Done.*
 
-## 1.0 - Archaeology first
+## 1.0 - Archaeology first (done, released as 1.0.0)
 
 * Relief visualisation of DEMs: sky-view factor, positive and negative openness, local relief
   model, multi-directional hillshade, multi-scale relief (walls and ditches barely visible on a
@@ -144,6 +144,18 @@ markers in too few photos.
   the 3D view, versions, undo, patches and the Metashape import. I3S *done*: the textured model
   as an Integrated Mesh scene layer package 1.7 (`chunk.export_i3s`, `ppg export --i3s`, *File >
   Esporta*), global (WGS84) or local (projected CRS), read back node by node by loaders.gl.
+* ARM builds. Linux aarch64 *done*: wheels of pycolmap 4.2.1 and Open3D 0.19.0, which their
+  projects do not publish, built in Docker with their own recipes (`packaging/arm`, workflow
+  `arm-wheels`) and tested with this project. Windows on ARM: the x64 application runs under the
+  emulation of Windows 11 (checked); native ARM64 builds (pycolmap, Open3D, OpenCV, lazrs) next.
+
+## After 1.0
+
+* Official documentation site in Italian and English, with tutorials worked on a real tell.
+* Plugins: a plugin interface, a guide to writing plugins and a repository that collects them.
+* Benchmark against Metashape and WebODM on Tell Tuqan (with control points): alignment, depth
+  maps, dense cloud, mesh, DEM and orthomosaic - times, results and errors.
+* Native Windows ARM64 builds.
 
 ## Not planned
 

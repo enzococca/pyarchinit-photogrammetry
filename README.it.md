@@ -9,7 +9,7 @@ curve di livello, volumi di scavo, classificazione della nuvola, Segment Anythin
 esportazione IFC e salvataggio diretto nel database di PyArchInit. Tutto è utilizzabile da
 Python e gira su CPU, anche su Mac Apple Silicon.
 
-> Stato: **alpha (0.5)**. Libreria Python, riga di comando e applicazione desktop (sulla stessa
+> Stato: **1.0**. Libreria Python, riga di comando e applicazione desktop (sulla stessa
 > API, con console Python integrata).
 
 ## Applicazione desktop (senza installare Python)
