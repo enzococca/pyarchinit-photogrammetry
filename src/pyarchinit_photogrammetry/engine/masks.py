@@ -24,7 +24,7 @@ import cv2
 import numpy as np
 
 from ..core.chunk import Chunk
-from ..core.progress import Progress
+from ..core.progress import Progress, as_progress
 from .visibility import read_photo
 
 TEMPLATES = ("{stem}_mask.png", "{stem}.png", "{name}.png", "{stem}_mask.jpg", "{stem}.jpg")
@@ -106,7 +106,7 @@ def import_masks(chunk: Chunk, folder: str | os.PathLike | None = None, template
     ``{stem}``, ``{label}``; by default ``<stem>_mask.png``, ``<stem>.png`` and the like), or,
     without a folder, from the alpha channel of the photos. White (or opaque) counts, unless
     ``invert``. Returns the masks written."""
-    progress = progress or Progress()
+    progress = as_progress(progress)
     cams = list(chunk.cameras if cams is None else cams)
     n = 0
     for i, cam in enumerate(cams):
@@ -176,7 +176,7 @@ def masks_from_background(chunk: Chunk, folder: str | os.PathLike, tolerance: fl
     (a turntable with a fixed camera: one background photo, or one per photo, named as the photos
     or as ``template``; a single file in the folder serves every photo): what differs from the
     background by more than ``tolerance`` levels is the object."""
-    progress = progress or Progress()
+    progress = as_progress(progress)
     folder = Path(folder)
     cams = list(chunk.cameras if cams is None else cams)
     files = [p for p in folder.iterdir() if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".tif", ".tiff")]
@@ -208,7 +208,7 @@ def masks_from_colour(chunk: Chunk, colour, tolerance: float = 40.0, cams=None,
                       progress: Progress | None = None) -> int:
     """Masks that leave out a backdrop of one colour (``colour`` RGB): every pixel within
     ``tolerance`` of it (distance in RGB) is masked."""
-    progress = progress or Progress()
+    progress = as_progress(progress)
     cams = list(chunk.cameras if cams is None else cams)
     bgr = np.array(colour[::-1][:3] if len(colour) >= 3 else colour, np.float32)
     for i, cam in enumerate(cams):
@@ -228,7 +228,7 @@ def masks_from_model(chunk: Chunk, cams=None, step: int = 4, margin_px: int = 6,
     from .visibility import Raycaster
     from ..io.mesh_ply import read_mesh
 
-    progress = progress or Progress()
+    progress = as_progress(progress)
     path = chunk.product_path("model")
     if path is None:
         raise RuntimeError("build the model first")
@@ -258,7 +258,7 @@ def masks_with_sam(chunk: Chunk, segmenter, cams=None, box_share: float = 0.0,
                    progress: Progress | None = None) -> int:
     """Masks that keep the object at the centre of each photo, segmented by SAM 2.1 (a point at the
     centre; with ``box_share`` > 0 also a centred box of that share of the photo)."""
-    progress = progress or Progress()
+    progress = as_progress(progress)
     cams = list(chunk.cameras if cams is None else cams)
     for i, cam in enumerate(cams):
         progress.check()

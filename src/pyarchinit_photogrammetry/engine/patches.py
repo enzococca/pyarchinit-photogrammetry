@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 
 from ..core.chunk import Chunk
-from ..core.progress import Progress
+from ..core.progress import Progress, as_progress
 
 MODES = ("assign", "exclude")
 SURFACES = ("dem", "ground")
@@ -179,7 +179,7 @@ def update_orthomosaic(chunk: Chunk, progress: Progress | None = None, workers: 
     from .ortho import _context, _on_grid, _run_tiles, _surface, correction_for, stored_blending
     from .visibility import raycaster_for_chunk, readable_cameras
 
-    progress = progress or Progress()
+    progress = as_progress(progress)
     path = chunk.orthomosaic_path
     if path is None or not path.exists():
         raise RuntimeError("build the orthomosaic first")
@@ -620,7 +620,7 @@ def retexture(chunk: Chunk, photos, faces=None, polygon=None, mode: str = "assig
     from .texturing import _face_camera_choice
     from .visibility import ImageCache, Raycaster, project_valid, readable_cameras, sample
 
-    progress = progress or Progress()
+    progress = as_progress(progress)
     if mode not in MODES:
         raise ValueError(f"mode: one of {', '.join(MODES)}")
     mesh, tex = _texture_mesh(chunk)

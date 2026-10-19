@@ -20,7 +20,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..core.chunk import Chunk
-from ..core.progress import Progress
+from ..core.progress import Progress, as_progress
 from .visibility import project_valid, read_photo, readable_cameras, sample
 
 SAMPLES = 20000     # surface points used for the estimate
@@ -70,7 +70,7 @@ def observations(chunk: Chunk, cams=None, samples: int = SAMPLES, raycaster=None
     """Colours of surface points in the photos that see them: point, photo and sensor indices,
     normalised radius and log colour (BGR) of every observation; points seen by fewer than two
     photos and saturated or black colours are left out."""
-    progress = progress or Progress()
+    progress = as_progress(progress)
     cams = list(cams) if cams is not None else readable_cameras(chunk, skip_unreadable=True)[0]
     pts = _surface_points(chunk, samples)
     sensors = sorted({c.sensor_key for c in cams})
@@ -171,7 +171,7 @@ def estimate(chunk: Chunk, samples: int = SAMPLES, vignetting: bool = True, occl
              progress: Progress | None = None) -> dict:
     """Measure the gains of the photos and the vignetting of the lenses, store them in
     ``chunk.meta["colour"]`` (used by the orthomosaic and the texture) and return them."""
-    progress = progress or Progress()
+    progress = as_progress(progress)
     raycaster = None
     if occlusion:
         from .visibility import raycaster_for_chunk

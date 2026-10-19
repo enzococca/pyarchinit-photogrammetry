@@ -24,7 +24,7 @@ import cv2
 import numpy as np
 
 from ..core.chunk import Chunk
-from ..core.progress import Progress
+from ..core.progress import Progress, as_progress
 
 # yaw (to the right) and pitch (up), degrees, of the axis of each face; panorama frame: x right,
 # y down, z forward (the centre of the panorama)
@@ -117,7 +117,7 @@ def add_panoramas(chunk: Chunk, paths, size: int | None = None, fov: float = 100
     from ..core.camera import Reference
     from ..io.exif import read_exif
 
-    progress = progress or Progress()
+    progress = as_progress(progress)
     files: list[Path] = []
     for p in map(Path, paths):
         files += sorted(f for f in p.iterdir() if f.suffix.lower() in EXTENSIONS) if p.is_dir() else [p]

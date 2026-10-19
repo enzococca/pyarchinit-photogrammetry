@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 
 from ..core.chunk import Chunk
-from ..core.progress import Cancelled, Progress
+from ..core.progress import Cancelled, Progress, as_progress
 from .isolate import IsolatedCrash, report, run_isolated
 
 log = logging.getLogger("pyarchinit_photogrammetry")
@@ -108,7 +108,7 @@ def fuse_depth_maps(chunk: Chunk, voxel_size: float | None = None, min_views: in
     """
     from . import dense
 
-    progress = progress or Progress()
+    progress = as_progress(progress)
     frames = depth_map_frames(chunk)
     if min_views is None:
         mode = chunk.meta["dense"].get("filter", "moderate")

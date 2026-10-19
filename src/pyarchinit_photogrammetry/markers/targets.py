@@ -16,7 +16,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from ..core.marker import Marker, Projection
-from ..core.progress import Progress
+from ..core.progress import Progress, as_progress
 
 TARGET_TYPES = {
     "aruco_4x4_50": cv2.aruco.DICT_4X4_50,
@@ -236,7 +236,7 @@ def _diagonal_intersection(q: np.ndarray) -> np.ndarray:
 
 
 def detect_in_chunk(chunk, target_type: str = "aruco_4x4_50", cameras=None, progress: Progress | None = None) -> list[Marker]:
-    progress = progress or Progress()
+    progress = as_progress(progress)
     cams = [c for c in (cameras or chunk.cameras) if c.enabled]
     by_code = {m.code: m for m in chunk.markers if m.code is not None and m.target_type == target_type}
     touched: dict[int, Marker] = {}

@@ -34,7 +34,7 @@ from pathlib import Path
 import numpy as np
 
 from ..core.chunk import Chunk
-from ..core.progress import Progress
+from ..core.progress import Progress, as_progress
 from .sfm import drop_missing_points, import_reconstruction, load_reconstruction
 
 log = logging.getLogger(__name__)
@@ -256,7 +256,7 @@ def remove_tie_points(chunk: Chunk, ids, optimize: bool = False, progress: Progr
     (all it has when it had fewer): such a photo could not be optimized nor stay aligned.
     Returns ``removed``, ``remaining``, the mean reprojection error before and after (px)
     and, with ``optimize``, the error of the optimization and the georeference report."""
-    progress = progress or Progress()
+    progress = as_progress(progress)
     rec = load_reconstruction(chunk)
     drop_missing_points(rec)
     before = tie_point_metrics(chunk, rec)["mean_reprojection_error"]

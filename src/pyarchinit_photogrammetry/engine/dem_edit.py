@@ -15,7 +15,7 @@ import datetime
 import numpy as np
 
 from ..core.chunk import Chunk
-from ..core.progress import Progress
+from ..core.progress import Progress, as_progress
 
 METHODS = ("plane", "constant", "idw", "linear")
 RING = 3  # cells around the area whose heights are the known ones
@@ -83,7 +83,7 @@ def fill_area(chunk: Chunk, polygon, method: str = "plane", value: float | None 
     from ..core import versions
     from .crop import as_polygon
 
-    progress = progress or Progress()
+    progress = as_progress(progress)
     src_path = chunk.dem_path
     if src_path is None or not src_path.exists():
         raise RuntimeError("build the DEM first")

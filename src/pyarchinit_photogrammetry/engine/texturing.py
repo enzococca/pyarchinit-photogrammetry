@@ -23,7 +23,7 @@ import cv2
 import numpy as np
 
 from ..core.chunk import Chunk
-from ..core.progress import Progress
+from ..core.progress import Progress, as_progress
 from .visibility import ImageCache, Raycaster, project_valid, readable_cameras, sample
 
 MAPPINGS = ("auto", "orthophoto", "generic")
@@ -251,7 +251,7 @@ def build_texture(chunk: Chunk, texture_size: int = 4096, progress: Progress | N
     from ..io.mesh_ply import read_mesh, write_mesh
     from .ortho import correction_for
 
-    progress = progress or Progress()
+    progress = as_progress(progress)
     path = chunk.product_path("model")
     if path is None or not path.exists():
         raise RuntimeError("build the model first")

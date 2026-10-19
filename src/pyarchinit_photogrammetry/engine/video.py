@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 
 from ..core.chunk import Chunk
-from ..core.progress import Progress
+from ..core.progress import Progress, as_progress
 from .quality import sharpness
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".mts", ".lrf"}
@@ -116,7 +116,7 @@ def extract_frames(video: str | os.PathLike, folder: str | os.PathLike, overlap:
     """Frames of ``video`` written as JPEG in ``folder`` (``<stem>_<frame>.jpg``): a new one when the
     view has moved by ``1 - overlap`` of its width (the sharpest in the ``window`` seconds after
     that moment), or one every ``every`` seconds. Returns ``[{"path", "frame", "time"}]``."""
-    progress = progress or Progress()
+    progress = as_progress(progress)
     video = Path(video)
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
@@ -186,7 +186,7 @@ def add_video(chunk: Chunk, video: str | os.PathLike, folder: str | os.PathLike 
     """Frames of a video added to ``chunk`` as photos (in ``folder``, by default
     ``<video stem>_fotogrammi`` beside the video); with the DJI ``.SRT`` (``srt``, or the file with
     the same name beside the video) every frame gets its position as camera reference."""
-    progress = progress or Progress()
+    progress = as_progress(progress)
     video = Path(video)
     folder = Path(folder) if folder is not None else video.with_name(f"{video.stem}_fotogrammi")
     frames = extract_frames(video, folder, overlap, every, max_frames, progress=progress.sub(0.0, 0.9))

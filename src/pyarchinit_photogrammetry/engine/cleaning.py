@@ -23,7 +23,7 @@ import numpy as np
 
 from ..core.chunk import Chunk
 from ..core.pointcloud import PointCloud
-from ..core.progress import Progress
+from ..core.progress import Progress, as_progress
 
 
 # ---------------------------------------------------------------- dense cloud
@@ -125,7 +125,7 @@ def point_filters(chunk: Chunk, pc: PointCloud | None = None, min_confidence: in
     ``min_points`` (distance 0 = 4 x the point spacing); ``color=((r, g, b), tolerance)``.
 
     Returns ``{filter name: boolean mask over the cloud}``."""
-    progress = progress or Progress()
+    progress = as_progress(progress)
     pc = pc if pc is not None else chunk.point_cloud
     if pc is None:
         raise RuntimeError("build the dense cloud first")
@@ -182,7 +182,7 @@ def summarize(masks: dict[str, np.ndarray], total: int) -> dict:
 def clean_point_cloud(chunk: Chunk, progress: Progress | None = None, **filters) -> dict:
     """Remove from the dense cloud what :func:`point_filters` selects (same keywords) and store
     the result (classes, confidence and the classes given by hand are kept). Returns the counts."""
-    progress = progress or Progress()
+    progress = as_progress(progress)
     pc = chunk.point_cloud
     if pc is None:
         raise RuntimeError("build the dense cloud first")
@@ -370,7 +370,7 @@ def clean_model(chunk: Chunk, min_confidence: int | None = None, min_component: 
     not taken for holes. Every vertex property (colours, confidence...) is kept; new vertices
     take those of the nearest old one. The texture stays when only faces were removed (and
     smoothing moved the vertices a little); closing holes or decimating leaves it out."""
-    progress = progress or Progress()
+    progress = as_progress(progress)
     progress(0.02, "Lettura del modello")
     mesh = _model(chunk)
     v, f = mesh.xyz, mesh.faces

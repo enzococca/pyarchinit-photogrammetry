@@ -23,7 +23,7 @@ import numpy as np
 from ..core import crs as crs_mod
 from ..core.chunk import QUALITY_DOWNSCALE, Chunk
 from ..core.pointcloud import PointCloud
-from ..core.progress import Progress
+from ..core.progress import Progress, as_progress
 
 log = logging.getLogger(__name__)
 
@@ -242,7 +242,7 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     from .masks import colmap_mask_folder
     from .panorama import panorama_cameras, rig_configs
 
-    progress = progress or Progress()
+    progress = as_progress(progress)
     work = _sfm_dir(chunk)
     db_path = work / "database.db"
     if db_path.exists():
@@ -355,7 +355,7 @@ def remove_stationary_matches(db_path: Path, min_shift: float = 2.0, min_inliers
 def align_cameras(chunk: Chunk, progress: Progress | None = None) -> int:
     import pycolmap
 
-    progress = progress or Progress()
+    progress = as_progress(progress)
     work = _sfm_dir(chunk)
     db_path = work / "database.db"
     if not db_path.exists():
@@ -737,7 +737,7 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
 
     from ..markers import gcp
 
-    progress = progress or Progress()
+    progress = as_progress(progress)
     rec = load_reconstruction(chunk)
     drop_missing_points(rec)  # models written from imported poses by earlier versions
 

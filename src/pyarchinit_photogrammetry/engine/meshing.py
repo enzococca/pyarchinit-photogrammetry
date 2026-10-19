@@ -18,7 +18,7 @@ import numpy as np
 from ..core import geometry
 from ..core.chunk import Chunk
 from ..core.pointcloud import NOISE_CLASSES
-from ..core.progress import Progress
+from ..core.progress import Progress, as_progress
 from .isolate import IsolatedCrash, run_isolated
 
 log = logging.getLogger("pyarchinit_photogrammetry")
@@ -67,7 +67,7 @@ def build_model(chunk: Chunk, source: str = "point_cloud", surface: str = "arbit
     dense points of these classes (the surface closes over what is left out); points
     classified as noise are never used.
     """
-    progress = progress or Progress()
+    progress = as_progress(progress)
     if classes is not None and source != "point_cloud":
         raise ValueError("the classes are those of the dense cloud: use source='point_cloud'")
     if source == "depth_maps":

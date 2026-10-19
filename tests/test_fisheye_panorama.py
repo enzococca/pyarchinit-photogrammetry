@@ -256,3 +256,23 @@ def test_interface_panoramas_and_lens_model(tmp_path, monkeypatch):
     w.setWindowModified(False)
     w.close()
     app.processEvents()
+
+
+def test_command_line(tmp_path):
+    from typer.testing import CliRunner
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.cli import app
+
+    scene = synthetic.make_chamber_scene()
+    cv2.imwrite(str(tmp_path / "P0.jpg"), synthetic.render_equirectangular(scene, STATIONS[0], 800))
+    doc = ppg.Document()
+    doc.add_chunk("c")
+    doc.save(tmp_path / "p.ppg")
+    run = CliRunner()
+    r = run.invoke(app, ["add-panoramas", str(doc.path), str(tmp_path / "P0.jpg"), "--faces", "front,right,back,left"])
+    assert r.exit_code == 0, r.output + repr(r.exception)
+    assert "1 panoramas added (4 faces)" in r.output
+    r = run.invoke(app, ["lens-model", str(doc.path), "opencv_fisheye"])
+    assert r.exit_code == 0, r.output + repr(r.exception)
+    assert {s.model for s in ppg.Document.open(doc.path).chunk.sensors.values()} == {"OPENCV_FISHEYE"}

@@ -9,7 +9,7 @@ from ..core import crs as crs_mod
 from ..core import geometry
 from ..core.chunk import Chunk
 from ..core.pointcloud import NOISE_CLASSES
-from ..core.progress import Progress
+from ..core.progress import Progress, as_progress
 
 NODATA = -32767.0
 
@@ -148,7 +148,7 @@ def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "poin
     """DEM of the highest surface point in each cell. ``classes`` (dense cloud): only these
     classes, e.g. the ground for a terrain model (DTM); the gaps they leave (under a removed
     tool or bush) are interpolated from around."""
-    progress = progress or Progress()
+    progress = as_progress(progress)
     ensure_level(chunk)
     progress(0.05, "Collecting surface points")
     classes = None if classes is None else sorted({int(c) for c in classes})

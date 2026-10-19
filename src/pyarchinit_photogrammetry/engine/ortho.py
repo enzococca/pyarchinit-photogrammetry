@@ -34,7 +34,7 @@ import numpy as np
 
 from .. import _native
 from ..core.chunk import Chunk
-from ..core.progress import Progress
+from ..core.progress import Progress, as_progress
 from .dem import NODATA, ensure_level, estimate_gsd
 from .visibility import project_valid, raycaster_for_chunk, read_photo, readable_cameras, sample
 
@@ -1025,7 +1025,7 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
 
     from ..core import crs as crs_mod
 
-    progress = progress or Progress()
+    progress = as_progress(progress)
     progress(0.0, "Checking the photos")
     cams, bad = readable_cameras(chunk, skip_unreadable)
     ensure_level(chunk)
@@ -1130,7 +1130,7 @@ def render_surface(chunk: Chunk, origin, shape, resolution: float, cams=None, ra
     world units): the orthophoto engine in memory (seamless mosaic), used for the texture of a
     terrain model. ``patches`` take their colours from the photos assigned to them;
     ``correction``: a colour correction (:func:`correction_for`)."""
-    progress = progress or Progress()
+    progress = as_progress(progress)
     cams = list(chunk.aligned_cameras if cams is None else cams)
     raycaster = raycaster if raycaster is not None else raycaster_for_chunk(chunk)
     if raycaster is None:

@@ -19,7 +19,7 @@ import numpy as np
 from .. import _native
 from ..core.chunk import Chunk
 from ..core.pointcloud import PointCloud
-from ..core.progress import Progress
+from ..core.progress import Progress, as_progress
 
 # ranges of the legend in the 3D view and of the statistics
 BINS = [(0, 0), (1, 1), (2, 2), (3, 4), (5, 9), (10, 19), (20, 255)]
@@ -161,7 +161,7 @@ def depth_map_support(chunk: Chunk, points: np.ndarray, tol: float = 0.01, progr
     """For every point (internal frame) the number of depth maps that agree on it (uint8).
     ``abs_tol``: a tolerance of each point in internal units, used where larger than ``tol``
     times its distance (a mesh vertex cannot lie closer to the surface than about half an edge)."""
-    progress = progress or Progress()
+    progress = as_progress(progress)
     maps = depth_maps(chunk)
     points = np.ascontiguousarray(points, np.float64)
     counts = np.zeros(len(points), np.uint16)
@@ -190,7 +190,7 @@ def _summary(conf: np.ndarray, source: str) -> dict:
 def compute_point_confidence(chunk: Chunk, tol: float = 0.01, progress: Progress | None = None) -> dict:
     """Confidence of the dense cloud from the depth maps of the chunk, stored in its file.
     Returns the statistics."""
-    progress = progress or Progress()
+    progress = as_progress(progress)
     pc = chunk.point_cloud
     if pc is None:
         raise RuntimeError("build the dense cloud first")
@@ -252,7 +252,7 @@ def compute_model_confidence(chunk: Chunk, tol: float = 0.01, progress: Progress
     no depth map saw the surface there (a hole the mesh closed, a 2.5D surface across a wall)."""
     from ..io.mesh_ply import read_mesh
 
-    progress = progress or Progress()
+    progress = as_progress(progress)
     path = chunk.product_path("model")
     if path is None or not path.exists():
         raise RuntimeError("build the model first")

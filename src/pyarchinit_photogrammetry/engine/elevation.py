@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from ..core.chunk import Chunk
-from ..core.progress import Progress
+from ..core.progress import Progress, as_progress
 
 
 def _unit(v) -> np.ndarray:
@@ -268,7 +268,7 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
     from .ortho import _context, _run_tiles, correction_for
     from .visibility import raycaster_for_chunk, readable_cameras
 
-    progress = progress or Progress()
+    progress = as_progress(progress)
     if chunk.product_path("model") is None:
         raise RuntimeError("build the model first: an elevation is made on the model")
     progress(0.0, "Checking the photos")

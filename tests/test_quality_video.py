@@ -166,3 +166,31 @@ def test_interface_quality_and_video(processed, tmp_path, monkeypatch):
     w.setWindowModified(False)
     w.close()
     app.processEvents()
+
+
+def test_command_line(tmp_path):
+    """The commands call the engine with a plain progress function (print_progress)."""
+    from typer.testing import CliRunner
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.cli import app
+
+    rng = np.random.default_rng(3)
+    (tmp_path / "foto").mkdir()
+    for i in range(3):
+        img = cv2.GaussianBlur((rng.random((300, 400, 3)) * 255).astype(np.uint8), (0, 0), 1.0 + 2.0 * (i == 2))
+        cv2.imwrite(str(tmp_path / "foto" / f"a{i}.jpg"), img)
+    doc = ppg.Document()
+    ch = doc.add_chunk("c")
+    doc.save(tmp_path / "p.ppg")
+    ch.add_photos([tmp_path / "foto"])
+    doc.save()
+    run = CliRunner()
+    r = run.invoke(app, ["quality", str(doc.path)])
+    assert r.exit_code == 0, r.output + repr(r.exception)
+    assert "a2" in r.output
+    path = tmp_path / "volo.mp4"
+    if _pan_video(path, frames=60):
+        r = run.invoke(app, ["add-video", str(doc.path), str(path), "--every", "1"])
+        assert r.exit_code == 0, r.output + repr(r.exception)
+        assert len(ppg.Document.open(doc.path).chunk.cameras) == 5

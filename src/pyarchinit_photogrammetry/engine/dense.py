@@ -22,7 +22,7 @@ import numpy as np
 from .. import _native
 from ..core.chunk import QUALITY_DOWNSCALE, Chunk
 from ..core.pointcloud import PointCloud
-from ..core.progress import Progress
+from ..core.progress import Progress, as_progress
 from .visibility import UnreadablePhotos, unreadable_photos  # noqa: F401 - part of this module's API
 
 FILTER_MODES = {  # min agreeing neighbours, relative depth tolerance, fusion min pixels
@@ -75,7 +75,7 @@ def build_depth_maps(chunk: Chunk, quality: str = "medium", filter_mode: str = "
     (:class:`UnreadablePhotos`) unless ``skip_unreadable``: then they are left out."""
     import pycolmap
 
-    progress = progress or Progress()
+    progress = as_progress(progress)
     progress(0.0, "Checking the photos")
     bad = unreadable_photos(chunk)
     if bad and (not skip_unreadable or len(bad) == len(chunk.aligned_cameras)):
@@ -125,7 +125,7 @@ def build_depth_maps(chunk: Chunk, quality: str = "medium", filter_mode: str = "
 def build_point_cloud(chunk: Chunk, point_colors: bool = True, progress: Progress | None = None) -> PointCloud:
     import pycolmap
 
-    progress = progress or Progress()
+    progress = as_progress(progress)
     ws = _workspace(chunk)
     info = chunk.meta.get("dense")
     if not info or not ws.exists():

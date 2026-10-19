@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 
 from ..core.chunk import Chunk
-from ..core.progress import Progress
+from ..core.progress import Progress, as_progress
 from .visibility import read_photo
 
 THRESHOLD = 0.5  # under it a photo is suggested to be left out
@@ -58,7 +58,7 @@ def estimate_quality(chunk: Chunk, cams=None, progress: Progress | None = None) 
     """Quality (0-1) of the photos of ``cams`` (all enabled ones by default), stored in
     ``camera.meta["quality"]`` (and the raw sharpness in ``meta["sharpness"]``); the reference is
     the sharpest photos of the whole chunk."""
-    progress = progress or Progress()
+    progress = as_progress(progress)
     cams = [c for c in (chunk.cameras if cams is None else cams)]
     for i, cam in enumerate(cams):
         progress.check()
