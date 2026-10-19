@@ -233,6 +233,10 @@ resolution; drag the blue flag onto the point or double click it when it is righ
 for the next photo. Every confirmation places the marker again (two green flags: triangulated) and
 moves the blue flags of the other photos to where it is now. Blue flags are estimates, not
 measurements: they never move a marker that has a green one, nor enter the camera optimisation.
+*Affina le bandierine blu* (right click in *Riferimenti*, for the selected markers or all of them,
+or *Flusso di lavoro > Affina le bandierine blu dei marker*) looks for the point of every blue flag
+in its photo by image correlation, on the surface around the marker: the flags found turn into
+measurements (automatic, as detected targets), the others stay blue to confirm by hand.
 
 A scale bar is the known distance between two markers, as in Metashape. In *Riferimenti* select two
 markers (Cmd/Shift click) and choose *Crea barra di scala tra A e B...* from the right-click menu, or

@@ -340,6 +340,19 @@ first (*Filter Photos by Point*); `gcp.project_marker(chunk, marker, point=None,
 replaces the estimated projections of a marker from its position; `gcp.views_of(chunk, marker,
 estimated=False)` counts the photos that measure it (or, with `estimated`, that only estimate it).
 
+`markers.refine.refine_markers(chunk, markers=None, min_score=0.8)` looks for every blue flag in its
+photo by image correlation: a patch of the photo where the marker is measured (placed by hand
+first, else the sharpest view) and the photo of the flag are both sampled on the same grid of
+points on the surface at the marker (the plane of the dense cloud, else of the tie points, around
+it; one sample per pixel of the coarser photo, smoothed against aliasing), so perspective,
+rotation, scale and lens distortion do not matter; a clear peak of the normalised correlation
+(at least `min_score`, 0.1 above any other peak, inside +-10 samples) moves the flag there to a
+fraction of a pixel and makes it an automatic measurement (`pinned` False); the marker is
+triangulated again and the flags left are estimated from its new place. Returns `{marker key:
+{"refined": {camera key: (dx, dy, score)}, "failed": [camera keys], "reference": key}}`;
+`refine_marker(chunk, marker, ...)` does one marker. On the synthetic trench, flags 2-6 px off
+the target come back within 0.3 px of the detected centre.
+
 In the camera optimisation (`chunk.optimize_cameras`) the control bars are fixed points as the
 control points are: `engine.sfm.bar_anchors(chunk, bars, fixed=None)` moves the markers at their
 ends so that the bars get their lengths, least squares of `scale * length - distance` (weighted

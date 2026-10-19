@@ -518,6 +518,7 @@ class ReferencePane(QWidget):
     changed = Signal()
     scalebar_requested = Signal(object)  # keys of the markers chosen (0, 1 or 2)
     filter_photos_requested = Signal(object)  # keys of the markers whose photos are to be shown
+    refine_requested = Signal(object)  # keys of the markers whose blue flags are to be looked for (none: all)
     scalebar_import_requested = Signal()
 
     BAR_COLS = ["Usa", "Barra", "Marker A", "Marker B", "Distanza (m)", "Accur. (m)", "Check", "Stimata (m)",
@@ -741,11 +742,16 @@ class ReferencePane(QWidget):
         a_photos = menu.addAction(icon("filter"), f"Filtra le foto di {', '.join(names)}" if names
                                   else "Filtra le foto... (seleziona uno o piu' marker)")
         a_photos.setEnabled(bool(keys))
+        a_refine = menu.addAction(icon("refine"), f"Affina le bandierine blu di {', '.join(names)}" if names
+                                  else "Affina le bandierine blu di tutti i marker")
+        a_refine.setToolTip("Cerca per correlazione, nelle foto, il punto di ogni posizione stimata")
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if chosen is a_bar:
             self.scalebar_requested.emit(keys)
         elif chosen is a_photos:
             self.filter_photos_requested.emit(keys)
+        elif chosen is a_refine:
+            self.refine_requested.emit(keys)
 
     def _bar_menu(self, pos) -> None:
         from PySide6.QtWidgets import QMenu

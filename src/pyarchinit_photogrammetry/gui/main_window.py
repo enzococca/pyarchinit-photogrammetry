@@ -190,6 +190,7 @@ class MainWindow(QMainWindow):
         self.reference.scalebar_requested.connect(self.new_scalebar)
         self.reference.scalebar_import_requested.connect(self.import_scalebars)
         self.reference.filter_photos_requested.connect(self.filter_photos_by_markers)
+        self.reference.refine_requested.connect(self.refine_markers)
         self.photos = PhotosPane()
         self.photos.thumbs_progress.connect(self._thumbs_progress)
         self.photos.open_camera.connect(self.open_photo)
@@ -334,6 +335,9 @@ class MainWindow(QMainWindow):
         self._act(m, "Unisci chunk...", self.merge_chunks, processing=True, icon_name="merge")
         m.addSeparator()
         self._act(m, "Rileva marker codificati...", self.detect_markers, processing=True, icon_name="markers")
+        self._act(m, "Affina le bandierine blu dei marker", lambda: self.refine_markers(), processing=True,
+                  icon_name="refine", tip="Cerca nelle foto, per correlazione, il punto di ogni posizione stimata "
+                                          "(bandierina blu) dei marker misurati in almeno una foto")
         self._act(m, "Allinea foto...", self.align_photos, processing=True, icon_name="align")
         self._act(m, "Importa riferimenti...", self.import_reference, icon_name="reference")
         self._act(m, "Aggiorna georeferenziazione", self.update_transform, processing=True, icon_name="georef")
@@ -1499,6 +1503,31 @@ class MainWindow(QMainWindow):
         if v:
             self.run_task("Rilevamento marker", lambda p: self.chunk.detect_markers(v["target_type"], progress=p),
                           lambda ms: self.statusBar().showMessage(f"{len(ms)} marker rilevati", 8000))
+
+    def refine_markers(self, keys=None) -> None:
+        """The blue flags of the markers (all, or those of ``keys``) looked for in the photos by
+        image correlation: those found become measurements (``markers.refine``)."""
+        if not self._need_chunk():
+            return
+        from ..markers.refine import refine_markers
+
+        ch = self.chunk
+        markers = [ch.marker_by_key(k) for k in keys] if keys else list(ch.markers)
+        if not any(p.measured for m in markers for p in m.projections.values()):
+            self._warn("Misura prima il marker in almeno una foto (o rileva i marker codificati): le bandierine blu "
+                       "nelle altre foto partono da li'.")
+            return
+
+        def done(report):
+            found = sum(len(r["refined"]) for r in report.values())
+            left = sum(len(r["failed"]) for r in report.values())
+            self._markers_edited()
+            text = (f"Bandierine blu trovate nelle foto: {found}" if found else "Nessuna bandierina blu trovata")
+            text += f"; {left} da confermare a mano" if left else ""
+            self.log_pane.info(text)
+            self.statusBar().showMessage(text, 15000)
+
+        self.run_task("Affinamento dei marker", lambda p: refine_markers(ch, markers, progress=p), done, refresh=False)
 
     def align_photos(self) -> None:
         if not self._need_chunk():

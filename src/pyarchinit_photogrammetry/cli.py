@@ -77,6 +77,29 @@ def detect_markers(project: Path, target_type: str = "aruco_4x4_50", chunk: Opti
     typer.echo(f"{len(found)} targets: " + ", ".join(f"{m.label} ({len(m.projections)} photos)" for m in found))
 
 
+@app.command("refine-markers")
+def refine_markers(project: Path, marker: Optional[list[str]] = typer.Option(None, help="marker label (repeat it); "
+                                                                                      "default: all"),
+                   min_score: float = typer.Option(0.8, help="correlation needed to accept a flag (0-1)"),
+                   chunk: Optional[str] = None):
+    """Look for the estimated marker projections (blue flags) in the photos by image correlation:
+    those found become measurements."""
+    import numpy as np
+
+    from .markers.gcp import resolve_marker
+    from .markers.refine import refine_markers as _refine
+
+    doc, ch = _open(project, chunk)
+    markers = [resolve_marker(ch, m) for m in marker] if marker else None
+    report = _refine(ch, markers, min_score=min_score, progress=print_progress)
+    doc.save()
+    for key, r in report.items():
+        m = ch.marker_by_key(key)
+        moved = [np.hypot(dx, dy) for dx, dy, _s in r["refined"].values()]
+        typer.echo(f"{m.label}: {len(r['refined'])} found" + (f" (moved {np.median(moved):.2f} px)" if moved else "")
+                   + (f", {len(r['failed'])} left to confirm" if r["failed"] else ""))
+
+
 @app.command()
 def align(project: Path, quality: str = "high", pairs: str = "auto", keypoints: int = 40000,
           chunk: Optional[str] = None):

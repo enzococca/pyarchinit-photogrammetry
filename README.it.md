@@ -254,7 +254,9 @@ Da terminale: `ppg patch PROGETTO --bbox ... --suggest` elenca le foto di un'are
   già giusta; Pagina giù/su passano alle altre foto. Le foto si filtrano per marker (tasto destro
   in *Riferimenti*), per punto (tasto destro sull'ortofoto, *Foto del punto* nella vista 3D) o per
   area (un poligono selezionato). Le bandierine blu non sono misure: con due verdi il marker viene
-  triangolato da quelle.
+  triangolato da quelle. *Affina le bandierine blu* trova il punto di ogni bandierina blu nella sua
+  foto per correlazione d'immagine sulla superficie attorno al marker (a una frazione di pixel): un
+  marker messo a mano diventa misurato in tutte le foto che lo mostrano chiaramente.
 * **Più barre**: ogni barra di controllo chiede una scala e le barre si mediano, pesate con
   l'accuratezza di ciascuna distanza. Una barra di **check** non scala: misura quanto il modello
   si discosta dalla distanza vera. La tabella riporta per ogni barra la distanza data, quella

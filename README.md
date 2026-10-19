@@ -272,7 +272,9 @@ Command line: `ppg patch PROJECT --bbox ... --suggest` lists the photos of an ar
   Page Down/Up go through the photos. Photos can be filtered by marker (right click in
   *Riferimenti*), by point (right click on the orthophoto, *Foto del punto* in the 3D view) or by
   area (a selected polygon). Blue flags are not measurements: with two green ones the marker is
-  triangulated from them.
+  triangulated from them. *Affina le bandierine blu* finds the point of every blue flag in its
+  photo by image correlation on the surface around the marker (to a fraction of a pixel): one
+  marker placed by hand becomes measured in all the photos that show it clearly.
 * **Several bars**: each control bar asks for a scale and the bars are averaged, weighted by
   the accuracy of each distance. A **check** bar does not scale: it measures how far the model
   is from the true distance. The table lists, for every bar, the distance given, the distance
