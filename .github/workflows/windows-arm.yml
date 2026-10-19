@@ -68,12 +68,21 @@ jobs:
       - name: OpenCV with the contrib modules from its source
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          # short paths: opencv-python sets up ARM64 for the Visual Studio generator only, whose file
+          # tracker fails beyond 260 characters (pip's temporary folders are longer)
+          New-Item -ItemType Directory -Force C:\t | Out-Null
+          $env:TEMP = "C:\t"; $env:TMP = "C:\t"
+          $env:ENABLE_CONTRIB = "1"; $env:ENABLE_HEADLESS = "1"
           python -m pip install --upgrade pip
           # its build requirements pin numpy 2.0.2, which has no win_arm64 wheel: a numpy 2 that has one
           # (a module built against numpy 2.x works with every 2.x)
           pip install numpy packaging "scikit-build>=0.14.0" "setuptools<70" wheel
-          pip wheel "opencv-contrib-python-headless==5.0.0.93" --no-binary opencv-contrib-python-headless --no-deps `
-            --no-build-isolation -w wheels
+          pip download "opencv-contrib-python-headless==5.0.0.93" --no-binary :all: --no-deps -d C:\t\sdist
+          tar -xzf (Get-ChildItem C:\t\sdist\*.tar.gz).FullName -C C:\t
+          Move-Item (Get-ChildItem C:\t -Directory -Filter "opencv*").FullName C:\cv
+          pip wheel C:\cv --no-deps --no-build-isolation -w wheels
           pip install (Get-ChildItem wheels/*.whl).FullName numpy
           python -c "import cv2; print(cv2.__version__, hasattr(cv2, 'mcc'), hasattr(cv2, 'ccm'))"
       - uses: actions/upload-artifact@v4
