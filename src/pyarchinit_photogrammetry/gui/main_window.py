@@ -346,6 +346,8 @@ class MainWindow(QMainWindow):
                   icon_name="scalebar")
         self._act(m, "Importa barre di scala (CSV)...", self.import_scalebars, icon_name="scalebar")
         self._act(m, "Ottimizza camere", self.optimize_cameras, processing=True, icon_name="optimize")
+        self._act(m, "Elaborazione batch...", self.batch_process, processing=True, icon_name="batch",
+                  tip="Passi in sequenza su piu' chunk, con salvataggio dopo ogni passo e ripresa se si interrompe")
         self._act(m, "Controllo prima di lasciare il sito", self.field_check, processing=True,
                   icon_name="fieldcheck", tip="Subito dopo l'allineamento: aree viste da meno di tre foto, foto non "
                                               "allineate o sfocate, marker in troppo poche foto")
@@ -1510,6 +1512,58 @@ class MainWindow(QMainWindow):
         if v:
             self.run_task("Rilevamento marker", lambda p: self.chunk.detect_markers(v["target_type"], progress=p),
                           lambda ms: self.statusBar().showMessage(f"{len(ms)} marker rilevati", 8000))
+
+    def batch_process(self) -> None:
+        """Flusso di lavoro > Elaborazione batch: steps over several chunks, the project saved after
+        each one; an unfinished batch is offered to be resumed (``pyarchinit_photogrammetry.batch``)."""
+        import json
+
+        from .. import batch
+        from .batch_dialog import BatchDialog
+
+        if self.doc.path is None:
+            self._warn("Salva prima il progetto: il batch lo salva dopo ogni passo.")
+            return
+        state = batch.pending(self.doc)
+        resume, steps, opts = False, None, {"retries": 1, "on_error": "continue"}
+        if state is not None:
+            total = sum(len(batch.targets(self.doc, s["chunks"])) for s in state["steps"])
+            r = choice(self, "question", "Elaborazione batch",
+                       f"Un batch si e' interrotto dopo {len(state['done'])} "
+                       f"{'passo' if len(state['done']) == 1 else 'passi'} su {total} (iniziato il "
+                       f"{state['started'][:16].replace('T', ' ')}). Riprenderlo da dove si era fermato?",
+                       ["Riprendi", "Modifica e ricomincia"])
+            if r is None:
+                return
+            steps, resume = state["steps"], r == 0
+        if not resume:
+            if steps is None:
+                try:
+                    steps = json.loads(self.settings.value("batch/steps", "[]") or "[]")
+                except ValueError:
+                    steps = []
+            dlg = BatchDialog(self.doc, steps, self)
+            if dlg.exec() != dlg.DialogCode.Accepted:
+                return
+            steps, opts = dlg.steps(), dlg.options()
+            self.settings.setValue("batch/steps", json.dumps(steps))
+        self._store_drawings()  # the batch saves the project: the drawings go with it
+        doc = self.doc
+
+        def done(report):
+            self.setWindowModified(False)
+            text = (f"Batch finito in {report['seconds'] / 60:.1f} min: {len(report['done'])} passi fatti"
+                    + (f", {len(report['failed'])} falliti" if report["failed"] else "")
+                    + (f", {len(report['skipped'])} saltati" if report["skipped"] else ""))
+            for key, err in report["failed"].items():
+                ck, i = key.split(":")
+                label = next((c.label for c in doc.chunks if str(c.key) == ck), ck)
+                self.log_pane.warning(f"Batch: {steps[int(i)]['op']} su {label} fallito: {err}")
+            self.log_pane.info(text)
+            self.statusBar().showMessage(text, 20000)
+
+        self.run_task("Elaborazione batch", lambda p: batch.run_batch(doc, steps, resume=resume, progress=p, **opts),
+                      done)
 
     def field_check(self) -> None:
         """Before leaving the site: gaps in the coverage, photos not aligned or blurred, markers in

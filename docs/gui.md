@@ -150,6 +150,12 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   every frame gets its GPS position. **Image quality** (right click in the Photos pane): the sharpness
   of every photo compared with the sharpest ones (in the tooltip, *sfocata* under 0.5), *Disattiva le
   foto sfocate*, enable or disable the selected photos, masks of the selected photos.
+* **Batch processing** (*Flusso di lavoro > Elaborazione batch*): a list of steps - alignment,
+  products, exports, the precision and the field check - each on all chunks or on the chosen ones,
+  with its parameters (*Aggiungi* by group, *Modifica* or double click, *Su*/*Giu'*, *Carica*/*Salva*
+  as JSON), the attempts for a step that fails and what to do then. The project is saved after every
+  step; if the batch stops (power cut, crash, *Annulla*) the next time it offers to go on from where it
+  stopped. Failed steps are listed in the log.
 * **Field check** (*Flusso di lavoro > Controllo prima di lasciare il sito*), right after the
   alignment, while the trench is still open: the map of how many photos frame every point (dark red
   none, red one, orange two, yellow three or four, green more; the photo count under the cursor;

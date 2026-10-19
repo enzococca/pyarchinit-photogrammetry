@@ -77,6 +77,24 @@ def detect_markers(project: Path, target_type: str = "aruco_4x4_50", chunk: Opti
     typer.echo(f"{len(found)} targets: " + ", ".join(f"{m.label} ({len(m.projections)} photos)" for m in found))
 
 
+@app.command("batch")
+def batch_cmd(project: Path, steps: Path = typer.Argument(..., help="JSON file of the steps"),
+              restart: bool = typer.Option(False, help="start again instead of resuming an unfinished batch"),
+              retries: int = typer.Option(1, help="attempts more for a failing step"),
+              stop_on_error: bool = typer.Option(False, help="stop at the first step that fails")):
+    """Run a batch of steps over the chunks, saving the project after every step (an interrupted
+    batch goes on from where it stopped)."""
+    from . import batch
+
+    doc = Document.open(project)
+    report = batch.run_batch(doc, batch.load_steps(steps), resume=not restart, retries=retries,
+                             on_error="stop" if stop_on_error else "continue", progress=print_progress)
+    for key, err in report["failed"].items():
+        typer.echo(f"failed {key}: {err}")
+    typer.echo(f"{len(report['done'])} steps done, {len(report['failed'])} failed, {len(report['skipped'])} skipped "
+               f"in {report['seconds']:.0f} s")
+
+
 @app.command("field-check")
 def field_check(project: Path, min_photos: int = typer.Option(3, help="photos a point needs"),
                 resolution: Optional[float] = typer.Option(None, help="cell of the coverage map (metres)"),

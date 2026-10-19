@@ -80,7 +80,7 @@ markers in too few photos.
 ## 0.9 - Everyday work
 
 * Batch processing over several chunks, saving after each step, resuming after a power cut,
-  retrying a failed step.
+  retrying a failed step. *Done.*
 * Undo and redo for drawings, markers, patches, scale bars and point edits.
 * Diagnostics: matching graph, matches between two photos, residuals in the photo view, camera
   calibration dialog with distortion plot, merging markers.

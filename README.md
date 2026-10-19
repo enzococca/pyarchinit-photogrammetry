@@ -201,6 +201,8 @@ is installed on first use (PyTorch in a separate environment, see the same page)
 * **Video and image quality**: frames chosen from a video (sharp, with the overlap the
   reconstruction needs), with the GPS of DJI drones from their `.SRT`; blurred photos found and
   disabled.
+* **Batch processing**: steps over several chunks (alignment, products, exports), the project saved
+  after every step; an interrupted batch goes on from where it stopped, failing steps are retried.
 * **Field check before leaving the site**: right after the alignment, the map of the areas seen by
   fewer than three photos, photos not aligned or blurred, markers in too few photos.
 * **Precision**: standard deviation of cameras, markers and tie points from the covariance of the

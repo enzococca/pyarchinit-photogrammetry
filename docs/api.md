@@ -214,6 +214,14 @@ that every photo sees from further than `max_angle` degrees from the vertical st
 | alignment | the faces of every panorama are one frame of a COLMAP rig (`engine.panorama.rig_configs`: a rig per `facce_360` folder, faces at their known rotation, no translation): they keep one centre and their relative rotation, their calibration is not refined (also in `optimize_cameras`), pairs of faces of the same panorama are not matched. Depth maps pair a face with faces of other panoramas looking up to 50 degrees away (the panoramas are turned anyhow) |
 | `engine.panorama.split_panorama(path, folder=None, size=None, fov=100, faces=None)`, `face_maps(...)`, `face_rotation(yaw, pitch)` | the faces alone |
 
+## Batch processing
+
+| Call | Description |
+| --- | --- |
+| `batch.step(op, chunks="all", **params)` | a step: one of `batch.OPERATIONS` (`detect_markers`, `import_reference`, `align_photos`, `match_photos`, `align_cameras`, `update_transform`, `optimize_cameras`, `field_check`, `build_depth_maps`, `build_point_cloud`, `build_model`, `build_texture`, `build_dem`, `build_orthomosaic`, `calibrate_colours`, `estimate_precision`, `export_point_cloud`, `export_model`, `export_dem`, `export_orthomosaic`, `generate_report`) with its parameters (the defaults completed, unknown names refused); `chunks`: `"all"`, `"enabled"` or labels/keys. Paths may use `{project}`, `{name}`, `{chunk}` |
+| `batch.run_batch(doc, steps, resume=True, retries=1, on_error="continue")` | every step on all its chunks, then the next; the project saved after each step of each chunk with the state in `<project>.ppg.files/batch.json`; `resume`: an unfinished batch with the same steps goes on (done steps are not run again, failed ones are tried again); a failing step is retried `retries` times, then the next steps of its chunk are skipped (or `BatchError` with `on_error="stop"`). Returns `done`, `failed` (`"chunk:step"` -> error), `skipped`, `seconds` |
+| `batch.load_steps(path)`, `save_steps(steps, path)`, `pending(doc, steps=None)`, `targets(doc, chunks)`, `run_step(doc, chunk, op, params)` | batch files (JSON), the state of an unfinished batch, the parts |
+
 ## Field check before leaving the site
 
 | Call | Description |

@@ -183,6 +183,8 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
 * **Video e qualità delle immagini**: fotogrammi scelti da un video (nitidi, con la sovrapposizione
   che serve alla ricostruzione), con il GPS dei droni DJI dal loro `.SRT`; foto sfocate trovate e
   disattivate.
+* **Elaborazione batch**: passi su più chunk (allineamento, prodotti, esportazioni), il progetto salvato
+  dopo ogni passo; un batch interrotto riparte da dove si era fermato, i passi falliti vengono ritentati.
 * **Controllo prima di lasciare il sito**: subito dopo l'allineamento, la mappa delle aree viste da
   meno di tre foto, le foto non allineate o sfocate, i marker in troppo poche foto.
 * **Precisione**: deviazione standard di camere, marker e punti di legame dalla covarianza del bundle
