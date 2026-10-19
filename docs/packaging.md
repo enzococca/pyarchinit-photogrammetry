@@ -127,6 +127,11 @@ pip install "pyarchinit-photogrammetry[all]"
   Linux packages hold names that differ only in case (`hdiutil detach build/arm` closes it).
 * A few files of COLMAP and Open3D need several GB each to compile: `JOBS` compilers at a time
   (3 by default, for a Docker with 8 GB), the ones that run out of memory compiled again alone.
+* Open3D on ARM links the shared `libgfortran` (put into the wheel by auditwheel): with the static
+  one, as Open3D's own ARM build does, the module cannot be imported ("cannot allocate memory in
+  static TLS block").
+* `pye57` (E57 scans, in `[all]`) has no wheel for aarch64 either: it is compiled when installed and
+  needs the Xerces-C headers (`sudo apt install libxerces-c-dev` on Debian and Ubuntu).
 
 
 ## Signing, notarization, TestFlight
