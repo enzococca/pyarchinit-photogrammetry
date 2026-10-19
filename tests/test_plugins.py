@@ -156,7 +156,7 @@ def test_install_from_the_index(tmp_path, monkeypatch):
     wheel = _wheel(tmp_path / "dal_indice-0.1.0-py3-none-any.whl", "dal-indice")
     good = _entry(wheel, "dal-indice")
     monkeypatch.setenv("PPG_PLUGIN_INDEX", _index(tmp_path, [
-        good,
+        {**good, "title": "From the index", "i18n": {"it": {"title": "Dall'indice"}}},
         {**good, "name": "sbagliato", "sha256": "0" * 64},
         {**good, "name": "nativo", "wheel": good["wheel"].replace("py3-none-any", "cp312-cp312-macosx_14_0_arm64")},
         {**good, "name": "nuovo", "min_app": "99.0"},
@@ -166,6 +166,9 @@ def test_install_from_the_index(tmp_path, monkeypatch):
     entries = {e.name: e for e in plugin_index.fetch()}
     assert set(entries) == {"dal-indice", "sbagliato", "nativo", "nuovo", "bisogni"}  # the incomplete one skipped
     assert entries["dal-indice"].problem() == ""
+    assert entries["dal-indice"].localized("title", "it") == "Dall'indice"
+    assert entries["dal-indice"].localized("title", "en") == "From the index"
+    assert entries["sbagliato"].localized("description", "it") == entries["sbagliato"].description
     assert "pure-Python" in entries["nativo"].problem()
     assert "99.0" in entries["nuovo"].problem()
     assert "un_modulo_che_non_esiste" in entries["bisogni"].problem()
@@ -244,13 +247,27 @@ def test_window_menu_export_and_dialog(tmp_path, monkeypatch, qapp):
         assert w.plugins.get("finestra").plugin.calls == ["action"]
         exports = [a.text() for a in w.export_menu.actions()]
         assert "Elenco di prova..." in exports
-        # an export of a plugin runs in the background and writes the file chosen
+        # an export of a plugin runs in the background and writes the file chosen; what the window
+        # shows is in the project before it starts
         out = tmp_path / "elenco.txt"
+        w.quote.append({"x": 1.0, "y": 2.0, "quota_q": 3.0})
         monkeypatch.setattr(mw.QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(out), "")))
         next(a for a in w.export_menu.actions() if a.text() == "Elenco di prova...").trigger()
         w.runner.wait()
         qapp.processEvents()
         assert out.read_text() == w.chunk.label
+        assert w.chunk.meta["drawings"]["quote"][0]["quota_q"] == 3.0
+        # ... and a plugin cannot read the window from the background
+        import threading
+
+        from pyarchinit_photogrammetry.plugins.api import Context
+
+        context, failures = Context("finestra", tmp_path / "ctx", window=w), []
+        worker = threading.Thread(target=lambda: failures.append(pytest.raises(RuntimeError, context.store_drawings)))
+        worker.start()
+        worker.join()
+        assert failures and "interface thread" in str(failures[0].value)
+        context.store_drawings()  # in the interface thread it works
         # a failing action is reported, the window stays
         errors = []
         monkeypatch.setattr(w, "_exc", lambda prefix, exc: errors.append((prefix, str(exc))))

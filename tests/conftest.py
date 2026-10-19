@@ -16,6 +16,7 @@ os.environ.setdefault("PPG_LANG", "it")  # the tests read the Italian texts (tes
 import tempfile  # noqa: E402
 
 os.environ.setdefault("PPG_PLUGINS_DIR", tempfile.mkdtemp(prefix="ppg-test-plugins-"))
+os.environ.setdefault("PPG_PLUGINS_ENVIRONMENT", "0")  # nor those installed with pip in the environment
 
 
 @pytest.fixture(autouse=True)

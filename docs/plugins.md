@@ -35,8 +35,9 @@ and they may use the modules the program carries (numpy, SciPy, OpenCV, Open3D, 
 shapely, pyproj, SQLAlchemy, PySide6, ...).
 
 **Plugins are Python code with the same rights as the program: install only those you trust.**
-`PPG_NO_PLUGINS=1` starts the program without any plugin; a plugin that fails when it starts is
-reported (in the log and in *Strumenti > Plugin*) and left out, the program goes on.
+`PPG_NO_PLUGINS=1` starts the program without any plugin (`PPG_PLUGINS_ENVIRONMENT=0`: only those
+of the plugin folder, none installed with pip); a plugin that fails when it starts is reported (in
+the log and in *Strumenti > Plugin*) and left out, the program goes on.
 
 ## Writing a plugin
 
@@ -109,7 +110,7 @@ the next start (`ppg plugin` lists its command at once).
 | `add_action(title, callback, menu="", tip="", processing=False)` | a menu action under *Plugin* (in the plugin's submenu, or in `menu`); `processing=True` disables it while a step runs |
 | `add_command(name, function, help="")` | `ppg plugin NAME ARGS...` calls `function(*args)` with the arguments as strings; an int returned is the exit code |
 | `add_exporter(title, suffix, function)` | *File > Esporta > title...*: `function(chunk, path, progress)` writes `path` in the background |
-| `store_drawings()` | writes what the window shows (units and spot heights drawn, stones, sections) into the project before a plugin reads `chunk.meta`; nothing in the command line |
+| `store_drawings()` | writes what the window shows (units and spot heights drawn, stones, sections) into the project before a plugin reads `chunk.meta`; in the interface thread only (an action, `done`), nothing in the command line; the window does it by itself before an exporter runs |
 | `run(title, function, done=None)` | `function(progress)` in the background with the progress bar of the window (at once in the command line), then `done(result)` in the interface thread |
 | `data_dir` | a folder for the plugin's files |
 | `settings`, `save_settings()` | a dictionary kept between sessions |
@@ -138,6 +139,7 @@ oldest version of the program a plugin works with (`min_app`).
      "name": "chunk-summary",
      "title": "Chunk summary",
      "description": "Photos, aligned photos, markers and products of the chunk",
+     "i18n": {"it": {"title": "Riepilogo del chunk", "description": "Foto, foto allineate, marker e prodotti del chunk"}},
      "version": "0.1.0",
      "author": "Your Name",
      "homepage": "https://github.com/you/ppg-chunk-summary",
@@ -151,5 +153,9 @@ oldest version of the program a plugin works with (`min_app`).
    ```
 
    `name` is the name of the entry point, `requires` lists the modules the plugin imports beyond
-   those of the program. The repository checks the entry when the pull request is opened: the hash,
-   the entry point, and that the plugin starts with the program.
+   those of the program, `i18n` gives title and description in other languages (shown when the
+   interface speaks them). `python scripts/make_entry.py WHEEL_URL --write` in the plugin repository
+   makes the entry from the wheel. The repository checks the entry when the pull request is opened:
+   the hash, the entry point, and that the plugin starts with the program. A plugin can also live in
+   the plugin repository itself, under `plugins/` (see its README); [`template/`](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/template)
+   there is a plugin to start from.

@@ -139,10 +139,16 @@ class Context:
     def store_drawings(self) -> None:
         """Write what the window shows (units and spot heights drawn, stones, sections) into the
         project, so that ``chunk.meta`` and the files beside the project hold it; nothing in the
-        command line, where the project read from its file already holds everything."""
+        command line, where the project read from its file already holds everything. Only in the
+        interface thread (an action, ``done``): the window does it itself before an exporter runs."""
         window = self.window
         if window is None:
             return
+        import threading
+
+        if threading.current_thread() is not threading.main_thread():
+            raise RuntimeError("store_drawings() reads the window: call it in the interface thread, "
+                               "not in the function given to run() or in an exporter")
         for name in ("_store_drawings", "_save_sections"):
             method = getattr(window, name, None)
             if method is not None:

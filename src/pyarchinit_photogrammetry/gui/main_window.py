@@ -1103,6 +1103,8 @@ class MainWindow(QMainWindow):
         if not path:
             return
         out = Path(path) if path.lower().endswith(exporter.suffix.lower()) else Path(path + exporter.suffix)
+        self._store_drawings()  # the exporter reads chunk.meta in the background: the drawings go there first
+        self._save_sections()
         self.run_task(exporter.title, lambda p: exporter.function(ch, out, p),
                       lambda _r: self.statusBar().showMessage(tr("Scritto {0}", out), 10000), refresh=False,
                       save=False)

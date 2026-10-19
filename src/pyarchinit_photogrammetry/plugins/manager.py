@@ -6,7 +6,8 @@ the entry point group ``pyarchinit_photogrammetry.plugins``) and the plugin fold
 them: the packaged application has no pip). A plugin of the folder wins over one of the same name
 in the environment. Each plugin is activated on its own: one that fails is reported and left out,
 the program goes on. ``PPG_NO_PLUGINS=1`` starts without plugins, ``PPG_PLUGINS_DIR`` moves the
-folder (the tests use one of their own).
+folder (the tests use one of their own), ``PPG_PLUGINS_ENVIRONMENT=0`` leaves out those of the
+environment (only the folder: the tests, a plugin checked on its own).
 """
 from __future__ import annotations
 
@@ -115,7 +116,8 @@ class Manager:
                 for dist in importlib.metadata.distributions(path=[str(sub)]):
                     for ep in dist.entry_points.select(group=GROUP):
                         found.setdefault(ep.name, _info(ep, dist, "folder", sub))
-        for ep in importlib.metadata.entry_points(group=GROUP):
+        environment = os.environ.get("PPG_PLUGINS_ENVIRONMENT", "1") not in ("0", "no", "false")
+        for ep in importlib.metadata.entry_points(group=GROUP) if environment else ():
             dist = getattr(ep, "dist", None)
             if dist is not None and _norm(dist.locate_file("")) in _ON_PATH:
                 continue  # a plugin folder this session put on sys.path

@@ -49,6 +49,7 @@ class Entry:
     api: int = API_VERSION
     min_app: str = "0"
     requires: list = field(default_factory=list)
+    i18n: dict = field(default_factory=dict)  # {"it": {"title": ..., "description": ...}}
 
     @classmethod
     def from_dict(cls, d: dict) -> Entry:
@@ -56,7 +57,22 @@ class Entry:
         entry = cls(**known)
         entry.requires = list(entry.requires or [])
         entry.api = int(entry.api)
+        entry.i18n = dict(entry.i18n) if isinstance(entry.i18n, dict) else {}
         return entry
+
+    def localized(self, name: str, language: str | None = None) -> str:
+        """The ``title`` or the ``description`` in ``language`` (that of the interface by default)
+        when the index gives it, else the plain one."""
+        if language is None:
+            try:
+                from ..gui.i18n import current
+
+                language = current()
+            except Exception:  # the program without its interface
+                language = ""
+        texts = self.i18n.get(language)
+        text = texts.get(name) if isinstance(texts, dict) else None
+        return text if isinstance(text, str) and text else getattr(self, name)
 
     def problem(self, app_version: str | None = None) -> str:
         """Why this program cannot install the plugin ("" when it can)."""

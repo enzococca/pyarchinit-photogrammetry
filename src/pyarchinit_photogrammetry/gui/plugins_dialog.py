@@ -165,7 +165,8 @@ class PluginsDialog(QDialog):
             if not note and e.name in installed:
                 note = tr("installato ({0})", installed[e.name]) if installed[e.name] == e.version else \
                     tr("installata la {0}: aggiornabile", installed[e.name])
-            for c, text in enumerate([e.title or e.name, e.version, e.author, e.description, note]):
+            for c, text in enumerate([e.localized("title") or e.name, e.version, e.author, e.localized("description"),
+                                      note]):
                 t.setItem(r, c, _item(text, e.name if c == 0 else None))
 
     def install(self) -> None:
@@ -192,7 +193,7 @@ class PluginsDialog(QDialog):
         self.fill_installed()
         self.fetch()
         message(self, "info", tr("Plugin"), tr("{0} {1} installato: si attiva al prossimo avvio.",
-                                               entry.title or entry.name, entry.version))
+                                               entry.localized("title") or entry.name, entry.version))
 
     def restart(self) -> None:
         self.accept()
