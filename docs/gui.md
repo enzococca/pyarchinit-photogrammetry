@@ -5,6 +5,7 @@ pip install "pyarchinit-photogrammetry[gui]"   # included in [all]
 ppg-gui [project.ppg]                          # or: ppg gui, python -m pyarchinit_photogrammetry.gui
 ppg-gui --doctor                               # environment diagnosis (same as ppg doctor)
 ppg-gui --check                                # opens, renders and exits (smoke test)
+ppg-gui --run script.py [arguments]            # a Python script with the program's modules, no window
 ```
 
 Or the packaged application for macOS and Windows: [packaging.md](packaging.md).

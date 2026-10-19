@@ -30,9 +30,22 @@ is not, and is installed on first use in a separate environment (see
   Writing geometries into a PyArchInit SQLite database needs `mod_spatialite.dll`: it is found
   in a QGIS or OSGeo4W installation, or set `SPATIALITE_LIBRARY_PATH`.
 
+* **Windows on ARM** (Snapdragon laptops, Windows 11 in Parallels on a Mac with Apple Silicon):
+  the x64 application runs under the emulation of Windows 11 - checked on Windows 11 ARM64 with
+  `--check` and `--doctor` (Python, pycolmap, Open3D, OpenCV, rasterio, Qt and VTK load) and
+  with the window.
+
 Logs are written in `~/Library/Logs/pyarchinit-photogrammetry` (macOS) or
 `%LOCALAPPDATA%\pyarchinit-photogrammetry\logs` (Windows); *Aiuto > Apri cartella dei log*
 opens the folder, *Aiuto > Diagnostica ambiente* runs the same checks as `ppg doctor`.
+
+The application runs Python scripts too, with its own Python and modules and without the
+window, as Metashape does with `-r` (the exit code is the script's):
+
+```bash
+"/Applications/PyArchInit Photogrammetry.app/Contents/MacOS/PyArchInit Photogrammetry" --run script.py args
+"PyArchInit Photogrammetry.exe" --run script.py args > out.txt 2>&1    # Windows: no console, redirect
+```
 
 ## Building locally
 
@@ -85,6 +98,35 @@ is refused by the dynamic loader of macOS 26/27 ("mis-aligned LINKEDIT string po
 `native` workflow builds the wheels (macOS arm64 and x86-64, Windows x64, Linux x86-64 and
 aarch64) and, on a `core-v*` tag, publishes them to PyPI; the `tests` workflow runs Python 3.12
 with the native core and 3.11 without it; the `desktop` workflow bundles it in the applications.
+
+
+## Linux on ARM (aarch64): pycolmap and Open3D
+
+pycolmap 4.2.1 and Open3D 0.19.0 publish no wheels for Linux on ARM (Open3D 0.20.0 does, but its
+Poisson reconstruction crashes and the requirements exclude it). `packaging/arm/build-linux.sh`
+builds them in Docker on an arm64 machine - a Mac with Apple Silicon, an arm64 Linux host - and
+the `arm-wheels` workflow does the same on GitHub's arm64 runners, then runs the tests of this
+project with them (on demand; the wheels stay as an artifact, or are attached to a release whose
+tag is given).
+
+```bash
+packaging/arm/build-linux.sh                       # both, Python 3.10-3.12, wheels in dist/arm
+PYTHONS=3.12 JOBS=3 packaging/arm/build-linux.sh pycolmap
+packaging/arm/build-linux.sh test                  # the tests with them (Ubuntu 24.04, Python 3.12)
+pip install dist/arm/pycolmap-*-cp312-*.whl dist/arm/open3d-*-cp312-*.whl
+pip install "pyarchinit-photogrammetry[all]"
+```
+
+* pycolmap: COLMAP's own recipe for its x86-64 wheels (the manylinux_2_28 image, vcpkg, GCC 12)
+  with an arm64 triplet; `manylinux_2_28_aarch64` wheels (glibc 2.28 or later).
+* Open3D: Open3D's own arm64 recipe (Ubuntu 20.04, OpenBLAS, VTK and Embree built from source)
+  without its new GUI (Filament), which this program does not use; `manylinux_2_31_aarch64`
+  wheels (glibc 2.31 or later), package name `open3d`.
+* The work goes to folders of the host, not to Docker's own disk (which only keeps the two
+  builder images); on a Mac to a case-sensitive disk image, `build/arm.sparseimage`, because
+  Linux packages hold names that differ only in case (`hdiutil detach build/arm` closes it).
+* A few files of COLMAP and Open3D need several GB each to compile: `JOBS` compilers at a time
+  (3 by default, for a Docker with 8 GB), the ones that run out of memory compiled again alone.
 
 
 ## Signing, notarization, TestFlight

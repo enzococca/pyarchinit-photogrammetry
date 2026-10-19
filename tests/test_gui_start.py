@@ -138,6 +138,28 @@ def test_launcher_starts_the_window(tmp_path):
     assert np.isfinite(float(log.split("Avvio in ")[1].split(" s")[0]))
 
 
+def test_the_launcher_runs_a_script_without_the_window(tmp_path):
+    """``ppg-gui --run script.py args`` (the packaged application scripted as Metashape with
+    ``-r``): the script with its arguments, the program's modules, its exit code, no splash."""
+    script = tmp_path / "script.py"
+    script.write_text("import sys, pyarchinit_photogrammetry as ppg\n"
+                      "open(sys.argv[1], 'w').write(ppg.__version__ + ' ' + ' '.join(sys.argv[2:]))\n"
+                      "sys.exit(3)\n")
+    out = tmp_path / "out.txt"
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", PPG_LOG_DIR=str(tmp_path))
+    code = "import sys, ppg_launcher; sys.exit(ppg_launcher.main(sys.argv[1:]))"
+    r = subprocess.run([sys.executable, "-c", code, "--run", str(script), str(out), "a", "b"], env=env,
+                       capture_output=True, text=True, timeout=300, close_fds=False)
+    import pyarchinit_photogrammetry as ppg
+
+    assert r.returncode == 3 and out.read_text() == f"{ppg.__version__} a b", r.stdout[-2000:] + r.stderr[-2000:]
+    bad = tmp_path / "bad.py"
+    bad.write_text("raise ValueError('no')\n")
+    r = subprocess.run([sys.executable, "-c", code, "--run", str(bad)], env=env, capture_output=True, text=True,
+                       timeout=300, close_fds=False)
+    assert r.returncode == 1 and "ValueError: no" in r.stderr
+
+
 def test_the_crash_log_never_stops_the_start(tmp_path, monkeypatch):
     """faulthandler refused by the system (the macOS runners of GitHub refused its signal
     stack): the interface starts all the same, without the crash file."""

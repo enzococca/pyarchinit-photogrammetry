@@ -5,8 +5,10 @@ Everything the interface does goes through the Python API on
 as ``doc`` / ``chunk``.
 
 Options: ``--check`` opens the window, renders it and exits (smoke test for the
-packaged application); ``--doctor`` prints the environment diagnosis; ``--ppg-worker``
-is used internally by the packaged application to run isolated worker processes.
+packaged application); ``--doctor`` prints the environment diagnosis; ``--run script.py
+[arguments]`` runs a Python script with the program's Python and modules, without the window
+(the packaged application can be scripted as Metashape with ``-r``); ``--ppg-worker`` is used
+internally by the packaged application to run isolated worker processes.
 """
 from __future__ import annotations
 
@@ -32,6 +34,27 @@ def _hard_exit(code: int) -> None:
 
 def _frozen_posix() -> bool:
     return bool(getattr(sys, "frozen", False)) and os.name != "nt"
+
+
+def run_script(args: list[str]) -> int:
+    """``--run script.py [arguments]``: the script runs as ``__main__`` with ``sys.argv`` set to
+    the script and its arguments (``pyarchinit_photogrammetry.app`` holds the open project, as
+    in ``ppg run``). Returns its exit code: that of ``sys.exit``, 1 for an error."""
+    import runpy
+    import traceback
+
+    if not args:
+        print("--run: the script to run is missing", file=sys.stderr)
+        return 2
+    sys.argv = list(args)
+    try:
+        runpy.run_path(args[0], run_name="__main__")
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+    except Exception:
+        traceback.print_exc()
+        return 1
+    return 0
 
 
 def app_settings():
@@ -84,10 +107,13 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
     freeze_support()
     os.environ.setdefault("GLOG_minloglevel", "2")
     os.environ.setdefault("QT_API", "pyside6")  # qtpy (pyvistaqt) must not pick another binding
-    if "--doctor" in argv:
-        from ..doctor import main as doctor_main
+    if "--doctor" in argv or argv[:1] == ["--run"]:
+        if argv[:1] == ["--run"]:
+            code = run_script(argv[1:])
+        else:
+            from ..doctor import main as doctor_main
 
-        code = doctor_main()
+            code = doctor_main()
         if _frozen_posix():  # skip interpreter finalisation: it can crash the packaged app
             _hard_exit(code)
         return code

@@ -291,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
     started = time.perf_counter()
     argv = list(sys.argv[1:] if argv is None else argv)
     _persistent_matplotlib_cache()
-    if (argv and argv[0].startswith("--ppg-")) or "--doctor" in argv:  # worker processes, diagnosis: no window
+    if (argv and argv[0].startswith("--ppg-")) or "--doctor" in argv or argv[:1] == ["--run"]:  # no window
         from pyarchinit_photogrammetry.gui import main as gui_main
 
         return gui_main(argv)
