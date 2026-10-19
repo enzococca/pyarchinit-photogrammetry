@@ -3,48 +3,71 @@ name: arm-wheels
 # Wheels of pycolmap 4.2.1 and Open3D 0.19.0 for Linux aarch64, which their projects do not
 # publish, built on GitHub's arm64 runners in the same containers as on a Mac with Docker
 # (packaging/arm/build-linux.sh), then the tests of this project with them. On demand: the
-# wheels stay as an artifact, and are attached to a release when its tag is given.
+# wheels stay as artifacts, and are attached to a release when its tag is given. One library
+# can be built alone, the other one's wheels taken from an earlier run.
 on:
   workflow_dispatch:
     inputs:
       pythons:
         description: "Python versions"
         default: "3.10 3.11 3.12"
+      libraries:
+        description: "Libraries to build"
+        default: "pycolmap open3d"
+      wheels_from:
+        description: "Id of an earlier run whose wheels complete these (empty: none)"
+        default: ""
       release:
-        description: "Tag of the release to attach the wheels to (empty: artifact only)"
+        description: "Tag of the release to attach the wheels to (empty: artifacts only)"
         default: ""
 
 permissions:
   contents: write   # attach the wheels to the release
+  actions: read     # wheels of an earlier run
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        what: [pycolmap, open3d]
+  pycolmap:
+    if: contains(inputs.libraries, 'pycolmap')
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v5
-      - name: Room on the disk (the Open3D build takes about 15 GB)
+      - name: Build
+        env:
+          JOBS: "4"
+          PY_JOBS: "4"
+          PYTHONS: ${{ inputs.pythons }}
+        run: packaging/arm/build-linux.sh pycolmap
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-pycolmap-linux-aarch64
+          path: dist/arm/*.whl
+          if-no-files-found: error
+
+  open3d:
+    if: contains(inputs.libraries, 'open3d')
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v5
+      - name: Room on the disk (the build takes about 15 GB)
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
           df -h /
       - name: Build
         env:
           JOBS: "4"
-          PY_JOBS: "4"
           PYTHONS: ${{ inputs.pythons }}
-        run: packaging/arm/build-linux.sh ${{ matrix.what }}
+        run: packaging/arm/build-linux.sh open3d
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.what }}-linux-aarch64
+          name: wheels-open3d-linux-aarch64
           path: dist/arm/*.whl
           if-no-files-found: error
 
   test:
-    needs: build
+    needs: [pycolmap, open3d]
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') }}
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v5
@@ -54,8 +77,15 @@ jobs:
         with:
           path: dist/arm
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        if: inputs.wheels_from != ''
+        with:
+          path: dist/arm
+          merge-multiple: true
+          run-id: ${{ inputs.wheels_from }}
+          github-token: ${{ github.token }}
       - name: Tests of pyarchinit-photogrammetry with the wheels (Python 3.12)
-        run: packaging/arm/build-linux.sh test
+        run: ls -l dist/arm && packaging/arm/build-linux.sh test
       - name: Attach to the release
         if: inputs.release != ''
         env:

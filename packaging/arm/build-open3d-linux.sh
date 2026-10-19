@@ -55,7 +55,9 @@ for v in ${PYVERS}; do
     ${env}/bin/python -m pip install -U -r python/requirements.txt -r python/requirements_build.txt
     # the setup.py of Open3D 0.19 and its wheel 0.38 import pkg_resources, gone from setuptools 81
     ${env}/bin/python -m pip install "setuptools<81"
-    cmake -S . -B build \
+    # another Python in the same build folder: its paths out of the cache, its module out of the package
+    rm -rf build/lib/python_package
+    cmake -S . -B build -U "Python3_*" -U "_Python3_*" -U "PYTHON_*" \
         -DCMAKE_BUILD_TYPE=Release \
         -DDEVELOPER_BUILD=OFF \
         -DBUILD_GUI=OFF \
