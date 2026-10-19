@@ -324,6 +324,8 @@ class MainWindow(QMainWindow):
                   icon_name="folder_photos")
         self._act(m, "Aggiungi video...", self.add_video, processing=True, icon_name="video",
                   tip="Fotogrammi scelti dal video (nitidi, con la sovrapposizione giusta), con il GPS dei droni DJI")
+        self._act(m, "Aggiungi foto 360°...", self.add_panoramas, processing=True, icon_name="panorama",
+                  tip="Foto sferiche (equirettangolari) divise nelle sei facce di un cubo, allineate come un rig")
         self._act(m, "Ricollega foto (altra cartella)...", lambda: self.relink_photos(), icon_name="relink",
                   tip="Collega le foto ai file con lo stesso nome in un'altra cartella (copia su un altro disco, "
                       "cartella spostata o tenuta «solo online» da Dropbox)")
@@ -1363,6 +1365,73 @@ class MainWindow(QMainWindow):
                 f"{len(cams)} fotogrammi aggiunti" + (" con il GPS" if cams and cams[0].reference.location else ""),
                 10000))
 
+    PANORAMA_FACES = [("front", "Davanti"), ("right", "Destra"), ("back", "Dietro"), ("left", "Sinistra"),
+                      ("up", "Sopra (volta, cielo)"), ("down", "Sotto (pavimento, treppiede)")]
+
+    def add_panoramas(self) -> None:
+        """Workflow > Aggiungi foto 360°: equirectangular photos as the faces of a cube (a rig)."""
+        if not self._need_chunk():
+            return
+        paths, _ = QFileDialog.getOpenFileNames(self, "Foto 360° (equirettangolari)", self._last_dir(),
+                                                "Immagini (*.jpg *.jpeg *.png *.tif *.tiff *.JPG *.JPEG *.PNG *.TIF)")
+        if not paths:
+            return
+        v = ParamDialog.ask(self, "Foto 360°", [
+            Field("faces", "Facce", [k for k, _ in self.PANORAMA_FACES], choices=self.PANORAMA_FACES, kind="checklist",
+                  tip="Togli la faccia «Sotto» se mostra solo il treppiede o chi tiene la camera"),
+            Field("fov", "Ampiezza di ogni faccia (gradi)", 100.0, minimum=90.0, maximum=130.0, decimals=0,
+                  tip="Piu' di 90 gradi: le facce vicine si sovrappongono e i punti si collegano"),
+            Field("size", "Lato delle facce in pixel (0 = la risoluzione della foto)", 0, minimum=0, maximum=20000)],
+            intro="Ogni foto 360° diventa sei foto prospettiche, le facce di un cubo, nella cartella «facce_360» "
+                  "accanto alle foto. Nell'allineamento le facce di una foto restano unite (stesso centro, rotazioni "
+                  "note); le foto che non sono equirettangolari (larghezza doppia dell'altezza) sono lasciate fuori.")
+        if not v:
+            return
+        if not v["faces"]:
+            self._warn("Scegli almeno una faccia.")
+            return
+        from ..engine.panorama import add_panoramas
+
+        self._started = True
+        chunk = self.chunk
+        n = len(paths)
+        self.run_task("Foto 360°", lambda p: add_panoramas(chunk, paths, size=int(v["size"]) or None, fov=v["fov"],
+                                                         faces=v["faces"], progress=p),
+                      lambda cams: self.statusBar().showMessage(
+                          f"{len({c.meta['panorama'] for c in cams})} foto 360° di {n} aggiunte ({len(cams)} facce)",
+                          10000))
+
+    LENS_MODELS = [("OPENCV", "Normale (Brown: k1, k2, p1, p2)"),
+                   ("OPENCV_FISHEYE", "Fisheye (Kannala-Brandt: k1-k4)"),
+                   ("FULL_OPENCV", "Normale, distorsione forte (k1-k6, p1, p2)"),
+                   ("PINHOLE", "Senza distorsione (camera virtuale, foto gia' corrette)")]
+
+    def lens_model(self, cams=None) -> None:
+        """Photos menu > Modello dell'obiettivo: the camera model of the sensors of ``cams``."""
+        if not self._need_chunk():
+            return
+        cams = cams if cams is not None else self.photos.selected_cameras()
+        sensors = sorted({c.sensor_key for c in cams}) or sorted(self.chunk.sensors)
+        if not sensors:
+            return
+        current = self.chunk.sensors[sensors[0]].model
+        choices = list(self.LENS_MODELS)
+        if current not in [k for k, _ in choices]:
+            choices.append((current, current))
+        labels = ", ".join(self.chunk.sensors[k].label for k in sensors)
+        v = ParamDialog.ask(self, "Modello dell'obiettivo", [
+            Field("model", "Modello", current, choices=choices)],
+            intro=f"Sensori: {labels}. Il fisheye e' riconosciuto dai dati EXIF dell'obiettivo (o da una focale "
+                  "equivalente fino a 15 mm); se non lo e', sceglilo qui. Focale e punto principale restano, la "
+                  "distorsione riparte da zero: allinea di nuovo le foto.")
+        if not v or all(self.chunk.sensors[k].model == v["model"] for k in sensors):
+            return
+        for k in sensors:
+            self.chunk.set_sensor_model(k, v["model"])
+        self._dirty(True)
+        self.log_pane.info(f"Modello dell'obiettivo {v['model']} per: {labels}. Allinea di nuovo le foto.")
+        self.statusBar().showMessage("Modello dell'obiettivo cambiato: allinea di nuovo le foto", 10000)
+
     def _photos_menu(self, pos) -> None:
         """Right click in the Photos pane: quality, enable/disable, masks of the selected photos."""
         if self.chunk is None:
@@ -1373,6 +1442,7 @@ class MainWindow(QMainWindow):
             menu.addAction(icon("photos"), "Apri", lambda: self.open_photo(cams[0]))
         menu.addAction(icon("quality"), "Stima la qualita' delle immagini", self.estimate_quality)
         menu.addAction("Disattiva le foto sfocate (qualita' sotto 0,5)", self.disable_blurred)
+        menu.addAction(icon("lens"), "Modello dell'obiettivo...", lambda: self.lens_model(cams))
         if cams:
             menu.addSeparator()
             menu.addAction(f"Disattiva le {len(cams)} foto selezionate", lambda: self.enable_photos(cams, False))

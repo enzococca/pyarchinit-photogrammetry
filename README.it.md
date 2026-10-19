@@ -183,6 +183,9 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
 * **Video e qualità delle immagini**: fotogrammi scelti da un video (nitidi, con la sovrapposizione
   che serve alla ricostruzione), con il GPS dei droni DJI dal loro `.SRT`; foto sfocate trovate e
   disattivate.
+* **Foto 360° e obiettivi fisheye**: foto equirettangolari divise nelle facce di un cubo e allineate
+  come un rig (un solo centro, rotazioni note) - tombe, grotte, cisterne e trincee strette riprese con
+  una camera 360°; obiettivi fisheye riconosciuti dall'EXIF e calibrati con il loro modello.
 * **Regione di ricostruzione**: un riquadro attorno al soggetto (dai punti di legame, da un poligono in
   pianta o con valori scritti, ruotato come la vista); depth map, nuvola densa, modello, DEM e ortofoto
   ne restano dentro.

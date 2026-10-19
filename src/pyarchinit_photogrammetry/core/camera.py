@@ -15,7 +15,16 @@ CAMERA_MODELS = {
     "RADIAL": 5,
     "OPENCV": 8,
     "FULL_OPENCV": 12,
+    "SIMPLE_RADIAL_FISHEYE": 4,
+    "RADIAL_FISHEYE": 5,
+    "OPENCV_FISHEYE": 8,
+    "FOV": 5,
+    "THIN_PRISM_FISHEYE": 12,
 }
+# fisheye lenses: a ray far from the axis still lands in the photo (no pinhole shortcut for them)
+FISHEYE_MODELS = {"SIMPLE_RADIAL_FISHEYE", "RADIAL_FISHEYE", "OPENCV_FISHEYE", "FOV", "THIN_PRISM_FISHEYE"}
+# models whose first parameters are f, cx, cy (one focal length); the others start fx, fy, cx, cy
+SINGLE_FOCAL = {"SIMPLE_PINHOLE", "SIMPLE_RADIAL", "RADIAL", "SIMPLE_RADIAL_FISHEYE", "RADIAL_FISHEYE"}
 
 
 @dataclass
@@ -64,6 +73,11 @@ class Sensor:
                 "RADIAL": [f, cx, cy, 0.0, 0.0],
                 "OPENCV": [f, f, cx, cy, 0.0, 0.0, 0.0, 0.0],
                 "FULL_OPENCV": [f, f, cx, cy] + [0.0] * 8,
+                "SIMPLE_RADIAL_FISHEYE": [f, cx, cy, 0.0],
+                "RADIAL_FISHEYE": [f, cx, cy, 0.0, 0.0],
+                "OPENCV_FISHEYE": [f, f, cx, cy, 0.0, 0.0, 0.0, 0.0],
+                "FOV": [f, f, cx, cy, 1e-6],
+                "THIN_PRISM_FISHEYE": [f, f, cx, cy] + [0.0] * 8,
             }
             self.params = defaults[self.model]
 
@@ -78,7 +92,7 @@ class Sensor:
     def K(self) -> np.ndarray:
         """3x3 calibration matrix (distortion ignored)."""
         p = self.params
-        if self.model in ("SIMPLE_PINHOLE", "SIMPLE_RADIAL", "RADIAL"):
+        if self.model in SINGLE_FOCAL:
             fx = fy = p[0]
             cx, cy = p[1], p[2]
         else:

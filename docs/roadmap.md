@@ -68,9 +68,9 @@ The generic texture of objects gets the colour correction; blending inside its a
 ## 0.8 - Acquisition and precision
 
 * Fisheye and 360-degree cameras (COLMAP fisheye models; equirectangular photos split into a rig
-  of virtual pinhole cameras).
+  of virtual pinhole cameras). *Done.*
 * Video import with automatic choice of the frames, image quality (blur) estimation, GPS from
-  the SRT files of DJI drones.
+  the SRT files of DJI drones. *Done.*
 * Automatic refinement of the estimated marker projections (blue flags) by image correlation.
 * Precision of markers and cameras from the covariance of the bundle adjustment; uncertainty map
   of the DEM; spot heights with their uncertainty in PyArchInit and IFC.

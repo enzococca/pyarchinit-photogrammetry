@@ -170,12 +170,16 @@ def project_valid(chunk: Chunk, cam, points: np.ndarray, margin: float = 2.0):
     pc = np.atleast_2d(points) @ m[:3, :3].T + m[:3, 3]
     depth = pc[:, 2]
     ok = depth > 1e-9
-    # reject points far outside the field of view before applying lens distortion
-    k = sensor.K
-    with np.errstate(divide="ignore", invalid="ignore"):
-        u = k[0, 0] * pc[:, 0] / depth + k[0, 2]
-        v = k[1, 1] * pc[:, 1] / depth + k[1, 2]
-    ok &= (u > -0.25 * sensor.width) & (u < 1.25 * sensor.width) & (v > -0.25 * sensor.height) & (v < 1.25 * sensor.height)
+    from ..core.camera import FISHEYE_MODELS
+
+    if sensor.model not in FISHEYE_MODELS:  # a fisheye sees far beyond the pinhole frame: no shortcut
+        # reject points far outside the field of view before applying lens distortion
+        k = sensor.K
+        with np.errstate(divide="ignore", invalid="ignore"):
+            u = k[0, 0] * pc[:, 0] / depth + k[0, 2]
+            v = k[1, 1] * pc[:, 1] / depth + k[1, 2]
+        ok &= ((u > -0.25 * sensor.width) & (u < 1.25 * sensor.width) & (v > -0.25 * sensor.height)
+               & (v < 1.25 * sensor.height))
     px = np.full((len(pc), 2), np.nan)
     if ok.any():
         px[ok] = sensor.project(pc[ok])

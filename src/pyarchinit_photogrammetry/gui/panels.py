@@ -360,7 +360,10 @@ class PhotosPane(QListWidget):
         text = f"{cam.path}\n{'allineata' if cam.aligned else 'non allineata'}"
         if not getattr(cam, "enabled", True):
             text += " (disattivata)"
-        q = (getattr(cam, "meta", None) or {}).get("quality")
+        meta = getattr(cam, "meta", None) or {}
+        if meta.get("panorama"):
+            text += f"\nFaccia «{meta.get('face')}» della foto 360° {meta['panorama']}"
+        q = meta.get("quality")
         if q is not None:
             text += f"\nQualita' dell'immagine {q:.2f}".replace(".", ",") + (" (sfocata)" if q < 0.5 else "")
         return text + (f"\nMarker: {', '.join(f[2])}" if f else "")

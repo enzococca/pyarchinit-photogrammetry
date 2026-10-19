@@ -25,7 +25,7 @@ def _dms(values, ref) -> float:
 
 
 def read_exif(path: str | Path) -> dict:
-    """Return ``width``, ``height``, ``make``, ``model``, ``focal_length_mm``,
+    """Return ``width``, ``height``, ``make``, ``model``, ``lens``, ``focal_length_mm``,
     ``focal_length_35mm``, ``datetime`` and ``gps`` = ``(lon, lat, alt)`` when present."""
     with Image.open(path) as im:
         info: dict = {"width": im.width, "height": im.height}
@@ -45,6 +45,9 @@ def read_exif(path: str | Path) -> dict:
             info["focal_length_35mm"] = float(sub[_TAGS["FocalLengthIn35mmFilm"]])
         if sub.get(_TAGS["DateTimeOriginal"]):
             info["datetime"] = sub[_TAGS["DateTimeOriginal"]]
+        lens = sub.get(_TAGS["LensModel"]) if "LensModel" in _TAGS else None
+        if lens:
+            info["lens"] = str(lens).strip() or None
         gps = exif.get_ifd(_GPS_IFD) if hasattr(exif, "get_ifd") else {}
         if gps and 2 in gps and 4 in gps:
             try:

@@ -204,6 +204,16 @@ that every photo sees from further than `max_angle` degrees from the vertical st
 | `engine.video.add_video(chunk, video, folder=None, srt=None, overlap=0.7, every=None, max_frames=None)` | frames added as photos: a new one when the view has moved by `1 - overlap` of its width (median shift of ORB matches, a frame with too few matches only counts when sharp), the sharpest in the next 0.4 s; or one every `every` seconds. The DJI `.SRT` beside the video (`[latitude] [longitude] [abs_alt]`, `GPS(lon,lat,alt)` or `GPS (lon, lat, alt)`) gives every frame its position (EPSG:4326, interpolated in time) |
 | `engine.video.extract_frames(video, folder, ...)`, `read_srt(path)`, `position_at(track, t)` | the parts |
 
+## Fisheye lenses and 360-degree photos
+
+| Call | Description |
+| --- | --- |
+| `chunk.add_photos(...)` | a lens whose EXIF name says fisheye (`LensModel`, or the camera model), or a 35 mm equivalent focal length up to 15 mm, gets an `OPENCV_FISHEYE` sensor (Kannala-Brandt: `fx, fy, cx, cy, k1-k4`); aligned with one focal length (`RADIAL_FISHEYE`) unless a calibration says otherwise. Projections far from the axis are no longer cut at the pinhole frame |
+| `chunk.set_sensor_model(sensor_key, model)` | another camera model for a sensor (`OPENCV`, `OPENCV_FISHEYE`, `FULL_OPENCV`, `PINHOLE`, any COLMAP model): focal length and principal point kept, distortion reset; align again after it |
+| `engine.panorama.add_panoramas(chunk, paths, size=None, fov=100, faces=None)` | equirectangular photos (width twice the height; others left out) become the faces of a cube (`front`, `right`, `back`, `left`, `up`, `down`, or the ones in `faces`): pinhole photos of `fov` degrees (more than 90: neighbouring faces overlap), `size` px a side (default: the resolution of the panorama in their centre), in `facce_360/<face>/<panorama>.jpg` beside the panoramas, one fixed `PINHOLE` sensor; `camera.meta["panorama"]`, `meta["face"]`; the GPS of the panorama is the reference of its faces |
+| alignment | the faces of every panorama are one frame of a COLMAP rig (`engine.panorama.rig_configs`: a rig per `facce_360` folder, faces at their known rotation, no translation): they keep one centre and their relative rotation, their calibration is not refined (also in `optimize_cameras`), pairs of faces of the same panorama are not matched. Depth maps pair a face with faces of other panoramas looking up to 50 degrees away (the panoramas are turned anyhow) |
+| `engine.panorama.split_panorama(path, folder=None, size=None, fov=100, faces=None)`, `face_maps(...)`, `face_rotation(yaw, pitch)` | the faces alone |
+
 ## Reconstruction region
 
 | Call | Description |

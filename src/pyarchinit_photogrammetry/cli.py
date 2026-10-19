@@ -944,6 +944,37 @@ def add_video(project: Path, video_path: Path, overlap: float = typer.Option(0.7
     typer.echo(f"{len(cams)} frames added")
 
 
+@app.command("add-panoramas")
+def add_panoramas(project: Path, paths: list[Path], fov: float = typer.Option(100.0, help="field of view of every "
+                                                                                          "face (degrees)"),
+                  size: Optional[int] = typer.Option(None, help="side of the faces in pixels (default: the "
+                                                                    "resolution of the panorama)"),
+                  faces: Optional[str] = typer.Option(None, help="faces to keep, e.g. front,right,back,left,up"),
+                  chunk: Optional[str] = None):
+    """360-degree (equirectangular) photos added as the six faces of a cube, aligned as a rig."""
+    from .engine.panorama import add_panoramas as _add
+
+    doc, ch = _open(project, chunk)
+    cams = _add(ch, paths, size=size, fov=fov, faces=[f.strip() for f in faces.split(",")] if faces else None,
+                progress=print_progress)
+    doc.save()
+    typer.echo(f"{len({c.meta['panorama'] for c in cams})} panoramas added ({len(cams)} faces)")
+
+
+@app.command("lens-model")
+def lens_model(project: Path, model: str = typer.Argument(..., help="OPENCV, OPENCV_FISHEYE, FULL_OPENCV, PINHOLE, "
+                                                                    "..."),
+               sensor: Optional[int] = typer.Option(None, help="sensor key (default: all)"),
+               chunk: Optional[str] = None):
+    """Camera model of the sensors (e.g. OPENCV_FISHEYE for a fisheye not recognised from EXIF)."""
+    doc, ch = _open(project, chunk)
+    for key in ([sensor] if sensor is not None else list(ch.sensors)):
+        s = ch.set_sensor_model(key, model.upper())
+        typer.echo(f"sensor {key} ({s.label}): {s.model}")
+    doc.save()
+    typer.echo("align the photos again")
+
+
 @app.command("calibrate-colours")
 def calibrate_colours(project: Path, vignetting: bool = True, samples: int = 20000, chunk: Optional[str] = None):
     """Exposure gain of every photo and vignetting of every lens (used by orthomosaic and texture)."""

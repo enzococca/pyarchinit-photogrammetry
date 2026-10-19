@@ -192,13 +192,33 @@ class Chunk:
         w, h = info["width"], info["height"]
         f35 = info.get("focal_length_35mm")
         f_px = (f35 / 36.0) * max(w, h) if f35 else 1.2 * max(w, h)
+        lens = f"{info.get('lens') or ''} {sig[1] or ''}".lower()
+        fisheye = "fisheye" in lens or "fish-eye" in lens or (f35 is not None and f35 <= 15)
         sensor = Sensor(key=self._next_key(self.sensors.values()),
                         label=f"{sig[0] or ''} {sig[1] or ''}".strip() or "camera",
-                        width=w, height=h, model="OPENCV",
+                        width=w, height=h, model="OPENCV_FISHEYE" if fisheye else "OPENCV",
                         params=[f_px, f_px, w / 2.0, h / 2.0, 0.0, 0.0, 0.0, 0.0],
                         focal_length_mm=info.get("focal_length_mm"))
         self.sensors[sensor.key] = sensor
         return sensor
+
+    def set_sensor_model(self, sensor_key: int, model: str) -> Sensor:
+        """Another lens model for a sensor (e.g. ``OPENCV_FISHEYE`` for a fisheye that was not
+        recognised): focal length and principal point kept, distortion reset; align again after."""
+        from .camera import CAMERA_MODELS, SINGLE_FOCAL
+
+        if model not in CAMERA_MODELS:
+            raise ValueError(f"camera model: one of {', '.join(CAMERA_MODELS)}")
+        s = self.sensors[sensor_key]
+        k = s.K
+        fx, fy, cx, cy = k[0, 0], k[1, 1], k[0, 2], k[1, 2]
+        n = CAMERA_MODELS[model]
+        head = [(fx + fy) / 2, cx, cy] if model in SINGLE_FOCAL else [fx, fy, cx, cy]
+        params = (head + [0.0] * n)[:n]
+        if model == "FOV":
+            params[4] = 1e-6
+        s.model, s.params = model, params
+        return s
 
     @staticmethod
     def _next_key(items) -> int:

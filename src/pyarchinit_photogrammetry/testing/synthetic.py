@@ -453,3 +453,90 @@ def make_classified_cloud(size=(6.0, 4.0), spacing: float = 0.02, origin=(248000
     codes = np.concatenate([np.full(len(p[0]), p[2], np.uint8) for p in parts])
     order = rng.permutation(len(xyz))
     return xyz[order], rgb[order], codes[order]
+
+
+# ---------------------------------------------------------------- a chamber for 360-degree photos
+def make_chamber_scene(size=(4.0, 3.0, 2.4), texel: float = 0.004, seed: int = 5) -> MeshScene:
+    """A closed rectangular chamber (a tomb, a cistern): floor, walls and ceiling, each with its
+    own texture, and a block in the middle. Local frame: floor at z = 0, a corner at (0, 0)."""
+    rng = np.random.default_rng(seed)
+    sx, sy, sz = size
+    v = np.array([[x, y, z] for z in (0, sz) for y in (0, sy) for x in (0, sx)], np.float32)
+    quads = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)]
+    bx, by, bz = (1.6, 2.4), (1.2, 1.8), 0.7  # the block (a sarcophagus)
+    v = np.vstack([v, np.array([[x, y, z] for z in (0, bz) for y in by for x in bx], np.float32)])
+    quads += [(8 + a, 8 + b, 8 + c, 8 + d) for a, b, c, d in quads]
+    faces = np.array([t for a, b, c, d in quads for t in ((a, b, c), (a, c, d))], np.uint32)
+    planes = []  # (axis, position, the two axes of the texture, extents) of the textured planes
+    for lo, hi in ((0.0, size), (np.array([bx[0], by[0], 0.0]), np.array([bx[1], by[1], bz]))):
+        lo, hi = np.broadcast_to(lo, 3), np.asarray(hi, float)
+        for axis in range(3):
+            u, w = [a for a in range(3) if a != axis]
+            for pos in (lo[axis], hi[axis]):
+                ext = (hi[u] - lo[u], hi[w] - lo[w])
+                tex = _noise_texture(max(2, int(ext[1] / texel)), max(2, int(ext[0] / texel)), rng)
+                planes.append((axis, float(pos), u, w, lo, tex))
+
+    def surface_color(p: np.ndarray) -> np.ndarray:
+        out = np.zeros((len(p), 3), np.float32)
+        best = np.full(len(p), np.inf)
+        which = np.zeros(len(p), int)
+        for i, (axis, pos, *_rest) in enumerate(planes):
+            d = np.abs(p[:, axis] - pos)
+            closer = d < best
+            best[closer], which[closer] = d[closer], i
+        for i, (_axis, _pos, u, w, lo, tex) in enumerate(planes):
+            sel = which == i
+            if sel.any():
+                out[sel] = _sample(tex, (p[sel, u] - lo[u]) / texel - 0.5, (p[sel, w] - lo[w]) / texel - 0.5)
+        return out
+
+    return MeshScene(v, faces, 0, 0.0, 1.0, np.zeros((1, 1, 3), np.uint8), surface_color)
+
+
+def _cast(scene: MeshScene, centre, dirs: np.ndarray, light=(0.3, -0.5, 0.8)) -> np.ndarray:
+    """Colours (uint8) of the rays ``dirs`` (N, 3) from ``centre`` (no mat), Lambert shading."""
+    import open3d as o3d
+
+    if not hasattr(scene, "_rc"):
+        rc = o3d.t.geometry.RaycastingScene()
+        rc.add_triangles(o3d.core.Tensor(scene.vertices.astype(np.float32)), o3d.core.Tensor(scene.faces.astype(np.uint32)))
+        scene._rc = rc
+    origins = np.repeat(np.asarray(centre, float)[None], len(dirs), 0)
+    ans = scene._rc.cast_rays(o3d.core.Tensor(np.hstack([origins, dirs]).astype(np.float32)))
+    t = ans["t_hit"].numpy()
+    hit = np.isfinite(t)
+    img = np.full((len(dirs), 3), 120.0, np.float32)
+    img[hit] = scene.surface_color(origins[hit] + dirs[hit] * t[hit, None])
+    lv = np.asarray(light, float) / np.linalg.norm(light)
+    shade = np.where(hit, 0.45 + 0.55 * np.abs(ans["primitive_normals"].numpy() @ lv), 1.0)
+    return np.clip(img * shade[:, None], 0, 255).astype(np.uint8)
+
+
+def render_equirectangular(scene: MeshScene, centre, width: int = 1600, yaw: float = 0.0) -> np.ndarray:
+    """A 360-degree photo of a :class:`MeshScene` from ``centre``: equirectangular, ``width`` x
+    ``width / 2``, level, its centre looking ``yaw`` degrees east of north (+y)."""
+    h = width // 2
+    lon = ((np.arange(width) + 0.5) / width - 0.5) * 2 * np.pi + np.radians(yaw)
+    lat = (0.5 - (np.arange(h) + 0.5) / h) * np.pi
+    lon, lat = np.meshgrid(lon, lat)
+    dirs = np.dstack([np.cos(lat) * np.sin(lon), np.cos(lat) * np.cos(lon), np.sin(lat)]).reshape(-1, 3)
+    return _cast(scene, centre, dirs).reshape(h, width, 3)
+
+
+def render_fisheye(scene: MeshScene, world_from_cam: np.ndarray, focal: float, size=(800, 600),
+                   k1: float = 0.0) -> np.ndarray:
+    """A fisheye photo of a :class:`MeshScene` (COLMAP ``OPENCV_FISHEYE`` with ``fx = fy =
+    focal``, principal point in the centre, ``k1`` only): the distance from the centre grows
+    with the angle from the axis, ``r = focal * theta * (1 + k1 * theta^2)``."""
+    w, h = size
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
+    x, y = (xx + 0.5 - w / 2) / focal, (yy + 0.5 - h / 2) / focal
+    rd = np.hypot(x, y)
+    theta = rd.copy()
+    for _ in range(20):  # Newton on theta * (1 + k1 theta^2) = rd
+        theta -= (theta * (1 + k1 * theta ** 2) - rd) / (1 + 3 * k1 * theta ** 2)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        scale = np.where(rd > 0, np.sin(theta) / rd, 1.0)
+    dirs_cam = np.dstack([x * scale, y * scale, np.cos(theta)]).reshape(-1, 3)
+    return _cast(scene, world_from_cam[:3, 3], dirs_cam @ world_from_cam[:3, :3].T).reshape(h, w, 3)

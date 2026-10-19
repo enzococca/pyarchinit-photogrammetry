@@ -201,6 +201,10 @@ is installed on first use (PyTorch in a separate environment, see the same page)
 * **Video and image quality**: frames chosen from a video (sharp, with the overlap the
   reconstruction needs), with the GPS of DJI drones from their `.SRT`; blurred photos found and
   disabled.
+* **360-degree photos and fisheye lenses**: equirectangular photos split into the faces of a cube
+  and aligned as a rig (one centre, known rotations) - tombs, caves, cisterns and narrow trenches
+  with a 360-degree camera; fisheye lenses recognised from the EXIF and calibrated with their own
+  model.
 * **Reconstruction region**: a box around the subject (from the tie points, a plan polygon or typed
   values, turned to the view); depth maps, dense cloud, model, DEM and orthomosaic stay inside it.
 * **DEM editing**: an area drawn on the DEM filled from the ground around it (plane, linear, IDW or a

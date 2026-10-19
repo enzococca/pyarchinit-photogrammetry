@@ -195,10 +195,12 @@ def _K_cv(K: np.ndarray) -> np.ndarray:
     return k
 
 
-def _neighbors(rec, max_neighbors: int = 4) -> dict[int, list[int]]:
+def _neighbors(rec, max_neighbors: int = 4, wide=frozenset()) -> dict[int, list[int]]:
     """Best stereo partners per image: many shared tie points, a useful parallax,
     similar viewing direction and a baseline roughly parallel to the image plane
-    (otherwise rectification degenerates)."""
+    (otherwise rectification degenerates). The images in ``wide`` - faces of 360-degree photos,
+    turned wherever the camera pointed - take partners looking up to 50 degrees away (a face of
+    another panorama is always within 45 degrees), the others up to 30."""
     shared: dict[int, dict[int, int]] = {i: {} for i in rec.images}
     for p in rec.points3D.values():
         ids = sorted({el.image_id for el in p.track.elements})
@@ -226,10 +228,19 @@ def _neighbors(rec, max_neighbors: int = 4) -> dict[int, list[int]]:
             axis_angle = np.degrees(np.arccos(np.clip(axes[i] @ axes[j], -1, 1)))
             cj = poses[i][:3, :3] @ centers[j] + poses[i][:3, 3]  # partner centre in camera i frame
             forward = abs(cj[2]) / max(np.linalg.norm(cj), 1e-12)
-            if 2.0 <= parallax <= 40.0 and axis_angle <= 30.0 and forward <= 0.6:
+            turn = 50.0 if i in wide or j in wide else 30.0
+            if 2.0 <= parallax <= 40.0 and axis_angle <= turn and forward <= 0.6:
                 scored.append((n * min(1.0, parallax / 6.0) * min(1.0, 20.0 / parallax), j))
         out[i] = [j for _, j in sorted(scored, reverse=True)[:max_neighbors]]
     return out
+
+
+def _panorama_images(chunk: Chunk, rec) -> set[int]:
+    """Images of ``rec`` that are faces of 360-degree photos."""
+    from .panorama import face_names
+
+    faces = face_names(chunk)
+    return {iid for iid, image in rec.images.items() if image.name in faces}
 
 
 def _point_ids(image, rec=None) -> list[int]:
@@ -450,7 +461,7 @@ def _cpu_depth_maps(chunk: Chunk, ws: Path, filter_mode: str, progress: Progress
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     rec = _read_workspace_model(ws)
-    neigh = _neighbors(rec)
+    neigh = _neighbors(rec, wide=_panorama_images(chunk, rec))
     min_agree, tol, _ = FILTER_MODES.get(filter_mode, FILTER_MODES["moderate"])
     (ws / "stereo" / "depth_maps").mkdir(parents=True, exist_ok=True)
     (ws / "stereo" / "normal_maps").mkdir(parents=True, exist_ok=True)

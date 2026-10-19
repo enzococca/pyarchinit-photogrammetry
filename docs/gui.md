@@ -150,6 +150,12 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   every frame gets its GPS position. **Image quality** (right click in the Photos pane): the sharpness
   of every photo compared with the sharpest ones (in the tooltip, *sfocata* under 0.5), *Disattiva le
   foto sfocate*, enable or disable the selected photos, masks of the selected photos.
+* **360-degree photos and fisheye lenses** (*Flusso di lavoro > Aggiungi foto 360°*): every
+  equirectangular photo becomes the six faces of a cube (the faces to keep - *Sotto* often shows only
+  the tripod - their width in degrees and size), written in `facce_360` beside the photos; in the
+  alignment the faces of one photo stay together as a rig. A fisheye lens is recognised from the EXIF;
+  otherwise *Modello dell'obiettivo...* (right click in the Photos pane) sets it for the sensors of the
+  selected photos (normal, fisheye, strong distortion, none). The tooltip of a face names its photo.
 * **Reconstruction region** (*Flusso di lavoro > Regione di ricostruzione*): a box (yellow in the 3D
   view, *Regione* shows or hides it) around the tie points, turned to face the 3D view, over the
   selected polygon of the plan, or with typed centre, size and rotation; depth maps, dense cloud and

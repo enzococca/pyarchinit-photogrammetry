@@ -49,9 +49,11 @@ def mapping_camera(sensor) -> tuple[str, list[float]]:
     length (``RADIAL`` for ``OPENCV``, ``SIMPLE_PINHOLE`` for ``PINHOLE``) unless the
     sensor has fx != fy or tangential distortion, which only a calibration can give."""
     p = [float(v) for v in sensor.params]
-    square = sensor.model in ("OPENCV", "PINHOLE") and abs(p[0] - p[1]) <= 1e-9 * abs(p[0])
+    square = sensor.model in ("OPENCV", "PINHOLE", "OPENCV_FISHEYE") and abs(p[0] - p[1]) <= 1e-9 * abs(p[0])
     if square and sensor.model == "OPENCV" and p[6] == 0.0 and p[7] == 0.0:
         return "RADIAL", [p[0], p[2], p[3], p[4], p[5]]
+    if square and sensor.model == "OPENCV_FISHEYE" and p[6] == 0.0 and p[7] == 0.0:
+        return "RADIAL_FISHEYE", [p[0], p[2], p[3], p[4], p[5]]
     if square and sensor.model == "PINHOLE":
         return "SIMPLE_PINHOLE", [p[0], p[2], p[3]]
     return sensor.model, p
@@ -65,6 +67,8 @@ def sensor_model_params(model: str, params, sensor_model: str) -> tuple[str, lis
         return "OPENCV", [p[0], p[0], p[1], p[2], p[3], p[4], 0.0, 0.0]
     if model == "SIMPLE_PINHOLE" and sensor_model == "PINHOLE":
         return "PINHOLE", [p[0], p[0], p[1], p[2]]
+    if model == "RADIAL_FISHEYE" and sensor_model == "OPENCV_FISHEYE":
+        return "OPENCV_FISHEYE", [p[0], p[0], p[1], p[2], p[3], p[4], 0.0, 0.0]
     return model, p
 
 
@@ -231,10 +235,12 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
                  exclude_stationary: bool = False) -> None:
     """Detect and match the points of the photos (SIFT); the masked parts of the photos
     (:mod:`.masks`) are left out. ``exclude_stationary``: matches that do not move between two
-    photos are dropped - the background of a turntable photographed from a fixed camera."""
+    photos are dropped - the background of a turntable photographed from a fixed camera. The
+    faces of 360-degree photos (:mod:`.panorama`) become the frames of a rig."""
     import pycolmap
 
     from .masks import colmap_mask_folder
+    from .panorama import panorama_cameras, rig_configs
 
     progress = progress or Progress()
     work = _sfm_dir(chunk)
@@ -250,6 +256,8 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
             by_sensor.setdefault(c.sensor_key, []).append(names[c.key])
 
     masks = colmap_mask_folder(chunk, names, work / "masks")
+    rigs = rig_configs(chunk, names)
+    faces = {c.sensor_key for c in panorama_cameras(chunk) if c.enabled} if rigs else set()
     progress(0.0, f"Detecting points in {len(names)} photos" + (" (with masks)" if masks else ""))
     for i, (skey, image_names) in enumerate(by_sensor.items()):
         sensor = chunk.sensors[skey]
@@ -262,13 +270,21 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
         reader.camera_params = ",".join(f"{p:.10g}" for p in params)
         if masks is not None:
             reader.mask_path = str(masks)
+        # a rig needs a camera per face: the faces of the panoramas are in a folder each
+        mode = pycolmap.CameraMode.PER_FOLDER if skey in faces else pycolmap.CameraMode.SINGLE
         pycolmap.extract_features(str(db_path), str(root), image_names=image_names,
-                                  camera_mode=pycolmap.CameraMode.SINGLE, reader_options=reader,
-                                  extraction_options=ext)
+                                  camera_mode=mode, reader_options=reader, extraction_options=ext)
         progress(0.5 * (i + 1) / len(by_sensor), f"Points detected for sensor {sensor.label}")
+    if rigs:
+        db = pycolmap.Database.open(str(db_path))
+        try:
+            pycolmap.apply_rig_config(rigs, db)
+        finally:
+            db.close()
 
     mopts = pycolmap.FeatureMatchingOptions()
     mopts.max_num_matches = max(int(tiepoint_limit) * 4, 8192)
+    mopts.skip_image_pairs_in_same_frame = bool(rigs)  # same centre: nothing to triangulate
     n = len(names)
     mode = pair_selection
     if mode == "auto":
@@ -294,7 +310,7 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     removed = remove_stationary_matches(db_path) if exclude_stationary else None
     chunk.meta["sfm"] = {"image_root": str(root), "names": {str(k): v for k, v in names.items()},
                          "quality": quality, "pair_selection": mode, "masks": masks is not None,
-                         "stationary_removed": removed}
+                         "stationary_removed": removed, "rigs": len(rigs)}
     progress(1.0, "Matching finished" + (f" ({removed:,} stationary matches left out)" if removed else ""))
 
 
@@ -352,6 +368,10 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None) -> int:
     opts.multiple_models = True
     opts.min_model_size = 3
     opts.extract_colors = True
+    fixed = _fixed_camera_ids(chunk, db_path)
+    if fixed:  # faces of 360-degree photos: exact calibration, rig known
+        opts.constant_cameras = fixed
+        opts.ba_refine_sensor_from_rig = False
     progress(0.0, "Aligning cameras")
     recs = pycolmap.incremental_mapping(str(db_path), root, str(out), opts)
     if not recs:
@@ -367,6 +387,55 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None) -> int:
     n = import_reconstruction(chunk, best)
     progress(1.0, "Alignment finished")
     return n
+
+
+def _fixed_camera_ids(chunk: Chunk, db_path: Path) -> set[int]:
+    """COLMAP cameras of the faces of 360-degree photos (virtual cameras known exactly) in the
+    database ``db_path``."""
+    import pycolmap
+
+    from .panorama import face_names
+
+    wanted = face_names(chunk)
+    if not wanted:
+        return set()
+    db = pycolmap.Database.open(str(db_path))
+    try:
+        return {int(im.camera_id) for im in db.read_all_images() if im.name in wanted}
+    finally:
+        db.close()
+
+
+def _rec_fixed_cameras(chunk: Chunk, rec) -> set[int]:
+    """The cameras of a reconstruction that are faces of 360-degree photos."""
+    from .panorama import face_names
+
+    wanted = face_names(chunk)
+    return {int(im.camera_id) for im in rec.images.values() if im.name in wanted} if wanted else set()
+
+
+def _adjust(rec, opts, constant_points=(), fixed_cameras=()) -> None:
+    """Bundle adjustment of the aligned images of ``rec``: ``constant_points`` held (they also
+    fix the gauge when there are three or more), the intrinsics of ``fixed_cameras`` and the
+    rigs not refined."""
+    import pycolmap
+
+    if not constant_points and not fixed_cameras:
+        pycolmap.bundle_adjustment(rec, opts)
+        return
+    config = pycolmap.BundleAdjustmentConfig()
+    for iid, image in rec.images.items():
+        if image.has_pose:
+            config.add_image(iid)
+    for pid in constant_points:
+        config.add_constant_point(pid)
+    for cid in fixed_cameras:
+        config.set_constant_cam_intrinsics(cid)
+    if fixed_cameras:
+        opts.refine_sensor_from_rig = False
+    if not constant_points:
+        config.fix_gauge(pycolmap.BundleAdjustmentGauge.THREE_POINTS)
+    pycolmap.create_default_bundle_adjuster(opts, config, rec).solve()
 
 
 def drop_missing_points(rec) -> int:
@@ -697,8 +766,9 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
         opts.refine_principal_point = fit_principal_point
     except AttributeError:  # pragma: no cover - option name differs between versions
         pass
+    fixed_cams = _rec_fixed_cameras(chunk, rec)
     if constrained:  # the block first finds its own shape and calibration, then bends to the references
-        pycolmap.bundle_adjustment(rec, opts)
+        _adjust(rec, opts, fixed_cameras=fixed_cams)
         _restore_sensor_models(chunk, rec)
         import_reconstruction(chunk, rec)
         gcp.update_transform(chunk)
@@ -713,16 +783,10 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     pids, used = _fixed_points(chunk, rec, copies, points) if points else ([], set())
     placed = np.array([rec.points3D[pid].xyz for pid in pids[::copies]]) if pids else np.zeros((0, 3))
     if len(placed) >= 3 and gcp._non_collinear(placed):
-        config = pycolmap.BundleAdjustmentConfig()
-        for iid, image in rec.images.items():
-            if image.has_pose:
-                config.add_image(iid)
-        for pid in pids:
-            config.add_constant_point(pid)  # with three or more fixed points the gauge is fixed too
-        pycolmap.create_default_bundle_adjuster(opts, config, rec).solve()
+        _adjust(rec, opts, constant_points=pids, fixed_cameras=fixed_cams)
     else:
         pids, points = _drop_points(rec, pids), []
-        pycolmap.bundle_adjustment(rec, opts)
+        _adjust(rec, opts, fixed_cameras=fixed_cams)
     pids = _drop_points(rec, pids)
     _restore_sensor_models(chunk, rec)
     rec.update_point_3d_errors()  # the adjustment does not refresh the stored errors
