@@ -195,6 +195,8 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
   con la normal map cotta dal modello completo, video di sorvolo.
 * **Misure**: area in pianta e della superficie (DEM e modello), pendenza, esposizione e altezza dal
   suolo sotto il cursore, raster di pendenza ed esposizione, nuvola densa colorata per altezza dal suolo.
+* **Paradati**: provenienza W3C PROV (JSON-LD) di ogni prodotto esportato o pubblicato, dalle foto e
+  dalla georeferenziazione al file (`ppg paradata`).
 * **Pacchetto QField** per il tablet in trincea (ortofoto, DEM, unita', quote, progetto QGIS) e le
   modifiche riportate nel progetto e in PyArchInit (`ppg qfield export|import`).
 * **Colore Munsell** di un'area dell'ortofoto, calibrato con una ColorChecker fotografata nello

@@ -211,6 +211,8 @@ is installed on first use (PyTorch in a separate environment, see the same page)
 * **Measures**: area in plan and of the surface (DEM and model), slope, aspect and height above the
   ground under the cursor, slope and aspect rasters, the dense cloud coloured by height above the
   ground.
+* **Paradata**: W3C PROV provenance (JSON-LD) of every exported or published product, from the
+  photos and the georeference to the file (`ppg paradata`).
 * **QField package** for the tablet in the trench (orthomosaic, DEM, units, spot heights, QGIS project)
   and the edits brought back to the project and to PyArchInit (`ppg qfield export|import`).
 * **Munsell colour** of an area of the orthomosaic, calibrated with a ColorChecker photographed in

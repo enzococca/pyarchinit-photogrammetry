@@ -314,6 +314,26 @@ def qfield(action: str = typer.Argument(..., help="export or import"), project: 
 
 
 @app.command()
+def paradata(project: Path, product: str = typer.Option("orthomosaic", help="point_cloud, model, dem, orthomosaic..."),
+             out: Optional[Path] = typer.Option(None, help="write the JSON-LD here (default: print it)"),
+             operator: Optional[str] = typer.Option(None, help="who made it"), chunk: Optional[str] = None):
+    """How a product was made, as W3C PROV in JSON-LD: the steps and their settings back to the
+    photos and the georeference, the software and the operator."""
+    import json as _json
+
+    doc, ch = _open(project, chunk)
+    if ch.product_path(product) is None:
+        raise typer.BadParameter(f"the chunk has no {product}")
+    data = ch.provenance(product, operator=operator)
+    text = _json.dumps(data, ensure_ascii=False, indent=1)
+    if out is None:
+        typer.echo(text)
+    else:
+        out.write_text(text, encoding="utf-8")
+        typer.echo(f"written {out}")
+
+
+@app.command()
 def precision(project: Path, marker_px: float = typer.Option(0.5, help="how well markers are measured (pixels)"),
               chunk: Optional[str] = None):
     """Precision of cameras, markers and tie points from the covariance of the bundle adjustment,

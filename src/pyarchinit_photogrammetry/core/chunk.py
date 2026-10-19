@@ -654,6 +654,13 @@ class Chunk:
                                        blend_sigma=blend_sigma, colour_correction=colour_correction,
                                        ghosting=ghosting, fill_holes=fill_holes)
 
+    def provenance(self, product: str, path: str | os.PathLike | None = None, operator: str | None = None) -> dict:
+        """How ``product`` was made, as W3C PROV in JSON-LD (:mod:`core.paradata`); ``path``: a copy
+        of it (an export) to describe as such."""
+        from . import paradata
+
+        return paradata.provenance(self, product, path=path, operator=operator)
+
     def build_relief(self, method: str = "svf", radius: float | None = None, directions: int = 16,
                      min_size: float | None = None, max_size: float | None = None, scaling: float = 2.0,
                      progress: ProgressCallback | None = None) -> Path:

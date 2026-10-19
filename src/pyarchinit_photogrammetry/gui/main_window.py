@@ -1272,12 +1272,20 @@ class MainWindow(QMainWindow):
         if "copc" in flt.lower() and not path.lower().endswith(".copc.laz"):
             path = str(Path(path).with_suffix("")) + ".copc.laz"
         cog = next((c for c in ("jpeg", "webp", "zstd") if c in flt.lower()), None) if "COG" in flt else None
+        product = {"cloud": "point_cloud", "model": "model", "dem": "dem", "ortho": "orthomosaic"}.get(what)
+        operator = str(self.settings.value("pa/disegnatore", "") or "") or None  # read here, not in the worker
         if cog or path.lower().endswith((".copc.laz", ".glb")):  # can take a while: in the background
             fn = {"cloud": lambda p: ch.export_point_cloud(path, classes=classes),
                   "model": lambda p: ch.export_model(path),
                   "dem": lambda p: ch.export_dem(path, cog=cog),
                   "ortho": lambda p: ch.export_orthomosaic(path, cog=cog)}[what]
-            self.run_task("Esportazione", fn,
+
+            def job(p):
+                out = fn(p)
+                self._write_paradata(ch, product, out, operator)
+                return out
+
+            self.run_task("Esportazione", job,
                           lambda out: (self.log_pane.info(tr("Esportato {0}", out)),
                                        self.statusBar().showMessage(tr("Esportato {0}", out), 8000)),
                           refresh=False, save=False)
@@ -1298,8 +1306,20 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._exc("Esportazione non riuscita", exc)
             return
+        if product is not None:
+            self._write_paradata(ch, product, path, operator)
         self.log_pane.info(tr("Esportato {0}", path))
         self.statusBar().showMessage(tr("Esportato {0}", path), 8000)
+
+    @staticmethod
+    def _write_paradata(chunk, product: str, path, operator: str | None = None) -> None:
+        """How an exported product was made, beside it (``<file>.prov.jsonld``, :mod:`core.paradata`)."""
+        from ..core.paradata import write_provenance
+
+        try:
+            write_provenance(chunk, product, path, operator=operator)
+        except Exception as exc:  # the export itself went well
+            log.warning("Paradati non scritti per %s: %s", path, exc)
 
     def import_scans(self) -> None:
         """File > Importa > Scansioni laser: E57 or PTX files as the dense cloud of a new chunk."""

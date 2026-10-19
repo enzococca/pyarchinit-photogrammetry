@@ -191,6 +191,13 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   exposed earlier *covers* the units it overlaps in plan exposed later; the ticked relations go into
   the US forms of PyArchInit in both directions (never twice). A double click on a phase shows it;
   *Salva CSV* writes the report.
+* **Paradata**: every export of the cloud, the model, the DEM or the orthomosaic gets a
+  `<file>.prov.jsonld` beside it, and so does the copy published in PyArchInit's media (whose
+  documentation note gets a one-line summary: photos aligned, control and check RMSE, resolution, CRS,
+  version). It is W3C PROV in JSON-LD: the file with its SHA-256, the step that made it with its
+  settings and time, and the steps before it down to the photos and the georeference, the program with
+  its libraries and the operator (the *Disegnatore* of the PyArchInit forms) - readable by any linked
+  data tool and by the Extended Matrix.
 * **QField in the trench** (*File > Esporta > Pacchetto QField*): a folder with the orthomosaic reduced
   for the tablet (Cloud Optimized GeoTIFF, 2 cm by default), the DEM shown as a hillshade and a
   GeoPackage with the units and spot heights of the chunk, plus a QGIS project with relative paths,

@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from ..core import crs as crs_mod
+from ..core import paradata
 from .database import PyArchInitDB, connect, reproject_wkt
 from .media import register_media
 
@@ -350,10 +351,11 @@ class PyArchInit:
         import shutil
 
         shutil.copy2(path, named)
-        res = chunk.meta.get("orthomosaic", {}).get("resolution")
-        note = kw.pop("note", "") or (f"GSD {res * 1000:.1f} mm/px, CRS {chunk.crs}" if res else "")
-        return self.publish_raster(named, sito, nome_doc, "Fotopiano", kw.pop("sorgente", "Fotogrammetria"),
-                                   link_us=link_us, crs=chunk.crs, note=note, **kw)
+        note = kw.pop("note", "") or paradata.summary(chunk, "orthomosaic")
+        out = self.publish_raster(named, sito, nome_doc, "Fotopiano", kw.pop("sorgente", "Fotogrammetria"),
+                                  link_us=link_us, crs=chunk.crs, note=note, **kw)
+        out["paradata"] = str(paradata.write_provenance(chunk, "orthomosaic", self._media_folder(sito) / named.name))
+        return out
 
     def publish_dem(self, chunk, sito: str, nome_doc: str, link_us=None, **kw) -> dict:
         path = chunk.dem_path
@@ -363,10 +365,11 @@ class PyArchInit:
 
         named = path.with_name(_safe(nome_doc) + ".tif")
         shutil.copy2(path, named)
-        res = chunk.meta.get("dem", {}).get("resolution")
-        note = kw.pop("note", "") or (f"DEM {res * 100:.1f} cm/px, CRS {chunk.crs}" if res else "")
-        return self.publish_raster(named, sito, nome_doc, "DEM", kw.pop("sorgente", "Fotogrammetria"),
-                                   link_us=link_us, crs=chunk.crs, note=note, **kw)
+        note = kw.pop("note", "") or paradata.summary(chunk, "dem")
+        out = self.publish_raster(named, sito, nome_doc, "DEM", kw.pop("sorgente", "Fotogrammetria"),
+                                  link_us=link_us, crs=chunk.crs, note=note, **kw)
+        out["paradata"] = str(paradata.write_provenance(chunk, "dem", self._media_folder(sito) / named.name))
+        return out
 
     def publish_model(self, chunk, sito: str, nome_doc: str, link_us=None, out_dir: str | Path | None = None,
                       **kw) -> dict:
@@ -378,9 +381,12 @@ class PyArchInit:
         rid = register_media(self.db, obj, mediatype="3d_model", descrizione=f"Modello 3D: {nome_doc}",
                              tags="['fotogrammetria', '3d']", links=self._links(sito, link_us),
                              overwrite=kw.get("overwrite", False), **self._media_dirs())
+        product = "model_textured" if chunk.product_path("model_textured") else "model"
         did = self.add_documentation(sito, nome_doc, "Modello tridimensionale", kw.get("sorgente", "Fotogrammetria"),
-                                     kw.get("scala", ""), kw.get("disegnatore", ""), kw.get("note", ""))
-        return {"id_media": rid, "id_documentazione": did, "path": str(obj)}
+                                     kw.get("scala", ""), kw.get("disegnatore", ""),
+                                     kw.get("note", "") or paradata.summary(chunk, product))
+        return {"id_media": rid, "id_documentazione": did, "path": str(obj),
+                "paradata": str(paradata.write_provenance(chunk, product, obj))}
 
     def publish_units(self, units, sito: str, area: str | None = None, crs: str | None = None,
                       rilievo_originale: str = "Fotogrammetria", disegnatore: str = "", nome_doc: str = "",

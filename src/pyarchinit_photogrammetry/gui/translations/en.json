@@ -989,6 +989,7 @@
   "Pagina iniziale": "Start page",
   "Pannello dei layer: mostra, nascondi, zoom, attributi": "Layers pane: show, hide, zoom, attributes",
   "Pannello delle sezioni": "Sections pane",
+  "Paradati non scritti per %s: %s": "Paradata not written for %s: %s",
   "Parametri dei sensori, calibrazione fissa e grafico della distorsione": "Parameters of the sensors, fixed calibration and distortion plot",
   "Parametro": "Parameter",
   "Passi in sequenza su piu' chunk, con salvataggio dopo ogni passo e ripresa se si interrompe": "Steps in sequence over several chunks, saving after each step and resuming if interrupted",
