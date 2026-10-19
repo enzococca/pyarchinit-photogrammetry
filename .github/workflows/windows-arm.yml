@@ -1,0 +1,124 @@
+name: windows-arm
+
+# Toward a native Windows ARM64 application (Snapdragon laptops, Windows 11 on a Mac with Apple
+# Silicon; the x64 application already runs there under emulation). Several libraries publish no
+# win_arm64 wheels and are built here, each in its own job: lazrs (LAZ point clouds), the native
+# core of this project, OpenCV with the contrib modules and pycolmap (COLMAP with vcpkg, as
+# COLMAP's own Windows wheels). On demand; the wheels stay as artifacts.
+on:
+  workflow_dispatch:
+
+jobs:
+  lazrs:
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          architecture: arm64
+      - name: lazrs from its source (Rust)
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip wheel "lazrs==0.8.2" --no-binary lazrs --no-deps -w wheels
+          pip install (Get-ChildItem wheels/*.whl).FullName
+          python -c "import lazrs; print('lazrs', lazrs.LasZipDecompressor)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-arm64-lazrs
+          path: wheels/*.whl
+          if-no-files-found: error
+
+  core:
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          architecture: arm64
+      - name: Native core
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip maturin numpy
+          maturin build --release -m native/Cargo.toml --out wheels
+          pip install (Get-ChildItem wheels/*.whl).FullName
+          python -c "import numpy as np, ppg_core; print(ppg_core.__version__, ppg_core.combine_depths(np.ones((2, 3, 4), np.float32), 1, 0.01).shape)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-arm64-core
+          path: wheels/*.whl
+          if-no-files-found: error
+
+  opencv:
+    runs-on: windows-11-arm
+    timeout-minutes: 360
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          architecture: arm64
+      - name: OpenCV with the contrib modules from its source
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip wheel "opencv-contrib-python-headless==5.0.0.93" --no-binary opencv-contrib-python-headless --no-deps -w wheels
+          pip install (Get-ChildItem wheels/*.whl).FullName numpy
+          python -c "import cv2; print(cv2.__version__, hasattr(cv2, 'mcc'), hasattr(cv2, 'ccm'))"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-arm64-opencv
+          path: wheels/*.whl
+          if-no-files-found: error
+
+  pycolmap:
+    runs-on: windows-11-arm
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: colmap/colmap
+          ref: "4.2.1"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          architecture: arm64
+      - name: COLMAP and pycolmap with vcpkg for arm64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $root = $PWD.Path -replace '\\', '/'
+          # COLMAP's script enters the x64 developer shell of Visual Studio
+          (Get-Content scripts/shell/enter_vs_dev_shell.ps1) -replace '-host_arch=amd64 -arch=amd64', '-host_arch=arm64 -arch=arm64' |
+            Set-Content scripts/shell/enter_vs_dev_shell.ps1
+          & ./scripts/shell/enter_vs_dev_shell.ps1
+          git clone https://github.com/microsoft/vcpkg "$root/vcpkg"
+          & "$root/vcpkg/bootstrap-vcpkg.bat" -disableMetrics
+          New-Item -ItemType Directory -Force triplets | Out-Null
+          Set-Content triplets/arm64-windows-release.cmake @(
+            "set(VCPKG_TARGET_ARCHITECTURE arm64)", "set(VCPKG_CRT_LINKAGE dynamic)",
+            "set(VCPKG_LIBRARY_LINKAGE dynamic)", "set(VCPKG_BUILD_TYPE release)")
+          $env:VCPKG_OVERLAY_TRIPLETS = "$root/triplets"
+          $toolchain = "$root/vcpkg/scripts/buildsystems/vcpkg.cmake"
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$root/install" `
+            -DCMAKE_TOOLCHAIN_FILE="$toolchain" -DVCPKG_TARGET_TRIPLET=arm64-windows-release `
+            -DCUDA_ENABLED=OFF -DONNX_ENABLED=OFF -DGUI_ENABLED=OFF -DCGAL_ENABLED=OFF -DLSD_ENABLED=OFF
+          cmake --build build --target install
+          python -m pip install --upgrade pip build delvewheel
+          python python/ci/install-build-requirements.py
+          python -m build --wheel --no-isolation -o raw `
+            -C cmake.define.CMAKE_TOOLCHAIN_FILE="$toolchain" `
+            -C cmake.define.VCPKG_TARGET_TRIPLET=arm64-windows-release `
+            -C cmake.define.VCPKG_INSTALLED_DIR="$root/build/vcpkg_installed" `
+            -C cmake.define.CMAKE_PREFIX_PATH="$root/install" `
+            -C cmake.args=-GNinja .
+          delvewheel repair -v --add-path "$root/build/vcpkg_installed/arm64-windows-release/bin" -w wheels `
+            (Get-ChildItem raw/*.whl).FullName
+          pip install (Get-ChildItem wheels/*.whl).FullName
+          python -c "import pycolmap; print(pycolmap.__version__, pycolmap.Reconstruction().summary())"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-arm64-pycolmap
+          path: wheels/*.whl
+          if-no-files-found: error
