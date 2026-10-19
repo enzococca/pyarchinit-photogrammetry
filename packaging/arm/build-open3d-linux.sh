@@ -41,11 +41,20 @@ cmake --version
 
 rsync -a --delete --exclude build /src/ /work/open3d/
 cd /work/open3d
+# On ARM Open3D links the static libgfortran.a, whose thread_unit is an initial-exec TLS variable:
+# the whole TLS block of the module (12 KB, OpenBLAS's gemv buffers) then has to fit in the static
+# TLS of glibc and the import fails ("cannot allocate memory in static TLS block"). The shared
+# libgfortran.so, as on x86-64, put into the wheel by auditwheel.
+perl -0pi -e 's/if\(LINUX_AARCH64 OR APPLE_AARCH64\)(\n\s+# Find libgfortran\.a)/if(APPLE_AARCH64)$1/' \
+    3rdparty/find_dependencies.cmake
+grep -B1 "# Find libgfortran.a and libgcc.a" 3rdparty/find_dependencies.cmake | grep -q "if(APPLE_AARCH64)"
 mkdir -p /out
 for v in ${PYVERS}; do
     env=/work/miniconda3/envs/py${v}
     [ -x ${env}/bin/python ] || ${CONDA} create -p ${env} python=${v}
     ${env}/bin/python -m pip install -U -r python/requirements.txt -r python/requirements_build.txt
+    # the setup.py of Open3D 0.19 and its wheel 0.38 import pkg_resources, gone from setuptools 81
+    ${env}/bin/python -m pip install "setuptools<81"
     cmake -S . -B build \
         -DCMAKE_BUILD_TYPE=Release \
         -DDEVELOPER_BUILD=OFF \
@@ -64,7 +73,11 @@ for v in ${PYVERS}; do
         -DCMAKE_INSTALL_PREFIX=/work/open3d_install
     # what runs out of memory in parallel is compiled again alone
     make -C build -j"${JOBS}" -k pip-package || make -C build -j1 pip-package
-    cp build/lib/python_package/pip_package/open3d-*.whl /out/
+    ${env}/bin/python -m pip install auditwheel patchelf
+    rm -rf /work/wheelhouse
+    PATH=${env}/bin:${PATH} ${env}/bin/python -m auditwheel repair --plat manylinux_2_31_aarch64 -w /work/wheelhouse \
+        build/lib/python_package/pip_package/open3d-*-cp${v/./}-*.whl
+    cp /work/wheelhouse/open3d-*.whl /out/
     ${env}/bin/python -m pip install --force-reinstall /out/open3d-*-cp${v/./}-*.whl
     ${env}/bin/python - <<'EOF'
 import numpy as np
