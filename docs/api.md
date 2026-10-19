@@ -1,291 +1,431 @@
-# Desktop interface
+# Python API
 
-```bash
-pip install "pyarchinit-photogrammetry[gui]"   # included in [all]
-ppg-gui [project.ppg]                          # or: ppg gui, python -m pyarchinit_photogrammetry.gui
-ppg-gui --doctor                               # environment diagnosis (same as ppg doctor)
-ppg-gui --check                                # opens, renders and exits (smoke test)
+```python
+import pyarchinit_photogrammetry as ppg
 ```
 
-Or the packaged application for macOS and Windows: [packaging.md](packaging.md).
+## Document and chunks
 
-The interface is in Italian, like PyArchInit. Every action calls the same Python API that
-scripts use, so anything done with the mouse can be repeated in the console or in a script.
-
-## Start and opening a project
-
-`ppg-gui` (and the packaged application) shows at once a splash in the colours of the logo
-with a progress bar in the middle: the percentage and what is loading (NumPy and Open3D, PROJ
-and GDAL, COLMAP, the VTK 3D view, the interface). The window appears in about a second
-(the packaged application took eleven); the log records how long the start took. Opening a
-project shows the same card over the window (project, workspace, 3D view, orthophoto and
-DEM); the photo thumbnails come afterwards in the background, from the small previews the
-cameras store in the EXIF (a few milliseconds per photo; the status bar counts them), so
-hundreds of drone photos no longer freeze the window. Photos that cannot be read (empty
-files kept online only by Dropbox or iCloud) get a dark thumbnail and a tooltip.
-
-## Start page
-
-Without a project the central area shows the start page: *Nuovo progetto*, *Apri
-progetto...*, *Progetto demo*, the recent projects, and links to the guide, the
-environment diagnosis and the log folder. *File > Pagina iniziale* brings it back.
-
-## Layout
-
-| Area | Content |
+| Call | Description |
 | --- | --- |
-| Toolbar | the workflow with coloured icons: open/save, photos, markers, alignment, references, dense cloud, model, texture, DEM, orthophoto, *Elabora tutto*, publish to PyArchInit. Processing actions are disabled while a task runs |
-| Drawing toolbar | always visible under the workflow: the drawing modes (*Sposta / interroga*, *Disegna US*, *Traccia sezione*, *Misura*, *Quota*, *SAM* with its menu), *Cancella disegni*, contour lines, volumes, plan slices, and shortcuts to the *Layer* and *Sezioni* panes and to *Pubblica* (units and spot heights) |
-| Left: **Area di lavoro** | project, chunks (click to make one active), CRS (double click to change), cameras (green camera = aligned, red = not aligned), markers (GCP, check points), products; double click opens a photo or a product |
-| Left: **Riferimenti** | markers with use/check flags, editable coordinates and accuracy, errors (m and px), camera positions; *Importa CSV*, *Aggiorna* (georeferencing), *Ottimizza camere* (with 3 or more control points they take part in the bundle adjustment and bend the block; check points stay out; control/check errors before and after in the log); *Barra di scala...* and *Importa barre...*; *Coordinate stimate* (as Metashape's *View Estimated*: the X, Y, Z columns show the estimated coordinates of the markers instead of the reference ones; on by itself when no marker has reference coordinates); the scale bars below the markers (see *Scale bars*); control and check RMSE of points and bars. The tooltip of a marker tells how it is placed: triangulated from N photos, on the surface from one photo, or added on the model or the orthophoto |
-| Left: **Layer** (editing) | double click a value in *Attributi* to change it (US, area, type, label, any free field; computed fields such as m2 and length are read-only). Units loaded from PyArchInit keep their `gid`: *Salva modifiche in PyArchInit* writes the changes back to `pyunitastratigrafiche`; drawn units and spot heights are written with *Pubblica*; written features keep their `gid`, so nothing is written twice |
-| Left: **Layer** | everything drawn on the orthomosaic/DEM is a layer: stratigraphic units, US polygons loaded from PyArchInit, section traces, contour lines, plan slices, spot heights. Tick to show/hide, double click to zoom (layer or single feature), *Rimuovi*; in *Sposta / interroga* mode a click on a feature shows its attributes (US, area, m2, elevation of a contour...) in the pane and in the status bar |
-| Centre: **Modello** | tie points, dense cloud, shaded or textured mesh, camera frusta, markers. Left drag orbits, right/middle drag pans, wheel zooms |
-| Centre: **Ortofoto / DEM** | orthomosaic or DEM (hypsometric tint and hillshade) in world coordinates; cursor X, Y, Z in the status bar |
-| Centre: **Foto** | a photo with its markers, as in Metashape: green flags are measured (placed by hand or detected), blue flags are estimated from the model and to be confirmed (labelled "?"), red crosses are where the survey puts a marker not placed in that photo. Drag a flag onto the point (it turns green; the flag moves as much as the mouse, whatever part of it is grabbed), double click a blue flag to confirm it where it is; right click to place, move, confirm or remove; Page Down/Up (or `]`/`[`) open the next/previous photo of the list shown, centred on the marker of the filter |
-| Bottom: **Foto** | thumbnails with an aligned/not aligned badge and, at the bottom, the markers on each photo (green: measured, blue: to confirm; the tooltip lists them). The bar shows the filter in use - *Foto di point 1*, *Foto con marker*, the photos of a point or of an area - with *Mostra tutte* and *Precedente*/*Successiva*. Filters come from the right click on markers in *Riferimenti* (*Filtra le foto di ...*), the right click on the orthophoto in *Sposta* mode (*Filtra le foto che vedono questo punto*, *Aggiungi un marker qui*), the selection menu of a polygon (*Filtra le foto che inquadrano quest'area*) and *Foto del punto* in the 3D view; a new marker filters the photos on itself |
-| Bottom: **Sezioni** | the sections of the project: list, preview of the SVG drawing (fitted to the pane, with lines and labels thickened so that a drawing metres long on paper stays readable), *Zoom sulla traccia*, *Apri cartella* (DXF profile and 3D DXF in `sezioni/`), *Pubblica in PyArchInit* (`pyarchinit_sezioni`), *Elimina*. Sections are saved in `sezioni/sezioni.json` next to the project and come back when it is reopened |
-| Bottom: **Console Python** | `doc`, `chunk`, `app`, `ppg`, `np`, `window` |
-| Bottom: **Log** | time, level and message of everything that happened; filter (all / warnings and errors / errors), search, *Copia*, *Salva...*, *Cartella log*, *Pulisci*; the traceback of an error is in the row tooltip and in the saved file |
-| Right: **PyArchInit** | connection, sites, stratigraphic units and documentation |
-| Status bar | task progress with a stop button while something runs; cursor coordinates |
+| `ppg.Document(path=None)`, `Document.open(path)`, `doc.save(path=None)` | project file `.ppg` + folder `.ppg.files/` |
+| `doc.add_chunk(label)`, `doc.chunks`, `doc.chunk` | chunks; `doc.chunk` is the active one (assign to change it) |
+| `ppg.app.document` | the project shared by scripts, CLI (`ppg run`) and GUI |
 
-The window fits a laptop screen, down to about 1000 x 650 pixels: the buttons of the panes
-wrap onto more lines when a pane is narrow, a pane that is too short for its content
-scrolls, and a toolbar that does not fit drops its texts (the workflow bar all at once,
-the drawing bar from its last buttons, so the drawing tools keep their names longest; the
-tooltips keep the names).
+## Chunk workflow
 
-The 3D view uses VTK (pyvista/pyvistaqt) when OpenGL is available, otherwise a software
-renderer (force it with `PPG_RENDERER=software`, or VTK with `PPG_RENDERER=vtk`).
-*Vista > Tema* switches between the light and the dark theme (remembered).
+| Method | Notes |
+| --- | --- |
+| `add_photos(paths, recursive=False)` | files or folders; sensors grouped by body, lens and resolution; EXIF GPS becomes camera reference |
+| `detect_markers(target_type="aruco_4x4_50")` | creates markers `target <code>` with projections |
+| `match_photos(quality, keypoint_limit, pair_selection)` | quality: ultra/high/medium/low/lowest; pairs: auto/exhaustive/sequential/reference |
+| `align_cameras()` | resets the transform; re-georeferences automatically when references exist. Photos are aligned with one focal length (square pixels): fitting fx and fy separately can drift into a degenerate solution. The result stays in the sensor model (`OPENCV` with fx = fy, no tangential distortion); a sensor calibrated with fx != fy or tangential distortion is aligned as it is, and `optimize_cameras()` refines every parameter |
+| `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4)` | bundle adjustment, returns the reprojection error (px). With 3 or more control points (markers with an enabled reference, not check points) a free adjustment is followed by one where the markers are fixed points at their reference coordinates, observed in the photos (each measurement weighs `marker_weight` tie point observations): the block bends to fit them, which a similarity alone cannot do. Control scale bars (2 or more, or with control points) enter the same way: their markers are fixed at `engine.sfm.bar_anchors` (see *Scale bars*). `meta["sfm"]["optimize"]` reports `control_points`, `scale_bars` and the control/check point and bar RMSE before and after (`ppg optimize`) |
+| `import_reference(csv, crs, columns="nxyz")`, `export_reference(csv)` | `n` label, `x y z`, `a` accuracy, `-` skip |
+| `add_marker`, `add_marker_projection`, `add_scalebar`, `triangulate_markers` | manual markers and scale bars (see *Scale bars*) |
+| `update_transform(use_cameras=None)` | weighted 7-parameter fit; returns control/check RMSE, per-marker and per-bar errors |
+| `build_depth_maps(quality, filter_mode, backend)` | backends: auto/cpu/colmap/openmvs |
+| `build_point_cloud()`, `build_model(source, surface, face_count, voxel_size, vertex_colors)`, `build_texture(texture_size)` | source: `point_cloud`, `tie_points` or `depth_maps` (see below) |
+| `build_dem(resolution, source)`, `build_orthomosaic(resolution, surface, blending, colour_correction, ghosting, fill_holes)`, `calibrate_colours()` | GeoTIFF in the chunk CRS (see *Seamless orthomosaic*) |
+| `export_point_cloud`, `export_model`, `export_cameras(fmt="csv"/"colmap")`, `export_dem`, `export_orthomosaic`, `generate_report` | world coordinates |
 
-## Errors and logs
+Every processing method accepts `progress=callback(fraction, message)`.
 
-Long steps run in the background with a progress window and *Annulla*. When a step fails,
-an error window shows a one-line summary, a hint for known problems (missing SpatiaLite or
-PyTorch, a crashed reconstruction, a stale Anaconda install...), the traceback under
-*Dettagli*, and the buttons *Copia* (summary + traceback, ready for a bug report) and
-*Apri cartella log*. The same text goes to the Log pane and to the log file
-(`ppg-gui.log`, rotated at 2 MB) in the platform log folder; native crashes are written to
-`crash.log` in the same folder by Python's faulthandler.
+### Mesh from depth maps
 
-*Aiuto > Diagnostica ambiente* lists Python, every library with its version, the known
-pitfalls (another `ppg-gui` earlier on `PATH`, the Anaconda base environment, Open3D 0.20.0,
-old pyvistaqt, missing SpatiaLite) and what to do about them; *Copia* puts the report on the
-clipboard.
+`chunk.build_model(source="depth_maps", surface="arbitrary", face_count="medium", voxel_size=None,
+vertex_colors=True)` builds the mesh straight from the depth maps of `build_depth_maps()`, without the
+dense cloud (like *source data: depth maps*). The depth maps are fused into a truncated signed distance
+field (TSDF in an Open3D `VoxelBlockGrid`: only the blocks near the surface are stored) and the surface
+is extracted with marching cubes, with vertex colours averaged from the photos. A voxel counts once as
+many depth maps see it as the dense-cloud fusion wants for the filtering mode (3 for `moderate`, 2 for
+`mild`/`none`); pieces smaller than 1 % of the largest one are dropped. The mesh is decimated to
+`face_count` (`high`/`medium`/`low` = 1/5, 1/15, 1/45 of the points the depth maps give at their own
+resolution, or a number) and saved as `model.ply` like the Poisson mesh, so texture, DEM, orthomosaic
+and sections work as before; `surface="height_field"` re-triangulates the fused surface in 2.5D.
+`voxel_size` is in chunk units (metres once georeferenced): by default twice the size of a depth-map
+pixel on the surface, raised (with a warning) when the surface would need more than a quarter of the
+memory. The fusion runs in a child process (a crash does not close the program; progress and
+cancellation work as usual) and needs depth maps of the `cpu` or `colmap` backend (OpenMVS keeps its
+own format). `engine.tsdf.fuse_depth_maps(chunk, voxel_size=, min_views=, colors=, memory_gb=)` returns
+the fused surface (`FusedMesh`, internal frame) without saving it. On the synthetic trench of the tests
+(depth maps at quality `high`) it takes about 4 s and is closer to the true surface than the Poisson
+mesh of the dense cloud: median distance 0.9 mm, 90th percentile 2.2 mm (Poisson 1.0 and 2.8 mm).
+CLI: `ppg mesh project.ppg --source depth_maps [--voxel-size 0.005]`.
 
-## Updates
+## Align and merge chunks
 
-A few seconds after start-up the application asks GitHub for the latest release, at most once
-a day: one HTTPS request to the GitHub API carrying the version in its User-Agent and nothing
-else (*Aiuto > Controlla gli aggiornamenti all'avvio* switches it off; `PPG_NO_UPDATE_CHECK=1`
-too). When a newer version exists a window shows its notes and offers:
+Chunks are aligned separately (each in its own arbitrary frame), brought into one frame,
+then merged, as with *Workflow > Align Chunks* and *Merge Chunks*.
 
-* **Scarica e installa** (macOS application): the dmg is downloaded to the Downloads folder,
-  the new application is copied out of it and, when the program closes (at once with *Riavvia
-  ora*, after the usual request to save the project), it replaces the old one in its folder
-  and opens. The old copy is kept until the new one is in place. If the folder cannot be
-  written by the user, the disk image opens for a manual drag to *Applicazioni*;
-* **Scarica** (Windows application): the zip goes to the Downloads folder, to extract over the
-  program folder after closing it;
-* **Copia il comando** (Python installation): `pip install --upgrade pyarchinit-photogrammetry`
-  (or `git pull` in a source checkout);
-* *Pagina della versione*, *Salta questa versione* (not proposed again at start-up, still found
-  by *Aiuto > Controlla aggiornamenti*) and *Piu' tardi*.
+| Call | Description |
+| --- | --- |
+| `doc.align_chunks(reference, chunks=None, method="markers", fix_scale=False, initial="auto", max_points=200_000, progress=None)` | moves `chunks` (Chunk objects, keys or labels; default: the other enabled chunks) into the world frame and CRS of `reference`; returns a report |
+| `doc.merge_chunks(chunks, label=None, merge_markers=True, merge_tie_points=True, merge_point_clouds=True, merge_models=False, progress=None)` | new chunk (default label `Merged chunk`) in the frame of the first chunk; the inputs are kept |
+| `ppg align-chunks project.ppg [CHUNKS...] -r REF --method markers\|points\|cameras [--fix-scale] [--initial ...] [--json]` | command line (default reference: the active chunk) |
+| `ppg merge-chunks project.ppg [CHUNKS...] [--label L] [--no-markers] [--no-tie-points] [--no-point-clouds] [--models] [--activate]` | command line (default: all enabled chunks) |
 
-From the command line `ppg update` tells whether a newer version exists and `ppg update
---download` fetches the installer of the system.
+Methods of `align_chunks`:
 
-## Menus
+* `markers`: markers with the same label in both chunks (at least 3, with a position),
+  least squares (Umeyama).
+* `cameras`: photos present in both chunks (the same file, or the same label when it is
+  unique in each chunk). Least squares on the camera centres; with 1-2 common photos, or
+  photos along a line, the rotation comes from the camera orientations.
+* `points`: registration of the dense clouds (tie points for a chunk without one). Initial
+  position from the common markers, else the georeference (both chunks in a projected CRS,
+  or referenced in the same local grid), else the common photos, else a global registration
+  (FPFH descriptors from Open3D, matched with a seeded RANSAC: needs the `[mesh]` extra);
+  `initial="markers"|"reference"|"cameras"|"global"` forces one. A scaled point-to-plane
+  ICP refines it; the result is accepted when most overlapping points fit and, with colours,
+  the brightness of matched points agrees (else `ValueError`).
+* `fix_scale=True`: rigid alignment that keeps the scale of each chunk; only for chunks already
+  in metres (CRS, references or scale bars), else `ValueError`.
 
-* **File**: new/open/save, recent projects, export (cloud, model, DEM, orthomosaic, cameras,
-  references, and all of them cut with a box or a polygon), HTML report, *Crea e apri progetto
-  demo*, *Pagina iniziale*.
-* **Flusso di lavoro**: add photos/folder, *Ricollega foto* (the photos with the same names in
-  another folder and its subfolders: a copy on an external disk of a Dropbox folder kept online
-  only, a moved folder), add chunk, *Allinea chunk* (bring other chunks into the frame of a reference chunk by markers with the same name, photos in common or overlapping clouds), *Unisci chunk* (a new chunk with the photos, markers, tie points, clouds and optionally meshes of aligned chunks), detect coded markers, align (quality,
-  pair selection, limits), import references, update georeferencing, *Nuova barra di scala (distanza tra due marker)*, *Importa barre di scala (CSV)*, optimise cameras, dense
-  cloud (quality, filter, engine), *Ritaglia nuvola densa* (height range and/or a cylinder
-  around the turntable axis: removes the mat and the targets before meshing an object), model
-  (source, surface, faces), texture, DEM, orthomosaic, *Elabora tutto* (Ctrl+R); *Pulizia e
-  confidenza* (confidence of the dense cloud and of the model, cleaning of the dense cloud, of
-  the model and of the tie points, the lasso, the crop tool). The project is saved after each
-  step once it has a file. Steps that read the photos (depth maps, texture, orthomosaic,
-  *Elabora tutto*) first list the photos that cannot be read (empty files kept online only by
-  Dropbox, iCloud or OneDrive) and offer *Ricollega a un'altra cartella*, *Continua senza
-  queste foto* or *Annulla*.
-* **Strumenti**: printable target sheets, turntable mats (with the CSV of the target
-  coordinates) and scale bars; *Calibra i colori delle foto* (exposure gain of every photo and
-  vignetting of every lens, measured on points seen by several photos and used from then on by the
-  orthomosaic and the texture); drawing on the orthomosaic: stratigraphic units (click the vertices, double
-  click to close), section traces (two clicks: SVG drawing, DXF profile and 3D DXF in
-  `sezioni/`), distance and height difference, spot heights / SAM prompts; contour lines;
-  cut/fill volumes (drawn unit, plane or second DEM); plan slice at a given elevation;
-  pottery profile from a mesh (vessel or sherd); point-cloud classification; Segment Anything
-  2.1 (automatic candidate units, units from clicked points, prompts on photos); IFC export
-  (one element per drawn unit, PyArchInit attributes when connected); run a Python script;
-  *Patch dell'ortofoto (assegna immagini)*: draw an area and choose its photos, assign photos to
-  the selected polygon, update the orthomosaic with the patches, remove every patch (see below).
-* **PyArchInit**: connect through `config.cfg` (or a SQLite path / PostgreSQL URL), use the
-  demo database, publish orthomosaic/DEM/model with links to US, publish drawn units to
-  `pyunitastratigrafiche`, load existing unit polygons onto the orthomosaic, publish spot
-  heights to `pyarchinit_quote`.
-* **Vista**: panes, views (F2 model, F3 orthomosaic/DEM, F4 photo), console (Ctrl+Shift+P), theme.
-* **Aiuto**: online documentation, environment diagnosis, log folder, *Controlla aggiornamenti*,
-  *Controlla gli aggiornamenti all'avvio*, about.
+Only `chunk.transform` and `chunk.crs` change; photos, tie points, dense cloud and mesh stay
+in the chunk's internal frame. Estimates use local frames (world coordinates minus a rounded
+offset), so national grid/UTM coordinates lose no precision. An unlevelled local reference is
+levelled first (as `build_dem` would do later). If one chunk cannot be aligned, nothing changes.
+Marker references of a chunk in another projected CRS are converted to the new one. The
+DEM and orthomosaic of an aligned chunk are in its old frame: build them again
+(`stale_products` in the report).
 
-## Orthophoto at full resolution and patches
+The report: `{"reference": {"key", "label"}, "method", "fix_scale", "crs", "levelled_reference",
+"chunks": [...]}`, one entry per chunk with `key`, `label`, `method`, `correspondences`, `rmse`
+(reference world units, metres once georeferenced or scaled), `scale` (scale applied),
+`transform` (the new `chunk.transform`), `delta` (old world -> reference world), `stale_products`;
+`residuals` (per marker or photo: `error`, `dx`, `dy`, `dz`; `angle_deg` for photos) and
+`max_error` for markers/cameras; `initial`, `source`/`target` (`point_cloud` or `tie_points`),
+`fitness`, `overlap`, `inlier_ratio`, `color_corr`, `attempts` and `check` (residuals of the
+common markers, not used by the registration) for points. `chunk.meta["chunk_alignment"]`
+keeps a summary.
 
-* **Zoom**: the orthomosaic/DEM view opens a large raster from a reduced copy (at most 6,000 px a
-  side, one of the overviews of the file) and, when the zoom pauses beyond that resolution, reads
-  the visible area again (plus a margin) at the resolution of the screen, up to the full one, in a
-  thread. The DEM detail keeps the colour limits of the whole DEM. Tell Abu adh-Dhuhur (44,952 px):
-  0.7 s to open, 10.8 cm/px before the detail, 1.38 cm/px after 0.37 s.
-* **Patch** (drawing bar, or *Strumenti > Patch dell'ortofoto*): drag a box or click the vertices
-  of a polygon and double click, or select a polygon (a unit) and choose *Assegna immagini a
-  quest'area* from its menu. The dialog shows the area now and, for the photo chosen in the list,
-  the area as it would come out (the rest as it is); the list has the photos that frame the area,
-  best first (framed share x closeness, verticality and centrality), with the share framed, the
-  angle from the vertical, the ground pixel, the share of the area the orthomosaic takes from it
-  now, and in the tooltip how much of it the model hides (tree crowns, walls). Choose one or more
-  photos (Shift/Cmd), *Usa solo* or *Escludi*, *Sul DEM* (a true orthophoto) or *Sul suolo attorno
-  all'area* (heights along the polygon interpolated inside: trees, vehicles and people come out
-  as in the photo, and holes of the DEM are filled), and optionally the texture of the model in
-  the area. *Applica* saves the patch and redraws only its cells, then the overviews of that
-  window; the view stays where it was.
-* The patches are a layer, *Patch ortofoto*: select one and press Delete (or *Elimina selezionati*)
-  and the orthomosaic is redrawn there without it. A later build of the orthomosaic applies every
-  patch again; *Aggiorna l'ortofoto con le patch* applies the ones not applied yet (after an
-  interrupted update). An orthomosaic of another program (exported by Metashape) is copied into
-  the chunk folder at the first patch, and its pixels come back where a patch is removed.
-* **Texture**: in the 3D view, the lasso on the model offers *Correggi la texture di queste facce
-  (assegna le immagini)*: the photos that see those faces, each with the part of the photo where
-  they are; every face takes the best of the chosen photos that sees it.
+`merge_chunks` needs chunks in one frame (aligned, or georeferenced in projected CRSs; another
+CRS is converted through a fitted similarity, with a warning above 5 mm). The merged chunk has
+the CRS, transform and internal frame of the first chunk, and contains:
+
+* sensors and cameras with new keys; a photo present in several chunks is kept once (the
+  first aligned copy). Identical calibrations stay separate sensors.
+* markers merged by label (projections combined, positions triangulated again), or all
+  kept with `merge_markers=False`; scale bars remapped.
+* tie points, dense clouds (colours, normals, classes) and, with `merge_models=True`,
+  meshes (vertex colours) concatenated in the common frame.
+* a COLMAP model of the merged cameras (`engine.sfm.write_reconstruction_from_chunk`,
+  with the merged tie points as 3D points), so depth maps, dense cloud, mesh, DEM and
+  orthomosaic can be built again on the merged chunk.
+
+DEMs, orthomosaics and textures are not merged. `merged.meta["merge"]` lists the source
+chunks, the photos found in more than one chunk and warnings.
+
+## Products from chosen point classes
+
+The classes of the dense cloud (rules, lasso, trained classifier or stratigraphic units)
+choose what goes into the products. Noise (`NOISE_CLASSES` = 7, 18) never makes a DEM or a mesh.
+
+| Call | Description |
+| --- | --- |
+| `chunk.point_classes()` | points per class of the dense cloud, reading only its class column (`PointCloud.read_class_counts(path)`) |
+| `chunk.build_dem(..., classes=[2])` | DEM from these classes only: `[2]` gives a terrain model (DTM) without vegetation, people or tools; the gaps under what is left out are interpolated; `meta["dem"]["classes"]` |
+| `chunk.build_orthomosaic(..., hide_classes=[3, 71])` | transparent where the visible surface (highest dense point, gridded at the point spacing and widened by one cell) is of these classes; `engine.ortho.hidden_cells(chunk, origin, shape, resolution, classes)`; `meta["orthomosaic"]["hidden_classes"]` |
+| `chunk.build_model(source="point_cloud", ..., classes=[2, 64])` | mesh from these classes (the surface closes over what is left out); only with the dense cloud as source; `meta["model"]["classes"]` |
+| `sections.section(chunk, p1, p2, source=, classes=)`, `sections_along(..., classes=)`, `plan_slice(chunk, z, classes=)` | from the dense cloud, only the points of these classes; from the model, only the stretches of the cut whose middle is nearest to a point of these classes and whose ends lie on such points (not the parts the mesh interpolates over what is left out) |
+| `chunk.export_point_cloud(path, classes=[64])` | only these classes (LAS keeps the class codes) |
+| `PointCloud.class_mask(classes=None, exclude=())` | boolean mask of the points to use |
+| `classify.classify_by_units(chunk, units, base_code=100, keep_manual=True)` | one class per stratigraphic unit (`unit_class_name`: `US 12 (area 1)`), points on the edge included; free codes from 100, the same code when run again (the old extent goes back to 1); returns per unit `name`, `code`, `sito`, `area_s`, `us`, `points`, `area_m2` (plan, of the polygons), `z_min`, `z_mean`, `z_max`; `units_table_csv(rows, path)` writes them (semicolons) |
+
+Command line: `ppg dem scavo.ppg --classes 2`, `ppg ortho scavo.ppg --hide-classes 3,71`,
+`ppg mesh scavo.ppg --classes 2,64`, `ppg section scavo.ppg x1 y1 x2 y2 --classes 2`,
+`ppg export scavo.ppg --cloud muri.las --classes 64`,
+`ppg classify-units scavo.ppg [--pyarchinit-site SITO] [--csv us.csv] [--no-keep-manual]`
+(the units drawn in the project, or the US polygons of a PyArchInit site).
+
+## Versions of the products
+
+`core.versions` keeps earlier results of the dense cloud, the model, the DEM and the
+orthomosaic to compare them. The *active* version is the product every tool uses (the usual
+files of the chunk); kept versions are in `versions/<product>/<id>/` inside the chunk folder,
+listed in `chunk.meta["versions"]` with name, date and the parameters they were built with.
+
+| Call | Description |
+| --- | --- |
+| `versions.keep_active(chunk, product, move=False)` | puts the active version among the kept ones (copied; moved with `move` when its files are inside the chunk folder: a file of another program is always copied); returns the entry |
+| `versions.restore(chunk, product, entry)` | undoes a `keep_active(move=True)` (a build that failed) |
+| `versions.set_active_name(chunk, product, name)`, `active_info(chunk, product)` | name and date of the active version (by default `DEM del 16/10 11:20 (classi 2)`) |
+| `versions.versions(chunk, product)`, `version_file(chunk, product, id)` | kept versions, main file of one |
+| `versions.activate(chunk, product, id)` | makes a kept version active; the active one is kept in its place |
+| `versions.rename(chunk, product, id_or_None, name)`, `delete(chunk, product, id)` | |
+| `versions.dem_difference(chunk, id, out=None)` | active DEM minus a kept one on the grid of the active one (GeoTIFF float32): surface minus terrain = height of walls and vegetation, after minus before = excavated depth |
+
+`chunk.build_depth_maps(..., skip_unreadable=True)` leaves out photos that cannot be read
+(`chunk.unreadable_photos()`: missing, empty placeholders of files kept online only, not
+images); without it they raise `engine.visibility.UnreadablePhotos` (also importable from
+`engine.dense`). `build_texture` and `build_orthomosaic` take the same option;
+`chunk.relink_photos(folder, only_unreadable=False)` points the photos to the files with the same
+names in another folder (COLMAP then reads them from their common folder, or from a folder of
+links when they are split, `engine.sfm.photo_folder`). The COLMAP model written
+from imported poses refers only to points with two observations; `engine.sfm.repair_reconstruction(chunk)`
+fixes models written by earlier versions (done before the depth maps and the camera optimisation).
+
+## Confidence, cleaning and cropping
+
+| Call | Description |
+| --- | --- |
+| `chunk.compute_confidence("point_cloud" or "model", tol=0.01)` | depth maps agreeing on each point or vertex (within `tol` of the distance; half an edge for a vertex), stored as the `confidence` property of the PLY (and an extra bytes dimension of LAS exports); returns the statistics |
+| `engine.confidence.depth_map_support(chunk, points, tol, abs_tol=None)` | the same count for any points of the internal frame |
+| `chunk.clean_point_cloud(min_confidence=, remove_classes=, statistical=(k, std), sparse=(radius, n), groups=(distance, n), color=((r, g, b), tol))` | removes what `engine.cleaning.point_filters` selects (distances 0 = automatic from the point spacing); returns the counts per filter |
+| `chunk.clean_model(min_confidence=, min_component=, max_edge=, repair=True, fill_holes=, smooth=, target_faces=)` | model cleaning (`engine.cleaning.face_filters` for the counts) |
+| `chunk.clean_tie_points(max_reprojection_error=, min_image_count=, max_reconstruction_uncertainty=, max_projection_accuracy=, optimize=False)` | gradual selection (`engine.tiepoints.tie_point_metrics`, `select_tie_points`, `remove_tie_points`) |
+| `engine.cleaning.delete_points(chunk, mask, keep_selected=False)`, `delete_faces(...)` | Metashape's delete / crop selection |
+| `chunk.export_dem(path, region=)`, `export_orthomosaic(path, region=)`, `export_model(path, region=, zmin=, zmax=)`, `export_point_cloud(path, region=, zmin=, zmax=)` | exports cut by a polygon in the chunk CRS (an `(N, 2)` ring, a box, WKT, GeoJSON or a shapely geometry: `engine.crop.as_polygon`) |
+| `chunk.crop_dem(region)`, `crop_orthomosaic(region)`, `crop_model(region, zmin, zmax)`, `crop_point_cloud(region=)` | the same in the project; a product that is a file of another program is never overwritten (`chunk.own_product_path`) |
+
+`chunk.build_orthomosaic(..., workers=None, max_angle=70.0)` builds the orthomosaic tile by tile
+(the surface read one window at a time, every tile written at once, overviews at the end): any
+size, the tiles in parallel; every cell takes the best of the photos that frame it (the four best
+are tried in turn against occlusions), so the choice never depends on the tile around it; cells
+that every photo sees from further than `max_angle` degrees from the vertical stay transparent.
+
+## Seamless orthomosaic and colour correction
+
+| Call | Description |
+| --- | --- |
+| `chunk.build_orthomosaic(..., blending="mosaic", blend_sigma=8.0)` | `mosaic`: the details of every cell from its best photo, the low frequencies blended across the seams over a few `blend_sigma` cells (Gaussian), so different exposures leave no edge and nothing is blurred; `disabled`: one photo per cell; `average`: every photo weighted by how well it sees the cell. A patch never changes the pixels around it: outside the patches the weights come from the photos the cells would take without any patch, inside a patch from its own cells (`engine.ortho._blend`) |
+| `chunk.calibrate_colours(vignetting=True, samples=20000)`, `engine.colour.estimate(chunk)` | exposure gain of every photo (per channel) and vignetting of every lens (`v(r) = b1 r^2 + b2 r^4 + b3 r^6` on the radius over the half diagonal), from surface points seen by several photos, least squares on all the observations at once (`scipy.sparse.linalg.lsqr`, outliers left out between rounds, mean log gain zero); stored in `chunk.meta["colour"]` with the colour scatter before/after |
+| `build_orthomosaic(colour_correction=None)`, `build_texture(colour_correction=None)` | None: the calibration of the chunk if there is one; True: measured first when missing; False: none (`engine.colour.Correction.correct(cam, image)`, applied as the photos are read) |
+| `build_orthomosaic(ghosting=False)` | where three or more of the candidate photos see a cell, the best one that agrees with their median colour (within 30 levels): people and vehicles seen by a few photos left out |
+| `build_orthomosaic(fill_holes=False)` | holes of at most 100 cells that no photo sees filled from their edges (`cv2.inpaint`, the cells of the same group only); larger holes stay transparent |
+
+## Elevations: orthophoto and relief on a plane or a cylinder
+
+A frame maps a raster cell `(u, v)` (u along the surface, left to right as the viewer sees it, v up,
+metres) and a depth `d` (towards the viewer) to the world: `engine.elevation.Plane(origin, u_axis,
+v_axis)` (`normal = u x v`) or `Cylinder(centre, axis, radius, inside, start)` (inside: seen from the
+axis, a well or an apse; outside: a tower or a column). The surface of a cell is the first hit of a
+ray from the viewer side on the model, kept within `depth=(dmin, dmax)` (what stands in front of
+`dmax` - scaffolding, a section left in front of the wall - is passed through).
+
+| Call | Description |
+| --- | --- |
+| `engine.elevation.plane_from_line(chunk, p1, p2, side=None)` | the vertical plane through a wall trace (plan points), seen from `side` (default: where the photos are) |
+| `plane_from_points(points, toward=None)` | the plane of three or more world points (markers on a wall) |
+| `cylinder_from_circle(chunk, points, inside=True)` | the vertical cylinder through a circle fitted to plan points |
+| `build_elevation(chunk, frame, resolution=None, name=None, depth=None, blending="mosaic", colour_correction=None, ghosting=False, fill_holes=True, max_angle=80)` | orthophoto (the orthomosaic engine on the frame: same photo choice, blending, colour correction) and relief (`d`, float32) as GeoTIFF in frame metres in `<chunk data>/elevations/<id>/` (frame in the tags and in `frame.json`), listed in `chunk.meta["elevations"]` |
+| `elevations(chunk)`, `elevation_paths(chunk, entry)`, `remove_elevation(chunk, id)` | the elevations of a chunk |
+
+## Masks of the photos
+
+A mask is a single-channel PNG as large as its photo, white where the photo counts and black where it
+is masked (Metashape's and COLMAP's convention), kept in `<chunk data>/masks/<camera key>.png`. Masked
+areas are left out when matching (COLMAP ignores their keypoints; the photos without a mask get a
+white one, since COLMAP skips a photo whose mask is missing), in the depth maps (no depth there, also
+after COLMAP's PatchMatch: `engine.dense.mask_depth_maps`), in the orthomosaic and in the texture (a
+photo does not see a masked cell or face).
+
+| Call | Description |
+| --- | --- |
+| `engine.masks.import_masks(chunk, folder, template=None, invert=False)` | from image files named after the photos (`{stem}_mask.png`, `{stem}.png`, `{name}.png`... or `template` with `{name}`, `{stem}`, `{label}`); `folder=None`: the alpha channel of the photos |
+| `export_masks(chunk, folder, template="{stem}_mask.png")`, `read_mask(chunk, cam)`, `write_mask(chunk, cam, keep)`, `remove_masks(chunk, cams=None)`, `masked_cameras(chunk)` | files and arrays (`keep`: True where the photo counts) |
+| `masks_from_background(chunk, folder, tolerance=12)` | photos of the background without the object from the same positions (one per photo, same names, or a single one for a fixed camera): the object is what differs |
+| `masks_from_colour(chunk, colour, tolerance=40)` | a backdrop of one colour (RGB) masked |
+| `masks_from_model(chunk, cams=None)` | only what the model covers is kept (after a first reconstruction) |
+| `masks_with_sam(chunk, segmenter, cams=None)` | SAM 2.1: the object at the centre of each photo |
+| `paint_polygon(chunk, cam, polygon, masked=True)` | mask (or give back) a polygon of pixels by hand |
+| `chunk.match_photos(..., exclude_stationary=True)`, `engine.sfm.remove_stationary_matches(db)` | verified matches that do not move between two photos (less than 2 px or 0.15 % of the photo) dropped: the background of a turntable photographed from a fixed camera |
+
+## Patches of the orthomosaic and of the texture
+
+A patch takes the colours of an area of the orthomosaic from photos chosen by hand: a dict in
+`chunk.meta["orthomosaic"]["patches"]`, `{"id", "polygon" [[x, y], ...] (chunk CRS), "photos"
+[labels], "mode" "assign"|"exclude", "surface" "dem"|"ground"}` (a later patch covers an earlier one).
+
+| Call | Description |
+| --- | --- |
+| `chunk.add_ortho_patch(polygon, photos, mode="assign")`, `engine.patches.add_patch(chunk, polygon, photos, mode, surface="dem")` | a new patch; `surface="ground"` projects the area on the ground around it (heights along the polygon, inverse-distance weighted inside) instead of the DEM: trees and vehicles as the photo shows them, holes of the DEM filled |
+| `chunk.update_orthomosaic(progress=None, skip_unreadable=False)` | redraws only the cells of the patches added, changed or removed since the file was written, then the overviews of those windows (`engine.overviews.refresh`, through rasterio's GDAL; every overview again when it cannot); an orthomosaic of another program is copied into the chunk first and its pixels come back where a patch is removed |
+| `chunk.ortho_patches`, `chunk.remove_ortho_patch(id)`, `engine.patches.clear_patches(chunk)`, `changed_patches(chunk)` | the patches |
+| `engine.patches.photos_for_area(chunk, polygon, limit=12)` | the photos that frame the area, best first: `label`, `coverage`, `visible` (share not hidden by the model), `angle`, `gsd`, `score`, `used` (share the orthomosaic takes from it now) |
+| `engine.patches.previews(chunk, polygon, photos, max_side=320)` | `({(label, surface): RGBA}, now, bounds)`: the area from each photo on each surface, the rest as it is |
+| `chunk.patch_texture(photos, polygon=None, faces=None, mode="assign")`, `engine.patches.photos_for_faces(chunk, faces)`, `preview_faces(chunk, faces, photo)` | colour again the faces of the textured model inside a polygon (seen from above) or chosen by index from the chosen photos; texels no chosen photo sees keep their colour |
+
+`chunk.build_orthomosaic(..., patches=None)` applies the patches of the chunk (pass `[]` to leave
+them out). The photos of every tile are ranked on all its cells, so an update gives the same
+pixels as a build.
 
 ## Scale bars
 
-**Markers.** A marker measured in one photo only lies where its ray meets the surface (the dense
-cloud, else the tie points: a local plane fitted around the ray, about 20 pixels wide), so it has
-coordinates, shows on the model and on the orthophoto and can end a scale bar at once; measured
-in a second photo it is triangulated (on the synthetic trench, one-photo markers are within
-0.6 mm of the surveyed targets). Markers can also be added without a photo, as Metashape's *Add
-Marker*: *Marker* in the 3D view (the view freezes; click a point of the model or the cloud: the
-nearest shown point under the cursor, refined along the line of sight on the full dense cloud)
-and *Marker* in the drawing bar (click the orthophoto or the DEM: the height from the DEM at full
-resolution, else from the cloud along the vertical). The new marker (`point 1`, `point 2`, ...) is
-projected on the photos that see it, not hidden by the surface (blue flags: drag one in a photo to
-pin it); the markers are drawn on the orthophoto as the *Marker* layer.
+A scale bar is the known distance between two markers (`core.marker.ScaleBar`: `label`, `marker_a`,
+`marker_b` (marker keys), `distance` in metres, `accuracy`, `enabled`, `checkpoint`).
 
-**Guided placement.** As in Metashape, a marker placed on one photo (or in 3D) gets blue flags on
-the other photos that see it (at most 60, those where it falls nearest the centre first), and
-the *Foto* pane is filtered on it. Open a photo (double click): it is centred on the marker at full
-resolution; drag the blue flag onto the point or double click it when it is right, then Page Down
-for the next photo. Every confirmation places the marker again (two green flags: triangulated) and
-moves the blue flags of the other photos to where it is now. Blue flags are estimates, not
-measurements: they never move a marker that has a green one, nor enter the camera optimisation.
+| Call | Description |
+| --- | --- |
+| `chunk.add_scalebar(marker_a, marker_b, distance, accuracy=0.001, checkpoint=False, label=None)` | markers as objects, labels, keys or target codes; the same pair again changes the bar |
+| `chunk.scalebar(label_or_key)`, `chunk.remove_scalebar(label_or_key)`, `chunk.scalebars` | the bars |
+| `chunk.import_scalebars(path, accuracy=0.001, delimiter=None)` | `marker_a, marker_b, distance[, accuracy[, check]]` per line; returns `{"bars": [labels], "missing": ["A-B"]}` |
+| `markers.gcp.scalebar_errors(chunk)` | every bar: `label`, `marker_a`, `marker_b`, `distance`, `accuracy`, `type` (control/check), `enabled`, `estimated`, `error` (metres) |
+| `markers.targets.generate_scale_bar(path, target_type="aruco_4x4_50", codes=None, distance_mm=200, marker_size_mm=40, page="A4", count=1)` | printable bars and their CSV, `(pages, csv)` |
 
-A scale bar is the known distance between two markers, as in Metashape. In *Riferimenti* select two
-markers (Cmd/Shift click) and choose *Crea barra di scala tra A e B...* from the right-click menu, or
-press *Barra di scala...* (the selected markers come first in the dialog). The dialog asks for the
-distance in metres (between the centres of the targets), its accuracy (it weighs the bar when there
-are several), whether it is a check bar, and whether to update the scale at once.
+`chunk.update_transform()` uses the control bars (enabled, not check) as follows:
 
-* **Control bars** scale the chunk: the scale is the least-squares solution of *scale x length in the
-  model = distance*, each bar weighted by `1 / accuracy²` (of two bars measured equally well, the
-  longer one counts more). Without control points the chunk is scaled in local coordinates (CRS
-  `LOCAL`): an object, a find, a wall, a trench.
-  The distance of a bar is the 3D one: with a height difference it is more than the distance in
-  plan measured on the orthophoto.
-* **Georeferenced chunks**: a new bar is proposed as a check (it measures the scale without
-  changing it). A control bar on a chunk georeferenced elsewhere (an imported project) with no
-  reference to fit it again scales it about the bar, in its CRS; when the scale changes, the log
-  says that the DEM and the orthophoto are still in the old one and are to be built again.
-* **Check bars** (*Check* ticked) do not scale: their error tells how good the scale is.
-* The table under the markers has a row per bar: *Usa* (untick to leave it out), name, markers,
-  *Distanza* and *Accur.* (double click to change them: the error follows at once), *Check*, the
-  distance measured on the model (*Stimata*) and the error, in red when it exceeds three times the
-  accuracy (at least 5 mm). Right click on rows deletes the bars. The summary shows *RMSE barre*
-  (control) and *RMSE barre check*, and how the chunk was placed: *scala dalle barre, coordinate
-  locali* or *scala da riferimenti e barre insieme*.
-* **Photos with GPS**: when their positions cover less than ten times their accuracy (a phone or a
-  drone over an object or a trench) they are left out and the bars scale the chunk in local
-  coordinates. Over a larger area (a flight over a site), or with three or more control points, the
-  photo positions, the control points and the bars are fitted together, each weighted by
-  `1 / accuracy²`: positions and points place and turn the survey, the scale comes from all of them.
-* The 3D view draws the bars between their markers, control bars in cyan and check bars dashed in
-  orange, with their length and error; the workspace lists them under the chunk.
-* *Importa barre...* (or *Flusso di lavoro > Importa barre di scala (CSV)*): a text file with
-  `marker_a, marker_b, distance[, accuracy[, check]]` per line, separated by commas, semicolons,
-  tabs or spaces; markers by name (`target 12`) or target code (`12`); a header line is skipped and
-  pairs whose markers are not in the chunk are listed in the log.
-* *Ottimizza camere* uses the bars too, as Metashape does: with two control bars or more, or with
-  control points, the markers at the ends of the bars are fixed where the bars get their lengths
-  (each moved as little as its precision in the photos allows, `MARKER_PIXEL_ACCURACY` 0.5 px) and
-  the block bends towards them as far as the tie points allow; a single bar only gives the scale.
-  The log reports the bar errors before and after.
-* Projects imported from Metashape bring their scale bars (distance, accuracy, check bars); WebODM
-  tasks bring the camera poses and their GCPs as markers, so bars can be drawn between them.
-* *Strumenti > Target > Barra di scala stampabile...*: one page per bar with two coded targets at a
-  known distance (the last codes of the dictionary, 48-49 for `aruco_4x4_50`, so they never clash
-  with target sheets and turntable mats), a 10 cm ruler to check that it was printed at 100 %, and
-  the CSV of the bars next to the PDF: glue the page on something rigid, photograph it with the
-  object, detect the markers and import the CSV.
+* no control point and no camera reference (or camera references that cover less than ten times
+  their accuracy, `cameras_span_their_accuracy`): the scale is the least-squares solution of
+  `scale * |a - b| = distance` weighted by `1 / accuracy²` (of two bars measured equally well, the
+  longer one counts more); the orientation stays, the origin is the internal one and the CRS
+  becomes `LOCAL` (`method == "scalebars"`);
+* the same on a chunk georeferenced elsewhere (an imported project, CRS not `LOCAL`) with no
+  enabled reference: the bars scale it about their centre, keeping its position, orientation
+  and CRS;
+* three or more control points, or camera references: the similarity is the joint weighted
+  least-squares fit of the points (`1 / accuracy²` on their 3D residuals) and of the bars
+  (`1 / accuracy²` on `scale * length - distance`), `markers.gcp.similarity_with_bars`: the
+  rotation and the position come from the points, the scale from points and bars together
+  (`"markers+scalebars"`, `"cameras+scalebars"`, `"markers+cameras+scalebars"`);
+  `use_cameras=True` or `False` forces the use of the camera references.
 
-## Demo
+The report adds `scale` (world units per internal unit), `scalebars` (as `scalebar_errors`),
+`scalebar_control_rmse` and `scalebar_check_rmse` (metres, None without bars of that type).
 
-**File > Crea e apri progetto demo** (or `ppg demo <folder> --process`) writes a synthetic
-4 x 3 m trench with a wall stub, 28 photos and 8 ArUco targets at EPSG:3004 coordinates, a
-bowl and a sherd as meshes, printable targets and a PyArchInit database (full PyArchInit 5
-schema) with the site *Saggio dimostrativo* (US 1-3, polygons, spot heights, a section
-trace, pottery and finds) plus a Roman villa and a necropolis with tens of units, then opens
-the project and connects the database.
+Markers are placed by `chunk.triangulate_markers()` (`markers.gcp.triangulate_markers`): from two
+photos or more they are triangulated; measured in one photo only they lie where its ray meets the
+surface, `gcp.surface_point(chunk, camera, x, y)` (the dense cloud, else the tie points, through
+`core.geometry.point_on_ray`: a plane fitted to the points around the ray, first in a wide cylinder,
+then in one of about 20 pixels at the depth found; kept per measurement); a marker with no
+projection keeps its position. `gcp.views_of(chunk, marker)` counts the aligned photos that measure
+it, `gcp.camera_ray(chunk, camera, x, y)` is the ray of a pixel. A marker placed in 3D (internal
+frame) is projected on the photos that see it with `gcp.project_marker(chunk, marker, point,
+max_photos=60)`: inside the frame, in front of the camera, not hidden by the surface near the
+marker, as estimated projections.
 
-The **pottery demo** (`ceramica/ceramica.ppg`, 32 photos of the bowl on a turntable mat with
-12 ArUco targets in a local metric frame) shows the close-range workflow: *Elabora tutto*
-without DEM and orthophoto, then *Strumenti > Profilo ceramico da mesh* on the exported
-model; with `--process` the demo already contains `ceramica/profilo.svg` (expected rim 16 cm,
-height 12 cm, wall 6 mm). The demo window lets you choose which project to open at the end.
+A projection (`core.marker.Projection`) is `pinned` True when placed or confirmed by hand, False
+when detected (coded targets), None when only estimated from the model (Metashape's blue flags;
+older versions read None as a detection). `Projection.measured` is True for the first two: a
+marker with measured projections is placed from them only, estimates are used only for a marker
+placed in 3D, and they never enter the camera optimisation. `gcp.photos_seeing(chunk, point,
+occlusion=True)` lists `(camera, x, y, depth)` of the photos that see a point, nearest the centre
+first (*Filter Photos by Point*); `gcp.project_marker(chunk, marker, point=None, max_photos=60)`
+replaces the estimated projections of a marker from its position; `gcp.views_of(chunk, marker,
+estimated=False)` counts the photos that measure it (or, with `estimated`, that only estimate it).
 
-## Robustness notes
+In the camera optimisation (`chunk.optimize_cameras`) the control bars are fixed points as the
+control points are: `engine.sfm.bar_anchors(chunk, bars, fixed=None)` moves the markers at their
+ends so that the bars get their lengths, least squares of `scale * length - distance` (weighted
+by `1 / accuracy²`) and of the shifts, weighted by `engine.sfm.marker_precision(chunk, marker)`
+(the pixel accuracy of its measurements, 0.5 px, carried to its distance from each camera and
+combined over the photos); the adjustment then holds those positions, observed in the photos.
+It needs three fixed points or more, not on a line: two bars, or bars and control points. On
+the synthetic trench, markers measured to 0.5 mm, a bar 6 mm too long with an accuracy of
+0.1 mm bends the block by 0.2 mm: the photos hold it, as in a joint adjustment.
 
-* Photos kept "online only" by Dropbox, iCloud or OneDrive are empty placeholder files: the dense cloud step lists them
-  before it starts and offers to go on without them (`build_depth_maps(skip_unreadable=True)`).
-* Message boxes are Qt's own (non-native): the native `NSAlert` of macOS 26/27 aborts the
-  process with Qt 6.
-* Poisson reconstruction runs in a child process (`engine/isolate.py`): a crash of the
-  native code becomes an error in the log, the step retries at a shallower depth and finally
-  builds a 2.5D height field.
-* Open3D is imported before rasterio/SciPy (`_env.load_open3d_first`) and the PROJ data
-  exported by Anaconda or QGIS is replaced by rasterio's own, also for worker threads.
+Imports: `integrations.metashape.import_psx` brings the scale bars of the project
+(`MsScaleBar`: two `endpoint marker_id`, `reference d`, accuracy `sd` or the chunk's
+`accuracy_scalebars`, unticked = check bar); `integrations.webodm.import_task` brings the camera
+poses (`read_cameras`: `cameras.json`, `odm_report/shots.geojson`) and the GCPs as markers
+(`read_gcps`), triangulated at once.
 
-## Where the archaeology, AI and BIM tools are
+## Modules
 
-| Task | Interface | Command line / API |
-| --- | --- | --- |
-| Connect PyArchInit | at start the interface connects by itself to the database configured in PyArchInit 5 (`~/pyarchinit_5/pyarchinit_DB_folder/config.cfg`, option *Connetti all'avvio*). *PyArchInit > Connetti...* opens the connection window: the PyArchInit configuration, a SQLite/SpatiaLite file, or a PostgreSQL/PostGIS server (host, port, database, user, password, *Prova connessione*). *Usa il database demo* creates `demo.sqlite` with the full PyArchInit 5 schema (three sites) inside `~/pyarchinit_5/pyarchinit_DB_folder` when that installation exists, so QGIS can open the same file; `config.cfg` is never touched. The right pane lists sites, US and documentation | `PyArchInit.connect(url=..., config_path=...)`, `.sites()`, `.stratigraphic_units(sito)`, `.documentation(sito)` |
-| Sites | a site must have its *scheda Sito* before anything is published: *PyArchInit > Nuovo sito...* (or *Nuovo sito* in the pane and in the publish window) creates the record; publishing to a site that does not exist creates it automatically | `pa.ensure_site(sito, comune=...)`, `pa.site_exists(sito)` |
-| Publish products | *PyArchInit > Pubblica ortofoto / DEM / modello*: choose the site, the document name and the US to link; rasters are copied next to PyArchInit's media folder, with thumbnails and a `documentazione_table` record | `ppg pyarchinit publish scavo.ppg "Sito" "Nome" --dem --model --link-us 1:101`; `pa.publish_orthomosaic/dem/model` |
-| Site of the project | every unit and spot height belongs to one excavation: the site is chosen once (*PyArchInit > Sito del progetto*, the combo at the top of the PyArchInit pane, or the question asked the first time something is drawn or published) and saved in the project. A PyArchInit database may hold several sites: the pane then lists the US and documents of the project's site only; the US form has the site among the database's sites | `doc.meta["sito"]` |
-| Stratigraphic units | *Disegna US* in the drawing bar (click the vertices, double click to close; with *Mano libera* press, trace and release), then the fields of PyArchInit's `pyunitastratigrafiche`: area, US (or an existing US of the site), unit type (`unita_tipo_s`), stratigraphic index (`stratigraph_index_us`: 1 characterization, 2 US outline), type (`tipo_us_s`), draughtsman, date, original survey; the layer shows the same columns (`scavo_s`, `area_s`, `us_s`...). Drawn units are saved in the project and come back when it is reopened. *Snap* (with its menu: vertices, segments, tolerance 6/12/20 px) puts the points of every drawing tool exactly on the vertices or edges of the visible layers, shown by a magenta square (vertex) or circle (segment): units traced along an existing boundary share it, without gaps or overlaps; *PyArchInit > Pubblica unita' disegnate* writes `pyunitastratigrafiche`; *Carica poligoni US* shows the existing ones | `pa.publish_units(units, sito)`, `pa.us_polygons(sito)`, `archaeo.stratigraphy.export_units` |
-| Select, delete, merge | *Seleziona* in the drawing bar: click a feature, Shift/Cmd+click to add or remove, drag a box to select everything it touches (hidden layers are skipped); the selection is outlined in cyan and, for a single feature, its attributes appear in the Layer pane. *Elimina* (or the Delete key) removes units, single parts of multi-part units, section traces with their drawings, contour/plan-slice lines and points; *Unisci* merges units into one polygon (you choose whose US number, area and type to keep; hairline gaps between units drawn side by side are closed) or contiguous lines of the same layer. Right click opens the same commands, Esc clears the selection. Polygons loaded from PyArchInit change in `pyunitastratigrafiche` only with *Salva modifiche in PyArchInit* (Layer pane), which asks before deleting | `pa.update_unit(gid, geometry=..., crs=...)`, `pa.delete_unit(gid)` |
-| Spot heights | *Quota* in the drawing bar, separate from SAM: a click reads the elevation on the DEM at full resolution, then the fields of `pyarchinit_quote` (area, US, unit type, elevation (editable), unit of measure, draughtsman, date, original survey); *Non chiedere piu'* keeps them for the next clicks (choose the tool again to change them). The points go in the *Quote* layer, are saved in the project and are written with *Pubblica* | `pa.publish_quote(points, sito, crs)`, `pa.publish_elevations(chunk, sito, area, us, points)` |
-| Segment Anything 2.1 | installed on request in its own environment, with the PyTorch build for the graphics card (CUDA on NVIDIA cards, picked by the installer on Windows and Linux; Apple's GPU through MPS on the Mac, about 3.5 times faster than the CPU on an M4 Pro); the window at the end of the installation says which one is used. *SAM* in the drawing bar, three ways chosen from its menu: **Tocco** (click an object: SAM looks at the part of the orthomosaic on screen, so zoom in for details and out for large units), **Riquadro** (drag a box around one object), **Area** (drag a box: every unit inside). The mask appears dashed with the unit form: *Salva*, *Annulla*, or *Correggi* (Shift+click adds a part, right click removes one, Enter saves, Esc discards). *Tutta l'ortofoto* scans the whole orthomosaic in overlapping 1024-pixel tiles at a chosen resolution and thoroughness (normale / alta / massima: more points and crops per tile): objects cut by the tiles are joined, duplicates dropped, and the units do not overlap (smaller ones are cut out of larger ones). Automatic units go to the layer *Unita' da SAM* without a US number. The menu also chooses the model (tiny to large). *Prompt sulle foto* segments an object on a photo | `ai.sam.segment_orthomosaic(chunk, segmenter, points=, labels=, box=, bounds=)`, `auto_units(chunk, segmenter, bounds=, resolution=, thoroughness=)`, `read_orthomosaic`, `segment_photo_and_classify(...)` |
-| Classification | *Strumenti > Classificazione della nuvola*: automatic rules (ground, vegetation, masonry/structures, noise; ASPRS classes plus archaeological classes 64-71), written in the dense cloud (LAS export keeps the classes). The 3D view colours the cloud by *Classi* (or *Quota*, or the photos' colours) with a legend: untick a class to hide it. *Lazo* selects points on the screen (click the vertices or drag, double click or Enter to close) and gives them a class (a new code can be given a name, e.g. 120 *Crollo*, shown in the legend); only the points visible at the front are taken unless asked, and hidden classes are never taken. Points corrected by hand are remembered: the automatic rules and the classifier leave them as they are. *Addestra il classificatore* learns the classes from those points (or from every classified point): the geometry around each point at three scales, the height above the ground and the colour, with a random forest (or gradient boosting for a smaller file); it reports the accuracy per class and classifies the rest of the cloud. The model is kept in the project; *Salva / Carica un classificatore* (`.ppgclf`) reuses it on other excavations with a similar point spacing. *Classifica con il classificatore* takes a minimum confidence (below it points stay unclassified); *Dimentica le correzioni a mano* clears the flags, classes unchanged. *Classi dalle US (poligoni)* gives the points inside each drawn or loaded unit (plan view) the class of that unit (`US 12 (area 1)`, codes from 100, kept when run again; hand corrections kept unless unticked) and shows points, plan area and elevations per US in a table (*Salva CSV...*). **The classes drive the products**: the DEM dialog lists the classes of the dense cloud with their points (only *Terreno* gives a terrain model, DTM, with the gaps under what is left out interpolated; contours and volumes then use it); the orthophoto dialog makes chosen classes transparent where they are the visible surface (tools, people, vegetation); the model dialog meshes only the ticked classes; *File > Esporta > Nuvola di punti* exports only some classes; the menu of the *Sezione* tool (*Opzioni delle sezioni*) cuts the model or the dense cloud and keeps only the ticked classes (from the model, the stretches lying on points of those classes); *Pianta a quota* has the same choice. Noise (classes 7 and 18) never makes a DEM or a mesh | `ppg classify scavo.ppg`, `ppg classify-train scavo.ppg modello.ppgclf`, `ppg classify-apply altro.ppg modello.ppgclf`, `ppg classify-units scavo.ppg --csv us.csv`, `ppg dem scavo.ppg --classes 2`, `ppg ortho --hide-classes 3,71`, `ppg mesh --classes 2,64`, `ppg section ... --classes 2`, `ppg export --cloud muri.las --classes 64`; `ai.classify.classify_chunk(chunk)`, `set_class(chunk, mask, code)`, `classify_by_units(chunk, units)`, `class_statistics`; `ai.learn.train_on_chunk(chunk)`, `classify_chunk_with_model(chunk, model)` |
-| Sections | *Traccia sezione* in the drawing toolbar, then two clicks on the orthomosaic: the model is cut along the trace, the drawing appears in the *Sezioni* pane (SVG, DXF profile and 3D DXF in `sezioni/`), the trace becomes a feature of the *Sezioni* layer. The SVG is at 1:20, or at the most detailed standard scale (1:50, 1:100, 1:200...) at which it fits about an A0 sheet (a 174 m section across a tell: 1:200); the profile line is 0.5 mm and the DXF grid spacing suits the height of the section (10 cm in a trench, 1-2 m on a tell). *Pianta a quota* cuts the model horizontally into its own layer | `ppg section scavo.ppg x1 y1 x2 y2 --out sezione.svg`; `archaeo.sections.section(chunk, p1, p2)`, `sections_along(chunk, baseline, interval, half_width)`, `plan_slice(chunk, elevation)`; `pa.publish_section_trace` |
-| Contours and volumes | *Curve di livello* (DXF/GeoJSON/GeoPackage) draws the lines as a queryable layer (elevation, index line) that survives switching between DEM and orthomosaic. The dialog shows the elevation range of the DEM and proposes a round interval giving at most about 50 levels (5 cm on a trench, 50 cm on a tell 20 m high), asks before an interval that would give more than 300 levels, and offers a *Levigatura* (Gaussian smoothing of the DEM, in metres) for drone DSMs; lines keep their vertices within half a pixel and closed rings smaller than 25 pixels (noise) are left out, so a tell gives thousands of lines instead of 158,000, added to the view in one go; *Volume scavo / riporto*: the reference is the surface before the work (a plane at the original ground level or the DEM before excavation): *scavo* = volume removed (now below the reference), *riporto* = volume added; with "Quota minima" the deposit above the lowest point. Partial cells along the polygon edge are weighted by their covered fraction | `ppg contours`; `archaeo.terrain.contours`, `volume`, `hillshade`, `slope_degrees`; `pa.publish_volume` |
-| Pottery profiles | *Strumenti > Profilo ceramico da mesh*: choose the mesh of a vessel or sherd (OBJ/PLY/STL), the scale and the units; the rotation axis is estimated from the surface, the profile with rim/base diameters, height and wall thickness is drawn as SVG/DXF | `ppg pottery vaso.ply --out profilo.svg --scale 1`; `archaeo.pottery.estimate_axis`, `best_profile`, `draw` |
-| US forms | double click a US in the PyArchInit pane (or *Scheda US* in the Layer and Proxy panes) opens the PyArchInit US form (`us_table`): description, chronology, excavation data, characters, elevations and measures, and the stratigraphic relationships as an editable table (*Copre*, *Taglia*, *Si appoggia a*...), stored in PyArchInit's own format so its Harris matrix reads them. *Nuova US* / *PyArchInit > Nuova scheda US* creates a record (the site record too when missing); an existing site/area/US/type is refused. A database with a reduced `us_table` (e.g. the demo database of version 0.2, or a file created by other tools) shows a warning in the form with *Aggiorna struttura del database* (also in the PyArchInit menu): the missing PyArchInit 5 columns are added after a backup copy of the file, records untouched | `pa.missing_us_columns()`, `pa.upgrade_us_table()`, `pa.us_record`, `pa.create_us(sito, area, us, tipo, **fields)`, `pa.update_us(id_us, **fields)`, `parse_relationships`, `format_relationships` |
-| US proxies | *Strumenti > Proxy 3D delle US*: each unit polygon (drawn, or from a PyArchInit site) becomes a closed solid between the project DEM (top) and a base: a plane at a given elevation, the DEM recorded after the unit was removed, a constant thickness or the lowest point. Its volume equals the cut/fill volume on the same cells. The *Proxy US* pane lists volume, plan area and elevations; *Vedi in 3D* shows them coloured over the model; *Esporta (Extended Matrix)* writes one OBJ with an object per unit (`US12`, `USM3`) plus the coordinate offset; *Pubblica in PyArchInit* registers each proxy as a 3D media linked to its US; *Quote nella scheda US* writes the min/max elevations into the form | `archaeo.proxies.unit_proxy`, `proxies_for_units`, `export_extended_matrix`, `save_proxy` |
-| BIM / IFC | *Strumenti > Esporta IFC (BIM)*: choose the units (drawn here, the US polygons of a PyArchInit site, or the *proxy solids*) and whether to include the whole survey; the export shows its progress and, at the end, a window with the elements, their attributes (`Pset_PyArchInit_US`) and a 3D view of what was written. IFC4 in metres with `IfcMapConversion`. With proxies the file carries quantities, materials, groups and relationships: see [bim.md](bim.md) | `ppg ifc scavo.ppg rilievo.ifc`; `bim.ifc.export_chunk_ifc(...)`, `export_proxies_ifc(...)`, `read_ifc_elements(path)` |
-| Versions | the dialogs of *Nuvola densa*, *Modello*, *DEM* and *Ortofoto* ask, when the product exists, whether to keep the current version (to compare it) or overwrite it, and the name of the new one; a failed build puts the kept one back. The workspace shows the name of the active version next to each product and lists the kept ones under it: double click shows a kept version without making it active (rasters in the orthomosaic view, clouds and models in the 3D view with a *Versione ... (non attiva)* label; choosing a view in the list goes back to the active products). Right click on a kept version: *Rendi attiva* (the one every tool uses; the active one takes its place among the kept ones), *Differenza con il DEM attivo* (active minus kept, red where the active one is higher, blue where lower, dZ under the cursor; a warning when the two DEMs have different resolutions), *Esporta*, *Rinomina*, *Elimina*. Right click on a product: *Conserva una copia come versione* (e.g. before classifying the cloud again), *Rinomina*. Kept versions live in `versions/` inside the chunk folder | `core.versions.keep_active`, `activate`, `versions`, `version_file`, `dem_difference`, `rename`, `delete` |
-| Confidence | *Flusso di lavoro > Pulizia e confidenza > Calcola la confidenza*: for the dense cloud and/or the vertices of the model, the number of depth maps that confirm each point (within 1 % of its distance from the camera, the tolerance of the fusion; half an edge for a vertex); the fused cloud already has it. The 3D view (*Colori > Confidenza*, also for the model) colours the ranges 0 (grey: no map, e.g. a hole the mesh closed), 1 (red), 2, 3-4, 5-9, 10-19, 20 or more (blue); unticking a row of the legend hides those points or faces, a preview of a cleaning. Needs the depth maps of the chunk (*Nuvola densa*, also *Solo le mappe di profondita'*) | `ppg confidence scavo.ppg --model`; `chunk.compute_confidence("point_cloud" or "model")`, `engine.confidence.depth_map_support` |
-| Cleaning | *Pulisci la nuvola densa*: points below a confidence, isolated points (statistical filter: neighbours, standard deviations), points without neighbours within a radius, detached groups smaller than a number of points, classes, a colour (with a tolerance); the points found are counted and shown in red in the 3D view, then removed when confirmed. *Pulisci il modello*: detached pieces below a share of the largest one, faces with a low vertex confidence, stretched triangles, topology, holes closed up to a radius, Taubin smoothing (borders fixed), decimation; colours and confidence kept, the texture to build again. *Pulisci i punti di legame (selezione graduale)*: thresholds on reprojection error, number of photos, reconstruction uncertainty and projection accuracy with live counts, then the camera optimisation (for models written from imported poses only the uncertainty matters). The *Lazo* deletes or keeps points and faces. Every cleaning can keep the current version first | `ppg clean-cloud`, `ppg clean-model`, `ppg clean-tie-points`; `chunk.clean_point_cloud(...)`, `clean_model(...)`, `clean_tie_points(...)`, `engine.cleaning.point_filters`, `face_filters`, `delete_points`, `delete_faces` |
-| Texture | *Costruisci texture*: *Correzione colore* (exposure of the photos and vignetting, measured the first time), *Mappatura* automatic, adaptive orthophoto (terrain from the air: the texture is the orthophoto of the model, made by the tiled orthophoto engine; walls and sections get their own cells in a band below) or generic (each face its own cell: objects and small models). The texture is an image beside `model.ply`, which carries the texture coordinates of each face; the view *Modello con texture* shows the whole model. *File > Importa > Modello e texture dal progetto Metashape* reads the model of the `.psx` again with its colours, confidence and texture (the model in use is kept as a version) | `chunk.build_texture(size, mapping="auto")`; `integrations.metashape.reimport_model(chunk)`; `io.mesh_ply.read_mesh`, `write_mesh` |
-| Crop | *Ritaglio* in the drawing tools (or *File > Esporta > Ritagliati...*, *Pulizia e confidenza > Ritaglia*): drag a box or click a polygon (double click to close) on the orthophoto or the DEM; or select a polygon (a unit) and *Ritaglia o esporta con il poligono selezionato*. Then choose the products: exported cut to a folder (DEM and orthophoto with no data or transparent outside the polygon, model PLY with colours, confidence and double-precision coordinates or OBJ with the texture, cloud LAS with classes and confidence, the polygon as GeoJSON) or cut in the project with the originals kept as versions; model and cloud can also be limited in height | `ppg crop scavo.ppg --polygon "x1,y1 x2,y2 x3,y3" --out ritagli` (or `--bbox`, `--wkt`, `--geojson`, `--in-project`); `chunk.export_dem(path, region=)`, `export_orthomosaic`, `export_model`, `export_point_cloud`, `crop_dem`, `crop_orthomosaic`, `crop_model`, `crop_point_cloud(region=)` |
-| QGIS | *QGIS > Apri in QGIS (collegamento dal vivo)*: see [integrations.md](integrations.md) | `io.qgis_link.export_layers`, `build_project` |
-| Import | *File > Importa*: Metashape `.psx`, WebODM/ODM, Photo3D sessions: see [integrations.md](integrations.md) | `ppg import-metashape`, `ppg import-webodm`, `ppg import-photo3d`, `ppg photo3d-job` |
+| Module | Main functions |
+| --- | --- |
+| `markers.targets` | `generate_sheet`, `generate_turntable_mat`, `turntable_layout`, `generate_scale_bar`, `scale_bar_codes`, `detect` |
+| `markers.gcp` | `import_reference`, `export_reference`, `triangulate_markers`, `update_transform`, `similarity_with_bars`, `marker_errors`, `scalebar_errors`, `import_scalebars`, `resolve_marker`, `cameras_span_their_accuracy` |
+| `engine.chunks` | `align_chunks`, `merge_chunks`, `common_markers`, `common_cameras`, `pose_similarity`, `icp`, `global_guesses`, `ransac_rigid`, `registration_quality` |
+| `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |
+| `archaeo.pottery` | `estimate_axis`, `profile_at`, `best_profile`, `Profile.measurements`, `draw` |
+| `archaeo.terrain` | `contours` (simplified, optional smoothing), `suggest_interval`, `dem_range`, `export_contours`, `volume`, `hillshade`, `slope_degrees` |
+| `archaeo.stratigraphy` | `UnitPolygon`, `mask_to_polygons`, `export_units` |
+| `bim.ifc` | `export_ifc`, `export_chunk_ifc`, `split_mesh_by_units` |
+| `ai.classify` | `classify_chunk`, `classify_by_units`, `unit_class_name`, `units_table_csv`, `assign_class_by_polygons`, `class_statistics`, `set_class`, `clear_manual`, `class_names` |
+| `ai.learn` | `point_features`, `train`, `predict`, `ClassifierModel`, `train_on_chunk`, `classify_chunk_with_model` (see below) |
+| `ai.sam` | `Sam2Segmenter`, `segment_orthomosaic`, `auto_units`, `classify_from_masks`, `segment_photo_and_classify` |
+| `pyarchinit` | `PyArchInit`, `register_media`, `connect` |
 
-Everything the interface does is also available in the console (*Console Python*: `doc`, `chunk`,
-`ppg`) and in scripts (`ppg run script.py --project scavo.ppg`). See [api.md](api.md) and
-[pyarchinit.md](pyarchinit.md).
+## Coordinate conventions
+
+* Internal frame = frame of the SfM solution; `chunk.transform` (similarity) maps it to the
+  chunk CRS. Dense cloud and mesh are stored internally; rasters and exports are in the CRS.
+* Image coordinates follow COLMAP: the centre of the first pixel is (0.5, 0.5).
+* Cameras: OpenCV axes (+X right, +Y down, +Z forward); `camera.transform` is
+  `world_from_cam` in the internal frame.
+
+## Demo data and interface
+
+| Call | Description |
+| --- | --- |
+| `ppg.demo.create_demo(folder, process=False)` | synthetic trench photos + GCPs, project, pottery meshes, PyArchInit DB (`DemoData`) |
+| `pyarchinit_photogrammetry.gui.main(argv)` | starts the desktop interface (`ppg-gui`) |
+| `ppg.core.progress.Progress` | progress callback with `sub()` ranges; `cancel()` stops every sub-step |
+
+
+## Added in 0.3
+
+* `chunk.crop_point_cloud(zmin=, zmax=, radius=, center=(x, y), bounds=(xmin, ymin, xmax, ymax))`
+  keeps the dense points inside the limits (world coordinates) and drops the model products.
+* `PyArchInit.connect(url=None, config_path=None, media_root=None)`, `pa.ensure_site(sito, ...)`,
+  `pa.site_exists(sito)`, `pa.label`.
+* `pyarchinit.demo_db.create_demo_database(home, size="small"|"large", overwrite=False, demo_content=True)`
+  with the PyArchInit 5 schema (`pyarchinit5_schema.sql`).
+* `demo.create_demo(..., with_pottery=True)` and `demo.process_pottery_demo(doc, profile_svg)`;
+  `testing.synthetic.make_turntable_scene()`, `render_mesh()`, `write_pottery_dataset()`.
+* `engine.isolate.run_isolated(fn, *args, timeout=, cancel_check=)` runs a module-level
+  function in a fresh interpreter (used by the Poisson reconstruction). With `progress=callback`
+  it relays what `fn` passes to `engine.isolate.report(fraction, message)` (used by the fusion of
+  the depth maps).
+
+
+## Trainable point classification
+
+Label some points by hand, train a classifier on them, classify the rest of the cloud and,
+with the saved model, the clouds of other projects (like CloudCompare's 3DMASC/CANUPO).
+Needs scikit-learn (`pip install "pyarchinit-photogrammetry[learn]"`, included in `[gui]` and `[all]`).
+
+```python
+from pyarchinit_photogrammetry.ai import classify, learn
+
+classify.set_class(chunk, lasso_mask, 64, label="Muro")   # class + "labelled by hand" flag
+model = learn.train_on_chunk(chunk)                        # learns from the hand-labelled points
+print(model.summary())                                     # out-of-bag accuracy, precision/recall per class
+pc, confidence = learn.classify_chunk_with_model(chunk, model, min_confidence=0.6)
+model.save("scavo.ppgclf")
+other = learn.ClassifierModel.load("scavo.ppgclf")          # apply it to another project
+```
+
+| Call | Description |
+| --- | --- |
+| `classify.set_class(chunk, mask, code, manual=True, label=None)` | gives the selected dense points (boolean mask or indices) a class and flags them as labelled by hand; `manual=False` removes the flag; returns the count |
+| `classify.label_points(pc, mask, code, manual=True)` | the same on a `PointCloud` in memory: label several selections, then store the cloud once (`chunk.point_cloud = pc`) |
+| `classify.clear_manual(chunk, mask=None)` | forgets the hand-labelled flag (classes unchanged) |
+| `learn.point_features(xyz, rgb=None, normals=None, scales=None, ground=None, progress=None)` | `(N, F)` float32 feature matrix and feature names; world coordinates, z up |
+| `learn.suggest_scales(xyz)`, `learn.estimate_spacing(xyz)` | default core voxel and radii: 5, 14 and 40 times the point spacing |
+| `learn.train(xyz, codes, rgb=None, ..., method="random_forest", n_estimators=None, max_per_class=20000, random_state=0)` | `ClassifierModel`; `codes` 1-255, 0 or negative = unlabelled; `method="gradient_boosting"` for smaller files |
+| `learn.predict(model, xyz, rgb=None, ..., min_confidence=0.0)` | `(codes uint8, confidence float32)`; points below `min_confidence` become 1 (unclassified) |
+| `learn.train_on_chunk(chunk, labels="manual")` | trains on the hand-labelled points (`labels="all"`: every point with a class above 1) |
+| `learn.classify_chunk_with_model(chunk, model, overwrite_manual=False, min_confidence=0.0)` | classifies and stores the dense cloud; returns `(point_cloud, confidence)` |
+| `model.save(path)`, `ClassifierModel.load(path)`, `learn.read_model_info(path)`, `model.summary()` | model files; `read_model_info` reads the metadata only |
+| `model.classes`, `class_names`, `feature_names`, `scales`, `oob_score`, `training_accuracy`, `confusion_matrix`, `stats` | training results (confusion matrix: rows true class, columns predicted) |
+
+* **Features** (per radius): linearity, planarity, sphericity, omnivariance, eigenentropy,
+  change of curvature, verticality of the normal and of the main axis, density, height above
+  the lowest and below the highest neighbour, vertical spread, roughness; then height above
+  ground (progressive morphological filter, or `ground=` a DTM GeoTIFF / ground elevations),
+  colour (normalised RGB, HSV, excess green) and colour contrast with the neighbours.
+  They are computed on a *core* cloud (one point per voxel; voxel = point spacing, coarser
+  above `max_core_points`, default 1 M) and every point takes the values of its voxel; each
+  radius uses its own voxel level and at most 64 neighbours. About 15 s per million core
+  points on 4 threads (`n_jobs`).
+* **Hand labels**: `PointCloud.manual` (boolean per point, `None` when nothing was labelled)
+  is stored as the PLY property `manual`; files without it load as before. The rule-based
+  `classify_chunk` and `classify_chunk_with_model` keep the class of these points unless
+  `overwrite_manual=True` (then the flag stays where the new class agrees).
+* **Training**: one sample per core voxel (the class most of its labelled points carry), at most
+  `max_per_class` per class, classes weighted inversely to their size; the random forest
+  (100 trees, each on at most 10,000 samples) is validated out of bag, gradient boosting on
+  20 % held out. Deterministic for a given `random_state`.
+* **Model file** (`.ppgclf`): a ZIP with `model.json` (format version, classes and names,
+  feature names, radii and settings, core voxel, statistics, versions of the package,
+  scikit-learn and NumPy, training chunk and CRS) and `estimator.pkl` (the scikit-learn
+  estimator). The estimator is unpickled with an allow-list of scikit-learn and NumPy types,
+  so a file that tries to run other code is refused. The radii are in metres: apply a model to
+  clouds with a similar point spacing and a metric CRS (a local chunk without scale has
+  arbitrary units).
+* **CLI**: `ppg classify-train scavo.ppg modello.ppgclf [--labels manual|all] [--method
+  random_forest|gradient_boosting] [--scales 0.05,0.15,0.4] [--trees 100]` and
+  `ppg classify-apply scavo.ppg modello.ppgclf [--min-confidence 0.6] [--overwrite-manual]`.

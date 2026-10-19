@@ -198,6 +198,13 @@ is installed on first use (PyTorch in a separate environment, see the same page)
   orthophoto of a tell at 1.35 cm/px takes 4-6 minutes on an Apple M4 Pro. Cells seen only at
   grazing angles (more than 70 degrees from the vertical, adjustable) stay transparent instead
   of smearing the photos.
+* **Elevations**: orthophoto and relief of a wall on the vertical plane of a section trace or of three
+  markers, development of a well or a tower on a cylinder; what stands in front of the wall can be left
+  out.
+* **Masks of the photos**: drawn on the photo, imported (also from the alpha channel), from photos of
+  the background, from a backdrop colour, from the model or with SAM 2.1; masked parts are not used
+  to align, in the depth maps, in the orthomosaic or in the texture. Stationary points (a turntable
+  with a fixed camera) can be left out of the alignment.
 * **No seams**: the orthomosaic takes the details of every cell from its best photo and fades the
   differences of light along the seams (two-band blending); the exposure of every photo and the
   vignetting of every lens are measured on points seen by several photos and corrected

@@ -229,6 +229,7 @@ class MainWindow(QMainWindow):
         self.sections_pane = SectionsPane()
         self.sections_pane.zoom_requested.connect(self._zoom_section)
         self.sections_pane.publish_requested.connect(self._publish_section)
+        self.sections_pane.elevation_requested.connect(lambda sdict: self.build_elevation(sdict))
         self.sections_pane.delete_requested.connect(self._delete_section)
         self.sections_pane.folder_requested.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._sections_dir()))))
         self.ortho_view.feature_clicked.connect(self._feature_clicked)
@@ -351,6 +352,8 @@ class MainWindow(QMainWindow):
         self._act(m, "Costruisci texture...", self.build_texture, processing=True, icon_name="texture")
         self._act(m, "Costruisci DEM...", self.build_dem, processing=True, icon_name="dem")
         self._act(m, "Costruisci ortofoto...", self.build_ortho, processing=True, icon_name="ortho")
+        self._act(m, "Prospetto o sviluppo cilindrico...", self.build_elevation, processing=True,
+                  icon_name="elevation", tip="Ortofoto e rilievo su un piano (muri) o su un cilindro (pozzi, torri)")
         m.addSeparator()
         self._act(m, "Elabora tutto...", self.process_all, "Ctrl+R", processing=True, icon_name="process_all")
         # ------------------------------------------------------------ Tools
@@ -2445,6 +2448,141 @@ class MainWindow(QMainWindow):
             ghosting=bool(v.get("ghosting")), fill_holes=bool(v.get("fill_holes", True)))),
             lambda _r: self._show_raster("ortho"))
 
+    # ---------------------------------------------------------------- elevations
+    def _elevation_fields(self, kind: str) -> list:
+        fields = []
+        if kind == "plane":
+            fields.append(Field("side", "Lato da cui guardare", "auto",
+                                choices=[("auto", "Dove sono le foto"), ("left", "A sinistra della traccia"),
+                                         ("right", "A destra della traccia")]))
+        if kind == "cylinder":
+            fields.append(Field("inside", "Visto", True, choices=[(True, "Dall'interno (pozzo, abside)"),
+                                                                   (False, "Dall'esterno (torre, colonna)")]))
+        return fields + [
+            Field("front", "Profondita' davanti (m)", 0.5, minimum=0.0, maximum=1000.0, decimals=3,
+                  tip="Cio' che sta piu' avanti (impalcature, una sezione davanti al muro) non copre la parete"),
+            Field("back", "Profondita' dietro (m)", 0.5, minimum=0.0, maximum=1000.0, decimals=3),
+            Field("resolution", "Risoluzione (m/pixel)", None, kind="optional_float"),
+            Field("blending", "Fusione", "mosaic",
+                  choices=[("mosaic", "Mosaico senza cuciture"), ("disabled", "Nessuna (una foto per cella)")]),
+            Field("colour", "Correzione colore", True),
+            Field("name", "Nome", "", kind="text")]
+
+    def build_elevation(self, section: dict | None = None) -> None:
+        """Workflow > Prospetto: on the trace of a section, on the plane of the selected markers,
+        or on the cylinder of the selected polygon (a well, a tower)."""
+        if not self._need_chunk(aligned=True, product="model"):
+            return
+        from ..engine import elevation as E
+
+        if section is None:
+            markers = self.reference.selected_markers()
+            poly = self._selected_polygon()
+            choices = []
+            if self.sections:
+                choices += [(("section", i), f"Traccia della sezione {s['label']}") for i, s in enumerate(self.sections)]
+            if len(markers) >= 3:
+                choices.append((("markers", None), f"Piano dei {len(markers)} marker selezionati"))
+            if poly is not None:
+                choices.append((("cylinder", None), "Cilindro dal poligono selezionato (pozzo, torre)"))
+            if not choices:
+                self._warn("Traccia una sezione lungo il muro (Disegno > Traccia sezione), oppure seleziona tre o piu' "
+                           "marker sulla parete nel pannello Riferimenti, oppure seleziona un poligono attorno a un "
+                           "pozzo o a una torre.")
+                return
+            v = ParamDialog.ask(self, "Prospetto", [Field("source", "Superficie", choices[0][0], choices=choices)]
+                                + self._elevation_fields("cylinder" if choices[0][0][0] == "cylinder" else "plane"),
+                                intro="Ortofoto della parete e rilievo (distanza dal piano o dal cilindro) costruiti "
+                                      "sul modello.")
+            if not v:
+                return
+            kind, idx = v["source"]
+            if kind == "section":
+                section = self.sections[idx]
+        else:
+            v = ParamDialog.ask(self, f"Prospetto lungo {section['label']}", self._elevation_fields("plane"))
+            if not v:
+                return
+            kind = "section"
+        try:
+            if kind == "section":
+                a, b = np.asarray(section["p1"], float), np.asarray(section["p2"], float)
+                side = None
+                if v.get("side") in ("left", "right"):
+                    d = b - a
+                    left = np.array([-d[1], d[0]])
+                    side = (a + b) / 2 + (left if v["side"] == "left" else -left)
+                frame = E.plane_from_line(self.chunk, a, b, side)
+                name = v.get("name") or f"Prospetto {section['label']}"
+            elif kind == "markers":
+                ms = [self.chunk.marker_by_key(k) for k in self.reference.selected_markers()]
+                pts = [m.position for m in ms if m.position is not None]
+                if len(pts) < 3:
+                    self._warn("I marker selezionati non hanno ancora una posizione (allinea le foto).")
+                    return
+                world = self.chunk.to_world(np.array(pts))
+                cams = self.chunk.to_world(np.array([c.center for c in self.chunk.aligned_cameras]))
+                frame = E.plane_from_points(world, toward=cams.mean(axis=0))
+                name = v.get("name") or "Prospetto sui marker"
+            else:
+                poly = self._selected_polygon()
+                ring = np.asarray(poly.exterior.coords if hasattr(poly, "exterior") else poly.geoms[0].exterior.coords)
+                frame = E.cylinder_from_circle(self.chunk, ring, inside=bool(v.get("inside", True)))
+                name = v.get("name") or ("Sviluppo interno" if frame.inside else "Sviluppo esterno")
+        except Exception as exc:
+            self._exc("Superficie del prospetto non valida", exc)
+            return
+        depth = (-float(v.get("back", 0.5)), float(v.get("front", 0.5)))
+        chunk = self.chunk
+        self.run_task("Prospetto", lambda p: E.build_elevation(
+            chunk, frame, v.get("resolution"), name, depth, v.get("blending", "mosaic"),
+            bool(v.get("colour", True)), progress=p), self.show_elevation, refresh=False)
+
+    def show_elevation(self, entry: dict) -> None:
+        from ..engine.elevation import elevation_paths
+
+        ortho, relief = elevation_paths(self.chunk, entry)
+        if not ortho.exists():
+            self._warn(f"Il prospetto «{entry['name']}» non ha piu' i suoi file.")
+            return
+        self.ortho_view.load(ortho, "ortho")
+        if relief.exists():
+            self.ortho_view.set_dem(relief)
+        self._raster_version = ("elevation", entry["id"])
+        self.show_view(self.ortho_view)
+        self.workspace.populate(self.doc)
+        self.statusBar().showMessage(f"{entry['name']}: coordinate del prospetto in metri (u lungo la parete, v in alto); "
+                                     "Z = rilievo verso chi guarda", 15000)
+        self._dirty(True)
+
+    def export_elevation(self, entry: dict) -> None:
+        import shutil
+
+        from ..engine.elevation import elevation_paths
+
+        folder = QFileDialog.getExistingDirectory(self, "Cartella per il prospetto", self._last_dir())
+        if not folder:
+            return
+        ortho, relief = elevation_paths(self.chunk, entry)
+        stem = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in entry["name"])
+        for src, suffix in ((ortho, "ortofoto"), (relief, "rilievo")):
+            if src.exists():
+                shutil.copy2(src, Path(folder) / f"{stem}_{suffix}.tif")
+        frame = ortho.parent / "frame.json"
+        if frame.exists():
+            shutil.copy2(frame, Path(folder) / f"{stem}_piano.json")
+        self._info("Prospetto", f"Ortofoto, rilievo e piano di «{entry['name']}» in {folder}.")
+
+    def delete_elevation(self, entry: dict) -> None:
+        from ..engine.elevation import remove_elevation
+
+        if choice(self, "question", "Elimina prospetto", f"Eliminare «{entry['name']}» e i suoi file?",
+                  ["Elimina"]) != 0:
+            return
+        remove_elevation(self.chunk, entry["id"])
+        self.workspace.populate(self.doc)
+        self._dirty(True)
+
     # ---------------------------------------------------------------- masks
     def set_mask_mode(self, mode: str | None) -> None:
         """Draw masks on the photo view (``mask`` / ``unmask``) or go back to the markers."""
@@ -2669,6 +2807,8 @@ class MainWindow(QMainWindow):
                 self._show_model(payload)
         elif kind == "version":
             self.show_version(*payload)
+        elif kind == "elevation":
+            self.show_elevation(payload)
         elif kind == "marker":
             cams = [chunk.camera(k) for k in payload.projections]
             if cams:
@@ -4605,6 +4745,14 @@ class MainWindow(QMainWindow):
         """Right click in the workspace: the versions of the dense cloud, model, DEM, orthomosaic."""
         from ..core import versions
 
+        if chunk is self.chunk and kind == "elevation":
+            menu = QMenu(self)
+            menu.addAction(icon("view"), "Mostra", lambda: self.show_elevation(payload))
+            menu.addAction(icon("export"), "Esporta...", lambda: self.export_elevation(payload))
+            menu.addSeparator()
+            menu.addAction(icon("delete"), "Elimina", lambda: self.delete_elevation(payload))
+            menu.exec(pos)
+            return
         if chunk is not self.chunk or kind not in ("product", "version"):
             return
         product, vid = (payload, None) if kind == "product" else payload

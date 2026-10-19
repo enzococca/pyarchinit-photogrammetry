@@ -66,7 +66,7 @@ ICONS = {
     "ok": ("mdi6.check-circle", "green"), "view": ("mdi6.eye-outline", "blue"), "edit": ("mdi6.pencil-outline", "slate"),
     "version": ("mdi6.layers-outline", "amber"),
     "previous": ("mdi6.chevron-left-circle-outline", "blue"), "next": ("mdi6.chevron-right-circle-outline", "blue"),
-    "filter": ("mdi6.filter-outline", "blue"), "update": ("mdi6.cloud-download-outline", "green"), "colour": ("mdi6.palette-outline", "pink"), "mask": ("mdi6.image-filter-black-white", "pink"),
+    "filter": ("mdi6.filter-outline", "blue"), "update": ("mdi6.cloud-download-outline", "green"), "colour": ("mdi6.palette-outline", "pink"), "mask": ("mdi6.image-filter-black-white", "pink"), "elevation": ("mdi6.wall", "brown"),
     # tree items
     "camera_ok": ("mdi6.camera", "green"), "camera_bad": ("mdi6.camera-off", "red"),
     "cameras": ("mdi6.camera-burst", "blue"), "marker": ("mdi6.map-marker", "violet"),

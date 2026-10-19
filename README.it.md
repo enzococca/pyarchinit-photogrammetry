@@ -180,6 +180,13 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
   di 45.000 x 46.000 pixel di un tell a 1,35 cm/px richiede 4-6 minuti su un Apple M4 Pro. Le celle
   viste solo di traverso (oltre 70 gradi dalla verticale, regolabile) restano trasparenti invece di
   stirare le foto.
+* **Prospetti**: ortofoto e rilievo di un muro sul piano verticale di una traccia di sezione o di tre
+  marker, sviluppo di un pozzo o di una torre su un cilindro; ciò che sta davanti al muro si può
+  escludere.
+* **Maschere delle foto**: disegnate sulla foto, importate (anche dal canale alfa), dalle foto dello
+  sfondo, da un colore del fondale, dal modello o con SAM 2.1; le parti mascherate non servono per
+  allineare, nelle depth map, nell'ortofoto e nella texture. Nell'allineamento si possono escludere i
+  punti fermi (turntable con fotocamera fissa).
 * **Niente cuciture**: l'ortofoto prende i dettagli di ogni cella dalla foto migliore e sfuma le
   differenze di luce lungo le cuciture (fusione a due bande); l'esposizione di ogni foto e la
   vignettatura di ogni obiettivo si misurano sui punti visti da più foto e si correggono

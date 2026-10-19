@@ -198,6 +198,19 @@ class WorkspaceTree(QTreeWidget):
                                      "attiva, confrontarla, rinominarla o eliminarla")
                     it.addChild(vi)
                 it.setExpanded(bool(kept))
+            elevations = (ch.meta or {}).get("elevations") or []
+            if elevations:
+                el = QTreeWidgetItem([f"Prospetti  ({len(elevations)})"])
+                el.setIcon(0, icon("elevation"))
+                ci.addChild(el)
+                for e in elevations:
+                    w, h = e.get("size", [0, 0])
+                    it = QTreeWidgetItem([f"{e['name']}  ({w} x {h} px, {e.get('resolution', 0) * 100:.2f} cm/px)"])
+                    it.setIcon(0, icon("elevation"))
+                    it.setData(0, Qt.ItemDataRole.UserRole, ("elevation", ch, e))
+                    it.setToolTip(0, "Doppio clic per vederlo; tasto destro: esporta, elimina")
+                    el.addChild(it)
+                el.setExpanded(True)
             ci.setExpanded(ch is document.chunk)
         root.setExpanded(True)
 
@@ -1389,6 +1402,7 @@ class SectionsPane(QWidget):
     publish_requested = Signal(dict)
     delete_requested = Signal(dict)
     folder_requested = Signal()
+    elevation_requested = Signal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1402,7 +1416,8 @@ class SectionsPane(QWidget):
         self.b_folder = _tool("folder", "Apri cartella")
         self.b_publish = _tool("publish", "Pubblica in PyArchInit", "Scrive la traccia in pyarchinit_sezioni")
         self.b_delete = _tool("clear", "Elimina")
-        for b in (self.b_zoom, self.b_folder, self.b_publish, self.b_delete):
+        self.b_elevation = _tool("elevation", "Prospetto", "Ortofoto e rilievo della parete lungo questa traccia")
+        for b in (self.b_zoom, self.b_folder, self.b_publish, self.b_elevation, self.b_delete):
             bar.addWidget(b)
         outer.addLayout(bar)
         lay = QHBoxLayout()
@@ -1428,6 +1443,7 @@ class SectionsPane(QWidget):
         self.b_zoom.clicked.connect(lambda: self._emit(self.zoom_requested))
         self.b_publish.clicked.connect(lambda: self._emit(self.publish_requested))
         self.b_delete.clicked.connect(lambda: self._emit(self.delete_requested))
+        self.b_elevation.clicked.connect(lambda: self._emit(self.elevation_requested))
         self.b_folder.clicked.connect(self.folder_requested)
 
     def current(self) -> dict | None:
