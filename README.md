@@ -52,6 +52,11 @@ pip install -U pip && pip install "pyarchinit-photogrammetry[all]"
 ```
 
 Optional: `pip install "pyarchinit-photogrammetry[sam]"` adds Segment Anything 2.1 (PyTorch).
+Linux on ARM (aarch64): pycolmap and Open3D publish no wheels there; install the ones attached to the
+[release](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest) for your Python first
+(`pip install pycolmap-*-cp312-*.whl open3d-*-cp312-*.whl`), and `sudo apt install libxerces-c-dev` for
+the E57 support of `[all]` (see [packaging.md](docs/packaging.md)). Windows on ARM: the x64 application
+runs under emulation.
 A global `ppg`/`ppg-gui` without activating anything: `uv tool install "pyarchinit-photogrammetry[all]"`
 (or `pipx install`).
 
