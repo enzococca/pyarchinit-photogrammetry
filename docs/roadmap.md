@@ -65,18 +65,17 @@ on the plane of a wall or a cylinder (wells, towers). DEM editing (plane, linear
 breaklines, the DEM as it was kept as a version). Reconstruction region (a box around the subject).
 The generic texture of objects gets the colour correction; blending inside its atlas is left for later.
 
-## 0.8 - Acquisition and precision
+## 0.8 - Acquisition and precision (done)
 
-* Fisheye and 360-degree cameras (COLMAP fisheye models; equirectangular photos split into a rig
-  of virtual pinhole cameras). *Done.*
-* Video import with automatic choice of the frames, image quality (blur) estimation, GPS from
-  the SRT files of DJI drones. *Done.*
-* Automatic refinement of the estimated marker projections (blue flags) by image correlation.
-  *Done.*
-* Precision of markers and cameras from the covariance of the bundle adjustment; uncertainty map
-  of the DEM; spot heights with their uncertainty in PyArchInit and IFC. *Done.*
-* Field check before leaving the site: coverage map (areas seen by fewer than three photos),
-  blurred photos, markers seen by too few photos. *Done.*
+Fisheye lenses recognised from the EXIF and aligned with their own model; 360-degree photos split
+into the faces of a cube and aligned as a COLMAP rig (one centre, known rotations, calibration held).
+Photos from a video (sharp frames with the right overlap, GPS from the subtitles of DJI drones) and
+image quality. Blue flags of the markers found by image correlation on the surface around the
+marker. Precision of cameras, markers and tie points from the covariance of the bundle adjustment
+(with the accuracy of the control points), map of the vertical precision of the DEM, spot heights
+with their precision in PyArchInit and in the IFC (IfcAnnotation). Field check right after the
+alignment: coverage map (areas seen by fewer than three photos), photos not aligned or blurred,
+markers in too few photos.
 
 ## 0.9 - Everyday work
 
