@@ -150,6 +150,14 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   every frame gets its GPS position. **Image quality** (right click in the Photos pane): the sharpness
   of every photo compared with the sharpest ones (in the tooltip, *sfocata* under 0.5), *Disattiva le
   foto sfocate*, enable or disable the selected photos, masks of the selected photos.
+* **Undo and redo** (*Modifica > Annulla / Ripeti*, Cmd/Ctrl+Z and Cmd/Ctrl+Shift+Z; the menu names
+  what will be undone): drawings (units, spot heights, sections, edits waiting to be saved in
+  PyArchInit), markers and their measurements in the photos, scale bars, patches of the orthomosaic
+  (the orthomosaic is updated again), the reconstruction region, and the edits of products in place -
+  classes given by hand, points deleted or kept with the lasso, cleaning and cropping of the dense
+  cloud, faces of the model, tie points, texture patches (their files are copied aside before the
+  edit; on macOS a clone, instant and without space). Processing steps (alignment, dense cloud...)
+  are not undone. The history starts again when another project or chunk is opened.
 * **Batch processing** (*Flusso di lavoro > Elaborazione batch*): a list of steps - alignment,
   products, exports, the precision and the field check - each on all chunks or on the chosen ones,
   with its parameters (*Aggiungi* by group, *Modifica* or double click, *Su*/*Giu'*, *Carica*/*Salva*

@@ -81,7 +81,7 @@ markers in too few photos.
 
 * Batch processing over several chunks, saving after each step, resuming after a power cut,
   retrying a failed step. *Done.*
-* Undo and redo for drawings, markers, patches, scale bars and point edits.
+* Undo and redo for drawings, markers, patches, scale bars and point edits. *Done.*
 * Diagnostics: matching graph, matches between two photos, residuals in the photo view, camera
   calibration dialog with distortion plot, merging markers.
 * Measures: 3D area on the model, slope, aspect and height above ground under the cursor,

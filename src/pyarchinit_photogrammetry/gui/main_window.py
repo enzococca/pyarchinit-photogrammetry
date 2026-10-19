@@ -29,6 +29,7 @@ from .model_view import ModelView
 from .panels import (ConsolePane, LayersPane, LogPane, PhotosPane, PhotosPanel, ProxiesPane, PyArchInitPane, ReferencePane,
                      SectionsPane, WorkspaceTree)
 from .start_page import StartPage
+from .undo import UndoHistory
 from .update_dialog import UpdateChecker, UpdateDialog, error_text
 from .worker import StatusProgress, TaskRunner
 
@@ -97,6 +98,8 @@ class MainWindow(QMainWindow):
         self._sam_obj: dict | None = None  # SAM mask being edited (prompts, bounds, preview)
         self.last_report: dict | None = None
         self._started = document is not None
+        self._task_done = False  # a processing step just ended: its changes are not an edit
+        self.history: UndoHistory | None = None
         self._build_views()
         self._build_docks()
         self._build_actions()
@@ -319,6 +322,14 @@ class MainWindow(QMainWindow):
         self._act(m, "Pagina iniziale", self.show_start_page, icon_name="home_view")
         m.addSeparator()
         self._act(m, "Esci", self.close, QKeySequence.StandardKey.Quit, icon_name="quit")
+        # ------------------------------------------------------------ Edit
+        m = mb.addMenu("&Modifica")
+        self.a_undo = self._act(m, "Annulla", self.undo, QKeySequence.StandardKey.Undo, icon_name="undo",
+                                tip="Annulla l'ultima modifica: disegni, quote, sezioni, marker, barre di scala, "
+                                    "patch, regione, punti della nuvola e facce del modello")
+        self.a_redo = self._act(m, "Ripeti", self.redo, QKeySequence.StandardKey.Redo, icon_name="redo")
+        self.a_undo.setEnabled(False)
+        self.a_redo.setEnabled(False)
         # ------------------------------------------------------------ Workflow
         m = mb.addMenu("Flusso di &lavoro")
         self._act(m, "Aggiungi foto...", self.add_photos, processing=True, icon_name="photos")
@@ -766,6 +777,11 @@ class MainWindow(QMainWindow):
         step(0.95, "Sezioni e disegni")
         self._load_sections()
         self.proxies_pane.set_proxies(self.chunk.meta.get("proxies", []) if self.chunk else [])
+        if self.history is None:
+            self.history = UndoHistory(self._undo_state, self._undo_apply, lambda: self.chunk,
+                                       on_change=self._undo_actions)
+        else:
+            self.history.reset()
         if doc.path:
             self._add_recent(doc.path)
         # a project already opened in QGIS stays linked: its drawings keep updating there
@@ -822,6 +838,8 @@ class MainWindow(QMainWindow):
 
     def _dirty(self, flag: bool = True) -> None:
         self.setWindowModified(flag)
+        if flag and self.history is not None and not self._task_done:
+            self.history.record()
 
     def _update_title(self) -> None:
         name = self.doc.path.name if self.doc.path else "senza nome"
@@ -923,22 +941,40 @@ class MainWindow(QMainWindow):
     def _exc(self, prefix: str, exc: BaseException) -> None:
         self._error(f"{prefix}: {exc}", traceback.format_exc(), logged=False)
 
-    def run_task(self, label: str, fn, on_done=None, refresh: bool = True, save: bool = True) -> bool:
+    def run_task(self, label: str, fn, on_done=None, refresh: bool = True, save: bool = True,
+                 undo: bool = False) -> bool:
+        """``fn(progress)`` in the background, then the project saved and the views refreshed.
+        ``undo``: the step is an edit (refined markers, a patch) that Modifica > Annulla takes back;
+        so is a step announced with ``history.backup`` (points, faces); a processing step is not."""
         def done(result):
-            if save and self.doc.path:
-                try:
-                    self._store_drawings()
-                    self.doc.save()
-                except Exception as exc:
-                    log.error("Salvataggio non riuscito: %s\n%s", exc, traceback.format_exc())
-            elif not self.doc.path:
-                self._dirty(True)
-            if refresh:
-                self.refresh_all()
+            self._task_done = True
+            try:
+                if save and self.doc.path:
+                    try:
+                        self._store_drawings()
+                        self.doc.save()
+                    except Exception as exc:
+                        log.error("Salvataggio non riuscito: %s\n%s", exc, traceback.format_exc())
+                elif not self.doc.path:
+                    self._dirty(True)
+                if refresh:
+                    self.refresh_all()
+            finally:
+                self._task_done = False
+            if self.history is not None:
+                if undo or self.history.pending:
+                    self.history.record(label)
+                else:
+                    self.history.rebase()
             if on_done is not None:
                 on_done(result)
 
-        return self.runner.run(label, fn, done, self._error)
+        def failed(*args):
+            if self.history is not None:
+                self.history.discard_pending()
+            self._error(*args)
+
+        return self.runner.run(label, fn, done, failed)
 
     # ---------------------------------------------------------------- file
     def new_document(self) -> None:
@@ -1513,6 +1549,100 @@ class MainWindow(QMainWindow):
             self.run_task("Rilevamento marker", lambda p: self.chunk.detect_markers(v["target_type"], progress=p),
                           lambda ms: self.statusBar().showMessage(f"{len(ms)} marker rilevati", 8000))
 
+    # ---------------------------------------------------------------- undo and redo
+    def _undo_state(self) -> dict:
+        """What Modifica > Annulla takes back, as JSON-able parts (see ``gui.undo``)."""
+        ch = self.chunk
+        state = {"chunk": None if ch is None else ch.key,
+                 "units": [{**u.to_dict(), "attributes": dict(u.attributes or {})} for u in self.units],
+                 "quote": [dict(q) for q in self.quote], "sections": [dict(x) for x in self.sections],
+                 "pa": {"deleted": sorted(self.pa_deleted), "geom": sorted(self.pa_geom_changed),
+                        "pending": sorted(int(k) for k in self.pa_pending)}}
+        if ch is not None:
+            state.update(markers=[m.to_dict() for m in ch.markers], scalebars=[sb.to_dict() for sb in ch.scalebars],
+                         excluded=ch.meta.get("marker_excluded"),
+                         patches=(ch.meta.get("orthomosaic") or {}).get("patches"), region=ch.meta.get("region"))
+        return state
+
+    def _undo_apply(self, state: dict, parts: set, products: list) -> None:
+        """Put back the ``parts`` of a snapshot (and show the ``products`` whose files came back)."""
+        ch = self.chunk
+        if parts & {"units", "quote", "sections", "pa"}:
+            from ..archaeo.stratigraphy import UnitPolygon
+
+            if "units" in state:
+                self.units = [UnitPolygon.from_dict(d) for d in state["units"] or []]
+            if "quote" in state:
+                self.quote = [dict(q) for q in state["quote"] or []]
+            if "sections" in state:
+                self.sections = [dict(x) for x in state["sections"] or []]
+                self._save_sections()
+                self.sections_pane.set_sections(self.sections)
+            if "pa" in state:
+                pa = state["pa"] or {}
+                self.pa_deleted, self.pa_geom_changed = set(pa.get("deleted", [])), set(pa.get("geom", []))
+                pending = set(pa.get("pending", []))
+                self.pa_pending = {int(u.attributes["gid"]): u for u in self.units
+                                   if (u.attributes or {}).get("gid") is not None
+                                   and int(u.attributes["gid"]) in pending}
+            self._redraw_drawings()
+        if ch is not None and parts & {"markers", "scalebars", "excluded"}:
+            from ..core.marker import Marker, ScaleBar
+
+            if "markers" in state:
+                ch.markers = [Marker.from_dict(d) for d in state["markers"] or []]
+            if "scalebars" in state:
+                ch.scalebars = [ScaleBar.from_dict(d) for d in state["scalebars"] or []]
+            if "excluded" in state:
+                if state["excluded"]:
+                    ch.meta["marker_excluded"] = state["excluded"]
+                else:
+                    ch.meta.pop("marker_excluded", None)
+            self._markers_edited()
+        if ch is not None and "region" in state:
+            if state["region"]:
+                ch.meta["region"] = state["region"]
+            else:
+                ch.meta.pop("region", None)
+            self._region_changed("Regione di ricostruzione come prima")
+        if ch is not None and "patches" in state:
+            ch.meta.setdefault("orthomosaic", {})["patches"] = state["patches"] or []
+            if ch.orthomosaic_path is not None:
+                self.run_task("Patch dell'ortofoto", lambda p: ch.update_orthomosaic(progress=p),
+                              lambda _r: self._draw_patches(), refresh=False)
+            else:
+                self._draw_patches()
+        if products:
+            self.workspace.populate(self.doc)
+            if self.model_view.kind:
+                self.model_view.refresh(reset=False)
+        self._dirty(True)
+
+    def _undo_actions(self) -> None:
+        h = self.history
+        if h is None:
+            return
+        self.a_undo.setEnabled(h.can_undo())
+        self.a_redo.setEnabled(h.can_redo())
+        self.a_undo.setText(f"Annulla: {h.undo_text()}" if h.can_undo() else "Annulla")
+        self.a_redo.setText(f"Ripeti: {h.redo_text()}" if h.can_redo() else "Ripeti")
+
+    def undo(self) -> None:
+        if self.runner.busy:
+            self.statusBar().showMessage("Aspetta che finisca l'elaborazione in corso", 6000)
+            return
+        text = self.history.undo() if self.history is not None else None
+        if text:
+            self.statusBar().showMessage(f"Annullato: {text}", 6000)
+
+    def redo(self) -> None:
+        if self.runner.busy:
+            self.statusBar().showMessage("Aspetta che finisca l'elaborazione in corso", 6000)
+            return
+        text = self.history.redo() if self.history is not None else None
+        if text:
+            self.statusBar().showMessage(f"Ripetuto: {text}", 6000)
+
     def batch_process(self) -> None:
         """Flusso di lavoro > Elaborazione batch: steps over several chunks, the project saved after
         each one; an unfinished batch is offered to be resumed (``pyarchinit_photogrammetry.batch``)."""
@@ -1682,7 +1812,8 @@ class MainWindow(QMainWindow):
             self.log_pane.info(text)
             self.statusBar().showMessage(text, 15000)
 
-        self.run_task("Affinamento dei marker", lambda p: refine_markers(ch, markers, progress=p), done, refresh=False)
+        self.run_task("Affinamento dei marker", lambda p: refine_markers(ch, markers, progress=p), done, refresh=False,
+                      undo=True)
 
     def align_photos(self) -> None:
         if not self._need_chunk():
@@ -2091,6 +2222,8 @@ class MainWindow(QMainWindow):
         if not v:
             return
 
+        self.history.backup(["point_cloud"])
+
         def job(p):
             p(0.2, "Ritaglio")
             return self.chunk.crop_point_cloud(zmin=v["zmin"], zmax=v["zmax"] if v["use_zmax"] else None,
@@ -2436,6 +2569,8 @@ class MainWindow(QMainWindow):
             def job(p):
                 return remove_tie_points(ch, sel["ids"], optimize=vals["optimize"], progress=p)
 
+            self.history.backup(["tie_points", "reconstruction"])
+
             def done(out):
                 text = (f"Punti di legame: tolti {_it(out['removed'])}, restano {_it(out['remaining'])}; errore di "
                         f"riproiezione {_it(out['reprojection_error_before'], 3)} -> "
@@ -2473,6 +2608,8 @@ class MainWindow(QMainWindow):
         chunk = self.chunk
         keep = v.get("keep") == "keep" or v.get("keep_copy") is True
         label = (v.get("version_name") or "").strip() or name
+        if self.history is not None:  # Modifica > Annulla puts the files back
+            self.history.backup([product] + (["reconstruction"] if product == "tie_points" else []))
 
         def wrapped(p):
             kept = versions.keep_active(chunk, product, move=False) if keep else None
@@ -2645,6 +2782,8 @@ class MainWindow(QMainWindow):
 
             self.run_task("Esportazione dei ritagli", job, done, refresh=False, save=False)
             return
+
+        self.history.backup([k for k in v["what"] if k in ("point_cloud", "model")])
 
         def job(p):
             from ..core import versions
@@ -3285,6 +3424,8 @@ class MainWindow(QMainWindow):
         if chunk is not None and chunk is not self.chunk and kind in ("select_chunk", "chunk"):
             self.doc.chunk = chunk
             self.refresh_all(reset_views=True)
+            if self.history is not None:
+                self.history.reset()  # the history belongs to a chunk
             return
         if kind == "camera":
             self.open_photo(payload)
@@ -5006,6 +5147,8 @@ class MainWindow(QMainWindow):
         automatic classifiers, used to train the classifier)."""
         from ..ai.classify import set_class
 
+        if self.history is not None:
+            self.history.backup(["point_cloud"])
         set_class(self.chunk, mask, code, label=label)
 
     # ---------------------------------------------------------------- patches of the orthomosaic and texture
@@ -5086,6 +5229,8 @@ class MainWindow(QMainWindow):
             return
         ch = self.chunk
         view = self.ortho_view.visible_world_bounds()
+        if v["texture"]:
+            self.history.backup(["model_textured"])  # Modifica > Annulla puts the texture back too
 
         def job(p):
             from ..engine import patches as P
@@ -5105,7 +5250,7 @@ class MainWindow(QMainWindow):
                 self.log_pane.info(f"Texture corretta su {_it(tex['faces'])} facce")
             self._reload_ortho(view)
 
-        self.run_task("Patch dell'ortofoto", job, done, refresh=False)
+        self.run_task("Patch dell'ortofoto", job, done, refresh=False, undo=True)
 
     def update_ortho_patches(self) -> None:
         """Apply the patches added, changed or removed since the orthomosaic was written."""
@@ -5207,6 +5352,7 @@ class MainWindow(QMainWindow):
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return
             v = dlg.values()
+            self.history.backup(["model_textured"])
             self.run_task("Texture delle facce", lambda p: ch.patch_texture(v["photos"], faces=faces, mode=v["mode"],
                                                                             progress=p),
                           lambda r: (self.log_pane.info(f"Texture corretta su {_it(r['faces'])} facce"),
@@ -5666,6 +5812,8 @@ class MainWindow(QMainWindow):
             return
         from ..ai.classify import clear_manual
 
+        if self.history is not None:
+            self.history.backup(["point_cloud"])
         n = clear_manual(self.chunk)
         self.log_pane.info(f"Correzioni a mano dimenticate su {n} punti (le classi restano)")
         self._dirty(True)

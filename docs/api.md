@@ -214,6 +214,17 @@ that every photo sees from further than `max_angle` degrees from the vertical st
 | alignment | the faces of every panorama are one frame of a COLMAP rig (`engine.panorama.rig_configs`: a rig per `facce_360` folder, faces at their known rotation, no translation): they keep one centre and their relative rotation, their calibration is not refined (also in `optimize_cameras`), pairs of faces of the same panorama are not matched. Depth maps pair a face with faces of other panoramas looking up to 50 degrees away (the panoramas are turned anyhow) |
 | `engine.panorama.split_panorama(path, folder=None, size=None, fov=100, faces=None)`, `face_maps(...)`, `face_rotation(yaw, pitch)` | the faces alone |
 
+## Undo and redo (interface)
+
+`gui.undo.UndoHistory(get_state, set_state, get_chunk, limit=50, file_limit=10)`: `record(text=None)`
+after a change keeps the parts of `get_state()` (JSON-able) that differ from the last snapshot;
+`backup(products)` before an edit copies the files of those products of the chunk (`gui.undo.clone`:
+`clonefile` on macOS, else a copy) into `<chunk data>/undo/`, and the next `record` keeps them;
+`undo()`/`redo()` hand the parts back to `set_state(parts, names, products)` and swap the files;
+`rebase()` after processing (not an edit); `reset()` for another project or chunk (copies deleted).
+The window records on every change of the project, `run_task(..., undo=True)` for edits made in
+the background.
+
 ## Batch processing
 
 | Call | Description |
