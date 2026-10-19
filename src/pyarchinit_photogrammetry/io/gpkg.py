@@ -89,7 +89,9 @@ def create(con: sqlite3.Connection, srs: tuple[int, str, str]) -> None:
              "longitude/latitude coordinates in decimal degrees on the WGS 84 spheroid")]
     if srs[0] > 0 and srs[0] != 4326:
         rows.append((srs[1], srs[0], "EPSG", srs[0], srs[2], ""))
-    con.executemany("INSERT OR IGNORE INTO gpkg_spatial_ref_sys VALUES (?, ?, ?, ?, ?, ?)", rows)
+    # the columns named: GDAL and QGIS may add definition_12_063 (CRS WKT extension) to this table
+    con.executemany("INSERT OR IGNORE INTO gpkg_spatial_ref_sys (srs_name, srs_id, organization, "
+                    "organization_coordsys_id, definition, description) VALUES (?, ?, ?, ?, ?, ?)", rows)
 
 
 def ensure_table(con: sqlite3.Connection, table: str, geometry_type: str, columns: dict[str, str], srs_id: int,

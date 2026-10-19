@@ -131,3 +131,19 @@ def test_window_round_trip(chunk, tmp_path, monkeypatch):
     assert sorted(u.us for u in w.units) == ["1", "7"] and "1 modificate" in shown[-1]
     w.setWindowModified(False)
     w.close()
+
+
+def test_a_geopackage_touched_by_gdal_can_be_written_again(tmp_path):
+    """GDAL and QGIS add the column definition_12_063 to gpkg_spatial_ref_sys (CRS WKT extension):
+    writing a table again must not count on the six columns of the base standard."""
+    path = tmp_path / "disegni.gpkg"
+    gpkg.write_table(path, "punti", "POINT", {"nome": "TEXT"}, [(Point(1, 2), {"nome": "a"})], "EPSG:3004")
+    con = sqlite3.connect(path)
+    con.execute("ALTER TABLE gpkg_spatial_ref_sys ADD COLUMN definition_12_063 TEXT NOT NULL DEFAULT 'undefined'")
+    con.commit()
+    con.close()
+    gpkg.write_table(path, "linee", "POINT", {"nome": "TEXT"}, [(Point(3, 4), {"nome": "b"})], "EPSG:32637")
+    assert [v["nome"] for _g, v in gpkg.read_table(path, "linee")] == ["b"]
+    con = sqlite3.connect(path)
+    assert con.execute("SELECT COUNT(*) FROM gpkg_spatial_ref_sys WHERE srs_id = 32637").fetchone()[0] == 1
+    con.close()
