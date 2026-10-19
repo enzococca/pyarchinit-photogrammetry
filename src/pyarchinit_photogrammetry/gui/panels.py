@@ -358,6 +358,11 @@ class PhotosPane(QListWidget):
     def _tooltip(self, cam) -> str:
         f = self._flags.get(getattr(cam, "key", None))
         text = f"{cam.path}\n{'allineata' if cam.aligned else 'non allineata'}"
+        if not getattr(cam, "enabled", True):
+            text += " (disattivata)"
+        q = (getattr(cam, "meta", None) or {}).get("quality")
+        if q is not None:
+            text += f"\nQualita' dell'immagine {q:.2f}".replace(".", ",") + (" (sfocata)" if q < 0.5 else "")
         return text + (f"\nMarker: {', '.join(f[2])}" if f else "")
 
     def update_flags(self) -> None:

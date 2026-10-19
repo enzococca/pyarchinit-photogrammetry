@@ -911,6 +911,39 @@ def doctor():
     raise SystemExit(doctor_main())
 
 
+@app.command()
+def quality(project: Path, disable_below: Optional[float] = typer.Option(
+        None, help="disable the photos under this quality (0.5 suggested)"), chunk: Optional[str] = None):
+    """Image quality (sharpness, 0-1 relative to the sharpest photos) of every photo."""
+    from .engine.quality import estimate_quality, low_quality
+
+    doc, ch = _open(project, chunk)
+    q = estimate_quality(ch, progress=print_progress)
+    for cam in sorted(ch.cameras, key=lambda c: q.get(c.key, 1.0)):
+        if cam.key in q:
+            typer.echo(f"{q[cam.key]:.2f}  {cam.label}")
+    if disable_below is not None:
+        low = low_quality(ch, disable_below)
+        for cam in low:
+            cam.enabled = False
+        typer.echo(f"{len(low)} photos disabled (quality < {disable_below})")
+    doc.save()
+
+
+@app.command("add-video")
+def add_video(project: Path, video_path: Path, overlap: float = typer.Option(0.7, help="share of a frame in "
+                                                                                       "common with the next"),
+              every: Optional[float] = typer.Option(None, help="one frame every N seconds instead"),
+              max_frames: Optional[int] = None, folder: Optional[Path] = None, chunk: Optional[str] = None):
+    """Frames of a video added as photos (the DJI .SRT beside it gives their GPS positions)."""
+    from .engine.video import add_video as _add
+
+    doc, ch = _open(project, chunk)
+    cams = _add(ch, video_path, folder, overlap=overlap, every=every, max_frames=max_frames, progress=print_progress)
+    doc.save()
+    typer.echo(f"{len(cams)} frames added")
+
+
 @app.command("calibrate-colours")
 def calibrate_colours(project: Path, vignetting: bool = True, samples: int = 20000, chunk: Optional[str] = None):
     """Exposure gain of every photo and vignetting of every lens (used by orthomosaic and texture)."""

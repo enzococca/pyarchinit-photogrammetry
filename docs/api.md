@@ -195,6 +195,15 @@ that every photo sees from further than `max_angle` degrees from the vertical st
 | `build_orthomosaic(ghosting=False)` | where three or more of the candidate photos see a cell, the best one that agrees with their median colour (within 30 levels): people and vehicles seen by a few photos left out |
 | `build_orthomosaic(fill_holes=False)` | holes of at most 100 cells that no photo sees filled from their edges (`cv2.inpaint`, the cells of the same group only); larger holes stay transparent |
 
+## Image quality and video
+
+| Call | Description |
+| --- | --- |
+| `engine.quality.estimate_quality(chunk, cams=None)` | sharpness of every photo relative to the sharpest of the chunk (0-1, `camera.meta["quality"]`): per cell of a 6 x 6 grid with texture, the finest detail over the detail a few pixels wide, along x and y, the lower of the two (motion blur in one direction counts), 80th percentile of the cells; independent of how much texture the scene has |
+| `engine.quality.low_quality(chunk, threshold=0.5)`, `sharpness(image)` | the blurred photos; the measure alone |
+| `engine.video.add_video(chunk, video, folder=None, srt=None, overlap=0.7, every=None, max_frames=None)` | frames added as photos: a new one when the view has moved by `1 - overlap` of its width (median shift of ORB matches, a frame with too few matches only counts when sharp), the sharpest in the next 0.4 s; or one every `every` seconds. The DJI `.SRT` beside the video (`[latitude] [longitude] [abs_alt]`, `GPS(lon,lat,alt)` or `GPS (lon, lat, alt)`) gives every frame its position (EPSG:4326, interpolated in time) |
+| `engine.video.extract_frames(video, folder, ...)`, `read_srt(path)`, `position_at(track, t)` | the parts |
+
 ## Reconstruction region
 
 | Call | Description |

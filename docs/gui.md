@@ -144,6 +144,12 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
 
 ## Orthophoto at full resolution and patches
 
+* **Photos from a video** (*Flusso di lavoro > Aggiungi video*): the frames are chosen when the view has
+  moved by a share of its width (the sharpest around that moment) or one every few seconds, written
+  in a folder beside the video and added as photos; with the `.SRT` of a DJI drone beside the video
+  every frame gets its GPS position. **Image quality** (right click in the Photos pane): the sharpness
+  of every photo compared with the sharpest ones (in the tooltip, *sfocata* under 0.5), *Disattiva le
+  foto sfocate*, enable or disable the selected photos, masks of the selected photos.
 * **Reconstruction region** (*Flusso di lavoro > Regione di ricostruzione*): a box (yellow in the 3D
   view, *Regione* shows or hides it) around the tie points, turned to face the 3D view, over the
   selected polygon of the plan, or with typed centre, size and rotation; depth maps, dense cloud and

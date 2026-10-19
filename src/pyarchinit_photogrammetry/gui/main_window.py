@@ -193,6 +193,8 @@ class MainWindow(QMainWindow):
         self.photos = PhotosPane()
         self.photos.thumbs_progress.connect(self._thumbs_progress)
         self.photos.open_camera.connect(self.open_photo)
+        self.photos.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.photos.customContextMenuRequested.connect(self._photos_menu)
         self.log_pane = LogPane()
         self.console = ConsolePane(self._namespace)
         self.console.executed.connect(self._after_console)
@@ -320,6 +322,8 @@ class MainWindow(QMainWindow):
         self._act(m, "Aggiungi foto...", self.add_photos, processing=True, icon_name="photos")
         self._act(m, "Aggiungi cartella...", lambda: self.add_photos(folder=True), processing=True,
                   icon_name="folder_photos")
+        self._act(m, "Aggiungi video...", self.add_video, processing=True, icon_name="video",
+                  tip="Fotogrammi scelti dal video (nitidi, con la sovrapposizione giusta), con il GPS dei droni DJI")
         self._act(m, "Ricollega foto (altra cartella)...", lambda: self.relink_photos(), icon_name="relink",
                   tip="Collega le foto ai file con lo stesso nome in un'altra cartella (copia su un altro disco, "
                       "cartella spostata o tenuta «solo online» da Dropbox)")
@@ -1328,6 +1332,94 @@ class MainWindow(QMainWindow):
             self._started = True
             self.run_task("Aggiunta foto", lambda p: self.chunk.add_photos(paths, recursive=folder),
                           lambda cams: self.statusBar().showMessage(f"{len(cams)} foto aggiunte", 8000))
+
+    def add_video(self) -> None:
+        """Workflow > Aggiungi video: frames chosen for the reconstruction, GPS from DJI subtitles."""
+        if not self._need_chunk():
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Video", self._last_dir(),
+                                              "Video (*.mp4 *.MP4 *.mov *.MOV *.m4v *.avi *.mkv *.mts *.MTS)")
+        if not path:
+            return
+        v = ParamDialog.ask(self, "Fotogrammi dal video", [
+            Field("mode", "Scelta dei fotogrammi", "auto",
+                  choices=[("auto", "Automatica: quando la vista si e' spostata (il piu' nitido)"),
+                           ("every", "Uno ogni tot secondi")]),
+            Field("overlap", "Sovrapposizione tra fotogrammi (%)", 70.0, minimum=30.0, maximum=95.0, decimals=0),
+            Field("every", "Secondi tra due fotogrammi", 1.0, minimum=0.1, maximum=60.0, decimals=1),
+            Field("max_frames", "Fotogrammi al massimo (0 = nessun limite)", 0, minimum=0, maximum=100000)],
+            intro=f"{Path(path).name}: i fotogrammi vanno nella cartella «{Path(path).stem}_fotogrammi» accanto al "
+                  "video. Se accanto c'e' il file .SRT del drone DJI, ogni fotogramma prende la sua posizione GPS.")
+        if not v:
+            return
+        from ..engine.video import add_video
+
+        self._started = True
+        chunk = self.chunk
+        self.run_task("Fotogrammi dal video", lambda p: add_video(
+            chunk, path, overlap=v["overlap"] / 100.0, every=v["every"] if v["mode"] == "every" else None,
+            max_frames=int(v["max_frames"]) or None, progress=p),
+            lambda cams: self.statusBar().showMessage(
+                f"{len(cams)} fotogrammi aggiunti" + (" con il GPS" if cams and cams[0].reference.location else ""),
+                10000))
+
+    def _photos_menu(self, pos) -> None:
+        """Right click in the Photos pane: quality, enable/disable, masks of the selected photos."""
+        if self.chunk is None:
+            return
+        cams = self.photos.selected_cameras()
+        menu = QMenu(self)
+        if len(cams) == 1:
+            menu.addAction(icon("photos"), "Apri", lambda: self.open_photo(cams[0]))
+        menu.addAction(icon("quality"), "Stima la qualita' delle immagini", self.estimate_quality)
+        menu.addAction("Disattiva le foto sfocate (qualita' sotto 0,5)", self.disable_blurred)
+        if cams:
+            menu.addSeparator()
+            menu.addAction(f"Disattiva le {len(cams)} foto selezionate", lambda: self.enable_photos(cams, False))
+            menu.addAction(f"Attiva le {len(cams)} foto selezionate", lambda: self.enable_photos(cams, True))
+            menu.addSeparator()
+            menu.addAction(icon("mask"), "Maschere dal modello (foto selezionate)", self.masks_from_model)
+            menu.addAction(icon("mask"), "Maschere con SAM 2.1 (foto selezionate)", self.masks_with_sam)
+            menu.addAction("Rimuovi le maschere delle foto selezionate", lambda: self.masks_remove(selected=True))
+        menu.exec(self.photos.mapToGlobal(pos))
+
+    def estimate_quality(self) -> None:
+        if not self._need_chunk():
+            return
+        from ..engine.quality import THRESHOLD, estimate_quality
+
+        chunk = self.chunk
+
+        def done(q):
+            low = sorted((v, k) for k, v in q.items() if v < THRESHOLD)
+            self.photos.update_flags()
+            self._dirty(True)
+            text = f"Qualita' stimata per {len(q)} foto."
+            if low:
+                names = ", ".join(chunk.camera(k).label for _v, k in low[:12]) + (" ..." if len(low) > 12 else "")
+                text += f" {len(low)} sfocate rispetto alle altre (sotto 0,5): {names}"
+            self.log_pane.info(text)
+            self.statusBar().showMessage(text[:200], 15000)
+
+        self.run_task("Qualita' delle immagini", lambda p: estimate_quality(chunk, progress=p), done, refresh=False)
+
+    def disable_blurred(self) -> None:
+        if not self._need_chunk():
+            return
+        from ..engine.quality import low_quality
+
+        if not any(c.meta.get("quality") is not None for c in self.chunk.cameras):
+            self._warn("Stima prima la qualita' delle immagini (tasto destro nel pannello Foto).")
+            return
+        self.enable_photos(low_quality(self.chunk), False)
+
+    def enable_photos(self, cams, enabled: bool) -> None:
+        for c in cams:
+            c.enabled = bool(enabled)
+        self.photos.update_flags()
+        self._dirty(True)
+        self.statusBar().showMessage(f"{len(cams)} foto {'attivate' if enabled else 'disattivate'}: valgono dal "
+                                     "prossimo allineamento o dalla prossima costruzione", 10000)
 
     def detect_markers(self) -> None:
         if not self._need_chunk():
