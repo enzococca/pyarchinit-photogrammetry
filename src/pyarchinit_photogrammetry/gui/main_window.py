@@ -175,6 +175,7 @@ class MainWindow(QMainWindow):
         self.ortho_view.dem_edit_finished.connect(self._dem_edit_drawn)
         self.ortho_view.dem_edit_requested.connect(self._dem_edit_selected)
         self.ortho_view.area_finished.connect(self._area_drawn)
+        self.ortho_view.chart_finished.connect(self._chart_drawn)
         self.ortho_view.area_requested.connect(self._area_selected)
         self.ortho_view.patch_requested.connect(self.patch_with_selection)
         self.ortho_view.line_finished.connect(self._section_drawn)
@@ -608,6 +609,10 @@ class MainWindow(QMainWindow):
         self._act(m, tr("Esposizione del DEM"), lambda: self.terrain_raster("aspect"), processing=True,
                   icon_name="aspect",
                   tip=tr("Raster dell'esposizione (verso dove scende il terreno), gradi dal nord"))
+        self._act(m, tr("Calibra il colore con la tabella colori..."), self.calibrate_colour_chart, processing=True,
+                  icon_name="colour",
+                  tip=tr("Un riquadro attorno a una ColorChecker fotografata nello scavo: i colori Munsell misurati "
+                         "con Misura area diventano confrontabili tra giorni e camere diversi"))
         self._act(m, tr("Visualizzazioni del rilievo..."), lambda: self.relief_visualisation(), processing=True,
                   icon_name="relief",
                   tip=tr("Sky-view factor, openness, rilievo locale e multiscala, ombreggiatura da piu' direzioni: "
@@ -3455,7 +3460,15 @@ class MainWindow(QMainWindow):
                 model = ch.model
                 if model is not None:
                     model.apply_transform(ch.transform)
-            return surface_area(ch.dem_path, geom, model=model)
+            r = surface_area(ch.dem_path, geom, model=model)
+            if ch.orthomosaic_path is not None:  # and its colour, when colour-science is there
+                from ..archaeo.munsell import area_colour
+
+                try:
+                    r["colour"] = area_colour(ch.orthomosaic_path, geom, (ch.meta.get("colour_chart") or {}).get("ccm"))
+                except (ImportError, ValueError) as exc:
+                    log.info("Colore Munsell non calcolato: %s", exc)
+            return r
 
         def done(r):
             if "plan" not in r:
@@ -3469,6 +3482,10 @@ class MainWindow(QMainWindow):
                 lines.append(tr("Dal modello ({0} facce): pianta {1:.3f} m2, superficie {2:.3f} m2",
                                 r['model_faces'], r['model_plan'], r['model_surface']))
             text = "\n".join(decimal_comma(line) for line in lines)
+            if r.get("colour"):  # Munsell notation keeps its points
+                c = r["colour"]
+                text += "\n" + tr("Colore Munsell {0} ({1}){2}", c["chip"], c["notation"],
+                                  "" if ch.meta.get("colour_chart") else tr(", senza calibrazione con la tabella colori"))
             coords = list(geom.exterior.coords) if geom.geom_type == "Polygon" else \
                 list(max(geom.geoms, key=lambda g: g.area).exterior.coords)
             self._add_line_feature("Misure", coords, "#ff006e", decimal_comma(f"{r['surface']:.2f} m2"),
@@ -3477,6 +3494,43 @@ class MainWindow(QMainWindow):
             self._info("Misura dell'area", text)
 
         self.run_task("Misura dell'area", job, done, refresh=False, save=False)
+
+    def calibrate_colour_chart(self) -> None:
+        """Strumenti > Calibra il colore con la tabella colori: a box around a ColorChecker
+        photographed in the trench, on the orthomosaic (:mod:`archaeo.munsell`)."""
+        if not self._need_chunk(product="orthomosaic"):
+            return
+        self._show_raster("ortho")
+        self.show_view(self.ortho_view)
+        self.ortho_view.set_mode("chart")
+        self.statusBar().showMessage(tr("Trascina un riquadro attorno alla tabella colori (ColorChecker da 24 colori), "
+                                        "oppure clic per i vertici e doppio clic per chiudere"), 30000)
+
+    def _chart_drawn(self, xy) -> None:
+        from datetime import datetime
+
+        from ..ai.sam import read_orthomosaic
+        from ..archaeo.munsell import calibrate_chart
+
+        self.set_draw_mode("pan")
+        ch = self.chunk
+        (x0, y0), (x1, y1) = np.min(xy, axis=0), np.max(xy, axis=0)
+
+        def job(p):
+            p(0.2, "Ricerca della tabella colori")
+            img, _valid, _tr = read_orthomosaic(ch.orthomosaic_path, (x0, y0, x1, y1), max_side=2400)
+            return calibrate_chart(img)
+
+        def done(cal):
+            ch.meta["colour_chart"] = {"ccm": cal["ccm"], "loss": cal["loss"], "bounds": [float(x0), float(y0),
+                                                                                          float(x1), float(y1)],
+                                       "date": datetime.now().isoformat(timespec="seconds")}
+            self._dirty(True)
+            self._info("Colore Munsell", tr("Tabella colori trovata: corretti, i 24 colori distano in media {0} "
+                                            "(CIEDE2000) dai valori di riferimento. Da ora i colori Munsell misurati "
+                                            "(Misura area) sono calibrati.", number(cal["loss"], 1)))
+
+        self.run_task("Calibrazione del colore", job, done, refresh=False)
 
     def terrain_raster(self, kind: str) -> None:
         """Strumenti > Pendenza / Esposizione del DEM: a raster of degrees, shown at once."""

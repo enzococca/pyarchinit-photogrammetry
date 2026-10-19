@@ -286,7 +286,7 @@ class RasterView(_ZoomView):
     file at the resolution of the screen, up to the full one (``detail``), in a thread."""
 
     DRAW_MODES = ("polygon", "line", "measure", "quota", "marker", "crop", "patch", "dem_edit")
-    AREA_MODES = ("crop", "patch", "dem_edit", "area")  # drag a box or click a polygon
+    AREA_MODES = ("crop", "patch", "dem_edit", "area", "chart")  # drag a box or click a polygon
     SAM_TOOLS = ("tap", "box", "area")
 
     mouse_world = Signal(float, float, object)  # x, y, z or None
@@ -299,6 +299,7 @@ class RasterView(_ZoomView):
     dem_edit_requested = Signal()  # "edit the DEM in the selected polygon" from the selection menu
     area_finished = Signal(object)  # (N,2) world XY: an area to measure
     area_requested = Signal()  # "measure the selected polygon" from the selection menu
+    chart_finished = Signal(object)  # (N,2) world XY: the area of a colour chart on the orthomosaic
     line_finished = Signal(object, object)
     quota_clicked = Signal(float, float)  # spot height at world x, y
     marker_clicked = Signal(float, float)  # a marker at world x, y (the height from the DEM)
@@ -1249,7 +1250,7 @@ class RasterView(_ZoomView):
 
     def _area_signal(self, mode: str):
         return {"patch": self.patch_finished, "dem_edit": self.dem_edit_finished,
-                "area": self.area_finished}.get(mode, self.crop_finished)
+                "area": self.area_finished, "chart": self.chart_finished}.get(mode, self.crop_finished)
 
 
 class PhotoView(_ZoomView):

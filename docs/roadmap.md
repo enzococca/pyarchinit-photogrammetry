@@ -107,7 +107,8 @@ markers in too few photos.
   drawn on).
 * Stone-by-stone drawing with SAM on orthomosaics and elevations. *Done* (SAM tool *Pietre*,
   `ppg stones`).
-* Munsell colour of the US from orthomosaics calibrated with a colour chart.
+* Munsell colour of the US from orthomosaics calibrated with a colour chart. *Done* (*Misura area*,
+  *Calibra il colore con la tabella colori*, `ppg munsell`).
 * QField package: orthomosaic and layers on the tablet in the trench, edits back to PyArchInit.
 * Machine-readable paradata (provenance of every product) linked to the PyArchInit media.
 * Pottery: rim diameter from a sherd, profile-based typology search against `pottery_table`.

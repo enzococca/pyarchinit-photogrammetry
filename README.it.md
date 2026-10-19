@@ -195,6 +195,8 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
   con la normal map cotta dal modello completo, video di sorvolo.
 * **Misure**: area in pianta e della superficie (DEM e modello), pendenza, esposizione e altezza dal
   suolo sotto il cursore, raster di pendenza ed esposizione, nuvola densa colorata per altezza dal suolo.
+* **Colore Munsell** di un'area dell'ortofoto, calibrato con una ColorChecker fotografata nello
+  scavo (`ppg munsell`).
 * **Disegno pietra per pietra** con SAM 2.1 su ortofoto e prospetti dei muri: DXF, SVG in scala,
   GeoJSON (`ppg stones`).
 * **Fasi dello scavo**: chunk per data, volume asportato da un rilievo all'altro e per US, rapporti

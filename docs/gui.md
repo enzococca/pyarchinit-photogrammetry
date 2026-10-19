@@ -191,6 +191,14 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   exposed earlier *covers* the units it overlaps in plan exposed later; the ticked relations go into
   the US forms of PyArchInit in both directions (never twice). A double click on a phase shows it;
   *Salva CSV* writes the report.
+* **Munsell colour**: *Misura area* (a box, a polygon or a selected unit) also gives the colour of the
+  orthomosaic inside it - the median of its pixels without the darkest and brightest tenth (shadows,
+  pebbles, glare) - as Munsell notation and nearest chip of a soil chart (`10YR 5/4`). Photograph a
+  ColorChecker Classic (24 patches) in the trench and use *Strumenti > Calibra il colore con la tabella
+  colori* (a box around it on the orthomosaic): the 3 x 3 correction of that survey (fitted in linear
+  light against the reference patches, residual reported as CIEDE2000) is kept in the chunk, and the
+  colours of different days and cameras become comparable. Needs colour-science (in `[gui]`, `[all]`,
+  or `[munsell]`).
 * **Stone-by-stone drawing** (SAM tool *Pietre*, on the orthomosaic or on the orthophoto of an elevation):
   drag a box over a wall face or a paving and SAM 2.1 outlines every object in it; the stones stay
   (equivalent diameter between the smallest and the largest stone asked, compact shape), the mortar and

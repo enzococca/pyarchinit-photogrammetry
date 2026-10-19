@@ -211,6 +211,8 @@ is installed on first use (PyTorch in a separate environment, see the same page)
 * **Measures**: area in plan and of the surface (DEM and model), slope, aspect and height above the
   ground under the cursor, slope and aspect rasters, the dense cloud coloured by height above the
   ground.
+* **Munsell colour** of an area of the orthomosaic, calibrated with a ColorChecker photographed in
+  the trench (`ppg munsell`).
 * **Stone-by-stone drawing** with SAM 2.1 on orthomosaics and wall elevations: DXF, SVG at scale,
   GeoJSON (`ppg stones`).
 * **Excavation phases**: chunks by date, the volume removed from one survey to the next and in every

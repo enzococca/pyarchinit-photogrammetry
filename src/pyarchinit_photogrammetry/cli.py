@@ -253,6 +253,42 @@ def stones(project: Path, out: Path = typer.Option(..., help="drawing: .dxf, .sv
 
 
 @app.command()
+def munsell(project: Path,
+            chart: Optional[str] = typer.Option(None, help="calibrate first with the ColorChecker inside "
+                                                           "'xmin,ymin,xmax,ymax' of the orthomosaic"),
+            area: Optional[str] = typer.Option(None, help="the colour inside 'xmin,ymin,xmax,ymax'"),
+            units: bool = typer.Option(False, help="the colour of every unit drawn on the chunk"),
+            chunk: Optional[str] = None):
+    """Munsell colour from the orthomosaic (median of an area, shadows and glare left out),
+    calibrated with a colour chart photographed in the trench."""
+    from shapely.geometry import box
+
+    from .ai.sam import read_orthomosaic
+    from .archaeo import munsell as mu
+    from .archaeo.timeline import units_of
+
+    doc, ch = _open(project, chunk)
+    if ch.orthomosaic_path is None:
+        raise typer.BadParameter("build the orthomosaic first")
+    if chart:
+        b = tuple(float(v) for v in chart.split(","))
+        img, _valid, _tr = read_orthomosaic(ch.orthomosaic_path, b, max_side=2400)
+        cal = mu.calibrate_chart(img)
+        ch.meta["colour_chart"] = {"ccm": cal["ccm"], "loss": cal["loss"], "bounds": list(b)}
+        doc.save()
+        typer.echo(f"colour chart: mean CIEDE2000 of the patches after correction {cal['loss']:.2f}")
+    ccm = (ch.meta.get("colour_chart") or {}).get("ccm")
+    targets = []
+    if area:
+        targets.append((area, box(*(float(v) for v in area.split(",")))))
+    if units:
+        targets += [(f"{u.tipo or 'US'} {u.us or '?'}", u.geometry) for u in units_of(ch)]
+    for name, geom in targets:
+        c = mu.area_colour(ch.orthomosaic_path, geom, ccm)
+        typer.echo(f"{name}: {c['chip']} ({c['notation']}){'' if ccm else ', not calibrated'}")
+
+
+@app.command()
 def precision(project: Path, marker_px: float = typer.Option(0.5, help="how well markers are measured (pixels)"),
               chunk: Optional[str] = None):
     """Precision of cameras, markers and tie points from the covariance of the bundle adjustment,
