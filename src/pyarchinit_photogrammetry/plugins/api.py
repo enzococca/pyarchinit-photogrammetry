@@ -136,6 +136,18 @@ class Context:
         self.contributions.exporters.append(exporter)
         return exporter
 
+    def store_drawings(self) -> None:
+        """Write what the window shows (units and spot heights drawn, stones, sections) into the
+        project, so that ``chunk.meta`` and the files beside the project hold it; nothing in the
+        command line, where the project read from its file already holds everything."""
+        window = self.window
+        if window is None:
+            return
+        for name in ("_store_drawings", "_save_sections"):
+            method = getattr(window, name, None)
+            if method is not None:
+                method()
+
     def run(self, title: str, function: Callable, done: Callable | None = None) -> object:
         """``function(progress)`` with a progress bar: in the background in the window (``done(result)``
         afterwards, in the interface thread), at once in the command line (``done`` too)."""
