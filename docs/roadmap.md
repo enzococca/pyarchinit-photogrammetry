@@ -48,23 +48,83 @@ poses and GCPs imported from WebODM; markers placed on one photo (on the surface
 the cloud or the orthophoto; guided placement with blue flags to confirm in the photos, photo
 filters by marker, point and area, estimated coordinates in the Reference pane.
 
-## 0.7 - Interface
+## 0.7 - Updates, speed and image quality
 
-* Batch processing over several chunks.
+* **Automatic update check**: the application looks for a new release at start-up (at most
+  once a day, can be switched off) and from *Aiuto > Controlla aggiornamenti*; it downloads the
+  installer for the platform and, on macOS, replaces the application and restarts it.
+* **Native core in Rust** (`pyarchinit-photogrammetry-core`, imported as `ppg_core`, PyO3 + rayon),
+  optional, with the numpy code kept as fallback and as the reference the tests compare it with.
+  Measured on a prototype (same results bit for bit): fusion of the depth maps of one photo
+  530 ms -> 14 ms, orthomosaic scoring of a 512 x 512 tile in 8 photos 87 ms -> 6 ms (2.5-4x from
+  compiled code, the rest from using every core without the GIL). First kernels: depth-map
+  fusion, orthomosaic and texture projection/scoring/painting, confidence; CPU depth maps of
+  several photos at once.
+* **Seamless orthomosaic and texture**: two-band blending (low frequencies averaged over the
+  photos, details from the best one), exposure and vignetting compensation between photos,
+  ghosting filter for people and vehicles seen in a few photos, smoother seams, hole filling.
+* **Image masks**: from SAM, from a background photo, from the model, imported and exported;
+  used when matching, in the depth maps, the orthomosaic and the texture; stationary tie points
+  left out for turntables with a fixed background.
+* **Orthomosaic and DEM on a plane or a cylinder**: wall elevations, wells, apses, towers.
+* **DEM editing**: fill an area with a constant height, the best-fit plane, IDW or a linear
+  interpolation, breaklines; kept as a version of the DEM, used by contours and volumes.
+* **Reconstruction region**: a 3D box that limits depth maps, cloud, mesh, DEM and orthomosaic.
+
+## 0.8 - Acquisition and precision
+
+* Fisheye and 360-degree cameras (COLMAP fisheye models; equirectangular photos split into a rig
+  of virtual pinhole cameras).
+* Video import with automatic choice of the frames, image quality (blur) estimation, GPS from
+  the SRT files of DJI drones.
+* Automatic refinement of the estimated marker projections (blue flags) by image correlation.
+* Precision of markers and cameras from the covariance of the bundle adjustment; uncertainty map
+  of the DEM; spot heights with their uncertainty in PyArchInit and IFC.
+* Field check before leaving the site: coverage map (areas seen by fewer than three photos),
+  blurred photos, markers seen by too few photos.
+
+## 0.9 - Everyday work
+
+* Batch processing over several chunks, saving after each step, resuming after a power cut,
+  retrying a failed step.
+* Undo and redo for drawings, markers, patches, scale bars and point edits.
+* Diagnostics: matching graph, matches between two photos, residuals in the photo view, camera
+  calibration dialog with distortion plot, merging markers.
+* Measures: 3D area on the model, slope, aspect and height above ground under the cursor,
+  height-above-ground view of the cloud, aspect raster.
+* Exports: Cloud Optimized GeoTIFF (JPEG, WebP, ZSTD), COPC, Cesium 3D Tiles, GLB, normal maps
+  for light models, fly-through video.
+* Laser scans: E57 and PTX import, registration on the photogrammetric chunk, colours from the
+  photos.
 * Section and plan-slice tools drawn directly in the 3D view; markers moved in 3D.
 * PyArchInit panel: browsing media linked to US.
 * English/Italian interface translation.
 
-## Engine
+## 1.0 - Archaeology first
 
-* Plane-sweep MVS backend for strongly converging close-range photos (a first prototype on the
-  Apple GPU found the same depths as the CPU path but ran 30 times slower than OpenCV SGBM).
-* Seamless texture blending and multi-page atlases.
-* Rig and multi-camera support, rolling-shutter compensation for drones.
-* E57 import/export, Cloud Optimized GeoTIFF output, tiled 3D (3D Tiles/I3S).
-
-## Archaeology and BIM
-
-* Profile-based pottery typology search against `pottery_table`.
+* Relief visualisation of DEMs: sky-view factor, positive and negative openness, local relief
+  model, multi-directional hillshade, multi-scale relief (walls and ditches barely visible on a
+  tell).
+* Excavation over time: phases (chunks by date) aligned together, volume removed for each US,
+  timeline in the views, stratigraphic relations suggested from the order of removal.
+* Stone-by-stone drawing with SAM on orthomosaics and elevations.
+* Munsell colour of the US from orthomosaics calibrated with a colour chart.
+* QField package: orthomosaic and layers on the tablet in the trench, edits back to PyArchInit.
+* Machine-readable paradata (provenance of every product) linked to the PyArchInit media.
+* Pottery: rim diameter from a sherd, profile-based typology search against `pottery_table`.
 * Automatic US proposal from SAM masks + stratigraphic relations for the Extended Matrix.
 * IFC with stratigraphic relations and s3dgraphy/StratiGraph identifiers (`node_uuid`).
+
+## Research
+
+* CPU PatchMatch multi-view stereo in the native core (COLMAP's needs CUDA, which the Mac does not
+  have; today the CPU path is two-view SGBM). A plane-sweep prototype on the Apple GPU found the
+  same depths as the CPU path but ran 30 times slower than OpenCV SGBM.
+* Own bundle adjustment in the native core: true distance constraints for scale bars,
+  rolling-shutter compensation for drones, GNSS bias (pycolmap does not accept custom costs).
+* Multi-page texture atlases, I3S.
+
+## Not planned
+
+Network and cloud processing, satellite imagery, planetary coordinate systems, aerial lidar
+calibration, powerline detection, agricultural prescription maps.
