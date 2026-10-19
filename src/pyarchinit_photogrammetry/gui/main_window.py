@@ -6080,10 +6080,15 @@ class MainWindow(QMainWindow):
 
         def job(p):
             s = sections.plan_slice(self.chunk, z0, classes=classes)
-            s.to_dxf(out, world=True)
+            if s.polylines:
+                s.to_dxf(out, world=True)
             return s
 
         def done(sec):
+            if not sec.polylines:  # above or below the model: nothing to draw, no empty drawing written
+                self.statusBar().showMessage(tr("Il piano a quota {0} m non taglia il modello: nessuna pianta",
+                                                f"{z0:.2f}"), 15000)
+                return
             for pl in sec.polylines:
                 self._add_line_feature(f"Pianta a quota {z0:.2f} m", pl[:, :2], "#ff00ff",
                                        attrs={"quota": z0, "dxf": str(out)})

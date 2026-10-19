@@ -1933,6 +1933,7 @@
   "Il chunk {0} e' stato prima messo in bolla (come per il DEM).": "The chunk {0} was levelled first (as for the DEM).",
   "Il classificatore impara dai punti di cui conosci la classe: con il lazo (vista 3D) assegna la classe giusta ad alcuni gruppi di punti di ogni tipo (almeno due classi), poi addestralo. Usa la geometria attorno a ogni punto a tre scale, l'altezza sul terreno e il colore.\n\nClassi corrette a mano: {0}.\nClassi presenti: {1}.": "The classifier learns from the points whose class you know: with the lasso (3D view) assign the right class to a few groups of points of every kind (at least two classes), then train it. It uses the geometry around every point at three scales, the height above the ground and the colour.\n\nClasses corrected by hand: {0}.\nClasses present: {1}.",
   "Il database contiene {0} siti (scavi).": "The database holds {0} sites (excavations).",
+  "Il piano a quota {0} m non taglia il modello: nessuna pianta": "The plane at height {0} m does not cut the model: no plan",
   "Il prospetto «{0}» non ha piu' i suoi file.": "The elevation «{0}» no longer has its files.",
   "Il sistema del progetto {0} (scene locali di ArcGIS)": "The system of the project {0} (ArcGIS local scenes)",
   "Importati {0} chunk da Metashape": "Imported {0} chunks from Metashape",

@@ -58,20 +58,29 @@ def test_section_and_slice_from_the_3d_view(window, monkeypatch):
     w.runner.wait()
     app.processEvents()
     assert got and np.allclose(got[0][0], a) and len(w.sections) == 1
-    # a plan slice at the height of a picked point
+    # a plan slice at the height of a picked point: the middle of the tie points, which the plane cuts
+    # (an extreme one may lie above or below the model, whose edges change with the meshing)
+    c = pts[np.argmin(np.linalg.norm(pts - np.median(pts, axis=0), axis=1))]
     asked = []
-    z = float(ch.to_world(a[None])[0, 2])
+    z = float(ch.to_world(c[None])[0, 2])
 
     def ask(cls, parent, title, fields, intro=""):
         asked.append(fields[0].default)
         return {"z": fields[0].default}
 
     monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(ask))
-    mv.slice_requested.emit(a)
+    mv.slice_requested.emit(c)
     w.runner.wait()
     app.processEvents()
     assert asked and asked[0] == pytest.approx(z, abs=1e-3)
     assert any(name.startswith("Pianta a quota") for name in w.line_layers)
+    # a plane above the model cuts nothing: said, and no empty drawing written
+    monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(lambda cls, *a, **k: {"z": z + 100.0}))
+    w.plan_slice()
+    w.runner.wait()
+    app.processEvents()
+    assert "non taglia il modello" in w.statusBar().currentMessage()
+    assert not (w.doc.path.parent / f"pianta_{z + 100.0:.3f}.dxf").exists()
 
 
 def test_marker_moved_in_3d(window, monkeypatch):
