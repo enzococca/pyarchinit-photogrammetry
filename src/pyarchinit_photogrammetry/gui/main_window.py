@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
+import sys
 import traceback
 from pathlib import Path
 
@@ -13,16 +15,18 @@ from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QDockWidget, QFileDialog, QFrame,
                                QInputDialog, QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
-                               QScrollArea, QStackedWidget, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget)
+                               QScrollArea, QStackedWidget, QStatusBar, QTabWidget, QToolBar, QToolButton, QVBoxLayout,
+                               QWidget)
 
 from .. import __version__, updates
 from ..app import app as application
 from ..core.document import Document
-from . import theme
+from . import i18n, theme
 from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelectionDialog, IfcPreviewDialog,
                       ImageDialog, ParamDialog, PatchDialog,
                       PublishDialog, QuotaDialog, SiteChoiceDialog, SiteDialog, TableDialog, UnitDialog, UsFormDialog,
                       choice, message, short_label)
+from .i18n import decimal_comma, number, thousands_points, tr, translate
 from .icons import app_icon, icon
 from .image_views import US_COLORS, PhotoView, RasterView
 from .model_view import ModelView
@@ -58,14 +62,22 @@ def _outlined(rgba: np.ndarray, polygon, bounds) -> np.ndarray:
 
 
 def _compass(deg: float) -> str:
-    """The point of the compass of a direction in degrees from north (Italian initials)."""
-    return ["N", "NE", "E", "SE", "S", "SO", "O", "NO"][int((deg % 360) / 45 + 0.5) % 8]
+    """The point of the compass of a direction in degrees from north (initials of the interface language)."""
+    points = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"] if i18n.current() == "it" else \
+        ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+    return points[int((deg % 360) / 45 + 0.5) % 8]
 
 
 def _it(value: float, decimals: int = 0) -> str:
-    """A number written the Italian way: 1.234.567 or 1.234,56."""
-    text = f"{value:,.{decimals}f}"
-    return text.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+    """A number as the interface writes it: 1.234,56 in Italian, 1,234.56 in English."""
+    return number(value, decimals)
+
+
+class _StatusBar(QStatusBar):
+    """The status bar: its messages in the language of the interface (also those of the engine)."""
+
+    def showMessage(self, text: str, timeout: int = 0) -> None:  # noqa: N802 - Qt name
+        super().showMessage(translate(text), timeout)
 CROP_PRODUCTS = [("dem", "DEM"), ("orthomosaic", "Ortofoto"), ("model", "Modello"), ("point_cloud", "Nuvola densa")]
 SAM_TOOLS = {"tap": "Tocco: clic sull'oggetto", "box": "Riquadro: un oggetto nel riquadro",
              "area": "Area: tutte le unita' nel riquadro"}
@@ -82,6 +94,7 @@ class MainWindow(QMainWindow):
         """``check_updates``: look for a new version a few seconds after start-up (once a day,
         when enabled in *Aiuto*); ``None`` = unless ``PPG_NO_UPDATE_CHECK`` is set."""
         super().__init__()
+        self.setStatusBar(_StatusBar(self))
         self._autoconnect = autoconnect
         self.setWindowTitle(APP_TITLE)
         self.setWindowIcon(app_icon())
@@ -114,6 +127,9 @@ class MainWindow(QMainWindow):
         self.update_checker = UpdateChecker(self)
         self.update_checker.finished.connect(self._updates_checked)
         self._pending_update: Path | None = None  # new application swapped in when the window closes
+        self._relaunch_on_close = False  # a new copy starts when this one closes (Vista > Lingua)
+        if i18n.current() != "it":  # the menu bar of macOS is native: its menus are never shown as widgets
+            i18n.translate_menus(self)
         if check_updates if check_updates is not None else not os.environ.get("PPG_NO_UPDATE_CHECK"):
             QTimer.singleShot(5000, self._auto_check_updates)
 
@@ -132,9 +148,9 @@ class MainWindow(QMainWindow):
         self.model_view.photos_point_requested.connect(self.filter_photos_by_point)
         self.ortho_view = RasterView()
         self.photo_view = PhotoView()
-        self.tabs.addTab(self.model_view, icon("view3d"), "Modello")
-        self.tabs.addTab(self.ortho_view, icon("view_ortho"), "Ortofoto / DEM")
-        self.tabs.addTab(self.photo_view, icon("view_photo"), "Foto")
+        self.tabs.addTab(self.model_view, icon("view3d"), tr("Modello"))
+        self.tabs.addTab(self.ortho_view, icon("view_ortho"), tr("Ortofoto / DEM"))
+        self.tabs.addTab(self.photo_view, icon("view_photo"), tr("Foto"))
         self.start_page = StartPage()
         self.start_page.new_requested.connect(self.new_document)
         self.start_page.open_requested.connect(lambda: self.open_document())
@@ -173,7 +189,7 @@ class MainWindow(QMainWindow):
         self.photo_view.markers_changed.connect(self._markers_edited)
         self.photo_view.navigate.connect(self.photo_step)
         self.photo_view.mask_changed.connect(lambda cam: (self._dirty(True), self.statusBar().showMessage(
-            f"Maschera di {cam.label} aggiornata", 5000)))
+            tr("Maschera di {0} aggiornata", cam.label), 5000)))
         self.photo_view.marker_created.connect(lambda m: self.filter_photos_by_markers([m.key]))
         self.photo_view.sam_prompt.connect(self._photo_sam_prompt)
 
@@ -225,22 +241,22 @@ class MainWindow(QMainWindow):
         # tab widgets inside docks (more robust than tabified docks across Qt platforms)
         self.left_tabs = QTabWidget()
         self.left_tabs.setIconSize(QSize(16, 16))
-        self.left_tabs.addTab(self.workspace, icon("workspace"), "Area di lavoro")
-        self.left_tabs.addTab(self.reference, icon("reference_pane"), "Riferimenti")
+        self.left_tabs.addTab(self.workspace, icon("workspace"), tr("Area di lavoro"))
+        self.left_tabs.addTab(self.reference, icon("reference_pane"), tr("Riferimenti"))
         self.layers_pane = LayersPane()
         self.layers_pane.set_view(self.ortho_view)
         self.layers_pane.attribute_edited.connect(self._attribute_edited)
         self.pa_pending: dict[int, object] = {}  # gid -> UnitPolygon edited, to write back to PyArchInit
         self.pa_deleted: set[int] = set()  # gid of polygons deleted or merged away here
         self.pa_geom_changed: set[int] = set()  # gid whose geometry changed (merge, part removed)
-        self.b_pa_save = QPushButton(icon("publish"), "Salva modifiche in PyArchInit")
+        self.b_pa_save = QPushButton(icon("publish"), tr("Salva modifiche in PyArchInit"))
         self.b_pa_save.clicked.connect(self.save_pending_units)
         self.b_pa_save.hide()
         self.layers_pane.layout().addWidget(self.b_pa_save)
         self.left_tabs.addTab(self.layers_pane, icon("slice"), "Layer")
         self.layers_pane.us_form_requested.connect(self._us_form_from_feature)
         self.proxies_pane = ProxiesPane()
-        self.left_tabs.addTab(self.proxies_pane, icon("us"), "Proxy US")
+        self.left_tabs.addTab(self.proxies_pane, icon("us"), tr("Proxy US"))
         self.proxies_pane.create_requested.connect(self.create_proxies)
         self.proxies_pane.show_requested.connect(lambda: self._show_model("proxies"))
         self.proxies_pane.export_requested.connect(self.export_proxies)
@@ -260,9 +276,9 @@ class MainWindow(QMainWindow):
         self.photos_panel = PhotosPanel(self.photos)
         self.photos_panel.step.connect(self.photo_step)
         self.photos_panel.with_markers.connect(self.filter_photos_with_markers)
-        self.bottom_tabs.addTab(self.photos_panel, icon("photos"), "Foto")
-        self.bottom_tabs.addTab(self.sections_pane, icon("line"), "Sezioni")
-        self.bottom_tabs.addTab(self.console, icon("console"), "Console Python")
+        self.bottom_tabs.addTab(self.photos_panel, icon("photos"), tr("Foto"))
+        self.bottom_tabs.addTab(self.sections_pane, icon("line"), tr("Sezioni"))
+        self.bottom_tabs.addTab(self.console, icon("console"), tr("Console Python"))
         self.bottom_tabs.addTab(self.log_pane, icon("log"), "Log")
         self.d_work = self._dock("Progetto", self.left_tabs, L, "workspace")
         self.d_pa = self._dock("PyArchInit", self.pa_pane, R, "pyarchinit")
@@ -302,145 +318,150 @@ class MainWindow(QMainWindow):
         mb = self.menuBar()
         # ------------------------------------------------------------ File
         m = mb.addMenu("&File")
-        self._act(m, "Nuovo progetto", self.new_document, QKeySequence.StandardKey.New, icon_name="new")
-        self._act(m, "Apri...", self.open_document, QKeySequence.StandardKey.Open, icon_name="open")
-        self.recent_menu = m.addMenu(icon("recent"), "Progetti recenti")
-        self._act(m, "Salva", self.save_document, QKeySequence.StandardKey.Save, icon_name="save")
-        self._act(m, "Salva con nome...", lambda: self.save_document(ask=True), QKeySequence.StandardKey.SaveAs,
+        self._act(m, tr("Nuovo progetto"), self.new_document, QKeySequence.StandardKey.New, icon_name="new")
+        self._act(m, tr("Apri..."), self.open_document, QKeySequence.StandardKey.Open, icon_name="open")
+        self.recent_menu = m.addMenu(icon("recent"), tr("Progetti recenti"))
+        self._act(m, tr("Salva"), self.save_document, QKeySequence.StandardKey.Save, icon_name="save")
+        self._act(m, tr("Salva con nome..."), lambda: self.save_document(ask=True), QKeySequence.StandardKey.SaveAs,
                   icon_name="save_as")
         m.addSeparator()
-        exp = m.addMenu(icon("export"), "Esporta")
-        self._act(exp, "Nuvola di punti (LAS/COPC/PLY)...", lambda: self.export("cloud"), icon_name="point_cloud")
-        self._act(exp, "Modello (OBJ/PLY/GLB)...", lambda: self.export("model"), icon_name="model")
-        self._act(exp, "Modello in Cesium 3D Tiles...", self.export_3dtiles, processing=True, icon_name="globe",
-                  tip="Cartella con tileset.json e i tasselli GLB: il modello sul globo di CesiumJS")
-        self._act(exp, "Modello leggero con normal map (GLB/OBJ)...", self.export_light_model, processing=True,
-                  icon_name="model", tip="Il modello con poche facce e due texture (colore e normal map) cotte dal "
-                                         "modello completo: per il web, Sketchfab e i motori di gioco")
-        self._act(exp, "Video di sorvolo (MP4)...", self.export_video, processing=True, icon_name="video",
-                  tip="Una camera che gira attorno al modello o alla nuvola, per presentazioni e musei")
+        exp = m.addMenu(icon("export"), tr("Esporta"))
+        self._act(exp, tr("Nuvola di punti (LAS/COPC/PLY)..."), lambda: self.export("cloud"), icon_name="point_cloud")
+        self._act(exp, tr("Modello (OBJ/PLY/GLB)..."), lambda: self.export("model"), icon_name="model")
+        self._act(exp, tr("Modello in Cesium 3D Tiles..."), self.export_3dtiles, processing=True, icon_name="globe",
+                  tip=tr("Cartella con tileset.json e i tasselli GLB: il modello sul globo di CesiumJS"))
+        self._act(exp, tr("Modello leggero con normal map (GLB/OBJ)..."), self.export_light_model, processing=True,
+                  icon_name="model", tip=tr("Il modello con poche facce e due texture (colore e normal map) cotte dal "
+                                            "modello completo: per il web, Sketchfab e i motori di gioco"))
+        self._act(exp, tr("Video di sorvolo (MP4)..."), self.export_video, processing=True, icon_name="video",
+                  tip=tr("Una camera che gira attorno al modello o alla nuvola, per presentazioni e musei"))
         self._act(exp, "DEM (GeoTIFF/COG)...", lambda: self.export("dem"), icon_name="dem")
-        self._act(exp, "Ortofoto (GeoTIFF/COG)...", lambda: self.export("ortho"), icon_name="ortho")
-        self._act(exp, "Camere (CSV / COLMAP)...", lambda: self.export("cameras"), icon_name="cameras")
-        self._act(exp, "Riferimenti (CSV)...", lambda: self.export("reference"), icon_name="reference")
+        self._act(exp, tr("Ortofoto (GeoTIFF/COG)..."), lambda: self.export("ortho"), icon_name="ortho")
+        self._act(exp, tr("Camere (CSV / COLMAP)..."), lambda: self.export("cameras"), icon_name="cameras")
+        self._act(exp, tr("Riferimenti (CSV)..."), lambda: self.export("reference"), icon_name="reference")
         exp.addSeparator()
-        self._act(exp, "Ritagliati con un poligono o un riquadro (DEM, ortofoto, modello, nuvola)...",
+        self._act(exp, tr("Ritagliati con un poligono o un riquadro (DEM, ortofoto, modello, nuvola)..."),
                   self.start_crop, icon_name="crop")
-        imp = m.addMenu(icon("open"), "Importa")
-        self._act(imp, "Scansioni laser (E57, PTX)...", self.import_scans, processing=True, icon_name="scan",
-                  tip="Una o piu' scansioni come nuvola densa di un nuovo chunk; poi Allinea chunk (punti) e Colori "
-                      "dalle foto")
-        self._act(imp, "Progetto Metashape (.psx)...", lambda: self.import_external("metashape"), processing=True,
+        imp = m.addMenu(icon("open"), tr("Importa"))
+        self._act(imp, tr("Scansioni laser (E57, PTX)..."), self.import_scans, processing=True, icon_name="scan",
+                  tip=tr("Una o piu' scansioni come nuvola densa di un nuovo chunk; poi Allinea chunk (punti) e Colori "
+                         "dalle foto"))
+        self._act(imp, tr("Progetto Metashape (.psx)..."), lambda: self.import_external("metashape"), processing=True,
                   icon_name="open")
-        self._act(imp, "Modello e texture dal progetto Metashape (reimporta)...", self.reimport_metashape_model,
+        self._act(imp, tr("Modello e texture dal progetto Metashape (reimporta)..."), self.reimport_metashape_model,
                   processing=True, icon_name="model_textured",
-                  tip="Rilegge dal .psx il modello con colori, confidenza e texture (progetti importati prima)")
-        self._act(imp, "Progetto WebODM / ODM (cartella o all.zip)...", lambda: self.import_external("webodm"),
+                  tip=tr("Rilegge dal .psx il modello con colori, confidenza e texture (progetti importati prima)"))
+        self._act(imp, tr("Progetto WebODM / ODM (cartella o all.zip)..."), lambda: self.import_external("webodm"),
                   processing=True, icon_name="open")
-        self._act(imp, "Sessione Photo3D...", lambda: self.import_external("photo3d"), processing=True,
+        self._act(imp, tr("Sessione Photo3D..."), lambda: self.import_external("photo3d"), processing=True,
                   icon_name="photos")
-        self._act(m, "Genera report HTML...", self.generate_report, processing=True, icon_name="report")
+        self._act(m, tr("Genera report HTML..."), self.generate_report, processing=True, icon_name="report")
         m.addSeparator()
-        self._act(m, "Crea e apri progetto demo...", self.open_demo, processing=True, icon_name="demo")
-        self._act(m, "Pagina iniziale", self.show_start_page, icon_name="home_view")
+        self._act(m, tr("Crea e apri progetto demo..."), self.open_demo, processing=True, icon_name="demo")
+        self._act(m, tr("Pagina iniziale"), self.show_start_page, icon_name="home_view")
         m.addSeparator()
-        self._act(m, "Esci", self.close, QKeySequence.StandardKey.Quit, icon_name="quit")
+        self._act(m, tr("Esci"), self.close, QKeySequence.StandardKey.Quit, icon_name="quit")
         # ------------------------------------------------------------ Edit
-        m = mb.addMenu("&Modifica")
-        self.a_undo = self._act(m, "Annulla", self.undo, QKeySequence.StandardKey.Undo, icon_name="undo",
-                                tip="Annulla l'ultima modifica: disegni, quote, sezioni, marker, barre di scala, "
-                                    "patch, regione, punti della nuvola e facce del modello")
-        self.a_redo = self._act(m, "Ripeti", self.redo, QKeySequence.StandardKey.Redo, icon_name="redo")
+        m = mb.addMenu(tr("&Modifica"))
+        self.a_undo = self._act(m, tr("Annulla", context="undo"), self.undo, QKeySequence.StandardKey.Undo,
+                                icon_name="undo",
+                                tip=tr("Annulla l'ultima modifica: disegni, quote, sezioni, marker, barre di scala, "
+                                       "patch, regione, punti della nuvola e facce del modello"))
+        self.a_redo = self._act(m, tr("Ripeti"), self.redo, QKeySequence.StandardKey.Redo, icon_name="redo")
         self.a_undo.setEnabled(False)
         self.a_redo.setEnabled(False)
         # ------------------------------------------------------------ Workflow
-        m = mb.addMenu("Flusso di &lavoro")
-        self._act(m, "Aggiungi foto...", self.add_photos, processing=True, icon_name="photos")
-        self._act(m, "Aggiungi cartella...", lambda: self.add_photos(folder=True), processing=True,
+        m = mb.addMenu(tr("Flusso di &lavoro"))
+        self._act(m, tr("Aggiungi foto..."), self.add_photos, processing=True, icon_name="photos")
+        self._act(m, tr("Aggiungi cartella..."), lambda: self.add_photos(folder=True), processing=True,
                   icon_name="folder_photos")
-        self._act(m, "Aggiungi video...", self.add_video, processing=True, icon_name="video",
-                  tip="Fotogrammi scelti dal video (nitidi, con la sovrapposizione giusta), con il GPS dei droni DJI")
-        self._act(m, "Aggiungi foto 360°...", self.add_panoramas, processing=True, icon_name="panorama",
-                  tip="Foto sferiche (equirettangolari) divise nelle sei facce di un cubo, allineate come un rig")
-        self._act(m, "Ricollega foto (altra cartella)...", lambda: self.relink_photos(), icon_name="relink",
-                  tip="Collega le foto ai file con lo stesso nome in un'altra cartella (copia su un altro disco, "
-                      "cartella spostata o tenuta «solo online» da Dropbox)")
-        self._act(m, "Aggiungi chunk", self.add_chunk, icon_name="chunk_add")
-        self._act(m, "Allinea chunk...", self.align_chunks, processing=True, icon_name="chunk")
-        self._act(m, "Unisci chunk...", self.merge_chunks, processing=True, icon_name="merge")
-        self._act(m, "Colori dalle foto (scansioni)...", self.colour_scan, processing=True, icon_name="colour",
-                  tip="Colora la nuvola del chunk attivo (una scansione laser) con le foto allineate di un altro chunk")
+        self._act(m, tr("Aggiungi video..."), self.add_video, processing=True, icon_name="video",
+                  tip=tr("Fotogrammi scelti dal video (nitidi, con la sovrapposizione giusta), con il GPS dei droni "
+                         "DJI"))
+        self._act(m, tr("Aggiungi foto 360°..."), self.add_panoramas, processing=True, icon_name="panorama",
+                  tip=tr("Foto sferiche (equirettangolari) divise nelle sei facce di un cubo, allineate come un rig"))
+        self._act(m, tr("Ricollega foto (altra cartella)..."), lambda: self.relink_photos(), icon_name="relink",
+                  tip=tr("Collega le foto ai file con lo stesso nome in un'altra cartella (copia su un altro disco, "
+                         "cartella spostata o tenuta «solo online» da Dropbox)"))
+        self._act(m, tr("Aggiungi chunk"), self.add_chunk, icon_name="chunk_add")
+        self._act(m, tr("Allinea chunk..."), self.align_chunks, processing=True, icon_name="chunk")
+        self._act(m, tr("Unisci chunk..."), self.merge_chunks, processing=True, icon_name="merge")
+        self._act(m, tr("Colori dalle foto (scansioni)..."), self.colour_scan, processing=True, icon_name="colour",
+                  tip=tr("Colora la nuvola del chunk attivo (una scansione laser) con le foto allineate di un altro "
+                         "chunk"))
         m.addSeparator()
-        self._act(m, "Rileva marker codificati...", self.detect_markers, processing=True, icon_name="markers")
-        self._act(m, "Affina le bandierine blu dei marker", lambda: self.refine_markers(), processing=True,
-                  icon_name="refine", tip="Cerca nelle foto, per correlazione, il punto di ogni posizione stimata "
-                                          "(bandierina blu) dei marker misurati in almeno una foto")
-        self._act(m, "Allinea foto...", self.align_photos, processing=True, icon_name="align")
-        self._act(m, "Importa riferimenti...", self.import_reference, icon_name="reference")
-        self._act(m, "Aggiorna georeferenziazione", self.update_transform, processing=True, icon_name="georef")
-        self._act(m, "Nuova barra di scala (distanza tra due marker)...", lambda: self.new_scalebar(),
+        self._act(m, tr("Rileva marker codificati..."), self.detect_markers, processing=True, icon_name="markers")
+        self._act(m, tr("Affina le bandierine blu dei marker"), lambda: self.refine_markers(), processing=True,
+                  icon_name="refine", tip=tr("Cerca nelle foto, per correlazione, il punto di ogni posizione stimata "
+                                             "(bandierina blu) dei marker misurati in almeno una foto"))
+        self._act(m, tr("Allinea foto..."), self.align_photos, processing=True, icon_name="align")
+        self._act(m, tr("Importa riferimenti..."), self.import_reference, icon_name="reference")
+        self._act(m, tr("Aggiorna georeferenziazione"), self.update_transform, processing=True, icon_name="georef")
+        self._act(m, tr("Nuova barra di scala (distanza tra due marker)..."), lambda: self.new_scalebar(),
                   icon_name="scalebar")
-        self._act(m, "Importa barre di scala (CSV)...", self.import_scalebars, icon_name="scalebar")
-        self._act(m, "Ottimizza camere", self.optimize_cameras, processing=True, icon_name="optimize")
-        self._act(m, "Elaborazione batch...", self.batch_process, processing=True, icon_name="batch",
-                  tip="Passi in sequenza su piu' chunk, con salvataggio dopo ogni passo e ripresa se si interrompe")
-        self._act(m, "Controllo prima di lasciare il sito", self.field_check, processing=True,
-                  icon_name="fieldcheck", tip="Subito dopo l'allineamento: aree viste da meno di tre foto, foto non "
-                                              "allineate o sfocate, marker in troppo poche foto")
-        self._act(m, "Stima la precisione", self.estimate_precision, processing=True, icon_name="precision",
-                  tip="Precisione di camere, marker e punti di legame dalla covarianza del bundle adjustment; "
-                      "mappa della precisione del DEM")
+        self._act(m, tr("Importa barre di scala (CSV)..."), self.import_scalebars, icon_name="scalebar")
+        self._act(m, tr("Ottimizza camere"), self.optimize_cameras, processing=True, icon_name="optimize")
+        self._act(m, tr("Elaborazione batch..."), self.batch_process, processing=True, icon_name="batch",
+                  tip=tr("Passi in sequenza su piu' chunk, con salvataggio dopo ogni passo e ripresa se si interrompe"))
+        self._act(m, tr("Controllo prima di lasciare il sito"), self.field_check, processing=True,
+                  icon_name="fieldcheck", tip=tr("Subito dopo l'allineamento: aree viste da meno di tre foto, foto non "
+                                                 "allineate o sfocate, marker in troppo poche foto"))
+        self._act(m, tr("Stima la precisione"), self.estimate_precision, processing=True, icon_name="precision",
+                  tip=tr("Precisione di camere, marker e punti di legame dalla covarianza del bundle adjustment; "
+                         "mappa della precisione del DEM"))
         m.addSeparator()
-        self._act(m, "Costruisci nuvola densa...", self.build_dense, processing=True, icon_name="dense")
-        self._act(m, "Ritaglia nuvola densa...", self.crop_cloud, processing=True, icon_name="eraser")
-        cl = m.addMenu(icon("clean"), "Pulizia e confidenza")
-        self._act(cl, "Calcola la confidenza (nuvola densa, modello)...", self.compute_confidence, processing=True,
+        self._act(m, tr("Costruisci nuvola densa..."), self.build_dense, processing=True, icon_name="dense")
+        self._act(m, tr("Ritaglia nuvola densa..."), self.crop_cloud, processing=True, icon_name="eraser")
+        cl = m.addMenu(icon("clean"), tr("Pulizia e confidenza"))
+        self._act(cl, tr("Calcola la confidenza (nuvola densa, modello)..."), self.compute_confidence, processing=True,
                   icon_name="confidence")
-        self._act(cl, "Mostra la confidenza nella vista 3D", self.show_confidence, icon_name="confidence")
+        self._act(cl, tr("Mostra la confidenza nella vista 3D"), self.show_confidence, icon_name="confidence")
         cl.addSeparator()
-        self._act(cl, "Pulisci la nuvola densa...", self.clean_cloud, processing=True, icon_name="clean")
-        self._act(cl, "Pulisci il modello...", self.clean_model, processing=True, icon_name="clean")
-        self._act(cl, "Pulisci i punti di legame (selezione graduale)...", self.clean_tie_points, processing=True,
+        self._act(cl, tr("Pulisci la nuvola densa..."), self.clean_cloud, processing=True, icon_name="clean")
+        self._act(cl, tr("Pulisci il modello..."), self.clean_model, processing=True, icon_name="clean")
+        self._act(cl, tr("Pulisci i punti di legame (selezione graduale)..."), self.clean_tie_points, processing=True,
                   icon_name="tie_clean")
         cl.addSeparator()
-        self._act(cl, "Seleziona con il lazo nella vista 3D (elimina, tieni)", self.lasso_edit, icon_name="select")
-        self._act(cl, "Ritaglia con un poligono o un riquadro...", self.start_crop, icon_name="crop")
-        self._act(m, "Costruisci modello...", self.build_model, processing=True, icon_name="model")
-        self._act(m, "Costruisci texture...", self.build_texture, processing=True, icon_name="texture")
-        self._act(m, "Costruisci DEM...", self.build_dem, processing=True, icon_name="dem")
-        self._act(m, "Costruisci ortofoto...", self.build_ortho, processing=True, icon_name="ortho")
-        rm = m.addMenu(icon("crop"), "Regione di ricostruzione")
-        self._act(rm, "Attorno ai punti di legame", self.region_reset, processing=True,
-                  tip="Depth map, nuvola densa e modello limitati al riquadro giallo della vista 3D")
-        self._act(rm, "Ruotata come la vista 3D", self.region_rotate_to_view, processing=True)
-        self._act(rm, "Sul poligono selezionato (pianta)", self.region_from_selection, processing=True)
-        self._act(rm, "Modifica i valori...", self.region_edit, processing=True)
-        self._act(rm, "Togli la regione", self.region_clear, processing=True)
-        self._act(m, "Prospetto o sviluppo cilindrico...", self.build_elevation, processing=True,
-                  icon_name="elevation", tip="Ortofoto e rilievo su un piano (muri) o su un cilindro (pozzi, torri)")
+        self._act(cl, tr("Seleziona con il lazo nella vista 3D (elimina, tieni)"), self.lasso_edit, icon_name="select")
+        self._act(cl, tr("Ritaglia con un poligono o un riquadro..."), self.start_crop, icon_name="crop")
+        self._act(m, tr("Costruisci modello..."), self.build_model, processing=True, icon_name="model")
+        self._act(m, tr("Costruisci texture..."), self.build_texture, processing=True, icon_name="texture")
+        self._act(m, tr("Costruisci DEM..."), self.build_dem, processing=True, icon_name="dem")
+        self._act(m, tr("Costruisci ortofoto..."), self.build_ortho, processing=True, icon_name="ortho")
+        rm = m.addMenu(icon("crop"), tr("Regione di ricostruzione"))
+        self._act(rm, tr("Attorno ai punti di legame"), self.region_reset, processing=True,
+                  tip=tr("Depth map, nuvola densa e modello limitati al riquadro giallo della vista 3D"))
+        self._act(rm, tr("Ruotata come la vista 3D"), self.region_rotate_to_view, processing=True)
+        self._act(rm, tr("Sul poligono selezionato (pianta)"), self.region_from_selection, processing=True)
+        self._act(rm, tr("Modifica i valori..."), self.region_edit, processing=True)
+        self._act(rm, tr("Togli la regione"), self.region_clear, processing=True)
+        self._act(m, tr("Prospetto o sviluppo cilindrico..."), self.build_elevation, processing=True,
+                  icon_name="elevation",
+                  tip=tr("Ortofoto e rilievo su un piano (muri) o su un cilindro (pozzi, torri)"))
         m.addSeparator()
-        self._act(m, "Elabora tutto...", self.process_all, "Ctrl+R", processing=True, icon_name="process_all")
+        self._act(m, tr("Elabora tutto..."), self.process_all, "Ctrl+R", processing=True, icon_name="process_all")
         # ------------------------------------------------------------ Tools
-        m = mb.addMenu("&Strumenti")
+        m = mb.addMenu(tr("&Strumenti"))
         tm = m.addMenu(icon("print"), "Target")
-        self._act(tm, "Stampa fogli di target...", self.print_targets, icon_name="print")
-        self._act(tm, "Tappetino per turntable...", self.print_turntable, icon_name="turntable")
-        self._act(tm, "Barra di scala stampabile...", self.print_scalebar, icon_name="scalebar")
-        self._act(m, "Calibra i colori delle foto...", self.calibrate_colours, processing=True, icon_name="colour",
-                  tip="Esposizione di ogni foto e vignettatura degli obiettivi, corrette in ortofoto e texture")
-        dm = m.addMenu(icon("diagnostics"), "Diagnostica dell'allineamento")
-        self._act(dm, "Grafo delle corrispondenze...", self.match_graph, icon_name="graph",
-                  tip="Quali foto si collegano a quali: gruppi separati e foto isolate")
-        self._act(dm, "Corrispondenze tra due foto...", lambda: self.pair_matches(), icon_name="matches",
-                  tip="Le due foto selezionate nel pannello Foto, con i punti che le collegano")
-        self.a_residuals = QAction(icon("residuals"), "Residui dei punti di legame nella foto", self, checkable=True)
-        self.a_residuals.setStatusTip("Nella vista Foto: dove ogni punto di legame e' stato misurato e dove lo "
-                                      "rimette il modello (frecce ingrandite 20 volte)")
+        self._act(tm, tr("Stampa fogli di target..."), self.print_targets, icon_name="print")
+        self._act(tm, tr("Tappetino per turntable..."), self.print_turntable, icon_name="turntable")
+        self._act(tm, tr("Barra di scala stampabile..."), self.print_scalebar, icon_name="scalebar")
+        self._act(m, tr("Calibra i colori delle foto..."), self.calibrate_colours, processing=True, icon_name="colour",
+                  tip=tr("Esposizione di ogni foto e vignettatura degli obiettivi, corrette in ortofoto e texture"))
+        dm = m.addMenu(icon("diagnostics"), tr("Diagnostica dell'allineamento"))
+        self._act(dm, tr("Grafo delle corrispondenze..."), self.match_graph, icon_name="graph",
+                  tip=tr("Quali foto si collegano a quali: gruppi separati e foto isolate"))
+        self._act(dm, tr("Corrispondenze tra due foto..."), lambda: self.pair_matches(), icon_name="matches",
+                  tip=tr("Le due foto selezionate nel pannello Foto, con i punti che le collegano"))
+        self.a_residuals = QAction(icon("residuals"), tr("Residui dei punti di legame nella foto"), self,
+                                   checkable=True)
+        self.a_residuals.setStatusTip(tr("Nella vista Foto: dove ogni punto di legame e' stato misurato e dove lo "
+                                         "rimette il modello (frecce ingrandite 20 volte)"))
         self.a_residuals.toggled.connect(self._residuals_toggled)
         dm.addAction(self.a_residuals)
-        self._act(dm, "Calibrazione della camera...", self.camera_calibration, icon_name="lens",
-                  tip="Parametri dei sensori, calibrazione fissa e grafico della distorsione")
-        km = m.addMenu(icon("mask"), "Maschere delle foto")
+        self._act(dm, tr("Calibrazione della camera..."), self.camera_calibration, icon_name="lens",
+                  tip=tr("Parametri dei sensori, calibrazione fissa e grafico della distorsione"))
+        km = m.addMenu(icon("mask"), tr("Maschere delle foto"))
         self.mask_actions: dict[str, QAction] = {}
         mgroup = QActionGroup(self)
         for mode, label in ((None, "Nessun disegno (marker)"),
@@ -452,22 +473,23 @@ class MainWindow(QMainWindow):
             mgroup.addAction(a)
             km.addAction(a)
             self.mask_actions[str(mode)] = a
-        self.a_show_masks = QAction("Mostra le maschere", self, checkable=True)
+        self.a_show_masks = QAction(tr("Mostra le maschere"), self, checkable=True)
         self.a_show_masks.setChecked(True)
         self.a_show_masks.toggled.connect(self._show_masks)
         km.addAction(self.a_show_masks)
         km.addSeparator()
-        self._act(km, "Importa maschere (immagini)...", self.masks_import, processing=True)
-        self._act(km, "Maschere dal canale alfa delle foto", lambda: self.masks_import(alpha=True), processing=True)
-        self._act(km, "Maschere dallo sfondo (foto senza l'oggetto)...", self.masks_from_background, processing=True)
-        self._act(km, "Maschere da un colore (fondale)...", self.masks_from_colour, processing=True)
-        self._act(km, "Maschere dal modello (resta solo l'oggetto)", self.masks_from_model, processing=True)
-        self._act(km, "Maschere con SAM 2.1 (l'oggetto al centro della foto)", self.masks_with_sam, processing=True)
+        self._act(km, tr("Importa maschere (immagini)..."), self.masks_import, processing=True)
+        self._act(km, tr("Maschere dal canale alfa delle foto"), lambda: self.masks_import(alpha=True), processing=True)
+        self._act(km, tr("Maschere dallo sfondo (foto senza l'oggetto)..."), self.masks_from_background,
+                  processing=True)
+        self._act(km, tr("Maschere da un colore (fondale)..."), self.masks_from_colour, processing=True)
+        self._act(km, tr("Maschere dal modello (resta solo l'oggetto)"), self.masks_from_model, processing=True)
+        self._act(km, tr("Maschere con SAM 2.1 (l'oggetto al centro della foto)"), self.masks_with_sam, processing=True)
         km.addSeparator()
-        self._act(km, "Esporta maschere...", self.masks_export)
-        self._act(km, "Rimuovi le maschere delle foto selezionate", lambda: self.masks_remove(selected=True))
-        self._act(km, "Rimuovi tutte le maschere", lambda: self.masks_remove(selected=False))
-        dm = m.addMenu(icon("polygon"), "Disegno su ortofoto")
+        self._act(km, tr("Esporta maschere..."), self.masks_export)
+        self._act(km, tr("Rimuovi le maschere delle foto selezionate"), lambda: self.masks_remove(selected=True))
+        self._act(km, tr("Rimuovi tutte le maschere"), lambda: self.masks_remove(selected=False))
+        dm = m.addMenu(icon("polygon"), tr("Disegno su ortofoto"))
         self.draw_group = QActionGroup(self)
         self.draw_actions: dict[str, QAction] = {}
         for mode, label, ic in (("pan", "Sposta / interroga", "pan"), ("select", "Seleziona", "select"),
@@ -488,18 +510,19 @@ class MainWindow(QMainWindow):
             dm.addAction(a)
             self.draw_actions[mode] = a
         # drawing options: freehand units, snapping to vertices / segments of the visible layers
-        self.a_freehand = QAction(icon("freehand"), "Mano libera", self, checkable=True)
-        self.a_freehand.setToolTip("Disegno a mano libera delle unita': tieni premuto, traccia e rilascia per chiudere")
+        self.a_freehand = QAction(icon("freehand"), tr("Mano libera"), self, checkable=True)
+        self.a_freehand.setToolTip(tr("Disegno a mano libera delle unita': tieni premuto, traccia e rilascia per "
+                                      "chiudere"))
         self.a_freehand.setChecked(self.settings.value("draw/freehand", "false") in ("true", True))
         self.a_freehand.toggled.connect(lambda _on: self._apply_draw_options())
         dm.addAction(self.a_freehand)
         self.snap_menu = QMenu("Snap", self)
         self.a_snap = QAction(icon("snap"), "Snap", self, checkable=True)
-        self.a_snap.setToolTip("Aggancia i punti ai vertici e/o ai segmenti dei layer visibili (scegli dal menu)")
+        self.a_snap.setToolTip(tr("Aggancia i punti ai vertici e/o ai segmenti dei layer visibili (scegli dal menu)"))
         self.a_snap.setChecked(self.settings.value("draw/snap", "false") in ("true", True))
         self.a_snap.setMenu(self.snap_menu)
-        self.a_snap_vertex = self.snap_menu.addAction("Vertici")
-        self.a_snap_segment = self.snap_menu.addAction("Segmenti")
+        self.a_snap_vertex = self.snap_menu.addAction(tr("Vertici"))
+        self.a_snap_segment = self.snap_menu.addAction(tr("Segmenti"))
         for a, key in ((self.a_snap_vertex, "draw/snap_vertex"), (self.a_snap_segment, "draw/snap_segment")):
             a.setCheckable(True)
             a.setChecked(self.settings.value(key, "true") in ("true", True))
@@ -507,7 +530,7 @@ class MainWindow(QMainWindow):
         tol_group = QActionGroup(self)
         self.snap_tol_actions = {}
         for px in (6, 12, 20):
-            a = self.snap_menu.addAction(f"Tolleranza {px} px")
+            a = self.snap_menu.addAction(tr("Tolleranza {0} px", px))
             a.setCheckable(True)
             a.setChecked(int(self.settings.value("draw/snap_px", 12)) == px)
             tol_group.addAction(a)
@@ -521,20 +544,20 @@ class MainWindow(QMainWindow):
         self.sam_tool_actions = {}
         current_tool = self.settings.value("sam/tool", "tap")
         for key, label in SAM_TOOLS.items():
-            a = self.sam_menu.addAction(label)
+            a = self.sam_menu.addAction(tr(label))
             a.setCheckable(True)
             a.setChecked(key == current_tool)
             a.triggered.connect(lambda _=False, k=key: self._set_sam_tool(k))
             sam_tools.addAction(a)
             self.sam_tool_actions[key] = a
         self.sam_menu.addSeparator()
-        self._act(self.sam_menu, "Tutta l'ortofoto (scansione a tasselli)...", lambda: self.sam_whole_orthomosaic(),
+        self._act(self.sam_menu, tr("Tutta l'ortofoto (scansione a tasselli)..."), lambda: self.sam_whole_orthomosaic(),
                   processing=True, icon_name="sam")
-        model_menu = self.sam_menu.addMenu("Modello")
+        model_menu = self.sam_menu.addMenu(tr("Modello"))
         model_group = QActionGroup(self)
         self.sam_model_actions = {}
         for key, label in SAM_MODELS:
-            a = model_menu.addAction(label)
+            a = model_menu.addAction(tr(label))
             a.setCheckable(True)
             a.setChecked(key == self.settings.value("sam/model", "small"))
             a.triggered.connect(lambda _=False, k=key: self._set_sam_model(k))
@@ -542,120 +565,133 @@ class MainWindow(QMainWindow):
             self.sam_model_actions[key] = a
         self.draw_actions["sam"].setMenu(self.sam_menu)
         # sections: what is cut (model or dense cloud) and which point classes
-        self.section_menu = QMenu("Sezione", self)
-        self._act(self.section_menu, "Opzioni delle sezioni (modello o nuvola, classi)...", self.section_options,
+        self.section_menu = QMenu(tr("Sezione"), self)
+        self._act(self.section_menu, tr("Opzioni delle sezioni (modello o nuvola, classi)..."), self.section_options,
                   icon_name="line")
         self.draw_actions["line"].setMenu(self.section_menu)
-        self.draw_actions["sam"].setToolTip("Segment Anything 2.1: clic su un oggetto (tocco), un riquadro per un "
-                                            "oggetto o per tutte le unita' di un'area; dal menu anche tutta l'ortofoto")
+        self.draw_actions["sam"].setToolTip(tr("Segment Anything 2.1: clic su un oggetto (tocco), un riquadro per un "
+                                               "oggetto o per tutte le unita' di un'area; dal menu anche tutta "
+                                               "l'ortofoto"))
         self.ortho_view.sam_tool = current_tool if current_tool in SAM_TOOLS else "tap"
         dm.addSeparator()
-        self.a_sel_delete = self._act(dm, "Elimina selezionati", lambda: self.delete_selected(), icon_name="delete")
-        self.a_sel_delete.setToolTip("Elimina gli elementi selezionati (tasto Canc nella modalita' Seleziona)")
-        self.a_sel_merge = self._act(dm, "Unisci selezionati", lambda: self.merge_selected(), icon_name="merge")
-        self.a_sel_merge.setToolTip("Unisce le unita' selezionate in un solo poligono, o linee contigue dello stesso layer")
+        self.a_sel_delete = self._act(dm, tr("Elimina selezionati"), lambda: self.delete_selected(), icon_name="delete")
+        self.a_sel_delete.setToolTip(tr("Elimina gli elementi selezionati (tasto Canc nella modalita' Seleziona)"))
+        self.a_sel_merge = self._act(dm, tr("Unisci selezionati"), lambda: self.merge_selected(), icon_name="merge")
+        self.a_sel_merge.setToolTip(tr("Unisce le unita' selezionate in un solo poligono, o linee contigue dello "
+                                       "stesso layer"))
         for a in (self.a_sel_delete, self.a_sel_merge):
             a.setEnabled(False)
-        self.a_clear_drawings = self._act(dm, "Cancella disegni", self.clear_drawings, icon_name="eraser")
-        self._act(dm, "Ritaglia o esporta con il poligono selezionato...", self.crop_with_selection, icon_name="crop")
-        pm = m.addMenu(icon("patch"), "Patch dell'ortofoto (assegna immagini)")
-        self._act(pm, "Disegna un'area e scegli le sue foto", self.start_patch, icon_name="patch")
-        self._act(pm, "Assegna immagini al poligono selezionato...", self.patch_with_selection, icon_name="patch")
-        self.a_patch_update = self._act(pm, "Aggiorna l'ortofoto con le patch", self.update_ortho_patches,
+        self.a_clear_drawings = self._act(dm, tr("Cancella disegni"), self.clear_drawings, icon_name="eraser")
+        self._act(dm, tr("Ritaglia o esporta con il poligono selezionato..."), self.crop_with_selection,
+                  icon_name="crop")
+        pm = m.addMenu(icon("patch"), tr("Patch dell'ortofoto (assegna immagini)"))
+        self._act(pm, tr("Disegna un'area e scegli le sue foto"), self.start_patch, icon_name="patch")
+        self._act(pm, tr("Assegna immagini al poligono selezionato..."), self.patch_with_selection, icon_name="patch")
+        self.a_patch_update = self._act(pm, tr("Aggiorna l'ortofoto con le patch"), self.update_ortho_patches,
                                         processing=True, icon_name="patch_update")
-        self._act(pm, "Rimuovi tutte le patch...", self.clear_ortho_patches, processing=True, icon_name="patch_remove")
+        self._act(pm, tr("Rimuovi tutte le patch..."), self.clear_ortho_patches, processing=True,
+                  icon_name="patch_remove")
         m.addSeparator()
-        self.a_contours = self._act(m, "Curve di livello...", self.contours, processing=True, icon_name="contours")
-        self.a_volume = self._act(m, "Volume scavo / riporto...", self.compute_volume, processing=True, icon_name="volume")
-        self._act(m, "Pendenza del DEM", lambda: self.terrain_raster("slope"), processing=True, icon_name="slope",
-                  tip="Raster della pendenza in gradi, mostrato subito (gradi sotto il cursore)")
-        self._act(m, "Esposizione del DEM", lambda: self.terrain_raster("aspect"), processing=True, icon_name="aspect",
-                  tip="Raster dell'esposizione (verso dove scende il terreno), gradi dal nord")
-        self._act(m, "Opzioni delle sezioni...", self.section_options, icon_name="line")
-        self.a_slice = self._act(m, "Pianta a quota (slice orizzontale)...", self.plan_slice, processing=True,
+        self.a_contours = self._act(m, tr("Curve di livello..."), self.contours, processing=True, icon_name="contours")
+        self.a_volume = self._act(m, tr("Volume scavo / riporto..."), self.compute_volume, processing=True,
+                                  icon_name="volume")
+        self._act(m, tr("Pendenza del DEM"), lambda: self.terrain_raster("slope"), processing=True, icon_name="slope",
+                  tip=tr("Raster della pendenza in gradi, mostrato subito (gradi sotto il cursore)"))
+        self._act(m, tr("Esposizione del DEM"), lambda: self.terrain_raster("aspect"), processing=True,
+                  icon_name="aspect",
+                  tip=tr("Raster dell'esposizione (verso dove scende il terreno), gradi dal nord"))
+        self._act(m, tr("Opzioni delle sezioni..."), self.section_options, icon_name="line")
+        self.a_slice = self._act(m, tr("Pianta a quota (slice orizzontale)..."), self.plan_slice, processing=True,
                                  icon_name="slice")
-        self._act(m, "Profilo ceramico da mesh...", self.pottery_profile, processing=True, icon_name="pottery")
-        self._act(m, "Proxy 3D delle US...", self.create_proxies, processing=True, icon_name="us")
+        self._act(m, tr("Profilo ceramico da mesh..."), self.pottery_profile, processing=True, icon_name="pottery")
+        self._act(m, tr("Proxy 3D delle US..."), self.create_proxies, processing=True, icon_name="us")
         m.addSeparator()
-        cm = m.addMenu(icon("classify"), "Classificazione della nuvola")
-        self._act(cm, "Classificazione automatica (regole)", self.classify, processing=True, icon_name="classify")
-        self._act(cm, "Mostra la nuvola per classi", self.show_classes, icon_name="classify")
-        self._act(cm, "Correggi a mano con il lazo (vista 3D)", self.classify_with_lasso, icon_name="select")
-        self._act(cm, "Classi dalle US (poligoni)...", self.units_to_classes, processing=True, icon_name="us")
+        cm = m.addMenu(icon("classify"), tr("Classificazione della nuvola"))
+        self._act(cm, tr("Classificazione automatica (regole)"), self.classify, processing=True, icon_name="classify")
+        self._act(cm, tr("Mostra la nuvola per classi"), self.show_classes, icon_name="classify")
+        self._act(cm, tr("Correggi a mano con il lazo (vista 3D)"), self.classify_with_lasso, icon_name="select")
+        self._act(cm, tr("Classi dalle US (poligoni)..."), self.units_to_classes, processing=True, icon_name="us")
         cm.addSeparator()
-        self._act(cm, "Addestra il classificatore sui punti corretti...", self.train_classifier, processing=True,
+        self._act(cm, tr("Addestra il classificatore sui punti corretti..."), self.train_classifier, processing=True,
                   icon_name="classify")
-        self._act(cm, "Classifica con il classificatore addestrato...", self.apply_classifier, processing=True,
+        self._act(cm, tr("Classifica con il classificatore addestrato..."), self.apply_classifier, processing=True,
                   icon_name="classify")
-        self._act(cm, "Carica un classificatore (.ppgclf)...", self.load_classifier, icon_name="open")
-        self._act(cm, "Salva il classificatore...", self.save_classifier, icon_name="save")
-        self._act(cm, "Dimentica le correzioni a mano", self.clear_manual_labels, icon_name="clear")
+        self._act(cm, tr("Carica un classificatore (.ppgclf)..."), self.load_classifier, icon_name="open")
+        self._act(cm, tr("Salva il classificatore..."), self.save_classifier, icon_name="save")
+        self._act(cm, tr("Dimentica le correzioni a mano"), self.clear_manual_labels, icon_name="clear")
         sm = m.addMenu(icon("sam"), "Segment Anything 2.1")
         for key, label in SAM_TOOLS.items():
-            self._act(sm, f"Ortofoto - {label}", lambda _=False, k=key: (self._set_sam_tool(k), self.set_draw_mode("sam")),
+            self._act(sm, tr("Ortofoto - {0}", tr(label)), lambda _=False, k=key: (self._set_sam_tool(k),
+                                                                               self.set_draw_mode("sam")),
                       icon_name="sam")
-        self._act(sm, "Ortofoto - tutta, scansione a tasselli...", lambda: self.sam_whole_orthomosaic(), processing=True,
+        self._act(sm, tr("Ortofoto - tutta, scansione a tasselli..."), lambda: self.sam_whole_orthomosaic(),
+                  processing=True,
                   icon_name="sam")
-        self._act(sm, "Prompt sulle foto (attiva/disattiva)", self.toggle_photo_sam, icon_name="view_photo")
+        self._act(sm, tr("Prompt sulle foto (attiva/disattiva)"), self.toggle_photo_sam, icon_name="view_photo")
         sm.addSeparator()
-        self._act(sm, "Installa / aggiorna SAM 2.1...", lambda: self.install_sam(), processing=True, icon_name="export")
-        self._act(sm, "Rimuovi SAM 2.1", self.remove_sam, icon_name="clear")
+        self._act(sm, tr("Installa / aggiorna SAM 2.1..."), lambda: self.install_sam(), processing=True,
+                  icon_name="export")
+        self._act(sm, tr("Rimuovi SAM 2.1"), self.remove_sam, icon_name="clear")
         m.addSeparator()
-        self._act(m, "Esporta IFC (BIM)...", self.export_ifc, processing=True, icon_name="ifc")
-        self._act(m, "Esegui script Python...", self.run_script, icon_name="script")
+        self._act(m, tr("Esporta IFC (BIM)..."), self.export_ifc, processing=True, icon_name="ifc")
+        self._act(m, tr("Esegui script Python..."), self.run_script, icon_name="script")
         # ------------------------------------------------------------ PyArchInit
         m = mb.addMenu("&PyArchInit")
-        self._act(m, "Connetti (config.cfg, SQLite o PostgreSQL)...", lambda: self.pyarchinit_connect(ask=True),
+        self._act(m, tr("Connetti (config.cfg, SQLite o PostgreSQL)..."), lambda: self.pyarchinit_connect(ask=True),
                   icon_name="database")
-        self._act(m, "Usa il database demo", self.pyarchinit_demo, icon_name="demo_db")
-        self._act(m, "Sito del progetto...", lambda: self.choose_project_site(), icon_name="site")
-        self._act(m, "Nuovo sito...", self.pyarchinit_new_site, icon_name="site")
-        self._act(m, "Nuova scheda US...", lambda: self.open_us_form(self.project_site(), "1", "", "US"),
+        self._act(m, tr("Usa il database demo"), self.pyarchinit_demo, icon_name="demo_db")
+        self._act(m, tr("Sito del progetto..."), lambda: self.choose_project_site(), icon_name="site")
+        self._act(m, tr("Nuovo sito..."), self.pyarchinit_new_site, icon_name="site")
+        self._act(m, tr("Nuova scheda US..."), lambda: self.open_us_form(self.project_site(), "1", "", "US"),
                   icon_name="us")
-        self._act(m, "Aggiorna struttura del database...", self.pyarchinit_upgrade, icon_name="database")
-        self.a_autoconnect = QAction("Connetti all'avvio al database di PyArchInit", self, checkable=True)
+        self._act(m, tr("Aggiorna struttura del database..."), self.pyarchinit_upgrade, icon_name="database")
+        self.a_autoconnect = QAction(tr("Connetti all'avvio al database di PyArchInit"), self, checkable=True)
         self.a_autoconnect.setChecked(self.settings.value("pa_autoconnect", "true") in ("true", True, 1, "1"))
         self.a_autoconnect.toggled.connect(lambda on: self.settings.setValue("pa_autoconnect", "true" if on else "false"))
         m.addAction(self.a_autoconnect)
         m.addSeparator()
-        self._act(m, "Pubblica ortofoto / DEM / modello...", self.pyarchinit_publish, processing=True,
+        self._act(m, tr("Pubblica ortofoto / DEM / modello..."), self.pyarchinit_publish, processing=True,
                   icon_name="publish")
-        self._act(m, "Pubblica unita' e quote disegnate", self.pyarchinit_publish_drawings, processing=True,
+        self._act(m, tr("Pubblica unita' e quote disegnate"), self.pyarchinit_publish_drawings, processing=True,
                   icon_name="publish")
-        self._act(m, "Pubblica solo le unita' (pyunitastratigrafiche)", self.pyarchinit_publish_units,
+        self._act(m, tr("Pubblica solo le unita' (pyunitastratigrafiche)"), self.pyarchinit_publish_units,
                   processing=True, icon_name="publish")
-        self._act(m, "Pubblica solo le quote (pyarchinit_quote)", self.pyarchinit_publish_points, processing=True,
+        self._act(m, tr("Pubblica solo le quote (pyarchinit_quote)"), self.pyarchinit_publish_points, processing=True,
                   icon_name="publish")
-        self._act(m, "Carica poligoni US sull'ortofoto", self.pyarchinit_load_units, icon_name="load")
-        self._act(m, "Aggiorna pannello", lambda: self.pa_pane.refresh(), icon_name="refresh")
+        self._act(m, tr("Carica poligoni US sull'ortofoto"), self.pyarchinit_load_units, icon_name="load")
+        self._act(m, tr("Aggiorna pannello"), lambda: self.pa_pane.refresh(), icon_name="refresh")
         # ------------------------------------------------------------ QGIS
         m = mb.addMenu("&QGIS")
-        self.a_qgis_open = self._act(m, "Apri in QGIS (collegamento dal vivo)", self.open_in_qgis, icon_name="view_ortho")
-        self.a_qgis_live = QAction("Aggiorna QGIS mentre disegno", self, checkable=True)
+        self.a_qgis_open = self._act(m, tr("Apri in QGIS (collegamento dal vivo)"), self.open_in_qgis,
+                                     icon_name="view_ortho")
+        self.a_qgis_live = QAction(tr("Aggiorna QGIS mentre disegno"), self, checkable=True)
         self.a_qgis_live.setChecked(False)
         self.a_qgis_live.toggled.connect(lambda on: self._schedule_qgis() if on else None)
         m.addAction(self.a_qgis_live)
-        self._act(m, "Apri la cartella dei layer per QGIS", lambda: QDesktopServices.openUrl(
+        self._act(m, tr("Apri la cartella dei layer per QGIS"), lambda: QDesktopServices.openUrl(
             QUrl.fromLocalFile(str(self._qgis_dir()))), icon_name="folder")
         # ------------------------------------------------------------ View
-        m = mb.addMenu("&Vista")
+        m = mb.addMenu(tr("&Vista"))
         for d in (self.d_work, self.d_photos, self.d_pa):
             m.addAction(d.toggleViewAction())
         m.addSeparator()
-        self._act(m, "Area di lavoro", lambda: self._show_pane(self.left_tabs, self.workspace), icon_name="workspace")
-        self._act(m, "Riferimenti", lambda: self._show_pane(self.left_tabs, self.reference), icon_name="reference_pane")
+        self._act(m, tr("Area di lavoro"), lambda: self._show_pane(self.left_tabs, self.workspace),
+                  icon_name="workspace")
+        self._act(m, tr("Riferimenti"), lambda: self._show_pane(self.left_tabs, self.reference),
+                  icon_name="reference_pane")
         self._act(m, "Layer", lambda: self._show_pane(self.left_tabs, self.layers_pane), icon_name="slice")
-        self._act(m, "Foto (miniature)", lambda: self._show_pane(self.bottom_tabs, self.photos_panel), icon_name="photos")
-        self._act(m, "Sezioni", lambda: self._show_pane(self.bottom_tabs, self.sections_pane), icon_name="line")
-        self._act(m, "Console Python", lambda: self._show_pane(self.bottom_tabs, self.console), "Ctrl+Shift+P",
+        self._act(m, tr("Foto (miniature)"), lambda: self._show_pane(self.bottom_tabs, self.photos_panel),
+                  icon_name="photos")
+        self._act(m, tr("Sezioni"), lambda: self._show_pane(self.bottom_tabs, self.sections_pane), icon_name="line")
+        self._act(m, tr("Console Python"), lambda: self._show_pane(self.bottom_tabs, self.console), "Ctrl+Shift+P",
                   icon_name="console")
         self._act(m, "Log", lambda: self._show_pane(self.bottom_tabs, self.log_pane), icon_name="log")
         m.addSeparator()
-        self._act(m, "Modello", lambda: self.show_view(self.model_view), "F2", icon_name="view3d")
-        self._act(m, "Ortofoto / DEM", lambda: self.show_view(self.ortho_view), "F3", icon_name="view_ortho")
-        self._act(m, "Foto", lambda: self.show_view(self.photo_view), "F4", icon_name="view_photo")
+        self._act(m, tr("Modello"), lambda: self.show_view(self.model_view), "F2", icon_name="view3d")
+        self._act(m, tr("Ortofoto / DEM"), lambda: self.show_view(self.ortho_view), "F3", icon_name="view_ortho")
+        self._act(m, tr("Foto"), lambda: self.show_view(self.photo_view), "F4", icon_name="view_photo")
         m.addSeparator()
-        tmenu = m.addMenu(icon("theme"), "Tema")
+        tmenu = m.addMenu(icon("theme"), tr("Tema"))
         tgroup = QActionGroup(self)
         self.theme_actions = {}
         for mode, label in (("light", "Chiaro"), ("dark", "Scuro")):
@@ -665,19 +701,29 @@ class MainWindow(QMainWindow):
             tgroup.addAction(a)
             tmenu.addAction(a)
             self.theme_actions[mode] = a
+        lmenu = m.addMenu(icon("language"), "Lingua / Language")
+        lgroup = QActionGroup(self)
+        self.language_actions = {}
+        for code, label in i18n.LANGUAGES.items():
+            a = QAction(label, self, checkable=True)
+            a.setChecked(i18n.current() == code)
+            a.triggered.connect(lambda _=False, c=code: self.set_language(c))
+            lgroup.addAction(a)
+            lmenu.addAction(a)
+            self.language_actions[code] = a
         # ------------------------------------------------------------ Help
-        m = mb.addMenu("&Aiuto")
-        self._act(m, "Documentazione online", self.open_docs, icon_name="help")
-        self._act(m, "Diagnostica ambiente...", self.show_doctor, icon_name="doctor")
-        self._act(m, "Apri cartella dei log", self.open_log_folder, icon_name="folder")
+        m = mb.addMenu(tr("&Aiuto"))
+        self._act(m, tr("Documentazione online"), self.open_docs, icon_name="help")
+        self._act(m, tr("Diagnostica ambiente..."), self.show_doctor, icon_name="doctor")
+        self._act(m, tr("Apri cartella dei log"), self.open_log_folder, icon_name="folder")
         m.addSeparator()
-        self._act(m, "Controlla aggiornamenti...", self.check_updates, icon_name="update")
-        self.a_update_auto = QAction("Controlla gli aggiornamenti all'avvio", self, checkable=True)
+        self._act(m, tr("Controlla aggiornamenti..."), self.check_updates, icon_name="update")
+        self.a_update_auto = QAction(tr("Controlla gli aggiornamenti all'avvio"), self, checkable=True)
         self.a_update_auto.setChecked(self.settings.value("updates_auto", "true") in ("true", True, 1, "1"))
         self.a_update_auto.toggled.connect(lambda on: self.settings.setValue("updates_auto", "true" if on else "false"))
         m.addAction(self.a_update_auto)
         m.addSeparator()
-        self._act(m, "Informazioni", self.about, icon_name="about")
+        self._act(m, tr("Informazioni"), self.about, icon_name="about")
         # ------------------------------------------------------------ toolbar
         tb = QToolBar("Flusso di lavoro")
         tb.setObjectName("workflow_toolbar")
@@ -724,7 +770,7 @@ class MainWindow(QMainWindow):
         db.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.addToolBar(db)
         self._toolbar_styles[db] = Qt.ToolButtonStyle.ToolButtonTextBesideIcon
-        lab = QLabel(" Disegno: ")
+        lab = QLabel(tr(" Disegno: "))
         lab.setObjectName("pageSubtitle")
         db.addWidget(lab)
         # short texts in the bar (menus keep the full names, tooltips show them)
@@ -740,7 +786,7 @@ class MainWindow(QMainWindow):
                          (self.a_qgis_open, "QGIS")):
             if a.toolTip() == a.text().replace("...", "").replace("&", ""):
                 a.setToolTip(a.text().replace("...", ""))
-            a.setIconText(short)
+            a.setIconText(tr(short))
         for mode in ("pan", "select", "polygon"):
             db.addAction(self.draw_actions[mode])
         db.addAction(self.a_freehand)
@@ -759,14 +805,15 @@ class MainWindow(QMainWindow):
         db.addAction(self.a_clear_drawings)
         db.addSeparator()
         a = db.addAction(icon("slice"), "Layer")
-        a.setToolTip("Pannello dei layer: mostra, nascondi, zoom, attributi")
+        a.setToolTip(tr("Pannello dei layer: mostra, nascondi, zoom, attributi"))
         a.triggered.connect(lambda _=False: self._show_pane(self.left_tabs, self.layers_pane))
-        a = db.addAction(icon("line"), "Sezioni")
-        a.setToolTip("Pannello delle sezioni")
+        a = db.addAction(icon("line"), tr("Sezioni"))
+        a.setToolTip(tr("Pannello delle sezioni"))
         a.triggered.connect(lambda _=False: self._show_pane(self.bottom_tabs, self.sections_pane))
         db.addAction(self.a_qgis_open)
-        a = db.addAction(icon("publish"), "Pubblica")
-        a.setToolTip("Scrive in PyArchInit le unita' disegnate (pyunitastratigrafiche) e le quote (pyarchinit_quote)")
+        a = db.addAction(icon("publish"), tr("Pubblica"))
+        a.setToolTip(tr("Scrive in PyArchInit le unita' disegnate (pyunitastratigrafiche) e le quote "
+                        "(pyarchinit_quote)"))
         a.triggered.connect(lambda _=False: self.pyarchinit_publish_drawings())
         self._processing_actions.append(a)
         self._refresh_recent()
@@ -817,7 +864,7 @@ class MainWindow(QMainWindow):
         self._restore_drawings()
         self.pa_pane.set_project_site(self.project_site())
         self.refresh_all(reset_views=True, progress=step)
-        step(0.95, "Sezioni e disegni")
+        step(0.95, tr("Sezioni e disegni"))
         self._load_sections()
         self.proxies_pane.set_proxies(self.chunk.meta.get("proxies", []) if self.chunk else [])
         if self.history is None:
@@ -839,15 +886,15 @@ class MainWindow(QMainWindow):
     def refresh_all(self, reset_views: bool = False, progress=None) -> None:
         step = progress or (lambda *_a, **_k: None)
         self._update_title()
-        step(0.05, "Area di lavoro")
+        step(0.05, tr("Area di lavoro"))
         self.workspace.populate(self.doc)
         self.reference.set_chunk(self.chunk, self.last_report)
-        step(0.15, "Foto (le miniature arrivano mentre lavori)")
+        step(0.15, tr("Foto (le miniature arrivano mentre lavori)"))
         self.photos.set_chunk(self.chunk)
-        step(0.25, "Vista 3D")
+        step(0.25, tr("Vista 3D"))
         self.model_view.set_chunk(self.chunk) if reset_views else self.model_view.set_chunk(self.chunk,
                                                                                              self.model_view.kind)
-        step(0.6, "Ortofoto e DEM")
+        step(0.6, tr("Ortofoto e DEM"))
         self._load_raster()
         self._update_stack()
 
@@ -885,9 +932,9 @@ class MainWindow(QMainWindow):
             self.history.record()
 
     def _update_title(self) -> None:
-        name = self.doc.path.name if self.doc.path else "senza nome"
+        name = self.doc.path.name if self.doc.path else tr("senza nome")
         site = self.project_site()
-        self.setWindowTitle(f"{APP_TITLE} {__version__} - {name}" + (f" - sito {site}" if site else "") + "[*]")
+        self.setWindowTitle(f"{APP_TITLE} {__version__} - {name}" + (tr(" - sito {0}", site) if site else "") + "[*]")
 
     # ---------------------------------------------------------------- site of the project
     def project_site(self) -> str:
@@ -912,7 +959,7 @@ class MainWindow(QMainWindow):
         self._update_title()
         self._dirty(True)
         self._redraw_drawings()
-        self.log_pane.info(f"Sito del progetto: {sito or '(nessuno)'}")
+        self.log_pane.info(tr("Sito del progetto: {0}", sito or tr('(nessuno)')))
 
     def _project_open(self) -> bool:
         return self.doc.path is not None or any(ch.cameras for ch in self.doc.chunks)
@@ -920,8 +967,8 @@ class MainWindow(QMainWindow):
     def choose_project_site(self, reason: str = "") -> str:
         """Ask which site the project belongs to: the sites of the PyArchInit database, or a new name."""
         sites = self.pa_pane.site_names() if self.pa is not None else []
-        text = (reason + "\n\n" if reason else "") + ("Sito dello scavo: tutte le US e le quote di questo progetto "
-                                                       "appartengono a questo sito.")
+        text = (reason + "\n\n" if reason else "") + (tr("Sito dello scavo: tutte le US e le quote di questo progetto "
+                                                         "appartengono a questo sito."))
         dlg = SiteChoiceDialog(self, sites, self.project_site(), text)
         if dlg.exec() == dlg.DialogCode.Accepted and dlg.value():
             self.set_project_site(dlg.value())
@@ -940,7 +987,7 @@ class MainWindow(QMainWindow):
         if len(sites) == 1:
             self.set_project_site(sites[0])
         elif sites and ask:
-            self.choose_project_site(f"Il database contiene {len(sites)} siti (scavi).")
+            self.choose_project_site(tr("Il database contiene {0} siti (scavi).", len(sites)))
 
     def _busy(self, busy: bool) -> None:
         for a in self._processing_actions:
@@ -958,7 +1005,7 @@ class MainWindow(QMainWindow):
         names = {"point_cloud": "la nuvola densa", "model": "il modello", "dem": "il DEM",
                  "orthomosaic": "l'ortofoto", "depth_maps": "le depth map"}
         if product and not ch.product_path(product):
-            self._warn(f"Costruisci prima {names.get(product, product)}.")
+            self._warn(tr("Costruisci prima {0}.", tr(names.get(product, product))))
             return False
         return True
 
@@ -989,6 +1036,8 @@ class MainWindow(QMainWindow):
         """``fn(progress)`` in the background, then the project saved and the views refreshed.
         ``undo``: the step is an edit (refined markers, a patch) that Modifica > Annulla takes back;
         so is a step announced with ``history.backup`` (points, faces); a processing step is not."""
+        label = tr(label)  # also the name of the step in Modifica > Annulla
+
         def done(result):
             self._task_done = True
             try:
@@ -1025,33 +1074,33 @@ class MainWindow(QMainWindow):
             return
         self._started = True
         self.set_document(Document())
-        self.statusBar().showMessage("Nuovo progetto: aggiungi le foto (Flusso di lavoro > Aggiungi foto)", 10000)
+        self.statusBar().showMessage(tr("Nuovo progetto: aggiungi le foto (Flusso di lavoro > Aggiungi foto)"), 10000)
 
     def open_document(self, path: str | None = None) -> None:
         if path is None:
-            path, _ = QFileDialog.getOpenFileName(self, "Apri progetto", self._last_dir(), "Progetti (*.ppg)")
+            path, _ = QFileDialog.getOpenFileName(self, tr("Apri progetto"), self._last_dir(), tr("Progetti (*.ppg)"))
             if not path:
                 return
         card = self._progress_card("Apertura del progetto", Path(path).name)
         step = card.progress(0, 100) if card is not None else (lambda *_a, **_k: None)
         try:
-            step(0.02, "Lettura del progetto")
+            step(0.02, tr("Lettura del progetto"))
             try:
                 doc = Document.open(path)
             except Exception as exc:
                 if card is not None:
                     card.close()
                     card = None
-                self._exc(f"Impossibile aprire {path}", exc)
+                self._exc(tr("Impossibile aprire {0}", path), exc)
                 return
             self.last_report = None
             self._started = True
             self.set_document(doc, progress=lambda f, text=None: step(0.08 + 0.9 * f, text))
-            step(1.0, "Pronto")
+            step(1.0, tr("Pronto"))
         finally:
             if card is not None:
                 card.close()
-        self.statusBar().showMessage(f"Aperto {path}", 5000)
+        self.statusBar().showMessage(tr("Aperto {0}", path), 5000)
 
     def _progress_card(self, title: str, subtitle: str = ""):
         """The splash card over the window, for a long step that is not a background task."""
@@ -1065,7 +1114,7 @@ class MainWindow(QMainWindow):
 
     def save_document(self, ask: bool = False) -> bool:
         if ask or self.doc.path is None:
-            path, _ = QFileDialog.getSaveFileName(self, "Salva progetto", self._last_dir(), "Progetti (*.ppg)")
+            path, _ = QFileDialog.getSaveFileName(self, tr("Salva progetto"), self._last_dir(), tr("Progetti (*.ppg)"))
             if not path:
                 return False
             self._store_drawings()
@@ -1076,7 +1125,7 @@ class MainWindow(QMainWindow):
             self.doc.save()
         self._dirty(False)
         self.refresh_all()
-        self.statusBar().showMessage(f"Salvato {self.doc.path}", 5000)
+        self.statusBar().showMessage(tr("Salvato {0}", self.doc.path), 5000)
         return True
 
     def _confirm_discard(self) -> bool:
@@ -1144,6 +1193,8 @@ class MainWindow(QMainWindow):
         super().closeEvent(ev)
         if self._pending_update is not None:
             self._install_pending_update()
+        if self._relaunch_on_close:
+            self._relaunch()
 
     def _last_dir(self) -> str:
         if self.doc.path:
@@ -1188,7 +1239,7 @@ class MainWindow(QMainWindow):
                     self._warn("Scegli almeno una classe.")
                     return
                 classes = None if set(v["classes"]) >= set(codes) else sorted(v["classes"])
-        path, flt = QFileDialog.getSaveFileName(self, "Esporta", self._last_dir(), filters[what])
+        path, flt = QFileDialog.getSaveFileName(self, tr("Esporta"), self._last_dir(), tr(filters[what]))
         if not path:
             return
         if "copc" in flt.lower() and not path.lower().endswith(".copc.laz"):
@@ -1199,8 +1250,9 @@ class MainWindow(QMainWindow):
                   "model": lambda p: ch.export_model(path),
                   "dem": lambda p: ch.export_dem(path, cog=cog),
                   "ortho": lambda p: ch.export_orthomosaic(path, cog=cog)}[what]
-            self.run_task("Esportazione", fn, lambda out: (self.log_pane.info(f"Esportato {out}"),
-                                                           self.statusBar().showMessage(f"Esportato {out}", 8000)),
+            self.run_task("Esportazione", fn,
+                          lambda out: (self.log_pane.info(tr("Esportato {0}", out)),
+                                       self.statusBar().showMessage(tr("Esportato {0}", out), 8000)),
                           refresh=False, save=False)
             return
         try:
@@ -1219,17 +1271,17 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._exc("Esportazione non riuscita", exc)
             return
-        self.log_pane.info(f"Esportato {path}")
-        self.statusBar().showMessage(f"Esportato {path}", 8000)
+        self.log_pane.info(tr("Esportato {0}", path))
+        self.statusBar().showMessage(tr("Esportato {0}", path), 8000)
 
     def import_scans(self) -> None:
         """File > Importa > Scansioni laser: E57 or PTX files as the dense cloud of a new chunk."""
-        paths, _ = QFileDialog.getOpenFileNames(self, "Scansioni laser", self._last_dir(),
-                                                "Scansioni (*.e57 *.E57 *.ptx *.PTX)")
+        paths, _ = QFileDialog.getOpenFileNames(self, tr("Scansioni laser"), self._last_dir(),
+                                                tr("Scansioni (*.e57 *.E57 *.ptx *.PTX)"))
         if not paths:
             return
         v = ParamDialog.ask(self, "Scansioni laser", [
-            Field("label", "Nome del chunk", f"Scansioni laser ({len(paths)} file)", kind="text"),
+            Field("label", "Nome del chunk", tr("Scansioni laser ({0} file)", len(paths)), kind="text"),
             Field("crs", "Sistema di riferimento delle scansioni (es. EPSG:32633; vuoto = locale)", "", kind="text"),
             Field("max_points", "Punti al massimo (0 = tutti)", 0, minimum=0, maximum=2_000_000_000)],
             intro="Le scansioni diventano la nuvola densa di un nuovo chunk, ognuna nella sua posizione registrata. "
@@ -1246,8 +1298,8 @@ class MainWindow(QMainWindow):
             self.doc.chunk = chunk
             self.refresh_all(reset_views=True)
             self._show_model("point_cloud")
-            self.log_pane.info(f"{chunk.label}: {_it(len(chunk.point_cloud))} punti da {len(chunk.meta['scans'])} "
-                               "scansioni")
+            self.log_pane.info(tr("{0}: {1} punti da {2} scansioni",
+                                  chunk.label, _it(len(chunk.point_cloud)), len(chunk.meta['scans'])))
 
         self.run_task("Scansioni laser", lambda p: import_scans(doc, paths, label=v["label"] or None,
                                                                 crs=(v["crs"] or "").strip() or None,
@@ -1264,8 +1316,8 @@ class MainWindow(QMainWindow):
             return
         v = ParamDialog.ask(self, "Colori dalle foto", [
             Field("photos", "Foto del chunk", others[0].key, choices=[(c.key, c.label) for c in others])],
-            intro=f"I punti di «{self.chunk.label}» prendono il colore della foto che li vede piu' di fronte e da piu' "
-                  "vicino, tra quelle in cui non sono nascosti dal modello.")
+            intro=tr("I punti di «{0}» prendono il colore della foto che li vede piu' di fronte e da piu' vicino, "
+                     "tra quelle in cui non sono nascosti dal modello.", self.chunk.label))
         if not v:
             return
         from ..io.scans import colour_from_photos
@@ -1273,8 +1325,9 @@ class MainWindow(QMainWindow):
         target = self.chunk
         photos = next(c for c in others if c.key == v["photos"])
         self.run_task("Colori dalle foto", lambda p: colour_from_photos(target, photos, progress=p),
-                      lambda r: (self.log_pane.info(f"Colori dalle foto per {_it(r['coloured'])} punti su "
-                                                    f"{_it(r['points'])}"), self._show_model("point_cloud")))
+                      lambda r: (self.log_pane.info(tr("Colori dalle foto per {0} punti su {1}",
+                                                       _it(r['coloured']), _it(r['points']))),
+                                 self._show_model("point_cloud")))
 
     def export_light_model(self) -> None:
         if not self._need_chunk(product="model"):
@@ -1293,8 +1346,8 @@ class MainWindow(QMainWindow):
 
         ch = self.chunk
         self.run_task("Modello leggero", lambda p: light_model(ch, int(v["faces"]), int(v["size"]), v["folder"], p),
-                      lambda out: self._info("Modello leggero", f"{_it(out['faces'])} facce, scritto in "
-                                                                f"{Path(out['glb']).parent}"),
+                      lambda out: self._info("Modello leggero", tr("{0} facce, scritto in {1}",
+                                                                   _it(out['faces']), Path(out['glb']).parent)),
                       refresh=False, save=False)
 
     def export_video(self) -> None:
@@ -1331,21 +1384,22 @@ class MainWindow(QMainWindow):
         self.run_task("Video di sorvolo", lambda p: orbit_video(ch, v["path"], kind=v["kind"], seconds=v["seconds"],
                                                                 size=(w, h), pitch=v["pitch"], zoom=v["zoom"],
                                                                 turns=v["turns"], progress=p),
-                      lambda out: (self.log_pane.info(f"Video salvato in {out}"),
-                                   self.statusBar().showMessage(f"Video salvato in {out}", 10000)),
+                      lambda out: (self.log_pane.info(tr("Video salvato in {0}", out)),
+                                   self.statusBar().showMessage(tr("Video salvato in {0}", out), 10000)),
                       refresh=False, save=False)
 
     def export_3dtiles(self) -> None:
         if not self._need_chunk(product="model"):
             return
-        folder = QFileDialog.getExistingDirectory(self, "Cartella per i 3D Tiles", self._last_dir())
+        folder = QFileDialog.getExistingDirectory(self, tr("Cartella per i 3D Tiles"), self._last_dir())
         if not folder:
             return
         ch = self.chunk
         out = Path(folder) / f"{ch.label.replace(' ', '_')}_3dtiles"
         self.run_task("Cesium 3D Tiles", lambda p: ch.export_3dtiles(out, progress=p),
-                      lambda path: self._info("Cesium 3D Tiles", f"Scritto {path}: aprilo in CesiumJS con "
-                                              "Cesium3DTileset.fromUrl (servito da un server web)."),
+                      lambda path: self._info("Cesium 3D Tiles", tr("Scritto {0}: aprilo in CesiumJS con "
+                                                                    "Cesium3DTileset.fromUrl (servito da un server "
+                                                                    "web).", path)),
                       refresh=False, save=False)
 
     def generate_report(self) -> None:
@@ -1375,9 +1429,9 @@ class MainWindow(QMainWindow):
             self.open_document(str(which))
             if d.pyarchinit_config:
                 self.pyarchinit_connect(config=d.pyarchinit_config, quiet=True)
-            text = (f"Saggio di scavo: {d.project}\nCiotola su turntable: {d.pottery_project or '-'}\n"
-                    + (f"Profilo della ciotola: {d.pottery_profile}\n" if d.pottery_profile else "")
-                    + f"Leggi {d.folder / 'LEGGIMI.txt'} per cosa provare.")
+            text = (tr("Saggio di scavo: {0}\nCiotola su turntable: {1}\n", d.project, d.pottery_project or '-')
+                    + (tr("Profilo della ciotola: {0}\n", d.pottery_profile) if d.pottery_profile else "")
+                    + tr("Leggi {0} per cosa provare.", d.folder / 'LEGGIMI.txt'))
             self._info("Demo pronta", text)
 
         self.run_task("Creazione dati demo", lambda p: create_demo(v["folder"], process=v["process"],
@@ -1389,7 +1443,7 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard():
             return
         if kind == "metashape":
-            src, _ = QFileDialog.getOpenFileName(self, "Progetto Metashape", self._last_dir(), "Metashape (*.psx)")
+            src, _ = QFileDialog.getOpenFileName(self, tr("Progetto Metashape"), self._last_dir(), "Metashape (*.psx)")
         elif kind == "webodm":
             r = message(self, "question", "WebODM", "Importi l'archivio scaricato da WebODM (all.zip)?\n"
                         "Si = scegli all.zip, No = scegli la cartella del task ODM.",
@@ -1398,16 +1452,17 @@ class MainWindow(QMainWindow):
             if r == QMessageBox.StandardButton.Cancel:
                 return
             if r == QMessageBox.StandardButton.Yes:
-                src, _ = QFileDialog.getOpenFileName(self, "all.zip di WebODM", self._last_dir(), "Zip (*.zip)")
+                src, _ = QFileDialog.getOpenFileName(self, tr("all.zip di WebODM"), self._last_dir(), "Zip (*.zip)")
             else:
-                src = QFileDialog.getExistingDirectory(self, "Cartella del task ODM", self._last_dir())
+                src = QFileDialog.getExistingDirectory(self, tr("Cartella del task ODM"), self._last_dir())
         else:
-            src = QFileDialog.getExistingDirectory(self, "Cartella della sessione Photo3D", self._last_dir())
+            src = QFileDialog.getExistingDirectory(self, tr("Cartella della sessione Photo3D"), self._last_dir())
         if not src:
             return
         stem = Path(src).stem if kind != "photo3d" else Path(src).name
         default = Path(src).parent / f"{stem}_ppg.ppg" if kind != "photo3d" else Path(src) / f"{stem}.ppg"
-        out, _ = QFileDialog.getSaveFileName(self, "Salva il progetto importato", str(default), "Progetti (*.ppg)")
+        out, _ = QFileDialog.getSaveFileName(self, tr("Salva il progetto importato"), str(default),
+                                             tr("Progetti (*.ppg)"))
         if not out:
             return
 
@@ -1430,20 +1485,21 @@ class MainWindow(QMainWindow):
             self.set_document(doc)
             warn = list(dict.fromkeys(w for ch in doc.chunks for w in ch.meta.get("import", {}).get("warnings", [])))
             ch = doc.chunk
-            text = (f"{len(doc.chunks)} chunk, {len(ch.cameras)} foto ({len(ch.aligned_cameras)} allineate), "
-                    f"prodotti: {', '.join(sorted(k for k in ch.products if k != 'reconstruction')) or 'nessuno'}, "
-                    f"CRS {ch.crs}")
+            products = ", ".join(sorted(k for k in ch.products if k != "reconstruction")) or tr("nessuno")
+            text = tr("{0} chunk, {1} foto ({2} allineate), prodotti: {3}, CRS {4}",
+                      len(doc.chunks), len(ch.cameras), len(ch.aligned_cameras), products, ch.crs)
             if ch.meta.get("point_cloud_source"):
-                text += f"\nNuvola densa: {ch.meta['point_cloud_source']} ({len(ch.point_cloud)} punti)"
+                text += tr("\nNuvola densa: {0} ({1} punti)", ch.meta['point_cloud_source'], len(ch.point_cloud))
             if ch.meta.get("import", {}).get("dem"):
                 text += f"\nDEM: {ch.meta['import']['dem']}"
             if ch.markers:
-                text += f"\nMarker: {len(ch.markers)}" + (f", barre di scala: {len(ch.scalebars)}" if ch.scalebars else "")
+                text += f"\nMarker: {len(ch.markers)}" + (tr(", barre di scala: {0}",
+                                                             len(ch.scalebars)) if ch.scalebars else "")
             odm = ch.meta.get("import", {}).get("gcp", {}).get("odm_errors")
             if odm:
                 rmse = float(np.sqrt(np.mean(np.sum(np.square(list(odm.values())), axis=1))))
-                text += f" (GCP di ODM: errore medio {rmse * 1000:.1f} mm secondo ODM)"
-            self.log_pane.info(f"Importato {src}: {text}")
+                text += tr(" (GCP di ODM: errore medio {0:.1f} mm secondo ODM)", rmse * 1000)
+            self.log_pane.info(tr("Importato {0}: {1}", src, text))
             for w in warn:
                 self.log_pane.warning(w)
             self._info("Importazione completata", text + ("\n\n" + "\n".join(warn[:6]) if warn else ""))
@@ -1452,7 +1508,7 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- workflow
     def add_chunk(self) -> None:
-        label, ok = QInputDialog.getText(self, "Nuovo chunk", "Nome:", text=f"Chunk {len(self.doc.chunks) + 1}")
+        label, ok = QInputDialog.getText(self, tr("Nuovo chunk"), tr("Nome:"), text=f"Chunk {len(self.doc.chunks) + 1}")
         if ok:
             self.doc.chunk = self.doc.add_chunk(label)
             self._dirty(True)
@@ -1470,7 +1526,7 @@ class MainWindow(QMainWindow):
             return
         doc = self.doc
         ref0 = self.chunk if self.chunk is not None else doc.chunks[0]
-        choices = [(ch.key, f"{ch.label} ({len(ch.aligned_cameras)} foto allineate)") for ch in doc.chunks]
+        choices = [(ch.key, tr("{0} ({1} foto allineate)", ch.label, len(ch.aligned_cameras))) for ch in doc.chunks]
         v = ParamDialog.ask(self, "Allinea chunk", [
             Field("reference", "Chunk di riferimento", ref0.key, choices=choices),
             Field("chunks", "Chunk da allineare", [ch.key for ch in doc.chunks if ch is not ref0 and ch.enabled],
@@ -1499,12 +1555,16 @@ class MainWindow(QMainWindow):
             lines = []
             for e in report["chunks"]:
                 rmse = e.get("rmse")
-                err = "" if rmse is None else (f", errore medio {rmse * 1000:.1f} mm" if metric else f", RMSE {rmse:.4g}")
-                lines.append(f"{e['label']}: {e.get('correspondences', 0)} corrispondenze{err}, scala {e['scale']:.4f}"
-                             + (f"; da ricostruire: {', '.join(e['stale_products'])}" if e.get("stale_products") else ""))
+                err = "" if rmse is None else (tr(", errore medio {0:.1f} mm",
+                                                  rmse * 1000) if metric else f", RMSE {rmse:.4g}")
+                lines.append(tr("{0}: {1} corrispondenze{2}, scala {3:.4f}",
+                                e['label'], e.get('correspondences', 0), err, e['scale'])
+                             + (tr("; da ricostruire: {0}",
+                                   ', '.join(e['stale_products'])) if e.get("stale_products") else ""))
             if report.get("levelled_reference"):
-                lines.append(f"Il chunk {ref.label} e' stato prima messo in bolla (come per il DEM).")
-            text = f"Allineati a {ref.label} ({dict(markers='marker', cameras='foto', points='punti')[v['method']]}):\n" \
+                lines.append(tr("Il chunk {0} e' stato prima messo in bolla (come per il DEM).", ref.label))
+            text = tr("Allineati a {0} ({1}):\n",
+                      ref.label, tr(dict(markers='marker', cameras='foto', points='punti')[v['method']])) \
                 + "\n".join(lines)
             self._info("Allinea chunk", text)
 
@@ -1542,8 +1602,8 @@ class MainWindow(QMainWindow):
             if v["activate"]:
                 doc.chunk = merged
                 self.refresh_all(reset_views=True)
-            text = (f"Creato «{merged.label}»: {len(merged.cameras)} foto, {len(merged.markers)} marker"
-                    + (f", nuvola densa di {len(merged.point_cloud):,} punti".replace(",", ".")
+            text = (tr("Creato «{0}»: {1} foto, {2} marker", merged.label, len(merged.cameras), len(merged.markers))
+                    + (tr(", nuvola densa di {0} punti", _it(len(merged.point_cloud)))
                        if merged.point_cloud is not None else ""))
             for w in info.get("warnings", []):
                 self.log_pane.warning(w)
@@ -1558,15 +1618,16 @@ class MainWindow(QMainWindow):
         if not self._need_chunk():
             return
         if folder:
-            d = QFileDialog.getExistingDirectory(self, "Cartella di foto", self._last_dir())
+            d = QFileDialog.getExistingDirectory(self, tr("Cartella di foto"), self._last_dir())
             paths = [d] if d else []
         else:
-            paths, _ = QFileDialog.getOpenFileNames(self, "Foto", self._last_dir(),
-                                                    "Immagini (*.jpg *.jpeg *.png *.tif *.tiff *.JPG *.JPEG *.PNG *.TIF)")
+            paths, _ = QFileDialog.getOpenFileNames(self, tr("Foto"), self._last_dir(),
+                                                    tr("Immagini (*.jpg *.jpeg *.png *.tif *.tiff *.JPG *.JPEG *.PNG "
+                                                       "*.TIF)"))
         if paths:
             self._started = True
             self.run_task("Aggiunta foto", lambda p: self.chunk.add_photos(paths, recursive=folder),
-                          lambda cams: self.statusBar().showMessage(f"{len(cams)} foto aggiunte", 8000))
+                          lambda cams: self.statusBar().showMessage(tr("{0} foto aggiunte", len(cams)), 8000))
 
     def add_video(self) -> None:
         """Workflow > Aggiungi video: frames chosen for the reconstruction, GPS from DJI subtitles."""
@@ -1583,8 +1644,9 @@ class MainWindow(QMainWindow):
             Field("overlap", "Sovrapposizione tra fotogrammi (%)", 70.0, minimum=30.0, maximum=95.0, decimals=0),
             Field("every", "Secondi tra due fotogrammi", 1.0, minimum=0.1, maximum=60.0, decimals=1),
             Field("max_frames", "Fotogrammi al massimo (0 = nessun limite)", 0, minimum=0, maximum=100000)],
-            intro=f"{Path(path).name}: i fotogrammi vanno nella cartella «{Path(path).stem}_fotogrammi» accanto al "
-                  "video. Se accanto c'e' il file .SRT del drone DJI, ogni fotogramma prende la sua posizione GPS.")
+            intro=tr("{0}: i fotogrammi vanno nella cartella «{1}_fotogrammi» accanto al video. Se accanto c'e' il "
+                     "file .SRT del drone DJI, ogni fotogramma prende la sua posizione GPS.",
+                     Path(path).name, Path(path).stem))
         if not v:
             return
         from ..engine.video import add_video
@@ -1595,7 +1657,8 @@ class MainWindow(QMainWindow):
             chunk, path, overlap=v["overlap"] / 100.0, every=v["every"] if v["mode"] == "every" else None,
             max_frames=int(v["max_frames"]) or None, progress=p),
             lambda cams: self.statusBar().showMessage(
-                f"{len(cams)} fotogrammi aggiunti" + (" con il GPS" if cams and cams[0].reference.location else ""),
+                tr("{0} fotogrammi aggiunti",
+                   len(cams)) + (tr(" con il GPS") if cams and cams[0].reference.location else ""),
                 10000))
 
     PANORAMA_FACES = [("front", "Davanti"), ("right", "Destra"), ("back", "Dietro"), ("left", "Sinistra"),
@@ -1605,8 +1668,9 @@ class MainWindow(QMainWindow):
         """Workflow > Aggiungi foto 360°: equirectangular photos as the faces of a cube (a rig)."""
         if not self._need_chunk():
             return
-        paths, _ = QFileDialog.getOpenFileNames(self, "Foto 360° (equirettangolari)", self._last_dir(),
-                                                "Immagini (*.jpg *.jpeg *.png *.tif *.tiff *.JPG *.JPEG *.PNG *.TIF)")
+        paths, _ = QFileDialog.getOpenFileNames(self, tr("Foto 360° (equirettangolari)"), self._last_dir(),
+                                                tr("Immagini (*.jpg *.jpeg *.png *.tif *.tiff *.JPG *.JPEG *.PNG "
+                                                   "*.TIF)"))
         if not paths:
             return
         v = ParamDialog.ask(self, "Foto 360°", [
@@ -1631,7 +1695,8 @@ class MainWindow(QMainWindow):
         self.run_task("Foto 360°", lambda p: add_panoramas(chunk, paths, size=int(v["size"]) or None, fov=v["fov"],
                                                          faces=v["faces"], progress=p),
                       lambda cams: self.statusBar().showMessage(
-                          f"{len({c.meta['panorama'] for c in cams})} foto 360° di {n} aggiunte ({len(cams)} facce)",
+                          tr("{0} foto 360° di {1} aggiunte ({2} facce)",
+                             len({c.meta['panorama'] for c in cams}), n, len(cams)),
                           10000))
 
     LENS_MODELS = [("OPENCV", "Normale (Brown: k1, k2, p1, p2)"),
@@ -1654,16 +1719,16 @@ class MainWindow(QMainWindow):
         labels = ", ".join(self.chunk.sensors[k].label for k in sensors)
         v = ParamDialog.ask(self, "Modello dell'obiettivo", [
             Field("model", "Modello", current, choices=choices)],
-            intro=f"Sensori: {labels}. Il fisheye e' riconosciuto dai dati EXIF dell'obiettivo (o da una focale "
-                  "equivalente fino a 15 mm); se non lo e', sceglilo qui. Focale e punto principale restano, la "
-                  "distorsione riparte da zero: allinea di nuovo le foto.")
+            intro=tr("Sensori: {0}. Il fisheye e' riconosciuto dai dati EXIF dell'obiettivo (o da una focale "
+                     "equivalente fino a 15 mm); se non lo e', sceglilo qui. Focale e punto principale restano, la "
+                     "distorsione riparte da zero: allinea di nuovo le foto.", labels))
         if not v or all(self.chunk.sensors[k].model == v["model"] for k in sensors):
             return
         for k in sensors:
             self.chunk.set_sensor_model(k, v["model"])
         self._dirty(True)
-        self.log_pane.info(f"Modello dell'obiettivo {v['model']} per: {labels}. Allinea di nuovo le foto.")
-        self.statusBar().showMessage("Modello dell'obiettivo cambiato: allinea di nuovo le foto", 10000)
+        self.log_pane.info(tr("Modello dell'obiettivo {0} per: {1}. Allinea di nuovo le foto.", v['model'], labels))
+        self.statusBar().showMessage(tr("Modello dell'obiettivo cambiato: allinea di nuovo le foto"), 10000)
 
     def _photos_menu(self, pos) -> None:
         """Right click in the Photos pane: quality, enable/disable, masks of the selected photos."""
@@ -1672,24 +1737,24 @@ class MainWindow(QMainWindow):
         cams = self.photos.selected_cameras()
         menu = QMenu(self)
         if len(cams) == 1:
-            menu.addAction(icon("photos"), "Apri", lambda: self.open_photo(cams[0]))
-        menu.addAction(icon("quality"), "Stima la qualita' delle immagini", self.estimate_quality)
-        menu.addAction("Disattiva le foto sfocate (qualita' sotto 0,5)", self.disable_blurred)
-        menu.addAction(icon("lens"), "Modello dell'obiettivo...", lambda: self.lens_model(cams))
+            menu.addAction(icon("photos"), tr("Apri"), lambda: self.open_photo(cams[0]))
+        menu.addAction(icon("quality"), tr("Stima la qualita' delle immagini"), self.estimate_quality)
+        menu.addAction(tr("Disattiva le foto sfocate (qualita' sotto 0,5)"), self.disable_blurred)
+        menu.addAction(icon("lens"), tr("Modello dell'obiettivo..."), lambda: self.lens_model(cams))
         if len(cams) == 2:
-            menu.addAction(icon("matches"), "Corrispondenze tra queste due foto",
+            menu.addAction(icon("matches"), tr("Corrispondenze tra queste due foto"),
                            lambda: self.pair_matches(cams[0], cams[1]))
         if len(cams) == 1 and cams[0].aligned:
-            menu.addAction(icon("residuals"), "Residui dei punti di legame",
+            menu.addAction(icon("residuals"), tr("Residui dei punti di legame"),
                            lambda: (self.a_residuals.setChecked(True), self.open_photo(cams[0])))
         if cams:
             menu.addSeparator()
-            menu.addAction(f"Disattiva le {len(cams)} foto selezionate", lambda: self.enable_photos(cams, False))
-            menu.addAction(f"Attiva le {len(cams)} foto selezionate", lambda: self.enable_photos(cams, True))
+            menu.addAction(tr("Disattiva le {0} foto selezionate", len(cams)), lambda: self.enable_photos(cams, False))
+            menu.addAction(tr("Attiva le {0} foto selezionate", len(cams)), lambda: self.enable_photos(cams, True))
             menu.addSeparator()
-            menu.addAction(icon("mask"), "Maschere dal modello (foto selezionate)", self.masks_from_model)
-            menu.addAction(icon("mask"), "Maschere con SAM 2.1 (foto selezionate)", self.masks_with_sam)
-            menu.addAction("Rimuovi le maschere delle foto selezionate", lambda: self.masks_remove(selected=True))
+            menu.addAction(icon("mask"), tr("Maschere dal modello (foto selezionate)"), self.masks_from_model)
+            menu.addAction(icon("mask"), tr("Maschere con SAM 2.1 (foto selezionate)"), self.masks_with_sam)
+            menu.addAction(tr("Rimuovi le maschere delle foto selezionate"), lambda: self.masks_remove(selected=True))
         menu.exec(self.photos.mapToGlobal(pos))
 
     def estimate_quality(self) -> None:
@@ -1703,10 +1768,10 @@ class MainWindow(QMainWindow):
             low = sorted((v, k) for k, v in q.items() if v < THRESHOLD)
             self.photos.update_flags()
             self._dirty(True)
-            text = f"Qualita' stimata per {len(q)} foto."
+            text = tr("Qualita' stimata per {0} foto.", len(q))
             if low:
                 names = ", ".join(chunk.camera(k).label for _v, k in low[:12]) + (" ..." if len(low) > 12 else "")
-                text += f" {len(low)} sfocate rispetto alle altre (sotto 0,5): {names}"
+                text += tr(" {0} sfocate rispetto alle altre (sotto 0,5): {1}", len(low), names)
             self.log_pane.info(text)
             self.statusBar().showMessage(text[:200], 15000)
 
@@ -1727,8 +1792,8 @@ class MainWindow(QMainWindow):
             c.enabled = bool(enabled)
         self.photos.update_flags()
         self._dirty(True)
-        self.statusBar().showMessage(f"{len(cams)} foto {'attivate' if enabled else 'disattivate'}: valgono dal "
-                                     "prossimo allineamento o dalla prossima costruzione", 10000)
+        self.statusBar().showMessage(tr("{0} foto {1}: valgono dal prossimo allineamento o dalla prossima costruzione",
+                                        len(cams), tr('attivate') if enabled else tr('disattivate')), 10000)
 
     def detect_markers(self) -> None:
         if not self._need_chunk():
@@ -1737,7 +1802,7 @@ class MainWindow(QMainWindow):
                                                          choices=TARGET_TYPES)])
         if v:
             self.run_task("Rilevamento marker", lambda p: self.chunk.detect_markers(v["target_type"], progress=p),
-                          lambda ms: self.statusBar().showMessage(f"{len(ms)} marker rilevati", 8000))
+                          lambda ms: self.statusBar().showMessage(tr("{0} marker rilevati", len(ms)), 8000))
 
     # ---------------------------------------------------------------- undo and redo
     def _undo_state(self) -> dict:
@@ -1814,24 +1879,24 @@ class MainWindow(QMainWindow):
             return
         self.a_undo.setEnabled(h.can_undo())
         self.a_redo.setEnabled(h.can_redo())
-        self.a_undo.setText(f"Annulla: {h.undo_text()}" if h.can_undo() else "Annulla")
-        self.a_redo.setText(f"Ripeti: {h.redo_text()}" if h.can_redo() else "Ripeti")
+        self.a_undo.setText(tr("Annulla: {0}", h.undo_text()) if h.can_undo() else tr("Annulla", context="undo"))
+        self.a_redo.setText(tr("Ripeti: {0}", h.redo_text()) if h.can_redo() else tr("Ripeti"))
 
     def undo(self) -> None:
         if self.runner.busy:
-            self.statusBar().showMessage("Aspetta che finisca l'elaborazione in corso", 6000)
+            self.statusBar().showMessage(tr("Aspetta che finisca l'elaborazione in corso"), 6000)
             return
         text = self.history.undo() if self.history is not None else None
         if text:
-            self.statusBar().showMessage(f"Annullato: {text}", 6000)
+            self.statusBar().showMessage(tr("Annullato: {0}", text), 6000)
 
     def redo(self) -> None:
         if self.runner.busy:
-            self.statusBar().showMessage("Aspetta che finisca l'elaborazione in corso", 6000)
+            self.statusBar().showMessage(tr("Aspetta che finisca l'elaborazione in corso"), 6000)
             return
         text = self.history.redo() if self.history is not None else None
         if text:
-            self.statusBar().showMessage(f"Ripetuto: {text}", 6000)
+            self.statusBar().showMessage(tr("Ripetuto: {0}", text), 6000)
 
     def batch_process(self) -> None:
         """Flusso di lavoro > Elaborazione batch: steps over several chunks, the project saved after
@@ -1849,9 +1914,10 @@ class MainWindow(QMainWindow):
         if state is not None:
             total = sum(len(batch.targets(self.doc, s["chunks"])) for s in state["steps"])
             r = choice(self, "question", "Elaborazione batch",
-                       f"Un batch si e' interrotto dopo {len(state['done'])} "
-                       f"{'passo' if len(state['done']) == 1 else 'passi'} su {total} (iniziato il "
-                       f"{state['started'][:16].replace('T', ' ')}). Riprenderlo da dove si era fermato?",
+                       tr("Un batch si e' interrotto dopo {0} {1} su {2} (iniziato il {3}). Riprenderlo da dove si "
+                          "era fermato?",
+                          len(state['done']), tr('passo') if len(state['done']) == 1 else tr('passi'), total,
+                          state['started'][:16].replace('T', ' ')),
                        ["Riprendi", "Modifica e ricomincia"])
             if r is None:
                 return
@@ -1872,13 +1938,13 @@ class MainWindow(QMainWindow):
 
         def done(report):
             self.setWindowModified(False)
-            text = (f"Batch finito in {report['seconds'] / 60:.1f} min: {len(report['done'])} passi fatti"
-                    + (f", {len(report['failed'])} falliti" if report["failed"] else "")
-                    + (f", {len(report['skipped'])} saltati" if report["skipped"] else ""))
+            text = (tr("Batch finito in {0:.1f} min: {1} passi fatti", report['seconds'] / 60, len(report['done']))
+                    + (tr(", {0} falliti", len(report['failed'])) if report["failed"] else "")
+                    + (tr(", {0} saltati", len(report['skipped'])) if report["skipped"] else ""))
             for key, err in report["failed"].items():
                 ck, i = key.split(":")
                 label = next((c.label for c in doc.chunks if str(c.key) == ck), ck)
-                self.log_pane.warning(f"Batch: {steps[int(i)]['op']} su {label} fallito: {err}")
+                self.log_pane.warning(tr("Batch: {0} su {1} fallito: {2}", steps[int(i)]['op'], label, err))
             self.log_pane.info(text)
             self.statusBar().showMessage(text, 20000)
 
@@ -1903,19 +1969,20 @@ class MainWindow(QMainWindow):
             lines = []
             if rep.get("cells"):
                 pct = rep["weak_fraction"] * 100
-                lines.append(f"Copertura: {pct:.1f}% dell'area vista da meno di {rep['min_photos']} foto "
-                             f"({rep['weak_area']:.2f} m2); in media ogni punto e' in {rep['median_photos']:.0f} foto."
-                             if pct else f"Copertura: tutta l'area e' vista da almeno {rep['min_photos']} foto "
-                                         f"(in media {rep['median_photos']:.0f}).")
+                lines.append(tr("Copertura: {0:.1f}% dell'area vista da meno di {1} foto ({2:.2f} m2); in media ogni "
+                                "punto e' in {3:.0f} foto.",
+                                pct, rep['min_photos'], rep['weak_area'], rep['median_photos'])
+                             if pct else tr("Copertura: tutta l'area e' vista da almeno {0} foto (in media {1:.0f}).",
+                                            rep['min_photos'], rep['median_photos']))
             if rep["unaligned"]:
-                lines.append(f"Foto non allineate ({len(rep['unaligned'])}): " + ", ".join(rep["unaligned"][:15])
+                lines.append(tr("Foto non allineate ({0}): ", len(rep['unaligned'])) + ", ".join(rep["unaligned"][:15])
                              + (" ..." if len(rep["unaligned"]) > 15 else ""))
             if rep.get("blurred"):
-                lines.append(f"Foto sfocate ({len(rep['blurred'])}): " + ", ".join(rep["blurred"][:15])
+                lines.append(tr("Foto sfocate ({0}): ", len(rep['blurred'])) + ", ".join(rep["blurred"][:15])
                              + (" ..." if len(rep["blurred"]) > 15 else ""))
             words = {"not found": "in nessuna foto", "one photo": "in una foto sola", "two photos": "in due foto sole"}
             for m in rep["markers"]:
-                lines.append(f"Marker {m['label']}: {words[m['status']]}")
+                lines.append(f"Marker {m['label']}: {tr(words[m['status']])}")
             if not lines[1:] and not rep.get("weak_cells"):
                 lines.append("Nessun problema: si puo' lasciare il sito.")
             if rep.get("cells"):
@@ -1933,8 +2000,8 @@ class MainWindow(QMainWindow):
             return
         self._load_raster("coverage", path)
         self.show_view(self.ortho_view)
-        self.statusBar().showMessage("Copertura: foto che inquadrano ogni punto - rosso scuro nessuna, rosso una, "
-                                     "arancio due, giallo 3-4, verde chiaro 5-8, verde 9 o piu'", 20000)
+        self.statusBar().showMessage(tr("Copertura: foto che inquadrano ogni punto - rosso scuro nessuna, rosso una, "
+                                        "arancio due, giallo 3-4, verde chiaro 5-8, verde 9 o piu'"), 20000)
 
     # ---------------------------------------------------------------- diagnostics of the alignment
     def match_graph(self) -> None:
@@ -1980,12 +2047,13 @@ class MainWindow(QMainWindow):
         try:
             measured, projected = residuals(self.chunk, cam.key)
         except Exception as exc:  # no model (an imported project without tie points)
-            self.statusBar().showMessage(f"Residui non disponibili: {exc}", 8000)
+            self.statusBar().showMessage(tr("Residui non disponibili: {0}", exc), 8000)
             return
         info = self.photo_view.show_residuals(measured, projected)
         self.statusBar().showMessage(
-            f"{cam.label}: {info['count']} punti di legame, residuo medio {info['mean']:.2f} px, massimo "
-            f"{info['max']:.2f} px (frecce x20: verde sotto 1 px, arancio sotto 3, rosso oltre)".replace(".", ","),
+            decimal_comma(tr("{0}: {1} punti di legame, residuo medio {2:.2f} px, massimo {3:.2f} px (frecce x20: "
+                             "verde sotto 1 px, arancio sotto 3, rosso "
+                             "oltre)", cam.label, info['count'], info['mean'], info['max'])),
             20000)
 
     def camera_calibration(self) -> None:
@@ -2010,7 +2078,7 @@ class MainWindow(QMainWindow):
         names = [ch.marker_by_key(k).label for k in keys]
         keep = ch.merge_markers(keys)
         self._markers_edited(keep)
-        self.log_pane.info(f"Marker {', '.join(names)} uniti in {keep.label}")
+        self.log_pane.info(tr("Marker {0} uniti in {1}", ', '.join(names), keep.label))
 
     def remove_markers(self, keys) -> None:
         if not self._need_chunk() or not keys:
@@ -2018,12 +2086,12 @@ class MainWindow(QMainWindow):
         ch = self.chunk
         names = [ch.marker_by_key(k).label for k in keys]
         bars = sum(1 for sb in ch.scalebars if {sb.marker_a, sb.marker_b} & set(keys))
-        if choice(self, "question", "Elimina marker", f"Eliminare {', '.join(names)}"
-                  + (f" e {bars} barre di scala che ci finiscono" if bars else "") + "?", ["Elimina"]) != 0:
+        if choice(self, "question", "Elimina marker", tr("Eliminare {0}", ', '.join(names))
+                  + (tr(" e {0} barre di scala che ci finiscono", bars) if bars else "") + "?", ["Elimina"]) != 0:
             return
         ch.remove_markers(keys)
         self._markers_edited()
-        self.log_pane.info(f"Marker eliminati: {', '.join(names)}")
+        self.log_pane.info(tr("Marker eliminati: {0}", ', '.join(names)))
 
     def estimate_precision(self) -> None:
         """Precision of cameras, markers and tie points from the covariance of the adjustment, and
@@ -2041,12 +2109,12 @@ class MainWindow(QMainWindow):
             self.workspace.populate(self.doc)
             self._dirty(True)
             tp, cams = report["tie_points"].get("median"), report["cameras"].get("median")
-            datum = {"control points": "rispetto ai punti di controllo e alla loro accuratezza",
-                     "camera positions": "rispetto alle posizioni GPS delle foto",
-                     "internal": "interna al blocco (nessun riferimento)"}[report["datum"]]
+            datum = tr({"control points": "rispetto ai punti di controllo e alla loro accuratezza",
+                        "camera positions": "rispetto alle posizioni GPS delle foto",
+                        "internal": "interna al blocco (nessun riferimento)"}[report["datum"]])
             fmt = lambda v: " / ".join(f"{x * 1000:.1f}" for x in v) if v else "-"  # noqa: E731
-            text = (f"Precisione {datum}: punti di legame X/Y/Z {fmt(tp)} mm, camere {fmt(cams)} mm (mediane); "
-                    f"misura nelle foto {report['sigma0_px']:.2f} px")
+            text = (tr("Precisione {0}: punti di legame X/Y/Z {1} mm, camere {2} mm (mediane); misura nelle foto "
+                       "{3:.2f} px", datum, fmt(tp), fmt(cams), report['sigma0_px']))
             self.log_pane.info(text)
             self.statusBar().showMessage(text, 20000)
             if ch.product_path("dem_precision") is not None:
@@ -2065,8 +2133,8 @@ class MainWindow(QMainWindow):
         self.show_view(self.ortho_view)
         lim = getattr(self.ortho_view, "diff_limit", 0.0)
         self.statusBar().showMessage(
-            f"Precisione del DEM (deviazione standard delle quote): verde piccola, rosso {lim * 1000:.1f} mm o piu'; "
-            "sigma Z sotto il cursore", 20000)
+            tr("Precisione del DEM (deviazione standard delle quote): verde piccola, rosso {0:.1f} mm o piu'; sigma "
+               "Z sotto il cursore", lim * 1000), 20000)
 
     def refine_markers(self, keys=None) -> None:
         """The blue flags of the markers (all, or those of ``keys``) looked for in the photos by
@@ -2086,8 +2154,10 @@ class MainWindow(QMainWindow):
             found = sum(len(r["refined"]) for r in report.values())
             left = sum(len(r["failed"]) for r in report.values())
             self._markers_edited()
-            text = (f"Bandierine blu trovate nelle foto: {found}" if found else "Nessuna bandierina blu trovata")
-            text += f"; {left} da confermare a mano" if left else ""
+            text = (tr("Bandierine blu trovate nelle foto: "
+                       "{0}", found) if found else tr("Nessuna bandierina blu "
+                                                                                         "trovata"))
+            text += tr("; {0} da confermare a mano", left) if left else ""
             self.log_pane.info(text)
             self.statusBar().showMessage(text, 15000)
 
@@ -2122,7 +2192,7 @@ class MainWindow(QMainWindow):
             return n
 
         self.run_task("Allineamento", job, lambda n: self.statusBar().showMessage(
-            f"{n}/{len(self.chunk.cameras)} foto allineate", 10000))
+            tr("{0}/{1} foto allineate", n, len(self.chunk.cameras)), 10000))
 
     def import_reference(self) -> None:
         if not self._need_chunk():
@@ -2142,8 +2212,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._exc("Importazione dei riferimenti non riuscita", exc)
             return
-        self.statusBar().showMessage(f"{n} riferimenti importati", 8000)
-        self.log_pane.info(f"{n} riferimenti importati da {v['path']}")
+        self.statusBar().showMessage(tr("{0} riferimenti importati", n), 8000)
+        self.log_pane.info(tr("{0} riferimenti importati da {1}", n, v['path']))
         self._dirty(True)
         self.refresh_all()
         if self.chunk.aligned_cameras:
@@ -2168,27 +2238,29 @@ class MainWindow(QMainWindow):
         try:
             ch.triangulate_markers()  # markers on one photo get their place on the surface
         except Exception as exc:
-            self.log_pane.warning(f"Triangolazione dei marker non riuscita: {exc}")
+            self.log_pane.warning(tr("Triangolazione dei marker non riuscita: {0}", exc))
         a, b = ch.marker_by_key(first), ch.marker_by_key(second)
         now = ""
         if a.position is not None and b.position is not None:
             from ..engine.chunks import _is_scaled
 
             d = _it(ch.scale * float(np.linalg.norm(a.position - b.position)), 4)
-            now = (f" Ora {a.label} e {b.label} distano {d} m (in 3D: con un dislivello e' piu' della distanza in "
-                   "pianta misurata sull'ortofoto)." if _is_scaled(ch) else
-                   f" Ora {a.label} e {b.label} distano {d} unita' arbitrarie (il rilievo non e' ancora in scala).")
+            now = (tr(" Ora {0} e {1} distano {2} m (in 3D: con un dislivello e' piu' della distanza in pianta "
+                      "misurata sull'ortofoto).", a.label, b.label, d) if _is_scaled(ch) else
+                   tr(" Ora {0} e {1} distano {2} unita' arbitrarie (il rilievo non e' ancora in scala).",
+                      a.label, b.label, d))
         else:
             missing = [m.label for m in (a, b) if m.position is None]
-            now = (f" {' e '.join(missing)} non ha ancora una posizione: mettilo su una foto (tasto destro nella "
-                   "vista Foto) o sul modello, sulla nuvola o sull'ortofoto (strumento Marker).")
+            now = (tr(" {0} non ha ancora una posizione: mettilo su una foto (tasto destro nella vista Foto) o sul "
+                      "modello, sulla nuvola o sull'ortofoto (strumento Marker).", ' e '.join(missing)))
         from ..core import crs as crs_mod
 
         georef = not crs_mod.is_local(ch.crs)
-        geo_text = (f"\n\nIl chunk e' georeferenziato ({ch.crs}): la barra e' proposta come verifica, misura "
-                    "l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di "
-                    "controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene "
-                    "scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti)."
+        geo_text = (tr("\n\nIl chunk e' georeferenziato ({0}): la barra e' proposta come verifica, misura l'errore "
+                       "della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di "
+                       "controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo "
+                       "viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).",
+                       ch.crs)
                     if georef else "")
         v = ParamDialog.ask(self, "Barra di scala", [
             Field("a", "Marker A", first, choices=choices),
@@ -2199,9 +2271,9 @@ class MainWindow(QMainWindow):
                   tip="Pesa la barra quando ce ne sono piu' d'una"),
             Field("check", "Solo verifica (check): misura l'errore, non scala", georef),
             Field("update", "Aggiorna subito la scala", True)],
-            intro="Come in Metashape: la distanza nota tra due marker mette in scala il rilievo. Senza punti di "
-                  "controllo resta in coordinate locali (oggetti, saggi senza stazione totale); piu' barre si "
-                  "mediano e quelle di verifica misurano l'errore." + now + geo_text)
+            intro=tr("Come in Metashape: la distanza nota tra due marker mette in scala il rilievo. Senza punti di "
+                     "controllo resta in coordinate locali (oggetti, saggi senza stazione totale); piu' barre si "
+                     "mediano e quelle di verifica misurano l'errore.") + now + geo_text)
         if not v:
             return
         if v["a"] == v["b"]:
@@ -2213,7 +2285,8 @@ class MainWindow(QMainWindow):
         except (KeyError, ValueError) as exc:
             self._warn(str(exc))
             return
-        self.log_pane.info(f"Barra di scala {sb.label}: {_it(sb.distance, 4)} m" + (" (check)" if sb.checkpoint else ""))
+        self.log_pane.info(tr("Barra di scala {0}: {1} m", sb.label, _it(sb.distance,
+                                                                         4)) + (" (check)" if sb.checkpoint else ""))
         self._dirty(True)
         self.workspace.populate(self.doc)
         if v["update"] and any(c.aligned for c in ch.cameras):
@@ -2225,8 +2298,8 @@ class MainWindow(QMainWindow):
     def import_scalebars(self) -> None:
         if not self._need_chunk():
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Barre di scala", self._last_dir(),
-                                              "Testo (*.csv *.txt);;Tutti i file (*)")
+        path, _ = QFileDialog.getOpenFileName(self, tr("Barre di scala"), self._last_dir(),
+                                              tr("Testo (*.csv *.txt);;Tutti i file (*)"))
         if not path:
             return
         try:
@@ -2234,10 +2307,10 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError) as exc:
             self._exc("Lettura delle barre di scala non riuscita", exc)
             return
-        text = f"{len(out['bars'])} barre di scala importate"
+        text = tr("{0} barre di scala importate", len(out['bars']))
         if out["missing"]:
-            text += (f"; {len(out['missing'])} senza i loro marker nel chunk ({', '.join(out['missing'][:6])}): "
-                     "rileva prima i target")
+            text += (tr("; {0} senza i loro marker nel chunk ({1}): rileva prima i target",
+                        len(out['missing']), ', '.join(out['missing'][:6])))
         self.log_pane.info(text)
         self.statusBar().showMessage(text, 15000)
         self._dirty(True)
@@ -2260,9 +2333,10 @@ class MainWindow(QMainWindow):
             Field("size", "Lato del target (mm)", 40.0, minimum=10, maximum=100, decimals=1),
             Field("page", "Formato", "A4", choices=[("A4", "A4 orizzontale"), ("A3", "A3 orizzontale")]),
             Field("count", "Numero di barre (una per pagina)", 1, minimum=1, maximum=10)],
-            intro=f"Due target codificati a distanza nota (codici {a}-{b} e seguenti a scendere): stampa al 100%, "
-                  "controlla il righello di 10 cm e incolla il foglio su un supporto rigido. Insieme al file viene "
-                  "scritto il CSV delle barre: dopo aver rilevato i target, importalo con Importa barre.")
+            intro=tr("Due target codificati a distanza nota (codici {0}-{1} e seguenti a scendere): stampa al 100%, "
+                     "controlla il righello di 10 cm e incolla il foglio su un supporto rigido. Insieme al file "
+                     "viene scritto il CSV delle barre: dopo aver rilevato i target, importalo con Importa barre.",
+                     a, b))
         if not v:
             return
         try:
@@ -2272,8 +2346,8 @@ class MainWindow(QMainWindow):
             self._exc("Generazione della barra di scala non riuscita", exc)
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(files[0])))
-        self.statusBar().showMessage(f"Barre di scala: {csv}", 15000)
-        self.log_pane.info(f"Barra di scala stampabile: {files[0]} (CSV delle barre: {csv})")
+        self.statusBar().showMessage(tr("Barre di scala: {0}", csv), 15000)
+        self.log_pane.info(tr("Barra di scala stampabile: {0} (CSV delle barre: {1})", files[0], csv))
 
     def update_transform(self) -> None:
         if not self._need_chunk(aligned=True):
@@ -2289,8 +2363,8 @@ class MainWindow(QMainWindow):
             change = float(ch.scale) / before - 1 if before else 0.0
             stale = [n for k, n in (("dem", "DEM"), ("orthomosaic", "ortofoto")) if k in ch.products]
             if abs(change) > 1e-6 and stale:
-                text = (f"La scala del rilievo e' cambiata del {change * 100:+.3f} %: {' e '.join(stale)} sono ancora "
-                        "nella scala di prima, ricostruiscili (Flusso di lavoro).")
+                text = (tr("La scala del rilievo e' cambiata del {0:+.3f} %: {1} sono ancora nella scala di prima, "
+                           "ricostruiscili (Flusso di lavoro).", change * 100, ' e '.join(stale)))
                 self.log_pane.warning(text)
                 self.statusBar().showMessage(text, 20000)
 
@@ -2312,16 +2386,17 @@ class MainWindow(QMainWindow):
         m = ch.add_marker(f"point {n}", position=np.asarray(point, float))
         seen = gcp.project_marker(ch, m, m.position)
         world = ch.to_world(m.position[None])[0]
-        self.log_pane.info(f"Marker {m.label} {where}: X {world[0]:.3f} Y {world[1]:.3f} Z {world[2]:.3f}; "
-                           + (f"stimato su {seen} foto: nel pannello Foto (filtrato su {m.label}) doppio clic su una "
-                              "foto, poi trascina la bandierina blu sul punto esatto o doppio clic se e' giusta"
-                              if seen else "nessuna foto lo vede: resta dove l'hai messo"))
+        self.log_pane.info(f"Marker {m.label} {tr(where)}: X {world[0]:.3f} Y {world[1]:.3f} Z {world[2]:.3f}; "
+                           + (tr("stimato su {0} foto: nel pannello Foto (filtrato su {1}) doppio clic su una foto, "
+                                 "poi trascina la bandierina blu sul punto esatto o doppio clic se e' giusta",
+                                 seen, m.label)
+                              if seen else tr("nessuna foto lo vede: resta dove l'hai messo")))
         self._markers_edited()
         self.model_view.refresh(reset=False)
         if seen:  # its photos, to confirm the flags as in Metashape
             self.filter_photos_by_markers([m.key])
         else:
-            self.statusBar().showMessage(f"Marker {m.label}: nessuna foto lo vede", 10000)
+            self.statusBar().showMessage(tr("Marker {0}: nessuna foto lo vede", m.label), 10000)
 
     def _draw_markers_on_raster(self) -> None:
         """The markers with a position as a layer of the orthophoto/DEM view."""
@@ -2347,18 +2422,19 @@ class MainWindow(QMainWindow):
         checks = [m for m in ch.markers if m.checkpoint and m.reference.location]
         bars = gcp.control_scalebars(ch)
         v = ParamDialog.ask(self, "Ottimizza camere", [
-            Field("markers", f"Usa punti di controllo e barre di scala nell'ottimizzazione ({len(controls)} GCP, "
-                             f"{len(bars)} barre)", len(controls) >= 3 or len(bars) >= 2),
+            Field("markers", tr("Usa punti di controllo e barre di scala nell'ottimizzazione ({0} GCP, {1} barre)",
+                                len(controls), len(bars)), len(controls) >= 3 or len(bars) >= 2),
             Field("weight", "Peso di una misura di marker (in osservazioni di punti di legame)", 4, minimum=1, maximum=50),
             Field("pp", "Ottimizza anche il punto principale (cx, cy)", False)],
-            intro="Bundle adjustment globale di posizioni, orientamenti e calibrazione. Con 3 o piu' punti di controllo "
-                  "i GCP entrano nel calcolo come punti fissi alle loro coordinate: il blocco si piega per passarci "
-                  "(corregge anche deformazioni come la cupola di una distorsione sbagliata, non solo la "
-                  f"rototraslazione). I check point ({len(checks)}) restano fuori e misurano il risultato.\n\n"
-                  "Le barre di scala (due o piu', oppure insieme ai GCP) entrano come in Metashape: i marker alle loro "
-                  "estremita' vengono fissati dove le barre hanno la loro lunghezza, spostati quanto permette la loro "
-                  "precisione nelle foto, e il blocco si piega verso di loro quanto le foto lo consentono. Una sola "
-                  "barra da' soltanto la scala. Le barre di check misurano il risultato.")
+            intro=tr("Bundle adjustment globale di posizioni, orientamenti e calibrazione. Con 3 o piu' punti di "
+                     "controllo i GCP entrano nel calcolo come punti fissi alle loro coordinate: il blocco si piega "
+                     "per passarci (corregge anche deformazioni come la cupola di una distorsione sbagliata, non "
+                     "solo la rototraslazione). I check point ({0}) restano fuori e misurano il risultato.\n\nLe "
+                     "barre di scala (due o piu', oppure insieme ai GCP) entrano come in Metashape: i marker alle "
+                     "loro estremita' vengono fissati dove le barre hanno la loro lunghezza, spostati quanto "
+                     "permette la loro precisione nelle foto, e il blocco si piega verso di loro quanto le foto lo "
+                     "consentono. Una sola barra da' soltanto la scala. Le barre di check misurano il risultato.",
+                     len(checks)))
         if not v:
             return
 
@@ -2371,22 +2447,23 @@ class MainWindow(QMainWindow):
 
         def done(err):
             rep = ch.meta.get("sfm", {}).get("optimize", {})
-            text = f"Errore di riproiezione {err:.3f} px"
+            text = tr("Errore di riproiezione {0:.3f} px", err)
             b, a = rep.get("before", {}), rep.get("after", {})
 
             def mm(x):
                 return "-" if x is None else f"{x * 1000:.1f} mm"
 
             if rep.get("control_points"):
-                text += (f"; {rep['control_points']} punti di controllo: errore {mm(b.get('control'))} -> "
-                         f"{mm(a.get('control'))}" + (f", check point {mm(b.get('check'))} -> {mm(a.get('check'))}"
-                                                     if a.get("check") is not None else ""))
+                text += (tr("; {0} punti di controllo: errore {1} -> {2}",
+                            rep['control_points'], mm(b.get('control')), mm(a.get('control')))
+                         + (f", check point {mm(b.get('check'))} -> {mm(a.get('check'))}"
+                            if a.get("check") is not None else ""))
             if rep.get("scale_bars"):
-                text += (f"; {rep['scale_bars']} barre di scala: errore {mm(b.get('scalebar_control'))} -> "
-                         f"{mm(a.get('scalebar_control'))}" + (
-                             f", barre check {mm(b.get('scalebar_check'))} -> {mm(a.get('scalebar_check'))}"
+                text += (tr("; {0} barre di scala: errore {1} -> {2}",
+                            rep['scale_bars'], mm(b.get('scalebar_control')), mm(a.get('scalebar_control'))) + (
+                             tr(", barre check {0} -> {1}", mm(b.get('scalebar_check')), mm(a.get('scalebar_check')))
                              if a.get("scalebar_check") is not None else ""))
-            self.log_pane.info("Ottimizzazione camere: " + text)
+            self.log_pane.info(tr("Ottimizzazione camere: ") + text)
             self.statusBar().showMessage(text, 15000)
 
         self.run_task("Ottimizzazione camere", job, done)
@@ -2420,8 +2497,8 @@ class MainWindow(QMainWindow):
 
         def done(pc):
             if pc is None:
-                self.statusBar().showMessage("Mappe di profondita' pronte: Modello > Dati sorgente «Mappe di "
-                                             "profondita'»", 15000)
+                self.statusBar().showMessage(tr("Mappe di profondita' pronte: Modello > Dati sorgente «Mappe di "
+                                                "profondita'»"), 15000)
             else:
                 self._show_model("point_cloud")
 
@@ -2438,16 +2515,17 @@ class MainWindow(QMainWindow):
             if not bad:
                 return False
             names = "\n".join(Path(c.path).name for c in bad[:5]) + ("\n..." if len(bad) > 5 else "")
-            text = (f"{len(bad)} foto su {len(cams)} non si possono leggere:\n{names}\n\nUn file vuoto (0 byte) di "
-                    "solito e' un file di Dropbox, iCloud o OneDrive tenuto «solo online»: rendi la cartella disponibile "
-                    "offline, oppure collega le foto a un'altra copia (per esempio sul disco esterno).")
+            text = (tr("{0} foto su {1} non si possono leggere:\n{2}\n\nUn file vuoto (0 byte) di solito e' un file "
+                       "di Dropbox, iCloud o OneDrive tenuto «solo online»: rendi la cartella disponibile offline, "
+                       "oppure collega le foto a un'altra copia (per esempio sul disco esterno).",
+                       len(bad), len(cams), names))
             every = len(bad) == len(cams)
             options = ["Ricollega a un'altra cartella..."] + ([] if every else ["Continua senza queste foto"])
-            r = choice(self, "warning" if every else "question", f"{step}: foto non leggibili", text, options)
+            r = choice(self, "warning" if every else "question", tr("{0}: foto non leggibili", step), text, options)
             if r is None:
                 return None
             if r == 1:
-                self.log_pane.warning(f"{step} senza {len(bad)} foto non leggibili")
+                self.log_pane.warning(tr("{0} senza {1} foto non leggibili", step, len(bad)))
                 return True
             if not self.relink_photos():  # every photo found there: a complete copy replaces the folder
                 return None
@@ -2457,7 +2535,7 @@ class MainWindow(QMainWindow):
         subfolders): a copy on another disk, a folder moved or renamed."""
         if not self._need_chunk():
             return False
-        folder = QFileDialog.getExistingDirectory(self, "Cartella con le foto (anche nelle sottocartelle)",
+        folder = QFileDialog.getExistingDirectory(self, tr("Cartella con le foto (anche nelle sottocartelle)"),
                                                   self._last_dir())
         if not folder:
             return False
@@ -2466,12 +2544,12 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._exc("Ricollegamento delle foto non riuscito", exc)
             return False
-        text = f"{r['relinked']} foto collegate a {folder}"
+        text = tr("{0} foto collegate a {1}", r['relinked'], folder)
         if r["not_found"]:
-            text += f"; {len(r['not_found'])} non trovate ({', '.join(r['not_found'][:3])}" + \
+            text += tr("; {0} non trovate ({1}", len(r['not_found']), ', '.join(r['not_found'][:3])) + \
                 ("...)" if len(r["not_found"]) > 3 else ")")
         if r["unreadable"]:
-            text += f"; ancora {r['unreadable']} non leggibili"
+            text += tr("; ancora {0} non leggibili", r['unreadable'])
         self.log_pane.info(text)
         self.statusBar().showMessage(text, 15000)
         self._dirty(True)
@@ -2509,8 +2587,9 @@ class MainWindow(QMainWindow):
                                                radius=v["radius"] if v["use_radius"] else None,
                                                center=(v["cx"], v["cy"]))
 
-        self.run_task("Ritaglio nuvola", job, lambda pc: (self.statusBar().showMessage(f"{len(pc):,} punti", 8000),
-                                                           self._show_model("point_cloud")))
+        self.run_task("Ritaglio nuvola", job,
+                      lambda pc: (self.statusBar().showMessage(tr("{0} punti", _it(len(pc))), 8000),
+                                  self._show_model("point_cloud")))
 
     def reimport_metashape_model(self) -> None:
         """The model of the Metashape project again, with its colours and texture (the model in
@@ -2521,7 +2600,7 @@ class MainWindow(QMainWindow):
         info = ch.meta.get("import") or {}
         psx = info.get("psx") if info.get("source") == "metashape" else None
         if not psx or not Path(psx).exists():
-            path, _ = QFileDialog.getOpenFileName(self, "Progetto Metashape del chunk", self._last_dir(),
+            path, _ = QFileDialog.getOpenFileName(self, tr("Progetto Metashape del chunk"), self._last_dir(),
                                                   "Metashape (*.psx)")
             if not path:
                 return
@@ -2533,9 +2612,9 @@ class MainWindow(QMainWindow):
             return reimport_model(ch, psx, progress=p)
 
         def done(r):
-            text = f"Modello di Metashape reimportato: {_it(r['faces'] or 0)} facce" + \
-                (", con la texture" if r["texture"] else ", senza texture") + \
-                " (il modello di prima e' tra le versioni)"
+            text = tr("Modello di Metashape reimportato: {0} facce", _it(r['faces'] or 0)) + \
+                (tr(", con la texture") if r["texture"] else tr(", senza texture")) + \
+                tr(" (il modello di prima e' tra le versioni)")
             for w in r["warnings"]:
                 self.log_pane.warning(w)
             self.log_pane.info(text)
@@ -2619,12 +2698,12 @@ class MainWindow(QMainWindow):
         def done(res):
             names = dict(targets)
             for k, info in res.items():
-                self.log_pane.info(f"Confidenza {names[k].lower()} (media {_it(info['mean'], 1)}): "
+                self.log_pane.info(tr("Confidenza {0} (media {1}): ", names[k].lower(), _it(info['mean'], 1))
                                    + self._confidence_text(info["histogram"]))
             first = "point_cloud" if "point_cloud" in res else "model"
             self.show_confidence(first)
-            self.statusBar().showMessage("Confidenza calcolata: nella legenda togli la spunta a una fascia per "
-                                         "nasconderla; Pulisci toglie i punti o le facce sotto una soglia", 15000)
+            self.statusBar().showMessage(tr("Confidenza calcolata: nella legenda togli la spunta a una fascia per "
+                                            "nasconderla; Pulisci toglie i punti o le facce sotto una soglia"), 15000)
 
         self.run_task("Confidenza", job, done, refresh=False)
 
@@ -2651,7 +2730,7 @@ class MainWindow(QMainWindow):
         if conf is not None:
             from ..engine.confidence import histogram
 
-            hist_text = "\n\nConfidenza attuale - " + self._confidence_text(histogram(conf))
+            hist_text = tr("\n\nConfidenza attuale - ") + self._confidence_text(histogram(conf))
         choices, codes = self._cloud_class_choices(noise=True)
         noise = [c for c in codes if c in (7, 18)]
         fields = [
@@ -2675,8 +2754,8 @@ class MainWindow(QMainWindow):
                    Field("color_tol", "    tolleranza (0-255)", 40, minimum=1, maximum=255)]
         fields += self._version_fields("point_cloud")
         v = ParamDialog.ask(self, "Pulisci la nuvola densa", fields,
-                            intro=f"{_it(self._cloud_size())} punti. Prima vengono contati i punti da togliere e "
-                                  "mostrati in rosso nella vista 3D; poi confermi." + hist_text)
+                            intro=tr("{0} punti. Prima vengono contati i punti da togliere e mostrati in rosso nella "
+                                     "vista 3D; poi confermi.", _it(self._cloud_size())) + hist_text)
         if not v:
             return
         filters = {}
@@ -2722,13 +2801,13 @@ class MainWindow(QMainWindow):
                 remove |= m
             names = {"confidence": "confidenza bassa", "statistical": "isolati", "groups": "gruppi staccati",
                      "sparse": "senza vicini", "classes": "classi", "color": "colore"}
-            parts = ", ".join(f"{names.get(k, k)} {_it(c)}" for k, c in info["by_filter"].items() if c)
+            parts = ", ".join(f"{tr(names.get(k, k))} {_it(c)}" for k, c in info["by_filter"].items() if c)
             self._show_model("point_cloud")
             self.model_view.highlight = remove  # shown in red while the question is open
             self.model_view.refresh(reset=False)
             r = choice(self, "question", "Pulisci la nuvola densa",
-                       f"Da togliere: {_it(info['removed'])} punti su {_it(info['total'])} "
-                       f"({_it(100 * info['removed'] / n, 2)}%) - {parts}.\n\nSono mostrati in rosso nella vista 3D.",
+                       tr("Da togliere: {0} punti su {1} ({2}%) - {3}.\n\nSono mostrati in rosso nella vista 3D.",
+                          _it(info['removed']), _it(info['total']), _it(100 * info['removed'] / n, 2), parts),
                        ["Togli i punti"])
             self.model_view.highlight = None
             if r != 0:
@@ -2747,8 +2826,8 @@ class MainWindow(QMainWindow):
                 return out
 
             self.run_task("Pulizia della nuvola", self._versioned_edit("point_cloud", v, apply, "Nuvola pulita"),
-                          lambda out: (self.log_pane.info(f"Nuvola pulita: tolti {_it(out['removed'])} punti, restano "
-                                                          f"{_it(out['kept'])} ({parts})"),
+                          lambda out: (self.log_pane.info(tr("Nuvola pulita: tolti {0} punti, restano {1} ({2})",
+                                                             _it(out['removed']), _it(out['kept']), parts)),
                                        self._show_model("point_cloud")))
 
         self.run_task("Analisi della nuvola", analyse, confirm, refresh=False)
@@ -2787,10 +2866,10 @@ class MainWindow(QMainWindow):
             Field("smooth", "Levigatura (passi, 0 = no; i bordi restano fermi)", 0, minimum=0, maximum=100),
             Field("target_faces", "Semplifica a un numero di facce (0 = no)", 0, minimum=0, maximum=2_000_000_000)]
             + self._version_fields("model"),
-            intro=f"Modello di {_it(n_faces)} facce"
-                  + ("; confidenza dei vertici calcolata." if conf is not None else
-                     "; la confidenza dei vertici verra' calcolata dalle mappe di profondita' se usi quel filtro.")
-                  + " La texture va ricostruita dopo la pulizia.")
+            intro=tr("Modello di {0} facce", _it(n_faces))
+                  + (tr("; confidenza dei vertici calcolata.") if conf is not None else
+                     tr("; la confidenza dei vertici verra' calcolata dalle mappe di profondita' se usi quel filtro."))
+                  + tr(" La texture va ricostruita dopo la pulizia."))
         if not v:
             return
         need_conf = v["min_confidence"] > 0 and conf is None
@@ -2810,10 +2889,11 @@ class MainWindow(QMainWindow):
         def done(info):
             names = {"confidence": "confidenza bassa", "components": "parti staccate", "long_edges": "triangoli stirati",
                      "topology": "topologia"}
-            parts = ", ".join(f"{names.get(k, k)} {_it(c)}" for k, c in info["by_filter"].items() if c)
-            text = (f"Modello pulito: {_it(info['faces'])} facce (prima {_it(info['faces_before'])})"
-                    + (f"; tolte {parts}" if parts else "")
-                    + (f"; {_it(info['filled_faces'])} facce per chiudere i buchi" if info.get("filled_faces") else ""))
+            parts = ", ".join(f"{tr(names.get(k, k))} {_it(c)}" for k, c in info["by_filter"].items() if c)
+            text = (tr("Modello pulito: {0} facce (prima {1})", _it(info['faces']), _it(info['faces_before']))
+                    + (tr("; tolte {0}", parts) if parts else "")
+                    + (tr("; {0} facce per chiudere i buchi",
+                          _it(info['filled_faces'])) if info.get("filled_faces") else ""))
             self.log_pane.info(text)
             self.statusBar().showMessage(text, 15000)
             self._show_model("model")
@@ -2851,11 +2931,11 @@ class MainWindow(QMainWindow):
             self.history.backup(["tie_points", "reconstruction"])
 
             def done(out):
-                text = (f"Punti di legame: tolti {_it(out['removed'])}, restano {_it(out['remaining'])}; errore di "
-                        f"riproiezione {_it(out['reprojection_error_before'], 3)} -> "
-                        f"{_it(out['reprojection_error_after'], 3)} px")
+                text = tr("Punti di legame: tolti {0}, restano {1}; errore di riproiezione {2} -> {3} px",
+                          _it(out['removed']), _it(out['remaining']), _it(out['reprojection_error_before'], 3),
+                          _it(out['reprojection_error_after'], 3))
                 if "optimize_error" in out:
-                    text += f"; dopo l'ottimizzazione {_it(out['optimize_error'], 3)} px"
+                    text += tr("; dopo l'ottimizzazione {0} px", _it(out['optimize_error'], 3))
                 self.log_pane.info(text)
                 self.statusBar().showMessage(text, 15000)
                 self._show_model("tie_points")
@@ -3002,9 +3082,9 @@ class MainWindow(QMainWindow):
             Field("zmin", "    quota minima", round(zlo, 3), minimum=-1e6, maximum=1e6, decimals=3),
             Field("zmax", "    quota massima", round(zhi, 3), minimum=-1e6, maximum=1e6, decimals=3),
             Field("keep", "Nel progetto: conserva gli originali come versioni", True)],
-            intro=(f"Poligono di {_it(geom.area, 2)} m2 ({_it(x1 - x0, 2)} x {_it(y1 - y0, 2)} m). DEM e ortofoto "
-                   "tengono la finestra del poligono, vuota (trasparente) fuori; il modello le facce con il centro "
-                   "dentro; la nuvola i punti dentro."))
+            intro=(tr("Poligono di {0} m2 ({1} x {2} m). DEM e ortofoto tengono la finestra del poligono, vuota "
+                      "(trasparente) fuori; il modello le facce con il centro dentro; la nuvola i punti dentro.",
+                      _it(geom.area, 2), _it(x1 - x0, 2), _it(y1 - y0, 2))))
         if not v:
             return
         if not v["what"]:
@@ -3025,7 +3105,7 @@ class MainWindow(QMainWindow):
             targets = {k: folder / f"{stem}{ext[k]}" for k in v["what"]}
             existing = [t.name for t in targets.values() if t.exists()]
             if existing and choice(self, "question", "Ritaglia con un poligono",
-                                   f"Nella cartella ci sono gia': {', '.join(existing)}. Sovrascriverli?",
+                                   tr("Nella cartella ci sono gia': {0}. Sovrascriverli?", ', '.join(existing)),
                                    ["Sovrascrivi"]) != 0:
                 return
 
@@ -3035,7 +3115,7 @@ class MainWindow(QMainWindow):
                 folder.mkdir(parents=True, exist_ok=True)
                 out = []
                 for i, k in enumerate(v["what"]):
-                    p(i / len(v["what"]), f"Ritaglio: {names[k]}")
+                    p(i / len(v["what"]), tr("Ritaglio: {0}", names[k]))
                     if k == "dem":
                         out.append(ch.export_dem(targets[k], region=geom))
                     elif k == "orthomosaic":
@@ -3054,9 +3134,9 @@ class MainWindow(QMainWindow):
 
             def done(paths):
                 for path in paths:
-                    self.log_pane.info(f"Esportato {path}")
-                self.statusBar().showMessage(f"Ritagli esportati in {folder}", 15000)
-                self._info("Ritaglia con un poligono", f"File scritti in {folder}:\n" +
+                    self.log_pane.info(tr("Esportato {0}", path))
+                self.statusBar().showMessage(tr("Ritagli esportati in {0}", folder), 15000)
+                self._info("Ritaglia con un poligono", tr("File scritti in {0}:\n", folder) +
                            "\n".join(Path(x).name for x in paths))
 
             self.run_task("Esportazione dei ritagli", job, done, refresh=False, save=False)
@@ -3069,7 +3149,7 @@ class MainWindow(QMainWindow):
 
             done = []
             for i, k in enumerate(v["what"]):
-                p(i / len(v["what"]), f"Ritaglio: {names[k]}")
+                p(i / len(v["what"]), tr("Ritaglio: {0}", names[k]))
                 kept = versions.keep_active(ch, k, move=False) if v["keep"] else None
                 try:
                     if k == "dem":
@@ -3089,9 +3169,9 @@ class MainWindow(QMainWindow):
             return done
 
         def finished(products):
-            text = "Ritagliati nel progetto: " + ", ".join(names[k] for k in products)
+            text = tr("Ritagliati nel progetto: ") + ", ".join(tr(names[k]) for k in products)
             if v["keep"]:
-                text += " (gli originali sono tra le versioni: tasto destro nell'area di lavoro)"
+                text += tr(" (gli originali sono tra le versioni: tasto destro nell'area di lavoro)")
             self.log_pane.info(text)
             self.statusBar().showMessage(text, 15000)
 
@@ -3114,9 +3194,9 @@ class MainWindow(QMainWindow):
             Field("voxel", "Voxel per le mappe di profondita' (m, 0 = automatico)", 0.0, minimum=0.0, maximum=100.0,
                   decimals=4, tip="Lato del voxel della fusione: 0 = due volte il pixel delle mappe sulla superficie")]
             + self._class_fields("Classi (solo dalla nuvola densa)") + self._version_fields("model"),
-            intro=("Con le mappe di profondita' la superficie nasce dalla fusione volumetrica delle mappe (TSDF), "
-                   "senza passare dalla nuvola densa: piu' fedele e con i colori delle foto." if depth_maps else
-                   "Costruisci le mappe di profondita' (Nuvola densa) per avere anche la fusione delle mappe.")
+            intro=(tr("Con le mappe di profondita' la superficie nasce dalla fusione volumetrica delle mappe (TSDF), "
+                      "senza passare dalla nuvola densa: piu' fedele e con i colori delle foto.") if depth_maps else
+                   tr("Costruisci le mappe di profondita' (Nuvola densa) per avere anche la fusione delle mappe."))
             + self._class_hint("Dalla nuvola densa puoi togliere delle classi (vegetazione, attrezzi): la superficie "
                                "si richiude sopra quello che manca."))
         if v:
@@ -3146,11 +3226,11 @@ class MainWindow(QMainWindow):
                   choices=[(2048, "2048"), (4096, "4096"), (8192, "8192")]),
             Field("colour", "Correzione colore (esposizione delle foto, vignettatura)", True,
                   tip="Misurata la prima volta sui punti visti da piu' foto (Strumenti > Calibra i colori)")],
-            intro=f"Modello di {faces:,} facce. ".replace(",", ".")
-                  + "Ortofoto adattiva: la texture e' l'ortofoto del modello e le pareti ripide hanno spazi propri "
-                    "(come in Metashape, per i rilievi dall'alto); generica: ogni faccia ha il suo spazio "
-                    "nell'immagine (per oggetti 3D; su milioni di facce ognuna resta di pochi pixel). "
-                    "Automatica sceglie l'ortofoto per i modelli grandi rivolti verso l'alto.")
+            intro=thousands_points(tr("Modello di {0:,} facce. ", faces))
+                  + tr("Ortofoto adattiva: la texture e' l'ortofoto del modello e le pareti ripide hanno spazi propri "
+                       "(come in Metashape, per i rilievi dall'alto); generica: ogni faccia ha il suo spazio "
+                       "nell'immagine (per oggetti 3D; su milioni di facce ognuna resta di pochi pixel). "
+                       "Automatica sceglie l'ortofoto per i modelli grandi rivolti verso l'alto."))
         if not v:
             return
         skip = self._photos_to_skip("Texture")
@@ -3224,13 +3304,14 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- reconstruction region
     def _region_changed(self, text: str) -> None:
+        text = tr(text)
         self._dirty(True)
         self.model_view.refresh(reset=False)
         r = self.chunk.region
         if r is not None:
-            text += "  ({:.2f} x {:.2f} x {:.2f} m)".format(*r.size).replace(".", ",")
+            text += "  ({} x {} x {} m)".format(*(_it(v, 2) for v in r.size))
         self.statusBar().showMessage(text, 10000)
-        self.log_pane.info(text + ": depth map, nuvola densa e modello costruiti da ora in poi ne restano dentro")
+        self.log_pane.info(text + tr(": depth map, nuvola densa e modello costruiti da ora in poi ne restano dentro"))
 
     def region_reset(self, angle_deg: float = 0.0) -> None:
         if not self._need_chunk(aligned=True):
@@ -3298,7 +3379,7 @@ class MainWindow(QMainWindow):
         self.chunk.region = None
         self._dirty(True)
         self.model_view.refresh(reset=False)
-        self.statusBar().showMessage("Nessuna regione: si ricostruisce tutto cio' che le foto vedono", 8000)
+        self.statusBar().showMessage(tr("Nessuna regione: si ricostruisce tutto cio' che le foto vedono"), 8000)
 
     # ---------------------------------------------------------------- DEM editing
     def _dem_edit_drawn(self, xy) -> None:
@@ -3323,14 +3404,14 @@ class MainWindow(QMainWindow):
             sa = None
         if sa is not None:
             s, a = sa
-            out += f"  pend. {s:.0f}°" + (f" esp. {_compass(a)}" if a >= 0 else "")
+            out += tr("  pend. {0:.0f}°", s) + (tr(" esp. {0}", _compass(a)) if a >= 0 else "")
         key = (ch.key, tuple(sorted(ch.products.items())), len((ch.meta.get("versions") or {}).get("dem", [])))
         if getattr(self, "_ground_key", None) != key:
             self._ground_key, self._ground_path = key, measures.ground_dem(ch)
         if self._ground_path is not None and Path(self._ground_path) != Path(ch.dem_path):
             g = measures.ground_dem_at(self._ground_path, x, y)
             if g is not None:
-                out += f"  dal suolo {z - g:.2f} m".replace(".", ",")
+                out += decimal_comma(tr("  dal suolo {0:.2f} m", z - g))
         return out
 
     def _area_drawn(self, xy) -> None:
@@ -3366,16 +3447,17 @@ class MainWindow(QMainWindow):
             if "plan" not in r:
                 self._warn("L'area e' fuori dal DEM.")
                 return
-            lines = [f"Area in pianta {r['plan']:.3f} m2, superficie {r['surface']:.3f} m2 "
-                     f"(+{(r['surface'] / max(r['plan'], 1e-12) - 1) * 100:.1f}%)",
-                     f"Pendenza media {r['mean_slope']:.1f}°, quote da {r['z_min']:.3f} a {r['z_max']:.3f} m"]
+            lines = [tr("Area in pianta {0:.3f} m2, superficie {1:.3f} m2 (+{2:.1f}%)",
+                        r['plan'], r['surface'], (r['surface'] / max(r['plan'], 1e-12) - 1) * 100),
+                     tr("Pendenza media {0:.1f}°, quote da {1:.3f} a {2:.3f} m",
+                        r['mean_slope'], r['z_min'], r['z_max'])]
             if r.get("model_faces"):
-                lines.append(f"Dal modello ({r['model_faces']} facce): pianta {r['model_plan']:.3f} m2, superficie "
-                             f"{r['model_surface']:.3f} m2")
-            text = "\n".join(line.replace(".", ",") for line in lines)
+                lines.append(tr("Dal modello ({0} facce): pianta {1:.3f} m2, superficie {2:.3f} m2",
+                                r['model_faces'], r['model_plan'], r['model_surface']))
+            text = "\n".join(decimal_comma(line) for line in lines)
             coords = list(geom.exterior.coords) if geom.geom_type == "Polygon" else \
                 list(max(geom.geoms, key=lambda g: g.area).exterior.coords)
-            self._add_line_feature("Misure", coords, "#ff006e", f"{r['surface']:.2f} m2".replace(".", ","),
+            self._add_line_feature("Misure", coords, "#ff006e", decimal_comma(f"{r['surface']:.2f} m2"),
                                    {"area_pianta_m2": round(r["plan"], 4), "superficie_m2": round(r["surface"], 4),
                                     "pendenza_media": round(r["mean_slope"], 2)})
             self._info("Misura dell'area", text)
@@ -3419,8 +3501,9 @@ class MainWindow(QMainWindow):
         self._load_raster(kind, path)
         self.show_view(self.ortho_view)
         self.statusBar().showMessage(
-            "Pendenza: bianco piano, rosso scuro ripido (gradi sotto il cursore)" if kind == "slope" else
-            "Esposizione: verso dove scende il terreno - rosso nord, giallo est, azzurro sud, viola ovest; grigio piano",
+            tr("Pendenza: bianco piano, rosso scuro ripido (gradi sotto il cursore)") if kind == "slope" else
+            tr("Esposizione: verso dove scende il terreno - rosso nord, giallo est, azzurro sud, viola ovest; grigio "
+               "piano"),
             20000)
 
     def _dem_edit_selected(self) -> None:
@@ -3451,12 +3534,13 @@ class MainWindow(QMainWindow):
                            ("idw", "Media pesata con la distanza (IDW)"),
                            ("constant", "Quota costante")]),
             Field("value", "Quota costante (vuota: la mediana del bordo)", None, kind="optional_float"),
-            Field("breaklines", f"Usa le {len(lines)} linee selezionate come linee di discontinuita'", bool(lines))
+            Field("breaklines", tr("Usa le {0} linee selezionate come linee di discontinuita'", len(lines)),
+                  bool(lines))
             if lines else None,
             Field("name", "Nome del DEM modificato (facoltativo)", "", kind="text")] if f is not None],
-            intro=f"{geom.area:.2f} m2. Le quote dentro l'area vengono ricavate da quelle appena fuori (alberi, "
-                  "tende, mezzi, cumuli e buchi spariscono da curve di livello e volumi). Il DEM com'era resta tra le "
-                  "versioni per confrontarlo o tornare indietro.".replace(".", ",", 1))
+            intro=tr("{0} m2. Le quote dentro l'area vengono ricavate da quelle appena fuori (alberi, tende, "
+                     "mezzi, cumuli e buchi spariscono da curve di livello e volumi). Il DEM com'era resta tra le "
+                     "versioni per confrontarlo o tornare indietro.", _it(geom.area, 2)))
         if not v:
             return
         breaklines = lines if v.get("breaklines") else None
@@ -3464,8 +3548,9 @@ class MainWindow(QMainWindow):
         self.run_task("Modifica del DEM", lambda p: chunk.edit_dem(
             geom, v["method"], v.get("value"), breaklines, True, (v.get("name") or "").strip() or None, progress=p),
             lambda info: (self._show_raster("dem"), self.log_pane.info(
-                f"DEM modificato: {info['cells']:,} celle, variazione media {info['dz_mean'] * 100:+.1f} cm, "
-                f"massima {info['dz_max'] * 100:.1f} cm".replace(",", "."))))
+                tr("DEM modificato: {0} celle, variazione media {1} cm, massima {2} cm", _it(info['cells']),
+                   ("+" if info['dz_mean'] >= 0 else "") + _it(info['dz_mean'] * 100, 1),
+                   _it(info['dz_max'] * 100, 1)))))
 
     # ---------------------------------------------------------------- elevations
     def _elevation_fields(self, kind: str) -> list:
@@ -3499,9 +3584,10 @@ class MainWindow(QMainWindow):
             poly = self._selected_polygon()
             choices = []
             if self.sections:
-                choices += [(("section", i), f"Traccia della sezione {s['label']}") for i, s in enumerate(self.sections)]
+                choices += [(("section", i), tr("Traccia della sezione {0}", s['label'])) for i,
+                            s in enumerate(self.sections)]
             if len(markers) >= 3:
-                choices.append((("markers", None), f"Piano dei {len(markers)} marker selezionati"))
+                choices.append((("markers", None), tr("Piano dei {0} marker selezionati", len(markers))))
             if poly is not None:
                 choices.append((("cylinder", None), "Cilindro dal poligono selezionato (pozzo, torre)"))
             if not choices:
@@ -3562,7 +3648,7 @@ class MainWindow(QMainWindow):
 
         ortho, relief = elevation_paths(self.chunk, entry)
         if not ortho.exists():
-            self._warn(f"Il prospetto «{entry['name']}» non ha piu' i suoi file.")
+            self._warn(tr("Il prospetto «{0}» non ha piu' i suoi file.", entry['name']))
             return
         self.ortho_view.load(ortho, "ortho")
         if relief.exists():
@@ -3570,8 +3656,8 @@ class MainWindow(QMainWindow):
         self._raster_version = ("elevation", entry["id"])
         self.show_view(self.ortho_view)
         self.workspace.populate(self.doc)
-        self.statusBar().showMessage(f"{entry['name']}: coordinate del prospetto in metri (u lungo la parete, v in alto); "
-                                     "Z = rilievo verso chi guarda", 15000)
+        self.statusBar().showMessage(tr("{0}: coordinate del prospetto in metri (u lungo la parete, v in alto); Z = "
+                                        "rilievo verso chi guarda", entry['name']), 15000)
         self._dirty(True)
 
     def export_elevation(self, entry: dict) -> None:
@@ -3579,7 +3665,7 @@ class MainWindow(QMainWindow):
 
         from ..engine.elevation import elevation_paths
 
-        folder = QFileDialog.getExistingDirectory(self, "Cartella per il prospetto", self._last_dir())
+        folder = QFileDialog.getExistingDirectory(self, tr("Cartella per il prospetto"), self._last_dir())
         if not folder:
             return
         ortho, relief = elevation_paths(self.chunk, entry)
@@ -3590,12 +3676,12 @@ class MainWindow(QMainWindow):
         frame = ortho.parent / "frame.json"
         if frame.exists():
             shutil.copy2(frame, Path(folder) / f"{stem}_piano.json")
-        self._info("Prospetto", f"Ortofoto, rilievo e piano di «{entry['name']}» in {folder}.")
+        self._info("Prospetto", tr("Ortofoto, rilievo e piano di «{0}» in {1}.", entry['name'], folder))
 
     def delete_elevation(self, entry: dict) -> None:
         from ..engine.elevation import remove_elevation
 
-        if choice(self, "question", "Elimina prospetto", f"Eliminare «{entry['name']}» e i suoi file?",
+        if choice(self, "question", "Elimina prospetto", tr("Eliminare «{0}» e i suoi file?", entry['name']),
                   ["Elimina"]) != 0:
             return
         remove_elevation(self.chunk, entry["id"])
@@ -3609,7 +3695,7 @@ class MainWindow(QMainWindow):
         self.mask_actions[str(mode)].setChecked(True)
         if mode is not None:
             self.show_view(self.photo_view)
-            self.statusBar().showMessage("Clic sui vertici dell'area, doppio clic (o Invio) chiude, Esc annulla",
+            self.statusBar().showMessage(tr("Clic sui vertici dell'area, doppio clic (o Invio) chiude, Esc annulla"),
                                          10000)
 
     def _show_masks(self, on: bool) -> None:
@@ -3623,7 +3709,7 @@ class MainWindow(QMainWindow):
     def _masks_done(self, what: str):
         def done(n):
             self.photo_view.draw_mask()
-            self._info("Maschere", f"{n} maschere {what}.")
+            self._info("Maschere", tr("{0} maschere {1}.", n, what))
             self._dirty(True)
         return done
 
@@ -3634,21 +3720,21 @@ class MainWindow(QMainWindow):
 
         folder = None
         if not alpha:
-            folder = QFileDialog.getExistingDirectory(self, "Cartella delle maschere", self._last_dir())
+            folder = QFileDialog.getExistingDirectory(self, tr("Cartella delle maschere"), self._last_dir())
             if not folder:
                 return
         self.run_task("Importazione delle maschere", lambda p: masks.import_masks(self.chunk, folder, progress=p),
-                      self._masks_done("importate" if folder else "dal canale alfa"), refresh=False)
+                      self._masks_done(tr("importate") if folder else tr("dal canale alfa")), refresh=False)
 
     def masks_export(self) -> None:
         if not self._need_chunk():
             return
         from ..engine import masks
 
-        folder = QFileDialog.getExistingDirectory(self, "Cartella per le maschere", self._last_dir())
+        folder = QFileDialog.getExistingDirectory(self, tr("Cartella per le maschere"), self._last_dir())
         if folder:
             n = masks.export_masks(self.chunk, folder)
-            self._info("Maschere", f"{n} maschere scritte in {folder} (nome della foto + _mask.png).")
+            self._info("Maschere", tr("{0} maschere scritte in {1} (nome della foto + _mask.png).", n, folder))
 
     def masks_from_background(self) -> None:
         if not self._need_chunk():
@@ -3664,7 +3750,7 @@ class MainWindow(QMainWindow):
             return
         cams = self._mask_targets()
         self.run_task("Maschere dallo sfondo", lambda p: masks.masks_from_background(
-            self.chunk, v["folder"], v["tolerance"], cams=cams, progress=p), self._masks_done("dallo sfondo"),
+            self.chunk, v["folder"], v["tolerance"], cams=cams, progress=p), self._masks_done(tr("dallo sfondo")),
             refresh=False)
 
     def masks_from_colour(self) -> None:
@@ -3680,7 +3766,7 @@ class MainWindow(QMainWindow):
             return
         cams = self._mask_targets()
         self.run_task("Maschere da un colore", lambda p: masks.masks_from_colour(
-            self.chunk, v["colour"], v["tolerance"], cams=cams, progress=p), self._masks_done("dal colore"),
+            self.chunk, v["colour"], v["tolerance"], cams=cams, progress=p), self._masks_done(tr("dal colore")),
             refresh=False)
 
     def masks_from_model(self) -> None:
@@ -3690,7 +3776,7 @@ class MainWindow(QMainWindow):
 
         cams = [c for c in self._mask_targets() if c.aligned]
         self.run_task("Maschere dal modello", lambda p: masks.masks_from_model(self.chunk, cams=cams, progress=p),
-                      self._masks_done("dal modello"), refresh=False)
+                      self._masks_done(tr("dal modello")), refresh=False)
 
     def masks_with_sam(self) -> None:
         if not self._need_chunk():
@@ -3703,7 +3789,7 @@ class MainWindow(QMainWindow):
         segmenter = self._segmenter()
         self.run_task("Maschere con SAM 2.1", lambda p: masks.masks_with_sam(self.chunk, segmenter, cams=cams,
                                                                             progress=p),
-                      self._masks_done("con SAM 2.1"), refresh=False)
+                      self._masks_done(tr("con SAM 2.1")), refresh=False)
 
     def masks_remove(self, selected: bool = True) -> None:
         if not self._need_chunk():
@@ -3712,7 +3798,7 @@ class MainWindow(QMainWindow):
 
         n = masks.remove_masks(self.chunk, self.photos.selected_cameras() if selected else None)
         self.photo_view.draw_mask()
-        self.statusBar().showMessage(f"{n} maschere rimosse", 8000)
+        self.statusBar().showMessage(tr("{0} maschere rimosse", n), 8000)
         if n:
             self._dirty(True)
 
@@ -3726,17 +3812,17 @@ class MainWindow(QMainWindow):
 
         def done(info):
             gains = [sum(g) / 3 for g in info["gains"].values()]
-            text = (f"Correzione misurata su {info['observations']:,} osservazioni di punti visti da piu' foto.\n\n"
-                    f"Differenza di colore tra le foto: {info['rms_before'] * 100:.1f}% prima, "
-                    f"{info['rms_after'] * 100:.1f}% dopo.\n"
-                    f"Esposizione delle foto: da {min(gains):.2f} a {max(gains):.2f} volte la media.").replace(",", ".")
+            text = tr("Correzione misurata su {0} osservazioni di punti visti da piu' foto.\n\nDifferenza di colore "
+                      "tra le foto: {1}% prima, {2}% dopo.\nEsposizione delle foto: da {3} a {4} volte la media.",
+                      _it(info['observations']), _it(info['rms_before'] * 100, 1), _it(info['rms_after'] * 100, 1),
+                      _it(min(gains), 2), _it(max(gains), 2))
             import math
 
             corner = [100 * (1 - math.exp(sum(b))) for b in info["vignetting"].values()]  # at the corners (r = 1)
             if any(abs(c) >= 1 for c in corner):
-                text += "\nVignettatura agli angoli: " + ", ".join(
-                    f"{abs(c):.0f}% piu' {'scuri' if c > 0 else 'chiari'}" for c in corner)
-            self._info("Colori delle foto", text + "\n\nOrtofoto e texture costruite da ora in poi la usano.")
+                text += tr("\nVignettatura agli angoli: ") + ", ".join(
+                    tr("{0:.0f}% piu' {1}", abs(c), tr('scuri') if c > 0 else tr('chiari')) for c in corner)
+            self._info("Colori delle foto", text + tr("\n\nOrtofoto e texture costruite da ora in poi la usano."))
 
         self.run_task("Calibrazione dei colori", lambda p: self.chunk.calibrate_colours(progress=p), done,
                       refresh=False)
@@ -3844,7 +3930,8 @@ class MainWindow(QMainWindow):
             self.set_crs()
 
     def set_crs(self) -> None:
-        crs, ok = QInputDialog.getText(self, "Sistema di riferimento", "EPSG del chunk (es. EPSG:3004) o LOCAL:",
+        crs, ok = QInputDialog.getText(self, tr("Sistema di riferimento"),
+                                       tr("EPSG del chunk (es. EPSG:3004) o LOCAL:"),
                                        text=self.chunk.crs)
         if ok and crs:
             self.chunk.crs = crs.strip()
@@ -3860,9 +3947,10 @@ class MainWindow(QMainWindow):
         self.photos.select_camera(camera)
         flags = sum(1 for m in self.chunk.markers if camera.key in m.projections)
         self.statusBar().showMessage(
-            f"{camera.label}: " + ("bandierina blu = posizione stimata da confermare: trascinala sul punto esatto (o doppio "
-                                   "clic se e' gia' giusta), diventa verde; " if flags else "")
-            + "tasto destro per posizionare un marker; Pagina giu'/su: foto successiva/precedente", 20000)
+            f"{camera.label}: " + (tr("bandierina blu = posizione stimata da confermare: trascinala sul punto esatto "
+                                      "(o doppio "
+                                      "clic se e' gia' giusta), diventa verde; ") if flags else "")
+            + tr("tasto destro per posizionare un marker; Pagina giu'/su: foto successiva/precedente"), 20000)
         if self.a_residuals.isChecked():
             self._draw_residuals()
 
@@ -3892,18 +3980,19 @@ class MainWindow(QMainWindow):
             if m.position is not None:
                 cams |= {c.key for c, *_ in gcp.photos_seeing(ch, m.position)}
         names = ", ".join(m.label for m in markers)
-        n = self.photos.set_filter(cams, f"Foto di {names}", focus=markers[0])
+        n = self.photos.set_filter(cams, tr("Foto di {0}", names), focus=markers[0])
         self._show_pane(self.bottom_tabs, self.photos_panel)
         self.statusBar().showMessage(
-            f"{n} foto con {names}: doppio clic per aprirle centrate sul marker; bandierina blu = da confermare "
-            "(trascinala sul punto esatto o doppio clic se e' giusta); Pagina giu'/su per passare alle altre", 20000)
+            tr("{0} foto con {1}: doppio clic per aprirle centrate sul marker; bandierina blu = da confermare "
+               "(trascinala sul punto esatto o doppio clic se e' giusta); Pagina giu'/su per passare alle altre",
+               n, names), 20000)
 
     def filter_photos_with_markers(self) -> None:
         ch = self.chunk
         if ch is None:
             return
         n = self.photos.set_filter({k for m in ch.markers for k in m.projections}, "Foto con marker")
-        self.statusBar().showMessage(f"{n} foto con almeno un marker", 8000)
+        self.statusBar().showMessage(tr("{0} foto con almeno un marker", n), 8000)
 
     def filter_photos_by_point(self, point, title: str | None = None) -> None:
         """Only the photos that see a point (internal frame), as Metashape's *Filter Photos by
@@ -3912,15 +4001,16 @@ class MainWindow(QMainWindow):
 
         ch = self.chunk
         if ch is None or point is None:
-            self.statusBar().showMessage("Nessun punto del modello, della nuvola o del DEM qui", 8000)
+            self.statusBar().showMessage(tr("Nessun punto del modello, della nuvola o del DEM qui"), 8000)
             return
         point = np.asarray(point, float)
         cams = {c.key for c, *_ in gcp.photos_seeing(ch, point)}
         x, y, z = ch.to_world(point[None])[0]
-        n = self.photos.set_filter(cams, title or f"Foto del punto X {x:.2f} Y {y:.2f} Z {z:.2f}", focus=point)
+        n = self.photos.set_filter(cams, title or tr("Foto del punto X {0:.2f} Y {1:.2f} Z {2:.2f}", x, y, z),
+                                   focus=point)
         self._show_pane(self.bottom_tabs, self.photos_panel)
-        self.statusBar().showMessage(f"{n} foto vedono il punto: doppio clic per aprirle centrate su di esso "
-                                     "(croce rossa)", 15000)
+        self.statusBar().showMessage(tr("{0} foto vedono il punto: doppio clic per aprirle centrate su di esso "
+                                        "(croce rossa)", n), 15000)
 
     def _photos_in_selected_area(self) -> None:
         from ..engine.patches import photos_for_area
@@ -3938,7 +4028,7 @@ class MainWindow(QMainWindow):
         keys = {r["key"] for r in rows if r.get("coverage", 0) > 0}
         n = self.photos.set_filter(keys, "Foto dell'area selezionata")
         self._show_pane(self.bottom_tabs, self.photos_panel)
-        self.statusBar().showMessage(f"{n} foto inquadrano l'area", 8000)
+        self.statusBar().showMessage(tr("{0} foto inquadrano l'area", n), 8000)
 
     def _markers_edited(self, marker=None) -> None:
         """A marker was placed, moved, confirmed or removed in a photo: positions again and, for that
@@ -3954,7 +4044,7 @@ class MainWindow(QMainWindow):
                     any(p.measured for p in marker.projections.values()):
                 gcp.project_marker(ch, marker)
         except Exception as exc:
-            self.log_pane.warning(f"Triangolazione dei marker non riuscita: {exc}")
+            self.log_pane.warning(tr("Triangolazione dei marker non riuscita: {0}", exc))
         self.reference.set_chunk(ch)
         self.workspace.populate(self.doc)
         self._draw_markers_on_raster()
@@ -3964,23 +4054,23 @@ class MainWindow(QMainWindow):
 
     def _thumbs_progress(self, done: int, total: int) -> None:
         if total >= 30:  # a few photos load at once: no message
-            self.statusBar().showMessage(f"Miniature delle foto: {done}/{total}" if done < total
-                                         else f"Miniature delle foto pronte ({total})", 3000)
+            self.statusBar().showMessage(tr("Miniature delle foto: {0}/{1}", done, total) if done < total
+                                         else tr("Miniature delle foto pronte ({0})", total), 3000)
 
     def _show_coords(self, x: float, y: float, z) -> None:
         kind = getattr(self.ortho_view, "kind", None)
         if kind in ("slope", "aspect"):
             zt = ""
             if z is not None and np.isfinite(z):
-                zt = (f"  pendenza {z:.1f}°" if kind == "slope" else
-                      "  terreno piano" if z < 0 else f"  esposizione {z:.0f}° ({_compass(z)})").replace(".", ",")
+                zt = decimal_comma(tr("  pendenza {0:.1f}°", z) if kind == "slope" else
+                                   tr("  terreno piano") if z < 0 else tr("  esposizione {0:.0f}° ({1})", z, _compass(z)))
             self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}{zt}   [{self.chunk.crs if self.chunk else ''}]")
             return
         if kind == "dem" and z is not None and self.chunk is not None and self.chunk.dem_path is not None:
             self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}  Z {z:.3f}{self._terrain_at(x, y, z)}   [{self.chunk.crs}]")
             return
         if getattr(self.ortho_view, "kind", None) == "coverage":
-            zt = f"  {int(z)} foto" if z is not None and np.isfinite(z) else ""
+            zt = tr("  {0} foto", int(z)) if z is not None and np.isfinite(z) else ""
             self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}{zt}   [{self.chunk.crs if self.chunk else ''}]")
             return
         if getattr(self.ortho_view, "kind", None) == "sigma":
@@ -3999,6 +4089,35 @@ class MainWindow(QMainWindow):
             self.reference.set_chunk(self.chunk)
 
     # ---------------------------------------------------------------- appearance and help
+    def set_language(self, code: str) -> None:
+        """The language of the interface from the next start; a restart now applies it."""
+        i18n.save_language(code)
+        if code == i18n.current():
+            return
+        pick = choice(self, "question", "Lingua / Language", tr("La lingua cambia al prossimo avvio del programma."),
+                      [tr("Riavvia ora")], cancel=tr("Piu' tardi"))
+        if pick == 0:
+            self._relaunch_on_close = True
+            if not self.close():  # the project was not saved and the user stayed
+                self._relaunch_on_close = False
+
+    def _relaunch(self) -> None:
+        """A new copy of the program, with the project that was open (the language just chosen)."""
+        env = {k: v for k, v in os.environ.items() if k != "PPG_LANG"}
+        project = [str(self.doc.path)] if self.doc.path else []
+        bundle = updates.app_bundle() if sys.platform == "darwin" and getattr(sys, "frozen", False) else None
+        if bundle is not None:
+            cmd = ["/usr/bin/open", "-n", str(bundle)] + (["--args"] + project if project else [])
+        elif getattr(sys, "frozen", False):
+            cmd = [sys.executable] + project
+        else:
+            cmd = [sys.executable, "-m", "pyarchinit_photogrammetry.gui"] + project
+        try:  # close_fds=False: posix_spawn, never a fork of this process (see engine.isolate)
+            subprocess.Popen(cmd, close_fds=False, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            log.error("Riavvio non riuscito: %s", exc)
+
     def set_theme(self, mode: str) -> None:
         theme.apply(QApplication.instance(), mode)
         self.settings.setValue("theme", mode)
@@ -4034,8 +4153,8 @@ class MainWindow(QMainWindow):
     def check_updates(self) -> None:
         """*Aiuto > Controlla aggiornamenti*: also the versions skipped before."""
         started = self.update_checker.start(manual=True)
-        self.statusBar().showMessage("Controllo degli aggiornamenti..." if started
-                                     else "Controllo degli aggiornamenti gia' in corso", 5000)
+        self.statusBar().showMessage(tr("Controllo degli aggiornamenti...") if started
+                                     else tr("Controllo degli aggiornamenti gia' in corso"), 5000)
 
     def _updates_checked(self, release, error, manual: bool) -> None:
         if error is not None:
@@ -4045,18 +4164,18 @@ class MainWindow(QMainWindow):
             return
         if release is None:
             if manual:
-                self._info("Aggiornamenti", f"Questa e' l'ultima versione ({__version__}).")
+                self._info("Aggiornamenti", tr("Questa e' l'ultima versione ({0}).", __version__))
             return
-        self.log_pane.info(f"E' disponibile la versione {release.version} (questa e' la {__version__})")
+        self.log_pane.info(tr("E' disponibile la versione {0} (questa e' la {1})", release.version, __version__))
         dlg = UpdateDialog(release, parent=self)
         dlg.exec()
         if dlg.action == "skip":
             self.settings.setValue("updates_skip", release.version)
-            self.log_pane.info(f"La versione {release.version} non verra' piu' proposta all'avvio")
+            self.log_pane.info(tr("La versione {0} non verra' piu' proposta all'avvio", release.version))
         elif dlg.action == "page":
             QDesktopServices.openUrl(QUrl(release.url))
         elif dlg.action == "copy" and dlg.command:
-            self.statusBar().showMessage(f"Comando copiato: {dlg.command}", 10000)
+            self.statusBar().showMessage(tr("Comando copiato: {0}", dlg.command), 10000)
         elif dlg.action in ("install", "download"):
             self.download_update(release, install=dlg.action == "install")
 
@@ -4065,8 +4184,8 @@ class MainWindow(QMainWindow):
         application) also copy the new application, swapped in when the window closes."""
         asset = updates.asset_for_platform(release)
         if asset is None:
-            self._warn(f"La versione {release.version} non ha un pacchetto per questo sistema: scaricalo dalla "
-                       "pagina della versione.")
+            self._warn(tr("La versione {0} non ha un pacchetto per questo sistema: scaricalo dalla pagina della "
+                          "versione.", release.version))
             QDesktopServices.openUrl(QUrl(release.url))
             return False
 
@@ -4088,22 +4207,23 @@ class MainWindow(QMainWindow):
             if new is None:
                 QDesktopServices.openUrl(QUrl.fromLocalFile(str(path if problem is not None else path.parent)))
                 if problem is not None:  # e.g. an application folder this user cannot write
-                    self._warn(f"La versione {release.version} e' stata scaricata ma non installata: {problem}.\n\n"
-                               "Si apre il disco: trascina l'applicazione nella cartella Applicazioni.")
+                    self._warn(tr("La versione {0} e' stata scaricata ma non installata: {1}.\n\nSi apre il disco: "
+                                  "trascina l'applicazione nella cartella Applicazioni.", release.version, problem))
                 else:
                     self._info("Aggiornamento scaricato",
-                               f"{path.name} e' nella cartella {path.parent}.\n\nChiudi il programma, estrai lo zip "
-                               "e sostituisci la cartella del programma con quella nuova.")
+                               tr("{0} e' nella cartella {1}.\n\nChiudi il programma, estrai lo zip e sostituisci la "
+                                  "cartella del programma con quella nuova.", path.name, path.parent))
                 return
             self._pending_update = new
             pick = choice(self, "question", "Aggiornamento pronto",
-                          f"La versione {release.version} e' pronta. Il programma si chiude (chiedendo di salvare il "
-                          "progetto se e' cambiato) e si riapre aggiornato.",
+                          tr("La versione {0} e' pronta. Il programma si chiude (chiedendo di salvare il progetto se "
+                             "e' cambiato) e si riapre aggiornato.", release.version),
                           ["Riavvia ora", "Alla chiusura del programma"], cancel=None)
             if pick == 0:
                 self.close()
             else:
-                self.statusBar().showMessage(f"La versione {release.version} verra' installata alla chiusura", 10000)
+                self.statusBar().showMessage(tr("La versione {0} verra' installata alla chiusura", release.version),
+                                             10000)
 
         return self.runner.run("Download dell'aggiornamento", work, done, self._error)
 
@@ -4117,11 +4237,10 @@ class MainWindow(QMainWindow):
 
     def about(self) -> None:
         message(self, "info", "Informazioni",
-                f"<b>{APP_TITLE} {__version__}</b><br>"
-                "Fotogrammetria open source per l'archeologia e il BIM, integrata con PyArchInit.<br><br>"
-                f"Visualizzatore 3D: {self.model_view.backend}<br>"
-                "Licenza GNU GPL v2 o successiva<br>Autore: Enzo Cocca<br>"
-                f"<a href='{DOCS_URL}'>{DOCS_URL}</a>")
+                tr("<b>{0} {1}</b><br>Fotogrammetria open source per l'archeologia e il BIM, integrata con "
+                   "PyArchInit.<br><br>Visualizzatore 3D: {2}<br>Licenza GNU GPL v2 o successiva<br>Autore: Enzo "
+                   "Cocca<br><a href='{3}'>{4}</a>",
+                   APP_TITLE, __version__, self.model_view.backend, DOCS_URL, DOCS_URL))
 
     # ---------------------------------------------------------------- drawing tools
     def _apply_draw_options(self) -> None:
@@ -4272,7 +4391,7 @@ class MainWindow(QMainWindow):
         self._draw_unit(u, len(self.units) - 1)
         self._dirty(True)
         self.log_pane.info(f"{u.tipo} {u.us or '?'}: area {u.geometry.area:.3f} m2"
-                           + (f" (sito {u.sito})" if u.sito else ""))
+                           + (tr(" (sito {0})", u.sito) if u.sito else ""))
 
     def _unit_drawn(self, xy) -> None:
         from shapely.geometry import Polygon
@@ -4320,7 +4439,7 @@ class MainWindow(QMainWindow):
         if keep is not None:
             v = dict(keep)
             if z is None:
-                self.statusBar().showMessage("Fuori dal DEM: quota non letta", 8000)
+                self.statusBar().showMessage(tr("Fuori dal DEM: quota non letta"), 8000)
                 return
             v["quota_q"] = round(z, 3)
         else:
@@ -4334,8 +4453,8 @@ class MainWindow(QMainWindow):
             self._last_quota = {k: val for k, val in v.items() if k not in ("quota_q", "keep")}
             if v.pop("keep", False):
                 self._quota_keep = dict(self._last_quota)
-                self.statusBar().showMessage("Quote: valori fissati per i prossimi punti (Esc o un altro "
-                                             "strumento per tornare a chiederli)", 15000)
+                self.statusBar().showMessage(tr("Quote: valori fissati per i prossimi punti (Esc o un altro "
+                                                "strumento per tornare a chiederli)"), 15000)
             if v.get("disegnatore"):
                 self.settings.setValue("pa/disegnatore", v["disegnatore"])
         q = {"x": float(x), "y": float(y), "sito_q": self.project_site(), **v}
@@ -4352,7 +4471,7 @@ class MainWindow(QMainWindow):
         """A section traced by two points picked in the 3D view (its plan trace)."""
         w = self.chunk.to_world(np.array([a, b], float))
         if np.hypot(*(w[1, :2] - w[0, :2])) < 1e-6:
-            self.statusBar().showMessage("I due punti sono uno sopra l'altro: nessuna traccia in pianta", 8000)
+            self.statusBar().showMessage(tr("I due punti sono uno sopra l'altro: nessuna traccia in pianta"), 8000)
             return
         self._section_drawn((float(w[0, 0]), float(w[0, 1])), (float(w[1, 0]), float(w[1, 1])))
 
@@ -4367,8 +4486,8 @@ class MainWindow(QMainWindow):
             return
         m = ch.marker_by_key(key)
         if any(p.measured for p in m.projections.values()):
-            self._warn(f"{m.label} e' misurato nelle foto: la sua posizione viene da li'. Spostalo trascinando le "
-                       "bandierine verdi nelle foto, oppure togli le misure.")
+            self._warn(tr("{0} e' misurato nelle foto: la sua posizione viene da li'. Spostalo trascinando le "
+                          "bandierine verdi nelle foto, oppure togli le misure.", m.label))
             return
         kind = self.model_view.kind if self.model_view.kind in self.model_view.PICK_KINDS else None
         self._show_model(kind or ("model" if ch.product_path("model") else "point_cloud"))
@@ -4378,18 +4497,18 @@ class MainWindow(QMainWindow):
         from ..markers import gcp
 
         if point is None:
-            self.statusBar().showMessage("Nessun punto del modello o della nuvola sotto il cursore", 8000)
+            self.statusBar().showMessage(tr("Nessun punto del modello o della nuvola sotto il cursore"), 8000)
             return
         m = self.chunk.marker_by_key(key)
         m.position = np.asarray(point, float)
         gcp.project_marker(self.chunk, m)
         self._markers_edited(m)
         x, y, z = self.chunk.to_world(m.position[None])[0]
-        self.log_pane.info(f"{m.label} spostato in X {x:.3f} Y {y:.3f} Z {z:.3f}")
+        self.log_pane.info(tr("{0} spostato in X {1:.3f} Y {2:.3f} Z {3:.3f}", m.label, x, y, z))
 
     def _marker_picked_in_3d(self, point) -> None:
         if point is None:
-            self.statusBar().showMessage("Nessun punto del modello o della nuvola sotto il cursore", 8000)
+            self.statusBar().showMessage(tr("Nessun punto del modello o della nuvola sotto il cursore"), 8000)
             return
         if self.chunk is None or not self.chunk.aligned_cameras:
             self._warn("Servono le foto allineate: il marker si proietta sulle foto che lo vedono.")
@@ -4427,7 +4546,7 @@ class MainWindow(QMainWindow):
             return
         point = self._raster_point(x, y)
         if point is None:
-            self.statusBar().showMessage("Qui non c'e' superficie (fuori dal DEM e dalla nuvola)", 8000)
+            self.statusBar().showMessage(tr("Qui non c'e' superficie (fuori dal DEM e dalla nuvola)"), 8000)
             return
         self.add_marker_at(point, "sull'ortofoto" if self.ortho_view.kind == "ortho" else "sul DEM")
 
@@ -4436,10 +4555,10 @@ class MainWindow(QMainWindow):
         self.quote.append(q)
         self._draw_quota(q, len(self.quote) - 1)
         self._dirty(True)
-        self.log_pane.info(f"Quota {q.get('quota_q')} {q.get('unita_misu_q', '')}"
+        self.log_pane.info(tr("Quota {0} {1}", q.get('quota_q'), q.get('unita_misu_q', ''))
                            + (f" ±{q['precisione_q'] * 1000:.1f} mm" if q.get("precisione_q") else "")
-                           + f" - US {q.get('us_q') or '?'} (area {q.get('area_q') or '?'}) in X {q['x']:.3f} "
-                             f"Y {q['y']:.3f}")
+                           + tr(" - US {0} (area {1}) in X {2:.3f} Y {3:.3f}",
+                                q.get('us_q') or '?', q.get('area_q') or '?', q['x'], q['y']))
 
     def _dem_value(self, x: float, y: float) -> float | None:
         """Elevation of the DEM at full resolution (the view keeps a reduced copy)."""
@@ -4517,7 +4636,7 @@ class MainWindow(QMainWindow):
         self.chunk.meta["section_options"] = {"source": v["source"], "thickness": float(v["thickness"]),
                                               "classes": classes}
         self._dirty(True)
-        self.statusBar().showMessage("Opzioni delle sezioni salvate: traccia la sezione sull'ortofoto", 8000)
+        self.statusBar().showMessage(tr("Opzioni delle sezioni salvate: traccia la sezione sull'ortofoto"), 8000)
 
     def _section_drawn(self, a, b) -> None:
         opts = self._section_options()
@@ -4556,7 +4675,7 @@ class MainWindow(QMainWindow):
                                      attrs={"lunghezza_m": round(sec.length, 3), "svg": str(svg)})
             self.sections_pane.add(sdict)
             self._show_pane(self.bottom_tabs, self.sections_pane)
-            self.log_pane.info(f"{label}: lunghezza {sec.length:.3f} m, disegni in {out_dir}")
+            self.log_pane.info(tr("{0}: lunghezza {1:.3f} m, disegni in {2}", label, sec.length, out_dir))
 
         self.run_task("Sezione", job, done, refresh=False, save=False)
 
@@ -4573,18 +4692,19 @@ class MainWindow(QMainWindow):
         from ..archaeo.sections import Section
 
         sites = self.pa_pane.site_names()
-        site, ok = QInputDialog.getItem(self, "Sito", "Sito PyArchInit:", sites, 0, True)
+        site, ok = QInputDialog.getItem(self, tr("Sito"), tr("Sito PyArchInit:"), sites, 0, True)
         if not ok or not site:
             return
         sec = Section(np.array(sdict["p1"] + [0.0]), np.array(sdict["p2"] + [0.0]), label=sdict["label"])
         self.run_task("Pubblicazione sezione",
                       lambda p: self.pa.publish_section_trace(sec, site, sdict["label"], crs=self.chunk.crs),
-                      lambda gid: self._info("PyArchInit", f"Traccia '{sdict['label']}' scritta in pyarchinit_sezioni (gid {gid})"),
+                      lambda gid: self._info("PyArchInit", tr("Traccia '{0}' scritta in pyarchinit_sezioni (gid {1})",
+                                                              sdict['label'], gid)),
                       refresh=False, save=False)
 
     def _delete_section(self, sdict: dict, confirm: bool = True, redraw: bool = True) -> None:
         if confirm:
-            r = message(self, "question", "Elimina sezione", f"Eliminare {sdict['label']} e i suoi file?",
+            r = message(self, "question", "Elimina sezione", tr("Eliminare {0} e i suoi file?", sdict['label']),
                         buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                         default=QMessageBox.StandardButton.No)
             if r != QMessageBox.StandardButton.Yes:
@@ -4652,7 +4772,7 @@ class MainWindow(QMainWindow):
 
     def _update_pa_save_button(self) -> None:
         n = len(set(self.pa_pending) | self.pa_deleted)
-        self.b_pa_save.setText(f"Salva modifiche in PyArchInit ({n})")
+        self.b_pa_save.setText(tr("Salva modifiche in PyArchInit ({0})", n))
         self.b_pa_save.setVisible(n > 0)
 
     def save_pending_units(self, confirm: bool = True) -> None:
@@ -4663,8 +4783,8 @@ class MainWindow(QMainWindow):
         pending, deleted, geom = dict(self.pa_pending), set(self.pa_deleted), set(self.pa_geom_changed)
         if deleted and confirm:
             r = message(self, "question", "Salva modifiche in PyArchInit",
-                        f"Eliminare {len(deleted)} poligoni da pyunitastratigrafiche e aggiornarne "
-                        f"{len(set(pending) - deleted)}? Le schede US non vengono toccate.",
+                        tr("Eliminare {0} poligoni da pyunitastratigrafiche e aggiornarne {1}? Le schede US non "
+                           "vengono toccate.", len(deleted), len(set(pending) - deleted)),
                         buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                         default=QMessageBox.StandardButton.No)
             if r != QMessageBox.StandardButton.Yes:
@@ -4687,8 +4807,8 @@ class MainWindow(QMainWindow):
             self._update_pa_save_button()
             self.pa_pane.refresh()
             n_upd, n_del = r
-            self._info("PyArchInit", f"pyunitastratigrafiche: {n_upd} poligoni aggiornati"
-                       + (f", {n_del} eliminati" if n_del else ""))
+            self._info("PyArchInit", tr("pyunitastratigrafiche: {0} poligoni aggiornati", n_upd)
+                       + (tr(", {0} eliminati", n_del) if n_del else ""))
 
         self.run_task("Aggiornamento unita' in PyArchInit", job, done, refresh=False, save=False)
 
@@ -4697,8 +4817,8 @@ class MainWindow(QMainWindow):
         self.a_sel_delete.setEnabled(n > 0)
         self.a_sel_merge.setEnabled(n > 1)
         if self.ortho_view.mode == "select":
-            self.statusBar().showMessage(f"{n} elementi selezionati: Canc per eliminare, Unisci per fonderli"
-                                         if n else "Nessun elemento selezionato", 8000)
+            self.statusBar().showMessage(tr("{0} elementi selezionati: Canc per eliminare, Unisci per fonderli", n)
+                                         if n else tr("Nessun elemento selezionato"), 8000)
 
     def _unit_part(self, layer: str, attrs: dict) -> tuple[int, int] | None:
         """(unit index, part index) of a feature drawn for a unit (one feature per polygon part)."""
@@ -4757,14 +4877,14 @@ class MainWindow(QMainWindow):
                 skip.add(id(attrs))
         if confirm:
             from_pa = sum(1 for i in parts if (self.units[i].attributes or {}).get("gid") is not None)
-            text = f"Eliminare {len(sel)} elementi selezionati?"
+            text = tr("Eliminare {0} elementi selezionati?", len(sel))
             if sections:
-                text += f"\n{len(sections)} tracce di sezione: anche i loro disegni (SVG/DXF)."
+                text += tr("\n{0} tracce di sezione: anche i loro disegni (SVG/DXF).", len(sections))
             if from_pa:
-                text += (f"\n{from_pa} poligoni vengono da PyArchInit: escono dal database solo con "
-                         "«Salva modifiche in PyArchInit».")
+                text += (tr("\n{0} poligoni vengono da PyArchInit: escono dal database solo con «Salva modifiche in "
+                            "PyArchInit».", from_pa))
             if patch_ids:
-                text += f"\n{len(patch_ids)} patch dell'ortofoto: l'ortofoto viene aggiornata senza di esse."
+                text += tr("\n{0} patch dell'ortofoto: l'ortofoto viene aggiornata senza di esse.", len(patch_ids))
             r = message(self, "question", "Elimina selezionati", text,
                         buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                         default=QMessageBox.StandardButton.Yes)
@@ -4801,7 +4921,7 @@ class MainWindow(QMainWindow):
         self._update_pa_save_button()
         self._redraw_overlays(skip=skip)
         self._dirty(True)
-        self.log_pane.info(f"Eliminati {len(sel)} elementi")
+        self.log_pane.info(tr("Eliminati {0} elementi", len(sel)))
         if patch_ids:
             self.update_ortho_patches()
         return len(sel)
@@ -4838,7 +4958,7 @@ class MainWindow(QMainWindow):
         keep = order[0]
         if len({(self.units[i].tipo, self.units[i].us, self.units[i].area) for i in order}) > 1:
             choices = [(str(i), f"{self.units[i].tipo} {self.units[i].us or '?'} (area {self.units[i].area or '-'})"
-                        + (" - da PyArchInit" if (self.units[i].attributes or {}).get("gid") is not None else ""))
+                        + (tr(" - da PyArchInit") if (self.units[i].attributes or {}).get("gid") is not None else ""))
                        for i in order]
             vals = ParamDialog.ask(self, "Unisci unita'", [
                 Field("keep", "Numero, area e tipo di", choices[0][0], choices=choices)],
@@ -4864,8 +4984,9 @@ class MainWindow(QMainWindow):
         self._update_pa_save_button()
         self._redraw_overlays()
         self._dirty(True)
-        self.log_pane.info(f"Unite {len(order)} unita' in {target.tipo} {target.us or '?'}: area "
-                           f"{target.geometry.area:.3f} m2" + (f", {len(polys)} parti separate" if len(polys) > 1 else ""))
+        self.log_pane.info(tr("Unite {0} unita' in {1} {2}: area {3:.3f} m2",
+                              len(order), target.tipo, target.us or '?', target.geometry.area)
+                           + (tr(", {0} parti separate", len(polys)) if len(polys) > 1 else ""))
         return True
 
     def _merge_lines(self, layer: str, idxs: list[int]) -> bool:
@@ -4895,7 +5016,7 @@ class MainWindow(QMainWindow):
         self.line_layers[layer] = [e for k, e in enumerate(entries) if k == first or k not in idxs]
         self._redraw_overlays()
         self._dirty(True)
-        self.log_pane.info(f"{layer}: unite {len(idxs)} linee, lunghezza {merged.length:.3f} m")
+        self.log_pane.info(tr("{0}: unite {1} linee, lunghezza {2:.3f} m", layer, len(idxs), merged.length))
         return True
 
     def _redraw_overlays(self, skip: set | None = None) -> None:
@@ -4962,7 +5083,8 @@ class MainWindow(QMainWindow):
         if dlg.exec() != dlg.DialogCode.Accepted:
             return False
         self.pa_pane.refresh()
-        self.log_pane.info(f"Scheda {dlg.tipo.currentText()} {dlg.us.text()} salvata in PyArchInit ({sito})")
+        self.log_pane.info(tr("Scheda {0} {1} salvata in PyArchInit ({2})",
+                              dlg.tipo.currentText(), dlg.us.text(), sito))
         return True
 
     def _unit_site(self, layer: str) -> str:
@@ -5009,8 +5131,8 @@ class MainWindow(QMainWindow):
             return
         drawn = [u for u in self.units if u.us]
         sites = self.pa_pane.site_names() if self.pa is not None else []
-        choices = ([("drawn", f"Unita' disegnate ({len(drawn)})")] if drawn else []) + \
-            [("pa:" + s, f"Poligoni US da PyArchInit - {s}") for s in sites]
+        choices = ([("drawn", tr("Unita' disegnate ({0})", len(drawn)))] if drawn else []) + \
+            [("pa:" + s, tr("Poligoni US da PyArchInit - {0}", s)) for s in sites]
         if not choices:
             self._warn("Disegna delle unita' (con il numero di US) o connetti PyArchInit per usare i poligoni delle US.")
             return
@@ -5057,7 +5179,8 @@ class MainWindow(QMainWindow):
             self.proxies_pane.set_proxies(self.chunk.meta["proxies"])
             self._show_pane(self.left_tabs, self.proxies_pane)
             self._show_model("proxies")
-            self.log_pane.info(f"{len(entries)} proxy creati, volume {sum(e['volume_m3'] for e in entries):.3f} m3")
+            self.log_pane.info(tr("{0} proxy creati, volume {1:.3f} m3",
+                                  len(entries), sum(e['volume_m3'] for e in entries)))
 
         self.run_task("Proxy delle US", job, done)
 
@@ -5080,7 +5203,7 @@ class MainWindow(QMainWindow):
         if not self.chunk.meta.get("proxies"):
             self._warn("Crea prima i proxy delle US.")
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Proxy per Extended Matrix", self._last_dir() + "/proxy_us.obj",
+        path, _ = QFileDialog.getSaveFileName(self, tr("Proxy per Extended Matrix"), self._last_dir() + "/proxy_us.obj",
                                               "OBJ (*.obj)")
         if not path:
             return
@@ -5089,7 +5212,8 @@ class MainWindow(QMainWindow):
         objs = [o[2] for o in self._proxy_objects()]
         allv = np.vstack([np.asarray(o.mesh.vertices) for o in objs])
         out = export_extended_matrix(objs, path, offset=np.floor(allv.min(0)))
-        self._info("Proxy esportati", f"{len(objs)} oggetti in {out}\nOffset delle coordinate in {out.name}.offset.txt")
+        self._info("Proxy esportati", tr("{0} oggetti in {1}\nOffset delle coordinate in {2}.offset.txt",
+                                         len(objs), out, out.name))
 
     def publish_proxies(self, rows: list) -> None:
         if not self._need_pa():
@@ -5102,7 +5226,7 @@ class MainWindow(QMainWindow):
         def job(p):
             done_ = []
             for k, (i, e, px) in enumerate(items):
-                p(k / max(len(items), 1), f"Pubblicazione {px.name}")
+                p(k / max(len(items), 1), tr("Pubblicazione {0}", px.name))
                 site = e.get("sito") or self.pa_pane.current_site()
                 if not site:
                     raise RuntimeError("indica il sito (pubblica dai poligoni di un sito PyArchInit)")
@@ -5124,8 +5248,9 @@ class MainWindow(QMainWindow):
                 entries[i]["linked"] = linked
             self.proxies_pane.set_proxies(entries)
             missing = [entries[i]["name"] for i, _r, linked in res if not linked]
-            self._info("PyArchInit", f"{len(res)} proxy pubblicati come modelli 3D"
-                       + (f"; senza scheda US (crea la scheda e ripubblica): {', '.join(missing)}" if missing else ""))
+            self._info("PyArchInit", tr("{0} proxy pubblicati come modelli 3D", len(res))
+                       + (tr("; senza scheda US (crea la scheda e ripubblica): {0}",
+                             ', '.join(missing)) if missing else ""))
 
         self.run_task("Pubblicazione dei proxy", job, done)
 
@@ -5144,8 +5269,8 @@ class MainWindow(QMainWindow):
             n += self.pa.update_us(int(rec["id_us"]), quota_min_abs=round(e["z_bottom"][0], 3),
                                    quota_max_abs=round(e["z_top"][1], 3))
         self.pa_pane.refresh()
-        self._info("PyArchInit", f"Quote scritte in {n} schede US"
-                   + (f"; schede mancanti: {', '.join(missing)}" if missing else ""))
+        self._info("PyArchInit", tr("Quote scritte in {0} schede US", n)
+                   + (tr("; schede mancanti: {0}", ', '.join(missing)) if missing else ""))
 
     def delete_proxies(self, rows: list) -> None:
         entries = self.chunk.meta.get("proxies", [])
@@ -5204,7 +5329,7 @@ class MainWindow(QMainWindow):
         ch = self.chunk
         files = self._export_qgis_layers(force=True)
         if not files:
-            self._warn(f"Non riesco a scrivere i disegni per QGIS in {self._qgis_dir()}: vedi il log.")
+            self._warn(tr("Non riesco a scrivere i disegni per QGIS in {0}: vedi il log.", self._qgis_dir()))
             return
         name = self.doc.path.stem if self.doc.path else "progetto"
         project = self._qgis_dir() / f"{name}_ppg.qgs"
@@ -5225,9 +5350,11 @@ class MainWindow(QMainWindow):
         def done(rep):
             self.a_qgis_live.setChecked(True)
             bad = [v["name"] for v in rep["vectors"] + rep["rasters"] if not v["valid"]]
-            self.log_pane.info(f"Progetto QGIS: {project} ({len(rep['vectors'])} layer vettoriali aggiornati dal vivo, "
-                               f"{len(rep['rasters'])} raster)" + (f"; non validi: {', '.join(bad)}" if bad else ""))
-            self.statusBar().showMessage("QGIS aperto: i disegni si aggiornano in QGIS da soli, ogni secondo", 15000)
+            self.log_pane.info(tr("Progetto QGIS: {0} ({1} layer vettoriali aggiornati dal vivo, {2} raster)",
+                                  project, len(rep['vectors']), len(rep['rasters']))
+                               + (tr("; non validi: {0}", ', '.join(bad)) if bad else ""))
+            self.statusBar().showMessage(tr("QGIS aperto: i disegni si aggiornano in QGIS da soli, ogni secondo"),
+                                         15000)
 
         self.run_task("Apertura in QGIS", job, done, refresh=False, save=False)
 
@@ -5286,7 +5413,7 @@ class MainWindow(QMainWindow):
             self._exc("Generazione del tappetino non riuscita", exc)
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(files[0])))
-        self.statusBar().showMessage(f"Coordinate dei target: {csv}", 15000)
+        self.statusBar().showMessage(tr("Coordinate dei target: {0}", csv), 15000)
 
     def contours(self) -> None:
         if not self._need_chunk(product="dem"):
@@ -5306,18 +5433,18 @@ class MainWindow(QMainWindow):
             Field("smooth", "Levigatura del DEM (m, 0 = nessuna)", 0.0, minimum=0.0, maximum=50, decimals=2),
             Field("path", "Salva (DXF, GeoPackage, GeoJSON)", str(Path(self._last_dir()) / "curve.dxf"),
                   kind="file_save", filter="DXF (*.dxf);;GeoPackage (*.gpkg);;GeoJSON (*.geojson)")],
-            intro=f"Quote del DEM da {lo:.2f} a {hi:.2f} m (dislivello {hi - lo:.2f} m): con {suggested:g} m "
-                  f"sono circa {int((hi - lo) / suggested)} livelli. Su un DSM da drone (vegetazione, zolle) "
-                  "una levigatura di 0,2-0,5 m toglie i piccoli anelli e da' curve piu' pulite.")
+            intro=tr("Quote del DEM da {0:.2f} a {1:.2f} m (dislivello {2:.2f} m): con {3:g} m sono circa {4} "
+                     "livelli. Su un DSM da drone (vegetazione, zolle) una levigatura di 0,2-0,5 m toglie i piccoli "
+                     "anelli e da' curve piu' pulite.", lo, hi, hi - lo, suggested, int((hi - lo) / suggested)))
         if not v:
             return
         levels = (hi - lo) / v["interval"]
         if levels > 300:
             r = message(self, "question", "Curve di livello",
-                        f"Con equidistanza {v['interval']:g} m il DEM (dislivello {hi - lo:.1f} m) da' {int(levels)} "
-                        f"livelli di curve: decine di migliaia di linee, lente da disegnare e da usare. "
-                        f"Un'equidistanza di {suggested:g} m ne da' circa {int((hi - lo) / suggested)}.\n\nContinuare "
-                        f"con {v['interval']:g} m?",
+                        tr("Con equidistanza {0:g} m il DEM (dislivello {1:.1f} m) da' {2} livelli di curve: decine "
+                           "di migliaia di linee, lente da disegnare e da usare. Un'equidistanza di {3:g} m ne da' "
+                           "circa {4}.\n\nContinuare con {5:g} m?",
+                           v['interval'], hi - lo, int(levels), suggested, int((hi - lo) / suggested), v['interval']),
                         buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                         default=QMessageBox.StandardButton.No)
             if r != QMessageBox.StandardButton.Yes:
@@ -5326,7 +5453,7 @@ class MainWindow(QMainWindow):
         def job(p):
             p(0.1, "Curve di livello")
             lines = terrain.contours(dem, v["interval"], index_every=v["index_every"], smooth=v["smooth"])
-            p(0.7, f"Salvataggio di {len(lines)} curve")
+            p(0.7, tr("Salvataggio di {0} curve", len(lines)))
             terrain.export_contours(lines, v["path"], crs=self.chunk.crs)
             return lines
 
@@ -5334,9 +5461,9 @@ class MainWindow(QMainWindow):
             self._show_raster("dem")
             name = f"Curve di livello ({v['interval']:g} m)"
             self._draw_contours(name, lines)
-            self.log_pane.info(f"{name}: {len(lines)} linee, {sum(len(ln['coords']) for ln in lines)} vertici, "
-                               f"salvate in {v['path']}")
-            self.statusBar().showMessage(f"{len(lines)} curve salvate in {v['path']}", 10000)
+            self.log_pane.info(tr("{0}: {1} linee, {2} vertici, salvate in {3}",
+                                  name, len(lines), sum(len(ln['coords']) for ln in lines), v['path']))
+            self.statusBar().showMessage(tr("{0} curve salvate in {1}", len(lines), v['path']), 10000)
             self._show_pane(self.left_tabs, self.layers_pane)
 
         self.run_task("Curve di livello", job, done, refresh=False, save=False)
@@ -5382,11 +5509,15 @@ class MainWindow(QMainWindow):
 
         def done(r):
             self._last_volume = r
-            what = ("deposito sopra il fondo" if v["reference"] == "min" else
-                    "rispetto al " + ("piano a " + f"{v['elevation']:.3f} m" if v["reference"] == "plane" else "DEM precedente"))
-            txt = (f"Area {r['area_m2']:.3f} m2 ({what}): scavo (volume asportato) {r['cut_m3']:.3f} m3, "
-                   f"riporto {r['fill_m3']:.3f} m3, netto {r['net_m3']:.3f} m3; quote attuali "
-                   f"{r['quota_min']:.3f} / {r['quota_max']:.3f} m")
+            if v["reference"] == "min":
+                what = tr("deposito sopra il fondo")
+            elif v["reference"] == "plane":
+                what = tr("rispetto al ") + tr("piano a ") + f"{_it(v['elevation'], 3)} m"
+            else:
+                what = tr("rispetto al ") + tr("DEM precedente")
+            txt = (tr("Area {0:.3f} m2 ({1}): scavo (volume asportato) {2:.3f} m3, riporto {3:.3f} m3, netto {4:.3f} "
+                      "m3; quote attuali {5:.3f} / {6:.3f} m",
+                      r['area_m2'], what, r['cut_m3'], r['fill_m3'], r['net_m3'], r['quota_min'], r['quota_max']))
             self._info("Volume", txt)
 
         self.run_task("Volume", lambda p: terrain.volume(self.chunk.dem_path, ref, poly), done, refresh=False,
@@ -5411,8 +5542,9 @@ class MainWindow(QMainWindow):
         v = ParamDialog.ask(self, "Pianta a quota", [
             Field("z", "Quota (m)", float(z_default), minimum=-10000.0, maximum=100000.0, decimals=3)]
             + ([Field("classes", "Classi", codes, choices=choices, kind="checklist")] if len(codes) > 1 else []),
-            intro="Il modello viene tagliato con un piano orizzontale alla quota scelta (per esempio la pianta di un "
-                  "muro)." + (" Togliendo delle classi restano solo i tratti che poggiano sulle classi scelte."
+            intro=tr("Il modello viene tagliato con un piano orizzontale alla quota scelta (per esempio la pianta di "
+                     "un "
+                     "muro).") + (tr(" Togliendo delle classi restano solo i tratti che poggiano sulle classi scelte.")
                               if len(codes) > 1 else ""))
         if not v:
             return
@@ -5435,7 +5567,7 @@ class MainWindow(QMainWindow):
                 self._add_line_feature(f"Pianta a quota {z0:.2f} m", pl[:, :2], "#ff00ff",
                                        attrs={"quota": z0, "dxf": str(out)})
             self.show_view(self.ortho_view)
-            self.statusBar().showMessage(f"Pianta salvata in {out}", 10000)
+            self.statusBar().showMessage(tr("Pianta salvata in {0}", out), 10000)
 
         self.run_task("Pianta a quota", job, done, refresh=False, save=False)
 
@@ -5474,12 +5606,12 @@ class MainWindow(QMainWindow):
             out, meas = r
             names = {"height_m": "Altezza", "max_diameter_m": "Diametro massimo", "rim_diameter_m": "Diametro orlo",
                      "base_diameter_m": "Diametro fondo", "wall_thickness_m": "Spessore parete"}
-            txt = "  -  ".join(f"{names.get(k, k)} {val * 100:.1f} cm" for k, val in meas.items())
-            self.log_pane.info(f"Profilo ceramico: {txt}")
+            txt = "  -  ".join(f"{tr(names.get(k, k))} {val * 100:.1f} cm" for k, val in meas.items())
+            self.log_pane.info(tr("Profilo ceramico: {0}", txt))
             if str(out).lower().endswith(".svg"):
                 ImageDialog("Profilo ceramico", out, txt, self).exec()
             else:
-                self._info("Profilo ceramico", f"{txt}\n\nSalvato in {out}")
+                self._info("Profilo ceramico", tr("{0}\n\nSalvato in {1}", txt, out))
 
         self.run_task("Profilo ceramico", job, done, refresh=False, save=False)
 
@@ -5490,7 +5622,7 @@ class MainWindow(QMainWindow):
 
         def done(pc):
             st = class_statistics(pc)
-            self.log_pane.info("Classi: " + ", ".join(f"{k}: {n}" for k, n in sorted(st.items())))
+            self.log_pane.info(tr("Classi: ") + ", ".join(f"{k}: {n}" for k, n in sorted(st.items())))
             self.show_classes()
 
         self.run_task("Classificazione", lambda p: classify_chunk(self.chunk), done)
@@ -5501,8 +5633,8 @@ class MainWindow(QMainWindow):
             return
         self.model_view.set_color_mode("class")
         self._show_model("point_cloud")
-        self.statusBar().showMessage("Nuvola per classi: togli la spunta nella legenda per nascondere una classe; "
-                                     "«Lazo» per correggere la classe di un gruppo di punti", 15000)
+        self.statusBar().showMessage(tr("Nuvola per classi: togli la spunta nella legenda per nascondere una classe; "
+                                        "«Lazo» per correggere la classe di un gruppo di punti"), 15000)
 
     def classify_with_lasso(self) -> None:
         if not self._need_chunk(product="point_cloud"):
@@ -5518,7 +5650,7 @@ class MainWindow(QMainWindow):
 
         n_vis, n_all = int(np.count_nonzero(visible)), int(np.count_nonzero(inside))
         if not n_all:
-            self.statusBar().showMessage("Nessun punto nel lazo", 8000)
+            self.statusBar().showMessage(tr("Nessun punto nel lazo"), 8000)
             return
         labels = self.chunk.meta.get("classes", {})
         codes = sorted(set(ASPRS_CLASSES) | set(ARCHAEO_CLASSES) | {int(k) for k in labels}
@@ -5532,13 +5664,14 @@ class MainWindow(QMainWindow):
                   choices=[(c, f"{c} - {class_name(c, labels)}") for c in codes]),
             Field("other", "...oppure un nuovo codice (0 = usa la classe sopra)", 0, minimum=0, maximum=255),
             Field("name", "Nome del nuovo codice (es. Crollo)", "", kind="text"),
-            Field("through", f"Anche i punti nascosti dietro la superficie ({_it(n_all)} invece di {_it(n_vis)})",
+            Field("through", tr("Anche i punti nascosti dietro la superficie ({0} invece di {1})",
+                                _it(n_all), _it(n_vis)),
                   False),
             Field("keep_copy", "Elimina / tieni: conserva prima una copia della nuvola (versione)", False)],
-            intro=f"Nel lazo ci sono {_it(n_vis)} punti visibili ({_it(n_all)} contando quelli nascosti). Le classi "
-                  "date a mano vengono ricordate: le classificazioni automatiche non le cambiano e il classificatore "
-                  "impara da loro (Classificazione della nuvola > Addestra il classificatore). Eliminare o tenere "
-                  "cambia la nuvola attuale: senza la copia non si torna indietro.")
+            intro=tr("Nel lazo ci sono {0} punti visibili ({1} contando quelli nascosti). Le classi date a mano "
+                     "vengono ricordate: le classificazioni automatiche non le cambiano e il classificatore impara "
+                     "da loro (Classificazione della nuvola > Addestra il classificatore). Eliminare o tenere cambia "
+                     "la nuvola attuale: senza la copia non si torna indietro.", _it(n_vis), _it(n_all)))
         if not v:
             return
         mask = inside if v["through"] else visible
@@ -5550,15 +5683,16 @@ class MainWindow(QMainWindow):
             self.run_task("Lazo sulla nuvola", self._versioned_edit(
                 "point_cloud", v, lambda p: delete_points(self.chunk, mask, keep_selected=keep_selected),
                 "Nuvola modificata con il lazo"),
-                lambda out: (self.log_pane.info(f"Lazo: tolti {_it(out['removed'])} punti, restano {_it(out['kept'])}"),
+                lambda out: (self.log_pane.info(tr("Lazo: tolti {0} punti, restano {1}",
+                                                   _it(out['removed']), _it(out['kept']))),
                              self.model_view.refresh(reset=False)), refresh=False)
             return
         code = int(v["other"] or v["code"])
         name = str(v.get("name") or "").strip() if v["other"] else ""
         self.settings.setValue("classes/last", code)
         self._set_point_class(mask, code, name or None)
-        self.log_pane.info(f"Classe {code} ({class_name(code, self.chunk.meta.get('classes'))}) assegnata a mano a "
-                           f"{int(np.count_nonzero(mask))} punti")
+        self.log_pane.info(tr("Classe {0} ({1}) assegnata a mano a {2} punti",
+                              code, class_name(code, self.chunk.meta.get('classes')), int(np.count_nonzero(mask))))
         self.model_view.refresh(reset=False)
         self._dirty(True)
 
@@ -5566,18 +5700,19 @@ class MainWindow(QMainWindow):
         """Faces of the model chosen with the lasso: delete them or keep only them."""
         n_vis, n_all = int(np.count_nonzero(visible)), int(np.count_nonzero(inside))
         if not n_all:
-            self.statusBar().showMessage("Nessuna faccia nel lazo", 8000)
+            self.statusBar().showMessage(tr("Nessuna faccia nel lazo"), 8000)
             return
         textured = self._texture_image() is not None
         v = ParamDialog.ask(self, "Facce selezionate con il lazo", [
             Field("action", "Cosa fare", "delete",
                   choices=[("delete", "Elimina queste facce"), ("keep", "Tieni solo queste facce (ritaglia)")]
                   + ([("texture", "Correggi la texture di queste facce (assegna le immagini)")] if textured else [])),
-            Field("through", f"Anche le facce nascoste dietro la superficie ({_it(n_all)} invece di {_it(n_vis)})",
+            Field("through", tr("Anche le facce nascoste dietro la superficie ({0} invece di {1})",
+                                _it(n_all), _it(n_vis)),
                   False),
             Field("keep_copy", "Conserva prima una copia del modello (versione)", False)],
-            intro=f"Nel lazo ci sono {_it(n_vis)} facce visibili ({_it(n_all)} contando quelle nascoste). Colori e "
-                  "confidenza restano; la texture va ricostruita.")
+            intro=tr("Nel lazo ci sono {0} facce visibili ({1} contando quelle nascoste). Colori e confidenza "
+                     "restano; la texture va ricostruita.", _it(n_vis), _it(n_all)))
         if not v:
             return
         from ..engine.cleaning import delete_faces
@@ -5590,7 +5725,8 @@ class MainWindow(QMainWindow):
         self.run_task("Lazo sul modello", self._versioned_edit(
             "model", v, lambda p: delete_faces(self.chunk, mask, keep_selected=keep_selected),
             "Modello modificato con il lazo"),
-            lambda out: (self.log_pane.info(f"Lazo: tolte {_it(out['removed_faces'])} facce, restano {_it(out['faces'])}"),
+            lambda out: (self.log_pane.info(tr("Lazo: tolte {0} facce, restano {1}",
+                                               _it(out['removed_faces']), _it(out['faces']))),
                          self._show_model("model")))
 
     def _set_point_class(self, mask, code: int, label: str | None = None) -> None:
@@ -5663,10 +5799,10 @@ class MainWindow(QMainWindow):
             if not cands:
                 self._warn("Nessuna foto vede quest'area dell'ortofoto.")
                 return
-            intro = (f"Area di {_it(geom.area, 2)} m2. Scegli da quali foto prendere i colori: per esempio una sola "
-                     "foto per alberi, veicoli o persone che l'ortofoto mostra a vortici o tagliati, oppure escludi la "
-                     "foto con un'ombra o un oggetto che si muove. La patch resta nel progetto (layer «Patch "
-                     "ortofoto») e vale anche per le prossime costruzioni dell'ortofoto.")
+            intro = (tr("Area di {0} m2. Scegli da quali foto prendere i colori: per esempio una sola foto per "
+                        "alberi, veicoli o persone che l'ortofoto mostra a vortici o tagliati, oppure escludi la "
+                        "foto con un'ombra o un oggetto che si muove. La patch resta nel progetto (layer «Patch "
+                        "ortofoto») e vale anche per le prossime costruzioni dell'ortofoto.", _it(geom.area, 2)))
             dlg = PatchDialog("Assegna immagini (patch dell'ortofoto)", now, cands, intro, "ortho",
                               texture=False if self._texture_image() is not None else None, parent=self)
             if dlg.exec() == QDialog.DialogCode.Accepted:
@@ -5694,11 +5830,11 @@ class MainWindow(QMainWindow):
 
         def done(result):
             patch, tex = result
-            how = "solo da " if patch["mode"] == "assign" else "senza "
-            where = " sul suolo attorno all'area" if patch.get("surface") == "ground" else ""
-            self.log_pane.info(f"Patch {patch['id']}: colori {how}{', '.join(patch['photos'])}{where}")
+            how = tr("solo da ") if patch["mode"] == "assign" else tr("senza ")
+            where = tr(" sul suolo attorno all'area") if patch.get("surface") == "ground" else ""
+            self.log_pane.info(tr("Patch {0}: colori {1}{2}{3}", patch['id'], how, ', '.join(patch['photos']), where))
             if tex:
-                self.log_pane.info(f"Texture corretta su {_it(tex['faces'])} facce")
+                self.log_pane.info(tr("Texture corretta su {0} facce", _it(tex['faces'])))
             self._reload_ortho(view)
 
         self.run_task("Patch dell'ortofoto", job, done, refresh=False, undo=True)
@@ -5714,7 +5850,7 @@ class MainWindow(QMainWindow):
             self._warn("Costruisci prima l'ortofoto.")
             return
         if not P.changed_patches(ch):
-            self.statusBar().showMessage("L'ortofoto e' gia' aggiornata con le patch", 8000)
+            self.statusBar().showMessage(tr("L'ortofoto e' gia' aggiornata con le patch"), 8000)
             return
         skip = self._photos_to_skip("Aggiorna l'ortofoto")
         if skip is None:
@@ -5730,10 +5866,11 @@ class MainWindow(QMainWindow):
 
         n = len(P.patches(self.chunk))
         if not n:
-            self.statusBar().showMessage("Nessuna patch nell'ortofoto", 8000)
+            self.statusBar().showMessage(tr("Nessuna patch nell'ortofoto"), 8000)
             return
-        if choice(self, "question", "Rimuovi le patch", f"Togliere le {n} patch dell'ortofoto? Le loro aree tornano "
-                  "come senza patch (per un'ortofoto di un altro programma, i suoi pixel originali).",
+        if choice(self, "question", "Rimuovi le patch", tr("Togliere le {0} patch dell'ortofoto? Le loro aree "
+                                                           "tornano come senza patch (per un'ortofoto di un altro "
+                                                           "programma, i suoi pixel originali).", n),
                   ["Rimuovi"]) != 0:
             return
         P.clear_patches(self.chunk)
@@ -5751,9 +5888,9 @@ class MainWindow(QMainWindow):
 
         for patch in P.patches(self.chunk):
             names = ", ".join(short_label(n) for n in patch["photos"][:2]) + (" ..." if len(patch["photos"]) > 2 else "")
-            label = f"{patch['id']}: " + (names if patch["mode"] == "assign" else f"senza {names}")
+            label = f"{patch['id']}: " + (names if patch["mode"] == "assign" else tr("senza {0}", names))
             ground = patch.get("surface") == "ground"
-            v.add_polygon(patch["polygon"], label=label + (" (suolo)" if ground else ""), color="#e84393",
+            v.add_polygon(patch["polygon"], label=label + (tr(" (suolo)") if ground else ""), color="#e84393",
                           fill_alpha=18, layer=PATCH_LAYER,
                           attrs={"patch": patch["id"], "foto": ", ".join(patch["photos"]),
                                  "modalita": "usa solo" if patch["mode"] == "assign" else "escludi",
@@ -5789,7 +5926,7 @@ class MainWindow(QMainWindow):
             p(0.02, "Foto che vedono le facce")
             cands = P.photos_for_faces(ch, faces, limit=12)
             for i, c in enumerate(cands):
-                p(0.1 + 0.85 * i / max(len(cands), 1), f"Facce viste da {c['label']}")
+                p(0.1 + 0.85 * i / max(len(cands), 1), tr("Facce viste da {0}", c['label']))
                 c["preview"] = P.preview_faces(ch, faces, c["label"], max_side=320)
             return cands
 
@@ -5798,15 +5935,15 @@ class MainWindow(QMainWindow):
                 self._warn("Nessuna foto vede queste facce.")
                 return
             dlg = PatchDialog("Assegna immagini alla texture", now, cands,
-                              f"{_it(len(faces))} facce del modello. Scegli le foto da cui prendere i loro colori: ogni "
-                              "faccia prende la migliore di quelle che la vedono.", "faces", parent=self)
+                              tr("{0} facce del modello. Scegli le foto da cui prendere i loro colori: ogni faccia "
+                                 "prende la migliore di quelle che la vedono.", _it(len(faces))), "faces", parent=self)
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return
             v = dlg.values()
             self.history.backup(["model_textured"])
             self.run_task("Texture delle facce", lambda p: ch.patch_texture(v["photos"], faces=faces, mode=v["mode"],
                                                                             progress=p),
-                          lambda r: (self.log_pane.info(f"Texture corretta su {_it(r['faces'])} facce"),
+                          lambda r: (self.log_pane.info(tr("Texture corretta su {0} facce", _it(r['faces']))),
                                      self._show_model("model_textured")), refresh=False)
 
         self.run_task("Foto delle facce", job, done, refresh=False, save=False)
@@ -5821,7 +5958,7 @@ class MainWindow(QMainWindow):
         if self.chunk is not None and versions.active_files(self.chunk, product):
             name = versions.active_info(self.chunk, product)["name"]
             fields.append(Field("keep", "Versione attuale", "keep",
-                                choices=[("keep", f"Conservala per confrontarla ({name})"),
+                                choices=[("keep", tr("Conservala per confrontarla ({0})", name)),
                                          ("overwrite", "Sovrascrivila")]))
         fields.append(Field("version_name", "Nome di questa versione (facoltativo)", "", kind="text"))
         return fields
@@ -5854,10 +5991,10 @@ class MainWindow(QMainWindow):
 
         if chunk is self.chunk and kind == "elevation":
             menu = QMenu(self)
-            menu.addAction(icon("view"), "Mostra", lambda: self.show_elevation(payload))
-            menu.addAction(icon("export"), "Esporta...", lambda: self.export_elevation(payload))
+            menu.addAction(icon("view"), tr("Mostra"), lambda: self.show_elevation(payload))
+            menu.addAction(icon("export"), tr("Esporta..."), lambda: self.export_elevation(payload))
             menu.addSeparator()
-            menu.addAction(icon("delete"), "Elimina", lambda: self.delete_elevation(payload))
+            menu.addAction(icon("delete"), tr("Elimina"), lambda: self.delete_elevation(payload))
             menu.exec(pos)
             return
         if chunk is not self.chunk or kind not in ("product", "version"):
@@ -5867,20 +6004,20 @@ class MainWindow(QMainWindow):
             return
         menu = QMenu(self)
         if vid is None:
-            menu.addAction(icon("view"), "Mostra", lambda: self._workspace_item("product", chunk, product))
-            menu.addAction(icon("recent"), "Conserva una copia come versione",
+            menu.addAction(icon("view"), tr("Mostra"), lambda: self._workspace_item("product", chunk, product))
+            menu.addAction(icon("recent"), tr("Conserva una copia come versione"),
                            lambda: self.keep_version_copy(product))
-            menu.addAction(icon("edit"), "Rinomina questa versione...", lambda: self.rename_version(product, None))
+            menu.addAction(icon("edit"), tr("Rinomina questa versione..."), lambda: self.rename_version(product, None))
         else:
-            menu.addAction(icon("view"), "Mostra", lambda: self.show_version(product, vid))
-            menu.addAction(icon("ok"), "Rendi attiva (la usano gli altri strumenti)",
+            menu.addAction(icon("view"), tr("Mostra"), lambda: self.show_version(product, vid))
+            menu.addAction(icon("ok"), tr("Rendi attiva (la usano gli altri strumenti)"),
                            lambda: self.activate_version(product, vid))
             if product == "dem" and chunk.dem_path:
-                menu.addAction(icon("dem"), "Differenza con il DEM attivo", lambda: self.dem_difference(vid))
-            menu.addAction(icon("export"), "Esporta...", lambda: self.export_version(product, vid))
-            menu.addAction(icon("edit"), "Rinomina...", lambda: self.rename_version(product, vid))
+                menu.addAction(icon("dem"), tr("Differenza con il DEM attivo"), lambda: self.dem_difference(vid))
+            menu.addAction(icon("export"), tr("Esporta..."), lambda: self.export_version(product, vid))
+            menu.addAction(icon("edit"), tr("Rinomina..."), lambda: self.rename_version(product, vid))
             menu.addSeparator()
-            menu.addAction(icon("delete"), "Elimina", lambda: self.delete_version(product, vid))
+            menu.addAction(icon("delete"), tr("Elimina"), lambda: self.delete_version(product, vid))
         menu.exec(pos)
 
     def _version_title(self, product: str, vid: str) -> str:
@@ -5902,8 +6039,8 @@ class MainWindow(QMainWindow):
         else:
             self.model_view.show_version(product, path, title)
             self.show_view(self.model_view)
-        self.statusBar().showMessage(f"Versione «{title}» (non attiva): doppio clic sul prodotto nell'area di lavoro "
-                                     "per tornare a quella attiva", 15000)
+        self.statusBar().showMessage(tr("Versione «{0}» (non attiva): doppio clic sul prodotto nell'area di lavoro "
+                                        "per tornare a quella attiva", title), 15000)
 
     def keep_version_copy(self, product: str) -> None:
         """Keep a copy of the active version (e.g. before classifying the cloud again)."""
@@ -5911,7 +6048,7 @@ class MainWindow(QMainWindow):
 
         chunk = self.chunk
         self.run_task("Copia della versione", lambda p: versions.keep_active(chunk, product),
-                      lambda e: self.log_pane.info(f"Conservata una copia: «{e['name']}»") if e else None)
+                      lambda e: self.log_pane.info(tr("Conservata una copia: «{0}»", e['name'])) if e else None)
 
     def activate_version(self, product: str, vid: str) -> None:
         from ..core import versions
@@ -5920,7 +6057,7 @@ class MainWindow(QMainWindow):
         title = self._version_title(product, vid)
 
         def done(_previous):
-            self.log_pane.info(f"Versione attiva: «{title}»")
+            self.log_pane.info(tr("Versione attiva: «{0}»", title))
             if product in ("dem", "orthomosaic"):
                 self._show_raster("dem" if product == "dem" else "ortho")
             else:
@@ -5933,7 +6070,7 @@ class MainWindow(QMainWindow):
         from ..core import versions
 
         old = versions.active_info(self.chunk, product)["name"] if vid is None else self._version_title(product, vid)
-        name, ok = QInputDialog.getText(self, "Rinomina versione", "Nome:", text=old)
+        name, ok = QInputDialog.getText(self, tr("Rinomina versione"), tr("Nome:"), text=old)
         if ok and name.strip():
             versions.rename(self.chunk, product, vid, name.strip())
             self._dirty(True)
@@ -5943,7 +6080,7 @@ class MainWindow(QMainWindow):
         from ..core import versions
 
         title = self._version_title(product, vid)
-        r = message(self, "question", "Elimina versione", f"Eliminare la versione «{title}» e i suoi file?",
+        r = message(self, "question", "Elimina versione", tr("Eliminare la versione «{0}» e i suoi file?", title),
                     buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if r != QMessageBox.StandardButton.Yes:
             return
@@ -5953,7 +6090,7 @@ class MainWindow(QMainWindow):
         versions.delete(self.chunk, product, vid)
         self._dirty(True)
         self.workspace.populate(self.doc)
-        self.log_pane.info(f"Versione «{title}» eliminata")
+        self.log_pane.info(tr("Versione «{0}» eliminata", title))
 
     def export_version(self, product: str, vid: str) -> None:
         import shutil
@@ -5961,11 +6098,11 @@ class MainWindow(QMainWindow):
         from ..core import versions
 
         src = versions.version_file(self.chunk, product, vid)
-        path, _ = QFileDialog.getSaveFileName(self, "Esporta versione", str(Path(self._last_dir()) / src.name),
+        path, _ = QFileDialog.getSaveFileName(self, tr("Esporta versione"), str(Path(self._last_dir()) / src.name),
                                               f"*{src.suffix}")
         if path:
             shutil.copy2(src, path)
-            self.log_pane.info(f"Versione «{self._version_title(product, vid)}» esportata in {path}")
+            self.log_pane.info(tr("Versione «{0}» esportata in {1}", self._version_title(product, vid), path))
 
     def dem_difference(self, vid: str) -> None:
         """Active DEM minus a kept one, shown with diverging colours (e.g. surface minus terrain =
@@ -5982,11 +6119,11 @@ class MainWindow(QMainWindow):
             self._load_raster("diff", path)
             lim = getattr(self.ortho_view, "diff_limit", 0.0)
             self.show_view(self.ortho_view)
-            text = (f"Differenza «{active}» - «{title}»: rosso dove l'attivo e' piu' alto, blu dove e' piu' basso "
-                    f"(colori pieni a +/-{lim:.2f} m); dZ sotto il cursore")
+            text = (tr("Differenza «{0}» - «{1}»: rosso dove l'attivo e' piu' alto, blu dove e' piu' basso (colori "
+                       "pieni a +/-{2:.2f} m); dZ sotto il cursore", active, title, lim))
             if r1 and r2 and abs(r1 - r2) > 1e-6 * max(r1, r2):
-                text += (f". Attenzione: risoluzioni diverse ({r1:.3g} e {r2:.3g} m), i bordi ripidi risultano diversi; "
-                         "per un confronto pulito usa la stessa risoluzione")
+                text += (tr(". Attenzione: risoluzioni diverse ({0:.3g} e {1:.3g} m), i bordi ripidi risultano "
+                            "diversi; per un confronto pulito usa la stessa risoluzione", r1, r2))
             self.log_pane.info(text)
             self.statusBar().showMessage(text, 30000)
 
@@ -6014,7 +6151,8 @@ class MainWindow(QMainWindow):
         counts = self._class_counts
         labels = self.chunk.meta.get("classes", {})
         codes = [c for c in sorted(counts) if noise or c not in NOISE_CLASSES]
-        return [(c, f"{c} {class_name(c, labels)} ({counts[c]:,} punti)".replace(",", ".")) for c in codes], codes
+        return [(c, thousands_points(tr("{0} {1} ({2:,} "
+                                        "punti)", c, class_name(c, labels), counts[c]))) for c in codes], codes
 
     def _class_fields(self, label: str) -> list:
         """A checklist of the classes of the dense cloud (all ticked), when it has more than one."""
@@ -6062,7 +6200,8 @@ class MainWindow(QMainWindow):
             f = lambda x: "" if x is None else round(x, 3)  # noqa: E731
             table = [[r["name"], r["code"], r["points"], round(r["area_m2"], 3), f(r["z_min"]), f(r["z_mean"]),
                       f(r["z_max"])] for r in rows]
-            self.log_pane.info("Classi dalle US: " + ", ".join(f"{r['name']} = {r['code']} ({r['points']} punti)"
+            self.log_pane.info(tr("Classi dalle US: ") + ", ".join(tr("{0} = {1} ({2} punti)",
+                                                                  r['name'], r['code'], r['points'])
                                                                for r in rows))
             TableDialog("Classi dalle US", ["US", "Classe", "Punti", "Area (m²)", "Quota min", "Quota media",
                                             "Quota max"], table, self,
@@ -6098,36 +6237,38 @@ class MainWindow(QMainWindow):
         return self.classifier
 
     def _classifier_report(self, model) -> str:
-        """What the classifier learnt, in Italian: method, radii, accuracy, figures per class."""
+        """What the classifier learnt: method, radii, accuracy, figures per class."""
         from .scene import class_name
 
         st = model.stats or {}
         labels = self.chunk.meta.get("classes", {}) if self.chunk is not None else {}
-        num = lambda n: f"{int(n):,}".replace(",", ".")  # noqa: E731
+        num = lambda n: thousands_points(f"{int(n):,}")  # noqa: E731
         method = "Random forest" if model.method == "random_forest" else "Gradient boosting"
-        lines = [f"{method}: {len(model.feature_names)} caratteristiche per punto, raggi "
+        lines = [tr("{0}: {1} caratteristiche per punto, raggi ", method, len(model.feature_names))
                  + " / ".join(f"{r:.3g}" for r in model.scales) + " m."]
         acc = st.get("validation_accuracy")
         if st:
-            check = "sui campioni esclusi da ogni albero" if st.get("validation") == "out-of-bag" else \
-                "su un quinto dei campioni tenuto da parte"
-            lines.append(f"Addestrato su {num(st.get('n_samples', 0))} campioni ({num(st.get('n_labelled_points', 0))} "
-                         "punti con la classe nota)" + ("" if acc is None else f"; accuratezza {check}: {acc:.1%}."))
+            check = tr("sui campioni esclusi da ogni albero") if st.get("validation") == "out-of-bag" else \
+                tr("su un quinto dei campioni tenuto da parte")
+            lines.append(tr("Addestrato su {0} campioni ({1} punti con la classe nota)",
+                            num(st.get('n_samples', 0)), num(st.get('n_labelled_points', 0)))
+                         + ("" if acc is None else tr("; accuratezza {0}: {1:.1%}.", check, acc)))
         for c in model.classes:
             fig = st.get("per_class", {}).get(str(c), {})
             name = class_name(c, labels)
-            if name == f"Classe {c}" and model.class_names.get(c, f"Class {c}") != f"Class {c}":
+            if name == tr("Classe {0}", c) and model.class_names.get(c, f"Class {c}") != f"Class {c}":
                 name = model.class_names[c]  # named in the project where the classifier was trained
             pr, rc = fig.get("precision"), fig.get("recall")
-            lines.append(f"  {c} {name}: {num(fig.get('samples', 0))} campioni"
-                         + ("" if pr is None else f", precisione {pr:.1%}") + ("" if rc is None else f", richiamo {rc:.1%}"))
+            lines.append(tr("  {0} {1}: {2} campioni", c, name, num(fig.get('samples', 0)))
+                         + ("" if pr is None else tr(", precisione {0:.1%}", pr))
+                         + ("" if rc is None else tr(", richiamo {0:.1%}", rc)))
         return "\n".join(lines)
 
     def _log_classes(self, pc) -> None:
         from ..ai.classify import class_statistics
 
         st = class_statistics(pc)
-        self.log_pane.info("Classi: " + ", ".join(f"{k}: {n}" for k, n in sorted(st.items())))
+        self.log_pane.info(tr("Classi: ") + ", ".join(f"{k}: {n}" for k, n in sorted(st.items())))
 
     def train_classifier(self) -> None:
         """Learn the classes from the points corrected by hand, then classify the rest."""
@@ -6140,20 +6281,20 @@ class MainWindow(QMainWindow):
         manual = pc.manual if pc.manual is not None else np.zeros(len(pc), bool)
         by_hand = sorted(int(c) for c in np.unique(pc.classification[manual])) if manual.any() else []
         classified = sorted(int(c) for c in np.unique(pc.classification) if c > 1)
-        names = lambda codes: ", ".join(f"{c} {class_name(c, labels)}" for c in codes) or "nessuna"  # noqa: E731
+        names = lambda codes: ", ".join(f"{c} {class_name(c, labels)}" for c in codes) or tr("nessuna")  # noqa: E731
         v = ParamDialog.ask(self, "Addestra il classificatore", [
             Field("labels", "Impara da", "manual" if len(by_hand) >= 2 else "all",
-                  choices=[("manual", f"Punti corretti a mano ({int(manual.sum()):,} punti)".replace(",", ".")),
+                  choices=[("manual", thousands_points(tr("Punti corretti a mano ({0:,} punti)", int(manual.sum())))),
                            ("all", "Tutti i punti con una classe (sopra 1)")]),
             Field("method", "Metodo", "random_forest",
                   choices=[("random_forest", "Random forest (consigliato)"),
                            ("gradient_boosting", "Gradient boosting (file piu' piccolo)")]),
             Field("trees", "Alberi (o iterazioni)", 100, minimum=10, maximum=1000),
             Field("apply", "Poi classifica il resto della nuvola", True)],
-            intro="Il classificatore impara dai punti di cui conosci la classe: con il lazo (vista 3D) assegna la "
-                  "classe giusta ad alcuni gruppi di punti di ogni tipo (almeno due classi), poi addestralo. Usa la "
-                  "geometria attorno a ogni punto a tre scale, l'altezza sul terreno e il colore.\n\n"
-                  f"Classi corrette a mano: {names(by_hand)}.\nClassi presenti: {names(classified)}.")
+            intro=tr("Il classificatore impara dai punti di cui conosci la classe: con il lazo (vista 3D) assegna la "
+                     "classe giusta ad alcuni gruppi di punti di ogni tipo (almeno due classi), poi addestralo. Usa "
+                     "la geometria attorno a ogni punto a tre scale, l'altezza sul terreno e il colore.\n\nClassi "
+                     "corrette a mano: {0}.\nClassi presenti: {1}.", names(by_hand), names(classified)))
         if not v:
             return
         if len(by_hand if v["labels"] == "manual" else classified) < 2:
@@ -6180,8 +6321,10 @@ class MainWindow(QMainWindow):
             if result is not None:
                 self._log_classes(result[0])
                 self.show_classes()
-            self._info("Classificatore addestrato", self._classifier_report(model) + "\n\nSalvato nel progetto; "
-                       "con «Salva il classificatore» si usa anche in altri scavi.")
+            self._info("Classificatore addestrato", self._classifier_report(model) + tr("\n\nSalvato nel progetto; "
+                                                                                        "con «Salva il "
+                                                                                        "classificatore» si usa anche "
+                                                                                        "in altri scavi."))
 
         self.run_task("Addestramento del classificatore", job, done)
 
@@ -6207,7 +6350,7 @@ class MainWindow(QMainWindow):
             Field("min_confidence", "Confidenza minima (sotto resta 1, non classificato)", 0.0, minimum=0.0,
                   maximum=0.99, decimals=2),
             Field("overwrite", "Riclassifica anche i punti corretti a mano", False)],
-            intro="Classi del classificatore: " + ", ".join(f"{c} {model.class_names.get(c) or class_name(c)}"
+            intro=tr("Classi del classificatore: ") + ", ".join(f"{c} {model.class_names.get(c) or class_name(c)}"
                                                              for c in model.classes) + ".")
         if not v:
             return
@@ -6225,8 +6368,8 @@ class MainWindow(QMainWindow):
                       done)
 
     def load_classifier(self) -> bool:
-        path, _ = QFileDialog.getOpenFileName(self, "Carica classificatore", self._last_dir(),
-                                              "Classificatori (*.ppgclf)")
+        path, _ = QFileDialog.getOpenFileName(self, tr("Carica classificatore"), self._last_dir(),
+                                              tr("Classificatori (*.ppgclf)"))
         if not path or not self._need_sklearn():
             return False
         from ..ai.learn import ClassifierModel
@@ -6236,7 +6379,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._exc("Classificatore non leggibile", exc)
             return False
-        self.log_pane.info(f"Classificatore caricato da {path}\n{self._classifier_report(self.classifier)}")
+        self.log_pane.info(tr("Classificatore caricato da {0}\n{1}", path, self._classifier_report(self.classifier)))
         return True
 
     def save_classifier(self) -> None:
@@ -6248,10 +6391,11 @@ class MainWindow(QMainWindow):
         if model is None:
             self._warn("Nessun classificatore: addestralo prima (Classificazione della nuvola > Addestra).")
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Salva classificatore", self._last_dir() + "/classificatore.ppgclf",
-                                              "Classificatori (*.ppgclf)")
+        path, _ = QFileDialog.getSaveFileName(self, tr("Salva classificatore"),
+                                              self._last_dir() + "/classificatore.ppgclf",
+                                              tr("Classificatori (*.ppgclf)"))
         if path:
-            self.log_pane.info(f"Classificatore salvato in {model.save(path)}")
+            self.log_pane.info(tr("Classificatore salvato in {0}", model.save(path)))
 
     def clear_manual_labels(self) -> None:
         if not self._need_chunk(product="point_cloud"):
@@ -6266,7 +6410,7 @@ class MainWindow(QMainWindow):
         if self.history is not None:
             self.history.backup(["point_cloud"])
         n = clear_manual(self.chunk)
-        self.log_pane.info(f"Correzioni a mano dimenticate su {n} punti (le classi restano)")
+        self.log_pane.info(tr("Correzioni a mano dimenticate su {0} punti (le classi restano)", n))
         self._dirty(True)
 
     def _segmenter(self):
@@ -6302,7 +6446,7 @@ class MainWindow(QMainWindow):
         def done(env):
             self.sam = None
             device = sam_env.DEVICE_NAMES.get(sam_env.installed_device(env) or "cpu")
-            self._info("Segment Anything 2.1", f"SAM 2.1 installato in {env}.\n\nCalcolo su: {device}.")
+            self._info("Segment Anything 2.1", tr("SAM 2.1 installato in {0}.\n\nCalcolo su: {1}.", env, device))
             if then is not None:
                 then()
 
@@ -6334,11 +6478,11 @@ class MainWindow(QMainWindow):
         self.sam = None
 
     def _sam_hint(self) -> str:
-        edit = " Maiusc+clic aggiunge una parte, clic destro la toglie; Invio salva, Esc annulla."
-        return {"tap": "SAM, tocco: clic sull'oggetto. SAM guarda l'area visibile: avvicinati per i dettagli, "
-                       "allontanati per gli oggetti grandi." + edit,
-                "box": "SAM, riquadro: trascina un riquadro attorno all'oggetto." + edit,
-                "area": "SAM, area: trascina un riquadro; SAM cerca tutte le unita' al suo interno."}.get(
+        edit = tr(" Maiusc+clic aggiunge una parte, clic destro la toglie; Invio salva, Esc annulla.")
+        return {"tap": tr("SAM, tocco: clic sull'oggetto. SAM guarda l'area visibile: avvicinati per i dettagli, "
+                          "allontanati per gli oggetti grandi.") + edit,
+                "box": tr("SAM, riquadro: trascina un riquadro attorno all'oggetto.") + edit,
+                "area": tr("SAM, area: trascina un riquadro; SAM cerca tutte le unita' al suo interno.")}.get(
             self.ortho_view.sam_tool, "")
 
     def _sam_cancel(self) -> None:
@@ -6401,8 +6545,8 @@ class MainWindow(QMainWindow):
 
         def done(unit):
             if unit.geometry.is_empty:
-                self.statusBar().showMessage("SAM non ha trovato un oggetto qui: prova un altro punto o cambia lo "
-                                             "zoom", 10000)
+                self.statusBar().showMessage(tr("SAM non ha trovato un oggetto qui: prova un altro punto o cambia lo "
+                                                "zoom"), 10000)
                 if ask:
                     self._sam_cancel()
                 return
@@ -6411,18 +6555,18 @@ class MainWindow(QMainWindow):
             if ask:
                 self._sam_accept()
             else:
-                self.statusBar().showMessage(f"Maschera aggiornata ({unit.geometry.area:.3f} m2): Invio per salvare, "
-                                             "Esc per annullare", 15000)
+                self.statusBar().showMessage(tr("Maschera aggiornata ({0:.3f} m2): Invio per salvare, Esc per "
+                                                "annullare", unit.geometry.area), 15000)
 
         if not self.runner.run("SAM 2.1", job, done, self._error, quiet=True):
-            self.statusBar().showMessage("SAM sta ancora lavorando: attendi il risultato", 5000)
+            self.statusBar().showMessage(tr("SAM sta ancora lavorando: attendi il risultato"), 5000)
 
     def _sam_key(self, key: str) -> None:
         if key == "accept" and self._sam_obj is not None and self._sam_obj.get("geom") is not None:
             self._sam_accept()
         elif key == "cancel":
             self._sam_cancel()
-            self.statusBar().showMessage("Maschera di SAM annullata", 5000)
+            self.statusBar().showMessage(tr("Maschera di SAM annullata"), 5000)
 
     def _sam_accept(self) -> None:
         obj = self._sam_obj
@@ -6433,8 +6577,8 @@ class MainWindow(QMainWindow):
             self._sam_cancel()
             self._add_unit(self._make_unit(obj["geom"], v))
         elif r == UnitDialog.REFINE:
-            self.statusBar().showMessage("Correggi la maschera: Maiusc+clic aggiunge, clic destro toglie; "
-                                         "Invio per salvare, Esc per annullare", 30000)
+            self.statusBar().showMessage(tr("Correggi la maschera: Maiusc+clic aggiunge, clic destro toglie; "
+                                            "Invio per salvare, Esc per annullare"), 30000)
         else:
             self._sam_cancel()
 
@@ -6456,8 +6600,8 @@ class MainWindow(QMainWindow):
                     self.units.append(u)
                     self._draw_unit(u, len(self.units) - 1)
             self._dirty(True)
-            self.statusBar().showMessage(f"{len(units)} unita' candidate nel layer «Unita' da SAM»: assegna le US "
-                                         "(pannello Layer) prima di pubblicarle", 20000)
+            self.statusBar().showMessage(tr("{0} unita' candidate nel layer «Unita' da SAM»: assegna le US (pannello "
+                                            "Layer) prima di pubblicarle", len(units)), 20000)
             self.log_pane.info(f"SAM: {len(units)} unita' candidate")
             self._show_pane(self.left_tabs, self.layers_pane)
 
@@ -6488,10 +6632,11 @@ class MainWindow(QMainWindow):
             Field("min_area", "Area minima di un'unita' (m2)", round(max(0.01, (12 * suggested) ** 2), 3),
                   minimum=0.0001, maximum=10000.0, decimals=4),
             Field("exclusive", "Unita' non sovrapposte (le piccole ritagliano le grandi)", True)],
-            intro=f"L'ortofoto ({side:.0f} m di lato, pixel di {native * 100:.1f} cm) viene esaminata a tasselli di 1024 "
-                  f"pixel che si sovrappongono: alla risoluzione proposta sono circa {tiles(suggested)} tasselli. "
-                  "Con la GPU del Mac (MPS) un tassello richiede circa 10 s in scansione normale, 40-90 s in alta o "
-                  "massima. Le unita' trovate vanno nel layer «Unita' da SAM», senza numero di US.")
+            intro=tr("L'ortofoto ({0:.0f} m di lato, pixel di {1:.1f} cm) viene esaminata a tasselli di 1024 pixel "
+                     "che si sovrappongono: alla risoluzione proposta sono circa {2} tasselli. Con la GPU del Mac "
+                     "(MPS) un tassello richiede circa 10 s in scansione normale, 40-90 s in alta o massima. Le "
+                     "unita' trovate vanno nel layer «Unita' da SAM», senza numero di US.",
+                     side, native * 100, tiles(suggested)))
         if not v:
             return
         self._ensure_site("Le US trovate da SAM appartengono a un sito: sceglilo una volta per il progetto.")
@@ -6502,7 +6647,7 @@ class MainWindow(QMainWindow):
         if not self.photo_view.sam_mode and not self._sam_available(then=self.toggle_photo_sam):
             return
         self.photo_view.sam_mode = not self.photo_view.sam_mode
-        self.statusBar().showMessage("Prompt SAM sulle foto " + ("attivi: clic sinistro sull'oggetto"
+        self.statusBar().showMessage(tr("Prompt SAM sulle foto ") + (tr("attivi: clic sinistro sull'oggetto")
                                                                 if self.photo_view.sam_mode else "disattivati"), 10000)
 
     def _photo_sam_prompt(self, camera, x, y, label) -> None:
@@ -6524,14 +6669,15 @@ class MainWindow(QMainWindow):
         sites = self.pa_pane.site_names() if self.pa is not None else []
         choices = []
         if self.chunk.meta.get("proxies"):
-            choices.append(("proxies", f"Proxy solidi delle US ({len(self.chunk.meta['proxies'])}): volumi e quantita' "
-                                       "per il computo"))
+            choices.append(("proxies", tr("Proxy solidi delle US ({0}): volumi e quantita' per il computo",
+                                          len(self.chunk.meta['proxies']))))
         if drawn:
-            choices.append(("drawn", f"Unita' disegnate in questo progetto ({len(drawn)})"))
-        choices += [("pa:" + s, f"Poligoni US da PyArchInit - {s}") for s in sites]
+            choices.append(("drawn", tr("Unita' disegnate in questo progetto ({0})", len(drawn))))
+        choices += [("pa:" + s, tr("Poligoni US da PyArchInit - {0}", s)) for s in sites]
         choices.append(("none", "Solo il modello del rilievo (un elemento)"))
         v = ParamDialog.ask(self, "Esporta IFC (BIM)", [
-            Field("path", "File IFC", str(Path(self._last_dir()) / "rilievo.ifc"), kind="file_save", filter="IFC (*.ifc)"),
+            Field("path", "File IFC", str(Path(self._last_dir()) / "rilievo.ifc"), kind="file_save",
+                  filter="IFC (*.ifc)"),
             Field("units", "Elementi per unita' stratigrafica", choices[0][0], choices=choices),
             Field("survey", "Includi anche il modello intero", True)],
             intro="Il modello viene tagliato in pianta con i poligoni delle US: ogni US diventa un IfcGeographicElement "
@@ -6568,7 +6714,7 @@ class MainWindow(QMainWindow):
                     site = sites[0]
             elif choice.startswith("pa:"):
                 site = choice[3:]
-                p(0.02, f"Lettura dei poligoni US di {site}")
+                p(0.02, tr("Lettura dei poligoni US di {0}", site))
                 units = self.pa.us_polygons(site, crs=self.chunk.crs if self.chunk else None)
             if self.pa is not None and site:
                 try:
@@ -6582,7 +6728,7 @@ class MainWindow(QMainWindow):
 
         def done(r):
             out, elements, n_units = r
-            self.log_pane.info(f"IFC salvato in {out}: {len(elements)} elementi")
+            self.log_pane.info(tr("IFC salvato in {0}: {1} elementi", out, len(elements)))
             if n_units and len(elements) <= (1 if v["survey"] else 0):
                 self._warn("Nessuna US interseca il modello: controlla che i poligoni stiano sull'area rilevata "
                            "e nello stesso sistema di riferimento.")
@@ -6591,12 +6737,12 @@ class MainWindow(QMainWindow):
         self.run_task("Esportazione IFC", job, done, refresh=False, save=False)
 
     def run_script(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Script Python", self._last_dir(), "Python (*.py)")
+        path, _ = QFileDialog.getOpenFileName(self, tr("Script Python"), self._last_dir(), "Python (*.py)")
         if not path:
             return
         src = Path(path).read_text(encoding="utf-8")
         self._show_pane(self.bottom_tabs, self.console)
-        self.console.write(f"# esecuzione di {path}\n")
+        self.console.write(tr("# esecuzione di {0}\n", path))
         ns = self._namespace()
         ns["__name__"] = "__main__"
         ns["__file__"] = path
@@ -6647,9 +6793,10 @@ class MainWindow(QMainWindow):
             except Exception:
                 missing = []
             if missing:
-                self.log_pane.warning(f"La scheda US di questo database e' ridotta: mancano {len(missing)} campi di "
-                                      "PyArchInit 5" + (", tra cui i rapporti" if "rapporti" in missing else "")
-                                      + ". PyArchInit > Aggiorna struttura del database li aggiunge.")
+                self.log_pane.warning(tr("La scheda US di questo database e' ridotta: mancano {0} campi di "
+                                         "PyArchInit 5",
+                                         len(missing)) + (tr(", tra cui i rapporti") if "rapporti" in missing else "")
+                                      + tr(". PyArchInit > Aggiorna struttura del database li aggiunge."))
 
         def failed(summary, details):
             self.pa_pane.set_disconnected("Non connesso")
@@ -6674,11 +6821,11 @@ class MainWindow(QMainWindow):
             return
         sqlite = self.pa.db.sqlite_path is not None
         r = message(self, "question", "Aggiorna struttura del database",
-                    f"Alla tabella us_table mancano {len(missing)} campi della scheda US di PyArchInit 5"
-                    + (", tra cui i rapporti stratigrafici" if "rapporti" in missing else "") + ".\n\n"
-                    + "Aggiungerli? I record esistenti non vengono modificati."
-                    + ("\nPrima viene fatta una copia di sicurezza del file." if sqlite
-                       else "\nSu PostgreSQL fai prima un backup del database."),
+                    tr("Alla tabella us_table mancano {0} campi della scheda US di PyArchInit 5", len(missing))
+                    + (tr(", tra cui i rapporti stratigrafici") if "rapporti" in missing else "") + ".\n\n"
+                    + tr("Aggiungerli? I record esistenti non vengono modificati.")
+                    + (tr("\nPrima viene fatta una copia di sicurezza del file.") if sqlite
+                       else tr("\nSu PostgreSQL fai prima un backup del database.")),
                     buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     default=QMessageBox.StandardButton.No)
         if r != QMessageBox.StandardButton.Yes:
@@ -6686,9 +6833,9 @@ class MainWindow(QMainWindow):
 
         def done(res):
             self.pa_pane.refresh()
-            text = f"Aggiunti {len(res['added'])} campi alla scheda US."
+            text = tr("Aggiunti {0} campi alla scheda US.", len(res['added']))
             if res.get("backup"):
-                text += f"\nCopia di sicurezza: {res['backup']}"
+                text += tr("\nCopia di sicurezza: {0}", res['backup'])
             self._info("PyArchInit", text)
 
         self.run_task("Aggiornamento della struttura PyArchInit", lambda p: self.pa.upgrade_us_table(), done,
@@ -6720,8 +6867,8 @@ class MainWindow(QMainWindow):
         db = home / "pyarchinit_DB_folder" / "demo.sqlite"
         if in_pyarchinit:
             self.pyarchinit_connect(url=str(db))
-            self.log_pane.info(f"Database demo in {db}: per vederlo in QGIS seleziona demo.sqlite nelle "
-                               "impostazioni di PyArchInit")
+            self.log_pane.info(tr("Database demo in {0}: per vederlo in QGIS seleziona demo.sqlite nelle "
+                                  "impostazioni di PyArchInit", db))
         else:
             self.pyarchinit_connect(config=cfg)
 
@@ -6737,7 +6884,7 @@ class MainWindow(QMainWindow):
             self._exc("Creazione del sito non riuscita", exc)
             return
         self.pa_pane.refresh()
-        self.log_pane.info(f"Sito creato in PyArchInit: {dlg.values()['sito']}")
+        self.log_pane.info(tr("Sito creato in PyArchInit: {0}", dlg.values()['sito']))
 
     def _need_pa(self) -> bool:
         if self.pa is None:
@@ -6767,12 +6914,12 @@ class MainWindow(QMainWindow):
                 out["dem"] = self.pa.publish_dem(self.chunk, v["sito"], v["nome_doc"] + " DEM", **kw)
             if v["model"]:
                 p(0.7, "Modello 3D")
-                out["modello"] = self.pa.publish_model(self.chunk, v["sito"], v["nome_doc"] + " modello", **kw)
+                out["modello"] = self.pa.publish_model(self.chunk, v["sito"], v["nome_doc"] + tr(" modello"), **kw)
             return out
 
         def done(out):
             self.pa_pane.refresh()
-            self._info("PyArchInit", "Pubblicato:\n" + json.dumps(out, indent=1, default=str))
+            self._info("PyArchInit", tr("Pubblicato:\n") + json.dumps(out, indent=1, default=str))
 
         self.run_task("Pubblicazione in PyArchInit", job, done, refresh=False, save=False)
 
@@ -6799,8 +6946,9 @@ class MainWindow(QMainWindow):
         elif what == "quote":
             units = []
         if not units and not quote:
-            self._warn("Niente da pubblicare: disegna (o segmenta con SAM) delle unita' con il numero di US, o delle "
-                       "quote" + (f" ({no_us} unita' sono ancora senza US)" if no_us else "") + ".")
+            self._warn(tr("Niente da pubblicare: disegna (o segmenta con SAM) delle unita' con il numero di US, o "
+                          "delle "
+                          "quote") + (tr(" ({0} unita' sono ancora senza US)", no_us) if no_us else "") + ".")
             return
         crs = self.chunk.crs
 
@@ -6820,8 +6968,11 @@ class MainWindow(QMainWindow):
             self._redraw_overlays()
             self._dirty(True)
             self.pa_pane.refresh()
-            self._info("PyArchInit", f"Sito {site}: {len(gu)} poligoni scritti in pyunitastratigrafiche, {len(gq)} quote "
-                       "in pyarchinit_quote." + (f"\n{no_us} unita' senza numero di US non sono state pubblicate."
+            self._info("PyArchInit", tr("Sito {0}: {1} poligoni scritti in pyunitastratigrafiche, {2} quote in "
+                                        "pyarchinit_quote.", site, len(gu), len(gq)) + (tr("\n{0} unita' senza numero "
+                                                                                           "di US non sono state "
+                                                                                           "pubblicate.",
+                                                    no_us)
                                                  if no_us and units else ""))
 
         self.run_task("Pubblicazione in PyArchInit", job, done, refresh=False, save=False)
@@ -6851,7 +7002,7 @@ class MainWindow(QMainWindow):
                 self._draw_unit(u, len(self.units) - 1, layer=f"US da PyArchInit - {site}")
         self.show_view(self.ortho_view)
         self._show_pane(self.left_tabs, self.layers_pane)
-        self.statusBar().showMessage(f"{len(polys)} poligoni US caricati dal sito {site}", 10000)
+        self.statusBar().showMessage(tr("{0} poligoni US caricati dal sito {1}", len(polys), site), 10000)
 
 
 class DoctorDialog(QDialog):
@@ -6861,13 +7012,13 @@ class DoctorDialog(QDialog):
         super().__init__(parent)
         from ..doctor import run_checks
 
-        self.setWindowTitle("Diagnostica ambiente")
+        self.setWindowTitle(tr("Diagnostica ambiente"))
         self.resize(760, 560)
         lay = QVBoxLayout(self)
         self.report = run_checks(gui=True)
-        head = QLabel(("Nessun problema bloccante." if not self.report.failures else
-                       f"{len(self.report.failures)} problemi impediscono il funzionamento.")
-                      + (f"  {len(self.report.warnings)} avvisi." if self.report.warnings else ""))
+        head = QLabel((tr("Nessun problema bloccante.") if not self.report.failures else
+                       tr("{0} problemi impediscono il funzionamento.", len(self.report.failures)))
+                      + (tr("  {0} avvisi.", len(self.report.warnings)) if self.report.warnings else ""))
         head.setObjectName("errorSummary")
         lay.addWidget(head)
         self.box = QPlainTextEdit(self.report.text())
@@ -6875,7 +7026,7 @@ class DoctorDialog(QDialog):
         self.box.setReadOnly(True)
         lay.addWidget(self.box, 1)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        b_copy = QPushButton(icon("copy"), "Copia")
+        b_copy = QPushButton(icon("copy"), tr("Copia"))
         b_copy.clicked.connect(lambda: QApplication.clipboard().setText(self.report.text()))
         bb.addButton(b_copy, QDialogButtonBox.ButtonRole.ActionRole)
         bb.rejected.connect(self.reject)

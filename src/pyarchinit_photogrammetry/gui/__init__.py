@@ -13,6 +13,8 @@ from __future__ import annotations
 import os
 import sys
 
+from .i18n import tr
+
 APP_TITLE = "PyArchInit Photogrammetry"
 
 
@@ -49,9 +51,9 @@ def install_translations(qapp) -> bool:
     path = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
     ok = False
     for name in ("qtbase_it", "qt_it"):
-        tr = QTranslator(qapp)
-        if tr.load(name, path):
-            qapp.installTranslator(tr)
+        translator = QTranslator(qapp)
+        if translator.load(name, path):
+            qapp.installTranslator(translator)
             ok = True
             break
     return ok
@@ -116,22 +118,25 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
     qapp.setApplicationDisplayName(APP_TITLE)
     qapp.setOrganizationName("pyarchinit")
     qapp.setWindowIcon(app_icon())
-    install_translations(qapp)
+    from . import i18n
+
+    if not i18n.install(qapp):  # Italian: Qt's own buttons and dialogs in Italian too
+        install_translations(qapp)
     settings = app_settings()
     theme.apply(qapp, str(settings.value("theme", "light")))
     splash = splash if splash is not None else _splash()
     step = splash.step if splash is not None else (lambda *_a, **_k: None)
-    step(84, "Finestra principale")
+    step(84, tr("Finestra principale"))
     from .main_window import MainWindow
 
     project = next((a for a in argv if a.endswith(".ppg")), None)
     open_error = None
     if project:
-        step(88, f"Apertura di {os.path.basename(project)}")
+        step(88, tr("Apertura di {0}", os.path.basename(project)))
         try:
             application.document = Document.open(project)
         except Exception as exc:
-            open_error = f"Impossibile aprire {project}: {exc}"
+            open_error = tr("Impossibile aprire {0}: {1}", project, exc)
     win = MainWindow(application.document if project and not open_error else None, autoconnect="--check" not in argv,
                      check_updates=False if "--check" in argv else None,
                      progress=splash.progress(88, 99) if splash is not None else None)
@@ -143,7 +148,7 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
             win.restoreState(state)
     win.show()
     if splash is not None:
-        step(100, "Pronto")
+        step(100, tr("Pronto"))
         splash.close()
     import logging
 

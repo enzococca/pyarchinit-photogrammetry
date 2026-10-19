@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QHBoxLayout, QLabel, QProg
                                QVBoxLayout, QWidget)
 
 from ..core.progress import Cancelled, Progress
+from .i18n import tr, translate
 from .icons import icon
 
 log = logging.getLogger("pyarchinit_photogrammetry.gui")
@@ -65,14 +66,14 @@ class ProgressDialog(QDialog):
         lay.setSpacing(10)
         head = QLabel(title)
         head.setObjectName("errorSummary")
-        self.message = QLabel("Avvio...")
+        self.message = QLabel(tr("Avvio..."))
         self.message.setWordWrap(True)
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
         self.bar.setTextVisible(True)
         self.elapsed = QLabel("")
         self.elapsed.setObjectName("pageSubtitle")
-        self.cancel_button = QPushButton(icon("cancel"), "Annulla")
+        self.cancel_button = QPushButton(icon("cancel"), tr("Annulla"))
         row = QHBoxLayout()
         row.addWidget(self.elapsed)
         row.addStretch(1)
@@ -88,9 +89,9 @@ class ProgressDialog(QDialog):
         if message:
             self.message.setText(message)
         el = time.monotonic() - self._t0
-        txt = f"Trascorso {el:5.0f} s"
+        txt = tr("Trascorso {0:5.0f} s", el)
         if 0.02 < fraction < 1:
-            txt += f"  -  restante circa {el * (1 - fraction) / fraction:5.0f} s"
+            txt += tr("  -  restante circa {0:5.0f} s", el * (1 - fraction) / fraction)
         self.elapsed.setText(txt)
 
 
@@ -112,7 +113,7 @@ class StatusProgress(QWidget):
         self.stop = QToolButton()
         self.stop.setIcon(icon("cancel"))
         self.stop.setIconSize(QSize(16, 16))
-        self.stop.setToolTip("Annulla l'elaborazione")
+        self.stop.setToolTip(tr("Annulla l'elaborazione"))
         self.stop.setAutoRaise(True)
         self.stop.clicked.connect(self.cancel_requested)
         lay.addWidget(self.label)
@@ -157,8 +158,9 @@ class TaskRunner(QObject):
         """Run ``fn(progress)`` in the worker thread. ``quiet``: no modal progress window, only
         the status-bar indicator (for short background jobs such as database connections)."""
         if self.busy:
-            self.status.emit("Un'elaborazione e' gia' in corso")
+            self.status.emit(tr("Un'elaborazione e' gia' in corso"))
             return False
+        label = tr(label)
         self._label, self._on_done, self._on_error = label, on_done, on_error
         self._t0 = time.monotonic()
         log.info("%s: avvio", label)
@@ -184,6 +186,7 @@ class TaskRunner(QObject):
 
     @Slot(float, str)
     def _on_progress(self, fraction: float, message: str) -> None:
+        message = translate(message)  # the engine writes in English or Italian
         if self.dialog is not None:
             self.dialog.update_progress(fraction, message)
         if self.status_widget is not None:
@@ -206,7 +209,7 @@ class TaskRunner(QObject):
         if self.task is not None:
             self.task.cancel()
             if self.dialog is not None:
-                self.dialog.message.setText("Annullamento in corso...")
+                self.dialog.message.setText(tr("Annullamento in corso..."))
                 self.dialog.cancel_button.setEnabled(False)
             if self.status_widget is not None:
                 self.status_widget.stop.setEnabled(False)
@@ -236,18 +239,18 @@ class TaskRunner(QObject):
     def _done(self, label, on_done, result) -> None:
         self._cleanup()
         log.info("%s: completato in %s", label, self._elapsed())
-        self.status.emit(f"{label}: completato ({self._elapsed()})")
+        self.status.emit(tr("{0}: completato ({1})", label, self._elapsed()))
         if on_done is not None:
             on_done(result)
 
     def _fail(self, label, on_error, summary: str, details: str) -> None:
         self._cleanup()
         log.error("%s: errore dopo %s\n%s", label, self._elapsed(), details.rstrip())
-        self.status.emit(f"{label}: errore")
+        self.status.emit(tr("{0}: errore", label))
         if on_error is not None:
             on_error(summary, details)
 
     def _cancelled(self, label) -> None:
         self._cleanup()
         log.info("%s: annullato", label)
-        self.status.emit(f"{label}: annullato")
+        self.status.emit(tr("{0}: annullato", label))

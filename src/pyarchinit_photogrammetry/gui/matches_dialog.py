@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QGraphicsSc
                                QLabel, QSpinBox, QVBoxLayout)
 
 from ..engine import diagnostics
+from .i18n import tr
 from .image_views import to_qimage
 
 GOOD, FAIR, WEAK = "#2a9d55", "#f4a261", "#d1495b"
@@ -48,13 +49,13 @@ class MatchGraphDialog(QDialog):
 
     def __init__(self, chunk, graph: dict | None = None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Grafo delle corrispondenze")
+        self.setWindowTitle(tr("Grafo delle corrispondenze"))
         self.resize(820, 700)
         self.chunk = chunk
         self.graph = diagnostics.match_graph(chunk) if graph is None else graph
         lay = QVBoxLayout(self)
         top = QHBoxLayout()
-        top.addWidget(QLabel("Corrispondenze minime per una linea"))
+        top.addWidget(QLabel(tr("Corrispondenze minime per una linea")))
         self.min_box = QSpinBox()
         self.min_box.setRange(1, 10000)
         self.min_box.setValue(15)
@@ -108,15 +109,15 @@ class MatchGraphDialog(QDialog):
             line = scene.addLine(*self.positions[a], *self.positions[b], pen)
             line.setData(0, (a, b))
             la, lb = self.chunk.camera(a).label, self.chunk.camera(b).label
-            line.setToolTip(f"{la} - {lb}: {n} corrispondenze (doppio clic per vederle)")
+            line.setToolTip(tr("{0} - {1}: {2} corrispondenze (doppio clic per vederle)", la, lb, n))
         linked = {k for pair in shown for k in pair}
         for key, (x, y) in self.positions.items():
             cam = self.chunk.camera(key)
             colour = "#2e86ab" if cam.aligned else WEAK
             dot = scene.addEllipse(x - 4, y - 4, 8, 8, QPen(QColor("#1f2933"), 0.8), QColor(colour))
             dot.setZValue(2)
-            dot.setToolTip(f"{cam.label}" + ("" if cam.aligned else " (non allineata)")
-                           + ("" if key in linked else f" - nessuna coppia con almeno {lim} corrispondenze"))
+            dot.setToolTip(f"{cam.label}" + ("" if cam.aligned else tr(" (non allineata)"))
+                           + ("" if key in linked else tr(" - nessuna coppia con almeno {0} corrispondenze", lim)))
             if key not in linked or not cam.aligned:
                 text = scene.addSimpleText(cam.label)
                 text.setBrush(QColor(colour))
@@ -125,13 +126,14 @@ class MatchGraphDialog(QDialog):
         self.view.fitInView(scene.itemsBoundingRect().adjusted(-20, -20, 20, 20), Qt.AspectRatioMode.KeepAspectRatio)
         groups = diagnostics.components(list(self.positions), self.graph, lim)
         alone = [self.chunk.camera(g[0]).label for g in groups if len(g) == 1]
-        parts = [f"{len(self.positions)} foto, {len(shown)} coppie con almeno {lim} corrispondenze"]
+        parts = [tr("{0} foto, {1} coppie con almeno {2} corrispondenze", len(self.positions), len(shown), lim)]
         if len(groups) > 1:
-            parts.append("gruppi che non si collegano: " + ", ".join(str(len(g)) for g in groups if len(g) > 1)
-                         + (" foto" if any(len(g) > 1 for g in groups) else ""))
+            parts.append(tr("gruppi che non si collegano: ") + ", ".join(str(len(g)) for g in groups if len(g) > 1)
+                         + (tr(" foto") if any(len(g) > 1 for g in groups) else ""))
         if alone:
-            parts.append(f"foto isolate ({len(alone)}): " + ", ".join(alone[:20]) + (" ..." if len(alone) > 20 else ""))
-        self.info.setText("; ".join(parts) + ". Rosso: meno di 30 corrispondenze, arancio meno di 100.")
+            parts.append(tr("foto isolate ({0}): ",
+                            len(alone)) + ", ".join(alone[:20]) + (" ..." if len(alone) > 20 else ""))
+        self.info.setText("; ".join(parts) + tr(". Rosso: meno di 30 corrispondenze, arancio meno di 100."))
 
     def show_pair(self, a: int, b: int) -> None:
         PairMatchesDialog(self.chunk, a, b, self).exec()
@@ -146,7 +148,7 @@ class PairMatchesDialog(QDialog):
         super().__init__(parent)
         self.chunk = chunk
         ca, cb = chunk.camera(key_a), chunk.camera(key_b)
-        self.setWindowTitle(f"Corrispondenze: {ca.label} - {cb.label}")
+        self.setWindowTitle(tr("Corrispondenze: {0} - {1}", ca.label, cb.label))
         self.resize(1100, 640)
         try:
             self.data = diagnostics.pair_matches(chunk, key_a, key_b)
@@ -162,9 +164,9 @@ class PairMatchesDialog(QDialog):
         verified = {tuple(m) for m in self.data["verified"]}
         rejected = [m for m in self.data["candidates"] if tuple(m) not in verified]
         self.rejected = np.array(rejected).reshape(-1, 2)
-        self.c_ver = QCheckBox(f"Verificate ({len(self.data['verified'])})")
-        self.c_rej = QCheckBox(f"Scartate ({len(self.rejected)})")
-        self.c_tie = QCheckBox(f"Punti di legame ({len(self.ties[0])})")
+        self.c_ver = QCheckBox(tr("Verificate ({0})", len(self.data['verified'])))
+        self.c_rej = QCheckBox(tr("Scartate ({0})", len(self.rejected)))
+        self.c_tie = QCheckBox(tr("Punti di legame ({0})", len(self.ties[0])))
         self.c_ver.setChecked(True)
         self.c_tie.setChecked(not len(self.data["verified"]))
         for c in (self.c_ver, self.c_rej, self.c_tie):

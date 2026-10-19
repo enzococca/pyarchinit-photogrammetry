@@ -9,6 +9,8 @@ from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel,
                                QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
+from .i18n import decimal_comma, tr
+
 MODELS = [("OPENCV", "Normale (Brown: k1, k2, p1, p2)"), ("OPENCV_FISHEYE", "Fisheye (Kannala-Brandt: k1-k4)"),
           ("FULL_OPENCV", "Normale, distorsione forte (k1-k6, p1, p2)"), ("RADIAL", "Radiale (k1, k2)"),
           ("PINHOLE", "Senza distorsione")]
@@ -59,7 +61,7 @@ class DistortionPlot(QWidget):
         try:
             ideal, real = distortion_field(s)
         except Exception as exc:  # pragma: no cover - a calibration that cannot be evaluated
-            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, f"Distorsione non calcolabile: {exc}")
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, tr("Distorsione non calcolabile: {0}", exc))
             return
         d = real - ideal
         mag = np.hypot(d[:, 0], d[:, 1])
@@ -83,7 +85,8 @@ class DistortionPlot(QWidget):
             p.drawEllipse(b, 1.6, 1.6)
         p.setPen(self.palette().text().color())
         p.drawText(QRectF(10, 2, self.width() - 20, 20), Qt.AlignmentFlag.AlignLeft,
-                   f"Distorsione: fino a {biggest:.1f} px dal punto ideale (frecce x{k / scale:.0f})".replace(".", ","))
+                   decimal_comma(tr("Distorsione: fino a {0:.1f} px dal punto ideale (frecce x{1:.0f})", biggest,
+                      k / scale)))
         # the shift along the radius, from the centre to the corner
         chart = QRectF(46, top_h + 18, self.width() - 60, self.height() - top_h - 46)
         kk = s.K
@@ -118,9 +121,9 @@ class DistortionPlot(QWidget):
         p.drawPath(path)
         p.setPen(self.palette().text().color())
         p.drawText(QRectF(chart.left(), chart.bottom() + 2, chart.width(), 18), Qt.AlignmentFlag.AlignCenter,
-                   f"distanza dal centro (0 - {corner:.0f} px, verso l'angolo)")
+                   tr("distanza dal centro (0 - {0:.0f} px, verso l'angolo)", corner))
         p.drawText(QRectF(0, chart.top() - 16, self.width(), 16), Qt.AlignmentFlag.AlignLeft,
-                   f"   spostamento radiale (+/-{lim:.1f} px)".replace(".", ","))
+                   decimal_comma(tr("   spostamento radiale (+/-{0:.1f} px)", lim)))
 
 
 class CalibrationDialog(QDialog):
@@ -128,7 +131,7 @@ class CalibrationDialog(QDialog):
 
     def __init__(self, chunk, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Calibrazione della camera")
+        self.setWindowTitle(tr("Calibrazione della camera"))
         self.resize(900, 600)
         self.chunk = chunk
         self.changed = False
@@ -137,8 +140,8 @@ class CalibrationDialog(QDialog):
         self.sensor_box = QComboBox()
         for s in chunk.sensors.values():
             n = sum(1 for c in chunk.cameras if c.sensor_key == s.key)
-            self.sensor_box.addItem(f"{s.label}  ({s.width} x {s.height} px, {n} foto)", s.key)
-        top.addWidget(QLabel("Sensore"))
+            self.sensor_box.addItem(tr("{0}  ({1} x {2} px, {3} foto)", s.label, s.width, s.height, n), s.key)
+        top.addWidget(QLabel(tr("Sensore")))
         top.addWidget(self.sensor_box, 1)
         lay.addLayout(top)
         body = QHBoxLayout()
@@ -146,11 +149,11 @@ class CalibrationDialog(QDialog):
         form = QFormLayout()
         self.model = QComboBox()
         form.addRow("Modello", self.model)
-        self.fixed = QCheckBox("Calibrazione fissa (l'allineamento e l'ottimizzazione non la cambiano)")
+        self.fixed = QCheckBox(tr("Calibrazione fissa (l'allineamento e l'ottimizzazione non la cambiano)"))
         form.addRow(self.fixed)
         left.addLayout(form)
         self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["Parametro", "Valore"])
+        self.table.setHorizontalHeaderLabels([tr("Parametro"), tr("Valore")])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.verticalHeader().setVisible(False)
         left.addWidget(self.table, 1)
@@ -162,7 +165,7 @@ class CalibrationDialog(QDialog):
         body.addWidget(self.plot, 3)
         lay.addLayout(body, 1)
         box = QDialogButtonBox(QDialogButtonBox.StandardButton.Apply | QDialogButtonBox.StandardButton.Close)
-        box.button(QDialogButtonBox.StandardButton.Apply).setText("Applica")
+        box.button(QDialogButtonBox.StandardButton.Apply).setText(tr("Applica"))
         box.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(self.apply)
         box.rejected.connect(self.reject)
         box.button(QDialogButtonBox.StandardButton.Close).clicked.connect(self.accept)
@@ -188,9 +191,10 @@ class CalibrationDialog(QDialog):
         self._fill(s.model, list(s.params))
         aligned = sum(1 for c in self.chunk.cameras if c.sensor_key == s.key and c.aligned)
         f35 = 36.0 * s.focal_px / max(s.width, s.height)
-        self.info.setText(f"{aligned} foto allineate con questo sensore. Focale {s.focal_px:.1f} px (circa {f35:.0f} mm "
-                          "equivalenti). I valori si possono correggere a mano: sono quelli da cui parte "
-                          "l'allineamento; cambiando modello la distorsione riparte da zero.")
+        self.info.setText(tr("{0} foto allineate con questo sensore. Focale {1:.1f} px (circa {2:.0f} mm "
+                             "equivalenti). I valori si possono correggere a mano: sono quelli da cui parte "
+                             "l'allineamento; cambiando modello la distorsione riparte da zero.",
+                             aligned, s.focal_px, f35))
         self.plot.set_sensor(s)
 
     def _fill(self, model: str, params) -> None:

@@ -11,6 +11,8 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
+from .i18n import decimal_comma, number, thousands_points, tr, translate
+
 
 @dataclass
 class Field:
@@ -58,7 +60,7 @@ class _PathEdit(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         self.edit = QLineEdit(str(f.default or ""))
-        b = QPushButton("Sfoglia")
+        b = QPushButton(tr("Sfoglia"))
         b.setFixedWidth(72)
         lay.addWidget(self.edit, 1)
         lay.addWidget(b)
@@ -139,7 +141,7 @@ class ParamDialog(QDialog):
             return _ColorButton(f.default)
         if f.kind == "optional_float":
             w = QLineEdit("" if f.default is None else str(f.default))
-            w.setPlaceholderText("automatico")
+            w.setPlaceholderText(tr("automatico"))
             return w
         if isinstance(f.default, bool):
             w = QCheckBox()
@@ -188,9 +190,8 @@ class ParamDialog(QDialog):
 
 
 def _it(value: float, decimals: int = 0) -> str:
-    """A number written the Italian way: 1.234.567 or 1.234,56."""
-    text = f"{value:,.{decimals}f}"
-    return text.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+    """A number as the interface writes it: 1.234,56 in Italian, 1,234.56 in English."""
+    return number(value, decimals)
 
 
 class GradualSelectionDialog(QDialog):
@@ -209,18 +210,18 @@ class GradualSelectionDialog(QDialog):
 
     def __init__(self, metrics: dict, select, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Selezione graduale dei punti di legame")
+        self.setWindowTitle(tr("Selezione graduale dei punti di legame"))
         self.setMinimumWidth(700)
         self.metrics, self.select = metrics, select
         lay = QVBoxLayout(self)
         n = len(metrics["ids"])
-        text = (f"{_it(n)} punti di legame in {metrics['images']} foto, errore medio di riproiezione "
-                f"{_it(metrics['mean_reprojection_error'], 3)} px. Spunta i criteri: i punti peggiori vengono tolti "
-                "dal modello e, se scegli, le camere vengono ottimizzate senza di loro.")
+        text = (tr("{0} punti di legame in {1} foto, errore medio di riproiezione {2} px. Spunta i criteri: i punti "
+                   "peggiori vengono tolti dal modello e, se scegli, le camere vengono ottimizzate senza di loro.",
+                   _it(n), metrics['images'], _it(metrics['mean_reprojection_error'], 3)))
         if metrics.get("synthetic"):
-            text += ("\n\nAttenzione: questo modello e' stato scritto da pose importate (Metashape, WebODM o chunk "
-                     "uniti): gli errori di riproiezione sono quasi nulli e conta solo l'incertezza di ricostruzione. "
-                     "Per una selezione completa allinea di nuovo le foto qui.")
+            text += tr("\n\nAttenzione: questo modello e' stato scritto da pose importate (Metashape, WebODM o "
+                       "chunk uniti): gli errori di riproiezione sono quasi nulli e conta solo l'incertezza di "
+                       "ricostruzione. Per una selezione completa allinea di nuovo le foto qui.")
         intro = QLabel(text)
         intro.setWordWrap(True)
         lay.addWidget(intro)
@@ -234,7 +235,7 @@ class GradualSelectionDialog(QDialog):
             spin.setDecimals(decimals)
             spin.setRange(0.0, maximum)
             spin.setValue(default)
-            stats = QLabel("non disponibile")
+            stats = QLabel(tr("non disponibile"))
             if values is None:
                 box.setEnabled(False)
                 spin.setEnabled(False)
@@ -243,7 +244,7 @@ class GradualSelectionDialog(QDialog):
                 v = v[np.isfinite(v)]
                 if len(v):
                     q = np.percentile(v, [50, 95])
-                    stats.setText(f"mediana {q[0]:.3g}, 95% {q[1]:.3g}, max {v.max():.3g}".replace(".", ","))
+                    stats.setText(decimal_comma(tr("mediana {0:.3g}, 95% {1:.3g}, max {2:.3g}", q[0], q[1], v.max())))
             stats.setStyleSheet("color: #6c7a89")
             row = QHBoxLayout()
             row.addWidget(spin)
@@ -252,18 +253,18 @@ class GradualSelectionDialog(QDialog):
             box.toggled.connect(lambda _on: self._update())
             spin.valueChanged.connect(lambda _v: self._update())
             self.rows[key] = (box, spin)
-        self.optimize = QCheckBox("Ottimizza le camere dopo la rimozione")
+        self.optimize = QCheckBox(tr("Ottimizza le camere dopo la rimozione"))
         self.optimize.setChecked(True)
         lay.addWidget(self.optimize)
         self.status = QLabel("")
         self.status.setWordWrap(True)
         self.status.setStyleSheet("font-weight: bold")
         lay.addWidget(self.status)
-        note = QLabel("I punti tolti non tornano indietro: per ricominciare allinea di nuovo le foto.")
+        note = QLabel(tr("I punti tolti non tornano indietro: per ricominciare allinea di nuovo le foto."))
         note.setStyleSheet("color: #b45309")
         lay.addWidget(note)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        bb.button(QDialogButtonBox.StandardButton.Ok).setText("Togli i punti selezionati")
+        bb.button(QDialogButtonBox.StandardButton.Ok).setText(tr("Togli i punti selezionati"))
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         self.ok_button = bb.button(QDialogButtonBox.StandardButton.Ok)
@@ -282,19 +283,20 @@ class GradualSelectionDialog(QDialog):
         crit = self.criteria()
         if not crit:
             self.selection = None
-            self.status.setText("Spunta almeno un criterio.")
+            self.status.setText(tr("Spunta almeno un criterio."))
             self.ok_button.setEnabled(False)
             return
         sel = self.select(**crit)
         self.selection = sel
         names = {"reprojection_error": "errore", "image_count": "poche foto",
                  "reconstruction_uncertainty": "incertezza", "projection_accuracy": "accuratezza"}
-        parts = [f"{names.get(name, name)} {_it(n)}" for name, n in (sel.get("by_criterion") or {}).items()
+        parts = [f"{tr(names.get(name, name))} {_it(n)}" for name, n in (sel.get("by_criterion") or {}).items()
                  if n is not None]
-        text = (f"Selezionati {_it(sel['selected'])} punti su {_it(sel['total'])} ({_it(sel['percent'], 1)}%)"
+        text = (tr("Selezionati {0} punti su {1} ({2}%)",
+                   _it(sel['selected']), _it(sel['total']), _it(sel['percent'], 1))
                 + (f" - {', '.join(parts)}" if parts else ""))
         if sel.get("images_below_minimum"):
-            text += f"\n{sel['images_below_minimum']} foto resterebbero con troppi pochi punti: alza le soglie."
+            text += tr("\n{0} foto resterebbero con troppi pochi punti: alza le soglie.", sel['images_below_minimum'])
         self.status.setText(text)
         self.ok_button.setEnabled(sel["selected"] > 0 and not sel.get("images_below_minimum"))
 
@@ -310,7 +312,7 @@ class PublishDialog(QDialog):
 
     def __init__(self, pa, chunk, parent=None, sites: list[str] | None = None):
         super().__init__(parent)
-        self.setWindowTitle("Pubblica in PyArchInit")
+        self.setWindowTitle(tr("Pubblica in PyArchInit"))
         self.setMinimumWidth(480)
         self.pa = pa
         lay = QVBoxLayout(self)
@@ -320,22 +322,22 @@ class PublishDialog(QDialog):
         self.site.setEditable(True)
         self.site.addItems(sites if sites is not None else [str(s.get("sito")) for s in pa.sites()])
         self.site.currentTextChanged.connect(self._load_us)
-        self.b_new_site = QPushButton("Nuovo sito...")
+        self.b_new_site = QPushButton(tr("Nuovo sito..."))
         self.b_new_site.clicked.connect(self._new_site)
         site_row = QHBoxLayout()
         site_row.addWidget(self.site, 1)
         site_row.addWidget(self.b_new_site)
         self.name = QLineEdit(chunk.label if chunk is not None else "Rilievo")
         self.author = QLineEdit("")
-        self.cb_ortho = QCheckBox("Ortofoto")
+        self.cb_ortho = QCheckBox(tr("Ortofoto"))
         self.cb_dem = QCheckBox("DEM")
-        self.cb_model = QCheckBox("Modello 3D")
+        self.cb_model = QCheckBox(tr("Modello 3D"))
         self.cb_ortho.setChecked(chunk is not None and chunk.orthomosaic_path is not None)
         self.cb_dem.setChecked(chunk is not None and chunk.dem_path is not None)
         self.cb_ortho.setEnabled(chunk is not None and chunk.orthomosaic_path is not None)
         self.cb_dem.setEnabled(chunk is not None and chunk.dem_path is not None)
         self.cb_model.setEnabled(chunk is not None and chunk.product_path("model") is not None)
-        self.overwrite = QCheckBox("Sovrascrivi se esiste gia'")
+        self.overwrite = QCheckBox(tr("Sovrascrivi se esiste gia'"))
         prods = QHBoxLayout()
         for cb in (self.cb_ortho, self.cb_dem, self.cb_model):
             prods.addWidget(cb)
@@ -344,7 +346,7 @@ class PublishDialog(QDialog):
         form.addRow("Disegnatore / operatore", self.author)
         form.addRow("Prodotti", prods)
         form.addRow("", self.overwrite)
-        lay.addWidget(QLabel("Collega alle US (selezione multipla):"))
+        lay.addWidget(QLabel(tr("Collega alle US (selezione multipla):")))
         self.us_list = QListWidget()
         self.us_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
         lay.addWidget(self.us_list, 1)
@@ -398,7 +400,8 @@ def _today() -> str:
 
 class _SiteHeader(QLabel):
     def __init__(self, sito: str):
-        super().__init__(f"Sito: <b>{sito}</b>" if sito else "Sito: <i>non scelto (menu PyArchInit > Sito del progetto)</i>")
+        super().__init__(tr("Sito: <b>{0}</b>",
+                            sito) if sito else "Sito: <i>non scelto (menu PyArchInit > Sito del progetto)</i>")
         self.setTextFormat(Qt.TextFormat.RichText)
 
 
@@ -418,7 +421,7 @@ class UnitDialog(QDialog):
         form = QFormLayout(self)
         form.addRow(_SiteHeader(sito))
         self.combo = QComboBox()
-        self.combo.addItem("(nuova / scrivi sotto)", None)
+        self.combo.addItem(tr("(nuova / scrivi sotto)"), None)
         for area, us, desc in us_choices or []:
             self.combo.addItem(f"Area {area} - US {us} {desc}", (area, us))
         self.area = QLineEdit(str(d.get("area") or default_area))
@@ -431,8 +434,8 @@ class UnitDialog(QDialog):
         for k, label in ((1, "1 - Caratterizzazione"), (2, "2 - Contorno US")):
             self.index.addItem(label, k)
         self.index.setCurrentIndex(1 if str(d.get("stratigraph_index_us") or "1") == "2" else 0)
-        self.index.setToolTip("stratigraph_index_us di pyunitastratigrafiche: 1 = caratterizzazione (riempita nel "
-                              "layer di PyArchInit), 2 = contorno dell'US")
+        self.index.setToolTip(tr("stratigraph_index_us di pyunitastratigrafiche: 1 = caratterizzazione (riempita nel "
+                                 "layer di PyArchInit), 2 = contorno dell'US"))
         self.tipo_us = QComboBox()
         self.tipo_us.setEditable(True)
         self.tipo_us.addItems(TIPO_US_SUGGESTIONS)
@@ -451,10 +454,11 @@ class UnitDialog(QDialog):
         form.addRow("Data", self.data)
         form.addRow("Rilievo originale", self.rilievo)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        bb.button(QDialogButtonBox.StandardButton.Ok).setText("Salva")
+        bb.button(QDialogButtonBox.StandardButton.Ok).setText(tr("Salva"))
         if refine:
             b = bb.addButton("Correggi...", QDialogButtonBox.ButtonRole.ActionRole)
-            b.setToolTip("Torna sulla mappa: Maiusc+clic aggiunge, clic destro toglie; Invio per salvare, Esc per scartare")
+            b.setToolTip(tr("Torna sulla mappa: Maiusc+clic aggiunge, clic destro toglie; Invio per salvare, Esc per "
+                            "scartare"))
             b.clicked.connect(lambda: self.done(self.REFINE))
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -479,9 +483,10 @@ class SiteChoiceDialog(QDialog):
 
     def __init__(self, parent=None, sites: list[str] | None = None, current: str = "", text: str = ""):
         super().__init__(parent)
-        self.setWindowTitle("Sito del progetto")
+        self.setWindowTitle(tr("Sito del progetto"))
         lay = QVBoxLayout(self)
-        lab = QLabel(text or "Sito dello scavo: tutte le US e le quote di questo progetto appartengono a questo sito.")
+        lab = QLabel(text or tr("Sito dello scavo: tutte le US e le quote di questo progetto appartengono a questo "
+                                "sito."))
         lab.setWordWrap(True)
         lay.addWidget(lab)
         self.combo = QComboBox()
@@ -493,7 +498,7 @@ class SiteChoiceDialog(QDialog):
         self.combo.setCurrentText(current or (names[0] if names else ""))
         lay.addWidget(self.combo)
         if not names:
-            hint = QLabel("Nessun sito nel database (o database non connesso): scrivi il nome del sito.")
+            hint = QLabel(tr("Nessun sito nel database (o database non connesso): scrivi il nome del sito."))
             hint.setObjectName("pageSubtitle")
             hint.setWordWrap(True)
             lay.addWidget(hint)
@@ -514,12 +519,12 @@ class QuotaDialog(QDialog):
     def __init__(self, parent=None, us_choices: list[tuple[str, str, str]] | None = None, sito: str = "",
                  quota: float | None = None, defaults: dict | None = None):
         super().__init__(parent)
-        self.setWindowTitle("Quota")
+        self.setWindowTitle(tr("Quota"))
         d = dict(defaults or {})
         form = QFormLayout(self)
         form.addRow(_SiteHeader(sito))
         self.combo = QComboBox()
-        self.combo.addItem("(nuova / scrivi sotto)", None)
+        self.combo.addItem(tr("(nuova / scrivi sotto)"), None)
         for area, us, desc in us_choices or []:
             self.combo.addItem(f"Area {area} - US {us} {desc}", (area, us))
         self.area = QLineEdit(str(d.get("area_q") or "1"))
@@ -539,7 +544,7 @@ class QuotaDialog(QDialog):
         self.disegnatore = QLineEdit(str(d.get("disegnatore") or ""))
         self.data = QLineEdit(str(d.get("data") or _today()))
         self.rilievo = QLineEdit(str(d.get("rilievo_originale") or "Fotogrammetria"))
-        self.keep = QCheckBox("Non chiedere piu': usa questi valori per i prossimi punti")
+        self.keep = QCheckBox(tr("Non chiedere piu': usa questi valori per i prossimi punti"))
         self.combo.currentIndexChanged.connect(self._pick)
         form.addRow("US esistente", self.combo)
         form.addRow("Area", self.area)
@@ -552,7 +557,7 @@ class QuotaDialog(QDialog):
         form.addRow("Rilievo originale", self.rilievo)
         form.addRow(self.keep)
         if quota is None:
-            form.addRow(QLabel("Fuori dal DEM: scrivi la quota a mano."))
+            form.addRow(QLabel(tr("Fuori dal DEM: scrivi la quota a mano.")))
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -663,7 +668,7 @@ class PatchDialog(QDialog):
         if current is not None:
             self._show(self.now_label, current)
         else:
-            self.now_label.setText("(nessuna ortofoto)")
+            self.now_label.setText(tr("(nessuna ortofoto)"))
         self.list = QListWidget()
         self.list.setViewMode(QListWidget.ViewMode.IconMode)
         self.list.setIconSize(QSize(150, 150))
@@ -679,18 +684,20 @@ class PatchDialog(QDialog):
             text = (f"{short_label(c['label'])}\n{_it(100 * c['coverage'])}% · {_it(c['angle'])}° · "
                     f"{_it(100 * gsd, 1)} cm/px")
             if c.get("used"):
-                text += f"\nusata ora: {_it(100 * c['used'])}%"
+                text += tr("\nusata ora: {0}%", _it(100 * c['used']))
             item = QListWidgetItem(text)
             prev = c.get("preview")
             if prev is not None:
                 item.setIcon(QIcon(self._pix(prev)))
             hidden = 1.0 - c.get("visible", 1.0)
-            item.setToolTip(f"{c['label']}: inquadra il {_it(100 * c['coverage'])}% dell'area, a {_it(c['angle'])} gradi "
-                            + ("dalla verticale" if kind == "ortho" else "dalla perpendicolare alle facce")
+            item.setToolTip(tr("{0}: inquadra il {1}% dell'area, a {2} gradi ",
+                               c['label'], _it(100 * c['coverage']), _it(c['angle']))
+                            + (tr("dalla verticale") if kind == "ortho" else tr("dalla perpendicolare alle facce"))
                             + f", {_it(100 * gsd, 2)} cm per pixel"
-                            + (f"; il {_it(100 * hidden)}% e' nascosto dal modello (chiome, muri)" if hidden > 0.05
+                            + (tr("; il {0}% e' nascosto dal modello (chiome, muri)",
+                                  _it(100 * hidden)) if hidden > 0.05
                                else "")
-                            + (f"; l'ortofoto ora ne prende il {_it(100 * c['used'])}%" if c.get("used") else ""))
+                            + (tr("; l'ortofoto ora ne prende il {0}%", _it(100 * c['used'])) if c.get("used") else ""))
             item.setData(Qt.ItemDataRole.UserRole, c["label"])
             self.list.addItem(item)
         self.list.itemSelectionChanged.connect(self._selection_changed)
@@ -698,11 +705,11 @@ class PatchDialog(QDialog):
         for c in candidates:
             for surf, img in (c.get("previews") or {}).items():
                 self._icons[(c["label"], surf)] = QIcon(self._pix(img))
-        lay.addWidget(QLabel("Foto che vedono l'area (le migliori prima; Maiusc o Cmd per sceglierne piu' d'una):"))
+        lay.addWidget(QLabel(tr("Foto che vedono l'area (le migliori prima; Maiusc o Cmd per sceglierne piu' d'una):")))
         lay.addWidget(self.list, 2)
         modes = QHBoxLayout()
-        self.r_assign = QRadioButton("Usa solo le foto scelte")
-        self.r_exclude = QRadioButton("Escludi le foto scelte (usa tutte le altre)")
+        self.r_assign = QRadioButton(tr("Usa solo le foto scelte"))
+        self.r_exclude = QRadioButton(tr("Escludi le foto scelte (usa tutte le altre)"))
         self.r_assign.setChecked(True)
         group = QButtonGroup(self)
         group.addButton(self.r_assign)
@@ -712,9 +719,9 @@ class PatchDialog(QDialog):
         modes.addStretch(1)
         lay.addLayout(modes)
         surfaces = QHBoxLayout()
-        self.r_dem = QRadioButton("Sul DEM (ortofoto vera)")
-        self.r_ground = QRadioButton("Sul suolo attorno all'area: alberi, veicoli e persone come nella foto, "
-                                     "senza vortici (riempie anche i buchi del DEM)")
+        self.r_dem = QRadioButton(tr("Sul DEM (ortofoto vera)"))
+        self.r_ground = QRadioButton(tr("Sul suolo attorno all'area: alberi, veicoli e persone come nella foto, "
+                                        "senza vortici (riempie anche i buchi del DEM)"))
         self.r_dem.setChecked(True)
         sgroup = QButtonGroup(self)
         for r in (self.r_dem, self.r_ground):
@@ -728,14 +735,14 @@ class PatchDialog(QDialog):
         else:
             for r in (self.r_dem, self.r_ground):
                 r.setVisible(False)
-        self.c_texture = QCheckBox("Correggi anche la texture del modello in quest'area")
+        self.c_texture = QCheckBox(tr("Correggi anche la texture del modello in quest'area"))
         self._texture_offered = kind == "ortho" and texture is not None
         self.c_texture.setVisible(self._texture_offered)
         self.c_texture.setChecked(bool(texture))
         lay.addWidget(self.c_texture)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.ok = bb.button(QDialogButtonBox.StandardButton.Ok)
-        self.ok.setText("Applica")
+        self.ok.setText(tr("Applica"))
         self.ok.setEnabled(False)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -744,7 +751,7 @@ class PatchDialog(QDialog):
             self.list.setCurrentRow(0)
             self.list.item(0).setSelected(True)
         else:
-            self.preview_label.setText("Nessuna foto vede quest'area")
+            self.preview_label.setText(tr("Nessuna foto vede quest'area"))
 
     def _show(self, label: QLabel, rgba) -> None:
         pix = self._pix(rgba)
@@ -796,6 +803,7 @@ def message(parent, kind: str, title: str, text: str, details: str = "", buttons
     """Non-native message box. ``kind``: info, warning, critical, question. Returns the button."""
     from PySide6.QtWidgets import QMessageBox
 
+    title, text = translate(title), translate(text)
     icons = {"info": QMessageBox.Icon.Information, "warning": QMessageBox.Icon.Warning,
              "critical": QMessageBox.Icon.Critical, "question": QMessageBox.Icon.Question}
     box = QMessageBox(icons.get(kind, QMessageBox.Icon.NoIcon), title, text, parent=parent)
@@ -817,6 +825,8 @@ def choice(parent, kind: str, title: str, text: str, options: list[str], default
     ``None`` for ``cancel`` (Esc) or a closed box."""
     from PySide6.QtWidgets import QMessageBox
 
+    title, text, options = translate(title), translate(text), [translate(o) for o in options]
+    cancel = translate(cancel) if cancel else cancel
     icons = {"info": QMessageBox.Icon.Information, "warning": QMessageBox.Icon.Warning,
              "critical": QMessageBox.Icon.Critical, "question": QMessageBox.Icon.Question}
     box = QMessageBox(icons.get(kind, QMessageBox.Icon.NoIcon), title, text, parent=parent)
@@ -856,10 +866,10 @@ _SUGGESTIONS = [
 
 
 def suggestion_for(text: str) -> str | None:
-    """A hint in Italian for known error signatures, or None."""
+    """A hint, in the language of the interface, for known error signatures, or None."""
     for key, hint in _SUGGESTIONS:
         if key in text:
-            return hint
+            return tr(hint)
     return None
 
 
@@ -873,6 +883,7 @@ class ErrorDialog(QDialog):
 
         from .icons import icon
 
+        title, summary = translate(title), translate(summary)
         self.setWindowTitle(title)
         self.setMinimumWidth(560)
         self.details = details
@@ -900,7 +911,7 @@ class ErrorDialog(QDialog):
             hint.setObjectName("hintBox")
             lay.addWidget(hint)
         self.toggle = QToolButton()
-        self.toggle.setText("Dettagli")
+        self.toggle.setText(tr("Dettagli"))
         self.toggle.setCheckable(True)
         self.toggle.setArrowType(Qt.ArrowType.RightArrow)
         self.toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
@@ -914,7 +925,7 @@ class ErrorDialog(QDialog):
             lay.addWidget(self.toggle)
         lay.addWidget(self.box, 1)
         row = QHBoxLayout()
-        self.b_copy = QPushButton(icon("copy"), "Copia")
+        self.b_copy = QPushButton(icon("copy"), tr("Copia"))
         self.b_copy.clicked.connect(self.copy)
         row.addWidget(self.b_copy)
         self.log_path = log_path
@@ -926,11 +937,11 @@ class ErrorDialog(QDialog):
             except Exception:  # pragma: no cover
                 self.log_path = None
         if self.log_path is not None:
-            self.b_log = QPushButton(icon("folder"), "Apri cartella log")
+            self.b_log = QPushButton(icon("folder"), tr("Apri cartella log"))
             self.b_log.clicked.connect(self.open_log_folder)
             row.addWidget(self.b_log)
         row.addStretch(1)
-        self.b_close = QPushButton("Chiudi")
+        self.b_close = QPushButton(tr("Chiudi"))
         self.b_close.setDefault(True)
         self.b_close.clicked.connect(self.accept)
         row.addWidget(self.b_close)
@@ -950,7 +961,7 @@ class ErrorDialog(QDialog):
         from PySide6.QtWidgets import QApplication
 
         QApplication.clipboard().setText(self.report_text())
-        self.b_copy.setText("Copiato")
+        self.b_copy.setText(tr("Copiato"))
 
     def open_log_folder(self) -> None:
         from PySide6.QtCore import QUrl
@@ -975,7 +986,7 @@ class ConnectDialog(QDialog):
 
         from PySide6.QtWidgets import QButtonGroup
 
-        self.setWindowTitle("Connessione a PyArchInit")
+        self.setWindowTitle(tr("Connessione a PyArchInit"))
         self.setMinimumWidth(560)
         from . import app_settings
 
@@ -983,7 +994,7 @@ class ConnectDialog(QDialog):
         lay = QVBoxLayout(self)
         self._group = QButtonGroup(self)  # the radio buttons live in different group boxes
         # --- PyArchInit installation
-        self.r_config = QRadioButton("Database configurato in PyArchInit (config.cfg)")
+        self.r_config = QRadioButton(tr("Database configurato in PyArchInit (config.cfg)"))
         cfg_path = pyarchinit_home() / "pyarchinit_DB_folder" / "config.cfg"
         self.cfg_edit = _PathEdit(Field("config", "config.cfg", str(cfg_path), kind="file_open",
                                         filter="config.cfg (config.cfg);;Tutti (*)"))
@@ -997,7 +1008,7 @@ class ConnectDialog(QDialog):
         l1.addWidget(self.cfg_info)
         lay.addWidget(g1)
         # --- SQLite file
-        self.r_sqlite = QRadioButton("File SQLite / SpatiaLite")
+        self.r_sqlite = QRadioButton(tr("File SQLite / SpatiaLite"))
         self.sqlite_edit = _PathEdit(Field("sqlite", "Database", str(self.settings.value("pa_sqlite", "")),
                                            kind="file_open", filter="SQLite (*.sqlite *.db *.sqlite3);;Tutti (*)"))
         g2 = QGroupBox()
@@ -1019,7 +1030,7 @@ class ConnectDialog(QDialog):
         self.user = QLineEdit(str(self.settings.value("pa_pg_user", "postgres")))
         self.password = QLineEdit(str(self.settings.value("pa_pg_password", "")))
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
-        self.remember = QCheckBox("Ricorda la password (in chiaro nelle impostazioni)")
+        self.remember = QCheckBox(tr("Ricorda la password (in chiaro nelle impostazioni)"))
         self.remember.setChecked(bool(self.settings.value("pa_pg_password", "")))
         self.sslmode = QComboBox()
         for m in ("allow", "prefer", "require", "disable"):
@@ -1038,7 +1049,7 @@ class ConnectDialog(QDialog):
         self.status.setWordWrap(True)
         lay.addWidget(self.status)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        self.b_test = QPushButton(icon("ok"), "Prova connessione")
+        self.b_test = QPushButton(icon("ok"), tr("Prova connessione"))
         self.b_test.clicked.connect(self.test)
         bb.addButton(self.b_test, QDialogButtonBox.ButtonRole.ActionRole)
         bb.accepted.connect(self.accept)
@@ -1051,12 +1062,12 @@ class ConnectDialog(QDialog):
         if cfg_path.exists():
             try:
                 c = PyArchInitConfig.load(cfg_path)
-                self.cfg_info.setText(f"{'PostgreSQL ' + c.host + '/' + c.database if c.is_postgres else c.sqlite_path}"
-                                      f"  -  sito corrente: {c.site_set or '-'}")
+                where = f"PostgreSQL {c.host}/{c.database}" if c.is_postgres else c.sqlite_path
+                self.cfg_info.setText(tr("{0}  -  sito corrente: {1}", where, c.site_set or "-"))
             except Exception as exc:
-                self.cfg_info.setText(f"config.cfg non leggibile: {exc}")
+                self.cfg_info.setText(tr("config.cfg non leggibile: {0}", exc))
         else:
-            self.cfg_info.setText("config.cfg non trovato: indica il file di PyArchInit o usa un'altra connessione")
+            self.cfg_info.setText(tr("config.cfg non trovato: indica il file di PyArchInit o usa un'altra connessione"))
 
     def values(self) -> dict:
         if self.r_config.isChecked():
@@ -1088,12 +1099,12 @@ class ConnectDialog(QDialog):
         try:
             pa = PyArchInit.connect(url=v["url"], config_path=v["config"])
             sites = pa.sites()
-            self.status.setText(f"Connessione riuscita: {len(sites)} siti"
+            self.status.setText(tr("Connessione riuscita: {0} siti", len(sites))
                                 + (f" ({', '.join(str(s['sito']) for s in sites[:4])}...)" if sites else "")
                                 + ("" if pa.db.is_postgres or pa.db.spatialite else
-                                   "  -  mod_spatialite non trovato: lettura ok, scrittura di geometrie no"))
+                                   tr("  -  mod_spatialite non trovato: lettura ok, scrittura di geometrie no")))
         except Exception as exc:
-            self.status.setText(f"Connessione non riuscita: {str(exc).splitlines()[0][:200]}")
+            self.status.setText(tr("Connessione non riuscita: {0}", str(exc).splitlines()[0][:200]))
 
     def accept(self) -> None:
         self.remember_settings()
@@ -1105,7 +1116,7 @@ class SiteDialog(QDialog):
 
     def __init__(self, parent=None, name: str = ""):
         super().__init__(parent)
-        self.setWindowTitle("Nuovo sito")
+        self.setWindowTitle(tr("Nuovo sito"))
         self.setMinimumWidth(460)
         form = QFormLayout(self)
         self.sito = QLineEdit(name)
@@ -1142,16 +1153,17 @@ class IfcPreviewDialog(QDialog):
         from .model_view import SoftwareCanvas
         from .scene import SceneData
 
-        self.setWindowTitle("IFC esportato")
+        self.setWindowTitle(tr("IFC esportato"))
         self.resize(1100, 680)
         lay = QVBoxLayout(self)
         n_faces = sum(len(e["faces"]) for e in elements)
-        head = QLabel(f"<b>{Path(path).name}</b> - {len(elements)} elementi, {n_faces:,} triangoli<br>{path}")
+        head = QLabel(tr("<b>{0}</b> - {1} elementi, {2:,} triangoli<br>{3}",
+                         Path(path).name, len(elements), n_faces, path))
         head.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         lay.addWidget(head)
         split = QSplitter()
         table = QTableWidget(len(elements), 4)
-        table.setHorizontalHeaderLabels(["Elemento", "Classe IFC", "Triangoli", "Attributi"])
+        table.setHorizontalHeaderLabels([tr("Elemento"), tr("Classe IFC"), tr("Triangoli"), tr("Attributi")])
         palette = [(205, 205, 205), (230, 80, 80), (80, 160, 230), (90, 200, 110), (240, 180, 60), (160, 100, 220)]
         for r, e in enumerate(elements):
             props = {k: v for name, pset in e["psets"].items() if not name.startswith("Qto") for k, v in pset.items()}
@@ -1189,7 +1201,7 @@ class IfcPreviewDialog(QDialog):
         split.setSizes([480, 620])
         lay.addWidget(split, 1)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        b_dir = QPushButton("Apri cartella")
+        b_dir = QPushButton(tr("Apri cartella"))
         b_dir.clicked.connect(lambda: __import__("PySide6.QtGui", fromlist=["QDesktopServices"]).QDesktopServices.openUrl(
             __import__("PySide6.QtCore", fromlist=["QUrl"]).QUrl.fromLocalFile(str(Path(path).parent))))
         bb.addButton(b_dir, QDialogButtonBox.ButtonRole.ActionRole)
@@ -1257,7 +1269,7 @@ class UsFormDialog(QDialog):
         self.pa = pa
         self.cols = pa.us_columns()
         self.record = pa.us_record(sito, area, us, unita_tipo) if us else None
-        self.setWindowTitle(("Scheda US - " if self.record else "Nuova US - ") + sito)
+        self.setWindowTitle((tr("Scheda US - ") if self.record else tr("Nuova US - ")) + sito)
         self.resize(760, 640)
         lay = QVBoxLayout(self)
         head = QFormLayout()
@@ -1287,7 +1299,7 @@ class UsFormDialog(QDialog):
         bl.setContentsMargins(10, 6, 10, 6)
         self.banner_text = QLabel("")
         self.banner_text.setWordWrap(True)
-        self.b_upgrade = QPushButton("Aggiorna struttura del database")
+        self.b_upgrade = QPushButton(tr("Aggiorna struttura del database"))
         self.b_upgrade.clicked.connect(lambda _=False: self.upgrade_structure())
         bl.addWidget(self.banner_text, 1)
         bl.addWidget(self.b_upgrade)
@@ -1300,13 +1312,13 @@ class UsFormDialog(QDialog):
         self.rel_page = QWidget()
         rl = QVBoxLayout(self.rel_page)
         self.rel = QTableWidget(0, 4)
-        self.rel.setHorizontalHeaderLabels(["Rapporto", "US", "Area", "Sito"])
+        self.rel.setHorizontalHeaderLabels([tr("Rapporto"), "US", "Area", tr("Sito")])
         self.rel.horizontalHeader().setStretchLastSection(True)
         self.rel.setColumnWidth(0, 190)
         for r in parse_relationships(data.get("rapporti")):
             self._add_rel(r)
         btns = QHBoxLayout()
-        b_add, b_del = QPushButton("Aggiungi rapporto"), QPushButton("Rimuovi")
+        b_add, b_del = QPushButton(tr("Aggiungi rapporto")), QPushButton(tr("Rimuovi"))
         b_add.clicked.connect(lambda: self._add_rel(["Copre", "", self.area.text(), self.sito.text()]))
         b_del.clicked.connect(lambda: self.rel.removeRow(self.rel.currentRow()) if self.rel.currentRow() >= 0 else None)
         btns.addWidget(b_add)
@@ -1351,18 +1363,18 @@ class UsFormDialog(QDialog):
                 self.fields[name] = edit
             self.tabs.addTab(w, page)
         if "rapporti" in self.cols:
-            self.tabs.addTab(self.rel_page, "Rapporti")
+            self.tabs.addTab(self.rel_page, tr("Rapporti"))
         try:
             self.missing = self.pa.missing_us_columns()
         except Exception:  # a database without the reference columns at all: nothing to offer
             self.missing = []
         if self.missing:
-            what = ", tra cui i rapporti stratigrafici" if "rapporti" in self.missing else ""
-            copy = (" Prima viene fatta una copia di sicurezza del file." if self.pa.db.sqlite_path is not None
-                    else " Su PostgreSQL fai prima un backup del database.")
-            self.banner_text.setText(f"Questo database ha una scheda US ridotta (struttura di una versione precedente): "
-                                     f"mancano {len(self.missing)} campi di PyArchInit 5{what}. «Aggiorna struttura» "
-                                     f"li aggiunge senza modificare i dati.{copy}")
+            what = tr(", tra cui i rapporti stratigrafici") if "rapporti" in self.missing else ""
+            copy = (tr(" Prima viene fatta una copia di sicurezza del file.") if self.pa.db.sqlite_path is not None
+                    else tr(" Su PostgreSQL fai prima un backup del database."))
+            self.banner_text.setText(tr("Questo database ha una scheda US ridotta (struttura di una versione "
+                                        "precedente): mancano {0} campi di PyArchInit 5{1}. «Aggiorna struttura» li "
+                                        "aggiunge senza modificare i dati.{2}", len(self.missing), what, copy))
         self.banner.setVisible(bool(self.missing))
 
     def _texts(self) -> dict:
@@ -1380,8 +1392,8 @@ class UsFormDialog(QDialog):
 
         if confirm:
             ans = message(self, "question", "Aggiorna struttura del database",
-                          f"Aggiungere a us_table i {len(self.missing)} campi mancanti della scheda US di PyArchInit 5? "
-                          "I record esistenti non vengono modificati.",
+                          tr("Aggiungere a us_table i {0} campi mancanti della scheda US di PyArchInit 5? I record "
+                             "esistenti non vengono modificati.", len(self.missing)),
                           buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                           default=QMessageBox.StandardButton.No)
             if ans != QMessageBox.StandardButton.Yes:
@@ -1390,7 +1402,7 @@ class UsFormDialog(QDialog):
         try:
             res = self.pa.upgrade_us_table()
         except Exception as exc:
-            self.status.setText(f"Aggiornamento non riuscito: {exc}")
+            self.status.setText(tr("Aggiornamento non riuscito: {0}", exc))
             return False
         self.cols = self.pa.us_columns()
         if self.record:
@@ -1399,9 +1411,9 @@ class UsFormDialog(QDialog):
         data = dict(self.record or {})
         data.update(typed)
         self._build_pages(data)
-        msg = f"Aggiunti {len(res['added'])} campi alla scheda US."
+        msg = tr("Aggiunti {0} campi alla scheda US.", len(res['added']))
         if res.get("backup"):
-            msg += f" Copia di sicurezza: {Path(res['backup']).name}"
+            msg += tr(" Copia di sicurezza: {0}", Path(res['backup']).name)
         self.status.setText(msg)
         return True
 
@@ -1446,12 +1458,12 @@ class UsFormDialog(QDialog):
                 self.saved_id = int(self.record["id_us"])
             else:
                 if not self.us.text().strip():
-                    self.status.setText("Indica il numero di US")
+                    self.status.setText(tr("Indica il numero di US"))
                     return
                 self.saved_id = self.pa.create_us(self.sito.text().strip(), self.area.text().strip(),
                                                   self.us.text().strip(), self.tipo.currentText().strip() or "US", **vals)
         except Exception as exc:
-            self.status.setText(f"Salvataggio non riuscito: {exc}")
+            self.status.setText(tr("Salvataggio non riuscito: {0}", exc))
             return
         self.accept()
 
@@ -1480,7 +1492,7 @@ class TableDialog(QDialog):
             for c, value in enumerate(row):
                 text = "" if value is None else str(value)
                 if isinstance(value, int) and not isinstance(value, bool) and abs(value) >= 10000:
-                    text = f"{value:,}".replace(",", ".")  # 114.835 points
+                    text = thousands_points(f"{value:,}")  # 114.835 points
                 it = QTableWidgetItem(text)
                 if isinstance(value, (int, float)):
                     it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -1498,9 +1510,9 @@ class TableDialog(QDialog):
         lay.addWidget(self.status)
 
     def _save_csv(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "Salva CSV", self._csv_name, "CSV (*.csv)")
+        path, _ = QFileDialog.getSaveFileName(self, tr("Salva CSV"), self._csv_name, "CSV (*.csv)")
         if path:
             try:
-                self.status.setText(f"Salvato {self._save(path)}")
+                self.status.setText(tr("Salvato {0}", self._save(path)))
             except Exception as exc:
-                self.status.setText(f"Salvataggio non riuscito: {exc}")
+                self.status.setText(tr("Salvataggio non riuscito: {0}", exc))

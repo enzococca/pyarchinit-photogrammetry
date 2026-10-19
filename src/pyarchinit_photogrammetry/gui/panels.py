@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QHBoxL
                                QVBoxLayout, QWidget)
 
 from .flow_layout import FlowLayout
+from .i18n import decimal_comma, number, tr, translate
 from .icons import PALETTE, icon
 from .image_views import to_qimage
 
@@ -35,8 +36,7 @@ def _precision(sigma) -> str:
 
 
 def _it(value: float, decimals: int = 0) -> str:
-    text = f"{value:,.{decimals}f}"
-    return text.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+    return number(value, decimals)
 
 
 def product_summary(key: str, path) -> str:
@@ -67,12 +67,12 @@ def product_summary(key: str, path) -> str:
 
                 with open(path, "rb") as f:
                     n = next(e["count"] for e in read_header(f)[1] if e["name"] == "vertex")
-            text = f"{_it(n)} punti"
+            text = tr("{0} punti", _it(n))
         elif key == "model":
             from ..io.mesh_ply import face_count
 
             n = face_count(path)
-            text = f"{_it(n)} facce" if n is not None else ""
+            text = tr("{0} facce", _it(n)) if n is not None else ""
         elif key == "model_textured":
             from PIL import Image
 
@@ -123,27 +123,27 @@ class WorkspaceTree(QTreeWidget):
     def populate(self, document) -> None:
         self.document = document
         self.clear()
-        name = document.path.name if document.path else "Progetto senza nome"
-        root = QTreeWidgetItem([f"{name}  ({len(document.chunks)} chunk)"])
+        name = document.path.name if document.path else tr("Progetto senza nome")
+        root = QTreeWidgetItem([tr("{0}  ({1} chunk)", name, len(document.chunks))])
         root.setIcon(0, icon("project"))
         root.setData(0, Qt.ItemDataRole.UserRole, ("document", None, None))
         self.addTopLevelItem(root)
         for ch in document.chunks:
             n_al = len(ch.aligned_cameras)
-            active = "  [attivo]" if ch is document.chunk else ""
-            ci = QTreeWidgetItem([f"{ch.label}{active}   {len(ch.cameras)} foto, {n_al} allineate"])
+            active = tr("  [attivo]") if ch is document.chunk else ""
+            ci = QTreeWidgetItem([tr("{0}{1}   {2} foto, {3} allineate", ch.label, active, len(ch.cameras), n_al)])
             ci.setIcon(0, icon("chunk", "blue" if ch is document.chunk else None))
             ci.setData(0, Qt.ItemDataRole.UserRole, ("chunk", ch, None))
             f = ci.font(0)
             f.setBold(ch is document.chunk)
             ci.setFont(0, f)
             root.addChild(ci)
-            info = QTreeWidgetItem([f"Sistema di riferimento: {ch.crs}"])
+            info = QTreeWidgetItem([tr("Sistema di riferimento: {0}", ch.crs)])
             info.setIcon(0, icon("crs"))
             info.setData(0, Qt.ItemDataRole.UserRole, ("crs", ch, None))
-            info.setToolTip(0, "Doppio clic per cambiare il sistema di riferimento")
+            info.setToolTip(0, tr("Doppio clic per cambiare il sistema di riferimento"))
             ci.addChild(info)
-            cams = QTreeWidgetItem([f"Camere  ({n_al}/{len(ch.cameras)} allineate)"])
+            cams = QTreeWidgetItem([tr("Camere  ({0}/{1} allineate)", n_al, len(ch.cameras))])
             cams.setIcon(0, icon("cameras"))
             cams.setData(0, Qt.ItemDataRole.UserRole, ("cameras", ch, None))
             ci.addChild(cams)
@@ -153,7 +153,7 @@ class WorkspaceTree(QTreeWidget):
                 it.setData(0, Qt.ItemDataRole.UserRole, ("camera", ch, cam))
                 if not cam.aligned:
                     it.setForeground(0, QColor(PALETTE["red"]))
-                    it.setToolTip(0, "Non allineata")
+                    it.setToolTip(0, tr("Non allineata"))
                 cams.addChild(it)
             mk = QTreeWidgetItem([f"Marker  ({len(ch.markers)})"])
             mk.setIcon(0, icon("marker"))
@@ -161,36 +161,37 @@ class WorkspaceTree(QTreeWidget):
             ci.addChild(mk)
             for m in ch.markers:
                 kind = "check" if m.checkpoint else ("GCP" if m.reference.location else "")
-                it = QTreeWidgetItem([f"{m.label}   {kind}   {len(m.projections)} proiezioni".replace("    ", "  ")])
+                it = QTreeWidgetItem([tr("{0}   {1}   {2} proiezioni", m.label, kind,
+                                         len(m.projections)).replace("    ", "  ")])
                 it.setIcon(0, icon("checkpoint" if m.checkpoint else ("gcp" if m.reference.location else "marker")))
                 it.setData(0, Qt.ItemDataRole.UserRole, ("marker", ch, m))
                 mk.addChild(it)
             if ch.scalebars:
-                sb = QTreeWidgetItem([f"Barre di scala  ({len(ch.scalebars)})"])
+                sb = QTreeWidgetItem([tr("Barre di scala  ({0})", len(ch.scalebars))])
                 sb.setIcon(0, icon("scalebar"))
                 ci.addChild(sb)
                 for s in ch.scalebars:
                     sb.addChild(QTreeWidgetItem([f"{s.label}: {s.distance:.4f} m" + ("  check" if s.checkpoint else "")
-                                                 + ("" if s.enabled else "  (non usata)")]))
+                                                 + ("" if s.enabled else tr("  (non usata)"))]))
             from ..core import versions
 
             for key in ("tie_points", "point_cloud", "model", "model_textured", "dem", "orthomosaic"):
                 kept = versions.versions(ch, key) if key in versions.PRODUCTS else []
                 if not ch.product_path(key) and not kept:
                     continue
-                label = PRODUCT_LABELS[key]
+                label = tr(PRODUCT_LABELS[key])
                 size = product_summary(key, ch.product_path(key))
                 if size:
                     label += f"  ({size})"
                 named = key in versions.PRODUCTS and (kept or (ch.meta.get("active_versions") or {}).get(key))
                 if named:
                     label += (f"  -  {versions.active_info(ch, key)['name']}" if ch.product_path(key)
-                              else "  -  nessuna versione attiva")
+                              else tr("  -  nessuna versione attiva"))
                 it = QTreeWidgetItem([label])
                 it.setIcon(0, icon(key))
                 it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, key))
                 if key in versions.PRODUCTS:
-                    it.setToolTip(0, "Doppio clic per vederlo; tasto destro: versioni (conserva, rinomina...)")
+                    it.setToolTip(0, tr("Doppio clic per vederlo; tasto destro: versioni (conserva, rinomina...)"))
                 ci.addChild(it)
                 for e in reversed(kept):
                     when = e["created"][:16].replace("T", " ")
@@ -201,35 +202,35 @@ class WorkspaceTree(QTreeWidget):
                     vi = QTreeWidgetItem([f"{e['name']}   ({size + ', ' if size else ''}{when})"])
                     vi.setIcon(0, icon("version"))
                     vi.setData(0, Qt.ItemDataRole.UserRole, ("version", ch, (key, e["id"])))
-                    vi.setToolTip(0, "Versione conservata: doppio clic per vederla; tasto destro per renderla "
-                                     "attiva, confrontarla, rinominarla o eliminarla")
+                    vi.setToolTip(0, tr("Versione conservata: doppio clic per vederla; tasto destro per renderla "
+                                        "attiva, confrontarla, rinominarla o eliminarla"))
                     it.addChild(vi)
                 it.setExpanded(bool(kept))
             for key, text, tip in (("slope", "Pendenza", "gradi"), ("aspect", "Esposizione", "gradi dal nord")):
                 path = ch.product_path(key)
                 if path is not None and path.exists():
-                    it = QTreeWidgetItem([text])
+                    it = QTreeWidgetItem([tr(text)])
                     it.setIcon(0, icon(key))
                     it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, key))
-                    it.setToolTip(0, f"Doppio clic per vederla ({tip} sotto il cursore)")
+                    it.setToolTip(0, tr("Doppio clic per vederla ({0} sotto il cursore)", tr(tip)))
                     ci.addChild(it)
             cov = ch.product_path("coverage")
             if cov is not None and cov.exists():
-                it = QTreeWidgetItem(["Copertura delle foto"])
+                it = QTreeWidgetItem([tr("Copertura delle foto")])
                 it.setIcon(0, icon("fieldcheck"))
                 it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "coverage"))
-                it.setToolTip(0, "Doppio clic per vederla: quante foto inquadrano ogni punto (rosso: meno di tre)")
+                it.setToolTip(0, tr("Doppio clic per vederla: quante foto inquadrano ogni punto (rosso: meno di tre)"))
                 ci.addChild(it)
             prec = ch.product_path("dem_precision")
             if prec is not None and prec.exists():
-                it = QTreeWidgetItem(["Precisione del DEM (sigma Z)"])
+                it = QTreeWidgetItem([tr("Precisione del DEM (sigma Z)")])
                 it.setIcon(0, icon("precision"))
                 it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "dem_precision"))
-                it.setToolTip(0, "Doppio clic per vederla: deviazione standard delle quote, dai punti di legame")
+                it.setToolTip(0, tr("Doppio clic per vederla: deviazione standard delle quote, dai punti di legame"))
                 ci.addChild(it)
             elevations = (ch.meta or {}).get("elevations") or []
             if elevations:
-                el = QTreeWidgetItem([f"Prospetti  ({len(elevations)})"])
+                el = QTreeWidgetItem([tr("Prospetti  ({0})", len(elevations))])
                 el.setIcon(0, icon("elevation"))
                 ci.addChild(el)
                 for e in elevations:
@@ -237,7 +238,7 @@ class WorkspaceTree(QTreeWidget):
                     it = QTreeWidgetItem([f"{e['name']}  ({w} x {h} px, {e.get('resolution', 0) * 100:.2f} cm/px)"])
                     it.setIcon(0, icon("elevation"))
                     it.setData(0, Qt.ItemDataRole.UserRole, ("elevation", ch, e))
-                    it.setToolTip(0, "Doppio clic per vederlo; tasto destro: esporta, elimina")
+                    it.setToolTip(0, tr("Doppio clic per vederlo; tasto destro: esporta, elimina"))
                     el.addChild(it)
                 el.setExpanded(True)
             ci.setExpanded(ch is document.chunk)
@@ -381,7 +382,7 @@ class PhotosPane(QListWidget):
             for k, pr in m.projections.items():
                 f = flags.setdefault(k, [0, 0, []])
                 f[0 if pr.measured else 1] += 1
-                f[2].append(m.label + ("" if pr.measured else " (da confermare)"))
+                f[2].append(m.label + ("" if pr.measured else tr(" (da confermare)")))
         return {k: tuple(v) for k, v in flags.items()}
 
     def _tooltip(self, cam) -> str:
@@ -391,12 +392,12 @@ class PhotosPane(QListWidget):
             text += " (disattivata)"
         meta = getattr(cam, "meta", None) or {}
         if meta.get("panorama"):
-            text += f"\nFaccia «{meta.get('face')}» della foto 360° {meta['panorama']}"
+            text += tr("\nFaccia «{0}» della foto 360° {1}", meta.get('face'), meta['panorama'])
         if meta.get("precision"):
-            text += f"\nPrecisione della posizione X/Y/Z: {_precision(meta['precision'])} mm"
+            text += tr("\nPrecisione della posizione X/Y/Z: {0} mm", _precision(meta['precision']))
         q = meta.get("quality")
         if q is not None:
-            text += f"\nQualita' dell'immagine {q:.2f}".replace(".", ",") + (" (sfocata)" if q < 0.5 else "")
+            text += decimal_comma(tr("\nQualita' dell'immagine {0:.2f}", q)) + (tr(" (sfocata)") if q < 0.5 else "")
         return text + (f"\nMarker: {', '.join(f[2])}" if f else "")
 
     def update_flags(self) -> None:
@@ -419,7 +420,8 @@ class PhotosPane(QListWidget):
         shown = 0
         for i in range(self.count()):
             it = self.item(i)
-            hide = self._filter is not None and getattr(it.data(Qt.ItemDataRole.UserRole), "key", None) not in self._filter
+            hide = self._filter is not None and getattr(it.data(Qt.ItemDataRole.UserRole), "key",
+                                                        None) not in self._filter
             it.setHidden(hide)
             shown += not hide
         self.filter_changed.emit(self.filter_title)
@@ -479,7 +481,7 @@ class PhotosPane(QListWidget):
             cam = it.data(Qt.ItemDataRole.UserRole)
             it.setIcon(self._icon(pm, cam.aligned, self._flags.get(getattr(cam, "key", None), (0, 0, []))[:2]))
             if img.isNull():
-                it.setToolTip(f"{cam.path}\nfoto non leggibile (file vuoto o mancante)")
+                it.setToolTip(tr("{0}\nfoto non leggibile (file vuoto o mancante)", cam.path))
         self._done += 1
         self.thumbs_progress.emit(self._done, self._total)
 
@@ -509,12 +511,14 @@ class PhotosPanel(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(2, 2, 2, 2)
         bar = FlowLayout()
-        self.label = QLabel("Tutte le foto")
-        self.b_all = _tool("photos", "Mostra tutte", "Togli il filtro: tutte le foto del chunk")
-        self.b_markers = _tool("marker", "Foto con marker", "Solo le foto con almeno un marker (bandierina verde: "
-                                                             "misurato, blu: da confermare)")
-        self.b_prev = _tool("previous", "Precedente", "Apri la foto precedente dell'elenco (Pagina su nella foto)")
-        self.b_next = _tool("next", "Successiva", "Apri la foto successiva dell'elenco (Pagina giu' nella foto)")
+        self.label = QLabel(tr("Tutte le foto"))
+        self.b_all = _tool("photos", tr("Mostra tutte"), tr("Togli il filtro: tutte le foto del chunk"))
+        self.b_markers = _tool("marker", tr("Foto con marker"), tr("Solo le foto con almeno un marker (bandierina "
+                                                                   "verde: misurato, blu: da confermare)"))
+        self.b_prev = _tool("previous", tr("Precedente"), tr("Apri la foto precedente dell'elenco (Pagina su nella "
+                                                             "foto)"))
+        self.b_next = _tool("next", tr("Successiva"),
+                            tr("Apri la foto successiva dell'elenco (Pagina giu' nella foto)"))
         for w in (self.label, self.b_all, self.b_markers, self.b_prev, self.b_next):
             bar.addWidget(w)
         lay.addLayout(bar)
@@ -528,7 +532,7 @@ class PhotosPanel(QWidget):
 
     def _filter_changed(self, title: str) -> None:
         n = len(self.pane.visible_cameras())
-        self.label.setText(f"<b>{title}</b> ({n} foto)" if title else f"Tutte le foto ({n})")
+        self.label.setText(tr("<b>{0}</b> ({1} foto)", title, n) if title else tr("Tutte le foto ({0})", n))
         self.b_all.setEnabled(bool(title))
 
 
@@ -567,21 +571,24 @@ class ReferencePane(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         bar = FlowLayout()
-        self.b_import = _tool("reference", "Importa CSV...", "Importa le coordinate dei marker")
-        self.b_update = _tool("georef", "Aggiorna", "Ricalcola la georeferenziazione")
-        self.b_opt = _tool("optimize", "Ottimizza camere", "Bundle adjustment con i riferimenti")
-        self.b_bar = _tool("scalebar", "Barra di scala...", "Distanza nota tra due marker: scala il rilievo "
-                                                           "(anche in coordinate locali, come per gli oggetti)")
-        self.b_bar_import = _tool("scalebar", "Importa barre...", "Barre di scala da un CSV (marker A, marker B, "
-                                                                  "distanza in metri)")
-        self.b_est = _tool("markers", "Coordinate stimate", "X, Y, Z dei marker stimate dal rilievo (triangolate dalle "
-                                                            "foto o, con una foto sola, sulla superficie) al posto di "
-                                                            "quelle di riferimento, come 'View Estimated' di Metashape")
+        self.b_import = _tool("reference", tr("Importa CSV..."), tr("Importa le coordinate dei marker"))
+        self.b_update = _tool("georef", tr("Aggiorna"), tr("Ricalcola la georeferenziazione"))
+        self.b_opt = _tool("optimize", tr("Ottimizza camere"), tr("Bundle adjustment con i riferimenti"))
+        self.b_bar = _tool("scalebar", tr("Barra di scala..."), tr("Distanza nota tra due marker: scala il rilievo "
+                                                                   "(anche in coordinate locali, come per gli "
+                                                                   "oggetti)"))
+        self.b_bar_import = _tool("scalebar", tr("Importa barre..."), tr("Barre di scala da un CSV (marker A, marker "
+                                                                         "B, distanza in metri)"))
+        self.b_est = _tool("markers", tr("Coordinate stimate"), tr("X, Y, Z dei marker stimate dal rilievo "
+                                                                   "(triangolate dalle foto o, con una foto sola, "
+                                                                   "sulla superficie) al posto di quelle di "
+                                                                   "riferimento, come 'View Estimated' di Metashape"))
         self.b_est.setCheckable(True)
         self._est_chosen = False  # chosen by hand: no longer follows the project
         self.b_est.toggled.connect(self._estimated_toggled)
-        self.b_prec = _tool("precision", "Precisione", "Precisione di camere, marker e punti di legame dalla covarianza "
-                                                       "del bundle adjustment, e mappa della precisione del DEM")
+        self.b_prec = _tool("precision", tr("Precisione"), tr("Precisione di camere, marker e punti di legame dalla "
+                                                              "covarianza del bundle adjustment, e mappa della "
+                                                              "precisione del DEM"))
         bar.addWidget(self.b_import)
         bar.addWidget(self.b_update)
         bar.addWidget(self.b_opt)
@@ -621,8 +628,8 @@ class ReferencePane(QWidget):
         self.bars.customContextMenuRequested.connect(self._bar_menu)
         split.addWidget(self.bars)
         self.cams = QTableWidget(0, 7)
-        self.cams.setHorizontalHeaderLabels(["Camera", "Allineata", "X", "Y", "Z", "Rif. X", "Rif. Y",
-                                             "Precisione X/Y/Z (mm)"])
+        self.cams.setHorizontalHeaderLabels(["Camera", tr("Allineata"), "X", "Y", "Z", tr("Rif. X"), tr("Rif. Y"),
+                                             tr("Precisione X/Y/Z (mm)")])
         self.cams.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.cams.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.cams.setAlternatingRowColors(True)
@@ -649,7 +656,7 @@ class ReferencePane(QWidget):
         if chunk is None:
             self._filling = False
             return
-        self.crs_label.setText(f"Sistema di riferimento: <b>{chunk.crs}</b>  -  scala {chunk.scale:.6g}")
+        self.crs_label.setText(tr("Sistema di riferimento: <b>{0}</b>  -  scala {1:.6g}", chunk.crs, chunk.scale))
         errs = {e["label"]: e for e in gcp.marker_errors(chunk)}
         if not self._est_chosen:  # no reference coordinates: the estimated ones are what there is to see
             self.b_est.blockSignals(True)
@@ -660,7 +667,7 @@ class ReferencePane(QWidget):
         precision = (chunk.meta.get("precision") or {}).get("markers", {})
         names = ["X stimata", "Y stimata", "Z stimata"] if estimated else ["X / Est", "Y / Nord", "Z"]
         for c, name in enumerate(names, 3):
-            self.table.setHorizontalHeaderItem(c, QTableWidgetItem(name))
+            self.table.setHorizontalHeaderItem(c, QTableWidgetItem(tr(name)))
         self.table.setRowCount(len(chunk.markers))
         one_photo = 0
         for r, m in enumerate(chunk.markers):
@@ -671,15 +678,15 @@ class ReferencePane(QWidget):
             views = gcp.views_of(chunk, m)
             one_photo += views == 1
             todo = gcp.views_of(chunk, m, estimated=True)
-            how = (f"triangolato da {views} foto" if views >= 2 else
-                   "su una foto sola: posizione dove il suo raggio incontra la superficie (nuvola densa o punti di "
-                   "legame); mettilo su una seconda foto per triangolarlo" if views == 1 else
-                   "messo sul modello, sulla nuvola o sull'ortofoto" if m.position is not None else
-                   "non ancora posizionato: tasto destro su una foto, oppure strumento Marker sul modello o "
-                   "sull'ortofoto")
+            how = (tr("triangolato da {0} foto", views) if views >= 2 else
+                   tr("su una foto sola: posizione dove il suo raggio incontra la superficie (nuvola densa o "
+                      "punti di legame); mettilo su una seconda foto per triangolarlo") if views == 1 else
+                   tr("messo sul modello, sulla nuvola o sull'ortofoto") if m.position is not None else
+                   tr("non ancora posizionato: tasto destro su una foto, oppure strumento Marker sul modello o "
+                      "sull'ortofoto"))
             if todo:
-                how += (f"; +{todo}: bandierine blu da confermare in altrettante foto (tasto destro > Filtra le foto, "
-                        "poi trascinale sul punto esatto)")
+                how += (tr("; +{0}: bandierine blu da confermare in altrettante foto (tasto destro > Filtra le foto, "
+                           "poi trascinale sul punto esatto)", todo))
             acc = m.reference.accuracy[0] if m.reference.accuracy else None
             use = QTableWidgetItem()
             use.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
@@ -694,11 +701,13 @@ class ReferencePane(QWidget):
                 QTableWidgetItem(_fmt(e.get("dx"), 4)), QTableWidgetItem(_fmt(e.get("dy"), 4)),
                 QTableWidgetItem(_fmt(e.get("dz"), 4)),
                 QTableWidgetItem(f"{e.get('projections', '')}" + (f" (+{e['estimated']})" if e.get("estimated") else "")),
-                QTableWidgetItem(_fmt(e.get("pixel_error"), 2)), QTableWidgetItem(_precision(precision.get(str(m.key))))]
+                QTableWidgetItem(_fmt(e.get("pixel_error"), 2)),
+                QTableWidgetItem(_precision(precision.get(str(m.key))))]
             for c, it in enumerate(vals):
                 if c == 13 and precision.get(str(m.key)):
-                    it.setToolTip("Precisione stimata della posizione dalle foto (deviazione standard): misura nelle "
-                                  "foto, incertezza delle camere e dei riferimenti")
+                    it.setToolTip(tr("Precisione stimata della posizione dalle foto (deviazione standard): misura "
+                                     "nelle "
+                                     "foto, incertezza delle camere e dei riferimenti"))
                 if c in (1, 7, 8, 9, 10, 11, 12, 13) or (estimated and c in (3, 4, 5)):
                     it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 if estimated and c in (3, 4, 5):
@@ -706,7 +715,7 @@ class ReferencePane(QWidget):
                     font = it.font()
                     font.setItalic(True)
                     it.setFont(font)
-                    it.setToolTip(f"Coordinata stimata: {how}")
+                    it.setToolTip(tr("Coordinata stimata: {0}", how))
                 if c in (1, 11):
                     it.setToolTip(how)
                 if c == 7 and e.get("error") is not None and e["error"] > 0.02:
@@ -748,22 +757,23 @@ class ReferencePane(QWidget):
         parts = []
         for key, name in (("control_rmse", "RMSE controllo"), ("check_rmse", "RMSE check")):
             if rep.get(key) is not None:
-                parts.append(f"{name}: <b>{rep[key] * 1000:.1f} mm</b>")
+                parts.append(f"{tr(name)}: <b>{rep[key] * 1000:.1f} mm</b>")
         for key, name in (("scalebar_control_rmse", "RMSE barre"), ("scalebar_check_rmse", "RMSE barre check")):
             if rep.get(key) is not None:
-                parts.append(f"{name}: <b>{rep[key] * 1000:.1f} mm</b>")
+                parts.append(f"{tr(name)}: <b>{rep[key] * 1000:.1f} mm</b>")
         if rep.get("method") == "scalebars":
-            parts.append("scala dalle barre, coordinate locali")
+            parts.append(tr("scala dalle barre, coordinate locali"))
         elif str(rep.get("method", "")).endswith("+scalebars"):
-            parts.append("scala da riferimenti e barre insieme, pesati con l'accuratezza")
+            parts.append(tr("scala da riferimenti e barre insieme, pesati con l'accuratezza"))
         if one_photo:
-            parts.append(f"{one_photo} marker su una foto sola: posizione sulla superficie, su una seconda foto "
-                         "vengono triangolati")
+            parts.append(tr("{0} marker su una foto sola: posizione sulla superficie, su una seconda foto vengono "
+                            "triangolati", one_photo))
         prec = chunk.meta.get("precision") or {}
         if (prec.get("tie_points") or {}).get("median"):
-            parts.append(f"precisione dei punti di legame (mediana) {_precision(prec['tie_points']['median'])} mm")
-        self.summary.setText("  |  ".join(parts) if parts else "Importa i riferimenti o crea una barra di scala, poi "
-                             "premi Aggiorna.")
+            parts.append(tr("precisione dei punti di legame (mediana) {0} mm",
+                            _precision(prec['tie_points']['median'])))
+        self.summary.setText("  |  ".join(parts) if parts else tr("Importa i riferimenti o crea una barra di scala, "
+                                                                  "poi premi Aggiorna."))
         self._filling = False
 
     def _estimated_toggled(self, _on: bool) -> None:
@@ -783,24 +793,24 @@ class ReferencePane(QWidget):
         keys = self.selected_markers()
         menu = QMenu(self)
         names = [self.chunk.marker_by_key(k).label for k in keys] if self.chunk is not None else []
-        a_bar = menu.addAction(f"Crea barra di scala tra {names[0]} e {names[1]}..." if len(keys) == 2
-                               else "Crea barra di scala... (seleziona due marker)")
+        a_bar = menu.addAction(tr("Crea barra di scala tra {0} e {1}...", names[0], names[1]) if len(keys) == 2
+                               else tr("Crea barra di scala... (seleziona due marker)"))
         a_bar.setIcon(icon("scalebar"))
-        a_photos = menu.addAction(icon("filter"), f"Filtra le foto di {', '.join(names)}" if names
-                                  else "Filtra le foto... (seleziona uno o piu' marker)")
+        a_photos = menu.addAction(icon("filter"), tr("Filtra le foto di {0}", ', '.join(names)) if names
+                                  else tr("Filtra le foto... (seleziona uno o piu' marker)"))
         a_photos.setEnabled(bool(keys))
-        a_refine = menu.addAction(icon("refine"), f"Affina le bandierine blu di {', '.join(names)}" if names
-                                  else "Affina le bandierine blu di tutti i marker")
-        a_refine.setToolTip("Cerca per correlazione, nelle foto, il punto di ogni posizione stimata")
+        a_refine = menu.addAction(icon("refine"), tr("Affina le bandierine blu di {0}", ', '.join(names)) if names
+                                  else tr("Affina le bandierine blu di tutti i marker"))
+        a_refine.setToolTip(tr("Cerca per correlazione, nelle foto, il punto di ogni posizione stimata"))
         menu.addSeparator()
-        a_merge = menu.addAction(icon("merge"), f"Unisci {', '.join(names)} in un marker" if len(keys) >= 2
-                                 else "Unisci i marker... (selezionane due o piu')")
+        a_merge = menu.addAction(icon("merge"), tr("Unisci {0} in un marker", ', '.join(names)) if len(keys) >= 2
+                                 else tr("Unisci i marker... (selezionane due o piu')"))
         a_merge.setEnabled(len(keys) >= 2)
-        a_remove = menu.addAction(icon("delete"), f"Elimina {', '.join(names)}" if names
-                                  else "Elimina marker... (seleziona uno o piu' marker)")
+        a_remove = menu.addAction(icon("delete"), tr("Elimina {0}", ', '.join(names)) if names
+                                  else tr("Elimina marker... (seleziona uno o piu' marker)"))
         a_remove.setEnabled(bool(keys))
-        a_move = menu.addAction(icon("marker"), f"Sposta {names[0]} nella vista 3D" if len(keys) == 1
-                                else "Sposta nella vista 3D... (seleziona un marker)")
+        a_move = menu.addAction(icon("marker"), tr("Sposta {0} nella vista 3D", names[0]) if len(keys) == 1
+                                else tr("Sposta nella vista 3D... (seleziona un marker)"))
         a_move.setEnabled(len(keys) == 1)
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if chosen is a_move:
@@ -821,8 +831,8 @@ class ReferencePane(QWidget):
 
         rows = sorted({i.row() for i in self.bars.selectedIndexes()})
         menu = QMenu(self)
-        a_del = menu.addAction(icon("delete"), f"Elimina {len(rows)} barre di scala" if len(rows) > 1
-                               else "Elimina la barra di scala")
+        a_del = menu.addAction(icon("delete"), tr("Elimina {0} barre di scala", len(rows)) if len(rows) > 1
+                               else tr("Elimina la barra di scala"))
         a_del.setEnabled(bool(rows))
         if menu.exec(self.bars.viewport().mapToGlobal(pos)) is a_del:
             self.delete_bars(rows)
@@ -1010,23 +1020,23 @@ class LogPane(QWidget):
         lay.setContentsMargins(4, 4, 4, 4)
         bar = FlowLayout()
         self.level = QComboBox()
-        self.level.addItem("Tutto", logging.DEBUG)
-        self.level.addItem("Avvisi ed errori", logging.WARNING)
-        self.level.addItem("Solo errori", logging.ERROR)
+        self.level.addItem(tr("Tutto"), logging.DEBUG)
+        self.level.addItem(tr("Avvisi ed errori"), logging.WARNING)
+        self.level.addItem(tr("Solo errori"), logging.ERROR)
         self.level.currentIndexChanged.connect(lambda _: self._refilter())
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Cerca nel log")
+        self.search.setPlaceholderText(tr("Cerca nel log"))
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(lambda _: self._refilter())
-        self.b_copy = _tool("copy", "Copia", "Copia le righe visibili")
-        self.b_save = _tool("save", "Salva...", "Salva il log in un file di testo")
-        self.b_folder = _tool("folder", "Cartella log", "Apri la cartella dei file di log")
-        self.b_clear = _tool("clear", "Pulisci")
+        self.b_copy = _tool("copy", tr("Copia"), tr("Copia le righe visibili"))
+        self.b_save = _tool("save", tr("Salva..."), tr("Salva il log in un file di testo"))
+        self.b_folder = _tool("folder", tr("Cartella log"), tr("Apri la cartella dei file di log"))
+        self.b_clear = _tool("clear", tr("Pulisci"))
         self.b_copy.clicked.connect(self.copy_visible)
         self.b_save.clicked.connect(self.save_as)
         self.b_folder.clicked.connect(self.open_folder)
         self.b_clear.clicked.connect(self.clear)
-        bar.addWidget(QLabel("Mostra:"))
+        bar.addWidget(QLabel(tr("Mostra:")))
         bar.addWidget(self.level)
         bar.addWidget(self.search)  # expanding: takes the free space of its line
         for b in (self.b_copy, self.b_save, self.b_folder, self.b_clear):
@@ -1034,7 +1044,7 @@ class LogPane(QWidget):
         lay.addLayout(bar)
         self.table = QTableWidget(0, 3)
         self.table.setObjectName("logTable")
-        self.table.setHorizontalHeaderLabels(["Ora", "Livello", "Messaggio"])
+        self.table.setHorizontalHeaderLabels([tr("Ora"), tr("Livello"), tr("Messaggio")])
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
@@ -1054,6 +1064,7 @@ class LogPane(QWidget):
 
     # ------------------------------------------------------------ API
     def log(self, level: int, text: str, details: str = "") -> None:
+        text = translate(text)  # also the messages of the engine and of the logger
         self.entries.append((time.time(), int(level), text, details))
         if len(self.entries) > 5000:
             del self.entries[:1000]
@@ -1088,7 +1099,8 @@ class LogPane(QWidget):
         for ts, level, text, details in self.entries:
             if visible_only and not self._visible(level, text):
                 continue
-            rows.append(f"{time.strftime('%H:%M:%S', time.localtime(ts))}  {LEVELS.get(level, ('?', ''))[0]:7s} {text}")
+            level_name = tr(LEVELS.get(level, ("?", ""))[0])
+            rows.append(f"{time.strftime('%H:%M:%S', time.localtime(ts))}  {level_name:7s} {text}")
             if details:
                 rows.append(details.rstrip())
         return "\n".join(rows)
@@ -1103,7 +1115,8 @@ class LogPane(QWidget):
         QApplication.clipboard().setText(self.text())
 
     def save_as(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "Salva log", str(Path.home() / "ppg-log.txt"), "Testo (*.txt)")
+        path, _ = QFileDialog.getSaveFileName(self, tr("Salva log"), str(Path.home() / "ppg-log.txt"),
+                                              tr("Testo (*.txt)"))
         if path:
             Path(path).write_text(self.text(visible_only=False), encoding="utf-8")
 
@@ -1133,7 +1146,7 @@ class LogPane(QWidget):
         name, iname = LEVELS.get(level, ("info", "info"))
         r = self.table.rowCount()
         self.table.insertRow(r)
-        items = [QTableWidgetItem(time.strftime("%H:%M:%S", time.localtime(ts))), QTableWidgetItem(name),
+        items = [QTableWidgetItem(time.strftime("%H:%M:%S", time.localtime(ts))), QTableWidgetItem(tr(name)),
                  QTableWidgetItem(text.splitlines()[0] if text else "")]
         items[1].setIcon(icon(iname))
         tip = text + ("\n\n" + details if details else "")
@@ -1162,22 +1175,23 @@ class PyArchInitPane(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         site_row = QHBoxLayout()
-        site_row.addWidget(QLabel("Sito del progetto:"))
+        site_row.addWidget(QLabel(tr("Sito del progetto:")))
         self.site_combo = QComboBox()
         self.site_combo.setEditable(True)
         self.site_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.site_combo.setToolTip("Lo scavo a cui appartengono le US e le quote disegnate in questo progetto "
-                                   "(un database PyArchInit puo' contenere piu' siti)")
+        self.site_combo.setToolTip(tr("Lo scavo a cui appartengono le US e le quote disegnate in questo progetto "
+                                      "(un database PyArchInit puo' contenere piu' siti)"))
         self.site_combo.activated.connect(lambda _i: self._site_edited())
         self.site_combo.lineEdit().editingFinished.connect(self._site_edited)
         site_row.addWidget(self.site_combo, 1)
         lay.addLayout(site_row)
         self._project_site = ""
         row = FlowLayout()
-        self.b_connect = _tool("database", "Connetti...", "Connetti al database di PyArchInit (config.cfg, SQLite, PostgreSQL)")
-        self.b_demo = _tool("demo_db", "Database demo", "Usa il database dimostrativo")
-        self.b_new_site = _tool("site", "Nuovo sito...", "Crea la scheda Sito in PyArchInit")
-        self.b_new_us = _tool("us", "Nuova US...", "Crea una scheda US nel sito selezionato")
+        self.b_connect = _tool("database", tr("Connetti..."), tr("Connetti al database di PyArchInit (config.cfg, "
+                                                                 "SQLite, PostgreSQL)"))
+        self.b_demo = _tool("demo_db", tr("Database demo"), tr("Usa il database dimostrativo"))
+        self.b_new_site = _tool("site", tr("Nuovo sito..."), tr("Crea la scheda Sito in PyArchInit"))
+        self.b_new_us = _tool("us", tr("Nuova US..."), tr("Crea una scheda US nel sito selezionato"))
         row.addWidget(self.b_connect)
         row.addWidget(self.b_demo)
         row.addWidget(self.b_new_site)
@@ -1187,17 +1201,17 @@ class PyArchInitPane(QWidget):
         self.b_demo.clicked.connect(self.demo_requested)
         self.b_new_site.clicked.connect(self.new_site_requested)
         self.b_new_us.clicked.connect(lambda: self.us_requested.emit(self.current_site() or "", "1", "", "US"))
-        self.status = QLabel("Non connesso")
+        self.status = QLabel(tr("Non connesso"))
         self.status.setWordWrap(True)
         lay.addWidget(self.status)
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Elemento", "Descrizione"])
+        self.tree.setHeaderLabels([tr("Elemento"), tr("Descrizione")])
         self.tree.setIconSize(QSize(16, 16))
         self.tree.setAlternatingRowColors(True)
         self.tree.itemDoubleClicked.connect(self._open_us)
         self.tree.currentItemChanged.connect(lambda cur, _prev: self._show_media(cur))
         lay.addWidget(self.tree, 1)
-        self.media_label = QLabel("Media: seleziona una US o un sito")
+        self.media_label = QLabel(tr("Media: seleziona una US o un sito"))
         self.media_label.setObjectName("pageSubtitle")
         lay.addWidget(self.media_label)
         self.media = QListWidget()
@@ -1207,10 +1221,10 @@ class PyArchInitPane(QWidget):
         self.media.setMovement(QListWidget.Movement.Static)
         self.media.setWordWrap(True)
         self.media.setMaximumHeight(150)
-        self.media.setToolTip("Media di PyArchInit collegati: doppio clic per aprirli")
+        self.media.setToolTip(tr("Media di PyArchInit collegati: doppio clic per aprirli"))
         self.media.itemDoubleClicked.connect(self._open_media)
         lay.addWidget(self.media)
-        hint = QLabel("Doppio clic su una US per aprire la scheda")
+        hint = QLabel(tr("Doppio clic su una US per aprire la scheda"))
         hint.setObjectName("pageSubtitle")
         hint.setWordWrap(True)
         lay.addWidget(hint)
@@ -1218,13 +1232,14 @@ class PyArchInitPane(QWidget):
 
     def set_connection(self, pa, label: str) -> None:
         self.pa = pa
-        kind = "PostgreSQL" if pa.db.is_postgres else ("SpatiaLite" if pa.db.spatialite else "SQLite (senza mod_spatialite)")
-        self.status.setText(f"Connesso ({kind}): {label}")
+        kind = ("PostgreSQL" if pa.db.is_postgres else "SpatiaLite" if pa.db.spatialite
+                else tr("SQLite (senza mod_spatialite)"))
+        self.status.setText(tr("Connesso ({0}): {1}", kind, label))
         self.refresh()
 
     def set_disconnected(self, text: str = "Non connesso") -> None:
         self.pa = None
-        self.status.setText(text)
+        self.status.setText(tr(text))
         self.tree.clear()
 
     def set_project_site(self, sito: str) -> None:
@@ -1256,7 +1271,7 @@ class PyArchInitPane(QWidget):
         try:
             sites = self.pa.sites()
         except Exception as exc:
-            self.status.setText(f"Errore: {exc}")
+            self.status.setText(tr("Errore: {0}", exc))
             return
         if self._project_site and any(str(s.get("sito")) == self._project_site for s in sites):
             sites = [s for s in sites if str(s.get("sito")) == self._project_site]
@@ -1265,7 +1280,7 @@ class PyArchInitPane(QWidget):
             si = QTreeWidgetItem([str(name), str(s.get("comune") or "")])
             si.setIcon(0, icon("site"))
             self.tree.addTopLevelItem(si)
-            us_root = QTreeWidgetItem(["Unita' stratigrafiche", ""])
+            us_root = QTreeWidgetItem([tr("Unita' stratigrafiche"), ""])
             us_root.setIcon(0, icon("us"))
             si.addChild(us_root)
             try:
@@ -1275,13 +1290,14 @@ class PyArchInitPane(QWidget):
                     it.setData(0, Qt.ItemDataRole.UserRole, (str(name), str(u.get("area") or ""), str(u.get("us")),
                                                              str(u.get("unita_tipo") or "US")))
                     us_root.addChild(it)
-                doc_root = QTreeWidgetItem(["Documentazione", ""])
+                doc_root = QTreeWidgetItem([tr("Documentazione"), ""])
                 doc_root.setIcon(0, icon("doc"))
                 si.addChild(doc_root)
                 for d in self.pa.documentation(name):
-                    doc_root.addChild(QTreeWidgetItem([str(d.get("nome_doc")), str(d.get("tipo_documentazione") or "")]))
+                    doc_root.addChild(QTreeWidgetItem([str(d.get("nome_doc")),
+                                                       str(d.get("tipo_documentazione") or "")]))
             except Exception as exc:
-                us_root.addChild(QTreeWidgetItem([f"errore: {exc}", ""]))
+                us_root.addChild(QTreeWidgetItem([tr("errore: {0}", exc), ""]))
             si.setExpanded(True)
             us_root.setExpanded(True)
         self.tree.resizeColumnToContents(0)
@@ -1317,12 +1333,12 @@ class PyArchInitPane(QWidget):
                 what = f"{data[3]} {data[2]} (area {data[1]})"
             elif item.parent() is None:  # a site
                 media = self.pa.site_media(item.text(0))
-                what = f"sito {item.text(0)}"
+                what = tr("sito {0}", item.text(0))
             else:
-                self.media_label.setText("Media: seleziona una US o un sito")
+                self.media_label.setText(tr("Media: seleziona una US o un sito"))
                 return 0
         except Exception as exc:
-            self.media_label.setText(f"Media non letti: {exc}")
+            self.media_label.setText(tr("Media non letti: {0}", exc))
             return 0
         for m in media:
             it = QListWidgetItem(str(m["filename"]))
@@ -1330,10 +1346,11 @@ class PyArchInitPane(QWidget):
             it.setIcon(QIcon(str(preview)) if preview is not None else icon("doc"))
             it.setToolTip(f"{m['filename']}.{m['filetype']} - {m['mediatype']}"
                           + (f"\n{m['descrizione']}" if m.get("descrizione") else "")
-                          + ("" if m["path"] or m["resize"] else "\n(file non presente su questo computer)"))
+                          + ("" if m["path"] or m["resize"] else tr("\n(file non presente su questo computer)")))
             it.setData(Qt.ItemDataRole.UserRole, m)
             self.media.addItem(it)
-        self.media_label.setText(f"Media di {what}: {len(media)}" if media else f"Nessun media collegato a {what}")
+        self.media_label.setText(tr("Media di {0}: {1}", what, len(media)) if media
+                                 else tr("Nessun media collegato a {0}", what))
         return len(media)
 
     def _open_media(self, item) -> None:
@@ -1369,11 +1386,11 @@ class LayersPane(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         bar = FlowLayout()
-        self.b_all = _tool("ok", "Tutti", "Mostra tutti i layer")
-        self.b_none = _tool("eraser", "Nessuno", "Nascondi tutti i layer")
-        self.b_zoom = _tool("search", "Zoom", "Zoom sul layer o sull'elemento selezionato")
-        self.b_remove = _tool("clear", "Rimuovi", "Rimuovi il layer selezionato dalla vista")
-        self.b_us = _tool("us", "Scheda US", "Apri (o crea) la scheda PyArchInit dell'unita' selezionata")
+        self.b_all = _tool("ok", tr("Tutti"), tr("Mostra tutti i layer"))
+        self.b_none = _tool("eraser", tr("Nessuno"), tr("Nascondi tutti i layer"))
+        self.b_zoom = _tool("search", "Zoom", tr("Zoom sul layer o sull'elemento selezionato"))
+        self.b_remove = _tool("clear", tr("Rimuovi"), tr("Rimuovi il layer selezionato dalla vista"))
+        self.b_us = _tool("us", tr("Scheda US"), tr("Apri (o crea) la scheda PyArchInit dell'unita' selezionata"))
         self.b_us.clicked.connect(lambda: self.us_form_requested.emit(*self._current) if self._current else None)
         for b in (self.b_all, self.b_none, self.b_zoom, self.b_remove, self.b_us):
             bar.addWidget(b)
@@ -1383,11 +1400,11 @@ class LayersPane(QWidget):
         self.tree.setIconSize(QSize(16, 16))
         self.tree.setAlternatingRowColors(True)
         lay.addWidget(self.tree, 1)
-        title = QLabel("ATTRIBUTI")
+        title = QLabel(tr("ATTRIBUTI"))
         title.setObjectName("sectionTitle")
         lay.addWidget(title)
         self.attrs = QTableWidget(0, 2)
-        self.attrs.setHorizontalHeaderLabels(["Campo", "Valore"])
+        self.attrs.setHorizontalHeaderLabels([tr("Campo"), tr("Valore")])
         self.attrs.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.attrs.verticalHeader().setVisible(False)
         self.attrs.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked
@@ -1396,7 +1413,7 @@ class LayersPane(QWidget):
         self.attrs.setMaximumHeight(200)
         self.attrs.itemChanged.connect(self._attr_changed)
         lay.addWidget(self.attrs)
-        hint = QLabel("Doppio clic su un valore per modificarlo")
+        hint = QLabel(tr("Doppio clic su un valore per modificarlo"))
         hint.setObjectName("pageSubtitle")
         hint.setWordWrap(True)
         lay.addWidget(hint)
@@ -1436,12 +1453,12 @@ class LayersPane(QWidget):
             for i, (_item, _label, attrs) in enumerate(feats[:self.MAX_LISTED]):
                 shown = [(k, v) for k, v in attrs.items() if not str(k).startswith("_")]
                 text = str(attrs.get("etichetta") or "") or ", ".join(f"{k} {v}" for k, v in shown[:2])
-                child = QTreeWidgetItem([text or f"elemento {i + 1}"])
+                child = QTreeWidgetItem([text or tr("elemento {0}", i + 1)])
                 child.setData(0, Qt.ItemDataRole.UserRole, (name, i))
                 top.addChild(child)
             if len(feats) > self.MAX_LISTED:  # thousands of contour lines: listing them would only slow down
-                more = QTreeWidgetItem([f"... altri {len(feats) - self.MAX_LISTED} elementi (clic sulla mappa "
-                                        "per interrogarli)"])
+                more = QTreeWidgetItem([tr("... altri {0} elementi (clic sulla mappa per interrogarli)",
+                                           len(feats) - self.MAX_LISTED)])
                 more.setData(0, Qt.ItemDataRole.UserRole, (name, -2))  # not a feature, not the layer
                 top.addChild(more)
             top.setExpanded(name in expanded or len(feats) <= 12)
@@ -1543,11 +1560,12 @@ class SectionsPane(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(4, 4, 4, 4)
         bar = FlowLayout()
-        self.b_zoom = _tool("search", "Zoom sulla traccia")
-        self.b_folder = _tool("folder", "Apri cartella")
-        self.b_publish = _tool("publish", "Pubblica in PyArchInit", "Scrive la traccia in pyarchinit_sezioni")
-        self.b_delete = _tool("clear", "Elimina")
-        self.b_elevation = _tool("elevation", "Prospetto", "Ortofoto e rilievo della parete lungo questa traccia")
+        self.b_zoom = _tool("search", tr("Zoom sulla traccia"))
+        self.b_folder = _tool("folder", tr("Apri cartella"))
+        self.b_publish = _tool("publish", tr("Pubblica in PyArchInit"), tr("Scrive la traccia in pyarchinit_sezioni"))
+        self.b_delete = _tool("clear", tr("Elimina"))
+        self.b_elevation = _tool("elevation", tr("Prospetto"),
+                                 tr("Ortofoto e rilievo della parete lungo questa traccia"))
         for b in (self.b_zoom, self.b_folder, self.b_publish, self.b_elevation, self.b_delete):
             bar.addWidget(b)
         outer.addLayout(bar)
@@ -1558,7 +1576,7 @@ class SectionsPane(QWidget):
         self.list.currentItemChanged.connect(lambda cur, _p: self._show(cur))
         lay.addWidget(self.list)
         right = QVBoxLayout()
-        self.info = QLabel("Traccia una sezione: Disegno > Traccia sezione, poi due clic sull'ortofoto.")
+        self.info = QLabel(tr("Traccia una sezione: Disegno > Traccia sezione, poi due clic sull'ortofoto."))
         self.info.setWordWrap(True)
         self.info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         right.addWidget(self.info)
@@ -1617,9 +1635,9 @@ class SectionsPane(QWidget):
             if size is not None:
                 self.svg.setFixedSize(size)
         p1, p2 = s.get("p1", [0, 0]), s.get("p2", [0, 0])
-        self.info.setText(f"<b>{s['label']}</b>  lunghezza {s.get('length', 0):.3f} m  -  da "
-                          f"({p1[0]:.2f}, {p1[1]:.2f}) a ({p2[0]:.2f}, {p2[1]:.2f})<br>"
-                          f"SVG: {s.get('svg', '')}<br>DXF: {s.get('dxf', '')}  -  3D: {s.get('dxf3d', '')}")
+        self.info.setText(tr("<b>{0}</b>  lunghezza {1:.3f} m  -  da ({2:.2f}, {3:.2f}) a ({4:.2f}, {5:.2f})<br>SVG: "
+                             "{6}<br>DXF: {7}  -  3D: {8}", s['label'], s.get('length', 0), p1[0], p1[1], p2[0], p2[1],
+                             s.get('svg', ''), s.get('dxf', ''), s.get('dxf3d', '')))
 
 
 
@@ -1678,9 +1696,10 @@ class ProxiesPane(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         bar = FlowLayout()
-        self.b_new = _tool("model", "Crea proxy...", "Solidi delle US tra la superficie e una base")
-        self.b_show = _tool("view3d", "Vedi in 3D")
-        self.b_export = _tool("export", "Esporta (Extended Matrix)", "Un OBJ con un oggetto per US (US12, USM3...)")
+        self.b_new = _tool("model", tr("Crea proxy..."), tr("Solidi delle US tra la superficie e una base"))
+        self.b_show = _tool("view3d", tr("Vedi in 3D"))
+        self.b_export = _tool("export", tr("Esporta (Extended Matrix)"), tr("Un OBJ con un oggetto per US (US12, "
+                                                                            "USM3...)"))
         for b in (self.b_new, self.b_show, self.b_export):
             bar.addWidget(b)
         lay.addLayout(bar)
@@ -1694,10 +1713,11 @@ class ProxiesPane(QWidget):
         self.table.itemDoubleClicked.connect(lambda it: self.us_requested.emit(it.row()))
         lay.addWidget(self.table, 1)
         bar2 = FlowLayout()
-        self.b_pub = _tool("publish", "Pubblica in PyArchInit", "Modello 3D collegato alla scheda US (media)")
-        self.b_quote = _tool("dem", "Quote nella scheda US", "Scrive quota minima e massima assolute nella scheda")
-        self.b_us = _tool("us", "Scheda US")
-        self.b_del = _tool("clear", "Elimina")
+        self.b_pub = _tool("publish", tr("Pubblica in PyArchInit"), tr("Modello 3D collegato alla scheda US (media)"))
+        self.b_quote = _tool("dem", tr("Quote nella scheda US"), tr("Scrive quota minima e massima assolute nella "
+                                                                    "scheda"))
+        self.b_us = _tool("us", tr("Scheda US"))
+        self.b_del = _tool("clear", tr("Elimina"))
         for b in (self.b_pub, self.b_quote, self.b_us, self.b_del):
             bar2.addWidget(b)
         lay.addLayout(bar2)
@@ -1723,7 +1743,7 @@ class ProxiesPane(QWidget):
         for r, e in enumerate(entries):
             vals = [e["name"], e.get("us") or "", e.get("area") or "", f"{e['volume_m3']:.3f}", f"{e['area_m2']:.3f}",
                     f"{e['z_top'][1]:.3f}", f"{e['z_bottom'][0]:.3f}",
-                    ("collegato" if e.get("id_media") else "")]
+                    (tr("collegato") if e.get("id_media") else "")]
             for c, v in enumerate(vals):
                 it = QTableWidgetItem(v)
                 if c == 0:
@@ -1731,5 +1751,5 @@ class ProxiesPane(QWidget):
                     it.setForeground(QColor(int(col[0]), int(col[1]), int(col[2])))
                 self.table.setItem(r, c, it)
         vol = sum(e["volume_m3"] for e in entries)
-        self.total.setText(f"{len(entries)} proxy, volume totale {vol:.3f} m3" if entries else
-                           "Nessun proxy: crea i solidi delle US con 'Crea proxy'")
+        self.total.setText(tr("{0} proxy, volume totale {1:.3f} m3", len(entries), vol) if entries else
+                           tr("Nessun proxy: crea i solidi delle US con 'Crea proxy'"))

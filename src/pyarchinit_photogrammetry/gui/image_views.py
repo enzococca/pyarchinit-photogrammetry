@@ -12,6 +12,8 @@ from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPainterPath,
 from PySide6.QtWidgets import (QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsPixmapItem, QGraphicsScene,
                                QGraphicsSimpleTextItem, QGraphicsView, QInputDialog, QMenu)
 
+from .i18n import tr
+
 SCALAR_KINDS = ("dem", "diff", "sigma", "coverage", "slope", "aspect")  # one band of values, coloured
 US_COLORS = ["#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231", "#911eb4", "#46f0f0", "#f032e6", "#bcf60c",
              "#fabebe", "#008080", "#e6beff", "#9a6324", "#800000", "#aaffc3", "#808000"]
@@ -974,21 +976,21 @@ class RasterView(_ZoomView):
 
     def _selection_menu(self, global_pos) -> None:
         menu = QMenu(self)
-        a_del = menu.addAction(f"Elimina selezionati ({len(self.selection)})")
-        a_merge = menu.addAction("Unisci selezionati")
+        a_del = menu.addAction(tr("Elimina selezionati ({0})", len(self.selection)))
+        a_merge = menu.addAction(tr("Unisci selezionati"))
         a_merge.setEnabled(len(self.selection) > 1)
         polygon = any(layer and self.layers[layer]["kind"] == "polygon" for layer, _i, _a in self.selected_features())
-        a_crop = menu.addAction("Ritaglia o esporta con questo poligono...")
+        a_crop = menu.addAction(tr("Ritaglia o esporta con questo poligono..."))
         a_crop.setEnabled(polygon)
-        a_patch = menu.addAction("Assegna immagini a quest'area (patch dell'ortofoto)...")
+        a_patch = menu.addAction(tr("Assegna immagini a quest'area (patch dell'ortofoto)..."))
         a_patch.setEnabled(polygon and self.kind == "ortho")
-        a_photos = menu.addAction("Filtra le foto che inquadrano quest'area")
+        a_photos = menu.addAction(tr("Filtra le foto che inquadrano quest'area"))
         a_photos.setEnabled(polygon)
-        a_dem = menu.addAction("Modifica il DEM in quest'area (riempi dal terreno attorno)...")
+        a_dem = menu.addAction(tr("Modifica il DEM in quest'area (riempi dal terreno attorno)..."))
         a_dem.setEnabled(polygon)
-        a_area = menu.addAction("Misura l'area e la superficie")
+        a_area = menu.addAction(tr("Misura l'area e la superficie"))
         a_area.setEnabled(polygon)
-        a_clear = menu.addAction("Deseleziona tutto")
+        a_clear = menu.addAction(tr("Deseleziona tutto"))
         chosen = menu.exec(global_pos)
         if chosen is a_del:
             self.delete_requested.emit()
@@ -1118,8 +1120,8 @@ class RasterView(_ZoomView):
     def _point_menu(self, global_pos, x: float, y: float) -> None:
         """Right click in pan mode: the photos that see the point, a marker there."""
         menu = QMenu(self)
-        a_photos = menu.addAction("Filtra le foto che vedono questo punto")
-        a_marker = menu.addAction("Aggiungi un marker qui")
+        a_photos = menu.addAction(tr("Filtra le foto che vedono questo punto"))
+        a_marker = menu.addAction(tr("Aggiungi un marker qui"))
         chosen = menu.exec(global_pos)
         if chosen is a_photos:
             self.photos_at_point.emit(x, y)
@@ -1185,9 +1187,10 @@ class RasterView(_ZoomView):
                 self.line_finished.emit(a, b)
             else:
                 za, zb = self.elevation(*a), self.elevation(*b)
-                txt = f"Distanza {np.linalg.norm(b - a):.3f} m"
+                txt = tr("Distanza {0:.3f} m", np.linalg.norm(b - a))
                 if za is not None and zb is not None:
-                    txt += f", dislivello {zb - za:+.3f} m, distanza inclinata {np.sqrt(np.sum((b - a) ** 2) + (zb - za) ** 2):.3f} m"
+                    txt += tr(", dislivello {0:+.3f} m, distanza inclinata {1:.3f} m",
+                              zb - za, np.sqrt(np.sum((b - a) ** 2) + (zb - za) ** 2))
                 self.measured.emit(txt)
             self.set_mode(self.mode)
 
@@ -1250,7 +1253,7 @@ class PhotoView(_ZoomView):
         img = cv2.imread(camera.path, cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
         if img is None:
             self.pixmap_item = None
-            self.scene().addText(f"Impossibile leggere {camera.path}")
+            self.scene().addText(tr("Impossibile leggere {0}", camera.path))
             return
         self.pixmap_item = self.scene().addPixmap(QPixmap.fromImage(to_qimage(img[:, :, ::-1])))
         self.setSceneRect(QRectF(0, 0, img.shape[1], img.shape[0]))
@@ -1558,19 +1561,19 @@ class PhotoView(_ZoomView):
         if near is not None:
             pr = near.projections[self.camera.key]
             if not pr.measured:
-                menu.addAction(f"Conferma {near.label} dov'e' (bandierina giusta)").triggered.connect(
+                menu.addAction(tr("Conferma {0} dov'e' (bandierina giusta)", near.label)).triggered.connect(
                     lambda: self._place(near, pr.x, pr.y))
-            menu.addAction(f"Sposta {near.label} qui").triggered.connect(lambda: self._place(near, x, y))
-        place = menu.addMenu("Posiziona marker qui")
+            menu.addAction(tr("Sposta {0} qui", near.label)).triggered.connect(lambda: self._place(near, x, y))
+        place = menu.addMenu(tr("Posiziona marker qui"))
         for m in self.chunk.markers:
             place.addAction(m.label).triggered.connect(lambda _=False, mm=m: self._place(mm, x, y))
         place.addSeparator()
-        place.addAction("Nuovo marker...").triggered.connect(lambda: self._new_marker(x, y))
+        place.addAction(tr("Nuovo marker...")).triggered.connect(lambda: self._new_marker(x, y))
         if near is not None:
-            menu.addAction(f"Rimuovi proiezione di {near.label}").triggered.connect(lambda: self._remove(near))
+            menu.addAction(tr("Rimuovi proiezione di {0}", near.label)).triggered.connect(lambda: self._remove(near))
         menu.addSeparator()
-        menu.addAction("Foto successiva (Pagina giu')").triggered.connect(lambda: self.navigate.emit(1))
-        menu.addAction("Foto precedente (Pagina su)").triggered.connect(lambda: self.navigate.emit(-1))
+        menu.addAction(tr("Foto successiva (Pagina giu')")).triggered.connect(lambda: self.navigate.emit(1))
+        menu.addAction(tr("Foto precedente (Pagina su)")).triggered.connect(lambda: self.navigate.emit(-1))
         menu.exec(ev.globalPos())
 
     def _place(self, marker, x, y) -> None:
@@ -1586,7 +1589,7 @@ class PhotoView(_ZoomView):
         n = 1
         while f"point {n}" in names:
             n += 1
-        label, ok = QInputDialog.getText(self, "Nuovo marker", "Etichetta:", text=f"point {n}")
+        label, ok = QInputDialog.getText(self, tr("Nuovo marker"), tr("Etichetta:"), text=f"point {n}")
         if ok and label:
             m = self.chunk.add_marker(label)
             self._place(m, x, y)

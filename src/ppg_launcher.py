@@ -14,6 +14,36 @@ import time
 
 TITLE = "PyArchInit Photogrammetry"
 SUBTITLE = "Fotogrammetria open source per l'archeologia e il BIM"
+ENGLISH = {SUBTITLE: "Open-source photogrammetry for archaeology and BIM", "Avvio": "Starting",
+           "Librerie di calcolo (NumPy, Open3D)": "Computing libraries (NumPy, Open3D)",
+           "Geodesia (PROJ, GDAL)": "Geodesy (PROJ, GDAL)", "Sistemi di riferimento": "Coordinate systems",
+           "Fotogrammetria (COLMAP)": "Photogrammetry (COLMAP)", "Vista 3D (VTK)": "3D view (VTK)",
+           "Interfaccia": "Interface", "versione {0}": "version {0}"}  # the texts of the splash
+
+
+def english() -> bool:
+    """Whether the interface is in English, decided as ``pyarchinit_photogrammetry.gui.i18n`` does
+    (``PPG_LANG``, the setting of *Vista > Lingua*, the language of the system) without importing
+    the package."""
+    code = os.environ.get("PPG_LANG", "").strip().lower()[:2]
+    if code in ("it", "en"):
+        return code == "en"
+    try:
+        from PySide6.QtCore import QLocale, QSettings
+
+        settings = QSettings(QSettings.defaultFormat(), QSettings.Scope.UserScope, "pyarchinit",
+                             "pyarchinit-photogrammetry")
+        code = str(settings.value("language", "") or "")
+        if code in ("it", "en"):
+            return code == "en"
+        langs = QLocale.system().uiLanguages()
+        return not (langs and langs[0].lower().startswith("it"))
+    except Exception:  # pragma: no cover - Qt missing
+        return False
+
+
+def _t(text: str) -> str:
+    return ENGLISH.get(text, text) if english() else text
 
 
 def _logo_path() -> str | None:
@@ -66,7 +96,7 @@ def _splash_class():
             titles.setSpacing(4)
             self.title = QLabel(title)
             self.title.setStyleSheet("color: white; font-size: 23px; font-weight: 700;")
-            self.subtitle = QLabel(subtitle)
+            self.subtitle = QLabel(_t(subtitle))
             self.subtitle.setWordWrap(True)
             self.subtitle.setStyleSheet("color: #c9d8e8; font-size: 13px;")
             titles.addStretch(1)
@@ -280,12 +310,12 @@ def main(argv: list[str] | None = None) -> int:
         QApplication([sys.argv[0]] + argv)
     c_numbers()
     splash = Splash()
-    splash.step(2, "Avvio")
+    splash.step(2, _t("Avvio"))
     times = {}
     for percent, text, module in STEPS:
         if module == "pyvistaqt" and os.environ.get("PPG_RENDERER") == "software":
             continue  # no VTK view
-        splash.step(percent, text)
+        splash.step(percent, _t(text))
         t = time.perf_counter()
         try:
             importlib.import_module(module)
@@ -295,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
         if module == "pyarchinit_photogrammetry":
             from pyarchinit_photogrammetry import __version__
 
-            splash.footer.setText(f"versione {__version__}")
+            splash.footer.setText(_t("versione {0}").format(__version__))
     from pyarchinit_photogrammetry.gui import main as gui_main
 
     return gui_main(argv, splash=splash, started=started, import_times=times)

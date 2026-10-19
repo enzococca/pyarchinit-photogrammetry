@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog
 
 from .. import batch
 from .dialogs import QUALITY, Field, ParamDialog, message
+from .i18n import tr
 from .icons import icon
 
 LABELS = {"detect_markers": "Rileva marker codificati", "import_reference": "Importa i riferimenti (CSV)",
@@ -104,13 +105,13 @@ def describe(s: dict, doc=None) -> str:
             continue
         shown = dict(f.choices or []).get(v, v)
         if isinstance(v, bool):
-            shown = "si" if v else "no"
-        parts.append(f"{f.label.split(' (')[0]}: {shown}")
+            shown = tr("sì") if v else "no"
+        parts.append(f"{tr(f.label.split(' (')[0])}: {tr(shown) if isinstance(shown, str) else shown}")
     extra = ", ".join(parts)
     chunks = s.get("chunks", "all")
-    where = "tutti i chunk" if chunks in ("all", None) else ("chunk attivi" if chunks == "enabled"
-                                                            else ", ".join(map(str, chunks)))
-    return f"{LABELS.get(s['op'], s['op'])}" + (f" ({extra})" if extra else "") + f"  -  {where}"
+    where = tr("tutti i chunk") if chunks in ("all", None) else (tr("chunk attivi") if chunks == "enabled"
+                                                                else ", ".join(map(str, chunks)))
+    return tr(LABELS.get(s['op'], s['op'])) + (f" ({extra})" if extra else "") + f"  -  {where}"
 
 
 class BatchDialog(QDialog):
@@ -118,14 +119,14 @@ class BatchDialog(QDialog):
 
     def __init__(self, doc, steps: list[dict] | None = None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Elaborazione batch")
+        self.setWindowTitle(tr("Elaborazione batch"))
         self.setMinimumSize(620, 420)
         self.doc = doc
         lay = QVBoxLayout(self)
-        intro = QLabel("I passi vengono eseguiti in ordine, ognuno su tutti i suoi chunk; il progetto si salva dopo "
-                       "ogni passo. Se il batch si interrompe (corrente, crash, Annulla) riparte da dove era arrivato. "
-                       "Un passo che fallisce viene ritentato; se fallisce ancora i passi successivi di quel chunk si "
-                       "saltano.")
+        intro = QLabel(tr("I passi vengono eseguiti in ordine, ognuno su tutti i suoi chunk; il progetto si salva "
+                          "dopo ogni passo. Se il batch si interrompe (corrente, crash, Annulla) riparte da dove era "
+                          "arrivato. Un passo che fallisce viene ritentato; se fallisce ancora i passi successivi di "
+                          "quel chunk si saltano."))
         intro.setWordWrap(True)
         lay.addWidget(intro)
         row = QHBoxLayout()
@@ -133,7 +134,7 @@ class BatchDialog(QDialog):
         self.list.itemDoubleClicked.connect(lambda _it: self.edit_step())
         row.addWidget(self.list, 1)
         buttons = QVBoxLayout()
-        self.b_add = QPushButton(icon("add"), "Aggiungi")
+        self.b_add = QPushButton(icon("add"), tr("Aggiungi"))
         menu = QMenu(self.b_add)
         for title, ops in GROUPS:
             sub = menu.addMenu(title)
@@ -155,12 +156,12 @@ class BatchDialog(QDialog):
         self.retries.setValue(1)
         form.addRow("Nuovi tentativi per un passo che fallisce", self.retries)
         self.on_error = QComboBox()
-        self.on_error.addItem("Continua con gli altri chunk", "continue")
-        self.on_error.addItem("Ferma il batch", "stop")
+        self.on_error.addItem(tr("Continua con gli altri chunk"), "continue")
+        self.on_error.addItem(tr("Ferma il batch"), "stop")
         form.addRow("Se un passo fallisce", self.on_error)
         lay.addLayout(form)
         box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        box.button(QDialogButtonBox.StandardButton.Ok).setText("Avvia")
+        box.button(QDialogButtonBox.StandardButton.Ok).setText(tr("Avvia"))
         box.accepted.connect(self._accept)
         box.rejected.connect(self.reject)
         lay.addWidget(box)
@@ -228,13 +229,13 @@ class BatchDialog(QDialog):
         self._append(s, new)
 
     def load(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Carica batch", str(self._folder()), "Batch (*.json)")
+        path, _ = QFileDialog.getOpenFileName(self, tr("Carica batch"), str(self._folder()), "Batch (*.json)")
         if not path:
             return
         try:
             steps = batch.load_steps(path)
         except Exception as exc:  # noqa: BLE001 - a wrong file is reported, not raised
-            message(self, "warning", "Carica batch", f"File non valido: {exc}")
+            message(self, "warning", "Carica batch", tr("File non valido: {0}", exc))
             return
         self._steps.clear()
         self.list.clear()
@@ -242,7 +243,7 @@ class BatchDialog(QDialog):
             self._append(s)
 
     def save(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "Salva batch", str(self._folder() / "batch.json"),
+        path, _ = QFileDialog.getSaveFileName(self, tr("Salva batch"), str(self._folder() / "batch.json"),
                                               "Batch (*.json)")
         if path:
             batch.save_steps(self.steps(), path)

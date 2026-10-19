@@ -68,7 +68,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 # files the code reads at run time (tests/test_packaging.py checks that nothing is left out)
-pyarchinit_photogrammetry = ["gui/resources/*", "pyarchinit/*.sql"]
+pyarchinit_photogrammetry = ["gui/resources/*", "gui/translations/*.json", "pyarchinit/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

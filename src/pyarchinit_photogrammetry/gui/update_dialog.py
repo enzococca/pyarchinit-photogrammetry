@@ -10,6 +10,8 @@ from PySide6.QtWidgets import (QApplication, QDialog, QHBoxLayout, QLabel, QPush
 
 from .. import __version__, updates
 
+from .i18n import tr
+
 ERROR_TEXTS = {
     "offline": "GitHub non e' raggiungibile: controlla la connessione a Internet.",
     "limit": "GitHub ha ricevuto troppe richieste da questa rete: riprova tra un'ora.",
@@ -22,7 +24,7 @@ SOURCE_COMMAND = "git pull"
 
 
 def error_text(exc: Exception) -> str:
-    return ERROR_TEXTS.get(getattr(exc, "kind", ""), "Controllo degli aggiornamenti non riuscito.")
+    return tr(ERROR_TEXTS.get(getattr(exc, "kind", ""), "Controllo degli aggiornamenti non riuscito."))
 
 
 class UpdateChecker(QObject):
@@ -70,12 +72,12 @@ class UpdateDialog(QDialog):
         self.release = release
         self.kind = kind or updates.install_kind()
         self.action = "later"
-        self.setWindowTitle("Aggiornamento disponibile")
+        self.setWindowTitle(tr("Aggiornamento disponibile"))
         lay = QVBoxLayout(self)
         date = release.published[:10]
-        head = QLabel(f"<b>E' disponibile PyArchInit Photogrammetry {release.version}</b>"
-                      + (f" (pubblicata il {date[8:10]}/{date[5:7]}/{date[:4]})" if len(date) == 10 else "")
-                      + f"<br>Questa copia e' la versione {__version__}.")
+        head = QLabel(tr("<b>E' disponibile PyArchInit Photogrammetry {0}</b>", release.version)
+                      + (tr(" (pubblicata il {0}/{1}/{2})", date[8:10], date[5:7], date[:4]) if len(date) == 10 else "")
+                      + tr("<br>Questa copia e' la versione {0}.", __version__))
         lay.addWidget(head)
         notes = QTextBrowser()
         notes.setOpenExternalLinks(True)
@@ -88,7 +90,7 @@ class UpdateDialog(QDialog):
                          "come quando esci (con la richiesta di salvarlo).",
             "windows-app": "Il file zip viene scaricato nella cartella Download: chiudi il programma, estrai lo "
                            "zip e sostituisci la cartella del programma.",
-            "pip": f"Installazione Python: aggiorna con <code>{updates.PIP_COMMAND}</code> (o con uv).",
+            "pip": tr("Installazione Python: aggiorna con <code>{0}</code> (o con uv).", updates.PIP_COMMAND),
             "source": "Copia dai sorgenti: aggiorna con <code>git pull</code> e reinstalla le dipendenze.",
         }.get(self.kind, "")
         if hint:

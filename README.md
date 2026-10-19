@@ -332,7 +332,8 @@ Command line: `ppg scalebar PROJECT --markers "target 3,target 9" --distance 0.1
 
 ## Desktop interface
 
-`ppg-gui` opens the desktop application (Italian UI): start page with recent projects; a
+`ppg-gui` opens the desktop application (Italian or English UI, *Vista > Lingua / Language*;
+by default the language of the system): start page with recent projects; a
 toolbar with the workflow (photos, markers, alignment, references, dense cloud, model,
 texture, DEM, orthophoto, *Elabora tutto*); workspace with chunks, cameras, markers and
 products; 3D view (VTK, with a software fallback renderer); orthomosaic and DEM view with

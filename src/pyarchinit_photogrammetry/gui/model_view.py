@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QHBoxLayout, 
                                QWidget)
 
 from .flow_layout import FlowLayout
+from .i18n import thousands_points, tr
 from .scene import OrbitCamera, SceneData, available_views, build_scene, sample_mesh_colors, splat
 
 VIEW_LABELS = {"cameras": "Camere", "tie_points": "Punti di legame", "point_cloud": "Nuvola densa",
@@ -147,7 +148,7 @@ class SoftwareCanvas(QWidget):
                 if ok[a] and ok[b]:
                     p.drawLine(QPointF(float(x[a]), float(y[a])), QPointF(float(x[b]), float(y[b])))
         p.setPen(QColor(200, 200, 200))
-        p.drawText(8, h - 8, f"{VIEW_LABELS.get(self.sd.kind, self.sd.kind)} - renderer software")
+        p.drawText(8, h - 8, tr("{0} - renderer software", tr(VIEW_LABELS.get(self.sd.kind, self.sd.kind))))
         p.end()
 
     # ----------------------------------------------------------- interaction
@@ -500,7 +501,7 @@ class ClassLegend(QListWidget):
         for key, text, rgb, n in rows:
             pm = QPixmap(14, 14)
             pm.fill(QColor(*[int(v) for v in rgb]))
-            it = QListWidgetItem(QIcon(pm), f"{text}  ({n:,})".replace(",", "."))
+            it = QListWidgetItem(QIcon(pm), thousands_points(f"{text}  ({n:,})"))
             it.setData(Qt.ItemDataRole.UserRole, int(key))
             it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             it.setCheckState(Qt.CheckState.Unchecked if key in hidden else Qt.CheckState.Checked)
@@ -547,58 +548,60 @@ class ModelView(QWidget):
         self.combo = QComboBox()
         self.combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.combo.currentIndexChanged.connect(self._combo_changed)
-        self.cb_cams = QCheckBox("Camere")
+        self.cb_cams = QCheckBox(tr("Camere"))
         self.cb_cams.setChecked(True)
         self.cb_marks = QCheckBox("Marker")
         self.cb_marks.setChecked(True)
-        self.cb_region = QCheckBox("Regione")
+        self.cb_region = QCheckBox(tr("Regione"))
         self.cb_region.setChecked(True)
-        self.cb_region.setToolTip("Il riquadro giallo della regione di ricostruzione (Flusso di lavoro > Regione)")
+        self.cb_region.setToolTip(tr("Il riquadro giallo della regione di ricostruzione (Flusso di lavoro > Regione)"))
         self.cb_cams.toggled.connect(lambda _: self.refresh(reset=False))
         self.cb_marks.toggled.connect(lambda _: self.refresh(reset=False))
         self.cb_region.toggled.connect(lambda _: self.refresh(reset=False))
-        b_reset = QPushButton("Vista iniziale")
-        b_top = QPushButton("Dall'alto")
+        b_reset = QPushButton(tr("Vista iniziale"))
+        b_top = QPushButton(tr("Dall'alto"))
         self.color_combo = QComboBox()
         self._color_modes: tuple = ()
         self._wanted_mode = "rgb"  # the colours asked for: kept while a view without them is shown
         self._filling = False
         self._fill_color_combo("point_cloud")
-        self.color_combo.setToolTip("Colori: quelli delle foto, le classi (con la legenda per nasconderle), la quota "
-                                    "o la confidenza (quante mappe di profondita' confermano ogni punto o vertice)")
+        self.color_combo.setToolTip(tr("Colori: quelli delle foto, le classi (con la legenda per nasconderle), la "
+                                       "quota "
+                                       "o la confidenza (quante mappe di profondita' confermano ogni punto o vertice)"))
         self.color_combo.currentIndexChanged.connect(self._color_chosen)
         self.point_spin = QSpinBox()
         self.point_spin.setRange(1, 8)
         self.point_spin.setValue(2)
         self.point_spin.setSuffix(" px")
-        self.point_spin.setToolTip("Dimensione dei punti sullo schermo")
-        self.point_label = QLabel("Punti:")
-        self.b_lasso = QPushButton("Lazo")
-        self.b_lasso.setToolTip("Seleziona con un lazo punti della nuvola (classe, elimina, tieni) o facce del "
-                                "modello (elimina, tieni)")
+        self.point_spin.setToolTip(tr("Dimensione dei punti sullo schermo"))
+        self.point_label = QLabel(tr("Punti:"))
+        self.b_lasso = QPushButton(tr("Lazo"))
+        self.b_lasso.setToolTip(tr("Seleziona con un lazo punti della nuvola (classe, elimina, tieni) o facce del "
+                                   "modello (elimina, tieni)"))
         self.b_lasso.clicked.connect(self.start_lasso)
         self.b_marker = QPushButton("Marker")
-        self.b_marker.setToolTip("Aggiungi un marker: clic su un punto del modello o della nuvola, come in Metashape. "
-                                 "Si proietta sulle foto che lo vedono; con due marker si fa una barra di scala")
+        self.b_marker.setToolTip(tr("Aggiungi un marker: clic su un punto del modello o della nuvola, come in "
+                                    "Metashape. "
+                                    "Si proietta sulle foto che lo vedono; con due marker si fa una barra di scala"))
         self.b_marker.clicked.connect(lambda: self.start_pick("marker"))
-        self.b_photos = QPushButton("Foto del punto")
-        self.b_photos.setToolTip("Clic su un punto del modello o della nuvola: le foto che lo vedono, come Filter "
-                                 "Photos by Point di Metashape")
+        self.b_photos = QPushButton(tr("Foto del punto"))
+        self.b_photos.setToolTip(tr("Clic su un punto del modello o della nuvola: le foto che lo vedono, come Filter "
+                                    "Photos by Point di Metashape"))
         self.b_photos.clicked.connect(lambda: self.start_pick("photos"))
-        self.b_section = QPushButton("Sezione")
-        self.b_section.setToolTip("Traccia di una sezione: clic su due punti del modello o della nuvola")
+        self.b_section = QPushButton(tr("Sezione"))
+        self.b_section.setToolTip(tr("Traccia di una sezione: clic su due punti del modello o della nuvola"))
         self.b_section.clicked.connect(lambda: self.start_pick("section"))
-        self.b_slice = QPushButton("Pianta a quota")
-        self.b_slice.setToolTip("Clic su un punto: la pianta del modello tagliato a quella quota")
+        self.b_slice = QPushButton(tr("Pianta a quota"))
+        self.b_slice.setToolTip(tr("Clic su un punto: la pianta del modello tagliato a quella quota"))
         self.b_slice.clicked.connect(lambda: self.start_pick("slice"))
         self.version_label = QLabel("")
         self.version_label.setObjectName("versionLabel")
         self.version_label.setStyleSheet("color: #b45309; font-weight: bold")
         self.version_label.setVisible(False)
-        self.info_label = QLabel("Senza confidenza: Flusso di lavoro > Calcola la confidenza")
+        self.info_label = QLabel(tr("Senza confidenza: Flusso di lavoro > Calcola la confidenza"))
         self.info_label.setStyleSheet("color: #b45309")
         self.info_label.setVisible(False)
-        bar.addWidget(QLabel("Mostra:"))
+        bar.addWidget(QLabel(tr("Mostra:")))
         bar.addWidget(self.combo)
         bar.addWidget(self.version_label)
         bar.addWidget(self.color_combo)
@@ -659,7 +662,7 @@ class ModelView(QWidget):
         """Show a kept version (``path``) of the dense cloud or the model; choosing a view in
         the list goes back to the active products."""
         self.paths = {kind: str(path)}
-        self.version_label.setText(f"Versione: {title} (non attiva)")
+        self.version_label.setText(tr("Versione: {0} (non attiva)", title))
         self.version_label.setVisible(True)
         if self.kind == kind:
             self.refresh(reset=False)
@@ -684,7 +687,7 @@ class ModelView(QWidget):
         self._filling = True
         self.combo.clear()
         for v in views:
-            self.combo.addItem(VIEW_LABELS[v], v)
+            self.combo.addItem(tr(VIEW_LABELS[v]), v)
         from .scene import best_view
 
         kind = kind or (best_view(chunk) if chunk is not None else None)
@@ -784,7 +787,8 @@ class ModelView(QWidget):
         what = {"photos": "le foto che lo vedono", "section": "il primo estremo della sezione",
                 "section_end": "il secondo estremo della sezione", "slice": "la quota della pianta"}.get(
             purpose, "il nuovo posto del marker" if purpose.startswith("move:") else "un nuovo marker")
-        self.picker.start(image, f"Clic su un punto del modello o della nuvola: {what} - Esc o tasto destro annulla")
+        self.picker.start(image, tr("Clic su un punto del modello o della nuvola: {0} - Esc o tasto destro annulla",
+                                    tr(what)))
         self.stack.setCurrentWidget(self.picker)
 
     def _pick_finished(self, pos) -> None:
@@ -953,7 +957,7 @@ class ModelView(QWidget):
         elif mode == "confidence":
             self.legend.set_bins(sd.bin_counts, bins)
             self.legend.setVisible(bool(sd.bin_counts))
-        self.info_label.setText("Senza punti del suolo (classe 2): classifica prima la nuvola" if sd.hag_missing
-                                else "Senza confidenza: Flusso di lavoro > Calcola la confidenza")
+        self.info_label.setText(tr("Senza punti del suolo (classe 2): classifica prima la nuvola") if sd.hag_missing
+                                else tr("Senza confidenza: Flusso di lavoro > Calcola la confidenza"))
         self.info_label.setVisible(bool(sd.confidence_missing or sd.hag_missing))
         self.canvas.set_scene(sd, reset=reset)

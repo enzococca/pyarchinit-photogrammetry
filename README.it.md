@@ -72,7 +72,9 @@ ppg-gui ~/ppg_demo/ceramica/ceramica.ppg   # la ciotola (sistema locale in metri
 ppg-gui                           # pagina iniziale: nuovo, apri, demo, progetti recenti
 ```
 
-`ppg-gui` equivale a `ppg gui` e a `python -m pyarchinit_photogrammetry.gui`. L'interfaccia
+`ppg-gui` equivale a `ppg gui` e a `python -m pyarchinit_photogrammetry.gui`. L'interfaccia e' in
+italiano o in inglese (*Vista > Lingua / Language*; senza una scelta segue la lingua del sistema,
+`PPG_LANG=it` o `en` la impone per una sessione). L'interfaccia
 scrive un log in `~/Library/Logs/pyarchinit-photogrammetry` (macOS),
 `%LOCALAPPDATA%\pyarchinit-photogrammetry\logs` (Windows) o
 `~/.local/state/pyarchinit-photogrammetry/logs` (Linux); *Aiuto > Apri cartella dei log* la apre.

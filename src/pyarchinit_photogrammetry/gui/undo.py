@@ -27,6 +27,8 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .i18n import tr
+
 log = logging.getLogger("pyarchinit_photogrammetry")
 
 PART_NAMES = {"units": "Disegni", "quote": "Quote", "sections": "Sezioni", "pa": "Modifiche per PyArchInit",
@@ -178,11 +180,11 @@ class UndoHistory:
         if not text:
             names = []
             for k in parts:
-                if PART_NAMES.get(k, k) not in names:
-                    names.append(PART_NAMES.get(k, k))
+                if tr(PART_NAMES.get(k, k)) not in names:
+                    names.append(tr(PART_NAMES.get(k, k)))
             for k in (files or {}).get("before", {}):
-                if PRODUCT_NAMES.get(k, k) not in names:
-                    names.append(PRODUCT_NAMES.get(k, k))
+                if tr(PRODUCT_NAMES.get(k, k)) not in names:
+                    names.append(tr(PRODUCT_NAMES.get(k, k)))
             text = ", ".join(names)
         for e in self.entries[self.index:]:  # a new change: what was undone cannot be redone
             self._drop_files(e)

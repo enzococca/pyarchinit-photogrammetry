@@ -7,6 +7,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .i18n import current, decimal_comma, tr
+
 
 @dataclass
 class SceneData:
@@ -92,20 +94,21 @@ def class_palette() -> np.ndarray:
 
 
 def class_name(code: int, labels: dict | None = None) -> str:
-    """Italian name of a class; ``labels`` (``chunk.meta["classes"]``) names the codes of the project."""
+    """Name of a class in the language of the interface; ``labels`` (``chunk.meta["classes"]``) names the
+    codes of the project."""
     from ..core.pointcloud import ARCHAEO_CLASSES, ASPRS_CLASSES
 
     names = {0: "Mai classificati", 1: "Non classificati", 2: "Terreno", 3: "Vegetazione bassa",
              4: "Vegetazione media", 5: "Vegetazione alta", 6: "Edificio", 7: "Rumore (basso)", 9: "Acqua",
              17: "Ponte", 18: "Rumore (alto)"}
     if code in names:
-        return names[code]
-    if code in ARCHAEO_CLASSES:
-        return ARCHAEO_CLASSES[code].split(" / ")[0]
+        return tr(names[code])
+    if code in ARCHAEO_CLASSES:  # "Italiano / English"
+        return ARCHAEO_CLASSES[code].split(" / ")[0 if current() == "it" else -1]
     if code in ASPRS_CLASSES:
         return ASPRS_CLASSES[code]
     name = str((labels or {}).get(str(code)) or "")
-    return f"Classe {code}" if not name or name == f"Class {code}" else name  # unnamed in a trained model
+    return tr("Classe {0}", code) if not name or name == f"Class {code}" else name  # unnamed in a trained model
 
 
 def elevation_colors(z: np.ndarray) -> np.ndarray:
@@ -391,7 +394,7 @@ def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_f
         if a.position is not None and b.position is not None:
             ends = W(np.array([a.position, b.position]))
             error = chunk.scale * float(np.linalg.norm(a.position - b.position)) - sb.distance
-            text = f"{sb.distance:.3f} m  ({error * 1000:+.1f} mm)".replace(".", ",")
+            text = decimal_comma(f"{sb.distance:.3f} m  ({error * 1000:+.1f} mm)")
             sd.scalebars.append((text, ends[0], ends[1], bool(sb.checkpoint)))
     region = chunk.region
     if region is not None:

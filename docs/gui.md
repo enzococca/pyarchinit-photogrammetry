@@ -9,8 +9,14 @@ ppg-gui --check                                # opens, renders and exits (smoke
 
 Or the packaged application for macOS and Windows: [packaging.md](packaging.md).
 
-The interface is in Italian, like PyArchInit. Every action calls the same Python API that
-scripts use, so anything done with the mouse can be repeated in the console or in a script.
+The interface speaks Italian, like PyArchInit, or English: *Vista > Lingua / Language* chooses
+(the change takes effect at the next start, *Riavvia ora* restarts at once with the open
+project); without a choice it follows the language of the system, and `PPG_LANG=en` or `it`
+forces one for a session. Menus, dialogs, panels, messages, the log and the progress of the
+engine are translated, numbers are written the English way; what is data keeps its Italian
+words: the values PyArchInit reads back (US types, relationships), the names of layers and of
+the versions of the products, the drawings and their files. Every action calls the same Python API that scripts use, so anything
+done with the mouse can be repeated in the console or in a script.
 
 ## Start and opening a project
 

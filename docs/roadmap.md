@@ -92,7 +92,8 @@ markers in too few photos.
   photos. *Done.*
 * Section and plan-slice tools drawn directly in the 3D view; markers moved in 3D. *Done.*
 * PyArchInit panel: browsing media linked to US. *Done.*
-* English/Italian interface translation.
+* English/Italian interface translation: catalog of the texts, messages with values, the
+  messages of the engine and of the log recognised when shown, *Vista > Lingua / Language*. *Done.*
 
 ## 1.0 - Archaeology first
 

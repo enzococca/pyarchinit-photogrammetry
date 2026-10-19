@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QListWidget, QListWi
 
 from .. import __version__
 from .flow_layout import FlowLayout
+from .i18n import tr
 from .icons import app_icon, icon
 
 
@@ -60,7 +61,7 @@ class StartPage(QWidget):
         titles = QVBoxLayout()
         t = QLabel("PyArchInit Photogrammetry")
         t.setObjectName("pageTitle")
-        s = QLabel(f"Fotogrammetria open source per l'archeologia e il BIM  -  versione {__version__}")
+        s = QLabel(tr("Fotogrammetria open source per l'archeologia e il BIM  -  versione {0}", __version__))
         s.setObjectName("pageSubtitle")
         s.setWordWrap(True)
         titles.addWidget(t)
@@ -76,7 +77,7 @@ class StartPage(QWidget):
         for b in (self.b_new, self.b_open, self.b_demo):
             cards.addWidget(b)
         col.addLayout(cards)
-        rec = QLabel("PROGETTI RECENTI")
+        rec = QLabel(tr("PROGETTI RECENTI"))
         rec.setObjectName("sectionTitle")
         col.addWidget(rec)
         self.recent = QListWidget()
@@ -85,14 +86,15 @@ class StartPage(QWidget):
         self.recent.itemActivated.connect(self._pick_recent)
         self.recent.itemClicked.connect(self._pick_recent)
         col.addWidget(self.recent)
-        self.empty = QLabel("Nessun progetto recente. Inizia con il progetto demo per vedere tutto il flusso di lavoro.")
+        self.empty = QLabel(tr("Nessun progetto recente. Inizia con il progetto demo per vedere tutto il flusso di "
+                               "lavoro."))
         self.empty.setObjectName("pageSubtitle")
         self.empty.setWordWrap(True)
         col.addWidget(self.empty)
         foot = FlowLayout(spacing=12)
-        self.b_help = QPushButton(icon("help"), "Guida")
-        self.b_doctor = QPushButton(icon("doctor"), "Diagnostica ambiente")
-        self.b_log = QPushButton(icon("log"), "Cartella dei log")
+        self.b_help = QPushButton(icon("help"), tr("Guida"))
+        self.b_doctor = QPushButton(icon("doctor"), tr("Diagnostica ambiente"))
+        self.b_log = QPushButton(icon("log"), tr("Cartella dei log"))
         for b in (self.b_help, self.b_doctor, self.b_log):
             b.setFlat(True)
             foot.addWidget(b)
