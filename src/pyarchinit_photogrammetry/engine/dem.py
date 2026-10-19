@@ -92,12 +92,15 @@ def point_spacing(xy: np.ndarray) -> float:
 
 
 def remove_spikes(dem: np.ndarray, resolution: float) -> tuple[np.ndarray, int]:
-    """Single-cell spikes and pits - cells above all their eight neighbours, or below all of them,
-    by more than five times the local noise (NMAD) and at least two cells - take the median of
-    their neighbourhood. With about one point per cell the highest point of a cell is now and then
-    a stray one (Tell Sultan sample: 1.4 % of the cells, against 0.4 % of such cells in Metashape's
-    DEM); the corner of a wall, which has neighbours as high as itself, stays. Returns the DEM and
-    the cells changed."""
+    """Single-cell spikes and pits - cells above all their neighbours with points, or below all of
+    them, by more than five times the noise (NMAD of the cells against the mean of their neighbours)
+    and at least two cells - take the median of those neighbours. With about one point per cell the
+    highest point of a cell is now and then a stray one (Tell Sultan sample: 1.4 % of the cells,
+    against 0.4 % of such cells in Metashape's DEM); the corner of a wall, which has neighbours as
+    high as itself, stays. Empty cells do not count (the noise was measured against the median
+    height of the whole DEM put in them: on a grid with gaps it came out metres and no spike went);
+    cells with fewer than two neighbours are left to :func:`remove_stray_cells`. Returns the DEM
+    and the cells changed."""
     from scipy import ndimage
 
     ok = np.isfinite(dem)
@@ -109,13 +112,23 @@ def remove_spikes(dem: np.ndarray, resolution: float) -> tuple[np.ndarray, int]:
     filled_high = np.where(ok, dem, np.inf)
     highest = ndimage.maximum_filter(filled_low, footprint=ring, mode="constant", cval=-np.inf)
     lowest = ndimage.minimum_filter(filled_high, footprint=ring, mode="constant", cval=np.inf)
-    med = ndimage.median_filter(np.where(ok, dem, np.nanmedian(dem)), size=3)
-    nmad = 1.4826 * float(np.median(np.abs((dem - med)[ok])))
+    count = ndimage.convolve(ok.astype(np.float64), ring.astype(np.float64), mode="constant")
+    total = ndimage.convolve(np.where(ok, dem, 0.0).astype(np.float64), ring.astype(np.float64), mode="constant")
+    judged = ok & (count >= 2)  # with one neighbour, a stray and a good cell look the same: they swapped
+    if not judged.any():
+        return dem, 0
+    nmad = 1.4826 * float(np.median(np.abs(dem[judged] - total[judged] / count[judged])))
     threshold = max(5.0 * nmad, 2.0 * resolution)
     with np.errstate(invalid="ignore"):
-        spikes = ok & np.isfinite(highest) & np.isfinite(lowest) & (
-            (dem - highest > threshold) | (lowest - dem > threshold))
-    return np.where(spikes, med, dem), int(spikes.sum())
+        spikes = judged & ((dem - highest > threshold) | (lowest - dem > threshold))
+    out = dem.copy()
+    if spikes.any():  # the median of the neighbours with points
+        rows, cols = np.nonzero(spikes)
+        padded = np.pad(np.where(ok, dem, np.nan).astype(np.float64), 1, constant_values=np.nan)
+        around = np.stack([padded[rows + 1 + dr, cols + 1 + dc] for dr in (-1, 0, 1) for dc in (-1, 0, 1)
+                           if dr or dc], axis=1)
+        out[rows, cols] = np.nanmedian(around, axis=1)
+    return out, int(spikes.sum())
 
 
 def grid_points(pts: np.ndarray, resolution: float, bounds=None, reducer: str = "max"):
@@ -184,6 +197,100 @@ def write_geotiff(path: Path, array: np.ndarray, origin, resolution: float, crs:
     return path
 
 
+COARSE = 16  # DEM cells per side of the cells that decide which ground a survey covers
+
+
+def covered_ground(mask: np.ndarray, coarse: int = COARSE) -> np.ndarray:
+    """The ground a survey covers, on the grid of ``mask`` (the cells with points). It is decided
+    on cells ``coarse`` times larger, where any point counts: the margins of a flight, seen by two
+    or three photos, have a point every half metre where the centre has several per decimetre, and
+    on the fine grid they were scattered dots (Tell Sultan, 425 photos: a quarter of the ground of
+    Metashape's DEM). Coarse cells with fewer than two occupied neighbours - stray points around the
+    survey - are left out, gaps of up to four coarse cells close and the holes inside fill. Along
+    its edge the ground reaches at most ``coarse`` cells beyond the last point."""
+    from scipy import ndimage
+
+    h, w = mask.shape
+    rows, cols = -(-h // coarse), -(-w // coarse)
+    pad = 3  # coarse cells around, so that the closing does not eat the edges of the array
+    occupied = np.zeros((rows + 2 * pad, cols + 2 * pad), bool)
+    blocks = np.zeros((rows * coarse, cols * coarse), bool)
+    blocks[:h, :w] = mask
+    occupied[pad:-pad, pad:-pad] = blocks.reshape(rows, coarse, cols, coarse).any(axis=(1, 3))
+    neighbours = ndimage.convolve(occupied.astype(np.uint8), np.ones((3, 3), np.uint8), mode="constant")
+    occupied &= neighbours - 1 >= 2
+    occupied = ndimage.binary_fill_holes(ndimage.binary_closing(occupied, iterations=2))
+    inner = ndimage.binary_erosion(occupied)
+    up = lambda a: np.repeat(np.repeat(a[pad:-pad, pad:-pad], coarse, axis=0), coarse, axis=1)[:h, :w]
+    near = ndimage.binary_dilation(mask, iterations=coarse)
+    return up(inner) | (up(occupied) & near)
+
+
+def remove_stray_cells(dem: np.ndarray, resolution: float, neighbours: int = 8) -> tuple[np.ndarray, int]:
+    """Cells with a point and at most one around them (:func:`remove_spikes` cannot judge them) - the
+    sparse margins of a flight, a stray point beside the survey - measured against the plane of the
+    ``neighbours`` nearest cells with points: they go when they are off it by more than four times
+    the scatter of those cells about it, and at least two cells. Interpolated, a stray point became
+    a cone metres wide. Returns the DEM and the cells removed."""
+    from scipy import ndimage
+    from scipy.spatial import cKDTree
+
+    ok = np.isfinite(dem)
+    ring = np.ones((3, 3), np.uint8)
+    ring[1, 1] = 0
+    alone = ok & (ndimage.convolve(ok.astype(np.uint8), ring, mode="constant") <= 1)
+    if not alone.any() or ok.sum() <= neighbours + 1:
+        return dem, 0
+    cells = np.argwhere(ok)
+    tree = cKDTree(cells)
+    targets = np.argwhere(alone)
+    _, idx = tree.query(targets, k=neighbours + 1, workers=-1)
+    near = cells[idx[:, 1:]]  # the nearest cells but the cell itself
+    d = (near - targets[:, None, :]).astype(np.float64) * resolution  # rows, cols in metres
+    z = dem[near[..., 0], near[..., 1]].astype(np.float64)
+    a = np.concatenate([np.ones(z.shape + (1,)), d], axis=2)
+    # a plane without each neighbour in turn, the one the others fit best: a stray among the
+    # neighbours - the farthest of them tilted the plane of all eight enough to save the cell
+    leave = 1.0 - np.eye(neighbours)
+    ata = np.einsum("jk,mki,mkl->mjil", leave, a, a) + np.diag([1e-12, 1e-9, 1e-9])
+    planes = np.linalg.solve(ata, np.einsum("jk,mki,mk->mji", leave, a, z)[..., None])[..., 0]
+    resid = np.abs(z[:, None, :] - np.einsum("mki,mji->mjk", a, planes))
+    resid[:, np.arange(neighbours), np.arange(neighbours)] = np.nan
+    fit = np.nanmedian(resid, axis=2)
+    best = np.argmin(fit, axis=1)
+    coef = planes[np.arange(len(best)), best]
+    scatter = 1.4826 * fit[np.arange(len(best)), best]
+    off = np.abs(dem[targets[:, 0], targets[:, 1]] - coef[:, 0])
+    stray = off > np.maximum(4.0 * scatter, 2.0 * resolution)
+    out = dem.copy()
+    out[targets[stray, 0], targets[stray, 1]] = np.nan
+    return out, int(stray.sum())
+
+
+def dem_from_points(pts: np.ndarray, resolution: float, reducer: str = "max", despike: bool = True,
+                    interpolate: bool = True, max_fill: int | None = None):
+    """Grid of the points (``reducer`` per cell), spikes and stray cells removed
+    (:func:`remove_spikes`, :func:`remove_stray_cells`), the cells without points interpolated
+    across the ground the survey covers (:func:`covered_ground`) up to ``max_fill`` cells from a
+    point (default four coarse cells). Returns ``(dem, origin, cells removed)``."""
+    dem, origin, _ = grid_points(pts, resolution, reducer=reducer)
+    removed = 0
+    if despike:
+        dem, spikes = remove_spikes(dem, resolution)
+        dem, strays = remove_stray_cells(dem, resolution)
+        removed = spikes + strays
+    if interpolate:
+        from rasterio.fill import fillnodata
+
+        mask = np.isfinite(dem)
+        # cells the search does not reach keep their NaN (with zeros they came out at height 0)
+        filled = fillnodata(dem.astype(np.float32), mask=mask.astype(np.uint8),
+                            max_search_distance=max_fill or 4 * COARSE, smoothing_iterations=0)
+        dem = np.where(mask, dem, filled)
+        dem[~covered_ground(mask)] = np.nan  # outside the surveyed ground the cells stay empty
+    return dem, origin, removed
+
+
 def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "point_cloud", interpolate: bool = True,
               classes=None, progress: Progress | None = None, despike: bool = True) -> Path:
     """DEM of the highest surface point in each cell. ``classes`` (dense cloud): only these
@@ -201,23 +308,9 @@ def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "poin
         whole = pts if classes is None else surface_points_world(chunk, source, None)
         resolution = float(max(2 * estimate_gsd(chunk), point_spacing(whole[:, :2])))
     progress(0.3, f"Rasterising DEM at {resolution:.4g} m/px")
-    dem, origin, _ = grid_points(pts, resolution, reducer="max" if source != "tie_points" else "mean")
-    spikes = 0
-    if despike:
-        dem, spikes = remove_spikes(dem, resolution)
-    if interpolate:
-        from rasterio.fill import fillnodata
-
-        mask = np.isfinite(dem).astype(np.uint8)
-        filled = fillnodata(np.nan_to_num(dem, nan=0).astype(np.float32), mask=mask,
-                            max_search_distance=30 if classes is None else 100, smoothing_iterations=0)
-        dem = np.where(mask > 0, dem, filled)
-        # keep holes outside the surveyed footprint empty
-        from scipy import ndimage
-
-        footprint = ndimage.binary_closing(mask > 0, iterations=10)
-        footprint = ndimage.binary_fill_holes(footprint)
-        dem[~footprint] = np.nan
+    dem, origin, spikes = dem_from_points(pts, resolution, reducer="max" if source != "tie_points" else "mean",
+                                          despike=despike, interpolate=interpolate,
+                                          max_fill=None if classes is None else 100)
     out = np.where(np.isfinite(dem), dem, NODATA).astype(np.float32)
     path = write_geotiff(chunk.data_dir / "dem.tif", out, origin, resolution, chunk.crs, nodata=NODATA)
     chunk._set_product("dem", path)
