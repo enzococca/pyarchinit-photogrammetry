@@ -195,6 +195,10 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
   con la normal map cotta dal modello completo, video di sorvolo.
 * **Misure**: area in pianta e della superficie (DEM e modello), pendenza, esposizione e altezza dal
   suolo sotto il cursore, raster di pendenza ed esposizione, nuvola densa colorata per altezza dal suolo.
+* **Disegno pietra per pietra** con SAM 2.1 su ortofoto e prospetti dei muri: DXF, SVG in scala,
+  GeoJSON (`ppg stones`).
+* **Fasi dello scavo**: chunk per data, volume asportato da un rilievo all'altro e per US, rapporti
+  stratigrafici suggeriti dall'ordine di asportazione e scritti nelle schede US (`ppg timeline`).
 * **Visualizzazioni del rilievo** del DEM: sky-view factor, openness positiva e negativa, rilievo locale
   e multiscala (MSRM), ombreggiatura da piu' direzioni (`ppg relief`), per muri e fossati appena accennati.
 * **Diagnostica**: grafo delle corrispondenze, corrispondenze tra due foto, residui dei punti di

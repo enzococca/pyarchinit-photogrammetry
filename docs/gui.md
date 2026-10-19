@@ -183,6 +183,21 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   the height above the ground. *Strumenti > Pendenza / Esposizione del DEM* make the two rasters (white
   to red; a colour wheel from the north) and show them, with the degrees under the cursor. The 3D view
   colours the dense cloud by *Altezza dal suolo* once its ground is classified.
+* **Excavation phases** (*Strumenti > Fasi dello scavo*): every chunk with a DEM is a survey of the
+  excavation - a day, the end of a US - in one frame (a common georeference, or *Allinea chunk*), in the
+  order of its date (the photos' EXIF, or written in the window). The units drawn on a phase belong to it
+  (switching chunk keeps each chunk's drawings) and were exposed then: the window gives the volume
+  removed and added from each phase to the next, also inside every unit, and proposes that a unit
+  exposed earlier *covers* the units it overlaps in plan exposed later; the ticked relations go into
+  the US forms of PyArchInit in both directions (never twice). A double click on a phase shows it;
+  *Salva CSV* writes the report.
+* **Stone-by-stone drawing** (SAM tool *Pietre*, on the orthomosaic or on the orthophoto of an elevation):
+  drag a box over a wall face or a paving and SAM 2.1 outlines every object in it; the stones stay
+  (equivalent diameter between the smallest and the largest stone asked, compact shape), the mortar and
+  the soil go. They form the layer *Pietre* of that image (kept with the project; a box drawn again
+  replaces the stones inside it, wrong ones go with *Seleziona* and *Canc*); *Segment Anything 2.1 >
+  Esporta il disegno delle pietre* writes them as DXF (closed polylines on the layer `PIETRE`), SVG at
+  a scale or GeoJSON, in the coordinates of the image (metres along and up the wall for an elevation).
 * **Relief visualisations** (*Strumenti > Visualizzazioni del rilievo*): sky-view factor (how much sky
   each cell sees: dark in ditches and at the foot of walls), positive and negative openness (ridges and
   walls, ditches and pits), local relief (the DEM minus its mean around: red above, blue below),

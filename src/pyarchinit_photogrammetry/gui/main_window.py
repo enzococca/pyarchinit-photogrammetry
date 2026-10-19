@@ -46,6 +46,7 @@ TARGET_TYPES = [("aruco_4x4_50", "ArUco 4x4 (50 codici)"), ("aruco_4x4_250", "Ar
 QUOTE_LAYER = "Quote"  # spot heights (pyarchinit_quote)
 CROP_LAYER = "Ritaglio"  # the polygon drawn with the crop tool
 PATCH_LAYER = "Patch ortofoto"  # areas of the orthomosaic coloured from photos chosen by hand
+STONES_LAYER = "Pietre"  # stone-by-stone drawing (archaeo.stones), per raster: orthomosaic or elevation
 
 
 def _outlined(rgba: np.ndarray, polygon, bounds) -> np.ndarray:
@@ -80,7 +81,8 @@ class _StatusBar(QStatusBar):
         super().showMessage(translate(text), timeout)
 CROP_PRODUCTS = [("dem", "DEM"), ("orthomosaic", "Ortofoto"), ("model", "Modello"), ("point_cloud", "Nuvola densa")]
 SAM_TOOLS = {"tap": "Tocco: clic sull'oggetto", "box": "Riquadro: un oggetto nel riquadro",
-             "area": "Area: tutte le unita' nel riquadro"}
+             "area": "Area: tutte le unita' nel riquadro",
+             "stones": "Pietre: ogni pietra nel riquadro (disegno pietra per pietra)"}
 SAM_MODELS = [("tiny", "Molto veloce (tiny)"), ("small", "Veloce (small)"), ("base_plus", "Accurato (base+)"),
               ("large", "Molto accurato (large)")]
 
@@ -113,6 +115,7 @@ class MainWindow(QMainWindow):
         self.sam = None
         self.classifier = None  # trained point classifier (ai.learn.ClassifierModel) in use
         self.quote: list[dict] = []  # spot heights: x, y and the columns of pyarchinit_quote
+        self.stones: dict[str, list] = {}  # name of the raster -> outlines of its stones (polygons)
         self._sam_obj: dict | None = None  # SAM mask being edited (prompts, bounds, preview)
         self.last_report: dict | None = None
         self._started = document is not None
@@ -128,6 +131,7 @@ class MainWindow(QMainWindow):
         self.update_checker.finished.connect(self._updates_checked)
         self._pending_update: Path | None = None  # new application swapped in when the window closes
         self._relaunch_on_close = False  # a new copy starts when this one closes (Vista > Lingua)
+        self._timeline = None  # Strumenti > Fasi dello scavo, a window beside this one
         if i18n.current() != "it":  # the menu bar of macOS is native: its menus are never shown as widgets
             i18n.translate_menus(self)
         if check_updates if check_updates is not None else not os.environ.get("PPG_NO_UPDATE_CHECK"):
@@ -595,6 +599,10 @@ class MainWindow(QMainWindow):
         self.a_contours = self._act(m, tr("Curve di livello..."), self.contours, processing=True, icon_name="contours")
         self.a_volume = self._act(m, tr("Volume scavo / riporto..."), self.compute_volume, processing=True,
                                   icon_name="volume")
+        self._act(m, tr("Fasi dello scavo (volumi e rapporti)..."), self.excavation_phases, processing=True,
+                  icon_name="timeline",
+                  tip=tr("Un chunk con il DEM per ogni rilievo dello scavo: volume asportato da una fase all'altra e "
+                         "per US, rapporti stratigrafici suggeriti dall'ordine in cui le US sono state scavate"))
         self._act(m, tr("Pendenza del DEM"), lambda: self.terrain_raster("slope"), processing=True, icon_name="slope",
                   tip=tr("Raster della pendenza in gradi, mostrato subito (gradi sotto il cursore)"))
         self._act(m, tr("Esposizione del DEM"), lambda: self.terrain_raster("aspect"), processing=True,
@@ -632,6 +640,9 @@ class MainWindow(QMainWindow):
                   processing=True,
                   icon_name="sam")
         self._act(sm, tr("Prompt sulle foto (attiva/disattiva)"), self.toggle_photo_sam, icon_name="view_photo")
+        self._act(sm, tr("Esporta il disegno delle pietre..."), self.export_stones_drawing, icon_name="export",
+                  tip=tr("Le pietre disegnate con lo strumento SAM «Pietre» sull'immagine mostrata: DXF (layer "
+                         "PIETRE), SVG in scala o GeoJSON"))
         sm.addSeparator()
         self._act(sm, tr("Installa / aggiorna SAM 2.1..."), lambda: self.install_sam(), processing=True,
                   icon_name="export")
@@ -861,6 +872,7 @@ class MainWindow(QMainWindow):
             doc.add_chunk("Chunk 1")
         self.units = []
         self.quote = []
+        self.stones = {}
         self._sam_obj = None
         self.classifier = None
         self.sections = []
@@ -929,6 +941,7 @@ class MainWindow(QMainWindow):
                     self.ortho_view.add_line(coords, color, label, layer=name, attrs=attrs, width=width)
             self._draw_patches()
             self._draw_markers_on_raster()
+            self._draw_stones()
 
     def _dirty(self, flag: bool = True) -> None:
         self.setWindowModified(flag)
@@ -1299,8 +1312,7 @@ class MainWindow(QMainWindow):
         doc = self.doc
 
         def done(chunk):
-            self.doc.chunk = chunk
-            self.refresh_all(reset_views=True)
+            self._activate_chunk(chunk)
             self._show_model("point_cloud")
             self.log_pane.info(tr("{0}: {1} punti da {2} scansioni",
                                   chunk.label, _it(len(chunk.point_cloud)), len(chunk.meta['scans'])))
@@ -1514,9 +1526,8 @@ class MainWindow(QMainWindow):
     def add_chunk(self) -> None:
         label, ok = QInputDialog.getText(self, tr("Nuovo chunk"), tr("Nome:"), text=f"Chunk {len(self.doc.chunks) + 1}")
         if ok:
-            self.doc.chunk = self.doc.add_chunk(label)
+            self._activate_chunk(self.doc.add_chunk(label))
             self._dirty(True)
-            self.refresh_all(reset_views=True)
 
     def _two_chunks(self) -> bool:
         if len(self.doc.chunks) < 2:
@@ -1604,8 +1615,7 @@ class MainWindow(QMainWindow):
         def done(merged):
             info = merged.meta.get("merge", {})
             if v["activate"]:
-                doc.chunk = merged
-                self.refresh_all(reset_views=True)
+                self._activate_chunk(merged)
             text = (tr("Creato «{0}»: {1} foto, {2} marker", merged.label, len(merged.cameras), len(merged.markers))
                     + (tr(", nuvola densa di {0} punti", _it(len(merged.point_cloud)))
                        if merged.point_cloud is not None else ""))
@@ -3713,6 +3723,7 @@ class MainWindow(QMainWindow):
         self.ortho_view.load(ortho, "ortho")
         if relief.exists():
             self.ortho_view.set_dem(relief)
+        self._draw_stones()
         self._raster_version = ("elevation", entry["id"])
         self.show_view(self.ortho_view)
         self.workspace.populate(self.doc)
@@ -3960,10 +3971,7 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- views and workspace
     def _workspace_item(self, kind: str, chunk, payload) -> None:
         if chunk is not None and chunk is not self.chunk and kind in ("select_chunk", "chunk"):
-            self.doc.chunk = chunk
-            self.refresh_all(reset_views=True)
-            if self.history is not None:
-                self.history.reset()  # the history belongs to a chunk
+            self._activate_chunk(chunk)
             return
         if kind == "camera":
             self.open_photo(payload)
@@ -4158,6 +4166,66 @@ class MainWindow(QMainWindow):
             self.reference.set_chunk(self.chunk)
 
     # ---------------------------------------------------------------- appearance and help
+    def excavation_phases(self) -> None:
+        """Strumenti > Fasi dello scavo (:mod:`archaeo.timeline`), in a window beside this one."""
+        from ..archaeo import timeline
+        from .timeline_dialog import TimelineDialog
+
+        if self._timeline is None:
+            self._timeline = TimelineDialog(self)
+            self._timeline.phase_chosen.connect(self._show_phase)
+            self._timeline.date_changed.connect(self._phase_date_changed)
+            self._timeline.recompute_requested.connect(self.excavation_phases)
+            self._timeline.write_requested.connect(self._write_phase_relations)
+        self._store_drawings()  # the units of the active phase, also those not saved yet
+        doc = self.doc
+
+        def done(report):
+            self._timeline.set_report(report, can_write=self.pa is not None)
+            self._timeline.show()
+            self._timeline.raise_()
+
+        self.run_task("Fasi dello scavo", lambda p: timeline.timeline(doc, progress=p), done, refresh=False,
+                      save=False)
+
+    def _show_phase(self, key: int) -> None:
+        chunk = next((c for c in self.doc.chunks if c.key == key), None)
+        if chunk is not None:
+            self._activate_chunk(chunk)
+            self.show_view(self.ortho_view)
+
+    def _phase_date_changed(self, key: int, text: str) -> None:
+        from ..archaeo import timeline
+
+        chunk = next((c for c in self.doc.chunks if c.key == key), None)
+        if chunk is None:
+            return
+        timeline.set_phase_date(chunk, text or None)
+        self._dirty(True)
+        self.statusBar().showMessage(tr("Data di {0}: {1}. Ricalcola per riordinare le fasi", chunk.label,
+                                        text or tr("dalle foto")), 10000)
+
+    def _write_phase_relations(self, relations) -> None:
+        from ..archaeo import timeline
+
+        if self.pa is None:
+            self._warn("Connetti prima PyArchInit (menu PyArchInit > Connetti).")
+            return
+        if choice(self, "question", "Rapporti stratigrafici",
+                  tr("Aggiungere {0} rapporti alle schede US di PyArchInit, in entrambe le direzioni? Quelli gia' "
+                     "presenti non si ripetono.", len(relations)), ["Aggiungi"]) != 0:
+            return
+        pa, site = self.pa, self.project_site()
+
+        def done(out):
+            text = tr("Rapporti aggiunti alle schede US: {0}", out["added"])
+            if out["missing"]:
+                text += tr("; senza scheda US (crea la scheda e ripubblica): {0}", ", ".join(out["missing"]))
+            self._info("PyArchInit", text)
+
+        self.run_task("Rapporti nelle schede US", lambda p: timeline.write_relations(pa, relations, site=site), done,
+                      refresh=False, save=False)
+
     def set_language(self, code: str) -> None:
         """The language of the interface from the next start; a restart now applies it."""
         i18n.save_language(code)
@@ -4391,6 +4459,24 @@ class MainWindow(QMainWindow):
             ch.meta["drawings"] = {"units": units, "quote": quote}
         else:
             ch.meta.pop("drawings", None)
+        stones = {k: [g.wkt for g in v] for k, v in self.stones.items() if v}
+        if stones:
+            ch.meta["stones"] = stones
+        else:
+            ch.meta.pop("stones", None)
+
+    def _activate_chunk(self, chunk) -> None:
+        """Another chunk becomes the active one: the drawings of the one left stay with it (the
+        units exposed in that phase of the excavation), those of the new one come back."""
+        if chunk is self.chunk:
+            return
+        self._store_drawings()
+        self._sam_cancel()
+        self.doc.chunk = chunk
+        self._restore_drawings()
+        self.refresh_all(reset_views=True)
+        if self.history is not None:
+            self.history.reset()  # the history belongs to a chunk
 
     def _restore_drawings(self) -> None:
         from ..archaeo.stratigraphy import UnitPolygon
@@ -4407,6 +4493,14 @@ class MainWindow(QMainWindow):
             except Exception as exc:  # a broken record must not stop the project from opening
                 log.warning("Unita' non letta dal progetto: %s", exc)
         self.quote = [dict(q) for q in data.get("quote", []) if "x" in q and "y" in q]
+        from shapely import wkt
+
+        self.stones = {}
+        for key, rows in ((ch.meta.get("stones") or {}) if ch is not None else {}).items():
+            try:
+                self.stones[key] = [wkt.loads(r) for r in rows]
+            except Exception as exc:  # a broken record must not stop the project from opening
+                log.warning("Pietre non lette dal progetto: %s", exc)
 
     def _redraw_drawings(self) -> None:
         self._redraw_overlays()
@@ -4925,10 +5019,12 @@ class MainWindow(QMainWindow):
         if not sel:
             return 0
         parts: dict[int, set[int]] = {}
-        sections, lines, skip, quote_gone, patch_ids = [], {}, set(), set(), set()
+        sections, lines, skip, quote_gone, patch_ids, stones_gone = [], {}, set(), set(), set(), set()
         for layer, idx, attrs in sel:
             if layer == PATCH_LAYER:
                 patch_ids.add(attrs.get("patch"))
+            elif layer == STONES_LAYER:
+                stones_gone.add(int(attrs["_stone"]))
             elif "_unit" in attrs:
                 ref = self._unit_part(layer, attrs)
                 if ref is not None:
@@ -4971,6 +5067,9 @@ class MainWindow(QMainWindow):
             self._forget_pa_unit(u, deleted=not keep)
         self.units = [u for i, u in enumerate(self.units) if i not in removed]
         self.quote = [q for i, q in enumerate(self.quote) if i not in quote_gone]
+        if stones_gone and self.ortho_view.path is not None:
+            key = self.ortho_view.path.name
+            self.stones[key] = [s for i, s in enumerate(self.stones.get(key, [])) if i not in stones_gone]
         for sdict in sections:
             self._delete_section(sdict, confirm=False, redraw=False)
         for layer, idxs in lines.items():
@@ -5103,7 +5202,7 @@ class MainWindow(QMainWindow):
         skip = skip or set()
         visible = {n: lay["visible"] for n, lay in v.layers.items()}
         order = list(v.layer_order)
-        modelled = set(self.line_layers) | {"Sezioni", QUOTE_LAYER, PATCH_LAYER, "Marker"}
+        modelled = set(self.line_layers) | {"Sezioni", QUOTE_LAYER, PATCH_LAYER, "Marker", STONES_LAYER}
         others = []
         for name in order:
             lay = v.layers[name]
@@ -5125,6 +5224,7 @@ class MainWindow(QMainWindow):
                 v.add_line(coords, color, label, layer=name, attrs=attrs, width=width)
         self._draw_patches()
         self._draw_markers_on_raster()
+        self._draw_stones()
         for name, kind, attrs, color in others:
             gtype, coords = attrs.get("_geom", (None, None))
             label = attrs.get("etichetta", "")
@@ -6585,6 +6685,10 @@ class MainWindow(QMainWindow):
     def _sam_rect(self, x0: float, y0: float, x1: float, y1: float) -> None:
         if not self._need_chunk(product="orthomosaic"):
             return
+        if self.ortho_view.sam_tool == "stones":
+            self._sam_cancel()
+            self.draw_stones((x0, y0, x1, y1))
+            return
         self._ensure_site("Le US trovate da SAM appartengono a un sito: sceglilo una volta per il progetto.")
         if self.ortho_view.sam_tool == "area":
             self._sam_cancel()
@@ -6650,6 +6754,92 @@ class MainWindow(QMainWindow):
                                             "Invio per salvare, Esc per annullare"), 30000)
         else:
             self._sam_cancel()
+
+    # ---------------------------------------------------------------- stone-by-stone drawing
+    def draw_stones(self, bounds=None) -> None:
+        """The stones SAM finds in ``bounds`` of the orthophoto or elevation shown (layer *Pietre*,
+        kept with that raster; the stones already there inside the box are found again)."""
+        view = self.ortho_view
+        if view.path is None or view.kind != "ortho" or view.tr is None:
+            self._warn("Mostra l'ortofoto o il prospetto di un muro per disegnarne le pietre.")
+            return
+        if not self._sam_available(then=lambda: self.draw_stones(bounds)):
+            return
+        from ..ai.sam import THOROUGHNESS
+        from ..archaeo.stones import find_stones
+
+        v = ParamDialog.ask(self, "Pietre (SAM)", [
+            Field("min_size", "Pietra piu' piccola (m)", float(self.settings.value("stones/min", 0.05)), minimum=0.005,
+                  maximum=5.0, decimals=3),
+            Field("max_size", "Pietra piu' grande (m)", float(self.settings.value("stones/max", 0.8)), minimum=0.01,
+                  maximum=20.0, decimals=3),
+            Field("thoroughness", "Scansione", "alta", choices=[(k, k.capitalize()) for k in THOROUGHNESS])],
+            intro=tr("SAM cerca ogni oggetto nel riquadro; restano quelli della misura di una pietra e di forma "
+                     "compatta. Le pietre vanno nel layer «Pietre» di questa immagine; le sbagliate si tolgono con "
+                     "Seleziona e Canc, Esporta il disegno delle pietre le scrive in DXF, SVG in scala o GeoJSON."))
+        if not v:
+            return
+        self.settings.setValue("stones/min", v["min_size"])
+        self.settings.setValue("stones/max", v["max_size"])
+        path, key = view.path, view.path.name
+
+        def job(p):
+            return find_stones(path, self._segmenter(), bounds=bounds, min_size=v["min_size"], max_size=v["max_size"],
+                               thoroughness=v["thoroughness"], progress=p)
+
+        def done(found):
+            from shapely.geometry import box
+
+            area = box(*bounds) if bounds is not None else None
+            kept = [s for s in self.stones.get(key, []) if area is not None and not s.intersects(area)]
+            self.stones[key] = kept + found
+            self._draw_stones()
+            self._dirty(True)
+            self.statusBar().showMessage(tr("{0} pietre nel layer «Pietre»", len(found)), 15000)
+
+        self.run_task("SAM - pietre", job, done, refresh=False, save=False)
+
+    def _draw_stones(self) -> None:
+        from ..archaeo.stones import size_of
+
+        view = self.ortho_view
+        view.remove_layer(STONES_LAYER)
+        if view.path is None or view.tr is None:
+            return
+        with view.batch():
+            for i, g in enumerate(self.stones.get(view.path.name, [])):
+                for part in getattr(g, "geoms", [g]):
+                    view.add_polygon(np.asarray(part.exterior.coords)[:, :2], "", "#5b3a1e", fill_alpha=0,
+                                     layer=STONES_LAYER, attrs={"n": i + 1, "area_m2": round(g.area, 4),
+                                                                "size_m": round(size_of(g), 3), "_stone": i})
+
+    def export_stones_drawing(self) -> None:
+        """The stones of the orthophoto or elevation shown as a drawing (DXF, SVG at scale, GeoJSON)."""
+        from ..archaeo.stones import export_stones
+
+        view = self.ortho_view
+        stones = self.stones.get(view.path.name, []) if view.path is not None else []
+        if not stones:
+            self._warn("Nessuna pietra su questa immagine: usa lo strumento SAM «Pietre» (trascina un riquadro).")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, tr("Disegno delle pietre"), str(Path(self._last_dir()) / "pietre.dxf"),
+                                              "DXF (*.dxf);;SVG (*.svg);;GeoJSON (*.geojson)")
+        if not path:
+            return
+        scale = 20.0
+        if path.lower().endswith(".svg"):
+            v = ParamDialog.ask(self, "Disegno delle pietre", [Field("scale", "Scala 1:", 20.0, minimum=1.0,
+                                                                      maximum=1000.0, decimals=0)])
+            if not v:
+                return
+            scale = v["scale"]
+        try:
+            out = export_stones(stones, path, scale=scale, title=view.path.stem)
+        except Exception as exc:
+            self._exc(tr("Salvataggio non riuscito: {0}", path), exc)
+            return
+        self.log_pane.info(tr("{0} pietre scritte in {1}", len(stones), out))
+        self.statusBar().showMessage(tr("{0} pietre scritte in {1}", len(stones), out), 10000)
 
     def _sam_auto(self, bounds=None, title: str = "SAM - unita' automatiche", **kw) -> None:
         """Every unit SAM finds in ``bounds`` (None: the whole orthomosaic), added without US

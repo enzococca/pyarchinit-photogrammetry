@@ -211,6 +211,11 @@ is installed on first use (PyTorch in a separate environment, see the same page)
 * **Measures**: area in plan and of the surface (DEM and model), slope, aspect and height above the
   ground under the cursor, slope and aspect rasters, the dense cloud coloured by height above the
   ground.
+* **Stone-by-stone drawing** with SAM 2.1 on orthomosaics and wall elevations: DXF, SVG at scale,
+  GeoJSON (`ppg stones`).
+* **Excavation phases**: chunks by date, the volume removed from one survey to the next and in every
+  US, stratigraphic relations suggested by the order of removal and written to the US forms
+  (`ppg timeline`).
 * **Relief visualisations** of the DEM: sky-view factor, positive and negative openness, local and
   multi-scale relief (MSRM), multi-directional hillshade (`ppg relief`), for faint walls and ditches.
 * **Diagnostics**: matching graph, matches between two photos, residuals of the tie points in the

@@ -102,8 +102,11 @@ markers in too few photos.
   tell). *Done* (in NumPy by tiles and threads: 2000 x 2400 cells in under a second per method, so
   no native kernel was needed).
 * Excavation over time: phases (chunks by date) aligned together, volume removed for each US,
-  timeline in the views, stratigraphic relations suggested from the order of removal.
-* Stone-by-stone drawing with SAM on orthomosaics and elevations.
+  timeline in the views, stratigraphic relations suggested from the order of removal. *Done*
+  (*Strumenti > Fasi dello scavo*, `ppg timeline`; the drawings now stay with the chunk they were
+  drawn on).
+* Stone-by-stone drawing with SAM on orthomosaics and elevations. *Done* (SAM tool *Pietre*,
+  `ppg stones`).
 * Munsell colour of the US from orthomosaics calibrated with a colour chart.
 * QField package: orthomosaic and layers on the tablet in the trench, edits back to PyArchInit.
 * Machine-readable paradata (provenance of every product) linked to the PyArchInit media.

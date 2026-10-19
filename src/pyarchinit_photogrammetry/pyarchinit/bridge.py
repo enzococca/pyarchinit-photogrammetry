@@ -142,6 +142,27 @@ class PyArchInit:
         with self.db.begin() as conn:
             return conn.execute(t.update().where(t.c.id_us == int(id_us)).values(**values)).rowcount
 
+    def add_relationships(self, sito: str, area: str, us: str, rels, unita_tipo: str | None = None) -> int | None:
+        """Relations ``[relation, us, area, sito]`` added to the ``rapporti`` of a US form, those it
+        already has left out. Returns how many were added, None when the form does not exist."""
+        rec = self.us_record(sito, area, us, unita_tipo)
+        if rec is None and unita_tipo:  # a form written without its type
+            rec = self.us_record(sito, area, us)
+        if rec is None:
+            return None
+        current = parse_relationships(rec.get("rapporti"))
+        have = {(r[0], r[1], r[2] or str(area), r[3] or sito) for r in current}
+        new = []
+        for r in rels:
+            r = [str(x) if x is not None else "" for x in r] + ["", ""]
+            row = [r[0], r[1], r[2] or str(area), r[3] or sito]
+            if tuple(row) not in have:
+                have.add(tuple(row))
+                new.append(row)
+        if new:
+            self.update_us(rec["id_us"], rapporti=current + new)
+        return len(new)
+
     def _us_values(self, fields: dict, default_site: str | None = None) -> dict:
         cols = self.us_columns()
         out = {}

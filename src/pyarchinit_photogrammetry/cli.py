@@ -191,6 +191,68 @@ def relief(project: Path, method: str = typer.Option("svf", help="svf, openness_
 
 
 @app.command()
+def timeline(project: Path, csv: Optional[Path] = typer.Option(None, help="write the report as CSV"),
+             date: Optional[str] = typer.Option(None, help="set the date of --chunk (ISO, e.g. 2026-07-01T09:30; "
+                                                           "'' = from the photos)"),
+             chunk: Optional[str] = None):
+    """Excavation over time: the chunks with a DEM as phases in date order, the volume removed
+    from one to the next and in every unit drawn, the relations suggested by the order of removal."""
+    from .archaeo import timeline as tl
+
+    doc, ch = _open(project, chunk)
+    if date is not None:
+        tl.set_phase_date(ch, date or None)
+        doc.save()
+    report = tl.timeline(doc, progress=print_progress)
+    for p in report["phases"]:
+        when = p["date"].strftime("%Y-%m-%d %H:%M") if p["date"] else "no date"
+        typer.echo(f"{when}  {p['label']}: {', '.join(p['units']) or 'no units drawn'}")
+    for s in report["removed"]:
+        typer.echo(f"{s['from']} -> {s['to']}: removed {s['cut_m3']:.3f} m3, added {s['fill_m3']:.3f} m3 "
+                   f"over {s['area_m2']:.2f} m2")
+        for u in s["units"]:
+            typer.echo(f"    {u['name']}: removed {u['cut_m3']:.3f} m3")
+    for r in report["relations"]:
+        typer.echo(f"{tl._name(r['upper'])} {r['relation']} {tl._name(r['lower'])} "
+                   f"({r['overlap_m2']:.2f} m2, {' -> '.join(r['phases'])})")
+    if csv is not None:
+        csv.write_text(tl.timeline_csv(report), encoding="utf-8")
+        typer.echo(f"written {csv}")
+
+
+@app.command()
+def stones(project: Path, out: Path = typer.Option(..., help="drawing: .dxf, .svg or .geojson"),
+           elevation: Optional[str] = typer.Option(None, help="name of an elevation (default: the orthomosaic)"),
+           min_size: float = typer.Option(0.05, help="smallest stone (metres)"),
+           max_size: float = typer.Option(0.8, help="largest stone (metres)"),
+           bounds: Optional[str] = typer.Option(None, help="only inside 'xmin,ymin,xmax,ymax' of the raster"),
+           thoroughness: str = typer.Option("alta", help="normale, alta, massima"),
+           scale: float = typer.Option(20.0, help="SVG: scale 1:N"), model: str = typer.Option("small"),
+           chunk: Optional[str] = None):
+    """Stone-by-stone drawing with SAM 2.1 on the orthomosaic or on the orthophoto of an
+    elevation: the outlines of the stones as DXF (layer PIETRE), SVG at scale or GeoJSON."""
+    from .ai.sam_env import make_segmenter
+    from .archaeo.stones import export_stones, find_stones
+    from .engine.elevation import elevation_paths
+
+    doc, ch = _open(project, chunk)
+    if elevation:
+        entry = next((e for e in ch.meta.get("elevations", []) if elevation in (e.get("name"), e.get("id"))), None)
+        if entry is None:
+            raise typer.BadParameter(f"no elevation {elevation!r}")
+        raster = elevation_paths(ch, entry)[0]
+    else:
+        raster = ch.orthomosaic_path
+        if raster is None:
+            raise typer.BadParameter("build the orthomosaic first")
+    box = tuple(float(v) for v in bounds.split(",")) if bounds else None
+    found = find_stones(raster, make_segmenter(model), bounds=box, min_size=min_size, max_size=max_size,
+                        thoroughness=thoroughness, progress=print_progress)
+    export_stones(found, out, scale=scale, title=Path(raster).stem)
+    typer.echo(f"{len(found)} stones: {out}")
+
+
+@app.command()
 def precision(project: Path, marker_px: float = typer.Option(0.5, help="how well markers are measured (pixels)"),
               chunk: Optional[str] = None):
     """Precision of cameras, markers and tie points from the covariance of the bundle adjustment,

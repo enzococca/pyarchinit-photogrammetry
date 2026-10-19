@@ -108,6 +108,8 @@ def tr(text: str, *args, context: str | None = None) -> str:
 
 def number(value: float, decimals: int = 0) -> str:
     """A number as the interface writes it: 1.234,56 in Italian, 1,234.56 in English."""
+    if round(value, decimals) == 0:
+        value = 0.0  # never "-0,000"
     text = f"{value:,.{decimals}f}"
     if current() == "it":
         text = text.replace(",", "\x00").replace(".", ",").replace("\x00", ".")

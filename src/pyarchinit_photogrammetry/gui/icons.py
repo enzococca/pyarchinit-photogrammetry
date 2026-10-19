@@ -70,7 +70,7 @@ ICONS = {
     "filter": ("mdi6.filter-outline", "blue"), "update": ("mdi6.cloud-download-outline", "green"), "colour": ("mdi6.palette-outline", "pink"), "mask": ("mdi6.image-filter-black-white", "pink"), "elevation": ("mdi6.wall", "brown"), "video": ("mdi6.video-outline", "violet"), "quality": ("mdi6.image-filter-center-focus", "teal"), "panorama": ("mdi6.panorama-sphere-outline", "violet"), "lens": ("mdi6.camera-iris", "teal"), "refine": ("mdi6.target-variant", "blue"), "precision": ("mdi6.crosshairs-question", "orange"), "fieldcheck": ("mdi6.clipboard-check-outline", "green"), "batch": ("mdi6.playlist-play", "blue"), "undo": ("mdi6.undo", "slate"), "redo": ("mdi6.redo", "slate"), "diagnostics": ("mdi6.stethoscope", "teal"), "graph": ("mdi6.graph-outline", "teal"), "matches": ("mdi6.vector-link", "teal"), "residuals": ("mdi6.arrow-expand-all", "orange"), "area": ("mdi6.vector-square", "pink"), "globe": ("mdi6.earth", "blue"), "scan": ("mdi6.laser-pointer", "red"), "slope": ("mdi6.slope-uphill", "brown"), "aspect": ("mdi6.compass-outline", "brown"),
     "relief": ("mdi6.terrain", "brown"), "svf": ("mdi6.terrain", "brown"), "openness_pos": ("mdi6.terrain", "brown"),
     "openness_neg": ("mdi6.terrain", "brown"), "slrm": ("mdi6.terrain", "brown"), "msrm": ("mdi6.terrain", "brown"),
-    "multi_hillshade": ("mdi6.terrain", "brown"), "add": ("mdi6.plus-circle-outline", "green"),
+    "multi_hillshade": ("mdi6.terrain", "brown"), "timeline": ("mdi6.timeline-clock-outline", "indigo"), "add": ("mdi6.plus-circle-outline", "green"),
     # tree items
     "camera_ok": ("mdi6.camera", "green"), "camera_bad": ("mdi6.camera-off", "red"),
     "cameras": ("mdi6.camera-burst", "blue"), "marker": ("mdi6.map-marker", "violet"),

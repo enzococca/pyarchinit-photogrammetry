@@ -237,7 +237,7 @@ def _segment_auto(segmenter, img, options: dict):
 def auto_units(chunk, segmenter: Segmenter, max_side: int = 2048, simplify: float | None = None,
                min_area_m2: float = 0.01, bounds=None, resolution: float | None = None, tile: int = 1024,
                overlap: int = 128, thoroughness: str = "normale", max_tiles: int = 64, exclusive: bool = True,
-               progress=None) -> list[UnitPolygon]:
+               progress=None, path=None, sam_options: dict | None = None) -> list[UnitPolygon]:
     """Automatic segmentation of the orthomosaic (or of world ``bounds``) into candidate
     units (no US yet), scanning it in overlapping tiles of ``tile`` pixels at ``resolution``
     (m/px; default: the finest that keeps at most ``max_tiles`` tiles), so that SAM sees the
@@ -246,14 +246,17 @@ def auto_units(chunk, segmenter: Segmenter, max_side: int = 2048, simplify: floa
     Objects cut by a tile border are joined with their other part from the next tile (they
     agree where the tiles overlap); duplicates are dropped. With ``exclusive`` the result is
     a partition: smaller units are kept whole and cut out of the larger ones (stones out of
-    a layer), as on a stratigraphic plan. ``thoroughness``: see :data:`THOROUGHNESS`."""
+    a layer), as on a stratigraphic plan. ``thoroughness``: see :data:`THOROUGHNESS`.
+    ``path``: another raster than the orthomosaic of ``chunk`` (the orthophoto of an elevation,
+    in its own coordinates); ``chunk`` may then be None. ``sam_options`` go to SAM's automatic
+    mode over those of the thoroughness (``points_per_side``, ``min_area``...)."""
     import rasterio
     from shapely.strtree import STRtree
 
     from ..core.progress import as_progress
 
     progress = as_progress(progress)
-    path = chunk.orthomosaic_path
+    path = path or (chunk.orthomosaic_path if chunk is not None else None)
     if path is None:
         raise RuntimeError("build the orthomosaic first")
     with rasterio.open(path) as src:
@@ -271,7 +274,7 @@ def auto_units(chunk, segmenter: Segmenter, max_side: int = 2048, simplify: floa
         if bounds is None and max_side and side / resolution < max_side:
             resolution = max(native, side / max_side)  # small orthomosaics: as before, one image
     res = max(float(resolution), native)
-    options = dict(THOROUGHNESS.get(thoroughness, THOROUGHNESS["normale"]))
+    options = {**THOROUGHNESS.get(thoroughness, THOROUGHNESS["normale"]), **(sam_options or {})}
     tiles = list(_tiles(bx, res, tile, overlap))
     found = []  # (tile index, polygon)
     for k, tb in enumerate(tiles):

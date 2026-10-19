@@ -1442,12 +1442,12 @@ class LayersPane(QWidget):
         if self.view is None:
             return
         self._filling = True
-        expanded = {self.tree.topLevelItem(i).text(0).split("  (")[0] for i in range(self.tree.topLevelItemCount())
-                    if self.tree.topLevelItem(i).isExpanded()}
+        expanded = {self.tree.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole)[0]
+                    for i in range(self.tree.topLevelItemCount()) if self.tree.topLevelItem(i).isExpanded()}
         self.tree.clear()
         for name in self.view.layer_order:
             lay = self.view.layers[name]
-            top = QTreeWidgetItem([f"{name}  ({len(lay['features'])})"])
+            top = QTreeWidgetItem([f"{translate(name)}  ({len(lay['features'])})"])  # the name stays the key
             top.setIcon(0, icon(LAYER_ICONS.get(lay["kind"], "line")))
             top.setFlags(top.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             top.setCheckState(0, Qt.CheckState.Checked if lay["visible"] else Qt.CheckState.Unchecked)
