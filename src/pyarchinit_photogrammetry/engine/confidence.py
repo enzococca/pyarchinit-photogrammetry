@@ -16,6 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .. import _native
 from ..core.chunk import Chunk
 from ..core.pointcloud import PointCloud
 from ..core.progress import Progress
@@ -134,6 +135,11 @@ def _agreeing(entry: dict, points: np.ndarray, grid: _Grid, tol: float, abs_tol:
     cand = grid.inside(world.min(axis=0) - pad, world.max(axis=0) + pad)
     if not len(cand):
         return cand
+    native = _native.kernel("depth_agree")
+    if native is not None:
+        return cand[native(points, cand.astype(np.int64, copy=False), depth.astype(np.float32, copy=False),
+                           (float(fx), float(fy), float(cx), float(cy)), np.ascontiguousarray(rot, np.float64),
+                           np.ascontiguousarray(t, np.float64), float(tol), abs_tol)]
     pc = points[cand] @ rot.T + t
     zc = pc[:, 2]
     good = zc > 1e-9

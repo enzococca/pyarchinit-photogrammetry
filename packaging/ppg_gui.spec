@@ -16,7 +16,7 @@ hidden = (collect_submodules("pyarchinit_photogrammetry") + collect_submodules("
           + collect_submodules("pyproj") + collect_submodules("shapely") + collect_submodules("laspy")
           + ["qtawesome", "pyvistaqt", "pyvista", "sqlalchemy.dialects.sqlite",
              "sqlalchemy.dialects.postgresql", "scipy.special._cdflib", "ezdxf", "trimesh"])
-for optional in ("open3d", "ifcopenshell", "psycopg2"):
+for optional in ("open3d", "ifcopenshell", "psycopg2", "ppg_core"):  # ppg_core: native kernels (Rust)
     try:
         __import__(optional)
     except Exception:

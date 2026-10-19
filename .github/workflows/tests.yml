@@ -24,6 +24,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[all,dev]"
+      - name: Native core (Rust; Python 3.11 keeps the numpy code, so both are tested)
+        if: matrix.python-version == '3.12'
+        run: pip install ./native
       - name: Tests
         shell: bash
         env:

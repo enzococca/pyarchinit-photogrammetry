@@ -129,6 +129,12 @@ def run_checks(gui: bool = True) -> Report:
         r.add("PROJ data", FAIL, str(exc)[:90], "Unset PROJ_LIB / PROJ_DATA exported by Anaconda or QGIS.")
 
     # optional engines
+    from . import _native
+
+    v = _native.version()
+    r.add("Native core (Rust)", OK if v else WARN, v or "missing (numpy code, slower)",
+          "" if v else "pip install ./native from the source tree (a Rust toolchain is needed), or "
+          "pip install pyarchinit-photogrammetry-core")
     v = _version("open3d")
     if v is None:
         r.add("Open3D", WARN, "missing (Poisson meshing uses COLMAP's PoissonRecon)",

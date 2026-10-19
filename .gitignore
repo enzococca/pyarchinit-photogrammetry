@@ -11,3 +11,5 @@ venv/
 *.ppg.tmp
 .DS_Store
 packaging/build/
+native/target/
+.ruff_cache/

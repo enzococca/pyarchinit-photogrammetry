@@ -19,6 +19,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .. import _native
 from ..core.chunk import QUALITY_DOWNSCALE, Chunk
 from ..core.pointcloud import PointCloud
 from ..core.progress import Progress
@@ -286,6 +287,10 @@ def _pair_depth(img_i, img_j, K_i, K_j, pose_i, pose_j, zrange) -> np.ndarray | 
         disp = disp[:, ::-1]
     if vertical:
         disp = disp.T
+    native = _native.kernel("disparity_to_depth")
+    if native is not None:
+        return native(disp, float(max(min_disp, 0.5)), float(f), float(baseline), float(cx), float(cy), R1,
+                      (float(K_i[0, 0]), float(K_i[1, 1]), float(K_i[0, 2]), float(K_i[1, 2])), (h, w))
     valid = disp > max(min_disp, 0.5)
     yy, xx = np.nonzero(valid)
     d = disp[valid]
@@ -306,6 +311,9 @@ def _pair_depth(img_i, img_j, K_i, K_j, pose_i, pose_j, zrange) -> np.ndarray | 
 
 
 def _normals_from_depth(depth: np.ndarray, K: np.ndarray) -> np.ndarray:
+    native = _native.kernel("depth_normals")
+    if native is not None and depth.dtype == np.float32:
+        return native(depth, (float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])))
     h, w = depth.shape
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
     x = (xx - K[0, 2]) * depth / K[0, 0]
@@ -343,53 +351,110 @@ def read_colmap_array(path: Path) -> np.ndarray:
     return np.transpose(arr, (1, 0, 2)).squeeze()
 
 
-def _cpu_depth_maps(chunk: Chunk, ws: Path, filter_mode: str, progress: Progress) -> None:
+class _GrayCache:
+    """Grey photos of the workspace, shared by the threads (a photo is the partner of several)."""
+
+    def __init__(self, ws: Path, rec, size: int):
+        import threading
+        from collections import OrderedDict
+
+        self.ws, self.rec, self.size = ws, rec, size
+        self.items: OrderedDict = OrderedDict()
+        self.lock = threading.Lock()
+
+    def get(self, iid: int):  # None for a photo left out of the undistortion (unreadable)
+        with self.lock:
+            if iid in self.items:
+                self.items.move_to_end(iid)
+                return self.items[iid]
+        path = self.ws / "images" / self.rec.images[iid].name
+        img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE | cv2.IMREAD_IGNORE_ORIENTATION) if path.exists() else None
+        with self.lock:
+            self.items[iid] = img
+            while len(self.items) > self.size:
+                self.items.popitem(last=False)
+        return img
+
+
+def depth_workers(width: int, height: int, partners: int = 6, budget: float = 3e9) -> int:
+    """Photos computed at the same time: one per two cores, at most six, and within ``budget``
+    bytes of depth estimates (a 20 Mpx photo at full size needs about half a gigabyte)."""
+    import os
+
+    per_photo = (partners + 3) * 4.0 * width * height
+    return int(max(1, min(6, (os.cpu_count() or 2) // 2, budget // max(per_photo, 1.0))))
+
+
+def _cpu_depth_maps(chunk: Chunk, ws: Path, filter_mode: str, progress: Progress, workers: int | None = None) -> None:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     rec = _read_workspace_model(ws)
     neigh = _neighbors(rec)
     min_agree, tol, _ = FILTER_MODES.get(filter_mode, FILTER_MODES["moderate"])
     (ws / "stereo" / "depth_maps").mkdir(parents=True, exist_ok=True)
     (ws / "stereo" / "normal_maps").mkdir(parents=True, exist_ok=True)
-    gray_cache: dict[int, np.ndarray] = {}
-
-    def gray(iid):  # None for a photo left out of the undistortion (unreadable)
-        if iid not in gray_cache:
-            path = ws / "images" / rec.images[iid].name
-            gray_cache[iid] = (cv2.imread(str(path), cv2.IMREAD_GRAYSCALE | cv2.IMREAD_IGNORE_ORIENTATION)
-                               if path.exists() else None)
-        return gray_cache[iid]
-
-    done = []
     ids = list(rec.images)
-    for n_done, iid in enumerate(ids):
+    if not workers:
+        cam = max(rec.cameras.values(), key=lambda c: c.width * c.height)
+        workers = depth_workers(cam.width, cam.height, max((len(v) for v in neigh.values()), default=1))
+    gray = _GrayCache(ws, rec, max(12, 3 * workers))
+
+    def one(iid) -> str | None:
+        """Depth and normal maps of one photo; the name of the photo when written."""
         image = rec.images[iid]
         pose_i, K_i = _pose(image), _K(rec.cameras[image.camera_id])
         zr = _depth_range(rec, image, pose_i)
+        gi = gray.get(iid) if zr is not None else None
+        if gi is None:
+            return None
         estimates = []
-        if zr is not None and gray(iid) is not None:
-            for jid in neigh.get(iid, []):
-                if gray(jid) is None:
-                    continue
-                other = rec.images[jid]
-                d = _pair_depth(gray(iid), gray(jid), K_i, _K(rec.cameras[other.camera_id]), pose_i, _pose(other), zr)
-                if d is not None:
-                    estimates.append(d)
-        if estimates:
-            depth = _combine(estimates, min_agree, tol)
-            if (depth > 0).sum() > 100:
-                name = image.name
-                out_d = ws / "stereo" / "depth_maps" / f"{name}.geometric.bin"
-                out_n = ws / "stereo" / "normal_maps" / f"{name}.geometric.bin"
-                out_d.parent.mkdir(parents=True, exist_ok=True)
-                out_n.parent.mkdir(parents=True, exist_ok=True)
-                write_colmap_array(out_d, depth)
-                write_colmap_array(out_n, _normals_from_depth(depth, K_i))
-                done.append(name)
-        if len(gray_cache) > 12:
-            gray_cache.clear()
-        progress((n_done + 1) / len(ids), f"Depth map {n_done + 1}/{len(ids)}")
-    if not done:
+        for jid in neigh.get(iid, []):
+            gj = gray.get(jid)
+            if gj is None:
+                continue
+            other = rec.images[jid]
+            d = _pair_depth(gi, gj, K_i, _K(rec.cameras[other.camera_id]), pose_i, _pose(other), zr)
+            if d is not None:
+                estimates.append(d)
+        if not estimates:
+            return None
+        depth = _combine(estimates, min_agree, tol)
+        if (depth > 0).sum() <= 100:
+            return None
+        name = image.name
+        out_d = ws / "stereo" / "depth_maps" / f"{name}.geometric.bin"
+        out_n = ws / "stereo" / "normal_maps" / f"{name}.geometric.bin"
+        out_d.parent.mkdir(parents=True, exist_ok=True)
+        out_n.parent.mkdir(parents=True, exist_ok=True)
+        write_colmap_array(out_d, depth)
+        write_colmap_array(out_n, _normals_from_depth(depth, K_i))
+        return name
+
+    done: dict[int, str] = {}
+    if workers <= 1:
+        for n_done, iid in enumerate(ids):
+            name = one(iid)
+            if name:
+                done[iid] = name
+            progress((n_done + 1) / len(ids), f"Depth map {n_done + 1}/{len(ids)}")
+    else:
+        progress(0.0, f"Depth maps: {workers} photos at a time")
+        with ThreadPoolExecutor(workers) as pool:
+            futures = {pool.submit(one, iid): iid for iid in ids}
+            try:
+                for n_done, fut in enumerate(as_completed(futures)):
+                    name = fut.result()
+                    if name:
+                        done[futures[fut]] = name
+                    progress((n_done + 1) / len(ids), f"Depth map {n_done + 1}/{len(ids)}")
+            except BaseException:  # cancelled or failed: the photos not started are dropped
+                for fut in futures:
+                    fut.cancel()
+                raise
+    names = [done[iid] for iid in ids if iid in done]
+    if not names:
         raise RuntimeError("no depth map could be computed (check overlap between photos)")
-    (ws / "stereo" / "fusion.cfg").write_text("\n".join(done) + "\n")
+    (ws / "stereo" / "fusion.cfg").write_text("\n".join(names) + "\n")
 
 
 def _combine(estimates: list[np.ndarray], min_agree: int, tol: float) -> np.ndarray:
@@ -399,6 +464,9 @@ def _combine(estimates: list[np.ndarray], min_agree: int, tol: float) -> np.ndar
     agree within ``tol`` (relative). Pixels seen by a single partner are kept unless
     ``min_agree >= 2`` (aggressive filtering): SGBM already did a left-right check.
     """
+    native = _native.kernel("combine_depths")
+    if native is not None and all(e.dtype == np.float32 for e in estimates):
+        return native(np.stack(estimates), int(min_agree), float(tol))
     import warnings
 
     warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*(slice|empty).*")

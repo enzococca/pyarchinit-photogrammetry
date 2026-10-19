@@ -20,6 +20,6 @@ def test_data_files_are_package_data():
     patterns = _package_data_patterns()
     data = [p.relative_to(PKG).as_posix() for p in PKG.rglob("*")
             if p.is_file() and p.suffix not in (".py", ".pyc") and "__pycache__" not in p.parts
-            and not p.name.startswith(".")]
+            and not any(part.startswith(".") for part in p.relative_to(PKG).parts)]  # tool caches
     missing = [f for f in data if not any(fnmatch.fnmatch(f, pat) for pat in patterns)]
     assert data and not missing, f"not declared in [tool.setuptools.package-data]: {missing}"

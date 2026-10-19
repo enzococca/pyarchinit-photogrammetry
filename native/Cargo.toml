@@ -1,0 +1,24 @@
+[package]
+name = "ppg_core"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+description = "Native kernels of pyarchinit-photogrammetry"
+repository = "https://github.com/enzococca/pyarchinit-photogrammetry"
+publish = false
+
+[lib]
+name = "ppg_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py310"] }
+numpy = "0.22"
+rayon = "1.10"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+# Rust strips debug info by default; the stripped library is refused by macOS 26/27
+# ("mis-aligned LINKEDIT string pool"), so it is kept
+strip = false

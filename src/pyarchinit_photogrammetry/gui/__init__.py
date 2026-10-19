@@ -133,6 +133,7 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
         except Exception as exc:
             open_error = f"Impossibile aprire {project}: {exc}"
     win = MainWindow(application.document if project and not open_error else None, autoconnect="--check" not in argv,
+                     check_updates=False if "--check" in argv else None,
                      progress=splash.progress(88, 99) if splash is not None else None)
     geo = win.settings.value("geometry")
     if geo is not None:
@@ -191,8 +192,11 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
                 libs = "ok"
             except Exception as exc:
                 libs = f"missing ({str(exc).splitlines()[0][:120]})"
+            from .. import _native
+
             print(f"GUI check: {'ok' if ok else 'FAILED'} | window: {win.windowTitle()} | 3D backend: "
-                  f"{win.model_view.backend} | vtk: {vtk} | libs: {libs} | log: {log_path}", flush=True)
+                  f"{win.model_view.backend} | vtk: {vtk} | libs: {libs} | native: {_native.version() or 'missing'} | "
+                  f"log: {log_path}", flush=True)
             if _frozen_posix():  # see --doctor
                 _hard_exit(0 if ok else 2)
             qapp.exit(0 if ok else 2)

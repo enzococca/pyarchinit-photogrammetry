@@ -24,6 +24,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .. import _native
 from ..core.chunk import Chunk
 from ..core.progress import Progress
 from .dem import NODATA, ensure_level, estimate_gsd
@@ -338,6 +339,12 @@ def hidden_cells(chunk: Chunk, origin, shape, resolution: float, hide_classes) -
 def _scores(chunk: Chunk, cam, pts, centres, up_int, min_cos: float = 0.0):
     """Pixels and score (frontal, central, fine) of points in a photo; -inf where not seen, or
     seen from further than the vertical than the angle whose cosine is ``min_cos``."""
+    sensor = chunk.sensor(cam)
+    if _native.supports(sensor.model):
+        return _native.kernel("ortho_scores")(np.ascontiguousarray(pts, np.float64), cam.cam_from_world, sensor.model,
+                                              [float(v) for v in sensor.params], float(sensor.width),
+                                              float(sensor.height), [float(v) for v in centres[cam.key]],
+                                              [float(v) for v in up_int], float(min_cos))
     px, depth, ok = project_valid(chunk, cam, pts)
     score = np.full(len(pts), -np.inf, np.float32)
     if ok.any():

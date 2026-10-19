@@ -62,8 +62,14 @@ git clone https://github.com/enzococca/pyarchinit-photogrammetry
 cd pyarchinit-photogrammetry
 uv venv --seed --python 3.12 .venv && source .venv/bin/activate
 uv pip install -e ".[all,dev]"
+uv pip install ./native     # optional: native kernels in Rust (needs a Rust toolchain)
 pytest -q
 ```
+
+The native core (`native/`, imported as `ppg_core`) runs the heaviest numpy steps of the depth maps,
+the orthomosaic and the confidence in Rust on every core: CPU depth maps about six times faster.
+Without it the same numpy code runs (see [docs/packaging.md](docs/packaging.md#native-core-rust));
+the desktop applications include it.
 
 Python 3.10-3.12. Writing geometries into a PyArchInit **SQLite** database needs `mod_spatialite`
 (found automatically in QGIS, MacPorts, Homebrew and Linux locations, or set

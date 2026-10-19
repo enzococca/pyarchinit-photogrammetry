@@ -1,0 +1,79 @@
+name: native
+
+# Wheels of the native core (pyarchinit-photogrammetry-core, folder native/): one abi3 wheel per
+# platform for Python 3.10 and later. Built on demand and on tags core-v*, which also publish
+# them to PyPI with trusted publishing (the PyPI project needs a trusted publisher for this
+# workflow and the environment pypi-core; no token is stored in the repository).
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to PyPI"
+        type: boolean
+        default: false
+  push:
+    tags: ["core-v*"]
+
+jobs:
+  wheels:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, target: aarch64-apple-darwin, label: macos-arm64, test: true }
+          - { os: macos-15, target: x86_64-apple-darwin, label: macos-x64, test: false }
+          - { os: windows-latest, target: x64, label: windows-x64, test: true }
+          - { os: ubuntu-24.04, target: x86_64, label: linux-x64, test: true }
+          - { os: ubuntu-24.04, target: aarch64, label: linux-arm64, test: false }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: native
+          target: ${{ matrix.target }}
+          manylinux: auto
+          args: --release --out dist
+      - name: Smoke test
+        if: matrix.test
+        shell: bash
+        run: |
+          pip install numpy native/dist/*.whl
+          python -c "import numpy as np, ppg_core; print(ppg_core.__version__, ppg_core.combine_depths(np.ones((2, 3, 4), np.float32), 1, 0.01).shape)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.label }}
+          path: native/dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: native
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: native/dist/*.tar.gz
+          if-no-files-found: error
+
+  pypi:
+    needs: [wheels, sdist]
+    if: startsWith(github.ref, 'refs/tags/core-v') || inputs.publish
+    runs-on: ubuntu-latest
+    environment: pypi-core
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1

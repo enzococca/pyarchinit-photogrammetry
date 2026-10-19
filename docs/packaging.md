@@ -38,6 +38,7 @@ opens the folder, *Aiuto > Diagnostica ambiente* runs the same checks as `ppg do
 
 ```bash
 pip install -e ".[all,build]"
+pip install ./native                 # native kernels (Rust toolchain needed), bundled when installed
 python packaging/build.py            # icons, PyInstaller, smoke test (--check), dmg/zip in dist/
 python packaging/build.py --no-smoke
 ```
@@ -54,7 +55,32 @@ python packaging/build.py --no-smoke
   (offscreen) and `--doctor`, then writes the `.dmg` (`hdiutil`) or the `.zip`.
 
 The smoke test opens the main window, renders it and exits with code 0; the build fails
-when the window does not appear.
+when the window does not appear. Its line also says whether the native core is inside
+(`native: 0.1.0`).
+
+## Native core (Rust)
+
+`native/` holds `pyarchinit-photogrammetry-core`, imported as `ppg_core`: the kernels that the
+Python code ran in numpy and that dominated the CPU time of the depth maps and of the
+orthomosaic - fusion of the depth estimates of a photo, disparity back to depth, normals,
+projection of points with the COLMAP camera models, scoring of the photos of an orthomosaic
+tile, agreement of points with a depth map (confidence). PyO3 + rayon, one abi3 wheel per
+platform for Python 3.10 and later. It is optional: without it (or with `PPG_NATIVE=0`) the
+numpy code runs, and `tests/test_native.py` checks that both give the same maps, pixels and
+counts. Measured on the synthetic trench, CPU depth maps of 48 photos: 5.7 s with numpy one
+photo at a time, 1.6 s with the native kernels, 0.9 s with six photos at a time.
+
+```bash
+pip install ./native                         # build and install (maturin is fetched by pip)
+maturin build --release -m native/Cargo.toml # a wheel in native/target/wheels
+PPG_NATIVE=0 ppg ...                         # the numpy code, for comparison
+```
+
+The release profile keeps the symbols: the library stripped by Rust's default release profile
+is refused by the dynamic loader of macOS 26/27 ("mis-aligned LINKEDIT string pool"). The
+`native` workflow builds the wheels (macOS arm64 and x86-64, Windows x64, Linux x86-64 and
+aarch64) and, on a `core-v*` tag, publishes them to PyPI; the `tests` workflow runs Python 3.12
+with the native core and 3.11 without it; the `desktop` workflow bundles it in the applications.
 
 
 ## Signing, notarization, TestFlight

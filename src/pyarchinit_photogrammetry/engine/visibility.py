@@ -6,6 +6,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .. import _native
 from ..core.chunk import Chunk
 
 
@@ -159,6 +160,10 @@ def project_valid(chunk: Chunk, cam, points: np.ndarray, margin: float = 2.0):
     """Project internal-frame points into a camera: returns pixels, depth and in-frame mask."""
     sensor = chunk.sensor(cam)
     m = cam.cam_from_world
+    if _native.supports(sensor.model):
+        return _native.kernel("project_points")(np.ascontiguousarray(np.atleast_2d(points), np.float64), m, sensor.model,
+                                                [float(v) for v in sensor.params], float(sensor.width),
+                                                float(sensor.height), float(margin))
     pc = np.atleast_2d(points) @ m[:3, :3].T + m[:3, 3]
     depth = pc[:, 2]
     ok = depth > 1e-9
