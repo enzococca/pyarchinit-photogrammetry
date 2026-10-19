@@ -48,28 +48,22 @@ poses and GCPs imported from WebODM; markers placed on one photo (on the surface
 the cloud or the orthophoto; guided placement with blue flags to confirm in the photos, photo
 filters by marker, point and area, estimated coordinates in the Reference pane.
 
-## 0.7 - Updates, speed and image quality
+## 0.7 - Updates, speed and image quality (done)
 
-* **Automatic update check**: the application looks for a new release at start-up (at most
-  once a day, can be switched off) and from *Aiuto > Controlla aggiornamenti*; it downloads the
-  installer for the platform and, on macOS, replaces the application and restarts it.
-* **Native core in Rust** (`pyarchinit-photogrammetry-core`, imported as `ppg_core`, PyO3 + rayon),
-  optional, with the numpy code kept as fallback and as the reference the tests compare it with.
-  Measured on a prototype (same results bit for bit): fusion of the depth maps of one photo
-  530 ms -> 14 ms, orthomosaic scoring of a 512 x 512 tile in 8 photos 87 ms -> 6 ms (2.5-4x from
-  compiled code, the rest from using every core without the GIL). First kernels: depth-map
-  fusion, orthomosaic and texture projection/scoring/painting, confidence; CPU depth maps of
-  several photos at once.
-* **Seamless orthomosaic and texture**: two-band blending (low frequencies averaged over the
-  photos, details from the best one), exposure and vignetting compensation between photos,
-  ghosting filter for people and vehicles seen in a few photos, smoother seams, hole filling.
-* **Image masks**: from SAM, from a background photo, from the model, imported and exported;
-  used when matching, in the depth maps, the orthomosaic and the texture; stationary tie points
-  left out for turntables with a fixed background.
-* **Orthomosaic and DEM on a plane or a cylinder**: wall elevations, wells, apses, towers.
-* **DEM editing**: fill an area with a constant height, the best-fit plane, IDW or a linear
-  interpolation, breaklines; kept as a version of the DEM, used by contours and volumes.
-* **Reconstruction region**: a 3D box that limits depth maps, cloud, mesh, DEM and orthomosaic.
+Automatic update check (at start-up once a day and from *Aiuto*; on macOS the new application is
+downloaded, copied aside and swapped in after quitting, then reopened). Native core in Rust
+(`native/`, `pyarchinit-photogrammetry-core`, imported as `ppg_core`, optional, numpy kept as fallback
+and reference): fusion of the depth estimates, disparity back to depth, normals, projection with the
+COLMAP camera models, scoring and best photos of every orthomosaic cell, confidence; CPU depth maps of
+several photos at once (synthetic trench 5.7 s -> 0.9 s, 40 photos of the Tell 10.8 s -> 3.2 s).
+Seamless orthomosaic: every cell picks among all the photos that frame it (no seam follows the
+tiles), two-band blending across the seams, exposure gain and vignetting measured on the photos and
+corrected (orthomosaic and texture), ghosting filter, small holes filled. Masks of the photos (drawn,
+imported, from background photos, a colour, the model or SAM 2.1) left out of matching, depth maps,
+orthomosaic and texture; stationary matches dropped for turntables. Elevations: orthophoto and relief
+on the plane of a wall or a cylinder (wells, towers). DEM editing (plane, linear, IDW, constant,
+breaklines, the DEM as it was kept as a version). Reconstruction region (a box around the subject).
+The generic texture of objects gets the colour correction; blending inside its atlas is left for later.
 
 ## 0.8 - Acquisition and precision
 
