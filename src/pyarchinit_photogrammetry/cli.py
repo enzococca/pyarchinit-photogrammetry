@@ -289,6 +289,31 @@ def munsell(project: Path,
 
 
 @app.command()
+def qfield(action: str = typer.Argument(..., help="export or import"), project: Path = typer.Argument(...),
+           folder: Path = typer.Argument(..., help="the folder of the package"),
+           resolution: float = typer.Option(0.02, help="export: pixel of the orthomosaic on the tablet (metres)"),
+           no_project: bool = typer.Option(False, help="export: without the QGIS project (QGIS not needed)"),
+           chunk: Optional[str] = None):
+    """QField package of a chunk (orthomosaic, DEM, units and spot heights, QGIS project) and the
+    edits made on the tablet brought back."""
+    from .io import qfield as qf
+
+    doc, ch = _open(project, chunk)
+    if action == "export":
+        out = qf.export_package(ch, folder, resolution=resolution, project=not no_project, progress=print_progress)
+        doc.save()
+        typer.echo(f"{out['folder']}: {out['units']} units, {out['quote']} spot heights"
+                   + (f", project {out['project'].name}" if out["project"] else ""))
+    elif action == "import":
+        n = qf.import_edits(ch, folder)
+        doc.save()
+        for kind, c in n.items():
+            typer.echo(f"{kind}: {c['added']} added, {c['changed']} changed, {c['deleted']} deleted")
+    else:
+        raise typer.BadParameter("export or import")
+
+
+@app.command()
 def precision(project: Path, marker_px: float = typer.Option(0.5, help="how well markers are measured (pixels)"),
               chunk: Optional[str] = None):
     """Precision of cameras, markers and tie points from the covariance of the bundle adjustment,

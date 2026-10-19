@@ -156,5 +156,35 @@ def write_table(path: str | Path, table: str, geometry_type: str, columns: dict[
     return path
 
 
+def geometry(data: bytes | None):
+    """The shapely geometry of a GeoPackage binary geometry (header, optional envelope, WKB)."""
+    import shapely
+
+    if data is None or len(data) < 8 or data[:2] != b"GP":
+        return None
+    envelope = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}.get((data[3] >> 1) & 0b111, 0)
+    if data[3] & 0b10000:  # empty geometry
+        return None
+    return shapely.from_wkb(bytes(data[8 + envelope:]))
+
+
+def read_table(path: str | Path, table: str) -> list[tuple[object, dict]]:
+    """The features of a GeoPackage table: ``(shapely geometry or None, {column: value})``."""
+    con = sqlite3.connect(str(path))
+    try:
+        cols = [r[1] for r in con.execute(f"PRAGMA table_info({quote(table)})")]
+        if not cols:
+            return []
+        geom_col = next((r[0] for r in con.execute(
+            "SELECT column_name FROM gpkg_geometry_columns WHERE table_name = ?", (table,))), "geom")
+        out = []
+        for row in con.execute(f"SELECT * FROM {quote(table)}"):
+            values = dict(zip(cols, row))
+            out.append((geometry(values.pop(geom_col, None)), values))
+        return out
+    finally:
+        con.close()
+
+
 __all__ = ["write_table", "is_geopackage", "srs_of", "blob", "create", "ensure_table", "replace_rows", "connect",
-           "quote"]
+           "quote", "geometry", "read_table"]

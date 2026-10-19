@@ -10,6 +10,8 @@ import numpy as np
 # pyunitastratigrafiche.stratigraph_index_us, as PyArchInit's layer style reads it
 STRATIGRAPHIC_INDEX = {1: "Caratterizzazione", 2: "Contorno US"}
 # the other columns of pyunitastratigrafiche kept in ``UnitPolygon.attributes`` under the same names
+# the kinds of unit of PyArchInit's US form (unita_tipo)
+US_TYPES = ["US", "USM", "USR", "USD", "USV", "USVs", "USVn", "SF", "VSF", "CON", "DOC", "TSU", "SE"]
 UNIT_FIELDS = ("stratigraph_index_us", "tipo_us_s", "rilievo_originale", "disegnatore", "data", "tipo_doc", "nome_doc")
 # columns of pyarchinit_quote (spot heights)
 QUOTE_FIELDS = ("sito_q", "area_q", "us_q", "unita_tipo_q", "quota_q", "unita_misu_q", "data", "disegnatore",

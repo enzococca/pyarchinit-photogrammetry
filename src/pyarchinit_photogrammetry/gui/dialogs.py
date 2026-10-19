@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
+from ..archaeo.stratigraphy import US_TYPES
 from .i18n import decimal_comma, number, thousands_points, tr, translate
 
 
@@ -1210,7 +1211,6 @@ class IfcPreviewDialog(QDialog):
 
 
 # ---------------------------------------------------------------- PyArchInit US form
-US_TYPES = ["US", "USM", "USR", "USD", "USV", "USVs", "USVn", "SF", "VSF", "CON", "DOC", "TSU", "SE"]
 US_FORM_PAGES = [
     ("Descrizione", [("d_stratigrafica", "Definizione stratigrafica"), ("d_interpretativa", "Definizione interpretativa"),
                      ("descrizione", "Descrizione*"), ("interpretazione", "Interpretazione*"),

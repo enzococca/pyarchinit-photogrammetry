@@ -191,6 +191,15 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   exposed earlier *covers* the units it overlaps in plan exposed later; the ticked relations go into
   the US forms of PyArchInit in both directions (never twice). A double click on a phase shows it;
   *Salva CSV* writes the report.
+* **QField in the trench** (*File > Esporta > Pacchetto QField*): a folder with the orthomosaic reduced
+  for the tablet (Cloud Optimized GeoTIFF, 2 cm by default), the DEM shown as a hillshade and a
+  GeoPackage with the units and spot heights of the chunk, plus a QGIS project with relative paths,
+  labels and the list of the US types (made with QGIS's Python when QGIS is installed; without it
+  QField opens the GeoPackage directly). Copy it to the tablet or to QFieldCloud, draw and correct in
+  the trench, bring the folder back: *File > Importa > Modifiche da QField* applies to the chunk the
+  units and spot heights added, changed and deleted there (every feature keeps an identity,
+  `ppg_id`), then *Pubblica in PyArchInit* / *Salva modifiche in PyArchInit* write them to the
+  database.
 * **Munsell colour**: *Misura area* (a box, a polygon or a selected unit) also gives the colour of the
   orthomosaic inside it - the median of its pixels without the darkest and brightest tenth (shadows,
   pebbles, glare) - as Munsell notation and nearest chip of a soil chart (`10YR 5/4`). Photograph a

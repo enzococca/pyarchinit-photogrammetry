@@ -344,6 +344,9 @@ class MainWindow(QMainWindow):
         self._act(exp, tr("Ortofoto (GeoTIFF/COG)..."), lambda: self.export("ortho"), icon_name="ortho")
         self._act(exp, tr("Camere (CSV / COLMAP)..."), lambda: self.export("cameras"), icon_name="cameras")
         self._act(exp, tr("Riferimenti (CSV)..."), lambda: self.export("reference"), icon_name="reference")
+        self._act(exp, tr("Pacchetto QField (tablet in trincea)..."), self.export_qfield, processing=True,
+                  icon_name="export", tip=tr("Ortofoto, DEM, unita' e quote del chunk in una cartella per QField: si "
+                                             "disegna sul tablet, poi File > Importa > Modifiche da QField"))
         exp.addSeparator()
         self._act(exp, tr("Ritagliati con un poligono o un riquadro (DEM, ortofoto, modello, nuvola)..."),
                   self.start_crop, icon_name="crop")
@@ -358,6 +361,8 @@ class MainWindow(QMainWindow):
                   tip=tr("Rilegge dal .psx il modello con colori, confidenza e texture (progetti importati prima)"))
         self._act(imp, tr("Progetto WebODM / ODM (cartella o all.zip)..."), lambda: self.import_external("webodm"),
                   processing=True, icon_name="open")
+        self._act(imp, tr("Modifiche da QField..."), self.import_qfield, icon_name="open",
+                  tip=tr("Le unita' e le quote disegnate o corrette sul tablet tornano nel chunk"))
         self._act(imp, tr("Sessione Photo3D..."), lambda: self.import_external("photo3d"), processing=True,
                   icon_name="photos")
         self._act(m, tr("Genera report HTML..."), self.generate_report, processing=True, icon_name="report")
@@ -3495,6 +3500,77 @@ class MainWindow(QMainWindow):
 
         self.run_task("Misura dell'area", job, done, refresh=False, save=False)
 
+    def export_qfield(self) -> None:
+        """File > Esporta > Pacchetto QField (:mod:`io.qfield`)."""
+        if not self._need_chunk():
+            return
+        from ..io import qfield
+        from ..io.qgis_link import find_qgis
+
+        folder = QFileDialog.getExistingDirectory(self, tr("Cartella in cui creare il pacchetto QField"),
+                                                  self._last_dir())
+        if not folder:
+            return
+        qgis = find_qgis()
+        v = ParamDialog.ask(self, "Pacchetto QField", [
+            Field("resolution", "Pixel dell'ortofoto sul tablet (m)", 0.02, minimum=0.001, maximum=1.0, decimals=3),
+            Field("project", "Progetto per QField (serve QGIS)", qgis is not None and bool(qgis.python))],
+            intro=tr("Una cartella con l'ortofoto (ridotta per il tablet), il DEM e un GeoPackage con le unita' e le "
+                     "quote di questo chunk, da copiare sul tablet o su QFieldCloud. Al ritorno, File > Importa > "
+                     "Modifiche da QField riporta qui cio' che e' stato disegnato o corretto."))
+        if not v:
+            return
+        import uuid
+
+        for u in self.units:  # the identity of every feature in the package, kept with the drawings
+            if not str((u.attributes or {}).get("_layer") or "").startswith("US da PyArchInit - "):
+                u.attributes.setdefault("ppg_id", uuid.uuid4().hex)
+        for q in self.quote:
+            q.setdefault("ppg_id", uuid.uuid4().hex)
+        self._store_drawings()
+        ch = self.chunk
+        target = Path(folder) / ("".join(c if c.isalnum() or c in "-_" else "_" for c in ch.label) + "_qfield")
+
+        def job(p):
+            return qfield.export_package(ch, target, resolution=v["resolution"], project=v["project"], progress=p)
+
+        def done(out):
+            self._dirty(True)
+            name = out["project"].name if out["project"] else qfield.GPKG
+            self._info("QField", tr("Pacchetto QField in {0}: {1} unita', {2} quote. Copia la cartella sul tablet (o "
+                                    "su QFieldCloud) e apri {3} con QField; al ritorno, File > Importa > Modifiche "
+                                    "da QField.", out["folder"], out["units"], out["quote"], name))
+
+        self.run_task("Pacchetto QField", job, done, refresh=False)
+
+    def import_qfield(self, folder: str | None = None) -> None:
+        """File > Importa > Modifiche da QField: the edits made on the tablet back in the chunk."""
+        if not self._need_chunk():
+            return
+        from ..io import qfield
+
+        if folder is None:
+            folder = QFileDialog.getExistingDirectory(self, tr("Cartella del pacchetto QField tornato dal tablet"),
+                                                      self._last_dir())
+            if not folder:
+                return
+        if not (Path(folder) / qfield.RECORD).exists():
+            self._warn(tr("{0} non e' un pacchetto QField di questo programma (manca {1}).", folder, qfield.RECORD))
+            return
+        self._store_drawings()
+        try:
+            n = qfield.import_edits(self.chunk, folder)
+        except (ValueError, OSError) as exc:
+            self._exc(tr("Modifiche da QField non importate"), exc)
+            return
+        self._reload_drawings()
+        self._dirty(True)
+        u, q = n["units"], n["quote"]
+        self._info("QField", tr("Dal tablet: unita' {0} nuove, {1} modificate, {2} eliminate; quote {3} nuove, {4} "
+                                "modificate, {5} eliminate. Verso PyArchInit: Pubblica in PyArchInit per le nuove, "
+                                "Salva modifiche in PyArchInit per le altre.", u["added"], u["changed"], u["deleted"],
+                                q["added"], q["changed"], q["deleted"]))
+
     def calibrate_colour_chart(self) -> None:
         """Strumenti > Calibra il colore con la tabella colori: a box around a ColorChecker
         photographed in the trench, on the orthomosaic (:mod:`archaeo.munsell`)."""
@@ -4527,10 +4603,20 @@ class MainWindow(QMainWindow):
         self._store_drawings()
         self._sam_cancel()
         self.doc.chunk = chunk
-        self._restore_drawings()
+        self._reload_drawings(redraw=False)
         self.refresh_all(reset_views=True)
         if self.history is not None:
             self.history.reset()  # the history belongs to a chunk
+
+    def _reload_drawings(self, redraw: bool = True) -> None:
+        """The drawings of the active chunk read again from the project; the units loaded from
+        PyArchInit (of the site, not of a chunk) stay."""
+        from_pa = [u for u in self.units
+                   if str((u.attributes or {}).get("_layer") or "").startswith("US da PyArchInit - ")]
+        self._restore_drawings()
+        self.units += from_pa
+        if redraw:
+            self._redraw_overlays()
 
     def _restore_drawings(self) -> None:
         from ..archaeo.stratigraphy import UnitPolygon

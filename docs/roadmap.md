@@ -109,7 +109,8 @@ markers in too few photos.
   `ppg stones`).
 * Munsell colour of the US from orthomosaics calibrated with a colour chart. *Done* (*Misura area*,
   *Calibra il colore con la tabella colori*, `ppg munsell`).
-* QField package: orthomosaic and layers on the tablet in the trench, edits back to PyArchInit.
+* QField package: orthomosaic and layers on the tablet in the trench, edits back to PyArchInit. *Done*
+  (*File > Esporta > Pacchetto QField*, *File > Importa > Modifiche da QField*, `ppg qfield`).
 * Machine-readable paradata (provenance of every product) linked to the PyArchInit media.
 * Pottery: rim diameter from a sherd, profile-based typology search against `pottery_table`.
 * Automatic US proposal from SAM masks + stratigraphic relations for the Extended Matrix.
