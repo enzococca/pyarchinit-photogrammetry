@@ -116,4 +116,6 @@ def test_grazing_views_leave_the_cells_transparent(processed, tmp_path):
     normal = coverage(ch.build_orthomosaic(resolution=0.008))
     strict = coverage(ch.build_orthomosaic(resolution=0.008, max_angle=12.0))
     assert ch.meta["orthomosaic"]["max_angle"] == 12.0
-    assert normal > 0.7 and strict < normal - 0.05
+    # how much falls out depends on the margins of the DEM seen only obliquely: a few points
+    # (5 with the two-view depth maps, 3.4 with PatchMatch, which leaves less ground to interpolate)
+    assert normal > 0.7 and strict < normal - 0.02

@@ -453,12 +453,18 @@ def refine_markers(project: Path, marker: Optional[list[str]] = typer.Option(Non
 
 
 @app.command()
-def align(project: Path, quality: str = "high", pairs: str = "auto", keypoints: int = 40000,
+def align(project: Path, quality: str = "high",
+          pairs: str = typer.Option("auto", help="auto, exhaustive (every pair), generic (the pairs that overlap, "
+                                                 "found on small images first), reference (nearest by GPS), "
+                                                 "sequential (video)"),
+          keypoints: int = 40000,
+          mapper: str = typer.Option("auto", help="auto, incremental (one photo after the other) or global (all at "
+                                                  "once, much faster with many photos)"),
           chunk: Optional[str] = None):
     """Match photos and align cameras."""
     doc, ch = _open(project, chunk)
     ch.match_photos(quality=quality, pair_selection=pairs, keypoint_limit=keypoints, progress=print_progress)
-    n = ch.align_cameras(progress=print_progress)
+    n = ch.align_cameras(progress=print_progress, mapper=mapper)
     doc.save()
     typer.echo(f"aligned {n}/{len(ch.cameras)} photos")
 

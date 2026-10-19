@@ -84,8 +84,10 @@ counts. Measured on the synthetic trench, CPU depth maps of 48 photos: 5.7 s wit
 photo at a time, 1.6 s with the native kernels, 0.9 s with six photos at a time.
 
 From 0.2.0 the core also holds PatchMatch multi-view stereo (`patchmatch_depth`, the depth-map
-backend `patchmatch`). It has no numpy version (it would be far too slow): without the core the
-backend is not offered in the window and the step stops with a message when asked for it.
+backend `patchmatch`, which the automatic choice takes for surveys from the air: photos whose GPS
+positions spread over the site). It has no numpy version (it would be far too slow): without the core
+`auto` falls back to two-view SGBM, the backend is not offered in the window and the step stops with a
+message when asked for it by name.
 
 ```bash
 pip install ./native                         # build and install (maturin is fetched by pip)

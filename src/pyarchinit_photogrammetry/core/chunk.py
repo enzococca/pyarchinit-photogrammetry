@@ -250,8 +250,9 @@ class Chunk:
                          pair_selection=pair_selection, progress=as_progress(progress),
                          exclude_stationary=exclude_stationary)
 
-    def align_cameras(self, progress: ProgressCallback | None = None) -> int:
+    def align_cameras(self, progress: ProgressCallback | None = None, mapper: str = "auto") -> int:
         """Estimate camera poses and sparse tie points. Returns the number of aligned photos.
+        ``mapper``: ``incremental``, ``global`` or ``auto`` (see :func:`engine.sfm.align_cameras`).
 
         A new alignment lives in a new arbitrary frame: the chunk transform is reset and,
         when references exist (>= 3 GCPs or GNSS camera positions, or scale bars), the
@@ -259,7 +260,7 @@ class Chunk:
         """
         from ..engine import sfm
 
-        n = sfm.align_cameras(self, progress=as_progress(progress))
+        n = sfm.align_cameras(self, progress=as_progress(progress), mapper=mapper)
         self.transform = geometry.identity()
         self.meta.pop("levelled", None)
         self.forget_precision()

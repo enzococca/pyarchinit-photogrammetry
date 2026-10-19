@@ -2332,10 +2332,17 @@ class MainWindow(QMainWindow):
         v = ParamDialog.ask(self, "Allinea foto", [
             Field("quality", "Precisione", "high", choices=QUALITY[1:]),
             Field("pair_selection", "Selezione coppie", "auto",
-                  choices=[("auto", "Automatica"), ("exhaustive", "Tutte le coppie"), ("sequential", "Sequenziale"),
-                           ("reference", "Da posizione GNSS")]),
+                  choices=[("auto", "Automatica"), ("generic", "Preselezione generica"), ("exhaustive", "Tutte le coppie"),
+                           ("sequential", "Sequenziale"), ("reference", "Da posizione GNSS")],
+                  tip="Automatica: tutte le coppie fino a 40 foto, oltre solo quelle che si sovrappongono, trovate "
+                      "prima su foto rimpicciolite (preselezione generica)"),
             Field("keypoint_limit", "Limite punti chiave", 40000, minimum=1000, maximum=200000),
             Field("tiepoint_limit", "Limite punti di legame", 8000, minimum=500, maximum=100000),
+            Field("mapper", "Metodo", "auto",
+                  choices=[("auto", "Automatico"), ("global", "Globale (tutte le camere insieme)"),
+                           ("incremental", "Incrementale (una foto alla volta)")],
+                  tip="Globale: molto piu' veloce con molte foto; automatico lo sceglie da 40 foto in su e torna "
+                      "all'incrementale se lascia fuori delle foto"),
             Field("stationary", "Escludi i punti fermi (turntable con fotocamera fissa)", False,
                   tip="I punti che restano nello stesso pixel in due foto sono lo sfondo fermo: non contano")],
             intro="Le parti mascherate delle foto (Strumenti > Maschere delle foto) non vengono usate.")
@@ -2345,7 +2352,7 @@ class MainWindow(QMainWindow):
         def job(p):
             self.chunk.match_photos(v["quality"], v["keypoint_limit"], v["tiepoint_limit"], v["pair_selection"],
                                     progress=p.sub(0, 0.5), exclude_stationary=bool(v.get("stationary")))
-            n = self.chunk.align_cameras(progress=p.sub(0.5, 0.5))
+            n = self.chunk.align_cameras(progress=p.sub(0.5, 0.5), mapper=v.get("mapper", "auto"))
             if any(m.reference.location for m in self.chunk.markers):
                 self.last_report = self.chunk.update_transform()
             return n
@@ -2658,8 +2665,10 @@ class MainWindow(QMainWindow):
                   + ([("patchmatch", "PatchMatch multi-vista (piu' preciso, piu' lento)")]
                      if dense.patchmatch_available() else [])
                   + [("colmap", "COLMAP (GPU NVIDIA)"), ("openmvs", "OpenMVS")],
-                  tip=tr("PatchMatch: un piano per pixel confrontato con piu' foto insieme; sulla trincea di prova "
-                         "errore del DEM 2-3 volte piu' basso dello stereo a coppie, circa 30 volte piu' lento")),
+                  tip=tr("Automatico: PatchMatch per i rilievi aerei (foto con il GPS sparse sul sito), lo stereo a "
+                         "coppie (CPU) per oggetti e scavi. PatchMatch: un piano per pixel confrontato con piu' foto "
+                         "insieme; da drone niente gradini a forma di curve di livello e bordi piu' coperti, circa 8 "
+                         "volte piu' lento")),
             Field("only_depth", "Solo le mappe di profondita' (per il modello fuso, senza nuvola densa)", False)]
             + self._version_fields("point_cloud"))
         if not v:

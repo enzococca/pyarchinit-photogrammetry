@@ -77,6 +77,20 @@ def surface_points_world(chunk: Chunk, source: str, classes=None) -> np.ndarray:
     return chunk.to_world(pts)
 
 
+def point_spacing(xy: np.ndarray) -> float:
+    """Mean distance between neighbouring points over the ground they cover: the occupied cells
+    of a grid ten times coarser than an even spread over their box, so that the empty corners of a
+    flight turned to the north or of an irregular site do not count as sparse ground (the box of the
+    Tell Sultan sample is 1.4 times the ground its points cover)."""
+    n = len(xy)
+    box = float(np.ptp(xy[:, 0]) * np.ptp(xy[:, 1])) if n else 0.0
+    if box <= 0:
+        return 0.0
+    cell = 10.0 * np.sqrt(box / n)
+    occupied = len(np.unique(np.floor(xy / cell).astype(np.int64), axis=0)) * cell * cell
+    return float(np.sqrt(min(occupied, box) / n))
+
+
 def grid_points(pts: np.ndarray, resolution: float, bounds=None, reducer: str = "max"):
     """Rasterise points; returns ``(array, (xmin, ymax), shape)``. Empty cells = NaN."""
     if bounds is None:
@@ -154,11 +168,11 @@ def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "poin
     classes = None if classes is None else sorted({int(c) for c in classes})
     pts = surface_points_world(chunk, source, classes)
     if resolution is None:
-        area = np.ptp(pts[:, 0]) * np.ptp(pts[:, 1])
-        n = len(pts)
-        if classes is not None:  # the density of the whole cloud: DEMs of other classes on the same grid
-            n = max(n, sum(v for k, v in chunk.point_classes().items() if k not in NOISE_CLASSES))
-        resolution = float(max(2 * estimate_gsd(chunk), np.sqrt(area / max(n, 1)) * 1.5))
+        # a cell per point, as dense as the cloud (Metashape's default too): with 1.5 points per
+        # cell the DEM of the Tell Sultan sample was 1.5 times coarser and further from Metashape's.
+        # With classes, the spacing of the whole cloud: DEMs of other classes on the same grid
+        whole = pts if classes is None else surface_points_world(chunk, source, None)
+        resolution = float(max(2 * estimate_gsd(chunk), point_spacing(whole[:, :2])))
     progress(0.3, f"Rasterising DEM at {resolution:.4g} m/px")
     dem, origin, _ = grid_points(pts, resolution, reducer="max" if source != "tie_points" else "mean")
     if interpolate:

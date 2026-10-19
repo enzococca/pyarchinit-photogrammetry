@@ -285,3 +285,31 @@ def test_patchmatch_depth_maps_of_the_trench(processed, scene, tmp_path):
     assert abs(np.median(err)) < 0.001
     assert 1.4826 * np.median(np.abs(err - np.median(err))) < 0.0015
     assert np.percentile(np.abs(err), 90) < 0.003
+
+
+def test_auto_takes_patchmatch_for_surveys_from_the_air(processed, monkeypatch):
+    """Two-view SGBM for the trench (no GPS), PatchMatch when the GPS of the photos spreads over a
+    site; an NVIDIA GPU or OpenMVS keep their precedence."""
+    from pyarchinit_photogrammetry.engine import dense
+
+    if not dense.patchmatch_available():
+        pytest.skip("native core without PatchMatch")
+    _doc, ch, _report = processed
+    monkeypatch.setattr(dense.shutil, "which", lambda name: None)  # no OpenMVS here
+    assert not dense.aerial_survey(ch) and dense.choose_backend("auto", ch) == "cpu"
+    saved = [(c.reference.location, c.reference.accuracy, c.reference.enabled, c.meta.get("reference_crs"))
+             for c in ch.cameras]
+    try:
+        for i, cam in enumerate(ch.aligned_cameras):  # a flight over 200 m, GPS known to 5 m
+            cam.reference.location = [1000.0 + 10.0 * (i % 5) * 4, 2000.0 + 10.0 * (i // 5) * 4, 100.0]
+            cam.reference.accuracy, cam.reference.enabled = [5.0, 5.0, 10.0], True
+            cam.meta["reference_crs"] = ch.crs
+        assert dense.aerial_survey(ch) and dense.choose_backend("auto", ch) == "patchmatch"
+        assert dense.choose_backend("cpu", ch) == "cpu"
+    finally:
+        for cam, (loc, acc, enabled, ref_crs) in zip(ch.cameras, saved):
+            cam.reference.location, cam.reference.accuracy, cam.reference.enabled = loc, acc, enabled
+            if ref_crs is None:
+                cam.meta.pop("reference_crs", None)
+            else:
+                cam.meta["reference_crs"] = ref_crs

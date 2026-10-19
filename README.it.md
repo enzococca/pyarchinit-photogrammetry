@@ -59,9 +59,10 @@ alla [release](https://github.com/enzococca/pyarchinit-photogrammetry/releases/l
 funziona in emulazione.
 Dai sorgenti, `uv pip install ./native` (serve Rust) aggiunge il nucleo nativo `ppg_core`: le parti più
 pesanti di depth map, ortofoto e confidenza in Rust su tutti i core (depth map su CPU circa sei volte più
-veloci) e il PatchMatch multi-vista senza GPU (motore `patchmatch`: un piano per pixel confrontato con
-fino a sei foto insieme; sulla trincea di prova l'errore del DEM è circa un terzo di quello dello stereo a
-coppie, in circa trenta volte il tempo); senza, gira lo stesso codice numpy. Le applicazioni desktop lo
+veloci) e il PatchMatch multi-vista senza GPU (motore `patchmatch`, scelto da `auto` per i rilievi aerei: un
+piano per pixel confrontato con fino a sei foto insieme; sulla trincea di prova l'errore del DEM è circa un
+terzo di quello dello stereo a coppie; sul rilievo da drone di un tell toglie i gradini a forma di curve di
+livello e le bande dello stereo a coppie e copre di più i bordi, in circa otto volte il tempo); senza, gira lo stesso codice numpy. Le applicazioni desktop lo
 contengono già.
 Per avere `ppg` e `ppg-gui` sempre disponibili senza attivare nulla:
 `uv tool install "pyarchinit-photogrammetry[all]"` (o `pipx install`).

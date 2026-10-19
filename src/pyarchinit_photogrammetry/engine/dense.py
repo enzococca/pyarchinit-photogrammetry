@@ -54,7 +54,27 @@ def _tool(name: str) -> str:
     return shutil.which(name) or name
 
 
-def choose_backend(backend: str) -> str:
+def aerial_survey(chunk: Chunk | None) -> bool:
+    """The photos are a survey from the air: their GPS positions spread over the site (at least ten
+    times their accuracy), not an object, a turntable or a trench of a few metres."""
+    if chunk is None:
+        return False
+    from ..markers.gcp import cameras_span_their_accuracy
+
+    try:
+        return bool(cameras_span_their_accuracy(chunk))
+    except Exception:  # pragma: no cover - references in a CRS that cannot be read
+        return False
+
+
+def choose_backend(backend: str, chunk: Chunk | None = None) -> str:
+    """``auto``: COLMAP's PatchMatch with an NVIDIA GPU, OpenMVS when it is installed, the
+    multi-view PatchMatch of the native core for a survey from the air (:func:`aerial_survey`),
+    else two-view SGBM. From the air the steps of SGBM's disparities (1/16 pixel, about 10 cm at
+    110 m on depth maps of 1000 pixels) drew contour-like terraces and stripes on the DEM of a tell,
+    and PatchMatch covers more of the edges of the flight (Tell Sultan: 79 % of the ground of
+    Metashape's DEM against 59 %, about eight times the time of SGBM); on a bowl photographed on a
+    turntable it swelled the rim by 8 mm, so close objects and trenches keep SGBM."""
     if backend != "auto":
         return backend
     try:
@@ -66,6 +86,8 @@ def choose_backend(backend: str) -> str:
         pass
     if shutil.which("DensifyPointCloud") and shutil.which("InterfaceCOLMAP"):
         return "openmvs"
+    if patchmatch_available() and aerial_survey(chunk):
+        return "patchmatch"
     return "cpu"
 
 
@@ -80,7 +102,7 @@ def build_depth_maps(chunk: Chunk, quality: str = "medium", filter_mode: str = "
     bad = unreadable_photos(chunk)
     if bad and (not skip_unreadable or len(bad) == len(chunk.aligned_cameras)):
         raise UnreadablePhotos(bad)
-    backend = choose_backend(backend)
+    backend = choose_backend(backend, chunk)
     ws = _workspace(chunk)
     shutil.rmtree(ws, ignore_errors=True)
     ws.mkdir(parents=True)
@@ -143,6 +165,14 @@ def build_point_cloud(chunk: Chunk, point_colors: bool = True, progress: Progres
         fopts.max_reproj_error = 2.0
         fopts.max_depth_error = 0.01
         fopts.max_normal_error = 20.0
+        if aerial_survey(chunk):
+            # at most 10 pixels in a point: without a limit a fused point takes in the pixels chained
+            # from photo to photo, and with the 15-20 photos of a drone survey that see every spot the
+            # cloud came out three to four times sparser than its depth maps (Tell Sultan sample:
+            # 0.9 M points, 3.3 M with the limit, Metashape 4.2 M). Close range keeps COLMAP's fusion:
+            # from small depth maps the points of fewer pixels were noisy enough to make two chunks of
+            # the synthetic trench aligned by their clouds miss by 12 mm one time in two
+            fopts.max_num_pixels = 10
         fopts.cache_size = _fusion_cache_gb()
         out = ws / "fused.ply"
         pycolmap.stereo_fusion(str(out), str(ws), input_type="geometric", options=fopts, output_type="PLY")

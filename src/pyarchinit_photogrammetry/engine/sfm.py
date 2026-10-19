@@ -230,13 +230,72 @@ def _reference_pairs(chunk: Chunk, names: dict[int, str], neighbors: int = 20) -
     return sorted(pairs)
 
 
+PRESELECTION_SIZE = 1024  # pixels of the longer side of the photos matched to find the pairs
+PRESELECTION_POINTS = 1024  # points per photo for that
+PRESELECTION_INLIERS = 15  # verified matches that make two photos a pair
+EXHAUSTIVE_UP_TO = 40  # photos: every pair is matched in full (cheap enough), above it the pairs are preselected
+
+
+def _preselected_pairs(chunk: Chunk, work: Path, root, by_sensor: dict, masks,
+                       names: dict[int, str]) -> list[tuple[str, str]]:
+    """The pairs of photos that overlap, found as the generic preselection of Metashape finds them:
+    a thousand points of every photo reduced to 1024 pixels, matched in every pair (a fraction of
+    the full matching), the pairs with at least ``PRESELECTION_INLIERS`` verified matches kept.
+    With GPS positions their nearest neighbours are added: a net for photos with little texture.
+    The full matching then runs on these pairs only (Tell Sultan sample, 57 photos: 859 pairs of
+    1596 in 7 s; orbits of oblique photos find the vertical ones that see the same ground, which a
+    choice by the positions of the cameras alone would miss)."""
+    import sqlite3
+
+    import pycolmap
+
+    db_path = work / "preselection.db"
+    db_path.unlink(missing_ok=True)
+    try:
+        for skey, image_names in by_sensor.items():
+            sensor = chunk.sensors[skey]
+            ext = pycolmap.FeatureExtractionOptions()
+            ext.max_image_size = min(PRESELECTION_SIZE, max(sensor.width, sensor.height))
+            ext.sift.max_num_features = PRESELECTION_POINTS
+            reader = pycolmap.ImageReaderOptions()
+            model, params = mapping_camera(sensor)
+            reader.camera_model = model
+            reader.camera_params = ",".join(f"{p:.10g}" for p in params)
+            if masks is not None:
+                reader.mask_path = str(masks)
+            pycolmap.extract_features(str(db_path), str(root), image_names=image_names,
+                                      camera_mode=pycolmap.CameraMode.SINGLE, reader_options=reader,
+                                      extraction_options=ext)
+        pycolmap.match_exhaustive(str(db_path))
+        con = sqlite3.connect(str(db_path))
+        try:
+            ids = dict(con.execute("SELECT image_id, name FROM images"))
+            pairs = set()
+            for pair_id, rows in con.execute("SELECT pair_id, rows FROM two_view_geometries WHERE rows >= ?",
+                                             (PRESELECTION_INLIERS,)):
+                a, b = pycolmap.pair_id_to_image_pair(int(pair_id))
+                pairs.add(tuple(sorted((ids[a], ids[b]))))
+        finally:
+            con.close()
+    finally:
+        for suffix in ("", "-shm", "-wal"):
+            Path(str(db_path) + suffix).unlink(missing_ok=True)
+    pairs |= set(_reference_pairs(chunk, names, neighbors=8) or [])
+    return sorted(pairs)
+
+
 def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 40000, tiepoint_limit: int = 8000,
                  pair_selection: str = "auto", progress: Progress | None = None,
                  exclude_stationary: bool = False) -> None:
     """Detect and match the points of the photos (SIFT); the masked parts of the photos
     (:mod:`.masks`) are left out. ``exclude_stationary``: matches that do not move between two
     photos are dropped - the background of a turntable photographed from a fixed camera. The
-    faces of 360-degree photos (:mod:`.panorama`) become the frames of a rig."""
+    faces of 360-degree photos (:mod:`.panorama`) become the frames of a rig.
+
+    ``pair_selection``: ``exhaustive`` (every pair), ``generic`` (the pairs that overlap, found on
+    small images first: :func:`_preselected_pairs`), ``reference`` (the nearest cameras by GPS),
+    ``sequential`` (video); ``auto`` matches every pair up to ``EXHAUSTIVE_UP_TO`` photos and
+    preselects above (360-degree rigs: every pair)."""
     import pycolmap
 
     from .masks import colmap_mask_folder
@@ -288,18 +347,25 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     n = len(names)
     mode = pair_selection
     if mode == "auto":
-        mode = "exhaustive" if n <= 200 else ("reference" if _reference_pairs(chunk, names) else "sequential")
-    progress(0.5, f"Matching photos ({mode})")
+        mode = "exhaustive" if n <= EXHAUSTIVE_UP_TO or rigs else "generic"
+    pairs = None
+    if mode == "generic":
+        progress(0.5, "Finding the pairs of photos that overlap")
+        pairs = _preselected_pairs(chunk, work, root, by_sensor, masks, names)
+        if not pairs:
+            mode = "exhaustive"  # nothing found on the small images: every pair
+    elif mode == "reference":
+        pairs = _reference_pairs(chunk, names)
+        if not pairs:
+            raise RuntimeError("reference pair selection needs camera reference positions")
+    progress(0.55, f"Matching photos ({mode}" + (f", {len(pairs):,} pairs)" if pairs else ")"))
     if mode == "exhaustive":
         pycolmap.match_exhaustive(str(db_path), matching_options=mopts)
     elif mode == "sequential":
         popts = pycolmap.SequentialPairingOptions()
         popts.overlap = 20
         pycolmap.match_sequential(str(db_path), matching_options=mopts, pairing_options=popts)
-    elif mode == "reference":
-        pairs = _reference_pairs(chunk, names)
-        if not pairs:
-            raise RuntimeError("reference pair selection needs camera reference positions")
+    elif mode in ("reference", "generic"):
         list_path = work / "pairs.txt"
         list_path.write_text("\n".join(f"{a} {b}" for a, b in pairs))
         popts = pycolmap.ImportedPairingOptions()
@@ -309,8 +375,9 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
         raise ValueError(f"unknown pair selection {pair_selection!r}")
     removed = remove_stationary_matches(db_path) if exclude_stationary else None
     chunk.meta["sfm"] = {"image_root": str(root), "names": {str(k): v for k, v in names.items()},
-                         "quality": quality, "pair_selection": mode, "masks": masks is not None,
-                         "stationary_removed": removed, "rigs": len(rigs)}
+                         "quality": quality, "pair_selection": mode, "pairs": len(pairs) if pairs else None,
+                         "masks": masks is not None, "stationary_removed": removed, "rigs": len(rigs),
+                         "keypoint_limit": int(keypoint_limit), "tiepoint_limit": int(tiepoint_limit)}
     progress(1.0, "Matching finished" + (f" ({removed:,} stationary matches left out)" if removed else ""))
 
 
@@ -352,7 +419,28 @@ def remove_stationary_matches(db_path: Path, min_shift: float = 2.0, min_inliers
         con.close()
 
 
-def align_cameras(chunk: Chunk, progress: Progress | None = None) -> int:
+GLOBAL_FROM = 40  # photos: from here ``auto`` aligns them all at once (global SfM) instead of one by one
+
+
+def _global_mapping(chunk: Chunk, db_path: Path, root: str, out: Path, n: int):
+    """All the cameras at once (COLMAP's global SfM, GLOMAP): rotations averaged over every pair,
+    then positions, then the bundle adjustment on a selection of the tracks - ``tiepoint_limit / 4``
+    per photo, as the tie point limit of Metashape, retriangulated afterwards. Tell Sultan sample
+    (57 photos): 58 s against 293 s one photo at a time, the same cameras within 2 cm."""
+    import pycolmap
+
+    per_view = max(500, int((chunk.meta.get("sfm") or {}).get("tiepoint_limit", 8000)) // 4)
+    opts = pycolmap.GlobalPipelineOptions()
+    opts.mapper.track_required_tracks_per_view = per_view
+    opts.mapper.keep_max_num_tracks = per_view * max(n, 1)
+    return pycolmap.global_mapping(str(db_path), root, str(out), opts)
+
+
+def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = "auto") -> int:
+    """Cameras and tie points from the matches of :func:`match_photos`. ``mapper``: ``incremental``
+    (one photo after the other, COLMAP), ``global`` (all at once, GLOMAP: much faster with many
+    photos) or ``auto`` - global from ``GLOBAL_FROM`` photos, incremental for fewer, for 360-degree
+    rigs and calibrations held fixed, and whenever the global one leaves photos out."""
     import pycolmap
 
     progress = as_progress(progress)
@@ -364,18 +452,40 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None) -> int:
     out = work / "mapper"
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
-    opts = pycolmap.IncrementalPipelineOptions()
-    opts.multiple_models = True
-    opts.min_model_size = 3
-    opts.extract_colors = True
+    n = len(chunk.meta["sfm"].get("names", {}))
     fixed = _fixed_camera_ids(chunk, db_path)
-    if fixed:  # faces of 360-degree photos (exact calibration, rig known), sensors held by the user
-        opts.constant_cameras = fixed
-        opts.ba_refine_sensor_from_rig = False
-    progress(0.0, "Aligning cameras")
-    recs = pycolmap.incremental_mapping(str(db_path), root, str(out), opts)
+    rigs = bool(chunk.meta["sfm"].get("rigs"))
+    if mapper not in ("auto", "incremental", "global"):
+        raise ValueError(f"unknown mapper {mapper!r}")
+    if mapper == "auto":
+        mapper = "global" if n >= GLOBAL_FROM and not fixed and not rigs else "incremental"
+    recs = {}
+    if mapper == "global":
+        progress(0.0, f"Aligning {n} cameras at once (global)")
+        try:
+            recs = _global_mapping(chunk, db_path, root, out, n)
+        except Exception as exc:  # pragma: no cover - a block the global solver cannot handle
+            progress(0.05, f"Global alignment failed ({exc}): one photo at a time")
+        best = max(recs.values(), key=lambda r: r.num_reg_images()) if recs else None
+        if best is None or best.num_reg_images() < 0.9 * n:
+            progress(0.1, f"Global alignment placed {best.num_reg_images() if best else 0} of {n} photos: "
+                          "one photo at a time")
+            shutil.rmtree(out, ignore_errors=True)
+            out.mkdir(parents=True)
+            recs, mapper = {}, "incremental"
+    if mapper == "incremental":
+        opts = pycolmap.IncrementalPipelineOptions()
+        opts.multiple_models = True
+        opts.min_model_size = 3
+        opts.extract_colors = True
+        if fixed:  # faces of 360-degree photos (exact calibration, rig known), sensors held by the user
+            opts.constant_cameras = fixed
+            opts.ba_refine_sensor_from_rig = False
+        progress(0.0, "Aligning cameras")
+        recs = pycolmap.incremental_mapping(str(db_path), root, str(out), opts)
     if not recs:
         raise RuntimeError("alignment failed: no reconstruction could be initialised")
+    chunk.meta["sfm"]["mapper"] = mapper
     best = max(recs.values(), key=lambda r: r.num_reg_images())
     _restore_sensor_models(chunk, best)
     model_dir = work / "model"
