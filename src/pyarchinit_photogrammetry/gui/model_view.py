@@ -31,6 +31,7 @@ class SoftwareCanvas(QWidget):
         self.preview = None
         self.show_cameras = True
         self.show_markers = True
+        self.show_region = True
         self.point_size = 2  # screen pixels of a point
         self._image: QImage | None = None
         self._dirty = True
@@ -135,6 +136,16 @@ class SoftwareCanvas(QWidget):
                 pa, pb = QPointF(float(x[0]), float(y[0])), QPointF(float(x[1]), float(y[1]))
                 p.drawLine(pa, pb)
                 p.drawText(pa + (pb - pa) * 0.4 + QPointF(6, -6), text)  # off the middle: crossing bars
+        if self.show_region and self.sd.region is not None:  # the reconstruction region
+            x, y, _, ok = self.cam.project(self.sd.region, w, h)
+            pen = QPen(QColor(255, 210, 0), 1.5)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            from ..engine.region import Region
+
+            for a, b in Region.EDGES:
+                if ok[a] and ok[b]:
+                    p.drawLine(QPointF(float(x[a]), float(y[a])), QPointF(float(x[b]), float(y[b])))
         p.setPen(QColor(200, 200, 200))
         p.drawText(8, h - 8, f"{VIEW_LABELS.get(self.sd.kind, self.sd.kind)} - renderer software")
         p.end()
@@ -210,6 +221,7 @@ class VtkCanvas(QWidget):
         self.sd = SceneData(np.zeros(3))
         self.show_cameras = True
         self.show_markers = True
+        self.show_region = True
         self.point_size = 2.0  # screen pixels of a point
         self._cloud_actor = None
 
@@ -265,6 +277,11 @@ class VtkCanvas(QWidget):
                 pl.add_point_labels(np.array([s[1] + 0.4 * (s[2] - s[1]) for s in bars]), [s[0] for s in bars],
                                     point_size=1, font_size=11, text_color="#ffa028" if check else "#00e5ff",
                                     shape_opacity=0.25, always_visible=True)
+        if self.show_region and sd.region is not None:  # the reconstruction region
+            from ..engine.region import Region
+
+            lines = np.hstack([[2, a, b] for a, b in Region.EDGES])
+            pl.add_mesh(pv.PolyData(np.asarray(sd.region, np.float64), lines=lines), color="#ffd200", line_width=2)
         if reset:
             self.reset_view()
         pl.render()
@@ -531,8 +548,12 @@ class ModelView(QWidget):
         self.cb_cams.setChecked(True)
         self.cb_marks = QCheckBox("Marker")
         self.cb_marks.setChecked(True)
+        self.cb_region = QCheckBox("Regione")
+        self.cb_region.setChecked(True)
+        self.cb_region.setToolTip("Il riquadro giallo della regione di ricostruzione (Flusso di lavoro > Regione)")
         self.cb_cams.toggled.connect(lambda _: self.refresh(reset=False))
         self.cb_marks.toggled.connect(lambda _: self.refresh(reset=False))
+        self.cb_region.toggled.connect(lambda _: self.refresh(reset=False))
         b_reset = QPushButton("Vista iniziale")
         b_top = QPushButton("Dall'alto")
         self.color_combo = QComboBox()
@@ -580,6 +601,7 @@ class ModelView(QWidget):
         bar.addWidget(self.b_photos)
         bar.addWidget(self.cb_cams)
         bar.addWidget(self.cb_marks)
+        bar.addWidget(self.cb_region)
         bar.addWidget(b_top)
         bar.addWidget(b_reset)
         lay.addLayout(bar)
@@ -880,6 +902,7 @@ class ModelView(QWidget):
     def refresh(self, reset: bool = False) -> None:
         self.canvas.show_cameras = self.cb_cams.isChecked()
         self.canvas.show_markers = self.cb_marks.isChecked()
+        self.canvas.show_region = self.cb_region.isChecked()
         self._update_tools()
         mode = self.color_mode()
         hidden = self._hidden("class") if mode == "class" else set()

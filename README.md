@@ -198,6 +198,8 @@ is installed on first use (PyTorch in a separate environment, see the same page)
   orthophoto of a tell at 1.35 cm/px takes 4-6 minutes on an Apple M4 Pro. Cells seen only at
   grazing angles (more than 70 degrees from the vertical, adjustable) stay transparent instead
   of smearing the photos.
+* **Reconstruction region**: a box around the subject (from the tie points, a plan polygon or typed
+  values, turned to the view); depth maps, dense cloud, model, DEM and orthomosaic stay inside it.
 * **DEM editing**: an area drawn on the DEM filled from the ground around it (plane, linear, IDW or a
   constant height, breaklines kept): trees, tents and spoil heaps out of contours and volumes; the DEM
   as it was stays as a version.

@@ -144,6 +144,11 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
 
 ## Orthophoto at full resolution and patches
 
+* **Reconstruction region** (*Flusso di lavoro > Regione di ricostruzione*): a box (yellow in the 3D
+  view, *Regione* shows or hides it) around the tie points, turned to face the 3D view, over the
+  selected polygon of the plan, or with typed centre, size and rotation; depth maps, dense cloud and
+  model built afterwards stay inside it - the trench and not the field around it, the pot and not the
+  table - and so do DEM and orthomosaic. *Togli la regione* goes back to everything the photos see.
 * **Editing the DEM** (drawing bar: *Modifica DEM*, drag a box or click a polygon; or *Modifica il DEM
   in quest'area* in the menu of a selected polygon): the heights inside the area come again from the
   ground just outside it - the plane that fits it, a linear interpolation, IDW or a constant height -

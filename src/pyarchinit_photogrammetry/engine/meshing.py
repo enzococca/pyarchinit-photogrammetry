@@ -137,6 +137,9 @@ def _paint(mesh, xyz: np.ndarray, rgb: np.ndarray) -> None:
 
 
 def _save_model(chunk: Chunk, mesh, progress: Progress):
+    from .region import crop_mesh
+
+    mesh = crop_mesh(chunk, mesh)  # nothing outside the reconstruction region
     path = chunk.data_dir / "model.ply"
     mesh.export(str(path))
     chunk._set_product("model", path)

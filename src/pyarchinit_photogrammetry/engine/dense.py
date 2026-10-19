@@ -134,7 +134,7 @@ def build_point_cloud(chunk: Chunk, point_colors: bool = True, progress: Progres
     if info["backend"] == "openmvs":
         subprocess.run([_tool("DensifyPointCloud"), str(ws / "scene.mvs"), "-w", str(ws)], check=True,
                        close_fds=False)
-        pc = PointCloud.load(ws / "scene_dense.ply")
+        pc = _inside_region(chunk, PointCloud.load(ws / "scene_dense.ply"))
     else:
         fopts = pycolmap.StereoFusionOptions()
         fopts.min_num_pixels = FILTER_MODES.get(info["filter"], FILTER_MODES["moderate"])[2]
@@ -145,6 +145,7 @@ def build_point_cloud(chunk: Chunk, point_colors: bool = True, progress: Progres
         out = ws / "fused.ply"
         pycolmap.stereo_fusion(str(out), str(ws), input_type="geometric", options=fopts, output_type="PLY")
         pc = PointCloud.load(out)
+        pc = _inside_region(chunk, pc)
         if len(pc):  # confidence: how many depth maps agree on each point
             from .confidence import depth_map_support
 
@@ -352,6 +353,17 @@ def read_colmap_array(path: Path) -> np.ndarray:
     return np.transpose(arr, (1, 0, 2)).squeeze()
 
 
+def _inside_region(chunk: Chunk, pc: PointCloud) -> PointCloud:
+    """The points of the reconstruction region (all of them without one)."""
+    from .region import get_region, inside_internal
+
+    region = get_region(chunk)
+    if region is None or not len(pc):
+        return pc
+    keep = inside_internal(chunk, pc.xyz, region)
+    return pc if keep.all() else pc.subset(keep)
+
+
 def _masked_cameras(chunk: Chunk) -> dict:
     """Cameras with a mask by their COLMAP image name."""
     from .masks import mask_path
@@ -365,26 +377,34 @@ def _masked_cameras(chunk: Chunk) -> dict:
 
 
 def mask_depth_maps(chunk: Chunk, ws: Path) -> int:
-    """Depth (and normal) maps written by another engine set to zero where their photos are
-    masked; returns the maps changed."""
+    """Depth maps written by another engine set to zero where their photos are masked and
+    outside the reconstruction region; returns the maps changed."""
     from .masks import mask_for_undistorted
+    from .region import depth_mask, get_region
 
     masked = _masked_cameras(chunk)
-    if not masked:
+    region = get_region(chunk)
+    if not masked and region is None:
         return 0
     rec = _read_workspace_model(ws)
     n = 0
     for image in rec.images.values():
         cam = masked.get(image.name)
-        if cam is None:
+        if cam is None and region is None:
             continue
+        K = _K(rec.cameras[image.camera_id])
         for kind in ("geometric", "photometric"):
             path = ws / "stereo" / "depth_maps" / f"{image.name}.{kind}.bin"
             if not path.exists():
                 continue
             depth = read_colmap_array(path).astype(np.float32)
-            keep = mask_for_undistorted(chunk, cam, _K(rec.cameras[image.camera_id]), depth.shape)
-            if keep is None:
+            keep = np.ones(depth.shape, bool)
+            if cam is not None:
+                m = mask_for_undistorted(chunk, cam, K, depth.shape)
+                keep &= m if m is not None else True
+            if region is not None:
+                keep &= depth_mask(chunk, depth, K, _pose(image), region) | (depth <= 0)
+            if keep.all():
                 continue
             depth[~keep] = 0
             write_colmap_array(path, depth)
@@ -440,6 +460,9 @@ def _cpu_depth_maps(chunk: Chunk, ws: Path, filter_mode: str, progress: Progress
         workers = depth_workers(cam.width, cam.height, max((len(v) for v in neigh.values()), default=1))
     gray = _GrayCache(ws, rec, max(12, 3 * workers))
     masked = _masked_cameras(chunk)
+    from .region import depth_mask, get_region
+
+    region = get_region(chunk)
 
     def one(iid) -> str | None:
         """Depth and normal maps of one photo; the name of the photo when written."""
@@ -467,6 +490,8 @@ def _cpu_depth_maps(chunk: Chunk, ws: Path, filter_mode: str, progress: Progress
             keep = mask_for_undistorted(chunk, masked[image.name], K_i, depth.shape)
             if keep is not None:
                 depth[~keep] = 0
+        if region is not None:  # no depth outside the reconstruction region
+            depth[~depth_mask(chunk, depth, K_i, pose_i, region)] = 0
         if (depth > 0).sum() <= 100:
             return None
         name = image.name

@@ -180,6 +180,9 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
   di 45.000 x 46.000 pixel di un tell a 1,35 cm/px richiede 4-6 minuti su un Apple M4 Pro. Le celle
   viste solo di traverso (oltre 70 gradi dalla verticale, regolabile) restano trasparenti invece di
   stirare le foto.
+* **Regione di ricostruzione**: un riquadro attorno al soggetto (dai punti di legame, da un poligono in
+  pianta o con valori scritti, ruotato come la vista); depth map, nuvola densa, modello, DEM e ortofoto
+  ne restano dentro.
 * **Modifica del DEM**: un'area disegnata sul DEM riempita dal terreno attorno (piano, lineare, IDW o
   quota costante, linee di discontinuità rispettate): alberi, tende e cumuli fuori da curve e volumi;
   il DEM com'era resta come versione.

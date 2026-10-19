@@ -354,6 +354,13 @@ class MainWindow(QMainWindow):
         self._act(m, "Costruisci texture...", self.build_texture, processing=True, icon_name="texture")
         self._act(m, "Costruisci DEM...", self.build_dem, processing=True, icon_name="dem")
         self._act(m, "Costruisci ortofoto...", self.build_ortho, processing=True, icon_name="ortho")
+        rm = m.addMenu(icon("crop"), "Regione di ricostruzione")
+        self._act(rm, "Attorno ai punti di legame", self.region_reset, processing=True,
+                  tip="Depth map, nuvola densa e modello limitati al riquadro giallo della vista 3D")
+        self._act(rm, "Ruotata come la vista 3D", self.region_rotate_to_view, processing=True)
+        self._act(rm, "Sul poligono selezionato (pianta)", self.region_from_selection, processing=True)
+        self._act(rm, "Modifica i valori...", self.region_edit, processing=True)
+        self._act(rm, "Togli la regione", self.region_clear, processing=True)
         self._act(m, "Prospetto o sviluppo cilindrico...", self.build_elevation, processing=True,
                   icon_name="elevation", tip="Ortofoto e rilievo su un piano (muri) o su un cilindro (pozzi, torri)")
         m.addSeparator()
@@ -2450,6 +2457,84 @@ class MainWindow(QMainWindow):
             max_angle=v.get("max_angle", 70.0), colour_correction=bool(v.get("colour", True)),
             ghosting=bool(v.get("ghosting")), fill_holes=bool(v.get("fill_holes", True)))),
             lambda _r: self._show_raster("ortho"))
+
+    # ---------------------------------------------------------------- reconstruction region
+    def _region_changed(self, text: str) -> None:
+        self._dirty(True)
+        self.model_view.refresh(reset=False)
+        r = self.chunk.region
+        if r is not None:
+            text += "  ({:.2f} x {:.2f} x {:.2f} m)".format(*r.size).replace(".", ",")
+        self.statusBar().showMessage(text, 10000)
+        self.log_pane.info(text + ": depth map, nuvola densa e modello costruiti da ora in poi ne restano dentro")
+
+    def region_reset(self, angle_deg: float = 0.0) -> None:
+        if not self._need_chunk(aligned=True):
+            return
+        try:
+            self.chunk.reset_region(angle_deg=angle_deg)
+        except Exception as exc:
+            self._exc("Regione non impostata", exc)
+            return
+        self._region_changed("Regione attorno ai punti di legame")
+
+    def region_rotate_to_view(self) -> None:
+        """The region around the tie points, turned so that its sides face the 3D view."""
+        if not self._need_chunk(aligned=True):
+            return
+        canvas = self.model_view.canvas
+        _o, d, _s = canvas.view_ray(canvas.width() / 2, canvas.height() / 2)
+        world = self.chunk.transform[:3, :3] @ np.asarray(d, float)
+        if np.hypot(world[0], world[1]) < 1e-6:  # looking straight down: as it is
+            angle = 0.0
+        else:
+            angle = float(np.degrees(np.arctan2(world[1], world[0])))
+        self.region_reset(angle)
+
+    def region_from_selection(self) -> None:
+        if not self._need_chunk(aligned=True):
+            return
+        geom = self._selected_polygon()
+        if geom is None:
+            self._warn("Seleziona un poligono sull'ortofoto o sul DEM (strumento Seleziona).")
+            return
+        from ..engine.region import region_from_box
+
+        region_from_box(self.chunk, geom.bounds)
+        self._region_changed("Regione sul poligono selezionato")
+
+    def region_edit(self) -> None:
+        if not self._need_chunk(aligned=True):
+            return
+        from ..engine.region import Region, rotation_z
+
+        r = self.chunk.region
+        if r is None:
+            try:
+                r = self.chunk.reset_region()
+            except Exception as exc:
+                self._exc("Regione non impostata", exc)
+                return
+        angle = float(np.degrees(np.arctan2(r.rotation[1, 0], r.rotation[0, 0])))
+        fields = [Field(k, label, float(val), minimum=-1e9, maximum=1e9, decimals=3)
+                  for k, label, val in (("cx", "Centro X", r.center[0]), ("cy", "Centro Y", r.center[1]),
+                                        ("cz", "Centro Z", r.center[2]), ("sx", "Larghezza (m)", r.size[0]),
+                                        ("sy", "Profondita' (m)", r.size[1]), ("sz", "Altezza (m)", r.size[2]))]
+        fields.append(Field("angle", "Rotazione attorno alla verticale (gradi)", angle, minimum=-360.0,
+                            maximum=360.0, decimals=2))
+        v = ParamDialog.ask(self, "Regione di ricostruzione", fields, intro="Coordinate del sistema del chunk.")
+        if not v:
+            return
+        self.chunk.region = Region([v["cx"], v["cy"], v["cz"]], [v["sx"], v["sy"], v["sz"]], rotation_z(v["angle"]))
+        self._region_changed("Regione modificata")
+
+    def region_clear(self) -> None:
+        if not self._need_chunk():
+            return
+        self.chunk.region = None
+        self._dirty(True)
+        self.model_view.refresh(reset=False)
+        self.statusBar().showMessage("Nessuna regione: si ricostruisce tutto cio' che le foto vedono", 8000)
 
     # ---------------------------------------------------------------- DEM editing
     def _dem_edit_drawn(self, xy) -> None:

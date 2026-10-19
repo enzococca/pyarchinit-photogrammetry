@@ -195,6 +195,15 @@ that every photo sees from further than `max_angle` degrees from the vertical st
 | `build_orthomosaic(ghosting=False)` | where three or more of the candidate photos see a cell, the best one that agrees with their median colour (within 30 levels): people and vehicles seen by a few photos left out |
 | `build_orthomosaic(fill_holes=False)` | holes of at most 100 cells that no photo sees filled from their edges (`cv2.inpaint`, the cells of the same group only); larger holes stay transparent |
 
+## Reconstruction region
+
+| Call | Description |
+| --- | --- |
+| `chunk.region = engine.region.Region(center, size, rotation)`, `chunk.region = None` | an oriented box in world coordinates (`chunk.meta["region"]`): depth maps (CPU and, afterwards, COLMAP's) have no depth outside it, the dense cloud and the mesh are cut to it (a Poisson surface no longer balloons beyond the object), so DEM and orthomosaic cover it only |
+| `chunk.reset_region(source="tie_points", margin=0.05, angle_deg=0)` | around the middle 98 % of the tie points (or the dense cloud), turned about the vertical |
+| `engine.region.region_from_box(chunk, (xmin, ymin, xmax, ymax), zmin=None, zmax=None)` | over a plan rectangle, the heights from the points inside |
+| `Region.contains(world)`, `corners()`, `footprint()`, `inside_internal(chunk, pts)`, `depth_mask(...)`, `crop_mesh(...)` | the box and its uses |
+
 ## Editing the DEM
 
 | Call | Description |

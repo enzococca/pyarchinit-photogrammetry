@@ -22,6 +22,7 @@ class SceneData:
     camera_labels: list[str] = field(default_factory=list)
     markers: list[tuple[str, np.ndarray, bool]] = field(default_factory=list)  # label, xyz, is_check
     scalebars: list[tuple[str, np.ndarray, np.ndarray, bool]] = field(default_factory=list)  # text, ends, is_check
+    region: np.ndarray | None = None  # (8,3) corners of the reconstruction region (engine.region.Region)
     up: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 1.0]))
     kind: str = "empty"
     point_codes: np.ndarray | None = None  # class code of each displayed point
@@ -347,6 +348,9 @@ def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_f
             error = chunk.scale * float(np.linalg.norm(a.position - b.position)) - sb.distance
             text = f"{sb.distance:.3f} m  ({error * 1000:+.1f} mm)".replace(".", ",")
             sd.scalebars.append((text, ends[0], ends[1], bool(sb.checkpoint)))
+    region = chunk.region
+    if region is not None:
+        sd.region = W(chunk.to_internal(region.corners()))
     return sd
 
 

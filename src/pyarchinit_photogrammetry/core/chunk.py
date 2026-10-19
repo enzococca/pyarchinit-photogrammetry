@@ -564,6 +564,27 @@ class Chunk:
                                        blend_sigma=blend_sigma, colour_correction=colour_correction,
                                        ghosting=ghosting, fill_holes=fill_holes)
 
+    @property
+    def region(self):
+        """The reconstruction region (:class:`engine.region.Region`, world coordinates) or None:
+        depth maps, dense cloud and mesh are limited to it."""
+        from ..engine.region import get_region
+
+        return get_region(self)
+
+    @region.setter
+    def region(self, value) -> None:
+        from ..engine.region import Region, set_region
+
+        set_region(self, value if value is None or isinstance(value, Region) else Region.from_dict(value))
+
+    def reset_region(self, source: str = "tie_points", margin: float = 0.05, angle_deg: float = 0.0):
+        """The region around the tie points (or the dense cloud), turned by ``angle_deg`` about the
+        vertical."""
+        from ..engine.region import reset_region
+
+        return reset_region(self, source, margin, angle_deg)
+
     def edit_dem(self, polygon, method: str = "plane", value: float | None = None, breaklines=None,
                  keep_version: bool = True, version_name: str | None = None,
                  progress: ProgressCallback | None = None) -> dict:
