@@ -201,6 +201,9 @@ is installed on first use (PyTorch in a separate environment, see the same page)
 * **Video and image quality**: frames chosen from a video (sharp, with the overlap the
   reconstruction needs), with the GPS of DJI drones from their `.SRT`; blurred photos found and
   disabled.
+* **Diagnostics**: matching graph, matches between two photos, residuals of the tie points in the
+  photos, camera calibration with a distortion plot and a calibration that can be held, merging
+  markers.
 * **Undo and redo** of drawings, spot heights, sections, markers, scale bars, patches, the region and
   the edits of the dense cloud, the model and the tie points.
 * **Batch processing**: steps over several chunks (alignment, products, exports), the project saved

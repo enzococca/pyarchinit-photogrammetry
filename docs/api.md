@@ -214,6 +214,18 @@ that every photo sees from further than `max_angle` degrees from the vertical st
 | alignment | the faces of every panorama are one frame of a COLMAP rig (`engine.panorama.rig_configs`: a rig per `facce_360` folder, faces at their known rotation, no translation): they keep one centre and their relative rotation, their calibration is not refined (also in `optimize_cameras`), pairs of faces of the same panorama are not matched. Depth maps pair a face with faces of other panoramas looking up to 50 degrees away (the panoramas are turned anyhow) |
 | `engine.panorama.split_panorama(path, folder=None, size=None, fov=100, faces=None)`, `face_maps(...)`, `face_rotation(yaw, pitch)` | the faces alone |
 
+## Diagnostics of the alignment, calibration, markers
+
+| Call | Description |
+| --- | --- |
+| `engine.diagnostics.match_graph(chunk, verified=True)` | `{(camera key a, b): matches}` of every matched pair, from the COLMAP database (the matches that fit the geometry of the pair, else all candidates): also for photos that did not align |
+| `diagnostics.components(keys, graph, min_matches=1)` | groups of photos linked by pairs with enough matches, largest first (separate groups, isolated photos) |
+| `diagnostics.pair_matches(chunk, a, b)` | keypoints of the two photos and the candidate and verified matches (index pairs); `shared_tie_points(chunk, a, b)` the tie points seen by both; `residuals(chunk, key)` measured and reprojected pixels of the tie points of a photo |
+| `Sensor.converted(model)` | the parameters in another camera model (focal length and principal point kept); `Chunk.set_sensor_model` uses it |
+| `Sensor.fixed` | the calibration is held: alignment (`constant_cameras`) and camera optimisation do not refine it, as for the faces of 360-degree photos. Imports no longer set it (their calibration is where the alignment starts) |
+| `chunk.merge_markers(markers, label=None)` | markers that are the same point made one: the first keeps its key, takes the measurements of all (in a photo measured in several, the one placed by hand), the first reference, the excluded photos; scale bars that ended at the others end at it |
+| `chunk.remove_markers(markers)` | markers (objects, keys or labels) removed with the scale bars that end at them |
+
 ## Undo and redo (interface)
 
 `gui.undo.UndoHistory(get_state, set_state, get_chunk, limit=50, file_limit=10)`: `record(text=None)`

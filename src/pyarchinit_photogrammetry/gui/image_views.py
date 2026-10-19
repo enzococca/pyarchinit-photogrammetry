@@ -1196,6 +1196,7 @@ class PhotoView(_ZoomView):
         self.chunk, self.camera = chunk, camera
         self.scene().clear()
         self.items = []
+        self.residual_items = []
         img = cv2.imread(camera.path, cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
         if img is None:
             self.pixmap_item = None
@@ -1243,6 +1244,39 @@ class PhotoView(_ZoomView):
         self.setTransform(QTransform.fromScale(max(1.0, fit), max(1.0, fit)))
         self.centerOn(QPointF(*xy))
         return True
+
+    def show_residuals(self, measured, projected, scale: float = 20.0) -> dict:
+        """Residuals of the tie points: a dot where each was measured and a line ``scale`` times
+        longer than the way to where its 3D point projects - green under 1 px, orange under 3,
+        red more. Returns the count and the mean and largest residual (pixels)."""
+        self.clear_residuals()
+        measured, projected = np.asarray(measured, float).reshape(-1, 2), np.asarray(projected, float).reshape(-1, 2)
+        d = projected - measured
+        err = np.hypot(d[:, 0], d[:, 1])
+        for lo, hi, colour in ((0, 1, "#2a9d55"), (1, 3, "#f4a261"), (3, np.inf, "#d1495b")):
+            sel = (err >= lo) & (err < hi)
+            if not sel.any():
+                continue
+            path = QPainterPath()
+            for (x, y), (dx, dy) in zip(measured[sel], d[sel]):
+                path.moveTo(QPointF(x, y))
+                path.lineTo(QPointF(x + dx * scale, y + dy * scale))
+                path.addEllipse(QPointF(x, y), 1.5, 1.5)
+            item = QGraphicsPathItem(path)
+            pen = QPen(QColor(colour), 1.5)
+            pen.setCosmetic(True)
+            item.setPen(pen)
+            item.setZValue(5)
+            self.scene().addItem(item)
+            self.residual_items.append(item)
+        return {"count": int(len(err)), "mean": float(err.mean()) if len(err) else 0.0,
+                "max": float(err.max()) if len(err) else 0.0}
+
+    def clear_residuals(self) -> None:
+        for it in getattr(self, "residual_items", []):
+            if it.scene() is self.scene():
+                self.scene().removeItem(it)
+        self.residual_items = []
 
     def draw_markers(self) -> None:
         for it in self.items:

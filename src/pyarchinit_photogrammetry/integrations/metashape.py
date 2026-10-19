@@ -809,7 +809,7 @@ def import_psx(psx: str | os.PathLike, project: str | os.PathLike, chunk_index: 
             model, params, w = sensor_params(s)
             warnings += w
             ch.sensors[s.id] = Sensor(key=s.id, label=s.label, width=s.width, height=s.height, model=model,
-                                      params=params, fixed=True)
+                                      params=params)
         base = mc.frame_dir or psx.parent
         for c in mc.cameras:
             if c.path is None:

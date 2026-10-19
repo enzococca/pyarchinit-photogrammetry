@@ -183,6 +183,9 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
 * **Video e qualità delle immagini**: fotogrammi scelti da un video (nitidi, con la sovrapposizione
   che serve alla ricostruzione), con il GPS dei droni DJI dal loro `.SRT`; foto sfocate trovate e
   disattivate.
+* **Diagnostica**: grafo delle corrispondenze, corrispondenze tra due foto, residui dei punti di
+  legame nelle foto, calibrazione della camera con il grafico della distorsione e calibrazione fissa,
+  unione dei marker.
 * **Annulla e ripeti** per disegni, quote, sezioni, marker, barre di scala, patch, regione e le modifiche
   della nuvola densa, del modello e dei punti di legame.
 * **Elaborazione batch**: passi su più chunk (allineamento, prodotti, esportazioni), il progetto salvato

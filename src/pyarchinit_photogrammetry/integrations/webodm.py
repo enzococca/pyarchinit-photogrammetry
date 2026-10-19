@@ -202,7 +202,7 @@ def _add_cameras(ch, poses: dict, images: Path, offset: np.ndarray) -> dict:
 
     keys = {}
     for i, (cid, (w, h, model, params)) in enumerate(poses["sensors"].items()):
-        ch.sensors[i] = Sensor(key=i, label=cid, width=w, height=h, model=model, params=list(params), fixed=True)
+        ch.sensors[i] = Sensor(key=i, label=cid, width=w, height=h, model=model, params=list(params))
         keys[cid] = i
     by_name = {}
     for j, shot in enumerate(poses["shots"]):

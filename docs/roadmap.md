@@ -83,7 +83,7 @@ markers in too few photos.
   retrying a failed step. *Done.*
 * Undo and redo for drawings, markers, patches, scale bars and point edits. *Done.*
 * Diagnostics: matching graph, matches between two photos, residuals in the photo view, camera
-  calibration dialog with distortion plot, merging markers.
+  calibration dialog with distortion plot, merging markers. *Done.*
 * Measures: 3D area on the model, slope, aspect and height above ground under the cursor,
   height-above-ground view of the cloud, aspect raster.
 * Exports: Cloud Optimized GeoTIFF (JPEG, WebP, ZSTD), COPC, Cesium 3D Tiles, GLB, normal maps

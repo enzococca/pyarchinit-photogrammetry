@@ -150,6 +150,17 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   every frame gets its GPS position. **Image quality** (right click in the Photos pane): the sharpness
   of every photo compared with the sharpest ones (in the tooltip, *sfocata* under 0.5), *Disattiva le
   foto sfocate*, enable or disable the selected photos, masks of the selected photos.
+* **Diagnostics of the alignment** (*Strumenti > Diagnostica dell'allineamento*): the *matching graph*
+  (photos where they were taken, the others in a ring; lines between matched photos, thicker and
+  greener with more matches, red under 30; separate groups and isolated photos listed; a double click
+  on a line opens the pair), the *matches between two photos* (the two selected in *Foto*, or right
+  click on them: verified matches green, rejected candidates red, tie points blue), the *residuals of
+  the tie points* in the photo view (green under 1 px, orange under 3, red more; arrows 20 times
+  longer; also from the right click on an aligned photo), and the *camera calibration*: the parameters
+  of every sensor, editable as starting values, the model, *Calibrazione fissa* (alignment and
+  optimisation do not change it) and a plot of the distortion (arrows over the frame and the radial
+  shift towards the corner). In *Riferimenti* the right click also *merges* the selected markers (a
+  coded target and the GCP placed by hand on it) or *deletes* them.
 * **Undo and redo** (*Modifica > Annulla / Ripeti*, Cmd/Ctrl+Z and Cmd/Ctrl+Shift+Z; the menu names
   what will be undone): drawings (units, spot heights, sections, edits waiting to be saved in
   PyArchInit), markers and their measurements in the photos, scale bars, patches of the orthomosaic

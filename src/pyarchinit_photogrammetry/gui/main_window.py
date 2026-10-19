@@ -194,6 +194,8 @@ class MainWindow(QMainWindow):
         self.reference.scalebar_import_requested.connect(self.import_scalebars)
         self.reference.filter_photos_requested.connect(self.filter_photos_by_markers)
         self.reference.refine_requested.connect(self.refine_markers)
+        self.reference.merge_requested.connect(self.merge_markers)
+        self.reference.remove_requested.connect(self.remove_markers)
         self.reference.precision_requested.connect(self.estimate_precision)
         self.photos = PhotosPane()
         self.photos.thumbs_progress.connect(self._thumbs_progress)
@@ -403,6 +405,18 @@ class MainWindow(QMainWindow):
         self._act(tm, "Barra di scala stampabile...", self.print_scalebar, icon_name="scalebar")
         self._act(m, "Calibra i colori delle foto...", self.calibrate_colours, processing=True, icon_name="colour",
                   tip="Esposizione di ogni foto e vignettatura degli obiettivi, corrette in ortofoto e texture")
+        dm = m.addMenu(icon("diagnostics"), "Diagnostica dell'allineamento")
+        self._act(dm, "Grafo delle corrispondenze...", self.match_graph, icon_name="graph",
+                  tip="Quali foto si collegano a quali: gruppi separati e foto isolate")
+        self._act(dm, "Corrispondenze tra due foto...", lambda: self.pair_matches(), icon_name="matches",
+                  tip="Le due foto selezionate nel pannello Foto, con i punti che le collegano")
+        self.a_residuals = QAction(icon("residuals"), "Residui dei punti di legame nella foto", self, checkable=True)
+        self.a_residuals.setStatusTip("Nella vista Foto: dove ogni punto di legame e' stato misurato e dove lo "
+                                      "rimette il modello (frecce ingrandite 20 volte)")
+        self.a_residuals.toggled.connect(self._residuals_toggled)
+        dm.addAction(self.a_residuals)
+        self._act(dm, "Calibrazione della camera...", self.camera_calibration, icon_name="lens",
+                  tip="Parametri dei sensori, calibrazione fissa e grafico della distorsione")
         km = m.addMenu(icon("mask"), "Maschere delle foto")
         self.mask_actions: dict[str, QAction] = {}
         mgroup = QActionGroup(self)
@@ -1492,6 +1506,12 @@ class MainWindow(QMainWindow):
         menu.addAction(icon("quality"), "Stima la qualita' delle immagini", self.estimate_quality)
         menu.addAction("Disattiva le foto sfocate (qualita' sotto 0,5)", self.disable_blurred)
         menu.addAction(icon("lens"), "Modello dell'obiettivo...", lambda: self.lens_model(cams))
+        if len(cams) == 2:
+            menu.addAction(icon("matches"), "Corrispondenze tra queste due foto",
+                           lambda: self.pair_matches(cams[0], cams[1]))
+        if len(cams) == 1 and cams[0].aligned:
+            menu.addAction(icon("residuals"), "Residui dei punti di legame",
+                           lambda: (self.a_residuals.setChecked(True), self.open_photo(cams[0])))
         if cams:
             menu.addSeparator()
             menu.addAction(f"Disattiva le {len(cams)} foto selezionate", lambda: self.enable_photos(cams, False))
@@ -1745,6 +1765,95 @@ class MainWindow(QMainWindow):
         self.show_view(self.ortho_view)
         self.statusBar().showMessage("Copertura: foto che inquadrano ogni punto - rosso scuro nessuna, rosso una, "
                                      "arancio due, giallo 3-4, verde chiaro 5-8, verde 9 o piu'", 20000)
+
+    # ---------------------------------------------------------------- diagnostics of the alignment
+    def match_graph(self) -> None:
+        if not self._need_chunk():
+            return
+        from ..engine import diagnostics
+        from .matches_dialog import MatchGraphDialog
+
+        try:
+            graph = diagnostics.match_graph(self.chunk)
+        except RuntimeError as exc:
+            self._warn(str(exc))
+            return
+        MatchGraphDialog(self.chunk, graph, self).exec()
+
+    def pair_matches(self, a=None, b=None) -> None:
+        """The points that link two photos (the two selected in the Photos pane)."""
+        if not self._need_chunk():
+            return
+        if a is None or b is None:
+            cams = self.photos.selected_cameras()
+            if len(cams) != 2:
+                self._warn("Seleziona due foto nel pannello Foto (Cmd/Maiusc + clic).")
+                return
+            a, b = cams
+        from .matches_dialog import PairMatchesDialog
+
+        PairMatchesDialog(self.chunk, a.key, b.key, self).exec()
+
+    def _residuals_toggled(self, on: bool) -> None:
+        if on and self.photo_view.camera is not None:
+            self._draw_residuals()
+        elif not on:
+            self.photo_view.clear_residuals()
+
+    def _draw_residuals(self) -> None:
+        cam = self.photo_view.camera
+        if cam is None or not cam.aligned:
+            self.photo_view.clear_residuals()
+            return
+        from ..engine.diagnostics import residuals
+
+        try:
+            measured, projected = residuals(self.chunk, cam.key)
+        except Exception as exc:  # no model (an imported project without tie points)
+            self.statusBar().showMessage(f"Residui non disponibili: {exc}", 8000)
+            return
+        info = self.photo_view.show_residuals(measured, projected)
+        self.statusBar().showMessage(
+            f"{cam.label}: {info['count']} punti di legame, residuo medio {info['mean']:.2f} px, massimo "
+            f"{info['max']:.2f} px (frecce x20: verde sotto 1 px, arancio sotto 3, rosso oltre)".replace(".", ","),
+            20000)
+
+    def camera_calibration(self) -> None:
+        if not self._need_chunk():
+            return
+        if not self.chunk.sensors:
+            self._warn("Aggiungi prima delle foto.")
+            return
+        from .calibration_dialog import CalibrationDialog
+
+        dlg = CalibrationDialog(self.chunk, self)
+        dlg.exec()
+        if dlg.changed:
+            self._dirty(True)
+            self.log_pane.info("Calibrazione della camera cambiata: allinea od ottimizza di nuovo le foto")
+
+    def merge_markers(self, keys) -> None:
+        if not self._need_chunk() or len(keys or []) < 2:
+            self._warn("Seleziona due marker o piu' in Riferimenti per unirli.")
+            return
+        ch = self.chunk
+        names = [ch.marker_by_key(k).label for k in keys]
+        keep = ch.merge_markers(keys)
+        self._markers_edited(keep)
+        self.log_pane.info(f"Marker {', '.join(names)} uniti in {keep.label}")
+
+    def remove_markers(self, keys) -> None:
+        if not self._need_chunk() or not keys:
+            return
+        ch = self.chunk
+        names = [ch.marker_by_key(k).label for k in keys]
+        bars = sum(1 for sb in ch.scalebars if {sb.marker_a, sb.marker_b} & set(keys))
+        if choice(self, "question", "Elimina marker", f"Eliminare {', '.join(names)}"
+                  + (f" e {bars} barre di scala che ci finiscono" if bars else "") + "?", ["Elimina"]) != 0:
+            return
+        ch.remove_markers(keys)
+        self._markers_edited()
+        self.log_pane.info(f"Marker eliminati: {', '.join(names)}")
 
     def estimate_precision(self) -> None:
         """Precision of cameras, markers and tie points from the covariance of the adjustment, and
@@ -3469,6 +3578,8 @@ class MainWindow(QMainWindow):
             f"{camera.label}: " + ("bandierina blu = posizione stimata da confermare: trascinala sul punto esatto (o doppio "
                                    "clic se e' gia' giusta), diventa verde; " if flags else "")
             + "tasto destro per posizionare un marker; Pagina giu'/su: foto successiva/precedente", 20000)
+        if self.a_residuals.isChecked():
+            self._draw_residuals()
 
     def photo_step(self, step: int) -> None:
         """The next (+1) or previous (-1) photo of the list shown (the filtered one), as Metashape's

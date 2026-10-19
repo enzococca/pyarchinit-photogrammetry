@@ -205,19 +205,8 @@ class Chunk:
     def set_sensor_model(self, sensor_key: int, model: str) -> Sensor:
         """Another lens model for a sensor (e.g. ``OPENCV_FISHEYE`` for a fisheye that was not
         recognised): focal length and principal point kept, distortion reset; align again after."""
-        from .camera import CAMERA_MODELS, SINGLE_FOCAL
-
-        if model not in CAMERA_MODELS:
-            raise ValueError(f"camera model: one of {', '.join(CAMERA_MODELS)}")
         s = self.sensors[sensor_key]
-        k = s.K
-        fx, fy, cx, cy = k[0, 0], k[1, 1], k[0, 2], k[1, 2]
-        n = CAMERA_MODELS[model]
-        head = [(fx + fy) / 2, cx, cy] if model in SINGLE_FOCAL else [fx, fy, cx, cy]
-        params = (head + [0.0] * n)[:n]
-        if model == "FOV":
-            params[4] = 1e-6
-        s.model, s.params = model, params
+        s.model, s.params = model, s.converted(model)
         return s
 
     @staticmethod
@@ -400,6 +389,64 @@ class Chunk:
                       checkpoint=bool(checkpoint))
         self.scalebars.append(sb)
         return sb
+
+    def remove_markers(self, markers) -> None:
+        """Remove markers (objects, keys or labels) and the scale bars that end at them."""
+        keys = {self._marker_ref(m).key for m in markers}
+        self.markers = [m for m in self.markers if m.key not in keys]
+        self.scalebars = [sb for sb in self.scalebars if sb.marker_a not in keys and sb.marker_b not in keys]
+        table = self.meta.get("marker_excluded") or {}
+        for k in keys:
+            table.pop(str(k), None)
+
+    def merge_markers(self, markers, label: str | None = None) -> Marker:
+        """Markers that are the same point made one (a coded target and the GCP placed by hand on
+        it): the first keeps its key; it takes the measurements of all (in a photo measured in
+        several, the one placed by hand first), the first reference found and the photos where
+        any was not to be estimated; scale bars ending at the others end at it, the others go."""
+        ms = [self._marker_ref(m) for m in markers]
+        ms = [m for i, m in enumerate(ms) if all(m.key != o.key for o in ms[:i])]
+        if len(ms) < 2:
+            raise ValueError("two markers or more are merged")
+        keep, others = ms[0], ms[1:]
+        for m in others:
+            for cam_key, proj in m.projections.items():
+                old = keep.projections.get(cam_key)
+                rank = {True: 0, False: 1, None: 2}
+                if old is None or rank[proj.pinned] < rank[old.pinned]:
+                    keep.projections[cam_key] = proj
+            if not keep.reference.location and m.reference.location:
+                keep.reference = m.reference
+            if keep.code is None and m.code is not None:
+                keep.code, keep.target_type = m.code, m.target_type
+        table = self.meta.get("marker_excluded") or {}
+        excluded = set(table.get(str(keep.key), []))
+        for m in others:
+            excluded |= set(table.pop(str(m.key), []))
+        excluded -= set(keep.projections)
+        if excluded:
+            self.meta.setdefault("marker_excluded", {})[str(keep.key)] = sorted(excluded)
+        gone = {m.key for m in others}
+        for sb in self.scalebars:
+            sb.marker_a = keep.key if sb.marker_a in gone else sb.marker_a
+            sb.marker_b = keep.key if sb.marker_b in gone else sb.marker_b
+        self.scalebars = [sb for sb in self.scalebars if sb.marker_a != sb.marker_b]
+        self.markers = [m for m in self.markers if m.key not in gone]
+        if label:
+            keep.label = label
+        if any(p.measured for p in keep.projections.values()):
+            self.triangulate_markers()
+        return keep
+
+    def _marker_ref(self, ref) -> Marker:
+        """A marker from itself, its key (an int) or its label."""
+        if isinstance(ref, Marker):
+            return ref
+        if isinstance(ref, (int, np.integer)):
+            return self.marker_by_key(int(ref))
+        from ..markers.gcp import resolve_marker
+
+        return resolve_marker(self, ref)
 
     def marker_by_key(self, key: int) -> Marker:
         """The marker with this key (:meth:`marker` also takes labels and target codes, and a

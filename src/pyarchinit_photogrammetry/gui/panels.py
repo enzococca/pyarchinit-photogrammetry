@@ -543,6 +543,8 @@ class ReferencePane(QWidget):
     filter_photos_requested = Signal(object)  # keys of the markers whose photos are to be shown
     refine_requested = Signal(object)  # keys of the markers whose blue flags are to be looked for (none: all)
     precision_requested = Signal()
+    merge_requested = Signal(object)  # keys of the markers to make one
+    remove_requested = Signal(object)  # keys of the markers to delete
     scalebar_import_requested = Signal()
 
     BAR_COLS = ["Usa", "Barra", "Marker A", "Marker B", "Distanza (m)", "Accur. (m)", "Check", "Stimata (m)",
@@ -781,7 +783,18 @@ class ReferencePane(QWidget):
         a_refine = menu.addAction(icon("refine"), f"Affina le bandierine blu di {', '.join(names)}" if names
                                   else "Affina le bandierine blu di tutti i marker")
         a_refine.setToolTip("Cerca per correlazione, nelle foto, il punto di ogni posizione stimata")
+        menu.addSeparator()
+        a_merge = menu.addAction(icon("merge"), f"Unisci {', '.join(names)} in un marker" if len(keys) >= 2
+                                 else "Unisci i marker... (selezionane due o piu')")
+        a_merge.setEnabled(len(keys) >= 2)
+        a_remove = menu.addAction(icon("delete"), f"Elimina {', '.join(names)}" if names
+                                  else "Elimina marker... (seleziona uno o piu' marker)")
+        a_remove.setEnabled(bool(keys))
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen is a_merge:
+            self.merge_requested.emit(keys)
+        elif chosen is a_remove:
+            self.remove_requested.emit(keys)
         if chosen is a_bar:
             self.scalebar_requested.emit(keys)
         elif chosen is a_photos:

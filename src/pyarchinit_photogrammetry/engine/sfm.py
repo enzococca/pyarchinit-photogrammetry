@@ -369,7 +369,7 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None) -> int:
     opts.min_model_size = 3
     opts.extract_colors = True
     fixed = _fixed_camera_ids(chunk, db_path)
-    if fixed:  # faces of 360-degree photos: exact calibration, rig known
+    if fixed:  # faces of 360-degree photos (exact calibration, rig known), sensors held by the user
         opts.constant_cameras = fixed
         opts.ba_refine_sensor_from_rig = False
     progress(0.0, "Aligning cameras")
@@ -389,14 +389,22 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None) -> int:
     return n
 
 
-def _fixed_camera_ids(chunk: Chunk, db_path: Path) -> set[int]:
-    """COLMAP cameras of the faces of 360-degree photos (virtual cameras known exactly) in the
-    database ``db_path``."""
-    import pycolmap
-
+def _held_names(chunk: Chunk) -> set[str]:
+    """COLMAP image names of the photos whose calibration is not refined: faces of 360-degree
+    photos (virtual cameras known exactly) and photos of sensors with ``fixed`` calibration."""
     from .panorama import face_names
 
-    wanted = face_names(chunk)
+    names = (chunk.meta.get("sfm") or {}).get("names") or {}
+    held = {names[str(c.key)] for c in chunk.cameras
+            if str(c.key) in names and getattr(chunk.sensors.get(c.sensor_key), "fixed", False)}
+    return face_names(chunk) | held
+
+
+def _fixed_camera_ids(chunk: Chunk, db_path: Path) -> set[int]:
+    """COLMAP cameras whose calibration is held (:func:`_held_names`) in the database ``db_path``."""
+    import pycolmap
+
+    wanted = _held_names(chunk)
     if not wanted:
         return set()
     db = pycolmap.Database.open(str(db_path))
@@ -407,10 +415,8 @@ def _fixed_camera_ids(chunk: Chunk, db_path: Path) -> set[int]:
 
 
 def _rec_fixed_cameras(chunk: Chunk, rec) -> set[int]:
-    """The cameras of a reconstruction that are faces of 360-degree photos."""
-    from .panorama import face_names
-
-    wanted = face_names(chunk)
+    """The cameras of a reconstruction whose calibration is held (:func:`_held_names`)."""
+    wanted = _held_names(chunk)
     return {int(im.camera_id) for im in rec.images.values() if im.name in wanted} if wanted else set()
 
 

@@ -99,6 +99,20 @@ class Sensor:
             fx, fy, cx, cy = p[0], p[1], p[2], p[3]
         return np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1.0]])
 
+    def converted(self, model: str) -> list[float]:
+        """The parameters of this sensor in another camera ``model``: focal length and principal
+        point kept, distortion from zero."""
+        if model not in CAMERA_MODELS:
+            raise ValueError(f"camera model: one of {', '.join(CAMERA_MODELS)}")
+        k = self.K
+        fx, fy, cx, cy = k[0, 0], k[1, 1], k[0, 2], k[1, 2]
+        n = CAMERA_MODELS[model]
+        head = [(fx + fy) / 2, cx, cy] if model in SINGLE_FOCAL else [fx, fy, cx, cy]
+        params = [float(v) for v in (head + [0.0] * n)[:n]]
+        if model == "FOV":
+            params[4] = 1e-6
+        return params
+
     @property
     def focal_px(self) -> float:
         k = self.K
