@@ -25,6 +25,10 @@ from .media import register_media
 US_FIELDS = ["sito", "area", "us", "unita_tipo", "d_stratigrafica", "d_interpretativa", "descrizione",
              "interpretazione", "periodo_iniziale", "fase_iniziale", "periodo_finale", "fase_finale",
              "anno_scavo", "schedatore", "rapporti", "quota_min_usm", "quota_max_usm"]
+POTTERY_FIELDS = ["id_rep", "id_number", "sito", "area", "us", "form", "specific_form", "specific_shape", "ware",
+                  "fabric", "datazione", "percent", "drawing"]
+POTTERY_WEIGHTS = {"diametro_rim": 2.0, "diametro_max": 1.0, "diametro_bottom": 1.0, "diametro_height": 1.0}
+UNKNOWN_SHAPE = 0.1  # the difference of shape given to a form saved without its profile
 
 
 class PyArchInit:
@@ -187,6 +191,198 @@ class PyArchInit:
 
     def pottery(self, sito: str, **filters) -> list[dict]:
         return self.db.query("pottery_table", sito=sito, **filters)
+
+    def thesaurus(self, code: str, table: str = "pottery_table", lingua: str | None = None) -> list[tuple[str, str]]:
+        """``(sigla, value)`` of a list of PyArchInit's thesaurus (``pyarchinit_thesaurus_sigle``:
+        ``11.4`` the forms of the pottery form, ``11.5`` the parts, ``11.6`` the wares, ``11.12``
+        the shapes) in ``lingua`` (``IT``, ``EN``...), else Italian, else the first language found."""
+        if not self.db.has_table("pyarchinit_thesaurus_sigle"):
+            return []
+        names = {table.lower(), table.split("_")[0].lower()}  # 'pottery_table', or 'Pottery' in older lists
+        langs: dict[str, list] = {}
+        for r in self.db.query("pyarchinit_thesaurus_sigle", tipologia_sigla=code):
+            if str(r.get("nome_tabella") or "").lower() in names and r.get("sigla_estesa"):
+                langs.setdefault(str(r.get("lingua") or "").upper(), []).append((str(r.get("sigla") or ""),
+                                                                                  str(r["sigla_estesa"])))
+        rows = langs.get((lingua or "").upper()) or langs.get("IT") or next(iter(langs.values()), [])
+        seen: set[str] = set()
+        return [(s, v) for s, v in rows if not (v in seen or seen.add(v))]
+
+    def pottery_profiles(self) -> dict[int, dict]:
+        """``id_rep`` -> the profile saved with the drawing of a pottery form (:meth:`save_pottery`:
+        ``<drawing>.profile.json`` beside a CERAMICA media file on this computer)."""
+        import json
+
+        out = {}
+        for link in self.db.query("media_to_entity_table", entity_type="CERAMICA"):
+            rid = int(link["id_entity"])
+            if rid in out or not link.get("filepath"):
+                continue
+            try:
+                out[rid] = json.loads(Path(str(link["filepath"])).with_suffix(".profile.json").read_text("utf-8"))
+            except (OSError, ValueError):  # no profile, or the media is on another computer
+                continue
+        return out
+
+    def search_pottery(self, rim_cm: float | None = None, max_cm: float | None = None, base_cm: float | None = None,
+                       height_cm: float | None = None, signature=None, sito: str | None = None,
+                       exclude: int | None = None, limit: int = 20) -> list[dict]:
+        """The forms of ``pottery_table`` most like a vessel, the most similar first (all sites
+        unless ``sito``). The diameters (rim, maximum, base) and the total height that a form shares
+        with the query are compared as relative differences (the rim counts twice); a form saved
+        with its profile (:meth:`save_pottery`) is also compared by shape
+        (:func:`archaeo.pottery.signature_distance`), and when ``signature`` is given a form without
+        a profile counts as a moderate difference of shape (``UNKNOWN_SHAPE``). ``score``: the two
+        differences combined (0 = identical); ``similarity_pct``, ``profile_distance`` and
+        ``compared`` (what was compared) are added to the fields of the form; forms that share no
+        dimension are left out."""
+        import math
+
+        from ..archaeo import pottery
+
+        query = {"diametro_rim": rim_cm, "diametro_max": max_cm, "diametro_bottom": base_cm,
+                 "diametro_height": height_cm}
+        profiles = self.pottery_profiles() if signature is not None else {}
+        out = []
+        for r in self.db.query("pottery_table", sito=sito):
+            if exclude is not None and int(r["id_rep"]) == int(exclude):
+                continue
+            num, den, compared = 0.0, 0.0, []
+            for col, weight in POTTERY_WEIGHTS.items():
+                a, b = _num(query[col]), _num(r.get(col))
+                if a and b:
+                    num += weight * ((a - b) / max(a, b)) ** 2
+                    den += weight
+                    compared.append(col)
+            if not compared:
+                continue
+            parts = [math.sqrt(num / den)]
+            shape = None
+            if signature is not None:
+                saved = (profiles.get(int(r["id_rep"])) or {}).get("signature")
+                shape = pottery.signature_distance(signature, saved) if saved else None
+                parts.append(UNKNOWN_SHAPE if shape is None else shape)
+                if shape is not None:
+                    compared.append("profilo")
+            score = math.hypot(*parts)  # differences of size and of shape add up
+            row = {k: r.get(k) for k in POTTERY_FIELDS if k in r}
+            row.update({c: _num(r.get(c)) for c in POTTERY_WEIGHTS if c in r})
+            out.append({**row, "score": score, "similarity_pct": max(0.0, 100.0 * (1.0 - score)),
+                        "profile_distance": shape, "compared": compared})
+        out.sort(key=lambda x: x["score"])
+        return out[:limit]
+
+    def update_pottery(self, id_rep: int, **fields) -> int:
+        """Write ``fields`` (columns of ``pottery_table``) in a pottery form."""
+        cols = self.db.columns("pottery_table")
+        values = {k: v for k, v in fields.items() if k in cols and k != "id_rep"}
+        if not values:
+            return 0
+        t = self.db.table("pottery_table")
+        with self.db.begin() as conn:
+            return conn.execute(t.update().where(t.c.id_rep == int(id_rep)).values(**values)).rowcount
+
+    def save_pottery(self, sito: str, measures: dict, id_rep: int | None = None, area: str = "", us: str = "",
+                     profile=None, name: str | None = None, title: str | None = None, scale: float = 1.0,
+                     overwrite: bool = False, **fields) -> dict:
+        """The measurements of a vessel or a sherd (:func:`archaeo.pottery.measure`, metres) in its
+        pottery form, in centimetres: ``diametro_rim``, ``diametro_max``, ``diametro_bottom`` (when the
+        profile reaches the base), ``diametro_height`` (the total height, when the profile is whole),
+        ``diametro_preserved`` (the preserved height) and ``percent`` (the class of the rim kept,
+        thesaurus 11.2); rim diameter and percent only when the circle of the rim is reliable (else
+        they are listed in ``uncertain`` and stay in the profile file). ``id_rep``: that form, whose
+        filled fields are kept unless ``overwrite`` (they come back in ``kept`` as ``{field: (value,
+        measured)}``); otherwise a new form (``id_number`` the next of the site), with ``fields``
+        (``form``, ``ware``...).
+
+        ``profile``: the drawing at 1:``scale`` in the media folder (``ceramica/<sito>``) as PNG,
+        linked to the form as CERAMICA media, SVG (the ``drawing`` of the form when it has none)
+        and DXF, with ``<name>.profile.json`` (measurements and signature, for
+        :meth:`search_pottery`). ``name`` default ``ceramica_<id_rep>``: a drawing already in the
+        media is replaced with ``overwrite``, else the new one takes the next free name."""
+        import json
+
+        from .. import __version__
+        from ..archaeo import pottery
+
+        def cm(key):
+            v = measures.get(key)
+            return None if v is None else round(float(v) * 100.0, 2)
+
+        values = {"diametro_rim": cm("rim_diameter_m"), "diametro_max": cm("max_diameter_m"),
+                  "diametro_bottom": cm("base_diameter_m"),
+                  "diametro_height": cm("height_m") if measures.get("full_profile") else None,
+                  "diametro_preserved": cm("height_m"),
+                  "percent": pottery.percent_class(measures.get("rim_preserved_pct"))}
+        uncertain = [k for k in ("diametro_rim", "percent") if values[k] is not None] \
+            if measures.get("rim_reliable") is False else []
+        values = {k: v for k, v in values.items() if v is not None and k not in uncertain}
+        cols = self.db.columns("pottery_table")
+        kept, new = {}, id_rep is None
+        if new:
+            self.ensure_site(sito)
+            numbers = [_num(r.get("id_number")) for r in self.db.query("pottery_table", sito=sito)]
+            row = {"sito": sito, "area": str(area), "us": str(us),
+                   "id_number": int(max([n for n in numbers if n is not None], default=0)) + 1, **fields, **values}
+            with self.db.begin() as conn:
+                id_rep = int(self.db.insert(conn, "pottery_table", row, id_column="id_rep"))
+            record = row
+        else:
+            found = self.db.query("pottery_table", id_rep=int(id_rep))
+            if not found:
+                raise KeyError(f"pottery_table: no form with id_rep {id_rep}")
+            record = found[0]
+            sito, area, us = record.get("sito") or sito, record.get("area") or area, record.get("us") or us
+            write = dict(fields)
+            for k, v in values.items():
+                old = record.get(k)
+                if old not in (None, "") and not overwrite and str(old) != str(v) and _num(old) != _num(v):
+                    kept[k] = (old, v)
+                else:
+                    write[k] = v
+            self.update_pottery(id_rep, **write)
+        out = {"id_rep": id_rep, "values": values, "kept": kept, "uncertain": uncertain, "id_media": None}
+        if profile is None:
+            return out
+        written, fresh = [], False
+        try:
+            folder = self._media_folder(sito, "ceramica")
+            folder.mkdir(parents=True, exist_ok=True)
+            stem = _safe(name) if name else f"ceramica_{id_rep}"
+            png, n = folder / f"{stem}.png", 1
+            while self.db.query("media_table", filepath=str(png)) and not overwrite:
+                n += 1
+                png = folder / f"{stem}_{n}.png"
+            number = record.get("id_number")
+            label = title or " - ".join(str(x) for x in (sito, f"area {area}" if area else "", f"US {us}" if us else "",
+                                                         f"n. {number}" if number not in (None, "") else "") if x)
+            fresh = not png.exists()
+            for f in (png, png.with_suffix(".svg"), png.with_suffix(".dxf")):
+                pottery.draw(profile, f, scale=scale, title=label, measures=measures)
+                written.append(f)
+            side = png.with_suffix(".profile.json")
+            written.append(side)
+            side.write_text(json.dumps({
+                "format": "pyarchinit-photogrammetry pottery profile", "version": 1, "id_rep": id_rep, "sito": sito,
+                "measures": {k: v for k, v in measures.items() if k != "signature"},
+                "signature": measures.get("signature"), "software": f"pyarchinit-photogrammetry {__version__}",
+                "date": date.today().isoformat()}, indent=1, default=float), encoding="utf-8")
+            out["id_media"] = register_media(self.db, png, mediatype="image", descrizione=f"Disegno ceramica: {label}",
+                                             tags="['fotogrammetria', 'ceramica']", links=[("CERAMICA", id_rep)],
+                                             overwrite=overwrite, **self._media_dirs())
+        except Exception:
+            if new:  # a new form without its drawing would be a half-done save
+                t = self.db.table("pottery_table")
+                with self.db.begin() as conn:
+                    conn.execute(t.delete().where(t.c.id_rep == int(id_rep)))
+                for f in written if fresh else []:
+                    f.unlink(missing_ok=True)
+            raise
+        if "drawing" in cols and (overwrite or not record.get("drawing")):
+            self.update_pottery(id_rep, drawing=png.with_suffix(".svg").name)
+        out.update({"image": str(png), "drawing": str(png.with_suffix(".svg")), "dxf": str(png.with_suffix(".dxf")),
+                    "profile": str(side)})
+        return out
 
     def documentation(self, sito: str) -> list[dict]:
         return self.db.query("documentazione_table", sito=sito)
@@ -588,3 +784,13 @@ def format_relationships(rels, default_site: str | None = None, default_area: st
 
 def _safe(name: str) -> str:
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in name).strip("_") or "documento"
+
+
+def _num(value) -> float | None:
+    """A number of a form (NUMERIC, text with a decimal comma, empty) as a float, None if missing."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(str(value).strip().replace(",", "."))
+    except ValueError:
+        return None

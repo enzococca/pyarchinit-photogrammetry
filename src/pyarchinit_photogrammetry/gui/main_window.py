@@ -132,6 +132,8 @@ class MainWindow(QMainWindow):
         self._pending_update: Path | None = None  # new application swapped in when the window closes
         self._relaunch_on_close = False  # a new copy starts when this one closes (Vista > Lingua)
         self._timeline = None  # Strumenti > Fasi dello scavo, a window beside this one
+        self._pottery_win = None  # Strumenti > Profilo ceramico: drawing, similar forms, save in PyArchInit
+        self._pottery: dict | None = None  # the last profile measured (profile, measures, id_rep once saved)
         if i18n.current() != "it":  # the menu bar of macOS is native: its menus are never shown as widgets
             i18n.translate_menus(self)
         if check_updates if check_updates is not None else not os.environ.get("PPG_NO_UPDATE_CHECK"):
@@ -5901,6 +5903,8 @@ class MainWindow(QMainWindow):
         self.run_task("Pianta a quota", job, done, refresh=False, save=False)
 
     def pottery_profile(self) -> None:
+        """Strumenti > Profilo ceramico da mesh: drawing and measurements of a vessel or a sherd, in a
+        window that searches the similar forms of PyArchInit and saves them in a pottery form."""
         start = self._last_dir()
         v = ParamDialog.ask(self, "Profilo ceramico", [
             Field("mesh", "Mesh del vaso o frammento", "", kind="file_open",
@@ -5910,11 +5914,20 @@ class MainWindow(QMainWindow):
             Field("scale", "Scala 1:", 1.0, minimum=0.1, maximum=100, decimals=2),
             Field("units", "Unita' della mesh", "m", choices=[("m", "metri"), ("mm", "millimetri"),
                                                              ("cm", "centimetri")]),
+            Field("axis", "Asse di rotazione", "auto", choices=[
+                ("auto", "stimato dalle normali"), ("up", "asse Z della mesh, orlo in alto (tornio)"),
+                ("down", "asse Z della mesh, orlo in basso (frammento appoggiato sull'orlo)")]),
+            Field("rim", "Il pezzo conserva l'orlo", True,
+                  tip="Diametro dell'orlo, percentuale conservata e confronto dei profili partono dall'orlo"),
             Field("title", "Titolo", "")],
-            intro="L'asse di rotazione viene stimato dalle normali della superficie (funziona anche sui frammenti).")
+            intro="L'asse di rotazione viene stimato dalle normali della superficie (funziona anche sui frammenti). "
+                  "Un frammento piccolo si misura meglio con l'orlo appoggiato in piano e l'asse Z. Il disegno "
+                  "viene salvato anche in PNG.")
         if not v or not v["mesh"]:
             return
         from ..archaeo import pottery
+
+        title = v["title"] or Path(v["mesh"]).stem
 
         def job(p):
             import trimesh
@@ -5925,24 +5938,113 @@ class MainWindow(QMainWindow):
             if f != 1.0:
                 mesh.apply_scale(f)
             p(0.3, "Asse di rotazione")
-            axis = pottery.estimate_axis(mesh)
-            p(0.6, "Profilo")
-            prof = pottery.best_profile(mesh, axis)
-            out = pottery.draw(prof, v["out"], scale=v["scale"], title=v["title"] or None)
-            return out, prof.measurements()
+            if v["axis"] == "auto":
+                axis = pottery.estimate_axis(mesh)
+            else:
+                axis = pottery.Axis(mesh.vertices.mean(axis=0), (0, 0, 1 if v["axis"] == "up" else -1))
+            p(0.6, "Orlo e profilo")
+            prof, meas = pottery.measure(mesh, axis, has_rim=v["rim"])
+            out = pottery.draw(prof, v["out"], scale=v["scale"], title=title, measures=meas)
+            png = pottery.draw(prof, Path(v["out"]).with_suffix(".png"), scale=v["scale"], title=title, measures=meas)
+            return out, png, prof, meas
 
         def done(r):
-            out, meas = r
-            names = {"height_m": "Altezza", "max_diameter_m": "Diametro massimo", "rim_diameter_m": "Diametro orlo",
-                     "base_diameter_m": "Diametro fondo", "wall_thickness_m": "Spessore parete"}
-            txt = "  -  ".join(f"{tr(names.get(k, k))} {val * 100:.1f} cm" for k, val in meas.items())
-            self.log_pane.info(tr("Profilo ceramico: {0}", txt))
-            if str(out).lower().endswith(".svg"):
-                ImageDialog("Profilo ceramico", out, txt, self).exec()
-            else:
-                self._info("Profilo ceramico", tr("{0}\n\nSalvato in {1}", txt, out))
+            from .pottery_dialog import PotteryDialog, measure_rows
+
+            out, png, prof, meas = r
+            self._pottery = {"profile": prof, "measures": meas, "title": title, "scale": v["scale"], "id_rep": None}
+            self.log_pane.info(tr("Profilo ceramico: {0}", "  -  ".join(f"{a} {b}" for a, b in measure_rows(meas))))
+            if self._pottery_win is None:
+                self._pottery_win = PotteryDialog(self)
+                self._pottery_win.search_requested.connect(self.search_similar_pottery)
+                self._pottery_win.save_requested.connect(self.save_pottery)
+            self._pottery_win.set_result(png, meas, [out, png], connected=self.pa is not None)
+            self._pottery_win.show()
+            self._pottery_win.raise_()
 
         self.run_task("Profilo ceramico", job, done, refresh=False, save=False)
+
+    def _pottery_query(self) -> dict:
+        """The measurements of the last profile as a search of :meth:`PyArchInit.search_pottery` (cm)."""
+        meas = self._pottery["measures"]
+
+        def cm(key):
+            return None if meas.get(key) is None else meas[key] * 100.0
+
+        return {"rim_cm": cm("rim_diameter_m"), "max_cm": cm("max_diameter_m"), "base_cm": cm("base_diameter_m"),
+                "height_cm": cm("height_m") if meas.get("full_profile") else None, "signature": meas.get("signature"),
+                "exclude": self._pottery.get("id_rep")}
+
+    def search_similar_pottery(self) -> None:
+        """The forms of PyArchInit's pottery_table most like the last profile (all the sites)."""
+        if not self._pottery or not self._need_pa():
+            return
+        pa, query = self.pa, self._pottery_query()
+
+        def done(rows):
+            if self._pottery_win is not None:
+                self._pottery_win.set_matches(rows, searched=True)
+
+        self.run_task("Ricerca di forme simili", lambda p: pa.search_pottery(**query), done, refresh=False,
+                      save=False)
+
+    def save_pottery(self, chosen=None) -> None:
+        """Measurements and drawing of the last profile in a pottery form of PyArchInit: a new one,
+        or the form chosen among the similar ones (or the one just saved)."""
+        if not self._pottery or not self._need_pa():
+            return
+        site = self._ensure_site("La scheda ceramica appartiene al sito del progetto.")
+        if not site:
+            return
+        pa, meas = self.pa, self._pottery["measures"]
+        forms = [(None, tr("Nuova scheda ceramica"))]
+        for rid in dict.fromkeys(x for x in (self._pottery.get("id_rep"), chosen) if x is not None):
+            rec = (pa.db.query("pottery_table", id_rep=int(rid)) or [{}])[0]
+            forms.append((int(rid), tr("Aggiorna la scheda n. {0} ({1}, US {2})", rec.get("id_number") or rid,
+                                       rec.get("sito") or "", rec.get("us") or "")))
+        lang = "EN" if i18n.current() == "en" else "IT"
+
+        def values(code):
+            return [(x, x) for _, x in pa.thesaurus(code, lingua=lang)]
+
+        part = next((x for s, x in pa.thesaurus("11.5", lingua=lang) if s == "RIM"), "") if meas.get("rim_diameter_m") \
+            and not meas.get("full_profile") else ""
+        v = ParamDialog.ask(self, "Salva in PyArchInit", [
+            Field("id_rep", "Scheda", chosen if chosen is not None else None, choices=forms),
+            Field("area", "Area", ""), Field("us", "US", ""),
+            Field("form", "Forma", "", kind="combo_text", choices=values("11.4")),
+            Field("specific_form", "Parte", part, kind="combo_text", choices=values("11.5")),
+            Field("specific_shape", "Forma specifica", "", kind="combo_text", choices=values("11.12")),
+            Field("ware", "Classe", "", kind="combo_text", choices=values("11.6")),
+            Field("overwrite", "Sostituisci i valori gia' presenti nella scheda", False)],
+            intro=tr("Sito {0}. Le misure vanno nella scheda in centimetri (diametri, altezza totale o conservata, "
+                     "percentuale dell'orlo); il disegno nei media della scheda (PNG, con SVG e DXF accanto) insieme "
+                     "al profilo per le ricerche. Area, US e i campi vuoti non cambiano una scheda esistente.", site))
+        if not v:
+            return
+        fields = {k: v[k] for k in ("form", "specific_form", "specific_shape", "ware") if v[k]}
+        pot = self._pottery
+        kw = {"area": v["area"], "us": v["us"]} if v["id_rep"] is None else \
+            {k: v[k] for k in ("area", "us") if v[k].strip()}
+
+        def job(p):
+            p(0.2, "Scheda ceramica")
+            return pa.save_pottery(site, meas, id_rep=v["id_rep"], profile=pot["profile"], title=pot["title"],
+                                   scale=pot["scale"], overwrite=v["overwrite"], **kw, **fields)
+
+        def done(out):
+            pot["id_rep"] = out["id_rep"]
+            text = tr("Scheda ceramica n. {0} salvata; disegno: {1}", out["id_rep"], out.get("image", ""))
+            if out["uncertain"]:
+                text += "\n\n" + tr("Diametro dell'orlo e percentuale conservata sono incerti (arco breve o "
+                                     "irregolare): non scritti nella scheda, restano nel profilo salvato.")
+            if out["kept"]:
+                text += "\n\n" + tr("Valori gia' presenti, lasciati come erano (misurati tra parentesi): {0}",
+                                     ", ".join(f"{k} {old} ({new})" for k, (old, new) in out["kept"].items()))
+            self.log_pane.info(text.replace("\n\n", " "))
+            self._info("PyArchInit", text)
+
+        self.run_task("Salva in PyArchInit", job, done, refresh=False, save=False)
 
     def classify(self) -> None:
         if not self._need_chunk(product="point_cloud"):
@@ -7204,6 +7306,8 @@ class MainWindow(QMainWindow):
         def done(pa):
             self.pa = pa
             self.pa_pane.set_connection(pa, pa.label)
+            if self._pottery_win is not None:
+                self._pottery_win.set_connected(True)
             log.info("PyArchInit connesso: %s", pa.label)
             self.d_pa.show()
             self._sync_site_with_db(ask=self._project_open() and not quiet)

@@ -171,14 +171,19 @@ def create_demo_database(home: str | Path, srid: int = 3004, site: str = DEMO_SI
         con.execute("INSERT INTO documentazione_table (id_documentazione, sito, nome_doc, data, tipo_documentazione, "
                     "sorgente, scala, disegnatore, note) VALUES (?,?,?,?,?,?,?,?,?)",
                     (i, main, nome, today, tipo, sorg, scala, "E. Cocca", "Documentazione dimostrativa"))
-    pottery = [("1", "1", "orlo", "ciotola", "ceramica comune", 16.0), ("1", "1", "parete", "olla", "ceramica da fuoco", None),
-               ("1", "3", "fondo", "piatto", "sigillata", 8.0), ("1", "3", "ansa", "anfora", "anfora", None),
-               ("1", "1", "orlo", "coppa", "vernice nera", 12.0), ("1", "2", "parete", "dolio", "ceramica comune", None)]
+    # form, part, shape and ware as in PyArchInit's thesaurus (11.4, 11.5, 11.12, 11.6); diameters and height in cm
+    pottery = [("1", "1", "Aperta", "Orlo", "Ciotola", "Media", 16.0, 16.8, None, None, "5-25"),
+               ("1", "1", "Chiusa", "Parete", "Giara", "Grossa", None, 31.0, None, None, "<5"),
+               ("1", "3", "Aperta", "Fondo", "Piatto", "Fine", None, None, 8.0, None, "5-25"),
+               ("1", "3", "Chiusa", "Ansa", "Anfora", "Media", None, None, None, None, "<5"),
+               ("1", "1", "Aperta", "Orlo", "Tazza", "Fine", 12.0, 12.4, 5.0, 7.5, ">50"),
+               ("1", "2", "Chiusa", "Parete", "Pithos", "Grossa", None, 64.0, None, None, "<5")]
     pcols = _columns(con, "pottery_table")
-    for i, (area, us, form, specific, ware, rim) in enumerate(pottery, 1):
+    for i, (area, us, form, part, shape, ware, rim, dmax, base, height, pct) in enumerate(pottery, 1):
         row = {"id_rep": i, "id_number": i, "sito": main, "area": area, "us": us, "form": form,
-               "specific_form": specific, "ware": ware, "diametro_rim": rim, "anno": 2025, "qty": 1,
-               "material": "ceramica", "fabric": "depurata", "note": "frammento dimostrativo"}
+               "specific_form": part, "specific_shape": shape, "ware": ware, "diametro_rim": rim,
+               "diametro_max": dmax, "diametro_bottom": base, "diametro_height": height, "percent": pct, "anno": 2025,
+               "qty": 1, "material": "Ceramica", "fabric": "depurata", "note": "frammento dimostrativo"}
         _insert(con, "pottery_table", {k: v for k, v in row.items() if k in pcols})
     icols = _columns(con, "inventario_materiali_table")
     finds = [("1", "1", "metallo", "chiodo", 3), ("1", "1", "vetro", "frammento di bicchiere", 1),

@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
 from ..archaeo.stratigraphy import US_TYPES
-from .i18n import decimal_comma, number, thousands_points, tr, translate
+from .i18n import NO_TRANSLATE, decimal_comma, number, thousands_points, tr, translate
 
 
 @dataclass
@@ -24,7 +24,8 @@ class Field:
     minimum: float = 0.0
     maximum: float = 1e9
     decimals: int = 4
-    kind: str | None = None  # "file_save", "file_open", "dir", "text", "optional_float", "checklist", "color"
+    kind: str | None = None  # "file_save", "file_open", "dir", "text", "optional_float", "checklist", "color",
+    # "combo_text" (a text with the choices as suggestions)
     filter: str = ""
     tip: str = ""
 
@@ -127,6 +128,13 @@ class ParamDialog(QDialog):
             w.setFixedHeight(w.sizeHintForRow(0) * rows + 2 * w.frameWidth() + 6)
             w.setMinimumWidth(min(600, w.sizeHintForColumn(0) + 2 * w.frameWidth() + 24))
             return w
+        if f.kind == "combo_text":
+            w = QComboBox()
+            w.setEditable(True)
+            w.setProperty(NO_TRANSLATE, True)  # values of the database, written as they are
+            w.addItems([str(lab) for _, lab in f.choices or []])
+            w.setCurrentText("" if f.default is None else str(f.default))
+            return w
         if f.choices is not None:
             w = QComboBox()
             w.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)  # the dialog widens, no cut text
@@ -167,6 +175,8 @@ class ParamDialog(QDialog):
             if f.kind == "checklist":
                 out[name] = [w.item(i).data(Qt.ItemDataRole.UserRole) for i in range(w.count())
                              if w.item(i).checkState() == Qt.CheckState.Checked]
+            elif f.kind == "combo_text":
+                out[name] = w.currentText().strip()
             elif isinstance(w, QComboBox):
                 out[name] = w.currentData()
             elif isinstance(w, _PathEdit):

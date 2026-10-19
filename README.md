@@ -224,6 +224,11 @@ is installed on first use (PyTorch in a separate environment, see the same page)
   (`ppg timeline`).
 * **Relief visualisations** of the DEM: sky-view factor, positive and negative openness, local and
   multi-scale relief (MSRM), multi-directional hillshade (`ppg relief`), for faint walls and ditches.
+* **Pottery**: rim diameter and percentage kept from the circle of the lip, also on a sherd
+  (uncertain below 40 degrees of arc), profile and drawing; the most similar forms of PyArchInit's
+  `pottery_table` by measurements and shape of the profile, and the save of measurements (cm) and
+  drawing in the pottery form (*Strumenti > Profilo ceramico da mesh*, `ppg pyarchinit
+  pottery-search`, `ppg pyarchinit pottery-save`).
 * **Diagnostics**: matching graph, matches between two photos, residuals of the tie points in the
   photos, camera calibration with a distortion plot and a calibration that can be held, merging
   markers.
@@ -405,7 +410,7 @@ then `ppg.app.document` inside the script (in the GUI: **Strumenti > Esegui scri
 | Dense | Depth maps and fusion on CPU (built-in), COLMAP PatchMatch on NVIDIA GPUs (Linux, `pycolmap-cuda12`), OpenMVS when installed |
 | Products | Point cloud (PLY/LAS 1.4 with classes), mesh (from the depth maps by TSDF fusion, Poisson in an isolated process with automatic fallback, or 2.5D), texture atlas (OBJ+MTL+JPG), DEM, orthomosaic, hillshade, slope, HTML report |
 | Markers | Printable ArUco/AprilTag sheets with scale bar, turntable mats with known layout, sub-pixel detection, triangulation, GCP/check points, scale bars (control and check, also in local coordinates), weighted 7-parameter transformation, any EPSG CRS (geographic GCPs go to the UTM zone) |
-| Archaeology | Vertical sections and parallel cross sections, plan slices at a given elevation, DXF/SVG drawings at scale, contour lines, cut/fill volumes, freehand drawing and snapping to vertices/segments, 3D proxies of stratigraphic units (closed solids, Extended Matrix OBJ), pottery: rotation axis from sherds, profile, rim/base diameter, height, wall thickness, drawing with filled section |
+| Archaeology | Vertical sections and parallel cross sections, plan slices at a given elevation, DXF/SVG drawings at scale, contour lines, cut/fill volumes, freehand drawing and snapping to vertices/segments, 3D proxies of stratigraphic units (closed solids, Extended Matrix OBJ), pottery: rotation axis from sherds, rim diameter and percentage kept from the circle of the lip, profile, base diameter, height, wall thickness, drawing with filled section, typological search in PyArchInit's `pottery_table` by size and profile, save in the pottery form |
 | BIM | IFC4 export with IfcMapConversion + IfcProjectedCRS georeferencing, one element per stratigraphic unit with `Pset_PyArchInit_US`; with US proxies, closed solids carrying quantities (`Qto_PyArchInit_US`: volume, area, height, elevations), materials, period/phase groups and stratigraphic relationships (see [docs/bim.md](docs/bim.md)) |
 | AI | Rule-based classification (ground, vegetation, masonry, noise) with archaeological LAS classes 64-71; classes shown, hidden and corrected with a lasso in the 3D view; trainable classifier (random forest on multi-scale geometry, height above ground and colour) learning from the corrections, models reusable on other projects; Segment Anything 2.1 on orthomosaics (tap, box, area, whole orthomosaic in tiles) and photos, on CUDA or the Apple GPU, masks projected to the point cloud, automatic candidate units |
 | PyArchInit | Reads `config.cfg` and the database (SQLite/SpatiaLite or PostgreSQL/PostGIS) without QGIS; creates and edits US forms with their stratigraphic relationships (adding the PyArchInit 5 columns to reduced databases); deletes and merges unit polygons drawn or loaded from `pyunitastratigrafiche`; publishes orthophotos, DEMs, 3D models and US proxies as media with PyArchInit thumbnails, documentation records and footprints, US links, US polygons, spot heights, section traces, volumes |
@@ -446,7 +451,18 @@ ppg pottery model.obj --out profilo.svg --scale 1 --title "US 101 n. 34"
 ```
 
 The axis is estimated from the surface normals (works on sherds); with the turntable you
-can impose it with `--axis 0,0,0,0,0,1`.
+can impose it with `--axis up` (the Z of the mesh, rim up) or `--axis down` (a sherd resting on
+its rim). The rim diameter comes from the circle of the lip, with the percentage of the rim kept
+(flagged as uncertain below 40 degrees of arc). The forms of PyArchInit most like it, by size and
+by the shape of the profile, and the save of measurements (cm) and drawing in a pottery form:
+
+```bash
+ppg pyarchinit pottery-search frammento.ply --axis down
+ppg pyarchinit pottery-save frammento.ply "Saggio 1" --us 101 --part Orlo --axis down
+```
+
+In the GUI the same is *Strumenti > Profilo ceramico da mesh* (*Cerca forme simili*, *Salva in
+PyArchInit...*).
 
 ## Accuracy check
 

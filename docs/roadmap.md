@@ -113,7 +113,9 @@ markers in too few photos.
   (*File > Esporta > Pacchetto QField*, *File > Importa > Modifiche da QField*, `ppg qfield`).
 * Machine-readable paradata (provenance of every product) linked to the PyArchInit media. *Done*
   (W3C PROV in JSON-LD beside exports and published media, `ppg paradata`).
-* Pottery: rim diameter from a sherd, profile-based typology search against `pottery_table`.
+* Pottery: rim diameter from a sherd, profile-based typology search against `pottery_table`. *Done*
+  (*Strumenti > Profilo ceramico da mesh*: rim diameter and arc kept from the circle of the lip,
+  *Cerca forme simili*, *Salva in PyArchInit*; `ppg pyarchinit pottery-search`, `pottery-save`).
 * Automatic US proposal from SAM masks + stratigraphic relations for the Extended Matrix.
 * IFC with stratigraphic relations and s3dgraphy/StratiGraph identifiers (`node_uuid`).
 

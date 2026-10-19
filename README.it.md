@@ -207,6 +207,11 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
   stratigrafici suggeriti dall'ordine di asportazione e scritti nelle schede US (`ppg timeline`).
 * **Visualizzazioni del rilievo** del DEM: sky-view factor, openness positiva e negativa, rilievo locale
   e multiscala (MSRM), ombreggiatura da piu' direzioni (`ppg relief`), per muri e fossati appena accennati.
+* **Ceramica**: diametro dell'orlo e percentuale conservata dal cerchio del labbro anche su un frammento
+  (incerto sotto i 40 gradi di arco), profilo e disegno; ricerca delle forme piu' simili nella
+  `pottery_table` di PyArchInit per misure e forma del profilo e salvataggio di misure (cm) e disegno
+  nella scheda ceramica (*Strumenti > Profilo ceramico da mesh*, `ppg pyarchinit pottery-search`,
+  `ppg pyarchinit pottery-save`).
 * **Diagnostica**: grafo delle corrispondenze, corrispondenze tra due foto, residui dei punti di
   legame nelle foto, calibrazione della camera con il grafico della distorsione e calibrazione fissa,
   unione dei marker.

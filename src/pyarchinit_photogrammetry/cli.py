@@ -1007,22 +1007,42 @@ def contours(project: Path, interval: float = typer.Option(0.0, help="metres (0:
     typer.echo(f"{terrain.export_contours(lines, out, crs=ch.crs)} ({len(lines)} lines)")
 
 
-@app.command()
-def pottery(mesh_path: Path, out: Path = Path("profilo.svg"), scale: float = 1.0, title: Optional[str] = None,
-            axis: Optional[str] = typer.Option(None, help="'x,y,z,dx,dy,dz' to impose the rotation axis")):
-    """Profile drawing and measurements of a vessel/sherd model (SVG or DXF)."""
+def _pottery_measure(mesh_path: Path, axis: Optional[str], units: str, rim: bool):
+    """Profile and measurements of a mesh (``axis``: 'x,y,z,dx,dy,dz', 'up' or 'down' for the Z of
+    the mesh with the rim up or down, None: estimated from the normals)."""
     import trimesh
 
     from .archaeo import pottery as pot
 
     m = trimesh.load(str(mesh_path), force="mesh")
+    f = {"m": 1.0, "cm": 0.01, "mm": 0.001}[units]
+    if f != 1.0:
+        m.apply_scale(f)
     ax = None
-    if axis:
+    if axis in ("up", "down"):
+        ax = pot.Axis(m.vertices.mean(axis=0), (0, 0, 1 if axis == "up" else -1))
+    elif axis:
         v = [float(x) for x in axis.split(",")]
         ax = pot.Axis(v[:3], v[3:])
-    prof = pot.best_profile(m, ax)
-    pot.draw(prof, out, scale=scale, title=title or mesh_path.stem)
-    typer.echo(json.dumps(prof.measurements(), indent=1))
+    return pot.measure(m, ax, has_rim=rim)
+
+
+AXIS_HELP = "'x,y,z,dx,dy,dz' to impose the rotation axis, 'up'/'down': the Z of the mesh, rim up/down"
+
+
+@app.command()
+def pottery(mesh_path: Path, out: Path = Path("profilo.svg"), scale: float = 1.0, title: Optional[str] = None,
+            axis: Optional[str] = typer.Option(None, help=AXIS_HELP),
+            units: str = typer.Option("m", help="units of the mesh: m, cm or mm"),
+            rim: bool = typer.Option(True, help="the piece keeps its rim (rim diameter, % preserved, signature)")):
+    """Profile drawing (SVG, DXF or PNG) and measurements of a vessel/sherd model: rim diameter and
+    percentage preserved, maximum and base diameter, height, wall thickness."""
+    from .archaeo import pottery as pot
+
+    prof, meas = _pottery_measure(mesh_path, axis, units, rim)
+    pot.draw(prof, out, scale=scale, title=title or mesh_path.stem, measures=meas)
+    meas.pop("signature", None)
+    typer.echo(json.dumps(meas, indent=1))
 
 
 @app.command()
@@ -1390,6 +1410,52 @@ def pa_publish(project: Path, sito: str, nome_doc: str, ortho: bool = True, dem:
         typer.echo(json.dumps(pa.publish_dem(ch, sito, f"DEM {nome_doc}", link_us=links)))
     if model:
         typer.echo(json.dumps(pa.publish_model(ch, sito, f"Modello {nome_doc}", link_us=links)))
+
+
+@pa_app.command("pottery-search")
+def pa_pottery_search(mesh_path: Path, sito: Optional[str] = typer.Option(None, help="only this site"),
+                      limit: int = 10, axis: Optional[str] = typer.Option(None, help=AXIS_HELP),
+                      units: str = typer.Option("m", help="units of the mesh: m, cm or mm"),
+                      url: Optional[str] = None):
+    """The pottery forms most like a vessel or a sherd (dimensions, and profile where saved)."""
+    from .pyarchinit import PyArchInit
+
+    _, meas = _pottery_measure(mesh_path, axis, units, True)
+
+    def cm(key):
+        return None if meas.get(key) is None else meas[key] * 100.0
+
+    rows = PyArchInit.connect(url).search_pottery(
+        rim_cm=cm("rim_diameter_m"), max_cm=cm("max_diameter_m"), base_cm=cm("base_diameter_m"),
+        height_cm=cm("height_m") if meas.get("full_profile") else None, signature=meas.get("signature"), sito=sito,
+        limit=limit)
+    for r in rows:
+        dims = " ".join(f"{k.replace('diametro_', '')}={r[k]:g}" for k in ("diametro_rim", "diametro_max",
+                                                                           "diametro_bottom", "diametro_height")
+                        if r.get(k) is not None)
+        typer.echo(f"{r['similarity_pct']:5.1f}%  id_rep {r['id_rep']}  {r.get('sito')}  US {r.get('us')}  "
+                   f"{r.get('specific_shape') or r.get('form') or ''}  {dims}  [{', '.join(r['compared'])}]")
+
+
+@pa_app.command("pottery-save")
+def pa_pottery_save(mesh_path: Path, sito: str, area: str = "", us: str = "",
+                    id_rep: Optional[int] = typer.Option(None, help="update this pottery form (default: a new one)"),
+                    form: Optional[str] = None, part: Optional[str] = typer.Option(None, help="specific_form"),
+                    shape: Optional[str] = typer.Option(None, help="specific_shape"), ware: Optional[str] = None,
+                    scale: float = 1.0, title: Optional[str] = None, overwrite: bool = False,
+                    axis: Optional[str] = typer.Option(None, help=AXIS_HELP),
+                    units: str = typer.Option("m", help="units of the mesh: m, cm or mm"),
+                    rim: bool = typer.Option(True, help="the piece keeps its rim"), url: Optional[str] = None):
+    """Measurements (cm) and drawing of a vessel or a sherd in a pottery form of PyArchInit."""
+    from .pyarchinit import PyArchInit
+
+    prof, meas = _pottery_measure(mesh_path, axis, units, rim)
+    fields = {k: v for k, v in (("form", form), ("specific_form", part), ("specific_shape", shape), ("ware", ware))
+              if v}
+    out = PyArchInit.connect(url).save_pottery(sito, meas, id_rep=id_rep, area=area, us=us, profile=prof,
+                                               title=title or mesh_path.stem, scale=scale, overwrite=overwrite,
+                                               **fields)
+    typer.echo(json.dumps(out, indent=1, default=str))
 
 
 def main():  # pragma: no cover - console entry point
