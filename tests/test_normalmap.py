@@ -61,6 +61,34 @@ def test_normal_map_holds_the_relief_of_the_full_model():
     assert np.corrcoef(reds, truth)[0, 1] > 0.9
 
 
+def test_same_mesh_takes_each_texel_from_its_own_face():
+    """A light mesh that is the full one (the leaves of an I3S package): every texel from the
+    texture at the same place of its face, without rays, as the rays find it."""
+    fv, ff, _colors, _a, _k = _waves(n=40)
+    texcoords = fv[ff][:, :, :2].reshape(-1, 6)  # the texture lies on the plan: u = x, v = y
+    yy, xx = np.mgrid[0:256, 0:256]
+    texture = np.dstack([(xx * 0.9).astype(np.uint8), (yy * 0.9).astype(np.uint8),
+                         np.where((xx // 32 + yy // 32) % 2, 230, 30).astype(np.uint8)])  # BGR
+    direct = bake_maps(fv, ff, fv, ff, size=512, full_texcoords=texcoords, full_texture=texture,
+                       same_mesh=True, normals=False)
+    rays = bake_maps(fv, ff, fv, ff, size=512, full_texcoords=texcoords, full_texture=texture, normals=False)
+    assert direct[1] is None and direct[3] == 1.0
+    side = direct[0].shape[0]
+    rng = np.random.default_rng(3)
+    errors, apart = [], []
+    for face in rng.choice(len(ff), 300, replace=False):
+        w = rng.dirichlet([3, 3, 3])
+        st = (w[:, None] * direct[2][face]).sum(0)
+        row, col = int((1 - st[1]) * side), int(st[0] * side)
+        x, y = (w[:, None] * fv[ff[face]]).sum(0)[:2]
+        true = texture[min(255, int((1 - y) * 256)), min(255, int(x * 256))].astype(float)
+        if true[2] in (30, 230) and abs(((x * 256) % 32) - 16) < 13 and abs(((1 - y) * 256 % 32) - 16) < 13:
+            errors.append(np.abs(direct[0][row, col].astype(float) - true).max())  # away from the checker edges
+        apart.append(np.abs(direct[0][row, col].astype(float) - rays[0][row, col]).max())
+    assert len(errors) > 100 and np.median(errors) <= 3 and np.percentile(errors, 95) <= 8
+    assert np.median(apart) <= 2
+
+
 def test_light_model_of_the_trench(processed, tmp_path):
     import trimesh
 

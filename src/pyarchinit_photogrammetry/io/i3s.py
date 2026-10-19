@@ -7,9 +7,13 @@ Online and Earth, CesiumJS and loaders.gl.
   many faces (vertex clustering, :func:`.mesh_ply.cluster_decimate`); the root of the tree has no
   mesh, as I3S wants. A node gives way to its children when its box covers more than about 4.5
   pixels a face on the screen (``lodThreshold``, ``maxScreenThresholdSQ``).
-* Every node has a texture of its own, a power of two on each side as I3S wants: the colour of the
-  model - its texture pages, else its vertex colours - baked onto the faces of the node by casting
-  from them onto the model (:func:`engine.normalmap.bake_maps`).
+* Every node has a texture of its own, a power of two on each side as I3S wants, sized by what it
+  shows: a leaf whose faces lie together in the model's texture (an orthophoto mapping, drone
+  models) takes that part of it as it is; any other leaf has the colour of the model - texture
+  pages, else vertex colours - laid on its faces, each texel from its own face, with about twice
+  the texels the model has there; the other nodes cast from their faces onto the model
+  (:func:`engine.normalmap.bake_maps`) for a texture of about three texels a pixel of their largest
+  size on the screen.
 * ``mode="global"`` (the default, what CesiumJS, deck.gl/loaders.gl and the global scenes of
   ArcGIS read): WGS84 longitude and latitude, every node a box oriented east, north, up at its
   centre (its rotation in earth-centred coordinates), the vertices as offsets from the centre in
@@ -38,8 +42,11 @@ from ..core.progress import Progress, as_progress
 
 NODES_PER_PAGE = 64  # a power of two, as node pages must be
 FACES_PER_NODE = 20_000
-TEXTURE_SIZE = 2048  # of the texture of a node
+TEXTURE_SIZE = 2048  # the largest texture of a node
 LOD_PIXELS_PER_FACE = 4.5
+LEAF_OVERSAMPLING = 2.0  # texels of a baked leaf for a texel of the model (its cells are equal for small and large faces)
+NODE_OVERSAMPLING = 3.0  # texels of any other node for a pixel of its largest size on the screen (lodThreshold)
+CROP_WASTE = 3.0  # a leaf takes its part of the model's texture as it is when that part has at most 3 times its texels
 HASH_TABLE = "@specialIndexFileHASH128@"
 GEOMETRY_SCHEMA = {
     "geometryType": "triangles",
@@ -203,6 +210,77 @@ class _Local:
         return box, v - centre, normals
 
 
+def _face_texels(texcoords, pages, texnumber, n: int) -> np.ndarray:
+    """Texels of the model's texture on every face (4 a face with vertex colours)."""
+    if texcoords is None or not pages:
+        return np.full(n, 4.0)
+    uv = np.asarray(texcoords, np.float64).reshape(-1, 3, 2)
+    d1, d2 = uv[:, 1] - uv[:, 0], uv[:, 2] - uv[:, 0]
+    area = 0.5 * np.abs(d1[:, 0] * d2[:, 1] - d2[:, 0] * d1[:, 1])
+    px = np.array([img.shape[0] * img.shape[1] for img in pages], np.float64)
+    return area * (px[0] if texnumber is None else px[np.asarray(texnumber, np.int64)])
+
+
+def _texture_side(texels: float, limit: int) -> int:
+    """A power of two for about ``texels`` texels, from 64 to ``limit``."""
+    return int(min(_pow2(limit), max(64, _pow2(int(np.ceil(np.sqrt(max(texels, 1.0))))))))
+
+
+def _cut_leaf(uv: np.ndarray, page: np.ndarray, texels: np.ndarray, limit: int, bake_rest):
+    """The texture of a leaf from the part of ``page`` under most of its faces, taken as it is:
+    ``(image, uv of the corners (F * 3, 2) from the top-left corner)``, or None when its faces do
+    not lie together there. ``uv`` ``(F, 3, 2)`` (v up) and ``texels`` ``(F,)`` of the faces in the
+    model's texture; the few faces elsewhere (the steep faces in the band of cells of an
+    orthophoto mapping) get their colour from ``bake_rest(mask, size)`` -> ``(colour, uv (n, 3, 2)
+    v up)``, in an atlas beside or below the cut (whichever makes the smaller texture). Larger
+    than ``limit``, the cut is reduced."""
+    import cv2
+
+    h, w = page.shape[:2]
+    px = np.clip(uv[..., 0] * w, 0, w)  # (F, 3) texels from the top-left corner; beyond the page nothing
+    py = np.clip((1.0 - uv[..., 1]) * h, 0, h)
+    cx, cy = px.mean(axis=1), py.mean(axis=1)
+    (lx, hx), (ly, hy) = np.percentile(cx, [10, 90]), np.percentile(cy, [10, 90])
+    gx, gy = 0.5 * (hx - lx) + 4, 0.5 * (hy - ly) + 4
+    core = (px.min(axis=1) >= lx - gx) & (px.max(axis=1) <= hx + gx) & (py.min(axis=1) >= ly - gy) & \
+        (py.max(axis=1) <= hy + gy)
+    if core.sum() < 0.7 * len(uv):
+        return None
+    x0, x1 = max(0, int(np.floor(px[core].min())) - 2), min(w, int(np.ceil(px[core].max())) + 2)  # 2 texels around
+    y0, y1 = max(0, int(np.floor(py[core].min())) - 2), min(h, int(np.ceil(py[core].max())) + 2)
+    cw, chh = x1 - x0, y1 - y0
+    if cw <= 0 or chh <= 0 or cw * chh > CROP_WASTE * max(float(texels[core].sum()), 16.0):
+        return None
+    rest = ~core
+    top = _pow2(limit)
+    rest_side = _texture_side(LEAF_OVERSAMPLING * float(texels[rest].sum()), max(64, top // 4)) if rest.any() else 0
+
+    def fit(beside: bool):
+        scale = min(1.0, (top - rest_side * beside) / cw, (top - rest_side * (not beside)) / chh)
+        fw, fh = max(1, int(round(cw * scale))), max(1, int(round(chh * scale)))
+        return _pow2(max(fw + rest_side * beside, fh + rest_side * (not beside))), -scale, beside, fw, fh
+
+    size, _, beside, sw, sh = min(fit(True), fit(False))
+    crop = page[y0:y1, x0:x1]
+    if (sw, sh) != (cw, chh):
+        crop = cv2.resize(crop, (sw, sh), interpolation=cv2.INTER_AREA)
+    image = np.empty((size, size, 3), np.uint8)
+    image[:sh, :sw] = crop
+    image[:sh, sw:] = crop[:, -1:]  # the rest repeats the edges: nothing samples it, filtering stays clean
+    image[sh:] = image[sh - 1:sh]
+    corners = np.empty(uv.shape, np.float64)
+    corners[core] = np.stack([(px[core] - x0) * (sw / cw) / size, (py[core] - y0) * (sh / chh) / size], axis=-1)
+    if rest.any():
+        colour, rest_uv = bake_rest(rest, rest_side)
+        side = colour.shape[0]
+        ox, oy = (sw, 0) if beside else (0, sh)
+        image[oy:oy + side, ox:ox + side] = colour
+        rest_uv = np.asarray(rest_uv, np.float64).reshape(-1, 3, 2)
+        corners[rest] = np.stack([(ox + rest_uv[..., 0] * side) / size, (oy + (1.0 - rest_uv[..., 1]) * side) / size],
+                                 axis=-1)
+    return image, corners.reshape(-1, 2)
+
+
 def _texture_source(chunk, mesh):
     """The colour of the model for the baking: ``(texcoords, pages (BGR images), texnumber)`` or
     ``(None, None, None)`` (the vertex colours then)."""
@@ -244,15 +322,21 @@ def export_slpk(chunk, path, max_faces: int = FACES_PER_NODE, texture_size: int 
     colors = mesh.colors
     tri_centre = world[faces].mean(axis=1)
     total = len(faces)
+    if not total:
+        raise ValueError("the model has no faces")
+    face_texels = _face_texels(texcoords, pages, texnumber, total)
     nodes: list = [None]  # 0: the root, without a mesh
-    files: dict[str, bytes] = {}
-    expected = max(1, int(np.ceil(total / max_faces * 4 / 3)))
+    done = [0]  # faces already in a leaf: every face ends in one
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    z = zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_STORED, allowZip64=True)  # the nodes go in as they are made
 
     def add(sel: np.ndarray, parent: int, depth: int) -> int:
         index = len(nodes)
         nodes.append(None)
         progress.check()
-        progress(0.02 + 0.9 * min(1.0, index / expected), f"I3S: node {index}")
+        progress(0.02 + 0.9 * done[0] / total, f"I3S: node {index}")
         used, inv = np.unique(faces[sel], return_inverse=True)
         v, f = world[used], inv.reshape(-1, 3)
         leaf = len(sel) <= max_faces or depth >= 12
@@ -260,32 +344,59 @@ def export_slpk(chunk, path, max_faces: int = FACES_PER_NODE, texture_size: int 
             nv, nf = v, f
         else:
             nv, nf, _ = cluster_decimate(v, lambda: iter([f]), None, target_faces=max_faces)
-        centre = (nv.min(axis=0) + nv.max(axis=0)) / 2
-        # the colour: baked from the model around the node (coordinates from the centre: float32 for the rays)
-        colour, _normal, uv, _share = bake_maps(
-            v - centre, f, nv - centre, nf, texture_size,
-            None if colors is None else colors[used],
-            None if texcoords is None else texcoords[sel], pages,
-            full_texnumber=None if texnumber is None else texnumber[sel])
-        side = colour.shape[0]
-        size = _pow2(side)
-        image = np.full((size, size, 3), 127, np.uint8)
-        image[:side, :side] = colour
-        corner_uv = np.asarray(uv, np.float64).reshape(-1, 2)
-        corner_uv = np.column_stack([corner_uv[:, 0] * side / size, (1.0 - corner_uv[:, 1]) * side / size])  # top-left
+        texels = float(face_texels[sel].sum())
+
+        def bake(part: np.ndarray, size: int, same_mesh: bool):
+            """The colour laid on the faces ``part`` of the node: a leaf has the faces of the model,
+            each texel from its own face; any other node bakes it from the model around it
+            (coordinates from the centre: float32 for the rays)."""
+            sub_faces = sel[part]
+            if part.all():
+                u, fv, ff = used, v, f
+            else:
+                u, i = np.unique(faces[sub_faces], return_inverse=True)
+                fv, ff = world[u], i.reshape(-1, 3)
+            lv, lf = (fv, ff) if same_mesh else (nv, nf)
+            c = (lv.min(axis=0) + lv.max(axis=0)) / 2
+            colour, _normal, uv, _share = bake_maps(
+                fv - c, ff, lv - c, lf, size, None if colors is None else colors[u],
+                None if texcoords is None else texcoords[sub_faces], pages,
+                full_texnumber=None if texnumber is None else texnumber[sub_faces], same_mesh=same_mesh, normals=False)
+            return colour, uv
+
+        cut = None
+        if leaf and pages is not None:
+            on = None if texnumber is None else np.unique(texnumber[sel])
+            if on is None or len(on) == 1:
+                cut = _cut_leaf(texcoords[sel].reshape(-1, 3, 2), pages[0 if on is None else int(on[0])],
+                                face_texels[sel], texture_size, lambda part, size: bake(part, size, True))
+        if cut is not None:
+            image, corner_uv = cut
+        else:
+            need = LEAF_OVERSAMPLING * texels if leaf else NODE_OVERSAMPLING * LOD_PIXELS_PER_FACE * len(nf)
+            colour, uv = bake(np.ones(len(sel), bool), _texture_side(need, texture_size), leaf)
+            side = colour.shape[0]
+            size = _pow2(side)
+            image = np.full((size, size, 3), 127, np.uint8)
+            image[:side, :side] = colour
+            corner_uv = np.asarray(uv, np.float64).reshape(-1, 2)
+            corner_uv = np.column_stack([corner_uv[:, 0] * side / size, (1.0 - corner_uv[:, 1]) * side / size])  # top-left
+        size = image.shape[0]
         ok, jpg = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 88])
         if not ok:
             raise RuntimeError("I3S: a node texture could not be written")
         corners = nv[nf].reshape(-1, 3)
         box, offsets, normals = frame.place(corners, _corner_normals(nv, nf))
-        files[f"nodes/{index}/geometries/0.bin.gz"] = gzip.compress(geometry_buffer(offsets, normals, corner_uv),
-                                                                     mtime=0)
-        files[f"nodes/{index}/textures/0.jpg"] = jpg.tobytes()
+        z.writestr(f"nodes/{index}/geometries/0.bin.gz", gzip.compress(geometry_buffer(offsets, normals, corner_uv),
+                                                                        mtime=0))
+        z.writestr(f"nodes/{index}/textures/0.jpg", jpg.tobytes())
         node = {"index": index, "parentIndex": parent, "obb": box,
                 "mesh": {"material": {"definition": 0, "resource": index, "texelCountHint": size * size},
                          "geometry": {"definition": 0, "resource": index, "vertexCount": int(len(corners)),
                                       "featureCount": 1}}}
-        if not leaf:
+        if leaf:
+            done[0] += len(sel)
+        else:
             node["lodThreshold"] = float(LOD_PIXELS_PER_FACE * len(nf))
             mid = (world[used].min(axis=0) + world[used].max(axis=0)) / 2
             q = (tri_centre[sel, 0] >= mid[0]).astype(int) + 2 * (tri_centre[sel, 1] >= mid[1]).astype(int)
@@ -293,13 +404,14 @@ def export_slpk(chunk, path, max_faces: int = FACES_PER_NODE, texture_size: int 
         nodes[index] = node
         return index
 
-    if not total:
-        raise ValueError("the model has no faces")
-    top = add(np.arange(total), 0, 0)
+    try:
+        top = add(np.arange(total), 0, 0)
+    except BaseException:  # cancelled or failed: no half-written package
+        z.close()
+        tmp.unlink(missing_ok=True)
+        raise
     nodes[0] = {"index": 0, "obb": nodes[top]["obb"], "children": [top]}
     progress(0.93, f"I3S: {len(nodes)} nodes, writing the package")
-    for k in range(0, len(nodes), NODES_PER_PAGE):
-        files[f"nodePages/{k // NODES_PER_PAGE}.json.gz"] = _gz({"nodes": nodes[k:k + NODES_PER_PAGE]})
     lo, hi = world.min(axis=0), world.max(axis=0)
     wkid = epsg
     if mode == "global":
@@ -326,16 +438,13 @@ def export_slpk(chunk, path, max_faces: int = FACES_PER_NODE, texture_size: int 
         "textureSetDefinitions": [{"formats": [{"name": "0", "format": "jpg"}]}],
         "geometryDefinitions": [GEOMETRY_DEFINITION],
     }
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as z:
+    with z:
+        for k in range(0, len(nodes), NODES_PER_PAGE):
+            z.writestr(f"nodePages/{k // NODES_PER_PAGE}.json.gz", _gz({"nodes": nodes[k:k + NODES_PER_PAGE]}))
         z.writestr("metadata.json", json.dumps({"folderPattern": "basic", "ArchiveCompressionType": "Store",
                                                 "ResourceCompressionType": "GZIP", "I3SVersion": "1.7",
                                                 "nodeCount": len(nodes)}))
         z.writestr("3dSceneLayer.json.gz", _gz(layer))
-        for name_, data in files.items():
-            z.writestr(name_, data)
         z.writestr(HASH_TABLE, hash_table((i.filename, i.header_offset) for i in z.infolist()))
     tmp.replace(path)
     progress(1.0, f"I3S: {len(nodes)} nodes in {path.name}")

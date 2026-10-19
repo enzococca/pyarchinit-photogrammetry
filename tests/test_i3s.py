@@ -80,6 +80,69 @@ def test_package_of_the_trench(processed, tmp_path):
         assert raw[offset + 30:offset + 30 + n_len].decode() == name
 
 
+def test_a_texture_laid_as_an_orthophoto_is_cut_as_it_is(processed, tmp_path, monkeypatch):
+    """Drone models (orthophoto mapping): a leaf takes its part of the model's texture as it is,
+    not baked. Here the texture is the orthophoto laid on the model by plan position, with a band
+    below it (magenta) where 5% of the faces have their cells, as the steep faces of an adaptive
+    orthophoto mapping: those keep their colour, baked in an atlas below the cut."""
+    import shutil
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.io.mesh_ply import read_mesh, write_mesh
+
+    doc, _, _ = processed
+    d = tmp_path / "copia"
+    d.mkdir()
+    shutil.copy2(doc.path, d / doc.path.name)
+    shutil.copytree(doc.files_dir, d / doc.files_dir.name)
+    ch = ppg.Document.open(d / doc.path.name).chunk
+    with rasterio.open(ch.orthomosaic_path) as src:
+        rgb, transform, (h, w) = src.read([1, 2, 3]), src.transform, src.shape
+    band = h // 8
+    image = np.zeros((h + band, w, 3), np.uint8)
+    image[:h] = np.transpose(rgb, (1, 2, 0))[:, :, ::-1]
+    image[h:] = (255, 0, 255)
+    page = ch.data_dir / "model_texture.jpg"
+    cv2.imwrite(str(page), image, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    ch._set_product("model_textured", page)
+    mesh = read_mesh(ch.product_path("model"))
+    world = mesh.xyz @ ch.transform[:3, :3].T + ch.transform[:3, 3]
+    col, row = (world[:, 0] - transform.c) / transform.a, (world[:, 1] - transform.f) / transform.e
+    corners = np.stack([col, row], axis=1)[mesh.faces]  # (F, 3, 2) texels of the page
+    rng = np.random.default_rng(0)
+    steep = rng.random(len(mesh.faces)) < 0.05
+    at = np.column_stack([rng.uniform(2, w - 8, steep.sum()), rng.uniform(h + 2, h + band - 8, steep.sum())])
+    corners[steep] = at[:, None, :] + np.array([[0, 0], [5, 0], [0, 5]])
+    mesh.texcoords = np.stack([corners[..., 0] / w, 1.0 - corners[..., 1] / (h + band)], axis=-1).reshape(-1, 6)
+    mesh.set_texture_file(page.name)
+    write_mesh(ch.product_path("model"), mesh)
+    cuts = []
+    cut_leaf = i3s._cut_leaf
+    monkeypatch.setattr(i3s, "_cut_leaf", lambda *a, **k: (lambda r: (cuts.append(r is not None), r)[1])(cut_leaf(*a, **k)))
+    path = i3s.export_slpk(ch, tmp_path / "drone.slpk", max_faces=2000, texture_size=512, mode="local")
+    leaves = [n for n in i3s.read_slpk(path)["nodes"][1:] if "children" not in n]
+    assert len(leaves) > 5 and len(cuts) == len(leaves) and sum(cuts) >= 0.8 * len(cuts)  # nearly all cut
+    diffs, magenta = [], []
+    with zipfile.ZipFile(path) as z, rasterio.open(ch.orthomosaic_path) as src:
+        for n in leaves:
+            k = n["mesh"]["geometry"]["resource"]
+            g = i3s.read_geometry_buffer(gzip.decompress(z.read(f"nodes/{k}/geometries/0.bin.gz")))
+            img = cv2.imdecode(np.frombuffer(z.read(f"nodes/{k}/textures/0.jpg"), np.uint8), cv2.IMREAD_COLOR)
+            assert img.shape[0] == img.shape[1] <= 512 and (g["uv0"] >= 0).all() and (g["uv0"] <= 1).all()
+            c = (g["position"] + np.array(n["obb"]["center"])).reshape(-1, 3, 3).mean(axis=1)[::5]
+            st = g["uv0"].reshape(-1, 3, 2).mean(axis=1)[::5]
+            size = img.shape[0]
+            tex = img[np.clip((st[:, 1] * size).astype(int), 0, size - 1),
+                      np.clip((st[:, 0] * size).astype(int), 0, size - 1)][:, ::-1].astype(float)
+            pink = (tex[:, 0] > 180) & (tex[:, 1] < 90) & (tex[:, 2] > 180)
+            magenta += list(pink)
+            ortho = np.array([v for v in src.sample([tuple(p) for p in c[:, :2]])], float)
+            ok = (ortho[:, 3] > 0) & ~pink
+            diffs += list(np.abs(tex[ok] - ortho[ok, :3]).mean(axis=1))
+    assert len(diffs) > 100 and np.median(diffs) < 6  # the orthophoto itself, through two JPEGs
+    assert 0.03 < np.mean(magenta) < 0.07  # the faces of the band keep their own colour
+
+
 def test_global_mode(processed, tmp_path):
     """WGS84: the boxes east, north, up at their centre, the vertices in degrees and metres from it,
     normals earth-centred."""

@@ -48,12 +48,15 @@ def _vertex_normals(verts, faces) -> np.ndarray:
 
 
 def bake_maps(full_verts, full_faces, light_verts, light_faces, size: int = 2048, full_colors=None,
-              full_texcoords=None, full_texture=None, progress: Progress | None = None, full_texnumber=None):
+              full_texcoords=None, full_texture=None, progress: Progress | None = None, full_texnumber=None,
+              same_mesh: bool = False, normals: bool = True):
     """Colour texture and normal map of a light mesh from the full one (see the module
     docstring). ``full_texcoords``: ``(F, 6)`` per face of the full mesh with ``full_texture``
     (BGR image, or the images of the pages with ``full_texnumber`` the page of every face); else
-    ``full_colors`` per vertex (RGB). Returns ``(colour BGR, normal RGB, uv (F_light, 3, 2), hit
-    share)``."""
+    ``full_colors`` per vertex (RGB). ``same_mesh``: the light mesh is the full one, face for
+    face: every texel takes the colour of its own face, without casting rays. ``normals=False``:
+    the colour only (no normal map: None). Returns ``(colour BGR, normal RGB, uv (F_light, 3, 2),
+    hit share)``."""
     import open3d as o3d
 
     progress = as_progress(progress)
@@ -77,13 +80,15 @@ def bake_maps(full_verts, full_faces, light_verts, light_faces, size: int = 2048
     det = np.where(np.abs(det) < 1e-20, 1e-20, det)
     tangent = (e1 * d2[:, 1:2] - e2 * d1[:, 1:2]) / det[:, None]
     bitangent = (e2 * d1[:, 0:1] - e1 * d2[:, 0:1]) / det[:, None]
-    lvn, fvn = _vertex_normals(lv, lf), _vertex_normals(fv, ff)
+    lvn = _vertex_normals(lv, lf) if normals or not same_mesh else None
+    fvn = _vertex_normals(fv, ff) if normals else None
     edge = float(np.median(np.linalg.norm(e1, axis=1))) if n else 1.0
     reach = 4.0 * edge
-    scene = o3d.t.geometry.RaycastingScene()
-    scene.add_triangles(o3d.core.Tensor(fv.astype(np.float32)), o3d.core.Tensor(ff.astype(np.uint32)))
+    if not same_mesh:
+        scene = o3d.t.geometry.RaycastingScene()
+        scene.add_triangles(o3d.core.Tensor(fv.astype(np.float32)), o3d.core.Tensor(ff.astype(np.uint32)))
     colour = np.zeros((side, side, 3), np.uint8)
-    normal = np.zeros((side, side, 3), np.uint8)
+    normal = np.zeros((side, side, 3), np.uint8) if normals else None
     valid = np.zeros((side, side), bool)
     local = np.column_stack(np.divmod(np.arange(s * s), s)[::-1])
     if full_texture is None:
@@ -109,13 +114,19 @@ def bake_maps(full_verts, full_faces, light_verts, light_faces, size: int = 2048
             continue
         f_all, p_all = np.concatenate(f_list), np.concatenate(p_list)
         b = bary[p_all]
-        pts = (b[:, :, None] * lv[lf[f_all]]).sum(1)
-        nrm = (b[:, :, None] * lvn[lf[f_all]]).sum(1)
-        nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-12)
+        if lvn is not None:
+            nrm = (b[:, :, None] * lvn[lf[f_all]]).sum(1)
+            nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-12)
         # from outside the light surface inwards, then from inside outwards for what was missed
-        dist = np.full(len(pts), np.inf)
-        prim = np.full(len(pts), -1, np.int64)
-        uvw = np.zeros((len(pts), 2))
+        dist = np.full(len(b), np.inf)
+        prim = np.full(len(b), -1, np.int64)
+        uvw = np.zeros((len(b), 2))
+        if same_mesh:  # the texel on its own face: (u, v) of its barycentrics, as a ray would give them
+            dist[:] = 0.0
+            prim = f_all.astype(np.int64)
+            uvw = b[:, 1:3]
+        else:
+            pts = (b[:, :, None] * lv[lf[f_all]]).sum(1)
         for sign in (1.0, -1.0):
             todo = ~np.isfinite(dist)
             if not todo.any():
@@ -129,23 +140,24 @@ def bake_maps(full_verts, full_faces, light_verts, light_faces, size: int = 2048
             prim[idx] = ans["primitive_ids"].numpy()[ok].astype(np.int64)
             uvw[idx] = ans["primitive_uvs"].numpy()[ok]
         hit = prim >= 0
-        total += len(pts)
+        total += len(b)
         hits += int(hit.sum())
         rows = cy[f_all] * s + local[p_all, 1]
         cols = cx[f_all] * s + local[p_all, 0]
         if hit.any():
             hp, hu = prim[hit], uvw[hit]
             w = np.column_stack([1 - hu[:, 0] - hu[:, 1], hu[:, 0], hu[:, 1]])  # barycentrics of the hit
-            fn = (w[:, :, None] * fvn[ff[hp]]).sum(1)
-            fn /= np.maximum(np.linalg.norm(fn, axis=1, keepdims=True), 1e-12)
-            fi = f_all[hit]
-            N = nrm[hit]
-            T = tangent[fi] - (tangent[fi] * N).sum(1, keepdims=True) * N
-            T /= np.maximum(np.linalg.norm(T, axis=1, keepdims=True), 1e-12)
-            B = np.cross(N, T)
-            B *= np.sign((B * bitangent[fi]).sum(1, keepdims=True) + 1e-30)
-            ts = np.column_stack([(fn * T).sum(1), (fn * B).sum(1), (fn * N).sum(1)])
-            normal[rows[hit], cols[hit]] = np.clip((ts + 1) * 127.5, 0, 255).astype(np.uint8)
+            if normals:
+                fn = (w[:, :, None] * fvn[ff[hp]]).sum(1)
+                fn /= np.maximum(np.linalg.norm(fn, axis=1, keepdims=True), 1e-12)
+                fi = f_all[hit]
+                N = nrm[hit]
+                T = tangent[fi] - (tangent[fi] * N).sum(1, keepdims=True) * N
+                T /= np.maximum(np.linalg.norm(T, axis=1, keepdims=True), 1e-12)
+                B = np.cross(N, T)
+                B *= np.sign((B * bitangent[fi]).sum(1, keepdims=True) + 1e-30)
+                ts = np.column_stack([(fn * T).sum(1), (fn * B).sum(1), (fn * N).sum(1)])
+                normal[rows[hit], cols[hit]] = np.clip((ts + 1) * 127.5, 0, 255).astype(np.uint8)
             if tex is not None and full_texcoords is not None:
                 tc = np.asarray(full_texcoords, np.float64).reshape(-1, 3, 2)[hp]
                 st = (w[:, :, None] * tc).sum(1)
@@ -163,11 +175,11 @@ def bake_maps(full_verts, full_faces, light_verts, light_faces, size: int = 2048
                 colour[rows[hit], cols[hit]] = 200
             valid[rows[hit], cols[hit]] = True
         progress(min(1.0, (start + len(part)) / n), f"Normal map: {start + len(part):,}/{n:,} faces")
-    flat = np.zeros_like(normal)
-    flat[:] = (128, 128, 255)
-    normal = np.where(valid[..., None], normal, flat)
     colour = _fill_empty(colour, valid)
-    normal = _fill_empty(normal, valid)
+    if normals:
+        flat = np.zeros_like(normal)
+        flat[:] = (128, 128, 255)
+        normal = _fill_empty(np.where(valid[..., None], normal, flat), valid)
     return colour, normal, uv, hits / max(total, 1)
 
 

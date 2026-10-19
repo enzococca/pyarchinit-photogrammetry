@@ -1480,7 +1480,7 @@ class MainWindow(QMainWindow):
                 ("global", "WGS84 (ArcGIS Online, scene globali, CesiumJS, deck.gl)"),
                 ("local", tr("Il sistema del progetto {0} (scene locali di ArcGIS)", ch.crs))]),
             Field("faces", "Facce per nodo", 20000, minimum=2000, maximum=200000),
-            Field("texture", "Texture di un nodo (pixel)", 2048, choices=[(1024, "1024"), (2048, "2048"), (4096, "4096")])],
+            Field("texture", "Texture massima di un nodo (pixel)", 2048, choices=[(1024, "1024"), (2048, "2048"), (4096, "4096")])],
             intro="Il modello diviso in nodi con livelli di dettaglio, ogni nodo con la sua texture presa dalla texture "
                   "del modello (o dai colori dei vertici), come un Integrated Mesh di ArcGIS.")
         if not v or not v["out"]:

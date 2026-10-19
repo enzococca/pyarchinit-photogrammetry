@@ -1474,7 +1474,7 @@
   "Testo (*.txt)": "Text (*.txt)",
   "Texture del modello": "Model texture",
   "Texture delle facce": "Texture of the faces",
-  "Texture di un nodo (pixel)": "Texture of a node (pixels)",
+  "Texture massima di un nodo (pixel)": "Largest texture of a node (pixels)",
   "Tieni premuto e traccia l'unita' a mano libera, rilascia per chiudere; tasto destro per annullare": "Hold down and trace the unit freehand, release to close; right click to cancel",
   "Tieni solo queste facce (ritaglia)": "Keep only these faces (crop)",
   "Tieni solo questi punti (ritaglia)": "Keep only these points (crop)",
