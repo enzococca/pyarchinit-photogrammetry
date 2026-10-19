@@ -1,0 +1,61 @@
+name: arm-wheels
+
+# Wheels of pycolmap 4.2.1 and Open3D 0.19.0 for Linux aarch64, which their projects do not
+# publish, built on GitHub's arm64 runners in the same containers as on a Mac with Docker
+# (packaging/arm/build-linux.sh), then the tests of this project with them. On demand: the
+# wheels stay as an artifact, and are attached to a release when its tag is given.
+on:
+  workflow_dispatch:
+    inputs:
+      pythons:
+        description: "Python versions"
+        default: "3.10 3.11 3.12"
+      release:
+        description: "Tag of the release to attach the wheels to (empty: artifact only)"
+        default: ""
+
+permissions:
+  contents: write   # attach the wheels to the release
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        what: [pycolmap, open3d]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v5
+      - name: Room on the disk (the Open3D build takes about 15 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+      - name: Build
+        env:
+          JOBS: "4"
+          PY_JOBS: "4"
+          PYTHONS: ${{ inputs.pythons }}
+        run: packaging/arm/build-linux.sh ${{ matrix.what }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.what }}-linux-aarch64
+          path: dist/arm/*.whl
+          if-no-files-found: error
+
+  test:
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/arm
+          merge-multiple: true
+      - name: Tests of pyarchinit-photogrammetry with the wheels (Python 3.12)
+        run: packaging/arm/build-linux.sh test
+      - name: Attach to the release
+        if: inputs.release != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.release }}" dist/arm/*.whl --clobber
