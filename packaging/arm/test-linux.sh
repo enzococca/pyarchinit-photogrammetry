@@ -8,7 +8,8 @@ export DEBIAN_FRONTEND=noninteractive TZ=UTC
 export HOME=/work/home TMPDIR=/work/tmp PIP_CACHE_DIR=/work/pip-cache CARGO_HOME=/work/cargo RUSTUP_HOME=/work/rustup
 mkdir -p "${HOME}" "${TMPDIR}"
 apt-get update
-apt-get install -y python3 python3-venv python3-dev build-essential curl git rsync \
+# libxerces-c-dev: pye57 (E57 scans, in [all]) has no aarch64 wheel and is compiled here
+apt-get install -y python3 python3-venv python3-dev build-essential curl git rsync libxerces-c-dev \
     libsqlite3-mod-spatialite libegl1 libgl1 libgomp1 libxkbcommon0 libfontconfig1 libdbus-1-3 libglib2.0-0
 rm -rf /var/lib/apt/lists/*
 [ -x /work/venv/bin/python ] || python3 -m venv /work/venv
