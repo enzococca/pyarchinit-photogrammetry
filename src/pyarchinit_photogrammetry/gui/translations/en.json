@@ -1030,6 +1030,8 @@
   "Patch dell'ortofoto (assegna immagini)": "Orthophoto patch (assign images)",
   "Patch dell'ortofoto: assegna le immagini a un'area": "Orthophoto patch: assign the images to an area",
   "Patch ortofoto": "Orthophoto patches",
+  "PatchMatch multi-vista (piu' preciso, piu' lento)": "PatchMatch multi-view (more precise, slower)",
+  "PatchMatch: un piano per pixel confrontato con piu' foto insieme; sulla trincea di prova errore del DEM 2-3 volte piu' basso dello stereo a coppie, circa 30 volte piu' lento": "PatchMatch: a plane per pixel checked against several photos at once; on the test trench the DEM error is 2-3 times lower than with two-view stereo, about 30 times slower",
   "Pendenza": "Slope",
   "Pendenza del DEM": "Slope of the DEM",
   "Pendenza: bianco piano, rosso scuro ripido (gradi sotto il cursore)": "Slope: white flat, dark red steep (degrees under the cursor)",

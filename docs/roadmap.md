@@ -127,8 +127,11 @@ markers in too few photos.
 ## Research
 
 * CPU PatchMatch multi-view stereo in the native core (COLMAP's needs CUDA, which the Mac does not
-  have; today the CPU path is two-view SGBM). A plane-sweep prototype on the Apple GPU found the
-  same depths as the CPU path but ran 30 times slower than OpenCV SGBM.
+  have; the CPU path was two-view SGBM). A plane-sweep prototype on the Apple GPU found the
+  same depths as the CPU path but ran 30 times slower than OpenCV SGBM. *Done* (backend
+  `patchmatch`, core 0.2.0: on the synthetic trench DEM median 0.27 mm, NMAD 0.70 mm, 90th
+  percentile 1.5 mm against 0.76 / 1.69 / 3.7 mm with SGBM, 0.5 s per photo of 600 x 450 pixels;
+  the two-view maps also put points beyond the edges of the surface).
 * Own bundle adjustment in the native core: true distance constraints for scale bars,
   rolling-shutter compensation for drones, GNSS bias (pycolmap does not accept custom costs).
 * Multi-page texture atlases, I3S.

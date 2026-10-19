@@ -2525,12 +2525,18 @@ class MainWindow(QMainWindow):
     def build_dense(self) -> None:
         if not self._need_chunk(aligned=True):
             return
+        from ..engine import dense
+
         v = ParamDialog.ask(self, "Nuvola densa", [
             Field("quality", "Qualita'", "medium", choices=QUALITY),
             Field("filter_mode", "Filtro profondita'", "moderate",
                   choices=[("mild", "Lieve"), ("moderate", "Moderato"), ("aggressive", "Aggressivo")]),
-            Field("backend", "Motore", "auto", choices=[("auto", "Automatico"), ("cpu", "CPU (integrato)"),
-                                                        ("colmap", "COLMAP (GPU NVIDIA)"), ("openmvs", "OpenMVS")]),
+            Field("backend", "Motore", "auto", choices=[("auto", "Automatico"), ("cpu", "CPU (integrato)")]
+                  + ([("patchmatch", "PatchMatch multi-vista (piu' preciso, piu' lento)")]
+                     if dense.patchmatch_available() else [])
+                  + [("colmap", "COLMAP (GPU NVIDIA)"), ("openmvs", "OpenMVS")],
+                  tip=tr("PatchMatch: un piano per pixel confrontato con piu' foto insieme; sulla trincea di prova "
+                         "errore del DEM 2-3 volte piu' basso dello stereo a coppie, circa 30 volte piu' lento")),
             Field("only_depth", "Solo le mappe di profondita' (per il modello fuso, senza nuvola densa)", False)]
             + self._version_fields("point_cloud"))
         if not v:

@@ -609,7 +609,9 @@ SKIP_HELP = "leave out the photos that cannot be read (e.g. kept online only by 
 
 
 @app.command()
-def dense(project: Path, quality: str = "medium", filter_mode: str = "moderate", backend: str = "auto",
+def dense(project: Path, quality: str = "medium", filter_mode: str = "moderate",
+          backend: str = typer.Option("auto", help="auto, cpu (two-view SGBM), patchmatch (multi-view, native core: "
+                                                   "more precise, slower), colmap (CUDA), openmvs"),
           skip_unreadable: bool = typer.Option(False, help=SKIP_HELP), chunk: Optional[str] = None):
     """Depth maps and dense point cloud (with the confidence of every point)."""
     doc, ch = _open(project, chunk)

@@ -70,6 +70,10 @@ numpy code runs, and `tests/test_native.py` checks that both give the same maps,
 counts. Measured on the synthetic trench, CPU depth maps of 48 photos: 5.7 s with numpy one
 photo at a time, 1.6 s with the native kernels, 0.9 s with six photos at a time.
 
+From 0.2.0 the core also holds PatchMatch multi-view stereo (`patchmatch_depth`, the depth-map
+backend `patchmatch`). It has no numpy version (it would be far too slow): without the core the
+backend is not offered in the window and the step stops with a message when asked for it.
+
 ```bash
 pip install ./native                         # build and install (maturin is fetched by pip)
 maturin build --release -m native/Cargo.toml # a wheel in native/target/wheels

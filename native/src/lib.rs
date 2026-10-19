@@ -5,6 +5,7 @@
 
 mod camera;
 mod depth;
+mod patchmatch;
 
 use numpy::ndarray::{Array1, Array2, Array3};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3,
@@ -16,7 +17,7 @@ use rayon::prelude::*;
 use camera::{Camera, Pose};
 
 /// Version of the functions offered here: raised when one is added or changes meaning.
-const API: u32 = 2;
+const API: u32 = 3;
 
 fn matrix3(a: &PyReadonlyArray2<f64>, what: &str) -> PyResult<[[f64; 3]; 3]> {
     if a.shape() != [3, 3] {
@@ -333,6 +334,66 @@ fn ortho_candidates<'py>(py: Python<'py>, points: PyReadonlyArray2<'py, f64>, po
         Array3::from_shape_vec((k, n, 2), pix).unwrap().into_pyarray_bound(py)))
 }
 
+type SourceArgs<'py> = (PyReadonlyArray2<'py, f32>, (f64, f64, f64, f64), PyReadonlyArray2<'py, f64>,
+                        PyReadonlyArray1<'py, f64>);
+
+/// PatchMatch multi-view stereo of one photo (`engine.dense._patchmatch_depth_maps`, see
+/// `patchmatch.rs`): `reference` h x w grey 0-1, `k` (fx, fy, cx, cy) with the centre of the first
+/// pixel at 0, `sources` as `(image, k, r, t)` with `x_src = r x_ref + t`. Returns depth (h x w,
+/// 0 where the cost is above `max_cost`), normals (h x w x 3, camera frame) and cost (h x w).
+#[pyfunction]
+#[pyo3(signature = (reference, k, sources, depth_range, init_depth=None, init_normals=None, iterations=4,
+                    half_window=4, step=2, top_k=3, max_cost=0.6, seed=1))]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn patchmatch_depth<'py>(py: Python<'py>, reference: PyReadonlyArray2<'py, f32>, k: (f64, f64, f64, f64),
+                         sources: Vec<SourceArgs<'py>>, depth_range: (f64, f64),
+                         init_depth: Option<PyReadonlyArray2<'py, f32>>, init_normals: Option<PyReadonlyArray3<'py, f32>>,
+                         iterations: usize, half_window: usize, step: usize, top_k: usize, max_cost: f32, seed: u64)
+    -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray3<f32>>, Bound<'py, PyArray2<f32>>)> {
+    let a = reference.as_array();
+    let (h, w) = a.dim();
+    let c = a.as_standard_layout();
+    let refdata = c.as_slice().unwrap();
+    if !(depth_range.0 > 0.0 && depth_range.1 > depth_range.0) {
+        return Err(PyValueError::new_err("depth_range must be (near, far) with 0 < near < far"));
+    }
+    let views: Vec<_> = sources.iter().map(|(img, _, _, _)| img.as_array()).collect();
+    let layouts: Vec<_> = views.iter().map(|v| v.as_standard_layout()).collect();
+    let mut srcs = Vec::with_capacity(sources.len());
+    for ((img, kk, r, t), lay) in sources.iter().zip(layouts.iter()) {
+        let (sh, sw) = img.as_array().dim();
+        let t = t.as_array();
+        if t.len() != 3 {
+            return Err(PyValueError::new_err("t must hold 3 values"));
+        }
+        srcs.push(patchmatch::Source { img: lay.as_slice().unwrap(), w: sw, h: sh, k: [kk.0, kk.1, kk.2, kk.3],
+                                       r: matrix3(r, "r")?, t: [t[0], t[1], t[2]] });
+    }
+    let init_view = init_depth.as_ref().map(|d| d.as_array());
+    let init_layout = init_view.as_ref().map(|v| v.as_standard_layout());
+    if let Some(v) = &init_view {
+        if v.dim() != (h, w) {
+            return Err(PyValueError::new_err("init_depth must have the shape of the reference"));
+        }
+    }
+    let normal_view = init_normals.as_ref().map(|d| d.as_array());
+    let normal_layout = normal_view.as_ref().map(|v| v.as_standard_layout());
+    if let Some(v) = &normal_view {
+        if v.dim() != (h, w, 3) {
+            return Err(PyValueError::new_err("init_normals must be h x w x 3"));
+        }
+    }
+    let init = init_layout.as_ref().map(|l| l.as_slice().unwrap());
+    let init_n = normal_layout.as_ref().map(|l| l.as_slice().unwrap());
+    let params = patchmatch::Params { depth_min: depth_range.0, depth_max: depth_range.1, iterations, half_window,
+                                      step, top_k, max_cost, seed };
+    let out = py.allow_threads(|| patchmatch::patchmatch(refdata, w, h, [k.0, k.1, k.2, k.3], &srcs, params, init,
+                                                         init_n));
+    Ok((Array2::from_shape_vec((h, w), out.depth).unwrap().into_pyarray_bound(py),
+        Array3::from_shape_vec((h, w, 3), out.normal).unwrap().into_pyarray_bound(py),
+        Array2::from_shape_vec((h, w), out.cost).unwrap().into_pyarray_bound(py)))
+}
+
 /// Camera models the projection kernels know.
 #[pyfunction]
 fn supported_models() -> Vec<&'static str> {
@@ -350,6 +411,7 @@ fn ppg_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(project_points, m)?)?;
     m.add_function(wrap_pyfunction!(ortho_scores, m)?)?;
     m.add_function(wrap_pyfunction!(ortho_candidates, m)?)?;
+    m.add_function(wrap_pyfunction!(patchmatch_depth, m)?)?;
     m.add_function(wrap_pyfunction!(supported_models, m)?)?;
     Ok(())
 }

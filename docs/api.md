@@ -46,7 +46,7 @@ and sections work as before; `surface="height_field"` re-triangulates the fused 
 `voxel_size` is in chunk units (metres once georeferenced): by default twice the size of a depth-map
 pixel on the surface, raised (with a warning) when the surface would need more than a quarter of the
 memory. The fusion runs in a child process (a crash does not close the program; progress and
-cancellation work as usual) and needs depth maps of the `cpu` or `colmap` backend (OpenMVS keeps its
+cancellation work as usual) and needs depth maps of the `cpu`, `patchmatch` or `colmap` backend (OpenMVS keeps its
 own format). `engine.tsdf.fuse_depth_maps(chunk, voxel_size=, min_views=, colors=, memory_gb=)` returns
 the fused surface (`FusedMesh`, internal frame) without saving it. On the synthetic trench of the tests
 (depth maps at quality `high`) it takes about 4 s and is closer to the true surface than the Poisson

@@ -68,6 +68,9 @@ pytest -q
 
 The native core (`native/`, imported as `ppg_core`) runs the heaviest numpy steps of the depth maps,
 the orthomosaic and the confidence in Rust on every core: CPU depth maps about six times faster.
+It also brings PatchMatch multi-view stereo without a GPU (backend `patchmatch`: a plane per pixel
+checked against up to six photos at once; on the synthetic trench the DEM error is about a third of
+the two-view one, at about thirty times the time).
 Without it the same numpy code runs (see [docs/packaging.md](docs/packaging.md#native-core-rust));
 the desktop applications include it.
 
@@ -411,7 +414,7 @@ then `ppg.app.document` inside the script (in the GUI: **Strumenti > Esegui scri
 | Area | Features |
 | --- | --- |
 | Alignment | SIFT features and matching, incremental SfM (COLMAP via pycolmap), camera calibration, bundle adjustment (optionally constrained by the control points), tie points, pair selection (exhaustive, sequential, by GNSS position), chunk alignment (markers, common photos or point clouds) and merging |
-| Dense | Depth maps and fusion on CPU (built-in), COLMAP PatchMatch on NVIDIA GPUs (Linux, `pycolmap-cuda12`), OpenMVS when installed |
+| Dense | Depth maps and fusion on CPU (built-in two-view SGBM, or PatchMatch multi-view stereo in the native core), COLMAP PatchMatch on NVIDIA GPUs (Linux, `pycolmap-cuda12`), OpenMVS when installed |
 | Products | Point cloud (PLY/LAS 1.4 with classes), mesh (from the depth maps by TSDF fusion, Poisson in an isolated process with automatic fallback, or 2.5D), texture atlas (OBJ+MTL+JPG), DEM, orthomosaic, hillshade, slope, HTML report |
 | Markers | Printable ArUco/AprilTag sheets with scale bar, turntable mats with known layout, sub-pixel detection, triangulation, GCP/check points, scale bars (control and check, also in local coordinates), weighted 7-parameter transformation, any EPSG CRS (geographic GCPs go to the UTM zone) |
 | Archaeology | Vertical sections and parallel cross sections, plan slices at a given elevation, DXF/SVG drawings at scale, contour lines, cut/fill volumes, freehand drawing and snapping to vertices/segments, 3D proxies of stratigraphic units (closed solids, Extended Matrix OBJ), pottery: rotation axis from sherds, rim diameter and percentage kept from the circle of the lip, profile, base diameter, height, wall thickness, drawing with filled section, typological search in PyArchInit's `pottery_table` by size and profile, save in the pottery form |

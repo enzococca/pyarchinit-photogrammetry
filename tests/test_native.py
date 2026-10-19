@@ -211,3 +211,77 @@ def test_confidence_and_orthomosaic_of_the_trench(processed, tmp_path, monkeypat
     assert ra.shape == rb.shape
     same = np.all(ra == rb, axis=0)
     assert same.mean() > 0.9999, same.mean()
+
+
+def _plane_views(width=320, height=240, focal=300.0):
+    """A textured plane z = 2 + 0.3 x seen by a camera at the origin and four around it."""
+    rng = np.random.default_rng(0)
+    coef = rng.normal(size=(40, 4))
+    k = (focal, focal, width / 2 - 0.5, height / 2 - 0.5)
+    n_w, c_w = np.array([-0.3, 0.0, 1.0]), 2.0
+
+    def texture(x, y):
+        v = sum(np.sin(a * 6 * x + b * 6 * y + c * 3) * 0.5 ** abs(d) for a, b, c, d in coef)
+        return (v - v.min()) / np.ptp(v)
+
+    def render(rot, t):
+        ys, xs = np.mgrid[0:height, 0:width].astype(float)
+        rays = np.stack([(xs - k[2]) / focal, (ys - k[3]) / focal, np.ones_like(xs)], -1) @ rot
+        centre = -rot.T @ t
+        pts = centre + rays * ((c_w - n_w @ centre) / (rays @ n_w))[..., None]
+        return texture(pts[..., 0], pts[..., 1]).astype(np.float32), (pts @ rot.T + t)[..., 2].astype(np.float32)
+
+    def turn(ay):
+        return np.array([[np.cos(ay), 0, np.sin(ay)], [0, 1, 0], [-np.sin(ay), 0, np.cos(ay)]])
+
+    ref, truth = render(np.eye(3), np.zeros(3))
+    sources = []
+    for dx, dy, ay in ((0.25, 0, -0.08), (-0.25, 0, 0.08), (0, 0.2, 0.0), (0, -0.2, 0.0)):
+        rot = turn(ay)
+        t = -rot @ np.array([dx, dy, 0.0])
+        sources.append((render(rot, t)[0], k, rot, t))
+    return ref, truth, k, sources, -n_w / np.linalg.norm(n_w)
+
+
+def test_patchmatch_finds_a_slanted_plane():
+    ref, truth, k, sources, normal = _plane_views()
+    depth, normals, cost = ppg_core.patchmatch_depth(ref, k, sources, (1.0, 4.0), iterations=4, max_cost=0.5)
+    valid = depth > 0
+    err = np.abs(depth[valid] - truth[valid]) / truth[valid]
+    assert valid.mean() > 0.9 and np.median(err) < 0.005 and np.percentile(err, 90) < 0.02
+    angle = np.degrees(np.arccos(np.clip(normals[valid] @ normal, -1, 1)))
+    assert np.median(angle) < 15 and (cost[valid] <= 0.5).all()
+    # started from the right depths the planes stay there; a wrong start is corrected
+    start = truth * np.where(np.arange(truth.size).reshape(truth.shape) % 7 == 0, 1.3, 1.0).astype(np.float32)
+    d2, _, _ = ppg_core.patchmatch_depth(ref, k, sources, (1.0, 4.0), init_depth=start, iterations=2)
+    ok = d2 > 0
+    assert np.median(np.abs(d2[ok] - truth[ok]) / truth[ok]) < 0.005
+
+
+def test_patchmatch_depth_maps_of_the_trench(processed, scene, tmp_path):
+    """The multi-view depth maps give a DEM at least as good as the two-view ones (on the
+    synthetic trench about three times better), over the surface that is there."""
+    import rasterio
+
+    import pyarchinit_photogrammetry as ppg
+
+    doc, _, _ = processed
+    d = tmp_path / "copia"
+    d.mkdir()
+    shutil.copy2(doc.path, d / doc.path.name)
+    shutil.copytree(doc.files_dir, d / doc.files_dir.name)
+    shutil.copytree(doc.path.parent / "photos", d / "photos")
+    copy = ppg.Document.open(d / doc.path.name).chunk
+    copy.build_depth_maps(quality="high", backend="patchmatch")
+    assert copy.meta["dense"]["backend"] == "patchmatch"
+    copy.build_point_cloud()
+    copy.build_dem()
+    with rasterio.open(copy.dem_path) as src:
+        dem = src.read(1)
+        rows, cols = np.nonzero(dem != src.nodata)
+        sel = np.random.default_rng(1).choice(len(rows), 4000, replace=False)
+        xs, ys = rasterio.transform.xy(src.transform, rows[sel], cols[sel])
+    err = dem[rows[sel], cols[sel]] - scene.world_height(np.array(xs), np.array(ys))
+    assert abs(np.median(err)) < 0.001
+    assert 1.4826 * np.median(np.abs(err - np.median(err))) < 0.0015
+    assert np.percentile(np.abs(err), 90) < 0.003

@@ -109,6 +109,8 @@ def build_depth_maps(chunk: Chunk, quality: str = "medium", filter_mode: str = "
     sub = progress.sub(0.1, 0.9)
     if backend == "cpu":
         _cpu_depth_maps(chunk, ws, filter_mode, sub)
+    elif backend == "patchmatch":
+        _patchmatch_depth_maps(chunk, ws, filter_mode, sub)
     elif backend == "colmap":
         popts = pycolmap.PatchMatchOptions()
         popts.geom_consistency = True
@@ -536,6 +538,94 @@ def _cpu_depth_maps(chunk: Chunk, ws: Path, filter_mode: str, progress: Progress
                     fut.cancel()
                 raise
     names = [done[iid] for iid in ids if iid in done]
+    if not names:
+        raise RuntimeError("no depth map could be computed (check overlap between photos)")
+    (ws / "stereo" / "fusion.cfg").write_text("\n".join(names) + "\n")
+
+
+# ---------------------------------------------------------------- PatchMatch (native core)
+PATCHMATCH_COST = {"none": 0.8, "mild": 0.65, "moderate": 0.5, "aggressive": 0.35}  # the largest 1 - NCC kept
+PATCHMATCH_PARTNERS = 6
+
+
+def patchmatch_available() -> bool:
+    return _native.kernel("patchmatch_depth") is not None
+
+
+def _patchmatch_depth_maps(chunk: Chunk, ws: Path, filter_mode: str, progress: Progress, iterations: int = 4,
+                           init: bool = True) -> None:
+    """Depth maps by PatchMatch multi-view stereo in the native core: a plane per pixel (depth and
+    normal) checked against up to six partners at once by normalised cross correlation, the best
+    three counting (a partner where the point is hidden does not), starting from the two-view
+    SGBM depths of the photo where they exist (``init``) - so a few iterations are enough - and
+    from random planes elsewhere. Slanted surfaces are matched without the fronto-parallel bias of
+    a rectified pair; the normals are those of the planes."""
+    kernel = _native.kernel("patchmatch_depth")
+    if kernel is None:
+        raise RuntimeError("the PatchMatch depth maps need the native core (pyarchinit-photogrammetry-core with "
+                           "patchmatch_depth): use the CPU backend")
+    rec = _read_workspace_model(ws)
+    neigh = _neighbors(rec, max_neighbors=PATCHMATCH_PARTNERS, wide=_panorama_images(chunk, rec))
+    max_cost = PATCHMATCH_COST.get(filter_mode, PATCHMATCH_COST["moderate"])
+    min_agree, tol, _ = FILTER_MODES.get(filter_mode, FILTER_MODES["moderate"])
+    (ws / "stereo" / "depth_maps").mkdir(parents=True, exist_ok=True)
+    (ws / "stereo" / "normal_maps").mkdir(parents=True, exist_ok=True)
+    gray = _GrayCache(ws, rec, 2 * PATCHMATCH_PARTNERS + 2)
+    masked = _masked_cameras(chunk)
+    from .region import depth_mask, get_region
+
+    region = get_region(chunk)
+    ids = list(rec.images)
+    names = []
+    for n_done, iid in enumerate(ids):
+        progress.check()
+        progress(n_done / len(ids), f"PatchMatch depth map {n_done + 1}/{len(ids)}")
+        image = rec.images[iid]
+        pose_i, K_i = _pose(image), _K(rec.cameras[image.camera_id])
+        zr = _depth_range(rec, image, pose_i)
+        gi = gray.get(iid) if zr is not None else None
+        if gi is None:
+            continue
+        sources, estimates = [], []
+        for jid in neigh.get(iid, []):
+            gj = gray.get(jid)
+            if gj is None:
+                continue
+            other = rec.images[jid]
+            K_j, pose_j = _K(rec.cameras[other.camera_id]), _pose(other)
+            rel = pose_j @ np.linalg.inv(pose_i)  # reference camera -> partner camera
+            kc = _K_cv(K_j)
+            sources.append((np.ascontiguousarray(gj, np.float32) / 255.0, (kc[0, 0], kc[1, 1], kc[0, 2], kc[1, 2]),
+                            np.ascontiguousarray(rel[:3, :3]), np.ascontiguousarray(rel[:3, 3])))
+            if init:
+                d = _pair_depth(gi, gj, K_i, K_j, pose_i, pose_j, zr)
+                if d is not None:
+                    estimates.append(d)
+        if not sources:
+            continue
+        start = _combine(estimates, min(min_agree, 1), max(tol, 0.01)) if estimates else None
+        kc = _K_cv(K_i)
+        depth, normals, _cost = kernel(np.ascontiguousarray(gi, np.float32) / 255.0,
+                                       (kc[0, 0], kc[1, 1], kc[0, 2], kc[1, 2]), sources, (float(zr[0]), float(zr[1])),
+                                       init_depth=start, init_normals=None if start is None else
+                                       _normals_from_depth(start, K_i), iterations=iterations, max_cost=max_cost)
+        if image.name in masked:  # no depth where the photo is masked
+            from .masks import mask_for_undistorted
+
+            keep = mask_for_undistorted(chunk, masked[image.name], K_i, depth.shape)
+            if keep is not None:
+                depth[~keep] = 0
+        if region is not None:  # no depth outside the reconstruction region
+            depth[~depth_mask(chunk, depth, K_i, pose_i, region)] = 0
+        if (depth > 0).sum() <= 100:
+            continue
+        normals[depth <= 0] = 0
+        for folder, arr in (("depth_maps", depth), ("normal_maps", normals)):
+            out = ws / "stereo" / folder / f"{image.name}.geometric.bin"
+            out.parent.mkdir(parents=True, exist_ok=True)  # names with folders (faces of 360-degree photos)
+            write_colmap_array(out, arr)
+        names.append(image.name)
+    progress(1.0, f"PatchMatch: {len(names)} depth maps")
     if not names:
         raise RuntimeError("no depth map could be computed (check overlap between photos)")
     (ws / "stereo" / "fusion.cfg").write_text("\n".join(names) + "\n")
