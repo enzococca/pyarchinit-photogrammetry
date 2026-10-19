@@ -9,6 +9,8 @@ on:
 
 jobs:
   build:
+    # releases of versions only (vX.Y.Z): not those holding data, such as the photos of the tutorials
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
