@@ -12,6 +12,10 @@ import pytest
 os.environ.setdefault("GLOG_minloglevel", "2")
 os.environ.setdefault("PPG_NO_UPDATE_CHECK", "1")  # the windows of the tests never ask GitHub
 os.environ.setdefault("PPG_LANG", "it")  # the tests read the Italian texts (test_i18n switches to English)
+# the windows of the tests load the plugins of an empty folder, never those of the user
+import tempfile  # noqa: E402
+
+os.environ.setdefault("PPG_PLUGINS_DIR", tempfile.mkdtemp(prefix="ppg-test-plugins-"))
 
 
 @pytest.fixture(autouse=True)

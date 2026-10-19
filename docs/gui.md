@@ -139,6 +139,9 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   pottery profile from a mesh (vessel or sherd); point-cloud classification; Segment Anything
   2.1 (automatic candidate units, units from clicked points, prompts on photos); IFC export
   (one element per drawn unit, PyArchInit attributes when connected); run a Python script;
+  *Plugin...*: the plugins installed and those of the plugin repository (install, enable, disable,
+  remove; their actions go in the menu *Plugin*, their formats in *File > Esporta*: see
+  [plugins.md](plugins.md));
   *Patch dell'ortofoto (assegna immagini)*: draw an area and choose its photos, assign photos to
   the selected polygon, update the orthomosaic with the patches, remove every patch (see below).
 * **PyArchInit**: connect through `config.cfg` (or a SQLite path / PostgreSQL URL), use the

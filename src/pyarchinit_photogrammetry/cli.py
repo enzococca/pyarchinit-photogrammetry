@@ -20,8 +20,10 @@ from .core.progress import print_progress
 app = typer.Typer(add_completion=False, help="pyarchinit-photogrammetry: open-source photogrammetry for archaeology")
 markers_app = typer.Typer(help="Coded targets: printable sheets and turntable mats")
 pa_app = typer.Typer(help="PyArchInit database bridge")
+plugins_app = typer.Typer(help="Plugins: those found, the index of the plugin repository, installing, enabling")
 app.add_typer(markers_app, name="markers")
 app.add_typer(pa_app, name="pyarchinit")
+app.add_typer(plugins_app, name="plugins")
 
 
 CLASSES_HELP = "point classes, e.g. 2,64 (2 ground, 3-5 vegetation, 64 masonry, 71 equipment)"
@@ -1548,6 +1550,107 @@ def pa_pottery_save(mesh_path: Path, sito: str, area: str = "", us: str = "",
                                                title=title or mesh_path.stem, scale=scale, overwrite=overwrite,
                                                **fields)
     typer.echo(json.dumps(out, indent=1, default=str))
+
+
+@plugins_app.command("list")
+def plugins_list():
+    """The plugins found (installed by the program or with pip), enabled or not."""
+    from .plugins import Manager
+
+    m = Manager()
+    m.discover()
+    if not m.plugins:
+        typer.echo("No plugin. `ppg plugins available` lists those of the plugin repository.")
+    for i in m.plugins:
+        typer.echo(f"{i.name:28} {i.version:10} {'enabled' if i.enabled else 'disabled':9} {i.source}")
+
+
+@plugins_app.command("available")
+def plugins_available():
+    """The plugins of the index of the plugin repository."""
+    from .plugins import index
+
+    try:
+        entries = index.fetch()
+    except index.PluginError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+    for e in entries:
+        problem = e.problem()
+        typer.echo(f"{e.name:28} {e.version:10} {e.title or e.description}" + (f"  [{problem}]" if problem else ""))
+
+
+@plugins_app.command("install")
+def plugins_install(name: str = typer.Argument(..., help="name of the plugin in the index")):
+    """Install a plugin of the index into the plugin folder (active from the next start)."""
+    from .plugins import index
+
+    try:
+        entry = next((e for e in index.fetch() if e.name == name), None)
+        if entry is None:
+            raise index.PluginError(f"no plugin {name!r} in the index")
+        path = index.install(entry, progress=print_progress)
+    except index.PluginError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+    typer.echo(f"{name} {entry.version} installed in {path}")
+
+
+@plugins_app.command("remove")
+def plugins_remove(name: str):
+    """Delete a plugin installed by the program."""
+    from .plugins import Manager
+
+    m = Manager()
+    m.discover()
+    try:
+        m.remove(name)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+    typer.echo(f"{name} removed")
+
+
+@plugins_app.command("enable")
+def plugins_enable(name: str):
+    """Enable a plugin from the next start."""
+    from .plugins import Manager
+
+    Manager().set_enabled(name, True)
+    typer.echo(f"{name} enabled")
+
+
+@plugins_app.command("disable")
+def plugins_disable(name: str):
+    """Disable a plugin from the next start (it stays installed)."""
+    from .plugins import Manager
+
+    Manager().set_enabled(name, False)
+    typer.echo(f"{name} disabled")
+
+
+@app.command("plugin", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def plugin_command(ctx: typer.Context, name: Optional[str] = typer.Argument(None, help="command of a plugin")):
+    """Run a command of a plugin: ``ppg plugin NAME [ARGS]...``; without NAME, the commands available."""
+    from .plugins import Manager
+
+    m = Manager()
+    m.load()
+    for i in m.plugins:
+        if i.error:
+            typer.echo(f"plugin {i.name} not loaded: {i.error}", err=True)
+    commands = m.commands
+    if not name:
+        if not commands:
+            typer.echo("No plugin gives commands. `ppg plugins list` lists the plugins found.")
+        for c in sorted(commands.values(), key=lambda c: c.name):
+            typer.echo(f"{c.name:24} {c.help}  ({c.plugin})")
+        return
+    if name not in commands:
+        typer.echo(f"no plugin gives the command {name!r}", err=True)
+        raise typer.Exit(2)
+    result = commands[name].function(*ctx.args)
+    raise typer.Exit(result if isinstance(result, int) else 0)
 
 
 def main():  # pragma: no cover - console entry point

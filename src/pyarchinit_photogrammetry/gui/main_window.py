@@ -125,6 +125,7 @@ class MainWindow(QMainWindow):
         self._build_docks()
         self._build_actions()
         self._build_statusbar()
+        self._load_plugins()
         self.set_document(document or application.document, progress=progress)
         QTimer.singleShot(0, self._autoconnect_pyarchinit)
         self.update_checker = UpdateChecker(self)
@@ -334,7 +335,7 @@ class MainWindow(QMainWindow):
         self._act(m, tr("Salva con nome..."), lambda: self.save_document(ask=True), QKeySequence.StandardKey.SaveAs,
                   icon_name="save_as")
         m.addSeparator()
-        exp = m.addMenu(icon("export"), tr("Esporta"))
+        exp = self.export_menu = m.addMenu(icon("export"), tr("Esporta"))
         self._act(exp, tr("Nuvola di punti (LAS/COPC/PLY)..."), lambda: self.export("cloud"), icon_name="point_cloud")
         self._act(exp, tr("Modello (OBJ/PLY/GLB)..."), lambda: self.export("model"), icon_name="model")
         self._act(exp, tr("Modello in Cesium 3D Tiles..."), self.export_3dtiles, processing=True, icon_name="globe",
@@ -673,6 +674,8 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self._act(m, tr("Esporta IFC (BIM)..."), self.export_ifc, processing=True, icon_name="ifc")
         self._act(m, tr("Esegui script Python..."), self.run_script, icon_name="script")
+        self._act(m, tr("Plugin..."), self.show_plugins, icon_name="plugin",
+                  tip=tr("I plugin installati e quelli del repository dei plugin: installa, attiva, disattiva"))
         # ------------------------------------------------------------ PyArchInit
         m = mb.addMenu("&PyArchInit")
         self._act(m, tr("Connetti (config.cfg, SQLite o PostgreSQL)..."), lambda: self.pyarchinit_connect(ask=True),
@@ -750,7 +753,7 @@ class MainWindow(QMainWindow):
             lmenu.addAction(a)
             self.language_actions[code] = a
         # ------------------------------------------------------------ Help
-        m = mb.addMenu(tr("&Aiuto"))
+        m = self.help_menu = mb.addMenu(tr("&Aiuto"))
         self._act(m, tr("Documentazione online"), self.open_docs, icon_name="help")
         self._act(m, tr("Diagnostica ambiente..."), self.show_doctor, icon_name="doctor")
         self._act(m, tr("Apri cartella dei log"), self.open_log_folder, icon_name="folder")
@@ -1050,6 +1053,72 @@ class MainWindow(QMainWindow):
         return True
 
     # ---------------------------------------------------------------- messages
+    # ================================================================ plugins
+    def _load_plugins(self) -> None:
+        """The plugins (Strumenti > Plugin): their actions in the menu Plugin, their export formats
+        in File > Esporta. One that fails is written in the log; the window starts anyway."""
+        from ..plugins import Manager
+
+        self.plugins = Manager(window=self)
+        self.plugin_menu: QMenu | None = None
+        try:
+            self.plugins.load()
+        except Exception as exc:
+            log.warning("Plugin non caricati: %s", exc)
+            return
+        for info in self.plugins.plugins:
+            if info.error:
+                log.warning(tr("Plugin {0} non caricato: {1}", info.name, info.error))
+        actions = self.plugins.actions
+        if actions:
+            menu = self.plugin_menu = QMenu(tr("&Plugin"), self)
+            self.menuBar().insertMenu(self.help_menu.menuAction(), menu)
+            titles = {i.name: i.title for i in self.plugins.plugins}
+            submenus: dict = {}
+            for a in actions:
+                key = a.menu or titles.get(a.plugin, a.plugin)
+                if key not in submenus:
+                    submenus[key] = menu.addMenu(icon("plugin"), key)
+                self._act(submenus[key], a.title, lambda a=a: self._run_plugin_action(a), tip=a.tip,
+                          processing=a.processing)
+        if self.plugins.exporters:
+            self.export_menu.addSeparator()
+            for e in self.plugins.exporters:
+                self._act(self.export_menu, e.title + "...", lambda e=e: self._plugin_export(e), processing=True,
+                          icon_name="plugin")
+
+    def _run_plugin_action(self, action) -> None:
+        try:
+            action.callback()
+        except Exception as exc:  # a plugin never takes the window down
+            self._exc(tr("Plugin {0}", action.plugin), exc)
+
+    def _plugin_export(self, exporter) -> None:
+        if not self._need_chunk():
+            return
+        ch = self.chunk
+        path, _ = QFileDialog.getSaveFileName(self, exporter.title,
+                                              str(Path(self._last_dir()) / f"{ch.label.replace(' ', '_')}{exporter.suffix}"),
+                                              f"{exporter.title} (*{exporter.suffix})")
+        if not path:
+            return
+        out = Path(path) if path.lower().endswith(exporter.suffix.lower()) else Path(path + exporter.suffix)
+        self.run_task(exporter.title, lambda p: exporter.function(ch, out, p),
+                      lambda _r: self.statusBar().showMessage(tr("Scritto {0}", out), 10000), refresh=False,
+                      save=False)
+
+    def show_plugins(self) -> None:
+        """Strumenti > Plugin: those found and those of the plugin repository."""
+        from .plugins_dialog import PluginsDialog
+
+        PluginsDialog(self).exec()
+
+    def restart(self) -> None:
+        """Close and start again with the same project (after plugins or the language changed)."""
+        self._relaunch_on_close = True
+        if not self.close():  # the project was not saved and the user stayed
+            self._relaunch_on_close = False
+
     def _warn(self, text: str) -> None:
         self.log_pane.warning(text)
         message(self, "warning", APP_TITLE, text)

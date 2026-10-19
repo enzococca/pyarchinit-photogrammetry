@@ -200,6 +200,10 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
   spostati nel 3D.
 * **Scansioni laser**: E57 e PTX importati come nuvole di punti, registrati sul chunk fotogrammetrico e
   colorati con le sue foto.
+* **Plugin**: pacchetti che aggiungono azioni ai menu, comandi ed esportazioni, installati da
+  *Strumenti > Plugin* o con `ppg plugins install` dal
+  [repository dei plugin](https://github.com/enzococca/pyarchinit-photogrammetry-plugins); come scriverne
+  uno: [plugins.md](docs/plugins.md).
 * **Esportazioni per il web**: Cloud Optimized GeoTIFF (JPEG, WebP, ZSTD), Cloud Optimized Point Cloud
   (COPC), glTF binario con la texture, Cesium 3D Tiles del modello posizionato sul globo, pacchetti di
   scena I3S (`.slpk`) del modello con la texture per ArcGIS Pro, ArcGIS Online e CesiumJS, modelli
