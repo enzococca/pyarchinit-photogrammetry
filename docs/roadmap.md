@@ -141,7 +141,9 @@ markers in too few photos.
   thresholds. Moving it to the native core is left for when blocks get too large for it.
 * Multi-page texture atlases, I3S. Pages *done*: a texture larger than 8192 px is split into pages
   (groups of nearby faces, or tiles of the plan for the orthophoto mapping), carried by exports,
-  the 3D view, versions, undo, patches and the Metashape import.
+  the 3D view, versions, undo, patches and the Metashape import. I3S *done*: the textured model
+  as an Integrated Mesh scene layer package 1.7 (`chunk.export_i3s`, `ppg export --i3s`, *File >
+  Esporta*), global (WGS84) or local (projected CRS), read back node by node by loaders.gl.
 
 ## Not planned
 

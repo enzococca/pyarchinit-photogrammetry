@@ -171,7 +171,11 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
 * **Exports for the web** (*File > Esporta*): the orthomosaic and the DEM also as *COG - Cloud Optimized
   GeoTIFF* (JPEG or WebP with transparency for the orthomosaic, ZSTD for the DEM), the dense cloud as
   *COPC* (`.copc.laz`), the model as *glTF binario* (`.glb`, with its texture) and *Modello in Cesium
-  3D Tiles* (a folder with `tileset.json` to open in CesiumJS), the *Modello leggero con normal map*
+  3D Tiles* (a folder with `tileset.json` to open in CesiumJS) and *Modello per ArcGIS e Cesium (I3S,
+  .slpk)* (an Integrated Mesh scene layer package with levels of detail, every node with its own texture:
+  in WGS84 for ArcGIS Online, global scenes and CesiumJS, or in the projected CRS of the project for the
+  local scenes of ArcGIS Pro; faces per node and texture size of a node can be chosen), the *Modello
+  leggero con normal map*
   (few faces, a colour texture and a normal map baked from the full model: GLB and OBJ for the web,
   Sketchfab and game engines) and the *Video di sorvolo* (an MP4 of a camera orbiting the model or the
   cloud: resolution up to 4K, duration, turns, height of the camera, zoom). The large ones run in the

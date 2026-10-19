@@ -48,11 +48,12 @@ def _vertex_normals(verts, faces) -> np.ndarray:
 
 
 def bake_maps(full_verts, full_faces, light_verts, light_faces, size: int = 2048, full_colors=None,
-              full_texcoords=None, full_texture=None, progress: Progress | None = None):
+              full_texcoords=None, full_texture=None, progress: Progress | None = None, full_texnumber=None):
     """Colour texture and normal map of a light mesh from the full one (see the module
     docstring). ``full_texcoords``: ``(F, 6)`` per face of the full mesh with ``full_texture``
-    (BGR image); else ``full_colors`` per vertex (RGB). Returns ``(colour BGR, normal RGB, uv
-    (F_light, 3, 2), hit share)``."""
+    (BGR image, or the images of the pages with ``full_texnumber`` the page of every face); else
+    ``full_colors`` per vertex (RGB). Returns ``(colour BGR, normal RGB, uv (F_light, 3, 2), hit
+    share)``."""
     import open3d as o3d
 
     progress = as_progress(progress)
@@ -85,7 +86,13 @@ def bake_maps(full_verts, full_faces, light_verts, light_faces, size: int = 2048
     normal = np.zeros((side, side, 3), np.uint8)
     valid = np.zeros((side, side), bool)
     local = np.column_stack(np.divmod(np.arange(s * s), s)[::-1])
-    tex = None if full_texture is None else np.asarray(full_texture)
+    if full_texture is None:
+        tex = None
+    elif isinstance(full_texture, (list, tuple)):
+        tex = [np.asarray(t) for t in full_texture]
+    else:
+        tex = [np.asarray(full_texture)]
+    page = None if full_texnumber is None or tex is None or len(tex) < 2 else np.asarray(full_texnumber)
     hits = total = 0
     batch = max(1, 1_500_000 // max(1, (s * s) // 2))
     for start in range(0, n, batch):
@@ -142,8 +149,13 @@ def bake_maps(full_verts, full_faces, light_verts, light_faces, size: int = 2048
             if tex is not None and full_texcoords is not None:
                 tc = np.asarray(full_texcoords, np.float64).reshape(-1, 3, 2)[hp]
                 st = (w[:, :, None] * tc).sum(1)
-                h, wd = tex.shape[:2]
-                colour[rows[hit], cols[hit]] = sample(tex, np.column_stack([st[:, 0] * wd, (1 - st[:, 1]) * h]))
+                on = np.zeros(len(hp), int) if page is None else page[hp]
+                hr, hc = rows[hit], cols[hit]
+                for k in np.unique(on):  # each texel from the page of its face
+                    sel = on == k
+                    h, wd = tex[k].shape[:2]
+                    colour[hr[sel], hc[sel]] = sample(tex[k], np.column_stack([st[sel, 0] * wd,
+                                                                               (1 - st[sel, 1]) * h]))
             elif full_colors is not None:
                 c = (w[:, :, None] * np.asarray(full_colors, np.float64)[ff[hp]]).sum(1)
                 colour[rows[hit], cols[hit]] = np.clip(c[:, ::-1], 0, 255).astype(np.uint8)  # RGB -> BGR

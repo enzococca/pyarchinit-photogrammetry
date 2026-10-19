@@ -816,6 +816,16 @@ class Chunk:
 
         return export_3dtiles(self, folder, max_faces=max_faces, progress=as_progress(progress))
 
+    def export_i3s(self, path: str | os.PathLike, mode: str = "global", max_faces: int = 20_000,
+                   texture_size: int = 2048, progress: ProgressCallback | None = None) -> Path:
+        """The model as an I3S scene layer package (``.slpk``, Integrated Mesh, version 1.7) for
+        ArcGIS, CesiumJS and loaders.gl (see :func:`io.i3s.export_slpk`; ``mode`` "global" in WGS84
+        or "local" in the projected CRS of the chunk)."""
+        from ..io.i3s import export_slpk
+
+        return export_slpk(self, path, max_faces=max_faces, texture_size=texture_size, mode=mode,
+                           progress=as_progress(progress))
+
     def export_cameras(self, path: str | os.PathLike, fmt: str = "colmap") -> Path:
         from ..io import exports
 

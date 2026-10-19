@@ -791,6 +791,10 @@ def export(project: Path, ortho: Optional[Path] = None, dem: Optional[Path] = No
            cog: Optional[str] = typer.Option(None, help="--ortho/--dem as Cloud Optimized GeoTIFF with this "
                                                        "compression: jpeg, webp, zstd, deflate, lzw"),
            tiles: Optional[Path] = typer.Option(None, help="folder for the model as Cesium 3D Tiles"),
+           i3s: Optional[Path] = typer.Option(None, help="the model as an I3S scene layer package (.slpk) for "
+                                                         "ArcGIS and CesiumJS"),
+           i3s_local: bool = typer.Option(False, help="--i3s in the projected CRS of the chunk (ArcGIS local "
+                                                      "scenes) instead of WGS84"),
            classes: Optional[str] = typer.Option(None, help="--cloud: only these " + CLASSES_HELP),
            bbox: Optional[str] = typer.Option(None, help="only inside 'xmin,ymin,xmax,ymax' (ortho, dem, model, "
                                                          "cloud)"),
@@ -802,6 +806,8 @@ def export(project: Path, ortho: Optional[Path] = None, dem: Optional[Path] = No
     region = _region(None, bbox, wkt, None) if (bbox or wkt) else None
     if tiles:
         typer.echo(str(ch.export_3dtiles(tiles, progress=print_progress)))
+    if i3s:
+        typer.echo(str(ch.export_i3s(i3s, mode="local" if i3s_local else "global", progress=print_progress)))
     for value, fn in ((ortho, lambda path: ch.export_orthomosaic(path, region=region, cog=cog)),
                       (dem, lambda path: ch.export_dem(path, region=region, cog=cog if cog not in ("jpeg", "webp")
                                                        else "zstd")),

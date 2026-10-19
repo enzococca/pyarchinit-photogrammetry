@@ -339,6 +339,9 @@ class MainWindow(QMainWindow):
         self._act(exp, tr("Modello (OBJ/PLY/GLB)..."), lambda: self.export("model"), icon_name="model")
         self._act(exp, tr("Modello in Cesium 3D Tiles..."), self.export_3dtiles, processing=True, icon_name="globe",
                   tip=tr("Cartella con tileset.json e i tasselli GLB: il modello sul globo di CesiumJS"))
+        self._act(exp, tr("Modello per ArcGIS e Cesium (I3S, .slpk)..."), self.export_i3s, processing=True,
+                  icon_name="globe", tip=tr("Pacchetto I3S (Integrated Mesh 1.7): livelli di dettaglio con una texture "
+                                            "per nodo, per ArcGIS Pro e Online, CesiumJS e deck.gl"))
         self._act(exp, tr("Modello leggero con normal map (GLB/OBJ)..."), self.export_light_model, processing=True,
                   icon_name="model", tip=tr("Il modello con poche facce e due texture (colore e normal map) cotte dal "
                                             "modello completo: per il web, Sketchfab e i motori di gioco"))
@@ -1456,6 +1459,37 @@ class MainWindow(QMainWindow):
                       lambda path: self._info("Cesium 3D Tiles", tr("Scritto {0}: aprilo in CesiumJS con "
                                                                     "Cesium3DTileset.fromUrl (servito da un server "
                                                                     "web).", path)),
+                      refresh=False, save=False)
+
+    def export_i3s(self) -> None:
+        """The model as an I3S scene layer package (:func:`io.i3s.export_slpk`)."""
+        if not self._need_chunk(product="model"):
+            return
+        from ..io.i3s import projected_epsg
+
+        ch = self.chunk
+        try:
+            projected_epsg(ch.crs)
+        except ValueError as exc:
+            self._warn(str(exc))
+            return
+        v = ParamDialog.ask(self, "Modello I3S (.slpk)", [
+            Field("out", "File", str(Path(self._last_dir()) / f"{ch.label.replace(' ', '_')}.slpk"), kind="file_save",
+                  filter="Scene Layer Package (*.slpk)"),
+            Field("mode", "Coordinate", "global", choices=[
+                ("global", "WGS84 (ArcGIS Online, scene globali, CesiumJS, deck.gl)"),
+                ("local", tr("Il sistema del progetto {0} (scene locali di ArcGIS)", ch.crs))]),
+            Field("faces", "Facce per nodo", 20000, minimum=2000, maximum=200000),
+            Field("texture", "Texture di un nodo (pixel)", 2048, choices=[(1024, "1024"), (2048, "2048"), (4096, "4096")])],
+            intro="Il modello diviso in nodi con livelli di dettaglio, ogni nodo con la sua texture presa dalla texture "
+                  "del modello (o dai colori dei vertici), come un Integrated Mesh di ArcGIS.")
+        if not v or not v["out"]:
+            return
+        out = Path(v["out"]).with_suffix(".slpk")
+        self.run_task("I3S", lambda p: ch.export_i3s(out, mode=v["mode"], max_faces=int(v["faces"]),
+                                                    texture_size=int(v["texture"]), progress=p),
+                      lambda path: self._info("I3S", tr("Scritto {0}: aggiungilo in ArcGIS Pro o caricalo in ArcGIS "
+                                                        "Online come pacchetto di scena.", path)),
                       refresh=False, save=False)
 
     def generate_report(self) -> None:
