@@ -183,6 +183,11 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
 * **Video e qualità delle immagini**: fotogrammi scelti da un video (nitidi, con la sovrapposizione
   che serve alla ricostruzione), con il GPS dei droni DJI dal loro `.SRT`; foto sfocate trovate e
   disattivate.
+* **Controllo prima di lasciare il sito**: subito dopo l'allineamento, la mappa delle aree viste da
+  meno di tre foto, le foto non allineate o sfocate, i marker in troppo poche foto.
+* **Precisione**: deviazione standard di camere, marker e punti di legame dalla covarianza del bundle
+  adjustment (con l'accuratezza dei punti di controllo), mappa della precisione delle quote del DEM,
+  quote con il loro ± in PyArchInit e nell'IFC.
 * **Foto 360° e obiettivi fisheye**: foto equirettangolari divise nelle facce di un cubo e allineate
   come un rig (un solo centro, rotazioni note) - tombe, grotte, cisterne e trincee strette riprese con
   una camera 360°; obiettivi fisheye riconosciuti dall'EXIF e calibrati con il loro modello.

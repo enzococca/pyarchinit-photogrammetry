@@ -191,6 +191,7 @@ class MainWindow(QMainWindow):
         self.reference.scalebar_import_requested.connect(self.import_scalebars)
         self.reference.filter_photos_requested.connect(self.filter_photos_by_markers)
         self.reference.refine_requested.connect(self.refine_markers)
+        self.reference.precision_requested.connect(self.estimate_precision)
         self.photos = PhotosPane()
         self.photos.thumbs_progress.connect(self._thumbs_progress)
         self.photos.open_camera.connect(self.open_photo)
@@ -345,6 +346,12 @@ class MainWindow(QMainWindow):
                   icon_name="scalebar")
         self._act(m, "Importa barre di scala (CSV)...", self.import_scalebars, icon_name="scalebar")
         self._act(m, "Ottimizza camere", self.optimize_cameras, processing=True, icon_name="optimize")
+        self._act(m, "Controllo prima di lasciare il sito", self.field_check, processing=True,
+                  icon_name="fieldcheck", tip="Subito dopo l'allineamento: aree viste da meno di tre foto, foto non "
+                                              "allineate o sfocate, marker in troppo poche foto")
+        self._act(m, "Stima la precisione", self.estimate_precision, processing=True, icon_name="precision",
+                  tip="Precisione di camere, marker e punti di legame dalla covarianza del bundle adjustment; "
+                      "mappa della precisione del DEM")
         m.addSeparator()
         self._act(m, "Costruisci nuvola densa...", self.build_dense, processing=True, icon_name="dense")
         self._act(m, "Ritaglia nuvola densa...", self.crop_cloud, processing=True, icon_name="eraser")
@@ -1503,6 +1510,100 @@ class MainWindow(QMainWindow):
         if v:
             self.run_task("Rilevamento marker", lambda p: self.chunk.detect_markers(v["target_type"], progress=p),
                           lambda ms: self.statusBar().showMessage(f"{len(ms)} marker rilevati", 8000))
+
+    def field_check(self) -> None:
+        """Before leaving the site: gaps in the coverage, photos not aligned or blurred, markers in
+        too few photos (``engine.fieldcheck``); the coverage map opens in the raster view."""
+        if not self._need_chunk():
+            return
+        ch = self.chunk
+        if not ch.aligned_cameras:
+            self._warn("Allinea prima le foto: il controllo usa le loro posizioni.")
+            return
+        from ..engine.fieldcheck import field_check
+
+        def done(rep):
+            self.photos.update_flags()
+            self.workspace.populate(self.doc)
+            self._dirty(True)
+            lines = []
+            if rep.get("cells"):
+                pct = rep["weak_fraction"] * 100
+                lines.append(f"Copertura: {pct:.1f}% dell'area vista da meno di {rep['min_photos']} foto "
+                             f"({rep['weak_area']:.2f} m2); in media ogni punto e' in {rep['median_photos']:.0f} foto."
+                             if pct else f"Copertura: tutta l'area e' vista da almeno {rep['min_photos']} foto "
+                                         f"(in media {rep['median_photos']:.0f}).")
+            if rep["unaligned"]:
+                lines.append(f"Foto non allineate ({len(rep['unaligned'])}): " + ", ".join(rep["unaligned"][:15])
+                             + (" ..." if len(rep["unaligned"]) > 15 else ""))
+            if rep.get("blurred"):
+                lines.append(f"Foto sfocate ({len(rep['blurred'])}): " + ", ".join(rep["blurred"][:15])
+                             + (" ..." if len(rep["blurred"]) > 15 else ""))
+            words = {"not found": "in nessuna foto", "one photo": "in una foto sola", "two photos": "in due foto sole"}
+            for m in rep["markers"]:
+                lines.append(f"Marker {m['label']}: {words[m['status']]}")
+            if not lines[1:] and not rep.get("weak_cells"):
+                lines.append("Nessun problema: si puo' lasciare il sito.")
+            if rep.get("cells"):
+                self.show_coverage_map()
+            self._info("Controllo prima di lasciare il sito", "\n".join(lines))
+
+        self.run_task("Controllo del rilievo", lambda p: field_check(ch, progress=p), done, refresh=False)
+
+    def show_coverage_map(self) -> None:
+        """How many photos frame every cell of the area (red: fewer than three)."""
+        ch = self.chunk
+        path = ch.product_path("coverage") if ch is not None else None
+        if path is None or not path.exists():
+            self._warn("Fai prima il controllo prima di lasciare il sito (Flusso di lavoro).")
+            return
+        self._load_raster("coverage", path)
+        self.show_view(self.ortho_view)
+        self.statusBar().showMessage("Copertura: foto che inquadrano ogni punto - rosso scuro nessuna, rosso una, "
+                                     "arancio due, giallo 3-4, verde chiaro 5-8, verde 9 o piu'", 20000)
+
+    def estimate_precision(self) -> None:
+        """Precision of cameras, markers and tie points from the covariance of the adjustment, and
+        the map of the precision of the DEM (``engine.precision``)."""
+        if not self._need_chunk():
+            return
+        ch = self.chunk
+        if len(ch.aligned_cameras) < 2:
+            self._warn("Allinea prima le foto.")
+            return
+
+        def done(report):
+            self.reference.set_chunk(ch, self.last_report)
+            self.photos.update_flags()
+            self.workspace.populate(self.doc)
+            self._dirty(True)
+            tp, cams = report["tie_points"].get("median"), report["cameras"].get("median")
+            datum = {"control points": "rispetto ai punti di controllo e alla loro accuratezza",
+                     "camera positions": "rispetto alle posizioni GPS delle foto",
+                     "internal": "interna al blocco (nessun riferimento)"}[report["datum"]]
+            fmt = lambda v: " / ".join(f"{x * 1000:.1f}" for x in v) if v else "-"  # noqa: E731
+            text = (f"Precisione {datum}: punti di legame X/Y/Z {fmt(tp)} mm, camere {fmt(cams)} mm (mediane); "
+                    f"misura nelle foto {report['sigma0_px']:.2f} px")
+            self.log_pane.info(text)
+            self.statusBar().showMessage(text, 20000)
+            if ch.product_path("dem_precision") is not None:
+                self.show_precision_map()
+
+        self.run_task("Stima della precisione", lambda p: ch.estimate_precision(progress=p), done, refresh=False)
+
+    def show_precision_map(self) -> None:
+        """The vertical precision of the DEM in the raster view (green small, red large)."""
+        ch = self.chunk
+        path = ch.product_path("dem_precision") if ch is not None else None
+        if path is None or not path.exists():
+            self._warn("Stima prima la precisione (con il DEM costruito).")
+            return
+        self._load_raster("sigma", path)
+        self.show_view(self.ortho_view)
+        lim = getattr(self.ortho_view, "diff_limit", 0.0)
+        self.statusBar().showMessage(
+            f"Precisione del DEM (deviazione standard delle quote): verde piccola, rosso {lim * 1000:.1f} mm o piu'; "
+            "sigma Z sotto il cursore", 20000)
 
     def refine_markers(self, keys=None) -> None:
         """The blue flags of the markers (all, or those of ``keys``) looked for in the photos by
@@ -3134,7 +3235,11 @@ class MainWindow(QMainWindow):
         if kind == "camera":
             self.open_photo(payload)
         elif kind == "product":
-            if payload in ("dem", "orthomosaic"):
+            if payload == "dem_precision":
+                self.show_precision_map()
+            elif payload == "coverage":
+                self.show_coverage_map()
+            elif payload in ("dem", "orthomosaic"):
                 self._show_raster("dem" if payload == "dem" else "ortho")
             else:
                 self._show_model(payload)
@@ -3272,6 +3377,14 @@ class MainWindow(QMainWindow):
                                          else f"Miniature delle foto pronte ({total})", 3000)
 
     def _show_coords(self, x: float, y: float, z) -> None:
+        if getattr(self.ortho_view, "kind", None) == "coverage":
+            zt = f"  {int(z)} foto" if z is not None and np.isfinite(z) else ""
+            self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}{zt}   [{self.chunk.crs if self.chunk else ''}]")
+            return
+        if getattr(self.ortho_view, "kind", None) == "sigma":
+            zt = f"  sigma Z {z * 1000:.1f} mm" if z is not None else ""
+            self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}{zt}   [{self.chunk.crs if self.chunk else ''}]")
+            return
         label = "dZ" if getattr(self.ortho_view, "kind", None) == "diff" else "Z"
         zt = f"  {label} {z:+.3f}" if z is not None and label == "dZ" else (f"  Z {z:.3f}" if z is not None else "")
         self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}{zt}   [{self.chunk.crs if self.chunk else ''}]")
@@ -3621,7 +3734,15 @@ class MainWindow(QMainWindow):
                                              "strumento per tornare a chiederli)", 15000)
             if v.get("disegnatore"):
                 self.settings.setValue("pa/disegnatore", v["disegnatore"])
-        self._add_quota({"x": float(x), "y": float(y), "sito_q": self.project_site(), **v})
+        q = {"x": float(x), "y": float(y), "sito_q": self.project_site(), **v}
+        from ..engine.precision import precision_at
+
+        sigma = precision_at(self.chunk, x, y) if self.chunk is not None else None
+        if sigma is not None:  # PyArchInit has no column for it: in the note of the survey too
+            q["precisione_q"] = round(sigma, 4)
+            if str(q.get("rilievo_originale") or "Fotogrammetria").strip() == "Fotogrammetria":
+                q["rilievo_originale"] = f"Fotogrammetria (±{sigma * 1000:.1f} mm)".replace(".", ",")
+        self._add_quota(q)
 
     def _marker_picked_in_3d(self, point) -> None:
         if point is None:
@@ -3672,8 +3793,10 @@ class MainWindow(QMainWindow):
         self.quote.append(q)
         self._draw_quota(q, len(self.quote) - 1)
         self._dirty(True)
-        self.log_pane.info(f"Quota {q.get('quota_q')} {q.get('unita_misu_q', '')} - US {q.get('us_q') or '?'} "
-                           f"(area {q.get('area_q') or '?'}) in X {q['x']:.3f} Y {q['y']:.3f}")
+        self.log_pane.info(f"Quota {q.get('quota_q')} {q.get('unita_misu_q', '')}"
+                           + (f" ±{q['precisione_q'] * 1000:.1f} mm" if q.get("precisione_q") else "")
+                           + f" - US {q.get('us_q') or '?'} (area {q.get('area_q') or '?'}) in X {q['x']:.3f} "
+                             f"Y {q['y']:.3f}")
 
     def _dem_value(self, x: float, y: float) -> float | None:
         """Elevation of the DEM at full resolution (the view keeps a reduced copy)."""
@@ -5800,7 +5923,7 @@ class MainWindow(QMainWindow):
                 except Exception:
                     records = None
             out = export_chunk_ifc(self.chunk, path, units=units, us_records=records, site=site,
-                                   include_survey=v["survey"], progress=p.sub(0.05, 0.85))
+                                   include_survey=v["survey"], progress=p.sub(0.05, 0.85), quote=self.quote)
             p(0.92, "Verifica del file IFC")
             return out, read_ifc_elements(out), len(units or [])
 

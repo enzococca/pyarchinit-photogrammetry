@@ -27,6 +27,13 @@ PRODUCT_LABELS = {"tie_points": "Punti di legame", "point_cloud": "Nuvola densa"
 _SUMMARIES: dict = {}
 
 
+def _precision(sigma) -> str:
+    """Standard deviations in metres along X, Y, Z as millimetres ("0.7 / 0.7 / 1.6")."""
+    if not sigma:
+        return ""
+    return " / ".join(f"{v * 1000:.1f}" if v < 0.1 else f"{v * 1000:.0f}" for v in sigma)
+
+
 def _it(value: float, decimals: int = 0) -> str:
     text = f"{value:,.{decimals}f}"
     return text.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
@@ -198,6 +205,20 @@ class WorkspaceTree(QTreeWidget):
                                      "attiva, confrontarla, rinominarla o eliminarla")
                     it.addChild(vi)
                 it.setExpanded(bool(kept))
+            cov = ch.product_path("coverage")
+            if cov is not None and cov.exists():
+                it = QTreeWidgetItem(["Copertura delle foto"])
+                it.setIcon(0, icon("fieldcheck"))
+                it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "coverage"))
+                it.setToolTip(0, "Doppio clic per vederla: quante foto inquadrano ogni punto (rosso: meno di tre)")
+                ci.addChild(it)
+            prec = ch.product_path("dem_precision")
+            if prec is not None and prec.exists():
+                it = QTreeWidgetItem(["Precisione del DEM (sigma Z)"])
+                it.setIcon(0, icon("precision"))
+                it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "dem_precision"))
+                it.setToolTip(0, "Doppio clic per vederla: deviazione standard delle quote, dai punti di legame")
+                ci.addChild(it)
             elevations = (ch.meta or {}).get("elevations") or []
             if elevations:
                 el = QTreeWidgetItem([f"Prospetti  ({len(elevations)})"])
@@ -363,6 +384,8 @@ class PhotosPane(QListWidget):
         meta = getattr(cam, "meta", None) or {}
         if meta.get("panorama"):
             text += f"\nFaccia «{meta.get('face')}» della foto 360° {meta['panorama']}"
+        if meta.get("precision"):
+            text += f"\nPrecisione della posizione X/Y/Z: {_precision(meta['precision'])} mm"
         q = meta.get("quality")
         if q is not None:
             text += f"\nQualita' dell'immagine {q:.2f}".replace(".", ",") + (" (sfocata)" if q < 0.5 else "")
@@ -519,13 +542,14 @@ class ReferencePane(QWidget):
     scalebar_requested = Signal(object)  # keys of the markers chosen (0, 1 or 2)
     filter_photos_requested = Signal(object)  # keys of the markers whose photos are to be shown
     refine_requested = Signal(object)  # keys of the markers whose blue flags are to be looked for (none: all)
+    precision_requested = Signal()
     scalebar_import_requested = Signal()
 
     BAR_COLS = ["Usa", "Barra", "Marker A", "Marker B", "Distanza (m)", "Accur. (m)", "Check", "Stimata (m)",
                 "Errore (m)"]
 
     COLS = ["Usa", "Marker", "Check", "X / Est", "Y / Nord", "Z", "Accur. (m)", "Errore (m)", "dX", "dY", "dZ",
-            "Proiez.", "Errore (px)"]
+            "Proiez.", "Errore (px)", "Precisione X/Y/Z (mm)"]
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -545,9 +569,12 @@ class ReferencePane(QWidget):
         self.b_est.setCheckable(True)
         self._est_chosen = False  # chosen by hand: no longer follows the project
         self.b_est.toggled.connect(self._estimated_toggled)
+        self.b_prec = _tool("precision", "Precisione", "Precisione di camere, marker e punti di legame dalla covarianza "
+                                                       "del bundle adjustment, e mappa della precisione del DEM")
         bar.addWidget(self.b_import)
         bar.addWidget(self.b_update)
         bar.addWidget(self.b_opt)
+        bar.addWidget(self.b_prec)
         bar.addWidget(self.b_bar)
         bar.addWidget(self.b_bar_import)
         bar.addWidget(self.b_est)
@@ -555,6 +582,7 @@ class ReferencePane(QWidget):
         self.b_import.clicked.connect(self.import_requested)
         self.b_update.clicked.connect(self.update_requested)
         self.b_opt.clicked.connect(self.optimize_requested)
+        self.b_prec.clicked.connect(self.precision_requested)
         self.b_bar.clicked.connect(lambda: self.scalebar_requested.emit(self.selected_markers()))
         self.b_bar_import.clicked.connect(self.scalebar_import_requested)
         self.crs_label = QLabel("")
@@ -582,7 +610,8 @@ class ReferencePane(QWidget):
         self.bars.customContextMenuRequested.connect(self._bar_menu)
         split.addWidget(self.bars)
         self.cams = QTableWidget(0, 7)
-        self.cams.setHorizontalHeaderLabels(["Camera", "Allineata", "X", "Y", "Z", "Rif. X", "Rif. Y"])
+        self.cams.setHorizontalHeaderLabels(["Camera", "Allineata", "X", "Y", "Z", "Rif. X", "Rif. Y",
+                                             "Precisione X/Y/Z (mm)"])
         self.cams.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.cams.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.cams.setAlternatingRowColors(True)
@@ -617,6 +646,7 @@ class ReferencePane(QWidget):
                                   and any(m.position is not None for m in chunk.markers))
             self.b_est.blockSignals(False)
         estimated = self.b_est.isChecked()
+        precision = (chunk.meta.get("precision") or {}).get("markers", {})
         names = ["X stimata", "Y stimata", "Z stimata"] if estimated else ["X / Est", "Y / Nord", "Z"]
         for c, name in enumerate(names, 3):
             self.table.setHorizontalHeaderItem(c, QTableWidgetItem(name))
@@ -653,9 +683,12 @@ class ReferencePane(QWidget):
                 QTableWidgetItem(_fmt(e.get("dx"), 4)), QTableWidgetItem(_fmt(e.get("dy"), 4)),
                 QTableWidgetItem(_fmt(e.get("dz"), 4)),
                 QTableWidgetItem(f"{e.get('projections', '')}" + (f" (+{e['estimated']})" if e.get("estimated") else "")),
-                QTableWidgetItem(_fmt(e.get("pixel_error"), 2))]
+                QTableWidgetItem(_fmt(e.get("pixel_error"), 2)), QTableWidgetItem(_precision(precision.get(str(m.key))))]
             for c, it in enumerate(vals):
-                if c in (1, 7, 8, 9, 10, 11, 12) or (estimated and c in (3, 4, 5)):
+                if c == 13 and precision.get(str(m.key)):
+                    it.setToolTip("Precisione stimata della posizione dalle foto (deviazione standard): misura nelle "
+                                  "foto, incertezza delle camere e dei riferimenti")
+                if c in (1, 7, 8, 9, 10, 11, 12, 13) or (estimated and c in (3, 4, 5)):
                     it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 if estimated and c in (3, 4, 5):
                     it.setForeground(QColor(PALETTE["grey"]))
@@ -694,7 +727,7 @@ class ReferencePane(QWidget):
             c = chunk.to_world(cam.center) if cam.aligned else [None] * 3
             ref = cam.reference.location or [None, None, None]
             row = [cam.label, "si" if cam.aligned else "no", _fmt(c[0], 3), _fmt(c[1], 3), _fmt(c[2], 3),
-                   _fmt(ref[0], 3), _fmt(ref[1], 3)]
+                   _fmt(ref[0], 3), _fmt(ref[1], 3), _precision(cam.meta.get("precision"))]
             for k, v in enumerate(row):
                 it = QTableWidgetItem(v)
                 if k == 0:
@@ -715,6 +748,9 @@ class ReferencePane(QWidget):
         if one_photo:
             parts.append(f"{one_photo} marker su una foto sola: posizione sulla superficie, su una seconda foto "
                          "vengono triangolati")
+        prec = chunk.meta.get("precision") or {}
+        if (prec.get("tie_points") or {}).get("median"):
+            parts.append(f"precisione dei punti di legame (mediana) {_precision(prec['tie_points']['median'])} mm")
         self.summary.setText("  |  ".join(parts) if parts else "Importa i riferimenti o crea una barra di scala, poi "
                              "premi Aggiorna.")
         self._filling = False

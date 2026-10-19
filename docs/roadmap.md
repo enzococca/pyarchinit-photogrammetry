@@ -74,9 +74,9 @@ The generic texture of objects gets the colour correction; blending inside its a
 * Automatic refinement of the estimated marker projections (blue flags) by image correlation.
   *Done.*
 * Precision of markers and cameras from the covariance of the bundle adjustment; uncertainty map
-  of the DEM; spot heights with their uncertainty in PyArchInit and IFC.
+  of the DEM; spot heights with their uncertainty in PyArchInit and IFC. *Done.*
 * Field check before leaving the site: coverage map (areas seen by fewer than three photos),
-  blurred photos, markers seen by too few photos.
+  blurred photos, markers seen by too few photos. *Done.*
 
 ## 0.9 - Everyday work
 

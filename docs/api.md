@@ -214,6 +214,22 @@ that every photo sees from further than `max_angle` degrees from the vertical st
 | alignment | the faces of every panorama are one frame of a COLMAP rig (`engine.panorama.rig_configs`: a rig per `facce_360` folder, faces at their known rotation, no translation): they keep one centre and their relative rotation, their calibration is not refined (also in `optimize_cameras`), pairs of faces of the same panorama are not matched. Depth maps pair a face with faces of other panoramas looking up to 50 degrees away (the panoramas are turned anyhow) |
 | `engine.panorama.split_panorama(path, folder=None, size=None, fov=100, faces=None)`, `face_maps(...)`, `face_rotation(yaw, pitch)` | the faces alone |
 
+## Field check before leaving the site
+
+| Call | Description |
+| --- | --- |
+| `engine.fieldcheck.field_check(chunk, min_photos=3, resolution=None, quality=True)` | right after the alignment: the photos not aligned, the blurred ones (image quality estimated where missing), the markers measured in no photo (with a reference), one photo or two only, and the coverage: on a grid over the middle 98 % of the tie points (400 cells along the longer side by default), at the height of the DEM or of the tie points of the cell (the empty cells interpolated), how many aligned photos frame each cell (no occlusion: fast); a GeoTIFF of counts (product `coverage`, -1 outside the area). Report in `chunk.meta["field_check"]` (`weak_fraction`, `weak_area` m2, `median_photos`, `unaligned`, `blurred`, `markers`, `tie_points_weak`) |
+| `engine.fieldcheck.coverage(chunk, resolution=None)` | the counts alone: `(counts, transform, heights)` |
+
+## Precision of the alignment
+
+| Call | Description |
+| --- | --- |
+| `chunk.estimate_precision(marker_px=0.5)`, `engine.precision.estimate_precision(chunk, ...)` | the adjustment set up as the camera optimisation does it (control points held at their reference, else three tie points; calibration held) and COLMAP's covariance of the camera poses (`pycolmap.estimate_ba_covariance`; tangent space of cam_from_world, rotation perturbed as `Exp(2d) R`, translation added). Cameras: covariance of the centre. Tie points and markers (two photos or more): the full covariance of the triangulated point, `s^2 H^-1 + H^-1 H_pc S_cc H_cp H^-1` - its measurements (`s` = the reprojection error of the adjustment, `marker_px` for markers) and the uncertainty of the cameras that see it. Datum: the accuracy of the control points (or of the camera positions that place the chunk), `a^2 (1 + d^2 / r^2)` per axis. Standard deviations in metres along X, Y, Z of the CRS: `camera.meta["precision"]`, `chunk.meta["precision"]` (`datum`, `sigma0_px`, medians, `markers`), tie points in `<data>/precision/tie_points.npz`. With a DEM, also the raster below. A new alignment, optimisation or georeference drops it (`chunk.forget_precision()`). Synthetic trench: tie point height errors / estimated sigma = 1.07 (RMS), cameras 0.5-0.7 |
+| `engine.precision.dem_precision(chunk, max_side=1024)` | sigma Z of the tie points interpolated over the DEM (linear, the nearest outside), GeoTIFF in the CRS of the DEM at most 1024 cells a side, product `dem_precision` (as the precision maps of James et al., 2017, from the covariance) |
+| `engine.precision.precision_at(chunk, x, y)`, `tie_point_precision(chunk)` | sigma Z of the DEM at a point; the tie points with theirs |
+| spot heights | the precision of the DEM where a spot height is taken is kept with it (`precisione_q`) and written in `rilievo_originale` ("Fotogrammetria (±1,2 mm)", PyArchInit has no column for it); `bim.ifc.export_chunk_ifc(..., quote=...)` writes the spot heights as `IfcAnnotation` (`SpotHeight`) with `Pset_PyArchInit_Quota` (Quota, Precisione, US, ...); `bim.ifc.spot_heights(quote)` |
+
 ## Reconstruction region
 
 | Call | Description |

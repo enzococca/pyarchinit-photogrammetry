@@ -83,6 +83,38 @@ def diff_colors(d: np.ndarray, limit: float | None = None) -> tuple[np.ndarray, 
     return rgba, lim
 
 
+def sigma_colors(s: np.ndarray, limit: float | None = None) -> tuple[np.ndarray, float]:
+    """Precision (sigma) of a DEM: green where it is small, through yellow and orange, to red at
+    ``limit`` (default the 95th percentile). Returns RGBA and that limit."""
+    valid = np.isfinite(s)
+    rgba = np.zeros(s.shape + (4,), np.uint8)
+    if not valid.any():
+        return rgba, 0.0
+    lim = float(limit) if limit else float(max(np.percentile(s[valid], 95), 1e-9))
+    t = np.clip(np.where(valid, s, 0) / lim, 0, 1)
+    stops = np.array([[0.0, 26, 152, 80], [0.35, 166, 217, 106], [0.6, 254, 224, 139], [0.8, 244, 109, 67],
+                      [1.0, 165, 0, 38]])
+    rgba[..., :3] = np.stack([np.interp(t, stops[:, 0], stops[:, k]) for k in (1, 2, 3)], -1).astype(np.uint8)
+    rgba[..., 3] = np.where(valid, 255, 0)
+    return rgba, lim
+
+
+COVERAGE_COLORS = [(0, (120, 0, 30)), (1, (215, 48, 39)), (2, (244, 109, 67)), (3, (254, 224, 139)),
+                   (5, (166, 217, 106)), (9, (26, 152, 80))]  # photos framing a cell: from that count up
+
+
+def coverage_colors(n: np.ndarray) -> np.ndarray:
+    """Count of photos framing every cell: dark red none, red one, orange two, yellow three or
+    four, light green five to eight, green nine or more; transparent outside the area."""
+    valid = np.isfinite(n) & (n >= 0)
+    rgba = np.zeros(n.shape + (4,), np.uint8)
+    k = np.where(valid, n, 0)
+    for lo, rgb in COVERAGE_COLORS:
+        rgba[k >= lo - 0.5, :3] = rgb
+    rgba[..., 3] = np.where(valid, 255, 0)
+    return rgba
+
+
 def read_window_rgba(path, kind: str, window: tuple[int, int, int, int], out_shape: tuple[int, int],
                      dem_range: tuple[float, float] | None = None, diff_limit: float | None = None) -> np.ndarray:
     """RGBA ``(h, w, 4)`` of a window ``(col, row, width, height)`` of a raster read at
@@ -96,11 +128,16 @@ def read_window_rgba(path, kind: str, window: tuple[int, int, int, int], out_sha
     h, w = out_shape
     with rasterio.open(path) as src:
         win = Window(col, row, width, height)
-        if kind in ("dem", "diff"):
-            z = src.read(1, window=win, out_shape=(h, w), resampling=Resampling.average,
-                         masked=True).astype(np.float64).filled(np.nan)
+        if kind in ("dem", "diff", "sigma", "coverage"):
+            z = src.read(1, window=win, out_shape=(h, w), masked=True,
+                         resampling=Resampling.nearest if kind == "coverage" else Resampling.average
+                         ).astype(np.float64).filled(np.nan)
             if kind == "diff":
                 return diff_colors(z, diff_limit)[0]
+            if kind == "sigma":
+                return sigma_colors(z, diff_limit)[0]
+            if kind == "coverage":
+                return coverage_colors(z)
             res = abs(src.transform.a) * width / max(w, 1)
             return dem_colors(z, res, dem_range)
         n = min(src.count, 4)
@@ -292,11 +329,16 @@ class RasterView(_ZoomView):
             h, w = int(round(src.height / f)), int(round(src.width / f))
             self.tr = src.transform @ src.transform.scale(src.width / w, src.height / h)
             self._src_size, self._base_size = (src.width, src.height), (w, h)
-            if kind in ("dem", "diff"):
-                z = src.read(1, out_shape=(h, w), resampling=Resampling.average, masked=True).astype(np.float64)
-                self.z = z.filled(np.nan)
+            if kind in ("dem", "diff", "sigma", "coverage"):
+                z = src.read(1, out_shape=(h, w), masked=True,
+                             resampling=Resampling.nearest if kind == "coverage" else Resampling.average)
+                self.z = z.astype(np.float64).filled(np.nan)
                 if kind == "diff":  # a difference of DEMs: diverging colours, the limit for the legend
                     rgba, self.diff_limit = diff_colors(self.z)
+                elif kind == "sigma":  # the precision of the DEM: the limit of the colours for the legend
+                    rgba, self.diff_limit = sigma_colors(self.z)
+                elif kind == "coverage":  # photos framing every cell
+                    rgba = coverage_colors(self.z)
                 else:
                     self._dem_range = dem_limits(self.z)
                     rgba = dem_colors(self.z, abs(self.tr.a), self._dem_range)
@@ -378,8 +420,8 @@ class RasterView(_ZoomView):
     @staticmethod
     def _read_detail(job):
         gen, path, kind, window, shape, scene, dem_range, diff_limit = job
-        rgba = read_window_rgba(path, "ortho" if kind not in ("dem", "diff") else kind, window, shape,
-                                dem_range, diff_limit)
+        rgba = read_window_rgba(path, kind if kind in ("dem", "diff", "sigma", "coverage") else "ortho", window,
+                                shape, dem_range, diff_limit)
         return gen, to_qimage(rgba), scene
 
     def _read_detail_async(self, job) -> None:

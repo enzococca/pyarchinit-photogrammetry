@@ -45,9 +45,11 @@ QTO_UNITS = {"NetVolume": "IfcQuantityVolume", "GrossVolume": "IfcQuantityVolume
 
 def export_ifc(path: str | Path, elements: list[IfcElement], crs: str | None = None, project: str = "Rilievo",
                site: str = "Sito", origin: np.ndarray | None = None, progress=None,
-               relations: list[tuple[str, str, str]] | None = None) -> Path:
+               relations: list[tuple[str, str, str]] | None = None, spot_heights: list[dict] | None = None) -> Path:
     """Write IFC4. ``relations``: ``(key_a, relation, key_b)`` between elements (stratigraphic
-    relationships), written as ``IfcRelConnectsElements`` named after the relation."""
+    relationships), written as ``IfcRelConnectsElements`` named after the relation.
+    ``spot_heights``: points ``{"x", "y", "z", "name", "props"}`` (world) written as
+    ``IfcAnnotation`` (object type ``SpotHeight``) with ``props`` in ``Pset_PyArchInit_Quota``."""
     from ..core.progress import as_progress
 
     progress = as_progress(progress)
@@ -72,7 +74,11 @@ def export_ifc(path: str | Path, elements: list[IfcElement], crs: str | None = N
     ctx = ifcopenshell.api.context.add_context(model, context_type="Model")
     body = ifcopenshell.api.context.add_context(model, context_type="Model", context_identifier="Body",
                                                 target_view="MODEL_VIEW", parent=ctx)
-    all_v = np.vstack([np.asarray(e.mesh.vertices) for e in elements]) if elements else np.zeros((1, 3))
+    spots = [q for q in (spot_heights or []) if q.get("z") is not None]
+    all_v = np.vstack([np.asarray(e.mesh.vertices) for e in elements] + [np.array([[q["x"], q["y"], q["z"]]
+                                                                                     for q in spots]).reshape(-1, 3)])
+    if not len(all_v):
+        all_v = np.zeros((1, 3))
     if origin is None:
         origin = np.floor(all_v.min(0))
     origin = np.asarray(origin, float)
@@ -143,6 +149,23 @@ def export_ifc(path: str | Path, elements: list[IfcElement], crs: str | None = N
             ifcopenshell.api.group.assign_group(model, products=[prod], group=grp)
         if el.key:
             products[el.key] = prod
+    if spots:
+        annotation = ifcopenshell.api.context.add_context(model, context_type="Plan", context_identifier="Annotation",
+                                                          target_view="PLAN_VIEW", parent=ctx)
+    for q in spots:
+        prod = model.create_entity("IfcAnnotation", GlobalId=ifcopenshell.guid.new(), Name=q.get("name") or "Quota",
+                                   ObjectType="SpotHeight")
+        ifcopenshell.api.spatial.assign_container(model, products=[prod], relating_structure=site_e)
+        at = np.array([q["x"], q["y"], q["z"]], float) - origin
+        prod.ObjectPlacement = model.createIfcLocalPlacement(None, model.createIfcAxis2Placement3D(
+            model.createIfcCartesianPoint(tuple(map(float, at))), None, None))
+        rep = model.createIfcShapeRepresentation(annotation, "Annotation", "Point",
+                                                 [model.createIfcCartesianPoint((0.0, 0.0, 0.0))])
+        prod.Representation = model.createIfcProductDefinitionShape(None, None, [rep])
+        props = {k: _plain(v) for k, v in (q.get("props") or {}).items() if v not in (None, "")}
+        if props:
+            pset = ifcopenshell.api.pset.add_pset(model, product=prod, name="Pset_PyArchInit_Quota")
+            ifcopenshell.api.pset.edit_pset(model, pset=pset, properties=props)
     for a, rel, b in relations or []:
         if a in products and b in products and a != b:
             model.create_entity("IfcRelConnectsElements", GlobalId=ifcopenshell.guid.new(), Name=rel,
@@ -166,11 +189,32 @@ def split_mesh_by_units(mesh_world, units) -> list[tuple[object, object]]:
     return out
 
 
+def spot_heights(quote: list[dict]) -> list[dict]:
+    """Spot heights of the project (``x``, ``y`` and the columns of ``pyarchinit_quote``; with
+    ``precisione_q``, the standard deviation of the height) as points for :func:`export_ifc`."""
+    out = []
+    for q in quote or []:
+        z = q.get("quota_q")
+        try:
+            z = float(z)
+        except (TypeError, ValueError):
+            continue
+        props = {"Sito": q.get("sito_q"), "Area": q.get("area_q"), "US": q.get("us_q"), "Quota": z,
+                 "UnitaMisura": q.get("unita_misu_q"), "Tipo": q.get("unita_tipo_q"),
+                 "Precisione": q.get("precisione_q"), "Data": q.get("data"), "Disegnatore": q.get("disegnatore"),
+                 "RilievoOriginale": q.get("rilievo_originale")}
+        name = f"Quota {z:.3f}" + (f" US {q['us_q']}" if q.get("us_q") else "")
+        out.append({"x": float(q["x"]), "y": float(q["y"]), "z": z, "name": name, "props": props})
+    return out
+
+
 def export_chunk_ifc(chunk, path: str | Path, units=None, us_records: dict | None = None,
-                     site: str | None = None, include_survey: bool = True, progress=None) -> Path:
+                     site: str | None = None, include_survey: bool = True, progress=None,
+                     quote: list[dict] | None = None) -> Path:
     """Export the chunk model to IFC. ``units`` (list of :class:`UnitPolygon`) splits the
     mesh into one element per stratigraphic unit; ``us_records`` maps US numbers to the
-    PyArchInit attributes to store in ``Pset_PyArchInit_US``."""
+    PyArchInit attributes to store in ``Pset_PyArchInit_US``. ``quote``: the spot heights of
+    the project (default those saved in the chunk), with their precision when estimated."""
     mesh = chunk.model
     if mesh is None:
         raise RuntimeError("build the model first")
@@ -187,8 +231,10 @@ def export_chunk_ifc(chunk, path: str | Path, units=None, us_records: dict | Non
         elements.append(IfcElement(sub, f"{u.tipo} {u.us}", ifc_class="IfcGeographicElement",
                                    predefined_type="USERDEFINED", psets={"Pset_PyArchInit_US": props},
                                    color=tuple(rng.uniform(0.3, 0.9, 3))))
+    if quote is None:
+        quote = ((chunk.meta or {}).get("drawings") or {}).get("quote") or []
     return export_ifc(path, elements, crs=chunk.crs, project=chunk.label, site=site or chunk.label,
-                      progress=progress)
+                      progress=progress, spot_heights=spot_heights(quote))
 
 
 def read_ifc_elements(path: str | Path) -> list[dict]:

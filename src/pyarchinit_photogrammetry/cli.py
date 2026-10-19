@@ -77,6 +77,50 @@ def detect_markers(project: Path, target_type: str = "aruco_4x4_50", chunk: Opti
     typer.echo(f"{len(found)} targets: " + ", ".join(f"{m.label} ({len(m.projections)} photos)" for m in found))
 
 
+@app.command("field-check")
+def field_check(project: Path, min_photos: int = typer.Option(3, help="photos a point needs"),
+                resolution: Optional[float] = typer.Option(None, help="cell of the coverage map (metres)"),
+                chunk: Optional[str] = None):
+    """Before leaving the site: areas seen by too few photos, photos not aligned or blurred,
+    markers in too few photos (writes the coverage map)."""
+    from .engine.fieldcheck import field_check as _check
+
+    doc, ch = _open(project, chunk)
+    rep = _check(ch, min_photos=min_photos, resolution=resolution, progress=print_progress)
+    doc.save()
+    if rep.get("cells"):
+        typer.echo(f"coverage: {rep['weak_fraction'] * 100:.1f}% of the area ({rep['weak_area']:.2f} m2) seen by fewer "
+                   f"than {min_photos} photos; median {rep['median_photos']:.0f} photos: {ch.product_path('coverage')}")
+    typer.echo(f"photos: {rep['photos']}, not aligned {len(rep['unaligned'])}"
+               + (f": {', '.join(rep['unaligned'])}" if rep["unaligned"] else ""))
+    if rep.get("blurred"):
+        typer.echo(f"blurred: {', '.join(rep['blurred'])}")
+    for m in rep["markers"]:
+        typer.echo(f"marker {m['label']}: {m['status']}")
+
+
+@app.command()
+def precision(project: Path, marker_px: float = typer.Option(0.5, help="how well markers are measured (pixels)"),
+              chunk: Optional[str] = None):
+    """Precision of cameras, markers and tie points from the covariance of the bundle adjustment,
+    and the precision map of the DEM (sigma Z) when there is one."""
+    doc, ch = _open(project, chunk)
+    rep = ch.estimate_precision(marker_px=marker_px, progress=print_progress)
+    doc.save()
+
+    def mm(v):
+        return " / ".join(f"{x * 1000:.2f}" for x in v) if v else "-"
+
+    typer.echo(f"datum: {rep['datum']} (held: {rep['held']}); measurement in the photos {rep['sigma0_px']:.3f} px")
+    tp, cams = rep["tie_points"], rep["cameras"]
+    typer.echo(f"tie points ({tp['count']:,}): median X/Y/Z {mm(tp['median'])} mm, 90th percentile {mm(tp['p90'])} mm")
+    typer.echo(f"cameras ({cams['count']}): median X/Y/Z {mm(cams['median'])} mm, largest {mm(cams['max'])} mm")
+    for key, sigma in rep["markers"].items():
+        typer.echo(f"{ch.marker_by_key(int(key)).label}: X/Y/Z {mm(sigma)} mm")
+    if ch.product_path("dem_precision") is not None:
+        typer.echo(f"precision of the DEM: {ch.product_path('dem_precision')}")
+
+
 @app.command("refine-markers")
 def refine_markers(project: Path, marker: Optional[list[str]] = typer.Option(None, help="marker label (repeat it); "
                                                                                       "default: all"),

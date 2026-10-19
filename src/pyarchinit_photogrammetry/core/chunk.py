@@ -273,6 +273,7 @@ class Chunk:
         n = sfm.align_cameras(self, progress=as_progress(progress))
         self.transform = geometry.identity()
         self.meta.pop("levelled", None)
+        self.forget_precision()
         if any(m.projections for m in self.markers):
             self.triangulate_markers()
         has_refs = (sum(1 for m in self.markers if m.reference.location and m.position is not None) >= 3
@@ -293,7 +294,28 @@ class Chunk:
                                    marker_weight=marker_weight, progress=as_progress(progress))
         if any(m.projections for m in self.markers):
             self.triangulate_markers()
+        self.forget_precision()
         return err
+
+    def estimate_precision(self, marker_px: float = 0.5, progress: ProgressCallback | None = None) -> dict:
+        """Precision of the cameras, the tie points and the markers from the covariance of the
+        adjustment and, when there is a DEM, the raster of its vertical precision (see
+        :mod:`engine.precision`). Returns the report (also in ``meta["precision"]``)."""
+        from ..engine import precision
+
+        p = as_progress(progress)
+        has_dem = self.dem_path is not None and self.dem_path.exists()
+        report = precision.estimate_precision(self, marker_px=marker_px, progress=p.sub(0, 0.85 if has_dem else 1.0))
+        if has_dem:
+            precision.dem_precision(self, progress=p.sub(0.85, 0.15))
+        return report
+
+    def forget_precision(self) -> None:
+        """Drop the precision estimated for an earlier alignment or georeference."""
+        self.meta.pop("precision", None)
+        self.products.pop("dem_precision", None)
+        for c in self.cameras:
+            c.meta.pop("precision", None)
 
     def reset_alignment(self) -> None:
         self.transform = geometry.identity()
@@ -428,6 +450,7 @@ class Chunk:
         :func:`markers.gcp.update_transform`)."""
         from ..markers import gcp
 
+        self.forget_precision()
         return gcp.update_transform(self, use_cameras=use_cameras)
 
     def reference_errors(self) -> list[dict]:

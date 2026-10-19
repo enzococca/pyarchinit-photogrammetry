@@ -150,6 +150,19 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   every frame gets its GPS position. **Image quality** (right click in the Photos pane): the sharpness
   of every photo compared with the sharpest ones (in the tooltip, *sfocata* under 0.5), *Disattiva le
   foto sfocate*, enable or disable the selected photos, masks of the selected photos.
+* **Field check** (*Flusso di lavoro > Controllo prima di lasciare il sito*), right after the
+  alignment, while the trench is still open: the map of how many photos frame every point (dark red
+  none, red one, orange two, yellow three or four, green more; the photo count under the cursor;
+  *Copertura delle foto* in the workspace) and a summary - share and area seen by fewer than three
+  photos, photos not aligned or blurred, markers in no photo, one or two only.
+* **Precision** (*Precisione* in *Riferimenti*, or *Flusso di lavoro > Stima la precisione*): the
+  standard deviation of every camera position, marker and tie point from the covariance of the bundle
+  adjustment, relative to the control points and their accuracy (or the GPS of the photos); a column
+  *Precisione X/Y/Z (mm)* for markers and cameras, the median of the tie points under the tables,
+  the precision of the camera in the tooltip of a photo. With a DEM, the map of its vertical precision
+  opens in the raster view (green small, red large, sigma Z under the cursor; *Precisione del DEM* in
+  the workspace). A spot height taken afterwards keeps its precision (also in `rilievo_originale`
+  for PyArchInit and in the IFC). A new alignment or georeference drops the old precision.
 * **360-degree photos and fisheye lenses** (*Flusso di lavoro > Aggiungi foto 360°*): every
   equirectangular photo becomes the six faces of a cube (the faces to keep - *Sotto* often shows only
   the tripod - their width in degrees and size), written in `facce_360` beside the photos; in the

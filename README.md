@@ -201,6 +201,11 @@ is installed on first use (PyTorch in a separate environment, see the same page)
 * **Video and image quality**: frames chosen from a video (sharp, with the overlap the
   reconstruction needs), with the GPS of DJI drones from their `.SRT`; blurred photos found and
   disabled.
+* **Field check before leaving the site**: right after the alignment, the map of the areas seen by
+  fewer than three photos, photos not aligned or blurred, markers in too few photos.
+* **Precision**: standard deviation of cameras, markers and tie points from the covariance of the
+  bundle adjustment (with the accuracy of the control points), the map of the vertical precision of
+  the DEM, spot heights with their ± in PyArchInit and in the IFC.
 * **360-degree photos and fisheye lenses**: equirectangular photos split into the faces of a cube
   and aligned as a rig (one centre, known rotations) - tombs, caves, cisterns and narrow trenches
   with a 360-degree camera; fisheye lenses recognised from the EXIF and calibrated with their own
