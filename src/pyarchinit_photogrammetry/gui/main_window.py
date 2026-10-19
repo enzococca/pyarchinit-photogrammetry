@@ -57,6 +57,11 @@ def _outlined(rgba: np.ndarray, polygon, bounds) -> np.ndarray:
     return out
 
 
+def _compass(deg: float) -> str:
+    """The point of the compass of a direction in degrees from north (Italian initials)."""
+    return ["N", "NE", "E", "SE", "S", "SO", "O", "NO"][int((deg % 360) / 45 + 0.5) % 8]
+
+
 def _it(value: float, decimals: int = 0) -> str:
     """A number written the Italian way: 1.234.567 or 1.234,56."""
     text = f"{value:,.{decimals}f}"
@@ -146,6 +151,8 @@ class MainWindow(QMainWindow):
         self.ortho_view.patch_finished.connect(self._patch_drawn)
         self.ortho_view.dem_edit_finished.connect(self._dem_edit_drawn)
         self.ortho_view.dem_edit_requested.connect(self._dem_edit_selected)
+        self.ortho_view.area_finished.connect(self._area_drawn)
+        self.ortho_view.area_requested.connect(self._area_selected)
         self.ortho_view.patch_requested.connect(self.patch_with_selection)
         self.ortho_view.line_finished.connect(self._section_drawn)
         self.ortho_view.measured.connect(lambda t: (self.statusBar().showMessage(t, 30000),
@@ -450,6 +457,7 @@ class MainWindow(QMainWindow):
         for mode, label, ic in (("pan", "Sposta / interroga", "pan"), ("select", "Seleziona", "select"),
                                 ("polygon", "Disegna unita' stratigrafica", "polygon"),
                                 ("line", "Traccia sezione", "line"), ("measure", "Misura distanza", "measure"),
+                                ("area", "Misura area e superficie 3D", "area"),
                                 ("quota", "Quota puntuale (pyarchinit_quote)", "point"),
                                 ("marker", "Marker: clic su un punto, proiettato sulle foto che lo vedono", "marker"),
                                 ("crop", "Ritaglio: riquadro o poligono (esporta o ritaglia i prodotti)", "crop"),
@@ -543,6 +551,10 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self.a_contours = self._act(m, "Curve di livello...", self.contours, processing=True, icon_name="contours")
         self.a_volume = self._act(m, "Volume scavo / riporto...", self.compute_volume, processing=True, icon_name="volume")
+        self._act(m, "Pendenza del DEM", lambda: self.terrain_raster("slope"), processing=True, icon_name="slope",
+                  tip="Raster della pendenza in gradi, mostrato subito (gradi sotto il cursore)")
+        self._act(m, "Esposizione del DEM", lambda: self.terrain_raster("aspect"), processing=True, icon_name="aspect",
+                  tip="Raster dell'esposizione (verso dove scende il terreno), gradi dal nord")
         self._act(m, "Opzioni delle sezioni...", self.section_options, icon_name="line")
         self.a_slice = self._act(m, "Pianta a quota (slice orizzontale)...", self.plan_slice, processing=True,
                                  icon_name="slice")
@@ -702,6 +714,7 @@ class MainWindow(QMainWindow):
         # short texts in the bar (menus keep the full names, tooltips show them)
         for a, short in ((self.draw_actions["pan"], "Sposta"), (self.draw_actions["polygon"], "Disegna US"),
                          (self.draw_actions["line"], "Sezione"), (self.draw_actions["measure"], "Misura"),
+                         (self.draw_actions["area"], "Area"),
                          (self.draw_actions["quota"], "Quota"), (self.draw_actions["marker"], "Marker"),
                          (self.draw_actions["sam"], "SAM"),
                          (self.draw_actions["patch"], "Patch"),
@@ -3140,6 +3153,119 @@ class MainWindow(QMainWindow):
             return
         self.edit_dem_area(geom)
 
+    def _terrain_at(self, x: float, y: float, z: float) -> str:
+        """Slope and aspect of the DEM under the cursor and, with a DTM kept as a version, the
+        height above the ground."""
+        from ..archaeo import measures
+
+        ch = self.chunk
+        out = ""
+        try:
+            sa = measures.slope_aspect_at(ch.dem_path, x, y)
+        except Exception:
+            sa = None
+        if sa is not None:
+            s, a = sa
+            out += f"  pend. {s:.0f}°" + (f" esp. {_compass(a)}" if a >= 0 else "")
+        key = (ch.key, tuple(sorted(ch.products.items())), len((ch.meta.get("versions") or {}).get("dem", [])))
+        if getattr(self, "_ground_key", None) != key:
+            self._ground_key, self._ground_path = key, measures.ground_dem(ch)
+        if self._ground_path is not None and Path(self._ground_path) != Path(ch.dem_path):
+            g = measures.ground_dem_at(self._ground_path, x, y)
+            if g is not None:
+                out += f"  dal suolo {z - g:.2f} m".replace(".", ",")
+        return out
+
+    def _area_drawn(self, xy) -> None:
+        from shapely.geometry import Polygon
+
+        self.measure_area(Polygon(xy).buffer(0))
+
+    def _area_selected(self) -> None:
+        geom = self._selected_polygon()
+        if geom is None:
+            self._warn("Seleziona un poligono, oppure disegna l'area con lo strumento Misura area.")
+            return
+        self.measure_area(geom)
+
+    def measure_area(self, geom) -> None:
+        """Area in plan and in 3D of a plan polygon: from the DEM and from the faces of the model."""
+        ch = self.chunk
+        if ch is None or ch.dem_path is None:
+            self._warn("Costruisci prima il DEM.")
+            return
+        from ..archaeo.measures import surface_area
+
+        def job(p):
+            p(0.1, "Misura dell'area")
+            model = None
+            if ch.product_path("model") is not None:
+                model = ch.model
+                if model is not None:
+                    model.apply_transform(ch.transform)
+            return surface_area(ch.dem_path, geom, model=model)
+
+        def done(r):
+            if "plan" not in r:
+                self._warn("L'area e' fuori dal DEM.")
+                return
+            lines = [f"Area in pianta {r['plan']:.3f} m2, superficie {r['surface']:.3f} m2 "
+                     f"(+{(r['surface'] / max(r['plan'], 1e-12) - 1) * 100:.1f}%)",
+                     f"Pendenza media {r['mean_slope']:.1f}°, quote da {r['z_min']:.3f} a {r['z_max']:.3f} m"]
+            if r.get("model_faces"):
+                lines.append(f"Dal modello ({r['model_faces']} facce): pianta {r['model_plan']:.3f} m2, superficie "
+                             f"{r['model_surface']:.3f} m2")
+            text = "\n".join(line.replace(".", ",") for line in lines)
+            coords = list(geom.exterior.coords) if geom.geom_type == "Polygon" else \
+                list(max(geom.geoms, key=lambda g: g.area).exterior.coords)
+            self._add_line_feature("Misure", coords, "#ff006e", f"{r['surface']:.2f} m2".replace(".", ","),
+                                   {"area_pianta_m2": round(r["plan"], 4), "superficie_m2": round(r["surface"], 4),
+                                    "pendenza_media": round(r["mean_slope"], 2)})
+            self._info("Misura dell'area", text)
+
+        self.run_task("Misura dell'area", job, done, refresh=False, save=False)
+
+    def terrain_raster(self, kind: str) -> None:
+        """Strumenti > Pendenza / Esposizione del DEM: a raster of degrees, shown at once."""
+        ch = self.chunk
+        if ch is None or ch.dem_path is None:
+            self._warn("Costruisci prima il DEM.")
+            return
+        from ..archaeo import measures, terrain
+
+        out = ch.data_dir / "terrain" / f"{kind}.tif"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        from ..core import crs as crs_mod
+
+        crs = None if crs_mod.is_local(ch.crs) else ch.crs
+
+        def job(p):
+            p(0.2, "Pendenza del DEM" if kind == "slope" else "Esposizione del DEM")
+            if kind == "slope":
+                terrain.slope_degrees(ch.dem_path, out, crs=crs)
+            else:
+                measures.aspect_raster(ch.dem_path, out, crs=crs)
+            ch._set_product(kind, out)
+            return out
+
+        def done(path):
+            self.workspace.populate(self.doc)
+            self.show_terrain_raster(kind)
+
+        self.run_task("Pendenza del DEM" if kind == "slope" else "Esposizione del DEM", job, done, refresh=False)
+
+    def show_terrain_raster(self, kind: str) -> None:
+        path = self.chunk.product_path(kind) if self.chunk is not None else None
+        if path is None or not path.exists():
+            self.terrain_raster(kind)
+            return
+        self._load_raster(kind, path)
+        self.show_view(self.ortho_view)
+        self.statusBar().showMessage(
+            "Pendenza: bianco piano, rosso scuro ripido (gradi sotto il cursore)" if kind == "slope" else
+            "Esposizione: verso dove scende il terreno - rosso nord, giallo est, azzurro sud, viola ovest; grigio piano",
+            20000)
+
     def _dem_edit_selected(self) -> None:
         geom = self._selected_polygon()
         if geom is None:
@@ -3539,7 +3665,9 @@ class MainWindow(QMainWindow):
         if kind == "camera":
             self.open_photo(payload)
         elif kind == "product":
-            if payload == "dem_precision":
+            if payload in ("slope", "aspect"):
+                self.show_terrain_raster(payload)
+            elif payload == "dem_precision":
                 self.show_precision_map()
             elif payload == "coverage":
                 self.show_coverage_map()
@@ -3683,6 +3811,17 @@ class MainWindow(QMainWindow):
                                          else f"Miniature delle foto pronte ({total})", 3000)
 
     def _show_coords(self, x: float, y: float, z) -> None:
+        kind = getattr(self.ortho_view, "kind", None)
+        if kind in ("slope", "aspect"):
+            zt = ""
+            if z is not None and np.isfinite(z):
+                zt = (f"  pendenza {z:.1f}°" if kind == "slope" else
+                      "  terreno piano" if z < 0 else f"  esposizione {z:.0f}° ({_compass(z)})").replace(".", ",")
+            self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}{zt}   [{self.chunk.crs if self.chunk else ''}]")
+            return
+        if kind == "dem" and z is not None and self.chunk is not None and self.chunk.dem_path is not None:
+            self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}  Z {z:.3f}{self._terrain_at(x, y, z)}   [{self.chunk.crs}]")
+            return
         if getattr(self.ortho_view, "kind", None) == "coverage":
             zt = f"  {int(z)} foto" if z is not None and np.isfinite(z) else ""
             self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}{zt}   [{self.chunk.crs if self.chunk else ''}]")
@@ -3871,6 +4010,8 @@ class MainWindow(QMainWindow):
                              if self.ortho_view.freehand else
                              "Clic per i vertici, doppio clic per chiudere, tasto destro per annullare"),
                  "line": "Due clic: inizio e fine della sezione", "measure": "Due clic per misurare",
+                 "area": "Trascina un riquadro, oppure clic per i vertici e doppio clic per chiudere: area in pianta "
+                         "e superficie 3D (dal DEM e dal modello), pendenza media, quote",
                  "quota": "Clic su un punto: la quota viene letta dal DEM, poi area, US e gli altri campi di "
                           "pyarchinit_quote",
                  "marker": "Clic su un punto: un marker con la quota del DEM, proiettato sulle foto che lo vedono "

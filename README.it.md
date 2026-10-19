@@ -183,6 +183,8 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
 * **Video e qualità delle immagini**: fotogrammi scelti da un video (nitidi, con la sovrapposizione
   che serve alla ricostruzione), con il GPS dei droni DJI dal loro `.SRT`; foto sfocate trovate e
   disattivate.
+* **Misure**: area in pianta e della superficie (DEM e modello), pendenza, esposizione e altezza dal
+  suolo sotto il cursore, raster di pendenza ed esposizione, nuvola densa colorata per altezza dal suolo.
 * **Diagnostica**: grafo delle corrispondenze, corrispondenze tra due foto, residui dei punti di
   legame nelle foto, calibrazione della camera con il grafico della distorsione e calibrazione fissa,
   unione dei marker.

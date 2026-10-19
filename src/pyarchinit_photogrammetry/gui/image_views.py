@@ -12,6 +12,7 @@ from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPainterPath,
 from PySide6.QtWidgets import (QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsPixmapItem, QGraphicsScene,
                                QGraphicsSimpleTextItem, QGraphicsView, QInputDialog, QMenu)
 
+SCALAR_KINDS = ("dem", "diff", "sigma", "coverage", "slope", "aspect")  # one band of values, coloured
 US_COLORS = ["#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231", "#911eb4", "#46f0f0", "#f032e6", "#bcf60c",
              "#fabebe", "#008080", "#e6beff", "#9a6324", "#800000", "#aaffc3", "#808000"]
 
@@ -115,6 +116,41 @@ def coverage_colors(n: np.ndarray) -> np.ndarray:
     return rgba
 
 
+def slope_colors(s: np.ndarray, limit: float | None = None) -> tuple[np.ndarray, float]:
+    """Slope in degrees: white flat, through yellow and orange, to dark red at ``limit``
+    (default the 98th percentile, at least 10 degrees)."""
+    valid = np.isfinite(s)
+    rgba = np.zeros(s.shape + (4,), np.uint8)
+    if not valid.any():
+        return rgba, 0.0
+    lim = float(limit) if limit else float(max(np.percentile(s[valid], 98), 10.0))
+    t = np.clip(np.where(valid, s, 0) / lim, 0, 1)
+    stops = np.array([[0.0, 255, 255, 255], [0.3, 254, 224, 139], [0.6, 244, 109, 67], [1.0, 120, 0, 30]])
+    rgba[..., :3] = np.stack([np.interp(t, stops[:, 0], stops[:, k]) for k in (1, 2, 3)], -1).astype(np.uint8)
+    rgba[..., 3] = np.where(valid, 255, 0)
+    return rgba, lim
+
+
+def aspect_colors(a: np.ndarray) -> np.ndarray:
+    """Aspect in degrees from north: a colour wheel (north red, east yellow-green, south cyan-blue,
+    west violet), flat ground (-1) grey."""
+    valid = np.isfinite(a)
+    rgba = np.zeros(a.shape + (4,), np.uint8)
+    flat = valid & (a < 0)
+    h = np.where(valid & ~flat, a, 0) / 60.0
+    i = np.floor(h).astype(int) % 6
+    f = h - np.floor(h)
+    v, q, t = np.full_like(h, 230.0), 230.0 * (1 - 0.7 * f), 230.0 * (1 - 0.7 * (1 - f))
+    p = np.full_like(h, 69.0)
+    r = np.choose(i, [v, q, p, p, t, v])
+    g = np.choose(i, [t, v, v, q, p, p])
+    b = np.choose(i, [p, p, t, v, v, q])
+    rgba[..., 0], rgba[..., 1], rgba[..., 2] = r, g, b
+    rgba[flat, :3] = 190
+    rgba[..., 3] = np.where(valid, 255, 0)
+    return rgba
+
+
 def read_window_rgba(path, kind: str, window: tuple[int, int, int, int], out_shape: tuple[int, int],
                      dem_range: tuple[float, float] | None = None, diff_limit: float | None = None) -> np.ndarray:
     """RGBA ``(h, w, 4)`` of a window ``(col, row, width, height)`` of a raster read at
@@ -128,10 +164,14 @@ def read_window_rgba(path, kind: str, window: tuple[int, int, int, int], out_sha
     h, w = out_shape
     with rasterio.open(path) as src:
         win = Window(col, row, width, height)
-        if kind in ("dem", "diff", "sigma", "coverage"):
+        if kind in SCALAR_KINDS:
             z = src.read(1, window=win, out_shape=(h, w), masked=True,
-                         resampling=Resampling.nearest if kind == "coverage" else Resampling.average
+                         resampling=Resampling.nearest if kind in ("coverage", "aspect") else Resampling.average
                          ).astype(np.float64).filled(np.nan)
+            if kind == "slope":
+                return slope_colors(z, diff_limit)[0]
+            if kind == "aspect":
+                return aspect_colors(z)
             if kind == "diff":
                 return diff_colors(z, diff_limit)[0]
             if kind == "sigma":
@@ -205,7 +245,7 @@ class RasterView(_ZoomView):
     file at the resolution of the screen, up to the full one (``detail``), in a thread."""
 
     DRAW_MODES = ("polygon", "line", "measure", "quota", "marker", "crop", "patch", "dem_edit")
-    AREA_MODES = ("crop", "patch", "dem_edit")  # drag a box or click a polygon
+    AREA_MODES = ("crop", "patch", "dem_edit", "area")  # drag a box or click a polygon
     SAM_TOOLS = ("tap", "box", "area")
 
     mouse_world = Signal(float, float, object)  # x, y, z or None
@@ -216,6 +256,8 @@ class RasterView(_ZoomView):
     patch_requested = Signal()  # "assign photos to the selected polygon" from the selection menu
     dem_edit_finished = Signal(object)  # (N,2) world XY: an area of the DEM to fill again
     dem_edit_requested = Signal()  # "edit the DEM in the selected polygon" from the selection menu
+    area_finished = Signal(object)  # (N,2) world XY: an area to measure
+    area_requested = Signal()  # "measure the selected polygon" from the selection menu
     line_finished = Signal(object, object)
     quota_clicked = Signal(float, float)  # spot height at world x, y
     marker_clicked = Signal(float, float)  # a marker at world x, y (the height from the DEM)
@@ -329,9 +371,9 @@ class RasterView(_ZoomView):
             h, w = int(round(src.height / f)), int(round(src.width / f))
             self.tr = src.transform @ src.transform.scale(src.width / w, src.height / h)
             self._src_size, self._base_size = (src.width, src.height), (w, h)
-            if kind in ("dem", "diff", "sigma", "coverage"):
+            if kind in SCALAR_KINDS:
                 z = src.read(1, out_shape=(h, w), masked=True,
-                             resampling=Resampling.nearest if kind == "coverage" else Resampling.average)
+                             resampling=Resampling.nearest if kind in ("coverage", "aspect") else Resampling.average)
                 self.z = z.astype(np.float64).filled(np.nan)
                 if kind == "diff":  # a difference of DEMs: diverging colours, the limit for the legend
                     rgba, self.diff_limit = diff_colors(self.z)
@@ -339,6 +381,10 @@ class RasterView(_ZoomView):
                     rgba, self.diff_limit = sigma_colors(self.z)
                 elif kind == "coverage":  # photos framing every cell
                     rgba = coverage_colors(self.z)
+                elif kind == "slope":  # degrees
+                    rgba, self.diff_limit = slope_colors(self.z)
+                elif kind == "aspect":  # degrees from north
+                    rgba = aspect_colors(self.z)
                 else:
                     self._dem_range = dem_limits(self.z)
                     rgba = dem_colors(self.z, abs(self.tr.a), self._dem_range)
@@ -420,8 +466,7 @@ class RasterView(_ZoomView):
     @staticmethod
     def _read_detail(job):
         gen, path, kind, window, shape, scene, dem_range, diff_limit = job
-        rgba = read_window_rgba(path, kind if kind in ("dem", "diff", "sigma", "coverage") else "ortho", window,
-                                shape, dem_range, diff_limit)
+        rgba = read_window_rgba(path, kind if kind in SCALAR_KINDS else "ortho", window, shape, dem_range, diff_limit)
         return gen, to_qimage(rgba), scene
 
     def _read_detail_async(self, job) -> None:
@@ -941,6 +986,8 @@ class RasterView(_ZoomView):
         a_photos.setEnabled(polygon)
         a_dem = menu.addAction("Modifica il DEM in quest'area (riempi dal terreno attorno)...")
         a_dem.setEnabled(polygon)
+        a_area = menu.addAction("Misura l'area e la superficie")
+        a_area.setEnabled(polygon)
         a_clear = menu.addAction("Deseleziona tutto")
         chosen = menu.exec(global_pos)
         if chosen is a_del:
@@ -955,6 +1002,8 @@ class RasterView(_ZoomView):
             self.photos_in_area_requested.emit()
         elif chosen is a_dem:
             self.dem_edit_requested.emit()
+        elif chosen is a_area:
+            self.area_requested.emit()
         elif chosen is a_clear:
             self.clear_selection()
 
@@ -1154,7 +1203,8 @@ class RasterView(_ZoomView):
             super().mouseDoubleClickEvent(ev)
 
     def _area_signal(self, mode: str):
-        return {"patch": self.patch_finished, "dem_edit": self.dem_edit_finished}.get(mode, self.crop_finished)
+        return {"patch": self.patch_finished, "dem_edit": self.dem_edit_finished,
+                "area": self.area_finished}.get(mode, self.crop_finished)
 
 
 class PhotoView(_ZoomView):

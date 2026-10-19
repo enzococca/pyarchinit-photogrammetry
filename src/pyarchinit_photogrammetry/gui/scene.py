@@ -30,6 +30,7 @@ class SceneData:
     class_labels: dict = field(default_factory=dict)  # names of the project classes (chunk.meta["classes"])
     bin_counts: dict = field(default_factory=dict)  # confidence range (index in BINS) -> points or vertices
     confidence_missing: bool = False  # confidence colours asked for a cloud or model without confidence
+    hag_missing: bool = False  # heights above the ground asked for a cloud without ground points
     shown_index: np.ndarray | None = None  # rows of the whole cloud that are displayed
 
     @property
@@ -116,6 +117,43 @@ def elevation_colors(z: np.ndarray) -> np.ndarray:
     i = np.clip(pos.astype(int), 0, len(stops) - 2)
     f = (pos - i)[:, None]
     return (stops[i] * (1 - f) + stops[i + 1] * f).astype(np.uint8)
+
+
+def hag_colors(h: np.ndarray) -> np.ndarray:
+    """Height above the ground: blue at the ground, green, yellow, orange, red at the 98th
+    percentile (at least half a metre); below the ground dark blue."""
+    lim = max(float(np.percentile(h, 98)), 0.5) if len(h) else 1.0
+    t = np.clip(h / lim, 0, 1)
+    stops = np.array([[0.0, 70, 110, 200], [0.08, 60, 170, 110], [0.35, 240, 220, 90], [0.7, 240, 130, 50],
+                      [1.0, 200, 30, 40]])
+    out = np.stack([np.interp(t, stops[:, 0], stops[:, k]) for k in (1, 2, 3)], -1).astype(np.uint8)
+    out[h < -0.05] = (20, 40, 120)
+    return out
+
+
+_HAG: dict = {}  # the heights above the ground of the last dense cloud read (key: its file)
+
+
+def height_above_ground(chunk, pc):
+    """Height of every point of the dense cloud above the ground (class 2), kept until the file
+    changes; None without ground points."""
+    from ..archaeo.measures import height_above_ground as hag
+
+    path = chunk.product_path("point_cloud")
+    try:
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size, tuple(np.asarray(chunk.transform).ravel()))
+    except (AttributeError, OSError):
+        key = None
+    if key is not None and _HAG.get("key") == key:
+        return _HAG["hag"]
+    try:
+        out = hag(chunk.to_world(pc.xyz), np.asarray(pc.classification))
+    except ValueError:  # no ground class
+        out = None
+    _HAG.clear()
+    _HAG.update(key=key, hag=out)
+    return out
 
 
 # confidence ranges (engine.confidence.BINS): grey for 0, red for what one map saw, then to blue
@@ -245,6 +283,13 @@ def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_f
                 sd.colors = class_palette()[sd.point_codes]
             elif color_mode == "elevation":
                 sd.colors = elevation_colors(sd.points.astype(float) @ sd.up if len(idx) else np.zeros(0))
+            elif color_mode == "hag":
+                hag = height_above_ground(chunk, pc)
+                if hag is None:
+                    sd.hag_missing = True
+                    sd.colors = np.full((len(idx), 3), 160, np.uint8)
+                else:
+                    sd.colors = hag_colors(hag[idx])
             elif color_mode == "confidence" and bins is not None:
                 sd.colors = CONFIDENCE_COLORS[bins[idx]]
             else:

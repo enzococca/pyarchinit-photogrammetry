@@ -205,6 +205,14 @@ class WorkspaceTree(QTreeWidget):
                                      "attiva, confrontarla, rinominarla o eliminarla")
                     it.addChild(vi)
                 it.setExpanded(bool(kept))
+            for key, text, tip in (("slope", "Pendenza", "gradi"), ("aspect", "Esposizione", "gradi dal nord")):
+                path = ch.product_path(key)
+                if path is not None and path.exists():
+                    it = QTreeWidgetItem([text])
+                    it.setIcon(0, icon(key))
+                    it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, key))
+                    it.setToolTip(0, f"Doppio clic per vederla ({tip} sotto il cursore)")
+                    ci.addChild(it)
             cov = ch.product_path("coverage")
             if cov is not None and cov.exists():
                 it = QTreeWidgetItem(["Copertura delle foto"])

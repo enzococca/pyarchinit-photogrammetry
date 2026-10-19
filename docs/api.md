@@ -214,6 +214,16 @@ that every photo sees from further than `max_angle` degrees from the vertical st
 | alignment | the faces of every panorama are one frame of a COLMAP rig (`engine.panorama.rig_configs`: a rig per `facce_360` folder, faces at their known rotation, no translation): they keep one centre and their relative rotation, their calibration is not refined (also in `optimize_cameras`), pairs of faces of the same panorama are not matched. Depth maps pair a face with faces of other panoramas looking up to 50 degrees away (the panoramas are turned anyhow) |
 | `engine.panorama.split_panorama(path, folder=None, size=None, fov=100, faces=None)`, `face_maps(...)`, `face_rotation(yaw, pitch)` | the faces alone |
 
+## Measures
+
+| Call | Description |
+| --- | --- |
+| `archaeo.measures.surface_area(dem_path, polygon, model=None)` | inside a plan polygon: `plan` and `surface` areas from the DEM (each cell `sqrt(1 + gx^2 + gy^2)` times, border cells by the share inside), `mean_slope`, `z_min`, `z_max`; with a mesh in the same coordinates also `model_surface`, `model_plan`, `model_faces` (faces whose centre is inside) |
+| `measures.slope_aspect_at(dem_path, x, y)` | slope and aspect (degrees; aspect clockwise from north, where the ground faces downhill, -1 flat) from the 3 x 3 cells (Horn) |
+| `measures.aspect_raster(dem_path, out)`, `archaeo.terrain.slope_degrees(dem_path, out)` | rasters of aspect and slope |
+| `measures.ground_surface(xyz, classes, cell=None)`, `height_above_ground(xyz, classes)` | the ground on a grid from the points of class 2 (median of each cell, holes interpolated) and the height of every point above it |
+| `measures.ground_dem(chunk)`, `ground_dem_at(path, x, y)` | a DTM kept as a version of the DEM (built from class 2 only) and its height at a point |
+
 ## Diagnostics of the alignment, calibration, markers
 
 | Call | Description |

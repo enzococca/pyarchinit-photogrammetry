@@ -85,7 +85,7 @@ markers in too few photos.
 * Diagnostics: matching graph, matches between two photos, residuals in the photo view, camera
   calibration dialog with distortion plot, merging markers. *Done.*
 * Measures: 3D area on the model, slope, aspect and height above ground under the cursor,
-  height-above-ground view of the cloud, aspect raster.
+  height-above-ground view of the cloud, aspect raster. *Done.*
 * Exports: Cloud Optimized GeoTIFF (JPEG, WebP, ZSTD), COPC, Cesium 3D Tiles, GLB, normal maps
   for light models, fly-through video.
 * Laser scans: E57 and PTX import, registration on the photogrammetric chunk, colours from the

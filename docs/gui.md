@@ -150,6 +150,13 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   every frame gets its GPS position. **Image quality** (right click in the Photos pane): the sharpness
   of every photo compared with the sharpest ones (in the tooltip, *sfocata* under 0.5), *Disattiva le
   foto sfocate*, enable or disable the selected photos, masks of the selected photos.
+* **Measures**: the *Area* tool of the drawing bar (drag a box or click a polygon; or *Misura l'area e
+  la superficie* on a selected polygon) gives the area in plan and of the surface from the DEM and the
+  model, the mean slope and the heights, and keeps the outline in the *Misure* layer. On the DEM the
+  bar at the bottom shows the slope and the aspect under the cursor and, with a DTM kept as a version,
+  the height above the ground. *Strumenti > Pendenza / Esposizione del DEM* make the two rasters (white
+  to red; a colour wheel from the north) and show them, with the degrees under the cursor. The 3D view
+  colours the dense cloud by *Altezza dal suolo* once its ground is classified.
 * **Diagnostics of the alignment** (*Strumenti > Diagnostica dell'allineamento*): the *matching graph*
   (photos where they were taken, the others in a ring; lines between matched photos, thicker and
   greener with more matches, red under 30; separate groups and isolated photos listed; a double click

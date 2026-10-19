@@ -696,9 +696,10 @@ class ModelView(QWidget):
         self.refresh(reset=True)
         self.view_changed.emit(self.kind or "")
 
-    COLOR_MODES = {"point_cloud": ("rgb", "class", "elevation", "confidence"),
+    COLOR_MODES = {"point_cloud": ("rgb", "class", "elevation", "hag", "confidence"),
                    "tie_points": ("rgb", "class", "elevation"), "model": ("rgb", "confidence")}
-    COLOR_LABELS = {"rgb": "Colori RGB", "class": "Classi", "elevation": "Quota", "confidence": "Confidenza"}
+    COLOR_LABELS = {"rgb": "Colori RGB", "class": "Classi", "elevation": "Quota", "hag": "Altezza dal suolo",
+                    "confidence": "Confidenza"}
 
     def _color_chosen(self, _i) -> None:
         if self._filling:
@@ -919,5 +920,7 @@ class ModelView(QWidget):
         elif mode == "confidence":
             self.legend.set_bins(sd.bin_counts, bins)
             self.legend.setVisible(bool(sd.bin_counts))
-        self.info_label.setVisible(bool(sd.confidence_missing))
+        self.info_label.setText("Senza punti del suolo (classe 2): classifica prima la nuvola" if sd.hag_missing
+                                else "Senza confidenza: Flusso di lavoro > Calcola la confidenza")
+        self.info_label.setVisible(bool(sd.confidence_missing or sd.hag_missing))
         self.canvas.set_scene(sd, reset=reset)

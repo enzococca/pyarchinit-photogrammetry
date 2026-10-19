@@ -201,6 +201,9 @@ is installed on first use (PyTorch in a separate environment, see the same page)
 * **Video and image quality**: frames chosen from a video (sharp, with the overlap the
   reconstruction needs), with the GPS of DJI drones from their `.SRT`; blurred photos found and
   disabled.
+* **Measures**: area in plan and of the surface (DEM and model), slope, aspect and height above the
+  ground under the cursor, slope and aspect rasters, the dense cloud coloured by height above the
+  ground.
 * **Diagnostics**: matching graph, matches between two photos, residuals of the tie points in the
   photos, camera calibration with a distortion plot and a calibration that can be held, merging
   markers.
