@@ -93,7 +93,11 @@ def test_model_vertex_confidence_and_cleaning(processed, tmp_path):
     low = face_filters(np.asarray(both.vertices), np.asarray(both.faces), conf, min_confidence=1)["confidence"]
     assert low[n0:].all() and low[:n0].mean() < 0.9
     report = ch.clean_model(min_component=0.01)  # the box and any crumb of the mesh itself
-    assert report["by_filter"]["components"] >= 12 and report["faces"] >= n0 - 0.01 * n0
+    # the surface stays: the largest piece of the mesh, less a few degenerate faces (the crumbs are each
+    # below 1% of it but can add up to more, as on CI where they were 1.2% of the faces)
+    pieces = trimesh.graph.connected_components(mesh.face_adjacency, nodes=np.arange(n0))
+    largest = max(len(piece) for piece in pieces)
+    assert report["by_filter"]["components"] >= 12 and report["faces"] >= 0.995 * largest
     cleaned = ch.model
     assert cleaned.visual.kind == "vertex"
     assert ch.to_world(np.asarray(cleaned.vertices))[:, 2].max() < top[2] - 0.5  # the box is gone
