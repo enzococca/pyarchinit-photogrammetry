@@ -91,9 +91,19 @@ jobs:
           Invoke-WebRequest $sdist.url -OutFile C:\t\opencv.tar.gz
           tar -xzf C:\t\opencv.tar.gz -C C:\t
           Move-Item (Get-ChildItem C:\t -Directory -Filter "opencv*").FullName C:\cv
+          # the package waits for OpenCV's FFmpeg library on every Windows: there is none for ARM64
+          Set-Content C:\t\patch.py @'
+          import pathlib
+          setup = pathlib.Path(r"C:\cv\setup.py")
+          text = setup.read_text(encoding="utf-8")
+          old = 'if os.name == "nt"\n            else []'
+          assert text.count(old) == 1, "setup.py of opencv-python has changed"
+          setup.write_text(text.replace(old, 'if os.name == "nt" and platform.machine() != "ARM64"\n            else []'), encoding="utf-8")
+          '@
+          python C:\t\patch.py
           pip wheel C:\cv --no-deps --no-build-isolation -w wheels
           pip install (Get-ChildItem wheels/*.whl).FullName numpy
-          python -c @'
+          Set-Content C:\t\check.py @'
           import cv2, numpy as np
           image = np.zeros((64, 64, 3), np.uint8)
           cv2.mcc.CCheckerDetector_create(); cv2.ccm.ColorCorrectionModel
@@ -106,6 +116,7 @@ jobs:
           if "MSMF" not in backends:
               print("::warning::OpenCV without Media Foundation: videos cannot be read")
           '@
+          python C:\t\check.py
       - uses: actions/upload-artifact@v4
         with:
           name: win-arm64-opencv
