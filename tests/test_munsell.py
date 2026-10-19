@@ -30,6 +30,13 @@ def test_soil_chips_come_back(chip):
     assert m["chip"] == chip, m
 
 
+def test_greyish_soil():
+    """Chroma under 2: colour-science does not write such a notation, the chart has a chip for it."""
+    m = mu.munsell(_srgb_of("10YR 5/1"))
+    assert m["chip"] == "10YR 5/1" and m["chroma"] < 2 and m["notation"].endswith("/" + f"{m['chroma']:.1f}")
+    assert m["notation"].startswith(m["hue"])
+
+
 def test_neutral_and_hue_names():
     assert mu.munsell([0.5, 0.5, 0.5])["chip"] == "N 5/"
     assert mu._hue_name(mu._hue_angle(9.1, "YR")) == "10YR"

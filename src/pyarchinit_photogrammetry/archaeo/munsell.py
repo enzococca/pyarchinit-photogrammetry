@@ -101,18 +101,16 @@ def munsell(rgb) -> dict:
     if spec is None:  # the iterative conversion did not converge: the nearest chip of the whole circle
         chip = _nearest_chip(colour, xyy)
         spec = colour.notation.munsell.munsell_colour_to_munsell_specification(chip)
-    if not np.isfinite(spec[0]) or not np.isfinite(spec[2]):
-        notation = f"N{float(spec[1]):.1f}"
-    else:
-        notation = colour.notation.munsell.munsell_specification_to_munsell_colour(spec, 1, 1, 1)
     hue, value, chroma, code = (float(v) for v in spec)
     v_chip = min(CHART_VALUES, key=lambda v: abs(v - value))
     if not (math.isfinite(hue) and math.isfinite(chroma)) or chroma < 0.5:
-        return {"notation": notation, "chip": f"N {v_chip:g}/", "hue": None, "value": value, "chroma": 0.0}
+        return {"notation": f"N{value:.1f}", "chip": f"N {v_chip:g}/", "hue": None, "value": value, "chroma": 0.0}
     family = {1: "B", 2: "BG", 3: "G", 4: "GY", 5: "Y", 6: "YR", 7: "R", 8: "RP", 9: "P", 10: "PB"}[int(code)]
     c_chip = min(CHART_CHROMAS, key=lambda c: abs(c - chroma))
     chip = f"{_hue_name(_hue_angle(hue, family))} {v_chip:g}/{c_chip:g}"
-    return {"notation": notation, "chip": chip, "hue": f"{hue:.1f}{family}", "value": value, "chroma": chroma}
+    # written here: colour-science writes a notation only for chromas from 2 (greyish soils have less)
+    return {"notation": f"{hue:.1f}{family} {value:.1f}/{chroma:.1f}", "chip": chip, "hue": f"{hue:.1f}{family}",
+            "value": value, "chroma": chroma}
 
 
 PERTURBATIONS = ((0, 0, 0), (0, 0, -1e-4), (0, 5e-4, 0), (-5e-4, 0, 0), (0, -5e-4, 0), (5e-4, 0, 0))
