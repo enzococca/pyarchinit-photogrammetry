@@ -177,14 +177,17 @@ def light_model(chunk, target_faces: int = 50_000, texture_size: int = 4096, fol
         raise RuntimeError("build the model first")
     mesh = read_mesh(path)
     fv, ff = mesh.xyz, np.asarray(mesh.faces, np.int64)
-    texture = chunk.product_path("model_textured")
-    image = None
-    if texture is not None and texture.exists() and texture.suffix.lower() != ".obj" and mesh.texcoords is not None:
-        image = cv2.imread(str(texture), cv2.IMREAD_COLOR)
+    from .texturing import display_texture, texture_pages
+
+    pages = texture_pages(chunk)
+    image, texcoords = None, None
+    if pages and pages[0].suffix.lower() != ".obj" and mesh.texcoords is not None:
+        source, texcoords = display_texture(chunk, mesh.texcoords, mesh.texnumber)  # the pages in one image
+        image = cv2.imread(str(source), cv2.IMREAD_COLOR)
     progress(0.02, f"Light model: {len(ff):,} -> {target_faces:,} faces")
     lv, lf = decimate(fv, ff, target_faces)
     colour, normal, uv, share = bake_maps(fv, ff, lv, lf, texture_size, mesh.colors,
-                                          mesh.texcoords if image is not None else None, image,
+                                          texcoords if image is not None else None, image,
                                           progress=progress.sub(0.1, 0.8))
     out = Path(folder) if folder is not None else chunk.data_dir / "light"
     out.mkdir(parents=True, exist_ok=True)

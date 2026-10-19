@@ -640,40 +640,53 @@ def retexture(chunk: Chunk, photos, faces=None, polygon=None, mode: str = "assig
     progress(0.02, f"Texture: {len(faces):,} faces from {len(cams)} photos")
     raycaster = Raycaster(verts, tris)
     choice = _face_camera_choice(chunk, verts, tris[faces], raycaster, progress.sub(0.02, 0.38), cams=cams)
-    atlas = cv2.imread(str(tex), cv2.IMREAD_COLOR)
-    if atlas is None:
-        raise RuntimeError(f"cannot read the texture {tex}")
-    height, width = atlas.shape[:2]
-    uv = mesh.texcoords[faces].reshape(-1, 3, 2).astype(np.float64)
-    tri_px = np.stack([uv[..., 0] * width, (1.0 - uv[..., 1]) * height], -1)
-    progress(0.42, "Texels of the faces")
-    fi, cols, rows, bary = _texels(tri_px, width, height)
     from .ortho import correction_for
+    from .texturing import texture_pages
 
+    pages = texture_pages(chunk) or [tex]
+    names = mesh.texture_files if len(pages) > 1 else [tex.name]
+    page_of = (np.asarray(mesh.texnumber)[faces] if mesh.texnumber is not None and len(pages) > 1
+               else np.zeros(len(faces), int))
     cache = ImageCache(chunk, 3, correction_for(chunk, bool((chunk.meta.get("texture") or {}).get("colour_correction"))))
-    used = np.unique(choice[choice >= 0])
-    written = 0
-    for done, k in enumerate(used):
-        sel = np.nonzero(choice[fi] == k)[0]
-        pts = (bary[sel, :, None] * verts[tris[faces[fi[sel]]]]).sum(axis=1)
-        px, _d, ok = project_valid(chunk, cams[k], pts, margin=0)
-        if ok.any():
-            col = sample(cache.get(cams[k]), px[ok]).astype(np.float64)
-            atlas[rows[sel[ok]], cols[sel[ok]]] = np.clip(col + 0.5, 0, 255).astype(np.uint8)
-            written += int(ok.sum())
-        progress(0.45 + 0.5 * (done + 1) / max(len(used), 1), f"Texture from {cams[k].label}")
-    own = chunk.data_dir / "model_texture.jpg"
-    out = tex if tex.resolve().parent == chunk.data_dir.resolve() else own
-    ext = out.suffix.lower()
-    params = [cv2.IMWRITE_JPEG_QUALITY, 95] if ext in (".jpg", ".jpeg") else []
-    tmp = out.with_name(out.stem + ".tmp" + out.suffix)
-    if not cv2.imwrite(str(tmp), atlas, params):
-        raise RuntimeError(f"cannot write {out}")
-    tmp.replace(out)
-    if out != tex:  # a texture of another program: the model now points at the copy
-        mesh.set_texture_file(out.name)
+    written, renamed = 0, False
+    for n_page, pg in enumerate(np.unique(page_of)):  # each page of the texture the faces are on
+        path = pages[pg]
+        atlas = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if atlas is None:
+            raise RuntimeError(f"cannot read the texture {path}")
+        height, width = atlas.shape[:2]
+        mine = np.nonzero(page_of == pg)[0]
+        uv = mesh.texcoords[faces[mine]].reshape(-1, 3, 2).astype(np.float64)
+        tri_px = np.stack([uv[..., 0] * width, (1.0 - uv[..., 1]) * height], -1)
+        progress(0.42, "Texels of the faces")
+        fi, cols, rows, bary = _texels(tri_px, width, height)
+        used = np.unique(choice[mine][choice[mine] >= 0])
+        for done, k in enumerate(used):
+            sel = np.nonzero(choice[mine][fi] == k)[0]
+            pts = (bary[sel, :, None] * verts[tris[faces[mine][fi[sel]]]]).sum(axis=1)
+            px, _d, ok = project_valid(chunk, cams[k], pts, margin=0)
+            if ok.any():
+                col = sample(cache.get(cams[k]), px[ok]).astype(np.float64)
+                atlas[rows[sel[ok]], cols[sel[ok]]] = np.clip(col + 0.5, 0, 255).astype(np.uint8)
+                written += int(ok.sum())
+            progress(0.45 + 0.5 * (n_page + (done + 1) / max(len(used), 1)) / len(np.unique(page_of)),
+                     f"Texture from {cams[k].label}")
+        own = chunk.data_dir / ("model_texture.jpg" if pg == 0 else f"model_texture_{pg}.jpg")
+        out = path if path.resolve().parent == chunk.data_dir.resolve() else own
+        ext = out.suffix.lower()
+        params = [cv2.IMWRITE_JPEG_QUALITY, 95] if ext in (".jpg", ".jpeg") else []
+        tmp = out.with_name(out.stem + ".tmp" + out.suffix)
+        if not cv2.imwrite(str(tmp), atlas, params):
+            raise RuntimeError(f"cannot write {out}")
+        tmp.replace(out)
+        if out != path:  # a texture of another program: the model now points at the copy
+            names[pg] = out.name
+            renamed = True
+            if pg == 0:
+                chunk._set_product("model_textured", out)
+    if renamed:
+        mesh.set_texture_files(names)
         chunk._set_product("model", write_mesh(chunk.own_product_path("model"), mesh))
-        chunk._set_product("model_textured", out)
     record = {"faces": int(len(faces)), "photos": sorted(labels), "mode": mode,
               "polygon": None if polygon is None else np.asarray(polygon, float)[:, :2].round(4).tolist()}
     chunk.meta.setdefault("texture", {}).setdefault("patches", []).append(record)

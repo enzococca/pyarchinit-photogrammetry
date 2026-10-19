@@ -148,7 +148,8 @@ def register_media(db, path: str | Path, mediatype: str | None = None, descrizio
                 Path(resize_dir).mkdir(parents=True, exist_ok=True)
                 shutil.copy2(target, resize_dir + resize_name)
                 written += [thumb_dir + thumb_name, resize_dir + resize_name]
-                for extra in (target.with_suffix(".mtl"), target.with_name(target.stem + "_texture.jpg")):
+                pages = sorted(target.parent.glob(target.stem + "_texture*.jpg"))  # every page of the texture
+                for extra in [target.with_suffix(".mtl")] + pages:
                     if extra.exists():
                         shutil.copy2(extra, resize_dir + extra.name)
             else:

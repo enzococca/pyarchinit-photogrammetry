@@ -79,6 +79,10 @@ def product_summary(key: str, path) -> str:
             image = path.parent / "texture.jpg" if path.suffix.lower() == ".obj" else path
             with Image.open(image) as im:
                 text = f"texture {_it(im.size[0])} x {_it(im.size[1])} px"
+            pages = 1 + sum(1 for q in path.parent.glob(f"{path.stem}_*{path.suffix}")
+                            if q.stem[len(path.stem) + 1:].isdigit())
+            if pages > 1:
+                text += tr(", {0} pagine", pages)
         elif key in ("dem", "orthomosaic"):
             import rasterio
 

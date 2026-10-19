@@ -194,7 +194,8 @@ is installed on first use (PyTorch in a separate environment, see the same page)
 * **Textures that can be read**: for terrain seen from the air the texture of the model is its
   orthophoto, with separate cells for walls and sections (adaptive orthophoto mapping, as
   Metashape; chosen by itself for large models facing up); colours and texture survive the
-  cleaning, the cropping and the confidence.
+  cleaning, the cropping and the confidence. Textures beyond 8192 pixels (16384, 32768) are split
+  into pages of 8192, as in Metashape, and so are the multi-page textures imported from it.
 * **3D view and workspace**: small points with an adjustable size, millions of points on the
   graphics card; points, faces or pixels in brackets next to every product, as Metashape shows them.
 * **Large orthophotos**: built tile by tile, in parallel, with overviews; a 45,000 x 46,000 px

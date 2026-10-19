@@ -14,6 +14,12 @@ Two mappings, as in Metashape:
     sections) get their own cells, as in the generic mapping, in a band below.
 ``auto``
     the orthophoto mapping for large models that mostly face up, the generic one otherwise.
+
+A texture larger than :data:`PAGE_SIZE` (the side graphics cards and viewers take) is split into
+pages, as Metashape does: ``model_texture.jpg``, ``model_texture_1.jpg``... named in ``model.ply``
+(``TextureFile`` comments) with the page of every face (``texnumber``). The generic mapping puts
+groups of nearby faces on each page; the orthophoto mapping cuts the plan into tiles, a page each,
+and puts the steep faces on pages of their own.
 """
 from __future__ import annotations
 
@@ -27,6 +33,7 @@ from ..core.progress import Progress, as_progress
 from .visibility import ImageCache, Raycaster, project_valid, readable_cameras, sample
 
 MAPPINGS = ("auto", "orthophoto", "generic")
+PAGE_SIZE = 8192
 
 
 def _cell_layout(s: int):
@@ -239,11 +246,174 @@ def _generic_atlas(chunk: Chunk, verts, faces, cams, texture_size: int, raycaste
     return atlas, uv
 
 
+def _split_spatially(points: np.ndarray, groups: int) -> list[np.ndarray]:
+    """Indices of ``points`` in ``groups`` groups of about the same size, each of points close
+    together (median cuts along the longest side, recursively)."""
+    def cut(idx, k):
+        if k <= 1 or len(idx) <= 1:
+            return [idx]
+        p = points[idx]
+        axis = int(np.argmax(np.ptp(p, axis=0)))
+        order = idx[np.argsort(p[:, axis], kind="stable")]
+        at = int(round(len(order) * (k // 2) / k))
+        return cut(order[:at], k // 2) + cut(order[at:], k - k // 2)
+
+    return [g for g in cut(np.arange(len(points)), max(1, groups)) if len(g)]
+
+
+def _pages_per_side(texture_size: int, page_size: int) -> int:
+    return max(1, int(np.ceil(texture_size / max(page_size, 1))))
+
+
+def _generic_pages(chunk: Chunk, verts, faces, cams, texture_size: int, page_size: int, raycaster,
+                   progress: Progress, correction=None):
+    """The generic mapping on pages: groups of nearby faces, a page each, with all the texels of a
+    ``texture_size`` square shared among them."""
+    side = _pages_per_side(texture_size, page_size)
+    if side == 1:
+        atlas, uv = _generic_atlas(chunk, verts, faces, cams, texture_size, raycaster, progress, correction)
+        return [atlas], uv, None
+    n = len(faces)
+    choice = _face_camera_choice(chunk, verts, faces, raycaster, progress.sub(0, 0.4), cams=cams)
+    groups = _split_spatially(verts[faces].mean(1), side * side)
+    uv, page, atlases = np.zeros((n, 3, 2)), np.zeros(n, np.int32), []
+    cache = ImageCache(chunk, 3, correction)
+    for g, ids in enumerate(groups):
+        per_side = int(np.ceil(np.sqrt(np.ceil(len(ids) / 2))))
+        s = max(4, page_size // per_side)
+        atlas = np.full((per_side * s, per_side * s, 3), 127, np.uint8)
+        uv[ids] = _bake_cells(chunk, verts, faces, ids, choice[ids], cams, atlas, 0, per_side, s,
+                              progress.sub(0.4 + 0.58 * g / len(groups), 0.58 / len(groups)), cache)
+        page[ids] = g
+        atlases.append(atlas)
+    return atlases, uv, page
+
+
+def _orthophoto_pages(chunk: Chunk, verts, faces, cams, texture_size: int, page_size: int, raycaster,
+                      progress: Progress, correction=None):
+    """The orthophoto mapping on pages: the plan cut into tiles of ``page_size`` pixels at the
+    resolution of a ``texture_size`` texture, each tile the orthophoto of the faces whose centre
+    falls in it (so a page reaches a little beyond its tile), the steep faces in cells on pages of
+    their own."""
+    from .ortho import render_surface
+
+    side = _pages_per_side(texture_size, page_size)
+    if side == 1:
+        atlas, uv = _orthophoto_atlas(chunk, verts, faces, cams, texture_size, raycaster, progress, correction)
+        return [atlas], uv, None
+    nz, _area = _upward(chunk, verts, faces)
+    steep = np.nonzero(nz < 0.5)[0]
+    flat = np.nonzero(nz >= 0.5)[0]
+    w = chunk.to_world(verts)
+    n = len(faces)
+    uv, page, atlases = np.zeros((n, 3, 2)), np.zeros(n, np.int32), []
+    if len(flat):
+        corners = w[faces[flat]]  # (k, 3, 3)
+        x0, y1 = corners[..., 0].min(), corners[..., 1].max()
+        res = max(corners[..., 0].max() - x0, y1 - corners[..., 1].min(), 1e-9) / texture_size
+        span = page_size * res
+        centre = corners.mean(axis=1)
+        tx = np.clip(np.floor((centre[:, 0] - x0) / span).astype(int), 0, side - 1)
+        ty = np.clip(np.floor((y1 - centre[:, 1]) / span).astype(int), 0, side - 1)
+        tiles = [(i, j) for j in range(side) for i in range(side) if np.any((tx == i) & (ty == j))]
+        for k, (i, j) in enumerate(tiles):
+            mine = (tx == i) & (ty == j)
+            sel, pc = flat[mine], corners[mine]
+            bx0, by1 = pc[..., 0].min(), pc[..., 1].max()
+            wo = int(np.ceil((pc[..., 0].max() - bx0) / res)) + 1
+            ho = int(np.ceil((by1 - pc[..., 1].min()) / res)) + 1
+            progress(0.02 + 0.68 * k / len(tiles), f"Texture page {len(atlases) + 1}: orthophoto {wo}x{ho} px")
+            rgba = render_surface(chunk, (bx0, by1), (ho, wo), res, cams=cams, raycaster=raycaster,
+                                  progress=progress.sub(0.02 + 0.68 * k / len(tiles), 0.68 / len(tiles)),
+                                  correction=correction)
+            atlases.append(_fill_empty(np.moveaxis(rgba[:3], 0, -1)[..., ::-1], rgba[3] > 0))
+            uv[sel, :, 0] = (pc[..., 0] - bx0) / res / wo
+            uv[sel, :, 1] = 1.0 - ((by1 - pc[..., 1]) / res) / ho
+            page[sel] = len(atlases) - 1
+    if len(steep):
+        cell = 8
+        per_row = page_size // cell
+        per_page = 2 * per_row * per_row
+        progress(0.72, f"Walls and steep faces: {len(steep):,} faces in cells of {cell} px")
+        choice = _face_camera_choice(chunk, verts, faces[steep], raycaster, progress.sub(0.72, 0.13), cams=cams)
+        groups = _split_spatially(verts[faces[steep]].mean(1), int(np.ceil(len(steep) / per_page)))
+        cache = ImageCache(chunk, 3, correction)
+        for g, local in enumerate(groups):
+            rows = int(np.ceil(np.ceil(len(local) / 2) / per_row))
+            atlas = np.full((rows * cell, page_size, 3), 127, np.uint8)
+            uv[steep[local]] = _bake_cells(chunk, verts, faces, steep[local], choice[local], cams, atlas, 0, per_row,
+                                           cell, progress.sub(0.85 + 0.13 * g / len(groups), 0.13 / len(groups)),
+                                           cache)
+            page[steep[local]] = len(atlases)
+            atlases.append(atlas)
+    return atlases, uv, page
+
+
+def texture_pages(chunk: Chunk) -> list[Path]:
+    """The images of the texture of the model, page by page (one for most models): the pages
+    named in ``model.ply`` beside the first one (the ``model_textured`` product); [] without a
+    texture (a texture of version 0.5, an OBJ, is its own single entry)."""
+    from ..io.mesh_ply import texture_files_of
+
+    first = chunk.product_path("model_textured")
+    if first is None or not first.exists():
+        return []
+    model = chunk.product_path("model")
+    if first.suffix.lower() == ".obj" or model is None or not model.exists():
+        return [first]
+    names = texture_files_of(model)
+    return [first.parent / name for name in names] if len(names) > 1 else [first]
+
+
+def display_texture(chunk: Chunk, texcoords: np.ndarray, texnumber: np.ndarray | None, max_side: int = PAGE_SIZE):
+    """One image for showing a texture of several pages (the 3D view, the fly-through): the pages
+    side by side, reduced to fit ``max_side``, kept as ``model_texture_display.jpg`` until the
+    pages change, and the texture coordinates ``(F, 6)`` in it. One page: itself, unchanged."""
+    from PIL import Image
+
+    pages = texture_pages(chunk)
+    if len(pages) <= 1 or texnumber is None:
+        return (pages[0] if pages else None), texcoords
+    sizes = []
+    for page in pages:
+        with Image.open(page) as im:
+            sizes.append(im.size)  # (width, height)
+    cols = int(np.ceil(np.sqrt(len(pages))))
+    rows = int(np.ceil(len(pages) / cols))
+    cw, ch = max(w for w, _ in sizes), max(h for _, h in sizes)
+    f = min(1.0, max_side / (cols * cw), max_side / (rows * ch))
+    cell_w, cell_h = max(1, int(cw * f)), max(1, int(ch * f))
+    scaled = [(max(1, int(round(w * f))), max(1, int(round(h * f)))) for w, h in sizes]
+    out = chunk.data_dir / "model_texture_display.jpg"
+    if not out.exists() or out.stat().st_mtime < max(p.stat().st_mtime for p in pages):
+        canvas = np.full((rows * cell_h, cols * cell_w, 3), 127, np.uint8)
+        flag = cv2.IMREAD_REDUCED_COLOR_4 if f <= 0.25 else cv2.IMREAD_REDUCED_COLOR_2 if f <= 0.5 else cv2.IMREAD_COLOR
+        for k, page in enumerate(pages):
+            img = cv2.imread(str(page), flag)
+            r, c = divmod(k, cols)
+            canvas[r * cell_h:r * cell_h + scaled[k][1], c * cell_w:c * cell_w + scaled[k][0]] = \
+                cv2.resize(img, scaled[k], interpolation=cv2.INTER_AREA)
+        cv2.imwrite(str(out), canvas, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    uv = np.asarray(texcoords, np.float64).reshape(-1, 3, 2).copy()
+    page = np.asarray(texnumber)
+    width, height = cols * cell_w, rows * cell_h
+    for k in range(len(pages)):
+        sel = page == k
+        r, c = divmod(k, cols)
+        x = uv[sel, :, 0] * scaled[k][0] + c * cell_w
+        y = (1.0 - uv[sel, :, 1]) * scaled[k][1] + r * cell_h
+        uv[sel, :, 0] = x / width
+        uv[sel, :, 1] = 1.0 - y / height
+    return out, uv.reshape(-1, 6).astype(np.float32)
+
+
 def build_texture(chunk: Chunk, texture_size: int = 4096, progress: Progress | None = None,
-                  skip_unreadable: bool = False, mapping: str = "auto", colour_correction: bool | None = None) -> Path:
+                  skip_unreadable: bool = False, mapping: str = "auto", colour_correction: bool | None = None,
+                  page_size: int = PAGE_SIZE) -> Path:
     """Texture of the model (see the module docstring for ``mapping``), written as
     ``model_texture.jpg`` with the texture coordinates in ``model.ply`` (every other property of
-    the model kept). Photos that cannot be read stop the step
+    the model kept); a ``texture_size`` above ``page_size`` gives several pages (see the module
+    docstring). Photos that cannot be read stop the step
     (:class:`~.visibility.UnreadablePhotos`) unless ``skip_unreadable``: then the faces take
     their colours from the other photos. ``colour_correction``: gains of the photos and
     vignetting (:mod:`.colour`): None = the one measured in the chunk if any, True = measured
@@ -266,42 +436,62 @@ def build_texture(chunk: Chunk, texture_size: int = 4096, progress: Progress | N
     if mapping == "auto":
         mapping = choose_mapping(chunk, verts, faces)
     progress(0.01, f"Texture: {mapping} mapping of {len(faces):,} faces")
-    if mapping == "orthophoto":
-        atlas, uv = _orthophoto_atlas(chunk, verts, faces, cams, texture_size, raycaster, progress.sub(0.01, 0.95),
-                                      correction)
-    else:
-        atlas, uv = _generic_atlas(chunk, verts, faces, cams, texture_size, raycaster, progress.sub(0.01, 0.95),
-                                   correction)
-    tex_path = chunk.data_dir / "model_texture.jpg"
-    cv2.imwrite(str(tex_path), atlas, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    build = _orthophoto_pages if mapping == "orthophoto" else _generic_pages
+    atlases, uv, page = build(chunk, verts, faces, cams, texture_size, page_size, raycaster, progress.sub(0.01, 0.95),
+                              correction)
+    paths = [chunk.data_dir / ("model_texture.jpg" if k == 0 else f"model_texture_{k}.jpg")
+             for k in range(len(atlases))]
+    for old in chunk.data_dir.glob("model_texture_*.jpg"):  # pages of an earlier, larger texture
+        if old not in paths:
+            old.unlink()
+    for atlas, path in zip(atlases, paths):
+        cv2.imwrite(str(path), atlas, [cv2.IMWRITE_JPEG_QUALITY, 92])
     mesh.texcoords = uv.reshape(-1, 6).astype(np.float32)
-    mesh.set_texture_file(tex_path.name)
+    if len(paths) > 1:
+        mesh.set_texture_files([p.name for p in paths])
+        mesh.texnumber = page.astype(np.int32)
+    else:
+        mesh.set_texture_file(paths[0].name)
     chunk._set_product("model", write_mesh(chunk.own_product_path("model"), mesh))
-    chunk._set_product("model_textured", tex_path)
-    chunk.meta["texture"] = {"mapping": mapping, "size": [int(atlas.shape[1]), int(atlas.shape[0])],
+    chunk._set_product("model_textured", paths[0])
+    first = atlases[0]
+    chunk.meta["texture"] = {"mapping": mapping, "size": [int(first.shape[1]), int(first.shape[0])],
+                             "pages": len(paths), "texture_size": int(texture_size),
                              "skipped_photos": [c.label for c in bad] or None,
                              "colour_correction": correction is not None}
-    progress(1.0, f"Texture {atlas.shape[1]}x{atlas.shape[0]} px ({mapping})")
-    return tex_path
+    pages = f", {len(paths)} pages" if len(paths) > 1 else ""
+    progress(1.0, f"Texture {first.shape[1]}x{first.shape[0]} px ({mapping}{pages})")
+    return paths[0]
 
 
-def write_obj(path: Path, verts: np.ndarray, faces: np.ndarray, uv: np.ndarray | None, texture: str | None,
-              transform: np.ndarray | None = None) -> Path:
-    """Write an OBJ with per-face-corner UVs (``uv`` shape ``(F,3,2)``)."""
+def write_obj(path: Path, verts: np.ndarray, faces: np.ndarray, uv: np.ndarray | None, texture,
+              transform: np.ndarray | None = None, pages: np.ndarray | None = None) -> Path:
+    """Write an OBJ with per-face-corner UVs (``uv`` shape ``(F,3,2)``); ``texture``: the image,
+    or the images of the pages with ``pages`` the page of every face (a material per page)."""
+    textures = [texture] if isinstance(texture, str) else list(texture or [])
     v = verts if transform is None else verts @ transform[:3, :3].T + transform[:3, 3]
     mtl = path.with_suffix(".mtl")
+    paged = uv is not None and pages is not None and len(textures) > 1
     with open(path, "w") as fh:
-        if texture:
-            fh.write(f"mtllib {mtl.name}\nusemtl material0\n")
+        if textures:
+            fh.write(f"mtllib {mtl.name}\n" + ("" if paged else "usemtl material0\n"))
         np.savetxt(fh, v, fmt="v %.6f %.6f %.6f")
         if uv is not None:
             np.savetxt(fh, uv.reshape(-1, 2), fmt="vt %.6f %.6f")
             idx = np.column_stack([faces[:, 0] + 1, np.arange(len(faces)) * 3 + 1,
                                    faces[:, 1] + 1, np.arange(len(faces)) * 3 + 2,
                                    faces[:, 2] + 1, np.arange(len(faces)) * 3 + 3])
-            np.savetxt(fh, idx, fmt="f %d/%d %d/%d %d/%d")
+            if paged:
+                for k in range(len(textures)):
+                    sel = np.asarray(pages) == k
+                    if sel.any():
+                        fh.write(f"usemtl material{k}\n")
+                        np.savetxt(fh, idx[sel], fmt="f %d/%d %d/%d %d/%d")
+            else:
+                np.savetxt(fh, idx, fmt="f %d/%d %d/%d %d/%d")
         else:
             np.savetxt(fh, faces + 1, fmt="f %d %d %d")
-    if texture:
-        mtl.write_text(f"newmtl material0\nKa 1 1 1\nKd 1 1 1\nd 1\nillum 1\nmap_Kd {texture}\n")
+    if textures:
+        mtl.write_text("".join(f"newmtl material{k}\nKa 1 1 1\nKd 1 1 1\nd 1\nillum 1\nmap_Kd {t}\n"
+                               for k, t in enumerate(textures)))
     return path

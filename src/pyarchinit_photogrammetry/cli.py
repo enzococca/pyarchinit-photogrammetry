@@ -639,7 +639,9 @@ def mesh(project: Path,
          voxel_size: Optional[float] = typer.Option(None, help="depth_maps: voxel in the chunk units "
                                                                "(default: twice the depth-map pixel)"),
          classes: Optional[str] = typer.Option(None, help="dense cloud: only these " + CLASSES_HELP),
-         texture: bool = True, texture_size: int = 4096,
+         texture: bool = True,
+         texture_size: int = typer.Option(4096, help="side of the texture in pixels; above 8192 it is split into "
+                                                     "pages of 8192 (16384: 4 pages, 32768: 16)"),
          colour: Optional[bool] = typer.Option(None, "--colour/--no-colour",
                                                help="colour correction of the photos (default: if calibrated)"),
          skip_unreadable: bool = typer.Option(False, help=SKIP_HELP), chunk: Optional[str] = None):

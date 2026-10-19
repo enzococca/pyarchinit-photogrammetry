@@ -629,6 +629,39 @@ def _dem_offset(dem: Path, xyz: np.ndarray) -> float | None:
 PREVIEW_FACES = 600_000  # models larger than this get a coarse copy for the 3D view
 
 
+def _texture_order(names: list[str], mesh: Path) -> list[str]:
+    """The texture pages of a model archive in the order of the faces' ``texnumber``: as the
+    ``TextureFile`` comments of the mesh name them, else by the number in the name
+    (``texture.tif``, ``texture1.tif``, ``texture2.tif``...)."""
+    from ..io.mesh_ply import texture_files_of
+
+    try:
+        listed = texture_files_of(mesh)
+    except OSError:
+        listed = []
+    by_name = {Path(n).name: n for n in names}
+    if listed and all(Path(t).name in by_name for t in listed):
+        return [by_name[Path(t).name] for t in listed]
+
+    def number(n):
+        m = re.search(r"(\d+)(?=\.[^.]+$)", Path(n).name)
+        return int(m.group(1)) if m else -1
+
+    return sorted(names, key=lambda n: (number(n), n))
+
+
+def _has_texnumber(mesh: Path) -> bool:
+    from ..io.mesh_ply import read_header
+
+    try:
+        with open(mesh, "rb") as f:
+            _, elements = read_header(f)
+    except (OSError, ValueError, KeyError):
+        return False
+    face = next((e for e in elements if e["name"] == "face"), None)
+    return face is not None and any(n == "texnumber" for n, _ in face["props"])
+
+
 def _import_texture(data: bytes, out: Path) -> Path | None:
     """The texture image of a Metashape model (TIFF, PNG or JPEG) as a JPEG next to the model."""
     import cv2
@@ -665,16 +698,29 @@ def _import_model(mc: MsChunk, ch, warnings: list, progress, dense_from_mesh: bo
             shutil.copyfileobj(src, out, 16 << 20)
         textures = [n for n in names if Path(n).name.lower().startswith("texture")
                     and Path(n).suffix.lower() in (".tif", ".tiff", ".png", ".jpg", ".jpeg")]
-        if len(textures) == 1:  # the texture of the model: the faces carry its coordinates
-            progress(0.15, f"{mc.label}: texture del modello")
-            texture = _import_texture(z.read(textures[0]), ch.data_dir / "model_texture.jpg")
-            if texture is not None:
-                ch._set_product("model_textured", texture)
-            else:
-                warnings.append(f"{mc.label}: texture del modello non leggibile ({textures[0]})")
-        elif textures:
-            warnings.append(f"{mc.label}: texture del modello in {len(textures)} pagine: non importata "
-                            "(il modello ha i colori ai vertici)")
+        textures = _texture_order(textures, dst)
+        paged = len(textures) > 1
+        if paged and not _has_texnumber(dst):
+            warnings.append(f"{mc.label}: texture del modello in {len(textures)} pagine senza la pagina di ogni "
+                            "faccia: non importata (il modello ha i colori ai vertici)")
+            textures = []
+        pages = []
+        for k, name in enumerate(textures):  # the texture of the model, page by page
+            progress(0.15, f"{mc.label}: texture del modello" + (f", pagina {k + 1} di {len(textures)}" if paged else ""))
+            page = _import_texture(z.read(name), ch.data_dir / ("model_texture.jpg" if k == 0
+                                                                 else f"model_texture_{k}.jpg"))
+            if page is None:
+                warnings.append(f"{mc.label}: texture del modello non leggibile ({name})")
+                pages = []
+                break
+            pages.append(page)
+        if pages:
+            ch._set_product("model_textured", pages[0])
+            if paged:  # the pages named in the header, in the order of texnumber
+                from ..io.mesh_ply import _header_comments, set_header_comments
+
+                keep = [c for c in _header_comments(dst) if not c.lower().startswith("texturefile")]
+                set_header_comments(dst, keep + [f"TextureFile {p.name}" for p in pages])
     ch._set_product("model", dst)
     try:
         if frame is not None:

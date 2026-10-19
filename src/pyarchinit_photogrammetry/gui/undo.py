@@ -142,8 +142,24 @@ class UndoHistory:
             except OSError as exc:
                 log.warning("Annulla: copia di %s non riuscita (%s)", path, exc)
                 continue
-            before[name] = {"rel": ch.products[name], "copy": str(copy)}
+            before[name] = {"rel": ch.products[name], "copy": str(copy), "pages": self._pages(ch, name, folder / "before")}
         self._pending = {"folder": str(folder), "before": before, "after": None} if before else None
+
+    @staticmethod
+    def _pages(ch, name: str, folder: Path) -> list:
+        """The other pages of a texture of several pages, copied beside the first one."""
+        if name != "model_textured":
+            return []
+        from ..engine.texturing import texture_pages
+
+        out = []
+        for page in texture_pages(ch)[1:]:
+            if page.exists():
+                copy = folder / name / page.name
+                clone(page, copy)
+                out.append({"rel": str(page.relative_to(ch.data_dir)) if page.is_relative_to(ch.data_dir)
+                            else str(page), "copy": str(copy)})
+        return out
 
     @property
     def pending(self) -> bool:
@@ -244,13 +260,18 @@ class UndoHistory:
                     continue
                 copy = Path(files["folder"]) / "after" / name / path.name
                 clone(path, copy)
-                after[name] = {"rel": ch.products[name], "copy": str(copy)}
+                after[name] = {"rel": ch.products[name], "copy": str(copy),
+                               "pages": self._pages(ch, name, Path(files["folder"]) / "after")}
             files["after"] = after
         for name, saved in (files.get(side) or {}).items():
             dst = ch.data_dir / saved["rel"]
             _remove(dst)
             clone(Path(saved["copy"]), dst)
             ch.products[name] = saved["rel"]
+            for page in saved.get("pages") or []:
+                target = ch.data_dir / page["rel"]
+                _remove(target)
+                clone(Path(page["copy"]), target)
 
     def _drop_files(self, e: Entry) -> None:
         if e.files:

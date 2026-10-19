@@ -475,7 +475,8 @@ def _ply_bytes(fields, records, faces=None):
     body = records.tobytes()
     if faces is not None:
         head += [f"element face {len(faces)}", "property list uchar int vertex_indices",
-                 "property list uchar float texcoord"]
+                 "property list uchar float texcoord"] + (["property int texnumber"] if "page" in faces.dtype.names
+                                                          else [])
         body += faces.tobytes()
     return ("\n".join(head + ["end_header"]) + "\n").encode() + body
 
@@ -491,11 +492,12 @@ def _zip(path, members):
             z.writestr(name, data)
 
 
-def make_psx(root: Path, n_grid: int = 41, texture: bool = False):
+def make_psx(root: Path, n_grid: int = 41, texture: bool = False, pages: int = 1):
     """A Metashape 2.x-like project near Tell Tuqan: chunk transform internal -> geocentric
     (ENU axes, 0.5 m per internal unit), 4 nadir cameras inside a camera group, tie points of
     the live component 0 plus stale points of a deleted component 1, and a model with
-    texture coordinates. Returns (psx path, site geocentric origin, east/north/up axes)."""
+    texture coordinates (``pages`` 2: the left half of the model on a red page, the right half on
+    a blue one). Returns (psx path, site geocentric origin, east/north/up axes)."""
     from pyproj import CRS, Transformer
 
     lon, lat, h = 36.8, 35.8, 300.0
@@ -555,9 +557,11 @@ def make_psx(root: Path, n_grid: int = 41, texture: bool = False):
     idx = np.arange(gx.size).reshape(gx.shape)
     a, b, c, d = idx[:-1, :-1].ravel(), idx[:-1, 1:].ravel(), idx[1:, 1:].ravel(), idx[1:, :-1].ravel()
     tri = np.vstack([np.column_stack([a, b, c]), np.column_stack([a, c, d])])
-    faces = np.zeros(len(tri), dtype=[("n", "u1"), ("v", "<i4", (3,)), ("nt", "u1"), ("t", "<f4", (6,))])
+    fdt = [("n", "u1"), ("v", "<i4", (3,)), ("nt", "u1"), ("t", "<f4", (6,))] + ([("page", "<i4")] if pages > 1 else [])
+    faces = np.zeros(len(tri), dtype=fdt)
     faces["n"], faces["v"], faces["nt"] = 3, tri, 6
     tif = b"II*\x00"  # not an image: the import warns and goes on
+    extra = {}
     if texture:  # planar texture coordinates and a real image, red on the left, blue on the right
         import cv2
 
@@ -567,10 +571,15 @@ def make_psx(root: Path, n_grid: int = 41, texture: bool = False):
         img[:, :32] = (0, 0, 255)
         img[:, 32:] = (255, 0, 0)
         tif = cv2.imencode(".tif", img)[1].tobytes()
+        if pages > 1:  # each half of the model has a page of its own, in one colour
+            left = verts["x"][tri].mean(axis=1) < 0
+            faces["page"] = np.where(left, 0, 1)
+            tif = cv2.imencode(".tif", np.full((64, 64, 3), (0, 0, 255), np.uint8))[1].tobytes()
+            extra = {"texture1.tif": cv2.imencode(".tif", np.full((64, 64, 3), (255, 0, 0), np.uint8))[1].tobytes()}
     _zip(files / "0" / "0" / "model" / "model.zip", {
         "doc.xml": f'<model version="1.2.0"><mesh path="mesh.ply"><faceCount>{len(tri)}</faceCount></mesh>'
                    '<texture path="texture.tif"/></model>',
-        "mesh.ply": _ply_bytes(vfields, verts, faces), "texture.tif": tif})
+        "mesh.ply": _ply_bytes(vfields, verts, faces), "texture.tif": tif, **extra})
     psx = root / "scavo.psx"
     psx.write_text('<document version="1.2.0" path="{projectname}.files/project.zip"/>')
     return psx, origin, (east, north, up)
@@ -652,6 +661,26 @@ def test_metashape_model_keeps_its_texture_and_colours(tmp_path):
     # smoothing keeps the texture, closing holes or decimating leave it out
     ch.clean_model(target_faces=len(half.faces) // 2)
     assert ch.product_path("model_textured") is None and read_mesh(ch.product_path("model")).colors is not None
+
+
+def test_metashape_model_with_texture_pages(tmp_path):
+    """A Metashape texture of several pages comes with every page, each face on its own."""
+    import cv2
+
+    from pyarchinit_photogrammetry.engine.texturing import texture_pages
+    from pyarchinit_photogrammetry.integrations import metashape as ms
+    from pyarchinit_photogrammetry.io.mesh_ply import read_mesh
+
+    psx, _origin, _ = make_psx(tmp_path / "src", texture=True, pages=2)
+    ch = ms.import_psx(psx, tmp_path / "out" / "p.ppg").chunk
+    pages = texture_pages(ch)
+    assert [p.name for p in pages] == ["model_texture.jpg", "model_texture_1.jpg"]
+    mesh = read_mesh(ch.product_path("model"))
+    u = mesh.texcoords.reshape(-1, 3, 2)[:, :, 0].mean(axis=1)  # the left half of the model has u under 0.5
+    assert (mesh.texnumber[u < 0.5] == 0).all() and (mesh.texnumber[u > 0.5] == 1).all()
+    assert cv2.imread(str(pages[0]))[32, 32, 2] > 200 and cv2.imread(str(pages[1]))[32, 32, 0] > 200  # red, blue
+    obj = ch.export_model(tmp_path / "pagine.obj")
+    assert obj.read_text().count("usemtl") == 2
 
 
 def test_metashape_local_frame_with_components(tmp_path):

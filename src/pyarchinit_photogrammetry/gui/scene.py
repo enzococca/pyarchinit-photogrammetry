@@ -323,12 +323,14 @@ def build_scene(chunk, kind: str | None = None, max_points: int = 400_000, max_f
         # the texture coordinates are in model.ply: every face with its corners in the image
         from ..io.mesh_ply import read_mesh
 
+        from ..engine.texturing import display_texture
+
         mesh = read_mesh(chunk.product_path("model"))
         corners = W(mesh.xyz)[mesh.faces]
         sd.mesh_vertices = corners.reshape(-1, 3)
         sd.mesh_faces = np.arange(len(mesh.faces) * 3).reshape(-1, 3)
-        sd.mesh_uv = mesh.texcoords.reshape(-1, 2).astype(np.float32)
-        sd.texture = chunk.product_path("model_textured")
+        sd.texture, uv = display_texture(chunk, mesh.texcoords, mesh.texnumber)  # pages side by side
+        sd.mesh_uv = uv.reshape(-1, 2).astype(np.float32)
     elif kind == "proxies":
         import trimesh
 

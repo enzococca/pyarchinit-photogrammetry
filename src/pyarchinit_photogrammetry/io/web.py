@@ -55,8 +55,9 @@ def export_cog(src: str | os.PathLike, dst: str | os.PathLike, compression: str 
 
 
 def _world_mesh(chunk):
-    """The model of the chunk: world vertices (float64), faces, colours, per-face texcoords and the
-    texture image (or None)."""
+    """The model of the chunk: world vertices (float64), faces, colours, per-face texcoords, the
+    texture pages (images; [] without a texture) and the page of every face (None: one page)."""
+    from ..engine.texturing import texture_pages
     from .mesh_ply import read_mesh
 
     path = chunk.product_path("model")
@@ -64,10 +65,11 @@ def _world_mesh(chunk):
         raise RuntimeError("build the model first")
     mesh = read_mesh(path)
     world = mesh.xyz @ chunk.transform[:3, :3].T + chunk.transform[:3, 3]
-    texture = chunk.product_path("model_textured")
-    if texture is None or not texture.exists() or texture.suffix.lower() == ".obj" or mesh.texcoords is None:
-        texture = None
-    return world, np.asarray(mesh.faces, np.int64), mesh.colors, mesh.texcoords, texture
+    pages = texture_pages(chunk)
+    if not pages or pages[0].suffix.lower() == ".obj" or mesh.texcoords is None:
+        pages = []
+    return world, np.asarray(mesh.faces, np.int64), mesh.colors, mesh.texcoords, pages, \
+        (mesh.texnumber if len(pages) > 1 else None)
 
 
 def _trimesh(vertices, faces, colors=None, texcoords=None, texture=None):
@@ -91,12 +93,15 @@ def export_glb(chunk, path: str | os.PathLike) -> Path:
     """The model as a binary glTF (see the module docstring); returns the path."""
     import trimesh
 
-    world, faces, colors, texcoords, texture = _world_mesh(chunk)
+    world, faces, colors, texcoords, pages, texnumber = _world_mesh(chunk)
     centre = (world.min(0) + world.max(0)) / 2
     local = world - centre
     yup = np.column_stack([local[:, 0], local[:, 2], -local[:, 1]])  # glTF is Y-up
-    mesh = _trimesh(yup, faces, colors, texcoords, texture)
-    scene = trimesh.Scene(mesh)
+    if texnumber is None:
+        scene = trimesh.Scene(_trimesh(yup, faces, colors, texcoords, pages[0] if pages else None))
+    else:  # a mesh (a material) per texture page
+        scene = trimesh.Scene([_trimesh(yup, faces[texnumber == k], colors, texcoords[texnumber == k], page)
+                               for k, page in enumerate(pages) if np.any(texnumber == k)])
     scene.metadata["extras"] = {"crs": chunk.crs, "origin": [float(v) for v in centre], "axes": "x east, y up, z south"}
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -134,7 +139,7 @@ def export_3dtiles(chunk, folder: str | os.PathLike, max_faces: int = 150_000, p
     from .mesh_ply import cluster_decimate
 
     progress = as_progress(progress)
-    world, faces, colors, _uv, _tex = _world_mesh(chunk)
+    world, faces, colors, _uv, _pages, _page = _world_mesh(chunk)
     if colors is None:
         colors = np.full((len(world), 3), 200, np.uint8)
     centre = (world.min(0) + world.max(0)) / 2

@@ -614,16 +614,18 @@ class Chunk:
 
     def build_texture(self, texture_size: int = 4096, progress: ProgressCallback | None = None,
                       skip_unreadable: bool = False, mapping: str = "auto",
-                      colour_correction: bool | None = None) -> Path:
+                      colour_correction: bool | None = None, page_size: int | None = None) -> Path:
         """Texture of the model: ``mapping`` "orthophoto" (adaptive, for terrain seen from the
         air), "generic" (objects) or "auto". Returns the texture image (beside ``model.ply``,
-        which gets the texture coordinates). ``colour_correction``: see :meth:`calibrate_colours`
-        (None = the one measured in the chunk, if any)."""
+        which gets the texture coordinates); a ``texture_size`` above ``page_size`` (8192) gives
+        several pages. ``colour_correction``: see :meth:`calibrate_colours` (None = the one
+        measured in the chunk, if any)."""
         from ..engine import texturing
 
         return texturing.build_texture(self, texture_size=texture_size, progress=as_progress(progress),
                                        skip_unreadable=skip_unreadable, mapping=mapping,
-                                       colour_correction=colour_correction)
+                                       colour_correction=colour_correction,
+                                       page_size=page_size or texturing.PAGE_SIZE)
 
     def build_dem(self, resolution: float | None = None, source: str = "point_cloud", interpolate: bool = True,
                   classes=None, progress: ProgressCallback | None = None) -> Path:

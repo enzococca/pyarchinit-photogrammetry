@@ -58,27 +58,39 @@ def export_model(chunk, path, region=None, zmin: float | None = None, zmax: floa
         if not keep.any():
             raise ValueError("no face of the model lies inside the region")
         mesh = mesh.subset_faces(keep)
-    texture = textured if textured is not None and not legacy and textured.exists() else None
+    from ..engine.texturing import texture_pages
+
+    pages = texture_pages(chunk) if textured is not None and not legacy and textured.exists() else []
     if mesh.texcoords is None:
-        texture = None
+        pages = []
+    if len(pages) > 1:  # only the pages the faces use, numbered again
+        used = np.unique(mesh.texnumber) if mesh.texnumber is not None else np.array([0])
+        renumber = np.full(len(pages), -1, np.int32)
+        renumber[used] = np.arange(len(used))
+        mesh.texnumber = renumber[mesh.texnumber] if mesh.texnumber is not None else None
+        pages = [pages[k] for k in used]
+    names = [path.stem + "_texture" + ("" if k == 0 else f"_{k}") + p.suffix for k, p in enumerate(pages)]
     world = mesh.xyz @ chunk.transform[:3, :3].T + chunk.transform[:3, 3]
     if path.suffix.lower() == ".ply":
         out = mesh.copy()
         out.set_xyz(world, double=True)
-        if texture is not None:
-            name = path.stem + "_texture" + texture.suffix
-            shutil.copy2(texture, path.with_name(name))
-            out.set_texture_file(name)
+        if pages:
+            for page, name in zip(pages, names):
+                shutil.copy2(page, path.with_name(name))
+            out.set_texture_files(names)
+            if len(pages) == 1:
+                out.texnumber = None
         else:
             out.texcoords = None
             out.set_texture_file(None)
         return write_mesh(path, out)
-    if path.suffix.lower() == ".obj" and texture is not None:
+    if path.suffix.lower() == ".obj" and pages:
         from ..engine.texturing import write_obj
 
-        name = path.stem + "_texture" + texture.suffix
-        write_obj(path, mesh.xyz, mesh.faces, mesh.texcoords.reshape(-1, 3, 2), name, transform=chunk.transform)
-        shutil.copy2(texture, path.with_name(name))
+        write_obj(path, mesh.xyz, mesh.faces, mesh.texcoords.reshape(-1, 3, 2), names if len(names) > 1 else names[0],
+                  transform=chunk.transform, pages=mesh.texnumber if len(names) > 1 else None)
+        for page, name in zip(pages, names):
+            shutil.copy2(page, path.with_name(name))
         return path
     import trimesh
 

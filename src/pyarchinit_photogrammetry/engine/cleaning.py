@@ -398,7 +398,7 @@ def clean_model(chunk: Chunk, min_confidence: int | None = None, min_component: 
             from ..io.mesh_ply import MeshData
 
             mesh = MeshData(mesh.vertices[first], f[ok], None if mesh.texcoords is None else mesh.texcoords[ok],
-                            mesh.comments)
+                            mesh.comments, None if mesh.texnumber is None else mesh.texnumber[ok])
     if fill_holes:
         progress(0.35, "Chiusura dei buchi")
         import open3d as o3d

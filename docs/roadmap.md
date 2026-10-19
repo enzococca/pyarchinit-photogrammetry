@@ -139,7 +139,9 @@ markers in too few photos.
   synthetic blocks it recovers poses and calibration, the scale from two bars, a GNSS bias within
   2 cm, and brings a rolling-shutter block from 1.75 px to 0.002 px; the trench keeps its
   thresholds. Moving it to the native core is left for when blocks get too large for it.
-* Multi-page texture atlases, I3S.
+* Multi-page texture atlases, I3S. Pages *done*: a texture larger than 8192 px is split into pages
+  (groups of nearby faces, or tiles of the plan for the orthophoto mapping), carried by exports,
+  the 3D view, versions, undo, patches and the Metashape import.
 
 ## Not planned
 

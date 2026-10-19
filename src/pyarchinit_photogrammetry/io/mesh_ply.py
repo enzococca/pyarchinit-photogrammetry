@@ -252,7 +252,9 @@ _TYPE_NAMES = {"f4": "float", "f8": "double", "u1": "uchar", "i1": "char", "u2":
 class MeshData:
     """A triangle mesh as a PLY holds it: every vertex property (colours, confidence, ...) in a
     structured array, the faces, the texture coordinates of the three corners of each face
-    (``(F, 6)``: u0 v0 u1 v1 u2 v2, as Metashape writes them) and the header comments.
+    (``(F, 6)``: u0 v0 u1 v1 u2 v2, as Metashape writes them), the texture page of each face
+    (``texnumber``, None with a single texture; the pages are the ``TextureFile`` comments, in
+    order, as MeshLab reads them) and the header comments.
 
     Reading and writing through this class keeps everything: a mesh with a texture loaded by
     trimesh loses its vertex colours and gets its vertices split along the seams."""
@@ -261,6 +263,7 @@ class MeshData:
     faces: np.ndarray
     texcoords: np.ndarray | None = None
     comments: list = field(default_factory=list)
+    texnumber: np.ndarray | None = None
 
     @property
     def xyz(self) -> np.ndarray:
@@ -324,9 +327,23 @@ class MeshData:
         return None
 
     def set_texture_file(self, name: str | None) -> None:
+        """One texture (or none): the pages of the faces go too."""
+        self.set_texture_files([name] if name else [])
+        self.texnumber = None
+
+    @property
+    def texture_files(self) -> list[str]:
+        """Every texture page, in order (``texnumber`` counts from the first)."""
+        out = []
+        for c in self.comments:
+            parts = c.split(None, 1)
+            if len(parts) == 2 and parts[0].lower() == "texturefile":
+                out.append(parts[1].strip())
+        return out
+
+    def set_texture_files(self, names) -> None:
         self.comments = [c for c in self.comments if not c.lower().startswith("texturefile")]
-        if name:
-            self.comments.append(f"TextureFile {name}")
+        self.comments += [f"TextureFile {n}" for n in names]
 
     def subset_faces(self, keep) -> "MeshData":
         """The faces of ``keep`` (mask or indices) and only the vertices they use."""
@@ -335,11 +352,13 @@ class MeshData:
         used[faces.ravel()] = True
         remap = np.cumsum(used) - 1
         tex = None if self.texcoords is None else self.texcoords[keep]
-        return MeshData(self.vertices[used], remap[faces], tex, list(self.comments))
+        page = None if self.texnumber is None else self.texnumber[keep]
+        return MeshData(self.vertices[used], remap[faces], tex, list(self.comments), page)
 
     def copy(self) -> "MeshData":
         return MeshData(self.vertices.copy(), self.faces.copy(),
-                        None if self.texcoords is None else self.texcoords.copy(), list(self.comments))
+                        None if self.texcoords is None else self.texcoords.copy(), list(self.comments),
+                        None if self.texnumber is None else self.texnumber.copy())
 
 
 def _header_comments(path: Path) -> list[str]:
@@ -354,6 +373,44 @@ def _header_comments(path: Path) -> list[str]:
                 break
             if text.startswith("comment "):
                 out.append(text[8:])
+    return out
+
+
+def set_header_comments(path: str | Path, comments: list[str], block: int = 16 << 20) -> Path:
+    """Replace the comments of the header of a PLY file (the data copied as it is, block by
+    block: also for meshes of several gigabytes)."""
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(path, "rb") as src:
+        lines = []
+        while True:
+            line = src.readline()
+            if not line:
+                raise ValueError("not a PLY file (no end_header)")
+            lines.append(line)
+            if line.strip() == b"end_header":
+                break
+        head = [ln for ln in lines if not ln.startswith(b"comment ")]
+        at = 2 if len(head) > 1 and head[1].startswith(b"format ") else 1
+        new = head[:at] + [f"comment {c}\n".encode("utf-8") for c in comments] + head[at:]
+        with open(tmp, "wb") as out:
+            out.writelines(new)
+            while True:
+                data = src.read(block)
+                if not data:
+                    break
+                out.write(data)
+    tmp.replace(path)
+    return path
+
+
+def texture_files_of(path: str | Path) -> list[str]:
+    """The texture pages named in the header of a PLY mesh (``TextureFile`` comments, in order)."""
+    out = []
+    for c in _header_comments(Path(path)):
+        parts = c.split(None, 1)
+        if len(parts) == 2 and parts[0].lower() == "texturefile":
+            out.append(parts[1].strip())
     return out
 
 
@@ -385,7 +442,8 @@ def read_mesh(path: str | Path) -> MeshData:
         if name in rec.dtype.names and rec.dtype[name].shape == (6,):
             tex = np.asarray(rec[name], np.float32)
             break
-    return MeshData(np.array(pm.vertices), faces, tex, _header_comments(path))
+    page = np.asarray(rec["texnumber"], np.int32) if "texnumber" in rec.dtype.names else None
+    return MeshData(np.array(pm.vertices), faces, tex, _header_comments(path), page)
 
 
 def write_mesh(path: str | Path, mesh: MeshData) -> Path:
@@ -407,6 +465,9 @@ def write_mesh(path: str | Path, mesh: MeshData) -> Path:
     if mesh.texcoords is not None:
         header.append("property list uchar float texcoord")
         fdescr += [("nt", "u1"), ("t", "<f4", (6,))]
+        if mesh.texnumber is not None:
+            header.append("property int texnumber")
+            fdescr.append(("page", "<i4"))
     header.append("end_header")
     vout = np.empty(len(v), dtype=vdescr)
     for n in names:
@@ -417,6 +478,8 @@ def write_mesh(path: str | Path, mesh: MeshData) -> Path:
     if mesh.texcoords is not None:
         fout["nt"] = 6
         fout["t"] = mesh.texcoords
+        if mesh.texnumber is not None:
+            fout["page"] = mesh.texnumber
     tmp = path.with_name(path.name + ".tmp")
     with open(tmp, "wb") as out:
         out.write(("\n".join(header) + "\n").encode("utf-8"))  # comments (a texture named "metà") in UTF-8
@@ -427,4 +490,4 @@ def write_mesh(path: str | Path, mesh: MeshData) -> Path:
 
 
 __all__ = ["PlyMesh", "MeshData", "read_header", "read_mesh", "write_mesh", "face_count", "transform_vertices",
-           "cluster_decimate", "write_mesh_ply", "make_preview"]
+           "cluster_decimate", "write_mesh_ply", "make_preview", "texture_files_of", "set_header_comments"]

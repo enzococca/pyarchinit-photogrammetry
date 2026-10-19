@@ -3301,7 +3301,10 @@ class MainWindow(QMainWindow):
                   choices=[("auto", "Automatica"), ("orthophoto", "Ortofoto adattiva (terreno, rilievi da drone)"),
                            ("generic", "Generica (oggetti, modelli piccoli)")]),
             Field("size", "Dimensione texture", 8192 if faces > 1_000_000 else 4096,
-                  choices=[(2048, "2048"), (4096, "4096"), (8192, "8192")]),
+                  choices=[(2048, "2048"), (4096, "4096"), (8192, "8192"), (16384, tr("16384 (4 pagine da 8192)")),
+                           (32768, tr("32768 (16 pagine da 8192)"))],
+                  tip=tr("Oltre 8192 pixel la texture e' divisa in pagine, come in Metashape: ogni pagina resta "
+                         "leggibile dalle schede grafiche e dai visualizzatori")),
             Field("colour", "Correzione colore (esposizione delle foto, vignettatura)", True,
                   tip="Misurata la prima volta sui punti visti da piu' foto (Strumenti > Calibra i colori)")],
             intro=thousands_points(tr("Modello di {0:,} facce. ", faces))

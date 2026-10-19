@@ -47,8 +47,12 @@ def active_files(chunk, product: str) -> dict[str, Path]:
         if textured is not None and textured.exists():
             if textured.suffix.lower() == ".obj":  # a texture of version 0.5 and earlier: a folder with its OBJ
                 files["textured"] = textured.parent
-            else:  # the texture image of the model (texture coordinates inside model.ply)
-                files["texture"] = textured
+            else:  # the texture image(s) of the model (texture coordinates inside model.ply), page by page
+                from ..engine.texturing import texture_pages
+
+                for k, page in enumerate(texture_pages(chunk) or [textured]):
+                    if page.exists():
+                        files["texture" if k == 0 else f"texture_{k}"] = page
     return files
 
 
@@ -165,7 +169,7 @@ def _activate_files(chunk, product: str, entry: dict) -> None:
             dst = chunk.data_dir / "model_preview.ply"
         elif role == "textured":
             dst = chunk.data_dir / "textured"
-        elif role == "texture":
+        elif role == "texture" or role.startswith("texture_"):  # the first page is the product
             dst = chunk.data_dir / Path(rel).name
         else:
             continue

@@ -178,7 +178,9 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
   spazi propri per pareti e sezioni (mappatura a ortofoto adattiva, come in Metashape; scelta da sola
   per i modelli grandi rivolti verso l'alto); colori e texture restano dopo pulizia, ritaglio e
   calcolo della confidenza. L'import di Metashape porta anche la texture del modello; *File > Importa >
-  Modello e texture dal progetto Metashape* la aggiunge ai progetti importati prima.
+  Modello e texture dal progetto Metashape* la aggiunge ai progetti importati prima. Le texture oltre
+  gli 8192 pixel (16384, 32768) sono divise in pagine da 8192, come in Metashape, e così quelle a più
+  pagine importate da Metashape.
 * **Vista 3D e area di lavoro**: punti piccoli con la dimensione regolabile, milioni di punti con la
   scheda grafica; accanto a ogni prodotto, come in Metashape, punti, facce o pixel tra parentesi.
 * **Ortofoto grandi**: costruite a tasselli, in parallelo, con le piramidi (overview); un'ortofoto
