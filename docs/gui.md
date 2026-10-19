@@ -150,6 +150,10 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   every frame gets its GPS position. **Image quality** (right click in the Photos pane): the sharpness
   of every photo compared with the sharpest ones (in the tooltip, *sfocata* under 0.5), *Disattiva le
   foto sfocate*, enable or disable the selected photos, masks of the selected photos.
+* **Exports for the web** (*File > Esporta*): the orthomosaic and the DEM also as *COG - Cloud Optimized
+  GeoTIFF* (JPEG or WebP with transparency for the orthomosaic, ZSTD for the DEM), the dense cloud as
+  *COPC* (`.copc.laz`), the model as *glTF binario* (`.glb`, with its texture) and *Modello in Cesium
+  3D Tiles* (a folder with `tileset.json` to open in CesiumJS). The large ones run in the background.
 * **Measures**: the *Area* tool of the drawing bar (drag a box or click a polygon; or *Misura l'area e
   la superficie* on a selected polygon) gives the area in plan and of the surface from the DEM and the
   model, the mean slope and the heights, and keeps the outline in the *Misure* layer. On the DEM the

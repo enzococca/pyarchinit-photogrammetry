@@ -737,7 +737,8 @@ class Chunk:
     # ---------------------------------------------------------------- export
     def export_point_cloud(self, path: str | os.PathLike, source: str = "point_cloud", classes=None, region=None,
                            zmin: float | None = None, zmax: float | None = None) -> Path:
-        """Write the cloud in world coordinates (LAS keeps the classes and the confidence);
+        """Write the cloud in world coordinates (LAS keeps the classes and the confidence; a name
+        ending in ``.copc.laz`` writes a Cloud Optimized Point Cloud, see :mod:`io.copc`);
         ``classes``: only the points of these classes; ``region`` (a polygon in the chunk CRS)
         and ``zmin``/``zmax``: only the points inside."""
         pc = self.point_cloud if source == "point_cloud" else self.tie_points
@@ -755,23 +756,46 @@ class Chunk:
             if not keep.any():
                 raise ValueError("no point lies inside the region")
             pc = pc.subset(keep)
+        if str(path).lower().endswith(".copc.laz"):
+            from ..io.copc import write_copc
+
+            world = pc.transformed(self.transform)
+            return write_copc(path, world.xyz, world.rgb, world.classification, world.confidence,
+                              crs_wkt=crs_mod.wkt(self.crs))
         return pc.transformed(self.transform).save(path, crs_wkt=crs_mod.wkt(self.crs))
 
     def export_model(self, path: str | os.PathLike, region=None, zmin: float | None = None,
                      zmax: float | None = None) -> Path:
         """The model in world coordinates (OBJ with the texture when built, PLY with colours and
-        confidence); ``region``/``zmin``/``zmax``: only the faces inside."""
+        confidence, GLB with the texture around its centre, see :func:`io.web.export_glb`);
+        ``region``/``zmin``/``zmax``: only the faces inside (not for GLB)."""
+        if str(path).lower().endswith(".glb"):
+            if region is not None or zmin is not None or zmax is not None:
+                raise ValueError("GLB: export the whole model (crop it in the project first)")
+            from ..io.web import export_glb
+
+            return export_glb(self, path)
         from ..io import exports
 
         return exports.export_model(self, path, region=region, zmin=zmin, zmax=zmax)
+
+    def export_3dtiles(self, folder: str | os.PathLike, max_faces: int = 150_000,
+                       progress: ProgressCallback | None = None) -> Path:
+        """The model as Cesium 3D Tiles (``folder/tileset.json``, see :func:`io.web.export_3dtiles`)."""
+        from ..io.web import export_3dtiles
+
+        return export_3dtiles(self, folder, max_faces=max_faces, progress=as_progress(progress))
 
     def export_cameras(self, path: str | os.PathLike, fmt: str = "colmap") -> Path:
         from ..io import exports
 
         return exports.export_cameras(self, path, fmt=fmt)
 
-    def export_dem(self, path: str | os.PathLike, region=None) -> Path:
-        """The DEM (GeoTIFF); ``region``: only the window of the polygon, no data outside it."""
+    def export_dem(self, path: str | os.PathLike, region=None, cog: str | None = None) -> Path:
+        """The DEM (GeoTIFF); ``region``: only the window of the polygon, no data outside it;
+        ``cog``: a Cloud Optimized GeoTIFF with this compression (zstd, deflate, lzw)."""
+        if cog:
+            return self._export_cog("dem", path, region, cog)
         if region is not None:
             from ..engine.crop import crop_raster
 
@@ -782,8 +806,12 @@ class Chunk:
 
         return exports.copy_raster(self.dem_path, path)
 
-    def export_orthomosaic(self, path: str | os.PathLike, region=None) -> Path:
-        """The orthomosaic (GeoTIFF); ``region``: only the polygon, transparent outside it."""
+    def export_orthomosaic(self, path: str | os.PathLike, region=None, cog: str | None = None,
+                           quality: int = 85) -> Path:
+        """The orthomosaic (GeoTIFF); ``region``: only the polygon, transparent outside it;
+        ``cog``: a Cloud Optimized GeoTIFF with this compression (jpeg, webp, zstd, ...)."""
+        if cog:
+            return self._export_cog("orthomosaic", path, region, cog, quality)
         if region is not None:
             from ..engine.crop import crop_raster
 
@@ -793,6 +821,22 @@ class Chunk:
         from ..io import exports
 
         return exports.copy_raster(self.orthomosaic_path, path)
+
+    def _export_cog(self, product: str, path, region, compression: str, quality: int = 85) -> Path:
+        import tempfile
+
+        from ..io.web import export_cog
+
+        src = self.dem_path if product == "dem" else self.orthomosaic_path
+        if src is None:
+            raise RuntimeError(f"no {product} in chunk")
+        if region is None:
+            return export_cog(src, path, compression, quality)
+        from ..engine.crop import crop_raster
+
+        with tempfile.TemporaryDirectory(dir=self.data_dir) as tmp:
+            cut = crop_raster(src, Path(tmp) / "cut.tif", region)
+            return export_cog(cut, path, compression, quality)
 
     def generate_report(self, path: str | os.PathLike) -> Path:
         from ..io import report

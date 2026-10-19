@@ -214,6 +214,15 @@ that every photo sees from further than `max_angle` degrees from the vertical st
 | alignment | the faces of every panorama are one frame of a COLMAP rig (`engine.panorama.rig_configs`: a rig per `facce_360` folder, faces at their known rotation, no translation): they keep one centre and their relative rotation, their calibration is not refined (also in `optimize_cameras`), pairs of faces of the same panorama are not matched. Depth maps pair a face with faces of other panoramas looking up to 50 degrees away (the panoramas are turned anyhow) |
 | `engine.panorama.split_panorama(path, folder=None, size=None, fov=100, faces=None)`, `face_maps(...)`, `face_rotation(yaw, pitch)` | the faces alone |
 
+## Exports for the web
+
+| Call | Description |
+| --- | --- |
+| `chunk.export_orthomosaic(path, region=None, cog=None, quality=85)`, `chunk.export_dem(path, region=None, cog=None)`, `io.web.export_cog(src, dst, compression="auto")` | Cloud Optimized GeoTIFF (tiled, overviews, read by parts over the network): `jpeg` (the alpha of the orthomosaic becomes a mask), `webp` (keeps the alpha), `zstd`/`deflate`/`lzw` lossless with the predictor (floating point for DEMs) |
+| `chunk.export_point_cloud("x.copc.laz")`, `io.copc.write_copc(path, xyz, rgb, classification, confidence, crs_wkt)` | Cloud Optimized Point Cloud 1.0: LAZ 1.4 (point format 7, confidence as an extra byte) arranged in an octree (each node one point per cell of a 128^3 grid, the rest to its children, down to 100 000 points), one LAZ chunk per node, the `copc info` VLR and the hierarchy EVLR; QGIS, Potree and laspy's `CopcReader` read only what they show |
+| `chunk.export_model("x.glb")`, `io.web.export_glb(chunk, path)` | binary glTF with the texture (or the vertex colours), coordinates around the centre of the model (single precision keeps millimetres), the centre and the CRS in the scene `extras` and in `x.json` |
+| `chunk.export_3dtiles(folder, max_faces=150000)`, `io.web.export_3dtiles` | Cesium 3D Tiles 1.1: `tileset.json` and GLB tiles in a quadtree in plan, each level the model with fewer faces (vertex colours, clustering), the leaves at full detail; the root transform from east-north-up at the centre of the model to earth-centred coordinates (pyproj; heights as they are) |
+
 ## Measures
 
 | Call | Description |

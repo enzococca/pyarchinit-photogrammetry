@@ -486,16 +486,23 @@ def merge_chunks(project: Path,
 def export(project: Path, ortho: Optional[Path] = None, dem: Optional[Path] = None, model: Optional[Path] = None,
            cloud: Optional[Path] = None, cameras: Optional[Path] = None, markers: Optional[Path] = None,
            report: Optional[Path] = None,
+           cog: Optional[str] = typer.Option(None, help="--ortho/--dem as Cloud Optimized GeoTIFF with this "
+                                                       "compression: jpeg, webp, zstd, deflate, lzw"),
+           tiles: Optional[Path] = typer.Option(None, help="folder for the model as Cesium 3D Tiles"),
            classes: Optional[str] = typer.Option(None, help="--cloud: only these " + CLASSES_HELP),
            bbox: Optional[str] = typer.Option(None, help="only inside 'xmin,ymin,xmax,ymax' (ortho, dem, model, "
                                                          "cloud)"),
            wkt: Optional[str] = typer.Option(None, help="only inside this WKT polygon"),
            chunk: Optional[str] = None):
-    """Export products in world coordinates (optionally cut by a box or a polygon: see also `ppg crop`)."""
+    """Export products in world coordinates (optionally cut by a box or a polygon: see also `ppg crop`).
+    A model ending in .glb is a binary glTF, a cloud ending in .copc.laz a Cloud Optimized Point Cloud."""
     _, ch = _open(project, chunk)
     region = _region(None, bbox, wkt, None) if (bbox or wkt) else None
-    for value, fn in ((ortho, lambda path: ch.export_orthomosaic(path, region=region)),
-                      (dem, lambda path: ch.export_dem(path, region=region)),
+    if tiles:
+        typer.echo(str(ch.export_3dtiles(tiles, progress=print_progress)))
+    for value, fn in ((ortho, lambda path: ch.export_orthomosaic(path, region=region, cog=cog)),
+                      (dem, lambda path: ch.export_dem(path, region=region, cog=cog if cog not in ("jpeg", "webp")
+                                                       else "zstd")),
                       (model, lambda path: ch.export_model(path, region=region)),
                       (cloud, lambda path: ch.export_point_cloud(path, classes=_classes(classes), region=region)),
                       (markers, ch.export_reference), (report, ch.generate_report)):

@@ -306,10 +306,12 @@ class MainWindow(QMainWindow):
                   icon_name="save_as")
         m.addSeparator()
         exp = m.addMenu(icon("export"), "Esporta")
-        self._act(exp, "Nuvola di punti (LAS/PLY)...", lambda: self.export("cloud"), icon_name="point_cloud")
-        self._act(exp, "Modello (OBJ/PLY)...", lambda: self.export("model"), icon_name="model")
-        self._act(exp, "DEM (GeoTIFF)...", lambda: self.export("dem"), icon_name="dem")
-        self._act(exp, "Ortofoto (GeoTIFF)...", lambda: self.export("ortho"), icon_name="ortho")
+        self._act(exp, "Nuvola di punti (LAS/COPC/PLY)...", lambda: self.export("cloud"), icon_name="point_cloud")
+        self._act(exp, "Modello (OBJ/PLY/GLB)...", lambda: self.export("model"), icon_name="model")
+        self._act(exp, "Modello in Cesium 3D Tiles...", self.export_3dtiles, processing=True, icon_name="globe",
+                  tip="Cartella con tileset.json e i tasselli GLB: il modello sul globo di CesiumJS")
+        self._act(exp, "DEM (GeoTIFF/COG)...", lambda: self.export("dem"), icon_name="dem")
+        self._act(exp, "Ortofoto (GeoTIFF/COG)...", lambda: self.export("ortho"), icon_name="ortho")
         self._act(exp, "Camere (CSV / COLMAP)...", lambda: self.export("cameras"), icon_name="cameras")
         self._act(exp, "Riferimenti (CSV)...", lambda: self.export("reference"), icon_name="reference")
         exp.addSeparator()
@@ -1153,9 +1155,12 @@ class MainWindow(QMainWindow):
         ch = self.chunk
         if ch is None:
             return
-        filters = {"cloud": "LAS (*.las);;PLY (*.ply)", "model": "OBJ con texture (*.obj);;PLY (*.ply)",
-                   "dem": "GeoTIFF (*.tif)", "ortho": "GeoTIFF (*.tif)", "cameras": "CSV (*.csv);;COLMAP (*.txt)",
-                   "reference": "CSV (*.csv)"}
+        filters = {"cloud": "LAS (*.las);;COPC - Cloud Optimized Point Cloud (*.copc.laz);;PLY (*.ply)",
+                   "model": "OBJ con texture (*.obj);;PLY (*.ply);;glTF binario con texture (*.glb)",
+                   "dem": "GeoTIFF (*.tif);;COG - Cloud Optimized GeoTIFF, ZSTD (*.tif)",
+                   "ortho": "GeoTIFF (*.tif);;COG - Cloud Optimized GeoTIFF, JPEG (*.tif);;"
+                            "COG - Cloud Optimized GeoTIFF, WebP con trasparenza (*.tif)",
+                   "cameras": "CSV (*.csv);;COLMAP (*.txt)", "reference": "CSV (*.csv)"}
         classes = None
         if what == "cloud":
             choices, codes = self._cloud_class_choices(noise=True)
@@ -1171,6 +1176,18 @@ class MainWindow(QMainWindow):
                 classes = None if set(v["classes"]) >= set(codes) else sorted(v["classes"])
         path, flt = QFileDialog.getSaveFileName(self, "Esporta", self._last_dir(), filters[what])
         if not path:
+            return
+        if "copc" in flt.lower() and not path.lower().endswith(".copc.laz"):
+            path = str(Path(path).with_suffix("")) + ".copc.laz"
+        cog = next((c for c in ("jpeg", "webp", "zstd") if c in flt.lower()), None) if "COG" in flt else None
+        if cog or path.lower().endswith((".copc.laz", ".glb")):  # can take a while: in the background
+            fn = {"cloud": lambda p: ch.export_point_cloud(path, classes=classes),
+                  "model": lambda p: ch.export_model(path),
+                  "dem": lambda p: ch.export_dem(path, cog=cog),
+                  "ortho": lambda p: ch.export_orthomosaic(path, cog=cog)}[what]
+            self.run_task("Esportazione", fn, lambda out: (self.log_pane.info(f"Esportato {out}"),
+                                                           self.statusBar().showMessage(f"Esportato {out}", 8000)),
+                          refresh=False, save=False)
             return
         try:
             if what == "cloud":
@@ -1190,6 +1207,19 @@ class MainWindow(QMainWindow):
             return
         self.log_pane.info(f"Esportato {path}")
         self.statusBar().showMessage(f"Esportato {path}", 8000)
+
+    def export_3dtiles(self) -> None:
+        if not self._need_chunk(product="model"):
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Cartella per i 3D Tiles", self._last_dir())
+        if not folder:
+            return
+        ch = self.chunk
+        out = Path(folder) / f"{ch.label.replace(' ', '_')}_3dtiles"
+        self.run_task("Cesium 3D Tiles", lambda p: ch.export_3dtiles(out, progress=p),
+                      lambda path: self._info("Cesium 3D Tiles", f"Scritto {path}: aprilo in CesiumJS con "
+                                              "Cesium3DTileset.fromUrl (servito da un server web)."),
+                      refresh=False, save=False)
 
     def generate_report(self) -> None:
         if not self._need_chunk(aligned=True):

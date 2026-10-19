@@ -183,6 +183,8 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
 * **Video e qualità delle immagini**: fotogrammi scelti da un video (nitidi, con la sovrapposizione
   che serve alla ricostruzione), con il GPS dei droni DJI dal loro `.SRT`; foto sfocate trovate e
   disattivate.
+* **Esportazioni per il web**: Cloud Optimized GeoTIFF (JPEG, WebP, ZSTD), Cloud Optimized Point Cloud
+  (COPC), glTF binario con la texture, Cesium 3D Tiles del modello posizionato sul globo.
 * **Misure**: area in pianta e della superficie (DEM e modello), pendenza, esposizione e altezza dal
   suolo sotto il cursore, raster di pendenza ed esposizione, nuvola densa colorata per altezza dal suolo.
 * **Diagnostica**: grafo delle corrispondenze, corrispondenze tra due foto, residui dei punti di
