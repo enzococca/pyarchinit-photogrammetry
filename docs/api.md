@@ -214,6 +214,22 @@ that every photo sees from further than `max_angle` degrees from the vertical st
 | alignment | the faces of every panorama are one frame of a COLMAP rig (`engine.panorama.rig_configs`: a rig per `facce_360` folder, faces at their known rotation, no translation): they keep one centre and their relative rotation, their calibration is not refined (also in `optimize_cameras`), pairs of faces of the same panorama are not matched. Depth maps pair a face with faces of other panoramas looking up to 50 degrees away (the panoramas are turned anyhow) |
 | `engine.panorama.split_panorama(path, folder=None, size=None, fov=100, faces=None)`, `face_maps(...)`, `face_rotation(yaw, pitch)` | the faces alone |
 
+## PyArchInit media
+
+`PyArchInit.us_media(sito, area, us, unita_tipo=None)` and `site_media(sito)`: the media linked to a
+stratigraphic unit or a site (`media_to_entity_table`), each with `id_media`, `filename`, `filetype`,
+`mediatype`, `descrizione` and the full paths of the original (`path`), the thumbnail (`thumb`) and the
+resized copy (`resize`) - None where the file is not on this computer or on a remote store.
+
+## Laser scans
+
+| Call | Description |
+| --- | --- |
+| `io.scans.read_ptx(path)`, `read_e57(path)` (extra `scans`: pye57), `read_scans(path)` | the scans of a file (`Scan`: registered `xyz`, `rgb`, `intensity` 0-1, scanner `position`); PTX: the grid of each scan with its 4 x 4 registration (empty returns left out); E57: the `data3D` scans with their poses, cartesian or spherical |
+| `io.scans.import_scans(doc, paths, label=None, crs=None, max_points=None)` | a new chunk whose dense cloud is all the scans in their registered frame (colours, else the intensity in grey), `meta["scans"]`, `meta["metric"]` (metres even in local coordinates: *Allinea chunk* without scale accepts it) |
+| `doc.align_chunks(photo_chunk, [scan_chunk], method="points", fix_scale=True)` | the scan on the photogrammetric chunk (global registration, then ICP); not needed when both are in the same CRS. On the synthetic trench the heights agree to 0.2 mm; in plan the walls of the dense cloud move the fit by a few millimetres |
+| `io.scans.colour_from_photos(target, photos)` | the points of `target` take the colour of the aligned photo of `photos` that sees them closest, among those where the model does not hide them (2 % tolerance) |
+
 ## Exports for the web
 
 | Call | Description |

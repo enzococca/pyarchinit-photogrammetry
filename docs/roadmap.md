@@ -89,9 +89,9 @@ markers in too few photos.
 * Exports: Cloud Optimized GeoTIFF (JPEG, WebP, ZSTD), COPC, Cesium 3D Tiles, GLB, normal maps
   for light models, fly-through video. *Done.*
 * Laser scans: E57 and PTX import, registration on the photogrammetric chunk, colours from the
-  photos.
-* Section and plan-slice tools drawn directly in the 3D view; markers moved in 3D.
-* PyArchInit panel: browsing media linked to US.
+  photos. *Done.*
+* Section and plan-slice tools drawn directly in the 3D view; markers moved in 3D. *Done.*
+* PyArchInit panel: browsing media linked to US. *Done.*
 * English/Italian interface translation.
 
 ## 1.0 - Archaeology first

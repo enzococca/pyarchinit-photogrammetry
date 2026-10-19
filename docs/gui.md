@@ -150,6 +150,18 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   every frame gets its GPS position. **Image quality** (right click in the Photos pane): the sharpness
   of every photo compared with the sharpest ones (in the tooltip, *sfocata* under 0.5), *Disattiva le
   foto sfocate*, enable or disable the selected photos, masks of the selected photos.
+* **Media in the PyArchInit pane**: selecting a US (or a site) in the tree shows the thumbnails of the
+  media linked to it in PyArchInit (`media_to_entity_table`); a double click opens the file (the
+  original, else its resized copy) with the program of the system.
+* **Tools in the 3D view**: *Sezione* (click two points of the model or the cloud: the section of their
+  trace in plan, as drawn on the orthophoto), *Pianta a quota* (click a point: the plan slice at its
+  height), and in *Riferimenti* the right click *Sposta nella vista 3D* places a marker again by a click
+  on the model or the cloud (for markers placed in 3D or on the orthophoto; those measured in the photos
+  are moved in the photos).
+* **Laser scans** (*File > Importa > Scansioni laser (E57, PTX)*): one or more scans become the dense cloud
+  of a new chunk; *Flusso di lavoro > Allinea chunk* (points, without scale) brings them onto the chunk of
+  the photos when they are not in its CRS, *Colori dalle foto (scansioni)* colours them from its
+  photos, *Unisci chunk* merges them; DEM, sections and measures work on them as on any dense cloud.
 * **Exports for the web** (*File > Esporta*): the orthomosaic and the DEM also as *COG - Cloud Optimized
   GeoTIFF* (JPEG or WebP with transparency for the orthomosaic, ZSTD for the DEM), the dense cloud as
   *COPC* (`.copc.laz`), the model as *glTF binario* (`.glb`, with its texture) and *Modello in Cesium

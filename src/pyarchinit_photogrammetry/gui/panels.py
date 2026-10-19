@@ -552,6 +552,7 @@ class ReferencePane(QWidget):
     refine_requested = Signal(object)  # keys of the markers whose blue flags are to be looked for (none: all)
     precision_requested = Signal()
     merge_requested = Signal(object)  # keys of the markers to make one
+    move3d_requested = Signal(int)  # key of the marker to place again in the 3D view
     remove_requested = Signal(object)  # keys of the markers to delete
     scalebar_import_requested = Signal()
 
@@ -798,8 +799,13 @@ class ReferencePane(QWidget):
         a_remove = menu.addAction(icon("delete"), f"Elimina {', '.join(names)}" if names
                                   else "Elimina marker... (seleziona uno o piu' marker)")
         a_remove.setEnabled(bool(keys))
+        a_move = menu.addAction(icon("marker"), f"Sposta {names[0]} nella vista 3D" if len(keys) == 1
+                                else "Sposta nella vista 3D... (seleziona un marker)")
+        a_move.setEnabled(len(keys) == 1)
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
-        if chosen is a_merge:
+        if chosen is a_move:
+            self.move3d_requested.emit(keys[0])
+        elif chosen is a_merge:
             self.merge_requested.emit(keys)
         elif chosen is a_remove:
             self.remove_requested.emit(keys)
@@ -1189,7 +1195,21 @@ class PyArchInitPane(QWidget):
         self.tree.setIconSize(QSize(16, 16))
         self.tree.setAlternatingRowColors(True)
         self.tree.itemDoubleClicked.connect(self._open_us)
+        self.tree.currentItemChanged.connect(lambda cur, _prev: self._show_media(cur))
         lay.addWidget(self.tree, 1)
+        self.media_label = QLabel("Media: seleziona una US o un sito")
+        self.media_label.setObjectName("pageSubtitle")
+        lay.addWidget(self.media_label)
+        self.media = QListWidget()
+        self.media.setViewMode(QListWidget.ViewMode.IconMode)
+        self.media.setIconSize(QSize(96, 96))
+        self.media.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.media.setMovement(QListWidget.Movement.Static)
+        self.media.setWordWrap(True)
+        self.media.setMaximumHeight(150)
+        self.media.setToolTip("Media di PyArchInit collegati: doppio clic per aprirli")
+        self.media.itemDoubleClicked.connect(self._open_media)
+        lay.addWidget(self.media)
         hint = QLabel("Doppio clic su una US per aprire la scheda")
         hint.setObjectName("pageSubtitle")
         hint.setWordWrap(True)
@@ -1284,6 +1304,46 @@ class PyArchInitPane(QWidget):
             return it.text(0)
         names = self.site_names()
         return names[0] if names else None
+
+    def _show_media(self, item) -> int:
+        """The media linked to the US (or the site) of ``item`` as thumbnails; returns how many."""
+        self.media.clear()
+        if item is None or self.pa is None:
+            return 0
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        try:
+            if data:
+                media = self.pa.us_media(data[0], data[1], data[2], data[3])
+                what = f"{data[3]} {data[2]} (area {data[1]})"
+            elif item.parent() is None:  # a site
+                media = self.pa.site_media(item.text(0))
+                what = f"sito {item.text(0)}"
+            else:
+                self.media_label.setText("Media: seleziona una US o un sito")
+                return 0
+        except Exception as exc:
+            self.media_label.setText(f"Media non letti: {exc}")
+            return 0
+        for m in media:
+            it = QListWidgetItem(str(m["filename"]))
+            preview = m["thumb"] or m["resize"]
+            it.setIcon(QIcon(str(preview)) if preview is not None else icon("doc"))
+            it.setToolTip(f"{m['filename']}.{m['filetype']} - {m['mediatype']}"
+                          + (f"\n{m['descrizione']}" if m.get("descrizione") else "")
+                          + ("" if m["path"] or m["resize"] else "\n(file non presente su questo computer)"))
+            it.setData(Qt.ItemDataRole.UserRole, m)
+            self.media.addItem(it)
+        self.media_label.setText(f"Media di {what}: {len(media)}" if media else f"Nessun media collegato a {what}")
+        return len(media)
+
+    def _open_media(self, item) -> None:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        m = item.data(Qt.ItemDataRole.UserRole) or {}
+        path = m.get("path") or m.get("resize") or m.get("thumb")
+        if path is not None:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def _open_us(self, item, _col) -> None:
         data = item.data(0, Qt.ItemDataRole.UserRole)

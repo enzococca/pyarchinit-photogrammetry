@@ -183,6 +183,11 @@ si installa al primo uso (PyTorch in un ambiente separato, stessa pagina).
 * **Video e qualità delle immagini**: fotogrammi scelti da un video (nitidi, con la sovrapposizione
   che serve alla ricostruzione), con il GPS dei droni DJI dal loro `.SRT`; foto sfocate trovate e
   disattivate.
+* **Media di PyArchInit**: foto, disegni e modelli collegati a una US mostrati nel pannello PyArchInit.
+* **Strumenti nella vista 3D**: sezioni e piante a quota scelte sul modello o sulla nuvola, marker
+  spostati nel 3D.
+* **Scansioni laser**: E57 e PTX importati come nuvole di punti, registrati sul chunk fotogrammetrico e
+  colorati con le sue foto.
 * **Esportazioni per il web**: Cloud Optimized GeoTIFF (JPEG, WebP, ZSTD), Cloud Optimized Point Cloud
   (COPC), glTF binario con la texture, Cesium 3D Tiles del modello posizionato sul globo, modelli leggeri
   con la normal map cotta dal modello completo, video di sorvolo.

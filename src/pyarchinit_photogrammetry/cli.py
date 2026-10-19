@@ -77,6 +77,32 @@ def detect_markers(project: Path, target_type: str = "aruco_4x4_50", chunk: Opti
     typer.echo(f"{len(found)} targets: " + ", ".join(f"{m.label} ({len(m.projections)} photos)" for m in found))
 
 
+@app.command("import-scans")
+def import_scans_cmd(project: Path, files: list[Path], label: Optional[str] = None,
+                     crs: Optional[str] = typer.Option(None, help="CRS of the scans (default local)"),
+                     max_points: Optional[int] = None):
+    """Laser scans (E57, PTX) as the dense cloud of a new chunk (then align-chunks --method points)."""
+    from .io.scans import import_scans
+
+    doc = Document.open(project)
+    ch = import_scans(doc, files, label=label, crs=crs, max_points=max_points, progress=print_progress)
+    doc.save()
+    typer.echo(f"{ch.label}: {len(ch.point_cloud)} points from {len(ch.meta['scans'])} scans")
+
+
+@app.command("colour-scan")
+def colour_scan(project: Path, scan: str = typer.Option(..., help="label of the chunk to colour"),
+                photos: str = typer.Option(..., help="label of the chunk with the aligned photos")):
+    """Colour a point cloud (a laser scan) from the aligned photos of another chunk."""
+    from .io.scans import colour_from_photos
+
+    doc = Document.open(project)
+    pick = {c.label: c for c in doc.chunks}
+    r = colour_from_photos(pick[scan], pick[photos], progress=print_progress)
+    doc.save()
+    typer.echo(f"{r['coloured']} of {r['points']} points coloured from {r['photos']} photos")
+
+
 @app.command("light-model")
 def light_model_cmd(project: Path, out: Path = typer.Argument(..., help="folder for light.glb, light.obj and the "
                                                                       "textures"),

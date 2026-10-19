@@ -16,7 +16,7 @@ hidden = (collect_submodules("pyarchinit_photogrammetry") + collect_submodules("
           + collect_submodules("pyproj") + collect_submodules("shapely") + collect_submodules("laspy")
           + ["qtawesome", "pyvistaqt", "pyvista", "sqlalchemy.dialects.sqlite",
              "sqlalchemy.dialects.postgresql", "scipy.special._cdflib", "ezdxf", "trimesh"])
-for optional in ("open3d", "ifcopenshell", "psycopg2", "ppg_core"):  # ppg_core: native kernels (Rust)
+for optional in ("open3d", "ifcopenshell", "psycopg2", "ppg_core", "pye57"):  # ppg_core: native kernels (Rust)
     try:
         __import__(optional)
     except Exception:
@@ -35,7 +35,7 @@ datas = ([(str(ROOT / "src" / "pyarchinit_photogrammetry" / "ai" / "sam_worker.p
          + collect_data_files("pyvista") + collect_data_files("rasterio") + collect_data_files("pyproj")
          + collect_data_files("ezdxf") + collect_data_files("trimesh"))
 binaries = collect_dynamic_libs("pycolmap")
-for optional in ("open3d", "ifcopenshell"):
+for optional in ("open3d", "ifcopenshell", "pye57"):  # pye57: E57 laser scans (its xerces library)
     try:
         __import__(optional)
     except Exception:

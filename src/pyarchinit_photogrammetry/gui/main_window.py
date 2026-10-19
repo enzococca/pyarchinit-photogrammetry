@@ -126,6 +126,9 @@ class MainWindow(QMainWindow):
         self.model_view.points_selected.connect(self._points_selected)
         self.model_view.faces_selected.connect(self._faces_selected)
         self.model_view.marker_requested.connect(self._marker_picked_in_3d)
+        self.model_view.section_requested.connect(self._section_in_3d)
+        self.model_view.slice_requested.connect(self._slice_in_3d)
+        self.model_view.move_marker_requested.connect(self._marker_moved_in_3d)
         self.model_view.photos_point_requested.connect(self.filter_photos_by_point)
         self.ortho_view = RasterView()
         self.photo_view = PhotoView()
@@ -202,6 +205,7 @@ class MainWindow(QMainWindow):
         self.reference.filter_photos_requested.connect(self.filter_photos_by_markers)
         self.reference.refine_requested.connect(self.refine_markers)
         self.reference.merge_requested.connect(self.merge_markers)
+        self.reference.move3d_requested.connect(self.move_marker_in_3d)
         self.reference.remove_requested.connect(self.remove_markers)
         self.reference.precision_requested.connect(self.estimate_precision)
         self.photos = PhotosPane()
@@ -323,6 +327,9 @@ class MainWindow(QMainWindow):
         self._act(exp, "Ritagliati con un poligono o un riquadro (DEM, ortofoto, modello, nuvola)...",
                   self.start_crop, icon_name="crop")
         imp = m.addMenu(icon("open"), "Importa")
+        self._act(imp, "Scansioni laser (E57, PTX)...", self.import_scans, processing=True, icon_name="scan",
+                  tip="Una o piu' scansioni come nuvola densa di un nuovo chunk; poi Allinea chunk (punti) e Colori "
+                      "dalle foto")
         self._act(imp, "Progetto Metashape (.psx)...", lambda: self.import_external("metashape"), processing=True,
                   icon_name="open")
         self._act(imp, "Modello e texture dal progetto Metashape (reimporta)...", self.reimport_metashape_model,
@@ -361,6 +368,8 @@ class MainWindow(QMainWindow):
         self._act(m, "Aggiungi chunk", self.add_chunk, icon_name="chunk_add")
         self._act(m, "Allinea chunk...", self.align_chunks, processing=True, icon_name="chunk")
         self._act(m, "Unisci chunk...", self.merge_chunks, processing=True, icon_name="merge")
+        self._act(m, "Colori dalle foto (scansioni)...", self.colour_scan, processing=True, icon_name="colour",
+                  tip="Colora la nuvola del chunk attivo (una scansione laser) con le foto allineate di un altro chunk")
         m.addSeparator()
         self._act(m, "Rileva marker codificati...", self.detect_markers, processing=True, icon_name="markers")
         self._act(m, "Affina le bandierine blu dei marker", lambda: self.refine_markers(), processing=True,
@@ -1212,6 +1221,60 @@ class MainWindow(QMainWindow):
             return
         self.log_pane.info(f"Esportato {path}")
         self.statusBar().showMessage(f"Esportato {path}", 8000)
+
+    def import_scans(self) -> None:
+        """File > Importa > Scansioni laser: E57 or PTX files as the dense cloud of a new chunk."""
+        paths, _ = QFileDialog.getOpenFileNames(self, "Scansioni laser", self._last_dir(),
+                                                "Scansioni (*.e57 *.E57 *.ptx *.PTX)")
+        if not paths:
+            return
+        v = ParamDialog.ask(self, "Scansioni laser", [
+            Field("label", "Nome del chunk", f"Scansioni laser ({len(paths)} file)", kind="text"),
+            Field("crs", "Sistema di riferimento delle scansioni (es. EPSG:32633; vuoto = locale)", "", kind="text"),
+            Field("max_points", "Punti al massimo (0 = tutti)", 0, minimum=0, maximum=2_000_000_000)],
+            intro="Le scansioni diventano la nuvola densa di un nuovo chunk, ognuna nella sua posizione registrata. "
+                  "Se sono nello stesso sistema di riferimento del rilievo fotogrammetrico sono gia' al loro posto; "
+                  "altrimenti Flusso di lavoro > Allinea chunk (metodo punti, senza scala) le porta sul chunk delle "
+                  "foto. Poi Colori dalle foto le colora con le foto.")
+        if not v:
+            return
+        from ..io.scans import import_scans
+
+        doc = self.doc
+
+        def done(chunk):
+            self.doc.chunk = chunk
+            self.refresh_all(reset_views=True)
+            self._show_model("point_cloud")
+            self.log_pane.info(f"{chunk.label}: {_it(len(chunk.point_cloud))} punti da {len(chunk.meta['scans'])} "
+                               "scansioni")
+
+        self.run_task("Scansioni laser", lambda p: import_scans(doc, paths, label=v["label"] or None,
+                                                                crs=(v["crs"] or "").strip() or None,
+                                                                max_points=int(v["max_points"]) or None, progress=p),
+                      done)
+
+    def colour_scan(self) -> None:
+        """The dense cloud of the active chunk coloured from the aligned photos of another chunk."""
+        if not self._need_chunk(product="point_cloud"):
+            return
+        others = [c for c in self.doc.chunks if c is not self.chunk and c.aligned_cameras]
+        if not others:
+            self._warn("Serve un altro chunk con le foto allineate, nello stesso sistema (Allinea chunk).")
+            return
+        v = ParamDialog.ask(self, "Colori dalle foto", [
+            Field("photos", "Foto del chunk", others[0].key, choices=[(c.key, c.label) for c in others])],
+            intro=f"I punti di «{self.chunk.label}» prendono il colore della foto che li vede piu' di fronte e da piu' "
+                  "vicino, tra quelle in cui non sono nascosti dal modello.")
+        if not v:
+            return
+        from ..io.scans import colour_from_photos
+
+        target = self.chunk
+        photos = next(c for c in others if c.key == v["photos"])
+        self.run_task("Colori dalle foto", lambda p: colour_from_photos(target, photos, progress=p),
+                      lambda r: (self.log_pane.info(f"Colori dalle foto per {_it(r['coloured'])} punti su "
+                                                    f"{_it(r['points'])}"), self._show_model("point_cloud")))
 
     def export_light_model(self) -> None:
         if not self._need_chunk(product="model"):
@@ -4285,6 +4348,45 @@ class MainWindow(QMainWindow):
                 q["rilievo_originale"] = f"Fotogrammetria (±{sigma * 1000:.1f} mm)".replace(".", ",")
         self._add_quota(q)
 
+    def _section_in_3d(self, a, b) -> None:
+        """A section traced by two points picked in the 3D view (its plan trace)."""
+        w = self.chunk.to_world(np.array([a, b], float))
+        if np.hypot(*(w[1, :2] - w[0, :2])) < 1e-6:
+            self.statusBar().showMessage("I due punti sono uno sopra l'altro: nessuna traccia in pianta", 8000)
+            return
+        self._section_drawn((float(w[0, 0]), float(w[0, 1])), (float(w[1, 0]), float(w[1, 1])))
+
+    def _slice_in_3d(self, point) -> None:
+        self.plan_slice(z_default=float(self.chunk.to_world(np.asarray(point, float)[None])[0, 2]))
+
+    def move_marker_in_3d(self, key: int) -> None:
+        """Riferimenti > Sposta nella vista 3D: the next click on the model or the cloud is the
+        new place of the marker (one placed in 3D or on the orthophoto, not measured in photos)."""
+        ch = self.chunk
+        if ch is None:
+            return
+        m = ch.marker_by_key(key)
+        if any(p.measured for p in m.projections.values()):
+            self._warn(f"{m.label} e' misurato nelle foto: la sua posizione viene da li'. Spostalo trascinando le "
+                       "bandierine verdi nelle foto, oppure togli le misure.")
+            return
+        kind = self.model_view.kind if self.model_view.kind in self.model_view.PICK_KINDS else None
+        self._show_model(kind or ("model" if ch.product_path("model") else "point_cloud"))
+        self.model_view.start_pick(f"move:{key}")
+
+    def _marker_moved_in_3d(self, key: int, point) -> None:
+        from ..markers import gcp
+
+        if point is None:
+            self.statusBar().showMessage("Nessun punto del modello o della nuvola sotto il cursore", 8000)
+            return
+        m = self.chunk.marker_by_key(key)
+        m.position = np.asarray(point, float)
+        gcp.project_marker(self.chunk, m)
+        self._markers_edited(m)
+        x, y, z = self.chunk.to_world(m.position[None])[0]
+        self.log_pane.info(f"{m.label} spostato in X {x:.3f} Y {y:.3f} Z {z:.3f}")
+
     def _marker_picked_in_3d(self, point) -> None:
         if point is None:
             self.statusBar().showMessage("Nessun punto del modello o della nuvola sotto il cursore", 8000)
@@ -5290,18 +5392,21 @@ class MainWindow(QMainWindow):
         self.run_task("Volume", lambda p: terrain.volume(self.chunk.dem_path, ref, poly), done, refresh=False,
                       save=False)
 
-    def plan_slice(self) -> None:
+    def plan_slice(self, z_default: float | None = None) -> None:
         if not self._need_chunk(product="model"):
             return
-        z_default = 0.0
-        if self.chunk.dem_path:
+        if z_default is not None:
+            z_default = round(float(z_default), 3)
+        elif self.chunk.dem_path:
             from ..archaeo.terrain import dem_range
 
             try:
                 lo, hi = dem_range(self.chunk.dem_path)[:2]
                 z_default = round((lo + hi) / 2, 3)
             except Exception:
-                pass
+                z_default = 0.0
+        else:
+            z_default = 0.0
         choices, codes = self._cloud_class_choices()
         v = ParamDialog.ask(self, "Pianta a quota", [
             Field("z", "Quota (m)", float(z_default), minimum=-10000.0, maximum=100000.0, decimals=3)]

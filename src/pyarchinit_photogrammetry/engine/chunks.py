@@ -504,8 +504,9 @@ def scene_depth(chunk: "Chunk", max_cameras: int = 60, max_points: int = 20000) 
 
 
 def _is_scaled(chunk: "Chunk") -> bool:
-    """World units are metres: a CRS, or a transform fitted to references or scale bars."""
-    return not crs_mod.is_local(chunk.crs) or abs(chunk.scale - 1.0) > 1e-9
+    """World units are metres: a CRS, a transform fitted to references or scale bars, or data
+    measured in metres (laser scans: ``meta["metric"]``)."""
+    return not crs_mod.is_local(chunk.crs) or abs(chunk.scale - 1.0) > 1e-9 or bool(chunk.meta.get("metric"))
 
 
 def _is_referenced(chunk: "Chunk") -> bool:

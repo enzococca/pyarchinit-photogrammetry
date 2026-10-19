@@ -173,6 +173,47 @@ class PyArchInit:
         links = self.db.query("media_to_entity_table", entity_type=entity_type, id_entity=id_entity)
         return [m for link in links for m in self.db.query("media_table", id_media=link["id_media"])]
 
+    def us_media(self, sito: str, area: str, us: str, unita_tipo: str | None = None) -> list[dict]:
+        """The media linked to a stratigraphic unit, with their previews (:meth:`_with_previews`)."""
+        return self._with_previews(self.media_for("US", self.us_id(sito, area, us, unita_tipo)))
+
+    def site_media(self, sito: str) -> list[dict]:
+        rows = self.db.query("site_table", sito=sito)
+        return self._with_previews(self.media_for("SITO", int(rows[0]["id_sito"]))) if rows else []
+
+    def _with_previews(self, media: list[dict]) -> list[dict]:
+        """``id_media``, ``filename``, ``filetype``, ``mediatype``, ``descrizione`` and the full
+        paths of the original (``path``), the thumbnail (``thumb``) and the resized copy
+        (``resize``) - None where the file is not on this computer (or on a remote store)."""
+        from .config import is_remote
+
+        cfg = self.db.config
+        if self.media_root is not None:
+            thumb_dir, resize_dir = self.media_root / "thumb", self.media_root / "resize"
+        else:
+            thumb_dir = Path(cfg.thumb_dir) if cfg and cfg.thumb_dir and not is_remote(cfg.thumb_dir) else None
+            resize_dir = Path(cfg.resize_dir) if cfg and cfg.resize_dir and not is_remote(cfg.resize_dir) else None
+
+        def existing(folder, name):
+            if folder is None or not name:
+                return None
+            p = folder / str(name)
+            return p if p.exists() else None
+
+        out, seen = [], set()
+        for m in media:
+            if m["id_media"] in seen:
+                continue
+            seen.add(m["id_media"])
+            t = (self.db.query("media_thumb_table", id_media=m["id_media"]) or [{}])[0]
+            original = Path(str(m.get("filepath") or "")) if m.get("filepath") else None
+            out.append({"id_media": m["id_media"], "filename": m.get("filename"), "filetype": m.get("filetype"),
+                        "mediatype": m.get("mediatype"), "descrizione": m.get("descrizione"),
+                        "path": original if original is not None and original.exists() else None,
+                        "thumb": existing(thumb_dir, t.get("media_thumb_filename")),
+                        "resize": existing(resize_dir, t.get("path_resize"))})
+        return out
+
     def us_polygons(self, sito: str, area: str | None = None, crs: str | None = None):
         """Stratigraphic unit polygons (``pyunitastratigrafiche``) as shapely geometries, in
         ``crs`` (e.g. the chunk CRS) when given, otherwise in the layer's SRID."""

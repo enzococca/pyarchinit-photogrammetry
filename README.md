@@ -201,6 +201,10 @@ is installed on first use (PyTorch in a separate environment, see the same page)
 * **Video and image quality**: frames chosen from a video (sharp, with the overlap the
   reconstruction needs), with the GPS of DJI drones from their `.SRT`; blurred photos found and
   disabled.
+* **PyArchInit media**: the photos, drawings and models linked to a US shown in the PyArchInit pane.
+* **3D view tools**: sections and plan slices picked on the model or the cloud, markers moved in 3D.
+* **Laser scans**: E57 and PTX imported as point clouds, registered on the photogrammetric chunk and
+  coloured from its photos.
 * **Exports for the web**: Cloud Optimized GeoTIFF (JPEG, WebP, ZSTD), Cloud Optimized Point Cloud
   (COPC), binary glTF with the texture, Cesium 3D Tiles of the model placed on the globe, light models
   with a normal map baked from the full one, fly-through videos.

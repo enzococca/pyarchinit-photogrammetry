@@ -535,6 +535,9 @@ class ModelView(QWidget):
     faces_selected = Signal(object, object)  # boolean masks over the faces of the model: visible only, all inside
     marker_requested = Signal(object)  # a point of the model or the cloud (internal frame), None: nothing there
     photos_point_requested = Signal(object)  # filter the photos that see this point (internal frame)
+    section_requested = Signal(object, object)  # the two ends of a section trace (internal frame)
+    slice_requested = Signal(object)  # a point at the height of a plan slice (internal frame)
+    move_marker_requested = Signal(int, object)  # a marker (key) to move to this point (internal frame)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -582,6 +585,12 @@ class ModelView(QWidget):
         self.b_photos.setToolTip("Clic su un punto del modello o della nuvola: le foto che lo vedono, come Filter "
                                  "Photos by Point di Metashape")
         self.b_photos.clicked.connect(lambda: self.start_pick("photos"))
+        self.b_section = QPushButton("Sezione")
+        self.b_section.setToolTip("Traccia di una sezione: clic su due punti del modello o della nuvola")
+        self.b_section.clicked.connect(lambda: self.start_pick("section"))
+        self.b_slice = QPushButton("Pianta a quota")
+        self.b_slice.setToolTip("Clic su un punto: la pianta del modello tagliato a quella quota")
+        self.b_slice.clicked.connect(lambda: self.start_pick("slice"))
         self.version_label = QLabel("")
         self.version_label.setObjectName("versionLabel")
         self.version_label.setStyleSheet("color: #b45309; font-weight: bold")
@@ -599,6 +608,8 @@ class ModelView(QWidget):
         bar.addWidget(self.b_lasso)
         bar.addWidget(self.b_marker)
         bar.addWidget(self.b_photos)
+        bar.addWidget(self.b_section)
+        bar.addWidget(self.b_slice)
         bar.addWidget(self.cb_cams)
         bar.addWidget(self.cb_marks)
         bar.addWidget(self.cb_region)
@@ -735,6 +746,8 @@ class ModelView(QWidget):
         # edits go to the active cloud or model, not to a kept version
         self.b_lasso.setVisible(self.kind in ("point_cloud", "model") and not self.paths)
         self.b_marker.setVisible(self.kind in self.PICK_KINDS)
+        self.b_section.setVisible(self.kind in self.PICK_KINDS)
+        self.b_slice.setVisible(self.kind in self.PICK_KINDS)
         self.b_photos.setVisible(self.kind in self.PICK_KINDS)
         mode = self.color_mode()
         self.legend.setVisible((self.kind in ("point_cloud", "tie_points") and mode == "class")
@@ -766,7 +779,11 @@ class ModelView(QWidget):
         image, self._project = self.canvas.snapshot()
         self._ray = self.canvas.view_ray
         self._purpose = purpose
-        what = "le foto che lo vedono" if purpose == "photos" else "un nuovo marker"
+        if purpose != "section_end":
+            self._section_start = None
+        what = {"photos": "le foto che lo vedono", "section": "il primo estremo della sezione",
+                "section_end": "il secondo estremo della sezione", "slice": "la quota della pianta"}.get(
+            purpose, "il nuovo posto del marker" if purpose.startswith("move:") else "un nuovo marker")
         self.picker.start(image, f"Clic su un punto del modello o della nuvola: {what} - Esc o tasto destro annulla")
         self.stack.setCurrentWidget(self.picker)
 
@@ -775,8 +792,24 @@ class ModelView(QWidget):
         if pos is None or self._project is None:
             return
         point = self.pick_point(pos[0], pos[1], self._project, self._ray)
-        (self.photos_point_requested if getattr(self, "_purpose", "marker") == "photos"
-         else self.marker_requested).emit(point)
+        purpose = getattr(self, "_purpose", "marker")
+        if purpose == "photos":
+            self.photos_point_requested.emit(point)
+        elif purpose == "section":
+            if point is not None:
+                self._section_start = point
+                self.start_pick("section_end")
+        elif purpose == "section_end":
+            if point is not None and getattr(self, "_section_start", None) is not None:
+                self.section_requested.emit(self._section_start, point)
+            self._section_start = None
+        elif purpose == "slice":
+            if point is not None:
+                self.slice_requested.emit(point)
+        elif purpose.startswith("move:"):
+            self.move_marker_requested.emit(int(purpose[5:]), point)
+        else:
+            self.marker_requested.emit(point)
 
     def pick_point(self, x: float, y: float, project, ray=None, reach: float = 8.0):
         """The point of the surface under widget pixel (x, y), internal frame: of the points and
