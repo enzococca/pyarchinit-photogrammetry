@@ -5,13 +5,17 @@ name: windows-arm
 # win_arm64 wheels and are built here, each in its own job: lazrs (LAZ point clouds), the native
 # core of this project, OpenCV (the modules this program uses), pycolmap (COLMAP with vcpkg, as
 # COLMAP's own Windows wheels) and Open3D (without its GUI, as this program's Linux ARM wheels). On
-# demand; the wheels stay as artifacts.
+# demand; the wheels stay as artifacts. The app job takes those wheels (the runs that hold them are
+# inputs), installs the program with them, runs its tests and builds the application with PyInstaller.
 on:
   workflow_dispatch:
     inputs:
       jobs:
         description: "Jobs to run"
         default: "lazrs core opencv pycolmap open3d"
+      wheel_runs:
+        description: "Runs of this workflow whose win-arm64-* artifacts the app job installs"
+        default: "39275909789 39329254692 39296584761 39405291562"
 
 jobs:
   lazrs:
@@ -414,3 +418,53 @@ jobs:
           name: win-arm64-open3d
           path: wheels/*.whl
           if-no-files-found: error
+
+  app:
+    if: contains(inputs.jobs, 'app')
+    runs-on: windows-11-arm
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          architecture: arm64
+      - name: The wheels built by the other jobs
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          foreach ($run in "${{ inputs.wheel_runs }}".Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries)) {
+            gh run download $run --pattern "win-arm64-*" -D wheels
+          }
+          Get-ChildItem wheels -Recurse -Filter *.whl | ForEach-Object { $_.FullName }
+      - name: Install the program with them
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m pip install --upgrade pip
+          pip install (Get-ChildItem wheels -Recurse -Filter *.whl | ForEach-Object { $_.FullName })
+          # every extra but PostGIS, E57 and SAM: psycopg2-binary, pye57 and torch have no ARM64 wheels yet
+          pip install -e ".[mesh,bim,learn,munsell,gui,build]" pytest
+          python -c "import open3d, pycolmap, cv2, lazrs, ppg_core, PySide6, pyarchinit_photogrammetry as ppg; print(ppg.__version__, open3d.__version__, pycolmap.__version__, cv2.__version__, ppg_core.__version__)"
+          ppg doctor
+      - name: Tests
+        continue-on-error: true
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PPG_RENDERER: software
+          PPG_LANG: it
+        run: python -m pytest tests -q -p no:cacheprovider --ignore=tests/test_pottery_demo.py
+      - name: Application
+        shell: pwsh
+        run: python packaging/build.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PyArchInit-Photogrammetry-windows-arm64
+          path: dist/*.zip
+          if-no-files-found: error
+
