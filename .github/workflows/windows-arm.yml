@@ -308,7 +308,7 @@ jobs:
           text = text.replace(old, old + "    PATCH_COMMAND ${EMBREE_PATCH_COMMAND}\n")
           f.write_text(text, encoding="utf-8")
           # this Visual Studio (MSVC 14.5) has no <experimental/filesystem> any more
-          for f in pathlib.Path("open3d/cpp").rglob("*.cpp"):
+          for f in [*pathlib.Path("open3d/cpp").rglob("*.cpp"), *pathlib.Path("open3d/cpp").rglob("*.h")]:
               text = f.read_text(encoding="utf-8")
               if "experimental/filesystem" in text:
                   text = text.replace("#include <experimental/filesystem>", "#include <filesystem>")
