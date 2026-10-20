@@ -132,8 +132,17 @@ def install(progress=None, env: Path | None = None, packages: list[str] | None =
     args = torch_backend_args(uv, clean)
     if args and sys.platform != "darwin" and installed_device(env) == "cpu":
         args += ["--reinstall-package", "torch"]  # an older install got the CPU build: look for the GPU again
-    _run([str(uv), "pip", "install", "--python", str(env_python(env))] + args + (packages or PACKAGES), clean,
-         progress, 0.15, 0.95)
+    wanted = list(packages or PACKAGES)
+    if sys.platform == "win32" and platform.machine().upper() == "ARM64" and "torch" in wanted:
+        # PyTorch for Windows on ARM exists only on its own index, and sam2 (a source archive) wants
+        # torch while it builds: first torch, then the rest built against it
+        _run([str(uv), "pip", "install", "--python", str(env_python(env))] + args + ["torch"], clean,
+             progress, 0.15, 0.75)
+        _run([str(uv), "pip", "install", "--python", str(env_python(env)), "--no-build-isolation"]
+             + [w for w in wanted if w != "torch"], clean, progress, 0.75, 0.95)
+    else:
+        _run([str(uv), "pip", "install", "--python", str(env_python(env))] + args + wanted, clean,
+             progress, 0.15, 0.95)
     out = subprocess.run([str(env_python(env)), "-c", _CHECK], capture_output=True, text=True, env=clean,
                          close_fds=False, timeout=600)
     if out.returncode != 0:
