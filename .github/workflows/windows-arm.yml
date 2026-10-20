@@ -307,6 +307,13 @@ jobs:
           assert text.count(old) == 1, "the Embree project of Open3D has changed"
           text = text.replace(old, old + "    PATCH_COMMAND ${EMBREE_PATCH_COMMAND}\n")
           f.write_text(text, encoding="utf-8")
+          # this Visual Studio (MSVC 14.5) has no <experimental/filesystem> any more
+          for f in pathlib.Path("open3d/cpp").rglob("*.cpp"):
+              text = f.read_text(encoding="utf-8")
+              if "experimental/filesystem" in text:
+                  text = text.replace("#include <experimental/filesystem>", "#include <filesystem>")
+                  text = text.replace("std::experimental::filesystem", "std::filesystem")
+                  f.write_text(text, encoding="utf-8")
           # with a system OpenSSL there is no BoringSSL target for curl to wait for
           f = pathlib.Path("open3d/3rdparty/curl/curl.cmake")
           text = f.read_text(encoding="utf-8")
