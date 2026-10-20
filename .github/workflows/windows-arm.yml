@@ -333,7 +333,8 @@ jobs:
           Import-Module (Join-Path $vs "Common7/Tools/Microsoft.VisualStudio.DevShell.dll")
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=arm64 -host_arch=arm64"
           Set-Location $root
-          # the headers of OpenBLAS (cblas.h, lapacke.h) are not on the include path Open3D makes for a
+          # VTK from its source: the one Open3D downloads for Windows is built for x64. The headers
+          # of OpenBLAS (cblas.h, lapacke.h) are not on the include path Open3D makes for a
           # system BLAS; the flags given keep CMake's own for cl.exe (WIN32 for PoissonRecon's headers),
           # name the architecture for the Windows headers included before windows.h (the dirent of
           # Open3D knows x86, x64 and ARM, not ARM64)
@@ -345,7 +346,7 @@ jobs:
             -DBUILD_SHARED_LIBS=OFF -DBUILD_PYTHON_MODULE=ON -DBUILD_GUI=OFF -DBUILD_WEBRTC=OFF `
             -DBUILD_EXAMPLES=OFF -DBUILD_UNIT_TESTS=OFF -DBUILD_BENCHMARKS=OFF -DBUILD_ISPC_MODULE=OFF `
             -DBUILD_CUDA_MODULE=OFF -DBUILD_JUPYTER_EXTENSION=OFF -DBUILD_AZURE_KINECT=OFF `
-            -DBUILD_LIBREALSENSE=OFF -DWITH_IPP=OFF -DWITH_OPENMP=ON `
+            -DBUILD_LIBREALSENSE=OFF -DWITH_IPP=OFF -DWITH_OPENMP=ON -DBUILD_VTK_FROM_SOURCE=ON `
             -DUSE_BLAS=ON -DUSE_SYSTEM_BLAS=ON -DBLA_VENDOR=OpenBLAS `
             -DBLAS_LIBRARIES="$blas/lib/openblas.lib" -DLAPACK_LIBRARIES="$blas/lib/openblas.lib" `
             -DLAPACKE_DIR="$blas" -DLAPACKE_INCDIR="$blas/include/openblas" -DLAPACKE_LIBDIR="$blas/lib" `
