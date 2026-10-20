@@ -31,6 +31,7 @@ class StartPage(QWidget):
     doctor_requested = Signal()
     log_requested = Signal()
     help_requested = Signal()
+    donate_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -95,7 +96,8 @@ class StartPage(QWidget):
         self.b_help = QPushButton(icon("help"), tr("Guida"))
         self.b_doctor = QPushButton(icon("doctor"), tr("Diagnostica ambiente"))
         self.b_log = QPushButton(icon("log"), tr("Cartella dei log"))
-        for b in (self.b_help, self.b_doctor, self.b_log):
+        self.b_donate = QPushButton(icon("donate"), tr("Sostieni il progetto"))
+        for b in (self.b_help, self.b_doctor, self.b_log, self.b_donate):
             b.setFlat(True)
             foot.addWidget(b)
         col.addLayout(foot)
@@ -111,6 +113,7 @@ class StartPage(QWidget):
         self.b_help.clicked.connect(self.help_requested)
         self.b_doctor.clicked.connect(self.doctor_requested)
         self.b_log.clicked.connect(self.log_requested)
+        self.b_donate.clicked.connect(self.donate_requested)
         self.set_recent([])
 
     def set_recent(self, paths: list[str]) -> None:

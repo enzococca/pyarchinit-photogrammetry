@@ -9,6 +9,8 @@ unità stratigrafiche e quote con i campi di PyArchInit, profili ceramici, class
 Anything 2.1, esportazione IFC. Un'applicazione desktop, una riga di comando (`ppg`) e una libreria
 Python sullo stesso motore, che gira sulla CPU (anche Apple Silicon). Licenza GPL-2.0-or-later.
 
+[:material-heart: Sostieni il progetto su PayPal](https://paypal.me/enzococca){ .md-button }
+
 <div class="grid cards" markdown>
 
 -   :material-download: **[Installazione](install.md)**

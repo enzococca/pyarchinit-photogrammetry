@@ -40,6 +40,7 @@ from .worker import StatusProgress, TaskRunner
 log = logging.getLogger("pyarchinit_photogrammetry.gui")
 APP_TITLE = "PyArchInit Photogrammetry"
 DOCS_URL = "https://github.com/enzococca/pyarchinit-photogrammetry"
+DONATE_URL = "https://paypal.me/enzococca"  # donations to the project (README, site and *Aiuto* say the same)
 TARGET_TYPES = [("aruco_4x4_50", "ArUco 4x4 (50 codici)"), ("aruco_4x4_250", "ArUco 4x4 (250 codici)"),
                 ("aruco_5x5_100", "ArUco 5x5 (100 codici)"), ("aruco_6x6_250", "ArUco 6x6 (250 codici)"),
                 ("apriltag_36h11", "AprilTag 36h11")]
@@ -168,6 +169,7 @@ class MainWindow(QMainWindow):
         self.start_page.doctor_requested.connect(self.show_doctor)
         self.start_page.log_requested.connect(self.open_log_folder)
         self.start_page.help_requested.connect(self.open_docs)
+        self.start_page.donate_requested.connect(self.donate)
         self.stack = QStackedWidget()
         self.stack.addWidget(self.start_page)
         self.stack.addWidget(self.tabs)
@@ -759,6 +761,7 @@ class MainWindow(QMainWindow):
         self._act(m, tr("Apri cartella dei log"), self.open_log_folder, icon_name="folder")
         m.addSeparator()
         self._act(m, tr("Controlla aggiornamenti..."), self.check_updates, icon_name="update")
+        self._act(m, tr("Sostieni il progetto (PayPal)..."), self.donate, icon_name="donate")
         self.a_update_auto = QAction(tr("Controlla gli aggiornamenti all'avvio"), self, checkable=True)
         self.a_update_auto.setChecked(self.settings.value("updates_auto", "true") in ("true", True, 1, "1"))
         self.a_update_auto.toggled.connect(lambda on: self.settings.setValue("updates_auto", "true" if on else "false"))
@@ -4686,6 +4689,10 @@ class MainWindow(QMainWindow):
     def open_docs(self) -> None:
         QDesktopServices.openUrl(QUrl(DOCS_URL))
 
+
+    def donate(self) -> None:
+        """*Aiuto > Sostieni il progetto*: the PayPal page of the project."""
+        QDesktopServices.openUrl(QUrl(DONATE_URL))
     def open_log_folder(self) -> None:
         from .logging_setup import log_dir
 

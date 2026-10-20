@@ -61,6 +61,7 @@ ICONS = {
     "workspace": ("mdi6.file-tree-outline", "slate"), "reference_pane": ("mdi6.table", "indigo"),
     # help and status
     "help": ("mdi6.help-circle-outline", "blue"), "about": ("mdi6.information-outline", "blue"),
+    "donate": ("mdi6.heart-outline", "red"),
     "doctor": ("mdi6.stethoscope", "teal"), "error": ("mdi6.alert-circle", "red"),
     "warning": ("mdi6.alert", "amber"), "info": ("mdi6.information", "blue"),
     "copy": ("mdi6.content-copy", "grey"), "folder": ("mdi6.folder-outline", "amber"),

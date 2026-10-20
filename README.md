@@ -15,6 +15,11 @@ Apple Silicon included.
 Documentation, tutorials and a benchmark against Metashape and WebODM/ODM:
 <https://enzococca.github.io/pyarchinit-photogrammetry/>
 
+[![Support the project on PayPal](https://img.shields.io/badge/Support_the_project-PayPal-0070ba?logo=paypal&logoColor=white)](https://paypal.me/enzococca)
+
+**If pyarchinit-photogrammetry is useful to you, support its development with a donation on
+[PayPal](https://paypal.me/enzococca).** Development, benchmarks and builds for every platform are the work of one person.
+
 ## Desktop application (no Python needed)
 
 Download the build for your system from the

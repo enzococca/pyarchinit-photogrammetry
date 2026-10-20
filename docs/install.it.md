@@ -11,6 +11,8 @@ viene per primo).
 </div>
 
 Tutte le versioni sono nella [pagina delle release](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest).
+Se l'applicazione ti è utile, [sostieni il progetto su PayPal](https://paypal.me/enzococca): è il lavoro di una persona
+sola.
 
 | Sistema | File | |
 |---|---|---|

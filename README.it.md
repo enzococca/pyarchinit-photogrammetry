@@ -15,6 +15,11 @@ Python e gira su CPU, anche su Mac Apple Silicon.
 Documentazione, tutorial e un confronto con Metashape e WebODM/ODM:
 <https://enzococca.github.io/pyarchinit-photogrammetry/it/>
 
+[![Sostieni il progetto su PayPal](https://img.shields.io/badge/Sostieni_il_progetto-PayPal-0070ba?logo=paypal&logoColor=white)](https://paypal.me/enzococca)
+
+**Se pyarchinit-photogrammetry ti è utile, sostieni il suo sviluppo con una donazione su
+[PayPal](https://paypal.me/enzococca).** Sviluppo, benchmark e versioni per ogni piattaforma sono il lavoro di una persona sola.
+
 ## Applicazione desktop (senza installare Python)
 
 Scarica la versione per il tuo sistema dalla pagina

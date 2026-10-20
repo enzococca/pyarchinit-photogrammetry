@@ -10,6 +10,8 @@ No Python needed: download the build for your system (the button of your system 
 </div>
 
 All the builds are on the [releases page](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest).
+If the application is useful to you, [support the project on PayPal](https://paypal.me/enzococca): it is the work of one
+person.
 
 | System | File | |
 |---|---|---|

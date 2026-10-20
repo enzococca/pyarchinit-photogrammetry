@@ -9,6 +9,8 @@ stratigraphic units and spot heights with the fields of PyArchInit, pottery prof
 Segment Anything 2.1, IFC export. A desktop application, a command line (`ppg`) and a Python
 library on the same engine, running on the CPU (Apple Silicon included). GPL-2.0-or-later.
 
+[:material-heart: Support the project on PayPal](https://paypal.me/enzococca){ .md-button }
+
 <div class="grid cards" markdown>
 
 -   :material-download: **[Installation](install.md)**
