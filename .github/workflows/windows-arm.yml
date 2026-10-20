@@ -319,12 +319,13 @@ jobs:
           # VTK built from its source gets the KWIML patch
           f = pathlib.Path("open3d/3rdparty/vtk/vtk_build.cmake")
           text = f.read_text(encoding="utf-8")
+          # (the first of its two projects is the build from source, the second the download)
           old = "    ExternalProject_Add(\n        ext_vtk\n"
-          assert text.count(old) == 1, "vtk_build.cmake of Open3D has changed"
-          text = text.replace(old, '    set(VTK_PATCH_COMMAND "%s" "%s" <SOURCE_DIR>)\n' % (os.environ["EMBREE_PYTHON"], os.environ["VTK_PATCH"]) + old)
+          assert text.count(old) == 2, "vtk_build.cmake of Open3D has changed"
+          text = text.replace(old, '    set(VTK_PATCH_COMMAND "%s" "%s" <SOURCE_DIR>)\n' % (os.environ["EMBREE_PYTHON"], os.environ["VTK_PATCH"]) + old, 1)
           old = '        UPDATE_COMMAND ""\n'
-          assert text.count(old) == 1, "the VTK project of Open3D has changed"
-          text = text.replace(old, old + "        PATCH_COMMAND ${VTK_PATCH_COMMAND}\n")
+          assert text.count(old) == 2, "the VTK projects of Open3D have changed"
+          text = text.replace(old, old + "        PATCH_COMMAND ${VTK_PATCH_COMMAND}\n", 1)
           f.write_text(text, encoding="utf-8")
           # this Visual Studio (MSVC 14.5) has no <experimental/filesystem> any more
           for f in [*pathlib.Path("open3d/cpp").rglob("*.cpp"), *pathlib.Path("open3d/cpp").rglob("*.h")]:
