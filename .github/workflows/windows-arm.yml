@@ -338,6 +338,12 @@ jobs:
                   text = text.replace("#include <experimental/filesystem>", "#include <filesystem>")
                   text = text.replace("std::experimental::filesystem", "std::filesystem")
                   f.write_text(text, encoding="utf-8")
+          # with a system OpenSSL, Open3D links curl to libcrypto only: libssl is needed too
+          f = pathlib.Path("open3d/3rdparty/find_dependencies.cmake")
+          text = f.read_text(encoding="utf-8")
+          old = "TARGETS OpenSSL::Crypto\n"
+          assert text.count(old) == 1, "find_dependencies.cmake of Open3D has changed (OpenSSL)"
+          f.write_text(text.replace(old, "TARGETS OpenSSL::SSL OpenSSL::Crypto\n"), encoding="utf-8")
           # with a system OpenSSL there is no BoringSSL target for curl to wait for
           f = pathlib.Path("open3d/3rdparty/curl/curl.cmake")
           text = f.read_text(encoding="utf-8")
