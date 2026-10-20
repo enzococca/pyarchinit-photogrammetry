@@ -245,7 +245,8 @@ jobs:
           $clang = (Get-ChildItem "C:/Program Files/LLVM/bin/clang-cl.exe", "$vs/VC/Tools/Llvm/ARM64/bin/clang-cl.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
           if (-not $clang) { throw "no clang-cl on this runner" }
           & $clang --version
-          $env:EMBREE_CLANG = $clang -replace '\\', '/'
+          # its 8.3 name: a path with a space is cut at the space in the list of CMake arguments
+          $env:EMBREE_CLANG = (New-Object -ComObject Scripting.FileSystemObject).GetFile($clang).ShortPath -replace '\\', '/'
           Set-Content patch.py @'
           import os, pathlib
           f = pathlib.Path("open3d/3rdparty/embree/embree.cmake")
