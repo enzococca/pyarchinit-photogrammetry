@@ -12,7 +12,7 @@ on:
     inputs:
       jobs:
         description: "Jobs to run"
-        default: "lazrs core opencv pycolmap open3d"
+        default: "lazrs core opencv pycolmap open3d sam"
       wheel_runs:
         description: "Runs of this workflow whose win-arm64-* artifacts the app job installs"
         default: "39275909789 39329254692 39296584761 39405291562"
@@ -470,4 +470,24 @@ jobs:
           name: PyArchInit-Photogrammetry-windows-arm64
           path: dist/*.zip
           if-no-files-found: error
+
+  sam:
+    # nothing to build: PyTorch publishes CPU wheels for Windows on ARM on its own index and sam2 is
+    # pure Python; this only checks that the separate environment of SAM (ai/sam_env.py) can exist
+    if: contains(inputs.jobs, 'sam')
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          architecture: arm64
+      - name: torch and sam2 for ARM64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install "sam2>=1.1" "huggingface_hub>=0.20"
+          python -c "import torch, sam2, platform; print(torch.__version__, platform.machine(), torch.ones(3).sum().item(), sam2.__name__)"
 
