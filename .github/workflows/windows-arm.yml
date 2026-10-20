@@ -260,8 +260,11 @@ jobs:
           '@
           python patch.py
           python -m pip install --upgrade pip
-          pip install numpy "setuptools<81" wheel delvewheel ninja
+          # cmake 3 (the runner has cmake 4, which refuses the old CMake projects Open3D builds: zlib)
+          pip install numpy "setuptools<81" wheel delvewheel ninja "cmake<4"
           $py = (Get-Command python).Source -replace '\\', '/'
+          $cmake = (python -c "import cmake, os; print(os.path.join(cmake.CMAKE_BIN_DIR, 'cmake.exe'))")
+          $env:CMAKE_POLICY_VERSION_MINIMUM = "3.5"
           # the developer shell of Visual Studio for ARM64 (the Visual Studio generator does not find
           # the installation on these runners), then Ninja
           $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
@@ -272,7 +275,7 @@ jobs:
           Set-Location $root
           # the headers of OpenBLAS (cblas.h, lapacke.h) are not on the include path Open3D makes for a
           # system BLAS; BORINGSSL_ROOT_DIR is what its curl recipe asks for even with a system OpenSSL
-          cmake -S open3d -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
+          & $cmake -S open3d -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_INSTALL_PREFIX="$root/install" -DDEVELOPER_BUILD=OFF `
             -DBUILD_SHARED_LIBS=OFF -DBUILD_PYTHON_MODULE=ON -DBUILD_GUI=OFF -DBUILD_WEBRTC=OFF `
             -DBUILD_EXAMPLES=OFF -DBUILD_UNIT_TESTS=OFF -DBUILD_BENCHMARKS=OFF -DBUILD_ISPC_MODULE=OFF `
@@ -284,7 +287,7 @@ jobs:
             -DCMAKE_CXX_FLAGS="/I$blas/include/openblas" -DCMAKE_C_FLAGS="/I$blas/include/openblas" `
             -DUSE_SYSTEM_OPENSSL=ON -DOPENSSL_ROOT_DIR="$ssl" -DBORINGSSL_ROOT_DIR="$ssl" `
             -DPython3_EXECUTABLE="$py" -DPYTHON_EXECUTABLE="$py"
-          cmake --build build --target pip-package
+          & $cmake --build build --target pip-package
           $raw = Get-ChildItem build/lib/python_package/pip_package/*.whl
           delvewheel repair -v --add-path "$blas/bin;$ssl/bin" -w wheels $raw.FullName
           pip install (Get-ChildItem wheels/*.whl).FullName
