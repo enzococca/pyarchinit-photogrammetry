@@ -237,16 +237,18 @@ jobs:
           Expand-Archive openblas.zip -DestinationPath "$root/ob"
           $blas = "$root/ob/OpenBLAS"
           # its LAPACK headers use C99 _Complex unless the complex types are defined before: cl.exe
-          # has no _Complex, so in C++ they are std::complex
+          # has no _Complex, so in C++ they are plain structures (std::complex returned by C-linkage
+          # functions is a warning Open3D treats as an error)
           $complex = @'
           #if defined(__cplusplus) && !defined(lapack_complex_float)
-          #include <complex>
-          #define lapack_complex_float std::complex<float>
-          #define lapack_complex_double std::complex<double>
-          #define lapack_complex_float_real(z) ((z).real())
-          #define lapack_complex_float_imag(z) ((z).imag())
-          #define lapack_complex_double_real(z) ((z).real())
-          #define lapack_complex_double_imag(z) ((z).imag())
+          typedef struct { float real, imag; } ppg_lapack_complex_float;
+          typedef struct { double real, imag; } ppg_lapack_complex_double;
+          #define lapack_complex_float ppg_lapack_complex_float
+          #define lapack_complex_double ppg_lapack_complex_double
+          #define lapack_complex_float_real(z) ((z).real)
+          #define lapack_complex_float_imag(z) ((z).imag)
+          #define lapack_complex_double_real(z) ((z).real)
+          #define lapack_complex_double_imag(z) ((z).imag)
           #endif
           '@
           foreach ($h in "lapack.h", "lapacke.h") {
