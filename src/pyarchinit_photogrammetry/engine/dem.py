@@ -267,18 +267,56 @@ def remove_stray_cells(dem: np.ndarray, resolution: float, neighbours: int = 8) 
     return out, int(stray.sum())
 
 
+def remove_pits(dem: np.ndarray, resolution: float, depth: float = 2.0, scale: float = 3.0, window: int = 5,
+                sparse: float = 0.1) -> tuple[np.ndarray, int]:
+    """Cells of the thinly covered parts of the DEM that lie more than ``depth`` metres above or
+    below the ground around them are emptied (to be filled from around): the ground around is
+    the median of the DEM over cells of ``scale`` metres, smoothed as the median of ``window``
+    such cells a side; a part is thinly covered when fewer than ``sparse`` of the fine cells of
+    its coarse cell have a height. At the edge of a survey from the air, where two or three
+    photos see the ground at the border of their frames, a few wrong points of the dense cloud
+    made pits of 5-20 m in the DEM of Tell Sultan; where the cloud is dense the DEM is trusted
+    as it is, so the trenches and walls of an excavation keep their depth and height. Returns the
+    DEM and the cells emptied."""
+    from scipy import ndimage
+
+    ok = np.isfinite(dem)
+    n = max(1, int(round(scale / resolution)))
+    H, W = dem.shape
+    Hc, Wc = -(-H // n), -(-W // n)
+    padded = np.full((Hc * n, Wc * n), np.nan)
+    padded[:H, :W] = dem
+    blocks = padded.reshape(Hc, n, Wc, n).transpose(0, 2, 1, 3).reshape(Hc, Wc, n * n)
+    with np.errstate(all="ignore"):
+        coarse = np.nanmedian(blocks, axis=2)
+    filled = np.isfinite(blocks).mean(axis=2)
+    if np.isfinite(coarse).sum() < window * window:
+        return dem, 0
+    around = ndimage.generic_filter(coarse, np.nanmedian, size=window, mode="constant", cval=np.nan)
+    thin = filled < sparse
+    ref = np.repeat(np.repeat(around, n, axis=0), n, axis=1)[:H, :W]
+    judge = np.repeat(np.repeat(thin, n, axis=0), n, axis=1)[:H, :W]
+    with np.errstate(invalid="ignore"):
+        pits = ok & judge & np.isfinite(ref) & (np.abs(dem - ref) > depth)
+    out = dem.copy()
+    out[pits] = np.nan
+    return out, int(pits.sum())
+
+
 def dem_from_points(pts: np.ndarray, resolution: float, reducer: str = "max", despike: bool = True,
                     interpolate: bool = True, max_fill: int | None = None):
-    """Grid of the points (``reducer`` per cell), spikes and stray cells removed
-    (:func:`remove_spikes`, :func:`remove_stray_cells`), the cells without points interpolated
-    across the ground the survey covers (:func:`covered_ground`) up to ``max_fill`` cells from a
-    point (default four coarse cells). Returns ``(dem, origin, cells removed)``."""
+    """Grid of the points (``reducer`` per cell), spikes, stray cells and the pits of the thinly
+    covered parts removed (:func:`remove_spikes`, :func:`remove_stray_cells`, :func:`remove_pits`),
+    the cells without points interpolated across the ground the survey covers
+    (:func:`covered_ground`) up to ``max_fill`` cells from a point (default four coarse cells).
+    Returns ``(dem, origin, cells removed)``."""
     dem, origin, _ = grid_points(pts, resolution, reducer=reducer)
     removed = 0
     if despike:
         dem, spikes = remove_spikes(dem, resolution)
         dem, strays = remove_stray_cells(dem, resolution)
-        removed = spikes + strays
+        dem, pits = remove_pits(dem, resolution)
+        removed = spikes + strays + pits
     if interpolate:
         from rasterio.fill import fillnodata
 

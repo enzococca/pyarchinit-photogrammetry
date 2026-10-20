@@ -65,3 +65,24 @@ def test_covered_ground_ends_near_the_points():
     assert ground[110:290, 110:290].all()  # the gaps between the points are ground
     assert not ground[350, 30] and not ground[:60].any()  # the stray point and the empty side are not
     assert not ground[100:300, 330:].any()  # at most a coarse cell beyond the last point
+
+
+def test_pits_of_the_thin_margin_go_the_trench_of_the_dense_part_stays():
+    """A survey DEM at 0.2 m: a dense part with a 2.5 m deep, 4 m wide trench, and a thin margin
+    (one cell in twenty) with a cluster of cells 8 m below the ground: the cluster is emptied, the
+    trench and the rest keep their heights."""
+    from pyarchinit_photogrammetry.engine.dem import remove_pits
+
+    rng = np.random.default_rng(0)
+    res = 0.2
+    dem = 100.0 + 0.001 * np.arange(300)[:, None] + rng.normal(0, 0.02, (300, 300))
+    dem[140:160, :150] -= 2.5  # the trench, in the dense part
+    thin = rng.random((300, 300)) > 0.05
+    dem[:, 150:] = np.where(thin[:, 150:], np.nan, dem[:, 150:])  # the margin: one cell in twenty
+    dem[200:203, 220:223] = 92.0  # wrong points at the margin
+    before = dem.copy()
+    out, n = remove_pits(dem, res)
+    assert 5 <= n <= 9 and np.isnan(out[200:203, 220:223]).all()
+    rest = ~np.isnan(before)
+    rest[200:203, 220:223] = False
+    assert np.array_equal(out[rest], before[rest])  # the trench, the dense part and the good margin cells
