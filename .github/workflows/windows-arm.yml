@@ -500,9 +500,9 @@ jobs:
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
           python -m pip install --upgrade pip
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          # sam2 builds from its source archive and wants torch while building: the one installed,
-          # not one from PyPI (where there is none for ARM64)
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          # sam2 builds from its source archive and wants torch (and torchvision) while building: those
+          # installed, not ones from PyPI (where there are none for ARM64)
           pip install --no-build-isolation "sam2>=1.1" "huggingface_hub>=0.20"
           python -c "import torch, sam2, platform; print(torch.__version__, platform.machine(), torch.ones(3).sum().item(), sam2.__name__)"
 

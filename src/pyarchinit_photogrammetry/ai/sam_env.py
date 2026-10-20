@@ -134,12 +134,12 @@ def install(progress=None, env: Path | None = None, packages: list[str] | None =
         args += ["--reinstall-package", "torch"]  # an older install got the CPU build: look for the GPU again
     wanted = list(packages or PACKAGES)
     if sys.platform == "win32" and platform.machine().upper() == "ARM64" and "torch" in wanted:
-        # PyTorch for Windows on ARM exists only on its own index, and sam2 (a source archive) wants
-        # torch while it builds: first torch, then the rest built against it
-        _run([str(uv), "pip", "install", "--python", str(env_python(env))] + args + ["torch"], clean,
+        # PyTorch and torchvision for Windows on ARM exist only on their own index, and sam2 (a source
+        # archive) wants them while it builds: first those two, then the rest built against them
+        _run([str(uv), "pip", "install", "--python", str(env_python(env))] + args + ["torch", "torchvision"], clean,
              progress, 0.15, 0.75)
         _run([str(uv), "pip", "install", "--python", str(env_python(env)), "--no-build-isolation"]
-             + [w for w in wanted if w != "torch"], clean, progress, 0.75, 0.95)
+             + [w for w in wanted if w not in ("torch", "torchvision")], clean, progress, 0.75, 0.95)
     else:
         _run([str(uv), "pip", "install", "--python", str(env_python(env))] + args + wanted, clean,
              progress, 0.15, 0.95)
