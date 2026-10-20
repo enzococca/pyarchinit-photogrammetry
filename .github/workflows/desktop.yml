@@ -76,13 +76,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
-          $PSNativeCommandUseErrorActionPreference = $true
           foreach ($run in $env:WHEEL_RUNS.Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries)) {
-            gh run download $run --pattern "win-arm64-*" -D wheels
+            $ok = $false
+            foreach ($try in 1..5) {  # the artifact service answers HTTP 500 now and then
+              gh run download $run --pattern "win-arm64-*" -D wheels
+              if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+              Start-Sleep -Seconds 30
+            }
+            if (-not $ok) { throw "the artifacts of run $run could not be downloaded" }
           }
           Remove-Item -Recurse -Force wheels/win-arm64-core -ErrorAction SilentlyContinue  # built below from native/
           python -m pip install --upgrade pip maturin numpy
+          if ($LASTEXITCODE -ne 0) { throw "pip" }
           pip install (Get-ChildItem wheels -Recurse -Filter *.whl | ForEach-Object { $_.FullName })
+          if ($LASTEXITCODE -ne 0) { throw "the wheels did not install" }
       - name: Install
         shell: pwsh
         run: |
