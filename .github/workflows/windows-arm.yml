@@ -447,8 +447,11 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           python -m pip install --upgrade pip
           pip install (Get-ChildItem wheels -Recurse -Filter *.whl | ForEach-Object { $_.FullName })
-          # every extra but PostGIS, E57 and SAM: psycopg2-binary, pye57 and torch have no ARM64 wheels yet
-          pip install -e ".[mesh,bim,learn,munsell,gui,build]" pytest
+          # every extra but PostGIS, E57 and SAM (psycopg2-binary, pye57 and torch have no ARM64 wheels yet)
+          # and the GUI without pyvista: it needs VTK, which has none either (the 3D view then uses the
+          # software renderer; asking for pyvista sent pip through all its versions and into a source
+          # build of OpenCV)
+          pip install -e ".[mesh,bim,learn,munsell,build]" "PySide6>=6.6" "qtawesome>=1.3" pytest
           python -c "import open3d, pycolmap, cv2, lazrs, ppg_core, PySide6, pyarchinit_photogrammetry as ppg; print(ppg.__version__, open3d.__version__, pycolmap.__version__, cv2.__version__, ppg_core.__version__)"
           ppg doctor
       - name: Tests
