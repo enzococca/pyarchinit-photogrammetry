@@ -72,6 +72,9 @@ plugins:
             Benchmark: Benchmark
             Roadmap: Roadmap
 
+extra_javascript:
+  - js/download.js
+
 markdown_extensions:
   - admonition
   - attr_list

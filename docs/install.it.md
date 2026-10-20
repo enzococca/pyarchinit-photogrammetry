@@ -2,8 +2,15 @@
 
 ## Applicazione desktop
 
-Senza installare Python: scarica la versione per il tuo sistema dall'[ultima
-release](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest).
+Senza installare Python: scarica la versione per il tuo sistema (il pulsante del tuo sistema
+viene per primo).
+
+<div class="ppg-download" markdown>
+[:material-apple: Scarica per macOS, Apple Silicon](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest){ .md-button data-ppg-asset="macos-arm64.dmg" }
+[:material-microsoft-windows: Scarica per Windows, 64 bit](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest){ .md-button data-ppg-asset="windows-x64.zip" }
+</div>
+
+Tutte le versioni sono nella [pagina delle release](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest).
 
 | Sistema | File | |
 |---|---|---|

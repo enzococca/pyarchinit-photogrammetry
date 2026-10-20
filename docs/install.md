@@ -2,8 +2,14 @@
 
 ## Desktop application
 
-No Python needed: download the build for your system from the
-[latest release](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest).
+No Python needed: download the build for your system (the button of your system comes first).
+
+<div class="ppg-download" markdown>
+[:material-apple: Download for macOS, Apple Silicon](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest){ .md-button data-ppg-asset="macos-arm64.dmg" }
+[:material-microsoft-windows: Download for Windows, 64 bit](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest){ .md-button data-ppg-asset="windows-x64.zip" }
+</div>
+
+All the builds are on the [releases page](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest).
 
 | System | File | |
 |---|---|---|
