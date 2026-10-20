@@ -386,7 +386,9 @@ jobs:
             -DPython3_EXECUTABLE="$py" -DPYTHON_EXECUTABLE="$py"
           & $cmake --build build --target pip-package
           $raw = Get-ChildItem build/lib/python_package/pip_package/*.whl
-          delvewheel repair -v --add-path "$blas/bin;$ssl/bin" -w wheels $raw.FullName
+          # the DLLs the module needs: OpenBLAS, OpenSSL and those of the libraries Open3D built shared (TBB)
+          $dllDirs = (Get-ChildItem -Recurse -Filter *.dll build | Select-Object -ExpandProperty DirectoryName -Unique) -join ";"
+          delvewheel repair -v --add-path "$blas/bin;$ssl/bin;$dllDirs" -w wheels $raw.FullName
           pip install (Get-ChildItem wheels/*.whl).FullName
           Set-Content check.py @'
           import numpy as np, open3d as o3d
