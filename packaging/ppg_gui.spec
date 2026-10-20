@@ -35,13 +35,18 @@ datas = ([(str(ROOT / "src" / "pyarchinit_photogrammetry" / "ai" / "sam_worker.p
          + collect_data_files("pyvista") + collect_data_files("rasterio") + collect_data_files("pyproj")
          + collect_data_files("ezdxf") + collect_data_files("trimesh"))
 binaries = collect_dynamic_libs("pycolmap")
-for optional in ("open3d", "ifcopenshell", "pye57"):  # pye57: E57 laser scans (its xerces library)
-    try:
+for optional in ("open3d", "ifcopenshell", "pye57", "psycopg"):  # pye57: E57 laser scans (its xerces library);
+    try:                                                         # psycopg: PostgreSQL without psycopg2 (ARM64)
         __import__(optional)
     except Exception:
         continue
     datas += collect_data_files(optional)
     binaries += collect_dynamic_libs(optional)
+    hidden += collect_submodules(optional)
+# libraries to put next to the executable: the libpq of psycopg on Windows ARM64 (PPG_EXTRA_BINARIES, a folder)
+extra = os.environ.get("PPG_EXTRA_BINARIES")
+if extra:
+    binaries += [(str(f), ".") for f in Path(extra).iterdir() if f.suffix.lower() in (".dll", ".so", ".dylib")]
 
 excludes = ["torch", "torchvision", "sam2", "tkinter", "PyQt5", "PyQt6", "PySide2", "IPython", "jupyter",
             "notebook", "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineQuick",

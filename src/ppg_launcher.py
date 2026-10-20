@@ -231,6 +231,15 @@ def c_numbers() -> None:
         pass
 
 
+def _app_libraries_on_path() -> None:
+    """On Windows the libraries put next to the modules of the packaged application (the libpq of
+    psycopg, PPG_EXTRA_BINARIES of the spec) are found by ctypes through PATH, which does not hold
+    that folder."""
+    if getattr(sys, "frozen", False) and os.name == "nt":
+        folder = getattr(sys, "_MEIPASS", None) or os.path.dirname(sys.executable)
+        os.environ["PATH"] = folder + os.pathsep + os.environ.get("PATH", "")
+
+
 def _persistent_matplotlib_cache() -> None:
     """The 3D view (pyvistaqt) loads matplotlib. In the packaged application PyInstaller points
     matplotlib to a new temporary folder at every start, so its font cache was built again each
@@ -291,6 +300,7 @@ def main(argv: list[str] | None = None) -> int:
     started = time.perf_counter()
     argv = list(sys.argv[1:] if argv is None else argv)
     _persistent_matplotlib_cache()
+    _app_libraries_on_path()
     if (argv and argv[0].startswith("--ppg-")) or "--doctor" in argv or argv[:1] == ["--run"]:  # no window
         from pyarchinit_photogrammetry.gui import main as gui_main
 

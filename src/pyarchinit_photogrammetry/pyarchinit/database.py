@@ -127,6 +127,22 @@ def _warm_up_proj() -> None:
             pass
 
 
+def postgres_driver() -> str:
+    """The driver SQLAlchemy gets for a ``postgresql://`` URL: psycopg2 when it is installed, otherwise
+    psycopg (version 3, pure Python over the libpq library: the one on Windows ARM64, where
+    psycopg2-binary has no wheel)."""
+    try:
+        import psycopg2  # noqa: F401
+        return "psycopg2"
+    except ImportError:
+        pass
+    try:
+        import psycopg  # noqa: F401
+        return "psycopg"
+    except ImportError:
+        return "psycopg2"
+
+
 class PyArchInitDB:
     def __init__(self, url: str | None = None, config: PyArchInitConfig | None = None, echo: bool = False):
         if config is None:
@@ -139,6 +155,8 @@ class PyArchInitDB:
         url = url or config.url()
         if url.startswith("postgres://"):
             url = "postgresql://" + url[len("postgres://"):]
+        if url.startswith("postgresql://") and postgres_driver() == "psycopg":
+            url = "postgresql+psycopg://" + url[len("postgresql://"):]
         self.url = url
         self.is_postgres = self.url.startswith("postgres")
         self.spatialite = False
