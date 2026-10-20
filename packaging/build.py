@@ -19,6 +19,7 @@ After building, the application is started with ``--check`` (offscreen) as a smo
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import platform
 import shutil
@@ -179,7 +180,10 @@ def smoke_test(bundle: Path) -> None:
     print("smoke test:", exe, flush=True)
     r = subprocess.run([str(exe), "--check"], env=env, timeout=600, capture_output=True, text=True)
     print(r.stdout[-2000:], r.stderr[-2000:])
-    if r.returncode != 0 or not all(k in r.stdout for k in ("GUI check: ok", "vtk: ok", "libs: ok")):
+    # without pyvistaqt in the build environment (Windows ARM64: VTK has no wheel) the 3D view uses
+    # the software renderer, and the check says "vtk: missing" as expected
+    vtk = "vtk: ok" if importlib.util.find_spec("pyvistaqt") else "3D backend: software"
+    if r.returncode != 0 or not all(k in r.stdout for k in ("GUI check: ok", vtk, "libs: ok")):
         raise SystemExit(f"smoke test failed (exit {r.returncode})")
     r = subprocess.run([str(exe), "--doctor"], env=env, timeout=600, capture_output=True, text=True)
     print(r.stdout[-3000:])
