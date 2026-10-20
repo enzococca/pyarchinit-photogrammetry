@@ -8,9 +8,11 @@
     var ua = navigator.userAgent || "";
     var mine = /Windows/.test(ua) ? "windows" : /Mac/.test(ua) ? "macos" : "";
     buttons.forEach(function (a) {
-      var system = a.getAttribute("data-ppg-asset").indexOf("windows") === 0 ? "windows" : "macos";
-      a.classList.toggle("md-button--primary", system === mine);
-      if (system === mine && a.parentNode.firstElementChild !== a) a.parentNode.insertBefore(a, a.parentNode.firstElementChild);
+      var asset = a.getAttribute("data-ppg-asset");
+      var system = asset.indexOf("windows") === 0 ? "windows" : "macos";
+      var primary = system === mine && asset !== "windows-arm64.zip";  // the browser does not tell x64 from ARM
+      a.classList.toggle("md-button--primary", primary);
+      if (primary && a.parentNode.firstElementChild !== a) a.parentNode.insertBefore(a, a.parentNode.firstElementChild);
     });
     fetch("https://api.github.com/repos/enzococca/pyarchinit-photogrammetry/releases/latest")
       .then(function (r) { return r.ok ? r.json() : null; })

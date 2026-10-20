@@ -7,6 +7,7 @@ No Python needed: download the build for your system (the button of your system 
 <div class="ppg-download" markdown>
 [:material-apple: Download for macOS, Apple Silicon](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest){ .md-button data-ppg-asset="macos-arm64.dmg" }
 [:material-microsoft-windows: Download for Windows, 64 bit](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest){ .md-button data-ppg-asset="windows-x64.zip" }
+[:material-microsoft-windows: Download for Windows on ARM (Snapdragon)](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest){ .md-button data-ppg-asset="windows-arm64.zip" }
 </div>
 
 All the builds are on the [releases page](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest).
@@ -17,7 +18,7 @@ person.
 |---|---|---|
 | macOS 15 or newer, Apple Silicon | `PyArchInit-Photogrammetry-<version>-macos-arm64.dmg` | open it and drag the app to *Applications* |
 | Windows 10/11, 64 bit | `PyArchInit-Photogrammetry-<version>-windows-x64.zip` | unzip, run `PyArchInit Photogrammetry.exe` |
-| Windows 11 on ARM | the Windows zip | runs under emulation |
+| Windows 11 on ARM (Snapdragon, ARM64 virtual machines) | `PyArchInit-Photogrammetry-<version>-windows-arm64.zip` | native build (from 1.1.0; the 3D view uses the software renderer); the x64 zip also runs, under emulation |
 
 The builds are not signed. On macOS right-click the app > *Open* the first time (or
 `xattr -dr com.apple.quarantine "/Applications/PyArchInit Photogrammetry.app"`); on Windows choose

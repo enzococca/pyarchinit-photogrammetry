@@ -63,8 +63,9 @@ Opzionale: `pip install "pyarchinit-photogrammetry[sam]"` aggiunge Segment Anyth
 Linux su ARM (aarch64): pycolmap e Open3D non pubblicano wheel per questa piattaforma; prima installa quelle allegate
 alla [release](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest) per il tuo Python
 (`pip install pycolmap-*-cp312-*.whl open3d-*-cp312-*.whl`) e, per le scansioni E57 di `[all]`,
-`sudo apt install libxerces-c-dev` (vedi [packaging.md](docs/packaging.md)). Windows su ARM: l'applicazione x64
-funziona in emulazione.
+`sudo apt install libxerces-c-dev` (vedi [packaging.md](docs/packaging.md)). Windows su ARM (Snapdragon): alle release è allegata
+un'applicazione nativa (`...-windows-arm64.zip`, vista 3D col renderer software); anche quella x64 funziona, in
+emulazione.
 Dai sorgenti, `uv pip install ./native` (serve Rust) aggiunge il nucleo nativo `ppg_core`: le parti più
 pesanti di depth map, ortofoto e confidenza in Rust su tutti i core (depth map su CPU circa sei volte più
 veloci) e il PatchMatch multi-vista senza GPU (motore `patchmatch`, scelto da `auto` per i rilievi aerei: un

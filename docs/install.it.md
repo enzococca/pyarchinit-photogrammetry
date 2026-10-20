@@ -8,6 +8,7 @@ viene per primo).
 <div class="ppg-download" markdown>
 [:material-apple: Scarica per macOS, Apple Silicon](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest){ .md-button data-ppg-asset="macos-arm64.dmg" }
 [:material-microsoft-windows: Scarica per Windows, 64 bit](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest){ .md-button data-ppg-asset="windows-x64.zip" }
+[:material-microsoft-windows: Scarica per Windows su ARM (Snapdragon)](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest){ .md-button data-ppg-asset="windows-arm64.zip" }
 </div>
 
 Tutte le versioni sono nella [pagina delle release](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest).
@@ -18,7 +19,7 @@ sola.
 |---|---|---|
 | macOS 15 o successivo, Apple Silicon | `PyArchInit-Photogrammetry-<versione>-macos-arm64.dmg` | aprila e trascina l'app in *Applicazioni* |
 | Windows 10/11, 64 bit | `PyArchInit-Photogrammetry-<versione>-windows-x64.zip` | estrai la cartella e avvia `PyArchInit Photogrammetry.exe` |
-| Windows 11 su ARM | lo zip per Windows | gira in emulazione |
+| Windows 11 su ARM (Snapdragon, macchine virtuali ARM64) | `PyArchInit-Photogrammetry-<versione>-windows-arm64.zip` | versione nativa (dalla 1.1.0; la vista 3D usa il renderer software); anche lo zip x64 gira, in emulazione |
 
 Le versioni non sono firmate. Su macOS, la prima volta, tasto destro sull'app > *Apri* (oppure
 `xattr -dr com.apple.quarantine "/Applications/PyArchInit Photogrammetry.app"`); su Windows *Ulteriori

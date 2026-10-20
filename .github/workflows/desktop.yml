@@ -1,6 +1,7 @@
 name: desktop
 
-# Builds the packaged desktop application (PyInstaller) for macOS (15+, Apple Silicon) and Windows.
+# Builds the packaged desktop application (PyInstaller) for macOS (15+, Apple Silicon), Windows x64
+# and Windows ARM64 (with the wheels the windows-arm workflow built: lazrs, OpenCV, pycolmap, Open3D).
 # Runs on demand, on version tags and when a release is published; the archives are
 # uploaded as workflow artifacts and attached to the release.
 on:
@@ -54,3 +55,66 @@ jobs:
           shopt -s nullglob
           files=(dist/*.dmg dist/*.zip)   # macOS builds a dmg, Windows a zip
           gh release upload "${{ github.event.release.tag_name }}" "${files[@]}" --clobber
+
+  build-arm64:
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
+    runs-on: windows-11-arm
+    timeout-minutes: 180
+    env:
+      # runs of the windows-arm workflow holding the win-arm64 wheels (artifacts last 90 days: run
+      # that workflow again and update these when they expire)
+      WHEEL_RUNS: "39275909789 39329254692 39296584761 39405291562"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          architecture: arm64
+      - name: The wheels built by the windows-arm workflow
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          foreach ($run in $env:WHEEL_RUNS.Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries)) {
+            gh run download $run --pattern "win-arm64-*" -D wheels
+          }
+          Remove-Item -Recurse -Force wheels/win-arm64-core -ErrorAction SilentlyContinue  # built below from native/
+          python -m pip install --upgrade pip maturin numpy
+          pip install (Get-ChildItem wheels -Recurse -Filter *.whl | ForEach-Object { $_.FullName })
+      - name: Install
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          # the GUI without pyvista (VTK has no ARM64 wheel: software renderer), PostGIS through psycopg 3
+          pip install -e ".[mesh,bim,learn,munsell,postgis,build]" "PySide6>=6.6" "qtawesome>=1.3"
+          # the native core of this commit (the runner image has Rust, as in the windows-arm workflow)
+          maturin build --release -m native/Cargo.toml --out core_wheels
+          pip install (Get-ChildItem core_wheels/*.whl).FullName
+          python -c "import open3d, pycolmap, cv2, lazrs, ppg_core, PySide6, pyarchinit_photogrammetry as ppg; print(ppg.__version__, open3d.__version__, pycolmap.__version__, cv2.__version__, ppg_core.__version__)"
+      - name: libpq for psycopg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $root = $PWD.Path -replace '\\', '/'
+          git clone --depth 1 https://github.com/microsoft/vcpkg "$root/vcpkg"
+          & "$root/vcpkg/bootstrap-vcpkg.bat" -disableMetrics
+          & "$root/vcpkg/vcpkg.exe" install libpq --triplet arm64-windows
+          "PPG_EXTRA_BINARIES=$root/vcpkg/installed/arm64-windows/bin" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Build and smoke-test
+        run: python packaging/build.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PyArchInit-Photogrammetry-windows-arm64
+          path: dist/*.zip
+          if-no-files-found: error
+      - name: Attach to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/*.zip --clobber
+
