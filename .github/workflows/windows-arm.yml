@@ -328,7 +328,8 @@ jobs:
           Set-Location $root
           # the headers of OpenBLAS (cblas.h, lapacke.h) are not on the include path Open3D makes for a
           # system BLAS; the flags given keep CMake's own for cl.exe (WIN32 for PoissonRecon's headers)
-          # and tell the KWIML of VTK 9.1 the byte order, which it does not know for ARM64;
+          # and tell the KWIML of VTK 9.1 the byte order, which it does not know for ARM64, skipping its
+          # checks of the pointer sizes (typedefs it then declared twice);
           # BORINGSSL_ROOT_DIR is what its curl recipe asks for even with a system OpenSSL
           & $cmake -S open3d -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_INSTALL_PREFIX="$root/install" -DDEVELOPER_BUILD=OFF `
@@ -339,8 +340,8 @@ jobs:
             -DUSE_BLAS=ON -DUSE_SYSTEM_BLAS=ON -DBLA_VENDOR=OpenBLAS `
             -DBLAS_LIBRARIES="$blas/lib/openblas.lib" -DLAPACK_LIBRARIES="$blas/lib/openblas.lib" `
             -DLAPACKE_DIR="$blas" -DLAPACKE_INCDIR="$blas/include/openblas" -DLAPACKE_LIBDIR="$blas/lib" `
-            -DCMAKE_CXX_FLAGS="/DWIN32 /D_WINDOWS /W3 /GR /EHsc /I$blas/include/openblas /DKWIML_ABI_ENDIAN_ID=KWIML_ABI_ENDIAN_ID_LITTLE" `
-            -DCMAKE_C_FLAGS="/DWIN32 /D_WINDOWS /W3 /I$blas/include/openblas /DKWIML_ABI_ENDIAN_ID=KWIML_ABI_ENDIAN_ID_LITTLE" `
+            -DCMAKE_CXX_FLAGS="/DWIN32 /D_WINDOWS /W3 /GR /EHsc /I$blas/include/openblas /DKWIML_ABI_ENDIAN_ID=KWIML_ABI_ENDIAN_ID_LITTLE /DKWIML_ABI_NO_VERIFY" `
+            -DCMAKE_C_FLAGS="/DWIN32 /D_WINDOWS /W3 /I$blas/include/openblas /DKWIML_ABI_ENDIAN_ID=KWIML_ABI_ENDIAN_ID_LITTLE /DKWIML_ABI_NO_VERIFY" `
             -DUSE_SYSTEM_OPENSSL=ON -DOPENSSL_ROOT_DIR="$ssl" -DBORINGSSL_ROOT_DIR="$ssl" `
             -DPython3_EXECUTABLE="$py" -DPYTHON_EXECUTABLE="$py"
           & $cmake --build build --target pip-package
