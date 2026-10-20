@@ -236,6 +236,9 @@ jobs:
           Invoke-WebRequest https://github.com/OpenMathLib/OpenBLAS/releases/download/v0.3.30/OpenBLAS-0.3.30-woa64-dll.zip -OutFile openblas.zip
           Expand-Archive openblas.zip -DestinationPath "$root/ob"
           $blas = "$root/ob/OpenBLAS"
+          # its LAPACK header uses C99 _Complex unless told to use structures: cl.exe has no _Complex
+          $lapack = "$blas/include/openblas/lapack.h"
+          Set-Content $lapack ("#define LAPACK_COMPLEX_STRUCTURE`n" + (Get-Content $lapack -Raw))
           $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
           $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath
           if (-not $vs) { $vs = & $vswhere -latest -products * -property installationPath }
