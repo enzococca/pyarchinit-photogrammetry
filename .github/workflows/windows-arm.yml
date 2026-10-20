@@ -388,7 +388,8 @@ jobs:
           $raw = Get-ChildItem build/lib/python_package/pip_package/*.whl
           # the DLLs the module needs: OpenBLAS, OpenSSL and those of the libraries Open3D built shared (TBB)
           $dllDirs = (Get-ChildItem -Recurse -Filter *.dll build | Select-Object -ExpandProperty DirectoryName -Unique) -join ";"
-          delvewheel repair -v --add-path "$blas/bin;$ssl/bin;$dllDirs" -w wheels $raw.FullName
+          # (the OpenGL of Windows is a system library: delvewheel must not follow it into the API sets)
+          delvewheel repair -v --add-path "$blas/bin;$ssl/bin;$dllDirs" --exclude "opengl32.dll;glu32.dll;ext-ms-win-dx-ddraw-l1-1-0.dll" -w wheels $raw.FullName
           pip install (Get-ChildItem wheels/*.whl).FullName
           Set-Content check.py @'
           import numpy as np, open3d as o3d
