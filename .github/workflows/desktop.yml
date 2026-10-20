@@ -53,8 +53,11 @@ jobs:
         shell: bash
         run: |
           shopt -s nullglob
+          tag="${{ github.event.release.tag_name }}"
           files=(dist/*.dmg dist/*.zip)   # macOS builds a dmg, Windows a zip
-          gh release upload "${{ github.event.release.tag_name }}" "${files[@]}" --clobber
+          mkdir -p dist/plain   # a copy without the version: the fixed link of the installation page
+          for f in "${files[@]}"; do cp "$f" "dist/plain/$(basename "${f/-${tag#v}-/-}")"; done
+          gh release upload "$tag" "${files[@]}" dist/plain/* --clobber
 
   build-arm64:
     if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
@@ -123,5 +126,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
-        run: gh release upload "${{ github.event.release.tag_name }}" dist/*.zip --clobber
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          mkdir -p dist/plain   # a copy without the version: the fixed link of the installation page
+          for f in dist/*.zip; do cp "$f" "dist/plain/$(basename "${f/-${tag#v}-/-}")"; done
+          gh release upload "$tag" dist/*.zip dist/plain/* --clobber
 
