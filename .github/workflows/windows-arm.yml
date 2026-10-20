@@ -251,6 +251,12 @@ jobs:
               set(ISA_BUILD_BYPRODUCTS "<INSTALL_DIR>/${Open3D_INSTALL_LIB_DIR}/${CMAKE_STATIC_LIBRARY_PREFIX}embree_avx2${CMAKE_STATIC_LIBRARY_SUFFIX}")
           """ + old
           f.write_text(text.replace(old, new), encoding="utf-8")
+          # with a system OpenSSL there is no BoringSSL target for curl to wait for
+          f = pathlib.Path("open3d/3rdparty/curl/curl.cmake")
+          text = f.read_text(encoding="utf-8")
+          old = "add_dependencies(ext_curl ext_boringssl)"
+          assert text.count(old) == 1, "curl.cmake of Open3D has changed"
+          f.write_text(text.replace(old, "if(TARGET ext_boringssl)\n    add_dependencies(ext_curl ext_boringssl)\nendif()"), encoding="utf-8")
           '@
           python patch.py
           python -m pip install --upgrade pip
