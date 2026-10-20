@@ -33,6 +33,10 @@ pub struct Params {
     pub half_window: usize,
     pub step: usize,
     pub top_k: usize,
+    /// photos that must see the whole window for a plane to get a cost: with one photo any
+    /// texture-poor window matches somewhere (the borders of a block of aerial photos came
+    /// out metres off and made a step in the DEM where the dense cloud ends)
+    pub min_views: usize,
     pub max_cost: f32,
     pub seed: u64,
 }
@@ -144,7 +148,7 @@ impl<'a> Problem<'a> {
     }
 
     /// 1 - NCC of the window of (x, y) with its image in each photo through the plane, the mean
-    /// of the `top_k` best photos; BAD when no photo sees the whole window.
+    /// of the `top_k` best photos; BAD when fewer than `min_views` photos see the whole window.
     fn cost(&self, x: usize, y: usize, plane: Plane) -> f32 {
         let i = y * self.w + x;
         let mean_r = self.mean[i];
@@ -218,7 +222,7 @@ impl<'a> Problem<'a> {
             costs[n_views] = c;
             n_views += 1;
         }
-        if n_views == 0 {
+        if n_views < self.p.min_views.max(1) {
             return BAD;
         }
         let best = &mut costs[..n_views];

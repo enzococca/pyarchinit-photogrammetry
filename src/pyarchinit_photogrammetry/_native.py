@@ -43,3 +43,9 @@ def supports(model: str) -> bool:
 def version() -> str | None:
     core = _core()
     return getattr(core, "__version__", None) if core is not None else None
+
+
+def api() -> int | None:
+    """The API level of the extension (what its functions accept), or ``None`` without it."""
+    core = _core() if enabled() else None
+    return getattr(core, "API", None) if core is not None else None

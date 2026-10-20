@@ -17,7 +17,7 @@ use rayon::prelude::*;
 use camera::{Camera, Pose};
 
 /// Version of the functions offered here: raised when one is added or changes meaning.
-const API: u32 = 3;
+const API: u32 = 4;
 
 fn matrix3(a: &PyReadonlyArray2<f64>, what: &str) -> PyResult<[[f64; 3]; 3]> {
     if a.shape() != [3, 3] {
@@ -343,12 +343,13 @@ type SourceArgs<'py> = (PyReadonlyArray2<'py, f32>, (f64, f64, f64, f64), PyRead
 /// 0 where the cost is above `max_cost`), normals (h x w x 3, camera frame) and cost (h x w).
 #[pyfunction]
 #[pyo3(signature = (reference, k, sources, depth_range, init_depth=None, init_normals=None, iterations=4,
-                    half_window=4, step=2, top_k=3, max_cost=0.6, seed=1))]
+                    half_window=4, step=2, top_k=3, max_cost=0.6, seed=1, min_views=2))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn patchmatch_depth<'py>(py: Python<'py>, reference: PyReadonlyArray2<'py, f32>, k: (f64, f64, f64, f64),
                          sources: Vec<SourceArgs<'py>>, depth_range: (f64, f64),
                          init_depth: Option<PyReadonlyArray2<'py, f32>>, init_normals: Option<PyReadonlyArray3<'py, f32>>,
-                         iterations: usize, half_window: usize, step: usize, top_k: usize, max_cost: f32, seed: u64)
+                         iterations: usize, half_window: usize, step: usize, top_k: usize, max_cost: f32, seed: u64,
+                         min_views: usize)
     -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray3<f32>>, Bound<'py, PyArray2<f32>>)> {
     let a = reference.as_array();
     let (h, w) = a.dim();
@@ -386,7 +387,7 @@ fn patchmatch_depth<'py>(py: Python<'py>, reference: PyReadonlyArray2<'py, f32>,
     let init = init_layout.as_ref().map(|l| l.as_slice().unwrap());
     let init_n = normal_layout.as_ref().map(|l| l.as_slice().unwrap());
     let params = patchmatch::Params { depth_min: depth_range.0, depth_max: depth_range.1, iterations, half_window,
-                                      step, top_k, max_cost, seed };
+                                      step, top_k, min_views, max_cost, seed };
     let out = py.allow_threads(|| patchmatch::patchmatch(refdata, w, h, [k.0, k.1, k.2, k.3], &srcs, params, init,
                                                          init_n));
     Ok((Array2::from_shape_vec((h, w), out.depth).unwrap().into_pyarray_bound(py),

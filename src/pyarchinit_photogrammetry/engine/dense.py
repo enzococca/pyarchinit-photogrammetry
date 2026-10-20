@@ -576,6 +576,7 @@ def _cpu_depth_maps(chunk: Chunk, ws: Path, filter_mode: str, progress: Progress
 # ---------------------------------------------------------------- PatchMatch (native core)
 PATCHMATCH_COST = {"none": 0.8, "mild": 0.65, "moderate": 0.5, "aggressive": 0.35}  # the largest 1 - NCC kept
 PATCHMATCH_PARTNERS = 6
+PATCHMATCH_MIN_VIEWS = 2
 
 
 def patchmatch_available() -> bool:
@@ -594,6 +595,11 @@ def _patchmatch_depth_maps(chunk: Chunk, ws: Path, filter_mode: str, progress: P
     if kernel is None:
         raise RuntimeError("the PatchMatch depth maps need the native core (pyarchinit-photogrammetry-core with "
                            "patchmatch_depth): use the CPU backend")
+    # in a survey from the air a plane needs two photos seeing its window (core 0.2.1): with one,
+    # windows at the borders of the block matched metres off, and the fused points of three such
+    # maps made pits and a step in the DEM where the dense cloud ends (Tell Sultan). Close up, the
+    # pixels at the frame borders that a single partner sees are as good as the others
+    views = {"min_views": PATCHMATCH_MIN_VIEWS if aerial_survey(chunk) else 1} if (_native.api() or 0) >= 4 else {}
     rec = _read_workspace_model(ws)
     neigh = _neighbors(rec, max_neighbors=PATCHMATCH_PARTNERS, wide=_panorama_images(chunk, rec))
     max_cost = PATCHMATCH_COST.get(filter_mode, PATCHMATCH_COST["moderate"])
@@ -638,7 +644,8 @@ def _patchmatch_depth_maps(chunk: Chunk, ws: Path, filter_mode: str, progress: P
         depth, normals, _cost = kernel(np.ascontiguousarray(gi, np.float32) / 255.0,
                                        (kc[0, 0], kc[1, 1], kc[0, 2], kc[1, 2]), sources, (float(zr[0]), float(zr[1])),
                                        init_depth=start, init_normals=None if start is None else
-                                       _normals_from_depth(start, K_i), iterations=iterations, max_cost=max_cost)
+                                       _normals_from_depth(start, K_i), iterations=iterations, max_cost=max_cost,
+                                       **views)
         if image.name in masked:  # no depth where the photo is masked
             from .masks import mask_for_undistorted
 
