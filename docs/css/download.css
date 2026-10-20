@@ -1,0 +1,52 @@
+/* The download control of the installation page: a button for the reader's system and a menu
+   with every build (docs/js/download.js). */
+.ppg-download {
+  position: relative;
+  display: inline-flex;
+  margin: 0.5em 0 1em;
+}
+.ppg-download .md-button {
+  margin: 0;
+}
+.ppg-download__main {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.ppg-download__toggle {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left: 1px solid rgba(255, 255, 255, 0.4);
+  padding-left: 0.7em;
+  padding-right: 0.7em;
+  cursor: pointer;
+  font: inherit;
+}
+.ppg-download__menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 10;
+  min-width: 100%;
+  margin: 0.25em 0 0 !important;
+  padding: 0.25em 0 !important;
+  list-style: none;
+  white-space: nowrap;
+  background: var(--md-default-bg-color);
+  box-shadow: var(--md-shadow-z2);
+  border-radius: 0.1rem;
+}
+.ppg-download__menu li {
+  margin: 0 !important;
+}
+.ppg-download__menu a {
+  display: block;
+  padding: 0.5em 1em;
+  color: var(--md-default-fg-color);
+}
+.ppg-download__menu a:hover,
+.ppg-download__menu a:focus {
+  background: var(--md-default-fg-color--lightest);
+}
+.ppg-download__menu a.ppg-download__current {
+  font-weight: 700;
+}

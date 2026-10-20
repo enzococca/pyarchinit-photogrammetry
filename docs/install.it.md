@@ -2,13 +2,17 @@
 
 ## Applicazione desktop
 
-Senza installare Python: scarica la versione per il tuo sistema (il pulsante del tuo sistema
-viene per primo).
+Senza installare Python: il pulsante scarica l'ultima versione per il tuo sistema (macOS: il dmg; Windows: lo
+zip a 64 bit, o quello per ARM quando il browser dichiara una macchina ARM); la freccia elenca tutte le versioni.
 
-<div class="ppg-download" markdown>
-[:material-apple: Scarica per macOS, Apple Silicon](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest){ .md-button data-ppg-asset="macos-arm64.dmg" }
-[:material-microsoft-windows: Scarica per Windows, 64 bit](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest){ .md-button data-ppg-asset="windows-x64.zip" }
-[:material-microsoft-windows: Scarica per Windows su ARM (Snapdragon)](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest){ .md-button data-ppg-asset="windows-arm64.zip" }
+<div class="ppg-download" data-ppg-download>
+<a class="md-button md-button--primary ppg-download__main" href="https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest" data-ppg-main data-ppg-prefix="Scarica per ">Scarica</a><button class="md-button md-button--primary ppg-download__toggle" type="button" aria-haspopup="true" aria-expanded="false" aria-label="Altri sistemi" data-ppg-toggle>&#9662;</button>
+<ul class="ppg-download__menu" data-ppg-menu hidden>
+<li><a href="https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest/download/PyArchInit-Photogrammetry-macos-arm64.dmg" download data-ppg-system="macos" data-ppg-asset="macos-arm64.dmg" data-ppg-label="macOS (Apple Silicon)">macOS 15 o più recente, Apple Silicon (.dmg)</a></li>
+<li><a href="https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest/download/PyArchInit-Photogrammetry-windows-x64.zip" download data-ppg-system="windows-x64" data-ppg-asset="windows-x64.zip" data-ppg-label="Windows (64 bit)">Windows 10/11, 64 bit (.zip)</a></li>
+<li><a href="https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest/download/PyArchInit-Photogrammetry-windows-arm64.zip" download data-ppg-system="windows-arm64" data-ppg-fallback="windows-x64" data-ppg-asset="windows-arm64.zip" data-ppg-label="Windows on ARM">Windows 11 su ARM, Snapdragon (.zip)</a></li>
+<li><a href="https://github.com/enzococca/pyarchinit-photogrammetry/releases">Tutte le versioni su GitHub</a></li>
+</ul>
 </div>
 
 Tutte le versioni sono nella [pagina delle release](https://github.com/enzococca/pyarchinit-photogrammetry/releases/latest).

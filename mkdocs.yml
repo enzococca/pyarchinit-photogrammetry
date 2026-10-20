@@ -72,6 +72,9 @@ plugins:
             Benchmark: Benchmark
             Roadmap: Roadmap
 
+extra_css:
+  - css/download.css
+
 extra_javascript:
   - js/download.js
 
