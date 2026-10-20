@@ -260,7 +260,7 @@ jobs:
           f.write_text(text.replace("DWORD cnt = 0;", "unsigned long cnt = 0;"), encoding="utf-8")
           '@
           $env:EMBREE_PATCH = "$root/embree_arm.py"
-          $env:EMBREE_PYTHON = $py
+          $env:EMBREE_PYTHON = (Get-Command python).Source -replace '\\', '/'
           Set-Content patch.py @'
           import os, pathlib
           f = pathlib.Path("open3d/3rdparty/embree/embree.cmake")
