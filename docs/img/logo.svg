@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2c5d8f"/>
+      <stop offset="1" stop-color="#153552"/>
+    </linearGradient>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4f8fcf"/>
+      <stop offset="1" stop-color="#2c5d8f"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#bg)"/>
+  <!-- stratigraphy: three layers of a trench section -->
+  <path d="M28 150 Q90 132 128 150 T228 150 L228 228 Q228 240 216 240 L40 240 Q28 240 28 228 Z" fill="#c98a4b"/>
+  <path d="M28 176 Q90 162 128 178 T228 176 L228 228 Q228 240 216 240 L40 240 Q28 240 28 228 Z" fill="#a66a35"/>
+  <path d="M28 204 Q90 192 128 206 T228 204 L228 228 Q228 240 216 240 L40 240 Q28 240 28 228 Z" fill="#7d4c27"/>
+  <!-- wall stub -->
+  <rect x="150" y="118" width="48" height="36" rx="4" fill="#e8dcc8"/>
+  <path d="M150 130 h48 M150 142 h48 M166 118 v12 M182 130 v12 M166 142 v12" stroke="#b9a98f" stroke-width="3" fill="none"/>
+  <!-- camera -->
+  <rect x="50" y="52" width="104" height="72" rx="14" fill="#ffffff"/>
+  <rect x="76" y="40" width="40" height="18" rx="6" fill="#ffffff"/>
+  <circle cx="102" cy="88" r="26" fill="#1d3f61"/>
+  <circle cx="102" cy="88" r="16" fill="#4f8fcf"/>
+  <circle cx="96" cy="82" r="5" fill="#ffffff" opacity="0.9"/>
+  <circle cx="138" cy="66" r="5" fill="#f39c12"/>
+  <!-- ground control target -->
+  <g transform="translate(206 74)">
+    <circle r="18" fill="#ffffff"/>
+    <path d="M-18 0 A18 18 0 0 1 0 -18 L0 0 Z M18 0 A18 18 0 0 1 0 18 L0 0 Z" fill="#e74c3c"/>
+  </g>
+</svg>

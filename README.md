@@ -12,6 +12,9 @@ Apple Silicon included.
 > Status: **1.0**. Python library, command line and desktop application (on the same
 > API, with a built-in Python console). Italian version: [README.it.md](README.it.md).
 
+Documentation, tutorials and a benchmark against Metashape and WebODM/ODM:
+<https://enzococca.github.io/pyarchinit-photogrammetry/>
+
 ## Desktop application (no Python needed)
 
 Download the build for your system from the

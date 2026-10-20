@@ -1,0 +1,107 @@
+site_name: pyarchinit-photogrammetry
+site_description: Open-source photogrammetry for archaeology, integrated with PyArchInit
+site_url: https://enzococca.github.io/pyarchinit-photogrammetry/
+site_author: Enzo Cocca
+repo_url: https://github.com/enzococca/pyarchinit-photogrammetry
+repo_name: enzococca/pyarchinit-photogrammetry
+edit_uri: edit/main/docs/
+copyright: GPL-2.0-or-later - Enzo Cocca
+
+docs_dir: docs
+exclude_docs: |
+  superpowers/
+
+theme:
+  name: material
+  logo: img/logo.svg
+  favicon: img/logo.svg
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - navigation.indexes
+    - content.code.copy
+    - content.action.edit
+    - search.highlight
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: amber
+      toggle:
+        icon: material/weather-night
+        name: Dark
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: amber
+      toggle:
+        icon: material/weather-sunny
+        name: Light
+
+plugins:
+  - search
+  - i18n:
+      docs_structure: suffix
+      fallback_to_default: true
+      reconfigure_material: true
+      reconfigure_search: true
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+        - locale: it
+          name: Italiano
+          build: true
+          site_description: Fotogrammetria open source per l'archeologia, integrata con PyArchInit
+          nav_translations:
+            Home: Home
+            Installation: Installazione
+            Tutorials: Tutorial
+            Guide: Guida
+            Desktop interface: Interfaccia
+            Python API: API Python
+            PyArchInit: PyArchInit
+            QGIS, Metashape, WebODM, Photo3D: QGIS, Metashape, WebODM, Photo3D
+            BIM and IFC: BIM e IFC
+            Plugins: Plugin
+            Packaging: Pacchetti
+            Benchmark: Benchmark
+            Roadmap: Roadmap
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+nav:
+  - Home: index.md
+  - Installation: install.md
+  - Tutorials:
+      - tutorials/index.md
+      - tutorials/tell.md
+  - Guide:
+      - Desktop interface: gui.md
+      - Python API: api.md
+      - PyArchInit: pyarchinit.md
+      - QGIS, Metashape, WebODM, Photo3D: integrations.md
+      - BIM and IFC: bim.md
+      - Plugins: plugins.md
+      - Packaging: packaging.md
+  - Benchmark: benchmark.md
+  - Roadmap: roadmap.md

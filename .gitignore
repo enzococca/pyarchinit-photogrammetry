@@ -13,3 +13,4 @@ venv/
 packaging/build/
 native/target/
 .ruff_cache/
+site/

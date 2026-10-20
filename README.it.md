@@ -12,6 +12,9 @@ Python e gira su CPU, anche su Mac Apple Silicon.
 > Stato: **1.0**. Libreria Python, riga di comando e applicazione desktop (sulla stessa
 > API, con console Python integrata).
 
+Documentazione, tutorial e un confronto con Metashape e WebODM/ODM:
+<https://enzococca.github.io/pyarchinit-photogrammetry/it/>
+
 ## Applicazione desktop (senza installare Python)
 
 Scarica la versione per il tuo sistema dalla pagina
