@@ -236,9 +236,23 @@ jobs:
           Invoke-WebRequest https://github.com/OpenMathLib/OpenBLAS/releases/download/v0.3.30/OpenBLAS-0.3.30-woa64-dll.zip -OutFile openblas.zip
           Expand-Archive openblas.zip -DestinationPath "$root/ob"
           $blas = "$root/ob/OpenBLAS"
-          # its LAPACK header uses C99 _Complex unless told to use structures: cl.exe has no _Complex
-          $lapack = "$blas/include/openblas/lapack.h"
-          Set-Content $lapack ("#define LAPACK_COMPLEX_STRUCTURE`n" + (Get-Content $lapack -Raw))
+          # its LAPACK headers use C99 _Complex unless the complex types are defined before: cl.exe
+          # has no _Complex, so in C++ they are std::complex
+          $complex = @'
+          #if defined(__cplusplus) && !defined(lapack_complex_float)
+          #include <complex>
+          #define lapack_complex_float std::complex<float>
+          #define lapack_complex_double std::complex<double>
+          #define lapack_complex_float_real(z) ((z).real())
+          #define lapack_complex_float_imag(z) ((z).imag())
+          #define lapack_complex_double_real(z) ((z).real())
+          #define lapack_complex_double_imag(z) ((z).imag())
+          #endif
+          '@
+          foreach ($h in "lapack.h", "lapacke.h") {
+            $path = "$blas/include/openblas/$h"
+            Set-Content $path ($complex + "`n" + (Get-Content $path -Raw))
+          }
           $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
           $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath
           if (-not $vs) { $vs = & $vswhere -latest -products * -property installationPath }
@@ -311,8 +325,7 @@ jobs:
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=arm64 -host_arch=arm64"
           Set-Location $root
           # the headers of OpenBLAS (cblas.h, lapacke.h) are not on the include path Open3D makes for a
-          # system BLAS, and their complex numbers must be structures (cl.exe has no C99 _Complex);
-          # BORINGSSL_ROOT_DIR is what its curl recipe asks for even with a system OpenSSL
+          # system BLAS; BORINGSSL_ROOT_DIR is what its curl recipe asks for even with a system OpenSSL
           & $cmake -S open3d -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_INSTALL_PREFIX="$root/install" -DDEVELOPER_BUILD=OFF `
             -DBUILD_SHARED_LIBS=OFF -DBUILD_PYTHON_MODULE=ON -DBUILD_GUI=OFF -DBUILD_WEBRTC=OFF `
@@ -322,7 +335,7 @@ jobs:
             -DUSE_BLAS=ON -DUSE_SYSTEM_BLAS=ON -DBLA_VENDOR=OpenBLAS `
             -DBLAS_LIBRARIES="$blas/lib/openblas.lib" -DLAPACK_LIBRARIES="$blas/lib/openblas.lib" `
             -DLAPACKE_DIR="$blas" -DLAPACKE_INCDIR="$blas/include/openblas" -DLAPACKE_LIBDIR="$blas/lib" `
-            -DCMAKE_CXX_FLAGS="/I$blas/include/openblas /DLAPACK_COMPLEX_STRUCTURE" -DCMAKE_C_FLAGS="/I$blas/include/openblas /DLAPACK_COMPLEX_STRUCTURE" `
+            -DCMAKE_CXX_FLAGS="/I$blas/include/openblas" -DCMAKE_C_FLAGS="/I$blas/include/openblas" `
             -DUSE_SYSTEM_OPENSSL=ON -DOPENSSL_ROOT_DIR="$ssl" -DBORINGSSL_ROOT_DIR="$ssl" `
             -DPython3_EXECUTABLE="$py" -DPYTHON_EXECUTABLE="$py"
           & $cmake --build build --target pip-package
