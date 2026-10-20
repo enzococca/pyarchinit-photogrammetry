@@ -279,13 +279,17 @@ jobs:
           f.write_text(text.replace("DWORD cnt = 0;", "unsigned long cnt = 0;"), encoding="utf-8")
           '@
           $env:EMBREE_PATCH = "$root/embree_arm.py"
-          # the KWIML of VTK 9.1 knows the ARM64 of GCC and clang (__aarch64__), not that of cl.exe
+          # the KWIML of VTK 9.1 knows the ARM64 of GCC and clang (__aarch64__), not that of cl.exe:
+          # byte order unknown and pointers of 4 bytes
           Set-Content vtk_arm.py @'
           import pathlib, sys
           f = pathlib.Path(sys.argv[1]) / "Utilities" / "KWIML" / "vtkkwiml" / "include" / "kwiml" / "abi.h"
           text = f.read_text(encoding="utf-8")
           assert text.count("#elif defined(__aarch64__)") == 1, "abi.h of KWIML has changed"
-          f.write_text(text.replace("#elif defined(__aarch64__)", "#elif defined(__aarch64__) || defined(_M_ARM64)"), encoding="utf-8")
+          text = text.replace("#elif defined(__aarch64__)", "#elif defined(__aarch64__) || defined(_M_ARM64)")
+          assert text.count("# elif defined(_M_X64)") == 1, "abi.h of KWIML has changed (pointer size)"
+          text = text.replace("# elif defined(_M_X64)", "# elif defined(_M_X64) || defined(_M_ARM64)")
+          f.write_text(text, encoding="utf-8")
           '@
           $env:VTK_PATCH = "$root/vtk_arm.py"
           $env:EMBREE_PYTHON = (Get-Command python).Source -replace '\\', '/'
