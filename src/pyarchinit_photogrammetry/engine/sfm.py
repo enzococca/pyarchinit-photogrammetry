@@ -233,18 +233,56 @@ def _reference_pairs(chunk: Chunk, names: dict[int, str], neighbors: int = 20) -
 PRESELECTION_SIZE = 1024  # pixels of the longer side of the photos matched to find the pairs
 PRESELECTION_POINTS = 1024  # points per photo for that
 PRESELECTION_INLIERS = 15  # verified matches that make two photos a pair
+PRESELECTION_PAIRS_PER_PHOTO = 20  # the pairs of each photo with the most matches are matched in full
 EXHAUSTIVE_UP_TO = 40  # photos: every pair is matched in full (cheap enough), above it the pairs are preselected
+
+
+def strongest_pairs(weights: dict[tuple[str, str], int], per_photo: int, links: int = 10) -> set[tuple[str, str]]:
+    """The ``per_photo`` pairs of every photo with the most verified matches (``weights``); a pair
+    stays when it is among the strongest of either photo. Where the cut leaves groups of photos
+    that the whole set joined - flights at different heights meet through few matches - the
+    ``links`` strongest pairs between every two groups come back. (Tell Sultan, 425 photos at four
+    heights: every photo overlapped 69 others, the full matching of all those pairs took 25 minutes.)"""
+    by_photo: dict[str, list[tuple[int, tuple[str, str]]]] = {}
+    for pair, w in weights.items():
+        for photo in pair:
+            by_photo.setdefault(photo, []).append((w, pair))
+    kept: set[tuple[str, str]] = set()
+    for pairs in by_photo.values():
+        pairs.sort(reverse=True)
+        kept.update(p for _, p in pairs[:per_photo])
+    parent = {photo: photo for photo in by_photo}
+
+    def root(photo):
+        while parent[photo] != photo:
+            parent[photo] = parent[parent[photo]]
+            photo = parent[photo]
+        return photo
+
+    for a, b in kept:
+        parent[root(a)] = root(b)
+    between: dict[tuple[str, str], list[tuple[int, tuple[str, str]]]] = {}
+    for pair, w in weights.items():
+        ga, gb = root(pair[0]), root(pair[1])
+        if ga != gb:
+            between.setdefault((min(ga, gb), max(ga, gb)), []).append((w, pair))
+    for pairs in between.values():
+        pairs.sort(reverse=True)
+        kept.update(p for _, p in pairs[:links])
+    return kept
 
 
 def _preselected_pairs(chunk: Chunk, work: Path, root, by_sensor: dict, masks,
                        names: dict[int, str]) -> list[tuple[str, str]]:
     """The pairs of photos that overlap, found as the generic preselection of Metashape finds them:
     a thousand points of every photo reduced to 1024 pixels, matched in every pair (a fraction of
-    the full matching), the pairs with at least ``PRESELECTION_INLIERS`` verified matches kept.
+    the full matching), the pairs with at least ``PRESELECTION_INLIERS`` verified matches kept -
+    for each photo the ``PRESELECTION_PAIRS_PER_PHOTO`` with the most (:func:`strongest_pairs`).
     With GPS positions their nearest neighbours are added: a net for photos with little texture.
     The full matching then runs on these pairs only (Tell Sultan sample, 57 photos: 859 pairs of
     1596 in 7 s; orbits of oblique photos find the vertical ones that see the same ground, which a
-    choice by the positions of the cameras alone would miss)."""
+    choice by the positions of the cameras alone would miss: in the whole survey of 425 photos at
+    four heights only 72 % of the pairs that overlap are among the 80 nearest by GPS)."""
     import sqlite3
 
     import pycolmap
@@ -270,13 +308,14 @@ def _preselected_pairs(chunk: Chunk, work: Path, root, by_sensor: dict, masks,
         con = sqlite3.connect(str(db_path))
         try:
             ids = dict(con.execute("SELECT image_id, name FROM images"))
-            pairs = set()
+            weights = {}
             for pair_id, rows in con.execute("SELECT pair_id, rows FROM two_view_geometries WHERE rows >= ?",
                                              (PRESELECTION_INLIERS,)):
                 a, b = pycolmap.pair_id_to_image_pair(int(pair_id))
-                pairs.add(tuple(sorted((ids[a], ids[b]))))
+                weights[tuple(sorted((ids[a], ids[b])))] = int(rows)
         finally:
             con.close()
+        pairs = strongest_pairs(weights, PRESELECTION_PAIRS_PER_PHOTO) if PRESELECTION_PAIRS_PER_PHOTO else set(weights)
     finally:
         for suffix in ("", "-shm", "-wal"):
             Path(str(db_path) + suffix).unlink(missing_ok=True)

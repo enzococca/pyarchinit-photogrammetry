@@ -61,3 +61,22 @@ def test_auto_choices(scene_dir, tmp_path, monkeypatch):
     assert ch.meta["sfm"]["mapper"] == "global"
     with pytest.raises(ValueError):
         ch.align_cameras(mapper="somehow")
+
+
+def test_strongest_pairs_keep_every_photo_and_the_links_between_groups():
+    # two flights of ten photos, every pair within a flight overlapping a lot, a few weak pairs across
+    low = [f"L{i}" for i in range(10)]
+    high = [f"H{i}" for i in range(10)]
+    weights = {}
+    for group, base in ((low, 2000), (high, 1500)):
+        for i, a in enumerate(group):
+            for b in group[i + 1:]:
+                weights[(a, b)] = base - 50 * abs(group.index(b) - i)  # neighbours in the strip overlap most
+    for i in range(10):
+        weights[(f"H{i}", f"L{(3 * i) % 10}")] = 20 + i  # few matches across the heights
+    kept = sfm.strongest_pairs(weights, per_photo=3, links=4)
+    assert kept < set(weights)
+    for photo in low + high:  # every photo keeps its strongest pairs
+        assert sum(photo in p for p in kept) >= 3
+    across = [p for p in kept if p[0][0] != p[1][0]]
+    assert len(across) == 4 and min(weights[p] for p in across) == 26  # the strongest links came back
