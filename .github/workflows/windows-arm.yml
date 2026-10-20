@@ -241,7 +241,8 @@ jobs:
           if (-not $vs) { $vs = & $vswhere -latest -products * -property installationPath }
           # Embree for ARM64 on Windows: NEON as on Linux ARM, built with clang-cl (Embree's headers
           # know the ARM64 of clang, __aarch64__ and __ARM_NEON, not that of cl.exe: with cl.exe it
-          # takes the AVX code and a 32-bit ssize_t)
+          # takes the AVX code and a 32-bit ssize_t); told it is no SYCL compiler, or it takes the
+          # DPC++ flags (-msse2) because this clang accepts -fsycl
           $clang = (Get-ChildItem "C:/Program Files/LLVM/bin/clang-cl.exe", "$vs/VC/Tools/Llvm/ARM64/bin/clang-cl.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
           if (-not $clang) { throw "no clang-cl on this runner" }
           & $clang --version
@@ -264,6 +265,7 @@ jobs:
                            -DEMBREE_ISA_SSE2=OFF
                            -DEMBREE_ISA_SSE42=OFF
                            -DCMAKE_SYSTEM_PROCESSOR=ARM64
+                           -DCOMPILER_HAS_SYCL_SUPPORT=OFF
                            -DCMAKE_C_COMPILER=%s
                            -DCMAKE_CXX_COMPILER=%s
               )
