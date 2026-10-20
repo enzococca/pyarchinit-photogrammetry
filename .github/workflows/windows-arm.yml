@@ -279,6 +279,15 @@ jobs:
           f.write_text(text.replace("DWORD cnt = 0;", "unsigned long cnt = 0;"), encoding="utf-8")
           '@
           $env:EMBREE_PATCH = "$root/embree_arm.py"
+          # the KWIML of VTK 9.1 knows the ARM64 of GCC and clang (__aarch64__), not that of cl.exe
+          Set-Content vtk_arm.py @'
+          import pathlib, sys
+          f = pathlib.Path(sys.argv[1]) / "Utilities" / "KWIML" / "vtkkwiml" / "include" / "kwiml" / "abi.h"
+          text = f.read_text(encoding="utf-8")
+          assert text.count("#elif defined(__aarch64__)") == 1, "abi.h of KWIML has changed"
+          f.write_text(text.replace("#elif defined(__aarch64__)", "#elif defined(__aarch64__) || defined(_M_ARM64)"), encoding="utf-8")
+          '@
+          $env:VTK_PATCH = "$root/vtk_arm.py"
           $env:EMBREE_PYTHON = (Get-Command python).Source -replace '\\', '/'
           Set-Content patch.py @'
           import os, pathlib
@@ -306,6 +315,16 @@ jobs:
           old = '    UPDATE_COMMAND ""\n'
           assert text.count(old) == 1, "the Embree project of Open3D has changed"
           text = text.replace(old, old + "    PATCH_COMMAND ${EMBREE_PATCH_COMMAND}\n")
+          f.write_text(text, encoding="utf-8")
+          # VTK built from its source gets the KWIML patch
+          f = pathlib.Path("open3d/3rdparty/vtk/vtk_build.cmake")
+          text = f.read_text(encoding="utf-8")
+          old = "    ExternalProject_Add(\n        ext_vtk\n"
+          assert text.count(old) == 1, "vtk_build.cmake of Open3D has changed"
+          text = text.replace(old, '    set(VTK_PATCH_COMMAND "%s" "%s" <SOURCE_DIR>)\n' % (os.environ["EMBREE_PYTHON"], os.environ["VTK_PATCH"]) + old)
+          old = '        UPDATE_COMMAND ""\n'
+          assert text.count(old) == 1, "the VTK project of Open3D has changed"
+          text = text.replace(old, old + "        PATCH_COMMAND ${VTK_PATCH_COMMAND}\n")
           f.write_text(text, encoding="utf-8")
           # this Visual Studio (MSVC 14.5) has no <experimental/filesystem> any more
           for f in [*pathlib.Path("open3d/cpp").rglob("*.cpp"), *pathlib.Path("open3d/cpp").rglob("*.h")]:
