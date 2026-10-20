@@ -475,11 +475,68 @@ def _global_mapping(chunk: Chunk, db_path: Path, root: str, out: Path, n: int):
     return pycolmap.global_mapping(str(db_path), root, str(out), opts)
 
 
+GLOBAL_FIT_FACTOR = 3.0  # cameras of a global block may miss their GPS by this times its accuracy (median, horizontal)
+
+
+def fits_references(centres, references, accuracies, factor: float = GLOBAL_FIT_FACTOR,
+                    floor: float = 1.0) -> tuple[bool, float]:
+    """Whether the camera ``centres`` of a reconstruction (internal frame) sit on their
+    ``references`` (metres, projected axes; ``accuracies`` in metres) once a single similarity
+    places them: the 90th percentile of the horizontal residuals within ``factor`` times the
+    median accuracy (never less than ``floor`` metres). A sound survey fits within the noise of
+    its GPS (Tell Sultan, 425 photos: 2.2 m for an accuracy of 7 m); a block the global mapper
+    assembled from parts at different scales fits no similarity at all (Tell Tuqan, 997 photos:
+    115 m, with every part consistent inside and the targets reprojected within 3 px). Fewer
+    than ten references, or references spanning less than ten times their accuracy (an object,
+    a trench), cannot judge the block: ``(True, nan)``. Returns ``(fits, residual)``."""
+    from ..core import geometry
+
+    src = np.asarray(centres, float).reshape(-1, 3)
+    dst = np.asarray(references, float).reshape(-1, 3)
+    acc = np.asarray(accuracies, float).reshape(-1)
+    if len(src) < 10 or len(src) != len(dst):
+        return True, float("nan")
+    typical = float(np.median(acc))
+    if float(np.linalg.norm(np.ptp(dst[:, :2], axis=0))) < 10.0 * typical:
+        return True, float("nan")
+    m = geometry.umeyama(src, dst, with_scale=True)
+    placed = (m[:3, :3] @ src.T).T + m[:3, 3]
+    residual = float(np.percentile(np.linalg.norm(placed[:, :2] - dst[:, :2], axis=1), 90))
+    return residual <= max(factor * typical, floor), residual
+
+
+def _block_fits_references(chunk: Chunk, rec) -> tuple[bool, float]:
+    """:func:`fits_references` for a reconstruction of the chunk's photos against the positions
+    of their cameras (the GPS of the photos), brought onto metric axes (the UTM zone of the
+    site when they are geographic)."""
+    from ..markers.gcp import projected_crs_for
+
+    names = {v: int(k) for k, v in chunk.meta["sfm"]["names"].items()}
+    by_key = {c.key: c for c in chunk.cameras}
+    groups: dict[str, list] = {}
+    for image in rec.images.values():
+        cam = by_key.get(names.get(image.name)) if image.has_pose else None
+        if cam is None or not (cam.reference.enabled and cam.reference.location):
+            continue
+        groups.setdefault(cam.meta.get("reference_crs", chunk.crs), []).append((image, cam))
+    src, dst, acc = [], [], []
+    for ref_crs, pairs in groups.items():
+        locs = np.array([cam.reference.location for _, cam in pairs], float).reshape(-1, 3)
+        if crs_mod.is_geographic(ref_crs):
+            locs = crs_mod.transform_points(locs, ref_crs, projected_crs_for(ref_crs, locs[0]))
+        for (image, cam), loc in zip(pairs, locs):
+            src.append(np.asarray(image.projection_center(), float))
+            dst.append(loc)
+            acc.append(float(np.mean(cam.reference.accuracy[:2])) if cam.reference.accuracy else 5.0)
+    return fits_references(src, dst, acc) if src else (True, float("nan"))
+
+
 def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = "auto") -> int:
     """Cameras and tie points from the matches of :func:`match_photos`. ``mapper``: ``incremental``
     (one photo after the other, COLMAP), ``global`` (all at once, GLOMAP: much faster with many
     photos) or ``auto`` - global from ``GLOBAL_FROM`` photos, incremental for fewer, for 360-degree
-    rigs and calibrations held fixed, and whenever the global one leaves photos out."""
+    rigs and calibrations held fixed, and whenever the global one leaves photos out or builds a
+    block whose cameras do not sit on the GPS of the photos (:func:`fits_references`)."""
     import pycolmap
 
     progress = as_progress(progress)
@@ -506,12 +563,22 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = 
         except Exception as exc:  # pragma: no cover - a block the global solver cannot handle
             progress(0.05, f"Global alignment failed ({exc}): one photo at a time")
         best = max(recs.values(), key=lambda r: r.num_reg_images()) if recs else None
+        why = None
         if best is None or best.num_reg_images() < 0.9 * n:
-            progress(0.1, f"Global alignment placed {best.num_reg_images() if best else 0} of {n} photos: "
-                          "one photo at a time")
+            why = f"placed {best.num_reg_images() if best else 0} of {n} photos"
+        else:
+            fits, residual = _block_fits_references(chunk, best)
+            if not fits:  # parts at different scales (Tell Tuqan): the matches are sound, the block is not
+                why = f"built a block whose cameras miss the GPS of the photos by {residual:.0f} m"
+        if why:
+            log.warning("global alignment %s: aligning one photo at a time", why)
+            progress(0.1, f"Global alignment {why}: one photo at a time")
+            chunk.meta["sfm"]["global_fallback"] = why
             shutil.rmtree(out, ignore_errors=True)
             out.mkdir(parents=True)
             recs, mapper = {}, "incremental"
+        else:
+            chunk.meta["sfm"].pop("global_fallback", None)
     if mapper == "incremental":
         opts = pycolmap.IncrementalPipelineOptions()
         opts.multiple_models = True
