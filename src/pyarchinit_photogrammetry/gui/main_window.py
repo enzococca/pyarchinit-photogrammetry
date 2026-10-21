@@ -1326,6 +1326,17 @@ class MainWindow(QMainWindow):
                 return
             name = "".join(c for c in label.strip() if c.isalnum() or c in "_-") or "Indice"
         formula = formula or None
+        used = formula or ms_mod.INDICES.get(name, ("", ""))[0]
+        bands = self._ms_meta().get("reflectance_bands") or self._ms_meta().get("bands") or []
+        try:
+            missing = ms_mod.missing_bands(used, bands) if used else []
+        except ValueError as exc:
+            self._warn(tr("Formula non valida: {0}", exc))
+            return
+        if missing:
+            self._warn(tr("L'indice {0} usa le bande {1}, che queste riprese non hanno (bande: {2}).", name,
+                          ", ".join(missing), ", ".join(bands)))
+            return
         self.run_task(tr("Indice {0}", name), lambda p: ms_mod.index_raster(self.chunk, name, formula),
                       lambda path: self.ms_show("index", name))
 
@@ -6404,6 +6415,14 @@ class MainWindow(QMainWindow):
                 if z.get("file") and Path(z["file"]).exists():
                     extra_vectors.append({"name": f"Zone {zname}", "path": z["file"], "table": "zone",
                                           "geometry": "POLYGON", "color": "#1a9850", "label": "classe"})
+
+        for provider in getattr(self, "qgis_providers", []):  # plugins: their rasters and GeoPackage layers
+            try:
+                more_rasters, more_vectors = provider()
+                rasters += list(more_rasters or [])
+                extra_vectors += list(more_vectors or [])
+            except Exception as exc:  # noqa: BLE001 - a plugin must not stop the export
+                log.warning("QGIS: layer di un plugin saltati: %s", exc)
 
         def job(p):
             p(0.2, "Creazione del progetto QGIS")

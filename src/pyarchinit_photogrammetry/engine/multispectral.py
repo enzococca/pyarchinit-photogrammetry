@@ -607,8 +607,35 @@ def build_reflectance(chunk: Chunk, bands: list[str] | None = None, resolution: 
 
 
 # ------------------------------------------------------------------------------ indices and zoning
+def formula_bands(formula: str) -> set[str]:
+    """The band names a formula uses (``np`` and the numbers left out)."""
+    import ast
+
+    try:
+        tree = ast.parse(formula, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError(f"formula {formula!r}: {exc.msg}") from None
+    return {n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id != "np"}
+
+
+def missing_bands(formula: str, available) -> list[str]:
+    """The bands a formula needs that ``available`` has not got (sorted)."""
+    return sorted(formula_bands(formula) - set(available))
+
+
+def available_indices(bands) -> list[str]:
+    """The indices of :data:`INDICES` whose bands are all among ``bands``."""
+    return [name for name, (formula, _) in INDICES.items() if not missing_bands(formula, bands)]
+
+
 def index_values(formula: str, bands: dict[str, np.ndarray]) -> np.ndarray:
-    """``formula`` over the band arrays (names as in :data:`INDICES`); NaN where undefined."""
+    """``formula`` over the band arrays (names as in :data:`INDICES`); NaN where undefined. A
+    band the captures have not got (the thermal LWIR of a camera without it) is an error that
+    names it, not a crash."""
+    missing = missing_bands(formula, bands)
+    if missing:
+        raise ValueError(f"the formula needs the band(s) {', '.join(missing)}, which these captures have not got "
+                         f"(bands: {', '.join(bands)})")
     names = {k: np.asarray(v, np.float32) for k, v in bands.items()}
     with np.errstate(divide="ignore", invalid="ignore"):
         out = eval(formula, {"__builtins__": {}, "np": np}, names)  # noqa: S307 - our own formulas

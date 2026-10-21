@@ -338,3 +338,15 @@ def test_pane_tree_and_views_show_the_products(scene_dir, tmp_path, monkeypatch)
     finally:
         w_.setWindowModified(False)
         w_.close()
+
+
+def test_an_index_without_its_band_is_refused_with_its_name():
+    """Thermal needs LWIR: without it the error names the band (a crash in 1.2.1)."""
+    bands = {"Red": np.ones((2, 2), np.float32), "NIR": np.ones((2, 2), np.float32)}
+    assert ms.available_indices(bands) == [n for n in ms.INDICES if n not in ("NDRE", "GNDVI", "NDWI", "CIRE", "Thermal")]
+    assert ms.missing_bands(ms.INDICES["Thermal"][0], bands) == ["LWIR"]
+    with pytest.raises(ValueError, match="LWIR"):
+        ms.index_values("LWIR", bands)
+    with pytest.raises(ValueError, match="formula"):
+        ms.index_values("NIR +", bands)
+    assert ms.index_values("(NIR - Red) / (NIR + Red)", bands).shape == (2, 2)

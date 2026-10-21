@@ -331,6 +331,21 @@ for r in cfg["rasters"]:
         lyr.setRenderer(index_renderer(lyr, float(lo), float(hi)))
     elif r.get("ramp") == "zones" and lyr.isValid():
         lyr.setRenderer(zones_renderer(lyr, int(r.get("classes") or 3)))
+    elif r.get("ramp") in ("grey", "grey_inverted", "diverging") and lyr.isValid():  # a geophysical grid
+        lo, hi = r.get("limits") or lyr.dataProvider().cumulativeCut(1, 0.02, 0.98)
+        lo, hi = float(lo), float(hi)
+        if r["ramp"] == "diverging":
+            stops = [(0.0, "#2166ac"), (0.5, "#f7f7f7"), (1.0, "#b2182b")]
+        elif r["ramp"] == "grey_inverted":
+            stops = [(0.0, "#ffffff"), (1.0, "#000000")]
+        else:
+            stops = [(0.0, "#000000"), (1.0, "#ffffff")]
+        ramp = QgsColorRampShader(lo, hi, None, QgsColorRampShader.Interpolated)
+        ramp.setColorRampItemList([QgsColorRampShader.ColorRampItem(lo + t * (hi - lo), QColor(c), f"{lo + t * (hi - lo):.3g}")
+                                   for t, c in stops])
+        shader = QgsRasterShader()
+        shader.setRasterShaderFunction(ramp)
+        lyr.setRenderer(QgsSingleBandPseudoColorRenderer(lyr.dataProvider(), int(r.get("band") or 1), shader))
     if r.get("opacity") is not None:
         lyr.setOpacity(float(r["opacity"]))
     proj.addMapLayer(lyr, False)

@@ -122,6 +122,21 @@ class MultispectralPane(QWidget):
     def _show_reflectance(self) -> None:
         self.show_requested.emit("reflectance", FALSE_COLOUR if self.c_show.currentData() == "false" else TRUE_COLOUR)
 
+    def _offer_indices(self, bands) -> None:
+        """Only the indices the bands allow (no Thermal without a LWIR band), the choice kept."""
+        from ..engine.multispectral import available_indices
+
+        current = self.c_index.currentData()
+        wanted = available_indices(bands) if bands else list(INDICES)
+        self.c_index.blockSignals(True)
+        self.c_index.clear()
+        for name in wanted:
+            self.c_index.addItem(f"{name}: {INDICES[name][1]}", name)
+        self.c_index.addItem(tr("Formula propria..."), "formula")
+        k = self.c_index.findData(current)
+        self.c_index.setCurrentIndex(k if k >= 0 else 0)
+        self.c_index.blockSignals(False)
+
     # --------------------------------------------------------------- state
     def set_state(self, chunk) -> None:
         """What every step has: read from the chunk (captures, alignment, DEM, panel, the
@@ -164,6 +179,7 @@ class MultispectralPane(QWidget):
             self.states["reflectance"].setText(tr("Da fare dopo il DEM: un GeoTIFF a virgola mobile con una banda per banda."))
         self.b_index.setEnabled(has_refl)
         self.c_index.setEnabled(has_refl)
+        self._offer_indices(ms.get("reflectance_bands") or ms.get("bands") or [])
         if indices:
             self.states["index"].setText(tr("Calcolati: {0}", ", ".join(sorted(indices))))
         else:
