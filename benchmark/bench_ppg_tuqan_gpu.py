@@ -10,6 +10,9 @@ Control and check targets from a CSV (label, east, north, height, role) in the U
 site; the RTT points (name, east, north, height, ...) checked against the DEM.
 
     BENCH_CRS=EPSG:xxxxx python bench_ppg_tuqan_gpu.py PROJECT.psx PHOTOS TARGETS.csv RTT.csv OUT [SUBSET.txt]
+
+Run again with the same OUT after a failure: the project and the steps already timed (in
+ppg_times.json) are kept and the run goes on from the first step missing.
 """
 import csv
 import json
@@ -61,30 +64,42 @@ observations = {m.label: [(src_cams[k], p.x, p.y) for k, p in m.projections.item
                 for m in src.markers}
 targets = {r["label"]: r for r in csv.DictReader(open(TARGETS))}
 
-doc = ppg.Document()
-chunk = doc.add_chunk()
-doc.chunk = chunk
-doc.save(OUT / "tell_tuqan_ppg.ppg")
+resumed = (OUT / "ppg_times.json").exists() and (OUT / "tell_tuqan_ppg.ppg").exists()
+if resumed:  # a run stopped by a failure: the steps already timed stand, the project goes on
+    earlier = json.load(open(OUT / "ppg_times.json"))
+    times.update(earlier["times_s"])
+    stats.update({k: v for k, v in earlier["stats"].items() if k not in stats})
+    doc = ppg.Document.open(str(OUT / "tell_tuqan_ppg.ppg"))
+    chunk = doc.chunks[0]
+    doc.chunk = chunk
+    print("BENCH resumed after", ", ".join(times), flush=True)
+else:
+    doc = ppg.Document()
+    chunk = doc.add_chunk()
+    doc.chunk = chunk
+    doc.save(OUT / "tell_tuqan_ppg.ppg")
 photos = sorted(PHOTOS.glob("*.JPG"))
 if SUBSET:
     names = set(SUBSET.read_text().split())
     photos = [p for p in photos if p.name in names]
 stats["photos"] = len(photos)
-timed("add_photos", lambda: chunk.add_photos([str(p) for p in photos]))
-cams = {Path(c.path).name: c for c in chunk.cameras}
-for label, obs in observations.items():
-    if label not in targets:
-        continue
-    m = chunk.add_marker(label)
-    for name, x, y in obs:
-        if name in cams:
-            chunk.add_marker_projection(m, cams[name], x, y, pinned=True)
-    m.checkpoint = targets[label]["role"] == "check"
-stats["marker_projections"] = {m.label: len(m.projections) for m in chunk.markers}
-doc.save()
-timed("match_photos", lambda: chunk.match_photos("medium", 40000, 8000, generic=True, reference="source", gpu="auto"))
-stats["matching"] = {k: (chunk.meta.get("sfm") or {}).get(k) for k in ("pair_selection", "pairs", "gpu", "gpu_pairs", "cpu_pairs")}
-save()
+if "add_photos" not in times:
+    timed("add_photos", lambda: chunk.add_photos([str(p) for p in photos]))
+    cams = {Path(c.path).name: c for c in chunk.cameras}
+    for label, obs in observations.items():
+        if label not in targets:
+            continue
+        m = chunk.add_marker(label)
+        for name, x, y in obs:
+            if name in cams:
+                chunk.add_marker_projection(m, cams[name], x, y, pinned=True)
+        m.checkpoint = targets[label]["role"] == "check"
+    stats["marker_projections"] = {m.label: len(m.projections) for m in chunk.markers}
+    doc.save()
+if "match_photos" not in times:
+    timed("match_photos", lambda: chunk.match_photos("medium", 40000, 8000, generic=True, reference="source", gpu="auto"))
+    stats["matching"] = {k: (chunk.meta.get("sfm") or {}).get(k) for k in ("pair_selection", "pairs", "gpu", "gpu_pairs", "cpu_pairs")}
+    save()
 timed("align_cameras", lambda: chunk.align_cameras(mapper="incremental", use_gps=True))
 stats["gps_priors"] = (chunk.meta.get("sfm") or {}).get("gps_priors")
 stats["transform_cameras_before_targets"] = {k: v for k, v in chunk.update_transform(use_cameras=True).items() if isinstance(v, (int, float, str, bool, type(None)))}

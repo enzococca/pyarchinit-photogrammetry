@@ -886,6 +886,21 @@ def _write_pose_priors(chunk: Chunk, db_path: Path, names: dict[int, str], previ
     if offset is None:
         offset = np.round(pts.mean(axis=0))
     by_name = {names[c.key]: (p - offset, c.reference.accuracy or [5.0, 5.0, 10.0]) for c, p in zip(cams, pts)}
+    # COLMAP's feature extraction writes a WGS84 prior from the EXIF GPS of every photo that has
+    # one (a unique index per image): those go, ours take their place; the CARTESIAN ones written
+    # here before stay when the database is kept
+    import sqlite3
+
+    con = sqlite3.connect(str(db_path))
+    try:
+        if previous:
+            con.execute("DELETE FROM pose_priors WHERE coordinate_system != ?",
+                        (int(pycolmap.PosePriorCoordinateSystem.CARTESIAN),))
+        else:
+            con.execute("DELETE FROM pose_priors")
+        con.commit()
+    finally:
+        con.close()
     db = pycolmap.Database.open(str(db_path))
     try:
         images = db.read_all_images()

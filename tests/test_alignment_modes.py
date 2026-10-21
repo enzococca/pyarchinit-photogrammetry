@@ -117,9 +117,31 @@ def test_gps_of_the_photos_holds_the_block(scene_dir, scene, tmp_path):
     _doc, ch = _project(scene_dir, tmp_path)
     poses = _with_gps(ch, scene)
     ch.match_photos(quality="high")
+    # COLMAP's feature extraction writes a WGS84 prior from the EXIF GPS of every photo that has one
+    # (the drone photos; the synthetic ones have none): the same, written here by hand, must give
+    # way to the priors of the alignment (a unique index per image: Tell Tuqan, 2026-10-21)
+    import pycolmap
+
+    db = pycolmap.Database.open(str(ch.data_dir / "sfm" / "database.db"))
+    try:
+        for image in db.read_all_images():
+            prior = pycolmap.PosePrior(position=np.array([41.0, 12.0, 100.0]),
+                                       coordinate_system=pycolmap.PosePriorCoordinateSystem.WGS84)
+            prior.corr_data_id = image.data_id
+            db.write_pose_prior(prior)
+        assert db.num_pose_priors() == len(ch.cameras)
+    finally:
+        db.close()
     assert ch.align_cameras(mapper="incremental") == len(ch.cameras)  # use_gps None: the photos have them
     info = ch.meta["sfm"]
     assert info["mapper"] == "incremental" and info["gps_priors"]["count"] == len(ch.cameras)
+    db = pycolmap.Database.open(str(ch.data_dir / "sfm" / "database.db"))
+    try:
+        priors = db.read_all_pose_priors()
+        assert len(priors) == len(ch.cameras)
+        assert all(p.coordinate_system == pycolmap.PosePriorCoordinateSystem.CARTESIAN for p in priors)
+    finally:
+        db.close()
     offset = np.asarray(info["gps_priors"]["offset"])
     # the block comes out on the axes of the priors: the internal frame is the metric one less the offset
     for cam in ch.aligned_cameras:
