@@ -25,7 +25,7 @@ class Field:
     maximum: float = 1e9
     decimals: int = 4
     kind: str | None = None  # "file_save", "file_open", "dir", "text", "optional_float", "checklist", "color",
-    # "combo_text" (a text with the choices as suggestions)
+    # "combo_text" (a text with the choices as suggestions), "heading" (a bold title row: no value)
     filter: str = ""
     tip: str = ""
 
@@ -99,6 +99,14 @@ class ParamDialog(QDialog):
         lay.addLayout(form)
         self.widgets: dict[str, tuple[Field, QWidget]] = {}
         for f in fields:
+            if f.kind == "heading":  # the General / Advanced groups of a dialog
+                lab = QLabel(f.label)
+                font = lab.font()
+                font.setBold(True)
+                lab.setFont(font)
+                lab.setContentsMargins(0, 8 if self.widgets else 0, 0, 0)
+                form.addRow(lab)
+                continue
             w = self._widget(f)
             if f.tip:
                 w.setToolTip(f.tip)

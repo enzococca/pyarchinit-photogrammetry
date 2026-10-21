@@ -453,18 +453,36 @@ def refine_markers(project: Path, marker: Optional[list[str]] = typer.Option(Non
 
 
 @app.command()
-def align(project: Path, quality: str = "high",
-          pairs: str = typer.Option("auto", help="auto, exhaustive (every pair), generic (the pairs that overlap, "
-                                                 "found on small images first), reference (nearest by GPS), "
-                                                 "sequential (video)"),
-          keypoints: int = 40000,
+def align(project: Path, quality: str = typer.Option("high", help="the accuracy: ultra (photos at full size), high "
+                                                                  "(1/2), medium (1/4), low (1/8), lowest (1/16)"),
+          pairs: str = typer.Option("auto", help="the older word: auto, exhaustive (every pair), generic (the pairs "
+                                                 "that overlap, found on small images first), reference (nearest by "
+                                                 "GPS), sequential (video); --generic/--no-generic and --reference "
+                                                 "replace it"),
+          generic: Optional[bool] = typer.Option(None, "--generic/--no-generic",
+                                                 help="generic preselection (default: from 40 photos up)"),
+          reference: str = typer.Option("none", help="reference preselection: none, source (the GPS of the photos), "
+                                                     "estimated (a previous alignment) or sequential (capture order)"),
+          neighbours: int = typer.Option(20, help="pairs of every photo with its nearest, or those around it"),
+          keypoints: int = 40000, tiepoints: int = 8000,
+          masks: str = typer.Option("keypoints", help="apply the masks of the photos to: none, keypoints, tiepoints"),
+          stationary: bool = typer.Option(False, help="exclude stationary tie points (turntable, fixed camera)"),
+          guided: bool = typer.Option(False, help="guided image matching"),
+          adaptive: bool = typer.Option(False, help="adaptive camera model fitting"),
+          gps: Optional[bool] = typer.Option(None, "--gps/--no-gps",
+                                             help="the GPS positions of the photos hold the block during the "
+                                                  "incremental alignment (default: when they exist)"),
+          keep: bool = typer.Option(False, help="keep the current alignment and add the photos not yet in it"),
           mapper: str = typer.Option("auto", help="auto, incremental (one photo after the other) or global (all at "
                                                   "once, much faster with many photos)"),
           chunk: Optional[str] = None):
-    """Match photos and align cameras."""
+    """Match photos and align cameras, with the choices of Metashape's Align Photos."""
     doc, ch = _open(project, chunk)
-    ch.match_photos(quality=quality, pair_selection=pairs, keypoint_limit=keypoints, progress=print_progress)
-    n = ch.align_cameras(progress=print_progress, mapper=mapper)
+    ch.match_photos(quality=quality, pair_selection=pairs, keypoint_limit=keypoints, tiepoint_limit=tiepoints,
+                    generic=generic, reference=None if reference == "none" else reference, neighbours=neighbours,
+                    apply_masks=masks, guided_matching=guided, exclude_stationary=stationary, reset=not keep,
+                    progress=print_progress)
+    n = ch.align_cameras(progress=print_progress, mapper=mapper, reset=not keep, use_gps=gps, adaptive_fitting=adaptive)
     doc.save()
     typer.echo(f"aligned {n}/{len(ch.cameras)} photos")
 

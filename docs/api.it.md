@@ -21,8 +21,8 @@ spiegazioni più lunghe seguono la tabella.
 | --- | --- |
 | `add_photos(paths, recursive=False)` | file o cartelle; sensori raggruppati per corpo, obiettivo e risoluzione; il GPS dell'EXIF diventa il riferimento della camera |
 | `detect_markers(target_type="aruco_4x4_50")` | marker `target <codice>` con le loro proiezioni |
-| `match_photos(quality, keypoint_limit, pair_selection)` | punti chiave e corrispondenze; `pair_selection` sceglie quali coppie vengono abbinate (*Coppie*, sotto) |
-| `align_cameras(mapper="auto")` | le foto collocate, dal mapper globale o da quello incrementale (*Mapper*, sotto); la trasformazione viene azzerata e la georeferenziazione rifatta quando ci sono riferimenti |
+| `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True)` | punti chiave e corrispondenze, con le scelte di *Allinea foto* di Metashape (*Coppie*, sotto) |
+| `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True)` | le foto collocate, dal mapper globale o da quello incrementale (*Mapper*, sotto), tenute al GPS delle foto; la trasformazione viene azzerata e la georeferenziazione rifatta quando ci sono riferimenti |
 | `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4)` | compensazione di pose, calibrazione e punti di legame, sui punti di controllo e sulle barre di scala quando ce ne sono (*Ottimizzazione delle camere*, sotto); restituisce l'errore di riproiezione (px) |
 | `import_reference(csv, crs, columns="nxyz")` | riferimenti di marker e camere da un file di testo: `n` etichetta, `x y z`, `a` accuratezza, `-` salta |
 | `export_reference(csv)` | i riferimenti in un file di testo |
@@ -45,11 +45,27 @@ Ogni metodo di elaborazione accetta `progress=callback(fraction, message)`.
 
 ### Coppie
 
-`pair_selection` è `auto`, `exhaustive`, `generic`, `sequential` o `reference`. `auto` abbina tutte le
-coppie fino a 40 foto; oltre è `generic`: le coppie che si sovrappongono vengono trovate prima sulle
-foto ridotte a 1024 pixel (come la preselezione generica di Metashape) e le 20 coppie più forti di
-ogni foto vengono abbinate per intero. `quality` è `ultra`, `high`, `medium`, `low` o `lowest`: le foto
-a piena dimensione o ridotte a 1/2, 1/4, 1/8, 1/16 del lato.
+Le scelte sono quelle di *Allinea foto* di Metashape. `quality` è la precisione: `ultra`, `high`,
+`medium`, `low` o `lowest`, le foto a piena dimensione o ridotte a 1/2, 1/4, 1/8, 1/16 del lato.
+`generic` è la preselezione generica: le coppie che si sovrappongono vengono trovate prima sulle foto
+ridotte a 1024 pixel e le 20 coppie più forti di ogni foto vengono abbinate per intero (`None`: da 40
+foto in su; sotto, tutte le coppie costano poco). `reference` è la preselezione di riferimento:
+`source` (ogni foto con le `neighbours` più vicine per posizione di riferimento, il GPS del drone),
+`estimated` (per le posizioni stimate da un allineamento precedente; le foto non ancora allineate con
+tutte le altre), `sequential` (le foto scattate prima e dopo, nell'ordine dei tempi di scatto: un
+video, un giro intorno a un oggetto). Con entrambe le preselezioni accese si abbinano le coppie di
+entrambe; con nessuna, tutte le coppie. La vecchia parola `pair_selection` (`auto`, `exhaustive`,
+`generic`, `sequential`, `reference`) vale quando `generic` e `reference` non vengono dati.
+
+`apply_masks` applica le maschere delle foto ai `keypoints` (nelle parti mascherate non si cercano
+punti), ai `tiepoints` (un punto mascherato in una foto viene tolto ovunque dopo l'allineamento:
+bastano poche foto mascherate) o a `none`. `guided_matching` cerca di nuovo le corrispondenze con la
+geometria di ogni coppia (più punti di legame, più lento); `exclude_stationary` toglie le
+corrispondenze che non si muovono tra due foto (lo sfondo fermo di un turntable). `reset=False`
+tiene le corrispondenze e l'allineamento che ci sono e abbina solo le foto aggiunte dopo;
+`align_cameras(reset=False)` poi le colloca nel blocco, una foto dopo l'altra (quando non si può
+tenere niente, si rifà tutto). `meta["sfm"]` registra cosa è stato fatto: `pair_selection`
+(`exhaustive`, `generic`, `generic+source`, ...), `pairs`, `apply_masks`, `masked_tie_points`, `added`.
 
 ### Mapper
 
@@ -63,6 +79,17 @@ allineano con una sola focale (pixel quadrati): stimare fx e fy separatamente pu
 soluzione degenere. Il risultato resta nel modello del sensore (`OPENCV` con fx = fy, senza
 distorsione tangenziale); un sensore calibrato con fx != fy o con distorsione tangenziale viene
 allineato com'è, e `optimize_cameras()` affina ogni parametro.
+
+`use_gps` (`None`: quando le foto ce l'hanno) dà al mapper incrementale le posizioni di riferimento
+delle foto, con la loro accuratezza, come prior di posa: il blocco viene tenuto su di esse mentre
+cresce, come l'allineamento di Metashape lo tiene sui riferimenti delle camere, e una lunga catena o
+un anello di foto non deriva più (una posizione GPS sbagliata viene smorzata da una loss robusta); la
+ricostruzione sta poi sugli assi metrici dei riferimenti meno un offset tondo,
+`meta["sfm"]["gps_priors"]`. `adaptive_fitting` è l'adattamento adattivo del modello della camera
+di Metashape, fatto a modo nostro: i parametri che solo un blocco sano regge - punto principale,
+distorsione tangenziale, due focali - vengono affinati su una copia della ricostruzione e tenuti solo
+se l'errore medio di riproiezione scende almeno dell'1 % e ogni camera resta entro limiti fisici
+(`meta["sfm"]["adaptive_fitting"]`).
 
 ### Ottimizzazione delle camere
 

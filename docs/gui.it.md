@@ -110,10 +110,14 @@ Dalla riga di comando `ppg update` dice se esiste una versione più nuova e `ppg
   progetto demo*, *Pagina iniziale*.
 * **Flusso di lavoro**: aggiungi foto/cartella, *Ricollega foto* (le foto con gli stessi nomi in
   un'altra cartella e nelle sue sottocartelle: una copia su disco esterno di una cartella Dropbox
-  tenuta solo online, una cartella spostata), aggiungi chunk, *Allinea chunk* (porta altri chunk nel sistema di un chunk di riferimento tramite i marker con lo stesso nome, le foto in comune o le nuvole che si sovrappongono), *Unisci chunk* (un nuovo chunk con le foto, i marker, i punti di legame, le nuvole e, a scelta, le mesh dei chunk allineati), rileva i marker codificati, allinea (qualità,
-  scelta delle coppie - automatica: tutte le coppie fino a 40 foto, oltre solo quelle che si sovrappongono, trovate prima su
-  foto ridotte - limiti, metodo - automatico: tutte le camere insieme (globale) da 40 foto, una foto
-  alla volta sotto), importa riferimenti, aggiorna la georeferenziazione, *Nuova barra di scala (distanza tra due marker)*, *Importa barre di scala (CSV)*, ottimizza camere, nuvola
+  tenuta solo online, una cartella spostata), aggiungi chunk, *Allinea chunk* (porta altri chunk nel sistema di un chunk di riferimento tramite i marker con lo stesso nome, le foto in comune o le nuvole che si sovrappongono), *Unisci chunk* (un nuovo chunk con le foto, i marker, i punti di legame, le nuvole e, a scelta, le mesh dei chunk allineati), rileva i marker codificati, allinea - la finestra di
+  *Allinea foto* di Metashape: precisione, preselezione generica (le coppie che si sovrappongono trovate
+  prima su foto ridotte; fino a 40 foto comunque tutte le coppie), preselezione di riferimento (il GPS
+  delle foto, un allineamento precedente o l'ordine di scatto), azzera o tieni l'allineamento attuale (le
+  foto aggiunte dopo vi entrano); sotto *Avanzate* i limiti, le maschere applicate ai punti chiave o ai
+  punti di legame, i punti di legame fermi, l'abbinamento guidato, l'adattamento adattivo del modello
+  della camera, il GPS delle foto che tiene il blocco mentre cresce una foto alla volta, e il metodo -
+  automatico: tutte le camere insieme (globale) da 40 foto, una foto alla volta sotto - importa riferimenti, aggiorna la georeferenziazione, *Nuova barra di scala (distanza tra due marker)*, *Importa barre di scala (CSV)*, ottimizza camere, nuvola
   densa (qualità, filtro, motore), *Ritaglia nuvola densa* (intervallo di quote e/o un cilindro
   attorno all'asse del turntable: toglie il tappetino e i target prima di fare la mesh di un oggetto), modello
   (sorgente, superficie, facce), texture, DEM, ortofoto, *Elabora tutto* (Ctrl+R); *Pulizia e

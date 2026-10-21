@@ -44,12 +44,18 @@ the bottom, the *Workspace* on the left lists the chunk with its cameras.
 
 ![Align photos](../img/tutorial/sultan-align-dialog.png)
 
-The defaults fit a drone survey: *Precision High* (features found on the photos at half size),
-40,000 key points and 8,000 tie points per photo, *Pair selection Automatic* - with more than 40
-photos the pairs that overlap are found first on reduced photos, and only those are matched in full -
-and *Method Automatic*: from 40 photos up all the cameras are placed at once (global alignment),
-much faster than one photo after the other. The program computes where every photo was taken and how
-the lens bends the image and, since the photos carry GPS positions, places the block in the UTM zone of the site.
+The dialog has the choices of Metashape's *Align Photos*, and the defaults fit a drone survey:
+*Precision High* (features found on the photos at half size), *Generic preselection* on - with more
+than 40 photos the pairs that overlap are found first on reduced photos, and only those are matched
+in full - and *Reference preselection* on the reference positions, the GPS of the photos. Under
+*Advanced*: 40,000 key points and 8,000 tie points per photo, the masks applied to the key points,
+the stationary points of a turntable, the guided matching, the adaptive camera model fitting, the
+GPS positions of the photos holding the block when the photos are placed one after the other, and
+*Method Automatic*: from 40 photos up all the cameras are placed at once (global alignment), much
+faster than one photo after the other. *Reset current alignment* unticked adds the photos that came
+later to an alignment there already is. The program computes where every photo was taken and how the
+lens bends the image and, since the photos carry GPS positions, places the block in the UTM zone of
+the site.
 
 Here: 57 photos of 57 aligned in about three minutes, 316,000 tie points. The *Model* view
 shows the tie points and the camera positions over the mound: the long strips of the flight and the

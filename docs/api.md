@@ -21,8 +21,8 @@ longer explanations follow the table.
 | --- | --- |
 | `add_photos(paths, recursive=False)` | files or folders; sensors grouped by body, lens and resolution; the EXIF GPS becomes the camera reference |
 | `detect_markers(target_type="aruco_4x4_50")` | markers `target <code>` with their projections |
-| `match_photos(quality, keypoint_limit, pair_selection)` | keypoints and matches; `pair_selection` chooses which pairs are matched (*Pairs*, below) |
-| `align_cameras(mapper="auto")` | the photos placed, by the global or the incremental mapper (*Mappers*, below); the transform is reset and the georeference made again when references exist |
+| `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True)` | keypoints and matches, with the choices of Metashape's *Align Photos* (*Pairs*, below) |
+| `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True)` | the photos placed, by the global or the incremental mapper (*Mappers*, below), held to the GPS of the photos; the transform is reset and the georeference made again when references exist |
 | `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4)` | bundle adjustment of poses, calibration and tie points, on the control points and scale bars when there are any (*Camera optimisation*, below); returns the reprojection error (px) |
 | `import_reference(csv, crs, columns="nxyz")` | references of markers and cameras from a text file: `n` label, `x y z`, `a` accuracy, `-` skip |
 | `export_reference(csv)` | the references to a text file |
@@ -45,11 +45,27 @@ Every processing method accepts `progress=callback(fraction, message)`.
 
 ### Pairs
 
-`pair_selection` is `auto`, `exhaustive`, `generic`, `sequential` or `reference`. `auto` matches every
-pair up to 40 photos; above that it is `generic`: the pairs that overlap are found first on the photos
-reduced to 1024 pixels (as Metashape's generic preselection) and the 20 strongest pairs of each photo
-are matched in full. `quality` is `ultra`, `high`, `medium`, `low` or `lowest`: the photos at full
-size or reduced to 1/2, 1/4, 1/8, 1/16 of their side.
+The choices are those of Metashape's *Align Photos*. `quality` is the accuracy: `ultra`, `high`,
+`medium`, `low` or `lowest`, the photos at full size or reduced to 1/2, 1/4, 1/8, 1/16 of their
+side. `generic` is the generic preselection: the pairs that overlap are found first on the photos
+reduced to 1024 pixels and the 20 strongest pairs of each photo are matched in full (`None`: from 40
+photos up; below, every pair is cheap enough). `reference` is the reference preselection:
+`source` (every photo with its `neighbours` nearest by the reference positions, the GPS of the
+drone), `estimated` (by the positions a previous alignment estimated; photos not aligned yet with
+every other), `sequential` (the photos before and after it in the order of the capture times: a
+video, a walk around an object). With both preselections on, the pairs of both are matched; with
+neither, every pair. The older `pair_selection` word (`auto`, `exhaustive`, `generic`,
+`sequential`, `reference`) stands in when `generic` and `reference` are not given.
+
+`apply_masks` applies the masks of the photos to the `keypoints` (no point is detected in the masked
+parts), to the `tiepoints` (a point masked in one photo is dropped everywhere after the alignment:
+masking a few photos is enough) or to `none`. `guided_matching` searches the matches again with the
+geometry of each pair (more tie points, slower); `exclude_stationary` drops the matches that do not
+move between two photos (the still background of a turntable). `reset=False` keeps the matches and
+the alignment there are and only matches the photos added since; `align_cameras(reset=False)` then
+registers them into the block, one photo after the other (when nothing can be kept, everything is
+done again). `meta["sfm"]` records what ran: `pair_selection` (`exhaustive`, `generic`,
+`generic+source`, ...), `pairs`, `apply_masks`, `masked_tie_points`, `added`.
 
 ### Mappers
 
@@ -63,6 +79,16 @@ with one focal length (square pixels): fitting fx and fy separately can drift in
 solution. The result stays in the sensor model (`OPENCV` with fx = fy, no tangential distortion); a
 sensor calibrated with fx != fy or tangential distortion is aligned as it is, and `optimize_cameras()`
 refines every parameter.
+
+`use_gps` (`None`: when the photos have them) gives the incremental mapper the reference positions
+of the photos, with their accuracy, as pose priors: the block is held to them while it grows, as
+Metashape's alignment holds it to the camera references, and a long chain or a ring of photos no
+longer drifts (a wrong GPS fix is damped by a robust loss); the reconstruction then lives on the
+metric axes of the references less a round offset, `meta["sfm"]["gps_priors"]`. `adaptive_fitting`
+is Metashape's adaptive camera model fitting, done our way: the parameters only a sound block can
+bear - the principal point, the tangential distortion, two focal lengths - are refined on a copy of
+the reconstruction and kept only when the mean reprojection error drops by 1 % at least and every
+camera stays within physical bounds (`meta["sfm"]["adaptive_fitting"]`).
 
 ### Camera optimisation
 

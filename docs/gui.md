@@ -111,10 +111,14 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   demo*, *Pagina iniziale*.
 * **Flusso di lavoro**: add photos/folder, *Ricollega foto* (the photos with the same names in
   another folder and its subfolders: a copy on an external disk of a Dropbox folder kept online
-  only, a moved folder), add chunk, *Allinea chunk* (bring other chunks into the frame of a reference chunk by markers with the same name, photos in common or overlapping clouds), *Unisci chunk* (a new chunk with the photos, markers, tie points, clouds and optionally meshes of aligned chunks), detect coded markers, align (quality,
-  pair selection - automatic: every pair up to 40 photos, above only those that overlap, found first on
-  reduced photos - limits, method - automatic: all the cameras at once (global) from 40 photos, one
-  photo at a time below), import references, update georeferencing, *Nuova barra di scala (distanza tra due marker)*, *Importa barre di scala (CSV)*, optimise cameras, dense
+  only, a moved folder), add chunk, *Allinea chunk* (bring other chunks into the frame of a reference chunk by markers with the same name, photos in common or overlapping clouds), *Unisci chunk* (a new chunk with the photos, markers, tie points, clouds and optionally meshes of aligned chunks), detect coded markers, align - the dialog of
+  Metashape's *Align Photos*: precision, generic preselection (the pairs that overlap found first on
+  reduced photos; every pair up to 40 photos anyway), reference preselection (the GPS of the photos, a
+  previous alignment or the capture order), reset or keep the current alignment (the photos added since
+  join it); under *Avanzate* the limits, the masks applied to the key points or to the tie points,
+  stationary tie points, guided matching, adaptive camera model fitting, the GPS of the photos holding
+  the block while it grows one photo at a time, and the method - automatic: all the cameras at once
+  (global) from 40 photos, one photo at a time below - import references, update georeferencing, *Nuova barra di scala (distanza tra due marker)*, *Importa barre di scala (CSV)*, optimise cameras, dense
   cloud (quality, filter, engine), *Ritaglia nuvola densa* (height range and/or a cylinder
   around the turntable axis: removes the mat and the targets before meshing an object), model
   (source, surface, faces), texture, DEM, orthomosaic, *Elabora tutto* (Ctrl+R); *Pulizia e

@@ -2332,30 +2332,61 @@ class MainWindow(QMainWindow):
         if not self.chunk.cameras:
             self._warn("Aggiungi prima delle foto.")
             return
+        has_gps = sum(1 for c in self.chunk.cameras if c.reference.location and c.reference.enabled) >= 3
+        aligned = bool(self.chunk.aligned_cameras)
         v = ParamDialog.ask(self, "Allinea foto", [
+            Field("general", "Generale", kind="heading"),
             Field("quality", "Precisione", "high", choices=QUALITY[1:]),
-            Field("pair_selection", "Selezione coppie", "auto",
-                  choices=[("auto", "Automatica"), ("generic", "Preselezione generica"), ("exhaustive", "Tutte le coppie"),
-                           ("sequential", "Sequenziale"), ("reference", "Da posizione GNSS")],
-                  tip="Automatica: tutte le coppie fino a 40 foto, oltre solo quelle che si sovrappongono, trovate "
-                      "prima su foto rimpicciolite (preselezione generica)"),
+            Field("generic", "Preselezione generica", True,
+                  tip="Le coppie che si sovrappongono trovate prima su foto rimpicciolite; fino a 40 foto si "
+                      "abbinano comunque tutte le coppie"),
+            Field("reference", "Preselezione di riferimento", "source" if has_gps else "none",
+                  choices=[("none", "Nessuna"), ("source", "Posizioni di riferimento (GPS delle foto)"),
+                           ("estimated", "Posizioni stimate (allineamento precedente)"),
+                           ("sequential", "Sequenziale (ordine di scatto)")],
+                  tip="Ogni foto abbinata alle 20 più vicine per posizione, o a quelle scattate prima e dopo; "
+                      "insieme alla generica si abbinano le coppie di entrambe"),
+            Field("reset", "Azzera l'allineamento attuale", True,
+                  tip="Spento: le foto aggiunte dopo l'ultimo allineamento entrano nel blocco esistente, che "
+                      "resta com'è"),
+            Field("advanced", "Avanzate", kind="heading"),
             Field("keypoint_limit", "Limite punti chiave", 40000, minimum=1000, maximum=200000),
             Field("tiepoint_limit", "Limite punti di legame", 8000, minimum=500, maximum=100000),
+            Field("masks", "Applica le maschere a", "keypoints",
+                  choices=[("none", "Niente"), ("keypoints", "Punti chiave"), ("tiepoints", "Punti di legame")],
+                  tip="Punti chiave: nelle parti mascherate non si cercano punti; punti di legame: un punto "
+                      "mascherato anche in una sola foto viene tolto ovunque (bastano poche foto mascherate)"),
+            Field("stationary", "Escludi i punti di legame fermi", False,
+                  tip="I punti che restano nello stesso pixel in due foto sono lo sfondo fermo (turntable con "
+                      "fotocamera fissa): non contano"),
+            Field("guided", "Abbinamento guidato delle immagini", False,
+                  tip="Le corrispondenze cercate di nuovo con la geometria della coppia: più punti di legame, "
+                      "abbinamento più lento"),
+            Field("adaptive", "Adattamento adattivo del modello della camera", False,
+                  tip="Punto principale, distorsione tangenziale e due focali stimati su una copia del blocco e "
+                      "tenuti solo se affidabili: errore che scende e valori entro i limiti"),
+            Field("gps", "Posizioni GPS delle foto nell'allineamento", has_gps,
+                  tip="Le posizioni delle foto, con la loro accuratezza, tengono il blocco durante l'allineamento "
+                      "incrementale: un anello o una lunga catena di foto non deriva"),
             Field("mapper", "Metodo", "auto",
                   choices=[("auto", "Automatico"), ("global", "Globale (tutte le camere insieme)"),
                            ("incremental", "Incrementale (una foto alla volta)")],
                   tip="Globale: molto piu' veloce con molte foto; automatico lo sceglie da 40 foto in su e torna "
-                      "all'incrementale se lascia fuori delle foto"),
-            Field("stationary", "Escludi i punti fermi (turntable con fotocamera fissa)", False,
-                  tip="I punti che restano nello stesso pixel in due foto sono lo sfondo fermo: non contano")],
-            intro="Le parti mascherate delle foto (Strumenti > Maschere delle foto) non vengono usate.")
+                      "all'incrementale se lascia fuori delle foto")],
+            intro="Le scelte di Allinea foto di Metashape: precisione, preselezioni, limiti, maschere, punti fermi, "
+                  "abbinamento guidato, modello della camera."
+                  + ("" if aligned else " Le opzioni che usano un allineamento precedente valgono dal secondo in poi."))
         if not v:
             return
 
         def job(p):
-            self.chunk.match_photos(v["quality"], v["keypoint_limit"], v["tiepoint_limit"], v["pair_selection"],
-                                    progress=p.sub(0, 0.5), exclude_stationary=bool(v.get("stationary")))
-            n = self.chunk.align_cameras(progress=p.sub(0.5, 0.5), mapper=v.get("mapper", "auto"))
+            self.chunk.match_photos(v["quality"], v["keypoint_limit"], v["tiepoint_limit"], progress=p.sub(0, 0.5),
+                                    exclude_stationary=bool(v.get("stationary")), generic=bool(v.get("generic")),
+                                    reference=v.get("reference") or None, apply_masks=v.get("masks", "keypoints"),
+                                    guided_matching=bool(v.get("guided")), reset=bool(v.get("reset", True)))
+            n = self.chunk.align_cameras(progress=p.sub(0.5, 0.5), mapper=v.get("mapper", "auto"),
+                                         reset=bool(v.get("reset", True)), use_gps=bool(v.get("gps")),
+                                         adaptive_fitting=bool(v.get("adaptive")))
             if any(m.reference.location for m in self.chunk.markers):
                 self.last_report = self.chunk.update_transform()
             return n

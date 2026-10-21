@@ -42,13 +42,18 @@ pannello *Foto* in basso, l'*Area di lavoro* a sinistra elenca il chunk con le s
 
 ![Allinea foto](../img/tutorial/sultan-align-dialog.png)
 
-I valori proposti vanno bene per un rilievo da drone: *Precisione Alta* (punti cercati sulle foto a
-metà dimensione), 40.000 punti chiave e 8.000 punti di legame per foto, *Selezione coppie Automatica*
-- con più di 40 foto le coppie che si sovrappongono vengono trovate prima su foto rimpicciolite e solo
-quelle vengono abbinate per intero - e *Metodo Automatico*: da 40 foto in su tutte le camere vengono
-collocate insieme (allineamento globale), molto più in fretta che una foto dopo l'altra. Il programma
-calcola da dove è stata scattata ogni foto e come l'obiettivo deforma l'immagine e, poiché le foto
-hanno la posizione GPS, colloca il blocco nel fuso UTM del sito.
+La finestra ha le scelte di *Allinea foto* di Metashape, e i valori proposti vanno bene per un rilievo
+da drone: *Precisione Alta* (punti cercati sulle foto a metà dimensione), *Preselezione generica*
+accesa - con più di 40 foto le coppie che si sovrappongono vengono trovate prima su foto
+rimpicciolite e solo quelle vengono abbinate per intero - e *Preselezione di riferimento* sulle
+posizioni di riferimento, il GPS delle foto. Sotto *Avanzate*: 40.000 punti chiave e 8.000 punti di
+legame per foto, le maschere applicate ai punti chiave, i punti fermi di un turntable, l'abbinamento
+guidato, l'adattamento adattivo del modello della camera, le posizioni GPS delle foto che tengono il
+blocco quando le foto vengono collocate una dopo l'altra, e *Metodo Automatico*: da 40 foto in su
+tutte le camere vengono collocate insieme (allineamento globale), molto più in fretta che una foto
+dopo l'altra. *Azzera l'allineamento attuale* spento aggiunge le foto arrivate dopo a un allineamento
+che c'è già. Il programma calcola da dove è stata scattata ogni foto e come l'obiettivo deforma
+l'immagine e, poiché le foto hanno la posizione GPS, colloca il blocco nel fuso UTM del sito.
 
 Qui: 57 foto su 57 allineate in circa tre minuti, 316.000 punti di legame. La vista
 *Modello* mostra i punti di legame e le posizioni delle camere sopra la collina: le lunghe strisciate

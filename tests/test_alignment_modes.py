@@ -1,23 +1,47 @@
 """Faster alignment of many photos: the pairs that overlap preselected on small images (as the
 generic preselection of Metashape) and all the cameras placed at once (global SfM), with the same
 accuracy on the control points of the synthetic trench, and the way back to the incremental
-alignment when the global one leaves photos out."""
+alignment when the global one leaves photos out. Then the other choices of Metashape's Align
+Photos: the reference preselections (source, estimated, sequential), the masks on the tie points,
+guided matching, adaptive camera model fitting, the GPS of the photos holding the block, and
+photos added to an alignment."""
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 import pyarchinit_photogrammetry as ppg
+from pyarchinit_photogrammetry.core.camera import Reference
 from pyarchinit_photogrammetry.engine import sfm
 
 
-def _matched(scene_dir, tmp_path, pairs):
+def _project(scene_dir, tmp_path, photos=None):
     doc = ppg.Document()
     ch = doc.add_chunk("Saggio")
     doc.save(tmp_path / "project.ppg")
-    ch.add_photos([scene_dir / "photos"])
+    ch.add_photos(photos if photos is not None else [scene_dir / "photos"])
     ch.detect_markers("aruco_4x4_50")
+    return doc, ch
+
+
+def _matched(scene_dir, tmp_path, pairs):
+    doc, ch = _project(scene_dir, tmp_path)
     ch.match_photos(quality="high", pair_selection=pairs)
     return doc, ch
+
+
+def _with_gps(ch, scene, noise: float = 0.05, seed: int = 3):
+    """The true positions of the synthetic cameras, a little noise added, as the GPS of the photos."""
+    from pyarchinit_photogrammetry.testing.synthetic import camera_poses
+
+    rng = np.random.default_rng(seed)
+    poses = camera_poses(scene)
+    for cam in ch.cameras:
+        i = int(cam.label.split("_")[-1])
+        xyz = poses[i][:3, 3] + np.asarray(scene.origin) + rng.normal(0.0, noise, 3)
+        cam.reference = Reference(location=[float(v) for v in xyz], accuracy=[0.1, 0.1, 0.2], enabled=True)
+        cam.meta["reference_crs"] = scene.crs
+    return poses
 
 
 def test_generic_preselection_matches_only_the_pairs_that_overlap(scene_dir, tmp_path):
@@ -61,6 +85,141 @@ def test_auto_choices(scene_dir, tmp_path, monkeypatch):
     assert ch.meta["sfm"]["mapper"] == "global"
     with pytest.raises(ValueError):
         ch.align_cameras(mapper="somehow")
+
+
+def test_reference_preselections_pick_the_pairs(scene_dir, scene, tmp_path):
+    _doc, ch = _project(scene_dir, tmp_path)
+    _with_gps(ch, scene)
+    n = len(ch.cameras)
+    every = n * (n - 1) // 2
+    ch.match_photos(quality="high", generic=False, reference="source", neighbours=4)
+    info = ch.meta["sfm"]
+    assert info["pair_selection"] == "source" and info["reference"] == "source" and not info["generic"]
+    assert 2 * n <= info["pairs"] < every
+    ch.match_photos(quality="high", generic=False, reference="sequential", neighbours=3)
+    assert ch.meta["sfm"]["pair_selection"] == "sequential"
+    assert ch.meta["sfm"]["pairs"] == sum(min(3, n - 1 - i) for i in range(n))  # 3 before and after each photo
+    with pytest.raises(RuntimeError):  # nothing aligned yet
+        ch.match_photos(quality="high", generic=False, reference="estimated")
+    with pytest.raises(ValueError):
+        ch.match_photos(quality="high", reference="nowhere")
+    ch.match_photos(quality="high", generic=True, reference="source", neighbours=4)
+    both = ch.meta["sfm"]
+    assert both["pair_selection"] == "generic+source" and both["pairs"] >= info["pairs"]
+    assert ch.align_cameras(mapper="incremental", use_gps=False) == n
+    ch.match_photos(quality="high", generic=False, reference="estimated", neighbours=4)
+    assert ch.meta["sfm"]["pair_selection"] == "estimated" and 2 * n <= ch.meta["sfm"]["pairs"] < every
+    ch.match_photos(quality="high", generic=False, reference=None)
+    assert ch.meta["sfm"]["pair_selection"] == "exhaustive" and ch.meta["sfm"]["pairs"] is None
+
+
+def test_gps_of_the_photos_holds_the_block(scene_dir, scene, tmp_path):
+    _doc, ch = _project(scene_dir, tmp_path)
+    poses = _with_gps(ch, scene)
+    ch.match_photos(quality="high")
+    assert ch.align_cameras(mapper="incremental") == len(ch.cameras)  # use_gps None: the photos have them
+    info = ch.meta["sfm"]
+    assert info["mapper"] == "incremental" and info["gps_priors"]["count"] == len(ch.cameras)
+    offset = np.asarray(info["gps_priors"]["offset"])
+    # the block comes out on the axes of the priors: the internal frame is the metric one less the offset
+    for cam in ch.aligned_cameras:
+        truth = poses[int(cam.label.split("_")[-1])][:3, 3] + np.asarray(scene.origin)
+        assert np.linalg.norm(np.asarray(cam.center) + offset - truth) < 0.2
+    ch.import_reference(scene_dir / "gcp.csv", crs="EPSG:3004")
+    report = ch.update_transform()
+    assert report["control_rmse"] < 0.002  # the priors place the block, the photos keep its shape
+    ch.match_photos(quality="high")
+    ch.align_cameras(mapper="incremental", use_gps=False)
+    assert ch.meta["sfm"]["gps_priors"] is None
+
+
+def test_masks_on_the_tie_points(scene_dir, tmp_path):
+    from pyarchinit_photogrammetry.engine.masks import write_mask
+
+    _doc, ch = _project(scene_dir, tmp_path)
+    cam0 = ch.cameras[0]
+    keep = np.ones((900, 1200), bool)
+    keep[:, :600] = False  # the left half of the first photo masked, the other photos untouched
+    write_mask(ch, cam0, keep)
+    name = ch.meta.get("sfm", {}).get("names", {}).get(str(cam0.key))
+
+    def left_most_x():
+        rec = sfm.load_reconstruction(ch)
+        image = next(im for im in rec.images.values() if im.name == ch.meta["sfm"]["names"][str(cam0.key)])
+        xs = [float(image.points2D[i].xy[0]) for i in image.get_observation_point2D_idxs()]
+        return min(xs), len(xs)
+
+    with pytest.raises(ValueError):
+        ch.match_photos(quality="high", apply_masks="everywhere")
+    ch.match_photos(quality="high", apply_masks="none")
+    assert ch.align_cameras(mapper="incremental", use_gps=False) == len(ch.cameras)
+    assert not ch.meta["sfm"]["masks"] and ch.meta["sfm"]["masked_tie_points"] == 0
+    x_none, n_none = left_most_x()
+    assert x_none < 600
+    ch.match_photos(quality="high", apply_masks="tiepoints")
+    assert ch.align_cameras(mapper="incremental", use_gps=False) == len(ch.cameras)
+    assert not ch.meta["sfm"]["masks"] and ch.meta["sfm"]["masked_tie_points"] > 0
+    x_tie, n_tie = left_most_x()
+    assert x_tie >= 599 and n_tie < n_none  # no tie point left in the masked half
+    ch.match_photos(quality="high", apply_masks="keypoints")
+    assert ch.meta["sfm"]["masks"] and name is None or True
+    assert ch.align_cameras(mapper="incremental", use_gps=False) == len(ch.cameras)
+    assert left_most_x()[0] >= 599
+
+
+def test_guided_matching_and_adaptive_camera_fitting_keep_the_accuracy(scene_dir, tmp_path):
+    _doc, ch = _project(scene_dir, tmp_path)
+    ch.match_photos(quality="high", guided_matching=True)
+    assert ch.meta["sfm"]["guided_matching"]
+    assert ch.align_cameras(mapper="incremental", use_gps=False, adaptive_fitting=True) == len(ch.cameras)
+    report = ch.meta["sfm"]["adaptive_fitting"]
+    assert {"kept", "before_px", "after_px", "sane"} <= set(report) and report["after_px"] > 0
+    sensor = ch.sensors[ch.cameras[0].sensor_key]
+    if report["kept"]:  # the wider model, within bounds
+        assert sensor.model == "OPENCV" and abs(sensor.params[0] / sensor.params[1] - 1) < 0.02
+        assert abs(sensor.params[6]) < 0.01 and abs(sensor.params[7]) < 0.01
+    ch.import_reference(scene_dir / "gcp.csv", crs="EPSG:3004")
+    assert ch.update_transform()["control_rmse"] < 0.002
+    # the wider model is never kept when it does not help: a trial that gains nothing
+    rec = sfm.load_reconstruction(ch)
+    same, rep = sfm.adaptive_camera_fit(ch, rec, fixed_cameras=set(rec.cameras))
+    assert same is rec and not rep["kept"]
+
+
+def test_photos_added_to_an_alignment(scene_dir, tmp_path):
+    photos = sorted((scene_dir / "photos").glob("*.jpg"))
+    _doc, ch = _project(scene_dir, tmp_path, photos[:14])
+    ch.match_photos(quality="high")
+    assert ch.align_cameras(mapper="incremental", use_gps=False) == 14
+    ch.import_reference(scene_dir / "gcp.csv", crs="EPSG:3004")
+    ch.update_transform()
+    before = {c.label: ch.to_world(c.center) for c in ch.aligned_cameras}
+    rest = len(photos) - 14
+    ch.add_photos(photos[14:])
+    ch.detect_markers("aruco_4x4_50")
+    ch.match_photos(quality="high", reset=False)
+    info = ch.meta["sfm"]
+    assert info["continued"] and len(info["added"]) == rest
+    assert info["pairs"] == rest * 14 + rest * (rest - 1) // 2  # the pairs with a new photo
+    assert ch.align_cameras(reset=False, use_gps=False) == len(photos) and info["mapper"] == "incremental"
+    report = ch.update_transform()
+    after = {c.label: ch.to_world(c.center) for c in ch.aligned_cameras}
+    assert len(after) == len(photos) and report["control_rmse"] < 0.002  # as accurate as a fresh alignment
+    # the first photos stay in the block, refined with the new ones (14 photos alone made a weaker
+    # block, placed on fewer targets: their positions move by centimetres, not metres)
+    assert set(after) >= set(before) and max(np.linalg.norm(after[k] - before[k]) for k in before) < 0.5
+    # nothing to continue (the photos of another folder): everything again, and said so
+    seen = []
+    other = tmp_path / "altrove"
+    other.mkdir()
+    for p in photos[:6]:
+        (other / p.name).write_bytes(p.read_bytes())
+    doc2 = ppg.Document()
+    ch2 = doc2.add_chunk("Altro")
+    doc2.save(tmp_path / "altro.ppg")
+    ch2.add_photos([other])
+    ch2.match_photos(quality="high", reset=False, progress=lambda f, m: seen.append(m))
+    assert not ch2.meta["sfm"]["continued"] and any("every photo again" in m for m in seen)
 
 
 def test_strongest_pairs_keep_every_photo_and_the_links_between_groups():

@@ -206,27 +206,79 @@ def relink_photos(chunk: Chunk, folder, only_unreadable: bool = False) -> dict:
             "image_root": (chunk.meta.get("sfm") or {}).get("image_root")}
 
 
-def _reference_pairs(chunk: Chunk, names: dict[int, str], neighbors: int = 20) -> list[tuple[str, str]] | None:
-    """Candidate pairs from camera reference positions (k nearest neighbours)."""
+REFERENCE_NEIGHBOURS = 20  # the pairs of every photo with its nearest ones (by position) or the ones around it (in sequence)
+PRESELECTIONS = ("source", "estimated", "sequential")  # the reference preselections, named as Metashape names them
+MASK_MODES = ("none", "keypoints", "tiepoints")  # what the masks of the photos apply to
+
+
+def _nearest_pairs(positions: dict[str, np.ndarray], neighbours: int) -> set[tuple[str, str]]:
+    """Every photo with its ``neighbours`` nearest ones (planimetric distance)."""
+    from scipy.spatial import cKDTree
+
+    names = list(positions)
+    if len(names) < 2:
+        return set()
+    pts = np.array([np.asarray(positions[n], float)[:2] for n in names])
+    tree = cKDTree(pts)
+    k = min(neighbours + 1, len(names))
+    _, idx = tree.query(pts, k=k)
+    pairs = set()
+    for i, row in enumerate(np.atleast_2d(idx)):
+        for j in row:
+            if i != j:
+                pairs.add(tuple(sorted((names[i], names[int(j)]))))
+    return pairs
+
+
+def _reference_positions(chunk: Chunk, names: dict[int, str]) -> dict[str, np.ndarray]:
+    """The reference positions of the photos (the GPS of the drone) on metric axes, by name."""
     cams = [c for c in chunk.cameras if c.enabled and c.key in names and c.reference.location]
-    if len(cams) < 3:
-        return None
+    if not cams:
+        return {}
     pts = np.array([c.reference.location for c in cams], float)
     src = cams[0].meta.get("reference_crs", chunk.crs)
     if crs_mod.is_geographic(src):
         utm = crs_mod.utm_for_lonlat(*pts[:, :2].mean(0))
         pts = crs_mod.transform_points(pts, src, utm)
-    from scipy.spatial import cKDTree
+    return {names[c.key]: p for c, p in zip(cams, pts)}
 
-    tree = cKDTree(pts[:, :2])
-    k = min(neighbors + 1, len(cams))
-    _, idx = tree.query(pts[:, :2], k=k)
+
+def _reference_pairs(chunk: Chunk, names: dict[int, str], neighbors: int = REFERENCE_NEIGHBOURS) -> list | None:
+    """Candidate pairs from the reference positions of the cameras - the ``source`` preselection:
+    every photo with its ``neighbors`` nearest - or None with fewer than three positions."""
+    positions = _reference_positions(chunk, names)
+    if len(positions) < 3:
+        return None
+    return sorted(_nearest_pairs(positions, neighbors))
+
+
+def _estimated_pairs(chunk: Chunk, names: dict[int, str], neighbours: int = REFERENCE_NEIGHBOURS) -> list | None:
+    """Candidate pairs from the positions a previous alignment estimated - the ``estimated``
+    preselection: every aligned photo with its ``neighbours`` nearest, the photos not aligned
+    yet with every other photo - or None without an alignment."""
+    aligned = {names[c.key]: np.asarray(c.center, float) for c in chunk.cameras
+               if c.enabled and c.key in names and c.transform is not None}
+    if len(aligned) < 3:
+        return None
+    pairs = _nearest_pairs(aligned, neighbours)
+    everyone = list(names.values())
+    for a in everyone:
+        if a not in aligned:
+            pairs.update(tuple(sorted((a, b))) for b in everyone if b != a)
+    return sorted(pairs)
+
+
+def _sequential_pairs(chunk: Chunk, names: dict[int, str], overlap: int = REFERENCE_NEIGHBOURS) -> list:
+    """Candidate pairs of photos taken one after the other - the ``sequential`` preselection, a
+    video or a walk around an object: every photo with the ``overlap`` before and after it in
+    the order of the capture times (the file names where the EXIF has none)."""
+    cams = [c for c in chunk.cameras if c.enabled and c.key in names]
+    order = sorted(cams, key=lambda c: (str(c.meta.get("datetime") or ""), names[c.key]))
+    seq = [names[c.key] for c in order]
     pairs = set()
-    for i, row in enumerate(np.atleast_2d(idx)):
-        for j in row:
-            if i != j:
-                a, b = sorted((names[cams[i].key], names[cams[int(j)].key]))
-                pairs.add((a, b))
+    for i, a in enumerate(seq):
+        for b in seq[i + 1:i + 1 + max(int(overlap), 1)]:
+            pairs.add(tuple(sorted((a, b))))
     return sorted(pairs)
 
 
@@ -323,41 +375,102 @@ def _preselected_pairs(chunk: Chunk, work: Path, root, by_sensor: dict, masks,
     return sorted(pairs)
 
 
+def _preselection(pair_selection: str, generic, reference) -> tuple[bool | None, str | None]:
+    """The generic and reference preselections asked for: by ``generic`` and ``reference`` when
+    either is given, else by the older ``pair_selection`` word."""
+    if generic is None and reference is None:
+        words = {"auto": (None, None), "exhaustive": (False, None), "generic": (True, None),
+                 "reference": (False, "source"), "sequential": (False, "sequential")}
+        if pair_selection not in words:
+            raise ValueError(f"unknown pair selection {pair_selection!r}")
+        return words[pair_selection]
+    if reference in ("", "none"):
+        reference = None
+    if reference is not None and reference not in PRESELECTIONS:
+        raise ValueError(f"unknown reference preselection {reference!r}: one of {', '.join(PRESELECTIONS)}")
+    return (None if generic is None else bool(generic)), reference
+
+
+def _db_image_names(db_path: Path) -> set[str]:
+    import pycolmap
+
+    db = pycolmap.Database.open(str(db_path))
+    try:
+        return {im.name for im in db.read_all_images()}
+    finally:
+        db.close()
+
+
+def _continuable(chunk: Chunk, db_path: Path, root, names: dict[int, str]) -> bool:
+    """Whether the matches and the alignment of the chunk can take more photos: database and
+    model exist, the photos sit in the same folder, every photo of the database is still there."""
+    info = chunk.meta.get("sfm") or {}
+    model = chunk.product_path("reconstruction")
+    if not db_path.exists() or model is None or not model.exists() or info.get("image_root") != str(root):
+        return False
+    return _db_image_names(db_path) <= set(names.values())
+
+
 def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 40000, tiepoint_limit: int = 8000,
                  pair_selection: str = "auto", progress: Progress | None = None,
-                 exclude_stationary: bool = False) -> None:
-    """Detect and match the points of the photos (SIFT); the masked parts of the photos
-    (:mod:`.masks`) are left out. ``exclude_stationary``: matches that do not move between two
-    photos are dropped - the background of a turntable photographed from a fixed camera. The
-    faces of 360-degree photos (:mod:`.panorama`) become the frames of a rig.
+                 exclude_stationary: bool = False, generic: bool | None = None, reference: str | None = None,
+                 neighbours: int = REFERENCE_NEIGHBOURS, apply_masks: str = "keypoints",
+                 guided_matching: bool = False, reset: bool = True) -> None:
+    """Detect and match the points of the photos (SIFT), with the choices of Metashape's *Align
+    Photos*: ``quality`` (the accuracy: the photos at full size or reduced), the ``generic``
+    preselection (the pairs that overlap found first on the photos reduced to 1024 pixels,
+    :func:`_preselected_pairs`; None: from ``EXHAUSTIVE_UP_TO`` photos up), the ``reference``
+    preselection - ``source`` (every photo with its ``neighbours`` nearest by the reference
+    positions, the GPS of the drone), ``estimated`` (by the positions of a previous alignment),
+    ``sequential`` (the photos before and after it in the order of the capture) - with the pairs
+    of both preselections matched when both are on and every pair when neither is. The older
+    ``pair_selection`` word (``auto``, ``exhaustive``, ``generic``, ``sequential``, ``reference``)
+    stands in when ``generic`` and ``reference`` are not given.
 
-    ``pair_selection``: ``exhaustive`` (every pair), ``generic`` (the pairs that overlap, found on
-    small images first: :func:`_preselected_pairs`), ``reference`` (the nearest cameras by GPS),
-    ``sequential`` (video); ``auto`` matches every pair up to ``EXHAUSTIVE_UP_TO`` photos and
-    preselects above (360-degree rigs: every pair)."""
+    ``apply_masks``: the masks of the photos (:mod:`.masks`) applied to the ``keypoints`` (no
+    point detected in the masked parts), to the ``tiepoints`` (a point masked in one photo is
+    dropped everywhere after the alignment: masking a few photos is enough) or to ``none``.
+    ``guided_matching``: the matches searched again with the geometry of the pair (more tie
+    points, slower). ``exclude_stationary``: matches that do not move between two photos are
+    dropped - the background of a turntable photographed from a fixed camera. ``reset`` False
+    keeps the matches and the alignment there are and only detects and matches the photos added
+    since (:func:`align_cameras` then registers them into the block); when they cannot be kept
+    everything is done again. The faces of 360-degree photos (:mod:`.panorama`) become the
+    frames of a rig."""
     import pycolmap
 
     from .masks import colmap_mask_folder
     from .panorama import panorama_cameras, rig_configs
 
     progress = as_progress(progress)
+    if apply_masks not in MASK_MODES:
+        raise ValueError(f"apply_masks: one of {', '.join(MASK_MODES)}")
+    generic, reference = _preselection(pair_selection, generic, reference)
     work = _sfm_dir(chunk)
     db_path = work / "database.db"
-    if db_path.exists():
-        db_path.unlink()
     root, names = image_root_and_names(chunk)
+    rigs = rig_configs(chunk, names)
+    keep = (not reset) and not rigs and _continuable(chunk, db_path, root, names)
+    if not reset and not keep:
+        progress(0.0, "No alignment to continue: every photo again")
+    if not keep and db_path.exists():
+        db_path.unlink()
+    existing = _db_image_names(db_path) if keep else set()
     downscale = QUALITY_DOWNSCALE.get(quality, 2)
 
     by_sensor: dict[int, list[str]] = {}
     for c in chunk.cameras:
         if c.enabled:
             by_sensor.setdefault(c.sensor_key, []).append(names[c.key])
+    new = [n for group in by_sensor.values() for n in group if n not in existing]
 
-    masks = colmap_mask_folder(chunk, names, work / "masks")
-    rigs = rig_configs(chunk, names)
+    masks = colmap_mask_folder(chunk, names, work / "masks") if apply_masks == "keypoints" else None
     faces = {c.sensor_key for c in panorama_cameras(chunk) if c.enabled} if rigs else set()
-    progress(0.0, f"Detecting points in {len(names)} photos" + (" (with masks)" if masks else ""))
+    progress(0.0, f"Detecting points in {len(new)} photos" + (" (with masks)" if masks else ""))
     for i, (skey, image_names) in enumerate(by_sensor.items()):
+        image_names = [n for n in image_names if n not in existing]
+        if not image_names:
+            continue
         sensor = chunk.sensors[skey]
         ext = pycolmap.FeatureExtractionOptions()
         ext.max_image_size = int(max(sensor.width, sensor.height) / downscale)
@@ -383,40 +496,53 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     mopts = pycolmap.FeatureMatchingOptions()
     mopts.max_num_matches = max(int(tiepoint_limit) * 4, 8192)
     mopts.skip_image_pairs_in_same_frame = bool(rigs)  # same centre: nothing to triangulate
+    mopts.guided_matching = bool(guided_matching)
     n = len(names)
-    mode = pair_selection
-    if mode == "auto":
-        mode = "exhaustive" if n <= EXHAUSTIVE_UP_TO or rigs else "generic"
-    pairs = None
-    if mode == "generic":
+    if generic is None:
+        generic = n > EXHAUSTIVE_UP_TO and not rigs  # every pair is cheap enough up to there
+    pairs: set[tuple[str, str]] | None = None
+    parts = []
+    if generic:
         progress(0.5, "Finding the pairs of photos that overlap")
-        pairs = _preselected_pairs(chunk, work, root, by_sensor, masks, names)
-        if not pairs:
-            mode = "exhaustive"  # nothing found on the small images: every pair
-    elif mode == "reference":
-        pairs = _reference_pairs(chunk, names)
-        if not pairs:
-            raise RuntimeError("reference pair selection needs camera reference positions")
-    progress(0.55, f"Matching photos ({mode}" + (f", {len(pairs):,} pairs)" if pairs else ")"))
-    if mode == "exhaustive":
+        found = _preselected_pairs(chunk, work, root, by_sensor, masks, names)
+        if found:  # nothing found on the small images: every pair
+            pairs, parts = set(found), ["generic"]
+    if reference:
+        finder = {"source": _reference_pairs, "estimated": _estimated_pairs, "sequential": _sequential_pairs}[reference]
+        found = finder(chunk, names, max(int(neighbours), 1))
+        if found:
+            pairs = (pairs or set()) | set(found)
+            parts.append(reference)
+        elif not pairs:
+            raise RuntimeError(f"the {reference} preselection needs "
+                               + ("camera reference positions" if reference == "source" else "an alignment"))
+    mode = "+".join(parts) if pairs else "exhaustive"
+    if keep:  # only the pairs with a photo added since
+        added, everyone = set(new), list(names.values())
+        if pairs is None:
+            pairs = {tuple(sorted((a, b))) for a in added for b in everyone if a != b}
+        else:
+            pairs = {p for p in pairs if p[0] in added or p[1] in added}
+    progress(0.55, f"Matching photos ({mode}" + (f", {len(pairs):,} pairs)" if pairs is not None else ")"))
+    if pairs is None:
         pycolmap.match_exhaustive(str(db_path), matching_options=mopts)
-    elif mode == "sequential":
-        popts = pycolmap.SequentialPairingOptions()
-        popts.overlap = 20
-        pycolmap.match_sequential(str(db_path), matching_options=mopts, pairing_options=popts)
-    elif mode in ("reference", "generic"):
+    elif pairs:
         list_path = work / "pairs.txt"
-        list_path.write_text("\n".join(f"{a} {b}" for a, b in pairs))
+        list_path.write_text("\n".join(f"{a} {b}" for a, b in sorted(pairs)))
         popts = pycolmap.ImportedPairingOptions()
         popts.match_list_path = str(list_path)
         pycolmap.match_image_pairs(str(db_path), matching_options=mopts, pairing_options=popts)
-    else:
-        raise ValueError(f"unknown pair selection {pair_selection!r}")
     removed = remove_stationary_matches(db_path) if exclude_stationary else None
+    old = chunk.meta.get("sfm") or {}
     chunk.meta["sfm"] = {"image_root": str(root), "names": {str(k): v for k, v in names.items()},
-                         "quality": quality, "pair_selection": mode, "pairs": len(pairs) if pairs else None,
-                         "masks": masks is not None, "stationary_removed": removed, "rigs": len(rigs),
-                         "keypoint_limit": int(keypoint_limit), "tiepoint_limit": int(tiepoint_limit)}
+                         "quality": quality, "pair_selection": mode, "pairs": len(pairs) if pairs is not None else None,
+                         "generic": bool(generic), "reference": reference, "neighbours": int(neighbours),
+                         "masks": masks is not None, "apply_masks": apply_masks, "guided_matching": bool(guided_matching),
+                         "stationary_removed": removed, "rigs": len(rigs),
+                         "keypoint_limit": int(keypoint_limit), "tiepoint_limit": int(tiepoint_limit),
+                         "continued": keep, "added": new if keep else None}
+    if keep and old.get("gps_priors"):
+        chunk.meta["sfm"]["gps_priors"] = old["gps_priors"]  # the priors already in the database: same axes
     progress(1.0, "Matching finished" + (f" ({removed:,} stationary matches left out)" if removed else ""))
 
 
@@ -531,12 +657,196 @@ def _block_fits_references(chunk: Chunk, rec) -> tuple[bool, float]:
     return fits_references(src, dst, acc) if src else (True, float("nan"))
 
 
-def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = "auto") -> int:
+def _write_pose_priors(chunk: Chunk, db_path: Path, names: dict[int, str], previous: dict | None = None) -> dict | None:
+    """The reference positions of the photos (the GPS of the drone, with their accuracy) into the
+    COLMAP database as pose priors, on metric axes less a round offset: the incremental mapper
+    then holds the block to them (``use_prior_position``), as Metashape's alignment holds it to
+    the camera references. ``previous`` (the report of an earlier call, when the database is
+    kept) keeps the same axes and only gives the photos without a prior theirs. Returns the
+    report (``count``, ``crs``, ``offset``), None with fewer than three positions."""
+    import pycolmap
+
+    from ..markers.gcp import projected_crs_for
+
+    cams = [c for c in chunk.cameras
+            if c.enabled and c.key in names and c.reference.enabled and c.reference.location]
+    if len(cams) < 3:
+        return None
+    pts = np.array([c.reference.location for c in cams], float)
+    src = cams[0].meta.get("reference_crs", chunk.crs)
+    if previous and previous.get("crs"):
+        crs, offset = previous["crs"], np.asarray(previous["offset"], float)
+    else:
+        crs = projected_crs_for(src, pts[0, :2]) if crs_mod.is_geographic(src) else src
+        offset = None
+    if crs != src:
+        pts = crs_mod.transform_points(pts, src, crs)
+    if offset is None:
+        offset = np.round(pts.mean(axis=0))
+    by_name = {names[c.key]: (p - offset, c.reference.accuracy or [5.0, 5.0, 10.0]) for c, p in zip(cams, pts)}
+    db = pycolmap.Database.open(str(db_path))
+    try:
+        images = db.read_all_images()
+        have = set()
+        if previous and db.num_pose_priors():  # the priors written before stay
+            for image in images:
+                try:
+                    if db.exists_pose_prior(image.image_id, True):
+                        have.add(image.name)
+                except Exception:  # pragma: no cover - the lookup differs between versions
+                    pass
+        n = 0
+        for image in images:
+            got = by_name.get(image.name)
+            if got is None or image.name in have:
+                continue
+            pos, acc = got
+            acc = np.resize(np.maximum(np.asarray(acc, float).reshape(-1)[:3], 1e-3), 3)
+            prior = pycolmap.PosePrior(position=np.asarray(pos, float), position_covariance=np.diag(acc ** 2),
+                                       coordinate_system=pycolmap.PosePriorCoordinateSystem.CARTESIAN)
+            prior.corr_data_id = image.data_id
+            db.write_pose_prior(prior)
+            n += 1
+    finally:
+        db.close()
+    return {"count": n + len(have), "crs": crs, "offset": [float(v) for v in offset]}
+
+
+def _drop_masked_tie_points(chunk: Chunk, rec, names: dict[int, str]) -> int:
+    """The masks applied to the tie points: every 3D point with an observation inside the masked
+    part of a photo is dropped (masking a few photos is enough). Returns how many."""
+    from . import masks as masks_mod
+
+    by_name = {v: k for k, v in names.items()}
+    drop = set()
+    for image in rec.images.values():
+        if not image.has_pose or image.name not in by_name:
+            continue
+        cam = chunk.camera(by_name[image.name])
+        if masks_mod.mask_path(chunk, cam) is None:
+            continue
+        idxs = list(image.get_observation_point2D_idxs())
+        if not idxs:
+            continue
+        px = np.array([image.points2D[i].xy for i in idxs], float)
+        hidden = masks_mod.hidden_by_mask(chunk, cam, px)
+        drop.update(int(image.points2D[i].point3D_id) for i, h in zip(idxs, hidden) if h)
+    for pid in drop:
+        if rec.exists_point3D(pid):
+            rec.delete_point3D(pid)
+    return len(drop)
+
+
+ADAPTIVE_MIN_GAIN = 0.01  # the wider lens model is kept when the reprojection error drops by this share at least
+ADAPTIVE_ITERATIONS = 50
+
+
+def _sane_camera(cam) -> bool:
+    """Intrinsics within physical bounds: the two focal lengths within 2 % of each other, the
+    principal point within 5 % of the centre, tangential distortion below 0.01, radial below 1."""
+    p = [float(v) for v in cam.params]
+    name = cam.model.name
+    if name not in ("OPENCV", "OPENCV_FISHEYE", "PINHOLE", "FULL_OPENCV"):
+        return True
+    w, h = float(cam.width), float(cam.height)
+    fx, fy, cx, cy = p[:4]
+    if fx <= 0 or fy <= 0 or abs(fx / fy - 1.0) > 0.02:
+        return False
+    if abs(cx - w / 2) > 0.05 * w or abs(cy - h / 2) > 0.05 * h:
+        return False
+    if name in ("OPENCV", "OPENCV_FISHEYE", "FULL_OPENCV") and (abs(p[4]) > 1.0 or abs(p[5]) > 1.0):
+        return False
+    if name in ("OPENCV", "FULL_OPENCV") and (abs(p[6]) > 0.01 or abs(p[7]) > 0.01):
+        return False
+    return True
+
+
+def adaptive_camera_fit(chunk: Chunk, rec, fixed_cameras=()) -> tuple:
+    """Metashape's *adaptive camera model fitting*, done our way: the parameters of the lens that
+    only a sound block can bear - the principal point, the tangential distortion, two focal
+    lengths - are refined on a copy of the reconstruction and kept only when they prove
+    reliable: the mean reprojection error drops by :data:`ADAPTIVE_MIN_GAIN` at least and every
+    camera stays within physical bounds (:func:`_sane_camera`). Returns ``(reconstruction,
+    report)``: the copy when kept, ``rec`` itself otherwise."""
+    import pycolmap
+
+    rec.update_point_3d_errors()
+    before = float(rec.compute_mean_reprojection_error())
+    trial = pycolmap.Reconstruction(rec)
+    widened = 0
+    for cid, cam in trial.cameras.items():
+        if cid in fixed_cameras:
+            continue
+        p = [float(v) for v in cam.params]
+        if cam.model.name == "RADIAL":
+            cam.model, cam.params = pycolmap.CameraModelId.OPENCV, [p[0], p[0], p[1], p[2], p[3], p[4], 0.0, 0.0]
+        elif cam.model.name == "SIMPLE_PINHOLE":
+            cam.model, cam.params = pycolmap.CameraModelId.PINHOLE, [p[0], p[0], p[1], p[2]]
+        elif cam.model.name == "RADIAL_FISHEYE":
+            cam.model, cam.params = pycolmap.CameraModelId.OPENCV_FISHEYE, [p[0], p[0], p[1], p[2], p[3], p[4], 0.0, 0.0]
+        elif cam.model.name not in ("OPENCV", "PINHOLE", "OPENCV_FISHEYE", "FULL_OPENCV"):
+            continue
+        widened += 1
+    if not widened:
+        return rec, {"kept": False, "before_px": before, "after_px": before, "why": "no camera to widen"}
+    opts = pycolmap.BundleAdjustmentOptions()
+    opts.refine_focal_length = True
+    opts.refine_principal_point = True
+    opts.refine_extra_params = True
+    _adjust(trial, _at_most(opts, ADAPTIVE_ITERATIONS), fixed_cameras=fixed_cameras)
+    trial.update_point_3d_errors()
+    after = float(trial.compute_mean_reprojection_error())
+    sane = all(_sane_camera(c) for cid, c in trial.cameras.items() if cid not in fixed_cameras)
+    kept = bool(sane and np.isfinite(after) and after <= before * (1.0 - ADAPTIVE_MIN_GAIN))
+    report = {"kept": kept, "before_px": before, "after_px": after, "sane": bool(sane)}
+    log.info("adaptive camera model fitting: %.3f -> %.3f px, %s", before, after, "kept" if kept else "not kept")
+    return (trial if kept else rec), report
+
+
+def _continuation_model(model_dir: Path, db_path: Path, out: Path) -> Path:
+    """A copy of the model with every camera in the model of the database, for the alignment to
+    continue from it (the model is kept in the models of the sensors, OPENCV; the database has the
+    cameras COLMAP matched the photos with, RADIAL for square pixels: COLMAP wants them equal)."""
+    import pycolmap
+
+    rec = pycolmap.Reconstruction(str(model_dir))
+    db = pycolmap.Database.open(str(db_path))
+    try:
+        wanted = {int(c.camera_id): c.model.name for c in db.read_all_cameras()}
+    finally:
+        db.close()
+    back = {("OPENCV", "RADIAL"): lambda p: [(p[0] + p[1]) / 2, p[2], p[3], p[4], p[5]],
+            ("PINHOLE", "SIMPLE_PINHOLE"): lambda p: [(p[0] + p[1]) / 2, p[2], p[3]],
+            ("OPENCV_FISHEYE", "RADIAL_FISHEYE"): lambda p: [(p[0] + p[1]) / 2, p[2], p[3], p[4], p[5]]}
+    for cid, cam in rec.cameras.items():
+        want = wanted.get(cid)
+        if want is None or want == cam.model.name:
+            continue
+        convert = back.get((cam.model.name, want))
+        if convert is None:
+            raise RuntimeError(f"camera {cid}: a {cam.model.name} model cannot continue as {want}")
+        cam.model, cam.params = getattr(pycolmap.CameraModelId, want), convert([float(v) for v in cam.params])
+    shutil.rmtree(out, ignore_errors=True)
+    out.mkdir(parents=True)
+    rec.write(str(out))
+    return out
+
+
+def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = "auto", reset: bool = True,
+                  use_gps: bool | None = None, adaptive_fitting: bool = False) -> int:
     """Cameras and tie points from the matches of :func:`match_photos`. ``mapper``: ``incremental``
     (one photo after the other, COLMAP), ``global`` (all at once, GLOMAP: much faster with many
     photos) or ``auto`` - global from ``GLOBAL_FROM`` photos, incremental for fewer, for 360-degree
     rigs and calibrations held fixed, and whenever the global one leaves photos out or builds a
-    block whose cameras do not sit on the GPS of the photos (:func:`fits_references`)."""
+    block whose cameras do not sit on the GPS of the photos (:func:`fits_references`).
+
+    ``use_gps`` (None: when the photos have them): the reference positions of the photos, with
+    their accuracy, hold the block during the incremental alignment - COLMAP's pose priors,
+    :func:`_write_pose_priors` - as Metashape's alignment holds it to the camera references: a
+    long chain or a ring of photos no longer drifts. ``adaptive_fitting``: Metashape's adaptive
+    camera model fitting (:func:`adaptive_camera_fit`). ``reset`` False, after
+    ``match_photos(reset=False)``, keeps the alignment there is and registers the photos added
+    since into it (one photo after the other)."""
     import pycolmap
 
     progress = as_progress(progress)
@@ -544,17 +854,31 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = 
     db_path = work / "database.db"
     if not db_path.exists():
         raise RuntimeError("run match_photos() before align_cameras()")
-    root = chunk.meta["sfm"]["image_root"]
+    info = chunk.meta["sfm"]
+    root = info["image_root"]
     out = work / "mapper"
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
-    n = len(chunk.meta["sfm"].get("names", {}))
+    names = {int(k): v for k, v in info.get("names", {}).items()}
+    n = len(names)
     fixed = _fixed_camera_ids(chunk, db_path)
-    rigs = bool(chunk.meta["sfm"].get("rigs"))
+    rigs = bool(info.get("rigs"))
     if mapper not in ("auto", "incremental", "global"):
         raise ValueError(f"unknown mapper {mapper!r}")
-    if mapper == "auto":
+    model_dir = work / "model"
+    continuing = (not reset) and bool(info.get("continued")) and model_dir.exists()
+    if continuing:
+        mapper = "incremental"
+    elif mapper == "auto":
         mapper = "global" if n >= GLOBAL_FROM and not fixed and not rigs else "incremental"
+    priors = None
+    if use_gps is None or use_gps:
+        priors = _write_pose_priors(chunk, db_path, names, info.get("gps_priors") if continuing else None)
+        if priors:
+            log.info("pose priors of %d photos (%s, offset %s)", priors["count"], priors["crs"], priors["offset"])
+        elif use_gps:
+            progress(0.0, "No reference positions of the photos: aligning without them")
+    info["gps_priors"] = priors
     recs = {}
     if mapper == "global":
         progress(0.0, f"Aligning {n} cameras at once (global)")
@@ -581,20 +905,31 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = 
             chunk.meta["sfm"].pop("global_fallback", None)
     if mapper == "incremental":
         opts = pycolmap.IncrementalPipelineOptions()
-        opts.multiple_models = True
+        opts.multiple_models = not continuing
         opts.min_model_size = 3
         opts.extract_colors = True
         if fixed:  # faces of 360-degree photos (exact calibration, rig known), sensors held by the user
             opts.constant_cameras = fixed
             opts.ba_refine_sensor_from_rig = False
-        progress(0.0, "Aligning cameras")
-        recs = pycolmap.incremental_mapping(str(db_path), root, str(out), opts)
+        if priors:
+            opts.use_prior_position = True
+            opts.use_robust_loss_on_prior_position = True  # a wrong GPS fix does not pull the block
+        progress(0.0, "Aligning cameras" + (" on the GPS of the photos" if priors else "")
+                 + (f" (adding {len(info.get('added') or [])} photos)" if continuing else ""))
+        start = str(_continuation_model(model_dir, db_path, work / "continue")) if continuing else ""
+        recs = pycolmap.incremental_mapping(str(db_path), root, str(out), opts, input_path=start)
+        shutil.rmtree(work / "continue", ignore_errors=True)
     if not recs:
         raise RuntimeError("alignment failed: no reconstruction could be initialised")
-    chunk.meta["sfm"]["mapper"] = mapper
+    info["mapper"] = mapper
     best = max(recs.values(), key=lambda r: r.num_reg_images())
+    info["masked_tie_points"] = _drop_masked_tie_points(chunk, best, names) if info.get("apply_masks") == "tiepoints" else 0
+    if adaptive_fitting:
+        progress(0.85, "Adaptive camera model fitting")
+        best, info["adaptive_fitting"] = adaptive_camera_fit(chunk, best, _rec_fixed_cameras(chunk, best))
+    else:
+        info.pop("adaptive_fitting", None)
     _restore_sensor_models(chunk, best)
-    model_dir = work / "model"
     shutil.rmtree(model_dir, ignore_errors=True)
     model_dir.mkdir()
     best.write(str(model_dir))

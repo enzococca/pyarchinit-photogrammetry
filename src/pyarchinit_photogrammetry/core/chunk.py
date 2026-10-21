@@ -240,19 +240,35 @@ class Chunk:
     # ------------------------------------------------------------- alignment
     def match_photos(self, quality: str = "high", keypoint_limit: int = 40000, tiepoint_limit: int = 8000,
                      pair_selection: str = "auto", progress: ProgressCallback | None = None,
-                     exclude_stationary: bool = False) -> None:
-        """Detect and match features (SIFT) between photos; masked areas are left out.
-        ``exclude_stationary``: matches that do not move between photos dropped (the background
-        of a turntable photographed from a fixed camera)."""
+                     exclude_stationary: bool = False, generic: bool | None = None, reference: str | None = None,
+                     neighbours: int = 20, apply_masks: str = "keypoints", guided_matching: bool = False,
+                     reset: bool = True) -> None:
+        """Detect and match features (SIFT) between photos, with the choices of Metashape's
+        *Align Photos* (see :func:`engine.sfm.match_photos`): ``quality`` (the accuracy), the
+        ``generic`` preselection (None: from 40 photos up), the ``reference`` preselection
+        (``source``: the GPS of the photos, ``estimated``: a previous alignment, ``sequential``:
+        the capture order; every photo with its ``neighbours`` nearest), ``apply_masks``
+        (``keypoints``, ``tiepoints`` or ``none``), ``guided_matching``, ``exclude_stationary``
+        (matches that do not move between photos dropped: the background of a turntable
+        photographed from a fixed camera); ``reset`` False keeps the matches and the alignment
+        there are and only matches the photos added since. The older ``pair_selection`` word
+        stands in when ``generic`` and ``reference`` are not given."""
         from ..engine import sfm
 
         sfm.match_photos(self, quality=quality, keypoint_limit=keypoint_limit, tiepoint_limit=tiepoint_limit,
                          pair_selection=pair_selection, progress=as_progress(progress),
-                         exclude_stationary=exclude_stationary)
+                         exclude_stationary=exclude_stationary, generic=generic, reference=reference,
+                         neighbours=neighbours, apply_masks=apply_masks, guided_matching=guided_matching,
+                         reset=reset)
 
-    def align_cameras(self, progress: ProgressCallback | None = None, mapper: str = "auto") -> int:
+    def align_cameras(self, progress: ProgressCallback | None = None, mapper: str = "auto", reset: bool = True,
+                      use_gps: bool | None = None, adaptive_fitting: bool = False) -> int:
         """Estimate camera poses and sparse tie points. Returns the number of aligned photos.
-        ``mapper``: ``incremental``, ``global`` or ``auto`` (see :func:`engine.sfm.align_cameras`).
+        ``mapper``: ``incremental``, ``global`` or ``auto``; ``use_gps`` (None: when the photos
+        have them): the GPS positions of the photos hold the block during the incremental
+        alignment; ``adaptive_fitting``: Metashape's adaptive camera model fitting; ``reset``
+        False registers the photos added since the last alignment into it (see
+        :func:`engine.sfm.align_cameras`).
 
         A new alignment lives in a new arbitrary frame: the chunk transform is reset and,
         when references exist (>= 3 GCPs or GNSS camera positions, or scale bars), the
@@ -260,7 +276,8 @@ class Chunk:
         """
         from ..engine import sfm
 
-        n = sfm.align_cameras(self, progress=as_progress(progress), mapper=mapper)
+        n = sfm.align_cameras(self, progress=as_progress(progress), mapper=mapper, reset=reset, use_gps=use_gps,
+                              adaptive_fitting=adaptive_fitting)
         self.transform = geometry.identity()
         self.meta.pop("levelled", None)
         self.forget_precision()
