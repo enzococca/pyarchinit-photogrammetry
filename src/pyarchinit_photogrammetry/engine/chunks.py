@@ -375,15 +375,33 @@ def _rodrigues(w: np.ndarray) -> np.ndarray:
     return np.eye(3) + np.sin(theta) * kx + (1 - np.cos(theta)) * kx @ kx
 
 
+def _displacement_jacobian(pc: np.ndarray, nvar: int) -> np.ndarray:
+    """Displacement of the points ``pc`` (relative to the centre of the update) for the unknowns
+    of one ICP step: rotation w, translation t and, with ``nvar`` 7, the scale ds."""
+    J = np.zeros((len(pc), 3, nvar))
+    J[:, 0, 1], J[:, 0, 2] = pc[:, 2], -pc[:, 1]
+    J[:, 1, 0], J[:, 1, 2] = -pc[:, 2], pc[:, 0]
+    J[:, 2, 0], J[:, 2, 1] = pc[:, 1], -pc[:, 0]
+    J[:, 0, 3] = J[:, 1, 4] = J[:, 2, 5] = 1.0
+    if nvar == 7:
+        J[:, :, 6] = pc
+    return J
+
+
 def icp(src: np.ndarray, dst: np.ndarray, init: np.ndarray, with_scale: bool = True, start: float = 1.0,
         final: float = 0.01, tree=None, normals: np.ndarray | None = None, tangential: float = 0.2,
-        max_iter: int = 30, scale_below: float | None = None, progress: Progress | None = None) -> np.ndarray:
+        max_iter: int = 30, scale_below: float | None = None, progress: Progress | None = None,
+        anchors: tuple[np.ndarray, np.ndarray] | None = None, anchor_weight: float | None = None) -> np.ndarray:
     """Similarity (rigid with ``with_scale=False``) registering ``src`` onto ``dst`` from
     ``init``: point-to-plane ICP with a small tangential term (``tangential`` = its weight
     relative to the normal one, it keeps flat scenes from sliding), Tukey weights, and a
     correspondence distance going down from ``start`` to ``final``. The scale is refined
     only once the distance is below ``scale_below`` (default ``4 * final``): estimated
-    from loose correspondences, it can shrink the cloud onto a small part of the target."""
+    from loose correspondences, it can shrink the cloud onto a small part of the target.
+    ``anchors``: pairs of points (in ``src``, in ``dst``) known to coincide - the markers the
+    chunks share - kept as point-to-point terms, together weighing as much as all the cloud
+    points (``anchor_weight`` per anchor to choose otherwise): a flat or noisy cloud cannot
+    slide away from them, and clouds that disagree with them strongly still win."""
     from scipy.spatial import cKDTree
 
     tree = tree or cKDTree(dst)
@@ -392,6 +410,10 @@ def icp(src: np.ndarray, dst: np.ndarray, init: np.ndarray, with_scale: bool = T
     stages = max(2, int(np.ceil(np.log2(max(start / final, 1.0)))) + 1)
     lam2 = tangential ** 2
     scale_below = 4.0 * final if scale_below is None else scale_below
+    if anchors is not None:
+        anchors = (np.asarray(anchors[0], float).reshape(-1, 3), np.asarray(anchors[1], float).reshape(-1, 3))
+        if len(anchors[0]) == 0:
+            anchors = None
     for thr in np.geomspace(max(start, final), final, stages):
         nvar = 7 if with_scale and thr <= scale_below * (1 + 1e-9) else 6
         for _ in range(max_iter):
@@ -408,18 +430,17 @@ def icp(src: np.ndarray, dst: np.ndarray, init: np.ndarray, with_scale: bool = T
             pc = p - c
             radius = float(np.sqrt(np.average(np.sum(pc ** 2, axis=1), weights=w)))
             e = p - q
-            # displacement of a point for the unknowns (rotation w, translation t, scale ds)
-            J = np.zeros((len(p), 3, nvar))
-            J[:, 0, 1], J[:, 0, 2] = pc[:, 2], -pc[:, 1]
-            J[:, 1, 0], J[:, 1, 2] = -pc[:, 2], pc[:, 0]
-            J[:, 2, 0], J[:, 2, 1] = pc[:, 1], -pc[:, 0]
-            J[:, 0, 3] = J[:, 1, 4] = J[:, 2, 5] = 1.0
-            if nvar == 7:
-                J[:, :, 6] = pc
+            J = _displacement_jacobian(pc, nvar)
             a = np.einsum("ni,nij->nj", n, J)  # normal component of the displacement
             en = np.einsum("ni,ni->n", n, e)
             H = lam2 * np.einsum("n,nai,naj->ij", w, J, J) + (1 - lam2) * np.einsum("n,ni,nj->ij", w, a, a)
             g = lam2 * np.einsum("n,nai,na->i", w, J, e) + (1 - lam2) * np.einsum("n,ni,n->i", w, a, en)
+            if anchors is not None:
+                pa = geometry.apply(M, anchors[0])
+                Ja = _displacement_jacobian(pa - c, nvar)
+                wa = float(w.sum()) / len(pa) if anchor_weight is None else float(anchor_weight)
+                H += wa * np.einsum("nai,naj->ij", Ja, Ja)
+                g += wa * np.einsum("nai,na->i", Ja, pa - anchors[1])
             H += np.eye(nvar) * 1e-9 * max(np.trace(H), 1e-30)
             x = np.linalg.solve(H, -g)
             rot = _rodrigues(x[:3])
@@ -693,7 +714,10 @@ def _align_points(ch, ref, frame, ref_frame, fix_scale, initial, max_points, pro
                 if _spread(ms, 1e-3) and _spread(md, 1e-3):
                     W0 = geometry.umeyama(ms, md, with_scale=with_scale)
                     err = float(np.max(np.linalg.norm(geometry.apply(W0, ms) - md, axis=1)))
-                    yield "markers", W0, max(10 * final, 3 * err)
+                    # the markers anchor the ICP too: on a flat or noisy cloud (depth maps of a
+                    # few hundred pixels) the point-to-plane cost has a valley the solution could
+                    # slide along, a centimetre away from where the measured markers hold it
+                    yield "markers", W0, max(10 * final, 3 * err), (ms, md)
             elif initial == "markers":
                 raise ValueError(f"{ch.label}: fewer than 3 markers in common with {ref.label}")
         if initial in ("auto", "reference"):
@@ -701,7 +725,7 @@ def _align_points(ch, ref, frame, ref_frame, fix_scale, initial, max_points, pro
             if W0 is not None:
                 if fix_scale:
                     W0 = geometry.compose_similarity(1.0, *geometry.decompose_similarity(W0)[1:])
-                yield "reference", W0, max(10 * final, 0.05 * extent)
+                yield "reference", W0, max(10 * final, 0.05 * extent), None
             elif initial == "reference":
                 raise ValueError(f"{ch.label} and {ref.label} do not share a georeference")
         if initial in ("auto", "cameras"):
@@ -711,7 +735,7 @@ def _align_points(ch, ref, frame, ref_frame, fix_scale, initial, max_points, pro
                 W0 = pose_similarity(ps, pd, with_scale=with_scale)
                 err = float(np.max(np.linalg.norm(geometry.apply(W0, np.array([p[:3, 3] for p in ps]))
                                                   - np.array([p[:3, 3] for p in pd]), axis=1)))
-                yield "cameras", W0, max(10 * final, 3 * err)
+                yield "cameras", W0, max(10 * final, 3 * err), None
             elif initial == "cameras":
                 raise ValueError(f"{ch.label}: not enough photos in common with {ref.label}")
         if initial in ("auto", "global"):
@@ -720,14 +744,14 @@ def _align_points(ch, ref, frame, ref_frame, fix_scale, initial, max_points, pro
                 da, db = scene_depth(ref), scene_depth(ch)
                 ratio = da / db if da and db else 1.0
             for M, voxel in global_guesses(src, dst, ratio, progress=progress):
-                yield "global", M, max(2.0 * voxel, 10 * final)
+                yield "global", M, max(2.0 * voxel, 10 * final), None
 
     best = None
     tried = []
-    for i, (name, W0, start) in enumerate(candidates()):
+    for i, (name, W0, start, anchors) in enumerate(candidates()):
         progress(min(0.9, 0.15 + 0.1 * i), f"{ch.label}: ICP from the {name} position")
         W = icp(src, dst, W0, with_scale=with_scale, start=start, final=final, tree=tree, normals=normals,
-                progress=progress)
+                progress=progress, anchors=anchors)
         q = registration_quality(src, dst, W, final, tree, normals, src_rgb, dst_rgb)
         q["scale_change"] = _scale_of(W) / _scale_of(W0)
         if abs(np.log(q["scale_change"])) > np.log(MAX_SCALE_CHANGE):  # collapsed or blown up: not a fit
@@ -751,9 +775,9 @@ def _align_points(ch, ref, frame, ref_frame, fix_scale, initial, max_points, pro
             "correspondences": q["inliers"], "rmse": q["rmse"], "fitness": q["fitness"], "overlap": q["overlap"],
             "inlier_ratio": q["inlier_ratio"], "color_corr": q["color_corr"], "distance": final, "attempts": tried}
     labels, ms, md = common_markers(ch, ref)
-    if labels:  # independent check of the result
+    if labels:  # the markers after the registration (anchors of the ICP when it started from them)
         res = _residuals(W, labels, frame.local(ms), ref_frame.local(md))
-        info["check"] = {"markers": res, "rmse": _rmse(res)}
+        info["check"] = {"markers": res, "rmse": _rmse(res), "anchored": name == "markers"}
     return W, info
 
 

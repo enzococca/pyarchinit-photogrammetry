@@ -302,8 +302,9 @@ The report: `{"reference": {"key", "label"}, "method", "fix_scale", "crs", "leve
 `residuals` (per marker or photo: `error`, `dx`, `dy`, `dz`; `angle_deg` for photos) and
 `max_error` for markers/cameras; `initial`, `source`/`target` (`point_cloud` or `tie_points`),
 `fitness`, `overlap`, `inlier_ratio`, `color_corr`, `attempts` and `check` (residuals of the
-common markers, not used by the registration) for points. `chunk.meta["chunk_alignment"]`
-keeps a summary.
+common markers; when the ICP started from them they also anchor it - point-to-point terms
+weighing together as much as the cloud - so a flat or noisy cloud cannot slide away from them,
+`anchored`) for points. `chunk.meta["chunk_alignment"]` keeps a summary.
 
 `merge_chunks` needs chunks in one frame (aligned, or georeferenced in projected CRSs; another
 CRS is converted through a fitted similarity, with a warning above 5 mm). The merged chunk has

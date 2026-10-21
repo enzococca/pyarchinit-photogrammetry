@@ -104,7 +104,7 @@ def test_align_points_from_markers(doc, scene):
     assert info["initial"] == "markers" and info["source"] == info["target"] == "tie_points"
     assert info["inlier_ratio"] > 0.7 and info["color_corr"] > 0.6
     unit = _metres_per_unit(a, scene)
-    assert info["check"]["rmse"] * unit < 0.003  # the markers, not used by the registration
+    assert info["check"]["rmse"] * unit < 0.003 and info["check"]["anchored"]  # the markers anchor the ICP
     assert _shared_centre_errors(a, b).max() * unit < 0.006
 
 

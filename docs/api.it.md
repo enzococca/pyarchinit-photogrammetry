@@ -310,8 +310,9 @@ Il rapporto: `{"reference": {"key", "label"}, "method", "fix_scale", "crs", "lev
 `stale_products`; `residuals` (per marker o foto: `error`, `dx`, `dy`, `dz`; `angle_deg` per le
 foto) e `max_error` per marker/camere; `initial`, `source`/`target` (`point_cloud` o `tie_points`),
 `fitness`, `overlap`, `inlier_ratio`, `color_corr`, `attempts` e `check` (residui dei marker in
-comune, non usati dalla registrazione) per i punti. `chunk.meta["chunk_alignment"]` ne conserva un
-riassunto.
+comune; quando l'ICP è partito da loro ne sono anche le ancore - termini punto-punto che insieme
+pesano quanto la nuvola - così una nuvola piatta o rumorosa non può scivolare via da loro,
+`anchored`) per i punti. `chunk.meta["chunk_alignment"]` ne conserva un riassunto.
 
 `merge_chunks` vuole chunk in un unico sistema (allineati, o georeferenziati in CRS proiettati; un
 altro CRS viene convertito con una similarità stimata, con un avviso sopra i 5 mm). Il chunk unito
