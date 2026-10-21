@@ -158,7 +158,14 @@ marker in troppo poche foto.
   profondità, nuvola densa, mesh, DEM e ortofoto - tempi, risultati ed errori.
 * Build native per Windows ARM64.
 
-## Dopo la 1.1
+## Dopo la 1.1 (fatto, pubblicato nella 1.2.0)
+
+Fatto nella 1.2.0: la GPU tramite wgpu per l'abbinamento dei descrittori e le mappe di profondità
+PatchMatch, più GPU e la CPU insieme; i nodi di rete e `ppg remote`; le riprese multispettrali con il
+pannello, il sensore di luce, le ortofoto di riflettanza, gli indici e la zonizzazione; le scene
+satellitari ortorettificate sul DEM e il modello di superficie da una coppia stereo. Ancora aperti
+di questo elenco: i tasselli di texture e ortofoto sui nodi, le triplette stereo e la verifica sui
+dataset pubblici WorldView-3.
 
 * GPU per i passi più lenti, portabile: kernel scritti in WGSL ed eseguiti con wgpu (Metal sul
   Mac, Vulkan su Linux e Windows, niente CUDA), prima per l'abbinamento dei descrittori e la NCC

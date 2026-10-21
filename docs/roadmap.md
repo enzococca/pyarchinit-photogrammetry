@@ -157,7 +157,14 @@ markers in too few photos.
   maps, dense cloud, mesh, DEM and orthomosaic - times, results and errors.
 * Native Windows ARM64 builds.
 
-## After 1.1
+## After 1.1 (done, released as 1.2.0)
+
+Done in 1.2.0: the GPU through wgpu for the matching of the descriptors and the PatchMatch depth
+maps, several GPUs and the CPU together; the network nodes and `ppg remote`; the multispectral
+captures with the panel, the sun sensor, reflectance orthomosaics, the indices and the zoning;
+the satellite scenes orthorectified on the DEM and the surface model from a stereo pair. Still
+open from this list: the texture and orthomosaic tiles on the nodes, stereo triplets and the check
+on the public WorldView-3 datasets.
 
 * GPU for the slowest steps, portable: kernels written in WGSL and run through wgpu (Metal on
   the Mac, Vulkan on Linux and Windows, no CUDA), first for the matching of the descriptors and
