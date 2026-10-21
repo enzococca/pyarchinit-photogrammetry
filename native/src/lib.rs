@@ -6,6 +6,7 @@
 mod camera;
 mod depth;
 mod gpu;
+mod gpu_fuse;
 mod gpu_patchmatch;
 mod gpu_sift;
 mod patchmatch;
@@ -24,7 +25,7 @@ use rayon::prelude::*;
 use camera::{Camera, Pose};
 
 /// Version of the functions offered here: raised when one is added or changes meaning.
-const API: u32 = 6;
+const API: u32 = 7;
 
 // one matcher per GPU, each behind its own lock: several GPUs work at the same time
 fn matchers() -> &'static Mutex<HashMap<i64, Arc<Mutex<gpu::Matcher>>>> {
@@ -45,6 +46,21 @@ fn matcher_for(device: i64) -> Result<Arc<Mutex<gpu::Matcher>>, String> {
 fn patchmatchers() -> &'static Mutex<HashMap<i64, Arc<gpu_patchmatch::PatchMatcher>>> {
     static M: OnceLock<Mutex<HashMap<i64, Arc<gpu_patchmatch::PatchMatcher>>>> = OnceLock::new();
     M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn fusers() -> &'static Mutex<HashMap<i64, Arc<Mutex<gpu_fuse::Fuser>>>> {
+    static M: OnceLock<Mutex<HashMap<i64, Arc<Mutex<gpu_fuse::Fuser>>>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn fuser_for(device: i64) -> Result<Arc<Mutex<gpu_fuse::Fuser>>, String> {
+    let mut all = fusers().lock().map_err(|e| e.to_string())?;
+    if let Some(m) = all.get(&device) {
+        return Ok(m.clone());
+    }
+    let m = Arc::new(Mutex::new(gpu_fuse::Fuser::new(if device < 0 { None } else { Some(device as usize) })?));
+    all.insert(device, m.clone());
+    Ok(m)
 }
 
 fn patchmatcher_for(device: i64) -> Result<Arc<gpu_patchmatch::PatchMatcher>, String> {
@@ -131,6 +147,14 @@ fn gpu_forget(py: Python<'_>) -> PyResult<()> {
             all.clear();
         }
         if let Ok(mut all) = patchmatchers().lock() {
+            all.clear();
+        }
+        if let Ok(mut all) = fusers().lock() {
+            for (_, m) in all.iter() {
+                if let Ok(mut g) = m.lock() {
+                    g.clear();
+                }
+            }
             all.clear();
         }
     });
@@ -571,7 +595,6 @@ fn gpu_patchmatch_depth<'py>(py: Python<'py>, reference: PyReadonlyArray2<'py, f
         Array2::from_shape_vec((h, w), out.cost).unwrap().into_pyarray_bound(py)))
 }
 
-/// Camera models the projection kernels know.
 /// SIFT key points and descriptors of a grey image (``h x w`` float32 in [0, 1]) on the GPU, as
 /// VLFeat and COLMAP compute them: ``(keypoints (n, 4) float32 - x, y, scale, orientation with the
 /// centre of the first pixel at (0, 0) -, descriptors (n, 128) uint8)``. ``device`` -1 = the best
@@ -600,6 +623,82 @@ fn gpu_sift_features<'py>(py: Python<'py>, image: PyReadonlyArray2<'py, f32>, ma
         Array2::from_shape_vec((n, gpu_sift::DESC), desc).unwrap().into_pyarray_bound(py)))
 }
 
+type FuseMapArgs<'py> = (i64, Option<PyReadonlyArray2<'py, f32>>, (f64, f64, f64, f64), PyReadonlyArray2<'py, f64>,
+                         PyReadonlyArray1<'py, f64>, u32);
+
+/// The dense points of one depth map fused with its covisible maps on the GPU (API 7): every map
+/// is ``(key, depth (h x w float32) or None when the GPU holds it already, (fx, fy, cx, cy),
+/// cam_from_world rotation 3x3, translation, order)``. Returns ``(xyz (n, 3) float32, normals
+/// (n, 3) float32, pixel (n,) uint32 - row * w + col of the reference -, pixels (n,) uint32 fused
+/// into each point, support (n,) uint32 maps agreeing on it, the reference included)``.
+#[pyfunction]
+#[pyo3(name = "gpu_fuse")]
+#[pyo3(signature = (reference, neighbours, min_pixels=3, max_reproj=2.0, max_depth_rel=0.01, max_normal_deg=20.0,
+                    support_tol=0.01, device=-1))]
+#[allow(clippy::too_many_arguments)]
+fn gpu_fuse_depth_maps<'py>(py: Python<'py>, reference: FuseMapArgs<'py>, neighbours: Vec<FuseMapArgs<'py>>,
+                            min_pixels: u32, max_reproj: f32, max_depth_rel: f32, max_normal_deg: f32, support_tol: f32,
+                            device: i64)
+    -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<f32>>, Bound<'py, PyArray1<u32>>, Bound<'py, PyArray1<u32>>,
+                 Bound<'py, PyArray1<u32>>)> {
+    let all: Vec<&FuseMapArgs<'py>> = std::iter::once(&reference).chain(neighbours.iter()).collect();
+    let views: Vec<_> = all.iter().map(|(_, d, _, _, _, _)| d.as_ref().map(|a| a.as_array())).collect();
+    let layouts: Vec<_> = views.iter().map(|v| v.as_ref().map(|a| a.as_standard_layout())).collect();
+    let mut maps = Vec::with_capacity(all.len());
+    for ((key, _, kk, r, t, order), lay) in all.iter().zip(layouts.iter()) {
+        let t = t.as_array();
+        if t.len() != 3 {
+            return Err(PyValueError::new_err("t must hold 3 values"));
+        }
+        let (depth, w, h) = match lay {
+            Some(l) => { let (h, w) = l.dim(); (Some(l.as_slice().unwrap()), w, h) }
+            None => (None, 0, 0),
+        };
+        maps.push(gpu_fuse::Map { key: *key, depth, w, h, k: [kk.0, kk.1, kk.2, kk.3], r: matrix3(r, "r")?,
+                                  t: [t[0], t[1], t[2]], order: *order });
+    }
+    let o = gpu_fuse::Options { min_pixels, max_reproj, max_depth_rel, max_normal_deg, support_tol };
+    let points = py.allow_threads(|| -> Result<Vec<gpu_fuse::Fused>, String> {
+        let f = fuser_for(device)?;
+        let mut g = f.lock().map_err(|e| e.to_string())?;
+        g.fuse(&maps[0], &maps[1..], &o)
+    }).map_err(PyRuntimeError::new_err)?;
+    let n = points.len();
+    let xyz: Vec<f32> = points.iter().flat_map(|p| [p.x, p.y, p.z]).collect();
+    let nrm: Vec<f32> = points.iter().flat_map(|p| [p.nx, p.ny, p.nz]).collect();
+    let pixel: Vec<u32> = points.iter().map(|p| p.pixel).collect();
+    let pixels: Vec<u32> = points.iter().map(|p| p.counts >> 16).collect();
+    let support: Vec<u32> = points.iter().map(|p| p.counts & 0xffff).collect();
+    Ok((Array2::from_shape_vec((n, 3), xyz).unwrap().into_pyarray_bound(py),
+        Array2::from_shape_vec((n, 3), nrm).unwrap().into_pyarray_bound(py),
+        Array1::from_vec(pixel).into_pyarray_bound(py), Array1::from_vec(pixels).into_pyarray_bound(py),
+        Array1::from_vec(support).into_pyarray_bound(py)))
+}
+
+/// Drop the depth maps a GPU holds for the fusion (their keys are unique within one workspace).
+#[pyfunction]
+#[pyo3(signature = (device=-1))]
+fn gpu_fuse_forget(py: Python<'_>, device: i64) -> PyResult<()> {
+    py.allow_threads(|| -> Result<(), String> {
+        let f = fuser_for(device)?;
+        let mut g = f.lock().map_err(|e| e.to_string())?;
+        g.clear();
+        Ok(())
+    }).map_err(PyRuntimeError::new_err)
+}
+
+/// The keys of the depth maps a GPU holds for the fusion.
+#[pyfunction]
+#[pyo3(signature = (device=-1))]
+fn gpu_fuse_cached(py: Python<'_>, device: i64) -> PyResult<Vec<i64>> {
+    py.allow_threads(|| -> Result<Vec<i64>, String> {
+        let f = fuser_for(device)?;
+        let g = f.lock().map_err(|e| e.to_string())?;
+        Ok(g.cached())
+    }).map_err(PyRuntimeError::new_err)
+}
+
+/// Camera models the projection kernels know.
 #[pyfunction]
 fn supported_models() -> Vec<&'static str> {
     camera::MODELS.to_vec()
@@ -620,6 +719,9 @@ fn ppg_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(supported_models, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_adapters, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_sift_features, m)?)?;
+    m.add_function(wrap_pyfunction!(gpu_fuse_depth_maps, m)?)?;
+    m.add_function(wrap_pyfunction!(gpu_fuse_cached, m)?)?;
+    m.add_function(wrap_pyfunction!(gpu_fuse_forget, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_match, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_device_name, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_forget, m)?)?;
