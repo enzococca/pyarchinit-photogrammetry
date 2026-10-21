@@ -248,6 +248,17 @@ went from 75 to 67 s on the 57 photos); on a computer with a discrete GPU the ra
 depth maps gain more: on the synthetic test scene 26 PatchMatch depth maps take 1.9 s on the GPU
 against 12.2 s on the CPU, with the same heights within a tenth of a millimetre.
 
+After 1.2.2 two more steps moved to the GPU (in the next release), with the same results as COLMAP's
+code: the SIFT key points - the photos read and reduced exactly as COLMAP reads them, so the GPU
+finds 99 % of the points of COLMAP's extractor with the same descriptors - and the fusion of the
+depth maps into the dense cloud, one thread per pixel checked against the maps covisible with it,
+with the confidence of every point counted in the same pass. On the 57 photos the key points take
+11 s against 19 s on the 12 cores (0.19 s per photo on the GPU, 3.2 s on one core), the fusion
+1.8 s against 4.5 s of COLMAP's fusion and the confidence; the fused cloud no longer absorbs the
+pixels around a point, so it is as dense as the depth maps (on the synthetic scene 2.7 times the
+points, the 90th percentile of the height errors 2.4 mm against 3.0, the DEM 3.5 mm against 5.7).
+The run of Tell Tuqan with every GPU part in place is in progress.
+
 ## What changed in pyarchinit-photogrammetry
 
 These tests changed the program; the numbers above are those of the version with the changes:

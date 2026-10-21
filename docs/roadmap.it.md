@@ -161,7 +161,9 @@ marker in troppo poche foto.
 ## Dopo la 1.1 (fatto, pubblicato nella 1.2.0)
 
 Fatto nella 1.2.0: la GPU tramite wgpu per l'abbinamento dei descrittori e le mappe di profondità
-PatchMatch, più GPU e la CPU insieme; i nodi di rete e `ppg remote`; le riprese multispettrali con il
+PatchMatch, più GPU e la CPU insieme (dopo la 1.2.2 anche i punti SIFT e la fusione delle mappe di
+profondità; la compensazione resta sulla CPU: Ceres, nessun solutore GPU portabile); i nodi di rete
+e `ppg remote`; le riprese multispettrali con il
 pannello, il sensore di luce, le ortofoto di riflettanza, gli indici e la zonizzazione; le scene
 satellitari ortorettificate sul DEM e il modello di superficie da una coppia stereo. Ancora aperti
 di questo elenco: i tasselli di texture e ortofoto sui nodi, le triplette stereo e la verifica sui

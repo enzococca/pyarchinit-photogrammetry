@@ -160,7 +160,9 @@ markers in too few photos.
 ## After 1.1 (done, released as 1.2.0)
 
 Done in 1.2.0: the GPU through wgpu for the matching of the descriptors and the PatchMatch depth
-maps, several GPUs and the CPU together; the network nodes and `ppg remote`; the multispectral
+maps, several GPUs and the CPU together (after 1.2.2 also the SIFT key points and the fusion of
+the depth maps; the bundle adjustment stays on the CPU: Ceres, no portable GPU solver); the
+network nodes and `ppg remote`; the multispectral
 captures with the panel, the sun sensor, reflectance orthomosaics, the indices and the zoning;
 the satellite scenes orthorectified on the DEM and the surface model from a stereo pair. Still
 open from this list: the texture and orthomosaic tiles on the nodes, stereo triplets and the check

@@ -252,6 +252,17 @@ discreta il rapporto si ribalta. Le mappe di profondità guadagnano di più: sul
 prova 26 mappe PatchMatch richiedono 1,9 s sulla GPU contro 12,2 s sulla CPU, con le stesse quote entro
 un decimo di millimetro.
 
+Dopo la 1.2.2 altri due passi sono passati alla GPU (nella prossima versione), con gli stessi
+risultati del codice di COLMAP: i punti SIFT - le foto lette e ridotte esattamente come le legge
+COLMAP, così la GPU trova il 99 % dei punti del suo estrattore con gli stessi descrittori - e la
+fusione delle mappe di profondità nella nuvola densa, un thread per pixel confrontato con le mappe
+covisibili, con la confidenza di ogni punto contata nello stesso passaggio. Sulle 57 foto i punti
+richiedono 11 s contro 19 s sui 12 core (0,19 s per foto sulla GPU, 3,2 s su un core), la fusione
+1,8 s contro 4,5 s della fusione di COLMAP più la confidenza; la nuvola fusa non assorbe più i pixel
+intorno a un punto, quindi è densa quanto le mappe (sulla scena sintetica 2,7 volte i punti, il 90°
+percentile degli errori in quota 2,4 mm contro 3,0, il DEM 3,5 mm contro 5,7). La prova di Tell
+Tuqan con tutte le parti GPU è in corso.
+
 ## Cosa è cambiato in pyarchinit-photogrammetry
 
 Queste prove hanno cambiato il programma; i numeri qui sopra sono quelli della versione con le modifiche:
