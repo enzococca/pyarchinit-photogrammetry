@@ -1709,6 +1709,66 @@ def plugin_command(ctx: typer.Context, name: Optional[str] = typer.Argument(None
 
 
 @app.command()
+def multispectral(project: Path, what: str = typer.Argument(..., help="add, panel, reflectance, index, zoning, bands"),
+                  source: Optional[Path] = typer.Argument(None, help="add: the folder of the captures; panel: the "
+                                                                     "photo of the panel (a reference-band file or "
+                                                                     "its capture name)"),
+                  reference: Optional[str] = typer.Option(None, help="add: the band to align (Red by default)"),
+                  region: Optional[str] = typer.Option(None, help="panel: x0,y0,x1,y1 of the panel in the images"),
+                  reflectance: float = typer.Option(0.5, help="panel: its known reflectance (0-1)"),
+                  index: str = typer.Option("NDVI", help="index/zoning: one of the indices, or a formula over the band names"),
+                  formula: Optional[str] = typer.Option(None, help="index: a formula instead of a known index"),
+                  classes: int = typer.Option(3, help="zoning: how many classes"),
+                  method: str = typer.Option("quantiles", help="zoning: quantiles, equal or kmeans"),
+                  out: Optional[Path] = typer.Option(None, help="zoning: the GeoPackage to write (default beside the project)"),
+                  resolution: Optional[float] = typer.Option(None, help="reflectance: metres per pixel (the orthomosaic's)"),
+                  chunk: Optional[str] = None):
+    """Multispectral captures: add (one file per band, side by side), the calibration panel, the
+    reflectance orthomosaic (a band per band), an index raster, the zoning polygons."""
+    from .engine import multispectral as ms
+
+    doc, ch = _open(project, chunk)
+    if what == "add":
+        if source is None:
+            raise typer.BadParameter("add needs the folder of the captures")
+        cams = ms.add_captures(ch, [source], reference=reference)
+        doc.save()
+        info = ch.meta["multispectral"]
+        typer.echo(f"{len(cams)} captures, bands {', '.join(info['bands'])}, reference {info['reference']}")
+    elif what == "bands":
+        info = ch.meta.get("multispectral") or {}
+        typer.echo(json.dumps({k: v for k, v in info.items() if k != "registration"}, indent=1))
+    elif what == "panel":
+        if source is None or not region:
+            raise typer.BadParameter("panel needs the photo of the panel and --region x0,y0,x1,y1")
+        cam = next((c for c in ms.multispectral_cameras(ch)
+                    if c.meta.get("capture") == str(source) or Path(c.path).stem == Path(source).stem
+                    or Path(source).resolve() in {Path(p).resolve() for p in c.meta["bands"].values()}), None)
+        if cam is None:
+            raise typer.BadParameter(f"{source} is not a capture of the chunk")
+        factors = ms.calibrate_panel(ch, cam, [float(v) for v in region.split(",")], reflectance)
+        doc.save()
+        typer.echo("panel factors: " + ", ".join(f"{b} {f:.4g}" for b, f in factors.items()))
+    elif what == "reflectance":
+        path = ms.build_reflectance(ch, resolution=resolution, progress=print_progress)
+        doc.save()
+        typer.echo(f"reflectance orthomosaic: {path}")
+    elif what == "index":
+        if formula is None and index not in ms.INDICES:
+            raise typer.BadParameter(f"{index}: one of {', '.join(ms.INDICES)} or --formula")
+        path = ms.index_raster(ch, index, formula)
+        doc.save()
+        typer.echo(f"{index}: {path}")
+    elif what == "zoning":
+        target = out or project.parent / f"{project.stem}_{index}_zone.gpkg"
+        summary = ms.export_zoning(ch, index, target, classes=classes, method=method)
+        doc.save()
+        typer.echo(json.dumps(summary, indent=1))
+    else:
+        raise typer.BadParameter("what: add, bands, panel, reflectance, index or zoning")
+
+
+@app.command()
 def node(folder: Path, once: bool = typer.Option(False, help="leave when no unit of work is left"),
          gpu: Optional[str] = typer.Option(None, help="the GPUs for the depth maps: auto, all, off, an adapter"),
          map: list[str] = typer.Option([], "--map", help="a path of the main computer and what it is here, "  # noqa: A002

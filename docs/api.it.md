@@ -93,6 +93,33 @@ invio. Le foto formano una coda servita da un lavoratore per GPU e uno per il ke
 tutti i core), così GPU e CPU se le dividono secondo la loro velocità; una foto che una GPU non
 riesce a fare passa al kernel CPU. `meta["dense"]["gpu"]` dice quali GPU sono state usate.
 
+### Camere multispettrali
+
+`engine.multispectral`: una camera multispettrale (MicaSense RedEdge / Altum, DJI Mavic 3
+Multispectral, Parrot Sequoia) scrive un file per banda di ogni scatto, fianco a fianco; le bande
+si riconoscono dai suffissi (`_1`..`_6`, `_MS_G` ..., `_GRE` ...) o dal `BandName` dell'XMP
+(`detect_bands`). `add_captures(chunk, paths, reference=None)` fa della banda di riferimento (la
+rossa, se c'è) la foto di ogni scatto - una copia a 8 bit stirata, con i tag dell'originale,
+allineata e ricostruita come una foto qualsiasi - e tiene le altre bande in
+`camera.meta["bands"]`. La radiometria (`radiance_image`, `reflectance_image`) segue i tag: il
+modello MicaSense (livello di nero, guadagno ed esposizione, i coefficienti di
+`RadiometricCalibration`, il polinomio di vignettatura), altrimenti numeri normalizzati per
+esposizione e guadagno; la riflettanza viene da un pannello di calibrazione ripreso nel volo
+(`calibrate_panel(chunk, camera, region, reflectance)`: la riflettanza nota per banda sulla
+radianza del pannello) o dall'irradianza del sensore di luce nei tag. Le bande di uno scatto si
+portano sulla banda di riferimento con un'omografia trovata sulle immagini (`register_bands`: lo
+spostamento per correlazione di fase sulle magnitudini del gradiente, un'affine a dimensione
+ridotta, l'omografia a dimensione piena). `build_reflectance(chunk, bands=None, resolution=None)`
+fa girare il motore dell'ortofoto sulla geometria della banda di riferimento con le bande
+registrate come valori a virgola mobile: `<dati>/multispectral/reflectance.tif`, una banda float32
+per banda spettrale, NaN dove non c'è niente. `index_raster(chunk, "NDVI")` (anche NDRE, GNDVI,
+SAVI, NDWI, OSAVI, CIRE, Thermal, o una formula qualsiasi sui nomi delle bande) fa l'indice sulla
+stessa griglia; `export_zoning(chunk, "NDVI", "zone.gpkg", classes=3, method="quantiles" | "equal"
+| "kmeans")` lo taglia in classi (le macchie piccole assorbite dal contorno) e scrive i poligoni
+con classe, intervallo, media e area in un GeoPackage - la mappa di prescrizione dell'agricoltura;
+in archeologia le tracce sulle colture sopra muri e fossati sepolti. `ppg multispectral PROGETTO
+add|panel|reflectance|index|zoning|bands`.
+
 ### Altri computer
 
 Il lavoro che si divide per foto va agli altri computer della rete attraverso la cartella del

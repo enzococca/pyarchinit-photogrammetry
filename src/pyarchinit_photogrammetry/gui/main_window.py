@@ -676,6 +676,15 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self._act(m, tr("Esporta IFC (BIM)..."), self.export_ifc, processing=True, icon_name="ifc")
         self._act(m, tr("Esegui script Python..."), self.run_script, icon_name="script")
+        ms_menu = m.addMenu(tr("Multispettrale"))
+        self._act(ms_menu, tr("Aggiungi riprese multispettrali..."), self.ms_add,
+                  tip=tr("Una cartella con un file per banda di ogni scatto (MicaSense, DJI, Sequoia)"))
+        self._act(ms_menu, tr("Pannello di calibrazione..."), self.ms_panel,
+                  tip=tr("La ripresa del pannello e la sua riflettanza: le bande diventano riflettanza"))
+        self._act(ms_menu, tr("Ortofoto di riflettanza..."), self.ms_reflectance, processing=True,
+                  tip=tr("Una banda per banda sulla geometria dell'ortofoto"))
+        self._act(ms_menu, tr("Indice e zonizzazione..."), self.ms_index, processing=True,
+                  tip=tr("NDVI, NDRE e gli altri; le zone come poligoni in un GeoPackage (mappa di prescrizione)"))
         self._act(m, tr("Nodi di rete..."), self.show_nodes, icon_name="network",
                   tip=tr("Altri computer che lavorano a questo progetto dalla cartella condivisa"))
         self._act(m, tr("Plugin..."), self.show_plugins, icon_name="plugin",
@@ -1113,6 +1122,105 @@ class MainWindow(QMainWindow):
         self.run_task(exporter.title, lambda p: exporter.function(ch, out, p),
                       lambda _r: self.statusBar().showMessage(tr("Scritto {0}", out), 10000), refresh=False,
                       save=False)
+
+    # ------------------------------------------------------------------ multispectral
+    def ms_add(self) -> None:
+        if not self._need_chunk():
+            return
+        from ..engine import multispectral as ms
+
+        v = ParamDialog.ask(self, "Aggiungi riprese multispettrali", [
+            Field("folder", "Cartella delle riprese", "", kind="dir"),
+            Field("reference", "Banda di riferimento (da allineare)", "auto",
+                  choices=[("auto", "Automatica (Red se c'è)")] + [(b, b) for b in ("Red", "Green", "NIR", "RedEdge", "Blue")])],
+            intro="Un file per banda di ogni scatto, fianco a fianco (IMG_0001_1.tif ... _5.tif, DJI_0001_MS_G.TIF ...). "
+                  "La banda di riferimento viene allineata e ricostruita come una foto qualsiasi; le altre bande le si "
+                  "sovrappongono con una omografia trovata sulle immagini.")
+        if not v or not v["folder"]:
+            return
+
+        def job(p):
+            cams = ms.add_captures(self.chunk, [v["folder"]], reference=None if v["reference"] == "auto" else v["reference"])
+            return len(cams)
+
+        self.run_task("Riprese multispettrali", job, lambda n: self._info(tr("Riprese multispettrali"), tr(
+            "{0} riprese aggiunte: bande {1}, riferimento {2}", n, ", ".join(self.chunk.meta["multispectral"]["bands"]),
+            self.chunk.meta["multispectral"]["reference"])), refresh=True)
+
+    def ms_panel(self) -> None:
+        if not self._need_chunk():
+            return
+        from ..engine import multispectral as ms
+
+        cams = ms.multispectral_cameras(self.chunk)
+        if not cams:
+            self._warn("Aggiungi prima le riprese multispettrali.")
+            return
+        v = ParamDialog.ask(self, "Pannello di calibrazione", [
+            Field("camera", "Ripresa con il pannello", cams[0].key, choices=[(c.key, c.label) for c in cams]),
+            Field("x0", "Pannello: x sinistra (px)", 0, minimum=0, maximum=100000),
+            Field("y0", "Pannello: y alto (px)", 0, minimum=0, maximum=100000),
+            Field("x1", "Pannello: x destra (px)", 100, minimum=1, maximum=100000),
+            Field("y1", "Pannello: y basso (px)", 100, minimum=1, maximum=100000),
+            Field("reflectance", "Riflettanza del pannello (0-1)", 0.5, minimum=0.001, maximum=1.0, decimals=3)],
+            intro="Il riquadro del pannello nelle immagini della ripresa (le bande sono quasi sovrapposte) e la sua "
+                  "riflettanza nota: da qui le bande diventano riflettanza. Senza pannello valgono i tag del sensore di "
+                  "luce (DLS) quando ci sono, altrimenti numeri normalizzati.")
+        if not v:
+            return
+        cam = self.chunk.camera(v["camera"])
+        factors = ms.calibrate_panel(self.chunk, cam, (v["x0"], v["y0"], v["x1"], v["y1"]), v["reflectance"])
+        self._dirty()
+        self._info(tr("Pannello di calibrazione"), tr("Fattori per banda: {0}", ", ".join(f"{b} {f:.4g}" for b, f in factors.items())))
+
+    def ms_reflectance(self) -> None:
+        if not self._need_chunk(aligned=True):
+            return
+        from ..engine import multispectral as ms
+
+        if not ms.multispectral_cameras(self.chunk):
+            self._warn("Aggiungi prima le riprese multispettrali.")
+            return
+        if self.chunk.dem_path is None:
+            self._warn("Costruisci prima il DEM: l'ortofoto di riflettanza si appoggia su di esso.")
+            return
+        v = ParamDialog.ask(self, "Ortofoto di riflettanza", [
+            Field("resolution", "Risoluzione (m/px, vuoto = automatica)", None, kind="optional_float")],
+            intro="Un GeoTIFF a virgola mobile con una banda per banda spettrale, sulla griglia dell'ortofoto.")
+        if v is None:
+            return
+        self.run_task("Ortofoto di riflettanza", lambda p: ms.build_reflectance(self.chunk, resolution=v["resolution"], progress=p),
+                      lambda path: self._info(tr("Ortofoto di riflettanza"), str(path)))
+
+    def ms_index(self) -> None:
+        if not self._need_chunk():
+            return
+        from ..engine import multispectral as ms
+
+        if not (self.chunk.meta.get("multispectral") or {}).get("reflectance"):
+            self._warn("Costruisci prima l'ortofoto di riflettanza.")
+            return
+        v = ParamDialog.ask(self, "Indice e zonizzazione", [
+            Field("index", "Indice", "NDVI", choices=[(k, f"{k}: {d}") for k, (_, d) in ms.INDICES.items()]),
+            Field("formula", "Formula propria (vuota = l'indice scelto)", "", kind="text"),
+            Field("classes", "Classi della zonizzazione", 3, minimum=2, maximum=10),
+            Field("method", "Metodo", "quantiles",
+                  choices=[("quantiles", "Quantili"), ("equal", "Intervalli uguali"), ("kmeans", "K-means (soglie naturali)")]),
+            Field("gpkg", "GeoPackage delle zone", str(Path(self.doc.path).with_name(f"{Path(self.doc.path).stem}_zone.gpkg")) if self.doc.path else "",
+                  kind="file_save", filter="GeoPackage (*.gpkg)")],
+            intro="L'indice dalle bande di riflettanza e le sue classi come poligoni (classe, intervallo, media, area): la "
+                  "mappa di prescrizione dell'agricoltura; in archeologia le tracce sulle colture.")
+        if not v:
+            return
+        name = v["index"] if not v["formula"].strip() else "Indice"
+        formula = v["formula"].strip() or None
+
+        def job(p):
+            ms.index_raster(self.chunk, name, formula)
+            return ms.export_zoning(self.chunk, name, v["gpkg"], classes=v["classes"], method=v["method"]) if v["gpkg"] else None
+
+        self.run_task("Indice e zonizzazione", job, lambda s: self._info(tr("Indice e zonizzazione"), tr(
+            "{0}: {1} poligoni, soglie {2}", name, s["polygons"], ", ".join(str(b) for b in s["breaks"])) if s else name))
 
     def show_nodes(self) -> None:
         """The computers working on this project through the shared folder."""

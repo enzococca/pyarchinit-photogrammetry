@@ -147,6 +147,11 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   pottery profile from a mesh (vessel or sherd); point-cloud classification; Segment Anything
   2.1 (automatic candidate units, units from clicked points, prompts on photos); IFC export
   (one element per drawn unit, PyArchInit attributes when connected); run a Python script;
+  *Multispettrale*: *Aggiungi riprese multispettrali...* (a folder with one file per band of every
+  capture: the reference band is aligned, the others ride on it), *Pannello di calibrazione...* (the
+  capture of the panel, its box and its reflectance), *Ortofoto di riflettanza...* (a float band per
+  band on the DEM), *Indice e zonizzazione...* (NDVI and the other indices or a formula, the zones as
+  polygons in a GeoPackage: see the API page, *Multispectral cameras*);
   *Nodi di rete...*: the other computers working on this project from the shared project folder
   (the folder to give to `ppg node` on each of them, the nodes present with their cores and GPUs,
   the switch that hands them the key points and the PatchMatch depth maps; `ppg remote` for a

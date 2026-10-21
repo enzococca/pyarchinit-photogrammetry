@@ -146,6 +146,12 @@ Dalla riga di comando `ppg update` dice se esiste una versione più nuova e `ppg
   profilo ceramico da una mesh (vaso o frammento); classificazione della nuvola di punti; Segment Anything
   2.1 (unità candidate automatiche, unità da punti cliccati, prompt sulle foto); esportazione IFC
   (un elemento per unità disegnata, attributi PyArchInit se collegato); esecuzione di uno script Python;
+  *Multispettrale*: *Aggiungi riprese multispettrali...* (una cartella con un file per banda di ogni
+  scatto: la banda di riferimento viene allineata, le altre le si sovrappongono), *Pannello di
+  calibrazione...* (la ripresa del pannello, il suo riquadro e la sua riflettanza), *Ortofoto di
+  riflettanza...* (una banda a virgola mobile per banda sul DEM), *Indice e zonizzazione...* (NDVI e gli
+  altri indici o una formula, le zone come poligoni in un GeoPackage: vedi la pagina dell'API, *Camere
+  multispettrali*);
   *Nodi di rete...*: gli altri computer che lavorano a questo progetto dalla cartella condivisa (la
   cartella da dare a `ppg node` su ognuno, i nodi presenti con core e GPU, l'interruttore che affida
   loro punti chiave e mappe di profondità PatchMatch; `ppg remote` per una macchina via SSH: vedi la

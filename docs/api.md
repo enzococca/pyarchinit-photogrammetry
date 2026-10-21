@@ -92,6 +92,31 @@ The photos form a queue served by a worker per GPU and one for the CPU kernel (w
 core), so GPUs and CPU share them by their speed; a photo a GPU cannot do goes to the CPU kernel.
 `meta["dense"]["gpu"]` names the GPUs used.
 
+### Multispectral cameras
+
+`engine.multispectral`: a multispectral camera (MicaSense RedEdge / Altum, DJI Mavic 3
+Multispectral, Parrot Sequoia) writes one file per band of every capture, side by side; the
+bands are found by their suffixes (`_1`..`_6`, `_MS_G` ..., `_GRE` ...) or by the `BandName` of
+their XMP (`detect_bands`). `add_captures(chunk, paths, reference=None)` makes the reference band
+(the red one by default) the photo of each capture - an 8-bit stretched copy with the tags of the
+original, aligned and reconstructed as any photo - and keeps the other bands in
+`camera.meta["bands"]`. The radiometry (`radiance_image`, `reflectance_image`) follows the tags:
+MicaSense's model (black level, gain and exposure, the `RadiometricCalibration` coefficients, the
+vignetting polynomial), else digital numbers normalised by exposure and gain; reflectance comes from
+a calibration panel in the flight (`calibrate_panel(chunk, camera, region, reflectance)`: the
+known reflectance per band over the panel's radiance) or from the irradiance of the sun sensor in
+the tags. The bands of a capture are brought onto the reference band with a homography found on
+the images (`register_bands`: the shift by phase correlation on the gradient magnitudes, an affine
+at a reduced size, the homography at full size). `build_reflectance(chunk, bands=None,
+resolution=None)` runs the orthophoto engine on the reference band's geometry with the registered
+bands as float values: `<data>/multispectral/reflectance.tif`, a float32 band per spectral band,
+NaN where nothing. `index_raster(chunk, "NDVI")` (also NDRE, GNDVI, SAVI, NDWI, OSAVI, CIRE,
+Thermal, or any formula over the band names) makes the index on the same grid; `export_zoning(chunk,
+"NDVI", "zone.gpkg", classes=3, method="quantiles" | "equal" | "kmeans")` cuts it into classes
+(small patches given to their surroundings) and writes the polygons with class, range, mean and
+area into a GeoPackage - the prescription map of agriculture; in archaeology the crop marks over
+buried walls and ditches. `ppg multispectral PROJECT add|panel|reflectance|index|zoning|bands`.
+
 ### Other computers
 
 The work that splits by photo goes to the other computers of the network through the project
