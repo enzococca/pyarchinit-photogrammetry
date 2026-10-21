@@ -43,7 +43,7 @@ postgis = ["psycopg2-binary>=2.9; sys_platform != 'win32' or platform_machine !=
            "psycopg>=3.1; sys_platform == 'win32' and platform_machine == 'ARM64'"]  # psycopg 3 over libpq on Windows ARM64
 sam = ["torch>=2.3", "sam2>=1.1", "huggingface_hub>=0.20"]  # the weights come from the Hugging Face hub
 learn = ["scikit-learn>=1.3"]  # trainable point classification (ai.learn)
-fast = ["pyarchinit-photogrammetry-core>=0.3"]  # native kernels in Rust (native/), optional
+fast = ["pyarchinit-photogrammetry-core>=0.4"]  # native kernels in Rust (native/), optional
 scans = ["pye57>=0.4"]  # laser scans in E57 (io.scans; PTX needs nothing)
 munsell = ["colour-science>=0.4.4"]  # Munsell notation of the colours (archaeo.munsell)
 gui = ["PySide6>=6.6", "pyvista>=0.43", "pyvistaqt>=0.13", "qtawesome>=1.3", "scikit-learn>=1.3",
