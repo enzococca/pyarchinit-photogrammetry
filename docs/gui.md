@@ -158,7 +158,8 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   ground sampling distance, footprint: see the API page, *Satellite imagery*);
   *Nodi di rete...*: the other computers working on this project from the shared project folder
   (the folder to give to `ppg node` on each of them, the nodes present with their cores and GPUs,
-  the switch that hands them the key points and the PatchMatch depth maps; `ppg remote` for a
+  the switch that hands them the key points and the PatchMatch depth maps, remembered and applied to
+  the running program as `PPG_NODES`; `ppg remote` for a
   machine over SSH: see the API page, *Other computers*);
   *Plugin...*: the plugins installed and those of the plugin repository (install, enable, disable,
   remove; their actions go in the menu *Plugin*, their formats in *File > Esporta*: see

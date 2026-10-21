@@ -106,6 +106,9 @@ class MainWindow(QMainWindow):
         from . import app_settings
 
         self.settings = app_settings()
+        from .nodes_dialog import apply_setting as _apply_nodes_setting
+
+        _apply_nodes_setting(self.settings)  # the engine hands work to the nodes as the dialog says
         self.runner = TaskRunner(self)
         self.runner.status.connect(lambda s: self.statusBar().showMessage(s, 8000))
         self.runner.busy_changed.connect(self._busy)

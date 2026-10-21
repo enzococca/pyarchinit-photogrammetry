@@ -133,3 +133,31 @@ def test_node_command_leaves_when_nothing_is_left(tmp_path):
                          text=True, env=env, timeout=120, close_fds=False)
     assert dry.returncode == 0 and "ppg node /data/p.ppg.files --once" in dry.stdout and "--map" in dry.stdout, dry.stdout + dry.stderr
     assert json.loads((tmp_path / "p.ppg").read_text()) == {}
+
+
+def test_dialog_switch_drives_the_engine(tmp_path, monkeypatch):
+    """The switch of the dialog sets ``PPG_NODES`` (the engine reads only that); at start the
+    stored choice applies unless the environment was set by hand."""
+    pytest.importorskip("PySide6")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    from pyarchinit_photogrammetry.gui import nodes_dialog
+
+    QApplication.instance() or QApplication([])
+    settings = QSettings(str(tmp_path / "test.ini"), QSettings.Format.IniFormat)
+    monkeypatch.delenv("PPG_NODES", raising=False)
+    settings.setValue("nodes/enabled", "false")
+    assert nodes_dialog.apply_setting(settings) is False and os.environ["PPG_NODES"] == "0" and not nodes.enabled()
+    monkeypatch.setenv("PPG_NODES", "1")
+    assert nodes_dialog.apply_setting(settings) is True  # set by hand: kept
+    d = nodes_dialog.NodesDialog(tmp_path, settings)
+    assert not d.use.isChecked()
+    d.use.setChecked(True)
+    assert os.environ["PPG_NODES"] == "1" and settings.value("nodes/enabled") == "true" and nodes.enabled()
+    d.use.setChecked(False)
+    assert os.environ["PPG_NODES"] == "0" and not nodes.enabled()
+    d.close()

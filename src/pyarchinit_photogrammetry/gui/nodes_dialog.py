@@ -2,12 +2,29 @@
 nodes present, the switch that hands them the work."""
 from __future__ import annotations
 
+import os
+
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
                                QTableWidget, QTableWidgetItem, QVBoxLayout)
 
 from ..engine import nodes
 from .i18n import tr
+
+
+def _stored(settings) -> bool:
+    return str(settings.value("nodes/enabled", "true")).lower() in ("true", "1", "yes")
+
+
+def apply_setting(settings, force: bool = False) -> bool:
+    """Set ``PPG_NODES`` from the stored choice (``nodes/enabled``), so the engine follows the
+    switch of the dialog; unless ``force``, a value set by hand in the environment before the
+    program started is kept. Returns whether the nodes are given work."""
+    if not force and "PPG_NODES" in os.environ:
+        return nodes.enabled()
+    on = _stored(settings)
+    os.environ["PPG_NODES"] = "1" if on else "0"
+    return on
 
 
 class NodesDialog(QDialog):
@@ -34,8 +51,8 @@ class NodesDialog(QDialog):
         row.addWidget(copy)
         lay.addLayout(row)
         self.use = QCheckBox(tr("Dai lavoro ai nodi presenti"))
-        self.use.setChecked(str(settings.value("nodes/enabled", "true")).lower() in ("true", "1", "yes"))
-        self.use.toggled.connect(lambda on: settings.setValue("nodes/enabled", "true" if on else "false"))
+        self.use.setChecked(_stored(settings))
+        self.use.toggled.connect(self._switch)
         lay.addWidget(self.use)
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels([tr("Nodo"), tr("Core"), tr("GPU"), tr("Visto da (s)")])
@@ -51,6 +68,10 @@ class NodesDialog(QDialog):
         self.timer.timeout.connect(self.refresh)
         self.timer.start(3000)
         self.refresh()
+
+    def _switch(self, on: bool) -> None:
+        self.settings.setValue("nodes/enabled", "true" if on else "false")
+        apply_setting(self.settings, force=True)
 
     def _copy(self) -> None:
         from PySide6.QtWidgets import QApplication
