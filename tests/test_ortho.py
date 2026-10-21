@@ -45,9 +45,11 @@ def test_surfaces_and_workers(processed, scene, tmp_path):
     many = ch.build_orthomosaic(resolution=0.004, workers=4)
     with rasterio.open(many) as src:
         assert np.array_equal(src.read(), a)  # the same pixels, tile by tile in any order
-    assert _targets_error(many, scene) < 0.005
+    worst = _targets_error(many, scene)
+    assert worst < 0.005, f"targets in the orthomosaic off by up to {worst * 1000:.2f} mm"
     # a true orthophoto on the mesh (vertical rays), and from the dense cloud alone
-    assert _targets_error(ch.build_orthomosaic(resolution=0.004, surface="model"), scene) < 0.006
+    worst = _targets_error(ch.build_orthomosaic(resolution=0.004, surface="model"), scene)
+    assert worst < 0.006, f"targets in the true orthophoto off by up to {worst * 1000:.2f} mm"
     ch.products.pop("dem")
     ch.products.pop("model")
     ch.products.pop("model_textured", None)
