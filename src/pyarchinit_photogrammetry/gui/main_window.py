@@ -685,6 +685,13 @@ class MainWindow(QMainWindow):
                   tip=tr("Una banda per banda sulla geometria dell'ortofoto"))
         self._act(ms_menu, tr("Indice e zonizzazione..."), self.ms_index, processing=True,
                   tip=tr("NDVI, NDRE e gli altri; le zone come poligoni in un GeoPackage (mappa di prescrizione)"))
+        sat_menu = m.addMenu(tr("Immagini satellitari"))
+        self._act(sat_menu, tr("Ortorettifica una scena..."), self.sat_ortho, processing=True,
+                  tip=tr("Una scena satellitare con i suoi RPC sul DEM del rilievo, come versione dell'ortofoto"))
+        self._act(sat_menu, tr("DSM da una coppia stereo..."), self.sat_dsm, processing=True,
+                  tip=tr("Il modello della superficie da due scene prese da due direzioni, come versione del DEM"))
+        self._act(sat_menu, tr("Informazioni sulla scena..."), self.sat_info,
+                  tip=tr("Dimensioni, bande, risoluzione a terra e impronta di una scena"))
         self._act(m, tr("Nodi di rete..."), self.show_nodes, icon_name="network",
                   tip=tr("Altri computer che lavorano a questo progetto dalla cartella condivisa"))
         self._act(m, tr("Plugin..."), self.show_plugins, icon_name="plugin",
@@ -1221,6 +1228,118 @@ class MainWindow(QMainWindow):
 
         self.run_task("Indice e zonizzazione", job, lambda s: self._info(tr("Indice e zonizzazione"), tr(
             "{0}: {1} poligoni, soglie {2}", name, s["polygons"], ", ".join(str(b) for b in s["breaks"])) if s else name))
+
+    # ------------------------------------------------------------------ satellite
+    _SCENE_FILTER = "Scene (*.tif *.tiff *.jp2 *.img *.ntf *.nitf);;Tutti (*)"
+    _RPC_FILTER = "RPC (*.txt *.TXT *.rpb *.RPB *.rpc *.xml *.XML);;Tutti (*)"
+
+    def _satellite_ready(self) -> bool:
+        if not self._need_chunk():
+            return False
+        from ..core import crs as crs_mod
+
+        if crs_mod.is_local(self.chunk.crs):
+            self._warn("Il chunk deve essere in un sistema di coordinate proiettato: georeferenzialo prima.")
+            return False
+        return True
+
+    def sat_info(self) -> None:
+        if not self._satellite_ready():
+            return
+        from ..engine import satellite as sat
+
+        v = ParamDialog.ask(self, "Informazioni sulla scena", [
+            Field("scene", "Scena", "", kind="file_open", filter=self._SCENE_FILTER),
+            Field("rpc", "File RPC (vuoto = nel file o accanto)", "", kind="file_open", filter=self._RPC_FILTER)])
+        if not v or not v["scene"]:
+            return
+        try:
+            info = sat.scene_info(Path(v["scene"]), self.chunk.crs, rpc=Path(v["rpc"]) if v["rpc"] else None)
+        except Exception as e:  # noqa: BLE001
+            self._warn(str(e))
+            return
+        b = info["bounds"]
+        self._info(tr("Informazioni sulla scena"), tr(
+            "{0} x {1} px, {2} bande ({3}), {4} m/px a terra; impronta {5}-{6} E, {7}-{8} N; altezza di riferimento {9} m",
+            info["width"], info["height"], info["bands"], info["dtype"], f"{info['gsd']:.3g}", f"{b[0]:.1f}",
+            f"{b[2]:.1f}", f"{b[1]:.1f}", f"{b[3]:.1f}", f"{info['height_off']:.1f}"))
+
+    def sat_ortho(self) -> None:
+        if not self._satellite_ready():
+            return
+        if self.chunk.dem_path is None or not self.chunk.dem_path.exists():
+            self._warn("Costruisci prima il DEM: la scena viene ortorettificata su di esso.")
+            return
+        from ..engine import satellite as sat
+
+        v = ParamDialog.ask(self, "Ortorettifica una scena", [
+            Field("scene", "Scena", "", kind="file_open", filter=self._SCENE_FILTER),
+            Field("rpc", "File RPC (vuoto = nel file o accanto)", "", kind="file_open", filter=self._RPC_FILTER),
+            Field("name", "Nome della versione (vuoto = nome del file)", "", kind="text"),
+            Field("resolution", "Risoluzione (m/px, vuoto = quella della scena)", None, kind="optional_float"),
+            Field("height_offset", "Ondulazione del geoide (m, quote ortometriche)", 0.0, minimum=-200.0, maximum=200.0, decimals=2),
+            Field("rgb", "Bande da mostrare come R,G,B (vuote = le prime tre)", "", kind="text"),
+            Field("resampling", "Ricampionamento", "cubic",
+                  choices=[("cubic", "Cubico"), ("linear", "Bilineare"), ("nearest", "Più vicino")])],
+            intro="Ogni cella del DEM viene proiettata nella scena con i suoi RPC e la scena viene letta lì. Il "
+                  "risultato completo (tutte le bande, il tipo della scena) va in <dati>/satellite/, una resa a 8 bit "
+                  "resta fra le versioni dell'ortofoto per confrontarla con quella del drone. Gli RPC usano quote "
+                  "ellissoidiche: con un DEM in quote ortometriche indica l'ondulazione del geoide.")
+        if not v or not v["scene"]:
+            return
+        bands = None
+        if v["rgb"].strip():
+            try:
+                bands = [int(x) for x in v["rgb"].split(",")]
+                assert len(bands) == 3
+            except (ValueError, AssertionError):
+                self._warn("Le bande vanno date come tre numeri: 3,2,1")
+                return
+
+        def job(p):
+            return sat.ortho_scene(self.chunk, Path(v["scene"]), name=v["name"].strip() or None,
+                                   rpc=Path(v["rpc"]) if v["rpc"] else None, resolution=v["resolution"],
+                                   height_offset=v["height_offset"], rgb=bands, resampling=v["resampling"], progress=p)
+
+        self.run_task("Ortorettifica", job, lambda r: self._info(tr("Ortorettifica"), tr(
+            "{0} x {1} px a {2} m, {3}% con dati: versione dell'ortofoto «{4}»", r["width"], r["height"],
+            f"{r['resolution']:g}", f"{r['filled'] * 100:.0f}", r["record"]["name"])))
+
+    def sat_dsm(self) -> None:
+        if not self._satellite_ready():
+            return
+        from ..engine import satellite as sat
+
+        has_dem = self.chunk.dem_path is not None and self.chunk.dem_path.exists()
+        v = ParamDialog.ask(self, "DSM da una coppia stereo", [
+            Field("scene_a", "Prima scena", "", kind="file_open", filter=self._SCENE_FILTER),
+            Field("rpc_a", "Suo file RPC (vuoto = nel file o accanto)", "", kind="file_open", filter=self._RPC_FILTER),
+            Field("scene_b", "Seconda scena", "", kind="file_open", filter=self._SCENE_FILTER),
+            Field("rpc_b", "Suo file RPC (vuoto = nel file o accanto)", "", kind="file_open", filter=self._RPC_FILTER),
+            Field("name", "Nome della versione (vuoto = i nomi dei file)", "", kind="text"),
+            Field("resolution", "Risoluzione (m, vuoto = quella delle scene)", None, kind="optional_float"),
+            Field("zmin", "Quota minima del terreno (m, vuoto = dal DEM o -100)", None, kind="optional_float"),
+            Field("zmax", "Quota massima del terreno (m, vuoto = dal DEM o +100)", None, kind="optional_float"),
+            Field("height_offset", "Ondulazione del geoide (m, quote ortometriche)", 0.0, minimum=-200.0, maximum=200.0, decimals=2),
+            Field("use_dem", "Quote di riferimento dal DEM del chunk", has_dem)],
+            intro="Le due scene vengono ricampionate sul piano del terreno a una quota di riferimento lungo la "
+                  "direzione della loro base; un punto sopra o sotto il piano si sposta lungo la linea di vista di "
+                  "ogni scena e la disparità fra le due, trovata con l'abbinamento semi-globale, dà la sua quota. "
+                  "Il risultato resta fra le versioni del DEM.")
+        if not v or not v["scene_a"] or not v["scene_b"]:
+            return
+        rng = (v["zmin"], v["zmax"]) if v["zmin"] is not None and v["zmax"] is not None else None
+
+        def job(p):
+            return sat.dsm_from_pair(self.chunk, Path(v["scene_a"]), Path(v["scene_b"]), name=v["name"].strip() or None,
+                                     rpc_a=Path(v["rpc_a"]) if v["rpc_a"] else None,
+                                     rpc_b=Path(v["rpc_b"]) if v["rpc_b"] else None, resolution=v["resolution"],
+                                     height_range=rng, height_offset=v["height_offset"], use_dem=bool(v["use_dem"]),
+                                     progress=p)
+
+        self.run_task("DSM stereo", job, lambda r: self._info(tr("DSM da una coppia stereo"), tr(
+            "{0} x {1} celle a {2} m, base/altezza {3}, {4}% abbinato: versione del DEM «{5}»", r["width"], r["height"],
+            f"{r['resolution']:g}", f"{r['base_to_height']:.2f}", f"{r['matched'] * 100:.0f}", r["record"]["name"])))
 
     def show_nodes(self) -> None:
         """The computers working on this project through the shared folder."""

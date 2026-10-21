@@ -120,6 +120,33 @@ con classe, intervallo, media e area in un GeoPackage - la mappa di prescrizione
 in archeologia le tracce sulle colture sopra muri e fossati sepolti. `ppg multispectral PROGETTO
 add|panel|reflectance|index|zoning|bands`.
 
+### Immagini satellitari
+
+`engine.satellite`: una scena satellitare arriva con i suoi *coefficienti polinomiali razionali*
+(RPC), due razionali cubiche che danno colonna e riga di un punto a terra qualsiasi (longitudine,
+latitudine, quota ellissoidica). `read_rpc(scena, rpc=None)` li legge dal GeoTIFF, da un file
+`_RPC.TXT` / `.RPB` / `.rpc` accanto o dall'`RPC_*.XML` di un prodotto DIMAP (Pléiades, SPOT: la
+loro numerazione dei pixel da 1 viene portata a 0); `project` e `ground` sono il modello e il suo
+inverso (centro del primo pixel in (0, 0)). `scene_info` dà dimensioni, bande, risoluzione a terra
+e impronta nel CRS del chunk. `ortho_scene(chunk, scena, name=None, rpc=None, resolution=None,
+height_offset=0, rgb=None)` ortorettifica la scena sul DEM del chunk (`orthorectify`: ogni cella
+portata alla quota del DEM, proiettata nella scena, la scena ricampionata lì, a tasselli in
+thread): il risultato completo, tutte le bande nel tipo della scena, in
+`<dati>/satellite/<nome>_ortho.tif`, e una resa RGBA a 8 bit conservata come versione
+dell'ortofoto, così l'ortofoto del drone e l'immagine satellitare dello stesso terreno si
+confrontano cella per cella. Le quote degli RPC sono ellissoidiche: con un DEM in quote
+ortometriche indica l'ondulazione del geoide in `height_offset`. `dsm_from_pair(chunk, scena_a,
+scena_b, name=None, resolution=None, height_range=None, use_dem=True)` costruisce un modello della
+superficie da una coppia stereo (`stereo_dsm`): a tasselli, le due scene vengono ricampionate sul
+piano del terreno a una quota di riferimento (la mediana del DEM lì, altrimenti quella degli RPC)
+lungo la direzione della loro base; un punto sopra o sotto il piano si sposta lungo la linea di
+vista di ogni scena, così la disparità trovata con l'abbinamento semi-globale (SGBM di OpenCV) dà
+la sua quota e la posizione vera si recupera togliendo lo spostamento; il risultato, un GeoTIFF
+float32 con i buchi riempiti, resta come versione del DEM e in `<dati>/satellite/`. Sulla trincea
+sintetica vista da due "satelliti" a proiezione parallela a 25 gradi dal nadir (base/altezza 0,93)
+il DSM sta entro 0,6 mm (mediana) dal DEM. `ppg satellite PROGETTO info|ortho|dsm SCENA [SCENA_B]
+[--rpc] [--resolution] [--height-offset] [--height-range zmin,zmax] [--rgb 3,2,1]`.
+
 ### Altri computer
 
 Il lavoro che si divide per foto va agli altri computer della rete attraverso la cartella del

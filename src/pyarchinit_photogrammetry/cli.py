@@ -1769,6 +1769,52 @@ def multispectral(project: Path, what: str = typer.Argument(..., help="add, pane
 
 
 @app.command()
+def satellite(project: Path, what: str = typer.Argument(..., help="info, ortho or dsm"),
+              scene: Path = typer.Argument(..., help="the scene (GeoTIFF with its RPC, or a sidecar beside it)"),
+              scene_b: Optional[Path] = typer.Argument(None, help="dsm: the second scene of the stereo pair"),
+              rpc: Optional[Path] = typer.Option(None, help="the RPC file of the scene (_RPC.TXT, .RPB, RPC_*.XML)"),
+              rpc_b: Optional[Path] = typer.Option(None, help="dsm: the RPC file of the second scene"),
+              name: Optional[str] = typer.Option(None, help="name of the version kept in the project"),
+              resolution: Optional[float] = typer.Option(None, help="metres per cell (default: the scene's GSD)"),
+              height_offset: float = typer.Option(0.0, help="added to the DEM heights before the RPC: the geoid "
+                                                            "undulation when the DEM is orthometric"),
+              height_range: Optional[str] = typer.Option(None, help="dsm: zmin,zmax of the ground (project heights)"),
+              rgb: Optional[str] = typer.Option(None, help="ortho: the bands shown as red,green,blue (1-based)"),
+              resampling: str = typer.Option("cubic", help="ortho: cubic, linear or nearest"),
+              use_dem: bool = typer.Option(True, "--dem/--no-dem", help="dsm: the reference heights from the DEM of the chunk"),
+              chunk: Optional[str] = None):
+    """Satellite scenes over the survey: info (size, GSD, footprint), ortho (the scene
+    orthorectified on the DEM of the chunk, kept as a version of the orthomosaic), dsm (a surface
+    model from a stereo pair, kept as a version of the DEM)."""
+    from .engine import satellite as sat
+
+    doc, ch = _open(project, chunk)
+    if what == "info":
+        info = sat.scene_info(scene, ch.crs, rpc=rpc)
+        info.pop("footprint")
+        typer.echo(json.dumps(info, indent=1, default=str))
+    elif what == "ortho":
+        bands = [int(v) for v in rgb.split(",")] if rgb else None
+        r = sat.ortho_scene(ch, scene, name=name, rpc=rpc, resolution=resolution, height_offset=height_offset,
+                            rgb=bands, resampling=resampling, progress=print_progress)
+        doc.save()
+        typer.echo(f"{r['width']} x {r['height']} px at {r['resolution']:g} m, {r['filled'] * 100:.0f}% with data: "
+                   f"{r['path']} (version {r['version']} of the orthomosaic)")
+    elif what == "dsm":
+        if scene_b is None:
+            raise typer.BadParameter("dsm needs the two scenes of the pair")
+        rng = tuple(float(v) for v in height_range.split(",")) if height_range else None
+        r = sat.dsm_from_pair(ch, scene, scene_b, name=name, rpc_a=rpc, rpc_b=rpc_b, resolution=resolution,
+                              height_range=rng, height_offset=height_offset, use_dem=use_dem,
+                              progress=print_progress)
+        doc.save()
+        typer.echo(f"{r['width']} x {r['height']} cells at {r['resolution']:g} m, base to height "
+                   f"{r['base_to_height']:.2f}, {r['matched'] * 100:.0f}% matched: {r['path']} (version {r['version']} of the DEM)")
+    else:
+        raise typer.BadParameter("what: info, ortho or dsm")
+
+
+@app.command()
 def node(folder: Path, once: bool = typer.Option(False, help="leave when no unit of work is left"),
          gpu: Optional[str] = typer.Option(None, help="the GPUs for the depth maps: auto, all, off, an adapter"),
          map: list[str] = typer.Option([], "--map", help="a path of the main computer and what it is here, "  # noqa: A002

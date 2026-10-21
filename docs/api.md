@@ -117,6 +117,33 @@ Thermal, or any formula over the band names) makes the index on the same grid; `
 area into a GeoPackage - the prescription map of agriculture; in archaeology the crop marks over
 buried walls and ditches. `ppg multispectral PROJECT add|panel|reflectance|index|zoning|bands`.
 
+### Satellite imagery
+
+`engine.satellite`: a satellite scene comes with its *rational polynomial coefficients* (RPC),
+two rational cubics giving the column and row of any ground point (longitude, latitude,
+ellipsoidal height). `read_rpc(scene, rpc=None)` takes them from the GeoTIFF, from a `_RPC.TXT`
+/ `.RPB` / `.rpc` sidecar or from the `RPC_*.XML` of a DIMAP product (Pleiades, SPOT: their
+1-based pixel numbering is brought to 0-based); `project` and `ground` are the model and its
+inverse (centre of the first pixel at (0, 0)). `scene_info` gives size, bands, ground sampling
+distance and footprint in the CRS of the chunk. `ortho_scene(chunk, scene, name=None, rpc=None,
+resolution=None, height_offset=0, rgb=None)` orthorectifies the scene on the DEM of the chunk
+(`orthorectify`: every cell lifted to the DEM height, projected into the scene, the scene
+resampled there, tile by tile in threads): the full result, all the bands in the type of the
+scene, in `<data>/satellite/<name>_ortho.tif`, and an 8-bit RGBA rendition kept as a version of
+the orthomosaic, so the drone orthomosaic and the satellite image of the same ground are compared
+cell by cell. RPC heights are ellipsoidal: with a DEM in orthometric heights give the geoid
+undulation as `height_offset`. `dsm_from_pair(chunk, scene_a, scene_b, name=None, resolution=None,
+height_range=None, use_dem=True)` builds a surface model from a stereo pair (`stereo_dsm`): tile
+by tile both scenes are resampled on the ground plane at a reference height (the median of the
+DEM there, else the RPC's) along the direction of their baseline; a point above or below the
+plane is displaced along the line of sight of each scene, so the disparity found by semi-global
+matching (OpenCV SGBM) gives its height and its true position is recovered by taking the
+displacement back; the result, a float32 GeoTIFF with the holes filled, is kept as a version of the
+DEM and in `<data>/satellite/`. On the synthetic trench seen by two parallel-projection
+"satellites" 25 degrees off nadir (base to height 0.93) the DSM is within 0.6 mm (median) of the
+DEM. `ppg satellite PROJECT info|ortho|dsm SCENE [SCENE_B] [--rpc] [--resolution] [--height-offset]
+[--height-range zmin,zmax] [--rgb 3,2,1]`.
+
 ### Other computers
 
 The work that splits by photo goes to the other computers of the network through the project
