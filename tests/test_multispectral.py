@@ -96,7 +96,7 @@ def test_reflectance_orthomosaic_indices_and_zoning(scene_dir, tmp_path):
     # a panel: a flat patch of the first capture with a known reflectance
     factors = ms.calibrate_panel(ch, cams[0], (10, 10, 60, 60), 0.5)
     assert set(factors) == set(BANDS.values()) and all(f > 0 for f in factors.values())
-    ch.build_depth_maps(quality="medium", backend="patchmatch", gpu="auto")
+    ch.build_depth_maps(quality="medium")  # the default backend: SGBM without the native core
     ch.build_point_cloud()
     ch.build_dem()
     out = ms.build_reflectance(ch, resolution=0.01)

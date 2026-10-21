@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 import pyarchinit_photogrammetry as ppg
+from pyarchinit_photogrammetry import _native
 from pyarchinit_photogrammetry.engine import nodes
 
 
@@ -79,6 +80,8 @@ def test_key_points_and_depth_maps_shared_with_a_node(scene_dir, scene, tmp_path
         ch.import_reference(scene_dir / "gcp.csv", crs="EPSG:3004")
         assert ch.update_transform()["control_rmse"] < 0.002  # the key points of the nodes are COLMAP's
         doc.save()
+        if _native.kernel("patchmatch_depth") is None:  # the nodes share PatchMatch depth maps: native core only
+            return
         ch.build_depth_maps(quality="high", backend="patchmatch", gpu="off")
         assert ch.meta["dense"].get("nodes")
         ws = ch.data_dir / "dense"
