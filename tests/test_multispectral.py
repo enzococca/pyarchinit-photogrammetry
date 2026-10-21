@@ -256,3 +256,85 @@ def test_dji_p4_multispectral_files(tmp_path):
             assert abs(h[0, 2] - 3) < 0.5 and abs(h[1, 2] + 2) < 0.5, (band, h)
             assert quality[band]["correlation"] > 0.5
     assert quality["NIR"]["on"] in ("RedEdge", "Red")
+
+
+def test_pane_tree_and_views_show_the_products(scene_dir, tmp_path, monkeypatch):
+    """The products in the project's tree, the pane's state and the raster view: a reflectance
+    orthomosaic in false colour, an index on its ramp, the zones by class with their polygons as a
+    layer - on small files written here, without the whole chain."""
+    pytest.importorskip("PySide6")
+    import os
+
+    import rasterio
+    from rasterio.transform import from_origin
+
+    from pyarchinit_photogrammetry.io import gpkg
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("PPG_RENDERER", "software")
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path))
+    qapp = QApplication.instance() or QApplication([])
+    from pyarchinit_photogrammetry.gui import image_views
+    from pyarchinit_photogrammetry.gui import main_window as mwmod
+
+    doc = ppg.Document()
+    ch = doc.add_chunk("Campo")
+    doc.save(tmp_path / "campo.ppg")
+    ch.crs = "EPSG:3004"
+    folder = ch.data_dir / "multispectral"
+    folder.mkdir(parents=True)
+    h, w = 60, 80
+    tr = from_origin(2480000.0, 4500000.0, 0.05, 0.05)
+    rng = np.random.default_rng(2)
+    bands = ["Blue", "Green", "Red", "RedEdge", "NIR"]
+    data = rng.uniform(0.01, 0.1, (5, h, w)).astype(np.float32)
+    data[4, :, :40] += 0.4  # vegetation on the left: NIR high
+    with rasterio.open(folder / "reflectance.tif", "w", driver="GTiff", height=h, width=w, count=5, dtype="float32",
+                       crs="EPSG:3004", transform=tr, nodata=float("nan")) as dst:
+        dst.write(data)
+        for i, b in enumerate(bands):
+            dst.set_band_description(i + 1, b)
+    ch.meta["multispectral"] = {"reference": "Red", "bands": bands, "captures": 12, "panel": None, "registration": {},
+                                "reflectance": "multispectral/reflectance.tif", "reflectance_bands": bands}
+    ndvi = ms.index_raster(ch, "NDVI")
+    summary = ms.export_zoning(ch, "NDVI", tmp_path / "zone.gpkg", classes=2, method="kmeans", min_cells=5)
+    assert summary["polygons"] >= 2 and (ch.data_dir / summary["raster"]).exists()
+    doc.save()
+    w_ = mwmod.MainWindow(doc, autoconnect=False)
+    w_.runner.show_dialog = False
+    try:
+        # the tree: the multispectral node with its three products
+        tree = w_.workspace
+        chunk_item = tree.topLevelItem(0).child(0)
+        nodes = [chunk_item.child(i) for i in range(chunk_item.childCount())]
+        node = next(n for n in nodes if n.data(0, mwmod.Qt.ItemDataRole.UserRole)[0] == "multispectral")
+        payloads = [node.child(i).data(0, mwmod.Qt.ItemDataRole.UserRole)[2] for i in range(node.childCount())]
+        assert payloads == ["ms:reflectance", "ms:index:NDVI", "ms:zones:NDVI"]
+        # the pane says what there is
+        assert "12" in w_.ms_pane.states["captures"].text() and "NDVI" in w_.ms_pane.states["index"].text()
+        assert w_.ms_pane.b_index.isEnabled() and w_.ms_pane.b_zoning.isEnabled() and w_.ms_pane.b_align.isEnabled()
+        assert not w_.ms_pane.b_surface.isEnabled()  # nothing aligned: the surface step waits
+        # the views: false colour, the index, the zones (with the polygons as a layer)
+        w_._workspace_item("product", ch, "ms:reflectance")
+        assert w_.ortho_view.kind == "reflectance" and w_.ortho_view._bands == (5, 3, 2)
+        rgba = image_views.read_window_rgba(folder / "reflectance.tif", "reflectance", (0, 0, w, h), (h, w), bands=(5, 3, 2),
+                                            limits=w_.ortho_view._band_limits)
+        assert rgba[..., 3].min() == 255 and rgba[:, :40, 0].mean() > rgba[:, 40:, 0].mean() + 60  # NIR shown as red
+        w_._workspace_item("product", ch, "ms:index:NDVI")
+        assert w_.ortho_view.kind == "index" and w_.ortho_view._dem_range[0] < w_.ortho_view._dem_range[1]
+        rgba = image_views.read_window_rgba(ndvi, "index", (0, 0, w, h), (h, w), w_.ortho_view._dem_range)
+        assert rgba[:, :40, 0].mean() < rgba[:, 40:, 0].mean() - 60  # red where low, dark green where high
+        w_._workspace_item("product", ch, "ms:zones:NDVI")
+        assert w_.ortho_view.kind == "zones" and "Zone NDVI" in w_.ortho_view.layers
+        assert len(w_.ortho_view.features("Zone NDVI")) == summary["polygons"]
+        rgba = image_views.read_window_rgba(ch.data_dir / summary["raster"], "zones", (0, 0, w, h), (h, w))
+        assert rgba[..., 3].max() == 255 and len(np.unique(rgba[rgba[..., 3] > 0][:, :3], axis=0)) == 2
+        rows = gpkg.read_table(tmp_path / "zone.gpkg", "zone")
+        assert {r[1]["classe"] for r in rows} == {1, 2}
+    finally:
+        w_.setWindowModified(False)
+        w_.close()

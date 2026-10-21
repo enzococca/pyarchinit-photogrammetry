@@ -249,6 +249,37 @@ class WorkspaceTree(QTreeWidget):
                     it.setToolTip(0, tr("Doppio clic per vederlo; tasto destro: esporta, elimina"))
                     el.addChild(it)
                 el.setExpanded(True)
+            ms = (ch.meta or {}).get("multispectral") or {}
+            if ms.get("captures"):  # the products of the multispectral captures, in the tree as the others
+                node = QTreeWidgetItem([tr("Multispettrale  ({0} riprese: {1})", ms["captures"],
+                                           ", ".join(ms.get("bands") or []))])
+                node.setIcon(0, icon("multispectral"))
+                node.setData(0, Qt.ItemDataRole.UserRole, ("multispectral", ch, None))
+                node.setToolTip(0, tr("Doppio clic: il pannello Multispettrale con i passi da fare"))
+                ci.addChild(node)
+                refl = ms.get("reflectance")
+                if refl and (ch.data_dir / refl).exists():
+                    it = QTreeWidgetItem([tr("Ortofoto di riflettanza  ({0} bande)", len(ms.get("reflectance_bands") or []))])
+                    it.setIcon(0, icon("ortho"))
+                    it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "ms:reflectance"))
+                    it.setToolTip(0, tr("Doppio clic per vederla in falso colore (NIR, Red, Green)"))
+                    node.addChild(it)
+                for iname, info in (ms.get("indices") or {}).items():
+                    if (ch.data_dir / info.get("file", "")).exists():
+                        it = QTreeWidgetItem([tr("Indice {0}", iname)])
+                        it.setIcon(0, icon("index"))
+                        it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, f"ms:index:{iname}"))
+                        it.setToolTip(0, info.get("formula") or "")
+                        node.addChild(it)
+                for zname, z in (ms.get("zoning") or {}).items():
+                    if z.get("raster") and (ch.data_dir / z["raster"]).exists():
+                        it = QTreeWidgetItem([tr("Zone {0}  ({1} classi, {2} poligoni)", zname, z.get("classes"),
+                                                 z.get("polygons"))])
+                        it.setIcon(0, icon("zones"))
+                        it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, f"ms:zones:{zname}"))
+                        it.setToolTip(0, tr("Doppio clic per vederle; i poligoni sono in {0}", z.get("file", "")))
+                        node.addChild(it)
+                node.setExpanded(True)
             ci.setExpanded(ch is document.chunk)
         root.setExpanded(True)
 

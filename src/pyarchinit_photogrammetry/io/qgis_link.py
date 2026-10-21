@@ -236,8 +236,40 @@ _BUILD_SCRIPT = r'''
 import json, sys
 from qgis.core import (QgsApplication, QgsCoordinateReferenceSystem, QgsPalLayerSettings, QgsProject,
                        QgsRasterLayer, QgsVectorLayer, QgsVectorLayerSimpleLabeling, QgsTextFormat,
-                       QgsHillshadeRenderer)
+                       QgsHillshadeRenderer, QgsMultiBandColorRenderer, QgsSingleBandPseudoColorRenderer,
+                       QgsColorRampShader, QgsRasterShader, QgsPalettedRasterRenderer, QgsContrastEnhancement)
 from qgis.PyQt.QtGui import QColor
+
+
+def stretched(lyr, band):
+    """A contrast enhancement between the 2nd and 98th percentiles of a band."""
+    prov = lyr.dataProvider()
+    stats = prov.bandStatistics(band)
+    ce = QgsContrastEnhancement(prov.dataType(band))
+    ce.setContrastEnhancementAlgorithm(QgsContrastEnhancement.StretchToMinimumMaximum)
+    lo, hi = prov.cumulativeCut(band, 0.02, 0.98)
+    ce.setMinimumValue(lo if lo is not None else stats.minimumValue)
+    ce.setMaximumValue(hi if hi is not None else stats.maximumValue)
+    return ce
+
+
+def index_renderer(lyr, lo, hi):
+    """A vegetation index: brown-red to dark green between ``lo`` and ``hi``."""
+    stops = [(0.0, "#a50026"), (0.25, "#f46d43"), (0.5, "#fee08b"), (0.75, "#66bd63"), (1.0, "#006837")]
+    ramp = QgsColorRampShader(lo, hi, None, QgsColorRampShader.Interpolated)
+    ramp.setColorRampItemList([QgsColorRampShader.ColorRampItem(lo + t * (hi - lo), QColor(c), f"{lo + t * (hi - lo):.2f}")
+                               for t, c in stops])
+    shader = QgsRasterShader()
+    shader.setRasterShaderFunction(ramp)
+    return QgsSingleBandPseudoColorRenderer(lyr.dataProvider(), 1, shader)
+
+
+def zones_renderer(lyr, n):
+    colours = ["#d6604d", "#f7cb78", "#b2df8a", "#1a9850", "#006d2c", "#4575b4", "#984ea3", "#ff7f00", "#a65628",
+               "#787878"]
+    classes = [QgsPalettedRasterRenderer.Class(k, QColor(colours[(k - 1) % len(colours)]), f"classe {k}")
+               for k in range(1, n + 1)]
+    return QgsPalettedRasterRenderer(lyr.dataProvider(), 1, classes)
 cfg = json.load(open(sys.argv[1], encoding="utf-8"))
 app = QgsApplication([], False)
 app.initQgis()
@@ -287,6 +319,18 @@ for r in cfg["rasters"]:
         lyr.setCrs(crs)
     if r.get("hillshade") and lyr.isValid():
         lyr.setRenderer(QgsHillshadeRenderer(lyr.dataProvider(), 1, 315, 45))
+    elif r.get("bands") and lyr.isValid():  # three bands of a multi-band raster, stretched
+        b = [int(v) for v in r["bands"]][:3]
+        ren = QgsMultiBandColorRenderer(lyr.dataProvider(), b[0], b[1], b[2])
+        ren.setRedContrastEnhancement(stretched(lyr, b[0]))
+        ren.setGreenContrastEnhancement(stretched(lyr, b[1]))
+        ren.setBlueContrastEnhancement(stretched(lyr, b[2]))
+        lyr.setRenderer(ren)
+    elif r.get("ramp") == "index" and lyr.isValid():
+        lo, hi = r.get("limits") or lyr.dataProvider().cumulativeCut(1, 0.02, 0.98)
+        lyr.setRenderer(index_renderer(lyr, float(lo), float(hi)))
+    elif r.get("ramp") == "zones" and lyr.isValid():
+        lyr.setRenderer(zones_renderer(lyr, int(r.get("classes") or 3)))
     if r.get("opacity") is not None:
         lyr.setOpacity(float(r["opacity"]))
     proj.addMapLayer(lyr, False)
@@ -312,11 +356,14 @@ STYLES = {  # table -> (colour, label field, label colour)
 
 def build_project(project_path: str | Path, crs: str, layer_files: dict[str, Path], rasters: list[dict],
                   title: str = "pyarchinit-photogrammetry", refresh_ms: int = 1000,
-                  qgis: QgisInstall | None = None) -> dict:
+                  qgis: QgisInstall | None = None, extra_vectors: list[dict] | None = None) -> dict:
     """Write a QGIS project with the live drawings (``{table: GeoPackage}`` from
-    :func:`export_layers`, redrawn every ``refresh_ms``) and the rasters
-    (``[{"name", "path", "hillshade"?, "opacity"?}]``). Needs QGIS's Python; returns the
-    report of the layers QGIS loaded."""
+    :func:`export_layers`, redrawn every ``refresh_ms``), the rasters
+    (``[{"name", "path", "hillshade"?, "opacity"?, "bands"? (three, 1-based, stretched), "ramp"?
+    ("index" with "limits", or "zones" with "classes")}]``) and other GeoPackage layers
+    (``extra_vectors``: ``[{"name", "path", "table", "geometry", "color", "label"?}]``, the zones
+    of a multispectral index for one). Needs QGIS's Python; returns the report of the layers
+    QGIS loaded."""
     qgis = qgis or find_qgis()
     if qgis is None or not qgis.python:
         raise RuntimeError("QGIS non trovato: installalo (qgis.org) o indica il percorso con PPG_QGIS")
@@ -326,6 +373,9 @@ def build_project(project_path: str | Path, crs: str, layer_files: dict[str, Pat
         color, label, label_color = STYLES[table]
         vectors.append({"name": title_v, "path": str(path), "table": table, "geometry": geometry, "color": color,
                         "label": label, "label_color": label_color})
+    for v in extra_vectors or []:
+        if v.get("path") and Path(v["path"]).exists():
+            vectors.append({"label": "", "label_color": "#202020", **v})
     cfg = {"project": str(project_path), "crs": crs if str(crs).upper().startswith("EPSG:") else "",
            "vectors": vectors, "rasters": [r for r in rasters if r.get("path") and Path(r["path"]).exists()],
            "title": title, "refresh_ms": refresh_ms}

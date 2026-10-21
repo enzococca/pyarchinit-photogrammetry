@@ -37,6 +37,19 @@ Without a project the central area shows the start page: *Nuovo progetto*, *Apri
 progetto...*, *Progetto demo*, the recent projects, and links to the guide, the
 environment diagnosis and the log folder. *File > Pagina iniziale* brings it back.
 
+## The Multispectral pane
+
+The *Multispettrale* tab of the project dock stays open and lists the seven steps in order, each
+with its state and its button: the captures, the alignment, the surface (depth maps, dense cloud
+and DEM in one step with the default choices), the calibration panel, the reflectance orthomosaic
+(*Mostra* in false colour NIR-Red-Green or in true colour), the index (NDVI, NDRE, GNDVI, SAVI, NDWI,
+OSAVI, CIRE, Thermal or an own formula over the band names, computed and shown on its ramp, red to
+green) and the zoning (classes and method, the polygons in a GeoPackage, shown by class with the
+polygons as a layer). The products appear in the project's tree under *Multispettrale* (the
+reflectance orthomosaic, every index, every zoning) and open from there; *Apri in QGIS* makes the
+QGIS project with the reflectance in false colour, the indices with their ramp, the zones as raster
+and as polygons, besides the orthomosaic, the DEM and the drawings.
+
 ## Layout
 
 | Area | Content |
@@ -147,7 +160,7 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   pottery profile from a mesh (vessel or sherd); point-cloud classification; Segment Anything
   2.1 (automatic candidate units, units from clicked points, prompts on photos); IFC export
   (one element per drawn unit, PyArchInit attributes when connected); run a Python script;
-  *Multispettrale*: *Aggiungi riprese multispettrali...* (a folder with one file per band of every
+  *Multispettrale*: the same steps as the *Multispettrale* pane of the project dock (see below); *Aggiungi riprese multispettrali...* (a folder with one file per band of every
   capture: the reference band is aligned, the others ride on it), *Pannello di calibrazione...* (the
   capture of the panel, its box and its reflectance), *Ortofoto di riflettanza...* (a float band per
   band on the DEM), *Indice e zonizzazione...* (NDVI and the other indices or a formula, the zones as

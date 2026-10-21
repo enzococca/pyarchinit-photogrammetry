@@ -632,6 +632,9 @@ def index_raster(chunk: Chunk, name: str, formula: str | None = None) -> Path:
         profile = src.profile.copy()
     out = index_values(formula, bands)
     profile.update(count=1, dtype="float32", nodata=float("nan"))
+    if not profile.get("tiled"):
+        profile.pop("blockxsize", None)
+        profile.pop("blockysize", None)
     target = chunk.data_dir / "multispectral" / f"{name}.tif"
     with rasterio.open(target, "w", **profile) as dst:
         dst.write(out, 1)
@@ -736,7 +739,8 @@ def export_zoning(chunk: Chunk, name: str, path, classes: int = 3, method: str =
         dst.write(cls, 1)
     areas = {k: round(sum(a["area_m2"] for _, a in polys if a["classe"] == k), 2) for k in range(1, classes + 1)}
     summary = {"index": name, "classes": classes, "method": method, "breaks": [round(b, 4) for b in breaks],
-               "polygons": len(polys), "area_m2": areas, "file": str(path)}
+               "polygons": len(polys), "area_m2": areas, "file": str(path),
+               "raster": str((chunk.data_dir / "multispectral" / f"{name}_zone.tif").relative_to(chunk.data_dir))}
     ms.setdefault("zoning", {})[name] = summary
     json.dumps(summary)  # serialisable
     return summary

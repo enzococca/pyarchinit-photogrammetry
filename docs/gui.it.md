@@ -37,6 +37,20 @@ Senza un progetto l'area centrale mostra la pagina iniziale: *Nuovo progetto*, *
 progetto...*, *Progetto demo*, i progetti recenti e i collegamenti alla guida, alla diagnostica
 dell'ambiente e alla cartella dei log. *File > Pagina iniziale* la fa tornare.
 
+## Il pannello Multispettrale
+
+La scheda *Multispettrale* del dock del progetto resta aperta ed elenca i sette passi in ordine,
+ognuno con il suo stato e il suo pulsante: le riprese, l'allineamento, la superficie (mappe di
+profondità, nuvola densa e DEM in un passo solo con le scelte predefinite), il pannello di
+calibrazione, l'ortofoto di riflettanza (*Mostra* in falso colore NIR-Red-Green o in colori veri),
+l'indice (NDVI, NDRE, GNDVI, SAVI, NDWI, OSAVI, CIRE, Thermal o una formula propria sui nomi delle
+bande, calcolato e mostrato sulla sua scala di colori, dal rosso al verde) e la zonizzazione (classi
+e metodo, i poligoni in un GeoPackage, mostrati per classe con i poligoni come layer). I prodotti
+compaiono nell'albero del progetto sotto *Multispettrale* (l'ortofoto di riflettanza, ogni indice,
+ogni zonizzazione) e si aprono da lì; *Apri in QGIS* crea il progetto QGIS con la riflettanza in
+falso colore, gli indici con la loro scala, le zone come raster e come poligoni, oltre a ortofoto,
+DEM e disegni.
+
 ## Disposizione
 
 | Area | Contenuto |
@@ -146,7 +160,7 @@ Dalla riga di comando `ppg update` dice se esiste una versione più nuova e `ppg
   profilo ceramico da una mesh (vaso o frammento); classificazione della nuvola di punti; Segment Anything
   2.1 (unità candidate automatiche, unità da punti cliccati, prompt sulle foto); esportazione IFC
   (un elemento per unità disegnata, attributi PyArchInit se collegato); esecuzione di uno script Python;
-  *Multispettrale*: *Aggiungi riprese multispettrali...* (una cartella con un file per banda di ogni
+  *Multispettrale*: gli stessi passi del pannello *Multispettrale* del dock del progetto (vedi sotto); *Aggiungi riprese multispettrali...* (una cartella con un file per banda di ogni
   scatto: la banda di riferimento viene allineata, le altre le si sovrappongono), *Pannello di
   calibrazione...* (la ripresa del pannello, il suo riquadro e la sua riflettanza), *Ortofoto di
   riflettanza...* (una banda a virgola mobile per banda sul DEM), *Indice e zonizzazione...* (NDVI e gli

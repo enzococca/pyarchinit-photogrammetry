@@ -15,7 +15,9 @@ from PySide6.QtWidgets import (QGraphicsEllipseItem, QGraphicsPathItem, QGraphic
 from .i18n import tr
 
 RELIEF_KINDS = ("svf", "openness_pos", "openness_neg", "slrm", "msrm", "multi_hillshade")  # archaeo.relief
-SCALAR_KINDS = ("dem", "diff", "sigma", "coverage", "slope", "aspect") + RELIEF_KINDS  # one band of values, coloured
+SCALAR_KINDS = ("dem", "diff", "sigma", "coverage", "slope", "aspect", "index", "zones") + RELIEF_KINDS  # one band of values, coloured
+ZONE_COLORS = [(214, 96, 77), (247, 203, 120), (178, 223, 138), (26, 152, 80), (0, 109, 44), (69, 117, 180),
+               (152, 78, 163), (255, 127, 0), (166, 86, 40), (120, 120, 120)]  # the classes of a zoning, 1 = lowest
 US_COLORS = ["#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231", "#911eb4", "#46f0f0", "#f032e6", "#bcf60c",
              "#fabebe", "#008080", "#e6beff", "#9a6324", "#800000", "#aaffc3", "#808000"]
 
@@ -66,6 +68,76 @@ def dem_colors(z: np.ndarray, res: float, limits: tuple[float, float] | None = N
     shade = np.sin(alt) * np.cos(slope) + np.cos(alt) * np.sin(slope) * np.cos(az - aspect)
     shade = np.clip(shade, 0, 1) * 0.7 + 0.3
     rgba[..., :3] = np.clip(col * shade[..., None], 0, 255).astype(np.uint8)
+    rgba[..., 3] = np.where(valid, 255, 0)
+    return rgba
+
+
+def index_limits(z: np.ndarray) -> tuple[float, float]:
+    """The ends of the colour ramp of a vegetation index: the 2nd and 98th percentiles, within
+    -1 and 1 for the normalised indices."""
+    valid = np.isfinite(z)
+    if not valid.any():
+        return -1.0, 1.0
+    lo, hi = np.percentile(z[valid], [2, 98])
+    if lo >= -1.0 and hi <= 1.0:
+        lo, hi = max(lo, -1.0), min(hi, 1.0)
+    return float(lo), float(hi) if hi > lo else float(lo) + 1e-6
+
+
+def index_colors(z: np.ndarray, limits: tuple[float, float] | None = None) -> np.ndarray:
+    """A vegetation index: brown-red where low, pale yellow in the middle, dark green where
+    high (the ramp of the agronomic maps); transparent where no data."""
+    valid = np.isfinite(z)
+    rgba = np.zeros(z.shape + (4,), np.uint8)
+    if not valid.any():
+        return rgba
+    lo, hi = limits if limits is not None else index_limits(z)
+    t = np.clip((np.where(valid, z, lo) - lo) / max(hi - lo, 1e-9), 0, 1)
+    stops = np.array([[0.0, 165, 0, 38], [0.25, 244, 109, 67], [0.5, 254, 224, 139], [0.75, 102, 189, 99],
+                      [1.0, 0, 104, 55]])
+    rgba[..., :3] = np.stack([np.interp(t, stops[:, 0], stops[:, k]) for k in (1, 2, 3)], -1).astype(np.uint8)
+    rgba[..., 3] = np.where(valid, 255, 0)
+    return rgba
+
+
+def zone_colors(c: np.ndarray) -> np.ndarray:
+    """The classes of a zoning (1, 2, ...), one colour each; transparent where no class."""
+    valid = np.isfinite(c) & (c > 0)
+    rgba = np.zeros(c.shape + (4,), np.uint8)
+    if not valid.any():
+        return rgba
+    k = (np.where(valid, c, 1).astype(int) - 1) % len(ZONE_COLORS)
+    rgba[..., :3] = np.asarray(ZONE_COLORS, np.uint8)[k]
+    rgba[..., 3] = np.where(valid, 255, 0)
+    return rgba
+
+
+def band_limits(path, bands: tuple[int, int, int]) -> list[tuple[float, float]]:
+    """The 2nd-98th percentile stretch of three bands of a multi-band raster, read at a reduced
+    size: the same for the whole raster and for the details."""
+    import rasterio
+    from rasterio.enums import Resampling
+
+    out = []
+    with rasterio.open(path) as src:
+        f = max(1, int(np.ceil(max(src.width, src.height) / 2048)))
+        for b in bands:
+            a = src.read(b, out_shape=(max(src.height // f, 1), max(src.width // f, 1)), resampling=Resampling.nearest,
+                         masked=True).astype(np.float64).filled(np.nan)
+            v = a[np.isfinite(a)]
+            lo, hi = (np.percentile(v, [2, 98]) if v.size > 16 else (0.0, 1.0))
+            out.append((float(lo), float(hi) if hi > lo else float(lo) + 1e-6))
+    return out
+
+
+def stretched_rgba(arr: np.ndarray, limits: list[tuple[float, float]]) -> np.ndarray:
+    """Three float bands ``(h, w, 3)`` stretched between their limits into RGBA, transparent
+    where a band has no value."""
+    h, w = arr.shape[:2]
+    rgba = np.zeros((h, w, 4), np.uint8)
+    valid = np.isfinite(arr).all(axis=-1)
+    for k, (lo, hi) in enumerate(limits[:3]):
+        rgba[..., k] = np.clip((np.nan_to_num(arr[..., k], nan=lo) - lo) / max(hi - lo, 1e-9) * 255, 0, 255).astype(np.uint8)
     rgba[..., 3] = np.where(valid, 255, 0)
     return rgba
 
@@ -191,10 +263,13 @@ def relief_colors(z: np.ndarray, kind: str, limits: tuple[float, float] | None =
 
 
 def read_window_rgba(path, kind: str, window: tuple[int, int, int, int], out_shape: tuple[int, int],
-                     dem_range: tuple[float, float] | None = None, diff_limit: float | None = None) -> np.ndarray:
+                     dem_range: tuple[float, float] | None = None, diff_limit: float | None = None,
+                     bands: tuple[int, int, int] | None = None, limits: list | None = None) -> np.ndarray:
     """RGBA ``(h, w, 4)`` of a window ``(col, row, width, height)`` of a raster read at
     ``out_shape`` (the overviews of the file are used when smaller), coloured like the whole
-    raster: orthomosaic bands as they are, DEM tinted and shaded, difference of DEMs diverging."""
+    raster: orthomosaic bands as they are, DEM tinted and shaded, difference of DEMs diverging,
+    a vegetation index on its ramp, a zoning by class, a reflectance orthomosaic by three of its
+    bands (1-based ``bands``) stretched between ``limits``."""
     import rasterio
     from rasterio.enums import Resampling
     from rasterio.windows import Window
@@ -205,7 +280,7 @@ def read_window_rgba(path, kind: str, window: tuple[int, int, int, int], out_sha
         win = Window(col, row, width, height)
         if kind in SCALAR_KINDS:
             z = src.read(1, window=win, out_shape=(h, w), masked=True,
-                         resampling=Resampling.nearest if kind in ("coverage", "aspect") else Resampling.average
+                         resampling=Resampling.nearest if kind in ("coverage", "aspect", "zones") else Resampling.average
                          ).astype(np.float64).filled(np.nan)
             if kind == "slope":
                 return slope_colors(z, diff_limit)[0]
@@ -217,10 +292,19 @@ def read_window_rgba(path, kind: str, window: tuple[int, int, int, int], out_sha
                 return sigma_colors(z, diff_limit)[0]
             if kind == "coverage":
                 return coverage_colors(z)
+            if kind == "index":
+                return index_colors(z, dem_range)
+            if kind == "zones":
+                return zone_colors(z)
             if kind in RELIEF_KINDS:
                 return relief_colors(z, kind, dem_range)
             res = abs(src.transform.a) * width / max(w, 1)
             return dem_colors(z, res, dem_range)
+        if kind == "reflectance":
+            bands = bands or (1, 2, 3)
+            arr = src.read(list(bands), window=win, out_shape=(3, h, w), resampling=Resampling.average,
+                           masked=True).astype(np.float64).filled(np.nan)
+            return stretched_rgba(np.moveaxis(arr, 0, -1), limits or band_limits(path, bands))
         n = min(src.count, 4)
         arr = np.moveaxis(src.read(list(range(1, n + 1)), window=win, out_shape=(n, h, w),
                                    resampling=Resampling.average), 0, -1)
@@ -388,7 +472,7 @@ class RasterView(_ZoomView):
             self.layers_changed.emit()
 
     # ----------------------------------------------------------- data
-    def load(self, path: str | Path, kind: str, max_side: int = 6000) -> None:
+    def load(self, path: str | Path, kind: str, max_side: int = 6000, bands=None) -> None:
         import rasterio
         from rasterio.enums import Resampling
 
@@ -430,9 +514,21 @@ class RasterView(_ZoomView):
                 elif kind in RELIEF_KINDS:  # the stretch of the whole raster, also for the detail
                     self._dem_range = relief_limits(self.z, kind)
                     rgba = relief_colors(self.z, kind, self._dem_range)
+                elif kind == "index":  # a vegetation index: its ramp between the percentiles of the whole raster
+                    self._dem_range = index_limits(self.z)
+                    rgba = index_colors(self.z, self._dem_range)
+                elif kind == "zones":  # the classes of a zoning
+                    rgba = zone_colors(self.z)
                 else:
                     self._dem_range = dem_limits(self.z)
                     rgba = dem_colors(self.z, abs(self.tr.a), self._dem_range)
+            elif kind == "reflectance":  # three bands of a float multi-band raster, stretched
+                self.z = None
+                self._bands = tuple(int(b) for b in (bands or (1, 2, 3)))[:3]
+                self._band_limits = band_limits(path, self._bands)
+                arr = src.read(list(self._bands), out_shape=(3, h, w), resampling=Resampling.average,
+                               masked=True).astype(np.float64).filled(np.nan)
+                rgba = stretched_rgba(np.moveaxis(arr, 0, -1), self._band_limits)
             else:
                 self.z = None
                 n = min(src.count, 4)
@@ -502,7 +598,7 @@ class RasterView(_ZoomView):
         self._detail_key = (window, shape)
         self._detail_gen += 1
         job = (self._detail_gen, str(self.path), self.kind, window, shape, scene, self._dem_range,
-               self.diff_limit)
+               self.diff_limit, getattr(self, "_bands", None), getattr(self, "_band_limits", None))
         if wait:
             self._show_detail(*self._read_detail(job))
         else:
@@ -510,8 +606,9 @@ class RasterView(_ZoomView):
 
     @staticmethod
     def _read_detail(job):
-        gen, path, kind, window, shape, scene, dem_range, diff_limit = job
-        rgba = read_window_rgba(path, kind if kind in SCALAR_KINDS else "ortho", window, shape, dem_range, diff_limit)
+        gen, path, kind, window, shape, scene, dem_range, diff_limit, bands, limits = job
+        kind = kind if kind in SCALAR_KINDS or kind == "reflectance" else "ortho"
+        rgba = read_window_rgba(path, kind, window, shape, dem_range, diff_limit, bands=bands, limits=limits)
         return gen, to_qimage(rgba), scene
 
     def _read_detail_async(self, job) -> None:

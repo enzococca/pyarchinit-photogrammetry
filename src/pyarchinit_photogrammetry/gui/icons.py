@@ -49,6 +49,9 @@ ICONS = {
     "ifc": ("mdi6.office-building-outline", "slate"), "script": ("mdi6.language-python", "blue"),
     "plugin": ("mdi6.puzzle-outline", "violet"),
     "network": ("mdi6.lan-connect", "violet"),
+    "multispectral": ("mdi6.leaf", "green"), "run": ("mdi6.play-circle-outline", "green"),
+    "index": ("mdi6.sprout-outline", "lime"), "zones": ("mdi6.view-dashboard-outline", "amber"),
+    "qgis": ("mdi6.map-search-outline", "lime"),
     # PyArchInit
     "database": ("mdi6.database-outline", "olive"), "publish": ("mdi6.database-arrow-up-outline", "olive"),
     "load": ("mdi6.database-arrow-down-outline", "olive"), "refresh": ("mdi6.refresh", "grey"),

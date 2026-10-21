@@ -279,6 +279,19 @@ class MainWindow(QMainWindow):
         self.proxies_pane.quote_requested.connect(self.quote_proxies)
         self.proxies_pane.us_requested.connect(self._us_form_from_proxy)
         self.proxies_pane.delete_requested.connect(self.delete_proxies)
+        from .multispectral_pane import MultispectralPane
+
+        self.ms_pane = MultispectralPane()
+        self.left_tabs.addTab(self.ms_pane, icon("multispectral"), tr("Multispettrale"))
+        self.ms_pane.add_requested.connect(self.ms_add)
+        self.ms_pane.align_requested.connect(self.align_photos)
+        self.ms_pane.surface_requested.connect(self.ms_build_surface)
+        self.ms_pane.panel_requested.connect(self.ms_panel)
+        self.ms_pane.reflectance_requested.connect(self.ms_reflectance)
+        self.ms_pane.show_requested.connect(self.ms_show)
+        self.ms_pane.index_requested.connect(self.ms_compute_index)
+        self.ms_pane.zoning_requested.connect(self.ms_zoning)
+        self.ms_pane.qgis_requested.connect(self.open_in_qgis)
         self.sections_pane = SectionsPane()
         self.sections_pane.zoom_requested.connect(self._zoom_section)
         self.sections_pane.publish_requested.connect(self._publish_section)
@@ -933,6 +946,7 @@ class MainWindow(QMainWindow):
         step(0.95, tr("Sezioni e disegni"))
         self._load_sections()
         self.proxies_pane.set_proxies(self.chunk.meta.get("proxies", []) if self.chunk else [])
+        self.ms_pane.set_state(self.chunk)
         if self.history is None:
             self.history = UndoHistory(self._undo_state, self._undo_apply, lambda: self.chunk,
                                        on_change=self._undo_actions)
@@ -963,10 +977,12 @@ class MainWindow(QMainWindow):
         step(0.6, tr("Ortofoto e DEM"))
         self._load_raster()
         self._update_stack()
+        self.ms_pane.set_state(self.chunk)
 
-    def _load_raster(self, kind: str | None = None, path=None) -> None:
+    def _load_raster(self, kind: str | None = None, path=None, bands=None) -> None:
         """The orthomosaic or the DEM of the chunk in the raster view (``path``: another file of
-        that kind, e.g. a kept version or a difference of DEMs) with the drawings on top."""
+        that kind, e.g. a kept version or a difference of DEMs; ``bands``: the three to show of a
+        reflectance orthomosaic) with the drawings on top."""
         ch = self.chunk
         kind = kind or ("ortho" if ch is not None and ch.orthomosaic_path else "dem")
         if path is None:
@@ -976,7 +992,7 @@ class MainWindow(QMainWindow):
             self.ortho_view.tr = None
             self.ortho_view.scene().addText(tr("Costruisci il DEM o l'ortofoto per vederli qui"))
             return
-        self.ortho_view.load(path, kind)
+        self.ortho_view.load(path, kind, bands=bands)
         if kind == "ortho" and ch.dem_path:
             self.ortho_view.set_dem(ch.dem_path)
         self._raster_version = None
@@ -1201,6 +1217,142 @@ class MainWindow(QMainWindow):
             return
         self.run_task("Ortofoto di riflettanza", lambda p: ms.build_reflectance(self.chunk, resolution=v["resolution"], progress=p),
                       lambda path: self._info(tr("Ortofoto di riflettanza"), str(path)))
+
+    def ms_build_surface(self) -> None:
+        """Depth maps, dense cloud and DEM in one step with the default choices: what the
+        reflectance orthomosaic needs, for the multispectral pane."""
+        if not self._need_chunk(aligned=True):
+            return
+        ch = self.chunk
+
+        def job(p):
+            if not (ch.data_dir / "dense" / "stereo" / "depth_maps").exists():
+                ch.build_depth_maps(quality="medium", progress=p.sub(0.0, 0.6))
+            if not ch.product_path("point_cloud"):
+                ch.build_point_cloud(progress=p.sub(0.6, 0.25))
+            ch.build_dem(progress=p.sub(0.85, 0.15))
+            return ch.dem_path
+
+        self.run_task("Superficie per il multispettrale", job,
+                      lambda path: self._info(tr("Superficie"), tr("DEM pronto: {0}", path)))
+
+    def _ms_meta(self) -> dict:
+        return (self.chunk.meta.get("multispectral") if self.chunk is not None else None) or {}
+
+    def ms_show(self, kind: str, payload=None) -> None:
+        """A multispectral product in the raster view: the reflectance orthomosaic by three of
+        its bands (names, false colour by default), an index on its ramp, the zones by class
+        (and their polygons as a layer)."""
+        ms = self._ms_meta()
+        ch = self.chunk
+        if kind == "reflectance":
+            rel = ms.get("reflectance")
+            if not rel:
+                self._warn("Costruisci prima l'ortofoto di riflettanza.")
+                return
+            names = list(ms.get("reflectance_bands") or [])
+            wanted = list(payload) if payload else ["NIR", "Red", "Green"]
+            idx = [names.index(b) + 1 for b in wanted if b in names]
+            if len(idx) < 3:
+                idx = (idx + [1, 2, 3])[:3]
+            self._load_raster("reflectance", ch.data_dir / rel, bands=tuple(idx))
+            self.statusBar().showMessage(tr("Riflettanza: bande {0}", ", ".join(names[i - 1] for i in idx)))
+        elif kind == "index":
+            info = (ms.get("indices") or {}).get(payload or "")
+            if not info:
+                self._warn("Calcola prima l'indice.")
+                return
+            self._load_raster("index", ch.data_dir / info["file"])
+            lo, hi = self.ortho_view._dem_range or (-1.0, 1.0)
+            self.statusBar().showMessage(tr("{0}: colori da {1} (rosso) a {2} (verde)", payload, f"{lo:.2f}", f"{hi:.2f}"))
+        elif kind == "zones":
+            z = (ms.get("zoning") or {}).get(payload or "")
+            if not z or not z.get("raster"):
+                self._warn("Fai prima la zonizzazione.")
+                return
+            self._load_raster("zones", ch.data_dir / z["raster"])
+            self._ms_zone_layer(payload, z)
+        else:
+            return
+        self.show_view(self.ortho_view)
+
+    def _ms_zone_layer(self, name: str, z: dict, limit: int = 3000) -> None:
+        """The polygons of a zoning as a layer of the raster view (up to ``limit``, the largest)."""
+        from ..io import gpkg
+
+        layer = tr("Zone {0}", name)
+        if layer in self.ortho_view.layers:
+            return
+        path = Path(z.get("file", ""))
+        if not path.exists():
+            return
+        try:
+            rows = gpkg.read_table(path, "zone")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("zone %s: %s", path, exc)
+            return
+        rows = sorted(rows, key=lambda r: -(r[1].get("area_m2") or 0))[:limit]
+        from .image_views import ZONE_COLORS
+
+        with self.ortho_view.batch():
+            for geom, attrs in rows:
+                polys = list(geom.geoms) if geom.geom_type == "MultiPolygon" else [geom]
+                for poly in polys:
+                    rgb = ZONE_COLORS[(int(attrs.get("classe") or 1) - 1) % len(ZONE_COLORS)]
+                    self.ortho_view.add_polygon(list(poly.exterior.coords), label="", color="#%02x%02x%02x" % rgb,
+                                                fill_alpha=0, layer=layer, attrs=dict(attrs))
+        if len(rows) == limit:
+            self.log_pane.info(tr("Zone {0}: nel layer i {1} poligoni più grandi; tutti sono nel GeoPackage {2}",
+                                  name, limit, path))
+
+    def ms_compute_index(self, name: str, formula: str = "") -> None:
+        """An index from the reflectance orthomosaic (a known one, or a formula asked for), then shown."""
+        if not self._need_chunk():
+            return
+        from ..engine import multispectral as ms_mod
+
+        if not self._ms_meta().get("reflectance"):
+            self._warn("Costruisci prima l'ortofoto di riflettanza.")
+            return
+        if name == "formula":
+            text, ok = QInputDialog.getText(self, tr("Formula dell'indice"),
+                                            tr("Formula sui nomi delle bande ({0}):", ", ".join(self._ms_meta().get("reflectance_bands") or [])),
+                                            text="(NIR - Red) / (NIR + Red)")
+            if not ok or not text.strip():
+                return
+            formula = text.strip()
+            label, ok = QInputDialog.getText(self, tr("Nome dell'indice"), tr("Nome del raster (senza spazi):"), text="Indice")
+            if not ok or not label.strip():
+                return
+            name = "".join(c for c in label.strip() if c.isalnum() or c in "_-") or "Indice"
+        formula = formula or None
+        self.run_task(tr("Indice {0}", name), lambda p: ms_mod.index_raster(self.chunk, name, formula),
+                      lambda path: self.ms_show("index", name))
+
+    def ms_zoning(self, name: str, classes: int = 3, method: str = "quantiles") -> None:
+        """The zoning of an index: polygons in a GeoPackage beside the project, the class raster
+        shown with the polygons as a layer."""
+        if not self._need_chunk():
+            return
+        from ..engine import multispectral as ms_mod
+
+        if name == "formula" or name not in (self._ms_meta().get("indices") or {}):
+            self._warn("Calcola prima l'indice scelto.")
+            return
+        base = Path(self.doc.path).with_name(f"{Path(self.doc.path).stem}_{name}_zone.gpkg") if self.doc.path \
+            else self.chunk.data_dir / "multispectral" / f"{name}_zone.gpkg"
+        path, _f = QFileDialog.getSaveFileName(self, tr("GeoPackage delle zone"), str(base), "GeoPackage (*.gpkg)")
+        if not path:
+            return
+
+        def done(summary):
+            self.ortho_view.remove_layer(tr("Zone {0}", name)) if tr("Zone {0}", name) in self.ortho_view.layers else None
+            self.ms_show("zones", name)
+            self._info(tr("Zonizzazione"), tr("{0}: {1} poligoni, soglie {2}, in {3}", name, summary["polygons"],
+                                               ", ".join(f"{b:.3g}" for b in summary["breaks"]), path))
+
+        self.run_task(tr("Zonizzazione {0}", name),
+                      lambda p: ms_mod.export_zoning(self.chunk, name, path, classes=int(classes), method=method), done)
 
     def ms_index(self) -> None:
         if not self._need_chunk():
@@ -4571,8 +4723,13 @@ class MainWindow(QMainWindow):
                 self.show_coverage_map()
             elif payload in ("dem", "orthomosaic"):
                 self._show_raster("dem" if payload == "dem" else "ortho")
+            elif isinstance(payload, str) and payload.startswith("ms:"):
+                parts = payload.split(":", 2)
+                self.ms_show(parts[1], parts[2] if len(parts) > 2 else None)
             else:
                 self._show_model(payload)
+        elif kind == "multispectral":
+            self._show_pane(self.left_tabs, self.ms_pane)
         elif kind == "version":
             self.show_version(*payload)
         elif kind == "elevation":
@@ -6229,10 +6386,29 @@ class MainWindow(QMainWindow):
             rasters.append({"name": "DEM (ombreggiato)", "path": str(ch.dem_path), "hillshade": True,
                             "opacity": 0.6, "hidden": True})
             rasters.append({"name": "DEM", "path": str(ch.dem_path), "hidden": True})
+        extra_vectors = []
+        ms = self._ms_meta()
+        if ch is not None and ms.get("reflectance") and (ch.data_dir / ms["reflectance"]).exists():
+            names = list(ms.get("reflectance_bands") or [])
+            idx = [names.index(b) + 1 for b in ("NIR", "Red", "Green") if b in names]
+            rasters.append({"name": "Riflettanza (falso colore)", "path": str(ch.data_dir / ms["reflectance"]),
+                            "bands": idx if len(idx) == 3 else [1, 2, 3], "hidden": True})
+            for iname, info in (ms.get("indices") or {}).items():
+                p_i = ch.data_dir / info.get("file", "")
+                if p_i.exists():
+                    rasters.append({"name": f"Indice {iname}", "path": str(p_i), "ramp": "index", "hidden": True})
+            for zname, z in (ms.get("zoning") or {}).items():
+                if z.get("raster") and (ch.data_dir / z["raster"]).exists():
+                    rasters.append({"name": f"Zone {zname} (raster)", "path": str(ch.data_dir / z["raster"]),
+                                    "ramp": "zones", "classes": z.get("classes", 3), "hidden": True})
+                if z.get("file") and Path(z["file"]).exists():
+                    extra_vectors.append({"name": f"Zone {zname}", "path": z["file"], "table": "zone",
+                                          "geometry": "POLYGON", "color": "#1a9850", "label": "classe"})
 
         def job(p):
             p(0.2, "Creazione del progetto QGIS")
-            rep = qgis_link.build_project(project, ch.crs if ch else "", files, rasters, title=name, qgis=q)
+            rep = qgis_link.build_project(project, ch.crs if ch else "", files, rasters, title=name, qgis=q,
+                                          extra_vectors=extra_vectors)
             qgis_link.open_in_qgis(project, q)
             return rep
 
