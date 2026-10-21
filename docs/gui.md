@@ -147,6 +147,10 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   pottery profile from a mesh (vessel or sherd); point-cloud classification; Segment Anything
   2.1 (automatic candidate units, units from clicked points, prompts on photos); IFC export
   (one element per drawn unit, PyArchInit attributes when connected); run a Python script;
+  *Nodi di rete...*: the other computers working on this project from the shared project folder
+  (the folder to give to `ppg node` on each of them, the nodes present with their cores and GPUs,
+  the switch that hands them the key points and the PatchMatch depth maps; `ppg remote` for a
+  machine over SSH: see the API page, *Other computers*);
   *Plugin...*: the plugins installed and those of the plugin repository (install, enable, disable,
   remove; their actions go in the menu *Plugin*, their formats in *File > Esporta*: see
   [plugins.md](plugins.md));

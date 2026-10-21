@@ -1708,6 +1708,98 @@ def plugin_command(ctx: typer.Context, name: Optional[str] = typer.Argument(None
     raise typer.Exit(result if isinstance(result, int) else 0)
 
 
+@app.command()
+def node(folder: Path, once: bool = typer.Option(False, help="leave when no unit of work is left"),
+         gpu: Optional[str] = typer.Option(None, help="the GPUs for the depth maps: auto, all, off, an adapter"),
+         map: list[str] = typer.Option([], "--map", help="a path of the main computer and what it is here, "  # noqa: A002
+                                                        "SRC=DST (the project folder is mapped by itself)")):
+    """Work for a project of another computer: FOLDER is its <project>.ppg.files folder on the
+    shared disk. Key points and PatchMatch depth maps come here in units of a few photos."""
+    from .engine import nodes
+
+    folder = Path(folder)
+    if folder.name == NODES_FOLDER_NAME:
+        folder = folder.parent
+    if not folder.is_dir():
+        raise typer.BadParameter(f"{folder} is not a folder")
+    typer.echo(f"node {nodes.host_name()} on {folder}" + (" (once)" if once else " (Ctrl+C to stop)"))
+    try:
+        n = nodes.serve(folder, once=once, gpu=gpu, maps=map, log=typer.echo)
+    except KeyboardInterrupt:  # pragma: no cover - the user
+        n = 0
+        typer.echo("stopped")
+    typer.echo(f"{n} units done")
+
+
+NODES_FOLDER_NAME = "nodes"
+
+
+@app.command()
+def remote(target: str, project: Path,
+           photos: Optional[Path] = typer.Option(None, help="the folder of the photos to copy there too (the "
+                                                            "key points need them; the depth maps do not)"),
+           gpu: Optional[str] = typer.Option(None, help="the GPUs of the other computer: auto, all, off"),
+           every: float = typer.Option(10.0, help="seconds between the copies back and forth"),
+           dry_run: bool = typer.Option(False, help="print the commands instead of running them")):
+    """A node on another computer over SSH (rsync and ssh of the system, your keys): the project
+    folder, and the photos if given, go to TARGET (user@host:/folder); the node runs there while
+    this command copies the units of work there and their results back, until the node leaves.
+    Run it beside the step (ppg align, ppg dense, the window) that hands out the work."""
+    import shlex
+    import subprocess
+    import time as _time
+
+    from .engine import nodes
+
+    host, _, remote_dir = target.partition(":")
+    if not host or not remote_dir:
+        raise typer.BadParameter("TARGET is user@host:/folder")
+    project = Path(project).resolve()
+    files_dir = project.parent / (project.name + ".files")
+    if not files_dir.is_dir():
+        raise typer.BadParameter(f"{files_dir} does not exist: open the project once")
+    nodes.folder(files_dir)
+    remote_dir = remote_dir.rstrip("/")
+    remote_files = f"{remote_dir}/{files_dir.name}"
+    maps = []
+    if photos is not None:
+        photos = Path(photos).resolve()
+        maps.append(f"{photos}={remote_dir}/{photos.name}")
+
+    def run(cmd, background=False):
+        typer.echo("$ " + " ".join(shlex.quote(c) for c in cmd))
+        if dry_run:
+            return None
+        if background:
+            return subprocess.Popen(cmd, close_fds=False)
+        return subprocess.run(cmd, check=False, close_fds=False)
+
+    rsync = ["/usr/bin/rsync", "-a", "--exclude", "nodes/taken", "--exclude", "nodes/hello"]
+    run(["/usr/bin/ssh", host, f"mkdir -p {shlex.quote(remote_dir)}"])
+    run(rsync + [str(project), f"{host}:{remote_dir}/"])
+    run(rsync + ["--delete", str(files_dir) + "/", f"{host}:{remote_files}/"])
+    if photos is not None:
+        run(rsync + [str(photos) + "/", f"{host}:{remote_dir}/{photos.name}/"])
+    node_cmd = f"ppg node {shlex.quote(remote_files)} --once" + (f" --gpu {shlex.quote(gpu)}" if gpu else "") \
+        + "".join(f" --map {shlex.quote(m)}" for m in maps)
+    proc = run(["/usr/bin/ssh", host, node_cmd], background=True)
+    if dry_run:
+        return
+    try:
+        while proc.poll() is None:
+            _time.sleep(every)
+            run(rsync + [str(files_dir) + "/nodes/todo/", f"{host}:{remote_files}/nodes/todo/"])
+            run(rsync + [str(files_dir) + "/", f"{host}:{remote_files}/", "--include", "*/", "--include", "*.bin",
+                         "--include", "*.txt", "--exclude", "*"])
+            run(rsync + [f"{host}:{remote_files}/", str(files_dir) + "/", "--include", "nodes/", "--include", "nodes/done/",
+                         "--include", "nodes/done/*", "--include", "nodes/failed/", "--include", "nodes/failed/*",
+                         "--include", "*/", "--include", "*.geometric.bin", "--exclude", "*"])
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+    typer.echo("the remote node left")
+
+
 def main():  # pragma: no cover - console entry point
     app()
 

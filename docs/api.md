@@ -92,6 +92,23 @@ The photos form a queue served by a worker per GPU and one for the CPU kernel (w
 core), so GPUs and CPU share them by their speed; a photo a GPU cannot do goes to the CPU kernel.
 `meta["dense"]["gpu"]` names the GPUs used.
 
+### Other computers
+
+The work that splits by photo goes to the other computers of the network through the project
+folder (`engine.nodes`): on each of them, with the project folder mounted, `ppg node
+<project>.ppg.files` takes units of work from `nodes/todo` (a few photos each, taken by an atomic
+rename, given back when a node dies) and leaves the results in `nodes/done`. Key points: the node
+runs COLMAP's extractor into a database of its own and sends keypoints and descriptors back, the
+main program writes them into its database, so the alignment sees no difference. PatchMatch depth
+maps: the node opens the project read-only on the shared folder and computes its units in the
+workspace there, with its GPUs and CPU. The main program is a node too (it takes what nobody
+took), so with no node present nothing changes; `PPG_NODES=0` keeps everything here. A node maps
+the main program's paths to its own (the project folder by itself, `--map SRC=DST` for the
+photos). Over SSH, `ppg remote user@host:/folder project.ppg [--photos ...]` copies the project
+folder (and the photos) there with rsync, starts the node and copies units and results back and
+forth while a step runs here. `meta["sfm"]["nodes"]` and `meta["dense"]["nodes"]` name the
+computers that took part. The alignment itself stays on one machine.
+
 ### Mappers
 
 `mapper` is `incremental` (one photo after the other, COLMAP), `global` (all the cameras at once,

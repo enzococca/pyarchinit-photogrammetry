@@ -304,9 +304,10 @@ class _PhotoCache:
     """Decoded photos shared by the tile workers (least recently used ones dropped), with the
     colour correction applied (:class:`.colour.Correction`) when there is one."""
 
-    def __init__(self, max_items: int, correction=None):
+    def __init__(self, max_items: int, correction=None, loader=None):
         self.max_items = max_items
         self.correction = correction or None
+        self.loader = loader  # the image of a camera (any dtype and channels); the photo itself by default
         self._items: OrderedDict[int, np.ndarray] = OrderedDict()
         self._lock = threading.Lock()
 
@@ -316,7 +317,7 @@ class _PhotoCache:
             if img is not None:
                 self._items.move_to_end(cam.key)
                 return img
-        img = read_photo(cam)  # decoded (and corrected) outside the lock: several photos at once
+        img = self.loader(cam) if self.loader is not None else read_photo(cam)  # decoded outside the lock
         if self.correction is not None:
             img = self.correction.correct(cam, img)
         with self._lock:
@@ -820,15 +821,25 @@ def _tile(ctx, r0: int, c0: int):
             colors = rgb[rr, cc]
             got = got | filled[rr, cc]
     sel = got & in_core
-    out = np.zeros((4, th, tw), np.uint8)
-    bgr = np.clip(colors[sel], 0, 255).astype(np.uint8)
     r_out, c_out = rr[sel] - m, cc[sel] - m
-    out[0, r_out, c_out] = bgr[:, 2]
-    out[1, r_out, c_out] = bgr[:, 1]
-    out[2, r_out, c_out] = bgr[:, 0]
-    out[3, r_out, c_out] = 255
-    if ctx.hidden is not None:
-        out[:, ctx.hidden.tile(r0, c0, th, tw)] = 0
+    if getattr(ctx, "float_output", False):  # the channels as they are (reflectance bands), NaN where nothing
+        out = np.full((4, th, tw), np.nan, np.float32)
+        vals = colors[sel].astype(np.float32)
+        out[0, r_out, c_out] = vals[:, 0]
+        out[1, r_out, c_out] = vals[:, 1]
+        out[2, r_out, c_out] = vals[:, 2]
+        out[3, r_out, c_out] = 1.0
+        if ctx.hidden is not None:
+            out[:, ctx.hidden.tile(r0, c0, th, tw)] = np.nan
+    else:
+        out = np.zeros((4, th, tw), np.uint8)
+        bgr = np.clip(colors[sel], 0, 255).astype(np.uint8)
+        out[0, r_out, c_out] = bgr[:, 2]
+        out[1, r_out, c_out] = bgr[:, 1]
+        out[2, r_out, c_out] = bgr[:, 0]
+        out[3, r_out, c_out] = 255
+        if ctx.hidden is not None:
+            out[:, ctx.hidden.tile(r0, c0, th, tw)] = 0
     if redo is None:
         return out
     todo_core, valid_core = todo[core], valid[core]
@@ -954,8 +965,10 @@ def _blend(ctx, pts, rr, cc, shape, colors, got, keys, seen, group, tcams, cams_
 def _context(chunk: Chunk, resolution: float, cams, surface, raycaster, blending: str = "mosaic",
              max_angle: float = 70.0, max_cameras: int = 8, workers: int | None = None, hide_classes=None,
              patches=None, tile: int = 512, lock=None, blend_sigma: float = BLEND_SIGMA, correction=None,
-             ghosting: bool = False, fill_holes: bool = False):
-    """Everything a tile needs: ``surface`` gives the grid (its ``origin`` and ``shape``)."""
+             ghosting: bool = False, fill_holes: bool = False, source=None, float_output: bool = False):
+    """Everything a tile needs: ``surface`` gives the grid (its ``origin`` and ``shape``). ``source``:
+    the image of a camera instead of its photo (three channels of any dtype, e.g. reflectance
+    bands); ``float_output``: tiles of float32 values as they are, NaN where nothing."""
     if blending not in BLENDINGS:
         raise ValueError(f"blending: one of {', '.join(BLENDINGS)}")
     ctx = _Context()
@@ -978,7 +991,8 @@ def _context(chunk: Chunk, resolution: float, cams, surface, raycaster, blending
     ctx.up_int = up_int / np.linalg.norm(up_int)
     ctx.footprints = _Footprints(chunk, ctx.cams)
     ctx.workers = int(workers or max(1, min(8, (os.cpu_count() or 4) - 2)))
-    ctx.cache = _PhotoCache(max(12, 3 * ctx.workers), correction)
+    ctx.cache = _PhotoCache(max(12, 3 * ctx.workers), correction, loader=source)
+    ctx.float_output = bool(float_output)
     ctx.hidden = _ClassGrid(chunk, ctx.origin, resolution, hide_classes) if hide_classes else None
     from .patches import prepare
 
@@ -1004,7 +1018,7 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
                       skip_unreadable: bool = False, workers: int | None = None, max_cameras: int = 8,
                       max_angle: float = 70.0, patches=None, blend_sigma: float = BLEND_SIGMA,
                       colour_correction: bool | None = None, ghosting: bool = False,
-                      fill_holes: bool = False) -> Path:
+                      fill_holes: bool = False, source=None, out_path: Path | None = None) -> Path:
     """``hide_classes``: classes of the dense cloud left out of the orthomosaic (transparent
     where they are the visible surface: excavation tools, people, vegetation). Photos that
     cannot be read (e.g. kept online only by Dropbox) stop the step
@@ -1034,14 +1048,18 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     old = dict(chunk.meta.get("orthomosaic") or {})
     if patches is None:
         patches = old.get("patches") or []
-    correction = correction_for(chunk, colour_correction, progress.sub(0.005, 0.005))
+    if source is not None:  # another image of every camera (reflectance bands): its values as they are
+        correction, ghosting, fill_holes = None, False, False
+    else:
+        correction = correction_for(chunk, colour_correction, progress.sub(0.005, 0.005))
     progress(0.01, "Surface for the orthomosaic")
     raycaster = raycaster_for_chunk(chunk)
     lock = threading.Lock()
     surf = _surface(chunk, resolution, surface, raycaster, lock)
     hidden_classes = sorted({int(c) for c in hide_classes}) if hide_classes else None
     ctx = _context(chunk, resolution, cams, surf, raycaster, blending, max_angle, max_cameras, workers,
-                   hidden_classes, patches, tile, lock, blend_sigma, correction, ghosting, fill_holes)
+                   hidden_classes, patches, tile, lock, blend_sigma, correction, ghosting, fill_holes,
+                   source=source, float_output=source is not None)
     h, w = ctx.shape
     progress(0.02, f"Orthomosaic {w}x{h} px at {resolution:.4g} m/px from {len(cams)} photos"
              + (f", {len(ctx.patches)} patches" if ctx.patches else ""))
@@ -1049,18 +1067,25 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     profile = {"driver": "GTiff", "height": h, "width": w, "count": 4, "dtype": "uint8",
                "transform": from_origin(ctx.origin[0], ctx.origin[1], resolution, resolution),
                "compress": "deflate", "photometric": "RGB", "BIGTIFF": "IF_SAFER"}
+    if source is not None:
+        profile.update(dtype="float32", nodata=float("nan"))
+        profile.pop("photometric")
     if h >= 256 and w >= 256:
         profile.update(tiled=True, blockxsize=256, blockysize=256)
     if not crs_mod.is_local(chunk.crs):
         profile["crs"] = crs_mod.to_pyproj(chunk.crs).to_wkt()
-    out_path = chunk.data_dir / "orthomosaic.tif"
-    tmp = out_path.with_name("orthomosaic.tmp.tif")
+    product = out_path is None
+    out_path = Path(out_path) if out_path is not None else chunk.data_dir / "orthomosaic.tif"
+    tmp = out_path.with_name(out_path.stem + ".tmp.tif")
     try:
         _write_tiles(ctx, tmp, profile, tiles, ctx.workers, progress)
     except BaseException:
         tmp.unlink(missing_ok=True)  # cancelled or failed: no half-written file left behind
         raise
     tmp.replace(out_path)
+    if not product:
+        progress(1.0, f"Orthomosaic {w}x{h} px")
+        return out_path
     chunk._set_product("orthomosaic", out_path)
     chunk.meta["orthomosaic"] = {"resolution": resolution, "surface": surface, "blending": blending,
                                  "blend_sigma": float(ctx.blend_sigma), "colour_correction": correction is not None,
@@ -1114,7 +1139,8 @@ def _write_tiles(ctx, tmp: Path, profile: dict, tiles, workers: int, progress: P
 
     h, w = ctx.shape
     with rasterio.open(tmp, "w", **profile) as dst:
-        dst.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
+        if profile.get("dtype") == "uint8":
+            dst.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
         _run_tiles(ctx, tiles, workers, progress,
                    lambda r0, c0, block: dst.write(block, window=Window(c0, r0, block.shape[2], block.shape[1])))
         factors = [f for f in (2, 4, 8, 16, 32, 64, 128) if min(h, w) // f >= 64]

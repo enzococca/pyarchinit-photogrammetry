@@ -93,6 +93,24 @@ invio. Le foto formano una coda servita da un lavoratore per GPU e uno per il ke
 tutti i core), così GPU e CPU se le dividono secondo la loro velocità; una foto che una GPU non
 riesce a fare passa al kernel CPU. `meta["dense"]["gpu"]` dice quali GPU sono state usate.
 
+### Altri computer
+
+Il lavoro che si divide per foto va agli altri computer della rete attraverso la cartella del
+progetto (`engine.nodes`): su ognuno, con la cartella del progetto montata, `ppg node
+<progetto>.ppg.files` prende unità di lavoro da `nodes/todo` (poche foto ciascuna, prese con una
+rinomina atomica, restituite se un nodo muore) e lascia i risultati in `nodes/done`. Punti chiave:
+il nodo fa girare l'estrattore di COLMAP in un database suo e rimanda punti e descrittori, il
+programma principale li scrive nel proprio database, così l'allineamento non vede differenze.
+Mappe di profondità PatchMatch: il nodo apre il progetto in sola lettura sulla cartella condivisa
+e calcola le sue unità nello spazio di lavoro lì, con le sue GPU e la sua CPU. Il programma
+principale è un nodo anche lui (prende quello che nessuno ha preso), quindi senza nodi non cambia
+niente; `PPG_NODES=0` tiene tutto qui. Un nodo mappa i percorsi del programma principale sui
+propri (la cartella del progetto da sola, `--map SRC=DST` per le foto). Via SSH, `ppg remote
+utente@host:/cartella progetto.ppg [--photos ...]` copia lì la cartella del progetto (e le foto)
+con rsync, avvia il nodo e copia avanti e indietro unità e risultati mentre un passo gira qui.
+`meta["sfm"]["nodes"]` e `meta["dense"]["nodes"]` dicono quali computer hanno partecipato.
+L'allineamento in sé resta su una macchina sola.
+
 ### Mapper
 
 `mapper` è `incremental` (una foto dopo l'altra, COLMAP), `global` (tutte le camere insieme,

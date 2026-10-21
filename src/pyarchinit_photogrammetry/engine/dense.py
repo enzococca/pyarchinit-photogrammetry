@@ -600,45 +600,91 @@ def _patchmatch_depth_maps(chunk: Chunk, ws: Path, filter_mode: str, progress: P
     if kernel is None:
         raise RuntimeError("the PatchMatch depth maps need the native core (pyarchinit-photogrammetry-core with "
                            "patchmatch_depth): use the CPU backend")
-    # the GPUs (core 0.3, wgpu) share the photos with the CPU kernel: one queue of photos, a worker
-    # per GPU and one for the CPU (its kernel uses every core), each as fast as it goes
-    gpu_kernel = _native.kernel("gpu_patchmatch_depth")
-    devices: list[tuple[int, str]] = []
-    for d in (_native.gpu_devices(gpu) if gpu_kernel is not None else []):
-        try:
-            devices.append((d, _native.kernel("gpu_device_name")(d)))
-        except Exception as exc:  # noqa: BLE001 - a GPU that does not work: the others, or the CPU alone
-            log.warning("GPU %s unavailable for PatchMatch (%s)", d, exc)
-    chunk.meta.setdefault("dense", {})["gpu"] = ", ".join(n for _, n in devices) or None
-    # in a survey from the air a plane needs two photos seeing its window (core 0.2.1): with one,
-    # windows at the borders of the block matched metres off, and the fused points of three such
-    # maps made pits and a step in the DEM where the dense cloud ends (Tell Sultan). Close up, the
-    # pixels at the frame borders that a single partner sees are as good as the others
-    views = {"min_views": PATCHMATCH_MIN_VIEWS if aerial_survey(chunk) else 1} if (_native.api() or 0) >= 4 else {}
-    rec = _read_workspace_model(ws)
-    neigh = _neighbors(rec, max_neighbors=PATCHMATCH_PARTNERS, wide=_panorama_images(chunk, rec))
-    max_cost = PATCHMATCH_COST.get(filter_mode, PATCHMATCH_COST["moderate"])
-    min_agree, tol, _ = FILTER_MODES.get(filter_mode, FILTER_MODES["moderate"])
-    (ws / "stereo" / "depth_maps").mkdir(parents=True, exist_ok=True)
-    (ws / "stereo" / "normal_maps").mkdir(parents=True, exist_ok=True)
-    gray = _GrayCache(ws, rec, (2 * PATCHMATCH_PARTNERS + 2) * (1 + len(devices)))
-    masked = _masked_cameras(chunk)
-    from .region import depth_mask, get_region
+    job = _PatchMatchJob(chunk, ws, filter_mode, iterations, init)
+    ids = list(job.rec.images)
+    from . import nodes
 
-    region = get_region(chunk)
-    ids = list(rec.images)
+    files_dir = chunk.data_dir.parent
+    others = nodes.wanted(files_dir)
+    if others and len(ids) >= 2 * nodes.DEPTH_UNIT_PHOTOS:
+        # the photos in units for the nodes present and for this program (its own worker)
+        project = files_dir.parent / files_dir.name[:-len(".files")] if files_dir.name.endswith(".files") else None
+        units = [{"kind": "depth_maps", "project": str(project), "chunk_dir": chunk.data_dir.name, "workspace": str(ws),
+                  "filter_mode": filter_mode, "iterations": int(iterations), "init": bool(init),
+                  "image_ids": [int(i) for i in ids[k:k + nodes.DEPTH_UNIT_PHOTOS]]}
+                 for k in range(0, len(ids), nodes.DEPTH_UNIT_PHOTOS)]
+        progress(0.0, f"PatchMatch depth maps: {len(units)} units of work shared with {len(others)} other computer(s)")
+        results = nodes.run(files_dir, units, progress.sub(0.0, 0.98), "units of depth maps", gpu=gpu,
+                            project_path=project, local=lambda payload: {"names": job.run(payload["image_ids"], gpu=gpu)})
+        names = [n for r in results for n in r.get("result", {}).get("names", [])]
+        chunk.meta["dense"]["nodes"] = sorted({r.get("by") for r in results if r.get("by")})
+        nodes.forget(files_dir, [r["name"] for r in results])
+    else:
+        names = job.run(ids, gpu=gpu, progress=progress)
+    progress(1.0, f"PatchMatch: {len(names)} depth maps")
+    if not names:
+        raise RuntimeError("no depth map could be computed (check overlap between photos)")
+    (ws / "stereo" / "fusion.cfg").write_text("\n".join(names) + "\n")
 
-    def one(iid, depth_fn) -> str | None:
-        """The depth map of one photo with ``depth_fn``; its name when written."""
+
+def patchmatch_job(chunk: Chunk, ws: Path, filter_mode: str, iterations: int, init: bool) -> "_PatchMatchJob":
+    """The PatchMatch work of a chunk's workspace, for a node of the network (:mod:`.nodes`)."""
+    return _PatchMatchJob(chunk, ws, filter_mode, iterations, init)
+
+
+class _PatchMatchJob:
+    """The depth maps of the photos of a workspace, one photo at a time (:meth:`one`) or a list
+    of photos over the GPUs and the CPU together (:meth:`run`): one queue of photos, a worker
+    per GPU and one for the CPU kernel (which uses every core), each as fast as it goes."""
+
+    def __init__(self, chunk: Chunk, ws: Path, filter_mode: str, iterations: int, init: bool):
+        self.chunk, self.ws, self.iterations, self.init = chunk, ws, int(iterations), bool(init)
+        self.kernel = _native.kernel("patchmatch_depth")
+        self.gpu_kernel = _native.kernel("gpu_patchmatch_depth")
+        # in a survey from the air a plane needs two photos seeing its window (core 0.2.1): with
+        # one, windows at the borders of the block matched metres off, and the fused points of
+        # three such maps made pits and a step in the DEM where the dense cloud ends (Tell
+        # Sultan). Close up, the pixels at the frame borders that a single partner sees are as
+        # good as the others
+        self.views = {"min_views": PATCHMATCH_MIN_VIEWS if aerial_survey(chunk) else 1} if (_native.api() or 0) >= 4 else {}
+        self.rec = _read_workspace_model(ws)
+        self.neigh = _neighbors(self.rec, max_neighbors=PATCHMATCH_PARTNERS, wide=_panorama_images(chunk, self.rec))
+        self.max_cost = PATCHMATCH_COST.get(filter_mode, PATCHMATCH_COST["moderate"])
+        self.min_agree, self.tol, _ = FILTER_MODES.get(filter_mode, FILTER_MODES["moderate"])
+        (ws / "stereo" / "depth_maps").mkdir(parents=True, exist_ok=True)
+        (ws / "stereo" / "normal_maps").mkdir(parents=True, exist_ok=True)
+        self.gray = _GrayCache(ws, self.rec, 4 * (PATCHMATCH_PARTNERS + 1))
+        self.masked = _masked_cameras(chunk)
+        from .region import get_region
+
+        self.region = get_region(chunk)
+
+    def devices(self, gpu: str | None) -> list[tuple[int, str]]:
+        """The GPUs to use (index, name): those that answer."""
+        out = []
+        for d in (_native.gpu_devices(gpu) if self.gpu_kernel is not None else []):
+            try:
+                out.append((d, _native.kernel("gpu_device_name")(d)))
+            except Exception as exc:  # noqa: BLE001 - a GPU that does not work: the others, or the CPU alone
+                log.warning("GPU %s unavailable for PatchMatch (%s)", d, exc)
+        return out
+
+    def one(self, iid: int, depth_fn=None) -> str | None:
+        """The depth map of one photo with ``depth_fn`` (the CPU kernel by default); its name
+        when written."""
+        from .region import depth_mask
+
+        depth_fn = depth_fn or self.kernel
+        rec = self.rec
         image = rec.images[iid]
         pose_i, K_i = _pose(image), _K(rec.cameras[image.camera_id])
         zr = _depth_range(rec, image, pose_i)
-        gi = gray.get(iid) if zr is not None else None
+        gi = self.gray.get(iid) if zr is not None else None
         if gi is None:
             return None
         sources, estimates = [], []
-        for jid in neigh.get(iid, []):
-            gj = gray.get(jid)
+        for jid in self.neigh.get(iid, []):
+            gj = self.gray.get(jid)
             if gj is None:
                 continue
             other = rec.images[jid]
@@ -647,98 +693,101 @@ def _patchmatch_depth_maps(chunk: Chunk, ws: Path, filter_mode: str, progress: P
             kc = _K_cv(K_j)
             sources.append((np.ascontiguousarray(gj, np.float32) / 255.0, (kc[0, 0], kc[1, 1], kc[0, 2], kc[1, 2]),
                             np.ascontiguousarray(rel[:3, :3]), np.ascontiguousarray(rel[:3, 3])))
-            if init:
+            if self.init:
                 d = _pair_depth(gi, gj, K_i, K_j, pose_i, pose_j, zr)
                 if d is not None:
                     estimates.append(d)
         if not sources:
             return None
-        start = _combine(estimates, min(min_agree, 1), max(tol, 0.01)) if estimates else None
+        start = _combine(estimates, min(self.min_agree, 1), max(self.tol, 0.01)) if estimates else None
         kc = _K_cv(K_i)
         depth, normals, _cost = depth_fn(np.ascontiguousarray(gi, np.float32) / 255.0,
                                          (kc[0, 0], kc[1, 1], kc[0, 2], kc[1, 2]), sources, (float(zr[0]), float(zr[1])),
                                          init_depth=start, init_normals=None if start is None else
-                                         _normals_from_depth(start, K_i), iterations=iterations, max_cost=max_cost,
-                                         **views)
-        if image.name in masked:  # no depth where the photo is masked
+                                         _normals_from_depth(start, K_i), iterations=self.iterations,
+                                         max_cost=self.max_cost, **self.views)
+        if image.name in self.masked:  # no depth where the photo is masked
             from .masks import mask_for_undistorted
 
-            keep = mask_for_undistorted(chunk, masked[image.name], K_i, depth.shape)
+            keep = mask_for_undistorted(self.chunk, self.masked[image.name], K_i, depth.shape)
             if keep is not None:
                 depth[~keep] = 0
-        if region is not None:  # no depth outside the reconstruction region
-            depth[~depth_mask(chunk, depth, K_i, pose_i, region)] = 0
+        if self.region is not None:  # no depth outside the reconstruction region
+            depth[~depth_mask(self.chunk, depth, K_i, pose_i, self.region)] = 0
         if (depth > 0).sum() <= 100:
             return None
         normals[depth <= 0] = 0
         for folder, arr in (("depth_maps", depth), ("normal_maps", normals)):
-            out = ws / "stereo" / folder / f"{image.name}.geometric.bin"
+            out = self.ws / "stereo" / folder / f"{image.name}.geometric.bin"
             out.parent.mkdir(parents=True, exist_ok=True)  # names with folders (faces of 360-degree photos)
             write_colmap_array(out, arr)
         return image.name
 
-    import threading
+    def run(self, ids, gpu: str | None = None, progress: Progress | None = None) -> list[str]:
+        """The depth maps of ``ids`` over the GPUs and the CPU; the names written."""
+        import threading
 
-    lock = threading.Lock()
-    pending = list(ids)
-    names: list[str] = []
-    done = {"cpu": 0, "gpu": 0}
-    failure: list[BaseException] = []
-    stop = threading.Event()
+        devices = self.devices(gpu)
+        self.chunk.meta.setdefault("dense", {})["gpu"] = ", ".join(n for _, n in devices) or None
+        lock = threading.Lock()
+        pending = list(ids)
+        names: list[str] = []
+        done = {"cpu": 0, "gpu": 0}
+        failure: list[BaseException] = []
+        stop = threading.Event()
+        gpu_kernel, kernel = self.gpu_kernel, self.kernel
 
-    def worker(kind: str, device):
-        def on_gpu(*args, **kwargs):
-            return gpu_kernel(*args, device=device, **kwargs)
+        def worker(kind: str, device):
+            def on_gpu(*args, **kwargs):
+                return gpu_kernel(*args, device=device, **kwargs)
 
-        fn = kernel if kind == "cpu" else on_gpu
-        while not stop.is_set():
-            with lock:
-                if not pending or failure:
-                    return
-                iid = pending.pop(0)
-            try:
-                name = one(iid, fn)
-            except Exception as exc:  # noqa: BLE001
-                if kind == "gpu":  # the CPU kernel takes the photo instead
-                    log.warning("GPU PatchMatch failed on a photo (%s): the CPU kernel", exc)
-                    try:
-                        name = one(iid, kernel)
-                    except Exception as again:  # noqa: BLE001
-                        with lock:
-                            failure.append(again)
+            fn = kernel if kind == "cpu" else on_gpu
+            while not stop.is_set():
+                with lock:
+                    if not pending or failure:
                         return
-                else:
-                    with lock:
-                        failure.append(exc)
-                    return
-            with lock:
-                if name:
-                    names.append(name)
-                done[kind] += 1
+                    iid = pending.pop(0)
+                try:
+                    name = self.one(iid, fn)
+                except Exception as exc:  # noqa: BLE001
+                    if kind == "gpu":  # the CPU kernel takes the photo instead
+                        log.warning("GPU PatchMatch failed on a photo (%s): the CPU kernel", exc)
+                        try:
+                            name = self.one(iid, kernel)
+                        except Exception as again:  # noqa: BLE001
+                            with lock:
+                                failure.append(again)
+                            return
+                    else:
+                        with lock:
+                            failure.append(exc)
+                        return
+                with lock:
+                    if name:
+                        names.append(name)
+                    done[kind] += 1
 
-    threads = [threading.Thread(target=worker, args=("gpu", d), name=f"ppg-patchmatch-gpu-{d}", daemon=True)
-               for d, _ in devices]
-    threads.append(threading.Thread(target=worker, args=("cpu", None), name="ppg-patchmatch-cpu", daemon=True))
-    for t in threads:
-        t.start()
-    try:
-        while any(t.is_alive() for t in threads):
-            for t in threads:
-                t.join(0.5)
-            with lock:
-                g, c = done["gpu"], done["cpu"]
-            progress((g + c) / max(len(ids), 1), f"PatchMatch depth map {g + c}/{len(ids)}"
-                     + (f" ({g} on the GPU, {c} on the CPU)" if devices else ""))
-            progress.check()
-    except BaseException:
-        stop.set()
-        raise
-    if failure:
-        raise failure[0]
-    progress(1.0, f"PatchMatch: {len(names)} depth maps" + (f", {done['gpu']} on the GPU" if devices else ""))
-    if not names:
-        raise RuntimeError("no depth map could be computed (check overlap between photos)")
-    (ws / "stereo" / "fusion.cfg").write_text("\n".join(names) + "\n")
+        threads = [threading.Thread(target=worker, args=("gpu", d), name=f"ppg-patchmatch-gpu-{d}", daemon=True)
+                   for d, _ in devices]
+        threads.append(threading.Thread(target=worker, args=("cpu", None), name="ppg-patchmatch-cpu", daemon=True))
+        for t in threads:
+            t.start()
+        try:
+            while any(t.is_alive() for t in threads):
+                for t in threads:
+                    t.join(0.5)
+                if progress is not None:
+                    with lock:
+                        g, c = done["gpu"], done["cpu"]
+                    progress((g + c) / max(len(ids), 1), f"PatchMatch depth map {g + c}/{len(ids)}"
+                             + (f" ({g} on the GPU, {c} on the CPU)" if devices else ""))
+                    progress.check()
+        except BaseException:
+            stop.set()
+            raise
+        if failure:
+            raise failure[0]
+        return names
 
 
 def _combine(estimates: list[np.ndarray], min_agree: int, tol: float) -> np.ndarray:

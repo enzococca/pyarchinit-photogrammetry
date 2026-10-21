@@ -48,6 +48,7 @@ ICONS = {
     "classify": ("mdi6.tag-multiple-outline", "lime"), "sam": ("mdi6.auto-fix", "violet"),
     "ifc": ("mdi6.office-building-outline", "slate"), "script": ("mdi6.language-python", "blue"),
     "plugin": ("mdi6.puzzle-outline", "violet"),
+    "network": ("mdi6.lan-connect", "violet"),
     # PyArchInit
     "database": ("mdi6.database-outline", "olive"), "publish": ("mdi6.database-arrow-up-outline", "olive"),
     "load": ("mdi6.database-arrow-down-outline", "olive"), "refresh": ("mdi6.refresh", "grey"),

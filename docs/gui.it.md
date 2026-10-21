@@ -146,6 +146,10 @@ Dalla riga di comando `ppg update` dice se esiste una versione più nuova e `ppg
   profilo ceramico da una mesh (vaso o frammento); classificazione della nuvola di punti; Segment Anything
   2.1 (unità candidate automatiche, unità da punti cliccati, prompt sulle foto); esportazione IFC
   (un elemento per unità disegnata, attributi PyArchInit se collegato); esecuzione di uno script Python;
+  *Nodi di rete...*: gli altri computer che lavorano a questo progetto dalla cartella condivisa (la
+  cartella da dare a `ppg node` su ognuno, i nodi presenti con core e GPU, l'interruttore che affida
+  loro punti chiave e mappe di profondità PatchMatch; `ppg remote` per una macchina via SSH: vedi la
+  pagina dell'API, *Altri computer*);
   *Plugin...*: i plugin installati e quelli del repository dei plugin (installa, attiva, disattiva,
   rimuovi; le loro azioni vanno nel menu *Plugin*, i loro formati in *File > Esporta*: vedi
   [plugins.md](plugins.md));

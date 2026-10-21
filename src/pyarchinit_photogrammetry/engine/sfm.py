@@ -606,25 +606,67 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     masks = colmap_mask_folder(chunk, names, work / "masks") if apply_masks == "keypoints" else None
     faces = {c.sensor_key for c in panorama_cameras(chunk) if c.enabled} if rigs else set()
     progress(0.0, f"Detecting points in {len(new)} photos" + (" (with masks)" if masks else ""))
-    for i, (skey, image_names) in enumerate(by_sensor.items()):
-        image_names = [n for n in image_names if n not in existing]
-        if not image_names:
-            continue
-        sensor = chunk.sensors[skey]
-        ext = pycolmap.FeatureExtractionOptions()
-        ext.max_image_size = int(max(sensor.width, sensor.height) / downscale)
-        ext.sift.max_num_features = int(keypoint_limit)
-        reader = pycolmap.ImageReaderOptions()
-        model, params = mapping_camera(sensor)
-        reader.camera_model = model
-        reader.camera_params = ",".join(f"{p:.10g}" for p in params)
-        if masks is not None:
-            reader.mask_path = str(masks)
-        # a rig needs a camera per face: the faces of the panoramas are in a folder each
-        mode = pycolmap.CameraMode.PER_FOLDER if skey in faces else pycolmap.CameraMode.SINGLE
-        pycolmap.extract_features(str(db_path), str(root), image_names=image_names,
-                                  camera_mode=mode, reader_options=reader, extraction_options=ext)
-        progress(0.5 * (i + 1) / len(by_sensor), f"Points detected for sensor {sensor.label}")
+    from . import nodes
+
+    files_dir = chunk.data_dir.parent
+    others = nodes.wanted(files_dir) if not rigs else []
+    chunk_nodes: list[str] = []
+    if others and len(new) >= 2 * nodes.FEATURE_UNIT_PHOTOS:
+        # the photos in units of work for the other computers and this one (its own worker): COLMAP's
+        # extractor runs there into a database of its own, the points come back and go into ours
+        units, cameras = [], {}
+        for skey, image_names in by_sensor.items():
+            image_names = [n for n in image_names if n not in existing]
+            if not image_names:
+                continue
+            sensor = chunk.sensors[skey]
+            model, params = mapping_camera(sensor)
+            cameras[skey] = {"model": model, "params": ",".join(f"{p:.10g}" for p in params),
+                             "width": sensor.width, "height": sensor.height, "names": image_names}
+            for k in range(0, len(image_names), nodes.FEATURE_UNIT_PHOTOS):
+                units.append({"kind": "features", "root": str(root), "names": image_names[k:k + nodes.FEATURE_UNIT_PHOTOS],
+                              "camera": {"model": model, "params": cameras[skey]["params"]},
+                              "max_image_size": int(max(sensor.width, sensor.height) / downscale),
+                              "max_num_features": int(keypoint_limit),
+                              "mask_path": str(masks) if masks is not None else None})
+        project = files_dir.parent / files_dir.name[:-len(".files")] if files_dir.name.endswith(".files") else None
+        progress(0.0, f"Detecting points: {len(units)} units of work shared with {len(others)} other computer(s)")
+        results = nodes.run(files_dir, units, progress.sub(0.0, 0.5), "units of photos", project_path=project)
+        db = pycolmap.Database.open(str(db_path))
+        try:
+            camera_ids = {}
+            for cam in cameras.values():
+                camera = pycolmap.Camera(model=cam["model"], width=int(cam["width"]), height=int(cam["height"]),
+                                         params=[float(v) for v in cam["params"].split(",")])
+                camera.has_prior_focal_length = True
+                cid = db.write_camera(camera)
+                for n in cam["names"]:
+                    camera_ids[n] = cid
+        finally:
+            db.close()
+        nodes.import_features(db_path, nodes.folder(files_dir) / "done", [r["result"] for r in results], camera_ids)
+        chunk_nodes = sorted({r.get("by") for r in results if r.get("by")})
+        nodes.forget(files_dir, [r["name"] for r in results])
+    else:
+        for i, (skey, image_names) in enumerate(by_sensor.items()):
+            image_names = [n for n in image_names if n not in existing]
+            if not image_names:
+                continue
+            sensor = chunk.sensors[skey]
+            ext = pycolmap.FeatureExtractionOptions()
+            ext.max_image_size = int(max(sensor.width, sensor.height) / downscale)
+            ext.sift.max_num_features = int(keypoint_limit)
+            reader = pycolmap.ImageReaderOptions()
+            model, params = mapping_camera(sensor)
+            reader.camera_model = model
+            reader.camera_params = ",".join(f"{p:.10g}" for p in params)
+            if masks is not None:
+                reader.mask_path = str(masks)
+            # a rig needs a camera per face: the faces of the panoramas are in a folder each
+            mode = pycolmap.CameraMode.PER_FOLDER if skey in faces else pycolmap.CameraMode.SINGLE
+            pycolmap.extract_features(str(db_path), str(root), image_names=image_names,
+                                      camera_mode=mode, reader_options=reader, extraction_options=ext)
+            progress(0.5 * (i + 1) / len(by_sensor), f"Points detected for sensor {sensor.label}")
     if rigs:
         db = pycolmap.Database.open(str(db_path))
         try:
@@ -696,7 +738,7 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
                          "masks": masks is not None, "apply_masks": apply_masks, "guided_matching": bool(guided_matching),
                          "stationary_removed": removed, "rigs": len(rigs),
                          "keypoint_limit": int(keypoint_limit), "tiepoint_limit": int(tiepoint_limit),
-                         "continued": keep, "added": new if keep else None,
+                         "continued": keep, "added": new if keep else None, "nodes": chunk_nodes,
                          "gpu": gpu_name if shares else None, "gpu_pairs": shares["gpu_pairs"] if shares else 0,
                          "gpu_shares": ({name: shares["by_device"].get(d, 0) for d, name in zip(devices, gpu_names)}
                                         if shares else None),

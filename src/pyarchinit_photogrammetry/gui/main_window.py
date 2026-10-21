@@ -676,6 +676,8 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self._act(m, tr("Esporta IFC (BIM)..."), self.export_ifc, processing=True, icon_name="ifc")
         self._act(m, tr("Esegui script Python..."), self.run_script, icon_name="script")
+        self._act(m, tr("Nodi di rete..."), self.show_nodes, icon_name="network",
+                  tip=tr("Altri computer che lavorano a questo progetto dalla cartella condivisa"))
         self._act(m, tr("Plugin..."), self.show_plugins, icon_name="plugin",
                   tip=tr("I plugin installati e quelli del repository dei plugin: installa, attiva, disattiva"))
         # ------------------------------------------------------------ PyArchInit
@@ -1111,6 +1113,16 @@ class MainWindow(QMainWindow):
         self.run_task(exporter.title, lambda p: exporter.function(ch, out, p),
                       lambda _r: self.statusBar().showMessage(tr("Scritto {0}", out), 10000), refresh=False,
                       save=False)
+
+    def show_nodes(self) -> None:
+        """The computers working on this project through the shared folder."""
+        from .nodes_dialog import NodesDialog
+
+        files_dir = self.doc.files_dir if self.doc is not None and self.doc.path else None
+        if files_dir is None:
+            self._warn("Salva prima il progetto: i nodi lavorano dalla sua cartella.")
+            return
+        NodesDialog(files_dir, self.settings, self).exec()
 
     def show_plugins(self) -> None:
         """Strumenti > Plugin: those found and those of the plugin repository."""
