@@ -4,7 +4,6 @@ install shadowing the right one, the Open3D build that crashes, SciPy wheels tha
 not load, missing SpatiaLite) and says what to do."""
 from __future__ import annotations
 
-import os
 import platform
 import shutil
 import sys
@@ -110,7 +109,7 @@ def run_checks(gui: bool = True) -> Report:
                        ("pyproj", "pyproj"), ("shapely", "shapely"), ("trimesh", "trimesh"), ("laspy", "laspy"),
                        ("ezdxf", "ezdxf"), ("sqlalchemy", "SQLAlchemy")):
         v = _version(mod)
-        r.add(label, OK if v else FAIL, v or "missing", "" if v else f"pip install \"pyarchinit-photogrammetry[all]\"")
+        r.add(label, OK if v else FAIL, v or "missing", "" if v else "pip install \"pyarchinit-photogrammetry[all]\"")
     try:
         from scipy.optimize import least_squares  # noqa: F401
         from scipy.sparse.linalg import svds  # noqa: F401
@@ -135,6 +134,22 @@ def run_checks(gui: bool = True) -> Report:
     r.add("Native core (Rust)", OK if v else WARN, v or "missing (numpy code, slower)",
           "" if v else "pip install ./native from the source tree (a Rust toolchain is needed), or "
           "pip install pyarchinit-photogrammetry-core")
+    if v:
+        gpus = _native.gpu_adapters()
+        setting = _native.gpu_setting()
+        if setting.lower() == "off":
+            r.add("GPU (wgpu)", WARN, "switched off (PPG_GPU=off)", "")
+        elif (_native.api() or 0) < 5:
+            r.add("GPU (wgpu)", WARN, "the native core is older than the GPU kernels (API 5)",
+                  "pip install -U pyarchinit-photogrammetry-core")
+        elif gpus:
+            chosen = _native.gpu_device()
+            names = ", ".join(f"{a['index']}: {a['name']} ({a['backend']}, {a['device_type']})" for a in gpus)
+            r.add("GPU (wgpu)", OK, names + (f"; in use: {setting}" if chosen is not None and chosen >= 0 and setting != 'auto'
+                                            else "; in use: the best one" if chosen == -1 else "; in use: none"),
+                  "" if chosen is not None else f"PPG_GPU={setting!r} matches no adapter: auto, off, an index or part of a name")
+        else:
+            r.add("GPU (wgpu)", WARN, "no Metal, Vulkan or DirectX 12 device: the matching runs on the CPU", "")
     v = _version("open3d")
     if v is None:
         r.add("Open3D", WARN, "missing (Poisson meshing uses COLMAP's PoissonRecon)",

@@ -5,19 +5,136 @@
 
 mod camera;
 mod depth;
+mod gpu;
+mod gpu_patchmatch;
 mod patchmatch;
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use numpy::ndarray::{Array1, Array2, Array3};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3,
             PyUntypedArrayMethods};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use rayon::prelude::*;
 
 use camera::{Camera, Pose};
 
 /// Version of the functions offered here: raised when one is added or changes meaning.
-const API: u32 = 4;
+const API: u32 = 5;
+
+// one matcher per GPU, each behind its own lock: several GPUs work at the same time
+fn matchers() -> &'static Mutex<HashMap<i64, Arc<Mutex<gpu::Matcher>>>> {
+    static M: OnceLock<Mutex<HashMap<i64, Arc<Mutex<gpu::Matcher>>>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn matcher_for(device: i64) -> Result<Arc<Mutex<gpu::Matcher>>, String> {
+    let mut all = matchers().lock().map_err(|e| e.to_string())?;
+    if let Some(m) = all.get(&device) {
+        return Ok(m.clone());
+    }
+    let m = Arc::new(Mutex::new(gpu::Matcher::new(if device < 0 { None } else { Some(device as usize) })?));
+    all.insert(device, m.clone());
+    Ok(m)
+}
+
+fn patchmatchers() -> &'static Mutex<HashMap<i64, Arc<gpu_patchmatch::PatchMatcher>>> {
+    static M: OnceLock<Mutex<HashMap<i64, Arc<gpu_patchmatch::PatchMatcher>>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn patchmatcher_for(device: i64) -> Result<Arc<gpu_patchmatch::PatchMatcher>, String> {
+    let mut all = patchmatchers().lock().map_err(|e| e.to_string())?;
+    if let Some(m) = all.get(&device) {
+        return Ok(m.clone());
+    }
+    let m = Arc::new(gpu_patchmatch::PatchMatcher::new(if device < 0 { None } else { Some(device as usize) })?);
+    all.insert(device, m.clone());
+    Ok(m)
+}
+
+/// The GPUs wgpu finds: ``index``, ``name``, ``backend`` (Metal, Vulkan, Dx12, Gl) and
+/// ``device_type`` (DiscreteGpu, IntegratedGpu, VirtualGpu, Cpu, Other) of each.
+#[pyfunction]
+fn gpu_adapters(py: Python<'_>) -> PyResult<Vec<Bound<'_, PyDict>>> {
+    let mut out = Vec::new();
+    for a in py.allow_threads(gpu::adapters) {
+        let d = PyDict::new_bound(py);
+        d.set_item("index", a.index)?;
+        d.set_item("name", a.name)?;
+        d.set_item("backend", a.backend)?;
+        d.set_item("device_type", a.device_type)?;
+        out.push(d);
+    }
+    Ok(out)
+}
+
+fn descriptor_bytes(a: &PyReadonlyArray2<'_, u8>, what: &str) -> PyResult<Vec<u8>> {
+    if a.shape()[1] != gpu::DIM {
+        return Err(PyValueError::new_err(format!("{what}: descriptors of 128 bytes expected, {} given", a.shape()[1])));
+    }
+    Ok(a.as_array().iter().copied().collect())
+}
+
+/// SIFT matches of a pair of photos on the GPU (:mod:`gpu`): ``a`` and ``b`` the uint8
+/// descriptors (n x 128, as COLMAP's database holds them), COLMAP's ``max_ratio``,
+/// ``max_distance`` and ``cross_check``; ``device`` an index of :func:`gpu_adapters` or -1 for
+/// the best one; ``a_key`` / ``b_key`` (not 0) keep the descriptors on the GPU for the next pairs
+/// of the same photos. Returns the (m, 2) uint32 matches, rows of ``a`` and of ``b``. The GIL is
+/// released while the GPU works.
+#[pyfunction]
+#[pyo3(signature = (a, b, max_ratio=0.8, max_distance=0.7, cross_check=true, device=-1, a_key=0, b_key=0))]
+#[allow(clippy::too_many_arguments)]
+fn gpu_match<'py>(py: Python<'py>, a: PyReadonlyArray2<'py, u8>, b: PyReadonlyArray2<'py, u8>, max_ratio: f64,
+                  max_distance: f64, cross_check: bool, device: i64, a_key: u64, b_key: u64)
+                  -> PyResult<Bound<'py, PyArray2<u32>>> {
+    let av = descriptor_bytes(&a, "a")?;
+    let bv = descriptor_bytes(&b, "b")?;
+    let matches = py.allow_threads(|| -> Result<Vec<[u32; 2]>, String> {
+        let m = matcher_for(device)?;
+        let mut g = m.lock().map_err(|e| e.to_string())?;
+        g.matches(a_key, &av, b_key, &bv, max_ratio as f32, max_distance as f32, cross_check)
+    }).map_err(PyRuntimeError::new_err)?;
+    let mut out = Array2::<u32>::zeros((matches.len(), 2));
+    for (k, m) in matches.iter().enumerate() {
+        out[[k, 0]] = m[0];
+        out[[k, 1]] = m[1];
+    }
+    Ok(out.into_pyarray_bound(py))
+}
+
+/// The name of the GPU a :func:`gpu_match` ``device`` resolves to (the matcher is created).
+#[pyfunction]
+#[pyo3(signature = (device=-1))]
+fn gpu_device_name(py: Python<'_>, device: i64) -> PyResult<String> {
+    py.allow_threads(|| -> Result<String, String> {
+        let m = matcher_for(device)?;
+        let g = m.lock().map_err(|e| e.to_string())?;
+        Ok(g.info.name.clone())
+    }).map_err(PyRuntimeError::new_err)
+}
+
+/// Drop the descriptors kept on the GPUs (and the matchers).
+#[pyfunction]
+fn gpu_forget(py: Python<'_>) -> PyResult<()> {
+    py.allow_threads(|| {
+        if let Ok(mut all) = matchers().lock() {
+            for (_, m) in all.iter() {
+                if let Ok(mut g) = m.lock() {
+                    g.clear();
+                }
+            }
+            all.clear();
+        }
+        if let Ok(mut all) = patchmatchers().lock() {
+            all.clear();
+        }
+    });
+    Ok(())
+}
 
 fn matrix3(a: &PyReadonlyArray2<f64>, what: &str) -> PyResult<[[f64; 3]; 3]> {
     if a.shape() != [3, 3] {
@@ -395,6 +512,64 @@ fn patchmatch_depth<'py>(py: Python<'py>, reference: PyReadonlyArray2<'py, f32>,
         Array2::from_shape_vec((h, w), out.cost).unwrap().into_pyarray_bound(py)))
 }
 
+/// :func:`patchmatch_depth` on the GPU (:mod:`gpu_patchmatch`): the same arguments and results,
+/// ``device`` an index of :func:`gpu_adapters` or -1 for the best one; up to six sources.
+#[pyfunction]
+#[pyo3(signature = (reference, k, sources, depth_range, init_depth=None, init_normals=None, iterations=4,
+                    half_window=4, step=2, top_k=3, max_cost=0.5, seed=7, min_views=1, device=-1))]
+#[allow(clippy::too_many_arguments)]
+fn gpu_patchmatch_depth<'py>(py: Python<'py>, reference: PyReadonlyArray2<'py, f32>, k: (f64, f64, f64, f64),
+                             sources: Vec<SourceArgs<'py>>, depth_range: (f64, f64),
+                             init_depth: Option<PyReadonlyArray2<'py, f32>>, init_normals: Option<PyReadonlyArray3<'py, f32>>,
+                             iterations: usize, half_window: usize, step: usize, top_k: usize, max_cost: f32, seed: u64,
+                             min_views: usize, device: i64)
+    -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray3<f32>>, Bound<'py, PyArray2<f32>>)> {
+    let a = reference.as_array();
+    let (h, w) = a.dim();
+    let c = a.as_standard_layout();
+    let refdata = c.as_slice().unwrap();
+    if !(depth_range.0 > 0.0 && depth_range.1 > depth_range.0) {
+        return Err(PyValueError::new_err("depth_range must be (near, far) with 0 < near < far"));
+    }
+    let views: Vec<_> = sources.iter().map(|(img, _, _, _)| img.as_array()).collect();
+    let layouts: Vec<_> = views.iter().map(|v| v.as_standard_layout()).collect();
+    let mut srcs = Vec::with_capacity(sources.len());
+    for ((img, kk, r, t), lay) in sources.iter().zip(layouts.iter()) {
+        let (sh, sw) = img.as_array().dim();
+        let t = t.as_array();
+        if t.len() != 3 {
+            return Err(PyValueError::new_err("t must hold 3 values"));
+        }
+        srcs.push(gpu_patchmatch::Source { img: lay.as_slice().unwrap(), w: sw, h: sh, k: [kk.0, kk.1, kk.2, kk.3],
+                                           r: matrix3(r, "r")?, t: [t[0], t[1], t[2]] });
+    }
+    let init_view = init_depth.as_ref().map(|d| d.as_array());
+    let init_layout = init_view.as_ref().map(|v| v.as_standard_layout());
+    if let Some(v) = &init_view {
+        if v.dim() != (h, w) {
+            return Err(PyValueError::new_err("init_depth must have the shape of the reference"));
+        }
+    }
+    let normal_view = init_normals.as_ref().map(|d| d.as_array());
+    let normal_layout = normal_view.as_ref().map(|v| v.as_standard_layout());
+    if let Some(v) = &normal_view {
+        if v.dim() != (h, w, 3) {
+            return Err(PyValueError::new_err("init_normals must be h x w x 3"));
+        }
+    }
+    let init = init_layout.as_ref().map(|l| l.as_slice().unwrap());
+    let init_n = normal_layout.as_ref().map(|l| l.as_slice().unwrap());
+    let opts = gpu_patchmatch::Options { depth_min: depth_range.0, depth_max: depth_range.1, iterations, half_window,
+                                         step, top_k, min_views, max_cost, seed };
+    let out = py.allow_threads(|| -> Result<gpu_patchmatch::Output, String> {
+        let m = patchmatcher_for(device)?;
+        m.run(refdata, w, h, [k.0, k.1, k.2, k.3], &srcs, opts, init, init_n)
+    }).map_err(PyRuntimeError::new_err)?;
+    Ok((Array2::from_shape_vec((h, w), out.depth).unwrap().into_pyarray_bound(py),
+        Array3::from_shape_vec((h, w, 3), out.normal).unwrap().into_pyarray_bound(py),
+        Array2::from_shape_vec((h, w), out.cost).unwrap().into_pyarray_bound(py)))
+}
+
 /// Camera models the projection kernels know.
 #[pyfunction]
 fn supported_models() -> Vec<&'static str> {
@@ -414,5 +589,10 @@ fn ppg_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ortho_candidates, m)?)?;
     m.add_function(wrap_pyfunction!(patchmatch_depth, m)?)?;
     m.add_function(wrap_pyfunction!(supported_models, m)?)?;
+    m.add_function(wrap_pyfunction!(gpu_adapters, m)?)?;
+    m.add_function(wrap_pyfunction!(gpu_match, m)?)?;
+    m.add_function(wrap_pyfunction!(gpu_device_name, m)?)?;
+    m.add_function(wrap_pyfunction!(gpu_forget, m)?)?;
+    m.add_function(wrap_pyfunction!(gpu_patchmatch_depth, m)?)?;
     Ok(())
 }

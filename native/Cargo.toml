@@ -1,6 +1,6 @@
 [package]
 name = "ppg_core"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 license = "GPL-2.0-or-later"
 description = "Native kernels of pyarchinit-photogrammetry"
@@ -15,6 +15,9 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.22", features = ["extension-module", "abi3-py310"] }
 numpy = "0.22"
 rayon = "1.10"
+wgpu = "24"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
 
 [profile.release]
 lto = "thin"

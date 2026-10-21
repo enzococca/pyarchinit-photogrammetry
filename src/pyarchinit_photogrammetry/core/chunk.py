@@ -242,7 +242,7 @@ class Chunk:
                      pair_selection: str = "auto", progress: ProgressCallback | None = None,
                      exclude_stationary: bool = False, generic: bool | None = None, reference: str | None = None,
                      neighbours: int = 20, apply_masks: str = "keypoints", guided_matching: bool = False,
-                     reset: bool = True) -> None:
+                     reset: bool = True, gpu: str | None = None) -> None:
         """Detect and match features (SIFT) between photos, with the choices of Metashape's
         *Align Photos* (see :func:`engine.sfm.match_photos`): ``quality`` (the accuracy), the
         ``generic`` preselection (None: from 40 photos up), the ``reference`` preselection
@@ -252,14 +252,16 @@ class Chunk:
         (matches that do not move between photos dropped: the background of a turntable
         photographed from a fixed camera); ``reset`` False keeps the matches and the alignment
         there are and only matches the photos added since. The older ``pair_selection`` word
-        stands in when ``generic`` and ``reference`` are not given."""
+        stands in when ``generic`` and ``reference`` are not given. ``gpu``: ``auto`` (the best
+        GPU shares the pairs with the CPU), ``off``, an adapter index or part of its name
+        (None: the ``PPG_GPU`` environment variable, ``auto`` by default)."""
         from ..engine import sfm
 
         sfm.match_photos(self, quality=quality, keypoint_limit=keypoint_limit, tiepoint_limit=tiepoint_limit,
                          pair_selection=pair_selection, progress=as_progress(progress),
                          exclude_stationary=exclude_stationary, generic=generic, reference=reference,
                          neighbours=neighbours, apply_masks=apply_masks, guided_matching=guided_matching,
-                         reset=reset)
+                         reset=reset, gpu=gpu)
 
     def align_cameras(self, progress: ProgressCallback | None = None, mapper: str = "auto", reset: bool = True,
                       use_gps: bool | None = None, adaptive_fitting: bool = False) -> int:
@@ -528,13 +530,15 @@ class Chunk:
 
     # ------------------------------------------------------------ dense & mesh
     def build_depth_maps(self, quality: str = "medium", filter_mode: str = "moderate", backend: str = "auto",
-                         progress: ProgressCallback | None = None, skip_unreadable: bool = False) -> None:
+                         progress: ProgressCallback | None = None, skip_unreadable: bool = False,
+                         gpu: str | None = None) -> None:
         """Depth maps of the aligned photos; photos that cannot be read (e.g. kept online only
-        by Dropbox) stop the step unless ``skip_unreadable``."""
+        by Dropbox) stop the step unless ``skip_unreadable``. ``gpu``: the PatchMatch kernel on
+        the GPU (``auto``, ``off``, an adapter; None: ``PPG_GPU``)."""
         from ..engine import dense
 
         dense.build_depth_maps(self, quality=quality, filter_mode=filter_mode, backend=backend,
-                               progress=as_progress(progress), skip_unreadable=skip_unreadable)
+                               progress=as_progress(progress), skip_unreadable=skip_unreadable, gpu=gpu)
 
     def build_point_cloud(self, point_colors: bool = True, progress: ProgressCallback | None = None) -> PointCloud:
         from ..engine import dense

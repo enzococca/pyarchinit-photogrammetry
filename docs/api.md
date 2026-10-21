@@ -67,6 +67,31 @@ registers them into the block, one photo after the other (when nothing can be ke
 done again). `meta["sfm"]` records what ran: `pair_selection` (`exhaustive`, `generic`,
 `generic+source`, ...), `pairs`, `apply_masks`, `masked_tie_points`, `added`.
 
+### The GPU
+
+`gpu` (default: the `PPG_GPU` environment variable, else `auto`) puts the matching on the GPU as
+well: `auto` takes the best GPU of the computer, `all` every GPU it has (each with its own stream
+of pairs), `off` leaves everything to the CPU, an adapter index or part of its name picks one
+(`ppg doctor` lists them). The kernels are written once in
+WGSL and run through wgpu - Metal on macOS, Vulkan on Linux and Windows (ARM too), DirectX 12 on
+Windows - in the native core (`pyarchinit-photogrammetry-core` 0.3, `ppg_core.gpu_match`): one
+pass over a pair of photos gives the best and second-best dot products in both directions, so
+COLMAP's ratio test, distance test and cross check come out of it exactly (the descriptors are
+COLMAP's uint8 ones, the dot products exact integers; an Apple M4 Pro does a pair of 40,000
+descriptors in 0.2 s). The pairs form one queue: the GPU takes them one by one from the front, the
+CPU (COLMAP's matcher) in chunks from the back, each as fast as it goes, so the split follows the
+speed of the two; the matches of the GPU go into the database and through COLMAP's geometric
+verification, and the alignment sees no difference. The guided matching and the rigs of 360-degree
+photos stay on the CPU. `meta["sfm"]["gpu"]`, `gpu_pairs` and `cpu_pairs` say what did what.
+
+The PatchMatch depth maps take the same choice (`build_depth_maps(gpu=...)`): the kernel of the
+native core runs on the GPU, one thread per pixel, with the same cost (the normalised cross
+correlation of the window through the plane of the pixel in up to six photos, the best three
+counting), the same propagation and the same start, the whole run of a photo in one submission.
+The photos form a queue served by a worker per GPU and one for the CPU kernel (which uses every
+core), so GPUs and CPU share them by their speed; a photo a GPU cannot do goes to the CPU kernel.
+`meta["dense"]["gpu"]` names the GPUs used.
+
 ### Mappers
 
 `mapper` is `incremental` (one photo after the other, COLMAP), `global` (all the cameras at once,

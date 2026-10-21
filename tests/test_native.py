@@ -313,3 +313,65 @@ def test_auto_takes_patchmatch_for_surveys_from_the_air(processed, monkeypatch):
                 cam.meta.pop("reference_crs", None)
             else:
                 cam.meta["reference_crs"] = ref_crs
+
+
+def test_gpu_matching_agrees_with_the_brute_force(rng):
+    """The GPU matcher (wgpu) picks the matches COLMAP's rules pick, checked against numpy."""
+    if _native.gpu_device("auto") is None:
+        pytest.skip("no GPU (wgpu adapter) on this computer")
+
+    def descriptors(n):
+        v = rng.random((n, 128), np.float32) ** 2
+        v /= np.linalg.norm(v, axis=1, keepdims=True)
+        return np.clip(np.round(v * 512), 0, 255).astype(np.uint8)
+
+    def brute_force(a, b, max_ratio, max_distance, cross):
+        d = a.astype(np.int64) @ b.astype(np.int64).T
+        dist = lambda s: np.arccos(np.minimum(s / 512.0 ** 2, 1.0))  # noqa: E731
+
+        def bests(m):
+            order = np.argsort(-m, axis=1)[:, :2]
+            rows = np.arange(len(m))
+            best, second = m[rows, order[:, 0]], m[rows, order[:, 1]]
+            return best, order[:, 0], (dist(best) <= max_distance) & (dist(best) < max_ratio * dist(second)) & (best > 0)
+
+        b1, j1, ok1 = bests(d)
+        if not cross:
+            return {(int(i), int(j1[i])) for i in np.flatnonzero(ok1)}
+        _b2, i2, ok2 = bests(d.T)
+        return {(int(i), int(j1[i])) for i in np.flatnonzero(ok1) if i2[j1[i]] == i and ok2[j1[i]]}
+
+    a, b = descriptors(2000), descriptors(1700)
+    b[:900] = np.clip(a[:900].astype(np.int32) + rng.integers(-6, 7, (900, 128)), 0, 255).astype(np.uint8)
+    for cross in (True, False):
+        got = {(int(i), int(j)) for i, j in _native.gpu_match(a, b, 0.8, 0.7, cross)}
+        want = brute_force(a, b, 0.8, 0.7, cross)
+        assert got == want and len(got) >= 850
+    # cached descriptors (keys) give the same answer, and a stricter distance fewer matches
+    again = {(int(i), int(j)) for i, j in _native.gpu_match(a, b, 0.8, 0.7, True, a_key=11, b_key=12)}
+    assert again == brute_force(a, b, 0.8, 0.7, True)
+    assert len(_native.gpu_match(a, b, 0.8, 0.02, True, a_key=11, b_key=12)) < len(again)  # the noise is more
+    assert len(_native.gpu_match(a[:0], b, 0.8, 0.7, True)) == 0
+    _native.gpu_forget()
+
+
+def test_gpu_patchmatch_agrees_with_the_cpu_kernel():
+    """The PatchMatch kernel on the GPU (wgpu) finds the slanted plane the CPU kernel finds."""
+    if _native.gpu_device("auto") is None or not hasattr(ppg_core, "gpu_patchmatch_depth"):
+        pytest.skip("no GPU (wgpu adapter) or a native core without the GPU kernels")
+    ref, truth, k, sources, normal = _plane_views()
+    depth, normals, cost = ppg_core.gpu_patchmatch_depth(ref, k, sources, (1.0, 4.0), iterations=4, max_cost=0.5)
+    valid = depth > 0
+    err = np.abs(depth[valid] - truth[valid]) / truth[valid]
+    assert valid.mean() > 0.9 and np.median(err) < 0.005 and np.percentile(err, 90) < 0.02
+    angle = np.degrees(np.arccos(np.clip(normals[valid] @ normal, -1, 1)))
+    assert np.median(angle) < 15 and (cost[valid] <= 0.5).all()
+    # the two kernels agree where both have a depth
+    d_cpu, _, _ = ppg_core.patchmatch_depth(ref, k, sources, (1.0, 4.0), iterations=4, max_cost=0.5)
+    both = valid & (d_cpu > 0)
+    assert both.mean() > 0.85 and np.median(np.abs(depth[both] - d_cpu[both]) / d_cpu[both]) < 0.005
+    # started from the right depths the planes stay there; a wrong start is corrected
+    start = truth * np.where(np.arange(truth.size).reshape(truth.shape) % 7 == 0, 1.3, 1.0).astype(np.float32)
+    d2, _, _ = ppg_core.gpu_patchmatch_depth(ref, k, sources, (1.0, 4.0), init_depth=start, iterations=2)
+    ok = d2 > 0
+    assert np.median(np.abs(d2[ok] - truth[ok]) / truth[ok]) < 0.005

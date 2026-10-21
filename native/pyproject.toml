@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "pyarchinit-photogrammetry-core"
-version = "0.2.1"
+version = "0.3.0"
 description = "Native kernels (Rust) of pyarchinit-photogrammetry: depth maps (PatchMatch MVS), orthomosaic, confidence"
 readme = "README.md"
 license = { text = "GPL-2.0-or-later" }

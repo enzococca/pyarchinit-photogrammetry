@@ -110,7 +110,7 @@ def test_reference_preselections_pick_the_pairs(scene_dir, scene, tmp_path):
     ch.match_photos(quality="high", generic=False, reference="estimated", neighbours=4)
     assert ch.meta["sfm"]["pair_selection"] == "estimated" and 2 * n <= ch.meta["sfm"]["pairs"] < every
     ch.match_photos(quality="high", generic=False, reference=None)
-    assert ch.meta["sfm"]["pair_selection"] == "exhaustive" and ch.meta["sfm"]["pairs"] is None
+    assert ch.meta["sfm"]["pair_selection"] == "exhaustive" and ch.meta["sfm"]["pairs"] in (None, every)  # a GPU lists them
 
 
 def test_gps_of_the_photos_holds_the_block(scene_dir, scene, tmp_path):
@@ -220,6 +220,27 @@ def test_photos_added_to_an_alignment(scene_dir, tmp_path):
     ch2.add_photos([other])
     ch2.match_photos(quality="high", reset=False, progress=lambda f, m: seen.append(m))
     assert not ch2.meta["sfm"]["continued"] and any("every photo again" in m for m in seen)
+
+
+def test_gpu_matching_shares_the_pairs_and_keeps_the_accuracy(scene_dir, tmp_path):
+    from pyarchinit_photogrammetry import _native
+
+    if _native.gpu_device("auto") is None:
+        pytest.skip("no GPU (wgpu adapter) on this computer")
+    _doc, ch = _project(scene_dir, tmp_path)
+    seen = []
+    ch.match_photos(quality="high", gpu="auto", progress=lambda f, m: seen.append(m))
+    info = ch.meta["sfm"]
+    n = len(ch.cameras)
+    assert info["gpu"] and info["gpu_pairs"] > 0 and info["gpu_pairs"] + info["cpu_pairs"] == n * (n - 1) // 2
+    assert any("on the GPU" in m for m in seen) and any(m.startswith("Verifying") for m in seen)
+    assert ch.align_cameras(mapper="incremental", use_gps=False) == n
+    ch.import_reference(scene_dir / "gcp.csv", crs="EPSG:3004")
+    assert ch.update_transform()["control_rmse"] < 0.002
+    ch.match_photos(quality="high", gpu="off")
+    assert ch.meta["sfm"]["gpu"] is None and ch.meta["sfm"]["gpu_pairs"] == 0
+    assert _native.gpu_device("no such adapter") is None  # the CPU alone (ppg doctor says so)
+    assert _native.gpu_device("0") == 0 and _native.gpu_device("auto") == -1
 
 
 def test_strongest_pairs_keep_every_photo_and_the_links_between_groups():

@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QDockWid
                                QScrollArea, QStackedWidget, QStatusBar, QTabWidget, QToolBar, QToolButton, QVBoxLayout,
                                QWidget)
 
-from .. import __version__, updates
+from .. import __version__, _native, updates
 from ..app import app as application
 from ..core.document import Document
 from . import i18n, theme
@@ -2372,18 +2372,25 @@ class MainWindow(QMainWindow):
                   choices=[("auto", "Automatico"), ("global", "Globale (tutte le camere insieme)"),
                            ("incremental", "Incrementale (una foto alla volta)")],
                   tip="Globale: molto piu' veloce con molte foto; automatico lo sceglie da 40 foto in su e torna "
-                      "all'incrementale se lascia fuori delle foto")],
+                      "all'incrementale se lascia fuori delle foto"),
+            Field("gpu", "GPU per l'abbinamento", str(self.settings.value("sfm/gpu", "auto")),
+                  choices=[("auto", "Automatica (la GPU migliore insieme alla CPU)"), ("off", "Spenta (solo CPU)")]
+                          + [(str(a["index"]), f"{a['name']} ({a['backend']})") for a in _native.gpu_adapters()],
+                  tip="Le coppie di foto si dividono tra la GPU (kernel wgpu: Metal, Vulkan o DirectX 12) e la CPU, "
+                      "ognuna alla sua velocità; l'abbinamento guidato resta sulla CPU")],
             intro="Le scelte di Allinea foto di Metashape: precisione, preselezioni, limiti, maschere, punti fermi, "
                   "abbinamento guidato, modello della camera."
                   + ("" if aligned else " Le opzioni che usano un allineamento precedente valgono dal secondo in poi."))
         if not v:
             return
+        self.settings.setValue("sfm/gpu", v.get("gpu", "auto"))
 
         def job(p):
             self.chunk.match_photos(v["quality"], v["keypoint_limit"], v["tiepoint_limit"], progress=p.sub(0, 0.5),
                                     exclude_stationary=bool(v.get("stationary")), generic=bool(v.get("generic")),
                                     reference=v.get("reference") or None, apply_masks=v.get("masks", "keypoints"),
-                                    guided_matching=bool(v.get("guided")), reset=bool(v.get("reset", True)))
+                                    guided_matching=bool(v.get("guided")), reset=bool(v.get("reset", True)),
+                                    gpu=v.get("gpu", "auto"))
             n = self.chunk.align_cameras(progress=p.sub(0.5, 0.5), mapper=v.get("mapper", "auto"),
                                          reset=bool(v.get("reset", True)), use_gps=bool(v.get("gps")),
                                          adaptive_fitting=bool(v.get("adaptive")))
@@ -2713,7 +2720,8 @@ class MainWindow(QMainWindow):
 
         def job(p):
             self.chunk.build_depth_maps(v["quality"], v["filter_mode"], v["backend"],
-                                        progress=p.sub(0, 1.0 if v["only_depth"] else 0.8), skip_unreadable=skip)
+                                        progress=p.sub(0, 1.0 if v["only_depth"] else 0.8), skip_unreadable=skip,
+                                        gpu=str(self.settings.value("sfm/gpu", "auto")))
             if v["only_depth"]:
                 return None
             return self.chunk.build_point_cloud(progress=p.sub(0.8, 0.2))

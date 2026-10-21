@@ -475,13 +475,16 @@ def align(project: Path, quality: str = typer.Option("high", help="the accuracy:
           keep: bool = typer.Option(False, help="keep the current alignment and add the photos not yet in it"),
           mapper: str = typer.Option("auto", help="auto, incremental (one photo after the other) or global (all at "
                                                   "once, much faster with many photos)"),
+          gpu: Optional[str] = typer.Option(None, help="the GPU for the matching, shared with the CPU: auto (the "
+                                                       "best one), off, an adapter index or part of its name "
+                                                       "(default: PPG_GPU, else auto; ppg doctor lists them)"),
           chunk: Optional[str] = None):
     """Match photos and align cameras, with the choices of Metashape's Align Photos."""
     doc, ch = _open(project, chunk)
     ch.match_photos(quality=quality, pair_selection=pairs, keypoint_limit=keypoints, tiepoint_limit=tiepoints,
                     generic=generic, reference=None if reference == "none" else reference, neighbours=neighbours,
                     apply_masks=masks, guided_matching=guided, exclude_stationary=stationary, reset=not keep,
-                    progress=print_progress)
+                    gpu=gpu, progress=print_progress)
     n = ch.align_cameras(progress=print_progress, mapper=mapper, reset=not keep, use_gps=gps, adaptive_fitting=adaptive)
     doc.save()
     typer.echo(f"aligned {n}/{len(ch.cameras)} photos")
@@ -648,11 +651,14 @@ SKIP_HELP = "leave out the photos that cannot be read (e.g. kept online only by 
 def dense(project: Path, quality: str = "medium", filter_mode: str = "moderate",
           backend: str = typer.Option("auto", help="auto, cpu (two-view SGBM), patchmatch (multi-view, native core: "
                                                    "more precise, slower), colmap (CUDA), openmvs"),
-          skip_unreadable: bool = typer.Option(False, help=SKIP_HELP), chunk: Optional[str] = None):
+          skip_unreadable: bool = typer.Option(False, help=SKIP_HELP),
+          gpu: Optional[str] = typer.Option(None, help="the GPU for the PatchMatch depth maps: auto, off, an adapter "
+                                                       "index or part of its name (default: PPG_GPU, else auto)"),
+          chunk: Optional[str] = None):
     """Depth maps and dense point cloud (with the confidence of every point)."""
     doc, ch = _open(project, chunk)
     ch.build_depth_maps(quality=quality, filter_mode=filter_mode, backend=backend, progress=print_progress,
-                        skip_unreadable=skip_unreadable)
+                        skip_unreadable=skip_unreadable, gpu=gpu)
     pc = ch.build_point_cloud(progress=print_progress)
     doc.save()
     typer.echo(f"{len(pc):,} points")

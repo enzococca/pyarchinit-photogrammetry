@@ -20,6 +20,7 @@ from pathlib import Path, PurePosixPath
 
 import numpy as np
 
+from .. import _native
 from ..core import crs as crs_mod
 from ..core.chunk import QUALITY_DOWNSCALE, Chunk
 from ..core.pointcloud import PointCloud
@@ -411,11 +412,149 @@ def _continuable(chunk: Chunk, db_path: Path, root, names: dict[int, str]) -> bo
     return _db_image_names(db_path) <= set(names.values())
 
 
+GPU_CACHE_PHOTOS = 96  # descriptors of this many photos kept in memory for the GPU stream
+
+
+def _match_with_gpu(db_path: Path, pairs, mopts, devices: list[int], progress: Progress, work: Path) -> dict:
+    """The pairs matched by the GPUs and the CPU together: one queue of pairs, a stream per GPU
+    (:func:`_native.gpu_match`, a thread that lets the GIL go) taking them one by one from the
+    front, the CPU stream (COLMAP's matcher, with its geometric verification) in chunks from the
+    back - a first chunk to measure it by, then the rest split by the speeds measured, since every
+    call re-reads the features - each as fast as it goes until the queue is empty. The matches of
+    the GPUs go into the database between the chunks of the CPU and are verified by COLMAP at the
+    end (``verify_matches``), so the alignment sees no difference. The pairs are sorted: a GPU
+    keeps the descriptors of the current photo on the device."""
+    import collections
+    import sqlite3
+    import threading
+    import time
+
+    import pycolmap
+
+    db = pycolmap.Database.open(str(db_path))
+    try:
+        ids = {im.name: int(im.image_id) for im in db.read_all_images()}
+    finally:
+        db.close()
+    by_id = {v: k for k, v in ids.items()}
+    queue = collections.deque(sorted(pairs))
+    total = len(queue)
+    lock = threading.Lock()
+    results: dict[tuple[int, int], np.ndarray] = {}
+    done = {"gpu": 0, "cpu": 0}
+    by_device = {d: 0 for d in devices}
+    failure: list[BaseException] = []
+    cache: collections.OrderedDict[int, np.ndarray] = collections.OrderedDict()
+    sift = mopts.sift
+    # the descriptors are read without taking any lock on the database (sqlite ``immutable``: the
+    # rows of the descriptors never change while the CPU matcher writes its matches): a reader
+    # holding a shared lock would make COLMAP's commit fail, and COLMAP aborts the process on it
+    reader = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True, check_same_thread=False)
+
+    def descriptors(image_id: int) -> np.ndarray:
+        with lock:
+            got = cache.get(image_id)
+            if got is not None:
+                cache.move_to_end(image_id)
+                return got
+            row = reader.execute("SELECT rows, cols, data FROM descriptors WHERE image_id = ?", (int(image_id),)).fetchone()
+            if row is None or not row[2]:
+                got = np.zeros((0, 128), np.uint8)
+            else:
+                got = np.ascontiguousarray(np.frombuffer(row[2], np.uint8).reshape(int(row[0]), int(row[1])))
+            cache[image_id] = got
+            while len(cache) > GPU_CACHE_PHOTOS:
+                cache.popitem(last=False)
+            return got
+
+    def gpu_stream(device: int):
+        try:
+            while True:
+                with lock:
+                    if not queue or failure:
+                        return
+                    a, b = queue.popleft()
+                ia, ib = ids[a], ids[b]
+                m = _native.gpu_match(descriptors(ia), descriptors(ib), sift.max_ratio, sift.max_distance,
+                                      sift.cross_check, device, a_key=ia, b_key=ib)
+                with lock:
+                    results[(ia, ib)] = np.asarray(m, dtype=np.uint32)
+                    done["gpu"] += 1
+                    by_device[device] += 1
+        except BaseException as exc:  # noqa: BLE001 - reported to the main thread
+            with lock:
+                failure.append(exc)
+
+    gpu_pairs: list[tuple[str, str]] = []
+
+    def flush() -> None:
+        """The matches of the GPUs so far into the database (between the chunks of the CPU)."""
+        with lock:
+            batch = dict(results)
+            results.clear()
+        if not batch:
+            return
+        d = pycolmap.Database.open(str(db_path))
+        try:
+            for (ia, ib), m in batch.items():
+                d.write_matches(ia, ib, np.ascontiguousarray(m.reshape(-1, 2), dtype=np.uint32))
+                gpu_pairs.append((by_id[ia], by_id[ib]))
+        finally:
+            d.close()
+
+    threads = [threading.Thread(target=gpu_stream, args=(d,), name=f"ppg-gpu-matching-{d}", daemon=True)
+               for d in devices]
+    started = time.perf_counter()
+    for t in threads:
+        t.start()
+    least = max(8, 4 * (os.cpu_count() or 4))
+    list_path = work / "pairs_cpu.txt"
+    cpu_rate = None  # pairs per second of the CPU stream, measured on its first chunk
+    try:
+        while True:
+            with lock:
+                if failure or not queue:
+                    break
+                left = len(queue)
+                if cpu_rate is None:
+                    n = max(1, left // 4)  # a first chunk to measure the CPU by, the GPUs meanwhile measured too
+                else:
+                    gpu_rate = done["gpu"] / max(time.perf_counter() - started, 1e-3)
+                    n = int(round(left * cpu_rate / max(cpu_rate + gpu_rate, 1e-9)))
+                n = min(left, max(n, min(least, left)))
+                batch = [queue.pop() for _ in range(n)]
+            list_path.write_text("\n".join(f"{a} {b}" for a, b in batch))
+            popts = pycolmap.ImportedPairingOptions()
+            popts.match_list_path = str(list_path)
+            t0 = time.perf_counter()
+            pycolmap.match_image_pairs(str(db_path), matching_options=mopts, pairing_options=popts)
+            cpu_rate = n / max(time.perf_counter() - t0, 1e-3)
+            with lock:
+                done["cpu"] += n
+                g, c = done["gpu"], done["cpu"]
+            flush()
+            progress(0.55 + 0.4 * min(1.0, (g + c) / max(total, 1)),
+                     f"Matching photos: {g:,} pairs on the GPU, {c:,} on the CPU")
+    finally:
+        for t in threads:
+            t.join()
+        reader.close()
+    if failure:
+        raise RuntimeError(f"GPU matching failed: {failure[0]}") from failure[0]
+    flush()
+    if gpu_pairs:  # COLMAP's geometric verification of what the GPUs matched
+        progress(0.95, f"Verifying {len(gpu_pairs):,} pairs matched on the GPU")
+        gpu_list = work / "pairs_gpu.txt"
+        gpu_list.write_text("\n".join(f"{a} {b}" for a, b in gpu_pairs))
+        pycolmap.verify_matches(str(db_path), str(gpu_list), pycolmap.TwoViewGeometryOptions())
+    return {"gpu_pairs": done["gpu"], "cpu_pairs": done["cpu"], "by_device": by_device}
+
+
 def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 40000, tiepoint_limit: int = 8000,
                  pair_selection: str = "auto", progress: Progress | None = None,
                  exclude_stationary: bool = False, generic: bool | None = None, reference: str | None = None,
                  neighbours: int = REFERENCE_NEIGHBOURS, apply_masks: str = "keypoints",
-                 guided_matching: bool = False, reset: bool = True) -> None:
+                 guided_matching: bool = False, reset: bool = True, gpu: str | None = None) -> None:
     """Detect and match the points of the photos (SIFT), with the choices of Metashape's *Align
     Photos*: ``quality`` (the accuracy: the photos at full size or reduced), the ``generic``
     preselection (the pairs that overlap found first on the photos reduced to 1024 pixels,
@@ -523,9 +662,26 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
             pairs = {tuple(sorted((a, b))) for a in added for b in everyone if a != b}
         else:
             pairs = {p for p in pairs if p[0] in added or p[1] in added}
-    progress(0.55, f"Matching photos ({mode}" + (f", {len(pairs):,} pairs)" if pairs is not None else ")"))
+    # the GPUs: the pairs shared with the CPU (not for rigs, nor with the guided matching, which is COLMAP's)
+    devices, gpu_names = [], []
+    if not rigs and not guided_matching:
+        for d in _native.gpu_devices(gpu):
+            try:
+                gpu_names.append(_native.kernel("gpu_device_name")(d))
+                devices.append(d)
+            except Exception as exc:  # noqa: BLE001 - a GPU that does not work: the others, or the CPU alone
+                log.warning("GPU %s unavailable for the matching (%s)", d, exc)
+    gpu_name = ", ".join(gpu_names) if devices else None
+    if devices and pairs is None:
+        everyone = sorted(names.values())
+        pairs = {(a, b) for i, a in enumerate(everyone) for b in everyone[i + 1:]}
+    progress(0.55, f"Matching photos ({mode}" + (f", {len(pairs):,} pairs)" if pairs is not None else ")")
+             + (f" on {gpu_name} and the CPU" if devices else ""))
+    shares = None
     if pairs is None:
         pycolmap.match_exhaustive(str(db_path), matching_options=mopts)
+    elif pairs and devices:
+        shares = _match_with_gpu(db_path, pairs, mopts, devices, progress, work)
     elif pairs:
         list_path = work / "pairs.txt"
         list_path.write_text("\n".join(f"{a} {b}" for a, b in sorted(pairs)))
@@ -540,7 +696,11 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
                          "masks": masks is not None, "apply_masks": apply_masks, "guided_matching": bool(guided_matching),
                          "stationary_removed": removed, "rigs": len(rigs),
                          "keypoint_limit": int(keypoint_limit), "tiepoint_limit": int(tiepoint_limit),
-                         "continued": keep, "added": new if keep else None}
+                         "continued": keep, "added": new if keep else None,
+                         "gpu": gpu_name if shares else None, "gpu_pairs": shares["gpu_pairs"] if shares else 0,
+                         "gpu_shares": ({name: shares["by_device"].get(d, 0) for d, name in zip(devices, gpu_names)}
+                                        if shares else None),
+                         "cpu_pairs": shares["cpu_pairs"] if shares else (len(pairs) if pairs else None)}
     if keep and old.get("gps_priors"):
         chunk.meta["sfm"]["gps_priors"] = old["gps_priors"]  # the priors already in the database: same axes
     progress(1.0, "Matching finished" + (f" ({removed:,} stationary matches left out)" if removed else ""))
@@ -914,6 +1074,10 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = 
         if priors:
             opts.use_prior_position = True
             opts.use_robust_loss_on_prior_position = True  # a wrong GPS fix does not pull the block
+        ratio = os.environ.get("PPG_BA_GLOBAL_RATIO")  # experiments: fewer global adjustments while the block grows
+        if ratio:
+            opts.ba_global_frames_ratio = float(ratio)
+            opts.ba_global_points_ratio = float(ratio)
         progress(0.0, "Aligning cameras" + (" on the GPS of the photos" if priors else "")
                  + (f" (adding {len(info.get('added') or [])} photos)" if continuing else ""))
         start = str(_continuation_model(model_dir, db_path, work / "continue")) if continuing else ""

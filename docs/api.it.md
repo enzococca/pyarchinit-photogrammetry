@@ -67,6 +67,32 @@ tiene le corrispondenze e l'allineamento che ci sono e abbina solo le foto aggiu
 tenere niente, si rifà tutto). `meta["sfm"]` registra cosa è stato fatto: `pair_selection`
 (`exhaustive`, `generic`, `generic+source`, ...), `pairs`, `apply_masks`, `masked_tie_points`, `added`.
 
+### La GPU
+
+`gpu` (predefinito: la variabile d'ambiente `PPG_GPU`, altrimenti `auto`) mette l'abbinamento anche
+sulla GPU: `auto` prende la GPU migliore del computer, `all` tutte quelle che ha (ognuna con il
+suo flusso di coppie), `off` lascia tutto alla CPU, un indice di adattatore o parte del suo nome ne
+sceglie una (`ppg doctor` le elenca). I kernel sono scritti una
+volta in WGSL e girano attraverso wgpu - Metal su macOS, Vulkan su Linux e Windows (anche ARM),
+DirectX 12 su Windows - nel nucleo nativo (`pyarchinit-photogrammetry-core` 0.3,
+`ppg_core.gpu_match`): un passaggio su una coppia di foto dà i prodotti scalari migliore e secondo
+in entrambe le direzioni, così il test del rapporto, quello della distanza e il controllo incrociato
+di COLMAP ne escono esatti (i descrittori sono quelli uint8 di COLMAP, i prodotti scalari interi
+esatti; un Apple M4 Pro fa una coppia da 40.000 descrittori in 0,2 s). Le coppie formano una coda
+sola: la GPU le prende una alla volta dalla testa, la CPU (il matcher di COLMAP) a blocchi dalla
+coda, ognuna alla sua velocità, così la divisione segue la velocità delle due; le corrispondenze
+della GPU vanno nel database e passano la verifica geometrica di COLMAP, e l'allineamento non vede
+differenze. L'abbinamento guidato e i rig di foto a 360 gradi restano sulla CPU.
+`meta["sfm"]["gpu"]`, `gpu_pairs` e `cpu_pairs` dicono chi ha fatto cosa.
+
+Le mappe di profondità PatchMatch prendono la stessa scelta (`build_depth_maps(gpu=...)`): il
+kernel del nucleo nativo gira sulla GPU, un thread per pixel, con lo stesso costo (la correlazione
+incrociata normalizzata della finestra attraverso il piano del pixel in fino a sei foto, contando
+le tre migliori), la stessa propagazione e la stessa partenza, l'intera corsa di una foto in un solo
+invio. Le foto formano una coda servita da un lavoratore per GPU e uno per il kernel CPU (che usa
+tutti i core), così GPU e CPU se le dividono secondo la loro velocità; una foto che una GPU non
+riesce a fare passa al kernel CPU. `meta["dense"]["gpu"]` dice quali GPU sono state usate.
+
 ### Mapper
 
 `mapper` è `incremental` (una foto dopo l'altra, COLMAP), `global` (tutte le camere insieme,
