@@ -31,7 +31,7 @@ The scripts are in the repository (`benchmark/`): run them on your data and comp
     On a Mac, Metashape runs its heaviest steps - the matching of the photos and the depth maps - on
     the GPU through Metal, besides the CPU; pyarchinit-photogrammetry and ODM run everything on the CPU.
     The times compare the programs as they run on this computer, not the algorithms on the same
-    hardware.
+    hardware. Version 1.2 of pyarchinit-photogrammetry uses the GPU as well: see *With the GPU* below.
 
 ## 57 photos (the tutorial)
 
@@ -227,6 +227,26 @@ Notes:
   of those three hours (alone, the last stretch ran five times faster). A photo cache sized on the
   memory rather than on the workers is the fix to make.
 * ODM was not run (see the 425 photos).
+
+## With the GPU (version 1.2)
+
+Since version 1.2 pyarchinit-photogrammetry runs two of its heaviest steps on any GPU through wgpu
+(Metal on the Mac, Vulkan and DirectX 12 elsewhere) together with the CPU: the matching of the SIFT
+descriptors and the PatchMatch depth maps. Measured on the same computer and photos as above (the GPU
+of the M4 Pro is the integrated one), the whole matching step - the features, the preselection of the
+pairs and the matching itself - in seconds:
+
+| Photos | CPU only (1.1) | GPU + CPU (1.2) |
+|---|---:|---:|
+| 57 (689 pairs, about 50,000 descriptors per photo) | 104 | 98 |
+| 425 (6,065 pairs) | 1,103 | 957 |
+
+On this Mac the integrated GPU takes a quarter of the pairs: its kernel matches a pair of 50,000 × 50,000
+descriptors in 318 ms (2 TFLOP/s), COLMAP's matcher on the 12 cores in 131 ms including the geometric
+verification, so the two together can be at best 29 % faster than the CPU alone (the matching itself
+went from 75 to 67 s on the 57 photos); on a computer with a discrete GPU the ratio turns around. The
+depth maps gain more: on the synthetic test scene 26 PatchMatch depth maps take 1.9 s on the GPU
+against 12.2 s on the CPU, with the same heights within a tenth of a millimetre.
 
 ## What changed in pyarchinit-photogrammetry
 

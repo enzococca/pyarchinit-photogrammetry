@@ -31,7 +31,7 @@ Gli script sono nel repository (`benchmark/`): puoi rifarlo sui tuoi dati e sul 
     Sul Mac Metashape esegue i passi più pesanti - l'abbinamento delle foto e le mappe di profondità -
     sulla GPU con Metal, oltre che sulla CPU; pyarchinit-photogrammetry e ODM fanno tutto sulla CPU.
     I tempi confrontano i programmi come girano su questo computer, non gli algoritmi sullo stesso
-    hardware.
+    hardware. La versione 1.2 di pyarchinit-photogrammetry usa anche la GPU: vedi *Con la GPU* più sotto.
 
 ## 57 foto (il tutorial)
 
@@ -230,6 +230,27 @@ Note:
   quasi tutte quelle tre ore (da solo, l'ultimo tratto è andato cinque volte più veloce). Una cache
   delle foto dimensionata sulla memoria invece che sui thread è la correzione da fare.
 * ODM non è stato lanciato (vedi le 425 foto).
+
+## Con la GPU (versione 1.2)
+
+Dalla versione 1.2 pyarchinit-photogrammetry esegue due dei suoi passi più pesanti su qualsiasi GPU
+tramite wgpu (Metal sul Mac, Vulkan e DirectX 12 altrove) insieme alla CPU: l'abbinamento dei
+descrittori SIFT e le mappe di profondità PatchMatch. Misurato sullo stesso computer e sulle stesse
+foto di sopra (la GPU dell'M4 Pro è quella integrata), l'intero passo dell'abbinamento - i punti
+caratteristici, la preselezione delle coppie e l'abbinamento vero e proprio - in secondi:
+
+| Foto | Solo CPU (1.1) | GPU + CPU (1.2) |
+|---|---:|---:|
+| 57 (689 coppie, circa 50.000 descrittori per foto) | 104 | 98 |
+| 425 (6.065 coppie) | 1.103 | 957 |
+
+Su questo Mac la GPU integrata prende un quarto delle coppie: il suo kernel abbina una coppia di
+50.000 × 50.000 descrittori in 318 ms (2 TFLOP/s), il matcher di COLMAP sui 12 core in 131 ms compresa
+la verifica geometrica, così i due insieme possono essere al massimo il 29 % più veloci della sola CPU
+(l'abbinamento vero e proprio è passato da 75 a 67 s sulle 57 foto); su un computer con una GPU
+discreta il rapporto si ribalta. Le mappe di profondità guadagnano di più: sulla scena sintetica di
+prova 26 mappe PatchMatch richiedono 1,9 s sulla GPU contro 12,2 s sulla CPU, con le stesse quote entro
+un decimo di millimetro.
 
 ## Cosa è cambiato in pyarchinit-photogrammetry
 
