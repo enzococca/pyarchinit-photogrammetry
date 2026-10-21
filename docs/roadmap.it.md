@@ -158,7 +158,28 @@ marker in troppo poche foto.
   profondità, nuvola densa, mesh, DEM e ortofoto - tempi, risultati ed errori.
 * Build native per Windows ARM64.
 
+## Dopo la 1.1
+
+* GPU per i passi più lenti, portabile: kernel scritti in WGSL ed eseguiti con wgpu (Metal sul
+  Mac, Vulkan su Linux e Windows, niente CUDA), prima per l'abbinamento dei descrittori e la NCC
+  del PatchMatch; più GPU e la CPU si dividono il lavoro in proporzione alla loro velocità.
+* Elaborazione in rete e remota: il programma avviato come nodo su altri computer della rete
+  prende dalla cartella condivisa del progetto il lavoro che si divide per foto (feature, mappe
+  di profondità, tasselli di texture e ortofoto); lo stesso via SSH su una macchina a noleggio.
+  L'allineamento resta su una macchina sola.
+* Camere multispettrali e indici di vegetazione: rig a quattro o cinque bande come i rig 360,
+  calibrazione radiometrica con il pannello e il sensore di luce, ortofoto di riflettanza a 16 bit
+  per banda, NDVI, NDRE e termico, zonizzazione esportata come poligoni con un attributo (la mappa
+  di prescrizione dell'agricoltura; in archeologia i crop mark sopra muri e fossati sepolti).
+* Immagini satellitari, in due tappe: l'ortorettifica di una scena col suo modello RPC sul DEM del
+  rilievo, tenuta come versione dell'ortofoto; poi modelli di superficie da coppie e triplette
+  stereo (approssimazione affine locale dell'RPC per tassello, rettifica, matching denso,
+  triangolazione), verificati sui dataset pubblici WorldView-3 con lidar di riferimento.
+
 ## Non previsto
 
-Elaborazione in rete e nel cloud, immagini satellitari, sistemi di coordinate planetari, calibrazione
-del lidar aereo, rilevamento delle linee elettriche, mappe di prescrizione agricole.
+Sistemi di coordinate planetari; la calibrazione del boresight del lidar aereo (nessun dato di
+traiettoria con cui validarla; le nuvole lidar si importano e si co-registrano col plugin terrio e
+con l'allineamento dei chunk). Il rilevamento delle linee elettriche non fa parte del programma ma
+è il plugin `powerlines` del [repository dei plugin](https://github.com/enzococca/pyarchinit-photogrammetry-plugins)
+(conduttori come catenarie, pali, franco dal suolo, distanza dagli ostacoli).

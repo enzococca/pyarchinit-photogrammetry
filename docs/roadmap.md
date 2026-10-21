@@ -157,7 +157,28 @@ markers in too few photos.
   maps, dense cloud, mesh, DEM and orthomosaic - times, results and errors.
 * Native Windows ARM64 builds.
 
+## After 1.1
+
+* GPU for the slowest steps, portable: kernels written in WGSL and run through wgpu (Metal on
+  the Mac, Vulkan on Linux and Windows, no CUDA), first for the matching of the descriptors and
+  the NCC of PatchMatch; several GPUs and the CPU share the work in proportion to their speed.
+* Network and remote processing: the program started as a node on other computers of the
+  network takes from the shared project folder the work that splits by photo (features, depth
+  maps, texture and orthomosaic tiles); the same over SSH on a rented machine. The alignment
+  stays on one machine.
+* Multispectral cameras and vegetation indices: rigs of four or five bands as the 360 rigs,
+  radiometric calibration with the panel and the sun sensor, reflectance orthomosaics at 16 bits
+  per band, NDVI, NDRE and thermal, zoning exported as polygons with an attribute (the
+  prescription map of agriculture; in archaeology the crop marks over buried walls and ditches).
+* Satellite imagery, in two steps: the orthorectification of a scene with its RPC model on the
+  DEM of the survey, kept as a version of the orthomosaic; then surface models from stereo pairs
+  and triplets (local affine approximation of the RPC per tile, rectification, dense matching,
+  triangulation), checked on the public WorldView-3 datasets with lidar truth.
+
 ## Not planned
 
-Network and cloud processing, satellite imagery, planetary coordinate systems, aerial lidar
-calibration, powerline detection, agricultural prescription maps.
+Planetary coordinate systems; the boresight calibration of aerial lidar (no trajectory data to
+validate it with; lidar clouds are imported and co-registered through the terrio plugin and the
+chunk alignment). Powerline detection is not part of the program but the plugin `powerlines` of
+the [plugin repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins)
+(conductors as catenaries, poles, clearance from the ground, distance from obstacles).
