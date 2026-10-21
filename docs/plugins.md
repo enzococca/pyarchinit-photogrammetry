@@ -39,6 +39,28 @@ shapely, pyproj, SQLAlchemy, PySide6, ...).
 of the plugin folder, none installed with pip); a plugin that fails when it starts is reported (in
 the log and in *Strumenti > Plugin*) and left out, the program goes on.
 
+## Starting a plugin: `ppg plugins new`
+
+The program writes the project of a plugin to start from: a small working plugin with the parts
+chosen, its tests, READMEs in English and Italian, the licence notice, a `.gitignore` and a GitHub
+workflow that builds the wheel of a release.
+
+```bash
+ppg plugins new "Conta foto" --dir ~/progetti --author "Your Name" --email you@example.org \
+    --description "counts the photos of a chunk" --parts action,background,command,exporter
+```
+
+`--parts` says what the plugin starts with, each with a working example: `action` (an action in the
+menu *Plugin* that shows a summary of the chunk), `background` (an action that reads the DEM in the
+background with the progress bar), `command` (`ppg plugin conta-foto PROJECT`), `exporter` (a format
+in *File > Esporta*). The folder `ppg-conta-foto/` holds the package `ppg_conta_foto` with the class
+`ContaFotoPlugin` and the entry point `conta-foto`, `tests/`, `README.md`, `README.it.md`, `LICENSE`,
+`.github/workflows/release.yml`. The command ends with the next steps: `pip install -e .` in the
+environment of the program, `pytest -q tests`, then the wheel and the pull request (below).
+
+In the window the same is *Strumenti > Plugin... > Nuovo plugin...*: name, title, description,
+author, folder and the parts to tick; the folder opens in the file manager when it is written.
+
 ## Writing a plugin
 
 A plugin is a package with an entry point in the group `pyarchinit_photogrammetry.plugins`:
@@ -156,6 +178,7 @@ oldest version of the program a plugin works with (`min_app`).
    those of the program, `i18n` gives title and description in other languages (shown when the
    interface speaks them). `python scripts/make_entry.py WHEEL_URL --write` in the plugin repository
    makes the entry from the wheel. The repository checks the entry when the pull request is opened:
-   the hash, the entry point, and that the plugin starts with the program. A plugin can also live in
-   the plugin repository itself, under `plugins/` (see its README); [`template/`](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/template)
-   there is a plugin to start from.
+   the hash, the entry point, and that the plugin starts with the program. Only the maintainer
+   merges: that is the approval. A plugin can also live in the plugin repository itself, under
+   `plugins/` (see its README); [`template/`](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/template)
+   there is the plugin `ppg plugins new` starts from.

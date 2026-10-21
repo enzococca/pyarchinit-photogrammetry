@@ -5,10 +5,25 @@ disabling, installing and removing apply from the next start: *Riavvia ora* rest
 with the open project. Plugins are Python code with the same rights as the program."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import (QAbstractItemView, QDialog, QHBoxLayout, QHeaderView, QLabel, QPushButton,
-                               QTableWidget, QTableWidgetItem, QVBoxLayout)
+from pathlib import Path
+
+from PySide6.QtCore import QStandardPaths, Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QGuiApplication
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QCheckBox,
+    QDialog,
+    QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+)
 
 from .i18n import tr
 
@@ -64,9 +79,13 @@ class PluginsDialog(QDialog):
         self.toggle_button.clicked.connect(self.toggle)
         self.remove_button = QPushButton(tr("Rimuovi"))
         self.remove_button.clicked.connect(self.remove)
+        self.new_button = QPushButton(tr("Nuovo plugin..."))
+        self.new_button.setToolTip(tr("Scrive il progetto di un plugin da cui partire (per chi programma in Python)"))
+        self.new_button.clicked.connect(self.new_plugin)
         row.addWidget(self.toggle_button)
         row.addWidget(self.remove_button)
         row.addStretch(1)
+        row.addWidget(self.new_button)
         lay.addLayout(row)
         lay.addWidget(QLabel(tr("Disponibili nel repository dei plugin")))
         self.available = _table(AVAILABLE_HEADERS)
@@ -198,3 +217,91 @@ class PluginsDialog(QDialog):
     def restart(self) -> None:
         self.accept()
         self.window.restart()
+
+    def new_plugin(self) -> None:
+        NewPluginDialog(self).exec()
+
+
+PARTS_LABELS = [("action", "Azione nel menu Plugin"), ("background", "Lavoro in background con la barra di avanzamento"),
+                ("command", "Comando della riga di comando (ppg plugin NOME)"),
+                ("exporter", "Formato di esportazione (File > Esporta)")]
+
+
+class NewPluginDialog(QDialog):
+    """*Nuovo plugin...*: the project of a plugin to start from, written by
+    :func:`pyarchinit_photogrammetry.plugins.scaffold.create` with the name, the texts, the author
+    and the parts chosen; the folder opens in the file manager when it is done."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.created: Path | None = None
+        self.setWindowTitle(tr("Nuovo plugin"))
+        self.resize(560, 420)
+        lay = QVBoxLayout(self)
+        intro = QLabel(tr("Scrive una cartella con un plugin funzionante da cui partire: pacchetto Python con "
+                          "l'entry point, le parti scelte con un esempio ciascuna, i test, i README, la licenza "
+                          "e il workflow di rilascio. Poi si installa con pip install -e . e si modifica."))
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        form = QFormLayout()
+        self.name = QLineEdit()
+        self.name.setPlaceholderText("conta-foto")
+        form.addRow(tr("Nome (lettere, cifre e trattini)"), self.name)
+        self.title_edit = QLineEdit()
+        form.addRow(tr("Titolo"), self.title_edit)
+        self.description = QLineEdit()
+        form.addRow(tr("Descrizione"), self.description)
+        self.author = QLineEdit()
+        form.addRow(tr("Autore"), self.author)
+        self.email = QLineEdit()
+        form.addRow(tr("E-mail"), self.email)
+        folder_row = QHBoxLayout()
+        self.folder = QLineEdit(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+                                or str(Path.home()))
+        browse = QPushButton(tr("Sfoglia..."))
+        browse.clicked.connect(self.browse)
+        folder_row.addWidget(self.folder, 1)
+        folder_row.addWidget(browse)
+        form.addRow(tr("Cartella"), folder_row)
+        lay.addLayout(form)
+        lay.addWidget(QLabel(tr("Il plugin parte con:")))
+        self.parts = {}
+        for key, label in PARTS_LABELS:
+            box = QCheckBox(tr(label))
+            box.setChecked(True)
+            self.parts[key] = box
+            lay.addWidget(box)
+        lay.addStretch(1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.create_button = QPushButton(tr("Crea"))
+        self.create_button.setDefault(True)
+        self.create_button.clicked.connect(self.create)
+        cancel = QPushButton(tr("Annulla"))
+        cancel.clicked.connect(self.reject)
+        row.addWidget(self.create_button)
+        row.addWidget(cancel)
+        lay.addLayout(row)
+
+    def browse(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, tr("Cartella del progetto"), self.folder.text())
+        if folder:
+            self.folder.setText(folder)
+
+    def create(self) -> None:
+        from ..plugins import scaffold
+        from .dialogs import message
+
+        parts = [key for key, box in self.parts.items() if box.isChecked()]
+        try:
+            target = scaffold.create(self.folder.text().strip() or str(Path.home()), self.name.text(),
+                                     title=self.title_edit.text(), description=self.description.text(),
+                                     author=self.author.text(), email=self.email.text(), parts=parts)
+        except (ValueError, FileExistsError, OSError) as exc:
+            message(self, "warning", tr("Nuovo plugin"), str(exc))
+            return
+        self.created = target
+        message(self, "info", tr("Nuovo plugin"), tr("Progetto del plugin scritto in {0}.\n\nProssimi passi:\n{1}",
+                                                      target, scaffold.next_steps(target)))
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+        self.accept()

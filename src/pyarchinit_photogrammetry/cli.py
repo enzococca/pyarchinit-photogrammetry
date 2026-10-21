@@ -1558,6 +1558,31 @@ def pa_pottery_save(mesh_path: Path, sito: str, area: str = "", us: str = "",
     typer.echo(json.dumps(out, indent=1, default=str))
 
 
+@plugins_app.command("new")
+def plugins_new(name: str = typer.Argument(..., help="name of the plugin: letters, digits and dashes"),
+                directory: str = typer.Option(".", "--dir", help="where the project folder ppg-NAME is written"),
+                title: str = typer.Option("", help="shown in the interface (the name by default)"),
+                description: str = typer.Option("", help="what the plugin does, in one line"),
+                author: str = typer.Option("", help="the author"),
+                email: str = typer.Option("", help="e-mail of the author"),
+                parts: str = typer.Option("action,background,command,exporter",
+                                          help="what the plugin starts with, comma-separated: action (in the "
+                                               "menu Plugin), background (with the progress bar), command (ppg "
+                                               "plugin NAME), exporter (File > Esporta)")):
+    """Write the project of a new plugin to start from: a working plugin with the parts chosen,
+    its tests, READMEs, licence and release workflow."""
+    from .plugins import scaffold
+
+    chosen = [p.strip() for p in parts.split(",") if p.strip()]
+    try:
+        target = scaffold.create(directory, name, title=title, description=description, author=author, email=email,
+                                 parts=chosen)
+    except (ValueError, FileExistsError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+    typer.echo(f"plugin project written in {target}\n" + scaffold.next_steps(target))
+
+
 @plugins_app.command("list")
 def plugins_list():
     """The plugins found (installed by the program or with pip), enabled or not."""

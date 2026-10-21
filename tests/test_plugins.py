@@ -287,3 +287,85 @@ def test_window_menu_export_and_dialog(tmp_path, monkeypatch, qapp):
     finally:
         w.setWindowModified(False)
         w.close()
+
+
+def test_new_plugin_project(tmp_path):
+    """``ppg plugins new``: a working plugin with the parts chosen, activated with a context of its
+    own, its own tests passing (the entry-point test skipped: not installed); the names derived;
+    a folder already there is not overwritten; a plugin with fewer parts."""
+    import importlib
+    import subprocess
+    import sys
+
+    from pyarchinit_photogrammetry.plugins import Context, scaffold
+
+    assert scaffold.names("Conta Foto") == {"slug": "conta-foto", "distribution": "ppg-conta-foto",
+                                            "package": "ppg_conta_foto", "class_name": "ContaFotoPlugin"}
+    assert scaffold.slug_of("ppg-Riepilogo_2") == "riepilogo-2"
+    target = scaffold.create(tmp_path, "Conta Foto", title="Conta foto", description="counts the photos",
+                             author="Enzo Cocca", email="enzo@example.org")
+    assert target == tmp_path / "ppg-conta-foto"
+    files = {str(p.relative_to(target)) for p in target.rglob("*") if p.is_file()}
+    assert files == {"pyproject.toml", "ppg_conta_foto/__init__.py", "tests/conftest.py", "tests/test_ppg_conta_foto.py",
+                     "README.md", "README.it.md", "LICENSE", ".gitignore", ".github/workflows/release.yml"}
+    pyproject = (target / "pyproject.toml").read_text()
+    assert 'conta-foto = "ppg_conta_foto:ContaFotoPlugin"' in pyproject and 'email = "enzo@example.org"' in pyproject
+    sys.path.insert(0, str(target))
+    try:
+        module = importlib.import_module("ppg_conta_foto")
+        context = Context("conta-foto", tmp_path / "ctx")
+        module.ContaFotoPlugin().activate(context)
+        c = context.contributions
+        assert [a.title for a in c.actions] == ["Riepilogo del chunk", "Statistiche del DEM"]
+        assert list(c.commands) == ["conta-foto"] and [e.suffix for e in c.exporters] == [".md"]
+    finally:
+        sys.path.remove(str(target))
+        sys.modules.pop("ppg_conta_foto", None)
+    env = {**os.environ, "PYTHONPATH": str(target), "PPG_PLUGINS_ENVIRONMENT": "0"}
+    r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--rootdir", str(target),
+                        str(target / "tests")], capture_output=True, text=True, env=env, close_fds=False)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "5 passed, 1 skipped" in r.stdout, r.stdout
+    with pytest.raises(FileExistsError):
+        scaffold.create(tmp_path, "conta-foto")
+    with pytest.raises(ValueError):
+        scaffold.create(tmp_path, "1-non-valido")
+    with pytest.raises(ValueError):
+        scaffold.create(tmp_path, "vuoto", parts=[])
+    small = scaffold.create(tmp_path / "s", "solo-comando", parts=["command"])
+    code = (small / "ppg_solo_comando" / "__init__.py").read_text()
+    assert "add_command" in code and "add_action" not in code and "add_exporter" not in code and "rasterio" not in code
+    assert "cd " in scaffold.next_steps(small) and "pull request" in scaffold.next_steps(small)
+
+
+def test_command_line_new(tmp_path):
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    runner = CliRunner()
+    r = runner.invoke(app, ["plugins", "new", "Prova CLI", "--dir", str(tmp_path), "--parts", "command,exporter",
+                            "--author", "Enzo"])
+    assert r.exit_code == 0, r.output
+    assert (tmp_path / "ppg-prova-cli" / "ppg_prova_cli" / "__init__.py").exists() and "pip install -e ." in r.output
+    r = runner.invoke(app, ["plugins", "new", "prova-cli", "--dir", str(tmp_path)])
+    assert r.exit_code == 1 and "exists already" in r.output
+
+
+def test_new_plugin_dialog(tmp_path, monkeypatch, qapp):
+    from pyarchinit_photogrammetry.gui import dialogs, plugins_dialog
+
+    shown = []
+    monkeypatch.setattr(dialogs, "message", lambda *a, **k: shown.append(a))
+    monkeypatch.setattr(plugins_dialog.QDesktopServices, "openUrl", staticmethod(lambda url: True))
+    d = plugins_dialog.NewPluginDialog()
+    d.name.setText("Dalla Finestra")
+    d.folder.setText(str(tmp_path))
+    d.parts["background"].setChecked(False)
+    d.create()
+    assert d.created == tmp_path / "ppg-dalla-finestra" and (d.created / "pyproject.toml").exists()
+    assert "rasterio" not in (d.created / "ppg_dalla_finestra" / "__init__.py").read_text()
+    assert shown and "Prossimi passi" in shown[-1][3]
+    d.name.setText("")  # a bad name is reported, nothing written
+    d.create()
+    assert "not a plugin name" in shown[-1][3]
