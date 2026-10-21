@@ -14,23 +14,100 @@ import pyarchinit_photogrammetry as ppg
 
 ## Chunk workflow
 
-| Method | Notes |
+One row per method of `Chunk`, in the order of the workflow; the parameters that matter most. The
+longer explanations follow the table.
+
+| Method | What it does |
 | --- | --- |
-| `add_photos(paths, recursive=False)` | files or folders; sensors grouped by body, lens and resolution; EXIF GPS becomes camera reference |
-| `detect_markers(target_type="aruco_4x4_50")` | creates markers `target <code>` with projections |
-| `match_photos(quality, keypoint_limit, pair_selection)` | quality: ultra/high/medium/low/lowest; pairs: auto/exhaustive/generic/sequential/reference (`auto`: every pair up to 40 photos, above that `generic` - the pairs that overlap, found first on photos reduced to 1024 pixels, as Metashape's generic preselection; the 20 strongest pairs of each photo are matched in full) |
-| `align_cameras(mapper="auto")` | `mapper`: `incremental` (one photo after the other, COLMAP), `global` (all the cameras at once, GLOMAP: rotations, positions, then the adjustment on `tiepoint_limit / 4` tracks per photo, retriangulated - on the 57 photos of the Tell Sultan tutorial 58 s against 293 s, the same cameras within 2 cm) or `auto` (global from 40 photos, incremental for fewer, for 360-degree rigs and calibrations held fixed, and when the global one places less than 90 % of the photos; `meta["sfm"]["mapper"]` says which ran). Resets the transform; re-georeferences automatically when references exist. Photos are aligned with one focal length (square pixels): fitting fx and fy separately can drift into a degenerate solution. The result stays in the sensor model (`OPENCV` with fx = fy, no tangential distortion); a sensor calibrated with fx != fy or tangential distortion is aligned as it is, and `optimize_cameras()` refines every parameter |
-| `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4)` | bundle adjustment, returns the reprojection error (px). With 3 or more control points (markers with an enabled reference, not check points) a free adjustment is followed by one where the markers are fixed points at their reference coordinates, observed in the photos (each measurement weighs `marker_weight` tie point observations): the block bends to fit them, which a similarity alone cannot do. Control scale bars (2 or more, or with control points) enter the same way: their markers are fixed at `engine.sfm.bar_anchors` (see *Scale bars*). `meta["sfm"]["optimize"]` reports `control_points`, `scale_bars` and the control/check point and bar RMSE before and after (`ppg optimize`). `engine="ppg"`: our own adjustment instead (`engine.bundle`), with `gnss="plain"` or `"bias"` and `rolling_shutter=True` |
-| `engine.bundle.problem_from_chunk(chunk, rec, use_markers, gnss, rolling_shutter)`, `bundle.adjust(problem)`, `bundle.write_back(...)` | our own bundle adjustment: sparse trust-region least squares (scipy; the Jacobian by finite differences grouped by the structure: a residual depends on one photo, one point, one camera), projection with the COLMAP camera models. Control points pulled to their reference by their accuracy (not fixed), control scale bars as distances between their markers, GNSS positions of the photos with a bias per flight (`bundle.flights`: per sensor, a new flight after 20 minutes without photos), rolling shutter (a linear and an angular velocity per photo, the time of an observation from its row; a weak prior towards a still camera, as large as 2 pixels of shift at the depth of the photo: on photos with a global shutter the velocities stay close to zero). Report: `gnss_bias` (per flight, in the CRS), `rolling_shutter_m`. Rigs (faces of 360-degree photos) are refused: COLMAP's adjustment keeps them |
-| `import_reference(csv, crs, columns="nxyz")`, `export_reference(csv)` | `n` label, `x y z`, `a` accuracy, `-` skip |
-| `add_marker`, `add_marker_projection`, `add_scalebar`, `triangulate_markers` | manual markers and scale bars (see *Scale bars*) |
-| `update_transform(use_cameras=None)` | weighted 7-parameter fit; returns control/check RMSE, per-marker and per-bar errors |
-| `build_depth_maps(quality, filter_mode, backend)` | backends: auto/cpu/colmap/openmvs |
-| `build_point_cloud()`, `build_model(source, surface, face_count, voxel_size, vertex_colors)`, `build_texture(texture_size, page_size=8192)` | source: `point_cloud`, `tie_points` or `depth_maps` (see below). A texture larger than `page_size` is split into pages as in Metashape (`model_texture.jpg`, `model_texture_1.jpg`...; `TextureFile` comments and the `texnumber` of every face in `model.ply`, as MeshLab reads them): the generic mapping puts groups of nearby faces on each page, the orthophoto mapping a tile of the plan (the steep faces on pages of their own). `engine.texturing.texture_pages(chunk)` lists the pages; exports write a material per page (OBJ), the pages and `texnumber` (PLY), a mesh per page (GLB); the 3D view shows them side by side in one reduced image (`display_texture`); versions, undo, texture patches and the Metashape import (pages and `texnumber` of `mesh.ply`) carry every page |
-| `build_dem(resolution, source)`, `build_orthomosaic(resolution, surface, blending, colour_correction, ghosting, fill_holes)`, `calibrate_colours()` | GeoTIFF in the chunk CRS (see *Seamless orthomosaic*) |
-| `export_point_cloud`, `export_model`, `export_cameras(fmt="csv"/"colmap")`, `export_dem`, `export_orthomosaic`, `generate_report` | world coordinates |
+| `add_photos(paths, recursive=False)` | files or folders; sensors grouped by body, lens and resolution; the EXIF GPS becomes the camera reference |
+| `detect_markers(target_type="aruco_4x4_50")` | markers `target <code>` with their projections |
+| `match_photos(quality, keypoint_limit, pair_selection)` | keypoints and matches; `pair_selection` chooses which pairs are matched (*Pairs*, below) |
+| `align_cameras(mapper="auto")` | the photos placed, by the global or the incremental mapper (*Mappers*, below); the transform is reset and the georeference made again when references exist |
+| `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4)` | bundle adjustment of poses, calibration and tie points, on the control points and scale bars when there are any (*Camera optimisation*, below); returns the reprojection error (px) |
+| `import_reference(csv, crs, columns="nxyz")` | references of markers and cameras from a text file: `n` label, `x y z`, `a` accuracy, `-` skip |
+| `export_reference(csv)` | the references to a text file |
+| `add_marker(...)`, `add_marker_projection(...)` | markers by hand (how they are placed: *Scale bars*) |
+| `add_scalebar(marker_a, marker_b, distance)` | a scale bar between two markers (*Scale bars*) |
+| `triangulate_markers()` | the markers placed from their projections (two photos or more), or on the surface from one |
+| `update_transform(use_cameras=None)` | the similarity onto the references (weighted, 7 parameters); returns the control and check RMSE and the error of every marker and bar |
+| `build_depth_maps(quality, filter_mode, backend)` | depth maps; backends `auto`, `cpu`, `patchmatch`, `colmap`, `openmvs` |
+| `build_point_cloud()` | the dense cloud from the depth maps |
+| `build_model(source, surface, face_count, voxel_size, vertex_colors)` | the mesh from `point_cloud`, `tie_points` or `depth_maps` (*Mesh from depth maps*, below) |
+| `build_texture(texture_size, page_size=8192)` | the texture of the model, in pages above `page_size` (*Texture pages*, below) |
+| `build_dem(resolution, source)` | the DEM, a GeoTIFF in the chunk CRS |
+| `build_orthomosaic(resolution, surface, blending, colour_correction, ghosting, fill_holes)` | the orthomosaic on the DEM or on the model (*Seamless orthomosaic and colour correction*) |
+| `calibrate_colours()` | exposure and vignetting of the photos (*Seamless orthomosaic and colour correction*) |
+| `export_point_cloud(path)`, `export_model(path)`, `export_dem(path)`, `export_orthomosaic(path)` | the products in world coordinates (formats and options: *Exports for the web*, *Confidence, cleaning and cropping*) |
+| `export_cameras(fmt="csv")` | the cameras, `csv` or `colmap` |
+| `generate_report(path)` | the HTML report of the chunk |
 
 Every processing method accepts `progress=callback(fraction, message)`.
+
+### Pairs
+
+`pair_selection` is `auto`, `exhaustive`, `generic`, `sequential` or `reference`. `auto` matches every
+pair up to 40 photos; above that it is `generic`: the pairs that overlap are found first on the photos
+reduced to 1024 pixels (as Metashape's generic preselection) and the 20 strongest pairs of each photo
+are matched in full. `quality` is `ultra`, `high`, `medium`, `low` or `lowest`: the photos at full
+size or reduced to 1/2, 1/4, 1/8, 1/16 of their side.
+
+### Mappers
+
+`mapper` is `incremental` (one photo after the other, COLMAP), `global` (all the cameras at once,
+GLOMAP: rotations, positions, then the adjustment on `tiepoint_limit / 4` tracks per photo,
+retriangulated; on the 57 photos of the Tell Sultan tutorial 58 s against 293 s, the same cameras
+within 2 cm) or `auto`: global from 40 photos, incremental for fewer, for 360-degree rigs and
+calibrations held fixed, when the global one places less than 90 % of the photos, and when its
+cameras do not fit the GPS of the photos. `meta["sfm"]["mapper"]` says which ran. Photos are aligned
+with one focal length (square pixels): fitting fx and fy separately can drift into a degenerate
+solution. The result stays in the sensor model (`OPENCV` with fx = fy, no tangential distortion); a
+sensor calibrated with fx != fy or tangential distortion is aligned as it is, and `optimize_cameras()`
+refines every parameter.
+
+### Camera optimisation
+
+With 3 or more control points (markers with an enabled reference, not check points) a free
+adjustment is followed by one where the markers are fixed points at their reference coordinates,
+observed in the photos (each measurement weighs `marker_weight` tie point observations): the block
+bends to fit them, which a similarity alone cannot do. The fixed points are reached by continuation:
+moved in steps from where the block sees them to their references, with an adjustment at each step,
+so that no step starts far from its solution (a single adjustment with the points fixed metres away
+diverges, the calibration running away; on the 997 photos of Tell Tuqan the targets start 1.8 m off
+and are reached in 20 steps). On big blocks (more than 2.5 million observations) the steps run on a
+copy with the strongest tracks, every photo keeping its share; then the poses go back to the whole
+block, every tie point is triangulated again, the points that no longer fit are dropped and one
+adjustment of everything closes. Control scale bars (2 or more, or with control points) enter the
+same way: their markers are fixed at `engine.sfm.bar_anchors` (see *Scale bars*).
+`meta["sfm"]["optimize"]` reports `control_points`, `scale_bars`, `steps` and the control/check point
+and bar RMSE before and after (`ppg optimize`).
+
+`engine="ppg"` uses our own adjustment instead (below), with `gnss="plain"` or `"bias"` and
+`rolling_shutter=True`.
+
+### Our own bundle adjustment
+
+`engine.bundle.problem_from_chunk(chunk, rec, use_markers, gnss, rolling_shutter)`,
+`bundle.adjust(problem)` and `bundle.write_back(...)`: sparse trust-region least squares (scipy; the
+Jacobian by finite differences grouped by the structure: a residual depends on one photo, one point,
+one camera), projection with the COLMAP camera models. Control points pulled to their reference by
+their accuracy (not fixed), control scale bars as distances between their markers, GNSS positions of
+the photos with a bias per flight (`bundle.flights`: per sensor, a new flight after 20 minutes
+without photos), rolling shutter (a linear and an angular velocity per photo, the time of an
+observation from its row; a weak prior towards a still camera, as large as 2 pixels of shift at the
+depth of the photo: on photos with a global shutter the velocities stay close to zero). Report:
+`gnss_bias` (per flight, in the CRS), `rolling_shutter_m`. Rigs (faces of 360-degree photos) are
+refused: COLMAP's adjustment keeps them.
+
+### Texture pages
+
+A texture larger than `page_size` is split into pages as in Metashape (`model_texture.jpg`,
+`model_texture_1.jpg`...; `TextureFile` comments and the `texnumber` of every face in `model.ply`,
+as MeshLab reads them): the generic mapping puts groups of nearby faces on each page, the orthophoto
+mapping a tile of the plan (the steep faces on pages of their own). `engine.texturing.texture_pages(chunk)`
+lists the pages; exports write a material per page (OBJ), the pages and `texnumber` (PLY), a mesh
+per page (GLB); the 3D view shows them side by side in one reduced image (`display_texture`);
+versions, undo, texture patches and the Metashape import (pages and `texnumber` of `mesh.ply`) carry
+every page.
 
 ### Mesh from depth maps
 
@@ -126,13 +203,31 @@ choose what goes into the products. Noise (`NOISE_CLASSES` = 7, 18) never makes 
 | Call | Description |
 | --- | --- |
 | `chunk.point_classes()` | points per class of the dense cloud, reading only its class column (`PointCloud.read_class_counts(path)`) |
-| `chunk.build_dem(..., classes=[2])` | DEM from these classes only: `[2]` gives a terrain model (DTM) without vegetation, people or tools; the gaps under what is left out are interpolated; `meta["dem"]["classes"]` |
-| `chunk.build_orthomosaic(..., hide_classes=[3, 71])` | transparent where the visible surface (highest dense point, gridded at the point spacing and widened by one cell) is of these classes; `engine.ortho.hidden_cells(chunk, origin, shape, resolution, classes)`; `meta["orthomosaic"]["hidden_classes"]` |
+| `chunk.build_dem(..., classes=[2])` | DEM from these classes only: `[2]` gives a terrain model (DTM) without vegetation, people or tools; `meta["dem"]["classes"]` |
+| `chunk.build_orthomosaic(..., hide_classes=[3, 71])` | transparent where the visible surface is of these classes; `meta["orthomosaic"]["hidden_classes"]` |
 | `chunk.build_model(source="point_cloud", ..., classes=[2, 64])` | mesh from these classes (the surface closes over what is left out); only with the dense cloud as source; `meta["model"]["classes"]` |
-| `sections.section(chunk, p1, p2, source=, classes=)`, `sections_along(..., classes=)`, `plan_slice(chunk, z, classes=)` | from the dense cloud, only the points of these classes; from the model, only the stretches of the cut whose middle is nearest to a point of these classes and whose ends lie on such points (not the parts the mesh interpolates over what is left out) |
+| `sections.section(chunk, p1, p2, source=, classes=)` | a section through the dense cloud or the model, limited to these classes |
+| `sections.sections_along(..., classes=)` | cross sections perpendicular to a baseline, with the same class filter |
+| `sections.plan_slice(chunk, z, classes=)` | a horizontal slice of the model at height `z`, with the same class filter |
 | `chunk.export_point_cloud(path, classes=[64])` | only these classes (LAS keeps the class codes) |
 | `PointCloud.class_mask(classes=None, exclude=())` | boolean mask of the points to use |
-| `classify.classify_by_units(chunk, units, base_code=100, keep_manual=True)` | one class per stratigraphic unit (`unit_class_name`: `US 12 (area 1)`), points on the edge included; free codes from 100, the same code when run again (the old extent goes back to 1); returns per unit `name`, `code`, `sito`, `area_s`, `us`, `points`, `area_m2` (plan, of the polygons), `z_min`, `z_mean`, `z_max`; `units_table_csv(rows, path)` writes them (semicolons) |
+| `classify.classify_by_units(chunk, units, base_code=100, keep_manual=True)` | one class per stratigraphic unit (`unit_class_name`: `US 12 (area 1)`), points on the edge included; returns a row per unit |
+| `classify.units_table_csv(rows, path)` | writes the rows of `classify_by_units` to a CSV (semicolons) |
+
+**`chunk.build_dem(..., classes=[2])`** interpolates the gaps under what is left out.
+
+**`chunk.build_orthomosaic(..., hide_classes=[3, 71])`** takes as visible surface the highest dense
+point, gridded at the point spacing and widened by one cell;
+`engine.ortho.hidden_cells(chunk, origin, shape, resolution, classes)` gives those cells.
+
+**`sections.section(...)`**, `sections_along` and `plan_slice` with `classes=` take, from the dense
+cloud, only the points of these classes; from the model, only the stretches of the cut whose middle
+is nearest to a point of these classes and whose ends lie on such points (not the parts the mesh
+interpolates over what is left out).
+
+**`classify.classify_by_units(...)`** takes free codes from 100 and gives the same code when run
+again (the old extent goes back to 1); it returns per unit `name`, `code`, `sito`, `area_s`, `us`,
+`points`, `area_m2` (plan, of the polygons), `z_min`, `z_mean`, `z_max`.
 
 Command line: `ppg dem scavo.ppg --classes 2`, `ppg ortho scavo.ppg --hide-classes 3,71`,
 `ppg mesh scavo.ppg --classes 2,64`, `ppg section scavo.ppg x1 y1 x2 y2 --classes 2`,
@@ -149,13 +244,22 @@ listed in `chunk.meta["versions"]` with name, date and the parameters they were 
 
 | Call | Description |
 | --- | --- |
-| `versions.keep_active(chunk, product, move=False)` | puts the active version among the kept ones (copied; moved with `move` when its files are inside the chunk folder: a file of another program is always copied); returns the entry |
+| `versions.keep_active(chunk, product, move=False)` | puts the active version among the kept ones; returns the entry |
 | `versions.restore(chunk, product, entry)` | undoes a `keep_active(move=True)` (a build that failed) |
-| `versions.set_active_name(chunk, product, name)`, `active_info(chunk, product)` | name and date of the active version (by default `DEM del 16/10 11:20 (classi 2)`) |
-| `versions.versions(chunk, product)`, `version_file(chunk, product, id)` | kept versions, main file of one |
+| `versions.set_active_name(chunk, product, name)` | names the active version (by default `DEM del 16/10 11:20 (classi 2)`) |
+| `versions.active_info(chunk, product)` | name and date of the active version |
+| `versions.versions(chunk, product)` | the kept versions |
+| `versions.version_file(chunk, product, id)` | the main file of a kept version |
 | `versions.activate(chunk, product, id)` | makes a kept version active; the active one is kept in its place |
-| `versions.rename(chunk, product, id_or_None, name)`, `delete(chunk, product, id)` | |
-| `versions.dem_difference(chunk, id, out=None)` | active DEM minus a kept one on the grid of the active one (GeoTIFF float32): surface minus terrain = height of walls and vegetation, after minus before = excavated depth |
+| `versions.rename(chunk, product, id_or_None, name)` | renames a kept version (`None`: the active one) |
+| `versions.delete(chunk, product, id)` | deletes a kept version and its files |
+| `versions.dem_difference(chunk, id, out=None)` | active DEM minus a kept one, on the grid of the active one (GeoTIFF float32) |
+
+**`versions.keep_active(...)`** copies the active version, or moves it with `move` when its files
+are inside the chunk folder: a file of another program is always copied.
+
+**`versions.dem_difference(...)`**: surface minus terrain = height of walls and vegetation, after
+minus before = excavated depth.
 
 `chunk.build_depth_maps(..., skip_unreadable=True)` leaves out photos that cannot be read
 (`chunk.unreadable_photos()`: missing, empty placeholders of files kept online only, not
@@ -171,16 +275,33 @@ fixes models written by earlier versions (done before the depth maps and the cam
 
 | Call | Description |
 | --- | --- |
-| `chunk.compute_confidence("point_cloud" or "model", tol=0.01)` | depth maps agreeing on each point or vertex (within `tol` of the distance; half an edge for a vertex), stored as the `confidence` property of the PLY (and an extra bytes dimension of LAS exports); returns the statistics |
+| `chunk.compute_confidence("point_cloud" or "model", tol=0.01)` | depth maps agreeing on each point or vertex, stored as the `confidence` property of the PLY; returns the statistics |
 | `engine.confidence.depth_map_support(chunk, points, tol, abs_tol=None)` | the same count for any points of the internal frame |
 | `chunk.clean_point_cloud(min_confidence=, remove_classes=, statistical=(k, std), sparse=(radius, n), groups=(distance, n), color=((r, g, b), tol))` | removes what `engine.cleaning.point_filters` selects (distances 0 = automatic from the point spacing); returns the counts per filter |
 | `chunk.clean_model(min_confidence=, min_component=, max_edge=, repair=True, fill_holes=, smooth=, target_faces=)` | model cleaning (`engine.cleaning.face_filters` for the counts) |
 | `chunk.clean_tie_points(max_reprojection_error=, min_image_count=, max_reconstruction_uncertainty=, max_projection_accuracy=, optimize=False)` | gradual selection (`engine.tiepoints.tie_point_metrics`, `select_tie_points`, `remove_tie_points`) |
-| `engine.cleaning.delete_points(chunk, mask, keep_selected=False)`, `delete_faces(...)` | Metashape's delete / crop selection |
-| `chunk.export_dem(path, region=)`, `export_orthomosaic(path, region=)`, `export_model(path, region=, zmin=, zmax=)`, `export_point_cloud(path, region=, zmin=, zmax=)` | exports cut by a polygon in the chunk CRS (an `(N, 2)` ring, a box, WKT, GeoJSON or a shapely geometry: `engine.crop.as_polygon`) |
-| `chunk.crop_dem(region)`, `crop_orthomosaic(region)`, `crop_model(region, zmin, zmax)`, `crop_point_cloud(region=)` | the same in the project; a product that is a file of another program is never overwritten (`chunk.own_product_path`) |
+| `engine.cleaning.delete_points(chunk, mask, keep_selected=False)` | Metashape's delete / crop selection on the dense cloud |
+| `engine.cleaning.delete_faces(...)` | the same on the faces of the model |
+| `chunk.export_dem(path, region=)` | the DEM cut by a polygon in the chunk CRS |
+| `chunk.export_orthomosaic(path, region=)` | the orthomosaic cut by a polygon |
+| `chunk.export_model(path, region=, zmin=, zmax=)` | the model cut by a polygon and between two heights |
+| `chunk.export_point_cloud(path, region=, zmin=, zmax=)` | the dense cloud cut by a polygon and between two heights |
+| `chunk.crop_dem(region)` | the same cut, written in the project |
+| `chunk.crop_orthomosaic(region)` | the same for the orthomosaic |
+| `chunk.crop_model(region, zmin, zmax)` | the same for the model |
+| `chunk.crop_point_cloud(region=)` | the same for the dense cloud |
+| `chunk.build_orthomosaic(..., workers=None, max_angle=70.0)` | the orthomosaic tile by tile, the tiles in parallel |
 
-`chunk.build_orthomosaic(..., workers=None, max_angle=70.0)` builds the orthomosaic tile by tile
+**`chunk.compute_confidence(...)`** counts the depth maps that agree within `tol` of the distance
+(half an edge for a vertex); the count is also an extra bytes dimension of LAS exports.
+
+**`chunk.export_dem(path, region=)`** and the other exports take the region as an `(N, 2)` ring, a
+box, WKT, GeoJSON or a shapely geometry (`engine.crop.as_polygon`).
+
+**`chunk.crop_dem(region)`** and the other crops never overwrite a product that is a file of another
+program (`chunk.own_product_path`).
+
+**`chunk.build_orthomosaic(..., workers=None, max_angle=70.0)`** builds the orthomosaic tile by tile
 (the surface read one window at a time, every tile written at once, overviews at the end): any
 size, the tiles in parallel; every cell takes the best of the photos that frame it (the four best
 are tried in turn against occlusions), so the choice never depends on the tile around it; cells
@@ -190,30 +311,83 @@ that every photo sees from further than `max_angle` degrees from the vertical st
 
 | Call | Description |
 | --- | --- |
-| `chunk.build_orthomosaic(..., blending="mosaic", blend_sigma=8.0)` | `mosaic`: the details of every cell from its best photo, the low frequencies blended across the seams over a few `blend_sigma` cells (Gaussian), so different exposures leave no edge and nothing is blurred; `disabled`: one photo per cell; `average`: every photo weighted by how well it sees the cell. A patch never changes the pixels around it: outside the patches the weights come from the photos the cells would take without any patch, inside a patch from its own cells (`engine.ortho._blend`) |
-| `chunk.calibrate_colours(vignetting=True, samples=20000)`, `engine.colour.estimate(chunk)` | exposure gain of every photo (per channel) and vignetting of every lens (`v(r) = b1 r^2 + b2 r^4 + b3 r^6` on the radius over the half diagonal), from surface points seen by several photos, least squares on all the observations at once (`scipy.sparse.linalg.lsqr`, outliers left out between rounds, mean log gain zero); stored in `chunk.meta["colour"]` with the colour scatter before/after |
-| `build_orthomosaic(colour_correction=None)`, `build_texture(colour_correction=None)` | None: the calibration of the chunk if there is one; True: measured first when missing; False: none (`engine.colour.Correction.correct(cam, image)`, applied as the photos are read) |
-| `build_orthomosaic(ghosting=False)` | where three or more of the candidate photos see a cell, the best one that agrees with their median colour (within 30 levels): people and vehicles seen by a few photos left out |
+| `chunk.build_orthomosaic(..., blending="mosaic", blend_sigma=8.0)` | how the photos are blended: `mosaic`, `disabled` (one photo per cell) or `average` |
+| `chunk.calibrate_colours(vignetting=True, samples=20000)` | exposure gain of every photo (per channel) and vignetting of every lens, stored in `chunk.meta["colour"]` |
+| `engine.colour.estimate(chunk)` | the same measurement as a module function |
+| `build_orthomosaic(colour_correction=None)` | None: the calibration of the chunk if there is one; True: measured first when missing; False: none |
+| `build_texture(colour_correction=None)` | the same option for the texture |
+| `build_orthomosaic(ghosting=False)` | with `True`, people and vehicles seen by a few photos are left out |
 | `build_orthomosaic(fill_holes=False)` | holes of at most 100 cells that no photo sees filled from their edges (`cv2.inpaint`, the cells of the same group only); larger holes stay transparent |
+
+**`chunk.build_orthomosaic(..., blending="mosaic", blend_sigma=8.0)`**: `mosaic` takes the details
+of every cell from its best photo, the low frequencies blended across the seams over a few
+`blend_sigma` cells (Gaussian), so different exposures leave no edge and nothing is blurred;
+`disabled`: one photo per cell; `average`: every photo weighted by how well it sees the cell. A
+patch never changes the pixels around it: outside the patches the weights come from the photos the
+cells would take without any patch, inside a patch from its own cells (`engine.ortho._blend`).
+
+**`chunk.calibrate_colours(...)`** fits the vignetting as `v(r) = b1 r^2 + b2 r^4 + b3 r^6` on the
+radius over the half diagonal, from surface points seen by several photos, least squares on all
+the observations at once (`scipy.sparse.linalg.lsqr`, outliers left out between rounds, mean log
+gain zero); `chunk.meta["colour"]` keeps the result with the colour scatter before/after.
+
+**`build_orthomosaic(colour_correction=None)`** and `build_texture` apply the correction
+(`engine.colour.Correction.correct(cam, image)`) as the photos are read.
+
+**`build_orthomosaic(ghosting=False)`**: where three or more of the candidate photos see a cell, the
+best one that agrees with their median colour (within 30 levels) is taken.
 
 ## Image quality and video
 
 | Call | Description |
 | --- | --- |
-| `engine.quality.estimate_quality(chunk, cams=None)` | sharpness of every photo relative to the sharpest of the chunk (0-1, `camera.meta["quality"]`): per cell of a 6 x 6 grid with texture, the finest detail over the detail a few pixels wide, along x and y, the lower of the two (motion blur in one direction counts), 80th percentile of the cells; independent of how much texture the scene has |
-| `engine.quality.low_quality(chunk, threshold=0.5)`, `sharpness(image)` | the blurred photos; the measure alone |
-| `engine.video.add_video(chunk, video, folder=None, srt=None, overlap=0.7, every=None, max_frames=None)` | frames added as photos: a new one when the view has moved by `1 - overlap` of its width (median shift of ORB matches, a frame with too few matches only counts when sharp), the sharpest in the next 0.4 s; or one every `every` seconds. The DJI `.SRT` beside the video (`[latitude] [longitude] [abs_alt]`, `GPS(lon,lat,alt)` or `GPS (lon, lat, alt)`) gives every frame its position (EPSG:4326, interpolated in time) |
-| `engine.video.extract_frames(video, folder, ...)`, `read_srt(path)`, `position_at(track, t)` | the parts |
+| `engine.quality.estimate_quality(chunk, cams=None)` | sharpness of every photo relative to the sharpest of the chunk (0-1, `camera.meta["quality"]`) |
+| `engine.quality.low_quality(chunk, threshold=0.5)` | the blurred photos |
+| `engine.quality.sharpness(image)` | the measure alone |
+| `engine.video.add_video(chunk, video, folder=None, srt=None, overlap=0.7, every=None, max_frames=None)` | frames of a video added as photos, a new one as the view moves or one every `every` seconds |
+| `engine.video.extract_frames(video, folder, ...)` | the frames alone, written as files |
+| `engine.video.read_srt(path)` | the positions of a DJI `.SRT` track |
+| `engine.video.position_at(track, t)` | the position of the track at a time, interpolated |
+
+**`engine.quality.estimate_quality(...)`** measures, per cell of a 6 x 6 grid with texture, the
+finest detail over the detail a few pixels wide, along x and y, the lower of the two (motion blur
+in one direction counts), 80th percentile of the cells; independent of how much texture the scene
+has.
+
+**`engine.video.add_video(...)`** adds a new frame when the view has moved by `1 - overlap` of its
+width (median shift of ORB matches, a frame with too few matches only counts when sharp), the
+sharpest in the next 0.4 s; or one every `every` seconds. The DJI `.SRT` beside the video
+(`[latitude] [longitude] [abs_alt]`, `GPS(lon,lat,alt)` or `GPS (lon, lat, alt)`) gives every frame
+its position (EPSG:4326, interpolated in time).
 
 ## Fisheye lenses and 360-degree photos
 
 | Call | Description |
 | --- | --- |
-| `chunk.add_photos(...)` | a lens whose EXIF name says fisheye (`LensModel`, or the camera model), or a 35 mm equivalent focal length up to 15 mm, gets an `OPENCV_FISHEYE` sensor (Kannala-Brandt: `fx, fy, cx, cy, k1-k4`); aligned with one focal length (`RADIAL_FISHEYE`) unless a calibration says otherwise. Projections far from the axis are no longer cut at the pinhole frame |
+| `chunk.add_photos(...)` | a fisheye lens gets an `OPENCV_FISHEYE` sensor (Kannala-Brandt: `fx, fy, cx, cy, k1-k4`) |
 | `chunk.set_sensor_model(sensor_key, model)` | another camera model for a sensor (`OPENCV`, `OPENCV_FISHEYE`, `FULL_OPENCV`, `PINHOLE`, any COLMAP model): focal length and principal point kept, distortion reset; align again after it |
-| `engine.panorama.add_panoramas(chunk, paths, size=None, fov=100, faces=None)` | equirectangular photos (width twice the height; others left out) become the faces of a cube (`front`, `right`, `back`, `left`, `up`, `down`, or the ones in `faces`): pinhole photos of `fov` degrees (more than 90: neighbouring faces overlap), `size` px a side (default: the resolution of the panorama in their centre), in `facce_360/<face>/<panorama>.jpg` beside the panoramas, one fixed `PINHOLE` sensor; `camera.meta["panorama"]`, `meta["face"]`; the GPS of the panorama is the reference of its faces |
-| alignment | the faces of every panorama are one frame of a COLMAP rig (`engine.panorama.rig_configs`: a rig per `facce_360` folder, faces at their known rotation, no translation): they keep one centre and their relative rotation, their calibration is not refined (also in `optimize_cameras`), pairs of faces of the same panorama are not matched. Depth maps pair a face with faces of other panoramas looking up to 50 degrees away (the panoramas are turned anyhow) |
-| `engine.panorama.split_panorama(path, folder=None, size=None, fov=100, faces=None)`, `face_maps(...)`, `face_rotation(yaw, pitch)` | the faces alone |
+| `engine.panorama.add_panoramas(chunk, paths, size=None, fov=100, faces=None)` | equirectangular photos become the faces of a cube: pinhole photos with one fixed `PINHOLE` sensor |
+| alignment | the faces of every panorama are one frame of a COLMAP rig (`engine.panorama.rig_configs`) |
+| `engine.panorama.split_panorama(path, folder=None, size=None, fov=100, faces=None)` | the faces of one panorama alone, written as files |
+| `engine.panorama.face_maps(...)` | the `cv2.remap` maps of a face |
+| `engine.panorama.face_rotation(yaw, pitch)` | the rotation from a face camera to the panorama frame |
+
+**`chunk.add_photos(...)`** recognises a lens whose EXIF name says fisheye (`LensModel`, or the
+camera model), or a 35 mm equivalent focal length up to 15 mm; the sensor is aligned with one focal
+length (`RADIAL_FISHEYE`) unless a calibration says otherwise. Projections far from the axis are no
+longer cut at the pinhole frame.
+
+**`engine.panorama.add_panoramas(...)`** takes equirectangular photos (width twice the height; others
+left out) and writes the faces of a cube (`front`, `right`, `back`, `left`, `up`, `down`, or the ones
+in `faces`): pinhole photos of `fov` degrees (more than 90: neighbouring faces overlap), `size` px a
+side (default: the resolution of the panorama in their centre), in `facce_360/<face>/<panorama>.jpg`
+beside the panoramas, one fixed `PINHOLE` sensor; `camera.meta["panorama"]`, `meta["face"]`; the GPS
+of the panorama is the reference of its faces.
+
+**alignment**: a rig per `facce_360` folder, faces at their known rotation, no translation: they
+keep one centre and their relative rotation, their calibration is not refined (also in
+`optimize_cameras`), pairs of faces of the same panorama are not matched. Depth maps pair a face
+with faces of other panoramas looking up to 50 degrees away (the panoramas are turned anyhow).
 
 ## PyArchInit media
 
@@ -226,60 +400,183 @@ resized copy (`resize`) - None where the file is not on this computer or on a re
 
 | Call | Description |
 | --- | --- |
-| `io.scans.read_ptx(path)`, `read_e57(path)` (extra `scans`: pye57), `read_scans(path)` | the scans of a file (`Scan`: registered `xyz`, `rgb`, `intensity` 0-1, scanner `position`); PTX: the grid of each scan with its 4 x 4 registration (empty returns left out); E57: the `data3D` scans with their poses, cartesian or spherical |
-| `io.scans.import_scans(doc, paths, label=None, crs=None, max_points=None)` | a new chunk whose dense cloud is all the scans in their registered frame (colours, else the intensity in grey), `meta["scans"]`, `meta["metric"]` (metres even in local coordinates: *Allinea chunk* without scale accepts it) |
-| `doc.align_chunks(photo_chunk, [scan_chunk], method="points", fix_scale=True)` | the scan on the photogrammetric chunk (global registration, then ICP); not needed when both are in the same CRS. On the synthetic trench the heights agree to 0.2 mm; in plan the walls of the dense cloud move the fit by a few millimetres |
-| `io.scans.colour_from_photos(target, photos)` | the points of `target` take the colour of the aligned photo of `photos` that sees them closest, among those where the model does not hide them (2 % tolerance) |
+| `io.scans.read_ptx(path)` | the scans of a PTX file: the grid of each scan with its 4 x 4 registration (empty returns left out) |
+| `io.scans.read_e57(path)` | the `data3D` scans of an E57 file with their poses, cartesian or spherical (extra `scans`: pye57) |
+| `io.scans.read_scans(path)` | either reader, by the extension of the file |
+| `io.scans.import_scans(doc, paths, label=None, crs=None, max_points=None)` | a new chunk whose dense cloud is all the scans in their registered frame; `meta["scans"]`, `meta["metric"]` |
+| `doc.align_chunks(photo_chunk, [scan_chunk], method="points", fix_scale=True)` | the scan on the photogrammetric chunk (global registration, then ICP); not needed when both are in the same CRS |
+| `io.scans.colour_from_photos(target, photos)` | the points of `target` take the colour of the aligned photo of `photos` that sees them closest |
+
+**`io.scans.read_ptx(path)`**, `read_e57` and `read_scans` return the scans of a file as `Scan`
+objects: registered `xyz`, `rgb`, `intensity` 0-1, scanner `position`.
+
+**`io.scans.import_scans(...)`** keeps the colours, else the intensity in grey; `meta["metric"]`
+means metres even in local coordinates (*Allinea chunk* without scale accepts it).
+
+**`doc.align_chunks(photo_chunk, [scan_chunk], method="points", fix_scale=True)`**: on the synthetic
+trench the heights agree to 0.2 mm; in plan the walls of the dense cloud move the fit by a few
+millimetres.
+
+**`io.scans.colour_from_photos(...)`** chooses among the photos where the model does not hide the
+point (2 % tolerance).
 
 ## Exports for the web
 
 | Call | Description |
 | --- | --- |
-| `chunk.export_orthomosaic(path, region=None, cog=None, quality=85)`, `chunk.export_dem(path, region=None, cog=None)`, `io.web.export_cog(src, dst, compression="auto")` | Cloud Optimized GeoTIFF (tiled, overviews, read by parts over the network): `jpeg` (the alpha of the orthomosaic becomes a mask), `webp` (keeps the alpha), `zstd`/`deflate`/`lzw` lossless with the predictor (floating point for DEMs) |
-| `chunk.export_point_cloud("x.copc.laz")`, `io.copc.write_copc(path, xyz, rgb, classification, confidence, crs_wkt)` | Cloud Optimized Point Cloud 1.0: LAZ 1.4 (point format 7, confidence as an extra byte) arranged in an octree (each node one point per cell of a 128^3 grid, the rest to its children, down to 100 000 points), one LAZ chunk per node, the `copc info` VLR and the hierarchy EVLR; QGIS, Potree and laspy's `CopcReader` read only what they show |
-| `chunk.export_model("x.glb")`, `io.web.export_glb(chunk, path)` | binary glTF with the texture (or the vertex colours), coordinates around the centre of the model (single precision keeps millimetres), the centre and the CRS in the scene `extras` and in `x.json` |
-| `engine.normalmap.light_model(chunk, target_faces=50000, texture_size=4096, folder=None)` | a light model for the web and game engines: quadric decimation (Open3D), faces in cells of an atlas, and for every texel the light surface moved along its normal onto the full model - its colour (texture or vertex colours) into `light_color.jpg`, its normal in the tangent space of the light face (x along U, y along V, OpenGL green up as glTF wants) into `light_normal.png`; `light.glb` (PBR material with both, local coordinates), `light.obj` + `.mtl` (`map_Kd`, `norm`). `bake_maps(full_verts, full_faces, light_verts, light_faces, ...)` the baking alone: on a rippled surface baked onto two triangles the decoded normals are within 3 degrees (median) |
-| `io.flythrough.orbit_video(chunk, path, kind=None, seconds=12, fps=25, size=(1280, 720), pitch=35, zoom=1, turns=1, backend="auto")` | an MP4 of a camera orbiting the model or the cloud: VTK off screen (with the texture) or the software renderer of the 3D view (points sampled on the surface, z-buffered), OpenCV writer (H.264 or MPEG-4) |
-| `chunk.export_3dtiles(folder, max_faces=150000)`, `io.web.export_3dtiles` | Cesium 3D Tiles 1.1: `tileset.json` and GLB tiles in a quadtree in plan, each level the model with fewer faces (vertex colours, clustering), the leaves at full detail; the root transform from east-north-up at the centre of the model to earth-centred coordinates (pyproj; heights as they are) |
-| `chunk.export_i3s(path, mode="global", max_faces=20000, texture_size=2048)`, `io.i3s.export_slpk(chunk, path, ...)`, `io.i3s.read_slpk(path)` | I3S 1.7 Integrated Mesh scene layer package (`.slpk`: ArcGIS Pro, ArcGIS Online and Earth, CesiumJS, loaders.gl): a quadtree in plan with levels of detail (leaves with at most `max_faces` faces, the other nodes clustered to that many, a root without mesh), every node with a texture of its own, a power of two sized by what it shows up to `texture_size` (a leaf whose faces lie together in the model's texture, as with an orthophoto mapping, takes that part as it is and bakes only its few other faces beside it; other leaves bake the texture pages or vertex colours face by face; other nodes cast onto the model), node pages, gzip geometry buffers, the MD5 hash table of the paths last; `mode="global"` WGS84 with boxes oriented east-north-up and earth-centred normals, `mode="local"` the projected CRS of the chunk (it needs an EPSG code in metres); `read_slpk` reads a package back (layer, nodes, geometries) |
+| `chunk.export_orthomosaic(path, region=None, cog=None, quality=85)` | the orthomosaic as a Cloud Optimized GeoTIFF with the compression `cog` |
+| `chunk.export_dem(path, region=None, cog=None)` | the DEM as a Cloud Optimized GeoTIFF |
+| `io.web.export_cog(src, dst, compression="auto")` | any GeoTIFF as a Cloud Optimized GeoTIFF |
+| `chunk.export_point_cloud("x.copc.laz")` | the dense cloud as a Cloud Optimized Point Cloud 1.0 |
+| `io.copc.write_copc(path, xyz, rgb, classification, confidence, crs_wkt)` | the COPC writer for any points |
+| `chunk.export_model("x.glb")` | binary glTF with the texture (or the vertex colours) |
+| `io.web.export_glb(chunk, path)` | the same as a module function |
+| `engine.normalmap.light_model(chunk, target_faces=50000, texture_size=4096, folder=None)` | a light model for the web and game engines: `light.glb`, `light.obj` + `.mtl`, `light_color.jpg`, `light_normal.png` |
+| `engine.normalmap.bake_maps(full_verts, full_faces, light_verts, light_faces, ...)` | the baking alone |
+| `io.flythrough.orbit_video(chunk, path, kind=None, seconds=12, fps=25, size=(1280, 720), pitch=35, zoom=1, turns=1, backend="auto")` | an MP4 of a camera orbiting the model or the cloud |
+| `chunk.export_3dtiles(folder, max_faces=150000)` | Cesium 3D Tiles 1.1: `tileset.json` and GLB tiles in a quadtree in plan |
+| `io.web.export_3dtiles` | the same as a module function |
+| `chunk.export_i3s(path, mode="global", max_faces=20000, texture_size=2048)` | I3S 1.7 Integrated Mesh scene layer package (`.slpk`: ArcGIS Pro, ArcGIS Online and Earth, CesiumJS, loaders.gl) |
+| `io.i3s.export_slpk(chunk, path, ...)` | the same as a module function |
+| `io.i3s.read_slpk(path)` | reads a package back (layer, nodes, geometries) |
+
+**`chunk.export_orthomosaic(..., cog=)`**, `export_dem` and `export_cog` write a Cloud Optimized
+GeoTIFF (tiled, overviews, read by parts over the network): `jpeg` (the alpha of the orthomosaic
+becomes a mask), `webp` (keeps the alpha), `zstd`/`deflate`/`lzw` lossless with the predictor
+(floating point for DEMs).
+
+**`chunk.export_point_cloud("x.copc.laz")`** writes LAZ 1.4 (point format 7, confidence as an extra
+byte) arranged in an octree (each node one point per cell of a 128^3 grid, the rest to its
+children, down to 100 000 points), one LAZ chunk per node, the `copc info` VLR and the hierarchy
+EVLR; QGIS, Potree and laspy's `CopcReader` read only what they show.
+
+**`chunk.export_model("x.glb")`** keeps the coordinates around the centre of the model (single
+precision keeps millimetres), the centre and the CRS in the scene `extras` and in `x.json`.
+
+**`engine.normalmap.light_model(...)`**: quadric decimation (Open3D), faces in cells of an atlas,
+and for every texel the light surface moved along its normal onto the full model - its colour
+(texture or vertex colours) into `light_color.jpg`, its normal in the tangent space of the light
+face (x along U, y along V, OpenGL green up as glTF wants) into `light_normal.png`; `light.glb` (PBR
+material with both, local coordinates), `light.obj` + `.mtl` (`map_Kd`, `norm`).
+
+**`engine.normalmap.bake_maps(...)`**: on a rippled surface baked onto two triangles the decoded
+normals are within 3 degrees (median).
+
+**`io.flythrough.orbit_video(...)`** renders with VTK off screen (with the texture) or the software
+renderer of the 3D view (points sampled on the surface, z-buffered), OpenCV writer (H.264 or
+MPEG-4).
+
+**`chunk.export_3dtiles(...)`**: each level the model with fewer faces (vertex colours, clustering),
+the leaves at full detail; the root transform from east-north-up at the centre of the model to
+earth-centred coordinates (pyproj; heights as they are).
+
+**`chunk.export_i3s(...)`** builds a quadtree in plan with levels of detail (leaves with at most
+`max_faces` faces, the other nodes clustered to that many, a root without mesh), every node with a
+texture of its own, a power of two sized by what it shows up to `texture_size` (a leaf whose faces
+lie together in the model's texture, as with an orthophoto mapping, takes that part as it is and
+bakes only its few other faces beside it; other leaves bake the texture pages or vertex colours
+face by face; other nodes cast onto the model), node pages, gzip geometry buffers, the MD5 hash
+table of the paths last; `mode="global"` WGS84 with boxes oriented east-north-up and earth-centred
+normals, `mode="local"` the projected CRS of the chunk (it needs an EPSG code in metres).
 
 ## Measures
 
 | Call | Description |
 | --- | --- |
-| `archaeo.measures.surface_area(dem_path, polygon, model=None)` | inside a plan polygon: `plan` and `surface` areas from the DEM (each cell `sqrt(1 + gx^2 + gy^2)` times, border cells by the share inside), `mean_slope`, `z_min`, `z_max`; with a mesh in the same coordinates also `model_surface`, `model_plan`, `model_faces` (faces whose centre is inside) |
+| `archaeo.measures.surface_area(dem_path, polygon, model=None)` | inside a plan polygon: `plan` and `surface` areas from the DEM, `mean_slope`, `z_min`, `z_max`; with a mesh also `model_surface`, `model_plan`, `model_faces` |
 | `measures.slope_aspect_at(dem_path, x, y)` | slope and aspect (degrees; aspect clockwise from north, where the ground faces downhill, -1 flat) from the 3 x 3 cells (Horn) |
-| `measures.aspect_raster(dem_path, out)`, `archaeo.terrain.slope_degrees(dem_path, out)` | rasters of aspect and slope |
-| `measures.ground_surface(xyz, classes, cell=None)`, `height_above_ground(xyz, classes)` | the ground on a grid from the points of class 2 (median of each cell, holes interpolated) and the height of every point above it |
-| `archaeo.timeline.phases(doc)`, `phase_date(chunk)`, `set_phase_date(chunk, date)` | the chunks with a DEM as phases of the excavation in date order (`meta["date"]`, else the earliest EXIF date of the photos) |
-| `timeline.removed(doc, polygon=None)`, `suggested_relations(doc)`, `timeline(doc)`, `timeline_csv(report)` | volume removed and added from each phase to the next, and inside each unit drawn on the earlier phase; units exposed earlier that overlap in plan units exposed later as `Copre` / `Coperto da`; the whole report and its CSV |
-| `timeline.write_relations(pa, relations)`, `pa.add_relationships(sito, area, us, rels)` | the suggested relations added to the `rapporti` of the US forms (both ways; those already there left out) |
-| `archaeo.us_proposal.propose_for_chunk(chunk, units, first_us, area=None, sito=None, step=0.02, cuts=True, lang="it")` | US proposed for units without a number: `measure_units` (area, perimeter, DEM elevations, Munsell colour, majority class of the classified cloud), `contacts` (pairs that touch: length, share of each outline, enclosure, DEM step across the contact from a strip on each side), `propose` (numbers from the highest unit, USM from the masonry class, fills of cuts with their cut, *Copre* from the step, *Si appoggia a* against masonry; each relation with `why`) |
-| `us_proposal.write_proposal(pa, proposal, sito)`, `pa.next_us(sito)` | the chosen units as US forms (`create_us`: `node_uuid`, `entity_uuid`; existing forms left) and their relations in both directions; the number after the highest US of a site |
-| `chunk.provenance(product, path=None, operator=None)`, `core.paradata.provenance(...)` | W3C PROV-O in JSON-LD: the product (file, SHA-256, size, CRS, resolution, active version) as `prov:Entity`, the `prov:Activity` that made it with its settings, the entities it derives from back to the photos and the georeference (control/check RMSE), the program and the operator as agents |
-| `paradata.write_provenance(chunk, product, path)`, `paradata.summary(chunk, product)` | `<file>.prov.jsonld` beside an export or a published copy; a one-line summary (PyArchInit's note). `pa.publish_orthomosaic/dem/model` write both |
-| `io.qfield.export_package(chunk, folder, resolution=0.02, project=True)` | QField package: `ortofoto.tif` (COG JPEG at `resolution`), `dem.tif`, `rilievo.gpkg` (layers `unita` and `quote` with `ppg_id` and the PyArchInit columns), `<chunk>.qgs` (QGIS's Python, relative paths, value maps) and `ppg_qfield.json` (what was exported) |
-| `qfield.read_edits(folder)`, `qfield.import_edits(chunk, folder)` | the units and spot heights added, changed and deleted on the tablet; applied to `chunk.meta["drawings"]` |
-| `io.gpkg.read_table(path, table)`, `gpkg.geometry(blob)` | features of a GeoPackage table read with `sqlite3` (geometry from the GeoPackage binary format) |
-| `archaeo.munsell.calibrate_chart(rgb)`, `correct(rgb, ccm)` | a ColorChecker Classic found in an image (OpenCV `mcc`), the 3 x 3 correction matrix in linear light (OpenCV `ccm`, loss as CIEDE2000), applied to colours |
-| `munsell.munsell(rgb)`, `area_colour(raster, polygon, ccm=None)` | Munsell notation (illuminant C, colour-science; retried and, if it does not converge, the nearest chip in CIELAB) and nearest soil chart chip; the median colour of a raster inside a polygon, shadows and glare left out |
-| `archaeo.stones.find_stones(raster, segmenter, bounds=None, min_size=0.05, max_size=1.0)` | stone-by-stone drawing: SAM's automatic masks over any RGB raster (orthomosaic, orthophoto of an elevation) by tiles, a partition, then `keep_stones` (equivalent diameter between the sizes, solidity >= 0.75) |
-| `stones.export_stones(stones, path, scale=20)` | the outlines as DXF (layer `PIETRE`), SVG at 1:`scale` (millimetres on paper) or GeoJSON; `ai.sam.auto_units(..., path=raster)` segments any raster |
-| `chunk.build_relief(method="svf", radius=None, directions=16, min_size=None, max_size=None, scaling=2.0)` | relief visualisation of the DEM, product `method` in `<data>/terrain/` (parameters and the 2nd/98th percentiles in `meta["relief"]`): `svf` sky-view factor (1 - mean sin of the horizon angle), `openness_pos` / `openness_neg` (mean zenith angle of the horizon, degrees), `slrm` (DEM minus its mean over the radius, metres), `msrm` (multi-scale relief: mean difference of low-pass levels of radius `k ** scaling` from `min_size` to `max_size`), `multi_hillshade` (0-1); radius default about 20 cells |
-| `archaeo.relief.build_relief(dem_path, out, method, ...)`, `relief.compute(z, resolution, method, ...)` | the same on any DEM file (tiles with the margin each method needs, several threads; the result is that of the whole DEM) or array |
-| `measures.ground_dem(chunk)`, `ground_dem_at(path, x, y)` | a DTM kept as a version of the DEM (built from class 2 only) and its height at a point |
+| `measures.aspect_raster(dem_path, out)` | raster of aspect |
+| `archaeo.terrain.slope_degrees(dem_path, out)` | raster of slope |
+| `measures.ground_surface(xyz, classes, cell=None)` | the ground on a grid from the points of class 2 (median of each cell, holes interpolated) |
+| `measures.height_above_ground(xyz, classes)` | the height of every point above that ground |
+| `archaeo.timeline.phases(doc)` | the chunks with a DEM as phases of the excavation in date order |
+| `timeline.phase_date(chunk)` | the date of a phase (`meta["date"]`, else the earliest EXIF date of the photos) |
+| `timeline.set_phase_date(chunk, date)` | the date of a phase set by hand |
+| `timeline.removed(doc, polygon=None)` | volume removed and added from each phase to the next, and inside each unit drawn on the earlier phase |
+| `timeline.suggested_relations(doc)` | units exposed earlier that overlap in plan units exposed later, as `Copre` / `Coperto da` |
+| `timeline.timeline(doc)` | the whole report |
+| `timeline.timeline_csv(report)` | the report as CSV |
+| `timeline.write_relations(pa, relations)` | the suggested relations added to the `rapporti` of the US forms (both ways; those already there left out) |
+| `pa.add_relationships(sito, area, us, rels)` | relations added to the `rapporti` of one US form |
+| `archaeo.us_proposal.propose_for_chunk(chunk, units, first_us, area=None, sito=None, step=0.02, cuts=True, lang="it")` | US proposed for units without a number: measures, contacts, numbers and relations, each relation with `why` |
+| `us_proposal.write_proposal(pa, proposal, sito)` | the chosen units as US forms (`create_us`: `node_uuid`, `entity_uuid`; existing forms left) and their relations in both directions |
+| `pa.next_us(sito)` | the number after the highest US of a site |
+| `chunk.provenance(product, path=None, operator=None)` | W3C PROV-O in JSON-LD: the product, the activity that made it, what it derives from, the agents |
+| `core.paradata.provenance(...)` | the same as a module function |
+| `paradata.write_provenance(chunk, product, path)` | `<file>.prov.jsonld` beside an export or a published copy |
+| `paradata.summary(chunk, product)` | a one-line summary (PyArchInit's note) |
+| `io.qfield.export_package(chunk, folder, resolution=0.02, project=True)` | QField package: `ortofoto.tif`, `dem.tif`, `rilievo.gpkg`, `<chunk>.qgs` and `ppg_qfield.json` |
+| `qfield.read_edits(folder)` | the units and spot heights added, changed and deleted on the tablet |
+| `qfield.import_edits(chunk, folder)` | those edits applied to `chunk.meta["drawings"]` |
+| `io.gpkg.read_table(path, table)` | features of a GeoPackage table read with `sqlite3` |
+| `gpkg.geometry(blob)` | a geometry from the GeoPackage binary format |
+| `archaeo.munsell.calibrate_chart(rgb)` | a ColorChecker Classic found in an image (OpenCV `mcc`): the 3 x 3 correction matrix in linear light (OpenCV `ccm`, loss as CIEDE2000) |
+| `munsell.correct(rgb, ccm)` | the matrix applied to colours |
+| `munsell.munsell(rgb)` | Munsell notation (illuminant C, colour-science) and nearest soil chart chip |
+| `munsell.area_colour(raster, polygon, ccm=None)` | the median colour of a raster inside a polygon, shadows and glare left out |
+| `archaeo.stones.find_stones(raster, segmenter, bounds=None, min_size=0.05, max_size=1.0)` | stone-by-stone drawing: SAM's automatic masks over any RGB raster by tiles, a partition, then `keep_stones` |
+| `stones.export_stones(stones, path, scale=20)` | the outlines as DXF (layer `PIETRE`), SVG at 1:`scale` (millimetres on paper) or GeoJSON |
+| `ai.sam.auto_units(..., path=raster)` | segments any raster |
+| `chunk.build_relief(method="svf", radius=None, directions=16, min_size=None, max_size=None, scaling=2.0)` | relief visualisation of the DEM, product `method` in `<data>/terrain/`: `svf`, `openness_pos`, `openness_neg`, `slrm`, `msrm`, `multi_hillshade` |
+| `archaeo.relief.build_relief(dem_path, out, method, ...)` | the same on any DEM file (tiles with the margin each method needs, several threads; the result is that of the whole DEM) |
+| `relief.compute(z, resolution, method, ...)` | the same on an array |
+| `measures.ground_dem(chunk)` | a DTM kept as a version of the DEM (built from class 2 only) |
+| `measures.ground_dem_at(path, x, y)` | its height at a point |
+
+**`archaeo.measures.surface_area(...)`** counts each cell `sqrt(1 + gx^2 + gy^2)` times, border
+cells by the share inside; the mesh must be in the same coordinates and `model_faces` are the faces
+whose centre is inside.
+
+**`archaeo.us_proposal.propose_for_chunk(...)`** runs `measure_units` (area, perimeter, DEM
+elevations, Munsell colour, majority class of the classified cloud), `contacts` (pairs that touch:
+length, share of each outline, enclosure, DEM step across the contact from a strip on each side)
+and `propose` (numbers from the highest unit, USM from the masonry class, fills of cuts with their
+cut, *Copre* from the step, *Si appoggia a* against masonry; each relation with `why`).
+
+**`chunk.provenance(...)`** describes the product (file, SHA-256, size, CRS, resolution, active
+version) as `prov:Entity`, the `prov:Activity` that made it with its settings, the entities it
+derives from back to the photos and the georeference (control/check RMSE), the program and the
+operator as agents.
+
+**`paradata.write_provenance(...)`** and `summary`: `pa.publish_orthomosaic/dem/model` write both.
+
+**`io.qfield.export_package(...)`**: `ortofoto.tif` is a COG JPEG at `resolution`, `rilievo.gpkg`
+has the layers `unita` and `quote` with `ppg_id` and the PyArchInit columns, `<chunk>.qgs` is
+written by QGIS's Python (relative paths, value maps) and `ppg_qfield.json` says what was exported.
+
+**`munsell.munsell(rgb)`** retries and, if it does not converge, takes the nearest chip in CIELAB.
+
+**`archaeo.stones.find_stones(...)`** reads the orthomosaic or the orthophoto of an elevation;
+`keep_stones` keeps an equivalent diameter between the sizes and a solidity >= 0.75.
+
+**`chunk.build_relief(...)`** keeps the parameters and the 2nd/98th percentiles in `meta["relief"]`:
+`svf` sky-view factor (1 - mean sin of the horizon angle), `openness_pos` / `openness_neg` (mean
+zenith angle of the horizon, degrees), `slrm` (DEM minus its mean over the radius, metres), `msrm`
+(multi-scale relief: mean difference of low-pass levels of radius `k ** scaling` from `min_size` to
+`max_size`), `multi_hillshade` (0-1); radius default about 20 cells.
 
 ## Diagnostics of the alignment, calibration, markers
 
 | Call | Description |
 | --- | --- |
-| `engine.diagnostics.match_graph(chunk, verified=True)` | `{(camera key a, b): matches}` of every matched pair, from the COLMAP database (the matches that fit the geometry of the pair, else all candidates): also for photos that did not align |
+| `engine.diagnostics.match_graph(chunk, verified=True)` | `{(camera key a, b): matches}` of every matched pair, from the COLMAP database; also for photos that did not align |
 | `diagnostics.components(keys, graph, min_matches=1)` | groups of photos linked by pairs with enough matches, largest first (separate groups, isolated photos) |
-| `diagnostics.pair_matches(chunk, a, b)` | keypoints of the two photos and the candidate and verified matches (index pairs); `shared_tie_points(chunk, a, b)` the tie points seen by both; `residuals(chunk, key)` measured and reprojected pixels of the tie points of a photo |
+| `diagnostics.pair_matches(chunk, a, b)` | keypoints of the two photos and the candidate and verified matches (index pairs) |
+| `diagnostics.shared_tie_points(chunk, a, b)` | the tie points seen by both photos |
+| `diagnostics.residuals(chunk, key)` | measured and reprojected pixels of the tie points of a photo |
 | `Sensor.converted(model)` | the parameters in another camera model (focal length and principal point kept); `Chunk.set_sensor_model` uses it |
-| `Sensor.fixed` | the calibration is held: alignment (`constant_cameras`) and camera optimisation do not refine it, as for the faces of 360-degree photos. Imports no longer set it (their calibration is where the alignment starts) |
-| `chunk.merge_markers(markers, label=None)` | markers that are the same point made one: the first keeps its key, takes the measurements of all (in a photo measured in several, the one placed by hand), the first reference, the excluded photos; scale bars that ended at the others end at it |
+| `Sensor.fixed` | the calibration is held: alignment (`constant_cameras`) and camera optimisation do not refine it, as for the faces of 360-degree photos |
+| `chunk.merge_markers(markers, label=None)` | markers that are the same point made one: the first keeps its key |
 | `chunk.remove_markers(markers)` | markers (objects, keys or labels) removed with the scale bars that end at them |
+
+**`engine.diagnostics.match_graph(...)`** counts the matches that fit the geometry of the pair,
+else (`verified=False`) all candidates.
+
+**`Sensor.fixed`**: imports no longer set it (their calibration is where the alignment starts).
+
+**`chunk.merge_markers(...)`**: the first marker takes the measurements of all (in a photo measured
+in several, the one placed by hand), the first reference, the excluded photos; scale bars that
+ended at the others end at it.
 
 ## Undo and redo (interface)
 
@@ -296,41 +593,108 @@ the background.
 
 | Call | Description |
 | --- | --- |
-| `batch.step(op, chunks="all", **params)` | a step: one of `batch.OPERATIONS` (`detect_markers`, `import_reference`, `align_photos`, `match_photos`, `align_cameras`, `update_transform`, `optimize_cameras`, `field_check`, `build_depth_maps`, `build_point_cloud`, `build_model`, `build_texture`, `build_dem`, `build_orthomosaic`, `calibrate_colours`, `estimate_precision`, `export_point_cloud`, `export_model`, `export_dem`, `export_orthomosaic`, `generate_report`) with its parameters (the defaults completed, unknown names refused); `chunks`: `"all"`, `"enabled"` or labels/keys. Paths may use `{project}`, `{name}`, `{chunk}` |
-| `batch.run_batch(doc, steps, resume=True, retries=1, on_error="continue")` | every step on all its chunks, then the next; the project saved after each step of each chunk with the state in `<project>.ppg.files/batch.json`; `resume`: an unfinished batch with the same steps goes on (done steps are not run again, failed ones are tried again); a failing step is retried `retries` times, then the next steps of its chunk are skipped (or `BatchError` with `on_error="stop"`). Returns `done`, `failed` (`"chunk:step"` -> error), `skipped`, `seconds` |
-| `batch.load_steps(path)`, `save_steps(steps, path)`, `pending(doc, steps=None)`, `targets(doc, chunks)`, `run_step(doc, chunk, op, params)` | batch files (JSON), the state of an unfinished batch, the parts |
+| `batch.step(op, chunks="all", **params)` | a step: one of `batch.OPERATIONS` with its parameters (the defaults completed, unknown names refused); `chunks`: `"all"`, `"enabled"` or labels/keys |
+| `batch.run_batch(doc, steps, resume=True, retries=1, on_error="continue")` | every step on all its chunks, then the next; returns `done`, `failed` (`"chunk:step"` -> error), `skipped`, `seconds` |
+| `batch.load_steps(path)` | the steps of a batch file (JSON) |
+| `batch.save_steps(steps, path)` | writes a batch file |
+| `batch.pending(doc, steps=None)` | the state of an unfinished batch |
+| `batch.targets(doc, chunks)` | the chunks a step runs on |
+| `batch.run_step(doc, chunk, op, params)` | one operation on one chunk |
+
+**`batch.step(...)`**: `batch.OPERATIONS` are `detect_markers`, `import_reference`, `align_photos`,
+`match_photos`, `align_cameras`, `update_transform`, `optimize_cameras`, `field_check`,
+`build_depth_maps`, `build_point_cloud`, `build_model`, `build_texture`, `build_dem`,
+`build_orthomosaic`, `calibrate_colours`, `estimate_precision`, `export_point_cloud`,
+`export_model`, `export_dem`, `export_orthomosaic`, `generate_report`. Paths may use `{project}`,
+`{name}`, `{chunk}`.
+
+**`batch.run_batch(...)`** saves the project after each step of each chunk with the state in
+`<project>.ppg.files/batch.json`; `resume`: an unfinished batch with the same steps goes on (done
+steps are not run again, failed ones are tried again); a failing step is retried `retries` times,
+then the next steps of its chunk are skipped (or `BatchError` with `on_error="stop"`).
 
 ## Field check before leaving the site
 
 | Call | Description |
 | --- | --- |
-| `engine.fieldcheck.field_check(chunk, min_photos=3, resolution=None, quality=True)` | right after the alignment: the photos not aligned, the blurred ones (image quality estimated where missing), the markers measured in no photo (with a reference), one photo or two only, and the coverage: on a grid over the middle 98 % of the tie points (400 cells along the longer side by default), at the height of the DEM or of the tie points of the cell (the empty cells interpolated), how many aligned photos frame each cell (no occlusion: fast); a GeoTIFF of counts (product `coverage`, -1 outside the area). Report in `chunk.meta["field_check"]` (`weak_fraction`, `weak_area` m2, `median_photos`, `unaligned`, `blurred`, `markers`, `tie_points_weak`) |
+| `engine.fieldcheck.field_check(chunk, min_photos=3, resolution=None, quality=True)` | right after the alignment: the photos not aligned or blurred, the markers measured in too few photos, the coverage of every cell; report in `chunk.meta["field_check"]` |
 | `engine.fieldcheck.coverage(chunk, resolution=None)` | the counts alone: `(counts, transform, heights)` |
+
+**`engine.fieldcheck.field_check(...)`** lists the photos not aligned, the blurred ones (image
+quality estimated where missing), the markers measured in no photo (with a reference), one photo or
+two only, and the coverage: on a grid over the middle 98 % of the tie points (400 cells along the
+longer side by default), at the height of the DEM or of the tie points of the cell (the empty cells
+interpolated), how many aligned photos frame each cell (no occlusion: fast); a GeoTIFF of counts
+(product `coverage`, -1 outside the area). The report in `chunk.meta["field_check"]` has
+`weak_fraction`, `weak_area` m2, `median_photos`, `unaligned`, `blurred`, `markers`,
+`tie_points_weak`.
 
 ## Precision of the alignment
 
 | Call | Description |
 | --- | --- |
-| `chunk.estimate_precision(marker_px=0.5)`, `engine.precision.estimate_precision(chunk, ...)` | the adjustment set up as the camera optimisation does it (control points held at their reference, else three tie points; calibration held) and COLMAP's covariance of the camera poses (`pycolmap.estimate_ba_covariance`; tangent space of cam_from_world, rotation perturbed as `Exp(2d) R`, translation added). Cameras: covariance of the centre. Tie points and markers (two photos or more): the full covariance of the triangulated point, `s^2 H^-1 + H^-1 H_pc S_cc H_cp H^-1` - its measurements (`s` = the reprojection error of the adjustment, `marker_px` for markers) and the uncertainty of the cameras that see it. Datum: the accuracy of the control points (or of the camera positions that place the chunk), `a^2 (1 + d^2 / r^2)` per axis. Standard deviations in metres along X, Y, Z of the CRS: `camera.meta["precision"]`, `chunk.meta["precision"]` (`datum`, `sigma0_px`, medians, `markers`), tie points in `<data>/precision/tie_points.npz`. With a DEM, also the raster below. A new alignment, optimisation or georeference drops it (`chunk.forget_precision()`). Synthetic trench: tie point height errors / estimated sigma = 1.07 (RMS), cameras 0.5-0.7 |
-| `engine.precision.dem_precision(chunk, max_side=1024)` | sigma Z of the tie points interpolated over the DEM (linear, the nearest outside), GeoTIFF in the CRS of the DEM at most 1024 cells a side, product `dem_precision` (as the precision maps of James et al., 2017, from the covariance) |
-| `engine.precision.precision_at(chunk, x, y)`, `tie_point_precision(chunk)` | sigma Z of the DEM at a point; the tie points with theirs |
-| spot heights | the precision of the DEM where a spot height is taken is kept with it (`precisione_q`) and written in `rilievo_originale` ("Fotogrammetria (±1,2 mm)", PyArchInit has no column for it); `bim.ifc.export_chunk_ifc(..., quote=...)` writes the spot heights as `IfcAnnotation` (`SpotHeight`) with `Pset_PyArchInit_Quota` (Quota, Precisione, US, ...); `bim.ifc.spot_heights(quote)` |
+| `chunk.estimate_precision(marker_px=0.5)` | standard deviations in metres along X, Y, Z of the CRS of cameras, tie points and markers, from COLMAP's covariance of the adjustment |
+| `engine.precision.estimate_precision(chunk, ...)` | the same as a module function |
+| `engine.precision.dem_precision(chunk, max_side=1024)` | sigma Z of the tie points interpolated over the DEM, GeoTIFF product `dem_precision` |
+| `engine.precision.precision_at(chunk, x, y)` | sigma Z of the DEM at a point |
+| `engine.precision.tie_point_precision(chunk)` | the tie points with theirs |
+| spot heights | the precision of the DEM where a spot height is taken is kept with it (`precisione_q`) |
+| `bim.ifc.export_chunk_ifc(..., quote=...)` | the spot heights in the IFC as `IfcAnnotation` (`SpotHeight`) with `Pset_PyArchInit_Quota` (Quota, Precisione, US, ...) |
+| `bim.ifc.spot_heights(quote)` | the spot heights of the project as points for the IFC export |
+
+**`chunk.estimate_precision(...)`** sets the adjustment up as the camera optimisation does it
+(control points held at their reference, else three tie points; calibration held) and takes
+COLMAP's covariance of the camera poses (`pycolmap.estimate_ba_covariance`; tangent space of
+cam_from_world, rotation perturbed as `Exp(2d) R`, translation added). Cameras: covariance of the
+centre. Tie points and markers (two photos or more): the full covariance of the triangulated point,
+`s^2 H^-1 + H^-1 H_pc S_cc H_cp H^-1` - its measurements (`s` = the reprojection error of the
+adjustment, `marker_px` for markers) and the uncertainty of the cameras that see it. Datum: the
+accuracy of the control points (or of the camera positions that place the chunk),
+`a^2 (1 + d^2 / r^2)` per axis. Standard deviations in metres along X, Y, Z of the CRS:
+`camera.meta["precision"]`, `chunk.meta["precision"]` (`datum`, `sigma0_px`, medians, `markers`),
+tie points in `<data>/precision/tie_points.npz`. With a DEM, also the raster below. A new
+alignment, optimisation or georeference drops it (`chunk.forget_precision()`). Synthetic trench:
+tie point height errors / estimated sigma = 1.07 (RMS), cameras 0.5-0.7.
+
+**`engine.precision.dem_precision(...)`** interpolates linearly (the nearest outside), in the CRS
+of the DEM at most 1024 cells a side (as the precision maps of James et al., 2017, from the
+covariance).
+
+**spot heights**: the precision is written in `rilievo_originale` ("Fotogrammetria (±1,2 mm)",
+PyArchInit has no column for it).
 
 ## Reconstruction region
 
 | Call | Description |
 | --- | --- |
-| `chunk.region = engine.region.Region(center, size, rotation)`, `chunk.region = None` | an oriented box in world coordinates (`chunk.meta["region"]`): depth maps (CPU and, afterwards, COLMAP's) have no depth outside it, the dense cloud and the mesh are cut to it (a Poisson surface no longer balloons beyond the object), so DEM and orthomosaic cover it only |
+| `chunk.region = engine.region.Region(center, size, rotation)` | an oriented box in world coordinates (`chunk.meta["region"]`) that bounds every product |
+| `chunk.region = None` | no region |
 | `chunk.reset_region(source="tie_points", margin=0.05, angle_deg=0)` | around the middle 98 % of the tie points (or the dense cloud), turned about the vertical |
 | `engine.region.region_from_box(chunk, (xmin, ymin, xmax, ymax), zmin=None, zmax=None)` | over a plan rectangle, the heights from the points inside |
-| `Region.contains(world)`, `corners()`, `footprint()`, `inside_internal(chunk, pts)`, `depth_mask(...)`, `crop_mesh(...)` | the box and its uses |
+| `Region.contains(world)` | which world points lie inside the box |
+| `Region.corners()` | the 8 corners of the box |
+| `Region.footprint()` | the extent of the box in plan |
+| `engine.region.inside_internal(chunk, pts)` | which points of the internal frame lie inside the region |
+| `engine.region.depth_mask(...)` | the pixels of a depth map whose surface lies inside the region |
+| `engine.region.crop_mesh(...)` | a mesh without the faces whose centre lies outside the region |
+
+**`chunk.region = engine.region.Region(...)`**: depth maps (CPU and, afterwards, COLMAP's) have no
+depth outside it, the dense cloud and the mesh are cut to it (a Poisson surface no longer balloons
+beyond the object), so DEM and orthomosaic cover it only.
 
 ## Editing the DEM
 
 | Call | Description |
 | --- | --- |
-| `chunk.edit_dem(polygon, method="plane", value=None, breaklines=None, keep_version=True, version_name=None)`, `engine.dem_edit.fill_area(...)` | new heights for the cells inside `polygon` (chunk CRS) from those in a ring of three cells around it: `plane` (the best-fit plane), `linear` (triangulation of the ring, IDW outside it), `idw`, `constant` (`value`, default the median of the ring); `breaklines` (lines (N, 2) or (N, 3); without z the DEM at their vertices) keep their heights. The DEM as it was is kept as a version first; a DEM of another program is edited as a copy in the chunk folder; overviews refreshed in the window; `chunk.meta["dem_edits"]` lists the edits. Returns `cells`, `dz_mean`, `dz_max`, `version` |
+| `chunk.edit_dem(polygon, method="plane", value=None, breaklines=None, keep_version=True, version_name=None)` | new heights for the cells inside `polygon` (chunk CRS) from those in a ring of three cells around it; returns `cells`, `dz_mean`, `dz_max`, `version` |
+| `engine.dem_edit.fill_area(...)` | the same as a module function |
 | `engine.dem_edit.new_heights(known, target, method, value=None)` | the interpolation alone |
+
+**`chunk.edit_dem(...)`**: `plane` (the best-fit plane), `linear` (triangulation of the ring, IDW
+outside it), `idw`, `constant` (`value`, default the median of the ring); `breaklines` (lines
+(N, 2) or (N, 3); without z the DEM at their vertices) keep their heights. The DEM as it was is
+kept as a version first; a DEM of another program is edited as a copy in the chunk folder;
+overviews refreshed in the window; `chunk.meta["dem_edits"]` lists the edits.
 
 ## Elevations: orthophoto and relief on a plane or a cylinder
 
@@ -346,8 +710,14 @@ ray from the viewer side on the model, kept within `depth=(dmin, dmax)` (what st
 | `engine.elevation.plane_from_line(chunk, p1, p2, side=None)` | the vertical plane through a wall trace (plan points), seen from `side` (default: where the photos are) |
 | `plane_from_points(points, toward=None)` | the plane of three or more world points (markers on a wall) |
 | `cylinder_from_circle(chunk, points, inside=True)` | the vertical cylinder through a circle fitted to plan points |
-| `build_elevation(chunk, frame, resolution=None, name=None, depth=None, blending="mosaic", colour_correction=None, ghosting=False, fill_holes=True, max_angle=80)` | orthophoto (the orthomosaic engine on the frame: same photo choice, blending, colour correction) and relief (`d`, float32) as GeoTIFF in frame metres in `<chunk data>/elevations/<id>/` (frame in the tags and in `frame.json`), listed in `chunk.meta["elevations"]` |
-| `elevations(chunk)`, `elevation_paths(chunk, entry)`, `remove_elevation(chunk, id)` | the elevations of a chunk |
+| `build_elevation(chunk, frame, resolution=None, name=None, depth=None, blending="mosaic", colour_correction=None, ghosting=False, fill_holes=True, max_angle=80)` | orthophoto and relief (`d`, float32) of the frame as GeoTIFF in frame metres, listed in `chunk.meta["elevations"]` |
+| `elevations(chunk)` | the elevations of a chunk |
+| `elevation_paths(chunk, entry)` | the orthophoto and relief files of one |
+| `remove_elevation(chunk, id)` | removes one |
+
+**`build_elevation(...)`** runs the orthomosaic engine on the frame (same photo choice, blending,
+colour correction) and writes the files in `<chunk data>/elevations/<id>/` (frame in the tags and
+in `frame.json`).
 
 ## Masks of the photos
 
@@ -361,13 +731,24 @@ photo does not see a masked cell or face).
 | Call | Description |
 | --- | --- |
 | `engine.masks.import_masks(chunk, folder, template=None, invert=False)` | from image files named after the photos (`{stem}_mask.png`, `{stem}.png`, `{name}.png`... or `template` with `{name}`, `{stem}`, `{label}`); `folder=None`: the alpha channel of the photos |
-| `export_masks(chunk, folder, template="{stem}_mask.png")`, `read_mask(chunk, cam)`, `write_mask(chunk, cam, keep)`, `remove_masks(chunk, cams=None)`, `masked_cameras(chunk)` | files and arrays (`keep`: True where the photo counts) |
-| `masks_from_background(chunk, folder, tolerance=12)` | photos of the background without the object from the same positions (one per photo, same names, or a single one for a fixed camera): the object is what differs |
+| `export_masks(chunk, folder, template="{stem}_mask.png")` | the masks written as files named after the photos |
+| `read_mask(chunk, cam)` | the mask of a photo as an array (`keep`: True where the photo counts) |
+| `write_mask(chunk, cam, keep)` | stores an array as the mask of a photo |
+| `remove_masks(chunk, cams=None)` | removes the masks (all by default) |
+| `masked_cameras(chunk)` | the photos that have a mask |
+| `masks_from_background(chunk, folder, tolerance=12)` | the object is what differs from photos of the background taken from the same positions |
 | `masks_from_colour(chunk, colour, tolerance=40)` | a backdrop of one colour (RGB) masked |
 | `masks_from_model(chunk, cams=None)` | only what the model covers is kept (after a first reconstruction) |
 | `masks_with_sam(chunk, segmenter, cams=None)` | SAM 2.1: the object at the centre of each photo |
 | `paint_polygon(chunk, cam, polygon, masked=True)` | mask (or give back) a polygon of pixels by hand |
-| `chunk.match_photos(..., exclude_stationary=True)`, `engine.sfm.remove_stationary_matches(db)` | verified matches that do not move between two photos (less than 2 px or 0.15 % of the photo) dropped: the background of a turntable photographed from a fixed camera |
+| `chunk.match_photos(..., exclude_stationary=True)` | verified matches that do not move between two photos dropped: the background of a turntable photographed from a fixed camera |
+| `engine.sfm.remove_stationary_matches(db)` | the same on a COLMAP database |
+
+**`masks_from_background(...)`** takes one background photo per photo (same names), or a single one
+for a fixed camera.
+
+**`chunk.match_photos(..., exclude_stationary=True)`** drops the matches that move less than 2 px
+or 0.15 % of the photo.
 
 ## Patches of the orthomosaic and of the texture
 
@@ -377,12 +758,31 @@ A patch takes the colours of an area of the orthomosaic from photos chosen by ha
 
 | Call | Description |
 | --- | --- |
-| `chunk.add_ortho_patch(polygon, photos, mode="assign")`, `engine.patches.add_patch(chunk, polygon, photos, mode, surface="dem")` | a new patch; `surface="ground"` projects the area on the ground around it (heights along the polygon, inverse-distance weighted inside) instead of the DEM: trees and vehicles as the photo shows them, holes of the DEM filled |
-| `chunk.update_orthomosaic(progress=None, skip_unreadable=False)` | redraws only the cells of the patches added, changed or removed since the file was written, then the overviews of those windows (`engine.overviews.refresh`, through rasterio's GDAL; every overview again when it cannot); an orthomosaic of another program is copied into the chunk first and its pixels come back where a patch is removed |
-| `chunk.ortho_patches`, `chunk.remove_ortho_patch(id)`, `engine.patches.clear_patches(chunk)`, `changed_patches(chunk)` | the patches |
-| `engine.patches.photos_for_area(chunk, polygon, limit=12)` | the photos that frame the area, best first: `label`, `coverage`, `visible` (share not hidden by the model), `angle`, `gsd`, `score`, `used` (share the orthomosaic takes from it now) |
+| `chunk.add_ortho_patch(polygon, photos, mode="assign")` | a new patch |
+| `engine.patches.add_patch(chunk, polygon, photos, mode, surface="dem")` | the same; `surface="ground"` projects the area on the ground around it instead of the DEM |
+| `chunk.update_orthomosaic(progress=None, skip_unreadable=False)` | redraws only the cells of the patches added, changed or removed since the file was written, then the overviews of those windows |
+| `chunk.ortho_patches` | the patches of the chunk |
+| `chunk.remove_ortho_patch(id)` | removes one |
+| `engine.patches.clear_patches(chunk)` | removes them all |
+| `engine.patches.changed_patches(chunk)` | the patches added, changed or removed since the orthomosaic file was written |
+| `engine.patches.photos_for_area(chunk, polygon, limit=12)` | the photos that frame the area, best first: `label`, `coverage`, `visible`, `angle`, `gsd`, `score`, `used` |
 | `engine.patches.previews(chunk, polygon, photos, max_side=320)` | `({(label, surface): RGBA}, now, bounds)`: the area from each photo on each surface, the rest as it is |
-| `chunk.patch_texture(photos, polygon=None, faces=None, mode="assign")`, `engine.patches.photos_for_faces(chunk, faces)`, `preview_faces(chunk, faces, photo)` | colour again the faces of the textured model inside a polygon (seen from above) or chosen by index from the chosen photos; texels no chosen photo sees keep their colour |
+| `chunk.patch_texture(photos, polygon=None, faces=None, mode="assign")` | colours again the faces of the textured model inside a polygon (seen from above) or chosen by index, from the chosen photos |
+| `engine.patches.photos_for_faces(chunk, faces)` | the photos that see those faces, best first |
+| `engine.patches.preview_faces(chunk, faces, photo)` | the part of a photo where the faces are seen |
+
+**`engine.patches.add_patch(..., surface="ground")`** takes the heights along the polygon,
+inverse-distance weighted inside: trees and vehicles as the photo shows them, holes of the DEM
+filled.
+
+**`chunk.update_orthomosaic(...)`** refreshes the overviews with `engine.overviews.refresh` (through
+rasterio's GDAL; every overview again when it cannot); an orthomosaic of another program is copied
+into the chunk first and its pixels come back where a patch is removed.
+
+**`engine.patches.photos_for_area(...)`**: `visible` is the share not hidden by the model, `used`
+the share the orthomosaic takes from it now.
+
+**`chunk.patch_texture(...)`**: texels no chosen photo sees keep their colour.
 
 `chunk.build_orthomosaic(..., patches=None)` applies the patches of the chunk (pass `[]` to leave
 them out). The photos of every tile are ranked on all its cells, so an update gives the same
@@ -396,7 +796,9 @@ A scale bar is the known distance between two markers (`core.marker.ScaleBar`: `
 | Call | Description |
 | --- | --- |
 | `chunk.add_scalebar(marker_a, marker_b, distance, accuracy=0.001, checkpoint=False, label=None)` | markers as objects, labels, keys or target codes; the same pair again changes the bar |
-| `chunk.scalebar(label_or_key)`, `chunk.remove_scalebar(label_or_key)`, `chunk.scalebars` | the bars |
+| `chunk.scalebar(label_or_key)` | one bar |
+| `chunk.remove_scalebar(label_or_key)` | removes one |
+| `chunk.scalebars` | all the bars |
 | `chunk.import_scalebars(path, accuracy=0.001, delimiter=None)` | `marker_a, marker_b, distance[, accuracy[, check]]` per line; returns `{"bars": [labels], "missing": ["A-B"]}` |
 | `markers.gcp.scalebar_errors(chunk)` | every bar: `label`, `marker_a`, `marker_b`, `distance`, `accuracy`, `type` (control/check), `enabled`, `estimated`, `error` (metres) |
 | `markers.targets.generate_scale_bar(path, target_type="aruco_4x4_50", codes=None, distance_mm=200, marker_size_mm=40, page="A4", count=1)` | printable bars and their CSV, `(pages, csv)` |
@@ -545,13 +947,24 @@ other = learn.ClassifierModel.load("scavo.ppgclf")          # apply it to anothe
 | `classify.label_points(pc, mask, code, manual=True)` | the same on a `PointCloud` in memory: label several selections, then store the cloud once (`chunk.point_cloud = pc`) |
 | `classify.clear_manual(chunk, mask=None)` | forgets the hand-labelled flag (classes unchanged) |
 | `learn.point_features(xyz, rgb=None, normals=None, scales=None, ground=None, progress=None)` | `(N, F)` float32 feature matrix and feature names; world coordinates, z up |
-| `learn.suggest_scales(xyz)`, `learn.estimate_spacing(xyz)` | default core voxel and radii: 5, 14 and 40 times the point spacing |
+| `learn.suggest_scales(xyz)` | default core voxel and radii: 5, 14 and 40 times the point spacing |
+| `learn.estimate_spacing(xyz)` | the point spacing of a cloud |
 | `learn.train(xyz, codes, rgb=None, ..., method="random_forest", n_estimators=None, max_per_class=20000, random_state=0)` | `ClassifierModel`; `codes` 1-255, 0 or negative = unlabelled; `method="gradient_boosting"` for smaller files |
 | `learn.predict(model, xyz, rgb=None, ..., min_confidence=0.0)` | `(codes uint8, confidence float32)`; points below `min_confidence` become 1 (unclassified) |
 | `learn.train_on_chunk(chunk, labels="manual")` | trains on the hand-labelled points (`labels="all"`: every point with a class above 1) |
 | `learn.classify_chunk_with_model(chunk, model, overwrite_manual=False, min_confidence=0.0)` | classifies and stores the dense cloud; returns `(point_cloud, confidence)` |
-| `model.save(path)`, `ClassifierModel.load(path)`, `learn.read_model_info(path)`, `model.summary()` | model files; `read_model_info` reads the metadata only |
-| `model.classes`, `class_names`, `feature_names`, `scales`, `oob_score`, `training_accuracy`, `confusion_matrix`, `stats` | training results (confusion matrix: rows true class, columns predicted) |
+| `model.save(path)` | writes the model file |
+| `ClassifierModel.load(path)` | reads a model file |
+| `learn.read_model_info(path)` | reads the metadata only |
+| `model.summary()` | a readable description: out-of-bag accuracy, precision/recall per class |
+| `model.classes` | the class codes of the model |
+| `model.class_names` | their names |
+| `model.feature_names` | the names of the features |
+| `model.scales` | the neighbourhood radii (metres) |
+| `model.oob_score` | the out-of-bag accuracy (random forest) |
+| `model.training_accuracy` | the accuracy on the training samples |
+| `model.confusion_matrix` | the confusion matrix (rows true class, columns predicted) |
+| `model.stats` | the training statistics |
 
 * **Features** (per radius): linearity, planarity, sphericity, omnivariance, eigenentropy,
   change of curvature, verticality of the normal and of the main axis, density, height above
