@@ -375,3 +375,53 @@ def test_gpu_patchmatch_agrees_with_the_cpu_kernel():
     d2, _, _ = ppg_core.gpu_patchmatch_depth(ref, k, sources, (1.0, 4.0), init_depth=start, iterations=2)
     ok = d2 > 0
     assert np.median(np.abs(d2[ok] - truth[ok]) / truth[ok]) < 0.005
+
+
+def test_gpu_sift_finds_colmaps_points(scene_dir, tmp_path):
+    """The SIFT kernel of the GPU, on the photo as COLMAP sees it (its grey, its reduction),
+    finds the key points COLMAP's extractor finds, with the same descriptors, in a fixed order."""
+    import sqlite3
+
+    import cv2
+    import pycolmap
+
+    from pyarchinit_photogrammetry.engine import sfm
+
+    device = _native.gpu_device("auto")
+    if device is None or _native.kernel("gpu_sift") is None:
+        pytest.skip("no GPU (wgpu adapter) or no GPU SIFT in the native core")
+    photo = scene_dir / "photos" / "IMG_0000.jpg"
+    (tmp_path / "im").mkdir()
+    shutil.copy(photo, tmp_path / "im" / photo.name)
+    ext = pycolmap.FeatureExtractionOptions()
+    ext.max_image_size = 600  # the 1200-pixel photo reduced by two, as quality "high"
+    ext.sift.max_num_features = 40000
+    reader = pycolmap.ImageReaderOptions()
+    reader.camera_model = "SIMPLE_PINHOLE"
+    pycolmap.extract_features(str(tmp_path / "db.db"), str(tmp_path / "im"), reader_options=reader, extraction_options=ext)
+    con = sqlite3.connect(str(tmp_path / "db.db"))
+    r, c, data = con.execute("select rows, cols, data from keypoints").fetchone()
+    theirs = np.frombuffer(data, np.float32).reshape(r, c)  # x, y, a11, a12, a21, a22
+    r, c, data = con.execute("select rows, cols, data from descriptors").fetchone()
+    their_desc = np.frombuffer(data, np.uint8).reshape(r, c)
+    con.close()
+    g = cv2.transform(cv2.imread(str(photo), cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION), sfm._REC709_BGR)
+    small = sfm._rescale_as_colmap(g, 600, 450)
+    raw, desc = _native.gpu_sift(small.astype(np.float32) / 255.0, max_features=40000, device=device)
+    raw, desc = np.asarray(raw, np.float32), np.asarray(desc, np.uint8)
+    kp = raw.copy()
+    kp[:, :2] = (kp[:, :2] + 0.5) * 2.0  # COLMAP's pixel centre, back to the full photo
+    kp[:, 2] *= 2.0
+    scale = np.hypot(theirs[:, 2], theirs[:, 4])
+    d = np.hypot(theirs[:, None, 0] - kp[None, :, 0], theirs[:, None, 1] - kp[None, :, 1])
+    j = d.argmin(axis=1)
+    twins = (d.min(axis=1) < 0.5) & (np.abs(np.log(kp[j, 2] / scale)) < 0.1)
+    assert twins.mean() > 0.95, f"{twins.mean():.3f} of COLMAP's points found"
+    assert abs(len(kp) - len(theirs)) < 0.05 * len(theirs)
+    a = desc[j[twins]].astype(float)
+    b = their_desc[twins].astype(float)
+    similarity = np.einsum("ij,ij->i", a, b) / (np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1))
+    assert np.median(similarity) > 0.99
+    again, desc_again = _native.gpu_sift(small.astype(np.float32) / 255.0, max_features=40000, device=device)
+    assert np.array_equal(np.asarray(again), raw) and np.array_equal(np.asarray(desc_again), desc)
+    assert np.all(np.diff(raw[:, 1]) >= 0)  # by row, then column: the same order every time

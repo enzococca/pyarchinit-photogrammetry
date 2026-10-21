@@ -282,3 +282,23 @@ def test_strongest_pairs_keep_every_photo_and_the_links_between_groups():
         assert sum(photo in p for p in kept) >= 3
     across = [p for p in kept if p[0][0] != p[1][0]]
     assert len(across) == 4 and min(weights[p] for p in across) == 26  # the strongest links came back
+
+
+def test_photos_reduced_as_colmap_reduces_them(scene_dir):
+    """The GPU extractor reads a photo as COLMAP does: its grey (Rec. 709) and its reduction
+    (OpenImageIO's triangle filter), pixel for pixel."""
+    import cv2
+    import pycolmap
+
+    photo = scene_dir / "photos" / "IMG_0000.jpg"
+    g = cv2.transform(cv2.imread(str(photo), cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION), sfm._REC709_BGR)
+    theirs = pycolmap.Bitmap.read(str(photo), False).to_array().reshape(g.shape)
+    assert np.array_equal(g, theirs)
+    for nw, nh in [(600, 450), (1024, 768), (777, 582)]:
+        bm = pycolmap.Bitmap.from_array(np.ascontiguousarray(g))
+        bm.rescale(nw, nh)
+        ref = bm.to_array().reshape(nh, nw).astype(int)
+        mine = sfm._rescale_as_colmap(g, nw, nh).astype(int)
+        assert mine.shape == ref.shape
+        assert np.mean(mine == ref) > 0.999 and np.abs(mine - ref).max() <= 1
+    assert sfm._rescale_as_colmap(g, 1200, 900) is g

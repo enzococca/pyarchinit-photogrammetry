@@ -85,6 +85,18 @@ della GPU vanno nel database e passano la verifica geometrica di COLMAP, e l'all
 differenze. L'abbinamento guidato e i rig di foto a 360 gradi restano sulla CPU.
 `meta["sfm"]["gpu"]`, `gpu_pairs` e `cpu_pairs` dicono chi ha fatto cosa.
 
+Anche i punti: con il nucleo nativo 0.4 il SIFT di COLMAP (quello di VLFeat) è a sua volta un
+insieme di kernel WGSL (`ppg_core.gpu_sift`) - la piramide gaussiana, le sue differenze, gli estremi
+con il loro raffinamento, le orientazioni e i descrittori di una foto, un'ottava per invio. Le foto
+vengono lette e ridotte sulla CPU, in thread, esattamente come le legge COLMAP (il suo grigio Rec.
+709, il raster del file, il filtro triangle di OpenImageIO in precisione singola, il lato lungo alla
+misura della qualità), così la GPU trova i punti che trova l'estrattore di COLMAP, con gli stessi
+descrittori (il 99 % sulla trincea sintetica). Un Apple M4 Pro fa una foto da 2016 pixel in 0,19 s
+dove un core dell'estrattore di COLMAP ne impiega 3,2; contro tutti i suoi core il guadagno è
+minore (57 foto di Tell Sultan: 11 s contro 19), maggiore su una GPU dedicata. Le maschere valgono
+come prima; le facce delle foto a 360 gradi restano all'estrattore di COLMAP, come una foto che la
+GPU non riesce a fare. `meta["sfm"]["features"]` dice `gpu` o `cpu`.
+
 Le mappe di profondità PatchMatch prendono la stessa scelta (`build_depth_maps(gpu=...)`): il
 kernel del nucleo nativo gira sulla GPU, un thread per pixel, con lo stesso costo (la correlazione
 incrociata normalizzata della finestra attraverso il piano del pixel in fino a sei foto, contando

@@ -84,6 +84,18 @@ speed of the two; the matches of the GPU go into the database and through COLMAP
 verification, and the alignment sees no difference. The guided matching and the rigs of 360-degree
 photos stay on the CPU. `meta["sfm"]["gpu"]`, `gpu_pairs` and `cpu_pairs` say what did what.
 
+The key points too: with the native core 0.4 COLMAP's SIFT (VLFeat's) is a set of WGSL kernels
+as well (`ppg_core.gpu_sift`) - the Gaussian pyramid, its differences, the extrema with their
+refinement, the orientations and the descriptors of a photo, an octave per submission. The photos
+are read and reduced on the CPU, in threads, exactly as COLMAP reads them (its Rec. 709 grey, the
+raster of the file, OpenImageIO's triangle filter in single precision, the longer side at the size
+of the quality), so the GPU finds the points COLMAP's extractor finds, with the same descriptors
+(99 % of them on the synthetic trench). An Apple M4 Pro does a 2016-pixel photo in 0.19 s where
+one core of COLMAP's extractor takes 3.2 s; against all its cores the gain is smaller (57 photos of
+Tell Sultan: 11 s against 19 s), and larger on a discrete GPU. The masks apply as before; the faces
+of 360-degree photos stay with COLMAP's extractor, and so does a photo the GPU cannot do.
+`meta["sfm"]["features"]` says `gpu` or `cpu`.
+
 The PatchMatch depth maps take the same choice (`build_depth_maps(gpu=...)`): the kernel of the
 native core runs on the GPU, one thread per pixel, with the same cost (the normalised cross
 correlation of the window through the plane of the pixel in up to six photos, the best three

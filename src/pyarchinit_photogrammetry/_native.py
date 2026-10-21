@@ -116,3 +116,16 @@ def gpu_forget() -> None:
     fn = getattr(core, "gpu_forget", None) if core is not None else None
     if fn is not None:
         fn()
+
+
+def gpu_sift(image, max_features: int = 8192, first_octave: int = -1, num_octaves: int = 4, octave_resolution: int = 3,
+             peak_threshold: float = 0.02 / 3.0, edge_threshold: float = 10.0, max_orientations: int = 2,
+             upright: bool = False, device: int = -1):
+    """SIFT key points ``(n, 4)`` float32 (x, y, scale, orientation; the centre of the first pixel
+    at (0, 0), as VLFeat) and descriptors ``(n, 128)`` uint8 of a grey float image in [0, 1] on
+    the GPU, as COLMAP's CPU extractor computes them (API 6 of the extension)."""
+    fn = kernel("gpu_sift")
+    if fn is None:
+        raise RuntimeError("the GPU SIFT needs pyarchinit-photogrammetry-core 0.4 (API 6)")
+    return fn(image, int(max_features), int(first_octave), int(num_octaves), int(octave_resolution),
+              float(peak_threshold), float(edge_threshold), int(max_orientations), bool(upright), int(device))

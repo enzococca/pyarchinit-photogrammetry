@@ -285,6 +285,54 @@ def _sequential_pairs(chunk: Chunk, names: dict[int, str], overlap: int = REFERE
 
 PRESELECTION_SIZE = 1024  # pixels of the longer side of the photos matched to find the pairs
 PRESELECTION_POINTS = 1024  # points per photo for that
+_REC709_BGR = np.array([[0.0722, 0.7152, 0.2126]], np.float32)  # COLMAP's grey (Bitmap::CloneAsGrey), pixel for pixel
+
+
+def _colmap_taps(dst: int, src: int) -> tuple[np.ndarray, np.ndarray]:
+    """The source pixels and weights of every destination pixel of OpenImageIO's ``resize`` with
+    the triangle filter (what COLMAP reduces the photos with): a triangle as wide as the step,
+    centred on the destination pixel, normalised, all in single precision in its order."""
+    f32 = np.float32
+    ratio = f32(dst) / f32(src)
+    rad = int(np.ceil(f32(1.0) / ratio))
+    n = 2 * rad + 1
+    x = np.arange(dst, dtype=f32)
+    src_f = ((x + f32(0.5)) * (f32(1.0) / f32(dst))) * f32(src)
+    src_i = np.floor(src_f).astype(np.int64)
+    frac = (src_f - src_i).astype(f32)
+    w = np.zeros((dst, n), f32)
+    for i in range(n):
+        arg = ratio * (f32(i - rad) - (frac - f32(0.5)))
+        w[:, i] = np.where(np.abs(arg) < 1, f32(1.0) - np.abs(arg), f32(0.0)).astype(f32)
+    total = w[:, 0].copy()
+    for i in range(1, n):
+        total += w[:, i]
+    idx = np.clip(src_i[:, None] - rad + np.arange(n)[None, :], 0, src - 1)
+    return idx, w / total[:, None]
+
+
+def _rescale_as_colmap(img: np.ndarray, new_w: int, new_h: int) -> np.ndarray:
+    """A grey photo (uint8) reduced as COLMAP reduces it before extracting the features:
+    OpenImageIO's ``resize`` with the ``triangle`` filter, the sum of the taps in single precision
+    in the same order, the result rounded as it rounds (99.98 % of the pixels equal, the rest off by
+    one). The GPU extractor then finds the points COLMAP's extractor finds; a box filter
+    (``cv2.INTER_AREA``) kept the image sharper and found a third more points, elsewhere."""
+    f32 = np.float32
+    h, w = img.shape
+    if (new_w, new_h) == (w, h):
+        return img
+    src = img.astype(f32) * f32(1.0 / 255.0)
+    ix, wx = _colmap_taps(new_w, w)
+    iy, wy = _colmap_taps(new_h, h)
+    live_x = [i for i in range(wx.shape[1]) if wx[:, i].any()]
+    pel = np.zeros((new_h, new_w), f32)
+    for j in range(wy.shape[1]):
+        if not wy[:, j].any():
+            continue
+        rows = src[iy[:, j], :]
+        for i in live_x:
+            pel += (wy[:, j][:, None] * wx[:, i][None, :]).astype(f32) * rows[:, ix[:, i]]
+    return np.clip(np.floor(pel * f32(255.0) + f32(0.5)), 0, 255).astype(np.uint8)
 PRESELECTION_INLIERS = 15  # verified matches that make two photos a pair
 PRESELECTION_PAIRS_PER_PHOTO = 20  # the pairs of each photo with the most matches are matched in full
 EXHAUSTIVE_UP_TO = 40  # photos: every pair is matched in full (cheap enough), above it the pairs are preselected
@@ -326,7 +374,7 @@ def strongest_pairs(weights: dict[tuple[str, str], int], per_photo: int, links: 
 
 
 def _preselected_pairs(chunk: Chunk, work: Path, root, by_sensor: dict, masks,
-                       names: dict[int, str]) -> list[tuple[str, str]]:
+                       names: dict[int, str], gpu_device=None) -> list[tuple[str, str]]:
     """The pairs of photos that overlap, found as the generic preselection of Metashape finds them:
     a thousand points of every photo reduced to 1024 pixels, matched in every pair (a fraction of
     the full matching), the pairs with at least ``PRESELECTION_INLIERS`` verified matches kept -
@@ -343,7 +391,18 @@ def _preselected_pairs(chunk: Chunk, work: Path, root, by_sensor: dict, masks,
     db_path = work / "preselection.db"
     db_path.unlink(missing_ok=True)
     try:
+        if gpu_device is not None:  # the small photos on the GPU: a few milliseconds each
+            try:
+                _extract_features_gpu(db_path, root, chunk, list(by_sensor.items()),
+                                      lambda s: min(PRESELECTION_SIZE, max(s.width, s.height)), PRESELECTION_POINTS,
+                                      masks, gpu_device)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("GPU SIFT failed in the preselection (%s): COLMAP's extractor", exc)
+                db_path.unlink(missing_ok=True)
+                gpu_device = None
         for skey, image_names in by_sensor.items():
+            if gpu_device is not None:
+                break
             sensor = chunk.sensors[skey]
             ext = pycolmap.FeatureExtractionOptions()
             ext.max_image_size = min(PRESELECTION_SIZE, max(sensor.width, sensor.height))
@@ -437,6 +496,10 @@ def _match_with_gpu(db_path: Path, pairs, mopts, devices: list[int], progress: P
     finally:
         db.close()
     by_id = {v: k for k, v in ids.items()}
+    # the descriptors kept on the GPUs are keyed by image id, unique within one database only:
+    # another database (another chunk, another project, the tests) starts from 1 again, and a
+    # photo with the same count of points would be matched with the points of the old one
+    _native.gpu_forget()
     queue = collections.deque(sorted(pairs))
     total = len(queue)
     lock = threading.Lock()
@@ -550,6 +613,106 @@ def _match_with_gpu(db_path: Path, pairs, mopts, devices: list[int], progress: P
     return {"gpu_pairs": done["gpu"], "cpu_pairs": done["cpu"], "by_device": by_device}
 
 
+def gpu_sift_device(gpu: str | None) -> int | None:
+    """The GPU the key points are extracted on (``None``: the CPU extractor of COLMAP): the first
+    of :func:`_native.gpu_devices` for the setting, when the native core has the SIFT kernel."""
+    if _native.kernel("gpu_sift") is None:
+        return None
+    try:
+        devices = _native.gpu_devices(gpu)
+    except Exception:  # noqa: BLE001
+        return None
+    return devices[0] if devices else None
+
+
+def _extract_features_gpu(db_path: Path, root: Path, chunk: Chunk, groups: list[tuple[int, list[str]]],
+                          max_image_size, max_features: int, masks: Path | None, device: int,
+                          progress: Progress | None = None, readers: int = 4) -> int:
+    """COLMAP's feature extraction done with the SIFT kernel of the GPU: a camera per sensor
+    (``groups``: sensor key, image names) with its rig and a frame per photo as COLMAP writes them,
+    the photos read and reduced on the CPU in threads while the GPU extracts one after the other,
+    the key points brought back to the pixels of the full photo (the centre of the first pixel at
+    0.5, as COLMAP), those under a mask dropped, everything written into the database as the CPU
+    extractor writes it. The image is COLMAP's, pixel for pixel: the Rec. 709 grey (cv2's 601
+    weights give other pixels and a third of the points elsewhere), the raster of the file with the
+    EXIF orientation ignored, reduced with :func:`_rescale_as_colmap` to the longer side of
+    ``max_image_size`` (a number or a function of the sensor). Returns how many photos were done."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    import cv2
+    import pycolmap
+
+    def load(name: str, limit: int):
+        img = cv2.imread(str(root / name), cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
+        if img is None:
+            return name, None, None, None
+        if img.ndim == 3:
+            img = cv2.transform(img, _REC709_BGR)
+        h, w = img.shape
+        if limit and max(w, h) > limit:  # COLMAP: the longer side to the limit, the other rounded
+            f = limit / max(w, h)
+            small = _rescale_as_colmap(img, max(int(np.floor(w * f + 0.5)), 8), max(int(np.floor(h * f + 0.5)), 8))
+        else:
+            small = img
+        mask = None
+        if masks is not None:
+            m = cv2.imread(str(masks / f"{name}.png"), cv2.IMREAD_GRAYSCALE)
+            if m is not None and m.shape == img.shape:
+                mask = m
+        return name, small.astype(np.float32) / 255.0, (w, h), mask
+
+    done = 0
+    total = sum(len(names) for _, names in groups)
+    lock = threading.Lock()
+    db = pycolmap.Database.open(str(db_path))
+    try:
+        for skey, image_names in groups:
+            sensor = chunk.sensors[skey]
+            model, params = mapping_camera(sensor)
+            camera = pycolmap.Camera(model=model, width=int(sensor.width), height=int(sensor.height), params=list(params))
+            camera.has_prior_focal_length = True
+            camera_id = db.write_camera(camera)
+            sensor_id = pycolmap.sensor_t(pycolmap.SensorType.CAMERA, camera_id)
+            rig = pycolmap.Rig()
+            rig.add_ref_sensor(sensor_id)
+            rig_id = db.write_rig(rig)
+            limit = int(max_image_size(sensor) if callable(max_image_size) else max_image_size)
+            with ThreadPoolExecutor(max_workers=readers) as pool:
+                for name, small, size, mask in pool.map(lambda n: load(n, limit), image_names):
+                    if small is None:
+                        log.warning("%s: unreadable, no key points", name)
+                        continue
+                    kp, desc = _native.gpu_sift(small, max_features=max_features, device=device)
+                    kp = np.asarray(kp, np.float32)
+                    desc = np.asarray(desc, np.uint8)
+                    sx, sy = size[0] / small.shape[1], size[1] / small.shape[0]
+                    kp[:, 0] = (kp[:, 0] + 0.5) * sx
+                    kp[:, 1] = (kp[:, 1] + 0.5) * sy
+                    kp[:, 2] *= 0.5 * (sx + sy)
+                    if mask is not None and len(kp):
+                        cx = np.clip(kp[:, 0].astype(int), 0, mask.shape[1] - 1)
+                        cy = np.clip(kp[:, 1].astype(int), 0, mask.shape[0] - 1)
+                        keep = mask[cy, cx] > 0
+                        kp, desc = kp[keep], desc[keep]
+                    with lock:
+                        image = pycolmap.Image(name=name, camera_id=camera_id)
+                        iid = db.write_image(image)
+                        frame = pycolmap.Frame()
+                        frame.rig_id = rig_id
+                        frame.add_data_id(pycolmap.data_t(sensor_id, iid))
+                        db.write_frame(frame)
+                        db.write_keypoints(iid, np.ascontiguousarray(kp))
+                        db.write_descriptors(iid, pycolmap.FeatureDescriptors(pycolmap.FeatureExtractorType.SIFT,
+                                                                              np.ascontiguousarray(desc)))
+                    done += 1
+                    if progress is not None and (done % 8 == 0 or done == total):
+                        progress(done / max(total, 1), f"Points detected on the GPU: {done} of {total} photos")
+    finally:
+        db.close()
+    return done
+
+
 def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 40000, tiepoint_limit: int = 8000,
                  pair_selection: str = "auto", progress: Progress | None = None,
                  exclude_stationary: bool = False, generic: bool | None = None, reference: str | None = None,
@@ -611,7 +774,10 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     files_dir = chunk.data_dir.parent
     others = nodes.wanted(files_dir) if not rigs else []
     chunk_nodes: list[str] = []
-    if others and len(new) >= 2 * nodes.FEATURE_UNIT_PHOTOS:
+    nodes_active = bool(others) and len(new) >= 2 * nodes.FEATURE_UNIT_PHOTOS
+    sift_device = None
+    features = "cpu"
+    if nodes_active:
         # the photos in units of work for the other computers and this one (its own worker): COLMAP's
         # extractor runs there into a database of its own, the points come back and go into ours
         units, cameras = [], {}
@@ -647,7 +813,19 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
         nodes.import_features(db_path, nodes.folder(files_dir) / "done", [r["result"] for r in results], camera_ids)
         chunk_nodes = sorted({r.get("by") for r in results if r.get("by")})
         nodes.forget(files_dir, [r["name"] for r in results])
-    else:
+    elif (sift_device := (gpu_sift_device(gpu) if not rigs else None)) is not None:
+        # the SIFT kernel of the GPU: the same points and descriptors as COLMAP's extractor, 15x faster
+        groups = [(skey, [n for n in image_names if n not in existing]) for skey, image_names in by_sensor.items()]
+        groups = [(k, n) for k, n in groups if n]
+        try:
+            _extract_features_gpu(db_path, root, chunk, groups,
+                                  lambda s: int(max(s.width, s.height) / downscale), int(keypoint_limit), masks,
+                                  sift_device, progress.sub(0.0, 0.5))
+            features = "gpu"
+        except Exception as exc:  # noqa: BLE001 - the GPU failed on these photos: COLMAP's extractor instead
+            log.warning("GPU SIFT failed (%s): COLMAP's extractor on the CPU", exc)
+            sift_device = None
+    if sift_device is None and not (nodes_active):
         for i, (skey, image_names) in enumerate(by_sensor.items()):
             image_names = [n for n in image_names if n not in existing]
             if not image_names:
@@ -685,7 +863,8 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     parts = []
     if generic:
         progress(0.5, "Finding the pairs of photos that overlap")
-        found = _preselected_pairs(chunk, work, root, by_sensor, masks, names)
+        found = _preselected_pairs(chunk, work, root, by_sensor, masks, names,
+                                   gpu_device=gpu_sift_device(gpu) if not rigs else None)
         if found:  # nothing found on the small images: every pair
             pairs, parts = set(found), ["generic"]
     if reference:
@@ -732,7 +911,7 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
         pycolmap.match_image_pairs(str(db_path), matching_options=mopts, pairing_options=popts)
     removed = remove_stationary_matches(db_path) if exclude_stationary else None
     old = chunk.meta.get("sfm") or {}
-    chunk.meta["sfm"] = {"image_root": str(root), "names": {str(k): v for k, v in names.items()},
+    chunk.meta["sfm"] = {"image_root": str(root), "names": {str(k): v for k, v in names.items()}, "features": features,
                          "quality": quality, "pair_selection": mode, "pairs": len(pairs) if pairs is not None else None,
                          "generic": bool(generic), "reference": reference, "neighbours": int(neighbours),
                          "masks": masks is not None, "apply_masks": apply_masks, "guided_matching": bool(guided_matching),
