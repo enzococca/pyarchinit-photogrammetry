@@ -245,10 +245,13 @@ def test_orthorectification_matches_the_orthomosaic(satellites, tmp_path):
     floor = np.isfinite(z) & (z < rim - 0.2) & (flat_grey > 0) & ref_ok
     floor = cv2.erode(floor.astype(np.uint8), np.ones((2 * k + 9, 2 * k + 9), np.uint8)) > 0
     assert floor.sum() > 500
-    # the flat orthorectification shows, at every cell, the ground about k cells further west
+    # the flat orthorectification shows, at every cell, the ground further west by the depth of
+    # the floor (its median under the cells compared: the 5th percentile above reaches the deepest
+    # spots, a couple of centimetres more, which is several cells once the DEM is fine)
     corr = {j: np.corrcoef(flat_grey[floor], np.roll(ref, j, axis=1)[floor])[0, 1] for j in range(-k - 6, k + 7)}
     best = max(corr, key=corr.get)
-    assert abs(best - k) <= 2 and corr[best] > 0.75 and corr[best] > corr[0] + 0.2
+    k_floor = (rim - float(np.median(z[floor]))) * np.tan(np.radians(THETA)) / satellites["gsd"]
+    assert abs(best - k_floor) <= max(2.0, 0.1 * k) and corr[best] > 0.75 and corr[best] > corr[0] + 0.2
 
 
 def test_stereo_pair_recovers_the_surface(satellites, tmp_path):

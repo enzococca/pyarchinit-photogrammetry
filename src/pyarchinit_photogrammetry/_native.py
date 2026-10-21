@@ -118,6 +118,32 @@ def gpu_forget() -> None:
         fn()
 
 
+def gpu_fuse(reference, neighbours, min_pixels: int = 3, max_reproj: float = 2.0, max_depth_rel: float = 0.01,
+             max_normal_deg: float = 20.0, support_tol: float = 0.01, device: int = -1):
+    """The dense points of one depth map fused with its covisible maps on the GPU (API 7): every
+    map ``(key, depth (h x w float32) or None when the GPU holds it, (fx, fy, cx, cy), rotation
+    3x3, translation, order)``; returns ``(xyz, normals, pixel, pixels, support)``."""
+    fn = kernel("gpu_fuse")
+    if fn is None:
+        raise RuntimeError("the GPU fusion needs pyarchinit-photogrammetry-core 0.4 (API 7)")
+    return fn(reference, neighbours, int(min_pixels), float(max_reproj), float(max_depth_rel), float(max_normal_deg),
+              float(support_tol), int(device))
+
+
+def gpu_fuse_cached(device: int = -1) -> list[int]:
+    """The keys of the depth maps the GPU keeps for the fusion."""
+    fn = kernel("gpu_fuse_cached")
+    return list(fn(int(device))) if fn is not None else []
+
+
+def gpu_fuse_forget(device: int = -1) -> None:
+    """Drop the depth maps the GPU keeps for the fusion: their keys are image ids, unique within
+    one workspace only."""
+    fn = kernel("gpu_fuse_forget")
+    if fn is not None:
+        fn(int(device))
+
+
 def gpu_sift(image, max_features: int = 8192, first_octave: int = -1, num_octaves: int = 4, octave_resolution: int = 3,
              peak_threshold: float = 0.02 / 3.0, edge_threshold: float = 10.0, max_orientations: int = 2,
              upright: bool = False, device: int = -1):

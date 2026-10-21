@@ -3129,7 +3129,7 @@ class MainWindow(QMainWindow):
                                         gpu=str(self.settings.value("sfm/gpu", "auto")))
             if v["only_depth"]:
                 return None
-            return self.chunk.build_point_cloud(progress=p.sub(0.8, 0.2))
+            return self.chunk.build_point_cloud(progress=p.sub(0.8, 0.2), gpu=str(self.settings.value("sfm/gpu", "auto")))
 
         if not v["only_depth"]:
             job = self._versioned("point_cloud", v, job)

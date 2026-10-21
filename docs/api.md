@@ -96,6 +96,20 @@ Tell Sultan: 11 s against 19 s), and larger on a discrete GPU. The masks apply a
 of 360-degree photos stay with COLMAP's extractor, and so does a photo the GPU cannot do.
 `meta["sfm"]["features"]` says `gpu` or `cpu`.
 
+The fusion of the depth maps too (`build_point_cloud(gpu=...)`, `ppg_core.gpu_fuse`): one thread
+per pixel of every depth map instead of COLMAP's traversal, the maps covisible with it (up to 64,
+kept on the GPU in a cache) checked with COLMAP's own tests - the pixel of the other map
+back-projected within 2 px, the depth within 1 %, the normals within 20 degrees - the consistent
+pixels averaged into the point, which the earliest map that holds it emits (no map repeats a
+point another one made), kept with `min_num_pixels` pixels of the filter mode. No pixel is
+absorbed by a neighbouring point, so the cloud is as dense as the depth maps (on the synthetic
+trench 2.7 times COLMAP's, with the 90th percentile of the height errors 2.4 mm against 3.0),
+and the confidence of every point - the maps that agree on its depth within 1 % - comes out of
+the same pass, so `depth_map_support` is not run again (57 photos of Tell Sultan, maps of 1008
+pixels: 1.8 s against 4.5 s of COLMAP's fusion and the confidence; the larger the survey, the
+larger the gain, as COLMAP's traversal slows down with the number of maps). `meta["dense"]["fusion"]`
+says `gpu` or `colmap`; a GPU that fails leaves the work to COLMAP's fusion.
+
 The PatchMatch depth maps take the same choice (`build_depth_maps(gpu=...)`): the kernel of the
 native core runs on the GPU, one thread per pixel, with the same cost (the normalised cross
 correlation of the window through the plane of the pixel in up to six photos, the best three

@@ -540,10 +540,11 @@ class Chunk:
         dense.build_depth_maps(self, quality=quality, filter_mode=filter_mode, backend=backend,
                                progress=as_progress(progress), skip_unreadable=skip_unreadable, gpu=gpu)
 
-    def build_point_cloud(self, point_colors: bool = True, progress: ProgressCallback | None = None) -> PointCloud:
+    def build_point_cloud(self, point_colors: bool = True, progress: ProgressCallback | None = None,
+                          gpu: str | None = None) -> PointCloud:
         from ..engine import dense
 
-        return dense.build_point_cloud(self, point_colors=point_colors, progress=as_progress(progress))
+        return dense.build_point_cloud(self, point_colors=point_colors, progress=as_progress(progress), gpu=gpu)
 
     def crop_point_cloud(self, zmin: float | None = None, zmax: float | None = None, radius: float | None = None,
                          center=(0.0, 0.0), bounds=None, region=None) -> "PointCloud":

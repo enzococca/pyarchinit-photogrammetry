@@ -425,3 +425,58 @@ def test_gpu_sift_finds_colmaps_points(scene_dir, tmp_path):
     again, desc_again = _native.gpu_sift(small.astype(np.float32) / 255.0, max_features=40000, device=device)
     assert np.array_equal(np.asarray(again), raw) and np.array_equal(np.asarray(desc_again), desc)
     assert np.all(np.diff(raw[:, 1]) >= 0)  # by row, then column: the same order every time
+
+
+def test_gpu_fusion_agrees_with_colmaps(processed, scene):
+    """The depth maps of the trench fused on the GPU: as accurate as COLMAP's fusion on the true
+    surface (denser: no pixel is absorbed by another), the confidence of the points as
+    depth_map_support counts it, the same cloud every time."""
+    from pyarchinit_photogrammetry.core.progress import as_progress
+    from pyarchinit_photogrammetry.engine import dense
+    from pyarchinit_photogrammetry.engine.confidence import depth_map_support
+
+    device = dense.gpu_fusion_device("auto")
+    if device is None:
+        pytest.skip("no GPU (wgpu adapter) or no fusion kernel in the native core")
+    _doc, ch, _report = processed
+    colmap = ch.point_cloud
+    ws = dense._workspace(ch)
+    pc = dense._gpu_fusion(ch, ws, 3, device, as_progress(None))
+    again = dense._gpu_fusion(ch, ws, 3, device, as_progress(None))
+    assert np.array_equal(pc.xyz, again.xyz) and np.array_equal(pc.confidence, again.confidence)
+    assert len(colmap) <= len(pc) <= 5 * len(colmap)
+    assert pc.rgb is not None and pc.normals is not None and pc.confidence.min() >= 3
+    xyz = ch.to_world(pc.xyz)
+    dz = xyz[:, 2] - scene.world_height(xyz[:, 0], xyz[:, 1])
+    o = np.asarray(scene.origin)
+    inside = ((xyz[:, 0] - o[0] > 0.05) & (xyz[:, 0] - o[0] < scene.size[0] - 0.05)
+              & (xyz[:, 1] - o[1] > 0.05) & (xyz[:, 1] - o[1] < scene.size[1] - 0.05))
+    assert abs(np.median(dz[inside])) < 0.001 and np.percentile(np.abs(dz[inside]), 90) < 0.004  # metres
+    support = depth_map_support(ch, pc.xyz)
+    assert np.mean(np.abs(pc.confidence.astype(int) - support.astype(int)) <= 1) > 0.95
+    assert np.abs(np.linalg.norm(pc.normals, axis=1) - 1).max() < 1e-3
+
+
+def test_gpu_fusion_replaces_a_map_given_again():
+    """A depth map given under a key the GPU already holds replaces the old one (image ids repeat
+    from one workspace to the next: chunk B fused with the maps of chunk A, one night)."""
+    if _native.gpu_device("auto") is None or _native.kernel("gpu_fuse") is None:
+        pytest.skip("no GPU (wgpu adapter) or no fusion kernel in the native core")
+    device = _native.gpu_device("auto")
+    _native.gpu_fuse_forget(device)
+    h, w = 24, 32
+    depth = np.full((h, w), 2.0, np.float32)
+    k = (40.0, 40.0, 16.0, 12.0)
+    r, t = np.eye(3), np.zeros(3)
+    xyz, _, pixel, pixels, support = _native.gpu_fuse((7, depth, k, r, t, 0), [], min_pixels=1, device=device)
+    assert len(xyz) == h * w and np.allclose(xyz[:, 2], 2.0) and pixels.max() == 1 and support.max() == 1
+    assert np.array_equal(pixel, np.arange(h * w))  # by row and column
+    assert _native.gpu_fuse_cached(device) == [7]
+    xyz2, _, _, _, _ = _native.gpu_fuse((7, depth * 3, k, r, t, 0), [], min_pixels=1, device=device)
+    assert np.allclose(xyz2[:, 2], 6.0)  # the new map, not the cached one
+    xyz3, _, _, _, _ = _native.gpu_fuse((7, None, k, r, t, 0), [], min_pixels=1, device=device)
+    assert np.allclose(xyz3[:, 2], 6.0)  # None: the map the GPU holds
+    _native.gpu_fuse_forget(device)
+    assert _native.gpu_fuse_cached(device) == []
+    with pytest.raises(RuntimeError):
+        _native.gpu_fuse((7, None, k, r, t, 0), [], min_pixels=1, device=device)

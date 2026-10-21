@@ -151,7 +151,145 @@ def build_depth_maps(chunk: Chunk, quality: str = "medium", filter_mode: str = "
     progress(1.0, "Depth maps ready")
 
 
-def build_point_cloud(chunk: Chunk, point_colors: bool = True, progress: Progress | None = None) -> PointCloud:
+MAX_FUSION_NEIGHBOURS = 64  # covisible depth maps a point is checked against on the GPU
+
+
+def gpu_fusion_device(gpu: str | None) -> int | None:
+    """The GPU the depth maps are fused on (``None``: COLMAP's fusion on the CPU): the first of
+    :func:`_native.gpu_devices` for the setting, when the native core has the fusion kernel."""
+    if _native.kernel("gpu_fuse") is None:
+        return None
+    try:
+        devices = _native.gpu_devices(gpu)
+    except Exception:  # noqa: BLE001
+        return None
+    return devices[0] if devices else None
+
+
+def _covisibility(rec, ids: list[int], limit: int, min_shared: int = 20, sample: int = 300_000) -> dict[int, list[int]]:
+    """For every image the images sharing at least ``min_shared`` tie points with it, the most
+    shared first, at most ``limit``: the tracks of (a sample of ``sample`` of) the points as a
+    sparse points x images matrix, and its Gram matrix."""
+    from scipy.sparse import coo_matrix
+
+    index = {iid: n for n, iid in enumerate(ids)}
+    step = max(1, rec.num_points3D() // sample)
+    rows, cols = [], []
+    for n, p in enumerate(rec.points3D.values()):
+        if n % step:
+            continue
+        for el in p.track.elements:
+            c = index.get(el.image_id)
+            if c is not None:
+                rows.append(n)
+                cols.append(c)
+    if not rows:
+        return {iid: [] for iid in ids}
+    rows = np.unique(np.asarray(rows, np.int64), return_inverse=True)[1]
+    cols = np.asarray(cols, np.int64)
+    min_shared = max(3, min_shared // step)
+    m = coo_matrix((np.ones(len(rows), np.float32), (rows, cols)), shape=(int(rows.max()) + 1, len(ids))).tocsr()
+    shared = (m.T @ m).tocsr()
+    out = {}
+    for iid in ids:
+        row = shared.getrow(index[iid])
+        pairs = [(int(c), int(v)) for c, v in zip(row.indices, row.data) if c != index[iid] and v >= min_shared]
+        pairs.sort(key=lambda p: -p[1])
+        out[iid] = [ids[c] for c, _ in pairs[:limit]]
+    return out
+
+
+def _gpu_fusion(chunk: Chunk, ws: Path, min_pixels: int, device: int, progress: Progress) -> PointCloud:
+    """COLMAP's fusion of the depth maps done on the GPU, map by map (``ppg_core.gpu_fuse``):
+    every pixel of a map against the maps covisible with it (:func:`_covisibility`, the maps kept
+    on the device in a cache), the consistent pixels (reprojection within 2 px, depth within 1 %,
+    normals within 20 degrees) averaged into a point emitted by the earliest map that holds it,
+    the colour of its own pixel; the confidence of the point is the number of maps that agree on
+    its depth, as :func:`confidence.depth_map_support` counts it, computed in the same pass."""
+    from .confidence import depth_maps
+
+    rec = _read_workspace_model(ws)
+    entries = {e["name"]: e for e in depth_maps(chunk)}
+    images = [img for _, img in sorted(rec.images.items()) if img.name in entries]
+    if not images:
+        raise RuntimeError("no depth maps to fuse")
+    ids = [img.image_id for img in images]
+    order = {iid: i for i, iid in enumerate(ids)}
+    progress(0.02, f"Fusing {len(ids)} depth maps on the GPU: the covisible maps of each")
+    neighbours = _covisibility(rec, ids, MAX_FUSION_NEIGHBOURS)
+    cams: dict[int, tuple] = {}  # iid -> (K, r, t, w, h) of its depth map
+
+    def load(iid: int):
+        e = entries[rec.images[iid].name]
+        depth = read_colmap_array(e["path"])
+        if depth.ndim == 3:
+            depth = depth[..., 0]
+        depth = np.ascontiguousarray(depth, np.float32)
+        h, w = depth.shape
+        fx, fy, cx, cy = e["K"]
+        sx, sy = w / e["size"][0], h / e["size"][1]  # a depth map smaller than the photo
+        pose = e["pose"]
+        cams[iid] = ((float(fx * sx), float(fy * sy), float(cx * sx), float(cy * sy)),
+                     np.ascontiguousarray(pose[:3, :3], np.float64), np.ascontiguousarray(pose[:3, 3], np.float64), w, h)
+        return depth
+
+    # the maps on the device are keyed by image id, unique within this workspace only: what another
+    # chunk or project left there goes, and only the maps sent by this call count as present
+    _native.gpu_fuse_forget(device)
+    on_device: set[int] = set()
+
+    def args(iid: int):
+        if iid in on_device:
+            k, r, t, _, _ = cams[iid]
+            return (iid, None, k, r, t, order[iid])
+        depth = load(iid)
+        k, r, t, _, _ = cams[iid]
+        on_device.add(iid)
+        return (iid, depth, k, r, t, order[iid])
+
+    xyz_parts, rgb_parts, normal_parts, support_parts = [], [], [], []
+    total = 0
+    for n, iid in enumerate(ids):
+        progress.check()
+        ref = args(iid)
+        neigh = [args(j) for j in neighbours.get(iid, [])]
+        xyz, normals, pixel, _pixels, support = _native.gpu_fuse(ref, neigh, min_pixels=min_pixels, device=device)
+        on_device &= set(_native.gpu_fuse_cached(device))  # the slots the device gave to other maps
+        if len(xyz):
+            k, _, _, w, h = cams[iid]
+            e = entries[rec.images[iid].name]
+            # the photo decoded at the scale of the depth map (a JPEG decodes at 1/2, 1/4, 1/8 for free)
+            ratio = e["size"][1] / h
+            flag = cv2.IMREAD_COLOR
+            for factor, reduced in ((8, cv2.IMREAD_REDUCED_COLOR_8), (4, cv2.IMREAD_REDUCED_COLOR_4), (2, cv2.IMREAD_REDUCED_COLOR_2)):
+                if ratio >= factor:
+                    flag = reduced
+                    break
+            img = cv2.imread(str(ws / "images" / rec.images[iid].name), flag | cv2.IMREAD_IGNORE_ORIENTATION)
+            if img is None:
+                rgb = np.zeros((len(xyz), 3), np.uint8)
+            else:
+                ih, iw = img.shape[:2]
+                rows = np.minimum(((pixel // w) * (ih / h)).astype(np.int64), ih - 1)
+                cols = np.minimum(((pixel % w) * (iw / w)).astype(np.int64), iw - 1)
+                rgb = np.ascontiguousarray(img[rows, cols][:, ::-1])
+            xyz_parts.append(np.asarray(xyz, np.float64))
+            normal_parts.append(np.asarray(normals, np.float32))
+            rgb_parts.append(rgb)
+            support_parts.append(np.minimum(np.asarray(support), 255).astype(np.uint8))
+            total += len(xyz)
+        if n % 10 == 0 or n == len(ids) - 1:
+            progress(0.05 + 0.9 * (n + 1) / len(ids), f"Fusing depth maps on the GPU: {n + 1}/{len(ids)}, {total:,} points")
+    if not xyz_parts:
+        raise RuntimeError("dense reconstruction produced no points")
+    return PointCloud(np.concatenate(xyz_parts), np.concatenate(rgb_parts), np.concatenate(normal_parts),
+                      confidence=np.concatenate(support_parts))
+
+
+def build_point_cloud(chunk: Chunk, point_colors: bool = True, progress: Progress | None = None,
+                      gpu: str | None = None) -> PointCloud:
+    """The dense cloud from the depth maps: on a GPU (``gpu``: the setting of :func:`gpu_fusion_device`,
+    default the ``PPG_GPU`` variable) with :func:`_gpu_fusion`, else COLMAP's fusion."""
     import pycolmap
 
     progress = as_progress(progress)
@@ -160,11 +298,23 @@ def build_point_cloud(chunk: Chunk, point_colors: bool = True, progress: Progres
     if not info or not ws.exists():
         raise RuntimeError("build depth maps first")
     progress(0.0, "Fusing depth maps")
+    pc = None
     if info["backend"] == "openmvs":
         subprocess.run([_tool("DensifyPointCloud"), str(ws / "scene.mvs"), "-w", str(ws)], check=True,
                        close_fds=False)
         pc = _inside_region(chunk, PointCloud.load(ws / "scene_dense.ply"))
-    else:
+    elif (device := gpu_fusion_device(gpu)) is not None:
+        try:
+            pc = _gpu_fusion(chunk, ws, FILTER_MODES.get(info["filter"], FILTER_MODES["moderate"])[2], device,
+                             progress.sub(0.0, 0.95))
+            pc = _inside_region(chunk, pc)
+            info["fusion"] = "gpu"
+        except Exception as exc:  # noqa: BLE001 - the GPU failed: COLMAP's fusion instead
+            log.warning("GPU fusion failed (%s): COLMAP's fusion on the CPU", exc)
+            progress(0.0, f"GPU fusion failed ({exc}): COLMAP's fusion on the CPU")
+            pc = None
+    if pc is None:
+        info["fusion"] = "colmap"
         fopts = pycolmap.StereoFusionOptions()
         fopts.min_num_pixels = FILTER_MODES.get(info["filter"], FILTER_MODES["moderate"])[2]
         fopts.max_reproj_error = 2.0

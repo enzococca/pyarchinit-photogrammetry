@@ -659,7 +659,7 @@ def dense(project: Path, quality: str = "medium", filter_mode: str = "moderate",
     doc, ch = _open(project, chunk)
     ch.build_depth_maps(quality=quality, filter_mode=filter_mode, backend=backend, progress=print_progress,
                         skip_unreadable=skip_unreadable, gpu=gpu)
-    pc = ch.build_point_cloud(progress=print_progress)
+    pc = ch.build_point_cloud(progress=print_progress, gpu=gpu)
     doc.save()
     typer.echo(f"{len(pc):,} points")
 

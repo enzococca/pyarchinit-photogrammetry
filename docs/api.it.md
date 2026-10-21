@@ -97,6 +97,21 @@ minore (57 foto di Tell Sultan: 11 s contro 19), maggiore su una GPU dedicata. L
 come prima; le facce delle foto a 360 gradi restano all'estrattore di COLMAP, come una foto che la
 GPU non riesce a fare. `meta["sfm"]["features"]` dice `gpu` o `cpu`.
 
+Anche la fusione delle mappe di profondità (`build_point_cloud(gpu=...)`, `ppg_core.gpu_fuse`):
+un thread per pixel di ogni mappa invece della traversata di COLMAP, le mappe covisibili con essa
+(fino a 64, tenute sulla GPU in una cache) controllate con i test stessi di COLMAP - il pixel
+dell'altra mappa riproiettato entro 2 px, la profondità entro l'1 %, le normali entro 20 gradi -, i
+pixel coerenti mediati nel punto, che emette la prima mappa che lo contiene (nessuna mappa ripete
+un punto che un'altra ha già fatto), tenuto con i `min_num_pixels` pixel della modalità di filtro.
+Nessun pixel viene assorbito da un punto vicino, così la nuvola è densa quanto le mappe (sulla
+trincea sintetica 2,7 volte quella di COLMAP, con il 90° percentile degli errori in quota a 2,4 mm
+contro 3,0), e la confidenza di ogni punto - le mappe che concordano sulla sua profondità entro
+l'1 % - esce dallo stesso passaggio, senza rifare `depth_map_support` (57 foto di Tell Sultan,
+mappe da 1008 pixel: 1,8 s contro 4,5 s della fusione di COLMAP più la confidenza; più il rilievo è
+grande, più cresce il guadagno, perché la traversata di COLMAP rallenta col numero di mappe).
+`meta["dense"]["fusion"]` dice `gpu` o `colmap`; una GPU che fallisce lascia il lavoro alla
+fusione di COLMAP.
+
 Le mappe di profondità PatchMatch prendono la stessa scelta (`build_depth_maps(gpu=...)`): il
 kernel del nucleo nativo gira sulla GPU, un thread per pixel, con lo stesso costo (la correlazione
 incrociata normalizzata della finestra attraverso il piano del pixel in fino a sei foto, contando
