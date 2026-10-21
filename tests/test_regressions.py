@@ -1,7 +1,7 @@
 """Regression tests for issues found in review."""
 import shutil
-from pathlib import Path
 import sqlite3
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -231,6 +231,97 @@ def test_optimize_cameras_on_control_points(processed, tmp_path):
         else:
             assert report["control_points"] == 0
     assert shifted["markers"] < shifted["plain"] - 0.0002  # the block bent towards the control point
+
+
+def test_adjust_towards_reaches_distant_fixed_points(processed):
+    """The fixed control points are reached by continuation even when the block starts far from
+    them: here every target must move by half a metre (hundreds of pixels at the distance of the
+    photos), so the whole block travels with them, its shape and its reprojection error unchanged.
+    A single adjustment with the points fixed that far diverges (Tell Tuqan)."""
+    import pycolmap
+
+    from pyarchinit_photogrammetry.engine import sfm
+    from pyarchinit_photogrammetry.markers import gcp
+
+    doc, ch, _ = processed
+    rec = sfm.load_reconstruction(ch)
+    sfm.drop_missing_points(rec)
+    rec.update_point_3d_errors()
+    err0 = rec.compute_mean_reprojection_error()
+    gcp.update_transform(ch)  # the markers triangulated in the internal frame
+    controls = [m for m in ch.markers if m.reference.location and not m.checkpoint and m.position is not None]
+    shift = np.array([0.5, -0.3, 0.2]) / ch.scale  # half a metre, in internal units
+    points = [(m, np.asarray(m.position, float) + shift) for m in controls]
+    pids, used = sfm._fixed_points(ch, rec, 4, points)
+    assert len(used) >= 3
+    assert np.median(sfm._point_residuals_px(rec, pids[::4])) > 100
+    centres = {iid: im.projection_center() for iid, im in rec.images.items() if im.has_pose}
+    starts = [m.position for m, _ in points if m.key in used]
+    steps = sfm._adjust_towards(rec, pycolmap.BundleAdjustmentOptions(), pids, 4, starts)
+    assert steps >= 5
+    assert np.median(sfm._point_residuals_px(rec, pids[::4])) < 1.0  # the targets reached
+    rec.update_point_3d_errors()
+    assert rec.compute_mean_reprojection_error() < err0 + 0.05
+    moved = np.array([rec.images[iid].projection_center() - c for iid, c in centres.items()])
+    assert np.allclose(moved, shift, atol=0.01 / ch.scale)  # the block moved as one, within a centimetre
+
+
+def test_retriangulate_puts_the_points_back(processed):
+    """Points moved away are triangulated again from their observations with the current cameras,
+    all at once, within the precision of the adjustment; the skipped ones stay."""
+    from pyarchinit_photogrammetry.engine import sfm
+
+    doc, ch, _ = processed
+    rec = sfm.load_reconstruction(ch)
+    sfm.drop_missing_points(rec)
+    rec.update_point_3d_errors()
+    err0 = rec.compute_mean_reprojection_error()
+    before = {pid: np.array(p.xyz) for pid, p in rec.points3D.items()}
+    skipped = list(before)[:5]
+    for pid, p in rec.points3D.items():
+        p.xyz = before[pid] + np.array([1.0, -2.0, 0.5]) / ch.scale  # metres away
+    moved = sfm._retriangulate(rec, skip=skipped)
+    assert moved >= 0.95 * (len(before) - len(skipped))
+    d = np.array([np.linalg.norm(rec.points3D[pid].xyz - before[pid]) for pid in before if pid not in skipped]) * ch.scale
+    assert np.median(d) < 0.002 and np.percentile(d, 90) < 0.01  # back within millimetres
+    for pid in skipped:
+        assert np.allclose(rec.points3D[pid].xyz, before[pid] + np.array([1.0, -2.0, 0.5]) / ch.scale)
+    rec.update_point_3d_errors()
+    assert sfm._drop_stale_points(rec, 16.0, skip=skipped[:1]) == len(skipped) - 1  # the stale ones go
+    assert skipped[0] in rec.points3D and skipped[1] not in rec.points3D
+    rec.points3D[skipped[0]].xyz = before[skipped[0]]
+    rec.update_point_3d_errors()
+    assert rec.compute_mean_reprojection_error() < err0 + 0.2
+
+
+def test_subset_keeps_the_strongest_tracks_and_transfers_poses(processed):
+    import pycolmap
+
+    from pyarchinit_photogrammetry.engine import sfm
+
+    doc, ch, _ = processed
+    rec = sfm.load_reconstruction(ch)
+    sfm.drop_missing_points(rec)
+    lengths = sorted((p.track.length() for p in rec.points3D.values()), reverse=True)
+    keep = list(rec.points3D.keys())[:3]
+    limit = sum(lengths) // 4
+    sub = sfm._subset(rec, keep, limit)
+    assert rec.num_points3D() > sub.num_points3D() >= 3
+    assert all(pid in sub.points3D for pid in keep)
+    kept = sum(p.track.length() for p in sub.points3D.values())
+    assert kept < sum(lengths) and kept <= 2 * limit  # about the budget (every photo keeps its share first)
+    assert kept / sub.num_points3D() > sum(lengths) / len(lengths)  # the strongest tracks
+    assert rec.num_points3D() == len(lengths)  # the original untouched
+    other = sfm.load_reconstruction(ch)
+    for frame in other.frames.values():
+        if frame.has_pose:
+            pose = frame.rig_from_world
+            frame.rig_from_world = pycolmap.Rigid3d(pose.rotation, pose.translation + np.array([1.0, 0.0, 0.0]))
+    sfm._transfer_poses(sub, other)
+    for fid, frame in sub.frames.items():
+        if frame.has_pose:
+            assert np.allclose(other.frames[fid].rig_from_world.translation, frame.rig_from_world.translation)
+    assert np.allclose(np.asarray(other.cameras[1].params), np.asarray(sub.cameras[1].params))
 
 
 def test_optimize_cameras_with_scale_bars(processed, tmp_path):

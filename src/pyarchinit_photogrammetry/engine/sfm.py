@@ -865,6 +865,183 @@ def _fixed_points(chunk: Chunk, rec, copies: int, points) -> tuple[list[int], se
     return pids, added
 
 
+STEP_RESIDUAL_PX = 15.0  # continuation of the fixed markers: each step starts within this reprojection error
+MAX_STEPS = 40
+STEP_ITERATIONS = 12  # adjustment iterations of the intermediate steps (the last step gets them all)
+SUBSET_OBSERVATIONS = 2_500_000  # the continuation runs on the longest tracks up to this many observations
+FREE_PASS_ITERATIONS = 20  # the free adjustment before the control points: the block is already adjusted
+FINAL_PASS_ITERATIONS = 30  # the adjustment of all the tie points after the continuation on the subset
+STALE_POINT_PX = 16.0  # points off by more than this (mean) after the re-triangulation are dropped
+
+
+def _at_most(opts, iterations: int):
+    """A copy of the adjustment options with at most ``iterations`` solver iterations."""
+    import copy
+
+    out = copy.deepcopy(opts)
+    out.ceres.solver_options.max_num_iterations = min(iterations, opts.ceres.solver_options.max_num_iterations)
+    return out
+
+
+def _point_residuals_px(rec, pids) -> np.ndarray:
+    """Reprojection residuals (px) of all the observations of the given points of ``rec``;
+    infinite behind a camera."""
+    out = []
+    for pid in pids:
+        p = rec.points3D[pid]
+        for el in p.track.elements:
+            image = rec.images[el.image_id]
+            xc = image.cam_from_world() * p.xyz
+            if xc[2] <= 0:
+                out.append(np.inf)
+                continue
+            proj = np.asarray(rec.cameras[image.camera_id].img_from_cam(xc[None, :]))[0]
+            out.append(float(np.linalg.norm(proj - image.points2D[el.point2D_idx].xy)))
+    return np.array(out, float)
+
+
+def _adjust_towards(rec, opts, pids, copies, starts, fixed_cameras=(), progress=None) -> int:
+    """Bundle adjustment with the markers as fixed points reached by continuation: the fixed points
+    (``pids``, ``copies`` per marker, at their references) are moved in steps from where the block
+    sees them (``starts``, one per marker; None = the reference) to their references, with an
+    adjustment at each step, so that no step starts far from its solution. A single adjustment
+    with the points fixed far from where the block sees them (metres at close range: hundreds of
+    pixels) diverges, the calibration running away (Tell Tuqan). Returns the number of steps."""
+    refs = np.array([rec.points3D[pid].xyz for pid in pids[::copies]])
+    starts = np.array([refs[i] if s is None else np.asarray(s, float) for i, s in enumerate(starts)])
+    px = _point_residuals_px(rec, pids[::copies])
+    median = float(np.median(px)) if len(px) else 0.0
+    steps = MAX_STEPS if not np.isfinite(median) else int(np.clip(np.ceil(median / STEP_RESIDUAL_PX), 1, MAX_STEPS))
+    for k in range(1, steps + 1):
+        f = k / steps
+        for i, pid in enumerate(pids):
+            rec.points3D[pid].xyz = starts[i // copies] + f * (refs[i // copies] - starts[i // copies])
+        step_opts = opts if k == steps else _at_most(opts, STEP_ITERATIONS)
+        _adjust(rec, step_opts, constant_points=pids, fixed_cameras=fixed_cameras)
+        if progress is not None:
+            progress(k / steps, f"Adjustment on the control points, step {k} of {steps}")
+    return steps
+
+
+def _subset(rec, keep_pids, max_observations: int):
+    """A copy of ``rec`` with the points of the longest tracks (and ``keep_pids``) up to about
+    ``max_observations`` observations: the continuation runs on it in a fraction of the time.
+    Every photo keeps its share of points first (its longest tracks), so that no pose is left
+    loose: the longest tracks alone crowd where the photos overlap most."""
+    import copy
+
+    lengths = {pid: p.track.length() for pid, p in rec.points3D.items()}
+    sub = copy.deepcopy(rec)
+    kept = set(keep_pids)
+    images = [im for im in rec.images.values() if im.has_pose]
+    quota = max(100, max_observations // (2 * max(1, len(images))))
+    for image in images:
+        ids = [p.point3D_id for p in image.points2D if p.has_point3D() and p.point3D_id in lengths]
+        ids.sort(key=lambda pid: -lengths[pid])
+        kept.update(ids[:quota])
+    budget = max_observations - sum(lengths[pid] for pid in kept)
+    for pid in sorted(lengths, key=lengths.get, reverse=True):
+        if budget <= 0:
+            break
+        if pid not in kept and lengths[pid] <= budget:
+            kept.add(pid)
+            budget -= lengths[pid]
+    for pid in lengths:
+        if pid not in kept:
+            sub.delete_point3D(pid)
+    return sub
+
+
+def _transfer_poses(src, dst) -> None:
+    """The poses and the intrinsics of ``src`` into ``dst`` (the same frames and cameras)."""
+    for fid, frame in src.frames.items():
+        if frame.has_pose:
+            dst.frames[fid].rig_from_world = frame.rig_from_world
+    for cid, cam in src.cameras.items():
+        dst.cameras[cid].params = cam.params
+
+
+def _retriangulate(rec, skip=(), batch: int = 2_000_000) -> int:
+    """Every point of ``rec`` (but ``skip``) triangulated again from its observations with the
+    current poses and intrinsics (least squares of the rays, all at once): after the cameras have
+    moved, the points would start an adjustment hundreds of pixels off and it would not converge.
+    Points whose rays do not meet keep their position. Returns the number of points moved."""
+    skip = set(skip)
+    pids = np.array([pid for pid in rec.points3D.keys() if pid not in skip], dtype=np.int64)
+    if len(pids) == 0:
+        return 0
+    lookup = np.full(int(pids.max()) + 1, -1, dtype=np.int64)
+    lookup[pids] = np.arange(len(pids))
+    n = len(pids)
+    A = np.zeros((n, 3, 3))
+    b = np.zeros((n, 3))
+    count = np.zeros(n, dtype=np.int64)
+    pending: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    size = 0
+
+    def flush():
+        nonlocal pending, size
+        if not pending:
+            return
+        ids = np.concatenate([p[0] for p in pending])
+        P = np.concatenate([p[1] for p in pending])
+        Pc = np.concatenate([p[2] for p in pending])
+        for i in range(3):
+            for j in range(3):
+                A[:, i, j] += np.bincount(ids, weights=P[:, i, j], minlength=n)
+            b[:, i] += np.bincount(ids, weights=Pc[:, i], minlength=n)
+        count[:] += np.bincount(ids, minlength=n)
+        pending, size = [], 0
+
+    for image in rec.images.values():
+        if not image.has_pose:
+            continue
+        obs = [(p.point3D_id, p.xy) for p in image.points2D if p.has_point3D()]
+        if not obs:
+            continue
+        ids = np.array([o[0] for o in obs], dtype=np.int64)
+        ids = np.where(ids < len(lookup), lookup[np.minimum(ids, len(lookup) - 1)], -1)
+        sel = ids >= 0
+        if not sel.any():
+            continue
+        xy = np.array([o[1] for o in obs], float)[sel]
+        ids = ids[sel]
+        norm = np.asarray(rec.cameras[image.camera_id].cam_from_img(xy), float)
+        d = np.column_stack([norm, np.ones(len(norm))])
+        u = d @ image.cam_from_world().rotation.matrix()  # directions in the world (R^T d, as rows)
+        u /= np.linalg.norm(u, axis=1, keepdims=True)
+        P = np.eye(3)[None] - u[:, :, None] * u[:, None, :]
+        c = np.asarray(image.projection_center(), float)
+        pending.append((ids, P, P @ c))
+        size += len(ids)
+        if size >= batch:
+            flush()
+    flush()
+    det = np.linalg.det(A)
+    scale = np.trace(A, axis1=1, axis2=2) ** 3 / 27.0
+    valid = (count >= 2) & (det > 1e-5 * np.maximum(scale, 1e-300))  # rays at least a tenth of a degree apart
+    if not valid.any():
+        return 0
+    X = np.linalg.solve(A[valid], b[valid][:, :, None])[:, :, 0]
+    good = np.isfinite(X).all(axis=1)
+    moved = 0
+    for pid, x, ok in zip(pids[valid], X, good):
+        if ok:
+            rec.points3D[int(pid)].xyz = x
+            moved += 1
+    return moved
+
+
+def _drop_stale_points(rec, max_px: float, skip=()) -> int:
+    """Points whose stored mean reprojection error (``update_point_3d_errors`` first) is above
+    ``max_px`` deleted, but ``skip``; returns how many."""
+    skip = set(skip)
+    bad = [pid for pid, p in rec.points3D.items() if p.error > max_px and pid not in skip]
+    for pid in bad:
+        rec.delete_point3D(pid)
+    return len(bad)
+
+
 def _control_markers(chunk: Chunk) -> dict:
     """Markers with an enabled reference (not check points) -> their reference in the internal frame."""
     out = {}
@@ -1058,7 +1235,7 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
         pass
     fixed_cams = _rec_fixed_cameras(chunk, rec)
     if constrained:  # the block first finds its own shape and calibration, then bends to the references
-        _adjust(rec, opts, fixed_cameras=fixed_cams)
+        _adjust(rec, _at_most(opts, FREE_PASS_ITERATIONS), fixed_cameras=fixed_cams)
         _restore_sensor_models(chunk, rec)
         import_reconstruction(chunk, rec)
         gcp.update_transform(chunk)
@@ -1072,8 +1249,25 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
         points = [(chunk.marker_by_key(k), X) for k, X in {**fixed, **anchors}.items()]
     pids, used = _fixed_points(chunk, rec, copies, points) if points else ([], set())
     placed = np.array([rec.points3D[pid].xyz for pid in pids[::copies]]) if pids else np.zeros((0, 3))
+    steps = 0
     if len(placed) >= 3 and gcp._non_collinear(placed):
-        _adjust(rec, opts, constant_points=pids, fixed_cameras=fixed_cams)
+        starts = [m.position for m, _ in points if m.key in used]  # where the block sees them now
+        observations = sum(p.track.length() for p in rec.points3D.values())
+        if observations > SUBSET_OBSERVATIONS:  # the continuation on the strongest tracks, then everything
+            sub = _subset(rec, pids, SUBSET_OBSERVATIONS)
+            steps = _adjust_towards(sub, opts, pids, copies, starts, fixed_cams, progress.sub(0.5, 0.3))
+            _transfer_poses(sub, rec)
+            for pid in pids:
+                rec.points3D[pid].xyz = sub.points3D[pid].xyz
+            del sub
+            progress(0.8, "Adjustment of all the tie points on the control points")
+            _retriangulate(rec, skip=pids)  # the other points follow the cameras before the adjustment
+            rec.update_point_3d_errors()
+            dropped = _drop_stale_points(rec, STALE_POINT_PX, skip=pids)  # what no longer fits the cameras
+            log.info("control points: %d steps, %d tie points dropped, %d kept", steps, dropped, rec.num_points3D())
+            _adjust(rec, _at_most(opts, FINAL_PASS_ITERATIONS), constant_points=pids, fixed_cameras=fixed_cams)
+        else:
+            steps = _adjust_towards(rec, opts, pids, copies, starts, fixed_cams, progress.sub(0.5, 0.45))
     else:
         pids, points = _drop_points(rec, pids), []
         _adjust(rec, opts, fixed_cameras=fixed_cams)
@@ -1086,7 +1280,7 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     used = used if points else set()
     report = {"reprojection_error": err,
               "control_points": sum(1 for m in controls if m.key in used) if with_gcps else 0,
-              "scale_bars": sum(1 for sb in bars if {sb.marker_a, sb.marker_b} <= used)}
+              "scale_bars": sum(1 for sb in bars if {sb.marker_a, sb.marker_b} <= used), "steps": steps}
     if points or gcp.control_scalebars(chunk):
         gcp.update_transform(chunk)  # the bars and the control points on the adjusted block
     else:
