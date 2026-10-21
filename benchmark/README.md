@@ -15,6 +15,19 @@ python benchmark/compare.py OUT/compare \
     odm=OUT/odm/sultan/odm_dem/dsm.tif,OUT/odm/sultan/odm_orthophoto/odm_orthophoto.tif
 ```
 
+With ground control (Tell Tuqan: the targets measured in the field, the marker projections of the
+surveyor's Metashape project read by both programs, `BENCH_CRS` the projected CRS of the targets):
+
+```bash
+BENCH_CRS=EPSG:xxxxx python benchmark/bench_ppg_tuqan.py PROJECT.psx PHOTOS targets.csv rtk.csv OUT/ppg
+BENCH_CRS=EPSG:xxxxx python benchmark/bench_ppg_tuqan_gpu.py PROJECT.psx PHOTOS targets.csv rtk.csv OUT/ppg_gpu   # GPU + GPS priors
+BENCH_CRS=EPSG:xxxxx MetashapePro -r benchmark/bench_metashape_tuqan.py PROJECT.psx PHOTOS targets.csv OUT/metashape
+BENCH_CRS=EPSG:xxxxx MetashapePro -r benchmark/bench_metashape_rebuild_ortho.py PHOTOS OUT/metashape   # DEM and orthomosaic as BigTIFF
+```
+
+`targets.csv`: `label,east,north,height,role` (role `control` or `check`); `rtk.csv`: `name,east,north,height`
+points on the ground checked against the DEM.
+
 * `bench_ppg.py`, `bench_metashape.py`: one process, one JSON of times and statistics
   (`ppg_times.json`, `metashape_times.json`), with the reprojection error measured the same way (RMS
   over all the observations of the tie points). Metashape scripts run inside its window (the
