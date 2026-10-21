@@ -7,6 +7,7 @@ mod camera;
 mod depth;
 mod gpu;
 mod gpu_patchmatch;
+mod gpu_sift;
 mod patchmatch;
 
 use std::collections::HashMap;
@@ -23,7 +24,7 @@ use rayon::prelude::*;
 use camera::{Camera, Pose};
 
 /// Version of the functions offered here: raised when one is added or changes meaning.
-const API: u32 = 5;
+const API: u32 = 6;
 
 // one matcher per GPU, each behind its own lock: several GPUs work at the same time
 fn matchers() -> &'static Mutex<HashMap<i64, Arc<Mutex<gpu::Matcher>>>> {
@@ -571,6 +572,34 @@ fn gpu_patchmatch_depth<'py>(py: Python<'py>, reference: PyReadonlyArray2<'py, f
 }
 
 /// Camera models the projection kernels know.
+/// SIFT key points and descriptors of a grey image (``h x w`` float32 in [0, 1]) on the GPU, as
+/// VLFeat and COLMAP compute them: ``(keypoints (n, 4) float32 - x, y, scale, orientation with the
+/// centre of the first pixel at (0, 0) -, descriptors (n, 128) uint8)``. ``device`` -1 = the best
+/// GPU, else the adapter index.
+#[pyfunction]
+#[pyo3(name = "gpu_sift")]
+#[pyo3(signature = (image, max_features=8192, first_octave=-1, num_octaves=4, octave_resolution=3,
+                    peak_threshold=0.02 / 3.0, edge_threshold=10.0, max_orientations=2, upright=false, device=-1))]
+#[allow(clippy::too_many_arguments)]
+fn gpu_sift_features<'py>(py: Python<'py>, image: PyReadonlyArray2<'py, f32>, max_features: usize, first_octave: i32,
+                 num_octaves: u32, octave_resolution: u32, peak_threshold: f32, edge_threshold: f32,
+                 max_orientations: u32, upright: bool, device: i64)
+    -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<u8>>)> {
+    let a = image.as_array();
+    let (h, w) = (a.shape()[0], a.shape()[1]);
+    let data: Vec<f32> = a.iter().copied().collect();
+    let o = gpu_sift::Options { first_octave, num_octaves, octave_resolution, peak_threshold, edge_threshold,
+                                max_orientations, upright, max_features };
+    let (kp, desc) = py.allow_threads(|| -> Result<(Vec<[f32; 4]>, Vec<u8>), String> {
+        let s = gpu_sift::sift_for(device)?;
+        s.extract(&data, w, h, &o)
+    }).map_err(PyRuntimeError::new_err)?;
+    let n = kp.len();
+    let flat: Vec<f32> = kp.iter().flat_map(|k| k.iter().copied()).collect();
+    Ok((Array2::from_shape_vec((n, 4), flat).unwrap().into_pyarray_bound(py),
+        Array2::from_shape_vec((n, gpu_sift::DESC), desc).unwrap().into_pyarray_bound(py)))
+}
+
 #[pyfunction]
 fn supported_models() -> Vec<&'static str> {
     camera::MODELS.to_vec()
@@ -590,6 +619,7 @@ fn ppg_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(patchmatch_depth, m)?)?;
     m.add_function(wrap_pyfunction!(supported_models, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_adapters, m)?)?;
+    m.add_function(wrap_pyfunction!(gpu_sift_features, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_match, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_device_name, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_forget, m)?)?;
