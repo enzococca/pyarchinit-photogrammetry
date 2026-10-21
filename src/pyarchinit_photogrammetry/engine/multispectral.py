@@ -71,6 +71,17 @@ def detect_bands(paths) -> dict[str, dict[str, Path]]:
         else:
             files.append(p)
     captures: dict[str, dict[str, Path]] = {}
+    owner: dict[str, Path] = {}  # the folder a capture name comes from: the numbering of a camera
+    # starts again in every folder (100MEDIA, 101MEDIA), so a repeated name takes its folder as a prefix
+    first_stem: dict[str, str] = {}  # the capture of a DJI P4 Multispectral: six files of their own
+    # numbers (DJI_0010.JPG, DJI_0011.TIF ... DJI_0015.TIF) sharing a CaptureUUID in the XMP
+
+    def unique(stem: str, folder: Path) -> str:
+        if owner.setdefault(stem, folder) != folder:
+            stem = f"{folder.name}_{stem}"
+            owner.setdefault(stem, folder)
+        return stem
+
     for f in files:
         m = _SUFFIX.match(f.stem)
         band = None
@@ -86,31 +97,65 @@ def detect_bands(paths) -> dict[str, dict[str, Path]]:
                 band = MICASENSE_BANDS.get(suffix)
             else:
                 band = SEQUOIA_BANDS.get(suffix)
-        xmp = band_name_of(f) if band is None else None
-        if xmp:
-            band = xmp
+        if band is None:
+            tags = xmp_of(f)
+            band = _band_alias(tags.get("BandName"))
+            uuid = tags.get("CaptureUUID")
+            if band and uuid:
+                stem = first_stem.setdefault(str(uuid), unique(f.stem, f.parent))
+            elif band:
+                stem = unique(stem, f.parent)
+        else:
+            stem = unique(stem, f.parent)
         if band is None:
             continue
         captures.setdefault(stem, {})[band] = f
     return {k: v for k, v in captures.items() if len(v) >= 2}
 
 
+_EXIF_BASICS = {258: "BitsPerSample", 50714: "BlackLevel", 34855: "ISOSpeedRatings", 33434: "ExposureTime",
+                306: "DateTime", 272: "Model"}
+
+
 def xmp_of(path) -> dict:
-    """The XMP tags of a photo as ``{name: value}`` (the names without their namespaces), {} when
-    there are none."""
+    """The XMP tags of a photo as ``{name: value}`` (the names without their namespaces) plus the
+    few EXIF tags the radiometry needs when the XMP has not got them (the black level of a DJI
+    P4 Multispectral band is an EXIF tag of the TIFF), {} when there are none."""
     from PIL import Image
 
+    out: dict = {}
     try:
         with Image.open(path) as im:
             raw = im.info.get("xmp") or b""
-            if not raw and hasattr(im, "getxmp"):
-                data = im.getxmp()
-                return _flatten(data) if data else {}
+            if not raw and hasattr(im, "tag_v2"):  # the XMP tag of a TIFF
+                raw = im.tag_v2.get(700) or b""
+                if isinstance(raw, (tuple, list)):
+                    raw = raw[0] if raw else b""
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", "replace")
+            if raw:
+                out = parse_xmp(raw)
+            elif hasattr(im, "getxmp"):
+                import warnings
+
+                try:
+                    with warnings.catch_warnings():  # PIL warns when it lacks defusedxml
+                        warnings.simplefilter("ignore")
+                        data = im.getxmp()
+                    out = _flatten(data) if data else {}
+                except Exception:  # noqa: BLE001 - needs defusedxml
+                    out = {}
+            try:
+                exif = im.getexif()
+                for tag, name in _EXIF_BASICS.items():
+                    v = exif.get(tag)
+                    if v is not None and name not in out:
+                        out[name] = list(v) if isinstance(v, (tuple, list)) else v
+            except Exception:  # noqa: BLE001
+                pass
     except Exception:  # noqa: BLE001 - not a photo PIL reads: no tags
-        return {}
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8", "replace")
-    return parse_xmp(raw)
+        return out
+    return out
 
 
 def _flatten(data, out=None, prefix="") -> dict:
@@ -148,9 +193,7 @@ def parse_xmp(text: str) -> dict:
     return out
 
 
-def band_name_of(path) -> str | None:
-    tags = xmp_of(path)
-    name = tags.get("BandName")
+def _band_alias(name) -> str | None:
     if isinstance(name, list):
         name = name[0] if name else None
     if not name:
@@ -159,6 +202,10 @@ def band_name_of(path) -> str | None:
     aliases = {"red edge": "RedEdge", "rededge": "RedEdge", "red-edge": "RedEdge", "nir": "NIR", "lwir": "LWIR",
                "thermal": "LWIR", "blue": "Blue", "green": "Green", "red": "Red", "panchro": "Panchro"}
     return aliases.get(name.lower(), name)
+
+
+def band_name_of(path) -> str | None:
+    return _band_alias(xmp_of(path).get("BandName"))
 
 
 def _number(v, default=None):
@@ -188,7 +235,13 @@ def _numbers(v) -> list[float]:
 
 def read_band(path) -> np.ndarray:
     """The band as float32 digital numbers (16-bit or 8-bit files)."""
-    img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED | cv2.IMREAD_ANYDEPTH)
+    if str(path).lower().endswith((".tif", ".tiff")):  # PIL: no libtiff warnings on DJI's tags
+        from PIL import Image
+
+        with Image.open(path) as im:
+            img = np.asarray(im)
+    else:
+        img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED | cv2.IMREAD_ANYDEPTH)
     if img is None:
         raise RuntimeError(f"cannot read {path}")
     if img.ndim == 3:
@@ -218,18 +271,34 @@ def radiance_image(path, tags: dict | None = None) -> tuple[np.ndarray, dict]:
         iso = _number(tags.get("ISOSpeedRatings") or tags.get("ISO"), None)
         gain = iso / 100.0 if iso else 1.0
     exposure = _number(tags.get("ExposureTime"), None) or _number(tags.get("exposure_time"), 1.0) or 1.0
+    dji = tags.get("VignettingData") is not None and tags.get("CalibratedOpticalCenterX") is not None
+    if dji and exposure > 1.0:  # DJI P4 Multispectral: microseconds
+        exposure = exposure / 1e6
     used.update(gain=gain, exposure=exposure)
-    # vignetting: MicaSense polynomial in the distance from the centre, DJI the same idea
+    # vignetting: MicaSense's polynomial in the distance from the centre is the fall-off (the
+    # image is divided by it), DJI's (VignettingData k1..k6 from the calibrated optical centre)
+    # is the correction (the image is multiplied by it): both as in their guides
     centre = _numbers(tags.get("VignettingCenter"))
     poly = _numbers(tags.get("VignettingPolynomial"))
+    multiply = False
+    if dji:
+        centre = [_number(tags.get("CalibratedOpticalCenterX"), w / 2), _number(tags.get("CalibratedOpticalCenterY"), h / 2)]
+        poly = _numbers(tags.get("VignettingData"))
+        multiply = True
     if len(centre) >= 2 and poly:
         yy, xx = np.mgrid[0:h, 0:w]
         r = np.sqrt((xx - centre[0]) ** 2 + (yy - centre[1]) ** 2).astype(np.float32)
         v = np.ones_like(r)
         for k, c in enumerate(poly, 1):
             v += c * r ** k
-        norm = norm * (1.0 / np.where(v > 1e-6, v, 1.0)).astype(np.float32)
+        v = np.where(v > 1e-6, v, 1.0).astype(np.float32)
+        norm = norm * v if multiply else norm / v
         used["vignetting"] = True
+    if dji:  # the guide's normalised camera value, with the gain adjustment of the band
+        adjust = _number(tags.get("SensorGainAdjustment"), 1.0) or 1.0
+        used["model"] = "dji"
+        used["gain_adjustment"] = adjust
+        return (norm * adjust / (max(gain, 1e-9) * max(exposure, 1e-9))).astype(np.float32), used
     cal = _numbers(tags.get("RadiometricCalibration"))
     if len(cal) >= 3:  # MicaSense: L = V * a1 / g * (p - pBL) / (te + a2 * y - a3 * te * y), y the row
         a1, a2, a3 = cal[:3]
@@ -276,21 +345,36 @@ def reflectance_image(path, factor: float | None = None, tags: dict | None = Non
     """The band in reflectance: radiance x the panel ``factor`` of its band, or pi x radiance /
     the irradiance of the sun sensor when the tags have it, else the normalised numbers."""
     tags = xmp_of(path) if tags is None else tags
-    rad, _used = radiance_image(path, tags)
+    rad, used = radiance_image(path, tags)
     if factor is not None:
         return (rad * factor).astype(np.float32)
     irr = irradiance_of(tags)
     if irr:
+        if used.get("model") == "dji":  # the sun sensor's value is normalised like the camera's: a ratio
+            return (rad / irr).astype(np.float32)
         return (np.pi * rad / irr).astype(np.float32)
     return rad
 
 
 # ------------------------------------------------------------------------------ registration
-def register_bands(images: dict[str, np.ndarray], reference: str, scale: int = 2, iterations: int = 100) -> dict[str, np.ndarray]:
+BAND_ORDER = ("Blue", "Green", "Red", "RedEdge", "NIR", "LWIR")  # by wavelength: the neighbours look alike
+
+
+def _wavelength_index(band: str) -> int:
+    return BAND_ORDER.index(band) if band in BAND_ORDER else len(BAND_ORDER)
+
+
+def register_bands(images: dict[str, np.ndarray], reference: str, scale: int = 2, iterations: int = 100,
+                   quality: dict | None = None) -> dict[str, np.ndarray]:
     """The homography of every band onto the ``reference`` band (ECC on the gradient magnitudes,
     at a reduced size then scaled back): ``{band: 3 x 3}`` mapping a pixel of the reference to
     the same point in the band (what :func:`warp_band` needs), the identity for the reference
-    and for a band ECC cannot register."""
+    and for a band ECC cannot register. The bands are registered in a chain by wavelength: a
+    band is matched against the two registered bands nearest to it in wavelength, already brought
+    into the frame of the reference, and the better match wins - a leaf is bright and textured in
+    the NIR, dark and smooth in the red, so NIR on red seldom converges (correlation 0.1-0.3 on a
+    DJI P4 Multispectral over scrub), NIR on red-edge always does (0.9). ``quality``, when given,
+    collects the ECC correlation of every band and the band it was matched to."""
     ref = images[reference]
     out = {}
     h0, w0 = ref.shape[:2]
@@ -306,31 +390,55 @@ def register_bands(images: dict[str, np.ndarray], reference: str, scale: int = 2
         return ((mag - mag.mean()) / (mag.std() + 1e-9)).astype(np.float32)
 
     criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, int(iterations), 1e-4)
-    pref_full = grad(ref, 1)
-    pref_half = grad(ref, scale) if scale > 1 else pref_full
-    window = cv2.createHanningWindow((pref_full.shape[1], pref_full.shape[0]), cv2.CV_32F)
-    for band, img in images.items():
-        if band == reference:
-            out[band] = np.eye(3)
-            continue
-        if img.shape[:2] != (h0, w0):
-            img = cv2.resize(np.nan_to_num(img.astype(np.float32)), (w0, h0), interpolation=cv2.INTER_AREA)
-        pimg_full = grad(img, 1)
-        # the shift first (phase correlation, whole image), then an affine at a reduced size,
-        # then the homography at full size: each starts where the previous ended
-        (dx, dy), _response = cv2.phaseCorrelate(pref_full, pimg_full, window)
+    window = cv2.createHanningWindow((w0, h0), cv2.CV_32F)
+    # the registered bands in the frame of the reference: their gradient features at full and
+    # at the reduced size, the targets of the bands still to register
+    targets: dict[str, tuple[np.ndarray, np.ndarray]] = {reference: (grad(ref, 1), grad(ref, scale) if scale > 1 else grad(ref, 1))}
+    out[reference] = np.eye(3)
+
+    def register(target: tuple[np.ndarray, np.ndarray], pimg_full: np.ndarray, pimg_half: np.ndarray):
+        """ECC of a band on a target: the shift first (phase correlation, whole image), then an
+        affine at the reduced size, then the homography at full size, each starting where the
+        previous ended. Returns the homography and the correlation reached (0 when ECC failed)."""
+        tfull, thalf = target
+        (dx, dy), _response = cv2.phaseCorrelate(tfull, pimg_full, window)
         h = np.array([[1.0, 0.0, dx], [0.0, 1.0, dy], [0.0, 0.0, 1.0]])
+        cc = 0.0
         try:
             if scale > 1:
                 s = np.diag([1.0 / scale, 1.0 / scale, 1.0])
                 warp = (s @ h @ np.linalg.inv(s))[:2].astype(np.float32)
-                _cc, warp = cv2.findTransformECC(pref_half, grad(img, scale), warp, cv2.MOTION_AFFINE, criteria, None, 5)
+                cc, warp = cv2.findTransformECC(thalf, pimg_half, warp, cv2.MOTION_AFFINE, criteria, None, 5)
                 h = np.linalg.inv(s) @ np.vstack([warp.astype(np.float64), [0.0, 0.0, 1.0]]) @ s
-            _cc, warp3 = cv2.findTransformECC(pref_full, pimg_full, h.astype(np.float32), cv2.MOTION_HOMOGRAPHY, criteria, None, 5)
+            cc, warp3 = cv2.findTransformECC(tfull, pimg_full, h.astype(np.float32), cv2.MOTION_HOMOGRAPHY, criteria, None, 5)
             h = warp3.astype(np.float64)
         except cv2.error:
-            pass  # the shift alone
+            pass  # the shift alone, or what the affine gave
+        return h, float(cc)
+
+    pending = sorted((b for b in images if b != reference),
+                     key=lambda b: (abs(_wavelength_index(b) - _wavelength_index(reference)), b))
+    for band in pending:
+        img = images[band]
+        if img.shape[:2] != (h0, w0):
+            img = cv2.resize(np.nan_to_num(img.astype(np.float32)), (w0, h0), interpolation=cv2.INTER_AREA)
+        pimg_full = grad(img, 1)
+        pimg_half = grad(img, scale) if scale > 1 else pimg_full
+        nearest = sorted(targets, key=lambda t: (abs(_wavelength_index(t) - _wavelength_index(band)), t != reference))[:2]
+        best = None
+        for t in nearest:
+            h, cc = register(targets[t], pimg_full, pimg_half)
+            if best is None or cc > best[1]:
+                best = (h, cc, t)
+            if cc >= 0.6:  # good enough: the second candidate is for the bands that look unlike
+                break
+        h, cc, matched = best
         out[band] = h
+        if quality is not None:
+            quality[band] = {"correlation": cc, "on": matched}
+        if cc > 0.15:  # registered: a target for the bands further away in wavelength
+            warped = warp_band(img, h, (h0, w0))
+            targets[band] = (grad(warped, 1), grad(warped, scale) if scale > 1 else grad(warped, 1))
     return out
 
 
@@ -391,6 +499,13 @@ def reference_copy(src: Path, dst: Path) -> Path:
     try:
         with Image.open(src) as im:
             exif = im.info.get("exif") or b""
+            if not exif:  # a TIFF: its EXIF rebuilt with the camera and GPS directories
+                from PIL import ExifTags
+
+                ex = im.getexif()
+                ex.get_ifd(ExifTags.IFD.Exif)
+                ex.get_ifd(ExifTags.IFD.GPSInfo)
+                exif = ex.tobytes() if len(ex) else b""
     except Exception:  # noqa: BLE001
         exif = b""
     pil = Image.fromarray(img)
@@ -426,8 +541,10 @@ def band_stack(chunk: Chunk, camera, bands: list[str], cache: dict | None = None
     refl = {b: reflectance_image(p, factors.get(b), tags[b]) for b, p in files.items()}
     hs = ms.get("registration", {}).get(str(camera.key))
     if hs is None:
-        hs = register_bands(refl, reference) if reference in refl else {b: np.eye(3) for b in refl}
+        quality: dict = {}
+        hs = register_bands(refl, reference, quality=quality) if reference in refl else {b: np.eye(3) for b in refl}
         ms.setdefault("registration", {})[str(camera.key)] = {b: np.asarray(h).tolist() for b, h in hs.items()}
+        ms.setdefault("registration_quality", {})[str(camera.key)] = quality
     shape = refl[reference].shape if reference in refl else next(iter(refl.values())).shape
     stack = np.full((shape[0], shape[1], len(bands)), np.nan, np.float32)
     for k, b in enumerate(bands):

@@ -193,3 +193,66 @@ def test_command_line_and_the_menu(scene_dir, tmp_path, monkeypatch):
     assert shown[-1][0] == "warn"  # the reflectance orthomosaic comes first
     w.setWindowModified(False)
     w.close()
+
+
+def _p4m_capture(folder: Path, number: int, uuid: str, rng, shift=(0, 0)) -> None:
+    """Six files as a DJI P4 Multispectral writes them: DJI_nnn0.JPG (RGB) and five 16-bit TIFFs
+    with the band, the capture and the radiometry as XMP attributes, the black level in the EXIF."""
+    from PIL import Image
+    from PIL.TiffImagePlugin import ImageFileDirectory_v2
+
+    base = rng.uniform(0.2, 0.8, (260, 320)).astype(np.float32)
+    bands = {"Blue": (1, 2870), "Green": (2, 1232), "Red": (3, 2780), "RedEdge": (4, 1900), "NIR": (5, 1480)}
+    Image.fromarray(np.zeros((260, 320, 3), np.uint8)).save(folder / f"DJI_{number:04d}.JPG", quality=80)
+    for band, (k, exposure) in bands.items():
+        dx, dy = (shift if band != "Red" else (0, 0))
+        img = np.roll(base, (dy, dx), axis=(0, 1))
+        dn = (4096 + img * 40000 * exposure / 2000).astype(np.uint16)
+        xmp = (f'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+               f'<rdf:Description rdf:about="" xmlns:drone-dji="http://www.dji.com/drone-dji/1.0/" '
+               f'drone-dji:BandName="{band}" drone-dji:CaptureUUID="{uuid}" drone-dji:Irradiance="3500.5" '
+               f'drone-dji:SensorGain="1.000" drone-dji:ExposureTime="{exposure}" drone-dji:SensorGainAdjustment="1.5" '
+               f'drone-dji:CalibratedOpticalCenterX="160.0" drone-dji:CalibratedOpticalCenterY="130.0" '
+               f'drone-dji:VignettingData="0.0002, 1.0e-6, 0, 0, 0, 0"/></rdf:RDF></x:xmpmeta>').encode()
+        info = ImageFileDirectory_v2()
+        info[700] = xmp
+        info[50714] = 4096
+        Image.fromarray(dn).save(folder / f"DJI_{number + k:04d}.TIF", tiffinfo=info)
+
+
+def test_dji_p4_multispectral_files(tmp_path):
+    """The P4 Multispectral: bands and captures from the XMP (CaptureUUID), the numbering that
+    starts again in a second folder, the black level from the EXIF, DJI's radiometric model."""
+    rng = np.random.default_rng(5)
+    a, b = tmp_path / "100MEDIA", tmp_path / "101MEDIA"
+    a.mkdir()
+    b.mkdir()
+    _p4m_capture(a, 10, "aaaa1", rng)
+    _p4m_capture(a, 20, "aaaa2", rng, shift=(3, -2))
+    _p4m_capture(b, 10, "bbbb1", rng)
+    caps = ms.detect_bands([a, b])
+    assert set(caps) == {"DJI_0011", "DJI_0021", "101MEDIA_DJI_0011"}
+    assert all(set(c) == {"Blue", "Green", "Red", "RedEdge", "NIR"} for c in caps.values())
+    assert caps["DJI_0021"]["NIR"].name == "DJI_0025.TIF" and caps["101MEDIA_DJI_0011"]["Red"].parent == b
+    tags = ms.xmp_of(caps["DJI_0011"]["Red"])
+    assert tags["BandName"] == "Red" and tags["BlackLevel"] == 4096 and tags["CaptureUUID"] == "aaaa1"
+    rad, used = ms.radiance_image(caps["DJI_0011"]["Red"], tags)
+    assert used["model"] == "dji" and used["exposure"] == pytest.approx(0.00278) and used["vignetting"]
+    assert used["black_level"] == 4096 and used["gain_adjustment"] == 1.5
+    dn = ms.read_band(caps["DJI_0011"]["Red"])
+    centre = (dn[130, 160] - 4096) / 65535 * 1.5 / 0.00278  # no vignetting at the optical centre
+    assert rad[130, 160] == pytest.approx(centre, rel=1e-3)
+    r = np.hypot(0 - 160, 0 - 130)
+    corner = (dn[0, 0] - 4096) / 65535 * (1 + 0.0002 * r + 1e-6 * r * r) * 1.5 / 0.00278
+    assert rad[0, 0] == pytest.approx(corner, rel=1e-3)
+    refl = ms.reflectance_image(caps["DJI_0011"]["Red"], tags=tags)
+    assert refl[130, 160] == pytest.approx(centre / 3500.5, rel=1e-3)
+    # the bands of the second capture are shifted: the chain registration finds the shift
+    imgs = {band: ms.read_band(p) for band, p in caps["DJI_0021"].items()}
+    quality: dict = {}
+    hs = ms.register_bands(imgs, "Red", quality=quality)
+    for band, h in hs.items():
+        if band != "Red":
+            assert abs(h[0, 2] - 3) < 0.5 and abs(h[1, 2] + 2) < 0.5, (band, h)
+            assert quality[band]["correlation"] > 0.5
+    assert quality["NIR"]["on"] in ("RedEdge", "Red")

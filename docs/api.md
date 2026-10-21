@@ -95,9 +95,11 @@ core), so GPUs and CPU share them by their speed; a photo a GPU cannot do goes t
 ### Multispectral cameras
 
 `engine.multispectral`: a multispectral camera (MicaSense RedEdge / Altum, DJI Mavic 3
-Multispectral, Parrot Sequoia) writes one file per band of every capture, side by side; the
-bands are found by their suffixes (`_1`..`_6`, `_MS_G` ..., `_GRE` ...) or by the `BandName` of
-their XMP (`detect_bands`). `add_captures(chunk, paths, reference=None)` makes the reference band
+Multispectral, Parrot Sequoia, DJI P4 Multispectral) writes one file per band of every capture, side
+by side; the bands are found by their suffixes (`_1`..`_6`, `_MS_G` ..., `_GRE` ...) or by the
+`BandName` of their XMP, the captures of a P4 Multispectral (six files of their own numbers) by
+their `CaptureUUID`, a numbering that starts again in a second folder by the folder's name
+(`detect_bands`). `add_captures(chunk, paths, reference=None)` makes the reference band
 (the red one by default) the photo of each capture - an 8-bit stretched copy with the tags of the
 original, aligned and reconstructed as any photo - and keeps the other bands in
 `camera.meta["bands"]`. The radiometry (`radiance_image`, `reflectance_image`) follows the tags:
@@ -107,7 +109,12 @@ a calibration panel in the flight (`calibrate_panel(chunk, camera, region, refle
 known reflectance per band over the panel's radiance) or from the irradiance of the sun sensor in
 the tags. The bands of a capture are brought onto the reference band with a homography found on
 the images (`register_bands`: the shift by phase correlation on the gradient magnitudes, an affine
-at a reduced size, the homography at full size). `build_reflectance(chunk, bands=None,
+at a reduced size, the homography at full size), in a chain by wavelength: each band is matched
+against the registered bands nearest to it in wavelength (a leaf is bright and textured in the NIR,
+dark and smooth in the red: NIR on red seldom converges, NIR on red-edge always does; on a P4
+Multispectral over scrub the correlations go from 0.1-0.3 to 0.9). DJI's radiometric model (the
+vignetting polynomial, the black level of the EXIF, gain, exposure, the gain adjustment, the
+irradiance of the sun sensor) is followed as in their guide. `build_reflectance(chunk, bands=None,
 resolution=None)` runs the orthophoto engine on the reference band's geometry with the registered
 bands as float values: `<data>/multispectral/reflectance.tif`, a float32 band per spectral band,
 NaN where nothing. `index_raster(chunk, "NDVI")` (also NDRE, GNDVI, SAVI, NDWI, OSAVI, CIRE,

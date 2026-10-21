@@ -96,9 +96,10 @@ riesce a fare passa al kernel CPU. `meta["dense"]["gpu"]` dice quali GPU sono st
 ### Camere multispettrali
 
 `engine.multispectral`: una camera multispettrale (MicaSense RedEdge / Altum, DJI Mavic 3
-Multispectral, Parrot Sequoia) scrive un file per banda di ogni scatto, fianco a fianco; le bande
-si riconoscono dai suffissi (`_1`..`_6`, `_MS_G` ..., `_GRE` ...) o dal `BandName` dell'XMP
-(`detect_bands`). `add_captures(chunk, paths, reference=None)` fa della banda di riferimento (la
+Multispectral, Parrot Sequoia, DJI P4 Multispectral) scrive un file per banda di ogni scatto, fianco
+a fianco; le bande si riconoscono dai suffissi (`_1`..`_6`, `_MS_G` ..., `_GRE` ...) o dal `BandName`
+dell'XMP, gli scatti di un P4 Multispectral (sei file con numeri propri) dal loro `CaptureUUID`, una
+numerazione che riparte in una seconda cartella dal nome della cartella (`detect_bands`). `add_captures(chunk, paths, reference=None)` fa della banda di riferimento (la
 rossa, se c'è) la foto di ogni scatto - una copia a 8 bit stirata, con i tag dell'originale,
 allineata e ricostruita come una foto qualsiasi - e tiene le altre bande in
 `camera.meta["bands"]`. La radiometria (`radiance_image`, `reflectance_image`) segue i tag: il
@@ -109,7 +110,12 @@ esposizione e guadagno; la riflettanza viene da un pannello di calibrazione ripr
 radianza del pannello) o dall'irradianza del sensore di luce nei tag. Le bande di uno scatto si
 portano sulla banda di riferimento con un'omografia trovata sulle immagini (`register_bands`: lo
 spostamento per correlazione di fase sulle magnitudini del gradiente, un'affine a dimensione
-ridotta, l'omografia a dimensione piena). `build_reflectance(chunk, bands=None, resolution=None)`
+ridotta, l'omografia a dimensione piena), a catena per lunghezza d'onda: ogni banda viene abbinata
+alle bande già registrate più vicine in lunghezza d'onda (una foglia è chiara e piena di texture nel
+NIR, scura e liscia nel rosso: NIR sul rosso converge di rado, NIR sul red-edge sempre; su un P4
+Multispectral sulla macchia le correlazioni passano da 0,1-0,3 a 0,9). Il modello radiometrico DJI
+(polinomio di vignettatura, livello di nero dell'EXIF, guadagno, esposizione, correzione del
+guadagno, irradianza del sensore di luce) segue la loro guida. `build_reflectance(chunk, bands=None, resolution=None)`
 fa girare il motore dell'ortofoto sulla geometria della banda di riferimento con le bande
 registrate come valori a virgola mobile: `<dati>/multispectral/reflectance.tif`, una banda float32
 per banda spettrale, NaN dove non c'è niente. `index_raster(chunk, "NDVI")` (anche NDRE, GNDVI,
