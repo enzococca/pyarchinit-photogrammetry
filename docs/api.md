@@ -22,7 +22,7 @@ longer explanations follow the table.
 | `add_photos(paths, recursive=False)` | files or folders; sensors grouped by body, lens and resolution; the EXIF GPS becomes the camera reference |
 | `detect_markers(target_type="aruco_4x4_50")` | markers `target <code>` with their projections |
 | `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True)` | keypoints and matches, with the choices of Metashape's *Align Photos* (*Pairs*, below) |
-| `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True)` | the photos placed, by the global or the incremental mapper (*Mappers*, below), held to the GPS of the photos; the transform is reset and the georeference made again when references exist |
+| `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None)` | the photos placed, by the global, the incremental or the hierarchical mapper (*Mappers*, below), held to the GPS of the photos; the transform is reset and the georeference made again when references exist |
 | `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4)` | bundle adjustment of poses, calibration and tie points, on the control points and scale bars when there are any (*Camera optimisation*, below); returns the reprojection error (px) |
 | `import_reference(csv, crs, columns="nxyz")` | references of markers and cameras from a text file: `n` label, `x y z`, `a` accuracy, `-` skip |
 | `export_reference(csv)` | the references to a text file |
@@ -216,6 +216,15 @@ is Metashape's adaptive camera model fitting, done our way: the parameters only 
 bear - the principal point, the tangential distortion, two focal lengths - are refined on a copy of
 the reconstruction and kept only when the mean reprojection error drops by 1 % at least and every
 camera stays within physical bounds (`meta["sfm"]["adaptive_fitting"]`).
+
+`tiepoint_limit` (default: the limit given to `match_photos`) is Metashape's tie point limit the
+mapper's way: the incremental and hierarchical mappers read a copy of the database that keeps, for
+every photo, its most matched key points only (`meta["sfm"]["tie_point_limit"]` counts what was
+kept; 0 keeps everything). `ba_global_ratio` and `ba_global_refinements` space out the global
+adjustments of the incremental mapper, which by default adjusts the whole block every time it
+grows by 10 % with up to 5 refinements each (`meta["sfm"]["ba_schedule"]`): on a block of a thousand
+photos that is most of the alignment time. `mapper="hierarchical"` is COLMAP's hierarchical
+pipeline: clusters of photos aligned on the cores, then merged.
 
 ### Camera optimisation
 

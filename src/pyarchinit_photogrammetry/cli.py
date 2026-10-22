@@ -473,8 +473,13 @@ def align(project: Path, quality: str = typer.Option("high", help="the accuracy:
                                              help="the GPS positions of the photos hold the block during the "
                                                   "incremental alignment (default: when they exist)"),
           keep: bool = typer.Option(False, help="keep the current alignment and add the photos not yet in it"),
-          mapper: str = typer.Option("auto", help="auto, incremental (one photo after the other) or global (all at "
-                                                  "once, much faster with many photos)"),
+          mapper: str = typer.Option("auto", help="auto, incremental (one photo after the other), global (all at "
+                                                  "once, much faster with many photos) or hierarchical (clusters of "
+                                                  "photos on the cores, then merged)"),
+          ba_ratio: Optional[float] = typer.Option(None, help="the incremental mapper adjusts the whole block when it "
+                                                               "grows by this ratio (default 1.1; 1.3 adjusts a third "
+                                                               "as often)"),
+          ba_refinements: Optional[int] = typer.Option(None, help="refinements of every global adjustment (default 5)"),
           gpu: Optional[str] = typer.Option(None, help="the GPU for the matching, shared with the CPU: auto (the "
                                                        "best one), off, an adapter index or part of its name "
                                                        "(default: PPG_GPU, else auto; ppg doctor lists them)"),
@@ -485,7 +490,8 @@ def align(project: Path, quality: str = typer.Option("high", help="the accuracy:
                     generic=generic, reference=None if reference == "none" else reference, neighbours=neighbours,
                     apply_masks=masks, guided_matching=guided, exclude_stationary=stationary, reset=not keep,
                     gpu=gpu, progress=print_progress)
-    n = ch.align_cameras(progress=print_progress, mapper=mapper, reset=not keep, use_gps=gps, adaptive_fitting=adaptive)
+    n = ch.align_cameras(progress=print_progress, mapper=mapper, reset=not keep, use_gps=gps, adaptive_fitting=adaptive,
+                         ba_global_ratio=ba_ratio, ba_global_refinements=ba_refinements)
     doc.save()
     typer.echo(f"aligned {n}/{len(ch.cameras)} photos")
 

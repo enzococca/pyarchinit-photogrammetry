@@ -336,6 +336,8 @@ def _rescale_as_colmap(img: np.ndarray, new_w: int, new_h: int) -> np.ndarray:
 PRESELECTION_INLIERS = 15  # verified matches that make two photos a pair
 PRESELECTION_PAIRS_PER_PHOTO = 20  # the pairs of each photo with the most matches are matched in full
 EXHAUSTIVE_UP_TO = 40  # photos: every pair is matched in full (cheap enough), above it the pairs are preselected
+BA_GLOBAL_RATIO = 1.1  # the incremental mapper adjusts the whole block when it grows by this ratio (COLMAP's 1.1)
+BA_GLOBAL_REFINEMENTS = 5  # refinements of every global adjustment (COLMAP's 5)
 
 
 def strongest_pairs(weights: dict[tuple[str, str], int], per_photo: int, links: int = 10) -> set[tuple[str, str]]:
@@ -968,6 +970,100 @@ def remove_stationary_matches(db_path: Path, min_shift: float = 2.0, min_inliers
 GLOBAL_FROM = 40  # photos: from here ``auto`` aligns them all at once (global SfM) instead of one by one
 
 
+def limit_tie_points(db_path: Path, out_path: Path, per_image: int, progress: Progress | None = None,
+                     min_per_pair: int = 100) -> dict:
+    """A copy of the database for the mapper with at most ``per_image`` key points per photo in
+    the verified matches - Metashape's *tie point limit*: for every photo the key points with the
+    most verified matches (the longest tracks) stay, the other matches go. The incremental mapper
+    runs a global bundle adjustment every time the block grows by a tenth: with the 40,000 points
+    a photo of a drone survey it carried 24,000 observations per photo (Tell Tuqan: 4.7 M tie
+    points, 7 hours); Metashape aligns with 4,000. The copy holds what the mapper reads (cameras,
+    images, key points, priors, rigs, frames, the pruned two-view geometries), not the
+    descriptors; without a photo above the limit nothing is written (``pruned`` False).
+    ``min_per_pair``: every pair keeps at least so many of its matches (the first ones, COLMAP's
+    order of the key points by scale) even outside the limit of its photos, so the weak links
+    between distant strips survive (Tell Tuqan: with 4,000 points and no minimum the mapper
+    stopped at 430 of 997 photos)."""
+    import sqlite3
+
+    import pycolmap
+
+    progress = as_progress(progress)
+    src = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        pairs = src.execute("SELECT pair_id, rows, cols, data, config, F, E, H, qvec, tvec FROM two_view_geometries "
+                            "WHERE rows > 0").fetchall()
+        n_kp = {int(i): int(r) for i, r in src.execute("SELECT image_id, rows FROM keypoints")}
+    finally:
+        src.close()
+    out_path = Path(out_path)
+    if not pairs:
+        out_path.unlink(missing_ok=True)
+        return {"pruned": False, "pairs": 0}
+    progress(0.1, "Counting the verified matches of every key point")
+    ids, kps = [], []
+    for pid, rows, cols, data, *_ in pairs:
+        m = np.frombuffer(data, np.uint32).reshape(rows, cols)
+        i1, i2 = divmod(int(pid), 2147483647)
+        ids.append(np.full(rows, i1, np.int64))
+        kps.append(m[:, 0].astype(np.int64))
+        ids.append(np.full(rows, i2, np.int64))
+        kps.append(m[:, 1].astype(np.int64))
+    key = (np.concatenate(ids) << 32) | np.concatenate(kps)
+    uniq, count = np.unique(key, return_counts=True)
+    image = (uniq >> 32).astype(np.int64)
+    kp = (uniq & 0xFFFFFFFF).astype(np.int64)
+    keep: dict[int, np.ndarray] = {}
+    pruned_images = 0
+    for iid in np.unique(image):
+        sel = np.nonzero(image == iid)[0]
+        mask = np.zeros(n_kp.get(int(iid), int(kp[sel].max()) + 1), bool)
+        if len(sel) > per_image:  # the most matched first, then the lower index (the larger scales of COLMAP)
+            order = np.lexsort((kp[sel], -count[sel]))[:per_image]
+            mask[kp[sel[order]]] = True
+            pruned_images += 1
+        else:
+            mask[kp[sel]] = True
+        keep[int(iid)] = mask
+    total_before = int(sum(r for _, r, *_ in pairs))
+    if not pruned_images:
+        out_path.unlink(missing_ok=True)
+        return {"pruned": False, "pairs": len(pairs), "matches": total_before, "per_image": per_image}
+    progress(0.4, f"Tie point limit {per_image:,}: {pruned_images} photos pruned")
+    out_path.unlink(missing_ok=True)
+    for suffix in ("-wal", "-shm"):
+        Path(str(out_path) + suffix).unlink(missing_ok=True)
+    pycolmap.Database.open(str(out_path)).close()  # the schema of this pycolmap
+    dst = sqlite3.connect(str(out_path))
+    try:
+        dst.execute("ATTACH DATABASE ? AS src", (str(db_path),))  # read only (SELECTs)
+        for table in ("cameras", "images", "keypoints", "pose_priors", "rigs", "rig_sensors", "frames", "frame_data"):
+            cols = [r[1] for r in dst.execute(f"PRAGMA table_info({table})")]
+            if cols and dst.execute("SELECT name FROM src.sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                names = ", ".join(cols)
+                dst.execute(f"INSERT INTO {table} ({names}) SELECT {names} FROM src.{table}")
+        dst.commit()
+        dst.execute("DETACH DATABASE src")
+        total_after = 0
+        for pid, rows, cols, data, config, F, E, H, qvec, tvec in pairs:
+            m = np.frombuffer(data, np.uint32).reshape(rows, cols)
+            i1, i2 = divmod(int(pid), 2147483647)
+            ok = keep[i1][np.minimum(m[:, 0], len(keep[i1]) - 1)] & keep[i2][np.minimum(m[:, 1], len(keep[i2]) - 1)]
+            if min_per_pair and ok.sum() < min(min_per_pair, rows):
+                ok[np.nonzero(~ok)[0][:min(min_per_pair, rows) - int(ok.sum())]] = True
+            m2 = np.ascontiguousarray(m[ok])
+            total_after += len(m2)
+            dst.execute("INSERT INTO two_view_geometries (pair_id, rows, cols, data, config, F, E, H, qvec, tvec) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (pid, len(m2), cols, m2.tobytes(), config, F, E, H, qvec, tvec))
+        dst.commit()
+    finally:
+        dst.close()
+    progress(1.0, f"Tie point limit {per_image:,}: {total_after:,} of {total_before:,} verified matches kept")
+    return {"pruned": True, "pairs": len(pairs), "matches": total_before, "kept": total_after, "per_image": per_image,
+            "photos_pruned": pruned_images}
+
+
 def _global_mapping(chunk: Chunk, db_path: Path, root: str, out: Path, n: int):
     """All the cameras at once (COLMAP's global SfM, GLOMAP): rotations averaged over every pair,
     then positions, then the bundle adjustment on a selection of the tracks - ``tiepoint_limit / 4``
@@ -1229,12 +1325,15 @@ def _continuation_model(model_dir: Path, db_path: Path, out: Path) -> Path:
 
 
 def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = "auto", reset: bool = True,
-                  use_gps: bool | None = None, adaptive_fitting: bool = False) -> int:
+                  use_gps: bool | None = None, adaptive_fitting: bool = False, tiepoint_limit: int | None = None,
+                  ba_global_ratio: float | None = None, ba_global_refinements: int | None = None) -> int:
     """Cameras and tie points from the matches of :func:`match_photos`. ``mapper``: ``incremental``
     (one photo after the other, COLMAP), ``global`` (all at once, GLOMAP: much faster with many
-    photos) or ``auto`` - global from ``GLOBAL_FROM`` photos, incremental for fewer, for 360-degree
-    rigs and calibrations held fixed, and whenever the global one leaves photos out or builds a
-    block whose cameras do not sit on the GPS of the photos (:func:`fits_references`).
+    photos), ``hierarchical`` (the photos in overlapping clusters of up to 500, each reconstructed
+    one photo after the other on its own core, then merged and adjusted together) or ``auto`` -
+    global from ``GLOBAL_FROM`` photos, incremental for fewer, for 360-degree rigs and calibrations
+    held fixed, and whenever the global one leaves photos out or builds a block whose cameras do
+    not sit on the GPS of the photos (:func:`fits_references`).
 
     ``use_gps`` (None: when the photos have them): the reference positions of the photos, with
     their accuracy, hold the block during the incremental alignment - COLMAP's pose priors,
@@ -1242,7 +1341,15 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = 
     long chain or a ring of photos no longer drifts. ``adaptive_fitting``: Metashape's adaptive
     camera model fitting (:func:`adaptive_camera_fit`). ``reset`` False, after
     ``match_photos(reset=False)``, keeps the alignment there is and registers the photos added
-    since into it (one photo after the other)."""
+    since into it (one photo after the other).
+
+    ``tiepoint_limit`` (None: the ``tiepoint_limit`` of :func:`match_photos`, 0 for none): at most
+    so many key points per photo go into the incremental and hierarchical mappers, the most matched
+    ones (:func:`limit_tie_points`, Metashape's tie point limit). ``ba_global_ratio`` and
+    ``ba_global_refinements`` (None: :data:`BA_GLOBAL_RATIO`, :data:`BA_GLOBAL_REFINEMENTS`): the
+    incremental mapper adjusts the whole block every time it grows by this ratio of photos or of
+    points, with up to so many refinements each; with 1.1 and 5 COLMAP adjusted a block of a
+    thousand photos sixty times."""
     import pycolmap
 
     progress = as_progress(progress)
@@ -1259,7 +1366,7 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = 
     n = len(names)
     fixed = _fixed_camera_ids(chunk, db_path)
     rigs = bool(info.get("rigs"))
-    if mapper not in ("auto", "incremental", "global"):
+    if mapper not in ("auto", "incremental", "global", "hierarchical"):
         raise ValueError(f"unknown mapper {mapper!r}")
     model_dir = work / "model"
     continuing = (not reset) and bool(info.get("continued")) and model_dir.exists()
@@ -1299,7 +1406,7 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = 
             recs, mapper = {}, "incremental"
         else:
             chunk.meta["sfm"].pop("global_fallback", None)
-    if mapper == "incremental":
+    if mapper in ("incremental", "hierarchical"):
         opts = pycolmap.IncrementalPipelineOptions()
         opts.multiple_models = not continuing
         opts.min_model_size = 3
@@ -1310,15 +1417,36 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = 
         if priors:
             opts.use_prior_position = True
             opts.use_robust_loss_on_prior_position = True  # a wrong GPS fix does not pull the block
-        ratio = os.environ.get("PPG_BA_GLOBAL_RATIO")  # experiments: fewer global adjustments while the block grows
-        if ratio:
-            opts.ba_global_frames_ratio = float(ratio)
-            opts.ba_global_points_ratio = float(ratio)
-        progress(0.0, "Aligning cameras" + (" on the GPS of the photos" if priors else "")
-                 + (f" (adding {len(info.get('added') or [])} photos)" if continuing else ""))
-        start = str(_continuation_model(model_dir, db_path, work / "continue")) if continuing else ""
-        recs = pycolmap.incremental_mapping(str(db_path), root, str(out), opts, input_path=start)
+        ratio = float(os.environ.get("PPG_BA_GLOBAL_RATIO") or ba_global_ratio or BA_GLOBAL_RATIO)
+        refinements = int(os.environ.get("PPG_BA_GLOBAL_REFINEMENTS") or ba_global_refinements or BA_GLOBAL_REFINEMENTS)
+        opts.ba_global_frames_ratio = ratio
+        opts.ba_global_points_ratio = ratio
+        opts.ba_global_max_refinements = refinements
+        info["ba_schedule"] = {"ratio": ratio, "refinements": refinements}
+        # Metashape's tie point limit: the mapper reads a copy of the database with the most
+        # matched key points of every photo only (the whole database stays for everything else)
+        mapper_db = db_path
+        limit = info.get("tiepoint_limit") if tiepoint_limit is None else tiepoint_limit
+        info.pop("tie_point_limit", None)
+        if limit and not continuing and not rigs:
+            stats = limit_tie_points(db_path, work / "database_mapper.db", int(limit), progress.sub(0.0, 0.05))
+            if stats.get("pruned"):
+                mapper_db = work / "database_mapper.db"
+                info["tie_point_limit"] = stats
+        progress(0.05, "Aligning cameras" + (" on the GPS of the photos" if priors else "")
+                 + (f" (adding {len(info.get('added') or [])} photos)" if continuing else "")
+                 + (" in clusters" if mapper == "hierarchical" else ""))
+        if mapper == "hierarchical":
+            hopts = pycolmap.HierarchicalPipelineOptions()
+            hopts.incremental_options = opts
+            recs = pycolmap.hierarchical_mapping(str(mapper_db), root, str(out), hopts)
+        else:
+            start = str(_continuation_model(model_dir, db_path, work / "continue")) if continuing else ""
+            recs = pycolmap.incremental_mapping(str(mapper_db), root, str(out), opts, input_path=start)
         shutil.rmtree(work / "continue", ignore_errors=True)
+        if mapper_db != db_path:
+            for suffix in ("", "-wal", "-shm"):
+                Path(str(mapper_db) + suffix).unlink(missing_ok=True)
     if not recs:
         raise RuntimeError("alignment failed: no reconstruction could be initialised")
     info["mapper"] = mapper

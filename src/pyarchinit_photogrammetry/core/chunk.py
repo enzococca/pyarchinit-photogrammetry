@@ -264,7 +264,8 @@ class Chunk:
                          reset=reset, gpu=gpu)
 
     def align_cameras(self, progress: ProgressCallback | None = None, mapper: str = "auto", reset: bool = True,
-                      use_gps: bool | None = None, adaptive_fitting: bool = False) -> int:
+                      use_gps: bool | None = None, adaptive_fitting: bool = False, tiepoint_limit: int | None = None,
+                      ba_global_ratio: float | None = None, ba_global_refinements: int | None = None) -> int:
         """Estimate camera poses and sparse tie points. Returns the number of aligned photos.
         ``mapper``: ``incremental``, ``global`` or ``auto``; ``use_gps`` (None: when the photos
         have them): the GPS positions of the photos hold the block during the incremental
@@ -279,7 +280,8 @@ class Chunk:
         from ..engine import sfm
 
         n = sfm.align_cameras(self, progress=as_progress(progress), mapper=mapper, reset=reset, use_gps=use_gps,
-                              adaptive_fitting=adaptive_fitting)
+                              adaptive_fitting=adaptive_fitting, tiepoint_limit=tiepoint_limit,
+                              ba_global_ratio=ba_global_ratio, ba_global_refinements=ba_global_refinements)
         self.transform = geometry.identity()
         self.meta.pop("levelled", None)
         self.forget_precision()

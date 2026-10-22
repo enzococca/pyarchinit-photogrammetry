@@ -302,3 +302,25 @@ def test_photos_reduced_as_colmap_reduces_them(scene_dir):
         assert mine.shape == ref.shape
         assert np.mean(mine == ref) > 0.999 and np.abs(mine - ref).max() <= 1
     assert sfm._rescale_as_colmap(g, 1200, 900) is g
+
+
+def test_tie_point_limit_and_hierarchical_mapper(scene_dir, tmp_path):
+    """Metashape's tie point limit: the mapper sees the most matched key points of every photo
+    only, the block stays as accurate; the hierarchical mapper (one cluster here) gives the same."""
+    _doc, ch = _matched(scene_dir, tmp_path, "exhaustive")
+    assert ch.align_cameras(mapper="incremental", tiepoint_limit=400, ba_global_ratio=1.3, ba_global_refinements=2) == len(ch.cameras)
+    info = ch.meta["sfm"]
+    stats = info["tie_point_limit"]
+    assert stats["pruned"] and stats["per_image"] == 400 and stats["kept"] < stats["matches"]
+    assert info["ba_schedule"] == {"ratio": 1.3, "refinements": 2}
+    assert not (ch.data_dir / "sfm" / "database_mapper.db").exists()  # the copy for the mapper is gone
+    rec = sfm.load_reconstruction(ch)
+    assert rec.num_points3D() < 400 * len(ch.cameras)
+    ch.import_reference(scene_dir / "gcp.csv", crs="EPSG:3004")
+    assert ch.update_transform()["control_rmse"] < 0.002
+    # without a photo above the limit nothing is pruned
+    assert ch.align_cameras(mapper="incremental", tiepoint_limit=0) == len(ch.cameras)
+    assert "tie_point_limit" not in ch.meta["sfm"]
+    assert ch.align_cameras(mapper="hierarchical") == len(ch.cameras)
+    assert ch.meta["sfm"]["mapper"] == "hierarchical"
+    assert ch.update_transform()["control_rmse"] < 0.002
