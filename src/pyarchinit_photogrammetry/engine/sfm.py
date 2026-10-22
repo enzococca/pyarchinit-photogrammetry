@@ -495,6 +495,8 @@ def _match_with_gpu(db_path: Path, pairs, mopts, devices: list[int], progress: P
 
     import pycolmap
 
+    from ..core.progress import Cancelled
+
     db = pycolmap.Database.open(str(db_path))
     try:
         ids = {im.name: int(im.image_id) for im in db.read_all_images()}
@@ -512,7 +514,21 @@ def _match_with_gpu(db_path: Path, pairs, mopts, devices: list[int], progress: P
     done = {"gpu": 0, "cpu": 0}
     by_device = {d: 0 for d in devices}
     failure: list[BaseException] = []
+    cancelled: list[bool] = []
+    reported = [0.0]
     cache: collections.OrderedDict[int, np.ndarray] = collections.OrderedDict()
+
+    def report(force: bool = False) -> None:
+        """The pairs done so far, from any stream, at most twice a second (the GPU streams report
+        too: the first chunk of the CPU can take minutes, and the window must move meanwhile)."""
+        now = time.perf_counter()
+        with lock:
+            if not force and now - reported[0] < 0.5:
+                return
+            reported[0] = now
+            g, c = done["gpu"], done["cpu"]
+        progress(0.55 + 0.4 * min(1.0, (g + c) / max(total, 1)),
+                 f"Matching photos: {g:,} pairs on the GPU, {c:,} on the CPU")
     sift = mopts.sift
     # the descriptors are read without taking any lock on the database (sqlite ``immutable``: the
     # rows of the descriptors never change while the CPU matcher writes its matches): a reader
@@ -539,7 +555,7 @@ def _match_with_gpu(db_path: Path, pairs, mopts, devices: list[int], progress: P
         try:
             while True:
                 with lock:
-                    if not queue or failure:
+                    if not queue or failure or cancelled:
                         return
                     a, b = queue.popleft()
                 ia, ib = ids[a], ids[b]
@@ -549,6 +565,9 @@ def _match_with_gpu(db_path: Path, pairs, mopts, devices: list[int], progress: P
                     results[(ia, ib)] = np.asarray(m, dtype=np.uint32)
                     done["gpu"] += 1
                     by_device[device] += 1
+                report()
+        except Cancelled:  # the user: the CPU stream stops at its next chunk
+            cancelled.append(True)
         except BaseException as exc:  # noqa: BLE001 - reported to the main thread
             with lock:
                 failure.append(exc)
@@ -581,7 +600,7 @@ def _match_with_gpu(db_path: Path, pairs, mopts, devices: list[int], progress: P
     try:
         while True:
             with lock:
-                if failure or not queue:
+                if failure or cancelled or not queue:
                     break
                 left = len(queue)
                 if cpu_rate is None:
@@ -599,16 +618,15 @@ def _match_with_gpu(db_path: Path, pairs, mopts, devices: list[int], progress: P
             cpu_rate = n / max(time.perf_counter() - t0, 1e-3)
             with lock:
                 done["cpu"] += n
-                g, c = done["gpu"], done["cpu"]
             flush()
-            progress(0.55 + 0.4 * min(1.0, (g + c) / max(total, 1)),
-                     f"Matching photos: {g:,} pairs on the GPU, {c:,} on the CPU")
+            report(force=True)
     finally:
         for t in threads:
             t.join()
         reader.close()
     if failure:
         raise RuntimeError(f"GPU matching failed: {failure[0]}") from failure[0]
+    progress.check()  # cancelled while a GPU stream was reporting: it stopped, the step stops here
     flush()
     if gpu_pairs:  # COLMAP's geometric verification of what the GPUs matched
         progress(0.95, f"Verifying {len(gpu_pairs):,} pairs matched on the GPU")

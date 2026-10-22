@@ -265,6 +265,31 @@ def test_gpu_matching_shares_the_pairs_and_keeps_the_accuracy(scene_dir, tmp_pat
     assert _native.gpu_device("0") == 0 and _native.gpu_device("auto") == -1
 
 
+def test_cancelling_the_gpu_matching_stops_it(scene_dir, tmp_path):
+    """The GPU streams report the pairs done while the CPU works on its first chunk (the window
+    moved nothing for minutes before), and the cancel button stops the step whichever stream
+    sees it first."""
+    from pyarchinit_photogrammetry import _native
+    from pyarchinit_photogrammetry.core.progress import Cancelled, Progress
+
+    if _native.gpu_device("auto") is None:
+        pytest.skip("no GPU (wgpu adapter) on this computer")
+    _doc, ch = _project(scene_dir, tmp_path)
+    progress = Progress()
+    seen = []
+
+    def watch(_fraction, message):
+        seen.append(message)
+        if message.startswith("Matching photos:"):  # the first report of any stream
+            progress.cancel()
+
+    progress.callback = watch
+    with pytest.raises(Cancelled):
+        ch.match_photos(quality="high", gpu="auto", progress=progress)
+    assert sum(m.startswith("Matching photos:") for m in seen) == 1
+    assert not any(m.startswith("Verifying") for m in seen)
+
+
 def test_strongest_pairs_keep_every_photo_and_the_links_between_groups():
     # two flights of ten photos, every pair within a flight overlapping a lot, a few weak pairs across
     low = [f"L{i}" for i in range(10)]
