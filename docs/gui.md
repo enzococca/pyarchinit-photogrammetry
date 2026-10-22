@@ -82,7 +82,14 @@ renderer (force it with `PPG_RENDERER=software`, or VTK with `PPG_RENDERER=vtk`)
 
 ## Errors and logs
 
-Long steps run in the background with a progress window and *Annulla*. When a step fails,
+Long steps run in the background with a progress window and *Annulla*. The window shows the
+bar, the current message, the elapsed time and an estimate of the time left (from the rate of
+the last minutes, so a step that slows down sees it grow rather than count down), and under
+*Dettagli* a console with every message of the step and its time - the photos whose key points
+are extracted, the blocks of pairs matched, the photos placed in the block one by one with the
+points they see, the adjustments of the whole block, the depth maps fused - read from COLMAP's
+own log while it runs, as Metashape's console does. The pane stays open or closed as you left it.
+When a step fails,
 an error window shows a one-line summary, a hint for known problems (missing SpatiaLite or
 PyTorch, a crashed reconstruction, a stale Anaconda install...), the traceback under
 *Dettagli*, and the buttons *Copia* (summary + traceback, ready for a bug report) and

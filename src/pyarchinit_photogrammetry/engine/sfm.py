@@ -25,6 +25,7 @@ from ..core import crs as crs_mod
 from ..core.chunk import QUALITY_DOWNSCALE, Chunk
 from ..core.pointcloud import PointCloud
 from ..core.progress import Progress, as_progress
+from . import colmap_log
 
 log = logging.getLogger(__name__)
 
@@ -376,7 +377,7 @@ def strongest_pairs(weights: dict[tuple[str, str], int], per_photo: int, links: 
 
 
 def _preselected_pairs(chunk: Chunk, work: Path, root, by_sensor: dict, masks,
-                       names: dict[int, str], gpu_device=None) -> list[tuple[str, str]]:
+                       names: dict[int, str], gpu_device=None, progress: Progress | None = None) -> list[tuple[str, str]]:
     """The pairs of photos that overlap, found as the generic preselection of Metashape finds them:
     a thousand points of every photo reduced to 1024 pixels, matched in every pair (a fraction of
     the full matching), the pairs with at least ``PRESELECTION_INLIERS`` verified matches kept -
@@ -390,6 +391,7 @@ def _preselected_pairs(chunk: Chunk, work: Path, root, by_sensor: dict, masks,
 
     import pycolmap
 
+    progress = as_progress(progress)
     db_path = work / "preselection.db"
     db_path.unlink(missing_ok=True)
     try:
@@ -402,23 +404,24 @@ def _preselected_pairs(chunk: Chunk, work: Path, root, by_sensor: dict, masks,
                 log.warning("GPU SIFT failed in the preselection (%s): COLMAP's extractor", exc)
                 db_path.unlink(missing_ok=True)
                 gpu_device = None
-        for skey, image_names in by_sensor.items():
-            if gpu_device is not None:
-                break
-            sensor = chunk.sensors[skey]
-            ext = pycolmap.FeatureExtractionOptions()
-            ext.max_image_size = min(PRESELECTION_SIZE, max(sensor.width, sensor.height))
-            ext.sift.max_num_features = PRESELECTION_POINTS
-            reader = pycolmap.ImageReaderOptions()
-            model, params = mapping_camera(sensor)
-            reader.camera_model = model
-            reader.camera_params = ",".join(f"{p:.10g}" for p in params)
-            if masks is not None:
-                reader.mask_path = str(masks)
-            pycolmap.extract_features(str(db_path), str(root), image_names=image_names,
-                                      camera_mode=pycolmap.CameraMode.SINGLE, reader_options=reader,
-                                      extraction_options=ext)
-        pycolmap.match_exhaustive(str(db_path))
+        with colmap_log.relay(progress, work, phases={"features": (0.0, 0.4), "blocks2": (0.4, 0.6)}):
+            for skey, image_names in by_sensor.items():
+                if gpu_device is not None:
+                    break
+                sensor = chunk.sensors[skey]
+                ext = pycolmap.FeatureExtractionOptions()
+                ext.max_image_size = min(PRESELECTION_SIZE, max(sensor.width, sensor.height))
+                ext.sift.max_num_features = PRESELECTION_POINTS
+                reader = pycolmap.ImageReaderOptions()
+                model, params = mapping_camera(sensor)
+                reader.camera_model = model
+                reader.camera_params = ",".join(f"{p:.10g}" for p in params)
+                if masks is not None:
+                    reader.mask_path = str(masks)
+                pycolmap.extract_features(str(db_path), str(root), image_names=image_names,
+                                          camera_mode=pycolmap.CameraMode.SINGLE, reader_options=reader,
+                                          extraction_options=ext)
+            pycolmap.match_exhaustive(str(db_path))
         con = sqlite3.connect(str(db_path))
         try:
             ids = dict(con.execute("SELECT image_id, name FROM images"))
@@ -844,8 +847,10 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
                 reader.mask_path = str(masks)
             # a rig needs a camera per face: the faces of the panoramas are in a folder each
             mode = pycolmap.CameraMode.PER_FOLDER if skey in faces else pycolmap.CameraMode.SINGLE
-            pycolmap.extract_features(str(db_path), str(root), image_names=image_names,
-                                      camera_mode=mode, reader_options=reader, extraction_options=ext)
+            with colmap_log.relay(progress.sub(0.5 * i / len(by_sensor), 0.5 / len(by_sensor)), work,
+                                  phases={"features": (0.0, 1.0)}):
+                pycolmap.extract_features(str(db_path), str(root), image_names=image_names,
+                                          camera_mode=mode, reader_options=reader, extraction_options=ext)
             progress(0.5 * (i + 1) / len(by_sensor), f"Points detected for sensor {sensor.label}")
     if rigs:
         db = pycolmap.Database.open(str(db_path))
@@ -866,7 +871,8 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     if generic:
         progress(0.5, "Finding the pairs of photos that overlap")
         found = _preselected_pairs(chunk, work, root, by_sensor, masks, names,
-                                   gpu_device=gpu_sift_device(gpu) if not rigs else None)
+                                   gpu_device=gpu_sift_device(gpu) if not rigs else None,
+                                   progress=progress.sub(0.5, 0.05))
         if found:  # nothing found on the small images: every pair
             pairs, parts = set(found), ["generic"]
     if reference:
@@ -901,8 +907,10 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     progress(0.55, f"Matching photos ({mode}" + (f", {len(pairs):,} pairs)" if pairs is not None else ")")
              + (f" on {gpu_name} and the CPU" if devices else ""))
     shares = None
+    blocks = {"blocks": (0.0, 1.0), "blocks2": (0.0, 1.0)}  # COLMAP's blocks of pairs as the progress
     if pairs is None:
-        pycolmap.match_exhaustive(str(db_path), matching_options=mopts)
+        with colmap_log.relay(progress.sub(0.55, 0.4), work, phases=blocks):
+            pycolmap.match_exhaustive(str(db_path), matching_options=mopts)
     elif pairs and devices:
         shares = _match_with_gpu(db_path, pairs, mopts, devices, progress, work)
     elif pairs:
@@ -910,7 +918,8 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
         list_path.write_text("\n".join(f"{a} {b}" for a, b in sorted(pairs)))
         popts = pycolmap.ImportedPairingOptions()
         popts.match_list_path = str(list_path)
-        pycolmap.match_image_pairs(str(db_path), matching_options=mopts, pairing_options=popts)
+        with colmap_log.relay(progress.sub(0.55, 0.4), work, phases=blocks):
+            pycolmap.match_image_pairs(str(db_path), matching_options=mopts, pairing_options=popts)
     removed = remove_stationary_matches(db_path) if exclude_stationary else None
     old = chunk.meta.get("sfm") or {}
     chunk.meta["sfm"] = {"image_root": str(root), "names": {str(k): v for k, v in names.items()}, "features": features,
@@ -1386,7 +1395,8 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = 
     if mapper == "global":
         progress(0.0, f"Aligning {n} cameras at once (global)")
         try:
-            recs = _global_mapping(chunk, db_path, root, out, n)
+            with colmap_log.relay(progress.sub(0.0, 0.8), work, total=n, phases={"stage": (0.0, 1.0)}):
+                recs = _global_mapping(chunk, db_path, root, out, n)
         except Exception as exc:  # pragma: no cover - a block the global solver cannot handle
             progress(0.05, f"Global alignment failed ({exc}): one photo at a time")
         best = max(recs.values(), key=lambda r: r.num_reg_images()) if recs else None
@@ -1436,13 +1446,15 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = 
         progress(0.05, "Aligning cameras" + (" on the GPS of the photos" if priors else "")
                  + (f" (adding {len(info.get('added') or [])} photos)" if continuing else "")
                  + (" in clusters" if mapper == "hierarchical" else ""))
-        if mapper == "hierarchical":
-            hopts = pycolmap.HierarchicalPipelineOptions()
-            hopts.incremental_options = opts
-            recs = pycolmap.hierarchical_mapping(str(mapper_db), root, str(out), hopts)
-        else:
-            start = str(_continuation_model(model_dir, db_path, work / "continue")) if continuing else ""
-            recs = pycolmap.incremental_mapping(str(mapper_db), root, str(out), opts, input_path=start)
+        # COLMAP's log as the progress: the photos placed so far over all of them
+        with colmap_log.relay(progress.sub(0.05, 0.8), work, total=n, phases={"register": (0.0, 1.0)}):
+            if mapper == "hierarchical":
+                hopts = pycolmap.HierarchicalPipelineOptions()
+                hopts.incremental_options = opts
+                recs = pycolmap.hierarchical_mapping(str(mapper_db), root, str(out), hopts)
+            else:
+                start = str(_continuation_model(model_dir, db_path, work / "continue")) if continuing else ""
+                recs = pycolmap.incremental_mapping(str(mapper_db), root, str(out), opts, input_path=start)
         shutil.rmtree(work / "continue", ignore_errors=True)
         if mapper_db != db_path:
             for suffix in ("", "-wal", "-shm"):

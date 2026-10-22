@@ -29,6 +29,7 @@ class Progress:
         self.span = span
         self._root: Progress = self
         self._cancel = False
+        self._last = 0.0  # the fraction last reported through this tree (messages without one keep it)
 
     @property
     def cancel_requested(self) -> bool:
@@ -43,8 +44,20 @@ class Progress:
             raise Cancelled(message or "cancelled")
         if message:
             log.info(message)
+        value = self.start + self.span * max(0.0, min(1.0, fraction))
+        self._root._last = value
         if self.callback is not None:
-            self.callback(self.start + self.span * max(0.0, min(1.0, fraction)), message)
+            self.callback(value, message)
+
+    def message(self, text: str) -> None:
+        """Report ``text`` without moving the bar: the fraction stays the one last reported by any
+        reporter of the tree (what a step says of itself while a library runs it)."""
+        if self.cancel_requested:
+            raise Cancelled(text or "cancelled")
+        if text:
+            log.info(text)
+        if self.callback is not None:
+            self.callback(self._root._last, text)
 
     def sub(self, start: float, span: float) -> "Progress":
         """Child reporter mapping its 0..1 range into ``[start, start+span]`` of this one."""

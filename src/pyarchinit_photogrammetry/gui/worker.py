@@ -6,15 +6,62 @@ import time
 import traceback
 from typing import Any, Callable
 
-from PySide6.QtCore import QObject, QSize, QThread, Qt, Signal, Slot
-from PySide6.QtWidgets import (QApplication, QDialog, QHBoxLayout, QLabel, QProgressBar, QPushButton, QToolButton,
-                               QVBoxLayout, QWidget)
+from PySide6.QtCore import QObject, QSize, QThread, Qt, QTimer, Signal, Slot
+from PySide6.QtWidgets import (QApplication, QDialog, QHBoxLayout, QLabel, QPlainTextEdit, QProgressBar, QPushButton,
+                               QToolButton, QVBoxLayout, QWidget)
 
 from ..core.progress import Cancelled, Progress
+from . import app_settings
 from .i18n import tr, translate
 from .icons import icon
 
 log = logging.getLogger("pyarchinit_photogrammetry.gui")
+
+LOG_LINES = 2000  # lines kept in the details pane of the progress window
+
+
+def hms(seconds: float) -> str:
+    """A duration as ``h:mm:ss`` (``0:00:07``, ``1:02:03``), as Metashape's progress window shows it."""
+    s = max(0, int(round(seconds)))
+    return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}"
+
+
+class Eta:
+    """The time a step still needs, from its progress so far: the rate of the recent samples
+    (the last third of the elapsed time, at least ``window`` seconds), the whole run when they say
+    nothing, smoothed so the estimate does not jump; None before 2 % is done. The rate is measured
+    up to now, not up to the last sample: a step that stalls sees its estimate grow, not count down."""
+
+    def __init__(self, window: float = 20.0, share: float = 0.34):
+        self.samples: list[tuple[float, float]] = []
+        self.window, self.share = window, share
+        self.estimate: float | None = None
+
+    def add(self, t: float, fraction: float) -> None:
+        if self.samples and t - self.samples[-1][0] < 0.5 and fraction < 1:
+            return
+        self.samples.append((t, fraction))
+
+    def remaining(self, t: float) -> float | None:
+        if not self.samples:
+            return None
+        t0, f0 = self.samples[0]
+        t1, f1 = self.samples[-1]
+        if f1 >= 1:
+            return 0.0
+        if f1 < 0.02:
+            return None
+        back = max(self.window, self.share * (t - t0))
+        older = [(ts, fs) for ts, fs in self.samples if t1 - ts >= back]
+        ts, fs = older[-1] if older else (t0, f0)
+        rate = (f1 - fs) / max(t - ts, 1e-6)
+        if rate <= 0:
+            rate = (f1 - f0) / max(t - t0, 1e-6)
+        if rate <= 0:
+            return None
+        left = (1.0 - f1) / rate
+        self.estimate = left if self.estimate is None else 0.7 * self.estimate + 0.3 * left
+        return self.estimate
 
 
 class Task(QObject):
@@ -53,12 +100,15 @@ class Task(QObject):
 
 
 class ProgressDialog(QDialog):
-    """Modal progress window with a cancel button (one per running task)."""
+    """Modal progress window with a cancel button (one per running task): the bar, the current
+    message, the elapsed time and the estimate of the time left (ticking every second, also while
+    the step says nothing), and a details pane with every message of the step and its time - the
+    photos matched, the photos placed in the block, the adjustments - as Metashape's console."""
 
     def __init__(self, title: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(520)
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
         lay = QVBoxLayout(self)
@@ -73,26 +123,83 @@ class ProgressDialog(QDialog):
         self.bar.setTextVisible(True)
         self.elapsed = QLabel("")
         self.elapsed.setObjectName("pageSubtitle")
+        self.details = QToolButton()
+        self.details.setText(tr("Dettagli"))
+        self.details.setCheckable(True)
+        self.details.setAutoRaise(True)
+        self.details.setArrowType(Qt.ArrowType.RightArrow)
+        self.details.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.log = QPlainTextEdit()
+        self.log.setObjectName("consoleOut")
+        self.log.setReadOnly(True)
+        self.log.setMaximumBlockCount(LOG_LINES)
+        self.log.setMinimumHeight(180)
+        self.log.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.log.hide()
         self.cancel_button = QPushButton(icon("cancel"), tr("Annulla"))
         row = QHBoxLayout()
         row.addWidget(self.elapsed)
         row.addStretch(1)
+        row.addWidget(self.details)
         row.addWidget(self.cancel_button)
         lay.addWidget(head)
         lay.addWidget(self.message)
         lay.addWidget(self.bar)
         lay.addLayout(row)
+        lay.addWidget(self.log, 1)
         self._t0 = time.monotonic()
+        self._fraction = 0.0
+        self._last_message = ""
+        self.eta = Eta()
+        self.details.toggled.connect(self._show_details)
+        shown = False
+        try:
+            shown = bool(app_settings().value("progress/details", False, type=bool))
+        except Exception:  # noqa: BLE001 - no settings store (scripts)
+            pass
+        if shown:
+            self.details.setChecked(True)
+        self.timer = QTimer(self)
+        self.timer.setInterval(1000)
+        self.timer.timeout.connect(self.tick)
+        self.timer.start()
+        self.tick()
 
     def update_progress(self, fraction: float, message: str) -> None:
+        self._fraction = fraction
         self.bar.setValue(int(fraction * 1000))
-        if message:
+        self.eta.add(time.monotonic(), fraction)
+        message = (message or "").strip()
+        if message and message != self._last_message:
+            self._last_message = message
             self.message.setText(message)
-        el = time.monotonic() - self._t0
-        txt = tr("Trascorso {0:5.0f} s", el)
-        if 0.02 < fraction < 1:
-            txt += tr("  -  restante circa {0:5.0f} s", el * (1 - fraction) / fraction)
+            self.log.appendPlainText(f"{hms(time.monotonic() - self._t0)}  {message}")
+            bar = self.log.verticalScrollBar()
+            bar.setValue(bar.maximum())
+        self.tick()
+
+    def tick(self) -> None:
+        """The elapsed time and the estimate of the time left, once a second."""
+        now = time.monotonic()
+        txt = tr("Trascorso {0}", hms(now - self._t0))
+        left = self.eta.remaining(now)
+        if left is not None and self._fraction < 1:
+            txt += tr("  -  restante circa {0}", hms(left))
         self.elapsed.setText(txt)
+
+    def _show_details(self, on: bool) -> None:
+        self.log.setVisible(on)
+        self.details.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
+        try:
+            app_settings().setValue("progress/details", bool(on))
+        except Exception:  # noqa: BLE001
+            pass
+        if not on:
+            self.adjustSize()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt
+        self.timer.stop()
+        super().closeEvent(event)
 
 
 class StatusProgress(QWidget):

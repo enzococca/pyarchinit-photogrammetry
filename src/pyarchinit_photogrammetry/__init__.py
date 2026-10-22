@@ -19,8 +19,11 @@ Quick start::
     chunk.build_orthomosaic()
     doc.save("scavo.ppg")
 """
+from ._env import glog_flushes_each_line as _glog_flushes_each_line
 from ._env import load_open3d_first as _load_open3d_first
 from ._env import use_bundled_proj_data as _use_bundled_proj_data
+
+_glog_flushes_each_line()  # before pycolmap loads: its log is tailed for the progress (see _env.py)
 
 _load_open3d_first()  # Open3D's OpenMP runtime must be bound before rasterio/scipy (see _env.py)
 

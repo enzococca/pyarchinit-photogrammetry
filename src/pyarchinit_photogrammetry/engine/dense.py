@@ -24,6 +24,7 @@ from .. import _native
 from ..core.chunk import QUALITY_DOWNSCALE, Chunk
 from ..core.pointcloud import PointCloud
 from ..core.progress import Progress, as_progress
+from . import colmap_log
 from .visibility import UnreadablePhotos, unreadable_photos  # noqa: F401 - part of this module's API
 
 log = logging.getLogger(__name__)
@@ -129,7 +130,8 @@ def build_depth_maps(chunk: Chunk, quality: str = "medium", filter_mode: str = "
         keep = [names[str(c.key)] for c in chunk.aligned_cameras if c.key not in skipped and str(c.key) in names]
     from .sfm import photo_folder
 
-    pycolmap.undistort_images(str(ws), str(rec_dir), photo_folder(chunk), image_names=keep, undistort_options=uopts)
+    with colmap_log.relay(progress.sub(0.0, 0.1), ws, phases={"undistort": (0.0, 1.0)}):
+        pycolmap.undistort_images(str(ws), str(rec_dir), photo_folder(chunk), image_names=keep, undistort_options=uopts)
     chunk.meta["dense"] = {"backend": backend, "quality": quality, "filter": filter_mode}
     if bad:
         chunk.meta["dense"]["skipped_photos"] = [c.label for c in bad]
@@ -330,7 +332,8 @@ def build_point_cloud(chunk: Chunk, point_colors: bool = True, progress: Progres
             fopts.max_num_pixels = 10
         fopts.cache_size = _fusion_cache_gb()
         out = ws / "fused.ply"
-        pycolmap.stereo_fusion(str(out), str(ws), input_type="geometric", options=fopts, output_type="PLY")
+        with colmap_log.relay(progress.sub(0.0, 0.85), ws, phases={"fusing": (0.0, 1.0)}):
+            pycolmap.stereo_fusion(str(out), str(ws), input_type="geometric", options=fopts, output_type="PLY")
         pc = PointCloud.load(out)
         pc = _inside_region(chunk, pc)
         if len(pc):  # confidence: how many depth maps agree on each point

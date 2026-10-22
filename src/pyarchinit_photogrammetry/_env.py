@@ -82,3 +82,10 @@ def skip_open3d_extras() -> None:
 
         plotly.draw_plotly = plotly.draw_plotly_server = unavailable
         sys.modules[plotly.__name__] = plotly
+
+
+def glog_flushes_each_line() -> None:
+    """COLMAP's log (glog) written to a file line by line: by default glog keeps 30 seconds of
+    lines in a buffer, and :mod:`engine.colmap_log` tails that file to show the progress of a
+    step while COLMAP runs it. Read when the library loads: call before importing pycolmap."""
+    os.environ.setdefault("GLOG_logbufsecs", "0")

@@ -83,7 +83,13 @@ La vista 3D usa VTK (pyvista/pyvistaqt) quando OpenGL è disponibile, altrimenti
 
 ## Errori e log
 
-I passi lunghi girano in background con una finestra di avanzamento e *Annulla*. Quando un passo
+I passi lunghi girano in background con una finestra di avanzamento e *Annulla*. La finestra mostra
+la barra, il messaggio corrente, il tempo trascorso e una stima del tempo restante (dal ritmo degli
+ultimi minuti: un passo che rallenta la vede crescere, non scendere a zero) e, sotto *Dettagli*, una
+console con ogni messaggio del passo e la sua ora - le foto di cui si estraggono i punti, i blocchi
+di coppie abbinati, le foto messe nel blocco una per una con i punti che vedono, le compensazioni
+dell'intero blocco, le mappe di profondità fuse - letti dal log di COLMAP mentre gira, come la console
+di Metashape. Il pannello resta aperto o chiuso come lo hai lasciato. Quando un passo
 fallisce, una finestra di errore mostra un riassunto di una riga, un suggerimento per i problemi noti
 (SpatiaLite o PyTorch mancanti, una ricostruzione andata in crash, un'installazione Anaconda
 vecchia...), il traceback sotto *Dettagli* e i pulsanti *Copia* (riassunto + traceback, pronti per
