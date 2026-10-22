@@ -15,19 +15,21 @@ from pyarchinit_photogrammetry.engine import multispectral as ms
 BANDS = {"1": "Blue", "2": "Green", "3": "Red", "4": "NIR", "5": "RedEdge"}
 
 
-def _write_captures(scene_dir: Path, out: Path, n: int | None = None) -> Path:
+def _write_captures(scene_dir: Path, out: Path, n: int | None = None, odd_gain: float = 1.0) -> Path:
     """Five 16-bit bands from every rendered photo: the visible bands from its grey levels, the
-    NIR high where the texture is dark (a "vegetation" class the indices must find)."""
+    NIR high where the texture is dark (a "vegetation" class the indices must find). ``odd_gain``
+    multiplies every band of every other photo: the strips between flight lines."""
     folder = out / "ms"
     folder.mkdir(parents=True, exist_ok=True)
     photos = sorted((scene_dir / "photos").glob("*.jpg"))[:n]
-    for p in photos:
+    for i, p in enumerate(photos):
         grey = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE).astype(np.float32) / 255.0
         veg = grey < 0.45
         bands = {"Blue": 0.9 * grey, "Green": grey, "Red": 0.95 * grey + 0.02,
                  "NIR": np.where(veg, 0.55 + 0.3 * grey, 0.2 + 0.4 * grey), "RedEdge": np.where(veg, 0.4 + 0.3 * grey, 0.25 + 0.4 * grey)}
+        gain = odd_gain if i % 2 else 1.0
         for suffix, name in BANDS.items():
-            dn = np.clip(bands[name] * 40000 + 500, 0, 65535).astype(np.uint16)
+            dn = np.clip(bands[name] * gain * 40000 + 500, 0, 65535).astype(np.uint16)
             cv2.imwrite(str(folder / f"{p.stem}_{suffix}.tif"), dn)
     return folder
 
@@ -81,7 +83,9 @@ def test_registration_finds_a_shift(scene_dir):
 
 
 def test_reflectance_orthomosaic_indices_and_zoning(scene_dir, tmp_path):
-    folder = _write_captures(scene_dir, tmp_path)
+    """The chain on captures where every other photo is 30 % brighter (the strips between flight
+    lines): the balance of the photos finds the gain, the reflectance orthomosaic is seamless."""
+    folder = _write_captures(scene_dir, tmp_path, odd_gain=1.3)
     doc = ppg.Document()
     ch = doc.add_chunk("Campo")
     doc.save(tmp_path / "campo.ppg")
@@ -99,15 +103,45 @@ def test_reflectance_orthomosaic_indices_and_zoning(scene_dir, tmp_path):
     ch.build_depth_maps(quality="medium")  # the default backend: SGBM without the native core
     ch.build_point_cloud()
     ch.build_dem()
+    # the balance: the odd photos were written 30 % brighter in every band
+    gains = ms.balance_gains(ch, ["NIR", "Red"])
+    odd = {c.meta["capture"] for i, c in enumerate(cams) if i % 2}
+    for band in ("NIR", "Red"):
+        g = gains[band]
+        hi = np.array([g[str(c.key)] for c in cams if c.meta["capture"] in odd and str(c.key) in g])
+        lo = np.array([g[str(c.key)] for c in cams if c.meta["capture"] not in odd and str(c.key) in g])
+        assert len(hi) > 3 and len(lo) > 3
+        assert np.median(hi) / np.median(lo) == pytest.approx(1.3, rel=0.05), band
+        assert gains["spread"][band] == pytest.approx(np.log(1.3) / 2, rel=0.2)
     out = ms.build_reflectance(ch, resolution=0.01)
     import rasterio
 
+    assert set(ch.meta["multispectral"]["balance"]) >= {"NIR", "Red", "spread"}
     with rasterio.open(out) as src:
         assert src.count == 5 and list(src.descriptions) == ch.meta["multispectral"]["bands"] and src.dtypes[0] == "float32"
         nir = src.read(src.descriptions.index("NIR") + 1)
         red = src.read(src.descriptions.index("Red") + 1)
     valid = np.isfinite(nir) & np.isfinite(red)
     assert valid.mean() > 0.3
+    # without the balance the mosaic is a chequerboard of the photos' gains (odd x 1.3): against
+    # the balanced one (gains of mean one: odd / 1.14, even x 1.14) the cells split in two groups
+    # at +-0.13 in log, and the means of 40 x 40 blocks vary more
+    raw = ms.build_reflectance(ch, resolution=0.01, balance=False)
+    assert "balance" not in ch.meta["multispectral"]
+    with rasterio.open(raw) as src:
+        red_raw = src.read(src.descriptions.index("Red") + 1)
+    both = np.isfinite(red) & np.isfinite(red_raw) & (red > 0.02) & (red_raw > 0.02)
+    lr = np.log(red_raw[both] / red[both])
+    assert np.percentile(lr, 95) - np.percentile(lr, 5) > 0.2 and abs(np.median(lr)) < 0.05
+
+    def block_cv(a):
+        means = [a[r:r + 40, c:c + 40][np.isfinite(a[r:r + 40, c:c + 40])].mean()
+                 for r in range(0, a.shape[0] - 40, 40) for c in range(0, a.shape[1] - 40, 40)
+                 if np.isfinite(a[r:r + 40, c:c + 40]).sum() > 800]
+        return float(np.std(means) / np.mean(means))
+
+    assert block_cv(red) < block_cv(red_raw)
+    out = ms.build_reflectance(ch, resolution=0.01)  # the balanced one again for the rest
     ndvi_path = ms.index_raster(ch, "NDVI")
     with rasterio.open(ndvi_path) as src:
         ndvi = src.read(1)
@@ -232,6 +266,22 @@ def test_dji_p4_multispectral_files(tmp_path):
     _p4m_capture(b, 10, "bbbb1", rng)
     caps = ms.detect_bands([a, b])
     assert set(caps) == {"DJI_0011", "DJI_0021", "101MEDIA_DJI_0011"}
+    assert set(ms.detect_bands([tmp_path], recursive=True)) == set(caps) and not ms.detect_bands([tmp_path])
+    sniff = ms.looks_multispectral([tmp_path], recursive=True)
+    assert sniff["captures"] == 3 and sniff["bands"] == ["Blue", "Green", "NIR", "Red", "RedEdge"]
+    assert ms.looks_multispectral([tmp_path]) is None  # nothing in the folder itself
+    # the rolls added one after the other (the second says "0 photos added" in 1.2.2): the names
+    # that repeat take the folder, the reference band stays, the same files are not added twice
+    doc = ppg.Document()
+    ch = doc.add_chunk("Campo")
+    doc.save(tmp_path / "campo.ppg")
+    assert len(ms.add_captures(ch, [a])) == 2 and ch.meta["multispectral"]["reference"] == "Red"
+    assert len(ms.add_captures(ch, [b], reference="NIR")) == 1
+    info = ch.meta["multispectral"]
+    assert info["captures"] == 3 and info["reference"] == "Red"
+    assert {c.meta["capture"] for c in ms.multispectral_cameras(ch)} == {"DJI_0011", "DJI_0021", "101MEDIA_DJI_0011"}
+    assert ms.add_captures(ch, [a, b]) == [] and ch.meta["multispectral"]["captures"] == 3
+    assert len({Path(c.path).name for c in ch.cameras}) == 3
     assert all(set(c) == {"Blue", "Green", "Red", "RedEdge", "NIR"} for c in caps.values())
     assert caps["DJI_0021"]["NIR"].name == "DJI_0025.TIF" and caps["101MEDIA_DJI_0011"]["Red"].parent == b
     tags = ms.xmp_of(caps["DJI_0011"]["Red"])
@@ -324,10 +374,30 @@ def test_pane_tree_and_views_show_the_products(scene_dir, tmp_path, monkeypatch)
         rgba = image_views.read_window_rgba(folder / "reflectance.tif", "reflectance", (0, 0, w, h), (h, w), bands=(5, 3, 2),
                                             limits=w_.ortho_view._band_limits)
         assert rgba[..., 3].min() == 255 and rgba[:, :40, 0].mean() > rgba[:, 40:, 0].mean() + 60  # NIR shown as red
+        # one band on its own, in grey, from the pane's choices
+        k = w_.ms_pane.c_show.findData("band:NIR")
+        assert k > 1 and w_.ms_pane.c_show.count() == 2 + len(bands)
+        w_.ms_pane.c_show.setCurrentIndex(k)
+        w_.ms_pane._show_reflectance()
+        assert w_.ortho_view.kind == "reflectance" and w_.ortho_view._bands == (5, 5, 5)
+        rgba = image_views.read_window_rgba(folder / "reflectance.tif", "reflectance", (0, 0, w, h), (h, w), bands=(5, 5, 5),
+                                            limits=w_.ortho_view._band_limits)
+        assert np.array_equal(rgba[..., 0], rgba[..., 1]) and np.array_equal(rgba[..., 1], rgba[..., 2])
+        assert rgba[:, :40, 0].mean() > rgba[:, 40:, 0].mean() + 60
         w_._workspace_item("product", ch, "ms:index:NDVI")
         assert w_.ortho_view.kind == "index" and w_.ortho_view._dem_range[0] < w_.ortho_view._dem_range[1]
         rgba = image_views.read_window_rgba(ndvi, "index", (0, 0, w, h), (h, w), w_.ortho_view._dem_range)
         assert rgba[:, :40, 0].mean() < rgba[:, 40:, 0].mean() - 60  # red where low, dark green where high
+        # another ramp from the pane: the view coloured again, the choice kept for the next window
+        w_.ms_pane.c_palette.setCurrentIndex(w_.ms_pane.c_palette.findData("grey"))
+        assert w_.ortho_view.palette == "grey" and w_.ortho_view.kind == "index"
+        assert w_.settings.value("ms/palette") == "grey"
+        grey = image_views.read_window_rgba(ndvi, "index", (0, 0, w, h), (h, w), w_.ortho_view._dem_range, palette="grey")
+        assert np.array_equal(grey[..., 0], grey[..., 1]) and grey[:, :40, 0].mean() > grey[:, 40:, 0].mean() + 60
+        for palette in ("viridis", "turbo"):
+            ends = image_views.index_colors(np.array([[0.0, 1.0]]), (0.0, 1.0), palette)[0]
+            assert ends[0, 3] == 255 and not np.array_equal(ends[0, :3], ends[1, :3])
+        assert image_views.index_colors(np.array([[0.0, 1.0]]), (0.0, 1.0), "viridis")[0, 1, 1] > 200  # yellow end
         w_._workspace_item("product", ch, "ms:zones:NDVI")
         assert w_.ortho_view.kind == "zones" and "Zone NDVI" in w_.ortho_view.layers
         assert len(w_.ortho_view.features("Zone NDVI")) == summary["polygons"]
@@ -335,6 +405,57 @@ def test_pane_tree_and_views_show_the_products(scene_dir, tmp_path, monkeypatch)
         assert rgba[..., 3].max() == 255 and len(np.unique(rgba[rgba[..., 3] > 0][:, :3], axis=0)) == 2
         rows = gpkg.read_table(tmp_path / "zone.gpkg", "zone")
         assert {r[1]["classe"] for r in rows} == {1, 2}
+    finally:
+        w_.setWindowModified(False)
+        w_.close()
+
+
+def test_adding_multispectral_files_as_photos_offers_the_captures(tmp_path, monkeypatch):
+    """Foto > Aggiungi cartella on the files of a multispectral camera: the window recognises
+    them and offers to add them as captures, then shows the Multispectral pane (a user followed
+    the ordinary steps on them, and the bands were aligned as different views)."""
+    pytest.importorskip("PySide6")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("PPG_RENDERER", "software")
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
+    QApplication.instance() or QApplication([])
+    from pyarchinit_photogrammetry.gui import main_window as mwmod
+
+    rng = np.random.default_rng(7)
+    roll = tmp_path / "flight" / "100MEDIA"
+    roll.mkdir(parents=True)
+    _p4m_capture(roll, 10, "u1", rng)
+    _p4m_capture(roll, 20, "u2", rng)
+    doc = ppg.Document()
+    ch = doc.add_chunk("Campo")
+    doc.save(tmp_path / "campo.ppg")
+    w_ = mwmod.MainWindow(doc, autoconnect=False)
+    w_.runner.show_dialog = False
+    try:
+        monkeypatch.setattr(mwmod.QFileDialog, "getExistingDirectory", lambda *a, **k: str(tmp_path / "flight"))
+        asked = []
+        monkeypatch.setattr(mwmod, "choice", lambda *args, **kw: asked.append(args[3]) or 0)
+        monkeypatch.setattr(w_, "_info", lambda *a, **k: None)
+        w_.add_photos(folder=True)
+        w_.runner.wait()
+        assert len(asked) == 1 and "2" in asked[0] and "NIR" in asked[0]
+        assert {c.meta["capture"] for c in ms.multispectral_cameras(ch)} == {"DJI_0011", "DJI_0021"}
+        assert ch.meta["multispectral"]["captures"] == 2 and w_.left_tabs.currentWidget() is w_.ms_pane
+        # ordinary photos: no question
+        monkeypatch.setattr(mwmod.QFileDialog, "getExistingDirectory", lambda *a, **k: str(tmp_path / "plain"))
+        (tmp_path / "plain").mkdir()
+        import cv2
+
+        cv2.imwrite(str(tmp_path / "plain" / "IMG_0001.jpg"), np.zeros((40, 60, 3), np.uint8))
+        w_.add_photos(folder=True)
+        w_.runner.wait()
+        assert len(asked) == 1 and len(ch.cameras) == 3
     finally:
         w_.setWindowModified(False)
         w_.close()

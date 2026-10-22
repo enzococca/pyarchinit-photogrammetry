@@ -58,18 +58,47 @@ _SUFFIX = re.compile(r"^(?P<stem>.+?)_(?P<band>\d|MS_[A-Z]+|GRE|RED|REG|NIR|RGB)
 
 
 # ------------------------------------------------------------------------------ the captures
-def detect_bands(paths) -> dict[str, dict[str, Path]]:
-    """The captures among ``paths`` (files or folders): ``{capture: {band name: file}}``. A
-    file is a band of a capture by its suffix (MicaSense ``_1``..``_6``, DJI ``_MS_G`` ...,
-    Sequoia ``_GRE`` ...) or by the ``BandName`` of its XMP; the RGB JPEG of a DJI capture is
-    left out (it is not a band)."""
+IMAGE_SUFFIXES = (".tif", ".tiff", ".jpg", ".jpeg", ".png")
+
+
+def image_files(paths, recursive: bool = False) -> list[Path]:
+    """The image files among ``paths`` (files, or folders listed - with their subfolders when
+    ``recursive``: the rolls of a camera, 100MEDIA and 101MEDIA)."""
     files: list[Path] = []
     for p in paths:
         p = Path(p)
         if p.is_dir():
-            files += sorted(f for f in p.iterdir() if f.suffix.lower() in (".tif", ".tiff", ".jpg", ".jpeg", ".png"))
+            found = p.rglob("*") if recursive else p.iterdir()
+            files += sorted(f for f in found if f.is_file() and f.suffix.lower() in IMAGE_SUFFIXES)
         else:
             files.append(p)
+    return files
+
+
+def detect_bands(paths, recursive: bool = False) -> dict[str, dict[str, Path]]:
+    """The captures among ``paths`` (files or folders, their subfolders too when ``recursive``):
+    ``{capture: {band name: file}}``. A file is a band of a capture by its suffix (MicaSense
+    ``_1``..``_6``, DJI ``_MS_G`` ..., Sequoia ``_GRE`` ...) or by the ``BandName`` of its XMP;
+    the RGB JPEG of a DJI capture is left out (it is not a band)."""
+    return _captures_of(image_files(paths, recursive))
+
+
+def looks_multispectral(paths, recursive: bool = False, sample: int = 60) -> dict | None:
+    """Whether ``paths`` hold the captures of a multispectral camera, from the first ``sample``
+    image files only (a folder of a thousand ordinary photos is not read through): ``{"bands",
+    "captures"}`` (the captures estimated for the whole set), or None."""
+    files = image_files(paths, recursive)
+    if not files:
+        return None
+    caps = _captures_of(files[:sample])
+    if not caps:
+        return None
+    bands = sorted({b for c in caps.values() for b in c})
+    estimate = len(caps) if len(files) <= sample else int(round(len(caps) * len(files) / sample))
+    return {"bands": bands, "captures": estimate, "files": len(files)}
+
+
+def _captures_of(files: list[Path]) -> dict[str, dict[str, Path]]:
     captures: dict[str, dict[str, Path]] = {}
     owner: dict[str, Path] = {}  # the folder a capture name comes from: the numbering of a camera
     # starts again in every folder (100MEDIA, 101MEDIA), so a repeated name takes its folder as a prefix
@@ -454,16 +483,39 @@ def warp_band(img: np.ndarray, h: np.ndarray, shape) -> np.ndarray:
 
 
 # ------------------------------------------------------------------------------ the chunk
-def add_captures(chunk: Chunk, paths, reference: str | None = None) -> list:
+def add_captures(chunk: Chunk, paths, reference: str | None = None, recursive: bool = False) -> list:
     """The captures of a multispectral camera into the chunk: the reference band of every
     capture becomes its photo (aligned and reconstructed as any photo), the other bands are
-    remembered in ``camera.meta["bands"]``. Returns the cameras added."""
-    captures = detect_bands(paths)
+    remembered in ``camera.meta["bands"]``. Returns the cameras added. Called again with another
+    folder of the same flight (the rolls of a camera, whose numbering starts again), it adds
+    those captures to the ones there - a name already taken gets its folder as a prefix - keeps
+    the reference band chosen the first time, and leaves out files already in the chunk."""
+    captures = detect_bands(paths, recursive=recursive)
     if not captures:
         raise RuntimeError("no multispectral captures found (files <capture>_<band>.tif side by side)")
-    bands = sorted({b for c in captures.values() for b in c})
-    reference = reference or next((b for b in DEFAULT_REFERENCE if b in bands), bands[0])
-    usable = {k: v for k, v in captures.items() if reference in v}
+    ms = chunk.meta.get("multispectral") or {}
+    existing = multispectral_cameras(chunk)
+    known = {Path(p).resolve() for c in existing for p in (c.meta.get("bands") or {}).values()}
+    captures = {s: f for s, f in captures.items() if not any(Path(p).resolve() in known for p in f.values())}
+    bands = sorted({b for c in captures.values() for b in c} | set(ms.get("bands") or []))
+    if existing and ms.get("reference"):
+        reference = ms["reference"]
+    else:
+        reference = reference or next((b for b in DEFAULT_REFERENCE if b in bands), bands[0])
+    taken = {c.meta.get("capture") for c in existing}
+    usable: dict[str, dict[str, Path]] = {}
+    for stem, files in captures.items():
+        if reference not in files:
+            continue
+        name = stem
+        if name in taken:
+            name = f"{files[reference].parent.name}_{stem}"
+        k = 2
+        while name in taken:
+            name = f"{files[reference].parent.name}_{stem}_{k}"
+            k += 1
+        taken.add(name)
+        usable[name] = files
     # the photos of the chunk: 8-bit copies of the reference band, stretched (12 or 16 bits with
     # a dark scene would come out almost black for the feature detector), with the tags of the
     # original (GPS, camera); the values come from the original files
@@ -472,7 +524,7 @@ def add_captures(chunk: Chunk, paths, reference: str | None = None) -> list:
     copies = {}
     for stem, files in usable.items():
         copies[stem] = reference_copy(files[reference], folder / f"{stem}.jpg")
-    cams = chunk.add_photos([copies[s] for s in usable])
+    cams = chunk.add_photos([copies[s] for s in usable]) if usable else []
     by_path = {Path(c.path).resolve(): c for c in cams}
     for stem, files in usable.items():
         cam = by_path.get(copies[stem].resolve())
@@ -480,8 +532,10 @@ def add_captures(chunk: Chunk, paths, reference: str | None = None) -> list:
             continue
         cam.meta["bands"] = {b: str(p) for b, p in files.items()}
         cam.meta["capture"] = stem
-    chunk.meta["multispectral"] = {"reference": reference, "bands": bands, "captures": len(usable),
-                                   "panel": None, "registration": {}}
+    ms.update({"reference": reference, "bands": bands, "captures": len(existing) + len(cams)})
+    ms.setdefault("panel", None)
+    ms.setdefault("registration", {})
+    chunk.meta["multispectral"] = ms
     return cams
 
 
@@ -530,9 +584,11 @@ def calibrate_panel(chunk: Chunk, camera, region, reflectance: dict[str, float] 
     return factors
 
 
-def band_stack(chunk: Chunk, camera, bands: list[str], cache: dict | None = None) -> np.ndarray:
+def band_stack(chunk: Chunk, camera, bands: list[str], cache: dict | None = None,
+               gains: dict[str, dict[str, float]] | None = None) -> np.ndarray:
     """The bands of the capture of ``camera`` in reflectance, registered onto the reference
-    band: ``(h, w, len(bands))`` float32, NaN where a band does not cover."""
+    band: ``(h, w, len(bands))`` float32, NaN where a band does not cover. ``gains`` (per band,
+    per camera key: :func:`balance_gains`) divide the values."""
     ms = chunk.meta.get("multispectral") or {}
     reference = ms.get("reference")
     files = camera.meta.get("bands") or {}
@@ -550,14 +606,87 @@ def band_stack(chunk: Chunk, camera, bands: list[str], cache: dict | None = None
     for k, b in enumerate(bands):
         if b in refl:
             stack[..., k] = warp_band(refl[b], np.asarray(hs[b], float), shape)
+            g = (gains or {}).get(b, {}).get(str(camera.key))
+            if g:
+                stack[..., k] /= float(g)
     return stack
 
 
+def balance_gains(chunk: Chunk, bands: list[str] | None = None, samples: int = 4000, rounds: int = 40,
+                  progress: Progress | None = None) -> dict:
+    """Per band and photo, the gain that brings the captures to the same reflectance where they
+    overlap: points of the surface are projected into every capture and read in its registered
+    bands; the log values are split into a value of the point and a gain of the photo (least
+    squares by alternation, the gains of mean zero, observations beyond three MADs dropped after
+    the first rounds). The strips between flight lines - the photos of one heading brighter than
+    the next (sun and view geometry, the light sensor tilted) - go away; the mean level is kept.
+    ``{band: {camera key: gain}}`` plus ``"spread"``: the standard deviation of the log gains per
+    band, what the balance took away."""
+    from .colour import _surface_points
+    from .visibility import project_valid
+
+    progress = as_progress(progress)
+    ms = chunk.meta.get("multispectral") or {}
+    bands = list(bands or ms.get("bands") or [])
+    cams = [c for c in multispectral_cameras(chunk) if c.aligned]
+    if not bands or len(cams) < 2:
+        return {}
+    pts = _surface_points(chunk, samples)
+    if not len(pts):
+        return {}
+    obs: dict[str, list] = {b: [] for b in bands}
+    for i, cam in enumerate(cams):
+        progress(i / len(cams), f"Balancing the photos: {i + 1} of {len(cams)}")
+        px, _depth, ok = project_valid(chunk, cam, pts, margin=4.0)
+        idx = np.nonzero(ok)[0]
+        if not len(idx):
+            continue
+        stack = band_stack(chunk, cam, bands)
+        h, w = stack.shape[:2]
+        c = np.clip(np.floor(px[idx, 0]).astype(int), 0, w - 1)
+        r = np.clip(np.floor(px[idx, 1]).astype(int), 0, h - 1)
+        for k, b in enumerate(bands):
+            v = stack[r, c, k]
+            good = np.isfinite(v) & (v > 1e-6)
+            obs[b].append((idx[good], np.full(good.sum(), i), np.log(v[good])))
+    out: dict = {"spread": {}}
+    for b in bands:
+        if not obs[b]:
+            continue
+        point = np.concatenate([o[0] for o in obs[b]])
+        photo = np.concatenate([o[1] for o in obs[b]])
+        logv = np.concatenate([o[2] for o in obs[b]])
+        seen = np.bincount(point, minlength=len(pts))
+        keep = seen[point] >= 2
+        point, photo, logv = point[keep], photo[keep], logv[keep]
+        if not len(point):
+            continue
+        g = np.zeros(len(cams))
+        for it in range(rounds):
+            n_pt = np.bincount(point, minlength=len(pts)).astype(float)
+            value = np.bincount(point, logv - g[photo], minlength=len(pts)) / np.maximum(n_pt, 1)
+            res = logv - value[point]
+            if it == rounds // 2:  # the outliers (a moving shadow, a saturated field): dropped
+                mad = np.median(np.abs(res - np.median(res))) * 1.4826 + 1e-9
+                keep = np.abs(res) <= 3 * mad
+                point, photo, logv, res = point[keep], photo[keep], logv[keep], res[keep]
+            n_ph = np.bincount(photo, minlength=len(cams)).astype(float)
+            g = np.bincount(photo, res, minlength=len(cams)) / np.maximum(n_ph, 1)  # given the points, the photos
+            g -= g[n_ph > 0].mean()
+        out[b] = {str(cam.key): float(np.exp(g[i])) for i, cam in enumerate(cams) if n_ph[i] > 0}
+        out["spread"][b] = float(g[n_ph > 0].std())
+    progress(1.0, "Photos balanced: " + ", ".join(f"{b} {s * 100:.1f} %" for b, s in out["spread"].items()))
+    return out
+
+
 def build_reflectance(chunk: Chunk, bands: list[str] | None = None, resolution: float | None = None,
-                      progress: Progress | None = None, **ortho_options) -> Path:
+                      progress: Progress | None = None, balance: bool = True, **ortho_options) -> Path:
     """The reflectance orthomosaic: ``<data>/multispectral/reflectance.tif``, a float32 band per
     spectral band on the grid of the orthophoto engine (``resolution`` as the orthomosaic), NaN
-    where nothing. Three bands at a time go through the engine (its channels)."""
+    where nothing. Three bands at a time go through the engine (its channels). ``balance``: the
+    photos brought to the same reflectance where they overlap first (:func:`balance_gains`),
+    against the strips between flight lines; the gains are kept in ``meta["multispectral"]
+    ["balance"]``."""
     import rasterio
 
     from .ortho import build_orthomosaic
@@ -570,6 +699,12 @@ def build_reflectance(chunk: Chunk, bands: list[str] | None = None, resolution: 
         raise RuntimeError("no multispectral captures in the chunk (add them with add_captures)")
     folder = chunk.data_dir / "multispectral"
     folder.mkdir(parents=True, exist_ok=True)
+    gains = None
+    if balance:
+        gains = balance_gains(chunk, bands, progress=progress.sub(0.0, 0.1))
+        ms["balance"] = gains
+    else:
+        ms.pop("balance", None)
     groups = [bands[i:i + 3] for i in range(0, len(bands), 3)]
     parts = []
     for gi, group in enumerate(groups):
@@ -579,12 +714,14 @@ def build_reflectance(chunk: Chunk, bands: list[str] | None = None, resolution: 
         def source(cam, trio=trio, keys=keys):
             if cam.key not in keys:
                 return np.full((chunk.sensors[cam.sensor_key].height, chunk.sensors[cam.sensor_key].width, 3), np.nan, np.float32)
-            return band_stack(chunk, cam, trio)
+            return band_stack(chunk, cam, trio, gains=gains)
 
         out = folder / f"part_{gi}.tif"
-        progress(gi / len(groups), f"Reflectance bands {', '.join(group)}")
+        start = 0.1 if balance else 0.0
+        progress(start + (1 - start) * gi / len(groups), f"Reflectance bands {', '.join(group)}")
         build_orthomosaic(chunk, resolution=resolution, source=source, out_path=out,
-                          progress=progress.sub(gi / len(groups), 0.9 / len(groups)), **ortho_options)
+                          progress=progress.sub(start + (1 - start) * gi / len(groups), (0.9 - start) / len(groups)),
+                          **ortho_options)
         parts.append((group, out))
     final = folder / "reflectance.tif"
     with rasterio.open(parts[0][1]) as first:

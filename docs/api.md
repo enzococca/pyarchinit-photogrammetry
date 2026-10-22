@@ -125,10 +125,13 @@ Multispectral, Parrot Sequoia, DJI P4 Multispectral) writes one file per band of
 by side; the bands are found by their suffixes (`_1`..`_6`, `_MS_G` ..., `_GRE` ...) or by the
 `BandName` of their XMP, the captures of a P4 Multispectral (six files of their own numbers) by
 their `CaptureUUID`, a numbering that starts again in a second folder by the folder's name
-(`detect_bands`). `add_captures(chunk, paths, reference=None)` makes the reference band
-(the red one by default) the photo of each capture - an 8-bit stretched copy with the tags of the
-original, aligned and reconstructed as any photo - and keeps the other bands in
-`camera.meta["bands"]`. The radiometry (`radiance_image`, `reflectance_image`) follows the tags:
+(`detect_bands(paths, recursive=False)`; `looks_multispectral(paths)` says from the first files
+whether a folder holds captures at all, what the window asks on). `add_captures(chunk, paths,
+reference=None, recursive=False)` makes the reference band (the red one by default) the photo of
+each capture - an 8-bit stretched copy with the tags of the original, aligned and reconstructed as
+any photo - and keeps the other bands in `camera.meta["bands"]`; called again with another folder
+of the flight it adds to the captures there (names that repeat take their folder, the reference
+band stays, files already in the chunk are left out). The radiometry (`radiance_image`, `reflectance_image`) follows the tags:
 MicaSense's model (black level, gain and exposure, the `RadiometricCalibration` coefficients, the
 vignetting polynomial), else digital numbers normalised by exposure and gain; reflectance comes from
 a calibration panel in the flight (`calibrate_panel(chunk, camera, region, reflectance)`: the
@@ -141,9 +144,14 @@ dark and smooth in the red: NIR on red seldom converges, NIR on red-edge always 
 Multispectral over scrub the correlations go from 0.1-0.3 to 0.9). DJI's radiometric model (the
 vignetting polynomial, the black level of the EXIF, gain, exposure, the gain adjustment, the
 irradiance of the sun sensor) is followed as in their guide. `build_reflectance(chunk, bands=None,
-resolution=None)` runs the orthophoto engine on the reference band's geometry with the registered
-bands as float values: `<data>/multispectral/reflectance.tif`, a float32 band per spectral band,
-NaN where nothing. `index_raster(chunk, "NDVI")` (also NDRE, GNDVI, SAVI, NDWI, OSAVI, CIRE,
+resolution=None, balance=True)` runs the orthophoto engine on the reference band's geometry with
+the registered bands as float values: `<data>/multispectral/reflectance.tif`, a float32 band per
+spectral band, NaN where nothing. `balance` first brings the photos to the same reflectance where
+they overlap (`balance_gains`: surface points projected into every capture and read in its bands,
+the log values split into a value of the point and a gain of the photo, least squares by
+alternation with the gains of mean zero, outliers beyond three MADs dropped): the strips between
+flight lines flown in opposite directions go away, the mean level stays; the gains and their
+spread per band are kept in `meta["multispectral"]["balance"]`. `index_raster(chunk, "NDVI")` (also NDRE, GNDVI, SAVI, NDWI, OSAVI, CIRE,
 Thermal, or any formula over the band names) makes the index on the same grid; `export_zoning(chunk,
 "NDVI", "zone.gpkg", classes=3, method="quantiles" | "equal" | "kmeans")` cuts it into classes
 (small patches given to their surroundings) and writes the polygons with class, range, mean and

@@ -42,10 +42,22 @@ dell'ambiente e alla cartella dei log. *File > Pagina iniziale* la fa tornare.
 La scheda *Multispettrale* del dock del progetto resta aperta ed elenca i sette passi in ordine,
 ognuno con il suo stato e il suo pulsante: le riprese, l'allineamento, la superficie (mappe di
 profondità, nuvola densa e DEM in un passo solo con le scelte predefinite), il pannello di
-calibrazione, l'ortofoto di riflettanza (*Mostra* in falso colore NIR-Red-Green o in colori veri),
-l'indice (NDVI, NDRE, GNDVI, SAVI, NDWI, OSAVI, CIRE, Thermal o una formula propria sui nomi delle
-bande, calcolato e mostrato sulla sua scala di colori, dal rosso al verde) e la zonizzazione (classi
-e metodo, i poligoni in un GeoPackage, mostrati per classe con i poligoni come layer). I prodotti
+calibrazione, l'ortofoto di riflettanza (*Mostra* in falso colore NIR-Red-Green, in colori veri, o
+una banda da sola in scala di grigi: NIR, red edge...), l'indice (NDVI, NDRE, GNDVI, SAVI, NDWI,
+OSAVI, CIRE, Thermal o una formula propria sui nomi delle bande, calcolato e mostrato sulla scala di
+colori scelta lì accanto - rosso-giallo-verde, scala di grigi, viridis o turbo; la scelta ricolora
+l'indice mostrato e viene ricordata) e la zonizzazione (classi e metodo, i poligoni in un
+GeoPackage, mostrati per classe con i poligoni come layer).
+
+I file di una camera multispettrale vengono riconosciuti quando aggiungi foto (*Foto* o *Aggiungi
+cartella*): la finestra propone di aggiungerli come riprese e apre questo pannello, così le bande
+non vengono allineate come se fossero viste diverse. Un volo diviso in più cartelle (i rulli di una
+camera, 100MEDIA e 101MEDIA, la cui numerazione riparte) si aggiunge una cartella dopo l'altra, o
+come cartella madre in un colpo solo: i nomi che si ripetono prendono la cartella come prefisso, i
+file già nel chunk restano fuori. L'ortofoto di riflettanza pareggia le foto per impostazione
+(*Pareggia la luminosità tra le foto*): un guadagno per foto e banda, trovato dove le foto si
+sovrappongono, toglie le strisce tra le linee di volo percorse in direzioni opposte (geometria di
+sole e vista) conservando il livello medio; togli la spunta per la riflettanza grezza. I prodotti
 compaiono nell'albero del progetto sotto *Multispettrale* (l'ortofoto di riflettanza, ogni indice,
 ogni zonizzazione) e si aprono da lì; *Apri in QGIS* crea il progetto QGIS con la riflettanza in
 falso colore, gli indici con la loro scala, le zone come raster e come poligoni, oltre a ortofoto,

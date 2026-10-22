@@ -84,18 +84,31 @@ def index_limits(z: np.ndarray) -> tuple[float, float]:
     return float(lo), float(hi) if hi > lo else float(lo) + 1e-6
 
 
-def index_colors(z: np.ndarray, limits: tuple[float, float] | None = None) -> np.ndarray:
-    """A vegetation index: brown-red where low, pale yellow in the middle, dark green where
-    high (the ramp of the agronomic maps); transparent where no data."""
+INDEX_PALETTES = [("rdylgn", "Rosso-giallo-verde"), ("grey", "Scala di grigi"), ("viridis", "Viridis"),
+                  ("turbo", "Turbo")]  # the colour ramps of a vegetation index (key, name)
+
+
+def index_colors(z: np.ndarray, limits: tuple[float, float] | None = None, palette: str = "rdylgn") -> np.ndarray:
+    """A vegetation index on a ``palette`` of :data:`INDEX_PALETTES`: ``rdylgn`` brown-red where
+    low, pale yellow in the middle, dark green where high (the ramp of the agronomic maps),
+    ``grey`` black to white, ``viridis`` and ``turbo`` OpenCV's; transparent where no data."""
     valid = np.isfinite(z)
     rgba = np.zeros(z.shape + (4,), np.uint8)
     if not valid.any():
         return rgba
     lo, hi = limits if limits is not None else index_limits(z)
     t = np.clip((np.where(valid, z, lo) - lo) / max(hi - lo, 1e-9), 0, 1)
-    stops = np.array([[0.0, 165, 0, 38], [0.25, 244, 109, 67], [0.5, 254, 224, 139], [0.75, 102, 189, 99],
-                      [1.0, 0, 104, 55]])
-    rgba[..., :3] = np.stack([np.interp(t, stops[:, 0], stops[:, k]) for k in (1, 2, 3)], -1).astype(np.uint8)
+    if palette == "grey":
+        rgba[..., :3] = (t * 255).astype(np.uint8)[..., None]
+    elif palette in ("viridis", "turbo"):
+        import cv2
+
+        cmap = cv2.COLORMAP_VIRIDIS if palette == "viridis" else cv2.COLORMAP_TURBO
+        rgba[..., :3] = cv2.applyColorMap(np.ascontiguousarray((t * 255).astype(np.uint8)), cmap)[..., ::-1]
+    else:
+        stops = np.array([[0.0, 165, 0, 38], [0.25, 244, 109, 67], [0.5, 254, 224, 139], [0.75, 102, 189, 99],
+                          [1.0, 0, 104, 55]])
+        rgba[..., :3] = np.stack([np.interp(t, stops[:, 0], stops[:, k]) for k in (1, 2, 3)], -1).astype(np.uint8)
     rgba[..., 3] = np.where(valid, 255, 0)
     return rgba
 
@@ -264,7 +277,8 @@ def relief_colors(z: np.ndarray, kind: str, limits: tuple[float, float] | None =
 
 def read_window_rgba(path, kind: str, window: tuple[int, int, int, int], out_shape: tuple[int, int],
                      dem_range: tuple[float, float] | None = None, diff_limit: float | None = None,
-                     bands: tuple[int, int, int] | None = None, limits: list | None = None) -> np.ndarray:
+                     bands: tuple[int, int, int] | None = None, limits: list | None = None,
+                     palette: str = "rdylgn") -> np.ndarray:
     """RGBA ``(h, w, 4)`` of a window ``(col, row, width, height)`` of a raster read at
     ``out_shape`` (the overviews of the file are used when smaller), coloured like the whole
     raster: orthomosaic bands as they are, DEM tinted and shaded, difference of DEMs diverging,
@@ -293,7 +307,7 @@ def read_window_rgba(path, kind: str, window: tuple[int, int, int, int], out_sha
             if kind == "coverage":
                 return coverage_colors(z)
             if kind == "index":
-                return index_colors(z, dem_range)
+                return index_colors(z, dem_range, palette)
             if kind == "zones":
                 return zone_colors(z)
             if kind in RELIEF_KINDS:
@@ -440,6 +454,7 @@ class RasterView(_ZoomView):
         self._src_size = self._base_size = (0, 0)
         self._dem_range: tuple[float, float] | None = None
         self.diff_limit = 0.0
+        self.palette = "rdylgn"  # the ramp of a vegetation index (INDEX_PALETTES)
         self._detail_pool = ThreadPoolExecutor(1, thread_name_prefix="raster-detail")
         self._detail_relay = _DetailRelay(self)
         self._detail_relay.ready.connect(self._show_detail)
@@ -516,7 +531,7 @@ class RasterView(_ZoomView):
                     rgba = relief_colors(self.z, kind, self._dem_range)
                 elif kind == "index":  # a vegetation index: its ramp between the percentiles of the whole raster
                     self._dem_range = index_limits(self.z)
-                    rgba = index_colors(self.z, self._dem_range)
+                    rgba = index_colors(self.z, self._dem_range, self.palette)
                 elif kind == "zones":  # the classes of a zoning
                     rgba = zone_colors(self.z)
                 else:
@@ -598,7 +613,7 @@ class RasterView(_ZoomView):
         self._detail_key = (window, shape)
         self._detail_gen += 1
         job = (self._detail_gen, str(self.path), self.kind, window, shape, scene, self._dem_range,
-               self.diff_limit, getattr(self, "_bands", None), getattr(self, "_band_limits", None))
+               self.diff_limit, getattr(self, "_bands", None), getattr(self, "_band_limits", None), self.palette)
         if wait:
             self._show_detail(*self._read_detail(job))
         else:
@@ -606,9 +621,10 @@ class RasterView(_ZoomView):
 
     @staticmethod
     def _read_detail(job):
-        gen, path, kind, window, shape, scene, dem_range, diff_limit, bands, limits = job
+        gen, path, kind, window, shape, scene, dem_range, diff_limit, bands, limits, palette = job
         kind = kind if kind in SCALAR_KINDS or kind == "reflectance" else "ortho"
-        rgba = read_window_rgba(path, kind, window, shape, dem_range, diff_limit, bands=bands, limits=limits)
+        rgba = read_window_rgba(path, kind, window, shape, dem_range, diff_limit, bands=bands, limits=limits,
+                                palette=palette)
         return gen, to_qimage(rgba), scene
 
     def _read_detail_async(self, job) -> None:

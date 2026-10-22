@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QComboBox, QGridLayout, QHBoxLayout, QLabel, QPus
 from ..engine.multispectral import INDICES
 from .i18n import tr
 from .icons import icon
+from .image_views import INDEX_PALETTES
 
 FALSE_COLOUR = ("NIR", "Red", "Green")
 TRUE_COLOUR = ("Red", "Green", "Blue")
@@ -27,6 +28,7 @@ class MultispectralPane(QWidget):
     index_requested = Signal(str, str)  # name, formula ("" = the known index)
     zoning_requested = Signal(str, int, str)  # index, classes, method
     qgis_requested = Signal()
+    palette_requested = Signal(str)  # the ramp of the indices shown
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -84,7 +86,11 @@ class MultispectralPane(QWidget):
             self.c_index.addItem(f"{name}: {text}", name)
         self.c_index.addItem(tr("Formula propria..."), "formula")
         self.b_index = QPushButton(icon("run"), tr("Calcola e mostra"))
-        step(5, "index", tr("Indice di vegetazione"), [self.c_index, self.b_index])
+        self.c_palette = QComboBox()
+        self.c_palette.setToolTip(tr("Scala di colori degli indici"))
+        for key, name in INDEX_PALETTES:
+            self.c_palette.addItem(tr(name), key)
+        step(5, "index", tr("Indice di vegetazione"), [self.c_index, self.b_index, self.c_palette])
         self.s_classes = QSpinBox()
         self.s_classes.setRange(2, 10)
         self.s_classes.setValue(3)
@@ -109,6 +115,7 @@ class MultispectralPane(QWidget):
         self.b_zoning.clicked.connect(lambda: self.zoning_requested.emit(self.index_name(), int(self.s_classes.value()),
                                                                          str(self.c_method.currentData())))
         self.b_qgis.clicked.connect(self.qgis_requested)
+        self.c_palette.currentIndexChanged.connect(lambda _i: self.palette_requested.emit(self.palette()))
         self.set_state(None)
 
     # --------------------------------------------------------------- choices
@@ -120,7 +127,38 @@ class MultispectralPane(QWidget):
         self.index_requested.emit(name, "")
 
     def _show_reflectance(self) -> None:
-        self.show_requested.emit("reflectance", FALSE_COLOUR if self.c_show.currentData() == "false" else TRUE_COLOUR)
+        what = str(self.c_show.currentData())
+        if what.startswith("band:"):  # one band in grey
+            self.show_requested.emit("reflectance", (what[5:],))
+        else:
+            self.show_requested.emit("reflectance", FALSE_COLOUR if what == "false" else TRUE_COLOUR)
+
+    def _offer_bands(self, bands) -> None:
+        """The composites and every band on its own (grey), the choice kept."""
+        current = self.c_show.currentData()
+        self.c_show.blockSignals(True)
+        self.c_show.clear()
+        self.c_show.addItem(tr("Falso colore (NIR, Red, Green)"), "false")
+        self.c_show.addItem(tr("Colori veri (Red, Green, Blue)"), "true")
+        for b in bands:
+            self.c_show.addItem(tr("Banda {0} (scala di grigi)", b), f"band:{b}")
+        k = self.c_show.findData(current)
+        self.c_show.setCurrentIndex(k if k >= 0 else 0)
+        self.c_show.blockSignals(False)
+
+    def palette(self) -> str:
+        return str(self.c_palette.currentData())
+
+    def palette_label(self) -> str:
+        return self.c_palette.currentText()
+
+    def set_palette(self, key: str) -> None:
+        """The ramp chosen (from the settings), without announcing it."""
+        k = self.c_palette.findData(key)
+        if k >= 0:
+            self.c_palette.blockSignals(True)
+            self.c_palette.setCurrentIndex(k)
+            self.c_palette.blockSignals(False)
 
     def _offer_indices(self, bands) -> None:
         """Only the indices the bands allow (no Thermal without a LWIR band), the choice kept."""
@@ -173,6 +211,8 @@ class MultispectralPane(QWidget):
         self.b_reflectance.setEnabled(has_dem and aligned > 0)
         self.b_show_refl.setEnabled(has_refl)
         self.c_show.setEnabled(has_refl)
+        self._offer_bands(ms.get("reflectance_bands") or [])
+        self.c_palette.setEnabled(has_refl)
         if has_refl:
             self.states["reflectance"].setText(tr("Pronta: {0} ({1})", ms["reflectance"], ", ".join(ms.get("reflectance_bands") or [])))
         else:

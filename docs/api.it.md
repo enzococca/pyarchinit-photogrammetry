@@ -126,10 +126,14 @@ riesce a fare passa al kernel CPU. `meta["dense"]["gpu"]` dice quali GPU sono st
 Multispectral, Parrot Sequoia, DJI P4 Multispectral) scrive un file per banda di ogni scatto, fianco
 a fianco; le bande si riconoscono dai suffissi (`_1`..`_6`, `_MS_G` ..., `_GRE` ...) o dal `BandName`
 dell'XMP, gli scatti di un P4 Multispectral (sei file con numeri propri) dal loro `CaptureUUID`, una
-numerazione che riparte in una seconda cartella dal nome della cartella (`detect_bands`). `add_captures(chunk, paths, reference=None)` fa della banda di riferimento (la
-rossa, se c'è) la foto di ogni scatto - una copia a 8 bit stirata, con i tag dell'originale,
-allineata e ricostruita come una foto qualsiasi - e tiene le altre bande in
-`camera.meta["bands"]`. La radiometria (`radiance_image`, `reflectance_image`) segue i tag: il
+numerazione che riparte in una seconda cartella dal nome della cartella (`detect_bands(paths,
+recursive=False)`; `looks_multispectral(paths)` dice dai primi file se una cartella contiene riprese,
+ciò su cui la finestra fa la domanda). `add_captures(chunk, paths, reference=None, recursive=False)`
+fa della banda di riferimento (la rossa, se c'è) la foto di ogni scatto - una copia a 8 bit stirata,
+con i tag dell'originale, allineata e ricostruita come una foto qualsiasi - e tiene le altre bande
+in `camera.meta["bands"]`; chiamata di nuovo con un'altra cartella del volo aggiunge alle riprese
+che ci sono (i nomi che si ripetono prendono la cartella, la banda di riferimento resta, i file già
+nel chunk restano fuori). La radiometria (`radiance_image`, `reflectance_image`) segue i tag: il
 modello MicaSense (livello di nero, guadagno ed esposizione, i coefficienti di
 `RadiometricCalibration`, il polinomio di vignettatura), altrimenti numeri normalizzati per
 esposizione e guadagno; la riflettanza viene da un pannello di calibrazione ripreso nel volo
@@ -142,10 +146,15 @@ alle bande già registrate più vicine in lunghezza d'onda (una foglia è chiara
 NIR, scura e liscia nel rosso: NIR sul rosso converge di rado, NIR sul red-edge sempre; su un P4
 Multispectral sulla macchia le correlazioni passano da 0,1-0,3 a 0,9). Il modello radiometrico DJI
 (polinomio di vignettatura, livello di nero dell'EXIF, guadagno, esposizione, correzione del
-guadagno, irradianza del sensore di luce) segue la loro guida. `build_reflectance(chunk, bands=None, resolution=None)`
+guadagno, irradianza del sensore di luce) segue la loro guida. `build_reflectance(chunk, bands=None, resolution=None, balance=True)`
 fa girare il motore dell'ortofoto sulla geometria della banda di riferimento con le bande
 registrate come valori a virgola mobile: `<dati>/multispectral/reflectance.tif`, una banda float32
-per banda spettrale, NaN dove non c'è niente. `index_raster(chunk, "NDVI")` (anche NDRE, GNDVI,
+per banda spettrale, NaN dove non c'è niente. `balance` porta prima le foto alla stessa riflettanza
+dove si sovrappongono (`balance_gains`: punti della superficie proiettati in ogni scatto e letti
+nelle sue bande, i logaritmi dei valori divisi in un valore del punto e un guadagno della foto,
+minimi quadrati per alternanza con guadagni a media zero, scarti oltre tre MAD esclusi): le strisce
+tra le linee di volo percorse in direzioni opposte spariscono, il livello medio resta; guadagni e
+loro dispersione per banda stanno in `meta["multispectral"]["balance"]`. `index_raster(chunk, "NDVI")` (anche NDRE, GNDVI,
 SAVI, NDWI, OSAVI, CIRE, Thermal, o una formula qualsiasi sui nomi delle bande) fa l'indice sulla
 stessa griglia; `export_zoning(chunk, "NDVI", "zone.gpkg", classes=3, method="quantiles" | "equal"
 | "kmeans")` lo taglia in classi (le macchie piccole assorbite dal contorno) e scrive i poligoni

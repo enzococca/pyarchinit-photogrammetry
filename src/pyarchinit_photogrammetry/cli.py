@@ -1728,6 +1728,8 @@ def multispectral(project: Path, what: str = typer.Argument(..., help="add, pane
                   method: str = typer.Option("quantiles", help="zoning: quantiles, equal or kmeans"),
                   out: Optional[Path] = typer.Option(None, help="zoning: the GeoPackage to write (default beside the project)"),
                   resolution: Optional[float] = typer.Option(None, help="reflectance: metres per pixel (the orthomosaic's)"),
+                  balance: bool = typer.Option(True, help="reflectance: bring the photos to the same reflectance where "
+                                                          "they overlap (against the strips between flight lines)"),
                   chunk: Optional[str] = None):
     """Multispectral captures: add (one file per band, side by side), the calibration panel, the
     reflectance orthomosaic (a band per band), an index raster, the zoning polygons."""
@@ -1737,10 +1739,11 @@ def multispectral(project: Path, what: str = typer.Argument(..., help="add, pane
     if what == "add":
         if source is None:
             raise typer.BadParameter("add needs the folder of the captures")
-        cams = ms.add_captures(ch, [source], reference=reference)
+        cams = ms.add_captures(ch, [source], reference=reference, recursive=True)
         doc.save()
         info = ch.meta["multispectral"]
-        typer.echo(f"{len(cams)} captures, bands {', '.join(info['bands'])}, reference {info['reference']}")
+        typer.echo(f"{len(cams)} captures added ({info['captures']} in the chunk), bands {', '.join(info['bands'])}, "
+                   f"reference {info['reference']}")
     elif what == "bands":
         info = ch.meta.get("multispectral") or {}
         typer.echo(json.dumps({k: v for k, v in info.items() if k != "registration"}, indent=1))
@@ -1756,9 +1759,11 @@ def multispectral(project: Path, what: str = typer.Argument(..., help="add, pane
         doc.save()
         typer.echo("panel factors: " + ", ".join(f"{b} {f:.4g}" for b, f in factors.items()))
     elif what == "reflectance":
-        path = ms.build_reflectance(ch, resolution=resolution, progress=print_progress)
+        path = ms.build_reflectance(ch, resolution=resolution, balance=balance, progress=print_progress)
         doc.save()
-        typer.echo(f"reflectance orthomosaic: {path}")
+        spread = (ch.meta["multispectral"].get("balance") or {}).get("spread") or {}
+        typer.echo(f"reflectance orthomosaic: {path}" + (" (photos balanced: " + ", ".join(
+            f"{b} {v * 100:.1f} %" for b, v in spread.items()) + ")" if spread else ""))
     elif what == "index":
         if formula is None and index not in ms.INDICES:
             raise typer.BadParameter(f"{index}: one of {', '.join(ms.INDICES)} or --formula")

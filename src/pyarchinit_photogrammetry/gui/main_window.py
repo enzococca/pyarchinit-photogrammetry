@@ -292,6 +292,8 @@ class MainWindow(QMainWindow):
         self.ms_pane.index_requested.connect(self.ms_compute_index)
         self.ms_pane.zoning_requested.connect(self.ms_zoning)
         self.ms_pane.qgis_requested.connect(self.open_in_qgis)
+        self.ms_pane.palette_requested.connect(self._ms_palette_changed)
+        self.ms_pane.set_palette(str(self.settings.value("ms/palette", "rdylgn")))
         self.sections_pane = SectionsPane()
         self.sections_pane.zoom_requested.connect(self._zoom_section)
         self.sections_pane.publish_requested.connect(self._publish_section)
@@ -1153,25 +1155,44 @@ class MainWindow(QMainWindow):
     def ms_add(self) -> None:
         if not self._need_chunk():
             return
-        from ..engine import multispectral as ms
-
         v = ParamDialog.ask(self, "Aggiungi riprese multispettrali", [
             Field("folder", "Cartella delle riprese", "", kind="dir"),
             Field("reference", "Banda di riferimento (da allineare)", "auto",
                   choices=[("auto", "Automatica (Red se c'è)")] + [(b, b) for b in ("Red", "Green", "NIR", "RedEdge", "Blue")])],
-            intro="Un file per banda di ogni scatto, fianco a fianco (IMG_0001_1.tif ... _5.tif, DJI_0001_MS_G.TIF ...). "
-                  "La banda di riferimento viene allineata e ricostruita come una foto qualsiasi; le altre bande le si "
-                  "sovrappongono con una omografia trovata sulle immagini.")
+            intro="Un file per banda di ogni scatto, fianco a fianco (IMG_0001_1.tif ... _5.tif, DJI_0001_MS_G.TIF ...), "
+                  "anche in sottocartelle (100MEDIA, 101MEDIA). La banda di riferimento viene allineata e ricostruita come "
+                  "una foto qualsiasi; le altre bande le si sovrappongono con una omografia trovata sulle immagini. "
+                  "Altre cartelle dello stesso volo si aggiungono una dopo l'altra.")
         if not v or not v["folder"]:
             return
+        self._add_captures([v["folder"]], None if v["reference"] == "auto" else v["reference"])
+
+    def _add_captures(self, paths, reference: str | None = None, recursive: bool = True) -> None:
+        from ..engine import multispectral as ms
 
         def job(p):
-            cams = ms.add_captures(self.chunk, [v["folder"]], reference=None if v["reference"] == "auto" else v["reference"])
-            return len(cams)
+            return len(ms.add_captures(self.chunk, paths, reference=reference, recursive=recursive))
 
-        self.run_task("Riprese multispettrali", job, lambda n: self._info(tr("Riprese multispettrali"), tr(
-            "{0} riprese aggiunte: bande {1}, riferimento {2}", n, ", ".join(self.chunk.meta["multispectral"]["bands"]),
-            self.chunk.meta["multispectral"]["reference"])), refresh=True)
+        def done(n):
+            info = self.chunk.meta["multispectral"]
+            self._show_pane(self.left_tabs, self.ms_pane)
+            self._info(tr("Riprese multispettrali"), tr("{0} riprese aggiunte ({1} nel chunk): bande {2}, riferimento {3}",
+                                                        n, info["captures"], ", ".join(info["bands"]), info["reference"]))
+
+        self.run_task("Riprese multispettrali", job, done, refresh=True)
+
+    def _ms_palette_changed(self, palette: str) -> None:
+        """The ramp of the indices: the one shown coloured again where it is, the choice kept."""
+        v = self.ortho_view
+        v.palette = palette
+        self.settings.setValue("ms/palette", palette)
+        if v.kind == "index" and v.path is not None and Path(v.path).exists():
+            t, hb, vb = v.transform(), v.horizontalScrollBar().value(), v.verticalScrollBar().value()
+            self._load_raster("index", v.path)
+            v.setTransform(t)
+            v.horizontalScrollBar().setValue(hb)
+            v.verticalScrollBar().setValue(vb)
+            v.update_detail()
 
     def ms_panel(self) -> None:
         if not self._need_chunk():
@@ -1211,11 +1232,15 @@ class MainWindow(QMainWindow):
             self._warn("Costruisci prima il DEM: l'ortofoto di riflettanza si appoggia su di esso.")
             return
         v = ParamDialog.ask(self, "Ortofoto di riflettanza", [
-            Field("resolution", "Risoluzione (m/px, vuoto = automatica)", None, kind="optional_float")],
-            intro="Un GeoTIFF a virgola mobile con una banda per banda spettrale, sulla griglia dell'ortofoto.")
+            Field("resolution", "Risoluzione (m/px, vuoto = automatica)", None, kind="optional_float"),
+            Field("balance", "Pareggia la luminosità tra le foto (toglie le strisce tra le linee di volo)", True)],
+            intro="Un GeoTIFF a virgola mobile con una banda per banda spettrale, sulla griglia dell'ortofoto. Il pareggio "
+                  "porta le foto alla stessa riflettanza dove si sovrappongono (un guadagno per foto e banda, livello "
+                  "medio conservato): le strisciate di direzione opposta non si vedono più.")
         if v is None:
             return
-        self.run_task("Ortofoto di riflettanza", lambda p: ms.build_reflectance(self.chunk, resolution=v["resolution"], progress=p),
+        self.run_task("Ortofoto di riflettanza",
+                      lambda p: ms.build_reflectance(self.chunk, resolution=v["resolution"], balance=v["balance"], progress=p),
                       lambda path: self._info(tr("Ortofoto di riflettanza"), str(path)))
 
     def ms_build_surface(self) -> None:
@@ -1252,19 +1277,26 @@ class MainWindow(QMainWindow):
                 return
             names = list(ms.get("reflectance_bands") or [])
             wanted = list(payload) if payload else ["NIR", "Red", "Green"]
-            idx = [names.index(b) + 1 for b in wanted if b in names]
-            if len(idx) < 3:
-                idx = (idx + [1, 2, 3])[:3]
-            self._load_raster("reflectance", ch.data_dir / rel, bands=tuple(idx))
-            self.statusBar().showMessage(tr("Riflettanza: bande {0}", ", ".join(names[i - 1] for i in idx)))
+            if len(wanted) == 1 and wanted[0] in names:  # one band, in grey
+                i = names.index(wanted[0]) + 1
+                self._load_raster("reflectance", ch.data_dir / rel, bands=(i, i, i))
+                self.statusBar().showMessage(tr("Riflettanza: banda {0} in scala di grigi", wanted[0]))
+            else:
+                idx = [names.index(b) + 1 for b in wanted if b in names]
+                if len(idx) < 3:
+                    idx = (idx + [1, 2, 3])[:3]
+                self._load_raster("reflectance", ch.data_dir / rel, bands=tuple(idx))
+                self.statusBar().showMessage(tr("Riflettanza: bande {0}", ", ".join(names[i - 1] for i in idx)))
         elif kind == "index":
             info = (ms.get("indices") or {}).get(payload or "")
             if not info:
                 self._warn("Calcola prima l'indice.")
                 return
+            self.ortho_view.palette = self.ms_pane.palette()
             self._load_raster("index", ch.data_dir / info["file"])
             lo, hi = self.ortho_view._dem_range or (-1.0, 1.0)
-            self.statusBar().showMessage(tr("{0}: colori da {1} (rosso) a {2} (verde)", payload, f"{lo:.2f}", f"{hi:.2f}"))
+            self.statusBar().showMessage(tr("{0}: colori da {1} a {2} ({3})", payload, f"{lo:.2f}", f"{hi:.2f}",
+                                            self.ms_pane.palette_label()))
         elif kind == "zones":
             z = (ms.get("zoning") or {}).get(payload or "")
             if not z or not z.get("raster"):
@@ -2191,10 +2223,29 @@ class MainWindow(QMainWindow):
             paths, _ = QFileDialog.getOpenFileNames(self, tr("Foto"), self._last_dir(),
                                                     tr("Immagini (*.jpg *.jpeg *.png *.tif *.tiff *.JPG *.JPEG *.PNG "
                                                        "*.TIF)"))
-        if paths:
-            self._started = True
-            self.run_task("Aggiunta foto", lambda p: self.chunk.add_photos(paths, recursive=folder),
-                          lambda cams: self.statusBar().showMessage(tr("{0} foto aggiunte", len(cams)), 8000))
+        if not paths:
+            return
+        self._started = True
+        # the files of a multispectral camera (a band per file): offered as captures, with the
+        # pane that walks through their steps - as photos the bands would be aligned as if they
+        # were different views
+        from ..engine import multispectral as ms
+
+        sniff = ms.looks_multispectral(paths, recursive=folder)
+        if sniff:
+            r = choice(self, "question", "Riprese multispettrali?",
+                       tr("Le foto sembrano riprese di una camera multispettrale: circa {0} scatti con le bande {1}. "
+                          "Aggiungerle come riprese multispettrali? La banda di riferimento viene allineata come foto, "
+                          "le altre bande le si sovrappongono; il pannello Multispettrale guida i passi.",
+                          sniff["captures"], ", ".join(sniff["bands"])),
+                       [tr("Riprese multispettrali"), tr("Foto normali")])
+            if r is None:
+                return
+            if r == 0:
+                self._add_captures(paths, recursive=folder)
+                return
+        self.run_task("Aggiunta foto", lambda p: self.chunk.add_photos(paths, recursive=folder),
+                      lambda cams: self.statusBar().showMessage(tr("{0} foto aggiunte", len(cams)), 8000))
 
     def add_video(self) -> None:
         """Workflow > Aggiungi video: frames chosen for the reconstruction, GPS from DJI subtitles."""

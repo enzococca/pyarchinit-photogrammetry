@@ -42,10 +42,21 @@ environment diagnosis and the log folder. *File > Pagina iniziale* brings it bac
 The *Multispettrale* tab of the project dock stays open and lists the seven steps in order, each
 with its state and its button: the captures, the alignment, the surface (depth maps, dense cloud
 and DEM in one step with the default choices), the calibration panel, the reflectance orthomosaic
-(*Mostra* in false colour NIR-Red-Green or in true colour), the index (NDVI, NDRE, GNDVI, SAVI, NDWI,
-OSAVI, CIRE, Thermal or an own formula over the band names, computed and shown on its ramp, red to
-green) and the zoning (classes and method, the polygons in a GeoPackage, shown by class with the
-polygons as a layer). The products appear in the project's tree under *Multispettrale* (the
+(*Mostra* in false colour NIR-Red-Green, in true colour, or one band on its own in greyscale: NIR,
+red edge...), the index (NDVI, NDRE, GNDVI, SAVI, NDWI, OSAVI, CIRE, Thermal or an own formula over
+the band names, computed and shown on the colour ramp chosen beside it - red-yellow-green, greyscale,
+viridis or turbo; the choice recolours the index shown and is remembered) and the zoning (classes
+and method, the polygons in a GeoPackage, shown by class with the polygons as a layer).
+
+The files of a multispectral camera are recognised when you add photos (*Foto* or *Aggiungi
+cartella*): the window offers to add them as captures and opens this pane, so the bands are not
+aligned as if they were different views. A flight split over several folders (the rolls of a
+camera, 100MEDIA and 101MEDIA, whose numbering starts again) is added folder after folder, or as
+the parent folder in one go: names that repeat take their folder as a prefix, files already in the
+chunk are left out. The reflectance orthomosaic balances the photos by default (*Pareggia la
+luminosità tra le foto*): a gain per photo and band, found where the photos overlap, takes away
+the strips between flight lines flown in opposite directions (the sun and view geometry) while
+keeping the mean level; untick it for the raw reflectance. The products appear in the project's tree under *Multispettrale* (the
 reflectance orthomosaic, every index, every zoning) and open from there; *Apri in QGIS* makes the
 QGIS project with the reflectance in false colour, the indices with their ramp, the zones as raster
 and as polygons, besides the orthomosaic, the DEM and the drawings.
