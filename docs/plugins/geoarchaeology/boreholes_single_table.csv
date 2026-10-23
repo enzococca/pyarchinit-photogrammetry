@@ -1,0 +1,31 @@
+hole_id,kind,easting,northing,elevation,depth,from,to,unit,description,colour,lithology
+S4,auger,608.00,897.00,287.533,3.80,0.00,0.29,US 1,topsoil (humus),10YR 3/2,organic
+S4,,,,,,0.29,1.40,US 2,colluvial clayey silt with mudbrick fragments and rolled pottery,7.5YR 5/4,silt
+S4,,,,,,1.40,2.09,US 2,mudbrick collapse and colluvium,7.5YR 6/4,rubble
+S4,,,,,,2.09,2.63,US 4,"mudbrick, ash, beaten floors",5YR 5/4,mudbrick
+S4,,,,,,2.63,3.32,US 5,sterile yellowish-brown clay,10YR 6/6,clay
+S4,,,,,,3.32,3.80,US 5,"silty clay with carbonate concretions, sterile",10YR 7/4,clay
+S9,auger,607.00,680.00,,3.00,0.00,0.35,US 1,topsoil (humus),10YR 3/2,organic
+S9,,,,,,0.35,1.85,US 5,sterile yellowish-brown clay,10YR 6/6,clay
+S9,,,,,,1.85,3.00,US 5,"silty clay with carbonate concretions, sterile",10YR 7/4,clay
+S1,core,611.00,799.00,307.130,12.00,0.00,0.34,US 1,topsoil (humus),10YR 3/2,organic
+S1,,,,,,0.34,1.31,US 2,mudbrick collapse and colluvium,7.5YR 6/4,rubble
+S1,,,,,,1.31,2.43,US 3,"grey silty clay, charcoal",10YR 5/2,clay
+S1,,,,,,2.43,3.84,US 3,silty clay with mudbrick and Iron Age pottery,10YR 5/3,clay
+S1,,,,,,3.84,5.30,US 3,"grey silty clay, charcoal",10YR 5/2,clay
+S1,,,,,,5.30,6.14,US 3,ash and charcoal layer (hearth),10YR 5/1,ash
+S1,,,,,,6.14,7.49,US 3,"grey silty clay, charcoal",10YR 5/2,clay
+S1,,,,,,7.49,8.81,US 4,"mudbrick, ash, beaten floors",5YR 5/4,mudbrick
+S1,,,,,,8.81,8.90,US 4,reddish silty clay with mudbrick and Bronze Age pottery,5YR 4/4,clay
+S1,,,,,,9.10,10.25,US 4,reddish silty clay with mudbrick and Bronze Age pottery,5YR 4/4,clay
+S1,,,,,,10.25,12.00,US 4,"mudbrick, ash, beaten floors",5YR 5/4,mudbrick
+S13,core,652.00,797.00,301.867,12.00,0.00,0.38,US 1,topsoil (humus),10YR 3/2,organic
+S13,,,,,,0.38,1.72,US 2,mudbrick collapse and colluvium,7.5YR 6/4,rubble
+S13,,,,,,1.72,2.67,US 3,"grey silty clay, charcoal",10YR 5/2,clay
+S13,,,,,,2.67,4.00,US 3,ash and charcoal layer (hearth),10YR 5/1,ash
+S13,,,,,,4.00,5.03,US 3,"grey silty clay, charcoal",10YR 5/2,clay
+S13,,,,,,5.03,6.66,US 4,"mudbrick, ash, beaten floors",5YR 5/4,mudbrick
+S13,,,,,,6.66,8.09,US 4,collapse of reddish mudbricks,5YR 6/4,rubble
+S13,,,,,,8.09,9.44,US 4,"mudbrick, ash, beaten floors",5YR 5/4,mudbrick
+S13,,,,,,9.44,10.38,US 4,grey ash with bone and charcoal,10YR 5/1,ash
+S13,,,,,,10.38,12.00,US 4,"mudbrick, ash, beaten floors",5YR 5/4,mudbrick

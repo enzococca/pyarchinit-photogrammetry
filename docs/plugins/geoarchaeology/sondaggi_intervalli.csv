@@ -1,0 +1,118 @@
+sondaggio;da;a;us;descrizione;colore
+S1;0,00;0,34;US 1;terreno vegetale (humus);10YR 3/2
+S1;0,34;1,31;US 2;crollo e colluvio di mattoni;7.5YR 6/4
+S1;1,31;2,43;US 3;argilla limosa grigia, carboni;10YR 5/2
+S1;2,43;3,84;US 3;argilla limosa con mattone crudo e ceramica dell'età del Ferro;10YR 5/3
+S1;3,84;5,30;US 3;argilla limosa grigia, carboni;10YR 5/2
+S1;5,30;6,14;US 3;livello di cenere e carboni (focolare);10YR 5/1
+S1;6,14;7,49;US 3;argilla limosa grigia, carboni;10YR 5/2
+S1;7,49;8,81;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S1;8,81;8,90;US 4;argilla limosa rossastra con mattone crudo e ceramica dell'età del Bronzo;5YR 4/4
+S1;9,10;10,25;US 4;argilla limosa rossastra con mattone crudo e ceramica dell'età del Bronzo;5YR 4/4
+S1;10,25;12,00;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S2;0,00;0,33;US 1;terreno vegetale (humus);10YR 3/2
+S2;0,33;1,06;US 2;crollo e colluvio di mattoni;7.5YR 6/4
+S2;1,06;2,38;US 3;argilla limosa grigia, carboni;10YR 5/2
+S2;2,38;3,23;US 3;argilla limosa con mattone crudo e ceramica dell'età del Ferro;10YR 5/3
+S2;3,23;4,64;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S2;4,64;5,59;US 4;crollo di mattoni crudi rossastri;5YR 6/4
+S2;5,59;7,26;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S2;7,26;8,52;US 4;cenere grigia con ossa e carboni;10YR 5/1
+S2;8,52;9,51;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S2;9,51;10,96;US 4;argilla limosa rossastra con mattone crudo e ceramica dell'età del Bronzo;5YR 4/4
+S2;10,96;12,00;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S3;0,00;0,31;US 1;terreno vegetale (humus);10YR 3/2
+S3;0,31;1,41;US 2;crollo e colluvio di mattoni;7.5YR 6/4
+S3;1,41;2,56;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S3;2,56;4,33;US 4;cenere grigia con ossa e carboni;10YR 5/1
+S3;4,33;5,29;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S3;5,29;6,84;US 4;argilla limosa rossastra con mattone crudo e ceramica dell'età del Bronzo;5YR 4/4
+S3;6,84;7,48;US 5;argilla bruno-gialla sterile;10YR 6/6
+S3;7,48;7,90;US 5;argilla limosa con concrezioni carbonatiche, sterile;10YR 7/4
+S4;0,00;0,29;US 1;terreno vegetale (humus);10YR 3/2
+S4;0,29;1,40;US 2;limo argilloso colluviale con frammenti di mattone crudo e ceramica fluitata;7.5YR 5/4
+S4;1,40;2,09;US 2;crollo e colluvio di mattoni;7.5YR 6/4
+S4;2,09;2,63;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S4;2,63;3,32;US 5;argilla bruno-gialla sterile;10YR 6/6
+S4;3,32;3,80;US 5;argilla limosa con concrezioni carbonatiche, sterile;10YR 7/4
+S5;0,00;0,30;US 1;terreno vegetale (humus);10YR 3/2
+S5;0,30;1,25;US 2;crollo e colluvio di mattoni;7.5YR 6/4
+S5;1,25;2,35;US 5;argilla bruno-gialla sterile;10YR 6/6
+S5;2,35;3,00;US 5;argilla limosa con concrezioni carbonatiche, sterile;10YR 7/4
+S6;0,00;0,35;US 1;terreno vegetale (humus);10YR 3/2
+S6;0,35;0,95;US 2;crollo e colluvio di mattoni;7.5YR 6/4
+S6;0,95;1,78;US 3;argilla limosa grigia, carboni;10YR 5/2
+S6;1,78;3,10;US 3;argilla limosa con mattone crudo e ceramica dell'età del Ferro;10YR 5/3
+S6;3,10;4,19;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S6;4,19;5,86;US 4;cenere grigia con ossa e carboni;10YR 5/1
+S6;5,86;6,96;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S6;6,96;8,06;US 4;argilla limosa rossastra con mattone crudo e ceramica dell'età del Bronzo;5YR 4/4
+S6;8,06;9,50;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S6;9,50;11,00;US 4;crollo di mattoni crudi rossastri;5YR 6/4
+S7;0,00;0,36;US 1;terreno vegetale (humus);10YR 3/2
+S7;0,36;1,34;US 2;limo argilloso colluviale con frammenti di mattone crudo e ceramica fluitata;7.5YR 5/4
+S7;1,34;2,67;US 2;crollo e colluvio di mattoni;7.5YR 6/4
+S7;2,67;3,57;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S7;3,57;4,87;US 4;crollo di mattoni crudi rossastri;5YR 6/4
+S7;4,87;5,33;US 5;argilla bruno-gialla sterile;10YR 6/6
+S7;5,33;6,00;US 5;argilla limosa con concrezioni carbonatiche, sterile;10YR 7/4
+S8;0,00;0,36;US 1;terreno vegetale (humus);10YR 3/2
+S8;0,36;0,99;US 2;crollo e colluvio di mattoni;7.5YR 6/4
+S8;0,99;1,81;US 5;argilla bruno-gialla sterile;10YR 6/6
+S8;1,81;3,00;US 5;argilla limosa con concrezioni carbonatiche, sterile;10YR 7/4
+S9;0,00;0,35;US 1;terreno vegetale (humus);10YR 3/2
+S9;0,35;1,85;US 5;argilla bruno-gialla sterile;10YR 6/6
+S9;1,85;3,00;US 5;argilla limosa con concrezioni carbonatiche, sterile;10YR 7/4
+S10;0,00;0,25;US 1;terreno vegetale (humus);10YR 3/2
+S10;0,25;1,40;US 5;argilla bruno-gialla sterile;10YR 6/6
+S10;1,40;3,00;US 5;argilla limosa con concrezioni carbonatiche, sterile;10YR 7/4
+S11;0,00;0,29;US 1;terreno vegetale (humus);10YR 3/2
+S11;0,29;1,45;US 2;limo argilloso colluviale con frammenti di mattone crudo e ceramica fluitata;7.5YR 5/4
+S11;1,45;2,36;US 2;crollo e colluvio di mattoni;7.5YR 6/4
+S11;2,36;2,42;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S11;2,42;3,08;US 5;argilla bruno-gialla sterile;10YR 6/6
+S11;3,08;3,60;US 5;argilla limosa con concrezioni carbonatiche, sterile;10YR 7/4
+S12;0,00;0,33;US 1;terreno vegetale (humus);10YR 3/2
+S12;0,33;0,86;US 2;crollo e colluvio di mattoni;7.5YR 6/4
+S12;0,86;1,85;US 3;argilla limosa grigia, carboni;10YR 5/2
+S12;1,85;3,15;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S12;3,15;4,17;US 4;argilla limosa rossastra con mattone crudo e ceramica dell'età del Bronzo;5YR 4/4
+S12;4,17;5,65;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S12;5,65;7,02;US 4;crollo di mattoni crudi rossastri;5YR 6/4
+S12;7,02;7,92;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S12;7,92;9,34;US 4;cenere grigia con ossa e carboni;10YR 5/1
+S12;9,34;10,74;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S12;10,74;11,33;US 5;argilla bruno-gialla sterile;10YR 6/6
+S12;11,33;12,00;US 5;argilla limosa con concrezioni carbonatiche, sterile;10YR 7/4
+S13;0,00;0,38;US 1;terreno vegetale (humus);10YR 3/2
+S13;0,38;1,72;US 2;crollo e colluvio di mattoni;7.5YR 6/4
+S13;1,72;2,67;US 3;argilla limosa grigia, carboni;10YR 5/2
+S13;2,67;4,00;US 3;livello di cenere e carboni (focolare);10YR 5/1
+S13;4,00;5,03;US 3;argilla limosa grigia, carboni;10YR 5/2
+S13;5,03;6,66;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S13;6,66;8,09;US 4;crollo di mattoni crudi rossastri;5YR 6/4
+S13;8,09;9,44;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S13;9,44;10,38;US 4;cenere grigia con ossa e carboni;10YR 5/1
+S13;10,38;12,00;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S14;0,00;0,41;US 1;terreno vegetale (humus);10YR 3/2
+S14;0,41;2,13;US 2;limo argilloso colluviale con frammenti di mattone crudo e ceramica fluitata;7.5YR 5/4
+S14;2,13;3,65;US 2;crollo e colluvio di mattoni;7.5YR 6/4
+S14;3,65;3,79;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S14;3,79;4,42;US 5;argilla bruno-gialla sterile;10YR 6/6
+S14;4,42;4,90;US 5;argilla limosa con concrezioni carbonatiche, sterile;10YR 7/4
+S15;0,00;0,35;US 1;terreno vegetale (humus);10YR 3/2
+S15;0,35;1,00;US 2;crollo e colluvio di mattoni;7.5YR 6/4
+S15;1,00;2,05;US 5;argilla bruno-gialla sterile;10YR 6/6
+S15;2,05;3,00;US 5;argilla limosa con concrezioni carbonatiche, sterile;10YR 7/4
+S16;0,00;0,25;US 1;terreno vegetale (humus);10YR 3/2
+S16;0,25;1,57;US 2;crollo e colluvio di mattoni;7.5YR 6/4
+S16;1,57;2,23;US 5;argilla bruno-gialla sterile;10YR 6/6
+S16;2,23;3,10;US 5;argilla limosa con concrezioni carbonatiche, sterile;10YR 7/4
+S17;0,00;0,34;US 1;terreno vegetale (humus);10YR 3/2
+S17;0,34;1,31;US 2;limo argilloso colluviale con frammenti di mattone crudo e ceramica fluitata;7.5YR 5/4
+S17;1,31;2,83;US 2;crollo e colluvio di mattoni;7.5YR 6/4
+S17;2,83;3,20;US 4;mattone crudo, cenere, battuti;5YR 5/4
+S17;3,20;4,20;US 5;argilla bruno-gialla sterile;10YR 6/6
+S18;0,00;0,30;US 1;terreno vegetale (humus);10YR 3/2
+S18;0,30;1,85;US 2;crollo e colluvio di mattoni;7.5YR 6/4
+S18;1,85;3,20;US 4;mattone crudo, cenere, battuti;5YR 5/4

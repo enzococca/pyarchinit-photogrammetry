@@ -39,6 +39,11 @@ library on the same engine, running on the CPU (Apple Silicon included). GPL-2.0
     Add menu actions, commands and export formats; the
     [plugin repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins).
 
+-   :material-book-open-variant: **[Plugin guides](plugins/guides.md)**
+
+    Step by step for archaeologists: the data, the dialogs and the results of each plugin, starting
+    with geoarchaeology (boreholes, contact surfaces, sections, a 3D model of the units).
+
 </div>
 
 ![The DEM view with units from PyArchInit, contour lines and a section](img/gui-layers.png)

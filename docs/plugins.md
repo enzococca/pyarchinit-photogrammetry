@@ -7,6 +7,9 @@ Plugins are collected in the repository
 [pyarchinit-photogrammetry-plugins](https://github.com/enzococca/pyarchinit-photogrammetry-plugins),
 whose index the program reads.
 
+This page is about installing and writing plugins. How to use them step by step - the data they
+need, the dialogs, how to read the results - is in the [Plugin guides](plugins/guides.md).
+
 ## Installing plugins
 
 * In the window: *Strumenti > Plugin...* lists the plugins installed (active, disabled, or the error

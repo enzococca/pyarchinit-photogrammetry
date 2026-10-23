@@ -7,6 +7,9 @@ impostazioni proprie. I plugin sono raccolti nel repository
 [pyarchinit-photogrammetry-plugins](https://github.com/enzococca/pyarchinit-photogrammetry-plugins),
 di cui il programma legge l'indice.
 
+Questa pagina spiega come installare e scrivere i plugin. Come usarli passo per passo - i dati che
+servono, i dialoghi, come leggere i risultati - sta nelle [Guide ai plugin](plugins/guides.md).
+
 ## Installare i plugin
 
 * Nella finestra: *Strumenti > Plugin...* elenca i plugin installati (attivi, disattivati, o l'errore

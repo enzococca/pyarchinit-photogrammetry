@@ -39,6 +39,11 @@ Python sullo stesso motore, che gira sulla CPU (anche Apple Silicon). Licenza GP
     Azioni di menu, comandi e formati di esportazione aggiunti; il
     [repository dei plugin](https://github.com/enzococca/pyarchinit-photogrammetry-plugins).
 
+-   :material-book-open-variant: **[Guide ai plugin](plugins/guides.md)**
+
+    Passo per passo per archeologi: i dati, i dialoghi e i risultati di ogni plugin, a cominciare dalla
+    geoarcheologia (sondaggi, superfici di contatto, sezioni, un modello 3D delle unità).
+
 </div>
 
 ![La vista del DEM con le US da PyArchInit, curve di livello e una sezione](img/gui-layers.png)

@@ -61,6 +61,9 @@ plugins:
             Home: Home
             Installation: Installazione
             Tutorials: Tutorial
+            Plugin guides: Guide ai plugin
+            Overview: Panoramica
+            Geoarchaeology: Geoarcheologia
             Guide: Guida
             Desktop interface: Interfaccia
             Python API: API Python
@@ -101,6 +104,9 @@ nav:
   - Tutorials:
       - tutorials/index.md
       - tutorials/tell.md
+  - Plugin guides:
+      - Overview: plugins/guides.md
+      - Geoarchaeology: plugins/geoarchaeology.md
   - Guide:
       - Desktop interface: gui.md
       - Python API: api.md
