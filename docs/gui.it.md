@@ -253,6 +253,26 @@ Dalla riga di comando `ppg update` dice se esiste una versione più nuova e `ppg
   pianta alla sua quota) e, in *Riferimenti*, il tasto destro *Sposta nella vista 3D* ricolloca un
   marker con un clic sul modello o sulla nuvola (per i marker messi in 3D o sull'ortofoto; quelli
   misurati nelle foto si spostano nelle foto).
+* **Modelli 3D di altri programmi** (*File > Importa > Modello 3D (OBJ, PLY, GLB)*): una mesh fatta
+  altrove (OBJ con il suo MTL e le texture, PLY con colori e pagine di texture come le scrivono Metashape e
+  MeshLab, glTF/GLB, STL, OFF) diventa il modello del chunk attivo o di un nuovo chunk, con i colori dei
+  vertici e le texture (ogni immagine di texture una pagina). Coordinate: nel sistema del chunk (i modelli
+  esportati da questo programma, da Metashape o da CloudCompare nello stesso CRS tornano al loro posto; il
+  GLB di questo programma ritrova l'origine nel file JSON accanto), oppure interne del chunk (il suo
+  `model.ply` modificato in MeshLab o Blender); *Scala* per i file in millimetri, *Spostamento* per i file
+  esportati attorno a un'origine spostata, *Asse verticale* Y per il glTF (automatico). Un chunk vuoto o
+  nuovo prende le coordinate del modello (un'origine tonda sotto di esso conserva i millimetri) e il CRS
+  indicato. Il modello attuale resta tra le versioni; un modello lontano dai dati del chunk viene
+  segnalato.
+* **Tagliare il modello** (*Taglia* nella vista 3D, oppure *Flusso di lavoro > Pulizia e confidenza >
+  Taglia il modello con un piano*): il piano è orizzontale (un clic alla quota), verticale (due clic: il
+  piano passa per la loro linea in pianta), per tre punti cliccati, inclinato (immersione e
+  inclinazione), lungo una sezione del pannello *Sezioni* o per i marker selezionati. Tieni la parte sopra
+  o sotto (sopra = a sinistra della linea dal punto 1 al punto 2 per un piano verticale), oppure una fetta
+  di uno spessore, come modello del chunk (quello di prima tra le versioni) o in un file; oppure salva le
+  due parti, o una serie di fette parallele a un passo dato, come PLY (o OBJ con la texture) in coordinate
+  del sistema del chunk. Le facce attraversate dal piano vengono tagliate sul piano, con colori, confidenza
+  e coordinate di texture interpolati.
 * **Scansioni laser** (*File > Importa > Scansioni laser (E57, PTX)*): una o più scansioni diventano
   la nuvola densa di un nuovo chunk; *Flusso di lavoro > Allinea chunk* (punti, senza scala) le porta
   sul chunk delle foto quando non sono nel suo CRS, *Colori dalle foto (scansioni)* le colora con le
@@ -593,7 +613,8 @@ fine.
 | Texture | *Costruisci texture*: *Correzione colore* (esposizione delle foto e vignettatura, misurate la prima volta), *Mappatura* automatica, ortofoto adattiva (terreno dall'alto: la texture è l'ortofoto del modello, fatta dal motore dell'ortofoto a tasselli; muri e sezioni hanno celle proprie in una fascia in basso) o generica (ogni faccia una cella propria: oggetti e modelli piccoli). *Dimensione texture* 16384 o 32768 divide la texture in 4 o 16 pagine di 8192 pixel (tasselli della pianta, o gruppi di facce vicine), come fa Metashape: ogni pagina resta leggibile da schede grafiche e visualizzatori. La texture è un'immagine (o una per pagina) accanto a `model.ply`, che porta le coordinate texture di ogni faccia; la vista *Modello con texture* mostra l'intero modello. *File > Importa > Modello e texture dal progetto Metashape* rilegge il modello del `.psx` con colori, confidenza e texture (il modello in uso viene conservato come versione) | `chunk.build_texture(size, mapping="auto")`; `integrations.metashape.reimport_model(chunk)`; `io.mesh_ply.read_mesh`, `write_mesh` |
 | Ritaglio | *Ritaglio* tra gli strumenti di disegno (o *File > Esporta > Ritagliati...*, *Pulizia e confidenza > Ritaglia*): trascina un riquadro o clicca un poligono (doppio clic per chiudere) sull'ortofoto o sul DEM; oppure seleziona un poligono (un'unità) e *Ritaglia o esporta con il poligono selezionato*. Poi scegli i prodotti: esportati ritagliati in una cartella (DEM e ortofoto con nodata o trasparenti fuori dal poligono, modello PLY con colori, confidenza e coordinate in doppia precisione o OBJ con la texture, nuvola LAS con classi e confidenza, il poligono come GeoJSON) o ritagliati nel progetto con gli originali conservati come versioni; modello e nuvola si possono anche limitare in altezza | `ppg crop scavo.ppg --polygon "x1,y1 x2,y2 x3,y3" --out ritagli` (o `--bbox`, `--wkt`, `--geojson`, `--in-project`); `chunk.export_dem(path, region=)`, `export_orthomosaic`, `export_model`, `export_point_cloud`, `crop_dem`, `crop_orthomosaic`, `crop_model`, `crop_point_cloud(region=)` |
 | QGIS | *QGIS > Apri in QGIS (collegamento dal vivo)*: vedi [integrations.md](integrations.md) | `io.qgis_link.export_layers`, `build_project` |
-| Importazione | *File > Importa*: Metashape `.psx`, WebODM/ODM, sessioni Photo3D: vedi [integrations.md](integrations.md) | `ppg import-metashape`, `ppg import-webodm`, `ppg import-photo3d`, `ppg photo3d-job` |
+| Taglio | *Taglia* nella vista 3D (un clic: piano orizzontale; due clic: piano verticale; tre clic: un piano qualsiasi; oppure i valori) o *Pulizia e confidenza > Taglia il modello con un piano*: una parte o una fetta come modello o in un file, le due parti o una serie di fette in file | `ppg cut-model scavo.ppg --horizontal 101.5 --keep below` (o `--vertical X1,Y1,X2,Y2`, `--points ...`, `--plane X,Y,Z,NX,NY,NZ`, `--dip X,Y,Z,IMMERSIONE,INCLINAZIONE`; `--keep above/below/slab/both/series`, `--thickness`, `--step`, `--out`); `chunk.cut_model(point, normal, keep=...)`, `engine.mesh_cut.clip`, `slab`, `series`, `horizontal`, `vertical`, `through_points`, `dipping` |
+| Importazione | *File > Importa*: modelli 3D (OBJ, PLY, GLB, STL...) come modello di un chunk; Metashape `.psx`, WebODM/ODM, sessioni Photo3D: vedi [integrations.md](integrations.md) | `ppg import-model scavo.ppg modello.obj [--new-chunk NOME] [--internal] [--scale] [--offset X,Y,Z] [--up y] [--crs EPSG:...]`; `chunk.import_model(path, ...)`, `io.mesh_import.import_model_chunk(doc, path)`; `ppg import-metashape`, `ppg import-webodm`, `ppg import-photo3d`, `ppg photo3d-job` |
 
 Tutto ciò che fa l'interfaccia è disponibile anche nella console (*Console Python*: `doc`, `chunk`,
 `ppg`) e negli script (`ppg run script.py --project scavo.ppg`). Vedi [api.md](api.md) e

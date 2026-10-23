@@ -251,6 +251,24 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   height), and in *Riferimenti* the right click *Sposta nella vista 3D* places a marker again by a click
   on the model or the cloud (for markers placed in 3D or on the orthophoto; those measured in the photos
   are moved in the photos).
+* **3D models of other programs** (*File > Importa > Modello 3D (OBJ, PLY, GLB)*): a mesh made elsewhere
+  (OBJ with its MTL and textures, PLY with colours and texture pages as Metashape and MeshLab write them,
+  glTF/GLB, STL, OFF) becomes the model of the active chunk or of a new chunk, with its vertex colours and
+  textures (every texture image a page). Coordinates: in the system of the chunk (models exported by this
+  program, Metashape or CloudCompare in the same CRS come back in place; the GLB of this program finds its
+  origin in the JSON file beside it), or internal to the chunk (its own `model.ply` edited in MeshLab or
+  Blender); *Scala* for files in millimetres, *Spostamento* for files exported around a shifted origin,
+  *Asse verticale* Y for glTF (automatic). An empty or new chunk takes the coordinates of the model (a
+  round origin under it keeps the millimetres) and the CRS given. The current model stays among the
+  versions; a model that lies far from the data of the chunk is reported.
+* **Cutting the model** (*Taglia* in the 3D view, or *Flusso di lavoro > Pulizia e confidenza > Taglia il
+  modello con un piano*): the plane is horizontal (a click at the height), vertical (two clicks: the plane
+  through their line in plan), through three clicked points, dipping (dip direction and dip), along a
+  section of the *Sezioni* pane or through the selected markers. Keep the part above or below (above =
+  left of the line from point 1 to point 2 for a vertical plane), or a slice of a thickness, as the model
+  of the chunk (the previous one among the versions) or as a file; or save both parts, or a series of
+  parallel slices every given step, as PLY (or OBJ with the texture) in world coordinates. Faces crossed
+  by the plane are cut on it, with colours, confidence and texture coordinates interpolated.
 * **Laser scans** (*File > Importa > Scansioni laser (E57, PTX)*): one or more scans become the dense cloud
   of a new chunk; *Flusso di lavoro > Allinea chunk* (points, without scale) brings them onto the chunk of
   the photos when they are not in its CRS, *Colori dalle foto (scansioni)* colours them from its
@@ -572,7 +590,8 @@ height 12 cm, wall 6 mm). The demo window lets you choose which project to open 
 | Texture | *Costruisci texture*: *Correzione colore* (exposure of the photos and vignetting, measured the first time), *Mappatura* automatic, adaptive orthophoto (terrain from the air: the texture is the orthophoto of the model, made by the tiled orthophoto engine; walls and sections get their own cells in a band below) or generic (each face its own cell: objects and small models). *Dimensione texture* 16384 or 32768 splits the texture into 4 or 16 pages of 8192 pixels (tiles of the plan, or groups of nearby faces), as Metashape does: every page stays readable by graphics cards and viewers. The texture is an image (or a page each) beside `model.ply`, which carries the texture coordinates of each face; the view *Modello con texture* shows the whole model. *File > Importa > Modello e texture dal progetto Metashape* reads the model of the `.psx` again with its colours, confidence and texture (the model in use is kept as a version) | `chunk.build_texture(size, mapping="auto")`; `integrations.metashape.reimport_model(chunk)`; `io.mesh_ply.read_mesh`, `write_mesh` |
 | Crop | *Ritaglio* in the drawing tools (or *File > Esporta > Ritagliati...*, *Pulizia e confidenza > Ritaglia*): drag a box or click a polygon (double click to close) on the orthophoto or the DEM; or select a polygon (a unit) and *Ritaglia o esporta con il poligono selezionato*. Then choose the products: exported cut to a folder (DEM and orthophoto with no data or transparent outside the polygon, model PLY with colours, confidence and double-precision coordinates or OBJ with the texture, cloud LAS with classes and confidence, the polygon as GeoJSON) or cut in the project with the originals kept as versions; model and cloud can also be limited in height | `ppg crop scavo.ppg --polygon "x1,y1 x2,y2 x3,y3" --out ritagli` (or `--bbox`, `--wkt`, `--geojson`, `--in-project`); `chunk.export_dem(path, region=)`, `export_orthomosaic`, `export_model`, `export_point_cloud`, `crop_dem`, `crop_orthomosaic`, `crop_model`, `crop_point_cloud(region=)` |
 | QGIS | *QGIS > Apri in QGIS (collegamento dal vivo)*: see [integrations.md](integrations.md) | `io.qgis_link.export_layers`, `build_project` |
-| Import | *File > Importa*: Metashape `.psx`, WebODM/ODM, Photo3D sessions: see [integrations.md](integrations.md) | `ppg import-metashape`, `ppg import-webodm`, `ppg import-photo3d`, `ppg photo3d-job` |
+| Cut | *Taglia* in the 3D view (one click: horizontal plane; two clicks: vertical plane; three clicks: any plane; or values) or *Pulizia e confidenza > Taglia il modello con un piano*: one side or a slice as the model or a file, both sides or a series of slices as files | `ppg cut-model scavo.ppg --horizontal 101.5 --keep below` (or `--vertical X1,Y1,X2,Y2`, `--points ...`, `--plane X,Y,Z,NX,NY,NZ`, `--dip X,Y,Z,DIPDIR,DIP`; `--keep above/below/slab/both/series`, `--thickness`, `--step`, `--out`); `chunk.cut_model(point, normal, keep=...)`, `engine.mesh_cut.clip`, `slab`, `series`, `horizontal`, `vertical`, `through_points`, `dipping` |
+| Import | *File > Importa*: 3D models (OBJ, PLY, GLB, STL...) as the model of a chunk; Metashape `.psx`, WebODM/ODM, Photo3D sessions: see [integrations.md](integrations.md) | `ppg import-model scavo.ppg modello.obj [--new-chunk NAME] [--internal] [--scale] [--offset X,Y,Z] [--up y] [--crs EPSG:...]`; `chunk.import_model(path, ...)`, `io.mesh_import.import_model_chunk(doc, path)`; `ppg import-metashape`, `ppg import-webodm`, `ppg import-photo3d`, `ppg photo3d-job` |
 
 Everything the interface does is also available in the console (*Console Python*: `doc`, `chunk`,
 `ppg`) and in scripts (`ppg run script.py --project scavo.ppg`). See [api.md](api.md) and

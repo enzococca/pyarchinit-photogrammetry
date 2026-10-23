@@ -92,6 +92,105 @@ def import_scans_cmd(project: Path, files: list[Path], label: Optional[str] = No
     typer.echo(f"{ch.label}: {len(ch.point_cloud)} points from {len(ch.meta['scans'])} scans")
 
 
+@app.command("import-model")
+def import_model_cmd(project: Path, file: Path,
+                     chunk: Optional[str] = typer.Option(None, help="chunk to import into (default: the active one)"),
+                     new_chunk: Optional[str] = typer.Option(None, "--new-chunk", help="put the model in a new chunk "
+                                                             "with this name"),
+                     internal: bool = typer.Option(False, help="the file is in the internal frame of the chunk "
+                                                   "(its model.ply edited elsewhere)"),
+                     up: str = typer.Option("auto", help="vertical axis of the file: auto (Y for glTF), z or y"),
+                     scale: float = typer.Option(1.0, help="multiplies the coordinates of the file (0.001 for mm)"),
+                     offset: Optional[str] = typer.Option(None, help="X,Y,Z added after the scale (default: the "
+                                                          "origin of a GLB of this program, else 0)"),
+                     crs: Optional[str] = typer.Option(None, help="CRS of a new or empty chunk (e.g. EPSG:32633)"),
+                     overwrite: bool = typer.Option(False, help="replace the current model instead of keeping it "
+                                                    "as a version"),
+                     name: Optional[str] = typer.Option(None, help="name of the new version of the model")):
+    """A mesh of another program (OBJ, PLY, GLB/glTF, STL, ...) as the model of a chunk, with its
+    colours and texture; the current model is kept as a version."""
+    from .io.mesh_import import import_model, import_model_chunk
+
+    xyz = None
+    if offset:
+        xyz = [float(v) for v in offset.replace(";", ",").split(",")]
+        if len(xyz) != 3:
+            raise typer.BadParameter("offset: X,Y,Z")
+    kw = {"frame": "internal" if internal else "world", "up": up, "scale": scale, "offset": xyz}
+    if new_chunk is not None:
+        doc = Document.open(project)
+        ch, r = import_model_chunk(doc, file, label=new_chunk or None, crs=crs, progress=print_progress, **kw)
+    else:
+        doc, ch = _open(project, chunk)
+        r = import_model(ch, file, crs=crs, keep=not overwrite, name=name, progress=print_progress, **kw)
+    doc.save()
+    typer.echo(f"{ch.label}: {r['faces']} faces, {r['vertices']} vertices, {r['pages']} texture pages"
+               + (f", previous model kept as version {r['kept']}" if r["kept"] else ""))
+    if r["missing_textures"]:
+        typer.echo(f"textures not found: {', '.join(r['missing_textures'])}")
+    if r["distance"]:
+        typer.echo(f"warning: the model lies {r['distance']:.1f} m from the data of the chunk "
+                   "(check the coordinate system, --offset, --scale and --up)")
+
+
+@app.command("cut-model")
+def cut_model_cmd(project: Path,
+                  horizontal: Optional[float] = typer.Option(None, help="horizontal plane at this height"),
+                  vertical: Optional[str] = typer.Option(None, help="vertical plane through the line X1,Y1,X2,Y2 "
+                                                         "(above = to the left of the walker from 1 to 2)"),
+                  points: Optional[str] = typer.Option(None, help="plane through three points X1,Y1,Z1,X2,Y2,Z2,"
+                                                       "X3,Y3,Z3"),
+                  plane: Optional[str] = typer.Option(None, help="a point and the normal X,Y,Z,NX,NY,NZ"),
+                  dip: Optional[str] = typer.Option(None, help="X,Y,Z,DIP_DIRECTION,DIP (degrees, from north)"),
+                  keep: str = typer.Option("above", help="above, below, slab, both or series"),
+                  thickness: Optional[float] = typer.Option(None, help="metres: the slab, or each slice of a series"),
+                  step: Optional[float] = typer.Option(None, help="metres between the slices of a series"),
+                  count: Optional[int] = typer.Option(None, help="slices of a series (default: across the model)"),
+                  out: Optional[Path] = typer.Option(None, help="file (.ply/.obj) for a part, the stem of the two "
+                                                     "parts, the folder of a series; without it the part kept "
+                                                     "becomes the model"),
+                  overwrite: bool = typer.Option(False, help="do not keep the current model as a version"),
+                  name: Optional[str] = typer.Option(None, help="name of the new version of the model"),
+                  chunk: Optional[str] = None):
+    """Cut the model with a plane: keep one side, a slice, both sides as files or a series of slices."""
+    import numpy as np
+
+    from .engine import mesh_cut
+
+    def numbers(text, n, what):
+        values = [float(v) for v in text.replace(";", ",").split(",")]
+        if len(values) != n:
+            raise typer.BadParameter(f"{what}: {n} numbers separated by commas")
+        return values
+
+    given = [v is not None for v in (horizontal, vertical, points, plane, dip)]
+    if sum(given) != 1:
+        raise typer.BadParameter("give one plane: --horizontal, --vertical, --points, --plane or --dip")
+    if horizontal is not None:
+        p, n = mesh_cut.horizontal(horizontal)
+    elif vertical is not None:
+        v = numbers(vertical, 4, "--vertical")
+        p, n = mesh_cut.vertical(v[:2], v[2:])
+    elif points is not None:
+        v = numbers(points, 9, "--points")
+        p, n = mesh_cut.through_points(v[:3], v[3:6], v[6:])
+    elif plane is not None:
+        v = numbers(plane, 6, "--plane")
+        p, n = np.asarray(v[:3]), np.asarray(v[3:]) / np.linalg.norm(v[3:])
+    else:
+        v = numbers(dip, 5, "--dip")
+        p, n = mesh_cut.dipping(v[:3], v[3], v[4])
+    doc, ch = _open(project, chunk)
+    r = ch.cut_model(p, n, keep=keep, thickness=thickness, step=step, count=count, out=out,
+                     as_version=not overwrite, name=name, progress=print_progress)
+    if not r["files"]:
+        doc.save()
+        typer.echo(f"{ch.label}: model cut, {r['faces']} -> {r['faces_kept']} faces"
+                   + (f", previous model kept as version {r['kept']}" if r["kept"] else ""))
+    for f in r["files"]:
+        typer.echo(f)
+
+
 @app.command("colour-scan")
 def colour_scan(project: Path, scan: str = typer.Option(..., help="label of the chunk to colour"),
                 photos: str = typer.Option(..., help="label of the chunk with the aligned photos")):

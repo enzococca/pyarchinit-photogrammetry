@@ -368,12 +368,26 @@ def texture_pages(chunk: Chunk) -> list[Path]:
 def display_texture(chunk: Chunk, texcoords: np.ndarray, texnumber: np.ndarray | None, max_side: int = PAGE_SIZE):
     """One image for showing a texture of several pages (the 3D view, the fly-through): the pages
     side by side, reduced to fit ``max_side``, kept as ``model_texture_display.jpg`` until the
-    pages change, and the texture coordinates ``(F, 6)`` in it. One page: itself, unchanged."""
+    pages change, and the texture coordinates ``(F, 6)`` in it. One page: itself, or a reduced copy
+    when it is larger than ``max_side`` (an imported texture: graphics cards stop at 8192-16384 px)."""
     from PIL import Image
 
     pages = texture_pages(chunk)
     if len(pages) <= 1 or texnumber is None:
-        return (pages[0] if pages else None), texcoords
+        if not pages:
+            return None, texcoords
+        with Image.open(pages[0]) as im:
+            big = max(im.size) > max_side
+        if not big:
+            return pages[0], texcoords
+        out = chunk.data_dir / "model_texture_display.jpg"
+        if not out.exists() or out.stat().st_mtime < pages[0].stat().st_mtime:
+            img = cv2.imread(str(pages[0]), cv2.IMREAD_COLOR)
+            f = max_side / max(img.shape[:2])
+            img = cv2.resize(img, (max(1, int(img.shape[1] * f)), max(1, int(img.shape[0] * f))),
+                             interpolation=cv2.INTER_AREA)
+            cv2.imwrite(str(out), img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        return out, texcoords
     sizes = []
     for page in pages:
         with Image.open(page) as im:

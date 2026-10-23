@@ -7,7 +7,7 @@ import os
 import numpy as np
 from PySide6.QtCore import QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel, QListWidget,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel, QListWidget, QMenu,
                                QListWidgetItem, QPushButton, QSizePolicy, QSpinBox, QStackedLayout, QVBoxLayout,
                                QWidget)
 
@@ -539,6 +539,7 @@ class ModelView(QWidget):
     section_requested = Signal(object, object)  # the two ends of a section trace (internal frame)
     slice_requested = Signal(object)  # a point at the height of a plan slice (internal frame)
     move_marker_requested = Signal(int, object)  # a marker (key) to move to this point (internal frame)
+    cut_requested = Signal(str, object)  # cut the model: "horizontal" (1 point), "vertical" (2), "points" (3), "values"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -594,6 +595,15 @@ class ModelView(QWidget):
         self.b_slice = QPushButton(tr("Pianta a quota"))
         self.b_slice.setToolTip(tr("Clic su un punto: la pianta del modello tagliato a quella quota"))
         self.b_slice.clicked.connect(lambda: self.start_pick("slice"))
+        self.b_cut = QPushButton(tr("Taglia"))
+        self.b_cut.setToolTip(tr("Taglia il modello con un piano: tieni una parte, una fetta, o salva le due parti "
+                                 "o una serie di fette"))
+        cut_menu = QMenu(self.b_cut)
+        cut_menu.addAction(tr("Piano orizzontale: clic sulla quota"), lambda: self.start_pick("cut_h"))
+        cut_menu.addAction(tr("Piano verticale: clic su due punti"), lambda: self.start_pick("cut_v"))
+        cut_menu.addAction(tr("Piano per tre punti: tre clic"), lambda: self.start_pick("cut_p"))
+        cut_menu.addAction(tr("Con i valori..."), lambda: self.cut_requested.emit("values", []))
+        self.b_cut.setMenu(cut_menu)
         self.version_label = QLabel("")
         self.version_label.setObjectName("versionLabel")
         self.version_label.setStyleSheet("color: #b45309; font-weight: bold")
@@ -613,6 +623,7 @@ class ModelView(QWidget):
         bar.addWidget(self.b_photos)
         bar.addWidget(self.b_section)
         bar.addWidget(self.b_slice)
+        bar.addWidget(self.b_cut)
         bar.addWidget(self.cb_cams)
         bar.addWidget(self.cb_marks)
         bar.addWidget(self.cb_region)
@@ -751,6 +762,7 @@ class ModelView(QWidget):
         self.b_marker.setVisible(self.kind in self.PICK_KINDS)
         self.b_section.setVisible(self.kind in self.PICK_KINDS)
         self.b_slice.setVisible(self.kind in self.PICK_KINDS)
+        self.b_cut.setVisible(self.kind in ("model", "model_textured") and not self.paths)
         self.b_photos.setVisible(self.kind in self.PICK_KINDS)
         mode = self.color_mode()
         self.legend.setVisible((self.kind in ("point_cloud", "tie_points") and mode == "class")
@@ -784,8 +796,13 @@ class ModelView(QWidget):
         self._purpose = purpose
         if purpose != "section_end":
             self._section_start = None
+        if purpose in ("cut_h", "cut_v", "cut_p"):
+            self._cut_points = []
         what = {"photos": "le foto che lo vedono", "section": "il primo estremo della sezione",
-                "section_end": "il secondo estremo della sezione", "slice": "la quota della pianta"}.get(
+                "section_end": "il secondo estremo della sezione", "slice": "la quota della pianta",
+                "cut_h": "la quota del piano di taglio", "cut_v": "il primo punto della linea di taglio",
+                "cut_v2": "il secondo punto della linea di taglio", "cut_p": "il primo dei tre punti del piano",
+                "cut_p2": "il secondo dei tre punti del piano", "cut_p3": "il terzo dei tre punti del piano"}.get(
             purpose, "il nuovo posto del marker" if purpose.startswith("move:") else "un nuovo marker")
         self.picker.start(image, tr("Clic su un punto del modello o della nuvola: {0} - Esc o tasto destro annulla",
                                     tr(what)))
@@ -810,6 +827,18 @@ class ModelView(QWidget):
         elif purpose == "slice":
             if point is not None:
                 self.slice_requested.emit(point)
+        elif purpose.startswith("cut_"):
+            if point is None:
+                return
+            points = getattr(self, "_cut_points", []) + [point]
+            self._cut_points = points
+            follow = {"cut_v": "cut_v2", "cut_p": "cut_p2", "cut_p2": "cut_p3"}.get(purpose)
+            if follow is not None:
+                self.start_pick(follow)
+            else:
+                kind = {"cut_h": "horizontal", "cut_v2": "vertical", "cut_p3": "points"}[purpose]
+                self._cut_points = []
+                self.cut_requested.emit(kind, points)
         elif purpose.startswith("move:"):
             self.move_marker_requested.emit(int(purpose[5:]), point)
         else:

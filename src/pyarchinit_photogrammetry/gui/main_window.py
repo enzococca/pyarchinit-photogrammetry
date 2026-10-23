@@ -160,6 +160,7 @@ class MainWindow(QMainWindow):
         self.model_view.marker_requested.connect(self._marker_picked_in_3d)
         self.model_view.section_requested.connect(self._section_in_3d)
         self.model_view.slice_requested.connect(self._slice_in_3d)
+        self.model_view.cut_requested.connect(self._cut_in_3d)
         self.model_view.move_marker_requested.connect(self._marker_moved_in_3d)
         self.model_view.photos_point_requested.connect(self.filter_photos_by_point)
         self.ortho_view = RasterView()
@@ -404,6 +405,10 @@ class MainWindow(QMainWindow):
         self._act(imp, tr("Scansioni laser (E57, PTX)..."), self.import_scans, processing=True, icon_name="scan",
                   tip=tr("Una o piu' scansioni come nuvola densa di un nuovo chunk; poi Allinea chunk (punti) e Colori "
                          "dalle foto"))
+        self._act(imp, tr("Modello 3D (OBJ, PLY, GLB)..."), self.import_model, processing=True,
+                  icon_name="model_textured",
+                  tip=tr("Una mesh fatta con un altro programma come modello del chunk attivo o di un nuovo chunk, "
+                         "con i colori e la texture; il modello di prima resta tra le versioni"))
         self._act(imp, tr("Progetto Metashape (.psx)..."), lambda: self.import_external("metashape"), processing=True,
                   icon_name="open")
         self._act(imp, tr("Modello e texture dal progetto Metashape (reimporta)..."), self.reimport_metashape_model,
@@ -484,6 +489,11 @@ class MainWindow(QMainWindow):
         cl.addSeparator()
         self._act(cl, tr("Seleziona con il lazo nella vista 3D (elimina, tieni)"), self.lasso_edit, icon_name="select")
         self._act(cl, tr("Ritaglia con un poligono o un riquadro..."), self.start_crop, icon_name="crop")
+        self._act(cl, tr("Taglia il modello con un piano (parti, fette)..."), lambda: self.cut_model(),
+                  processing=True, icon_name="crop",
+                  tip=tr("Un piano orizzontale, verticale, per tre punti o inclinato: tieni una parte o una fetta "
+                         "come modello, oppure salva le due parti o una serie di fette (anche dal pulsante Taglia "
+                         "della vista 3D)"))
         self._act(m, tr("Costruisci modello..."), self.build_model, processing=True, icon_name="model")
         self._act(m, tr("Costruisci texture..."), self.build_texture, processing=True, icon_name="texture")
         self._act(m, tr("Costruisci DEM..."), self.build_dem, processing=True, icon_name="dem")
@@ -2104,6 +2114,82 @@ class MainWindow(QMainWindow):
                                                                 crs=(v["crs"] or "").strip() or None,
                                                                 max_points=int(v["max_points"]) or None, progress=p),
                       done)
+
+    def import_model(self) -> None:
+        """File > Importa > Modello 3D: a mesh of another program (OBJ, PLY, GLB, STL, ...) as the model
+        of the active chunk or of a new chunk, with its colours and texture (:mod:`io.mesh_import`)."""
+        from ..core import crs as crs_mod
+        from ..io import mesh_import
+
+        path, _ = QFileDialog.getOpenFileName(self, tr("Modello 3D"), self._last_dir(),
+                                              tr("Modelli 3D (*.obj *.ply *.glb *.gltf *.stl *.off *.dae);;"
+                                                 "Tutti i file (*)"))
+        if not path:
+            return
+        ch = self.chunk
+        offset = mesh_import.default_offset(path)
+        up = mesh_import.default_up(path)
+        local = ch is None or not ch.crs or crs_mod.is_local(ch.crs)
+        targets = ([("active", tr("Nel chunk attivo «{0}», come suo modello", ch.label))] if ch is not None else []) \
+            + [("new", "In un nuovo chunk")]
+        v = ParamDialog.ask(self, "Importa modello 3D", [
+            Field("target", "Dove", targets[0][0], choices=targets),
+            Field("label", "Nome del nuovo chunk", Path(path).stem, kind="text"),
+            Field("frame", "Coordinate del file", "world",
+                  choices=[("world", tr("Nel sistema di riferimento del chunk ({0})", tr("locale") if local else ch.crs)),
+                           ("internal", "Interne del chunk (il suo model.ply modificato con un altro programma)")]),
+            Field("up", "Asse verticale del file", "auto",
+                  choices=[("auto", tr("Automatico ({0})", tr("Y, come vuole il glTF") if up == "y" else "Z")),
+                           ("z", "Z in alto"), ("y", "Y in alto (glTF, Blender, molti visualizzatori)")]),
+            Field("scale", "Scala (0,001 per un file in millimetri)", 1.0, minimum=1e-6, maximum=1e6, decimals=6),
+            Field("dx", "Spostamento X (sommato dopo la scala)", float(offset[0]), minimum=-1e9, maximum=1e9,
+                  decimals=3),
+            Field("dy", "Spostamento Y", float(offset[1]), minimum=-1e9, maximum=1e9, decimals=3),
+            Field("dz", "Spostamento Z", float(offset[2]), minimum=-1e9, maximum=1e9, decimals=3),
+            Field("crs", "Sistema di riferimento di un chunk nuovo o vuoto (es. EPSG:32633; vuoto = locale)",
+                  "" if local else ch.crs, kind="text")]
+            + (self._version_fields("model") if ch is not None else []),
+            intro=tr("Coordinate del sistema del chunk: i modelli esportati da questo programma, da Metashape o da "
+                     "CloudCompare nello stesso sistema tornano al loro posto (il GLB di questo programma ritrova "
+                     "da solo l'origine nel file JSON accanto). In un chunk vuoto o nuovo il modello porta le sue "
+                     "coordinate. Colori dei vertici e texture vengono importati; il modello attuale del chunk "
+                     "resta tra le versioni se lo conservi."))
+        if not v:
+            return
+        kw = {"frame": v["frame"], "up": v["up"], "scale": float(v["scale"]),
+              "offset": (float(v["dx"]), float(v["dy"]), float(v["dz"]))}
+        crs = (v.get("crs") or "").strip() or None
+        doc = self.doc
+        if v["target"] == "new" or ch is None:
+            def job(p):
+                return mesh_import.import_model_chunk(doc, path, label=(v.get("label") or "").strip() or None,
+                                                      crs=crs, progress=p, **kw)
+        else:
+            keep = v.get("keep", "keep") == "keep"
+            name = (v.get("version_name") or "").strip() or None
+            if not keep and self.history is not None:  # Modifica > Annulla puts the model back
+                self.history.backup(["model"])
+            empty = mesh_import.is_empty(ch)
+
+            def job(p):
+                return ch, ch.import_model(path, keep=keep, name=name, crs=crs if empty else None, progress=p, **kw)
+
+        def done(result):
+            chunk, report = result
+            self._activate_chunk(chunk)
+            self._show_model("model")
+            self.log_pane.info(tr("Modello importato da {0}: {1} facce, {2} pagine di texture",
+                                  Path(path).name, _it(report["faces"]), report["pages"]))
+            if report.get("missing_textures"):
+                self.log_pane.warning(tr("Texture non trovate: {0}; il modello e' stato importato senza",
+                                         ", ".join(report["missing_textures"])))
+            if report.get("distance"):
+                self._warn(tr("Il modello importato e' a {0} m dai dati del chunk: controlla il sistema di "
+                              "riferimento, lo spostamento, la scala e l'asse verticale del file. Il modello di "
+                              "prima e' tra le versioni (tasto destro sul modello nell'area di lavoro).",
+                              _it(report["distance"], 1)))
+
+        self.run_task("Importa modello 3D", job, done)
 
     def colour_scan(self) -> None:
         """The dense cloud of the active chunk coloured from the aligned photos of another chunk."""
@@ -5911,6 +5997,131 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(tr("I due punti sono uno sopra l'altro: nessuna traccia in pianta"), 8000)
             return
         self._section_drawn((float(w[0, 0]), float(w[0, 1])), (float(w[1, 0]), float(w[1, 1])))
+
+    def _cut_in_3d(self, kind: str, points) -> None:
+        """The Taglia button of the 3D view: the points picked (internal frame) give the plane."""
+        if self.chunk is None:
+            return
+        world = self.chunk.to_world(np.asarray(points, float)) if len(points) else np.zeros((0, 3))
+        self.cut_model(kind if kind != "values" else None, world)
+
+    def cut_model(self, kind: str | None = None, points=None) -> None:
+        """Strumenti > Pulizia > Taglia il modello: a plane (horizontal, vertical through two points,
+        through three points, dipping, along a section, through the selected markers) and what to
+        keep (:mod:`engine.mesh_cut`)."""
+        if not self._need_chunk(product="model"):
+            return
+        from ..io.mesh_ply import PlyMesh
+
+        ch = self.chunk
+        pts = np.zeros((0, 3)) if points is None else np.asarray(points, float).reshape(-1, 3)
+        try:
+            centre = ch.to_world(np.median(PlyMesh(ch.product_path("model")).xyz(), axis=0)[None])[0]
+        except Exception:
+            centre = np.zeros(3)
+        fmt = "{:.3f}; {:.3f}; {:.3f}".format
+        defaults = [fmt(*(pts[k] if k < len(pts) else centre + [k * 1.0, (k == 2) * 1.0, 0.0])) for k in range(3)]
+        markers = [m for m in (ch.marker_by_key(k) for k in self.reference.selected_markers())
+                   if m.position is not None]
+        planes = [("horizontal", "Orizzontale"), ("vertical", "Verticale per due punti (la loro linea in pianta)"),
+                  ("points", "Per tre punti"), ("dip", "Inclinato (immersione e inclinazione, per il punto 1)")]
+        planes += [(f"section:{i}", tr("Verticale lungo la sezione {0}", sec["label"]))
+                   for i, sec in enumerate(self.sections)]
+        if len(markers) >= 3:
+            planes.append(("markers", tr("Per i {0} marker selezionati", len(markers))))
+        stem = Path(self._last_dir()) / f"{ch.label.replace(' ', '_')}_taglio"
+        v = ParamDialog.ask(self, "Taglia il modello", [
+            Field("plane", "Piano", kind or "horizontal", choices=planes),
+            Field("z", "Quota del piano orizzontale (m)", float(pts[0, 2]) if len(pts) == 1 else float(centre[2]),
+                  minimum=-1e6, maximum=1e6, decimals=3),
+            Field("p1", "Punto 1 (X; Y; Z)", defaults[0], kind="text"),
+            Field("p2", "Punto 2 (X; Y; Z)", defaults[1], kind="text"),
+            Field("p3", "Punto 3 (X; Y; Z)", defaults[2], kind="text"),
+            Field("dip_dir", "Immersione (gradi da nord)", 0.0, minimum=0.0, maximum=360.0, decimals=1),
+            Field("dip", "Inclinazione (gradi)", 0.0, minimum=0.0, maximum=90.0, decimals=1),
+            Field("part", "Cosa tenere", "above",
+                  choices=[("above", "La parte sopra il piano (a sinistra della linea dal punto 1 al 2)"),
+                           ("below", "La parte sotto il piano (a destra della linea)"),
+                           ("slab", "Una fetta attorno al piano"),
+                           ("both", "Le due parti, in due file"),
+                           ("series", "Una serie di fette parallele, in file")]),
+            Field("thickness", "Spessore della fetta (m)", 0.1, minimum=0.0001, maximum=10000.0, decimals=4),
+            Field("step", "Passo tra le fette della serie (m)", 0.5, minimum=0.0001, maximum=10000.0, decimals=4),
+            Field("result", "Risultato di una parte o di una fetta", "version",
+                  choices=[("version", "Il modello del chunk (quello di prima resta tra le versioni)"),
+                           ("file", "Un file (il modello resta com'e')")]),
+            Field("out", "File (PLY o OBJ con la texture); per la serie: la cartella", str(stem) + ".ply",
+                  kind="file_save", filter="PLY (*.ply);;OBJ (*.obj)")]
+            + self._version_fields("model"),
+            intro=tr("Le facce attraversate dal piano vengono tagliate sul piano, con i colori e la texture. Il "
+                     "piano verticale passa per la linea in pianta dei punti 1 e 2; quello per tre punti "
+                     "segue l'ordine dei punti (antiorario visto dall'alto: normale in su). Le parti salvate "
+                     "in file sono in coordinate del sistema del chunk."))
+        if not v:
+            return
+        try:
+            point, normal = self._cut_plane(v, markers)
+        except ValueError as exc:
+            self._warn(tr("Piano non valido: {0}", str(exc)))
+            return
+        part = v["part"]
+        out = None
+        if part in ("both", "series") or v["result"] == "file":
+            out = Path(v["out"])
+            if part == "series":
+                out = out.with_suffix("")
+            elif out.suffix.lower() not in (".ply", ".obj"):
+                out = out.with_suffix(".ply")
+        thickness = float(v["thickness"]) if part in ("slab", "series") else None
+        step = float(v["step"]) if part == "series" else None
+        keep_version = v.get("keep", "keep") == "keep"
+        name = (v.get("version_name") or "").strip() or None
+        if out is None and not keep_version and self.history is not None:
+            self.history.backup(["model"])  # Modifica > Annulla puts the model back
+
+        def done(report):
+            if report["files"]:
+                for f in report["files"]:
+                    self.log_pane.info(tr("Scritto {0}", f))
+                self.statusBar().showMessage(tr("{0} file scritti in {1}", len(report["files"]),
+                                                str(Path(report["files"][0]).parent)), 10000)
+            else:
+                self._show_model("model")
+                self.log_pane.info(tr("Modello tagliato: {0} facce -> {1}", _it(report["faces"]),
+                                      _it(report["faces_kept"])))
+
+        self.run_task("Taglia il modello", lambda p: ch.cut_model(point, normal, keep=part, thickness=thickness,
+                                                                  step=step, out=out, as_version=keep_version,
+                                                                  name=name, progress=p), done)
+
+    def _cut_plane(self, v: dict, markers) -> tuple:
+        """The world plane of the cut dialog's answers."""
+        from ..engine import mesh_cut
+
+        def point(text):
+            parts = [t for t in text.replace(";", " ").split() if t]
+            if len(parts) != 3:
+                parts = [t for t in text.split(",") if t.strip()]
+            if len(parts) != 3:
+                raise ValueError(tr("tre numeri: X; Y; Z"))
+            return np.array([float(t.strip().replace(",", ".")) for t in parts])
+
+        kind = v["plane"]
+        if kind == "horizontal":
+            return mesh_cut.horizontal(float(v["z"]))
+        if kind == "vertical":
+            return mesh_cut.vertical(point(v["p1"]), point(v["p2"]))
+        if kind == "points":
+            return mesh_cut.through_points(point(v["p1"]), point(v["p2"]), point(v["p3"]))
+        if kind == "dip":
+            return mesh_cut.dipping(point(v["p1"]), float(v["dip_dir"]), float(v["dip"]))
+        if kind.startswith("section:"):
+            sec = self.sections[int(kind.split(":")[1])]
+            return mesh_cut.vertical(sec["p1"], sec["p2"])
+        world = self.chunk.to_world(np.array([m.position for m in markers]))
+        centre = world.mean(axis=0)
+        normal = np.linalg.svd(world - centre)[2][2]
+        return centre, (normal if normal[2] >= 0 else -normal)
 
     def _slice_in_3d(self, point) -> None:
         self.plan_slice(z_default=float(self.chunk.to_world(np.asarray(point, float)[None])[0, 2]))

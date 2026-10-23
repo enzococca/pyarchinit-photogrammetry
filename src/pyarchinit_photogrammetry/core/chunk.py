@@ -821,6 +821,31 @@ class Chunk:
                               crs_wkt=crs_mod.wkt(self.crs))
         return pc.transformed(self.transform).save(path, crs_wkt=crs_mod.wkt(self.crs))
 
+    def import_model(self, path: str | os.PathLike, frame: str = "world", offset=None, scale: float = 1.0,
+                     up: str = "auto", crs: str | None = None, keep: bool = True, name: str | None = None,
+                     progress: ProgressCallback | None = None) -> dict:
+        """A mesh of another program (OBJ, PLY, GLB/glTF, STL, ...) as the model of the chunk, with
+        its colours and texture; the current model kept as a version (``keep``). See
+        :func:`io.mesh_import.import_model` for the coordinates (``frame``, ``offset``, ``scale``,
+        ``up``, ``crs``)."""
+        from ..io.mesh_import import import_model
+
+        return import_model(self, path, frame=frame, offset=offset, scale=scale, up=up, crs=crs, keep=keep,
+                            name=name, progress=as_progress(progress))
+
+    def cut_model(self, point, normal, keep: str = "above", thickness: float | None = None,
+                  step: float | None = None, count: int | None = None, out: str | os.PathLike | None = None,
+                  as_version: bool = True, name: str | None = None,
+                  progress: ProgressCallback | None = None) -> dict:
+        """Cut the model with the plane through ``point`` with ``normal`` (world coordinates): one side
+        (``keep`` "above"/"below"), a slice of ``thickness`` ("slab") as the new model or to the file
+        ``out``; both sides ("both") or slices every ``step`` ("series") to files. See
+        :func:`engine.mesh_cut.cut_model`."""
+        from ..engine.mesh_cut import cut_model
+
+        return cut_model(self, point, normal, keep=keep, thickness=thickness, step=step, count=count, out=out,
+                         as_version=as_version, name=name, progress=as_progress(progress))
+
     def export_model(self, path: str | os.PathLike, region=None, zmin: float | None = None,
                      zmax: float | None = None) -> Path:
         """The model in world coordinates (OBJ with the texture when built, PLY with colours and

@@ -690,6 +690,37 @@ un'unità stratigrafica o a un sito (`media_to_entity_table`), ciascuno con `id_
 (`thumb`) e della copia ridotta (`resize`) - None dove il file non è su questo computer o su un
 archivio remoto.
 
+## Mesh di altri programmi e taglio del modello
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `chunk.import_model(path, frame="world", offset=None, scale=1.0, up="auto", crs=None, keep=True, name=None)` | una mesh (OBJ, PLY, GLB/glTF, STL, OFF...) come modello del chunk, con colori e texture; il modello attuale conservato come versione |
+| `io.mesh_import.import_model_chunk(doc, path, label=None, **kw)` | lo stesso in un nuovo chunk, tolto di nuovo se l'importazione fallisce; restituisce `(chunk, report)` |
+| `io.mesh_import.read_mesh_file(path)` | la mesh di un file nelle sue coordinate: posizioni, facce, colori, coordinate di texture per angolo di faccia, pagine |
+| `chunk.cut_model(point, normal, keep="above", thickness=None, step=None, count=None, out=None, as_version=True)` | taglia il modello con un piano in coordinate del mondo: una parte o una fetta come modello o in un file, le due parti o una serie di fette in file |
+| `engine.mesh_cut.horizontal(z)`, `vertical(a, b)`, `through_points(p1, p2, p3)`, `dipping(point, dip_direction, dip)` | piani come `(punto, normale)` in coordinate del mondo |
+| `engine.mesh_cut.clip(mesh, point, normal, keep)`, `slab(...)`, `series(...)` | i tagli su un `MeshData` nel sistema del piano |
+
+**`chunk.import_model(...)`**: `frame="world"` legge il file nel sistema di riferimento del chunk
+(scalato di `scale`, poi spostato di `offset`); `frame="internal"` nel sistema interno del chunk (il
+suo `model.ply` modificato altrove). `up="auto"` porta i file glTF da Y in alto a Z in alto; il GLB
+scritto da questo programma prende l'origine dal file JSON accanto. Un chunk senza foto, prodotti né
+riferimenti prende le coordinate della mesh: il suo sistema interno parte da un'origine tonda sotto di
+essa e `crs` ne indica il sistema di riferimento. Tutti gli oggetti del file formano una sola mesh, ogni
+immagine di texture diventa una pagina (`model_texture.jpg`, `model_texture_1.jpg`, ...), i vertici
+nella stessa posizione vengono uniti, i colori dei vertici di una mesh con texture vengono letti dalla
+texture. Il report dà vertici, facce, pagine, `distance` dai dati del chunk in metri (0 quando si
+sovrappongono) e `kept` (la versione conservata). Riga di comando: `ppg import-model`.
+
+**`chunk.cut_model(...)`**: `keep` "above" è il lato verso cui punta la normale (per `vertical(a, b)` la
+sinistra di chi cammina da a verso b), "below" l'altro, "slab" la fetta di spessore `thickness` attorno
+al piano; senza `out` la parte diventa il modello (quello di prima conservato come versione), con `out`
+(.ply o .obj) viene scritta lì in coordinate del mondo. "both" scrive `<out>_sopra` e `<out>_sotto`,
+"series" fette di spessore `thickness` ogni `step` nella cartella `out` (`fetta_+0.500.ply`, lo
+spostamento lungo la normale). Le facce attraversate dal piano vengono tagliate sul piano: nuovi vertici
+sui lati attraversati, condivisi dalle due facce del lato, con ogni proprietà dei vertici e le
+coordinate di texture interpolate. Riga di comando: `ppg cut-model`.
+
 ## Scansioni laser
 
 | Chiamata | Descrizione |

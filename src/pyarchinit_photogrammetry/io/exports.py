@@ -48,7 +48,7 @@ def export_model(chunk, path, region=None, zmin: float | None = None, zmax: floa
     model_path = chunk.product_path("model")
     if model_path is None or not model_path.exists():
         raise RuntimeError("no model in chunk")
-    from .mesh_ply import read_mesh, write_mesh
+    from .mesh_ply import read_mesh
 
     mesh = read_mesh(model_path)
     if cropping:
@@ -58,6 +58,20 @@ def export_model(chunk, path, region=None, zmin: float | None = None, zmax: floa
         if not keep.any():
             raise ValueError("no face of the model lies inside the region")
         mesh = mesh.subset_faces(keep)
+    return export_mesh(chunk, mesh, path)
+
+
+def export_mesh(chunk, mesh, path) -> Path:
+    """A mesh in the internal frame of ``chunk`` (the model, a part of it) written in world
+    coordinates as :func:`export_model` writes the model: ``.ply`` with every vertex property in
+    double precision and the texture pages the faces use, ``.obj`` with the texture, other formats
+    through trimesh with the vertex colours."""
+    from .mesh_ply import write_mesh
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    textured = chunk.product_path("model_textured")
+    legacy = textured is not None and textured.suffix.lower() == ".obj"
     from ..engine.texturing import texture_pages
 
     pages = texture_pages(chunk) if textured is not None and not legacy and textured.exists() else []

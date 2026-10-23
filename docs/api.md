@@ -666,6 +666,37 @@ stratigraphic unit or a site (`media_to_entity_table`), each with `id_media`, `f
 `mediatype`, `descrizione` and the full paths of the original (`path`), the thumbnail (`thumb`) and the
 resized copy (`resize`) - None where the file is not on this computer or on a remote store.
 
+## Meshes of other programs and cutting the model
+
+| Call | Description |
+| --- | --- |
+| `chunk.import_model(path, frame="world", offset=None, scale=1.0, up="auto", crs=None, keep=True, name=None)` | a mesh (OBJ, PLY, GLB/glTF, STL, OFF...) as the model of the chunk, with its colours and texture; the current model kept as a version |
+| `io.mesh_import.import_model_chunk(doc, path, label=None, **kw)` | the same in a new chunk, removed again if the import fails; returns `(chunk, report)` |
+| `io.mesh_import.read_mesh_file(path)` | the mesh of a file in its own coordinates: positions, faces, colours, texture coordinates per face corner, pages |
+| `chunk.cut_model(point, normal, keep="above", thickness=None, step=None, count=None, out=None, as_version=True)` | cut the model with a world plane: one side or a slice as the model or a file, both sides or a series of slices as files |
+| `engine.mesh_cut.horizontal(z)`, `vertical(a, b)`, `through_points(p1, p2, p3)`, `dipping(point, dip_direction, dip)` | planes as `(point, normal)` in world coordinates |
+| `engine.mesh_cut.clip(mesh, point, normal, keep)`, `slab(...)`, `series(...)` | the cuts on a `MeshData` in the frame of the plane |
+
+**`chunk.import_model(...)`**: `frame="world"` reads the file in the coordinate system of the chunk
+(scaled by `scale`, then shifted by `offset`); `frame="internal"` in the internal frame of the chunk
+(its `model.ply` edited elsewhere). `up="auto"` turns glTF files from Y-up to Z-up; the GLB written by
+this program gets its origin from the JSON file beside it. A chunk without photos, products or
+reference takes the coordinates of the mesh: its internal frame starts at a round origin under it,
+and `crs` names its coordinate system. Every object of the file joins one mesh, every texture image
+becomes a page (`model_texture.jpg`, `model_texture_1.jpg`, ...), vertices at the same position are
+joined, the vertex colours of a textured mesh are read from the texture. The report gives vertices,
+faces, pages, `distance` from the data of the chunk in metres (0 when they overlap) and `kept` (the
+version kept). CLI: `ppg import-model`.
+
+**`chunk.cut_model(...)`**: `keep` "above" is the side the normal points to (for `vertical(a, b)` the
+left of the walker from a to b), "below" the other, "slab" the slice of `thickness` around the plane;
+without `out` the part becomes the model (the previous one kept as a version), with `out` (.ply or
+.obj) it is written there in world coordinates. "both" writes `<out>_sopra` and `<out>_sotto`,
+"series" slices of `thickness` every `step` in the folder `out` (`fetta_+0.500.ply`, the offset along
+the normal). Faces crossed by the plane are cut on it: new vertices on the crossed edges, shared by
+the two faces of the edge, with every vertex property and the texture coordinates interpolated.
+CLI: `ppg cut-model`.
+
 ## Laser scans
 
 | Call | Description |

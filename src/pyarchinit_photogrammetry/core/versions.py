@@ -67,7 +67,8 @@ def _describe(chunk, product: str) -> str:
             bits.append(f"qualita' {meta['quality']}")
     elif product == "model" and meta.get("source"):
         bits.append({"depth_maps": "mappe di profondita'", "point_cloud": "nuvola densa",
-                     "tie_points": "punti di legame"}.get(meta["source"], meta["source"]))
+                     "tie_points": "punti di legame", "import": f"importato da {meta.get('file', 'un file')}"}
+                    .get(meta["source"], meta["source"]))
     if meta.get("classes"):
         bits.append("classi " + ", ".join(str(c) for c in meta["classes"]))
     if product == "orthomosaic" and meta.get("hidden_classes"):
