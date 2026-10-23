@@ -102,7 +102,9 @@ def test_model_vertex_confidence_and_cleaning(processed, tmp_path):
     assert cleaned.visual.kind == "vertex"
     assert ch.to_world(np.asarray(cleaned.vertices))[:, 2].max() < top[2] - 0.5  # the box is gone
     stored = read_model_confidence(ch.product_path("model"))
-    assert len(stored) == len(cleaned.vertices) and np.median(stored) == np.median(conf[: len(mesh.vertices)])
+    # the confidence goes with the vertices kept: the crumbs removed may move the median by one map
+    # (the Poisson mesh of the shared fixture differs from run to run)
+    assert len(stored) == len(cleaned.vertices) and abs(np.median(stored) - np.median(conf[: len(mesh.vertices)])) <= 1
     # a hole closed again, then smoothing and decimation
     v = np.asarray(cleaned.vertices)
     centre = v[np.argmin(np.linalg.norm(v - v.mean(axis=0), axis=1))]
