@@ -427,11 +427,15 @@ def _probe(pts):
 
 def _rank(ctx, probe, near) -> list:
     """The photos of a tile: the ``max_cameras`` that see the cells of ``probe`` best, and
-    those that reach cells the best ones do not."""
+    those that reach cells the best ones do not (with a float source, cells where their image
+    has a value)."""
     ranked = []
     for cam in near:
-        _px, s = _scores(ctx.chunk, cam, probe, ctx.centres, ctx.up_int, ctx.min_cos)
+        px, s = _scores(ctx.chunk, cam, probe, ctx.centres, ctx.up_int, ctx.min_cos)
         seen = np.isfinite(s)
+        if seen.any() and getattr(ctx, "float_output", False):  # a float source: where it has values
+            idx = np.nonzero(seen)[0]
+            seen[idx[~np.isfinite(_sample_photo(ctx, cam, px[idx].astype(np.float32))).all(axis=1)]] = False
         if seen.any():
             ranked.append((float(np.where(seen, s, 0).sum()), cam, seen))
     ranked.sort(key=lambda r: -r[0])
@@ -462,7 +466,15 @@ def _colour(ctx, pts, near, want_choice: bool = False, colours: bool = True):
 def _candidates(ctx, pts, cams, k: int = CANDIDATES):
     """The ``k`` best of ``cams`` for every point, each point on its own (so its photo never
     depends on the tile around it): indices into ``cams`` (k, n; -1 for none), scores (float32,
-    best first, an equal score behind the earlier photo) and pixels (k, n, 2, float32)."""
+    best first, an equal score behind the earlier photo) and pixels (k, n, 2, float32). With a
+    float source (:func:`_with_values`) only photos whose image has a value at the point."""
+    if getattr(ctx, "float_output", False) and cams:
+        return _with_values(ctx, pts, cams, k)
+    return _best_photos(ctx, pts, cams, k)
+
+
+def _best_photos(ctx, pts, cams, k: int):
+    """:func:`_candidates` among every photo that sees the points, values or not."""
     from .masks import hidden_by_mask, mask_path
 
     n = len(pts)
@@ -502,6 +514,67 @@ def _candidates(ctx, pts, cams, k: int = CANDIDATES):
         sc[:, cols] = np.take_along_axis(all_s, order, 0)
         idx[:, cols] = np.take_along_axis(all_i, order, 0)
         px[:, cols] = np.take_along_axis(all_p, order[..., None], 0)
+    return idx, sc, px
+
+
+VALUE_SEARCH = 4  # photos beyond the best k looked at first for a value (float sources)
+VALUE_BLOCK = 65536  # points searched at once among more photos (memory: points x photos)
+
+
+def _drop_without_values(ctx, cams, idx, sc, px) -> None:
+    """Candidates whose image (a float source) has no value at their pixel: none (-1, -inf)."""
+    r, c = np.nonzero(idx >= 0)
+    if not len(r):
+        return
+    cam_of = idx[r, c]
+    order = np.argsort(cam_of, kind="stable")
+    r, c, cam_of = r[order], c[order], cam_of[order]
+    cut = np.flatnonzero(np.diff(cam_of)) + 1
+    for rs, cs, js in zip(np.split(r, cut), np.split(c, cut), np.split(cam_of, cut)):
+        vals = _sample_photo(ctx, cams[js[0]], px[rs, cs])
+        bad = ~np.isfinite(vals).all(axis=1)
+        idx[rs[bad], cs[bad]] = -1
+        sc[rs[bad], cs[bad]] = -np.inf
+
+
+def _keep_best(idx, sc, px, k: int):
+    order = np.argsort(-sc, axis=0, kind="stable")[:k]  # dropped ones last, the order of the others kept
+    return (np.take_along_axis(idx, order, 0), np.take_along_axis(sc, order, 0),
+            np.take_along_axis(px, order[..., None], 0))
+
+
+def _with_values(ctx, pts, cams, k: int):
+    """:func:`_candidates` for a float source, whose image has no value over parts of its photo
+    (a thermal frame covers the middle of the visible photo only, a registered band leaves its
+    borders empty): the ``k`` best photos that have a value at each point. They are looked for
+    among the ``k + VALUE_SEARCH`` best, then, for the points left short, among twice as many and
+    so on up to all the photos: better photos without a value can be many (the low strips of a
+    flight frame at their edge, outside their narrower thermal frames, the cells that only the
+    high strips have temperatures for)."""
+    n = len(pts)
+    wide = min(len(cams), k + VALUE_SEARCH)
+    idx, sc, px = _best_photos(ctx, pts, cams, wide)
+    full = idx[-1] >= 0  # every place taken: there may be more photos beyond
+    _drop_without_values(ctx, cams, idx, sc, px)
+    idx, sc, px = _keep_best(idx, sc, px, k)
+    if idx.shape[0] < k:  # fewer photos than k: the arrays as the other candidates are
+        pad = k - idx.shape[0]
+        idx = np.vstack([idx, np.full((pad, n), -1, idx.dtype)])
+        sc = np.vstack([sc, np.full((pad, n), -np.inf, sc.dtype)])
+        px = np.concatenate([px, np.full((pad, n, 2), np.nan, px.dtype)], axis=0)
+    short = np.nonzero(full & (idx[k - 1] < 0))[0]
+    while len(short) and wide < len(cams):
+        wide = min(len(cams), 2 * wide)
+        left = []
+        for b in range(0, len(short), VALUE_BLOCK):
+            part = short[b:b + VALUE_BLOCK]
+            i2, s2, p2 = _best_photos(ctx, pts[part], cams, wide)
+            more = i2[-1] >= 0
+            _drop_without_values(ctx, cams, i2, s2, p2)
+            i2, s2, p2 = _keep_best(i2, s2, p2, k)
+            idx[:, part], sc[:, part], px[:, part] = i2, s2, p2
+            left.append(part[more & (i2[k - 1] < 0)])
+        short = np.concatenate(left)
     return idx, sc, px
 
 
@@ -587,40 +660,10 @@ def _paint(ctx, pts, tcams, want_choice: bool = False, colours: bool = True, inf
             for k in np.unique(chosen[cells]):
                 mine = chosen[cells] == k
                 colors[cells[mine]] = _sample_photo(ctx, tcams[k], px_of[mine])
-            if getattr(ctx, "float_output", False):
-                _next_with_values(ctx, cells, rank_of, cand_i, cand_px, tcams, colors, chosen, got, occlusion, visible)
     if want_choice:
         keys[got] = np.array([tcams[k].key for k in chosen[got]], dtype=keys.dtype) if got.any() else keys[got]
         return colors, got, keys
     return colors, got
-
-
-def _next_with_values(ctx, cells, rank_of, cand_i, cand_px, tcams, colors, chosen, got, occlusion, visible) -> None:
-    """Cells whose photo has no value there (a float source: the thermal band covers the middle of
-    the visible photo only, a registered band leaves its borders empty) take the next candidate
-    photo that sees them and has one; those left without any are not painted."""
-    bad = cells[~np.isfinite(colors[cells]).all(axis=1)]
-    for rank in range(cand_i.shape[0]):
-        if not len(bad):
-            break
-        cand = cand_i[rank, bad]
-        later = (cand >= 0) & (rank > rank_of[bad])
-        for k in np.unique(cand[later]):
-            sel = bad[later & (cand == k)]
-            if occlusion and len(sel):
-                sel = sel[visible(tcams[k], sel)]
-            if not len(sel):
-                continue
-            vals = _sample_photo(ctx, tcams[k], cand_px[rank, sel])
-            fin = np.isfinite(vals).all(axis=1)
-            colors[sel[fin]] = vals[fin]
-            chosen[sel[fin]] = k
-            rank_of[sel[fin]] = rank
-        bad = bad[~np.isfinite(colors[bad]).all(axis=1)]
-    if len(bad):
-        colors[bad] = 0.0
-        got[bad] = False
-        chosen[bad] = -1
 
 
 def _paint_ghost_free(ctx, pts, tcams, colors, chosen, keys, want_choice, colours, info, occlusion, visible):

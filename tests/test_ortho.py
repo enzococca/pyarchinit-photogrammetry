@@ -121,3 +121,40 @@ def test_grazing_views_leave_the_cells_transparent(processed, tmp_path):
     # how much falls out depends on the margins of the DEM seen only obliquely: a few points
     # (5 with the two-view depth maps, 3.4 with PatchMatch, which leaves less ground to interpolate)
     assert normal > 0.7 and strict < normal - 0.02
+
+
+def test_a_float_source_takes_the_best_photo_that_has_a_value(processed, tmp_path):
+    """A float source (a thermal frame, a registered band) has no value over parts of its photo: a
+    cell takes the best photo that has one there, however many better photos have none - as the
+    low strips of a flight whose narrower thermal frames miss the cell that their visible photos
+    frame at the edge (a hole of 12 % in the paired thermal orthomosaic of a real flight)."""
+    from pyarchinit_photogrammetry.engine.ortho import build_orthomosaic
+    from pyarchinit_photogrammetry.engine.visibility import read_photo
+
+    doc, ch = _copy(processed, tmp_path)
+    up = np.linalg.inv(ch.transform)[:3, :3] @ np.array([0.0, 0.0, 1.0])
+    up /= np.linalg.norm(up)
+
+    def looks_down(cam) -> bool:
+        return float(-(cam.transform[:3, :3] @ np.array([0.0, 0.0, 1.0])) @ up) > np.cos(np.radians(15))
+
+    nadir = {c.key for c in ch.aligned_cameras if looks_down(c)}
+    assert 10 <= len(nadir) < len(ch.aligned_cameras) - 4  # the obliques: the photos with values
+
+    def source(cam):
+        img = read_photo(cam).astype(np.float32)[::2, ::2]  # a band on a reduced grid, like the thermal ones
+        return np.full_like(img, np.nan) if cam.key in nadir else img
+
+    def read(path):
+        with rasterio.open(path) as src:
+            return src.read(1)
+
+    mixed = read(build_orthomosaic(ch, resolution=0.008, source=source, out_path=tmp_path / "mixed.tif"))
+    for cam in ch.aligned_cameras:  # the same without the photos that have no value
+        if cam.key in nadir:
+            cam.transform = None
+    alone = read(build_orthomosaic(ch, resolution=0.008, source=source, out_path=tmp_path / "alone.tif"))
+    assert np.isfinite(alone).mean() > 0.5
+    both = np.isfinite(mixed) & np.isfinite(alone)
+    assert both.sum() >= 0.995 * np.isfinite(alone).sum()  # every cell the obliques see has its value
+    assert np.median(np.abs(mixed[both] - alone[both])) < 0.5
