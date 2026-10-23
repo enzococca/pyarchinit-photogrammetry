@@ -159,6 +159,8 @@ def test_glb_is_y_up_and_brings_its_origin(processed, tmp_path):
 def test_one_big_page_is_reduced_for_the_view(processed, tmp_path):
     doc, ch = _copy(processed, tmp_path)
     m = read_mesh(ch.product_path("model"))
+    stale = ch.data_dir / "model_texture_display.jpg"  # left by another texture or another limit, newer than the page
+    cv2.imwrite(str(stale), np.zeros((300, 700, 3), np.uint8))
     path, uv = display_texture(ch, m.texcoords, None, max_side=512)
     assert path.name == "model_texture_display.jpg" and max(cv2.imread(str(path)).shape[:2]) == 512
     assert uv is m.texcoords

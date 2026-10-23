@@ -365,6 +365,20 @@ def texture_pages(chunk: Chunk) -> list[Path]:
     return [first.parent / name for name in names] if len(names) > 1 else [first]
 
 
+def _display_current(out: Path, pages: list[Path], size: tuple[int, int]) -> bool:
+    """Whether the image made for the view is still good: newer than every page and of the size wanted
+    now (it was made for another limit, or for the pages of an earlier texture)."""
+    from PIL import Image
+
+    if not out.exists() or out.stat().st_mtime < max(p.stat().st_mtime for p in pages):
+        return False
+    try:
+        with Image.open(out) as im:
+            return tuple(im.size) == tuple(size)
+    except OSError:
+        return False
+
+
 def display_texture(chunk: Chunk, texcoords: np.ndarray, texnumber: np.ndarray | None, max_side: int = PAGE_SIZE):
     """One image for showing a texture of several pages (the 3D view, the fly-through): the pages
     side by side, reduced to fit ``max_side``, kept as ``model_texture_display.jpg`` until the
@@ -377,15 +391,14 @@ def display_texture(chunk: Chunk, texcoords: np.ndarray, texnumber: np.ndarray |
         if not pages:
             return None, texcoords
         with Image.open(pages[0]) as im:
-            big = max(im.size) > max_side
-        if not big:
+            w, h = im.size
+        if max(w, h) <= max_side:
             return pages[0], texcoords
+        f = max_side / max(w, h)
+        size = (max(1, int(w * f)), max(1, int(h * f)))
         out = chunk.data_dir / "model_texture_display.jpg"
-        if not out.exists() or out.stat().st_mtime < pages[0].stat().st_mtime:
-            img = cv2.imread(str(pages[0]), cv2.IMREAD_COLOR)
-            f = max_side / max(img.shape[:2])
-            img = cv2.resize(img, (max(1, int(img.shape[1] * f)), max(1, int(img.shape[0] * f))),
-                             interpolation=cv2.INTER_AREA)
+        if not _display_current(out, pages, size):
+            img = cv2.resize(cv2.imread(str(pages[0]), cv2.IMREAD_COLOR), size, interpolation=cv2.INTER_AREA)
             cv2.imwrite(str(out), img, [cv2.IMWRITE_JPEG_QUALITY, 90])
         return out, texcoords
     sizes = []
@@ -399,7 +412,7 @@ def display_texture(chunk: Chunk, texcoords: np.ndarray, texnumber: np.ndarray |
     cell_w, cell_h = max(1, int(cw * f)), max(1, int(ch * f))
     scaled = [(max(1, int(round(w * f))), max(1, int(round(h * f)))) for w, h in sizes]
     out = chunk.data_dir / "model_texture_display.jpg"
-    if not out.exists() or out.stat().st_mtime < max(p.stat().st_mtime for p in pages):
+    if not _display_current(out, pages, (cols * cell_w, rows * cell_h)):
         canvas = np.full((rows * cell_h, cols * cell_w, 3), 127, np.uint8)
         flag = cv2.IMREAD_REDUCED_COLOR_4 if f <= 0.25 else cv2.IMREAD_REDUCED_COLOR_2 if f <= 0.5 else cv2.IMREAD_COLOR
         for k, page in enumerate(pages):
