@@ -83,6 +83,10 @@ class UsProposalDialog(QDialog):
         self.units.itemChanged.connect(self._edited)
         self.units.itemDoubleClicked.connect(self._unit_clicked)
         self.relations = _table(RELATION_HEADERS)
+        from .table_export import install_excel_menu
+
+        install_excel_menu(self.units, tr("Unita'"))
+        install_excel_menu(self.relations, tr("Rapporti"))
         self.tabs.addTab(self.units, tr("Unita'"))
         self.tabs.addTab(self.relations, tr("Rapporti"))
         lay.addWidget(self.tabs, 1)

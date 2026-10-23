@@ -19,7 +19,11 @@ hidden = (collect_submodules("pyarchinit_photogrammetry") + collect_submodules("
              # the backends matplotlib loads by the extension of a file (a plugin's figure as SVG, PDF or EPS)
              # and the Qt canvas: the program itself writes PNG only, so PyInstaller saw Agg alone
              "matplotlib.backends.backend_svg", "matplotlib.backends.backend_pdf", "matplotlib.backends.backend_ps",
-             "matplotlib.backends.backend_qtagg"])
+             "matplotlib.backends.backend_qtagg",
+             # the PDF report (fpdf2) and the Excel tables (openpyxl), imported only when used
+             "fpdf", "openpyxl"]
+          # fontTools loads the tables of a font by their tags (__import__): the PDF report embeds DejaVu Sans
+          + collect_submodules("fontTools.ttLib.tables") + collect_submodules("fpdf") + collect_submodules("openpyxl"))
 for optional in ("open3d", "ifcopenshell", "psycopg2", "ppg_core", "pye57", "colour"):  # ppg_core: native kernels
     try:
         __import__(optional)
@@ -38,7 +42,8 @@ datas = ([(str(ROOT / "src" / "pyarchinit_photogrammetry" / "ai" / name), "pyarc
           for name in ("sam_worker.py", "learned_worker.py", "learned_net.py")]
          + collect_data_files("pyarchinit_photogrammetry") + collect_data_files("qtawesome")
          + collect_data_files("pyvista") + collect_data_files("rasterio") + collect_data_files("pyproj")
-         + collect_data_files("ezdxf") + collect_data_files("trimesh"))
+         + collect_data_files("ezdxf") + collect_data_files("trimesh")
+         + collect_data_files("fpdf"))  # its colour profile (importlib.resources)
 binaries = collect_dynamic_libs("pycolmap")
 for optional in ("open3d", "ifcopenshell", "pye57", "psycopg"):  # pye57: E57 laser scans (its xerces library);
     try:                                                         # psycopg: PostgreSQL without psycopg2 (ARM64)

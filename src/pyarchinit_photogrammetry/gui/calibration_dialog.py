@@ -156,6 +156,9 @@ class CalibrationDialog(QDialog):
         self.table.setHorizontalHeaderLabels([tr("Parametro"), tr("Valore")])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.verticalHeader().setVisible(False)
+        from .table_export import install_excel_menu
+
+        install_excel_menu(self.table, tr("Calibrazione"))
         left.addWidget(self.table, 1)
         self.info = QLabel("")
         self.info.setWordWrap(True)

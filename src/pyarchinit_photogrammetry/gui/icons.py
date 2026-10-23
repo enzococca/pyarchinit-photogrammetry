@@ -26,6 +26,7 @@ ICONS = {
     "recent": ("mdi6.history", "grey"), "save": ("mdi6.content-save-outline", "blue"),
     "save_as": ("mdi6.content-save-edit-outline", "blue"), "export": ("mdi6.export-variant", "slate"),
     "report": ("mdi6.file-chart-outline", "indigo"), "demo": ("mdi6.flask-outline", "violet"),
+    "pdf": ("mdi6.file-pdf-box", "red"), "excel": ("mdi6.file-excel-outline", "green"),
     "quit": ("mdi6.power", "grey"),
     # workflow
     "photos": ("mdi6.image-multiple-outline", "blue"), "folder_photos": ("mdi6.folder-image", "blue"),

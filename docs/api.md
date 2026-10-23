@@ -38,8 +38,10 @@ longer explanations follow the table.
 | `build_orthomosaic(resolution, surface, blending, colour_correction, ghosting, fill_holes)` | the orthomosaic on the DEM or on the model (*Seamless orthomosaic and colour correction*) |
 | `calibrate_colours()` | exposure and vignetting of the photos (*Seamless orthomosaic and colour correction*) |
 | `export_point_cloud(path)`, `export_model(path)`, `export_dem(path)`, `export_orthomosaic(path)` | the products in world coordinates (formats and options: *Exports for the web*, *Confidence, cleaning and cropping*) |
-| `export_cameras(fmt="csv")` | the cameras, `csv` or `colmap` |
-| `generate_report(path)` | the HTML report of the chunk |
+| `export_cameras(fmt="csv")` | the cameras, `csv`, `xlsx` or `colmap` |
+| `generate_report(path, language="en")` | the HTML report of the chunk (*Reports and tables*, below) |
+| `generate_pdf_report(path, language=None, title=, description=)` | the printable PDF report of the chunk (*Reports and tables*) |
+| `export_tables(path, language=None)` | every table of the chunk in an Excel workbook (*Reports and tables*) |
 
 Every processing method accepts `progress=callback(fraction, message)`.
 
@@ -1177,6 +1179,57 @@ Imports: `integrations.metashape.import_psx` brings the scale bars of the projec
 `accuracy_scalebars`, unticked = check bar); `integrations.webodm.import_task` brings the camera
 poses (`read_cameras`: `cameras.json`, `odm_report/shots.geojson`) and the GCPs as markers
 (`read_gcps`), triangulated at once.
+
+## Reports and tables
+
+| Call | What it does |
+| --- | --- |
+| `io.pdf_report.generate_pdf_report(doc_or_chunk, path, language=None, chunks=None, title=None, description="", index_palette="rdylgn", thermal_palette="iron", progress=None)` | the processing report as an A4 PDF |
+| `io.report.generate_report(doc_or_chunk, path, language="en")` | the same report as one HTML page (figures embedded) |
+| `io.report_content.collect(doc_or_chunk, language=None, chunks=None, ...)` | the content both are drawn from: a `Report` of `Section`s holding `KeyValues`, `Table`, `Figure`, `Paragraph` |
+| `io.tables.write_xlsx(path, {sheet: (headers, rows)})` | tables into an Excel workbook, a sheet each |
+| `io.tables.project_tables(chunk, language=None)`, `io.tables.export_tables(chunk, path, language=None)` | every table of a chunk, as `Sheet`s or written to a workbook |
+| `io.tables.read_xlsx(path)` | the values of every sheet, row by row |
+
+`generate_pdf_report` takes a `Document` (its enabled chunks, or the `chunks` given as objects,
+keys or labels) or a `Chunk`. `language` is `it` or `en`; without it the report speaks the language
+of the interface (*Vista > Lingua*, `PPG_LANG`), else of the system. The report has a first page
+(title, description, project, date, version, the chunks and the contents with their pages) and,
+for every chunk, the parts it has: survey data (with the camera and marker positions over the
+orthomosaic), camera calibration, references and their errors (control and check points with the
+RMSE in X, Y, Z, XY and in all, scale bars, the error of the GPS of the photos), the processing
+parameters kept in `chunk.meta`, dense cloud and point classes, model, DEM (hypsometric tints over
+the hillshade, colour bar in metres), orthomosaic, the multispectral products (bands, radiometric
+model and calibration, registration, balance, reflectance in false colour and the statistics of
+every band, every index on `index_palette` with its colour bar and statistics, the zones with
+their legend and areas), the thermal products (decoder, frames, parameters of the measure, offsets
+between the frames, the temperature orthomosaic on `thermal_palette` with its colour bar in degrees
+Celsius and statistics, the anomalies) and the measuring points. A part that cannot be read becomes
+a note; the report goes on. The figures are at most 1600 pixels a side (JPEG, PNG for the zones),
+with their scale bar and north arrow; the text is DejaVu Sans (`report_content.font_files`: the
+fonts of matplotlib, else of the system, else the core fonts). The legacy `chunk.generate_report`
+stays in English unless `language` is given.
+
+`project_tables` gives the project, cameras (estimated and reference positions, omega/phi/kappa,
+errors, tie points per photo, precision), sensors and their parameters, markers, scale bars,
+processing parameters, products, point classes, versions, multispectral bands, indices and zones,
+thermal measure and offsets of the frames, measuring points, spot heights, units drawn, stones, US
+proxies and the sections of the project, the headers in `language`. `write_xlsx` keeps numbers as
+numbers (numpy's too; NaN and None empty) with a number format per column (`Sheet.decimals`, else
+from the values), writes a text starting with `=` as text, makes the sheet names valid and unique
+(`sheet_names`), freezes the header row and puts a filter on it.
+
+`markers.gcp.export_reference(chunk, "x.xlsx")`, `chunk.export_cameras(path, fmt="xlsx")` and
+`engine.probe.write_points(points, "x.xlsx", crs)` write a workbook instead of a CSV.
+
+From the command line:
+
+```bash
+ppg report scavo.ppg                                  # scavo_report.pdf, every enabled chunk
+ppg report scavo.ppg --pdf rapporto.pdf --html rapporto.html --lang it --chunk "Saggio 1" \
+    --title "Saggio 1, campagna 2026" --description "Rilievo fotogrammetrico"
+ppg tables scavo.ppg tabelle.xlsx --chunk "Saggio 1" --lang en
+```
 
 ## Modules
 

@@ -36,3 +36,25 @@ def test_the_application_carries_the_figure_backends_plugins_use():
     check = (ROOT / "src" / "pyarchinit_photogrammetry" / "gui" / "__init__.py").read_text()
     assert '("png", "svg", "pdf", "eps")' in check
 
+
+def test_the_application_carries_the_pdf_report_and_the_excel_tables(tmp_path):
+    """The PDF report (fpdf2) and the Excel tables (openpyxl) are dependencies of the program and
+    parts of the application: fontTools, which reads the fonts for fpdf2, loads the tables of a font
+    by their tags (``__import__``, not seen by PyInstaller) and fpdf2 reads its colour profile as
+    package data. The smoke test of the application writes a PDF and a workbook and reads it back."""
+    tomllib = pytest.importorskip("tomllib")
+    deps = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["dependencies"]
+    assert any(d.startswith("fpdf2") for d in deps) and any(d.startswith("openpyxl") for d in deps)
+    spec = (ROOT / "packaging" / "ppg_gui.spec").read_text()
+    for name in ('"fpdf"', '"openpyxl"', 'collect_submodules("fontTools.ttLib.tables")', 'collect_data_files("fpdf")'):
+        assert name in spec, name
+    check = (ROOT / "src" / "pyarchinit_photogrammetry" / "gui" / "__init__.py").read_text()
+    assert "sample_pdf(" in check and "write_xlsx(" in check and "read_xlsx(" in check
+    pytest.importorskip("fpdf")
+    pytest.importorskip("openpyxl")
+    from pyarchinit_photogrammetry.io.pdf_report import sample_pdf
+    from pyarchinit_photogrammetry.io.tables import read_xlsx, write_xlsx
+
+    assert sample_pdf(tmp_path / "check.pdf").read_bytes().startswith(b"%PDF")
+    assert read_xlsx(write_xlsx(tmp_path / "check.xlsx", {"check": (["a", "b"], [[1, 2.5]])}))["check"][1] == [1, 2.5]
+

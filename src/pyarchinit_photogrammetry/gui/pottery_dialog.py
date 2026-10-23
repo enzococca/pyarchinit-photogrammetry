@@ -91,6 +91,9 @@ class PotteryDialog(QDialog):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setStretchLastSection(True)
+        from .table_export import install_excel_menu
+
+        install_excel_menu(self.table, tr("Forme simili"))
         lay.addWidget(self.table, 2)
         self.status = QLabel("")
         self.status.setWordWrap(True)

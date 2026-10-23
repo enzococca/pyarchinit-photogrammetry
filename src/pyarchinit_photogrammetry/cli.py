@@ -961,6 +961,62 @@ def export(project: Path, ortho: Optional[Path] = None, dem: Optional[Path] = No
         typer.echo(str(ch.export_cameras(cameras, fmt="csv" if cameras.suffix == ".csv" else "colmap")))
 
 
+def _language(lang: Optional[str]) -> Optional[str]:
+    if lang and lang.strip().lower()[:2] not in ("it", "en"):
+        raise typer.BadParameter(f"--lang: it or en, not {lang!r}")
+    return lang.strip().lower()[:2] if lang else None
+
+
+@app.command()
+def report(project: Path,
+           pdf: Optional[Path] = typer.Option(None, help="the PDF to write (default: <project>_report.pdf beside the "
+                                                         "project when --html is not given)"),
+           html: Optional[Path] = typer.Option(None, help="also, or only, the report as an HTML page"),
+           lang: Optional[str] = typer.Option(None, help="it or en (default: the language of the interface or of the "
+                                                         "system)"),
+           chunk: Optional[str] = typer.Option(None, help="only this chunk (label or key); default: every enabled chunk"),
+           title: Optional[str] = typer.Option(None, help="title on the first page"),
+           description: str = typer.Option("", help="text on the first page")):
+    """The processing report: survey, calibration, accuracy of the references, processing parameters,
+    products with their figures, multispectral and thermal products, measuring points."""
+    from .io.pdf_report import generate_pdf_report
+    from .io.report import generate_report
+
+    language = _language(lang)
+    doc = Document.open(project)
+    if not doc.chunks:
+        raise typer.BadParameter("the project has no chunks")
+    chunks = None
+    if chunk is not None:
+        found = next((c for c in doc.chunks if c.label == chunk or str(c.key) == chunk), None)
+        if found is None:
+            raise typer.BadParameter(f"no chunk {chunk!r} in the project")
+        chunks = [found]
+    if pdf is None and html is None:
+        pdf = project.with_name(project.stem + "_report.pdf")
+    if pdf is not None:
+        typer.echo(str(generate_pdf_report(doc, pdf, language=language, chunks=chunks, title=title,
+                                           description=description, progress=print_progress)))
+    if html is not None:
+        target = chunks[0] if chunks else doc
+        typer.echo(str(generate_report(target, html, language=language)))
+
+
+@app.command()
+def tables(project: Path, out: Path = typer.Argument(..., help="the Excel workbook to write (.xlsx)"),
+           chunk: Optional[str] = typer.Option(None, help="label or key of the chunk (default: the active one)"),
+           lang: Optional[str] = typer.Option(None, help="language of the headers: it or en (default: of the "
+                                                         "interface or of the system)")):
+    """Every table of a chunk in one Excel workbook, a sheet each: cameras, sensors, markers, scale bars,
+    products, point classes, versions, parameters, multispectral bands, indices and zones, thermal measure,
+    measuring points, spot heights, units, stones, proxies, sections."""
+    from .io.tables import export_tables
+
+    language = _language(lang)
+    _, ch = _open(project, chunk)
+    typer.echo(str(export_tables(ch, out, language=language, progress=print_progress)))
+
+
 def _numbers(text: Optional[str], count: int, what: str) -> Optional[tuple]:
     """``"16,2.0"`` -> ``(16.0, 2.0)`` (None when not given)."""
     if not text:

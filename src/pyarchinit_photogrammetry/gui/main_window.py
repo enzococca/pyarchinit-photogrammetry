@@ -395,6 +395,12 @@ class MainWindow(QMainWindow):
         self._act(exp, tr("Ortofoto (GeoTIFF/COG)..."), lambda: self.export("ortho"), icon_name="ortho")
         self._act(exp, tr("Camere (CSV / COLMAP)..."), lambda: self.export("cameras"), icon_name="cameras")
         self._act(exp, tr("Riferimenti (CSV)..."), lambda: self.export("reference"), icon_name="reference")
+        self._act(exp, tr("Tabelle (Excel)..."), self.export_tables_xlsx, processing=True, icon_name="excel",
+                  tip=tr("Tutte le tabelle del chunk attivo in un file Excel, un foglio ciascuna: camere, sensori, "
+                         "marker, barre di scala, prodotti, classi, multispettrale, termico, punti di misura, US"))
+        self._act(exp, tr("Rapporto PDF..."), self.generate_pdf_report, processing=True, icon_name="pdf",
+                  tip=tr("Il rapporto di elaborazione da stampare: rilievo, calibrazione, accuratezza, parametri, "
+                         "prodotti, multispettrale e termico quando ci sono"))
         self._act(exp, tr("Pacchetto QField (tablet in trincea)..."), self.export_qfield, processing=True,
                   icon_name="export", tip=tr("Ortofoto, DEM, unita' e quote del chunk in una cartella per QField: si "
                                              "disegna sul tablet, poi File > Importa > Modifiche da QField"))
@@ -2013,7 +2019,7 @@ class MainWindow(QMainWindow):
                    "dem": "GeoTIFF (*.tif);;COG - Cloud Optimized GeoTIFF, ZSTD (*.tif)",
                    "ortho": "GeoTIFF (*.tif);;COG - Cloud Optimized GeoTIFF, JPEG (*.tif);;"
                             "COG - Cloud Optimized GeoTIFF, WebP con trasparenza (*.tif)",
-                   "cameras": "CSV (*.csv);;COLMAP (*.txt)", "reference": "CSV (*.csv)"}
+                   "cameras": "CSV (*.csv);;Excel (*.xlsx);;COLMAP (*.txt)", "reference": "CSV (*.csv);;Excel (*.xlsx)"}
         classes = None
         if what == "cloud":
             choices, codes = self._cloud_class_choices(noise=True)
@@ -2061,7 +2067,7 @@ class MainWindow(QMainWindow):
             elif what == "ortho":
                 ch.export_orthomosaic(path)
             elif what == "cameras":
-                ch.export_cameras(path, fmt="csv" if path.lower().endswith(".csv") else "colmap")
+                ch.export_cameras(path, fmt={".csv": "csv", ".xlsx": "xlsx"}.get(Path(path).suffix.lower(), "colmap"))
             elif what == "reference":
                 ch.export_reference(path)
         except Exception as exc:
@@ -2321,8 +2327,85 @@ class MainWindow(QMainWindow):
             return
         path, _ = QFileDialog.getSaveFileName(self, "Report", self._last_dir() + "/report.html", "HTML (*.html)")
         if path:
-            self.run_task("Report", lambda p: self.chunk.generate_report(path),
+            language = i18n.current()
+            self.run_task("Report", lambda p: self.chunk.generate_report(path, language=language),
                           lambda r: QDesktopServices.openUrl(QUrl.fromLocalFile(str(r))), refresh=False, save=False)
+
+    def generate_pdf_report(self) -> None:
+        """File > Esporta > Rapporto PDF: the processing report of the active chunk or of every
+        chunk (:func:`io.pdf_report.generate_pdf_report`) - survey, calibration, accuracy,
+        parameters, products, and the multispectral and thermal products when there are - opened
+        when it is written."""
+        if not self._need_chunk():
+            return
+        ch, doc = self.chunk, self.doc
+        enabled = [c for c in doc.chunks if c.enabled]
+        fields = [Field("title", "Titolo", tr("Rapporto di elaborazione")),
+                  Field("description", "Descrizione", "")]
+        if len(doc.chunks) > 1:
+            fields.append(Field("chunks", "Chunk", "active", choices=[
+                ("active", tr("Solo il chunk attivo ({0})", ch.label)),
+                ("all", tr("Tutti i chunk attivi ({0})", len(enabled) or len(doc.chunks)))]))
+        fields.append(Field("language", "Lingua", i18n.current(), choices=[("it", "Italiano"), ("en", "English")]))
+        v = ParamDialog.ask(self, "Rapporto PDF", fields,
+                            intro="Il rapporto si apre alla fine. Contiene i dati del rilievo, la calibrazione delle "
+                                  "camere, i riferimenti con i loro errori, i parametri usati, i prodotti con le loro "
+                                  "figure e, quando ci sono, i prodotti multispettrali, termici e i punti di misura.")
+        if not v:
+            return
+        stem = doc.path.stem if doc.path else "progetto"
+        start = str(Path(self._last_dir()) / f"{stem}_rapporto.pdf")
+        path, _ = QFileDialog.getSaveFileName(self, tr("Rapporto PDF"), start, "PDF (*.pdf)")
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        self._store_drawings()  # the measuring points and the units drawn go into the report
+        chunks = (enabled or list(doc.chunks)) if v.get("chunks") == "all" else [ch]
+        palettes = (str(self.settings.value("ms/palette", "rdylgn") or "rdylgn"),
+                    str(self.settings.value("thermal/palette", "iron") or "iron"))
+        from ..io.pdf_report import generate_pdf_report
+
+        title = v["title"].strip()
+        if title == tr("Rapporto di elaborazione"):
+            title = ""  # the report's own title, in the language chosen for it
+
+        def job(p):
+            return generate_pdf_report(doc, path, language=v["language"], chunks=chunks, progress=p,
+                                       title=title or None, description=v["description"].strip(),
+                                       index_palette=palettes[0], thermal_palette=palettes[1])
+
+        def done(out):
+            self.log_pane.info(tr("Rapporto scritto in {0}", out))
+            self.statusBar().showMessage(tr("Rapporto scritto in {0}", out), 10000)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(out)))
+
+        self.run_task("Rapporto PDF", job, done, refresh=False, save=False)
+
+    def export_tables_xlsx(self) -> None:
+        """File > Esporta > Tabelle (Excel): every table of the active chunk in one workbook, a
+        sheet each (:func:`io.tables.project_tables`), the headers in the language of the window."""
+        if not self._need_chunk():
+            return
+        ch, doc = self.chunk, self.doc
+        stem = doc.path.stem if doc.path else "progetto"
+        label = "".join(c if c.isalnum() or c in "-_" else "_" for c in ch.label).strip("_") or "chunk"
+        start = str(Path(self._last_dir()) / f"{stem}_{label}_tabelle.xlsx")
+        path, _ = QFileDialog.getSaveFileName(self, tr("Esporta le tabelle in Excel"), start, "Excel (*.xlsx)")
+        if not path:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+        self._store_drawings()
+        language = i18n.current()
+        from ..io.tables import export_tables
+
+        def done(out):
+            self.log_pane.info(tr("Tabelle esportate in {0}", out))
+            self.statusBar().showMessage(tr("Tabelle esportate in {0}", out), 10000)
+
+        self.run_task("Tabelle in Excel", lambda p: export_tables(ch, path, language=language, progress=p), done,
+                      refresh=False, save=False)
 
     def open_demo(self) -> None:
         default = str(Path.home() / "ppg_demo")
@@ -5941,7 +6024,8 @@ class MainWindow(QMainWindow):
 
         start = str(Path(self._last_dir()) / "punti_misura.gpkg")
         path, filt = QFileDialog.getSaveFileName(self, tr("Esporta i punti di misura"), start,
-                                                 "GeoPackage (*.gpkg);;CSV (*.csv);;GeoJSON (*.geojson)")
+                                                 "GeoPackage (*.gpkg);;CSV (*.csv);;GeoJSON (*.geojson);;"
+                                                 "Excel (*.xlsx)")
         if not path:
             return
         try:

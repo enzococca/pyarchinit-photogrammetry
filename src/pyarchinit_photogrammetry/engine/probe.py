@@ -160,11 +160,13 @@ class Probe:
 def write_points(points: list[dict], path, crs: str | None, fmt: str | None = None, table: str = "punti_misura") -> Path:
     """Measuring points (dicts with ``x``, ``y`` and their values, :meth:`Probe.record`) into a
     GeoPackage (``gpkg``: a point table with ``z`` too, the reference system of the chunk), a CSV
-    (``csv``: one line per point, QGIS reads it as delimited text with x and y) or a GeoJSON
-    (``geojson``; coordinates as they are, the CRS in its ``crs`` member). The columns are the
-    union of the points' fields."""
+    (``csv``: one line per point, QGIS reads it as delimited text with x and y), a GeoJSON
+    (``geojson``; coordinates as they are, the CRS in its ``crs`` member) or an Excel workbook
+    (``xlsx``: a sheet of the points, numbers as numbers, the CRS as the title of the workbook).
+    The columns are the union of the points' fields."""
     path = Path(path)
-    fmt = fmt or {".csv": "csv", ".geojson": "geojson", ".json": "geojson"}.get(path.suffix.lower(), "gpkg")
+    fmt = fmt or {".csv": "csv", ".geojson": "geojson", ".json": "geojson", ".xlsx": "xlsx"}.get(path.suffix.lower(),
+                                                                                                 "gpkg")
     fields: list[str] = []
     for p in points:
         for k in p:
@@ -180,6 +182,12 @@ def write_points(points: list[dict], path, crs: str | None, fmt: str | None = No
             for p in points:
                 w.writerow(["" if p.get(k) is None else p.get(k) for k in fields])
         return path
+    if fmt == "xlsx":  # a sheet of the points; the reference system is the title of the workbook
+        from ..io.tables import Sheet, write_xlsx
+
+        decimals = [DECIMALS.get(k, 4) if k != "label" else None for k in fields]
+        return write_xlsx(path, {table: Sheet(fields, [[p.get(k) for k in fields] for p in points], decimals)},
+                          title=crs or None)
     if fmt == "geojson":
         feats = [{"type": "Feature", "geometry": {"type": "Point", "coordinates":
                   [p["x"], p["y"]] + ([p["z"]] if p.get("z") is not None else [])},
@@ -190,7 +198,7 @@ def write_points(points: list[dict], path, crs: str | None, fmt: str | None = No
         path.write_text(json.dumps(doc, indent=1, ensure_ascii=False), encoding="utf-8")
         return path
     if fmt != "gpkg":
-        raise ValueError(f"unknown format {fmt!r}: gpkg, csv or geojson")
+        raise ValueError(f"unknown format {fmt!r}: gpkg, csv, geojson or xlsx")
     from shapely.geometry import Point
 
     from ..io import gpkg

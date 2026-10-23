@@ -61,6 +61,11 @@ class TimelineDialog(QDialog):
         self.phases.itemChanged.connect(self._date_edited)
         self.steps = _table(["Dalla fase", "Alla fase", "Unita'", "Asportato (m3)", "Riportato (m3)", "Area (m2)"])
         self.relations = _table(["Scrivi", "US sopra", "Rapporto", "US sotto", "Sovrapposizione (m2)", "Fasi"])
+        from .table_export import install_excel_menu
+
+        for table, name in ((self.phases, tr("Fasi")), (self.steps, tr("Volumi asportati")),
+                            (self.relations, tr("Rapporti suggeriti"))):
+            install_excel_menu(table, name)
         self.tabs.addTab(self.phases, tr("Fasi"))
         self.tabs.addTab(self.steps, tr("Volumi asportati"))
         self.tabs.addTab(self.relations, tr("Rapporti suggeriti"))
@@ -109,7 +114,11 @@ class TimelineDialog(QDialog):
             self.relations.setItem(r, 1, _item(timeline._name(rel["upper"])))
             self.relations.setItem(r, 2, _item(rel["relation"]))
             self.relations.setItem(r, 3, _item(timeline._name(rel["lower"])))
-            self.relations.setItem(r, 4, _item(number(rel["overlap_m2"], 3), right=True))
+            overlap = _item(number(rel["overlap_m2"], 3), right=True)
+            from .table_export import RAW_ROLE
+
+            overlap.setData(RAW_ROLE, float(rel["overlap_m2"]))
+            self.relations.setItem(r, 4, overlap)
             self.relations.setItem(r, 5, _item(" -> ".join(rel["phases"])))
         self.b_write.setEnabled(can_write and bool(report["relations"]))
         n = len(report["phases"])
@@ -120,8 +129,12 @@ class TimelineDialog(QDialog):
     def _add_step(self, a, b, unit, cut, fill, area, bold: bool = False) -> None:
         r = self.steps.rowCount()
         self.steps.insertRow(r)
+        from .table_export import RAW_ROLE
+
         for c, v in enumerate([a, b, unit, number(cut, 3), number(fill, 3), number(area, 2)]):
             it = _item(v, right=c >= 3)
+            if c >= 3:
+                it.setData(RAW_ROLE, float((cut, fill, area)[c - 3]))  # the Excel export keeps the number
             if bold:
                 f = it.font()
                 f.setBold(True)
@@ -153,12 +166,22 @@ class TimelineDialog(QDialog):
             return
         self.date_changed.emit(int(item.data(Qt.ItemDataRole.UserRole)), text)
 
-    def _save_csv(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, tr("Salva CSV"), "fasi_scavo.csv", "CSV (*.csv)")
-        if path:
+    def _save_csv(self, path: str | None = None) -> None:
+        if path is None:
+            path, _ = QFileDialog.getSaveFileName(self, tr("Salva CSV"), "fasi_scavo.csv",
+                                                  "CSV (*.csv);;Excel (*.xlsx)")
+        if not path:
+            return
+        if path.lower().endswith(".xlsx"):  # the three tables, a sheet each, numbers as numbers
+            from ..io.tables import write_xlsx
+            from .table_export import table_data
+
+            path = write_xlsx(path, {self.tabs.tabText(i): table_data(self.tabs.widget(i))
+                                     for i in range(self.tabs.count())})
+        else:
             with open(path, "w", encoding="utf-8", newline="") as f:
                 f.write(timeline.timeline_csv(self.report))
-            self.status.setText(tr("Salvato {0}", path))
+        self.status.setText(tr("Salvato {0}", path))
 
     def _write(self) -> None:
         chosen = self.chosen_relations()

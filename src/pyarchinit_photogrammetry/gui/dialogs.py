@@ -1526,16 +1526,20 @@ class UsFormDialog(QDialog):
 
 
 class TableDialog(QDialog):
-    """Results as a table (numbers right aligned) with *Salva CSV...* when ``save(path)`` is given."""
+    """Results as a table (numbers right aligned) with *Salva CSV...* when ``save(path)`` is given
+    and *Salva Excel...* (the values as they are: numbers stay numbers), also in the context menu."""
 
     def __init__(self, title: str, headers: list[str], rows: list[list], parent=None, intro: str = "",
                  save=None, csv_name: str = "tabella.csv"):
         from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem
 
+        from .table_export import RAW_ROLE, install_excel_menu
+
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setMinimumSize(560, 320)
         self._save, self._csv_name = save, csv_name
+        self._title, self._headers, self._rows = title, list(headers), [list(r) for r in rows]
         lay = QVBoxLayout(self)
         if intro:
             lab = QLabel(intro)
@@ -1553,18 +1557,36 @@ class TableDialog(QDialog):
                 it = QTableWidgetItem(text)
                 if isinstance(value, (int, float)):
                     it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                    if not isinstance(value, bool):
+                        it.setData(RAW_ROLE, value)  # the Excel export keeps the number
                 self.table.setItem(r, c, it)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setStretchLastSection(True)
+        install_excel_menu(self.table, title)
         lay.addWidget(self.table)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         bb.rejected.connect(self.reject)
         if save is not None:
             b = bb.addButton("Salva CSV...", QDialogButtonBox.ButtonRole.ActionRole)
             b.clicked.connect(self._save_csv)
+        self.b_xlsx = bb.addButton(tr("Salva Excel..."), QDialogButtonBox.ButtonRole.ActionRole)
+        self.b_xlsx.clicked.connect(self._save_xlsx)
         lay.addWidget(bb)
         self.status = QLabel("")
         lay.addWidget(self.status)
+
+    def _save_xlsx(self, path: str | None = None) -> None:
+        """The rows of the table into an Excel workbook (asked where, unless ``path``)."""
+        from .table_export import export_rows
+
+        if path is None:
+            start = str(Path(self._csv_name).with_suffix(".xlsx"))
+            path, _ = QFileDialog.getSaveFileName(self, tr("Salva Excel"), start, "Excel (*.xlsx)")
+            if not path:
+                return
+        out = export_rows(self, self._title, self._headers, self._rows, path)
+        if out is not None:
+            self.status.setText(tr("Salvato {0}", out))
 
     def _save_csv(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, tr("Salva CSV"), self._csv_name, "CSV (*.csv)")

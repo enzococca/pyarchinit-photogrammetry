@@ -166,8 +166,8 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
 ## Menus
 
 * **File**: new/open/save, recent projects, export (cloud, model, DEM, orthomosaic, cameras,
-  references, and all of them cut with a box or a polygon), HTML report, *Crea e apri progetto
-  demo*, *Pagina iniziale*.
+  references, *Tabelle (Excel)*, *Rapporto PDF*, and all of them cut with a box or a polygon), HTML
+  report, *Crea e apri progetto demo*, *Pagina iniziale* (the report and the tables: see below).
 * **Flusso di lavoro**: add photos/folder, *Ricollega foto* (the photos with the same names in
   another folder and its subfolders: a copy on an external disk of a Dropbox folder kept online
   only, a moved folder), add chunk, *Allinea chunk* (bring other chunks into the frame of a reference chunk by markers with the same name, photos in common or overlapping clouds), *Unisci chunk* (a new chunk with the photos, markers, tie points, clouds and optionally meshes of aligned chunks), detect coded markers, align - the dialog of
@@ -234,6 +234,57 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
 * **Vista**: panes, views (F2 model, F3 orthomosaic/DEM, F4 photo), console (Ctrl+Shift+P), theme.
 * **Aiuto**: online documentation, environment diagnosis, log folder, *Controlla aggiornamenti*,
   *Controlla gli aggiornamenti all'avvio*, about.
+
+## PDF report and Excel tables
+
+**File > Esporta > Rapporto PDF...** writes the processing report to print or to hand over: a title
+and a description for the first page, the active chunk or every enabled chunk, the language
+(Italian or English, the window's by default). The PDF opens when it is written. It is an A4
+document: a first page with the project, the date, the version of the program, the chunks of the
+report and the contents with their pages, then every chunk from a new page with its parts - each
+only when the chunk has it:
+
+* **survey data**: photos, aligned photos, sensors, tie points and their projections, mean
+  reprojection error, ground resolution and camera distance, area covered, reference system, and
+  the positions of the cameras and of the markers over the orthomosaic (or the DEM);
+* **camera calibration**: every sensor with its model and its parameters;
+* **reference and accuracy**: the georeferencing, the control and check points with their errors
+  and their RMSE in X, Y, Z, XY and in all, the scale bars, the error of the GPS of the photos;
+* **processing parameters**: what every step was run with (alignment, optimisation, depth maps,
+  dense cloud, model, texture, DEM, orthomosaic);
+* **products**: dense cloud and its point classes, model and texture, the DEM in hypsometric tints
+  over its hillshade with a colour bar in metres, the orthomosaic - size, resolution, extent, files;
+* **multispectral** (when the captures of a multispectral camera are there): bands and reference
+  band, radiometric model and calibration (panel, sun sensor or neither), registration of the
+  bands, balance of the photos, the reflectance in false colour with the statistics of every band,
+  every index computed, on the palette chosen in the Multispettrale pane, with its colour bar and
+  its statistics (minimum, maximum, mean, P2, P98), the zones with their legend and the area of each;
+* **thermal** (when there are thermal frames): decoder (DJI Thermal SDK, FLIR, TIFF), frames, how
+  they were registered, the parameters of the measure (emissivity, reflected and atmospheric
+  temperature, humidity, distance), the offsets between the frames, the temperature orthomosaic on
+  the palette of the Termico pane with its colour bar in degrees Celsius and its statistics, the
+  anomalies;
+* **measuring points**: the points of the *Punto di misura* tool with every value read there.
+
+The figures carry their scale bar and north arrow; the sections are bookmarks of the PDF. The text
+is DejaVu Sans, so degrees, diameters and accented letters print. *Genera report HTML...* writes
+the same content as one web page.
+
+**File > Esporta > Tabelle (Excel)...** writes every table of the active chunk into one workbook, a
+sheet each: project, cameras (estimated and reference positions, omega/phi/kappa, errors, tie
+points, precision), sensors and their parameters, markers, scale bars, processing parameters,
+products, point classes, versions, multispectral bands, indices and zones, thermal measure and the
+offsets of its frames, measuring points, spot heights, the units drawn, stones, US proxies, the
+sections of the project. Numbers stay numbers (with the decimals that suit them); the header row is
+frozen and has a filter.
+
+Every table of the panes and of the result windows has **Esporta tabella in Excel...** in its context
+menu (right click): markers, scale bars and cameras of *Riferimenti*, the attributes of the selected
+feature and - right click on a layer in *Layer* - the attributes of every feature of that layer, the
+US proxies, the phases and volumes of the excavation, the proposed units and relations, the similar
+pottery shapes, the calibration of a sensor. The exports that wrote a CSV of a table (references,
+cameras, measuring points, the classes from the units, the phases of the excavation) offer an Excel
+workbook too.
 
 ## Orthophoto at full resolution and patches
 

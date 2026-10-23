@@ -930,10 +930,27 @@ class Chunk:
             cut = crop_raster(src, Path(tmp) / "cut.tif", region)
             return export_cog(cut, path, compression, quality)
 
-    def generate_report(self, path: str | os.PathLike) -> Path:
+    def generate_report(self, path: str | os.PathLike, language: str | None = "en") -> Path:
+        """The processing report as an HTML page (``language``: ``en``, ``it``, None for the
+        language of the interface or of the system)."""
         from ..io import report
 
-        return report.generate_report(self, path)
+        return report.generate_report(self, path, language=language)
+
+    def generate_pdf_report(self, path: str | os.PathLike, language: str | None = None,
+                            progress: ProgressCallback | None = None, **options) -> Path:
+        """The processing report of this chunk as a printable PDF (:func:`io.pdf_report.generate_pdf_report`:
+        ``title``, ``description``, ``index_palette``, ``thermal_palette``)."""
+        from ..io.pdf_report import generate_pdf_report
+
+        return generate_pdf_report(self, path, language=language, progress=progress, **options)
+
+    def export_tables(self, path: str | os.PathLike, language: str | None = None,
+                      progress: ProgressCallback | None = None) -> Path:
+        """Every table of the chunk in one Excel workbook, a sheet each (:func:`io.tables.project_tables`)."""
+        from ..io.tables import export_tables
+
+        return export_tables(self, path, language=language, progress=progress)
 
     # ----------------------------------------------------------- serialisation
     def _base_dir(self) -> Path | None:

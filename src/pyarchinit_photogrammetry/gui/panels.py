@@ -697,6 +697,9 @@ class ReferencePane(QWidget):
         self.cams.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.cams.setAlternatingRowColors(True)
         self.cams.verticalHeader().setVisible(False)
+        from .table_export import install_excel_menu
+
+        install_excel_menu(self.cams, tr("Camere"))
         split.addWidget(self.cams)
         lay.addWidget(split, 1)
         self.summary = QLabel("")
@@ -892,6 +895,9 @@ class ReferencePane(QWidget):
         a_move = menu.addAction(icon("marker"), tr("Sposta {0} nella vista 3D", names[0]) if len(keys) == 1
                                 else tr("Sposta nella vista 3D... (seleziona un marker)"))
         a_move.setEnabled(len(keys) == 1)
+        from .table_export import add_excel_action
+
+        add_excel_action(menu, self.table, "Marker")  # the same word in English
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if chosen is a_move:
             self.move3d_requested.emit(keys[0])
@@ -914,6 +920,9 @@ class ReferencePane(QWidget):
         a_del = menu.addAction(icon("delete"), tr("Elimina {0} barre di scala", len(rows)) if len(rows) > 1
                                else tr("Elimina la barra di scala"))
         a_del.setEnabled(bool(rows))
+        from .table_export import add_excel_action
+
+        add_excel_action(menu, self.bars, tr("Barre di scala"))
         if menu.exec(self.bars.viewport().mapToGlobal(pos)) is a_del:
             self.delete_bars(rows)
 
@@ -1492,6 +1501,11 @@ class LayersPane(QWidget):
                                    | QAbstractItemView.EditTrigger.AnyKeyPressed)
         self.attrs.setMaximumHeight(200)
         self.attrs.itemChanged.connect(self._attr_changed)
+        from .table_export import install_excel_menu
+
+        install_excel_menu(self.attrs, tr("Attributi"))
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._tree_menu)
         lay.addWidget(self.attrs)
         hint = QLabel(tr("Doppio clic su un valore per modificarlo"))
         hint.setObjectName("pageSubtitle")
@@ -1580,6 +1594,39 @@ class LayersPane(QWidget):
             return
         name, _ = item.data(0, Qt.ItemDataRole.UserRole)
         self.view.remove_layer(name)
+
+    def _tree_menu(self, pos) -> None:
+        item = self.tree.itemAt(pos) or self.tree.currentItem()
+        if item is None or self.view is None:
+            return
+        self.layer_menu(item.data(0, Qt.ItemDataRole.UserRole)[0]).exec(self.tree.viewport().mapToGlobal(pos))
+
+    def layer_menu(self, name: str):
+        """The context menu of a layer of the tree: its attributes into Excel."""
+        from PySide6.QtWidgets import QMenu
+
+        menu = QMenu(self)
+        a = menu.addAction(icon("excel"), tr("Esporta gli attributi di {0} in Excel...", translate(name)))
+        a.triggered.connect(lambda _=False: self.export_layer(name))
+        a.setEnabled(self.view is not None and bool(self.view.features(name)))
+        return menu
+
+    def layer_table(self, name: str) -> tuple[list[str], list[list]]:
+        """The attributes of every feature of a layer: the fields of all of them, a row each."""
+        feats = self.view.features(name) if self.view is not None else []
+        keys: list[str] = []
+        for attrs in feats:
+            for k in attrs:
+                if not str(k).startswith("_") and k not in keys:
+                    keys.append(k)
+        return keys, [[attrs.get(k) for k in keys] for attrs in feats]
+
+    def export_layer(self, name: str, path: str | None = None):
+        """The attribute table of a layer into an Excel workbook (asked where, unless ``path``)."""
+        from .table_export import export_rows
+
+        headers, rows = self.layer_table(name)
+        return export_rows(self, translate(name), headers, rows, path)
 
     def show_attributes(self, layer: str, attrs: dict) -> None:
         idx = int(attrs.get("_index", -1))
@@ -1791,6 +1838,9 @@ class ProxiesPane(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setAlternatingRowColors(True)
         self.table.itemDoubleClicked.connect(lambda it: self.us_requested.emit(it.row()))
+        from .table_export import install_excel_menu
+
+        install_excel_menu(self.table, tr("Proxy US"))
         lay.addWidget(self.table, 1)
         bar2 = FlowLayout()
         self.b_pub = _tool("publish", tr("Pubblica in PyArchInit"), tr("Modello 3D collegato alla scheda US (media)"))

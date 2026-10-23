@@ -229,6 +229,15 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
                 with tempfile.TemporaryDirectory() as tmp:
                     for ext in ("png", "svg", "pdf", "eps"):
                         fig.savefig(os.path.join(tmp, f"check.{ext}"))
+                    # the PDF report (fpdf2, fontTools, the fonts) and the Excel tables (openpyxl)
+                    from ..io.pdf_report import sample_pdf
+                    from ..io.tables import read_xlsx, write_xlsx
+
+                    if not sample_pdf(os.path.join(tmp, "report.pdf")).read_bytes().startswith(b"%PDF"):
+                        raise RuntimeError("the PDF report is not a PDF")
+                    book = write_xlsx(os.path.join(tmp, "tables.xlsx"), {"check": (["a", "b"], [[1, 2.5]])})
+                    if read_xlsx(book)["check"][1] != [1, 2.5]:
+                        raise RuntimeError("the Excel workbook does not read back")
                 libs = "ok"
             except Exception as exc:
                 libs = f"missing ({str(exc).splitlines()[0][:120]})"

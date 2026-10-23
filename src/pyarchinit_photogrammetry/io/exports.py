@@ -151,7 +151,7 @@ def opk_from_rotation(r_world_from_cam: np.ndarray) -> tuple[float, float, float
 
 def export_cameras(chunk, path, fmt: str = "colmap") -> Path:
     """``colmap``: COLMAP text model (internal frame); ``csv``: camera centres in world
-    coordinates with omega/phi/kappa."""
+    coordinates with omega/phi/kappa; ``xlsx``: the same as an Excel workbook."""
     path = Path(path)
     if fmt == "colmap":
         from ..engine.sfm import load_reconstruction
@@ -159,16 +159,23 @@ def export_cameras(chunk, path, fmt: str = "colmap") -> Path:
         path.mkdir(parents=True, exist_ok=True)
         load_reconstruction(chunk).write_text(str(path))
         return path
-    if fmt == "csv":
+    if fmt in ("csv", "xlsx"):
         _, rot, _ = geometry.decompose_similarity(chunk.transform)
+        header = ["label", "x", "y", "z", "omega", "phi", "kappa", "sensor", "path"]
+        rows = []
+        for cam in chunk.aligned_cameras:
+            c = chunk.to_world(cam.center)
+            o, p, k = opk_from_rotation(rot @ cam.transform[:3, :3])
+            rows.append([cam.label, *(round(float(v), 4) for v in c), round(o, 5), round(p, 5), round(k, 5),
+                         chunk.sensor(cam).label, cam.path])
+        if fmt == "xlsx":
+            from .tables import Sheet, write_xlsx
+
+            return write_xlsx(path, {"cameras": Sheet(header, rows, [None, 4, 4, 4, 5, 5, 5, None, None])})
         with open(path, "w", newline="") as fh:
             w = csv.writer(fh)
-            w.writerow(["label", "x", "y", "z", "omega", "phi", "kappa", "sensor", "path"])
-            for cam in chunk.aligned_cameras:
-                c = chunk.to_world(cam.center)
-                o, p, k = opk_from_rotation(rot @ cam.transform[:3, :3])
-                w.writerow([cam.label, *np.round(c, 4), round(o, 5), round(p, 5), round(k, 5),
-                            chunk.sensor(cam).label, cam.path])
+            w.writerow(header)
+            w.writerows(rows)
         return path
     raise ValueError(f"unknown camera export format {fmt!r}")
 

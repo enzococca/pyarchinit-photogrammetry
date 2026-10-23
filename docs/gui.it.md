@@ -166,8 +166,9 @@ Dalla riga di comando `ppg update` dice se esiste una versione più nuova e `ppg
 ## Menu
 
 * **File**: nuovo/apri/salva, progetti recenti, esportazione (nuvola, modello, DEM, ortofoto, camere,
-  riferimenti, e tutti insieme ritagliati con un riquadro o un poligono), rapporto HTML, *Crea e apri
-  progetto demo*, *Pagina iniziale*.
+  riferimenti, *Tabelle (Excel)*, *Rapporto PDF*, e tutti insieme ritagliati con un riquadro o un
+  poligono), rapporto HTML, *Crea e apri progetto demo*, *Pagina iniziale* (il rapporto e le tabelle:
+  vedi sotto).
 * **Flusso di lavoro**: aggiungi foto/cartella, *Ricollega foto* (le foto con gli stessi nomi in
   un'altra cartella e nelle sue sottocartelle: una copia su disco esterno di una cartella Dropbox
   tenuta solo online, una cartella spostata), aggiungi chunk, *Allinea chunk* (porta altri chunk nel sistema di un chunk di riferimento tramite i marker con lo stesso nome, le foto in comune o le nuvole che si sovrappongono), *Unisci chunk* (un nuovo chunk con le foto, i marker, i punti di legame, le nuvole e, a scelta, le mesh dei chunk allineati), rileva i marker codificati, allinea - la finestra di
@@ -235,6 +236,59 @@ Dalla riga di comando `ppg update` dice se esiste una versione più nuova e `ppg
 * **Vista**: pannelli, viste (F2 modello, F3 ortofoto/DEM, F4 foto), console (Ctrl+Maiusc+P), tema.
 * **Aiuto**: documentazione in linea, diagnostica dell'ambiente, cartella dei log, *Controlla aggiornamenti*,
   *Controlla gli aggiornamenti all'avvio*, informazioni.
+
+## Rapporto PDF e tabelle Excel
+
+**File > Esporta > Rapporto PDF...** scrive il rapporto di elaborazione da stampare o da consegnare:
+un titolo e una descrizione per la prima pagina, il chunk attivo o tutti i chunk attivi, la lingua
+(italiano o inglese, quella della finestra se non si cambia). Il PDF si apre quando e' scritto. E'
+un documento A4: una prima pagina con il progetto, la data, la versione del programma, i chunk del
+rapporto e l'indice con le pagine, poi ogni chunk da una pagina nuova con le sue parti, ognuna solo
+quando il chunk la ha:
+
+* **dati del rilievo**: foto, foto allineate, sensori, punti di legame e loro proiezioni, errore
+  medio di riproiezione, risoluzione a terra e distanza di ripresa, area coperta, sistema di
+  riferimento, e la posizione delle camere e dei marker sull'ortofoto (o sul DEM);
+* **calibrazione delle camere**: ogni sensore con il suo modello e i suoi parametri;
+* **riferimenti e accuratezza**: la georeferenziazione, i punti di controllo e di verifica con i loro
+  errori e il loro RMSE in X, Y, Z, XY e totale, le barre di scala, l'errore del GPS delle foto;
+* **parametri di elaborazione**: con che cosa e' stato eseguito ogni passo (allineamento,
+  ottimizzazione, mappe di profondita', nuvola densa, modello, texture, DEM, ortofoto);
+* **prodotti**: nuvola densa e classi dei punti, modello e texture, il DEM in tinte ipsometriche
+  sull'ombreggiatura con la barra dei colori in metri, l'ortofoto: dimensione, risoluzione,
+  estensione, file;
+* **multispettrale** (quando ci sono le riprese di una camera multispettrale): bande e banda di
+  riferimento, modello e calibrazione radiometrica (pannello, sensore solare o nessuno dei due),
+  registrazione delle bande, pareggiamento delle foto, la riflettanza in falso colore con le
+  statistiche di ogni banda, ogni indice calcolato, con la palette scelta nel pannello
+  Multispettrale, la sua barra dei colori e le sue statistiche (minimo, massimo, media, P2, P98), le
+  zone con la legenda e l'area di ciascuna;
+* **termico** (quando ci sono fotogrammi termici): decodifica (DJI Thermal SDK, FLIR, TIFF),
+  fotogrammi, come sono stati registrati, i parametri della misura (emissivita', temperatura
+  riflessa e atmosferica, umidita', distanza), gli scostamenti tra i fotogrammi, l'ortofoto termica
+  con la palette del pannello Termico, la barra dei colori in gradi Celsius e le statistiche, le
+  anomalie;
+* **punti di misura**: i punti dello strumento *Punto di misura* con tutti i valori letti li'.
+
+Le figure hanno la barra di scala e la freccia del nord; le sezioni sono segnalibri del PDF. Il testo
+e' in DejaVu Sans, quindi gradi, diametri e lettere accentate si stampano. *Genera report HTML...*
+scrive lo stesso contenuto in una pagina web.
+
+**File > Esporta > Tabelle (Excel)...** scrive tutte le tabelle del chunk attivo in una cartella di
+lavoro, un foglio ciascuna: progetto, camere (posizioni stimate e di riferimento, omega/phi/kappa,
+errori, punti di legame, precisione), sensori e parametri, marker, barre di scala, parametri di
+elaborazione, prodotti, classi dei punti, versioni, bande, indici e zone multispettrali, misura
+termica e scostamenti dei fotogrammi, punti di misura, quote, unita' disegnate, pietre, proxy US,
+sezioni del progetto. I numeri restano numeri (con i decimali adatti); la riga delle intestazioni
+e' bloccata e ha il filtro.
+
+Ogni tabella dei pannelli e delle finestre dei risultati ha **Esporta tabella in Excel...** nel menu
+contestuale (tasto destro): marker, barre di scala e camere di *Riferimenti*, gli attributi
+dell'elemento selezionato e - tasto destro su un layer in *Layer* - gli attributi di tutti gli
+elementi del layer, i proxy US, le fasi e i volumi dello scavo, le unita' e i rapporti proposti, le
+forme ceramiche simili, la calibrazione di un sensore. Le esportazioni che scrivevano il CSV di una
+tabella (riferimenti, camere, punti di misura, classi dalle US, fasi dello scavo) offrono anche il
+file Excel.
 
 ## Ortofoto a piena risoluzione e patch
 

@@ -38,8 +38,10 @@ spiegazioni più lunghe seguono la tabella.
 | `build_orthomosaic(resolution, surface, blending, colour_correction, ghosting, fill_holes)` | l'ortofoto sul DEM o sul modello (*Ortofoto senza cuciture e correzione del colore*) |
 | `calibrate_colours()` | esposizione e vignettatura delle foto (*Ortofoto senza cuciture e correzione del colore*) |
 | `export_point_cloud(path)`, `export_model(path)`, `export_dem(path)`, `export_orthomosaic(path)` | i prodotti in coordinate mondo (formati e opzioni: *Esportazioni per il web*, *Confidenza, pulizia e ritaglio*) |
-| `export_cameras(fmt="csv")` | le camere, `csv` o `colmap` |
-| `generate_report(path)` | il rapporto HTML del chunk |
+| `export_cameras(fmt="csv")` | le camere, `csv`, `xlsx` o `colmap` |
+| `generate_report(path, language="en")` | il rapporto HTML del chunk (*Rapporti e tabelle*, sotto) |
+| `generate_pdf_report(path, language=None, title=, description=)` | il rapporto PDF da stampare del chunk (*Rapporti e tabelle*) |
+| `export_tables(path, language=None)` | tutte le tabelle del chunk in un file Excel (*Rapporti e tabelle*) |
 
 Ogni metodo di elaborazione accetta `progress=callback(fraction, message)`.
 
@@ -1215,6 +1217,57 @@ Importazioni: `integrations.metashape.import_psx` porta le barre di scala del pr
 del chunk, senza spunta = barra di verifica); `integrations.webodm.import_task` porta le pose delle
 camere (`read_cameras`: `cameras.json`, `odm_report/shots.geojson`) e i GCP come marker
 (`read_gcps`), triangolati subito.
+
+## Rapporti e tabelle
+
+| Chiamata | Che cosa fa |
+| --- | --- |
+| `io.pdf_report.generate_pdf_report(doc_o_chunk, path, language=None, chunks=None, title=None, description="", index_palette="rdylgn", thermal_palette="iron", progress=None)` | il rapporto di elaborazione in un PDF A4 |
+| `io.report.generate_report(doc_o_chunk, path, language="en")` | lo stesso rapporto in una pagina HTML (figure incluse) |
+| `io.report_content.collect(doc_o_chunk, language=None, chunks=None, ...)` | il contenuto da cui sono disegnati: un `Report` di `Section` con `KeyValues`, `Table`, `Figure`, `Paragraph` |
+| `io.tables.write_xlsx(path, {foglio: (intestazioni, righe)})` | tabelle in un file Excel, un foglio ciascuna |
+| `io.tables.project_tables(chunk, language=None)`, `io.tables.export_tables(chunk, path, language=None)` | tutte le tabelle di un chunk, come `Sheet` o scritte in un file |
+| `io.tables.read_xlsx(path)` | i valori di ogni foglio, riga per riga |
+
+`generate_pdf_report` accetta un `Document` (i suoi chunk attivi, o i `chunks` dati come oggetti,
+chiavi o nomi) o un `Chunk`. `language` e' `it` o `en`; senza, il rapporto parla la lingua
+dell'interfaccia (*Vista > Lingua*, `PPG_LANG`), altrimenti quella del sistema. Il rapporto ha una
+prima pagina (titolo, descrizione, progetto, data, versione, i chunk e l'indice con le pagine) e,
+per ogni chunk, le parti che ha: dati del rilievo (con la posizione delle camere e dei marker
+sull'ortofoto), calibrazione delle camere, riferimenti e loro errori (punti di controllo e di
+verifica con l'RMSE in X, Y, Z, XY e totale, barre di scala, errore del GPS delle foto), i parametri
+di elaborazione tenuti in `chunk.meta`, nuvola densa e classi dei punti, modello, DEM (tinte
+ipsometriche sull'ombreggiatura, barra dei colori in metri), ortofoto, i prodotti multispettrali
+(bande, modello e calibrazione radiometrica, registrazione, pareggiamento, riflettanza in falso
+colore e statistiche di ogni banda, ogni indice con `index_palette`, la sua barra dei colori e le
+statistiche, le zone con legenda e aree), i prodotti termici (decodifica, fotogrammi, parametri
+della misura, scostamenti tra i fotogrammi, l'ortofoto termica con `thermal_palette`, barra dei
+colori in gradi Celsius e statistiche, le anomalie) e i punti di misura. Una parte che non si
+riesce a leggere diventa una nota; il rapporto continua. Le figure hanno al massimo 1600 pixel di
+lato (JPEG, PNG per le zone), con barra di scala e freccia del nord; il testo e' in DejaVu Sans
+(`report_content.font_files`: i font di matplotlib, altrimenti del sistema, altrimenti quelli di
+base). Il vecchio `chunk.generate_report` resta in inglese se non si passa `language`.
+
+`project_tables` da' progetto, camere (posizioni stimate e di riferimento, omega/phi/kappa, errori,
+punti di legame per foto, precisione), sensori e parametri, marker, barre di scala, parametri di
+elaborazione, prodotti, classi dei punti, versioni, bande, indici e zone multispettrali, misura
+termica e scostamenti dei fotogrammi, punti di misura, quote, unita' disegnate, pietre, proxy US e
+sezioni del progetto, con le intestazioni in `language`. `write_xlsx` tiene i numeri come numeri
+(anche quelli di numpy; NaN e None vuoti) con un formato numerico per colonna (`Sheet.decimals`,
+altrimenti dai valori), scrive come testo un testo che comincia con `=`, rende validi e unici i
+nomi dei fogli (`sheet_names`), blocca la riga delle intestazioni e ci mette il filtro.
+
+`markers.gcp.export_reference(chunk, "x.xlsx")`, `chunk.export_cameras(path, fmt="xlsx")` e
+`engine.probe.write_points(punti, "x.xlsx", crs)` scrivono un file Excel invece del CSV.
+
+Dalla riga di comando:
+
+```bash
+ppg report scavo.ppg                                  # scavo_report.pdf, tutti i chunk attivi
+ppg report scavo.ppg --pdf rapporto.pdf --html rapporto.html --lang it --chunk "Saggio 1" \
+    --title "Saggio 1, campagna 2026" --description "Rilievo fotogrammetrico"
+ppg tables scavo.ppg tabelle.xlsx --chunk "Saggio 1" --lang en
+```
 
 ## Moduli
 

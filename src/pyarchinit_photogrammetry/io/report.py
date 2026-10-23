@@ -1,92 +1,136 @@
-"""Processing report (standalone HTML, previews embedded)."""
+"""Processing report as a standalone HTML page (the figures embedded).
+
+The content is the one of the PDF report (:mod:`io.report_content`): survey, calibration,
+references and their errors, processing parameters, products, multispectral and thermal products,
+measuring points; :mod:`io.pdf_report` lays the same content out for printing.
+"""
 from __future__ import annotations
 
 import base64
 import html
-import io
-from datetime import datetime
 from pathlib import Path
 
-import numpy as np
+from .report_content import ColourBar, Figure, KeyValues, Legend, Paragraph, Report, Section, Table, collect
+
+CSS = """
+body{font-family:"DejaVu Sans",system-ui,-apple-system,"Segoe UI",sans-serif;max-width:1000px;margin:2em auto;
+padding:0 1em;color:#232323;background:#fff;line-height:1.4}
+h1{color:#1f4e79;margin-bottom:.1em}h2{color:#1f4e79;border-bottom:2px solid #1f4e79;padding-bottom:.2em;margin-top:2em}
+h3{color:#1f4e79;border-bottom:1px solid #bec6d0;padding-bottom:.15em;margin-top:1.6em}h4{margin:1.2em 0 .4em}
+.sub{font-size:1.25em;margin-top:0}
+table{border-collapse:collapse;margin:.4em 0 1em;font-size:13px}
+td,th{padding:3px 8px;text-align:left;vertical-align:top}th{background:#1f4e79;color:#fff}
+tr:nth-child(even) td{background:#f2f5f8}td.r,th.r{text-align:right}
+table.kv td:first-child{font-weight:bold;color:#464646;padding-right:1.5em}
+figure{margin:1em 0;text-align:center}figure img{max-width:100%;border:1px solid #bec6d0}
+figcaption{font-style:italic;color:#737373;font-size:13px}
+.bar{display:inline-block;width:min(380px,60%);margin:.4em 0;text-align:left;font-size:11px;color:#3c3c3c}
+.ramp{height:12px;border:1px solid #787878}.ticks{position:relative;height:1.3em}.ticks span{position:absolute;
+transform:translateX(-50%)}.legend{font-size:12px;margin:.3em 0}.legend span{display:inline-block;margin:0 .8em .2em 0}
+.legend i{display:inline-block;width:12px;height:11px;border:1px solid #5a5a5a;margin-right:4px;vertical-align:-1px}
+.note{color:#737373;font-style:italic;font-size:13px}nav li.l0{font-weight:bold;margin-top:.3em}
+"""
 
 
-def _png_preview(path: Path, max_side: int = 900, dem: bool = False) -> str | None:
-    if path is None or not Path(path).exists():
-        return None
-    import rasterio
-    from PIL import Image
-
-    with rasterio.open(path) as src:
-        f = max(1, int(np.ceil(max(src.width, src.height) / max_side)))
-        out = (src.count, max(1, src.height // f), max(1, src.width // f))
-        arr = src.read(out_shape=out)
-        nodata = src.nodata
-    if dem:
-        a = arr[0].astype(float)
-        if nodata is not None:
-            a[a == nodata] = np.nan
-        lo, hi = np.nanpercentile(a, [2, 98]) if np.isfinite(a).any() else (0, 1)
-        t = np.clip((a - lo) / max(hi - lo, 1e-9), 0, 1)
-        rgb = np.dstack([t, 0.4 + 0.4 * (1 - abs(t - 0.5) * 2), 1 - t])
-        rgb[~np.isfinite(a)] = 1
-        img = Image.fromarray((rgb * 255).astype(np.uint8))
-    else:
-        img = Image.fromarray(np.moveaxis(arr[:4], 0, -1).astype(np.uint8), "RGBA" if arr.shape[0] == 4 else "RGB")
-    buf = io.BytesIO()
-    img.save(buf, "PNG")
-    return base64.b64encode(buf.getvalue()).decode()
+def generate_report(chunk, path, language: str | None = "en", progress=None, index_palette: str = "rdylgn",
+                    thermal_palette: str = "iron") -> Path:
+    """The HTML report of ``chunk`` at ``path`` (a :class:`Document` gives every enabled chunk).
+    ``language``: ``en`` (the default, as the report always was), ``it``, or None for the language
+    of the interface or of the system."""
+    report = collect(chunk, language=language, index_palette=index_palette, thermal_palette=thermal_palette,
+                     progress=progress)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_html(report), encoding="utf-8")
+    return path
 
 
-def _table(rows: list[dict], cols: list[str]) -> str:
-    def fmt(v):
-        if v is None:
-            return ""
-        if isinstance(v, float):
-            return f"{v:.4f}"
-        return html.escape(str(v))
+def render_html(report: Report) -> str:
+    """A report as one HTML page (figures as data URIs)."""
+    w = report.words
+    e = html.escape
+    parts = [f"<h1>{e(report.title)}</h1>", f"<p class='sub'>{e(report.project)}</p>", _key_values(report.info)]
+    if report.description:
+        parts.append(f"<p><b>{e(w('description'))}</b><br>{e(report.description)}</p>")
+    parts += [f"<h3>{e(w('chunks_title'))}</h3>", _table(report.chunks)]
+    entries = []
+    counter = [0]
 
-    head = "".join(f"<th>{html.escape(c)}</th>" for c in cols)
-    body = "".join("<tr>" + "".join(f"<td>{fmt(r.get(c))}</td>" for c in cols) + "</tr>" for r in rows)
+    def anchor() -> str:
+        counter[0] += 1
+        return f"s{counter[0]}"
+
+    body = []
+    for top in report.sections:
+        body.append(_section(top, anchor, entries, w))
+    if entries:
+        items = "".join(f"<li class='l{lvl}'><a href='#{a}'>{e(t)}</a></li>" for lvl, t, a in entries if lvl <= 1)
+        parts += [f"<h3>{e(w('contents'))}</h3>", f"<nav><ul>{items}</ul></nav>"]
+    doc = (f"<!doctype html><html lang='{report.language}'><head><meta charset='utf-8'>"
+           f"<meta name='viewport' content='width=device-width,initial-scale=1'>"
+           f"<title>{e(report.title)} - {e(report.project)}</title><style>{CSS}</style></head><body>"
+           + "".join(parts) + "".join(body) + "</body></html>")
+    return doc
+
+
+def _section(s: Section, anchor, entries: list, words) -> str:
+    a = anchor()
+    entries.append((s.level, s.title, a))
+    tag = {0: "h2", 1: "h3"}.get(s.level, "h4")
+    out = [f"<{tag} id='{a}'>{html.escape(s.title)}</{tag}>"]
+    for b in s.blocks:
+        if isinstance(b, Section):
+            out.append(_section(b, anchor, entries, words))
+        elif isinstance(b, KeyValues):
+            out.append(_key_values(b))
+        elif isinstance(b, Table):
+            out.append(_table(b))
+        elif isinstance(b, Figure):
+            out.append(_figure(b, words))
+        elif isinstance(b, Paragraph):
+            out.append(f"<p class='{'note' if b.note else ''}'>{html.escape(b.text)}</p>")
+    return "".join(out)
+
+
+def _key_values(kv: KeyValues) -> str:
+    rows = "".join(f"<tr><td>{html.escape(k)}</td><td>{html.escape(v)}</td></tr>" for k, v in kv.rows)
+    return f"<table class='kv'>{rows}</table>"
+
+
+def _table(t: Table) -> str:
+    align = t.alignment()
+    cls = ["r" if a == "R" else "" for a in align]
+    head = "".join(f"<th class='{c}'>{html.escape(h)}</th>" for h, c in zip(t.headers, cls))
+    body = "".join("<tr>" + "".join(f"<td class='{cls[i] if i < len(cls) else ''}'>{html.escape(str(v))}</td>"
+                                    for i, v in enumerate(r)) + "</tr>" for r in t.rows)
     return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
 
 
-def generate_report(chunk, path) -> Path:
-    from ..markers.gcp import marker_errors, scalebar_errors
+def _colour_bar(cb: ColourBar, words) -> str:
+    cols = cb.colours(11)
+    grad = ", ".join(f"rgb({r},{g},{b}) {k * 10}%" for k, (r, g, b) in enumerate(cols))
+    span = (cb.high - cb.low) or 1.0
+    decimals = cb.tick_decimals()
+    ticks = "".join(f"<span style='left:{100 * (v - cb.low) / span:.2f}%'>{html.escape(words.number(v, decimals))}</span>"
+                    for v in cb.ticks() if cb.low <= v <= cb.high)
+    return (f"<div class='bar'><b>{html.escape(cb.label)}</b><div class='ramp' style='background:linear-gradient(to right,"
+            f" {grad})'></div><div class='ticks'>{ticks}</div></div>")
 
-    path = Path(path)
-    cams = chunk.cameras
-    aligned = chunk.aligned_cameras
-    tp = chunk.tie_points
-    sfm = chunk.meta.get("sfm", {})
-    sensors = [{"label": s.label, "resolution": f"{s.width}x{s.height}", "model": s.model,
-                "focal_px": s.focal_px, "params": ", ".join(f"{p:.5g}" for p in s.params)} for s in chunk.sensors.values()]
-    parts = [
-        f"<h1>{html.escape(chunk.label)}</h1>",
-        f"<p>Report generated {datetime.now():%Y-%m-%d %H:%M} by pyarchinit-photogrammetry</p>",
-        "<h2>Survey data</h2>",
-        _table([{"photos": len(cams), "aligned": len(aligned), "tie points": len(tp) if tp is not None else 0,
-                 "reprojection error (px)": sfm.get("reprojection_error"), "CRS": chunk.crs,
-                 "scale": chunk.scale}],
-               ["photos", "aligned", "tie points", "reprojection error (px)", "CRS", "scale"]),
-        "<h2>Camera calibration</h2>", _table(sensors, ["label", "resolution", "model", "focal_px", "params"]),
-    ]
-    if chunk.markers:
-        parts += ["<h2>Markers</h2>", _table(marker_errors(chunk),
-                                             ["label", "type", "projections", "pixel_error", "dx", "dy", "dz", "error"])]
-    if chunk.scalebars:
-        parts += ["<h2>Scale bars</h2>", _table(scalebar_errors(chunk), ["label", "type", "distance", "estimated",
-                                                                          "error"])]
-    for name, key, dem in (("Digital elevation model", "dem", True), ("Orthomosaic", "orthomosaic", False)):
-        b64 = _png_preview(chunk.product_path(key), dem=dem)
-        if b64:
-            res = chunk.meta.get(key, {}).get("resolution")
-            parts += [f"<h2>{name}</h2>", f"<p>Resolution: {res:.4g} m/px</p>" if res else "",
-                      f'<img alt="{name}" src="data:image/png;base64,{b64}">']
-    css = ("body{font-family:system-ui,sans-serif;max-width:980px;margin:2em auto;padding:0 1em;color:#222}"
-           "table{border-collapse:collapse;margin:.5em 0 1.5em;font-size:14px}"
-           "td,th{border:1px solid #ccc;padding:4px 8px;text-align:right}th{background:#f2f2f2}"
-           "img{max-width:100%;border:1px solid #ccc}")
-    doc = f"<!doctype html><html><head><meta charset='utf-8'><title>{html.escape(chunk.label)} - report</title>" \
-          f"<style>{css}</style></head><body>{''.join(parts)}</body></html>"
-    path.write_text(doc, encoding="utf-8")
-    return path
+
+def _legend(lg: Legend) -> str:
+    items = "".join(f"<span><i style='background:rgb{tuple(c)}'></i>{html.escape(label)}</span>" for c, label in lg.items)
+    return f"<div class='legend'>{items}</div>"
+
+
+def _figure(f: Figure, words) -> str:
+    src = f"data:{f.mime};base64,{base64.b64encode(f.data).decode()}"
+    extra = ""
+    if f.colour_bar is not None:
+        extra += _colour_bar(f.colour_bar, words)
+    if f.legend is not None:
+        extra += _legend(f.legend)
+    cap = f"<figcaption>{html.escape(f.caption)}</figcaption>" if f.caption else ""
+    return f"<figure><img alt='{html.escape(f.caption)}' src='{src}'>{extra}{cap}</figure>"
+
+
+__all__ = ["generate_report", "render_html"]

@@ -317,18 +317,25 @@ def _find_marker(chunk, label: str) -> Marker | None:
 
 
 def export_reference(chunk, path) -> Path:
-    """Write markers (reference and estimated coordinates, errors) as CSV."""
+    """Write markers (reference and estimated coordinates, errors) as CSV, or as an Excel
+    workbook when ``path`` ends in ``.xlsx`` (the same columns, numbers as numbers)."""
     path = Path(path)
     errors = {e["label"]: e for e in marker_errors(chunk)}
+    header = ["label", "x_ref", "y_ref", "z_ref", "x_est", "y_est", "z_est", "error_m", "projections", "type"]
+    rows = []
+    for m in chunk.markers:
+        ref = m.reference.location or [None] * 3
+        est = chunk.to_world(m.position) if m.position is not None else [None] * 3
+        e = errors.get(m.label, {})
+        rows.append([m.label, *ref, *est, e.get("error"), len(m.projections), "check" if m.checkpoint else "control"])
+    if path.suffix.lower() == ".xlsx":
+        from ..io.tables import Sheet, write_xlsx
+
+        return write_xlsx(path, {"markers": Sheet(header, rows, [None, 3, 3, 3, 3, 3, 3, 4, 0, None])})
     with open(path, "w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["label", "x_ref", "y_ref", "z_ref", "x_est", "y_est", "z_est", "error_m", "projections", "type"])
-        for m in chunk.markers:
-            ref = m.reference.location or [None] * 3
-            est = chunk.to_world(m.position) if m.position is not None else [None] * 3
-            e = errors.get(m.label, {})
-            w.writerow([m.label, *ref, *est, e.get("error"), len(m.projections),
-                        "check" if m.checkpoint else "control"])
+        w.writerow(header)
+        w.writerows(rows)
     return path
 
 
