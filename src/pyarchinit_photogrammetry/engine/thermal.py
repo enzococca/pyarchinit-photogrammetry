@@ -765,6 +765,21 @@ def decoder_status() -> dict:
     return {"available": True, "mode": "native", "tool": str(tool), "message": f"DJI Thermal SDK ({tool})"}
 
 
+def _failure_detail(errors: str, stderr: str) -> str:
+    """What went wrong, from the SDK's errors or Docker's: the line that says it (Docker ends with
+    "Run 'docker run --help' for more information", which does not), with what to do when Docker's
+    own disk is read-only or full (it happens when the computer's disk fills up while Docker writes)."""
+    lines = [ln.strip() for ln in (errors.strip().splitlines() or stderr.strip().splitlines()) if ln.strip()]
+    if not lines:
+        return "no output"
+    detail = next((ln for ln in lines if "error" in ln.lower()), lines[-1])
+    text = (errors + stderr).lower()
+    if "read-only file system" in text or "no space left" in text:
+        detail += (" - Docker's disk is read-only or full (this happens when the computer's disk fills up while "
+                   "Docker writes): free some space, then restart Docker Desktop")
+    return detail
+
+
 def _irp_args(src: str, out: str, params: dict, distance: float, ambient: bool = True) -> list[str]:
     args = ["-s", src, "-a", "measure", "-o", out, "--measurefmt", "float32",
             "--distance", f"{distance:g}", "--humidity", f"{float(params.get('humidity') or 70.0):g}",
@@ -853,8 +868,7 @@ def decode_dji(files: list[Path], params: dict, distances: list | None = None, p
         for f, name, (w, h) in zip(files, names, sizes):
             raw = work / "out" / f"{name}.raw"
             if not raw.exists() or raw.stat().st_size != w * h * 4:
-                detail = (errors.strip().splitlines() or stderr.strip().splitlines() or ["no output"])[-1]
-                raise RuntimeError(f"DJI's SDK did not decode {f.name}: {detail}")
+                raise RuntimeError(f"DJI's SDK did not decode {f.name}: {_failure_detail(errors, stderr)}")
             out[f] = np.fromfile(raw, dtype="<f4").reshape(h, w).astype(np.float32)
     progress(1.0, f"{len(out)} thermal frames decoded")
     return out

@@ -598,3 +598,14 @@ def test_frames_of_other_thermal_cameras(tmp_path):
     thermal.set_params(ch, scale=scale, offset=offset)
     assert thermal.params_of(ch)["scale"] == 0.01
     assert np.max(np.abs(thermal.decode_file(thermal.thermal_file(cams[0]), thermal.params_of(ch)) - t)) < 0.006
+
+
+def test_what_went_wrong_with_docker():
+    """Docker's last line says nothing ("Run 'docker run --help'..."): the error is the line that says
+    it, and a disk of Docker turned read-only (the computer's disk filled up) says what to do."""
+    err = ("docker: Error response from daemon: mkdir /var/lib/docker/overlay2/x-init: read-only file system\n\n"
+           "Run 'docker run --help' for more information\n")
+    text = thermal._failure_detail("", err)
+    assert text.startswith("docker: Error response from daemon") and "restart Docker Desktop" in text
+    assert thermal._failure_detail("dji_irp: cannot open the file\n", "") == "dji_irp: cannot open the file"
+    assert thermal._failure_detail("", "") == "no output"
