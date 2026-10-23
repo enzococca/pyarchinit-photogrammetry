@@ -42,6 +42,7 @@ bim = ["ifcopenshell>=0.8"]
 postgis = ["psycopg2-binary>=2.9; sys_platform != 'win32' or platform_machine != 'ARM64'",
            "psycopg>=3.1; sys_platform == 'win32' and platform_machine == 'ARM64'"]  # psycopg 3 over libpq on Windows ARM64
 sam = ["torch>=2.3", "sam2>=1.1", "huggingface_hub>=0.20"]  # the weights come from the Hugging Face hub
+learned = ["torch>=2.3", "kornia>=0.8"]  # learned key points + LightGlue (engine.learned), run in a worker process
 learn = ["scikit-learn>=1.3"]  # trainable point classification (ai.learn)
 fast = ["pyarchinit-photogrammetry-core>=0.4"]  # native kernels in Rust (native/), optional
 scans = ["pye57>=0.4"]  # laser scans in E57 (io.scans; PTX needs nothing)

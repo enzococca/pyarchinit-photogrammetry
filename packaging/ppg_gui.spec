@@ -30,7 +30,8 @@ try:  # trainable point classifier: estimators imported lazily and unpickled fro
 except Exception:
     pass
 
-datas = ([(str(ROOT / "src" / "pyarchinit_photogrammetry" / "ai" / "sam_worker.py"), "pyarchinit_photogrammetry/ai")]
+datas = ([(str(ROOT / "src" / "pyarchinit_photogrammetry" / "ai" / name), "pyarchinit_photogrammetry/ai")
+          for name in ("sam_worker.py", "learned_worker.py", "learned_net.py")]
          + collect_data_files("pyarchinit_photogrammetry") + collect_data_files("qtawesome")
          + collect_data_files("pyvista") + collect_data_files("rasterio") + collect_data_files("pyproj")
          + collect_data_files("ezdxf") + collect_data_files("trimesh"))

@@ -466,12 +466,15 @@ def _db_image_names(db_path: Path) -> set[str]:
         db.close()
 
 
-def _continuable(chunk: Chunk, db_path: Path, root, names: dict[int, str]) -> bool:
+def _continuable(chunk: Chunk, db_path: Path, root, names: dict[int, str], matcher: str = "sift") -> bool:
     """Whether the matches and the alignment of the chunk can take more photos: database and
-    model exist, the photos sit in the same folder, every photo of the database is still there."""
+    model exist, the photos sit in the same folder, every photo of the database is still there,
+    the points were found by the same ``matcher`` (SIFT's and the learned ones do not match)."""
     info = chunk.meta.get("sfm") or {}
     model = chunk.product_path("reconstruction")
     if not db_path.exists() or model is None or not model.exists() or info.get("image_root") != str(root):
+        return False
+    if (info.get("matcher") or "sift") != matcher:
         return False
     return _db_image_names(db_path) <= set(names.values())
 
@@ -740,7 +743,8 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
                  pair_selection: str = "auto", progress: Progress | None = None,
                  exclude_stationary: bool = False, generic: bool | None = None, reference: str | None = None,
                  neighbours: int = REFERENCE_NEIGHBOURS, apply_masks: str = "keypoints",
-                 guided_matching: bool = False, reset: bool = True, gpu: str | None = None) -> None:
+                 guided_matching: bool = False, reset: bool = True, gpu: str | None = None,
+                 matcher: str = "sift") -> None:
     """Detect and match the points of the photos (SIFT), with the choices of Metashape's *Align
     Photos*: ``quality`` (the accuracy: the photos at full size or reduced), the ``generic``
     preselection (the pairs that overlap found first on the photos reduced to 1024 pixels,
@@ -761,25 +765,43 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     keeps the matches and the alignment there are and only detects and matches the photos added
     since (:func:`align_cameras` then registers them into the block); when they cannot be kept
     everything is done again. The faces of 360-degree photos (:mod:`.panorama`) become the
-    frames of a rig."""
+    frames of a rig.
+
+    ``matcher``: ``sift`` (COLMAP's SIFT, on the GPU when there is one), or learned key points
+    matched by LightGlue (:mod:`.learned`): ``disk`` or ``aliked`` - more matches on thermal
+    frames and on surfaces with little texture, slower. Not for rigs (SIFT is used) nor with the
+    guided matching, which is COLMAP's."""
     import pycolmap
 
+    from . import learned
     from .masks import colmap_mask_folder
     from .panorama import panorama_cameras, rig_configs
 
     progress = as_progress(progress)
     if apply_masks not in MASK_MODES:
         raise ValueError(f"apply_masks: one of {', '.join(MASK_MODES)}")
+    if matcher not in learned.MATCHERS:
+        raise ValueError(f"matcher: one of {', '.join(learned.MATCHERS)}")
     generic, reference = _preselection(pair_selection, generic, reference)
     work = _sfm_dir(chunk)
     db_path = work / "database.db"
     root, names = image_root_and_names(chunk)
     rigs = rig_configs(chunk, names)
-    keep = (not reset) and not rigs and _continuable(chunk, db_path, root, names)
+    if matcher != "sift" and rigs:
+        log.warning("learned features are not used for the rigs of 360-degree photos: SIFT")
+        matcher = "sift"
+    if matcher != "sift" and guided_matching:
+        log.warning("the guided matching is COLMAP's (SIFT): left out with %s", learned.NAMES[matcher])
+        guided_matching = False
+    keep = (not reset) and not rigs and _continuable(chunk, db_path, root, names, matcher)
     if not reset and not keep:
         progress(0.0, "No alignment to continue: every photo again")
     if not keep and db_path.exists():
         db_path.unlink()
+    if not keep:
+        import shutil
+
+        shutil.rmtree(work / "learned", ignore_errors=True)  # the descriptors of the database just removed
     existing = _db_image_names(db_path) if keep else set()
     downscale = QUALITY_DOWNSCALE.get(quality, 2)
 
@@ -795,12 +817,24 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     from . import nodes
 
     files_dir = chunk.data_dir.parent
-    others = nodes.wanted(files_dir) if not rigs else []
+    others = nodes.wanted(files_dir) if not rigs and matcher == "sift" else []
     chunk_nodes: list[str] = []
     nodes_active = bool(others) and len(new) >= 2 * nodes.FEATURE_UNIT_PHOTOS
     sift_device = None
     features = "cpu"
-    if nodes_active:
+    if matcher != "sift":
+        # learned key points, in a worker process of their own (the GPU is free again for the preselection)
+        groups = [(skey, [n for n in image_names if n not in existing]) for skey, image_names in by_sensor.items()]
+        groups = [(k, n) for k, n in groups if n]
+        turns = learned.quarter_turns(chunk, names)  # the networks are not invariant to rotation
+        with learned.open_features(matcher) as feats:
+            progress(0.0, f"Detecting points with {learned.NAMES[matcher]} on {feats.device.upper()}"
+                     + (f", {sum(1 for k in turns.values() if k)} photos turned to the heading of the others"
+                        if turns else ""))
+            learned.extract_to_database(db_path, root, chunk, groups, lambda s: int(max(s.width, s.height) / downscale),
+                                        feats, masks, progress.sub(0.0, 0.5), turns=turns)
+        features = matcher
+    elif nodes_active:
         # the photos in units of work for the other computers and this one (its own worker): COLMAP's
         # extractor runs there into a database of its own, the points come back and go into ours
         units, cameras = [], {}
@@ -848,7 +882,7 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
         except Exception as exc:  # noqa: BLE001 - the GPU failed on these photos: COLMAP's extractor instead
             log.warning("GPU SIFT failed (%s): COLMAP's extractor on the CPU", exc)
             sift_device = None
-    if sift_device is None and not (nodes_active):
+    if sift_device is None and not nodes_active and matcher == "sift":
         for i, (skey, image_names) in enumerate(by_sensor.items()):
             image_names = [n for n in image_names if n not in existing]
             if not image_names:
@@ -911,7 +945,7 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
             pairs = {p for p in pairs if p[0] in added or p[1] in added}
     # the GPUs: the pairs shared with the CPU (not for rigs, nor with the guided matching, which is COLMAP's)
     devices, gpu_names = [], []
-    if not rigs and not guided_matching:
+    if not rigs and not guided_matching and matcher == "sift":
         for d in _native.gpu_devices(gpu):
             try:
                 gpu_names.append(_native.kernel("gpu_device_name")(d))
@@ -923,10 +957,17 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
         everyone = sorted(names.values())
         pairs = {(a, b) for i, a in enumerate(everyone) for b in everyone[i + 1:]}
     progress(0.55, f"Matching photos ({mode}" + (f", {len(pairs):,} pairs)" if pairs is not None else ")")
-             + (f" on {gpu_name} and the CPU" if devices else ""))
+             + (f" on {gpu_name} and the CPU" if devices else "")
+             + (f" with {learned.NAMES[matcher]}" if matcher != "sift" else ""))
     shares = None
     blocks = {"blocks": (0.0, 1.0), "blocks2": (0.0, 1.0)}  # COLMAP's blocks of pairs as the progress
-    if pairs is None:
+    if matcher != "sift":
+        if pairs is None:
+            everyone = sorted(names.values())
+            pairs = {(a, b) for i, a in enumerate(everyone) for b in everyone[i + 1:]}
+        with learned.open_features(matcher) as feats:
+            learned.match_pairs(db_path, pairs, feats, progress.sub(0.55, 0.4))
+    elif pairs is None:
         with colmap_log.relay(progress.sub(0.55, 0.4), work, phases=blocks):
             pycolmap.match_exhaustive(str(db_path), matching_options=mopts)
     elif pairs and devices:
@@ -941,6 +982,7 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     removed = remove_stationary_matches(db_path) if exclude_stationary else None
     old = chunk.meta.get("sfm") or {}
     chunk.meta["sfm"] = {"image_root": str(root), "names": {str(k): v for k, v in names.items()}, "features": features,
+                         "matcher": matcher,
                          "quality": quality, "pair_selection": mode, "pairs": len(pairs) if pairs is not None else None,
                          "generic": bool(generic), "reference": reference, "neighbours": int(neighbours),
                          "masks": masks is not None, "apply_masks": apply_masks, "guided_matching": bool(guided_matching),

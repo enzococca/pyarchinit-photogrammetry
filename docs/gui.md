@@ -156,7 +156,9 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   only, a moved folder), add chunk, *Allinea chunk* (bring other chunks into the frame of a reference chunk by markers with the same name, photos in common or overlapping clouds), *Unisci chunk* (a new chunk with the photos, markers, tie points, clouds and optionally meshes of aligned chunks), detect coded markers, align - the dialog of
   Metashape's *Align Photos*: precision, generic preselection (the pairs that overlap found first on
   reduced photos; every pair up to 40 photos anyway), reference preselection (the GPS of the photos, a
-  previous alignment or the capture order), reset or keep the current alignment (the photos added since
+  previous alignment or the capture order), the points (*Punti*: SIFT, or learned points matched by
+  LightGlue - DISK or ALIKED - for thermal photos and surfaces with little detail; the program offers to
+  install PyTorch and kornia when they are missing), reset or keep the current alignment (the photos added since
   join it); under *Avanzate* the limits, the masks applied to the key points or to the tie points,
   stationary tie points, guided matching, adaptive camera model fitting, the GPS of the photos holding
   the block while it grows one photo at a time, the method - automatic: all the cameras at once

@@ -57,6 +57,17 @@ class Report:
         return "\n".join(lines)
 
 
+def _dist_version(dist: str) -> str | None:
+    """The installed version of a distribution, read from its metadata: nothing is imported
+    (PyTorch must never be imported in the program's process, see ``ai/sam_env.py``)."""
+    from importlib import metadata
+
+    try:
+        return metadata.version(dist)
+    except metadata.PackageNotFoundError:
+        return None
+
+
 def _version(mod: str) -> str | None:
     try:
         m = __import__(mod)
@@ -165,14 +176,25 @@ def run_checks(gui: bool = True) -> Report:
     from .ai import sam_env
 
     mode = sam_env.available()
-    if mode == "inprocess":
-        r.add("SAM 2.1", OK, f"PyTorch {_version('torch')} in this environment")
+    if mode == "local":
+        r.add("SAM 2.1", OK, f"PyTorch {_dist_version('torch')} in this environment (worker process)")
     elif mode == "external":
         r.add("SAM 2.1", OK, f"separate environment {sam_env.env_dir()}")
     else:
         r.add("SAM 2.1", WARN, "not installed",
               "Strumenti > Segment Anything 2.1 > Installa (the application installs PyTorch and SAM 2.1 "
               "in a separate environment), or pip install \"pyarchinit-photogrammetry[sam]\"")
+    from .engine import learned
+
+    mode = learned.available()
+    if mode == "local":
+        r.add("Learned features (LightGlue)", OK, f"kornia {_dist_version('kornia')} in this environment (worker process)")
+    elif mode == "external":
+        r.add("Learned features (LightGlue)", OK, f"kornia in the separate environment {sam_env.env_dir()}")
+    else:
+        r.add("Learned features (LightGlue)", WARN, "not installed (SIFT only)",
+              "Flusso di lavoro > Allinea foto > Punti: install from there (PyTorch and kornia in the separate "
+              "environment of SAM 2.1), or pip install \"pyarchinit-photogrammetry[learned]\"")
 
     # PyArchInit SQLite geometries: probed in a separate process, so that loading the extension
     # (which brings its own PROJ/GEOS/sqlite) can never destabilise this one

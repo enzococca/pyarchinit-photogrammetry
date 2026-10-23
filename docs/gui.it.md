@@ -156,7 +156,9 @@ Dalla riga di comando `ppg update` dice se esiste una versione più nuova e `ppg
   tenuta solo online, una cartella spostata), aggiungi chunk, *Allinea chunk* (porta altri chunk nel sistema di un chunk di riferimento tramite i marker con lo stesso nome, le foto in comune o le nuvole che si sovrappongono), *Unisci chunk* (un nuovo chunk con le foto, i marker, i punti di legame, le nuvole e, a scelta, le mesh dei chunk allineati), rileva i marker codificati, allinea - la finestra di
   *Allinea foto* di Metashape: precisione, preselezione generica (le coppie che si sovrappongono trovate
   prima su foto ridotte; fino a 40 foto comunque tutte le coppie), preselezione di riferimento (il GPS
-  delle foto, un allineamento precedente o l'ordine di scatto), azzera o tieni l'allineamento attuale (le
+  delle foto, un allineamento precedente o l'ordine di scatto), i punti (*Punti*: SIFT, oppure punti
+  appresi abbinati da LightGlue - DISK o ALIKED - per le foto termiche e le superfici povere di dettagli;
+  se mancano PyTorch e kornia il programma propone di installarli), azzera o tieni l'allineamento attuale (le
   foto aggiunte dopo vi entrano); sotto *Avanzate* i limiti, le maschere applicate ai punti chiave o ai
   punti di legame, i punti di legame fermi, l'abbinamento guidato, l'adattamento adattivo del modello
   della camera, il GPS delle foto che tiene il blocco mentre cresce una foto alla volta, il metodo -

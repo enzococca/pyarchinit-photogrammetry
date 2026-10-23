@@ -21,7 +21,7 @@ longer explanations follow the table.
 | --- | --- |
 | `add_photos(paths, recursive=False)` | files or folders; sensors grouped by body, lens and resolution; the EXIF GPS becomes the camera reference |
 | `detect_markers(target_type="aruco_4x4_50")` | markers `target <code>` with their projections |
-| `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True)` | keypoints and matches, with the choices of Metashape's *Align Photos* (*Pairs*, below) |
+| `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True, gpu=None, matcher="sift")` | keypoints and matches, with the choices of Metashape's *Align Photos* (*Pairs*, below); SIFT or learned points (*Learned points*, below) |
 | `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None)` | the photos placed, by the global, the incremental or the hierarchical mapper (*Mappers*, below), held to the GPS of the photos; the transform is reset and the georeference made again when references exist |
 | `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4)` | bundle adjustment of poses, calibration and tie points, on the control points and scale bars when there are any (*Camera optimisation*, below); returns the reprojection error (px) |
 | `import_reference(csv, crs, columns="nxyz")` | references of markers and cameras from a text file: `n` label, `x y z`, `a` accuracy, `-` skip |
@@ -65,7 +65,33 @@ move between two photos (the still background of a turntable). `reset=False` kee
 the alignment there are and only matches the photos added since; `align_cameras(reset=False)` then
 registers them into the block, one photo after the other (when nothing can be kept, everything is
 done again). `meta["sfm"]` records what ran: `pair_selection` (`exhaustive`, `generic`,
-`generic+source`, ...), `pairs`, `apply_masks`, `masked_tie_points`, `added`.
+`generic+source`, ...), `pairs`, `apply_masks`, `masked_tie_points`, `added`, `matcher`.
+
+### Learned points
+
+`matcher` picks the points: `sift` (COLMAP's SIFT, on the GPU when there is one) or key points found
+by a small neural network and matched by LightGlue, `disk` or `aliked` (`engine.learned`, kornia on
+PyTorch: the `[learned]` extra, or the separate environment of SAM 2.1 that the application installs
+on request). They find matches where SIFT finds few - thermal frames, smooth plaster, sand - and are
+slower. The networks are not invariant to rotation, SIFT is: every photo is first turned by quarter
+turns to the heading the photos share (`quarter_turns`: the yaw the drone writes into the photo,
+DJI's gimbal or aircraft yaw in the XMP or the EXIF `GPSImgDirection`; the course of the strips
+modulo 90 degrees, so that strips flown one way and back, and cross strips, all end up the same way
+up), and its points are brought back to the photo as it is. Without that, the frames of a thermal
+flight matched across strips flown in opposite directions failed nearly always. The networks always
+run in a process of their own (`learned_worker.py`): PyTorch and pycolmap each bring an OpenMP
+runtime, and the second to start aborts the process (`OMP: Error #15`); SAM 2.1 does the same.
+Photos are reduced to 1600 pixels at most for the networks; the descriptors stay in
+`sfm/learned/<kind>/` beside COLMAP's database, the matches go into it and COLMAP's geometric
+verification decides the inliers. Not for the rigs of 360-degree photos, nor with the guided
+matching (both COLMAP's). `ppg align PROJECT --matcher disk`.
+
+On the 407 thermal frames of a Mavic 2 Enterprise Advanced flight at 20 m (photos at 320 pixels,
+`quality="high"`), SIFT aligned 405 one photo at a time (its global solution missed the GPS by 78
+m) after 108 s of matching and 229 s of alignment; DISK aligned all 407 at once (513 s and 22 s),
+ALIKED too (1187 s and 23 s); the temperature orthomosaics came out equally sharp and the cameras as
+close to the GPS (1.7-1.9 m median). Without turning the photos DISK aligned 267. SIFT stays the
+default: the learned points are for the photos SIFT cannot hold together.
 
 ### The GPU
 

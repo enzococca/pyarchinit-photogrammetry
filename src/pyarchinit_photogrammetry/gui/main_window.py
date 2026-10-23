@@ -2911,9 +2911,20 @@ class MainWindow(QMainWindow):
             return
         has_gps = sum(1 for c in self.chunk.cameras if c.reference.location and c.reference.enabled) >= 3
         aligned = bool(self.chunk.aligned_cameras)
+        from ..engine import learned
+
+        matcher = str(self.settings.value("sfm/matcher", "sift") or "sift")
+        if matcher not in learned.MATCHERS:
+            matcher = "sift"
         v = ParamDialog.ask(self, "Allinea foto", [
             Field("general", "Generale", kind="heading"),
             Field("quality", "Precisione", "high", choices=QUALITY[1:]),
+            Field("matcher", "Punti", matcher,
+                  choices=[("sift", "SIFT (COLMAP)"), ("disk", "DISK + LightGlue (appresi)"),
+                           ("aliked", "ALIKED + LightGlue (appresi)")],
+                  tip="I punti appresi da una rete neurale e abbinati da LightGlue trovano più corrispondenze su "
+                      "foto termiche e superfici povere di dettagli (intonaco, sabbia); più lenti di SIFT. Servono "
+                      "PyTorch e kornia: se mancano il programma propone di installarli"),
             Field("generic", "Preselezione generica", True,
                   tip="Le coppie che si sovrappongono trovate prima su foto rimpicciolite; fino a 40 foto si "
                       "abbinano comunque tutte le coppie"),
@@ -2961,13 +2972,19 @@ class MainWindow(QMainWindow):
         if not v:
             return
         self.settings.setValue("sfm/gpu", v.get("gpu", "auto"))
+        self.settings.setValue("sfm/matcher", v.get("matcher", "sift"))
+        if v.get("matcher", "sift") != "sift" and not self._learned_available(then=lambda: self._align(v)):
+            return
+        self._align(v)
 
+    def _align(self, v: dict) -> None:
+        """Matching and alignment with the choices of :meth:`align_photos`."""
         def job(p):
             self.chunk.match_photos(v["quality"], v["keypoint_limit"], v["tiepoint_limit"], progress=p.sub(0, 0.5),
                                     exclude_stationary=bool(v.get("stationary")), generic=bool(v.get("generic")),
                                     reference=v.get("reference") or None, apply_masks=v.get("masks", "keypoints"),
                                     guided_matching=bool(v.get("guided")), reset=bool(v.get("reset", True)),
-                                    gpu=v.get("gpu", "auto"))
+                                    gpu=v.get("gpu", "auto"), matcher=v.get("matcher", "sift"))
             n = self.chunk.align_cameras(progress=p.sub(0.5, 0.5), mapper=v.get("mapper", "auto"),
                                          reset=bool(v.get("reset", True)), use_gps=bool(v.get("gps")),
                                          adaptive_fitting=bool(v.get("adaptive")))
@@ -7808,6 +7825,37 @@ class MainWindow(QMainWindow):
                     default=QMessageBox.StandardButton.Yes)
         if r == QMessageBox.StandardButton.Yes:
             self.install_sam(then=then)
+        return False
+
+    def _learned_available(self, then=None) -> bool:
+        """True when the learned key points (DISK or ALIKED + LightGlue) can run; otherwise offer to
+        install PyTorch and kornia (then call ``then``)."""
+        from ..ai import sam_env
+        from ..engine import learned
+
+        if learned.available():
+            return True
+        if sam_env.is_installed():
+            text = ("I punti appresi (DISK o ALIKED con LightGlue) richiedono PyTorch e kornia.\n\nL'applicazione puo' "
+                    "aggiungere kornia all'ambiente separato di SAM 2.1 (pochi MB). I pesi delle reti si scaricano al "
+                    "primo uso (circa 50 MB).\n\nInstallare adesso?")
+        else:
+            text = ("I punti appresi (DISK o ALIKED con LightGlue) richiedono PyTorch e kornia.\n\nL'applicazione puo' "
+                    "scaricare e installare ora PyTorch e kornia in un ambiente separato, lo stesso di SAM 2.1 (circa "
+                    "1-2 GB, alcuni minuti; serve la connessione). I pesi delle reti si scaricano al primo uso (circa "
+                    "50 MB).\n\nInstallare adesso?")
+        r = message(self, "question", "Punti appresi", text,
+                    buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    default=QMessageBox.StandardButton.Yes)
+        if r == QMessageBox.StandardButton.Yes:
+            def done(env):
+                self.sam = None
+                self._info("Punti appresi", tr("PyTorch e kornia pronti in {0}.", env))
+                if then is not None:
+                    then()
+
+            self.run_task("Installazione dei punti appresi", lambda p: learned.install(progress=p), done,
+                          refresh=False, save=False)
         return False
 
     def install_sam(self, then=None) -> None:

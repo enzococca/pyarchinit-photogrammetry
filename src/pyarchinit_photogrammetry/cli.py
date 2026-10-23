@@ -483,13 +483,16 @@ def align(project: Path, quality: str = typer.Option("high", help="the accuracy:
           gpu: Optional[str] = typer.Option(None, help="the GPU for the matching, shared with the CPU: auto (the "
                                                        "best one), off, an adapter index or part of its name "
                                                        "(default: PPG_GPU, else auto; ppg doctor lists them)"),
+          matcher: str = typer.Option("sift", help="the points: sift (COLMAP), or learned key points matched by "
+                                                   "LightGlue, disk or aliked (thermal frames, surfaces with little "
+                                                   "texture; need PyTorch and kornia, the [learned] extra)"),
           chunk: Optional[str] = None):
     """Match photos and align cameras, with the choices of Metashape's Align Photos."""
     doc, ch = _open(project, chunk)
     ch.match_photos(quality=quality, pair_selection=pairs, keypoint_limit=keypoints, tiepoint_limit=tiepoints,
                     generic=generic, reference=None if reference == "none" else reference, neighbours=neighbours,
                     apply_masks=masks, guided_matching=guided, exclude_stationary=stationary, reset=not keep,
-                    gpu=gpu, progress=print_progress)
+                    gpu=gpu, matcher=matcher, progress=print_progress)
     n = ch.align_cameras(progress=print_progress, mapper=mapper, reset=not keep, use_gps=gps, adaptive_fitting=adaptive,
                          ba_global_ratio=ba_ratio, ba_global_refinements=ba_refinements)
     doc.save()

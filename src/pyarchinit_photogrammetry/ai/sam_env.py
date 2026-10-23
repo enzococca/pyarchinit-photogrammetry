@@ -9,9 +9,14 @@ its official GitHub release when it is not on the system):
 The model runs in a worker process of that environment (``sam_worker.py``) and
 :class:`ExternalSam2Segmenter` talks to it; it has the same methods as
 :class:`~pyarchinit_photogrammetry.ai.sam.Sam2Segmenter`, so everything else is unchanged.
+
+When PyTorch and sam2 are installed beside the program (the ``[sam]`` extra) the same worker runs
+with this Python: never PyTorch in the program's process, where pycolmap is loaded. Each brings
+its own OpenMP runtime, and the second to start aborts the process (``OMP: Error #15``).
 """
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 import os
@@ -28,7 +33,7 @@ from pathlib import Path
 
 import numpy as np
 
-PACKAGES = ["torch", "sam2", "huggingface_hub", "numpy", "pillow"]
+PACKAGES = ["torch", "sam2", "huggingface_hub", "numpy", "pillow", "kornia"]  # kornia: learned key points (engine.learned)
 UV_URL = "https://github.com/astral-sh/uv/releases/latest/download/uv-{target}.{ext}"
 
 
@@ -57,22 +62,21 @@ def is_installed(env: Path | None = None) -> bool:
 
 
 def in_process_available() -> bool:
-    """PyTorch and sam2 importable in this interpreter (pip installs with the [sam] extra),
-    with huggingface_hub that downloads the weights (sam2 does not require it)."""
+    """PyTorch and sam2 installed for this Python (pip installs with the [sam] extra), with
+    huggingface_hub that downloads the weights (sam2 does not require it). Looked up, not
+    imported: importing PyTorch here would start its OpenMP runtime beside pycolmap's."""
+    if getattr(sys, "frozen", False):  # the packaged application: its executable is not a Python
+        return False
     try:
-        import huggingface_hub  # noqa: F401
-        import sam2  # noqa: F401
-        import torch  # noqa: F401
-
-        return True
-    except Exception:
+        return all(importlib.util.find_spec(name) is not None for name in ("torch", "sam2", "huggingface_hub"))
+    except (ImportError, ValueError):
         return False
 
 
 def available() -> str | None:
-    """``"inprocess"``, ``"external"`` or None."""
+    """``"local"`` (the worker runs with this Python), ``"external"`` or None."""
     if in_process_available():
-        return "inprocess"
+        return "local"
     if is_installed():
         return "external"
     return None
@@ -272,12 +276,11 @@ class ExternalSam2Segmenter:
 
 
 def make_segmenter(model: str = "small"):
-    """The SAM 2.1 segmenter available here: in process, external environment, or ImportError."""
+    """The SAM 2.1 segmenter available here, always in a worker process (see the module): with
+    this Python, with the external environment, or ImportError."""
     mode = available()
-    if mode == "inprocess":
-        from .sam import Sam2Segmenter
-
-        return Sam2Segmenter(model)
+    if mode == "local":
+        return ExternalSam2Segmenter(model, python=sys.executable)
     if mode == "external":
         return ExternalSam2Segmenter(model)
     raise ImportError("SAM 2.1 non e' installato")

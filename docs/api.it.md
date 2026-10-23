@@ -21,7 +21,7 @@ spiegazioni più lunghe seguono la tabella.
 | --- | --- |
 | `add_photos(paths, recursive=False)` | file o cartelle; sensori raggruppati per corpo, obiettivo e risoluzione; il GPS dell'EXIF diventa il riferimento della camera |
 | `detect_markers(target_type="aruco_4x4_50")` | marker `target <codice>` con le loro proiezioni |
-| `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True)` | punti chiave e corrispondenze, con le scelte di *Allinea foto* di Metashape (*Coppie*, sotto) |
+| `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True, gpu=None, matcher="sift")` | punti chiave e corrispondenze, con le scelte di *Allinea foto* di Metashape (*Coppie*, sotto); SIFT o punti appresi (*Punti appresi*, sotto) |
 | `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None)` | le foto collocate, dal mapper globale, da quello incrementale o da quello gerarchico (*Mapper*, sotto), tenute al GPS delle foto; la trasformazione viene azzerata e la georeferenziazione rifatta quando ci sono riferimenti |
 | `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4)` | compensazione di pose, calibrazione e punti di legame, sui punti di controllo e sulle barre di scala quando ce ne sono (*Ottimizzazione delle camere*, sotto); restituisce l'errore di riproiezione (px) |
 | `import_reference(csv, crs, columns="nxyz")` | riferimenti di marker e camere da un file di testo: `n` etichetta, `x y z`, `a` accuratezza, `-` salta |
@@ -65,7 +65,36 @@ corrispondenze che non si muovono tra due foto (lo sfondo fermo di un turntable)
 tiene le corrispondenze e l'allineamento che ci sono e abbina solo le foto aggiunte dopo;
 `align_cameras(reset=False)` poi le colloca nel blocco, una foto dopo l'altra (quando non si può
 tenere niente, si rifà tutto). `meta["sfm"]` registra cosa è stato fatto: `pair_selection`
-(`exhaustive`, `generic`, `generic+source`, ...), `pairs`, `apply_masks`, `masked_tie_points`, `added`.
+(`exhaustive`, `generic`, `generic+source`, ...), `pairs`, `apply_masks`, `masked_tie_points`, `added`,
+`matcher`.
+
+### Punti appresi
+
+`matcher` sceglie i punti: `sift` (il SIFT di COLMAP, sulla GPU quando c'è) oppure punti chiave
+trovati da una piccola rete neurale e abbinati da LightGlue, `disk` o `aliked` (`engine.learned`,
+kornia su PyTorch: l'extra `[learned]`, oppure l'ambiente separato di SAM 2.1 che l'applicazione
+installa su richiesta). Trovano corrispondenze dove SIFT ne trova poche - fotogrammi termici, intonaco
+liscio, sabbia - e sono più lenti. Le reti non sono invarianti alla rotazione, SIFT sì: ogni foto viene
+prima girata di quarti di giro verso la direzione comune alle foto (`quarter_turns`: l'imbardata che il
+drone scrive nella foto, quella del gimbal o del velivolo nell'XMP di DJI oppure `GPSImgDirection`
+dell'EXIF; la rotta delle strisciate modulo 90 gradi, così le strisciate di andata e ritorno e quelle
+incrociate finiscono tutte dritte allo stesso modo), e i suoi punti vengono riportati sulla foto com'è.
+Senza questo, i fotogrammi di un volo termico abbinati tra strisciate percorse in versi opposti
+fallivano quasi sempre. Le reti girano sempre in un processo a parte (`learned_worker.py`): PyTorch e
+pycolmap portano ciascuno un runtime OpenMP e il secondo che parte fa abortire il processo
+(`OMP: Error #15`); lo stesso vale per SAM 2.1. Per le reti le foto si riducono a 1600 pixel al
+massimo; i descrittori restano in `sfm/learned/<tipo>/` accanto al database di COLMAP, le
+corrispondenze vanno nel database e la verifica geometrica di COLMAP decide gli inlier. Non per i rig
+delle foto a 360 gradi, né con l'abbinamento guidato (entrambi di COLMAP). `ppg align PROGETTO
+--matcher disk`.
+
+Sui 407 fotogrammi termici di un volo di un Mavic 2 Enterprise Advanced a 20 m (foto a 320 pixel,
+`quality="high"`), SIFT ne ha allineati 405 una foto alla volta (la sua soluzione globale mancava il GPS
+di 78 m) dopo 108 s di abbinamento e 229 s di allineamento; DISK li ha allineati tutti e 407 insieme
+(513 s e 22 s), ALIKED anche (1187 s e 23 s); le ortofoto delle temperature sono venute nitide allo
+stesso modo e le camere vicine al GPS allo stesso modo (1,7-1,9 m di mediana). Senza girare le foto
+DISK ne allineava 267. SIFT resta la scelta predefinita: i punti appresi servono per le foto che SIFT
+non riesce a tenere insieme.
 
 ### La GPU
 

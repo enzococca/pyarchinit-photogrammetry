@@ -242,7 +242,7 @@ class Chunk:
                      pair_selection: str = "auto", progress: ProgressCallback | None = None,
                      exclude_stationary: bool = False, generic: bool | None = None, reference: str | None = None,
                      neighbours: int = 20, apply_masks: str = "keypoints", guided_matching: bool = False,
-                     reset: bool = True, gpu: str | None = None) -> None:
+                     reset: bool = True, gpu: str | None = None, matcher: str = "sift") -> None:
         """Detect and match features (SIFT) between photos, with the choices of Metashape's
         *Align Photos* (see :func:`engine.sfm.match_photos`): ``quality`` (the accuracy), the
         ``generic`` preselection (None: from 40 photos up), the ``reference`` preselection
@@ -254,14 +254,16 @@ class Chunk:
         there are and only matches the photos added since. The older ``pair_selection`` word
         stands in when ``generic`` and ``reference`` are not given. ``gpu``: ``auto`` (the best
         GPU shares the pairs with the CPU), ``off``, an adapter index or part of its name
-        (None: the ``PPG_GPU`` environment variable, ``auto`` by default)."""
+        (None: the ``PPG_GPU`` environment variable, ``auto`` by default). ``matcher``: ``sift``,
+        or learned key points matched by LightGlue, ``disk`` or ``aliked`` (:mod:`engine.learned`:
+        more matches on thermal frames and on surfaces with little texture)."""
         from ..engine import sfm
 
         sfm.match_photos(self, quality=quality, keypoint_limit=keypoint_limit, tiepoint_limit=tiepoint_limit,
                          pair_selection=pair_selection, progress=as_progress(progress),
                          exclude_stationary=exclude_stationary, generic=generic, reference=reference,
                          neighbours=neighbours, apply_masks=apply_masks, guided_matching=guided_matching,
-                         reset=reset, gpu=gpu)
+                         reset=reset, gpu=gpu, matcher=matcher)
 
     def align_cameras(self, progress: ProgressCallback | None = None, mapper: str = "auto", reset: bool = True,
                       use_gps: bool | None = None, adaptive_fitting: bool = False, tiepoint_limit: int | None = None,
