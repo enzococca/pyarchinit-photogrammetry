@@ -1,7 +1,7 @@
 """A row of widgets that wraps onto more lines when the space is narrow."""
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt
 from PySide6.QtWidgets import QLayout
 
 
@@ -21,6 +21,7 @@ class FlowLayout(QLayout):
         super().__init__(parent)
         self._items: list = []
         self._height = 0  # height of the lines at the width of the last placement
+        self._watched = None  # the widget whose showing is watched (see eventFilter)
         self.setContentsMargins(0, 0, 0, 0)
         self.setSpacing(spacing)
 
@@ -47,9 +48,25 @@ class FlowLayout(QLayout):
         super().setGeometry(rect)
         need = self._arrange(rect, apply=True)
         owner = self.parentWidget()
+        if owner is not None and owner is not self._watched:
+            owner.installEventFilter(self)
+            self._watched = owner
         if need != self._height and rect.width() > 0 and owner is not None and owner.isVisible():
             self._height = need  # more or fewer lines: the parents recompute their minimum size
             self.invalidate()
+
+    def eventFilter(self, obj, event) -> bool:
+        """The owner shown (the tab of a pane opened the first time): Qt placed the row just before,
+        while it was not visible yet, so the height of its lines is taken now - otherwise the
+        lines after the first were cut until the panel was resized."""
+        if event.type() == QEvent.Type.Show and obj is self._watched:
+            rect = self.geometry()
+            if rect.width() > 0:
+                need = self._arrange(rect, apply=False)
+                if need != self._height:
+                    self._height = need
+                    self.invalidate()
+        return False
 
     def sizeHint(self) -> QSize:
         """All the widgets on one line."""

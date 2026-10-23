@@ -200,3 +200,38 @@ def test_flow_layout_wraps_and_makes_room(qapp):
     assert below.y() >= buttons[-1].geometry().bottom()  # room made for the lines, nothing drawn over them
     assert page.minimumSizeHint().height() >= buttons[-1].geometry().bottom()
     page.close()
+
+
+def test_flow_layout_makes_room_when_its_tab_first_appears(qapp):
+    """A row laid out narrow while its tab was not shown yet makes room for its lines when the tab
+    appears: the height of the lines was kept only for a visible owner, and Qt places a page just
+    before it is visible, so the buttons on the second line onwards were cut until the panel was
+    resized (the Geoarcheologia pane of a plugin, first opened in a narrow dock)."""
+    from PySide6.QtWidgets import QListWidget, QPushButton, QTabWidget, QVBoxLayout, QWidget
+
+    from pyarchinit_photogrammetry.gui.flow_layout import FlowLayout
+
+    page = QWidget()
+    lay = QVBoxLayout(page)
+    row = FlowLayout()
+    buttons = [QPushButton(t) for t in ("Importa sondaggi...", "Ordine delle unita'...", "Superfici...", "Modello 3D...")]
+    for b in buttons:
+        row.addWidget(b)
+    lay.addLayout(row)
+    below = QListWidget()
+    lay.addWidget(below, 1)
+    tabs = QTabWidget()
+    tabs.addTab(QWidget(), "Altro")
+    tabs.addTab(page, "Geoarcheologia")
+    widest = max(b.sizeHint().width() for b in buttons)
+    tabs.resize(widest + 40, 500)
+    tabs.show()
+    for _ in range(3):
+        qapp.processEvents()
+    tabs.setCurrentIndex(1)
+    for _ in range(3):
+        qapp.processEvents()
+    ys = [b.y() for b in buttons]
+    assert len(set(ys)) > 1  # wrapped
+    assert below.y() >= buttons[-1].geometry().bottom()  # room made for every line, nothing cut or drawn over
+    tabs.close()
