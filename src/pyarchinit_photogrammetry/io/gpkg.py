@@ -68,6 +68,14 @@ def is_geopackage(path: str | Path) -> bool:
         return False
 
 
+def refuse_foreign(path: str | Path) -> None:
+    """:class:`FileExistsError` when ``path`` is a file with content that is not a GeoPackage: the
+    program never deletes or rewrites a file it did not make."""
+    path = Path(path)
+    if path.exists() and (path.is_dir() or path.stat().st_size) and not is_geopackage(path):
+        raise FileExistsError(f"{path} exists and is not a GeoPackage: it was left as it is, choose another file")
+
+
 def connect(path: str | Path) -> sqlite3.Connection:
     """Connection in autocommit mode (transactions are explicit), waiting for other writers."""
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -136,12 +144,15 @@ def replace_rows(con: sqlite3.Connection, table: str, columns: list[str], featur
 
 def write_table(path: str | Path, table: str, geometry_type: str, columns: dict[str, str], features,
                 crs: str | None, identifier: str | None = None) -> Path:
-    """Write one feature table into a GeoPackage (created when missing; other tables kept)."""
+    """Write one feature table into a GeoPackage (created when missing; other tables kept). A file
+    that exists and is not a GeoPackage - another database, a document chosen by mistake - is never
+    touched: :class:`FileExistsError`. An empty file (left by a save dialog) is used."""
     path = Path(path)
     srs = srs_of(crs)
     new = not is_geopackage(path)
     if new and path.exists():
-        path.unlink()  # not a GeoPackage (an empty or foreign file chosen as output)
+        refuse_foreign(path)
+        path.unlink()  # empty: nothing to lose
     con = connect(path)
     try:
         con.execute("BEGIN IMMEDIATE")
@@ -188,5 +199,5 @@ def read_table(path: str | Path, table: str) -> list[tuple[object, dict]]:
         con.close()
 
 
-__all__ = ["write_table", "is_geopackage", "srs_of", "blob", "create", "ensure_table", "replace_rows", "connect",
+__all__ = ["write_table", "is_geopackage", "refuse_foreign", "srs_of", "blob", "create", "ensure_table", "replace_rows", "connect",
            "quote", "geometry", "read_table"]

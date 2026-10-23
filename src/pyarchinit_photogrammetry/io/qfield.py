@@ -175,6 +175,7 @@ def export_package(chunk, folder: str | os.PathLike, resolution: float | None = 
     crs = None if crs_mod.is_local(chunk.crs) else chunk.crs
     gp = folder / GPKG
     if gp.exists():
+        gpkg.refuse_foreign(gp)  # an earlier package is written again, a file of something else stays
         gp.unlink()
     progress(0.05, "QField: layers")
     units = [(wkt.loads(u["wkt"]), _unit_row(u)) for u in d["units"]]

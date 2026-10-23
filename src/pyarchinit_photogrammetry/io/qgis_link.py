@@ -182,6 +182,8 @@ class LiveLink:
         groups = self._group(layers)
         new = not gpkg.is_geopackage(self.path)
         if new:
+            gpkg.refuse_foreign(self.path)  # never write the drawings into another file of that name
+        if new:
             self._signatures = {}
         todo = {t: f for t, f in groups.items() if force or new or self._signatures.get(t) != self._signature(f)}
         if todo:

@@ -147,3 +147,29 @@ def test_a_geopackage_touched_by_gdal_can_be_written_again(tmp_path):
     con = sqlite3.connect(path)
     assert con.execute("SELECT COUNT(*) FROM gpkg_spatial_ref_sys WHERE srs_id = 32637").fetchone()[0] == 1
     con.close()
+
+
+def test_a_file_that_is_not_a_geopackage_is_never_deleted(tmp_path):
+    """Choosing by mistake an existing document or another database as the GeoPackage to write:
+    the file stays as it was and the error says why; an empty file (from a save dialog) is used."""
+    import pytest
+
+    doc = tmp_path / "relazione.gpkg"
+    doc.write_text("una relazione di scavo")
+    with pytest.raises(FileExistsError):
+        gpkg.write_table(doc, "punti", "POINT", {"nome": "TEXT"}, [(Point(1, 2), {"nome": "a"})], None)
+    assert doc.read_text() == "una relazione di scavo"
+    other = tmp_path / "altro.sqlite"
+    con = sqlite3.connect(other)
+    con.execute("CREATE TABLE schede (us TEXT)")
+    con.commit()
+    con.close()
+    with pytest.raises(FileExistsError):
+        gpkg.write_table(other, "punti", "POINT", {"nome": "TEXT"}, [(Point(1, 2), {"nome": "a"})], None)
+    con = sqlite3.connect(other)
+    assert [r[0] for r in con.execute("SELECT name FROM sqlite_master")] == ["schede"]
+    con.close()
+    empty = tmp_path / "vuoto.gpkg"
+    empty.touch()
+    gpkg.write_table(empty, "punti", "POINT", {"nome": "TEXT"}, [(Point(1, 2), {"nome": "a"})], None)
+    assert [v["nome"] for _g, v in gpkg.read_table(empty, "punti")] == ["a"]
