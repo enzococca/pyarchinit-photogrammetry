@@ -31,6 +31,7 @@ dependencies = [
     "trimesh>=4.0",
     "contourpy>=1.1",
     "ezdxf>=1.1",
+    "matplotlib>=3.7",  # drawings (pottery, plugins' sections and logs); came only through pyvista before
     "laspy[lazrs]>=2.4",
     "sqlalchemy>=2.0",
     "typer>=0.9",
