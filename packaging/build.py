@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 from pathlib import Path
 
@@ -174,16 +175,32 @@ def notarize(path: Path, keychain_profile: str) -> None:
     print(f"notarized and stapled {path.name}", flush=True)
 
 
+def _print_logs(folder: Path) -> None:
+    """What the packaged application wrote while it was tested: where a stalled check stood (the
+    tracebacks of check-hang.txt), crashes, the end of its log."""
+    for name, tail in (("check-hang.txt", 20000), ("crash.log", 8000), ("ppg-gui.log", 6000)):
+        f = folder / name
+        if f.exists() and f.stat().st_size:
+            print(f"----- {name}", flush=True)
+            print(f.read_text(encoding="utf-8", errors="replace")[-tail:], flush=True)
+
+
 def smoke_test(bundle: Path) -> None:
-    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", PPG_RENDERER="software")
+    logs = Path(tempfile.mkdtemp(prefix="ppg-check-logs-"))
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", PPG_RENDERER="software", PPG_LOG_DIR=str(logs))
     exe = executable(bundle)
     print("smoke test:", exe, flush=True)
-    r = subprocess.run([str(exe), "--check"], env=env, timeout=600, capture_output=True, text=True)
+    try:
+        r = subprocess.run([str(exe), "--check"], env=env, timeout=600, capture_output=True, text=True)
+    except subprocess.TimeoutExpired:
+        _print_logs(logs)
+        raise SystemExit("smoke test: the application did not finish its check in 600 s")
     print(r.stdout[-2000:], r.stderr[-2000:])
     # without pyvistaqt in the build environment (Windows ARM64: VTK has no wheel) the 3D view uses
     # the software renderer, and the check says "vtk: missing" as expected
     vtk = "vtk: ok" if importlib.util.find_spec("pyvistaqt") else "3D backend: software"
     if r.returncode != 0 or not all(k in r.stdout for k in ("GUI check: ok", vtk, "libs: ok")):
+        _print_logs(logs)
         raise SystemExit(f"smoke test failed (exit {r.returncode})")
     r = subprocess.run([str(exe), "--doctor"], env=env, timeout=600, capture_output=True, text=True)
     print(r.stdout[-3000:])

@@ -203,6 +203,23 @@ def test_the_launcher_turns_the_crash_log_on_first(tmp_path):
     assert (tmp_path / "crash.log").exists()
 
 
+def test_a_stalled_check_says_where_it_stopped(tmp_path):
+    """The smoke test of a build (--check) that stalls writes where every thread stood to
+    check-hang.txt in the log folder and ends (the Windows ARM64 build of 1.3.0 waited 600 s for a
+    check that never finished, and said nothing)."""
+    env = dict(os.environ, PPG_LOG_DIR=str(tmp_path), PPG_CHECK_TIMEOUT="1")
+    code = ("import time, ppg_launcher\n"
+            "assert ppg_launcher.check_watchdog()\n"
+            "def stuck_here():\n"
+            "    time.sleep(30)\n"
+            "stuck_here()\n")
+    r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60,
+                       close_fds=False)
+    assert r.returncode != 0
+    text = (tmp_path / "check-hang.txt").read_text()
+    assert "stuck_here" in text and "Thread" in text
+
+
 def test_numbers_stay_in_the_c_locale(qapp):
     """Qt takes the locale of the system: with an Italian one IfcOpenShell read "1.5" as 1 and
     the IFC preview was empty. The start puts the numbers back in the C locale."""

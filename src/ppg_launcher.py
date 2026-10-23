@@ -263,6 +263,41 @@ def _persistent_matplotlib_cache() -> None:
 _crash_file = None  # kept open while the application runs
 
 
+def _log_folder() -> str:
+    """The log folder of the interface (as ``gui.logging_setup``; ``PPG_LOG_DIR`` overrides it)."""
+    folder = os.environ.get("PPG_LOG_DIR")
+    if folder:
+        return folder
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Logs/pyarchinit-photogrammetry")
+    if os.name == "nt":
+        return os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local"),
+                            "pyarchinit-photogrammetry", "logs")
+    return os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+                        "pyarchinit-photogrammetry", "logs")
+
+
+_hang_file = None
+
+
+def check_watchdog() -> bool:
+    """The smoke test of a build (``--check``) that stalls says where: after ``PPG_CHECK_TIMEOUT``
+    seconds (420 by default, less than the build script waits) the traceback of every thread goes
+    to ``check-hang.txt`` in the log folder and the process ends. True when it is armed."""
+    global _hang_file
+    import faulthandler
+
+    try:
+        seconds = float(os.environ.get("PPG_CHECK_TIMEOUT", "420"))
+        folder = _log_folder()
+        os.makedirs(folder, exist_ok=True)
+        _hang_file = open(os.path.join(folder, "check-hang.txt"), "w", encoding="utf-8")
+        faulthandler.dump_traceback_later(seconds, exit=True, file=_hang_file)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def crash_log() -> bool:
     """Native crashes (segfault, abort) written to ``crash.log`` in the log folder of the
     interface (as ``gui.logging_setup``, ``PPG_LOG_DIR`` overrides it) from the very start,
@@ -274,16 +309,7 @@ def crash_log() -> bool:
 
     if faulthandler.is_enabled():
         return True
-    folder = os.environ.get("PPG_LOG_DIR")
-    if not folder:
-        if sys.platform == "darwin":
-            folder = os.path.expanduser("~/Library/Logs/pyarchinit-photogrammetry")
-        elif os.name == "nt":
-            folder = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local"),
-                                  "pyarchinit-photogrammetry", "logs")
-        else:
-            folder = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
-                                  "pyarchinit-photogrammetry", "logs")
+    folder = _log_folder()
     try:
         os.makedirs(folder, exist_ok=True)
         _crash_file = open(os.path.join(folder, "crash.log"), "a", encoding="utf-8")
@@ -306,6 +332,8 @@ def main(argv: list[str] | None = None) -> int:
 
         return gui_main(argv)
     crash_log()
+    if "--check" in argv:
+        check_watchdog()
     os.environ.setdefault("QT_API", "pyside6")  # qtpy (pyvistaqt) must not pick another binding
     os.environ.setdefault("GLOG_minloglevel", "2")
     try:
