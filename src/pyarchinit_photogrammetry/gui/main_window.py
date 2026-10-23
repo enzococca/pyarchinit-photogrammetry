@@ -1271,12 +1271,13 @@ class MainWindow(QMainWindow):
             self._warn("Costruisci prima l'ortofoto termica.")
             return
         suffix, filt = {"tif": ("_C.tif", "GeoTIFF (*.tif)"), "tif16": ("_centikelvin.tif", "GeoTIFF (*.tif)"),
-                        "csv": (".csv", "CSV (*.csv)")}[fmt]
+                        "csv": (".csv", "CSV (*.csv)"), "flir": ("_flir.jpg", "JPEG FLIR (*.jpg)")}[fmt]
         start = str(Path(self._last_dir()) / f"temperatura{suffix}")
         path, _ = QFileDialog.getSaveFileName(self, tr("Esporta le temperature"), start, filt)
         if not path:
             return
-        self.run_task("Esporta le temperature", lambda p: th.export(self.chunk, path, fmt),
+        palette = str(self.settings.value("thermal/palette", "iron") or "iron")
+        self.run_task("Esporta le temperature", lambda p: th.export(self.chunk, path, fmt, palette=palette),
                       lambda out: self._info(tr("Temperature esportate"), str(out)))
 
     def _ms_palette_changed(self, palette: str) -> None:

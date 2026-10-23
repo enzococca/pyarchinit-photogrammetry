@@ -17,8 +17,9 @@ Temperatures (:func:`temperature`): the raw counts of a radiometric JPEG become 
 camera maker's model with the object parameters - emissivity, reflected temperature, ambient
 temperature, humidity, distance (:data:`DEFAULTS`: the factory values of the DJI cameras, 0.95 and
 22 degrees). DJI R-JPEGs are decoded by DJI's Thermal SDK (``dji_irp -a measure``; Windows and
-Linux; on macOS through Docker), MicaSense LWIR TIFFs are centikelvin, float TIFFs (from the DJI
-Thermal Analysis Tool, Thermal-Tools, ...) are degrees already. The frames decoded are kept as float32
+Linux; on macOS through Docker), FLIR radiometric JPEGs here (:func:`decode_flir`: the FFF records
+of their APP1 segments and FLIR's Planck model), MicaSense LWIR TIFFs are centikelvin, float TIFFs
+(from the DJI Thermal Analysis Tool, Thermal-Tools, ...) are degrees already. The frames decoded are kept as float32
 TIFFs in the chunk (``<data>/thermal/frames/``) with the parameters in their tags.
 
 The temperature orthomosaic (:func:`build_thermal`) is the orthophoto engine run on the visible
@@ -29,7 +30,9 @@ degree): :func:`balance_offsets` finds an offset per frame where the frames over
 away, the mean level kept - the strips between flight lines go. :func:`anomalies` is the local
 deviation (the temperature minus its surroundings): what a buried wall or ditch does to the soil.
 :func:`export` writes the temperatures as float32 GeoTIFF (degrees Celsius), 16-bit GeoTIFF in
-centikelvin (the integer format of MicaSense and of most tools) or CSV of x, y, temperature.
+centikelvin (the integer format of MicaSense and of most tools), CSV of x, y, temperature, or
+FLIR radiometric JPEGs (:func:`write_flir_jpeg`, tiles with world files) that the tools made for
+FLIR cameras read as thermograms.
 """
 from __future__ import annotations
 
@@ -334,9 +337,267 @@ def decode_file(path, params: dict | None = None, distance: float | None = None)
         out = decode_dji([Path(path)], params, distances=[distance])
         return out[Path(path)]
     if kind == "flir":
-        raise ThermalDecoderMissing(f"{Path(path).name}: FLIR radiometric JPEGs are not decoded yet; convert them "
-                                    "to float TIFFs (FLIR Thermal Studio, Thermal-Tools) and add those")
+        return decode_flir(path, params, distance)
     raise ValueError(f"{Path(path).name} holds no temperatures (not a radiometric JPEG or a temperature TIFF)")
+
+
+# ------------------------------------------------------------------------------ FLIR radiometric JPEGs
+# A FLIR radiometric JPEG carries a FLIR file (FFF) in its APP1 segments, each opened by "FLIR\0",
+# 0x01, its number and the number of the last one: a big-endian header of 64 bytes, a directory of
+# records of 32 bytes, the records. Two of them matter: the raw data (1: the counts of the sensor,
+# 16-bit, or a PNG) and the camera information (0x20: the object parameters, FLIR's Planck
+# constants of the camera, the constants of the atmosphere). The layout is the one ExifTool documents
+# (Image::ExifTool::FLIR); the conversion from counts to degrees is FLIR's model as Thermimage writes
+# it (raw2temp), the one the tools for FLIR files use.
+FLIR_PLANCK = {"R1": 21106.77, "B": 1501.0, "F": 1.0, "O": -7340.0, "R2": 0.012545258}  # Thermimage's defaults
+FLIR_ATMOSPHERE = {"ATA1": 0.006569, "ATA2": 0.01262, "ATB1": -0.002276, "ATB2": -0.00667, "ATX": 1.9}
+FLIR_SEGMENT = 65524  # bytes of the FFF in one APP1 segment, as FLIR's cameras write them
+FLIR_TILE = 2048  # side of the exported tiles: 256 segments hold 16.7 MB, a raw frame of 2896 x 2896 at most
+_CAMERA_INFO_SIZE = 0x5D0
+_PNG = b"\x89PNG\r\n\x1a\n"
+
+
+def _flir_fff(data: bytes) -> bytes | None:
+    """The FFF held by the APP1 segments of a JPEG, in the order of their numbers."""
+    if data[:2] != b"\xff\xd8":
+        return None
+    chunks: dict[int, bytes] = {}
+    i = 2
+    while i + 4 <= len(data) and data[i] == 0xFF:
+        marker = data[i + 1]
+        if marker == 0xDA:
+            break
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+            i += 2
+            continue
+        n = struct.unpack(">H", data[i + 2:i + 4])[0]
+        body = data[i + 4:i + 2 + n]
+        if marker == 0xE1 and body[:5] == b"FLIR\x00" and len(body) >= 8:
+            chunks[body[6]] = body[8:]
+        i += 2 + n
+    if not chunks:
+        return None
+    return b"".join(chunks[k] for k in sorted(chunks))
+
+
+def _flir_records(fff: bytes) -> dict[int, bytes]:
+    """The records of an FFF by type."""
+    if fff[:4] not in (b"FFF\x00", b"AFF\x00"):
+        raise ValueError("not a FLIR file (FFF)")
+    order = ">"
+    if not 100 <= struct.unpack(">I", fff[0x14:0x18])[0] < 200:  # the version tells the byte order
+        order = "<"
+    pos, num = struct.unpack(order + "II", fff[0x18:0x20])
+    out = {}
+    for k in range(num):
+        e = pos + 32 * k
+        rtype = struct.unpack(order + "H", fff[e:e + 2])[0]
+        if rtype == 0:
+            continue
+        off, length = struct.unpack(order + "II", fff[e + 12:e + 20])
+        out.setdefault(rtype, fff[off:off + length])
+    return out
+
+
+def _record_order(rec: bytes) -> str:
+    """A record's own byte order, from its first number (2 when read the right way)."""
+    return "<" if struct.unpack("<H", rec[:2])[0] == 2 else ">"
+
+
+def read_flir(path) -> tuple[np.ndarray, dict]:
+    """The raw counts (float32) of a FLIR radiometric JPEG and its camera information: the object
+    parameters the camera stored (``emissivity``, ``distance``, ``reflected``, ``ambient``,
+    ``humidity`` in percent, ``window``, ``window_transmission``), FLIR's Planck constants (``R1``,
+    ``B``, ``F``, ``O``, ``R2``) and those of the atmosphere (``ATA1``...``ATX``)."""
+    fff = _flir_fff(Path(path).read_bytes())
+    if fff is None:
+        raise ValueError(f"{Path(path).name}: no FLIR data in the file")
+    recs = _flir_records(fff)
+    if 1 not in recs or 0x20 not in recs:
+        raise ValueError(f"{Path(path).name}: the FLIR data has no raw data or no camera information")
+    raw_rec = recs[1]
+    o = _record_order(raw_rec)
+    w, h = struct.unpack(o + "HH", raw_rec[2:6])
+    body = raw_rec[32:]
+    if body[:8] == _PNG:
+        img = cv2.imdecode(np.frombuffer(body, np.uint8), cv2.IMREAD_UNCHANGED)
+        if img is None:
+            raise ValueError(f"{Path(path).name}: the PNG of the FLIR raw data does not open")
+        raw = img.astype(np.uint16)
+        if o == "<":  # the counts written little-endian inside a PNG (most FLIR cameras do): swapped back
+            raw = raw.byteswap()
+    else:
+        raw = np.frombuffer(body[:w * h * 2], o + "u2").reshape(h, w)
+    cam = recs[0x20]
+    o = _record_order(cam)
+
+    def f32(at):
+        return float(struct.unpack(o + "f", cam[at:at + 4])[0])
+
+    info = {"emissivity": f32(0x20), "distance": f32(0x24), "reflected": f32(0x28) - 273.15,
+            "ambient": f32(0x2C) - 273.15, "window": f32(0x30) - 273.15, "window_transmission": f32(0x34),
+            "humidity": f32(0x3C), "R1": f32(0x58), "B": f32(0x5C), "F": f32(0x60),
+            "O": float(struct.unpack(o + "i", cam[0x308:0x30C])[0]), "R2": f32(0x30C),
+            "ATA1": f32(0x70), "ATA2": f32(0x74), "ATB1": f32(0x78), "ATB2": f32(0x7C), "ATX": f32(0x80)}
+    info["humidity"] = info["humidity"] * 100.0 if info["humidity"] <= 2.0 else info["humidity"]  # a fraction, or percent
+    if not info["window_transmission"]:
+        info["window_transmission"] = 1.0
+    if not all(info[k] for k in FLIR_ATMOSPHERE):
+        info.update(FLIR_ATMOSPHERE)
+    return raw.astype(np.float32), info
+
+
+def _flir_tau(distance: float, humidity: float, ambient: float, k: dict) -> float:
+    """FLIR's transmission of the air over half the distance (Thermimage's raw2temp)."""
+    h2o = (humidity / 100.0) * np.exp(1.5587 + 0.06939 * ambient - 0.00027816 * ambient ** 2
+                                       + 0.00000068455 * ambient ** 3)
+    d = np.sqrt(distance / 2.0)
+    return float(k["ATX"] * np.exp(-d * (k["ATA1"] + k["ATB1"] * np.sqrt(h2o)))
+                 + (1 - k["ATX"]) * np.exp(-d * (k["ATA2"] + k["ATB2"] * np.sqrt(h2o))))
+
+
+def _planck(t_c, k: dict):
+    """The counts of a black body at ``t_c`` degrees."""
+    return k["R1"] / (k["R2"] * (np.exp(k["B"] / (np.asarray(t_c, np.float64) + 273.15)) - k["F"])) - k["O"]
+
+
+def _flir_terms(p: dict, k: dict) -> tuple[float, float]:
+    """``raw = gain * (raw_object + offset)``: FLIR's model of what the camera counts for an object
+    of radiance ``raw_object`` seen through the air and the window, the surroundings reflected."""
+    e, irt = float(p["emissivity"]), float(p.get("window_transmission", 1.0) or 1.0)
+    tau = _flir_tau(float(p["distance"]), float(p["humidity"]), float(p["ambient"]), k)
+    window = p.get("window")
+    window = float(p["ambient"]) if window is None else float(window)
+    offset = ((1 - e) / e * _planck(p["reflected"], k)
+              + (1 - tau) / e / tau * _planck(p["ambient"], k)
+              + (1 - tau) / e / tau / irt / tau * _planck(p["ambient"], k)
+              + (1 - irt) / e / tau / irt * _planck(window, k))
+    return e * tau * irt * tau, float(offset)
+
+
+def flir_temperature(raw: np.ndarray, params: dict, constants: dict | None = None) -> np.ndarray:
+    """Degrees Celsius of FLIR raw counts with the object ``params`` (``emissivity``, ``distance``,
+    ``reflected``, ``ambient``, ``humidity`` in percent; ``window``, ``window_transmission``) and the
+    camera's ``constants`` (Planck and atmosphere; Thermimage's defaults when None)."""
+    k = {**FLIR_PLANCK, **FLIR_ATMOSPHERE, **(constants or {})}
+    gain, offset = _flir_terms(params, k)
+    obj = np.asarray(raw, np.float64) / gain - offset
+    val = k["R1"] / (k["R2"] * (obj + k["O"])) + k["F"]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        t = k["B"] / np.log(val) - 273.15
+    return np.where(val > 1.0, t, np.nan).astype(np.float32)
+
+
+def flir_counts(t: np.ndarray, params: dict, constants: dict | None = None) -> np.ndarray:
+    """The FLIR raw counts (float) that :func:`flir_temperature` turns back into ``t`` degrees."""
+    k = {**FLIR_PLANCK, **FLIR_ATMOSPHERE, **(constants or {})}
+    gain, offset = _flir_terms(params, k)
+    return gain * (_planck(t, k) + offset)
+
+
+def decode_flir(path, params: dict | None = None, distance: float | None = None) -> np.ndarray:
+    """The temperatures of a FLIR radiometric JPEG with the chunk's object parameters (the camera's
+    own calibration, its Planck constants, from the file); the distance is the flight height when
+    not set, else the one the camera stored."""
+    raw, info = read_flir(path)
+    p = dict(DEFAULTS if params is None else params)
+    if distance is None:
+        distance = p.get("distance")
+    if distance is None:
+        distance = flight_height(path) or info["distance"] or 1.0
+    p.update(distance=float(distance), window=info["window"], window_transmission=info["window_transmission"])
+    constants = {k: info[k] for k in (*FLIR_PLANCK, *FLIR_ATMOSPHERE)}
+    return flir_temperature(raw, p, constants)
+
+
+def _printed(params: dict) -> dict:
+    """The object parameters as ExifTool prints them (emissivity to 2 decimals, distance to the
+    centimetre, temperatures to a tenth of a degree, humidity to a tenth of a percent): the tools
+    that read FLIR files through ExifTool compute with these, so the counts are made with them too.
+    A distance not set (the flight height of every frame) is written as 1 m."""
+    distance = params.get("distance")
+    return {"emissivity": round(float(params["emissivity"]), 2),
+            "distance": round(float(1.0 if distance is None else distance), 2),
+            "reflected": round(float(params["reflected"]), 1), "ambient": round(float(params["ambient"]), 1),
+            "humidity": round(float(params["humidity"]), 1), "window": round(float(params["ambient"]), 1),
+            "window_transmission": 1.0}
+
+
+def _fff_bytes(raw: np.ndarray, p: dict, model: str) -> bytes:
+    """An FFF with the raw data (16-bit little-endian, ExifTool turns it into a TIFF) and the camera
+    information (the object parameters, Thermimage's Planck and atmosphere constants)."""
+    h, w = raw.shape
+    raw_head = np.zeros(16, "<u2")
+    raw_head[:3] = (2, w, h)
+    raw_head[6], raw_head[8] = w - 1, h - 1
+    raw_rec = raw_head.tobytes() + np.ascontiguousarray(raw, "<u2").tobytes()
+    cam = bytearray(_CAMERA_INFO_SIZE)
+    struct.pack_into("<H", cam, 0, 2)
+    for at, v in ((0x20, p["emissivity"]), (0x24, p["distance"]), (0x28, p["reflected"] + 273.15),
+                  (0x2C, p["ambient"] + 273.15), (0x30, p["window"] + 273.15), (0x34, p["window_transmission"]),
+                  (0x3C, p["humidity"] / 100.0), (0x58, FLIR_PLANCK["R1"]), (0x5C, FLIR_PLANCK["B"]),
+                  (0x60, FLIR_PLANCK["F"]), (0x70, FLIR_ATMOSPHERE["ATA1"]), (0x74, FLIR_ATMOSPHERE["ATA2"]),
+                  (0x78, FLIR_ATMOSPHERE["ATB1"]), (0x7C, FLIR_ATMOSPHERE["ATB2"]), (0x80, FLIR_ATMOSPHERE["ATX"]),
+                  (0x90, 150.0 + 273.15), (0x94, -40.0 + 273.15), (0x30C, FLIR_PLANCK["R2"])):
+        struct.pack_into("<f", cam, at, float(v))
+    struct.pack_into("<i", cam, 0x308, int(FLIR_PLANCK["O"]))
+    name = model.encode("ascii", "replace")[:31]
+    cam[0xD4:0xD4 + len(name)] = name
+    lo, hi = int(raw.min()), int(raw.max())
+    struct.pack_into("<HH", cam, 0x310, lo, hi)
+    struct.pack_into("<H", cam, 0x338, int(np.median(raw)))
+    struct.pack_into("<H", cam, 0x33C, hi - lo)
+    raw_at = 64 + 2 * 32
+    cam_at = raw_at + len(raw_rec)
+    head = bytearray(64)
+    head[:4] = b"FFF\x00"
+    head[4:20] = b"pyarchinit-ppg\x00\x00"
+    struct.pack_into(">IIII", head, 0x14, 100, 64, 2, 3)
+    entries = (struct.pack(">HHIIIIIII", 1, 2, 0x64, 1, raw_at, len(raw_rec), 0, 0, 0)
+               + struct.pack(">HHIIIIIII", 0x20, 1, 0x64, 2, cam_at, len(cam), 0, 0, 0))
+    return bytes(head) + entries + raw_rec + bytes(cam)
+
+
+def write_flir_jpeg(path, t: np.ndarray, params: dict, lims: tuple[float, float] | None = None,
+                    palette: str = "iron", model: str = "pyarchinit-photogrammetry") -> Path:
+    """A FLIR radiometric JPEG of the temperatures ``t`` (degrees Celsius, NaN where nothing): the
+    image is the palette rendering, the APP1 segments hold the FLIR file with the raw counts made
+    with the inverse of FLIR's model for ``params`` (rounded as ExifTool prints them, see
+    :func:`_printed`), so ExifTool, FLIR's tools and the programs built on them (Thermal-Image-Analysis,
+    flirimageextractor, flyr) read these temperatures back, within 0.01 degrees. The format has no
+    empty value: cells without a temperature get the coldest of the image (black in the picture).
+    At most 2896 x 2896 cells (:data:`FLIR_TILE`)."""
+    t = np.asarray(t, np.float32)
+    h, w = t.shape
+    if h * w * 2 + 2048 > 256 * FLIR_SEGMENT:
+        raise ValueError(f"{w} x {h} cells do not fit in a FLIR file: export in tiles")
+    ok = np.isfinite(t)
+    if not ok.any():
+        raise ValueError("no temperature to write")
+    p = _printed(params)
+    filled = np.where(ok, t, float(np.min(t[ok])))
+    counts = flir_counts(filled, p)
+    if counts.max() > 65535 or counts.min() < 1:
+        raise ValueError(f"temperatures from {float(t[ok].min()):.1f} to {float(t[ok].max()):.1f} degrees do not fit "
+                         "in FLIR's 16-bit counts with these parameters")
+    raw = np.round(counts).astype(np.uint16)
+    fff = _fff_bytes(raw, p, model)
+    rgba = colours(t, lims, palette)
+    bgr = cv2.cvtColor(rgba[..., :3], cv2.COLOR_RGB2BGR)
+    bgr[~ok] = 0
+    okj, jpeg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    if not okj:
+        raise RuntimeError("the JPEG could not be encoded")
+    jpeg = jpeg.tobytes()
+    n = (len(fff) + FLIR_SEGMENT - 1) // FLIR_SEGMENT
+    segments = b"".join(b"\xff\xe1" + struct.pack(">H", 2 + 8 + len(part)) + b"FLIR\x00\x01" + bytes((k, n - 1)) + part
+                        for k, part in enumerate(fff[i:i + FLIR_SEGMENT] for i in range(0, len(fff), FLIR_SEGMENT)))
+    at = 2
+    if jpeg[2:4] == b"\xff\xe0":  # after the JFIF segment, which must come first
+        at = 4 + struct.unpack(">H", jpeg[4:6])[0]
+    path = Path(path)
+    path.write_bytes(jpeg[:at] + segments + jpeg[at:])
+    return path
 
 
 def decode_all(chunk: Chunk, cams=None, progress: Progress | None = None, force: bool = False) -> int:
@@ -1021,18 +1282,22 @@ def difference(chunk: Chunk, other: Path, name: str = "thermal_difference") -> P
     return out
 
 
-def export(chunk: Chunk, path, fmt: str | None = None, source: Path | None = None) -> Path:
+def export(chunk: Chunk, path, fmt: str | None = None, source: Path | None = None, tile: int = FLIR_TILE,
+           palette: str = "iron") -> Path:
     """The temperatures in a file that keeps them: ``tif`` float32 GeoTIFF in degrees Celsius,
     ``tif16`` 16-bit GeoTIFF in centikelvin (0 = nothing; degrees = value / 100 - 273.15, as
-    MicaSense writes its thermal band), ``csv`` one line per cell with x, y and the temperature.
-    The parameters of the measure go with it (tags, or the CSV's header)."""
+    MicaSense writes its thermal band), ``csv`` one line per cell with x, y and the temperature,
+    ``flir`` FLIR radiometric JPEGs (:func:`export_flir`: tiles of ``tile`` cells with world files).
+    The parameters of the measure go with it (tags, the CSV's header, the FLIR camera information)."""
     import rasterio
 
     src_path = Path(source) if source is not None else thermal_path(chunk)
     if src_path is None or not src_path.exists():
         raise RuntimeError("build the temperature orthomosaic first")
     path = Path(path)
-    fmt = fmt or {".csv": "csv", ".txt": "csv"}.get(path.suffix.lower(), "tif")
+    fmt = fmt or {".csv": "csv", ".txt": "csv", ".jpg": "flir", ".jpeg": "flir"}.get(path.suffix.lower(), "tif")
+    if fmt == "flir":
+        return export_flir(chunk, path, src_path, tile=tile, palette=palette)
     with rasterio.open(src_path) as src:
         t = src.read(1).astype(np.float32)
         profile = src.profile.copy()
@@ -1061,7 +1326,75 @@ def export(chunk: Chunk, path, fmt: str | None = None, source: Path | None = Non
                 block = np.column_stack([np.asarray(xs[s:s + step]), np.asarray(ys[s:s + step]), t[rows[s:s + step], cols[s:s + step]]])
                 np.savetxt(f, block, fmt=["%.3f", "%.3f", "%.2f"], delimiter=",")
         return path
-    raise ValueError(f"unknown format {fmt!r}: tif, tif16 or csv")
+    raise ValueError(f"unknown format {fmt!r}: tif, tif16, csv or flir")
+
+
+def _export_distance(chunk: Chunk, params: dict, sample: int = 40) -> float:
+    """The distance the temperatures were measured at: the one set, else the median flight height of
+    the thermal frames (as :func:`_distance` takes it for every frame)."""
+    if params.get("distance") is not None:
+        return float(params["distance"])
+    files = [f for f in (thermal_file(c) for c in chunk.cameras if c.enabled) if f]
+    if not files:
+        return 1.0
+    step = max(1, len(files) // sample)
+    return float(np.median([_distance(params, f) for f in files[::step]]))
+
+
+def export_flir(chunk: Chunk, path, source: Path, tile: int = FLIR_TILE, palette: str = "iron") -> Path:
+    """The temperature orthomosaic as FLIR radiometric JPEGs (:func:`write_flir_jpeg`): one file when
+    it fits in ``tile`` cells a side, else tiles ``<name>_r<row>_c<column>.jpg`` with an index
+    ``<name>_tiles.csv`` (file, bounds, coldest and hottest degrees, cells with a value). Every JPEG
+    has its world file (``.jgw``) and its reference system (``.aux.xml``): QGIS and GDAL place it.
+    The colours of all the tiles share the ramp of the whole orthomosaic. The object parameters
+    written are those the temperatures were measured with (the distance: the median flight height).
+    Returns the file, or the index of the tiles."""
+    import rasterio
+    from rasterio.windows import Window
+
+    path = Path(path).with_suffix(".jpg")
+    tile = int(min(max(tile, 64), 2800))
+    params = params_of(chunk)
+    params = {**params, "distance": _export_distance(chunk, params)}
+    with rasterio.open(source) as src:
+        wkt = src.crs.to_wkt() if src.crs else None
+        tr = src.transform
+        h, w = src.height, src.width
+        step = max(1, int(np.ceil(max(h, w) / 2000)))
+        lims = limits(src.read(1, out_shape=(max(1, h // step), max(1, w // step))).astype(np.float32))
+        tiles = []
+        for r0 in range(0, h, tile):
+            for c0 in range(0, w, tile):
+                win = Window(c0, r0, min(tile, w - c0), min(tile, h - r0))
+                t = src.read(1, window=win).astype(np.float32)
+                ok = np.isfinite(t)
+                if not ok.any():
+                    continue
+                single = h <= tile and w <= tile
+                out = path if single else path.with_name(f"{path.stem}_r{r0 // tile:02d}_c{c0 // tile:02d}.jpg")
+                write_flir_jpeg(out, t, params, lims, palette)
+                wt = rasterio.windows.transform(win, tr)
+                # the world file: the size of a cell and the centre of the first one
+                out.with_suffix(".jgw").write_text("\n".join(f"{v:.10f}" for v in (
+                    wt.a, wt.d, wt.b, wt.e, wt.c + wt.a / 2 + wt.b / 2, wt.f + wt.d / 2 + wt.e / 2)) + "\n")
+                if wkt:
+                    from xml.sax.saxutils import escape
+
+                    Path(str(out) + ".aux.xml").write_text(f"<PAMDataset>\n  <SRS>{escape(wkt)}</SRS>\n</PAMDataset>\n")
+                b = rasterio.windows.bounds(win, tr)
+                tiles.append((out.name, b[0], b[1], b[2], b[3], float(np.min(t[ok])), float(np.max(t[ok])),
+                              int(ok.sum())))
+    if not tiles:
+        raise RuntimeError("the temperature orthomosaic is empty")
+    if len(tiles) == 1 and tiles[0][0] == path.name:
+        return path
+    index = path.with_name(f"{path.stem}_tiles.csv")
+    with open(index, "w", encoding="utf-8") as f:
+        f.write("# FLIR radiometric JPEGs of " + Path(source).name + "; " + json.dumps(_printed(params)) + "\n")
+        f.write("file,xmin,ymin,xmax,ymax,tmin_c,tmax_c,cells\n")
+        for row in tiles:
+            f.write(f"{row[0]},{row[1]:.3f},{row[2]:.3f},{row[3]:.3f},{row[4]:.3f},{row[5]:.2f},{row[6]:.2f},{row[7]}\n")
+    return index
 
 
 # ------------------------------------------------------------------------------ colours

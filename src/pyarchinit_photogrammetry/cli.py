@@ -1784,7 +1784,7 @@ def multispectral(project: Path, what: str = typer.Argument(..., help="add, pane
 
 @app.command()
 def thermal(project: Path, what: str = typer.Argument(..., help="status, params, build, anomalies or export"),
-            target: Optional[Path] = typer.Argument(None, help="export: the file to write (.tif, .csv)"),
+            target: Optional[Path] = typer.Argument(None, help="export: the file to write (.tif, .csv, .jpg)"),
             emissivity: Optional[float] = typer.Option(None, help="params: emissivity (factory 0.95)"),
             reflected: Optional[float] = typer.Option(None, help="params: reflected temperature, degrees (factory 22)"),
             ambient: Optional[float] = typer.Option(None, help="params: ambient temperature, degrees (factory 22)"),
@@ -1793,7 +1793,10 @@ def thermal(project: Path, what: str = typer.Argument(..., help="status, params,
             resolution: Optional[float] = typer.Option(None, help="build: metres per pixel (default: a thermal pixel on the ground)"),
             balance: bool = typer.Option(True, help="build: take away the offsets between frames"),
             radius: float = typer.Option(2.0, help="anomalies: the radius of the surroundings, metres"),
-            fmt: Optional[str] = typer.Option(None, "--format", help="export: tif (degrees, float32), tif16 (centikelvin) or csv"),
+            fmt: Optional[str] = typer.Option(None, "--format", help="export: tif (degrees, float32), tif16 (centikelvin), "
+                                                                     "csv, or flir (FLIR radiometric JPEGs in tiles with world files)"),
+            tile: int = typer.Option(2048, help="export flir: the side of the tiles, cells (at most 2800)"),
+            palette: str = typer.Option("iron", help="export flir: the colours of the picture (iron, inferno, rainbow, grey)"),
             chunk: Optional[str] = None):
     """Thermal frames (a DJI R-JPEG camera, MicaSense LWIR, temperature TIFFs) added with
     ``ppg multispectral PROJECT add``: the measure's parameters, the temperature orthomosaic in
@@ -1826,7 +1829,7 @@ def thermal(project: Path, what: str = typer.Argument(..., help="status, params,
     elif what == "export":
         if target is None:
             raise typer.BadParameter("export needs the file to write")
-        typer.echo(str(th.export(ch, target, fmt)))
+        typer.echo(str(th.export(ch, target, fmt, tile=tile, palette=palette)))
     else:
         raise typer.BadParameter("what: status, params, build, anomalies or export")
 

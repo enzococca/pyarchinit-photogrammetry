@@ -113,6 +113,169 @@ def test_files_recognised_and_decoded(tmp_path, monkeypatch):
     assert thermal.decode_file(kel)[0, 0] == pytest.approx(23.5, abs=1e-3)
 
 
+def _exiftool_like(path: Path) -> tuple[np.ndarray, dict]:
+    """The raw thermal image and the FLIR tags of a JPEG as ExifTool reads and prints them
+    (Image::ExifTool::FLIR): the FFF from the APP1 segments ("FLIR\\0", 1, number, last number) in
+    the order of their numbers; the byte order of the header from its version (100-199), then
+    toggled by a record whose first number reads 0x100 or more; the raw data a TIFF only when it is
+    little-endian and width x height x 2 bytes; the values as ExifTool prints them, which is what
+    the tools built on it (Thermal-Image-Analysis) compute with."""
+    data = path.read_bytes()
+    assert data[:2] == b"\xff\xd8"
+    i, chunks, total = 2, {}, None
+    while data[i] == 0xFF and data[i + 1] != 0xDA:
+        n = struct.unpack(">H", data[i + 2:i + 4])[0]
+        body = data[i + 4:i + 2 + n]
+        if data[i + 1] == 0xE1 and body[:5] == b"FLIR\x00":
+            assert body[5] == 1 and n <= 65535
+            chunks[body[6]] = body[8:]
+            total = body[7] + 1
+        i += 2 + n
+    assert total and sorted(chunks) == list(range(total))
+    fff = b"".join(chunks[k] for k in range(total))
+    assert fff[:4] == b"FFF\x00"
+    order = ">" if 100 <= struct.unpack(">I", fff[0x14:0x18])[0] < 200 else "<"
+    pos, num = struct.unpack(order + "II", fff[0x18:0x20])
+    recs = {}
+    for k in range(num):
+        rtype, _sub, _ver, _idx, off, length = struct.unpack(order + "HHIIII", fff[pos + 32 * k:pos + 32 * k + 20])
+        recs[rtype] = fff[off:off + length]
+
+    def toggled(o, rec):
+        return ("<" if o == ">" else ">") if struct.unpack(o + "H", rec[:2])[0] >= 0x100 else o
+
+    order = toggled(order, recs[1])
+    w, h = struct.unpack(order + "HH", recs[1][2:6])
+    body = recs[1][32:]
+    assert order == "<" and len(body) == w * h * 2  # RawThermalImageType: TIFF
+    image = np.frombuffer(body, "<u2").reshape(h, w)
+    cam = recs[0x20]
+    order = toggled(order, cam)
+
+    def f(at):
+        return struct.unpack(order + "f", cam[at:at + 4])[0]
+
+    rh = f(0x3C)
+    rh = rh / 100 if rh > 2 else rh
+    tags = {"Emissivity": "%.2f" % f(0x20), "ObjectDistance": "%.2f m" % f(0x24),
+            "ReflectedApparentTemperature": "%.1f C" % (f(0x28) - 273.15),
+            "AtmosphericTemperature": "%.1f C" % (f(0x2C) - 273.15),
+            "IRWindowTemperature": "%.1f C" % (f(0x30) - 273.15), "IRWindowTransmission": "%.2f" % f(0x34),
+            "RelativeHumidity": "%.1f %%" % (rh * 100), "PlanckR1": "%.8g" % f(0x58), "PlanckB": "%.8g" % f(0x5C),
+            "PlanckF": "%.8g" % f(0x60), "PlanckO": "%d" % struct.unpack(order + "i", cam[0x308:0x30C])[0],
+            "PlanckR2": "%.8g" % f(0x30C)}
+    return image, tags
+
+
+def _flir_reference_temperature(raw: np.ndarray, tags: dict) -> np.ndarray:
+    """Degrees from FLIR counts the way the tools for FLIR files do it (Thermimage's raw2temp, as
+    thermal_base of Thermal-Image-Analysis applies it to ExifTool's printed tags), written out term by
+    term: the object's counts are what the camera counted, less the air and the window in front of
+    it and the surroundings it reflects, then FLIR's Planck curve backwards."""
+    v = {k: float(str(x).split()[0]) for k, x in tags.items()}
+    e, d, t_refl, t_atm = v["Emissivity"], v["ObjectDistance"], v["ReflectedApparentTemperature"], v["AtmosphericTemperature"]
+    t_win, irt, rh = v["IRWindowTemperature"], v["IRWindowTransmission"], v["RelativeHumidity"]
+    r1, b, f, o, r2 = v["PlanckR1"], v["PlanckB"], v["PlanckF"], v["PlanckO"], v["PlanckR2"]
+    water = rh / 100 * np.exp(1.5587 + 0.06939 * t_atm - 0.00027816 * t_atm ** 2 + 0.00000068455 * t_atm ** 3)
+    half = np.sqrt(d / 2)
+    tau = 1.9 * np.exp(-half * (0.006569 - 0.002276 * np.sqrt(water))) + (1 - 1.9) * np.exp(
+        -half * (0.01262 - 0.00667 * np.sqrt(water)))
+
+    def counts(t_c):
+        return r1 / (r2 * (np.exp(b / (t_c + 273.15)) - f)) - o
+
+    obj = (raw.astype(np.float64) / (e * tau * irt * tau)
+           - (1 - tau) / e / tau * counts(t_atm)                 # the air between the object and the window
+           - (1 - tau) / e / tau / irt / tau * counts(t_atm)     # the air between the window and the camera
+           - (1 - irt) / e / tau / irt * counts(t_win)           # the window itself
+           - (1 - e) / e * counts(t_refl))                       # the surroundings, reflected
+    inside = r1 / (r2 * (obj + o)) + f
+    assert np.all(inside > 0)  # Thermal-Image-Analysis gives up otherwise ("Image seems to be corrupted")
+    return b / np.log(inside) - 273.15
+
+
+def test_flir_radiometric_jpeg_round_trip(tmp_path):
+    """A FLIR radiometric JPEG written by the program gives its temperatures back to ExifTool's way
+    of reading (and to the tools on it), to the program's own reader, and holds a picture."""
+    yy, xx = np.mgrid[0:300, 0:420]
+    t = (14.0 + 0.03 * xx + 6.0 * np.sin(yy / 23.0)).astype(np.float32)
+    t[200:240, 300:360] = 57.3  # a hot roof
+    t[:30, :50] = np.nan  # outside the survey
+    params = dict(thermal.DEFAULTS, distance=19.837, emissivity=0.95, humidity=70.0)
+    path = thermal.write_flir_jpeg(tmp_path / "t.jpg", t, params)
+    ok = np.isfinite(t)
+    raw, tags = _exiftool_like(path)
+    assert raw.shape == t.shape
+    assert tags["Emissivity"] == "0.95" and tags["ObjectDistance"] == "19.84 m"
+    assert tags["ReflectedApparentTemperature"] == "22.0 C" and tags["RelativeHumidity"] == "70.0 %"
+    got = _flir_reference_temperature(raw, tags)
+    assert np.max(np.abs(got[ok] - t[ok])) < 0.01
+    assert np.allclose(got[~ok], np.nanmin(t), atol=0.01)  # no value: the coldest of the image
+    # the program's own reader, with the parameters written in the file
+    assert thermal.kind_of(path) == "flir"
+    counts, info = thermal.read_flir(path)
+    assert info["emissivity"] == pytest.approx(0.95) and info["humidity"] == pytest.approx(70.0)
+    back = thermal.decode_file(path, dict(params, distance=19.84))
+    assert np.max(np.abs(back[ok] - t[ok])) < 0.01
+    # the picture is the palette rendering, black where nothing
+    img = cv2.imread(str(path))
+    assert img.shape[:2] == t.shape and img[5, 5].max() < 20 and img[220, 330].max() > 150
+    # big frames do not fit in 256 segments
+    with pytest.raises(ValueError, match="tiles"):
+        thermal.write_flir_jpeg(tmp_path / "big.jpg", np.zeros((3000, 3000), np.float32), params)
+    # the FLIR files of the cameras: counts in a PNG with the bytes swapped (most of them do)
+    png_jpeg = tmp_path / "png.jpg"
+    data = path.read_bytes()
+    fff = thermal._flir_fff(data)
+    recs = thermal._flir_records(fff)
+    swapped = counts.astype(np.uint16).byteswap()
+    okp, png = cv2.imencode(".png", swapped)
+    raw_rec = recs[1][:32] + png.tobytes()
+    cam_rec = recs[0x20]
+    head = bytearray(fff[:64])
+    struct.pack_into(">IIII", head, 0x14, 100, 64, 2, 3)
+    entries = (struct.pack(">HHIIIIIII", 1, 3, 0x64, 1, 128, len(raw_rec), 0, 0, 0)
+               + struct.pack(">HHIIIIIII", 0x20, 1, 0x64, 2, 128 + len(raw_rec), len(cam_rec), 0, 0, 0))
+    new = bytes(head) + entries + raw_rec + cam_rec
+    seg = b"\xff\xe1" + struct.pack(">H", 2 + 8 + len(new)) + b"FLIR\x00\x01\x00\x00" + new
+    png_jpeg.write_bytes(data[:2] + seg + _without_flir(data)[2:])
+    back = thermal.decode_file(png_jpeg, dict(params, distance=19.84))
+    assert np.max(np.abs(back[ok] - t[ok])) < 0.01
+
+
+def _without_flir(data: bytes) -> bytes:
+    """A JPEG without its FLIR segments."""
+    out, i = bytearray(data[:2]), 2
+    while data[i] == 0xFF and data[i + 1] != 0xDA:
+        n = struct.unpack(">H", data[i + 2:i + 4])[0]
+        if not (data[i + 1] == 0xE1 and data[i + 4:i + 9] == b"FLIR\x00"):
+            out += data[i:i + 2 + n]
+        i += 2 + n
+    return bytes(out + data[i:])
+
+
+@pytest.mark.skipif(not __import__("shutil").which("exiftool"), reason="ExifTool is not installed")
+def test_flir_jpeg_read_by_exiftool(tmp_path):
+    import subprocess
+
+    t = np.linspace(10, 40, 64 * 48, dtype=np.float32).reshape(48, 64)
+    path = thermal.write_flir_jpeg(tmp_path / "t.jpg", t, dict(thermal.DEFAULTS, distance=20.0))
+    out = subprocess.run(["exiftool", "-j", "-Emissivity", "-ObjectDistance", "-ReflectedApparentTemperature",
+                          "-AtmosphericTemperature", "-IRWindowTemperature", "-IRWindowTransmission", "-RelativeHumidity",
+                          "-PlanckR1", "-PlanckB", "-PlanckF", "-PlanckO", "-PlanckR2", "-RawThermalImageType", str(path)],
+                         capture_output=True, text=True, check=True)
+    tags = json.loads(out.stdout)[0]
+    assert tags["RawThermalImageType"] == "TIFF" and tags["Emissivity"] == 0.95
+    tiff = subprocess.run(["exiftool", "-b", "-RawThermalImage", str(path)], capture_output=True, check=True).stdout
+    from io import BytesIO
+
+    from PIL import Image
+
+    raw = np.asarray(Image.open(BytesIO(tiff)))
+    got = _flir_reference_temperature(raw, {k: v for k, v in tags.items() if k not in ("SourceFile", "RawThermalImageType")})
+    assert np.max(np.abs(got - t)) < 0.01
+
+
 def test_visible_and_thermal_paired_by_name_or_by_time(tmp_path):
     from PIL import Image
 
@@ -246,6 +409,25 @@ def test_temperature_orthomosaic_of_the_trench(scene_dir, tmp_path):
     lines = csv.read_text().splitlines()
     assert lines[1] == "x,y,temperature_c" and len(lines) == 2 + np.isfinite(t).sum()
     assert json.loads(lines[0].split("; ", 1)[1])["emissivity"] == "0.95"
+    # FLIR radiometric JPEGs in tiles: every tile's thermogram is the orthomosaic, placed by its world file
+    index = thermal.export(ch, tmp_path / "t_flir.jpg", "flir", tile=64)
+    rows = index.read_text().splitlines()
+    assert rows[1].startswith("file,xmin") and len(rows) > 3
+    with rasterio.open(out) as src:
+        tr0 = src.transform
+    for row in rows[2:]:
+        name = row.split(",")[0]
+        jpg = tmp_path / name
+        raw, tags = _exiftool_like(jpg)
+        got = _flir_reference_temperature(raw, tags)
+        r0, c0 = (int(v[1:]) * 64 for v in jpg.stem.split("_")[-2:])
+        want = t[r0:r0 + raw.shape[0], c0:c0 + raw.shape[1]]
+        ok = np.isfinite(want)
+        assert np.max(np.abs(got[ok] - want[ok])) < 0.01
+        assert np.all(got[~ok] >= np.min(want[ok]) - 0.01)  # no value: the coldest of the tile
+        a, d, b, e, cx, cy = (float(v) for v in jpg.with_suffix(".jgw").read_text().split())
+        assert (cx, cy) == pytest.approx(tr0 * (c0 + 0.5, r0 + 0.5)) and a == pytest.approx(tr0.a) and e == pytest.approx(tr0.e)
+        assert "<SRS>" in Path(str(jpg) + ".aux.xml").read_text()
     # without the balance the strips come back: the two halves differ by the offset again
     thermal.build_thermal(ch, balance=False)
     assert "offsets" not in ch.meta["thermal"]
