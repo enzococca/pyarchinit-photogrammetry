@@ -290,8 +290,9 @@ class MainWindow(QMainWindow):
         self.left_tabs.addTab(self.ms_pane, icon("multispectral"), tr("Multispettrale"))
         self.thermal_pane = MultispectralPane(mode="thermal")
         self.left_tabs.addTab(self.thermal_pane, icon("thermal"), tr("Termico"))
+        self.ms_pane.add_requested.connect(self.ms_add)
+        self.thermal_pane.add_requested.connect(lambda: self.ms_add(thermal=True))
         for pane in (self.ms_pane, self.thermal_pane):
-            pane.add_requested.connect(self.ms_add)
             pane.align_requested.connect(self.align_photos)
             pane.surface_requested.connect(self.ms_build_surface)
             pane.qgis_requested.connect(self.open_in_qgis)
@@ -729,7 +730,7 @@ class MainWindow(QMainWindow):
                          "temperatura, bande e indici letti lì a piena risoluzione"))
         self._act(ms_menu, tr("Esporta i punti di misura..."), self.export_probe_points, icon_name="export")
         th_menu = m.addMenu(icon("thermal"), tr("Termico"))
-        self._act(th_menu, tr("Aggiungi riprese termiche..."), self.ms_add,
+        self._act(th_menu, tr("Aggiungi riprese termiche..."), lambda: self.ms_add(thermal=True),
                   tip=tr("La cartella dei fotogrammi termici e, se ci sono, quella delle foto visibili dello stesso volo"))
         self._act(th_menu, tr("Parametri di misura della termica..."), self.ms_thermal_params, icon_name="settings",
                   tip=tr("Emissività, temperatura riflessa e ambiente, umidità, distanza: valgono per tutti i fotogrammi"))
@@ -1203,8 +1204,20 @@ class MainWindow(QMainWindow):
                       save=False)
 
     # ------------------------------------------------------------------ multispectral
-    def ms_add(self) -> None:
+    def ms_add(self, thermal: bool = False) -> None:
         if not self._need_chunk():
+            return
+        if thermal:
+            v = ParamDialog.ask(self, "Aggiungi riprese termiche", [
+                Field("folder", "Cartella dei fotogrammi termici", "", kind="dir"),
+                Field("visible", "Cartella delle foto visibili dello stesso volo (facoltativa)", "", kind="dir")],
+                intro="I fotogrammi radiometrici: R-JPEG DJI, JPEG radiometrici FLIR, TIFF in gradi o in kelvin, TIFF di "
+                      "valori interi (WIRIS e altre camere: la conversione in gradi, scala e offset, si imposta nei "
+                      "Parametri di misura). Con le foto visibili ogni fotogramma si registra sulla foto del suo scatto; "
+                      "anche le sottocartelle (100MEDIA, 101MEDIA).")
+            if not v or not v["folder"]:
+                return
+            self._add_captures([v["folder"]] + ([v["visible"]] if v.get("visible") else []), None, thermal=True)
             return
         v = ParamDialog.ask(self, "Aggiungi riprese multispettrali", [
             Field("folder", "Cartella delle riprese", "", kind="dir"),
@@ -1218,11 +1231,11 @@ class MainWindow(QMainWindow):
             return
         self._add_captures([v["folder"]], None if v["reference"] == "auto" else v["reference"])
 
-    def _add_captures(self, paths, reference: str | None = None, recursive: bool = True) -> None:
+    def _add_captures(self, paths, reference: str | None = None, recursive: bool = True, thermal: bool = False) -> None:
         from ..engine import multispectral as ms
 
         def job(p):
-            return len(ms.add_captures(self.chunk, paths, reference=reference, recursive=recursive))
+            return len(ms.add_captures(self.chunk, paths, reference=reference, recursive=recursive, thermal=thermal))
 
         def done(n):
             info = self.chunk.meta["multispectral"]
@@ -1240,16 +1253,34 @@ class MainWindow(QMainWindow):
         from ..engine import thermal as th
 
         p = th.params_of(self.chunk)
+        preset = "none" if p["scale"] is None or p["offset"] is None else next(
+            (k for k, (a, b) in th.RAW_PRESETS.items() if abs(a - p["scale"]) < 1e-12 and abs(b - p["offset"]) < 1e-9), "custom")
         v = ParamDialog.ask(self, "Parametri di misura della termica", [
             Field("emissivity", "Emissività", float(p["emissivity"]), minimum=0.01, maximum=1.0, decimals=3),
             Field("reflected", "Temperatura riflessa (°C)", float(p["reflected"]), minimum=-40.0, maximum=500.0, decimals=1),
             Field("ambient", "Temperatura ambiente (°C)", float(p["ambient"]), minimum=-40.0, maximum=80.0, decimals=1),
             Field("humidity", "Umidità relativa (%)", float(p["humidity"]), minimum=1.0, maximum=100.0, decimals=0),
-            Field("distance", "Distanza dal suolo (m, vuoto = altezza di volo, 1-25)", p["distance"], kind="optional_float")],
+            Field("distance", "Distanza dal suolo (m, vuoto = altezza di volo, 1-25)", p["distance"], kind="optional_float"),
+            Field("raw_head", "TIFF di valori interi (WIRIS e altre camere)", kind="heading"),
+            Field("raw", "Conversione in gradi", preset,
+                  choices=[("none", "Nessuna (i file sono in gradi o li decodifica il programma)"),
+                           ("centikelvin", "Centikelvin: 0,01 × valore − 273,15"),
+                           ("centidegrees_100", "Centesimi di grado da −100: 0,01 × valore − 100"),
+                           ("custom", "Scala e offset qui sotto")],
+                  tip="Come la trasformazione raster di Metashape, ma su ogni fotogramma prima del mosaico. La codifica "
+                      "dipende dalla camera: controllala su un punto di temperatura nota"),
+            Field("scale", "Scala", p["scale"], kind="optional_float"),
+            Field("offset", "Offset (°C)", p["offset"], kind="optional_float")],
             intro="I valori di fabbrica delle camere DJI: emissività 0,95, 22 °C di temperatura riflessa e ambiente. "
                   "Cambiandoli, le temperature dei fotogrammi vengono ricalcolate alla prossima ortofoto termica.")
         if v is None:
             return
+        raw = v.pop("raw", "none")
+        v.pop("raw_head", None)
+        if raw == "none":
+            v["scale"], v["offset"] = None, None
+        elif raw in th.RAW_PRESETS:
+            v["scale"], v["offset"] = th.RAW_PRESETS[raw]
         th.set_params(self.chunk, **v)
         self._dirty(True)
         self._capture_states()

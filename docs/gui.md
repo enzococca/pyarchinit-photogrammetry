@@ -62,7 +62,11 @@ QGIS project with the reflectance in false colour, the indices with their ramp, 
 and as polygons, besides the orthomosaic, the DEM and the drawings.
 
 The **Termico** tab next to it walks through a **thermal camera** (and *Strumenti > Termico* has the
-same steps): after the captures, the alignment and the surface come the steps of the temperatures -
+same steps): its *Aggiungi riprese...* takes the radiometric frames - DJI R-JPEGs, FLIR radiometric
+JPEGs, TIFFs in degrees or kelvin, TIFFs of integers of other cameras (WIRIS...), which become
+degrees with the scale and offset set in *Parametri...* - and, when there are any, the visible
+photos of the same flight. After the captures, the alignment and the surface come the steps of the
+temperatures -
 the measure's parameters (*Parametri...*:
 emissivity, reflected and ambient temperature, humidity, distance; the factory values of the DJI
 cameras by default), the thermal orthomosaic in degrees Celsius (*Costruisci...*, then shown on a

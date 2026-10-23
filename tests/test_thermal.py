@@ -552,3 +552,49 @@ def test_thermal_steps_views_and_exports_in_the_window(tmp_path, monkeypatch):
     finally:
         w_.setWindowModified(False)
         w_.close()
+
+
+def test_frames_of_other_thermal_cameras(tmp_path):
+    """Frames that are not DJI's: FLIR radiometric JPEGs and TIFFs of temperatures are thermal
+    frames by themselves; TIFFs of integers (WIRIS and other cameras) only when the frames are added
+    as thermal ones (nothing else tells them from the bands of a multispectral camera), and become
+    degrees with the scale and offset of the measure's parameters, as Metashape's raster transform."""
+    from PIL import Image
+
+    yy, xx = np.mgrid[0:48, 0:64]
+    t = (18.0 + 0.05 * xx + 0.02 * yy).astype(np.float32)
+    ints = tmp_path / "wiris"
+    ints.mkdir()
+    for i in range(3):
+        Image.fromarray(np.round((t + i + 100.0) * 100.0).astype(np.uint16)).save(ints / f"IMG_{i:04d}.tiff")
+    flir = tmp_path / "flir"
+    flir.mkdir()
+    for i in range(2):
+        thermal.write_flir_jpeg(flir / f"FLIR{i:04d}.jpg", t + i, dict(thermal.DEFAULTS, distance=10.0))
+    deg = tmp_path / "gradi"
+    deg.mkdir()
+    _write_float_tiff(deg / "frame_a.tif", t)
+    # recognised by themselves: the FLIR JPEGs and the TIFFs of degrees, not the integers
+    assert set(ms.detect_bands([flir])) == {"FLIR0000", "FLIR0001"}
+    assert all(set(c) == {"LWIR"} for c in ms.detect_bands([flir]).values())
+    assert set(ms.detect_bands([deg])) == {"frame_a"}
+    assert ms.detect_bands([ints]) == {}
+    caps = ms.detect_bands([ints], thermal=True)
+    assert len(caps) == 3 and thermal.kind_of(caps["IMG_0001"]["LWIR"]) == "counts"
+    # integers: degrees only once the conversion is set
+    f = caps["IMG_0001"]["LWIR"]
+    with pytest.raises(thermal.ThermalDecoderMissing, match="scale"):
+        thermal.decode_file(f, thermal.DEFAULTS)
+    scale, offset = thermal.RAW_PRESETS["centidegrees_100"]
+    got = thermal.decode_file(f, dict(thermal.DEFAULTS, scale=scale, offset=offset))
+    assert np.max(np.abs(got - (t + 1))) < 0.006
+    assert thermal.intensity(f).max() > 10000  # the geometry reads the integers as they are
+    # into a chunk as the frames of a thermal camera
+    doc = ppg.Document()
+    ch = doc.add_chunk("Altre camere")
+    doc.save(tmp_path / "altre.ppg")
+    cams = ms.add_captures(ch, [ints], thermal=True)
+    assert len(cams) == 3 and ch.meta["multispectral"]["reference"] == "LWIR"
+    thermal.set_params(ch, scale=scale, offset=offset)
+    assert thermal.params_of(ch)["scale"] == 0.01
+    assert np.max(np.abs(thermal.decode_file(thermal.thermal_file(cams[0]), thermal.params_of(ch)) - t)) < 0.006

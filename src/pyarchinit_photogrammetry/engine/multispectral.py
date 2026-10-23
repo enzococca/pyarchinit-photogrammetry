@@ -80,12 +80,15 @@ def image_files(paths, recursive: bool = False) -> list[Path]:
     return files
 
 
-def detect_bands(paths, recursive: bool = False) -> dict[str, dict[str, Path]]:
+def detect_bands(paths, recursive: bool = False, thermal: bool = False) -> dict[str, dict[str, Path]]:
     """The captures among ``paths`` (files or folders, their subfolders too when ``recursive``):
     ``{capture: {band name: file}}``. A file is a band of a capture by its suffix (MicaSense
     ``_1``..``_6``, DJI ``_MS_G`` ..., Sequoia ``_GRE`` ...) or by the ``BandName`` of its XMP;
-    the RGB JPEG of a DJI capture is left out (it is not a band)."""
-    return _captures_of(image_files(paths, recursive))
+    the RGB JPEG of a DJI capture is left out (it is not a band). A FLIR radiometric JPEG or a
+    TIFF of temperatures is a thermal frame of its own; with ``thermal`` every radiometric image
+    without a band is one (the TIFFs of integers too, which nothing else tells from the bands of
+    a multispectral camera)."""
+    return _captures_of(image_files(paths, recursive), thermal=thermal)
 
 
 def looks_multispectral(paths, recursive: bool = False, sample: int = 60) -> dict | None:
@@ -113,10 +116,14 @@ def looks_multispectral(paths, recursive: bool = False, sample: int = 60) -> dic
     return {"bands": bands, "captures": estimate, "files": len(files), "thermal": "LWIR" in bands}
 
 
-def _captures_of(files: list[Path]) -> dict[str, dict[str, Path]]:
+def _captures_of(files: list[Path], thermal: bool = False) -> dict[str, dict[str, Path]]:
+    from .thermal import kind_of
+
     pairs = [f for f in files if _DJI_PAIR.match(f.stem)]
     captures: dict[str, dict[str, Path]] = _wide_thermal_pairs(pairs) if pairs else {}
-    thermal_alone = {k: v for k, v in captures.items() if set(v) == {"LWIR"}}
+    thermal_alone = {k for k, v in captures.items() if set(v) == {"LWIR"}}
+    # the radiometric frames that are thermal captures by themselves (not bands of a capture)
+    alone_kinds = ("flir", "tiff", "counts", "micasense", "dji") if thermal else ("flir", "tiff")
     files = [f for f in files if not _DJI_PAIR.match(f.stem)]
     owner: dict[str, Path] = {}  # the folder a capture name comes from: the numbering of a camera
     # starts again in every folder (100MEDIA, 101MEDIA), so a repeated name takes its folder as a prefix
@@ -152,6 +159,9 @@ def _captures_of(files: list[Path]) -> dict[str, dict[str, Path]]:
                 stem = first_stem.setdefault(str(uuid), unique(f.stem, f.parent))
             elif band:
                 stem = unique(stem, f.parent)
+            elif kind_of(f) in alone_kinds:  # a FLIR R-JPEG, a TIFF of temperatures: a thermal frame
+                band, stem = "LWIR", unique(f.stem, f.parent)
+                thermal_alone.add(stem)
         else:
             stem = unique(stem, f.parent)
         if band is None:
@@ -592,16 +602,20 @@ def warp_band(img: np.ndarray, h: np.ndarray, shape) -> np.ndarray:
 
 
 # ------------------------------------------------------------------------------ the chunk
-def add_captures(chunk: Chunk, paths, reference: str | None = None, recursive: bool = False) -> list:
-    """The captures of a multispectral camera into the chunk: the reference band of every
+def add_captures(chunk: Chunk, paths, reference: str | None = None, recursive: bool = False,
+                 thermal: bool = False) -> list:
+    """The captures of a multispectral camera into the chunk (``thermal``: of a thermal camera -
+    every radiometric image without a band is a thermal frame, see :func:`detect_bands`): the reference band of every
     capture becomes its photo (aligned and reconstructed as any photo), the other bands are
     remembered in ``camera.meta["bands"]``. Returns the cameras added. Called again with another
     folder of the same flight (the rolls of a camera, whose numbering starts again), it adds
     those captures to the ones there - a name already taken gets its folder as a prefix - keeps
     the reference band chosen the first time, and leaves out files already in the chunk."""
-    captures = detect_bands(paths, recursive=recursive)
+    captures = detect_bands(paths, recursive=recursive, thermal=thermal)
     if not captures:
-        raise RuntimeError("no multispectral captures found (files <capture>_<band>.tif side by side)")
+        raise RuntimeError("no thermal frames found (DJI R-JPEGs, FLIR radiometric JPEGs, TIFFs of temperatures or "
+                           "of integers)" if thermal else
+                           "no multispectral captures found (files <capture>_<band>.tif side by side)")
     ms = chunk.meta.get("multispectral") or {}
     existing = multispectral_cameras(chunk)
     known = {Path(p).resolve() for c in existing for p in (c.meta.get("bands") or {}).values()}

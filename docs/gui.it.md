@@ -64,7 +64,10 @@ falso colore, gli indici con la loro scala, le zone come raster e come poligoni,
 DEM e disegni.
 
 La scheda **Termico** accanto guida una **camera termica** (e *Strumenti > Termico* ha gli stessi
-passi): dopo le riprese, l'allineamento e la superficie vengono i passi delle temperature - i
+passi): il suo *Aggiungi riprese...* prende i fotogrammi radiometrici - R-JPEG DJI, JPEG radiometrici
+FLIR, TIFF in gradi o in kelvin, TIFF di valori interi di altre camere (WIRIS...), che diventano gradi
+con la scala e l'offset impostati in *Parametri...* - e, se ci sono, le foto visibili dello stesso
+volo. Dopo le riprese, l'allineamento e la superficie vengono i passi delle temperature - i
 parametri della misura
 (*Parametri...*: emissività, temperatura riflessa e ambiente, umidità, distanza; per impostazione i
 valori di fabbrica delle camere DJI), l'ortofoto termica in gradi Celsius (*Costruisci...*, poi

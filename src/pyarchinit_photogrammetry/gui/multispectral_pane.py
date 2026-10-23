@@ -374,9 +374,11 @@ class MultispectralPane(QWidget):
         distance = tr("altezza di volo (1-25 m)") if p["distance"] is None else f"{p['distance']:g} m"
         decoder = (tr("DJI Thermal SDK in Docker") if sys.platform == "darwin" else tr("DJI Thermal SDK")) \
             if thermal.sdk_dir() is not None else tr("senza DJI Thermal SDK: servono i file già in gradi")
-        self.states["thermal_params"].setText(tr("Emissività {0}, riflessa {1} °C, ambiente {2} °C, umidità {3} %, distanza {4}; {5}",
-                                                 f"{p['emissivity']:g}", f"{p['reflected']:g}", f"{p['ambient']:g}",
-                                                 f"{p['humidity']:g}", distance, decoder))
+        text = tr("Emissività {0}, riflessa {1} °C, ambiente {2} °C, umidità {3} %, distanza {4}; {5}",
+                  f"{p['emissivity']:g}", f"{p['reflected']:g}", f"{p['ambient']:g}", f"{p['humidity']:g}", distance, decoder)
+        if p.get("scale") is not None and p.get("offset") is not None:
+            text += tr("; TIFF di interi: {0} × valore {1} °C", f"{p['scale']:g}", f"{p['offset']:+g}")
+        self.states["thermal_params"].setText(text)
         has_dem = bool(chunk is not None and chunk.dem_path is not None and chunk.dem_path.exists())
         path = thermal.thermal_path(chunk) if chunk is not None else None
         self.b_thermal.setEnabled(has_dem and thermal_band)

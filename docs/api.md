@@ -197,8 +197,14 @@ their own: an 8-bit copy of each, all with one stretch of the raw counts, is ali
 `engine.thermal` turns the frames into degrees Celsius (`temperature(chunk, cam)`, `decode_file`):
 DJI R-JPEGs through DJI's Thermal SDK (`dji_irp -a measure --measurefmt float32`, all the frames in
 one run; Windows and Linux natively, on macOS in Docker with an image the program prepares the first
-time: Docker Desktop must be running), MicaSense LWIR TIFFs in centikelvin, TIFFs already in degrees
-or kelvin. The SDK goes in the folder `dji_tsdk` of the program's data (or `PPG_DJI_TSDK`); it is
+time: Docker Desktop must be running), FLIR radiometric JPEGs (`decode_flir`), MicaSense LWIR TIFFs in
+centikelvin, TIFFs already in degrees or kelvin, and TIFFs of integers of other cameras (WIRIS...),
+which become degrees with `scale` and `offset` of the parameters (degrees = value x scale + offset;
+`RAW_PRESETS`: centikelvin 0.01 and -273.15, hundredths of a degree from -100 0.01 and -100), frame by
+frame before the mosaic where Metashape transforms the finished orthomosaic. FLIR JPEGs and TIFFs of
+temperatures are thermal frames by themselves; `add_captures(chunk, paths, thermal=True)` (`ppg
+multispectral PROJECT add FOLDER --thermal`) takes every radiometric image without a band, the
+TIFFs of integers too. The SDK goes in the folder `dji_tsdk` of the program's data (or `PPG_DJI_TSDK`); it is
 free from dji.com. The raw counts of an R-JPEG (`raw_counts`, its APP3 segments) grow with the
 temperature but are not degrees: they serve the geometry only. The parameters of the measure
 (`params_of`, `set_params`) hold for every frame: emissivity 0.95, reflected and ambient

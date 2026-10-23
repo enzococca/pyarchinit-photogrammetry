@@ -1723,6 +1723,8 @@ def multispectral(project: Path, what: str = typer.Argument(..., help="add, pane
                                                                      "photo of the panel (a reference-band file or "
                                                                      "its capture name)"),
                   reference: Optional[str] = typer.Option(None, help="add: the band to align (Red by default)"),
+                  thermal: bool = typer.Option(False, help="add: the frames of a thermal camera (every radiometric image "
+                                                           "without a band: FLIR JPEGs, TIFFs of temperatures or integers)"),
                   region: Optional[str] = typer.Option(None, help="panel: x0,y0,x1,y1 of the panel in the images"),
                   reflectance: float = typer.Option(0.5, help="panel: its known reflectance (0-1)"),
                   index: str = typer.Option("NDVI", help="index/zoning: one of the indices, or a formula over the band names"),
@@ -1742,7 +1744,7 @@ def multispectral(project: Path, what: str = typer.Argument(..., help="add, pane
     if what == "add":
         if source is None:
             raise typer.BadParameter("add needs the folder of the captures")
-        cams = ms.add_captures(ch, [source], reference=reference, recursive=True)
+        cams = ms.add_captures(ch, [source], reference=reference, recursive=True, thermal=thermal)
         doc.save()
         info = ch.meta["multispectral"]
         typer.echo(f"{len(cams)} captures added ({info['captures']} in the chunk), bands {', '.join(info['bands'])}, "
@@ -1790,6 +1792,9 @@ def thermal(project: Path, what: str = typer.Argument(..., help="status, params,
             ambient: Optional[float] = typer.Option(None, help="params: ambient temperature, degrees (factory 22)"),
             humidity: Optional[float] = typer.Option(None, help="params: relative humidity, percent (70)"),
             distance: Optional[float] = typer.Option(None, help="params: distance to the ground, metres (default: the flight height, 1-25)"),
+            scale: Optional[float] = typer.Option(None, help="params: TIFFs of integers (WIRIS and others): degrees = value x scale + offset"),
+            offset: Optional[float] = typer.Option(None, help="params: the offset of that conversion, degrees (centikelvin: "
+                                                              "--scale 0.01 --offset -273.15)"),
             resolution: Optional[float] = typer.Option(None, help="build: metres per pixel (default: a thermal pixel on the ground)"),
             balance: bool = typer.Option(True, help="build: take away the offsets between frames"),
             radius: float = typer.Option(2.0, help="anomalies: the radius of the surroundings, metres"),
@@ -1812,7 +1817,8 @@ def thermal(project: Path, what: str = typer.Argument(..., help="status, params,
                               indent=1, default=str))
     elif what == "params":
         given = {k: v for k, v in (("emissivity", emissivity), ("reflected", reflected), ("ambient", ambient),
-                                    ("humidity", humidity), ("distance", distance)) if v is not None}
+                                    ("humidity", humidity), ("distance", distance), ("scale", scale), ("offset", offset))
+                 if v is not None}
         typer.echo(json.dumps(th.set_params(ch, **given), indent=1))
         doc.save()
     elif what == "build":

@@ -205,7 +205,13 @@ si allinea una copia a 8 bit di ciascuno, tutte con un unico stiramento dei cont
 gli R-JPEG DJI con il Thermal SDK di DJI (`dji_irp -a measure --measurefmt float32`, tutti i
 fotogrammi in una sola esecuzione; Windows e Linux direttamente, sul Mac in Docker con un'immagine
 che il programma prepara la prima volta: Docker Desktop deve essere avviato), i TIFF LWIR di
-MicaSense in centikelvin, i TIFF già in gradi o in kelvin. L'SDK va nella cartella `dji_tsdk` dei
+MicaSense in centikelvin, i TIFF già in gradi o in kelvin, i JPEG radiometrici FLIR (`decode_flir`) e i
+TIFF di valori interi di altre camere (WIRIS...), che diventano gradi con `scale` e `offset` dei
+parametri (gradi = valore x scala + offset; `RAW_PRESETS`: centikelvin 0,01 e -273,15, centesimi di
+grado da -100 0,01 e -100), fotogramma per fotogramma prima del mosaico, dove Metashape trasforma
+l'ortofoto finita. I JPEG FLIR e i TIFF di temperature sono fotogrammi termici da soli;
+`add_captures(chunk, percorsi, thermal=True)` (`ppg multispectral PROGETTO add CARTELLA --thermal`)
+prende ogni immagine radiometrica senza banda, anche i TIFF di interi. L'SDK va nella cartella `dji_tsdk` dei
 dati del programma (o `PPG_DJI_TSDK`); è gratuito su dji.com. I conteggi grezzi di un R-JPEG
 (`raw_counts`, i suoi segmenti APP3) crescono con la temperatura ma non sono gradi: servono solo
 alla geometria. I parametri della misura (`params_of`, `set_params`) valgono per tutti i

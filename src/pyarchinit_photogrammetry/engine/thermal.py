@@ -52,7 +52,10 @@ import numpy as np
 from ..core.chunk import Chunk
 from ..core.progress import Progress, as_progress
 
-DEFAULTS = {"emissivity": 0.95, "reflected": 22.0, "ambient": 22.0, "humidity": 70.0, "distance": None}
+DEFAULTS = {"emissivity": 0.95, "reflected": 22.0, "ambient": 22.0, "humidity": 70.0, "distance": None,
+            "scale": None, "offset": None}  # scale, offset: degrees = value x scale + offset for integer TIFFs
+# integer encodings of temperatures that are common enough to pick by name: (scale, offset)
+RAW_PRESETS = {"centikelvin": (0.01, -273.15), "centidegrees_100": (0.01, -100.0)}
 DISTANCE_RANGE = (1.0, 25.0)  # what DJI's SDK accepts; None = the flight height of the frame, clipped
 THERMAL_BANDS = ("LWIR",)
 DOCKER_IMAGE = "ppg-dji-tsdk:1"  # ubuntu:22.04 with the OpenMP runtime dji_irp needs, built when missing
@@ -125,8 +128,10 @@ def _jpeg_segments(path, limit: int = 64) -> list[tuple[int, bytes]]:
 
 def kind_of(path) -> str | None:
     """What decodes ``path``: ``dji`` (a DJI R-JPEG), ``flir`` (a FLIR radiometric JPEG),
-    ``micasense`` (a MicaSense LWIR TIFF in centikelvin), ``tiff`` (temperatures as floats), or
-    None for an image that holds no temperatures."""
+    ``micasense`` (a MicaSense LWIR TIFF in centikelvin), ``tiff`` (temperatures as floats),
+    ``counts`` (a single-band TIFF of integers: values that become degrees with the scale and
+    offset of the measure's parameters, as Metashape's raster transform does - WIRIS and other
+    cameras), or None for an image that holds no temperatures."""
     p = Path(path)
     suffix = p.suffix.lower()
     if suffix in (".jpg", ".jpeg"):
@@ -154,7 +159,7 @@ def kind_of(path) -> str | None:
         if mode in ("I;16", "I;16B", "I;16L", "I"):
             from .multispectral import band_name_of
 
-            return "micasense" if band_name_of(p) == "LWIR" else None
+            return "micasense" if band_name_of(p) == "LWIR" else "counts"
     return None
 
 
@@ -232,7 +237,17 @@ def intensity(path) -> np.ndarray:
         raw = raw_counts(path)
         if raw is not None:
             return raw
+    if kind == "counts":  # the integers as they are: the geometry needs no degrees
+        return _tiff_values(path)
     return decode_file(path)
+
+
+def _tiff_values(path) -> np.ndarray:
+    from PIL import Image
+
+    with Image.open(path) as im:
+        t = np.asarray(im, np.float32)
+    return t[..., 0] if t.ndim == 3 else t
 
 
 def stretch_of(paths, sample: int = 40) -> tuple[float, float]:
@@ -333,6 +348,14 @@ def decode_file(path, params: dict | None = None, distance: float | None = None)
         with Image.open(path) as im:
             t = np.asarray(im, np.float32)
         return t / 100.0 - 273.15  # centikelvin
+    if kind == "counts":
+        scale, offset = params.get("scale"), params.get("offset")
+        if scale is None or offset is None:
+            raise ThermalDecoderMissing(f"{Path(path).name}: a TIFF of integers - set how they become degrees (scale "
+                                        "and offset in the measure's parameters, e.g. 0.01 x value - 273.15 for "
+                                        "centikelvin, 0.01 x value - 100 for hundredths of a degree above -100)")
+        v = _tiff_values(path)
+        return np.where(v > 0, v * float(scale) + float(offset), np.nan).astype(np.float32)  # 0: no value
     if kind == "dji":
         out = decode_dji([Path(path)], params, distances=[distance])
         return out[Path(path)]
@@ -1209,7 +1232,9 @@ def build_thermal(chunk: Chunk, resolution: float | None = None, balance: bool =
         dst.update_tags(units="degC", emissivity=str(params["emissivity"]), reflected_temperature=str(params["reflected"]),
                         ambient_temperature=str(params["ambient"]), humidity=str(params["humidity"]),
                         distance="flight height" if params["distance"] is None else str(params["distance"]),
-                        offsets_balanced=str(bool(balance)))
+                        offsets_balanced=str(bool(balance)),
+                        **({"raw_scale": str(params["scale"]), "raw_offset": str(params["offset"])}
+                           if params.get("scale") is not None and params.get("offset") is not None else {}))
     part.unlink(missing_ok=True)
     v = t[np.isfinite(t)]
     meta["file"] = str(final.relative_to(chunk.data_dir))
