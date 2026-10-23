@@ -39,6 +39,12 @@ import numpy as np
 from ..core.chunk import Chunk
 from ..core.progress import Progress, as_progress
 
+# ECC (OpenCV's video module) refines the registration of the bands; without it (the Windows ARM64
+# wheel up to 1.3.0) the shift of the phase correlation is kept.
+ECC = hasattr(cv2, "findTransformECC")
+MOTION_AFFINE = getattr(cv2, "MOTION_AFFINE", 2)
+MOTION_HOMOGRAPHY = getattr(cv2, "MOTION_HOMOGRAPHY", 3)
+
 # the usual names, in the order of the suffixes of the common cameras
 MICASENSE_BANDS = {"1": "Blue", "2": "Green", "3": "Red", "4": "NIR", "5": "RedEdge", "6": "LWIR"}
 DJI_BANDS = {"G": "Green", "R": "Red", "RE": "RedEdge", "NIR": "NIR"}
@@ -558,16 +564,18 @@ def register_bands(images: dict[str, np.ndarray], reference: str, scale: int = 2
         affine at the reduced size, then the homography at full size, each starting where the
         previous ended. Returns the homography and the correlation reached (0 when ECC failed)."""
         tfull, thalf = target
-        (dx, dy), _response = cv2.phaseCorrelate(tfull, pimg_full, window)
+        (dx, dy), response = cv2.phaseCorrelate(tfull, pimg_full, window)
         h = np.array([[1.0, 0.0, dx], [0.0, 1.0, dy], [0.0, 0.0, 1.0]])
         cc = 0.0
+        if not ECC:  # an OpenCV without the video module: the shift alone
+            return h, float(response)
         try:
             if scale > 1:
                 s = np.diag([1.0 / scale, 1.0 / scale, 1.0])
                 warp = (s @ h @ np.linalg.inv(s))[:2].astype(np.float32)
-                cc, warp = cv2.findTransformECC(thalf, pimg_half, warp, cv2.MOTION_AFFINE, criteria, None, 5)
+                cc, warp = cv2.findTransformECC(thalf, pimg_half, warp, MOTION_AFFINE, criteria, None, 5)
                 h = np.linalg.inv(s) @ np.vstack([warp.astype(np.float64), [0.0, 0.0, 1.0]]) @ s
-            cc, warp3 = cv2.findTransformECC(tfull, pimg_full, h.astype(np.float32), cv2.MOTION_HOMOGRAPHY, criteria, None, 5)
+            cc, warp3 = cv2.findTransformECC(tfull, pimg_full, h.astype(np.float32), MOTION_HOMOGRAPHY, criteria, None, 5)
             h = warp3.astype(np.float64)
         except cv2.error:
             pass  # the shift alone, or what the affine gave

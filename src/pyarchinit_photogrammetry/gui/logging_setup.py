@@ -107,6 +107,10 @@ def _notify(summary: str, details: str) -> None:
 
 
 def _show_error(summary: str, details: str) -> None:
+    if "--check" in sys.argv:  # the smoke test of a build: no window to wait on, the error ends it
+        logging.getLogger(__name__).critical("--check failed: %s", summary)
+        logging.shutdown()
+        os._exit(3)
     from PySide6.QtWidgets import QApplication
 
     from .dialogs import ErrorDialog

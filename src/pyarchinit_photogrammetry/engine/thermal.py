@@ -52,6 +52,12 @@ import numpy as np
 from ..core.chunk import Chunk
 from ..core.progress import Progress, as_progress
 
+# ECC (OpenCV's video module) refines the registrations; a build without it (the Windows ARM64
+# wheel up to 1.3.0) keeps the first estimate. The motions by value: OpenCV's numbers.
+ECC = hasattr(cv2, "findTransformECC")
+MOTION_AFFINE = getattr(cv2, "MOTION_AFFINE", 2)
+MOTION_HOMOGRAPHY = getattr(cv2, "MOTION_HOMOGRAPHY", 3)
+
 DEFAULTS = {"emissivity": 0.95, "reflected": 22.0, "ambient": 22.0, "humidity": 70.0, "distance": None,
             "scale": None, "offset": None}  # scale, offset: degrees = value x scale + offset for integer TIFFs
 # integer encodings of temperatures that are common enough to pick by name: (scale, offset)
@@ -1049,11 +1055,13 @@ def _footprint_box(h_gt: np.ndarray, grid_shape, thermal_shape, shrink: float = 
             int(min(gw, np.ceil(x1 - dx))), int(min(gh, np.ceil(y1 - dy))))
 
 
-def ecc(grid_grad: np.ndarray, thermal_grad: np.ndarray, h_gt: np.ndarray, motion=cv2.MOTION_HOMOGRAPHY,
+def ecc(grid_grad: np.ndarray, thermal_grad: np.ndarray, h_gt: np.ndarray, motion: int = MOTION_HOMOGRAPHY,
         iterations: int = 80) -> tuple[np.ndarray, float]:
     """ECC of the thermal gradients on the grid's, from ``h_gt`` (grid pixel -> thermal pixel) on
     the part of the grid the frame covers. Returns the homography and the correlation (0 when ECC
-    failed: then the homography given)."""
+    failed or OpenCV has no ECC, see :data:`ECC`: then the homography given)."""
+    if not ECC:
+        return h_gt, 0.0
     th, tw = thermal_grad.shape
     x0, y0, x1, y1 = _footprint_box(h_gt, grid_grad.shape, (th, tw))
     if x1 - x0 < 16 or y1 - y0 < 16:
@@ -1063,7 +1071,7 @@ def ecc(grid_grad: np.ndarray, thermal_grad: np.ndarray, h_gt: np.ndarray, motio
     warp = (h_gt @ shift)
     criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, int(iterations), 1e-5)
     try:
-        if motion == cv2.MOTION_HOMOGRAPHY:
+        if motion == MOTION_HOMOGRAPHY:
             cc, w = cv2.findTransformECC(template, thermal_grad, (warp / warp[2, 2]).astype(np.float32), motion, criteria, None, 3)
             refined = w.astype(np.float64)
         else:
@@ -1103,7 +1111,7 @@ def register(grid: np.ndarray, temp: np.ndarray, cover: float | None = None) -> 
     best = (None, -1.0, None)
     for c in covers:
         h0 = initial_homography(gg.shape, tg.shape, float(c))
-        h, cc = ecc(gg, tg, h0, motion=cv2.MOTION_AFFINE, iterations=40)
+        h, cc = ecc(gg, tg, h0, motion=MOTION_AFFINE, iterations=40)
         if cc > best[1]:
             best = (h, cc, float(c))
         if cover and c == cover and cc > 0.5:
@@ -1111,7 +1119,7 @@ def register(grid: np.ndarray, temp: np.ndarray, cover: float | None = None) -> 
     h, cc, c = best
     if h is None:
         return initial_homography(gg.shape, tg.shape, cover or 0.75), 0.0, cover or 0.75
-    h2, cc2 = ecc(gg, tg, h, motion=cv2.MOTION_HOMOGRAPHY, iterations=80)
+    h2, cc2 = ecc(gg, tg, h, motion=MOTION_HOMOGRAPHY, iterations=80)
     if cc2 >= cc:
         h, cc = h2, cc2
     return h, float(cc), float(c)
@@ -1168,7 +1176,7 @@ def registrations(chunk: Chunk, cams=None, progress: Progress | None = None, sam
         temp = temperature(chunk, cam)
         gg, tg = _grad(grid), _grad(temp)
         cc_fixed = correlation(gg, tg, fixed)
-        h, _cc = ecc(gg, tg, fixed, motion=cv2.MOTION_HOMOGRAPHY, iterations=60)
+        h, _cc = ecc(gg, tg, fixed, motion=MOTION_HOMOGRAPHY, iterations=60)
         cc = correlation(gg, tg, h)
         refined = cc > cc_fixed + 0.05 and _corner_shift(h, fixed, temp.shape) < 4.0
         out["captures"][str(cam.key)] = {"h": (h if refined else fixed).tolist(), "cc": float(cc if refined else cc_fixed),
