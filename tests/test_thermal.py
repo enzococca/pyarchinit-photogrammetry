@@ -315,6 +315,38 @@ def test_visible_and_thermal_paired_by_name_or_by_time(tmp_path):
         ms.build_reflectance(ch)
 
 
+def test_pairs_by_time_go_to_the_closest_place_first(tmp_path):
+    """The EXIF times are whole seconds: the visible photo of the next shot, a few metres on, can look
+    as close in time as the right one. One photo for one frame, the closest places first: no frame
+    steals the photo of the next one (13 of 407 captures of a real flight were left out)."""
+    from PIL import Image
+
+    def shot(path, stamp, north_m, size=(80, 60)):
+        im = Image.fromarray(np.zeros((size[1], size[0], 3), np.uint8))
+        exif = Image.Exif()
+        exif[271] = "DJI"
+        exif.get_ifd(0x8769)[36867] = stamp
+        lat = 41.0 + north_m / 111320.0
+        deg = int(lat)
+        minutes = (lat - deg) * 60
+        exif.get_ifd(0x8825).update({1: "N", 2: (deg, int(minutes), (minutes - int(minutes)) * 60), 3: "E", 4: (14, 0, 0.0)})
+        im.save(path, exif=exif.tobytes())
+
+    rgb, ir = tmp_path / "RGB", tmp_path / "IR"
+    rgb.mkdir()
+    ir.mkdir()
+    # shots a second apart and 2.2 m; the time of a thermal frame, truncated, falls one second after its
+    # photo - on the time of the next photo (the camera numbers them n and n+1)
+    for k in range(6):
+        north = 2.2 * k
+        shot(rgb / f"DJI_{100 + 2 * k + 1:04d}_W.JPG", f"2025:10:30 11:00:{10 + k:02d}", north)
+        shot(ir / f"DJI_{100 + 2 * k + 2:04d}_T.JPG", f"2025:10:30 11:00:{11 + k:02d}", north + 0.3, (32, 24))
+    caps = ms.detect_bands([tmp_path], recursive=True)
+    assert len(caps) == 6
+    for c in caps.values():  # the closest in time would give every frame the next photo
+        assert int(c["LWIR"].stem[4:8]) - int(c["Visible"].stem[4:8]) == 1
+
+
 def test_registration_finds_the_thermal_frame(scene_dir):
     photo = cv2.imread(str(sorted((scene_dir / "photos").glob("*.jpg"))[3]))
     temp, (x0, y0, cw, ch) = _thermal_of(photo)

@@ -235,29 +235,38 @@ def _wide_thermal_pairs(files: list[Path], max_seconds: float = 1.5, max_metres:
             out[name] = {"LWIR": f}
         return out
     if rest_w and rest_t:
+        # one visible photo for one thermal frame, the closest pairs first: the times of the EXIF are
+        # whole seconds, so the photo of the next shot (a few metres on) can look as close in time as
+        # the right one, and taking the closest in time stole it from the frame it belonged to (13 of
+        # 407 captures of a Mavic 2 Enterprise Advanced); the place decides, the time breaks the ties
         shots_w = [(f, *_shot(f)) for f in rest_w]
         shots_w = [s for s in shots_w if s[1] is not None]
         times = np.array([s[1] for s in shots_w]) if shots_w else np.zeros(0)
+        candidates = []
         for f in rest_t:
             t, where = _shot(f)
             if t is None or not len(times):
                 continue
-            order = np.argsort(np.abs(times - t))
-            for k in order[:3]:
+            for k in np.flatnonzero(np.abs(times - t) <= max_seconds):
                 wf, wt, wwhere = shots_w[k]
-                if abs(wt - t) > max_seconds or wf in used_w:
-                    continue
+                metres = max_metres
                 if where and wwhere:
                     dy = (where[0] - wwhere[0]) * 111320.0
                     dx = (where[1] - wwhere[1]) * 111320.0 * np.cos(np.radians(where[0]))
-                    if np.hypot(dx, dy) > max_metres:
+                    metres = float(np.hypot(dx, dy))
+                    if metres > max_metres:
                         continue
-                name = _DJI_PAIR.match(wf.stem).group("stem")
-                if name in out:
-                    name = f"{wf.parent.name}_{name}"
-                out[name] = {"Visible": wf, "LWIR": f}
-                used_w.add(wf)
-                break
+                candidates.append((metres + 0.01 * abs(wt - t), str(f), str(wf), f, wf))
+        used_t_here = set()
+        for _cost, _a, _b, f, wf in sorted(candidates):
+            if f in used_t_here or wf in used_w:
+                continue
+            name = _DJI_PAIR.match(wf.stem).group("stem")
+            if name in out:
+                name = f"{wf.parent.name}_{name}"
+            out[name] = {"Visible": wf, "LWIR": f}
+            used_w.add(wf)
+            used_t_here.add(f)
     return out
 
 
