@@ -19,6 +19,12 @@ pub const DIM: usize = 128;
 const TILE_A: usize = 128;
 const CACHE_BYTES: usize = 768 << 20; // descriptors kept on the GPU across the pairs of the same photos
 
+/// The bytes of descriptors kept on the GPU: ``PPG_GPU_CACHE_MB`` when set (the tests make it
+/// small to make the cache full), else ``CACHE_BYTES``.
+fn cache_limit() -> usize {
+    std::env::var("PPG_GPU_CACHE_MB").ok().and_then(|v| v.trim().parse::<usize>().ok()).map_or(CACHE_BYTES, |mb| mb << 20)
+}
+
 #[derive(Clone, Debug)]
 pub struct AdapterInfo {
     pub index: usize,
@@ -232,8 +238,9 @@ pub struct Matcher {
     out: Option<(wgpu::Buffer, wgpu::Buffer, u64)>,
     partials: Option<(wgpu::Buffer, u64)>,
     cache: HashMap<u64, (wgpu::Buffer, usize)>,
-    order: VecDeque<u64>,
+    order: VecDeque<u64>, // least recently used first
     cached_bytes: usize,
+    limit: usize,
 }
 
 impl Matcher {
@@ -278,28 +285,35 @@ impl Matcher {
         let merge = make("merge");
         let params = device.create_buffer(&wgpu::BufferDescriptor { label: Some("params"), size: 16, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         Ok(Matcher { info, device, queue, gemm, merge, layout, params, out: None, partials: None,
-                     cache: HashMap::new(), order: VecDeque::new(), cached_bytes: 0 })
+                     cache: HashMap::new(), order: VecDeque::new(), cached_bytes: 0, limit: cache_limit() })
     }
 
     fn upload(&self, data: &[u8]) -> wgpu::Buffer {
         self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: data, usage: wgpu::BufferUsages::STORAGE })
     }
 
-    /// The descriptors ``data`` (n x 128 bytes) on the device: cached under ``key`` (not 0).
-    fn descriptors(&mut self, key: u64, data: &[u8]) -> wgpu::Buffer {
+    /// The descriptors ``data`` (n x 128 bytes) on the device: cached under ``key`` (not 0), the
+    /// photos used least recently forgotten first - never ``keep``, the other photo of the pair:
+    /// its buffer is about to be bound (a destroyed buffer in a bind group is a validation error
+    /// of wgpu, which stopped the matching of 48-megapixel photos once the cache was full).
+    fn descriptors(&mut self, key: u64, data: &[u8], keep: u64) -> wgpu::Buffer {
         if key == 0 {
             return self.upload(data);
         }
         if let Some((buf, n)) = self.cache.get(&key) {
             if *n == data.len() {
-                return buf.clone();
+                let buf = buf.clone();
+                self.order.retain(|k| *k != key); // used now: the last to be forgotten
+                self.order.push_back(key);
+                return buf;
             }
             self.forget(key);
         }
-        while self.cached_bytes + data.len() > CACHE_BYTES {
-            match self.order.pop_front() {
+        while self.cached_bytes + data.len() > self.limit {
+            let victim = self.order.iter().position(|k| *k != keep || keep == 0);
+            match victim.and_then(|i| self.order.remove(i)) {
                 Some(old) => self.forget(old),
-                None => break,
+                None => break, // only the other photo of the pair is left: the cache goes over its limit
             }
         }
         let buf = self.upload(data);
@@ -352,8 +366,8 @@ impl Matcher {
             return Ok(Vec::new());
         }
         let tiles_a = (n_a + TILE_A - 1) / TILE_A;
-        let a_buf = self.descriptors(a_key, a);
-        let b_buf = self.descriptors(b_key, b);
+        let a_buf = self.descriptors(a_key, a, b_key);
+        let b_buf = self.descriptors(b_key, b, a_key);
         let out_size = ((n_a + n_b) * 16) as u64;
         let part_size = (tiles_a * n_b * 8) as u64;
         let (out, staging, part) = self.working(out_size, part_size);

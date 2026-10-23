@@ -355,6 +355,37 @@ def test_gpu_matching_agrees_with_the_brute_force(rng):
     _native.gpu_forget()
 
 
+def test_gpu_descriptor_cache_keeps_the_pair_it_matches():
+    """A full cache of descriptors on the GPU forgets the photos used least recently, never the
+    other photo of the pair being matched: before, a photo found in the cache could be destroyed
+    while the second one went in, and wgpu stopped the matching ("Buffer has been destroyed") -
+    on 48-megapixel photos, once 768 MB of descriptors were on the GPU. Run with a cache of 1 MB
+    (PPG_GPU_CACHE_MB) in a process of its own: two photos fit."""
+    if _native.gpu_device("auto") is None:
+        pytest.skip("no GPU (wgpu adapter) on this computer")
+    import subprocess
+    import sys
+
+    code = (
+        "import numpy as np\n"
+        "from pyarchinit_photogrammetry import _native\n"
+        "rng = np.random.default_rng(5)\n"
+        "v = rng.random((3000, 128), np.float32) ** 2\n"
+        "v /= np.linalg.norm(v, axis=1, keepdims=True)\n"
+        "base = np.clip(np.round(v * 512), 0, 255)\n"  # as SIFT's: a norm of 512
+        "photos = {k: np.clip(base + rng.integers(-4, 5, base.shape), 0, 255).astype(np.uint8) for k in range(1, 6)}\n"
+        "out = []\n"
+        "for a, b in [(1, 2), (1, 3), (4, 1), (1, 5), (2, 3), (5, 4), (1, 2)]:\n"
+        "    keyed = _native.gpu_match(photos[a], photos[b], 0.8, 0.7, True, a_key=a, b_key=b)\n"
+        "    plain = _native.gpu_match(photos[a], photos[b], 0.8, 0.7, True)\n"
+        "    out.append(len(keyed) > 100 and sorted(map(tuple, keyed.tolist())) == sorted(map(tuple, plain.tolist())))\n"
+        "print(all(out), len(out))\n")
+    env = dict(__import__("os").environ, PPG_GPU_CACHE_MB="1")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=600, close_fds=False)
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert r.stdout.split() == ["True", "7"], r.stdout + r.stderr[-1000:]
+
+
 def test_gpu_patchmatch_agrees_with_the_cpu_kernel():
     """The PatchMatch kernel on the GPU (wgpu) finds the slanted plane the CPU kernel finds."""
     if _native.gpu_device("auto") is None or not hasattr(ppg_core, "gpu_patchmatch_depth"):
