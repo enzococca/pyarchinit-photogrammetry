@@ -44,7 +44,12 @@ def test_surfaces_and_workers(processed, scene, tmp_path):
         assert src.overviews(1)  # pyramids for a quick display
     many = ch.build_orthomosaic(resolution=0.004, workers=4)
     with rasterio.open(many) as src:
-        assert np.array_equal(src.read(), a)  # the same pixels, tile by tile in any order
+        b = src.read()
+    differ = np.any(a != b, axis=0)
+    if differ.any():  # say where, if it ever happens again (it did with OpenBLAS splitting products)
+        rows, cols = np.nonzero(differ)
+        raise AssertionError(f"1 and 4 workers: {int(differ.sum())} pixels differ, rows {rows.min()}-{rows.max()}, "
+                             f"columns {cols.min()}-{cols.max()}, up to {int(np.abs(a.astype(int) - b).max())}")
     worst = _targets_error(many, scene)
     assert worst < 0.005, f"targets in the orthomosaic off by up to {worst * 1000:.2f} mm"
     # a true orthophoto on the mesh (vertical rays), and from the dense cloud alone

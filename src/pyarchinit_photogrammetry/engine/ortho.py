@@ -1203,11 +1203,27 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     return out_path
 
 
+def _one_blas_thread():
+    """BLAS on one thread while the tiles are made: OpenBLAS (numpy on Linux and Windows) splits a
+    product among its threads in a way that depends on how many calls run at once, and a row that
+    lands in a remainder block is rounded by another kernel: one bit in a cell's coordinates was
+    enough to pick another photo, so one worker and four gave different pixels. The tiles are
+    already in parallel: one BLAS thread each is also the faster way."""
+    try:
+        from threadpoolctl import threadpool_limits
+    except ImportError:  # pragma: no cover - a dependency of the program
+        import contextlib
+
+        return contextlib.nullcontext()
+    return threadpool_limits(limits=1, user_api="blas")
+
+
 def _run_tiles(ctx, tiles, workers: int, progress: Progress, put, start: float = 0.03, span: float = 0.9) -> None:
     """Make the tiles in parallel (at most twice the workers waiting) and hand each one to
-    ``put(r0, c0, block)`` in this thread as soon as it is ready."""
+    ``put(r0, c0, block)`` in this thread as soon as it is ready; the same pixels with any number
+    of workers (:func:`_one_blas_thread`)."""
     done = 0
-    with ThreadPoolExecutor(workers) as pool:
+    with _one_blas_thread(), ThreadPoolExecutor(workers) as pool:
         queue = iter(tiles)
         running = {}
         try:
