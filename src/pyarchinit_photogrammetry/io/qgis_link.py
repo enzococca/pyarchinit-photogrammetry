@@ -34,6 +34,7 @@ LIVE_DB = "disegni_ppg.gpkg"
 # fixed tables, so that the QGIS project never needs rebuilding while drawing
 LIVE_TABLES = {  # table -> (title in QGIS, geometry type)
     "unita": ("Unita' stratigrafiche (ppg)", "POLYGON"),
+    "poligoni": ("Poligoni (ppg)", "POLYGON"),  # zones, stones, patches, the polygons of plugins
     "sezioni": ("Sezioni (ppg)", "LINESTRING"),
     "curve": ("Curve di livello (ppg)", "LINESTRING"),
     "linee": ("Linee (ppg)", "LINESTRING"),
@@ -85,10 +86,13 @@ def find_qgis() -> QgisInstall | None:
     return None
 
 
-def classify_layer(name: str, kind: str) -> str:
-    """Which live table a layer of the interface goes to."""
+def classify_layer(name: str, kind: str, attrs: dict | None = None) -> str:
+    """Which live table a layer of the interface goes to. Polygons: the layers of stratigraphic
+    units and any feature with the columns of a unit (pyunitastratigrafiche) to "unita", any other
+    polygon (zones, stones, patches, the anomalies of a plugin) to "poligoni"."""
     if kind == "polygon":
-        return "unita"
+        units = name == "Unita' stratigrafiche" or name.startswith("US ")
+        return "unita" if units or attrs is None or any(k in attrs for k in ("_unit", "us_s", "us")) else "poligoni"
     if kind == "point":
         return "quote" if name == "Quote" else "punti"
     if name.startswith("Sezioni"):
@@ -152,11 +156,10 @@ class LiveLink:
     def _group(layers: dict[str, dict]) -> dict[str, list]:
         out: dict[str, list] = {t: [] for t in LIVE_TABLES}
         for name, lay in layers.items():
-            table = classify_layer(name, lay["kind"])
             for feat in lay["features"]:
                 attrs = feat[-1] if isinstance(feat, (tuple, list)) else feat
                 if isinstance(attrs, dict) and attrs.get("_geom"):
-                    out[table].append((name, attrs))
+                    out[classify_layer(name, lay["kind"], attrs)].append((name, attrs))
         return out
 
     @staticmethod
@@ -364,6 +367,7 @@ app.exitQgis()
 
 STYLES = {  # table -> (colour, label field, label colour)
     "unita": ("#e6194b", "etichetta", "#ffffff"),
+    "poligoni": ("#8e44ad", "etichetta", "#3b1a4d"),
     "sezioni": ("#ffd000", "etichetta", "#7a5c00"),
     "curve": ("#4a3b2a", "quota", "#4a3b2a"),
     "linee": ("#00a0ff", "etichetta", "#003a66"),

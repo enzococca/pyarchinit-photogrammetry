@@ -258,7 +258,10 @@ def test_qgis_live_geopackage(tmp_path):
     layers = {"Unita' stratigrafiche": {"kind": "polygon", "features": [unit]},
               "Curve di livello (0.1 m)": {"kind": "line", "features": [
                   {"quota": 99.5, "direttrice": True, "_geom": ("LineString", [[0, 0], [2, 2]])}]},
-              "Punti": {"kind": "point", "features": [{"z": 1.0, "_geom": ("Point", [0.5, 0.5])}]}}
+              "Punti": {"kind": "point", "features": [{"z": 1.0, "_geom": ("Point", [0.5, 0.5])}]},
+              # a polygon that is not a unit (a plugin's layer): its own table, not among the units
+              "Anomalie geofisiche": {"kind": "polygon", "features": [
+                  {"griglia": "mag1", "nota": "fossato?", "_geom": ("Polygon", [[2, 2], [3, 2], [3, 3]])}]}}
     link = LiveLink(tmp_path, "EPSG:3004")
     files = link.write(layers)
     assert set(files) == set(LIVE_TABLES) and files["unita"] == tmp_path / LIVE_DB
@@ -272,7 +275,9 @@ def test_qgis_live_geopackage(tmp_path):
     assert "_unit" not in u and u["geom"].geom_type == "Polygon" and u["geom"].area == 0.5  # ring closed
     (c,) = _gpkg_rows(tmp_path / LIVE_DB, "curve")
     assert c["quota"] == 99.5 and c["direttrice"] == 1
-    assert link.counts() == {"unita": 1, "sezioni": 0, "curve": 1, "linee": 0, "punti": 1, "quote": 0}
+    (a,) = _gpkg_rows(tmp_path / LIVE_DB, "poligoni")
+    assert a["layer"] == "Anomalie geofisiche" and a["nota"] == "fossato?"
+    assert link.counts() == {"unita": 1, "poligoni": 1, "sezioni": 0, "curve": 1, "linee": 0, "punti": 1, "quote": 0}
 
     def changes():
         con = sqlite3.connect(tmp_path / LIVE_DB)
