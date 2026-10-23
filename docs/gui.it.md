@@ -272,7 +272,10 @@ Dalla riga di comando `ppg update` dice se esiste una versione più nuova e `ppg
   di uno spessore, come modello del chunk (quello di prima tra le versioni) o in un file; oppure salva le
   due parti, o una serie di fette parallele a un passo dato, come PLY (o OBJ con la texture) in coordinate
   del sistema del chunk. Le facce attraversate dal piano vengono tagliate sul piano, con colori, confidenza
-  e coordinate di texture interpolati.
+  e coordinate di texture interpolati; *Chiudi i solidi tagliati* riempie la faccia del taglio di ogni
+  solido chiuso nel suo colore (le unità del plugin di geoarcheologia, i proxy delle US, un vaso: la sua
+  cavità resta vuota), le superfici aperte restano aperte. I solidi importati uno accanto all'altro (un
+  modello di unità stratigrafiche) restano solidi separati.
 * **Scansioni laser** (*File > Importa > Scansioni laser (E57, PTX)*): una o più scansioni diventano
   la nuvola densa di un nuovo chunk; *Flusso di lavoro > Allinea chunk* (punti, senza scala) le porta
   sul chunk delle foto quando non sono nel suo CRS, *Colori dalle foto (scansioni)* le colora con le

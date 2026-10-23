@@ -268,7 +268,10 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   left of the line from point 1 to point 2 for a vertical plane), or a slice of a thickness, as the model
   of the chunk (the previous one among the versions) or as a file; or save both parts, or a series of
   parallel slices every given step, as PLY (or OBJ with the texture) in world coordinates. Faces crossed
-  by the plane are cut on it, with colours, confidence and texture coordinates interpolated.
+  by the plane are cut on it, with colours, confidence and texture coordinates interpolated; *Chiudi i
+  solidi tagliati* fills the cut face of every closed solid in its own colour (the units of the
+  geoarchaeology plugin, US proxies, a vessel: its hollow stays hollow), open surfaces stay open. Solids
+  imported side by side (a model of stratigraphic units) stay separate solids.
 * **Laser scans** (*File > Importa > Scansioni laser (E57, PTX)*): one or more scans become the dense cloud
   of a new chunk; *Flusso di lavoro > Allinea chunk* (points, without scale) brings them onto the chunk of
   the photos when they are not in its CRS, *Colori dalle foto (scansioni)* colours them from its

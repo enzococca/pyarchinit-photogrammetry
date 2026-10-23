@@ -151,6 +151,7 @@ def cut_model_cmd(project: Path,
                                                      "becomes the model"),
                   overwrite: bool = typer.Option(False, help="do not keep the current model as a version"),
                   name: Optional[str] = typer.Option(None, help="name of the new version of the model"),
+                  cap: bool = typer.Option(True, help="close the solids cut on the plane (each in its colour)"),
                   chunk: Optional[str] = None):
     """Cut the model with a plane: keep one side, a slice, both sides as files or a series of slices."""
     import numpy as np
@@ -182,7 +183,7 @@ def cut_model_cmd(project: Path,
         p, n = mesh_cut.dipping(v[:3], v[3], v[4])
     doc, ch = _open(project, chunk)
     r = ch.cut_model(p, n, keep=keep, thickness=thickness, step=step, count=count, out=out,
-                     as_version=not overwrite, name=name, progress=print_progress)
+                     as_version=not overwrite, name=name, cap=cap, progress=print_progress)
     if not r["files"]:
         doc.save()
         typer.echo(f"{ch.label}: model cut, {r['faces']} -> {r['faces_kept']} faces"

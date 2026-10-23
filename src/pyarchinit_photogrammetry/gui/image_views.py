@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform
 from PySide6.QtWidgets import (QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsPixmapItem, QGraphicsScene,
                                QGraphicsSimpleTextItem, QGraphicsView, QInputDialog, QMenu)
+import shiboken6
 
 from .i18n import tr
 
@@ -497,10 +498,9 @@ class RasterView(_ZoomView):
             self.layers_changed.emit()
 
     # ----------------------------------------------------------- data
-    def load(self, path: str | Path, kind: str, max_side: int = 6000, bands=None) -> None:
-        import rasterio
-        from rasterio.enums import Resampling
-
+    def _empty_scene(self) -> None:
+        """Everything on the scene deleted, and with it the layers, the selection and the overlays
+        that pointed to its items."""
         had_selection = bool(self.selection)
         self.selection, self._sel_marks, self._band, self._band_origin = [], [], None, None  # deleted by clear()
         self._snap_marks, self._snap_cache, self._stroking = {}, None, False
@@ -513,6 +513,20 @@ class RasterView(_ZoomView):
         self._changed()
         if had_selection:
             self.selection_changed.emit(0)
+
+    def clear_raster(self, text: str = "") -> None:
+        """No raster to show (a chunk without DEM or orthophoto): the scene emptied as :meth:`load`
+        empties it, ``text`` in its place."""
+        self._empty_scene()
+        self.tr = None
+        if text:
+            self.scene().addText(text)
+
+    def load(self, path: str | Path, kind: str, max_side: int = 6000, bands=None) -> None:
+        import rasterio
+        from rasterio.enums import Resampling
+
+        self._empty_scene()
         self.path, self.kind = Path(path), kind
         with rasterio.open(path) as src:
             f = max(1.0, max(src.width, src.height) / max_side)
@@ -847,10 +861,12 @@ class RasterView(_ZoomView):
             self.select_items([it for it in self.selection if id(it) not in gone])
         for item, label_item, _ in lay["features"]:
             for it in (item, label_item):
-                if it is not None:
+                if it is None or not shiboken6.isValid(it):  # deleted with its scene
+                    continue
+                if it.scene() is self.scene():
                     self.scene().removeItem(it)
-                    if it in self.overlays:
-                        self.overlays.remove(it)
+                if it in self.overlays:
+                    self.overlays.remove(it)
         self._changed()
 
     def layer_rect(self, name: str) -> QRectF | None:

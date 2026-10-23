@@ -835,16 +835,16 @@ class Chunk:
 
     def cut_model(self, point, normal, keep: str = "above", thickness: float | None = None,
                   step: float | None = None, count: int | None = None, out: str | os.PathLike | None = None,
-                  as_version: bool = True, name: str | None = None,
+                  as_version: bool = True, name: str | None = None, cap: bool = True,
                   progress: ProgressCallback | None = None) -> dict:
         """Cut the model with the plane through ``point`` with ``normal`` (world coordinates): one side
         (``keep`` "above"/"below"), a slice of ``thickness`` ("slab") as the new model or to the file
-        ``out``; both sides ("both") or slices every ``step`` ("series") to files. See
-        :func:`engine.mesh_cut.cut_model`."""
+        ``out``; both sides ("both") or slices every ``step`` ("series") to files; ``cap``: closed
+        solids closed on the plane. See :func:`engine.mesh_cut.cut_model`."""
         from ..engine.mesh_cut import cut_model
 
         return cut_model(self, point, normal, keep=keep, thickness=thickness, step=step, count=count, out=out,
-                         as_version=as_version, name=name, progress=as_progress(progress))
+                         as_version=as_version, name=name, cap=cap, progress=as_progress(progress))
 
     def export_model(self, path: str | os.PathLike, region=None, zmin: float | None = None,
                      zmax: float | None = None) -> Path:

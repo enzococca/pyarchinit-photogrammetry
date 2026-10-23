@@ -78,10 +78,11 @@ def to_internal(chunk, point, normal, near=None) -> tuple[np.ndarray, np.ndarray
 
 
 # ------------------------------------------------------------------------------------- cutting
-def clip(mesh, point, normal, keep: str = "above"):
+def clip(mesh, point, normal, keep: str = "above", cap: bool = False):
     """The part of ``mesh`` (:class:`io.mesh_ply.MeshData`, in the frame of ``point``/``normal``) on
     one side of the plane (``keep`` "above", the side of the normal, or "below"), faces crossed by
-    the plane cut on it. Returns a new MeshData (no faces when nothing is on that side)."""
+    the plane cut on it; ``cap``: the solids cut closed on the plane (:func:`cap`). Returns a new
+    MeshData (no faces when nothing is on that side)."""
     from ..io.mesh_ply import MeshData
 
     xyz = mesh.xyz
@@ -154,7 +155,105 @@ def clip(mesh, point, normal, keep: str = "above"):
     out = MeshData(all_vertices, np.vstack(new_faces).astype(np.int64), out_tex, list(mesh.comments), out_page)
     f = out.faces
     real = (f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 2] != f[:, 0])  # a face touching the plane only
-    return out.subset_faces(real)  # unused vertices left out
+    out = out.subset_faces(real)  # unused vertices left out
+    if cap and len(out.faces):
+        out = close_cut(out, point, n if keep == "above" else -n)
+    return out
+
+
+def close_cut(mesh, point, inward):
+    """Close the solids that a cut opened. The edges on the plane that bound only one face form
+    loops; walked as the faces orient them, a loop that turns counter-clockwise seen from the part
+    kept (``inward``) is the outline of a solid, a clockwise one the outline of a hollow (the inside
+    of a vessel, whose faces look into it). Each outline, less the hollows inside it, is triangulated
+    (constrained Delaunay) on its own vertices, facing out of the part kept: solids side by side
+    (stratigraphic units) are closed each on its own vertices, in its colour. Open edges of a
+    surface (a terrain) do not close a loop and stay open. On a textured mesh each new face takes
+    the colour of the texture at one of its corners."""
+    import shapely
+    from scipy.spatial import cKDTree
+
+    from ..io.mesh_ply import MeshData
+
+    xyz = mesh.xyz
+    n = np.asarray(inward, np.float64) / np.linalg.norm(inward)
+    p = np.asarray(point, np.float64)
+    extent = float(np.ptp(xyz, axis=0).max()) if len(xyz) else 1.0
+    on = np.abs((xyz - p) @ n) <= 1e-6 * (float(np.abs(xyz).max()) + extent)  # single-precision vertices too
+    f = np.asarray(mesh.faces, np.int64)
+    a, b = f.ravel(), f[:, [1, 2, 0]].ravel()
+    count = np.int64(len(xyz))
+    sel = ~np.isin(b * count + a, a * count + b) & on[a] & on[b]
+    if not sel.any():
+        return mesh
+    e1 = np.cross(n, [1.0, 0.0, 0.0] if abs(n[0]) < 0.9 else [0.0, 1.0, 0.0])
+    e1 /= np.linalg.norm(e1)
+    e2 = np.cross(n, e1)  # (e1, e2, n) right-handed: counter-clockwise seen from the part kept is positive
+    uv = np.column_stack([(xyz - p) @ e1, (xyz - p) @ e2])
+    outlines, hollows = [], []
+    for ring in _loops(a[sel], b[sel]):
+        c = uv[ring]
+        signed = 0.5 * float(np.sum(c[:, 0] * np.roll(c[:, 1], -1) - np.roll(c[:, 0], -1) * c[:, 1]))
+        poly = shapely.make_valid(shapely.Polygon(c))
+        if poly.is_empty or abs(signed) <= (1e-9 * max(extent, 1.0)) ** 2:
+            continue
+        (outlines if signed > 0 else hollows).append((poly, ring))
+    caps = []
+    for poly, ring in outlines:
+        inner = [(h, r) for h, r in hollows if poly.contains(shapely.point_on_surface(h))]
+        region = poly.difference(shapely.union_all([h for h, _r in inner])) if inner else poly
+        own = np.concatenate([ring] + [r for _h, r in inner])
+        tree = cKDTree(uv[own])
+        for t in shapely.get_parts(shapely.constrained_delaunay_triangles(region)):
+            corners = np.asarray(shapely.get_coordinates(t))[:3]
+            dist, idx = tree.query(corners)
+            if dist.max() > 1e-6 * max(extent, 1.0) or len(set(idx.tolist())) < 3:
+                continue
+            caps.append(own[idx])
+    if not caps:
+        return mesh
+    caps = np.asarray(caps, np.int64)
+    c = xyz[caps]
+    facing = np.cross(c[:, 1] - c[:, 0], c[:, 2] - c[:, 0]) @ n
+    caps[facing > 0] = caps[facing > 0][:, [0, 2, 1]]  # the new faces look out of the part kept
+    tex = page = None
+    if mesh.texcoords is not None:
+        corner_uv = np.zeros((len(xyz), 2), np.float32)
+        corner_uv[f.ravel()] = np.asarray(mesh.texcoords, np.float32).reshape(-1, 2)
+        flat = np.repeat(corner_uv[caps[:, 0]][:, None, :], 3, axis=1).reshape(-1, 6)
+        tex = np.concatenate([np.asarray(mesh.texcoords, np.float32), flat]).astype(np.float32)
+        if mesh.texnumber is not None:
+            pages = np.zeros(len(xyz), np.int32)
+            pages[f.ravel()] = np.repeat(np.asarray(mesh.texnumber, np.int32), 3)
+            page = np.concatenate([np.asarray(mesh.texnumber, np.int32), pages[caps[:, 0]]]).astype(np.int32)
+    return MeshData(mesh.vertices, np.vstack([f, caps]), tex, list(mesh.comments), page)
+
+
+def _loops(start: np.ndarray, end: np.ndarray) -> list[np.ndarray]:
+    """The closed walks of directed edges ``start -> end`` (each edge used once); chains that do not
+    close are left out."""
+    nxt: dict[int, list[int]] = {}
+    for s0, e0 in zip(start.tolist(), end.tolist()):
+        nxt.setdefault(s0, []).append(e0)
+    loops = []
+    while nxt:
+        first = next(iter(nxt))
+        ring, v = [first], first
+        while True:
+            outs = nxt.get(v)
+            if not outs:
+                break
+            w = outs.pop()
+            if not outs:
+                del nxt[v]
+            if w == first:
+                loops.append(np.asarray(ring, np.int64))
+                break
+            ring.append(w)
+            v = w
+            if len(ring) > len(start) + 1:  # never: every edge is used once
+                break
+    return [r for r in loops if len(r) >= 3]
 
 
 def _interpolate(vertices: np.ndarray, a: np.ndarray, b: np.ndarray, t: np.ndarray) -> np.ndarray:
@@ -176,19 +275,19 @@ def _interpolate(vertices: np.ndarray, a: np.ndarray, b: np.ndarray, t: np.ndarr
     return out
 
 
-def slab(mesh, point, normal, thickness: float):
+def slab(mesh, point, normal, thickness: float, cap: bool = False):
     """The slice of ``mesh`` between the two planes parallel to the given one at
-    ``thickness`` / 2 on either side."""
+    ``thickness`` / 2 on either side (``cap``: solids closed on both)."""
     n = np.asarray(normal, np.float64)
     p = np.asarray(point, np.float64)
     half = float(thickness) / 2
     if half <= 0:
         raise ValueError("the thickness must be positive")
-    part = clip(mesh, p - half * n, n, "above")
-    return clip(part, p + half * n, n, "below") if len(part.faces) else part
+    part = clip(mesh, p - half * n, n, "above", cap=cap)
+    return clip(part, p + half * n, n, "below", cap=cap) if len(part.faces) else part
 
 
-def series(mesh, point, normal, thickness: float, step: float, count: int | None = None):
+def series(mesh, point, normal, thickness: float, step: float, count: int | None = None, cap: bool = False):
     """Slices of ``thickness`` every ``step`` along the normal, the first centred on ``point``;
     ``count`` None: as many as the model spans on both sides. Returns ``[(offset, mesh)]`` with
     the slices that have faces."""
@@ -206,7 +305,7 @@ def series(mesh, point, normal, thickness: float, step: float, count: int | None
     for off in offsets:
         if d.max() < off - thickness / 2 or d.min() > off + thickness / 2:
             continue
-        part = slab(mesh, p + off * n, n, thickness)
+        part = slab(mesh, p + off * n, n, thickness, cap=cap)
         if len(part.faces):
             out.append((float(off), part))
     return out
@@ -215,7 +314,7 @@ def series(mesh, point, normal, thickness: float, step: float, count: int | None
 # ----------------------------------------------------------------------------------- the model
 def cut_model(chunk, point, normal, keep: str = "above", thickness: float | None = None,
               step: float | None = None, count: int | None = None, out=None, as_version: bool = True,
-              name: str | None = None, progress: Progress | None = None) -> dict:
+              name: str | None = None, cap: bool = True, progress: Progress | None = None) -> dict:
     """Cut the model of ``chunk`` with the world plane ``point``/``normal``:
 
     * ``keep`` "above" / "below": one side; "slab": the slice of ``thickness`` around the plane;
@@ -227,7 +326,9 @@ def cut_model(chunk, point, normal, keep: str = "above", thickness: float | None
       model), written in the folder ``out`` as ``fetta_+0.500.ply`` and so on (offset along the
       normal in metres).
 
-    Returns a report: faces before and after, the files written, the version kept."""
+    ``cap``: the solids cut (stratigraphic units, proxies, a vessel) are closed on the plane, each in
+    its colour; open surfaces stay open. Returns a report: faces before and after, the files
+    written, the version kept."""
     from ..core import versions
     from ..engine.cleaning import store_model
     from ..io.mesh_ply import read_mesh
@@ -249,9 +350,9 @@ def cut_model(chunk, point, normal, keep: str = "above", thickness: float | None
         if keep == "slab":
             if not thickness:
                 raise ValueError("a slab needs its thickness")
-            part = slab(mesh, p, n, float(thickness) / scale)
+            part = slab(mesh, p, n, float(thickness) / scale, cap=cap)
         else:
-            part = clip(mesh, p, n, keep)
+            part = clip(mesh, p, n, keep, cap=cap)
         report["faces_kept"] = int(len(part.faces))
         if not len(part.faces):
             raise ValueError("no face of the model on that side of the plane")
@@ -276,7 +377,7 @@ def cut_model(chunk, point, normal, keep: str = "above", thickness: float | None
         out = Path(out)
         suffix = out.suffix or ".ply"
         for side, label in (("above", "sopra"), ("below", "sotto")):
-            part = clip(mesh, p, n, side)
+            part = clip(mesh, p, n, side, cap=cap)
             if len(part.faces):
                 report["files"].append(str(write_part(chunk, part, out.with_name(f"{out.stem}_{label}{suffix}"))))
         report["faces_kept"] = None
@@ -285,7 +386,7 @@ def cut_model(chunk, point, normal, keep: str = "above", thickness: float | None
             raise ValueError("a series needs thickness, step and the folder out")
         folder = Path(out)
         folder.mkdir(parents=True, exist_ok=True)
-        parts = series(mesh, p, n, float(thickness) / scale, float(step) / scale, count)
+        parts = series(mesh, p, n, float(thickness) / scale, float(step) / scale, count, cap=cap)
         for k, (off, part) in enumerate(parts):
             progress.check()
             progress(0.3 + 0.7 * k / max(len(parts), 1), f"Slice {k + 1}/{len(parts)}")
@@ -311,5 +412,5 @@ def write_part(chunk, mesh, path) -> Path:
     return export_mesh(chunk, mesh, path)
 
 
-__all__ = ["horizontal", "vertical", "through_points", "dipping", "to_internal", "clip", "slab", "series",
-           "cut_model", "write_part", "KEEP"]
+__all__ = ["horizontal", "vertical", "through_points", "dipping", "to_internal", "clip", "close_cut", "slab",
+           "series", "cut_model", "write_part", "KEEP"]

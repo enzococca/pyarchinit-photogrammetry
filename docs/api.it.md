@@ -699,7 +699,8 @@ archivio remoto.
 | `io.mesh_import.read_mesh_file(path)` | la mesh di un file nelle sue coordinate: posizioni, facce, colori, coordinate di texture per angolo di faccia, pagine |
 | `chunk.cut_model(point, normal, keep="above", thickness=None, step=None, count=None, out=None, as_version=True)` | taglia il modello con un piano in coordinate del mondo: una parte o una fetta come modello o in un file, le due parti o una serie di fette in file |
 | `engine.mesh_cut.horizontal(z)`, `vertical(a, b)`, `through_points(p1, p2, p3)`, `dipping(point, dip_direction, dip)` | piani come `(punto, normale)` in coordinate del mondo |
-| `engine.mesh_cut.clip(mesh, point, normal, keep)`, `slab(...)`, `series(...)` | i tagli su un `MeshData` nel sistema del piano |
+| `engine.mesh_cut.clip(mesh, point, normal, keep, cap=False)`, `slab(...)`, `series(...)` | i tagli su un `MeshData` nel sistema del piano; `cap`: i solidi chiusi chiusi sul piano |
+| `engine.mesh_cut.close_cut(mesh, point, inward)` | riempie gli anelli aperti da un taglio: contorni meno le cavità al loro interno, ogni solido sui suoi vertici |
 
 **`chunk.import_model(...)`**: `frame="world"` legge il file nel sistema di riferimento del chunk
 (scalato di `scale`, poi spostato di `offset`); `frame="internal"` nel sistema interno del chunk (il
@@ -719,7 +720,10 @@ al piano; senza `out` la parte diventa il modello (quello di prima conservato co
 "series" fette di spessore `thickness` ogni `step` nella cartella `out` (`fetta_+0.500.ply`, lo
 spostamento lungo la normale). Le facce attraversate dal piano vengono tagliate sul piano: nuovi vertici
 sui lati attraversati, condivisi dalle due facce del lato, con ogni proprietà dei vertici e le
-coordinate di texture interpolate. Riga di comando: `ppg cut-model`.
+coordinate di texture interpolate. `cap=True` (il predefinito di `cut_model`, `--cap/--no-cap`) chiude ogni
+solido chiuso sul piano: gli anelli di lati sul piano, percorsi come li orientano le facce, sono contorni
+(antiorari visti dalla parte tenuta) o cavità (orari); ogni contorno meno le cavità al suo interno viene
+triangolato sui suoi vertici, così unità accostate tengono i loro colori. Riga di comando: `ppg cut-model`.
 
 ## Scansioni laser
 

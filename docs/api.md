@@ -675,7 +675,8 @@ resized copy (`resize`) - None where the file is not on this computer or on a re
 | `io.mesh_import.read_mesh_file(path)` | the mesh of a file in its own coordinates: positions, faces, colours, texture coordinates per face corner, pages |
 | `chunk.cut_model(point, normal, keep="above", thickness=None, step=None, count=None, out=None, as_version=True)` | cut the model with a world plane: one side or a slice as the model or a file, both sides or a series of slices as files |
 | `engine.mesh_cut.horizontal(z)`, `vertical(a, b)`, `through_points(p1, p2, p3)`, `dipping(point, dip_direction, dip)` | planes as `(point, normal)` in world coordinates |
-| `engine.mesh_cut.clip(mesh, point, normal, keep)`, `slab(...)`, `series(...)` | the cuts on a `MeshData` in the frame of the plane |
+| `engine.mesh_cut.clip(mesh, point, normal, keep, cap=False)`, `slab(...)`, `series(...)` | the cuts on a `MeshData` in the frame of the plane; `cap`: closed solids closed on the plane |
+| `engine.mesh_cut.close_cut(mesh, point, inward)` | fills the loops a cut opened: outlines less the hollows inside them, each solid on its own vertices |
 
 **`chunk.import_model(...)`**: `frame="world"` reads the file in the coordinate system of the chunk
 (scaled by `scale`, then shifted by `offset`); `frame="internal"` in the internal frame of the chunk
@@ -695,7 +696,10 @@ without `out` the part becomes the model (the previous one kept as a version), w
 "series" slices of `thickness` every `step` in the folder `out` (`fetta_+0.500.ply`, the offset along
 the normal). Faces crossed by the plane are cut on it: new vertices on the crossed edges, shared by
 the two faces of the edge, with every vertex property and the texture coordinates interpolated.
-CLI: `ppg cut-model`.
+`cap=True` (the default of `cut_model`, `--cap/--no-cap`) closes every closed solid on the plane: the
+loops of edges on the plane, walked as the faces orient them, are outlines (counter-clockwise seen from
+the part kept) or hollows (clockwise); each outline less the hollows inside it is triangulated on its
+own vertices, so units side by side keep their colours. CLI: `ppg cut-model`.
 
 ## Laser scans
 

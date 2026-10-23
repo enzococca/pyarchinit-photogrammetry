@@ -1056,9 +1056,7 @@ class MainWindow(QMainWindow):
         if path is None:
             path = (ch.orthomosaic_path if kind == "ortho" else ch.dem_path) if ch is not None else None
         if path is None or not Path(path).exists():
-            self.ortho_view.scene().clear()
-            self.ortho_view.tr = None
-            self.ortho_view.scene().addText(tr("Costruisci il DEM o l'ortofoto per vederli qui"))
+            self.ortho_view.clear_raster(tr("Costruisci il DEM o l'ortofoto per vederli qui"))
             return
         self.ortho_view.load(path, kind, bands=bands)
         if kind == "ortho" and ch.dem_path:
@@ -6047,6 +6045,9 @@ class MainWindow(QMainWindow):
                            ("series", "Una serie di fette parallele, in file")]),
             Field("thickness", "Spessore della fetta (m)", 0.1, minimum=0.0001, maximum=10000.0, decimals=4),
             Field("step", "Passo tra le fette della serie (m)", 0.5, minimum=0.0001, maximum=10000.0, decimals=4),
+            Field("cap", "Chiudi i solidi tagliati (la faccia del taglio piena, nel colore di ogni solido)", True,
+                  tip=tr("Per i solidi chiusi: unita' del modello geoarcheologico, proxy delle US, un vaso; le "
+                         "superfici aperte (un terreno) restano aperte")),
             Field("result", "Risultato di una parte o di una fetta", "version",
                   choices=[("version", "Il modello del chunk (quello di prima resta tra le versioni)"),
                            ("file", "Un file (il modello resta com'e')")]),
@@ -6090,9 +6091,10 @@ class MainWindow(QMainWindow):
                 self.log_pane.info(tr("Modello tagliato: {0} facce -> {1}", _it(report["faces"]),
                                       _it(report["faces_kept"])))
 
+        cap = bool(v.get("cap", True))
         self.run_task("Taglia il modello", lambda p: ch.cut_model(point, normal, keep=part, thickness=thickness,
                                                                   step=step, out=out, as_version=keep_version,
-                                                                  name=name, progress=p), done)
+                                                                  name=name, cap=cap, progress=p), done)
 
     def _cut_plane(self, v: dict, markers) -> tuple:
         """The world plane of the cut dialog's answers."""

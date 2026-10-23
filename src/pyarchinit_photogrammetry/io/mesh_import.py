@@ -21,9 +21,10 @@ as it comes: its internal frame starts at a round origin under the mesh (single 
 the millimetres of map coordinates) and ``crs`` names its coordinate system.
 
 Every object of the file joins one mesh (their transforms applied); every texture image becomes
-a page. Vertices at the same position are joined (texture coordinates are per face corner), the
-vertex colours of a textured mesh are read from the texture, normals are left out (the program
-does not keep them).
+a page. Vertices at the same position are joined (texture coordinates are per face corner), except
+between closed objects: solids touching each other (the units of a stratigraphic model, proxies)
+stay separate solids, so a cut closes each one in its own colour. The vertex colours of a textured
+mesh are read from the texture, normals are left out (the program does not keep them).
 """
 from __future__ import annotations
 
@@ -60,6 +61,7 @@ class Mesh:
     pages: list = field(default_factory=list)
     extra: dict = field(default_factory=dict)
     info: dict = field(default_factory=dict)
+    groups: np.ndarray | None = None  # per vertex: its closed object, -1 (or None) for the rest
 
 
 # ------------------------------------------------------------------------------------- reading
@@ -74,6 +76,7 @@ def read_mesh_file(path, progress: Progress | None = None) -> Mesh:
     if not len(mesh.faces):
         raise ValueError(f"{path.name}: no triangles in the file")
     progress(0.7, f"{len(mesh.faces):,} faces")
+    mesh.groups = closed_components(mesh.xyz, mesh.faces)
     mesh = _join_duplicates(mesh)
     if mesh.colors is None and mesh.texcoords is not None:
         mesh.colors = _colours_from_texture(mesh)
@@ -162,6 +165,38 @@ def _read_trimesh(path: Path) -> Mesh:
                 (page if len(pages) > 1 else None) if pages else None, pages, {}, info)
 
 
+def closed_components(xyz: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    """Per vertex, the connected piece of the mesh it belongs to when that piece encloses a volume
+    (every edge, vertices at the same position counted as one, shared by an even number of faces of
+    the piece: two, or four where a solid pinches - a layer thinning to nothing between cells), -1
+    otherwise: solids written side by side in one file (stratigraphic units, proxies)."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    n = len(xyz)
+    out = np.full(n, -1, np.int64)
+    if not len(faces) or not n:
+        return out
+    e = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]]])
+    graph = coo_matrix((np.ones(len(e), np.int8), (e[:, 0], e[:, 1])), shape=(n, n))
+    _count, label = connected_components(graph, directed=False)
+    rows = np.ascontiguousarray(np.column_stack([np.asarray(xyz, np.float64), label.astype(np.float64)]))
+    _u, pid = np.unique(rows.view(np.dtype((np.void, 32))).ravel(), return_inverse=True)
+    f = pid.reshape(-1)[faces]
+    edges = np.sort(np.vstack([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), axis=1)
+    owner = np.tile(label[faces[:, 0]], 3)
+    real = edges[:, 0] != edges[:, 1]
+    edges, owner = edges[real], owner[real]
+    uniq, first, counts = np.unique(edges, axis=0, return_index=True, return_counts=True)
+    closed = np.ones(label.max() + 1, bool)
+    closed[np.unique(owner[first[counts % 2 == 1]])] = False
+    faces_per = np.bincount(label[faces[:, 0]], minlength=len(closed))
+    closed &= faces_per >= 4
+    hit = closed[label]
+    out[hit] = label[hit]
+    return out
+
+
 def _visual(g):
     """``(image, uv per vertex, vertex colours)`` of a trimesh: the texture (PIL) when the object has
     one, otherwise its colours (vertex, face or material colour), None where missing."""
@@ -225,9 +260,12 @@ def _plain_page(pages, uvs, page, faces, colors):
 
 
 def _join_duplicates(mesh: Mesh) -> Mesh:
-    """Vertices at the same position joined (first colour and properties kept), unused ones left out."""
+    """Vertices at the same position joined (first colour and properties kept), unused ones left out;
+    a closed object's vertices only among themselves (``mesh.groups``)."""
     xyz = np.ascontiguousarray(mesh.xyz, np.float64)
-    keys = xyz.view(np.dtype((np.void, xyz.dtype.itemsize * 3))).ravel()
+    group = np.full(len(xyz), -1.0) if mesh.groups is None else mesh.groups.astype(np.float64)
+    rows = np.ascontiguousarray(np.column_stack([xyz, group]))
+    keys = rows.view(np.dtype((np.void, rows.dtype.itemsize * 4))).ravel()
     _u, first, inverse = np.unique(keys, return_index=True, return_inverse=True)
     used = np.zeros(len(first), bool)
     used[inverse.reshape(-1)[mesh.faces.reshape(-1)]] = True
@@ -240,6 +278,8 @@ def _join_duplicates(mesh: Mesh) -> Mesh:
     keep = first[order]
     mesh.faces = rank[inverse.reshape(-1)][mesh.faces]
     mesh.xyz = xyz[keep]
+    if mesh.groups is not None:
+        mesh.groups = mesh.groups[keep]
     if mesh.colors is not None:
         mesh.colors = mesh.colors[keep]
     mesh.extra = {k: v[keep] for k, v in mesh.extra.items()}
@@ -480,4 +520,4 @@ def _image_size(path: Path) -> list[int]:
 
 
 __all__ = ["Mesh", "read_mesh_file", "import_model", "import_model_chunk", "default_up", "default_offset",
-           "is_empty", "to_file_frame", "FORMATS"]
+           "is_empty", "to_file_frame", "closed_components", "FORMATS"]

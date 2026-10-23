@@ -218,9 +218,16 @@ def test_file_import_model_in_the_window(processed, tmp_path, monkeypatch):
     w = mw.MainWindow(doc, autoconnect=False)
     w.runner.show_dialog = False
     try:
+        w._show_raster("dem")
+        app.processEvents()
+        lo = ch.to_world(read_mesh(ch.product_path("model")).xyz).min(axis=0)
+        w.ortho_view.add_line([(lo[0], lo[1]), (lo[0] + 1, lo[1] + 1)], layer="Tracce di prova")  # a plugin's layer
         w.import_model()
         w.runner.wait()
         app.processEvents()
+        # the new chunk has no DEM: the raster view was emptied, with it the layers of the old raster
+        assert "Tracce di prova" not in w.ortho_view.layers and w.ortho_view.tr is None
+        w.ortho_view.remove_layer("Tracce di prova")  # a plugin removing its layer again: nothing to do
         assert {"target", "frame", "up", "scale", "dx", "dy", "dz", "crs", "keep"} <= set(seen[0])
         new = w.chunk
         assert new.label == "Dal file" and new.crs == "EPSG:32633" and len(doc.chunks) == 2
@@ -246,3 +253,41 @@ def test_file_import_model_in_the_window(processed, tmp_path, monkeypatch):
         w.photos.stop()
         w.setWindowModified(False)
         w.close()
+
+
+def test_solids_side_by_side_stay_separate(tmp_path):
+    import trimesh
+
+    from pyarchinit_photogrammetry.io.mesh_ply import write_mesh_ply
+
+    a = trimesh.creation.box(extents=(1, 1, 1))
+    a.apply_translation((0.5, 0.5, 0.5))
+    b = trimesh.creation.box(extents=(1, 1, 1))
+    b.apply_translation((0.5, 0.5, 1.5))  # on a: four corners in common
+    trimesh.Scene([a, b]).export(tmp_path / "unita.obj")
+    assert len(mesh_import.read_mesh_file(tmp_path / "unita.obj").xyz) == 16  # each unit keeps its corners
+    write_mesh_ply(tmp_path / "unita.ply", np.vstack([a.vertices, b.vertices]), np.vstack([a.faces, b.faces + 8]))
+    assert len(mesh_import.read_mesh_file(tmp_path / "unita.ply").xyz) == 16  # also in one block of a PLY
+    # a layer pinching to nothing between two cells: one solid whose cells share only an edge (four
+    # faces on it) is still closed, and stays apart from the unit above it
+    c = trimesh.creation.box(extents=(1, 1, 1))
+    c.apply_translation((1.5, 1.5, 0.5))  # touches a along the edge x = 1, y = 1
+    va, vc = np.asarray(a.vertices), np.asarray(c.vertices)
+    index = np.arange(8) + 8
+    for k, v in enumerate(vc):
+        same = np.nonzero(np.all(np.isclose(va, v), axis=1))[0]
+        if len(same):
+            index[k] = same[0]
+    keep = np.nonzero(index >= 8)[0]
+    index[keep] = 8 + np.arange(len(keep))
+    pinched = np.vstack([va, vc[keep]])
+    faces = np.vstack([a.faces, index[c.faces]])
+    assert (mesh_import.closed_components(pinched, faces) >= 0).all()
+    write_mesh_ply(tmp_path / "strato.ply", np.vstack([pinched, b.vertices]),
+                   np.vstack([faces, b.faces + len(pinched)]))
+    assert len(mesh_import.read_mesh_file(tmp_path / "strato.ply").xyz) == len(pinched) + 8
+    # an open surface written as two objects (two materials) is joined along the seam
+    left = trimesh.Trimesh([[0, 0, 0], [1, 0, 0], [1, 1, 0]], [[0, 1, 2]], process=False)
+    right = trimesh.Trimesh([[0, 0, 0], [1, 1, 0], [0, 1, 0]], [[0, 1, 2]], process=False)
+    trimesh.Scene([left, right]).export(tmp_path / "superficie.obj")
+    assert len(mesh_import.read_mesh_file(tmp_path / "superficie.obj").xyz) == 4

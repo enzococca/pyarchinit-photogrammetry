@@ -78,6 +78,71 @@ def test_a_cut_keeps_one_side_with_colours_texture_and_orientation():
     assert np.isclose(_area(down.xyz, down.faces).sum(), 4 + 4 * 2 * 1.3, rtol=1e-4)
 
 
+def _closed(faces) -> bool:
+    edges = Counter(tuple(sorted(e)) for f in np.asarray(faces).tolist() for e in ((f[0], f[1]), (f[1], f[2]), (f[2], f[0])))
+    return all(k == 2 for k in edges.values())
+
+
+def _volume(xyz, faces) -> float:
+    c = xyz[faces]
+    return float(np.einsum("ij,ij->i", c[:, 0], np.cross(c[:, 1], c[:, 2])).sum() / 6)
+
+
+def _solid(lo, hi, red, inward=False):
+    """A closed box from lo to hi (outward faces, or inward for a hollow), a colour of its own."""
+    import trimesh
+
+    lo, hi = np.asarray(lo, float), np.asarray(hi, float)
+    m = trimesh.creation.box(extents=hi - lo)
+    m.apply_translation((lo + hi) / 2)
+    m = m.subdivide()
+    f = np.asarray(m.faces, np.int64)
+    if inward:
+        f = f[:, [0, 2, 1]]
+    arr = np.empty(len(m.vertices), [("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("red", "u1"), ("green", "u1"),
+                                     ("blue", "u1")])
+    arr["x"], arr["y"], arr["z"] = np.asarray(m.vertices).T
+    arr["red"], arr["green"], arr["blue"] = red, 40, 40
+    return MeshData(arr, f)
+
+
+def _together(*meshes):
+    v = np.concatenate([m.vertices for m in meshes])
+    off = np.cumsum([0] + [len(m.vertices) for m in meshes])
+    return MeshData(v, np.vstack([m.faces + o for m, o in zip(meshes, off)]))
+
+
+def test_a_cut_closes_the_solids_each_in_its_colour():
+    box = _box()
+    p, n = mesh_cut.horizontal(0.3)
+    up = mesh_cut.clip(box, p, n, "above", cap=True)
+    assert _closed(up.faces) and np.isclose(_volume(up.xyz, up.faces), 2 * 2 * 0.7, rtol=1e-4)
+    c = up.xyz[up.faces]
+    normals = np.cross(c[:, 1] - c[:, 0], c[:, 2] - c[:, 0])
+    flat = np.all(np.isclose(c[:, :, 2], 0.3, atol=1e-6), axis=1)
+    assert flat.sum() > 2 and (normals[flat, 2] < 0).all()  # the new faces look down, out of the part kept
+    assert up.texcoords is not None and len(up.texcoords) == len(up.faces)
+    down = mesh_cut.clip(box, p, n, "below", cap=True)
+    assert _closed(down.faces) and np.isclose(_volume(down.xyz, down.faces), 2 * 2 * 1.3, rtol=1e-4)
+    # two units one on the other (their own vertices) and a hollow vessel: each closed on its own
+    lower, upper = _solid((0, 0, 0), (2, 2, 1), 200), _solid((0, 0, 1), (2, 2, 2), 60)
+    wall = _together(_solid((4, 0, 0), (6, 2, 2), 120), _solid((4.5, 0.5, 0.5), (5.5, 1.5, 1.5), 120, inward=True))
+    cut = mesh_cut.clip(_together(lower, upper, wall), *mesh_cut.vertical((0, 1), (6, 1)), "above", cap=True)
+    xyz, faces = cut.xyz, cut.faces
+    on = np.all(np.isclose(xyz[faces][:, :, 1], 1.0, atol=1e-6), axis=1)
+    reds = cut.vertices["red"][faces[on, 0]]
+    area = np.zeros(256)
+    np.add.at(area, reds, _area(xyz, faces[on]))
+    assert np.isclose(area[200], 2) and np.isclose(area[60], 2)  # the cut faces of the two units
+    assert np.isclose(area[120], 2 * 2 - 1 * 1)  # the wall of the hollow box only, not its hollow
+    assert _closed(faces) and np.isclose(_volume(xyz, faces), 2 + 2 + (2 * 1 * 2 - 1 * 0.5 * 1), rtol=1e-4)
+    # an open surface (a terrain) stays open
+    ground = _solid((0, 0, 0), (2, 2, 1), 90)
+    top = ground.subset_faces(np.isclose(ground.xyz[ground.faces][:, :, 2], 1).all(axis=1))
+    sliced = mesh_cut.clip(top, *mesh_cut.vertical((0, 1), (2, 1)), "above", cap=True)
+    assert len(sliced.faces) == len(mesh_cut.clip(top, *mesh_cut.vertical((0, 1), (2, 1)), "above").faces)
+
+
 def test_slab_series_and_planes():
     box = _box()
     p, n = mesh_cut.horizontal(0.0)
