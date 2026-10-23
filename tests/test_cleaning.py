@@ -105,13 +105,18 @@ def test_model_vertex_confidence_and_cleaning(processed, tmp_path):
     # the confidence goes with the vertices kept: the crumbs removed may move the median by one map
     # (the Poisson mesh of the shared fixture differs from run to run)
     assert len(stored) == len(cleaned.vertices) and abs(np.median(stored) - np.median(conf[: len(mesh.vertices)])) <= 1
-    # a hole closed again, then smoothing and decimation
-    v = np.asarray(cleaned.vertices)
-    centre = v[np.argmin(np.linalg.norm(v - v.mean(axis=0), axis=1))]
-    tri_c = v[np.asarray(cleaned.faces)].mean(axis=1)
-    hole = np.argsort(np.linalg.norm(tri_c - centre, axis=1))[:30]
+    # a hole closed again, then smoothing and decimation; the hole is cut where the model is furthest
+    # from the borders it already has: cut next to one of its holes it joins it, and the joined hole
+    # can be larger than the radius given (nothing was filled on CI, the Poisson mesh varying by run)
     from pyarchinit_photogrammetry.engine.cleaning import boundary_vertices, delete_faces
 
+    v = np.asarray(cleaned.vertices)
+    faces = np.asarray(cleaned.faces)
+    used = np.unique(faces)
+    border = boundary_vertices(faces, len(v))
+    centre = v[used[np.argmax(cKDTree(v[border]).query(v[used])[0])]]
+    tri_c = v[faces].mean(axis=1)
+    hole = np.argsort(np.linalg.norm(tri_c - centre, axis=1))[:30]
     mask = np.zeros(len(cleaned.faces), bool)
     mask[hole] = True
     delete_faces(ch, mask)
