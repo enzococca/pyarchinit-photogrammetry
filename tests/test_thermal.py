@@ -445,9 +445,12 @@ def test_colours_and_limits():
 
 
 def test_thermal_steps_views_and_exports_in_the_window(tmp_path, monkeypatch):
-    """The window with the captures of a thermal camera: the pane shows the steps of the
-    temperatures (not those of the spectral bands), the thermal orthomosaic opens from the tree on
-    its iron ramp with the range of the pane, another range recolours it, the export keeps degrees."""
+    """The window with the captures of a thermal camera: the Termico tab shows the steps of the
+    temperatures (the Multispettrale tab those of the spectral bands), the thermal orthomosaic opens
+    from the Termico node of the tree on its iron ramp with the range of the pane, another range
+    recolours it, the temperature under the mouse is read at full resolution, a measuring point
+    keeps its elevation and temperature through saving, deleting and exporting, the export keeps
+    degrees."""
     pytest.importorskip("PySide6")
     import rasterio
     from rasterio.transform import from_origin
@@ -485,15 +488,19 @@ def test_thermal_steps_views_and_exports_in_the_window(tmp_path, monkeypatch):
     w_ = mwmod.MainWindow(doc, autoconnect=False)
     w_.runner.show_dialog = False
     try:
-        pane = w_.ms_pane
+        pane = w_.thermal_pane
+        assert w_.left_tabs.tabText(w_.left_tabs.indexOf(pane)) == "Termico"
+        assert not w_.ms_pane.rows["thermal"][0].isVisibleTo(w_.ms_pane) and w_.ms_pane.rows["reflectance"][0].isVisibleTo(w_.ms_pane)
         assert pane.rows["thermal"][0].isVisibleTo(pane) and not pane.rows["reflectance"][0].isVisibleTo(pane)
         assert pane.rows["thermal"][0].text().startswith("<b>5.")  # captures, alignment, surface, parameters, thermal
         assert "0.95" in pane.states["thermal_params"].text() and "0.42" in pane.states["thermal"].text()
         assert pane.b_tshow.isEnabled() and (pane.s_tlow.value(), pane.s_thigh.value()) == (18.0, 26.0)
         tree = w_.workspace
         chunk_item = tree.topLevelItem(0).child(0)
+        kinds = [chunk_item.child(i).data(0, mwmod.Qt.ItemDataRole.UserRole)[0] for i in range(chunk_item.childCount())]
+        assert "multispectral" not in kinds  # no spectral band: no Multispettrale node
         node = next(chunk_item.child(i) for i in range(chunk_item.childCount())
-                    if chunk_item.child(i).data(0, mwmod.Qt.ItemDataRole.UserRole)[0] == "multispectral")
+                    if chunk_item.child(i).data(0, mwmod.Qt.ItemDataRole.UserRole)[0] == "thermal")
         payloads = [node.child(i).data(0, mwmod.Qt.ItemDataRole.UserRole)[2] for i in range(node.childCount())]
         assert payloads == ["ms:thermal"]
         w_._workspace_item("product", ch, "ms:thermal")
@@ -509,6 +516,31 @@ def test_thermal_steps_views_and_exports_in_the_window(tmp_path, monkeypatch):
         assert w_.settings.value("thermal/palette") == "grey"
         pane.b_tauto.click()
         assert v.thermal_range is None and v._dem_range == (18.0, 26.0)
+        # under the mouse: the temperature at full resolution, with its name and unit
+        w_._show_coords(400000.0 + 40 * 0.05, 4500000.0 - 5 * 0.05, None)
+        assert "T 26.00 °C" in w_.coord_label.text()
+        # a measuring point: its temperature, in the layer, through saving and reopening, deleted, exported
+        w_.set_draw_mode("probe")
+        assert v.mode == "probe"
+        v.probe_clicked.emit(400000.0 + 10 * 0.05 + 0.01, 4500000.0 - 20 * 0.05 - 0.01)
+        assert len(w_.probe_points) == 1 and w_.probe_points[0]["temp_c"] == pytest.approx(18.0)
+        assert len(v.features(mwmod.PROBE_LAYER)) == 1 and "1 punti di misura" in pane.states["points"].text()
+        w_._store_drawings()
+        doc.save()
+        assert ch.meta["drawings"]["points"][0]["label"] == "P1"
+        w_._reload_drawings()
+        assert len(w_.probe_points) == 1 and len(v.features(mwmod.PROBE_LAYER)) == 1
+        gpkg_out = tmp_path / "punti.gpkg"
+        monkeypatch.setattr(mwmod.QFileDialog, "getSaveFileName", lambda *a, **k: (str(gpkg_out), ""))
+        monkeypatch.setattr(w_, "_info", lambda *a, **k: None)
+        w_.export_probe_points()
+        import sqlite3
+
+        con = sqlite3.connect(gpkg_out)
+        assert con.execute("SELECT temp_c, label FROM punti_misura").fetchall() == [(18.0, "P1")]
+        con.close()
+        v.select_items([v.layers[mwmod.PROBE_LAYER]["features"][0][0]])
+        assert w_.delete_selected(confirm=False) == 1 and w_.probe_points == []
         # the export keeps degrees
         out = tmp_path / "temperatura_C.tif"
         monkeypatch.setattr(mwmod.QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))

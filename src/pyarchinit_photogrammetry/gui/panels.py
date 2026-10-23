@@ -250,9 +250,12 @@ class WorkspaceTree(QTreeWidget):
                     el.addChild(it)
                 el.setExpanded(True)
             ms = (ch.meta or {}).get("multispectral") or {}
-            if ms.get("captures"):  # the products of the multispectral captures, in the tree as the others
+            bands = list(ms.get("bands") or [])
+            spectral = any(b not in ("Visible", "LWIR") for b in bands)
+            th_info = ch.meta.get("thermal") or {}
+            if ms.get("captures") and spectral:  # the products of the multispectral captures, in the tree as the others
                 node = QTreeWidgetItem([tr("Multispettrale  ({0} riprese: {1})", ms["captures"],
-                                           ", ".join(ms.get("bands") or []))])
+                                           ", ".join(b for b in bands if b != "LWIR"))])
                 node.setIcon(0, icon("multispectral"))
                 node.setData(0, Qt.ItemDataRole.UserRole, ("multispectral", ch, None))
                 node.setToolTip(0, tr("Doppio clic: il pannello Multispettrale con i passi da fare"))
@@ -271,20 +274,6 @@ class WorkspaceTree(QTreeWidget):
                         it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, f"ms:index:{iname}"))
                         it.setToolTip(0, info.get("formula") or "")
                         node.addChild(it)
-                th_info = ch.meta.get("thermal") or {}
-                if th_info.get("file") and (ch.data_dir / th_info["file"]).exists():
-                    st = th_info.get("stats") or {}
-                    it = QTreeWidgetItem([tr("Ortofoto termica  ({0} - {1} °C)", f"{st.get('p2', 0):.1f}", f"{st.get('p98', 0):.1f}")])
-                    it.setIcon(0, icon("ortho"))
-                    it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "ms:thermal"))
-                    it.setToolTip(0, tr("Doppio clic per vederla; le temperature restano in gradi nel GeoTIFF"))
-                    node.addChild(it)
-                    an = th_info.get("anomaly") or {}
-                    if an.get("file") and (ch.data_dir / an["file"]).exists():
-                        it = QTreeWidgetItem([tr("Anomalie termiche  (raggio {0} m)", f"{an.get('radius_m', 0):g}")])
-                        it.setIcon(0, icon("index"))
-                        it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "ms:thermal_anomaly"))
-                        node.addChild(it)
                 for zname, z in (ms.get("zoning") or {}).items():
                     if z.get("raster") and (ch.data_dir / z["raster"]).exists():
                         it = QTreeWidgetItem([tr("Zone {0}  ({1} classi, {2} poligoni)", zname, z.get("classes"),
@@ -294,6 +283,27 @@ class WorkspaceTree(QTreeWidget):
                         it.setToolTip(0, tr("Doppio clic per vederle; i poligoni sono in {0}", z.get("file", "")))
                         node.addChild(it)
                 node.setExpanded(True)
+            if "LWIR" in bands or th_info.get("file"):  # the temperatures, under their own node
+                tnode = QTreeWidgetItem([tr("Termico  ({0} fotogrammi)", sum(1 for c in ch.cameras
+                                                                            if "LWIR" in (c.meta.get("bands") or {})))])
+                tnode.setIcon(0, icon("thermal"))
+                tnode.setData(0, Qt.ItemDataRole.UserRole, ("thermal", ch, None))
+                tnode.setToolTip(0, tr("Doppio clic: il pannello Termico con i passi da fare"))
+                ci.addChild(tnode)
+                if th_info.get("file") and (ch.data_dir / th_info["file"]).exists():
+                    st = th_info.get("stats") or {}
+                    it = QTreeWidgetItem([tr("Ortofoto termica  ({0} - {1} °C)", f"{st.get('p2', 0):.1f}", f"{st.get('p98', 0):.1f}")])
+                    it.setIcon(0, icon("ortho"))
+                    it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "ms:thermal"))
+                    it.setToolTip(0, tr("Doppio clic per vederla; le temperature restano in gradi nel GeoTIFF"))
+                    tnode.addChild(it)
+                    an = th_info.get("anomaly") or {}
+                    if an.get("file") and (ch.data_dir / an["file"]).exists():
+                        it = QTreeWidgetItem([tr("Anomalie termiche  (raggio {0} m)", f"{an.get('radius_m', 0):g}")])
+                        it.setIcon(0, icon("index"))
+                        it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "ms:thermal_anomaly"))
+                        tnode.addChild(it)
+                tnode.setExpanded(True)
             ci.setExpanded(ch is document.chunk)
         root.setExpanded(True)
 

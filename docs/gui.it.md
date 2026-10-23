@@ -63,16 +63,27 @@ ogni zonizzazione) e si aprono da lì; *Apri in QGIS* crea il progetto QGIS con 
 falso colore, gli indici con la loro scala, le zone come raster e come poligoni, oltre a ortofoto,
 DEM e disegni.
 
-Lo stesso pannello guida una **camera termica**: quando le riprese hanno una banda termica, i passi
-delle bande spettrali lasciano il posto a quelli delle temperature - i parametri della misura
+La scheda **Termico** accanto guida una **camera termica** (e *Strumenti > Termico* ha gli stessi
+passi): dopo le riprese, l'allineamento e la superficie vengono i passi delle temperature - i
+parametri della misura
 (*Parametri...*: emissività, temperatura riflessa e ambiente, umidità, distanza; per impostazione i
 valori di fabbrica delle camere DJI), l'ortofoto termica in gradi Celsius (*Costruisci...*, poi
 mostrata su una scala - ferro, inferno, arcobaleno, grigi - tra due temperature che scegli tu, come il
 raster calculator di Metashape restringe la scala termica; *Auto* torna al 2°-98° percentile), le
 anomalie termiche (la temperatura meno quella dei dintorni entro un raggio) e l'esportazione che
-conserva i gradi (GeoTIFF float32 in gradi Celsius, GeoTIFF a 16 bit in centikelvin, CSV). Gli R-JPEG
+conserva i gradi (GeoTIFF float32 in gradi Celsius, GeoTIFF a 16 bit in centikelvin, CSV, oppure JPEG
+radiometrici FLIR a tasselli con i world file, che i programmi per le termocamere FLIR aprono come
+termogrammi). Gli R-JPEG
 DJI si decodificano con il Thermal SDK gratuito di DJI, che va nella cartella `dji_tsdk` dei dati del
 programma; sul Mac gira in Docker, quindi Docker Desktop deve essere avviato.
+
+Sotto il mouse la barra di stato legge i prodotti a piena risoluzione: sull'ortofoto termica la quota,
+la temperatura e la sua anomalia (`Z 158.231  T 18.34 °C  ΔT +0.42 °C`), sulla riflettanza ogni banda,
+su un indice il suo valore, sull'ortofoto e sul DEM anche la temperatura quando c'è. Lo strumento
+**Punto di misura** (nella barra *Disegno*, nelle due schede e nei menu) mette un punto dove fai clic
+con le coordinate, la quota del DEM, la temperatura e la sua anomalia, la riflettanza di ogni banda e
+gli indici: i punti vanno nel layer *Punti di misura*, si salvano con il progetto, arrivano in QGIS con
+gli altri layer e si esportano in GeoPackage, CSV o GeoJSON (*Esporta i punti di misura...*).
 
 ## Disposizione
 

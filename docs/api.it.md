@@ -227,10 +227,27 @@ derivano tra una correzione di campo piatto e l'altra, e il terreno si scalda du
 volo di 28 minuti di un Mavic 2 Enterprise Advanced gli scostamenti hanno una deviazione di circa un
 grado), conservando il livello medio. `anomalies(chunk, radius_m)` è la temperatura meno quella dei
 dintorni (`thermal_anomaly.tif`, gradi attorno allo zero); `difference` sottrae un'altra ortofoto
-termica dello stesso terreno (notte contro giorno). `export(chunk, path, "tif" | "tif16" | "csv")`
-conserva le temperature: GeoTIFF float32 in gradi, GeoTIFF a 16 bit in centikelvin (gradi = valore
-/ 100 - 273,15, con scala e offset impostati), CSV di x, y e temperatura, i parametri nei tag o
-nell'intestazione. `ppg thermal PROGETTO status|params|build|anomalies|export`.
+termica dello stesso terreno (notte contro giorno). `export(chunk, path, "tif" | "tif16" | "csv" |
+"flir")` conserva le temperature: GeoTIFF float32 in gradi, GeoTIFF a 16 bit in centikelvin (gradi =
+valore / 100 - 273,15, con scala e offset impostati), CSV di x, y e temperatura, i parametri nei tag o
+nell'intestazione, oppure JPEG radiometrici FLIR (`export_flir`, `write_flir_jpeg`): tasselli di 2048
+celle di lato (`tile`, al massimo 2800: un file FLIR sta in 256 segmenti APP1) chiamati
+`<nome>_r<riga>_c<colonna>.jpg`, ognuno con il suo world file (`.jgw`) e il sistema di riferimento
+(`.aux.xml`), e un indice `<nome>_tiles.csv`. L'immagine è la resa con la tavolozza; i conteggi grezzi
+sono costruiti con l'inversa del modello di FLIR (raw2temp di Thermimage) per i parametri della misura
+come li stampa ExifTool, così ExifTool, i programmi di FLIR e quelli costruiti su di essi
+(Thermal-Image-Analysis, flirimageextractor, flyr) rileggono gli stessi gradi, entro 0,01 °C. Il
+formato non ha un valore vuoto: le celle senza temperatura prendono la più fredda del tassello (nere
+nell'immagine). I JPEG radiometrici FLIR si leggono anche (`read_flir`, `decode_flir`: i dati grezzi
+come conteggi a 16 bit o come PNG, le costanti di Planck della camera, i parametri della misura del
+chunk). `ppg thermal PROGETTO status|params|build|anomalies|export [--format flir --tile 2048]`.
+
+`engine.probe` legge cosa contengono i prodotti in un punto, a piena risoluzione: `Probe(chunk)` tiene
+aperti il DEM, l'ortofoto termica e le sue anomalie, la riflettanza e gli indici; `probe.at(x, y,
+fields=None)` dà `{"z", "temp_c", "anomaly_c", "refl_<banda>", "<indice>"}` (solo i valori che i
+prodotti hanno lì), `probe.record(x, y, label=...)` un punto di misura arrotondato a ciò che i valori
+significano, `write_points(punti, percorso, crs)` un GeoPackage (tabella `punti_misura`), un CSV o un
+GeoJSON. La finestra tiene i suoi punti di misura in `chunk.meta["drawings"]["points"]`.
 
 ### Immagini satellitari
 

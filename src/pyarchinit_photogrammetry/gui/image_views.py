@@ -390,7 +390,7 @@ class RasterView(_ZoomView):
     file) so that it opens at once; zooming in further, the visible part is read again from the
     file at the resolution of the screen, up to the full one (``detail``), in a thread."""
 
-    DRAW_MODES = ("polygon", "line", "measure", "quota", "marker", "crop", "patch", "dem_edit")
+    DRAW_MODES = ("polygon", "line", "measure", "quota", "marker", "crop", "patch", "dem_edit", "probe")
     AREA_MODES = ("crop", "patch", "dem_edit", "area", "chart")  # drag a box or click a polygon
     SAM_TOOLS = ("tap", "box", "area")
 
@@ -408,6 +408,7 @@ class RasterView(_ZoomView):
     line_finished = Signal(object, object)
     quota_clicked = Signal(float, float)  # spot height at world x, y
     marker_clicked = Signal(float, float)  # a marker at world x, y (the height from the DEM)
+    probe_clicked = Signal(float, float)  # a measuring point at world x, y (elevation, temperature, bands)
     photos_at_point = Signal(float, float)  # filter the photos that see world x, y
     photos_in_area_requested = Signal()  # filter the photos that frame the selected polygon
     sam_click = Signal(float, float, int, bool)  # x, y, label (1 add / 0 remove), True = a new object
@@ -1337,9 +1338,9 @@ class RasterView(_ZoomView):
         xy = self.world(sp)
         if self.mode in self.DRAW_MODES and ev.button() != Qt.MouseButton.RightButton:
             sp, _kind, xy = self.snap_world(sp)
-        if self.mode in ("quota", "marker"):
+        if self.mode in ("quota", "marker", "probe"):
             if ev.button() == Qt.MouseButton.LeftButton:
-                (self.quota_clicked if self.mode == "quota" else self.marker_clicked).emit(*xy)
+                {"quota": self.quota_clicked, "marker": self.marker_clicked, "probe": self.probe_clicked}[self.mode].emit(*xy)
             return
         if ev.button() == Qt.MouseButton.RightButton:  # cancel the current drawing
             self.set_mode(self.mode)

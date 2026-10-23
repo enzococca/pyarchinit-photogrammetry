@@ -50,6 +50,7 @@ ICONS = {
     "plugin": ("mdi6.puzzle-outline", "violet"),
     "network": ("mdi6.lan-connect", "violet"),
     "multispectral": ("mdi6.leaf", "green"), "run": ("mdi6.play-circle-outline", "green"),
+    "thermal": ("mdi6.thermometer", "red"), "probe": ("mdi6.map-marker-plus-outline", "red"),
     "index": ("mdi6.sprout-outline", "lime"), "zones": ("mdi6.view-dashboard-outline", "amber"),
     "qgis": ("mdi6.map-search-outline", "lime"),
     # PyArchInit

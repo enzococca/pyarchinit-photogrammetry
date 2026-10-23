@@ -219,10 +219,26 @@ corrections, and the ground warms during a flight: on a Mavic 2 Enterprise Advan
 minutes the offsets spread by about a degree), the mean level kept. `anomalies(chunk, radius_m)` is
 the temperature minus its surroundings (`thermal_anomaly.tif`, degrees around zero); `difference`
 subtracts another temperature orthomosaic of the same ground (night against day).
-`export(chunk, path, "tif" | "tif16" | "csv")` keeps the temperatures: float32 GeoTIFF in degrees,
-16-bit GeoTIFF in centikelvin (degrees = value / 100 - 273.15, with scale and offset set), CSV of
-x, y and temperature, the parameters in the tags or the header. `ppg thermal PROJECT
-status|params|build|anomalies|export`.
+`export(chunk, path, "tif" | "tif16" | "csv" | "flir")` keeps the temperatures: float32 GeoTIFF in
+degrees, 16-bit GeoTIFF in centikelvin (degrees = value / 100 - 273.15, with scale and offset set),
+CSV of x, y and temperature, the parameters in the tags or the header, or FLIR radiometric JPEGs
+(`export_flir`, `write_flir_jpeg`): tiles of 2048 cells a side (`tile`, at most 2800: a FLIR file
+fits in 256 APP1 segments) named `<name>_r<row>_c<column>.jpg`, each with its world file (`.jgw`)
+and reference system (`.aux.xml`), and an index `<name>_tiles.csv`. The picture is the palette
+rendering; the raw counts are made with the inverse of FLIR's model (Thermimage's raw2temp) for the
+parameters of the measure as ExifTool prints them, so ExifTool, FLIR's tools and the programs built
+on them (Thermal-Image-Analysis, flirimageextractor, flyr) read the same degrees back, within 0.01
+°C. The format has no empty value: cells without a temperature get the coldest of the tile (black in
+the picture). FLIR radiometric JPEGs are read too (`read_flir`, `decode_flir`: the raw data as
+16-bit counts or as a PNG, the camera's Planck constants, the measure's parameters of the chunk).
+`ppg thermal PROJECT status|params|build|anomalies|export [--format flir --tile 2048]`.
+
+`engine.probe` reads what the products hold at a point, at full resolution: `Probe(chunk)` keeps
+the DEM, the thermal orthomosaic and its anomalies, the reflectance and the indices open;
+`probe.at(x, y, fields=None)` gives `{"z", "temp_c", "anomaly_c", "refl_<band>", "<index>"}` (only
+the values the products have there), `probe.record(x, y, label=...)` a measuring point rounded to
+what the values mean, `write_points(points, path, crs)` a GeoPackage (table `punti_misura`), a CSV
+or a GeoJSON. The window keeps its measuring points in `chunk.meta["drawings"]["points"]`.
 
 ### Satellite imagery
 

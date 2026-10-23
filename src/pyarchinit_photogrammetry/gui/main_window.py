@@ -45,6 +45,7 @@ TARGET_TYPES = [("aruco_4x4_50", "ArUco 4x4 (50 codici)"), ("aruco_4x4_250", "Ar
                 ("aruco_5x5_100", "ArUco 5x5 (100 codici)"), ("aruco_6x6_250", "ArUco 6x6 (250 codici)"),
                 ("apriltag_36h11", "AprilTag 36h11")]
 QUOTE_LAYER = "Quote"  # spot heights (pyarchinit_quote)
+PROBE_LAYER = "Punti di misura"  # points with the values of the products: elevation, temperature, bands, indices
 CROP_LAYER = "Ritaglio"  # the polygon drawn with the crop tool
 PATCH_LAYER = "Patch ortofoto"  # areas of the orthomosaic coloured from photos chosen by hand
 STONES_LAYER = "Pietre"  # stone-by-stone drawing (archaeo.stones), per raster: orthomosaic or elevation
@@ -119,6 +120,8 @@ class MainWindow(QMainWindow):
         self.sam = None
         self.classifier = None  # trained point classifier (ai.learn.ClassifierModel) in use
         self.quote: list[dict] = []  # spot heights: x, y and the columns of pyarchinit_quote
+        self.probe_points: list[dict] = []  # measuring points: x, y and the values of the products (engine.probe)
+        self._probe_obj = None  # the products of the chunk open for the readout under the mouse
         self.stones: dict[str, list] = {}  # name of the raster -> outlines of its stones (polygons)
         self._sam_obj: dict | None = None  # SAM mask being edited (prompts, bounds, preview)
         self.last_report: dict | None = None
@@ -192,6 +195,7 @@ class MainWindow(QMainWindow):
         self.ortho_view.measured.connect(lambda t: (self.statusBar().showMessage(t, 30000),
                                                     self.log_pane.info(t)))
         self.ortho_view.quota_clicked.connect(self._quota_clicked)
+        self.ortho_view.probe_clicked.connect(self._probe_clicked)
         self.ortho_view.marker_clicked.connect(self._marker_clicked_on_raster)
         self.ortho_view.photos_at_point.connect(lambda x, y: self.filter_photos_by_point(self._raster_point(x, y)))
         self.ortho_view.photos_in_area_requested.connect(self._photos_in_selected_area)
@@ -281,29 +285,35 @@ class MainWindow(QMainWindow):
         self.proxies_pane.delete_requested.connect(self.delete_proxies)
         from .multispectral_pane import MultispectralPane
 
-        self.ms_pane = MultispectralPane()
+        # the multispectral and the thermal steps, each in its tab (the first three steps are the same)
+        self.ms_pane = MultispectralPane(mode="spectral")
         self.left_tabs.addTab(self.ms_pane, icon("multispectral"), tr("Multispettrale"))
-        self.ms_pane.add_requested.connect(self.ms_add)
-        self.ms_pane.align_requested.connect(self.align_photos)
-        self.ms_pane.surface_requested.connect(self.ms_build_surface)
+        self.thermal_pane = MultispectralPane(mode="thermal")
+        self.left_tabs.addTab(self.thermal_pane, icon("thermal"), tr("Termico"))
+        for pane in (self.ms_pane, self.thermal_pane):
+            pane.add_requested.connect(self.ms_add)
+            pane.align_requested.connect(self.align_photos)
+            pane.surface_requested.connect(self.ms_build_surface)
+            pane.qgis_requested.connect(self.open_in_qgis)
+            pane.probe_requested.connect(lambda: self.set_draw_mode("probe"))
+            pane.probe_export_requested.connect(self.export_probe_points)
         self.ms_pane.panel_requested.connect(self.ms_panel)
         self.ms_pane.reflectance_requested.connect(self.ms_reflectance)
         self.ms_pane.show_requested.connect(self.ms_show)
         self.ms_pane.index_requested.connect(self.ms_compute_index)
         self.ms_pane.zoning_requested.connect(self.ms_zoning)
-        self.ms_pane.qgis_requested.connect(self.open_in_qgis)
         self.ms_pane.palette_requested.connect(self._ms_palette_changed)
-        self.ms_pane.thermal_params_requested.connect(self.ms_thermal_params)
-        self.ms_pane.thermal_build_requested.connect(self.ms_build_thermal)
-        self.ms_pane.thermal_show_requested.connect(self.ms_thermal_show)
-        self.ms_pane.anomaly_requested.connect(self.ms_thermal_anomalies)
-        self.ms_pane.thermal_export_requested.connect(self.ms_thermal_export)
+        self.thermal_pane.thermal_params_requested.connect(self.ms_thermal_params)
+        self.thermal_pane.thermal_build_requested.connect(self.ms_build_thermal)
+        self.thermal_pane.thermal_show_requested.connect(self.ms_thermal_show)
+        self.thermal_pane.anomaly_requested.connect(self.ms_thermal_anomalies)
+        self.thermal_pane.thermal_export_requested.connect(self.ms_thermal_export)
         self.ms_pane.set_palette(str(self.settings.value("ms/palette", "rdylgn")))
-        k = self.ms_pane.c_tpalette.findData(str(self.settings.value("thermal/palette", "iron")))
+        k = self.thermal_pane.c_tpalette.findData(str(self.settings.value("thermal/palette", "iron")))
         if k >= 0:
-            self.ms_pane.c_tpalette.blockSignals(True)
-            self.ms_pane.c_tpalette.setCurrentIndex(k)
-            self.ms_pane.c_tpalette.blockSignals(False)
+            self.thermal_pane.c_tpalette.blockSignals(True)
+            self.thermal_pane.c_tpalette.setCurrentIndex(k)
+            self.thermal_pane.c_tpalette.blockSignals(False)
         self.sections_pane = SectionsPane()
         self.sections_pane.zoom_requested.connect(self._zoom_section)
         self.sections_pane.publish_requested.connect(self._publish_section)
@@ -545,6 +555,7 @@ class MainWindow(QMainWindow):
                                 ("line", "Traccia sezione", "line"), ("measure", "Misura distanza", "measure"),
                                 ("area", "Misura area e superficie 3D", "area"),
                                 ("quota", "Quota puntuale (pyarchinit_quote)", "point"),
+                                ("probe", "Punto di misura: quota, temperatura, bande e indici nel punto", "probe"),
                                 ("marker", "Marker: clic su un punto, proiettato sulle foto che lo vedono", "marker"),
                                 ("crop", "Ritaglio: riquadro o poligono (esporta o ritaglia i prodotti)", "crop"),
                                 ("patch", "Patch dell'ortofoto: assegna le immagini a un'area", "patch"),
@@ -713,6 +724,32 @@ class MainWindow(QMainWindow):
                   tip=tr("Una banda per banda sulla geometria dell'ortofoto"))
         self._act(ms_menu, tr("Indice e zonizzazione..."), self.ms_index, processing=True,
                   tip=tr("NDVI, NDRE e gli altri; le zone come poligoni in un GeoPackage (mappa di prescrizione)"))
+        self._act(ms_menu, tr("Punto di misura"), lambda: self.set_draw_mode("probe"), icon_name="probe",
+                  tip=tr("Clic sull'ortofoto, termica o multispettrale: un punto con coordinate, quota del DEM, "
+                         "temperatura, bande e indici letti lì a piena risoluzione"))
+        self._act(ms_menu, tr("Esporta i punti di misura..."), self.export_probe_points, icon_name="export")
+        th_menu = m.addMenu(icon("thermal"), tr("Termico"))
+        self._act(th_menu, tr("Aggiungi riprese termiche..."), self.ms_add,
+                  tip=tr("La cartella dei fotogrammi termici e, se ci sono, quella delle foto visibili dello stesso volo"))
+        self._act(th_menu, tr("Parametri di misura della termica..."), self.ms_thermal_params, icon_name="settings",
+                  tip=tr("Emissività, temperatura riflessa e ambiente, umidità, distanza: valgono per tutti i fotogrammi"))
+        self._act(th_menu, tr("Ortofoto termica..."), self.ms_build_thermal, processing=True, icon_name="ortho",
+                  tip=tr("Ortofoto in gradi Celsius: un GeoTIFF a virgola mobile che resta radiometrico in ogni esportazione"))
+        self._act(th_menu, tr("Mostra l'ortofoto termica"), lambda: self.ms_show("thermal"), icon_name="view")
+        self._act(th_menu, tr("Anomalie termiche"), lambda: self.ms_thermal_anomalies(float(self.thermal_pane.s_radius.value())),
+                  processing=True, icon_name="run",
+                  tip=tr("La temperatura meno quella dei dintorni: i muri e i fossati sepolti cambiano il suolo sopra di loro"))
+        ex_menu = th_menu.addMenu(icon("export"), tr("Esporta le temperature"))
+        for fmt, text in (("tif", tr("GeoTIFF in gradi Celsius (32 bit)")), ("tif16", tr("GeoTIFF in centikelvin (16 bit)")),
+                          ("csv", tr("CSV (x, y, temperatura)")), ("flir", tr("JPEG radiometrici FLIR (tasselli con world file)"))):
+            self._act(ex_menu, text + "...", lambda _c=False, f=fmt: self.ms_thermal_export(f))
+        th_menu.addSeparator()
+        self._act(th_menu, tr("Punto di misura"), lambda: self.set_draw_mode("probe"), icon_name="probe",
+                  tip=tr("Clic sull'ortofoto, termica o multispettrale: un punto con coordinate, quota del DEM, "
+                         "temperatura, bande e indici letti lì a piena risoluzione"))
+        self._act(th_menu, tr("Esporta i punti di misura..."), self.export_probe_points, icon_name="export")
+        self._act(th_menu, tr("Pannello Termico"), lambda: self._show_pane(self.left_tabs, self.thermal_pane),
+                  icon_name="thermal")
         sat_menu = m.addMenu(tr("Immagini satellitari"))
         self._act(sat_menu, tr("Ortorettifica una scena..."), self.sat_ortho, processing=True,
                   tip=tr("Una scena satellitare con i suoi RPC sul DEM del rilievo, come versione dell'ortofoto"))
@@ -868,6 +905,7 @@ class MainWindow(QMainWindow):
                          (self.draw_actions["line"], "Sezione"), (self.draw_actions["measure"], "Misura"),
                          (self.draw_actions["area"], "Area"),
                          (self.draw_actions["quota"], "Quota"), (self.draw_actions["marker"], "Marker"),
+                         (self.draw_actions["probe"], "Punto"),
                          (self.draw_actions["sam"], "SAM"),
                          (self.draw_actions["patch"], "Patch"),
                          (self.a_sel_delete, "Elimina"),
@@ -884,7 +922,7 @@ class MainWindow(QMainWindow):
         snap_button = db.widgetForAction(self.a_snap)
         if snap_button is not None:
             snap_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        for mode in ("line", "measure", "quota", "marker", "sam", "patch"):
+        for mode in ("line", "measure", "quota", "probe", "marker", "sam", "patch"):
             db.addAction(self.draw_actions[mode])
         for mode in ("sam", "line"):
             button = db.widgetForAction(self.draw_actions[mode])
@@ -947,6 +985,8 @@ class MainWindow(QMainWindow):
             doc.add_chunk("Chunk 1")
         self.units = []
         self.quote = []
+        self.probe_points = []
+        self._probe_reset()
         self.stones = {}
         self._sam_obj = None
         self.classifier = None
@@ -958,7 +998,7 @@ class MainWindow(QMainWindow):
         step(0.95, tr("Sezioni e disegni"))
         self._load_sections()
         self.proxies_pane.set_proxies(self.chunk.meta.get("proxies", []) if self.chunk else [])
-        self.ms_pane.set_state(self.chunk)
+        self._capture_states()
         if self.history is None:
             self.history = UndoHistory(self._undo_state, self._undo_apply, lambda: self.chunk,
                                        on_change=self._undo_actions)
@@ -977,6 +1017,7 @@ class MainWindow(QMainWindow):
 
     def refresh_all(self, reset_views: bool = False, progress=None) -> None:
         step = progress or (lambda *_a, **_k: None)
+        self._probe_reset()  # products may have been built or removed
         self._update_title()
         step(0.05, tr("Area di lavoro"))
         self.workspace.populate(self.doc)
@@ -989,7 +1030,7 @@ class MainWindow(QMainWindow):
         step(0.6, tr("Ortofoto e DEM"))
         self._load_raster()
         self._update_stack()
-        self.ms_pane.set_state(self.chunk)
+        self._capture_states()
 
     def _load_raster(self, kind: str | None = None, path=None, bands=None) -> None:
         """The orthomosaic or the DEM of the chunk in the raster view (``path``: another file of
@@ -1185,7 +1226,7 @@ class MainWindow(QMainWindow):
 
         def done(n):
             info = self.chunk.meta["multispectral"]
-            self._show_pane(self.left_tabs, self.ms_pane)
+            self._show_pane(self.left_tabs, self._capture_pane())
             self._info(tr("Riprese multispettrali"), tr("{0} riprese aggiunte ({1} nel chunk): bande {2}, riferimento {3}",
                                                         n, info["captures"], ", ".join(info["bands"]), info["reference"]))
 
@@ -1211,7 +1252,7 @@ class MainWindow(QMainWindow):
             return
         th.set_params(self.chunk, **v)
         self._dirty(True)
-        self.ms_pane.set_state(self.chunk)
+        self._capture_states()
 
     def ms_build_thermal(self) -> None:
         """The temperature orthomosaic in degrees (DJI's SDK decodes the R-JPEGs), then shown."""
@@ -1231,7 +1272,20 @@ class MainWindow(QMainWindow):
             return
         self.run_task("Ortofoto termica",
                       lambda p: th.build_thermal(self.chunk, resolution=v["resolution"], balance=v["balance"], progress=p),
-                      lambda path: (self.ms_pane.set_state(self.chunk), self.ms_show("thermal")), refresh=True)
+                      lambda path: (self._capture_states(), self.ms_show("thermal")), refresh=True)
+
+    def _capture_states(self) -> None:
+        """The steps of the Multispettrale and Termico tabs read again from the chunk."""
+        for pane in (self.ms_pane, self.thermal_pane):
+            pane.set_state(self.chunk)
+            pane.set_points(len(self.probe_points))
+
+    def _capture_pane(self):
+        """The tab for the captures of the chunk: Termico when they have a thermal band and no
+        spectral one, else Multispettrale."""
+        bands = ((self.chunk.meta.get("multispectral") if self.chunk is not None else None) or {}).get("bands") or []
+        spectral = any(b not in ("Visible", "LWIR") for b in bands)
+        return self.thermal_pane if "LWIR" in bands and not spectral else self.ms_pane
 
     def ms_thermal_show(self, palette: str, limits) -> None:
         """The temperatures again with another ramp or range, the zoom kept."""
@@ -1248,7 +1302,7 @@ class MainWindow(QMainWindow):
             v.update_detail()
             lo, hi = v._dem_range or (0.0, 1.0)
             self.statusBar().showMessage(tr("Temperatura: colori da {0} °C a {1} °C ({2})", f"{lo:.1f}", f"{hi:.1f}",
-                                            self.ms_pane.c_tpalette.currentText()))
+                                            self.thermal_pane.c_tpalette.currentText()))
         else:
             self.ms_show("thermal")
 
@@ -1258,11 +1312,11 @@ class MainWindow(QMainWindow):
         from ..engine import thermal as th
 
         self.run_task("Anomalie termiche", lambda p: th.anomalies(self.chunk, radius_m=radius),
-                      lambda path: (self._dirty(True), self.ms_pane.set_state(self.chunk), self.ms_show("thermal_anomaly")),
+                      lambda path: (self._dirty(True), self._capture_states(), self.ms_show("thermal_anomaly")),
                       refresh=True)
 
     def ms_thermal_export(self, fmt: str = "tif") -> None:
-        """The temperatures into a file that keeps them (degrees or centikelvin GeoTIFF, CSV)."""
+        """The temperatures into a file that keeps them (degrees or centikelvin GeoTIFF, CSV, FLIR JPEGs)."""
         if not self._need_chunk():
             return
         from ..engine import thermal as th
@@ -1409,8 +1463,8 @@ class MainWindow(QMainWindow):
                 self._warn("Costruisci prima l'ortofoto termica." if kind == "thermal" else "Calcola prima le anomalie termiche.")
                 return
             if kind == "thermal":
-                self.ortho_view.thermal_palette = self.ms_pane.thermal_palette()
-                self.ortho_view.thermal_range = self.ms_pane.thermal_range()
+                self.ortho_view.thermal_palette = self.thermal_pane.thermal_palette()
+                self.ortho_view.thermal_range = self.thermal_pane.thermal_range()
             self._load_raster(kind, ch.data_dir / rel)
             if kind == "thermal":
                 lo, hi = self.ortho_view._dem_range or (0.0, 1.0)
@@ -2551,6 +2605,7 @@ class MainWindow(QMainWindow):
         state = {"chunk": None if ch is None else ch.key,
                  "units": [{**u.to_dict(), "attributes": dict(u.attributes or {})} for u in self.units],
                  "quote": [dict(q) for q in self.quote], "sections": [dict(x) for x in self.sections],
+                 "probe": [dict(q) for q in self.probe_points],
                  "pa": {"deleted": sorted(self.pa_deleted), "geom": sorted(self.pa_geom_changed),
                         "pending": sorted(int(k) for k in self.pa_pending)}}
         if ch is not None:
@@ -2562,9 +2617,11 @@ class MainWindow(QMainWindow):
     def _undo_apply(self, state: dict, parts: set, products: list) -> None:
         """Put back the ``parts`` of a snapshot (and show the ``products`` whose files came back)."""
         ch = self.chunk
-        if parts & {"units", "quote", "sections", "pa"}:
+        if parts & {"units", "quote", "sections", "pa", "probe"}:
             from ..archaeo.stratigraphy import UnitPolygon
 
+            if "probe" in state:
+                self.probe_points = [dict(q) for q in state["probe"] or []]
             if "units" in state:
                 self.units = [UnitPolygon.from_dict(d) for d in state["units"] or []]
             if "quote" in state:
@@ -4931,6 +4988,8 @@ class MainWindow(QMainWindow):
                 self._show_model(payload)
         elif kind == "multispectral":
             self._show_pane(self.left_tabs, self.ms_pane)
+        elif kind == "thermal":
+            self._show_pane(self.left_tabs, self.thermal_pane)
         elif kind == "version":
             self.show_version(*payload)
         elif kind == "elevation":
@@ -5072,6 +5131,22 @@ class MainWindow(QMainWindow):
 
     def _show_coords(self, x: float, y: float, z) -> None:
         kind = getattr(self.ortho_view, "kind", None)
+        if self.chunk is not None and kind in ("thermal", "thermal_anomaly", "reflectance", "index", "ortho", "dem"):
+            # the values of the products at full resolution (the view shows a reduced copy)
+            probe = self._probe()
+            shown = probe.fields_of(self.ortho_view.path) if self.ortho_view.path is not None else []
+            order = {"thermal": ["z", "temp_c", "anomaly_c"], "thermal_anomaly": ["z", "anomaly_c", "temp_c"],
+                     "ortho": ["z", "temp_c"], "dem": ["z", "temp_c"]}.get(kind, ["z"] + shown)
+            fields = [f for f in order if f in probe.labels]
+            if kind in ("thermal", "thermal_anomaly", "reflectance", "index") or "temp_c" in fields:
+                text = probe.text(probe.at(x, y, fields), fields)
+                extra = self._terrain_at(x, y, z) if kind == "dem" and z is not None and self.chunk.dem_path else ""
+                self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}  {text}{extra}   [{self.chunk.crs}]")
+                return
+        if kind == "zones":
+            zt = tr("  classe {0}", int(z)) if z is not None and np.isfinite(z) else ""
+            self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}{zt}   [{self.chunk.crs if self.chunk else ''}]")
+            return
         if kind in RELIEF_KINDS:
             zt = ""
             if z is not None and np.isfinite(z):
@@ -5495,6 +5570,8 @@ class MainWindow(QMainWindow):
                          "e superficie 3D (dal DEM e dal modello), pendenza media, quote",
                  "quota": "Clic su un punto: la quota viene letta dal DEM, poi area, US e gli altri campi di "
                           "pyarchinit_quote",
+                 "probe": "Clic su un punto: un punto di misura con coordinate, quota del DEM, temperatura, bande e "
+                          "indici letti lì a piena risoluzione (layer Punti di misura, esportabile e in QGIS)",
                  "marker": "Clic su un punto: un marker con la quota del DEM, proiettato sulle foto che lo vedono "
                            "(come Aggiungi marker in Metashape); con due marker si fa una barra di scala",
                  "crop": "Trascina un riquadro, oppure clic per i vertici e doppio clic per chiudere il poligono: poi "
@@ -5507,6 +5584,7 @@ class MainWindow(QMainWindow):
     def clear_drawings(self) -> None:
         self.units = []
         self.quote = []
+        self.probe_points = []
         self._sam_cancel()
         self.line_layers = {}
         self.ortho_view.clear_overlays()
@@ -5523,8 +5601,9 @@ class MainWindow(QMainWindow):
         units = [{**u.to_dict(), "layer": (u.attributes or {}).get("_layer")} for u in self.units
                  if not str((u.attributes or {}).get("_layer") or "").startswith("US da PyArchInit - ")]
         quote = [{k: v for k, v in q.items() if not str(k).startswith("_")} for q in self.quote]
-        if units or quote:
-            ch.meta["drawings"] = {"units": units, "quote": quote}
+        points = [{k: v for k, v in q.items() if not str(k).startswith("_")} for q in self.probe_points]
+        if units or quote or points:
+            ch.meta["drawings"] = {"units": units, "quote": quote, **({"points": points} if points else {})}
         else:
             ch.meta.pop("drawings", None)
         stones = {k: [g.wkt for g in v] for k, v in self.stones.items() if v}
@@ -5571,6 +5650,7 @@ class MainWindow(QMainWindow):
             except Exception as exc:  # a broken record must not stop the project from opening
                 log.warning("Unita' non letta dal progetto: %s", exc)
         self.quote = [dict(q) for q in data.get("quote", []) if "x" in q and "y" in q]
+        self.probe_points = [dict(q) for q in data.get("points", []) if "x" in q and "y" in q]
         from shapely import wkt
 
         self.stones = {}
@@ -5671,6 +5751,69 @@ class MainWindow(QMainWindow):
         z = q.get("quota_q")
         label = f"{float(z):.2f}" if z not in (None, "") else "?"
         self.ortho_view.add_point(float(q["x"]), float(q["y"]), "#ffd166", label, layer=QUOTE_LAYER, attrs=attrs)
+
+    # ---------------------------------------------------------------- measuring points
+    def _probe(self):
+        """The products of the active chunk, open for reading single cells (engine.probe)."""
+        if self._probe_obj is None or getattr(self._probe_obj, "_chunk", None) is not self.chunk:
+            from ..engine.probe import Probe
+
+            self._probe_reset()
+            self._probe_obj = Probe(self.chunk)
+            self._probe_obj._chunk = self.chunk
+        return self._probe_obj
+
+    def _probe_reset(self) -> None:
+        """Products built or removed: the open files closed, opened again at the next readout."""
+        if getattr(self, "_probe_obj", None) is not None:
+            self._probe_obj.close()
+        self._probe_obj = None
+
+    def _draw_probe_point(self, q: dict, i: int) -> None:
+        attrs = {k: v for k, v in q.items()}
+        attrs["_probe"] = i
+        t = q.get("temp_c")
+        label = q.get("label") or f"P{i + 1}"
+        if t is not None:
+            label += f" {float(t):.1f}°"
+        self.ortho_view.add_point(float(q["x"]), float(q["y"]), "#ff5d8f", label, layer=PROBE_LAYER, attrs=attrs)
+
+    def _probe_clicked(self, x: float, y: float) -> None:
+        """A measuring point: the values of every product of the chunk at the clicked point."""
+        if self.chunk is None:
+            return
+        probe = self._probe()
+        q = probe.record(x, y, label=f"P{len(self.probe_points) + 1}")
+        self.probe_points.append(q)
+        self._draw_probe_point(q, len(self.probe_points) - 1)
+        self._dirty(True)
+        values = probe.text({k: v for k, v in q.items() if k not in ("x", "y", "label")})
+        self.log_pane.info(tr("Punto di misura {0} in X {1:.3f} Y {2:.3f}: {3}", q["label"], x, y,
+                              values or tr("nessun prodotto qui")))
+        self.statusBar().showMessage(f"{q['label']}  {values}", 15000)
+        self._capture_states()
+
+    def export_probe_points(self) -> None:
+        """The measuring points of the chunk into a GeoPackage, a CSV or a GeoJSON (QGIS opens them)."""
+        if not self._need_chunk():
+            return
+        if not self.probe_points:
+            self._warn("Nessun punto di misura: usa lo strumento Punto di misura sull'ortofoto, termica o multispettrale.")
+            return
+        from ..engine.probe import write_points
+
+        start = str(Path(self._last_dir()) / "punti_misura.gpkg")
+        path, filt = QFileDialog.getSaveFileName(self, tr("Esporta i punti di misura"), start,
+                                                 "GeoPackage (*.gpkg);;CSV (*.csv);;GeoJSON (*.geojson)")
+        if not path:
+            return
+        try:
+            out = write_points([{k: v for k, v in q.items() if not str(k).startswith("_")} for q in self.probe_points],
+                               path, self.chunk.crs if self.chunk.crs != "LOCAL" else None)
+        except Exception as exc:
+            self._exc("Esportazione dei punti non riuscita", exc)
+            return
+        self._info(tr("Punti di misura"), tr("{0} punti esportati in {1}", len(self.probe_points), out))
 
     def _quota_clicked(self, x: float, y: float) -> None:
         """A spot height at the clicked point: elevation from the DEM, then the columns of
@@ -6098,8 +6241,11 @@ class MainWindow(QMainWindow):
             return 0
         parts: dict[int, set[int]] = {}
         sections, lines, skip, quote_gone, patch_ids, stones_gone = [], {}, set(), set(), set(), set()
+        probe_gone = set()
         for layer, idx, attrs in sel:
-            if layer == PATCH_LAYER:
+            if layer == PROBE_LAYER and "_probe" in attrs:
+                probe_gone.add(int(attrs["_probe"]))
+            elif layer == PATCH_LAYER:
                 patch_ids.add(attrs.get("patch"))
             elif layer == STONES_LAYER:
                 stones_gone.add(int(attrs["_stone"]))
@@ -6145,6 +6291,8 @@ class MainWindow(QMainWindow):
             self._forget_pa_unit(u, deleted=not keep)
         self.units = [u for i, u in enumerate(self.units) if i not in removed]
         self.quote = [q for i, q in enumerate(self.quote) if i not in quote_gone]
+        if probe_gone:
+            self.probe_points = [q for i, q in enumerate(self.probe_points) if i not in probe_gone]
         if stones_gone and self.ortho_view.path is not None:
             key = self.ortho_view.path.name
             self.stones[key] = [s for i, s in enumerate(self.stones.get(key, [])) if i not in stones_gone]
@@ -6280,7 +6428,7 @@ class MainWindow(QMainWindow):
         skip = skip or set()
         visible = {n: lay["visible"] for n, lay in v.layers.items()}
         order = list(v.layer_order)
-        modelled = set(self.line_layers) | {"Sezioni", QUOTE_LAYER, PATCH_LAYER, "Marker", STONES_LAYER}
+        modelled = set(self.line_layers) | {"Sezioni", QUOTE_LAYER, PATCH_LAYER, "Marker", STONES_LAYER, PROBE_LAYER}
         others = []
         for name in order:
             lay = v.layers[name]
@@ -6296,6 +6444,8 @@ class MainWindow(QMainWindow):
             self._draw_unit(u, i)
         for i, q in enumerate(self.quote):
             self._draw_quota(q, i)
+        for i, q in enumerate(self.probe_points):
+            self._draw_probe_point(q, i)
         self._draw_sections()
         for name, lines in self.line_layers.items():
             for coords, color, label, attrs, width in lines:

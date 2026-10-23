@@ -5,11 +5,12 @@ from __future__ import annotations
 import sys
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
+from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QLabel, QPushButton, QScrollArea,
                                QSpinBox, QVBoxLayout, QWidget)
 
 from ..engine.multispectral import INDICES
 from ..engine.thermal import PALETTE_NAMES as THERMAL_PALETTES
+from .flow_layout import FlowLayout
 from .i18n import tr
 from .icons import icon
 from .image_views import INDEX_PALETTES
@@ -18,11 +19,16 @@ FALSE_COLOUR = ("NIR", "Red", "Green")
 TRUE_COLOUR = ("Red", "Green", "Blue")
 
 
+SPECTRAL_STEPS = ("panel", "reflectance", "index", "zoning")
+THERMAL_STEPS = ("thermal_params", "thermal", "anomaly", "thermal_export")
+
+
 class MultispectralPane(QWidget):
-    """The steps of a multispectral or thermal camera, each with its state and its button; the
-    buttons of a step that cannot run yet are disabled, the state says what is missing. The steps
-    of the spectral bands (panel, reflectance, indices, zoning) show when the captures have them,
-    those of the temperatures when they have a thermal band; the numbers follow what shows."""
+    """The steps of a multispectral camera (``mode="spectral"``: panel, reflectance, indices,
+    zoning) or of a thermal one (``mode="thermal"``: the measure's parameters, the orthomosaic in
+    degrees, the anomalies, the exports), after the steps they share (captures, alignment,
+    surface); each step with its state and its buttons, the buttons of a step that cannot run yet
+    disabled, the state saying what is missing. The window has one of each, in two tabs."""
 
     add_requested = Signal()
     align_requested = Signal()
@@ -38,10 +44,13 @@ class MultispectralPane(QWidget):
     thermal_build_requested = Signal()
     thermal_show_requested = Signal(str, object)  # palette, (low, high) in degrees or None for the automatic range
     anomaly_requested = Signal(float)  # radius in metres
-    thermal_export_requested = Signal(str)  # tif, tif16, csv
+    thermal_export_requested = Signal(str)  # tif, tif16, csv, flir
+    probe_requested = Signal()  # the Punto di misura tool on the raster view
+    probe_export_requested = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, mode: str = "spectral"):
         super().__init__(parent)
+        self.mode = mode
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
@@ -53,34 +62,43 @@ class MultispectralPane(QWidget):
         lay = QVBoxLayout(body)
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(4)
-        intro = QLabel(tr("Riprese di una camera multispettrale o termica: i passi in ordine. Ogni passo dice cosa gli manca."))
+        intro = QLabel(tr("Riprese di una termocamera (R-JPEG DJI, JPEG radiometrici FLIR, TIFF LWIR o in gradi), sole o "
+                          "con le foto visibili dello stesso volo: i passi in ordine. Ogni passo dice cosa gli manca.")
+                       if mode == "thermal" else
+                       tr("Riprese di una camera multispettrale: i passi in ordine. Ogni passo dice cosa gli manca."))
         intro.setWordWrap(True)
         lay.addWidget(intro)
         self.states: dict[str, QLabel] = {}
         self.rows: dict[str, tuple] = {}  # key: (title label, title, widgets, state label)
         self.order: list[str] = []
-        grid = QGridLayout()
-        grid.setColumnStretch(1, 1)
-        lay.addLayout(grid)
 
         def step(row: int, key: str, title: str, widgets: list[QWidget]) -> None:
+            # one under the other - the title, the commands (on more lines when the dock is narrow), what
+            # the step has - so that nothing ends up beyond the right edge of a narrow dock
             t = QLabel(f"<b>{row + 1}. {title}</b>")
-            grid.addWidget(t, row * 2, 0, 1, 2)
-            bar = QHBoxLayout()
+            t.setWordWrap(True)
+            lay.addWidget(t)
+            holder = QWidget()
+            bar = FlowLayout(holder)
             for w in widgets:
+                if isinstance(w, QComboBox):  # the longest item does not set the width of the pane
+                    w.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+                    w.setMinimumContentsLength(12)
                 bar.addWidget(w)
-            bar.addStretch(1)
-            grid.addLayout(bar, row * 2 + 1, 0)
+            lay.addWidget(holder)
             s = QLabel("")
             s.setWordWrap(True)
             s.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            grid.addWidget(s, row * 2 + 1, 1)
+            s.setContentsMargins(0, 0, 0, 8)
+            lay.addWidget(s)
             self.states[key] = s
-            self.rows[key] = (t, title, list(widgets), s)
+            self.rows[key] = (t, title, [holder, *widgets], s)
             self.order.append(key)
 
         self.b_add = QPushButton(icon("photos"), tr("Aggiungi riprese..."))
-        self.b_add.setToolTip(tr("Una cartella con un file per banda di ogni scatto (MicaSense, DJI, Sequoia)"))
+        self.b_add.setToolTip(tr("La cartella dei fotogrammi termici e, se ci sono, quella delle foto visibili dello stesso volo")
+                              if mode == "thermal" else
+                              tr("Una cartella con un file per banda di ogni scatto (MicaSense, DJI, Sequoia)"))
         step(0, "captures", tr("Riprese"), [self.b_add])
         self.b_align = QPushButton(icon("align"), tr("Allinea foto..."))
         step(1, "alignment", tr("Allineamento (la banda di riferimento come foto)"), [self.b_align])
@@ -153,6 +171,7 @@ class MultispectralPane(QWidget):
         self.c_texport.addItem(tr("GeoTIFF in gradi Celsius (32 bit)"), "tif")
         self.c_texport.addItem(tr("GeoTIFF in centikelvin (16 bit)"), "tif16")
         self.c_texport.addItem(tr("CSV (x, y, temperatura)"), "csv")
+        self.c_texport.addItem(tr("JPEG radiometrici FLIR (tasselli con world file)"), "flir")
         self.b_texport = QPushButton(icon("export"), tr("Esporta..."))
         step(10, "thermal_export", tr("Esporta le temperature (restano in gradi)"), [self.c_texport, self.b_texport])
         self.b_tparams.clicked.connect(self.thermal_params_requested)
@@ -163,6 +182,15 @@ class MultispectralPane(QWidget):
         self.b_tauto.clicked.connect(self._auto_range)
         self.b_anomaly.clicked.connect(lambda: self.anomaly_requested.emit(float(self.s_radius.value())))
         self.b_texport.clicked.connect(lambda: self.thermal_export_requested.emit(str(self.c_texport.currentData())))
+        # measuring points, in both tabs: the values of every product at a clicked point
+        self.b_probe = QPushButton(icon("probe"), tr("Punto di misura"))
+        self.b_probe.setToolTip(tr("Clic sull'ortofoto, termica o multispettrale: un punto con coordinate, quota del DEM, "
+                                   "temperatura, bande e indici letti lì a piena risoluzione"))
+        self.b_probe_export = QPushButton(icon("export"), tr("Esporta punti..."))
+        self.b_probe_export.setToolTip(tr("GeoPackage, CSV o GeoJSON; in QGIS arrivano anche con gli altri layer"))
+        step(11, "points", tr("Punti di misura"), [self.b_probe, self.b_probe_export])
+        self.b_probe.clicked.connect(self.probe_requested)
+        self.b_probe_export.clicked.connect(self.probe_export_requested)
         self._auto_limits: tuple[float, float] | None = None
         lay.addStretch(1)
         self.b_add.clicked.connect(self.add_requested)
@@ -266,9 +294,8 @@ class MultispectralPane(QWidget):
         captures = int(ms.get("captures") or 0)
         bands = list(ms.get("bands") or [])
         thermal_band = "LWIR" in bands
-        spectral = any(b not in ("Visible", "LWIR") for b in bands) or not bands
-        visible = [k for k in self.order if (k not in ("panel", "reflectance", "index", "zoning") or spectral)
-                   and (not k.startswith(("thermal", "anomaly")) or thermal_band)]
+        hidden = SPECTRAL_STEPS if self.mode == "thermal" else THERMAL_STEPS
+        visible = [k for k in self.order if k not in hidden]
         for k in self.order:
             title_label, title, widgets, state = self.rows[k]
             on = k in visible
@@ -276,8 +303,8 @@ class MultispectralPane(QWidget):
                 w.setVisible(on)
             if on:
                 title_label.setText(f"<b>{visible.index(k) + 1}. {title}</b>")
-        if thermal_band:
-            self._thermal_state(chunk)
+        if self.mode == "thermal":
+            self._thermal_state(chunk, thermal_band)
         aligned = len(chunk.aligned_cameras) if chunk is not None else 0
         cams = len(chunk.cameras) if chunk is not None else 0
         has_dem = bool(chunk is not None and chunk.dem_path is not None and chunk.dem_path.exists())
@@ -331,7 +358,13 @@ class MultispectralPane(QWidget):
         else:
             self.states["zoning"].setText(tr("Da fare dopo un indice: le classi come poligoni con classe, intervallo, media e area."))
 
-    def _thermal_state(self, chunk) -> None:
+    def set_points(self, n: int) -> None:
+        """How many measuring points the chunk has."""
+        self.b_probe_export.setEnabled(n > 0)
+        self.states["points"].setText(tr("{0} punti di misura (layer Punti di misura)", n) if n else
+                                      tr("Nessun punto: attiva lo strumento e clicca sull'ortofoto o sul DEM."))
+
+    def _thermal_state(self, chunk, thermal_band: bool = True) -> None:
         """The steps of the temperatures: the measure's parameters and who decodes the frames, the
         orthomosaic in degrees with its range, the anomalies, the exports."""
         from ..engine import thermal
@@ -346,7 +379,7 @@ class MultispectralPane(QWidget):
                                                  f"{p['humidity']:g}", distance, decoder))
         has_dem = bool(chunk is not None and chunk.dem_path is not None and chunk.dem_path.exists())
         path = thermal.thermal_path(chunk) if chunk is not None else None
-        self.b_thermal.setEnabled(has_dem)
+        self.b_thermal.setEnabled(has_dem and thermal_band)
         for w in (self.b_tshow, self.c_tpalette, self.s_tlow, self.s_thigh, self.b_tauto, self.b_anomaly, self.s_radius,
                   self.b_texport, self.c_texport):
             w.setEnabled(path is not None)
@@ -360,10 +393,12 @@ class MultispectralPane(QWidget):
             if spread is not None:
                 text += tr("; scostamenti tra i fotogrammi tolti ({0} °C)", f"{spread:.2f}")
             self.states["thermal"].setText(text)
+        elif not thermal_band:
+            self.states["thermal"].setText(tr("Da fare dopo aver aggiunto i fotogrammi termici (passo 1) e costruito il DEM."))
         else:
             self.states["thermal"].setText(tr("Da fare dopo il DEM: le temperature di ogni fotogramma sull'ortofoto, in gradi."))
             self._auto_limits = None
         an = info.get("anomaly")
         self.states["anomaly"].setText(tr("Calcolate con raggio {0} m", f"{an['radius_m']:g}") if an else
                                        tr("Da fare dopo l'ortofoto termica."))
-        self.states["thermal_export"].setText(tr("GeoTIFF in gradi o centikelvin con i parametri nei tag, o CSV: QGIS e gli altri programmi leggono le temperature."))
+        self.states["thermal_export"].setText(tr("GeoTIFF in gradi o centikelvin con i parametri nei tag, CSV, o JPEG radiometrici FLIR: QGIS, i programmi per le termocamere FLIR e gli altri leggono le temperature."))
