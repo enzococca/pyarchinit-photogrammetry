@@ -34,7 +34,11 @@ jobs:
           PPG_RENDERER: software
         run: |
           set +e
-          python -m pytest -q --tb=line -rfE 2>&1 | tee pytest.log
+          # a native crash (exit 139, seen on 3.12 with the native core) must leave its traceback in the log:
+          # Python's faulthandler from the start, and pytest capturing sys.stdout/err only (with the
+          # descriptors captured, the dump went into pytest's temporary file and was lost with the process)
+          export GLOG_minloglevel=2
+          python -X faulthandler -m pytest -q --tb=line -rfE --capture=sys -p no:faulthandler 2>&1 | tee pytest.log
           status=${PIPESTATUS[0]}
           # failures as annotations, readable on the run page
           grep -E "^(FAILED|ERROR) |^/.*:[0-9]+: " pytest.log | head -10 | while IFS= read -r line; do
