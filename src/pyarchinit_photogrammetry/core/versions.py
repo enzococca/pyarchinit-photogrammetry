@@ -238,7 +238,7 @@ def dem_difference(chunk, vid: str, out: str | Path | None = None) -> Path:
         diff = np.where(np.isfinite(za) & np.isfinite(zb), za - zb, np.nan).astype("float32")
         profile = a.profile.copy()
     nodata = -32767.0
-    profile.update(dtype="float32", count=1, nodata=nodata)
+    profile.update(dtype="float32", count=1, nodata=nodata, BIGTIFF="IF_SAFER")
     with rasterio.open(out, "w", **profile) as dst:
         dst.write(np.where(np.isfinite(diff), diff, nodata).astype("float32"), 1)
     return out

@@ -138,7 +138,7 @@ def field_check(chunk: Chunk, min_photos: int = MIN_PHOTOS, resolution: float | 
         path = folder / "coverage.tif"
         with rasterio.open(path, "w", driver="GTiff", width=counts.shape[1], height=counts.shape[0], count=1,
                            dtype="int16", crs=None if crs_mod.is_local(chunk.crs) else chunk.crs, transform=transform,
-                           nodata=-1, compress="deflate") as dst:
+                           nodata=-1, compress="deflate", BIGTIFF="IF_SAFER") as dst:
             dst.write(np.clip(counts, -1, 32767).astype(np.int16), 1)
         chunk._set_product("coverage", path)
         res = abs(transform.a)

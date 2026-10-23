@@ -313,7 +313,7 @@ def _write_frame(path: Path, temp: np.ndarray, params: dict, source: str, decode
     path.parent.mkdir(parents=True, exist_ok=True)
     h, w = temp.shape
     with rasterio.open(path, "w", driver="GTiff", height=h, width=w, count=1, dtype="float32",
-                       nodata=float("nan"), compress="deflate") as dst:
+                       nodata=float("nan"), compress="deflate", BIGTIFF="IF_SAFER") as dst:
         dst.write(temp.astype(np.float32), 1)
         dst.set_band_description(1, "temperature (degrees Celsius)")
         dst.update_tags(units="degC", source=str(source), decoder=decoder,
@@ -1239,7 +1239,7 @@ def build_thermal(chunk: Chunk, resolution: float | None = None, balance: bool =
     with rasterio.open(part) as src:
         profile = src.profile.copy()
         t = src.read(1)
-    profile.update(count=1, dtype="float32", nodata=float("nan"))
+    profile.update(count=1, dtype="float32", nodata=float("nan"), BIGTIFF="IF_SAFER")
     with rasterio.open(final, "w", **profile) as dst:
         dst.write(t.astype(np.float32), 1)
         dst.set_band_description(1, "temperature (degrees Celsius)")
@@ -1287,7 +1287,7 @@ def anomalies(chunk: Chunk, radius_m: float = 2.0) -> Path:
     local = np.where(den > 1e-3, num / np.maximum(den, 1e-6), np.nan)
     out = np.where(ok, t - local, np.nan).astype(np.float32)
     target = src_path.with_name("thermal_anomaly.tif")
-    profile.update(count=1, dtype="float32", nodata=float("nan"))
+    profile.update(count=1, dtype="float32", nodata=float("nan"), BIGTIFF="IF_SAFER")
     with rasterio.open(target, "w", **profile) as dst:
         dst.write(out, 1)
         dst.set_band_description(1, f"temperature minus its surroundings within {radius_m:g} m (degrees)")
@@ -1315,6 +1315,7 @@ def difference(chunk: Chunk, other: Path, name: str = "thermal_difference") -> P
         reproject(b.read(1).astype(np.float32), tb, src_transform=b.transform, src_crs=b.crs or crs, dst_transform=tr,
                   dst_crs=crs, src_nodata=np.nan, dst_nodata=np.nan, resampling=Resampling.bilinear)
     out = mine.with_name(f"{name}.tif")
+    profile.update(BIGTIFF="IF_SAFER")
     with rasterio.open(out, "w", **profile) as dst:
         dst.write((ta - tb).astype(np.float32), 1)
         dst.update_tags(units="degC", minus=str(other))
@@ -1347,7 +1348,7 @@ def export(chunk: Chunk, path, fmt: str | None = None, source: Path | None = Non
         return path
     if fmt == "tif16":
         ck = np.where(np.isfinite(t), np.clip(np.round((t + 273.15) * 100.0), 1, 65535), 0).astype(np.uint16)
-        profile.update(dtype="uint16", nodata=0)
+        profile.update(dtype="uint16", nodata=0, BIGTIFF="IF_SAFER")
         with rasterio.open(path, "w", **profile) as dst:
             dst.write(ck, 1)
             dst.set_band_description(1, "temperature in centikelvin (degrees = value / 100 - 273.15)")

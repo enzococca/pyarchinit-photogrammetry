@@ -881,7 +881,8 @@ def build_reflectance(chunk: Chunk, bands: list[str] | None = None, resolution: 
     final = folder / "reflectance.tif"
     with rasterio.open(parts[0][1]) as first:
         profile = first.profile.copy()
-    profile.update(count=len(bands), dtype="float32", nodata=float("nan"))
+    # BigTIFF: a classic TIFF stops at 4 GB, past it the last bands of a large survey read as zeros
+    profile.update(count=len(bands), dtype="float32", nodata=float("nan"), BIGTIFF="IF_SAFER")
     with rasterio.open(final, "w", **profile) as dst:
         k = 1
         for group, path in parts:
@@ -950,7 +951,7 @@ def index_raster(chunk: Chunk, name: str, formula: str | None = None) -> Path:
         bands = {src.descriptions[i] or f"b{i + 1}": src.read(i + 1) for i in range(src.count)}
         profile = src.profile.copy()
     out = index_values(formula, bands)
-    profile.update(count=1, dtype="float32", nodata=float("nan"))
+    profile.update(count=1, dtype="float32", nodata=float("nan"), BIGTIFF="IF_SAFER")
     if not profile.get("tiled"):
         profile.pop("blockxsize", None)
         profile.pop("blockysize", None)
@@ -1054,7 +1055,7 @@ def export_zoning(chunk: Chunk, name: str, path, classes: int = 3, method: str =
     gpkg.write_table(path, "zone", "POLYGON", columns, polys, chunk.crs if chunk.crs != "LOCAL" else None, f"zone {name}")
     with rasterio.open(chunk.data_dir / "multispectral" / f"{name}_zone.tif", "w", driver="GTiff", height=cls.shape[0],
                        width=cls.shape[1], count=1, dtype="int32", nodata=0, transform=transform, crs=crs,
-                       compress="deflate") as dst:
+                       compress="deflate", BIGTIFF="IF_SAFER") as dst:
         dst.write(cls, 1)
     areas = {k: round(sum(a["area_m2"] for _, a in polys if a["classe"] == k), 2) for k in range(1, classes + 1)}
     summary = {"index": name, "classes": classes, "method": method, "breaks": [round(b, 4) for b in breaks],

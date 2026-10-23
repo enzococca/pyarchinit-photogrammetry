@@ -70,6 +70,33 @@ def _qt_garbage_between_tests():
 
 
 @pytest.fixture(autouse=True)
+def _geotiffs_may_pass_4_gb(monkeypatch):
+    """Every GeoTIFF the program writes asks for BIGTIFF: a classic TIFF stops at 4 GB, and with
+    compression GDAL's default (IF_NEEDED) never switches to BigTIFF, so writing goes on past the
+    limit without an error and what is left reads as zeros - the Red and RedEdge bands of the
+    reflectance of a survey of 547 captures (12187 x 17931 cells, five float bands). The writes
+    of the tests themselves and of other packages are not checked."""
+    import sys
+
+    import rasterio
+
+    import pyarchinit_photogrammetry
+
+    package = str(Path(pyarchinit_photogrammetry.__file__).parent)
+    real = rasterio.open
+
+    def open_(fp, mode="r", *args, **kwargs):
+        if mode in ("w", "w+") and str(kwargs.get("driver", "GTiff")).upper() in ("GTIFF", "COG"):
+            caller = sys._getframe(1).f_code.co_filename
+            if caller.startswith(package) and not any(str(k).upper() == "BIGTIFF" for k in kwargs):
+                raise AssertionError(f"GeoTIFF written without BIGTIFF ({caller}): {fp}")
+        return real(fp, mode, *args, **kwargs)
+
+    monkeypatch.setattr(rasterio, "open", open_)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _c_numbers():
     """As the application does after creating the QApplication (which takes the locale of the
     system): numbers in the C locale for the C/C++ libraries (IfcOpenShell's geometry)."""

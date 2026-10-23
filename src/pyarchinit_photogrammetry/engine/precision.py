@@ -314,7 +314,7 @@ def dem_precision(chunk: Chunk, max_side: int = 1024, progress: Progress | None 
     path = chunk.data_dir / "precision" / "dem_sigma_z.tif"
     path.parent.mkdir(parents=True, exist_ok=True)
     with rasterio.open(path, "w", driver="GTiff", width=w, height=h, count=1, dtype="float32", crs=crs,
-                       transform=transform, nodata=-9999.0, compress="deflate") as dst:
+                       transform=transform, nodata=-9999.0, compress="deflate", BIGTIFF="IF_SAFER") as dst:
         dst.write(out, 1)
     chunk._set_product("dem_precision", path)
     progress(1.0, f"Precision of the DEM: median sigma Z {np.median(out[valid]) * 1000:.1f} mm")
