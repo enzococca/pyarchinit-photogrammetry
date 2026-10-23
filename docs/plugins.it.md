@@ -140,6 +140,12 @@ prossimo avvio (`ppg plugin` elenca subito il suo comando).
 | `data_dir` | una cartella per i file del plugin |
 | `settings`, `save_settings()` | un dizionario conservato da una sessione all'altra |
 | `log` | un logger: i suoi messaggi vanno nel log del programma |
+| `request_polygon(on_finished, on_cancelled=None, hint="")` | dalla 1.3.2: l'utente disegna un poligono sulla vista 2D con lo strumento del programma (trascina un riquadro, oppure clic per i vertici e doppio clic o Invio; Backspace toglie l'ultimo vertice, Esc annulla); `on_finished(xy)` riceve un array `(N, 2)` nelle coordinate del chunk; `on_cancelled()` quando l'utente sceglie un altro strumento o arriva un'altra richiesta; `False` se non c'è niente su cui disegnare |
+| `request_line(...)`, `request_point(...)` | lo stesso per una linea di due o più vertici e per un punto (`(1, 2)`) |
+| `on_raster_loaded(callback)` | dalla 1.3.2: `callback()` ogni volta che la vista 2D mostra un altro raster, una cornice vuota o niente: lì si ridisegnano i layer e le sovrapposizioni del plugin (si scollega da sola quando il plugin viene tolto) |
+| `show_frame(bounds, resolution, text="")` | dalla 1.3.2: una cornice vuota sulla vista 2D (`xmin, ymin, xmax, ymax` nelle coordinate del chunk, metri per pixel) su cui disegnare quando il chunk non ha ortofoto né DEM |
+| `mark_modified()` | dalla 1.3.2: il progetto ha modifiche da salvare (`chunk.meta` o i file del plugin sono cambiati) |
+| `call_in_gui(function, *args)` | dalla 1.3.2: `function(*args)` nel thread dell'interfaccia, dalla funzione data a `run` o da un esportatore |
 
 `progress(fraction, message)` riporta un valore tra 0 e 1 e solleva `Cancelled` quando l'utente annulla:
 chiamala spesso nei cicli lunghi. I widget si toccano solo nelle callback delle azioni e in `done`, mai
@@ -150,7 +156,8 @@ ha preso oltre alle sue registrazioni (file aperti, timer).
 
 `Plugin.api` è l'API dei plugin per cui il plugin è stato scritto (`pyarchinit_photogrammetry.plugins.API_VERSION`,
 ora 1): un programma con un'API più vecchia rifiuta il plugin con un messaggio. L'indice dà anche la
-versione più vecchia del programma con cui un plugin funziona (`min_app`).
+versione più vecchia del programma con cui un plugin funziona (`min_app`): un plugin che usa i metodi
+indicati "dalla 1.3.2" chiede `min_app` 1.3.2.
 
 ## Pubblicare un plugin
 

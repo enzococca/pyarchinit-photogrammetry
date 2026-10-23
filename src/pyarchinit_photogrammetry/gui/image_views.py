@@ -391,8 +391,10 @@ class RasterView(_ZoomView):
     file) so that it opens at once; zooming in further, the visible part is read again from the
     file at the resolution of the screen, up to the full one (``detail``), in a thread."""
 
-    DRAW_MODES = ("polygon", "line", "measure", "quota", "marker", "crop", "patch", "dem_edit", "probe")
-    AREA_MODES = ("crop", "patch", "dem_edit", "area", "chart")  # drag a box or click a polygon
+    DRAW_MODES = ("polygon", "line", "measure", "quota", "marker", "crop", "patch", "dem_edit", "probe",
+                  "req_polygon", "req_line", "req_point")
+    AREA_MODES = ("crop", "patch", "dem_edit", "area", "chart", "req_polygon")  # drag a box or click a polygon
+    REQUEST_MODES = ("req_polygon", "req_line", "req_point")  # the drawing lent to a plugin (request_geometry)
     SAM_TOOLS = ("tap", "box", "area")
 
     mouse_world = Signal(float, float, object)  # x, y, z or None
@@ -410,6 +412,9 @@ class RasterView(_ZoomView):
     quota_clicked = Signal(float, float)  # spot height at world x, y
     marker_clicked = Signal(float, float)  # a marker at world x, y (the height from the DEM)
     probe_clicked = Signal(float, float)  # a measuring point at world x, y (elevation, temperature, bands)
+    request_finished = Signal(object)  # (N,2) world XY drawn for a request: polygon, line or one point
+    request_cancelled = Signal()  # Esc during a request
+    raster_loaded = Signal()  # a raster, an empty frame or nothing is now shown: layers must be drawn again
     photos_at_point = Signal(float, float)  # filter the photos that see world x, y
     photos_in_area_requested = Signal()  # filter the photos that frame the selected polygon
     sam_click = Signal(float, float, int, bool)  # x, y, label (1 add / 0 remove), True = a new object
@@ -521,6 +526,33 @@ class RasterView(_ZoomView):
         self.tr = None
         if text:
             self.scene().addText(text)
+        self.raster_loaded.emit()
+
+    def show_frame(self, bounds, resolution: float, text: str = "") -> None:
+        """An empty frame in world coordinates instead of a raster (``bounds`` = xmin, ymin, xmax,
+        ymax; ``resolution`` = metres per pixel of the view): layers and overlays of plugins can be
+        drawn on it with no orthophoto or DEM (a geophysical grid before the survey has one)."""
+        from rasterio.transform import from_origin
+
+        x0, y0, x1, y1 = (float(v) for v in bounds)
+        if not (x1 > x0 and y1 > y0) or not resolution > 0:
+            raise ValueError("an empty frame needs xmin < xmax, ymin < ymax and a positive resolution")
+        self._empty_scene()
+        w = max(1, int(np.ceil((x1 - x0) / resolution)))
+        h = max(1, int(np.ceil((y1 - y0) / resolution)))
+        self.path, self.kind, self.z = None, "frame", None
+        self.tr = from_origin(x0, y1, resolution, resolution)
+        self._src_size = self._base_size = (w, h)
+        self._dem_lookup = None
+        self.pixmap_item = None
+        frame = self.scene().addRect(QRectF(0, 0, w, h), self._pen("#9aa0a6", 1))
+        frame.setZValue(-2)
+        if text:
+            label = self.scene().addText(text)
+            label.setPos(4, 4)
+        self.setSceneRect(QRectF(0, 0, w, h))
+        self.fit()
+        self.raster_loaded.emit()
 
     def load(self, path: str | Path, kind: str, max_side: int = 6000, bands=None) -> None:
         import rasterio
@@ -589,6 +621,7 @@ class RasterView(_ZoomView):
         self.setSceneRect(QRectF(0, 0, w, h))
         self.fit()
         self._view_changed()
+        self.raster_loaded.emit()
 
     # ----------------------------------------------------------- full-resolution detail
     def _view_changed(self, *_args) -> None:
@@ -1201,6 +1234,23 @@ class RasterView(_ZoomView):
             self.clear_selection()
 
     def keyPressEvent(self, ev) -> None:
+        if self.mode in self.REQUEST_MODES:
+            if ev.key() == Qt.Key.Key_Escape:
+                self.set_mode(self.mode)
+                self.request_cancelled.emit()
+                return
+            if ev.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self._finish_request()
+                return
+            if ev.key() == Qt.Key.Key_Backspace and self._clicks:  # the last vertex away
+                self._clicks.pop()
+                self._click_xy.pop()
+                if self._clicks:
+                    self._update_rubber()
+                elif self._rubber is not None:
+                    self.scene().removeItem(self._rubber)
+                    self._rubber = None
+                return
         if self.mode == "sam":
             if ev.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 self.sam_key.emit("accept")
@@ -1372,6 +1422,9 @@ class RasterView(_ZoomView):
         self._clicks.append(sp)
         self._click_xy.append(xy)
         self._update_rubber()
+        if self.mode == "req_point":
+            self._finish_request()
+            return
         if self.mode in ("line", "measure") and len(self._clicks) == 2:
             a, b = (np.array(p) for p in self._click_xy)
             if self.mode == "line":
@@ -1388,6 +1441,9 @@ class RasterView(_ZoomView):
     def mouseDoubleClickEvent(self, ev) -> None:
         if self.mode == "sam":  # a second press: nothing more (Enter accepts the mask)
             return
+        if self.mode == "req_line":
+            self._finish_request()
+            return
         if self.mode in ("polygon", *self.AREA_MODES) and len(self._click_xy) >= 3:
             xy = np.array(self._click_xy)
             mode = self.mode
@@ -1397,8 +1453,18 @@ class RasterView(_ZoomView):
             super().mouseDoubleClickEvent(ev)
 
     def _area_signal(self, mode: str):
-        return {"patch": self.patch_finished, "dem_edit": self.dem_edit_finished,
-                "area": self.area_finished, "chart": self.chart_finished}.get(mode, self.crop_finished)
+        return {"patch": self.patch_finished, "dem_edit": self.dem_edit_finished, "area": self.area_finished,
+                "chart": self.chart_finished, "req_polygon": self.request_finished}.get(mode, self.crop_finished)
+
+    def _finish_request(self) -> None:
+        """The geometry of a request, when it has enough vertices (polygon 3, line 2, point 1)."""
+        need = {"req_polygon": 3, "req_line": 2, "req_point": 1}[self.mode]
+        xy = [p for i, p in enumerate(self._click_xy) if i == 0 or not np.allclose(p, self._click_xy[i - 1])]
+        if len(xy) < need:
+            return
+        mode = self.mode
+        self.set_mode(mode)
+        self.request_finished.emit(np.array(xy, float))
 
 
 class PhotoView(_ZoomView):

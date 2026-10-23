@@ -187,6 +187,8 @@ class Manager:
                     info.plugin.deactivate()
                 except Exception as exc:
                     log.warning("plugin %s: deactivate failed: %s", info.name, exc)
+            if info.context is not None:
+                info.context.release()
             info.active, info.plugin, info.context = False, None, None
 
     def remove(self, name: str) -> None:
@@ -199,6 +201,8 @@ class Manager:
                 info.plugin.deactivate()
             except Exception:
                 pass
+        if info.context is not None:
+            info.context.release()
         shutil.rmtree(info.location)
         self.plugins = [i for i in self.plugins if i.name != name]
 

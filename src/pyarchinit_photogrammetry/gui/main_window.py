@@ -11,7 +11,7 @@ import traceback
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QObject, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QDockWidget, QFileDialog, QFrame,
                                QInputDialog, QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
@@ -74,6 +74,24 @@ def _compass(deg: float) -> str:
 def _it(value: float, decimals: int = 0) -> str:
     """A number as the interface writes it: 1.234,56 in Italian, 1,234.56 in English."""
     return number(value, decimals)
+
+
+class _GuiCalls(QObject):
+    """Runs functions in the interface thread: emitted from any thread, received there (queued)."""
+
+    call = Signal(object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.call.connect(self._run, Qt.ConnectionType.QueuedConnection)
+
+    @staticmethod
+    def _run(job) -> None:
+        function, args, kwargs = job
+        try:
+            function(*args, **kwargs)
+        except Exception:  # a plugin's function never stops the window
+            log.exception("function run in the interface thread failed")
 
 
 class _StatusBar(QStatusBar):
@@ -193,6 +211,10 @@ class MainWindow(QMainWindow):
         self.ortho_view.area_requested.connect(self._area_selected)
         self.ortho_view.patch_requested.connect(self.patch_with_selection)
         self.ortho_view.line_finished.connect(self._section_drawn)
+        self._request = None  # the drawing lent by request_geometry: (on_finished, on_cancelled)
+        self._gui_calls = _GuiCalls(self)
+        self.ortho_view.request_finished.connect(self._request_drawn)
+        self.ortho_view.request_cancelled.connect(lambda: self._end_request(cancelled=True))
         self.ortho_view.measured.connect(lambda t: (self.statusBar().showMessage(t, 30000),
                                                     self.log_pane.info(t)))
         self.ortho_view.quota_clicked.connect(self._quota_clicked)
@@ -567,6 +589,7 @@ class MainWindow(QMainWindow):
         self._act(km, tr("Rimuovi tutte le maschere"), lambda: self.masks_remove(selected=False))
         dm = m.addMenu(icon("polygon"), tr("Disegno su ortofoto"))
         self.draw_group = QActionGroup(self)
+        self.draw_group.triggered.connect(lambda _a: self._end_request(cancelled=True))
         self.draw_actions: dict[str, QAction] = {}
         for mode, label, ic in (("pan", "Sposta / interroga", "pan"), ("select", "Seleziona", "select"),
                                 ("polygon", "Disegna unita' stratigrafica", "polygon"),
@@ -1085,6 +1108,75 @@ class MainWindow(QMainWindow):
         self.setWindowModified(flag)
         if flag and self.history is not None and not self._task_done:
             self.history.record()
+
+    def mark_modified(self) -> None:
+        """The project has changes to save (a plugin changed ``chunk.meta`` or its files): the title
+        shows it, *Salva* and the question at closing take it into account, Modifica > Annulla can
+        take it back."""
+        self._dirty(True)
+
+    def call_in_gui(self, function, *args, **kwargs) -> None:
+        """``function(*args, **kwargs)`` in the interface thread, soon: from a background step or an
+        exporter, for whatever touches the window."""
+        self._gui_calls.call.emit((function, args, kwargs))
+
+    # ---------------------------------------------------------------- drawing lent to plugins
+    def request_geometry(self, kind: str, on_finished, on_cancelled=None, hint: str = "") -> bool:
+        """Lend the drawing of the 2D view: ``kind`` "polygon" (drag a box, or click the vertices and
+        double click or Enter), "line" (click the vertices, double click or Enter to end) or "point"
+        (one click). ``on_finished(xy)`` gets the vertices, ``(N, 2)`` in the coordinates of the chunk,
+        in the interface thread; ``on_cancelled()`` when Esc, another tool of the drawing bar or another
+        request ends it. Backspace drops the last vertex. Returns False when there is nothing to draw
+        on (no orthophoto, DEM or frame)."""
+        if kind not in ("polygon", "line", "point"):
+            raise ValueError("kind: 'polygon', 'line' or 'point'")
+        self._end_request(cancelled=True)
+        view = self.ortho_view
+        if view.tr is None and self.chunk is not None and (self.chunk.orthomosaic_path or self.chunk.dem_path):
+            self._show_raster("ortho" if self.chunk.orthomosaic_path else "dem")
+        if view.tr is None:
+            self._warn("Costruisci prima l'ortofoto o il DEM.")
+            if on_cancelled is not None:
+                on_cancelled()
+            return False
+        self._request = (on_finished, on_cancelled)
+        for action in self.draw_group.actions():  # no tool of the bar is the one drawing now
+            action.setChecked(False)
+        view.set_mode("req_" + kind)
+        self.show_view(view)
+        default = {"polygon": "Trascina un riquadro, oppure clic per i vertici e doppio clic o Invio per chiudere; "
+                              "Esc annulla",
+                   "line": "Clic per i vertici, doppio clic o Invio per finire; Backspace toglie l'ultimo, Esc annulla",
+                   "point": "Clic sul punto; Esc annulla"}[kind]
+        self.statusBar().showMessage(hint or tr(default), 0)
+        return True
+
+    def _request_drawn(self, xy) -> None:
+        request, self._request = self._request, None
+        self.ortho_view.set_mode("pan")
+        self.draw_actions["pan"].setChecked(True)
+        self.statusBar().clearMessage()
+        if request is not None:
+            try:
+                request[0](np.asarray(xy, float))
+            except Exception as exc:
+                log.exception("the function of a drawing request failed")
+                self._warn(tr("Il disegno non e' stato accettato: {0}", str(exc)))
+
+    def _end_request(self, cancelled: bool = False) -> None:
+        """A pending request ends (another tool, another request, Esc): its ``on_cancelled``."""
+        request, self._request = self._request, None
+        if request is None:
+            return
+        if self.ortho_view.mode in self.ortho_view.REQUEST_MODES:
+            self.ortho_view.set_mode("pan")
+            self.draw_actions["pan"].setChecked(True)
+        self.statusBar().clearMessage()
+        if cancelled and request[1] is not None:
+            try:
+                request[1]()
+            except Exception:
+                log.exception("the cancel function of a drawing request failed")
 
     def _update_title(self) -> None:
         name = self.doc.path.name if self.doc.path else tr("senza nome")

@@ -382,3 +382,87 @@ def test_help_of_a_plugin_command_goes_to_the_plugin():
     assert runner.invoke(cli.app, ["plugin", "--help"]).exit_code == 0  # the commands of the plugins
     r = runner.invoke(cli.app, ["plugin", "nothing", "--help"])
     assert r.exit_code == 2 and "no plugin gives the command" in r.output
+
+
+def test_plugins_borrow_the_drawing_and_follow_the_view(tmp_path, qapp):
+    """The window lends its drawing to a plugin (a polygon, a line, a point), tells it when the 2D
+    view shows another raster, gives it an empty frame to draw on, marks the project modified and
+    runs its functions in the interface thread."""
+    import threading
+
+    import numpy as np
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.gui import main_window as mw
+    from pyarchinit_photogrammetry.plugins.api import Context
+
+    doc = ppg.Document()
+    doc.add_chunk("vuoto")
+    doc.save(tmp_path / "progetto.ppg")
+    w = mw.MainWindow(doc, autoconnect=False, check_updates=False)
+    w.resize(1200, 800)
+    w.show()
+    v = w.ortho_view
+    context = Context("prova", tmp_path / "dati", w)
+    loaded = []
+    context.on_raster_loaded(lambda: loaded.append(v.kind))
+    try:
+        context.show_frame((1000.0, 2000.0, 1100.0, 2050.0), 0.1, "griglia")  # no orthophoto or DEM: a frame
+        qapp.processEvents()
+        assert loaded == ["frame"] and v.tr is not None
+
+        def at(x, y):
+            return v.mapFromScene(v.scene_pt(x, y))
+
+        def click(x, y):
+            QTest.mouseClick(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, at(x, y))
+
+        got, cancelled = [], []
+        assert context.request_polygon(got.append, lambda: cancelled.append("poligono"))
+        assert v.mode == "req_polygon" and not any(a.isChecked() for a in w.draw_group.actions())
+        for x, y in ((1010, 2010), (1060, 2010), (1040, 2040)):
+            click(x, y)
+        QTest.mouseDClick(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, at(1040, 2040))
+        assert len(got) == 1 and got[0].shape[1] == 2 and len(got[0]) >= 3
+        assert np.allclose(got[0][:3], [[1010, 2010], [1060, 2010], [1040, 2040]], atol=0.5)
+        assert v.mode == "pan" and w.draw_actions["pan"].isChecked()
+        assert context.request_line(got.append)  # two vertices, Enter ends; Backspace drops the last
+        for x, y in ((1010, 2005), (1090, 2045), (1095, 2045)):
+            click(x, y)
+        QTest.keyClick(v, Qt.Key.Key_Backspace)
+        QTest.keyClick(v, Qt.Key.Key_Return)
+        assert np.allclose(got[1], [[1010, 2005], [1090, 2045]], atol=0.5)
+        assert context.request_point(got.append)
+        click(1050, 2025)
+        assert got[2].shape == (1, 2) and np.allclose(got[2], [[1050, 2025]], atol=0.5)
+        # another tool of the drawing bar, Esc and another request end a request
+        context.request_polygon(got.append, lambda: cancelled.append("strumento"))
+        w.draw_actions["measure"].trigger()
+        assert cancelled == ["strumento"] and v.mode == "measure"
+        context.request_line(got.append, lambda: cancelled.append("esc"))
+        click(1010, 2010)
+        QTest.keyClick(v, Qt.Key.Key_Escape)
+        assert cancelled[-1] == "esc" and v.mode == "pan"
+        context.request_point(got.append, lambda: cancelled.append("primo"))
+        context.request_point(got.append, lambda: cancelled.append("secondo"))
+        assert cancelled[-1] == "primo" and len(got) == 3
+        # the project modified; a function from a background thread run in the interface thread
+        w.setWindowModified(False)
+        context.mark_modified()
+        assert w.isWindowModified()
+        ran = []
+        t = threading.Thread(target=lambda: context.call_in_gui(
+            lambda value: ran.append((value, threading.current_thread() is threading.main_thread())), 7))
+        t.start()
+        t.join()
+        qapp.processEvents()
+        assert ran == [(7, True)]
+        # a plugin that goes away is no longer told
+        context.release()
+        context.show_frame((0.0, 0.0, 10.0, 10.0), 0.05)
+        assert loaded == ["frame"]
+    finally:
+        w.setWindowModified(False)
+        w.close()

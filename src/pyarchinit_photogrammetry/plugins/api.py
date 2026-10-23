@@ -77,6 +77,7 @@ class Contributions:
     actions: list = field(default_factory=list)
     commands: dict = field(default_factory=dict)
     exporters: list = field(default_factory=list)
+    connections: list = field(default_factory=list)  # (signal, slot) disconnected when the plugin goes away
 
 
 class Context:
@@ -153,6 +154,75 @@ class Context:
             method = getattr(window, name, None)
             if method is not None:
                 method()
+
+    # ------------------------------------------------------------------ the window (since 1.3.2)
+    def request_polygon(self, on_finished: Callable, on_cancelled: Callable | None = None, hint: str = "") -> bool:
+        """Let the user draw a polygon on the 2D view with the program's own tool (drag a box, or click
+        the vertices and double click or Enter; Backspace drops the last vertex, Esc cancels):
+        ``on_finished(xy)`` gets the vertices, an ``(N, 2)`` array in the coordinates of the chunk, in the
+        interface thread; ``on_cancelled()`` when the user picks another tool or another request comes.
+        ``hint``: the text of the status bar. False (and ``on_cancelled``) when there is nothing to draw
+        on; in the command line there is no drawing (``RuntimeError``)."""
+        return self._request("polygon", on_finished, on_cancelled, hint)
+
+    def request_line(self, on_finished: Callable, on_cancelled: Callable | None = None, hint: str = "") -> bool:
+        """As :meth:`request_polygon` for a line of two or more vertices (double click or Enter ends)."""
+        return self._request("line", on_finished, on_cancelled, hint)
+
+    def request_point(self, on_finished: Callable, on_cancelled: Callable | None = None, hint: str = "") -> bool:
+        """As :meth:`request_polygon` for one point: ``on_finished`` gets a ``(1, 2)`` array."""
+        return self._request("point", on_finished, on_cancelled, hint)
+
+    def _request(self, kind, on_finished, on_cancelled, hint) -> bool:
+        if self.window is None:
+            raise RuntimeError("drawing on the view needs the window: not in the command line")
+        return self.window.request_geometry(kind, on_finished, on_cancelled, hint)
+
+    def on_raster_loaded(self, callback: Callable[[], object]) -> None:
+        """``callback()`` each time the 2D view shows another raster, an empty frame or nothing: the
+        layers and overlays of a plugin are gone with the old one and are drawn again there.
+        Disconnected by itself when the plugin is disabled. Nothing in the command line."""
+        view = getattr(self.window, "ortho_view", None)
+        if view is None:
+            return
+        view.raster_loaded.connect(callback)
+        self.contributions.connections.append((view.raster_loaded, callback))
+
+    def show_frame(self, bounds, resolution: float, text: str = "") -> None:
+        """An empty frame on the 2D view (``bounds`` = xmin, ymin, xmax, ymax in the coordinates of the
+        chunk, ``resolution`` metres per pixel of the view) when the chunk has no orthophoto or DEM to
+        draw on: then layers and overlays can be added as usual."""
+        view = getattr(self.window, "ortho_view", None)
+        if view is None:
+            raise RuntimeError("the 2D view needs the window: not in the command line")
+        view.show_frame(bounds, resolution, text)
+
+    def mark_modified(self) -> None:
+        """The project has changes to save (``chunk.meta`` or files of the plugin changed): the window
+        shows it and asks to save at closing. Nothing in the command line, where the plugin saves."""
+        method = getattr(self.window, "mark_modified", None)
+        if method is not None:
+            method()
+
+    def call_in_gui(self, function: Callable, *args, **kwargs) -> None:
+        """``function(*args, **kwargs)`` in the interface thread, soon: from the function given to
+        :meth:`run` or from an exporter, for anything that touches the window. At once in the command
+        line."""
+        method = getattr(self.window, "call_in_gui", None)
+        if method is None:
+            function(*args, **kwargs)
+        else:
+            method(function, *args, **kwargs)
+
+    def release(self) -> None:
+        """What the plugin connected through the context, disconnected (the manager calls it after
+        :meth:`Plugin.deactivate`)."""
+        for signal, slot in self.contributions.connections:
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+        self.contributions.connections.clear()
 
     def run(self, title: str, function: Callable, done: Callable | None = None) -> object:
         """``function(progress)`` with a progress bar: in the background in the window (``done(result)``
