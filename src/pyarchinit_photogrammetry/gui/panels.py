@@ -271,6 +271,20 @@ class WorkspaceTree(QTreeWidget):
                         it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, f"ms:index:{iname}"))
                         it.setToolTip(0, info.get("formula") or "")
                         node.addChild(it)
+                th_info = ch.meta.get("thermal") or {}
+                if th_info.get("file") and (ch.data_dir / th_info["file"]).exists():
+                    st = th_info.get("stats") or {}
+                    it = QTreeWidgetItem([tr("Ortofoto termica  ({0} - {1} °C)", f"{st.get('p2', 0):.1f}", f"{st.get('p98', 0):.1f}")])
+                    it.setIcon(0, icon("ortho"))
+                    it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "ms:thermal"))
+                    it.setToolTip(0, tr("Doppio clic per vederla; le temperature restano in gradi nel GeoTIFF"))
+                    node.addChild(it)
+                    an = th_info.get("anomaly") or {}
+                    if an.get("file") and (ch.data_dir / an["file"]).exists():
+                        it = QTreeWidgetItem([tr("Anomalie termiche  (raggio {0} m)", f"{an.get('radius_m', 0):g}")])
+                        it.setIcon(0, icon("index"))
+                        it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "ms:thermal_anomaly"))
+                        node.addChild(it)
                 for zname, z in (ms.get("zoning") or {}).items():
                     if z.get("raster") and (ch.data_dir / z["raster"]).exists():
                         it = QTreeWidgetItem([tr("Zone {0}  ({1} classi, {2} poligoni)", zname, z.get("classes"),

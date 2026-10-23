@@ -1,0 +1,1091 @@
+"""Thermal cameras: the temperature of every pixel from the radiometric images, the thermal frame
+of a capture registered onto its visible photo, the temperature orthomosaic in degrees Celsius
+that stays radiometric through every export.
+
+A drone thermal camera (DJI Mavic 2 Enterprise Advanced, M30T, Mavic 3 Thermal, H20T; MicaSense
+Altum's LWIR band) shoots a visible photo and a thermal frame at the same moment: ``DJI_0833_W.JPG``
+and ``DJI_0833_T.JPG``. The visible photo - 48 megapixels, full of texture - is aligned and
+reconstructed as any photo; the thermal frame (640 x 512, smooth) is brought onto it with a
+homography found on the images (:func:`register`): the two lenses are a few centimetres apart, at
+the distances of a drone the parallax is below a thermal pixel. Their fields of view differ (the
+thermal one is narrower): the first guess comes from the focal lengths, ECC on the gradient
+magnitudes refines it (the edges of a road, a wall, a tree agree in both), and one homography for
+the whole flight (the camera is rigid) is taken from the captures where ECC agrees best, then
+refined capture by capture only where that clearly agrees better.
+
+Temperatures (:func:`temperature`): the raw counts of a radiometric JPEG become degrees through the
+camera maker's model with the object parameters - emissivity, reflected temperature, ambient
+temperature, humidity, distance (:data:`DEFAULTS`: the factory values of the DJI cameras, 0.95 and
+22 degrees). DJI R-JPEGs are decoded by DJI's Thermal SDK (``dji_irp -a measure``; Windows and
+Linux; on macOS through Docker), MicaSense LWIR TIFFs are centikelvin, float TIFFs (from the DJI
+Thermal Analysis Tool, Thermal-Tools, ...) are degrees already. The frames decoded are kept as float32
+TIFFs in the chunk (``<data>/thermal/frames/``) with the parameters in their tags.
+
+The temperature orthomosaic (:func:`build_thermal`) is the orthophoto engine run on the visible
+photos with the registered temperatures as float values: ``<data>/multispectral/thermal.tif``, one
+float32 band in degrees Celsius, NaN where nothing, the parameters in its tags. Uncooled
+microbolometers drift between frames (the flat-field corrections jump by tenths of a degree, a
+degree): :func:`balance_offsets` finds an offset per frame where the frames overlap and takes it
+away, the mean level kept - the strips between flight lines go. :func:`anomalies` is the local
+deviation (the temperature minus its surroundings): what a buried wall or ditch does to the soil.
+:func:`export` writes the temperatures as float32 GeoTIFF (degrees Celsius), 16-bit GeoTIFF in
+centikelvin (the integer format of MicaSense and of most tools) or CSV of x, y, temperature.
+"""
+from __future__ import annotations
+
+import json
+import os
+import platform
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+from ..core.chunk import Chunk
+from ..core.progress import Progress, as_progress
+
+DEFAULTS = {"emissivity": 0.95, "reflected": 22.0, "ambient": 22.0, "humidity": 70.0, "distance": None}
+DISTANCE_RANGE = (1.0, 25.0)  # what DJI's SDK accepts; None = the flight height of the frame, clipped
+THERMAL_BANDS = ("LWIR",)
+DOCKER_IMAGE = "ppg-dji-tsdk:1"  # ubuntu:22.04 with the OpenMP runtime dji_irp needs, built when missing
+DOCKERFILE = ("FROM ubuntu:22.04\n"
+              "RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm -rf /var/lib/apt/lists/*\n")
+PALETTES = {  # (position, (R, G, B)): the ramps of temperature
+    "iron": [(0.0, (0, 0, 0)), (0.18, (40, 0, 110)), (0.38, (140, 0, 140)), (0.55, (220, 40, 40)),
+             (0.72, (250, 130, 0)), (0.88, (255, 215, 40)), (1.0, (255, 255, 230))],
+    "inferno": [(0.0, (0, 0, 4)), (0.25, (87, 16, 110)), (0.5, (188, 55, 84)), (0.75, (249, 142, 9)),
+                (1.0, (252, 255, 164))],
+    "rainbow": [(0.0, (0, 0, 130)), (0.2, (0, 60, 255)), (0.4, (0, 220, 220)), (0.6, (80, 230, 40)),
+                (0.8, (255, 200, 0)), (1.0, (200, 0, 0))],
+    "grey": [(0.0, (0, 0, 0)), (1.0, (255, 255, 255))],
+    "grey_inverted": [(0.0, (255, 255, 255)), (1.0, (0, 0, 0))],
+}
+PALETTE_NAMES = [("iron", "Iron (ferro)"), ("inferno", "Inferno"), ("rainbow", "Arcobaleno"), ("grey", "Scala di grigi"),
+                 ("grey_inverted", "Grigi invertiti")]
+
+
+class ThermalDecoderMissing(RuntimeError):
+    """The program that decodes these radiometric images is not available; the message says how
+    to get it."""
+
+
+# ------------------------------------------------------------------------------ parameters
+def params_of(chunk: Chunk | None) -> dict:
+    """The object parameters of the chunk's thermal frames (:data:`DEFAULTS` where not set)."""
+    p = dict(DEFAULTS)
+    if chunk is not None:
+        p.update({k: v for k, v in ((chunk.meta.get("thermal") or {}).get("params") or {}).items() if k in DEFAULTS})
+    return p
+
+
+def set_params(chunk: Chunk, **params) -> dict:
+    """Change the object parameters; the frames decoded with others are decoded again."""
+    meta = chunk.meta.setdefault("thermal", {})
+    current = params_of(chunk)
+    new = dict(current)
+    new.update({k: (None if v is None else float(v)) for k, v in params.items() if k in DEFAULTS})
+    if new != current:
+        meta["params"] = new
+        meta.pop("decoded", None)
+        frames = Path(chunk.data_dir) / "thermal" / "frames"
+        if frames.exists():
+            shutil.rmtree(frames, ignore_errors=True)
+    return new
+
+
+# ------------------------------------------------------------------------------ the files
+def _jpeg_segments(path, limit: int = 64) -> list[tuple[int, bytes]]:
+    """``(marker, first bytes)`` of the first JPEG segments of ``path`` (APPn and the like)."""
+    out = []
+    with open(path, "rb") as f:
+        if f.read(2) != b"\xff\xd8":
+            return out
+        while len(out) < limit:
+            b = f.read(2)
+            if len(b) < 2 or b[0] != 0xFF:
+                break
+            marker = b[1]
+            if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+                continue
+            if marker == 0xDA:  # the scan: the image data follows
+                break
+            n = struct.unpack(">H", f.read(2))[0]
+            body = f.read(n - 2)
+            out.append((marker, body[:32]))
+    return out
+
+
+def kind_of(path) -> str | None:
+    """What decodes ``path``: ``dji`` (a DJI R-JPEG), ``flir`` (a FLIR radiometric JPEG),
+    ``micasense`` (a MicaSense LWIR TIFF in centikelvin), ``tiff`` (temperatures as floats), or
+    None for an image that holds no temperatures."""
+    p = Path(path)
+    suffix = p.suffix.lower()
+    if suffix in (".jpg", ".jpeg"):
+        try:
+            segs = _jpeg_segments(p)
+        except OSError:
+            return None
+        if any(m == 0xE1 and body.startswith(b"FLIR\x00") for m, body in segs):
+            return "flir"
+        app3 = sum(1 for m, _b in segs if m == 0xE3)
+        dji = any(m == 0xE1 and b"DJI" in body for m, body in segs) or _exif_make(p) == "DJI"
+        if app3 and dji:
+            return "dji"
+        return None
+    if suffix in (".tif", ".tiff"):
+        try:
+            from PIL import Image
+
+            with Image.open(p) as im:
+                mode = im.mode
+        except Exception:  # noqa: BLE001
+            return None
+        if mode in ("F", "F;32BF") or mode.startswith("F"):
+            return "tiff"
+        if mode in ("I;16", "I;16B", "I;16L", "I"):
+            from .multispectral import band_name_of
+
+            return "micasense" if band_name_of(p) == "LWIR" else None
+    return None
+
+
+def _exif_make(path) -> str | None:
+    try:
+        from PIL import Image
+
+        with Image.open(path) as im:
+            return str(im.getexif().get(271) or "").strip() or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def image_size(path) -> tuple[int, int]:
+    from PIL import Image
+
+    with Image.open(path) as im:
+        return im.size
+
+
+def flight_height(path) -> float | None:
+    """The height of the drone over the take-off point (``drone-dji:RelativeAltitude``), metres."""
+    from .multispectral import xmp_of, _number
+
+    try:
+        return _number(xmp_of(path).get("RelativeAltitude"), None)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def focal_35mm(path) -> float | None:
+    """The 35 mm equivalent focal length of the EXIF, when there is one."""
+    try:
+        from PIL import ExifTags, Image
+
+        with Image.open(path) as im:
+            sub = im.getexif().get_ifd(ExifTags.IFD.Exif)
+            v = sub.get(41989)  # FocalLengthIn35mmFilm
+            return float(v) if v else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def raw_counts(path) -> np.ndarray | None:
+    """The raw counts of a DJI R-JPEG (the 16-bit frame its APP3 segments hold, one after the
+    other), or None when the file has not got them. They grow with the temperature: enough for the
+    geometry - an 8-bit copy to align the frames on - not degrees, which only DJI's SDK gives."""
+    data = Path(path).read_bytes()
+    if data[:2] != b"\xff\xd8":
+        return None
+    chunks = []
+    i = 2
+    while i + 4 <= len(data) and data[i] == 0xFF:
+        marker = data[i + 1]
+        if marker == 0xDA:
+            break
+        n = struct.unpack(">H", data[i + 2:i + 4])[0]
+        if marker == 0xE3:
+            chunks.append(data[i + 4:i + 2 + n])
+        i += 2 + n
+    if not chunks:
+        return None
+    raw = b"".join(chunks)
+    w, h = image_size(path)
+    if len(raw) < w * h * 2:
+        return None
+    return np.frombuffer(raw[:w * h * 2], "<u2").reshape(h, w).astype(np.float32)
+
+
+def intensity(path) -> np.ndarray:
+    """What a thermal frame looks like for the geometry: its raw counts (DJI), else its
+    temperatures as the files hold them (TIFFs, MicaSense)."""
+    kind = kind_of(path)
+    if kind == "dji":
+        raw = raw_counts(path)
+        if raw is not None:
+            return raw
+    return decode_file(path)
+
+
+def stretch_of(paths, sample: int = 40) -> tuple[float, float]:
+    """One stretch for every frame of a flight (the 1st and 99th percentiles of a sample of
+    frames): the same counts give the same grey in every 8-bit copy, as the features need."""
+    paths = list(paths)
+    pick = paths if len(paths) <= sample else [paths[int(i)] for i in np.linspace(0, len(paths) - 1, sample)]
+    vals = []
+    for p in pick:
+        v = intensity(p)
+        v = v[np.isfinite(v)]
+        if v.size:
+            vals.append(np.percentile(v, [1, 99]))
+    if not vals:
+        return 0.0, 1.0
+    lo = float(np.median([v[0] for v in vals]))
+    hi = float(np.median([v[1] for v in vals]))
+    span = max(hi - lo, 1e-6)
+    return lo - 0.5 * span, hi + 0.5 * span  # room for the frames warmer or colder than the median
+
+
+def reference_copy(src, dst: Path, stretch: tuple[float, float]) -> Path:
+    """An 8-bit JPEG of a thermal frame for the alignment, with the EXIF (GPS, camera) of the
+    original, stretched by ``stretch`` (:func:`stretch_of`) and sharpened a little (local contrast:
+    a thermal frame is smooth, its features faint)."""
+    from PIL import Image
+
+    if dst.exists() and dst.stat().st_mtime >= Path(src).stat().st_mtime:
+        return dst
+    v = intensity(src)
+    lo, hi = stretch
+    img = np.clip((np.nan_to_num(v, nan=lo) - lo) / max(hi - lo, 1e-6) * 255.0, 0, 255).astype(np.uint8)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    img = clahe.apply(img)
+    exif = b""
+    try:
+        with Image.open(src) as im:
+            exif = im.info.get("exif") or b""
+    except Exception:  # noqa: BLE001
+        exif = b""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    pil = Image.fromarray(img)
+    if exif:
+        pil.save(dst, quality=97, exif=exif)
+    else:
+        pil.save(dst, quality=97)
+    return dst
+
+
+# ------------------------------------------------------------------------------ decoding
+def frames_dir(chunk: Chunk) -> Path:
+    return Path(chunk.data_dir) / "thermal" / "frames"
+
+
+def _frame_path(chunk: Chunk, cam) -> Path:
+    name = cam.meta.get("capture") or Path(cam.path).stem
+    return frames_dir(chunk) / f"{name}.tif"
+
+
+def _write_frame(path: Path, temp: np.ndarray, params: dict, source: str, decoder: str) -> None:
+    import rasterio
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    h, w = temp.shape
+    with rasterio.open(path, "w", driver="GTiff", height=h, width=w, count=1, dtype="float32",
+                       nodata=float("nan"), compress="deflate") as dst:
+        dst.write(temp.astype(np.float32), 1)
+        dst.set_band_description(1, "temperature (degrees Celsius)")
+        dst.update_tags(units="degC", source=str(source), decoder=decoder,
+                        **{k: ("" if v is None else str(v)) for k, v in params.items()})
+
+
+def _read_frame(path: Path) -> np.ndarray:
+    import rasterio
+
+    with rasterio.open(path) as src:
+        return src.read(1).astype(np.float32)
+
+
+def decode_file(path, params: dict | None = None, distance: float | None = None) -> np.ndarray:
+    """The temperatures (degrees Celsius, float32) of one radiometric image."""
+    params = dict(DEFAULTS if params is None else params)
+    kind = kind_of(path)
+    if kind == "tiff":
+        from PIL import Image
+
+        with Image.open(path) as im:
+            t = np.asarray(im, np.float32)
+        if t.ndim == 3:
+            t = t[..., 0]
+        finite = t[np.isfinite(t)]
+        if finite.size and np.median(finite) > 150.0:  # kelvin
+            t = t - 273.15
+        return t
+    if kind == "micasense":
+        from PIL import Image
+
+        with Image.open(path) as im:
+            t = np.asarray(im, np.float32)
+        return t / 100.0 - 273.15  # centikelvin
+    if kind == "dji":
+        out = decode_dji([Path(path)], params, distances=[distance])
+        return out[Path(path)]
+    if kind == "flir":
+        raise ThermalDecoderMissing(f"{Path(path).name}: FLIR radiometric JPEGs are not decoded yet; convert them "
+                                    "to float TIFFs (FLIR Thermal Studio, Thermal-Tools) and add those")
+    raise ValueError(f"{Path(path).name} holds no temperatures (not a radiometric JPEG or a temperature TIFF)")
+
+
+def decode_all(chunk: Chunk, cams=None, progress: Progress | None = None, force: bool = False) -> int:
+    """Decode the thermal frame of every capture of ``cams`` (all the multispectral cameras) into
+    ``<data>/thermal/frames/``, all the DJI R-JPEGs in one run of the SDK; returns how many were
+    decoded now."""
+    from .multispectral import multispectral_cameras
+
+    progress = as_progress(progress)
+    cams = list(cams) if cams is not None else [c for c in multispectral_cameras(chunk) if thermal_file(c)]
+    params = params_of(chunk)
+    todo = [c for c in cams if thermal_file(c) and (force or not _frame_path(chunk, c).exists())]
+    if not todo:
+        return 0
+    dji = [c for c in todo if kind_of(thermal_file(c)) == "dji"]
+    other = [c for c in todo if c not in dji]
+    n_done = 0
+    for i, cam in enumerate(other):
+        progress(0.9 * i / max(len(todo), 1), f"Temperatures of {cam.label} ({i + 1} of {len(todo)})")
+        src = thermal_file(cam)
+        _write_frame(_frame_path(chunk, cam), decode_file(src, params, _distance(params, src)), params, src, kind_of(src) or "")
+        n_done += 1
+    if dji:
+        files = [Path(thermal_file(c)) for c in dji]
+        temps = decode_dji(files, params, distances=[_distance(params, f) for f in files],
+                           progress=progress.sub(0.9 * len(other) / max(len(todo), 1), 0.9 * len(dji) / max(len(todo), 1)))
+        for cam, f in zip(dji, files):
+            _write_frame(_frame_path(chunk, cam), temps[f], params, f, "dji")
+            n_done += 1
+    chunk.meta.setdefault("thermal", {})["decoded"] = len(list(frames_dir(chunk).glob("*.tif")))
+    progress(1.0, f"Temperatures of {n_done} frames")
+    return n_done
+
+
+def _distance(params: dict, path) -> float:
+    d = params.get("distance")
+    if d is None:
+        d = flight_height(path) or 5.0
+    return float(min(max(float(d), DISTANCE_RANGE[0]), DISTANCE_RANGE[1]))
+
+
+def thermal_file(cam) -> str | None:
+    bands = cam.meta.get("bands") or {}
+    for b in THERMAL_BANDS:
+        if b in bands:
+            return bands[b]
+    return None
+
+
+def temperature(chunk: Chunk, cam) -> np.ndarray:
+    """The temperatures (degrees Celsius) of the thermal frame of ``cam``'s capture, decoded now
+    when they are not in the chunk yet."""
+    path = _frame_path(chunk, cam)
+    if not path.exists():
+        decode_all(chunk, [cam])
+    return _read_frame(path)
+
+
+# ------------------------------------------------------------------------------ DJI's SDK
+def sdk_dir() -> Path | None:
+    """The folder of DJI's Thermal SDK: ``PPG_DJI_TSDK``, else ``<app data>/dji_tsdk``."""
+    env = os.environ.get("PPG_DJI_TSDK")
+    if env and Path(env).exists():
+        return Path(env)
+    from ..ai.sam_env import data_dir
+
+    d = data_dir() / "dji_tsdk"
+    return d if d.exists() else None
+
+
+def sdk_tool(linux: bool = False) -> Path | None:
+    """``dji_irp`` of the SDK for this computer (``linux``: the Linux x86-64 one, for Docker)."""
+    root = sdk_dir()
+    if root is None:
+        return None
+    exe = "dji_irp.exe" if (os.name == "nt" and not linux) else "dji_irp"
+    want = "windows" if (os.name == "nt" and not linux) else "linux"
+    arch = "x64"
+    if not linux and platform.machine().lower() in ("aarch64", "arm64") and sys.platform.startswith("linux"):
+        arch = "aarch64"
+    found = [p for p in root.rglob(exe) if p.is_file() and want in str(p).lower()]
+    found.sort(key=lambda p: (arch not in str(p).lower(), "release" not in str(p).lower(), len(str(p))))
+    return found[0] if found else None
+
+
+def _docker() -> str | None:
+    for c in (shutil.which("docker"), "/usr/local/bin/docker", "/Applications/Docker.app/Contents/Resources/bin/docker"):
+        if c and Path(c).exists():
+            return str(c)
+    return None
+
+
+def _docker_running(docker: str) -> bool:
+    try:
+        return subprocess.run([docker, "info"], capture_output=True, timeout=20, close_fds=False).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _ensure_image(docker: str, progress=None) -> str:
+    """The Docker image that runs dji_irp (linux/amd64): ``PPG_DJI_DOCKER_IMAGE``, else
+    :data:`DOCKER_IMAGE`, built from :data:`DOCKERFILE` the first time."""
+    image = os.environ.get("PPG_DJI_DOCKER_IMAGE", DOCKER_IMAGE)
+    have = subprocess.run([docker, "image", "inspect", image], capture_output=True, close_fds=False).returncode == 0
+    if have or image != DOCKER_IMAGE:
+        return image
+    if progress:
+        progress(0.0, "Preparing the Docker image for DJI's SDK (once)")
+    proc = subprocess.run([docker, "build", "--platform", "linux/amd64", "-t", image, "-"], input=DOCKERFILE, text=True,
+                          capture_output=True, close_fds=False)
+    if proc.returncode != 0:
+        raise ThermalDecoderMissing("could not prepare the Docker image for DJI's SDK: "
+                                    + ((proc.stderr or proc.stdout).strip().splitlines() or ["?"])[-1])
+    return image
+
+
+def decoder_status() -> dict:
+    """How DJI R-JPEGs would be decoded here: ``{"available", "mode", "tool", "message"}``.
+    ``PPG_DJI_IRP`` names a ``dji_irp`` to run as it is (a native build, a wrapper script)."""
+    own = os.environ.get("PPG_DJI_IRP")
+    if own and Path(own).exists():
+        return {"available": True, "mode": "native", "tool": own, "message": f"dji_irp ({own})"}
+    if sdk_dir() is None:
+        return {"available": False, "mode": None, "tool": None,
+                "message": "DJI Thermal SDK not found: download it from dji.com (Windows or Linux version), "
+                           "unzip it into the folder dji_tsdk of the program's data, or point PPG_DJI_TSDK to it"}
+    if sys.platform == "darwin":
+        tool = sdk_tool(linux=True)
+        docker = _docker()
+        if tool is None:
+            return {"available": False, "mode": "docker", "tool": None, "message": "the SDK has no Linux x64 dji_irp"}
+        if docker is None:
+            return {"available": False, "mode": "docker", "tool": str(tool),
+                    "message": "on macOS the SDK runs in Docker (linux/amd64): install Docker Desktop"}
+        if not _docker_running(docker):
+            return {"available": False, "mode": "docker", "tool": str(tool),
+                    "message": "on macOS the SDK runs in Docker: start Docker Desktop and try again"}
+        return {"available": True, "mode": "docker", "tool": str(tool), "message": f"DJI Thermal SDK through Docker ({docker})"}
+    tool = sdk_tool()
+    if tool is None:
+        return {"available": False, "mode": "native", "tool": None, "message": "the SDK has no dji_irp for this system"}
+    return {"available": True, "mode": "native", "tool": str(tool), "message": f"DJI Thermal SDK ({tool})"}
+
+
+def _irp_args(src: str, out: str, params: dict, distance: float, ambient: bool = True) -> list[str]:
+    args = ["-s", src, "-a", "measure", "-o", out, "--measurefmt", "float32",
+            "--distance", f"{distance:g}", "--humidity", f"{float(params.get('humidity') or 70.0):g}",
+            "--emissivity", f"{float(params['emissivity']):g}", "--reflection", f"{float(params['reflected']):g}"]
+    if ambient and params.get("ambient") is not None:
+        args += ["--ambient", f"{float(params['ambient']):g}"]
+    return args
+
+
+def decode_dji(files: list[Path], params: dict, distances: list | None = None, progress=None) -> dict[Path, np.ndarray]:
+    """Temperatures of DJI R-JPEGs with the SDK's ``dji_irp -a measure --measurefmt float32``: one
+    run of a script for all the files (natively, or in one Docker container on macOS, the files
+    copied to a folder of the internal disk that Docker can mount)."""
+    progress = as_progress(progress)
+    status = decoder_status()
+    if not status["available"]:
+        raise ThermalDecoderMissing(status["message"])
+    distances = list(distances or [None] * len(files))
+    sizes = [image_size(f) for f in files]
+    from ..ai.sam_env import data_dir
+
+    base = data_dir() / "thermal_work"
+    base.mkdir(parents=True, exist_ok=True)
+    out: dict[Path, np.ndarray] = {}
+    with tempfile.TemporaryDirectory(dir=base) as tmp:
+        work = Path(tmp)
+        (work / "in").mkdir()
+        (work / "out").mkdir()
+        docker = status["mode"] == "docker"
+        tool = Path(status["tool"])
+        lines = ["#!/bin/sh", "set -u"]
+        if docker:
+            lib = "/sdk/" + str(tool.parent.relative_to(sdk_dir())).replace(os.sep, "/")
+            exe = f"{lib}/{tool.name}"
+        else:
+            lib, exe = str(tool.parent), str(tool)
+        lines.append(f'export LD_LIBRARY_PATH="{lib}:${{LD_LIBRARY_PATH:-}}"')  # the SDK's libraries beside dji_irp
+        names = []
+        for i, f in enumerate(files):
+            name = f"f{i:05d}"
+            if docker:
+                shutil.copy(f, work / "in" / f"{name}.jpg")
+                src, dst = f"/work/in/{name}.jpg", f"/work/out/{name}.raw"
+            else:
+                src, dst = str(f), str(work / "out" / f"{name}.raw")
+            d = distances[i] if distances[i] is not None else _distance(params, f)
+            args = _irp_args(src, dst, params, d)
+            lines.append(" ".join(_q(a) for a in [exe] + args) + f" > /dev/null 2>> {'/work' if docker else str(work)}/errors.txt"
+                         + f" || {' '.join(_q(a) for a in [exe] + _irp_args(src, dst, params, d, ambient=False))} > /dev/null 2>> "
+                         + f"{'/work' if docker else str(work)}/errors.txt")
+            lines.append(f'echo "{i + 1}" >> {"/work" if docker else str(work)}/progress.txt')
+            names.append(name)
+        script = work / "run.sh"
+        script.write_text("\n".join(lines) + "\n")
+        script.chmod(0o755)
+        if docker:
+            image = _ensure_image(_docker(), progress)
+            cmd = [_docker(), "run", "--rm", "--platform", "linux/amd64", "-v", f"{sdk_dir()}:/sdk:ro", "-v", f"{work}:/work",
+                   image, "sh", "/work/run.sh"]
+        elif os.name == "nt":  # pragma: no cover - Windows: the same lines in a batch file
+            bat = work / "run.bat"
+            bat.write_text("\r\n".join(" ".join(_q(a) for a in [exe] + _irp_args(str(f), str(work / "out" / f"{n}.raw"), params,
+                                                                               distances[i] if distances[i] is not None else _distance(params, f)))
+                                       for i, (f, n) in enumerate(zip(files, names))) + "\r\n")
+            cmd = ["cmd.exe", "/c", str(bat)]
+        else:
+            cmd = ["/bin/sh", str(script)]
+        progress(0.0, f"Decoding {len(files)} thermal frames with DJI's SDK" + (" in Docker" if docker else ""))
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, close_fds=False)
+        try:
+            import time
+
+            while proc.poll() is None:
+                time.sleep(0.5)
+                done = (work / "progress.txt").read_text().count("\n") if (work / "progress.txt").exists() else 0
+                try:
+                    progress(min(0.99, done / max(len(files), 1)), f"Decoding thermal frames: {done} of {len(files)}")
+                except Exception:
+                    proc.terminate()
+                    raise
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        _stdout, stderr = proc.communicate()
+        errors = (work / "errors.txt").read_text(errors="replace") if (work / "errors.txt").exists() else ""
+        for f, name, (w, h) in zip(files, names, sizes):
+            raw = work / "out" / f"{name}.raw"
+            if not raw.exists() or raw.stat().st_size != w * h * 4:
+                detail = (errors.strip().splitlines() or stderr.strip().splitlines() or ["no output"])[-1]
+                raise RuntimeError(f"DJI's SDK did not decode {f.name}: {detail}")
+            out[f] = np.fromfile(raw, dtype="<f4").reshape(h, w).astype(np.float32)
+    progress(1.0, f"{len(out)} thermal frames decoded")
+    return out
+
+
+def _q(a: str) -> str:
+    a = str(a)
+    if a and all(c.isalnum() or c in "/._-=:+" for c in a):
+        return a
+    return "'" + a.replace("'", "'\\''") + "'"
+
+
+# ------------------------------------------------------------------------------ registration
+def _grad(img: np.ndarray, sigma: float = 1.0) -> np.ndarray:
+    g = cv2.GaussianBlur(np.nan_to_num(img.astype(np.float32), nan=float(np.nanmedian(img)) if np.isfinite(img).any() else 0.0),
+                         (0, 0), sigma)
+    gx = cv2.Scharr(g, cv2.CV_32F, 1, 0)
+    gy = cv2.Scharr(g, cv2.CV_32F, 0, 1)
+    mag = np.sqrt(gx * gx + gy * gy)
+    return ((mag - mag.mean()) / (mag.std() + 1e-9)).astype(np.float32)
+
+
+def visible_grid(path, factor: int) -> np.ndarray:
+    """The visible photo in grey, reduced ``factor`` times (2, 4 or 8: decoded reduced by the JPEG
+    decoder itself), as the orthophoto engine and the registration see it."""
+    flags = {2: cv2.IMREAD_REDUCED_GRAYSCALE_2, 4: cv2.IMREAD_REDUCED_GRAYSCALE_4,
+             8: cv2.IMREAD_REDUCED_GRAYSCALE_8}.get(int(factor), cv2.IMREAD_GRAYSCALE)
+    img = cv2.imread(str(path), flags | cv2.IMREAD_IGNORE_ORIENTATION)
+    if img is None:
+        raise RuntimeError(f"cannot read {path}")
+    if factor not in (2, 4, 8) and factor > 1:
+        img = cv2.resize(img, (img.shape[1] // factor, img.shape[0] // factor), interpolation=cv2.INTER_AREA)
+    return img.astype(np.float32)
+
+
+def grid_factor(scale_tw: float) -> int:
+    """The reduction of the visible photo that makes a thermal pixel about 1.2 cells of the grid
+    (``scale_tw``: thermal pixels per visible pixel)."""
+    want = 1.0 / (1.2 * max(scale_tw, 1e-6))
+    return int(min((1, 2, 4, 8), key=lambda f: abs(np.log(f / max(want, 1.0)))))
+
+
+def initial_homography(grid_shape, thermal_shape, cover: float) -> np.ndarray:
+    """Grid pixel -> thermal pixel for a thermal frame centred on the visible one whose width spans
+    ``cover`` of the grid's width (OpenCV pixel centres)."""
+    gh, gw = grid_shape
+    th, tw = thermal_shape
+    a = tw / max(cover * gw, 1e-9)  # thermal pixels per grid pixel
+    cgx, cgy = (gw - 1) / 2.0, (gh - 1) / 2.0
+    ctx, cty = (tw - 1) / 2.0, (th - 1) / 2.0
+    return np.array([[a, 0.0, ctx - a * cgx], [0.0, a, cty - a * cgy], [0.0, 0.0, 1.0]])
+
+
+def _footprint_box(h_gt: np.ndarray, grid_shape, thermal_shape, shrink: float = 0.04) -> tuple[int, int, int, int]:
+    """The box of the grid the thermal frame covers (its corners mapped back), shrunk a little."""
+    th, tw = thermal_shape
+    inv = np.linalg.inv(h_gt)
+    corners = np.array([[0, 0, 1], [tw - 1, 0, 1], [tw - 1, th - 1, 1], [0, th - 1, 1]], float).T
+    g = inv @ corners
+    g = g[:2] / g[2]
+    x0, x1 = g[0].min(), g[0].max()
+    y0, y1 = g[1].min(), g[1].max()
+    dx, dy = (x1 - x0) * shrink, (y1 - y0) * shrink
+    gh, gw = grid_shape
+    return (int(max(0, np.floor(x0 + dx))), int(max(0, np.floor(y0 + dy))),
+            int(min(gw, np.ceil(x1 - dx))), int(min(gh, np.ceil(y1 - dy))))
+
+
+def ecc(grid_grad: np.ndarray, thermal_grad: np.ndarray, h_gt: np.ndarray, motion=cv2.MOTION_HOMOGRAPHY,
+        iterations: int = 80) -> tuple[np.ndarray, float]:
+    """ECC of the thermal gradients on the grid's, from ``h_gt`` (grid pixel -> thermal pixel) on
+    the part of the grid the frame covers. Returns the homography and the correlation (0 when ECC
+    failed: then the homography given)."""
+    th, tw = thermal_grad.shape
+    x0, y0, x1, y1 = _footprint_box(h_gt, grid_grad.shape, (th, tw))
+    if x1 - x0 < 16 or y1 - y0 < 16:
+        return h_gt, 0.0
+    template = np.ascontiguousarray(grid_grad[y0:y1, x0:x1])
+    shift = np.array([[1.0, 0.0, x0], [0.0, 1.0, y0], [0.0, 0.0, 1.0]])
+    warp = (h_gt @ shift)
+    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, int(iterations), 1e-5)
+    try:
+        if motion == cv2.MOTION_HOMOGRAPHY:
+            cc, w = cv2.findTransformECC(template, thermal_grad, (warp / warp[2, 2]).astype(np.float32), motion, criteria, None, 3)
+            refined = w.astype(np.float64)
+        else:
+            cc, w = cv2.findTransformECC(template, thermal_grad, warp[:2].astype(np.float32), motion, criteria, None, 3)
+            refined = np.vstack([w.astype(np.float64), [0.0, 0.0, 1.0]])
+    except cv2.error:
+        return h_gt, 0.0
+    return refined @ np.linalg.inv(shift), float(cc)
+
+
+def correlation(grid_grad: np.ndarray, thermal_grad: np.ndarray, h_gt: np.ndarray) -> float:
+    """The correlation of the gradients of the grid and of the thermal frame put on it by ``h_gt``
+    (what ECC maximises), over the part the frame covers."""
+    gh, gw = grid_grad.shape
+    warped = cv2.warpPerspective(thermal_grad, np.asarray(h_gt, np.float64), (gw, gh),
+                                 flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_CONSTANT,
+                                 borderValue=float("nan"))
+    x0, y0, x1, y1 = _footprint_box(h_gt, (gh, gw), thermal_grad.shape)
+    a = grid_grad[y0:y1, x0:x1].ravel().astype(np.float64)
+    b = warped[y0:y1, x0:x1].ravel().astype(np.float64)
+    ok = np.isfinite(a) & np.isfinite(b)
+    if ok.sum() < 100:
+        return 0.0
+    a, b = a[ok] - a[ok].mean(), b[ok] - b[ok].mean()
+    return float((a @ b) / (np.sqrt((a @ a) * (b @ b)) + 1e-12))
+
+
+def register(grid: np.ndarray, temp: np.ndarray, cover: float | None = None) -> tuple[np.ndarray, float, float]:
+    """The homography (grid pixel -> thermal pixel) of a thermal frame on its visible photo
+    reduced to ``grid``, its ECC correlation and the cover used. ``cover``: the part of the
+    visible width the thermal frame spans (from the focal lengths); None or doubtful: searched,
+    every cover from 0.3 to 1.0 tried with an affine ECC and the best kept."""
+    gg = _grad(grid)
+    tg = _grad(temp)
+    covers = [cover] if cover else []
+    covers += [c for c in np.round(np.arange(0.3, 1.01, 0.05), 2) if not cover or abs(c - cover) > 0.025]
+    best = (None, -1.0, None)
+    for c in covers:
+        h0 = initial_homography(gg.shape, tg.shape, float(c))
+        h, cc = ecc(gg, tg, h0, motion=cv2.MOTION_AFFINE, iterations=40)
+        if cc > best[1]:
+            best = (h, cc, float(c))
+        if cover and c == cover and cc > 0.5:
+            break  # the focal lengths were right
+    h, cc, c = best
+    if h is None:
+        return initial_homography(gg.shape, tg.shape, cover or 0.75), 0.0, cover or 0.75
+    h2, cc2 = ecc(gg, tg, h, motion=cv2.MOTION_HOMOGRAPHY, iterations=80)
+    if cc2 >= cc:
+        h, cc = h2, cc2
+    return h, float(cc), float(c)
+
+
+def cover_from_focals(visible_path, thermal_path, visible_focal_px: float | None, visible_size) -> float | None:
+    """The part of the visible width the thermal frame spans, from the focal lengths: the visible
+    one of the aligned sensor (pixels), the thermal one from its EXIF (35 mm equivalent)."""
+    f35 = focal_35mm(thermal_path)
+    if not f35 or not visible_focal_px:
+        return None
+    tw, th = image_size(thermal_path)
+    f_t = f35 / 43.2666 * np.hypot(tw, th)  # 35 mm equivalents are on the diagonal
+    vw = visible_size[0]
+    # thermal width in visible pixels: tw * f_v / f_t
+    return float(min(1.5, (tw * visible_focal_px / f_t) / vw))
+
+
+def registrations(chunk: Chunk, cams=None, progress: Progress | None = None, samples: int = 24) -> dict:
+    """The homography of every capture's thermal frame on its visible photo: one for the flight
+    (the median of the captures where ECC agrees best, the camera being rigid), refined capture
+    by capture where that agrees clearly better and stays close. Kept in ``meta["thermal"]
+    ["registration"]``: ``{"factor", "cover", "fixed", "captures": {key: {"h", "cc", "refined"}}}``."""
+    from .multispectral import multispectral_cameras
+
+    progress = as_progress(progress)
+    cams = [c for c in (cams if cams is not None else multispectral_cameras(chunk)) if thermal_file(c)]
+    if not cams:
+        raise RuntimeError("no thermal frames in the chunk (add the captures of a thermal camera)")
+    first = cams[0]
+    sensor = chunk.sensor(first)
+    vis_size = (sensor.width, sensor.height)
+    t0 = temperature(chunk, first)
+    cover = cover_from_focals(first.path, thermal_file(first), getattr(sensor, "focal_px", None), vis_size)
+    scale_tw = t0.shape[1] / ((cover or 0.75) * vis_size[0])
+    factor = grid_factor(scale_tw)
+    pick = cams if len(cams) <= samples else [cams[int(i)] for i in np.linspace(0, len(cams) - 1, samples)]
+    found = []
+    for i, cam in enumerate(pick):
+        progress(0.5 * i / len(pick), f"Registering the thermal frames on the photos: {i + 1} of {len(pick)}")
+        grid = visible_grid(cam.path, factor)
+        h, cc, c = register(grid, temperature(chunk, cam), cover)
+        found.append((h / h[2, 2], cc, c))
+    good = [f for f in found if f[1] >= 0.25]
+    if not good:
+        good = sorted(found, key=lambda f: -f[1])[:max(1, len(found) // 3)]
+    fixed = np.median(np.stack([g[0] for g in good]), axis=0)
+    cover_used = float(np.median([g[2] for g in good]))
+    out = {"factor": factor, "cover": cover_used, "cover_from_focals": cover, "fixed": fixed.tolist(),
+           "fixed_cc": float(np.median([g[1] for g in good])), "captures": {}}
+    for i, cam in enumerate(cams):
+        progress(0.5 + 0.5 * i / len(cams), f"Thermal frame on its photo: {i + 1} of {len(cams)}")
+        grid = visible_grid(cam.path, factor)
+        temp = temperature(chunk, cam)
+        gg, tg = _grad(grid), _grad(temp)
+        cc_fixed = correlation(gg, tg, fixed)
+        h, _cc = ecc(gg, tg, fixed, motion=cv2.MOTION_HOMOGRAPHY, iterations=60)
+        cc = correlation(gg, tg, h)
+        refined = cc > cc_fixed + 0.05 and _corner_shift(h, fixed, temp.shape) < 4.0
+        out["captures"][str(cam.key)] = {"h": (h if refined else fixed).tolist(), "cc": float(cc if refined else cc_fixed),
+                                         "refined": bool(refined)}
+    chunk.meta.setdefault("thermal", {})["registration"] = out
+    progress(1.0, f"Thermal frames registered: {sum(v['refined'] for v in out['captures'].values())} of {len(cams)} "
+                  f"refined on their own, the others with the flight's homography (correlation {out['fixed_cc']:.2f})")
+    return out
+
+
+def _corner_shift(h1: np.ndarray, h2: np.ndarray, thermal_shape) -> float:
+    """How far apart (thermal pixels) two homographies put the frame's corners."""
+    th, tw = thermal_shape
+    inv1, inv2 = np.linalg.inv(h1), np.linalg.inv(h2)
+    corners = np.array([[0, 0, 1], [tw - 1, 0, 1], [tw - 1, th - 1, 1], [0, th - 1, 1]], float).T
+    a = inv1 @ corners
+    b = inv2 @ corners
+    a, b = a[:2] / a[2], b[:2] / b[2]
+    # grid pixels back to thermal pixels: the scale of h2
+    scale = np.sqrt(abs(np.linalg.det(h2[:2, :2])))
+    return float(np.max(np.hypot(*(a - b))) * scale)
+
+
+def thermal_only(chunk: Chunk) -> bool:
+    """The thermal frames are the photos (no visible camera): aligned themselves, no registration."""
+    return (chunk.meta.get("multispectral") or {}).get("reference") == "LWIR"
+
+
+def thermal_stack(chunk: Chunk, cam, offsets: dict | None = None) -> np.ndarray:
+    """The temperatures of ``cam``'s capture on the reduced grid of its visible photo, NaN where
+    the thermal frame does not reach: ``(h, w, 3)`` float32 (the three channels the orthophoto
+    engine paints), the frame's offset taken away. When the thermal frames are the photos, the
+    frame itself."""
+    if thermal_only(chunk):
+        temp = temperature(chunk, cam)
+        off = (offsets or {}).get(str(cam.key))
+        if off:
+            temp = temp - np.float32(off)
+        return np.repeat(temp[..., None], 3, axis=2).astype(np.float32)
+    reg = (chunk.meta.get("thermal") or {}).get("registration")
+    if not reg:
+        raise RuntimeError("register the thermal frames first")
+    factor = int(reg["factor"])
+    sensor = chunk.sensor(cam)
+    gw, gh = -(-sensor.width // factor), -(-sensor.height // factor)  # what the reduced JPEG decoding gives
+    entry = reg["captures"].get(str(cam.key))
+    h = np.asarray(entry["h"] if entry else reg["fixed"], np.float64)
+    temp = temperature(chunk, cam)
+    off = (offsets or {}).get(str(cam.key))
+    if off:
+        temp = temp - np.float32(off)
+    warped = cv2.warpPerspective(temp, h, (gw, gh), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                                 borderMode=cv2.BORDER_CONSTANT, borderValue=float("nan"))
+    return np.repeat(warped[..., None], 3, axis=2).astype(np.float32)
+
+
+# ------------------------------------------------------------------------------ offsets between frames
+def balance_offsets(chunk: Chunk, cams=None, samples: int = 4000, rounds: int = 40, progress: Progress | None = None) -> dict:
+    """The offset of every frame (degrees) that brings the frames to the same temperature where
+    they overlap: surface points read in every frame, each reading split into a temperature of the
+    point and an offset of the frame (least squares by alternation, offsets of mean zero, readings
+    beyond three MADs dropped half way). ``{key: offset}`` plus ``"spread"`` (their standard
+    deviation): what the flat-field corrections of the camera did between frames."""
+    from .colour import _surface_points
+    from .multispectral import multispectral_cameras
+    from .visibility import project_valid
+
+    progress = as_progress(progress)
+    cams = [c for c in (cams if cams is not None else multispectral_cameras(chunk)) if c.aligned and thermal_file(c)]
+    if len(cams) < 2:
+        return {}
+    pts = _surface_points(chunk, samples)
+    if not len(pts):
+        return {}
+    point, photo, value = [], [], []
+    for i, cam in enumerate(cams):
+        progress(i / len(cams), f"Balancing the thermal frames: {i + 1} of {len(cams)}")
+        px, _depth, ok = project_valid(chunk, cam, pts, margin=4.0)
+        idx = np.nonzero(ok)[0]
+        if not len(idx):
+            continue
+        stack = thermal_stack(chunk, cam)[..., 0]
+        sensor = chunk.sensor(cam)
+        sx, sy = stack.shape[1] / sensor.width, stack.shape[0] / sensor.height
+        c = np.clip(np.floor(px[idx, 0] * sx).astype(int), 0, stack.shape[1] - 1)
+        r = np.clip(np.floor(px[idx, 1] * sy).astype(int), 0, stack.shape[0] - 1)
+        v = stack[r, c]
+        fin = np.isfinite(v)
+        point.append(idx[fin])
+        photo.append(np.full(fin.sum(), i))
+        value.append(v[fin].astype(np.float64))
+    if not point:
+        return {}
+    point, photo, value = np.concatenate(point), np.concatenate(photo), np.concatenate(value)
+    seen = np.bincount(point, minlength=len(pts))
+    keep = seen[point] >= 2
+    point, photo, value = point[keep], photo[keep], value[keep]
+    if not len(point):
+        return {}
+    o = np.zeros(len(cams))
+    n_ph = np.ones(len(cams))
+    for it in range(rounds):
+        n_pt = np.bincount(point, minlength=len(pts)).astype(float)
+        temp = np.bincount(point, value - o[photo], minlength=len(pts)) / np.maximum(n_pt, 1)
+        res = value - temp[point]
+        if it == rounds // 2:
+            mad = np.median(np.abs(res - np.median(res))) * 1.4826 + 1e-9
+            keep = np.abs(res - np.median(res)) <= 3 * mad + 0.05
+            point, photo, value, res = point[keep], photo[keep], value[keep], res[keep]
+        n_ph = np.bincount(photo, minlength=len(cams)).astype(float)
+        o = np.bincount(photo, res, minlength=len(cams)) / np.maximum(n_ph, 1)
+        o -= o[n_ph > 0].mean()
+    out = {str(cam.key): float(o[i]) for i, cam in enumerate(cams) if n_ph[i] > 0}
+    out["spread"] = float(o[n_ph > 0].std())
+    progress(1.0, f"Thermal frames balanced: offsets of {out['spread']:.2f} degrees")
+    return out
+
+
+# ------------------------------------------------------------------------------ the orthomosaic
+def thermal_gsd(chunk: Chunk) -> float:
+    """The ground size of a thermal pixel: the visible photos' one times the visible pixels a
+    thermal pixel spans (rounded to a millimetre)."""
+    from .dem import estimate_gsd
+
+    reg = (chunk.meta.get("thermal") or {}).get("registration") or {}
+    fixed = reg.get("fixed")
+    gsd = estimate_gsd(chunk)
+    if thermal_only(chunk):
+        return max(0.001, round(gsd, 3))
+    if fixed is None:
+        return round(gsd * 8, 3)
+    h = np.asarray(fixed, float)
+    a = np.sqrt(abs(np.linalg.det(h[:2, :2])))  # thermal pixels per grid pixel
+    visible_per_thermal = int(reg["factor"]) / max(a, 1e-9)
+    return max(0.001, round(gsd * visible_per_thermal, 3))
+
+
+def build_thermal(chunk: Chunk, resolution: float | None = None, balance: bool = True, progress: Progress | None = None,
+                  **ortho_options) -> Path:
+    """The temperature orthomosaic: ``<data>/multispectral/thermal.tif``, one float32 band in
+    degrees Celsius on the grid of the orthophoto engine (``resolution`` m/px, by default the
+    thermal pixel's ground size), NaN where nothing, the object parameters in its tags."""
+    import rasterio
+
+    from .multispectral import multispectral_cameras
+    from .ortho import build_orthomosaic
+
+    progress = as_progress(progress)
+    cams = [c for c in multispectral_cameras(chunk) if thermal_file(c)]
+    if not cams:
+        raise RuntimeError("no thermal frames in the chunk (add the captures of a thermal camera)")
+    if chunk.dem_path is None:
+        raise RuntimeError("build the DEM first: the temperature orthomosaic lies on it")
+    decode_all(chunk, cams, progress.sub(0.0, 0.25))
+    reg = None if thermal_only(chunk) else registrations(chunk, cams, progress.sub(0.25, 0.15))
+    meta = chunk.meta.setdefault("thermal", {})
+    offsets = None
+    if balance:
+        offsets = balance_offsets(chunk, cams, progress=progress.sub(0.4, 0.05))
+        meta["offsets"] = offsets
+    else:
+        meta.pop("offsets", None)
+    keys = {c.key for c in cams}
+
+    def source(cam):
+        if cam.key not in keys:
+            s = chunk.sensor(cam)
+            f = int(reg["factor"]) if reg else 1
+            return np.full((-(-s.height // f), -(-s.width // f), 3), np.nan, np.float32)
+        return thermal_stack(chunk, cam, offsets)
+
+    folder = Path(chunk.data_dir) / "multispectral"
+    folder.mkdir(parents=True, exist_ok=True)
+    resolution = resolution or thermal_gsd(chunk)
+    part = folder / "thermal_part.tif"
+    build_orthomosaic(chunk, resolution=resolution, source=source, out_path=part, progress=progress.sub(0.45, 0.5),
+                      **ortho_options)
+    final = folder / "thermal.tif"
+    params = params_of(chunk)
+    with rasterio.open(part) as src:
+        profile = src.profile.copy()
+        t = src.read(1)
+    profile.update(count=1, dtype="float32", nodata=float("nan"))
+    with rasterio.open(final, "w", **profile) as dst:
+        dst.write(t.astype(np.float32), 1)
+        dst.set_band_description(1, "temperature (degrees Celsius)")
+        dst.update_tags(units="degC", emissivity=str(params["emissivity"]), reflected_temperature=str(params["reflected"]),
+                        ambient_temperature=str(params["ambient"]), humidity=str(params["humidity"]),
+                        distance="flight height" if params["distance"] is None else str(params["distance"]),
+                        offsets_balanced=str(bool(balance)))
+    part.unlink(missing_ok=True)
+    v = t[np.isfinite(t)]
+    meta["file"] = str(final.relative_to(chunk.data_dir))
+    meta["resolution"] = float(resolution)
+    meta["stats"] = ({"min": float(v.min()), "max": float(v.max()), "median": float(np.median(v)),
+                      "p2": float(np.percentile(v, 2)), "p98": float(np.percentile(v, 98))} if v.size else {})
+    progress(1.0, f"Temperature orthomosaic: {resolution * 100:.1f} cm/px" + (
+        f", {meta['stats']['p2']:.1f} - {meta['stats']['p98']:.1f} degrees" if v.size else ""))
+    return final
+
+
+def thermal_path(chunk: Chunk) -> Path | None:
+    f = (chunk.meta.get("thermal") or {}).get("file")
+    p = Path(chunk.data_dir) / f if f else None
+    return p if p is not None and p.exists() else None
+
+
+# ------------------------------------------------------------------------------ products from it
+def anomalies(chunk: Chunk, radius_m: float = 2.0) -> Path:
+    """The thermal anomalies: the temperature minus the mean of its surroundings (a Gaussian of
+    ``radius_m``, NaN-aware): ``<data>/multispectral/thermal_anomaly.tif``, degrees, around zero."""
+    import rasterio
+
+    src_path = thermal_path(chunk)
+    if src_path is None:
+        raise RuntimeError("build the temperature orthomosaic first")
+    with rasterio.open(src_path) as src:
+        t = src.read(1).astype(np.float32)
+        profile = src.profile.copy()
+        res = abs(src.transform.a)
+    ok = np.isfinite(t)
+    sigma = max(1.0, radius_m / max(res, 1e-9) / 2.0)
+    filled = np.where(ok, t, 0.0).astype(np.float32)
+    num = cv2.GaussianBlur(filled, (0, 0), sigma)
+    den = cv2.GaussianBlur(ok.astype(np.float32), (0, 0), sigma)
+    local = np.where(den > 1e-3, num / np.maximum(den, 1e-6), np.nan)
+    out = np.where(ok, t - local, np.nan).astype(np.float32)
+    target = src_path.with_name("thermal_anomaly.tif")
+    profile.update(count=1, dtype="float32", nodata=float("nan"))
+    with rasterio.open(target, "w", **profile) as dst:
+        dst.write(out, 1)
+        dst.set_band_description(1, f"temperature minus its surroundings within {radius_m:g} m (degrees)")
+        dst.update_tags(units="degC", radius_m=str(radius_m))
+    meta = chunk.meta.setdefault("thermal", {})
+    meta["anomaly"] = {"file": str(target.relative_to(chunk.data_dir)), "radius_m": float(radius_m)}
+    return target
+
+
+def difference(chunk: Chunk, other: Path, name: str = "thermal_difference") -> Path:
+    """This temperature orthomosaic minus another one of the same ground (a night flight against a
+    day flight: soils that keep the heat differently), on this one's grid."""
+    import rasterio
+    from rasterio.warp import Resampling, reproject
+
+    mine = thermal_path(chunk)
+    if mine is None:
+        raise RuntimeError("build the temperature orthomosaic first")
+    with rasterio.open(mine) as a:
+        ta = a.read(1).astype(np.float32)
+        profile = a.profile.copy()
+        tr, crs = a.transform, a.crs
+    with rasterio.open(other) as b:
+        tb = np.full(ta.shape, np.nan, np.float32)
+        reproject(b.read(1).astype(np.float32), tb, src_transform=b.transform, src_crs=b.crs or crs, dst_transform=tr,
+                  dst_crs=crs, src_nodata=np.nan, dst_nodata=np.nan, resampling=Resampling.bilinear)
+    out = mine.with_name(f"{name}.tif")
+    with rasterio.open(out, "w", **profile) as dst:
+        dst.write((ta - tb).astype(np.float32), 1)
+        dst.update_tags(units="degC", minus=str(other))
+    return out
+
+
+def export(chunk: Chunk, path, fmt: str | None = None, source: Path | None = None) -> Path:
+    """The temperatures in a file that keeps them: ``tif`` float32 GeoTIFF in degrees Celsius,
+    ``tif16`` 16-bit GeoTIFF in centikelvin (0 = nothing; degrees = value / 100 - 273.15, as
+    MicaSense writes its thermal band), ``csv`` one line per cell with x, y and the temperature.
+    The parameters of the measure go with it (tags, or the CSV's header)."""
+    import rasterio
+
+    src_path = Path(source) if source is not None else thermal_path(chunk)
+    if src_path is None or not src_path.exists():
+        raise RuntimeError("build the temperature orthomosaic first")
+    path = Path(path)
+    fmt = fmt or {".csv": "csv", ".txt": "csv"}.get(path.suffix.lower(), "tif")
+    with rasterio.open(src_path) as src:
+        t = src.read(1).astype(np.float32)
+        profile = src.profile.copy()
+        tags = src.tags()
+        tr = src.transform
+    if fmt == "tif":
+        shutil.copy(src_path, path)
+        return path
+    if fmt == "tif16":
+        ck = np.where(np.isfinite(t), np.clip(np.round((t + 273.15) * 100.0), 1, 65535), 0).astype(np.uint16)
+        profile.update(dtype="uint16", nodata=0)
+        with rasterio.open(path, "w", **profile) as dst:
+            dst.write(ck, 1)
+            dst.set_band_description(1, "temperature in centikelvin (degrees = value / 100 - 273.15)")
+            dst.update_tags(**{**tags, "units": "centikelvin", "scale": "0.01", "offset": "-273.15"})
+            dst.scales, dst.offsets = (0.01,), (-273.15,)
+        return path
+    if fmt == "csv":
+        rows, cols = np.nonzero(np.isfinite(t))
+        xs, ys = rasterio.transform.xy(tr, rows, cols, offset="center")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("# temperature in degrees Celsius; " + json.dumps({k: tags[k] for k in sorted(tags)}) + "\n")
+            f.write("x,y,temperature_c\n")
+            step = 200000
+            for s in range(0, len(rows), step):
+                block = np.column_stack([np.asarray(xs[s:s + step]), np.asarray(ys[s:s + step]), t[rows[s:s + step], cols[s:s + step]]])
+                np.savetxt(f, block, fmt=["%.3f", "%.3f", "%.2f"], delimiter=",")
+        return path
+    raise ValueError(f"unknown format {fmt!r}: tif, tif16 or csv")
+
+
+# ------------------------------------------------------------------------------ colours
+def limits(t: np.ndarray, low: float | None = None, high: float | None = None) -> tuple[float, float]:
+    """The ends of the colour ramp: the given ones, else the 2nd and 98th percentiles."""
+    v = t[np.isfinite(t)]
+    if v.size == 0:
+        return 0.0, 1.0
+    lo = float(np.percentile(v, 2)) if low is None else float(low)
+    hi = float(np.percentile(v, 98)) if high is None else float(high)
+    return (lo, hi) if hi > lo else (lo, lo + 1e-3)
+
+
+def colours(t: np.ndarray, lims: tuple[float, float] | None = None, palette: str = "iron") -> np.ndarray:
+    """RGBA of temperatures on a :data:`PALETTES` ramp between ``lims``, transparent where NaN."""
+    ok = np.isfinite(t)
+    rgba = np.zeros(t.shape + (4,), np.uint8)
+    if not ok.any():
+        return rgba
+    lo, hi = lims if lims is not None else limits(t)
+    x = np.clip((np.where(ok, t, lo) - lo) / max(hi - lo, 1e-9), 0, 1)
+    stops = PALETTES.get(palette, PALETTES["iron"])
+    pos = np.array([s[0] for s in stops])
+    for k in range(3):
+        rgba[..., k] = np.interp(x, pos, [s[1][k] for s in stops]).astype(np.uint8)
+    rgba[..., 3] = np.where(ok, 255, 0)
+    return rgba

@@ -162,6 +162,47 @@ con classe, intervallo, media e area in un GeoPackage - la mappa di prescrizione
 in archeologia le tracce sulle colture sopra muri e fossati sepolti. `ppg multispectral PROGETTO
 add|panel|reflectance|index|zoning|bands`.
 
+### Camere termiche
+
+Una camera termica da drone scatta insieme una foto visibile e un fotogramma termico (DJI Mavic 2
+Enterprise Advanced, M30T, Mavic 3 Thermal, H20T: `DJI_0517_W.JPG` e `DJI_0518_T.JPG`; MicaSense
+Altum: la sesta banda, LWIR). `add_captures` li riconosce: le coppie si trovano dal numero quando è
+lo stesso, altrimenti dall'ora e dal luogo dello scatto (queste camere numerano ogni file, e i due
+tipi possono stare in cartelle diverse), la foto visibile è la foto dello scatto così com'è, il
+fotogramma termico la sua banda `LWIR`. I fotogrammi termici senza foto visibili sono scatti a sé:
+si allinea una copia a 8 bit di ciascuno, tutte con un unico stiramento dei conteggi grezzi.
+
+`engine.thermal` porta i fotogrammi in gradi Celsius (`temperature(chunk, cam)`, `decode_file`):
+gli R-JPEG DJI con il Thermal SDK di DJI (`dji_irp -a measure --measurefmt float32`, tutti i
+fotogrammi in una sola esecuzione; Windows e Linux direttamente, sul Mac in Docker con un'immagine
+che il programma prepara la prima volta: Docker Desktop deve essere avviato), i TIFF LWIR di
+MicaSense in centikelvin, i TIFF già in gradi o in kelvin. L'SDK va nella cartella `dji_tsdk` dei
+dati del programma (o `PPG_DJI_TSDK`); è gratuito su dji.com. I conteggi grezzi di un R-JPEG
+(`raw_counts`, i suoi segmenti APP3) crescono con la temperatura ma non sono gradi: servono solo
+alla geometria. I parametri della misura (`params_of`, `set_params`) valgono per tutti i
+fotogrammi: emissività 0,95, temperatura riflessa e ambiente 22 °C (i valori di fabbrica delle camere
+DJI), umidità 70 %, la distanza uguale all'altezza di volo limitata a 1-25 m come vuole l'SDK;
+cambiandoli i fotogrammi vengono decodificati di nuovo.
+
+`build_thermal(chunk, resolution=None, balance=True)` crea `<dati>/multispectral/thermal.tif`, una
+banda float32 in gradi Celsius con i parametri nei tag, NaN dove non c'è niente, alla dimensione a
+terra di un pixel termico se non si chiede altro. Con le foto visibili il fotogramma termico di ogni
+scatto va sulla sua foto con un'omografia (`registrations`): la prima stima dalle focali, o una
+ricerca della parte di foto che il fotogramma copre, affinata con ECC sulle magnitudini del
+gradiente; un'omografia per il volo (la mediana degli scatti che si accordano meglio: la camera è
+rigida), affinata scatto per scatto solo dove si accorda chiaramente meglio. Il motore legge le
+temperature su una griglia ridotta della foto visibile (`thermal_stack`), e una foto il cui
+fotogramma non arriva a una cella la lascia alla successiva che ci arriva. `balance_offsets` toglie
+uno scostamento per fotogramma trovato dove i fotogrammi si sovrappongono (le camere non raffreddate
+derivano tra una correzione di campo piatto e l'altra, e il terreno si scalda durante il volo: in un
+volo di 28 minuti di un Mavic 2 Enterprise Advanced gli scostamenti hanno una deviazione di circa un
+grado), conservando il livello medio. `anomalies(chunk, radius_m)` è la temperatura meno quella dei
+dintorni (`thermal_anomaly.tif`, gradi attorno allo zero); `difference` sottrae un'altra ortofoto
+termica dello stesso terreno (notte contro giorno). `export(chunk, path, "tif" | "tif16" | "csv")`
+conserva le temperature: GeoTIFF float32 in gradi, GeoTIFF a 16 bit in centikelvin (gradi = valore
+/ 100 - 273,15, con scala e offset impostati), CSV di x, y e temperatura, i parametri nei tag o
+nell'intestazione. `ppg thermal PROGETTO status|params|build|anomalies|export`.
+
 ### Immagini satellitari
 
 `engine.satellite`: una scena satellitare arriva con i suoi *coefficienti polinomiali razionali*

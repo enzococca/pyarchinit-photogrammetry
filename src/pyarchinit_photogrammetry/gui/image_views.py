@@ -15,7 +15,8 @@ from PySide6.QtWidgets import (QGraphicsEllipseItem, QGraphicsPathItem, QGraphic
 from .i18n import tr
 
 RELIEF_KINDS = ("svf", "openness_pos", "openness_neg", "slrm", "msrm", "multi_hillshade")  # archaeo.relief
-SCALAR_KINDS = ("dem", "diff", "sigma", "coverage", "slope", "aspect", "index", "zones") + RELIEF_KINDS  # one band of values, coloured
+SCALAR_KINDS = ("dem", "diff", "sigma", "coverage", "slope", "aspect", "index", "zones", "thermal",
+                "thermal_anomaly") + RELIEF_KINDS  # one band of values, coloured
 ZONE_COLORS = [(214, 96, 77), (247, 203, 120), (178, 223, 138), (26, 152, 80), (0, 109, 44), (69, 117, 180),
                (152, 78, 163), (255, 127, 0), (166, 86, 40), (120, 120, 120)]  # the classes of a zoning, 1 = lowest
 US_COLORS = ["#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231", "#911eb4", "#46f0f0", "#f032e6", "#bcf60c",
@@ -308,6 +309,12 @@ def read_window_rgba(path, kind: str, window: tuple[int, int, int, int], out_sha
                 return coverage_colors(z)
             if kind == "index":
                 return index_colors(z, dem_range, palette)
+            if kind == "thermal":  # degrees on a thermal ramp between the limits of the whole raster (or the user's)
+                from ..engine.thermal import colours as thermal_colours
+
+                return thermal_colours(z, dem_range, palette)
+            if kind == "thermal_anomaly":
+                return diff_colors(z, diff_limit)[0]
             if kind == "zones":
                 return zone_colors(z)
             if kind in RELIEF_KINDS:
@@ -455,6 +462,8 @@ class RasterView(_ZoomView):
         self._dem_range: tuple[float, float] | None = None
         self.diff_limit = 0.0
         self.palette = "rdylgn"  # the ramp of a vegetation index (INDEX_PALETTES)
+        self.thermal_palette = "iron"  # the ramp of the temperatures (engine.thermal.PALETTES)
+        self.thermal_range: tuple[float, float] | None = None  # the user's limits in degrees; None: 2nd-98th percentile
         self._detail_pool = ThreadPoolExecutor(1, thread_name_prefix="raster-detail")
         self._detail_relay = _DetailRelay(self)
         self._detail_relay.ready.connect(self._show_detail)
@@ -532,6 +541,14 @@ class RasterView(_ZoomView):
                 elif kind == "index":  # a vegetation index: its ramp between the percentiles of the whole raster
                     self._dem_range = index_limits(self.z)
                     rgba = index_colors(self.z, self._dem_range, self.palette)
+                elif kind == "thermal":  # degrees: the user's range, else the percentiles of the whole raster
+                    from ..engine.thermal import colours as thermal_colours, limits as thermal_limits
+
+                    lo_hi = self.thermal_range or (None, None)
+                    self._dem_range = thermal_limits(self.z, *lo_hi)
+                    rgba = thermal_colours(self.z, self._dem_range, self.thermal_palette)
+                elif kind == "thermal_anomaly":  # degrees around zero, diverging
+                    rgba, self.diff_limit = diff_colors(self.z)
                 elif kind == "zones":  # the classes of a zoning
                     rgba = zone_colors(self.z)
                 else:
@@ -613,7 +630,8 @@ class RasterView(_ZoomView):
         self._detail_key = (window, shape)
         self._detail_gen += 1
         job = (self._detail_gen, str(self.path), self.kind, window, shape, scene, self._dem_range,
-               self.diff_limit, getattr(self, "_bands", None), getattr(self, "_band_limits", None), self.palette)
+               self.diff_limit, getattr(self, "_bands", None), getattr(self, "_band_limits", None),
+               self.thermal_palette if self.kind == "thermal" else self.palette)
         if wait:
             self._show_detail(*self._read_detail(job))
         else:

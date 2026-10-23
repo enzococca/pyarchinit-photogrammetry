@@ -293,7 +293,17 @@ class MainWindow(QMainWindow):
         self.ms_pane.zoning_requested.connect(self.ms_zoning)
         self.ms_pane.qgis_requested.connect(self.open_in_qgis)
         self.ms_pane.palette_requested.connect(self._ms_palette_changed)
+        self.ms_pane.thermal_params_requested.connect(self.ms_thermal_params)
+        self.ms_pane.thermal_build_requested.connect(self.ms_build_thermal)
+        self.ms_pane.thermal_show_requested.connect(self.ms_thermal_show)
+        self.ms_pane.anomaly_requested.connect(self.ms_thermal_anomalies)
+        self.ms_pane.thermal_export_requested.connect(self.ms_thermal_export)
         self.ms_pane.set_palette(str(self.settings.value("ms/palette", "rdylgn")))
+        k = self.ms_pane.c_tpalette.findData(str(self.settings.value("thermal/palette", "iron")))
+        if k >= 0:
+            self.ms_pane.c_tpalette.blockSignals(True)
+            self.ms_pane.c_tpalette.setCurrentIndex(k)
+            self.ms_pane.c_tpalette.blockSignals(False)
         self.sections_pane = SectionsPane()
         self.sections_pane.zoom_requested.connect(self._zoom_section)
         self.sections_pane.publish_requested.connect(self._publish_section)
@@ -1181,6 +1191,94 @@ class MainWindow(QMainWindow):
 
         self.run_task("Riprese multispettrali", job, done, refresh=True)
 
+    # ---------------------------------------------------------------- thermal
+    def ms_thermal_params(self) -> None:
+        """The parameters of the temperature measure: they hold for every frame of the chunk."""
+        if not self._need_chunk():
+            return
+        from ..engine import thermal as th
+
+        p = th.params_of(self.chunk)
+        v = ParamDialog.ask(self, "Parametri di misura della termica", [
+            Field("emissivity", "Emissività", float(p["emissivity"]), minimum=0.01, maximum=1.0, decimals=3),
+            Field("reflected", "Temperatura riflessa (°C)", float(p["reflected"]), minimum=-40.0, maximum=500.0, decimals=1),
+            Field("ambient", "Temperatura ambiente (°C)", float(p["ambient"]), minimum=-40.0, maximum=80.0, decimals=1),
+            Field("humidity", "Umidità relativa (%)", float(p["humidity"]), minimum=1.0, maximum=100.0, decimals=0),
+            Field("distance", "Distanza dal suolo (m, vuoto = altezza di volo, 1-25)", p["distance"], kind="optional_float")],
+            intro="I valori di fabbrica delle camere DJI: emissività 0,95, 22 °C di temperatura riflessa e ambiente. "
+                  "Cambiandoli, le temperature dei fotogrammi vengono ricalcolate alla prossima ortofoto termica.")
+        if v is None:
+            return
+        th.set_params(self.chunk, **v)
+        self._dirty(True)
+        self.ms_pane.set_state(self.chunk)
+
+    def ms_build_thermal(self) -> None:
+        """The temperature orthomosaic in degrees (DJI's SDK decodes the R-JPEGs), then shown."""
+        if not self._need_chunk(aligned=True):
+            return
+        from ..engine import thermal as th
+
+        if self.chunk.dem_path is None:
+            self._warn("Costruisci prima il DEM: l'ortofoto termica si appoggia su di esso.")
+            return
+        v = ParamDialog.ask(self, "Ortofoto termica (°C)", [
+            Field("resolution", "Risoluzione (m/px, vuoto = il pixel termico a terra)", None, kind="optional_float"),
+            Field("balance", "Togli gli scostamenti tra i fotogrammi (le strisce delle camere non raffreddate)", True)],
+            intro="Un GeoTIFF a virgola mobile in gradi Celsius, con i parametri di misura nei tag. Le termiche DJI "
+                  "si decodificano con il DJI Thermal SDK (sul Mac in Docker: deve essere avviato).")
+        if v is None:
+            return
+        self.run_task("Ortofoto termica",
+                      lambda p: th.build_thermal(self.chunk, resolution=v["resolution"], balance=v["balance"], progress=p),
+                      lambda path: (self.ms_pane.set_state(self.chunk), self.ms_show("thermal")), refresh=True)
+
+    def ms_thermal_show(self, palette: str, limits) -> None:
+        """The temperatures again with another ramp or range, the zoom kept."""
+        v = self.ortho_view
+        v.thermal_palette = palette
+        v.thermal_range = tuple(limits) if limits else None
+        self.settings.setValue("thermal/palette", palette)
+        if v.kind == "thermal" and v.path is not None and Path(v.path).exists():
+            t, hb, vb = v.transform(), v.horizontalScrollBar().value(), v.verticalScrollBar().value()
+            self._load_raster("thermal", v.path)
+            v.setTransform(t)
+            v.horizontalScrollBar().setValue(hb)
+            v.verticalScrollBar().setValue(vb)
+            v.update_detail()
+            lo, hi = v._dem_range or (0.0, 1.0)
+            self.statusBar().showMessage(tr("Temperatura: colori da {0} °C a {1} °C ({2})", f"{lo:.1f}", f"{hi:.1f}",
+                                            self.ms_pane.c_tpalette.currentText()))
+        else:
+            self.ms_show("thermal")
+
+    def ms_thermal_anomalies(self, radius: float = 2.0) -> None:
+        if not self._need_chunk():
+            return
+        from ..engine import thermal as th
+
+        self.run_task("Anomalie termiche", lambda p: th.anomalies(self.chunk, radius_m=radius),
+                      lambda path: (self._dirty(True), self.ms_pane.set_state(self.chunk), self.ms_show("thermal_anomaly")),
+                      refresh=True)
+
+    def ms_thermal_export(self, fmt: str = "tif") -> None:
+        """The temperatures into a file that keeps them (degrees or centikelvin GeoTIFF, CSV)."""
+        if not self._need_chunk():
+            return
+        from ..engine import thermal as th
+
+        if th.thermal_path(self.chunk) is None:
+            self._warn("Costruisci prima l'ortofoto termica.")
+            return
+        suffix, filt = {"tif": ("_C.tif", "GeoTIFF (*.tif)"), "tif16": ("_centikelvin.tif", "GeoTIFF (*.tif)"),
+                        "csv": (".csv", "CSV (*.csv)")}[fmt]
+        start = str(Path(self._last_dir()) / f"temperatura{suffix}")
+        path, _ = QFileDialog.getSaveFileName(self, tr("Esporta le temperature"), start, filt)
+        if not path:
+            return
+        self.run_task("Esporta le temperature", lambda p: th.export(self.chunk, path, fmt),
+                      lambda out: self._info(tr("Temperature esportate"), str(out)))
+
     def _ms_palette_changed(self, palette: str) -> None:
         """The ramp of the indices: the one shown coloured again where it is, the choice kept."""
         v = self.ortho_view
@@ -1250,9 +1348,13 @@ class MainWindow(QMainWindow):
             return
         ch = self.chunk
 
+        from ..engine.thermal import thermal_only
+
+        quality = "high" if thermal_only(ch) else "medium"  # thermal frames are small: their full size
+
         def job(p):
             if not (ch.data_dir / "dense" / "stereo" / "depth_maps").exists():
-                ch.build_depth_maps(quality="medium", progress=p.sub(0.0, 0.6))
+                ch.build_depth_maps(quality=quality, progress=p.sub(0.0, 0.6))
             if not ch.product_path("point_cloud"):
                 ch.build_point_cloud(progress=p.sub(0.6, 0.25))
             ch.build_dem(progress=p.sub(0.85, 0.15))
@@ -1297,6 +1399,25 @@ class MainWindow(QMainWindow):
             lo, hi = self.ortho_view._dem_range or (-1.0, 1.0)
             self.statusBar().showMessage(tr("{0}: colori da {1} a {2} ({3})", payload, f"{lo:.2f}", f"{hi:.2f}",
                                             self.ms_pane.palette_label()))
+        elif kind in ("thermal", "thermal_anomaly"):
+            from ..engine import thermal as th
+
+            info = ch.meta.get("thermal") or {}
+            rel = info.get("file") if kind == "thermal" else (info.get("anomaly") or {}).get("file")
+            if not rel or not (ch.data_dir / rel).exists():
+                self._warn("Costruisci prima l'ortofoto termica." if kind == "thermal" else "Calcola prima le anomalie termiche.")
+                return
+            if kind == "thermal":
+                self.ortho_view.thermal_palette = self.ms_pane.thermal_palette()
+                self.ortho_view.thermal_range = self.ms_pane.thermal_range()
+            self._load_raster(kind, ch.data_dir / rel)
+            if kind == "thermal":
+                lo, hi = self.ortho_view._dem_range or (0.0, 1.0)
+                name = dict(th.PALETTE_NAMES).get(self.ortho_view.thermal_palette, self.ortho_view.thermal_palette)
+                self.statusBar().showMessage(tr("Temperatura: colori da {0} °C a {1} °C ({2})", f"{lo:.1f}", f"{hi:.1f}", tr(name)))
+            else:
+                self.statusBar().showMessage(tr("Anomalie termiche: blu più freddo dei dintorni, rosso più caldo, fino a ±{0} °C",
+                                                f"{self.ortho_view.diff_limit:.2f}"))
         elif kind == "zones":
             z = (ms.get("zoning") or {}).get(payload or "")
             if not z or not z.get("raster"):
@@ -6467,6 +6588,15 @@ class MainWindow(QMainWindow):
                     extra_vectors.append({"name": f"Zone {zname}", "path": z["file"], "table": "zone",
                                           "geometry": "POLYGON", "color": "#1a9850", "label": "classe"})
 
+        th_info = (ch.meta.get("thermal") or {}) if ch is not None else {}
+        if ch is not None and th_info.get("file") and (ch.data_dir / th_info["file"]).exists():
+            st = th_info.get("stats") or {}
+            rasters.append({"name": "Temperatura (°C)", "path": str(ch.data_dir / th_info["file"]), "ramp": "thermal",
+                            "limits": [float(st.get("p2", 0.0)), float(st.get("p98", 1.0))]})
+            an = th_info.get("anomaly") or {}
+            if an.get("file") and (ch.data_dir / an["file"]).exists():
+                rasters.append({"name": "Anomalie termiche (°C)", "path": str(ch.data_dir / an["file"]), "ramp": "diverging",
+                                "hidden": True})
         for provider in getattr(self, "qgis_providers", []):  # plugins: their rasters and GeoPackage layers
             try:
                 more_rasters, more_vectors = provider()

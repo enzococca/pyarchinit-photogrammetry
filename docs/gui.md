@@ -61,6 +61,17 @@ reflectance orthomosaic, every index, every zoning) and open from there; *Apri i
 QGIS project with the reflectance in false colour, the indices with their ramp, the zones as raster
 and as polygons, besides the orthomosaic, the DEM and the drawings.
 
+The same pane walks through a **thermal camera**: when the captures have a thermal band, the steps
+of the spectral bands give way to those of the temperatures - the measure's parameters (*Parametri...*:
+emissivity, reflected and ambient temperature, humidity, distance; the factory values of the DJI
+cameras by default), the thermal orthomosaic in degrees Celsius (*Costruisci...*, then shown on a
+ramp - iron, inferno, rainbow, greys - between two temperatures you set, as Metashape's raster
+calculator narrows the thermal scale; *Auto* goes back to the 2nd-98th percentile), the thermal
+anomalies (the temperature minus its surroundings within a radius) and the export that keeps the
+degrees (GeoTIFF float32 in degrees Celsius, 16-bit GeoTIFF in centikelvin, CSV). DJI R-JPEGs are
+decoded with DJI's free Thermal SDK, which goes in the folder `dji_tsdk` of the program's data; on
+the Mac it runs in Docker, so Docker Desktop must be running.
+
 ## Layout
 
 | Area | Content |

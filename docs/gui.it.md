@@ -63,6 +63,17 @@ ogni zonizzazione) e si aprono da lì; *Apri in QGIS* crea il progetto QGIS con 
 falso colore, gli indici con la loro scala, le zone come raster e come poligoni, oltre a ortofoto,
 DEM e disegni.
 
+Lo stesso pannello guida una **camera termica**: quando le riprese hanno una banda termica, i passi
+delle bande spettrali lasciano il posto a quelli delle temperature - i parametri della misura
+(*Parametri...*: emissività, temperatura riflessa e ambiente, umidità, distanza; per impostazione i
+valori di fabbrica delle camere DJI), l'ortofoto termica in gradi Celsius (*Costruisci...*, poi
+mostrata su una scala - ferro, inferno, arcobaleno, grigi - tra due temperature che scegli tu, come il
+raster calculator di Metashape restringe la scala termica; *Auto* torna al 2°-98° percentile), le
+anomalie termiche (la temperatura meno quella dei dintorni entro un raggio) e l'esportazione che
+conserva i gradi (GeoTIFF float32 in gradi Celsius, GeoTIFF a 16 bit in centikelvin, CSV). Gli R-JPEG
+DJI si decodificano con il Thermal SDK gratuito di DJI, che va nella cartella `dji_tsdk` dei dati del
+programma; sul Mac gira in Docker, quindi Docker Desktop deve essere avviato.
+
 ## Disposizione
 
 | Area | Contenuto |

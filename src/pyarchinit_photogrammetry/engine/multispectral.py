@@ -43,7 +43,7 @@ from ..core.progress import Progress, as_progress
 MICASENSE_BANDS = {"1": "Blue", "2": "Green", "3": "Red", "4": "NIR", "5": "RedEdge", "6": "LWIR"}
 DJI_BANDS = {"G": "Green", "R": "Red", "RE": "RedEdge", "NIR": "NIR"}
 SEQUOIA_BANDS = {"GRE": "Green", "RED": "Red", "REG": "RedEdge", "NIR": "NIR"}
-DEFAULT_REFERENCE = ("Red", "Green", "NIR", "RedEdge", "Blue")
+DEFAULT_REFERENCE = ("Visible", "Red", "Green", "NIR", "RedEdge", "Blue")  # a thermal camera's visible photo first
 INDICES = {  # name: (formula over band names, description)
     "NDVI": ("(NIR - Red) / (NIR + Red)", "vegetation vigour"),
     "NDRE": ("(NIR - RedEdge) / (NIR + RedEdge)", "chlorophyll, late season"),
@@ -55,6 +55,11 @@ INDICES = {  # name: (formula over band names, description)
     "Thermal": ("LWIR", "temperature (the thermal band itself)"),
 }
 _SUFFIX = re.compile(r"^(?P<stem>.+?)_(?P<band>\d|MS_[A-Z]+|GRE|RED|REG|NIR|RGB)$", re.IGNORECASE)
+# the DJI enterprise cameras (Mavic 2 Enterprise Advanced, M30T, Mavic 3 Thermal, H20T): a visible
+# photo (W wide, V visible) and a thermal frame (T) per capture; Z (zoom) and S (screen) are not bands
+_DJI_PAIR = re.compile(r"^(?P<stem>.+)_(?P<kind>[WTVZS])$", re.IGNORECASE)
+DJI_PAIR_BANDS = {"W": "Visible", "V": "Visible", "T": "LWIR"}
+NON_SPECTRAL = ("Visible", "LWIR")  # not reflectance: the visible photo, the temperatures
 
 
 # ------------------------------------------------------------------------------ the captures
@@ -90,16 +95,29 @@ def looks_multispectral(paths, recursive: bool = False, sample: int = 60) -> dic
     files = image_files(paths, recursive)
     if not files:
         return None
+    kinds = [DJI_PAIR_BANDS.get(m.group("kind").upper()) for m in (_DJI_PAIR.match(f.stem) for f in files) if m]
+    n_vis, n_th = kinds.count("Visible"), kinds.count("LWIR")
+    if n_vis and n_th:  # a thermal camera: visible photos and thermal frames, perhaps in different folders
+        return {"bands": ["LWIR", "Visible"], "captures": min(n_vis, n_th), "files": len(files), "thermal": True}
+    if n_th:  # the thermal frames alone: radiometric ones only
+        from .thermal import kind_of
+
+        probe = [f for f in files if _DJI_PAIR.match(f.stem) and DJI_PAIR_BANDS.get(_DJI_PAIR.match(f.stem).group("kind").upper()) == "LWIR"]
+        if kind_of(probe[0]) is not None:
+            return {"bands": ["LWIR"], "captures": n_th, "files": len(files), "thermal": True}
     caps = _captures_of(files[:sample])
     if not caps:
         return None
     bands = sorted({b for c in caps.values() for b in c})
     estimate = len(caps) if len(files) <= sample else int(round(len(caps) * len(files) / sample))
-    return {"bands": bands, "captures": estimate, "files": len(files)}
+    return {"bands": bands, "captures": estimate, "files": len(files), "thermal": "LWIR" in bands}
 
 
 def _captures_of(files: list[Path]) -> dict[str, dict[str, Path]]:
-    captures: dict[str, dict[str, Path]] = {}
+    pairs = [f for f in files if _DJI_PAIR.match(f.stem)]
+    captures: dict[str, dict[str, Path]] = _wide_thermal_pairs(pairs) if pairs else {}
+    thermal_alone = {k: v for k, v in captures.items() if set(v) == {"LWIR"}}
+    files = [f for f in files if not _DJI_PAIR.match(f.stem)]
     owner: dict[str, Path] = {}  # the folder a capture name comes from: the numbering of a camera
     # starts again in every folder (100MEDIA, 101MEDIA), so a repeated name takes its folder as a prefix
     first_stem: dict[str, str] = {}  # the capture of a DJI P4 Multispectral: six files of their own
@@ -139,7 +157,98 @@ def _captures_of(files: list[Path]) -> dict[str, dict[str, Path]]:
         if band is None:
             continue
         captures.setdefault(stem, {})[band] = f
-    return {k: v for k, v in captures.items() if len(v) >= 2}
+    return {k: v for k, v in captures.items() if len(v) >= 2 or k in thermal_alone}
+
+
+def _shot(path) -> tuple[float | None, tuple[float, float] | None]:
+    """When a photo was taken (seconds, from DateTimeOriginal and its sub-seconds) and where
+    (degrees), from its EXIF."""
+    from datetime import datetime
+
+    from PIL import ExifTags, Image
+
+    try:
+        with Image.open(path) as im:
+            ex = im.getexif()
+            sub = ex.get_ifd(ExifTags.IFD.Exif)
+            gps = ex.get_ifd(ExifTags.IFD.GPSInfo)
+    except Exception:  # noqa: BLE001
+        return None, None
+    t = None
+    stamp = sub.get(36867) or ex.get(306)
+    if stamp:
+        try:
+            t = datetime.strptime(str(stamp).strip()[:19], "%Y:%m:%d %H:%M:%S").timestamp()
+            frac = str(sub.get(37521) or "").strip()
+            if frac.isdigit():
+                t += float("0." + frac)
+        except ValueError:
+            t = None
+    where = None
+    try:
+        if gps and 2 in gps and 4 in gps:
+            dms = lambda v: float(v[0]) + float(v[1]) / 60 + float(v[2]) / 3600  # noqa: E731
+            where = (dms(gps[2]) * (-1 if gps.get(1) == "S" else 1), dms(gps[4]) * (-1 if gps.get(3) == "W" else 1))
+    except Exception:  # noqa: BLE001
+        where = None
+    return t, where
+
+
+def _wide_thermal_pairs(files: list[Path], max_seconds: float = 1.5, max_metres: float = 5.0) -> dict[str, dict[str, Path]]:
+    """The captures of a DJI enterprise camera: the visible photo (``_W``/``_V``) and the thermal
+    frame (``_T``) of the same moment, paired by their number when both have it once, else by the
+    time and the place of the shot (the camera may number the two files differently, and the two
+    kinds may sit in different folders: RGB and IR). Named after the visible photo."""
+    wide: dict[str, list[Path]] = {}
+    thermal: dict[str, list[Path]] = {}
+    for f in files:
+        m = _DJI_PAIR.match(f.stem)
+        band = DJI_PAIR_BANDS.get(m.group("kind").upper())
+        if band == "Visible":
+            wide.setdefault(m.group("stem"), []).append(f)
+        elif band == "LWIR":
+            thermal.setdefault(m.group("stem"), []).append(f)
+    out: dict[str, dict[str, Path]] = {}
+    used_w, used_t = set(), set()
+    for stem in sorted(set(wide) & set(thermal)):
+        if len(wide[stem]) == 1 and len(thermal[stem]) == 1:
+            out[stem] = {"Visible": wide[stem][0], "LWIR": thermal[stem][0]}
+            used_w.add(wide[stem][0])
+            used_t.add(thermal[stem][0])
+    rest_w = [f for v in wide.values() for f in v if f not in used_w]
+    rest_t = [f for v in thermal.values() for f in v if f not in used_t]
+    if not wide:  # the thermal frames alone (no visible photos): each its own capture
+        for f in rest_t:
+            name = _DJI_PAIR.match(f.stem).group("stem")
+            if name in out:
+                name = f"{f.parent.name}_{name}"
+            out[name] = {"LWIR": f}
+        return out
+    if rest_w and rest_t:
+        shots_w = [(f, *_shot(f)) for f in rest_w]
+        shots_w = [s for s in shots_w if s[1] is not None]
+        times = np.array([s[1] for s in shots_w]) if shots_w else np.zeros(0)
+        for f in rest_t:
+            t, where = _shot(f)
+            if t is None or not len(times):
+                continue
+            order = np.argsort(np.abs(times - t))
+            for k in order[:3]:
+                wf, wt, wwhere = shots_w[k]
+                if abs(wt - t) > max_seconds or wf in used_w:
+                    continue
+                if where and wwhere:
+                    dy = (where[0] - wwhere[0]) * 111320.0
+                    dx = (where[1] - wwhere[1]) * 111320.0 * np.cos(np.radians(where[0]))
+                    if np.hypot(dx, dy) > max_metres:
+                        continue
+                name = _DJI_PAIR.match(wf.stem).group("stem")
+                if name in out:
+                    name = f"{wf.parent.name}_{name}"
+                out[name] = {"Visible": wf, "LWIR": f}
+                used_w.add(wf)
+                break
+    return out
 
 
 _EXIF_BASICS = {258: "BitsPerSample", 50714: "BlackLevel", 34855: "ISOSpeedRatings", 33434: "ExposureTime",
@@ -501,7 +610,7 @@ def add_captures(chunk: Chunk, paths, reference: str | None = None, recursive: b
     if existing and ms.get("reference"):
         reference = ms["reference"]
     else:
-        reference = reference or next((b for b in DEFAULT_REFERENCE if b in bands), bands[0])
+        reference = reference or next((b for b in DEFAULT_REFERENCE + ("LWIR",) if b in bands), bands[0])
     taken = {c.meta.get("capture") for c in existing}
     usable: dict[str, dict[str, Path]] = {}
     for stem, files in captures.items():
@@ -522,8 +631,21 @@ def add_captures(chunk: Chunk, paths, reference: str | None = None, recursive: b
     folder = chunk.data_dir / "multispectral" / "reference"
     folder.mkdir(parents=True, exist_ok=True)
     copies = {}
+    stretch = None
+    if reference == "LWIR":  # the thermal frames alone: one stretch for all their 8-bit copies
+        from .thermal import stretch_of
+
+        stretch = ms.get("thermal_stretch") or list(stretch_of([f["LWIR"] for f in usable.values()]))
+        ms["thermal_stretch"] = stretch
     for stem, files in usable.items():
-        copies[stem] = reference_copy(files[reference], folder / f"{stem}.jpg")
+        if reference == "Visible":  # a thermal camera's visible photo: the photo itself, colours and all
+            copies[stem] = Path(files[reference])
+        elif reference == "LWIR":
+            from .thermal import reference_copy as thermal_copy
+
+            copies[stem] = thermal_copy(files[reference], folder / f"{stem}.jpg", tuple(stretch))
+        else:
+            copies[stem] = reference_copy(files[reference], folder / f"{stem}.jpg")
     cams = chunk.add_photos([copies[s] for s in usable]) if usable else []
     by_path = {Path(c.path).resolve(): c for c in cams}
     for stem, files in usable.items():
@@ -593,8 +715,16 @@ def band_stack(chunk: Chunk, camera, bands: list[str], cache: dict | None = None
     reference = ms.get("reference")
     files = camera.meta.get("bands") or {}
     factors = (ms.get("panel") or {}).get("factors") or {}
+    files = {b: p for b, p in files.items() if b != "Visible" or b == reference}
     tags = {b: xmp_of(p) for b, p in files.items()}
-    refl = {b: reflectance_image(p, factors.get(b), tags[b]) for b, p in files.items()}
+    refl = {}
+    for b, p in files.items():
+        if b == "LWIR":  # a thermal band: degrees Celsius, not reflectance
+            from .thermal import decode_file
+
+            refl[b] = decode_file(p)
+        else:
+            refl[b] = reflectance_image(p, factors.get(b), tags[b])
     hs = ms.get("registration", {}).get(str(camera.key))
     if hs is None:
         quality: dict = {}
@@ -627,7 +757,7 @@ def balance_gains(chunk: Chunk, bands: list[str] | None = None, samples: int = 4
 
     progress = as_progress(progress)
     ms = chunk.meta.get("multispectral") or {}
-    bands = list(bands or ms.get("bands") or [])
+    bands = [b for b in (bands or ms.get("bands") or []) if b not in NON_SPECTRAL]  # temperatures: offsets, see thermal
     cams = [c for c in multispectral_cameras(chunk) if c.aligned]
     if not bands or len(cams) < 2:
         return {}
@@ -693,10 +823,12 @@ def build_reflectance(chunk: Chunk, bands: list[str] | None = None, resolution: 
 
     progress = as_progress(progress)
     ms = chunk.meta.get("multispectral") or {}
-    bands = list(bands or ms.get("bands") or [])
+    bands = list(bands or [b for b in (ms.get("bands") or []) if b != "Visible"])
     cams = multispectral_cameras(chunk)
     if not bands or not cams:
         raise RuntimeError("no multispectral captures in the chunk (add them with add_captures)")
+    if all(b in NON_SPECTRAL for b in bands) and ms.get("reference") == "Visible":
+        raise RuntimeError("the captures of a thermal camera have no spectral bands: build the temperature orthomosaic")
     folder = chunk.data_dir / "multispectral"
     folder.mkdir(parents=True, exist_ok=True)
     gains = None

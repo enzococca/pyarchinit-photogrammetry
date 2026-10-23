@@ -331,10 +331,13 @@ for r in cfg["rasters"]:
         lyr.setRenderer(index_renderer(lyr, float(lo), float(hi)))
     elif r.get("ramp") == "zones" and lyr.isValid():
         lyr.setRenderer(zones_renderer(lyr, int(r.get("classes") or 3)))
-    elif r.get("ramp") in ("grey", "grey_inverted", "diverging") and lyr.isValid():  # a geophysical grid
+    elif r.get("ramp") in ("grey", "grey_inverted", "diverging", "thermal") and lyr.isValid():  # grids, temperatures
         lo, hi = r.get("limits") or lyr.dataProvider().cumulativeCut(1, 0.02, 0.98)
         lo, hi = float(lo), float(hi)
-        if r["ramp"] == "diverging":
+        if r["ramp"] == "thermal":  # iron, as the thermal cameras show it
+            stops = [(0.0, "#000000"), (0.18, "#28006e"), (0.38, "#8c008c"), (0.55, "#dc2828"), (0.72, "#fa8200"),
+                     (0.88, "#ffd728"), (1.0, "#ffffe6")]
+        elif r["ramp"] == "diverging":
             stops = [(0.0, "#2166ac"), (0.5, "#f7f7f7"), (1.0, "#b2182b")]
         elif r["ramp"] == "grey_inverted":
             stops = [(0.0, "#ffffff"), (1.0, "#000000")]

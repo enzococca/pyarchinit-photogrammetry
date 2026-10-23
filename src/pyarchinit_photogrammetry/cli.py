@@ -1780,6 +1780,55 @@ def multispectral(project: Path, what: str = typer.Argument(..., help="add, pane
 
 
 @app.command()
+def thermal(project: Path, what: str = typer.Argument(..., help="status, params, build, anomalies or export"),
+            target: Optional[Path] = typer.Argument(None, help="export: the file to write (.tif, .csv)"),
+            emissivity: Optional[float] = typer.Option(None, help="params: emissivity (factory 0.95)"),
+            reflected: Optional[float] = typer.Option(None, help="params: reflected temperature, degrees (factory 22)"),
+            ambient: Optional[float] = typer.Option(None, help="params: ambient temperature, degrees (factory 22)"),
+            humidity: Optional[float] = typer.Option(None, help="params: relative humidity, percent (70)"),
+            distance: Optional[float] = typer.Option(None, help="params: distance to the ground, metres (default: the flight height, 1-25)"),
+            resolution: Optional[float] = typer.Option(None, help="build: metres per pixel (default: a thermal pixel on the ground)"),
+            balance: bool = typer.Option(True, help="build: take away the offsets between frames"),
+            radius: float = typer.Option(2.0, help="anomalies: the radius of the surroundings, metres"),
+            fmt: Optional[str] = typer.Option(None, "--format", help="export: tif (degrees, float32), tif16 (centikelvin) or csv"),
+            chunk: Optional[str] = None):
+    """Thermal frames (a DJI R-JPEG camera, MicaSense LWIR, temperature TIFFs) added with
+    ``ppg multispectral PROJECT add``: the measure's parameters, the temperature orthomosaic in
+    degrees Celsius (DJI's Thermal SDK decodes the R-JPEGs; on macOS it runs in Docker), its
+    anomalies, the exports that keep degrees."""
+    from .engine import thermal as th
+
+    doc, ch = _open(project, chunk)
+    if what == "status":
+        st = th.decoder_status()
+        typer.echo(json.dumps({"decoder": st, "params": th.params_of(ch),
+                               "thermal": {k: v for k, v in (ch.meta.get("thermal") or {}).items() if k != "registration"}},
+                              indent=1, default=str))
+    elif what == "params":
+        given = {k: v for k, v in (("emissivity", emissivity), ("reflected", reflected), ("ambient", ambient),
+                                    ("humidity", humidity), ("distance", distance)) if v is not None}
+        typer.echo(json.dumps(th.set_params(ch, **given), indent=1))
+        doc.save()
+    elif what == "build":
+        path = th.build_thermal(ch, resolution=resolution, balance=balance, progress=print_progress)
+        doc.save()
+        info = ch.meta["thermal"]
+        typer.echo(f"temperature orthomosaic: {path} ({info['resolution'] * 100:.1f} cm/px"
+                   + (f", {info['stats']['p2']:.1f} - {info['stats']['p98']:.1f} degrees" if info.get("stats") else "")
+                   + (f", offsets between frames {info['offsets']['spread']:.2f} degrees" if info.get("offsets") else "") + ")")
+    elif what == "anomalies":
+        path = th.anomalies(ch, radius_m=radius)
+        doc.save()
+        typer.echo(f"thermal anomalies: {path}")
+    elif what == "export":
+        if target is None:
+            raise typer.BadParameter("export needs the file to write")
+        typer.echo(str(th.export(ch, target, fmt)))
+    else:
+        raise typer.BadParameter("what: status, params, build, anomalies or export")
+
+
+@app.command()
 def satellite(project: Path, what: str = typer.Argument(..., help="info, ortho or dsm"),
               scene: Path = typer.Argument(..., help="the scene (GeoTIFF with its RPC, or a sidecar beside it)"),
               scene_b: Optional[Path] = typer.Argument(None, help="dsm: the second scene of the stereo pair"),

@@ -2,11 +2,14 @@
 read from the chunk, the products shown in the raster view and sent to QGIS."""
 from __future__ import annotations
 
+import sys
+
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QComboBox, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSpinBox,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
+                               QSpinBox, QVBoxLayout, QWidget)
 
 from ..engine.multispectral import INDICES
+from ..engine.thermal import PALETTE_NAMES as THERMAL_PALETTES
 from .i18n import tr
 from .icons import icon
 from .image_views import INDEX_PALETTES
@@ -16,8 +19,10 @@ TRUE_COLOUR = ("Red", "Green", "Blue")
 
 
 class MultispectralPane(QWidget):
-    """Seven steps, each with its state and its button; the buttons of a step that cannot run yet
-    are disabled, and the state says what is missing."""
+    """The steps of a multispectral or thermal camera, each with its state and its button; the
+    buttons of a step that cannot run yet are disabled, the state says what is missing. The steps
+    of the spectral bands (panel, reflectance, indices, zoning) show when the captures have them,
+    those of the temperatures when they have a thermal band; the numbers follow what shows."""
 
     add_requested = Signal()
     align_requested = Signal()
@@ -29,6 +34,11 @@ class MultispectralPane(QWidget):
     zoning_requested = Signal(str, int, str)  # index, classes, method
     qgis_requested = Signal()
     palette_requested = Signal(str)  # the ramp of the indices shown
+    thermal_params_requested = Signal()
+    thermal_build_requested = Signal()
+    thermal_show_requested = Signal(str, object)  # palette, (low, high) in degrees or None for the automatic range
+    anomaly_requested = Signal(float)  # radius in metres
+    thermal_export_requested = Signal(str)  # tif, tif16, csv
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -43,10 +53,12 @@ class MultispectralPane(QWidget):
         lay = QVBoxLayout(body)
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(4)
-        intro = QLabel(tr("Riprese di una camera multispettrale: i passi in ordine. Ogni passo dice cosa gli manca."))
+        intro = QLabel(tr("Riprese di una camera multispettrale o termica: i passi in ordine. Ogni passo dice cosa gli manca."))
         intro.setWordWrap(True)
         lay.addWidget(intro)
         self.states: dict[str, QLabel] = {}
+        self.rows: dict[str, tuple] = {}  # key: (title label, title, widgets, state label)
+        self.order: list[str] = []
         grid = QGridLayout()
         grid.setColumnStretch(1, 1)
         lay.addLayout(grid)
@@ -64,6 +76,8 @@ class MultispectralPane(QWidget):
             s.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             grid.addWidget(s, row * 2 + 1, 1)
             self.states[key] = s
+            self.rows[key] = (t, title, list(widgets), s)
+            self.order.append(key)
 
         self.b_add = QPushButton(icon("photos"), tr("Aggiungi riprese..."))
         self.b_add.setToolTip(tr("Una cartella con un file per banda di ogni scatto (MicaSense, DJI, Sequoia)"))
@@ -104,6 +118,52 @@ class MultispectralPane(QWidget):
         self.b_qgis.setToolTip(tr("Progetto QGIS con riflettanza, indici, zone e i disegni"))
         step(6, "zoning", tr("Zonizzazione (poligoni in un GeoPackage: la mappa di prescrizione)"),
              [self.s_classes, self.c_method, self.b_zoning, self.b_qgis])
+        # the temperatures (a thermal band: DJI R-JPEGs, MicaSense LWIR, temperature TIFFs)
+        self.b_tparams = QPushButton(icon("settings"), tr("Parametri..."))
+        self.b_tparams.setToolTip(tr("Emissività, temperatura riflessa e ambiente, umidità, distanza: valgono per tutti i fotogrammi"))
+        step(7, "thermal_params", tr("Parametri di misura della termica"), [self.b_tparams])
+        self.b_thermal = QPushButton(icon("ortho"), tr("Costruisci..."))
+        self.b_thermal.setToolTip(tr("Ortofoto in gradi Celsius: un GeoTIFF a virgola mobile che resta radiometrico in ogni esportazione"))
+        self.c_tpalette = QComboBox()
+        for key, name in THERMAL_PALETTES:
+            self.c_tpalette.addItem(tr(name), key)
+        self.s_tlow = QDoubleSpinBox()
+        self.s_thigh = QDoubleSpinBox()
+        for w, tip in ((self.s_tlow, tr("Temperatura del colore più freddo (°C)")), (self.s_thigh, tr("Temperatura del colore più caldo (°C)"))):
+            w.setRange(-100.0, 1000.0)
+            w.setDecimals(1)
+            w.setSingleStep(0.5)
+            w.setSuffix(" °C")
+            w.setToolTip(tip)
+        self.b_tauto = QPushButton(tr("Auto"))
+        self.b_tauto.setToolTip(tr("Dal 2° al 98° percentile dell'ortofoto"))
+        self.b_tshow = QPushButton(icon("view"), tr("Mostra"))
+        step(8, "thermal", tr("Ortofoto termica (°C)"), [self.b_thermal, self.c_tpalette, self.s_tlow, self.s_thigh,
+                                                        self.b_tauto, self.b_tshow])
+        self.s_radius = QDoubleSpinBox()
+        self.s_radius.setRange(0.1, 500.0)
+        self.s_radius.setDecimals(1)
+        self.s_radius.setValue(2.0)
+        self.s_radius.setPrefix(tr("raggio "))
+        self.s_radius.setSuffix(" m")
+        self.b_anomaly = QPushButton(icon("run"), tr("Calcola e mostra"))
+        self.b_anomaly.setToolTip(tr("La temperatura meno quella dei dintorni: i muri e i fossati sepolti cambiano il suolo sopra di loro"))
+        step(9, "anomaly", tr("Anomalie termiche"), [self.s_radius, self.b_anomaly])
+        self.c_texport = QComboBox()
+        self.c_texport.addItem(tr("GeoTIFF in gradi Celsius (32 bit)"), "tif")
+        self.c_texport.addItem(tr("GeoTIFF in centikelvin (16 bit)"), "tif16")
+        self.c_texport.addItem(tr("CSV (x, y, temperatura)"), "csv")
+        self.b_texport = QPushButton(icon("export"), tr("Esporta..."))
+        step(10, "thermal_export", tr("Esporta le temperature (restano in gradi)"), [self.c_texport, self.b_texport])
+        self.b_tparams.clicked.connect(self.thermal_params_requested)
+        self.b_thermal.clicked.connect(self.thermal_build_requested)
+        self.b_tshow.clicked.connect(lambda: self.thermal_show_requested.emit(self.thermal_palette(), self.thermal_range()))
+        self.c_tpalette.currentIndexChanged.connect(
+            lambda _i: self.thermal_show_requested.emit(self.thermal_palette(), self.thermal_range()) if self.b_tshow.isEnabled() else None)
+        self.b_tauto.clicked.connect(self._auto_range)
+        self.b_anomaly.clicked.connect(lambda: self.anomaly_requested.emit(float(self.s_radius.value())))
+        self.b_texport.clicked.connect(lambda: self.thermal_export_requested.emit(str(self.c_texport.currentData())))
+        self._auto_limits: tuple[float, float] | None = None
         lay.addStretch(1)
         self.b_add.clicked.connect(self.add_requested)
         self.b_align.clicked.connect(self.align_requested)
@@ -149,6 +209,29 @@ class MultispectralPane(QWidget):
     def palette(self) -> str:
         return str(self.c_palette.currentData())
 
+    def thermal_palette(self) -> str:
+        return str(self.c_tpalette.currentData())
+
+    def thermal_range(self) -> tuple[float, float] | None:
+        """The limits of the temperature colours, or None when they are the automatic ones."""
+        lo, hi = float(self.s_tlow.value()), float(self.s_thigh.value())
+        if self._auto_limits is not None and abs(lo - self._auto_limits[0]) < 0.05 and abs(hi - self._auto_limits[1]) < 0.05:
+            return None
+        return (lo, hi) if hi > lo else None
+
+    def set_thermal_limits(self, lo: float, hi: float, automatic: bool = False) -> None:
+        for w, v in ((self.s_tlow, lo), (self.s_thigh, hi)):
+            w.blockSignals(True)
+            w.setValue(round(float(v), 1))
+            w.blockSignals(False)
+        if automatic:
+            self._auto_limits = (round(float(lo), 1), round(float(hi), 1))
+
+    def _auto_range(self) -> None:
+        if self._auto_limits is not None:
+            self.set_thermal_limits(*self._auto_limits)
+        self.thermal_show_requested.emit(self.thermal_palette(), None)
+
     def palette_label(self) -> str:
         return self.c_palette.currentText()
 
@@ -181,6 +264,20 @@ class MultispectralPane(QWidget):
         reflectance orthomosaic, the indices and the zonings built)."""
         ms = (chunk.meta.get("multispectral") if chunk is not None else None) or {}
         captures = int(ms.get("captures") or 0)
+        bands = list(ms.get("bands") or [])
+        thermal_band = "LWIR" in bands
+        spectral = any(b not in ("Visible", "LWIR") for b in bands) or not bands
+        visible = [k for k in self.order if (k not in ("panel", "reflectance", "index", "zoning") or spectral)
+                   and (not k.startswith(("thermal", "anomaly")) or thermal_band)]
+        for k in self.order:
+            title_label, title, widgets, state = self.rows[k]
+            on = k in visible
+            for w in [title_label, state] + widgets:
+                w.setVisible(on)
+            if on:
+                title_label.setText(f"<b>{visible.index(k) + 1}. {title}</b>")
+        if thermal_band:
+            self._thermal_state(chunk)
         aligned = len(chunk.aligned_cameras) if chunk is not None else 0
         cams = len(chunk.cameras) if chunk is not None else 0
         has_dem = bool(chunk is not None and chunk.dem_path is not None and chunk.dem_path.exists())
@@ -233,3 +330,40 @@ class MultispectralPane(QWidget):
             self.states["zoning"].setText("; ".join(parts))
         else:
             self.states["zoning"].setText(tr("Da fare dopo un indice: le classi come poligoni con classe, intervallo, media e area."))
+
+    def _thermal_state(self, chunk) -> None:
+        """The steps of the temperatures: the measure's parameters and who decodes the frames, the
+        orthomosaic in degrees with its range, the anomalies, the exports."""
+        from ..engine import thermal
+
+        info = (chunk.meta.get("thermal") or {}) if chunk is not None else {}
+        p = thermal.params_of(chunk)
+        distance = tr("altezza di volo (1-25 m)") if p["distance"] is None else f"{p['distance']:g} m"
+        decoder = (tr("DJI Thermal SDK in Docker") if sys.platform == "darwin" else tr("DJI Thermal SDK")) \
+            if thermal.sdk_dir() is not None else tr("senza DJI Thermal SDK: servono i file già in gradi")
+        self.states["thermal_params"].setText(tr("Emissività {0}, riflessa {1} °C, ambiente {2} °C, umidità {3} %, distanza {4}; {5}",
+                                                 f"{p['emissivity']:g}", f"{p['reflected']:g}", f"{p['ambient']:g}",
+                                                 f"{p['humidity']:g}", distance, decoder))
+        has_dem = bool(chunk is not None and chunk.dem_path is not None and chunk.dem_path.exists())
+        path = thermal.thermal_path(chunk) if chunk is not None else None
+        self.b_thermal.setEnabled(has_dem)
+        for w in (self.b_tshow, self.c_tpalette, self.s_tlow, self.s_thigh, self.b_tauto, self.b_anomaly, self.s_radius,
+                  self.b_texport, self.c_texport):
+            w.setEnabled(path is not None)
+        if path is not None:
+            st = info.get("stats") or {}
+            if st and self._auto_limits is None:
+                self.set_thermal_limits(st.get("p2", 0.0), st.get("p98", 1.0), automatic=True)
+            spread = (info.get("offsets") or {}).get("spread")
+            text = tr("Pronta: {0} cm/px, {1} - {2} °C", f"{float(info.get('resolution', 0)) * 100:.1f}",
+                      f"{st.get('p2', 0):.1f}", f"{st.get('p98', 0):.1f}")
+            if spread is not None:
+                text += tr("; scostamenti tra i fotogrammi tolti ({0} °C)", f"{spread:.2f}")
+            self.states["thermal"].setText(text)
+        else:
+            self.states["thermal"].setText(tr("Da fare dopo il DEM: le temperature di ogni fotogramma sull'ortofoto, in gradi."))
+            self._auto_limits = None
+        an = info.get("anomaly")
+        self.states["anomaly"].setText(tr("Calcolate con raggio {0} m", f"{an['radius_m']:g}") if an else
+                                       tr("Da fare dopo l'ortofoto termica."))
+        self.states["thermal_export"].setText(tr("GeoTIFF in gradi o centikelvin con i parametri nei tag, o CSV: QGIS e gli altri programmi leggono le temperature."))

@@ -158,6 +158,46 @@ Thermal, or any formula over the band names) makes the index on the same grid; `
 area into a GeoPackage - the prescription map of agriculture; in archaeology the crop marks over
 buried walls and ditches. `ppg multispectral PROJECT add|panel|reflectance|index|zoning|bands`.
 
+### Thermal cameras
+
+A drone thermal camera shoots a visible photo and a thermal frame at the same moment (DJI Mavic 2
+Enterprise Advanced, M30T, Mavic 3 Thermal, H20T: `DJI_0517_W.JPG` and `DJI_0518_T.JPG`; MicaSense
+Altum: the sixth band, LWIR). `add_captures` recognises them: the pairs are found by their number
+when it is the same, else by the time and the place of the shot (these cameras number every file,
+and the two kinds may sit in different folders), the visible photo is the photo of the capture as
+it is, the thermal frame its `LWIR` band. Thermal frames without visible photos are captures of
+their own: an 8-bit copy of each, all with one stretch of the raw counts, is aligned as the photo.
+
+`engine.thermal` turns the frames into degrees Celsius (`temperature(chunk, cam)`, `decode_file`):
+DJI R-JPEGs through DJI's Thermal SDK (`dji_irp -a measure --measurefmt float32`, all the frames in
+one run; Windows and Linux natively, on macOS in Docker with an image the program prepares the first
+time: Docker Desktop must be running), MicaSense LWIR TIFFs in centikelvin, TIFFs already in degrees
+or kelvin. The SDK goes in the folder `dji_tsdk` of the program's data (or `PPG_DJI_TSDK`); it is
+free from dji.com. The raw counts of an R-JPEG (`raw_counts`, its APP3 segments) grow with the
+temperature but are not degrees: they serve the geometry only. The parameters of the measure
+(`params_of`, `set_params`) hold for every frame: emissivity 0.95, reflected and ambient
+temperature 22 °C (the factory values of the DJI cameras), humidity 70 %, the distance the flight
+height clipped to the SDK's 1-25 m; changing them decodes the frames again.
+
+`build_thermal(chunk, resolution=None, balance=True)` makes `<data>/multispectral/thermal.tif`, one
+float32 band in degrees Celsius with the parameters in its tags, NaN where nothing, at the ground
+size of a thermal pixel unless asked otherwise. With visible photos the thermal frame of every
+capture is put on its photo by a homography (`registrations`): the first guess from the focal
+lengths, or a search of the part of the photo the frame covers, refined by ECC on the gradient
+magnitudes; one homography for the flight (the median of the captures that agree best: the camera
+is rigid), refined capture by capture only where that agrees clearly better. The engine samples
+the temperatures on a reduced grid of the visible photo (`thermal_stack`), and a photo whose frame
+does not reach a cell leaves it to the next one that does. `balance_offsets` takes away an offset
+per frame found where the frames overlap (uncooled cameras drift between their flat-field
+corrections, and the ground warms during a flight: on a Mavic 2 Enterprise Advanced flight of 28
+minutes the offsets spread by about a degree), the mean level kept. `anomalies(chunk, radius_m)` is
+the temperature minus its surroundings (`thermal_anomaly.tif`, degrees around zero); `difference`
+subtracts another temperature orthomosaic of the same ground (night against day).
+`export(chunk, path, "tif" | "tif16" | "csv")` keeps the temperatures: float32 GeoTIFF in degrees,
+16-bit GeoTIFF in centikelvin (degrees = value / 100 - 273.15, with scale and offset set), CSV of
+x, y and temperature, the parameters in the tags or the header. `ppg thermal PROJECT
+status|params|build|anomalies|export`.
+
 ### Satellite imagery
 
 `engine.satellite`: a satellite scene comes with its *rational polynomial coefficients* (RPC),

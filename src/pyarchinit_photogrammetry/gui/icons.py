@@ -70,7 +70,7 @@ ICONS = {
     "warning": ("mdi6.alert", "amber"), "info": ("mdi6.information", "blue"),
     "copy": ("mdi6.content-copy", "grey"), "folder": ("mdi6.folder-outline", "amber"),
     "search": ("mdi6.magnify", "grey"), "clear": ("mdi6.delete-sweep-outline", "grey"),
-    "ok": ("mdi6.check-circle", "green"), "view": ("mdi6.eye-outline", "blue"), "edit": ("mdi6.pencil-outline", "slate"),
+    "ok": ("mdi6.check-circle", "green"), "view": ("mdi6.eye-outline", "blue"), "settings": ("mdi6.tune-variant", "slate"), "edit": ("mdi6.pencil-outline", "slate"),
     "version": ("mdi6.layers-outline", "amber"),
     "previous": ("mdi6.chevron-left-circle-outline", "blue"), "next": ("mdi6.chevron-right-circle-outline", "blue"),
     "filter": ("mdi6.filter-outline", "blue"), "update": ("mdi6.cloud-download-outline", "green"), "colour": ("mdi6.palette-outline", "pink"), "mask": ("mdi6.image-filter-black-white", "pink"), "elevation": ("mdi6.wall", "brown"), "video": ("mdi6.video-outline", "violet"), "quality": ("mdi6.image-filter-center-focus", "teal"), "panorama": ("mdi6.panorama-sphere-outline", "violet"), "lens": ("mdi6.camera-iris", "teal"), "refine": ("mdi6.target-variant", "blue"), "precision": ("mdi6.crosshairs-question", "orange"), "fieldcheck": ("mdi6.clipboard-check-outline", "green"), "batch": ("mdi6.playlist-play", "blue"), "undo": ("mdi6.undo", "slate"), "redo": ("mdi6.redo", "slate"), "diagnostics": ("mdi6.stethoscope", "teal"), "graph": ("mdi6.graph-outline", "teal"), "matches": ("mdi6.vector-link", "teal"), "residuals": ("mdi6.arrow-expand-all", "orange"), "area": ("mdi6.vector-square", "pink"), "globe": ("mdi6.earth", "blue"), "scan": ("mdi6.laser-pointer", "red"), "slope": ("mdi6.slope-uphill", "brown"), "aspect": ("mdi6.compass-outline", "brown"),
