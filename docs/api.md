@@ -218,8 +218,10 @@ capture is put on its photo by a homography (`registrations`): the first guess f
 lengths, or a search of the part of the photo the frame covers, refined by ECC on the gradient
 magnitudes; one homography for the flight (the median of the captures that agree best: the camera
 is rigid), refined capture by capture only where that agrees clearly better. The engine samples
-the temperatures on a reduced grid of the visible photo (`thermal_stack`), and a photo whose frame
-does not reach a cell leaves it to the next one that does. `balance_offsets` takes away an offset
+the temperatures on a reduced grid of the visible photo (`thermal_stack`), and a cell takes the best
+photo whose frame reaches it, however many better photos frame it only at their edge (on a flight at
+two heights the low visible photos win on resolution where their thermal frames do not reach).
+`balance_offsets` takes away an offset
 per frame found where the frames overlap (uncooled cameras drift between their flat-field
 corrections, and the ground warms during a flight: on a Mavic 2 Enterprise Advanced flight of 28
 minutes the offsets spread by about a degree), the mean level kept. `anomalies(chunk, radius_m)` is

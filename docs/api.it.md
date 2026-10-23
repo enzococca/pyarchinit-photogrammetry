@@ -226,8 +226,10 @@ scatto va sulla sua foto con un'omografia (`registrations`): la prima stima dall
 ricerca della parte di foto che il fotogramma copre, affinata con ECC sulle magnitudini del
 gradiente; un'omografia per il volo (la mediana degli scatti che si accordano meglio: la camera è
 rigida), affinata scatto per scatto solo dove si accorda chiaramente meglio. Il motore legge le
-temperature su una griglia ridotta della foto visibile (`thermal_stack`), e una foto il cui
-fotogramma non arriva a una cella la lascia alla successiva che ci arriva. `balance_offsets` toglie
+temperature su una griglia ridotta della foto visibile (`thermal_stack`), e una cella prende la foto
+migliore il cui fotogramma ci arriva, per quante foto migliori la inquadrino solo al bordo (in un volo
+a due quote le foto visibili basse vincono per risoluzione dove i loro fotogrammi termici non arrivano).
+`balance_offsets` toglie
 uno scostamento per fotogramma trovato dove i fotogrammi si sovrappongono (le camere non raffreddate
 derivano tra una correzione di campo piatto e l'altra, e il terreno si scalda durante il volo: in un
 volo di 28 minuti di un Mavic 2 Enterprise Advanced gli scostamenti hanno una deviazione di circa un
