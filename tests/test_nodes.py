@@ -90,7 +90,10 @@ def test_key_points_and_depth_maps_shared_with_a_node(scene_dir, scene, tmp_path
         assert not list((files_dir / "nodes" / "todo").iterdir()) and not list((files_dir / "nodes" / "done").iterdir())
     finally:
         stop.set()
-        node.join(10)
+        # the node leaves (and takes its hello away) once the unit it is working on is done: on a slow
+        # computer that is more than the 10 s this waited, and the node was still there below
+        node.join(120)
+    assert not node.is_alive() and not nodes.present(files_dir)
     # the depth maps are as good as alone
     ch.build_point_cloud()
     ch.build_dem()
