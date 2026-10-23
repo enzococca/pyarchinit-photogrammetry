@@ -89,7 +89,7 @@ matching (both COLMAP's). `ppg align PROJECT --matcher disk`.
 On the 407 thermal frames of a Mavic 2 Enterprise Advanced flight at 20 m (photos at 320 pixels,
 `quality="high"`), SIFT aligned 405 one photo at a time (its global solution missed the GPS by 78
 m) after 108 s of matching and 229 s of alignment; DISK aligned all 407 at once (513 s and 22 s),
-ALIKED too (1187 s and 23 s); the temperature orthomosaics came out equally sharp and the cameras as
+ALIKED 404 of them (1229 s and 29 s); the temperature orthomosaics came out equally sharp and the cameras as
 close to the GPS (1.7-1.9 m median). Without turning the photos DISK aligned 267. SIFT stays the
 default: the learned points are for the photos SIFT cannot hold together.
 

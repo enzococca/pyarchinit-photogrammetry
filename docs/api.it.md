@@ -91,7 +91,7 @@ delle foto a 360 gradi, né con l'abbinamento guidato (entrambi di COLMAP). `ppg
 Sui 407 fotogrammi termici di un volo di un Mavic 2 Enterprise Advanced a 20 m (foto a 320 pixel,
 `quality="high"`), SIFT ne ha allineati 405 una foto alla volta (la sua soluzione globale mancava il GPS
 di 78 m) dopo 108 s di abbinamento e 229 s di allineamento; DISK li ha allineati tutti e 407 insieme
-(513 s e 22 s), ALIKED anche (1187 s e 23 s); le ortofoto delle temperature sono venute nitide allo
+(513 s e 22 s), ALIKED 404 (1229 s e 29 s); le ortofoto delle temperature sono venute nitide allo
 stesso modo e le camere vicine al GPS allo stesso modo (1,7-1,9 m di mediana). Senza girare le foto
 DISK ne allineava 267. SIFT resta la scelta predefinita: i punti appresi servono per le foto che SIFT
 non riesce a tenere insieme.
