@@ -23,3 +23,16 @@ def test_data_files_are_package_data():
             and not any(part.startswith(".") for part in p.relative_to(PKG).parts)]  # tool caches
     missing = [f for f in data if not any(fnmatch.fnmatch(f, pat) for pat in patterns)]
     assert data and not missing, f"not declared in [tool.setuptools.package-data]: {missing}"
+
+
+def test_the_application_carries_the_figure_backends_plugins_use():
+    """matplotlib loads the backend of a figure's format when it is saved (SVG, PDF, EPS): the
+    program itself writes PNG only, so PyInstaller saw Agg alone and a plugin drawing its logs as
+    SVG stopped with "No module named 'matplotlib.backends.backend_svg'" in the application 1.3.0.
+    The spec names them, and the smoke test of the application saves a figure in each format."""
+    spec = (ROOT / "packaging" / "ppg_gui.spec").read_text()
+    for backend in ("backend_svg", "backend_pdf", "backend_ps", "backend_qtagg"):
+        assert f"matplotlib.backends.{backend}" in spec, backend
+    check = (ROOT / "src" / "pyarchinit_photogrammetry" / "gui" / "__init__.py").read_text()
+    assert '("png", "svg", "pdf", "eps")' in check
+

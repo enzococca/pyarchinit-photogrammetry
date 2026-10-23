@@ -15,7 +15,11 @@ ICON = str(ICON) if ICON and ICON.exists() else None
 hidden = (collect_submodules("pyarchinit_photogrammetry") + collect_submodules("rasterio")
           + collect_submodules("pyproj") + collect_submodules("shapely") + collect_submodules("laspy")
           + ["qtawesome", "pyvistaqt", "pyvista", "sqlalchemy.dialects.sqlite",
-             "sqlalchemy.dialects.postgresql", "scipy.special._cdflib", "ezdxf", "trimesh"])
+             "sqlalchemy.dialects.postgresql", "scipy.special._cdflib", "ezdxf", "trimesh",
+             # the backends matplotlib loads by the extension of a file (a plugin's figure as SVG, PDF or EPS)
+             # and the Qt canvas: the program itself writes PNG only, so PyInstaller saw Agg alone
+             "matplotlib.backends.backend_svg", "matplotlib.backends.backend_pdf", "matplotlib.backends.backend_ps",
+             "matplotlib.backends.backend_qtagg"])
 for optional in ("open3d", "ifcopenshell", "psycopg2", "ppg_core", "pye57", "colour"):  # ppg_core: native kernels
     try:
         __import__(optional)

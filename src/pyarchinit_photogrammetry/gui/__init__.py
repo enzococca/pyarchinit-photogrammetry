@@ -220,6 +220,15 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
 
                 box = o3d.t.geometry.TriangleMesh.create_box()
                 box.fill_holes(hole_size=1.0)
+                import tempfile  # a figure in every format matplotlib loads by extension (plugins write SVG, PDF)
+
+                from matplotlib.figure import Figure
+
+                fig = Figure()
+                fig.add_subplot().plot([0, 1], [0, 1])
+                with tempfile.TemporaryDirectory() as tmp:
+                    for ext in ("png", "svg", "pdf", "eps"):
+                        fig.savefig(os.path.join(tmp, f"check.{ext}"))
                 libs = "ok"
             except Exception as exc:
                 libs = f"missing ({str(exc).splitlines()[0][:120]})"
