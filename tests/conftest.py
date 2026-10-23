@@ -49,6 +49,27 @@ def _no_modal_dialogs(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _qt_garbage_between_tests():
+    """The windows and widgets a test leaves behind are destroyed here, between the tests, and not
+    by Python's garbage collector in the middle of the next test's event loop: the CI died now and
+    then with a segmentation fault in QCoreApplication::notifyInternal2, called by
+    QTimerInfoList::activateTimers in a processEvents of a test of the interface (a timer handing
+    its event to an object no longer there). The objects waiting for deleteLater go too."""
+    yield
+    import gc
+    import sys
+
+    if "PySide6.QtCore" not in sys.modules:
+        return
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    gc.collect()
+    if QCoreApplication.instance() is not None:
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        gc.collect()
+
+
+@pytest.fixture(autouse=True)
 def _c_numbers():
     """As the application does after creating the QApplication (which takes the locale of the
     system): numbers in the C locale for the C/C++ libraries (IfcOpenShell's geometry)."""
