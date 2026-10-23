@@ -15,10 +15,14 @@ from pyarchinit_photogrammetry.engine import multispectral as ms
 BANDS = {"1": "Blue", "2": "Green", "3": "Red", "4": "NIR", "5": "RedEdge"}
 
 
-def _write_captures(scene_dir: Path, out: Path, n: int | None = None, odd_gain: float = 1.0) -> Path:
+def _write_captures(scene_dir: Path, out: Path, n: int | None = None, odd_gain: float = 1.0, odd_slope: float = 0.0,
+                    radial: float = 0.0) -> Path:
     """Five 16-bit bands from every rendered photo: the visible bands from its grey levels, the
     NIR high where the texture is dark (a "vegetation" class the indices must find). ``odd_gain``
-    multiplies every band of every other photo: the strips between flight lines."""
+    multiplies every band of every other photo: the strips between flight lines; ``odd_slope``
+    makes their light change across the frame (exp(slope u), u from -0.5 to 0.5 left to right: a
+    cloud's shadow, the reflectance seen from the side), ``radial`` brightens the edges of every
+    frame (exp(radial (u2 + v2 - 1/6)), of mean one)."""
     folder = out / "ms"
     folder.mkdir(parents=True, exist_ok=True)
     photos = sorted((scene_dir / "photos").glob("*.jpg"))[:n]
@@ -27,9 +31,13 @@ def _write_captures(scene_dir: Path, out: Path, n: int | None = None, odd_gain: 
         veg = grey < 0.45
         bands = {"Blue": 0.9 * grey, "Green": grey, "Red": 0.95 * grey + 0.02,
                  "NIR": np.where(veg, 0.55 + 0.3 * grey, 0.2 + 0.4 * grey), "RedEdge": np.where(veg, 0.4 + 0.3 * grey, 0.25 + 0.4 * grey)}
+        h, w = grey.shape
+        u = (np.arange(w, dtype=np.float32) + 0.5)[None, :] / w - 0.5
+        v = (np.arange(h, dtype=np.float32) + 0.5)[:, None] / h - 0.5
+        field = np.exp(radial * (u * u + v * v - 1.0 / 6.0) + (odd_slope * u if i % 2 else 0.0))
         gain = odd_gain if i % 2 else 1.0
         for suffix, name in BANDS.items():
-            dn = np.clip(bands[name] * gain * 40000 + 500, 0, 65535).astype(np.uint16)
+            dn = np.clip(bands[name] * gain * field * 40000 + 500, 0, 65535).astype(np.uint16)
             cv2.imwrite(str(folder / f"{p.stem}_{suffix}.tif"), dn)
     return folder
 
@@ -68,6 +76,70 @@ def test_bands_found_and_the_radiometry_of_the_tags(scene_dir, tmp_path):
     assert np.allclose(ms.reflectance_image(captures[stem]["Red"], 2.0, {}), 2.0 * plain)
 
 
+def test_balance_finds_the_gains_the_planes_and_the_radial_term_of_the_photos():
+    """The fit of the balance on made-up readings: 60 photos, four of them 2.5 times brighter or
+    darker (the outlier test looked at the readings with the photo's gain still in them and threw
+    those photos' readings away), each with a plane across its frame, all brighter at the edges,
+    and a few readings far off (a moving shadow): everything found within a few hundredths; a gain
+    per photo alone leaves the readings of a point disagreeing more."""
+    rng = np.random.default_rng(1)
+    n_photos, n_points = 60, 3000
+    g = rng.normal(0, 0.2, n_photos)
+    g[:4] = [0.9, -0.9, 0.8, -0.85]
+    a, b, c = rng.normal(0, 0.25, n_photos), rng.normal(0, 0.25, n_photos), 0.5
+    value = rng.normal(-2.5, 0.6, n_points)
+    point = np.repeat(np.arange(n_points), 8)  # every point read by 8 photos at places of their frames
+    photo = rng.integers(0, n_photos, len(point))
+    u, v = rng.uniform(-0.5, 0.5, len(point)), rng.uniform(-0.5, 0.5, len(point))
+    logv = value[point] + g[photo] + a[photo] * u + b[photo] * v + c * (u * u + v * v - 1 / 6)
+    logv += rng.normal(0, 0.05, len(point))
+    far = rng.random(len(point)) < 0.02
+    logv[far] += rng.normal(0, 1.0, far.sum())
+    coef, radial, n_ph, residual = ms._fit_balance(point, photo, logv, u, v, n_points, n_photos)
+    assert (n_ph > 0).all()
+    assert np.max(np.abs(coef[:, 0] - (g - g.mean()))) < 0.03
+    assert np.max(np.abs(coef[:, 1] - a)) < 0.06 and np.max(np.abs(coef[:, 2] - b)) < 0.06
+    assert radial == pytest.approx(c, abs=0.03) and residual < 0.08
+    alone, _radial, _n, residual_alone = ms._fit_balance(point, photo, logv, u, v, n_points, n_photos, planes=False)
+    assert np.max(np.abs(alone[:, 0] - (g - g.mean()))) < 0.06 and residual_alone > 2 * residual
+    # what the photos are divided by: the plane and the radial term on the pixels of the frame
+    gains = {"NIR": {"7": [float(np.exp(0.2)), 0.3, -0.1]}, "radial": {"NIR": 0.5}}
+    f = ms._balance_field(gains, "NIR", "7", (4, 8))
+    uu = (np.arange(8) + 0.5) / 8 - 0.5
+    vv = (np.arange(4) + 0.5) / 4 - 0.5
+    want = np.exp(0.2 + 0.3 * uu[None, :] - 0.1 * vv[:, None] + 0.5 * (uu[None, :] ** 2 + vv[:, None] ** 2 - 1 / 6))
+    assert np.allclose(f, want, rtol=1e-5)
+    assert ms._balance_field({"NIR": {"7": 1.25}}, "NIR", "7", (4, 8)) == pytest.approx(1.25)  # a gain alone (before 1.3)
+    assert ms._balance_field(gains, "Red", "7", (4, 8)) is None
+    # the plane holds where the photo's points were: beyond them it stays at its edge (a photo at
+    # the edge of the block, its points on one side only: prolonged, the plane whitened the rest)
+    edge = {"NIR": {"7": [1.0, 2.0, 0.0, -0.5, 0.0, -0.5, 0.5]}}
+    f = ms._balance_field(edge, "NIR", "7", (2, 8))
+    assert np.allclose(f[0, :4], np.exp(2.0 * uu[:4])) and np.allclose(f[0, 4:], 1.0)
+    side = (np.repeat(np.arange(20), 30), np.zeros(600, int))  # one photo read on the left of its frame only
+    uu2 = rng.uniform(-0.5, -0.1, 600)
+    found = ms._photo_ranges(side[1], uu2, rng.uniform(-0.5, 0.5, 600), 1)
+    assert found[0, 0] == pytest.approx(-0.49, abs=0.02) and found[0, 1] == pytest.approx(-0.11, abs=0.02)
+
+
+def test_balance_is_not_tilted_by_a_shadow_that_moved():
+    """Ten photos of a second flight see a fifth of the points three times darker (the shadow of a
+    tree that moved in the hour between the flights), all on the left of their frames: weighed as
+    the others, those readings tilted the planes of the ten photos (x2.8 across the frame on a
+    real survey, the shadow whitened in the orthomosaic); weighed by their residuals they do not."""
+    rng = np.random.default_rng(4)
+    n_photos, n_points = 40, 3000
+    value = rng.normal(-2.5, 0.5, n_points)
+    point = np.repeat(np.arange(n_points), 8)
+    photo = rng.integers(0, n_photos, len(point))
+    u, v = rng.uniform(-0.5, 0.5, len(point)), rng.uniform(-0.5, 0.5, len(point))
+    logv = value[point] + rng.normal(0, 0.05, len(point))
+    shadow = (photo >= 30) & (point < n_points // 5) & (u < 0)
+    logv[shadow] -= np.log(3.0)
+    coef, _radial, _n, _residual = ms._fit_balance(point, photo, logv, u, v, n_points, n_photos)
+    assert np.max(np.abs(coef[30:, 1])) < 0.1 and np.max(np.abs(coef[:, 0])) < 0.05
+
+
 def test_registration_finds_a_shift(scene_dir):
     photo = sorted((scene_dir / "photos").glob("*.jpg"))[0]
     base = cv2.imread(str(photo), cv2.IMREAD_GRAYSCALE).astype(np.float32) / 255.0
@@ -84,8 +156,10 @@ def test_registration_finds_a_shift(scene_dir):
 
 def test_reflectance_orthomosaic_indices_and_zoning(scene_dir, tmp_path):
     """The chain on captures where every other photo is 30 % brighter (the strips between flight
-    lines): the balance of the photos finds the gain, the reflectance orthomosaic is seamless."""
-    folder = _write_captures(scene_dir, tmp_path, odd_gain=1.3)
+    lines), its light changing across the frame, and every frame brighter at its edges: the
+    balance of the photos finds the gain, the plane of every photo and the radial term, and the
+    reflectance orthomosaic is seamless."""
+    folder = _write_captures(scene_dir, tmp_path, odd_gain=1.3, odd_slope=0.3, radial=0.4)
     doc = ppg.Document()
     ch = doc.add_chunk("Campo")
     doc.save(tmp_path / "campo.ppg")
@@ -103,7 +177,8 @@ def test_reflectance_orthomosaic_indices_and_zoning(scene_dir, tmp_path):
     ch.build_depth_maps(quality="medium")  # the default backend: SGBM without the native core
     ch.build_point_cloud()
     ch.build_dem()
-    # the balance: the odd photos were written 30 % brighter in every band
+    # the balance: the odd photos were written 30 % brighter in every band, their light rising by
+    # 0.3 (log) from the left of the frame to the right, every frame 0.4 brighter at the edges
     gains = ms.balance_gains(ch, ["NIR", "Red"])
     odd = {c.meta["capture"] for i, c in enumerate(cams) if i % 2}
     for band in ("NIR", "Red"):
@@ -111,8 +186,15 @@ def test_reflectance_orthomosaic_indices_and_zoning(scene_dir, tmp_path):
         hi = np.array([g[str(c.key)] for c in cams if c.meta["capture"] in odd and str(c.key) in g])
         lo = np.array([g[str(c.key)] for c in cams if c.meta["capture"] not in odd and str(c.key) in g])
         assert len(hi) > 3 and len(lo) > 3
-        assert np.median(hi) / np.median(lo) == pytest.approx(1.3, rel=0.05), band
+        assert np.median(hi[:, 0]) / np.median(lo[:, 0]) == pytest.approx(1.3, rel=0.05), band
         assert gains["spread"][band] == pytest.approx(np.log(1.3) / 2, rel=0.2)
+        assert np.median(hi[:, 1]) == pytest.approx(0.3, abs=0.06) and abs(np.median(lo[:, 1])) < 0.06, band
+        assert np.abs(np.median(np.vstack([hi, lo])[:, 2])) < 0.06
+        assert gains["radial"][band] == pytest.approx(0.4, abs=0.08), band
+    # a gain per photo alone leaves the light changing inside the frames: the readings of a point
+    # disagree more between the photos
+    alone = ms.balance_gains(ch, ["NIR"], planes=False)
+    assert gains["residual"]["NIR"] < 0.7 * alone["residual"]["NIR"]
     out = ms.build_reflectance(ch, resolution=0.01)
     import rasterio
 

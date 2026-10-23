@@ -465,6 +465,24 @@ def test_temperature_orthomosaic_of_the_trench(scene_dir, tmp_path):
     assert "offsets" not in ch.meta["thermal"]
 
 
+def test_offsets_of_the_frames_found_even_when_large():
+    """The fit of the offsets of the frames on made-up readings: 40 frames, three of them 4-6
+    degrees off (the outlier test looked at the readings with the frame's offset still in them and
+    threw those frames' readings away), a few readings far off: every offset found."""
+    rng = np.random.default_rng(2)
+    n_frames, n_points = 40, 2000
+    off = rng.normal(0, 0.5, n_frames)
+    off[:3] = [6.0, -5.0, 4.0]
+    temp = rng.normal(20.0, 3.0, n_points)
+    point = np.repeat(np.arange(n_points), 6)
+    photo = rng.integers(0, n_frames, len(point))
+    value = temp[point] + off[photo] + rng.normal(0, 0.2, len(point))
+    far = rng.random(len(point)) < 0.02
+    value[far] += rng.normal(0, 5.0, far.sum())
+    o, n_ph = thermal._fit_offsets(point, photo, value, n_points, n_frames)
+    assert (n_ph > 0).all() and np.max(np.abs(o - (off - off.mean()))) < 0.05
+
+
 def test_colours_and_limits():
     t = np.array([[10.0, 20.0, np.nan], [30.0, 40.0, 25.0]], np.float32)
     lo, hi = thermal.limits(t, 15.0, 35.0)

@@ -1156,23 +1156,35 @@ def balance_offsets(chunk: Chunk, cams=None, samples: int = 4000, rounds: int = 
     point, photo, value = point[keep], photo[keep], value[keep]
     if not len(point):
         return {}
-    o = np.zeros(len(cams))
-    n_ph = np.ones(len(cams))
-    for it in range(rounds):
-        n_pt = np.bincount(point, minlength=len(pts)).astype(float)
-        temp = np.bincount(point, value - o[photo], minlength=len(pts)) / np.maximum(n_pt, 1)
-        res = value - temp[point]
-        if it == rounds // 2:
-            mad = np.median(np.abs(res - np.median(res))) * 1.4826 + 1e-9
-            keep = np.abs(res - np.median(res)) <= 3 * mad + 0.05
-            point, photo, value, res = point[keep], photo[keep], value[keep], res[keep]
-        n_ph = np.bincount(photo, minlength=len(cams)).astype(float)
-        o = np.bincount(photo, res, minlength=len(cams)) / np.maximum(n_ph, 1)
-        o -= o[n_ph > 0].mean()
+    o, n_ph = _fit_offsets(point, photo, value, len(pts), len(cams), rounds)
     out = {str(cam.key): float(o[i]) for i, cam in enumerate(cams) if n_ph[i] > 0}
     out["spread"] = float(o[n_ph > 0].std())
     progress(1.0, f"Thermal frames balanced: offsets of {out['spread']:.2f} degrees")
     return out
+
+
+def _fit_offsets(point, photo, value, n_points: int, n_frames: int, rounds: int = 40) -> tuple[np.ndarray, np.ndarray]:
+    """Readings split into a temperature of the point and an offset of the frame (least squares by
+    alternation, offsets of mean zero). Half way the readings beyond three MADs of the others once
+    the frames' offsets are taken off are dropped - never the readings of a frame for being far
+    from the others before its offset. Returns the offsets and the readings kept per frame."""
+    o = np.zeros(n_frames)
+    n_ph = np.zeros(n_frames)
+    keep = np.ones(len(value), bool)
+    for it in range(rounds):
+        n_pt = np.bincount(point[keep], minlength=n_points).astype(float)
+        temp = np.bincount(point[keep], (value - o[photo])[keep], minlength=n_points) / np.maximum(n_pt, 1)
+        res = value - temp[point]
+        if it == rounds // 2:
+            rest = res - o[photo]
+            mid = np.median(rest[keep])
+            mad = np.median(np.abs(rest[keep] - mid)) * 1.4826 + 1e-9
+            keep &= np.abs(rest - mid) <= 3 * mad + 0.05
+        n_ph = np.bincount(photo[keep], minlength=n_frames).astype(float)
+        o = np.bincount(photo[keep], res[keep], minlength=n_frames) / np.maximum(n_ph, 1)
+        if (n_ph > 0).any():
+            o -= o[n_ph > 0].mean()
+    return o, n_ph
 
 
 # ------------------------------------------------------------------------------ the orthomosaic

@@ -759,22 +759,157 @@ def band_stack(chunk: Chunk, camera, bands: list[str], cache: dict | None = None
     for k, b in enumerate(bands):
         if b in refl:
             stack[..., k] = warp_band(refl[b], np.asarray(hs[b], float), shape)
-            g = (gains or {}).get(b, {}).get(str(camera.key))
-            if g:
-                stack[..., k] /= float(g)
+            field = _balance_field(gains, b, str(camera.key), shape)
+            if field is not None:
+                stack[..., k] /= field
     return stack
 
 
-def balance_gains(chunk: Chunk, bands: list[str] | None = None, samples: int = 4000, rounds: int = 40,
-                  progress: Progress | None = None) -> dict:
-    """Per band and photo, the gain that brings the captures to the same reflectance where they
-    overlap: points of the surface are projected into every capture and read in its registered
-    bands; the log values are split into a value of the point and a gain of the photo (least
-    squares by alternation, the gains of mean zero, observations beyond three MADs dropped after
-    the first rounds). The strips between flight lines - the photos of one heading brighter than
-    the next (sun and view geometry, the light sensor tilted) - go away; the mean level is kept.
-    ``{band: {camera key: gain}}`` plus ``"spread"``: the standard deviation of the log gains per
-    band, what the balance took away."""
+def _balance_field(gains: dict | None, band: str, key: str, shape) -> np.ndarray | float | None:
+    """What :func:`balance_gains` found for the photo ``key`` in ``band``, as what every pixel of the
+    frame (``shape``) is divided by: its gain times exp(plane + radial term), or the gain alone (a
+    project balanced before the planes); None when nothing is known."""
+    if not gains:
+        return None
+    entry = (gains.get(band) or {}).get(key)
+    radial = float((gains.get("radial") or {}).get(band) or 0.0)
+    if entry is None and not radial:
+        return None
+    box = (-0.5, 0.5, -0.5, 0.5)
+    if entry is None:
+        g, a, b = 1.0, 0.0, 0.0
+    elif isinstance(entry, (int, float)):
+        g, a, b = float(entry), 0.0, 0.0
+    else:
+        values = [float(x) for x in entry]
+        g, a, b = values[:3]
+        if len(values) >= 7:
+            box = tuple(values[3:7])
+    if not a and not b and not radial:
+        return g
+    h, w = shape[:2]
+    u = ((np.arange(w, dtype=np.float32) + 0.5) / w - 0.5)[None, :]
+    v = ((np.arange(h, dtype=np.float32) + 0.5) / h - 0.5)[:, None]
+    # the plane holds where the photo's points were, beyond them it stays at its edge: a photo at the
+    # edge of the block sees the surface on one side of its frame only
+    plane = a * np.clip(u, box[0], box[1]) + b * np.clip(v, box[2], box[3])
+    return (g * np.exp(plane + radial * (u * u + v * v - 1.0 / 6.0))).astype(np.float32)
+
+
+def _photo_ranges(photo, u, v, n_photos: int, low: float = 2.0, high: float = 98.0) -> np.ndarray:
+    """Per photo, the part of its frame its readings cover: the ``low`` and ``high`` percentiles of
+    ``u`` and of ``v`` (``(n_photos, 4)``: u from, u to, v from, v to; the whole frame without
+    readings)."""
+    out = np.tile(np.array([-0.5, 0.5, -0.5, 0.5]), (n_photos, 1))
+    if not len(photo):
+        return out
+    order = np.argsort(photo, kind="stable")
+    ph, uu, vv = photo[order], u[order], v[order]
+    cut = np.flatnonzero(np.diff(ph)) + 1
+    for idx, us, vs in zip(np.split(ph, cut), np.split(uu, cut), np.split(vv, cut)):
+        out[idx[0]] = [*np.percentile(us, [low, high]), *np.percentile(vs, [low, high])]
+    return out
+
+
+BALANCE_RIDGE = 0.001  # the planes drawn to zero where a photo's points cover a sliver of its frame only
+BALANCE_POINTS_PER_PHOTO = 80  # surface points read, per photo of the chunk (at least 4000, at most 100000)
+BALANCE_POINTS_MAX = 100_000
+
+
+def _balance_planes(photo, u, v, r, n_photos: int, ridge: float = BALANCE_RIDGE, weights=None) -> np.ndarray:
+    """Weighted least squares ``r ~ g + a u + b v`` for every photo (its normal equations from
+    bincounts), the slopes drawn to zero by ``ridge`` times the weight of the readings; a photo
+    whose readings weigh less than 10 gets their weighted mean only. ``(n_photos, 3)``."""
+    w8 = np.ones_like(u) if weights is None else weights
+
+    def total(x):
+        return np.bincount(photo, w8 * x, minlength=n_photos)
+
+    cols = (np.ones_like(u), u, v)
+    m = np.empty((n_photos, 3, 3))
+    for i in range(3):
+        for j in range(i, 3):
+            m[:, i, j] = m[:, j, i] = total(cols[i] * cols[j])
+    n = m[:, 0, 0].copy()
+    m[:, 1, 1] += ridge * n
+    m[:, 2, 2] += ridge * n
+    rhs = np.stack([total(r), total(r * u), total(r * v)], axis=1)
+    out = np.zeros((n_photos, 3))
+    full = n >= 10
+    if full.any():
+        out[full] = np.linalg.solve(m[full], rhs[full][..., None])[..., 0]
+    few = (n > 0) & ~full
+    out[few, 0] = rhs[few, 0] / n[few]
+    return out
+
+
+TUKEY = 4.685  # the biweight's constant, in MADs of the residuals
+
+
+def _fit_balance(point, photo, logv, u, v, n_points: int, n_photos: int, rounds: int = 40,
+                 planes: bool = True) -> tuple[np.ndarray, float, np.ndarray, float]:
+    """The log readings split into a value of the point, and per photo a gain and (``planes``) a
+    plane across its frame (``u``, ``v`` from -0.5 to 0.5), plus a radial term common to the photos
+    (u2 + v2 - 1/6, of mean zero over the frame): least squares by alternation, the gains of mean
+    zero, every reading weighed by Tukey's biweight of its residual once the photos are corrected
+    (recomputed every round from the third): readings that no correction of their photo explains
+    - the shadow of a tree that moved between two flights, a saturated field, vegetation in the
+    wind - weigh little or nothing, instead of tilting the plane of the photo to explain them.
+    Returns the (gain, slope u, slope v) of every photo in log, the radial term, the readings that
+    count per photo and the MAD of what is left."""
+    q = u * u + v * v - 1.0 / 6.0
+    coef = np.zeros((n_photos, 3))
+    radial = 0.0
+    w = np.ones(len(logv))
+    for it in range(rounds):
+        corr = coef[photo, 0] + coef[photo, 1] * u + coef[photo, 2] * v + radial * q
+        sw = np.bincount(point, w, minlength=n_points)
+        value = np.bincount(point, w * (logv - corr), minlength=n_points) / np.maximum(sw, 1e-12)
+        res = logv - value[point]  # what the photo and the place in its frame add
+        if it >= 2:
+            rest = res - corr
+            mid = np.median(rest[w > 0])
+            mad = 1.4826 * np.median(np.abs(rest[w > 0] - mid)) + 1e-9
+            t = (rest - mid) / (TUKEY * mad)
+            w = np.where(np.abs(t) < 1.0, (1.0 - t * t) ** 2, 0.0)
+        if planes:
+            coef = _balance_planes(photo, u, v, res - radial * q, n_photos, weights=w)
+            rest = res - coef[photo, 0] - coef[photo, 1] * u - coef[photo, 2] * v
+            sw_all = max(float(w.sum()), 1e-12)
+            qk = q - float(np.sum(w * q)) / sw_all
+            rk = rest - float(np.sum(w * rest)) / sw_all
+            radial = float(np.sum(w * qk * rk) / max(float(np.sum(w * qk * qk)), 1e-12))
+        else:
+            weight = np.bincount(photo, w, minlength=n_photos)
+            coef[:, 0] = np.bincount(photo, w * res, minlength=n_photos) / np.maximum(weight, 1e-12)
+        counted = np.bincount(photo, (w > 0).astype(float), minlength=n_photos)
+        if (counted > 0).any():
+            coef[:, 0] -= coef[counted > 0, 0].mean()
+    corr = coef[photo, 0] + coef[photo, 1] * u + coef[photo, 2] * v + radial * q
+    sw = np.bincount(point, w, minlength=n_points)
+    value = np.bincount(point, w * (logv - corr), minlength=n_points) / np.maximum(sw, 1e-12)
+    rest = (logv - corr - value[point])[w > 0]
+    residual = float(1.4826 * np.median(np.abs(rest - np.median(rest)))) if len(rest) else 0.0
+    n_ph = np.bincount(photo, (w > 0).astype(float), minlength=n_photos)
+    return coef, radial, n_ph, residual
+
+
+def balance_gains(chunk: Chunk, bands: list[str] | None = None, samples: int | None = None, rounds: int = 40,
+                  progress: Progress | None = None, planes: bool = True) -> dict:
+    """Per band and photo, what brings the captures to the same reflectance where they overlap:
+    points of the surface (``samples``, by default 80 per photo) are projected into every capture
+    and read in its registered bands; the log readings are split into a value of the point and,
+    per photo, a gain and a plane across the frame, plus one radial term per band
+    (:func:`_fit_balance`). The gains take away the strips between flight lines - the photos of
+    one heading or one moment brighter than the next (sun and view geometry, a light sensor
+    tilted or seeing another cloud than the ground) - and the planes the light changing across a
+    frame (a cloud's shadow, the reflectance of the vegetation seen from one side); the radial
+    term the edges of every frame brighter or darker than its middle. The mean level is kept.
+    ``{band: {camera key: [gain, slope u, slope v, u from, u to, v from, v to]}}`` (the plane holds on the
+    part of the frame the photo's points covered) plus ``"spread"`` (the standard deviation of
+    the log gains per band, what the balance took away), ``"radial"`` and ``"residual"`` (the MAD of
+    the log readings of a point between the photos once balanced). ``planes=False``: a gain per
+    photo only."""
     from .colour import _surface_points
     from .visibility import project_valid
 
@@ -784,6 +919,8 @@ def balance_gains(chunk: Chunk, bands: list[str] | None = None, samples: int = 4
     cams = [c for c in multispectral_cameras(chunk) if c.aligned]
     if not bands or len(cams) < 2:
         return {}
+    if samples is None:
+        samples = int(min(BALANCE_POINTS_MAX, max(4000, BALANCE_POINTS_PER_PHOTO * len(cams))))
     pts = _surface_points(chunk, samples)
     if not len(pts):
         return {}
@@ -798,36 +935,29 @@ def balance_gains(chunk: Chunk, bands: list[str] | None = None, samples: int = 4
         h, w = stack.shape[:2]
         c = np.clip(np.floor(px[idx, 0]).astype(int), 0, w - 1)
         r = np.clip(np.floor(px[idx, 1]).astype(int), 0, h - 1)
+        uu, vv = px[idx, 0] / w - 0.5, px[idx, 1] / h - 0.5  # the place in the frame, -0.5 to 0.5
         for k, b in enumerate(bands):
             v = stack[r, c, k]
             good = np.isfinite(v) & (v > 1e-6)
-            obs[b].append((idx[good], np.full(good.sum(), i), np.log(v[good])))
-    out: dict = {"spread": {}}
+            obs[b].append((idx[good], np.full(good.sum(), i), np.log(v[good]), uu[good], vv[good]))
+    out: dict = {"spread": {}, "radial": {}, "residual": {}, "model": "planes" if planes else "gains"}
     for b in bands:
         if not obs[b]:
             continue
-        point = np.concatenate([o[0] for o in obs[b]])
-        photo = np.concatenate([o[1] for o in obs[b]])
-        logv = np.concatenate([o[2] for o in obs[b]])
+        point, photo, logv, u, v = (np.concatenate([o[j] for o in obs[b]]) for j in range(5))
         seen = np.bincount(point, minlength=len(pts))
         keep = seen[point] >= 2
-        point, photo, logv = point[keep], photo[keep], logv[keep]
+        point, photo, logv, u, v = point[keep], photo[keep], logv[keep], u[keep], v[keep]
         if not len(point):
             continue
-        g = np.zeros(len(cams))
-        for it in range(rounds):
-            n_pt = np.bincount(point, minlength=len(pts)).astype(float)
-            value = np.bincount(point, logv - g[photo], minlength=len(pts)) / np.maximum(n_pt, 1)
-            res = logv - value[point]
-            if it == rounds // 2:  # the outliers (a moving shadow, a saturated field): dropped
-                mad = np.median(np.abs(res - np.median(res))) * 1.4826 + 1e-9
-                keep = np.abs(res) <= 3 * mad
-                point, photo, logv, res = point[keep], photo[keep], logv[keep], res[keep]
-            n_ph = np.bincount(photo, minlength=len(cams)).astype(float)
-            g = np.bincount(photo, res, minlength=len(cams)) / np.maximum(n_ph, 1)  # given the points, the photos
-            g -= g[n_ph > 0].mean()
-        out[b] = {str(cam.key): float(np.exp(g[i])) for i, cam in enumerate(cams) if n_ph[i] > 0}
-        out["spread"][b] = float(g[n_ph > 0].std())
+        coef, radial, n_ph, residual = _fit_balance(point, photo, logv, u, v, len(pts), len(cams), rounds, planes)
+        box = _photo_ranges(photo, u, v, len(cams))
+        out[b] = {str(cam.key): [float(np.exp(coef[i, 0])), float(coef[i, 1]), float(coef[i, 2]), *(float(x) for x in box[i])]
+                  for i, cam in enumerate(cams) if n_ph[i] > 0}
+        out["spread"][b] = float(coef[n_ph > 0, 0].std())
+        out["residual"][b] = residual
+        if planes:
+            out["radial"][b] = radial
     progress(1.0, "Photos balanced: " + ", ".join(f"{b} {s * 100:.1f} %" for b, s in out["spread"].items()))
     return out
 
