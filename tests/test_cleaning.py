@@ -53,7 +53,9 @@ def test_dense_cloud_confidence(processed, tmp_path):
     assert stored is not None
     assert np.median(stored[:len(pc)]) >= 3 and (stored[len(pc):] <= 1).mean() > 0.95
     report = ch.clean_point_cloud(min_confidence=2)
-    assert report["by_filter"]["confidence"] >= 290 and report["kept"] >= 0.9 * len(pc)
+    # 95 % of the noise, as above: a few noise points land by chance on a wall of the trench, where the
+    # depth maps do confirm them (289 of 300 once on CI, from the order of the threads)
+    assert report["by_filter"]["confidence"] >= 285 and report["kept"] >= 0.9 * len(pc)
     cleaned = ch.point_cloud
     assert cleaned.confidence.min() >= 2
     # the LAS keeps the confidence (extra bytes, as Metashape writes it)
