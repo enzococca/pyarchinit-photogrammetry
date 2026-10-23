@@ -369,3 +369,16 @@ def test_new_plugin_dialog(tmp_path, monkeypatch, qapp):
     d.name.setText("")  # a bad name is reported, nothing written
     d.create()
     assert "not a plugin name" in shown[-1][3]
+
+
+def test_help_of_a_plugin_command_goes_to_the_plugin():
+    """``ppg plugin NAME --help`` is the plugin's own help, not the program's (Typer took --help:
+    a plugin could not show its usage, and an unknown NAME looked fine)."""
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry import cli
+
+    runner = CliRunner()
+    assert runner.invoke(cli.app, ["plugin", "--help"]).exit_code == 0  # the commands of the plugins
+    r = runner.invoke(cli.app, ["plugin", "nothing", "--help"])
+    assert r.exit_code == 2 and "no plugin gives the command" in r.output

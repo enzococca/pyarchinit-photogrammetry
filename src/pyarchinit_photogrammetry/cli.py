@@ -1693,9 +1693,13 @@ def plugins_disable(name: str):
     typer.echo(f"{name} disabled")
 
 
-@app.command("plugin", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+@app.command("plugin", context_settings={"allow_extra_args": True, "ignore_unknown_options": True,
+                                         "help_option_names": []})
 def plugin_command(ctx: typer.Context, name: Optional[str] = typer.Argument(None, help="command of a plugin")):
-    """Run a command of a plugin: ``ppg plugin NAME [ARGS]...``; without NAME, the commands available."""
+    """Run a command of a plugin: ``ppg plugin NAME [ARGS]...``; without NAME, the commands available.
+    ``--help`` goes to the plugin (``ppg plugin NAME --help`` is the plugin's own help)."""
+    if name in ("--help", "-h"):
+        name = None
     from .plugins import Manager
 
     m = Manager()
