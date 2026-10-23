@@ -543,8 +543,13 @@ def _paint(ctx, pts, tcams, want_choice: bool = False, colours: bool = True, inf
             if ok.any():
                 wgt = scores[k, ok].astype(np.float64)
                 if colours:
-                    colors[ok] += sample(ctx.cache.get(cam), pix[k, ok]) * wgt[:, None]
-                weight[ok] += wgt
+                    vals = _sample_photo(ctx, cam, pix[k, ok])
+                    fin = np.isfinite(vals).all(axis=1)  # a float source without a value there: not this photo
+                    idx_ok = np.nonzero(ok)[0]
+                    colors[idx_ok[fin]] += vals[fin] * wgt[fin, None]
+                    weight[idx_ok[fin]] += wgt[fin]
+                else:
+                    weight[ok] += wgt
         got = weight > 0
         colors[got] /= weight[got, None]
         chosen[got] = order[0, got]
@@ -581,11 +586,41 @@ def _paint(ctx, pts, tcams, want_choice: bool = False, colours: bool = True, inf
             px_of = cand_px[rank_of[cells], cells]
             for k in np.unique(chosen[cells]):
                 mine = chosen[cells] == k
-                colors[cells[mine]] = sample(ctx.cache.get(tcams[k]), px_of[mine])
+                colors[cells[mine]] = _sample_photo(ctx, tcams[k], px_of[mine])
+            if getattr(ctx, "float_output", False):
+                _next_with_values(ctx, cells, rank_of, cand_i, cand_px, tcams, colors, chosen, got, occlusion, visible)
     if want_choice:
         keys[got] = np.array([tcams[k].key for k in chosen[got]], dtype=keys.dtype) if got.any() else keys[got]
         return colors, got, keys
     return colors, got
+
+
+def _next_with_values(ctx, cells, rank_of, cand_i, cand_px, tcams, colors, chosen, got, occlusion, visible) -> None:
+    """Cells whose photo has no value there (a float source: the thermal band covers the middle of
+    the visible photo only, a registered band leaves its borders empty) take the next candidate
+    photo that sees them and has one; those left without any are not painted."""
+    bad = cells[~np.isfinite(colors[cells]).all(axis=1)]
+    for rank in range(cand_i.shape[0]):
+        if not len(bad):
+            break
+        cand = cand_i[rank, bad]
+        later = (cand >= 0) & (rank > rank_of[bad])
+        for k in np.unique(cand[later]):
+            sel = bad[later & (cand == k)]
+            if occlusion and len(sel):
+                sel = sel[visible(tcams[k], sel)]
+            if not len(sel):
+                continue
+            vals = _sample_photo(ctx, tcams[k], cand_px[rank, sel])
+            fin = np.isfinite(vals).all(axis=1)
+            colors[sel[fin]] = vals[fin]
+            chosen[sel[fin]] = k
+            rank_of[sel[fin]] = rank
+        bad = bad[~np.isfinite(colors[bad]).all(axis=1)]
+    if len(bad):
+        colors[bad] = 0.0
+        got[bad] = False
+        chosen[bad] = -1
 
 
 def _paint_ghost_free(ctx, pts, tcams, colors, chosen, keys, want_choice, colours, info, occlusion, visible):
@@ -604,7 +639,7 @@ def _paint_ghost_free(ctx, pts, tcams, colors, chosen, keys, want_choice, colour
             if occlusion:
                 sel = sel[visible(tcams[k], sel)]
             vis[rank, sel] = True
-            col[rank, sel] = sample(ctx.cache.get(tcams[k]), cand_px[rank, sel])
+            col[rank, sel] = _sample_photo(ctx, tcams[k], cand_px[rank, sel])
     seen_by = vis.sum(axis=0)
     some = seen_by > 0  # the median only where a photo sees the cell (no all-NaN slices)
     med = np.full((n, 3), np.nan)
@@ -631,7 +666,7 @@ def _paint_ghost_free(ctx, pts, tcams, colors, chosen, keys, want_choice, colour
             fb = cells[need]
             for k in np.unique(chosen[fb]):
                 mine = fb[chosen[fb] == k]
-                colors[mine] = sample(ctx.cache.get(tcams[k]), cand_px[0, mine])
+                colors[mine] = _sample_photo(ctx, tcams[k], cand_px[0, mine])
     if want_choice:
         keys[got] = np.array([tcams[k].key for k in chosen[got]], dtype=keys.dtype) if got.any() else keys[got]
         return colors, got, keys
@@ -852,6 +887,18 @@ def _tile(ctx, r0: int, c0: int):
     return out, todo_core & ~from_base, from_base
 
 
+def _sample_photo(ctx, cam, px: np.ndarray) -> np.ndarray:
+    """Colours of the image of ``cam`` (the photo, or the image a ``source`` gives) at COLMAP
+    pixels ``px`` of its sensor: an image of another size than the sensor (a thermal band on a
+    reduced grid of the visible photo) is sampled at the same points, its pixels scaled."""
+    img = ctx.cache.get(cam)
+    sensor = ctx.chunk.sensor(cam)
+    h, w = img.shape[:2]
+    if (w, h) != (sensor.width, sensor.height) and len(px):
+        px = np.asarray(px, np.float32) * np.array([w / sensor.width, h / sensor.height], np.float32)
+    return sample(img, px)
+
+
 def _photo_colours(ctx, cam, pts):
     """Colours (BGR) of ``pts`` in one photo and where the photo sees them, decided as
     :func:`_paint` decides: the same colour whichever photo a cell takes."""
@@ -864,7 +911,11 @@ def _photo_colours(ctx, cam, pts):
         ok[idx[~vis]] = False
     col = np.zeros((len(pts), 3), np.float64)
     if ok.any():
-        col[ok] = sample(ctx.cache.get(cam), px[ok].astype(np.float32))
+        col[ok] = _sample_photo(ctx, cam, px[ok].astype(np.float32))
+        bad = ~np.isfinite(col).all(axis=1)  # a float source without a value there (a band's border)
+        if bad.any():
+            ok &= ~bad
+            col[bad] = 0.0
     return col, ok
 
 
