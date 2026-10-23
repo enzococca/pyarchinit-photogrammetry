@@ -6,7 +6,7 @@ fotogrammetrico: la colonna di ogni sondaggio, la superficie dove comincia ogni 
 volume di ogni unità, sezioni lungo qualsiasi linea e un modello 3D con un solido per unità. Tutto sta sul
 DEM e sull'ortofoto del progetto, nel suo sistema di riferimento.
 
-Questa pagina descrive la versione 0.1.1 del plugin, che richiede pyarchinit-photogrammetry 1.2.2 o
+Questa pagina descrive la versione 0.1.2 del plugin, che richiede pyarchinit-photogrammetry 1.2.2 o
 successiva. Il README e il codice sono nel
 [repository dei plugin](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/geoarchaeology).
 
@@ -35,7 +35,7 @@ successiva. Il README e il codice sono nel
 4. Nel pannello *Geoarcheologia*: *Importa sondaggi...*, controlla l'*Ordine delle unità...*, poi
    *Superfici...*.
 5. Guarda le superfici sopra l'ortofoto, disegna sezioni e colonne stratigrafiche, costruisci il modello
-   3D.
+   3D e guardalo nella vista 3D.
 6. Esporta in GeoPackage, GeoTIFF, DXF, PLY/OBJ e CSV, oppure apri tutto in QGIS.
 
 ## Che cosa fa
@@ -71,8 +71,8 @@ stesso di quale strato di un altro - resta il lavoro dell'archeologo: si scrive 
   sua y, sulla griglia del DEM, e misura distanze, aree e volumi nell'unità delle coordinate: sondaggi
   misurati in un altro sistema (latitudine e longitudine, un altro fuso, la griglia locale dello scavo)
   finiscono altrove o da nessuna parte. Convertili prima, per esempio in QGIS. Va bene anche un sistema
-  locale, se rilievo e sondaggi stanno tutti e due lì, come nella dimostrazione; allora però i GeoTIFF non
-  hanno un sistema di riferimento e il progetto QGIS del programma lascia fuori i layer del plugin.
+  locale, se rilievo e sondaggi stanno tutti e due lì, come nella dimostrazione; allora però i GeoTIFF e i
+  layer non hanno un sistema di riferimento, e QGIS li mostra in un progetto senza.
 * **I log** dei sondaggi in tabelle CSV: la sezione che segue.
 
 ## I dati
@@ -86,11 +86,22 @@ Il plugin legge file CSV: tabelle di solo testo, che ogni foglio di calcolo sa s
 * **una tabella sola**: una riga per intervallo, con la posizione del sondaggio sulla stessa riga -
   almeno sulla prima riga di ogni sondaggio.
 
-Le colonne possono stare in qualsiasi ordine, con nomi italiani o inglesi. Maiuscole, accenti, spazi e
-punteggiatura non contano: `Profondità (m)`, `profondita_m` e `PROFONDITA` sono la stessa colonna. Le
-colonne che il plugin non conosce vengono ignorate, così nella tabella puoi tenere colonne tue (data,
-operatore, campioni). Quando due colonne potrebbero contenere la stessa cosa - `note` e `descrizione`,
-`codice` e `sondaggio` - si legge quella più a sinistra e l'altra viene ignorata.
+Le colonne possono stare in qualsiasi ordine, con nomi italiani o inglesi, scritti come sul campo:
+
+* maiuscole, accenti, spazi e punteggiatura non contano: `Profondità (m)`, `profondita_m` e
+  `PROFONDITA` sono la stessa colonna;
+* un'unità di misura dopo il nome converte i valori: `Da (cm)`, `Prof. (m)`, `quota_mm`;
+* le parole intorno a un nome che non lo cambiano vengono saltate: `Sigla sondaggio`, `N. sondaggio`,
+  `Codice US`, `N. US`, `US n.` (il sondaggio, l'unità), `Quota s.l.m.`, `Elevation (m a.s.l.)` (la
+  quota), `Quota sondaggio`, `Descrizione US` (un campo del sondaggio, dell'unità).
+
+Le colonne che il plugin non conosce restano fuori e vengono nominate alla fine dell'importazione
+(*colonne non usate: 'Data', 'Operatore'*), così nella tabella puoi tenere colonne tue (data, operatore,
+campioni). Quando due colonne potrebbero contenere la stessa cosa vince il nome più chiaro - `sondaggio`
+su `id`, `descrizione` su `note` - e, fra nomi ugualmente chiari, quello più a sinistra. Alcuni nomi
+indovinano soltanto il loro campo: `codice`, `sigla` e `nome` (il sondaggio, oppure l'unità quando il
+sondaggio ha una colonna sua), `h` (la quota), `e` o `n` da soli (le coordinate). Vengono letti quando non
+c'è niente di più chiaro, e l'importazione lo dice: *colonna 'codice' presa come unità*.
 
 ### La tabella dei collari { #collars }
 
@@ -124,31 +135,46 @@ Una tabella sola ha le colonne di tutte e due: una riga per intervallo, con `son
 stesso sondaggio, possono lasciarle vuote.
 
 ??? info "Tutti i nomi di colonna che il plugin riconosce"
-    | Campo | Nomi |
-    |---|---|
-    | sondaggio | `sondaggio`, `sondaggi`, `id_sondaggio`, `nome_sondaggio`, `carota`, `carotaggio`, `trincea`, `saggio`, `nome`, `sigla`, `codice`, `punto`, `id`, `hole`, `hole_id`, `holeid`, `bhid`, `bh`, `borehole`, `borehole_id`, `boring`, `core_id`, `trench`, `name`, `point`, `station`, `location`, `location_id` |
-    | x | `x`, `est`, `e`, `x_coord`, `coord_x`, `xcoord`, `x_utm`, `utm_e`, `utm_x`, `east`, `easting` |
-    | y | `y`, `nord`, `n`, `y_coord`, `coord_y`, `ycoord`, `y_utm`, `utm_n`, `utm_y`, `north`, `northing` |
-    | quota del collare | `quota`, `quota_bocca`, `quota_testa`, `quota_piano`, `quota_slm`, `quota_p_c`, `z`, `h`, `elevation`, `elev`, `collar_z`, `z_collar`, `collar_elevation`, `rl`, `height`, `altitude`, `alt`, `ground_level` |
-    | profondità raggiunta | `profondita`, `profondita_totale`, `profondita_raggiunta`, `prof`, `prof_max`, `prof_totale`, `depth`, `total_depth`, `max_depth`, `final_depth`, `eoh`, `td` |
-    | tipo | `tipo`, `tipologia`, `metodo`, `strumento`, `kind`, `type`, `method`, `tool` |
-    | tetto dell'intervallo (profondità) | `da`, `dal`, `prof_da`, `profondita_da`, `da_prof`, `tetto`, `inizio`, `from`, `depth_from`, `from_depth`, `top`, `top_depth`, `start` |
-    | base dell'intervallo (profondità) | `a`, `al`, `prof_a`, `profondita_a`, `a_prof`, `letto`, `fine`, `to`, `depth_to`, `to_depth`, `bottom`, `bottom_depth`, `base`, `end` |
-    | tetto dell'intervallo (quota) | `quota_tetto`, `quota_da`, `quota_sup`, `quota_superiore`, `z_tetto`, `q_tetto`, `top_z`, `z_top`, `z_from`, `from_z`, `top_elevation` |
-    | base dell'intervallo (quota) | `quota_letto`, `quota_base`, `quota_a`, `quota_inf`, `quota_inferiore`, `z_letto`, `q_letto`, `base_z`, `bottom_z`, `z_base`, `z_bottom`, `z_to`, `to_z`, `bottom_elevation` |
-    | unità | `us`, `unita`, `unita_stratigrafica`, `codice_unita`, `strato`, `orizzonte`, `unit`, `unit_code`, `unit_id`, `us_code`, `layer`, `stratum`, `horizon`, `facies`, `formation`, `litho_unit` |
-    | descrizione | `descrizione`, `desc`, `descr`, `note`, `osservazioni`, `description`, `notes`, `remarks` |
-    | colore | `colore`, `colore_munsell`, `munsell`, `colour`, `color`, `munsell_colour`, `munsell_color` |
-    | litologia | `litologia`, `lito`, `materiale`, `tessitura`, `lithology`, `lith`, `material`, `texture` |
+    I nomi sono scritti qui senza maiuscole, accenti e punteggiatura, con `_` fra le parole. Sotto *meno
+    sicuri* ci sono i nomi che vengono letti solo quando non ce n'è uno più chiaro.
 
-    Un'unità di misura dopo il nome la rende esplicita: `_m`, `_mt`, `_metri`, `_metres`, `_meters` sono
-    metri, `_cm` centimetri (`da_cm`, `Profondità (cm)`). I centimetri vengono convertiti solo per le
-    profondità (`da`, `a`, `profondita`): le quote sono sempre in metri.
+    | Campo | Nomi | Meno sicuri |
+    |---|---|---|
+    | sondaggio | `sondaggio`, `sondaggi`, `id_sondaggio`, `nome_sondaggio`, `carota`, `carotaggio`, `trincea`, `saggio`, `pozzetto`, `trivellata`, `foro`, `hole`, `hole_id`, `holeid`, `bhid`, `bh`, `borehole`, `borehole_id`, `boring`, `core`, `core_id`, `trench`, `test_pit`, `pit`, `location_id`, `log_id` | `id`; da indovinare: `codice`, `code`, `sigla`, `nome`, `name`, `punto`, `point`, `station`, `location` |
+    | x | `x`, `est`, `x_coord`, `coord_x`, `xcoord`, `coordinata_x`, `x_utm`, `utm_e`, `utm_x`, `east`, `easting` | `e` (da indovinare senza `n`) |
+    | y | `y`, `nord`, `y_coord`, `coord_y`, `ycoord`, `coordinata_y`, `y_utm`, `utm_n`, `utm_y`, `north`, `northing` | `n` (da indovinare senza `e`) |
+    | quota del collare | `quota`, `z`, `quota_bocca`, `quota_testa`, `quota_piano`, `quota_pc`, `quota_p_c`, `quota_piano_campagna`, `quota_terreno`, `quota_suolo`, `elevation`, `elev`, `collar_z`, `z_collar`, `collar_elevation`, `rl`, `collar_rl`, `altitude`, `alt`, `ground_level`, `ground_elevation`, `surface_elevation` | da indovinare: `h`, `height` |
+    | profondità raggiunta | `profondita`, `profondita_totale`, `profondita_raggiunta`, `profondita_max`, `profondita_foro`, `prof`, `prof_max`, `prof_totale`, `prof_raggiunta`, `fondo_foro`, `depth`, `total_depth`, `max_depth`, `final_depth`, `hole_depth`, `eoh`, `td` | |
+    | tipo | `tipo`, `tipologia`, `metodo`, `strumento`, `tecnica`, `kind`, `type`, `method`, `tool` | |
+    | tetto dell'intervallo (profondità) | `da`, `dal`, `prof_da`, `profondita_da`, `da_prof`, `inizio`, `profondita_tetto`, `prof_tetto`, `from`, `depth_from`, `from_depth`, `top_depth`, `start` | `tetto`, `top` (sotto) |
+    | base dell'intervallo (profondità) | `a`, `al`, `prof_a`, `profondita_a`, `a_prof`, `fine`, `profondita_letto`, `prof_letto`, `profondita_base`, `prof_base`, `to`, `depth_to`, `to_depth`, `bottom_depth`, `end` | `letto`, `base`, `bottom` (sotto) |
+    | tetto dell'intervallo (quota) | `quota_tetto`, `tetto_quota`, `quota_da`, `da_quota`, `quota_sup`, `quota_superiore`, `z_tetto`, `q_tetto`, `top_z`, `z_top`, `z_from`, `from_z`, `top_elevation`, `top_rl`, `rl_top`, `rl_from` | `tetto`, `top` (sotto) |
+    | base dell'intervallo (quota) | `quota_letto`, `letto_quota`, `quota_base`, `base_quota`, `quota_a`, `a_quota`, `quota_inf`, `quota_inferiore`, `quota_fondo`, `z_letto`, `q_letto`, `base_z`, `bottom_z`, `z_base`, `z_bottom`, `z_to`, `to_z`, `bottom_elevation`, `base_elevation`, `bottom_rl`, `base_rl`, `rl_bottom`, `rl_to` | `letto`, `base`, `bottom` (sotto) |
+    | unità | `us`, `usm`, `us_usm`, `unita`, `unita_stratigrafica`, `unita_litologica`, `codice_unita`, `strato`, `orizzonte`, `su`, `unit`, `unit_code`, `unit_id`, `us_code`, `context`, `layer`, `stratum`, `horizon`, `facies`, `formation`, `litho_unit` | `livello`; da indovinare: `codice`, `code`, `sigla` |
+    | descrizione | `descrizione`, `desc`, `descr`, `description` | `note`, `osservazioni`, `commento`, `commenti`, `notes`, `remarks`, `comment`, `comments` |
+    | colore | `colore`, `colore_munsell`, `munsell`, `colour`, `color`, `munsell_colour`, `munsell_color`, `colour_munsell`, `color_munsell` | |
+    | litologia | `litologia`, `lito`, `materiale`, `tessitura`, `granulometria`, `lithology`, `lith`, `material`, `texture` | |
 
-    Attenzione: `tetto` e `letto`, `top`, `bottom` e `base` sono profondità dalla bocca, non quote (le
-    quote sono `quota_tetto`, `quota_letto`, `quota_base`); `codice` è il sondaggio, `h` la quota, `e` e
-    `n` le coordinate. I nomi che non sono nell'elenco - come `Codice US`, `N. US`, `Sigla sondaggio`,
-    `Quota s.l.m.` - vengono ignorati: rinomina la colonna.
+    Intorno a questi nomi:
+
+    * **un'unità di misura** in fondo - `m`, `mt`, `metro`, `metri`, `metre`, `metres`, `meter`,
+      `meters`, `cm`, `mm` - converte i valori in metri, in qualsiasi colonna di numeri: `Da (cm)`,
+      `quota_cm`, `profondita_mm`;
+    * **da dove si misura una quota**, in fondo, viene saltato: `s.l.m.`, `slm`, `m s.l.m.`, `a.s.l.`,
+      `asl`, `m a.s.l.`, `amsl`, `msl`, `assoluta`, `assoluto`, `ass`, `abs`, `absolute`
+      (`Quota s.l.m. (m)` è `quota`, `Elevation (m a.s.l.)` è `elevation`);
+    * **le parole che non cambiano il sondaggio o l'unità**, prima o dopo, vengono saltate: `n`, `nr`,
+      `no`, `num`, `numero`, `number`, `cod`, `codice`, `code`, `sigla`, `id`, `nome`, `name`
+      (`Sigla sondaggio`, `N. sondaggio`, `Codice US`, `US n.`, `Context No.`);
+    * **il sondaggio o l'unità a cui appartiene un campo**, dopo il campo, viene saltato: `sondaggio`,
+      `sondaggi`, `foro`, `carota`, `carotaggio`, `hole`, `borehole`, `us`, `unita`, `strato`, `layer`,
+      `unit`, `intervallo`, `interval` (`Quota sondaggio`, `Descrizione US`, `Tipo sondaggio`).
+
+    `tetto` e `letto`, `top`, `bottom` e `base` da soli possono essere profondità o quote. Il plugin
+    decide dalle altre colonne - accanto a `da` e `a` sono quote, accanto a `quota_tetto` e `quota_letto`
+    sono profondità, e con una sola di queste lo dice l'altro estremo dell'intervallo -, altrimenti dai
+    valori: le quote diminuiscono verso il basso, le profondità aumentano. L'importazione dice come li ha
+    letti: *'tetto', 'letto' lette come quote (la base è sotto il tetto in 2 righe su 2)*.
 
 ### Profondità { #depths }
 
@@ -158,7 +184,8 @@ stesso sondaggio, possono lasciarle vuote.
   terreno stesso, il DEM.
 * Gli intervalli si susseguono: il valore di `a` di un intervallo è il `da` del successivo. Differenze
   sotto i 5 mm contano come arrotondamenti.
-* Le profondità in centimetri vogliono un nome di colonna che lo dica: `da_cm`, `a_cm`, `profondita_cm`.
+* Le profondità in centimetri o millimetri vogliono un nome di colonna che lo dica: `Da (cm)`, `da_cm`,
+  `profondita_mm`. Lo stesso vale per quote e coordinate.
 * `profondita`, la profondità raggiunta, può restare vuota. Se è più profonda della base dell'ultimo
   intervallo, il plugin considera che il foro fosse ancora nell'ultima unità fin laggiù: le unità sotto
   sono più profonde.
@@ -184,7 +211,10 @@ deve avere una quota - nella tabella, oppure dal DEM; senza, l'intervallo resta 
 al collare la quota del tetto del suo primo intervallo. Una tabella può mescolare i due modi: una riga con
 `da` e `a` usa quelli, una riga senza usa le quote.
 
-`tetto` e `letto` da soli, come `top`, `bottom` e `base`, sono profondità, non quote.
+`tetto` e `letto` da soli, come `top`, `bottom` e `base`, possono essere l'una o l'altra cosa: il plugin
+decide dalle altre colonne o dai valori - le quote diminuiscono verso il basso, le profondità aumentano - e
+lo dice alla fine dell'importazione (*'tetto', 'letto' lette come quote (la base è sotto il tetto in 2
+righe su 2)*). `quota_tetto` e `quota_letto` non lasciano dubbi.
 
 ### Unità { #units }
 
@@ -193,8 +223,14 @@ collegati fra loro solo attraverso questi codici.
 
 * Va bene qualsiasi codice: un numero di US (`US 12`, `12`), un'unità litologica o stratigrafica (`A`,
   `B`, `Unità 3`).
-* Scrivi ogni codice esattamente allo stesso modo in tutti i log: `US 3`, `US3` e `us 3` sono tre unità
-  diverse.
+* I codici vengono confrontati in una sola forma: `US 3`, `US3`, `us 3`, `US 03`, `US n. 3` e `SU 3`
+  sono un'unità sola, mostrata come è scritta più spesso, e l'importazione elenca le grafie lette come
+  una (*unità scritte in modi diversi, lette come una sola: US 3 (US3, us 3)*). Un numero da solo (`3`)
+  è l'unità dell'unico tipo che ha quel numero (`US 3`); quando due tipi lo condividono (`US 4` e
+  `USM 4`) resta un'unità a parte e l'importazione lo dice (*unità '4': potrebbe essere US 4 o USM 4,
+  tenuta a parte*): scrivi il tipo. Gli altri codici vengono confrontati senza maiuscole, spazi e
+  punteggiatura: `Sabbia gialla` e `sabbia-gialla` sono un'unità sola. La colonna di un singolo
+  sondaggio mostra ogni codice come lo scrive il suo log.
 * Un codice è un'unità, in un punto della sequenza. Due strati dello stesso tipo a profondità diverse -
   due livelli di cenere - vogliono due codici.
 * Più intervalli di seguito possono appartenere alla stessa unità, con descrizioni diverse; un'unità non
@@ -216,33 +252,40 @@ vengono rappresentate come tali: al massimo diventano unità che mancano in alcu
 
 * `descrizione` è testo libero. La descrizione più frequente di un'unità le dà il nome nelle legende di
   sezioni e pannelli; ogni intervallo tiene la sua nella colonna di un singolo sondaggio.
-* `colore`: una notazione Munsell (`10YR 4/3`, `7.5YR 6/4`, `N 5/`), `#rrggbb`, tre numeri da 0 a 255
-  (`160,82,45` oppure `160 82 45`) o un nome di colore inglese (`brown`, `grey`). Scrivi la tinta Munsell
-  con il punto: `2.5Y 5/2`, non `2,5Y 5/2`, che non viene letto. Un'unità viene disegnata nel colore
-  scritto più spesso per lei; un'unità senza un colore leggibile ne prende uno da una tavolozza di toni di
-  terra. Le notazioni Munsell vengono convertite dalla libreria colour-science, che c'è nell'applicazione
-  desktop e nelle installazioni `[gui]` e `[all]`; senza, le unità prendono i colori della tavolozza.
-* `litologia` è facoltativa: insieme alla descrizione sceglie il retino dell'unità nelle colonne e nelle
-  sezioni.
+* `colore`: una notazione Munsell (`10YR 4/3`, `7.5YR 6/4`, `2.5Y 5/2` oppure `2,5Y 5/2`, `N 5/`), anche
+  dentro un testo più lungo (`10YR 4/3 bruno scuro`); `#rrggbb`; tre numeri da 0 a 255 (`160,82,45`
+  oppure `160 82 45`); oppure il colore a parole, in italiano o in inglese (`bruno rossastro`,
+  `grigio scuro`, `giallo chiaro`, `light yellowish brown`, `dark grey`), che dà un tono di terra
+  approssimato. Un'unità viene disegnata nel colore scritto più spesso per lei (il primo che si riesce a
+  leggere); un colore che non si legge viene nominato alla fine dell'importazione (*colore 'xyzzy' non
+  riconosciuto (riga 3): non usato*), e un'unità senza un colore leggibile ne prende uno da una
+  tavolozza di toni di terra. Le notazioni Munsell vengono convertite dalla libreria colour-science, che
+  c'è nell'applicazione desktop e nelle installazioni `[gui]` e `[all]`; senza, l'importazione lo dice e
+  le unità prendono il colore delle parole scritte accanto alla notazione, oppure uno della tavolozza.
+* `litologia` è facoltativa: sceglie il retino dell'unità nelle colonne e nelle sezioni; quando non
+  nomina una litologia, decide la descrizione.
 
-| Retino | Parole cercate nella litologia e nella descrizione |
-|---|---|
-| linee orizzontali (argilla) | `argill`, `clay` |
-| linee e punti (limo) | `limo`, `limos`, `silt` |
-| punti (sabbia) | `sabbi`, `sand` |
-| cerchietti (ghiaia) | `ghiai`, `ciottol`, `gravel`, `pebble`, `cobble` |
-| stelle (pietre, crollo, laterizi) | `crollo`, `pietr`, `macerie`, `laterizi`, `stone`, `rubble`, `brick` |
-| croci (cenere, carboni) | `cenere`, `carbon`, `ash`, `charcoal` |
-| linee verticali (torba) | `torba`, `peat` |
-| linee oblique (organico) | `organico`, `humus`, `organic` |
+| Retino | Nomi | Aggettivi, quando non c'è un nome |
+|---|---|---|
+| linee orizzontali (argilla) | `argilla`, `argille`, `clay` | `argilloso` (`-a`, `-i`, `-e`), `clayey` |
+| linee e punti (limo) | `limo`, `limi`, `silt` | `limoso`..., `silty` |
+| punti (sabbia) | `sabbia`, `sabbie`, `sand` | `sabbioso`..., `sandy` |
+| cerchietti (ghiaia) | `ghiaia`, `ghiaie`, `ghiaietto`, `ghiaino`, `ciottolo`, `ciottoli`, `gravel`, `pebble`, `cobble` | `ghiaioso`..., `ciottoloso`..., `gravelly`, `pebbly` |
+| stelle (pietre, crollo, laterizi) | `pietra`, `pietre`, `pietrame`, `pietrisco`, `sasso`, `sassi`, `crollo`, `crolli`, `maceria`, `macerie`, `laterizio`, `laterizi`, `mattone`, `mattoni`, `tegola`, `tegole`, `coppo`, `coppi`, `stone`, `rubble`, `brick`, `tile`, `collapse`, `debris` | `pietroso`..., `stony` |
+| griglia (mattone crudo) | `mattone crudo`, `mattoni crudi`, `mattone di fango`, `mattoni di fango`, `terra cruda`, `mudbrick`, `mud brick`, `adobe` | |
+| croci (cenere, carboni) | `cenere`, `ceneri`, `carbone`, `carboni`, `carbonella`, `ash`, `charcoal` | `cineritico`..., `carbonioso`..., `ashy` |
+| linee verticali (torba) | `torba`, `torbe`, `peat` | `torboso`..., `peaty` |
+| linee oblique (organico) | `humus`, `topsoil`, `terreno vegetale`, `terra vegetale`, `suolo vegetale` | `organico`..., `humico`..., `organic` |
 
-Le parole vengono cercate anche dentro altre parole, riga per riga in quest'ordine, nella litologia e nella
-descrizione insieme: decide la prima riga che trova qualcosa, e la litologia non conta più della
-descrizione. Così `limo argilloso` prende il retino dell'argilla, `ghiaia sabbiosa` quello della sabbia,
-`concrezioni carbonatiche` quello della cenere se nessuna riga sopra trova niente, l'inglese `mudbrick`
-quello delle pietre. Se un'unità prende un retino inatteso, cerca queste parole nelle sue descrizioni.
-Nelle sezioni un'unità prende il retino della sua litologia e della sua descrizione più frequenti; nelle
-colonne ogni intervallo prende il suo.
+Contano le parole intere, non pezzi di parole; maiuscole e accenti no, e vengono lette anche le forme
+plurali inglesi (`clays`, `stones`, `bricks`, `ashes`...). Decide la colonna della litologia quando
+nomina una litologia, altrimenti la descrizione. Dentro un testo decide il nome: in italiano il primo
+(`ghiaia sabbiosa` è ghiaia, `limo argilloso` limo, `crollo di mattoni crudi` pietre), in inglese
+l'ultimo di un composto (`sandy gravel` è ghiaia, `silty clay` argilla, `mudbrick collapse` pietre); un
+aggettivo conta solo quando non c'è un nome (`argilloso`: argilla). Un testo che non nomina litologie
+non dà retino: `concrezioni carbonatiche` non ne ha, `argilla con concrezioni carbonatiche` è argilla.
+Nelle sezioni e nelle legende un'unità prende il retino della sua litologia e della sua descrizione più
+frequenti; nelle colonne ogni intervallo prende il suo.
 
 ### Vuoti e perdite di carota { #gaps }
 
@@ -312,8 +355,8 @@ riga per sondaggio (collari) o per intervallo, e nient'altro sul foglio: niente 
 totali.
 
 * **Formatta** le colonne dei codici (`sondaggio`, `us`) come *Testo* prima di scrivere, così codici come
-  `1-2` o `01` non diventano date o numeri; formatta le colonne dei numeri come numeri semplici **senza il
-  separatore delle migliaia**.
+  `1-2` o `01` non diventano date o numeri. Le colonne dei numeri possono tenere il loro formato: decimali
+  e separatori delle migliaia vengono letti nel contesto del file (sotto).
 * **LibreOffice Calc**: *File > Salva con nome...*, tipo di file *Testo CSV (.csv)*, spunta *Modifica
   impostazioni filtro*, poi insieme di caratteri *Unicode (UTF-8)* e separatore di campo `;`. I decimali
   vengono scritti come li mostrano le celle (con la virgola, con le impostazioni italiane): il plugin li
@@ -323,11 +366,21 @@ totali.
   contengono il separatore: il plugin li legge tutti e due.
 
 Il plugin trova da solo il separatore (virgola, punto e virgola, tabulazione o barra verticale; gli spazi
-se non c'è nessuno di questi), legge i decimali con il punto o con la virgola, legge file in UTF-8 o nella
-codifica Windows di Excel, e salta le righe vuote e quelle che cominciano con `#`, comode per le note in
-cima a una tabella. Celle vuote, `-`, `na` e `null` vogliono dire nessun valore. Un testo fra virgolette
-può contenere il separatore (`"argilla limosa, carboni"`): i fogli di calcolo mettono le virgolette da
-soli.
+se non c'è nessuno di questi), legge file in UTF-8 o nella codifica Windows di Excel, e salta le righe vuote
+e quelle che cominciano con `#`, comode per le note in cima a una tabella.
+
+* **I numeri** si leggono con il punto o con la virgola decimale, con o senza separatori delle migliaia
+  (`4.500.810,5`, `4,500,810.5`, `4 500 810`, `4'500'810`), ognuno nel contesto del suo file: `1.234` è
+  1234 in un file i cui numeri hanno la virgola decimale, 1,234 altrimenti.
+* Celle vuote, `-`, `na`, `n/a`, `n.d.`, `nd`, `null` e `?` vogliono dire nessun valore; qualsiasi altro
+  testo in una colonna di numeri viene nominato con la sua riga (*S2: x 'cinquecento' non è un numero
+  (riga 3)*).
+* Un testo fra virgolette può contenere il separatore (`"argilla limosa, carboni"`): i fogli di calcolo
+  mettono le virgolette da soli. Una riga scritta a mano senza virgolette - una descrizione con dentro il
+  separatore, una virgola decimale in un file separato da virgole - ha più campi dell'intestazione: il
+  plugin la ricompone quando lo si può fare in un modo solo e nomina le righe (*virgola decimale in un
+  file separato da virgole: 1 riga ricomposta (riga 2)*); altrimenti lascia fuori la riga, con il suo
+  numero.
 
 ### Sul campo { #field }
 
@@ -339,8 +392,8 @@ soli.
 * Misura la posizione di ogni sondaggio con il ricevitore GNSS o la stazione totale, nel sistema di
   riferimento del rilievo fotogrammetrico, e scrivi il sistema sulla scheda. Prendi la quota nello stesso
   sistema di quote del DEM, oppure lasciala al DEM.
-* Scrivi i colori Munsell con il punto nella tinta (`2.5Y 5/2`) e la litologia principale in una parola
-  (`argilla`, `limo`, `sabbia`, `ghiaia`...).
+* Scrivi i colori Munsell come notazioni (`2.5Y 5/2`, oppure `2,5Y 5/2`) e la litologia principale con il
+  suo nome (`argilla`, `limo sabbioso`, `ghiaia`...): il nome sceglie il retino.
 * Dai ai sondaggi codici brevi e unici (`S1`, `S2`... oppure `T1`, `T2`...); un sondaggio rifatto accanto
   a uno fallito prende un codice nuovo.
 * Una sezione di scavo diventa uno o più log: una colonna ogni uno o due metri lungo la parete, con il
@@ -348,26 +401,31 @@ soli.
 
 ### Errori frequenti e avvisi { #mistakes }
 
-Alla fine dell'importazione il plugin elenca quello che gli è sembrato strano: i primi 15 avvisi nella
-finestra, tutti dalla riga di comando. I numeri di riga contano l'intestazione come riga 1.
+Alla fine dell'importazione il plugin elenca quello che ha indovinato, ricomposto, lasciato fuori o
+trovato strano: i primi 15 avvisi nella finestra, tutti dalla riga di comando. I numeri di riga sono
+quelli del file come li mostra un editor di testo, contando anche le righe vuote e le note.
 
 | Che cosa è successo | Che cosa fa o dice il plugin | Che cosa fare |
 |---|---|---|
-| nessuna colonna per il sondaggio, o un nome che non conosce (`Sigla sondaggio`) | *manca la colonna del sondaggio (id, sondaggio, hole...)*: non si importa nulla | chiamala `sondaggio` |
+| nessuna colonna per il sondaggio, o un nome che non conosce | *manca la colonna del sondaggio (id, sondaggio, hole...)*: non si importa nulla | chiamala `sondaggio` |
 | una tabella senza x e y e senza da e a | *né coordinate (x, y) né intervalli (da, a / from, to)*: non si importa nulla | controlla i nomi delle colonne |
 | nessun collare con le coordinate | *Nessun sondaggio con le coordinate nei file letti* | aggiungi la tabella dei collari, o x e y |
-| la colonna dell'unità ha un nome che non conosce (`Codice US`, `N. US`) | ogni intervallo è *senza unità (riga ...): lasciato fuori* | chiamala `us` |
-| la colonna della quota ha un nome che non conosce (`Quota s.l.m.`) | nessun avviso: le quote vengono lette dal DEM (il riepilogo conta le *quote prese dal DEM*) | chiamala `quota` |
-| quote scritte in `tetto`/`letto` o `top`/`bottom` | lette come profondità: gli intervalli risultano *con la base sopra il tetto* e restano fuori | usa `quota_tetto` e `quota_letto` |
-| virgola decimale in un file separato da virgole, senza virgolette (scritto a mano) | nessun messaggio: i numeri vengono spezzati fra le colonne | separa con il punto e virgola, o usa il punto decimale |
-| separatore delle migliaia (`1.234.567`) | il numero non viene letto: il collare si perde e i suoi intervalli sono *senza la posizione del sondaggio* | niente separatore delle migliaia |
-| la stessa unità scritta in due modi (`US 1` e `US1`) | due unità: l'ordine e le superfici vengono sbagliati | una sola grafia |
+| una colonna con un nome che non conosce (`Strato archeologico`, `Quota relativa`) | *colonna non usata: 'Strato archeologico'*; senza l'unità ogni intervallo è anche *senza unità (riga 2): lasciato fuori*, senza la quota le quote vengono lette dal DEM | rinominala (`us`, `quota`...), oppure lasciala se è una colonna tua |
+| un nome che indovina soltanto il suo campo (`codice`, `sigla`, `h`) | letto, e detto: *colonna 'codice' presa come unità* | niente se è giusto, altrimenti rinominala |
+| quote scritte in `tetto`/`letto` o `top`/`bottom` | lette come quote, e detto: *'tetto', 'letto' lette come quote (la base è sotto il tetto in 2 righe su 2)* | niente; `quota_tetto` e `quota_letto` non lasciano dubbi |
+| virgola decimale in un file separato da virgole, senza virgolette (scritto a mano) | la riga viene ricomposta quando lo si può fare in un modo solo (*virgola decimale in un file separato da virgole: 1 riga ricomposta (riga 2)*), altrimenti resta fuori (*riga 3: 7 campi invece di 5 e più di un modo di ricomporli: lasciata fuori ...*) | separa le colonne con il punto e virgola, o usa il punto decimale |
+| il separatore dentro un testo senza virgolette (`humus; radici` in una tabella separata da punti e virgola), o fra i tre numeri di un colore (`139;90;43`) | ricomposta quando lo si può fare in un modo solo: *il separatore dentro un campo senza virgolette: 2 righe ricomposte (righe 2, 3)*; altrimenti lasciata fuori, con la sua riga | metti il testo fra virgolette, o scrivi `139,90,43` |
+| testo in una colonna di numeri (`cinquecento`) | *S2: x 'cinquecento' non è un numero (riga 3)*; un collare senza la sua x o la sua y resta fuori con i suoi intervalli | scrivi il numero |
+| una riga senza il codice del sondaggio | *riga 3 senza il codice del sondaggio: lasciata fuori* | scrivi il codice |
+| un collare senza x e y | *S2 senza x e y: lasciato fuori*, e i suoi intervalli sono *senza la posizione del sondaggio* | aggiungi la posizione |
+| la stessa unità scritta in modi diversi (`US 1`, `US1`, `us 1`) | letta come un'unità sola, e detto: *unità scritte in modi diversi, lette come una sola: US 1 (US1, us 1)* | niente, se sono la stessa unità |
+| un numero da solo condiviso da due tipi di unità (`4` accanto a `US 4` e `USM 4`) | *unità '4': potrebbe essere US 4 o USM 4, tenuta a parte* | scrivi il tipo |
 | lo stesso codice per due strati diversi, o un log con le unità in un altro ordine | *US 2 sopra US 3 in 2 sondaggi, sotto in 1* nell'ordine; *S7: US 2 sotto US 3, contro l'ordine delle unità* con le superfici | controlla i log, dai codici diversi a strati diversi |
 | quote in un altro sistema di quote | *Quota dei collari meno DEM* con una mediana di metri | riportale al sistema del DEM, o lasciale vuote |
 | coordinate in un altro sistema, o x e y scambiate | i sondaggi cadono fuori dal DEM: *Senza quota (né nel file né dal DEM)* se la tabella non ce l'ha, e nella vista non sono dove dovrebbero | converti le coordinate |
 | un log che non comincia da 0 | nessun messaggio: il tetto della prima unità viene interpolato invece di essere il DEM | comincia da 0 |
-| una riga senza `a` (o senza `da`) | lasciata fuori senza messaggio | completala |
-| la base sopra il tetto | *intervallo 2-1,8 m con la base sopra il tetto (riga 8): lasciato fuori* | correggi le profondità |
+| una riga senza `a` (o senza `da`) | *S1: riga 5 senza 'a': lasciata fuori* | completala |
+| la base sopra il tetto | *intervallo 2-1,8 m con la base sopra il tetto (riga 6): lasciato fuori* | correggi le profondità |
 | due intervalli sovrapposti | *intervalli sovrapposti a 0,9 m: il secondo parte dalla base del primo*, oppure *intervallo ... dentro il precedente: lasciato fuori* | correggi le profondità |
 | un vuoto fra due intervalli | *vuoto fra 2 e 2,5 m (contatto a metà)*, oppure *vuoto ... dentro US 2 (nessun contatto)* | niente, se è una perdita di carota |
 | un intervallo senza unità | *intervallo 2-2,1 m senza unità (riga 9): lasciato fuori* | scrivi l'unità |
@@ -375,8 +433,8 @@ finestra, tutti dalla riga di comando. I numeri di riga contano l'intestazione c
 | intervalli di un sondaggio che manca nei collari | *X9: intervalli senza la posizione del sondaggio: lasciati fuori* | aggiungi il sondaggio ai collari, con lo stesso codice |
 | un sondaggio con due posizioni diverse | *B ha due posizioni (riga 4): tenuta la prima* | una posizione per sondaggio |
 | intervalli per quote, il collare senza quota e fuori dal DEM | *intervallo in quote (riga 2) senza la quota del sondaggio: lasciato fuori* | dai la quota al collare |
-| una tinta Munsell con la virgola (`2,5Y 5/2`), un nome di colore in italiano (`marrone`) | nessun messaggio: l'unità prende un colore della tavolozza | `2.5Y 5/2`, `#8b5a2b` o `139,90,43` |
-| tre numeri per un colore (`139;90;43`) in una tabella separata da punti e virgola | i numeri finiscono nelle colonne seguenti | `139,90,43` o `139 90 43` |
+| un colore che non sa leggere | *colore 'xyzzy' non riconosciuto (riga 3): non usato*: l'unità prende un altro colore scritto per lei, oppure uno della tavolozza | una notazione Munsell, `#rrggbb`, `r,g,b` o parole |
+| notazioni Munsell senza la libreria colour-science | *colori Munsell non convertiti: manca la libreria colour-science (le unità prendono i colori della tavolozza)* | usa l'applicazione desktop, oppure installa il programma con `[gui]` o `[all]` |
 
 ## Passo per passo nel programma { #program }
 
@@ -434,9 +492,9 @@ superfici: ricostruiscile.
 
 *Ordine delle unità...* mostra le unità dall'alto in basso, come risultano dai log, e i disaccordi fra i
 sondaggi, se ce ne sono (*US 2 sopra US 3 in 2 sondaggi, sotto in 1*). Per cambiare l'ordine scrivi i
-codici dall'alto in basso separati da virgole; i codici non scritti vanno dopo, nell'ordine dei log. Un
-ordine dato a mano resta finché i sondaggi non portano unità nuove. Dopo, ricostruisci le superfici e il
-modello.
+codici dall'alto in basso separati da virgole, in qualsiasi grafia; i codici non scritti vanno dopo,
+nell'ordine dei log. Un ordine dato a mano resta finché i sondaggi non portano unità nuove. Dopo,
+ricostruisci le superfici e il modello.
 
 ### 3. Superfici di contatto { #surfaces }
 
@@ -447,7 +505,7 @@ modello.
 | *Modello del variogramma* | *scelto dai dati* | sferico, esponenziale o gaussiano: come crescono con la distanza le differenze di un contatto. Scelto dai dati: il modello più stabile fra quelli con l'errore leave-one-out entro il 5 % del migliore |
 | *Andamento* | *scelto dai dati* | *nessuno* (kriging ordinario) o *piano inclinato* (kriging universale, per un contatto che pende attraverso il sito); il piano si prova con sei sondaggi o più, non tutti allineati |
 | *Interpola* | per contatto | le quote di tutti i contatti, le profondità di tutti i contatti dal terreno, oppure ogni contatto a modo suo (sotto) |
-| *Per unità* | | il modo di alcune unità, per esempio `US 2=profondità, US 5=quota`; vanno bene anche `depth` ed `elevation` |
+| *Per unità* | | il modo di alcune unità, per esempio `US 2=profondità, US 5=quota`, i codici in qualsiasi grafia; vanno bene anche `depth` ed `elevation` |
 | *Cella* | quella del DEM | il lato delle celle delle superfici, in metri; su un'area grande la cella del DEM viene raddoppiata, triplicata... per restare entro un milione di celle; senza DEM, un valore tondo che dà circa 300 celle attraverso l'area |
 | *Pepita* | stimata | la varianza di un contatto fra due sondaggi vicinissimi, in m²: errori di misura e variazioni a breve distanza |
 | *Margine attorno ai sondaggi* | la loro distanza tipica | fin dove le superfici vanno oltre i sondaggi esterni; di norma la distanza mediana fra un sondaggio e il più vicino |
@@ -482,8 +540,8 @@ Tetto di US 2: kriging gaussiano, errore leave-one-out 0,026 m, per
   profondità (segue il terreno: profondità variabili per 0,03 m, quote per
   6,22 m); corretta dalla pila su 9.736 m² (abbassata fino a 0,01 m, alzata
   fino a 0,02 m)
-Tetto di US 3: kriging sferico, errore leave-one-out 0,943 m (il gaussiano
-  dava 0,908 m: meno del 5 % di differenza), per profondità (...)
+Tetto di US 3: kriging sferico, errore leave-one-out 0,943 m (il modello
+  gaussiano dava 0,908 m: meno del 5 % di differenza), per profondità (...)
 Tetto di US 5: kriging sferico, errore leave-one-out 0,274 m (...), per
   quota (ha una forma sua: profondità variabili per 2,84 m, quote per
   0,22 m); corretta dalla pila su 39.412 m² (abbassata fino a 3,44 m,
@@ -504,22 +562,23 @@ Scegli una riga della scheda *Superfici*, poi:
 
 * *Banda*, solo per i tetti: *Quota*, *Varianza di kriging* (l'incertezza, m²) o *Correzione della pila*
   (quanto è stato spostato il contatto, m);
-* *Palette*: quella del prodotto (ipsometrica per le quote, calore per varianze e correzioni, una rampa di
-  marroni per gli spessori) o un'altra (grigi, terra, divergente...);
+* *Palette*: quella del prodotto (ipsometrica per le quote, calore per le varianze, divergente per le
+  correzioni, una rampa di marroni per gli spessori) o un'altra (grigi, terra...);
 * *Opacità*.
 
 *Sovrapponi alla vista*, o un doppio clic sulla riga, la mette sopra l'ortofoto o il DEM; la riga in fondo
 al pannello dice che cosa si vede e i valori ai due estremi dei colori (il 2° e il 98° percentile).
-Spessori, varianze e correzioni partono da zero: così le correzioni mostrano dove un contatto è stato
-abbassato, mentre le celle alzate (valori negativi) stanno nella banda 3 del GeoTIFF. *Nascondi* toglie la
-sovrapposizione; se ne vede una alla volta.
+Spessori e varianze partono da zero. Le correzioni sono centrate sullo zero: le celle dove un contatto è
+stato abbassato sono rosse, quelle dove è stato alzato blu, quelle dove è rimasto bianche. *Nascondi* toglie
+la sovrapposizione; se ne vede una alla volta.
 
 ### 5. Sezioni { #sections }
 
 * *Traccia una sezione*: clicca l'inizio e poi la fine della traccia sull'ortofoto o sul DEM (lo strumento
   linea del programma, prestato al plugin per una traccia).
 * *Sezione per i sondaggi*: seleziona due o più sondaggi nella scheda *Sondaggi* (con Ctrl, o Cmd sul Mac);
-  la traccia li unisce nell'ordine della tabella.
+  la traccia li unisce nell'ordine in cui li hai scelti (un intervallo di righe scelto con Maiusc viene
+  nell'ordine della tabella).
 
 | Campo | Che cosa fa |
 |---|---|
@@ -547,7 +606,8 @@ superfici, rifallo.
 
 ### 6. Colonne stratigrafiche { #columns }
 
-*Colonne stratigrafiche*: spunta i sondaggi; quelli selezionati nella tabella vengono per primi.
+*Colonne stratigrafiche*: spunta i sondaggi; quelli selezionati nella tabella vengono per primi,
+nell'ordine in cui li hai scelti.
 
 * Un sondaggio: la sua colonna con le profondità, le quote quando il collare ne ha una, la descrizione e
   il colore di ogni intervallo.
@@ -555,8 +615,9 @@ superfici, rifallo.
 
 *Asse verticale*: le quote se tutti i sondaggi le hanno (predefinito), le quote, oppure le profondità.
 *Scala 1:*: vuota per stare in un foglio A4 (da 1:10 a 1:1000). Il plugin scrive un SVG e un PNG e apre il
-PNG. Un pannello nuovo sostituisce il precedente (`colonne.svg`, `colonne.png`); dalla riga di comando si
-può scrivere in un file a scelta.
+PNG. Ogni pannello ha i suoi file, con il nome dei suoi sondaggi (`colonne_S5-S4-S3-S2-S1.svg`, `.png`),
+così un pannello nuovo sostituisce solo quello degli stessi sondaggi; dalla riga di comando si può scrivere
+in un file a scelta.
 
 <figure markdown="span">
   ![Un pannello di nove colonne stratigrafiche su un asse comune delle quote](../img/plugins/geoarchaeology/columns.png)
@@ -575,11 +636,16 @@ può scrivere in un file a scelta.
 | *Ritaglia le unità sulle US disegnate con lo stesso numero* | un'unità il cui codice corrisponde a US disegnate nel chunk viene ritagliata sui loro poligoni |
 | *Anche l'ultima unità, fino al fondo* | l'ultima unità non ha niente sotto: il suo solido scende fino a un fondo |
 | *Quota del fondo* | vuota: il fondo più basso dei sondaggi, tenuto sotto il tetto più basso dell'ultima unità di un margine pari al 5 % dell'altezza coperta dai sondaggi (almeno 10 cm), perché il solido non abbia buchi |
+| *Nella vista 3D, unità separate in verticale di* | vuoto: come stanno; una distanza in metri alza ogni unità di tanto sopra quella sotto, così le unità che hanno i contatti in comune si distinguono nella vista (i file del modello non si spostano) |
 
-Una finestra elenca i volumi. I file sono un PLY per unità (coordinate vere in doppia precisione, il
-colore dell'unità), un OBJ con un oggetto e un materiale per unità (`unita.obj`, `unita.mtl`) e
-`volumi.csv`; aprili in MeshLab, Blender, CloudCompare o QGIS 3D. Il volume dell'ultima unità dipende dal
-fondo scelto: non è il volume di un deposito.
+Alla fine le unità compaiono nella vista 3D del programma - la scheda *Modello* dell'area centrale -
+ognuna nel suo colore, con il titolo *Unità geoarcheologiche (5 unità)*; per tornare ai prodotti del
+chunk scegli un'altra vista nell'elenco *Mostra* della vista 3D. *Mostra nella vista 3D*, nel pannello,
+riporta le unità nella vista; *Apri la cartella* apre la cartella del modello nel Finder o in Esplora
+file. Una finestra elenca i volumi. I file sono un PLY per unità (coordinate vere in doppia precisione,
+il colore dell'unità), un OBJ con un oggetto e un materiale per unità (`unita.obj`, `unita.mtl`) e
+`volumi.csv`; aprili in MeshLab, Blender, CloudCompare o QGIS 3D. Il volume dell'ultima unità dipende
+dal fondo scelto: non è il volume di un deposito.
 
 <figure markdown="span">
   ![I solidi di cinque unità e un taglio del modello](../img/plugins/geoarchaeology/model-3d.jpg)
@@ -595,7 +661,7 @@ fondo scelto: non è il volume di un deposito.
   GeoPackage si ottiene da *File > Esporta > Sondaggi e superfici geoarcheologiche (GeoPackage)...*.
 * *Apri in QGIS*: il progetto QGIS del programma ([QGIS](../integrations.md)) con le superfici - nascoste
   all'inizio, le quote in grigi e gli spessori in una rampa calda - e i layer dei sondaggi e delle
-  sezioni; solo per un chunk georeferenziato.
+  sezioni; anche per un chunk in un sistema locale, in un progetto senza sistema di riferimento.
 * *Rimuovi*: nella scheda *Superfici* tutte le superfici e gli spessori (formano una pila sola); nella
   scheda *Sezioni* la sezione selezionata e i suoi disegni; nella scheda *Sondaggi* i sondaggi selezionati.
 
@@ -628,11 +694,11 @@ ppg plugin geoarchaeology remove scavo.ppg surfaces
 | `help` | tutti i comandi con le loro opzioni |
 | `import PROGETTO FILE...` | una o più tabelle (collari, intervalli, tabelle sole, in qualsiasi ordine); i sondaggi si aggiungono a quelli del chunk, sostituendo quelli con lo stesso codice; `--replace` dimentica quelli che c'erano; `--kind` auger, core, trench, test_pit o other per tutti |
 | `list PROGETTO` | sondaggi, unità, superfici, sezioni, modello; `--json`: tutto il registro, con ogni modello di variogramma provato e il suo errore |
-| `order PROGETTO UNITÀ` | i codici dall'alto in basso, separati da virgole |
+| `order PROGETTO UNITÀ` | i codici dall'alto in basso, separati da virgole, in qualsiasi grafia (`us3` è `US 3`) |
 | `surfaces PROGETTO` | `--model` auto, spherical, exponential, gaussian; `--trend` auto, none, linear; `--mode` auto, elevation o depth (anche quota, profondità), e le unità nominate (`"auto,US 2=profondità"`); `--cell` m; `--nugget` m²; `--buffer` m, il margine; `--min-points` (5); `--order` le unità dall'alto in basso |
 | `section PROGETTO` | `--coords "x1,y1;x2,y2;..."`, una traccia di due o più punti nel sistema di riferimento del chunk (`--coords=...` se il primo numero è negativo), oppure `--through S1,S4,S7`, in quell'ordine; `--name`; `--distance` m; `--scale` (la N di 1:N); `--exaggeration` |
-| `logs PROGETTO [CODICI...]` | i sondaggi (tutti se non se ne dà nessuno); `--out` un file `.svg`, `.png` o `.pdf`; `--vertical` auto, elevation, depth; `--scale` |
-| `model PROGETTO` | `--cell` m; `--no-clip`; `--floor` quota; `--no-last` lascia fuori l'ultima unità; `--offset X,Y,Z` sottratto alle coordinate dell'OBJ (scritto nella sua intestazione e in `unita.obj.offset.txt`) |
+| `logs PROGETTO [CODICI...]` | i sondaggi (tutti se non se ne dà nessuno); `--out` un file `.svg`, `.png` o `.pdf`, altrimenti `logs/<sondaggio>` per un sondaggio e `logs/colonne_<sondaggi>` per un pannello; `--vertical` auto, elevation, depth; `--scale` |
+| `model PROGETTO` | `--cell` m; `--no-clip`; `--floor` quota; `--no-last` lascia fuori l'ultima unità; `--offset X,Y,Z` sottratto alle coordinate dell'OBJ (scritto nella sua intestazione e in `unita.obj.offset.txt`); `--explode` m, le unità separate in verticale in `unita_vista.ply`, il file della vista 3D |
 | `export PROGETTO OUT` | un GeoPackage con accanto i GeoTIFF e i volumi; con `--id` (un id mostrato da `list`, come `top_4_US_5` o `thickness_US_2`) una superficie in GeoTIFF |
 | `remove PROGETTO [COSA]` | `all` (predefinito) o `boreholes`: tutto quello del plugin nel chunk; `surfaces`, `sections`, `model`; il codice di un sondaggio o il nome di una sezione |
 
@@ -672,23 +738,24 @@ superficie dolce; 0,9 e 1,3 m per i tetti dei depositi del Ferro e del Bronzo de
 a 30-60 m l'uno dall'altro.
 
 Il rapporto nomina il modello usato e, quando un altro aveva un errore appena minore, lo dice: *(il
-gaussiano dava 0,908 m: meno del 5 % di differenza)*. I modelli entro il 5 % del migliore valgono quanto
-lui, e si usa il più stabile (sferico, poi esponenziale, senza piano inclinato prima che con, gaussiano per
-ultimo): con pochi sondaggi il modello gaussiano, che spesso vince gare così strette, esagera fra i
-sondaggi. La cartella *surfaces* ha anche una figura per ogni contatto fatto per kriging
-(`variogram_<id>.png`): la semivarianza delle coppie di sondaggi rispetto alla loro distanza, e il modello
-adattato. Con una dozzina di sondaggi ha pochi punti e il modello è un'indicazione di massima: giudica la
-superficie dal suo errore leave-one-out.
+modello gaussiano dava 0,908 m: meno del 5 % di differenza)*. I modelli entro il 5 % del migliore
+valgono quanto lui, e si usa il più stabile (sferico, poi esponenziale, senza piano inclinato prima che
+con, gaussiano per ultimo): con pochi sondaggi il modello gaussiano, che spesso vince gare così strette,
+esagera fra i sondaggi. La cartella *surfaces* ha anche una figura per ogni contatto fatto per kriging
+(`variogram_<id>.png`): la semivarianza delle coppie di sondaggi rispetto alla loro distanza, e il
+modello adattato. Con una dozzina di sondaggi ha pochi punti e il modello è un'indicazione di massima:
+giudica la superficie dal suo errore leave-one-out.
 
 ### Correzioni della pila (banda 3)
 
-Interpolati uno per uno, due contatti possono incrociarsi o salire sopra il terreno. La pila li rimette in
-ordine: dove due contatti si incrociano si incontrano dove sta quello meglio conosciuto, e nessuno sale
-sopra il DEM. La banda 3 tiene la correzione fatta in ogni cella (positiva: abbassata, negativa: alzata), il
-rapporto l'area e gli spostamenti più grandi (*corretta dalla pila su 39.412 m² (abbassata fino a 3,44 m,
-alzata fino a 1,60 m)*). Correzioni di qualche centimetro sono normali. Correzioni di metri su aree grandi
-vogliono dire che i sondaggi sono troppo distanti per la velocità con cui cambiano le unità, oppure che
-codici o ordine non sono coerenti: guarda la banda 3 e traccia una sezione in quella zona.
+Interpolati uno per uno, due contatti possono incrociarsi o salire sopra il terreno. La pila li rimette
+in ordine: dove due contatti si incrociano si incontrano dove sta quello meglio conosciuto, e nessuno
+sale sopra il DEM. La banda 3 tiene la correzione fatta in ogni cella (positiva: abbassata, in rosso
+sulla vista; negativa: alzata, in blu), il rapporto l'area e gli spostamenti più grandi (*corretta dalla
+pila su 39.412 m² (abbassata fino a 3,44 m, alzata fino a 1,60 m)*). Correzioni di qualche centimetro
+sono normali. Correzioni di metri su aree grandi vogliono dire che i sondaggi sono troppo distanti per
+la velocità con cui cambiano le unità, oppure che codici o ordine non sono coerenti: guarda la banda 3 e
+traccia una sezione in quella zona.
 
 ### Unità assenti
 
@@ -746,8 +813,8 @@ aprono con lui.
 * `sondaggi.gpkg`: un GeoPackage tenuto aggiornato, con tre tabelle: `sondaggi` (punti: codice, x, y,
   quota e da dove viene, quota del DEM, profondità, quota del fondo, tipo, unità, numero di intervalli,
   tabella di origine), `intervalli` (senza geometria: sondaggio, da, a, quote del tetto e della base,
-  unità, descrizione, colore, litologia) e `sezioni` (linee: nome, lunghezza, distanza, scala,
-  sondaggi, disegno).
+  unità come mostrata e come scritta nel log - `unita`, `unita_scritta` -, descrizione, colore,
+  litologia) e `sezioni` (linee: nome, lunghezza, distanza, scala, sondaggi, disegno).
 * `surfaces/top_<k>_<unità>.tif`: il tetto di ogni unità, un GeoTIFF float32 con tre bande: 1 la quota
   (m), 2 la varianza di kriging (m²), 3 la correzione della pila (m, positiva dove è stato abbassato,
   negativa dove è stato alzato); nessun valore fuori dall'area dei sondaggi.
@@ -755,11 +822,17 @@ aprono con lui.
 * `surfaces/variogram_<id>.png`: il variogramma di ogni contatto fatto per kriging.
 * `sections/<nome>.svg`, `.png`, `.dxf`, `.csv`: ogni sezione - disegno, DXF in coordinate di sezione,
   profilo.
-* `logs/<sondaggio>.svg`, `.png`: la colonna di un sondaggio; `logs/colonne.svg`, `.png`: l'ultimo
-  pannello.
+* `logs/<sondaggio>.svg`, `.png`: la colonna di un sondaggio; `logs/colonne_<sondaggi>.svg`, `.png`:
+  ogni pannello, con il nome dei suoi sondaggi. Gli SVG (e un PDF chiesto dalla riga di comando)
+  richiedono i backend vettoriali di matplotlib: dove mancano, come nell'applicazione desktop fino alla
+  1.3.0, sezioni e colonne vengono scritte solo in PNG, e il plugin lo dice (*SVG non disponibile in
+  questa installazione: scritto solo il PNG*).
 * `model/<unità>.ply`, `model/unita.obj` con `unita.mtl`, `model/volumi.csv`: i solidi e i loro volumi;
   `volumi.csv` ha unità, descrizione, volume, area, spessore medio e massimo, tetto e base minimi e
   massimi, celle, ritagliata, fino al fondo, volume e area dove manca il DEM.
+* `model/unita_vista.ply`: tutte le unità in un PLY solo per la vista 3D del programma, nel sistema
+  interno del chunk (per un modello grande il programma ne scrive accanto una copia più leggera,
+  `model_preview.ply`).
 
 Il GeoPackage esportato con *Esporta...* (o `export`) ha le stesse tre tabelle, con accanto
 `<nome>_<id>.tif` per ogni superficie e spessore e `<nome>_volumi.csv`.

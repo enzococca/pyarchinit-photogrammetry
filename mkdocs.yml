@@ -64,6 +64,12 @@ plugins:
             Plugin guides: Guide ai plugin
             Overview: Panoramica
             Geoarchaeology: Geoarcheologia
+            Terrain: Terreno
+            Geophysics: Geofisica
+            GIS archive: Archivio GIS
+            terrio: terrio
+            Spirula: Spirula
+            Powerlines: Linee elettriche
             Guide: Guida
             Desktop interface: Interfaccia
             Python API: API Python
@@ -107,6 +113,12 @@ nav:
   - Plugin guides:
       - Overview: plugins/guides.md
       - Geoarchaeology: plugins/geoarchaeology.md
+      - Terrain: plugins/terrain.md
+      - Geophysics: plugins/geophysics.md
+      - GIS archive: plugins/gis-archive.md
+      - terrio: plugins/terrio.md
+      - Spirula: plugins/spirula.md
+      - Powerlines: plugins/powerlines.md
   - Guide:
       - Desktop interface: gui.md
       - Python API: api.md

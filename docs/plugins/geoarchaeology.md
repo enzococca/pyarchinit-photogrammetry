@@ -6,7 +6,7 @@ the column of every borehole, the surface where each unit begins, the thickness 
 each unit, sections along any line and a 3D model with one solid per unit. Everything lies on the DEM
 and the orthophoto of the project, in its reference system.
 
-This page describes version 0.1.1 of the plugin, which needs pyarchinit-photogrammetry 1.2.2 or later.
+This page describes version 0.1.2 of the plugin, which needs pyarchinit-photogrammetry 1.2.2 or later.
 Its README and source code are in the
 [plugin repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/geoarchaeology).
 
@@ -35,7 +35,7 @@ Its README and source code are in the
 4. In the *Geoarchaeology* pane: *Import boreholes...*, check the *Order of the units...*, then
    *Surfaces...*.
 5. Look at the surfaces over the orthophoto, draw sections and stratigraphic columns, build the 3D
-   model.
+   model and look at it in the 3D view.
 6. Export to GeoPackage, GeoTIFF, DXF, PLY/OBJ and CSV, or open everything in QGIS.
 
 ## What it does
@@ -72,8 +72,7 @@ which layer of another - stays the archaeologist's job: it is written in the uni
   coordinates: boreholes measured in another system (latitude and longitude, another zone, the local
   grid of the excavation) fall elsewhere or nowhere. Convert them first, for example in QGIS. A local
   system works too when the survey and the boreholes are both in it, as in the demonstration; the
-  GeoTIFFs then have no reference system and the QGIS project of the program leaves the plugin's
-  layers out.
+  GeoTIFFs and the layers then have no reference system, and QGIS shows them in a project without one.
 * **The logs** of the boreholes as CSV tables: the next section.
 
 ## The data
@@ -87,11 +86,22 @@ The plugin reads CSV files: plain text tables, which every spreadsheet can write
 * **one table**: one row per interval, with the position of its borehole on the same row - at least on
   the first row of each borehole.
 
-The columns can be in any order, with Italian or English names. Capitals, accents, spaces and
-punctuation do not count: `Profondità (m)`, `profondita_m` and `PROFONDITA` are the same column.
-Columns the plugin does not know are ignored, so the table can keep columns of your own (date,
-operator, samples). When two columns could hold the same thing - `note` and `descrizione`, `codice`
-and `sondaggio` - the one further left is read and the other is ignored.
+The columns can be in any order, with Italian or English names, written as they are in the field:
+
+* capitals, accents, spaces and punctuation do not count: `Profondità (m)`, `profondita_m` and
+  `PROFONDITA` are the same column;
+* a unit of length after the name converts the values: `Da (cm)`, `Prof. (m)`, `quota_mm`;
+* the words around a name that do not change it are passed over: `Sigla sondaggio`, `N. sondaggio`,
+  `Codice US`, `N. US`, `US n.` (the borehole, the unit), `Quota s.l.m.`, `Elevation (m a.s.l.)` (the
+  elevation), `Quota sondaggio`, `Descrizione US` (a field of the borehole, of the unit).
+
+Columns the plugin does not know are left out and named at the end of the import (*columns not used:
+'Data', 'Operatore'*), so the table can keep columns of your own (date, operator, samples). When two
+columns could hold the same thing, the clearer name wins - `sondaggio` over `id`, `descrizione` over
+`note` - and the one further left among equals. A few names only guess their field: `codice`,
+`sigla` and `nome` (the borehole, or the unit when the borehole has a column of its own), `h` (the
+elevation), `e` or `n` alone (the coordinates). They are read when nothing clearer is there, and the
+import says so: *column 'codice' taken as the unit*.
 
 ### The collar table { #collars }
 
@@ -123,31 +133,46 @@ A single table has the columns of both: one row per interval, with `sondaggio`, 
 same borehole may leave them empty.
 
 ??? info "Every column name the plugin recognises"
-    | Field | Names |
-    |---|---|
-    | borehole | `sondaggio`, `sondaggi`, `id_sondaggio`, `nome_sondaggio`, `carota`, `carotaggio`, `trincea`, `saggio`, `nome`, `sigla`, `codice`, `punto`, `id`, `hole`, `hole_id`, `holeid`, `bhid`, `bh`, `borehole`, `borehole_id`, `boring`, `core_id`, `trench`, `name`, `point`, `station`, `location`, `location_id` |
-    | x | `x`, `est`, `e`, `x_coord`, `coord_x`, `xcoord`, `x_utm`, `utm_e`, `utm_x`, `east`, `easting` |
-    | y | `y`, `nord`, `n`, `y_coord`, `coord_y`, `ycoord`, `y_utm`, `utm_n`, `utm_y`, `north`, `northing` |
-    | elevation of the collar | `quota`, `quota_bocca`, `quota_testa`, `quota_piano`, `quota_slm`, `quota_p_c`, `z`, `h`, `elevation`, `elev`, `collar_z`, `z_collar`, `collar_elevation`, `rl`, `height`, `altitude`, `alt`, `ground_level` |
-    | depth reached | `profondita`, `profondita_totale`, `profondita_raggiunta`, `prof`, `prof_max`, `prof_totale`, `depth`, `total_depth`, `max_depth`, `final_depth`, `eoh`, `td` |
-    | kind | `tipo`, `tipologia`, `metodo`, `strumento`, `kind`, `type`, `method`, `tool` |
-    | top of the interval (depth) | `da`, `dal`, `prof_da`, `profondita_da`, `da_prof`, `tetto`, `inizio`, `from`, `depth_from`, `from_depth`, `top`, `top_depth`, `start` |
-    | base of the interval (depth) | `a`, `al`, `prof_a`, `profondita_a`, `a_prof`, `letto`, `fine`, `to`, `depth_to`, `to_depth`, `bottom`, `bottom_depth`, `base`, `end` |
-    | top of the interval (elevation) | `quota_tetto`, `quota_da`, `quota_sup`, `quota_superiore`, `z_tetto`, `q_tetto`, `top_z`, `z_top`, `z_from`, `from_z`, `top_elevation` |
-    | base of the interval (elevation) | `quota_letto`, `quota_base`, `quota_a`, `quota_inf`, `quota_inferiore`, `z_letto`, `q_letto`, `base_z`, `bottom_z`, `z_base`, `z_bottom`, `z_to`, `to_z`, `bottom_elevation` |
-    | unit | `us`, `unita`, `unita_stratigrafica`, `codice_unita`, `strato`, `orizzonte`, `unit`, `unit_code`, `unit_id`, `us_code`, `layer`, `stratum`, `horizon`, `facies`, `formation`, `litho_unit` |
-    | description | `descrizione`, `desc`, `descr`, `note`, `osservazioni`, `description`, `notes`, `remarks` |
-    | colour | `colore`, `colore_munsell`, `munsell`, `colour`, `color`, `munsell_colour`, `munsell_color` |
-    | lithology | `litologia`, `lito`, `materiale`, `tessitura`, `lithology`, `lith`, `material`, `texture` |
+    The names are written here without capitals, accents and punctuation, with `_` between the words.
+    Under *less sure* are the names that are read only when no clearer one is there.
 
-    A unit after the name makes it explicit: `_m`, `_mt`, `_metri`, `_metres`, `_meters` are metres,
-    `_cm` centimetres (`da_cm`, `Profondità (cm)`). Centimetres are converted only for the depths (`da`,
-    `a`, `profondita`): elevations are always in metres.
+    | Field | Names | Less sure |
+    |---|---|---|
+    | borehole | `sondaggio`, `sondaggi`, `id_sondaggio`, `nome_sondaggio`, `carota`, `carotaggio`, `trincea`, `saggio`, `pozzetto`, `trivellata`, `foro`, `hole`, `hole_id`, `holeid`, `bhid`, `bh`, `borehole`, `borehole_id`, `boring`, `core`, `core_id`, `trench`, `test_pit`, `pit`, `location_id`, `log_id` | `id`; guesses: `codice`, `code`, `sigla`, `nome`, `name`, `punto`, `point`, `station`, `location` |
+    | x | `x`, `est`, `x_coord`, `coord_x`, `xcoord`, `coordinata_x`, `x_utm`, `utm_e`, `utm_x`, `east`, `easting` | `e` (a guess without `n`) |
+    | y | `y`, `nord`, `y_coord`, `coord_y`, `ycoord`, `coordinata_y`, `y_utm`, `utm_n`, `utm_y`, `north`, `northing` | `n` (a guess without `e`) |
+    | elevation of the collar | `quota`, `z`, `quota_bocca`, `quota_testa`, `quota_piano`, `quota_pc`, `quota_p_c`, `quota_piano_campagna`, `quota_terreno`, `quota_suolo`, `elevation`, `elev`, `collar_z`, `z_collar`, `collar_elevation`, `rl`, `collar_rl`, `altitude`, `alt`, `ground_level`, `ground_elevation`, `surface_elevation` | guesses: `h`, `height` |
+    | depth reached | `profondita`, `profondita_totale`, `profondita_raggiunta`, `profondita_max`, `profondita_foro`, `prof`, `prof_max`, `prof_totale`, `prof_raggiunta`, `fondo_foro`, `depth`, `total_depth`, `max_depth`, `final_depth`, `hole_depth`, `eoh`, `td` | |
+    | kind | `tipo`, `tipologia`, `metodo`, `strumento`, `tecnica`, `kind`, `type`, `method`, `tool` | |
+    | top of the interval (depth) | `da`, `dal`, `prof_da`, `profondita_da`, `da_prof`, `inizio`, `profondita_tetto`, `prof_tetto`, `from`, `depth_from`, `from_depth`, `top_depth`, `start` | `tetto`, `top` (below) |
+    | base of the interval (depth) | `a`, `al`, `prof_a`, `profondita_a`, `a_prof`, `fine`, `profondita_letto`, `prof_letto`, `profondita_base`, `prof_base`, `to`, `depth_to`, `to_depth`, `bottom_depth`, `end` | `letto`, `base`, `bottom` (below) |
+    | top of the interval (elevation) | `quota_tetto`, `tetto_quota`, `quota_da`, `da_quota`, `quota_sup`, `quota_superiore`, `z_tetto`, `q_tetto`, `top_z`, `z_top`, `z_from`, `from_z`, `top_elevation`, `top_rl`, `rl_top`, `rl_from` | `tetto`, `top` (below) |
+    | base of the interval (elevation) | `quota_letto`, `letto_quota`, `quota_base`, `base_quota`, `quota_a`, `a_quota`, `quota_inf`, `quota_inferiore`, `quota_fondo`, `z_letto`, `q_letto`, `base_z`, `bottom_z`, `z_base`, `z_bottom`, `z_to`, `to_z`, `bottom_elevation`, `base_elevation`, `bottom_rl`, `base_rl`, `rl_bottom`, `rl_to` | `letto`, `base`, `bottom` (below) |
+    | unit | `us`, `usm`, `us_usm`, `unita`, `unita_stratigrafica`, `unita_litologica`, `codice_unita`, `strato`, `orizzonte`, `su`, `unit`, `unit_code`, `unit_id`, `us_code`, `context`, `layer`, `stratum`, `horizon`, `facies`, `formation`, `litho_unit` | `livello`; guesses: `codice`, `code`, `sigla` |
+    | description | `descrizione`, `desc`, `descr`, `description` | `note`, `osservazioni`, `commento`, `commenti`, `notes`, `remarks`, `comment`, `comments` |
+    | colour | `colore`, `colore_munsell`, `munsell`, `colour`, `color`, `munsell_colour`, `munsell_color`, `colour_munsell`, `color_munsell` | |
+    | lithology | `litologia`, `lito`, `materiale`, `tessitura`, `granulometria`, `lithology`, `lith`, `material`, `texture` | |
 
-    Beware: `tetto` and `letto`, `top`, `bottom` and `base` are depths below the collar, not elevations
-    (those are `quota_tetto`, `quota_letto`, `quota_base`); `codice` is the borehole, `h` the elevation,
-    `e` and `n` the coordinates. Names that are not in the list - such as `Codice US`, `N. US`,
-    `Sigla sondaggio`, `Quota s.l.m.` - are ignored: rename the column.
+    Around these names:
+
+    * **a unit of length** at the end - `m`, `mt`, `metro`, `metri`, `metre`, `metres`, `meter`,
+      `meters`, `cm`, `mm` - converts the values to metres, in any column of numbers: `Da (cm)`,
+      `quota_cm`, `profondita_mm`;
+    * **what an elevation is measured from**, at the end, is passed over: `s.l.m.`, `slm`, `m s.l.m.`,
+      `a.s.l.`, `asl`, `m a.s.l.`, `amsl`, `msl`, `assoluta`, `assoluto`, `ass`, `abs`, `absolute`
+      (`Quota s.l.m. (m)` is `quota`, `Elevation (m a.s.l.)` is `elevation`);
+    * **the words that do not change the borehole or the unit**, before or after it, are passed over:
+      `n`, `nr`, `no`, `num`, `numero`, `number`, `cod`, `codice`, `code`, `sigla`, `id`, `nome`, `name`
+      (`Sigla sondaggio`, `N. sondaggio`, `Codice US`, `US n.`, `Context No.`);
+    * **the borehole or the unit a field belongs to**, after the field, is passed over: `sondaggio`,
+      `sondaggi`, `foro`, `carota`, `carotaggio`, `hole`, `borehole`, `us`, `unita`, `strato`, `layer`,
+      `unit`, `intervallo`, `interval` (`Quota sondaggio`, `Descrizione US`, `Tipo sondaggio`).
+
+    `tetto` and `letto`, `top`, `bottom` and `base` alone can be depths or elevations. The plugin
+    decides from the other columns - beside `da` and `a` they are elevations, beside `quota_tetto` and
+    `quota_letto` they are depths, and with only one of these the other end of the interval tells -,
+    otherwise from the values: elevations decrease downwards, depths increase. The import says which:
+    *'tetto', 'letto' read as elevations (the base is below the top in 2 rows of 2)*.
 
 ### Depths { #depths }
 
@@ -157,7 +182,8 @@ same borehole may leave them empty.
   the ground itself, the DEM.
 * The intervals follow one another: the `a` of one is the `da` of the next. Differences under 5 mm
   count as rounding.
-* Depths in centimetres need a column name that says so: `da_cm`, `a_cm`, `profondita_cm`.
+* Depths in centimetres or millimetres need a column name that says so: `Da (cm)`, `da_cm`,
+  `profondita_mm`. The same holds for elevations and coordinates.
 * `profondita`, the depth reached, may stay empty. When it is deeper than the base of the last interval,
   the plugin takes it that the hole was still in the last unit down there: the units below are deeper.
 
@@ -182,7 +208,10 @@ collar needs an elevation - in the table, or from the DEM; without one the inter
 warning. Give the collar the elevation of the top of its first interval. A table may mix the two ways:
 a row with `da` and `a` uses them, a row without them uses the elevations.
 
-`tetto` and `letto` alone, like `top`, `bottom` and `base`, are depths, not elevations.
+`tetto` and `letto` alone, like `top`, `bottom` and `base`, can be either: the plugin decides from the
+other columns or from the values - elevations decrease downwards, depths increase - and says which at the
+end of the import (*'tetto', 'letto' read as elevations (the base is below the top in 2 rows of 2)*).
+`quota_tetto` and `quota_letto` leave no doubt.
 
 ### Units { #units }
 
@@ -191,8 +220,13 @@ are linked to one another only through these codes.
 
 * Any code works: a US number (`US 12`, `12`), a lithological or stratigraphic unit (`A`, `B`,
   `Unit 3`).
-* Write each code exactly the same way in every log: `US 3`, `US3` and `us 3` are three different
-  units.
+* The codes are compared in one form: `US 3`, `US3`, `us 3`, `US 03`, `US n. 3` and `SU 3` are one
+  unit, shown as it is written most often, and the import lists the spellings it read as one (*units
+  written in different ways, read as one: US 3 (US3, us 3)*). A plain number (`3`) is the unit of the
+  one kind that has that number (`US 3`); when two kinds share it (`US 4` and `USM 4`) it stays a unit
+  of its own and the import says so (*unit '4': it could be US 4 or USM 4, kept apart*): write the
+  kind. Other codes are compared without capitals, spaces and punctuation: `Sabbia gialla` and
+  `sabbia-gialla` are one unit. The column of a single borehole shows every code as its log writes it.
 * One code is one unit, in one place of the sequence. Two layers of the same kind at different depths -
   two levels of ash - need two codes.
 * Several intervals in a row may belong to the same unit, with different descriptions; a unit does not
@@ -214,33 +248,40 @@ modelled as such: at best they become units missing from some logs.
 
 * `descrizione` is free text. The most frequent description of a unit names it in the legends of the
   sections and panels; each interval keeps its own in the column of a single borehole.
-* `colore`: a Munsell notation (`10YR 4/3`, `7.5YR 6/4`, `N 5/`), `#rrggbb`, three numbers from 0 to
-  255 (`160,82,45` or `160 82 45`) or an English colour name (`brown`, `grey`). Write the Munsell hue
-  with a point: `2.5Y 5/2`, not `2,5Y 5/2`, which is not read. A unit is drawn in the colour written
-  most often for it; a unit without a readable colour gets one from a palette of earth tones. Munsell
+* `colore`: a Munsell notation (`10YR 4/3`, `7.5YR 6/4`, `2.5Y 5/2` or `2,5Y 5/2`, `N 5/`), also
+  inside a longer text (`10YR 4/3 bruno scuro`); `#rrggbb`; three numbers from 0 to 255 (`160,82,45`
+  or `160 82 45`); or the colour in words, Italian or English (`bruno rossastro`, `grigio scuro`,
+  `giallo chiaro`, `light yellowish brown`, `dark grey`), which gives an approximate soil tone. A unit
+  is drawn in the colour written most often for it (the first one that can be read); a colour that
+  cannot be read is named at the end of the import (*colour 'xyzzy' not recognised (line 3): not
+  used*), and a unit without a readable colour gets one from a palette of earth tones. Munsell
   notations are converted by the colour-science library, which is in the desktop application and in
-  the `[gui]` and `[all]` installations; without it the units get the palette colours.
-* `litologia` is optional: together with the description it chooses the hatch of the unit in the
-  columns and in the sections.
+  the `[gui]` and `[all]` installations; without it the import says so, and the units take the colour
+  of the words written beside the notation, or a palette colour.
+* `litologia` is optional: it chooses the hatch of the unit in the columns and in the sections; when it
+  names no lithology, the description does.
 
-| Hatch | Words looked for in the lithology and the description |
-|---|---|
-| horizontal lines (clay) | `argill`, `clay` |
-| lines and dots (silt) | `limo`, `limos`, `silt` |
-| dots (sand) | `sabbi`, `sand` |
-| small circles (gravel) | `ghiai`, `ciottol`, `gravel`, `pebble`, `cobble` |
-| stars (stones, collapse, bricks) | `crollo`, `pietr`, `macerie`, `laterizi`, `stone`, `rubble`, `brick` |
-| crosses (ash, charcoal) | `cenere`, `carbon`, `ash`, `charcoal` |
-| vertical lines (peat) | `torba`, `peat` |
-| diagonal lines (organic) | `organico`, `humus`, `organic` |
+| Hatch | Nouns | Adjectives, when no noun is there |
+|---|---|---|
+| horizontal lines (clay) | `argilla`, `argille`, `clay` | `argilloso` (`-a`, `-i`, `-e`), `clayey` |
+| lines and dots (silt) | `limo`, `limi`, `silt` | `limoso`..., `silty` |
+| dots (sand) | `sabbia`, `sabbie`, `sand` | `sabbioso`..., `sandy` |
+| small circles (gravel) | `ghiaia`, `ghiaie`, `ghiaietto`, `ghiaino`, `ciottolo`, `ciottoli`, `gravel`, `pebble`, `cobble` | `ghiaioso`..., `ciottoloso`..., `gravelly`, `pebbly` |
+| stars (stones, collapse, bricks) | `pietra`, `pietre`, `pietrame`, `pietrisco`, `sasso`, `sassi`, `crollo`, `crolli`, `maceria`, `macerie`, `laterizio`, `laterizi`, `mattone`, `mattoni`, `tegola`, `tegole`, `coppo`, `coppi`, `stone`, `rubble`, `brick`, `tile`, `collapse`, `debris` | `pietroso`..., `stony` |
+| grid (mudbrick) | `mattone crudo`, `mattoni crudi`, `mattone di fango`, `mattoni di fango`, `terra cruda`, `mudbrick`, `mud brick`, `adobe` | |
+| crosses (ash, charcoal) | `cenere`, `ceneri`, `carbone`, `carboni`, `carbonella`, `ash`, `charcoal` | `cineritico`..., `carbonioso`..., `ashy` |
+| vertical lines (peat) | `torba`, `torbe`, `peat` | `torboso`..., `peaty` |
+| diagonal lines (organic) | `humus`, `topsoil`, `terreno vegetale`, `terra vegetale`, `suolo vegetale` | `organico`..., `humico`..., `organic` |
 
-The words are looked for as parts of words, row by row in this order, in the lithology and the
-description together: the first row that matches decides, and the lithology does not count more than
-the description. So `limo argilloso` gets the clay hatch, `ghiaia sabbiosa` the sand hatch,
-`concrezioni carbonatiche` the ash hatch when nothing above matches, the English `mudbrick` the stones
-hatch. If a unit gets an unexpected hatch, look for these words in its descriptions. In the sections a
-unit takes the hatch of its most frequent lithology and description; in the columns every interval
-takes its own.
+Whole words count, not parts of words; capitals and accents do not, and the English plurals (`clays`,
+`stones`, `bricks`, `ashes`...) are read too. The lithology column decides when it names a lithology,
+the description otherwise. Inside a text the noun decides: in Italian the first one (`ghiaia sabbiosa`
+is gravel, `limo argilloso` silt, `crollo di mattoni crudi` stones), in English the last one of a
+compound (`sandy gravel` is gravel, `silty clay` clay, `mudbrick collapse` stones); an adjective counts
+only when there is no noun (`argilloso`: clay). A text that names no lithology gives no hatch:
+`concrezioni carbonatiche` has none, `argilla con concrezioni carbonatiche` is clay. In the sections and
+in the legends a unit takes the hatch of its most frequent lithology and description; in the columns
+every interval takes its own.
 
 ### Gaps and lost core { #gaps }
 
@@ -309,8 +350,8 @@ Any spreadsheet will do: one sheet per table, the column names in the first row,
 borehole (collars) or per interval, and nothing else on the sheet - no titles, merged cells or totals.
 
 * **Format** the code columns (`sondaggio`, `us`) as *Text* before typing, so that codes such as `1-2`
-  or `01` do not turn into dates or numbers; format the number columns as plain numbers **without the
-  thousands separator**.
+  or `01` do not turn into dates or numbers. The number columns can keep their format: decimals and
+  thousands separators are read in the context of the file (below).
 * **LibreOffice Calc**: *File > Save As...*, file type *Text CSV (.csv)*, tick *Edit filter settings*,
   then character set *Unicode (UTF-8)* and field delimiter `;`. Decimals are written as the cells show
   them (a comma with Italian settings): the plugin reads both.
@@ -319,10 +360,20 @@ borehole (collars) or per interval, and nothing else on the sheet - no titles, m
   contain the separator: the plugin reads both.
 
 The plugin finds the separator by itself (comma, semicolon, tab or vertical bar; spaces when there is
-none of these), reads decimals written with a point or a comma, reads files in UTF-8 or in the Windows
-encoding of Excel, and skips empty lines and lines that start with `#`, handy for notes at the top of a
-table. Empty cells, `-`, `na` and `null` mean no value. Text in quotes may contain the separator
-(`"argilla limosa, carboni"`): spreadsheets add the quotes by themselves.
+none of these), reads files in UTF-8 or in the Windows encoding of Excel, and skips empty lines and
+lines that start with `#`, handy for notes at the top of a table.
+
+* **Numbers** are read with a decimal point or a decimal comma, with or without thousands separators
+  (`4.500.810,5`, `4,500,810.5`, `4 500 810`, `4'500'810`), each in the context of its file: `1.234` is
+  1234 in a file whose numbers have a decimal comma, 1.234 otherwise.
+* Empty cells, `-`, `na`, `n/a`, `n.d.`, `nd`, `null` and `?` mean no value; any other text in a column
+  of numbers is named with its line (*S2: x 'cinquecento' is not a number (line 3)*).
+* Text in quotes may contain the separator (`"argilla limosa, carboni"`): spreadsheets add the quotes
+  by themselves. A row typed by hand without them - a description with the separator in it, a decimal
+  comma in a file separated by commas - has more fields than the header: the plugin puts it back
+  together when that can be done in one way only and names the lines (*decimal comma in a file
+  separated by commas: 1 row put back together (line 2)*); otherwise it leaves the row out, with its
+  line.
 
 ### In the field { #field }
 
@@ -334,8 +385,8 @@ table. Empty cells, `-`, `na` and `null` mean no value. Text in quotes may conta
 * Measure the position of every borehole with the GNSS receiver or the total station, in the reference
   system of the photogrammetric survey, and write the system on the sheet. Take the elevation in the
   same height system as the DEM, or leave it to the DEM.
-* Write Munsell colours with a point in the hue (`2.5Y 5/2`) and the main lithology in one word
-  (`argilla`, `limo`, `sabbia`, `ghiaia`...).
+* Write Munsell colours as notations (`2.5Y 5/2`, or `2,5Y 5/2`) and the main lithology with its noun
+  (`argilla`, `limo sabbioso`, `ghiaia`...): the noun chooses the hatch.
 * Give the boreholes short, unique codes (`S1`, `S2`... or `T1`, `T2`...); a borehole drilled again
   next to a failed one gets a new code.
 * A trench section becomes one or more logs: a column every metre or two along the wall, its collar at
@@ -343,26 +394,31 @@ table. Empty cells, `-`, `na` and `null` mean no value. Text in quotes may conta
 
 ### Common mistakes and the warnings they give { #mistakes }
 
-At the end of the import the plugin lists what it found odd: the first 15 warnings in the window, all
-of them on the command line. Line numbers count the header as line 1.
+At the end of the import the plugin lists what it guessed, put back together, left out or found odd:
+the first 15 warnings in the window, all of them on the command line. Line numbers are those of the
+file as a text editor shows them, empty lines and notes included.
 
 | What happened | What the plugin does or says | What to do |
 |---|---|---|
-| no column for the borehole, or a name it does not know (`Sigla sondaggio`) | *no column of the borehole (id, sondaggio, hole...)*: nothing is imported | rename it `sondaggio` |
+| no column for the borehole, or a name it does not know | *no column of the borehole (id, sondaggio, hole...)*: nothing is imported | rename it `sondaggio` |
 | a table with neither x and y nor from and to | *neither coordinates (x, y) nor intervals (from, to)*: nothing is imported | check the column names |
 | no collar with coordinates | *No borehole with coordinates in the files read* | add the collar table, or x and y |
-| the unit column has a name it does not know (`Codice US`, `N. US`) | every interval is *without a unit (line ...): left out* | rename it `us` |
-| the elevation column has a name it does not know (`Quota s.l.m.`) | no warning: the elevations are read from the DEM (the report counts the *elevations taken from the DEM*) | rename it `quota` |
-| elevations written in `tetto`/`letto` or `top`/`bottom` | read as depths: the intervals come out *with its base above its top* and are left out | use `quota_tetto` and `quota_letto` |
-| decimal commas in a file separated by commas, without quotes (typed by hand) | no message: the numbers are split across the columns | separate with semicolons, or use decimal points |
-| thousands separators (`1.234.567`) | the number is not read: the collar is lost and its intervals are *without the position of the borehole* | no thousands separators |
-| the same unit written in two ways (`US 1` and `US1`) | two units: the order and the surfaces go wrong | one spelling |
+| a column with a name it does not know (`Strato archeologico`, `Quota relativa`) | *column not used: 'Strato archeologico'*; without the unit every interval is also *without a unit (line 2): left out*, without the elevation the elevations are read from the DEM | rename it (`us`, `quota`...), or leave it if it is a column of your own |
+| a name that only guesses its field (`codice`, `sigla`, `h`) | read, and said so: *column 'codice' taken as the unit* | nothing if right, otherwise rename it |
+| elevations in `tetto`/`letto` or `top`/`bottom` | read as elevations, and said so: *'tetto', 'letto' read as elevations (the base is below the top in 2 rows of 2)* | nothing; `quota_tetto` and `quota_letto` leave no doubt |
+| decimal commas in a file separated by commas, without quotes (typed by hand) | the row is put back together when that can be done in one way only (*decimal comma in a file separated by commas: 1 row put back together (line 2)*), otherwise left out (*line 3: 7 fields instead of 5 and more than one way to put them back together: left out ...*) | separate the columns with semicolons, or use decimal points |
+| the separator inside a text without quotes (`humus; radici` in a table separated by semicolons), or between the three numbers of a colour (`139;90;43`) | put back together when that can be done in one way only: *the separator inside a field without quotes: 2 rows put back together (lines 2, 3)*; otherwise left out, with its line | quote the text, or write `139,90,43` |
+| text in a column of numbers (`cinquecento`) | *S2: x 'cinquecento' is not a number (line 3)*; a collar without its x or y is left out with its intervals | write the number |
+| a row without the code of the borehole | *line 3 without the code of the borehole: left out* | write the code |
+| a collar without x and y | *S2 without x and y: left out*, and its intervals are *without the position of the borehole* | add the position |
+| the same unit written in different ways (`US 1`, `US1`, `us 1`) | read as one unit, and said so: *units written in different ways, read as one: US 1 (US1, us 1)* | nothing, if they are one unit |
+| a plain number shared by two kinds of unit (`4` beside `US 4` and `USM 4`) | *unit '4': it could be US 4 or USM 4, kept apart* | write the kind |
 | the same code for two different layers, or a log with the units in another order | *US 2 above US 3 in 2 boreholes, below in 1* in the order; *S7: US 2 below US 3, against the order of the units* with the surfaces | check the logs, give different layers different codes |
 | elevations in another height system | *Collar elevation minus DEM* with a median of metres | bring them to the system of the DEM, or leave them empty |
 | coordinates in another system, or x and y swapped | the boreholes fall outside the DEM: *Without elevation (neither in the file nor from the DEM)* when the table has none, and in the view they are not where they should be | convert the coordinates |
 | a log that does not start at 0 | no message: the top of the first unit is interpolated instead of being the DEM | start at 0 |
-| a row without `a` (or without `da`) | left out without a message | fill it in |
-| the base above the top | *interval 2-1.8 m with its base above its top (line 8): left out* | correct the depths |
+| a row without `a` (or without `da`) | *S1: line 5 without 'a': left out* | fill it in |
+| the base above the top | *interval 2-1.8 m with its base above its top (line 6): left out* | correct the depths |
 | two intervals that overlap | *overlapping intervals at 0.9 m: the second starts at the base of the first*, or *interval ... inside the one before: left out* | correct the depths |
 | a gap between two intervals | *gap between 2 and 2.5 m (contact in the middle)*, or *gap ... inside US 2 (no contact)* | nothing, if it is lost core |
 | an interval without a unit | *interval 2-2.1 m without a unit (line 9): left out* | write the unit |
@@ -370,8 +426,8 @@ of them on the command line. Line numbers count the header as line 1.
 | intervals of a borehole missing from the collars | *X9: intervals without the position of the borehole: left out* | add the borehole to the collars, with the same code |
 | a borehole with two different positions | *B has two positions (line 4): the first kept* | one position per borehole |
 | intervals by elevation, the collar without elevation and outside the DEM | *interval by elevations (line 2) without the elevation of the borehole: left out* | give the collar its elevation |
-| a Munsell hue with a comma (`2,5Y 5/2`), a colour name in Italian (`marrone`) | no message: the unit gets a palette colour | `2.5Y 5/2`, `#8b5a2b` or `139,90,43` |
-| three numbers for a colour (`139;90;43`) in a table separated by semicolons | the numbers end up in the next columns | `139,90,43` or `139 90 43` |
+| a colour it cannot read | *colour 'xyzzy' not recognised (line 3): not used*: the unit takes another colour written for it, or a palette colour | a Munsell notation, `#rrggbb`, `r,g,b` or words |
+| Munsell notations without the colour-science library | *Munsell colours not converted: the colour-science library is missing (the units take the colours of the palette)* | use the desktop application, or install the program with `[gui]` or `[all]` |
 
 ## Step by step in the program { #program }
 
@@ -429,9 +485,9 @@ build them again.
 
 *Order of the units...* shows the units from the top down, as found in the logs, and the disagreements
 between the boreholes, if any (*US 2 above US 3 in 2 boreholes, below in 1*). To change the order, write
-the codes from the top down separated by commas; the codes not written go after, in the order of the
-logs. An order given by hand is kept until the boreholes bring new units. Build the surfaces and the
-model again afterwards.
+the codes from the top down separated by commas, in any spelling; the codes not written go after, in the
+order of the logs. An order given by hand is kept until the boreholes bring new units. Build the
+surfaces and the model again afterwards.
 
 ### 3. Contact surfaces { #surfaces }
 
@@ -442,7 +498,7 @@ model again afterwards.
 | *Variogram model* | *chosen by the data* | spherical, exponential or Gaussian: how the differences of a contact grow with the distance. Chosen by the data: the steadiest model among those whose leave-one-out error is within 5 % of the best |
 | *Trend* | *chosen by the data* | *none* (ordinary kriging) or *tilted plane* (universal kriging, for a contact that dips across the site); the plane is tried with six boreholes or more, not all in a line |
 | *Interpolate* | per contact | the elevations of every contact, the depths of every contact below the ground, or each contact in its own way (below) |
-| *By unit* | | the way of some units, for example `US 2=depth, US 5=elevation`; `profondità` and `quota` work too |
+| *By unit* | | the way of some units, for example `US 2=depth, US 5=elevation`, the codes in any spelling; `profondità` and `quota` work too |
 | *Cell* | the DEM's | the size of the cells of the surfaces, in metres; over a large area the cell of the DEM is doubled, tripled... to stay within a million cells; without a DEM, a round size giving about 300 cells across the area |
 | *Nugget* | fitted | the variance of a contact between two boreholes very close to each other, in m²: measurement errors and changes over short distances |
 | *Margin around the boreholes* | their usual spacing | how far beyond the outer boreholes the surfaces go; by default the median distance between a borehole and its nearest one |
@@ -476,12 +532,13 @@ Top of US 1: the ground
 Top of US 2: kriging Gaussian, leave-one-out error 0.026 m, by depth (it
   follows the ground: depths varying by 0.03 m, elevations by 6.22 m);
   moved by the stack on 9,736 m² (lowered up to 0.01 m, raised up to 0.02 m)
-Top of US 3: kriging spherical, leave-one-out error 0.943 m (Gaussian gave
-  0.908 m: less than 5 % apart), by depth (...)
-Top of US 5: kriging spherical, leave-one-out error 0.274 m (exponential
-  gave 0.271 m: less than 5 % apart), by elevation (it has a shape of its
-  own: depths varying by 2.84 m, elevations by 0.22 m); moved by the stack
-  on 39,412 m² (lowered up to 3.44 m, raised up to 1.60 m)
+Top of US 3: kriging spherical, leave-one-out error 0.943 m (the Gaussian
+  model gave 0.908 m: less than 5 % apart), by depth (...)
+Top of US 5: kriging spherical, leave-one-out error 0.274 m (the
+  exponential model gave 0.271 m: less than 5 % apart), by elevation (it
+  has a shape of its own: depths varying by 2.84 m, elevations by 0.22 m);
+  moved by the stack on 39,412 m² (lowered up to 3.44 m, raised up to
+  1.60 m)
 Thickness of US 2: mean 1.08 m, largest 5.20 m, 78,462 m³ (+ 2,787 m³
   where there is no DEM); missing on 4,956 m² (boreholes without it: S9,
   S10)
@@ -499,14 +556,14 @@ Choose a row of the *Surfaces* tab, then:
 
 * *Band*, for the tops only: *Elevation*, *Kriging variance* (the uncertainty, m²) or *Correction by the
   stack* (how much the contact was moved, m);
-* *Palette*: the product's own (hypsometric for elevations, heat for variances and corrections, a brown
-  ramp for thicknesses) or another one (greys, earth, diverging...);
+* *Palette*: the product's own (hypsometric for elevations, heat for variances, diverging for
+  corrections, a brown ramp for thicknesses) or another one (greys, earth...);
 * *Opacity*.
 
 *Overlay on the view*, or a double click on the row, lays it over the orthophoto or the DEM; the line at
 the bottom of the pane says what is shown and the values at the two ends of the colours (the 2nd and
-98th percentiles). Thicknesses, variances and corrections start from zero: so the corrections show
-where a contact was lowered, while the raised cells (negative values) are in band 3 of the GeoTIFF.
+98th percentiles). Thicknesses and variances start from zero. The corrections are centred on zero:
+the cells where a contact was lowered are red, those where it was raised blue, those it kept white.
 *Hide* takes the overlay away; one is shown at a time.
 
 ### 5. Sections { #sections }
@@ -514,7 +571,8 @@ where a contact was lowered, while the raised cells (negative values) are in ban
 * *Draw a section*: click the start and then the end of the trace on the orthophoto or the DEM (the
   line tool of the program, lent to the plugin for one trace).
 * *Section through the boreholes*: select two or more boreholes in the *Boreholes* tab (with Ctrl, or
-  Cmd on the Mac); the trace joins them in the order of the table.
+  Cmd on the Mac); the trace joins them in the order you picked them (a range picked with Shift comes
+  in the order of the table).
 
 | Field | What it does |
 |---|---|
@@ -542,7 +600,8 @@ that moment: after building the surfaces again, draw it again.
 
 ### 6. Stratigraphic columns { #columns }
 
-*Stratigraphic columns*: tick the boreholes; those selected in the table come first.
+*Stratigraphic columns*: tick the boreholes; those selected in the table come first, in the order you
+picked them.
 
 * One borehole: its column with the depths, the elevations when the collar has one, and the
   description and colour of every interval.
@@ -550,8 +609,9 @@ that moment: after building the surfaces again, draw it again.
 
 *Vertical axis*: elevations when every borehole has one (the default), elevations, or depths.
 *Scale 1:*: empty to fit an A4 sheet (from 1:10 to 1:1000). The plugin writes an SVG and a PNG and opens
-the PNG. A new panel replaces the previous one (`colonne.svg`, `colonne.png`); from the command line
-it can be written to a file of your choice.
+the PNG. Every panel has files of its own, named after its boreholes (`colonne_S5-S4-S3-S2-S1.svg`,
+`.png`), so a new panel replaces only the panel of the same boreholes; from the command line it can be
+written to a file of your choice.
 
 <figure markdown="span">
   ![A panel of nine stratigraphic columns on a common elevation axis](../img/plugins/geoarchaeology/columns.png)
@@ -570,11 +630,16 @@ it can be written to a file of your choice.
 | *Clip the units to the US drawn with the same number* | a unit whose code matches US drawn in the chunk is cut to their polygons |
 | *The last unit too, down to the floor* | the last unit has nothing below it: its solid goes down to a floor |
 | *Elevation of the floor* | empty: the deepest bottom of the boreholes, kept below the lowest top of the last unit by a margin of 5 % of the height the boreholes span (at least 10 cm), so that the solid has no holes |
+| *In the 3D view, units set apart vertically by* | empty: as they lie; a distance in metres raises every unit by that much above the one below it, so that units sharing their contacts can be told apart in the view (the files of the model are not moved) |
 
-A window lists the volumes. The files are a PLY per unit (true coordinates in double precision, the
-colour of the unit), one OBJ with an object and a material per unit (`unita.obj`, `unita.mtl`) and
-`volumi.csv`; open them in MeshLab, Blender, CloudCompare or QGIS 3D. The volume of the last unit
-depends on the floor chosen: it is not the volume of a deposit.
+At the end the units appear in the program's 3D view - the *Model* tab of the central area - each in its
+colour, under the title *Geoarchaeological units (5 units)*; to go back to the products of the chunk,
+choose another view in the *Show* list of the 3D view. *Show in the 3D view*, in the pane, brings the
+units back; *Open the folder* opens the folder of the model in the Finder or in the Explorer. A window
+lists the volumes. The files are a PLY per unit (true coordinates in double precision, the colour of the
+unit), one OBJ with an object and a material per unit (`unita.obj`, `unita.mtl`) and `volumi.csv`; open
+them in MeshLab, Blender, CloudCompare or QGIS 3D. The volume of the last unit depends on the floor
+chosen: it is not the volume of a deposit.
 
 <figure markdown="span">
   ![The solids of five units and a cut through the model](../img/plugins/geoarchaeology/model-3d.jpg)
@@ -590,7 +655,7 @@ depends on the floor chosen: it is not the volume of a deposit.
   GeoPackage comes from *File > Export > Boreholes and geoarchaeological surfaces (GeoPackage)...*.
 * *Open in QGIS*: the program's QGIS project ([QGIS](../integrations.md)) with the surfaces - hidden at
   first, elevations in greys and thicknesses in a warm ramp - and the layers of the boreholes and of
-  the sections; for a georeferenced chunk only.
+  the sections; for a chunk in a local system too, in a project without a reference system.
 * *Remove*: on the *Surfaces* tab all the surfaces and thicknesses (they form one stack); on the
   *Sections* tab the selected section and its drawings; on the *Boreholes* tab the selected boreholes.
 
@@ -623,11 +688,11 @@ ppg plugin geoarchaeology remove scavo.ppg surfaces
 | `help` | every command with its options |
 | `import PROJECT FILES...` | one or more tables (collars, intervals, single tables, in any order); the boreholes are added to those of the chunk, replacing those with the same code; `--replace` forgets those there were; `--kind` auger, core, trench, test_pit or other for all of them |
 | `list PROJECT` | boreholes, units, surfaces, sections, model; `--json`: the whole record, with every variogram model tried and its error |
-| `order PROJECT UNITS` | the codes from the top down, separated by commas |
+| `order PROJECT UNITS` | the codes from the top down, separated by commas, in any spelling (`us3` is `US 3`) |
 | `surfaces PROJECT` | `--model` auto, spherical, exponential, gaussian; `--trend` auto, none, linear; `--mode` auto, elevation or depth, and the units named (`"auto,US 2=depth"`); `--cell` m; `--nugget` m²; `--buffer` m, the margin; `--min-points` (5); `--order` the units from the top down |
 | `section PROJECT` | `--coords "x1,y1;x2,y2;..."`, a trace of two or more points in the reference system of the chunk (`--coords=...` when the first number is negative), or `--through S1,S4,S7`, in that order; `--name`; `--distance` m; `--scale` (the N of 1:N); `--exaggeration` |
-| `logs PROJECT [CODES...]` | the boreholes (all when none is given); `--out` an `.svg`, `.png` or `.pdf` file; `--vertical` auto, elevation, depth; `--scale` |
-| `model PROJECT` | `--cell` m; `--no-clip`; `--floor` elevation; `--no-last` leaves the last unit out; `--offset X,Y,Z` subtracted from the coordinates of the OBJ (written in its header and in `unita.obj.offset.txt`) |
+| `logs PROJECT [CODES...]` | the boreholes (all when none is given); `--out` an `.svg`, `.png` or `.pdf` file, otherwise `logs/<borehole>` for one borehole and `logs/colonne_<boreholes>` for a panel; `--vertical` auto, elevation, depth; `--scale` |
+| `model PROJECT` | `--cell` m; `--no-clip`; `--floor` elevation; `--no-last` leaves the last unit out; `--offset X,Y,Z` subtracted from the coordinates of the OBJ (written in its header and in `unita.obj.offset.txt`); `--explode` m, the units set apart vertically in `unita_vista.ply`, the file of the 3D view |
 | `export PROJECT OUT` | a GeoPackage with the GeoTIFFs and the volumes beside it; with `--id` (an id shown by `list`, such as `top_4_US_5` or `thickness_US_2`) one surface as GeoTIFF |
 | `remove PROJECT [WHAT]` | `all` (the default) or `boreholes`: everything of the plugin in the chunk; `surfaces`, `sections`, `model`; the code of a borehole or the name of a section |
 
@@ -666,24 +731,24 @@ boreholes. In the demonstration: 0.03 m for the base of the topsoil, which follo
 for the top of the natural, a gentle surface; 0.9 and 1.3 m for the tops of the Iron Age and Bronze Age
 deposits inside the mound, with boreholes 30-60 m apart.
 
-The report names the model used and, when another one had a slightly smaller error, says so:
-*(Gaussian gave 0.908 m: less than 5 % apart)*. Models within 5 % of the best are taken as equally good
-and the steadiest of them is used (spherical, then exponential, without a tilted plane before with
+The report names the model used and, when another one had a slightly smaller error, says so: *(the
+Gaussian model gave 0.908 m: less than 5 % apart)*. Models within 5 % of the best are taken as equally
+good and the steadiest of them is used (spherical, then exponential, without a tilted plane before with
 one, Gaussian last): with few boreholes the Gaussian model, which often wins such close races,
 overshoots between the boreholes. The *surfaces* folder also has a figure per contact made by kriging
-(`variogram_<id>.png`): the semivariance of the pairs of boreholes against their distance, and the
-model fitted. With a dozen boreholes it has few points and the model is a rough guide: judge the
-surface by its leave-one-out error.
+(`variogram_<id>.png`): the semivariance of the pairs of boreholes against their distance, and the model
+fitted. With a dozen boreholes it has few points and the model is a rough guide: judge the surface by
+its leave-one-out error.
 
 ### Corrections of the stack (band 3)
 
 Interpolated one by one, two contacts can cross or rise above the ground. The stack puts them back in
 order: where two contacts cross they meet where the better known one is, and none rises above the DEM.
-Band 3 keeps the correction made at every cell (positive: lowered, negative: raised), the report the area
-and the largest moves (*moved by the stack on 39,412 m² (lowered up to 3.44 m, raised up to 1.60 m)*).
-Corrections of a few centimetres are normal. Corrections of metres over large areas mean that the
-boreholes are too far apart for how quickly the units change, or that codes or order are not consistent:
-look at band 3 and draw a section through that area.
+Band 3 keeps the correction made at every cell (positive: lowered, red on the view; negative: raised,
+blue), the report the area and the largest moves (*moved by the stack on 39,412 m² (lowered up to 3.44
+m, raised up to 1.60 m)*). Corrections of a few centimetres are normal. Corrections of metres over large
+areas mean that the boreholes are too far apart for how quickly the units change, or that codes or order
+are not consistent: look at band 3 and draw a section through that area.
 
 ### Missing units
 
@@ -741,8 +806,8 @@ itself and open with it.
 * `sondaggi.gpkg`: a GeoPackage kept up to date, with three tables: `sondaggi` (points: code, x, y,
   elevation and where it came from, elevation of the DEM, depth, elevation of the bottom, kind, units,
   number of intervals, source table), `intervalli` (no geometry: borehole, from, to, elevations of top
-  and base, unit, description, colour, lithology) and `sezioni` (lines: name, length, distance, scale,
-  boreholes, drawing).
+  and base, unit as shown and as written in the log - `unita`, `unita_scritta` -, description, colour,
+  lithology) and `sezioni` (lines: name, length, distance, scale, boreholes, drawing).
 * `surfaces/top_<k>_<unit>.tif`: the top of every unit, a float32 GeoTIFF with three bands: 1 the
   elevation (m), 2 the kriging variance (m²), 3 the correction by the stack (m, positive where lowered,
   negative where raised); no value outside the area of the boreholes.
@@ -750,10 +815,16 @@ itself and open with it.
 * `surfaces/variogram_<id>.png`: the variogram of every contact made by kriging.
 * `sections/<name>.svg`, `.png`, `.dxf`, `.csv`: every section - drawing, DXF in section coordinates,
   profile.
-* `logs/<borehole>.svg`, `.png`: the column of one borehole; `logs/colonne.svg`, `.png`: the last panel.
+* `logs/<borehole>.svg`, `.png`: the column of one borehole; `logs/colonne_<boreholes>.svg`, `.png`:
+  every panel, named after its boreholes. The SVGs (and a PDF asked from the command line) need
+  matplotlib's vector backends: where they are missing, as in the desktop application up to 1.3.0,
+  sections and columns are written as PNG only, and the plugin says so (*SVG not available in this
+  installation: only the PNG written*).
 * `model/<unit>.ply`, `model/unita.obj` with `unita.mtl`, `model/volumi.csv`: the solids and their
   volumes; `volumi.csv` has unit, description, volume, area, mean and largest thickness, lowest and
   highest top and base, cells, clipped, down to the floor, volume and area where there is no DEM.
+* `model/unita_vista.ply`: all the units in one PLY for the program's 3D view, in the internal frame
+  of the chunk (for a large model the program writes a lighter copy beside it, `model_preview.ply`).
 
 The GeoPackage exported with *Export...* (or `export`) has the same three tables, with `<name>_<id>.tif`
 for every surface and thickness and `<name>_volumi.csv` beside it.

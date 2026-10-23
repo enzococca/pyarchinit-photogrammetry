@@ -41,8 +41,13 @@ them with pip in a Python environment, see [Plugins](../plugins.md).
 | Plugin | What it does | Guide |
 |---|---|---|
 | Geoarchaeology (`geoarchaeology`) | boreholes, cores and trench logs on the survey: stratigraphic columns, contact surfaces and thicknesses by kriging, sections, a 3D model of the units with their volumes | [Geoarchaeology](geoarchaeology.md) |
+| Terrain (`terrain`) | analyses of the DEM with WhiteboxTools: water courses and basins, topographic position and landforms, curvature and roughness, nested hollows and mounds with their volumes, viewshed | [Terrain](terrain.md) |
+| Geophysics (`geophysics`) | grids of magnetometry, resistivity, GPR and EM surveys: import, georeferencing on the pegs of the survey grid, filters, overlay on the orthophoto and the DEM, exports | [Geophysics](geophysics.md) |
+| GIS archive (`gis-archive`) | spot heights, contour lines, US, sections, stones, markers, DEM and orthophoto of a project into a GeoPackage, PostGIS or SpatiaLite database | [GIS archive](gis-archive.md) |
+| terrio (`terrio`) | point clouds of any format, also from the web, into the project; ground classification; reference rasters; E57, EPT, PMTiles and MBTiles exports | [terrio](terrio.md) |
+| Spirula (`spirula`) | 3D Gaussian splatting of the aligned photos with Spirula Studio, a mesh from the splat, the installation of Spirula Studio | [Spirula](spirula.md) |
+| Powerlines (`powerlines`) | overhead lines in the dense cloud: conductors as catenaries with sag, clearance and obstacles, poles, classes, 3D exports | [Powerlines](powerlines.md) |
 
-Guides for the other plugins of the repository - Terrain, Geophysics, GIS archive, terrio, Spirula,
-Powerlines - will follow, with the same parts: what the plugin does and what it needs first, the data
-and how to prepare them, the steps in the program and on the command line, how to read the results, the
-files it writes.
+Every guide has the same parts: what the plugin does and what it needs first, the data and how to
+prepare them, the steps in the program and on the command line, how to read the results, the files it
+writes.
