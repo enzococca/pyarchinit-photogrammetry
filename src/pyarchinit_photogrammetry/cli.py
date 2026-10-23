@@ -1788,6 +1788,28 @@ def multispectral(project: Path, what: str = typer.Argument(..., help="add, pane
         raise typer.BadParameter("what: add, bands, panel, reflectance, index or zoning")
 
 
+@app.command("thermal-sdk")
+def thermal_sdk(install: bool = typer.Option(False, help="download DJI's Thermal SDK from DJI into the program's data"),
+                accept_license: bool = typer.Option(False, "--accept-license",
+                                                    help="you accept DJI's terms: the MIT licence for the samples and "
+                                                         "utilities such as dji_irp, DJI's SDK EULA for the rest"),
+                folder: Optional[Path] = typer.Option(None, help="install: another folder (default: <app data>/dji_tsdk)")):
+    """DJI's Thermal SDK, which reads the temperatures of DJI's R-JPEGs: how the frames would be decoded
+    here, or (``--install --accept-license``) the SDK downloaded from DJI. It is not shipped with the
+    program; on macOS it runs in Docker Desktop."""
+    from .engine import thermal as th
+
+    if install:
+        if not accept_license:
+            typer.echo(f"DJI's Thermal SDK is DJI's: its samples and utilities (dji_irp) are under the MIT licence, the "
+                       f"rest under DJI's SDK EULA ({th.SDK_EULA_URL}). Run again with --accept-license to download it "
+                       f"from DJI ({th.SDK_URL}, about 74 MB).")
+            raise typer.Exit(1)
+        path = th.install_sdk(progress=print_progress, folder=folder)
+        typer.echo(f"DJI's Thermal SDK in {path}")
+    typer.echo(json.dumps(th.decoder_status(), indent=1))
+
+
 @app.command()
 def thermal(project: Path, what: str = typer.Argument(..., help="status, params, build, anomalies or export"),
             target: Optional[Path] = typer.Argument(None, help="export: the file to write (.tif, .csv, .jpg)"),

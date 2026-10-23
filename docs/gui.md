@@ -75,8 +75,10 @@ calculator narrows the thermal scale; *Auto* goes back to the 2nd-98th percentil
 anomalies (the temperature minus its surroundings within a radius) and the export that keeps the
 degrees (GeoTIFF float32 in degrees Celsius, 16-bit GeoTIFF in centikelvin, CSV, or FLIR radiometric
 JPEGs in tiles with world files, which the programs for FLIR cameras open as thermograms). DJI R-JPEGs are
-decoded with DJI's free Thermal SDK, which goes in the folder `dji_tsdk` of the program's data; on
-the Mac it runs in Docker, so Docker Desktop must be running.
+decoded with DJI's free Thermal SDK, which is not shipped with the program: *Scarica il DJI Thermal
+SDK...* in the parameters step of the Termico tab (and in *Strumenti > Termico*) shows DJI's terms and,
+once accepted, downloads it from DJI into the folder `dji_tsdk` of the program's data, checked against
+the archive DJI published. On the Mac it runs in Docker, so Docker Desktop must be running.
 
 Under the mouse the status bar reads the products at full resolution: on the thermal orthomosaic the
 elevation, the temperature and its anomaly (`Z 158.231  T 18.34 °C  ΔT +0.42 °C`), on the

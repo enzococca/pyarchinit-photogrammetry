@@ -211,7 +211,10 @@ frame before the mosaic where Metashape transforms the finished orthomosaic. FLI
 temperatures are thermal frames by themselves; `add_captures(chunk, paths, thermal=True)` (`ppg
 multispectral PROJECT add FOLDER --thermal`) takes every radiometric image without a band, the
 TIFFs of integers too. The SDK goes in the folder `dji_tsdk` of the program's data (or `PPG_DJI_TSDK`); it is
-free from dji.com. The raw counts of an R-JPEG (`raw_counts`, its APP3 segments) grow with the
+free from dji.com and not shipped with the program: `install_sdk(progress=None)` (`ppg thermal-sdk --install
+--accept-license`) downloads it from DJI for whoever accepted its licence (MIT for the samples and utilities
+such as dji_irp, DJI's SDK EULA for the rest), checks its SHA-256 against the archive DJI published, unpacks
+it without letting any file out of its folder and puts it in place in one move. The raw counts of an R-JPEG (`raw_counts`, its APP3 segments) grow with the
 temperature but are not degrees: they serve the geometry only. The parameters of the measure
 (`params_of`, `set_params`) hold for every frame: emissivity 0.95, reflected and ambient
 temperature 22 °C (the factory values of the DJI cameras), humidity 70 %, the distance the flight

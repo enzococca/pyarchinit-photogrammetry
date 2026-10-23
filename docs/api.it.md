@@ -219,7 +219,11 @@ grado da -100 0,01 e -100), fotogramma per fotogramma prima del mosaico, dove Me
 l'ortofoto finita. I JPEG FLIR e i TIFF di temperature sono fotogrammi termici da soli;
 `add_captures(chunk, percorsi, thermal=True)` (`ppg multispectral PROGETTO add CARTELLA --thermal`)
 prende ogni immagine radiometrica senza banda, anche i TIFF di interi. L'SDK va nella cartella `dji_tsdk` dei
-dati del programma (o `PPG_DJI_TSDK`); è gratuito su dji.com. I conteggi grezzi di un R-JPEG
+dati del programma (o `PPG_DJI_TSDK`); è gratuito su dji.com e non è distribuito con il programma:
+`install_sdk(progress=None)` (`ppg thermal-sdk --install --accept-license`) lo scarica dal sito di DJI per chi ne
+ha accettato la licenza (MIT per gli esempi e i programmi di utilità come dji_irp, la licenza d'uso del SDK di DJI
+per il resto), ne controlla lo SHA-256 sull'archivio pubblicato da DJI, lo estrae senza lasciare uscire nessun
+file dalla sua cartella e lo mette al suo posto in un colpo solo. I conteggi grezzi di un R-JPEG
 (`raw_counts`, i suoi segmenti APP3) crescono con la temperatura ma non sono gradi: servono solo
 alla geometria. I parametri della misura (`params_of`, `set_params`) valgono per tutti i
 fotogrammi: emissività 0,95, temperatura riflessa e ambiente 22 °C (i valori di fabbrica delle camere

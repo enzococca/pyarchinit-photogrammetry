@@ -25,7 +25,7 @@ from . import i18n, theme
 from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelectionDialog, IfcPreviewDialog,
                       ImageDialog, ParamDialog, PatchDialog,
                       PublishDialog, QuotaDialog, SiteChoiceDialog, SiteDialog, TableDialog, UnitDialog, UsFormDialog,
-                      choice, message, short_label)
+                      accept_dji_licence, choice, message, short_label)
 from .i18n import decimal_comma, number, thousands_points, tr, translate
 from .icons import app_icon, icon
 from .image_views import RELIEF_KINDS, US_COLORS, PhotoView, RasterView
@@ -305,6 +305,7 @@ class MainWindow(QMainWindow):
         self.ms_pane.zoning_requested.connect(self.ms_zoning)
         self.ms_pane.palette_requested.connect(self._ms_palette_changed)
         self.thermal_pane.thermal_params_requested.connect(self.ms_thermal_params)
+        self.thermal_pane.sdk_requested.connect(self.ms_thermal_sdk)
         self.thermal_pane.thermal_build_requested.connect(self.ms_build_thermal)
         self.thermal_pane.thermal_show_requested.connect(self.ms_thermal_show)
         self.thermal_pane.anomaly_requested.connect(self.ms_thermal_anomalies)
@@ -732,6 +733,9 @@ class MainWindow(QMainWindow):
         th_menu = m.addMenu(icon("thermal"), tr("Termico"))
         self._act(th_menu, tr("Aggiungi riprese termiche..."), lambda: self.ms_add(thermal=True),
                   tip=tr("La cartella dei fotogrammi termici e, se ci sono, quella delle foto visibili dello stesso volo"))
+        self._act(th_menu, tr("Scarica il DJI Thermal SDK..."), self.ms_thermal_sdk, icon_name="update",
+                  tip=tr("Il programma di DJI che legge le temperature delle R-JPEG: scaricato dal sito di DJI "
+                         "dopo aver accettato la sua licenza"))
         self._act(th_menu, tr("Parametri di misura della termica..."), self.ms_thermal_params, icon_name="settings",
                   tip=tr("Emissività, temperatura riflessa e ambiente, umidità, distanza: valgono per tutti i fotogrammi"))
         self._act(th_menu, tr("Ortofoto termica..."), self.ms_build_thermal, processing=True, icon_name="ortho",
@@ -1246,6 +1250,24 @@ class MainWindow(QMainWindow):
         self.run_task("Riprese multispettrali", job, done, refresh=True)
 
     # ---------------------------------------------------------------- thermal
+    def ms_thermal_sdk(self) -> None:
+        """DJI's Thermal SDK downloaded from DJI once its licence is accepted (it is not shipped with
+        the program), then the steps of the Termico tab read again."""
+        if not accept_dji_licence(self):
+            return
+        from ..engine import thermal
+
+        def done(path) -> None:
+            self._capture_states()
+            text = tr("DJI Thermal SDK installato in {0}.", str(path))
+            if sys.platform == "darwin":
+                text += " " + tr("Sul Mac gira in Docker Desktop: avvialo prima di costruire l'ortofoto termica.")
+            self.statusBar().showMessage(text, 15000)
+            log.info("%s", text)
+
+        self.run_task("Scarica il DJI Thermal SDK", lambda p: thermal.install_sdk(progress=p), done, refresh=False,
+                      save=False)
+
     def ms_thermal_params(self) -> None:
         """The parameters of the temperature measure: they hold for every frame of the chunk."""
         if not self._need_chunk():

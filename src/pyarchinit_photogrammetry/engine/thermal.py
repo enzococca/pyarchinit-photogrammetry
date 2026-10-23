@@ -59,6 +59,14 @@ RAW_PRESETS = {"centikelvin": (0.01, -273.15), "centidegrees_100": (0.01, -100.0
 DISTANCE_RANGE = (1.0, 25.0)  # what DJI's SDK accepts; None = the flight height of the frame, clipped
 THERMAL_BANDS = ("LWIR",)
 DOCKER_IMAGE = "ppg-dji-tsdk:1"  # ubuntu:22.04 with the OpenMP runtime dji_irp needs, built when missing
+# DJI's Thermal SDK as DJI publishes it (linked from dji.com/downloads/softwares/dji-thermal-sdk): downloaded by
+# install_sdk for whoever accepts its licence, never shipped with the program
+SDK_VERSION = "1.9"
+SDK_URL = "https://terra-1-g.djicdn.com/2640963bcd8e45c0a4f0cb9829739d6b/TSDK/v1.9/dji_thermal_sdk_v1.9_20260526.zip"
+SDK_SHA256 = "9345dc8d403ecc413c212e545d690b8bc843b3189157f3687bddd1c38e1d76eb"  # of the archive at SDK_URL
+SDK_SIZE = 73_701_242  # for the progress when the server does not say
+SDK_EULA_URL = "https://developer.dji.com/policies/eula/"
+SDK_PAGE_URL = "https://www.dji.com/downloads/softwares/dji-thermal-sdk"
 DOCKERFILE = ("FROM ubuntu:22.04\n"
               "RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm -rf /var/lib/apt/lists/*\n")
 PALETTES = {  # (position, (R, G, B)): the ramps of temperature
@@ -680,6 +688,110 @@ def temperature(chunk: Chunk, cam) -> np.ndarray:
 
 
 # ------------------------------------------------------------------------------ DJI's SDK
+class SdkInstallError(RuntimeError):
+    """DJI's Thermal SDK could not be downloaded or is not what was expected."""
+
+
+def sdk_folder() -> Path:
+    """Where the program keeps DJI's Thermal SDK: ``<app data>/dji_tsdk``."""
+    from ..ai.sam_env import data_dir
+
+    return data_dir() / "dji_tsdk"
+
+
+def _unzip_safely(archive: Path, dest: Path) -> None:
+    """The archive unpacked into ``dest``: no member outside it (absolute paths, ``..``), the
+    executable bits kept (``dji_irp`` runs as it is, also inside Docker)."""
+    import zipfile
+
+    dest = dest.resolve()
+    with zipfile.ZipFile(archive) as z:
+        for info in z.infolist():
+            target = (dest / info.filename).resolve()
+            if target != dest and dest not in target.parents:
+                raise SdkInstallError(f"the archive has a file outside its folder: {info.filename}")
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with z.open(info) as src, open(target, "wb") as out:
+                shutil.copyfileobj(src, out, 1 << 20)
+            mode = (info.external_attr >> 16) & 0o777
+            if os.name != "nt" and (mode or target.name.startswith("dji_")):
+                os.chmod(target, (mode or 0o644) | (0o755 if target.name.startswith("dji_") and "." not in target.name else 0))
+
+
+def install_sdk(progress: Progress | None = None, url: str = SDK_URL, sha256: str | None = None,
+                folder: Path | None = None) -> Path:
+    """DJI's Thermal SDK downloaded from DJI and unpacked into the program's data (``folder``, by
+    default :func:`sdk_folder`), for whoever accepted DJI's licence first (the samples and the
+    utilities such as dji_irp under the MIT licence, the rest under DJI's SDK EULA: the text is in
+    ``License.txt`` of the SDK). The download is written aside, checked against ``sha256`` (by
+    default the SHA-256 of the archive DJI published), unpacked without letting any file out of its
+    folder, and put in place in one move, over an older SDK too; a failure leaves nothing behind.
+    Returns the folder."""
+    import datetime
+    import hashlib
+    import urllib.error
+    import urllib.request
+
+    from ..updates import _ssl_context
+
+    progress = as_progress(progress)
+    expected = SDK_SHA256 if sha256 is None and url == SDK_URL else sha256
+    folder = Path(folder) if folder is not None else sdk_folder()
+    folder.parent.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="dji_tsdk_", dir=folder.parent))
+    try:
+        archive = work / (Path(urllib.request.url2pathname(url.rsplit("/", 1)[-1])).name or "sdk.zip")
+        digest = hashlib.sha256()
+        done = 0
+        request = urllib.request.Request(url, headers={"User-Agent": "pyarchinit-photogrammetry"})
+        kw = {"context": _ssl_context()} if url.lower().startswith("https:") else {}
+        try:
+            with urllib.request.urlopen(request, timeout=120, **kw) as r, open(archive, "wb") as f:
+                total = int(r.headers.get("Content-Length") or 0) or SDK_SIZE
+                while True:
+                    progress.check()
+                    block = r.read(1 << 20)
+                    if not block:
+                        break
+                    f.write(block)
+                    digest.update(block)
+                    done += len(block)
+                    progress(0.9 * min(done / total, 1.0), f"Downloading DJI's Thermal SDK: {done / 1e6:.0f} MB")
+        except (urllib.error.URLError, OSError) as exc:
+            raise SdkInstallError(f"could not download DJI's Thermal SDK from {url}: {exc}") from exc
+        got = digest.hexdigest()
+        if expected and got != expected.lower():
+            raise SdkInstallError(f"the file downloaded is not the SDK DJI published (SHA-256 {got[:12]}..., expected "
+                                  f"{expected[:12]}...): download it from {SDK_PAGE_URL}")
+        progress(0.92, "Unpacking DJI's Thermal SDK")
+        unpacked = work / "dji_tsdk"
+        unpacked.mkdir()
+        try:
+            _unzip_safely(archive, unpacked)
+        except SdkInstallError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - not a zip, a broken one
+            raise SdkInstallError(f"the file downloaded is not a usable archive: {exc}") from exc
+        if not any(p.name in ("dji_irp", "dji_irp.exe") for p in unpacked.rglob("dji_irp*")):
+            raise SdkInstallError("the archive has no dji_irp: it is not DJI's Thermal SDK")
+        (unpacked / "installed.json").write_text(json.dumps(
+            {"version": SDK_VERSION if url == SDK_URL else None, "url": url, "sha256": got, "bytes": done,
+             "installed": datetime.datetime.now().isoformat(timespec="seconds"),
+             "licence": f"MIT for the samples and utilities, DJI's SDK EULA ({SDK_EULA_URL}) for the rest"}, indent=1))
+        old = None
+        if folder.exists():
+            old = work / "previous"
+            folder.rename(old)
+        unpacked.rename(folder)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    progress(1.0, f"DJI's Thermal SDK in {folder}")
+    return folder
+
+
 def sdk_dir() -> Path | None:
     """The folder of DJI's Thermal SDK: ``PPG_DJI_TSDK``, else ``<app data>/dji_tsdk``."""
     env = os.environ.get("PPG_DJI_TSDK")

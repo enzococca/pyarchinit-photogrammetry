@@ -483,6 +483,117 @@ def test_offsets_of_the_frames_found_even_when_large():
     assert (n_ph > 0).all() and np.max(np.abs(o - (off - off.mean()))) < 0.05
 
 
+def _fake_sdk_zip(path: Path, members: dict | None = None) -> Path:
+    """An archive laid out as DJI's Thermal SDK (dji_irp for Linux with its executable bit)."""
+    import zipfile
+
+    members = members or {"dji_thermal_sdk_v9.9/License.txt": b"MIT for the utilities, DJI's SDK EULA for the rest",
+                          "dji_thermal_sdk_v9.9/utility/bin/linux/release_x64/dji_irp": b"#!/bin/sh\necho irp\n",
+                          "dji_thermal_sdk_v9.9/utility/bin/windows/release_x64/dji_irp.exe": b"MZ"}
+    with zipfile.ZipFile(path, "w") as z:
+        for name, data in members.items():
+            info = zipfile.ZipInfo(name)
+            info.external_attr = (0o755 if name.endswith("dji_irp") else 0o644) << 16
+            z.writestr(info, data)
+    return path
+
+
+def test_dji_sdk_downloaded_checked_and_unpacked(tmp_path, monkeypatch):
+    """DJI's Thermal SDK fetched for whoever accepted its licence: its SHA-256 checked, unpacked with
+    dji_irp executable, put in place in one move (over an older one too); a wrong file or an archive
+    with a member outside its folder leaves nothing behind."""
+    import hashlib
+
+    z = _fake_sdk_zip(tmp_path / "sdk.zip")
+    good = hashlib.sha256(z.read_bytes()).hexdigest()
+    target = tmp_path / "data" / "dji_tsdk"
+    with pytest.raises(thermal.SdkInstallError):
+        thermal.install_sdk(url=z.as_uri(), sha256="0" * 64, folder=target)
+    assert not target.exists() and list(target.parent.iterdir()) == []
+    assert thermal.install_sdk(url=z.as_uri(), sha256=good, folder=target) == target
+    info = json.loads((target / "installed.json").read_text())
+    assert info["sha256"] == good and info["url"] == z.as_uri()
+    irp = next(target.rglob("dji_irp"))
+    if os.name != "nt":
+        assert os.access(irp, os.X_OK)
+    monkeypatch.setenv("PPG_DJI_TSDK", str(target))
+    assert thermal.sdk_tool(linux=True) == irp
+    thermal.install_sdk(url=z.as_uri(), sha256=good, folder=target)  # again: replaced in one move
+    assert sorted(q.name for q in target.parent.iterdir()) == ["dji_tsdk"]
+    bad = _fake_sdk_zip(tmp_path / "bad.zip", {"../evil.txt": b"x", "a/dji_irp": b"x"})
+    with pytest.raises(thermal.SdkInstallError):
+        thermal.install_sdk(url=bad.as_uri(), sha256=None, folder=tmp_path / "other" / "dji_tsdk")
+    assert not (tmp_path / "evil.txt").exists() and not (tmp_path / "other" / "dji_tsdk").exists()
+    empty = _fake_sdk_zip(tmp_path / "empty.zip", {"x/readme.txt": b"no tools"})  # not DJI's SDK
+    with pytest.raises(thermal.SdkInstallError):
+        thermal.install_sdk(url=empty.as_uri(), sha256=None, folder=tmp_path / "third" / "dji_tsdk")
+
+
+def test_dji_sdk_command(tmp_path, monkeypatch):
+    """`ppg thermal-sdk --install` downloads nothing until the licence is accepted on the command line
+    (it says where to read it); with --accept-license the SDK is installed where asked."""
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    r = CliRunner().invoke(app, ["thermal-sdk", "--install"])
+    assert r.exit_code == 1 and thermal.SDK_EULA_URL in r.output
+    called = {}
+
+    def fake_install(progress=None, folder=None):
+        called["folder"] = folder
+        return folder
+
+    monkeypatch.setattr(thermal, "install_sdk", fake_install)
+    r = CliRunner().invoke(app, ["thermal-sdk", "--install", "--accept-license", "--folder", str(tmp_path / "sdk")])
+    assert r.exit_code == 0 and called["folder"] == tmp_path / "sdk"
+
+
+def test_dji_sdk_offered_in_the_thermal_pane(tmp_path, monkeypatch):
+    """Without DJI's SDK the Termico pane offers to download it: its licence comes first (declined:
+    nothing happens), accepted: the download runs as a task and the button goes away."""
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("PPG_RENDERER", "software")
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
+    QApplication.instance() or QApplication([])
+    from pyarchinit_photogrammetry.gui import main_window as mwmod
+
+    installed = {"dir": None}
+    monkeypatch.setattr(thermal, "sdk_dir", lambda: installed["dir"])
+    calls = []
+
+    def fake_install(progress=None, **_kw):
+        calls.append(1)
+        installed["dir"] = tmp_path / "dji_tsdk"
+        return installed["dir"]
+
+    monkeypatch.setattr(thermal, "install_sdk", fake_install)
+    answers = [False, True]
+    monkeypatch.setattr(mwmod, "accept_dji_licence", lambda parent: answers.pop(0))
+    doc = ppg.Document()
+    doc.add_chunk("Campo")
+    doc.save(tmp_path / "campo.ppg")
+    w_ = mwmod.MainWindow(doc, autoconnect=False)
+    w_.runner.show_dialog = False
+    try:
+        pane = w_.thermal_pane
+        assert pane.b_tsdk.isVisibleTo(pane)
+        pane.b_tsdk.click()  # the licence declined
+        w_.runner.wait()
+        assert calls == [] and pane.b_tsdk.isVisibleTo(pane)
+        pane.b_tsdk.click()  # accepted
+        w_.runner.wait()
+        QApplication.processEvents()
+        assert calls == [1] and not pane.b_tsdk.isVisibleTo(pane)
+    finally:
+        w_.close()
+
+
 def test_colours_and_limits():
     t = np.array([[10.0, 20.0, np.nan], [30.0, 40.0, 25.0]], np.float32)
     lo, hi = thermal.limits(t, 15.0, 35.0)

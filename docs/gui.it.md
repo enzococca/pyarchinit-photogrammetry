@@ -77,8 +77,11 @@ anomalie termiche (la temperatura meno quella dei dintorni entro un raggio) e l'
 conserva i gradi (GeoTIFF float32 in gradi Celsius, GeoTIFF a 16 bit in centikelvin, CSV, oppure JPEG
 radiometrici FLIR a tasselli con i world file, che i programmi per le termocamere FLIR aprono come
 termogrammi). Gli R-JPEG
-DJI si decodificano con il Thermal SDK gratuito di DJI, che va nella cartella `dji_tsdk` dei dati del
-programma; sul Mac gira in Docker, quindi Docker Desktop deve essere avviato.
+DJI si decodificano con il Thermal SDK gratuito di DJI, che non è distribuito con il programma: *Scarica il
+DJI Thermal SDK...* nel passo dei parametri della scheda Termico (e in *Strumenti > Termico*) mostra le
+condizioni di DJI e, una volta accettate, lo scarica dal sito di DJI nella cartella `dji_tsdk` dei dati del
+programma, controllato sull'archivio pubblicato da DJI. Sul Mac gira in Docker, quindi Docker Desktop deve
+essere avviato.
 
 Sotto il mouse la barra di stato legge i prodotti a piena risoluzione: sull'ortofoto termica la quota,
 la temperatura e la sua anomalia (`Z 158.231  T 18.34 °C  ΔT +0.42 °C`), sulla riflettanza ogni banda,

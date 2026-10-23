@@ -861,6 +861,45 @@ def choice(parent, kind: str, title: str, text: str, options: list[str], default
     return buttons.index(clicked) if clicked in buttons else None
 
 
+
+def accept_dji_licence(parent) -> bool:
+    """Non-native box with the terms of DJI's Thermal SDK before the program downloads it: what
+    is under which licence, where to read it, a box to tick; True when accepted."""
+    import sys
+
+    from ..engine import thermal
+
+    dlg = QDialog(parent)
+    dlg.setWindowTitle(tr("DJI Thermal SDK"))
+    dlg.setMinimumWidth(520)
+    lay = QVBoxLayout(dlg)
+    text = (tr("Per leggere le temperature delle R-JPEG di DJI serve il DJI Thermal SDK, un programma di DJI "
+               "che non è distribuito con pyarchinit-photogrammetry. Il programma lo scarica dal sito di DJI "
+               "(versione {0}, circa 74 MB) nella sua cartella dei dati.", thermal.SDK_VERSION)
+            + "<br><br>"
+            + tr("Gli esempi e i programmi di utilità del SDK (come dji_irp) sono sotto licenza MIT, il resto "
+                 "sotto la licenza d'uso del SDK di DJI: {0}. Il testo completo è nel file License.txt del SDK.",
+                 f'<a href="{thermal.SDK_EULA_URL}">{thermal.SDK_EULA_URL}</a>'))
+    if sys.platform == "darwin":
+        text += "<br><br>" + tr("Sul Mac il SDK gira in Docker Desktop: DJI non lo fornisce per macOS.")
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setTextFormat(Qt.TextFormat.RichText)
+    label.setOpenExternalLinks(True)
+    lay.addWidget(label)
+    tick = QCheckBox(tr("Ho letto e accetto le condizioni di DJI"))
+    lay.addWidget(tick)
+    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+    ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
+    ok.setText(tr("Scarica"))
+    ok.setEnabled(False)
+    tick.toggled.connect(ok.setEnabled)
+    buttons.accepted.connect(dlg.accept)
+    buttons.rejected.connect(dlg.reject)
+    lay.addWidget(buttons)
+    return dlg.exec() == QDialog.DialogCode.Accepted and tick.isChecked()
+
+
 _SUGGESTIONS = [
     ("crashed in the worker process", "La ricostruzione e' stata eseguita in un processo separato che si e' interrotto. "
                                       "Il modello viene ricostruito con il metodo alternativo (campo di altezze); "

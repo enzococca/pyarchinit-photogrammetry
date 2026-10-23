@@ -41,6 +41,7 @@ class MultispectralPane(QWidget):
     qgis_requested = Signal()
     palette_requested = Signal(str)  # the ramp of the indices shown
     thermal_params_requested = Signal()
+    sdk_requested = Signal()  # download DJI's Thermal SDK
     thermal_build_requested = Signal()
     thermal_show_requested = Signal(str, object)  # palette, (low, high) in degrees or None for the automatic range
     anomaly_requested = Signal(float)  # radius in metres
@@ -139,7 +140,10 @@ class MultispectralPane(QWidget):
         # the temperatures (a thermal band: DJI R-JPEGs, MicaSense LWIR, temperature TIFFs)
         self.b_tparams = QPushButton(icon("settings"), tr("Parametri..."))
         self.b_tparams.setToolTip(tr("Emissività, temperatura riflessa e ambiente, umidità, distanza: valgono per tutti i fotogrammi"))
-        step(7, "thermal_params", tr("Parametri di misura della termica"), [self.b_tparams])
+        self.b_tsdk = QPushButton(icon("update"), tr("Scarica il DJI Thermal SDK..."))
+        self.b_tsdk.setToolTip(tr("Il programma di DJI che legge le temperature delle R-JPEG: scaricato dal sito di DJI "
+                                  "dopo aver accettato la sua licenza"))
+        step(7, "thermal_params", tr("Parametri di misura della termica"), [self.b_tparams, self.b_tsdk])
         self.b_thermal = QPushButton(icon("ortho"), tr("Costruisci..."))
         self.b_thermal.setToolTip(tr("Ortofoto in gradi Celsius: un GeoTIFF a virgola mobile che resta radiometrico in ogni esportazione"))
         self.c_tpalette = QComboBox()
@@ -175,6 +179,7 @@ class MultispectralPane(QWidget):
         self.b_texport = QPushButton(icon("export"), tr("Esporta..."))
         step(10, "thermal_export", tr("Esporta le temperature (restano in gradi)"), [self.c_texport, self.b_texport])
         self.b_tparams.clicked.connect(self.thermal_params_requested)
+        self.b_tsdk.clicked.connect(self.sdk_requested)
         self.b_thermal.clicked.connect(self.thermal_build_requested)
         self.b_tshow.clicked.connect(lambda: self.thermal_show_requested.emit(self.thermal_palette(), self.thermal_range()))
         self.c_tpalette.currentIndexChanged.connect(
@@ -372,8 +377,10 @@ class MultispectralPane(QWidget):
         info = (chunk.meta.get("thermal") or {}) if chunk is not None else {}
         p = thermal.params_of(chunk)
         distance = tr("altezza di volo (1-25 m)") if p["distance"] is None else f"{p['distance']:g} m"
+        have_sdk = thermal.sdk_dir() is not None
         decoder = (tr("DJI Thermal SDK in Docker") if sys.platform == "darwin" else tr("DJI Thermal SDK")) \
-            if thermal.sdk_dir() is not None else tr("senza DJI Thermal SDK: servono i file già in gradi")
+            if have_sdk else tr("senza DJI Thermal SDK: servono i file già in gradi")
+        self.b_tsdk.setVisible(not have_sdk)
         text = tr("Emissività {0}, riflessa {1} °C, ambiente {2} °C, umidità {3} %, distanza {4}; {5}",
                   f"{p['emissivity']:g}", f"{p['reflected']:g}", f"{p['ambient']:g}", f"{p['humidity']:g}", distance, decoder)
         if p.get("scale") is not None and p.get("offset") is not None:
