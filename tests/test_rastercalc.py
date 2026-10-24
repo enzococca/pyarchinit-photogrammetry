@@ -138,6 +138,13 @@ def test_formulas_written_as_in_qgis():
     assert np.allclose(run("max(dem, slope * 4) - min(dem, 100) + sqrt(abs(-4)) * pi / pi"),
                        np.maximum(dem, slope * 4) - np.minimum(dem, 100) + 2, equal_nan=True)
     assert np.isnan(run("dem / 0")).all()  # infinities are no data
+    # also for what follows: a comparison, coalesce, isnan
+    assert np.isnan(run("(dem / 0) > 1")).all() and np.isnan(run("exp(dem * 100) > 0")).all()
+    assert np.array_equal(run("coalesce(dem / 0, 5)"), np.full((2, 3), 5.0))
+    assert np.array_equal(run("isnan(ln(dem - dem))"), np.ones((2, 3)))
+    # a number with a raster in AND, OR
+    assert np.array_equal(run("dem > 100 AND 1"), run("dem > 100"), equal_nan=True)
+    assert np.array_equal(run("1 OR dem > 100"), [[1.0, 1.0, np.nan], [1.0, 1.0, 1.0]], equal_nan=True)
     f = rc.parse("slope + dem@1 - dem", cat)
     assert [(r.name, b) for r, b in f.inputs] == [("slope", 1), ("dem", 1)] and [r.name for r in f.rasters] == ["slope", "dem"]
 
@@ -256,6 +263,28 @@ def test_a_chunk_with_no_reference_system(tmp_path):
     want = _plane(top, RES, (H, W), 0.02, 0.02, 0.5) * 10
     inner = (slice(25, H - 4), slice(45, W - 4))  # away from the hole of the DEM
     assert np.allclose(out[inner], want[inner], atol=1e-4)
+
+
+def test_a_rotated_grid_for_the_result(tmp_path):
+    """A rotated grid (a geophysical survey) as the grid of the result: the DEM resampled onto all of
+    it, block by block."""
+    from affine import Affine
+
+    doc, ch, _dem = _chunk(tmp_path)
+    n, res = 30, 0.1
+    turned = Affine.translation(X0 + 5.0, Y0 + 4.5) @ Affine.rotation(30) @ Affine.scale(res, -res)  # in the DEM
+    (ch.data_dir / "geophysics").mkdir()
+    with rasterio.open(ch.data_dir / "geophysics" / "gpr.tif", "w", driver="GTiff", height=n, width=n, count=1,
+                       dtype="float32", crs=CRS, transform=turned, nodata=float("nan"), BIGTIFF="IF_SAFER") as dst:
+        dst.write(np.ones((1, n, n), np.float32))
+    info = rc.calculate(ch, "geophysics_gpr * 0 + dem", "ruotato", block=8)
+    with rasterio.open(ch.data_dir / info["file"]) as src:
+        out = src.read(1)
+        assert src.transform.almost_equals(turned)
+    rows, cols = np.mgrid[0:n, 0:n]
+    xs, ys = turned @ (cols + 0.5, rows + 0.5)
+    want = 0.5 * (xs - X0) + 0.25 * (ys - Y0) + 100.0  # the plane of the DEM at the centres of the turned cells
+    assert np.isfinite(out).all() and np.allclose(out, want, atol=5e-3)  # cells twice the DEM's: averaged
 
 
 # ---------------------------------------------------------------- plugins, window, command line
