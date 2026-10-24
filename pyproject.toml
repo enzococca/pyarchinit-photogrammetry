@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyarchinit-photogrammetry"
-version = "1.3.3"
+version = "1.3.4"
 description = "Open-source photogrammetry engine for archaeology and BIM, integrated with PyArchInit"
 readme = "README.md"
 license = "GPL-2.0-or-later"
