@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -34,7 +35,7 @@ def test_files_alpha_and_hand_drawing(processed, tmp_path):
     for i, cam in enumerate(cams):
         m = np.full((h, w), 255, np.uint8)
         m[:, : w // (2 + i)] = 0
-        cv2.imwrite(str(folder / f"{cam.path.rsplit('/', 1)[-1].rsplit('.', 1)[0]}_mask.png"), m)
+        cv2.imwrite(str(folder / f"{Path(cam.path).stem}_mask.png"), m)
     assert M.import_masks(ch, folder) == 3 and len(M.masked_cameras(ch)) == 3
     keep = M.read_mask(ch, cams[0])
     assert keep.shape == (h, w) and not keep[:, 0].any() and keep[:, -1].all()
@@ -67,7 +68,7 @@ def test_masks_from_background_and_colour(processed, tmp_path):
     centres = []
     for cam in cams:
         img = cv2.imread(cam.path)
-        shutil.copy2(cam.path, bg / cam.path.rsplit("/", 1)[-1])
+        shutil.copy2(cam.path, bg / Path(cam.path).name)
         h, w = img.shape[:2]
         c = (w // 2, h // 2)
         cv2.circle(img, c, min(h, w) // 5, (20, 200, 240), -1)  # the "object" on the turntable

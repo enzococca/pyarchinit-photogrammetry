@@ -609,7 +609,7 @@ def test_menu_actions_write_the_report_and_the_tables(qapp, tmp_path, monkeypatc
         w.runner.wait()
         assert asked["title"] == "Rapporto PDF" and asked["fields"] == ["title", "description", "chunks", "language"]
         out = pdf.with_suffix(".pdf")
-        assert opened == [str(out)] and out.read_bytes().startswith(b"%PDF")
+        assert [Path(p) for p in opened] == [out] and out.read_bytes().startswith(b"%PDF")
         marks = outline(out.read_bytes())
         assert {"Chunk: Campo", "Chunk: Volo termico", "Multispectral", "Thermal"} <= set(marks)
         assert "Rilievo" in pdf_text(out.read_bytes())

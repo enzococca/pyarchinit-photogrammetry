@@ -171,7 +171,7 @@ def test_macos_update_refused_where_the_user_cannot_write(tmp_path, monkeypatch)
 
 def test_install_kind_of_this_checkout():
     assert updates.install_kind() in ("source", "pip")
-    assert updates.app_bundle("/Applications/X.app/Contents/MacOS/X") == updates.Path("/Applications/X.app")
+    assert updates.app_bundle("/Applications/X.app/Contents/MacOS/X") == updates.Path("/Applications/X.app").resolve()
     assert updates.app_bundle("/usr/bin/python3") is None
 
 

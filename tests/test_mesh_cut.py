@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import shutil
 from collections import Counter
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -183,7 +184,7 @@ def test_cut_the_model_of_the_chunk(processed, tmp_path):
     assert len(read_mesh(ch.product_path("model")).faces) == len(before.faces)
     # both parts as files: together the whole model and the cut
     r = ch.cut_model(*mesh_cut.horizontal(z), keep="both", out=tmp_path / "parti" / "trincea.ply")
-    names = sorted(p.split("/")[-1] for p in r["files"])
+    names = sorted(Path(p).name for p in r["files"])
     assert names == ["trincea_sopra.ply", "trincea_sotto.ply"]
     faces = [read_mesh(f).faces.shape[0] for f in r["files"]]
     assert sum(faces) >= len(before.faces)

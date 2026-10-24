@@ -1,6 +1,8 @@
 """Media of PyArchInit linked to a US or a site, browsed from the PyArchInit pane."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -63,5 +65,5 @@ def test_pane_shows_the_media(pa_db, tmp_path, monkeypatch):
 
     monkeypatch.setattr(QDesktopServices, "openUrl", staticmethod(lambda url: opened.append(url.toLocalFile())))
     pane._open_media(pane.media.item(0))
-    assert opened == [str(tmp_path / "pianta.jpg")]
+    assert [Path(p) for p in opened] == [tmp_path / "pianta.jpg"]
     pane.deleteLater()
