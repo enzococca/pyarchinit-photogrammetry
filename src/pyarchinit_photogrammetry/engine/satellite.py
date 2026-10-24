@@ -724,6 +724,41 @@ def stereo_dsm(scene_a: Path, scene_b: Path, out: Path, crs: str | None = None, 
             "matched": job.matched / max(width * height, 1), "tiles": n, "height_reference": h_ref}
 
 
+# Memory of OpenCV's full-scale SGBM (MODE_HH): a cost volume and its sum, 2 bytes each per pixel and
+# disparity. A matching larger than the memory given to it (sgbm_memory()) is split into smaller tiles,
+# down to MIN_SPLIT_TILE cells; each part repeats the margin, so splitting costs time: only when needed.
+SGBM_BYTES_PER_COST = 4
+MIN_SPLIT_TILE = 64
+
+
+def _physical_memory() -> float:
+    """Bytes of RAM of the computer (16 GB when it cannot be read)."""
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class _Status(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+            status = _Status()
+            status.dwLength = ctypes.sizeof(_Status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return float(status.ullTotalPhys)
+            return 16.0e9
+        return float(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
+    except (AttributeError, OSError, ValueError):
+        return 16.0e9
+
+
+def sgbm_memory() -> float:
+    """Bytes one matching may take: 35 % of the computer's memory, between 1 and 8 GB."""
+    return float(np.clip(0.35 * _physical_memory(), 1.0e9, 8.0e9))
+
+
 class _StereoJob:
     """The tiles of :func:`stereo_dsm`: the reference plane, the rectification of both scenes
     on it along the baseline, the matching, the heights and their true positions. ``fill``
@@ -735,6 +770,7 @@ class _StereoJob:
         self.a, self.b, self.d, self.st = a, b, d, st
         self.origin, self.res, self.height_range, self.height_offset, self.block = origin, res, height_range, height_offset, block
         self.fill = fill
+        self.budget = sgbm_memory()  # bytes one matching may take (shared out among the pairs of multi_view_dsm)
         self.matched = 0
         self.ratios: list[float] = []
         self._lock = threading.Lock()
@@ -751,7 +787,9 @@ class _StereoJob:
                 zmin = ts["min"] if ts["min"] is not None else st["min"]
                 zmax = ts["max"] if ts["max"] is not None else st["max"]
             zmin, zmax = zmin + off, zmax + off
-            margin = max(2.0, 0.1 * (zmax - zmin))
+            # 2 m beyond the DEM (20 cells at most: on a grid finer than satellites' it would be
+            # hundreds of disparities), or a tenth of its range
+            margin = max(min(2.0, 20.0 * self.res), 0.1 * (zmax - zmin))
             return h0, zmin - margin, zmax + margin
         if self.height_range:
             zmin, zmax = self.height_range[0] + off, self.height_range[1] + off
@@ -779,6 +817,20 @@ class _StereoJob:
         span = max(abs(h0 - zmin), abs(h0 - zmax))
         m = int(np.ceil(span * max(np.hypot(*ua), np.hypot(*ub), ratio) / res)) + 32
         H, W = th + 2 * m, tw + 2 * m
+        # a point at height h: apparent position g + (h0 - h) u in each scene, so the disparity
+        # d = x_a - x_b = (h0 - h) |base| / res
+        d_lo = (h0 - zmax) * ratio / res
+        d_hi = (h0 - zmin) * ratio / res
+        min_disp = int(np.floor(d_lo)) - 1
+        num = int(np.ceil((d_hi - min_disp + 1) / 16.0)) * 16
+        if SGBM_BYTES_PER_COST * W * H * num > self.budget and min(th, tw) >= 2 * MIN_SPLIT_TILE:
+            # the full-scale SGBM keeps a cost volume of W x H x disparities: a tile too large for
+            # the memory given to it is matched in four parts (each with its own margin)
+            h1, w1 = th // 2, tw // 2
+            z = np.empty((th, tw), np.float64)
+            for rr, cc, hh, ww in ((0, 0, h1, w1), (0, w1, h1, tw - w1), (h1, 0, th - h1, w1), (h1, w1, th - h1, tw - w1)):
+                z[rr:rr + hh, cc:cc + ww] = self.heights((r0 + rr, c0 + cc, hh, ww))
+            return z
         jj, ii = np.meshgrid((np.arange(W) - W / 2 + 0.5) * res, (np.arange(H) - H / 2 + 0.5) * res)
         gx = xc + jj * bhat[0] + ii * nhat[0]
         gy = yc + jj * bhat[1] + ii * nhat[1]
@@ -788,12 +840,6 @@ class _StereoJob:
             data, ok = s.resample(col, row, cv2.INTER_LINEAR)
             band = data[0].astype(np.float32) if s.count == 1 else data[:3].astype(np.float32).mean(axis=0)
             imgs.append((_to_uint8(band, ok), ok))
-        # a point at height h: apparent position g + (h0 - h) u in each scene, so the disparity
-        # d = x_a - x_b = (h0 - h) |base| / res
-        d_lo = (h0 - zmax) * ratio / res
-        d_hi = (h0 - zmin) * ratio / res
-        min_disp = int(np.floor(d_lo)) - 1
-        num = int(np.ceil((d_hi - min_disp + 1) / 16.0)) * 16
         k = self.block
         sgbm = cv2.StereoSGBM_create(minDisparity=min_disp, numDisparities=num, blockSize=k, P1=8 * k * k,
                                      P2=32 * k * k, disp12MaxDiff=1, uniquenessRatio=10, speckleWindowSize=100,
@@ -1267,7 +1313,10 @@ def multi_view_dsm(scenes: Sequence[Path], out: Path, crs: str | None = None, de
         min_count = 2 if len(chosen) >= 3 else 1
     offsets: list[list[float]] = [[] for _ in chosen]
     agreed = [0]
-    pool = ThreadPoolExecutor(max_workers=workers or min(len(jobs), os.cpu_count() or 1, 8))
+    n_workers = workers or min(len(jobs), os.cpu_count() or 1, 8)
+    for j in jobs:  # the pairs matched at the same time share the memory of one matching
+        j.budget = max(j.budget / n_workers, 2.0e8)
+    pool = ThreadPoolExecutor(max_workers=n_workers)
 
     def heights(t):
         stack = np.stack(list(pool.map(lambda j: j.heights(t), jobs)))

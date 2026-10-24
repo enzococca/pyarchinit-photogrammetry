@@ -254,9 +254,17 @@ def test_orthorectification_matches_the_orthomosaic(satellites, tmp_path):
     assert abs(best - k_floor) <= max(2.0, 0.1 * k) and corr[best] > 0.75 and corr[best] > corr[0] + 0.2
 
 
-def test_stereo_pair_recovers_the_surface(satellites, tmp_path):
+@pytest.mark.parametrize("memory", [None, 3.0e8], ids=["whole", "split"])
+def test_stereo_pair_recovers_the_surface(satellites, tmp_path, monkeypatch, memory):
+    """The surface of a pair; "split": with little memory for the matching each tile is matched
+    in parts (each with its margin), and the surface comes out as good."""
     import rasterio
 
+    if memory is not None:
+        monkeypatch.setattr(sat, "sgbm_memory", lambda: memory)
+        splits = []
+        heights = sat._StereoJob.heights
+        monkeypatch.setattr(sat._StereoJob, "heights", lambda self, t: splits.append(t) or heights(self, t))
     east, west = satellites["scenes"]["east"], satellites["scenes"]["west"]
     out = tmp_path / "dsm.tif"
     z0 = satellites["h0"]
@@ -278,6 +286,8 @@ def test_stereo_pair_recovers_the_surface(satellites, tmp_path):
     assert np.median(err) < 0.015 and np.percentile(err, 75) < 0.05
     assert np.nanpercentile(dsm, 5) == pytest.approx(np.nanpercentile(truth[ok], 5), abs=0.03)  # the floor
     assert np.nanpercentile(dsm, 90) == pytest.approx(np.nanpercentile(truth[ok], 90), abs=0.03)  # the rim
+    if memory is not None:
+        assert len(splits) > len(list(sat._tiles(r["height"], r["width"], 1024)))  # tiles matched in parts
 
 
 def test_scene_and_pair_in_the_project(satellites, tmp_path):
