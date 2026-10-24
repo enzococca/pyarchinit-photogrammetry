@@ -444,6 +444,10 @@ jobs:
     runs-on: windows-11-arm
     timeout-minutes: 360
     steps:
+      - uses: actions/checkout@v5  # the OpenGL probe of the program (src/.../gui/wgl.py)
+        with:
+          sparse-checkout: src/pyarchinit_photogrammetry/gui/wgl.py
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -526,8 +530,9 @@ jobs:
         shell: pwsh
         run: |
           # the runner has no graphics driver with OpenGL 3.2 (VTK's minimum): Microsoft's OpenGL over
-          # Direct3D 12 (the "OpenCL, OpenGL, and Vulkan Compatibility Pack" Snapdragon laptops come with),
-          # if the Store can be reached from here; Mesa publishes no software OpenGL for Windows ARM64
+          # Direct3D 12 (the "OpenCL, OpenGL, and Vulkan Compatibility Pack" Snapdragon laptops come with)
+          # installs from the Store but does not serve the Basic Render Driver of these virtual machines
+          # (checked 2026-10-24); Mesa publishes no software OpenGL for Windows ARM64
           # (the runner image has no winget: App Installer registered, or installed from its GitHub release)
           $wingetExe = "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe"
           if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
@@ -545,6 +550,14 @@ jobs:
           & $wingetExe --version
           & $wingetExe install --id 9NQPSL29BFFF --source msstore --accept-package-agreements --accept-source-agreements --disable-interactivity
           Get-AppxPackage *D3DMappingLayers* | Select-Object Name, Version, InstallLocation
+          # the probe the program runs before choosing VTK: without OpenGL 3.2, VTK crashes the
+          # process (it tries OSMesa, which is not there) instead of drawing
+          & C:\venv\Scripts\python -c "import runpy; p = runpy.run_path('src/pyarchinit_photogrammetry/gui/wgl.py'); print('OpenGL for VTK:', p['opengl_version']())"
+          $draw = & C:\venv\Scripts\python -c "import runpy; print(runpy.run_path('src/pyarchinit_photogrammetry/gui/wgl.py')['vtk_can_draw']())"
+          if ($draw -ne "True") {
+            "::warning::no OpenGL 3.2 on this runner (Basic Render Driver): VTK is not asked to draw here"
+            exit 0
+          }
           Set-Content render.py @'
           import pyvista as pv
           p = pv.Plotter(off_screen=True, window_size=(320, 240))
