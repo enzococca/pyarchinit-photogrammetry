@@ -1125,6 +1125,41 @@ outside it), `idw`, `constant` (`value`, default the median of the ring); `break
 kept as a version first; a DEM of another program is edited as a copy in the chunk folder;
 overviews refreshed in the window; `chunk.meta["dem_edits"]` lists the edits.
 
+## Raster calculator
+
+| Call | Description |
+| --- | --- |
+| `engine.rastercalc.rasters(chunk)` | every raster of the chunk the calculator reads, each a `Raster` with its `name` in the formulas, `label`, `path`, `source` (`product`, `version`, `multispectral`, `thermal`, `calculator`, `plugin`, `file`), the names of its `bands`, its size and cell |
+| `engine.rastercalc.calculate(chunk, formula, name, grid=None, resolution=None, progress=None)` | the result of `formula` as `<chunk data>/calculator/<name>.tif`, on the grid of the raster `grid` (default: the first one of the formula) at `resolution` (default: its own); returns its entry of `chunk.meta["calculator"]` (`file`, `formula`, `inputs`, `grid`, `resolution`, `size`, `stats`) |
+| `engine.rastercalc.parse(formula, catalog)` | the formula read against the rasters by name (`Formula`: its `inputs`, `evaluate(values)`); `FormulaError` (a `ValueError` with a `code`) says what is wrong |
+| `engine.rastercalc.register(provider, owner=None)` / `unregister(entry)` | `provider(chunk)` names rasters for the calculator: dicts `name`, `label`, `path` (what a plugin's `context.add_rasters` does) |
+| `ppg calc PROJECT FORMULA --name NAME [--grid RASTER] [--resolution M]`, `ppg calc PROJECT --list` | the same from the command line; `--list` prints the names |
+
+**Names.** A product by its key (`dem`, `orthomosaic`, `slope`, `aspect`, `svf`...), a kept version by its
+product and name (`dem_prima_dello_scavo`), the reflectance as `reflectance` with its bands by name, an
+index by its name (`ndvi`) and its zones (`ndvi_zone`), the thermal orthomosaic (`thermal`,
+`thermal_anomaly`), a result by its name, and every other GeoTIFF of the chunk folder by its folder and
+file (`terrain_twi`, `satellite_<scene>_ortho`; its `ppg_name` tag is its label), unless a plugin names
+it. The elevations are left out (a frame of their own), and so are images with no place.
+
+**Formulas.** As in the raster calculator of QGIS: a band as `dem@1`, `"orthomosaic@2"` or
+`reflectance@NIR`, a raster of one band also by its name alone; `+ - * /`, `^` or `**` (power), `%`,
+`//`; `< <= > >= = == != <>` give 1 where true and 0 where false; `AND OR NOT` (or `and or not`);
+`if(condition, a, b)`; the functions `abs sqrt exp ln log log10 log2 sin cos tan asin acos atan atan2
+degrees radians hypot floor ceil round min max mean clip where isnan coalesce` and the constants `pi e
+nan`. A cell where an input has no data (its nodata, NaN, the transparent part of an orthomosaic) has
+no data in the result, unless `isnan` or `coalesce` fill it; a division by zero gives no data. `&`, `|`
+and `~` are refused (they bind tighter than the comparisons in Python's grammar: `AND`, `OR`, `NOT`
+instead). The formula is read with `ast` and only what is listed here is computed: no attribute, no
+call of anything else, never run as Python.
+
+**The result.** 32-bit floats, NaN where no data, on the grid of `grid` (or at another `resolution` over
+the same bounds); the inputs on another grid, also in another reference system or in none (a local
+chunk), are resampled onto it (bilinear, nearest for integer rasters: zones, classes); computed in
+blocks of 1024 x 1024 cells (the size is limited by the disk), with overviews; the formula is in the
+GeoTIFF too (tag `ppg_formula`). The window shows it on a ramp between its 2nd and 98th percentiles
+and puts it into the QGIS project.
+
 ## Coregistering DEMs
 
 | Call | Description |

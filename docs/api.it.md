@@ -1159,6 +1159,42 @@ DEM com'era viene prima conservato come versione; un DEM di un altro programma v
 copia nella cartella del chunk; overview aggiornate nella finestra; `chunk.meta["dem_edits"]` elenca
 le modifiche.
 
+## Calcolatore raster
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `engine.rastercalc.rasters(chunk)` | tutti i raster del chunk che il calcolatore legge, ognuno un `Raster` con il suo `name` nelle formule, `label`, `path`, `source` (`product`, `version`, `multispectral`, `thermal`, `calculator`, `plugin`, `file`), i nomi delle sue `bands`, dimensioni e cella |
+| `engine.rastercalc.calculate(chunk, formula, name, grid=None, resolution=None, progress=None)` | il risultato di `formula` come `<dati del chunk>/calculator/<name>.tif`, sulla griglia del raster `grid` (predefinito: il primo della formula) alla risoluzione `resolution` (predefinito: la sua); restituisce la sua voce di `chunk.meta["calculator"]` (`file`, `formula`, `inputs`, `grid`, `resolution`, `size`, `stats`) |
+| `engine.rastercalc.parse(formula, catalog)` | la formula letta rispetto ai raster per nome (`Formula`: i suoi `inputs`, `evaluate(values)`); `FormulaError` (un `ValueError` con un `code`) dice che cosa non va |
+| `engine.rastercalc.register(provider, owner=None)` / `unregister(entry)` | `provider(chunk)` dà un nome a dei raster per il calcolatore: dizionari `name`, `label`, `path` (quello che fa `context.add_rasters` di un plugin) |
+| `ppg calc PROGETTO FORMULA --name NOME [--grid RASTER] [--resolution M]`, `ppg calc PROGETTO --list` | lo stesso dalla riga di comando; `--list` stampa i nomi |
+
+**Nomi.** Un prodotto con la sua chiave (`dem`, `orthomosaic`, `slope`, `aspect`, `svf`...), una
+versione conservata con il prodotto e il nome (`dem_prima_dello_scavo`), la riflettanza come
+`reflectance` con le bande per nome, un indice con il suo nome (`ndvi`) e le sue zone (`ndvi_zone`),
+l'ortofoto termica (`thermal`, `thermal_anomaly`), un risultato con il suo nome, e ogni altro GeoTIFF
+della cartella del chunk con la cartella e il file (`terrain_twi`, `satellite_<scena>_ortho`; il tag
+`ppg_name` è la sua etichetta), a meno che un plugin non gli dia un nome. Restano fuori i prospetti (un
+riferimento loro) e le immagini senza posizione.
+
+**Formule.** Come nel calcolatore raster di QGIS: una banda come `dem@1`, `"orthomosaic@2"` o
+`reflectance@NIR`, un raster di una banda anche con il nome solo; `+ - * /`, `^` o `**` (potenza), `%`,
+`//`; `< <= > >= = == != <>` danno 1 dove è vero e 0 dove è falso; `AND OR NOT` (o `and or not`);
+`if(condizione, a, b)`; le funzioni `abs sqrt exp ln log log10 log2 sin cos tan asin acos atan atan2
+degrees radians hypot floor ceil round min max mean clip where isnan coalesce` e le costanti `pi e
+nan`. Una cella dove un raster non ha dati (il suo nodata, NaN, la parte trasparente di un'ortofoto)
+non ha dati nel risultato, a meno che `isnan` o `coalesce` la riempiano; una divisione per zero non dà
+dati. `&`, `|` e `~` sono rifiutati (nella grammatica di Python legano più dei confronti: `AND`, `OR`,
+`NOT` al loro posto). La formula è letta con `ast` e si calcola solo quello che è elencato qui: nessun
+attributo, nessuna chiamata d'altro, mai eseguita come Python.
+
+**Il risultato.** Float a 32 bit, NaN dove non ci sono dati, sulla griglia di `grid` (o a un'altra
+`resolution` sugli stessi limiti); i raster su un'altra griglia, anche in un altro sistema di
+riferimento o in nessuno (un chunk locale), vengono ricampionati su di essa (bilineare, il più vicino
+per i raster di interi: zone, classi); calcolato a blocchi di 1024 x 1024 celle (la dimensione è
+limitata dal disco), con le overview; la formula è anche nel GeoTIFF (tag `ppg_formula`). La finestra
+lo mostra su una scala di colori tra il 2° e il 98° percentile e lo mette nel progetto QGIS.
+
 ## Coregistrazione dei DEM
 
 | Chiamata | Descrizione |

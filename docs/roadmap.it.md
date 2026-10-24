@@ -208,7 +208,10 @@ Punti aperti, senza un ordine fisso:
 * Windows ARM64: la vista 3D VTK e l'E57. *Fatto* nella 1.3.5 (VTK 9.7.1 e pye57 compilati per ARM64; la
   vista provata su una macchina Windows 11 ARM64 con OpenGL 4.3). SpatiaLite aspetta un QGIS per ARM64.
 * Idee proposte ma non ancora decise:
-    * calcolatore raster (formule su qualsiasi raster del progetto);
+    * calcolatore raster (formule su qualsiasi raster del progetto). *Fatto*: *Strumenti > Calcolatore
+      raster*, `ppg calc`, `engine.rastercalc`: formule come in QGIS su tutti i raster di un chunk, anche
+      quelli dei plugin (trovati nella cartella del chunk, o con il nome che dà loro il plugin con
+      `context.add_rasters`), sulla griglia di uno di essi, a blocchi;
     * plugin samgeo (segmentare l'ortofoto scrivendo «pietre», «muri»);
     * plugin geoai (addestramento sui propri disegni, confronto fra date).
 

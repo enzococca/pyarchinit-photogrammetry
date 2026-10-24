@@ -207,7 +207,10 @@ Open points, in no fixed order:
 * Windows ARM64: the VTK 3D view and E57. *Done* in 1.3.5 (VTK 9.7.1 and pye57 built for ARM64; the view
   checked in a Windows 11 ARM64 machine with OpenGL 4.3). SpatiaLite waits for an ARM64 build of QGIS.
 * Ideas proposed but not decided yet:
-    * a raster calculator (formulas on any raster of the project);
+    * a raster calculator (formulas on any raster of the project). *Done*: *Strumenti > Calcolatore raster*,
+      `ppg calc`, `engine.rastercalc`: formulas as in QGIS on every raster of a chunk, those of the plugins
+      too (found in the chunk folder, or named by the plugin with `context.add_rasters`), on the grid of one
+      of them, block by block;
     * a samgeo plugin (segmenting the orthomosaic by writing "stones", "walls");
     * a geoai plugin (training on your own drawings, comparison between dates).
 
