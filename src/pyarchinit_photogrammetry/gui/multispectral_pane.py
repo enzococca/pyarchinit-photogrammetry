@@ -19,6 +19,26 @@ FALSE_COLOUR = ("NIR", "Red", "Green")
 TRUE_COLOUR = ("Red", "Green", "Blue")
 
 
+def radiometry_text(ms: dict, digits: int = 3) -> str:
+    """How the bands become reflectance (``meta["multispectral"]["radiometry"]``), for the pane and
+    the panel's dialog: the panel with the sun sensor following the light, the panel alone, the
+    sun sensor alone, or neither."""
+    panel = ms.get("panel") or {}
+    factors = ", ".join(f"{b} {f:.{digits}g}" for b, f in (panel.get("factors") or {}).items())
+    method = ms.get("radiometry") or ("panel+dls" if panel.get("follow_dls") else "panel" if factors else None)
+    if method == "panel+dls" and factors:
+        return tr("Pannello e sensore di luce (DLS): il pannello dà il livello, il DLS segue la luce durante il volo. "
+                  "Fattori per banda: {0}", factors)
+    if method == "panel" and factors:
+        return tr("Solo pannello (il sensore di luce non segue la luce). Fattori per banda: {0}", factors)
+    if method == "dls":
+        return tr("Senza pannello: riflettanza dal sensore di luce (DLS) dei tag. Con un pannello il DLS ne segue solo "
+                  "le variazioni: più esatto.")
+    if method == "normalised":
+        return tr("Senza pannello né sensore di luce: numeri normalizzati (valgono gli indici, non i valori assoluti).")
+    return tr("Senza pannello: vale il sensore di luce dei tag quando c'è, altrimenti numeri normalizzati.")
+
+
 SPECTRAL_STEPS = ("panel", "reflectance", "index", "zoning")
 THERMAL_STEPS = ("thermal_params", "thermal", "anomaly", "thermal_export")
 
@@ -336,11 +356,7 @@ class MultispectralPane(QWidget):
         else:
             self.states["surface"].setText(tr("Da fare dopo l'allineamento: l'ortofoto di riflettanza si appoggia sul DEM."))
         self.b_panel.setEnabled(captures > 0)
-        panel = ms.get("panel")
-        if panel:
-            self.states["panel"].setText(tr("Fattori per banda: {0}", ", ".join(f"{b} {f:.3g}" for b, f in (panel.get("factors") or {}).items())))
-        else:
-            self.states["panel"].setText(tr("Senza pannello: vale il sensore di luce dei tag quando c'è, altrimenti numeri normalizzati."))
+        self.states["panel"].setText(radiometry_text(ms))
         self.b_reflectance.setEnabled(has_dem and aligned > 0)
         self.b_show_refl.setEnabled(has_refl)
         self.c_show.setEnabled(has_refl)

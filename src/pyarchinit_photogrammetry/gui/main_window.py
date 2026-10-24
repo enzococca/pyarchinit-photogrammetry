@@ -1579,23 +1579,30 @@ class MainWindow(QMainWindow):
             Field("y0", "Pannello: y alto (px)", 0, minimum=0, maximum=100000),
             Field("x1", "Pannello: x destra (px)", 100, minimum=1, maximum=100000),
             Field("y1", "Pannello: y basso (px)", 100, minimum=1, maximum=100000),
-            Field("reflectance", "Riflettanza del pannello (0-1)", 0.5, minimum=0.001, maximum=1.0, decimals=3)],
+            Field("reflectance", "Riflettanza del pannello (0-1)", 0.5, minimum=0.001, maximum=1.0, decimals=3),
+            Field("dls", "Il sensore di luce (DLS) segue la luce durante il volo", True,
+                  tip="Quando la ripresa del pannello e il volo hanno l'irradianza del DLS: il pannello dà il livello di "
+                      "ogni banda, il DLS le variazioni (una nuvola, il sole più basso). Da solo il DLS sbaglia il livello "
+                      "anche del 30-50 %, le variazioni le segue bene.")],
             intro="Il riquadro del pannello nelle immagini della ripresa (le bande sono quasi sovrapposte) e la sua "
                   "riflettanza nota: da qui le bande diventano riflettanza. Senza pannello valgono i tag del sensore di "
                   "luce (DLS) quando ci sono, altrimenti numeri normalizzati.")
         if not v:
             return
         cam = self.chunk.camera(v["camera"])
+        follow = None if v.get("dls", True) else False
         try:
             if v.get("tags"):
-                factors = ms.calibrate_panel(self.chunk, cam)
+                ms.calibrate_panel(self.chunk, cam, follow_dls=follow)
             else:
-                factors = ms.calibrate_panel(self.chunk, cam, (v["x0"], v["y0"], v["x1"], v["y1"]), v["reflectance"])
+                ms.calibrate_panel(self.chunk, cam, (v["x0"], v["y0"], v["x1"], v["y1"]), v["reflectance"], follow_dls=follow)
         except ValueError:
             self._warn("La camera non ha trovato un pannello in questa ripresa: indica il riquadro e la riflettanza.")
             return
         self._dirty()
-        self._info(tr("Pannello di calibrazione"), tr("Fattori per banda: {0}", ", ".join(f"{b} {f:.4g}" for b, f in factors.items())))
+        from .multispectral_pane import radiometry_text
+
+        self._info(tr("Pannello di calibrazione"), radiometry_text(self.chunk.meta.get("multispectral") or {}, digits=4))
 
     def ms_reflectance(self) -> None:
         if not self._need_chunk(aligned=True):

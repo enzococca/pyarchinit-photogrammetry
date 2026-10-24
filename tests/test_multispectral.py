@@ -566,6 +566,153 @@ def test_bands_of_other_cameras_start_from_their_geometry():
     assert np.allclose(hs["LWIR"], ms._camera_homography({"Red": cameras["Red"], "LWIR": (k_th, np.eye(3))}, "Red", "LWIR"))
 
 
+def _fields_texture(rng, shape=(1800, 2400)) -> np.ndarray:
+    """A far plane with fields, roads and buildings: rectangles of random levels (edges a thermal
+    band at 1/16 of the texture's resolution still shows)."""
+    tex = np.full(shape, 0.5, np.float32)
+    for _ in range(140):
+        h, w = rng.integers(60, 360, 2)
+        y, x = rng.integers(0, shape[0] - h), rng.integers(0, shape[1] - w)
+        tex[y:y + h, x:x + w] = rng.uniform(0, 1)
+    return cv2.GaussianBlur(tex, (0, 0), 2.0)
+
+
+def _lens_view(tex: np.ndarray, world: np.ndarray, k: np.ndarray, dist, r: np.ndarray, shape) -> np.ndarray:
+    """What a band with lens (K, distortion) turned by ``r`` in the rig sees of the texture."""
+    yy, xx = np.mgrid[0:shape[0], 0:shape[1]].astype(np.float64)
+    n = ms._undistort(np.stack([xx.ravel(), yy.ravel()], 1), k, dist)
+    ray = np.concatenate([n, np.ones((len(n), 1))], 1) @ r.T @ world.T  # the band's ray in the rig -> texture
+    m = (ray[:, :2] / ray[:, 2:3]).reshape(shape[0], shape[1], 2).astype(np.float32)
+    return cv2.remap(tex, m[..., 0], m[..., 1], cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+
+
+def test_bands_registered_through_their_lenses_and_a_thermal_band_by_its_edges():
+    """MicaSense's bands have their own lens (``PerspectiveDistortion``): every band is undistorted
+    and turned by its rotation in the rig before ECC, and the registration goes from the
+    reference's distorted pixels to the band's. A thermal band (a quarter of the resolution, a
+    strong barrel distortion, the contrast reversed: warm roads, cool fields) whose rig rotation in
+    the tags is off by about 1.4 thermal pixels is refined by the agreement of its edges, within
+    half a thermal pixel; without the lens model it would be pixels off at the corners."""
+    import json
+
+    rng = np.random.default_rng(21)
+    tex = _fields_texture(rng)
+    world = np.array([[1600.0, 0, 1200], [0, 1600.0, 900], [0, 0, 1]])  # rig ray -> texture pixel
+    k_ref = np.array([[500.0, 0, 203], [0, 500.0, 147], [0, 0, 1]])
+    d_ref = np.array([-0.12, 0.2, 0.0004, -0.0009, -0.1])
+    k_nir = np.array([[505.0, 0, 197], [0, 505.0, 152], [0, 0, 1]])
+    d_nir = np.array([-0.13, 0.22, -0.0001, 0.0005, -0.15])
+    k_th = np.array([[125.0, 0, 51.5], [0, 125.0, 37.0], [0, 0, 1]])
+    d_th = np.array([-0.36, 0.23, 0.0015, -0.003, -0.03])
+    r_nir = ms._rig_rotation([0.2, -0.1, 0.3])
+    r_th_tags = ms._rig_rotation([-0.1, 0.34, -0.9])
+    r_th = r_th_tags @ ms._rig_rotation([0.55, -0.35, 0.0])  # the tags about 1.4 thermal pixels off
+    ref = _lens_view(tex, world, k_ref, d_ref, np.eye(3), (300, 400))
+    nir = _lens_view(tex, world, k_nir, d_nir, r_nir @ ms._rig_rotation([0.0, 0.0, 0.05]), (300, 400))
+    fine = _lens_view(tex, world, k_th * [[4], [4], [1]] + [[0, 0, 1.5], [0, 0, 1.5], [0, 0, 0]], d_th, r_th, (300, 400))
+    thermal = 30.0 - 12.0 * cv2.resize(fine, (100, 75), interpolation=cv2.INTER_AREA)  # degrees: warm where dark
+    thermal = cv2.GaussianBlur(thermal, (0, 0), 0.6)
+    cameras = {"Red": (k_ref, np.eye(3), d_ref), "NIR": (k_nir, r_nir, d_nir), "LWIR": (k_th, r_th_tags, d_th)}
+    quality: dict = {}
+    hs = ms.register_bands({"Red": ref, "NIR": nir, "LWIR": thermal}, "Red", quality=quality, cameras=cameras)
+    assert isinstance(hs["NIR"], dict) and isinstance(hs["LWIR"], dict) and np.allclose(hs["Red"], np.eye(3))
+
+    def truth(k_b, d_b, r_b, pts):
+        n = ms._undistort(pts, k_ref, d_ref)
+        ray = np.concatenate([n, np.ones((len(n), 1))], 1) @ r_b  # r_b.T @ ray, row-wise
+        return ms._distort(ray[:, :2] / ray[:, 2:3], k_b, d_b)
+
+    gy, gx = np.mgrid[20:281:26, 20:381:36].astype(np.float64)
+    pts = np.stack([gx.ravel(), gy.ravel()], 1)
+    err_nir = np.linalg.norm(ms.map_points(hs["NIR"], pts) - truth(k_nir, d_nir, r_nir @ ms._rig_rotation([0, 0, 0.05]), pts), axis=1)
+    assert np.median(err_nir) < 0.15 and err_nir.max() < 0.5, err_nir
+    # the thermal band: the cameras' geometry alone, then refined by the edges (thermal pixels)
+    want = truth(k_th, d_th, r_th, pts)
+    seen = (want[:, 0] > 3) & (want[:, 0] < 97) & (want[:, 1] > 3) & (want[:, 1] < 72)
+    geometry = np.linalg.norm(truth(k_th, d_th, r_th_tags, pts) - want, axis=1)[seen]
+    err_th = np.linalg.norm(ms.map_points(hs["LWIR"], pts) - want, axis=1)[seen]
+    assert np.median(geometry) > 1.0
+    assert quality["LWIR"]["on"] == "edges" and quality["LWIR"]["correlation"] > quality["LWIR"]["before"]
+    assert np.median(err_th) < 0.3 and np.percentile(err_th, 90) < 0.5, err_th
+    # without the lens model (a homography from the rotations) the corners would be pixels off
+    plain = ms._camera_homography({"Red": (k_ref, np.eye(3)), "LWIR": (k_th, r_th)}, "Red", "LWIR")
+    err_plain = np.linalg.norm(cv2.perspectiveTransform(pts[None], plain)[0] - want, axis=1)[seen]
+    assert err_plain.max() > 2.0
+    # warped onto the reference, through JSON (as kept in the chunk's meta)
+    back = json.loads(json.dumps(ms.registration_json(hs["NIR"])))
+    warped = ms.warp_band(nir, back, ref.shape)
+    inner = (slice(25, -25), slice(25, -25))
+    assert np.nanmean(np.abs(warped[inner] - ref[inner])) < 0.05 * np.nanstd(ref)
+    assert np.allclose(warped, ms.warp_band(nir, hs["NIR"], ref.shape), equal_nan=True)
+
+
+def test_sun_position_and_the_tilt_of_a_dls_1():
+    """The sun's position (NOAA's equations) against what MicaSense's DLS 2 wrote on the Altum sample
+    (2022-04-06 20:00:32 UTC, 47.70364 N 122.14142 W: elevation 48.927, azimuth 176.078 degrees);
+    a DLS 1 reading corrected for the sensor's tilt as MicaSense's model does it (Fresnel transmission
+    of the diffuser, direct x cos(angle) + scattered = direct / 6), the horizontal irradiance found
+    back; without the attitude the reading stays as written."""
+    from datetime import datetime, timezone
+
+    el, az = ms.sun_position(47.70364, -122.14142, datetime(2022, 4, 6, 20, 0, 32, tzinfo=timezone.utc))
+    assert np.degrees(el) == pytest.approx(48.927, abs=0.05) and np.degrees(az) == pytest.approx(176.078, abs=0.05)
+    direct, diffuse = 1.1, 1.0 / 6.0
+    yaw, pitch, roll = 0.4, np.radians(8.0), np.radians(-5.0)
+    sun = np.array([np.cos(az) * np.cos(el), np.sin(az) * np.cos(el), -np.sin(el)])
+    angle = np.arccos(sun @ ms.sensor_normal(yaw, pitch, roll))
+    reading = ms._fresnel_transmission(angle) * direct * (np.cos(angle) + diffuse)
+    tags = {"Make": "MicaSense", "SpectralIrradiance": str(reading), "Yaw": str(yaw), "Pitch": str(pitch),
+            "Roll": str(roll), "GPSLatitude": 47.70364, "GPSLongitude": -122.14142,
+            "DateTimeOriginal": "2022:04:06 20:00:32"}
+    value, how = ms.dls_irradiance(tags)
+    assert how == "dls1" and value == pytest.approx(direct * (np.sin(el) + diffuse), rel=1e-3)
+    assert ms._fresnel_transmission(0.0) == pytest.approx(0.942, abs=0.002)  # 6 % lost at normal incidence
+    level = ms.sensor_normal(0.0, 0.0, 0.0)
+    assert np.allclose(level, [0, 0, -1])  # up, in north-east-down
+    no_pose = {k: v for k, v in tags.items() if k not in ("Yaw", "Pitch", "Roll")}
+    assert ms.dls_irradiance(no_pose) == (pytest.approx(reading), "spectral")
+
+
+def test_panel_with_the_sun_sensor_following_the_light(tmp_path):
+    """A panel capture and a flight capture of a MicaSense camera with a DLS 2: the panel gives the
+    level of every band, the DLS the change of light (half the light in the flight: the same
+    digital numbers are twice the reflectance). The default when both are there; the method in
+    ``meta["multispectral"]["radiometry"]``; the panel alone when asked; the DLS alone without a panel."""
+    h, w = 60, 80
+    folder = tmp_path / "SET"
+    folder.mkdir()
+    cal = f"<Camera:RadiometricCalibration>{_seq('9.6e-05', '8.7e-08', '3.3e-06')}</Camera:RadiometricCalibration>"
+    panel = ("<Camera:CalibrationPicture>2</Camera:CalibrationPicture><Camera:Albedo>0.5</Camera:Albedo>"
+             f"<Camera:ReflectArea>{_seq('50,20,50,40,30,40,30,20')}</Camera:ReflectArea>")
+    rng = np.random.default_rng(5)
+    dn = (8000 + 20000 * rng.uniform(0, 1, (h, w))).astype(np.uint16)
+    dn[20:40, 30:50] = 30000
+    for stem, irr, extra in (("IMG_0001", 80.0, panel), ("IMG_0002", 40.0, "")):
+        dls = f"<DLS:HorizontalIrradiance>{irr}</DLS:HorizontalIrradiance><DLS:SpectralIrradiance>{irr}</DLS:SpectralIrradiance>"
+        for k, name in (("3", "Red"), ("4", "NIR")):
+            _micasense_band(folder / f"{stem}_{k}.tif", dn, name, xmp=cal + dls + extra)
+    doc = ppg.Document()
+    ch = doc.add_chunk("Campo")
+    doc.save(tmp_path / "campo.ppg")
+    cams = ms.add_captures(ch, [folder])
+    assert ch.meta["multispectral"]["radiometry"] == "dls"
+    by_capture = {c.meta["capture"]: c for c in cams}
+    factors = ms.calibrate_panel(ch, by_capture["IMG_0001"])
+    info = ch.meta["multispectral"]
+    assert info["radiometry"] == "panel+dls" and info["panel"]["follow_dls"]
+    assert info["panel"]["irradiance"]["Red"] == pytest.approx(0.8)
+    ch.meta["multispectral"]["registration"] = {str(c.key): {"Red": np.eye(3).tolist(), "NIR": np.eye(3).tolist()} for c in cams}
+    rad, _ = ms.radiance_image(by_capture["IMG_0002"].meta["bands"]["Red"])
+    flight = ms.band_stack(ch, by_capture["IMG_0002"], ["Red"])[..., 0]
+    assert np.allclose(flight, rad * factors["Red"] * 2.0, rtol=1e-5)
+    at_panel = ms.band_stack(ch, by_capture["IMG_0001"], ["Red"])[..., 0]
+    region = ms._region_mask(info["panel"]["regions"]["Red"], at_panel.shape)
+    assert float(at_panel[region].mean()) == pytest.approx(0.5, rel=1e-5)  # the panel's capture: its albedo
+    ms.calibrate_panel(ch, by_capture["IMG_0001"], follow_dls=False)
+    assert ch.meta["multispectral"]["radiometry"] == "panel"
+    assert np.allclose(ms.band_stack(ch, by_capture["IMG_0002"], ["Red"])[..., 0], rad * factors["Red"], rtol=1e-5)
+
+
 MICASENSE_SAMPLES = Path("/Volumes/Extreme Pro/verifica_ppg/dati_pubblici/micasense")
 
 
@@ -604,6 +751,42 @@ def test_micasense_samples_against_micasenses_numbers():
     assert set(caps["IMG_0010"]) == {"Blue", "Green", "Red", "NIR", "RedEdge", "Panchro", "LWIR"}
     caps = ms.detect_bands([MICASENSE_SAMPLES / "REDEDGE-MX-DUAL"])
     assert len(caps["IMG_0431"]) == 10
+
+
+@pytest.mark.skipif(not MICASENSE_SAMPLES.exists(), reason="MicaSense's sample captures are not on this computer")
+def test_micasense_samples_thermal_band_and_sun_sensor():
+    """On MicaSense's samples (2026-10-24): the thermal band of the Altum and the Altum-PT flight
+    captures refined by its edges (tile shifts against the red band 1.1-2.2 thermal pixels with the
+    rig's homography, 0.24-0.5 now), the panel captures - taken at arm's length, where the rig's
+    parallax is no small correction - left on the cameras' geometry; the sun's position within 0.05
+    degrees of what the DLS 2 wrote; the sun sensor's change of light between the panel and the
+    flight the same in every band within 2 % (it follows the light well), while its level, alone,
+    gives the panel 0.64-2.2 times its albedo (MicaSense's own library gives the same)."""
+    for cam, capture, method in (("ALTUM", "IMG_0021", "edges"), ("ALTUM-PT", "IMG_0010", "edges"),
+                                 ("ALTUM", "IMG_0000", "cameras")):
+        files = ms.detect_bands([MICASENSE_SAMPLES / cam])[capture]
+        imgs = {b: ms.reflectance_image(p) for b, p in files.items()}
+        tags = {b: ms.xmp_of(p) for b, p in files.items()}
+        quality: dict = {}
+        hs = ms.register_bands(imgs, "Red", quality=quality, cameras=ms.band_cameras(tags, {b: i.shape for b, i in imgs.items()}))
+        assert quality["LWIR"]["on"] == method, (cam, capture, quality["LWIR"])
+        assert all(isinstance(hs[b], dict) for b in hs if b != "Red")
+        if method == "edges":
+            assert quality["LWIR"]["correlation"] > quality["LWIR"]["before"] + 0.03
+    for cam in ("ALTUM", "ALTUM-PT", "REDEDGE-MX", "REDEDGE-MX-DUAL", "REDEDGE-P"):
+        caps = ms.detect_bands([MICASENSE_SAMPLES / cam])
+        panel = next(s for s in sorted(caps) if any(ms.panel_in_tags(ms.xmp_of(p)) for p in caps[s].values()))
+        flight = next(s for s in sorted(caps) if s != panel)
+        ratios = []
+        for band, path in caps[panel].items():
+            tags = ms.xmp_of(path)
+            if ms._micasense_lwir(tags):
+                continue
+            sun = ms._sun_of({k: v for k, v in tags.items() if k not in ("SolarElevation", "SolarAzimuth")})
+            assert np.degrees(sun[0]) == pytest.approx(np.degrees(float(tags["SolarElevation"])), abs=0.05)
+            assert np.degrees(sun[1]) == pytest.approx(np.degrees(float(tags["SolarAzimuth"])), abs=0.05)
+            ratios.append(ms.irradiance_of(ms.xmp_of(caps[flight][band])) / ms.irradiance_of(tags))
+        assert max(ratios) / min(ratios) < 1.02, (cam, ratios)
 
 
 def test_pane_tree_and_views_show_the_products(scene_dir, tmp_path, monkeypatch):

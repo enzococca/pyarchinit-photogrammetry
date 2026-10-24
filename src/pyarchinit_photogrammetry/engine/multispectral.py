@@ -17,7 +17,8 @@ calibration ``a1 a2 a3``, the vignetting polynomial; DJI: black level, gain, exp
 vignetting), else they are normalised by exposure and gain; radiance becomes reflectance through
 a calibration panel photographed in the flight (:func:`panel_factors`: the panel's known
 reflectance per band divided by its radiance) or, failing that, the irradiance of the sun sensor
-(DLS) written in the tags. Without any of these the bands stay normalised numbers: the indices,
+(DLS) written in the tags; with both, the panel gives the level and the sun sensor follows the
+changes of light during the flight (:func:`calibrate_panel`, :func:`radiometry_method`). Without any of these the bands stay normalised numbers: the indices,
 ratios of bands, still work, their absolute values do not.
 
 The reflectance orthomosaic (:func:`build_reflectance`) is the orthophoto engine run on the
@@ -328,6 +329,16 @@ def xmp_of(path) -> dict:
                     v = sub.get(tag)
                     if v is not None and name not in out:
                         out[name] = float(v) if not isinstance(v, (tuple, list, str, bytes)) else v
+                # when and where (UTC on a MicaSense camera): the sun's position for a DLS 1
+                if sub.get(36867) and "DateTimeOriginal" not in out:
+                    out["DateTimeOriginal"] = str(sub.get(36867)).strip()
+                    if sub.get(37521) is not None:
+                        out["SubSecTimeOriginal"] = str(sub.get(37521)).strip()
+                gps = exif.get_ifd(ExifTags.IFD.GPSInfo)
+                if gps and 2 in gps and 4 in gps and "GPSLatitude" not in out:
+                    dms = lambda v: float(v[0]) + float(v[1]) / 60 + float(v[2]) / 3600  # noqa: E731
+                    out["GPSLatitude"] = dms(gps[2]) * (-1 if gps.get(1) == "S" else 1)
+                    out["GPSLongitude"] = dms(gps[4]) * (-1 if gps.get(3) == "W" else 1)
             except Exception:  # noqa: BLE001
                 pass
     except Exception:  # noqa: BLE001 - not a photo PIL reads: no tags
@@ -544,27 +555,150 @@ def _horizontal_irradiance_valid(tags: dict) -> bool:
     return good is None or not firmware or firmware >= good
 
 
-def irradiance_of(tags: dict) -> float | None:
-    """The irradiance of the sun sensor (DLS) in the tags, W/m2/nm, when it is there: the
-    horizontal irradiance of a DLS 2 (MicaSense writes it in hundredths of W/m2/nm unless
-    ``IrradianceScaleToSIUnits`` says otherwise; with a firmware that wrote it wrong, direct x
-    sin(sun's elevation) + scattered), else the spectral irradiance the sensor measured (a DLS 1,
-    not corrected for the sensor's tilt)."""
+def sun_position(latitude: float, longitude: float, when) -> tuple[float, float]:
+    """The sun's elevation above the horizon and its azimuth (from north, clockwise), radians, at
+    a place (degrees) and a time (a ``datetime`` in UTC), with NOAA's solar position equations
+    (Meeus; a few hundredths of a degree, no refraction)."""
+    jd = when.timestamp() / 86400.0 + 2440587.5  # the Julian day
+    jc = (jd - 2451545.0) / 36525.0
+    lon0 = np.radians((280.46646 + jc * (36000.76983 + jc * 0.0003032)) % 360.0)  # the sun's mean longitude
+    anom = np.radians(357.52911 + jc * (35999.05029 - 0.0001537 * jc))
+    ecc = 0.016708634 - jc * (0.000042037 + 0.0000001267 * jc)
+    centre = np.radians(np.sin(anom) * (1.914602 - jc * (0.004817 + 0.000014 * jc))
+                        + np.sin(2 * anom) * (0.019993 - 0.000101 * jc) + np.sin(3 * anom) * 0.000289)
+    omega = np.radians(125.04 - 1934.136 * jc)
+    apparent = lon0 + centre - np.radians(0.00569 + 0.00478 * np.sin(omega))
+    obliquity = np.radians(23.0 + (26.0 + (21.448 - jc * (46.815 + jc * (0.00059 - jc * 0.001813))) / 60.0) / 60.0
+                           + 0.00256 * np.cos(omega))
+    decl = np.arcsin(np.sin(obliquity) * np.sin(apparent))
+    y = np.tan(obliquity / 2) ** 2
+    eq_time = 4.0 * np.degrees(y * np.sin(2 * lon0) - 2 * ecc * np.sin(anom) + 4 * ecc * y * np.sin(anom) * np.cos(2 * lon0)
+                               - 0.5 * y * y * np.sin(4 * lon0) - 1.25 * ecc * ecc * np.sin(2 * anom))  # minutes
+    minutes = when.hour * 60.0 + when.minute + (when.second + when.microsecond / 1e6) / 60.0
+    hour_angle = np.radians(((minutes + eq_time + 4.0 * longitude) % 1440.0) / 4.0 - 180.0)
+    lat = np.radians(latitude)
+    cos_zenith = np.clip(np.sin(lat) * np.sin(decl) + np.cos(lat) * np.cos(decl) * np.cos(hour_angle), -1.0, 1.0)
+    zenith = np.arccos(cos_zenith)
+    cos_az = np.clip((np.sin(lat) * cos_zenith - np.sin(decl)) / max(np.cos(lat) * np.sin(zenith), 1e-12), -1.0, 1.0)
+    az = np.arccos(cos_az)
+    azimuth = (az + np.pi) % (2 * np.pi) if hour_angle > 0 else (3 * np.pi - az) % (2 * np.pi)
+    return float(np.pi / 2 - zenith), float(azimuth)
+
+
+def _sun_of(tags: dict) -> tuple[float, float] | None:
+    """The sun's elevation and azimuth (radians) of a capture: what the camera wrote (a DLS 2
+    writes ``SolarElevation`` and ``SolarAzimuth``), else from its GPS and its time (UTC on a
+    MicaSense camera)."""
+    el, az = _number(tags.get("SolarElevation"), None), _number(tags.get("SolarAzimuth"), None)
+    if el is not None and az is not None:
+        return el, az
+    lat, lon = _number(tags.get("GPSLatitude"), None), _number(tags.get("GPSLongitude"), None)
+    stamp = tags.get("DateTimeOriginal")
+    if lat is None or lon is None or not stamp:
+        return None
+    from datetime import datetime, timezone
+
+    try:
+        when = datetime.strptime(str(stamp).strip()[:19], "%Y:%m:%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    frac = str(tags.get("SubSecTimeOriginal") or "").strip()
+    if frac.isdigit():
+        from datetime import timedelta
+
+        when += timedelta(seconds=float("0." + frac))
+    return sun_position(lat, lon, when)
+
+
+def _fresnel_transmission(angle: float, indices=(1.000277, 1.6, 1.38)) -> float:
+    """The share of light that crosses the DLS's diffuser at ``angle`` of incidence (radians):
+    unpolarised Fresnel transmission through air, polycarbonate and PTFE, as in MicaSense's model."""
+    t, theta = 1.0, float(angle)
+    for n1, n2 in zip(indices[:-1], indices[1:]):
+        s = n1 / n2 * np.sin(theta)
+        if abs(s) >= 1.0:
+            return 0.0
+        inside = float(np.arcsin(s))
+        c1, c2 = np.cos(theta), np.cos(inside)
+        rs = ((n1 * c1 - n2 * c2) / (n1 * c1 + n2 * c2)) ** 2
+        rp = ((n1 * c2 - n2 * c1) / (n1 * c2 + n2 * c1)) ** 2
+        t *= 1.0 - 0.5 * (rs + rp)
+        theta = inside
+    return float(min(max(t, 0.0), 1.0))
+
+
+def sensor_normal(yaw: float, pitch: float, roll: float) -> np.ndarray:
+    """The DLS's normal (up from the drone) in north-east-down coordinates for the attitude
+    yaw, pitch, roll (radians, rotations about z, y, x)."""
+    cy, sy, cp, sp, cr, sr = np.cos(yaw), np.sin(yaw), np.cos(pitch), np.sin(pitch), np.cos(roll), np.sin(roll)
+    rz = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]])
+    ry = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]])
+    rx = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]])
+    return rz @ ry @ rx @ np.array([0.0, 0.0, -1.0])
+
+
+DLS1_DIFFUSE = 1.0 / 6.0  # scattered / direct light under a clear sky (MicaSense's model of the DLS 1)
+
+
+def dls1_horizontal(spectral: float, tags: dict, diffuse: float = DLS1_DIFFUSE) -> float | None:
+    """The horizontal irradiance from what a DLS 1 measured (``spectral``, W/m2/nm) with the sensor
+    tilted, after MicaSense's published model: the reading is the direct light on the sensor's
+    plane - direct x cos(angle between the sun and the sensor's normal), through the diffuser's
+    Fresnel transmission - plus the scattered light, ``diffuse`` x direct; the direct light found,
+    the horizontal irradiance is direct x (sin(sun's elevation) + ``diffuse``). The sensor's
+    attitude is the DLS's ``Yaw``, ``Pitch``, ``Roll`` (radians), the sun's position from the
+    tags or from GPS and time. None when the tags have not got them."""
+    sun = _sun_of(tags)
+    pose = [_number(tags.get(k), None) for k in ("Yaw", "Pitch", "Roll")]
+    if sun is None or any(v is None for v in pose) or not spectral:
+        return None
+    el, az = sun
+    sun_ned = np.array([np.cos(az) * np.cos(el), np.sin(az) * np.cos(el), -np.sin(el)])
+    angle = float(np.arccos(np.clip(sun_ned @ sensor_normal(*pose), -1.0, 1.0)))
+    transmission = _fresnel_transmission(angle)
+    if transmission <= 0 or np.cos(angle) + diffuse <= 0.05 or el <= 0:
+        return None  # the sun behind the sensor or under the horizon: nothing to correct with
+    direct = spectral / transmission / (np.cos(angle) + diffuse)
+    return float(direct * (np.sin(el) + diffuse))
+
+
+def dls_irradiance(tags: dict) -> tuple[float | None, str | None]:
+    """The irradiance of the sun sensor (DLS) in the tags, W/m2/nm, and how it was had:
+    ``"horizontal"`` - a DLS 2's horizontal irradiance, which the camera already corrected for
+    the sensor's tilt and the sun's angle (MicaSense writes it in hundredths of W/m2/nm unless
+    ``IrradianceScaleToSIUnits`` says otherwise); ``"direct+scattered"`` - with a firmware that
+    computed it wrong, direct x sin(sun's elevation) + scattered; ``"dls1"`` - a DLS 1's reading
+    corrected for the sensor's tilt (:func:`dls1_horizontal`); ``"spectral"`` - the reading as
+    written, when nothing tells the tilt. (None, None) without a sun sensor."""
     horizontal = _number(tags.get("HorizontalIrradiance"), None)
     scale = _number(tags.get("IrradianceScaleToSIUnits"), None)
     if scale is None:
         scale = 0.01 if horizontal is not None else 1.0
     if horizontal and _horizontal_irradiance_valid(tags):
-        return horizontal * scale
+        return horizontal * scale, "horizontal"
     direct, scattered = _number(tags.get("DirectIrradiance"), None), _number(tags.get("ScatteredIrradiance"), None)
-    elevation = _number(tags.get("SolarElevation"), None)  # radians
-    if direct and scattered is not None and elevation is not None:
-        return (direct * np.sin(elevation) + scattered) * scale
+    if direct and scattered is not None:
+        elevation = _number(tags.get("SolarElevation"), None)  # radians
+        if elevation is None:
+            sun = _sun_of(tags)
+            elevation = None if sun is None else sun[0]
+        if elevation is not None:
+            return (direct * np.sin(elevation) + scattered) * scale, "direct+scattered"
     for key in ("Irradiance", "SpectralIrradiance"):
         v = _number(tags.get(key), None)
         if v:
-            return v * scale
-    return None
+            micasense = "micasense" in str(tags.get("Make") or "").lower()
+            corrected = dls1_horizontal(v * scale, tags) if micasense else None
+            if corrected:
+                return corrected, "dls1"
+            return v * scale, "spectral"
+    return None, None
+
+
+def irradiance_of(tags: dict) -> float | None:
+    """The irradiance of the sun sensor (DLS) in the tags, W/m2/nm, when it is there
+    (:func:`dls_irradiance`)."""
+    return dls_irradiance(tags)[0]
 
 
 def panel_in_tags(tags: dict) -> tuple[list[tuple[float, float]], float | None] | None:
@@ -614,9 +748,8 @@ def panel_factors(captures: dict[str, dict[str, Path]], capture: str, region=Non
             source = next(iter(regions))
             images = {source: rads[source], **{b: rads[b] for b in missing}}
             hs = register_bands(images, source, cameras=band_cameras({b: tags[b] for b in images}))
-            for b in missing:  # the homography maps a pixel of the source band onto the band's own grid
-                pts = np.asarray(regions[source], np.float64)
-                xy = cv2.perspectiveTransform(pts[None], np.asarray(hs[b], np.float64))[0]
+            for b in missing:  # the registration maps a pixel of the source band onto the band's own grid
+                xy = map_points(hs[b], regions[source])
                 regions[b] = [tuple(float(v) for v in p) for p in xy]
     albedo = {b: t[1] for b, t in in_tags.items() if t and t[1]}
     out = {}
@@ -642,12 +775,18 @@ def panel_factors(captures: dict[str, dict[str, Path]], capture: str, region=Non
     return out
 
 
-def reflectance_image(path, factor: float | None = None, tags: dict | None = None) -> np.ndarray:
+def reflectance_image(path, factor: float | None = None, tags: dict | None = None,
+                      panel_irradiance: float | None = None) -> np.ndarray:
     """The band in reflectance: radiance x the panel ``factor`` of its band, or pi x radiance /
-    the irradiance of the sun sensor when the tags have it, else the normalised numbers."""
+    the irradiance of the sun sensor when the tags have it, else the normalised numbers. With a
+    ``factor`` and the sun sensor's irradiance when the panel was photographed
+    (``panel_irradiance``), the panel calibrates and the sun sensor follows the light: the factor
+    times panel irradiance / this capture's irradiance (:func:`capture_factor`)."""
     tags = xmp_of(path) if tags is None else tags
     rad, used = radiance_image(path, tags)
     if factor is not None:
+        if panel_irradiance:
+            factor = factor * dls_ratio(panel_irradiance, tags)
         return (rad * factor).astype(np.float32)
     irr = irradiance_of(tags)
     if irr:
@@ -655,6 +794,30 @@ def reflectance_image(path, factor: float | None = None, tags: dict | None = Non
             return (rad / irr).astype(np.float32)
         return (np.pi * rad / irr).astype(np.float32)
     return rad
+
+
+def dls_ratio(panel_irradiance: float | None, tags: dict) -> float:
+    """How much darker the light is now than when the panel was photographed, by the sun sensor:
+    its irradiance then / its irradiance in this capture (1 when either is missing)."""
+    irr = irradiance_of(tags)
+    if not panel_irradiance or not irr:
+        return 1.0
+    return float(panel_irradiance) / float(irr)
+
+
+def capture_factor(ms: dict, band: str) -> tuple[float | None, float | None]:
+    """The panel factor of a band and the sun sensor's irradiance at the panel to use for one
+    capture (see :func:`reflectance_image`): ``(factor, panel irradiance)``, the second None
+    unless the panel and the sun sensor are combined (``meta["multispectral"]["panel"]
+    ["follow_dls"]``)."""
+    panel = ms.get("panel") or {}
+    factor = (panel.get("factors") or {}).get(band)
+    if factor is None or not panel.get("follow_dls"):
+        return factor, None
+    return factor, (panel.get("irradiance") or {}).get(band)
+
+
+RADIOMETRY_METHODS = ("panel+dls", "panel", "dls", "normalised")
 
 
 # ------------------------------------------------------------------------------ registration
@@ -681,64 +844,319 @@ def _rig_rotation(degrees) -> np.ndarray:
     return rx @ ry @ rz
 
 
-def band_cameras(tags: dict[str, dict], shapes: dict[str, tuple] | None = None) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-    """The camera of every band whose tags describe it (MicaSense: focal length and principal point
-    in millimetres, ``FocalPlaneXResolution`` pixels per millimetre, the rotation in the rig
-    ``RigRelatives``): ``{band: (K, R)}``. The bands of a MicaSense camera are separate cameras
-    with their own lens - the panchromatic band of a RedEdge-P or an Altum-PT and the thermal one
-    of an Altum see another field at another scale, a few degrees apart - and :func:`register_bands`
-    starts from what these say. ``shapes`` (rows, columns) check the principal point."""
+def lens_of(tags: dict) -> tuple[np.ndarray, np.ndarray | None] | None:
+    """The lens of a band from MicaSense's tags: the camera matrix (``PerspectiveFocalLength`` and
+    ``PrincipalPoint`` in millimetres, ``FocalPlaneX/YResolution`` pixels per millimetre) and the
+    distortion ``PerspectiveDistortion`` - k1 k2 k3 p1 p2, the radial and tangential terms of the
+    Brown-Conrady model on the normalised image coordinates, as MicaSense documents it - given in
+    OpenCV's order k1 k2 p1 p2 k3 (None when the tags have no distortion). None without a camera."""
+    f = _number(tags.get("PerspectiveFocalLength"), None)
+    res = _number(tags.get("FocalPlaneXResolution"), None)
+    res_y = _number(tags.get("FocalPlaneYResolution"), res)
+    pp = _numbers(tags.get("PrincipalPoint"))
+    if not f or not res or len(pp) < 2:
+        return None
+    if str(tags.get("PerspectiveFocalLengthUnits") or "mm").lower() not in ("mm", ""):
+        fx = fy = f  # already in pixels
+    else:
+        fx, fy = f * res, f * res_y
+    k = np.array([[fx, 0.0, pp[0] * res], [0.0, fy, pp[1] * res_y], [0.0, 0.0, 1.0]])
+    d = _numbers(tags.get("PerspectiveDistortion"))
+    dist = np.array([d[0], d[1], d[3], d[4], d[2]], float) if len(d) >= 5 else None
+    return k, dist
+
+
+def band_cameras(tags: dict[str, dict], shapes: dict[str, tuple] | None = None) -> dict[str, tuple]:
+    """The camera of every band whose tags describe it (MicaSense: :func:`lens_of` and the rotation
+    in the rig ``RigRelatives``): ``{band: (K, R, distortion)}``, the distortion None when the tags
+    have none. The bands of a MicaSense camera are separate cameras with their own lens - the
+    panchromatic band of a RedEdge-P or an Altum-PT and the thermal one of an Altum see another
+    field at another scale, a few degrees apart, the thermal lens with a strong barrel distortion
+    (k1 -0.36 on the Altum: 11 thermal pixels at the corners) - and :func:`register_bands` starts
+    from what these say. ``shapes`` (rows, columns) check the principal point."""
     out = {}
     for band, t in tags.items():
-        f = _number(t.get("PerspectiveFocalLength"), None)
-        res = _number(t.get("FocalPlaneXResolution"), None)
-        res_y = _number(t.get("FocalPlaneYResolution"), res)
-        pp = _numbers(t.get("PrincipalPoint"))
-        rig = _numbers(t.get("RigRelatives"))
-        if not f or not res or len(pp) < 2:
+        lens = lens_of(t)
+        if lens is None:
             continue
-        if str(t.get("PerspectiveFocalLengthUnits") or "mm").lower() not in ("mm", ""):
-            fx = fy = f  # already in pixels
-        else:
-            fx, fy = f * res, f * res_y
-        cx, cy = pp[0] * res, pp[1] * res_y
+        k, dist = lens
+        rig = _numbers(t.get("RigRelatives"))
         if shapes and band in shapes:
             h, w = shapes[band][:2]
-            if not (0 < cx < w and 0 < cy < h):
+            if not (0 < k[0, 2] < w and 0 < k[1, 2] < h):
                 continue
-        k = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
-        out[band] = (k, _rig_rotation(rig) if len(rig) >= 3 else np.eye(3))
+        out[band] = (k, _rig_rotation(rig) if len(rig) >= 3 else np.eye(3), dist)
     return out
+
+
+def _camera(c) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    """(K, R, distortion) of a camera of :func:`band_cameras` (the distortion may be missing)."""
+    dist = c[2] if len(c) > 2 else None
+    return np.asarray(c[0], float), np.asarray(c[1], float), None if dist is None else np.asarray(dist, float)
 
 
 def _camera_homography(cameras: dict, reference: str, band: str) -> np.ndarray | None:
     """Reference pixel -> band pixel for a scene far away (rotation only, no lens distortion)."""
     if not cameras or reference not in cameras or band not in cameras:
         return None
-    (kr, rr), (kb, rb) = cameras[reference], cameras[band]
+    (kr, rr, _dr), (kb, rb, _db) = _camera(cameras[reference]), _camera(cameras[band])
     h = kb @ rb.T @ rr @ np.linalg.inv(kr)
     return h / h[2, 2]
 
 
+def _distort(n: np.ndarray, k: np.ndarray, dist: np.ndarray | None) -> np.ndarray:
+    """Normalised image coordinates (..., 2) -> pixels through the lens (OpenCV's k1 k2 p1 p2 k3)."""
+    x, y = n[..., 0], n[..., 1]
+    if dist is not None:
+        k1, k2, p1, p2, k3 = (float(v) for v in dist[:5])
+        r2 = x * x + y * y
+        radial = 1.0 + r2 * (k1 + r2 * (k2 + r2 * k3))
+        x, y = (x * radial + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x),
+                y * radial + p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y)
+    return np.stack([k[0, 0] * x + k[0, 1] * y + k[0, 2], k[1, 1] * y + k[1, 2]], -1)
+
+
+def _undistort(p: np.ndarray, k: np.ndarray, dist: np.ndarray | None) -> np.ndarray:
+    """Pixels (N, 2) -> normalised image coordinates without the lens (iterated to 1e-12)."""
+    p = np.asarray(p, np.float64).reshape(-1, 1, 2)
+    if dist is None:
+        return cv2.undistortPoints(p, k, None).reshape(-1, 2)
+    criteria = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 50, 1e-12)
+    return cv2.undistortPoints(p, k, np.asarray(dist, np.float64), criteria=criteria).reshape(-1, 2)
+
+
+LENS_GRID = 8  # the lens maps are computed every 8 pixels and interpolated: below 0.01 pixel off
+REGISTRATION_VERSION = 2  # 2: through the lenses, the thermal band by its edges (1.3.5); kept registrations of 1 are found again
+
+
+def _grid_map(func, shape) -> tuple[np.ndarray, np.ndarray]:
+    """``func`` (pixels (N, 2) of a grid of ``shape`` -> pixels of another image (N, 2)) as the two
+    maps of ``cv2.remap``: computed on a grid every :data:`LENS_GRID` pixels and interpolated
+    (the mapping is smooth: a lens, a rotation)."""
+    h, w = int(shape[0]), int(shape[1])
+    gx = np.arange(0, w + LENS_GRID, LENS_GRID, dtype=np.float64)
+    gy = np.arange(0, h + LENS_GRID, LENS_GRID, dtype=np.float64)
+    xx, yy = np.meshgrid(gx, gy)
+    out = func(np.stack([xx.ravel(), yy.ravel()], 1)).reshape(len(gy), len(gx), 2).astype(np.float32)
+    fx = (np.arange(w, dtype=np.float32) / LENS_GRID)[None, :].repeat(h, 0)
+    fy = (np.arange(h, dtype=np.float32) / LENS_GRID)[:, None].repeat(w, 1)
+    mx = cv2.remap(np.ascontiguousarray(out[..., 0]), fx, fy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    my = cv2.remap(np.ascontiguousarray(out[..., 1]), fx, fy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    return mx, my
+
+
+def _registration(h):
+    """A registration as given: a dict (through the lenses) even when wrapped in a numpy array."""
+    if isinstance(h, np.ndarray) and h.dtype == object and h.ndim == 0:
+        return h.item()
+    return h
+
+
+def _lens_entry(entry: dict) -> tuple:
+    m = np.asarray(entry["matrix"], float)
+    ref, band = entry["reference"], entry["band"]
+    dr = None if ref.get("dist") is None else np.asarray(ref["dist"], float)
+    db = None if band.get("dist") is None else np.asarray(band["dist"], float)
+    return m, np.asarray(ref["K"], float), dr, np.asarray(band["K"], float), db
+
+
+def map_points(h, pts) -> np.ndarray:
+    """Pixels of the reference band (N, 2) -> the same points in the band, with the registration
+    ``h`` of :func:`register_bands`: a homography, or the lenses of both bands and the matrix
+    between their rays (a band registered through its lens)."""
+    pts = np.asarray(pts, np.float64).reshape(-1, 2)
+    h = _registration(h)
+    if isinstance(h, dict):
+        m, kr, dr, kb, db = _lens_entry(h)
+        n = _undistort(pts, kr, dr)
+        ray = np.concatenate([n, np.ones((len(n), 1))], 1) @ m.T
+        return _distort(ray[:, :2] / ray[:, 2:3], kb, db)
+    return cv2.perspectiveTransform(pts[None], np.asarray(h, np.float64))[0]
+
+
+def registration_json(h):
+    """A registration of :func:`register_bands` as JSON (lists), for ``meta``."""
+    if isinstance(h, dict):
+        return {k: (np.asarray(v).tolist() if isinstance(v, np.ndarray) else
+                    {kk: (None if vv is None else np.asarray(vv).tolist()) for kk, vv in v.items()} if isinstance(v, dict) else v)
+                for k, v in h.items()}
+    return np.asarray(h).tolist()
+
+
+def _frame_maps(kr: np.ndarray, rotation: np.ndarray, kb: np.ndarray, db: np.ndarray | None, shape,
+                g: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """The maps bringing a band into the reference's undistorted frame (a pinhole camera with the
+    reference's matrix ``kr``): frame pixel -> ``g`` (a homography of the frame) -> ray -> the band's
+    rotation in the rig -> the band's lens -> band pixel."""
+    a = rotation @ np.linalg.inv(kr) @ (np.eye(3) if g is None else g)
+
+    def func(p):
+        ray = np.concatenate([p, np.ones((len(p), 1))], 1) @ a.T
+        return _distort(ray[:, :2] / ray[:, 2:3], kb, db)
+
+    return _grid_map(func, shape)
+
+
+def _remap(img: np.ndarray, maps, border=cv2.BORDER_CONSTANT) -> np.ndarray:
+    return cv2.remap(img.astype(np.float32), maps[0], maps[1], cv2.INTER_LINEAR, borderMode=border,
+                     borderValue=float("nan"))
+
+
+def _is_thermal(band: str) -> bool:
+    return band == "LWIR" or _wavelength_index(band) > 3000
+
+
+THERMAL_SEARCH = 3.0  # thermal pixels: how far the edge refinement may move a thermal band from the cameras' geometry
+THERMAL_LINEAR = 0.03  # and how much it may scale or shear it
+THERMAL_GAIN = 0.02  # the agreement of the edges it must gain to be kept
+
+
+def _orientation_field(img: np.ndarray, sigma: float) -> np.ndarray:
+    """The gradient of ``img`` as a complex number with its angle doubled and the gradient's
+    modulus: an edge gives the same value whichever side is brighter, so a thermal band compares
+    with a visible one (a road warm and bright, a tree cool in the thermal and bright in the NIR)."""
+    g = cv2.GaussianBlur(np.nan_to_num(img.astype(np.float32)), (0, 0), sigma)
+    gx = cv2.Scharr(g, cv2.CV_32F, 1, 0)
+    gy = cv2.Scharr(g, cv2.CV_32F, 0, 1)
+    z = (gx + 1j * gy) ** 2 / (np.hypot(gx, gy) + 1e-12)
+    return z.astype(np.complex64)
+
+
+def _agreement(a: np.ndarray, b: np.ndarray, mask: np.ndarray) -> float:
+    """The normalised agreement of two orientation fields over ``mask``: 1 when every edge of one
+    lies on an edge of the other, whatever their contrast, about 0 for unrelated images."""
+    x, y = a[mask], b[mask]
+    den = float(np.sqrt(np.sum(np.abs(x) ** 2) * np.sum(np.abs(y) ** 2)))
+    return float(np.real(np.vdot(y, x))) / den if den > 0 else 0.0
+
+
+def _edge_refine(moving: np.ndarray, fixed: dict[str, np.ndarray], pixel: float,
+                 search: float = THERMAL_SEARCH, linear: float = THERMAL_LINEAR) -> dict | None:
+    """A small affine correction of ``moving`` - a thermal band already brought into the frame of
+    the reference by the cameras' geometry, NaN where it does not cover - onto the ``fixed`` bands
+    registered in that frame (``pixel``: frame pixels per thermal pixel). ECC does not work across
+    the infrared: the edges are the same, their contrast is not (a road warm and bright, a tree cool
+    and bright in the NIR). Here the agreement of the gradient orientations
+    (:func:`_orientation_field`, angles doubled) is maximised at two working scales, coarse to fine:
+    the shift first (correlation of the fields), then an affine about the centre, within ``search``
+    thermal pixels and ``linear`` of scale and shear. The fixed bands are weighted by their
+    agreement at the start (the bands most like the thermal one count most). Returns ``{"h": frame
+    pixel -> moving frame pixel, "before", "after", "bands"}``, or None when nothing came of it."""
+    from scipy import optimize
+
+    h0, w0 = moving.shape
+    out = None
+    t = np.eye(3)  # frame pixel -> moving frame pixel, so far
+    for level, per_thermal in enumerate((1.0, 2.0)):  # working pixels per thermal pixel
+        s = max(1.0, pixel / per_thermal)
+        ws, hs = max(16, int(round(w0 / s))), max(16, int(round(h0 / s)))
+        sx, sy = ws / w0, hs / h0
+        # frame pixel -> working pixel (cv2.resize keeps the pixel centres)
+        to_work = np.array([[sx, 0.0, 0.5 * sx - 0.5], [0.0, sy, 0.5 * sy - 0.5], [0.0, 0.0, 1.0]])
+
+        def small(a):
+            ok = cv2.resize(np.isfinite(a).astype(np.float32), (ws, hs), interpolation=cv2.INTER_AREA)
+            v = cv2.resize(np.nan_to_num(a.astype(np.float32)), (ws, hs), interpolation=cv2.INTER_AREA)
+            return np.where(ok > 0.99, v, np.nan)
+
+        mov = small(moving)
+        fix = {b: small(a) for b, a in fixed.items()}
+        valid = np.isfinite(mov)
+        for a in fix.values():
+            valid &= np.isfinite(a)
+        valid = cv2.erode(valid.astype(np.uint8), np.ones((7, 7), np.uint8)).astype(bool)
+        if valid.sum() < 400:
+            return out
+        blur = 1.0  # working pixels; the visible bands, sharper than the thermal one, a little more
+        zf = {b: _orientation_field(a, blur + 0.8) for b, a in fix.items()}
+        tw = to_work @ t @ np.linalg.inv(to_work)  # the correction so far, in working pixels
+        mov_work = cv2.warpPerspective(np.nan_to_num(mov), tw, (ws, hs), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                                       borderMode=cv2.BORDER_REPLICATE)
+        z0 = _orientation_field(mov_work, blur)
+        weights = {b: _agreement(z, z0, valid) for b, z in zf.items()}
+        use = {b: w for b, w in weights.items() if w > 0.05}
+        if not use:
+            return out
+        target = sum(w * zf[b] / np.sqrt(np.mean(np.abs(zf[b][valid]) ** 2) + 1e-30) for b, w in use.items())
+        c = np.array([(ws - 1) / 2.0, (hs - 1) / 2.0])
+        limit = search * per_thermal  # working pixels
+
+        def affine(p):
+            lin = np.array([[1.0 + p[2], p[3]], [p[4], 1.0 + p[5]]])
+            a = np.eye(3)
+            a[:2, :2] = lin
+            a[:2, 2] = p[:2] + c - lin @ c
+            return a @ tw
+
+        def score(p):
+            warped = cv2.warpPerspective(np.nan_to_num(mov), affine(p), (ws, hs), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                                         borderMode=cv2.BORDER_REPLICATE)
+            return _agreement(target, _orientation_field(warped, blur), valid)
+
+        before = score(np.zeros(6))
+        geometry = _agreement(target, _orientation_field(np.nan_to_num(mov), blur), valid)  # the cameras' alone
+        p0 = np.zeros(6)
+        if level == 0:  # the shift: the peak of the correlation of the fields within the search
+            fa = np.where(valid, target, 0)
+            fb = np.where(valid, z0, 0)
+            corr = np.fft.fftshift(np.real(np.fft.ifft2(np.fft.fft2(fb) * np.conj(np.fft.fft2(fa)))))
+            r = int(np.ceil(limit))
+            cy, cx = hs // 2, ws // 2
+            win = corr[cy - r:cy + r + 1, cx - r:cx + r + 1]
+            iy, ix = np.unravel_index(int(np.argmax(win)), win.shape)
+            p0[:2] = (ix - r, iy - r)
+            if score(p0) < before:
+                p0[:2] = 0.0
+        tlim = limit * (1.0 if level == 0 else 0.5)  # the fine level only refines
+        bounds = [(-limit, limit)] * 2 if level == 0 else [(p0[0] - tlim, p0[0] + tlim), (p0[1] - tlim, p0[1] + tlim)]
+        bounds += [(-linear, linear)] * 4
+        res = optimize.minimize(lambda p: -score(p), p0, method="Powell", bounds=bounds,
+                                options={"xtol": 1e-3, "ftol": 1e-6, "maxfev": 2000})
+        after = -float(res.fun)
+        if after <= before:
+            continue
+        t = np.linalg.inv(to_work) @ affine(res.x) @ to_work
+        out = {"h": t, "before": geometry, "after": after, "bands": sorted(use, key=lambda b: -use[b])}
+    if out is None:
+        return None
+    centre = np.array([[[w0 / 2.0, h0 / 2.0]]])
+    moved = float(np.linalg.norm(cv2.perspectiveTransform(centre, out["h"])[0, 0] - centre[0, 0]))
+    if out["after"] < out["before"] + THERMAL_GAIN or moved > 0.98 * search * pixel:
+        return None  # no clear gain, or at the end of the search: the cameras' geometry stays
+    return out
+
+
 def register_bands(images: dict[str, np.ndarray], reference: str, scale: int = 2, iterations: int = 100,
-                   quality: dict | None = None, cameras: dict | None = None) -> dict[str, np.ndarray]:
-    """The homography of every band onto the ``reference`` band (ECC on the gradient magnitudes,
-    at a reduced size then scaled back): ``{band: 3 x 3}`` mapping a pixel of the reference to
-    the same point in the band (what :func:`warp_band` needs), the identity for the reference
-    and for a band ECC cannot register. A band of another size (the panchromatic band of a
-    RedEdge-P, the thermal one of an Altum) is matched at the reference's size and its homography
-    given onto its own pixels. The bands are registered in a chain by wavelength: a
-    band is matched against the two registered bands nearest to it in wavelength, already brought
-    into the frame of the reference, and the better match wins - a leaf is bright and textured in
-    the NIR, dark and smooth in the red, so NIR on red seldom converges (correlation 0.1-0.3 on a
-    DJI P4 Multispectral over scrub), NIR on red-edge always does (0.9). ``quality``, when given,
-    collects the ECC correlation of every band and the band it was matched to. ``cameras``
-    (:func:`band_cameras`) give where to start: the band brought onto the reference by the
-    cameras' geometry first, ECC from there; a band ECC cannot match (a thermal band: its edges are
-    not those of the others) keeps the cameras' homography when ECC would move it far from it."""
+                   quality: dict | None = None, cameras: dict | None = None) -> dict:
+    """The registration of every band onto the ``reference`` band: ``{band: h}`` mapping a pixel
+    of the reference to the same point in the band (what :func:`warp_band` and :func:`map_points`
+    need), the identity for the reference. ``h`` is a homography (3 x 3) or, for the bands of a
+    camera whose tags describe its lenses (:func:`band_cameras` with the distortion: MicaSense),
+    the lenses of the reference and of the band and the matrix between their rays (a dict, see
+    :func:`map_points`): the bands of such a camera are registered in the reference's undistorted
+    frame - every band undistorted with its own lens and turned by its rotation in the rig first -
+    so what is left between them is the small correction a homography holds; the result goes from
+    the reference's pixels, distorted as the photo, to the band's.
+
+    ECC on the gradient magnitudes, at a reduced size then at full size. The bands are registered
+    in a chain by wavelength: a band is matched against the two registered bands nearest to it in
+    wavelength, already brought into the frame of the reference, and the better match wins - a
+    leaf is bright and textured in the NIR, dark and smooth in the red, so NIR on red seldom
+    converges (correlation 0.1-0.3 on a DJI P4 Multispectral over scrub), NIR on red-edge always
+    does (0.9). A band of another size (the panchromatic band of a RedEdge-P, the thermal one of an
+    Altum) is matched at the reference's size and its registration given onto its own pixels.
+    ``cameras`` (:func:`band_cameras`) give where to start; a band ECC cannot match keeps the
+    cameras' geometry when ECC would move it far from it. A thermal band (LWIR) is not matched by
+    ECC - its edges are those of the others, their contrast is not - but refined from the cameras'
+    geometry by the agreement of its gradient orientations with the registered bands
+    (:func:`_edge_refine`, a few thermal pixels at most). ``quality``, when given, collects the
+    correlation of every band (the edge agreement for a thermal band), the band it was matched to
+    (``"edges"`` for a refined thermal band, ``"cameras"`` for the geometry alone) and how."""
     ref = images[reference]
-    out = {}
+    out: dict = {}
     h0, w0 = ref.shape[:2]
+    ref_cam = _camera(cameras[reference]) if cameras and reference in cameras else None
+    lens = ref_cam is not None and ref_cam[2] is not None  # register in the undistorted frame
 
     def grad(img, s: int):
         """The gradient magnitude at 1/s, normalised: bands that look different (a leaf bright
@@ -752,9 +1170,17 @@ def register_bands(images: dict[str, np.ndarray], reference: str, scale: int = 2
 
     criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, int(iterations), 1e-4)
     window = cv2.createHanningWindow((w0, h0), cv2.CV_32F)
+    if lens:  # the reference without its lens: the frame every band is brought into
+        kr, _rr, dr = ref_cam
+        ref_frame = _remap(np.nan_to_num(ref.astype(np.float32)), _frame_maps(kr, np.eye(3), kr, dr, (h0, w0)),
+                           border=cv2.BORDER_REPLICATE)
+    else:
+        ref_frame = ref
     # the registered bands in the frame of the reference: their gradient features at full and
-    # at the reduced size, the targets of the bands still to register
-    targets: dict[str, tuple[np.ndarray, np.ndarray]] = {reference: (grad(ref, 1), grad(ref, scale) if scale > 1 else grad(ref, 1))}
+    # at the reduced size, the targets of the bands still to register, and the images themselves
+    targets: dict[str, tuple[np.ndarray, np.ndarray]] = {
+        reference: (grad(ref_frame, 1), grad(ref_frame, scale) if scale > 1 else grad(ref_frame, 1))}
+    frames: dict[str, np.ndarray] = {reference: ref_frame}
     out[reference] = np.eye(3)
 
     def register(target: tuple[np.ndarray, np.ndarray], pimg_full: np.ndarray, pimg_half: np.ndarray):
@@ -779,34 +1205,83 @@ def register_bands(images: dict[str, np.ndarray], reference: str, scale: int = 2
             pass  # the shift alone, or what the affine gave
         return h, float(cc)
 
+    def finish(band: str, size: np.ndarray, g: np.ndarray, band_cam):
+        """The registration of a band from its correction ``g`` in the frame."""
+        if not lens:
+            return size @ g
+        kr, rr, dr = ref_cam
+        kb, rb, db = band_cam
+        m = rb.T @ rr @ np.linalg.inv(kr) @ g @ kr
+        return {"model": "lens", "matrix": m / np.linalg.norm(m),
+                "reference": {"K": kr, "dist": dr}, "band": {"K": kb, "dist": db}}
+
+    # the spectral bands first by their distance in wavelength, the thermal ones last (they are
+    # refined on the spectral bands registered)
     pending = sorted((b for b in images if b != reference),
-                     key=lambda b: (abs(_wavelength_index(b) - _wavelength_index(reference)), b))
+                     key=lambda b: (_is_thermal(b), abs(_wavelength_index(b) - _wavelength_index(reference)), b))
     for band in pending:
         img = images[band]
-        start = _camera_homography(cameras, reference, band)
+        thermal = _is_thermal(band)
+        band_cam = _camera(cameras[band]) if cameras and band in cameras else None
+        if lens and band_cam is None:  # a band without a camera in a camera that has lenses: its pixels as the reference's
+            sz = np.diag([img.shape[1] / w0, img.shape[0] / h0, 1.0])
+            band_cam = (sz @ ref_cam[0], ref_cam[1], ref_cam[2])
+        start = _camera_homography(cameras, reference, band) if not lens else None
         size = np.eye(3)  # from the reference's frame to the band's own pixels
-        if start is not None:
-            # the band seen through the cameras' geometry, reduced first when it is much finer (the
-            # panchromatic band: the warp alone would alias it); replicated edges, not NaN: an edge of
-            # zeros would be the strongest gradient of the image
-            src = np.nan_to_num(img.astype(np.float32))
-            k = min(img.shape[0] / h0, img.shape[1] / w0)
-            if k > 1.3:
-                src = cv2.resize(src, (int(round(img.shape[1] / k)), int(round(img.shape[0] / k))), interpolation=cv2.INTER_AREA)
-                down = np.diag([src.shape[1] / img.shape[1], src.shape[0] / img.shape[0], 1.0])
-            else:
-                down = np.eye(3)
+        src = np.nan_to_num(img.astype(np.float32))
+        k = min(img.shape[0] / h0, img.shape[1] / w0)
+        if (lens or start is not None) and k > 1.3:
+            # the band reduced first when it is much finer (the panchromatic band: the warp alone
+            # would alias it); replicated edges, not NaN: an edge of zeros would be the strongest
+            # gradient of the image. cv2.resize keeps the pixel centres: x' = (x + 0.5) r - 0.5
+            src = cv2.resize(src, (int(round(img.shape[1] / k)), int(round(img.shape[0] / k))), interpolation=cv2.INTER_AREA)
+            rx, ry = src.shape[1] / img.shape[1], src.shape[0] / img.shape[0]
+            down = np.array([[rx, 0.0, 0.5 * rx - 0.5], [0.0, ry, 0.5 * ry - 0.5], [0.0, 0.0, 1.0]])
+        else:
+            down = np.eye(3)
+        if lens:
+            kb, rb, db = band_cam
+            maps = _frame_maps(ref_cam[0], rb.T @ ref_cam[1], down @ kb, db, (h0, w0))
+            img = _remap(src, maps, border=cv2.BORDER_REPLICATE)
+            if thermal:  # NaN where the band does not see: the edge refinement must not take the border for an edge
+                img[~np.isfinite(_remap(np.ones_like(src), maps))] = np.nan
+        elif start is not None:
             size = start
             img = cv2.warpPerspective(src, down @ start, (w0, h0), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
                                       borderMode=cv2.BORDER_REPLICATE)
+            if thermal:
+                seen = cv2.warpPerspective(np.ones_like(src), down @ start, (w0, h0),
+                                           flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_CONSTANT)
+                img[seen < 0.99] = np.nan
         elif img.shape[:2] != (h0, w0):
             size = np.diag([img.shape[1] / w0, img.shape[0] / h0, 1.0])
             small = img.shape[0] < h0
             img = cv2.resize(np.nan_to_num(img.astype(np.float32)), (w0, h0),
                              interpolation=cv2.INTER_LINEAR if small else cv2.INTER_AREA)
+        geometry = lens or start is not None
+        if thermal:
+            # frame pixels per thermal pixel: from the focal lengths, else from the sizes
+            if band_cam is not None and (lens or start is not None):
+                kref = ref_cam[0] if ref_cam is not None else _camera(cameras[reference])[0]
+                pixel = float(kref[0, 0] / band_cam[0][0, 0])
+            else:
+                pixel = w0 / max(images[band].shape[1], 1)
+            spectral = {b: f for b, f in frames.items() if not _is_thermal(b)}
+            refined = _edge_refine(img, spectral, max(pixel, 1.0)) if spectral else None
+            if refined is not None:
+                h, cc, matched = refined["h"], refined["after"], "edges"
+                how = {"method": "edges", "before": refined["before"], "bands": refined["bands"]}
+            else:
+                h, cc, matched = np.eye(3), 0.0, "cameras" if geometry else reference
+                how = {"method": "cameras" if geometry else "none"}
+            out[band] = finish(band, size, h, band_cam)
+            if quality is not None:
+                quality[band] = {"correlation": cc, "on": matched, **how}
+            continue
         pimg_full = grad(img, 1)
         pimg_half = grad(img, scale) if scale > 1 else pimg_full
-        nearest = sorted(targets, key=lambda t: (abs(_wavelength_index(t) - _wavelength_index(band)), t != reference))[:2]
+        nearest = sorted((t for t in targets if not _is_thermal(t)),
+                         key=lambda t: (abs(_wavelength_index(t) - _wavelength_index(band)), t != reference))[:2]
         best = None
         for t in nearest:
             h, cc = register(targets[t], pimg_full, pimg_half)
@@ -815,24 +1290,30 @@ def register_bands(images: dict[str, np.ndarray], reference: str, scale: int = 2
             if cc >= 0.6:  # good enough: the second candidate is for the bands that look unlike
                 break
         h, cc, matched = best
-        if start is not None and cc < 0.3:
+        if geometry and cc < 0.3:
             # a weak match: kept only when it stays near the cameras' geometry (2 % of the diagonal)
             corners = np.array([[0, 0], [w0, 0], [0, h0], [w0, h0]], np.float64)[None]
             moved = np.linalg.norm(cv2.perspectiveTransform(corners, h)[0] - corners[0], axis=1).max()
             if moved > 0.02 * np.hypot(w0, h0):
                 h, matched = np.eye(3), "cameras"
-        out[band] = size @ h
+        out[band] = finish(band, size, h, band_cam)
         if quality is not None:
-            quality[band] = {"correlation": cc, "on": matched}
+            quality[band] = {"correlation": cc, "on": matched, "method": "ecc"}
         if cc > 0.15:  # registered: a target for the bands further away in wavelength
             warped = warp_band(img, h, (h0, w0))
             targets[band] = (grad(warped, 1), grad(warped, scale) if scale > 1 else grad(warped, 1))
+            frames[band] = warped
     return out
 
 
-def warp_band(img: np.ndarray, h: np.ndarray, shape) -> np.ndarray:
+def warp_band(img: np.ndarray, h, shape) -> np.ndarray:
     """``img`` (a band) brought onto the reference band's grid of ``shape`` with ``h``, the
-    homography of :func:`register_bands` (reference pixel -> band pixel); NaN outside."""
+    registration of :func:`register_bands` (reference pixel -> band pixel: a homography, or the
+    lenses of the two bands); NaN outside."""
+    h = _registration(h)
+    if isinstance(h, dict):
+        maps = _grid_map(lambda p: map_points(h, p), shape)
+        return _remap(img, maps)
     if np.allclose(h, np.eye(3)) and img.shape[:2] == tuple(shape):
         return img.astype(np.float32)
     out = cv2.warpPerspective(img.astype(np.float32), np.asarray(h, np.float64), (int(shape[1]), int(shape[0])),
@@ -910,8 +1391,12 @@ def add_captures(chunk: Chunk, paths, reference: str | None = None, recursive: b
         cam.meta["capture"] = stem
     ms.update({"reference": reference, "bands": bands, "captures": len(existing) + len(cams)})
     ms.setdefault("panel", None)
-    ms.setdefault("registration", {})
+    if not ms.get("registration"):
+        ms["registration"] = {}
+        ms["registration_version"] = REGISTRATION_VERSION
     chunk.meta["multispectral"] = ms
+    if reference not in NON_SPECTRAL:
+        ms["radiometry"] = radiometry_method(chunk)
     return cams
 
 
@@ -950,10 +1435,16 @@ def multispectral_cameras(chunk: Chunk) -> list:
     return [c for c in chunk.cameras if c.meta.get("bands")]
 
 
-def calibrate_panel(chunk: Chunk, camera, region=None, reflectance: dict[str, float] | float | None = None) -> dict:
+def calibrate_panel(chunk: Chunk, camera, region=None, reflectance: dict[str, float] | float | None = None,
+                    follow_dls: bool | None = None) -> dict:
     """The panel factors from the capture of ``camera`` (its bands), kept in the chunk. Without a
     ``region`` or a ``reflectance``, the panel the camera found and the reflectances it read
-    (MicaSense: :func:`panel_in_tags`)."""
+    (MicaSense: :func:`panel_in_tags`). ``follow_dls``: the sun sensor follows the light during the
+    flight - every capture's factor times the sun sensor's irradiance at the panel / its irradiance
+    in that capture, as MicaSense's and DJI's guides recommend: the panel gives the level, the sun
+    sensor the changes (a cloud, the sun lower). None (the default): when the panel's capture and
+    the flight both have the sun sensor's irradiance. The method is kept in
+    ``meta["multispectral"]["radiometry"]`` (:func:`radiometry_method`)."""
     captures = {camera.meta.get("capture", "panel"): {b: Path(p) for b, p in camera.meta["bands"].items()}}
     found: dict = {}
     factors = panel_factors(captures, next(iter(captures)), region, reflectance, found=found)
@@ -963,11 +1454,48 @@ def calibrate_panel(chunk: Chunk, camera, region=None, reflectance: dict[str, fl
     ms = chunk.meta.setdefault("multispectral", {})
     if reflectance is None:
         reflectance = {b: v["reflectance"] for b, v in found.items()}
+    irradiance = {}
+    for b in factors:
+        value = irradiance_of(xmp_of(camera.meta["bands"][b]))
+        if value:
+            irradiance[b] = value
+    if follow_dls is None:
+        flight = [c for c in multispectral_cameras(chunk) if c.key != camera.key]
+        follow_dls = bool(irradiance) and any(_capture_irradiance(c) for c in flight[:5])
     ms["panel"] = {"camera": camera.key, "region": None if region is None else np.asarray(region, float).tolist(),
                    "factors": factors, "reflectance": reflectance,
                    "regions": {b: v["region"] for b, v in found.items()},
-                   "source": "tags" if region is None else "given"}
+                   "source": "tags" if region is None else "given",
+                   "irradiance": irradiance, "follow_dls": bool(follow_dls and irradiance)}
+    ms["radiometry"] = radiometry_method(chunk)
     return factors
+
+
+def _capture_irradiance(camera) -> dict[str, float]:
+    """The sun sensor's irradiance per spectral band of a capture ({} without one)."""
+    out = {}
+    for b, p in (camera.meta.get("bands") or {}).items():
+        if b in NON_SPECTRAL:
+            continue
+        value = irradiance_of(xmp_of(p))
+        if value:
+            out[b] = value
+    return out
+
+
+def radiometry_method(chunk: Chunk) -> str:
+    """How the bands of the chunk become reflectance (one of :data:`RADIOMETRY_METHODS`):
+    ``"panel+dls"`` the panel's factors with the sun sensor following the light, ``"panel"`` the
+    panel's factors alone, ``"dls"`` the sun sensor alone, ``"normalised"`` neither (numbers
+    normalised by exposure and gain: the indices hold, the absolute values do not)."""
+    ms = chunk.meta.get("multispectral") or {}
+    panel = ms.get("panel")
+    if panel and panel.get("factors"):
+        return "panel+dls" if panel.get("follow_dls") else "panel"
+    cams = multispectral_cameras(chunk)
+    if cams and _capture_irradiance(cams[len(cams) // 2]):
+        return "dls"
+    return "normalised"
 
 
 def panel_captures(chunk: Chunk) -> list:
@@ -987,7 +1515,6 @@ def band_stack(chunk: Chunk, camera, bands: list[str], cache: dict | None = None
     ms = chunk.meta.get("multispectral") or {}
     reference = ms.get("reference")
     files = camera.meta.get("bands") or {}
-    factors = (ms.get("panel") or {}).get("factors") or {}
     files = {b: p for b, p in files.items() if b != "Visible" or b == reference}
     tags = {b: xmp_of(p) for b, p in files.items()}
     refl = {}
@@ -996,21 +1523,26 @@ def band_stack(chunk: Chunk, camera, bands: list[str], cache: dict | None = None
             from .thermal import decode_file
 
             refl[b] = decode_file(p)
-        else:
-            refl[b] = reflectance_image(p, factors.get(b), tags[b])
+        else:  # the panel's factor, with the sun sensor following the light when they are combined
+            factor, at_panel = capture_factor(ms, b)
+            refl[b] = reflectance_image(p, factor, tags[b], at_panel)
+    if ms.get("registration") and ms.get("registration_version") != REGISTRATION_VERSION:
+        # registrations of an earlier version (homographies without the lenses): found again
+        ms["registration"], ms["registration_quality"] = {}, {}
+    ms["registration_version"] = REGISTRATION_VERSION
     hs = ms.get("registration", {}).get(str(camera.key))
     if hs is None:
         quality: dict = {}
         cameras = band_cameras(tags, {b: v.shape for b, v in refl.items()})
         hs = (register_bands(refl, reference, quality=quality, cameras=cameras) if reference in refl
               else {b: np.eye(3) for b in refl})
-        ms.setdefault("registration", {})[str(camera.key)] = {b: np.asarray(h).tolist() for b, h in hs.items()}
+        ms.setdefault("registration", {})[str(camera.key)] = {b: registration_json(h) for b, h in hs.items()}
         ms.setdefault("registration_quality", {})[str(camera.key)] = quality
     shape = refl[reference].shape if reference in refl else next(iter(refl.values())).shape
     stack = np.full((shape[0], shape[1], len(bands)), np.nan, np.float32)
     for k, b in enumerate(bands):
         if b in refl:
-            stack[..., k] = warp_band(refl[b], np.asarray(hs[b], float), shape)
+            stack[..., k] = warp_band(refl[b], hs[b] if isinstance(hs[b], dict) else np.asarray(hs[b], float), shape)
             field = _balance_field(gains, b, str(camera.key), shape)
             if field is not None:
                 stack[..., k] /= field

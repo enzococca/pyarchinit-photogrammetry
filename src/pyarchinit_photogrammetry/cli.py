@@ -1977,6 +1977,9 @@ def multispectral(project: Path, what: str = typer.Argument(..., help="add, pane
                   resolution: Optional[float] = typer.Option(None, help="reflectance: metres per pixel (the orthomosaic's)"),
                   balance: bool = typer.Option(True, help="reflectance: bring the photos to the same reflectance where "
                                                           "they overlap (against the strips between flight lines)"),
+                  dls: bool = typer.Option(True, help="panel: the sun sensor (DLS) follows the light during the flight "
+                                                      "when the panel's capture and the flight have it (the panel gives "
+                                                      "the level, the DLS the changes)"),
                   chunk: Optional[str] = None):
     """Multispectral captures: add (one file per band, side by side), the calibration panel, the
     reflectance orthomosaic (a band per band), an index raster, the zoning polygons."""
@@ -1990,7 +1993,7 @@ def multispectral(project: Path, what: str = typer.Argument(..., help="add, pane
         doc.save()
         info = ch.meta["multispectral"]
         typer.echo(f"{len(cams)} captures added ({info['captures']} in the chunk), bands {', '.join(info['bands'])}, "
-                   f"reference {info['reference']}")
+                   f"reference {info['reference']}" + (f", radiometry {info['radiometry']}" if info.get("radiometry") else ""))
     elif what == "bands":
         info = ch.meta.get("multispectral") or {}
         typer.echo(json.dumps({k: v for k, v in info.items() if k != "registration"}, indent=1))
@@ -2011,9 +2014,17 @@ def multispectral(project: Path, what: str = typer.Argument(..., help="add, pane
             raise typer.BadParameter("the camera found no panel in this capture: give --region x0,y0,x1,y1")
         if region and reflectance is None:
             reflectance = 0.5
-        factors = ms.calibrate_panel(ch, cam, [float(v) for v in region.split(",")] if region else None, reflectance)
+        factors = ms.calibrate_panel(ch, cam, [float(v) for v in region.split(",")] if region else None, reflectance,
+                                     follow_dls=None if dls else False)
         doc.save()
         typer.echo("panel factors: " + ", ".join(f"{b} {f:.4g}" for b, f in factors.items()))
+        panel = ch.meta["multispectral"]["panel"]
+        if panel.get("follow_dls"):
+            at_panel = ", ".join(f"{b} {v:.4g}" for b, v in panel["irradiance"].items())
+            typer.echo(f"radiometry: panel+dls (the panel gives the level, the sun sensor follows the light; "
+                       f"its irradiance at the panel, W/m2/nm: {at_panel})")
+        else:
+            typer.echo("radiometry: panel" + (" (the sun sensor left out)" if panel.get("irradiance") else ""))
     elif what == "reflectance":
         path = ms.build_reflectance(ch, resolution=resolution, balance=balance, progress=print_progress)
         doc.save()

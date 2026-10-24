@@ -242,6 +242,9 @@ TEXT: dict[str, tuple[str, str]] = {  # key: (Italian, English)
                          "digital numbers normalised by exposure and gain"),
     "radiometric_calibration": ("Calibrazione radiometrica", "Radiometric calibration"),
     "cal_panel": ("pannello di calibrazione (ripresa {0}, riflettanza {1})", "calibration panel (capture {0}, reflectance {1})"),
+    "cal_panel_dls": ("pannello di calibrazione (ripresa {0}, riflettanza {1}) e sensore solare (DLS) che segue la luce "
+                      "durante il volo", "calibration panel (capture {0}, reflectance {1}) and the sun sensor (DLS) "
+                      "following the light during the flight"),
     "cal_dls": ("irradianza del sensore solare (DLS) nei metadati", "irradiance of the sun sensor (DLS) in the tags"),
     "cal_none": ("nessun pannello e nessun DLS: gli indici valgono, i valori assoluti no",
                  "no panel and no DLS: the indices hold, the absolute values do not"),
@@ -1482,7 +1485,8 @@ def _multispectral(chunk, w: Words, index_palette: str) -> Section | None:
         refl = panel.get("reflectance")
         refl_text = (", ".join(f"{b} {w.number(v, 3)}" for b, v in refl.items()) if isinstance(refl, dict)
                      else w.number(refl, 3))
-        calibration = w("cal_panel", cam.meta.get("capture", cam.label) if cam else panel.get("camera"), refl_text)
+        calibration = w("cal_panel_dls" if panel.get("follow_dls") else "cal_panel",
+                        cam.meta.get("capture", cam.label) if cam else panel.get("camera"), refl_text)
     elif tags and irradiance_of(tags):
         calibration = w("cal_dls")
     else:
