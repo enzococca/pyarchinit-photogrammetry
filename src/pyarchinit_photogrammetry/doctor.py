@@ -173,6 +173,9 @@ def run_checks(gui: bool = True) -> Report:
     v = _version("ifcopenshell")
     r.add("IfcOpenShell", OK if v else WARN, v or "missing (IFC export disabled)",
           "" if v else "pip install \"pyarchinit-photogrammetry[bim]\"")
+    v = _version("pye57")
+    r.add("E57 scans (pye57)", OK if v else WARN, v or "missing (E57 import and export disabled; PTX works)",
+          "" if v else "pip install \"pyarchinit-photogrammetry[scans]\"")
     from .ai import sam_env
 
     mode = sam_env.available()

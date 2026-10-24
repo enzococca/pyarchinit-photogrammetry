@@ -196,7 +196,7 @@ def smoke_test(bundle: Path) -> None:
         _print_logs(logs)
         raise SystemExit("smoke test: the application did not finish its check in 600 s")
     print(r.stdout[-2000:], r.stderr[-2000:])
-    # without pyvistaqt in the build environment (Windows ARM64: VTK has no wheel) the 3D view uses
+    # without pyvistaqt in the build environment (an installation without VTK) the 3D view uses
     # the software renderer, and the check says "vtk: missing" as expected
     vtk = "vtk: ok" if importlib.util.find_spec("pyvistaqt") else "3D backend: software"
     if r.returncode != 0 or not all(k in r.stdout for k in ("GUI check: ok", vtk, "libs: ok")):
@@ -206,6 +206,9 @@ def smoke_test(bundle: Path) -> None:
     print(r.stdout[-3000:])
     if r.returncode not in (0, 1) or "[OK] Python" not in r.stdout:
         raise SystemExit(f"doctor failed in the packaged application (exit {r.returncode})")
+    # pye57 in the build environment must work in the application too (its xerces-c library)
+    if importlib.util.find_spec("pye57") and "[OK] E57 scans" not in r.stdout:
+        raise SystemExit("E57 scans (pye57) do not work in the packaged application")
 
 
 def make_dmg(folder: Path, out: Path, attempts: int = 5) -> None:
