@@ -75,12 +75,18 @@ def test_a_failing_global_alignment_goes_back_to_one_photo_at_a_time(scene_dir, 
 
 
 def test_auto_choices(scene_dir, tmp_path, monkeypatch):
-    """Up to ``EXHAUSTIVE_UP_TO`` photos every pair and, below ``GLOBAL_FROM``, one photo at a time."""
+    """Up to ``EXHAUSTIVE_UP_TO`` photos every pair; the global mapper only from ``GLOBAL_FROM`` photos
+    of a survey from the air, one photo at a time otherwise."""
+    from pyarchinit_photogrammetry.engine import dense
+
     _doc, ch = _matched(scene_dir, tmp_path, "auto")
     assert ch.meta["sfm"]["pair_selection"] == "exhaustive"
     ch.align_cameras()
     assert ch.meta["sfm"]["mapper"] == "incremental"
     monkeypatch.setattr(sfm, "GLOBAL_FROM", 10)
+    ch.align_cameras()
+    assert ch.meta["sfm"]["mapper"] == "incremental"  # a trench without GPS over a site: not from the air
+    monkeypatch.setattr(dense, "aerial_survey", lambda chunk: True)
     ch.align_cameras()
     assert ch.meta["sfm"]["mapper"] == "global"
     with pytest.raises(ValueError):

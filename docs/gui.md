@@ -214,7 +214,8 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   join it); under *Avanzate* the limits, the masks applied to the key points or to the tie points,
   stationary tie points, guided matching, adaptive camera model fitting, the GPS of the photos holding
   the block while it grows one photo at a time, the method - automatic: all the cameras at once
-  (global) from 40 photos, one photo at a time below - and the GPU for the matching (the best one
+  (global) from 40 photos of a drone survey (GPS spread over the site), one photo at a time below and for objects
+  and close-range scenes - and the GPU for the matching (the best one
   together with the CPU, off, or a chosen adapter; the choice is remembered and serves the PatchMatch
   depth maps too) - import references, update georeferencing, *Nuova barra di scala (distanza tra due marker)*, *Importa barre di scala (CSV)*, optimise cameras, dense
   cloud (quality, filter, engine), *Ritaglia nuvola densa* (height range and/or a cylinder

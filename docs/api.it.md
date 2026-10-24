@@ -328,7 +328,8 @@ L'allineamento in sé resta su una macchina sola.
 `mapper` è `incremental` (una foto dopo l'altra, COLMAP), `global` (tutte le camere insieme,
 GLOMAP: rotazioni, posizioni, poi la compensazione su `tiepoint_limit / 4` tracce per foto,
 ritriangolate; sulle 57 foto del tutorial di Tell Sultan 58 s contro 293 s, le stesse camere
-entro 2 cm) o `auto`: globale da 40 foto, incrementale sotto, per i rig a 360 gradi e le
+entro 2 cm) o `auto`: globale da 40 foto di un rilievo aereo (il GPS delle foto sparso sul sito),
+incrementale sotto, per oggetti e scene ravvicinate, per i rig a 360 gradi e le
 calibrazioni tenute fisse, quando il globale colloca meno del 90 % delle foto e quando le sue
 camere non si accordano con il GPS delle foto. `meta["sfm"]["mapper"]` dice quale ha girato. Le foto si
 allineano con una sola focale (pixel quadrati): stimare fx e fy separatamente può scivolare in una

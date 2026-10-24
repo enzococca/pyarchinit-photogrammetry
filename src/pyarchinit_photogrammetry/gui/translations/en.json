@@ -808,7 +808,7 @@
   "GitHub non e' raggiungibile: controlla la connessione a Internet.": "GitHub cannot be reached: check the Internet connection.",
   "Giu'": "Down",
   "Globale (tutte le camere insieme)": "Global (all the cameras at once)",
-  "Globale: molto piu' veloce con molte foto; automatico lo sceglie da 40 foto in su e torna all'incrementale se lascia fuori delle foto": "Global: much faster with many photos; automatic chooses it from 40 photos up and goes back to incremental when it leaves photos out",
+  "Globale: molto piu' veloce con molte foto; automatico lo sceglie per i rilievi da drone (foto con il GPS sparse sul sito) da 40 foto in su e torna all'incrementale se lascia fuori delle foto; per oggetti e scene ravvicinate usa sempre l'incrementale": "Global: much faster with many photos; automatic picks it for drone surveys (photos with their GPS spread over the site) from 40 photos up and goes back to incremental if it leaves photos out; objects and close-range scenes always use incremental",
   "Gradient boosting (file piu' piccolo)": "Gradient boosting (smaller file)",
   "Grafo delle corrispondenze": "Matching graph",
   "Grafo delle corrispondenze...": "Matching graph...",

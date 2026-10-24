@@ -297,6 +297,9 @@ def test_auto_takes_patchmatch_for_surveys_from_the_air(processed, monkeypatch):
     _doc, ch, _report = processed
     monkeypatch.setattr(dense.shutil, "which", lambda name: None)  # no OpenMVS here
     assert not dense.aerial_survey(ch) and dense.choose_backend("auto", ch) == "cpu"
+    from pyarchinit_photogrammetry.engine import sfm
+
+    assert sfm.auto_mapper(ch, 400) == "incremental"  # a trench, an object, a room: one photo at a time"
     saved = [(c.reference.location, c.reference.accuracy, c.reference.enabled, c.meta.get("reference_crs"))
              for c in ch.cameras]
     try:
@@ -306,6 +309,11 @@ def test_auto_takes_patchmatch_for_surveys_from_the_air(processed, monkeypatch):
             cam.meta["reference_crs"] = ch.crs
         assert dense.aerial_survey(ch) and dense.choose_backend("auto", ch) == "patchmatch"
         assert dense.choose_backend("cpu", ch) == "cpu"
+        # the automatic mapper: global only for a survey from the air of 40 photos or more
+        from pyarchinit_photogrammetry.engine import sfm
+
+        assert sfm.auto_mapper(ch, 40) == "global" and sfm.auto_mapper(ch, 39) == "incremental"
+        assert sfm.auto_mapper(ch, 400, rigs=True) == "incremental" and sfm.auto_mapper(ch, 400, fixed=True) == "incremental"
     finally:
         for cam, (loc, acc, enabled, ref_crs) in zip(ch.cameras, saved):
             cam.reference.location, cam.reference.accuracy, cam.reference.enabled = loc, acc, enabled

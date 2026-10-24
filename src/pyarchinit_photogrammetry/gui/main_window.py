@@ -3347,8 +3347,9 @@ class MainWindow(QMainWindow):
             Field("mapper", "Metodo", "auto",
                   choices=[("auto", "Automatico"), ("global", "Globale (tutte le camere insieme)"),
                            ("incremental", "Incrementale (una foto alla volta)")],
-                  tip="Globale: molto piu' veloce con molte foto; automatico lo sceglie da 40 foto in su e torna "
-                      "all'incrementale se lascia fuori delle foto"),
+                  tip="Globale: molto piu' veloce con molte foto; automatico lo sceglie per i rilievi da drone (foto "
+                      "con il GPS sparse sul sito) da 40 foto in su e torna all'incrementale se lascia fuori delle foto; "
+                      "per oggetti e scene ravvicinate usa sempre l'incrementale"),
             Field("gpu", "GPU per l'abbinamento", str(self.settings.value("sfm/gpu", "auto")),
                   choices=[("auto", "Automatica (la GPU migliore insieme alla CPU)"), ("off", "Spenta (solo CPU)")]
                           + [(str(a["index"]), f"{a['name']} ({a['backend']})") for a in _native.gpu_adapters()],

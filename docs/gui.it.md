@@ -216,7 +216,8 @@ Dalla riga di comando `ppg update` dice se esiste una versione più nuova e `ppg
   foto aggiunte dopo vi entrano); sotto *Avanzate* i limiti, le maschere applicate ai punti chiave o ai
   punti di legame, i punti di legame fermi, l'abbinamento guidato, l'adattamento adattivo del modello
   della camera, il GPS delle foto che tiene il blocco mentre cresce una foto alla volta, il metodo -
-  automatico: tutte le camere insieme (globale) da 40 foto, una foto alla volta sotto - e la GPU per
+  automatico: tutte le camere insieme (globale) da 40 foto di un rilievo da drone (GPS sparso sul sito), una foto
+  alla volta sotto e per oggetti e scene ravvicinate - e la GPU per
   l'abbinamento (la migliore insieme alla CPU, spenta, o un adattatore scelto; la scelta viene
   ricordata e vale anche per le mappe di profondità PatchMatch) - importa riferimenti, aggiorna la georeferenziazione, *Nuova barra di scala (distanza tra due marker)*, *Importa barre di scala (CSV)*, ottimizza camere, nuvola
   densa (qualità, filtro, motore), *Ritaglia nuvola densa* (intervallo di quote e/o un cilindro

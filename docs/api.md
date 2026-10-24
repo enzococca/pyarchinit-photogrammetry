@@ -317,7 +317,8 @@ computers that took part. The alignment itself stays on one machine.
 `mapper` is `incremental` (one photo after the other, COLMAP), `global` (all the cameras at once,
 GLOMAP: rotations, positions, then the adjustment on `tiepoint_limit / 4` tracks per photo,
 retriangulated; on the 57 photos of the Tell Sultan tutorial 58 s against 293 s, the same cameras
-within 2 cm) or `auto`: global from 40 photos, incremental for fewer, for 360-degree rigs and
+within 2 cm) or `auto`: global from 40 photos of a survey from the air (their GPS spread over the site),
+incremental for fewer, for objects and close-range scenes, for 360-degree rigs and
 calibrations held fixed, when the global one places less than 90 % of the photos, and when its
 cameras do not fit the GPS of the photos. `meta["sfm"]["mapper"]` says which ran. Photos are aligned
 with one focal length (square pixels): fitting fx and fy separately can drift into a degenerate
