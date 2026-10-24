@@ -3,6 +3,7 @@ software point-splatting renderer (works everywhere, also headless)."""
 from __future__ import annotations
 
 import os
+import sys
 
 import numpy as np
 from PySide6.QtCore import QPointF, Qt, QTimer, Signal
@@ -533,7 +534,25 @@ def _vtk_usable() -> bool:
         import vtkmodules.vtkRenderingOpenGL2  # noqa: F401  (not "import vtk": the full package loads every module)
     except Exception:
         return False
+    if choice != "vtk" and _windows_arm64():
+        # Windows on ARM: OpenGL 3.2 comes from the graphics driver or from Microsoft's OpenCL, OpenGL
+        # and Vulkan Compatibility Pack; without them (virtual machines) VTK cannot draw
+        from .wgl import VTK_MINIMUM, opengl_version
+
+        found = opengl_version()
+        if found is not None and found[0] < VTK_MINIMUM:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "OpenGL %s (%s): VTK needs 3.2, the 3D view uses the software renderer", found[1], found[2])
+            return False
     return True
+
+
+def _windows_arm64() -> bool:
+    import platform
+
+    return sys.platform == "win32" and platform.machine().upper() == "ARM64"
 
 
 class ModelView(QWidget):

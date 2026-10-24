@@ -241,6 +241,19 @@ def run_checks(gui: bool = True) -> Report:
             if old and sys.platform == "darwin":
                 r.add("3D view (VTK)", FAIL, f"pyvistaqt {pq}, VTK {vtk}",
                       "pyvistaqt before 0.13 hangs on start on recent macOS: pip install -U pyvistaqt")
+            elif sys.platform == "win32" and platform.machine().upper() == "ARM64":
+                from .gui.wgl import VTK_MINIMUM, opengl_version  # Windows on ARM: is there OpenGL 3.2?
+
+                found = opengl_version()
+                if found is None:
+                    r.add("3D view (VTK)", OK, f"pyvistaqt {pq}, VTK {vtk} (OpenGL not probed)")
+                elif found[0] < VTK_MINIMUM:
+                    r.add("3D view (VTK)", WARN, f"pyvistaqt {pq}, VTK {vtk}; OpenGL {found[1]} ({found[2]}): "
+                                                 "software renderer",
+                          "VTK needs OpenGL 3.2: install the graphics driver of the computer or the \"OpenCL, "
+                          "OpenGL, and Vulkan Compatibility Pack\" from the Microsoft Store")
+                else:
+                    r.add("3D view (VTK)", OK, f"pyvistaqt {pq}, VTK {vtk}; OpenGL {found[1]} ({found[2]})")
             else:
                 r.add("3D view (VTK)", OK, f"pyvistaqt {pq}, VTK {vtk}")
         try:
