@@ -305,7 +305,8 @@ Dalla riga di comando `ppg update` dice se esiste una versione più nuova e `ppg
   (un elemento per unità disegnata, attributi PyArchInit se collegato); esecuzione di uno script Python;
   *Multispettrale*: gli stessi passi del pannello *Multispettrale* del dock del progetto (vedi sotto); *Aggiungi riprese multispettrali...* (una cartella con un file per banda di ogni
   scatto: la banda di riferimento viene allineata, le altre le si sovrappongono), *Pannello di
-  calibrazione...* (la ripresa del pannello, il suo riquadro e la sua riflettanza), *Ortofoto di
+  calibrazione...* (la ripresa del pannello, il suo riquadro e la sua riflettanza; con una camera MicaSense il pannello
+  che ha trovato e le riflettanze del suo codice QR, dai tag), *Ortofoto di
   riflettanza...* (una banda a virgola mobile per banda sul DEM), *Indice e zonizzazione...* (NDVI e gli
   altri indici o una formula, le zone come poligoni in un GeoPackage: vedi la pagina dell'API, *Camere
   multispettrali*);

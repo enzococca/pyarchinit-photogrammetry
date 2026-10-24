@@ -165,19 +165,50 @@ con i tag dell'originale, allineata e ricostruita come una foto qualsiasi - e ti
 in `camera.meta["bands"]`; chiamata di nuovo con un'altra cartella del volo aggiunge alle riprese
 che ci sono (i nomi che si ripetono prendono la cartella, la banda di riferimento resta, i file già
 nel chunk restano fuori). La radiometria (`radiance_image`, `reflectance_image`) segue i tag: il
-modello MicaSense (livello di nero, guadagno ed esposizione, i coefficienti di
-`RadiometricCalibration`, il polinomio di vignettatura), altrimenti numeri normalizzati per
-esposizione e guadagno; la riflettanza viene da un pannello di calibrazione ripreso nel volo
-(`calibrate_panel(chunk, camera, region, reflectance)`: la riflettanza nota per banda sulla
-radianza del pannello) o dall'irradianza del sensore di luce nei tag. Le bande di uno scatto si
-portano sulla banda di riferimento con un'omografia trovata sulle immagini (`register_bands`: lo
-spostamento per correlazione di fase sulle magnitudini del gradiente, un'affine a dimensione
-ridotta, l'omografia a dimensione piena), a catena per lunghezza d'onda: ogni banda viene abbinata
+modello MicaSense (livello di nero, guadagno - l'ISO / 100 - ed esposizione dalla directory EXIF, i
+coefficienti di `RadiometricCalibration`, il polinomio di vignettatura radiale o quello 2D della
+RedEdge-P e dell'Altum-PT, numeri digitali divisi per 2^N con N i bit del file: 16, o 12 per la
+RedEdge-P e l'Altum-PT), altrimenti numeri normalizzati per esposizione e guadagno; la riflettanza
+viene da un pannello di calibrazione ripreso nel volo (`calibrate_panel(chunk, camera, region=None,
+reflectance=None)`: la riflettanza nota per banda sulla radianza del pannello; senza riquadro, il
+pannello che una camera MicaSense ha trovato da sé - `ReflectArea` e l'`Albedo` letto dal codice QR,
+`panel_in_tags`, `panel_captures(chunk)` - e una banda che non li ha prende gli angoli di un'altra
+banda attraverso la registrazione) o dall'irradianza del sensore di luce nei tag (`irradiance_of`:
+l'irradianza orizzontale del DLS 2, scritta in centesimi di W/m2/nm, oppure diretta x sin(elevazione
+del sole) + diffusa con il firmware che la calcolava male). Una banda termica MicaSense (Altum,
+Altum-PT) è in centikelvin: gradi Celsius. Le bande di uno scatto si portano sulla banda di
+riferimento con un'omografia trovata sulle immagini (`register_bands`: lo spostamento per
+correlazione di fase sulle magnitudini del gradiente, un'affine a dimensione ridotta, l'omografia a
+dimensione piena; con `cameras=band_cameras(tags)` - focale, punto principale e `RigRelatives` di
+MicaSense per banda - parte dalla geometria delle camere, che serve alla banda pancromatica, più
+fine e con un obiettivo suo, e una banda che ECC non riesce ad abbinare, la termica, tiene quella
+geometria), a catena per lunghezza d'onda: ogni banda viene abbinata
 alle bande già registrate più vicine in lunghezza d'onda (una foglia è chiara e piena di texture nel
 NIR, scura e liscia nel rosso: NIR sul rosso converge di rado, NIR sul red-edge sempre; su un P4
 Multispectral sulla macchia le correlazioni passano da 0,1-0,3 a 0,9). Il modello radiometrico DJI
 (polinomio di vignettatura, livello di nero dell'EXIF, guadagno, esposizione, correzione del
-guadagno, irradianza del sensore di luce) segue la loro guida. `build_reflectance(chunk, bands=None, resolution=None, balance=True)`
+guadagno, irradianza del sensore di luce) segue la loro guida.
+
+Verificato sugli scatti di esempio del repository di MicaSense (github.com/micasense/imageprocessing,
+`data/`: RedEdge-MX, RedEdge-MX Dual, RedEdge-P, Altum, Altum-PT, uno scatto del pannello e uno in
+volo per ciascuna) contro i numeri della libreria di MicaSense: radianza identica pixel per pixel
+(differenza relativa mediana sotto lo 0,001 %), banda termica identica, irradianza del DLS identica,
+radianza media del pannello sull'area trovata dalla camera entro lo 0,01 % (noi la prendiamo
+sull'immagine com'è, loro su quella senza distorsione), quindi fattori del pannello e riflettanza
+coincidono. Tutte e cinque le camere sono riconosciute: le bande prendono il nome dal `BandName` (un
+suffisso `_6` è la banda termica di un'Altum, la pancromatica di una RedEdge-P o di un'Altum-PT, un
+blu della seconda camera di una Dual; la seconda camera della Dual dà `Blue444`, `Green531`,
+`Red650`, `RedEdge705`, `RedEdge740`, nomi che una formula può usare). Per le camere a 12 bit la
+libreria di MicaSense legge i file con OpenCV, che li porta a 16 bit mentre il livello di nero resta
+a 12: la sua radianza esce circa 16 volte troppo alta (l'irradianza del pannello a 17 W/m2/nm, il
+DLS dice 1,2); letta con i numeri digitali veri coincide con la nostra. Registrazione sugli scatti
+in volo: correlazione 0,8-0,99 fra bande vicine, spostamenti residui in 3 x 3 tasselli del
+fotogramma 0,05-0,5 px (RedEdge-MX, Dual, Altum), fino a 1-2 px per la RedEdge-P (4-8 px prima di
+partire dalla geometria delle camere). Non verificati: la posizione della banda termica (dalla
+geometria delle camere, senza la distorsione dell'obiettivo: circa 1-2 pixel termici a occhio
+sull'esempio dell'Altum), la riflettanza dal DLS contro una misura a terra (il pannello visto dal DLS
+vale 0,3-1,15 invece di 0,49-0,53 su questi esempi: meglio un pannello), il DLS 1 (preso come
+scritto, senza la correzione per l'inclinazione del sensore), un volo intero fino all'ortofoto. `build_reflectance(chunk, bands=None, resolution=None, balance=True)`
 fa girare il motore dell'ortofoto sulla geometria della banda di riferimento con le bande
 registrate come valori a virgola mobile: `<dati>/multispectral/reflectance.tif`, una banda float32
 per banda spettrale, NaN dove non c'è niente. `balance` porta prima le foto alla stessa riflettanza

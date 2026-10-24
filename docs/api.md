@@ -160,18 +160,49 @@ each capture - an 8-bit stretched copy with the tags of the original, aligned an
 any photo - and keeps the other bands in `camera.meta["bands"]`; called again with another folder
 of the flight it adds to the captures there (names that repeat take their folder, the reference
 band stays, files already in the chunk are left out). The radiometry (`radiance_image`, `reflectance_image`) follows the tags:
-MicaSense's model (black level, gain and exposure, the `RadiometricCalibration` coefficients, the
-vignetting polynomial), else digital numbers normalised by exposure and gain; reflectance comes from
-a calibration panel in the flight (`calibrate_panel(chunk, camera, region, reflectance)`: the
-known reflectance per band over the panel's radiance) or from the irradiance of the sun sensor in
-the tags. The bands of a capture are brought onto the reference band with a homography found on
-the images (`register_bands`: the shift by phase correlation on the gradient magnitudes, an affine
-at a reduced size, the homography at full size), in a chain by wavelength: each band is matched
+MicaSense's model (black level, gain - the ISO / 100 - and exposure from the EXIF directory, the
+`RadiometricCalibration` coefficients, the radial vignetting polynomial or the 2D one of the
+RedEdge-P and the Altum-PT, digital numbers divided by 2^N with N the bits of the file: 16, or 12
+for the RedEdge-P and the Altum-PT), else digital numbers normalised by exposure and gain;
+reflectance comes from a calibration panel in the flight (`calibrate_panel(chunk, camera,
+region=None, reflectance=None)`: the known reflectance per band over the panel's radiance; without a
+region, the panel a MicaSense camera found by itself - `ReflectArea` and the `Albedo` read from the
+QR code, `panel_in_tags`, `panel_captures(chunk)` - a band without them taking the corners of
+another band through the registration) or from the irradiance of the sun sensor in the tags
+(`irradiance_of`: the DLS 2's horizontal irradiance, written in hundredths of W/m2/nm, or direct x
+sin(sun's elevation) + scattered with the firmware that computed it wrong). A MicaSense thermal band
+(Altum, Altum-PT) is centikelvin: degrees Celsius. The bands of a capture are brought onto the
+reference band with a homography found on the images (`register_bands`: the shift by phase
+correlation on the gradient magnitudes, an affine at a reduced size, the homography at full size;
+with `cameras=band_cameras(tags)` - MicaSense's focal length, principal point and `RigRelatives`
+per band - it starts from the cameras' geometry, which the panchromatic band, finer and with its own
+lens, needs, and a band ECC cannot match, the thermal one, keeps that geometry), in a chain by
+wavelength: each band is matched
 against the registered bands nearest to it in wavelength (a leaf is bright and textured in the NIR,
 dark and smooth in the red: NIR on red seldom converges, NIR on red-edge always does; on a P4
 Multispectral over scrub the correlations go from 0.1-0.3 to 0.9). DJI's radiometric model (the
 vignetting polynomial, the black level of the EXIF, gain, exposure, the gain adjustment, the
-irradiance of the sun sensor) is followed as in their guide. `build_reflectance(chunk, bands=None,
+irradiance of the sun sensor) is followed as in their guide.
+
+Verified on the sample captures of MicaSense's own repository (github.com/micasense/imageprocessing,
+`data/`: RedEdge-MX, RedEdge-MX Dual, RedEdge-P, Altum, Altum-PT, a panel capture and a flight
+capture each) against the numbers of MicaSense's library: radiance identical pixel by pixel (median
+relative difference below 0.001 %), thermal band identical, DLS irradiance identical, the panel's
+mean radiance over the area the camera found within 0.01 % (we take it on the image as shot, they on
+the undistorted one), so the panel factors and the reflectance match. All five cameras are
+recognised: the bands are named by their `BandName` (a suffix `_6` is the thermal band of an Altum,
+the panchromatic one of a RedEdge-P or an Altum-PT, a blue of the second camera of a Dual; the Dual's
+second camera gives `Blue444`, `Green531`, `Red650`, `RedEdge705`, `RedEdge740`, names a formula can
+use). For the 12-bit cameras MicaSense's library reads the files with OpenCV, which scales them to 16
+bits while the black level stays in 12: its radiance comes out about 16 times too high (the panel's
+irradiance at 17 W/m2/nm, the DLS says 1.2); read with their real digital numbers its radiance
+equals ours. Registration on the flight captures: correlation 0.8-0.99 between neighbouring bands,
+residual shifts in 3 x 3 tiles of the frame 0.05-0.5 px (RedEdge-MX, Dual, Altum), up to 1-2 px for
+the RedEdge-P (from 4-8 px before starting from the cameras' geometry). Not verified: the thermal
+band's placement (from the cameras' geometry, without the lens distortion: about 1-2 thermal pixels
+by eye on the Altum sample), the reflectance from the DLS against ground truth (the panel seen by the
+DLS reads 0.3-1.15 instead of 0.49-0.53 on these samples: a panel is better), the DLS 1 (taken as
+written, without the correction for the sensor's tilt), a whole flight through the orthomosaic. `build_reflectance(chunk, bands=None,
 resolution=None, balance=True)` runs the orthophoto engine on the reference band's geometry with
 the registered bands as float values: `<data>/multispectral/reflectance.tif`, a float32 band per
 spectral band, NaN where nothing. `balance` first brings the photos to the same reflectance where
