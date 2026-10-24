@@ -155,7 +155,8 @@ def test_dialog_switch_drives_the_engine(tmp_path, monkeypatch):
 
     QApplication.instance() or QApplication([])
     settings = QSettings(str(tmp_path / "test.ini"), QSettings.Format.IniFormat)
-    monkeypatch.delenv("PPG_NODES", raising=False)
+    monkeypatch.setenv("PPG_NODES", "1")  # recorded: the variable comes back as it was after the test
+    monkeypatch.delenv("PPG_NODES")
     settings.setValue("nodes/enabled", "false")
     assert nodes_dialog.apply_setting(settings) is False and os.environ["PPG_NODES"] == "0" and not nodes.enabled()
     monkeypatch.setenv("PPG_NODES", "1")
@@ -167,3 +168,65 @@ def test_dialog_switch_drives_the_engine(tmp_path, monkeypatch):
     d.use.setChecked(False)
     assert os.environ["PPG_NODES"] == "0" and not nodes.enabled()
     d.close()
+
+
+def test_processing_started_from_the_window_follows_its_switch(tmp_path, monkeypatch):
+    """The choice of *Strumenti > Nodi di rete* decides for what the window runs: a step in the
+    background asks the engine which nodes to share the work with (as the key points and the depth
+    maps do) and gets the node present only while the switch is on - the stored choice when the
+    window opens, the dialog's as it changes; ``PPG_NODES`` set by hand before the start is kept."""
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("PPG_RENDERER", "software")
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    import pyarchinit_photogrammetry.gui as gui
+    from pyarchinit_photogrammetry.gui import main_window as mw
+    from pyarchinit_photogrammetry.gui import nodes_dialog
+
+    app = QApplication.instance() or QApplication([])
+    path = tmp_path / "preferenze.ini"
+    monkeypatch.setattr(gui, "app_settings", lambda: QSettings(str(path), QSettings.Format.IniFormat))
+    stored = gui.app_settings()
+    stored.setValue("nodes/enabled", "false")
+    stored.sync()
+    monkeypatch.setenv("PPG_NODES", "1")  # recorded: the variable comes back as it was after the test
+    monkeypatch.delenv("PPG_NODES")
+    doc = ppg.Document()
+    doc.add_chunk("Saggio")
+    doc.save(tmp_path / "scavo.ppg")
+    files_dir = doc.files_dir
+    (nodes.folder(files_dir) / "hello" / "altro-1.json").write_text(json.dumps(
+        {"host": "altro-1", "machine": "altro", "cores": 8, "gpus": [], "time": time.time()}))
+    seen = []
+
+    def step(w):
+        w.run_task("Nodi", lambda p: [n["host"] for n in nodes.wanted(files_dir)], seen.append, refresh=False,
+                   save=False)
+        w.runner.wait()
+        app.processEvents()
+        return seen.pop()
+
+    w = mw.MainWindow(doc, autoconnect=False, check_updates=False)
+    w.runner.show_dialog = False
+    try:
+        assert step(w) == []  # the stored choice: the work stays here
+        d = nodes_dialog.NodesDialog(files_dir, w.settings, w)
+        assert not d.use.isChecked()
+        d.use.setChecked(True)
+        assert step(w) == ["altro-1"]
+        d.use.setChecked(False)
+        assert step(w) == []
+        d.close()
+    finally:
+        w.setWindowModified(False)
+        w.close()
+    monkeypatch.setenv("PPG_NODES", "1")  # by hand, before the window opens
+    w = mw.MainWindow(doc, autoconnect=False, check_updates=False)
+    w.runner.show_dialog = False
+    try:
+        assert step(w) == ["altro-1"] and w.settings.value("nodes/enabled") == "false"
+    finally:
+        w.setWindowModified(False)
+        w.close()
