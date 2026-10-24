@@ -5713,8 +5713,22 @@ class MainWindow(QMainWindow):
                 "DEM coregistrato su {0}: dx {1} cm, dy {2} cm, dz {3} cm, inclinazione {4} mm/m; NMAD sul terreno "
                 "stabile da {5} a {6} cm ({7} celle)", out["reference"], _it(out["dx"] * 100, 1),
                 _it(out["dy"] * 100, 1), _it(out["dz"] * 100, 1),
-                _it(float(np.hypot(out["tilt_x"], out["tilt_y"])) * 1000, 2), _it((nb or 0) * 100, 2),
+                _it(float(np.hypot(out["tilt_x"], out["tilt_y"])) * 1000, 2), "-" if nb is None else _it(nb * 100, 2),
                 _it((na or 0) * 100, 2), _it(out["cells"])))
+            initial, start = out.get("initial"), out.get("initial_shift") or (0.0, 0.0)
+            east, north = _it(float(start[0]), 2), _it(float(start[1]), 2)
+            if initial == "used":
+                self.log_pane.info(tr("Ricerca iniziale: i DEM erano spostati di {0} m verso est e {1} m verso nord; "
+                                      "l'adattamento e' partito da li'", east, north))
+            elif initial == "rejected":
+                self.log_pane.info(tr("Ricerca iniziale: lo spostamento trovato ({0} m verso est, {1} m verso nord) "
+                                      "non dava un accordo migliore e non e' stato usato", east, north))
+            elif initial == "ambiguous":
+                self.log_pane.warning(tr("Ricerca iniziale ambigua (terreno periodico o uguale lungo una direzione): "
+                                         "non usata"))
+            elif initial == "beyond":
+                self.log_pane.warning(tr("Ricerca iniziale: un accordo migliore oltre la distanza di ricerca ({0} m "
+                                         "verso est, {1} m verso nord), non usato", east, north))
             if not out.get("horizontal", True):
                 self.log_pane.warning(tr("Spostamento orizzontale non misurabile in tutte le direzioni (terreno piano "
                                          "o in pendenza da un solo lato): quella parte resta a zero, il dislivello la "

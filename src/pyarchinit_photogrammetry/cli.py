@@ -377,6 +377,9 @@ def coregister(project: Path,
                method: str = typer.Option("auto", help="auto / nuth_kaab (built in) or xdem (pip install "
                                                        "pyarchinit-photogrammetry[coreg])"),
                name: Optional[str] = typer.Option(None, help="name of the coregistered DEM (a version)"),
+               search: Optional[float] = typer.Option(None, help="metres of the initial search for large shifts "
+                                                                 "(two GPS georeferencings); 0: none; default: "
+                                                                 "from the DEMs"),
                chunk: Optional[str] = None):
     """Coregister the DEM of --chunk (default the active one) onto the DEM of --reference over the
     ground that did not change: horizontal shift (Nuth & Kääb), vertical bias and tilt. The result
@@ -390,7 +393,8 @@ def coregister(project: Path,
     if ref is ch and version is None:
         raise typer.BadParameter("the reference is the chunk itself: give another chunk, or --version")
     out = ch.coregister_dem((ref, version), stable=_polygons(stable_polygon), exclude=_polygons(exclude_polygon),
-                            tilt=tilt, max_iter=max_iter, method=method, name=name, progress=print_progress)
+                            tilt=tilt, max_iter=max_iter, method=method, name=name, search=search,
+                            progress=print_progress)
     doc.save()
     typer.echo(f"{ch.label}: DEM coregistered on {out['reference']} -> active DEM '{out['name']}' "
                f"(the DEM as it was kept as version {out['version']})")

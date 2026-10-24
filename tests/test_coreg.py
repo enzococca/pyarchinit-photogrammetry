@@ -512,3 +512,12 @@ def test_xdem_agrees(tmp_path):
     around = Point(PIT[0], PIT[1]).buffer(PIT[2] + 0.15)
     assert volume(tmp_path / "xdem.tif", reference=first, polygon=around)["cut_m3"] == pytest.approx(pit_volume(),
                                                                                                     rel=0.05)
+
+
+def test_summary_of_dems_apart_as_they_were():
+    from pyarchinit_photogrammetry.archaeo import coreg
+
+    r = {"dx": 4.3, "dy": -2.7, "dz": 3.0, "tilt_x": 0.0, "tilt_y": 0.0, "nmad_before": None, "nmad_after": 0.003,
+         "cells": 1000, "initial": "used", "initial_shift": (4.31, -2.69), "initial_score": 0.8}
+    text = coreg.summary(r)
+    assert "NMAD - -> 0.0030 m" in text and "nan" not in text and "initial search +4.31 -2.69 m" in text

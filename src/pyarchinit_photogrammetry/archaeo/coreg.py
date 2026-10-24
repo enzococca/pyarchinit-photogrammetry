@@ -1197,8 +1197,9 @@ def summary(result: Coregistration | dict) -> str:
         return float("nan") if v is None else round(float(v), 4) + 0.0  # never "-0.0000"
 
     tilt = math.hypot(num(r.get("tilt_x") or 0.0), num(r.get("tilt_y") or 0.0)) * 1000
+    before = "-" if r.get("nmad_before") is None else f"{num(r['nmad_before']):.4f}"  # DEMs apart as they were
     text = (f"dx {num(r['dx']):+.4f} m, dy {num(r['dy']):+.4f} m, dz {num(r['dz']):+.4f} m, tilt {tilt:.2f} mm/m; "
-            f"NMAD {num(r.get('nmad_before')):.4f} -> {num(r.get('nmad_after')):.4f} m ({r['cells']} stable cells)")
+            f"NMAD {before} -> {num(r.get('nmad_after')):.4f} m ({r['cells']} stable cells)")
     initial, start = r.get("initial"), r.get("initial_shift")
     if initial in ("used", "rejected") and start:
         found = (f"initial search {num(start[0]):+.2f} {num(start[1]):+.2f} m (slope correlation "
