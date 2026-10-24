@@ -145,7 +145,9 @@ def proxies_for_units(dem_path, units, base=None, thickness=None, top_dem=None, 
 
 
 def save_proxy(proxy: UnitProxy, folder: str | Path, fmt: str = "ply", offset=None) -> Path:
-    """Write the proxy mesh (world coordinates; ``offset`` subtracted when given)."""
+    """Write the proxy mesh (world coordinates; ``offset`` subtracted when given). A PLY keeps the
+    coordinates in double precision: in single precision a UTM northing of 4 500 km keeps only half a
+    metre, and the proxy would collapse onto a grid of that step."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     mesh = proxy.mesh.copy()
@@ -156,6 +158,10 @@ def save_proxy(proxy: UnitProxy, folder: str | Path, fmt: str = "ply", offset=No
         mesh.metadata["name"] = proxy.name
         text = mesh.export(file_type="obj", include_normals=False)
         path.write_text(f"o {proxy.name}\n" + text, encoding="utf-8")
+    elif fmt == "ply":
+        from ..io.mesh_ply import write_mesh_ply
+
+        write_mesh_ply(path, np.asarray(mesh.vertices, float), np.asarray(mesh.faces), double=True)
     else:
         mesh.export(str(path))
     return path

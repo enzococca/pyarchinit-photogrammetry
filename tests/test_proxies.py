@@ -39,6 +39,18 @@ def test_proxy_is_a_closed_solid_with_the_cut_volume(pit_dem, tmp_path):
         proxies.unit_proxy(pit_dem, box(50, 50, 51, 51))
 
 
+def test_a_proxy_in_map_coordinates_keeps_its_millimetres(tmp_path):
+    import trimesh
+
+    z = np.full((60, 80), 120.0, np.float32)
+    dem = write_geotiff(tmp_path / "utm.tif", z, (300000.0, 4500003.0), 0.05, "EPSG:32633", nodata=-32767.0)
+    p = proxies.unit_proxy(dem, box(300000.31, 4500000.52, 300001.43, 4500002.47), thickness=0.25, us="3")
+    back = trimesh.load(str(proxies.save_proxy(p, tmp_path / "ply")), process=False, force="mesh")
+    assert np.abs(np.asarray(back.vertices) - np.asarray(p.mesh.vertices)).max() < 1e-6  # float32: 0.25 m
+    assert len(np.unique(np.asarray(back.vertices)[:, 1])) > 30  # every row of cells, not a 0.5 m grid
+    assert abs(back.volume) == pytest.approx(p.volume_m3)
+
+
 def test_relationships_round_trip():
     text = format_relationships([["Copre", "2"], ["Taglia", "7", "2", "Altro"]], default_site="Scavo", default_area="1")
     assert parse_relationships(text) == [["Copre", "2", "1", "Scavo"], ["Taglia", "7", "2", "Altro"]]
