@@ -41,3 +41,16 @@ points on the ground checked against the DEM.
   the hillshades on a 1 m grid, then least squares surface matching at 10 cm) before the DEMs are
   compared (NMAD, 95th percentile, ground covered); the orthophotos are compared by the ground they
   cover and their sharpness (variance of the Laplacian at 2 cm) in the tiles that all of them cover.
+
+Satellite stereo against lidar (the JHU/APL multi-view stereo benchmark, WorldView-3 chips with their
+RPCs and the lidar of each site; public release):
+
+```bash
+python benchmark/satellite_wv3.py WV3_MVS_FOLDER OUT [--site Explorer] [--scenes 12JUN15,18JUN15,...] [--max-pairs 6]
+```
+
+* `satellite_wv3.py`: for every site the surface from the chosen scenes and from each of its pairs
+  alone, with and without the relative correction of the RPCs, measured against the lidar inside the
+  site polygon (median absolute error, NMAD, RMSE, completeness = share of lidar cells within 1 m)
+  as they come out and after the evaluation alignment (whole-cell horizontal shift within 3 m and the
+  median vertical offset); `report.json` in OUT.

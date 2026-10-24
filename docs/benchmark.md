@@ -259,6 +259,58 @@ pixels around a point, so it is as dense as the depth maps (on the synthetic sce
 points, the 90th percentile of the height errors 2.4 mm against 3.0, the DEM 3.5 mm against 5.7).
 The run of Tell Tuqan with every GPU part in place is in progress.
 
+## Satellite stereo against lidar (WorldView-3)
+
+The surface models from satellite scenes (*Strumenti > Immagini satellitari*, `ppg satellite ... dsm`)
+were checked on public data: the JHU/APL *Multi-View Stereo Benchmark for Satellite Imagery*
+(WorldView-3 panchromatic chips of about 0.3 m with their RPCs, airborne lidar of each site; Bosch et
+al., AIPR 2016; imagery courtesy of DigitalGlobe), two sites near San Fernando, Argentina: *Explorer*
+and *MasterProvisional3*. Five scenes per site, taken within 18 days in June 2015 from directions
+11-29 degrees apart (12, 18, 19, 24 and 30 June); the program chose four pairs among them. Grid of
+0.3 m (the lidar's), heights on the WGS84 ellipsoid like the lidar's; measured inside the polygon of
+each site. Each surface is compared as it comes out and after an alignment made only for the
+measure: the horizontal shift (whole lidar cells, within 3 m) and the vertical offset that minimise
+the median absolute error, as the benchmark's own tool does. *Completeness* is the share of the
+lidar cells with a height within 1 m. Script: `benchmark/satellite_wv3.py`.
+
+| Site | Surface | Median abs. error (m) | NMAD (m) | RMSE (m) | Completeness | Time |
+|---|---|---:|---:|---:|---:|---:|
+| Explorer | 5 scenes, 4 pairs, RPCs corrected | 0.59 | 0.88 | 3.1 | 60.6 % | 21 s |
+| Explorer | best single pair (19 degrees), corrected | 0.59 | 0.88 | 5.8 | 55.2 % | 8 s |
+| Explorer | 5 scenes, RPCs as delivered | 2.22 | 3.29 | 5.4 | 12.0 % | 10 s |
+| Explorer | best single pair, RPCs as delivered | 2.38 | 3.53 | 12.8 | 18.5 % | 8 s |
+| MasterProvisional3 | 5 scenes, 4 pairs, RPCs corrected | 1.03 | 1.53 | 6.3 | 38.3 % | 17 s |
+| MasterProvisional3 | best single pair (19 degrees), corrected | 1.05 | 1.56 | 11.1 | 35.1 % | 8 s |
+| MasterProvisional3 | 5 scenes, RPCs as delivered | 3.70 | 5.49 | 8.6 | 3.4 % | 8 s |
+| MasterProvisional3 | best single pair, RPCs as delivered | 3.15 | 4.67 | 12.8 | 13.5 % | 6 s |
+
+(after the alignment; times on the M4 Pro, with the tie points)
+
+* **The relative correction is what makes it work.** The RPCs of the different acquisitions disagree
+  by 1.7-4.8 pixels (the shifts found); without the correction the rows of the two rectified scenes
+  do not meet, the matching fails on most of the ground and the pairs give heights metres apart, so
+  their fusion keeps half the cells or fewer. With the correction the tie points (5,388 on Explorer,
+  4,223 on MasterProvisional3) go from 2.95 / 2.78 to 0.33 / 0.37 pixels RMS.
+* **Before the alignment** the corrected surfaces sit 2.1 m (Explorer) and 1.6 m (MasterProvisional3)
+  above the lidar and about 1 m aside, the same for both sites: that is the absolute error of the RPCs
+  of these five scenes together, which no correction without ground control can see (the lidar heights
+  are ellipsoidal: with orthometric heights the offset would be more than ten metres, the geoid undulation there).
+* **Several pairs against the best one**: the fusion gains 5 points of completeness on Explorer and 3 on
+  MasterProvisional3, and above all the RMSE halves (the outliers of single pairs vanish); the fusion
+  also does not need to know which pair is the best one.
+* **MasterProvisional3** is mostly trees: the errors are on the foliage, which changes between the
+  images and the lidar (the error map shows the open ground close to the lidar, the canopies off). Seven scenes (with 14
+  and 19 July) and up to ten pairs raise its completeness to 44.2 % (median 1.13 m).
+* **Published numbers** for comparison, from Zhang et al., *Leveraging Vision Reconstruction Pipelines for
+  Satellite Imagery* (ICCVW 2019), on three sites of the same data (their site 1, 0.46 km², is about
+  the size of Explorer), grid of 0.5 m with the highest point per cell, their own alignment: S2P, the
+  winner of the original challenge, 65.6 % completeness and 0.43 m median error on site 1 (average of
+  10 pairs chosen because S2P does well on them), 53.9-62.8 % and 0.42-0.44 m on the other two;
+  COLMAP's multi-view stereo on all the views 72.5 % / 0.32 m on site 1. Our numbers are of the same
+  order, a little behind on Explorer (SGBM instead of MGM, a finer 0.3 m grid, five scenes instead of
+  forty); they are not measured on exactly the same grid and polygon, so take the comparison as an
+  order of magnitude.
+
 ## What changed in pyarchinit-photogrammetry
 
 These tests changed the program; the numbers above are those of the version with the changes:
