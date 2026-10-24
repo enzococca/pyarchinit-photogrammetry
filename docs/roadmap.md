@@ -190,10 +190,16 @@ Open points, in no fixed order:
 
 * Network nodes: they already share the key points of the photos and the depth maps among
   computers; the texture and the orthomosaic tiles not yet. Useful only with several computers.
-* Satellite: the surface model is made from pairs of images, not yet from triplets.
-* Check of the satellite processing on the public WorldView-3 datasets with lidar truth.
-* Parts never tried on real data: MicaSense multispectral captures, the import from WebODM, a real
-  satellite scene, `ppg remote` on a remote machine.
+* Satellite: surface models from three scenes or more. *Done*: pairs chosen by intersection angle and date,
+  a relative correction of the RPCs from tie points, the pairs fused per cell.
+* Check of the satellite processing on the public WorldView-3 datasets with lidar truth. *Done* on two
+  sites of the JHU/APL benchmark: median error 0.59 m and 1.03 m, 61 % and 38 % of the cells within
+  1 m (see the benchmark page).
+* Parts never tried on real data: the import from WebODM, a satellite scene of one's own, `ppg remote`
+  on a remote machine. MicaSense *checked* on the sample captures of five cameras (radiance,
+  thermal band, panel, sun sensor and band registration against MicaSense's own numbers; the thermal
+  band within 0.3 thermal pixels; panel + sun sensor by default); a whole MicaSense flight to the
+  reflectance orthomosaic is still to be tried.
 * Windows ARM64: the VTK 3D view (the simpler renderer is used) and E57 are still missing.
 * Ideas proposed but not decided yet:
     * a raster calculator (formulas on any raster of the project);

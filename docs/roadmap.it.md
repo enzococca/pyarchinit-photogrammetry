@@ -191,10 +191,16 @@ Punti aperti, senza un ordine fisso:
 
 * Nodi di rete: dividono già tra più computer i punti delle foto e le mappe di profondità; texture
   e tasselli dell'ortofoto non ancora. Serve solo se si lavora con più computer.
-* Satellite: il modello di superficie si fa da coppie di immagini, non ancora da terne.
-* Verifica dell'elaborazione satellitare sui dataset pubblici WorldView-3 con lidar di riferimento.
-* Parti mai provate su dati veri: riprese multispettrali MicaSense, import da WebODM, una scena
-  satellitare reale, `ppg remote` su una macchina remota.
+* Satellite: modelli di superficie da tre scene o più. *Fatto*: coppie scelte per angolo di intersezione e
+  data, correzione relativa degli RPC dai punti di legame, coppie fuse cella per cella.
+* Verifica dell'elaborazione satellitare sui dataset pubblici WorldView-3 con lidar di riferimento. *Fatto*
+  su due siti del benchmark JHU/APL: errore mediano 0,59 m e 1,03 m, 61 % e 38 % delle celle entro 1 m
+  (vedi la pagina del benchmark).
+* Parti mai provate su dati veri: import da WebODM, una scena satellitare propria, `ppg remote` su una
+  macchina remota. MicaSense *verificato* sulle riprese di esempio di cinque camere (radianza, banda
+  termica, pannello, sensore di luce e registrazione delle bande contro i numeri di MicaSense; banda
+  termica entro 0,3 pixel termici; pannello + sensore di luce di predefinito); resta da provare un volo
+  MicaSense intero fino all'ortofoto di riflettanza.
 * Windows ARM64: mancano ancora la vista 3D VTK (si usa quella più semplice) e l'E57.
 * Idee proposte ma non ancora decise:
     * calcolatore raster (formule su qualsiasi raster del progetto);
