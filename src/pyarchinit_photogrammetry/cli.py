@@ -1965,7 +1965,8 @@ def multispectral(project: Path, what: str = typer.Argument(..., help="add, pane
                   index: str = typer.Option("NDVI", help="index/zoning: one of the indices, or a formula over the band names"),
                   formula: Optional[str] = typer.Option(None, help="index: a formula instead of a known index"),
                   classes: int = typer.Option(3, help="zoning: how many classes"),
-                  method: str = typer.Option("quantiles", help="zoning: quantiles, equal or kmeans"),
+                  method: str = typer.Option("quantiles", help="zoning: quantiles, equal, jenks (natural breaks: the most "
+                                                               "homogeneous classes) or kmeans"),
                   out: Optional[Path] = typer.Option(None, help="zoning: the GeoPackage to write (default beside the project)"),
                   resolution: Optional[float] = typer.Option(None, help="reflectance: metres per pixel (the orthomosaic's)"),
                   balance: bool = typer.Option(True, help="reflectance: bring the photos to the same reflectance where "
@@ -2011,6 +2012,8 @@ def multispectral(project: Path, what: str = typer.Argument(..., help="add, pane
         doc.save()
         typer.echo(f"{index}: {path}")
     elif what == "zoning":
+        if method not in ms.ZONING_METHODS:
+            raise typer.BadParameter(f"--method: {', '.join(ms.ZONING_METHODS)}")
         target = out or project.parent / f"{project.stem}_{index}_zone.gpkg"
         summary = ms.export_zoning(ch, index, target, classes=classes, method=method)
         doc.save()

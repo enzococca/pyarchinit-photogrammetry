@@ -1752,7 +1752,8 @@ class MainWindow(QMainWindow):
             Field("formula", "Formula propria (vuota = l'indice scelto)", "", kind="text"),
             Field("classes", "Classi della zonizzazione", 3, minimum=2, maximum=10),
             Field("method", "Metodo", "quantiles",
-                  choices=[("quantiles", "Quantili"), ("equal", "Intervalli uguali"), ("kmeans", "K-means (soglie naturali)")]),
+                  choices=[("quantiles", "Quantili"), ("equal", "Intervalli uguali"), ("jenks", "Interruzioni naturali (Jenks)"),
+                           ("kmeans", "K-means")]),
             Field("gpkg", "GeoPackage delle zone", str(Path(self.doc.path).with_name(f"{Path(self.doc.path).stem}_zone.gpkg")) if self.doc.path else "",
                   kind="file_save", filter="GeoPackage (*.gpkg)")],
             intro="L'indice dalle bande di riflettanza e le sue classi come poligoni (classe, intervallo, media, area): la "

@@ -1,9 +1,11 @@
 """Zoning of an index: natural breaks (Jenks) exact on their sample, between the populations of an
 index where the quantiles cut through them, the same every time and on large rasters; the
-GeoPackage and the class raster as with the other methods."""
+GeoPackage and the class raster as with the other methods; the choice on the command line and in
+the window."""
 from __future__ import annotations
 
 import itertools
+import json
 
 import numpy as np
 import pytest
@@ -130,3 +132,68 @@ def test_export_zoning_with_natural_breaks(tmp_path):
     with rasterio.open(ch.data_dir / summary["raster"]) as src:
         assert np.array_equal(src.read(1), truth)
     assert ch.meta["multispectral"]["zoning"]["NDVI"]["method"] == "jenks"
+
+
+def test_command_line_zoning_with_natural_breaks(tmp_path):
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    doc, ch, values, truth = _index_project(tmp_path)
+    out = tmp_path / "zone.gpkg"
+    r = CliRunner().invoke(app, ["multispectral", str(doc.path), "zoning", "--index", "NDVI", "--method", "jenks",
+                                 "--out", str(out)])
+    assert r.exit_code == 0, r.output + repr(r.exception)
+    summary = json.loads(r.output[r.output.index("{"):])
+    assert summary["method"] == "jenks" and out.exists() and _between_the_populations(values, truth, summary["breaks"])
+    r = CliRunner().invoke(app, ["multispectral", str(doc.path), "zoning", "--method", "somehow"])
+    assert r.exit_code != 0
+
+
+def test_the_window_offers_natural_breaks(tmp_path, monkeypatch):
+    """The pane's method and the dialog of Strumenti > Multispettrale: natural breaks chosen, the
+    zones made and shown."""
+    pytest.importorskip("PySide6")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("PPG_RENDERER", "software")
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
+    qapp = QApplication.instance() or QApplication([])
+    from pyarchinit_photogrammetry.gui import main_window as mwmod
+
+    doc, ch, values, truth = _index_project(tmp_path)
+    w = mwmod.MainWindow(doc, autoconnect=False)
+    w.runner.show_dialog = False
+    try:
+        pane = w.ms_pane
+        k = pane.c_method.findData("jenks")
+        assert k >= 0 and pane.c_method.itemText(k) == "Interruzioni naturali (Jenks)" and pane.b_zoning.isEnabled()
+        pane.c_method.setCurrentIndex(k)
+        target = tmp_path / "zone_jenks.gpkg"
+        monkeypatch.setattr(mwmod.QFileDialog, "getSaveFileName", lambda *a, **kw: (str(target), ""))
+        shown = []
+        monkeypatch.setattr(w, "_info", lambda title, text: shown.append((title, text)))
+        pane.b_zoning.click()
+        w.runner.wait()
+        qapp.processEvents()
+        zones = ch.meta["multispectral"]["zoning"]["NDVI"]
+        assert zones["method"] == "jenks" and target.exists() and shown and shown[-1][0] == "Zonizzazione"
+        assert _between_the_populations(values, truth, zones["breaks"])
+        assert w.ortho_view.kind == "zones" and len(w.ortho_view.features("Zone NDVI")) == 3
+        fields = {}
+
+        def ask(parent, title, given, intro=""):
+            fields.update({f.name: f for f in given})
+            return None
+
+        monkeypatch.setattr(mwmod.ParamDialog, "ask", staticmethod(ask))
+        w.ms_index()
+        assert ("jenks", "Interruzioni naturali (Jenks)") in fields["method"].choices
+    finally:
+        w.setWindowModified(False)
+        w.close()

@@ -131,7 +131,11 @@ class MultispectralPane(QWidget):
         self.c_method = QComboBox()
         self.c_method.addItem(tr("Quantili"), "quantiles")
         self.c_method.addItem(tr("Intervalli uguali"), "equal")
-        self.c_method.addItem(tr("K-means (soglie naturali)"), "kmeans")
+        self.c_method.addItem(tr("Interruzioni naturali (Jenks)"), "jenks")
+        self.c_method.addItem(tr("K-means"), "kmeans")
+        self.c_method.setToolTip(tr("Quantili: lo stesso numero di celle per classe; intervalli uguali: classi della stessa "
+                                    "ampiezza; interruzioni naturali (Jenks): le soglie che rendono le classi il più omogenee "
+                                    "possibile; K-means: la stessa idea per approssimazioni successive"))
         self.b_zoning = QPushButton(icon("slice"), tr("Zonizza e mostra"))
         self.b_qgis = QPushButton(icon("qgis"), tr("Apri in QGIS"))
         self.b_qgis.setToolTip(tr("Progetto QGIS con riflettanza, indici, zone e i disegni"))
