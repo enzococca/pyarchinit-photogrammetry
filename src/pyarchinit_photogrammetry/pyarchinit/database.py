@@ -49,6 +49,20 @@ def _spatialite_paths() -> list[str]:
     return out
 
 
+def dll_folder_on_path(path: str) -> None:
+    """Windows: the folder of a mod_spatialite given by its full path goes at the end of the PATH of
+    this process. SQLite loads the extension with ``LoadLibraryW``, which looks for the libraries it
+    depends on (GEOS, PROJ, libxml2... beside it in QGIS's ``bin``) in the folders of PATH, not in
+    the folder of the extension: without QGIS on PATH the load failed with "the specified module
+    could not be found", and SQLite databases of PyArchInit were opened without SpatiaLite."""
+    if os.name != "nt" or not os.path.isabs(path):
+        return
+    folder = os.path.dirname(path)
+    entries = os.environ.get("PATH", "").split(os.pathsep)
+    if not any(os.path.normcase(e.rstrip("\\/")) == os.path.normcase(folder.rstrip("\\/")) for e in entries if e):
+        os.environ["PATH"] = os.pathsep.join([*(e for e in entries if e), folder])
+
+
 _PINNED: dict[str, object] = {}
 
 
@@ -81,6 +95,7 @@ def spatialite_path() -> str | None:
         try:
             con = sqlite3.connect(":memory:")
             con.enable_load_extension(True)
+            dll_folder_on_path(cand)
             con.load_extension(cand)
             pin_spatialite(cand)
             con.close()
@@ -175,6 +190,7 @@ class PyArchInitDB:
         dbapi_conn.enable_load_extension(True)
         for path in _spatialite_paths():
             try:
+                dll_folder_on_path(path)
                 dbapi_conn.load_extension(path)
                 pin_spatialite(path)
                 self.spatialite = True

@@ -1,4 +1,5 @@
 """Bridge tests on a minimal PyArchInit-compatible SpatiaLite database."""
+import os
 import sqlite3
 
 import pytest
@@ -58,3 +59,20 @@ def test_publish_everything(pa_db, processed, tmp_path):
     assert [m["filename"] for m in pa.media_for("US", 2)] == ["Modello_saggio"]
     q = con.execute("SELECT quota_q FROM pyarchinit_quote").fetchone()[0]
     assert q == pytest.approx(99.95, abs=0.02)
+
+
+def test_the_folder_of_spatialite_on_path_on_windows(monkeypatch):
+    """Windows looks for the libraries mod_spatialite depends on in the folders of PATH: the folder
+    of a mod_spatialite given by its full path is added once, at the end; elsewhere nothing changes."""
+    from pyarchinit_photogrammetry.pyarchinit import database
+
+    dll = os.path.abspath(os.path.join(os.sep, "qgis", "bin", "mod_spatialite.dll"))
+    monkeypatch.setenv("PATH", os.pathsep.join(["/a", "/b"]))
+    monkeypatch.setattr(database.os, "name", "posix")
+    database.dll_folder_on_path(dll)
+    assert os.environ["PATH"] == os.pathsep.join(["/a", "/b"])  # not Windows
+    monkeypatch.setattr(database.os, "name", "nt")
+    database.dll_folder_on_path("mod_spatialite")  # a bare name: Windows' own search
+    database.dll_folder_on_path(dll)
+    database.dll_folder_on_path(dll)
+    assert os.environ["PATH"] == os.pathsep.join(["/a", "/b", os.path.dirname(dll)])
