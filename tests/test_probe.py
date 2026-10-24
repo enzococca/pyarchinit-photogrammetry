@@ -74,6 +74,11 @@ def test_values_at_a_point(chunk):
         text = probe.text(v, ["z", "temp_c", "anomaly_c", "ndvi"])
         assert text.startswith(f"Z {dem[r, c]:.3f}  T {t[r, c]:.2f} °C  ΔT ") and "NDVI " in text
         assert probe.fields_of(ch.data_dir / "multispectral" / "index_NDVI.tif") == ["ndvi"]
+        # while a task may write the products: the same values, no file left open (Windows does not
+        # replace or delete a file held open)
+        assert probe._open
+        probe.keep_open = False
+        assert probe.at(x, y) == v and not probe._open
 
 
 def test_points_for_qgis(chunk, tmp_path):
