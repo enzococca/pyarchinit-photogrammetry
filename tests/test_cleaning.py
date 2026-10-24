@@ -210,9 +210,11 @@ def test_cropped_exports_and_crops(processed, tmp_path):
     # textured OBJ cropped too
     obj = ch.export_model(tmp_path / "modello_ritaglio.obj", region=tri)
     assert obj.exists() and (tmp_path / "modello_ritaglio_texture.jpg").exists()
-    # dense cloud: points inside
+    # dense cloud: points inside, give or take the 0.1 mm step of the LAS coordinates (a point
+    # inside by less than half a step is written up to 0.07 mm outside: with a margin of 1e-6 m the
+    # CI failed now and then, 3 times on 19-21 October 2026)
     las = PointCloud.load(ch.export_point_cloud(tmp_path / "nuvola_ritaglio.las", region=tri))
-    assert len(las) > 100 and all(poly.buffer(1e-6).contains(Point(x, y)) for x, y in las.xyz[::100, :2])
+    assert len(las) > 100 and all(poly.buffer(1e-4).contains(Point(x, y)) for x, y in las.xyz[::100, :2])
     # inside the project
     n = len(ch.point_cloud)
     ch.crop_point_cloud(region=tri)
