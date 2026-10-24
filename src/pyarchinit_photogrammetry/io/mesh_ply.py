@@ -435,14 +435,16 @@ def read_mesh(path: str | Path) -> MeshData:
         if vc is not None:
             arr["red"], arr["green"], arr["blue"] = np.asarray(vc)[:, :3].T
         return MeshData(arr, np.asarray(m.faces, np.int64))
+    # copies, never views of the memory map: a view keeps the file mapped and Windows refuses to
+    # replace, move or delete a mapped file (writing the changed model over it failed there)
     rec = pm._faces
-    faces = np.asarray(rec[pm.index_field], np.int64)
+    faces = np.array(rec[pm.index_field], np.int64)
     tex = None
     for name in ("texcoord", "texcoords"):
         if name in rec.dtype.names and rec.dtype[name].shape == (6,):
-            tex = np.asarray(rec[name], np.float32)
+            tex = np.array(rec[name], np.float32)
             break
-    page = np.asarray(rec["texnumber"], np.int32) if "texnumber" in rec.dtype.names else None
+    page = np.array(rec["texnumber"], np.int32) if "texnumber" in rec.dtype.names else None
     return MeshData(np.array(pm.vertices), faces, tex, _header_comments(path), page)
 
 
