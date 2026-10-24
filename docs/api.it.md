@@ -825,9 +825,10 @@ geocentriche, `mode="local"` il CRS proiettato del chunk (serve un codice EPSG i
 | `archaeo.timeline.phases(doc)` | i chunk con un DEM come fasi dello scavo in ordine di data |
 | `timeline.phase_date(chunk)` | la data di una fase (`meta["date"]`, altrimenti la data EXIF più vecchia delle foto) |
 | `timeline.set_phase_date(chunk, date)` | la data di una fase impostata a mano |
-| `timeline.removed(doc, polygon=None)` | volume asportato e aggiunto da ogni fase alla successiva, e dentro ogni unità disegnata sulla fase precedente |
+| `timeline.removed(doc, polygon=None, coregister=False, reference="first", tilt=True)` | volume asportato e aggiunto da ogni fase alla successiva, e dentro ogni unità disegnata sulla fase precedente; con `coregister` i DEM delle fasi vengono prima coregistrati |
+| `timeline.coregister_phases(doc, folder, reference="first", tilt=True)` | ogni fase coregistrata sulla prima (o su quella prima di lei), i DEM scritti in `folder`; il progetto non cambia |
 | `timeline.suggested_relations(doc)` | unità esposte prima che si sovrappongono in pianta a unità esposte dopo, come `Copre` / `Coperto da` |
-| `timeline.timeline(doc)` | il rapporto completo |
+| `timeline.timeline(doc, coregister=False, reference="first")` | il rapporto completo |
 | `timeline.timeline_csv(report)` | il rapporto come CSV |
 | `timeline.write_relations(pa, relations)` | i rapporti suggeriti aggiunti ai `rapporti` delle schede US (nei due versi; quelli già presenti restano fuori) |
 | `pa.add_relationships(sito, area, us, rels)` | rapporti aggiunti ai `rapporti` di una scheda US |
@@ -859,6 +860,19 @@ geocentriche, `mode="local"` il CRS proiettato del chunk (serve un codice EPSG i
 **`archaeo.measures.surface_area(...)`** conta ogni cella `sqrt(1 + gx^2 + gy^2)` volte, le celle di
 bordo per la frazione interna; la mesh deve essere nelle stesse coordinate e `model_faces` sono le
 facce con il centro all'interno.
+
+**`timeline.removed(..., coregister=True)`**: rilievi di giorni diversi non sono mai registrati alla
+perfezione, e uno spostamento di qualche centimetro fra due DEM è falso scavo e riporto su ogni
+pendio. `coregister_phases` sposta ogni fase sulla prima (`reference="first"`) o sulla fase prima di
+lei, già spostata (`"previous"`), con `archaeo.coreg.coregister` (vedi *Coregistrazione dei DEM*): il
+terreno stabile lascia fuori le unità disegnate sulle fasi dal riferimento alla fase (se non resta
+troppo poco terreno), le celle cambiate vengono trovate comunque. I DEM coregistrati stanno in una
+cartella temporanea del progetto mentre si misurano i volumi. Ogni passo riceve `"coregistration"`
+(le misure della sua fase successiva: `dx`, `dy`, `dz`, `tilt_x`, `tilt_y`, `nmad_before`,
+`nmad_after`, `cells`, `reference`, `units_excluded`, oppure `error` quando la fase non si è potuta
+coregistrare e ha tenuto il suo DEM); `timeline(...)` le dà a ogni fase e aggiunge
+`"coregistration": {"reference", "tilt"}`; `timeline_csv` aggiunge una tabella degli spostamenti e
+`coregistration_text(measures)` scrive una riga.
 
 **`archaeo.us_proposal.propose_for_chunk(...)`** esegue `measure_units` (area, perimetro, quote dal
 DEM, colore Munsell, classe maggioritaria della nuvola classificata), `contacts` (coppie che si
@@ -1035,6 +1049,64 @@ dell'anello, IDW fuori di essa), `idw`, `constant` (`value`, predefinito la medi
 DEM com'era viene prima conservato come versione; un DEM di un altro programma viene modificato come
 copia nella cartella del chunk; overview aggiornate nella finestra; `chunk.meta["dem_edits"]` elenca
 le modifiche.
+
+## Coregistrazione dei DEM
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `archaeo.coreg.coregister(reference_path, dem_path, out_path=None, stable=None, exclude=None, tilt=True, max_iter=10, method="auto")` | un DEM spostato su un riferimento sul terreno che non è cambiato; restituisce una `Coregistration`, scrive il DEM spostato con `out_path` |
+| `chunk.coregister_dem(reference, stable=None, exclude=None, tilt=True, max_iter=10, method="auto", name=None)` | il DEM del chunk spostato su un altro chunk, `(chunk, id della versione)` o un file; conservato come versione attiva |
+| `coreg.coregister_chunk(chunk, reference, ...)` | lo stesso come funzione del modulo |
+| `coreg.reference_dem(reference)` | percorso, etichetta e chiavi di un riferimento |
+| `coreg.summary(result)` | una riga: spostamento, scarto verticale, inclinazione, NMAD prima e dopo |
+| `coreg.bilinear(z, transform, x, y, strict=True)` | quote di una griglia in punti dati (NaN fuori) |
+| `coreg.xdem_available()` | se si può usare `method="xdem"` |
+
+**`archaeo.coreg.coregister(...)`** lavora sul *terreno stabile*: le celle presenti in entrambi i
+DEM, non più ripide di `max_slope` (60 gradi: muri e pareti di una trincea), dentro `stable` e fuori
+da `exclude` (geometrie shapely nelle coordinate dei DEM, o per `stable` una griglia booleana del
+riferimento), senza le celle cambiate - oltre `k` (3) NMAD dalla mediana delle differenze, cercate di
+nuovo a ogni iterazione. Il modello è quello di Nuth e Kääb (2011): un DEM che mostra il terreno
+spostato di `a` verso l'azimut `b` differisce, su un pendio `α` esposto verso `ψ`, di
+`dh = a cos(b - ψ) tan α` (cioè `-∇z · (dx, dy)`, con la pendenza del riferimento, Horn). Le due
+componenti dello spostamento vengono stimate ai minimi quadrati con pesi di Huber *insieme* allo
+scarto verticale e, con `tilt`, a un piano: stimate una dopo l'altra, un'inclinazione viene presa per
+uno spostamento su un rilievo i cui fianchi guardano nelle sue direzioni (un tell, un tumulo). Il DEM
+viene spostato di quanto trovato (bilineare) e la stima rifatta finché lo spostamento cambia meno di
+`tolerance` (0,01 celle) o dopo `max_iter` iterazioni; la prima non lascia fuori celle e non stima
+l'inclinazione, perché lo spostamento è ancora nelle differenze. Poi lo scarto verticale (mediana) e
+l'inclinazione (piano robusto) vengono misurati di nuovo sul DEM spostato. Su terreno piano, o dove
+i pendii guardano tutti da una parte (un piano, una valle diritta lungo il suo asse), uno spostamento
+orizzontale non si distingue da uno verticale - e non cambia alcun volume: la parte che non si può
+misurare resta 0 e `horizontal` è False. I DEM con più di 2 milioni di celle si misurano su un
+campione regolare del riferimento (`max_samples`, `step`), con le pendenze dalle celle vicine a piena
+risoluzione. I due DEM possono avere griglie diverse; sistemi di riferimento diversi o raster ruotati
+danno `ValueError`, come DEM che non si sovrappongono o che differiscono quasi ovunque.
+
+La `Coregistration` dà `dx`, `dy` (il DEM mostrava il terreno tanto più a est e a nord del
+riferimento), `dz` (tanto più in alto in `centre`, il centro del DEM), `tilt_x`, `tilt_y` (metri per
+metro), `nmad_before`, `nmad_after`, `rmse_before`, `rmse_after`, `median_before`, `median_after`
+(sulle celle stabili), `cells` (stabili alla fine), `compared`, `step`, `iterations`, `converged`,
+`horizontal`, `stable_index` (righe e colonne delle celle stabili sulla griglia del riferimento),
+`to_dict()` e `correction(x, y)`. Il DEM scritto è `z(x + dx, y + dy) - (dz + tilt_x (x - x0) +
+tilt_y (y - y0))` sulla griglia del DEM di partenza, float32 con NaN dove è vuoto (BigTIFF quando
+serve, overview). Su un rilievo sintetico a celle di 1 cm spostato di 7 e -4 cm, alzato di 1,5 cm e
+inclinato di 1,8 mm/m, con una buca scavata nel frattempo, lo spostamento torna entro un millesimo di
+cella, `dz` entro 0,2 mm, l'NMAD sul terreno stabile passa da 15 a 1 mm (il rumore) e il volume della
+buca è giusto entro lo 0,2 % (sbagliato dell'11,5 % prima); 36 milioni di celle richiedono 12 s.
+
+**`chunk.coregister_dem(...)`**: il DEM com'era resta tra le versioni (`versions`), quello spostato
+diventa il DEM attivo nella cartella del chunk, con il nome `name` o "DEM coregistrato su
+<riferimento>"; `chunk.meta["dem"]["coregistration"]` conserva le misure con `reference`,
+`reference_chunk`, `reference_version`, `version` (il DEM conservato) e `when`. Un riferimento che è
+il DEM stesso dà `ValueError`.
+
+**`method="xdem"`** usa la libreria xdem (`pip install pyarchinit-photogrammetry[coreg]`; non è in
+`all` né nell'applicazione pacchettizzata): `NuthKaab` e, con `tilt`, `Deramp` di primo grado,
+stimati sul terreno stabile di questo modulo (le celle cambiate trovate sulle differenze prima della
+coregistrazione). Quanto xdem ha applicato viene misurato sul suo risultato, così spostamento, scarto
+e inclinazione si leggono come sopra; quando le griglie sono diverse il risultato copre la parte del
+DEM sulla griglia del riferimento. `"auto"` e `"nuth_kaab"` sono l'implementazione del programma.
 
 ## Prospetti: ortofoto e rilievo su un piano o un cilindro
 
@@ -1279,6 +1351,7 @@ ppg tables scavo.ppg tabelle.xlsx --chunk "Saggio 1" --lang en
 | `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |
 | `archaeo.pottery` | `estimate_axis`, `profile_at`, `best_profile`, `Profile.measurements`, `rim` (cerchio dell'orlo: diametro, arco conservato, affidabilità), `measure` (profilo e misure di un vaso o di un frammento, asse spostato al centro dell'orlo), `percent_class`, `signature`, `signature_distance`, `draw` (SVG, DXF, PNG) |
 | `archaeo.terrain` | `contours` (semplificate, levigatura facoltativa), `suggest_interval`, `dem_range`, `export_contours`, `volume`, `hillshade`, `slope_degrees` |
+| `archaeo.coreg` | `coregister` (spostamento di Nuth e Kääb con scarto verticale e inclinazione sul terreno stabile), `Coregistration`, `coregister_chunk`, `reference_dem`, `summary`, `bilinear`, `xdem_available` |
 | `archaeo.stratigraphy` | `UnitPolygon`, `mask_to_polygons`, `export_units` |
 | `bim.ifc` | `export_ifc`, `export_chunk_ifc`, `export_proxies_ifc`, `split_mesh_by_units`, `global_id` (GlobalId IFC dal `node_uuid` di una scheda US), `read_ifc_elements` |
 | `archaeo.stratigraphy` (rapporti) | `RELATION_EDGES` (i rapporti delle schede di PyArchInit in italiano, inglese e tedesco come archi dell'Extended Matrix), `stratigraphic_edges` (ogni rapporto dichiarato una volta sola, dall'inizio del suo arco) |

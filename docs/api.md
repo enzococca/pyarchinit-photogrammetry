@@ -799,9 +799,10 @@ normals, `mode="local"` the projected CRS of the chunk (it needs an EPSG code in
 | `archaeo.timeline.phases(doc)` | the chunks with a DEM as phases of the excavation in date order |
 | `timeline.phase_date(chunk)` | the date of a phase (`meta["date"]`, else the earliest EXIF date of the photos) |
 | `timeline.set_phase_date(chunk, date)` | the date of a phase set by hand |
-| `timeline.removed(doc, polygon=None)` | volume removed and added from each phase to the next, and inside each unit drawn on the earlier phase |
+| `timeline.removed(doc, polygon=None, coregister=False, reference="first", tilt=True)` | volume removed and added from each phase to the next, and inside each unit drawn on the earlier phase; with `coregister` the DEMs of the phases are coregistered first |
+| `timeline.coregister_phases(doc, folder, reference="first", tilt=True)` | every phase coregistered onto the first one (or onto the one before), the DEMs written in `folder`; the project is not touched |
 | `timeline.suggested_relations(doc)` | units exposed earlier that overlap in plan units exposed later, as `Copre` / `Coperto da` |
-| `timeline.timeline(doc)` | the whole report |
+| `timeline.timeline(doc, coregister=False, reference="first")` | the whole report |
 | `timeline.timeline_csv(report)` | the report as CSV |
 | `timeline.write_relations(pa, relations)` | the suggested relations added to the `rapporti` of the US forms (both ways; those already there left out) |
 | `pa.add_relationships(sito, area, us, rels)` | relations added to the `rapporti` of one US form |
@@ -833,6 +834,19 @@ normals, `mode="local"` the projected CRS of the chunk (it needs an EPSG code in
 **`archaeo.measures.surface_area(...)`** counts each cell `sqrt(1 + gx^2 + gy^2)` times, border
 cells by the share inside; the mesh must be in the same coordinates and `model_faces` are the faces
 whose centre is inside.
+
+**`timeline.removed(..., coregister=True)`**: surveys of different days are never perfectly
+registered, and a shift of a few centimetres between two DEMs is false excavation and fill on every
+slope. `coregister_phases` moves every phase onto the first (`reference="first"`) or onto the phase
+before it, itself already moved (`"previous"`), with `archaeo.coreg.coregister` (see *Coregistering
+DEMs*): the stable ground leaves out the units drawn on the phases from the reference to the phase
+(unless that leaves too little ground), the cells that changed are found anyway. The coregistered
+DEMs live in a temporary folder of the project while the volumes are measured. Each step gets
+`"coregistration"` (the measures of its later phase: `dx`, `dy`, `dz`, `tilt_x`, `tilt_y`,
+`nmad_before`, `nmad_after`, `cells`, `reference`, `units_excluded`, or `error` when the phase could
+not be coregistered and kept its DEM); `timeline(...)` gives them to each phase and adds
+`"coregistration": {"reference", "tilt"}`; `timeline_csv` appends a table of the shifts and
+`coregistration_text(measures)` writes one line.
 
 **`archaeo.us_proposal.propose_for_chunk(...)`** runs `measure_units` (area, perimeter, DEM
 elevations, Munsell colour, majority class of the classified cloud), `contacts` (pairs that touch:
@@ -1002,6 +1016,63 @@ outside it), `idw`, `constant` (`value`, default the median of the ring); `break
 (N, 2) or (N, 3); without z the DEM at their vertices) keep their heights. The DEM as it was is
 kept as a version first; a DEM of another program is edited as a copy in the chunk folder;
 overviews refreshed in the window; `chunk.meta["dem_edits"]` lists the edits.
+
+## Coregistering DEMs
+
+| Call | Description |
+| --- | --- |
+| `archaeo.coreg.coregister(reference_path, dem_path, out_path=None, stable=None, exclude=None, tilt=True, max_iter=10, method="auto")` | a DEM moved onto a reference over the ground that did not change; returns a `Coregistration`, writes the DEM moved with `out_path` |
+| `chunk.coregister_dem(reference, stable=None, exclude=None, tilt=True, max_iter=10, method="auto", name=None)` | the DEM of the chunk moved onto another chunk, `(chunk, version id)` or a file; kept as the active version |
+| `coreg.coregister_chunk(chunk, reference, ...)` | the same as a module function |
+| `coreg.reference_dem(reference)` | path, label and keys of a reference |
+| `coreg.summary(result)` | one line: shift, bias, tilt, NMAD before and after |
+| `coreg.bilinear(z, transform, x, y, strict=True)` | heights of a grid at points (NaN outside) |
+| `coreg.xdem_available()` | whether `method="xdem"` can be used |
+
+**`archaeo.coreg.coregister(...)`** works on the *stable ground*: the cells present in both DEMs,
+not steeper than `max_slope` (60 degrees: walls and the sides of a trench), inside `stable` and
+outside `exclude` (shapely geometries in the coordinates of the DEMs, or for `stable` a boolean grid
+of the reference), without the cells that changed - further than `k` (3) NMAD from the median
+difference, looked for again at every iteration. The model is the one of Nuth & Kääb (2011): a DEM
+that shows the ground shifted by `a` towards the azimuth `b` differs on a slope `α` facing `ψ` by
+`dh = a cos(b - ψ) tan α` (that is `-∇z · (dx, dy)`, with the slope of the reference, Horn). The two
+components of the shift are fitted by least squares with Huber weights *together with* the vertical
+bias and, with `tilt`, a plane: fitted one after the other, a tilt is taken for a shift on a hill
+whose sides face its directions (a tell, a mound). The DEM is shifted by what was found (bilinear) and
+the fit done again until the shift changes by less than `tolerance` (0.01 cell) or after `max_iter`
+iterations; the first one leaves no cell out and fits no tilt, the shift being still in the
+differences. Then the vertical bias (median) and the tilt (robust plane) are measured again on the
+DEM shifted. On flat ground, or where the slopes all face one way (a plane, a straight valley along
+it), a horizontal shift cannot be told from a vertical one - and changes no volume: the part that
+cannot be measured stays 0 and `horizontal` is False. DEMs of more than 2 million cells are measured
+on a regular sample of the reference (`max_samples`, `step`), with slopes from the full-resolution
+neighbours. The two DEMs may have different grids; different coordinate systems or rotated rasters
+raise `ValueError`, and so do DEMs that do not overlap or differ almost everywhere.
+
+The `Coregistration` gives `dx`, `dy` (the DEM showed the ground that far east and north of the
+reference), `dz` (that much higher at `centre`, the centre of the DEM), `tilt_x`, `tilt_y` (metres
+per metre), `nmad_before`, `nmad_after`, `rmse_before`, `rmse_after`, `median_before`, `median_after`
+(on the stable cells), `cells` (stable at the end), `compared`, `step`, `iterations`, `converged`,
+`horizontal`, `stable_index` (rows and columns of the stable cells on the grid of the reference),
+`to_dict()` and `correction(x, y)`. The DEM written is `z(x + dx, y + dy) - (dz + tilt_x (x - x0) +
+tilt_y (y - y0))` on the grid of the input DEM, float32 with NaN where empty (BigTIFF when needed,
+overviews). On a synthetic survey of 1 cm cells shifted by 7 and -4 cm, raised by 1.5 cm and
+tilted by 1.8 mm/m, with a pit dug in between, the shift comes back within a thousandth of a cell,
+`dz` within 0.2 mm, the NMAD on the stable ground goes from 15 to 1 mm (the noise) and the volume
+of the pit is right within 0.2 % (11.5 % off before); 36 million cells take 12 s.
+
+**`chunk.coregister_dem(...)`**: the DEM as it was is kept among the versions (`versions`), the
+moved one becomes the active DEM in the chunk folder, named `name` or "DEM coregistrato su
+<reference>"; `chunk.meta["dem"]["coregistration"]` keeps the measures with `reference`,
+`reference_chunk`, `reference_version`, `version` (the DEM kept) and `when`. A reference that is the
+DEM itself raises `ValueError`.
+
+**`method="xdem"`** uses the library xdem (`pip install pyarchinit-photogrammetry[coreg]`; not in
+`all` nor in the packaged application): `NuthKaab` and, with `tilt`, `Deramp` of the first order,
+fitted on the stable ground of this module (the cells that changed found on the differences before
+coregistration). What xdem applied is measured on its result, so the shift, bias and tilt read as
+above; when the grids differ the result covers the part of the DEM on the grid of the reference.
+`"auto"` and `"nuth_kaab"` are the implementation of the program.
 
 ## Elevations: orthophoto and relief on a plane or a cylinder
 
@@ -1241,6 +1312,7 @@ ppg tables scavo.ppg tabelle.xlsx --chunk "Saggio 1" --lang en
 | `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |
 | `archaeo.pottery` | `estimate_axis`, `profile_at`, `best_profile`, `Profile.measurements`, `rim` (circle of the lip: diameter, arc kept, reliability), `measure` (profile and measurements of a vessel or sherd, axis moved to the centre of the rim), `percent_class`, `signature`, `signature_distance`, `draw` (SVG, DXF, PNG) |
 | `archaeo.terrain` | `contours` (simplified, optional smoothing), `suggest_interval`, `dem_range`, `export_contours`, `volume`, `hillshade`, `slope_degrees` |
+| `archaeo.coreg` | `coregister` (Nuth & Kääb shift with bias and tilt on the stable ground), `Coregistration`, `coregister_chunk`, `reference_dem`, `summary`, `bilinear`, `xdem_available` |
 | `archaeo.stratigraphy` | `UnitPolygon`, `mask_to_polygons`, `export_units` |
 | `bim.ifc` | `export_ifc`, `export_chunk_ifc`, `export_proxies_ifc`, `split_mesh_by_units`, `global_id` (IFC GlobalId from the `node_uuid` of a US form), `read_ifc_elements` |
 | `archaeo.stratigraphy` (relations) | `RELATION_EDGES` (the relations of PyArchInit's forms in Italian, English and German as Extended Matrix edges), `stratigraphic_edges` (each declared relation once, from the start of its edge) |

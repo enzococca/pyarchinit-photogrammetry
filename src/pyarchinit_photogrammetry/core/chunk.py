@@ -744,6 +744,19 @@ class Chunk:
         return dem_edit.fill_area(self, polygon, method, value, breaklines, keep_version, version_name,
                                   progress=as_progress(progress))
 
+    def coregister_dem(self, reference, stable=None, exclude=None, tilt: bool = True, max_iter: int = 10,
+                       method: str = "auto", name: str | None = None,
+                       progress: ProgressCallback | None = None) -> dict:
+        """The DEM moved onto the DEM of ``reference`` - another chunk, ``(chunk, version id)`` or a
+        file - over the ground that did not change (:mod:`archaeo.coreg`: horizontal shift, vertical
+        bias and, with ``tilt``, a plane; ``exclude``: the areas dug in between, ``stable``: where the
+        ground may be stable). The result becomes the active DEM, the DEM as it was stays among the
+        versions; the measures in ``meta["dem"]["coregistration"]``."""
+        from ..archaeo import coreg
+
+        return coreg.coregister_chunk(self, reference, stable=stable, exclude=exclude, tilt=tilt, max_iter=max_iter,
+                                      method=method, name=name, progress=as_progress(progress))
+
     def calibrate_colours(self, vignetting: bool = True, samples: int = 20000,
                           progress: ProgressCallback | None = None) -> dict:
         """Measure the exposure gain of every photo and the vignetting of every lens on points of

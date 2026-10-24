@@ -64,6 +64,88 @@ def test_volumes_removed(project):
     assert steps[1]["units"][0]["us"] == "2" and steps[1]["units"][0]["cut_m3"] == pytest.approx(0.2, rel=0.03)
 
 
+PITS = {"A": (X0 + 1.2, Y1 - 1.2, 0.45, 0.3), "B": (X0 + 2.8, Y1 - 2.7, 0.4, 0.25)}  # centre, radius, depth
+
+
+def _ground(x, y):
+    """Rough ground with slopes in every direction."""
+    rng = np.random.default_rng(7)
+    z = 100.0 + 0.04 * (x - X0) + 0.02 * (y - Y1)
+    for lam in np.geomspace(0.5, 3.0, 10):
+        ang, phase = rng.uniform(0, 2 * np.pi, 2)
+        k = 2 * np.pi / lam
+        z = z + 0.12 / k * np.sin(k * (np.cos(ang) * x + np.sin(ang) * y) + phase)
+    return z
+
+
+def _pit(x, y, name):
+    cx, cy, r, depth = PITS[name]
+    t = np.clip((r - np.hypot(x - cx, y - cy)) / 0.1, 0, 1)  # walls 10 cm wide
+    return depth * t * t * (3 - 2 * t)
+
+
+def _pit_volume(name, step=0.0025):
+    cx, cy, r, _ = PITS[name]
+    gx, gy = np.meshgrid(np.arange(cx - r, cx + r, step) + step / 2, np.arange(cy - r, cy + r, step) + step / 2)
+    return float(_pit(gx, gy, name).sum() * step * step)
+
+
+def _survey(doc, label, date, shift=(0.0, 0.0), dz=0.0, tilt=(0.0, 0.0), dug=(), units=()):
+    """A phase surveyed ``shift`` further, ``dz`` higher and tilted, with the pits ``dug``."""
+    from shapely.geometry import Point
+
+    res = 0.02
+    ch = doc.add_chunk(label)
+    ch.crs = "EPSG:32633"
+    n = int(4 / res)
+    rows, cols = np.mgrid[0:n, 0:n]
+    x, y = X0 + (cols + 0.5) * res, Y1 - (rows + 0.5) * res
+    gx, gy = x - shift[0], y - shift[1]
+    z = _ground(gx, gy) + dz + tilt[0] * (x - X0 - 2) + tilt[1] * (y - Y1 + 2)
+    for name in dug:
+        z -= _pit(gx, gy, name)
+    ch._set_product("dem", write_geotiff(ch.data_dir / "dem.tif", z.astype(np.float32), (X0, Y1), res, ch.crs,
+                                         nodata=NODATA))
+    timeline.set_phase_date(ch, date)
+    ch.meta["drawings"] = {"units": [{"wkt": Point(PITS[p][0], PITS[p][1]).buffer(PITS[p][2] + 0.05).wkt,
+                                      "sito": "Saggio", "area": "1", "us": us, "tipo": "US", "attributes": {}}
+                                     for us, p in units], "quote": []}
+    return ch
+
+
+def test_volumes_with_coregistered_phases(tmp_path):
+    """Three surveys, each a few centimetres off and tilted: without coregistration the shift is
+    false excavation and fill on every slope; with it each step removes the pit dug in between."""
+    doc = ppg.Document()
+    doc.save(tmp_path / "scavo.ppg")
+    _survey(doc, "Inizio", "2026-07-01T09:00", units=[("1", "A")])
+    _survey(doc, "Fine US 1", "2026-07-02T12:00", (0.07, -0.04), 0.015, (0.0015, -0.001), ["A"], [("2", "B")])
+    _survey(doc, "Fine US 2", "2026-07-03T17:00", (-0.05, 0.03), -0.01, (-0.001, 0.0005), ["A", "B"])
+    va, vb = _pit_volume("A"), _pit_volume("B")
+    raw = timeline.removed(doc)
+    assert raw[0]["coregistration"] is None
+    assert raw[0]["fill_m3"] > va and raw[1]["cut_m3"] > 2 * vb  # the shifts dug and filled on every slope
+    for reference in ("first", "previous"):
+        steps = timeline.removed(doc, coregister=True, reference=reference)
+        assert steps[0]["cut_m3"] == pytest.approx(va, rel=0.02) and steps[0]["fill_m3"] < 0.01 * va
+        assert steps[1]["cut_m3"] == pytest.approx(vb, rel=0.02) and steps[1]["fill_m3"] < 0.01 * vb
+        assert steps[0]["units"][0]["us"] == "1" and steps[0]["units"][0]["cut_m3"] == pytest.approx(va, rel=0.02)
+        c1, c2 = steps[0]["coregistration"], steps[1]["coregistration"]
+        assert c1["reference"] == "Inizio" and c1["units_excluded"]
+        assert c1["dx"] == pytest.approx(0.07, abs=0.002) and c1["dy"] == pytest.approx(-0.04, abs=0.002)
+        assert c2["reference"] == ("Inizio" if reference == "first" else "Fine US 1")
+        if reference == "first":
+            assert c2["dx"] == pytest.approx(-0.05, abs=0.002) and c2["dz"] == pytest.approx(-0.01, abs=0.002)
+    assert not list(doc.files_dir.glob("coreg-*"))  # the coregistered DEMs were temporary
+    report = timeline.timeline(doc, coregister=True)
+    assert report["coregistration"] == {"reference": "first", "tilt": True}
+    assert [p["coregistration"] is None for p in report["phases"]] == [True, False, False]
+    text = timeline.timeline_csv(report)
+    assert "coregistered_on" in text and "\nFine US 1,Inizio,0.0" in text.replace("\r\n", "\n")
+    line = timeline.coregistration_text(report["phases"][1]["coregistration"])
+    assert line.startswith("coregistered on Inizio: dx +0.0") and "NMAD" in line
+
+
 def test_relations_from_the_order_of_removal(project):
     rels = timeline.suggested_relations(project)
     assert [(r["upper"].us, r["relation"], r["lower"].us) for r in rels] == [("1", "Copre", "2")]
@@ -121,6 +203,9 @@ def test_phases_window(project, tmp_path):
     d = w._timeline
     assert d.isVisible() and d.phases.rowCount() == 3 and d.relations.rowCount() == 1
     assert d.steps.rowCount() == 5  # two steps; units 1 and 3 under the first, unit 2 under the second
+    # three phases: coregistered first (flat ground: no shift to find, the volumes are the same)
+    assert d.coregister.isChecked() and d.shifts.rowCount() == 3 and d.report["coregistration"]
+    assert d.report["removed"][0]["cut_m3"] == pytest.approx(1.2, rel=0.02)
     target = next(c for c in project.chunks if c.label == "Inizio")
     d.phase_chosen.emit(target.key)  # a double click on a phase shows it, with the units drawn on it
     app.processEvents()
@@ -142,4 +227,7 @@ def test_cli(project, tmp_path):
     r = CliRunner().invoke(app, ["timeline", str(project.path), "--csv", str(out)])
     assert r.exit_code == 0, r.output
     assert "Inizio -> Fine US 1: removed 1.2" in r.output and "US 1 Copre US 2" in r.output
+    assert "coregistered on Inizio" in r.output
     assert "Copre" in out.read_text()
+    r = CliRunner().invoke(app, ["timeline", str(project.path), "--no-coregister"])
+    assert r.exit_code == 0 and "removed 1.2" in r.output and "coregistered" not in r.output

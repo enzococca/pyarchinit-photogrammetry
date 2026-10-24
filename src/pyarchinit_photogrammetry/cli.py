@@ -296,19 +296,28 @@ def relief(project: Path, method: str = typer.Option("svf", help="svf, openness_
 def timeline(project: Path, csv: Optional[Path] = typer.Option(None, help="write the report as CSV"),
              date: Optional[str] = typer.Option(None, help="set the date of --chunk (ISO, e.g. 2026-07-01T09:30; "
                                                            "'' = from the photos)"),
+             coregister: bool = typer.Option(True, "--coregister/--no-coregister",
+                                             help="coregister the DEMs of the phases before measuring the volumes "
+                                                  "(the DEMs of the project are not changed)"),
+             coregister_to: str = typer.Option("first", help="coregister every phase onto the 'first' phase or onto "
+                                                             "the 'previous' one"),
              chunk: Optional[str] = None):
     """Excavation over time: the chunks with a DEM as phases in date order, the volume removed
     from one to the next and in every unit drawn, the relations suggested by the order of removal."""
     from .archaeo import timeline as tl
 
+    if coregister_to not in tl.COREG_REFERENCES:
+        raise typer.BadParameter(f"--coregister-to: one of {', '.join(tl.COREG_REFERENCES)}")
     doc, ch = _open(project, chunk)
     if date is not None:
         tl.set_phase_date(ch, date or None)
         doc.save()
-    report = tl.timeline(doc, progress=print_progress)
+    report = tl.timeline(doc, progress=print_progress, coregister=coregister, reference=coregister_to)
     for p in report["phases"]:
         when = p["date"].strftime("%Y-%m-%d %H:%M") if p["date"] else "no date"
         typer.echo(f"{when}  {p['label']}: {', '.join(p['units']) or 'no units drawn'}")
+        if p.get("coregistration"):
+            typer.echo(f"    {tl.coregistration_text(p['coregistration'])}")
     for s in report["removed"]:
         typer.echo(f"{s['from']} -> {s['to']}: removed {s['cut_m3']:.3f} m3, added {s['fill_m3']:.3f} m3 "
                    f"over {s['area_m2']:.2f} m2")
@@ -320,6 +329,72 @@ def timeline(project: Path, csv: Optional[Path] = typer.Option(None, help="write
     if csv is not None:
         csv.write_text(tl.timeline_csv(report), encoding="utf-8")
         typer.echo(f"written {csv}")
+
+
+def _polygons(texts: Optional[list[str]]):
+    """Polygons given on the command line - WKT, a GeoJSON geometry or feature collection, or the
+    path of a GeoJSON file - merged (None without)."""
+    if not texts:
+        return None
+    from shapely.geometry import shape
+    from shapely.ops import unary_union
+
+    from .engine.crop import as_polygon
+
+    out = []
+    for text in texts:
+        try:
+            is_file = Path(text).is_file()
+        except OSError:  # a WKT longer than a file name can be
+            is_file = False
+        try:
+            if is_file:
+                text = Path(text).read_text(encoding="utf-8")
+            if text.lstrip().startswith("{"):
+                data = json.loads(text)
+                geoms = ([shape(f["geometry"]) for f in data["features"]] if data.get("type") == "FeatureCollection"
+                         else [shape(data.get("geometry", data))])
+                out.append(as_polygon(unary_union(geoms)))
+            else:
+                out.append(as_polygon(text))
+        except Exception as exc:  # JSON, GeoJSON or WKT (shapely's GEOSException) that cannot be read
+            raise typer.BadParameter(f"not a polygon (WKT, GeoJSON or a GeoJSON file): {text[:60]}") from exc
+    return unary_union(out)
+
+
+@app.command()
+def coregister(project: Path,
+               reference: str = typer.Option(..., help="the chunk (label or key) whose DEM is the reference"),
+               version: Optional[str] = typer.Option(None, help="a kept version of the reference DEM (id) instead "
+                                                                "of the active one"),
+               exclude_polygon: Optional[list[str]] = typer.Option(
+                   None, help="an area that changed (the excavation), left out of the stable ground: WKT, GeoJSON or "
+                              "a GeoJSON file; repeat for more"),
+               stable_polygon: Optional[list[str]] = typer.Option(
+                   None, help="only inside this area the ground may be stable (WKT, GeoJSON or a GeoJSON file)"),
+               tilt: bool = typer.Option(True, "--tilt/--no-tilt", help="correct a tilt (plane) besides the shift"),
+               max_iter: int = typer.Option(10, help="iterations of the horizontal shift"),
+               method: str = typer.Option("auto", help="auto / nuth_kaab (built in) or xdem (pip install "
+                                                       "pyarchinit-photogrammetry[coreg])"),
+               name: Optional[str] = typer.Option(None, help="name of the coregistered DEM (a version)"),
+               chunk: Optional[str] = None):
+    """Coregister the DEM of --chunk (default the active one) onto the DEM of --reference over the
+    ground that did not change: horizontal shift (Nuth & Kääb), vertical bias and tilt. The result
+    becomes the active DEM, the DEM as it was stays among the versions."""
+    from .archaeo import coreg as cg
+
+    doc, ch = _open(project, chunk)
+    ref = next((c for c in doc.chunks if c.label == reference or str(c.key) == reference), None)
+    if ref is None:
+        raise typer.BadParameter(f"--reference: no chunk {reference!r}")
+    if ref is ch and version is None:
+        raise typer.BadParameter("the reference is the chunk itself: give another chunk, or --version")
+    out = ch.coregister_dem((ref, version), stable=_polygons(stable_polygon), exclude=_polygons(exclude_polygon),
+                            tilt=tilt, max_iter=max_iter, method=method, name=name, progress=print_progress)
+    doc.save()
+    typer.echo(f"{ch.label}: DEM coregistered on {out['reference']} -> active DEM '{out['name']}' "
+               f"(the DEM as it was kept as version {out['version']})")
+    typer.echo(f"    {cg.summary(out)}")
 
 
 @app.command("us-proposal")

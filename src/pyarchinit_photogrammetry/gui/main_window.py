@@ -705,6 +705,10 @@ class MainWindow(QMainWindow):
                   icon_name="timeline",
                   tip=tr("Un chunk con il DEM per ogni rilievo dello scavo: volume asportato da una fase all'altra e "
                          "per US, rapporti stratigrafici suggeriti dall'ordine in cui le US sono state scavate"))
+        self._act(m, tr("Coregistra DEM..."), self.coregister_dem, processing=True, icon_name="dem",
+                  tip=tr("Sposta il DEM del chunk sul DEM di un altro rilievo (un altro chunk o una versione) sul "
+                         "terreno che non e' cambiato: spostamento orizzontale, verticale e inclinazione, cosi' "
+                         "volumi e differenze non hanno falso scavo sui pendii"))
         self._act(m, tr("Pendenza del DEM"), lambda: self.terrain_raster("slope"), processing=True, icon_name="slope",
                   tip=tr("Raster della pendenza in gradi, mostrato subito (gradi sotto il cursore)"))
         self._act(m, tr("Esposizione del DEM"), lambda: self.terrain_raster("aspect"), processing=True,
@@ -5628,16 +5632,82 @@ class MainWindow(QMainWindow):
             self._timeline.date_changed.connect(self._phase_date_changed)
             self._timeline.recompute_requested.connect(self.excavation_phases)
             self._timeline.write_requested.connect(self._write_phase_relations)
+            self._timeline.set_coregistration_default(len(timeline.phases(self.doc)))
         self._store_drawings()  # the units of the active phase, also those not saved yet
         doc = self.doc
+        options = self._timeline.coregistration_options()
 
         def done(report):
             self._timeline.set_report(report, can_write=self.pa is not None)
             self._timeline.show()
             self._timeline.raise_()
 
-        self.run_task("Fasi dello scavo", lambda p: timeline.timeline(doc, progress=p), done, refresh=False,
-                      save=False)
+        self.run_task("Fasi dello scavo", lambda p: timeline.timeline(doc, progress=p, **options), done,
+                      refresh=False, save=False)
+
+    def coregister_dem(self) -> None:
+        """Strumenti > Coregistra DEM: the DEM of the active chunk moved onto another DEM (another chunk,
+        a kept version) over the ground that did not change (:mod:`archaeo.coreg`); the selected
+        polygons can be left out (the excavation) or be the stable ground. The result becomes the
+        active DEM, the DEM as it was stays among the versions."""
+        if not self._need_chunk(product="dem"):
+            return
+        from ..core import versions
+
+        chunk = self.chunk
+        choices = []
+        for c in self.doc.chunks:
+            if c is not chunk and c.dem_path is not None and c.dem_path.exists():
+                active = versions.active_info(c, "dem")["name"]
+                choices.append((f"{c.key}:", tr("{0} (DEM attivo: {1})", c.label, active)))
+            choices += [(f"{c.key}:{e['id']}", tr("{0}, versione: {1}", c.label, e["name"]))
+                        for e in versions.versions(c, "dem")]
+        if not choices:
+            self._warn("Serve un altro DEM come riferimento: un altro chunk con il DEM, nello stesso sistema di "
+                       "riferimento, o una versione conservata del DEM.")
+            return
+        poly = self._selected_polygon()
+        fields = [Field("reference", "DEM di riferimento", choices[0][0], choices=choices)]
+        if poly is not None:
+            fields.append(Field("areas", "Poligoni selezionati", "exclude",
+                                choices=[("exclude", "Escludili: aree scavate o cambiate"),
+                                         ("include", "Solo dentro: il terreno stabile"), ("none", "Ignorali")]))
+        fields += [Field("tilt", "Correggi anche l'inclinazione", True),
+                   Field("name", "Nome del DEM coregistrato (facoltativo)", "", kind="text")]
+        v = ParamDialog.ask(self, "Coregistra DEM", fields, intro=tr(
+            "Il DEM del chunk {0} viene spostato sul DEM di riferimento dove il terreno non e' cambiato: "
+            "spostamento orizzontale (Nuth e Kääb), verticale e, se scelto, inclinazione. Le celle cambiate (lo "
+            "scavo, i cumuli di terra) vengono riconosciute ed escluse da sole; i poligoni selezionati possono "
+            "escluderle a priori. Il DEM com'era resta tra le versioni.", chunk.label))
+        if not v:
+            return
+        key, _, vid = str(v["reference"]).partition(":")
+        reference = (next(c for c in self.doc.chunks if str(c.key) == key), vid or None)
+        areas = v.get("areas", "none")
+        stable, exclude = (poly if areas == "include" else None), (poly if areas == "exclude" else None)
+        name = (v.get("name") or "").strip() or None
+
+        def done(out):
+            self._show_raster("dem")
+            nb, na = out.get("nmad_before"), out.get("nmad_after")
+            self.log_pane.info(tr(
+                "DEM coregistrato su {0}: dx {1} cm, dy {2} cm, dz {3} cm, inclinazione {4} mm/m; NMAD sul terreno "
+                "stabile da {5} a {6} cm ({7} celle)", out["reference"], _it(out["dx"] * 100, 1),
+                _it(out["dy"] * 100, 1), _it(out["dz"] * 100, 1),
+                _it(float(np.hypot(out["tilt_x"], out["tilt_y"])) * 1000, 2), _it((nb or 0) * 100, 2),
+                _it((na or 0) * 100, 2), _it(out["cells"])))
+            if not out.get("horizontal", True):
+                self.log_pane.warning(tr("Spostamento orizzontale non misurabile in tutte le direzioni (terreno piano "
+                                         "o in pendenza da un solo lato): quella parte resta a zero, il dislivello la "
+                                         "assorbe."))
+            if not out.get("converged", True):
+                self.log_pane.warning(tr("Lo spostamento non si e' stabilizzato: tenuto lo stato piu' vicino (DEM "
+                                         "troppo distanti o terreno diverso?). Controlla con Differenza con il DEM "
+                                         "attivo."))
+            self.statusBar().showMessage(tr("DEM attivo: {0}", out["name"]), 10000)
+
+        self.run_task("Coregistrazione del DEM", lambda p: chunk.coregister_dem(
+            reference, stable=stable, exclude=exclude, tilt=v["tilt"], name=name, progress=p), done)
 
     def _show_phase(self, key: int) -> None:
         chunk = next((c for c in self.doc.chunks if c.key == key), None)

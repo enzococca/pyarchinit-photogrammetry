@@ -1,14 +1,18 @@
 """Strumenti > Fasi dello scavo: the phases of the excavation (chunks by date), what was dug away
 from one to the next and the stratigraphic relations that the order of removal suggests
 (:mod:`archaeo.timeline`). A window that stays open beside the main one: a double click on a
-phase shows it, its date can be corrected, the relations go into the US forms of PyArchInit."""
+phase shows it, its date can be corrected, the relations go into the US forms of PyArchInit.
+The DEMs of the phases can be coregistered before the volumes (:mod:`archaeo.coreg`, on by default
+with more than one phase): the tab *Coregistrazione* gives the shift of each phase."""
 from __future__ import annotations
 
+import math
 from datetime import datetime
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, QFileDialog, QHeaderView, QLabel,
-                               QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout)
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+                               QHBoxLayout, QHeaderView, QLabel, QTableWidget, QTableWidgetItem, QTabWidget,
+                               QVBoxLayout)
 
 from ..archaeo import timeline
 from .i18n import number, tr
@@ -55,20 +59,38 @@ class TimelineDialog(QDialog):
                           "sovrappongono in pianta, si propone che coprano quelle messe in luce dopo."))
         intro.setWordWrap(True)
         lay.addWidget(intro)
+        row = QHBoxLayout()
+        self.coregister = QCheckBox(tr("Coregistra i DEM delle fasi prima dei volumi"))
+        self.coregister.setToolTip(tr("Rilievi di giorni diversi non sono mai registrati alla perfezione: uno "
+                                      "spostamento di qualche centimetro o una leggera inclinazione fra due DEM "
+                                      "diventano falso scavo e riporto su ogni pendio. Ogni fase viene spostata sul "
+                                      "terreno che non e' cambiato (le unita' disegnate restano fuori); i DEM del "
+                                      "progetto non cambiano. Ricalcola per applicare la scelta."))
+        self.coregister_to = QComboBox()
+        self.coregister_to.addItem(tr("sulla prima fase"), "first")
+        self.coregister_to.addItem(tr("sulla fase precedente"), "previous")
+        self.coregister.toggled.connect(self.coregister_to.setEnabled)
+        row.addWidget(self.coregister)
+        row.addWidget(self.coregister_to)
+        row.addStretch(1)
+        lay.addLayout(row)
         self.tabs = QTabWidget()
         self.phases = _table(["Fase", "Data", "Unita' disegnate"])
         self.phases.itemDoubleClicked.connect(self._phase_clicked)
         self.phases.itemChanged.connect(self._date_edited)
         self.steps = _table(["Dalla fase", "Alla fase", "Unita'", "Asportato (m3)", "Riportato (m3)", "Area (m2)"])
         self.relations = _table(["Scrivi", "US sopra", "Rapporto", "US sotto", "Sovrapposizione (m2)", "Fasi"])
+        self.shifts = _table(["Fase", "Coregistrata su", "dx (cm)", "dy (cm)", "dz (cm)", "Inclinazione (mm/m)",
+                              "NMAD prima (cm)", "NMAD dopo (cm)", "Celle stabili", "Note"])
         from .table_export import install_excel_menu
 
         for table, name in ((self.phases, tr("Fasi")), (self.steps, tr("Volumi asportati")),
-                            (self.relations, tr("Rapporti suggeriti"))):
+                            (self.relations, tr("Rapporti suggeriti")), (self.shifts, tr("Coregistrazione"))):
             install_excel_menu(table, name)
         self.tabs.addTab(self.phases, tr("Fasi"))
         self.tabs.addTab(self.steps, tr("Volumi asportati"))
         self.tabs.addTab(self.relations, tr("Rapporti suggeriti"))
+        self.tabs.addTab(self.shifts, tr("Coregistrazione"))
         lay.addWidget(self.tabs, 1)
         self.status = QLabel("")
         self.status.setWordWrap(True)
@@ -82,6 +104,55 @@ class TimelineDialog(QDialog):
         self.b_write = bb.addButton(tr("Scrivi i rapporti nelle schede US"), QDialogButtonBox.ButtonRole.ActionRole)
         self.b_write.clicked.connect(self._write)
         lay.addWidget(bb)
+
+    # ------------------------------------------------------------ coregistration
+    def set_coregistration_default(self, phases: int) -> None:
+        """The choice of the first computation: coregistered when there is more than one phase."""
+        self.coregister.setChecked(phases > 1)
+        self.coregister_to.setEnabled(phases > 1)
+
+    def coregistration_options(self) -> dict:
+        """The keywords of :func:`archaeo.timeline.timeline` chosen in the window."""
+        return {"coregister": self.coregister.isChecked(), "reference": self.coregister_to.currentData() or "first"}
+
+    def _fill_shifts(self, report: dict) -> None:
+        from .table_export import RAW_ROLE
+
+        self.shifts.setRowCount(0)
+        if not report.get("coregistration"):
+            return
+        for p in report["phases"]:
+            c = p.get("coregistration")
+            r = self.shifts.rowCount()
+            self.shifts.insertRow(r)
+            self.shifts.setItem(r, 0, _item(p["label"], p["key"]))
+            if c is None:  # the reference of the others
+                self.shifts.setItem(r, 1, _item(tr("riferimento")))
+                continue
+            self.shifts.setItem(r, 1, _item(c["reference"]))
+            if c.get("error"):
+                self.shifts.setItem(r, 9, _item(tr("non coregistrata: {0}", c["error"])))
+                continue
+            tilt = math.hypot(c.get("tilt_x") or 0.0, c.get("tilt_y") or 0.0) * 1000
+            values = [(c["dx"], 100, 1), (c["dy"], 100, 1), (c["dz"], 100, 1), (tilt, 1, 2),
+                      (c.get("nmad_before"), 100, 2), (c.get("nmad_after"), 100, 2)]
+            for col, (v, scale, decimals) in enumerate(values, start=2):
+                if v is None:
+                    continue
+                it = _item(number(v * scale, decimals), right=True)
+                it.setData(RAW_ROLE, float(v * scale))  # the Excel export keeps the number
+                self.shifts.setItem(r, col, it)
+            cells = _item(number(c["cells"]), right=True)
+            cells.setData(RAW_ROLE, int(c["cells"]))
+            self.shifts.setItem(r, 8, cells)
+            notes = []
+            if not c.get("horizontal", True):
+                notes.append(tr("spostamento orizzontale non misurabile (terreno piano o in pendenza da un solo lato)"))
+            if not c.get("converged", True):
+                notes.append(tr("non convergente"))
+            if c.get("units_excluded"):
+                notes.append(tr("unita' disegnate escluse"))
+            self.shifts.setItem(r, 9, _item("; ".join(notes)))
 
     # ------------------------------------------------------------ content
     def set_report(self, report: dict, can_write: bool = False) -> None:
@@ -121,10 +192,19 @@ class TimelineDialog(QDialog):
             self.relations.setItem(r, 4, overlap)
             self.relations.setItem(r, 5, _item(" -> ".join(rel["phases"])))
         self.b_write.setEnabled(can_write and bool(report["relations"]))
+        self._fill_shifts(report)
         n = len(report["phases"])
-        self.status.setText(tr("{0} fasi, {1} rapporti suggeriti", n, len(report["relations"])) if n >= 2 else
-                            tr("Servono almeno due chunk con il DEM, nello stesso sistema di riferimento (Allinea "
-                               "chunk), uno per fase."))
+        text = (tr("{0} fasi, {1} rapporti suggeriti", n, len(report["relations"])) if n >= 2 else
+                tr("Servono almeno due chunk con il DEM, nello stesso sistema di riferimento (Allinea chunk), uno per "
+                   "fase."))
+        coreg = report.get("coregistration")
+        if coreg:
+            text += "; " + (tr("DEM coregistrati sulla prima fase") if coreg["reference"] == "first" else
+                            tr("DEM coregistrati ognuno sulla fase precedente"))
+            failed = [p["label"] for p in report["phases"] if (p.get("coregistration") or {}).get("error")]
+            if failed:
+                text += " " + tr("(non coregistrate: {0})", ", ".join(failed))
+        self.status.setText(text)
 
     def _add_step(self, a, b, unit, cut, fill, area, bold: bool = False) -> None:
         r = self.steps.rowCount()
