@@ -3,7 +3,9 @@ temperature and its anomaly, the reflectance of every band, the vegetation indic
 resolution from the GeoTIFFs, never from the reduced copy the views show.
 
 :class:`Probe` keeps the files open between calls: the readout under the mouse reads one cell of
-each file per movement (GDAL keeps the blocks around it in memory). :meth:`Probe.record` makes the
+each file per movement (GDAL keeps the blocks around it in memory). With ``keep_open`` False it
+closes them after each reading: while a task may write those products (Windows does not replace or
+delete a file another handle holds open). :meth:`Probe.record` makes the
 attributes of a measuring point (coordinates, elevation, temperature, bands, indices) and
 :func:`write_points` writes such points as a GeoPackage, a CSV or a GeoJSON that QGIS opens with
 their reference system.
@@ -36,6 +38,7 @@ class Probe:
         self.sources: list[tuple[Path, list[str]]] = []  # (GeoTIFF, field of each band)
         self.labels: dict[str, str] = {}  # field -> what to call it on screen
         self._open: dict[Path, object] = {}
+        self.keep_open = True
         if chunk is None:
             return
         data = Path(chunk.data_dir)
@@ -93,6 +96,13 @@ class Probe:
         """The values at the point ``x``, ``y`` (the chunk's reference system): only those the
         products have there (outside a raster, or on its empty cells, a field is left out);
         ``fields``: only the products holding these."""
+        try:
+            return self._at(x, y, fields)
+        finally:
+            if not self.keep_open:
+                self.close()
+
+    def _at(self, x: float, y: float, fields) -> dict[str, float]:
         from rasterio.windows import Window
 
         out: dict[str, float] = {}

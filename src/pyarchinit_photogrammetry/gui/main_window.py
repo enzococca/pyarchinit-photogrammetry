@@ -1290,6 +1290,8 @@ class MainWindow(QMainWindow):
             self.choose_project_site(tr("Il database contiene {0} siti (scavi).", len(sites)))
 
     def _busy(self, busy: bool) -> None:
+        if busy:  # the task may write the products the readout under the mouse holds open (see _probe)
+            self._probe_reset()
         for a in self._processing_actions:
             a.setEnabled(not busy)
         self.reference.setEnabled(not busy)
@@ -6309,6 +6311,9 @@ class MainWindow(QMainWindow):
             self._probe_reset()
             self._probe_obj = Probe(self.chunk)
             self._probe_obj._chunk = self.chunk
+        # while a task runs the files are closed after each reading: the task may write them, and
+        # Windows does not replace or delete a file held open
+        self._probe_obj.keep_open = not self.runner.busy
         return self._probe_obj
 
     def _probe_reset(self) -> None:
