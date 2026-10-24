@@ -384,6 +384,50 @@ def test_help_of_a_plugin_command_goes_to_the_plugin():
     assert r.exit_code == 2 and "no plugin gives the command" in r.output
 
 
+def test_requests_in_projected_coordinates(tmp_path, qapp):
+    """In UTM coordinates (hundreds of km) vertices a few metres apart stay apart: Enter ends a short
+    line and a small polygon; the same pixel clicked twice counts once."""
+    import numpy as np
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.gui import main_window as mw
+    from pyarchinit_photogrammetry.plugins.api import Context
+
+    doc = ppg.Document()
+    doc.add_chunk("utm")
+    doc.save(tmp_path / "progetto.ppg")
+    w = mw.MainWindow(doc, autoconnect=False, check_updates=False)
+    w.resize(1200, 800)
+    w.show()
+    v = w.ortho_view
+    context = Context("prova", tmp_path / "dati", w)
+    try:
+        context.show_frame((500000.0, 4500000.0, 500020.0, 4500010.0), 0.01, "griglia")
+        qapp.processEvents()
+
+        def click(x, y):
+            QTest.mouseClick(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                             v.mapFromScene(v.scene_pt(x, y)))
+
+        got = []
+        assert context.request_line(got.append)
+        for x, y in ((500002.0, 4500002.0), (500002.0, 4500005.0), (500002.0, 4500005.0)):
+            click(x, y)
+        QTest.keyClick(v, Qt.Key.Key_Return)
+        assert len(got) == 1 and np.allclose(got[0], [[500002.0, 4500002.0], [500002.0, 4500005.0]], atol=0.05)
+        assert context.request_polygon(got.append)
+        for x, y in ((500003.0, 4500003.0), (500006.0, 4500003.0), (500005.0, 4500006.0)):
+            click(x, y)
+        QTest.keyClick(v, Qt.Key.Key_Return)
+        assert len(got) == 2 and len(got[1]) == 3
+    finally:
+        context.release()
+        w.setWindowModified(False)
+        w.close()
+
+
 def test_plugins_borrow_the_drawing_and_follow_the_view(tmp_path, qapp):
     """The window lends its drawing to a plugin (a polygon, a line, a point), tells it when the 2D
     view shows another raster, gives it an empty frame to draw on, marks the project modified and

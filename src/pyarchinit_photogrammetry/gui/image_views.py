@@ -1031,7 +1031,7 @@ class RasterView(_ZoomView):
                         verts.append(np.asarray([coords], float)[:, :2])
                         continue
                     c = np.asarray(coords, float)[:, :2]
-                    if gtype == "Polygon" and len(c) > 2 and not np.allclose(c[0], c[-1]):
+                    if gtype == "Polygon" and len(c) > 2 and not np.allclose(c[0], c[-1], rtol=0.0, atol=1e-9):
                         c = np.vstack([c, c[:1]])
                     verts.append(c)
                     if len(c) >= 2:
@@ -1457,9 +1457,13 @@ class RasterView(_ZoomView):
                 "chart": self.chart_finished, "req_polygon": self.request_finished}.get(mode, self.crop_finished)
 
     def _finish_request(self) -> None:
-        """The geometry of a request, when it has enough vertices (polygon 3, line 2, point 1)."""
+        """The geometry of a request, when it has enough vertices (polygon 3, line 2, point 1); a
+        vertex clicked again on the same screen pixel (a slow double click) counts once."""
         need = {"req_polygon": 3, "req_line": 2, "req_point": 1}[self.mode]
-        xy = [p for i, p in enumerate(self._click_xy) if i == 0 or not np.allclose(p, self._click_xy[i - 1])]
+        # one screen pixel in world units: a relative tolerance would join vertices metres apart in UTM
+        pixel = abs(self.tr.a) / max(self.transform().m11(), 1e-12) if self.tr is not None else 0.0
+        xy = [p for i, p in enumerate(self._click_xy)
+              if i == 0 or np.hypot(p[0] - self._click_xy[i - 1][0], p[1] - self._click_xy[i - 1][1]) > pixel]
         if len(xy) < need:
             return
         mode = self.mode
