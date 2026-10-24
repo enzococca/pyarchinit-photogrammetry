@@ -319,7 +319,8 @@ Dalla riga di comando `ppg update` dice se esiste una versione più nuova e `ppg
   risoluzione a terra, impronta: vedi la pagina dell'API, *Immagini satellitari*);
   *Nodi di rete...*: gli altri computer che lavorano a questo progetto dalla cartella condivisa (la
   cartella da dare a `ppg node` su ognuno, i nodi presenti con core e GPU, l'interruttore che affida
-  loro punti chiave e mappe di profondità PatchMatch, ricordato e applicato al programma in esecuzione come
+  loro punti chiave, mappe di profondità PatchMatch, tasselli dell'ortofoto e celle della texture,
+  ricordato e applicato al programma in esecuzione come
   `PPG_NODES`; `ppg remote` per una macchina via SSH: vedi la
   pagina dell'API, *Altri computer*);
   *Plugin...*: i plugin installati e quelli del repository dei plugin (installa, attiva, disattiva,
