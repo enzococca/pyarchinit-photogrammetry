@@ -99,7 +99,7 @@ exported as GeoPackage, CSV or GeoJSON (*Esporta i punti di misura...*).
 | --- | --- |
 | Toolbar | the workflow with coloured icons: open/save, photos, markers, alignment, references, dense cloud, model, texture, DEM, orthophoto, *Elabora tutto*, publish to PyArchInit. Processing actions are disabled while a task runs |
 | Drawing toolbar | always visible under the workflow: the drawing modes (*Sposta / interroga*, *Disegna US*, *Traccia sezione*, *Misura*, *Quota*, *SAM* with its menu), *Cancella disegni*, contour lines, volumes, plan slices, and shortcuts to the *Layer* and *Sezioni* panes and to *Pubblica* (units and spot heights) |
-| Left: **Area di lavoro** | project, chunks (click to make one active), CRS (double click to change), cameras (green camera = aligned, red = not aligned), markers (GCP, check points), products; double click opens a photo or a product |
+| Left: **Area di lavoro** | project, chunks (double click to make one active), CRS (double click to change), cameras (green camera = aligned, red = not aligned), markers (GCP, check points), scale bars, depth maps and products; double click opens a photo or a product; the bar above adds chunks and photos, makes a chunk active, enables, disables, renames and removes (see *The workspace*) |
 | Left: **Riferimenti** | markers with use/check flags, editable coordinates and accuracy, errors (m and px), camera positions; *Importa CSV*, *Aggiorna* (georeferencing), *Ottimizza camere* (with 3 or more control points they take part in the bundle adjustment and bend the block; check points stay out; control/check errors before and after in the log); *Barra di scala...* and *Importa barre...*; *Coordinate stimate* (as Metashape's *View Estimated*: the X, Y, Z columns show the estimated coordinates of the markers instead of the reference ones; on by itself when no marker has reference coordinates); the scale bars below the markers (see *Scale bars*); control and check RMSE of points and bars. The tooltip of a marker tells how it is placed: triangulated from N photos, on the surface from one photo, or added on the model or the orthophoto |
 | Left: **Layer** (editing) | double click a value in *Attributi* to change it (US, area, type, label, any free field; computed fields such as m2 and length are read-only). Units loaded from PyArchInit keep their `gid`: *Salva modifiche in PyArchInit* writes the changes back to `pyunitastratigrafiche`; drawn units and spot heights are written with *Pubblica*; written features keep their `gid`, so nothing is written twice |
 | Left: **Layer** | everything drawn on the orthomosaic/DEM is a layer: stratigraphic units, US polygons loaded from PyArchInit, section traces, contour lines, plan slices, spot heights. Tick to show/hide, double click to zoom (layer or single feature), *Rimuovi*; in *Sposta / interroga* mode a click on a feature shows its attributes (US, area, m2, elevation of a contour...) in the pane and in the status bar |
@@ -154,6 +154,61 @@ The 3D view uses VTK (pyvista/pyvistaqt) when OpenGL is available, otherwise a s
 renderer (force it with `PPG_RENDERER=software`, or VTK with `PPG_RENDERER=vtk`).
 *Vista > Tema* switches between the light and the dark theme (remembered).
 
+## The workspace
+
+The *Area di lavoro* pane shows the project as Metashape's Workspace does: the project, its chunks
+and, under each chunk, its coordinate system, *Camere* (aligned / all), *Marker*, *Barre di scala*,
+*Punti di legame*, *Mappe di profondità* (how many, with which quality), *Nuvola densa*, *Modello 3D*,
+the texture, *DEM* and *Ortofoto* with their sizes, the relief rasters, the coverage of the photos and
+the precision of the DEM, the elevations, the products of the multispectral and thermal captures and
+those of the plugins. The active chunk - the one the tools work on - is in bold with *[attivo]*; a
+disabled chunk and a disabled photo are grey.
+
+The bar above the tree has icons only (their tooltips name them; on a narrow pane the » at its end
+holds the buttons that do not fit):
+
+| Button | What it does |
+| --- | --- |
+| *Aggiungi chunk* | an empty chunk with the name you give it, which becomes the active one |
+| *Aggiungi foto...*, *Aggiungi cartella...* | photos, or a folder of photos, into the active chunk (as in *Flusso di lavoro*) |
+| *Rendi attivo* | the chunk selected becomes the active one (a double click on it does the same) |
+| *Attiva*, *Disattiva* | the chunks and the photos selected: a disabled chunk stays in the project, out of the batch steps on the enabled chunks and of the chunks *Allinea chunk* and *Unisci chunk* propose; a disabled photo stays out of the next alignment and of the next builds |
+| *Rinomina...* | the chunk or the version selected (F2) |
+| *Rimuovi* | what is selected (Delete or Backspace): see below |
+
+A click selects (Cmd/Ctrl + click and Shift + click select several items); a double click or Enter
+makes a chunk the active one, and opens a photo, a product or a version after making its chunk the
+active one. The right click has the commands of each item: on a chunk *Rendi attivo*, *Rinomina...*,
+*Attiva* or *Disattiva*, *Rimuovi chunk*; on the dense cloud, the model, the DEM and the orthomosaic
+*Mostra*, their versions (*Conserva una copia come versione*, *Rinomina questa versione...*) and
+*Rimuovi*; on a kept version *Mostra*, *Rendi attiva*, *Differenza con il DEM attivo*, *Esporta...*,
+*Rinomina...*, *Rimuovi*; on a photo *Apri*, *Attiva* or *Disattiva*, *Rimuovi la foto*; on a marker
+*Filtra le foto di ...* and *Rimuovi il marker*; on the groups *Camere*, *Marker* and *Barre di scala*
+the removal of all they hold; on several items selected *Attiva*, *Disattiva* and *Rimuovi N elementi*;
+on the project *Aggiungi chunk*. The commands work on the chunks that are not the active one too:
+removing, renaming, enabling and disabling act on the chunk of the item and leave the active chunk as
+it is, while showing an item and the commands of its versions make its chunk the active one first.
+
+**Removing.** Everything the tree lists can be removed, the coordinate system apart: whole chunks (the
+last one too: the project gets an empty chunk, as a new project has one), the products - the tie
+points take the alignment with them (the photos are no longer aligned; dense cloud, model, DEM and
+orthomosaic stay), the model takes its texture -, the depth maps (often most of the space a chunk
+takes), the relief rasters, the products of the multispectral and thermal captures, kept versions,
+elevations, photos (their files are never touched; the next alignment leaves them out), markers (with
+the scale bars that end at them) and scale bars. The kept versions of a product stay when the product
+is removed: remove them one by one with the right click. A question first says what goes and what
+happens to the files; *Annulla* there changes nothing.
+
+*Modifica > Annulla* puts back what was removed as it was - a chunk in its place in the list and
+active again if it was, the files where they were - and *Ripeti* takes it away again. The files of
+what is removed are moved aside inside the files folder of the project (`<project>.ppg.files/.removed/`:
+on the same disk, instant), never deleted at once, and a file outside the chunk's own folder - a DEM
+or an orthomosaic exported by Metashape that an imported project points to - is never moved or
+deleted: it only leaves the project. When the project is closed, or another one is opened, the files
+follow the project as last saved: what it no longer lists is deleted, what it still lists (a removal
+never saved) goes back in its place. If the program stops before (a crash), the next opening of the
+project does the same.
+
 ## Errors and logs
 
 Long steps run in the background with a progress window and *Annulla*. The window shows the
@@ -205,7 +260,7 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   report, *Crea e apri progetto demo*, *Pagina iniziale* (the report and the tables: see below).
 * **Flusso di lavoro**: add photos/folder, *Ricollega foto* (the photos with the same names in
   another folder and its subfolders: a copy on an external disk of a Dropbox folder kept online
-  only, a moved folder), add chunk, *Allinea chunk* (bring other chunks into the frame of a reference chunk by markers with the same name, photos in common or overlapping clouds), *Unisci chunk* (a new chunk with the photos, markers, tie points, clouds and optionally meshes of aligned chunks), detect coded markers, align - the dialog of
+  only, a moved folder), add chunk (also in the bar of the workspace), *Allinea chunk* (bring other chunks into the frame of a reference chunk by markers with the same name, photos in common or overlapping clouds), *Unisci chunk* (a new chunk with the photos, markers, tie points, clouds and optionally meshes of aligned chunks), detect coded markers, align - the dialog of
   Metashape's *Align Photos*: precision, generic preselection (the pairs that overlap found first on
   reduced photos; every pair up to 40 photos anyway), reference preselection (the GPS of the photos, a
   previous alignment or the capture order), the points (*Punti*: SIFT, or learned points matched by
@@ -269,8 +324,8 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   `pyunitastratigrafiche`, load existing unit polygons onto the orthomosaic, publish spot
   heights to `pyarchinit_quote`.
 * **Vista**: *Pannelli* (each pane open or closed, F6 / Shift+F6 to the next and previous pane, the
-  default layout: see *Panes* above), the panes themselves, views (F2 model, F3 orthomosaic/DEM,
-  F4 photo), console (Ctrl+Shift+P), theme.
+  default layout: see *Panes* above), the panes themselves, views (F2 model - in the workspace F2 renames
+  instead -, F3 orthomosaic/DEM, F4 photo), console (Ctrl+Shift+P), theme.
 * **Aiuto**: online documentation, environment diagnosis, log folder, *Controlla aggiornamenti*,
   *Controlla gli aggiornamenti all'avvio*, about.
 
@@ -477,8 +532,10 @@ workbook too.
   (the orthomosaic is updated again), the reconstruction region, and the edits of products in place -
   classes given by hand, points deleted or kept with the lasso, cleaning and cropping of the dense
   cloud, faces of the model, tie points, texture patches (their files are copied aside before the
-  edit; on macOS a clone, instant and without space). Processing steps (alignment, dense cloud...)
-  are not undone. The history starts again when another project or chunk is opened.
+  edit; on macOS a clone, instant and without space), and what the workspace removes (see *The
+  workspace*). Processing steps (alignment, dense cloud...) are not undone. The history starts again
+  when another project is opened; when another chunk becomes the active one it keeps only the
+  removals (the other edits belong to their chunk).
 * **Batch processing** (*Flusso di lavoro > Elaborazione batch*): a list of steps - alignment,
   products, exports, the precision and the field check - each on all chunks or on the chosen ones,
   with its parameters (*Aggiungi* by group, *Modifica* or double click, *Su*/*Giu'*, *Carica*/*Salva*

@@ -100,7 +100,7 @@ gli altri layer e si esportano in GeoPackage, CSV o GeoJSON (*Esporta i punti di
 | --- | --- |
 | Barra degli strumenti | il flusso di lavoro con icone colorate: apri/salva, foto, marker, allineamento, riferimenti, nuvola densa, modello, texture, DEM, ortofoto, *Elabora tutto*, pubblicazione in PyArchInit. Le azioni di elaborazione sono disattivate mentre gira un'attività |
 | Barra di disegno (*Disegno e layer*) | sempre visibile sotto il flusso di lavoro: le modalità di disegno (*Sposta / interroga*, *Disegna US*, *Traccia sezione*, *Misura*, *Quota*, *SAM* con il suo menu), *Cancella disegni*, curve di livello, volumi, piante a quota e le scorciatoie ai pannelli *Layer* e *Sezioni* e a *Pubblica* (unità e quote) |
-| Sinistra: **Area di lavoro** | progetto, chunk (clic per renderne uno attivo), CRS (doppio clic per cambiarlo), camere (camera verde = allineata, rossa = non allineata), marker (GCP, punti di verifica), prodotti; un doppio clic apre una foto o un prodotto |
+| Sinistra: **Area di lavoro** | progetto, chunk (doppio clic per renderne uno attivo), CRS (doppio clic per cambiarlo), camere (camera verde = allineata, rossa = non allineata), marker (GCP, punti di verifica), barre di scala, mappe di profondità e prodotti; un doppio clic apre una foto o un prodotto; la barra sopra aggiunge chunk e foto, rende attivo un chunk, attiva, disattiva, rinomina e rimuove (vedi *L'area di lavoro*) |
 | Sinistra: **Riferimenti** | marker con le spunte usa/check, coordinate e accuratezza modificabili, errori (m e px), posizioni delle camere; *Importa CSV*, *Aggiorna* (georeferenziazione), *Ottimizza camere* (con 3 o più punti di controllo entrano nella compensazione e piegano il blocco; i punti di verifica restano fuori; errori di controllo e di verifica prima e dopo nel log); *Barra di scala...* e *Importa barre...*; *Coordinate stimate* (come *View Estimated* di Metashape: le colonne X, Y, Z mostrano le coordinate stimate dei marker invece di quelle di riferimento; si attiva da sola quando nessun marker ha coordinate di riferimento); le barre di scala sotto i marker (vedi *Barre di scala*); RMSE di controllo e di verifica di punti e barre. Il tooltip di un marker dice come è collocato: triangolato da N foto, sulla superficie da una foto, o aggiunto sul modello o sull'ortofoto |
 | Sinistra: **Layer** (modifica) | doppio clic su un valore in *Attributi* per cambiarlo (US, area, tipo, etichetta, qualsiasi campo libero; i campi calcolati come m2 e lunghezza sono di sola lettura). Le unità caricate da PyArchInit conservano il loro `gid`: *Salva modifiche in PyArchInit* riscrive le modifiche in `pyunitastratigrafiche`; le unità disegnate e le quote si scrivono con *Pubblica*; gli elementi scritti conservano il loro `gid`, così niente viene scritto due volte |
 | Sinistra: **Layer** | tutto ciò che si disegna sull'ortofoto/DEM è un layer: unità stratigrafiche, poligoni US caricati da PyArchInit, tracce di sezione, curve di livello, piante a quota, quote. Spunta per mostrare/nascondere, doppio clic per lo zoom (sul layer o sul singolo elemento), *Rimuovi*; in modalità *Sposta / interroga* un clic su un elemento ne mostra gli attributi (US, area, m2, quota di una curva...) nel pannello e nella barra di stato |
@@ -157,6 +157,62 @@ La vista 3D usa VTK (pyvista/pyvistaqt) quando OpenGL è disponibile, altrimenti
 (lo si impone con `PPG_RENDERER=software`, o VTK con `PPG_RENDERER=vtk`).
 *Vista > Tema* passa dal tema chiaro a quello scuro e viceversa (la scelta viene ricordata).
 
+## L'area di lavoro
+
+Il pannello *Area di lavoro* mostra il progetto come il Workspace di Metashape: il progetto, i suoi
+chunk e, sotto ogni chunk, il sistema di riferimento, *Camere* (allineate / tutte), *Marker*, *Barre
+di scala*, *Punti di legame*, *Mappe di profondità* (quante e con quale qualità), *Nuvola densa*,
+*Modello 3D*, la texture, *DEM* e *Ortofoto* con le loro dimensioni, i raster del rilievo, la copertura
+delle foto e la precisione del DEM, i prospetti, i prodotti delle riprese multispettrali e termiche e
+quelli dei plugin. Il chunk attivo - quello su cui lavorano gli strumenti - è in grassetto con
+*[attivo]*; un chunk disattivato e una foto disattivata sono in grigio.
+
+La barra sopra l'albero ha solo icone (i tooltip le nominano; in un pannello stretto il » in fondo
+raccoglie i pulsanti che non ci stanno):
+
+| Pulsante | Cosa fa |
+| --- | --- |
+| *Aggiungi chunk* | un chunk vuoto con il nome che gli dai, che diventa quello attivo |
+| *Aggiungi foto...*, *Aggiungi cartella...* | foto, o una cartella di foto, nel chunk attivo (come dal menu *Flusso di lavoro*) |
+| *Rendi attivo* | il chunk selezionato diventa quello attivo (lo fa anche un doppio clic su di lui) |
+| *Attiva*, *Disattiva* | i chunk e le foto selezionati: un chunk disattivato resta nel progetto, fuori dai passi batch sui chunk attivati e dai chunk che *Allinea chunk* e *Unisci chunk* propongono; una foto disattivata resta fuori dal prossimo allineamento e dalle prossime costruzioni |
+| *Rinomina...* | il chunk o la versione selezionati (F2) |
+| *Rimuovi* | ciò che è selezionato (Canc o Backspace): vedi sotto |
+
+Un clic seleziona (Cmd/Ctrl + clic e Maiusc + clic ne selezionano più d'uno); un doppio clic o Invio
+rende attivo un chunk, e apre una foto, un prodotto o una versione dopo aver reso attivo il suo chunk.
+Il tasto destro ha i comandi di ogni elemento: su un chunk *Rendi attivo*, *Rinomina...*, *Attiva* o
+*Disattiva*, *Rimuovi chunk*; su nuvola densa, modello, DEM e ortofoto *Mostra*, le loro versioni
+(*Conserva una copia come versione*, *Rinomina questa versione...*) e *Rimuovi*; su una versione
+conservata *Mostra*, *Rendi attiva*, *Differenza con il DEM attivo*, *Esporta...*, *Rinomina...*,
+*Rimuovi*; su una foto *Apri*, *Attiva* o *Disattiva*, *Rimuovi la foto*; su un marker *Filtra le foto
+di ...* e *Rimuovi il marker*; sui gruppi *Camere*, *Marker* e *Barre di scala* la rimozione di tutto
+quello che contengono; su più elementi selezionati *Attiva*, *Disattiva* e *Rimuovi N elementi*; sul
+progetto *Aggiungi chunk*. I comandi valgono anche per i chunk che non sono quello attivo: rimuovere,
+rinominare, attivare e disattivare agiscono sul chunk dell'elemento e lasciano il chunk attivo com'è,
+mentre mostrare un elemento e i comandi delle sue versioni rendono prima attivo il suo chunk.
+
+**Rimuovere.** Si può rimuovere tutto ciò che l'albero elenca, a parte il sistema di riferimento: chunk
+interi (anche l'ultimo: il progetto ne riceve uno vuoto, come lo ha un progetto nuovo), i prodotti - i
+punti di legame si portano via l'allineamento (le foto tornano non allineate; nuvola densa, modello,
+DEM e ortofoto restano), il modello si porta via la sua texture -, le mappe di profondità (spesso la
+parte più grande dello spazio di un chunk), i raster del rilievo, i prodotti delle riprese
+multispettrali e termiche, le versioni conservate, i prospetti, le foto (i loro file non vengono mai
+toccati; il prossimo allineamento le lascia fuori), i marker (con le barre di scala che finiscono su
+di loro) e le barre di scala. Le versioni conservate di un prodotto restano quando il prodotto viene
+rimosso: si rimuovono una per una con il tasto destro. Prima una domanda dice cosa se ne va e cosa
+succede ai file; lì *Annulla* non cambia nulla.
+
+*Modifica > Annulla* rimette ciò che è stato rimosso com'era - un chunk al suo posto nell'elenco, e di
+nuovo attivo se lo era, i file dov'erano - e *Ripeti* lo toglie di nuovo. I file di ciò che si rimuove
+vengono spostati da parte dentro la cartella dei file del progetto (`<progetto>.ppg.files/.removed/`:
+sullo stesso disco, istantaneo), mai cancellati subito, e un file fuori dalla cartella del chunk - un
+DEM o un'ortofoto esportati da Metashape a cui punta un progetto importato - non viene mai spostato né
+cancellato: esce soltanto dal progetto. Quando il progetto si chiude, o se ne apre un altro, i file
+seguono il progetto com'è stato salvato l'ultima volta: ciò che non elenca più viene cancellato, ciò
+che elenca ancora (una rimozione mai salvata) torna al suo posto. Se il programma si ferma prima (un
+crash), lo fa la successiva apertura del progetto.
+
 ## Errori e log
 
 I passi lunghi girano in background con una finestra di avanzamento e *Annulla*. La finestra mostra
@@ -207,7 +263,7 @@ Dalla riga di comando `ppg update` dice se esiste una versione più nuova e `ppg
   vedi sotto).
 * **Flusso di lavoro**: aggiungi foto/cartella, *Ricollega foto* (le foto con gli stessi nomi in
   un'altra cartella e nelle sue sottocartelle: una copia su disco esterno di una cartella Dropbox
-  tenuta solo online, una cartella spostata), aggiungi chunk, *Allinea chunk* (porta altri chunk nel sistema di un chunk di riferimento tramite i marker con lo stesso nome, le foto in comune o le nuvole che si sovrappongono), *Unisci chunk* (un nuovo chunk con le foto, i marker, i punti di legame, le nuvole e, a scelta, le mesh dei chunk allineati), rileva i marker codificati, allinea - la finestra di
+  tenuta solo online, una cartella spostata), aggiungi chunk (anche dalla barra dell'area di lavoro), *Allinea chunk* (porta altri chunk nel sistema di un chunk di riferimento tramite i marker con lo stesso nome, le foto in comune o le nuvole che si sovrappongono), *Unisci chunk* (un nuovo chunk con le foto, i marker, i punti di legame, le nuvole e, a scelta, le mesh dei chunk allineati), rileva i marker codificati, allinea - la finestra di
   *Allinea foto* di Metashape: precisione, preselezione generica (le coppie che si sovrappongono trovate
   prima su foto ridotte; fino a 40 foto comunque tutte le coppie), preselezione di riferimento (il GPS
   delle foto, un allineamento precedente o l'ordine di scatto), i punti (*Punti*: SIFT, oppure punti
@@ -273,7 +329,8 @@ Dalla riga di comando `ppg update` dice se esiste una versione più nuova e `ppg
   sull'ortofoto, pubblicazione delle quote in `pyarchinit_quote`.
 * **Vista**: *Pannelli* (ogni pannello aperto o chiuso, F6 / Maiusc+F6 per il pannello successivo e
   il precedente, la disposizione iniziale: vedi *Pannelli* sopra), i singoli pannelli, viste (F2
-  modello, F3 ortofoto/DEM, F4 foto), console (Ctrl+Maiusc+P), tema.
+  modello - nell'area di lavoro invece F2 rinomina -, F3 ortofoto/DEM, F4 foto), console (Ctrl+Maiusc+P),
+  tema.
 * **Aiuto**: documentazione in linea, diagnostica dell'ambiente, cartella dei log, *Controlla aggiornamenti*,
   *Controlla gli aggiornamenti all'avvio*, informazioni.
 
@@ -494,9 +551,10 @@ file Excel.
   viene aggiornata di nuovo), la regione di ricostruzione e le modifiche dei prodotti sul posto -
   classi date a mano, punti eliminati o tenuti con il lazo, pulizia e ritaglio della nuvola densa,
   facce del modello, punti di legame, patch della texture (i loro file vengono copiati da parte prima
-  della modifica; su macOS un clone, istantaneo e senza spazio). I passi di elaborazione
-  (allineamento, nuvola densa...) non si annullano. La storia ricomincia quando si apre un altro
-  progetto o chunk.
+  della modifica; su macOS un clone, istantaneo e senza spazio) e ciò che si rimuove dall'area di
+  lavoro (vedi *L'area di lavoro*). I passi di elaborazione (allineamento, nuvola densa...) non si
+  annullano. La storia ricomincia quando si apre un altro progetto; quando un altro chunk diventa
+  attivo conserva solo le rimozioni (le altre modifiche appartengono al loro chunk).
 * **Elaborazione batch** (*Flusso di lavoro > Elaborazione batch*): un elenco di passi - allineamento,
   prodotti, esportazioni, la precisione e il controllo sul campo - ciascuno su tutti i chunk o su
   quelli scelti, con i suoi parametri (*Aggiungi* per gruppo, *Modifica* o doppio clic, *Su*/*Giu'*,
