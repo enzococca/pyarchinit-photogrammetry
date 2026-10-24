@@ -66,11 +66,19 @@ def _no_modal_dialogs(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _qt_garbage_between_tests():
-    """The windows and widgets a test leaves behind are destroyed here, between the tests, and not
-    by Python's garbage collector in the middle of the next test's event loop: the CI died now and
-    then with a segmentation fault in QCoreApplication::notifyInternal2, called by
-    QTimerInfoList::activateTimers in a processEvents of a test of the interface (a timer handing
-    its event to an object no longer there). The objects waiting for deleteLater go too."""
+    """The windows and widgets a test leaves behind are destroyed here, between the tests, in the
+    main thread, and not by a garbage collection that a worker thread of a later test starts: the
+    CI died now and then (21-23 October 2026: 13 runs in 36 on Python 3.12, 1 in 36 on 3.11) with a
+    segmentation fault in QCoreApplication::notifyInternal2, called by
+    QTimerInfoList::activateTimers in a processEvents of test_satellite.py::
+    test_command_line_and_the_menu. test_relief.py::test_chunk_cli_and_view left a RasterView with
+    its timers running, kept by a reference cycle (the traceback in the CliRunner result leads
+    back to the test's frame); a collection started by a worker thread (the thread pools of the
+    satellite engine, the QThread of the window's tasks) freed it there, where Qt cannot stop
+    timers ("QObject::~QObject: Timers cannot be stopped from another thread"), and the next
+    processEvents handed a timer event to the deleted view
+    (reproduced in tests/test_gc_guard.py; the application collects in the GUI thread only, see
+    gui/gc_guard.py). The objects waiting for deleteLater go too."""
     yield
     import gc
     import sys

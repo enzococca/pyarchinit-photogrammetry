@@ -134,6 +134,11 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
     if QApplication.instance() is None:
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     qapp = QApplication.instance() or QApplication([sys.argv[0]] + argv)
+    from .gc_guard import install as collect_in_this_thread
+
+    # Python's garbage collector from now on runs only here, in the GUI thread: a collection
+    # started by a worker thread would destroy the windows and timers it frees there (see gc_guard)
+    collector = collect_in_this_thread(qapp)
     import locale
 
     try:  # Qt took the locale of the system: numbers for the C/C++ libraries in the C locale (see ppg_launcher)
@@ -249,7 +254,10 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
             qapp.exit(0 if ok else 2)
 
         QTimer.singleShot(1500, check)
-    return qapp.exec()
+    try:
+        return qapp.exec()
+    finally:
+        collector.stop()
 
 
 __all__ = ["main", "APP_TITLE"]
