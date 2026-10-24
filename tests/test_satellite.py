@@ -386,3 +386,192 @@ def test_command_line_and_the_menu(satellites, tmp_path, monkeypatch):
     assert len(w.chunk.meta["versions"]["orthomosaic"]) == 2 and len(w.chunk.meta["versions"]["dem"]) == 2
     w.setWindowModified(False)
     w.close()
+
+
+# ---------------------------------------------------------------------------- three scenes and more
+def test_rpc_list_of_the_benchmark_chips_and_the_dates(satellites, tmp_path):
+    """The comma-separated RPC of the JHU/APL chips: offsets and scales, 80 coefficients, the
+    validity box and the chip's place in the full image (moved back into the offsets); the sidecar
+    ``rpc_<chip>.txt`` is found by itself. Acquisition dates from DigitalGlobe and ISO names."""
+    import shutil
+    from datetime import datetime
+
+    rpc = satellites["scenes"]["east"]["rpc"]
+    chip_c, chip_r = 1234.25, 567.5
+    nums = [rpc.line_off + chip_r, rpc.samp_off + chip_c, rpc.lat_off, rpc.long_off, rpc.height_off, rpc.line_scale,
+            rpc.samp_scale, rpc.lat_scale, rpc.long_scale, rpc.height_scale, *rpc.line_num, *rpc.line_den,
+            *rpc.samp_num, *rpc.samp_den, -58.6, -34.5, -58.5, -34.4, chip_c, chip_r]
+    scene = tmp_path / "Site_01SEP15WV031000015SEP01135603-P1BS-500497284040_01_P001.tif"
+    shutil.copy2(satellites["scenes"]["west"]["path"], scene)  # no RPC in this file: the sidecar is read
+    (tmp_path / f"rpc_{scene.stem}.txt").write_text(", ".join(f"{v:.20f}" for v in nums) + "\n")
+    assert _same(sat.read_rpc(scene), rpc)
+    assert sat.acquisition_date(scene) == datetime(2015, 9, 1, 13, 56, 3)
+    assert sat.acquisition_date(tmp_path / "S2B_MSIL2A_20230714T101559_x.tif") == datetime(2023, 7, 14, 10, 15, 59)
+    assert sat.acquisition_date(tmp_path / "scene.tif") is None
+    with pytest.raises(ValueError):
+        sat.parse_rpc_list("1, 2, 3")
+
+
+def test_pairs_are_chosen_by_angle_and_date():
+    from datetime import datetime
+
+    def view(off_nadir, azimuth):
+        t, a = np.radians(off_nadir), np.radians(azimuth)
+        v = np.array([np.tan(t) * np.sin(a), np.tan(t) * np.cos(a), 1.0])
+        return v / np.linalg.norm(v)
+
+    views = [view(10, 90), view(10, 270), view(2, 0), view(12, 95), view(25, 180)]
+    dates = [datetime(2015, 6, 1), datetime(2015, 6, 3), datetime(2015, 6, 2), datetime(2015, 12, 1), datetime(2015, 6, 2)]
+    got = sat.choose_pairs(views, dates, min_angle=5, max_angle=30, max_pairs=3)
+    angles = {c["pair"]: c["angle"] for c in got}
+    assert all(5 <= a <= 30 for a in angles.values())
+    assert got[0]["days"] <= 1.0  # the closest in time first
+    assert (0, 3) not in angles  # 2-3 degrees apart: no base
+    assert len({i for c in got for i in c["pair"]}) >= 4  # spread over the scenes
+    assert sat.choose_pairs(views[:2], None, min_angle=5, max_angle=30)[0]["days"] is None
+
+
+def test_fusion_takes_the_heights_that_agree():
+    stack = np.full((4, 2, 3), np.nan)
+    stack[:, 0, 0] = [10.0, 10.2, 10.1, 30.0]  # an outlier among three that agree
+    stack[:2, 0, 1] = [5.0, 5.1]  # only two
+    stack[0, 0, 2] = 7.0  # only one
+    stack[:, 1, 0] = [1.0, 9.0, 1.2, 20.0]
+    z, n = sat.fuse_heights(stack, agree=0.5, min_count=2)
+    assert z[0, 0] == pytest.approx(10.1) and n[0, 0] == 3
+    assert z[0, 1] == pytest.approx(5.05) and np.isnan(z[0, 2]) and np.isnan(z[1, 1])
+    z1, _ = sat.fuse_heights(stack, agree=0.5, min_count=1)
+    assert z1[0, 2] == 7.0
+
+
+def _size(s):
+    b, gsd = s["bounds"], s["gsd"]
+    return int(1.3 * (b[2] - b[0]) / gsd), int(1.3 * (b[3] - b[1]) / gsd)
+
+
+@pytest.fixture(scope="module")
+def three_satellites(satellites):
+    """A third scene of the trench, 20 degrees off nadir from the north."""
+    ch = satellites["chunk"]
+    rpc, _, (_, to_xy) = _affine_rpc(ch.crs, satellites["bounds"], satellites["h0"], 20.0, 0.0, 30.0,
+                                     satellites["gsd"], *_size(satellites))
+    path = _render(rpc, to_xy, satellites["ortho"], satellites["dem"], *_size(satellites),
+                   satellites["folder"] / "scene_north.tif")
+    return {**satellites, "north": {"path": path, "rpc": rpc}}
+
+
+def _truth_errors(path: Path, dem: Path) -> np.ndarray:
+    import rasterio
+
+    with rasterio.open(path) as src:
+        dsm = src.read(1).astype(np.float64)
+        dsm[dsm == src.nodata] = np.nan
+        tr = src.transform
+        x = tr.c + (np.arange(src.width) + 0.5) * tr.a
+        y = tr.f + (np.arange(src.height) + 0.5) * tr.e
+    X, Y = np.meshgrid(x, y)
+    err = dsm - sat._Dem(dem).sample(X, Y)
+    return err[np.isfinite(err)]
+
+
+def test_relative_bias_and_the_surface_from_three_scenes(three_satellites, tmp_path):
+    """The three RPCs given with pointing errors of a few pixels, different for each scene (as
+    those of different acquisitions): the tie points bring them back together (the residuals
+    from pixels to a fraction), and the surface fused from the three pairs is then as good as the
+    pair with exact RPCs, while without the correction the pairs disagree."""
+    s = three_satellites
+    scenes = [s["scenes"]["east"]["path"], s["scenes"]["west"]["path"], s["north"]["path"]]
+    true = [s["scenes"]["east"]["rpc"], s["scenes"]["west"]["rpc"], s["north"]["rpc"]]
+    errors = [(4.0, -3.0), (-2.0, 5.0), (1.0, 0.0)]
+    biased = [sat.corrected_rpc(r, e) for r, e in zip(true, errors)]
+    z0 = s["h0"]
+    common = dict(crs=s["chunk"].crs, resolution=s["gsd"], height_range=(z0 - 1.0, z0 + 1.0), bounds=s["bounds"],
+                  max_angle=60.0)
+    out = tmp_path / "multi.tif"
+    r = sat.multi_view_dsm(scenes, out, rpcs=biased, **common)
+    bias = r["bias"]
+    assert bias["applied"] and bias["rms_before"] > 1.0 and bias["rms_after"] < 0.3
+    # the correction undoes the errors up to what no tie point can see: a common move dX of the
+    # ground (x, y, h), seen in each image as the shift J_i dX
+    shifts = np.array(bias["shifts"])
+    xc, yc = 0.5 * (s["bounds"][0] + s["bounds"][2]), 0.5 * (s["bounds"][1] + s["bounds"][3])
+    J = []
+    for p, t in zip(scenes, true):
+        sc = sat._Scene(p, s["chunk"].crs, rpc=t)
+        c, rr = sc.pixels(np.array([xc, xc + 1, xc, xc]), np.array([yc, yc, yc + 1, yc]), np.array([z0, z0, z0, z0 + 1]))
+        J.append(np.array([[c[1] - c[0], c[2] - c[0], c[3] - c[0]], [rr[1] - rr[0], rr[2] - rr[0], rr[3] - rr[0]]]))
+    J = np.vstack(J)
+    left = (shifts + np.array(errors)).reshape(-1)
+    dX = np.linalg.lstsq(J, left, rcond=None)[0]
+    assert np.abs(J @ dX - left).max() < 0.25
+    assert len(r["pairs"]) == 3 and r["fused"] > 0.5 and r["filled"] > 0.6
+    err = _truth_errors(out, s["dem"])
+    offset = float(np.median(err))
+    assert abs(offset + dX[2]) < 0.01 or abs(offset - dX[2]) < 0.01  # only the height no tie point can see
+    assert np.median(np.abs(err - offset)) < 0.015 and np.percentile(np.abs(err - offset), 75) < 0.05
+    rp = sat.multi_view_dsm(scenes, tmp_path / "plain.tif", rpcs=biased, correct_bias=False, **common)
+    assert rp["bias"] is None
+    e2 = _truth_errors(tmp_path / "plain.tif", s["dem"])
+    nmad = 1.4826 * np.median(np.abs(err - offset))
+    nmad2 = 1.4826 * np.median(np.abs(e2 - np.median(e2)))
+    assert nmad2 > 2 * nmad  # without the correction the pairs disagree and the fused surface is rougher
+
+
+def test_scenes_in_the_project_and_from_the_command_line(three_satellites, tmp_path, monkeypatch):
+    import shutil
+
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    s = three_satellites
+    doc = ppg.Document()
+    ch = doc.add_chunk("Satellite")
+    doc.save(tmp_path / "sat.ppg")
+    ch.crs = s["chunk"].crs
+    shutil.copy2(s["dem"], ch.data_dir / "dem.tif")
+    ch._set_product("dem", ch.data_dir / "dem.tif")
+    scenes = [s["scenes"]["east"]["path"], s["scenes"]["west"]["path"], s["north"]["path"]]
+    r = sat.dsm_from_scenes(ch, scenes, name="Tre scene", resolution=s["gsd"], bounds=s["bounds"], max_angle=60.0)
+    assert len(r["pairs"]) == 3 and r["bias"]["applied"]
+    v = ch.meta["versions"]["dem"]
+    assert len(v) == 1 and v[0]["name"] == "DSM stereo: Tre scene" and v[0]["params"]["source"] == "satellite_multiview"
+    rec = ch.meta["satellite"]["stereo"][-1]
+    assert len(rec["scenes"]) == 3 and len(rec["pairs"]) == 3 and (ch.data_dir / rec["dsm"]).exists()
+    doc.save()
+    res = CliRunner().invoke(app, ["satellite", str(doc.path), "dsm", *map(str, scenes), "--resolution", str(s["gsd"]),
+                                   "--max-angle", "60", "--name", "Cli"])
+    assert res.exit_code == 0, res.output + repr(res.exception)
+    assert "3 pairs" in res.output and "of the DEM" in res.output
+    doc2 = ppg.Document.open(doc.path)
+    assert len(doc2.chunks[0].meta["versions"]["dem"]) == 2
+
+    pytest.importorskip("PySide6")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("PPG_RENDERER", "software")
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path))
+    qapp = QApplication.instance() or QApplication([])
+    from pyarchinit_photogrammetry.gui import main_window as mwmod
+
+    w = mwmod.MainWindow(doc2, autoconnect=False)
+    w.runner.show_dialog = False
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(w, "_info", lambda title, text: shown.append((title, text)))
+    monkeypatch.setattr(w, "_warn", lambda text: shown.append(("warn", text)))
+    answer = {"scene_a": str(scenes[0]), "rpc_a": "", "scene_b": str(scenes[1]), "rpc_b": "", "name": "Gui",
+              "resolution": s["gsd"], "zmin": None, "zmax": None, "height_offset": 0.0, "use_dem": True,
+              "more": f"{scenes[2]};", "correct": True}
+    monkeypatch.setattr(mwmod.ParamDialog, "ask", staticmethod(lambda parent, title, fields, intro="": dict(answer)))
+    w.sat_dsm()
+    w.runner.wait()
+    qapp.processEvents()
+    assert shown[-1][0] == "DSM da più scene" and "RPC corretti" in shown[-1][1], shown
+    assert len(w.chunk.meta["versions"]["dem"]) == 3
+    w.setWindowModified(False)
+    w.close()

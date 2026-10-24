@@ -14,13 +14,22 @@ ellipsoidal height). Two things are built from them here:
   where a point above or below that plane appears displaced along the line of sight of each
   scene; the residual disparity between the two, found by semi-global matching along the
   direction of the baseline, is proportional to the height above the plane. Kept as a version of
-  the DEM (:func:`dsm_from_pair`).
+  the DEM (:func:`dsm_from_pair`);
+* a **surface model from three or more scenes** (:func:`multi_view_dsm`): the RPCs of different
+  acquisitions are not calibrated against each other (a few pixels of pointing error each), so
+  they are first corrected with tie points (:func:`relative_bias`: one image shift per scene,
+  found together with the ground points in one adjustment); the useful pairs are chosen by their
+  intersection angle and the days between them (:func:`choose_pairs`), every pair gives a surface
+  on a common grid and the surfaces are fused cell by cell (median of the heights that agree).
+  Kept as a version of the DEM (:func:`dsm_from_scenes`).
 
 Conventions: RPC sample and line follow the RPC00B standard, the centre of the first pixel at
 (0, 0), as OpenCV counts pixels; heights are ellipsoidal WGS84, so a DEM in orthometric heights
 needs the geoid undulation of the place as ``height_offset``. RPCs are read from the GeoTIFF
 itself, from a ``_RPC.TXT`` / ``.RPB`` / ``.rpc`` sidecar or from the ``RPC_*.XML`` of a DIMAP
-product (Pleiades, SPOT: their 1-based pixel numbering is brought to 0-based).
+product (Pleiades, SPOT: their 1-based pixel numbering is brought to 0-based), or from the
+comma-separated ``rpc_<name>.txt`` of the chips of the JHU/APL multi-view stereo benchmark
+(WorldView-3), whose last numbers place the chip in the full image.
 """
 from __future__ import annotations
 
@@ -28,6 +37,7 @@ import logging
 import os
 import re
 import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
@@ -161,7 +171,7 @@ def ground(rpc: Rpc, col, row, h, iterations: int = 12) -> tuple[np.ndarray, np.
 
 # ---------------------------------------------------------------------------- reading RPCs
 _SIDE_CARS = ("{stem}_RPC.TXT", "{stem}_rpc.txt", "{stem}.RPB", "{stem}.rpb", "{stem}.rpc", "{stem}_RPC.XML",
-              "RPC_{stem}.XML", "RPC_{core}.XML")
+              "RPC_{stem}.XML", "RPC_{core}.XML", "rpc_{stem}.txt")
 
 
 def _coeffs(values: dict, prefix: str) -> np.ndarray:
@@ -189,10 +199,41 @@ _RPB_NAMES = {"lineoffset": "LINE_OFF", "sampoffset": "SAMP_OFF", "latoffset": "
 _NUMBER = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 
 
+_LIST_ORDER = ("LINE_OFF", "SAMP_OFF", "LAT_OFF", "LONG_OFF", "HEIGHT_OFF", "LINE_SCALE", "SAMP_SCALE", "LAT_SCALE",
+               "LONG_SCALE", "HEIGHT_SCALE")
+
+
+def parse_rpc_list(text: str) -> Rpc:
+    """The comma-separated RPC of the chips of the JHU/APL multi-view stereo benchmark: the ten
+    offsets and scales (line, sample, latitude, longitude, height offsets, then the scales in the
+    same order), the 4 x 20 coefficients (line numerator and denominator, sample numerator and
+    denominator), the validity box (min/max longitude and latitude) and the position of the chip in
+    the full image (sample offset, line offset): the chip's pixel (c, r) is the image's
+    (c + sample offset, r + line offset), so the offsets of the RPC are moved back by them."""
+    nums = [float(v) for v in re.split(r"[,\s]+", text.strip()) if v]
+    if len(nums) < 90:
+        raise ValueError(f"RPC list: {len(nums)} numbers, at least 90 are needed")
+    values: dict = dict(zip(_LIST_ORDER, nums[:10]))
+    for k, name in enumerate(("LINE_NUM_COEFF", "LINE_DEN_COEFF", "SAMP_NUM_COEFF", "SAMP_DEN_COEFF")):
+        values[name] = nums[10 + 20 * k:30 + 20 * k]
+    rpc = _rpc_from_values(values)
+    if len(nums) >= 96:  # the chip's place in the full image
+        rpc.samp_off -= nums[94]
+        rpc.line_off -= nums[95]
+    return rpc
+
+
+def _is_number_list(text: str) -> bool:
+    head = text.strip()[:4000]
+    return ":" not in head and "=" not in head and head.count(",") >= 80
+
+
 def parse_rpc_text(text: str) -> Rpc:
-    """An RPC00B text file (``KEY: value unit`` per line) or an ``.RPB`` (``key = value;`` and
-    ``key = ( v1, v2, ... );``)."""
+    """An RPC00B text file (``KEY: value unit`` per line), an ``.RPB`` (``key = value;`` and
+    ``key = ( v1, v2, ... );``) or the comma-separated list of :func:`parse_rpc_list`."""
     values: dict = {}
+    if _is_number_list(text):
+        return parse_rpc_list(text)
     if "=" in text and "(" in text:  # RPB
         for key, val in re.findall(r"(\w+)\s*=\s*([^;]+);", text, re.S):
             name = _RPB_NAMES.get(key.lower())
@@ -242,10 +283,8 @@ def read_rpc(scene: Path, rpc: Path | None = None) -> Rpc:
         p = Path(rpc)
         text = p.read_text(encoding="utf-8", errors="replace")
         return parse_rpc_xml(text) if p.suffix.lower() == ".xml" or text.lstrip().startswith("<") else parse_rpc_text(text)
-    import rasterio
-
     scene = Path(scene)
-    with rasterio.open(scene) as src:
+    with _open_raster(scene) as src:
         if src.rpcs is not None:
             return Rpc.from_rasterio(src.rpcs)
     core = re.sub(r"^(IMG_)", "", scene.stem)
@@ -257,16 +296,29 @@ def read_rpc(scene: Path, rpc: Path | None = None) -> Rpc:
 
 
 # ---------------------------------------------------------------------------- the scene
-class _Scene:
-    """A scene opened once per thread, its RPC, and the transformer to lon/lat of the CRS."""
+def _open_raster(path: Path):
+    """``rasterio.open`` without the warning about a raster with no geotransform: a raw scene
+    (or a chip of it) has none, its geometry is the RPC."""
+    import rasterio
+    from rasterio.errors import NotGeoreferencedWarning
 
-    def __init__(self, path: Path, crs: str, rpc: Rpc | None = None, rpc_file: Path | None = None):
-        import rasterio
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", NotGeoreferencedWarning)
+        return rasterio.open(path)
+
+
+class _Scene:
+    """A scene opened once per thread, its RPC, and the transformer to lon/lat of the CRS.
+    ``rpc_file`` may be an :class:`Rpc` already (a corrected one)."""
+
+    def __init__(self, path: Path, crs: str, rpc: Rpc | None = None, rpc_file: Path | Rpc | None = None):
         from pyproj import Transformer
 
         self.path = Path(path)
+        if rpc is None and isinstance(rpc_file, Rpc):
+            rpc, rpc_file = rpc_file, None
         self.rpc = rpc or read_rpc(self.path, rpc_file)
-        with rasterio.open(self.path) as src:
+        with _open_raster(self.path) as src:
             self.width, self.height, self.count = src.width, src.height, src.count
             self.dtype = np.dtype(src.dtypes[0])
             self.nodata = src.nodata
@@ -279,9 +331,7 @@ class _Scene:
     def src(self):
         s = getattr(self._local, "src", None)
         if s is None:
-            import rasterio
-
-            s = self._local.src = rasterio.open(self.path)
+            s = self._local.src = _open_raster(self.path)
         return s
 
     def pixels(self, x: np.ndarray, y: np.ndarray, h: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -584,10 +634,67 @@ def _parallax(s: _Scene, x: float, y: float, h: float) -> np.ndarray:
     return np.array([gx[0] - x, gy[0] - y])
 
 
+def _grid_profile(crs: str, origin, width: int, height: int, res: float) -> dict:
+    from rasterio.transform import from_origin
+
+    profile = {"driver": "GTiff", "width": width, "height": height, "count": 1, "dtype": "float32", "crs": crs,
+               "transform": from_origin(origin[0], origin[1], res, res), "compress": "deflate", "BIGTIFF": "IF_SAFER",
+               "nodata": NODATA}
+    if width >= 256 and height >= 256:
+        profile.update(tiled=True, blockxsize=256, blockysize=256)
+    return profile
+
+
+def _write_heights(out: Path, crs: str, origin, width: int, height: int, res: float, tile: int, heights, p,
+                   label: str) -> int:
+    """A float32 surface model written tile by tile: ``heights(tile)`` gives the heights of a tile
+    (NaN = no data); no half-written file if it fails or is cancelled. Returns the tiles."""
+    import rasterio
+    from rasterio.enums import Resampling
+    from rasterio.windows import Window
+
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tiles = list(_tiles(height, width, tile))
+    tmp = out.with_name(out.name + ".tmp.tif")
+    try:
+        with rasterio.open(tmp, "w", **_grid_profile(crs, origin, width, height, res)) as dst:
+            for k, t in enumerate(tiles):
+                r0, c0, th, tw = t
+                z = np.asarray(heights(t), np.float32)
+                z[~np.isfinite(z)] = NODATA
+                dst.write(z[None], window=Window(c0, r0, tw, th))
+                p(0.05 + 0.9 * (k + 1) / len(tiles), f"{label}: tassello {k + 1} di {len(tiles)}")
+            factors = [f for f in (2, 4, 8, 16, 32) if min(width, height) // f >= 64]
+            if factors:
+                dst.build_overviews(factors, Resampling.nearest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    tmp.replace(out)
+    return len(tiles)
+
+
+def _fill_small_holes(z: np.ndarray, res: float) -> np.ndarray:
+    """Single-cell spikes out (:func:`engine.dem.remove_spikes`), holes up to 4 cells filled."""
+    from .dem import remove_spikes
+
+    if not np.isfinite(z).any():
+        return z
+    z, _ = remove_spikes(z, res)
+    holes = ~np.isfinite(z)
+    if holes.any() and not holes.all():
+        from rasterio.fill import fillnodata
+
+        z = np.asarray(fillnodata(z.astype(np.float32), mask=(~holes).astype(np.uint8), max_search_distance=4,
+                                  smoothing_iterations=0), np.float64)
+    return z
+
+
 def stereo_dsm(scene_a: Path, scene_b: Path, out: Path, crs: str | None = None, dem: Path | None = None,
                resolution: float | None = None, bounds=None, height_range: tuple[float, float] | None = None,
-               rpc_a: Path | None = None, rpc_b: Path | None = None, height_offset: float = 0.0, tile: int = 1024,
-               block: int = 7, progress: ProgressCallback | None = None) -> dict:
+               rpc_a: Path | Rpc | None = None, rpc_b: Path | Rpc | None = None, height_offset: float = 0.0,
+               tile: int = 1024, block: int = 7, progress: ProgressCallback | None = None) -> dict:
     """A surface model from two scenes of the same ground taken from two directions. Tile by
     tile both scenes are resampled on the ground plane at a reference height (the median of
     ``dem`` there, else the RPC's height) along the direction of their baseline; a point above
@@ -595,11 +702,8 @@ def stereo_dsm(scene_a: Path, scene_b: Path, out: Path, crs: str | None = None, 
     found by semi-global matching gives its height, and its true position is recovered by
     taking the displacement back. ``height_range`` (CRS heights) bounds the search (from the
     DEM when there is one, else +-100 m); the result is a float32 GeoTIFF with no data where no
-    match (small holes filled). Returns the base-to-height ratio and the matched fraction."""
-    import rasterio
-    from rasterio.enums import Resampling
-    from rasterio.transform import from_origin
-
+    match (small holes filled). ``rpc_a``/``rpc_b`` are files or :class:`Rpc` (corrected ones,
+    see :func:`relative_bias`). Returns the base-to-height ratio and the matched fraction."""
     p = as_progress(progress)
     d = _Dem(dem) if dem is not None else None
     crs = crs or (d.crs if d is not None else None)
@@ -612,44 +716,28 @@ def stereo_dsm(scene_a: Path, scene_b: Path, out: Path, crs: str | None = None, 
     res = float(resolution) if resolution else _round_res(max(a.gsd(h_ref), b.gsd(h_ref)))
     area = _intersect([a.footprint(h_ref), b.footprint(h_ref)], [d.bounds if d is not None else None, bounds])
     origin, width, height = _grid(area, res)
-    out = Path(out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    profile = {"driver": "GTiff", "width": width, "height": height, "count": 1, "dtype": "float32", "crs": crs,
-               "transform": from_origin(origin[0], origin[1], res, res), "compress": "deflate", "BIGTIFF": "IF_SAFER",
-               "nodata": NODATA}
-    if width >= 256 and height >= 256:
-        profile.update(tiled=True, blockxsize=256, blockysize=256)
-    tiles = list(_tiles(height, width, tile))
     job = _StereoJob(a, b, d, st, origin, res, height_range, height_offset, block)
-    tmp = out.with_name(out.name + ".tmp.tif")
-    try:
-        with rasterio.open(tmp, "w", **profile) as dst:
-            for k, t in enumerate(tiles):
-                job.tile(dst, t)
-                p(0.05 + 0.9 * (k + 1) / len(tiles), f"DSM stereo: tassello {k + 1} di {len(tiles)}")
-            factors = [f for f in (2, 4, 8, 16, 32) if min(width, height) // f >= 64]
-            if factors:
-                dst.build_overviews(factors, Resampling.nearest)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-    tmp.replace(out)
+    n = _write_heights(out, crs, origin, width, height, res, tile, job.heights, p, "DSM stereo")
     p(1.0, f"{width} x {height} celle a {res:g} m")
-    return {"path": out, "width": width, "height": height, "resolution": res, "bounds": area,
+    return {"path": Path(out), "width": width, "height": height, "resolution": res, "bounds": area,
             "base_to_height": float(np.mean(job.ratios)) if job.ratios else 0.0,
-            "matched": job.matched / max(width * height, 1), "tiles": len(tiles), "height_reference": h_ref}
+            "matched": job.matched / max(width * height, 1), "tiles": n, "height_reference": h_ref}
 
 
 class _StereoJob:
     """The tiles of :func:`stereo_dsm`: the reference plane, the rectification of both scenes
-    on it along the baseline, the matching, the heights and their true positions."""
+    on it along the baseline, the matching, the heights and their true positions. ``fill``
+    False leaves the cells without a match empty (the pairs of :func:`multi_view_dsm`, fused
+    afterwards)."""
 
     def __init__(self, a: _Scene, b: _Scene, d: _Dem | None, st: dict, origin, res: float, height_range,
-                 height_offset: float, block: int):
+                 height_offset: float, block: int, fill: bool = True):
         self.a, self.b, self.d, self.st = a, b, d, st
         self.origin, self.res, self.height_range, self.height_offset, self.block = origin, res, height_range, height_offset, block
+        self.fill = fill
         self.matched = 0
         self.ratios: list[float] = []
+        self._lock = threading.Lock()
 
     def _plane(self, tb) -> tuple[float, float, float]:
         """Reference height and search range (RPC heights) of a tile."""
@@ -665,16 +753,15 @@ class _StereoJob:
             zmin, zmax = zmin + off, zmax + off
             margin = max(2.0, 0.1 * (zmax - zmin))
             return h0, zmin - margin, zmax + margin
-        h0 = self.a.rpc.height_off
         if self.height_range:
-            return h0, self.height_range[0] + off, self.height_range[1] + off
+            zmin, zmax = self.height_range[0] + off, self.height_range[1] + off
+            return 0.5 * (zmin + zmax), zmin, zmax
+        h0 = self.a.rpc.height_off
         return h0, h0 - 100.0, h0 + 100.0
 
-    def tile(self, dst, t) -> None:
+    def heights(self, t) -> np.ndarray:
+        """The heights (CRS, NaN where no match) of a tile ``(r0, c0, rows, cols)``."""
         import cv2
-        from rasterio.windows import Window
-
-        from .dem import remove_spikes
 
         a, b, res = self.a, self.b, self.res
         r0, c0, th, tw = t
@@ -687,7 +774,6 @@ class _StereoJob:
         ratio = float(np.hypot(*base))
         if ratio < 0.05:
             raise ValueError(f"the two scenes look from almost the same direction (base to height {ratio:.3f})")
-        self.ratios.append(ratio)
         bhat = base / ratio
         nhat = np.array([-bhat[1], bhat[0]])
         span = max(abs(h0 - zmin), abs(h0 - zmax))
@@ -728,18 +814,488 @@ class _StereoJob:
         got = cnt > 0
         z[got] = sums[got] / cnt[got]
         z = z.reshape(th, tw)
-        if got.any():
-            z, _ = remove_spikes(z, res)
-            holes = ~np.isfinite(z)
-            if holes.any() and not holes.all():
-                from rasterio.fill import fillnodata
+        if self.fill:
+            z = _fill_small_holes(z, res)
+        else:
+            from .dem import remove_spikes
 
-                z = np.asarray(fillnodata(z.astype(np.float32), mask=(~holes).astype(np.uint8), max_search_distance=4,
-                                          smoothing_iterations=0), np.float64)
-        z = (z - self.height_offset).astype(np.float32)
-        self.matched += int(np.isfinite(z).sum())
-        z[~np.isfinite(z)] = NODATA
-        dst.write(z[None], window=Window(c0, r0, tw, th))
+            if got.any():
+                z, _ = remove_spikes(z, res)
+        z = z - self.height_offset
+        with self._lock:
+            self.ratios.append(ratio)
+            self.matched += int(np.isfinite(z).sum())
+        return z
+
+
+# ---------------------------------------------------------------------------- three or more scenes
+_MONTHS = {m: i + 1 for i, m in enumerate(("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT",
+                                           "NOV", "DEC"))}
+_DG_TIME = re.compile(r"(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\d{2})(\d{2})(\d{2})(\d{2})")
+_ISO_DATE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})-?(0[1-9]|1[0-2])-?(0[1-9]|[12]\d|3[01])(?:[T_-]?(\d{2})(\d{2})(\d{2}))?(?!\d)")
+
+
+def acquisition_date(scene: Path) -> datetime | None:
+    """When a scene was taken: the acquisition metadata of the file (NITF, TIFF date) or the
+    name (the DigitalGlobe catalogue form ``15SEP01135603`` = 2015-09-01 13:56:03, or an ISO
+    date ``2015-09-01`` / ``20150901``); None if nothing says it."""
+    scene = Path(scene)
+    try:
+        with _open_raster(scene) as src:
+            tags = {**src.tags()}
+            for ns in ("IMD", "IMAGERY"):
+                tags.update(src.tags(ns=ns) or {})
+    except Exception:  # noqa: BLE001 - a scene rasterio cannot read has its name left
+        tags = {}
+    for key in ("NITF_STDIDC_ACQUISITION_DATE", "NITF_IDATIM", "ACQUISITIONDATETIME", "FIRSTLINETIME",
+                "IMAGE_1.FIRSTLINETIME", "TIFFTAG_DATETIME"):
+        v = str(tags.get(key, "")).strip().strip('"')
+        if not v:
+            continue
+        for fmt in ("%Y%m%d%H%M%S", "%Y:%m:%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                return datetime.strptime(v[:len(datetime(2000, 1, 1).strftime(fmt))], fmt)
+            except ValueError:
+                continue
+    name = scene.name.upper()
+    m = _DG_TIME.search(name)
+    if m:
+        yy, mon, dd, hh, mi, ss = m.groups()
+        try:
+            return datetime(2000 + int(yy), _MONTHS[mon], int(dd), int(hh), int(mi), int(ss))
+        except ValueError:
+            pass
+    m = _ISO_DATE.search(scene.name)
+    if m:
+        y, mo, dd, hh, mi, ss = m.groups()
+        try:
+            return datetime(int(y), int(mo), int(dd), int(hh or 0), int(mi or 0), int(ss or 0))
+        except ValueError:
+            return None
+    return None
+
+
+def _view(s: _Scene, x: float, y: float, h: float) -> tuple[np.ndarray, np.ndarray]:
+    """The parallax vector (ground metres per metre of height) and the unit vector towards the
+    satellite (east, north, up) of a scene at a point."""
+    u = _parallax(s, x, y, h)
+    v = np.array([u[0], u[1], 1.0])
+    return u, v / np.linalg.norm(v)
+
+
+def choose_pairs(views: Sequence[np.ndarray], dates: Sequence[datetime | None] | None = None, min_angle: float = 5.0,
+                 max_angle: float = 30.0, max_pairs: int = 6, target_angle: float = 15.0) -> list[dict]:
+    """The useful stereo pairs among scenes: intersection angle (between the lines of sight)
+    between ``min_angle`` and ``max_angle`` degrees, the closest in time first (the ground,
+    the shadows and the vegetation change between acquisitions), then the angle nearest
+    ``target_angle``; at most ``max_pairs``, spread so that every scene is used before one is used
+    twice when possible. ``views`` are unit vectors towards the satellites. Returns
+    ``{"pair": (i, j), "angle": degrees, "days": days or None}``, best first."""
+    n = len(views)
+    dates = list(dates) if dates is not None else [None] * n
+    cands = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            ang = float(np.degrees(np.arccos(np.clip(np.dot(views[i], views[j]), -1.0, 1.0))))
+            days = (abs((dates[i] - dates[j]).total_seconds()) / 86400.0
+                    if dates[i] is not None and dates[j] is not None else None)
+            cands.append({"pair": (i, j), "angle": ang, "days": days})
+    good = [c for c in cands if min_angle <= c["angle"] <= max_angle]
+    if not good:  # nothing in the range: the pairs nearest to it
+        good = sorted(cands, key=lambda c: min(abs(c["angle"] - min_angle), abs(c["angle"] - max_angle)))[:1]
+        good = [c for c in good if c["angle"] >= 1.0]
+    good.sort(key=lambda c: (c["days"] if c["days"] is not None else 0.0, abs(c["angle"] - target_angle)))
+    chosen: list[dict] = []
+    used: set[int] = set()
+    for c in good:  # first the pairs that bring a scene not used yet, then the others, best first
+        if len(chosen) < max_pairs and not set(c["pair"]) <= used:
+            chosen.append(c)
+            used.update(c["pair"])
+    for c in good:
+        if len(chosen) < max_pairs and c not in chosen:
+            chosen.append(c)
+    return chosen
+
+
+def _scene_window(s: _Scene, area, hmin: float, hmax: float, margin: int = 32) -> tuple[int, int, int, int] | None:
+    """The pixels of a scene that see the area between two heights: ``(c0, r0, c1, r1)``."""
+    xs = np.array([area[0], area[2], area[2], area[0]] * 2, float)
+    ys = np.array([area[1], area[1], area[3], area[3]] * 2, float)
+    hs = np.array([hmin] * 4 + [hmax] * 4, float)
+    col, row = s.pixels(xs, ys, hs)
+    if not (np.isfinite(col).all() and np.isfinite(row).all()):
+        return None
+    c0 = max(int(np.floor(col.min())) - margin, 0)
+    r0 = max(int(np.floor(row.min())) - margin, 0)
+    c1 = min(int(np.ceil(col.max())) + margin + 1, s.width)
+    r1 = min(int(np.ceil(row.max())) + margin + 1, s.height)
+    return (c0, r0, c1, r1) if c1 - c0 > 16 and r1 - r0 > 16 else None
+
+
+def _features(s: _Scene, window, max_side: int, max_points: int):
+    """SIFT key points (scene pixels, centre of the first pixel at 0) and descriptors of a
+    window of a scene, read reduced to ``max_side`` at most."""
+    import cv2
+
+    c0, r0, c1, r1 = window
+    data = s.read_window(c0, r0, c1, r1)
+    band = data[0].astype(np.float32) if s.count == 1 else data[:3].astype(np.float32).mean(axis=0)
+    ok = np.ones(band.shape, bool) if s.nodata is None else (data != s.nodata).all(axis=0)
+    img = _to_uint8(band, ok)
+    f = max(1.0, max(img.shape) / float(max_side))
+    if f > 1.0:
+        img = cv2.resize(img, (int(round(img.shape[1] / f)), int(round(img.shape[0] / f))), interpolation=cv2.INTER_AREA)
+        fx, fy = band.shape[1] / img.shape[1], band.shape[0] / img.shape[0]
+    else:
+        fx = fy = 1.0
+    sift = cv2.SIFT_create(nfeatures=max_points)
+    kps, desc = sift.detectAndCompute(img, None)
+    if desc is None or not kps:
+        return np.zeros((0, 2)), np.zeros((0, 128), np.float32)
+    pts = np.array([k.pt for k in kps], float)
+    pts[:, 0] = (pts[:, 0] + 0.5) * fx - 0.5 + c0
+    pts[:, 1] = (pts[:, 1] + 0.5) * fy - 0.5 + r0
+    return pts, desc
+
+
+def _match(pa, da, pb, db, ratio: float = 0.75, threshold: float = 1.5) -> np.ndarray:
+    """Indices ``(k, 2)`` of the matches of two scenes: ratio test both ways, then the
+    epipolar geometry (fundamental matrix with RANSAC: over the chip of a pushbroom scene the
+    RPC geometry is nearly affine)."""
+    import cv2
+
+    if len(pa) < 8 or len(pb) < 8:
+        return np.zeros((0, 2), int)
+    bf = cv2.BFMatcher(cv2.NORM_L2)
+
+    def oneway(d1, d2):
+        out = {}
+        for m in bf.knnMatch(d1, d2, k=2):
+            if len(m) == 2 and m[0].distance < ratio * m[1].distance:
+                out[m[0].queryIdx] = m[0].trainIdx
+        return out
+
+    ab, ba = oneway(da, db), oneway(db, da)
+    pairs = np.array([(i, j) for i, j in ab.items() if ba.get(j) == i], int).reshape(-1, 2)
+    if len(pairs) < 12:
+        return np.zeros((0, 2), int)
+    _, mask = cv2.findFundamentalMat(pa[pairs[:, 0]].astype(np.float32), pb[pairs[:, 1]].astype(np.float32),
+                                     cv2.FM_RANSAC, threshold, 0.999)
+    if mask is None:
+        return np.zeros((0, 2), int)
+    return pairs[mask.ravel() > 0]
+
+
+def tie_points(scenes: Sequence[_Scene], area, hmin: float, hmax: float, max_side: int = 4000,
+               max_points: int = 20000, max_tracks: int = 20000, progress: ProgressCallback | None = None) -> dict:
+    """Tie points among scenes over an area: SIFT in the part of every scene that sees it,
+    matches of every pair checked by their epipolar geometry, joined in tracks (a track that
+    meets twice the same scene is dropped). Returns ``obs`` = ``(track, scene, column, row)``
+    rows, the number of tracks and the matches per pair."""
+    p = as_progress(progress)
+    n = len(scenes)
+    feats = []
+    for i, s in enumerate(scenes):
+        win = _scene_window(s, area, hmin, hmax)
+        feats.append(_features(s, win, max_side, max_points) if win else (np.zeros((0, 2)), np.zeros((0, 128), np.float32)))
+        p(0.5 * (i + 1) / n, f"Punti di legame: scena {i + 1} di {n}")
+    offsets = np.cumsum([0] + [len(f[0]) for f in feats])
+    parent = np.arange(offsets[-1])
+
+    def find(k):
+        root = k
+        while parent[root] != root:
+            root = parent[root]
+        while parent[k] != root:
+            parent[k], k = root, parent[k]
+        return root
+
+    per_pair = {}
+    pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+    for q, (i, j) in enumerate(pairs):
+        m = _match(feats[i][0], feats[i][1], feats[j][0], feats[j][1])
+        per_pair[(i, j)] = len(m)
+        for a, b in m:
+            ra, rb = find(offsets[i] + a), find(offsets[j] + b)
+            if ra != rb:
+                parent[rb] = ra
+        p(0.5 + 0.5 * (q + 1) / max(len(pairs), 1), f"Punti di legame: coppia {q + 1} di {len(pairs)}")
+    roots = np.array([find(k) for k in range(offsets[-1])], int)
+    scene_of = np.repeat(np.arange(n), np.diff(offsets))
+    pts = np.concatenate([f[0] for f in feats]) if offsets[-1] else np.zeros((0, 2))
+    _, inverse, counts = np.unique(roots, return_inverse=True, return_counts=True)
+    keep = counts[inverse] >= 2
+    # a track seen twice in one scene is a wrong join
+    key = inverse * n + scene_of
+    _, kinv, kcnt = np.unique(key, return_inverse=True, return_counts=True)
+    bad_tracks = np.unique(inverse[kcnt[kinv] > 1])
+    keep &= ~np.isin(inverse, bad_tracks)
+    tracks = np.unique(inverse[keep])
+    rng = np.random.default_rng(0)
+    if len(tracks) > max_tracks:
+        tracks = np.sort(rng.choice(tracks, max_tracks, replace=False))
+        keep &= np.isin(inverse, tracks)
+    remap = np.full(inverse.max() + 1 if len(inverse) else 0, -1, int)
+    remap[tracks] = np.arange(len(tracks))
+    obs = np.column_stack([remap[inverse[keep]], scene_of[keep], pts[keep]]) if keep.any() else np.zeros((0, 4))
+    return {"obs": obs, "tracks": int(len(tracks)), "matches": {f"{i}-{j}": v for (i, j), v in per_pair.items()}}
+
+
+def _adjust(scenes: Sequence[_Scene], obs: np.ndarray, h0: float, sigma_bias: float, free: bool,
+            iterations: int = 8) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Ground points and image shifts that fit the observations: Gauss-Newton on
+    ``project_i(X) + b_i = observation`` with the points eliminated (Schur complement on the
+    2 N shifts), Huber weights from the third iteration, a weak prior ``b ~ 0`` (``sigma_bias``
+    pixels) that fixes what the observations cannot see (a common shift of all the scenes and
+    of the heights). ``free`` False keeps the shifts at 0 (the plain triangulation). Returns the
+    points (T, 3: x, y, h), the shifts (N, 2) and the residuals (pixels) of the observations."""
+    n = len(scenes)
+    t_of = obs[:, 0].astype(int)
+    i_of = obs[:, 1].astype(int)
+    uv = obs[:, 2:4].astype(float)
+    T = int(t_of.max()) + 1 if len(t_of) else 0
+    X = np.zeros((T, 3))
+    first = np.zeros(T, int)
+    first[t_of[::-1]] = np.arange(len(t_of))[::-1]
+    for i, s in enumerate(scenes):
+        sel = i_of[first] == i
+        if sel.any():
+            k = first[sel]
+            x, y = s.ground_xy(uv[k, 0], uv[k, 1], np.full(len(k), h0))
+            X[sel] = np.column_stack([x, y, np.full(len(k), h0)])
+    bias = np.zeros((n, 2))
+    lam = (1.0 / sigma_bias) ** 2 if free else 1e12
+    steps = np.eye(3)
+    res = np.zeros_like(uv)
+    for it in range(iterations):
+        P = np.zeros_like(uv)
+        J = np.zeros((len(uv), 2, 3))
+        for i, s in enumerate(scenes):
+            sel = i_of == i
+            if not sel.any():
+                continue
+            Xi = X[t_of[sel]]
+            c, r = s.pixels(Xi[:, 0], Xi[:, 1], Xi[:, 2])
+            P[sel] = np.column_stack([c, r])
+            for k in range(3):
+                d = Xi + steps[k]
+                ck, rk = s.pixels(d[:, 0], d[:, 1], d[:, 2])
+                J[sel, 0, k] = ck - c
+                J[sel, 1, k] = rk - r
+        res = uv - P - bias[i_of]
+        if it >= 2:
+            norm = np.hypot(res[:, 0], res[:, 1])
+            k_h = max(1.0, 2.5 * 1.4826 * float(np.median(norm)))
+            w = np.where(norm <= k_h, 1.0, k_h / np.maximum(norm, 1e-12))
+        else:
+            w = np.ones(len(uv))
+        JT = np.transpose(J, (0, 2, 1)) * w[:, None, None]  # (k, 3, 2) = w J^T
+        A = np.zeros((T, 3, 3))
+        np.add.at(A, t_of, JT @ J)
+        A += np.eye(3) * 1e-9
+        gx = np.zeros((T, 3))
+        np.add.at(gx, t_of, np.einsum("kab,kb->ka", JT, res))
+        F = np.zeros((T, n, 3, 2))
+        F[t_of, i_of] = JT
+        Ainv = np.linalg.inv(A)
+        G = np.einsum("tac,tjcd->tjad", Ainv, F)
+        S = np.zeros((n, 2, n, 2))
+        wsum = np.bincount(i_of, weights=w, minlength=n)
+        for i in range(n):
+            S[i, :, i, :] += np.eye(2) * (wsum[i] + lam)
+        S -= np.einsum("tiab,tjad->ibjd", F, G)
+        rhs = np.zeros((n, 2))
+        np.add.at(rhs, i_of, res * w[:, None])
+        rhs -= lam * bias
+        rhs -= np.einsum("tiab,ta->ib", F, np.einsum("tac,tc->ta", Ainv, gx))
+        db = np.linalg.solve(S.reshape(2 * n, 2 * n), rhs.reshape(-1)).reshape(n, 2)
+        if not free:
+            db[:] = 0.0
+        dX = np.einsum("tac,tc->ta", Ainv, gx - np.einsum("tiab,ib->ta", F, db))
+        X += dX
+        bias += db
+        if np.abs(dX).max(initial=0) < 1e-4 and np.abs(db).max(initial=0) < 1e-4:
+            break
+    P = np.zeros_like(uv)
+    for i, s in enumerate(scenes):
+        sel = i_of == i
+        if sel.any():
+            Xi = X[t_of[sel]]
+            c, r = s.pixels(Xi[:, 0], Xi[:, 1], Xi[:, 2])
+            P[sel] = np.column_stack([c, r])
+    res = uv - P - bias[i_of]
+    return X, bias, res
+
+
+def corrected_rpc(rpc: Rpc, shift) -> Rpc:
+    """An RPC whose image positions are moved by ``shift`` (columns, rows)."""
+    d = rpc.to_dict()
+    d["samp_off"] += float(shift[0])
+    d["line_off"] += float(shift[1])
+    return Rpc.from_dict(d)
+
+
+def relative_bias(scenes: Sequence[_Scene], area, hmin: float, hmax: float, sigma_bias: float = 10.0,
+                  max_side: int = 4000, progress: ProgressCallback | None = None) -> dict:
+    """The relative pointing correction of scenes whose RPCs were not adjusted together: one
+    image shift (columns, rows) per scene, found with the ground points of the tie points in one
+    adjustment (:func:`_adjust`) so that every tie point is one ground point in all the scenes.
+    The shifts are relative: the weak prior keeps their mean near zero, so the result stays where
+    the RPCs together put it (no absolute correction without ground control). Observations more
+    than 4 pixels off after the adjustment are dropped and the adjustment repeated. Returns the
+    corrected :class:`Rpc` per scene, the shifts and the residuals (RMS, pixels) before and after."""
+    p = as_progress(progress)
+    tp = tie_points(scenes, area, hmin, hmax, max_side=max_side, progress=p.sub(0.0, 0.8))
+    obs = tp["obs"]
+    n = len(scenes)
+    seen = np.bincount(obs[:, 1].astype(int), minlength=n) if len(obs) else np.zeros(n, int)
+    if len(obs) == 0 or (seen < 20).any():
+        log.warning("relative RPC correction: too few tie points (%s): RPCs left as they are", seen.tolist())
+        return {"rpcs": [s.rpc for s in scenes], "shifts": [[0.0, 0.0]] * n, "tracks": tp["tracks"],
+                "observations": seen.tolist(), "rms_before": None, "rms_after": None, "applied": False,
+                "matches": tp["matches"]}
+    h0 = 0.5 * (hmin + hmax)
+    _, _, res0 = _adjust(scenes, obs, h0, sigma_bias, free=False)
+    norm0 = np.hypot(res0[:, 0], res0[:, 1])
+    p(0.85, "Correzione relativa degli RPC")
+    _, bias, res = _adjust(scenes, obs, h0, sigma_bias, free=True)
+    keep = np.hypot(res[:, 0], res[:, 1]) <= max(4.0, 3 * 1.4826 * float(np.median(np.hypot(res[:, 0], res[:, 1]))))
+    if keep.sum() < len(keep):
+        kept = obs[keep]
+        tracks, counts = np.unique(kept[:, 0], return_counts=True)
+        kept = kept[np.isin(kept[:, 0], tracks[counts >= 2])]
+        _, kept[:, 0] = np.unique(kept[:, 0], return_inverse=True)
+        if len(kept) and (np.bincount(kept[:, 1].astype(int), minlength=n) >= 20).all():
+            obs = kept
+            _, bias, res = _adjust(scenes, obs, h0, sigma_bias, free=True)
+    norm = np.hypot(res[:, 0], res[:, 1])
+    p(1.0, f"Correzione relativa: {len(np.unique(obs[:, 0]))} punti di legame, "
+           f"{float(np.sqrt(np.mean(norm0 ** 2))):.2f} -> {float(np.sqrt(np.mean(norm ** 2))):.2f} px")
+    return {"rpcs": [corrected_rpc(s.rpc, b) for s, b in zip(scenes, bias)], "shifts": bias.tolist(),
+            "tracks": int(len(np.unique(obs[:, 0]))), "observations": np.bincount(obs[:, 1].astype(int), minlength=n).tolist(),
+            "rms_before": float(np.sqrt(np.mean(norm0 ** 2))), "median_before": float(np.median(norm0)),
+            "rms_after": float(np.sqrt(np.mean(norm ** 2))), "median_after": float(np.median(norm)),
+            "applied": True, "matches": tp["matches"]}
+
+
+def fuse_heights(stack: np.ndarray, agree: float, min_count: int = 2) -> tuple[np.ndarray, np.ndarray]:
+    """Cell by cell fusion of the surfaces of several pairs ``(pairs, rows, cols)`` (NaN = no
+    match): the median of the heights within ``agree`` of the median of all, kept where at least
+    ``min_count`` agree. Returns the heights and the number that agreed."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        med = np.nanmedian(stack, axis=0)
+        close = np.abs(stack - med[None]) <= agree
+        n = close.sum(axis=0)
+        z = np.nanmedian(np.where(close, stack, np.nan), axis=0)
+    z[n < min_count] = np.nan
+    return z, n
+
+
+def multi_view_dsm(scenes: Sequence[Path], out: Path, crs: str | None = None, dem: Path | None = None,
+                   resolution: float | None = None, bounds=None, height_range: tuple[float, float] | None = None,
+                   rpcs: Sequence[Path | Rpc | None] | None = None, height_offset: float = 0.0,
+                   pairs: Sequence[tuple[int, int]] | None = None, max_pairs: int = 6, min_angle: float = 5.0,
+                   max_angle: float = 30.0, dates: Sequence[datetime | None] | None = None, correct_bias: bool = True,
+                   min_count: int | None = None, agree: float | None = None, tile: int = 1024, block: int = 7,
+                   workers: int | None = None, progress: ProgressCallback | None = None) -> dict:
+    """A surface model from two or more scenes. The RPCs are first corrected against each other
+    with tie points (:func:`relative_bias`, ``correct_bias``); the pairs are those given or
+    those :func:`choose_pairs` finds (intersection angle between ``min_angle`` and ``max_angle``,
+    closest dates first; dates from :func:`acquisition_date` unless given); tile by tile every pair
+    gives its heights on the common grid (as :func:`stereo_dsm`, without filling) and the heights
+    are fused (:func:`fuse_heights`: the median of those within ``agree`` metres of the median,
+    default 2.5 cells over the median base-to-height ratio; at least ``min_count`` pairs, default
+    2 with three pairs or more), then small holes are filled. Returns, beside the grid, the pairs
+    (angle, days, base to height, matched fraction, median offset from the fused surface), the
+    correction and the fraction of cells with a height."""
+    p = as_progress(progress)
+    scenes = [Path(s) for s in scenes]
+    if len(scenes) < 2:
+        raise ValueError("at least two scenes are needed")
+    rpcs = list(rpcs) if rpcs is not None else [None] * len(scenes)
+    d = _Dem(dem) if dem is not None else None
+    crs = crs or (d.crs if d is not None else None)
+    if not crs or crs_mod.is_local(crs) or crs_mod.is_geographic(crs):
+        raise ValueError("a projected coordinate system (metres) is needed: the DEM's or crs=")
+    ss = [_Scene(s, crs, rpc_file=r) for s, r in zip(scenes, rpcs)]
+    st = d.stats() if d is not None else {"median": None, "min": None, "max": None}
+    if st["median"] is not None:
+        h_ref = st["median"] + height_offset
+        hmin, hmax = st["min"] + height_offset, st["max"] + height_offset
+    elif height_range:
+        hmin, hmax = height_range[0] + height_offset, height_range[1] + height_offset
+        h_ref = 0.5 * (hmin + hmax)
+    else:
+        h_ref = ss[0].rpc.height_off
+        hmin, hmax = h_ref - 100.0, h_ref + 100.0
+    if height_range:
+        hmin, hmax = height_range[0] + height_offset, height_range[1] + height_offset
+    area = _intersect([s.footprint(h_ref) for s in ss], [d.bounds if d is not None else None, bounds])
+    xc, yc = 0.5 * (area[0] + area[2]), 0.5 * (area[1] + area[3])
+    views = [_view(s, xc, yc, h_ref)[1] for s in ss]
+    dates = list(dates) if dates is not None else [acquisition_date(s) for s in scenes]
+    if pairs is None:
+        chosen = choose_pairs(views, dates, min_angle=min_angle, max_angle=max_angle, max_pairs=max_pairs)
+    else:
+        chosen = []
+        for i, j in pairs:
+            ang = float(np.degrees(np.arccos(np.clip(np.dot(views[i], views[j]), -1, 1))))
+            days = (abs((dates[i] - dates[j]).total_seconds()) / 86400.0
+                    if dates[i] is not None and dates[j] is not None else None)
+            chosen.append({"pair": (int(i), int(j)), "angle": ang, "days": days})
+    if not chosen:
+        raise ValueError("no pair of the scenes sees the ground from directions different enough")
+    used = sorted({i for c in chosen for i in c["pair"]})
+    bias = None
+    if correct_bias:
+        sub = [ss[i] for i in used]
+        bias = relative_bias(sub, area, hmin, hmax, progress=p.sub(0.0, 0.25))
+        for i, r in zip(used, bias["rpcs"]):
+            ss[i] = _Scene(scenes[i], crs, rpc=r)
+        bias["scenes"] = used
+    p0 = 0.25 if correct_bias else 0.0
+    res = float(resolution) if resolution else _round_res(max(ss[i].gsd(h_ref) for i in used))
+    origin, width, height = _grid(area, res)
+    jobs = [_StereoJob(ss[c["pair"][0]], ss[c["pair"][1]], d, st, origin, res, height_range, height_offset, block,
+                       fill=False) for c in chosen]
+    ratios = [float(np.hypot(*(_parallax(ss[c["pair"][0]], xc, yc, h_ref) - _parallax(ss[c["pair"][1]], xc, yc, h_ref))))
+              for c in chosen]
+    agree = float(agree) if agree else max(2.5 * res / float(np.median(ratios)), 2.0 * res)
+    if min_count is None:
+        min_count = 2 if len(chosen) >= 3 else 1
+    offsets: list[list[float]] = [[] for _ in chosen]
+    agreed = [0]
+    pool = ThreadPoolExecutor(max_workers=workers or min(len(jobs), os.cpu_count() or 1, 8))
+
+    def heights(t):
+        stack = np.stack(list(pool.map(lambda j: j.heights(t), jobs)))
+        z, n = fuse_heights(stack, agree, min_count)
+        for k in range(len(jobs)):  # how each pair sits against the fused surface (a sample)
+            ok = np.isfinite(stack[k]) & np.isfinite(z)
+            if ok.sum() > 50:
+                offsets[k].append(float(np.median((stack[k] - z)[ok])))
+        agreed[0] += int(np.isfinite(z).sum())
+        return _fill_small_holes(z, res)
+
+    try:
+        n_tiles = _write_heights(out, crs, origin, width, height, res, tile, heights, p.sub(p0, 1.0 - p0),
+                                 f"DSM da {len(chosen)} coppie")
+    finally:
+        pool.shutdown(wait=True)
+    import rasterio
+
+    with rasterio.open(out) as src:
+        filled = float((src.read(1) != NODATA).mean())
+    cells = max(width * height, 1)
+    pair_info = [{**c, "scenes": [str(scenes[c["pair"][0]]), str(scenes[c["pair"][1]])], "base_to_height": r,
+                  "matched": j.matched / cells, "offset": float(np.median(o)) if o else None}
+                 for c, r, j, o in zip(chosen, ratios, jobs, offsets)]
+    p(1.0, f"{width} x {height} celle a {res:g} m da {len(chosen)} coppie")
+    return {"path": Path(out), "width": width, "height": height, "resolution": res, "bounds": area,
+            "pairs": pair_info, "bias": bias, "agree": agree, "min_count": min_count,
+            "fused": agreed[0] / cells, "filled": filled, "tiles": n_tiles, "height_reference": h_ref,
+            "base_to_height": float(np.median(ratios))}
 
 
 # ---------------------------------------------------------------------------- in the project
@@ -890,3 +1446,48 @@ def dsm_from_pair(chunk, scene_a: Path, scene_b: Path, name: str | None = None, 
     _record(chunk, "stereo", rec)
     p(1.0, f"{label}: {result['width']} x {result['height']} celle, base/altezza {result['base_to_height']:.2f}")
     return {**result, "version": entry["id"], "record": rec}
+
+
+def dsm_from_scenes(chunk, scenes: Sequence[Path], name: str | None = None, rpcs: Sequence[Path | None] | None = None,
+                    resolution: float | None = None, height_range: tuple[float, float] | None = None,
+                    height_offset: float = 0.0, use_dem: bool = True, bounds=None, correct_bias: bool = True,
+                    max_pairs: int = 6, min_angle: float = 5.0, max_angle: float = 30.0,
+                    progress: ProgressCallback | None = None) -> dict:
+    """A surface model from two or more scenes (:func:`multi_view_dsm`: relative correction of the
+    RPCs, pairs chosen by angle and date, fusion), in the CRS of the chunk, kept as a version of the
+    DEM and in ``<data>/satellite/<name>_dsm.tif``; the pairs and the correction noted in
+    ``meta["satellite"]["stereo"]``."""
+    import shutil
+
+    p = as_progress(progress)
+    scenes = [Path(s) for s in scenes]
+    dem = chunk.dem_path if hasattr(chunk, "dem_path") else chunk.product_path("dem")
+    dem = Path(dem) if (use_dem and dem is not None and Path(dem).exists()) else None
+    crs = chunk.crs
+    if dem is None and (not crs or crs_mod.is_local(crs)):
+        raise ValueError("the chunk needs a projected coordinate system (or a DEM) for a stereo DSM")
+    label = name or " + ".join(s.stem[:20] for s in scenes[:3]) + (f" + {len(scenes) - 3}" if len(scenes) > 3 else "")
+    safe = re.sub(r"[^\w.-]+", "_", label)[:60] or "stereo"
+    out = _folder(chunk) / f"{safe}_dsm.tif"
+    result = multi_view_dsm(scenes, out, crs=None if dem is not None else crs, dem=dem, resolution=resolution,
+                            bounds=bounds, height_range=height_range, rpcs=rpcs, height_offset=height_offset,
+                            max_pairs=max_pairs, min_angle=min_angle, max_angle=max_angle, correct_bias=correct_bias,
+                            progress=p.sub(0.0, 0.95))
+    copy = out.with_name(out.stem + "_version.tif")
+    shutil.copy2(out, copy)
+    pairs = [{"scenes": list(c["pair"]), "angle": c["angle"], "days": c["days"], "base_to_height": c["base_to_height"],
+              "matched": c["matched"], "offset": c["offset"]} for c in result["pairs"]]
+    bias = result["bias"]
+    correction = None if bias is None else {k: bias[k] for k in ("shifts", "tracks", "rms_before", "rms_after", "applied",
+                                                                  "scenes")}
+    params = {"source": "satellite_multiview", "scenes": [str(s) for s in scenes], "name": label,
+              "resolution": result["resolution"], "height_offset": height_offset, "pairs": pairs,
+              "correction": correction, "file": str(out.relative_to(chunk.data_dir))}
+    entry = _version_entry(chunk, "dem", copy, f"DSM stereo: {label}", params)
+    rec = {"name": label, "scenes": [str(s) for s in scenes], "dsm": str(out.relative_to(chunk.data_dir)),
+           "version": entry["id"], "resolution": result["resolution"], "base_to_height": result["base_to_height"],
+           "matched": result["filled"], "pairs": pairs, "correction": correction, "bounds": list(result["bounds"]),
+           "created": entry["created"]}
+    _record(chunk, "stereo", rec)
+    p(1.0, f"{label}: {result['width']} x {result['height']} celle da {len(pairs)} coppie")
+    return {**result, "version": entry["id"], "record": rec, "matched": result["filled"]}
