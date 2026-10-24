@@ -463,6 +463,7 @@ def test_a_section_moved_in_qgis_is_cut_again(processed, tmp_path):
     doc = ppg.Document.open(processed[0].path)
     doc.save(tmp_path / "copia.ppg")  # a copy: the processed project is shared by the tests
     doc.chunk.meta.pop("drawings", None)
+    doc.chunk.meta.pop("section_options", None)  # cut from the model, whatever another test chose
     doc.meta["sito"] = "Saggio"
     w = mw.MainWindow(doc, autoconnect=False, check_updates=False)
     w.runner.show_dialog = False
