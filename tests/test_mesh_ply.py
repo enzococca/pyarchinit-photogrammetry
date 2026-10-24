@@ -36,6 +36,27 @@ def test_stream_decimate_and_transform(tmp_path):
     assert np.array_equal(np.vstack(list(moved.face_chunks())), m.faces)  # faces untouched
 
 
+def test_a_read_mesh_does_not_keep_its_file_mapped(tmp_path):
+    """Every array of read_mesh is a copy: a view of the memory map keeps the file mapped, and Windows
+    refuses to replace, move or delete it (writing the cleaned model over it failed there)."""
+    from pyarchinit_photogrammetry.io.mesh_ply import MeshData, read_mesh, write_mesh
+
+    v = np.zeros(4, [("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("red", "u1"), ("green", "u1"), ("blue", "u1")])
+    mesh = MeshData(v, np.array([[0, 1, 2], [1, 2, 3]]), np.zeros((2, 6), np.float32), ["TextureFile a.jpg",
+                    "TextureFile b.jpg"], np.array([0, 1], np.int32))
+    back = read_mesh(write_mesh(tmp_path / "m.ply", mesh))
+
+    def mapped(a):
+        while a is not None:
+            if isinstance(a, np.memmap):
+                return True
+            a = getattr(a, "base", None)
+        return False
+
+    assert not any(mapped(a) for a in (back.vertices, back.faces, back.texcoords, back.texnumber))
+    assert back.texture_files == ["a.jpg", "b.jpg"] and back.texnumber.tolist() == [0, 1]
+
+
 def test_variable_face_lists_are_refused(tmp_path):
     from pyarchinit_photogrammetry.io.mesh_ply import PlyMesh
 
