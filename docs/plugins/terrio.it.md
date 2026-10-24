@@ -4,12 +4,18 @@ Il plugin *terrio* porta nel progetto ciò che fanno altri strumenti e altri pro
 prodotti del progetto nei loro formati. È costruito su [terrio](https://github.com/opengeos/terrio), una
 libreria di lettura e scrittura di dati geografici scritta in Rust: non c'è altro - GDAL, PROJ, PDAL - da
 installare. Importa nuvole di punti di tutti i formati più comuni, da un file o dal web; separa il
-terreno dal resto della nuvola densa con i filtri usati per il lidar aereo; prende un raster di
-riferimento - un DEM regionale, un'ortofoto più vecchia - sopra il rilievo; esporta la nuvola per i
-programmi di laser scanning e l'ortofoto come tasselli per le mappe web.
+terreno dal resto della nuvola densa con i filtri usati per il lidar aereo; pulisce la nuvola dai punti
+isolati e dai gruppi staccati; dà ai punti i colori di un'ortofoto, o un valore di un raster - una
+temperatura, un indice, una quota; sposta un DEM o una nuvola fra quote ellissoidiche (GNSS) e quote sul
+geoide; prende un raster di riferimento - un DEM regionale, un'ortofoto più vecchia, il DEM Copernicus del
+Planetary Computer di Microsoft - sopra il rilievo; esporta la nuvola per i programmi di laser scanning e
+l'ortofoto come tasselli per le mappe web.
 
-Questa pagina descrive la versione 0.1.2 del plugin, che richiede pyarchinit-photogrammetry 1.1.0 o
-successiva e terrio 0.4 (vengono accettate la 0.3.2 e le versioni 0.4). Il README e il codice sono nel
+Questa pagina descrive la versione 0.2.0 del plugin, che richiede pyarchinit-photogrammetry 1.1.0 o
+successiva (1.3.4 o successiva per vedere nella vista 3D i punti trovati e i valori) e terrio 0.5. Un
+terrio più vecchio (la 0.3.2 e le versioni 0.4) fa ancora l'importazione, la classificazione del terreno, i
+raster di riferimento da un URL e le esportazioni; gli altri passi dicono che serve terrio 0.5 e propongono
+di scaricarlo. Il README e il codice sono nel
 [repository dei plugin](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/terrio).
 
 <figure markdown="span">
@@ -25,15 +31,22 @@ successiva e terrio 0.4 (vengono accettate la 0.3.2 e le versioni 0.4). Il READM
 ## In breve
 
 1. Installa il plugin; la prima volta che un passo ha bisogno di terrio, il programma propone di
-   scaricarlo (circa 17 MB), oppure *Plugin > terrio > Installa terrio...*.
+   scaricarlo (circa 20 MB), oppure *Plugin > terrio > Installa terrio...*.
 2. *Importa nuvola di punti...*: un file LAS, LAZ, COPC, EPT, PLY o E57, o un indirizzo web, in un nuovo
    chunk o al posto della nuvola densa di quello attivo.
 3. *Classifica il terreno (SMRF, CSF, PMF)...*: i punti senza un'altra classe diventano terreno (classe 2)
    o resto (classe 1); poi
    costruisci un DEM della classe *Terreno*: un modello del terreno.
-4. *Raster di riferimento dal web...*: un DEM regionale o un'ortofoto sopra il rilievo, tenuti come
-   versione del DEM o dell'ortofoto, da confrontare con i tuoi.
-5. *File > Esporta*: la nuvola densa in E57 o EPT, l'ortofoto in PMTiles o MBTiles.
+4. *Pulisci la nuvola (LOF, DBSCAN)...*: punti isolati in classe 7, gruppi staccati (uccelli, persone,
+   frammenti sospesi) rimossi o in una classe - contati e mostrati prima di cambiare qualcosa.
+5. *Colori e valori da un raster...*: i colori dell'ortofoto per i punti, o un valore (temperatura,
+   indice, quota) come loro dimensione; *Valori dei punti nella vista 3D...* lo mostra.
+6. *Quote ellissoidiche e sul geoide...*: il DEM o la nuvola dalle quote GNSS alle quote su EGM2008,
+   EGM96 o un geoide nazionale, o viceversa, come nuova versione.
+7. *Raster di riferimento dal web...*: un DEM regionale o un'ortofoto sopra il rilievo - da un URL o dal
+   Planetary Computer - tenuti come versione del DEM o dell'ortofoto, con le quote portate in quelle del
+   rilievo se chiesto, da confrontare con i tuoi.
+8. *File > Esporta*: la nuvola densa in E57 o EPT, l'ortofoto in PMTiles o MBTiles.
 
 ## Che cosa fa
 
@@ -41,7 +54,10 @@ successiva e terrio 0.4 (vengono accettate la 0.3.2 e le versioni 0.4). Il READM
 |---|---|---|
 | Importa nuvola di punti | una nuvola LAS, LAZ, COPC, EPT, PLY o E57 - anche in uno zip, anche sul web - come nuvola densa di un nuovo chunk o di quello attivo, con i suoi colori (o l'intensità come grigi) e le sue classi | una scansione laser, il lidar di un rilievo regionale, la nuvola di un altro programma, accanto alla fotogrammetria |
 | Classifica il terreno | terreno (classe 2) e altri punti (classe 1), rumore basso (7), vegetazione per altezza (3, 4, 5); i punti di altre classi restano come sono | un DTM sotto alberi ed edifici, il terreno per i plugin [Terreno](terrain.md) e [Linee elettriche](powerlines.md) |
-| Raster di riferimento | un raster sul web o sul disco, letto solo sopra il rilievo, riproiettato nel sistema del chunk, tenuto come versione | confrontare il rilievo con un DEM regionale o un'ortofoto più vecchia, il paesaggio intorno al sito |
+| Pulisci la nuvola | punti isolati in classe 7, gruppi staccati rimossi o in una classe (18 di base); la nuvola di prima tenuta come versione | DEM e mesh senza punte, uccelli e frammenti sospesi di profondità sbagliate |
+| Colori e valori | i colori di un'ortofoto (o di qualsiasi raster) per i punti; oppure una banda come dimensione dei punti, esportata con loro | un lidar senza colori; la temperatura o un indice sulla nuvola 3D, anche in altri programmi |
+| Quote | un DEM o una nuvola fra quote ellissoidiche e quote sul geoide, come nuova versione | mettere sulle stesse quote un rilievo da drone e un DEM nazionale, o due rilievi |
+| Raster di riferimento | un raster sul web, sul disco o nel Planetary Computer, letto solo sopra il rilievo, riproiettato nel sistema del chunk, con le quote spostate se chiesto, tenuto come versione | confrontare il rilievo con un DEM regionale o un'ortofoto più vecchia, il paesaggio intorno al sito |
 | Esportazioni | E57 ed EPT della nuvola (LAS, LAZ, COPC e PLY dalla riga di comando), PMTiles e MBTiles dell'ortofoto | i programmi di laser scanning, i visualizzatori web di nuvole, le mappe web, le mappe su un tablet sul campo |
 
 ## Che cosa serve prima { #before }
@@ -49,17 +65,19 @@ successiva e terrio 0.4 (vengono accettate la 0.3.2 e le versioni 0.4). Il READM
 * **Il plugin**, installato dal programma: vedi [Guide ai plugin](guides.md#install).
 * **terrio stesso.** Installato con pip, il plugin se lo porta dietro. L'applicazione desktop non ha
   pip: la prima volta che un passo ha bisogno di terrio, il programma chiede se scaricarlo da PyPI (circa
-  17 MB, controllato con il suo SHA-256) nella cartella propria del plugin; dopo lo scaricamento, rifai
+  20 MB, controllato con il suo SHA-256) nella cartella propria del plugin; dopo lo scaricamento, rifai
   il passo. *Plugin > terrio > Installa terrio...* fa lo stesso in ogni momento, `ppg plugin terrio
   install` dalla riga di comando. terrio esiste per macOS (Apple Silicon e Intel), Windows (x64 e ARM64)
-  e Linux (x86-64 e ARM64).
+  e Linux (x86-64 e ARM64). Se il terrio presente è più vecchio della 0.5, i passi che la richiedono lo
+  dicono e propongono di scaricarla: la nuova va accanto e da allora si usa quella.
 * **Un progetto.** Un'importazione in un nuovo chunk non vuole altro; la classificazione e
   l'esportazione della nuvola vogliono un chunk con una nuvola densa; i tasselli un'ortofoto; il raster
   di riferimento un chunk con un sistema di riferimento (altrimenti *the chunk needs a reference system
   (align it with GPS or markers first)*).
 * **Memoria.** I filtri del terreno lavorano su tutta la nuvola insieme: decine di milioni di punti
   vogliono qualche gigabyte.
-* **Internet**, per le sorgenti sul web.
+* **Internet**, per le sorgenti sul web, il Planetary Computer e le griglie del geoide che non sono
+  ancora sul computer.
 
 ## I dati { #data }
 
@@ -131,12 +149,42 @@ successiva e terrio 0.4 (vengono accettate la 0.3.2 e le versioni 0.4). Il READM
 * **Quote.** Un DEM nazionale o globale può dare quote sul geoide (sul livello del mare) mentre un
   rilievo da drone con il GNSS dà quote sull'ellissoide, o il contrario: la differenza è l'ondulazione del
   geoide, decine di metri in molti luoghi (in una prova un DEM globale di 30 m stava 37,6 m sotto il DEM
-  del drone). Confronta le forme, oppure correggi lo scarto prima di confrontare le quote.
+  del drone). La finestra porta le quote di un DEM in quelle del rilievo durante la lettura: il catalogo
+  conosce le quote dei suoi DEM, per un URL dille tu (vedi [Quote](#heights-data)).
+* **Planetary Computer di Microsoft**: una collezione per nome - *Copernicus DEM GLO-30* e *GLO-90* (quote
+  EGM2008), *ALOS World 3D* e *NASADEM* (EGM96), *USGS 3DEP* (solo Stati Uniti, NAVD88), *Sentinel-2 L2A*
+  a colori naturali (l'immagine più recente con meno del 10 % di nuvole nelle date date) e *NAIP* (solo
+  Stati Uniti) - o qualsiasi altra collezione e asset del suo catalogo. Il catalogo viene cercato sopra il
+  rilievo e i suoi file letti a finestre, con gli indirizzi firmati da terrio. Non serve un account;
+  l'accesso anonimo ha dei limiti (una chiave nella variabile d'ambiente `PC_SDK_SUBSCRIPTION_KEY` viene
+  mandata se c'è). Un'immagine Sentinel-2 è lenta: terrio ne scarica circa 200 MB per una finestra, per
+  questo se ne legge una sola.
+
+### Quote { #heights-data }
+
+Un sistema di quote è:
+
+* **l'ellissoide** (quote GNSS): del datum del sistema del chunk - WGS 84 per l'UTM, ETRS89 per i sistemi
+  ETRS89 - oppure WGS 84 quando il sistema è su un datum più vecchio (Monte Mario, OSGB36), su cui le
+  quote GNSS non stanno mai;
+* **un geoide**: EGM2008 (`EPSG:3855`), EGM96 (`EPSG:5773`), o qualsiasi sistema verticale dell'EPSG
+  (`EPSG:5701` ODN, `EPSG:5703` NAVD88...): terrio usa il modello del geoide e le trasformazioni che
+  userebbe PROJ;
+* **un file di griglia del geoide** (`.gtx`, o una griglia GeoTIFF di PROJ `.tif`): un geoide nazionale
+  che il CDN di PROJ non ha (l'ITALGEO italiano, per esempio, lo distribuisce l'IGM): quote sopra di esso.
+
+Le griglie vengono dal CDN di PROJ (`https://cdn.proj.org`) la prima volta che servono - EGM2008 è 80 MB,
+EGM96 3 MB - e restano in `plugins/_data/terrio/grids/` dentro la cartella dei plugin del programma (`ppg
+plugin terrio version` la scrive), dove servono di nuovo anche senza rete; le griglie già sul computer (una
+cartella data nella finestra, le cartelle di PROJ) si usano per prime. Una quota che nessuna griglia ha
+spostato - la griglia manca e non c'è rete, o il rilievo è fuori dal modello - è un errore (*Nessun modello
+ha spostato le quote da ... a ...*), mai una copia delle quote com'erano.
 
 ## Passo per passo nel programma { #program }
 
 Il menu *Plugin > terrio* ha *Importa nuvola di punti...*, *Classifica il terreno (SMRF, CSF, PMF)...*,
-*Raster di riferimento dal web...* e *Installa terrio...*; *File > Esporta* ha *Nuvola di punti E57
+*Pulisci la nuvola (LOF, DBSCAN)...*, *Colori e valori da un raster...*, *Valori dei punti nella vista
+3D...*, *Quote ellissoidiche e sul geoide...*, *Raster di riferimento dal web...* e *Installa terrio...*; *File > Esporta* ha *Nuvola di punti E57
 (terrio)...*, *Nuvola di punti EPT (terrio)...*, *Ortofoto PMTiles (terrio)...* e *Ortofoto MBTiles
 (terrio)...*. I passi che cambiano il progetto girano in background con la barra di avanzamento, poi il
 progetto viene salvato e le viste aggiornate. La maggior parte dei campi tiene il valore usato l'ultima
@@ -202,25 +250,121 @@ Filtro SMRF: 7.400 punti, 7.350 cambiati
   64 Struttura muraria: 50
 ```
 
-### 3. Raster di riferimento { #reference }
+### 3. Pulire la nuvola { #clean }
+
+*Pulisci la nuvola (LOF, DBSCAN)...* lavora sulla nuvola densa del chunk attivo, in due tempi: prima i
+punti vengono trovati e contati, poi decidi.
+
+| Campo | Predefinito | Che cosa fa |
+|---|---|---|
+| *Punti isolati in classe 7 (LOF)* | sì | il fattore di anomalia locale di ogni punto: la densità dei vicini su quella del punto, circa 1 su una superficie |
+| *Vicini per il LOF* | 20 | |
+| *Soglia del LOF* | 3 | sopra, il punto è isolato; più bassa = più punti |
+| *Gruppi staccati (DBSCAN)* | sì | |
+| *Raggio di DBSCAN (m; vuoto = 4 volte la distanza fra i punti)* | vuoto | due punti più vicini di così stanno nello stesso gruppo; la distanza fra i punti è la mediana della distanza di ogni punto dal più vicino |
+| *Punti minimi di un nucleo di DBSCAN* | 6 | |
+| *Staccato se ha meno del (% della nuvola)* | 1 | il gruppo più grande non è mai staccato |
+| *I gruppi staccati* | in una classe | *in una classe (sotto)* o *rimossi dalla nuvola* |
+| *Classe dei gruppi staccati* | 18 | 18 rumore alto, 7 rumore basso: il programma li lascia entrambi fuori da DEM e mesh |
+
+Un gruppo è staccato quando DBSCAN lo trova piccolo ed è anche a più di 4 raggi da ogni altro punto (lo
+dice un secondo raggruppamento, per distanza): i margini radi di un rilievo da drone, che DBSCAN spezza in
+piccoli gruppi al raggio del centro denso, restano attaccati al resto. L'analisi gira in background; poi,
+con il programma 1.3.4 o successivo, la vista 3D mostra la nuvola con i punti isolati rossi e i gruppi
+staccati arancioni, e una finestra dà i conteggi:
+
+```text
+7.352.132 punti, distanza media fra i punti 0.00799 m
+  Punti isolati (LOF > 3, 20 vicini): 910
+  Gruppi staccati (DBSCAN, raggio 0.032 m, sotto il 1 % della nuvola, a oltre 0.128 m dal resto): 824 con 10.301 punti
+    i piu' grandi: 586, 426, 186, 167, 156
+```
+
+*Applica* cambia la nuvola: quella di prima va fra le versioni (*Area di lavoro*, sotto la nuvola densa:
+*Rendi attiva* per tornare indietro), la nuova si chiama *Nuvola pulita con terrio del <data>*. I punti
+classificati a mano non cambiano mai e non vengono mai rimossi; i punti già nelle classi 7 e 18 restano
+fuori dall'analisi. I valori che il plugin ha dato ai punti (sotto) vanno con loro.
+
+### 4. Colori e valori da un raster { #colours }
+
+*Colori e valori da un raster...* lavora sulla nuvola densa del chunk attivo.
+
+| Campo | Che cosa fa |
+|---|---|
+| *Raster* | i raster del chunk: l'ortofoto attiva e le sue versioni, il DEM e le sue versioni, la temperatura dell'ortofoto termica, gli indici e le bande della riflettanza (multispettrale); oppure *un altro raster (file o URL, sotto)* |
+| *File*, *Oppure URL (COG, STACIT:...)* | un altro raster, in qualsiasi sistema di riferimento |
+| *Che cosa prendere* | *secondo il raster* (colori da un'ortofoto, un valore dagli altri), *i colori (bande 1, 2, 3)*, *un valore, come dimensione dei punti* |
+| *Banda del valore (file)* | per un altro raster |
+| *Nome della dimensione (vuoto = dal raster)* | lettere minuscole, cifre e `_`: `temperature`, `ndvi`, `height` |
+| *Poi mostrare il valore nella vista 3D con* | una tavolozza, oppure no |
+
+* **Colori.** I punti coperti dal raster prendono i suoi colori (le bande a 16 bit o in virgola mobile
+  stirate fra il 2° e il 98° percentile; i pixel trasparenti e senza dato non ne danno); gli altri tengono
+  i loro, grigi se non ne avevano - un lidar importato senza colori. La nuvola di prima resta come
+  versione.
+* **Un valore.** Una banda diventa una dimensione dei punti: una proprietà dei vertici della PLY della
+  nuvola densa (un `float`, NaN dove il raster non ha valore), come il programma tiene la sua confidenza;
+  CloudCompare la mostra come campo scalare. I colori non cambiano. Le esportazioni del plugin (E57, EPT,
+  e LAS, LAZ, COPC, PLY dalla riga di comando) la portano come dimensione in più, e i suoi passi la
+  conservano.
+* Il raster viene letto a tasselli sopra i punti - un'ortofoto grande non viene mai letta intera - e,
+  quando è in un altro sistema, riproiettato in quello del chunk (bilineare).
+
+*Valori dei punti nella vista 3D...* sceglie una di queste dimensioni e mostra la nuvola colorata secondo
+essa (*turbo*, *viridis*, *inferno*, *grey*, *rdylgn*, *coolwarm*, *terrain*; fra il 2° e il 98°
+percentile, o fra i limiti dati) accanto alla lista *Mostra* della vista 3D; può anche togliere la
+dimensione.
+
+### 5. Quote ellissoidiche e sul geoide { #heights }
+
+*Quote ellissoidiche e sul geoide...*
+
+| Campo | Predefinito | Che cosa fa |
+|---|---|---|
+| *Che cosa* | DEM | *DEM* o *Nuvola densa (attiva)* |
+| *Quale DEM* | il DEM attivo | o una versione (un raster di riferimento, per esempio) |
+| *Quote di ora* | Ellissoide (quote GNSS) | *Geoide EGM2008 (EPSG:3855)*, *Geoide EGM96 (EPSG:5773)* o *altro (scritto sotto)* |
+| *Altro sistema di ora* | | un CRS verticale (`EPSG:5703`) o un file del geoide (`.gtx`, `.tif`) |
+| *Quote volute* | Geoide EGM2008 | come sopra |
+| *Farne la versione attiva* | no | |
+| *Scaricare le griglie che mancano dal CDN di PROJ* | sì | |
+| *Tenere le griglie scaricate nella cartella del plugin (poi anche senza rete)* | sì | no: le griglie vengono lette dalla rete, sul posto, ogni volta |
+| *Cartella con altre griglie (facoltativa)* | | griglie tue, cercate per prime |
+
+Il risultato è una nuova versione del DEM o della nuvola, con il nome di quella convertita (*DEM del 24/10
+17:27 (quote EGM2008)*); quella convertita non cambia. Una finestra dà lo spostamento:
+
+```text
+"DEM del 24/10 17:27 (quote EGM2008)" (fra le versioni)
+Quote da Ellissoide (quote GNSS) a Geoide EGM2008 (EPSG:3855): spostate di -47,896 m (da -47,903 a -47,890)
+Griglie scaricate in: .../plugins/_data/terrio/grids
+```
+
+### 6. Raster di riferimento { #reference }
 
 *Raster di riferimento dal web...*
 
 | Campo | Predefinito | Che cosa fa |
 |---|---|---|
 | *URL del COG, ricerca STAC (STACIT:...) o file* | | la sorgente |
-| *Tenerlo come versione di* | DEM | *DEM* o *Ortofoto* |
+| *Oppure Microsoft Planetary Computer* | nessuna | una collezione del catalogo (vedi [Raster di riferimento](#reference-data)) o *un'altra collezione (sotto)* |
+| *Altra collezione e asset* | | es. `esa-worldcover map` |
+| *Date (immagini)* | | `2024-06-01/2024-09-30`: Sentinel-2 e NAIP |
+| *Tenerlo come versione di* | DEM | *DEM* o *Ortofoto*; per le collezioni del catalogo lo decide il catalogo |
 | *Margine intorno al rilievo (m)* | 20 | fin dove oltre il rilievo il raster viene letto |
 | *Risoluzione (m; vuoto = della sorgente)* | vuoto | la cella del risultato |
+| *Quote del raster (DEM)* | come dice il catalogo | le quote della sorgente |
+| *Convertire le quote in* | non convertire | le quote del rilievo: l'ellissoide per un drone con GNSS |
 | *Nome della versione (vuoto = dal file)* | vuoto | `Riferimento: <nome del file>` se vuoto (`Reference: ...` quando il programma parla inglese) |
 
 Il raster viene letto sopra il rilievo e il margine, riproiettato nel sistema del chunk (bilineare per un
 DEM, cubico per un'ortofoto) e tenuto come versione: il DEM o l'ortofoto attivi non cambiano. Una
 finestra ne dà le dimensioni (*Versione "Riferimento: dem_regionale.tif": 60 x 60 pixel a 1 m.*). La
 versione sta nell'*Area di lavoro* sotto il DEM (o l'ortofoto): tasto destro, *Mostra*; per un DEM anche
-*Differenza con il DEM attivo*.
+*Differenza con il DEM attivo*. Con le quote convertite il nome lo dice (*Riferimento: cop-dem-glo-30
+(quote ellissoidiche)*) e la finestra dà lo spostamento.
 
-### 4. Esportazioni { #exports }
+### 7. Esportazioni { #exports }
 
 * *File > Esporta > Nuvola di punti E57 (terrio)...*: la nuvola densa nelle coordinate del rilievo, con
   colori e classi, come una scansione sola.
@@ -246,6 +390,18 @@ ppg plugin terrio ground scavo.ppg --method pmf
 ppg plugin terrio ground scavo.ppg --method csf --resolution 0.5 --rigidness 2
 ppg plugin terrio reference scavo.ppg https://host/dem_regionale.tif --product dem --margin 50 --resolution 1
 ppg plugin terrio reference scavo.ppg ortofoto_2010.tif --product orthomosaic --name "Ortofoto 2010"
+ppg plugin terrio reference scavo.ppg --collection cop-dem-glo-30 --margin 100 --heights-to ellipsoid
+ppg plugin terrio reference scavo.ppg --collection sentinel-2-l2a --datetime 2024-06-01/2024-09-30
+ppg plugin terrio catalogue
+ppg plugin terrio clean scavo.ppg --dry-run
+ppg plugin terrio clean scavo.ppg --remove
+ppg plugin terrio colour scavo.ppg --list
+ppg plugin terrio colour scavo.ppg orthomosaic
+ppg plugin terrio colour scavo.ppg thermal
+ppg plugin terrio colour scavo.ppg index:NDVI
+ppg plugin terrio values scavo.ppg
+ppg plugin terrio heights scavo.ppg --from ellipsoid --to EPSG:3855
+ppg plugin terrio heights scavo.ppg --product point_cloud --from ellipsoid --to italgeo.gtx --activate
 ppg plugin terrio export scavo.ppg nuvola.e57
 ppg plugin terrio export scavo.ppg nuvola.ept
 ppg plugin terrio export scavo.ppg nuvola.copc.laz
@@ -254,11 +410,16 @@ ppg plugin terrio export scavo.ppg ortofoto.pmtiles
 
 | Comando | Opzioni |
 |---|---|
-| `version` | il terrio in uso (codice di uscita 1 se non c'è) |
+| `version` | il terrio in uso (codice di uscita 1 se non c'è) e la cartella delle griglie |
 | `install` | scarica terrio nella cartella del plugin |
 | `import PROGETTO SORGENTE` | un file o un indirizzo web; senza `--chunk` un nuovo chunk (`--label` il suo nome) - il chunk attivo del progetto resta, `--activate` rende attivo il nuovo; `--chunk NOME`: al posto della nuvola densa di quel chunk; `--max-points`; `--classes 2,6`; `--crs EPSG:...` |
 | `ground PROGETTO` | `--method` smrf, csf o pmf; `--cell` (1.0); `--slope` (del filtro: SMRF 0.15, PMF 1.0); `--threshold` (del filtro: SMRF e CSF 0.5, PMF 0.15 - la sua distanza iniziale); `--window`; `--resolution` (1.0, CSF); `--rigidness` (3, CSF); `--noise`; `--vegetation` |
-| `reference PROGETTO URL` | `--product` dem o orthomosaic; `--margin` (20); `--resolution`; `--name` |
+| `clean PROGETTO` | `--no-lof`; `--lof-neighbours` (20); `--lof-threshold` (3); `--no-dbscan`; `--eps` (4 volte la distanza fra i punti); `--min-points` (6); `--max-share` (1 %); `--remove`, altrimenti `--detached-class` (18); `--dry-run`: solo i conteggi |
+| `colour PROGETTO SORGENTE` | `orthomosaic`, `dem`, `thermal`, `index:NDVI`, `reflectance:N`, `version:dem:ID`... (`--list` li elenca) o un file o URL; `--rgb` o `--value`; `--band`; `--name` |
+| `values PROGETTO` | le dimensioni dei punti; `--remove NOME` |
+| `heights PROGETTO` | `--from`, `--to`: `ellipsoid`, `EPSG:3855`, `EPSG:5773`, qualsiasi CRS verticale o un file del geoide; `--product` dem o point_cloud; `--version ID`; `--activate`; `--name`; `--no-network`; `--no-keep-grids`; `--grids CARTELLA` |
+| `reference PROGETTO [URL]` | `--collection` (Planetary Computer), `--asset`, `--datetime`, `--max-items`, `--cloud`; `--product` dem o orthomosaic; `--margin` (20); `--resolution`; `--name`; `--heights-from`, `--heights-to`; `--no-network` |
+| `catalogue` | le collezioni del Planetary Computer offerte per nome |
 | `export PROGETTO USCITA` | `.e57`, `.ept` (una cartella), `.las`, `.laz`, `.copc.laz`, `.ply`: la nuvola densa; `.pmtiles`, `.mbtiles`: l'ortofoto |
 
 ## Leggere i risultati { #reading }
@@ -278,6 +439,31 @@ ppg plugin terrio export scavo.ppg ortofoto.pmtiles
 * Strutture sottili sul terreno nudo - un muretto basso, un argine - spesso vengono classificate come
   terreno: per il modello del terreno può andare bene, per una pianta dei muri no.
 
+### La pulizia { #reading-clean }
+
+* Il LOF è un rapporto di densità: su una nuvola fotogrammetrica la cui densità cambia molto - foto prese
+  da due quote, un centro denso e margini radi - segna anche punti lungo il bordo fra una parte densa e una
+  rada. Una soglia di 3 ne lascia fuori quasi tutti (con 2, in una prova su una nuvola vera, li segnava lungo
+  tutto quel bordo); guarda i punti rossi prima di applicare.
+* Anche le chiome degli alberi di cui le foto non hanno visto il tronco sono gruppi staccati, come uccelli
+  e persone: per questo la scelta di base è una classe, non la rimozione. Una classe si cambia di nuovo; i
+  punti rimossi tornano solo con la versione.
+* Su un ritaglio a piena risoluzione di 7,4 milioni di punti di un rilievo da drone (40 x 40 m) l'analisi
+  ha preso circa un minuto: 910 punti isolati e 824 gruppi staccati con 10.301 punti.
+
+### Valori e quote { #reading-values }
+
+* Il programma non conosce le dimensioni del plugin: quando riscrive la nuvola - la sua pulizia e
+  classificazione, un ritaglio - spariscono, e *Valori dei punti...* non le elenca più: prendile di nuovo
+  dal raster.
+* Una conversione delle quote aggiunge lo stesso spostamento a tutte le quote di un luogo: la forma del DEM
+  non cambia. Sopra un sito lo spostamento è quasi costante (pochi millimetri su qualche centinaio di metri);
+  confrontalo con la differenza che vedi fra due DEM: quello che resta è l'errore di uno dei due o un
+  cambiamento vero.
+* Su un rilievo nell'Italia meridionale lo spostamento dall'ellissoide a EGM2008 è stato -47,896 m, il valore
+  di PROJ al millimetro; il DEM Copernicus del Planetary Computer, portato in quote ellissoidiche, è venuto a
+  15 m dal DEM di quel rilievo invece che a 63 m - il resto sono le quote proprie del drone, non GNSS.
+
 ### Raster di riferimento { #reading-reference }
 
 La versione mostra la sorgente sopra il rilievo sulla griglia che hai chiesto. *Differenza con il DEM
@@ -293,6 +479,7 @@ intorno, non il sito.
   diversi: classifica chunk separati, oppure correggi a mano (il programma tiene le classi date a mano).
 * **E57 in un pezzo.** Le scansioni di un E57 vengono unite in una nuvola all'importazione e scritte
   come una scansione all'esportazione; l'importazione E57 del programma le tiene separate.
+* **I valori non sono dati del programma.** Vedi [Valori e quote](#reading-values).
 * **terrio è giovane.** Le sue funzioni possono ancora cambiare prima della versione 1.0; il plugin
   accetta le versioni con cui è stato provato.
 
@@ -303,9 +490,15 @@ intorno, non il sito.
   `versions/point_cloud/`.
 * Un raster di riferimento: `versions/dem/<id>/dem.tif` o `versions/orthomosaic/<id>/orthomosaic.tif`
   nella cartella del chunk, un GeoTIFF a tasselli, compresso, con le panoramiche.
-* Le classi vengono scritte nella nuvola densa.
+* Le classi vengono scritte nella nuvola densa; una nuvola pulita o ricolorata tiene quella di prima in
+  `versions/point_cloud/`, un DEM o una nuvola convertiti sono una nuova cartella di `versions/dem/` o
+  `versions/point_cloud/`.
+* I valori dei punti sono proprietà dei vertici di `point_cloud.ply`.
+* Le griglie del geoide e dei datum scaricate: `plugins/_data/terrio/grids/`; le nuvole mostrate nella
+  vista 3D (i punti trovati, i valori a colori): `plugins/_data/terrio/preview/`.
 * Il progetto registra la sorgente di un'importazione, i parametri e i conteggi dell'ultima
-  classificazione e la sorgente di ogni versione di riferimento.
+  classificazione e pulizia, le sorgenti dei valori dei punti, e la sorgente e le quote di ogni versione
+  fatta dal plugin.
 * terrio, quando lo scarica il plugin, va in `plugins/_data/terrio/lib/` dentro la cartella dei plugin
   del programma (vedi [Plugin](../plugins.md)).
 * Le esportazioni vanno dove scegli; un'esportazione EPT è una cartella.
