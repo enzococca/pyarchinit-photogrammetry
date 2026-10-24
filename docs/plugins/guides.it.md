@@ -50,6 +50,7 @@ installarli con pip in un ambiente Python, vedi [Plugin](../plugins.md).
 | Linee elettriche (`powerlines`) | linee aeree nella nuvola densa: conduttori come catenarie con freccia, franco e ostacoli, pali, classi, esportazioni 3D | [Linee elettriche](powerlines.md) |
 | Mesh (MeshLab) (`mesh-tools`) | i filtri di MeshLab sul modello del chunk: decimazione che conserva la texture, rimaglia isotropa, levigatura Taubin e HC, buchi chiusi lasciando aperto il contorno, topologia riparata, misure; ogni risultato una nuova versione del modello | [Mesh (MeshLab)](mesh-tools.md) |
 | Sentinel-2 (`sentinel2`) | serie temporali Sentinel-2 sul rilievo per cercare i crop mark: ricerca in un catalogo pubblico, nuvole mascherate, NDVI, NDRE e NDMI per data, serie e grafico, compositi e mappe dei crop mark sopra l'ortofoto, QGIS ed esportazioni | [Sentinel-2](sentinel2.md) |
+| Blender ed EMtools (`blender-em`) | i proxy 3D delle unità e il rilievo in un progetto Extended Matrix, con i nomi dei nodi dell'em.json di PyArchInit o EMStudio; Blender aperto sul progetto e aggiornato dal vivo quando i proxy cambiano; la selezione condivisa dal vivo con EMtools 1.6 | [Blender ed EMtools](blender-em.md) |
 
 Ogni guida ha le stesse parti: che cosa fa il plugin e che cosa serve prima, i dati e come prepararli, i
 passi nel programma e dalla riga di comando, come leggere i risultati, i file che scrive.

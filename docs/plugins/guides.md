@@ -49,6 +49,7 @@ them with pip in a Python environment, see [Plugins](../plugins.md).
 | Powerlines (`powerlines`) | overhead lines in the dense cloud: conductors as catenaries with sag, clearance and obstacles, poles, classes, 3D exports | [Powerlines](powerlines.md) |
 | Mesh (MeshLab) (`mesh-tools`) | MeshLab's filters on the model of the chunk: decimation that keeps the texture, isotropic remeshing, Taubin and HC smoothing, holes closed with the outline left open, topology repaired, measures; every result a new version of the model | [Mesh (MeshLab)](mesh-tools.md) |
 | Sentinel-2 (`sentinel2`) | Sentinel-2 time series over the survey to look for crop marks: a public catalog searched, clouds masked, NDVI, NDRE and NDMI per date, series and chart, composites and crop-mark maps over the orthophoto, QGIS and exports | [Sentinel-2](sentinel2.md) |
+| Blender and EMtools (`blender-em`) | the 3D proxies of the units and the survey into an Extended Matrix project, named after the nodes of the em.json of PyArchInit or EMStudio; Blender opened on it and kept up to date while the proxies change; the selection shared live with EMtools 1.6 | [Blender and EMtools](blender-em.md) |
 
 Every guide has the same parts: what the plugin does and what it needs first, the data and how to
 prepare them, the steps in the program and on the command line, how to read the results, the files it
