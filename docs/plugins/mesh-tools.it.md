@@ -36,7 +36,7 @@ successiva. Il README e il codice sono nel
    (*File > Importa > Modello 3D (OBJ, PLY, GLB)...*).
 2. Apri la scheda *Mesh (MeshLab)* del dock *Progetto* (*Plugin > Mesh (MeshLab) > Pannello Mesh
    (MeshLab)*). La prima volta che parte un'operazione il plugin propone di installare MeshLab (circa
-   300 MB), a meno che pymeshlab non sia già nel Python del programma.
+   300 MB), a meno che pymeshlab non sia già nel Python del programma, e lo prova su un triangolo.
 3. *Misura*: chiuso o aperto, quante parti separate, quanti difetti.
 4. Scegli un'operazione - *Decima...*, *Rimaglia...*, *Leviga...*, *Chiudi i buchi...*, *Ripara la
    topologia...* - e impostala nella sua finestra. La nuova versione compare nella vista 3D, le sue
@@ -82,6 +82,11 @@ fette)...*), la texture (*Flusso di lavoro > Costruisci texture...*) e i volumi 
     non ce n'è una per Windows su ARM, dove il plugin dice che gli strumenti MeshLab non sono
     disponibili. La riga sotto la descrizione del pannello dice quale MeshLab usa il plugin.
 
+* **Su Linux, qualche libreria di sistema.** pymeshlab ha bisogno di librerie che i suoi pacchetti non
+  portano con sé, prima di tutto `libOpenGL.so.0`: senza, si avvia ma non legge nessun modello, e ogni
+  operazione fallirebbe. Installale una volta sola - su Debian e Ubuntu
+  `sudo apt install libopengl0 libgl1`, su Fedora `sudo dnf install libglvnd-opengl libglvnd-glx`.
+
 * **Un chunk con un modello**: costruito dal programma o importato. Il plugin lavora sul modello che il
   chunk mostra, la sua versione attiva.
 * **Un chunk in metri** - un sistema di riferimento, barre di scala, oppure una scansione - per avere
@@ -90,9 +95,11 @@ fette)...*), la texture (*Flusso di lavoro > Costruisci texture...*) e i volumi 
 ## Il modello { #model }
 
 * **Le cuciture.** Un modello con texture ripete i suoi vertici lungo le cuciture della texture. Prima
-  che MeshLab veda il modello, i vertici nella stessa posizione vengono contati una volta sola:
-  altrimenti MeshLab prenderebbe ogni cucitura per un bordo, la levigatura la aprirebbe e le misure la
-  conterebbero come un buco.
+  che MeshLab veda il modello, le copie lungo una cucitura vengono contate una volta sola: altrimenti
+  MeshLab prenderebbe ogni cucitura per un bordo, la levigatura la aprirebbe e le misure la
+  conterebbero come un buco. Le copie che si toccano solo in un punto - un vertice non-manifold diviso
+  dalla riparazione, due pezzi che si incontrano in un angolo - restano separate, così l'operazione
+  successiva non disfa una riparazione.
 * **Ciò che MeshLab non porta.** MeshLab riceve le posizioni, i colori dei vertici e, quando
   l'operazione la conserva, la texture. Le altre proprietà dei vertici - la confidenza, cioè quante
   mappe di profondità confermano il vertice - tornano dal vertice del modello più vicino a ogni vertice
@@ -123,15 +130,17 @@ oppure *Plugin > Mesh (MeshLab) > Pannello Mesh (MeshLab)*.
   ![Il pannello Mesh (MeshLab) dopo una decimazione](../img/plugins/mesh-tools/pane.png)
   <figcaption>Il pannello dopo la decimazione del modello del tutorial a 100.000 facce, chiamata
   <em>Per il web</em> nella sua finestra: MeshLab gira con il pymeshlab del Python del programma, le
-  misure della nuova versione sono nella tabella, l'ultima riga dice che cosa ha fatto MeshLab. A
-  destra la nuova versione con la sua texture nella vista 3D.</figcaption>
+  misure della nuova versione sono nella tabella, l'ultima riga dice che cosa ha fatto MeshLab e quali
+  difetti del modello ha lasciato. A destra la nuova versione con la sua texture nella vista
+  3D.</figcaption>
 </figure>
 
 Dall'alto:
 
 * una breve descrizione;
 * quale MeshLab usa il plugin - *pymeshlab ... di questo Python* oppure *nell'ambiente del plugin* -
-  oppure che non è installato, con il pulsante *Installa MeshLab...*;
+  oppure che non è installato, con il pulsante *Installa MeshLab...*, o che cosa gli manca quando la
+  prova descritta più sotto lo ha trovato non funzionante;
 * il modello attivo: nome, facce, vertici e pagine della texture;
 * i pulsanti *Decima...*, *Rimaglia...*, *Leviga...*, *Chiudi i buchi...*, *Ripara la topologia...*,
   *Misura* e *Mostra nella vista 3D*;
@@ -153,10 +162,20 @@ Ogni operazione apre la sua finestra, con i parametri descritti più sotto e due
 | *Modello attuale* | *Conservalo tra le versioni (...)* (il predefinito) oppure *Sovrascrivilo* |
 | *Nome della nuova versione (facoltativo)* | vuoto: il nome dice che cosa ha fatto MeshLab |
 
+La prima operazione di una sessione comincia con una prova, in background (*Prova di MeshLab*):
+MeshLab legge un triangolo ed elenca i filtri che il plugin usa. Se funziona l'operazione prosegue, e
+la prova non si ripete in quella sessione. Se no, l'operazione si ferma lì e il messaggio, come la
+riga del pannello, dice che cosa manca: su Linux le librerie e i pacchetti che le contengono,
+altrove di installare di nuovo MeshLab. Una prova fallita si rifà all'operazione successiva: dopo aver
+installato ciò che mancava, basta riprovare.
+
 Il lavoro gira in background con la barra di avanzamento - lettura del modello, filtro, misure,
 scrittura del risultato. *Annulla* ferma subito MeshLab e il modello resta com'era. Alla fine la nuova
 versione è il modello attivo, la vista 3D la mostra, il pannello ne dà le misure e la barra di stato il
-riassunto, per esempio *Modello decimato: 458.089 → 99.999 facce; texture conservata*.
+riassunto, per esempio *Modello decimato: 458.089 → 99.999 facce; restano 2.636 vertici e 0 spigoli
+non-manifold («Ripara la topologia»); texture conservata*. La parte centrale compare quando MeshLab
+lascia vertici o spigoli non-manifold: qui sono i difetti del modello come è stato costruito, che la
+decimazione non tocca.
 
 ### 1. Misura { #measure }
 
@@ -178,7 +197,7 @@ misura il suo risultato.
 | *Dimensioni (x × y × z)* | il riquadro intorno al modello, nelle coordinate del chunk |
 | *Lato medio dei triangoli* | la lunghezza media dei lati dei triangoli |
 
-Il modello del tutorial, in 1,2 s: 458.089 facce, 250.084 vertici, 87.402 m², né chiuso né
+Il modello del tutorial, in meno di due secondi: 458.089 facce, 250.084 vertici, 87.402 m², né chiuso né
 2-manifold, 925 parti separate - la superficie principale e tanti pezzetti nei campi intorno al tell -
 57.981 spigoli di bordo, 2.636 vertici non-manifold, 434,64 × 324,68 × 24,42 m, lato medio 0,70 m. Un
 modello di terreno aperto costruito dalle foto è raramente chiuso: il volume è per i reperti e gli
@@ -208,7 +227,7 @@ pieghe conservano i loro.
 | *Semplificazione planare (zone piane con triangoli migliori)* | non spuntato | triangoli migliori sulle zone piane: pavimenti, pareti, le facce di un blocco |
 | *Non capovolgere le facce* | non spuntato | rifiuta i collassi che girerebbero una faccia |
 
-Il modello del tutorial è passato da 458.089 a 99.999 facce in 3,9 s, con la sua texture: MeshLab
+Il modello del tutorial è passato da 458.089 a 99.999 facce in circa 5 s, con la sua texture: MeshLab
 può fermarsi una faccia o due prima del numero chiesto. L'area è passata da 87.402 a 86.585 m² (-0,9 %,
 i piccoli dossi spianati), gli spigoli di bordo sono rimasti gli stessi e il lato medio è cresciuto da
 0,70 a 1,05 m. Un modello per misurare resta quello intero: conserva la versione di prima e decima la
@@ -227,11 +246,12 @@ più volte.
 | *Adattiva (triangoli più piccoli dove la superficie curva)* | non spuntato | spuntato: il lato si accorcia dove la superficie si piega |
 | *Spigoli vivi da conservare: angolo (gradi)* | 30 | gli spigoli fra facce più inclinate di così restano dove sono |
 | *Distanza massima dalla superficie di partenza (m, 0 = nessun controllo)* | 0 | sopra 0, un vertice non si allontana più di così dal modello di prima |
-| *Ripara prima la topologia (su un modello non-manifold MeshLab si chiude)* | spuntato | la riparazione della sezione 6 prima della rimaglia |
+| *Ripara prima la topologia (su un modello non-manifold MeshLab si chiude)* | spuntato | la riparazione della sezione 6 prima della rimaglia, e di nuovo dopo: la rimaglia riunisce i vertici che la riparazione aveva diviso |
 
 La texture va ricostruita dopo. Sul modello del tutorial il lato proposto, 0,70 m, ha dato 526.706
-facce in 22 s, con un lato medio di 0,63 m: un po' più corto di quello chiesto. La rimaglia sposta
-ogni vertice: è il passo giusto prima di modellare o di stampare, non prima di misurare.
+facce in 24 s, con un lato medio di 0,63 m - un po' più corto di quello chiesto - e 12 vertici
+non-manifold rimasti, come dopo la sola riparazione. La rimaglia sposta ogni vertice: è il passo giusto
+prima di modellare o di stampare, non prima di misurare.
 
 ### 4. Leviga { #smooth }
 
@@ -276,8 +296,8 @@ contorno.
   texture va ricostruita.</figcaption>
 </figure>
 
-Sul modello del tutorial, dopo la riparazione, si sono chiusi 3.592 buchi con 13.799 facce nuove in
-2,9 s; gli spigoli di bordo sono passati da 57.984 a 38.193. Quando non c'è nessun buco così piccolo,
+Sul modello del tutorial, dopo la riparazione, si sono chiusi 3.302 buchi con 13.071 facce nuove in
+meno di 4 s; gli spigoli di bordo sono passati da 57.984 a 39.141. Quando non c'è nessun buco così piccolo,
 il messaggio *Nessun buco fino a 30 lati da chiudere: il modello non è cambiato.* lo dice e non si
 aggiunge nessuna versione.
 
@@ -295,10 +315,11 @@ Ogni passo si può lasciar fuori togliendo la spunta; girano in quest'ordine.
 | *Vertici non-manifold (divisi)* | un vertice dove si toccano due ventagli di facce diviso in due |
 | *Vertici non usati* | i vertici che nessuna faccia usa tolti |
 
-La texture resta. Sul modello del tutorial la riparazione ha tolto 1 faccia doppia e diviso 2.636
-vertici non-manifold in 2,4 s; il messaggio elenca che cosa ha cambiato ogni passo. Misura di nuovo
-dopo: qualche difetto può restare, e finché il modello non è 2-manifold MeshLab non ne sa contare i
-bordi.
+La texture resta. Il messaggio elenca che cosa ha cambiato ogni passo e che cosa resta; sul modello
+del tutorial, in 2,4 s: *Topologia riparata: facce doppie tolte 1, vertici non-manifold divisi 2.636;
+restano 12 vertici e 0 spigoli non-manifold («Ripara la topologia»); texture conservata*. I vertici
+divisi restano divisi nelle operazioni successive. Finché qualche difetto resta il modello non è
+2-manifold, e MeshLab non ne sa contare i bordi.
 
 ### 7. Versioni { #versions }
 
@@ -330,8 +351,8 @@ ppg plugin mesh-tools measure scavo.ppg --json
 
 | Comando | Opzioni |
 |---|---|
-| `status` | stampa quale MeshLab usa il plugin; codice di uscita 1 quando non ce n'è |
-| `install` | installa l'ambiente del plugin; `--force` anche quando il Python del programma ha pymeshlab, o per installarlo di nuovo |
+| `status` | stampa quale MeshLab usa il plugin e lo prova su un triangolo; codice di uscita 1 quando non ce n'è o non funziona, e allora dice che cosa manca |
+| `install` | installa l'ambiente del plugin e lo prova; `--force` anche quando il Python del programma ha pymeshlab, o per installarlo di nuovo. Quando al computer manca una libreria l'ambiente resta installato e il messaggio dice che cosa aggiungere |
 | `measure PROGETTO` | stampa le misure; `--json` tutte, in JSON, con gli angoli del riquadro |
 | `decimate PROGETTO` | `--faces` facce da ottenere (0: la frazione `--fraction`, 0.5); `--no-texture` la variante senza texture; `--quality` (0.3); `--free-borders`; `--free-topology`; `--planar`; `--keep-normals` (nessuna faccia capovolta) |
 | `remesh PROGETTO` | `--edge` m (0: il lato medio del modello); `--iterations` (10); `--adaptive`; `--feature-angle` gradi (30); `--max-distance` m (0); `--no-repair` |
@@ -341,7 +362,8 @@ ppg plugin mesh-tools measure scavo.ppg --json
 
 Ogni operazione accetta anche `--name` (il nome della nuova versione), `--overwrite` (nessuna versione
 conservata del modello di prima) e `--json` (tutto il resoconto, con le misure). Senza `--json` stampa
-l'avanzamento, che cosa ha fatto MeshLab, il nome della nuova versione e le misure.
+l'avanzamento, che cosa ha fatto MeshLab, il nome della nuova versione e le misure. Ogni comando che usa
+MeshLab prima lo prova, come fa la finestra, e si ferma con lo stesso messaggio quando non funziona.
 
 ## Limiti { #limits }
 
@@ -353,12 +375,14 @@ l'avanzamento, che cosa ha fatto MeshLab, il nome della nuova versione e le misu
 * **Modelli difettosi.** Di un modello che non è 2-manifold non si possono contare i bordi, e alcuni
   filtri di MeshLab si chiudono di colpo: il plugin ripara prima, e se MeshLab si chiude
   inaspettatamente il modello resta com'era e il messaggio suggerisce *Ripara la topologia*. La rimaglia
-  può riunire i vertici che la riparazione aveva diviso: sul modello del tutorial i 2.636 vertici
-  non-manifold c'erano di nuovo dopo. Misura dopo ogni passo.
+  di MeshLab riunisce i vertici che una riparazione aveva diviso: con *Ripara prima la topologia* il
+  plugin ripara ancora una volta dopo. Ogni riassunto dice i vertici e gli spigoli non-manifold che
+  restano.
 * **Memoria.** Il programma e MeshLab tengono entrambi tutto il modello: un modello di decine di milioni
   di facce chiede diversi gigabyte. Decima una copia prima di rimagliarla.
 * **Il volume** solo per i modelli chiusi.
-* **Windows su ARM** non ha pymeshlab.
+* **Linux** ha bisogno delle librerie di sistema di [Che cosa serve prima](#before); **Windows su
+  ARM** non ha pymeshlab.
 
 ## File scritti { #files }
 

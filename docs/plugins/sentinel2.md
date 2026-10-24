@@ -28,8 +28,9 @@ Its README and source code are in the
     survey in it, and an area of 400 x 400 m around Stonehenge, a public monument, given as a box of
     longitudes and latitudes from the command line. The search over 2023 found 23 acquisitions; six of
     them (19 January, 4 April, 26 May, 13 and 25 June, 22 August) were read, about 110 MB in 22
-    seconds. They show what the plugin does and are not a study of the monument: at 10 m a pixel, the
-    strongest marks here are modern.
+    seconds. For the pictures of the pane the three summer dates were read again, and 22 August was
+    then taken out of the cache with its products kept. They show what the plugin does and are not a
+    study of the monument: at 10 m a pixel, the strongest marks here are modern.
 
 ## In short
 
@@ -43,6 +44,9 @@ Its README and source code are in the
 5. *View*: an index, a date or a period, a palette, an opacity, then *Overlay* on the orthophoto or the
    DEM.
 6. *Crop-mark map* and *Composite of the period* make products to show, export, or open in QGIS.
+7. *Remove from the cache* and *Empty the cache...* take acquisitions read out of the project; the next
+   *Read and compute* reads them again. From program 1.3.4 the products are also in the tree of the
+   *Workspace*.
 
 ## What it does
 
@@ -56,6 +60,8 @@ Its README and source code are in the
 | Composites | the median of an index over a season, a year, a month, a span of days | a period without the noise of a single date |
 | Crop-mark maps | the index less its smooth background, divided by its spread: a z-score | the lines and spots that differ from the field around them |
 | Exports | GeoTIFF on the grid of the scenes and on the grid of the survey, CSV, PNG, the QGIS project of the program | the GIS, the report, the archive |
+| Cache | the acquisitions read, kept in the project; a few or all taken out of it on request | a project that stays small; dates read again when they are needed |
+| Project tree (from program 1.3.4) | a *Sentinel-2* node under the chunk: acquisitions, indices by date, series, composites, crop-mark maps | every product of the chunk at hand, without the pane |
 
 At 10 m a pixel, Sentinel-2 sees the larger features - enclosures, ditches and roads several metres
 wide, villas, the outline of a settlement - and above all **when** the fields show them: the
@@ -160,8 +166,11 @@ Sentinel-2 > Sentinel-2 pane*.
 <figure markdown="span">
   ![The Sentinel-2 pane](../img/plugins/sentinel2/pane-parts.png)
   <figcaption>The whole pane, in two halves side by side: on the left the area, the search, the
-  acquisitions found and read and the chart of the series; on the right the view, the crop marks, the
-  products made and the notice of the data. Contains modified Copernicus Sentinel data 2023.</figcaption>
+  acquisitions found and read, the buttons of the reading and of the cache, and the chart of the
+  series; on the right the view with its legend, the crop marks, the products made and the notice of
+  the data. 22 August was taken out of the cache with its products kept: the two products made from it
+  are marked <em>(dates no longer cached)</em>, and the series has the two dates left. Contains
+  modified Copernicus Sentinel data 2023.</figcaption>
 </figure>
 
 From the top:
@@ -173,12 +182,15 @@ From the top:
 * the table of the acquisitions: *Date*, *Satellite*, *Tile*, *Clouds %* (of the tiles), *Clear %*
   (of the area, once read), *Status* - *to read*, *read*, *cloudy*, *error* (the tooltip of the date
   gives the id of the acquisition and the error);
-* *Least clear part of the area (%)*, *Read and compute*, *Compute again*;
+* *Least clear part of the area (%)*, *Read and compute*, *Compute again*, *Remove from the cache*,
+  *Empty the cache...*; a right click on the table has *Show (natural colour)*, *Remove from the cache
+  (N)* and *Empty the cache...*, and a double click on an acquisition read shows its natural colour;
 * the chart of the series; a double click opens it full size;
 * **View**: *Index*, *Date or period*, *Palette*, *Opacity*, *Overlay*, *Hide*, and the colours shown;
 * **Crop marks**: *Background (m)*, *Method*, *Crop-mark map*, *Composite of the period*;
 * the table of the products - *Name*, *Dates*, *Made* - with *Overlay*, *Export...*, *Remove*, *QGIS*
-  and *Export everything...*;
+  and *Export everything...*; a product made also from acquisitions no longer in the cache is marked
+  *(dates no longer cached)*;
 * the notice of the data: *Contains modified Copernicus Sentinel data* and the years.
 
 The *Plugins > Sentinel-2* menu has *Sentinel-2 pane*, *Search Sentinel-2 images...*, *Draw the
@@ -233,10 +245,37 @@ four at a time, and then computes the indices and the series:
 
 The status line then gives how many acquisitions were read, found already in the project, cloudy or
 in error, and how many clear dates the series has. *Compute again* makes the indices and the series
-again from what was read, without the network. A new *Least clear part of the area* is used by the next
-*Read and compute*: press it again, and only the acquisitions not yet read are downloaded.
+again from what was read, without the network, with the *Least clear part of the area* set in the
+pane, and keeps that value: raise it to leave the hazier dates out of the series, lower it to take
+them back. An acquisition marked *cloudy* was never downloaded: with a lower value, the next *Read and
+compute* reads it.
 
-### 4. On the view { #view }
+### 4. The cache { #cache }
+
+Each acquisition read is kept in the project as a small GeoTIFF - the window of the area, its seven
+bands and the scene classification, about 100 KB - and the indices, the series and the products are
+made from these files. They can be taken out:
+
+* *Remove from the cache*: the acquisitions read that are selected in the table (also from its right
+  click, *Remove from the cache (N)*);
+* *Empty the cache...*: every acquisition read.
+
+A question comes first, with the acquisitions or the files and megabytes concerned. When composites
+or crop-mark maps were made from those dates, it also asks what to do with them: *Remove the products
+too*, or *Keep the products*. Then the files are deleted and the acquisitions go back to *to read* in
+the table - they stay in the search, and the next *Read and compute* reads them again from the
+network - and the indices and the series are computed again from the dates left (with none left, they
+are deleted). An overlay that showed something taken away is hidden.
+
+A product kept is what was computed then, and does not change; but the cache can no longer make it
+again, so the table of the products marks it *(dates no longer cached)* and its tooltip names the
+acquisitions missing. The mark goes when they are read again.
+
+The right click on the table also has *Show (natural colour)* for an acquisition read, whether or not
+it entered the series (a double click on its row does the same): the natural colour of that date
+over the view.
+
+### 5. On the view { #view }
 
 | Field | What it does |
 |---|---|
@@ -247,19 +286,23 @@ again from what was read, without the network. A new *Least clear part of the ar
 
 *Overlay* lays the index of the date, or the median of the period, over the orthophoto or the DEM;
 natural colour shows the clearest date of the period. An index is stretched between its 2nd and 98th
-percentiles, a crop-mark map between -3 and 3; the line under the buttons gives the values at the two
-ends. Every pixel of Sentinel-2 stays a square of 10 m: hundreds of pixels of the orthophoto. One
+percentiles, a crop-mark map between -3 and 3. A crop-mark map reads as an index does, in the pane and
+in QGIS alike: with the default palette red is weaker vegetation, green greener. The line under the
+buttons gives the values at the two ends and their colours, and for a crop-mark map what they mean:
+*z from -3 (red) to 3 (green): under -2 the vegetation is weaker than around it (walls, roads,
+compacted ground), over 2 it is greener (ditches, pits)*. Every pixel of Sentinel-2 stays a square of
+10 m: hundreds of pixels of the orthophoto. One
 overlay is shown at a time; *Hide* takes it away, and it is drawn again when the view shows another
 raster of the same chunk.
 
 <figure markdown="span">
   ![The crop-mark map over the frame of the area](../img/plugins/sentinel2/pane.png)
   <figcaption>The crop-mark map of the summer of 2023 laid over the frame of <em>Show the whole
-  area</em>, with the area of the analysis in yellow. Contains modified Copernicus Sentinel data
-  2023.</figcaption>
+  area</em>, with the area of the analysis in yellow; in the table, 13 June is selected among the
+  acquisitions read. Contains modified Copernicus Sentinel data 2023.</figcaption>
 </figure>
 
-### 5. Composites and crop-mark maps { #products }
+### 6. Composites and crop-mark maps { #products }
 
 Both take the *Index* and the *Date or period* chosen in the *View* group (natural colour has none).
 
@@ -293,22 +336,40 @@ The periods are written as the command line writes them:
 | `2023-04-01/2023-06-30` | a span of days |
 | `20230613_S2A` | one acquisition |
 
-### 6. QGIS and exports { #export }
+### 7. QGIS and exports { #export }
 
 * *Overlay* on a product of the table (or a double click on it) shows it on the view.
 * *Export...*: the product as a GeoTIFF on the grid of the scenes, with its copy on the grid of the
   survey beside it (`..._chunk.tif`).
 * *Remove* asks first, then deletes the files of the product.
 * *QGIS*: the QGIS project of the program ([QGIS](../integrations.md)) with the products on the grid of
-  the survey, hidden at first: composites with the ramp of the vegetation indices, crop-mark maps from
-  blue at -3 (weaker vegetation) through white to red at 3 (greener) - the other way round from the
-  red-yellow-green of the view.
+  the survey, hidden at first, in the red-yellow-green of the vegetation indices: composites between
+  their 10th and 90th percentiles, crop-mark maps from -3 (red, weaker vegetation) to 3 (green,
+  greener), as in the pane.
 * *Export everything...*: into a folder, the stack of every index and date in one GeoTIFF
   (`sentinel2_stack.tif`, bands named like `NDVI 2023-06-13 20230613_S2A`), one GeoTIFF per index, the
   series per date and per month (CSV) with the chart, every product on both grids, and a text file with
   the notice of the data and the formulas.
 * *File > Export > Sentinel-2 time series (CSV)...* writes the series per date, the monthly one beside
   it (`..._monthly.csv`) and the chart (`.png`); *Sentinel-2 stack (GeoTIFF)...* the stack.
+
+### 8. In the project tree { #tree }
+
+From pyarchinit-photogrammetry 1.3.4, every chunk the plugin worked on has a *Sentinel-2* node in the
+tree of the *Workspace*, after the products of the program; with 1.3.3 the pane does it all.
+
+| Item | Double click | Right click |
+|---|---|---|
+| *Sentinel-2* | the pane | *Show the pane*, *Show the whole area*, *Hide the overlay*, *Export everything...*, *Open in QGIS*, *Empty the cache...* |
+| *Acquisitions read (N)*, a row per date with its satellite and clear part | the natural colour of that date | *Show (natural colour)*, *Hide*, *Export...* (the reflectance of the seven bands and the scene classification, one GeoTIFF), *Remove from the cache*; on the group, *Empty the cache...* |
+| *Indices by date (N dates)*: NDVI, NDRE and NDMI, each with its dates | the index of that date | *Show*, *Hide*, *Export...* (that index of that date, on both grids), *Remove from the cache*; on an index, *Show the median of whole period* |
+| *Time series* | the chart | *Open the chart*, *Export the series (CSV)...* |
+| *Composites (N)*, *Crop marks (N)* | the product over the view | *Show*, *Hide*, *Export...*, *Open in QGIS*, *Remove* |
+
+A double click makes the chunk of the item the active one and shows the item over the view, and the
+pane follows the choice. The node is filled again after every change, with the same *(dates no longer
+cached)* mark as the pane. The two exports of a single date - its reflectance, one index - are only in
+the tree.
 
 ## From the command line { #cli }
 
@@ -320,31 +381,35 @@ ppg plugin sentinel2 --help
 ppg plugin sentinel2 search scavo.ppg --start 2021-01-01 --end 2024-12-31
 ppg plugin sentinel2 search scavo.ppg --max-cloud 20 --margin 500
 ppg plugin sentinel2 search scavo.ppg \
-    --bbox=-1.8291,51.1771,-1.8233,51.1807 --start 2023-01-01 --end 2023-12-31
+    --bbox -1.8291,51.1771,-1.8233,51.1807 --start 2023-01-01 --end 2023-12-31
 ppg plugin sentinel2 fetch scavo.ppg --min-clear 0.5
 ppg plugin sentinel2 fetch scavo.ppg --scenes 20230613_S2A,20230625_S2B
+ppg plugin sentinel2 compute scavo.ppg --min-clear 0.8
 ppg plugin sentinel2 series scavo.ppg --monthly --index NDVI
 ppg plugin sentinel2 composite scavo.ppg --index NDVI --period 2023-summer
 ppg plugin sentinel2 cropmarks scavo.ppg --period 2023-summer --background 50
 ppg plugin sentinel2 list scavo.ppg
 ppg plugin sentinel2 export scavo.ppg sentinel2_export/
 ppg plugin sentinel2 remove scavo.ppg cropmarks_NDVI_2023_summer_50m
+ppg plugin sentinel2 remove-scene scavo.ppg 20230822_S2A
+ppg plugin sentinel2 remove-scene scavo.ppg --all --with-products
 ```
 
 | Command | Options |
 |---|---|
-| `search PROJECT` | `--start`, `--end` (YYYY-MM-DD; from the first of January two years ago to today); `--max-cloud` % (30); `--margin` m (300); `--area auto`, `dem`, `orthomosaic`, or `keep` the area set before; `--bbox=WEST,SOUTH,EAST,NORTH` in degrees; `--polygon "x,y;x,y;x,y"` in the coordinates of the chunk; `--catalog URL`, `--collection`; `--client auto`, `stdlib` or `pystac` |
+| `search PROJECT` | `--start`, `--end` (YYYY-MM-DD; from the first of January two years ago to today); `--max-cloud` % (30); `--margin` m (300); `--area auto`, `dem`, `orthomosaic`, or `keep` the area set before; `--bbox WEST,SOUTH,EAST,NORTH` in degrees (also as four numbers); `--polygon "x,y;x,y;x,y"` in the coordinates of the chunk; `--catalog URL`, `--collection`; `--client auto`, `stdlib` or `pystac` |
 | `fetch PROJECT` | `--scenes ID,ID` only these acquisitions; `--min-clear` 0-1 (0.5); `--clear` SCL classes kept (4,5,6); `--buffer` m (20); `--workers` acquisitions read at the same time (4); `--no-compute` |
-| `compute PROJECT` | indices and series again from what was read, without the network |
+| `compute PROJECT` | indices and series again from what was read, without the network; `--min-clear` 0-1, kept for the next times (the value of the last reading when not given) |
 | `series PROJECT` | the series per date, or `--monthly`; `--index NDVI`, `NDRE` or `NDMI` |
 | `composite PROJECT` | `--index` (NDVI); `--period` (all) |
 | `cropmarks PROJECT` | `--index` (NDVI); `--period` (all); `--background` m (50); `--method gaussian` or `median` |
-| `list PROJECT` | the area, the grid, the search, the acquisitions, the dates and the products, as JSON |
+| `list PROJECT` | the area, the grid, the search, the cache (files, megabytes, acquisitions), the acquisitions, the dates and the products with the dates no longer cached, as JSON |
 | `export PROJECT PATH` | a folder: everything, as *Export everything...*; a `.tif`: the stack; a `.csv`: the series |
 | `remove PROJECT ID` | deletes a product and its files |
+| `remove-scene PROJECT ID [ID...]` | the acquisitions out of the cache; `--all` every one; `--with-products` removes the products made from them too, otherwise they stay, marked. An id not in the cache is refused, and the message lists those that are |
 
-Write `--bbox=` with the equals sign: a box west of Greenwich starts with a minus sign, and without the
-`=` the command takes it for an option and stops with *expected one argument*. The ids of the
+A box west of Greenwich starts with a minus sign: write it as it is (`--bbox -1.8291,51.1771,...`),
+as `--bbox=...` or as four numbers; `--polygon` takes negative coordinates too. The ids of the
 acquisitions are those `search` and `list` print; the ids of the products - `composite_NDVI_2023_summer`,
 `cropmarks_NDVI_2023_summer_50m` - those of `list`.
 
@@ -383,8 +448,9 @@ acquisitions are those `search` and `list` print; the ids of the products - `com
 
 ### Crop-mark maps { #reading-cropmarks }
 
-* **z under -2** (red with the default palette): vegetation weaker than the ground around it - buried
-  walls, roads, compacted surfaces, but also tracks, paths, stony patches and the edges of fields.
+* **z under -2** (red with the default palette, in the pane and in QGIS): vegetation weaker than the
+  ground around it - buried walls, roads, compacted surfaces, but also tracks, paths, stony patches and
+  the edges of fields.
   **z over 2** (green): greener - ditches, pits, but also hedges, wet hollows, a strip sown later.
 * **Read lines and shapes**, not single pixels: a ring, a rectangle, a straight line that crosses the
   boundaries of the fields. A mark that follows a field boundary or a tramline is agricultural.
@@ -409,17 +475,19 @@ acquisitions are those `search` and `list` print; the ids of the products - `com
 * **A local chunk** cannot be searched from the window: georeference it, or work from the command line
   with a box of longitudes and latitudes.
 * **The catalog.** The plugin depends on Earth Search and on the images on AWS being online; what was
-  read stays in the project.
+  read stays in the project until it is taken out of the cache.
 
 ## Files written { #files }
 
 Everything goes into the folder of the chunk, next to the project file:
 `<project>.ppg.files/chunk_<n>/sentinel2/`. The area, the grid, the search, the state of every
-acquisition, the dates and the products are kept in the project itself.
+acquisition, the dates and the products, with the dates no longer cached, are kept in the project
+itself.
 
 * `scenes.json`: the acquisitions of the last search, with the addresses of their bands.
 * `scenes/<acquisition>.tif`: the window of each acquisition read - the seven bands and the scene
-  classification, with their scale and offset - on the grid of the scenes; about 100 KB each.
+  classification, with their scale and offset - on the grid of the scenes; about 100 KB each. These
+  are the files *Remove from the cache* and *Empty the cache...* delete.
 * `indices/NDVI.tif`, `NDRE.tif`, `NDMI.tif`: a band per clear date, in time order, named after the
   acquisition; NaN where the cell was not clear.
 * `series.csv`, `series_monthly.csv`, `series.png`: the series and its chart.

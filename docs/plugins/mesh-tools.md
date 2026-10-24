@@ -35,7 +35,7 @@ Its README and source code are in the
    (OBJ, PLY, GLB)...*).
 2. Open the *Mesh (MeshLab)* tab of the *Project* dock (*Plugins > Mesh (MeshLab) > Mesh (MeshLab)
    pane*). The first time an operation runs, the plugin offers to install MeshLab (about 300 MB),
-   unless pymeshlab is already in the Python of the program.
+   unless pymeshlab is already in the Python of the program, and tries it on a triangle.
 3. *Measure*: closed or open, how many separate parts, how many defects.
 4. Choose an operation - *Decimate...*, *Remesh...*, *Smooth...*, *Close holes...*, *Repair the
    topology...* - and set it in its window. The new version shows in the 3D view, its measures in the
@@ -81,6 +81,11 @@ volume...*). The plugin adds what MeshLab does better.
     x86-64; there is none for Windows on ARM, where the plugin says that the MeshLab tools are not
     available. The line under the description of the pane says which MeshLab the plugin uses.
 
+* **On Linux, a few system libraries.** pymeshlab needs libraries its packages do not carry,
+  `libOpenGL.so.0` above all: without them it starts but reads no model, and every operation would
+  fail. Install them once - on Debian and Ubuntu `sudo apt install libopengl0 libgl1`, on Fedora
+  `sudo dnf install libglvnd-opengl libglvnd-glx`.
+
 * **A chunk with a model**: built by the program, or imported. The plugin works on the model the chunk
   shows, its active version.
 * **A chunk in metres** - a reference system, scale bars, or a scan - for lengths and measures in
@@ -89,8 +94,10 @@ volume...*). The plugin adds what MeshLab does better.
 ## The model { #model }
 
 * **Seams.** A textured model repeats its vertices along the seams of the texture. Before MeshLab sees
-  the model, the vertices at the same place are counted once: otherwise MeshLab would take every seam
-  for a border, smoothing would open it and the measures would count it as a hole.
+  the model, the copies along a seam are counted once: otherwise MeshLab would take every seam for a
+  border, smoothing would open it and the measures would count it as a hole. Copies that touch only at
+  a point - a non-manifold vertex the repair split, two pieces meeting at a corner - stay apart, so
+  the next operation does not undo a repair.
 * **What MeshLab cannot carry.** MeshLab gets the positions, the colours of the vertices and, when the
   operation keeps it, the texture. The other properties of the vertices - the confidence, how many
   depth maps confirm the vertex - come back from the vertex of the model nearest to each new vertex;
@@ -119,15 +126,16 @@ Once the plugin is installed and the program restarted, the *Mesh (MeshLab)* tab
   ![The Mesh (MeshLab) pane after a decimation](../img/plugins/mesh-tools/pane.png)
   <figcaption>The pane after the decimation of the tutorial model to 100,000 faces, named <em>For the
   web</em> in its window: MeshLab runs with the pymeshlab of the Python of the program, the measures
-  of the new version are in the table, the last line says what MeshLab did. On the right, the new
-  version with its texture in the 3D view.</figcaption>
+  of the new version are in the table, the last line says what MeshLab did and the defects of the
+  model it left. On the right, the new version with its texture in the 3D view.</figcaption>
 </figure>
 
 From the top:
 
 * a short description;
 * which MeshLab the plugin uses - *pymeshlab ... of this Python* or *in the environment of the
-  plugin* - or that it is not installed, with the button *Install MeshLab...*;
+  plugin* - or that it is not installed, with the button *Install MeshLab...*, or what it lacks when
+  the check below found it not working;
 * the active model: its name, faces, vertices and texture pages;
 * the buttons *Decimate...*, *Remesh...*, *Smooth...*, *Close holes...*, *Repair the topology...*,
   *Measure* and *Show in the 3D view*;
@@ -150,10 +158,20 @@ end:
 | *Current model* | *Keep it among the versions (...)* (the default) or *Overwrite it* |
 | *Name of the new version (optional)* | empty: the name says what MeshLab did |
 
+The first operation of a session starts with a check, in the background (*Trying MeshLab*): MeshLab
+reads a triangle and lists the filters the plugin uses. When it works the operation follows, and the
+check is not repeated in that session. When it does not, the operation stops there and the message,
+and the line of the pane, say what is missing: on Linux the libraries and the packages that have
+them, elsewhere to install MeshLab again. A check that failed is done again at the next operation:
+after installing what was missing, just try again.
+
 The work runs in the background with the progress bar - reading the model, the filter, the measures,
 writing the result. *Cancel* stops MeshLab at once and the model stays as it was. At the end the new
 version is the active model, the 3D view shows it, the pane gives its measures and the status bar
-the summary, for example *Model decimated: 458,089 → 99,999 faces; texture kept*.
+the summary, for example *Model decimated: 458,089 → 99,999 faces; 2,636 non-manifold vertices and 0
+edges left ('Repair the topology'); texture kept*. The middle part appears when MeshLab leaves
+non-manifold vertices or edges: here they are the defects of the model as built, which the decimation
+does not touch.
 
 ### 1. Measure { #measure }
 
@@ -175,7 +193,7 @@ measures its result too.
 | *Size (x × y × z)* | the box around the model, in the coordinates of the chunk |
 | *Mean edge of the triangles* | the mean length of the sides of the triangles |
 
-The tutorial model, in 1.2 s: 458,089 faces, 250,084 vertices, 87,402 m², not closed and not
+The tutorial model, in under two seconds: 458,089 faces, 250,084 vertices, 87,402 m², not closed and not
 2-manifold, 925 separate parts - the main surface and many small pieces in the fields around the
 mound - 57,981 border edges, 2,636 non-manifold vertices, 434.64 × 324.68 × 24.42 m, a mean edge of
 0.70 m. A model of open ground built from photos is rarely closed: the volume is for finds and
@@ -204,7 +222,7 @@ edge collapse): flat ground loses its triangles first, edges and bends keep thei
 | *Planar simplification (flat areas with better triangles)* | not ticked | better triangles on flat areas: floors, walls, the faces of a block |
 | *Do not flip faces* | not ticked | refuses collapses that would turn a face over |
 
-The tutorial model went from 458,089 to 99,999 faces in 3.9 s, with its texture: MeshLab can stop
+The tutorial model went from 458,089 to 99,999 faces in about 5 s, with its texture: MeshLab can stop
 a face or two short of the number asked. The area went from 87,402 to 86,585 m² (-0.9 %, the small
 bumps flattened), the border edges stayed the same and the mean edge grew from 0.70 to 1.05 m. A
 model meant for measuring should stay the full one: keep the version before, and decimate the copy
@@ -223,11 +241,12 @@ again.
 | *Adaptive (smaller triangles where the surface curves)* | not ticked | ticked: the edge shrinks where the surface bends |
 | *Sharp edges to keep: angle (degrees)* | 30 | edges between faces at a sharper angle stay where they are |
 | *Largest distance from the surface before (m, 0 = no check)* | 0 | when above 0, a vertex is not moved farther than this from the model before |
-| *Repair the topology first (on a non-manifold model MeshLab crashes)* | ticked | the repair of section 6 before the remeshing |
+| *Repair the topology first (on a non-manifold model MeshLab crashes)* | ticked | the repair of section 6 before the remeshing, and again after it: the remeshing joins again the vertices the repair split |
 
 The texture has to be built again afterwards. On the tutorial model the edge proposed, 0.70 m, gave
-526,706 faces in 22 s, with a mean edge of 0.63 m: a little shorter than the one asked. Remeshing
-moves every vertex: it is the right step before modelling or printing, not before measuring.
+526,706 faces in 24 s, with a mean edge of 0.63 m - a little shorter than the one asked - and 12
+non-manifold vertices left, as after the repair alone. Remeshing moves every vertex: it is the right
+step before modelling or printing, not before measuring.
 
 ### 4. Smooth { #smooth }
 
@@ -270,9 +289,9 @@ above, with a number of edges larger than its outline.
   texture has to be built again.</figcaption>
 </figure>
 
-On the tutorial model, after the repair, 3,592 holes were closed with 13,799 new faces in 2.9 s; the
-border edges went from 57,984 to 38,193. When there is no hole that small, the message *No hole up to
-30 edges to close: the model has not changed.* says so and no version is added.
+On the tutorial model, after the repair, 3,302 holes were closed with 13,071 new faces in under 4 s;
+the border edges went from 57,984 to 39,141. When there is no hole that small, the message *No hole up
+to 30 edges to close: the model has not changed.* says so and no version is added.
 
 ### 6. Repair the topology { #repair }
 
@@ -288,9 +307,11 @@ Every step can be left out by unticking it; they run in this order.
 | *Non-manifold vertices (split)* | a vertex where two fans of faces touch split into two |
 | *Unused vertices* | vertices no face uses removed |
 
-The texture stays. On the tutorial model the repair removed 1 duplicate face and split 2,636
-non-manifold vertices in 2.4 s; the message lists what each step changed. Measure again afterwards:
-a few defects can remain, and while the model is not 2-manifold MeshLab cannot count its borders.
+The texture stays. The message lists what each step changed and what is left; on the tutorial model,
+in 2.4 s: *Topology repaired: duplicate faces removed 1, non-manifold vertices split 2,636; 12
+non-manifold vertices and 0 edges left ('Repair the topology'); texture kept*. The vertices split
+stay split in the operations that follow. While a few defects remain the model is not 2-manifold, and
+MeshLab cannot count its borders.
 
 ### 7. Versions { #versions }
 
@@ -322,8 +343,8 @@ ppg plugin mesh-tools measure scavo.ppg --json
 
 | Command | Options |
 |---|---|
-| `status` | prints which MeshLab the plugin uses; exit code 1 when none |
-| `install` | installs the environment of the plugin; `--force` also when the Python of the program has pymeshlab, or to install it again |
+| `status` | prints which MeshLab the plugin uses and tries it on a triangle; exit code 1 when there is none or it does not work, and then it says what is missing |
+| `install` | installs the environment of the plugin and tries it; `--force` also when the Python of the program has pymeshlab, or to install it again. When the computer lacks a library, the environment stays installed and the message names what to add |
 | `measure PROJECT` | prints the measures; `--json` all of them as JSON, with the corners of the box |
 | `decimate PROJECT` | `--faces` faces to reach (0: `--fraction` of them, 0.5); `--no-texture` the variant without texture; `--quality` (0.3); `--free-borders`; `--free-topology`; `--planar`; `--keep-normals` (no face flipped) |
 | `remesh PROJECT` | `--edge` m (0: the mean edge of the model); `--iterations` (10); `--adaptive`; `--feature-angle` degrees (30); `--max-distance` m (0); `--no-repair` |
@@ -333,7 +354,8 @@ ppg plugin mesh-tools measure scavo.ppg --json
 
 Every operation also takes `--name` (the name of the new version), `--overwrite` (no version kept of
 the model before) and `--json` (the whole report, with the measures). Without `--json` it prints the
-progress, what MeshLab did, the name of the new version and the measures.
+progress, what MeshLab did, the name of the new version and the measures. Every command that runs
+MeshLab tries it first, as the window does, and stops with the same message when it does not work.
 
 ## Limits { #limits }
 
@@ -343,13 +365,14 @@ progress, what MeshLab did, the name of the new version and the measures.
 * **The texture after remeshing and closing holes** is gone: build it again on the new model.
 * **Defective models.** A model that is not 2-manifold cannot have its borders counted, and some
   MeshLab filters crash on it: the plugin repairs first, and if MeshLab closes unexpectedly the model is
-  left as it was and the message suggests *Repair the topology*. The remeshing can join again the
-  vertices the repair had split: on the tutorial model the 2,636 non-manifold vertices were back after
-  it. Measure after every step.
+  left as it was and the message suggests *Repair the topology*. MeshLab's remeshing joins again the
+  vertices a repair split: with *Repair the topology first* the plugin repairs once more after it.
+  Every summary names the non-manifold vertices and edges left.
 * **Memory.** The program and MeshLab both hold the whole model: a model of tens of millions of faces
   needs several gigabytes. Decimate a copy before remeshing it.
 * **Volume** only for closed models.
-* **Windows on ARM** has no pymeshlab.
+* **Linux** needs the system libraries of [What you need first](#before); **Windows on ARM** has no
+  pymeshlab.
 
 ## Files written { #files }
 
