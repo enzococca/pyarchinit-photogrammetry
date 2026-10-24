@@ -78,6 +78,7 @@ class Contributions:
     commands: dict = field(default_factory=dict)
     exporters: list = field(default_factory=list)
     connections: list = field(default_factory=list)  # (signal, slot) disconnected when the plugin goes away
+    tree_items: list = field(default_factory=list)  # (plugin, provider) of the workspace, taken out with it
 
 
 class Context:
@@ -337,15 +338,57 @@ class Context:
         signal.connect(deleted)
         self.contributions.connections.append((signal, deleted))
 
+    def add_tree_items(self, provider: Callable[[object], list]) -> None:
+        """Since 1.3.4: the products of the plugin in the workspace (*Area di lavoro*), under each chunk
+        after those of the program. ``provider(chunk)`` returns the items of ``chunk``, each a dict:
+        ``label``, ``icon`` (a name of ``gui.icons.icon`` such as "index", "zones", "multispectral", or
+        a QIcon), ``tooltip``, ``children`` (items), ``activate`` (``activate()`` on a double click or
+        Enter), ``actions`` (``[(text, callback), ...]``: the menu of the right click), ``expanded``;
+        a key left out is empty. The callbacks run in the interface thread with the chunk of the item
+        the active one. The provider is called for every chunk each time the tree is filled - every
+        time the window shows the project again, and at :meth:`refresh_tree`; one that fails is written
+        in the log and left out. A node keeps the expansion the user gave it. Taken out when the plugin
+        is disabled. Nothing in the command line."""
+        tree = getattr(self.window, "workspace", None)
+        if tree is None or not hasattr(tree, "providers"):
+            return
+        entry = (self.name, provider)
+        tree.providers.append(entry)
+        self.contributions.tree_items.append(entry)
+        if tree.document is not None:  # the tree is filled already (a plugin activated afterwards)
+            self.refresh_tree()
+
+    def refresh_tree(self) -> None:
+        """Since 1.3.4: the workspace filled again, the items of the plugins asked again (after the plugin
+        made or deleted products). From another thread it is done in the interface thread, soon. Nothing
+        in the command line."""
+        tree = getattr(self.window, "workspace", None)
+        if tree is None or getattr(tree, "document", None) is None:
+            return
+        import threading
+
+        if threading.current_thread() is not threading.main_thread():
+            self.call_in_gui(self.refresh_tree)
+            return
+        try:
+            tree.populate(tree.document)
+        except RuntimeError:  # the window is being closed
+            pass
+
     def release(self) -> None:
-        """What the plugin connected through the context, disconnected (the manager calls it after
-        :meth:`Plugin.deactivate`)."""
+        """What the plugin connected through the context, disconnected, and its items taken out of the
+        workspace (the manager calls it after :meth:`Plugin.deactivate`)."""
         for signal, slot in self.contributions.connections:
             try:
                 signal.disconnect(slot)
             except (RuntimeError, TypeError):
                 pass
         self.contributions.connections.clear()
+        tree = getattr(self.window, "workspace", None)
+        if self.contributions.tree_items and tree is not None:
+            tree.providers[:] = [p for p in tree.providers if not any(p is e for e in self.contributions.tree_items)]
+            self.contributions.tree_items.clear()
+            self.refresh_tree()
 
     def run(self, title: str, function: Callable, done: Callable | None = None) -> object:
         """``function(progress)`` with a progress bar: in the background in the window (``done(result)``

@@ -107,7 +107,8 @@ def _tool(name: str, text: str, tip: str = "") -> QToolButton:
 
 
 class WorkspaceTree(QTreeWidget):
-    """Document > chunks > photos / markers / scale bars / products."""
+    """Document > chunks > photos / markers / scale bars / products, and the products of the plugins
+    (:meth:`plugins.api.Context.add_tree_items`) under them."""
 
     activated_item = Signal(str, object, object)  # kind, chunk, payload
     context_requested = Signal(str, object, object, object)  # kind, chunk, payload, global position
@@ -123,8 +124,16 @@ class WorkspaceTree(QTreeWidget):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._context)
         self.document = None
+        self.providers: list[tuple[str, object]] = []  # (plugin, provider(chunk) -> items) of the plugins
+        self._plugin_items: list[tuple[str, dict]] = []  # (plugin, item) shown (their index is in the data)
+        self._plugin_nodes: list[tuple[QTreeWidgetItem, tuple]] = []  # their nodes, by plugin, chunk and labels
 
     def populate(self, document) -> None:
+        try:  # the nodes of the plugins keep the expansion the user gave them
+            states = {key: node.isExpanded() for node, key in self._plugin_nodes}
+        except RuntimeError:  # pragma: no cover - the tree was destroyed
+            states = {}
+        self._plugin_items, self._plugin_nodes = [], []
         self.document = document
         self.clear()
         name = document.path.name if document.path else tr("Progetto senza nome")
@@ -304,11 +313,67 @@ class WorkspaceTree(QTreeWidget):
                         it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "ms:thermal_anomaly"))
                         tnode.addChild(it)
                 tnode.setExpanded(True)
+            self._add_plugin_items(ci, ch, states)
             ci.setExpanded(ch is document.chunk)
         root.setExpanded(True)
 
+    # ---------------------------------------------------------------- the products of the plugins
+    def _add_plugin_items(self, parent: QTreeWidgetItem, chunk, states: dict) -> None:
+        """The items the providers of the plugins give for ``chunk``, after the program's products; a
+        provider that fails is written in the log and left out. A node keeps the expansion the user
+        gave it (by plugin, chunk and labels), else its ``expanded``."""
+        for plugin, provider in list(self.providers):
+            expand: list = []
+            mark = len(self._plugin_items), len(self._plugin_nodes)
+            try:
+                nodes = [self._plugin_node(chunk, plugin, item, (), expand) for item in provider(chunk) or []]
+            except Exception:
+                del self._plugin_items[mark[0]:], self._plugin_nodes[mark[1]:]
+                logging.getLogger("pyarchinit_photogrammetry").exception(
+                    "the plugin %s did not give its products for the workspace", plugin)
+                continue
+            parent.addChildren(nodes)
+            for node, key, default in expand:  # in the tree now: a node out of it does not expand
+                node.setExpanded(states.get(key, default))
+
+    def keyPressEvent(self, event) -> None:
+        """Enter on an item of a plugin activates it, as a double click."""
+        data = self._data(self.currentItem())
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and data and data[0] == "plugin":
+            self.activated_item.emit(*data)
+            return
+        super().keyPressEvent(event)
+
+    def _plugin_node(self, chunk, plugin: str, item: dict, path: tuple, expand: list) -> QTreeWidgetItem:
+        label = str(item.get("label") or "")
+        node = QTreeWidgetItem([label])
+        ic = item.get("icon")
+        if isinstance(ic, QIcon):
+            node.setIcon(0, ic)
+        elif ic:
+            node.setIcon(0, icon(str(ic)))
+        if item.get("tooltip"):
+            node.setToolTip(0, str(item["tooltip"]))
+        node.setData(0, Qt.ItemDataRole.UserRole, ("plugin", chunk, len(self._plugin_items)))
+        self._plugin_items.append((plugin, item))
+        key = (plugin, getattr(chunk, "key", None), path + (label,))
+        node.addChildren([self._plugin_node(chunk, plugin, child, key[2], expand)
+                          for child in item.get("children") or []])
+        if node.childCount():
+            self._plugin_nodes.append((node, key))
+            expand.append((node, key, bool(item.get("expanded"))))
+        return node
+
+    def _data(self, item):
+        """``(kind, chunk, payload)`` of a node; for an item of a plugin the payload is the name of
+        the plugin and the item's dict."""
+        data = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        if data and data[0] == "plugin":
+            return ("plugin", data[1], self._plugin_items[data[2]])
+        return data
+
     def _double(self, item, _col) -> None:
-        data = item.data(0, Qt.ItemDataRole.UserRole)
+        data = self._data(item)
         if data:
             self.activated_item.emit(*data)
 
@@ -318,8 +383,7 @@ class WorkspaceTree(QTreeWidget):
             self.activated_item.emit("select_chunk", data[1], None)
 
     def _context(self, pos) -> None:
-        item = self.itemAt(pos)
-        data = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        data = self._data(self.itemAt(pos))
         if data:
             self.context_requested.emit(*data, self.viewport().mapToGlobal(pos))
 

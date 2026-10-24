@@ -5286,6 +5286,9 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- views and workspace
     def _workspace_item(self, kind: str, chunk, payload) -> None:
+        if kind == "plugin":  # an item a plugin put in the tree (Context.add_tree_items)
+            self._plugin_item_call(chunk, payload[0], payload[1].get("activate"))
+            return
         if chunk is not None and chunk is not self.chunk and kind in ("select_chunk", "chunk"):
             self._activate_chunk(chunk)
             return
@@ -5321,6 +5324,17 @@ class MainWindow(QMainWindow):
                 self.open_photo(cams[0])
         elif kind == "crs":
             self.set_crs()
+
+    def _plugin_item_call(self, chunk, plugin: str, callback) -> None:
+        """A callback of an item a plugin put in the workspace, with the chunk of the item the active one."""
+        if callback is None:
+            return
+        if chunk is not None and chunk is not self.chunk and any(c is chunk for c in self.doc.chunks):
+            self._activate_chunk(chunk)
+        try:
+            callback()
+        except Exception as exc:  # a plugin never takes the window down
+            self._exc(tr("Plugin {0}", plugin), exc)
 
     def set_crs(self) -> None:
         crs, ok = QInputDialog.getText(self, tr("Sistema di riferimento"),
@@ -8046,9 +8060,20 @@ class MainWindow(QMainWindow):
         return wrapped
 
     def _workspace_menu(self, kind: str, chunk, payload, pos) -> None:
-        """Right click in the workspace: the versions of the dense cloud, model, DEM, orthomosaic."""
+        """Right click in the workspace: the versions of the dense cloud, model, DEM, orthomosaic; the
+        actions of an item a plugin put there."""
         from ..core import versions
 
+        if kind == "plugin":
+            plugin, item = payload
+            actions = list(item.get("actions") or [])
+            if actions:
+                menu = QMenu(self)
+                for text, callback in actions:
+                    action = menu.addAction(str(text))
+                    action.triggered.connect(lambda _=False, c=callback: self._plugin_item_call(chunk, plugin, c))
+                menu.exec(pos)
+            return
         if chunk is self.chunk and kind == "elevation":
             menu = QMenu(self)
             menu.addAction(icon("view"), tr("Mostra"), lambda: self.show_elevation(payload))

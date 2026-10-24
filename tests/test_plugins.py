@@ -754,3 +754,98 @@ def test_plugins_are_told_the_features_the_user_deletes(tmp_path, qapp, window_s
         context.release()
         w.setWindowModified(False)
         w.close()
+
+
+def test_plugins_put_their_products_in_the_workspace(tmp_path, qapp, window_settings, monkeypatch, caplog):
+    """Since 1.3.4 a plugin lists its products in the workspace under each chunk, after those of the
+    program: a node with two children; a double click or Enter calls ``activate`` with the chunk of the
+    item the active one, the right click offers its ``actions``; ``refresh_tree`` asks the provider
+    again and a node keeps the expansion the user gave it; a provider that fails leaves the tree whole
+    without its items; the items go away with the plugin."""
+    import logging
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.gui import main_window as mw
+    from pyarchinit_photogrammetry.plugins.api import Context
+
+    doc = ppg.Document()
+    primo, secondo = doc.add_chunk("primo"), doc.add_chunk("secondo")
+    doc.save(tmp_path / "progetto.ppg")
+    doc.chunk = secondo
+    w = mw.MainWindow(doc, autoconnect=False, check_updates=False)
+    w.resize(1200, 800)
+    w.show()
+    qapp.processEvents()
+    tree = w.workspace
+    role = Qt.ItemDataRole.UserRole
+    calls, products = [], {"primo": ["NDVI", "NDRE"], "secondo": []}
+    menus = []
+
+    class Menu(mw.QMenu):  # the right click: the entries recorded, the first one chosen
+        def exec(self, *args):
+            menus.append([a.text() for a in self.actions()])
+            self.actions()[0].trigger()
+
+    monkeypatch.setattr(mw, "QMenu", Menu)
+
+    def provider(chunk):
+        calls.append(chunk.label)
+        names = products[chunk.label]
+        children = [{"label": f"Indice {n}", "icon": "index", "tooltip": f"l'indice {n}",
+                     "activate": lambda n=n: calls.append(("mostra", n, w.chunk.label)),
+                     "actions": [("Esporta...", lambda n=n: calls.append(("esporta", n, w.chunk.label)))]}
+                    for n in names]
+        return [{"label": f"Sentinel-2 ({len(names)} indici)", "icon": "multispectral", "children": children,
+                 "expanded": True}] if names else []
+
+    def chunk_node(label):
+        root = tree.topLevelItem(0)
+        return next(root.child(i) for i in range(root.childCount()) if root.child(i).data(0, role)[1].label == label)
+
+    def of_plugins(item):
+        return [item.child(i) for i in range(item.childCount()) if item.child(i).data(0, role)[0] == "plugin"]
+
+    context = Context("prova", tmp_path / "dati", w)
+    try:
+        before = chunk_node("primo").childCount()
+        context.add_tree_items(provider)  # the tree filled again at once
+        assert calls == ["primo", "secondo"]
+        node = chunk_node("primo")
+        (s2,) = of_plugins(node)
+        assert node.childCount() == before + 1 and node.child(node.childCount() - 1) is s2  # after the products
+        assert s2.text(0) == "Sentinel-2 (2 indici)" and s2.isExpanded()
+        assert [s2.child(i).text(0) for i in range(s2.childCount())] == ["Indice NDVI", "Indice NDRE"]
+        assert s2.child(0).toolTip(0) == "l'indice NDVI" and of_plugins(chunk_node("secondo")) == []
+        # a double click: the chunk of the item becomes the active one, then activate
+        tree.itemDoubleClicked.emit(s2.child(1), 0)
+        assert calls[-1] == ("mostra", "NDRE", "primo") and w.chunk is primo
+        ndvi = of_plugins(chunk_node("primo"))[0].child(0)  # the tree was filled again for the chunk
+        tree.setCurrentItem(ndvi)
+        QTest.keyClick(tree, Qt.Key.Key_Return)
+        assert calls[-1] == ("mostra", "NDVI", "primo")
+        tree.scrollToItem(ndvi)
+        tree.customContextMenuRequested.emit(tree.visualItemRect(ndvi).center())
+        assert menus == [["Esporta..."]] and calls[-1] == ("esporta", "NDVI", "primo")
+        # filled again: the provider asked again, the expansion the user gave kept
+        of_plugins(chunk_node("primo"))[0].setExpanded(False)
+        n = len(calls)
+        context.refresh_tree()
+        assert calls[n:] == ["primo", "secondo"] and not of_plugins(chunk_node("primo"))[0].isExpanded()
+        # a provider that fails: written in the log, the tree whole without its items
+        other = Context("rotto", tmp_path / "rotto", w)
+        with caplog.at_level(logging.ERROR, logger="pyarchinit_photogrammetry"):
+            other.add_tree_items(lambda chunk: 1 / 0)
+        assert "rotto" in caplog.text and len(of_plugins(chunk_node("primo"))) == 1
+        other.release()
+        context.release()  # the plugin goes away, its items with it
+        assert of_plugins(chunk_node("primo")) == [] and tree.providers == []
+        n = len(calls)
+        w.refresh_all()
+        assert len(calls) == n
+    finally:
+        context.release()
+        w.setWindowModified(False)
+        w.close()
