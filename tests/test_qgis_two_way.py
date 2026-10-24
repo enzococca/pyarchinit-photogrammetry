@@ -1,5 +1,6 @@
-"""The live GeoPackage of the QGIS link both ways: rows written in place by identity (their fid
-kept), and the edits another program saves in it read back. QGIS is simulated by a second sqlite3
+"""The live link with QGIS both ways: rows written in place by identity (their fid kept), the edits
+QGIS saves in the GeoPackage read back into the window, undone with Modifica > Annulla, and the 3D
+proxy of a unit built again when its polygon changes there. QGIS is simulated by a second sqlite3
 connection editing the file, as QGIS's GeoPackage provider does when an edit session is saved."""
 from __future__ import annotations
 
@@ -242,3 +243,300 @@ def test_signatures_do_not_depend_on_empty_columns():
     assert row_signature(raw, {"a": 1.5}) != row_signature(raw, {"a": 1.25})
     assert row_signature(raw, {"a": 1.5, ID_FIELD: "x"}) == row_signature(raw, {"a": 1.5, ID_FIELD: "y"})
 
+
+# ---------------------------------------------------------------- the window
+@pytest.fixture
+def trench(tmp_path, monkeypatch):
+    """A window on a small trench: a DEM sloping gently from 100 m and an orthomosaic, 6 x 6 m."""
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("PPG_RENDERER", "software")
+    import numpy as np
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.engine.dem import write_geotiff
+
+    app = QApplication.instance() or QApplication([])
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    doc = ppg.Document()
+    ch = doc.add_chunk("Saggio 1")
+    doc.save(tmp_path / "scavo.ppg")
+    ch.crs = CRS
+    ch.data_dir.mkdir(parents=True, exist_ok=True)
+    res, n = 0.02, 300
+    yy, xx = np.mgrid[0:n, 0:n]
+    z = (100.0 + 0.01 * xx * res - 0.02 * yy * res).astype(np.float32)
+    dem = write_geotiff(ch.data_dir / "dem.tif", z, (X0, Y0 + n * res), res, CRS, nodata=-9999.0)
+    rgb = np.stack([(xx * 0.8) % 255, (yy * 0.8) % 255, np.full((n, n), 120)]).astype(np.uint8)
+    ortho = write_geotiff(ch.data_dir / "orthomosaic.tif", rgb, (X0, Y0 + n * res), res, CRS)
+    ch._set_product("dem", dem)
+    ch._set_product("orthomosaic", ortho)
+    doc.meta["sito"] = "Saggio"
+    doc.save()
+    w = mw.MainWindow(doc, autoconnect=False, check_updates=False)
+    w.runner.show_dialog = False
+    w.show()
+    app.processEvents()
+    yield w, app, mw
+    w.setWindowModified(False)
+    w.close()
+
+
+def _log(w):
+    t = w.log_pane.table
+    return [t.item(r, 2).text() for r in range(t.rowCount())]
+
+
+def _from_qgis(w):
+    return [line for line in _log(w) if line.startswith("Da QGIS")]
+
+
+def _units(w):
+    return {u.us: u for u in w.units}
+
+
+def test_units_saved_in_qgis_come_back_and_can_be_undone(trench):
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+
+    w, app, mw = trench
+    w._add_unit(UnitPolygon(box(X0 + 1, Y0 + 1, X0 + 2, Y0 + 2), us="6", area="1", sito="Saggio"))
+    w._add_unit(UnitPolygon(box(X0 + 3, Y0 + 1, X0 + 4, Y0 + 2), us="8", area="1", sito="Saggio"))
+    six = w.units[0].geometry
+    w.a_qgis_live.setChecked(True)
+    w._export_qgis_layers()
+    path = w._qgis_dir() / LIVE_DB
+    w._poll_qgis()  # the first look: everything there was written here
+    assert _from_qgis(w) == []
+    rows = {r["us_s"]: r for r in _rows(path, "unita")}
+    assert rows["6"][ID_FIELD] == w.units[0].attributes[ID_FIELD]
+
+    qgis = Qgis(path)
+    grown = box(X0 + 1, Y0 + 1, X0 + 2.5, Y0 + 2)
+    qgis.save(qgis.move("unita", rows["6"]["fid"], grown, disegnatore="E. C."),
+              qgis.delete("unita", rows["8"]["fid"]),
+              qgis.insert("unita", box(X0 + 4.5, Y0 + 4, X0 + 5, Y0 + 4.5), us_s="9", area_s="1", unita_tipo_s="USM"))
+    w._poll_qgis()
+    units = _units(w)
+    assert set(units) == {"6", "9"}
+    assert units["6"].geometry.equals(grown) and units["6"].attributes["disegnatore"] == "E. C."
+    assert units["9"].tipo == "USM" and units["9"].sito == "Saggio"
+    new = next(r for r in _rows(path, "unita") if r["us_s"] == "9")
+    assert units["9"].attributes[ID_FIELD] == new[ID_FIELD]  # the row drawn in QGIS has its identity
+    assert sorted(_from_qgis(w)) == ["Da QGIS: US 6 modificata", "Da QGIS: US 8 eliminata", "Da QGIS: USM 9 aggiunta"]
+    assert w.history.undo_text() == "Da QGIS: 3 modifiche" and w.isWindowModified()
+    stored = {d["us"] for d in w.chunk.meta["drawings"]["units"]}
+    assert stored == {"6", "9"}  # the drawings of the chunk
+    assert len(w.ortho_view.features("Unita' stratigrafiche")) == 2  # drawn again
+
+    # the program writes its version of the rows: they keep their fid, and nothing comes back
+    w._export_qgis_layers()
+    after = {r["us_s"]: r for r in _rows(path, "unita")}
+    assert after["6"]["fid"] == rows["6"]["fid"] and after["9"]["fid"] == new["fid"]
+    assert after["9"]["layer"] == "Unita' stratigrafiche" and after["9"]["etichetta"] == "USM 9"
+    w._poll_qgis()
+    assert len(_from_qgis(w)) == 3
+
+    w.undo()  # Modifica > Annulla takes the whole batch back
+    units = _units(w)
+    assert set(units) == {"6", "8"} and units["6"].geometry.equals(six)
+    w._export_qgis_layers()
+    back = {r["us_s"]: r for r in _rows(path, "unita")}
+    assert set(back) == {"6", "8"} and back["6"]["fid"] == rows["6"]["fid"] and back["6"]["geom"].equals(six)
+    w._poll_qgis()
+    assert len(_from_qgis(w)) == 3
+    qgis.close()
+
+
+def test_spot_heights_sections_and_bad_geometries(trench):
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+
+    w, app, mw = trench
+    w._add_unit(UnitPolygon(box(X0 + 1, Y0 + 1, X0 + 2, Y0 + 2), us="6", area="1", sito="Saggio"))
+    w._add_unit(UnitPolygon(box(X0 + 3, Y0 + 1, X0 + 4, Y0 + 2), us="8", area="1", sito="Saggio"))
+    q = {"x": X0 + 0.5, "y": Y0 + 0.5, "quota_q": 100.12, "us_q": "6", "sito_q": "Saggio"}
+    w.quote.append(q)
+    w._draw_quota(q, 0)
+    w.sections = [{"label": "Sezione 1", "p1": [X0 + 0.5, Y0 + 3.0], "p2": [X0 + 5.5, Y0 + 3.0], "length": 5.0,
+                   "svg": "", "dxf": "", "dxf3d": "", "kind": "vertical"},
+                  {"label": "Sezione 2", "p1": [X0 + 0.5, Y0 + 5.0], "p2": [X0 + 5.5, Y0 + 5.0], "length": 5.0,
+                   "svg": "", "dxf": "", "dxf3d": "", "kind": "vertical"}]
+    w._ensure_ppg_ids()
+    w._draw_sections()
+    w.a_qgis_live.setChecked(True)
+    w._export_qgis_layers()
+    path = w._qgis_dir() / LIVE_DB
+    w._poll_qgis()
+    units = {r["us_s"]: r for r in _rows(path, "unita")}
+    quota = _rows(path, "quote")[0]
+    secs = {r["etichetta"]: r for r in _rows(path, "sezioni")}
+    assert quota[ID_FIELD] == q[ID_FIELD] and set(secs) == {"Sezione 1", "Sezione 2"}
+
+    qgis = Qgis(path)
+    bowtie = Polygon([(X0 + 1, Y0 + 1), (X0 + 2, Y0 + 2), (X0 + 2, Y0 + 1), (X0 + 1, Y0 + 2)])  # self-crossing
+    assert not bowtie.is_valid
+    qgis.save(qgis.move("unita", units["6"]["fid"], bowtie),
+              ('UPDATE "unita" SET geom = NULL WHERE fid = ?', (units["8"]["fid"],)),  # a feature left without geometry
+              qgis.move("quote", quota["fid"], Point(X0 + 0.7, Y0 + 0.6), quota_q=100.2),
+              qgis.move("sezioni", secs["Sezione 1"]["fid"], LineString([(X0 + 0.5, Y0 + 3.0), (X0 + 5.5, Y0 + 3.5)]),
+                        etichetta="Sezione A"),
+              qgis.delete("sezioni", secs["Sezione 2"]["fid"]))
+    w._poll_qgis()
+    units = _units(w)
+    assert units["6"].geometry.is_valid and units["6"].geometry.geom_type == "MultiPolygon"  # made valid
+    assert units["8"].geometry.equals(box(X0 + 3, Y0 + 1, X0 + 4, Y0 + 2))  # kept as it was
+    assert (w.quote[0]["x"], w.quote[0]["y"], w.quote[0]["quota_q"]) == (round(X0 + 0.7, 3), round(Y0 + 0.6, 3), 100.2)
+    assert [s["label"] for s in w.sections] == ["Sezione A"] and w.sections[0]["p2"] == [X0 + 5.5, Y0 + 3.5]
+    assert [s["label"] for s in w.sections_pane.sections] == ["Sezione A"]
+    lines = _log(w)
+    assert "Da QGIS: la geometria di US 6 non era valida ed è stata corretta" in lines
+    assert "Da QGIS: US 8 senza geometria leggibile, non ripresa" in lines
+    assert "Da QGIS: quota 100.20 modificata" in lines and "Da QGIS: Sezione 2 eliminata" in lines
+    # no model in this project: the trace is kept, its drawing not made again
+    assert any("Sezione A: la traccia è cambiata ma il disegno non è stato rifatto" in t for t in lines)
+    assert json_sections(w) == ["Sezione A"]
+    qgis.close()
+
+
+def json_sections(w):
+    import json
+
+    return [s["label"] for s in json.loads(w._sections_file().read_text(encoding="utf-8"))]
+
+
+def test_a_unit_drawn_in_qgis_reaches_the_window_by_itself(trench):
+    import time
+
+    w, app, mw = trench
+    w.a_qgis_live.setChecked(True)
+    w._export_qgis_layers()
+    path = w._qgis_dir() / LIVE_DB
+    qgis = Qgis(path)
+    qgis.save(qgis.insert("unita", box(X0 + 1, Y0 + 1, X0 + 2, Y0 + 2), us_s="12", area_s="2"))
+    end = time.monotonic() + 5
+    while time.monotonic() < end and not w.units:  # the window looks once a second
+        app.processEvents()
+        time.sleep(0.05)
+    assert [u.us for u in w.units] == ["12"] and "Da QGIS: US 12 aggiunta" in _log(w)
+    fid = _rows(path, "unita")[0]["fid"]
+    qgis.save(qgis.move("unita", fid, box(X0 + 1, Y0 + 1, X0 + 2.5, Y0 + 2)))
+    qgis.con.execute("BEGIN IMMEDIATE")  # and holds the file again at once: the window waits, without errors
+    w._poll_qgis()
+    assert w.units[0].geometry.equals(box(X0 + 1, Y0 + 1, X0 + 2, Y0 + 2))
+    qgis.con.execute("COMMIT")
+    w._poll_qgis()
+    assert w.units[0].geometry.equals(box(X0 + 1, Y0 + 1, X0 + 2.5, Y0 + 2))
+    qgis.close()
+
+
+def test_the_proxy_follows_its_unit(trench, monkeypatch):
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+
+    w, app, mw = trench
+    w._add_unit(UnitPolygon(box(X0 + 1, Y0 + 1, X0 + 2, Y0 + 2), us="6", area="1", sito="Saggio"))
+    answers = {"units": "drawn", "base": "plane", "z": 99.0, "thickness": 0.1, "dem": ""}
+    monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(lambda cls, parent, title, fields, intro="": dict(answers)))
+    w.create_proxies()
+    w.runner.wait()
+    app.processEvents()
+    (e,) = w.chunk.meta["proxies"]
+    assert e["base"] == "plane" and e["base_z"] == 99.0 and e["ppg_id"] == w.units[0].attributes[ID_FIELD]
+    volume, area = e["volume_m3"], e["area_m2"]
+    w.a_qgis_live.setChecked(True)
+    w._export_qgis_layers()
+    path = w._qgis_dir() / LIVE_DB
+    w._poll_qgis()
+    qgis = Qgis(path)
+    fid = _rows(path, "unita")[0]["fid"]
+
+    qgis.save(qgis.move("unita", fid, box(X0 + 1, Y0 + 1, X0 + 3, Y0 + 2)))  # twice as large
+    w._poll_qgis()
+    w.runner.wait()
+    app.processEvents()
+    (e,) = w.chunk.meta["proxies"]
+    assert e["area_m2"] == pytest.approx(2 * area, rel=0.05) and e["volume_m3"] > 1.8 * volume
+    assert any(t.startswith("Proxy US6 ricostruito sul nuovo poligono") for t in _log(w))
+
+    qgis.save(qgis.move("unita", fid, box(X0 + 1, Y0 + 1, X0 + 3, Y0 + 2), us_s="7"))  # renumbered only
+    w._poll_qgis()
+    (e,) = w.chunk.meta["proxies"]
+    assert e["name"] == "US7" and e["us"] == "7" and (w.chunk.data_dir / e["file"]).name == "US7.ply"
+    assert (w.chunk.data_dir / e["file"]).exists() and not (w.chunk.data_dir / "proxies" / "US6.ply").exists()
+
+    # a proxy of an earlier version, its plane not kept: asked once, then kept
+    del e["base_z"]
+    asked = []
+    monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(
+        lambda cls, parent, title, fields, intro="": asked.append(title) or {"z": 98.5}))
+    qgis.save(qgis.move("unita", fid, box(X0 + 1, Y0 + 1, X0 + 2, Y0 + 2)))
+    w._poll_qgis()
+    w.runner.wait()
+    app.processEvents()
+    (e,) = w.chunk.meta["proxies"]
+    assert asked == ["Proxy di US7"] and e["base_z"] == 98.5
+    assert e["z_bottom"][0] == pytest.approx(98.5) and e["area_m2"] == pytest.approx(area, rel=0.05)
+    qgis.close()
+
+
+def test_a_section_moved_in_qgis_is_cut_again(processed, tmp_path):
+    """On the processed trench (a model to cut): the trace moved in QGIS, the section drawn again."""
+    import os
+    import time
+    from pathlib import Path
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("PPG_RENDERER", "software")
+    import numpy as np
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    import pyarchinit_photogrammetry as ppg
+
+    app = QApplication.instance() or QApplication([])
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    doc = ppg.Document.open(processed[0].path)
+    doc.save(tmp_path / "copia.ppg")  # a copy: the processed project is shared by the tests
+    doc.chunk.meta.pop("drawings", None)
+    doc.meta["sito"] = "Saggio"
+    w = mw.MainWindow(doc, autoconnect=False, check_updates=False)
+    w.runner.show_dialog = False
+    w.show()
+    app.processEvents()
+    try:
+        w._section_drawn(np.array([X0 + 1.0, Y0 + 1.5]), np.array([X0 + 3.0, Y0 + 1.5]))
+        w.runner.wait()
+        app.processEvents()
+        (s,) = w.sections
+        svg, before = Path(s["svg"]), Path(s["svg"]).stat().st_mtime_ns
+        assert 1.9 < s["length"] < 2.1
+        w.a_qgis_live.setChecked(True)
+        w._export_qgis_layers()
+        path = w._qgis_dir() / LIVE_DB
+        w._poll_qgis()
+        qgis = Qgis(path)
+        (row,) = _rows(path, "sezioni")
+        time.sleep(0.01)
+        qgis.save(qgis.move("sezioni", row["fid"], LineString([(X0 + 1.0, Y0 + 1.0), (X0 + 3.0, Y0 + 2.5)])))
+        w._poll_qgis()
+        w.runner.wait()
+        app.processEvents()
+        (s,) = w.sections
+        assert s["p1"] == [X0 + 1.0, Y0 + 1.0] and s["p2"] == [X0 + 3.0, Y0 + 2.5]
+        assert s["length"] == pytest.approx(2.5, abs=0.05)  # cut again along the new trace
+        assert Path(s["svg"]) == svg and svg.stat().st_mtime_ns > before
+        assert "Sezione 1: sezione ricalcolata sulla nuova traccia" in _log(w)
+        assert "Da QGIS: Sezione 1 modificata" in _log(w)
+        qgis.close()
+    finally:
+        w.setWindowModified(False)
+        w.close()
