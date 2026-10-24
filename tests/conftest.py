@@ -19,6 +19,22 @@ os.environ.setdefault("PPG_PLUGINS_DIR", tempfile.mkdtemp(prefix="ppg-test-plugi
 os.environ.setdefault("PPG_PLUGINS_ENVIRONMENT", "0")  # nor those installed with pip in the environment
 
 
+def _settings_of_the_tests() -> None:
+    """The preferences of every window of the tests go to INI files of a temporary folder, never to
+    the user's (on macOS the plist in ~/Library/Preferences): a test that opened a project put its
+    temporary path in the user's list of recent projects. A test may still point them elsewhere."""
+    try:
+        from PySide6.QtCore import QSettings
+    except ImportError:  # no interface installed: no window either
+        return
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope,
+                      tempfile.mkdtemp(prefix="ppg-test-settings-"))
+
+
+_settings_of_the_tests()
+
+
 @pytest.fixture(autouse=True)
 def _no_modal_dialogs(monkeypatch):
     """A modal dialog in an offscreen test would wait forever (the CI job hangs without a

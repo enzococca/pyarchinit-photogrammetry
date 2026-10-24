@@ -384,6 +384,18 @@ def test_help_of_a_plugin_command_goes_to_the_plugin():
     assert r.exit_code == 2 and "no plugin gives the command" in r.output
 
 
+def test_the_tests_never_write_the_users_preferences(qapp):
+    """Every window of the tests keeps its preferences in a temporary INI file (conftest), whatever
+    test ran before: a recent project of a test never reaches the user's list."""
+    from PySide6.QtCore import QSettings
+
+    from pyarchinit_photogrammetry.gui import app_settings
+
+    s = app_settings()
+    assert s.format() == QSettings.Format.IniFormat and not s.fileName().endswith(".plist")
+    assert "Library/Preferences" not in s.fileName()
+
+
 def test_requests_in_projected_coordinates(tmp_path, qapp):
     """In UTM coordinates (hundreds of km) vertices a few metres apart stay apart: Enter ends a short
     line and a small polygon; the same pixel clicked twice counts once."""
