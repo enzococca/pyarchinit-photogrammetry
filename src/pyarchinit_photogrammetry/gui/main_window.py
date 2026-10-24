@@ -819,8 +819,8 @@ class MainWindow(QMainWindow):
         sat_menu = m.addMenu(tr("Immagini satellitari"))
         self._act(sat_menu, tr("Ortorettifica una scena..."), self.sat_ortho, processing=True,
                   tip=tr("Una scena satellitare con i suoi RPC sul DEM del rilievo, come versione dell'ortofoto"))
-        self._act(sat_menu, tr("DSM da una coppia stereo..."), self.sat_dsm, processing=True,
-                  tip=tr("Il modello della superficie da due scene prese da due direzioni, come versione del DEM"))
+        self._act(sat_menu, tr("DSM da due o più scene..."), self.sat_dsm, processing=True,
+                  tip=tr("Il modello della superficie da scene prese da direzioni diverse, come versione del DEM"))
         self._act(sat_menu, tr("Informazioni sulla scena..."), self.sat_info,
                   tip=tr("Dimensioni, bande, risoluzione a terra e impronta di una scena"))
         self._act(m, tr("Nodi di rete..."), self.show_nodes, icon_name="network",
@@ -1910,7 +1910,7 @@ class MainWindow(QMainWindow):
         from ..engine import satellite as sat
 
         has_dem = self.chunk.dem_path is not None and self.chunk.dem_path.exists()
-        v = ParamDialog.ask(self, "DSM da una coppia stereo", [
+        v = ParamDialog.ask(self, "DSM da due o più scene", [
             Field("scene_a", "Prima scena", "", kind="file_open", filter=self._SCENE_FILTER),
             Field("rpc_a", "Suo file RPC (vuoto = nel file o accanto)", "", kind="file_open", filter=self._RPC_FILTER),
             Field("scene_b", "Seconda scena", "", kind="file_open", filter=self._SCENE_FILTER),
@@ -1920,14 +1920,45 @@ class MainWindow(QMainWindow):
             Field("zmin", "Quota minima del terreno (m, vuoto = dal DEM o -100)", None, kind="optional_float"),
             Field("zmax", "Quota massima del terreno (m, vuoto = dal DEM o +100)", None, kind="optional_float"),
             Field("height_offset", "Ondulazione del geoide (m, quote ortometriche)", 0.0, minimum=-200.0, maximum=200.0, decimals=2),
-            Field("use_dem", "Quote di riferimento dal DEM del chunk", has_dem)],
+            Field("use_dem", "Quote di riferimento dal DEM del chunk", has_dem),
+            Field("more", "Altre scene (tre o più viste: percorsi separati da ;)", "", kind="text"),
+            Field("correct", "Correggi gli RPC fra loro con i punti di legame", True)],
             intro="Le due scene vengono ricampionate sul piano del terreno a una quota di riferimento lungo la "
                   "direzione della loro base; un punto sopra o sotto il piano si sposta lungo la linea di vista di "
                   "ogni scena e la disparità fra le due, trovata con l'abbinamento semi-globale, dà la sua quota. "
+                  "Con tre scene o più gli RPC vengono prima corretti fra loro con i punti di legame, le coppie "
+                  "scelte per angolo e data e le loro superfici fuse cella per cella. "
                   "Il risultato resta fra le versioni del DEM.")
         if not v or not v["scene_a"] or not v["scene_b"]:
             return
         rng = (v["zmin"], v["zmax"]) if v["zmin"] is not None and v["zmax"] is not None else None
+        more = [Path(x.strip()) for x in str(v.get("more", "")).split(";") if x.strip()]
+        if more:
+            missing = [str(x) for x in more if not x.exists()]
+            if missing:
+                self._warn(tr("Scene non trovate: {0}", ", ".join(missing)))
+                return
+            scenes = [Path(v["scene_a"]), Path(v["scene_b"]), *more]
+            rpcs = [Path(v["rpc_a"]) if v["rpc_a"] else None, Path(v["rpc_b"]) if v["rpc_b"] else None] + [None] * len(more)
+
+            def multi(p):
+                return sat.dsm_from_scenes(self.chunk, scenes, name=v["name"].strip() or None, rpcs=rpcs,
+                                           resolution=v["resolution"], height_range=rng,
+                                           height_offset=v["height_offset"], use_dem=bool(v["use_dem"]),
+                                           correct_bias=bool(v.get("correct", True)), progress=p)
+
+            def done(r):
+                b = r["bias"]
+                fix = (tr("RPC corretti: {0} punti di legame, residuo da {1} a {2} px", b["tracks"],
+                          f"{b['rms_before']:.2f}", f"{b['rms_after']:.2f}")
+                       if b is not None and b["applied"] else tr("RPC non corretti"))
+                self._info(tr("DSM da più scene"), tr(
+                    "{0} x {1} celle a {2} m da {3} coppie, {4}% con una quota; {5}: versione del DEM «{6}»",
+                    r["width"], r["height"], f"{r['resolution']:g}", len(r["pairs"]), f"{r['filled'] * 100:.0f}", fix,
+                    r["record"]["name"]))
+
+            self.run_task("DSM da più scene", multi, done)
+            return
 
         def job(p):
             return sat.dsm_from_pair(self.chunk, Path(v["scene_a"]), Path(v["scene_b"]), name=v["name"].strip() or None,

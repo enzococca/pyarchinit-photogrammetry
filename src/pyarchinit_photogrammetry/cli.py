@@ -2119,6 +2119,8 @@ def thermal(project: Path, what: str = typer.Argument(..., help="status, params,
 def satellite(project: Path, what: str = typer.Argument(..., help="info, ortho or dsm"),
               scene: Path = typer.Argument(..., help="the scene (GeoTIFF with its RPC, or a sidecar beside it)"),
               scene_b: Optional[Path] = typer.Argument(None, help="dsm: the second scene of the stereo pair"),
+              more: Optional[list[Path]] = typer.Argument(None, help="dsm: more scenes: the pairs are chosen among "
+                                                                     "them and their surfaces fused"),
               rpc: Optional[Path] = typer.Option(None, help="the RPC file of the scene (_RPC.TXT, .RPB, RPC_*.XML)"),
               rpc_b: Optional[Path] = typer.Option(None, help="dsm: the RPC file of the second scene"),
               name: Optional[str] = typer.Option(None, help="name of the version kept in the project"),
@@ -2129,12 +2131,22 @@ def satellite(project: Path, what: str = typer.Argument(..., help="info, ortho o
               rgb: Optional[str] = typer.Option(None, help="ortho: the bands shown as red,green,blue (1-based)"),
               resampling: str = typer.Option("cubic", help="ortho: cubic, linear or nearest"),
               use_dem: bool = typer.Option(True, "--dem/--no-dem", help="dsm: the reference heights from the DEM of the chunk"),
+              correct: Optional[bool] = typer.Option(None, "--correct/--no-correct",
+                                                     help="dsm: correct the RPCs against each other with tie points "
+                                                          "(default: with three scenes or more)"),
+              max_pairs: int = typer.Option(6, help="dsm, three scenes or more: the pairs fused at most"),
+              min_angle: float = typer.Option(5.0, help="dsm: least intersection angle of a pair (degrees)"),
+              max_angle: float = typer.Option(30.0, help="dsm: largest intersection angle of a pair (degrees)"),
               chunk: Optional[str] = None):
     """Satellite scenes over the survey: info (size, GSD, footprint), ortho (the scene
     orthorectified on the DEM of the chunk, kept as a version of the orthomosaic), dsm (a surface
-    model from a stereo pair, kept as a version of the DEM)."""
+    model from a stereo pair, or from three scenes or more: RPCs corrected against each other,
+    pairs chosen by angle and date, surfaces fused; kept as a version of the DEM)."""
     from .engine import satellite as sat
 
+    more = list(more or [])
+    if correct is None:
+        correct = bool(more)
     doc, ch = _open(project, chunk)
     if what == "info":
         info = sat.scene_info(scene, ch.crs, rpc=rpc)
@@ -2151,6 +2163,24 @@ def satellite(project: Path, what: str = typer.Argument(..., help="info, ortho o
         if scene_b is None:
             raise typer.BadParameter("dsm needs the two scenes of the pair")
         rng = tuple(float(v) for v in height_range.split(",")) if height_range else None
+        if more or correct:
+            scenes = [scene, scene_b, *more]
+            r = sat.dsm_from_scenes(ch, scenes, name=name, rpcs=[rpc, rpc_b] + [None] * len(more), resolution=resolution,
+                                    height_range=rng, height_offset=height_offset, use_dem=use_dem,
+                                    correct_bias=correct, max_pairs=max_pairs, min_angle=min_angle, max_angle=max_angle,
+                                    progress=print_progress)
+            doc.save()
+            b = r["bias"]
+            for pr in r["pairs"]:
+                typer.echo(f"pair {pr['pair'][0] + 1}-{pr['pair'][1] + 1}: {pr['angle']:.1f} degrees"
+                           + (f", {pr['days']:.0f} days" if pr["days"] is not None else "")
+                           + f", base to height {pr['base_to_height']:.2f}")
+            if b is not None:
+                typer.echo(f"RPC correction: {b['tracks']} tie points, residuals {b['rms_before'] or 0:.2f} -> "
+                           f"{b['rms_after'] or 0:.2f} px RMS" + ("" if b["applied"] else " (not applied: too few)"))
+            typer.echo(f"{r['width']} x {r['height']} cells at {r['resolution']:g} m from {len(r['pairs'])} pairs, "
+                       f"{r['filled'] * 100:.0f}% with a height: {r['path']} (version {r['version']} of the DEM)")
+            return
         r = sat.dsm_from_pair(ch, scene, scene_b, name=name, rpc_a=rpc, rpc_b=rpc_b, resolution=resolution,
                               height_range=rng, height_offset=height_offset, use_dem=use_dem,
                               progress=print_progress)
