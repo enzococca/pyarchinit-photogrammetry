@@ -166,6 +166,12 @@ def test_one_big_page_is_reduced_for_the_view(processed, tmp_path):
     assert uv is m.texcoords
     path, _uv = display_texture(ch, m.texcoords, None)  # 2048 px: the page itself
     assert path == texture_pages(ch)[0]
+    # the long side is the limit whatever the size of the page (w * (512 / w) is 511.999... for 2469 widths)
+    page = texture_pages(ch)[0]
+    for width in (561, 700, 1000, 2000):
+        cv2.imwrite(str(page), np.zeros((width // 3, width, 3), np.uint8))
+        path, _uv = display_texture(ch, m.texcoords, None, max_side=512)
+        assert max(cv2.imread(str(path)).shape[:2]) == 512, width
 
 
 def test_import_model_from_the_command_line(processed, tmp_path):

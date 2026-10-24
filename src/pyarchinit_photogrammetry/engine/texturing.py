@@ -395,7 +395,7 @@ def display_texture(chunk: Chunk, texcoords: np.ndarray, texnumber: np.ndarray |
         if max(w, h) <= max_side:
             return pages[0], texcoords
         f = max_side / max(w, h)
-        size = (max(1, int(w * f)), max(1, int(h * f)))
+        size = (max(1, int(w * f + 1e-9)), max(1, int(h * f + 1e-9)))  # w * (512 / w) can be 511.999...
         out = chunk.data_dir / "model_texture_display.jpg"
         if not _display_current(out, pages, size):
             img = cv2.resize(cv2.imread(str(pages[0]), cv2.IMREAD_COLOR), size, interpolation=cv2.INTER_AREA)
@@ -409,7 +409,7 @@ def display_texture(chunk: Chunk, texcoords: np.ndarray, texnumber: np.ndarray |
     rows = int(np.ceil(len(pages) / cols))
     cw, ch = max(w for w, _ in sizes), max(h for _, h in sizes)
     f = min(1.0, max_side / (cols * cw), max_side / (rows * ch))
-    cell_w, cell_h = max(1, int(cw * f)), max(1, int(ch * f))
+    cell_w, cell_h = max(1, int(cw * f + 1e-9)), max(1, int(ch * f + 1e-9))
     scaled = [(max(1, int(round(w * f))), max(1, int(round(h * f)))) for w, h in sizes]
     out = chunk.data_dir / "model_texture_display.jpg"
     if not _display_current(out, pages, (cols * cell_w, rows * cell_h)):
