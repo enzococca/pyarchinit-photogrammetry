@@ -908,9 +908,9 @@ def _irp_args(src: str, out: str, params: dict, distance: float, ambient: bool =
 
 
 def decode_dji(files: list[Path], params: dict, distances: list | None = None, progress=None) -> dict[Path, np.ndarray]:
-    """Temperatures of DJI R-JPEGs with the SDK's ``dji_irp -a measure --measurefmt float32``: one
-    run of a script for all the files (natively, or in one Docker container on macOS, the files
-    copied to a folder of the internal disk that Docker can mount)."""
+    """Temperatures of DJI R-JPEGs with the SDK's ``dji_irp -a measure --measurefmt float32``: run
+    file by file (natively), or by one script for all the files in one Docker container on macOS,
+    the files copied to a folder of the internal disk that Docker can mount."""
     progress = as_progress(progress)
     status = decoder_status()
     if not status["available"]:
@@ -926,63 +926,13 @@ def decode_dji(files: list[Path], params: dict, distances: list | None = None, p
         work = Path(tmp)
         (work / "in").mkdir()
         (work / "out").mkdir()
-        docker = status["mode"] == "docker"
         tool = Path(status["tool"])
-        lines = ["#!/bin/sh", "set -u"]
-        if docker:
-            lib = "/sdk/" + str(tool.parent.relative_to(sdk_dir())).replace(os.sep, "/")
-            exe = f"{lib}/{tool.name}"
+        names = [f"f{i:05d}" for i in range(len(files))]
+        dists = [distances[i] if distances[i] is not None else _distance(params, f) for i, f in enumerate(files)]
+        if status["mode"] == "docker":
+            errors, stderr = _decode_in_docker(tool, files, names, params, dists, work, progress)
         else:
-            lib, exe = str(tool.parent), str(tool)
-        lines.append(f'export LD_LIBRARY_PATH="{lib}:${{LD_LIBRARY_PATH:-}}"')  # the SDK's libraries beside dji_irp
-        names = []
-        for i, f in enumerate(files):
-            name = f"f{i:05d}"
-            if docker:
-                shutil.copy(f, work / "in" / f"{name}.jpg")
-                src, dst = f"/work/in/{name}.jpg", f"/work/out/{name}.raw"
-            else:
-                src, dst = str(f), str(work / "out" / f"{name}.raw")
-            d = distances[i] if distances[i] is not None else _distance(params, f)
-            args = _irp_args(src, dst, params, d)
-            lines.append(" ".join(_q(a) for a in [exe] + args) + f" > /dev/null 2>> {'/work' if docker else str(work)}/errors.txt"
-                         + f" || {' '.join(_q(a) for a in [exe] + _irp_args(src, dst, params, d, ambient=False))} > /dev/null 2>> "
-                         + f"{'/work' if docker else str(work)}/errors.txt")
-            lines.append(f'echo "{i + 1}" >> {"/work" if docker else str(work)}/progress.txt')
-            names.append(name)
-        script = work / "run.sh"
-        script.write_text("\n".join(lines) + "\n")
-        script.chmod(0o755)
-        if docker:
-            image = _ensure_image(_docker(), progress)
-            cmd = [_docker(), "run", "--rm", "--platform", "linux/amd64", "-v", f"{sdk_dir()}:/sdk:ro", "-v", f"{work}:/work",
-                   image, "sh", "/work/run.sh"]
-        elif os.name == "nt":  # pragma: no cover - Windows: the same lines in a batch file
-            bat = work / "run.bat"
-            bat.write_text("\r\n".join(" ".join(_q(a) for a in [exe] + _irp_args(str(f), str(work / "out" / f"{n}.raw"), params,
-                                                                               distances[i] if distances[i] is not None else _distance(params, f)))
-                                       for i, (f, n) in enumerate(zip(files, names))) + "\r\n")
-            cmd = ["cmd.exe", "/c", str(bat)]
-        else:
-            cmd = ["/bin/sh", str(script)]
-        progress(0.0, f"Decoding {len(files)} thermal frames with DJI's SDK" + (" in Docker" if docker else ""))
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, close_fds=False)
-        try:
-            import time
-
-            while proc.poll() is None:
-                time.sleep(0.5)
-                done = (work / "progress.txt").read_text().count("\n") if (work / "progress.txt").exists() else 0
-                try:
-                    progress(min(0.99, done / max(len(files), 1)), f"Decoding thermal frames: {done} of {len(files)}")
-                except Exception:
-                    proc.terminate()
-                    raise
-        finally:
-            if proc.poll() is None:
-                proc.kill()
-        _stdout, stderr = proc.communicate()
-        errors = (work / "errors.txt").read_text(errors="replace") if (work / "errors.txt").exists() else ""
+            errors, stderr = _decode_natively(tool, files, names, params, dists, work, progress), ""
         for f, name, (w, h) in zip(files, names, sizes):
             raw = work / "out" / f"{name}.raw"
             if not raw.exists() or raw.stat().st_size != w * h * 4:
@@ -990,6 +940,69 @@ def decode_dji(files: list[Path], params: dict, distances: list | None = None, p
             out[f] = np.fromfile(raw, dtype="<f4").reshape(h, w).astype(np.float32)
     progress(1.0, f"{len(out)} thermal frames decoded")
     return out
+
+
+def _decode_natively(tool: Path, files, names, params: dict, distances, work: Path, progress) -> str:
+    """``dji_irp`` started for each file without a shell: the arguments reach it as they are (paths with
+    spaces or backslashes; Windows has no /bin/sh and cmd.exe quotes differently). Again without
+    ``--ambient`` when the camera refuses it. Returns what the SDK wrote on its error stream."""
+    env = dict(os.environ)
+    if sys.platform.startswith("linux"):  # the SDK's libraries beside dji_irp (Windows looks there by itself)
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(p for p in (str(tool.parent), env.get("LD_LIBRARY_PATH")) if p)
+    progress(0.0, f"Decoding {len(files)} thermal frames with DJI's SDK")
+    errors = []
+    for i, (f, name, d) in enumerate(zip(files, names, distances)):
+        src, dst = str(f), str(work / "out" / f"{name}.raw")
+        tries = [_irp_args(src, dst, params, d)]
+        if "--ambient" in tries[0]:
+            tries.append(_irp_args(src, dst, params, d, ambient=False))
+        for args in tries:
+            r = subprocess.run([str(tool)] + args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env,
+                               close_fds=False)
+            errors.append(r.stderr.decode("utf-8", "replace"))
+            if r.returncode == 0:
+                break
+        progress(min(0.99, (i + 1) / max(len(files), 1)), f"Decoding thermal frames: {i + 1} of {len(files)}")
+    return "".join(errors)
+
+
+def _decode_in_docker(tool: Path, files, names, params: dict, distances, work: Path, progress) -> tuple[str, str]:
+    """One container of the Linux SDK running a shell script for all the files (copied into the work
+    folder that Docker mounts). Returns the SDK's errors and Docker's."""
+    lib = "/sdk/" + str(tool.parent.relative_to(sdk_dir())).replace(os.sep, "/")
+    exe = f"{lib}/{tool.name}"
+    lines = ["#!/bin/sh", "set -u", f'export LD_LIBRARY_PATH="{lib}:${{LD_LIBRARY_PATH:-}}"']  # the SDK's libraries
+    for i, (f, name, d) in enumerate(zip(files, names, distances)):
+        shutil.copy(f, work / "in" / f"{name}.jpg")
+        src, dst = f"/work/in/{name}.jpg", f"/work/out/{name}.raw"
+        lines.append(" ".join(_q(a) for a in [exe] + _irp_args(src, dst, params, d)) + " > /dev/null 2>> /work/errors.txt"
+                     + f" || {' '.join(_q(a) for a in [exe] + _irp_args(src, dst, params, d, ambient=False))}"
+                     + " > /dev/null 2>> /work/errors.txt")
+        lines.append(f'echo "{i + 1}" >> /work/progress.txt')
+    script = work / "run.sh"
+    script.write_text("\n".join(lines) + "\n", newline="\n")
+    image = _ensure_image(_docker(), progress)
+    cmd = [_docker(), "run", "--rm", "--platform", "linux/amd64", "-v", f"{sdk_dir()}:/sdk:ro", "-v", f"{work}:/work",
+           image, "sh", "/work/run.sh"]
+    progress(0.0, f"Decoding {len(files)} thermal frames with DJI's SDK in Docker")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, close_fds=False)
+    try:
+        import time
+
+        while proc.poll() is None:
+            time.sleep(0.5)
+            done = (work / "progress.txt").read_text().count("\n") if (work / "progress.txt").exists() else 0
+            try:
+                progress(min(0.99, done / max(len(files), 1)), f"Decoding thermal frames: {done} of {len(files)}")
+            except Exception:
+                proc.terminate()
+                raise
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    _stdout, stderr = proc.communicate()
+    errors = (work / "errors.txt").read_text(errors="replace") if (work / "errors.txt").exists() else ""
+    return errors, stderr
 
 
 def _q(a: str) -> str:

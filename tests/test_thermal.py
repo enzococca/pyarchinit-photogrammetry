@@ -80,6 +80,10 @@ v = 20 + 10 * float(opt["--emissivity"]) + float(opt["--distance"]) / 100 + floa
 np.full((h, w), v, "<f4").tofile(opt["-o"])
 """)
     script.chmod(0o755)
+    if os.name == "nt":  # no shebang lines on Windows: a batch file starts the script
+        wrapper = folder / "dji_irp.cmd"
+        wrapper.write_text(f'@"{sys.executable}" "{script}" %*\r\n')
+        return wrapper
     return script
 
 
