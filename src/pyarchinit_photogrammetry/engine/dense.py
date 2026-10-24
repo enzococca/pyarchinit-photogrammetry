@@ -768,7 +768,8 @@ def _patchmatch_depth_maps(chunk: Chunk, ws: Path, filter_mode: str, progress: P
                  for k in range(0, len(ids), nodes.DEPTH_UNIT_PHOTOS)]
         progress(0.0, f"PatchMatch depth maps: {len(units)} units of work shared with {len(others)} other computer(s)")
         results = nodes.run(files_dir, units, progress.sub(0.0, 0.98), "units of depth maps", gpu=gpu,
-                            project_path=project, local=lambda payload: {"names": job.run(payload["image_ids"], gpu=gpu)})
+                            project_path=project,
+                            local=lambda payload, quiet: {"names": job.run(payload["image_ids"], gpu=gpu, progress=quiet)})
         names = [n for r in results for n in r.get("result", {}).get("names", [])]
         chunk.meta["dense"]["nodes"] = sorted({r.get("by") for r in results if r.get("by")})
         nodes.forget(files_dir, [r["name"] for r in results])
