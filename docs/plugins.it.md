@@ -147,6 +147,10 @@ prossimo avvio (`ppg plugin` elenca subito il suo comando).
 | `show_frame(bounds, resolution, text="")` | dalla 1.3.2: una cornice vuota sulla vista 2D (`xmin, ymin, xmax, ymax` nelle coordinate del chunk, metri per pixel) su cui disegnare quando il chunk non ha ortofoto né DEM |
 | `mark_modified()` | dalla 1.3.2: il progetto ha modifiche da salvare (`chunk.meta` o i file del plugin sono cambiati) |
 | `call_in_gui(function, *args)` | dalla 1.3.2: `function(*args)` nel thread dell'interfaccia, dalla funzione data a `run` o da un esportatore |
+| `activate_chunk(chunk)` | dalla 1.3.4: `chunk` diventa quello attivo, come quando l'utente lo sceglie nell'area di lavoro (i disegni restano col loro chunk, le viste mostrano il nuovo, le callback di `on_refresh` vengono chiamate); nella riga di comando, il chunk attivo del suo progetto |
+| `show_raster(kind=None, chunk=None, path=None)` | dalla 1.3.4: l'ortofoto (`"ortho"`) o il DEM (`"dem"`) di `chunk` (quello attivo, oppure diventa quello attivo) nella vista 2D con i disegni della finestra, come li mostra la finestra; `None`: l'ortofoto, altrimenti il DEM; `path`: un altro GeoTIFF di quel tipo (una versione conservata, un raster del plugin); `False` se non c'è niente di quel tipo (la vista resta com'era) e nella riga di comando |
+| `show_model(kind=None, chunk=None, path=None, title="")` | dalla 1.3.4: `"model"`, `"model_textured"`, `"point_cloud"`, `"tie_points"`, `"cameras"` o `"proxies"` di `chunk` nella vista 3D (`None`: il meglio che ha); `path`: una mesh (`"model"`) o una nuvola di punti (`"point_cloud"`) del plugin, un PLY nel sistema interno del chunk, col nome `title` accanto all'elenco *Mostra* finché l'utente non sceglie lì un'altra vista; `False` se non c'è niente di quel tipo e nella riga di comando |
+| `on_features_deleted(layer, callback)` | dalla 1.3.4: `callback(features)` quando l'utente elimina elementi di `layer` sulla vista 2D (*Seleziona* e Canc, *Elimina selezionati*): i loro attributi, dizionari come li teneva il layer (`_geom`: tipo e coordinate), perché il plugin tolga i suoi record; un layer tolto dalla vista non è un'eliminazione (si scollega da sola quando il plugin viene tolto) |
 
 `progress(fraction, message)` riporta un valore tra 0 e 1 e solleva `Cancelled` quando l'utente annulla:
 chiamala spesso nei cicli lunghi. I widget si toccano solo nelle callback delle azioni e in `done`, mai
@@ -158,7 +162,8 @@ ha preso oltre alle sue registrazioni (file aperti, timer).
 `Plugin.api` è l'API dei plugin per cui il plugin è stato scritto (`pyarchinit_photogrammetry.plugins.API_VERSION`,
 ora 1): un programma con un'API più vecchia rifiuta il plugin con un messaggio. L'indice dà anche la
 versione più vecchia del programma con cui un plugin funziona (`min_app`): un plugin che usa i metodi
-indicati "dalla 1.3.2" chiede `min_app` 1.3.2, uno che usa `on_refresh` 1.3.3.
+indicati "dalla 1.3.2" chiede `min_app` 1.3.2, uno che usa `on_refresh` 1.3.3, uno che usa quelli "dalla 1.3.4"
+1.3.4.
 
 ## Pubblicare un plugin
 

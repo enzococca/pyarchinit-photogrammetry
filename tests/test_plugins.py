@@ -545,6 +545,96 @@ def window_settings(tmp_path, monkeypatch):
     return path
 
 
+def _rasters(chunk, height: int = 48, width: int = 64, res: float = 0.5):
+    """A small DEM and orthophoto made the products of ``chunk``."""
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    rows, cols = np.mgrid[0:height, 0:width].astype(np.float32)
+    transform = from_origin(1000.0, 2000.0 + height * res, res, res)
+    dem, ortho = chunk.data_dir / "dem.tif", chunk.data_dir / "ortofoto.tif"
+    with rasterio.open(dem, "w", driver="GTiff", height=height, width=width, count=1, dtype="float32",
+                       transform=transform) as dst:
+        dst.write(100.0 + 0.01 * cols + 0.02 * rows, 1)
+    rgba = np.stack([cols % 256, rows % 256, np.full_like(cols, 128), np.full_like(cols, 255)]).astype(np.uint8)
+    with rasterio.open(ortho, "w", driver="GTiff", height=height, width=width, count=4, dtype="uint8",
+                       transform=transform, photometric="RGB") as dst:
+        dst.write(rgba)
+    chunk.products["dem"], chunk.products["orthomosaic"] = dem.name, ortho.name
+    return dem, ortho
+
+
+def test_plugins_choose_the_chunk_and_what_the_views_show(tmp_path, qapp, window_settings):
+    """Since 1.3.4 a plugin makes a chunk the active one and shows - as the window does - its orthophoto,
+    its DEM or another GeoTIFF of theirs in the 2D view, a product or a mesh of its own in the 3D view
+    (the list *Mostra* naming it); with nothing of that kind it gets False and the views stay. In the
+    command line nothing is shown and the chunk becomes the active one of its project."""
+    import shutil
+
+    import trimesh
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.gui import main_window as mw
+    from pyarchinit_photogrammetry.plugins.api import Context
+
+    doc = ppg.Document()
+    rilievo, vuoto = doc.add_chunk("rilievo"), doc.add_chunk("vuoto")
+    doc.save(tmp_path / "progetto.ppg")
+    dem, ortho = _rasters(rilievo)
+    kept = Path(shutil.copy2(dem, tmp_path / "dem_conservato.tif"))
+    doc.chunk = vuoto
+    w = mw.MainWindow(doc, autoconnect=False, check_updates=False)
+    v, mv = w.ortho_view, w.model_view
+    context = Context("prova", tmp_path / "dati", w)
+    shown = []
+    context.on_refresh(lambda: shown.append(w.chunk.label))
+    try:
+        assert w.chunk is vuoto and v.tr is None
+        assert context.show_raster() is False and v.tr is None  # nothing to show: the view stays
+        assert context.show_raster(chunk=rilievo) is True  # the chunk first becomes the active one
+        assert w.chunk is rilievo and shown == ["rilievo"]
+        assert v.kind == "ortho" and v.path == ortho and w.tabs.currentWidget() is v
+        assert context.show_raster("dem") and v.kind == "dem" and v.path == dem
+        assert context.show_raster("dem", path=kept) and v.kind == "dem" and v.path == kept  # a kept version
+        assert context.show_raster("ortho", path=tmp_path / "nessuno.tif") is False and v.path == kept
+        with pytest.raises(ValueError):
+            context.show_raster("modello")
+        with pytest.raises(ValueError):
+            context.show_raster(path=kept)  # which kind?
+        # the 3D view: a product, the best the chunk has, a mesh of the plugin
+        assert context.show_model("model") is False and mv.kind == "cameras"  # no model in the chunk
+        assert context.show_model() and mv.kind == "cameras" and w.tabs.currentWidget() is mv
+        mesh = rilievo.data_dir / "unita.ply"
+        trimesh.creation.box(extents=(2.0, 2.0, 1.0)).export(mesh)
+        w.show_view(v)
+        assert context.show_model("model", path=mesh, title="Unità (1)") and w.tabs.currentWidget() is mv
+        assert mv.kind == "model" and mv.combo.currentData() == "model" and len(mv.sd.mesh_faces) == 12
+        assert mv.version_label.text() == "Unità (1)" and mv.version_label.isVisibleTo(mv)
+        mv.combo.setCurrentIndex(mv.combo.findData("cameras"))  # back to the products of the chunk
+        assert mv.kind == "cameras" and not mv.paths and mv.combo.findData("model") < 0
+        assert context.show_model("model", path=tmp_path / "nessuno.ply") is False and mv.kind == "cameras"
+        with pytest.raises(ValueError):
+            context.show_model("tie_points", path=mesh)
+        with pytest.raises(ValueError):
+            context.show_model("modelli")
+        # another chunk active; the active one again changes nothing
+        context.activate_chunk(vuoto)
+        assert w.chunk is vuoto and shown == ["rilievo", "vuoto"] and v.tr is None
+        context.activate_chunk(vuoto)
+        assert shown == ["rilievo", "vuoto"]
+        with pytest.raises(ValueError):
+            context.activate_chunk(ppg.Document().add_chunk("di un altro progetto"))
+    finally:
+        context.release()
+        w.setWindowModified(False)
+        w.close()
+    line = Context("prova", tmp_path / "dati")
+    assert line.show_raster() is False and line.show_model("model") is False
+    line.activate_chunk(rilievo)
+    assert doc.chunk is rilievo
+
+
 def test_the_list_of_the_3d_view_names_the_mesh_a_plugin_shows(tmp_path, qapp, window_settings):
     """Reported: after the geoarchaeology plugin showed its units in the 3D view - a mesh of its own
     given to ``model_view.show_version`` on a chunk without a model - the list *Mostra* read "Camere".
@@ -598,5 +688,69 @@ def test_the_list_of_the_3d_view_names_the_mesh_a_plugin_shows(tmp_path, qapp, w
         w._show_model("model")
         assert mv.kind == "cameras" and mv.combo.currentData() == "cameras"
     finally:
+        w.setWindowModified(False)
+        w.close()
+
+
+def test_plugins_are_told_the_features_the_user_deletes(tmp_path, qapp, window_settings, monkeypatch):
+    """Since 1.3.4 the window tells a plugin which features of its layer the user deleted - the tool
+    *Seleziona* and Canc, *Elimina selezionati* - with their attributes, for the plugin to drop its
+    records of them; not those of other layers, not after the plugin went away. A plugin that fails
+    is reported and the window goes on."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QMessageBox
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.gui import main_window as mw
+    from pyarchinit_photogrammetry.plugins.api import Context
+
+    doc = ppg.Document()
+    doc.add_chunk("griglia")
+    doc.save(tmp_path / "progetto.ppg")
+    w = mw.MainWindow(doc, autoconnect=False, check_updates=False)
+    w.resize(1200, 800)
+    w.show()
+    v = w.ortho_view
+    layer = "Anomalie di prova"
+    context = Context("prova", tmp_path / "dati", w)
+    told = []
+    context.on_features_deleted(layer, told.append)
+    monkeypatch.setattr(mw, "message", lambda *a, **k: QMessageBox.StandardButton.Yes)
+
+    def anomaly(k):
+        x = 1010.0 + 20 * k
+        v.add_polygon([(x, 2010.0), (x + 10, 2010.0), (x + 10, 2020.0)], f"A{k}", layer=layer, attrs={"id": f"a{k}"})
+
+    def feature(name, ident):
+        return next(item for item, _label, attrs in v.layers[name]["features"] if attrs.get("id") == ident)
+
+    try:
+        context.show_frame((1000.0, 2000.0, 1100.0, 2050.0), 0.1, "griglia")
+        for k in range(3):
+            anomaly(k)
+        v.add_point(1050.0, 2040.0, layer="Altri punti", attrs={"id": "p0"})
+        w.set_draw_mode("select")
+        v.select_items([feature(layer, "a0"), feature("Altri punti", "p0")])
+        QTest.keyClick(v, Qt.Key.Key_Delete)  # Canc with the tool Seleziona
+        assert [[f["id"] for f in features] for features in told] == [["a0"]]
+        assert told[0][0]["etichetta"] == "A0" and told[0][0]["_geom"][0] == "Polygon"
+        assert [f["id"] for f in v.features(layer)] == ["a1", "a2"] and "Altri punti" not in v.layers
+        v.select_items([feature(layer, "a2")])
+        w.a_sel_delete.trigger()  # Elimina selezionati of the drawing bar
+        assert [f["id"] for f in told[1]] == ["a2"]
+        errors = []
+        monkeypatch.setattr(w, "_exc", lambda prefix, exc: errors.append((prefix, str(exc))))
+        context.on_features_deleted(layer, lambda features: 1 / 0)
+        v.select_items([feature(layer, "a1")])
+        assert w.delete_selected(confirm=False) == 1
+        assert [f["id"] for f in told[2]] == ["a1"]  # the other callbacks are told all the same
+        assert errors and "prova" in errors[0][0] and "division" in errors[0][1]
+        context.release()  # a plugin that went away is not told
+        anomaly(3)
+        v.select_items([feature(layer, "a3")])
+        assert w.delete_selected(confirm=False) == 1 and len(told) == 3 and len(errors) == 1
+    finally:
+        context.release()
         w.setWindowModified(False)
         w.close()

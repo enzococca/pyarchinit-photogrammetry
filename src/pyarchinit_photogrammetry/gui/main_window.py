@@ -112,6 +112,7 @@ CLASSIFIER_FILE = "classificatore.ppgclf"  # classifier trained in a chunk, kept
 
 class MainWindow(QMainWindow):
     refreshed = Signal()  # the window shows the project again (a plugin's Context.on_refresh)
+    features_deleted = Signal(str, object)  # layer, attributes of the features the user deleted (on_features_deleted)
 
     def __init__(self, document: Document | None = None, autoconnect: bool = True, progress=None,
                  check_updates: bool | None = None):
@@ -6780,6 +6781,9 @@ class MainWindow(QMainWindow):
                 quote_gone.add(int(attrs["_quota"]))
             else:  # points and anything else drawn only in the view
                 skip.add(id(attrs))
+        deleted: dict[str, list[dict]] = {}  # told to the plugins at the end, layer by layer
+        for layer, _idx, attrs in sel:
+            deleted.setdefault(layer, []).append(dict(attrs))
         if confirm:
             from_pa = sum(1 for i in parts if (self.units[i].attributes or {}).get("gid") is not None)
             text = tr("Eliminare {0} elementi selezionati?", len(sel))
@@ -6832,6 +6836,8 @@ class MainWindow(QMainWindow):
         self._redraw_overlays(skip=skip)
         self._dirty(True)
         self.log_pane.info(tr("Eliminati {0} elementi", len(sel)))
+        for layer, features in deleted.items():
+            self.features_deleted.emit(layer, features)
         if patch_ids:
             self.update_ortho_patches()
         return len(sel)

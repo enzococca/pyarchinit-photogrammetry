@@ -225,6 +225,118 @@ class Context:
         else:
             method(function, *args, **kwargs)
 
+    # ------------------------------------------------------------------ chunks and views (since 1.3.4)
+    def activate_chunk(self, chunk) -> None:
+        """Since 1.3.4: ``chunk`` (of the open project) becomes the active one. In the window as when the
+        user picks it in the workspace: the drawings of the chunk left stay with it, those of ``chunk``
+        come back, the views show it and the ``on_refresh`` callbacks are called; nothing happens when it
+        is the active one already. In the command line it becomes the active chunk of its project."""
+        window = self.window
+        doc = getattr(window, "doc", None) if window is not None else getattr(chunk, "document", None)
+        if doc is None or not any(c is chunk for c in doc.chunks):
+            raise ValueError("the chunk does not belong to the open project")
+        activate = getattr(window, "_activate_chunk", None)
+        if activate is None:
+            doc.chunk = chunk
+        else:
+            activate(chunk)
+
+    def show_raster(self, kind: str | None = None, chunk=None, path=None) -> bool:
+        """Since 1.3.4: the orthophoto (``kind`` "ortho") or the DEM ("dem") of ``chunk`` in the 2D view,
+        with the drawings of the window on top, as the window shows them; None: the orthophoto when the
+        chunk has one, else the DEM. ``chunk``: the active one when None, else it becomes the active one
+        first (:meth:`activate_chunk`). ``path``: another GeoTIFF of that kind instead of the product (a
+        kept version, ``core.versions.version_file(chunk, "dem", id)``; a raster of the plugin). Returns
+        whether it is shown: False when there is nothing of that kind (the view stays as it was), and in
+        the command line."""
+        if kind not in (None, "ortho", "dem"):
+            raise ValueError("kind: 'ortho', 'dem' or None")
+        if path is not None and kind is None:
+            raise ValueError("a path is shown as 'ortho' or 'dem': give the kind")
+        window = self.window
+        view = getattr(window, "ortho_view", None)
+        if view is None:
+            return False
+        if chunk is not None:
+            self.activate_chunk(chunk)
+        ch = window.chunk
+        if ch is None:
+            return False
+        if kind is None:
+            kind = "ortho" if ch.orthomosaic_path is not None and Path(ch.orthomosaic_path).exists() else "dem"
+        file = path if path is not None else (ch.orthomosaic_path if kind == "ortho" else ch.dem_path)
+        if file is None or not Path(file).exists():
+            return False
+        if path is None:
+            window._show_raster(kind)
+        else:
+            window._load_raster(kind, path)
+            window.show_view(view)
+        return True
+
+    def show_model(self, kind: str | None = None, chunk=None, path=None, title: str = "") -> bool:
+        """Since 1.3.4: ``kind`` of ``chunk`` in the 3D view: "model", "model_textured", "point_cloud",
+        "tie_points", "cameras", "proxies"; None: the best the chunk has (as after a processing step).
+        ``chunk``: the active one when None, else it becomes the active one first (:meth:`activate_chunk`).
+        ``path``: a mesh (``kind`` "model") or a point cloud ("point_cloud") of the plugin, a PLY in the
+        internal frame of the chunk as its own products, shown instead of them and named ``title`` beside
+        the list *Mostra* until the user chooses another view there. Returns whether it is shown: False
+        when the chunk has nothing of that kind (the view stays as it was), and in the command line."""
+        if path is not None and kind not in ("model", "point_cloud"):
+            raise ValueError("a file of the plugin is shown as 'model' or 'point_cloud'")
+        window = self.window
+        view = getattr(window, "model_view", None)
+        if view is None:
+            return False
+        from ..gui.model_view import VIEW_LABELS
+        from ..gui.scene import available_views
+
+        if kind is not None and kind not in VIEW_LABELS:
+            raise ValueError(f"kind: one of {', '.join(VIEW_LABELS)} or None")
+        if chunk is not None:
+            self.activate_chunk(chunk)
+        ch = window.chunk
+        if ch is None:
+            return False
+        if path is not None:
+            if not Path(path).exists():
+                return False
+            view.show_version(kind, path, title or Path(path).stem, version=False)
+            window.show_view(view)
+        elif kind is not None and kind not in ["cameras"] + available_views(ch):
+            return False
+        else:
+            window._show_model(kind)
+        return True
+
+    def on_features_deleted(self, layer: str, callback: Callable[[list], object]) -> None:
+        """Since 1.3.4: ``callback(features)`` when the user deletes features of ``layer`` on the 2D view
+        (the tool *Seleziona* and Canc, *Elimina selezionati* in the menu of the selection or in the
+        drawing bar): ``features`` are their attributes, a list of dicts as the layer held them (``_geom``
+        is the type and the coordinates), for the plugin to drop its records of them. A layer taken out
+        of the view (the pane *Layer*, another raster shown) is not a deletion. Disconnected by itself
+        when the plugin is disabled. Nothing in the command line."""
+        signal = getattr(self.window, "features_deleted", None)
+        if signal is None:
+            return
+
+        def deleted(name, features):
+            if name != layer:
+                return
+            try:
+                callback(features)
+            except Exception as exc:  # a plugin never takes the window down
+                report = getattr(self.window, "_exc", None)
+                if report is None:
+                    self.log.exception("the plugin failed on the features deleted in %s", layer)
+                else:
+                    from ..gui.i18n import tr
+
+                    report(tr("Plugin {0}", self.name), exc)
+
+        signal.connect(deleted)
+        self.contributions.connections.append((signal, deleted))
+
     def release(self) -> None:
         """What the plugin connected through the context, disconnected (the manager calls it after
         :meth:`Plugin.deactivate`)."""
