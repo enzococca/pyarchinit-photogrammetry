@@ -2208,7 +2208,8 @@ def node(folder: Path, once: bool = typer.Option(False, help="leave when no unit
          map: list[str] = typer.Option([], "--map", help="a path of the main computer and what it is here, "  # noqa: A002
                                                         "SRC=DST (the project folder is mapped by itself)")):
     """Work for a project of another computer: FOLDER is its <project>.ppg.files folder on the
-    shared disk. Key points and PatchMatch depth maps come here in units of a few photos."""
+    shared disk. Key points and PatchMatch depth maps come here in units of a few photos, the
+    orthomosaic and the texture in units of tiles and of rows of cells."""
     from .engine import nodes
 
     folder = Path(folder)
@@ -2282,6 +2283,8 @@ def remote(target: str, project: Path,
     try:
         while proc.poll() is None:
             _time.sleep(every)
+            # the chunk of a step (orthomosaic, texture) before the units that need it
+            run(rsync + [str(files_dir) + "/nodes/state/", f"{host}:{remote_files}/nodes/state/"])
             run(rsync + [str(files_dir) + "/nodes/todo/", f"{host}:{remote_files}/nodes/todo/"])
             run(rsync + [str(files_dir) + "/", f"{host}:{remote_files}/", "--include", "*/", "--include", "*.bin",
                          "--include", "*.txt", "--exclude", "*"])

@@ -10,14 +10,19 @@ node too: it works on the units nobody has taken, so with no node present nothin
 with nodes present every computer takes what it can at its own speed. Nodes say they are there
 with a ``nodes/hello/<host>.json`` file renewed every :data:`HELLO_EVERY` seconds.
 
-What splits by photo goes to the nodes: the detection of the key points (units of a few photos
-of one sensor: the node runs COLMAP's extractor into a database of its own and sends keypoints
-and descriptors back, the main program writes them into its database) and the PatchMatch depth
-maps (units of a few photos: the node opens the project read-only on the shared folder, computes
-the maps in the workspace there with its GPUs and CPU). The alignment stays on one machine.
+What splits goes to the nodes: the detection of the key points (units of a few photos of one
+sensor: the node runs COLMAP's extractor into a database of its own and sends keypoints and
+descriptors back, the main program writes them into its database), the PatchMatch depth maps
+(units of a few photos: the node opens the project read-only on the shared folder, computes the
+maps in the workspace there with its GPUs and CPU), the tiles of the orthomosaic and of the
+orthophoto of a terrain texture, and the cells of the texture (faces coloured from their best
+photo). For the last two the main program shares the chunk as it has it in memory, saved or not
+(:func:`share_chunk`, ``nodes/state``): a node rebuilds the step from it, keeps it for the next
+units of the step and sends back the pixels, which the main program writes into its file. The
+alignment stays on one machine.
 
-A unit that fails on a node (a photo it cannot read) is done again by the main program; the units
-of a step cancelled or failed are taken back.
+A unit that fails on a node (a photo it cannot read, another version of the program) is done
+again by the main program; the units of a step cancelled or failed are taken back.
 
 Paths inside a unit are the main program's: a node maps the main program's project folder to
 its own (``nodes/master.json`` says where the main program sees it) and any other prefix the
@@ -26,6 +31,7 @@ the photos go to the other computer with rsync, the node runs there and the resu
 """
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import platform
@@ -41,12 +47,16 @@ import numpy as np
 from ..core.progress import Progress, as_progress
 
 NODES_DIR = "nodes"
-STATES = ("hello", "todo", "taken", "done", "failed")
+STATES = ("hello", "todo", "taken", "done", "failed", "state")
 HELLO_EVERY = 30.0  # seconds between the hello files of a node
 HELLO_TIMEOUT = 90.0  # a node whose hello is older is gone
 STALE = 180.0  # a taken unit untouched for this long goes back to todo (its node died)
+STATE_KEPT = 86400.0  # a state file this old belongs to no step any more
 FEATURE_UNIT_PHOTOS = 8
 DEPTH_UNIT_PHOTOS = 4
+ORTHO_UNIT_TILES = 8  # tiles of 512 x 512 cells of the orthomosaic
+TEXTURE_UNIT_TEXELS = 4_000_000  # texels of the cells of the texture (whole rows of cells)
+_SEQ = itertools.count()
 
 
 def enabled() -> bool:
@@ -91,6 +101,16 @@ def wanted(files_dir: str | os.PathLike) -> list[dict]:
     """The nodes to share the work with: those present, when sharing is enabled."""
     return present(files_dir) if enabled() else []
 
+
+def sharing(chunk, units: int) -> Path | None:
+    """The files folder of the project when the nodes present take part in a step of ``units``
+    units of work of ``chunk``; None with no node present (or sharing off), fewer than two units or
+    a project never saved."""
+    doc = chunk.document
+    if units < 2 or doc is None or doc.path is None:
+        return None
+    files_dir = chunk.data_dir.parent
+    return files_dir if wanted(files_dir) else None
 
 
 def write_master(files_dir: str | os.PathLike, project_path: str | os.PathLike | None) -> None:
@@ -264,14 +284,80 @@ def _finished(root: Path, state: str) -> set[str]:
         return set()
 
 
+# ---------------------------------------------------------------------------- the chunk of a step
+def share_chunk(files_dir: str | os.PathLike, chunk, **extra) -> str:
+    """The chunk as the main program has it now - not saved yet, or changed by the step itself (made
+    level, a colour correction measured) - for the units of a step: ``nodes/state/<name>.json`` with
+    the ``extra`` values of the step; returns its name (:func:`forget_state` when the step ends)."""
+    root = folder(files_dir)
+    now = time.time()
+    for p in (root / "state").iterdir():  # of a step that never ended (the program closed while it ran)
+        try:
+            if now - p.stat().st_mtime > STATE_KEPT:
+                p.unlink()
+        except OSError:
+            pass
+    name = f"{int(now * 1000):x}-{next(_SEQ)}-chunk{chunk.key}"
+    doc = chunk.document
+    data = {"project": str(doc.path) if doc is not None and doc.path is not None else None,
+            "chunk": chunk.to_dict(), **extra}
+    tmp = root / "state" / f".{name}.json.part"
+    tmp.write_text(json.dumps(data), encoding="utf-8")
+    tmp.replace(root / "state" / f"{name}.json")
+    return name
+
+
+def state_file(root: Path, state: str, suffix: str) -> Path:
+    """A file of a step beside its state (``<state>_<suffix>``), removed with it."""
+    return root / "state" / f"{state}_{suffix}"
+
+
+def forget_state(files_dir: str | os.PathLike, state: str) -> None:
+    root = folder(files_dir, create=False) / "state"
+    for p in [root / f"{state}.json", *root.glob(f"{state}_*")]:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
+def node_chunk(root: Path, state: str, mapping):
+    """The chunk of a state (:func:`share_chunk`) on this computer, its paths mapped (the photos
+    inside the project folder are relative to it, the others take the prefixes given to the node),
+    and the whole state."""
+    from ..core.chunk import Chunk
+    from ..core.document import Document
+
+    data = json.loads((root / "state" / f"{state}.json").read_text(encoding="utf-8"))
+    project = map_path(data.get("project"), mapping)
+    if not project:
+        raise RuntimeError("the project of the main program has not been saved")
+    chunk = Chunk.from_dict(data["chunk"], document=Document(project))
+    for cam in chunk.cameras:
+        cam.path = map_path(cam.path, mapping)
+    return chunk, data
+
+
 # ---------------------------------------------------------------------------- the work
 def process(payload: dict, mapping, gpu: str | None = None, out_dir: Path | None = None) -> dict:
     """One unit on this computer; the result the main program reads (files in ``out_dir``)."""
+    from .. import __version__
+
     kind = payload.get("kind")
+    if payload.get("version") not in (None, __version__):  # the units that rebuild a step on the node
+        raise RuntimeError(f"this computer runs version {__version__}, the main program {payload['version']}")
     if kind == "features":
         return features_unit(payload, mapping, out_dir)
     if kind == "depth_maps":
         return depth_unit(payload, mapping, gpu)
+    if kind == "ortho_tiles":
+        from .ortho import node_tiles
+
+        return node_tiles(payload, mapping, out_dir)
+    if kind == "texture_cells":
+        from .texturing import node_cells
+
+        return node_cells(payload, mapping, out_dir)
     raise ValueError(f"unknown unit {kind!r}")
 
 
@@ -367,12 +453,15 @@ class _Quiet(Progress):
 
 
 def run(files_dir: str | os.PathLike, units: list[dict], progress: Progress | None = None,
-        label: str = "units", gpu: str | None = None, project_path=None, local=None) -> list[dict]:
+        label: str = "units", gpu: str | None = None, project_path=None, local=None, each=None,
+        tick=None) -> list[dict]:
     """The ``units`` done by the nodes present and by this program (a worker thread taking the
     units nobody took; ``local(payload, progress)`` does one here - ``progress`` stops it when the
     step ends - :func:`process` by default); returns their outcomes in order (``by``,
-    ``result``). A unit that fails on another computer is done again here; one that fails here
-    stops everything, and the units nobody took are taken back."""
+    ``result``). ``each(outcome)`` is called in this thread with every outcome as soon as it is
+    read, ``tick()`` at every look (what the worker did here can be written in this thread). A
+    unit that fails on another computer is done again here; one that fails here stops everything,
+    and the units nobody took are taken back."""
     progress = as_progress(progress)
     root = folder(files_dir)
     _sweep(root)
@@ -431,6 +520,10 @@ def run(files_dir: str | os.PathLike, units: list[dict], progress: Progress | No
                     errors.append(f"{name} on {got.get('by')}: {got['error']}")
                     break
                 results[name] = got
+                if each is not None:
+                    each(got)
+            if tick is not None:
+                tick()
             requeue_stale(root)
             by_others = sum(1 for r in results.values() if r.get("by") != host)
             progress(len(results) / max(len(names), 1),
@@ -446,6 +539,8 @@ def run(files_dir: str | os.PathLike, units: list[dict], progress: Progress | No
             forget(files_dir, names)
     if errors:
         raise RuntimeError("a unit of work failed: " + "; ".join(errors[:3]))
+    if tick is not None:
+        tick()
     return [results[n] for n in names]
 
 
