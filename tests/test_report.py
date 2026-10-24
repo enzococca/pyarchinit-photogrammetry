@@ -265,6 +265,18 @@ def test_pdf_report_of_the_processed_trench(processed, tmp_path):
     assert "Ortofoto" in ch.generate_report(tmp_path / "rapporto.html", language="it").read_text(encoding="utf-8")
 
 
+def test_local_chunks_in_metres_have_units():
+    ch = ppg.Document().add_chunk()
+    assert ch.crs in (None, "", "LOCAL") and not rc._metric(ch)  # arbitrary units of an unscaled block
+    ch.meta["metric"] = True  # laser scans, a model imported in metres
+    assert rc._metric(ch)
+    ch.meta.pop("metric")
+    T = np.eye(4)
+    T[:3, :3] *= 27.6  # scaled by references or bars, then shifted to a local frame
+    ch.transform = T
+    assert rc._metric(ch)
+
+
 def test_multispectral_and_thermal_parts(tmp_path):
     """A chunk with a reflectance orthomosaic, an index and its zones gets the multispectral part
     (bands, calibration, balance, false colour, the index on its ramp with its statistics, the

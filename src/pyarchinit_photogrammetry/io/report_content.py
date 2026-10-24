@@ -795,12 +795,14 @@ def _crs_name(crs: str) -> str:
 
 
 def _metric(chunk) -> bool:
-    """Coordinates in metres: a projected CRS, or local ones scaled by references or scale bars."""
+    """Coordinates in metres: a projected CRS, or local ones scaled (references, scale bars, a
+    transform kept from a georeferencing) or measured in metres (laser scans, models imported in
+    metres: ``meta["metric"]``), as for the alignment of chunks."""
     from ..core import crs as crs_mod
 
     if crs_mod.is_geographic(chunk.crs):
         return False
-    if not crs_mod.is_local(chunk.crs):
+    if not crs_mod.is_local(chunk.crs) or chunk.meta.get("metric") or abs(chunk.scale - 1.0) > 1e-9:
         return True
     return any(m.reference.location for m in chunk.markers) or any(not sb.checkpoint for sb in chunk.scalebars)
 
