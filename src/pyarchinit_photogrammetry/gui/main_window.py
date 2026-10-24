@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import traceback
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QDockWid
 from .. import __version__, _native, updates
 from ..app import app as application
 from ..core.document import Document
+from ..io.qgis_link import ID_FIELD, new_id, stable_id
 from . import i18n, theme
 from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelectionDialog, IfcPreviewDialog,
                       ImageDialog, ParamDialog, PatchDialog,
@@ -390,6 +392,10 @@ class MainWindow(QMainWindow):
         self._qgis_timer.setSingleShot(True)
         self._qgis_timer.timeout.connect(self._export_qgis_layers)
         self.ortho_view.layers_changed.connect(self._schedule_qgis)
+        self._qgis_poll = QTimer(self)  # the edits saved in QGIS, looked for once a second
+        self._qgis_poll.setInterval(1000)
+        self._qgis_poll.timeout.connect(self._poll_qgis)
+        self._qgis_waiting: dict[str, list] = {"proxies": [], "sections": []}  # for when no step is running
 
     def _act(self, menu, text: str, slot, shortcut=None, tip: str = "", processing: bool = False,
              icon_name: str | None = None) -> QAction:
@@ -856,9 +862,11 @@ class MainWindow(QMainWindow):
         m = mb.addMenu("&QGIS")
         self.a_qgis_open = self._act(m, tr("Apri in QGIS (collegamento dal vivo)"), self.open_in_qgis,
                                      icon_name="view_ortho")
-        self.a_qgis_live = QAction(tr("Aggiorna QGIS mentre disegno"), self, checkable=True)
+        self.a_qgis_live = QAction(tr("Collegamento dal vivo con QGIS (nei due sensi)"), self, checkable=True)
+        self.a_qgis_live.setToolTip(tr("Ciò che disegni qui arriva in QGIS da solo; ciò che salvi in QGIS nei layer "
+                                       "delle US, delle quote e delle sezioni torna qui entro un secondo"))
         self.a_qgis_live.setChecked(False)
-        self.a_qgis_live.toggled.connect(lambda on: self._schedule_qgis() if on else None)
+        self.a_qgis_live.toggled.connect(self._qgis_live_toggled)
         m.addAction(self.a_qgis_live)
         self._act(m, tr("Apri la cartella dei layer per QGIS"), lambda: QDesktopServices.openUrl(
             QUrl.fromLocalFile(str(self._qgis_dir()))), icon_name="folder")
@@ -2179,6 +2187,11 @@ class MainWindow(QMainWindow):
             ev.ignore()
             return
         self._settle_removals(self.doc)  # the files of what was removed: deleted, or back if never saved
+        self._qgis_poll.stop()  # a window closed reads no more edits of QGIS
+        self._qgis_timer.stop()
+        if getattr(self, "_live_link", None) is not None:
+            self._live_link.close()
+            self._live_link = None
         self.photos.stop()
         self.log_pane.detach()
         self.settings.setValue("geometry", self.saveGeometry())
@@ -3056,8 +3069,17 @@ class MainWindow(QMainWindow):
 
             if "probe" in state:
                 self.probe_points = [dict(q) for q in state["probe"] or []]
+            follow = []
             if "units" in state:
+                before = {(u.attributes or {}).get(ID_FIELD): u for u in self.units}
                 self.units = [UnitPolygon.from_dict(d) for d in state["units"] or []]
+                for u in self.units:  # a polygon back as it was: its proxy too
+                    b = before.get((u.attributes or {}).get(ID_FIELD))
+                    if b is None:
+                        continue
+                    moved = not b.geometry.equals(u.geometry)
+                    if moved or (b.tipo, b.us, b.area) != (u.tipo, u.us, u.area):
+                        follow.append((u, (b.tipo, b.us, b.area), moved))
             if "quote" in state:
                 self.quote = [dict(q) for q in state["quote"] or []]
             if "sections" in state:
@@ -3072,6 +3094,7 @@ class MainWindow(QMainWindow):
                                    if (u.attributes or {}).get("gid") is not None
                                    and int(u.attributes["gid"]) in pending}
             self._redraw_drawings()
+            self._follow_proxies(follow)
         if ch is not None and parts & {"markers", "scalebars", "excluded"}:
             from ..core.marker import Marker, ScaleBar
 
@@ -6201,6 +6224,7 @@ class MainWindow(QMainWindow):
                 log.warning("Unita' non letta dal progetto: %s", exc)
         self.quote = [dict(q) for q in data.get("quote", []) if "x" in q and "y" in q]
         self.probe_points = [dict(q) for q in data.get("points", []) if "x" in q and "y" in q]
+        self._ensure_ppg_ids()
         from shapely import wkt
 
         self.stones = {}
@@ -6278,6 +6302,9 @@ class MainWindow(QMainWindow):
             u.attributes = {}
         layer = layer or u.attributes.get("_layer") or "Unita' stratigrafiche"
         u.attributes["_layer"] = layer  # survives raster reloads (DEM <-> orthomosaic)
+        if not u.attributes.get(ID_FIELD):  # its identity in the QGIS link
+            gid = u.attributes.get("gid")
+            u.attributes[ID_FIELD] = stable_id("pyarchinit", u.sito, gid) if gid is not None else new_id()
         geoms = getattr(u.geometry, "geoms", [u.geometry])
         # the columns of pyunitastratigrafiche, as in PyArchInit's layer
         attrs = {**u.layer_attributes(), "area_m2": round(u.geometry.area, 3),
@@ -6286,15 +6313,18 @@ class MainWindow(QMainWindow):
                  "_unit": i}
         if (u.attributes or {}).get("gid") is not None:
             attrs["_gid"] = u.attributes["gid"]
-        for g in geoms:
+        for g in geoms:  # one feature per part, with its holes for QGIS
             self.ortho_view.add_polygon(np.asarray(g.exterior.coords)[:, :2], f"{u.tipo} {u.us or '?'}",
-                                        US_COLORS[i % len(US_COLORS)], layer=layer, attrs=attrs)
+                                        US_COLORS[i % len(US_COLORS)], layer=layer, attrs={**attrs, "_shape": g})
 
     # ---------------------------------------------------------------- spot heights (pyarchinit_quote)
     def _draw_quota(self, q: dict, i: int) -> None:
         from ..archaeo.stratigraphy import QUOTE_FIELDS
 
+        if not q.get(ID_FIELD):
+            q[ID_FIELD] = stable_id("pyarchinit_quote", q["gid"]) if q.get("gid") is not None else new_id()
         attrs = {k: q.get(k, "") for k in QUOTE_FIELDS}
+        attrs[ID_FIELD] = q[ID_FIELD]
         attrs["_quota"] = i
         if q.get("gid") is not None:
             attrs["_gid"] = q["gid"]
@@ -6664,6 +6694,7 @@ class MainWindow(QMainWindow):
                 self.sections = [dict(x) for x in json.loads(f.read_text(encoding="utf-8"))]
             except (OSError, ValueError) as exc:
                 log.warning("sezioni.json non leggibile: %s", exc)
+        self._ensure_ppg_ids()
         self.sections_pane.set_sections(self.sections)
         self._draw_sections()
 
@@ -6672,9 +6703,11 @@ class MainWindow(QMainWindow):
             return
         with self.ortho_view.batch():
             for sdict in self.sections:
+                if not sdict.get(ID_FIELD):
+                    sdict[ID_FIELD] = new_id()
                 self.ortho_view.add_line([sdict["p1"], sdict["p2"]], "#ffd000", sdict["label"], layer="Sezioni",
                                          attrs={"lunghezza_m": round(sdict.get("length", 0), 3),
-                                                "svg": sdict.get("svg", "")})
+                                                "svg": sdict.get("svg", ""), ID_FIELD: sdict[ID_FIELD]})
 
     def _section_options(self) -> dict:
         return dict((self.chunk.meta.get("section_options") or {}) if self.chunk is not None else {})
@@ -6735,11 +6768,12 @@ class MainWindow(QMainWindow):
             self._last_section = sec
             sdict = {"label": label, "p1": [float(a[0]), float(a[1])], "p2": [float(b[0]), float(b[1])],
                      "length": float(sec.length), "svg": str(svg), "dxf": str(dxf), "dxf3d": str(dxf3d),
-                     "kind": "vertical"}
+                     "kind": "vertical", ID_FIELD: new_id()}
             self.sections.append(sdict)
             self._save_sections()
             self.ortho_view.add_line([a, b], "#ffd000", label, layer="Sezioni",
-                                     attrs={"lunghezza_m": round(sec.length, 3), "svg": str(svg)})
+                                     attrs={"lunghezza_m": round(sec.length, 3), "svg": str(svg),
+                                            ID_FIELD: sdict[ID_FIELD]})
             self.sections_pane.add(sdict)
             self._show_pane(self.bottom_tabs, self.sections_pane)
             self.log_pane.info(tr("{0}: lunghezza {1:.3f} m, disegni in {2}", label, sec.length, out_dir))
@@ -7114,6 +7148,7 @@ class MainWindow(QMainWindow):
     def _redraw_overlays_now(self, skip: set | None) -> None:
         v = self.ortho_view
         skip = skip or set()
+        self._ensure_ppg_ids()  # copies of a unit (a part split off) get an identity of their own
         visible = {n: lay["visible"] for n, lay in v.layers.items()}
         order = list(v.layer_order)
         modelled = set(self.line_layers) | {"Sezioni", QUOTE_LAYER, PATCH_LAYER, "Marker", STONES_LAYER, PROBE_LAYER}
@@ -7250,10 +7285,16 @@ class MainWindow(QMainWindow):
             entries = []
             for px in proxies:
                 path = save_proxy(px, folder, "ply")
+                gid = px.attributes.get("gid")
+                pid = px.attributes.get(ID_FIELD) or (stable_id("pyarchinit", site, gid) if gid is not None else None)
+                # the base kept with its value: the proxy is built again the same way when its unit changes
                 entries.append({"name": px.name, "us": px.us, "area": px.area, "tipo": px.tipo, "sito": site,
                                 "file": str(path.relative_to(self.chunk.data_dir)), "volume_m3": px.volume_m3,
                                 "area_m2": px.area_m2, "z_top": list(px.z_top), "z_bottom": list(px.z_bottom),
-                                "base": v["base"]})
+                                "base": v["base"], **({"base_z": float(v["z"])} if v["base"] == "plane" else {}),
+                                **({"thickness": float(thickness)} if thickness is not None else {}),
+                                **({"base_dem": str(base)} if v["base"] == "dem" else {}),
+                                **({"ppg_id": pid} if pid else {})})
             return entries
 
         def done(entries):
@@ -7381,16 +7422,28 @@ class MainWindow(QMainWindow):
 
     def _qgis_live_link(self):
         """The GeoPackage of the drawings read by QGIS (one per project folder and CRS; it
-        remembers what it wrote, so only the changed tables are rewritten)."""
+        remembers what it wrote, so only the changed rows are rewritten)."""
         from ..io.qgis_link import LiveLink
 
         folder, crs = self._qgis_dir(), self.chunk.crs if self.chunk else ""
         link = getattr(self, "_live_link", None)
         if link is None or link.path.parent != folder or link.crs != (crs or ""):
+            if link is not None:
+                link.close()
             link = self._live_link = LiveLink(folder, crs)
         return link
 
+    def _qgis_live_toggled(self, on: bool) -> None:
+        """The live link with QGIS on or off: the drawings written for QGIS, its edits looked for."""
+        if on:
+            self._schedule_qgis()
+            self._qgis_poll.start()
+        else:
+            self._qgis_poll.stop()
+
     def _export_qgis_layers(self, force: bool = False) -> dict:
+        if self._ensure_ppg_ids():
+            self._redraw_overlays()  # the features carry the identities given now
         view = self.ortho_view
         layers = {name: {"kind": lay["kind"], "features": view.features(name)} for name, lay in view.layers.items()
                   if name != "Marker"}  # the markers are the survey's control, not excavation drawings
@@ -7401,6 +7454,558 @@ class MainWindow(QMainWindow):
             if "locked" in str(exc) or "busy" in str(exc):
                 self._qgis_timer.start(3000)  # QGIS or a sync client holds the file a moment: try again
             return {}
+
+    def _ensure_ppg_ids(self) -> bool:
+        """Every unit, spot height and section with an identity of its own (``ppg_id``, kept with
+        the project; the QGIS link writes and reads the rows by it). Those of projects of earlier
+        versions get one from their content - the same in every session until the project is saved -
+        and a copy (a unit split in two) a new one. Returns whether any was given."""
+        seen, changed = set(), False
+
+        def give(current, content):
+            nonlocal changed
+            pid = str(current or "").strip()
+            if not pid or pid in seen:
+                base = stable_id(pid, "copia") if pid else stable_id(*content())
+                pid, k = base, 1
+                while pid in seen:
+                    k += 1
+                    pid = stable_id(base, k)
+                changed = True
+            seen.add(pid)
+            return pid
+
+        for u in self.units:
+            if u.attributes is None:
+                u.attributes = {}
+            gid = u.attributes.get("gid")
+            u.attributes[ID_FIELD] = give(u.attributes.get(ID_FIELD), lambda u=u, gid=gid: (
+                ("pyarchinit", u.sito, gid) if gid is not None else ("unita", u.geometry.wkt, u.tipo, u.us, u.area, u.sito)))
+        for q in self.quote:
+            q[ID_FIELD] = give(q.get(ID_FIELD), lambda q=q: (
+                ("pyarchinit_quote", q["gid"]) if q.get("gid") is not None else ("quota", q.get("x"), q.get("y"),
+                                                                                   q.get("quota_q"))))
+        for sdict in self.sections:
+            sdict[ID_FIELD] = give(sdict.get(ID_FIELD), lambda s=sdict: ("sezione", s.get("label"), s.get("p1"),
+                                                                         s.get("p2")))
+        return changed
+
+    # ---------------------------------------------------------------- QGIS: its edits back here
+    def _poll_qgis(self) -> None:
+        """Once a second while the live link is on: what was saved in QGIS since the last look
+        (units, spot heights, sections) comes into the window. Not while a step runs or a dialog
+        waits: it stays in the GeoPackage and comes at the next look."""
+        if not self.a_qgis_live.isChecked() or self.chunk is None or self.runner.busy:
+            return
+        if QApplication.activeModalWidget() is not None:
+            return
+        self._run_qgis_waiting()
+        if self.runner.busy:
+            return
+        link = self._qgis_live_link()
+        try:
+            if not link.external_change():
+                return
+            changes = link.read_changes()
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) and "busy" not in str(exc):
+                log.warning("Modifiche di QGIS non lette: %s", exc)
+            return  # QGIS is saving: read at the next look
+        except Exception as exc:  # noqa: BLE001 - the live link never stops the work with an error window
+            log.warning("Modifiche di QGIS non lette: %s", exc, exc_info=True)
+            return
+        if changes:
+            self._apply_qgis_changes(changes)
+
+    def _apply_qgis_changes(self, changes: dict) -> list[str]:
+        """The changes read from the GeoPackage (``LiveLink.read_changes``) into the drawings: one
+        entry of Modifica > Annulla, a line of the log for each feature, the layers drawn again and
+        the drawings stored in the chunk; the proxies of the units whose polygon changed are built
+        again, the sections whose trace moved cut again. Returns the lines."""
+        from ..io import gpkg
+
+        srs = gpkg.srs_of(self.chunk.crs if self.chunk is not None else "")[0]
+        for table, ch in changes.items():
+            if ch.refused:
+                self.log_pane.warning(tr("Da QGIS: il layer {0} è nel sistema di riferimento {1}, il progetto nel "
+                                         "{2}: le sue modifiche non sono state riprese", table, ch.refused[0],
+                                         ch.refused[1]))
+        proxies, recut, lines = [], [], []
+        if changes.get("unita") and not changes["unita"].refused:
+            lines += self._qgis_units(changes["unita"], srs, proxies)
+        if changes.get("quote") and not changes["quote"].refused:
+            lines += self._qgis_quote(changes["quote"], srs)
+        sections = bool(changes.get("sezioni") and not changes["sezioni"].refused)
+        if sections:
+            lines += self._qgis_sections(changes["sezioni"], srs, recut)
+        if not lines:
+            return []
+        self._store_drawings()
+        if sections:
+            self._save_sections() if self.sections else self._sections_file().unlink(missing_ok=True)
+            self.sections_pane.set_sections(self.sections)
+        self._update_pa_save_button()
+        self._redraw_overlays()  # and the GeoPackage brought to the program's version of these rows
+        self.setWindowModified(True)
+        if self.history is not None:
+            self.history.record(tr("Da QGIS: {0}", lines[0] if len(lines) == 1 else tr("{0} modifiche", len(lines))))
+        for line in lines:
+            self.log_pane.info(tr("Da QGIS: {0}", line))
+        self._follow_proxies(proxies)
+        self._qgis_waiting["sections"] += [s for s in recut if all(s is not o for o in self._qgis_waiting["sections"])]
+        self._run_qgis_waiting()
+        return lines
+
+    def _qgis_geometry(self, f, srs: int, name: str):
+        """The 2D geometry of a row read back, None (said in the log) when it is in another reference
+        system or cannot be read."""
+        import shapely
+
+        if f.srs_id is not None and f.srs_id != srs:
+            self.log_pane.warning(tr("Da QGIS: {0} è nel sistema di riferimento {1}, il progetto nel {2}: non ripresa",
+                                     name, f.srs_id, srs))
+            return None
+        g = f.geometry
+        if g is None or g.is_empty:
+            self.log_pane.warning(tr("Da QGIS: {0} senza geometria leggibile, non ripresa", name))
+            return None
+        return shapely.force_2d(g) if g.has_z else g
+
+    def _qgis_polygon(self, rows: list, srs: int, name: str):
+        """The polygon of a unit from its rows (one per part); an invalid one is made valid, and
+        what is left of no polygon is skipped (both said in the log)."""
+        from shapely.geometry import MultiPolygon, Polygon
+        from shapely.validation import make_valid
+
+        def polygons(g):
+            if isinstance(g, Polygon):
+                return [g] if not g.is_empty and g.area > 0 else []
+            return [p for part in getattr(g, "geoms", []) for p in polygons(part)]
+
+        out, fixed = [], False
+        for f in rows:
+            g = self._qgis_geometry(f, srs, name)
+            if g is None:
+                continue
+            if not g.is_valid:
+                g, fixed = make_valid(g), True
+            out += polygons(g)
+        if not out:
+            self.log_pane.warning(tr("Da QGIS: la geometria di {0} non è valida e non è stata ripresa", name))
+            return None
+        if fixed:
+            self.log_pane.info(tr("Da QGIS: la geometria di {0} non era valida ed è stata corretta", name))
+        return out[0] if len(out) == 1 else MultiPolygon(out)
+
+    def _unit_from_row(self, u, values: dict) -> None:
+        """The columns of a row of ``unita`` (pyunitastratigrafiche's) into the unit."""
+        from ..archaeo.stratigraphy import UNIT_FIELDS
+        from ..io.qgis_link import TECHNICAL_FIELDS
+
+        def text(key):
+            v = values.get(key)
+            return None if v is None or not str(v).strip() else str(v).strip()
+
+        u.us, u.area = text("us_s"), text("area_s")
+        u.tipo = text("unita_tipo_s") or "US"
+        u.sito = text("scavo_s") or u.sito or self.project_site() or None
+        a = u.attributes
+        for k in UNIT_FIELDS:
+            v = values.get(k)
+            if k == "stratigraph_index_us" and v not in (None, ""):
+                try:
+                    v = int(float(v))
+                except (TypeError, ValueError):
+                    v = 1
+            if v in (None, ""):
+                a.pop(k, None)
+            else:
+                a[k] = v
+        drawn = {"layer", "etichetta", "area_m2", "scavo_s", "area_s", "us_s", "unita_tipo_s", "gid"}
+        for k, v in values.items():  # the other columns, also those added in QGIS
+            if k in drawn or k in UNIT_FIELDS or k in TECHNICAL_FIELDS or str(k).startswith("_"):
+                continue
+            if v is None:
+                a.pop(k, None)
+            else:
+                a[k] = v
+
+    @staticmethod
+    def _unit_name(u) -> str:
+        return f"{u.tipo} {u.us or '?'}"
+
+    def _qgis_units(self, ch, srs: int, proxies: list) -> list[str]:
+        """Units changed, drawn or deleted in QGIS; ``proxies`` gets ``(unit, (tipo, us, area) before,
+        polygon changed)`` of those whose proxy has to follow."""
+        from ..archaeo.stratigraphy import UnitPolygon
+
+        lines = []
+        by_id = {(u.attributes or {}).get(ID_FIELD): u for u in self.units}
+        parts: dict[str, list] = {}
+        for f in ch.rows:
+            parts.setdefault(f.id, []).append(f)
+        edited = {f.fid for f in ch.changed}
+        added = [f.id for f in ch.added]
+        gone = []
+        for pid in dict.fromkeys([f.id for f in ch.changed] + [k[0] for k in ch.deleted]):
+            u, rows = by_id.get(pid), sorted(parts.get(pid, []), key=lambda f: f.part)
+            if u is None:  # deleted here meanwhile, changed there: it comes back
+                if rows:
+                    added.append(pid)
+                continue
+            if not rows:
+                gone.append(u)
+                continue
+            geom = self._qgis_polygon(rows, srs, self._unit_name(u))
+            if geom is None:
+                continue
+            before = (u.tipo, u.us, u.area)
+            self._unit_from_row(u, next((f for f in rows if f.fid in edited), rows[0]).values)
+            moved = not geom.equals(u.geometry)
+            if moved:
+                u.geometry = geom
+            gid = u.attributes.get("gid")
+            if gid is not None:  # a polygon of PyArchInit: saved there with Salva modifiche in PyArchInit
+                if moved:
+                    self._forget_pa_unit(u, deleted=False)
+                else:
+                    self.pa_pending[int(gid)] = u
+            if moved or before != (u.tipo, u.us, u.area):
+                proxies.append((u, before, moved))
+            lines.append(tr("{0} modificata", self._unit_name(u)))
+        for pid in dict.fromkeys(added):
+            rows = sorted(parts.get(pid, []), key=lambda f: f.part)
+            geom = self._qgis_polygon(rows, srs, tr("una US disegnata in QGIS"))
+            if geom is None:
+                continue
+            u = UnitPolygon(geom, attributes={ID_FIELD: pid}, sito=self.project_site() or None)
+            self._unit_from_row(u, rows[0].values)
+            layer = str(rows[0].values.get("layer") or "")
+            from ..io.qgis_link import classify_layer
+
+            if layer and not layer.startswith("US da PyArchInit - ") and classify_layer(layer, "polygon") == "unita":
+                u.attributes["_layer"] = layer
+            self.units.append(u)
+            lines.append(tr("{0} aggiunta", self._unit_name(u)))
+        for u in gone:
+            self._forget_pa_unit(u, deleted=True)
+            lines.append(tr("{0} eliminata", self._unit_name(u)))
+        if gone:
+            self.units = [u for u in self.units if all(u is not g for g in gone)]
+        return lines
+
+    def _quota_name(self, q: dict) -> str:
+        z = q.get("quota_q")
+        try:
+            return tr("quota {0}", f"{float(z):.2f}")
+        except (TypeError, ValueError):
+            return tr("quota {0}", "?")
+
+    def _qgis_quote(self, ch, srs: int) -> list[str]:
+        """Spot heights changed, drawn or deleted in QGIS."""
+        from ..archaeo.stratigraphy import QUOTE_FIELDS
+
+        lines = []
+        by_id = {q.get(ID_FIELD): q for q in self.quote}
+        for f in ch.changed + ch.added:
+            q = by_id.get(f.id)
+            g = self._qgis_geometry(f, srs, self._quota_name(q or f.values))
+            if g is None:
+                continue
+            g = g if g.geom_type == "Point" else g.representative_point()
+            new = q is None
+            if new:
+                q = {ID_FIELD: f.id, "sito_q": self.project_site() or ""}
+                self.quote.append(q)
+            q["x"], q["y"] = round(float(g.x), 3), round(float(g.y), 3)
+            for k in QUOTE_FIELDS:
+                if k not in f.values:
+                    continue
+                v = f.values[k]
+                if k == "quota_q":
+                    try:
+                        q[k] = None if v in (None, "") else round(float(v), 3)
+                    except (TypeError, ValueError):
+                        q[k] = None
+                elif v is not None or not new:
+                    q[k] = "" if v is None else v
+            lines.append(tr("{0} aggiunta", self._quota_name(q)) if new else tr("{0} modificata", self._quota_name(q)))
+        gone = {k[0] for k in ch.deleted}
+        for q in [q for q in self.quote if q.get(ID_FIELD) in gone]:
+            lines.append(tr("{0} eliminata", self._quota_name(q)))
+        self.quote = [q for q in self.quote if q.get(ID_FIELD) not in gone]
+        return lines
+
+    def _qgis_sections(self, ch, srs: int, recut: list) -> list[str]:
+        """Sections whose trace or name changed in QGIS, drawn or deleted there; ``recut`` gets those
+        to cut again (their drawings are files: those of a deleted section stay in sezioni/)."""
+        lines = []
+        by_id = {s.get(ID_FIELD): s for s in self.sections}
+        for f in ch.changed + ch.added:
+            s = by_id.get(f.id)
+            label = str(f.values.get("etichetta") or "").strip()
+            g = self._qgis_geometry(f, srs, s["label"] if s is not None else (label or tr("una sezione")))
+            if g is None:
+                continue
+            coords = list(g.coords) if g.geom_type == "LineString" else \
+                [c for part in getattr(g, "geoms", []) for c in getattr(part, "coords", [])]
+            if len(coords) < 2 or coords[0][:2] == coords[-1][:2]:
+                self.log_pane.warning(tr("Da QGIS: la traccia di {0} non ha due estremi distinti, non ripresa",
+                                         s["label"] if s is not None else (label or tr("una sezione"))))
+                continue
+            p1, p2 = [float(coords[0][0]), float(coords[0][1])], [float(coords[-1][0]), float(coords[-1][1])]
+            length = float(np.hypot(p2[0] - p1[0], p2[1] - p1[1]))
+            if s is None:
+                n = len(self.sections) + 1
+                names = {x["label"] for x in self.sections}
+                while f"Sezione {n}" in names:
+                    n += 1
+                s = {"label": label or f"Sezione {n}", "p1": p1, "p2": p2, "length": length, "svg": "", "dxf": "",
+                     "dxf3d": "", "kind": "vertical", ID_FIELD: f.id}
+                self.sections.append(s)
+                recut.append(s)
+                lines.append(tr("{0} aggiunta", s["label"]))
+                continue
+            if label:
+                s["label"] = label
+            if max(abs(a - b) for a, b in zip(s["p1"] + s["p2"], p1 + p2)) > 1e-9:
+                s["p1"], s["p2"], s["length"] = p1, p2, length
+                recut.append(s)
+            lines.append(tr("{0} modificata", s["label"]))
+        gone = {k[0] for k in ch.deleted}
+        for s in [s for s in self.sections if s.get(ID_FIELD) in gone]:
+            lines.append(tr("{0} eliminata", s["label"]))
+        self.sections = [s for s in self.sections if s.get(ID_FIELD) not in gone]
+        return lines
+
+    def _run_qgis_waiting(self) -> None:
+        """The proxies to build again and the sections to cut again after edits made in QGIS, when no
+        step is running (one at a time: the next ones at the next look)."""
+        if self.runner.busy or self.chunk is None:
+            return
+        w = self._qgis_waiting
+        if w["proxies"]:
+            items, w["proxies"] = w["proxies"], []
+            self._rebuild_proxies(items)
+        elif w["sections"]:
+            items, w["sections"] = [s for s in w["sections"] if any(s is x for x in self.sections)], []
+            if items:
+                self._recut_sections(items)
+
+    # ---------------------------------------------------------------- proxies that follow their unit
+    PROXY_BASES = ("plane", "dem", "thickness", "min")  # built by the program: built again the same way
+
+    def _proxy_entries(self, u, before: tuple) -> list[dict]:
+        """The proxies of the chunk built for ``u`` (``before``: its ``(tipo, us, area)`` when they
+        were named): by its identity, else by the name it had."""
+        from ..archaeo.proxies import proxy_name
+
+        entries = (self.chunk.meta.get("proxies") or []) if self.chunk is not None else []
+        pid = (u.attributes or {}).get(ID_FIELD)
+        mine = [e for e in entries if pid and e.get("ppg_id") == pid]
+        if mine:
+            return mine
+        name, area = proxy_name(before[0], before[1]), before[2]
+        return [e for e in entries if not e.get("ppg_id") and before[1] and e.get("name") == name
+                and (not e.get("area") or not area or str(e["area"]) == str(area))]
+
+    def _follow_proxies(self, items: list) -> None:
+        """The proxies of units whose polygon changed are built again with the base they were built
+        with; those of units only renamed take the new name. ``items``: ``(unit, (tipo, us, area)
+        before, polygon changed)``."""
+        if self.chunk is None or not self.chunk.meta.get("proxies"):
+            return
+        renamed = False
+        for u, before, moved in items:
+            for e in self._proxy_entries(u, before):
+                e["ppg_id"] = u.attributes.get(ID_FIELD)  # bound to its unit from now on
+                if not moved:
+                    renamed |= self._rename_proxy(e, u)
+                    continue
+                if e.get("base") not in self.PROXY_BASES:
+                    self.log_pane.info(tr("Il proxy {0} non viene ricostruito: non è stato costruito dal programma",
+                                          e.get("name")))
+                    continue
+                params = self._proxy_base(e)
+                if params is None:
+                    self.log_pane.info(tr("Il proxy {0} resta com'era: la sua base non è stata indicata",
+                                          e.get("name")))
+                    continue
+                self._qgis_waiting["proxies"].append((e["ppg_id"], e.get("name"), params))
+        if renamed:
+            self.proxies_pane.set_proxies(self.chunk.meta["proxies"])
+            self.setWindowModified(True)
+        self._run_qgis_waiting()
+
+    def _rename_proxy(self, e: dict, u) -> bool:
+        """The proxy of a unit whose type or number changed takes its new name (and its file)."""
+        from ..archaeo.proxies import proxy_name
+
+        new = proxy_name(u.tipo, u.us)
+        e["us"], e["area"], e["tipo"] = u.us, u.area, u.tipo or "US"
+        if new == e.get("name"):
+            return True
+        old, path = e.get("name"), self.chunk.data_dir / str(e.get("file") or "")
+        if e.get("file") and path.exists():
+            target = path.with_name(new + path.suffix)
+            if target.exists():
+                self.log_pane.warning(tr("Il proxy {0} non è stato rinominato {1}: c'è già un file con quel nome",
+                                         old, new))
+                return True
+            path.rename(target)
+            e["file"] = str(target.relative_to(self.chunk.data_dir))
+        e["name"] = new
+        self.log_pane.info(tr("Il proxy {0} si chiama ora {1}", old, new))
+        return True
+
+    def _proxy_base(self, e: dict) -> dict | None:
+        """``{"base", "thickness"}`` of :func:`proxies_for_units` the proxy of entry ``e`` was built with;
+        what the entry does not keep (proxies of earlier versions) is asked once, and kept."""
+        kind, name = e.get("base"), e.get("name")
+        intro = tr("Il poligono di {0} è cambiato: il proxy va ricostruito, ma il progetto non ricorda la base con "
+                   "cui è stato costruito.", name)
+        if kind == "plane":
+            if e.get("base_z") is None:
+                v = ParamDialog.ask(self, tr("Proxy di {0}", name), [
+                    Field("z", tr("Quota del piano (m)"), round(float((e.get("z_bottom") or [0.0])[0]), 3),
+                          minimum=-10000, maximum=10000, decimals=3)], intro=intro)
+                if not v:
+                    return None
+                e["base_z"] = float(v["z"])
+            return {"base": float(e["base_z"]), "thickness": None}
+        if kind == "thickness":
+            if e.get("thickness") is None:
+                top, bottom = e.get("z_top") or [0.0, 0.0], e.get("z_bottom") or [0.0, 0.0]
+                v = ParamDialog.ask(self, tr("Proxy di {0}", name), [
+                    Field("thickness", tr("Spessore (m)"), max(0.001, round(float(top[0]) - float(bottom[0]), 3)),
+                          minimum=0.001, maximum=100, decimals=3)], intro=intro)
+                if not v:
+                    return None
+                e["thickness"] = float(v["thickness"])
+            return {"base": None, "thickness": float(e["thickness"])}
+        if kind == "dem":
+            if not e.get("base_dem") or not Path(e["base_dem"]).exists():
+                v = ParamDialog.ask(self, tr("Proxy di {0}", name), [
+                    Field("dem", tr("DEM dopo la rimozione"), e.get("base_dem") or "", kind="file_open",
+                          filter="GeoTIFF (*.tif *.tiff)")], intro=intro)
+                if not v or not v.get("dem"):
+                    return None
+                e["base_dem"] = str(v["dem"])
+            return {"base": str(e["base_dem"]), "thickness": None}
+        return {"base": None, "thickness": None}  # "min": the lowest point inside the polygon
+
+    def _rebuild_proxies(self, items: list) -> None:
+        """Build again the proxies of ``items`` (``(unit identity, proxy name, base)``) on the polygons
+        of their units now, in the background."""
+        from ..archaeo.proxies import proxies_for_units, save_proxy
+        from ..archaeo.stratigraphy import UnitPolygon
+
+        ch = self.chunk
+        if ch is None or ch.dem_path is None:
+            self.log_pane.warning(tr("Proxy non ricostruiti: il chunk non ha più il DEM"))
+            return
+        by_id = {(u.attributes or {}).get(ID_FIELD): u for u in self.units}
+        work = [(pid, name, params, UnitPolygon(by_id[pid].geometry, us=by_id[pid].us, area=by_id[pid].area,
+                                                tipo=by_id[pid].tipo, attributes=dict(by_id[pid].attributes),
+                                                sito=by_id[pid].sito))
+                for pid, name, params in items if pid in by_id]
+        if not work:
+            return
+        dem, folder = ch.dem_path, ch.data_dir / "proxies"
+
+        def job(p):
+            out = []
+            for k, (pid, name, params, unit) in enumerate(work):
+                p(k / len(work), tr("Proxy {0}", name))
+                made = proxies_for_units(dem, [unit], base=params["base"], thickness=params["thickness"])
+                if not made:
+                    out.append((pid, name, None, None))
+                    continue
+                path = save_proxy(made[0], folder, "ply")
+                out.append((pid, name, made[0], str(path.relative_to(ch.data_dir))))
+            return out
+
+        def done(results):
+            entries = ch.meta.get("proxies") or []
+            for pid, name, px, rel in results:
+                e = next((e for e in entries if e.get("ppg_id") == pid and e.get("name") == name), None)
+                if e is None:
+                    continue
+                if px is None:
+                    self.log_pane.warning(tr("Il proxy {0} non è stato ricostruito: il nuovo poligono non tocca "
+                                             "il DEM", name))
+                    continue
+                if e.get("file") and e["file"] != rel:
+                    (ch.data_dir / e["file"]).unlink(missing_ok=True)
+                e.update(name=px.name, us=px.us, area=px.area, tipo=px.tipo, file=rel, volume_m3=px.volume_m3,
+                         area_m2=px.area_m2, z_top=list(px.z_top), z_bottom=list(px.z_bottom))
+                self.log_pane.info(tr("Proxy {0} ricostruito sul nuovo poligono: {1} m3", px.name,
+                                      number(px.volume_m3, 3)))
+                if e.get("id_media") is not None:
+                    self.log_pane.info(tr("{0}: pubblicato in PyArchInit con la forma di prima, da ripubblicare",
+                                          px.name))
+            self.proxies_pane.set_proxies(entries)
+            if self.model_view.kind == "proxies":
+                self.model_view.set_chunk(ch, "proxies")
+            self.setWindowModified(True)
+
+        if not self.run_task("Proxy delle US", job, done, refresh=False, save=False):
+            self._qgis_waiting["proxies"] += items
+
+    def _recut_sections(self, sdicts: list) -> None:
+        """Cut again the sections whose trace moved (or was drawn) in QGIS, with the options of the
+        chunk; their drawings are written over (a new section gets new files)."""
+        opts = self._section_options()
+        source = opts.get("source", "model")
+        ch = self.chunk
+        if ch is None or ch.product_path("model" if source == "model" else "point_cloud") is None:
+            for s in sdicts:
+                self.log_pane.warning(tr("{0}: la traccia è cambiata ma il disegno non è stato rifatto (serve il "
+                                         "modello o la nuvola densa)", s["label"]))
+            return
+        from ..archaeo import sections
+
+        out_dir = self._sections_dir()
+        work = []
+        for s in sdicts:
+            stem = Path(s["svg"]).stem if s.get("svg") else None
+            if not stem:
+                n = 1
+                while (out_dir / f"sezione_{n}.svg").exists() or any(w[1] == f"sezione_{n}" for w in work):
+                    n += 1
+                stem = f"sezione_{n}"
+            work.append((s, stem, list(s["p1"]), list(s["p2"]), s["label"]))
+
+        def job(p):
+            out = []
+            for k, (s, stem, a, b, label) in enumerate(work):
+                p(k / len(work), label)
+                sec = sections.section(ch, a, b, label=label, source=source,
+                                       thickness=float(opts.get("thickness", 0.02)), classes=opts.get("classes"))
+                if not sec.polylines:
+                    out.append((s, None))
+                    continue
+                out_dir.mkdir(parents=True, exist_ok=True)
+                out.append((s, {"length": float(sec.length), "svg": str(sec.to_svg(out_dir / f"{stem}.svg")),
+                                "dxf": str(sec.to_dxf(out_dir / f"{stem}.dxf", world=False)),
+                                "dxf3d": str(sec.to_dxf(out_dir / f"{stem}_3d.dxf", world=True))}))
+            return out
+
+        def done(results):
+            for s, files in results:
+                if files is None:
+                    self.log_pane.warning(tr("{0}: la sezione è vuota lungo la nuova traccia", s["label"]))
+                    continue
+                s.update(files)
+                self.log_pane.info(tr("{0}: sezione ricalcolata sulla nuova traccia", s["label"]))
+            self._save_sections()
+            self.sections_pane.set_sections(self.sections)
+            self.ortho_view.remove_layer("Sezioni")
+            self._draw_sections()
+            self.setWindowModified(True)
+
+        if not self.run_task("Sezione", job, done, refresh=False, save=False):
+            self._qgis_waiting["sections"] += sdicts
 
     def open_in_qgis(self) -> None:
         """QGIS project with orthomosaic, DEM and the drawn layers, which QGIS reloads every
