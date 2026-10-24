@@ -7,14 +7,67 @@ scrive un progetto QGIS accanto al `.ppg` (`<nome>_qgis/<nome>_ppg.qgs`) e lo ap
 
 * raster: l'ortofoto, il DEM (ombreggiatura, all'inizio nascosta) e i valori del DEM;
 * vettori, nel gruppo *Disegni (aggiornati dal vivo)*: le tabelle di un GeoPackage,
-  `disegni_ppg.gpkg`: `unita` (poligoni delle unità, etichetta = `etichetta`), `sezioni` (tracce
-  di sezione), `curve` (curve di livello, etichetta = quota), `linee` (altre linee), `punti`
-  (quote, etichetta = `z`).
+  `disegni_ppg.gpkg`: `unita` (poligoni delle unità con le colonne di `pyunitastratigrafiche`,
+  etichetta = `etichetta`), `poligoni` (zone, pietre, patch, i poligoni dei plugin), `sezioni`
+  (tracce di sezione), `curve` (curve di livello, etichetta = quota), `linee` (altre linee), `punti`
+  (punti di misura e altri punti) e `quote` (quote con le colonne di `pyarchinit_quote`, etichetta
+  = `quota_q`).
 
 Il GeoPackage viene aggiornato 0,4 s dopo ogni modifica nell'interfaccia (disegno nuovo, layer
-tolto, attributo modificato), sul posto e con una transazione per ogni tabella cambiata, e il
-progetto chiede a QGIS di ridisegnare quei layer ogni secondo: QGIS rilegge un GeoPackage a ogni
-ridisegno, così quello che disegni qui compare in QGIS da solo, senza *Aggiorna*.
+tolto, attributo modificato), sul posto e in una transazione, e il progetto chiede a QGIS di
+ridisegnare quei layer ogni secondo: QGIS rilegge un GeoPackage a ogni ridisegno, così quello che
+disegni qui compare in QGIS da solo, senza *Aggiorna*.
+
+### Nei due sensi
+
+Con *QGIS > Collegamento dal vivo con QGIS (nei due sensi)* acceso (lo accende *Apri in QGIS*, e
+resta acceso per un progetto già collegato), anche ciò che si salva in QGIS torna qui. Modifica in
+QGIS i layer *Unita' stratigrafiche (ppg)*, *Quote (ppg)* o *Sezioni (ppg)* come un layer
+qualsiasi (*Attiva modifiche*, disegna, sposta i vertici, cambia gli attributi nella tabella
+attributi, elimina) e salva le modifiche: entro un secondo la finestra le ha.
+
+* **Unità**: il contorno e le colonne di `pyunitastratigrafiche` - `us_s`, `area_s`,
+  `unita_tipo_s`, `scavo_s`, `stratigraph_index_us`, `tipo_us_s`, `disegnatore`, `data`... - e le
+  altre colonne (anche quelle aggiunte in QGIS) come attributi dell'unità. Un'unità di più
+  poligoni è una riga per parte (`ppg_parte`). Un'unità disegnata in QGIS diventa un'unità qui, nel
+  layer *Unita' stratigrafiche*, con il sito del progetto quando `scavo_s` è vuoto. Un poligono
+  caricato da PyArchInit e cambiato in QGIS aspetta, come quando lo si cambia qui, *Salva
+  modifiche in PyArchInit*.
+* **Quote**: il punto e le colonne di `pyarchinit_quote` (`quota_q`, `us_q`...).
+* **Sezioni**: il nome (`etichetta`) e la traccia (il primo e l'ultimo vertice). Una sezione con
+  la traccia spostata, o disegnata in QGIS, viene tagliata di nuovo in background con le opzioni
+  del chunk, quando c'è il modello (o la nuvola densa); i disegni di una sezione eliminata in QGIS
+  restano in `sezioni/`.
+
+Ogni salvataggio fatto in QGIS è una voce di *Modifica > Annulla* (*Annulla: Da QGIS: US 6
+modificata*; più elementi: *Da QGIS: 3 modifiche*) e una riga del log per ogni elemento. I
+disegni vengono salvati nel chunk, i layer ridisegnati e il GeoPackage portato alla versione del
+programma di quelle righe (l'etichetta, l'area...). Quando cambia il contorno di un'unità che ha un
+proxy 3D, il proxy viene ricostruito da solo, con la base con cui era stato fatto (il piano, lo
+spessore o il DEM dopo l'asportazione, conservati con il proxy da questa versione; per un proxy di
+una versione precedente il valore che manca viene chiesto una volta); quando cambia solo il numero
+il proxy prende il nuovo nome. Annullando la voce, i proxy tornano con i poligoni.
+
+Come il programma distingue le modifiche di QGIS dalle sue: ogni elemento ha un'identità, `ppg_id`
+(un UUID conservato con l'unità, la quota o la sezione, usato anche dal pacchetto QField), e le
+righe vengono scritte una per una con quell'identità, così una riga tiene il suo `fid` finché
+il suo elemento esiste e una sessione di modifica di QGIS non perde mai le sue righe. Ogni riga ha
+anche `ppg_sig`, la firma di ciò che il programma vi ha scritto l'ultima volta: una riga con
+geometria o attributi che non corrispondono più è stata modificata da un altro programma. Le
+righe senza identità sono state disegnate lì (ne ricevono una subito); le righe sparite sono state
+eliminate lì. La finestra guarda una volta al secondo se un altro programma ha scritto nel file
+(`PRAGMA data_version` di una connessione tenuta aperta: le sue scritture non contano), e non
+scrive mai sopra una modifica che non ha ancora letto. Poiché le firme stanno nel file, le
+modifiche fatte in QGIS mentre il programma era chiuso tornano quando il progetto viene riaperto
+(tranne le eliminazioni fatte nel frattempo: il programma riscrive quegli elementi).
+
+* **Contorni non validi** (un poligono che si incrocia) vengono resi validi; uno senza più area, o
+  un elemento senza geometria, viene saltato, con una riga nel log.
+* **Sistema di riferimento**: un layer in un sistema di riferimento diverso da quello del
+  progetto viene rifiutato (una riga nel log), come un singolo elemento scritto in un altro.
+* **QGIS che tiene il file** mentre salva: la finestra legge un attimo dopo.
+* **Solo in un senso**: curve di livello, zone, pietre, patch, punti di misura e i disegni dei
+  plugin li calcola il programma; una modifica fatta loro in QGIS non viene ripresa.
 
 Fino alla 0.4.1 i disegni erano file GeoJSON impostati per *ricaricare i dati ogni secondo*, e i
 disegni nuovi comparivano solo dopo *Aggiorna*: QGIS tiene il GeoJSON in memoria, e QGIS 3.34-3.42
