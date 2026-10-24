@@ -16,7 +16,7 @@ on:
         default: "lazrs core opencv pycolmap open3d vtk pye57 sam"
       wheel_runs:
         description: "Runs of this workflow whose win-arm64-* artifacts the app job installs"
-        default: "39275909789 39979737728 39296584761 39405291562"
+        default: "39275909789 39979737728 39296584761 39405291562 40083058295 40076719405"
 
 jobs:
   lazrs:
