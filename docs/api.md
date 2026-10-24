@@ -169,14 +169,33 @@ region=None, reflectance=None)`: the known reflectance per band over the panel's
 region, the panel a MicaSense camera found by itself - `ReflectArea` and the `Albedo` read from the
 QR code, `panel_in_tags`, `panel_captures(chunk)` - a band without them taking the corners of
 another band through the registration) or from the irradiance of the sun sensor in the tags
-(`irradiance_of`: the DLS 2's horizontal irradiance, written in hundredths of W/m2/nm, or direct x
-sin(sun's elevation) + scattered with the firmware that computed it wrong). A MicaSense thermal band
-(Altum, Altum-PT) is centikelvin: degrees Celsius. The bands of a capture are brought onto the
+(`irradiance_of`, `dls_irradiance(tags)` with how it was had: the DLS 2's horizontal irradiance,
+written in hundredths of W/m2/nm, which the camera already corrected for the sensor's tilt; direct x
+sin(sun's elevation) + scattered with the firmware that computed it wrong; a DLS 1's reading
+corrected for the tilt with MicaSense's published model - `dls1_horizontal`: the angle between the
+sun and the sensor's normal from the DLS's `Yaw`, `Pitch`, `Roll`, the Fresnel transmission of the
+diffuser, scattered light a sixth of the direct one - with the sun's position from the tags or from
+GPS and time, `sun_position(lat, lon, when)`, NOAA's equations). With a panel and a sun sensor both
+(the default when the panel's capture and the flight have the DLS, `calibrate_panel(...,
+follow_dls=None)`), the panel gives the level of every band and the DLS follows the light: every
+capture's factor is the panel's times the DLS's irradiance at the panel over its irradiance in that
+capture, as MicaSense's and DJI's guides recommend. The method is kept in
+`meta["multispectral"]["radiometry"]` (`radiometry_method(chunk)`: `panel+dls`, `panel`, `dls`,
+`normalised`) and shown in the pane and by `ppg multispectral ... panel` (`--no-dls` for the panel
+alone). A MicaSense thermal band (Altum, Altum-PT) is centikelvin: degrees Celsius. The bands of a capture are brought onto the
 reference band with a homography found on the images (`register_bands`: the shift by phase
 correlation on the gradient magnitudes, an affine at a reduced size, the homography at full size;
-with `cameras=band_cameras(tags)` - MicaSense's focal length, principal point and `RigRelatives`
-per band - it starts from the cameras' geometry, which the panchromatic band, finer and with its own
-lens, needs, and a band ECC cannot match, the thermal one, keeps that geometry), in a chain by
+with `cameras=band_cameras(tags)` - MicaSense's focal length, principal point, `RigRelatives` and
+lens distortion `PerspectiveDistortion` per band, `lens_of(tags)` - every band is first undistorted
+with its own lens and turned by its rotation in the rig into the reference's undistorted frame, and
+the registration kept is the band's lens, the matrix between the two bands' rays and the reference's
+lens: from the reference's pixels, distorted as shot, to the band's, `map_points(h, pts)`,
+`warp_band(img, h, shape)`; the thermal band, whose edges are those of the others but not their
+contrast, is not matched by ECC but refined from the cameras' geometry by the agreement of its
+gradient orientations - angles doubled, so a warm bright road and a cool tree bright in the NIR
+agree - with the registered bands, coarse to fine, an affine within 3 thermal pixels and 3 % of scale,
+kept only when the agreement grows; captures at arm's length, where the rig's parallax is no small
+correction, keep the cameras' geometry), in a chain by
 wavelength: each band is matched
 against the registered bands nearest to it in wavelength (a leaf is bright and textured in the NIR,
 dark and smooth in the red: NIR on red seldom converges, NIR on red-edge always does; on a P4
@@ -197,12 +216,21 @@ use). For the 12-bit cameras MicaSense's library reads the files with OpenCV, wh
 bits while the black level stays in 12: its radiance comes out about 16 times too high (the panel's
 irradiance at 17 W/m2/nm, the DLS says 1.2); read with their real digital numbers its radiance
 equals ours. Registration on the flight captures: correlation 0.8-0.99 between neighbouring bands,
-residual shifts in 3 x 3 tiles of the frame 0.05-0.5 px (RedEdge-MX, Dual, Altum), up to 1-2 px for
-the RedEdge-P (from 4-8 px before starting from the cameras' geometry). Not verified: the thermal
-band's placement (from the cameras' geometry, without the lens distortion: about 1-2 thermal pixels
-by eye on the Altum sample), the reflectance from the DLS against ground truth (the panel seen by the
-DLS reads 0.3-1.15 instead of 0.49-0.53 on these samples: a panel is better), the DLS 1 (taken as
-written, without the correction for the sensor's tilt), a whole flight through the orthomosaic. `build_reflectance(chunk, bands=None,
+residual shifts in 3 x 3 tiles of the frame 0.05-0.45 px (RedEdge-MX, Dual, Altum), 0.1-0.25 px for
+the Altum-PT and about 0.5 px for the RedEdge-P (0.5-1.1 px without the lens model, 4-8 px before
+starting from the cameras' geometry). The thermal band, against the red one in 4 x 4 tiles by the
+agreement of the edges: median 1.8 thermal pixels on the Altum and 1.7 on the Altum-PT with the
+rig's homography alone, 0.7 and 1.3 undistorted (as MicaSense's library places it: 0.7 and 1.2), 0.24
+and 0.26 refined by the edges (against green 0.24 and 0.29, NIR 0.29 and 0.46). The sun sensor: the
+panel's reflectance from the DLS alone is 0.64-2.2 times its albedo on these samples (0.31-1.16 for
+0.49-0.53), and MicaSense's library gives the same numbers: the camera's horizontal irradiance is
+already corrected for the tilt, and its error changes from band to band within one capture (Altum-PT:
+0.64 times in the blue, 1.17 in the panchromatic band), which no correction of the angle can explain;
+MicaSense's DLS 1 model on the same readings gives 0.65-1.6 times. Between the panel's capture and the
+flight the DLS's change of light is the same in every band within 2 % (1.04 to 1.27 times): it
+follows the light well, its level is not to be trusted - hence the panel with the DLS. The sun's
+position agrees with the DLS 2's within 0.04 degrees. Not verified: the reflectance against ground
+truth, a DLS 1 on its own files, a whole flight through the orthomosaic. `build_reflectance(chunk, bands=None,
 resolution=None, balance=True)` runs the orthophoto engine on the reference band's geometry with
 the registered bands as float values: `<data>/multispectral/reflectance.tif`, a float32 band per
 spectral band, NaN where nothing. `balance` first brings the photos to the same reflectance where

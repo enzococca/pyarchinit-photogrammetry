@@ -173,16 +173,36 @@ viene da un pannello di calibrazione ripreso nel volo (`calibrate_panel(chunk, c
 reflectance=None)`: la riflettanza nota per banda sulla radianza del pannello; senza riquadro, il
 pannello che una camera MicaSense ha trovato da sé - `ReflectArea` e l'`Albedo` letto dal codice QR,
 `panel_in_tags`, `panel_captures(chunk)` - e una banda che non li ha prende gli angoli di un'altra
-banda attraverso la registrazione) o dall'irradianza del sensore di luce nei tag (`irradiance_of`:
-l'irradianza orizzontale del DLS 2, scritta in centesimi di W/m2/nm, oppure diretta x sin(elevazione
-del sole) + diffusa con il firmware che la calcolava male). Una banda termica MicaSense (Altum,
+banda attraverso la registrazione) o dall'irradianza del sensore di luce nei tag (`irradiance_of`,
+`dls_irradiance(tags)` con il modo in cui è stata ricavata: l'irradianza orizzontale del DLS 2,
+scritta in centesimi di W/m2/nm, che la camera ha già corretto per l'inclinazione del sensore; diretta
+x sin(elevazione del sole) + diffusa con il firmware che la calcolava male; la lettura di un DLS 1
+corretta per l'inclinazione con il modello pubblicato da MicaSense - `dls1_horizontal`: l'angolo fra
+il sole e la normale del sensore da `Yaw`, `Pitch`, `Roll` del DLS, la trasmissione di Fresnel del
+diffusore, luce diffusa un sesto della diretta - con la posizione del sole dai tag o da GPS e ora,
+`sun_position(lat, lon, quando)`, equazioni del NOAA). Con pannello e sensore di luce insieme (il
+predefinito quando la ripresa del pannello e il volo hanno il DLS, `calibrate_panel(...,
+follow_dls=None)`) il pannello dà il livello di ogni banda e il DLS segue la luce: il fattore di ogni
+scatto è quello del pannello per l'irradianza del DLS al pannello diviso quella dello scatto, come
+consigliano le guide di MicaSense e di DJI. Il metodo resta in `meta["multispectral"]["radiometry"]`
+(`radiometry_method(chunk)`: `panel+dls`, `panel`, `dls`, `normalised`) e si vede nel pannello e in
+`ppg multispectral ... panel` (`--no-dls` per il solo pannello). Una banda termica MicaSense (Altum,
 Altum-PT) è in centikelvin: gradi Celsius. Le bande di uno scatto si portano sulla banda di
 riferimento con un'omografia trovata sulle immagini (`register_bands`: lo spostamento per
 correlazione di fase sulle magnitudini del gradiente, un'affine a dimensione ridotta, l'omografia a
-dimensione piena; con `cameras=band_cameras(tags)` - focale, punto principale e `RigRelatives` di
-MicaSense per banda - parte dalla geometria delle camere, che serve alla banda pancromatica, più
-fine e con un obiettivo suo, e una banda che ECC non riesce ad abbinare, la termica, tiene quella
-geometria), a catena per lunghezza d'onda: ogni banda viene abbinata
+dimensione piena; con `cameras=band_cameras(tags)` - focale, punto principale, `RigRelatives` e
+distorsione dell'obiettivo `PerspectiveDistortion` di MicaSense per banda, `lens_of(tags)` - ogni
+banda viene prima raddrizzata con il suo obiettivo e ruotata secondo la sua posizione nel rig nel
+fotogramma senza distorsione della banda di riferimento, e la registrazione che resta è l'obiettivo
+della banda, la matrice fra i raggi delle due bande e l'obiettivo della banda di riferimento: dai
+pixel della banda di riferimento, distorti come scattati, a quelli della banda, `map_points(h, pts)`,
+`warp_band(img, h, shape)`; la banda termica, che ha gli stessi bordi delle altre ma non lo stesso
+contrasto, non passa da ECC ma viene rifinita a partire dalla geometria delle camere sull'accordo
+delle orientazioni del gradiente - angoli raddoppiati, così una strada calda e chiara e un albero
+fresco e chiaro nel NIR vanno d'accordo - con le bande registrate, dal grossolano al fine, un'affine
+entro 3 pixel termici e il 3 % di scala, tenuta solo se l'accordo cresce; gli scatti a distanza di
+braccio, dove la parallasse del rig non è una piccola correzione, tengono la geometria delle camere), a
+catena per lunghezza d'onda: ogni banda viene abbinata
 alle bande già registrate più vicine in lunghezza d'onda (una foglia è chiara e piena di texture nel
 NIR, scura e liscia nel rosso: NIR sul rosso converge di rado, NIR sul red-edge sempre; su un P4
 Multispectral sulla macchia le correlazioni passano da 0,1-0,3 a 0,9). Il modello radiometrico DJI
@@ -203,12 +223,21 @@ libreria di MicaSense legge i file con OpenCV, che li porta a 16 bit mentre il l
 a 12: la sua radianza esce circa 16 volte troppo alta (l'irradianza del pannello a 17 W/m2/nm, il
 DLS dice 1,2); letta con i numeri digitali veri coincide con la nostra. Registrazione sugli scatti
 in volo: correlazione 0,8-0,99 fra bande vicine, spostamenti residui in 3 x 3 tasselli del
-fotogramma 0,05-0,5 px (RedEdge-MX, Dual, Altum), fino a 1-2 px per la RedEdge-P (4-8 px prima di
-partire dalla geometria delle camere). Non verificati: la posizione della banda termica (dalla
-geometria delle camere, senza la distorsione dell'obiettivo: circa 1-2 pixel termici a occhio
-sull'esempio dell'Altum), la riflettanza dal DLS contro una misura a terra (il pannello visto dal DLS
-vale 0,3-1,15 invece di 0,49-0,53 su questi esempi: meglio un pannello), il DLS 1 (preso come
-scritto, senza la correzione per l'inclinazione del sensore), un volo intero fino all'ortofoto. `build_reflectance(chunk, bands=None, resolution=None, balance=True)`
+fotogramma 0,05-0,45 px (RedEdge-MX, Dual, Altum), 0,1-0,25 px per l'Altum-PT e circa 0,5 px per la
+RedEdge-P (0,5-1,1 px senza il modello dell'obiettivo, 4-8 px prima di partire dalla geometria delle
+camere). La banda termica, contro la rossa in 4 x 4 tasselli sull'accordo dei bordi: mediana 1,8 pixel
+termici sull'Altum e 1,7 sull'Altum-PT con la sola omografia del rig, 0,7 e 1,3 senza distorsione
+(come la mette la libreria di MicaSense: 0,7 e 1,2), 0,24 e 0,26 rifinita sui bordi (contro il verde
+0,24 e 0,29, il NIR 0,29 e 0,46). Il sensore di luce: la riflettanza del pannello dal solo DLS vale
+0,64-2,2 volte l'albedo su questi esempi (0,31-1,16 invece di 0,49-0,53), e la libreria di MicaSense
+dà gli stessi numeri: l'irradianza orizzontale della camera è già corretta per l'inclinazione, e il
+suo errore cambia da banda a banda nello stesso scatto (Altum-PT: 0,64 volte nel blu, 1,17 nella
+pancromatica), cosa che nessuna correzione dell'angolo spiega; il modello del DLS 1 di MicaSense sulle
+stesse letture dà 0,65-1,6 volte. Fra la ripresa del pannello e il volo la variazione di luce del DLS
+è la stessa in ogni banda entro il 2 % (da 1,04 a 1,27 volte): segue bene la luce, il suo livello non
+è affidabile - da qui il pannello con il DLS. La posizione del sole coincide con quella del DLS 2 entro
+0,04 gradi. Non verificati: la riflettanza contro una misura a terra, un DLS 1 sui suoi file, un volo
+intero fino all'ortofoto. `build_reflectance(chunk, bands=None, resolution=None, balance=True)`
 fa girare il motore dell'ortofoto sulla geometria della banda di riferimento con le bande
 registrate come valori a virgola mobile: `<dati>/multispectral/reflectance.tif`, una banda float32
 per banda spettrale, NaN dove non c'è niente. `balance` porta prima le foto alla stessa riflettanza

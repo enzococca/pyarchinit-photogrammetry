@@ -303,7 +303,9 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   *Multispettrale*: the same steps as the *Multispettrale* pane of the project dock (see below); *Aggiungi riprese multispettrali...* (a folder with one file per band of every
   capture: the reference band is aligned, the others ride on it), *Pannello di calibrazione...* (the
   capture of the panel, its box and its reflectance; with a MicaSense camera the panel it found and
-  the reflectances of its QR code, from the tags), *Ortofoto di riflettanza...* (a float band per
+  the reflectances of its QR code, from the tags; *Il sensore di luce (DLS) segue la luce durante il
+  volo*, on by default when the captures have the DLS: the panel gives the level, the DLS the changes
+  of light; the pane's state says which method is in use), *Ortofoto di riflettanza...* (a float band per
   band on the DEM), *Indice e zonizzazione...* (NDVI and the other indices or a formula, the zones as
   polygons in a GeoPackage: see the API page, *Multispectral cameras*);
   *Immagini satellitari*: *Ortorettifica una scena...* (a scene with its RPCs on the DEM of the survey, kept as
