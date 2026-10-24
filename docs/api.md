@@ -1148,7 +1148,8 @@ it. The elevations are left out (a frame of their own), and so are images with n
 `if(condition, a, b)`; the functions `abs sqrt exp ln log log10 log2 sin cos tan asin acos atan atan2
 degrees radians hypot floor ceil round min max mean clip where isnan coalesce` and the constants `pi e
 nan`. A cell where an input has no data (its nodata, NaN, the transparent part of an orthomosaic) has
-no data in the result, unless `isnan` or `coalesce` fill it; a division by zero gives no data. `&`, `|`
+no data in the result, unless `isnan` or `coalesce` fill it; a division by zero or an overflow gives no
+data, also for what follows in the formula (`coalesce(a / b, 0)` fills it). `&`, `|`
 and `~` are refused (they bind tighter than the comparisons in Python's grammar: `AND`, `OR`, `NOT`
 instead). The formula is read with `ast` and only what is listed here is computed: no attribute, no
 call of anything else, never run as Python.

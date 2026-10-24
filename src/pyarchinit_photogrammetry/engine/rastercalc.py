@@ -282,8 +282,7 @@ class Formula:
     def evaluate(self, values: dict) -> np.ndarray:
         """The result for ``values``: ``{(raster name, band): float array}``, no data as NaN."""
         with np.errstate(all="ignore"):
-            out = np.asarray(_eval(self.tree.body, self.names, values), np.float64)
-        return np.where(np.isfinite(out), out, np.nan)
+            return _eval(self.tree.body, self.names, values)
 
 
 def _prepare(text: str) -> tuple[str, list[tuple[str, str]]]:
@@ -433,11 +432,15 @@ def parse(text: str, catalog) -> Formula:
     return Formula(text, tree, inputs, names)
 
 
-def _truth(a):
-    return np.where(np.isnan(a), np.nan, (a != 0).astype(np.float64))
+def _eval(node, names, values) -> np.ndarray:
+    """The value of ``node``, its infinities as no data: a division by zero or an overflow inside a
+    formula is no data for what follows (a comparison, ``coalesce``, ``isnan``), not only in the
+    result."""
+    v = np.asarray(_value(node, names, values), np.float64)
+    return np.where(np.isfinite(v), v, np.nan)
 
 
-def _eval(node, names, values):
+def _value(node, names, values):
     if isinstance(node, ast.Constant):
         return float(node.value)
     if isinstance(node, ast.Name):
@@ -474,8 +477,8 @@ def _eval(node, names, values):
 
 
 def _logic(op, items):
-    items = [np.asarray(v, np.float64) for v in items]
-    bad = np.zeros(np.broadcast(*items).shape, bool)
+    items = np.broadcast_arrays(*[np.asarray(v, np.float64) for v in items])  # a number with a raster too
+    bad = np.zeros(items[0].shape, bool)
     for v in items:
         bad = bad | np.isnan(v)
     truth = [v != 0 for v in items]
@@ -534,13 +537,12 @@ def _block_values(src, band: int, integer: bool, crs, transform, window, shape, 
         return src.read(band, window=window, masked=True).astype(np.float64).filled(np.nan)
     dst_transform = window_transform(window, transform)
     h, w = shape
-    left, top = dst_transform.c, dst_transform.f
-    right, bottom = left + dst_transform.a * w, top + dst_transform.e * h
+    xs, ys = zip(*(dst_transform @ corner for corner in ((0, 0), (w, 0), (0, h), (w, h))))  # a rotated grid too
     src_crs = src.crs or crs or STAND_IN_CRS
     dst_crs = crs or src.crs or STAND_IN_CRS
     if src.crs is None and crs is not None or src.crs is not None and crs is None:
         src_crs = dst_crs  # one of them in no system: the same frame as the other (the chunk's)
-    bounds = (min(left, right), min(top, bottom), max(left, right), max(top, bottom))
+    bounds = (min(xs), min(ys), max(xs), max(ys))
     if src_crs != dst_crs:
         bounds = transform_bounds(dst_crs, src_crs, *bounds, densify_pts=21)
     out = np.full(shape, np.nan)

@@ -1183,8 +1183,9 @@ riferimento loro) e le immagini senza posizione.
 `if(condizione, a, b)`; le funzioni `abs sqrt exp ln log log10 log2 sin cos tan asin acos atan atan2
 degrees radians hypot floor ceil round min max mean clip where isnan coalesce` e le costanti `pi e
 nan`. Una cella dove un raster non ha dati (il suo nodata, NaN, la parte trasparente di un'ortofoto)
-non ha dati nel risultato, a meno che `isnan` o `coalesce` la riempiano; una divisione per zero non dà
-dati. `&`, `|` e `~` sono rifiutati (nella grammatica di Python legano più dei confronti: `AND`, `OR`,
+non ha dati nel risultato, a meno che `isnan` o `coalesce` la riempiano; una divisione per zero o un
+numero troppo grande non dà dati, anche per il resto della formula (`coalesce(a / b, 0)` la riempie).
+`&`, `|` e `~` sono rifiutati (nella grammatica di Python legano più dei confronti: `AND`, `OR`,
 `NOT` al loro posto). La formula è letta con `ast` e si calcola solo quello che è elencato qui: nessun
 attributo, nessuna chiamata d'altro, mai eseguita come Python.
 
