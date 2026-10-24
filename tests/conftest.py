@@ -182,6 +182,55 @@ def processed(scene_dir):
     return doc, ch, report
 
 
+TRENCH_ORIGIN = (2480000.0, 4500000.0)  # metre coordinates in Gauss-Boaga: float32 would round them
+
+
+@pytest.fixture
+def trench(tmp_path, monkeypatch):
+    """A window on a small trench in Gauss-Boaga (``TRENCH_ORIGIN``): a DEM sloping gently from 100 m and an
+    orthomosaic, 6 x 6 m, no drawings. Yields ``(window, app, main_window module)``."""
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("PPG_RENDERER", "software")
+    import numpy as np
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.engine.dem import write_geotiff
+
+    app = QApplication.instance() or QApplication([])
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    doc = ppg.Document()
+    ch = doc.add_chunk("Saggio 1")
+    doc.save(tmp_path / "scavo.ppg")
+    ch.crs = "EPSG:3004"
+    ch.data_dir.mkdir(parents=True, exist_ok=True)
+    res, n = 0.02, 300
+    x0, y0 = TRENCH_ORIGIN
+    yy, xx = np.mgrid[0:n, 0:n]
+    z = (100.0 + 0.01 * xx * res - 0.02 * yy * res).astype(np.float32)
+    dem = write_geotiff(ch.data_dir / "dem.tif", z, (x0, y0 + n * res), res, "EPSG:3004", nodata=-9999.0)
+    rgb = np.stack([(xx * 0.8) % 255, (yy * 0.8) % 255, np.full((n, n), 120)]).astype(np.uint8)
+    ortho = write_geotiff(ch.data_dir / "orthomosaic.tif", rgb, (x0, y0 + n * res), res, "EPSG:3004")
+    ch._set_product("dem", dem)
+    ch._set_product("orthomosaic", ortho)
+    doc.meta["sito"] = "Saggio"
+    doc.save()
+    w = mw.MainWindow(doc, autoconnect=False, check_updates=False)
+    w.runner.show_dialog = False
+    w.show()
+    app.processEvents()
+    yield w, app, mw
+    w.setWindowModified(False)
+    w.close()
+
+
 @pytest.fixture
 def rng():
     return np.random.default_rng(0)

@@ -226,6 +226,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.stack)
         self.ortho_view.mouse_world.connect(self._show_coords)
         self.ortho_view.polygon_finished.connect(self._unit_drawn)
+        self.ortho_view.vertices_edited.connect(self._unit_vertices_edited)
+        self.ortho_view.reshape_finished.connect(self._unit_reshaped)
         self.ortho_view.crop_finished.connect(self._crop_drawn)
         self.ortho_view.crop_requested.connect(self.crop_with_selection)
         self.ortho_view.patch_finished.connect(self._patch_drawn)
@@ -617,6 +619,8 @@ class MainWindow(QMainWindow):
         self.draw_actions: dict[str, QAction] = {}
         for mode, label, ic in (("pan", "Sposta / interroga", "pan"), ("select", "Seleziona", "select"),
                                 ("polygon", "Disegna unita' stratigrafica", "polygon"),
+                                ("vertices", "Modifica i vertici delle unita'", "vertices"),
+                                ("reshape", "Rimodella un'unita' con una linea (come in QGIS)", "reshape"),
                                 ("line", "Traccia sezione", "line"), ("measure", "Misura distanza", "measure"),
                                 ("area", "Misura area e superficie 3D", "area"),
                                 ("quota", "Quota puntuale (pyarchinit_quote)", "point"),
@@ -975,6 +979,7 @@ class MainWindow(QMainWindow):
         db.addWidget(lab)
         # short texts in the bar (menus keep the full names, tooltips show them)
         for a, short in ((self.draw_actions["pan"], "Sposta"), (self.draw_actions["polygon"], "Disegna US"),
+                         (self.draw_actions["vertices"], "Vertici"), (self.draw_actions["reshape"], "Rimodella"),
                          (self.draw_actions["line"], "Sezione"), (self.draw_actions["measure"], "Misura"),
                          (self.draw_actions["area"], "Area"),
                          (self.draw_actions["quota"], "Quota"), (self.draw_actions["marker"], "Marker"),
@@ -988,7 +993,7 @@ class MainWindow(QMainWindow):
             if a.toolTip() == a.text().replace("...", "").replace("&", ""):
                 a.setToolTip(a.text().replace("...", ""))
             a.setIconText(tr(short))
-        for mode in ("pan", "select", "polygon"):
+        for mode in ("pan", "select", "polygon", "vertices", "reshape"):
             db.addAction(self.draw_actions[mode])
         db.addAction(self.a_freehand)
         db.addAction(self.a_snap)
@@ -6130,6 +6135,12 @@ class MainWindow(QMainWindow):
                  "polygon": ("Tieni premuto e traccia l'unita' a mano libera, rilascia per chiudere; tasto destro per annullare"
                              if self.ortho_view.freehand else
                              "Clic per i vertici, doppio clic per chiudere, tasto destro per annullare"),
+                 "vertices": "Clic su un'unita': trascina i vertici, trascina il punto a meta' di un lato per un vertice "
+                             "nuovo, Alt+clic o tasto destro su un vertice per toglierlo; Invio o un'altra unita' "
+                             "tengono il contorno, Esc lo rimette com'era",
+                 "reshape": "Clic per i vertici di una linea che attraversa due volte il contorno di un'unita', doppio "
+                            "clic o Invio: la parte del contorno tra i due attraversamenti diventa la linea (fuori "
+                            "allarga, dentro taglia via la parte piu' piccola), come Rimodella elementi in QGIS",
                  "line": "Due clic: inizio e fine della sezione", "measure": "Due clic per misurare",
                  "area": "Trascina un riquadro, oppure clic per i vertici e doppio clic per chiudere: area in pianta "
                          "e superficie 3D (dal DEM e dal modello), pendenza media, quote",
@@ -6296,6 +6307,65 @@ class MainWindow(QMainWindow):
         if r != 1:
             return
         self._add_unit(self._make_unit(Polygon(xy).buffer(0), v))
+
+    def _unit_outline_changed(self, u, text: str) -> None:
+        """The polygon of ``u`` changed here (vertices moved, a reshape): drawn again, one entry of
+        Modifica > Annulla, the change waiting for PyArchInit for a polygon of PyArchInit, a line of
+        the log, and its 3D proxy built again."""
+        self._forget_pa_unit(u, deleted=False)
+        self._update_pa_save_button()
+        self._redraw_overlays()
+        self.setWindowModified(True)
+        if self.history is not None:
+            self.history.record(text)
+        self.log_pane.info(tr("{0}: area {1} m2", text, number(u.geometry.area, 3)))
+        self._follow_proxies([(u, (u.tipo, u.us, u.area), True)])
+
+    def _unit_vertices_edited(self, layer: str, attrs: dict, xy) -> None:
+        """The outline of a unit part moved with *Modifica i vertici* (its holes kept when still inside)."""
+        from shapely.geometry import MultiPolygon, Polygon
+
+        ref = self._unit_part(layer, attrs)
+        if ref is None:
+            return
+        u = self.units[ref[0]]
+        parts = list(getattr(u.geometry, "geoms", [u.geometry]))
+        outline = Polygon(np.asarray(xy, float)[:, :2])
+        new = Polygon(outline.exterior.coords, [h.coords for h in parts[ref[1]].interiors
+                                                if outline.contains(Polygon(h))])
+        if not new.is_valid or new.area <= 0:
+            self._redraw_overlays()  # the outline as it was
+            self.statusBar().showMessage(tr("Il contorno di {0} si incrocia: modifica non applicata",
+                                            self._unit_name(u)), 10000)
+            return
+        parts[ref[1]] = new
+        u.geometry = parts[0] if len(parts) == 1 else MultiPolygon(parts)
+        self._unit_outline_changed(u, tr("Vertici di {0}", self._unit_name(u)))
+
+    def _unit_reshaped(self, xy) -> None:
+        """*Rimodella*: the topmost visible unit whose outline the line crosses twice takes it
+        (:func:`archaeo.stratigraphy.reshape_polygon`)."""
+        from shapely.geometry import LineString, MultiPolygon
+
+        from ..archaeo.stratigraphy import reshape_polygon
+
+        line = LineString(np.asarray(xy, float)[:, :2])
+        layers = self.ortho_view.layers
+        for u in reversed(self.units):  # the units drawn last lie on top
+            lay = layers.get((u.attributes or {}).get("_layer"))
+            if lay is None or not lay["visible"]:
+                continue
+            parts = list(getattr(u.geometry, "geoms", [u.geometry]))
+            for k, part in enumerate(parts):
+                new = reshape_polygon(part, line)
+                if new is None or new.equals(part):
+                    continue
+                parts[k] = new
+                u.geometry = parts[0] if len(parts) == 1 else MultiPolygon(parts)
+                self._unit_outline_changed(u, tr("Rimodellata {0}", self._unit_name(u)))
+                return
+        self.statusBar().showMessage(tr("La linea deve attraversare due volte il contorno di un'unita' visibile"),
+                                     10000)
 
     def _draw_unit(self, u, i: int, layer: str | None = None) -> None:
         if u.attributes is None:
@@ -7497,7 +7567,7 @@ class MainWindow(QMainWindow):
         waits: it stays in the GeoPackage and comes at the next look."""
         if not self.a_qgis_live.isChecked() or self.chunk is None or self.runner.busy:
             return
-        if QApplication.activeModalWidget() is not None:
+        if QApplication.activeModalWidget() is not None or self.ortho_view.editing_vertices():
             return
         self._run_qgis_waiting()
         if self.runner.busy:

@@ -86,6 +86,72 @@ class UnitPolygon:
                    attributes=dict(d.get("attributes") or {}), sito=d.get("sito"))
 
 
+def _polygons(geom) -> list:
+    """The polygons with an area in ``geom`` (a polygon, a multipolygon, a collection)."""
+    from shapely.geometry import Polygon
+
+    if isinstance(geom, Polygon):
+        return [geom] if not geom.is_empty and geom.area > 0 else []
+    return [p for part in getattr(geom, "geoms", []) for p in _polygons(part)]
+
+
+def reshape_polygon(polygon, line):
+    """QGIS's *Reshape Features* on one polygon: ``line`` (a shapely LineString or its vertices)
+    crosses the outline at least twice; the outline between the first and the last crossing is
+    replaced by the line between them, on the side that keeps the larger polygon - a line that goes
+    out and comes back adds what it encloses, one that cuts through takes away the smaller part.
+    The holes inside the new outline stay. None when the line does not cross the outline twice."""
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import substring
+    from shapely.validation import make_valid
+
+    line = line if isinstance(line, LineString) else LineString(line)
+    ring = LineString(polygon.exterior.coords)
+    crossing = ring.intersection(line)
+    points = []
+    for g in getattr(crossing, "geoms", [crossing]):
+        if g.is_empty:
+            continue
+        if g.geom_type == "Point":
+            points.append(g)
+        elif g.geom_type == "LineString":  # the line runs along the outline for a while: its ends
+            coords = list(g.coords)
+            points += [Point(coords[0]), Point(coords[-1])]
+    if len(points) < 2:
+        return None
+    points.sort(key=line.project)
+    t0, t1 = line.project(points[0]), line.project(points[-1])
+    a, b = ring.project(points[0]), ring.project(points[-1])
+    if t1 - t0 <= 0 or a == b:
+        return None
+    path = list(substring(line, t0, t1).coords)
+    total = ring.length
+
+    def arc(start, end):  # along the outline from start to end, round the closing vertex when needed
+        if start <= end:
+            part = substring(ring, start, end)
+            return list(part.coords) if part.geom_type == "LineString" else []
+        return list(substring(ring, start, total).coords) + list(substring(ring, 0.0, end).coords)[1:]
+
+    best = None
+    for outline in (path + arc(b, a)[1:], arc(a, b) + path[::-1][1:]):
+        if len(outline) < 4:
+            continue
+        shape = Polygon(outline)
+        if not shape.is_valid:
+            shape = make_valid(shape)
+        for p in _polygons(shape):
+            if best is None or p.area > best.area:
+                best = p
+    if best is None:
+        return None
+    for hole in polygon.interiors:
+        h = Polygon(hole)
+        if best.contains(h):
+            best = best.difference(h)
+    return best
+
+
 def stratigraphic_edges(declarations) -> list[tuple[str, str, str, str | None]]:
     """The relations declared in the US forms as edges, each fact once. ``declarations``:
     ``(us, [[relation, other us, ...], ...])`` (the ``rapporti`` of each form); returns ``(from,
