@@ -3,7 +3,9 @@ US proposed for each - number, kind, stratigraphic definition, what the survey m
 stratigraphic relations their contacts suggest, each with its reason (:mod:`archaeo.us_proposal`).
 Numbers, kinds and definitions can be corrected in the table; the ticked units and relations go
 into the project and, when asked, into the US forms of PyArchInit (from which PyArchInit and
-EMStudio build the Extended Matrix)."""
+EMStudio build the Extended Matrix). Units drawn with their number but without their form are
+proposed with it; the units that have their form (``context``) are not listed among the units,
+they take part in the relations only."""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
@@ -75,7 +77,8 @@ class UsProposalDialog(QDialog):
                           "contatti: chi e' piu' alta lungo il contatto copre l'altra, un'unita' chiusa in un'altra e "
                           "non piu' alta e' il riempimento di un taglio (proposto anch'esso), gli strati si "
                           "appoggiano ai muri. Numero, tipo e definizione si correggono nella tabella; doppio clic "
-                          "per vedere l'unita' sull'ortofoto."))
+                          "per vedere l'unita' sull'ortofoto. Le unita' disegnate con il loro numero ma senza scheda "
+                          "in PyArchInit lo tengono; quelle che la scheda ce l'hanno contano solo per i rapporti."))
         intro.setWordWrap(True)
         lay.addWidget(intro)
         self.tabs = QTabWidget()
@@ -113,6 +116,8 @@ class UsProposalDialog(QDialog):
         self.units.blockSignals(True)
         self.units.setRowCount(0)
         for it in self.proposal["units"]:
+            if it.get("context"):  # its form is there: only its relations
+                continue
             r = self.units.rowCount()
             self.units.insertRow(r)
             m, u, f = it["measures"], it["unit"], it["fields"]
@@ -144,10 +149,13 @@ class UsProposalDialog(QDialog):
             self.relations.setItem(r, 2, _item(rel["relation"]))
             self.relations.setItem(r, 3, _item(names[rel["lower"]]))
             self.relations.setItem(r, 4, _item(reason(rel, names)))
-        n_units = sum(1 for it in self.proposal["units"] if it["kind"] == "unit")
-        n_cuts = len(self.proposal["units"]) - n_units
-        self.status.setText(tr("{0} unita', {1} tagli proposti, {2} rapporti", n_units, n_cuts,
-                               len(self.proposal["relations"])))
+        n_units = sum(1 for it in self.proposal["units"] if it["kind"] == "unit" and not it.get("context"))
+        n_context = sum(1 for it in self.proposal["units"] if it.get("context"))
+        n_cuts = len(self.proposal["units"]) - n_units - n_context
+        text = tr("{0} unita', {1} tagli proposti, {2} rapporti", n_units, n_cuts, len(self.proposal["relations"]))
+        if n_context:
+            text += tr("; {0} US con la scheda gia' in PyArchInit, per i rapporti", n_context)
+        self.status.setText(text)
 
     def _edited(self, item) -> None:
         field = EDITABLE.get(item.column())

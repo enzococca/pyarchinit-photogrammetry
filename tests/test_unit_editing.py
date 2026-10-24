@@ -1,5 +1,6 @@
 """The units drawn edited in the 2D view - their vertices moved, added and removed, their outline
-reshaped with a line as in QGIS - with their 3D proxy built again by itself."""
+reshaped with a line as in QGIS - with their 3D proxy built again by itself; and the units drawn with a
+number but without their US form brought into the Extended Matrix through PyArchInit."""
 from __future__ import annotations
 
 import numpy as np
@@ -154,3 +155,47 @@ def test_reshape_in_the_window(trench):
     w._unit_reshaped(np.array([[X0 + 4, Y0 + 4], [X0 + 5, Y0 + 5]]))  # far from every unit
     assert u.geometry.equals(before) and "attraversare due volte" in w.statusBar().currentMessage()
 
+
+# ---------------------------------------------------------------- into the Extended Matrix
+def test_a_unit_drawn_with_its_number_reaches_the_matrix_through_pyarchinit(pa_db, trench, monkeypatch):
+    """US 2 has its form in PyArchInit; US 7, drawn inside it with its number, has none: the window
+    says so, Proponi US e rapporti creates its form (with its node_uuid), the cut it fills, and the
+    relations with US 2 too, whose form is otherwise left as it was."""
+    from pyarchinit_photogrammetry.pyarchinit import PyArchInit
+    from pyarchinit_photogrammetry.pyarchinit.bridge import parse_relationships
+
+    w, app, mw = trench
+    w.pa = PyArchInit.connect()
+    w._add_unit(UnitPolygon(box(X0 + 1, Y0 + 1, X0 + 4, Y0 + 4), us="2", area="1", sito="Saggio"))
+    assert not any("non è ancora in PyArchInit" in t for t in _log(w))
+    w._add_unit(UnitPolygon(box(X0 + 2, Y0 + 2, X0 + 3, Y0 + 3), us="7", area="1", sito="Saggio"))
+    assert any(t.startswith("US 7: la scheda US non è ancora in PyArchInit") for t in _log(w))
+    assert w._without_us_form("Saggio") == [1]
+
+    asked = []
+    monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(
+        lambda cls, parent, title, fields, intro="": asked.append(intro) or
+        {"first": 8, "area": "1", "step": 2.0, "cuts": True}))
+    told = []
+    monkeypatch.setattr(w, "_info", lambda title, text: told.append(text))
+    w.propose_units()
+    w.runner.wait()
+    app.processEvents()
+    assert "1 unita' disegnate con il loro numero non hanno ancora la scheda" in asked[0]
+    d = w._proposal_win
+    rows = [(d.units.item(r, 1).text(), d.units.item(r, 2).text()) for r in range(d.units.rowCount())]
+    assert rows == [("7", "US"), ("8", "US")]  # US 7 and the cut it fills; US 2 only for the relations
+    rels = {(d.relations.item(r, 1).text(), d.relations.item(r, 2).text(), d.relations.item(r, 3).text())
+            for r in range(d.relations.rowCount())}
+    assert rels == {("US 7", "Riempie", "US 8"), ("US 8", "Taglia", "US 2")}
+    assert "1 US con la scheda gia' in PyArchInit" in d.status.text()
+    d._apply(True)
+    w.runner.wait()
+    app.processEvents()
+    seven, cut, two = (w.pa.us_record("Saggio", "1", n) for n in ("7", "8", "2"))
+    assert seven is not None and seven["node_uuid"] and cut is not None
+    assert ["Riempie", "8"] in [r[:2] for r in parse_relationships(seven["rapporti"])]
+    assert ["Tagliato da", "8"] in [r[:2] for r in parse_relationships(two["rapporti"])]
+    assert two["d_stratigrafica"] == "Strato 2"  # its form otherwise as it was
+    assert "Esporta sito in em.json" in told[-1] and "2 schede US create" in told[-1]
+    assert w._without_us_form("Saggio") == []

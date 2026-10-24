@@ -5674,22 +5674,59 @@ class MainWindow(QMainWindow):
             self.reference.set_chunk(self.chunk)
 
     # ---------------------------------------------------------------- appearance and help
+    def _without_us_form(self, site: str | None) -> list[int]:
+        """The units drawn here with a US number whose form PyArchInit does not have (any type, any area
+        when the unit has none): the ones to bring into the Extended Matrix. Empty without a database."""
+        if self.pa is None or not site:
+            return []
+        out = []
+        for i, u in enumerate(self.units):
+            if not u.us or (u.attributes or {}).get("gid") is not None:
+                continue
+            try:
+                rows = self.pa.db.query("us_table", sito=u.sito or site, area=str(u.area) if u.area else None,
+                                        us=str(u.us))
+            except Exception as exc:  # the database does not answer: nothing is proposed for them
+                log.warning("Schede US di PyArchInit non lette: %s", exc)
+                return []
+            if not rows:
+                out.append(i)
+        return out
+
+    def _matrix_hint(self, units) -> None:
+        """A line of the log for the units just drawn whose US form is not in PyArchInit yet."""
+        site = self.project_site()
+        if self.pa is None or not site:
+            return
+        missing = set(self._without_us_form(site))
+        names = [self._unit_name(u) for i, u in enumerate(self.units) if i in missing and any(u is x for x in units)]
+        if names:
+            self.log_pane.info(tr("{0}: la scheda US non è ancora in PyArchInit. Strumenti > Proponi US e rapporti la "
+                                  "crea, con i rapporti, per l'Extended Matrix", ", ".join(names)))
+
     def propose_units(self) -> None:
         """Strumenti > Proponi US e rapporti: a US number, a kind and the measurements for every unit
         without a number (SAM, drawn) and the relations their contacts suggest
-        (:mod:`archaeo.us_proposal`), in a window where they are checked before being applied."""
+        (:mod:`archaeo.us_proposal`), in a window where they are checked before being applied. With
+        PyArchInit connected, also the units drawn with their number whose US form is not there yet
+        (they keep their number): written into PyArchInit with their relations - also with the units
+        that have their form, which take part only for the relations - they reach the Extended Matrix
+        that PyArchInit exports (``em.json``)."""
         from ..archaeo import us_proposal
         from ..archaeo.timeline import units_of
         from .us_proposal_dialog import UsProposalDialog
 
         if not self._need_chunk():
             return
-        todo = [i for i, u in enumerate(self.units) if not u.us and (u.attributes or {}).get("gid") is None]
-        if not todo:
-            self._warn("Nessuna unita' senza numero di US: segmenta l'ortofoto con SAM (Tutta l'ortofoto) o disegna "
-                       "le unita' prima.")
-            return
         site = self.project_site()
+        todo = [i for i, u in enumerate(self.units) if not u.us and (u.attributes or {}).get("gid") is None]
+        numbered = self._without_us_form(site)
+        if not todo and not numbered:
+            self._warn("Nessuna unita' senza numero di US o senza scheda in PyArchInit: segmenta l'ortofoto con SAM "
+                       "(Tutta l'ortofoto) o disegna le unita' prima.")
+            return
+        context = [i for i, u in enumerate(self.units) if u.us and i not in numbered] if numbered or todo else []
+        targets = todo + numbered
         used = [u.us for u in self.units] + [u.us for ch in self.doc.chunks if ch is not self.chunk
                                              for u in units_of(ch)]
         first = max([int(n) for n in used if n and str(n).isdigit()], default=0) + 1
@@ -5699,16 +5736,20 @@ class MainWindow(QMainWindow):
             except Exception as exc:  # the database does not answer: the project's numbers
                 log.warning("Numeri di US di PyArchInit non letti: %s", exc)
         areas = [u.area for u in self.units if u.area]
+        intro = tr("{0} unita' senza numero di US nel chunk {1}. I numeri partono dopo l'ultima US del sito {2} e "
+                   "del progetto.", len(todo), self.chunk.label, site or tr("(nessun sito scelto)"))
+        if numbered:
+            intro += " " + tr("{0} unita' disegnate con il loro numero non hanno ancora la scheda in PyArchInit: lo "
+                              "tengono, e con la scheda e i rapporti entrano nell'Extended Matrix.", len(numbered))
         v = ParamDialog.ask(self, "Proponi US e rapporti", [
             Field("first", "Primo numero di US", int(first), minimum=1, maximum=10 ** 6),
             Field("area", "Area", max(set(areas), key=areas.count) if areas else "1"),
             Field("step", "Dislivello minimo per dire chi copre (cm)", 2.0, minimum=0.1, maximum=100.0, decimals=1),
-            Field("cuts", "Proponi il taglio dei riempimenti", True)],
-            intro=tr("{0} unita' senza numero di US nel chunk {1}. I numeri partono dopo l'ultima US del sito {2} e "
-                     "del progetto.", len(todo), self.chunk.label, site or tr("(nessun sito scelto)")))
+            Field("cuts", "Proponi il taglio dei riempimenti", True)], intro=intro)
         if not v:
             return
-        units, chunk, lang = [self.units[i] for i in todo], self.chunk, i18n.current()
+        order = targets + context  # the units with their form only for their relations with the others
+        units, chunk, lang = [self.units[i] for i in order], self.chunk, i18n.current()
 
         def job(p):
             return us_proposal.propose_for_chunk(chunk, units, v["first"], area=v["area"].strip() or None,
@@ -5717,7 +5758,10 @@ class MainWindow(QMainWindow):
 
         def done(prop):
             for it in prop["units"]:
-                it["index"] = todo[it["source"]] if it["source"] is not None else None
+                it["index"] = order[it["source"]] if it["source"] is not None else None
+                it["context"] = it["source"] is not None and it["source"] >= len(targets)
+            keep = {it["key"] for it in prop["units"] if not it["context"]}
+            prop["relations"] = [r for r in prop["relations"] if r["upper"] in keep or r["lower"] in keep]
             self._proposal = prop
             if self._proposal_win is not None:
                 self._proposal_win.close()
@@ -5748,8 +5792,8 @@ class MainWindow(QMainWindow):
 
         prop, chosen = self._proposal, set(keys)
         for it in prop["units"]:
-            it["use"] = it["key"] in chosen
-            if not it["use"]:
+            it["use"] = it["key"] in chosen or it.get("context", False)
+            if not it["use"] or it.get("context"):
                 continue
             new = it["unit"]
             if it["kind"] == "unit":
@@ -5766,12 +5810,12 @@ class MainWindow(QMainWindow):
         self._dirty(True)
         if self._proposal_win is not None:
             self._proposal_win.close()
-        n = len(chosen)
+        n = sum(1 for it in prop["units"] if it["key"] in chosen and not it.get("context"))
         if not write:
             self.statusBar().showMessage(tr("{0} unita' numerate nel progetto", n), 10000)
             return
         pa, site, crs = self.pa, self.project_site(), self.chunk.crs
-        units = [self.units[it["index"]] for it in prop["units"] if it["use"]]
+        units = [self.units[it["index"]] for it in prop["units"] if it["use"] and not it.get("context")]
         units = [u for u in units if (u.attributes or {}).get("gid") is None]
 
         def job(p):
@@ -5791,6 +5835,9 @@ class MainWindow(QMainWindow):
                       site, len(out["created"]), out["relations"], len(gids))
             if out["existing"]:
                 text += "\n" + tr("Schede gia' presenti, lasciate come erano: {0}", ", ".join(out["existing"]))
+            if out["created"]:
+                text += "\n\n" + tr("Per portarle nell'Extended Matrix di EMtools ed EMStudio esporta di nuovo "
+                                     "l'em.json del sito da PyArchInit (Extended Matrix > Esporta sito in em.json).")
             self._info("PyArchInit", text)
 
         self.run_task("Proposta di US in PyArchInit", job, done, refresh=False, save=False)
@@ -6298,6 +6345,7 @@ class MainWindow(QMainWindow):
         self._dirty(True)
         self.log_pane.info(f"{u.tipo} {u.us or '?'}: area {u.geometry.area:.3f} m2"
                            + (tr(" (sito {0})", u.sito) if u.sito else ""))
+        self._matrix_hint([u])
 
     def _unit_drawn(self, xy) -> None:
         from shapely.geometry import Polygon
@@ -7621,6 +7669,8 @@ class MainWindow(QMainWindow):
             self.history.record(tr("Da QGIS: {0}", lines[0] if len(lines) == 1 else tr("{0} modifiche", len(lines))))
         for line in lines:
             self.log_pane.info(tr("Da QGIS: {0}", line))
+        added = {f.id for f in (changes.get("unita").added if changes.get("unita") else [])}
+        self._matrix_hint([u for u in self.units if (u.attributes or {}).get(ID_FIELD) in added])
         self._follow_proxies(proxies)
         self._qgis_waiting["sections"] += [s for s in recut if all(s is not o for o in self._qgis_waiting["sections"])]
         self._run_qgis_waiting()

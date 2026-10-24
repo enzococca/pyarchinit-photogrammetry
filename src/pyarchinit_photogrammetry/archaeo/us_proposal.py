@@ -396,13 +396,15 @@ def write_proposal(pa, proposal: dict, sito: str, keys=None) -> dict:
     """The units of ``proposal`` (those with ``use``, or the ``keys`` given) as US forms of
     PyArchInit (``create_us``: ``node_uuid`` and ``entity_uuid`` with them, the site form too) and
     their relations with ``use``, in both directions: ``{"created": [names], "existing": [names
-    already there, left as they are], "relations": n added, "missing": [...]}``."""
+    already there, left as they are], "relations": n added, "missing": [...]}``. Units marked
+    ``context`` (they have their form) get no form, only the relations with the others."""
     from .timeline import write_relations
 
     chosen = {it["key"] for it in proposal["units"] if (it["use"] if keys is None else it["key"] in set(keys))}
+    chosen |= {it["key"] for it in proposal["units"] if it.get("context")}
     created, existing = [], []
     for it in proposal["units"]:
-        if it["key"] not in chosen:
+        if it["key"] not in chosen or it.get("context"):  # a unit with its form: only its relations
             continue
         u = it["unit"]
         try:
