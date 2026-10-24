@@ -17,7 +17,7 @@ from .i18n import tr
 
 RELIEF_KINDS = ("svf", "openness_pos", "openness_neg", "slrm", "msrm", "multi_hillshade")  # archaeo.relief
 SCALAR_KINDS = ("dem", "diff", "sigma", "coverage", "slope", "aspect", "index", "zones", "thermal",
-                "thermal_anomaly") + RELIEF_KINDS  # one band of values, coloured
+                "thermal_anomaly", "calc") + RELIEF_KINDS  # one band of values, coloured
 ZONE_COLORS = [(214, 96, 77), (247, 203, 120), (178, 223, 138), (26, 152, 80), (0, 109, 44), (69, 117, 180),
                (152, 78, 163), (255, 127, 0), (166, 86, 40), (120, 120, 120)]  # the classes of a zoning, 1 = lowest
 US_COLORS = ["#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231", "#911eb4", "#46f0f0", "#f032e6", "#bcf60c",
@@ -308,7 +308,7 @@ def read_window_rgba(path, kind: str, window: tuple[int, int, int, int], out_sha
                 return sigma_colors(z, diff_limit)[0]
             if kind == "coverage":
                 return coverage_colors(z)
-            if kind == "index":
+            if kind in ("index", "calc"):  # a result of the raster calculator: on the ramp of the indices
                 return index_colors(z, dem_range, palette)
             if kind == "thermal":  # degrees on a thermal ramp between the limits of the whole raster (or the user's)
                 from ..engine.thermal import colours as thermal_colours
@@ -595,7 +595,8 @@ class RasterView(_ZoomView):
                 elif kind in RELIEF_KINDS:  # the stretch of the whole raster, also for the detail
                     self._dem_range = relief_limits(self.z, kind)
                     rgba = relief_colors(self.z, kind, self._dem_range)
-                elif kind == "index":  # a vegetation index: its ramp between the percentiles of the whole raster
+                elif kind in ("index", "calc"):  # an index, a result of the raster calculator: a ramp between
+                    # the percentiles of the whole raster
                     self._dem_range = index_limits(self.z)
                     rgba = index_colors(self.z, self._dem_range, self.palette)
                 elif kind == "thermal":  # degrees: the user's range, else the percentiles of the whole raster

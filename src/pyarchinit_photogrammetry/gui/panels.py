@@ -387,6 +387,21 @@ class WorkspaceTree(QTreeWidget):
                         it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, "ms:thermal_anomaly"))
                         tnode.addChild(it)
                 tnode.setExpanded(True)
+            calc = [(n, info) for n, info in ((ch.meta or {}).get("calculator") or {}).items()
+                    if (ch.data_dir / str(info.get("file", ""))).is_file()]
+            if calc:  # the results of the raster calculator
+                cnode = QTreeWidgetItem([tr("Calcolatore raster  ({0})", len(calc))])
+                cnode.setIcon(0, icon("calculator"))
+                cnode.setData(0, Qt.ItemDataRole.UserRole, ("calculator", ch, None))
+                cnode.setToolTip(0, tr("Doppio clic: il calcolatore raster"))
+                ci.addChild(cnode)
+                for cname, info in calc:
+                    it = QTreeWidgetItem([f"{cname} = {info.get('formula', '')}"])
+                    it.setIcon(0, icon("calculator"))
+                    it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, f"calc:{cname}"))
+                    it.setToolTip(0, tr("Doppio clic per vederlo; tasto destro: un'altra formula, rimuovi"))
+                    cnode.addChild(it)
+                cnode.setExpanded(True)
             self._add_plugin_items(ci, ch, states)
             ci.setExpanded(ch is document.chunk)
         root.setExpanded(True)
