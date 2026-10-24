@@ -79,6 +79,7 @@ class Contributions:
     exporters: list = field(default_factory=list)
     connections: list = field(default_factory=list)  # (signal, slot) disconnected when the plugin goes away
     tree_items: list = field(default_factory=list)  # (plugin, provider) of the workspace, taken out with it
+    rasters: list = field(default_factory=list)  # entries of engine.rastercalc.register, taken out with it
 
 
 class Context:
@@ -359,6 +360,28 @@ class Context:
         if tree.document is not None:  # the tree is filled already (a plugin activated afterwards)
             self.refresh_tree()
 
+    def add_rasters(self, provider: Callable[[object], list]) -> None:
+        """Since 1.4.0: the rasters of the plugin by name in the raster calculator (*Strumenti >
+        Calcolatore raster*, ``engine.rastercalc``) and wherever the program lists the rasters of a
+        chunk. ``provider(chunk)`` returns a dict for each one: ``name`` (in the formulas: letters,
+        digits and ``_``; made so if it is not), ``label`` and ``path`` (a GeoTIFF). Without it the
+        calculator finds every GeoTIFF of the chunk folder anyway, named by its folder and file
+        (``terrain_twi``), or by its ``ppg_name`` tag. Taken out when the plugin is disabled; also in
+        the command line."""
+        from ..engine import rastercalc
+
+        self.contributions.rasters.append(rastercalc.register(provider, owner=self.name))
+
+    def rasters(self, chunk=None) -> list[dict]:
+        """Since 1.4.0: every raster of ``chunk`` (the active one when None) the raster calculator reads,
+        with its name in the formulas: dicts ``name``, ``label``, ``path``, ``source``, ``bands`` (their
+        names, "" where none), ``width``, ``height``, ``resolution``. A formula of the calculator on
+        them: ``engine.rastercalc.calculate(chunk, formula, name)``."""
+        from ..engine import rastercalc
+
+        chunk = chunk if chunk is not None else self.app.document.chunk
+        return [] if chunk is None else [r.as_dict() for r in rastercalc.rasters(chunk)]
+
     def refresh_tree(self) -> None:
         """Since 1.3.4: the workspace filled again, the items of the plugins asked again (after the plugin
         made or deleted products). From another thread it is done in the interface thread, soon. Nothing
@@ -407,6 +430,12 @@ class Context:
             except (RuntimeError, TypeError):
                 pass
         self.contributions.connections.clear()
+        if self.contributions.rasters:
+            from ..engine import rastercalc
+
+            for entry in self.contributions.rasters:
+                rastercalc.unregister(entry)
+            self.contributions.rasters.clear()
         tree = getattr(self.window, "workspace", None)
         if self.contributions.tree_items and tree is not None:
             tree.providers[:] = [p for p in tree.providers if not any(p is e for e in self.contributions.tree_items)]

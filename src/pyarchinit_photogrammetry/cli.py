@@ -293,6 +293,41 @@ def relief(project: Path, method: str = typer.Option("svf", help="svf, openness_
 
 
 @app.command()
+def calc(project: Path, formula: Optional[str] = typer.Argument(None, help='e.g. "dem - dem_before_excavation" or '
+                                                                       '"(reflectance@NIR - reflectance@Red) / '
+                                                                       '(reflectance@NIR + reflectance@Red)"'),
+         name: Optional[str] = typer.Option(None, help="the name of the result (letters, digits and _)"),
+         grid: Optional[str] = typer.Option(None, help="the raster whose grid the result takes (default: the first "
+                                                       "one of the formula)"),
+         resolution: Optional[float] = typer.Option(None, help="another resolution of that grid (metres)"),
+         list_: bool = typer.Option(False, "--list", help="list the rasters of the chunk with their names"),
+         chunk: Optional[str] = None):
+    """Raster calculator: a formula, as in the raster calculator of QGIS, on any raster of the chunk
+    (products, versions, bands, indices, the rasters of the plugins, earlier results), kept as
+    <chunk data>/calculator/NAME.tif. --list shows the names of the rasters for the formulas."""
+    from .engine import rastercalc
+
+    doc, ch = _open(project, chunk)
+    if list_ or not formula:
+        for r in rastercalc.rasters(ch):
+            bands = "" if len(r.bands) == 1 else "  bands " + ", ".join(
+                f"@{k}" + (f" {b}" if b else "") for k, b in enumerate(r.bands, 1))
+            typer.echo(f"{r.name:28s} {r.width}x{r.height} at {r.resolution:.4g}  {r.label} [{r.source}]{bands}")
+        return
+    if not name:
+        raise typer.BadParameter("give the result a --name")
+    try:
+        info = rastercalc.calculate(ch, formula, name, grid=grid, resolution=resolution, progress=print_progress)
+    except rastercalc.FormulaError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    doc.save()
+    st = info["stats"]
+    typer.echo(f"{name}: {ch.data_dir / info['file']} ({info['size'][0]}x{info['size'][1]} on the grid of "
+               f"{info['grid']}" + (f", values {st['min']:.4g} to {st['max']:.4g}" if st.get("cells") else ", no data")
+               + ")")
+
+
+@app.command()
 def timeline(project: Path, csv: Optional[Path] = typer.Option(None, help="write the report as CSV"),
              date: Optional[str] = typer.Option(None, help="set the date of --chunk (ISO, e.g. 2026-07-01T09:30; "
                                                            "'' = from the photos)"),
