@@ -390,6 +390,222 @@ def test_dji_p4_multispectral_files(tmp_path):
     assert quality["NIR"]["on"] in ("RedEdge", "Red")
 
 
+def _micasense_band(path: Path, dn: np.ndarray, band: str, black: int = 4800, exposure: float = 0.0005,
+                    iso: int = 200, xmp: str = "", model: str = "RedEdge-M", software: str = "v7.5.0") -> None:
+    """A band as a MicaSense camera writes it: a TIFF whose XMP (tag 700) carries the band and the
+    radiometric calibration as elements, the black level and the bits in the first directory, the
+    exposure, the ISO and the focal-plane resolution in the EXIF directory (nowhere else)."""
+    from PIL import Image
+    from PIL.TiffImagePlugin import ImageFileDirectory_v2
+
+    packet = ('<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+              '<rdf:Description rdf:about="" xmlns:Camera="http://pix4d.com/camera/1.0/" '
+              'xmlns:MicaSense="http://micasense.com/MicaSense/1.0/" xmlns:DLS="http://micasense.com/DLS/1.0/">'
+              f'<Camera:BandName>{band}</Camera:BandName>{xmp}</rdf:Description></rdf:RDF></x:xmpmeta>')
+    info = ImageFileDirectory_v2()
+    info[700] = packet.encode()
+    info[50714] = black
+    info[271] = "MicaSense"
+    info[272] = model
+    info[305] = software
+    info[34665] = {33434: exposure, 34867: iso, 41486: 266.666667, 41487: 266.666667}
+    Image.fromarray(dn.astype(np.uint16)).save(path, tiffinfo=info)
+
+
+def _seq(*values) -> str:
+    return "<rdf:Seq>" + "".join(f"<rdf:li>{v}</rdf:li>" for v in values) + "</rdf:Seq>"
+
+
+def test_micasense_radiometry_panel_and_bands(tmp_path):
+    """MicaSense's tag layout (as on the RedEdge-MX, RedEdge-MX Dual, RedEdge-P, Altum and
+    Altum-PT samples of MicaSense's own repository): the bands named by the XMP whatever their
+    suffix, the exposure and the gain from the EXIF directory, MicaSense's radiance model with the
+    radial or the 2D vignetting polynomial, the DLS 2 irradiance in hundredths, the panel the
+    camera found (ReflectArea, Albedo), a 16-bit thermal band in centikelvin."""
+    rng = np.random.default_rng(3)
+    h, w = 120, 160
+    folder = tmp_path / "SET"
+    folder.mkdir()
+    cal = f"<Camera:RadiometricCalibration>{_seq('9.6e-05', '8.7e-08', '3.3e-06')}</Camera:RadiometricCalibration>"
+    dls = ("<DLS:HorizontalIrradiance>77.81</DLS:HorizontalIrradiance><DLS:DirectIrradiance>104.4</DLS:DirectIrradiance>"
+           "<DLS:ScatteredIrradiance>3.3</DLS:ScatteredIrradiance><DLS:SolarElevation>0.79</DLS:SolarElevation>"
+           "<DLS:SpectralIrradiance>88.2</DLS:SpectralIrradiance>")
+    camera = ("<Camera:PerspectiveFocalLength>5.4</Camera:PerspectiveFocalLength>"
+              "<Camera:PerspectiveFocalLengthUnits>mm</Camera:PerspectiveFocalLengthUnits>"
+              f"<Camera:PrincipalPoint>{w / 2 / 266.666667:.6f},{h / 2 / 266.666667:.6f}</Camera:PrincipalPoint>"
+              f"<Camera:RigRelatives>0,0,0</Camera:RigRelatives>")
+    vignette = f"<Camera:VignettingCenter>{_seq(78.5, 61.0)}</Camera:VignettingCenter>" \
+               f"<Camera:VignettingPolynomial>{_seq('1.0e-06', '5.6e-07', '-6.0e-09')}</Camera:VignettingPolynomial>"
+    panel = ("<Camera:CalibrationPicture>2</Camera:CalibrationPicture><Camera:Albedo>0.4884</Camera:Albedo>"
+             f"<Camera:ReflectArea>{_seq('100,40,100,70,60,70,60,40')}</Camera:ReflectArea>")
+    base = rng.uniform(0.0, 1.0, (h, w))
+    dn = (6000 + 20000 * base).astype(np.uint16)
+    dn[40:70, 60:100] = 30000  # the panel's reflective area
+    names = {"1": "Blue", "2": "Green", "3": "Red", "4": "NIR", "5": "Red edge", "6": "Blue-444", "10": "Red edge-740"}
+    for k, name in names.items():
+        tags = cal + vignette + dls + camera + (panel if k != "2" else "")  # the camera missed the panel in green
+        _micasense_band(folder / f"IMG_0001_{k}.tif", dn, name, xmp=tags)
+    thermal = (29000 + 300 * base[::2, ::2]).astype(np.uint16)  # centikelvin
+    _micasense_band(folder / "IMG_0001_7.tif", thermal, "LWIR", black=0, xmp=f"<Camera:RadiometricCalibration>{_seq(0, 0, 0)}"
+                    "</Camera:RadiometricCalibration><Camera:ThermalCalibrationParameters>1,316.9</Camera:ThermalCalibrationParameters>")
+    caps = ms.detect_bands([folder])
+    assert set(caps) == {"IMG_0001"}
+    assert set(caps["IMG_0001"]) == {"Blue", "Green", "Red", "NIR", "RedEdge", "Blue444", "RedEdge740", "LWIR"}
+    assert caps["IMG_0001"]["Blue444"].name == "IMG_0001_6.tif"  # _6 is not the thermal band here
+    red = caps["IMG_0001"]["Red"]
+    tags = ms.xmp_of(red)
+    assert tags["ExposureTime"] == pytest.approx(0.0005) and tags["ISOSpeed"] == 200
+    rad, used = ms.radiance_image(red, tags)
+    assert used["model"] == "micasense" and used["gain"] == 2.0 and used["exposure"] == pytest.approx(0.0005)
+    a1, a2, a3 = 9.6e-05, 8.7e-08, 3.3e-06
+    for y, x in ((61, 78), (0, 0), (119, 159), (30, 120)):
+        r = np.hypot(x - 78.5, y - 61.0)
+        fall = 1 + 1.0e-06 * r + 5.6e-07 * r ** 2 - 6.0e-09 * r ** 3
+        want = (float(dn[y, x]) - 4800) / 65536 / fall * a1 / 2.0 / (0.0005 + a2 * y - a3 * 0.0005 * y)
+        assert rad[y, x] == pytest.approx(want, rel=1e-4), (y, x)
+    # the DLS 2 writes hundredths of W/m2/nm; a firmware that computed the horizontal value wrong
+    assert ms.irradiance_of(tags) == pytest.approx(0.7781)
+    assert ms.irradiance_of({**tags, "IrradianceScaleToSIUnits": "1"}) == pytest.approx(77.81)
+    old = {**tags, "Software": "v4.0.0"}
+    assert ms.irradiance_of(old) == pytest.approx((104.4 * np.sin(0.79) + 3.3) / 100)
+    assert ms.irradiance_of({"Irradiance": "1.25"}) == 1.25  # a DLS 1: as written
+    refl = ms.reflectance_image(red, None, tags)
+    assert np.allclose(refl, np.pi * rad / 0.7781, rtol=1e-5)
+    # the panel the camera found: its area and its reflectance from the tags; the green band, where
+    # the tags have none, takes the area of another band and the mean reflectance
+    found: dict = {}
+    factors = ms.panel_factors(caps, "IMG_0001", found=found)
+    assert set(factors) == {"Blue", "Green", "Red", "NIR", "RedEdge", "Blue444", "RedEdge740"}
+    poly = np.zeros((h, w), np.uint8)
+    cv2.fillPoly(poly, [np.array([[100, 40], [100, 70], [60, 70], [60, 40]], np.int32)], 1)
+    mask = poly.astype(bool)
+    assert factors["Red"] == pytest.approx(0.4884 / float(rad[mask].mean()), rel=1e-6)
+    assert found["Green"]["from"] == "carried" and found["Green"]["reflectance"] == pytest.approx(0.4884)
+    assert np.allclose(np.asarray(found["Green"]["region"]), np.asarray(found["Red"]["region"]), atol=0.5)
+    # the thermal band: degrees Celsius
+    lw, used_lw = ms.radiance_image(caps["IMG_0001"]["LWIR"])
+    assert used_lw["model"] == "micasense_lwir" and lw[0, 0] == pytest.approx(thermal[0, 0] / 100 - 273.15, abs=1e-3)
+    from pyarchinit_photogrammetry.engine import thermal as th
+
+    assert th.kind_of(caps["IMG_0001"]["LWIR"]) == "micasense"
+    # the chunk: the panel calibrated from the tags without a region
+    doc = ppg.Document()
+    ch = doc.add_chunk("Campo")
+    doc.save(tmp_path / "campo.ppg")
+    cams = ms.add_captures(ch, [folder])
+    assert ch.meta["multispectral"]["reference"] == "Red" and ms.panel_captures(ch) == cams
+    got = ms.calibrate_panel(ch, cams[0])
+    assert got == pytest.approx(factors) and ch.meta["multispectral"]["panel"]["source"] == "tags"
+
+
+def test_micasense_12_bit_bands_and_their_2d_vignetting(tmp_path):
+    """The RedEdge-P and the Altum-PT write 12 bits (BitsPerSample 12, black level about 240): the
+    normalisation is 2^12, as MicaSense's model says (MicaSense's library reads these files with
+    OpenCV, which scales them to 16 bits while the black level stays in 12: its radiance came out
+    16 times too high and the panel's irradiance at 17 W/m2/nm); their vignetting is a polynomial
+    in x / width and y / height."""
+    from PIL import Image
+    from PIL.TiffImagePlugin import ImageFileDirectory_v2
+
+    h, w = 60, 80
+    dn = np.full((h, w), 2000, np.uint16)
+    coef = [1.0, 0.2, -0.1, 0.3]
+    powers = [0, 0, 1, 0, 0, 1, 2, 2]  # 1 + 0.2 x - 0.1 y + 0.3 x2 y2
+    packet = ('<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="r"><rdf:Description xmlns:Camera="c">'
+              '<Camera:BandName>Panchro</Camera:BandName>'
+              f'<Camera:RadiometricCalibration>{_seq("1.9e-04", "2.7e-09", "1.6e-05")}</Camera:RadiometricCalibration>'
+              f'<Camera:VignettingPolynomial2D>{_seq(",".join(map(str, coef)))}</Camera:VignettingPolynomial2D>'
+              f'<Camera:VignettingPolynomial2DName>{_seq(",".join(map(str, powers)))}</Camera:VignettingPolynomial2DName>'
+              '</rdf:Description></rdf:RDF></x:xmpmeta>')
+    info = ImageFileDirectory_v2()
+    info[700] = packet.encode()
+    info[50714] = 240
+    info[34665] = {33434: 0.001, 34867: 100}
+    path = tmp_path / "IMG_0000_6.tif"
+    Image.fromarray(dn).save(path, tiffinfo=info)
+    tags = ms.xmp_of(path)
+    tags["BitsPerSample"] = 12  # what the camera's header says (PIL writes its own on saving)
+    rad, used = ms.radiance_image(path, tags)
+    assert used["model"] == "micasense" and used["vignetting"]
+    for y, x in ((0, 0), (30, 40), (59, 79)):
+        xv, yv = x / w, y / h
+        fall = 1 + 0.2 * xv - 0.1 * yv + 0.3 * xv ** 2 * yv ** 2
+        want = (2000 - 240) / 4096 / fall * 1.9e-04 / 1.0 / (0.001 + 2.7e-09 * y - 1.6e-05 * 0.001 * y)
+        assert rad[y, x] == pytest.approx(want, rel=1e-4)
+
+
+def test_bands_of_other_cameras_start_from_their_geometry():
+    """A band with its own lens (MicaSense's panchromatic band: finer and narrower, a degree apart in
+    the rig): registered from the cameras' geometry onto its own pixels; a band ECC cannot match (a
+    thermal band) keeps that geometry."""
+    rng = np.random.default_rng(9)
+    big = cv2.GaussianBlur(rng.uniform(0, 1, (900, 1200)).astype(np.float32), (0, 0), 3)
+    k_ref = np.array([[500.0, 0, 200], [0, 500.0, 150], [0, 0, 1]])
+    k_pan = np.array([[1100.0, 0, 410], [0, 1100.0, 300], [0, 0, 1]])
+    rot = ms._rig_rotation([0.0, 0.0, 1.0])  # one degree about the optical axis
+    world = np.array([[2000.0, 0, 600], [0, 2000.0, 450], [0, 0, 1]])  # a far plane, its texture in pixels
+
+    def view(k, r, shape):
+        hmg = world @ np.linalg.inv(k @ r.T)  # band pixel -> texture pixel
+        return cv2.warpPerspective(big, hmg, (shape[1], shape[0]), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP)
+
+    ref = view(k_ref, np.eye(3), (300, 400))
+    pan = view(k_pan, rot, (600, 820))
+    cameras = {"Red": (k_ref, np.eye(3)), "Panchro": (k_pan, rot)}
+    start = ms._camera_homography(cameras, "Red", "Panchro")
+    k_pan_off = k_pan.copy()
+    k_pan_off[0, 2] += 6  # the tags a few pixels off: ECC finds the rest
+    hs = ms.register_bands({"Red": ref, "Panchro": pan}, "Red", cameras={"Red": cameras["Red"], "Panchro": (k_pan_off, rot)})
+    back = ms.warp_band(pan, hs["Panchro"], ref.shape)
+    inner = (slice(30, -30), slice(30, -30))
+    assert np.nanmean(np.abs(back[inner] - ref[inner])) < 0.1 * np.nanstd(ref)
+    assert np.allclose(start @ [200, 150, 1] / (start @ [200, 150, 1])[2], [410, 300, 1], atol=1e-6)
+    noise = rng.uniform(0, 1, (75, 100)).astype(np.float32)  # nothing in common with the reference
+    k_th = np.array([[125.0, 0, 50], [0, 125.0, 37.5], [0, 0, 1]])
+    hs = ms.register_bands({"Red": ref, "LWIR": noise}, "Red", cameras={"Red": cameras["Red"], "LWIR": (k_th, np.eye(3))})
+    assert np.allclose(hs["LWIR"], ms._camera_homography({"Red": cameras["Red"], "LWIR": (k_th, np.eye(3))}, "Red", "LWIR"))
+
+
+MICASENSE_SAMPLES = Path("/Volumes/Extreme Pro/verifica_ppg/dati_pubblici/micasense")
+
+
+@pytest.mark.skipif(not MICASENSE_SAMPLES.exists(), reason="MicaSense's sample captures are not on this computer")
+def test_micasense_samples_against_micasenses_numbers():
+    """The sample captures of MicaSense's imageprocessing repository (MIT): our radiance, DLS
+    irradiance and panel against the numbers of MicaSense's own library (2026-10-24; the 12-bit
+    files read with their real digital numbers, see the test above)."""
+    reference = {  # band file: (mean radiance over the panel the camera found, DLS horizontal irradiance)
+        "REDEDGE-MX/IMG_0001_3": (0.15775995652381508, 0.6728975021380448),
+        "REDEDGE-P/IMG_0000_3": (0.14991433644810898, 0.9119319162764613),
+        "ALTUM/IMG_0000_4": (0.11467415436937316, 0.45482744465926417),
+        "REDEDGE-MX-DUAL/IMG_0000_9": (0.11972001092139525, 0.38018188476562503),
+    }
+    for key, (panel, irradiance) in reference.items():
+        path = MICASENSE_SAMPLES / f"{key}.tif"
+        tags = ms.xmp_of(path)
+        rad, used = ms.radiance_image(path, tags)
+        corners, albedo = ms.panel_in_tags(tags)
+        mean = float(rad[ms._region_mask(corners, rad.shape)].mean())
+        assert mean == pytest.approx(panel, rel=2e-4), key
+        assert ms.irradiance_of(tags) == pytest.approx(irradiance, rel=1e-6), key
+    images = {  # band file: (mean radiance of the image, at row 100 column 100) - degrees for the thermal band
+        "ALTUM/IMG_0021_3": (0.016061170777141583, None),
+        "ALTUM-PT/IMG_0010_6": (0.031074204038329157, None),
+        "REDEDGE-P/IMG_0011_4": (0.05635678250515375, None),
+        "REDEDGE-MX-DUAL/IMG_0431_10": (0.06067793713835656, 0.0588647723197937),
+        "ALTUM/IMG_0021_6": (19.065110942622027, 13.520000457763672),
+    }
+    for key, (mean, pixel) in images.items():
+        rad, _used = ms.radiance_image(MICASENSE_SAMPLES / f"{key}.tif")
+        assert float(rad.astype(float).mean()) == pytest.approx(mean, rel=1e-4), key
+        if pixel is not None:
+            assert float(rad[100, 100]) == pytest.approx(pixel, rel=1e-4), key
+    caps = ms.detect_bands([MICASENSE_SAMPLES / "ALTUM-PT"])
+    assert set(caps["IMG_0010"]) == {"Blue", "Green", "Red", "NIR", "RedEdge", "Panchro", "LWIR"}
+    caps = ms.detect_bands([MICASENSE_SAMPLES / "REDEDGE-MX-DUAL"])
+    assert len(caps["IMG_0431"]) == 10
+
+
 def test_pane_tree_and_views_show_the_products(scene_dir, tmp_path, monkeypatch):
     """The products in the project's tree, the pane's state and the raster view: a reflectance
     orthomosaic in false colour, an index on its ramp, the zones by class with their polygons as a

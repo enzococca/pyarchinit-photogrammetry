@@ -1964,8 +1964,10 @@ def multispectral(project: Path, what: str = typer.Argument(..., help="add, pane
                   reference: Optional[str] = typer.Option(None, help="add: the band to align (Red by default)"),
                   thermal: bool = typer.Option(False, help="add: the frames of a thermal camera (every radiometric image "
                                                            "without a band: FLIR JPEGs, TIFFs of temperatures or integers)"),
-                  region: Optional[str] = typer.Option(None, help="panel: x0,y0,x1,y1 of the panel in the images"),
-                  reflectance: float = typer.Option(0.5, help="panel: its known reflectance (0-1)"),
+                  region: Optional[str] = typer.Option(None, help="panel: x0,y0,x1,y1 of the panel in the images (without "
+                                                                  "it, the panel the camera found: MicaSense)"),
+                  reflectance: Optional[float] = typer.Option(None, help="panel: its known reflectance (0-1; without it, "
+                                                                         "the reflectances the camera read, else 0.5)"),
                   index: str = typer.Option("NDVI", help="index/zoning: one of the indices, or a formula over the band names"),
                   formula: Optional[str] = typer.Option(None, help="index: a formula instead of a known index"),
                   classes: int = typer.Option(3, help="zoning: how many classes"),
@@ -1993,14 +1995,23 @@ def multispectral(project: Path, what: str = typer.Argument(..., help="add, pane
         info = ch.meta.get("multispectral") or {}
         typer.echo(json.dumps({k: v for k, v in info.items() if k != "registration"}, indent=1))
     elif what == "panel":
-        if source is None or not region:
-            raise typer.BadParameter("panel needs the photo of the panel and --region x0,y0,x1,y1")
-        cam = next((c for c in ms.multispectral_cameras(ch)
-                    if c.meta.get("capture") == str(source) or Path(c.path).stem == Path(source).stem
-                    or Path(source).resolve() in {Path(p).resolve() for p in c.meta["bands"].values()}), None)
+        found = ms.panel_captures(ch) if not region else []
+        if source is None and found:
+            cam = found[0]
+        elif source is None:
+            raise typer.BadParameter("panel needs the photo of the panel and --region x0,y0,x1,y1 (no capture of the "
+                                     "chunk has a panel the camera found)")
+        else:
+            cam = next((c for c in ms.multispectral_cameras(ch)
+                        if c.meta.get("capture") == str(source) or Path(c.path).stem == Path(source).stem
+                        or Path(source).resolve() in {Path(p).resolve() for p in c.meta["bands"].values()}), None)
         if cam is None:
             raise typer.BadParameter(f"{source} is not a capture of the chunk")
-        factors = ms.calibrate_panel(ch, cam, [float(v) for v in region.split(",")], reflectance)
+        if not region and cam not in found:
+            raise typer.BadParameter("the camera found no panel in this capture: give --region x0,y0,x1,y1")
+        if region and reflectance is None:
+            reflectance = 0.5
+        factors = ms.calibrate_panel(ch, cam, [float(v) for v in region.split(",")] if region else None, reflectance)
         doc.save()
         typer.echo("panel factors: " + ", ".join(f"{b} {f:.4g}" for b, f in factors.items()))
     elif what == "reflectance":

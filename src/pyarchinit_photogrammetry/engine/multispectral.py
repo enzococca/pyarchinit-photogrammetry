@@ -60,7 +60,7 @@ INDICES = {  # name: (formula over band names, description)
     "CIRE": ("NIR / RedEdge - 1", "chlorophyll"),
     "Thermal": ("LWIR", "temperature (the thermal band itself)"),
 }
-_SUFFIX = re.compile(r"^(?P<stem>.+?)_(?P<band>\d|MS_[A-Z]+|GRE|RED|REG|NIR|RGB)$", re.IGNORECASE)
+_SUFFIX = re.compile(r"^(?P<stem>.+?)_(?P<band>\d{1,2}|MS_[A-Z]+|GRE|RED|REG|NIR|RGB)$", re.IGNORECASE)
 # the DJI enterprise cameras (Mavic 2 Enterprise Advanced, M30T, Mavic 3 Thermal, H20T): a visible
 # photo (W wide, V visible) and a thermal frame (T) per capture; Z (zoom) and S (screen) are not bands
 _DJI_PAIR = re.compile(r"^(?P<stem>.+)_(?P<kind>[WTVZS])$", re.IGNORECASE)
@@ -154,7 +154,10 @@ def _captures_of(files: list[Path], thermal: bool = False) -> dict[str, dict[str
             elif suffix == "RGB":
                 continue
             elif suffix.isdigit():
-                band = MICASENSE_BANDS.get(suffix)
+                # a MicaSense band: its XMP names it (the suffix alone is not enough: _6 is the thermal
+                # band of an Altum, the panchromatic one of a RedEdge-P or an Altum-PT, a blue of the
+                # second camera of a RedEdge-MX Dual; _7 to _10 have no fixed meaning)
+                band = _band_alias(xmp_of(f).get("BandName")) or MICASENSE_BANDS.get(suffix)
             else:
                 band = SEQUOIA_BANDS.get(suffix)
         if band is None:
@@ -277,7 +280,11 @@ def _wide_thermal_pairs(files: list[Path], max_seconds: float = 1.5, max_metres:
 
 
 _EXIF_BASICS = {258: "BitsPerSample", 50714: "BlackLevel", 34855: "ISOSpeedRatings", 33434: "ExposureTime",
-                306: "DateTime", 272: "Model"}
+                306: "DateTime", 272: "Model", 271: "Make", 305: "Software"}
+# the camera's settings in the EXIF directory of a TIFF (a MicaSense band keeps its exposure and its
+# ISO there, nowhere else: read from the first directory only, the model took exposure 1 s and gain 1)
+_EXIF_SETTINGS = {33434: "ExposureTime", 34867: "ISOSpeed", 34855: "ISOSpeedRatings",
+                  41486: "FocalPlaneXResolution", 41487: "FocalPlaneYResolution"}
 
 
 def xmp_of(path) -> dict:
@@ -314,6 +321,13 @@ def xmp_of(path) -> dict:
                     v = exif.get(tag)
                     if v is not None and name not in out:
                         out[name] = list(v) if isinstance(v, (tuple, list)) else v
+                from PIL import ExifTags
+
+                sub = exif.get_ifd(ExifTags.IFD.Exif)
+                for tag, name in _EXIF_SETTINGS.items():
+                    v = sub.get(tag)
+                    if v is not None and name not in out:
+                        out[name] = float(v) if not isinstance(v, (tuple, list, str, bytes)) else v
             except Exception:  # noqa: BLE001
                 pass
     except Exception:  # noqa: BLE001 - not a photo PIL reads: no tags
@@ -356,15 +370,27 @@ def parse_xmp(text: str) -> dict:
     return out
 
 
+_BAND_ALIASES = {"red edge": "RedEdge", "rededge": "RedEdge", "red-edge": "RedEdge", "nir": "NIR", "lwir": "LWIR",
+                 "thermal": "LWIR", "blue": "Blue", "green": "Green", "red": "Red", "panchro": "Panchro",
+                 "panchromatic": "Panchro"}
+
+
 def _band_alias(name) -> str | None:
+    """The band's name as the program writes it: one word a formula can use. The second camera of
+    a MicaSense RedEdge-MX Dual names its bands by colour and wavelength (``Blue-444``, ``Red
+    edge-705``): they become ``Blue444``, ``RedEdge705`` (with a hyphen a formula would read a
+    subtraction), and the bands of the first camera keep the plain names the indices use."""
     if isinstance(name, list):
         name = name[0] if name else None
     if not name:
         return None
     name = str(name).strip()
-    aliases = {"red edge": "RedEdge", "rededge": "RedEdge", "red-edge": "RedEdge", "nir": "NIR", "lwir": "LWIR",
-               "thermal": "LWIR", "blue": "Blue", "green": "Green", "red": "Red", "panchro": "Panchro"}
-    return aliases.get(name.lower(), name)
+    if name.lower() in _BAND_ALIASES:
+        return _BAND_ALIASES[name.lower()]
+    m = re.fullmatch(r"(?P<base>[A-Za-z][A-Za-z ]*?)[\s_-]*(?P<nm>\d{3,5})(?:\s*nm)?", name)
+    if m and m.group("base").strip().lower() in _BAND_ALIASES:
+        return _BAND_ALIASES[m.group("base").strip().lower()] + m.group("nm")
+    return name
 
 
 def band_name_of(path) -> str | None:
@@ -387,7 +413,11 @@ def _numbers(v) -> list[float]:
     if v is None:
         return []
     if isinstance(v, str):
-        v = re.split(r"[,\s]+", v.strip())
+        v = [v]
+    if not isinstance(v, (list, tuple)):
+        v = [v]
+    # a list of one string "a,b,c" too (MicaSense's ReflectArea and VignettingPolynomial2D)
+    v = [y for x in v for y in (re.split(r"[,\s]+", x.strip()) if isinstance(x, str) else [x]) if y != ""]
     out = []
     for x in v:
         n = _number(x)
@@ -414,33 +444,43 @@ def read_band(path) -> np.ndarray:
 
 # ------------------------------------------------------------------------------ radiometry
 def radiance_image(path, tags: dict | None = None) -> tuple[np.ndarray, dict]:
-    """The band in radiance (W/m2/sr/nm, MicaSense's model) or, without calibration tags, in
-    digital numbers normalised by exposure and gain (black level taken off, vignetting
-    corrected when known). Returns the image and what was used."""
+    """The band in radiance (W/m2/sr/nm, MicaSense's model; a MicaSense thermal band in degrees
+    Celsius) or, without calibration tags, in digital numbers normalised by exposure and gain
+    (black level taken off, vignetting corrected when known). Returns the image and what was used."""
     tags = xmp_of(path) if tags is None else tags
     dn = read_band(path)
     h, w = dn.shape
     used: dict = {}
+    if _micasense_lwir(tags):  # centikelvin: the temperature, not a radiance (RadiometricCalibration 0 0 0)
+        used["model"] = "micasense_lwir"
+        return (dn / 100.0 - 273.15).astype(np.float32), used
     black = _number(tags.get("BlackLevel"), 0.0)
     if tags.get("BlackLevel") and isinstance(tags["BlackLevel"], list) and len(tags["BlackLevel"]) > 1:
         black = float(np.mean(_numbers(tags["BlackLevel"])))
     bits = _number(tags.get("BitsPerSample"), None)
     if bits is None:
         bits = 16.0 if dn.max() > 255 else 8.0
-    norm = (dn - black) / (2.0 ** bits - 1.0)
+    dji = tags.get("VignettingData") is not None and tags.get("CalibratedOpticalCenterX") is not None
+    cal = _numbers(tags.get("RadiometricCalibration"))
+    micasense = not dji and len(cal) >= 3
+    # MicaSense's model divides by 2^N (N the bits of the file: 16, or 12 for the RedEdge-P and the
+    # Altum-PT), the black level too; DJI's guide by 65535
+    norm = (dn - black) / (2.0 ** bits if micasense else 2.0 ** bits - 1.0)
     used["black_level"] = black
     gain = _number(tags.get("SensorGain") or tags.get("Gain"), None)
-    if gain is None:
-        iso = _number(tags.get("ISOSpeedRatings") or tags.get("ISO"), None)
+    if gain is None:  # MicaSense: the ISO / 100 (EXIF ISOSpeed)
+        iso = _number(tags.get("ISOSpeed") or tags.get("ISOSpeedRatings") or tags.get("ISO"), None)
         gain = iso / 100.0 if iso else 1.0
     exposure = _number(tags.get("ExposureTime"), None) or _number(tags.get("exposure_time"), 1.0) or 1.0
-    dji = tags.get("VignettingData") is not None and tags.get("CalibratedOpticalCenterX") is not None
     if dji and exposure > 1.0:  # DJI P4 Multispectral: microseconds
         exposure = exposure / 1e6
+    if micasense and str(tags.get("Model") or "") != "Altum" and abs(exposure - 1.0 / 6329.0) < 1e-6:
+        exposure = 0.000274  # the exposure some old RedEdge firmware wrote wrong, as MicaSense corrects it
     used.update(gain=gain, exposure=exposure)
     # vignetting: MicaSense's polynomial in the distance from the centre is the fall-off (the
-    # image is divided by it), DJI's (VignettingData k1..k6 from the calibrated optical centre)
-    # is the correction (the image is multiplied by it): both as in their guides
+    # image is divided by it; the newer cameras - RedEdge-P, Altum-PT - give a polynomial in x/width
+    # and y/height instead), DJI's (VignettingData k1..k6 from the calibrated optical centre) is the
+    # correction (the image is multiplied by it): both as in their guides
     centre = _numbers(tags.get("VignettingCenter"))
     poly = _numbers(tags.get("VignettingPolynomial"))
     multiply = False
@@ -448,13 +488,25 @@ def radiance_image(path, tags: dict | None = None) -> tuple[np.ndarray, dict]:
         centre = [_number(tags.get("CalibratedOpticalCenterX"), w / 2), _number(tags.get("CalibratedOpticalCenterY"), h / 2)]
         poly = _numbers(tags.get("VignettingData"))
         multiply = True
+    fall_off = None
     if len(centre) >= 2 and poly:
         yy, xx = np.mgrid[0:h, 0:w]
-        r = np.sqrt((xx - centre[0]) ** 2 + (yy - centre[1]) ** 2).astype(np.float32)
+        r = np.sqrt((xx - centre[0]) ** 2 + (yy - centre[1]) ** 2)
         v = np.ones_like(r)
         for k, c in enumerate(poly, 1):
             v += c * r ** k
-        v = np.where(v > 1e-6, v, 1.0).astype(np.float32)
+        fall_off = v
+    else:
+        coef = _numbers(tags.get("VignettingPolynomial2D"))
+        powers = _numbers(tags.get("VignettingPolynomial2DName"))
+        if coef and len(powers) >= 2 * len(coef):
+            x = (np.arange(w, dtype=np.float64) / w)[None, :]
+            y = (np.arange(h, dtype=np.float64) / h)[:, None]
+            fall_off = np.zeros((h, w))
+            for i, c in enumerate(coef):
+                fall_off += c * x ** powers[2 * i] * y ** powers[2 * i + 1]
+    if fall_off is not None:
+        v = np.where(fall_off > 1e-6, fall_off, 1.0).astype(np.float32)
         norm = norm * v if multiply else norm / v
         used["vignetting"] = True
     if dji:  # the guide's normalised camera value, with the gain adjustment of the band
@@ -462,45 +514,131 @@ def radiance_image(path, tags: dict | None = None) -> tuple[np.ndarray, dict]:
         used["model"] = "dji"
         used["gain_adjustment"] = adjust
         return (norm * adjust / (max(gain, 1e-9) * max(exposure, 1e-9))).astype(np.float32), used
-    cal = _numbers(tags.get("RadiometricCalibration"))
-    if len(cal) >= 3:  # MicaSense: L = V * a1 / g * (p - pBL) / (te + a2 * y - a3 * te * y), y the row
+    if micasense:  # L = V * a1 / g * (p - pBL) / (te + a2 * y - a3 * te * y), y the row; never below 0
         a1, a2, a3 = cal[:3]
-        rows = np.arange(h, dtype=np.float32)[:, None]
+        rows = np.arange(h, dtype=np.float64)[:, None]
         denom = exposure + a2 * rows - a3 * exposure * rows
-        rad = norm * (a1 / max(gain, 1e-9)) / np.where(np.abs(denom) > 1e-12, denom, 1e-12)
+        rad = np.maximum(norm, 0.0) * (a1 / max(gain, 1e-9)) / np.where(np.abs(denom) > 1e-12, denom, 1e-12)
         used["model"] = "micasense"
         return rad.astype(np.float32), used
     used["model"] = "normalised"
     return (norm / (max(gain, 1e-9) * max(exposure, 1e-9))).astype(np.float32), used
 
 
+def _micasense_lwir(tags: dict) -> bool:
+    return _band_alias(tags.get("BandName")) == "LWIR" and (
+        "micasense" in str(tags.get("Make") or "").lower() or tags.get("ThermalCalibrationParameters") is not None)
+
+
+def _version(text) -> tuple:
+    return tuple(int(n) for n in re.findall(r"\d+", str(text or ""))[:3])
+
+
+def _horizontal_irradiance_valid(tags: dict) -> bool:
+    """Whether the DLS 2's horizontal irradiance can be taken as written: some firmware of the
+    Altum (before 1.2.3) and of the RedEdge(-M/-MX) (before 5.1.7) computed it wrong while the direct
+    and scattered parts were right (MicaSense's documentation); the firmware is the EXIF Software."""
+    model = str(tags.get("Model") or "")
+    firmware = _version(tags.get("Software"))
+    good = {"Altum": (1, 2, 3), "RedEdge": (5, 1, 7), "RedEdge-M": (5, 1, 7)}.get(model)
+    return good is None or not firmware or firmware >= good
+
+
 def irradiance_of(tags: dict) -> float | None:
-    """The irradiance of the sun sensor (DLS) in the tags, W/m2/nm, when it is there."""
-    for key in ("HorizontalIrradiance", "Irradiance", "SpectralIrradiance"):
+    """The irradiance of the sun sensor (DLS) in the tags, W/m2/nm, when it is there: the
+    horizontal irradiance of a DLS 2 (MicaSense writes it in hundredths of W/m2/nm unless
+    ``IrradianceScaleToSIUnits`` says otherwise; with a firmware that wrote it wrong, direct x
+    sin(sun's elevation) + scattered), else the spectral irradiance the sensor measured (a DLS 1,
+    not corrected for the sensor's tilt)."""
+    horizontal = _number(tags.get("HorizontalIrradiance"), None)
+    scale = _number(tags.get("IrradianceScaleToSIUnits"), None)
+    if scale is None:
+        scale = 0.01 if horizontal is not None else 1.0
+    if horizontal and _horizontal_irradiance_valid(tags):
+        return horizontal * scale
+    direct, scattered = _number(tags.get("DirectIrradiance"), None), _number(tags.get("ScatteredIrradiance"), None)
+    elevation = _number(tags.get("SolarElevation"), None)  # radians
+    if direct and scattered is not None and elevation is not None:
+        return (direct * np.sin(elevation) + scattered) * scale
+    for key in ("Irradiance", "SpectralIrradiance"):
         v = _number(tags.get(key), None)
         if v:
-            return v
+            return v * scale
     return None
 
 
-def panel_factors(captures: dict[str, dict[str, Path]], capture: str, region, reflectance: dict[str, float] | float) -> dict:
+def panel_in_tags(tags: dict) -> tuple[list[tuple[float, float]], float | None] | None:
+    """The calibration panel a MicaSense camera found by itself in a photo (``CalibrationPicture``
+    2, the panel's QR code read): the corners of its reflective area in the image (``ReflectArea``,
+    x y pairs) and its reflectance in this band (``Albedo``, from the QR code), or None."""
+    corners = _numbers(tags.get("ReflectArea"))
+    if len(corners) < 6 or len(corners) % 2:
+        return None
+    return [(corners[k], corners[k + 1]) for k in range(0, len(corners), 2)], _number(tags.get("Albedo"), None)
+
+
+def _region_mask(region, shape) -> np.ndarray:
+    """The pixels of a panel ``region``: a rectangle (x0, y0, x1, y1) or a polygon [(x, y), ...]."""
+    mask = np.zeros(shape, bool)
+    pts = np.asarray(region, float)
+    if pts.ndim == 1 and pts.size == 4:
+        x0, y0, x1, y1 = (int(v) for v in pts)
+        mask[max(y0, 0):max(y1, 0), max(x0, 0):max(x1, 0)] = True
+        return mask
+    poly = np.zeros(shape, np.uint8)
+    cv2.fillPoly(poly, [np.round(pts.reshape(-1, 2)).astype(np.int32)], 1)
+    return poly.astype(bool)
+
+
+def panel_factors(captures: dict[str, dict[str, Path]], capture: str, region=None,
+                  reflectance: dict[str, float] | float | None = None, found: dict | None = None) -> dict:
     """The factor reflectance / radiance of every band from the photo of a calibration panel
-    (the capture that shows it, the ``region`` (x0, y0, x1, y1) of the panel in its images, the
-    known reflectance of the panel per band or one for all)."""
+    (the capture that shows it, the ``region`` of the panel in its images - x0, y0, x1, y1 or the
+    corners of a polygon - and the known reflectance of the panel per band or one for all).
+    Without a ``region`` or a ``reflectance``, what the camera wrote (:func:`panel_in_tags`: a
+    MicaSense camera finds its panel and reads its reflectances from the QR code); a band whose
+    tags have no panel takes the corners of a band that has (moved onto it with the registration
+    of the bands) and the mean reflectance of the others. ``found``, when given, collects where
+    the region and the reflectance of every band came from."""
     bands = captures[capture]
-    x0, y0, x1, y1 = (int(v) for v in region)
+    tags = {b: xmp_of(p) for b, p in bands.items()}
+    in_tags = {b: panel_in_tags(t) for b, t in tags.items() if b not in NON_SPECTRAL and not _micasense_lwir(t)}
+    rads = {b: radiance_image(bands[b], tags[b])[0] for b in in_tags}
+    regions: dict = {}
+    if region is not None:
+        regions = {b: region for b in rads}
+    else:
+        regions = {b: t[0] for b, t in in_tags.items() if t}
+        missing = [b for b in rads if b not in regions]
+        if missing and regions:  # the corners of a band with a panel, carried onto the others
+            source = next(iter(regions))
+            images = {source: rads[source], **{b: rads[b] for b in missing}}
+            hs = register_bands(images, source, cameras=band_cameras({b: tags[b] for b in images}))
+            for b in missing:  # the homography maps a pixel of the source band onto the band's own grid
+                pts = np.asarray(regions[source], np.float64)
+                xy = cv2.perspectiveTransform(pts[None], np.asarray(hs[b], np.float64))[0]
+                regions[b] = [tuple(float(v) for v in p) for p in xy]
+    albedo = {b: t[1] for b, t in in_tags.items() if t and t[1]}
     out = {}
-    for band, path in bands.items():
-        rad, _ = radiance_image(path)
-        patch = rad[max(y0, 0):y1, max(x0, 0):x1]
-        if patch.size == 0:
+    for band, rad in rads.items():
+        if band not in regions:
             continue
-        rho = reflectance.get(band) if isinstance(reflectance, dict) else reflectance
+        if reflectance is None:
+            rho = albedo.get(band, float(np.mean(list(albedo.values()))) if albedo else None)
+        else:
+            rho = reflectance.get(band) if isinstance(reflectance, dict) else reflectance
         if rho is None:
             continue
-        mean = float(np.mean(patch))
+        mask = _region_mask(regions[band], rad.shape)
+        if not mask.any():
+            continue
+        mean = float(np.mean(rad[mask]))
         if mean > 0:
             out[band] = float(rho) / mean
+            if found is not None:
+                found[band] = {"region": np.asarray(regions[band], float).round(1).tolist(), "reflectance": float(rho),
+                               "radiance": mean,
+                               "from": "given" if region is not None else ("tags" if in_tags.get(band) else "carried")}
     return out
 
 
@@ -521,23 +659,83 @@ def reflectance_image(path, factor: float | None = None, tags: dict | None = Non
 
 # ------------------------------------------------------------------------------ registration
 BAND_ORDER = ("Blue", "Green", "Red", "RedEdge", "NIR", "LWIR")  # by wavelength: the neighbours look alike
+# the centre of each band in nanometres (MicaSense's, near enough for the others); a band named with
+# its wavelength (Blue444, RedEdge705) has it in the name; the panchromatic band covers the visible
+WAVELENGTHS = {"Blue": 475, "Green": 560, "Red": 668, "RedEdge": 717, "NIR": 842, "Panchro": 634, "LWIR": 11000}
 
 
-def _wavelength_index(band: str) -> int:
-    return BAND_ORDER.index(band) if band in BAND_ORDER else len(BAND_ORDER)
+def _wavelength_index(band: str) -> float:
+    m = re.fullmatch(r"[A-Za-z]+?(\d{3,5})", band)
+    if m:
+        return float(m.group(1))
+    return float(WAVELENGTHS.get(band, 1e5))
+
+
+def _rig_rotation(degrees) -> np.ndarray:
+    """The rotation of a band's camera in the rig from MicaSense's ``RigRelatives`` (degrees about
+    x, then y, then z, composed Rx Ry Rz)."""
+    ax, ay, az = np.radians([float(v) for v in degrees[:3]])
+    rx = np.array([[1, 0, 0], [0, np.cos(ax), -np.sin(ax)], [0, np.sin(ax), np.cos(ax)]])
+    ry = np.array([[np.cos(ay), 0, np.sin(ay)], [0, 1, 0], [-np.sin(ay), 0, np.cos(ay)]])
+    rz = np.array([[np.cos(az), -np.sin(az), 0], [np.sin(az), np.cos(az), 0], [0, 0, 1]])
+    return rx @ ry @ rz
+
+
+def band_cameras(tags: dict[str, dict], shapes: dict[str, tuple] | None = None) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """The camera of every band whose tags describe it (MicaSense: focal length and principal point
+    in millimetres, ``FocalPlaneXResolution`` pixels per millimetre, the rotation in the rig
+    ``RigRelatives``): ``{band: (K, R)}``. The bands of a MicaSense camera are separate cameras
+    with their own lens - the panchromatic band of a RedEdge-P or an Altum-PT and the thermal one
+    of an Altum see another field at another scale, a few degrees apart - and :func:`register_bands`
+    starts from what these say. ``shapes`` (rows, columns) check the principal point."""
+    out = {}
+    for band, t in tags.items():
+        f = _number(t.get("PerspectiveFocalLength"), None)
+        res = _number(t.get("FocalPlaneXResolution"), None)
+        res_y = _number(t.get("FocalPlaneYResolution"), res)
+        pp = _numbers(t.get("PrincipalPoint"))
+        rig = _numbers(t.get("RigRelatives"))
+        if not f or not res or len(pp) < 2:
+            continue
+        if str(t.get("PerspectiveFocalLengthUnits") or "mm").lower() not in ("mm", ""):
+            fx = fy = f  # already in pixels
+        else:
+            fx, fy = f * res, f * res_y
+        cx, cy = pp[0] * res, pp[1] * res_y
+        if shapes and band in shapes:
+            h, w = shapes[band][:2]
+            if not (0 < cx < w and 0 < cy < h):
+                continue
+        k = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
+        out[band] = (k, _rig_rotation(rig) if len(rig) >= 3 else np.eye(3))
+    return out
+
+
+def _camera_homography(cameras: dict, reference: str, band: str) -> np.ndarray | None:
+    """Reference pixel -> band pixel for a scene far away (rotation only, no lens distortion)."""
+    if not cameras or reference not in cameras or band not in cameras:
+        return None
+    (kr, rr), (kb, rb) = cameras[reference], cameras[band]
+    h = kb @ rb.T @ rr @ np.linalg.inv(kr)
+    return h / h[2, 2]
 
 
 def register_bands(images: dict[str, np.ndarray], reference: str, scale: int = 2, iterations: int = 100,
-                   quality: dict | None = None) -> dict[str, np.ndarray]:
+                   quality: dict | None = None, cameras: dict | None = None) -> dict[str, np.ndarray]:
     """The homography of every band onto the ``reference`` band (ECC on the gradient magnitudes,
     at a reduced size then scaled back): ``{band: 3 x 3}`` mapping a pixel of the reference to
     the same point in the band (what :func:`warp_band` needs), the identity for the reference
-    and for a band ECC cannot register. The bands are registered in a chain by wavelength: a
+    and for a band ECC cannot register. A band of another size (the panchromatic band of a
+    RedEdge-P, the thermal one of an Altum) is matched at the reference's size and its homography
+    given onto its own pixels. The bands are registered in a chain by wavelength: a
     band is matched against the two registered bands nearest to it in wavelength, already brought
     into the frame of the reference, and the better match wins - a leaf is bright and textured in
     the NIR, dark and smooth in the red, so NIR on red seldom converges (correlation 0.1-0.3 on a
     DJI P4 Multispectral over scrub), NIR on red-edge always does (0.9). ``quality``, when given,
-    collects the ECC correlation of every band and the band it was matched to."""
+    collects the ECC correlation of every band and the band it was matched to. ``cameras``
+    (:func:`band_cameras`) give where to start: the band brought onto the reference by the
+    cameras' geometry first, ECC from there; a band ECC cannot match (a thermal band: its edges are
+    not those of the others) keeps the cameras' homography when ECC would move it far from it."""
     ref = images[reference]
     out = {}
     h0, w0 = ref.shape[:2]
@@ -585,8 +783,27 @@ def register_bands(images: dict[str, np.ndarray], reference: str, scale: int = 2
                      key=lambda b: (abs(_wavelength_index(b) - _wavelength_index(reference)), b))
     for band in pending:
         img = images[band]
-        if img.shape[:2] != (h0, w0):
-            img = cv2.resize(np.nan_to_num(img.astype(np.float32)), (w0, h0), interpolation=cv2.INTER_AREA)
+        start = _camera_homography(cameras, reference, band)
+        size = np.eye(3)  # from the reference's frame to the band's own pixels
+        if start is not None:
+            # the band seen through the cameras' geometry, reduced first when it is much finer (the
+            # panchromatic band: the warp alone would alias it); replicated edges, not NaN: an edge of
+            # zeros would be the strongest gradient of the image
+            src = np.nan_to_num(img.astype(np.float32))
+            k = min(img.shape[0] / h0, img.shape[1] / w0)
+            if k > 1.3:
+                src = cv2.resize(src, (int(round(img.shape[1] / k)), int(round(img.shape[0] / k))), interpolation=cv2.INTER_AREA)
+                down = np.diag([src.shape[1] / img.shape[1], src.shape[0] / img.shape[0], 1.0])
+            else:
+                down = np.eye(3)
+            size = start
+            img = cv2.warpPerspective(src, down @ start, (w0, h0), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                                      borderMode=cv2.BORDER_REPLICATE)
+        elif img.shape[:2] != (h0, w0):
+            size = np.diag([img.shape[1] / w0, img.shape[0] / h0, 1.0])
+            small = img.shape[0] < h0
+            img = cv2.resize(np.nan_to_num(img.astype(np.float32)), (w0, h0),
+                             interpolation=cv2.INTER_LINEAR if small else cv2.INTER_AREA)
         pimg_full = grad(img, 1)
         pimg_half = grad(img, scale) if scale > 1 else pimg_full
         nearest = sorted(targets, key=lambda t: (abs(_wavelength_index(t) - _wavelength_index(band)), t != reference))[:2]
@@ -598,7 +815,13 @@ def register_bands(images: dict[str, np.ndarray], reference: str, scale: int = 2
             if cc >= 0.6:  # good enough: the second candidate is for the bands that look unlike
                 break
         h, cc, matched = best
-        out[band] = h
+        if start is not None and cc < 0.3:
+            # a weak match: kept only when it stays near the cameras' geometry (2 % of the diagonal)
+            corners = np.array([[0, 0], [w0, 0], [0, h0], [w0, h0]], np.float64)[None]
+            moved = np.linalg.norm(cv2.perspectiveTransform(corners, h)[0] - corners[0], axis=1).max()
+            if moved > 0.02 * np.hypot(w0, h0):
+                h, matched = np.eye(3), "cameras"
+        out[band] = size @ h
         if quality is not None:
             quality[band] = {"correlation": cc, "on": matched}
         if cc > 0.15:  # registered: a target for the bands further away in wavelength
@@ -727,14 +950,33 @@ def multispectral_cameras(chunk: Chunk) -> list:
     return [c for c in chunk.cameras if c.meta.get("bands")]
 
 
-def calibrate_panel(chunk: Chunk, camera, region, reflectance: dict[str, float] | float) -> dict:
-    """The panel factors from the capture of ``camera`` (its bands), kept in the chunk."""
+def calibrate_panel(chunk: Chunk, camera, region=None, reflectance: dict[str, float] | float | None = None) -> dict:
+    """The panel factors from the capture of ``camera`` (its bands), kept in the chunk. Without a
+    ``region`` or a ``reflectance``, the panel the camera found and the reflectances it read
+    (MicaSense: :func:`panel_in_tags`)."""
     captures = {camera.meta.get("capture", "panel"): {b: Path(p) for b, p in camera.meta["bands"].items()}}
-    factors = panel_factors(captures, next(iter(captures)), region, reflectance)
+    found: dict = {}
+    factors = panel_factors(captures, next(iter(captures)), region, reflectance, found=found)
+    if not factors:
+        raise ValueError("no panel: give its region in the images and its reflectance (the tags of these "
+                         "photos do not say where it is)")
     ms = chunk.meta.setdefault("multispectral", {})
-    ms["panel"] = {"camera": camera.key, "region": [int(v) for v in region], "factors": factors,
-                   "reflectance": reflectance}
+    if reflectance is None:
+        reflectance = {b: v["reflectance"] for b, v in found.items()}
+    ms["panel"] = {"camera": camera.key, "region": None if region is None else np.asarray(region, float).tolist(),
+                   "factors": factors, "reflectance": reflectance,
+                   "regions": {b: v["region"] for b, v in found.items()},
+                   "source": "tags" if region is None else "given"}
     return factors
+
+
+def panel_captures(chunk: Chunk) -> list:
+    """The cameras of the chunk whose bands show a panel the camera found by itself (MicaSense)."""
+    out = []
+    for cam in multispectral_cameras(chunk):
+        if any(panel_in_tags(xmp_of(p)) for b, p in cam.meta["bands"].items() if b not in NON_SPECTRAL):
+            out.append(cam)
+    return out
 
 
 def band_stack(chunk: Chunk, camera, bands: list[str], cache: dict | None = None,
@@ -759,7 +1001,9 @@ def band_stack(chunk: Chunk, camera, bands: list[str], cache: dict | None = None
     hs = ms.get("registration", {}).get(str(camera.key))
     if hs is None:
         quality: dict = {}
-        hs = register_bands(refl, reference, quality=quality) if reference in refl else {b: np.eye(3) for b in refl}
+        cameras = band_cameras(tags, {b: v.shape for b, v in refl.items()})
+        hs = (register_bands(refl, reference, quality=quality, cameras=cameras) if reference in refl
+              else {b: np.eye(3) for b in refl})
         ms.setdefault("registration", {})[str(camera.key)] = {b: np.asarray(h).tolist() for b, h in hs.items()}
         ms.setdefault("registration_quality", {})[str(camera.key)] = quality
     shape = refl[reference].shape if reference in refl else next(iter(refl.values())).shape

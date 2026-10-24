@@ -1569,8 +1569,12 @@ class MainWindow(QMainWindow):
         if not cams:
             self._warn("Aggiungi prima le riprese multispettrali.")
             return
+        found = ms.panel_captures(self.chunk)
         v = ParamDialog.ask(self, "Pannello di calibrazione", [
-            Field("camera", "Ripresa con il pannello", cams[0].key, choices=[(c.key, c.label) for c in cams]),
+            Field("camera", "Ripresa con il pannello", (found or cams)[0].key, choices=[(c.key, c.label) for c in cams]),
+            Field("tags", "Pannello e riflettanze trovati dalla camera (MicaSense)", bool(found),
+                  tip="La camera ha riconosciuto il pannello dal codice QR: riquadro e riflettanza per banda dai tag "
+                      "delle immagini. Togli la spunta per indicarli a mano."),
             Field("x0", "Pannello: x sinistra (px)", 0, minimum=0, maximum=100000),
             Field("y0", "Pannello: y alto (px)", 0, minimum=0, maximum=100000),
             Field("x1", "Pannello: x destra (px)", 100, minimum=1, maximum=100000),
@@ -1582,7 +1586,14 @@ class MainWindow(QMainWindow):
         if not v:
             return
         cam = self.chunk.camera(v["camera"])
-        factors = ms.calibrate_panel(self.chunk, cam, (v["x0"], v["y0"], v["x1"], v["y1"]), v["reflectance"])
+        try:
+            if v.get("tags"):
+                factors = ms.calibrate_panel(self.chunk, cam)
+            else:
+                factors = ms.calibrate_panel(self.chunk, cam, (v["x0"], v["y0"], v["x1"], v["y1"]), v["reflectance"])
+        except ValueError:
+            self._warn("La camera non ha trovato un pannello in questa ripresa: indica il riquadro e la riflettanza.")
+            return
         self._dirty()
         self._info(tr("Pannello di calibrazione"), tr("Fattori per banda: {0}", ", ".join(f"{b} {f:.4g}" for b, f in factors.items())))
 
