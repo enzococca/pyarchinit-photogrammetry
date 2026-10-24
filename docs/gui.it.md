@@ -311,8 +311,9 @@ Dalla riga di comando `ppg update` dice se esiste una versione più nuova e `ppg
   altri indici o una formula, le zone come poligoni in un GeoPackage: vedi la pagina dell'API, *Camere
   multispettrali*);
   *Immagini satellitari*: *Ortorettifica una scena...* (una scena con i suoi RPC sul DEM del rilievo, conservata
-  come versione dell'ortofoto), *DSM da una coppia stereo...* (la superficie da due scene prese da due
-  direzioni, conservata come versione del DEM), *Informazioni sulla scena...* (dimensioni, bande,
+  come versione dell'ortofoto), *DSM da due o più scene...* (la superficie da due scene prese da due
+  direzioni, o da tre e più: gli RPC corretti fra loro con i punti di legame, le coppie scelte per
+  angolo e data, le loro superfici fuse; conservata come versione del DEM), *Informazioni sulla scena...* (dimensioni, bande,
   risoluzione a terra, impronta: vedi la pagina dell'API, *Immagini satellitari*);
   *Nodi di rete...*: gli altri computer che lavorano a questo progetto dalla cartella condivisa (la
   cartella da dare a `ppg node` su ognuno, i nodi presenti con core e GPU, l'interruttore che affida

@@ -336,6 +336,34 @@ sintetica vista da due "satelliti" a proiezione parallela a 25 gradi dal nadir (
 il DSM sta entro 0,6 mm (mediana) dal DEM. `ppg satellite PROGETTO info|ortho|dsm SCENA [SCENA_B]
 [--rpc] [--resolution] [--height-offset] [--height-range zmin,zmax] [--rgb 3,2,1]`.
 
+**Tre scene o più.** Gli RPC di acquisizioni diverse non sono compensati insieme: ognuno ha un
+errore di puntamento di qualche pixel, così due coppie dello stesso terreno danno superfici a metri
+l'una dall'altra e fonderle peggiora entrambe. `multi_view_dsm(scene, out, crs=None, dem=None,
+rpcs=None, pairs=None, max_pairs=6, min_angle=5, max_angle=30, correct_bias=True, min_count=None,
+agree=None)` prima li corregge fra loro (`relative_bias`): punti di legame SIFT nella parte di ogni
+scena che vede l'area, abbinamenti di ogni coppia controllati con la geometria epipolare e uniti in
+tracce (`tie_points`), poi una sola compensazione trova il punto a terra di ogni traccia e uno
+spostamento dell'immagine per scena (Gauss-Newton con i punti eliminati, pesi di Huber, un vincolo
+debole che tiene lo spostamento medio vicino a zero: la correzione è relativa, la superficie resta
+dove la mettono gli RPC insieme; `corrected_rpc` applica uno spostamento). Le coppie sono quelle
+date o quelle che trova `choose_pairs`: angolo d'intersezione fra le linee di vista
+nell'intervallo, prima le date d'acquisizione più vicine (`acquisition_date`: metadati NITF/TIFF,
+il nome di catalogo DigitalGlobe `15SEP01135603`, una data ISO nel nome), ogni scena usata una volta
+prima che un'altra lo sia due. A tasselli ogni coppia dà le sue quote su una griglia comune (come
+`stereo_dsm`, senza riempire) e `fuse_heights` tiene la mediana di quelle entro `agree` metri dalla
+mediana di tutte (predefinito 2,5 celle diviso il rapporto base/altezza mediano) dove almeno
+`min_count` concordano (2 con tre coppie o più); poi si riempiono i buchi piccoli. Il risultato
+riporta le coppie (angolo, giorni, base/altezza, parte abbinata, scarto mediano dalla superficie
+fusa), la correzione (spostamenti, punti di legame, residui prima e dopo) e la parte di celle con
+una quota. `read_rpc` legge anche gli `rpc_<ritaglio>.txt` separati da virgole dei ritagli del
+benchmark multi-vista JHU/APL (`parse_rpc_list`: la posizione del ritaglio nell'immagine intera
+viene riportata negli offset). Nel progetto: `dsm_from_scenes(chunk, scene, ...)`, una versione del
+DEM con le coppie e la correzione annotate; `ppg satellite PROGETTO dsm A B C ...
+[--correct/--no-correct] [--max-pairs] [--min-angle] [--max-angle]` (con due scene e `--correct`
+viene corretta anche la coppia). Sulla trincea sintetica vista da tre direzioni con RPC sbagliati di
+1-5 pixel i residui dei punti di legame passano da qualche pixel a meno di 0,3 e la superficie fusa è vicina al
+DEM quanto la coppia esatta; per le scene WorldView-3 contro il lidar vedi la pagina *Benchmark*.
+
 ### Altri computer
 
 Il lavoro che si divide per foto va agli altri computer della rete attraverso la cartella del

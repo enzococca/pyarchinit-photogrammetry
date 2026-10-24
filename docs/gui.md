@@ -307,8 +307,9 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   band on the DEM), *Indice e zonizzazione...* (NDVI and the other indices or a formula, the zones as
   polygons in a GeoPackage: see the API page, *Multispectral cameras*);
   *Immagini satellitari*: *Ortorettifica una scena...* (a scene with its RPCs on the DEM of the survey, kept as
-  a version of the orthomosaic), *DSM da una coppia stereo...* (the surface from two scenes taken
-  from two directions, kept as a version of the DEM), *Informazioni sulla scena...* (size, bands,
+  a version of the orthomosaic), *DSM da due o più scene...* (the surface from two scenes taken
+  from two directions, or from three or more: the RPCs corrected against each other with tie points,
+  the pairs chosen by angle and date, their surfaces fused; kept as a version of the DEM), *Informazioni sulla scena...* (size, bands,
   ground sampling distance, footprint: see the API page, *Satellite imagery*);
   *Nodi di rete...*: the other computers working on this project from the shared project folder
   (the folder to give to `ppg node` on each of them, the nodes present with their cores and GPUs,

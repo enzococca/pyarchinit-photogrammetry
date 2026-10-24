@@ -326,6 +326,34 @@ DEM and in `<data>/satellite/`. On the synthetic trench seen by two parallel-pro
 DEM. `ppg satellite PROJECT info|ortho|dsm SCENE [SCENE_B] [--rpc] [--resolution] [--height-offset]
 [--height-range zmin,zmax] [--rgb 3,2,1]`.
 
+**Three scenes or more.** The RPCs of different acquisitions are not adjusted together: each has
+a pointing error of a few pixels, so two pairs of the same ground give surfaces metres apart and a
+fusion of them is worse than either. `multi_view_dsm(scenes, out, crs=None, dem=None, rpcs=None,
+pairs=None, max_pairs=6, min_angle=5, max_angle=30, correct_bias=True, min_count=None, agree=None)`
+first corrects them against each other (`relative_bias`): SIFT tie points in the part of every
+scene that sees the area, matches of every pair checked by their epipolar geometry and joined in
+tracks (`tie_points`), then one adjustment finds the ground point of every track and one image
+shift per scene (Gauss-Newton with the points eliminated, Huber weights, a weak prior that keeps
+the mean shift near zero: the correction is relative, the surface stays where the RPCs together
+put it; `corrected_rpc` applies a shift). The pairs are those given or those `choose_pairs` finds:
+intersection angle between the lines of sight in the range, the closest acquisition dates first
+(`acquisition_date`: NITF/TIFF metadata, the DigitalGlobe catalogue name `15SEP01135603`, an ISO
+date in the name), every scene used once before any twice. Tile by tile every pair gives its
+heights on a common grid (as `stereo_dsm`, without filling) and `fuse_heights` keeps the median of
+those within `agree` metres of the median of all (default 2.5 cells over the median base to
+height) where at least `min_count` agree (2 with three pairs or more); small holes are then
+filled. The result reports the pairs (angle, days, base to height, matched share, median offset
+from the fused surface), the correction (shifts, tie points, residuals before and after) and the
+share of cells with a height. `read_rpc` also reads the comma-separated `rpc_<chip>.txt` of the
+chips of the JHU/APL multi-view stereo benchmark (`parse_rpc_list`: the chip's place in the full
+image is moved back into the offsets). In the project: `dsm_from_scenes(chunk, scenes, ...)`, a
+version of the DEM with the pairs and the correction noted; `ppg satellite PROJECT dsm A B C ...
+[--correct/--no-correct] [--max-pairs] [--min-angle] [--max-angle]` (with two scenes and
+`--correct` the pair is corrected too). On the synthetic trench seen from three directions with
+RPCs off by 1-5 pixels the residuals of the tie points go from pixels to under 0.3 and the fused
+surface is as close to the DEM as the exact pair; on WorldView-3 scenes against lidar see the
+*Benchmark* page.
+
 ### Other computers
 
 The work that splits by photo goes to the other computers of the network through the project
