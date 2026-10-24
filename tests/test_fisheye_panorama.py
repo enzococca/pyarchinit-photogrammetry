@@ -137,6 +137,13 @@ def test_panoramas_align_as_rigs(tmp_path, monkeypatch):
 
 
 def test_fisheye_photos_are_recognised_and_aligned(tmp_path):
+    """The fisheye model: read from the EXIF, refined by the alignment, projecting beyond 90
+    degrees, depth maps. The 40 photos are taken from 10 stations, 4 directions with one centre
+    each, and are aligned one by one (incremental mapper): the global one, the automatic choice
+    from 40 photos, put a camera of a station 14-37 cm off in 3 runs of 200 (RMS 23-59 mm; once
+    in the CI, 19 mm), the incremental one never (200 runs, RMS 1.4-1.6 mm). COLMAP's seeds do
+    not make the runs repeatable: the photos get their database ids in the order the extraction
+    threads finish, and the RANSAC generators are per thread."""
     import pyarchinit_photogrammetry as ppg
     from PIL import Image
 
@@ -164,7 +171,7 @@ def test_fisheye_photos_are_recognised_and_aligned(tmp_path):
     (sensor,) = ch.sensors.values()
     assert sensor.model == "OPENCV_FISHEYE"  # from the lens model in the EXIF
     ch.match_photos(quality="high")
-    assert ch.align_cameras() == 40
+    assert ch.align_cameras(mapper="incremental") == 40
     sensor = ch.sensors[sensor.key]
     assert sensor.model == "OPENCV_FISHEYE" and abs(sensor.params[0] - focal) < 3 and abs(sensor.params[4] - k1) < 0.005
     E = np.array([c.transform[:3, 3] for c in ch.cameras])
