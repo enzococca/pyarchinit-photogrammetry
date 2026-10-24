@@ -7,6 +7,7 @@ import os
 import struct
 import subprocess
 import sys
+import threading
 import time
 
 import numpy as np
@@ -175,6 +176,12 @@ def test_the_crash_log_never_stops_the_start(tmp_path, monkeypatch):
     monkeypatch.setattr(logging_setup, "_state", {})
     monkeypatch.setattr(faulthandler, "is_enabled", lambda: False)
     monkeypatch.setattr(faulthandler, "enable", refuse)
+    # install() takes the exception hooks and Qt's messages for the application: given back
+    # afterwards, or for the rest of the session Qt's warnings went to the logging captured by
+    # pytest and never reached the CI log ("Timers cannot be stopped from another thread" among
+    # them, the warning that came before the segmentation faults of 21-23 October 2026)
+    monkeypatch.setattr(sys, "excepthook", sys.excepthook)
+    monkeypatch.setattr(threading, "excepthook", threading.excepthook)
     root = logging.getLogger()
     before = list(root.handlers)
     try:
@@ -182,6 +189,9 @@ def test_the_crash_log_never_stops_the_start(tmp_path, monkeypatch):
         assert path == tmp_path / "ppg-gui.log" and logging_setup._state["crash_file"] is None
         assert "crash.log not available" in path.read_text()
     finally:
+        from PySide6.QtCore import qInstallMessageHandler
+
+        qInstallMessageHandler(None)  # Qt's own handler: the messages on stderr again
         for h in root.handlers[:]:
             if h not in before:
                 root.removeHandler(h)
