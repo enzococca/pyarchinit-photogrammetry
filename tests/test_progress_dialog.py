@@ -47,6 +47,8 @@ def test_eta_from_the_recent_rate():
 
 
 def test_the_window_lists_the_messages_with_their_time(qapp, tmp_path):
+    import time
+
     from PySide6.QtCore import QSettings
 
     from pyarchinit_photogrammetry.gui.worker import ProgressDialog
@@ -70,7 +72,9 @@ def test_the_window_lists_the_messages_with_their_time(qapp, tmp_path):
     assert dlg.log.isVisible()
     assert QSettings(QSettings.defaultFormat(), QSettings.Scope.UserScope, "pyarchinit",
                      "pyarchinit-photogrammetry").value("progress/details", False, type=bool) is True
-    dlg._t0 -= 100.0  # a hundred seconds ago, a fifth done: the estimate appears
+    # started a hundred seconds ago, a fifth done: the estimate appears (from now, not from when the
+    # window opened: on a busy runner a second had passed and the window said 0:01:41)
+    dlg._t0 = time.monotonic() - 100.0
     dlg.eta = Eta()
     dlg.eta.add(dlg._t0, 0.0)
     dlg.update_progress(0.2, "Placing photo #4: 5 in the block")
