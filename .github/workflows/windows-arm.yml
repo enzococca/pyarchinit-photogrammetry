@@ -3,8 +3,9 @@ name: windows-arm
 # Toward a native Windows ARM64 application (Snapdragon laptops, Windows 11 on a Mac with Apple
 # Silicon; the x64 application already runs there under emulation). Several libraries publish no
 # win_arm64 wheels and are built here, each in its own job: lazrs (LAZ point clouds), the native
-# core of this project, OpenCV (the modules this program uses), pycolmap (COLMAP with vcpkg, as
-# COLMAP's own Windows wheels) and Open3D (without its GUI, as this program's Linux ARM wheels). On
+# core of this project, OpenCV (the modules this program uses), VTK (the 3D view), pye57 (E57 scans),
+# pycolmap (COLMAP with vcpkg, as COLMAP's own Windows wheels) and Open3D (without its GUI, as this
+# program's Linux ARM wheels). On
 # demand; the wheels stay as artifacts. The app job takes those wheels (the runs that hold them are
 # inputs), installs the program with them, runs its tests and builds the application with PyInstaller.
 on:
@@ -12,7 +13,7 @@ on:
     inputs:
       jobs:
         description: "Jobs to run"
-        default: "lazrs core opencv pycolmap open3d sam"
+        default: "lazrs core opencv pycolmap open3d vtk pye57 sam"
       wheel_runs:
         description: "Runs of this workflow whose win-arm64-* artifacts the app job installs"
         default: "39275909789 39979737728 39296584761 39405291562"
@@ -431,6 +432,175 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: win-arm64-open3d
+          path: wheels/*.whl
+          if-no-files-found: error
+
+  vtk:
+    # VTK with its Python wrapping, as the wheels Kitware publishes for x64 and macOS (VTK_WHEEL_BUILD),
+    # the modules of the default groups (StandAlone and Rendering: those pyvista imports, lazily). The
+    # build tree is kept in the cache between runs (sources dated in the past, so Ninja resumes where a
+    # run stopped instead of starting again)
+    if: contains(inputs.jobs, 'vtk')
+    runs-on: windows-11-arm
+    timeout-minutes: 360
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          architecture: arm64
+      - name: VTK build tree of an earlier run
+        uses: actions/cache/restore@v4
+        with:
+          path: C:\vb
+          key: vtk-9.7.1-arm64-windows-py312-${{ github.run_id }}
+          restore-keys: vtk-9.7.1-arm64-windows-py312-
+      - name: VTK 9.7.1
+        timeout-minutes: 320
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          # short paths (C:\vtk, C:\vb): the deepest VTK files pass 260 characters under the workspace
+          git clone --depth 1 --branch v9.7.1 https://github.com/Kitware/VTK C:\vtk
+          $past = Get-Date "2020-01-01"
+          Get-ChildItem -Recurse -File C:\vtk | ForEach-Object { $_.LastWriteTime = $past }
+          python -m pip install --upgrade pip
+          pip install "cmake<4" ninja setuptools wheel delvewheel
+          $py = (Get-Command python).Source -replace '\\', '/'
+          $cmake = (python -c "import cmake, os; print(os.path.join(cmake.CMAKE_BIN_DIR, 'cmake.exe'))")
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath
+          if (-not $vs) { $vs = & $vswhere -latest -products * -property installationPath }
+          Import-Module (Join-Path $vs "Common7/Tools/Microsoft.VisualStudio.DevShell.dll")
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=arm64 -host_arch=arm64"
+          # the options of Kitware's wheels (.gitlab/ci/configure_wheel.cmake) without the .pyi files;
+          # no version suffix: 9.7.1 as on PyPI, or pip would take it for a pre-release
+          & $cmake -S C:\vtk -B C:\vb -G Ninja -DCMAKE_BUILD_TYPE=Release `
+            -DVTK_WHEEL_BUILD=ON -DVTK_WRAP_PYTHON=ON -DVTK_VERSION_SUFFIX= `
+            -DVTK_BUILD_TESTING=OFF -DVTK_BUILD_EXAMPLES=OFF -DVTK_ENABLE_REMOTE_MODULES=OFF `
+            -DVTK_DEBUG_LEAKS=OFF -DVTK_BUILD_PYI_FILES=OFF -DVTK_USE_PCH=OFF -DVTK_GROUP_ENABLE_Qt=NO `
+            -DVTK_SMP_IMPLEMENTATION_TYPE=STDThread `
+            -DPython3_EXECUTABLE="$py" -DPython3_FIND_STRATEGY=LOCATION
+          & $cmake --build C:\vb
+          Set-Location C:\vb
+          $env:CMAKE_EXE = $cmake
+          python setup.py bdist_wheel
+          # the DLLs of VTK (bin) go into the wheel, under their own names as in Kitware's wheels
+          $noMangle = (Get-ChildItem -Path bin -Filter *.dll -File -Name) -join ';'
+          delvewheel repair --add-path bin --no-mangle "$noMangle" `
+            --exclude "opengl32.dll;glu32.dll" -w "$env:GITHUB_WORKSPACE/wheels" (Get-ChildItem dist/*.whl).FullName
+          Get-ChildItem "$env:GITHUB_WORKSPACE/wheels" | ForEach-Object { "$($_.Name) $([math]::Round($_.Length / 1MB, 1)) MB" }
+      - name: Keep the VTK build tree
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: C:\vb
+          key: vtk-9.7.1-arm64-windows-py312-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-arm64-vtk
+          path: wheels/*.whl
+          if-no-files-found: error
+      - name: VTK and pyvista with the wheel
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m venv C:\venv
+          & C:\venv\Scripts\python -m pip install --upgrade pip
+          & C:\venv\Scripts\python -m pip install (Get-ChildItem wheels/*.whl).FullName "pyvista>=0.43" "pyvistaqt>=0.13" "PySide6>=6.6"
+          Set-Content check.py @'
+          import vtkmodules.vtkRenderingOpenGL2  # noqa: F401
+          from vtkmodules.vtkCommonCore import vtkVersion
+          import pyvista as pv, pyvistaqt  # noqa: F401
+          mesh = pv.Sphere().triangulate().decimate(0.5).compute_normals()
+          clip = mesh.clip("z")
+          print("VTK", vtkVersion.GetVTKVersion(), "pyvista", pv.__version__, "faces", mesh.n_cells, clip.n_cells)
+          '@
+          & C:\venv\Scripts\python check.py
+      - name: An image drawn by VTK (Mesa llvmpipe in place of a graphics driver)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          # the runner has no OpenGL driver beyond Windows' GDI 1.1: the software OpenGL of Mesa for ARM64,
+          # next to python.exe only for this test (the application uses the system's OpenGL)
+          $rel = Invoke-RestMethod https://api.github.com/repos/pal1000/mesa-dist-win/releases/latest
+          $asset = $rel.assets | Where-Object { $_.name -like "*-release-msvc.7z" } | Select-Object -First 1
+          Invoke-WebRequest $asset.browser_download_url -OutFile mesa.7z
+          7z x mesa.7z -omesa | Out-Null
+          Get-ChildItem mesa -Directory | ForEach-Object { $_.Name }
+          Copy-Item mesa/arm64/*.dll C:\venv\Scripts\
+          $env:GALLIUM_DRIVER = "llvmpipe"
+          Set-Content render.py @'
+          import pyvista as pv
+          p = pv.Plotter(off_screen=True, window_size=(320, 240))
+          p.add_mesh(pv.Sphere(), color="orange")
+          image = p.screenshot(return_img=True)
+          print("rendered", image.shape, "non-background pixels", int((image != image[0, 0]).any(axis=2).sum()))
+          print(p.render_window.ReportCapabilities()[:400])
+          '@
+          & C:\venv\Scripts\python render.py
+
+  pye57:
+    # E57 laser scans: pye57 from its source with xerces-c from vcpkg
+    if: contains(inputs.jobs, 'pye57')
+    runs-on: windows-11-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          architecture: arm64
+      - name: pye57 0.4.19
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $root = $PWD.Path -replace '\\', '/'
+          git clone --depth 1 https://github.com/microsoft/vcpkg "$root/vcpkg"
+          & "$root/vcpkg/bootstrap-vcpkg.bat" -disableMetrics
+          & "$root/vcpkg/vcpkg.exe" install "xerces-c[core]" --triplet arm64-windows
+          $x = "$root/vcpkg/installed/arm64-windows"
+          Get-ChildItem "$x/lib", "$x/bin" | ForEach-Object { $_.Name }
+          # pye57 links "xerces-c_3.lib"
+          if (-not (Test-Path "$x/lib/xerces-c_3.lib")) {
+            Copy-Item (Get-ChildItem "$x/lib/xerces-c*.lib" | Select-Object -First 1).FullName "$x/lib/xerces-c_3.lib"
+          }
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath
+          if (-not $vs) { $vs = & $vswhere -latest -products * -property installationPath }
+          Import-Module (Join-Path $vs "Common7/Tools/Microsoft.VisualStudio.DevShell.dll")
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=arm64 -host_arch=arm64"
+          Set-Location $root
+          # the compiler of the developer shell, with the headers and the library of xerces-c
+          $env:DISTUTILS_USE_SDK = "1"; $env:MSSdk = "1"
+          $env:INCLUDE = "$x/include;$env:INCLUDE"; $env:LIB = "$x/lib;$env:LIB"
+          python -m pip install --upgrade pip delvewheel
+          pip wheel "pye57==0.4.19" --no-binary pye57 --no-deps -w raw
+          delvewheel repair -v --add-path "$x/bin" -w wheels (Get-ChildItem raw/*.whl).FullName
+          Get-ChildItem wheels | ForEach-Object { "$($_.Name) $([math]::Round($_.Length / 1MB, 1)) MB" }
+          python -m venv C:\venv
+          & C:\venv\Scripts\python -m pip install (Get-ChildItem wheels/*.whl).FullName
+          Set-Content check.py @'
+          import os, tempfile, numpy as np, pye57
+          path = os.path.join(tempfile.mkdtemp(), "check.e57")
+          n = 1000
+          rng = np.random.default_rng(0)
+          data = {"cartesianX": rng.random(n), "cartesianY": rng.random(n), "cartesianZ": rng.random(n),
+                  "colorRed": rng.integers(0, 255, n).astype(np.uint8), "colorGreen": np.zeros(n, np.uint8),
+                  "colorBlue": np.zeros(n, np.uint8)}
+          with pye57.E57(path, mode="w") as e57:
+              e57.write_scan_raw(data)
+          back = pye57.E57(path).read_scan_raw(0)
+          assert np.allclose(back["cartesianX"], data["cartesianX"]) and (back["colorRed"] == data["colorRed"]).all()
+          print("pye57 wrote and read", len(back["cartesianX"]), "points")
+          '@
+          & C:\venv\Scripts\python check.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-arm64-pye57
           path: wheels/*.whl
           if-no-files-found: error
 
