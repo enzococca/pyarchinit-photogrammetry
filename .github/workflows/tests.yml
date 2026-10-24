@@ -57,7 +57,7 @@ jobs:
     # holds it open or memory-mapped (POSIX allows it), paths have backslashes and there is no
     # /bin/sh. No SpatiaLite in the runner image: the tests of PyArchInit databases skip themselves.
     runs-on: windows-latest
-    timeout-minutes: 150
+    timeout-minutes: 120   # about 45 minutes, 38 of them the tests
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
