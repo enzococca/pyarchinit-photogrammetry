@@ -246,12 +246,14 @@ class VtkCanvas(QWidget):
         self.sd = sd
         pl = self.plotter
         pl.clear()
+        pl.enable_lightkit()  # clear() also takes the lights away: without them a model has no shading
         self._cloud_actor = None
         if sd.points is not None and len(sd.points):
             cloud = pv.PolyData(sd.points)
             cloud["rgb"] = sd.colors
             self._cloud_actor = pl.add_mesh(cloud, scalars="rgb", rgb=True, point_size=self.point_size,
-                                            render_points_as_spheres=False, show_scalar_bar=False)
+                                            render_points_as_spheres=False, show_scalar_bar=False,
+                                            lighting=False)  # points keep their own colours
         if sd.mesh_vertices is not None:
             faces = np.hstack([np.full((len(sd.mesh_faces), 1), 3), sd.mesh_faces]).astype(np.int64).ravel()
             mesh = pv.PolyData(sd.mesh_vertices, faces)
