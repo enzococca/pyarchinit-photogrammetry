@@ -993,9 +993,21 @@ class MainWindow(QMainWindow):
             if a.toolTip() == a.text().replace("...", "").replace("&", ""):
                 a.setToolTip(a.text().replace("...", ""))
             a.setIconText(tr(short))
-        for mode in ("pan", "select", "polygon", "vertices", "reshape"):
+        self.draw_actions["polygon"].setToolTip(tr("Disegna unita' stratigrafica; dal menu: Mano libera"))
+        self.draw_actions["vertices"].setToolTip(tr("Modifica i vertici delle unita'; dal menu: Rimodella un'unita' "
+                                                    "con una linea (come in QGIS)"))
+        for mode in ("pan", "select", "polygon", "vertices"):
             db.addAction(self.draw_actions[mode])
-        db.addAction(self.a_freehand)
+        # in the menus of their buttons, so that the bar keeps its texts on a wide screen: the freehand
+        # of Disegna US (as the digitizing techniques of QGIS) and Rimodella next to Vertici
+        for mode, actions in (("polygon", [self.a_freehand]),
+                              ("vertices", [self.draw_actions["vertices"], self.draw_actions["reshape"]])):
+            button = db.widgetForAction(self.draw_actions[mode])
+            if button is not None:
+                menu = QMenu(self)
+                menu.addActions(actions)
+                button.setMenu(menu)
+                button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         db.addAction(self.a_snap)
         snap_button = db.widgetForAction(self.a_snap)
         if snap_button is not None:
@@ -6144,6 +6156,7 @@ class MainWindow(QMainWindow):
         """Freehand and snapping options to the raster view, remembered between sessions."""
         v = self.ortho_view
         v.freehand = self.a_freehand.isChecked()
+        self.draw_actions["polygon"].setIcon(icon("freehand" if v.freehand else "polygon"))  # in its menu now
         on = self.a_snap.isChecked()
         v.snap_vertex = on and self.a_snap_vertex.isChecked()
         v.snap_segment = on and self.a_snap_segment.isChecked()
