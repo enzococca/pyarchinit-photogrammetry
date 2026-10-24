@@ -2,7 +2,7 @@
 Layer always there, the others closed and opened again from *Vista > Pannelli*; moved, floated and
 tabbed; F6 / Shift+F6 from pane to pane; the layout saved with the window (that of the program up to
 1.3.3 left out) and the default one put back; the methods of the tab widgets of 1.3.3 for the plugins
-released."""
+released, and ``context.add_pane`` / ``context.show_pane`` since 1.3.4."""
 from __future__ import annotations
 
 import os
@@ -321,6 +321,90 @@ def test_reset_puts_back_panes_that_came_later(make_window, qapp):
     assert other in w.tabifiedDockWidgets(workspace) and other not in w.tabifiedDockWidgets(photos)
     assert not console.isHidden() and console in w.tabifiedDockWidgets(photos)
     assert _front(workspace) and _front(photos)
+
+
+def test_context_add_pane_show_pane_and_release(make_window, qapp, tmp_path):
+    import shiboken6
+    from PySide6.QtWidgets import QDockWidget
+
+    from pyarchinit_photogrammetry.gui import icons
+    from pyarchinit_photogrammetry.plugins.api import Context
+
+    w = make_window()
+    context = Context("prova-pannelli", tmp_path / "ctx", w)
+    first, second = QLabel("uno"), QLabel("due")
+    dock = context.add_pane(first, "Pannello di prova", "plugin")
+    dock2 = context.add_pane(second, "Secondo", area="bottom")
+    _settle(qapp)
+    assert isinstance(dock, QDockWidget) and dock.objectName() == "pane_plugin_prova-pannelli"
+    assert dock2.objectName() == "pane_plugin_prova-pannelli_2"
+    assert dock.features() & QDockWidget.DockWidgetFeature.DockWidgetClosable
+    assert dock in w.tabifiedDockWidgets(w.panes.dock(w.workspace))
+    assert dock2 in w.tabifiedDockWidgets(w.panes.dock(w.photos_panel))
+    assert dock.windowIcon().isNull() != icons.available()
+    assert {"Pannello di prova", "Secondo"} <= {a.text() for a in w.panes.menu.actions()}
+    dock.close()
+    _settle(qapp)
+    context.show_pane(first)
+    _settle(qapp)
+    assert _front(dock) and w.left_tabs.currentWidget() is first
+    context.release()  # the plugin goes: its panes too
+    _settle(qapp)
+    assert not shiboken6.isValid(dock) and not shiboken6.isValid(dock2)
+    assert w.left_tabs.indexOf(first) < 0 and w.bottom_tabs.indexOf(second) < 0
+    command_line = Context("riga", tmp_path / "cli")  # no window: nothing to add
+    assert command_line.add_pane(QLabel("x"), "x") is None
+    command_line.show_pane(first)
+
+
+def test_a_plugin_of_the_folder_with_both_kinds_of_pane(make_window, qapp, tmp_path, monkeypatch):
+    """A plugin installed in the plugin folder, loaded by the window: a pane added the 1.3.3 way and
+    one with ``add_pane``; disabled, both go."""
+    folder = tmp_path / "plugins"
+    module = "ppg_test_panes_plugin"
+    dist = folder / "pannelli" / "pannelli-0.1.0.dist-info"
+    dist.mkdir(parents=True)
+    (dist / "METADATA").write_text("Metadata-Version: 2.1\nName: pannelli\nVersion: 0.1.0\nSummary: panes\n")
+    (dist / "entry_points.txt").write_text(f"[pyarchinit_photogrammetry.plugins]\npannelli = {module}:PanesPlugin\n")
+    (dist / "WHEEL").write_text("Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n")
+    (folder / "pannelli" / module).mkdir()
+    (folder / "pannelli" / module / "__init__.py").write_text('''
+from PySide6.QtWidgets import QLabel
+
+from pyarchinit_photogrammetry.plugins import Plugin
+
+
+class OldPane(QLabel):
+    pass
+
+
+class PanesPlugin(Plugin):
+    title = "Pannelli di prova"
+
+    def activate(self, context):
+        self.context = context
+        self.old, self.new = OldPane("vecchio"), QLabel("nuovo")
+        context.window.left_tabs.addTab(self.old, "Vecchio modo")
+        context.add_pane(self.new, "Nuovo modo", "plugin", area="right")
+
+    def deactivate(self):
+        tabs = self.context.window.left_tabs
+        k = tabs.indexOf(self.old)
+        if k >= 0:
+            tabs.removeTab(k)
+''')
+    monkeypatch.setenv("PPG_PLUGINS_DIR", str(folder))
+    w = make_window()
+    plugin = w.plugins.get("pannelli").plugin
+    assert plugin is not None
+    old, new = w.panes.dock(plugin.old), w.panes.dock(plugin.new)
+    assert old.objectName() == "pane_plugin_pannelli"  # the plugin's name, from the package of its pane
+    assert new.objectName() == "pane_plugin_pannelli_2"
+    assert new in w.tabifiedDockWidgets(w.d_pa)
+    w.plugins.unload()
+    _settle(qapp)
+    assert w.left_tabs.indexOf(plugin.old) < 0 and w.panes.dock(plugin.new) is None
+    assert {d.objectName() for d in w.panes.docks} == set(LEFT + BOTTOM + ["pane_pyarchinit"])
 
 
 def test_panes_in_english(make_window, qapp):

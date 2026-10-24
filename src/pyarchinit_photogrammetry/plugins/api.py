@@ -92,6 +92,7 @@ class Context:
         self._settings: dict | None = None
         self.contributions = Contributions()
         self.log = logging.getLogger(f"pyarchinit_photogrammetry.plugins.{name}")
+        self._panes: list = []  # widgets given to add_pane: out of the window with release()
 
     @property
     def app(self):
@@ -375,9 +376,31 @@ class Context:
         except RuntimeError:  # the window is being closed
             pass
 
+    # ------------------------------------------------------------------ panes (since 1.3.4)
+    def add_pane(self, widget, title: str, icon=None, area: str = "left"):
+        """Since 1.3.4: ``widget`` as a pane of the window, a dock of its own tabbed with the panes of
+        ``area`` ("left", "bottom" or "right"): the user moves it, floats it as a window, closes it and
+        opens it again from *Vista > Pannelli*, and the window remembers where it was. ``icon``: a QIcon
+        or the name of an icon of the program ("plugin", "relief", ...). Returns the dock, None in the
+        command line; the pane goes away with the plugin (:meth:`release`)."""
+        method = getattr(self.window, "add_pane", None)
+        if method is None:
+            return None
+        name = f"pane_plugin_{self.name}" + (f"_{len(self._panes) + 1}" if self._panes else "")
+        dock = method(widget, title, icon, area=area, name=name)
+        self._panes.append(widget)
+        return dock
+
+    def show_pane(self, widget) -> None:
+        """Since 1.3.4: a pane of the plugin in front, also when the user closed it or floated it.
+        Nothing in the command line."""
+        method = getattr(self.window, "show_pane", None)
+        if method is not None:
+            method(widget)
+
     def release(self) -> None:
-        """What the plugin connected through the context, disconnected, and its items taken out of the
-        workspace (the manager calls it after :meth:`Plugin.deactivate`)."""
+        """What the plugin connected through the context, disconnected, its items taken out of the workspace
+        and its panes out of the window (the manager calls it after :meth:`Plugin.deactivate`)."""
         for signal, slot in self.contributions.connections:
             try:
                 signal.disconnect(slot)
@@ -389,6 +412,14 @@ class Context:
             tree.providers[:] = [p for p in tree.providers if not any(p is e for e in self.contributions.tree_items)]
             self.contributions.tree_items.clear()
             self.refresh_tree()
+        remove = getattr(self.window, "remove_pane", None)
+        for widget in self._panes:
+            try:
+                if remove is not None:
+                    remove(widget)
+            except RuntimeError:  # the window is already gone
+                pass
+        self._panes.clear()
 
     def run(self, title: str, function: Callable, done: Callable | None = None) -> object:
         """``function(progress)`` with a progress bar: in the background in the window (``done(result)``
