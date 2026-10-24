@@ -514,6 +514,23 @@ def test_a_section_moved_in_qgis_is_cut_again(processed, tmp_path):
         assert "Sezione 1: sezione ricalcolata sulla nuova traccia" in _log(w)
         assert "Da QGIS: Sezione 1 modificata" in _log(w)
         qgis.close()
+
+        # Annulla puts the trace back, and its drawing is cut again along it; Ripeti the other way
+        w.a_qgis_live.setChecked(False)  # the queue of the window does it, not the look at QGIS
+        moved = svg.stat().st_mtime_ns
+        time.sleep(0.01)
+        w.undo()
+        w.runner.wait()
+        app.processEvents()
+        (s,) = w.sections
+        assert s["p1"] == [X0 + 1.0, Y0 + 1.5] and s["p2"] == [X0 + 3.0, Y0 + 1.5]
+        assert 1.9 < s["length"] < 2.1 and svg.stat().st_mtime_ns > moved
+        w.redo()
+        w.runner.wait()
+        app.processEvents()
+        (s,) = w.sections
+        assert s["p2"] == [X0 + 3.0, Y0 + 2.5] and s["length"] == pytest.approx(2.5, abs=0.05)
+        assert _log(w).count("Sezione 1: sezione ricalcolata sulla nuova traccia") == 3
     finally:
         w.setWindowModified(False)
         w.close()
