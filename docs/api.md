@@ -1030,9 +1030,9 @@ overviews refreshed in the window; `chunk.meta["dem_edits"]` lists the edits.
 
 | Call | Description |
 | --- | --- |
-| `archaeo.coreg.coregister(reference_path, dem_path, out_path=None, stable=None, exclude=None, tilt=True, max_iter=10, method="auto")` | a DEM moved onto a reference over the ground that did not change; returns a `Coregistration`, writes the DEM moved with `out_path` |
+| `archaeo.coreg.coregister(reference_path, dem_path, out_path=None, stable=None, exclude=None, tilt=True, max_iter=10, method="auto", search=None)` | a DEM moved onto a reference over the ground that did not change, also from metres away; returns a `Coregistration`, writes the DEM moved with `out_path` |
 | `chunk.coregister_dem(reference, stable=None, exclude=None, tilt=True, max_iter=10, method="auto", name=None)` | the DEM of the chunk moved onto another chunk, `(chunk, version id)` or a file; kept as the active version |
-| `coreg.coregister_chunk(chunk, reference, ...)` | the same as a module function |
+| `coreg.coregister_chunk(chunk, reference, ..., search=None)` | the same as a module function |
 | `coreg.reference_dem(reference)` | path, label and keys of a reference |
 | `coreg.summary(result)` | one line: shift, bias, tilt, NMAD before and after |
 | `coreg.bilinear(z, transform, x, y, strict=True)` | heights of a grid at points (NaN outside) |
@@ -1058,17 +1058,62 @@ on a regular sample of the reference (`max_samples`, `step`), with slopes from t
 neighbours. The two DEMs may have different grids; different coordinate systems or rotated rasters
 raise `ValueError`, and so do DEMs that do not overlap or differ almost everywhere.
 
+**Shifts of metres.** The fit is a local one: it finds a shift only when it is shorter than the
+scale of the relief (about 1.5 m on ground with waves of 0.4-3 m), and two surveys georeferenced
+with different GPS are metres apart. So the slopes of the two DEMs are first correlated at every
+shift at once: both are averaged on a lattice of at most 512 cells a side (at least 2 cells of the
+reference each), smoothed alike, and the normalised cross-correlation of their slope vectors (east,
+north) is computed by FFT with the masks of both - only the cells present in both at a shift count,
+so irregular outlines and partial overlaps do not matter - at the shifts where the two overlap by at
+least 30 % of the most they can. Slopes rather than heights or hillshades: they do not see the
+vertical bias (metres between two GPS), a tilt only adds a constant to them that the normalisation
+takes away, and they do not depend on the direction of a light. A correlation rather than a
+coarse-to-fine pyramid of the fit: it tries every shift, so how long the shift is does not matter,
+only that the ground shows something - the slopes of a tell, the walls of a trench, the few ditches
+of a level field - whereas a pyramid of fits reaches further only where the ground has relief at
+larger scales (a tell, not a level field with a few features). The best four shifts are correlated
+again without the cells that changed there (the steep walls of a pit dug in between, vegetation
+that grew), and the best of them is taken when it correlates at least 0.2, no shift elsewhere comes
+within 10 % of it (else `ambiguous`: ground that repeats itself - ploughing, rows of vines, a grid of
+pits) and the shifts nearly as good do not spread along a line (one long ditch, furrows: `ambiguous`
+too); flat ground and DEMs of different ground give `none`. `search` (metres) limits the shifts
+looked at (`0`: no search); when a clearly better match lies further, the best one within reach
+only looks like the ground and is not used (`beyond`).
+
+The fit is always run from the DEM as it is: when it ends within 1.5 cells of the search of the
+shift found (`confirmed`), nothing else is done - the few centimetres between the phases of an
+excavation give the same result as before. Otherwise it is run again from the shift found and kept
+(`used`) only if it leaves at most half as much of the sloped ground (at least 3 degrees: the ground
+that tells a horizontal shift) in disagreement - beyond `k` times the smaller NMAD of the two fits -
+and agrees on at least 5 % of it more; else the fit from the DEM as it is stays (`rejected`). The
+NMAD does not decide: on level ground with a few features, the features a wrong shift leaves out of
+place are taken for ground that changed and the NMAD of the rest is as small, and reading a DEM
+between its cells averages its noise, so the NMAD also depends on where the shift falls between the
+cells. A direction the slopes cannot measure is not moved by the fit: it stays 0, or where the
+search put it. Coregistering DSMs of ground whose vegetation changed between the surveys (crops,
+bushes), the search may find nothing: coregister the DTMs (`chunk.build_dem(..., classes=[2])`).
+
 The `Coregistration` gives `dx`, `dy` (the DEM showed the ground that far east and north of the
 reference), `dz` (that much higher at `centre`, the centre of the DEM), `tilt_x`, `tilt_y` (metres
 per metre), `nmad_before`, `nmad_after`, `rmse_before`, `rmse_after`, `median_before`, `median_after`
 (on the stable cells), `cells` (stable at the end), `compared`, `step`, `iterations`, `converged`,
-`horizontal`, `stable_index` (rows and columns of the stable cells on the grid of the reference),
-`to_dict()` and `correction(x, y)`. The DEM written is `z(x + dx, y + dy) - (dz + tilt_x (x - x0) +
-tilt_y (y - y0))` on the grid of the input DEM, float32 with NaN where empty (BigTIFF when needed,
-overviews). On a synthetic survey of 1 cm cells shifted by 7 and -4 cm, raised by 1.5 cm and
-tilted by 1.8 mm/m, with a pit dug in between, the shift comes back within a thousandth of a cell,
-`dz` within 0.2 mm, the NMAD on the stable ground goes from 15 to 1 mm (the noise) and the volume
-of the pit is right within 0.2 % (11.5 % off before); 36 million cells take 12 s.
+`horizontal`, `initial` (what the search did: `off`, `none`, `ambiguous`, `beyond`, `confirmed`,
+`used`, `rejected`), `initial_shift` (the shift it found, metres east and north), `initial_score`
+(the correlation of the slopes there), `search_cell` (its cells, metres), `method_used`
+(`"search+nuth_kaab"` when the fit started from the search), `stable_index` (rows and columns of the
+stable cells on the grid of the reference), `to_dict()` and `correction(x, y)`; `summary()` says
+what the search did. The DEM written is `z(x + dx, y + dy) - (dz + tilt_x (x - x0) + tilt_y (y -
+y0))` on the grid of the input DEM, float32 with NaN where empty (BigTIFF when needed, overviews).
+On a synthetic survey of 1 cm cells shifted by 7 and -4 cm, raised by 1.5 cm and tilted by 1.8 mm/m,
+with a pit dug in between, the shift comes back within a thousandth of a cell, `dz` within 0.2 mm,
+the NMAD on the stable ground goes from 15 to 1 mm (the noise) and the volume of the pit is right
+within 0.2 % (11.5 % off before). Two surveys 4.3 m east and 2.7 m south of each other, 3 m higher
+and tilted by 2.2 mm/m, overlapping on 80 % of their area, with a pit dug in between, on rough ground
+whose relief is all shorter than the shift: the search finds the shift within a tenth of its cells,
+the fit within a thousandth of a cell, the NMAD goes from 21 cm to 3 mm and the volume of the pit is
+right within 0.2 % (without the search the DEM stays where it is: three quarters of the pit missing
+and 0.56 m³ of fill that is not there). 4 million cells take 3 s and 36 million 15 s, about a second
+of which for the search.
 
 **`chunk.coregister_dem(...)`**: the DEM as it was is kept among the versions (`versions`), the
 moved one becomes the active DEM in the chunk folder, named `name` or "DEM coregistrato su
@@ -1079,9 +1124,10 @@ DEM itself raises `ValueError`.
 **`method="xdem"`** uses the library xdem (`pip install pyarchinit-photogrammetry[coreg]`; not in
 `all` nor in the packaged application): `NuthKaab` and, with `tilt`, `Deramp` of the first order,
 fitted on the stable ground of this module (the cells that changed found on the differences before
-coregistration). What xdem applied is measured on its result, so the shift, bias and tilt read as
-above; when the grids differ the result covers the part of the DEM on the grid of the reference.
-`"auto"` and `"nuth_kaab"` are the implementation of the program.
+coregistration), without the initial search: DEMs metres apart need `"auto"`. What xdem applied is
+measured on its result, so the shift, bias and tilt read as above; when the grids differ the result
+covers the part of the DEM on the grid of the reference. `"auto"` and `"nuth_kaab"` are the
+implementation of the program.
 
 ## Elevations: orthophoto and relief on a plane or a cylinder
 
@@ -1321,7 +1367,7 @@ ppg tables scavo.ppg tabelle.xlsx --chunk "Saggio 1" --lang en
 | `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |
 | `archaeo.pottery` | `estimate_axis`, `profile_at`, `best_profile`, `Profile.measurements`, `rim` (circle of the lip: diameter, arc kept, reliability), `measure` (profile and measurements of a vessel or sherd, axis moved to the centre of the rim), `percent_class`, `signature`, `signature_distance`, `draw` (SVG, DXF, PNG) |
 | `archaeo.terrain` | `contours` (simplified, optional smoothing), `suggest_interval`, `dem_range`, `export_contours`, `volume`, `hillshade`, `slope_degrees` |
-| `archaeo.coreg` | `coregister` (Nuth & Kääb shift with bias and tilt on the stable ground), `Coregistration`, `coregister_chunk`, `reference_dem`, `summary`, `bilinear`, `xdem_available` |
+| `archaeo.coreg` | `coregister` (initial search on the slopes for shifts of metres, then the Nuth & Kääb shift with bias and tilt on the stable ground), `Coregistration`, `coregister_chunk`, `reference_dem`, `summary`, `bilinear`, `xdem_available` |
 | `archaeo.stratigraphy` | `UnitPolygon`, `mask_to_polygons`, `export_units` |
 | `bim.ifc` | `export_ifc`, `export_chunk_ifc`, `export_proxies_ifc`, `split_mesh_by_units`, `global_id` (IFC GlobalId from the `node_uuid` of a US form), `read_ifc_elements` |
 | `archaeo.stratigraphy` (relations) | `RELATION_EDGES` (the relations of PyArchInit's forms in Italian, English and German as Extended Matrix edges), `stratigraphic_edges` (each declared relation once, from the start of its edge) |

@@ -1062,9 +1062,9 @@ le modifiche.
 
 | Chiamata | Descrizione |
 | --- | --- |
-| `archaeo.coreg.coregister(reference_path, dem_path, out_path=None, stable=None, exclude=None, tilt=True, max_iter=10, method="auto")` | un DEM spostato su un riferimento sul terreno che non è cambiato; restituisce una `Coregistration`, scrive il DEM spostato con `out_path` |
+| `archaeo.coreg.coregister(reference_path, dem_path, out_path=None, stable=None, exclude=None, tilt=True, max_iter=10, method="auto", search=None)` | un DEM spostato su un riferimento sul terreno che non è cambiato, anche da metri di distanza; restituisce una `Coregistration`, scrive il DEM spostato con `out_path` |
 | `chunk.coregister_dem(reference, stable=None, exclude=None, tilt=True, max_iter=10, method="auto", name=None)` | il DEM del chunk spostato su un altro chunk, `(chunk, id della versione)` o un file; conservato come versione attiva |
-| `coreg.coregister_chunk(chunk, reference, ...)` | lo stesso come funzione del modulo |
+| `coreg.coregister_chunk(chunk, reference, ..., search=None)` | lo stesso come funzione del modulo |
 | `coreg.reference_dem(reference)` | percorso, etichetta e chiavi di un riferimento |
 | `coreg.summary(result)` | una riga: spostamento, scarto verticale, inclinazione, NMAD prima e dopo |
 | `coreg.bilinear(z, transform, x, y, strict=True)` | quote di una griglia in punti dati (NaN fuori) |
@@ -1091,17 +1091,66 @@ campione regolare del riferimento (`max_samples`, `step`), con le pendenze dalle
 risoluzione. I due DEM possono avere griglie diverse; sistemi di riferimento diversi o raster ruotati
 danno `ValueError`, come DEM che non si sovrappongono o che differiscono quasi ovunque.
 
+**Spostamenti di metri.** La stima è locale: trova uno spostamento solo se è più corto della scala
+del rilievo (circa 1,5 m su un terreno con ondulazioni di 0,4-3 m), e due rilievi georeferenziati
+con GPS diversi distano metri. Per questo le pendenze dei due DEM vengono prima confrontate per
+correlazione su tutti gli spostamenti in una volta: entrambi sono mediati su un reticolo di al
+massimo 512 celle per lato (almeno 2 celle del riferimento ciascuna), lisciati allo stesso modo, e la
+correlazione incrociata normalizzata dei loro vettori pendenza (est, nord) viene calcolata con la FFT
+tenendo conto delle maschere di entrambi - a ogni spostamento contano solo le celle presenti in tutti
+e due, quindi contorni irregolari e sovrapposizioni parziali non disturbano - sugli spostamenti a cui
+i due si sovrappongono almeno per il 30 % del massimo possibile. Pendenze e non quote o
+ombreggiature: non vedono lo scarto verticale (metri tra due GPS), un'inclinazione aggiunge loro solo
+una costante che la normalizzazione toglie, e non dipendono dalla direzione di una luce. Una
+correlazione e non una piramide di stime dal grossolano al fine: prova tutti gli spostamenti, quindi
+non conta quanto sia lungo lo spostamento ma solo che il terreno mostri qualcosa - i fianchi di un
+tell, le pareti di una trincea, i pochi fossati di un campo piano - mentre una piramide di stime
+arriva più lontano solo dove il terreno ha rilievo a scale maggiori (un tell, non un campo piano con
+poche tracce). I quattro spostamenti migliori vengono correlati di nuovo senza le celle che lì
+risultano cambiate (le pareti ripide di una buca scavata nel frattempo, la vegetazione cresciuta), e
+il migliore viene preso se ha una correlazione di almeno 0,2, nessuno spostamento altrove gli arriva
+entro il 10 % (altrimenti `ambiguous`: un terreno che si ripete - arature, filari di vite, una
+griglia di buche) e gli spostamenti quasi altrettanto buoni non si allineano lungo una retta (un
+fossato lungo, dei solchi: `ambiguous` anche questo); terreno piano e DEM di terreni diversi danno
+`none`. `search` (metri) limita gli spostamenti cercati (`0`: nessuna ricerca); se più lontano c'è
+una corrispondenza nettamente migliore, la migliore a portata assomiglia solo al terreno e non viene
+usata (`beyond`).
+
+La stima parte sempre dal DEM così com'è: se finisce entro 1,5 celle della ricerca dallo spostamento
+trovato (`confirmed`) non si fa altro - i pochi centimetri tra le fasi di uno scavo danno lo stesso
+risultato di prima. Altrimenti viene rifatta partendo dallo spostamento trovato e tenuta (`used`)
+solo se lascia in disaccordo al massimo la metà del terreno in pendenza (almeno 3 gradi: il terreno
+che rivela uno spostamento orizzontale) - oltre `k` volte il minore dei due NMAD - e ne mette
+d'accordo almeno un 5 % in più; altrimenti resta la stima dal DEM così com'è (`rejected`). Non è
+l'NMAD a decidere: su un terreno piano con poche tracce, quelle che uno spostamento sbagliato lascia
+fuori posto vengono prese per terreno cambiato e l'NMAD del resto è altrettanto piccolo; inoltre
+leggere un DEM tra le sue celle ne media il rumore, quindi l'NMAD dipende anche da dove cade lo
+spostamento tra una cella e l'altra. Una direzione che le pendenze non possono misurare non viene
+toccata dalla stima: resta 0, o dove l'ha messa la ricerca. Con DSM di un terreno la cui vegetazione è
+cambiata tra un rilievo e l'altro (colture, cespugli) la ricerca può non trovare nulla: si
+coregistrano i DTM (`chunk.build_dem(..., classes=[2])`).
+
 La `Coregistration` dà `dx`, `dy` (il DEM mostrava il terreno tanto più a est e a nord del
 riferimento), `dz` (tanto più in alto in `centre`, il centro del DEM), `tilt_x`, `tilt_y` (metri per
 metro), `nmad_before`, `nmad_after`, `rmse_before`, `rmse_after`, `median_before`, `median_after`
 (sulle celle stabili), `cells` (stabili alla fine), `compared`, `step`, `iterations`, `converged`,
-`horizontal`, `stable_index` (righe e colonne delle celle stabili sulla griglia del riferimento),
-`to_dict()` e `correction(x, y)`. Il DEM scritto è `z(x + dx, y + dy) - (dz + tilt_x (x - x0) +
-tilt_y (y - y0))` sulla griglia del DEM di partenza, float32 con NaN dove è vuoto (BigTIFF quando
-serve, overview). Su un rilievo sintetico a celle di 1 cm spostato di 7 e -4 cm, alzato di 1,5 cm e
-inclinato di 1,8 mm/m, con una buca scavata nel frattempo, lo spostamento torna entro un millesimo di
-cella, `dz` entro 0,2 mm, l'NMAD sul terreno stabile passa da 15 a 1 mm (il rumore) e il volume della
-buca è giusto entro lo 0,2 % (sbagliato dell'11,5 % prima); 36 milioni di celle richiedono 12 s.
+`horizontal`, `initial` (cosa ha fatto la ricerca: `off`, `none`, `ambiguous`, `beyond`,
+`confirmed`, `used`, `rejected`), `initial_shift` (lo spostamento trovato, metri verso est e nord),
+`initial_score` (la correlazione delle pendenze lì), `search_cell` (le sue celle, metri),
+`method_used` (`"search+nuth_kaab"` quando la stima è partita dalla ricerca), `stable_index` (righe e
+colonne delle celle stabili sulla griglia del riferimento), `to_dict()` e `correction(x, y)`;
+`summary()` dice cosa ha fatto la ricerca. Il DEM scritto è `z(x + dx, y + dy) - (dz + tilt_x (x -
+x0) + tilt_y (y - y0))` sulla griglia del DEM di partenza, float32 con NaN dove è vuoto (BigTIFF
+quando serve, overview). Su un rilievo sintetico a celle di 1 cm spostato di 7 e -4 cm, alzato di
+1,5 cm e inclinato di 1,8 mm/m, con una buca scavata nel frattempo, lo spostamento torna entro un
+millesimo di cella, `dz` entro 0,2 mm, l'NMAD sul terreno stabile passa da 15 a 1 mm (il rumore) e il
+volume della buca è giusto entro lo 0,2 % (sbagliato dell'11,5 % prima). Due rilievi spostati di
+4,3 m verso est e 2,7 m verso sud, 3 m più in alto e inclinati di 2,2 mm/m, sovrapposti sull'80 %
+dell'area, con una buca scavata nel frattempo, su un terreno accidentato con rilievi tutti più corti
+dello spostamento: la ricerca trova lo spostamento entro un decimo delle sue celle, la stima entro un
+millesimo di cella, l'NMAD passa da 21 cm a 3 mm e il volume della buca è giusto entro lo 0,2 % (senza
+la ricerca il DEM resta dov'è: mancano tre quarti della buca e compaiono 0,56 m³ di riporto che non
+c'è). 4 milioni di celle richiedono 3 s e 36 milioni 15 s, di cui circa un secondo per la ricerca.
 
 **`chunk.coregister_dem(...)`**: il DEM com'era resta tra le versioni (`versions`), quello spostato
 diventa il DEM attivo nella cartella del chunk, con il nome `name` o "DEM coregistrato su
@@ -1112,9 +1161,10 @@ il DEM stesso dà `ValueError`.
 **`method="xdem"`** usa la libreria xdem (`pip install pyarchinit-photogrammetry[coreg]`; non è in
 `all` né nell'applicazione pacchettizzata): `NuthKaab` e, con `tilt`, `Deramp` di primo grado,
 stimati sul terreno stabile di questo modulo (le celle cambiate trovate sulle differenze prima della
-coregistrazione). Quanto xdem ha applicato viene misurato sul suo risultato, così spostamento, scarto
-e inclinazione si leggono come sopra; quando le griglie sono diverse il risultato copre la parte del
-DEM sulla griglia del riferimento. `"auto"` e `"nuth_kaab"` sono l'implementazione del programma.
+coregistrazione), senza la ricerca iniziale: per DEM distanti metri serve `"auto"`. Quanto xdem ha
+applicato viene misurato sul suo risultato, così spostamento, scarto e inclinazione si leggono come
+sopra; quando le griglie sono diverse il risultato copre la parte del DEM sulla griglia del
+riferimento. `"auto"` e `"nuth_kaab"` sono l'implementazione del programma.
 
 ## Prospetti: ortofoto e rilievo su un piano o un cilindro
 
@@ -1359,7 +1409,7 @@ ppg tables scavo.ppg tabelle.xlsx --chunk "Saggio 1" --lang en
 | `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |
 | `archaeo.pottery` | `estimate_axis`, `profile_at`, `best_profile`, `Profile.measurements`, `rim` (cerchio dell'orlo: diametro, arco conservato, affidabilità), `measure` (profilo e misure di un vaso o di un frammento, asse spostato al centro dell'orlo), `percent_class`, `signature`, `signature_distance`, `draw` (SVG, DXF, PNG) |
 | `archaeo.terrain` | `contours` (semplificate, levigatura facoltativa), `suggest_interval`, `dem_range`, `export_contours`, `volume`, `hillshade`, `slope_degrees` |
-| `archaeo.coreg` | `coregister` (spostamento di Nuth e Kääb con scarto verticale e inclinazione sul terreno stabile), `Coregistration`, `coregister_chunk`, `reference_dem`, `summary`, `bilinear`, `xdem_available` |
+| `archaeo.coreg` | `coregister` (ricerca iniziale sulle pendenze per spostamenti di metri, poi spostamento di Nuth e Kääb con scarto verticale e inclinazione sul terreno stabile), `Coregistration`, `coregister_chunk`, `reference_dem`, `summary`, `bilinear`, `xdem_available` |
 | `archaeo.stratigraphy` | `UnitPolygon`, `mask_to_polygons`, `export_units` |
 | `bim.ifc` | `export_ifc`, `export_chunk_ifc`, `export_proxies_ifc`, `split_mesh_by_units`, `global_id` (GlobalId IFC dal `node_uuid` di una scheda US), `read_ifc_elements` |
 | `archaeo.stratigraphy` (rapporti) | `RELATION_EDGES` (i rapporti delle schede di PyArchInit in italiano, inglese e tedesco come archi dell'Extended Matrix), `stratigraphic_edges` (ogni rapporto dichiarato una volta sola, dall'inizio del suo arco) |
