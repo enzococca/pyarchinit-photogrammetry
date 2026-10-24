@@ -107,7 +107,9 @@ def number_format(values: list, decimals: int | None = None) -> str | None:
     if not nums:
         return None
     if decimals is not None:
-        return "0" if decimals <= 0 else "0." + "0" * int(decimals)
+        if decimals <= 0:
+            return "#,##0" if max(abs(v) for v in nums) >= 10000 else "0"
+        return "0." + "0" * int(decimals)
     if all(isinstance(v, int) or float(v).is_integer() for v in nums):
         return "#,##0" if max(abs(v) for v in nums) >= 10000 else "0"
     top = max(abs(float(v)) for v in nums)

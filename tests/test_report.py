@@ -378,11 +378,13 @@ def test_write_xlsx_keeps_numbers_and_makes_valid_sheets(tmp_path):
                                ["P2", np.float64(2480002.5), np.int32(40000), float("nan"), None, False]],
                               [None, 3, None, 4, None, None]),
               "Misure ": (["a"], [[1]]),
-              "Progetto": (["Campo", "Valore"], [["Foto", 57], ["Punti", 316195], ["Errore", 0.7123]])}
+              "Progetto": (["Campo", "Valore"], [["Foto", 57], ["Punti", 316195], ["Errore", 0.7123]]),
+              "Prodotti": Sheet(["Punti"], [[316195], [12]], [0])}
     out = write_xlsx(tmp_path / "t", tables, title="Prova")
     assert out.suffix == ".xlsx"
     wb = load_workbook(out)
-    assert wb.sheetnames == ["Misure", "Misure (2)", "Progetto"] and wb.properties.title == "Prova"
+    assert wb.sheetnames == ["Misure", "Misure (2)", "Progetto", "Prodotti"] and wb.properties.title == "Prova"
+    assert wb["Prodotti"]["A2"].number_format == "#,##0"  # no decimals asked: thousands still grouped
     kv = wb["Progetto"]  # counts among measures stay whole numbers
     assert (kv["B2"].number_format, kv["B3"].number_format, kv["B4"].number_format) == ("0", "#,##0", "0.000")
     ws = wb["Misure"]
