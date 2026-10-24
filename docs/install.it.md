@@ -23,7 +23,7 @@ sola.
 |---|---|---|
 | macOS 15 o successivo, Apple Silicon | `PyArchInit-Photogrammetry-<versione>-macos-arm64.dmg` | aprila e trascina l'app in *Applicazioni* |
 | Windows 10/11, 64 bit | `PyArchInit-Photogrammetry-<versione>-windows-x64.zip` | estrai la cartella e avvia `PyArchInit Photogrammetry.exe` |
-| Windows 11 su ARM (Snapdragon, macchine virtuali ARM64) | `PyArchInit-Photogrammetry-<versione>-windows-arm64.zip` | versione nativa (dalla 1.1.0; la vista 3D usa il renderer software); anche lo zip x64 gira, in emulazione |
+| Windows 11 su ARM (Snapdragon, macchine virtuali ARM64) | `PyArchInit-Photogrammetry-<versione>-windows-arm64.zip` | versione nativa (dalla 1.1.0; vista 3D VTK e scansioni E57 dalla 1.3.5, renderer software dove Windows non ha OpenGL 3.2); anche lo zip x64 gira, in emulazione |
 
 Le versioni non sono firmate. Su macOS, la prima volta, tasto destro sull'app > *Apri* (oppure
 `xattr -dr com.apple.quarantine "/Applications/PyArchInit Photogrammetry.app"`); su Windows *Ulteriori

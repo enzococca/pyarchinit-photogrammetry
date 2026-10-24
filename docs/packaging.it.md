@@ -31,9 +31,15 @@ no, e viene installato al primo uso in un ambiente separato (vedi
   in un'installazione di QGIS o di OSGeo4W, oppure imposta `SPATIALITE_LIBRARY_PATH`.
 
 * **Windows su ARM** (portatili Snapdragon, Windows 11 in Parallels su un Mac con Apple Silicon):
-  l'applicazione x64 gira nell'emulazione di Windows 11 - provata su Windows 11 ARM64 con
-  `--check` e `--doctor` (Python, pycolmap, Open3D, OpenCV, rasterio, Qt e VTK si caricano) e
-  con la finestra.
+  un'applicazione nativa, `...-windows-arm64.zip`, costruita dal job `build-arm64` del workflow
+  `desktop` con le wheel win_arm64 del workflow `windows-arm` (lazrs, OpenCV, pycolmap, Open3D e,
+  dalla 1.3.5, VTK 9.7.1 per la vista 3D e pye57 per le scansioni E57, come nell'applicazione x64).
+  VTK disegna con OpenGL 3.2 o successivo: i computer Snapdragon lo hanno dal driver grafico o dal
+  *Pacchetto di compatibilità OpenCL, OpenGL e Vulkan* di Microsoft (Microsoft Store); dove Windows
+  offre solo il suo OpenGL 1.1 (macchine virtuali senza driver 3D) il programma se ne accorge prima
+  di aprire la vista e usa il renderer software (*Aiuto > Diagnostica ambiente* mostra l'OpenGL
+  trovato). Anche l'applicazione x64 gira nell'emulazione di Windows 11 - provata su Windows 11
+  ARM64 con `--check` e `--doctor` e con la finestra.
 
 I log vengono scritti in `~/Library/Logs/pyarchinit-photogrammetry` (macOS) o in
 `%LOCALAPPDATA%\pyarchinit-photogrammetry\logs` (Windows); *Aiuto > Apri cartella dei log*
