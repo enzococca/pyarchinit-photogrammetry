@@ -18,6 +18,18 @@ import tempfile  # noqa: E402
 os.environ.setdefault("PPG_PLUGINS_DIR", tempfile.mkdtemp(prefix="ppg-test-plugins-"))
 os.environ.setdefault("PPG_PLUGINS_ENVIRONMENT", "0")  # nor those installed with pip in the environment
 
+# A native crash prints both stacks: pycolmap installs glog's failure signal handler when it is
+# imported, and pytest's faulthandler (enabled when pytest configures, after this file) dumps the
+# Python stack of every thread - the test and its line - and then hands the signal on to the
+# handler it found, glog's, which prints the native stack. Imported later, while the tests are
+# collected, pycolmap replaced the faulthandler and the CI showed the native stack alone. The
+# package first: it loads Open3D before the other libraries (see _env).
+try:
+    import pyarchinit_photogrammetry  # noqa: E402,F401
+    import pycolmap  # noqa: E402,F401
+except ImportError:  # pragma: no cover - an installation without them
+    pass
+
 
 def _settings_of_the_tests() -> None:
     """The preferences of every window of the tests go to INI files of a temporary folder, never to
