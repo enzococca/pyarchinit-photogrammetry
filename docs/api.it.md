@@ -402,7 +402,19 @@ rinomina atomica, restituite se un nodo muore) e lascia i risultati in `nodes/do
 il nodo fa girare l'estrattore di COLMAP in un database suo e rimanda punti e descrittori, il
 programma principale li scrive nel proprio database, così l'allineamento non vede differenze.
 Mappe di profondità PatchMatch: il nodo apre il progetto in sola lettura sulla cartella condivisa
-e calcola le sue unità nello spazio di lavoro lì, con le sue GPU e la sua CPU. Il programma
+e calcola le sue unità nello spazio di lavoro lì, con le sue GPU e la sua CPU. Ortofoto
+(`build_orthomosaic`, RGB) e texture (`build_texture`): il programma principale condivide il chunk
+come lo ha in memoria, salvato o no - livellato, con la correzione del colore appena misurata - in
+`nodes/state`; un nodo ricostruisce il passo una volta, lo tiene per le unità successive dello
+stesso passo e rimanda i pixel: tasselli di 512 x 512 celle (`nodes.ORTHO_UNIT_TILES` per unità;
+anche l'ortofoto della texture di un terreno) e righe intere di celle della texture
+(`nodes.TEXTURE_UNIT_TEXELS` texel per unità: ogni faccia sceglie la sua foto da sola, quindi una
+riga non dipende dalle altre), che il programma principale scrive nel suo file man mano che
+arrivano. I pixel sono gli stessi di quando questo computer lavora da solo: un tassello guarda le
+sue foto, la sua superficie e la sua griglia, mai i tasselli attorno. Un nodo deve avere la stessa
+versione del programma e trovare foto, DEM e modello sulla cartella condivisa; un'unità che non
+riesce a fare (una foto che non legge, un'altra versione) la rifà il programma principale, e un
+passo annullato o fallito ritira le sue unità. Il programma
 principale è un nodo anche lui (prende quello che nessuno ha preso), quindi senza nodi non cambia
 niente; `PPG_NODES=0` tiene tutto qui. Un nodo mappa i percorsi del programma principale sui
 propri (la cartella del progetto da sola, `--map SRC=DST` per le foto). Via SSH, `ppg remote

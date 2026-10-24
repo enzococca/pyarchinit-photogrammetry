@@ -391,7 +391,18 @@ rename, given back when a node dies) and leaves the results in `nodes/done`. Key
 runs COLMAP's extractor into a database of its own and sends keypoints and descriptors back, the
 main program writes them into its database, so the alignment sees no difference. PatchMatch depth
 maps: the node opens the project read-only on the shared folder and computes its units in the
-workspace there, with its GPUs and CPU. The main program is a node too (it takes what nobody
+workspace there, with its GPUs and CPU. Orthomosaic (`build_orthomosaic`, RGB) and texture
+(`build_texture`): the main program shares the chunk as it has it in memory, saved or not - made
+level, with the colour correction just measured - in `nodes/state`; a node rebuilds the step from
+it once, keeps it for the next units of the step and sends back the pixels: tiles of 512 x 512
+cells (`nodes.ORTHO_UNIT_TILES` a unit; also the orthophoto of a terrain texture) and whole rows of
+cells of the texture (`nodes.TEXTURE_UNIT_TEXELS` texels a unit: every face takes its photo on its
+own, so a row does not depend on the others), which the main program writes into its file as they
+come. The pixels are the same as when this computer makes them alone: a tile looks at its photos,
+its surface and its grid, never at the tiles around it. A node needs the same version of the
+program and the photos, the DEM and the model on the shared folder; a unit it cannot do (a photo it
+cannot read, another version) is done again by the main program, and a step cancelled or failed
+takes its units back. The main program is a node too (it takes what nobody
 took), so with no node present nothing changes; `PPG_NODES=0` keeps everything here. A node maps
 the main program's paths to its own (the project folder by itself, `--map SRC=DST` for the
 photos). Over SSH, `ppg remote user@host:/folder project.ppg [--photos ...]` copies the project

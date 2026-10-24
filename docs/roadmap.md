@@ -190,6 +190,10 @@ Open points, in no fixed order:
 
 * Network nodes: they already share the key points of the photos and the depth maps among
   computers; the texture and the orthomosaic tiles not yet. Useful only with several computers.
+  *Done*: the tiles of the orthomosaic and of the orthophoto of a terrain texture, and the rows of
+  cells of the texture, made from the chunk the main program shares as it has it in memory; the
+  pixels are the same as alone. A unit a node cannot do is done again by the main program, and a
+  cancelled step takes its units back.
 * Satellite: surface models from three scenes or more. *Done*: pairs chosen by intersection angle and date,
   a relative correction of the RPCs from tie points, the pairs fused per cell.
 * Check of the satellite processing on the public WorldView-3 datasets with lidar truth. *Done* on two

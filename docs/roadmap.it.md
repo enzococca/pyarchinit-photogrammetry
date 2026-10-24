@@ -190,7 +190,11 @@ dataset pubblici WorldView-3.
 Punti aperti, senza un ordine fisso:
 
 * Nodi di rete: dividono già tra più computer i punti delle foto e le mappe di profondità; texture
-  e tasselli dell'ortofoto non ancora. Serve solo se si lavora con più computer.
+  e tasselli dell'ortofoto non ancora. Serve solo se si lavora con più computer. *Fatto*: i tasselli
+  dell'ortofoto e dell'ortofoto della texture di un terreno, e le righe di celle della texture, fatti
+  dal chunk che il programma principale condivide come lo ha in memoria; i pixel sono gli stessi di
+  quando lavora da solo. Un'unità che un nodo non riesce a fare la rifà il programma principale, e un
+  passo annullato ritira le sue unità.
 * Satellite: modelli di superficie da tre scene o più. *Fatto*: coppie scelte per angolo di intersezione e
   data, correzione relativa degli RPC dai punti di legame, coppie fuse cella per cella.
 * Verifica dell'elaborazione satellitare sui dataset pubblici WorldView-3 con lidar di riferimento. *Fatto*
