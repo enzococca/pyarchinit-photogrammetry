@@ -51,3 +51,37 @@ jobs:
           done
           { echo '```'; tail -60 pytest.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit $status
+
+  windows:
+    # the suite on Windows x64: there a file cannot be replaced, moved or deleted while the program
+    # holds it open or memory-mapped (POSIX allows it), paths have backslashes and there is no
+    # /bin/sh. No SpatiaLite in the runner image: the tests of PyArchInit databases skip themselves.
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[all,dev]"
+      - name: Native core (Rust, as in the Windows application)
+        run: pip install ./native
+      - name: Tests
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PPG_RENDERER: software
+        run: |
+          set +e
+          export GLOG_minloglevel=2
+          python -m pytest -q --tb=short -rfE --capture=sys -o faulthandler_timeout=1200 \
+            -o faulthandler_exit_on_timeout=true 2>&1 | tee pytest.log
+          status=${PIPESTATUS[0]}
+          grep -E "^(FAILED|ERROR) " pytest.log | head -10 | while IFS= read -r line; do
+            echo "::error::${line}"
+          done
+          { echo '```'; tail -60 pytest.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $status
