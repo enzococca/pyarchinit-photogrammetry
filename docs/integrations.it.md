@@ -46,7 +46,8 @@ programma di quelle righe (l'etichetta, l'area...). Quando cambia il contorno di
 proxy 3D, il proxy viene ricostruito da solo, con la base con cui era stato fatto (il piano, lo
 spessore o il DEM dopo l'asportazione, conservati con il proxy da questa versione; per un proxy di
 una versione precedente il valore che manca viene chiesto una volta); quando cambia solo il numero
-il proxy prende il nuovo nome. Annullando la voce, i proxy tornano con i poligoni.
+il proxy prende il nuovo nome. Annullando la voce, i proxy tornano con i poligoni e le sezioni
+vengono tagliate di nuovo lungo la traccia che avevano.
 
 Come il programma distingue le modifiche di QGIS dalle sue: ogni elemento ha un'identità, `ppg_id`
 (un UUID conservato con l'unità, la quota o la sezione, usato anche dal pacchetto QField), e le
@@ -57,7 +58,7 @@ geometria o attributi che non corrispondono più è stata modificata da un altro
 righe senza identità sono state disegnate lì (ne ricevono una subito); le righe sparite sono state
 eliminate lì. La finestra guarda una volta al secondo se un altro programma ha scritto nel file
 (`PRAGMA data_version` di una connessione tenuta aperta: le sue scritture non contano), e non
-scrive mai sopra una modifica che non ha ancora letto. Poiché le firme stanno nel file, le
+scrive mai sopra una modifica o un'eliminazione che non ha ancora letto. Poiché le firme stanno nel file, le
 modifiche fatte in QGIS mentre il programma era chiuso tornano quando il progetto viene riaperto
 (tranne le eliminazioni fatte nel frattempo: il programma riscrive quegli elementi).
 
