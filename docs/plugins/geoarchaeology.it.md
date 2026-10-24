@@ -440,8 +440,7 @@ quelli del file come li mostra un editor di testo, contando anche le righe vuote
 
 ### Il pannello
 
-Una volta installato il plugin e riavviato il programma, la scheda *Geoarcheologia* compare nel dock
-*Progetto* a sinistra; se le schede non ci stanno, usa le frecce in fondo alla barra delle schede, oppure
+Una volta installato il plugin e riavviato il programma, il pannello *Geoarcheologia* si apre a destra nella finestra, fra le schede di *PyArchInit*; si sposta, si stacca o si chiude come gli altri pannelli e si riapre da *Vista > Pannelli*, oppure con
 *Plugin > Geoarcheologia > Geoarcheologia...*. Il menu *Plugin > Geoarcheologia* ha anche i passi
 principali: *Importa sondaggi...*, *Superfici di contatto (kriging)...*, *Sezione geoarcheologica...*,
 *Colonne stratigrafiche...*, *Modello 3D delle unità...*, *Nascondi la sovrapposizione*.

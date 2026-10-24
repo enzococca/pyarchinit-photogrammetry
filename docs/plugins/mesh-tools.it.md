@@ -34,7 +34,7 @@ successiva. Il README e il codice sono nel
 1. Costruisci il modello del chunk (*Flusso di lavoro > Costruisci modello...*) e, se ti serve, la sua
    texture (*Flusso di lavoro > Costruisci texture...*); oppure porta dentro un modello fatto altrove
    (*File > Importa > Modello 3D (OBJ, PLY, GLB)...*).
-2. Apri la scheda *Mesh (MeshLab)* del dock *Progetto* (*Plugin > Mesh (MeshLab) > Pannello Mesh
+2. Apri il pannello *Mesh (MeshLab)* (*Plugin > Mesh (MeshLab) > Pannello Mesh
    (MeshLab)*). La prima volta che parte un'operazione il plugin propone di installare MeshLab (circa
    300 MB), a meno che pymeshlab non sia già nel Python del programma, e lo prova su un triangolo.
 3. *Misura*: chiuso o aperto, quante parti separate, quanti difetti.
@@ -122,9 +122,7 @@ fette)...*), la texture (*Flusso di lavoro > Costruisci texture...*) e i volumi 
 
 ### Il pannello
 
-Dopo aver installato il plugin e riavviato il programma, la scheda *Mesh (MeshLab)* compare nel dock
-*Progetto* a sinistra; se le schede non ci stanno, usa le frecce in fondo alla barra delle schede,
-oppure *Plugin > Mesh (MeshLab) > Pannello Mesh (MeshLab)*.
+Dopo aver installato il plugin e riavviato il programma, il pannello *Mesh (MeshLab)* si apre a destra nella finestra, fra le schede di *PyArchInit*; si sposta, si stacca o si chiude come gli altri pannelli e si riapre da *Vista > Pannelli*, oppure con *Plugin > Mesh (MeshLab) > Pannello Mesh (MeshLab)*.
 
 <figure markdown="span">
   ![Il pannello Mesh (MeshLab) dopo una decimazione](../img/plugins/mesh-tools/pane.png)

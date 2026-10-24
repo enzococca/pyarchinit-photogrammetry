@@ -38,7 +38,7 @@ successiva. Il README e il codice sono nel
 
 1. Un chunk in un sistema di riferimento sulla Terra - un fuso UTM, una griglia nazionale - con il suo
    DEM o la sua ortofoto; oppure un riquadro in longitudine e latitudine dalla riga di comando.
-2. Nella scheda *Sentinel-2* del dock *Progetto*: *Dal DEM o dall'ortofoto* (oppure *Disegna
+2. Nel pannello *Sentinel-2*: *Dal DEM o dall'ortofoto* (oppure *Disegna
    l'area...*), con un margine intorno.
 3. *Cerca*: il primo e l'ultimo giorno, le nuvole al massimo. Le acquisizioni riempiono la tabella.
 4. *Scarica e calcola*: la finestra di ogni acquisizione viene letta una volta e tenuta nel progetto;
@@ -163,9 +163,7 @@ I tre indici, ciascuno da due bande (a - b) / (a + b):
 
 ### Il pannello
 
-Dopo aver installato il plugin e riavviato il programma, la scheda *Sentinel-2* compare nel dock
-*Progetto* a sinistra; se le schede non ci stanno, usa le frecce in fondo alla barra delle schede,
-oppure *Plugin > Sentinel-2 > Pannello Sentinel-2*.
+Dopo aver installato il plugin e riavviato il programma, il pannello *Sentinel-2* si apre a destra nella finestra, fra le schede di *PyArchInit*; si sposta, si stacca o si chiude come gli altri pannelli e si riapre da *Vista > Pannelli*, oppure con *Plugin > Sentinel-2 > Pannello Sentinel-2*.
 
 <figure markdown="span">
   ![Il pannello Sentinel-2](../img/plugins/sentinel2/pane-parts.png)

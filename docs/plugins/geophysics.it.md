@@ -193,9 +193,7 @@ come etichetta (`slice_045cm.tif` dà l'etichetta `slice_045cm`).
 
 ### Il pannello
 
-Una volta installato il plugin e riavviato il programma, la scheda *Geofisica* compare nel dock
-*Progetto* a sinistra; se le schede non ci stanno, usa le frecce in fondo alla barra delle schede,
-oppure *Plugin > Geofisica > Griglie geofisiche...*. Il menu *Plugin > Geofisica* ha anche *Importa
+Una volta installato il plugin e riavviato il programma, il pannello *Geofisica* si apre a destra nella finestra, fra le schede di *PyArchInit*; si sposta, si stacca o si chiude come gli altri pannelli e si riapre da *Vista > Pannelli*, oppure con *Plugin > Geofisica > Griglie geofisiche...*. Il menu *Plugin > Geofisica* ha anche *Importa
 griglia geofisica...*, *Sovrapponi la griglia alla vista*, *Nascondi la griglia* e *Disegna un'anomalia*.
 
 Dall'alto: una breve descrizione; *Importa griglia...*, *Georeferenzia...*, *Filtri...*; la tabella

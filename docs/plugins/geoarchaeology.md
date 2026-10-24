@@ -433,8 +433,7 @@ file as a text editor shows them, empty lines and notes included.
 
 ### The pane
 
-Once the plugin is installed and the program restarted, the *Geoarchaeology* tab appears in the
-*Project* dock on the left; if the tabs do not fit, use the arrows at the end of the tab bar, or
+Once the plugin is installed and the program restarted, the *Geoarchaeology* pane opens on the right of the window, tabbed with *PyArchInit*; it can be moved, floated or closed like the other panes and opened again from *Vista > Pannelli*, or with
 *Plugins > Geoarchaeology > Geoarchaeology...*. The *Plugins > Geoarchaeology* menu has the main steps
 too: *Import boreholes...*, *Contact surfaces (kriging)...*, *Geoarchaeological section...*,
 *Stratigraphic columns...*, *3D model of the units...*, *Hide the overlay*.

@@ -31,7 +31,7 @@ Its README and source code are in the
 
 1. Build the DEM of the chunk (*Workflow > Build DEM...*); for water, hollows and mounds on the bare
    ground, a DEM of the *Ground* class only.
-2. Open the *Terrain* tab of the *Project* dock (*Plugins > Terrain > Terrain analysis...*).
+2. Open the *Terrain* pane (*Plugins > Terrain > Terrain analysis...*).
 3. Choose an analysis: *Hydrology...*, *Geomorphometry...*, *Depressions and mounds...* or
    *Viewshed...*. The first one downloads WhiteboxTools (about 40 MB) once.
 4. Look at the result over the orthophoto or the DEM, with the palette and the opacity you like; put
@@ -123,8 +123,7 @@ of WhiteboxTools while it runs, with the phase it is in (*FillDepressions: Filli
 
 ### The pane
 
-Once the plugin is installed and the program restarted, the *Terrain* tab appears in the *Project*
-dock on the left; if the tabs do not fit, use the arrows at the end of the tab bar, or *Plugins >
+Once the plugin is installed and the program restarted, the *Terrain* pane opens on the right of the window, tabbed with *PyArchInit*; it can be moved, floated or closed like the other panes and opened again from *Vista > Pannelli*, or with *Plugins >
 Terrain > Terrain analysis...*. The *Plugins > Terrain* menu has the four analyses too, and *Hide the
 overlay*.
 

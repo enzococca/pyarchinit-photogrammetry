@@ -30,7 +30,7 @@ successiva. Il README e il codice sono nel
 
 1. Costruisci il DEM del chunk (*Flusso di lavoro > Costruisci DEM...*); per l'acqua, le conche e i
    rilievi del suolo nudo, un DEM della sola classe *Terreno*.
-2. Apri la scheda *Terreno* del dock *Progetto* (*Plugin > Terreno > Analisi del terreno...*).
+2. Apri il pannello *Terreno* (*Plugin > Terreno > Analisi del terreno...*).
 3. Scegli un'analisi: *Idrologia...*, *Geomorfometria...*, *Depressioni e rilievi...* o
    *Visibilità...*. La prima scarica WhiteboxTools (circa 40 MB) una volta sola.
 4. Guarda il risultato sopra l'ortofoto o il DEM, con la palette e l'opacità che preferisci; metti
@@ -125,9 +125,7 @@ di WhiteboxTools mentre lavora, con la fase in cui si trova (*FillDepressions: F
 
 ### Il pannello
 
-Una volta installato il plugin e riavviato il programma, la scheda *Terreno* compare nel dock
-*Progetto* a sinistra; se le schede non ci stanno, usa le frecce in fondo alla barra delle schede,
-oppure *Plugin > Terreno > Analisi del terreno...*. Anche il menu *Plugin > Terreno* ha le quattro
+Una volta installato il plugin e riavviato il programma, il pannello *Terreno* si apre a destra nella finestra, fra le schede di *PyArchInit*; si sposta, si stacca o si chiude come gli altri pannelli e si riapre da *Vista > Pannelli*, oppure con *Plugin > Terreno > Analisi del terreno...*. Anche il menu *Plugin > Terreno* ha le quattro
 analisi, e *Nascondi la sovrapposizione*.
 
 <figure markdown="span">

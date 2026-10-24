@@ -36,7 +36,7 @@ Its README and source code are in the
 
 1. A chunk in a reference system on the Earth - a UTM zone, a national grid - with its DEM or
    orthophoto; or a box of longitudes and latitudes from the command line.
-2. In the *Sentinel-2* tab of the *Project* dock: *From the DEM or orthomosaic* (or *Draw the
+2. In the *Sentinel-2* pane: *From the DEM or orthomosaic* (or *Draw the
    area...*), with a margin around it.
 3. *Search*: the first and the last day, the clouds at most. The acquisitions fill the table.
 4. *Read and compute*: the window of each acquisition is read once and kept in the project; cloudy ones
@@ -159,8 +159,7 @@ The three indices, each from two bands (a - b) / (a + b):
 
 ### The pane
 
-Once the plugin is installed and the program restarted, the *Sentinel-2* tab appears in the *Project*
-dock on the left; if the tabs do not fit, use the arrows at the end of the tab bar, or *Plugins >
+Once the plugin is installed and the program restarted, the *Sentinel-2* pane opens on the right of the window, tabbed with *PyArchInit*; it can be moved, floated or closed like the other panes and opened again from *Vista > Pannelli*, or with *Plugins >
 Sentinel-2 > Sentinel-2 pane*.
 
 <figure markdown="span">

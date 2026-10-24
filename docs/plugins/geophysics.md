@@ -188,8 +188,7 @@ A folder of slices becomes one grid with a band per file, the band labelled with
 
 ### The pane
 
-Once the plugin is installed and the program restarted, the *Geophysics* tab appears in the *Project*
-dock on the left; if the tabs do not fit, use the arrows at the end of the tab bar, or *Plugins >
+Once the plugin is installed and the program restarted, the *Geophysics* pane opens on the right of the window, tabbed with *PyArchInit*; it can be moved, floated or closed like the other panes and opened again from *Vista > Pannelli*, or with *Plugins >
 Geophysics > Geophysical grids...*. The *Plugins > Geophysics* menu also has *Import geophysical
 grid...*, *Overlay the grid on the view*, *Hide the grid* and *Draw an anomaly*.
 

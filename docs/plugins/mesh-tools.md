@@ -33,7 +33,7 @@ Its README and source code are in the
 1. Build the model of the chunk (*Workflow > Build model...*) and, if you want it, its texture
    (*Workflow > Build texture...*); or bring in a model made elsewhere (*File > Import > 3D model
    (OBJ, PLY, GLB)...*).
-2. Open the *Mesh (MeshLab)* tab of the *Project* dock (*Plugins > Mesh (MeshLab) > Mesh (MeshLab)
+2. Open the *Mesh (MeshLab)* pane (*Plugins > Mesh (MeshLab) > Mesh (MeshLab)
    pane*). The first time an operation runs, the plugin offers to install MeshLab (about 300 MB),
    unless pymeshlab is already in the Python of the program, and tries it on a triangle.
 3. *Measure*: closed or open, how many separate parts, how many defects.
@@ -118,8 +118,7 @@ volume...*). The plugin adds what MeshLab does better.
 
 ### The pane
 
-Once the plugin is installed and the program restarted, the *Mesh (MeshLab)* tab appears in the
-*Project* dock on the left; if the tabs do not fit, use the arrows at the end of the tab bar, or
+Once the plugin is installed and the program restarted, the *Mesh (MeshLab)* pane opens on the right of the window, tabbed with *PyArchInit*; it can be moved, floated or closed like the other panes and opened again from *Vista > Pannelli*, or with
 *Plugins > Mesh (MeshLab) > Mesh (MeshLab) pane*.
 
 <figure markdown="span">
