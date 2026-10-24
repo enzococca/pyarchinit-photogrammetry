@@ -138,7 +138,50 @@ at the bottom shows it.
 
 ![The section](../img/tutorial/sultan-section.png)
 
-## 9. Taking the results away
+## 9. Cutting the model
+
+*Cut* in the bar of the 3D view, *Vertical plane: click two points*: two clicks on the model, west
+and east of the top. The dialog shows the plane through their line in plan; *The part above the
+plane* keeps the side on the left of the line from the first point to the second (north, here) as
+the model of the chunk, and the whole model stays among the versions (right click on the model in
+the workspace brings it back).
+
+![Cut the model](../img/tutorial/sultan-cut-dialog.png)
+
+The northern half seen from the south, with the heights doubled (*Vertical exaggeration* x2 in the
+bar of the view): the edge of the cut is the profile of the mound through its top. The exaggeration
+changes only what is shown; clicks, sections and cuts keep the true heights. A cut can also keep a
+slice of a given thickness, or save both halves or a series of parallel slices as PLY or OBJ files.
+
+![The northern half of the tell](../img/tutorial/sultan-cut.png)
+
+## 10. A model edited in another program
+
+A model exported with *File > Export* (PLY, or OBJ with its texture) and cleaned in MeshLab or
+Blender comes back with *File > Import > 3D model (OBJ, PLY, GLB)...*: *In the active chunk, as its
+model*, coordinates *In the coordinate system of the chunk*, the current model kept among the
+versions. Vertex colours and textures come with it; a model that lands far from the data of the
+chunk is reported (then check the scale, the shift and the vertical axis of the file).
+
+![Import a 3D model](../img/tutorial/sultan-import-dialog.png)
+
+## 11. Report and tables
+
+*File > Export > PDF report...* writes the processing report of the chunk, in Italian or English:
+survey data and the camera positions over the orthophoto, calibration, references and their errors,
+the parameters of every step, the products with their figures, scale bars and legends.
+
+![Three pages of the PDF report](../img/tutorial/sultan-report.png)
+
+*File > Export > Tables (Excel)...* puts every table of the chunk in one workbook, a sheet each:
+project, cameras (estimated and reference positions, errors, tie points), sensors and calibration,
+processing parameters, products, point classes, versions and sections, and markers, scale bars,
+measuring points or drawn units when the chunk has them. Numbers stay numbers, with a filter on the
+header row.
+
+![The Products sheet of the workbook](../img/tutorial/sultan-tables.png)
+
+## 12. Taking the results away
 
 * *File > Export*: orthophoto and DEM as GeoTIFF (also Cloud Optimized), the dense cloud as LAS,
   LAZ or PLY, the model as OBJ, PLY or GLB, the cameras, and everything cut by a box or a polygon.
@@ -159,6 +202,9 @@ ppg mesh tell_sultan.ppg                     # model and texture
 ppg dem tell_sultan.ppg
 ppg ortho tell_sultan.ppg
 ppg export tell_sultan.ppg --dem dem.tif --ortho ortofoto.tif --cloud nuvola.laz --report report.html
+ppg cut-model tell_sultan.ppg --vertical X1,Y1,X2,Y2 --keep above   # the two points of the cut
+ppg report tell_sultan.ppg --pdf rapporto.pdf --lang en
+ppg tables tell_sultan.ppg tabelle.xlsx
 ```
 
 ## The same in Python
@@ -182,6 +228,15 @@ chunk.build_orthomosaic()
 doc.save()
 chunk.export_dem("dem.tif")
 chunk.export_orthomosaic("ortofoto.tif")
+
+from pyarchinit_photogrammetry.engine import mesh_cut
+from pyarchinit_photogrammetry.io.pdf_report import generate_pdf_report
+from pyarchinit_photogrammetry.io.tables import export_tables
+
+point, normal = mesh_cut.vertical(west, east)  # two points (X, Y, Z) in the system of the chunk
+chunk.cut_model(point, normal, keep="above")
+generate_pdf_report(doc, "rapporto.pdf", language="en")
+export_tables(chunk, "tabelle.xlsx")
 ```
 
 ## Times

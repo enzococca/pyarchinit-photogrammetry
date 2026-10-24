@@ -137,7 +137,50 @@ in basso lo mostra.
 
 ![La sezione](../img/tutorial/sultan-section.png)
 
-## 9. Portare via i risultati
+## 9. Tagliare il modello
+
+*Taglia* nella barra della vista 3D, *Piano verticale: clic su due punti*: due clic sul modello, a
+ovest e a est della cima. Il dialogo mostra il piano che passa per la loro linea in pianta; *La parte
+sopra il piano* tiene il lato a sinistra della linea dal primo punto al secondo (qui il nord) come
+modello del chunk, e il modello intero resta tra le versioni (tasto destro sul modello nell'area di
+lavoro per riprenderlo).
+
+![Taglia il modello](../img/tutorial/sultan-cut-dialog.png)
+
+La metà nord vista da sud, con le quote raddoppiate (*Esagerazione verticale* x2 nella barra della
+vista): il bordo del taglio è il profilo della collina attraverso la cima. L'esagerazione cambia solo
+quello che si vede; clic, sezioni e tagli usano le quote vere. Un taglio può anche tenere una fetta di
+uno spessore dato, oppure salvare le due metà o una serie di fette parallele in file PLY o OBJ.
+
+![La metà nord del tell](../img/tutorial/sultan-cut.png)
+
+## 10. Un modello modificato in un altro programma
+
+Un modello esportato con *File > Esporta* (PLY, oppure OBJ con la texture) e ripulito in MeshLab o in
+Blender torna con *File > Importa > Modello 3D (OBJ, PLY, GLB)...*: *Nel chunk attivo, come suo
+modello*, coordinate *Nel sistema di riferimento del chunk*, il modello attuale conservato tra le
+versioni. Colori dei vertici e texture vengono con lui; un modello che finisce lontano dai dati del
+chunk viene segnalato (allora controlla la scala, lo spostamento e l'asse verticale del file).
+
+![Importa un modello 3D](../img/tutorial/sultan-import-dialog.png)
+
+## 11. Rapporto e tabelle
+
+*File > Esporta > Rapporto PDF...* scrive il rapporto di elaborazione del chunk, in italiano o in
+inglese: dati del rilievo e posizioni delle camere sull'ortofoto, calibrazione, riferimenti e loro
+errori, parametri di ogni passo, prodotti con le loro figure, barre di scala e legende.
+
+![Tre pagine del rapporto PDF](../img/tutorial/sultan-report.png)
+
+*File > Esporta > Tabelle (Excel)...* mette tutte le tabelle del chunk in una cartella di lavoro, un
+foglio ciascuna: progetto, camere (posizioni stimate e di riferimento, errori, punti di legame),
+sensori e calibrazione, parametri di elaborazione, prodotti, classi dei punti, versioni e sezioni, e
+marker, barre di scala, punti di misura o US disegnate quando il chunk li ha. I numeri restano
+numeri, con un filtro sulla riga delle intestazioni.
+
+![Il foglio Prodotti della cartella di lavoro](../img/tutorial/sultan-tables.png)
+
+## 12. Portare via i risultati
 
 * *File > Esporta*: ortofoto e DEM in GeoTIFF (anche Cloud Optimized), nuvola densa in LAS, LAZ o PLY,
   modello in OBJ, PLY o GLB, le camere, e tutto ritagliato con un riquadro o un poligono.
@@ -158,6 +201,9 @@ ppg mesh tell_sultan.ppg                     # modello e texture
 ppg dem tell_sultan.ppg
 ppg ortho tell_sultan.ppg
 ppg export tell_sultan.ppg --dem dem.tif --ortho ortofoto.tif --cloud nuvola.laz --report report.html
+ppg cut-model tell_sultan.ppg --vertical X1,Y1,X2,Y2 --keep above   # i due punti del taglio
+ppg report tell_sultan.ppg --pdf rapporto.pdf --lang it
+ppg tables tell_sultan.ppg tabelle.xlsx
 ```
 
 ## Gli stessi passi in Python
@@ -181,6 +227,15 @@ chunk.build_orthomosaic()
 doc.save()
 chunk.export_dem("dem.tif")
 chunk.export_orthomosaic("ortofoto.tif")
+
+from pyarchinit_photogrammetry.engine import mesh_cut
+from pyarchinit_photogrammetry.io.pdf_report import generate_pdf_report
+from pyarchinit_photogrammetry.io.tables import export_tables
+
+point, normal = mesh_cut.vertical(ovest, est)  # due punti (X, Y, Z) nel sistema del chunk
+chunk.cut_model(point, normal, keep="above")
+generate_pdf_report(doc, "rapporto.pdf", language="it")
+export_tables(chunk, "tabelle.xlsx")
 ```
 
 ## Tempi
