@@ -193,6 +193,26 @@ def test_the_program_never_writes_over_an_edit_not_read_yet(tmp_path):
     qgis.close()
 
 
+def test_a_deletion_in_qgis_is_never_undone_by_a_write(tmp_path):
+    """A unit deleted in QGIS while the program draws (its write comes before its next look at the
+    file): the row is not written again, and the reader still gives the deletion."""
+    a, b = _unit(1, X0, Y0), _unit(2, X0 + 1, Y0)
+    link = LiveLink(tmp_path, CRS)
+    link.write(_layers([a, b]))
+    fid = next(r["fid"] for r in _rows(link.path, "unita") if r[ID_FIELD] == b["ppg_id"])
+    qgis = Qgis(link.path)
+    qgis.save(qgis.delete("unita", fid))
+    c = _unit(3, X0 + 2, Y0)
+    link.write(_layers([a, b, c]))  # a unit drawn here, b still in the window
+    link.write(_layers([a, b, c]), force=True)
+    assert {r[ID_FIELD] for r in _rows(link.path, "unita")} == {a["ppg_id"], c["ppg_id"]}
+    got = link.read_changes()["unita"]
+    assert got.deleted == [(b["ppg_id"], 1)] and not got.changed and not got.added
+    link.write(_layers([a, c]))  # the window without it: nothing more
+    assert link.read_changes() == {} and len(_rows(link.path, "unita")) == 2
+    qgis.close()
+
+
 def test_a_copy_made_in_qgis_is_a_feature_of_its_own(tmp_path):
     a = _unit(1, X0, Y0)
     link = LiveLink(tmp_path, CRS)

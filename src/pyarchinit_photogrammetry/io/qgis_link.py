@@ -356,8 +356,8 @@ class LiveLink:
         ``(item, label, attrs)`` triples of :class:`gui.image_views.RasterView`). Every table
         exists even when empty, so QGIS sees deletions. ``force``: every table compared row by
         row, also those whose features did not change here (an edit made in QGIS to a one-way
-        table is undone). Rows of the two-way tables edited in QGIS and not read back yet are
-        left as they are."""
+        table is undone). Rows of the two-way tables edited or deleted in QGIS and not read back
+        yet are left as they are."""
         from . import gpkg
 
         groups = self._group(layers)
@@ -491,6 +491,9 @@ class LiveLink:
         for w in self._wanted(table, feats, cols, types):
             s = primary.pop(w.key, None)
             row = [gpkg.blob(w.geom, srs_id)] + [w.values.get(c) for c in written]
+            if s is None and two_way and w.key in known:
+                after[w.key] = known[w.key]  # deleted in QGIS and not read back yet: the reader takes it first
+                continue
             if s is None:
                 fid = con.execute(insert, row).lastrowid
                 touched.append(fid)
