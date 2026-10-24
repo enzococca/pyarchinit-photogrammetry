@@ -3100,9 +3100,14 @@ class MainWindow(QMainWindow):
             if "quote" in state:
                 self.quote = [dict(q) for q in state["quote"] or []]
             if "sections" in state:
+                traces = {s.get(ID_FIELD): s for s in self.sections if s.get(ID_FIELD)}
                 self.sections = [dict(x) for x in state["sections"] or []]
                 self._save_sections()
                 self.sections_pane.set_sections(self.sections)
+                for s in self.sections:  # a trace back as it was (moved in QGIS): its drawing cut again
+                    b = traces.get(s.get(ID_FIELD))
+                    if b is not None and (list(b["p1"]), list(b["p2"])) != (list(s["p1"]), list(s["p2"])):
+                        self._qgis_waiting["sections"].append(s)
             if "pa" in state:
                 pa = state["pa"] or {}
                 self.pa_deleted, self.pa_geom_changed = set(pa.get("deleted", [])), set(pa.get("geom", []))
@@ -3112,6 +3117,7 @@ class MainWindow(QMainWindow):
                                    and int(u.attributes["gid"]) in pending}
             self._redraw_drawings()
             self._follow_proxies(follow)
+            self._run_qgis_waiting()
         if ch is not None and parts & {"markers", "scalebars", "excluded"}:
             from ..core.marker import Marker, ScaleBar
 
@@ -6908,6 +6914,8 @@ class MainWindow(QMainWindow):
             self.sections_pane.add(sdict)
             self._show_pane(self.bottom_tabs, self.sections_pane)
             self.log_pane.info(tr("{0}: lunghezza {1:.3f} m, disegni in {2}", label, sec.length, out_dir))
+            if self.history is not None:
+                self.history.rebase()  # a product of the step, as its files: the next undo keeps it
 
         self.run_task("Sezione", job, done, refresh=False, save=False)
 
@@ -8081,13 +8089,15 @@ class MainWindow(QMainWindow):
             if self.model_view.kind == "proxies":
                 self.model_view.set_chunk(ch, "proxies")
             self.setWindowModified(True)
+            self._run_qgis_waiting()  # the sections waiting, also with the live link off
 
         if not self.run_task("Proxy delle US", job, done, refresh=False, save=False):
             self._qgis_waiting["proxies"] += items
 
     def _recut_sections(self, sdicts: list) -> None:
-        """Cut again the sections whose trace moved (or was drawn) in QGIS, with the options of the
-        chunk; their drawings are written over (a new section gets new files)."""
+        """Cut again the sections whose trace moved (or was drawn) in QGIS, or came back as it was
+        with Modifica > Annulla, with the options of the chunk; their drawings are written over (a
+        new section gets new files)."""
         opts = self._section_options()
         source = opts.get("source", "model")
         ch = self.chunk
@@ -8136,6 +8146,7 @@ class MainWindow(QMainWindow):
             self.ortho_view.remove_layer("Sezioni")
             self._draw_sections()
             self.setWindowModified(True)
+            self._run_qgis_waiting()
 
         if not self.run_task("Sezione", job, done, refresh=False, save=False):
             self._qgis_waiting["sections"] += sdicts
