@@ -135,10 +135,7 @@ def replace_rows(con: sqlite3.Connection, table: str, columns: list[str], featur
     con.execute(f"DELETE FROM {quote(table)}")
     names = "".join(f", {quote(c)}" for c in columns)
     con.executemany(f"INSERT INTO {quote(table)} (geom{names}) VALUES ({', '.join('?' * (len(columns) + 1))})", rows)
-    ext = (min(b[0] for b in bounds), min(b[1] for b in bounds), max(b[2] for b in bounds),
-           max(b[3] for b in bounds)) if bounds else (None, None, None, None)
-    con.execute("UPDATE gpkg_contents SET last_change = strftime('%Y-%m-%dT%H:%M:%fZ','now'), "
-                "min_x = ?, min_y = ?, max_x = ?, max_y = ? WHERE table_name = ?", (*ext, table))
+    set_extent(con, table, bounds)
     return len(rows)
 
 
@@ -169,16 +166,46 @@ def write_table(path: str | Path, table: str, geometry_type: str, columns: dict[
     return path
 
 
+def wkb(data: bytes | None) -> bytes | None:
+    """The WKB of a GeoPackage binary geometry (its header and envelope left out); None when
+    empty or not a GeoPackage geometry."""
+    if data is None or len(data) < 8 or bytes(data[:2]) != b"GP":
+        return None
+    if data[3] & 0b10000:  # empty geometry
+        return None
+    envelope = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}.get((data[3] >> 1) & 0b111, 0)
+    return bytes(data[8 + envelope:])
+
+
+def blob_srs(data: bytes | None) -> int | None:
+    """The ``srs_id`` written in the header of a GeoPackage binary geometry."""
+    if data is None or len(data) < 8 or bytes(data[:2]) != b"GP":
+        return None
+    return struct.unpack("<i" if data[3] & 1 else ">i", bytes(data[4:8]))[0]
+
+
 def geometry(data: bytes | None):
     """The shapely geometry of a GeoPackage binary geometry (header, optional envelope, WKB)."""
     import shapely
 
-    if data is None or len(data) < 8 or data[:2] != b"GP":
-        return None
-    envelope = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}.get((data[3] >> 1) & 0b111, 0)
-    if data[3] & 0b10000:  # empty geometry
-        return None
-    return shapely.from_wkb(bytes(data[8 + envelope:]))
+    raw = wkb(data)
+    return shapely.from_wkb(raw) if raw is not None else None
+
+
+def table_srs(con: sqlite3.Connection, table: str) -> int | None:
+    """The ``srs_id`` of a feature table (``gpkg_geometry_columns``), None when it is not one."""
+    row = con.execute("SELECT srs_id FROM gpkg_geometry_columns WHERE table_name = ?", (table,)).fetchone()
+    return None if row is None else int(row[0])
+
+
+def set_extent(con: sqlite3.Connection, table: str, bounds) -> None:
+    """``gpkg_contents``: the extent of ``table`` (``(minx, miny, maxx, maxy)`` of every feature)
+    and the time of the change."""
+    bounds = list(bounds)
+    ext = (min(b[0] for b in bounds), min(b[1] for b in bounds), max(b[2] for b in bounds),
+           max(b[3] for b in bounds)) if bounds else (None, None, None, None)
+    con.execute("UPDATE gpkg_contents SET last_change = strftime('%Y-%m-%dT%H:%M:%fZ','now'), "
+                "min_x = ?, min_y = ?, max_x = ?, max_y = ? WHERE table_name = ?", (*ext, table))
 
 
 def read_table(path: str | Path, table: str) -> list[tuple[object, dict]]:
@@ -200,4 +227,4 @@ def read_table(path: str | Path, table: str) -> list[tuple[object, dict]]:
 
 
 __all__ = ["write_table", "is_geopackage", "refuse_foreign", "srs_of", "blob", "create", "ensure_table", "replace_rows", "connect",
-           "quote", "geometry", "read_table"]
+           "quote", "geometry", "read_table", "wkb", "blob_srs", "table_srs", "set_extent"]
