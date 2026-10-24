@@ -979,6 +979,7 @@ def _match(pa, da, pb, db, ratio: float = 0.75, threshold: float = 1.5) -> np.nd
     pairs = np.array([(i, j) for i, j in ab.items() if ba.get(j) == i], int).reshape(-1, 2)
     if len(pairs) < 12:
         return np.zeros((0, 2), int)
+    cv2.setRNGSeed(0)  # RANSAC draws from the thread's generator: the same tie points on every run
     _, mask = cv2.findFundamentalMat(pa[pairs[:, 0]].astype(np.float32), pb[pairs[:, 1]].astype(np.float32),
                                      cv2.FM_RANSAC, threshold, 0.999)
     if mask is None:
