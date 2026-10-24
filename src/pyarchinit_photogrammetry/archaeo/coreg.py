@@ -26,17 +26,63 @@ the vertical bias (median) and the tilt (robust plane) are measured again on the
 On flat ground, or where the slopes all face one way (one plane, the two sides of a straight
 valley along it), a horizontal shift cannot be told from a vertical one, and changes no volume: a
 direction along which the slopes of the stable ground, beyond what a plane explains, spread by less
-than :data:`MIN_SLOPE` degrees (or a tenth of their root mean square) is not measured, the shift
-along it stays 0 and ``horizontal`` is False. When the shift does not settle within ``max_iter``
-iterations (DEMs further apart than their slopes can tell, or not the same ground), the state of
-the iterations with which the DEMs agreed best is kept if it is clearly better (:data:`CLEARLY`)
-than the DEM as it is, else the DEM is not shifted; ``converged`` is False either way.
+than :data:`MIN_SLOPE` degrees (or a tenth of their root mean square) is not measured, the fit does
+not move the DEM along it (the shift stays 0, or where the initial search put it) and
+``horizontal`` is False. When the shift does not settle within ``max_iter`` iterations (DEMs
+further apart than their slopes can tell, or not the same ground), the state of the iterations with
+which the DEMs agreed best is kept if it is clearly better (:data:`CLEARLY`) than the state the
+iterations started from, else that one; ``converged`` is False either way.
+
+**The initial search.** The fit is a local one: it finds a shift only when it is shorter than the
+scale of the relief - a fraction of the width of the features of the ground. Two surveys
+georeferenced with different GPS, metres apart, on a site of pits and walls are beyond it. So the
+slopes of the two DEMs are first correlated at every shift at once (:func:`_search`): both are
+averaged on a lattice of at most :data:`SEARCH_SIDE` cells a side (the reference in blocks of its
+cells, the DEM read at the same centres), smoothed alike, and the normalised cross-correlation of
+their slope vectors (east, north) is computed for every shift by FFT with the masks of both (only
+the cells present in both at a shift count, with their own means and variances: Padfield 2012),
+where the two overlap by at least :data:`SEARCH_OVERLAP` of the most they can. Why this method:
+slopes do not see the vertical bias (metres between two GPS) and a tilt only adds a constant to
+them, which the normalisation takes away; a hillshade would also depend on the direction of the
+light. A correlation tries every shift, so how long the shift is does not matter, only that the
+ground shows something - the slopes of a tell, the walls of a trench, the few ditches of a level
+field - whereas a pyramid of fits of Nuth & Kääb on smoothed DEMs reaches further only where the
+ground has relief at larger scales (a tell, not a level field with a few features). The masks keep
+the irregular outline of the surveys out of the result, where a phase correlation would need a
+rectangle inside both. The best few shifts (:data:`SEARCH_CANDIDATES`) are correlated again
+without the cells that changed there - beyond ``k`` NMAD once bias and plane are taken away, as in
+the fit: the steep walls of a pit dug in between, or vegetation that grew, pull the correlation -
+and the best of them is ``found`` when it correlates at least :data:`SEARCH_MIN_SCORE`, no shift
+elsewhere correlates almost as well (:data:`SEARCH_MARGIN`; else ``ambiguous``: ground that
+repeats itself, ploughing, rows of vines, a grid of pits) and the shifts nearly as good lie around
+it, not along a line (:data:`SEARCH_RIDGE`; ground that is the same along one direction, one long
+ditch or furrows: ``ambiguous`` too). Flat ground (slopes spreading less than
+:data:`SEARCH_MIN_RELIEF` degrees) and DEMs of different ground give ``none``. With ``search`` only
+shifts up to that length are looked at; when a clearly better match lies further, the best one
+within reach only looks like the ground and is not used (``beyond``).
+
+The fit is always run from the DEM as it is, as above. When the search found a shift, that fit
+ending within :data:`SEARCH_AGREE` cells of the search of it confirms it (``confirmed``: the small
+shifts of the phases of an excavation, nothing changes for them). Otherwise the fit is run again
+from the shift found and kept (``used``) if it leaves at most :data:`SEARCH_BETTER` as much of the
+sloped ground in disagreement - differences beyond ``k`` times the smaller NMAD of the two fits, on
+the cells sloping at least :data:`MIN_SLOPE` degrees, the ground that tells a horizontal shift -
+and agrees on at least :data:`SEARCH_GAIN` of it more; else the fit from the DEM as it is stays
+(``rejected``). The NMAD does not decide between the two: on level ground with a few features,
+those a wrong shift leaves out of place are taken for ground that changed and the NMAD of the rest
+is as small; and reading a DEM between its cells averages the noise of up to four of them, so the
+NMAD of a fit also depends on where its shift falls between the cells (down to a half). A shift
+found but not verified this way is never applied.
 
 The result (:class:`Coregistration`) says where the DEM was - ``dx``, ``dy``: it showed the ground
 that far east and north of the reference; ``dz``: that much higher at ``centre``; ``tilt_x``,
 ``tilt_y``: metres per metre - and how well the two DEMs agree on the stable ground before and after
-(NMAD, RMSE, median). The coregistered DEM is ``z(x + dx, y + dy) - (dz + tilt_x (x - x0) +
-tilt_y (y - y0))`` written on the grid of the input DEM (float32, NaN where empty).
+(NMAD, RMSE, median); ``initial`` (off, none, ambiguous, beyond, confirmed, used, rejected),
+``initial_shift`` (the shift the search found, or the better one beyond ``search``),
+``initial_score`` (its correlation), ``search_cell`` and ``method_used`` ("search+nuth_kaab" when
+the fit started from the search) say what the search did. The coregistered DEM is ``z(x + dx, y +
+dy) - (dz + tilt_x (x - x0) + tilt_y (y - y0))`` written on the grid of the input DEM (float32, NaN
+where empty).
 
 Large DEMs are measured on a regular sample of at most :data:`MAX_SAMPLES` cells of the reference
 (their slopes from the full-resolution neighbours); the whole DEM is then shifted.
@@ -46,8 +92,8 @@ version, or a file) and keeps the result as the active version of its DEM, the D
 the versions; :mod:`.timeline` coregisters the phases of an excavation before measuring volumes.
 
 ``method="xdem"`` uses the library xdem (``pip install pyarchinit-photogrammetry[coreg]``:
-``NuthKaab`` and, with ``tilt``, ``Deramp``) if it can be imported; ``"auto"`` and ``"nuth_kaab"``
-are the implementation of this module.
+``NuthKaab`` and, with ``tilt``, ``Deramp``, without the initial search) if it can be imported;
+``"auto"`` and ``"nuth_kaab"`` are the implementation of this module.
 """
 from __future__ import annotations
 
@@ -73,6 +119,21 @@ HUBER = 1.345  # NMAD: the Huber weights of the fits
 IRLS_ROUNDS = 5  # reweighted least squares of each fit
 BLOCK_ROWS = 512  # rows of a DEM written or read at a time
 NMAD_FACTOR = 1.4826
+# the initial search (see the module docstring)
+SEARCH_SIDE = 512  # cells: the larger side of the lattice of the search (the DEMs averaged in blocks)
+SEARCH_MIN_FACTOR = 2  # the cells of the search are at least this many cells of the reference a side
+SEARCH_SMOOTH = 1.0  # cells of the lattice: sigma of the Gaussian both DEMs are smoothed with
+SEARCH_OVERLAP = 0.3  # shifts at which the DEMs overlap less than this share of the most they can are not tried
+SEARCH_MIN_CELLS = 64  # cells of the lattice in common, at least
+SEARCH_MIN_RELIEF = 1.0  # degrees: slopes of the lattice spreading less (either DEM): flat ground, nothing to look for
+SEARCH_MIN_SCORE = 0.2  # least correlation of the slopes at the shift found
+SEARCH_CANDIDATES = 4  # the best shifts tried again without the cells that changed there
+SEARCH_MARGIN = 0.1  # another shift correlating within this share of the best one: ambiguous
+SEARCH_RIDGE = 10.0  # cells: the shifts nearly as good spread further along a line (3 times across): ambiguous
+SEARCH_AGREE = 1.5  # cells of the search: the fit from the DEM as it is ending this close to it agrees with it
+SEARCH_BETTER = 0.5  # the fit from the search leaves at most this share of the sloped ground in disagreement
+# that the fit from the DEM as it is leaves...
+SEARCH_GAIN = 0.05  # ...and agrees on at least this share of the sloped ground more
 
 
 @dataclass
@@ -97,9 +158,17 @@ class Coregistration:
     resolution: float = 0.0  # of the reference
     iterations: int = 0
     converged: bool = False
-    horizontal: bool = True  # False: flat or one-sided ground, the shift that cannot be measured left at 0
+    horizontal: bool = True  # False: flat or one-sided ground, the shift that cannot be measured not fitted
     tilt: bool = True
     method: str = "nuth_kaab"
+    # the initial search: off, none (no clear match), ambiguous (several shifts match: periodic ground),
+    # beyond (the best match is further than ``search``), confirmed (the fit from the DEM as it is
+    # reached it), used (the fit started from it), rejected (the DEMs did not agree better there)
+    initial: str = "off"
+    initial_shift: tuple[float, float] | None = None  # (m) the shift the search found
+    initial_score: float = float("nan")  # correlation of the slopes at that shift (1: the same)
+    search_cell: float = 0.0  # (m) the cells of the search
+    method_used: str = "nuth_kaab"  # or "search+nuth_kaab": the fit started from the shift of the search
     reference: str = ""
     dem: str = ""
     path: str | None = None  # the coregistered DEM, when written
@@ -119,13 +188,15 @@ class Coregistration:
         """JSON values (the stable cells left out)."""
         out = {}
         for k in ("dx", "dy", "dz", "tilt_x", "tilt_y", "nmad_before", "nmad_after", "rmse_before", "rmse_after",
-                  "median_before", "median_after", "resolution"):
+                  "median_before", "median_after", "resolution", "initial_score", "search_cell"):
             v = float(getattr(self, k))
             out[k] = v if math.isfinite(v) else None
         out.update(shift=self.shift, centre=[float(self.centre[0]), float(self.centre[1])], cells=int(self.cells),
                    compared=int(self.compared), step=int(self.step), iterations=int(self.iterations),
                    converged=bool(self.converged), horizontal=bool(self.horizontal), tilt=bool(self.tilt),
-                   method=self.method, reference=self.reference, dem=self.dem, path=self.path)
+                   method=self.method, initial=self.initial,
+                   initial_shift=None if self.initial_shift is None else [float(v) for v in self.initial_shift],
+                   method_used=self.method_used, reference=self.reference, dem=self.dem, path=self.path)
         return out
 
 
@@ -383,6 +454,8 @@ class _Measure:
         self.sx, self.sy = -gx, -gy  # dh = sx dx + sy dy for a DEM that shows the ground (dx, dy) further
         tan = np.hypot(gx, gy)
         self.base = np.isfinite(tan) & (tan <= math.tan(math.radians(max_slope)))
+        with np.errstate(invalid="ignore"):
+            self.sloped = tan >= math.tan(math.radians(MIN_SLOPE))  # the ground that tells a horizontal shift
         self.base &= _areas(stable, exclude, self.x, self.y, rr, cc, zr.shape)
         self.u, self.v = self.x - centre[0], self.y - centre[1]
         self.resolution = abs(tr_r.a)
@@ -401,45 +474,399 @@ def _centre(transform, shape) -> tuple[float, float]:
     return (transform.c + transform.a * shape[1] / 2, transform.f + transform.e * shape[0] / 2)
 
 
-def _estimate(zr, tr_r, zd, tr_d, stable=None, exclude=None, tilt: bool = True, max_iter: int = 10,
-              max_slope: float = MAX_SLOPE, k: float = OUTLIER_K, tolerance: float = TOLERANCE,
-              max_samples: int = MAX_SAMPLES, progress: Progress | None = None) -> Coregistration:
-    """The shift, bias and tilt of ``zd`` (grid ``tr_d``) on ``zr`` (grid ``tr_r``)."""
+# ---------------------------------------------------------------- the initial search
+@dataclass
+class _Found:
+    """What :func:`_search` found: the shift (m), the correlation of the slopes there and the best
+    correlation of another shift; ``status``: found, ambiguous, beyond (the shift is the better one
+    further than ``search``) or none."""
+
+    dx: float = 0.0
+    dy: float = 0.0
+    score: float = float("nan")
+    second: float = float("nan")
+    status: str = "none"
+    cell: float = 0.0  # (m) the cells of the search
+    note: str = ""
+
+
+def _reduce(z: np.ndarray, f: int) -> np.ndarray:
+    """Means of the blocks of ``f`` x ``f`` cells of ``z`` (NaN where less than half of a block has
+    a value), a band of rows at a time: float32."""
+    if f <= 1:
+        return z
+    h, w = z.shape
+    rows, cols = -(-h // f), -(-w // f)
+    out = np.empty((rows, cols), np.float32)
+    step = max(1, BLOCK_ROWS // f)
+    for b0 in range(0, rows, step):
+        b1 = min(rows, b0 + step)
+        band = np.full(((b1 - b0) * f, cols * f), np.nan, np.float32)
+        src = z[b0 * f:b1 * f]
+        band[:src.shape[0], :w] = src
+        valid = np.isfinite(band)
+        total = np.where(valid, band, 0.0).reshape(b1 - b0, f, cols, f).sum(axis=(1, 3), dtype=np.float64)
+        count = valid.reshape(b1 - b0, f, cols, f).sum(axis=(1, 3))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            out[b0:b1] = np.where(count >= f * f / 2, total / count, np.nan)
+    return out
+
+
+def _smooth(z: np.ndarray, sigma: float) -> np.ndarray:
+    """``z`` smoothed by a Gaussian of ``sigma`` cells, the empty cells left out (and left empty)."""
+    from scipy import ndimage
+
+    valid = np.isfinite(z)
+    if sigma <= 0 or not valid.any():
+        return z.astype(np.float64)
+    base = float(np.median(z[valid]))
+    num = ndimage.gaussian_filter(np.where(valid, z - base, 0.0).astype(np.float64), sigma, mode="constant")
+    den = ndimage.gaussian_filter(valid.astype(np.float64), sigma, mode="constant")
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(valid & (den > 0.25), num / den + base, np.nan)
+
+
+def _grid_slopes(z: np.ndarray, east: float, north: float):
+    """East and north gradient of a whole grid (Horn), NaN at the edges and next to empty cells."""
+    p = np.pad(z.astype(np.float64), 1, constant_values=np.nan)
+    a, b, c = p[:-2, :-2], p[:-2, 1:-1], p[:-2, 2:]
+    d, f = p[1:-1, :-2], p[1:-1, 2:]
+    g, hh, i = p[2:, :-2], p[2:, 1:-1], p[2:, 2:]
+    gx = ((c + 2 * f + i) - (a + 2 * d + g)) / (8 * east)
+    gy = ((a + 2 * b + c) - (g + 2 * hh + i)) / (8 * north)
+    return gx, gy
+
+
+class _Lattice:
+    """The two DEMs on one lattice of cells ``f`` times those of the reference: the reference
+    averaged in blocks, the DEM averaged in blocks of about the same size and read at the centres of
+    the cells of the lattice that cover it, both smoothed alike (:data:`SEARCH_SMOOTH`: the block
+    means and the reading filter the two differently near the shortest wavelength the lattice
+    holds); their heights, slopes (east, north) and the cells whose slopes count (not steeper than
+    ``max_slope``; for the reference inside ``stable`` and outside ``exclude``). ``offset``: the
+    lattice row and column of the first cell of the DEM."""
+
+    def __init__(self, zr, tr_r, zd, tr_d, stable, exclude, f: int, max_slope: float):
+        from rasterio.transform import Affine
+
+        east, north = abs(tr_r.a) * f, abs(tr_r.e) * f
+        self.east, self.north = east, north
+        steep = math.tan(math.radians(max_slope))
+        self.zr = _smooth(_reduce(zr, f), SEARCH_SMOOTH)
+        self.tr_r = Affine(east, 0.0, tr_r.c, 0.0, -north, tr_r.f)
+        self.ref = _grid_slopes(self.zr, east, north)
+        with np.errstate(invalid="ignore"):
+            self.mr = np.hypot(*self.ref) <= steep
+        if stable is not None or exclude is not None:
+            rr, cc = np.mgrid[0:self.zr.shape[0], 0:self.zr.shape[1]]
+            x, y = tr_r.c + (cc + 0.5) * east, tr_r.f - (rr + 0.5) * north
+            rr = np.minimum(rr * f + f // 2, zr.shape[0] - 1)
+            cc = np.minimum(cc * f + f // 2, zr.shape[1] - 1)
+            self.mr &= _areas(stable, exclude, x, y, rr, cc, zr.shape)
+        h, w = zd.shape
+        xd0, xd1 = sorted((tr_d.c, tr_d.c + w * tr_d.a))
+        yd0, yd1 = sorted((tr_d.f, tr_d.f + h * tr_d.e))
+        c0, c1 = math.floor((xd0 - tr_r.c) / east), math.ceil((xd1 - tr_r.c) / east)
+        r0, r1 = math.floor((tr_r.f - yd1) / north), math.ceil((tr_r.f - yd0) / north)
+        g = max(1, int(round(east / abs(tr_d.a))))
+        cols, rows = np.meshgrid(np.arange(c0, c1), np.arange(r0, r1))
+        tr_g = Affine(tr_d.a * g, 0.0, tr_d.c, 0.0, tr_d.e * g, tr_d.f)  # the blocks of g x g cells
+        self.zd = _smooth(bilinear(_reduce(zd, g), tr_g, tr_r.c + (cols + 0.5) * east, tr_r.f - (rows + 0.5) * north,
+                                   strict=False), SEARCH_SMOOTH)
+        self.tr_d = Affine(east, 0.0, tr_r.c + c0 * east, 0.0, -north, tr_r.f - r0 * north)
+        self.dem = _grid_slopes(self.zd, east, north)
+        with np.errstate(invalid="ignore"):
+            self.md = np.hypot(*self.dem) <= steep
+        self.offset = (r0, c0)
+
+    def changed(self, dx: float, dy: float, mask: np.ndarray, k: float) -> np.ndarray:
+        """The cells of ``mask`` (reference lattice) where the DEM read ``dx``, ``dy`` further differs
+        from the reference beyond ``k`` NMAD once the bias and a plane (robust fit) are taken away:
+        the ground that changed, as the fit of Nuth & Kääb finds it."""
+        rows, cols = np.nonzero(mask)
+        x = self.tr_r.c + (cols + 0.5) * self.east
+        y = self.tr_r.f - (rows + 0.5) * self.north
+        d = bilinear(self.zd, self.tr_d, x + dx, y + dy) - self.zr[rows, cols]
+        ok = np.isfinite(d)
+        out = np.zeros(mask.shape, bool)
+        if int(ok.sum()) < SEARCH_MIN_CELLS:
+            return out
+        u, v = x - x[ok].mean(), y - y[ok].mean()
+        _, _, plane, _ = _fit(d[ok], None, None, u[ok], v[ok], True, shift=False)
+        inl, _, _ = _inliers(d - (plane[0] + plane[1] * u + plane[2] * v), ok, k)
+        out[rows[ok & ~inl], cols[ok & ~inl]] = True
+        return out
+
+
+def _masked_ncc(ref, mr, dem, md):
+    """Normalised cross-correlation of the slopes of the reference (``ref`` = (east, north) on the
+    mask ``mr``) and of the DEM for every offset of the DEM grid, both masks taken into account
+    (Padfield 2012: only the cells present in both at that offset count, with their own means and
+    variances), by FFT. Returns ``(ncc, overlap)`` laid out by offset: index ``(a, b)`` is the
+    offset ``(a - rows of the reference + 1, b - columns of the reference + 1)`` of the DEM grid."""
+    from scipy import fft
+
+    (hr, wr), (hd, wd) = mr.shape, md.shape
+    shape = (fft.next_fast_len(hr + hd - 1, real=True), fft.next_fast_len(wr + wd - 1, real=True))
+
+    def spectrum(a):
+        return fft.rfft2(a, s=shape, workers=-1)
+
+    def back(s):
+        out = fft.irfft2(s, s=shape, workers=-1)
+        out = np.roll(out, (hr - 1, wr - 1), axis=(0, 1))
+        return out[:hr + hd - 1, :wr + wd - 1]
+
+    def centred(parts, mask):
+        out = []
+        for p in parts:
+            q = np.where(mask, p, 0.0)
+            q[mask] -= q[mask].mean()  # the correlation does not change, the sums lose less to rounding
+            out.append(q)
+        return out
+
+    rx, ry = centred(ref, mr)
+    dx, dy = centred(dem, md)
+    fmr, fmd = spectrum(mr.astype(np.float64)), spectrum(md.astype(np.float64))
+    frx, fry, fdx, fdy = spectrum(rx), spectrum(ry), spectrum(dx), spectrum(dy)
+    n = np.maximum(np.rint(back(np.conj(fmr) * fmd)), 0.0)
+    srx, sry = back(np.conj(frx) * fmd), back(np.conj(fry) * fmd)
+    sdx, sdy = back(np.conj(fmr) * fdx), back(np.conj(fmr) * fdy)
+    srr = back(np.conj(spectrum(rx * rx + ry * ry)) * fmd)
+    sdd = back(np.conj(fmr) * spectrum(dx * dx + dy * dy))
+    srd = back(np.conj(frx) * fdx + np.conj(fry) * fdy)
+    some = n >= 1
+    inv = 1.0 / np.where(some, n, 1.0)
+    cov = srd - (srx * sdx + sry * sdy) * inv
+    vr = srr - (srx * srx + sry * sry) * inv
+    vd = sdd - (sdx * sdx + sdy * sdy) * inv
+    tiny = 1e-9 * max(float(vr[some].max(initial=0.0)), float(vd[some].max(initial=0.0)), 1e-300)
+    ok = some & (vr > tiny) & (vd > tiny)
+    ncc = np.full(n.shape, np.nan)
+    ncc[ok] = cov[ok] / np.sqrt(vr[ok] * vd[ok])
+    return ncc, n
+
+
+def _subcell(score: np.ndarray, p) -> tuple[float, float]:
+    """The maximum of the quadratic through the 3 x 3 values around the cell ``p`` (rows, columns),
+    as an offset from it; (0, 0) when they do not make a maximum."""
+    a, b = p
+    win = score[a - 1:a + 2, b - 1:b + 2]
+    if win.shape != (3, 3) or not np.isfinite(win).all():
+        return 0.0, 0.0
+    v, u = np.mgrid[-1:2, -1:2]
+    x = np.column_stack([np.ones(9), u.ravel(), v.ravel(), u.ravel() ** 2, (u * v).ravel(), v.ravel() ** 2])
+    c = np.linalg.lstsq(x, win.ravel(), rcond=None)[0]
+    hess = np.array([[2 * c[3], c[4]], [c[4], 2 * c[5]]])
+    if np.linalg.eigvalsh(hess).max() >= 0:
+        return 0.0, 0.0
+    du, dv = np.linalg.solve(hess, -c[1:3])
+    if abs(du) > 1 or abs(dv) > 1:
+        return 0.0, 0.0
+    return float(dv), float(du)
+
+
+@dataclass
+class _Map:
+    """The correlation of the slopes at every shift tried (:func:`_ncc_map`): ``score`` (-inf where
+    not tried) and the shift in cells of the lattice (rows south ``sr``, columns east ``sc``);
+    ``beyond``: the index of the best shift longer than ``search``, ``beyond_score`` its correlation."""
+
+    score: np.ndarray
+    valid: np.ndarray
+    sr: np.ndarray
+    sc: np.ndarray
+    beyond: tuple | None = None
+    beyond_score: float = -np.inf
+
+
+def _ncc_map(lat: _Lattice, mr: np.ndarray, search: float | None) -> _Map | None:
+    """The correlation of the slopes of the reference cells ``mr`` with the DEM at every shift at
+    which they overlap enough (:data:`SEARCH_OVERLAP`) and, with ``search``, not longer than that;
+    None when there are too few cells."""
+    if int(mr.sum()) < SEARCH_MIN_CELLS or int(lat.md.sum()) < SEARCH_MIN_CELLS:
+        return None
+    ncc, n = _masked_ncc(lat.ref, mr, lat.dem, lat.md)
+    hr, wr = mr.shape
+    sr, sc = np.mgrid[0:ncc.shape[0], 0:ncc.shape[1]]
+    sr, sc = sr - (hr - 1) + lat.offset[0], sc - (wr - 1) + lat.offset[1]
+    valid = np.isfinite(ncc) & (n >= max(SEARCH_MIN_CELLS, SEARCH_OVERLAP * float(n.max())))
+    beyond, beyond_score = None, -np.inf
+    if search is not None:
+        inside = np.hypot(sr * lat.north, sc * lat.east) <= search
+        far = valid & ~inside
+        if far.any():
+            beyond = np.unravel_index(int(np.argmax(np.where(far, ncc, -np.inf))), ncc.shape)
+            beyond_score = float(ncc[beyond])
+        valid &= inside
+    if not valid.any():
+        return None
+    return _Map(np.where(valid, ncc, -np.inf), valid, sr, sc, beyond, beyond_score)
+
+
+def _shift_at(lat: _Lattice, mp: _Map, p) -> tuple[float, float]:
+    """The shift (m, east and north) of the maximum of ``mp`` around the index ``p``."""
+    ddr, ddc = _subcell(mp.score, p)
+    return float((mp.sc[p] + ddc) * lat.east), float(-(mp.sr[p] + ddr) * lat.north)
+
+
+def _peaks(mp: _Map, floor: float) -> list:
+    """The indices of the local maxima of ``mp`` correlating at least ``floor``, best first (at most
+    :data:`SEARCH_CANDIDATES`)."""
+    from scipy import ndimage
+
+    top = mp.valid & (mp.score >= floor) & (mp.score == ndimage.maximum_filter(mp.score, size=5, mode="nearest"))
+    idx = np.flatnonzero(top)
+    idx = idx[np.argsort(mp.score.ravel()[idx])[::-1][:SEARCH_CANDIDATES]]
+    return [np.unravel_index(int(i), mp.score.shape) for i in idx]
+
+
+def _analyse(lat: _Lattice, mp: _Map) -> _Found:
+    """The best shift of ``mp`` and whether it is ``found``, ``ambiguous`` or ``none`` (see
+    :func:`_search`)."""
+    from scipy import ndimage
+
+    found = _Found(cell=lat.east)
+    score = mp.score
+    p = np.unravel_index(int(np.argmax(score)), score.shape)
+    best = found.score = float(score[p])
+    if best < SEARCH_MIN_SCORE:
+        found.note = "low correlation"
+        return found
+    eight = np.ones((3, 3), bool)
+    lab, _ = ndimage.label(score >= best / 2, structure=eight)
+    others = mp.valid & (lab != lab[p])  # outside the hill of the best shift
+    found.second = float(score[others].max()) if others.any() else float("nan")
+    lab, _ = ndimage.label(score >= (1 - SEARCH_MARGIN) * best, structure=eight)
+    rows, cols = np.nonzero(lab == lab[p])  # the shifts nearly as good, around the best one
+    spread = np.sqrt(np.clip(np.linalg.eigvalsh(np.cov(np.vstack([rows - p[0], cols - p[1]]))), 0, None)) \
+        if rows.size > 2 else np.zeros(2)
+    found.note = f"plateau {rows.size} cells, spread {spread[1]:.2f} x {spread[0]:.2f}"
+    if found.second >= (1 - SEARCH_MARGIN) * best or (spread[1] > SEARCH_RIDGE and spread[1] > 3 * spread[0]):
+        found.status = "ambiguous"
+        return found
+    around = mp.valid[max(p[0] - 1, 0):p[0] + 2, max(p[1] - 1, 0):p[1] + 2]
+    if around.shape != (3, 3) or not around.all():
+        found.note += "; at the edge of the shifts looked at"
+        return found
+    found.dx, found.dy = _shift_at(lat, mp, p)
+    found.status = "found"
+    return found
+
+
+def _relief(slopes, mask) -> float:
+    """The spread (root mean square about their mean) of the slope vectors of the cells of ``mask``."""
+    if int(mask.sum()) < SEARCH_MIN_CELLS:
+        return 0.0
+    return float(math.sqrt(np.var(slopes[0][mask]) + np.var(slopes[1][mask])))
+
+
+def _search(zr, tr_r, zd, tr_d, stable=None, exclude=None, search: float | None = None,
+            max_slope: float = MAX_SLOPE, k: float = OUTLIER_K, progress: Progress | None = None) -> _Found:
+    """The horizontal shift of ``zd`` on ``zr`` found by correlating their slopes (see the module
+    docstring): on a lattice of at most :data:`SEARCH_SIDE` cells a side (:class:`_Lattice`), every
+    shift at which the two DEMs overlap enough is tried at once (:func:`_masked_ncc`). The best few
+    shifts (:data:`SEARCH_CANDIDATES`) are tried again without the cells that changed there
+    (:meth:`_Lattice.changed`: the steep walls of a pit dug in between, vegetation that grew, pull
+    the correlation), and the one correlating best then is kept: ``found`` when its correlation is at
+    least :data:`SEARCH_MIN_SCORE`, no other shift correlates almost as well (``ambiguous``:
+    :data:`SEARCH_MARGIN`) and the shifts close to it in correlation lie around it, not along a line
+    (a ridge: ground that is the same along one direction, ``ambiguous`` too)."""
     progress = as_progress(progress)
-    centre = _centre(tr_d, zd.shape)
-    m = _Measure(zr, tr_r, stable, exclude, max_slope, max_samples, centre)
-    if int(m.base.sum()) < MIN_CELLS:
-        raise ValueError("too few cells to compare: the DEMs do not overlap, or the areas given leave out "
-                         "almost all of them")
-    few = "too few stable cells: the two DEMs differ almost everywhere"
-    dx = dy = 0.0
+    res = abs(tr_r.a)
+    side = max(zr.shape + (zd.shape[0] * abs(tr_d.e) / abs(tr_r.e), zd.shape[1] * abs(tr_d.a) / res))
+    f = max(SEARCH_MIN_FACTOR, int(math.ceil(side / SEARCH_SIDE)))
+    progress(0.0, f"Coregistration: initial search on cells of {f * res:.3f} m")
+    lat = _Lattice(zr, tr_r, zd, tr_d, stable, exclude, f, max_slope)
+    progress.check()
+    relief = min(_relief(lat.ref, lat.mr), _relief(lat.dem, lat.md))
+    if relief < math.tan(math.radians(SEARCH_MIN_RELIEF)):
+        return _Found(cell=lat.east, note=f"flat ground (slopes spread {math.degrees(math.atan(relief)):.2f} degrees)")
+    first = _ncc_map(lat, lat.mr, search)
+    if first is None:
+        return _Found(cell=lat.east, note="too few cells in common")
+    top = float(first.score.max())
+    if first.beyond is not None and first.beyond_score >= SEARCH_MIN_SCORE and \
+            top <= (1 - SEARCH_MARGIN) * first.beyond_score:
+        # the best shift within reach only looks like the ground: a clearly better one is further
+        b = first.beyond
+        return _Found(dx=float(first.sc[b] * lat.east), dy=float(-first.sr[b] * lat.north),
+                      score=first.beyond_score, second=top, status="beyond", cell=lat.east,
+                      note=f"the best shift within {search} m correlates {top:.2f}")
+    peaks = _peaks(first, max(SEARCH_MIN_SCORE / 2, top / 2))
+    chosen, left_out = first, 0
+    best = -np.inf
+    for i, p in enumerate(peaks):
+        progress(0.2 + 0.7 * i / len(peaks), "Coregistration: initial search, the best shifts again")
+        progress.check()
+        dx, dy = _shift_at(lat, first, p)
+        changed = lat.changed(dx, dy, lat.mr, k)
+        mp = _ncc_map(lat, lat.mr & ~changed, search) if changed.any() else first
+        if mp is None:
+            continue
+        near = mp.score[max(p[0] - 2, 0):p[0] + 3, max(p[1] - 2, 0):p[1] + 3]
+        if float(near.max()) > best:
+            best, chosen, left_out = float(near.max()), mp, int(changed.sum())
+    found = _analyse(lat, chosen)
+    if left_out:
+        found.note += f"; {left_out} cells that changed left out"
+    where = f" {found.dx:+.3f} {found.dy:+.3f} m" if found.status == "found" else ""
+    progress(1.0, f"Coregistration: initial search {found.status}{where} (slope correlation {found.score:.2f})")
+    return found
+
+
+@dataclass
+class _Run:
+    """One fit of Nuth & Kääb (:func:`_iterate`): the state it ended in and how the DEMs agree there."""
+
+    dx: float
+    dy: float
+    plane: np.ndarray
+    horizontal: bool
+    converged: bool
+    iterations: int
+    nmad: float  # on the stable cells at the end
+    inl: np.ndarray  # the stable cells at the end
+    ok: np.ndarray  # the cells compared at the end
+    after: np.ndarray  # the differences left
+
+
+FEW = "too few stable cells: the two DEMs differ almost everywhere"
+
+
+def _iterate(m: _Measure, zd, tr_d, start, tilt: bool, max_iter: int, k: float, tolerance: float,
+             progress: Progress, label: str = "") -> _Run:
+    """The fit of Nuth & Kääb from the shift ``start`` (see the module docstring)."""
+    dx, dy = float(start[0]), float(start[1])
     plane = np.zeros(3)
     horizontal, converged, it = False, False, 0
     # if the shift never settles (DEMs further apart than the slopes can tell, not the same ground),
-    # the closest state measured - the DEM as it is unless another agreed clearly better
-    start = best = None
+    # the closest state measured - the one it started from unless another agreed clearly better
+    first = best = None
 
     def clearly_better(nmad: float) -> bool:
-        return nmad < min(best[0], (1 - CLEARLY) * start)
+        return nmad < min(best[0], (1 - CLEARLY) * first)
 
     for it in range(1, max_iter + 1):
         progress.check()
         dh = bilinear(zd, tr_d, m.x + dx, m.y + dy) - m.z - m.plane(plane)
         ok = m.base & np.isfinite(dh)
         inl, _med, nmad = _inliers(dh, ok, k)
-        if start is None:
-            start, best = nmad, (nmad, dx, dy, plane.copy())
+        if first is None:
+            first, best = nmad, (nmad, dx, dy, plane.copy())
         elif clearly_better(nmad):
             best = (nmad, dx, dy, plane.copy())
         if it == 1:  # the shift is still in the differences: no cell left out yet (see the module docstring)
             inl, nmad = ok, _nmad(dh[ok])
         if int(inl.sum()) < MIN_CELLS:
-            raise ValueError(few)
+            if it == 1:
+                raise ValueError(FEW)
+            break  # the iterations went off the DEM: back to the closest state below
         ddx, ddy, inc, horizontal = _fit(dh[inl], m.sx[inl], m.sy[inl], m.u[inl], m.v[inl], tilt and it > 1)
         plane = plane + inc
         dx, dy = dx + ddx, dy + ddy
-        progress(0.9 * it / max_iter, f"Coregistration: iteration {it}, shift {dx:+.4f} {dy:+.4f} m, "
-                                      f"NMAD {nmad:.4f} m")
+        progress(it / max_iter, f"Coregistration{label}: iteration {it}, shift {dx:+.4f} {dy:+.4f} m, "
+                                f"NMAD {nmad:.4f} m")
         if math.hypot(ddx, ddy) < tolerance * m.resolution:
             converged = True
             break
@@ -447,26 +874,95 @@ def _estimate(zr, tr_r, zd, tr_d, stable=None, exclude=None, tilt: bool = True, 
     raw = bilinear(zd, tr_d, m.x + dx, m.y + dy) - m.z
     ok = m.base & np.isfinite(raw)
     inl, _, nmad = _inliers(raw - m.plane(plane), ok, k)
-    if not converged and best is not None and not clearly_better(nmad):
+    if not converged and best is not None and (int(inl.sum()) < MIN_CELLS or not clearly_better(nmad)):
         _, dx, dy, plane = best
         raw = bilinear(zd, tr_d, m.x + dx, m.y + dy) - m.z
         ok = m.base & np.isfinite(raw)
         inl, _, _ = _inliers(raw - m.plane(plane), ok, k)
     if int(inl.sum()) < MIN_CELLS:
-        raise ValueError(few)
+        raise ValueError(FEW)
     _, _, plane, _ = _fit(raw[inl], None, None, m.u[inl], m.v[inl], tilt, shift=False)
     after = raw - m.plane(plane)
     inl, _, _ = _inliers(after, ok, k)
-    before = bilinear(zd, tr_d, m.x, m.y) - m.z
+    return _Run(dx=dx, dy=dy, plane=plane, horizontal=horizontal, converged=converged, iterations=it,
+                nmad=_nmad(after[inl]), inl=inl, ok=ok, after=after)
+
+
+def _agreement(m: _Measure, run: _Run, sigma: float, k: float) -> float:
+    """The share of the sloped cells compared at the end of ``run`` (:attr:`_Measure.sloped`: the
+    ground that tells a horizontal shift) whose difference is within ``k`` ``sigma`` of the bias."""
+    sloped = run.ok & m.sloped
+    if not sloped.any() or not run.inl.any():
+        return 0.0
+    bias = float(np.median(run.after[run.inl]))
+    return float(np.mean(np.abs(run.after[sloped] - bias) <= max(k * sigma, MIN_THRESHOLD)))
+
+
+def _better(m: _Measure, other: _Run, run: _Run, k: float) -> bool:
+    """Whether the fit from the initial search (``other``) is kept instead of the fit from the DEM as
+    it is (``run``): of the sloped ground (:func:`_agreement`, ``k`` times the smaller NMAD of the
+    two) it leaves at most :data:`SEARCH_BETTER` as much in disagreement, and at least
+    :data:`SEARCH_GAIN` of it less. Not the NMAD: on level ground with a few features, those a wrong
+    shift leaves out of place are taken for ground that changed and the NMAD of the rest is as small;
+    and reading the DEM between its cells averages the noise of up to four of them, so the NMAD of a
+    fit also depends on where its shift falls between the cells (down to a half)."""
+    sigma = min(run.nmad, other.nmad)
+    a, b = _agreement(m, run, sigma, k), _agreement(m, other, sigma, k)
+    return 1 - b <= SEARCH_BETTER * (1 - a) and b - a >= SEARCH_GAIN
+
+
+def _estimate(zr, tr_r, zd, tr_d, stable=None, exclude=None, tilt: bool = True, max_iter: int = 10,
+              max_slope: float = MAX_SLOPE, k: float = OUTLIER_K, tolerance: float = TOLERANCE,
+              max_samples: int = MAX_SAMPLES, search: float | None = None,
+              progress: Progress | None = None) -> Coregistration:
+    """The shift, bias and tilt of ``zd`` (grid ``tr_d``) on ``zr`` (grid ``tr_r``): the initial
+    search (unless ``search`` is 0), the fit from the DEM as it is and, when the search found a
+    shift that fit did not reach, the fit from there, kept if the DEMs agree clearly better."""
+    progress = as_progress(progress)
+    centre = _centre(tr_d, zd.shape)
+    m = _Measure(zr, tr_r, stable, exclude, max_slope, max_samples, centre)
+    if int(m.base.sum()) < MIN_CELLS:
+        raise ValueError("too few cells to compare: the DEMs do not overlap, or the areas given leave out "
+                         "almost all of them")
+    found = None
+    if search is None or search > 0:
+        found = _search(zr, tr_r, zd, tr_d, stable, exclude, search, max_slope, k, progress.sub(0.0, 0.15))
+    run = _iterate(m, zd, tr_d, (0.0, 0.0), tilt, max_iter, k, tolerance, progress.sub(0.15, 0.4))
+    before = bilinear(zd, tr_d, m.x, m.y) - m.z  # the DEM as it is
+    initial = "off" if found is None else found.status
+    used = False
+    if found is not None and found.status == "found":
+        near = SEARCH_AGREE * found.cell
+        if math.hypot(run.dx - found.dx, run.dy - found.dy) <= near:
+            initial = "confirmed"
+        else:
+            try:
+                other = _iterate(m, zd, tr_d, (found.dx, found.dy), tilt, max_iter, k, tolerance,
+                                 progress.sub(0.55, 0.4), " from the initial search")
+            except ValueError:  # too few cells in common there
+                other = None
+            if other is not None and math.hypot(run.dx - other.dx, run.dy - other.dy) <= near:
+                initial = "confirmed"  # both fits ended at the same shift
+            elif other is not None and _better(m, other, run, k):
+                run, initial, used = other, "used", True
+            else:
+                initial = "rejected"
+    dx, dy, plane, inl = run.dx, run.dy, run.plane, run.inl
     nb, rb, mb = m.stats(before[inl & np.isfinite(before)])
-    na, ra, ma = m.stats(after[inl])
+    na, ra, ma = m.stats(run.after[inl])
     progress(0.95, f"Coregistration: shift {dx:+.4f} {dy:+.4f} m, dz {plane[0]:+.4f} m, NMAD {nb:.4f} -> {na:.4f} m")
+    tried = found is not None and found.status in ("found", "beyond")
     return Coregistration(dx=float(dx), dy=float(dy), dz=float(plane[0]), tilt_x=float(plane[1]),
                           tilt_y=float(plane[2]), centre=(float(centre[0]), float(centre[1])), nmad_before=nb,
                           nmad_after=na, rmse_before=rb, rmse_after=ra, median_before=mb, median_after=ma,
-                          cells=int(inl.sum()), compared=int(ok.sum()), step=int(m.step),
-                          resolution=float(m.resolution), iterations=it, converged=converged,
-                          horizontal=horizontal, tilt=bool(tilt), stable_index=(m.rr[inl], m.cc[inl]))
+                          cells=int(inl.sum()), compared=int(run.ok.sum()), step=int(m.step),
+                          resolution=float(m.resolution), iterations=run.iterations, converged=run.converged,
+                          horizontal=run.horizontal, tilt=bool(tilt), initial=initial,
+                          initial_shift=(found.dx, found.dy) if tried else None,
+                          initial_score=found.score if found is not None else float("nan"),
+                          search_cell=found.cell if found is not None else 0.0,
+                          method_used="search+nuth_kaab" if used else "nuth_kaab",
+                          stable_index=(m.rr[inl], m.cc[inl]))
 
 
 def _method(method: str) -> str:
@@ -493,7 +989,7 @@ def xdem_available() -> bool:
 
 def coregister(reference_path, dem_path, out_path=None, stable=None, exclude=None, tilt: bool = True,
                max_iter: int = 10, method: str = "auto", max_slope: float = MAX_SLOPE, k: float = OUTLIER_K,
-               tolerance: float = TOLERANCE, max_samples: int = MAX_SAMPLES,
+               tolerance: float = TOLERANCE, max_samples: int = MAX_SAMPLES, search: float | None = None,
                progress: Progress | None = None) -> Coregistration:
     """The DEM ``dem_path`` moved onto ``reference_path`` over the stable ground (see the module
     docstring); with ``out_path`` the coregistered DEM is written there.
@@ -502,8 +998,9 @@ def coregister(reference_path, dem_path, out_path=None, stable=None, exclude=Non
     the DEMs, or a boolean grid of the shape of the reference); ``exclude``: areas that changed (the
     excavation), a geometry or a list. ``tilt``: a plane besides the vertical bias. ``max_slope``:
     degrees; ``k``: NMAD of the differences beyond which a cell changed; ``tolerance``: cells.
-    ``method``: ``"auto"`` / ``"nuth_kaab"`` (this module) or ``"xdem"``. A ``ValueError`` when the
-    DEMs do not overlap or differ almost everywhere."""
+    ``search``: the longest shift (m) the initial search looks for - None: any at which the DEMs
+    overlap enough, 0: no initial search. ``method``: ``"auto"`` / ``"nuth_kaab"`` (this module) or
+    ``"xdem"``. A ``ValueError`` when the DEMs do not overlap or differ almost everywhere."""
     progress = as_progress(progress)
     method = _method(method)
     if method == "xdem":
@@ -514,7 +1011,7 @@ def coregister(reference_path, dem_path, out_path=None, stable=None, exclude=Non
     zd, tr_d, crs_d = _read(dem_path)
     _check(tr_r, tr_d, crs_r, crs_d)
     result = _estimate(zr, tr_r, zd, tr_d, stable=stable, exclude=exclude, tilt=tilt, max_iter=max_iter,
-                       max_slope=max_slope, k=k, tolerance=tolerance, max_samples=max_samples,
+                       max_slope=max_slope, k=k, tolerance=tolerance, max_samples=max_samples, search=search,
                        progress=progress.sub(0.02, 0.78))
     del zr
     result.reference, result.dem = str(reference_path), str(dem_path)
@@ -584,7 +1081,7 @@ def _coregister_xdem(reference_path, dem_path, out_path, stable, exclude, tilt, 
     progress(0.7, "Coregistration (xdem): measuring the result")
     # what xdem did: the input DEM measured on its result (nothing changed between the two)
     applied = _estimate(za, tr_d, zd, tr_d, tilt=tilt, max_iter=max_iter, max_slope=89.0, k=1e9,
-                        max_samples=max_samples)
+                        max_samples=max_samples, search=0)
     # agreement with the reference on the stable ground of this module, before and after
     m = _Measure(zr, tr_r, stable, exclude, max_slope, max_samples, applied.centre)
     after = bilinear(za, tr_d, m.x, m.y) - m.z
@@ -597,8 +1094,8 @@ def _coregister_xdem(reference_path, dem_path, out_path, stable, exclude, tilt, 
                          median_before=mb, median_after=ma, cells=int(inl.sum()),
                          compared=int((m.base & np.isfinite(after)).sum()), step=int(m.step),
                          resolution=float(m.resolution), iterations=max_iter, converged=True,
-                         horizontal=applied.horizontal, tilt=bool(tilt), method="xdem", reference=str(reference_path),
-                         dem=str(dem_path), stable_index=(m.rr[inl], m.cc[inl]))
+                         horizontal=applied.horizontal, tilt=bool(tilt), method="xdem", method_used="xdem",
+                         reference=str(reference_path), dem=str(dem_path), stable_index=(m.rr[inl], m.cc[inl]))
     if out_path is not None:
         Path(out_path).parent.mkdir(parents=True, exist_ok=True)
         with rasterio.open(out_path, "w", **_profile(zd.shape, tr_d, crs_d)) as dst:
@@ -636,11 +1133,13 @@ def reference_dem(reference) -> tuple[Path, str, dict]:
 
 
 def coregister_chunk(chunk, reference, stable=None, exclude=None, tilt: bool = True, max_iter: int = 10,
-                     method: str = "auto", name: str | None = None, progress: Progress | None = None) -> dict:
+                     method: str = "auto", name: str | None = None, search: float | None = None,
+                     progress: Progress | None = None) -> dict:
     """The DEM of ``chunk`` coregistered onto ``reference`` (:func:`reference_dem`): the result
     becomes the active DEM (named ``name``, default "DEM coregistrato su <reference>"), the DEM as it
     was stays among the versions; the measures go into ``chunk.meta["dem"]["coregistration"]`` and
-    are returned with ``name`` and ``version`` (the id of the DEM kept)."""
+    are returned with ``name`` and ``version`` (the id of the DEM kept). ``search``: see
+    :func:`coregister`."""
     from ..core import versions
 
     progress = as_progress(progress)
@@ -653,7 +1152,7 @@ def coregister_chunk(chunk, reference, stable=None, exclude=None, tilt: bool = T
     tmp = chunk.data_dir / "dem.coreg.tmp.tif"
     try:
         result = coregister(ref_path, src, tmp, stable=stable, exclude=exclude, tilt=tilt, max_iter=max_iter,
-                            method=method, progress=progress.sub(0.0, 0.95))
+                            method=method, search=search, progress=progress.sub(0.0, 0.95))
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
@@ -688,6 +1187,17 @@ def summary(result: Coregistration | dict) -> str:
     tilt = math.hypot(num(r.get("tilt_x") or 0.0), num(r.get("tilt_y") or 0.0)) * 1000
     text = (f"dx {num(r['dx']):+.4f} m, dy {num(r['dy']):+.4f} m, dz {num(r['dz']):+.4f} m, tilt {tilt:.2f} mm/m; "
             f"NMAD {num(r.get('nmad_before')):.4f} -> {num(r.get('nmad_after')):.4f} m ({r['cells']} stable cells)")
+    initial, start = r.get("initial"), r.get("initial_shift")
+    if initial in ("used", "rejected") and start:
+        found = (f"initial search {num(start[0]):+.2f} {num(start[1]):+.2f} m (slope correlation "
+                 f"{num(r.get('initial_score')):.2f})")
+        text += f"; {found}, the fit started there" if initial == "used" else \
+            f"; {found} rejected: the DEMs did not agree better there"
+    elif initial == "ambiguous":
+        text += "; initial search ambiguous (several shifts match: periodic ground?), not used"
+    elif initial == "beyond" and start:
+        text += (f"; initial search: a better match at {num(start[0]):+.2f} {num(start[1]):+.2f} m lies beyond the "
+                 f"search distance, not used")
     if not r.get("horizontal", True):
         text += "; horizontal shift not measurable along the ground (flat or one-sided)"
     if not r.get("converged", True):
