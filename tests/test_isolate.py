@@ -103,3 +103,25 @@ def test_cancelled_progress_stops_child():
     with pytest.raises(Cancelled):
         run_isolated(_report_then_sleep, 30.0, progress=p)
     assert time.monotonic() - t0 < 10
+
+
+def test_a_report_the_parent_is_reading_never_stops_the_work(tmp_path, monkeypatch):
+    """On Windows the progress file cannot be replaced while the parent reads it: the report is
+    tried again, then skipped, and the child goes on (the fusion of the depth maps failed on it)."""
+    from pyarchinit_photogrammetry.engine import isolate
+
+    target = tmp_path / "progress.txt"
+    monkeypatch.setattr(isolate, "_progress_file", target)
+    tries = []
+
+    def busy(src, dst):
+        tries.append(dst)
+        raise PermissionError(5, "Access is denied", str(dst))
+
+    monkeypatch.setattr(isolate.os, "replace", busy)
+    isolate.report(0.5, "halfway")  # no exception
+    assert len(tries) == 5 and not target.exists() and not target.with_suffix(".tmp").exists()
+    monkeypatch.undo()
+    monkeypatch.setattr(isolate, "_progress_file", target)
+    isolate.report(0.75, "three quarters")
+    assert target.read_text(encoding="utf-8") == "0.750000\tthree quarters"

@@ -139,7 +139,16 @@ def report(fraction: float, message: str = "") -> None:
         return
     tmp = _progress_file.with_suffix(".tmp")
     tmp.write_text(f"{float(fraction):.6f}\t{message}", encoding="utf-8")
-    os.replace(tmp, _progress_file)  # the parent never reads half a line
+    # the parent never reads half a line. On Windows a file cannot be replaced while the parent is
+    # reading it ("Access is denied"): a few tries, then this report is skipped - progress must never
+    # stop the work (the fusion of the depth maps failed on it)
+    for attempt in range(5):
+        try:
+            os.replace(tmp, _progress_file)
+            return
+        except PermissionError:
+            time.sleep(0.01 * (attempt + 1))
+    tmp.unlink(missing_ok=True)
 
 
 def _relay_progress(path: Path, last: str | None, progress: Callable[[float, str], None]) -> str | None:
