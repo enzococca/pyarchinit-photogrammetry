@@ -54,9 +54,39 @@ def _icon(value) -> QIcon:
     return QIcon()
 
 
+class PaneScroll(QScrollArea):
+    """The scroll area of a pane, with room above it for the pane's toolbar: the tools stay in sight
+    while the pane scrolls, and the pane is still the widget of the area."""
+
+    def __init__(self):
+        super().__init__()
+        self.toolbar: QWidget | None = None
+
+    def set_toolbar(self, bar: QWidget) -> None:
+        self.toolbar = bar
+        bar.setParent(self)
+        bar.show()
+        self._place_toolbar()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt name
+        super().resizeEvent(event)
+        self._place_toolbar()
+
+    def _place_toolbar(self) -> None:
+        bar = self.toolbar
+        if bar is None:
+            return
+        h = bar.sizeHint().height()
+        if self.viewportMargins().top() != h:
+            self.setViewportMargins(0, h, 0, 0)
+        r = self.contentsRect()
+        bar.setGeometry(r.left(), r.top(), r.width(), h)
+
+
 class PaneDock(QDockWidget):
     """A pane: its widget in a scroll area (a pane taller than a laptop screen scrolls), the group
-    of the side where it starts, fixed (always there) or not."""
+    of the side where it starts, fixed (always there) or not; a toolbar of the pane above it
+    (:meth:`set_toolbar`), as Metashape's Workspace has."""
 
     def __init__(self, widget: QWidget, title: str, name: str, group: PaneGroup, parent: QMainWindow,
                  icon: QIcon | None = None, fixed: bool = False):
@@ -66,7 +96,7 @@ class PaneDock(QDockWidget):
         self.group = group
         self.fixed = fixed
         self.setFeatures(FIXED if fixed else CLOSABLE)
-        scroll = QScrollArea()
+        scroll = PaneScroll()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setMinimumSize(40, 40)  # the tabs are above the pane now: the window stays as small as before
@@ -87,6 +117,12 @@ class PaneDock(QDockWidget):
         """The icon of its tab (not of its entry in *Vista > Pannelli*: there the tick says open or closed,
         and a menu entry with an icon shows the icon instead of the tick)."""
         self.setWindowIcon(icon)
+
+    def set_toolbar(self, bar: QWidget) -> None:
+        """``bar`` (a QToolBar) above the pane, out of its scrolling part."""
+        scroll = self.widget()
+        if isinstance(scroll, PaneScroll):
+            scroll.set_toolbar(bar)
 
     def take_pane(self) -> QWidget:
         """The widget out of the dock, without a parent: the dock can go, the widget is the caller's."""
@@ -543,4 +579,4 @@ class Panes(QObject):
         return False
 
 
-__all__ = ["STATE_VERSION", "AREAS", "PaneDock", "PaneGroup", "GroupDock", "Panes"]
+__all__ = ["STATE_VERSION", "AREAS", "PaneScroll", "PaneDock", "PaneGroup", "GroupDock", "Panes"]

@@ -34,6 +34,8 @@ QToolButton:hover {{ background: {hover}; border-color: {border}; }}
 QToolButton:pressed, QToolButton:checked {{ background: {selected}; border-color: {accent}; }}
 QToolButton:disabled {{ color: {text_dim}; }}
 QToolButton#qt_toolbar_ext_button {{ padding: 0px; border-radius: 4px; }}  /* the >> of a full toolbar */
+QToolBar#paneToolbar {{ background: {panel_alt}; padding: 2px 4px; spacing: 1px; }}  /* above a pane: icons only */
+QToolBar#paneToolbar QToolButton {{ padding: 3px; }}
 QMenuBar {{ background: {toolbar}; border-bottom: 1px solid {border}; padding: 2px; }}
 QMenuBar::item {{ padding: 4px 10px; border-radius: 4px; }}
 QMenuBar::item:selected {{ background: {hover}; }}
