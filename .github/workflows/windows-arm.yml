@@ -473,13 +473,16 @@ jobs:
           if (-not $vs) { $vs = & $vswhere -latest -products * -property installationPath }
           Import-Module (Join-Path $vs "Common7/Tools/Microsoft.VisualStudio.DevShell.dll")
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=arm64 -host_arch=arm64"
-          # the options of Kitware's wheels (.gitlab/ci/configure_wheel.cmake) without the .pyi files;
+          # the options of Kitware's wheels (.gitlab/ci/configure_wheel.cmake) without the .pyi files,
+          # plus the three modules pyvista maps outside the default groups;
           # no version suffix: 9.7.1 as on PyPI, or pip would take it for a pre-release
           & $cmake -S C:\vtk -B C:\vb -G Ninja -DCMAKE_BUILD_TYPE=Release `
             -DVTK_WHEEL_BUILD=ON -DVTK_WRAP_PYTHON=ON -DVTK_VERSION_SUFFIX= `
             -DVTK_BUILD_TESTING=OFF -DVTK_BUILD_EXAMPLES=OFF -DVTK_ENABLE_REMOTE_MODULES=OFF `
             -DVTK_DEBUG_LEAKS=OFF -DVTK_BUILD_PYI_FILES=OFF -DVTK_USE_PCH=OFF -DVTK_GROUP_ENABLE_Qt=NO `
             -DVTK_SMP_IMPLEMENTATION_TYPE=STDThread `
+            -DVTK_MODULE_ENABLE_VTK_FiltersParallelDIY2=WANT -DVTK_MODULE_ENABLE_VTK_IOParallelExodus=WANT `
+            -DVTK_MODULE_ENABLE_VTK_IOXdmf2=WANT `
             -DPython3_EXECUTABLE="$py" -DPython3_FIND_STRATEGY=LOCATION
           & $cmake --build C:\vb
           Set-Location C:\vb
@@ -518,30 +521,24 @@ jobs:
           print("VTK", vtkVersion.GetVTKVersion(), "pyvista", pv.__version__, "faces", mesh.n_cells, clip.n_cells)
           '@
           & C:\venv\Scripts\python check.py
-      - name: An image drawn by VTK (Mesa llvmpipe in place of a graphics driver)
+      - name: An image drawn by VTK
         continue-on-error: true
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-          $PSNativeCommandUseErrorActionPreference = $true
-          # the runner has no OpenGL driver beyond Windows' GDI 1.1: the software OpenGL of Mesa for ARM64,
-          # next to python.exe only for this test (the application uses the system's OpenGL)
-          $rel = Invoke-RestMethod https://api.github.com/repos/pal1000/mesa-dist-win/releases/latest
-          $asset = $rel.assets | Where-Object { $_.name -like "*-release-msvc.7z" } | Select-Object -First 1
-          Invoke-WebRequest $asset.browser_download_url -OutFile mesa.7z
-          7z x mesa.7z -omesa | Out-Null
-          Get-ChildItem mesa -Directory | ForEach-Object { $_.Name }
-          Copy-Item mesa/arm64/*.dll C:\venv\Scripts\
-          $env:GALLIUM_DRIVER = "llvmpipe"
+          # the runner has no graphics driver with OpenGL 3.2 (VTK's minimum): Microsoft's OpenGL over
+          # Direct3D 12 (the "OpenCL, OpenGL, and Vulkan Compatibility Pack" Snapdragon laptops come with),
+          # if the Store can be reached from here; Mesa publishes no software OpenGL for Windows ARM64
+          winget install --id 9NQPSL29BFFF --source msstore --accept-package-agreements --accept-source-agreements --disable-interactivity
           Set-Content render.py @'
           import pyvista as pv
           p = pv.Plotter(off_screen=True, window_size=(320, 240))
           p.add_mesh(pv.Sphere(), color="orange")
           image = p.screenshot(return_img=True)
           print("rendered", image.shape, "non-background pixels", int((image != image[0, 0]).any(axis=2).sum()))
-          print(p.render_window.ReportCapabilities()[:400])
+          print(p.render_window.ReportCapabilities()[:600])
           '@
           & C:\venv\Scripts\python render.py
+          if ($LASTEXITCODE -ne 0) { throw "VTK could not draw (exit $LASTEXITCODE)" }
 
   pye57:
     # E57 laser scans: pye57 from its source with xerces-c from vcpkg
