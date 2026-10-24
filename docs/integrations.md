@@ -46,7 +46,8 @@ program's version of those rows (its label, its area...). When the outline of a 
 3D proxy changes, the proxy is built again by itself, with the base it was built with (the plane,
 the thickness or the DEM after the removal, kept with the proxy since this version; for a proxy
 of an earlier version the missing value is asked once); when only its number changes the proxy
-takes the new name. Undoing the entry brings the proxies back with the polygons.
+takes the new name. Undoing the entry brings the proxies back with the polygons, and the
+sections are cut again along the traces they had.
 
 How the program tells the edits of QGIS from its own: every feature has an identity, `ppg_id` (a
 UUID kept with the unit, the spot height or the section, and also used by the QField package),
@@ -56,7 +57,7 @@ signature of what the program last wrote in it: a row whose geometry or attribut
 match was edited by another program. Rows without an identity were drawn there (they get one at
 once); rows that disappeared were deleted there. The window looks once a second whether another
 program committed to the file (`PRAGMA data_version` of a connection kept open: its own writes do
-not count), and never writes over an edit it has not read yet. Since the signatures live in the
+not count), and never writes over an edit or a deletion it has not read yet. Since the signatures live in the
 file, the edits made in QGIS while the program was closed come back when the project is opened
 again (deletions made meanwhile excepted: the program writes those features again).
 
