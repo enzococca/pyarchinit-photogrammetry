@@ -14,7 +14,9 @@ Two kinds of changes are kept:
   the edited ones kept for redo.
 
 The history belongs to the open chunk: it starts again when another project or chunk is opened,
-and its copies (``<chunk data>/undo``) are deleted then.
+and its copies (``<chunk data>/undo``) are deleted then. A third kind of entry undoes and redoes
+itself (:meth:`UndoHistory.push`): the removals from the workspace (``core.removal``), which act
+on any chunk and stay in the history when another chunk becomes the active one.
 """
 from __future__ import annotations
 
@@ -70,6 +72,8 @@ class Entry:
     after: dict
     files: dict | None = None  # {"folder", "before": {product: {"rel", "copy"}}, "after": ... or None}
     extra: dict = field(default_factory=dict)
+    action: object | None = None  # an entry that undoes itself: action.undo(), action.redo() (push)
+    document: bool = False  # kept when another chunk becomes the active one
 
 
 class UndoHistory:
@@ -90,13 +94,17 @@ class UndoHistory:
         state = self.get_state() or {}
         return {k: json.dumps(v, sort_keys=True, default=str) for k, v in state.items()}
 
-    def reset(self) -> None:
-        """Forget everything (another project or chunk is open) and delete the copies."""
+    def reset(self, keep_document: bool = False) -> None:
+        """Forget everything (another project or chunk is open) and delete the copies;
+        ``keep_document``: the entries of the project that can still be undone (removals from the
+        workspace) stay, as when another chunk becomes the active one."""
+        keep = [e for e in self.entries[:self.index] if e.document] if keep_document else []
         for e in self.entries:
-            self._drop_files(e)
+            if not any(e is k for k in keep):
+                self._drop_files(e)
         if self._pending:
             shutil.rmtree(self._pending["folder"], ignore_errors=True)
-        self.entries, self.index, self._pending = [], 0, None
+        self.entries, self.index, self._pending = keep, len(keep), None
         self._base = self._snapshot()
         ch = self.get_chunk()
         if ch is not None:
@@ -186,7 +194,7 @@ class UndoHistory:
         new = self._snapshot()
         if new.get("chunk") != self._base.get("chunk"):  # another chunk: its own history
             self.discard_pending()
-            self.reset()
+            self.reset(keep_document=True)
             return False
         parts = [k for k in new if k != "chunk" and new.get(k) != self._base.get(k)]
         files = self._pending
@@ -207,6 +215,25 @@ class UndoHistory:
         del self.entries[self.index:]
         self.entries.append(Entry(text, {k: self._base.get(k) for k in parts}, {k: new[k] for k in parts}, files))
         self._base = new
+        self._trim()
+        self._changed()
+        return True
+
+    def push(self, text: str, action, document: bool = True) -> None:
+        """A step already done that undoes and redoes itself: ``action.undo()``, ``action.redo()`` and,
+        if it has one, ``action.drop()`` when the history forgets it (a removal from the workspace).
+        ``document``: it stays when another chunk becomes the active one. What was undone cannot be
+        redone after it."""
+        for e in self.entries[self.index:]:
+            self._drop_files(e)
+        del self.entries[self.index:]
+        self.entries.append(Entry(text, {}, {}, None, action=action, document=document))
+        self._base = self._snapshot()
+        self._trim()
+        self._changed()
+
+    def _trim(self) -> None:
+        """At most ``limit`` entries, the copies of files of the last ``file_limit`` only."""
         while len(self.entries) > self.limit:
             self._drop_files(self.entries.pop(0))
         with_files = [e for e in self.entries if e.files]
@@ -215,15 +242,16 @@ class UndoHistory:
             e.files = None
             e.extra["files_dropped"] = True
         self.index = len(self.entries)
-        self._changed()
-        return True
 
     # ------------------------------------------------------------------ undo / redo
     def undo(self) -> str | None:
         if not self.can_undo():
             return None
         e = self.entries[self.index - 1]
-        self._apply(e.before, e.files, "before")
+        if e.action is not None:
+            self._run(e, self.index - 1, "undo")
+        else:
+            self._apply(e.before, e.files, "before")
         self.index -= 1
         self._changed()
         return e.text
@@ -232,10 +260,32 @@ class UndoHistory:
         if not self.can_redo():
             return None
         e = self.entries[self.index]
-        self._apply(e.after, e.files, "after")
+        if e.action is not None:
+            self._run(e, self.index, "redo")
+        else:
+            self._apply(e.after, e.files, "after")
         self.index += 1
         self._changed()
         return e.text
+
+    def _run(self, e: Entry, i: int, how: str) -> None:
+        """``action.undo()`` or ``redo()`` of the entry at ``i``. When it fails the entry goes, with what
+        was undone after it (it cannot be redone), and the error goes on to the caller."""
+        self.applying = True
+        try:
+            getattr(e.action, how)()
+        except Exception:
+            self.applying = False
+            for gone in self.entries[i:]:
+                self._drop_files(gone)
+            del self.entries[i:]
+            self.index = i
+            self._base = self._snapshot()
+            self._changed()
+            raise
+        finally:
+            self.applying = False
+        self._base = self._snapshot()
 
     def _apply(self, parts: dict, files: dict | None, side: str) -> None:
         self.applying = True
@@ -276,3 +326,9 @@ class UndoHistory:
     def _drop_files(self, e: Entry) -> None:
         if e.files:
             shutil.rmtree(e.files["folder"], ignore_errors=True)
+        drop = getattr(e.action, "drop", None)
+        if drop is not None:
+            try:
+                drop()
+            except Exception as exc:  # noqa: BLE001 - forgetting an entry never stops the window
+                log.warning("Annulla: %s non dimenticato (%s)", e.text, exc)

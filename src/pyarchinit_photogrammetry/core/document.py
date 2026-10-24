@@ -2,6 +2,8 @@
 
 A project is ``name.ppg`` (JSON) plus the folder ``name.ppg.files/`` with the
 heavy data of each chunk (feature database, depth maps, clouds, meshes, rasters).
+What the workspace removes in a session waits in ``name.ppg.files/.removed/`` until
+the session ends (see :mod:`.removal`).
 """
 from __future__ import annotations
 
@@ -19,6 +21,7 @@ class Document:
     def __init__(self, path: str | Path | None = None):
         self.chunks: list[Chunk] = []
         self.meta: dict = {}
+        self.removals: list = []  # removals of this session that can still be undone (core.removal)
         self._path: Path | None = None
         self._tmp: tempfile.TemporaryDirectory | None = None
         if path is not None:
@@ -62,14 +65,37 @@ class Document:
             self.meta["active_chunk"] = chunk.key
 
     def add_chunk(self, label: str | None = None) -> Chunk:
-        key = max((c.key for c in self.chunks), default=-1) + 1
+        """A new chunk at the end. Its key is never that of a chunk removed in this session (it can
+        come back with Modifica > Annulla) nor that of a folder already full in the files folder."""
+        removed = [c.key for r in self.removals if getattr(r, "kind", "") == "chunks" and r.state == "removed"
+                   for c in r.chunks]
+        key = max([c.key for c in self.chunks] + removed, default=-1) + 1
+        if self._path is not None or self._tmp is not None:  # the files folder exists already
+            while (folder := self.files_dir / f"chunk_{key}").is_dir() and any(folder.iterdir()):
+                key += 1
         chunk = Chunk(key=key, label=label or f"Chunk {key + 1}", document=self)
         self.chunks.append(chunk)
         return chunk
 
     def remove_chunk(self, chunk: Chunk) -> None:
+        """The chunk out of the project and its folder deleted at once (a chunk just made by a step that
+        failed). The workspace removes chunks with :class:`removal.ChunkRemoval`, which can be undone."""
         self.chunks.remove(chunk)
         shutil.rmtree(self.files_dir / f"chunk_{chunk.key}", ignore_errors=True)
+
+    def settle_removals(self) -> None:
+        """End of the session: the files of what was removed in it as the project last saved wants them
+        (back in place when it still lists them, else deleted) - the chunks first, then what goes inside
+        them - and the folder ``.removed`` emptied (see :mod:`.removal`)."""
+        for r in sorted(self.removals, key=lambda r: 0 if getattr(r, "kind", "") == "chunks" else 1):
+            r.settle()
+        self.removals = []
+
+    def recover_removed(self) -> dict:
+        """What a session that crashed left in ``.removed``, settled now (see :func:`removal.recover`)."""
+        from .removal import recover
+
+        return recover(self)
 
     def align_chunks(self, reference, chunks=None, method: str = "markers", fix_scale: bool = False,
                      initial: str = "auto", max_points: int = 200_000, progress=None) -> dict:
@@ -117,6 +143,8 @@ class Document:
         tmp = self._path.with_suffix(".ppg.tmp")
         tmp.write_text(json.dumps(payload, indent=1))
         tmp.replace(self._path)
+        for r in self.removals:  # what the file now says: the end of the session settles the files on it
+            r.mark_saved()
         return self._path
 
     def _read(self) -> None:

@@ -231,11 +231,20 @@ class Chunk:
         return relink_photos(self, folder, only_unreadable=only_unreadable)
 
     def remove_cameras(self, cameras: Iterable[Camera]) -> None:
+        """Photos out of the chunk (their files stay where they are), with their measurements of the
+        markers and their names in the alignment model: the model keeps their images, which nothing
+        maps to a photo any more, so optimising or refining it leaves them out, and a new alignment
+        does not use them."""
         drop = {c.key for c in cameras}
         self.cameras = [c for c in self.cameras if c.key not in drop]
         for m in self.markers:
             for k in drop:
                 m.projections.pop(k, None)
+        names = (self.meta.get("sfm") or {}).get("names")
+        if isinstance(names, dict):
+            for k in drop:
+                names.pop(str(k), None)
+        self._surface_cache.clear()
 
     # ------------------------------------------------------------- alignment
     def match_photos(self, quality: str = "high", keypoint_limit: int = 40000, tiepoint_limit: int = 8000,
