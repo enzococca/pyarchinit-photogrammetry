@@ -283,6 +283,18 @@ def test_flat_or_different_ground_finds_nothing(tmp_path):
     assert r.initial == "none" and (r.dx, r.dy) == (0.0, 0.0) and not r.converged
 
 
+def test_surveys_that_do_not_overlap_as_they_are(tmp_path):
+    """A GPS error larger than the surveys: as they are the two DEMs of 4 m do not overlap, and the
+    fit from there cannot start. The search matches them and the fit from its shift is used; without
+    the search they cannot be compared."""
+    first, second, _ = write_far(tmp_path, rough_ground(), size=4.0, res=0.01, offset=(4.5, 0.2), shift=(4.3, 0.1))
+    r = coreg.coregister(first, second)
+    assert r.initial == "used" and r.converged and abs(r.dx - 4.3) < 0.02 * 0.01 and abs(r.dy - 0.1) < 0.02 * 0.01
+    assert r.nmad_after < 0.005 and r.to_dict()["nmad_before"] is None  # nothing to compare before
+    with pytest.raises(ValueError, match="too few"):
+        coreg.coregister(first, second, search=0)
+
+
 def test_search_distance(tmp_path):
     """A search shorter than the shift: the best match within reach only looks like the ground, a
     clearly better one lies further; it is reported, not used. Long enough, it is used."""

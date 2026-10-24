@@ -1125,10 +1125,12 @@ d'accordo almeno un 5 % in più; altrimenti resta la stima dal DEM così com'è 
 l'NMAD a decidere: su un terreno piano con poche tracce, quelle che uno spostamento sbagliato lascia
 fuori posto vengono prese per terreno cambiato e l'NMAD del resto è altrettanto piccolo; inoltre
 leggere un DEM tra le sue celle ne media il rumore, quindi l'NMAD dipende anche da dove cade lo
-spostamento tra una cella e l'altra. Una direzione che le pendenze non possono misurare non viene
-toccata dalla stima: resta 0, o dove l'ha messa la ricerca. Con DSM di un terreno la cui vegetazione è
-cambiata tra un rilievo e l'altro (colture, cespugli) la ricerca può non trovare nulla: si
-coregistrano i DTM (`chunk.build_dem(..., classes=[2])`).
+spostamento tra una cella e l'altra. DEM che così come sono non si sovrappongono (un errore del GPS
+più grande dei rilievi) vengono coregistrati dallo spostamento trovato se lì la stima si stabilizza
+(`nmad_before` è allora None); senza la ricerca danno `ValueError`. Una direzione che le pendenze
+non possono misurare non viene toccata dalla stima: resta 0, o dove l'ha messa la ricerca. Con DSM
+di un terreno la cui vegetazione è cambiata tra un rilievo e l'altro (colture, cespugli) la ricerca
+può non trovare nulla: si coregistrano i DTM (`chunk.build_dem(..., classes=[2])`).
 
 La `Coregistration` dà `dx`, `dy` (il DEM mostrava il terreno tanto più a est e a nord del
 riferimento), `dz` (tanto più in alto in `centre`, il centro del DEM), `tilt_x`, `tilt_y` (metri per

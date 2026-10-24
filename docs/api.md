@@ -1089,9 +1089,12 @@ and agrees on at least 5 % of it more; else the fit from the DEM as it is stays 
 NMAD does not decide: on level ground with a few features, the features a wrong shift leaves out of
 place are taken for ground that changed and the NMAD of the rest is as small, and reading a DEM
 between its cells averages its noise, so the NMAD also depends on where the shift falls between the
-cells. A direction the slopes cannot measure is not moved by the fit: it stays 0, or where the
-search put it. Coregistering DSMs of ground whose vegetation changed between the surveys (crops,
-bushes), the search may find nothing: coregister the DTMs (`chunk.build_dem(..., classes=[2])`).
+cells. DEMs that do not overlap as they are (a GPS error larger than the surveys) are coregistered
+from the shift found when the fit settles there (`nmad_before` is then None); without the search
+they raise `ValueError`. A direction the slopes cannot measure is not moved by the fit: it stays 0,
+or where the search put it. Coregistering DSMs of ground whose vegetation changed between the
+surveys (crops, bushes), the search may find nothing: coregister the DTMs
+(`chunk.build_dem(..., classes=[2])`).
 
 The `Coregistration` gives `dx`, `dy` (the DEM showed the ground that far east and north of the
 reference), `dz` (that much higher at `centre`, the centre of the DEM), `tilt_x`, `tilt_y` (metres

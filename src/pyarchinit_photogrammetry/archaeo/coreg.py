@@ -72,7 +72,9 @@ and agrees on at least :data:`SEARCH_GAIN` of it more; else the fit from the DEM
 those a wrong shift leaves out of place are taken for ground that changed and the NMAD of the rest
 is as small; and reading a DEM between its cells averages the noise of up to four of them, so the
 NMAD of a fit also depends on where its shift falls between the cells (down to a half). A shift
-found but not verified this way is never applied.
+found but not verified this way is never applied. DEMs that hardly overlap as they are (a GPS error
+larger than the surveys) leave the fit from the DEM as it is nothing to start from: the fit from the
+shift found is then used if it settles, else ``ValueError`` as without the search.
 
 The result (:class:`Coregistration`) says where the DEM was - ``dx``, ``dy``: it showed the ground
 that far east and north of the reference; ``dz``: that much higher at ``centre``; ``tilt_x``,
@@ -927,13 +929,18 @@ def _estimate(zr, tr_r, zd, tr_d, stable=None, exclude=None, tilt: bool = True, 
     found = None
     if search is None or search > 0:
         found = _search(zr, tr_r, zd, tr_d, stable, exclude, search, max_slope, k, progress.sub(0.0, 0.15))
-    run = _iterate(m, zd, tr_d, (0.0, 0.0), tilt, max_iter, k, tolerance, progress.sub(0.15, 0.4))
-    before = bilinear(zd, tr_d, m.x, m.y) - m.z  # the DEM as it is
+    searched = found is not None and found.status == "found"
+    try:
+        run = _iterate(m, zd, tr_d, (0.0, 0.0), tilt, max_iter, k, tolerance, progress.sub(0.15, 0.4))
+    except ValueError:
+        if not searched:
+            raise
+        run = None  # the DEMs hardly overlap as they are (a GPS error larger than the surveys)
     initial = "off" if found is None else found.status
     used = False
-    if found is not None and found.status == "found":
+    if searched:
         near = SEARCH_AGREE * found.cell
-        if math.hypot(run.dx - found.dx, run.dy - found.dy) <= near:
+        if run is not None and math.hypot(run.dx - found.dx, run.dy - found.dy) <= near:
             initial = "confirmed"
         else:
             try:
@@ -941,12 +948,17 @@ def _estimate(zr, tr_r, zd, tr_d, stable=None, exclude=None, tilt: bool = True, 
                                  progress.sub(0.55, 0.4), " from the initial search")
             except ValueError:  # too few cells in common there
                 other = None
-            if other is not None and math.hypot(run.dx - other.dx, run.dy - other.dy) <= near:
+            if run is None:  # nothing to compare with: the fit from the shift found, if it settles
+                if other is None or not other.converged:
+                    raise ValueError(FEW)
+                run, initial, used = other, "used", True
+            elif other is not None and math.hypot(run.dx - other.dx, run.dy - other.dy) <= near:
                 initial = "confirmed"  # both fits ended at the same shift
             elif other is not None and _better(m, other, run, k):
                 run, initial, used = other, "used", True
             else:
                 initial = "rejected"
+    before = bilinear(zd, tr_d, m.x, m.y) - m.z  # the DEM as it is
     dx, dy, plane, inl = run.dx, run.dy, run.plane, run.inl
     nb, rb, mb = m.stats(before[inl & np.isfinite(before)])
     na, ra, ma = m.stats(run.after[inl])
