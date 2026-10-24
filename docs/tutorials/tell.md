@@ -84,7 +84,7 @@ how many depth maps confirm it (*confidence*).
 ## 4. Model and texture
 
 *Workflow > Build model...* (source *Dense cloud*, surface *Arbitrary*, *Medium* faces) makes a
-mesh of 448,000 faces in 24 s; *Workflow > Build texture...* paints it from the photos in
+mesh of 458,000 faces in 24 s; *Workflow > Build texture...* paints it from the photos in
 27 s.
 
 ![The textured model](../img/tutorial/sultan-textured.png)

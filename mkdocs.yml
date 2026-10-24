@@ -70,6 +70,8 @@ plugins:
             terrio: terrio
             Spirula: Spirula
             Powerlines: Linee elettriche
+            Mesh (MeshLab): Mesh (MeshLab)
+            Sentinel-2: Sentinel-2
             Guide: Guida
             Desktop interface: Interfaccia
             Python API: API Python
@@ -119,6 +121,8 @@ nav:
       - terrio: plugins/terrio.md
       - Spirula: plugins/spirula.md
       - Powerlines: plugins/powerlines.md
+      - Mesh (MeshLab): plugins/mesh-tools.md
+      - Sentinel-2: plugins/sentinel2.md
   - Guide:
       - Desktop interface: gui.md
       - Python API: api.md

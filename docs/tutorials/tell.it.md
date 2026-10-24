@@ -83,7 +83,7 @@ conserva quante mappe di profondità lo confermano (*confidenza*).
 ## 4. Modello e texture
 
 *Flusso di lavoro > Costruisci modello...* (sorgente *Nuvola densa*, superficie *Arbitraria*, facce
-*Medio*) crea una mesh di 448.000 facce in 24 s; *Flusso di lavoro > Costruisci
+*Medio*) crea una mesh di 458.000 facce in 24 s; *Flusso di lavoro > Costruisci
 texture...* la colora dalle foto in 27 s.
 
 ![Il modello con texture](../img/tutorial/sultan-textured.png)
