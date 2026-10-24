@@ -34,6 +34,24 @@ class SceneData:
     confidence_missing: bool = False  # confidence colours asked for a cloud or model without confidence
     hag_missing: bool = False  # heights above the ground asked for a cloud without ground points
     shown_index: np.ndarray | None = None  # rows of the whole cloud that are displayed
+    exaggeration: float = 1.0  # heights shown multiplied by this along ``up`` around ``pivot``
+    pivot: np.ndarray | None = None
+
+    def to_display(self, pts) -> np.ndarray:
+        """Scene coordinates -> the coordinates shown (heights exaggerated)."""
+        pts = np.asarray(pts, np.float64)
+        if self.exaggeration == 1.0 or self.pivot is None:
+            return pts
+        up = self.up / np.linalg.norm(self.up)
+        return pts + np.multiply.outer(((pts - self.pivot) @ up) * (self.exaggeration - 1.0), up)
+
+    def from_display(self, pts) -> np.ndarray:
+        """The coordinates shown -> scene coordinates (the inverse of :meth:`to_display`)."""
+        pts = np.asarray(pts, np.float64)
+        if self.exaggeration == 1.0 or self.pivot is None:
+            return pts
+        up = self.up / np.linalg.norm(self.up)
+        return pts + np.multiply.outer(((pts - self.pivot) @ up) * (1.0 / self.exaggeration - 1.0), up)
 
     @property
     def extent(self) -> float:
@@ -53,6 +71,26 @@ class SceneData:
         if self.cameras:
             return np.vstack(self.cameras).mean(0)
         return np.zeros(3)
+
+
+def exaggerated(sd: SceneData, factor: float) -> SceneData:
+    """``sd`` with the heights multiplied by ``factor`` around the centre of the scene, along its
+    up direction: a vertical exaggeration of what is shown. Points picked on it go back to the
+    true coordinates with :meth:`SceneData.from_display`."""
+    import dataclasses
+
+    out = dataclasses.replace(sd, exaggeration=float(factor), pivot=np.asarray(sd.center, np.float64))
+    if out.exaggeration == 1.0:
+        return out
+
+    def shown(a):
+        return None if a is None else out.to_display(a).astype(np.float32)
+
+    out.points, out.mesh_vertices, out.region = shown(sd.points), shown(sd.mesh_vertices), shown(sd.region)
+    out.cameras = [shown(c) for c in sd.cameras]
+    out.markers = [(label, shown(xyz[None])[0], check) for label, xyz, check in sd.markers]
+    out.scalebars = [(text, shown(a[None])[0], shown(b[None])[0], check) for text, a, b, check in sd.scalebars]
+    return out
 
 
 def available_views(chunk) -> list[str]:

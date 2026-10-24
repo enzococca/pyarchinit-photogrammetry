@@ -7,16 +7,21 @@ import os
 import numpy as np
 from PySide6.QtCore import QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel, QListWidget, QMenu,
-                               QListWidgetItem, QPushButton, QSizePolicy, QSpinBox, QStackedLayout, QVBoxLayout,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QListWidget,
+                               QMenu, QListWidgetItem, QPushButton, QSizePolicy, QSpinBox, QStackedLayout, QVBoxLayout,
                                QWidget)
 
 from .flow_layout import FlowLayout
-from .i18n import thousands_points, tr
-from .scene import OrbitCamera, SceneData, available_views, build_scene, sample_mesh_colors, splat
+from .i18n import decimal_comma, thousands_points, tr
+from .scene import OrbitCamera, SceneData, available_views, build_scene, exaggerated, sample_mesh_colors, splat
 
 VIEW_LABELS = {"cameras": "Camere", "tie_points": "Punti di legame", "point_cloud": "Nuvola densa",
                "model": "Modello (ombreggiato)", "model_textured": "Modello con texture", "proxies": "Proxy delle US"}
+
+
+def exaggeration_text(factor: float) -> str:
+    """The caption of an exaggerated view: "Esagerazione verticale x2,5"."""
+    return tr("Esagerazione verticale x{0}", decimal_comma(f"{factor:g}"))
 
 
 class SoftwareCanvas(QWidget):
@@ -149,6 +154,8 @@ class SoftwareCanvas(QWidget):
                     p.drawLine(QPointF(float(x[a]), float(y[a])), QPointF(float(x[b]), float(y[b])))
         p.setPen(QColor(200, 200, 200))
         p.drawText(8, h - 8, tr("{0} - renderer software", tr(VIEW_LABELS.get(self.sd.kind, self.sd.kind))))
+        if self.sd.exaggeration != 1.0:
+            p.drawText(8, h - 26, exaggeration_text(self.sd.exaggeration))
         p.end()
 
     # ----------------------------------------------------------- interaction
@@ -283,6 +290,8 @@ class VtkCanvas(QWidget):
 
             lines = np.hstack([[2, a, b] for a, b in Region.EDGES])
             pl.add_mesh(pv.PolyData(np.asarray(sd.region, np.float64), lines=lines), color="#ffd200", line_width=2)
+        if sd.exaggeration != 1.0:
+            pl.add_text(exaggeration_text(sd.exaggeration), position="lower_left", font_size=10, color="#c8c8c8")
         if reset:
             self.reset_view()
         pl.render()
@@ -561,6 +570,21 @@ class ModelView(QWidget):
         self.cb_region.toggled.connect(lambda _: self.refresh(reset=False))
         b_reset = QPushButton(tr("Vista iniziale"))
         b_top = QPushButton(tr("Dall'alto"))
+        self.exaggeration = 1.0
+        self.exag_spin = QDoubleSpinBox()
+        self.exag_spin.setRange(0.1, 50.0)
+        self.exag_spin.setDecimals(1)
+        self.exag_spin.setSingleStep(0.5)
+        self.exag_spin.setValue(1.0)
+        self.exag_spin.setPrefix("x")
+        self.exag_spin.setKeyboardTracking(False)
+        self.exag_spin.setToolTip(tr("Esagerazione verticale: le quote di cio' che si vede moltiplicate intorno al "
+                                     "centro della scena, per leggere il rilievo di un terreno quasi piatto. Cambia "
+                                     "solo la vista: marker, sezioni, tagli e lazo usano le coordinate vere"))
+        self._exag_timer = QTimer(self)  # one rebuild of the view when the arrows are held down
+        self._exag_timer.setSingleShot(True)
+        self._exag_timer.timeout.connect(lambda: self.set_exaggeration(self.exag_spin.value()))
+        self.exag_spin.valueChanged.connect(lambda _v: self._exag_timer.start(150))
         self.color_combo = QComboBox()
         self._color_modes: tuple = ()
         self._wanted_mode = "rgb"  # the colours asked for: kept while a view without them is shown
@@ -627,6 +651,8 @@ class ModelView(QWidget):
         bar.addWidget(self.cb_cams)
         bar.addWidget(self.cb_marks)
         bar.addWidget(self.cb_region)
+        bar.addWidget(QLabel(tr("Esagerazione verticale:")))
+        bar.addWidget(self.exag_spin)
         bar.addWidget(b_top)
         bar.addWidget(b_reset)
         lay.addLayout(bar)
@@ -658,7 +684,8 @@ class ModelView(QWidget):
         lay.addLayout(row, 1)
         self.chunk = None
         self.kind = None
-        self.sd = None
+        self.sd = None  # what is shown (heights exaggerated)
+        self.base_sd = None  # the same in true scene coordinates
         self.paths: dict = {}  # files shown instead of the active products (a kept version)
         self.highlight = None  # mask over the dense cloud shown in red (what a cleaning would remove)
         self._project = None
@@ -863,11 +890,11 @@ class ModelView(QWidget):
         if not len(idx):
             return None
         front = idx[depth[idx] <= depth[idx].min() * 1.02 + 1e-12]  # the surface in front, not what is behind it
-        picked = self.chunk.to_internal((pts[front[np.argmin(d2[front])]] + sd.offset)[None])[0]
+        picked = self.chunk.to_internal(sd.from_display(pts[front[np.argmin(d2[front])]][None]) + sd.offset)[0]
         if ray is None:
             return picked
-        origin, direction, pixel = ray(x, y)
-        o, e = self.chunk.to_internal(np.array([origin + sd.offset, origin + direction + sd.offset]))
+        origin, direction, pixel = ray(x, y)  # a line of the view is a line of the true scene too
+        o, e = self.chunk.to_internal(sd.from_display(np.array([origin, origin + direction])) + sd.offset)
         d = (e - o) / np.linalg.norm(e - o)
         dist = float(np.linalg.norm(picked - o))
         scale = float(np.linalg.norm(e - o))  # internal units per scene unit
@@ -934,7 +961,7 @@ class ModelView(QWidget):
             return np.zeros(0, bool), np.zeros(0, bool)
         v, f = np.asarray(mesh.vertices, np.float64), np.asarray(mesh.faces, np.int64)
         centres = self.chunk.to_world((v[f[:, 0]] + v[f[:, 1]] + v[f[:, 2]]) / 3.0) - self.sd.offset
-        x, y, z, ok = project(centres)
+        x, y, z, ok = project(self.sd.to_display(centres))
         hidden = self._hidden("confidence") if self.color_mode() == "confidence" else set()
         if hidden:
             from ..engine.confidence import read_model_confidence
@@ -954,7 +981,7 @@ class ModelView(QWidget):
             n = 0
             return np.zeros(n, bool), np.zeros(n, bool)
         world = self.chunk.to_world(pc.xyz) - self.sd.offset
-        x, y, z, ok = project(world)
+        x, y, z, ok = project(self.sd.to_display(world))
         mode = self.color_mode()
         hidden = self._hidden(mode) if mode in ("class", "confidence") else set()
         codes = getattr(pc, "classification", None)
@@ -965,6 +992,22 @@ class ModelView(QWidget):
 
             ok &= ~np.isin(confidence_bins(pc.confidence), list(hidden))
         return self._inside_and_visible(polygon, x, y, z, ok, depth_tol, cell)
+
+    def set_exaggeration(self, factor: float) -> None:
+        """Heights of what is shown multiplied by ``factor`` around the centre of the scene (1: as
+        they are). Only the view changes: picks and selections give the true coordinates."""
+        factor = float(min(max(factor, 0.1), 50.0))
+        self._exag_timer.stop()
+        if abs(self.exag_spin.value() - factor) > 1e-9:
+            self.exag_spin.blockSignals(True)
+            self.exag_spin.setValue(factor)
+            self.exag_spin.blockSignals(False)
+        if factor == self.exaggeration and (self.sd is None or self.sd.exaggeration == factor):
+            return
+        self.exaggeration = factor
+        if self.base_sd is not None:
+            self.sd = exaggerated(self.base_sd, factor)
+            self.canvas.set_scene(self.sd, reset=False)
 
     def refresh(self, reset: bool = False) -> None:
         self.canvas.show_cameras = self.cb_cams.isChecked()
@@ -980,7 +1023,8 @@ class ModelView(QWidget):
                           hidden_bins=bins, highlight=highlight, max_points=3_000_000 if vtk else 400_000,
                           max_textured_faces=8_000_000 if vtk else 3_000_000)
               if self.chunk is not None else SceneData(np.zeros(3)))
-        self.sd = sd
+        self.base_sd = sd
+        self.sd = sd = exaggerated(sd, self.exaggeration)
         if mode == "class":
             self.legend.set_counts(sd.class_counts, hidden, sd.class_labels)
         elif mode == "confidence":

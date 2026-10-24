@@ -323,6 +323,10 @@ workbook too.
   solidi tagliati* fills the cut face of every closed solid in its own colour (the units of the
   geoarchaeology plugin, US proxies, a vessel: its hollow stays hollow), open surfaces stay open. Solids
   imported side by side (a model of stratigraphic units) stay separate solids.
+* **Vertical exaggeration** (*Esagerazione verticale* in the bar of the 3D view, x0.1 to x50): the heights
+  of what is shown are multiplied around the centre of the scene, so the relief of almost flat ground, a
+  low mound or the units of a geoarchaeological model can be read; the view says so in its corner. Only the
+  view changes: markers, sections, plan slices, cuts and the lasso still take the true coordinates.
 * **Laser scans** (*File > Importa > Scansioni laser (E57, PTX)*): one or more scans become the dense cloud
   of a new chunk; *Flusso di lavoro > Allinea chunk* (points, without scale) brings them onto the chunk of
   the photos when they are not in its CRS, *Colori dalle foto (scansioni)* colours them from its

@@ -330,6 +330,11 @@ file Excel.
   solido chiuso nel suo colore (le unità del plugin di geoarcheologia, i proxy delle US, un vaso: la sua
   cavità resta vuota), le superfici aperte restano aperte. I solidi importati uno accanto all'altro (un
   modello di unità stratigrafiche) restano solidi separati.
+* **Esagerazione verticale** (*Esagerazione verticale* nella barra della vista 3D, da x0,1 a x50): le quote
+  di ciò che si vede vengono moltiplicate attorno al centro della scena, per leggere il rilievo di un
+  terreno quasi piatto, di un piccolo rilievo o delle unità di un modello geoarcheologico; la vista lo
+  scrive nel suo angolo. Cambia solo la vista: marker, sezioni, piante a quota, tagli e lazo usano sempre
+  le coordinate vere.
 * **Scansioni laser** (*File > Importa > Scansioni laser (E57, PTX)*): una o più scansioni diventano
   la nuvola densa di un nuovo chunk; *Flusso di lavoro > Allinea chunk* (punti, senza scala) le porta
   sul chunk delle foto quando non sono nel suo CRS, *Colori dalle foto (scansioni)* le colora con le

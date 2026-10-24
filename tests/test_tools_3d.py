@@ -101,3 +101,61 @@ def test_marker_moved_in_3d(window, monkeypatch):
     assert warned and "misurato nelle foto" in warned[0]
     w.undo()
     assert not np.allclose(ch.marker_by_key(m.key).position, target)
+
+
+def test_vertical_exaggeration_changes_only_the_view(window):
+    from PySide6.QtTest import QTest
+
+    from pyarchinit_photogrammetry.gui.model_view import exaggeration_text
+
+    w, app, mw = window
+    ch = w.chunk
+    w._show_model("model")
+    mv = w.model_view
+    true_vertices = np.array(mv.base_sd.mesh_vertices, float)
+    mv.set_exaggeration(3.0)
+    sd = mv.sd
+    assert sd.exaggeration == 3.0 and mv.exag_spin.value() == 3.0 and mv.canvas.sd is sd
+    up = sd.up / np.linalg.norm(sd.up)
+    shown = np.array(sd.mesh_vertices, float)
+    h_true, h_shown = (true_vertices - sd.pivot) @ up, (shown - sd.pivot) @ up
+    assert np.ptp(h_true) > 0.05 and np.allclose(h_shown, 3 * h_true, atol=1e-4)
+    assert np.allclose(shown - np.outer(h_shown, up), true_vertices - np.outer(h_true, up), atol=1e-4)
+    assert np.allclose(sd.from_display(shown), true_vertices, atol=1e-4)
+    assert exaggeration_text(3.0) == "Esagerazione verticale x3"
+    # a click gives a true point of the model: shown again, it falls under the cursor
+    image, project = mv.canvas.snapshot()
+    x, y, _depth, ok = project(shown)
+    i = int(np.argmin(np.where(ok, (x - mv.canvas.width() / 2) ** 2 + (y - mv.canvas.height() / 2) ** 2, np.inf)))
+    for ray in (None, mv.canvas.view_ray):
+        picked = mv.pick_point(float(x[i]), float(y[i]), project, ray)
+        back = sd.to_display(ch.to_world(picked[None]) - sd.offset)
+        px, py, _, _ = project(back)
+        assert np.hypot(px[0] - x[i], py[0] - y[i]) < 10
+
+    # seen from the side (100 px per metre, heights up the screen) the exaggeration moves things a lot
+    def side(pts):
+        pts = np.asarray(pts, float)
+        return pts[:, 0] * 100, -((pts - sd.pivot) @ up) * 100, pts[:, 1] + 100, np.ones(len(pts), bool)
+
+    j = int(np.argmax(np.abs(h_true)))
+    sx, sy, _, _ = side(shown[j][None])
+    picked = mv.pick_point(float(sx[0]), float(sy[0]), side, reach=0.5)
+    assert np.allclose(picked, ch.to_internal(true_vertices[j][None] + sd.offset)[0], atol=1e-4)
+    # the lasso takes the faces where they are shown
+    v, f = np.asarray(ch.model.vertices, float), np.asarray(ch.model.faces)
+    true_centres = ch.to_world(v[f].mean(axis=1)) - sd.offset
+    k = int(np.argmax(np.abs((true_centres - sd.pivot) @ up)))
+    cx, cy, _, _ = side(sd.to_display(true_centres[k][None]))
+    square = [(cx[0] - 6, cy[0] - 6), (cx[0] + 6, cy[0] - 6), (cx[0] + 6, cy[0] + 6), (cx[0] - 6, cy[0] + 6)]
+    _visible, inside = mv.select_faces(square, side)
+    tx, ty, _, _ = side(true_centres[k][None])
+    assert inside[k] and np.hypot(tx[0] - cx[0], ty[0] - cy[0]) > 12  # not where the true face would be
+    # a refresh keeps it; the spin box changes it (once the arrows stop); 1 = the true scene
+    mv.cb_cams.toggle()
+    assert mv.sd.exaggeration == 3.0
+    mv.exag_spin.setValue(2.0)
+    QTest.qWait(400)
+    assert mv.sd.exaggeration == 2.0
+    mv.set_exaggeration(1.0)
+    assert np.allclose(np.array(mv.sd.mesh_vertices, float), true_vertices)
