@@ -54,6 +54,7 @@ ICONS = {
     "multispectral": ("mdi6.leaf", "green"), "run": ("mdi6.play-circle-outline", "green"),
     "thermal": ("mdi6.thermometer", "red"), "probe": ("mdi6.map-marker-plus-outline", "red"),
     "index": ("mdi6.sprout-outline", "lime"), "zones": ("mdi6.view-dashboard-outline", "amber"),
+    "calculator": ("mdi6.calculator-variant-outline", "teal"),
     "qgis": ("mdi6.map-search-outline", "lime"),
     # PyArchInit
     "database": ("mdi6.database-outline", "olive"), "publish": ("mdi6.database-arrow-up-outline", "olive"),

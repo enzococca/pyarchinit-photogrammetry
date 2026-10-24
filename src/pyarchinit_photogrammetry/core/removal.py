@@ -446,13 +446,16 @@ class _ScaleBars(_Objects):
 
 def make_part(chunk, kind: str, payload) -> _Part:
     """The part for an item of the workspace: ``("product", key)`` (a key of ``chunk.products``,
-    ``depth_maps`` or ``ms:...``), ``("version", (product, id))``, ``("elevation", id)``,
+    ``depth_maps``, ``ms:...`` or ``calc:<name>``, a result of the raster calculator),
+    ``("version", (product, id))``, ``("elevation", id)``,
     ``("cameras", [Camera])``, ``("markers", [Marker])``, ``("scalebars", [ScaleBar])``."""
     if kind == "product":
         if payload == "depth_maps":
             return _DepthMaps()
         if isinstance(payload, str) and payload.startswith("ms:"):
             return _meta_part(payload)
+        if isinstance(payload, str) and payload.startswith("calc:"):
+            return _Meta({("calculator", payload[5:]): ("file",)})
         return _Product(str(payload))
     if kind == "version":
         product, vid = payload

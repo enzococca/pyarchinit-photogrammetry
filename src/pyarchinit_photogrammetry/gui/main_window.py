@@ -750,6 +750,9 @@ class MainWindow(QMainWindow):
                   icon_name="relief",
                   tip=tr("Sky-view factor, openness, rilievo locale e multiscala, ombreggiatura da piu' direzioni: "
                          "muri, fossati e terrazzamenti appena accennati nel DEM"))
+        self._act(m, tr("Calcolatore raster..."), lambda: self.raster_calculator(), processing=True,
+                  icon_name="calculator",
+                  tip=tr("Formule sui raster del progetto, anche quelli dei plugin, come nel calcolatore raster di QGIS"))
         self._act(m, tr("Opzioni delle sezioni..."), self.section_options, icon_name="line")
         self.a_slice = self._act(m, tr("Pianta a quota (slice orizzontale)..."), self.plan_slice, processing=True,
                                  icon_name="slice")
@@ -5447,6 +5450,46 @@ class MainWindow(QMainWindow):
         self.show_view(self.ortho_view)
 
     # ---------------------------------------------------------------- views and workspace
+    # ---------------------------------------------------------------- raster calculator
+    def raster_calculator(self, formula: str = "", name: str | None = None) -> None:
+        """*Strumenti > Calcolatore raster*: a formula on the rasters of the active chunk (those of the
+        plugins too), its result kept in the chunk and shown (:mod:`..engine.rastercalc`); ``formula``
+        and ``name``: those the dialog starts with (a result made again)."""
+        if not self._need_chunk():
+            return
+        from ..engine import rastercalc
+        from .raster_calculator_dialog import RasterCalculatorDialog
+
+        ch = self.chunk
+        catalog = rastercalc.rasters(ch)
+        if not catalog:
+            self._warn("Il chunk non ha ancora raster: costruisci il DEM o l'ortofoto.")
+            return
+        v = RasterCalculatorDialog.ask(catalog, self, formula, name)
+        if not v:
+            return
+        self.run_task("Calcolatore raster", lambda p: rastercalc.calculate(ch, v["formula"], v["name"], grid=v["grid"],
+                                                                          resolution=v["resolution"], progress=p),
+                      lambda _info: self.show_calc(v["name"]))
+
+    def show_calc(self, name: str) -> None:
+        """A result of the raster calculator in the 2D view, on the ramp of the indices (viridis)
+        between its 2nd and 98th percentiles."""
+        from ..engine import rastercalc
+
+        ch = self.chunk
+        path = rastercalc.result_path(ch, name) if ch is not None else None
+        if path is None or not path.exists():
+            self._warn(tr("Il risultato {0} del calcolatore raster non c'è più.", name))
+            return
+        self.ortho_view.palette = "viridis"
+        self._load_raster("calc", path)
+        lo, hi = self.ortho_view._dem_range or (0.0, 1.0)
+        self.statusBar().showMessage(tr("{0} = {1}: colori da {2} a {3} (Viridis)", name,
+                                        ch.meta["calculator"][name].get("formula", ""), decimal_comma(f"{lo:.4g}"),
+                                        decimal_comma(f"{hi:.4g}")))
+        self.show_view(self.ortho_view)
+
     def _workspace_item(self, kind: str, chunk, payload) -> None:
         """A double click (or Enter) in the Area di lavoro: a chunk becomes the active one; a photo, a
         product, a version... opens, its chunk made the active one first."""
@@ -5474,10 +5517,14 @@ class MainWindow(QMainWindow):
             elif isinstance(payload, str) and payload.startswith("ms:"):
                 parts = payload.split(":", 2)
                 self.ms_show(parts[1], parts[2] if len(parts) > 2 else None)
+            elif isinstance(payload, str) and payload.startswith("calc:"):
+                self.show_calc(payload[5:])
             else:
                 self._show_model(payload)
         elif kind == "multispectral":
             self._show_pane(self.left_tabs, self.ms_pane)
+        elif kind == "calculator":
+            self.raster_calculator()
         elif kind == "thermal":
             self._show_pane(self.left_tabs, self.thermal_pane)
         elif kind == "version":
@@ -5651,6 +5698,10 @@ class MainWindow(QMainWindow):
                 extra = self._terrain_at(x, y, z) if kind == "dem" and z is not None and self.chunk.dem_path else ""
                 self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}  {text}{extra}   [{self.chunk.crs}]")
                 return
+        if kind == "calc":  # a result of the raster calculator
+            zt = tr("  valore {0}", decimal_comma(f"{z:.4g}")) if z is not None and np.isfinite(z) else ""
+            self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}{zt}   [{self.chunk.crs if self.chunk else ''}]")
+            return
         if kind == "zones":
             zt = tr("  classe {0}", int(z)) if z is not None and np.isfinite(z) else ""
             self.coord_label.setText(f"X {x:.3f}  Y {y:.3f}{zt}   [{self.chunk.crs if self.chunk else ''}]")
@@ -8202,6 +8253,12 @@ class MainWindow(QMainWindow):
             if an.get("file") and (ch.data_dir / an["file"]).exists():
                 rasters.append({"name": "Anomalie termiche (°C)", "path": str(ch.data_dir / an["file"]), "ramp": "diverging",
                                 "hidden": True})
+        for cname, info in ((ch.meta.get("calculator") or {}) if ch is not None else {}).items():
+            p_c = ch.data_dir / info.get("file", "")
+            st = info.get("stats") or {}
+            if p_c.exists():  # the results of the raster calculator, in grey between their percentiles
+                rasters.append({"name": f"Calcolo {cname}", "path": str(p_c), "ramp": "grey", "hidden": True,
+                                **({"limits": [float(st["p2"]), float(st["p98"])]} if "p2" in st else {})})
         for provider in getattr(self, "qgis_providers", []):  # plugins: their rasters and GeoPackage layers
             try:
                 more_rasters, more_vectors = provider()
@@ -9183,6 +9240,8 @@ class MainWindow(QMainWindow):
         elif kind in ("multispectral", "thermal"):
             pane = self.ms_pane if kind == "multispectral" else self.thermal_pane
             menu.addAction(icon(kind), tr("Apri il pannello"), on(lambda: self._show_pane(self.left_tabs, pane)))
+        elif kind == "calculator":
+            menu.addAction(icon("calculator"), tr("Calcolatore raster..."), on(lambda: self.raster_calculator()))
         elif kind == "product":
             present = self._removable(chunk, kind, payload)  # a product with kept versions only: nothing active
             if payload != "depth_maps" and present:
@@ -9192,6 +9251,10 @@ class MainWindow(QMainWindow):
                                on(lambda: self.keep_version_copy(payload)))
                 menu.addAction(icon("edit"), tr("Rinomina questa versione..."),
                                lambda: self.rename_version(payload, None, chunk=chunk))
+            if isinstance(payload, str) and payload.startswith("calc:") and present:
+                info = (chunk.meta.get("calculator") or {}).get(payload[5:]) or {}
+                menu.addAction(icon("calculator"), tr("Calcola di nuovo con un'altra formula..."),
+                               on(lambda: self.raster_calculator(info.get("formula", ""), payload[5:])))
             if present:
                 remove({"tie_points": tr("Rimuovi (con l'allineamento)"), "model": tr("Rimuovi (con la texture)"),
                         "model_textured": tr("Rimuovi la texture")}.get(payload, tr("Rimuovi")))

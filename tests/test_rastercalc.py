@@ -2,7 +2,7 @@
 versions, bands by number or name, indices, the GeoTIFFs of the plugins, earlier results - read
 safely (never run as Python), on the grid of one of them, block by block, also on rasters of other
 grids and in a chunk with no reference system; the plugins name their rasters and use the
-calculator; the command line."""
+calculator; the window and the command line."""
 from __future__ import annotations
 
 import json
@@ -275,6 +275,71 @@ def test_a_plugin_names_its_rasters_and_reads_the_catalog(tmp_path):
     finally:
         context.release()
     assert "twi" not in {r["name"] for r in context.rasters(ch)}
+
+
+def test_the_calculator_in_the_window(tmp_path, monkeypatch):
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("PPG_RENDERER", "software")
+    from PySide6.QtCore import QSettings, Qt
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
+    from pyarchinit_photogrammetry.gui import i18n, main_window as mw
+    from pyarchinit_photogrammetry.gui.raster_calculator_dialog import RasterCalculatorDialog
+
+    doc, ch, _dem = _chunk(tmp_path)
+    # the dialog: the formula checked while it is written, a double click writes a raster
+    i18n.set_current("it")
+    d = RasterCalculatorDialog(rc.rasters(ch))
+    ok = d.buttons.button(d.buttons.StandardButton.Ok)
+    assert d.name.text() == "calcolo_1" and not ok.isEnabled() and d.state.text() == "Scrivi una formula."
+    d.formula.setText("orthomosaic + dem")
+    assert not ok.isEnabled() and d.state.text() == "orthomosaic ha 4 bande: scrivi orthomosaic@1 ... orthomosaic@4."
+    d.formula.setText("demm")
+    assert d.state.text() == "Nessun raster si chiama demm (forse dem?)."
+    d.formula.clear()
+    row = next(i for i, r in enumerate(d.rasters) if r.name == "orthomosaic")
+    d._insert(row)
+    d.formula.insert(" / 255 - ")
+    d._insert(next(i for i, r in enumerate(d.rasters) if r.name == "slope"))
+    assert d.formula.text() == "orthomosaic@1 / 255 - slope" and ok.isEnabled()
+    assert d.state.text() == "Legge orthomosaic@1, slope; il risultato sulla griglia di orthomosaic."
+    d.name.setText("dem")
+    assert not ok.isEnabled() and "c'è già un raster" in d.state.text()
+    d.close()
+    # the window: the result built, shown, listed in the workspace and removed from there
+    w = mw.MainWindow(doc, autoconnect=False, check_updates=False)
+    w.runner.show_dialog = False
+    w.show()
+    app.processEvents()
+    try:
+        monkeypatch.setattr(RasterCalculatorDialog, "ask", classmethod(lambda cls, catalog, parent=None, formula="", name=None: {
+            "formula": "dem - dem_prima_dello_scavo", "name": "scavato", "grid": None, "resolution": None}))
+        w.raster_calculator()
+        w.runner.wait()
+        app.processEvents()
+        v = w.ortho_view
+        assert v.kind == "calc" and v.path == ch.data_dir / "calculator" / "scavato.tif"
+        assert "scavato = dem - dem_prima_dello_scavo" in w.statusBar().currentMessage()
+        items = [it for it in w.workspace._walk() if it.data(0, Qt.ItemDataRole.UserRole)
+                 and it.data(0, Qt.ItemDataRole.UserRole)[2:] == ("calc:scavato",)]
+        assert len(items) == 1 and items[0].text(0) == "scavato = dem - dem_prima_dello_scavo"
+        w._show_coords(X0 + 3.0, Y0 + 3.0, 0.5)
+        assert "valore 0,5" in w.coord_label.text()
+        w._show_raster("dem")
+        w._workspace_item("product", ch, "calc:scavato")
+        assert w.ortho_view.kind == "calc"
+        assert w._removable(ch, "product", "calc:scavato")
+        from pyarchinit_photogrammetry.core import removal
+
+        part = removal.make_part(ch, "product", "calc:scavato")
+        assert part.capture(ch)["files"][0] == ch.data_dir / "calculator" / "scavato.tif"
+    finally:
+        w.setWindowModified(False)
+        w.close()
 
 
 def test_the_command_line(tmp_path):
