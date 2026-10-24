@@ -153,6 +153,8 @@ the next start (`ppg plugin` lists its command at once).
 | `on_features_deleted(layer, callback)` | since 1.3.4: `callback(features)` when the user deletes features of `layer` on the 2D view (*Seleziona* and Canc, *Elimina selezionati*): their attributes, dicts as the layer held them (`_geom`: type and coordinates), for the plugin to drop its records of them; a layer taken out of the view is not a deletion (disconnected by itself when the plugin goes away) |
 | `add_tree_items(provider)` | since 1.3.4: the plugin's products in the workspace, under each chunk after those of the program: `provider(chunk)` returns a list of dicts `{"label", "icon", "tooltip", "children", "activate", "actions", "expanded"}` (`icon`: a name such as `"index"`, `"zones"`, `"multispectral"`, or a QIcon; `activate()` on a double click or Enter; `actions`: `[(text, callback), ...]`, the menu of the right click; a key left out is empty). It is called for every chunk each time the tree is filled; the callbacks run with the chunk of the item the active one; a node keeps the expansion the user gave it; a provider that fails is written in the log and left out; the items go away with the plugin |
 | `refresh_tree()` | since 1.3.4: the workspace filled again, the providers asked again (after the plugin made or deleted products) |
+| `add_pane(widget, title, icon=None, area="left")` | since 1.3.4: `widget` as a pane of the window, a dock of its own tabbed with the panes of `area` (`"left"`, `"bottom"`, `"right"`): the user moves it, floats it, closes it and opens it again from *Vista > Pannelli*, and the window remembers where it was. `icon` is a `QIcon` or the name of an icon of the program (`"plugin"`, `"relief"`...); returns the dock (its object name `pane_plugin_` + the plugin's name), `None` in the command line; the pane goes away with the plugin |
+| `show_pane(widget)` | since 1.3.4: a pane of the plugin in front, also when the user closed it or floated it |
 
 `progress(fraction, message)` reports 0-1 and raises `Cancelled` when the user cancels: call it
 often in long loops. Widgets are touched only in the callbacks of actions and in `done`, never in
@@ -165,7 +167,11 @@ took beyond its registrations (open files, timers).
 now 1): a program with an older API refuses the plugin with a message. The index also gives the
 oldest version of the program a plugin works with (`min_app`): a plugin that uses the methods marked
 "since 1.3.2" asks for `min_app` 1.3.2, one that uses `on_refresh` 1.3.3, one that uses those "since 1.3.4"
-1.3.4.
+1.3.4. The plugins written before 1.3.4 put their pane among the tabs of the window with
+`window.left_tabs.addTab(pane, icon, title)`, show it with `window.left_tabs.setCurrentWidget(pane)`
+followed by `window.d_work.show()` and `window.d_work.raise_()`, and take it away with
+`removeTab(indexOf(pane))`: since 1.3.4 every pane is a dock of its own, and these calls still work -
+they make, show and remove the dock of the pane.
 
 ## Publishing a plugin
 

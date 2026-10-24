@@ -153,6 +153,8 @@ prossimo avvio (`ppg plugin` elenca subito il suo comando).
 | `on_features_deleted(layer, callback)` | dalla 1.3.4: `callback(features)` quando l'utente elimina elementi di `layer` sulla vista 2D (*Seleziona* e Canc, *Elimina selezionati*): i loro attributi, dizionari come li teneva il layer (`_geom`: tipo e coordinate), perché il plugin tolga i suoi record; un layer tolto dalla vista non è un'eliminazione (si scollega da sola quando il plugin viene tolto) |
 | `add_tree_items(provider)` | dalla 1.3.4: i prodotti del plugin nell'area di lavoro, sotto ogni chunk dopo quelli del programma: `provider(chunk)` restituisce una lista di dizionari `{"label", "icon", "tooltip", "children", "activate", "actions", "expanded"}` (`icon`: un nome come `"index"`, `"zones"`, `"multispectral"`, o una QIcon; `activate()` al doppio clic o con Invio; `actions`: `[(testo, callback), ...]`, il menu del tasto destro; una chiave che manca è vuota). Viene chiamato per ogni chunk ogni volta che l'albero si riempie; le callback girano con il chunk dell'elemento come chunk attivo; un nodo tiene l'espansione che gli ha dato l'utente; un provider che fallisce finisce nel log e viene saltato; gli elementi se ne vanno con il plugin |
 | `refresh_tree()` | dalla 1.3.4: l'area di lavoro riempita di nuovo, i provider interrogati di nuovo (dopo che il plugin ha creato o eliminato prodotti) |
+| `add_pane(widget, title, icon=None, area="left")` | dalla 1.3.4: `widget` come pannello della finestra, un dock a sé raggruppato a schede con i pannelli di `area` (`"left"`, `"bottom"`, `"right"`): l'utente lo sposta, lo stacca, lo chiude e lo riapre da *Vista > Pannelli*, e la finestra ricorda dov'era. `icon` è una `QIcon` o il nome di un'icona del programma (`"plugin"`, `"relief"`...); restituisce il dock (nome dell'oggetto `pane_plugin_` + il nome del plugin), `None` nella riga di comando; il pannello se ne va con il plugin |
+| `show_pane(widget)` | dalla 1.3.4: un pannello del plugin in primo piano, anche se l'utente lo ha chiuso o staccato |
 
 `progress(fraction, message)` riporta un valore tra 0 e 1 e solleva `Cancelled` quando l'utente annulla:
 chiamala spesso nei cicli lunghi. I widget si toccano solo nelle callback delle azioni e in `done`, mai
@@ -165,7 +167,11 @@ ha preso oltre alle sue registrazioni (file aperti, timer).
 ora 1): un programma con un'API più vecchia rifiuta il plugin con un messaggio. L'indice dà anche la
 versione più vecchia del programma con cui un plugin funziona (`min_app`): un plugin che usa i metodi
 indicati "dalla 1.3.2" chiede `min_app` 1.3.2, uno che usa `on_refresh` 1.3.3, uno che usa quelli "dalla 1.3.4"
-1.3.4.
+1.3.4. I plugin scritti prima della 1.3.4 mettono il loro pannello fra le schede della
+finestra con `window.left_tabs.addTab(pane, icon, title)`, lo mostrano con
+`window.left_tabs.setCurrentWidget(pane)` seguito da `window.d_work.show()` e `window.d_work.raise_()`,
+e lo tolgono con `removeTab(indexOf(pane))`: dalla 1.3.4 ogni pannello è un dock a sé, e queste
+chiamate funzionano ancora - creano, mostrano e tolgono il dock del pannello.
 
 ## Pubblicare un plugin
 

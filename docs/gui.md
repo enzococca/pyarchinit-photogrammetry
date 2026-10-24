@@ -39,7 +39,7 @@ environment diagnosis and the log folder. *File > Pagina iniziale* brings it bac
 
 ## The Multispectral pane
 
-The *Multispettrale* tab of the project dock stays open and lists the seven steps in order, each
+The *Multispettrale* pane (a tab among the panes on the left) lists the seven steps in order, each
 with its state and its button: the captures, the alignment, the surface (depth maps, dense cloud
 and DEM in one step with the default choices), the calibration panel, the reflectance orthomosaic
 (*Mostra* in false colour NIR-Red-Green, in true colour, or one band on its own in greyscale: NIR,
@@ -112,6 +112,36 @@ exported as GeoPackage, CSV or GeoJSON (*Esporta i punti di misura...*).
 | Bottom: **Log** | time, level and message of everything that happened; filter (all / warnings and errors / errors), search, *Copia*, *Salva...*, *Cartella log*, *Pulisci*; the traceback of an error is in the row tooltip and in the saved file |
 | Right: **PyArchInit** | connection, sites, stratigraphic units and documentation |
 | Status bar | task progress with a stop button while something runs; cursor coordinates |
+
+### Panes
+
+Every pane is a dock of its own, as in Metashape. At the first start the panes on the left are the
+tabs of one group (*Area di lavoro*, *Riferimenti*, *Layer*, *Proxy US*, *Multispettrale*, *Termico*
+and the panes of the plugins), those at the bottom of another (*Foto*, *Sezioni*, *Console Python*,
+*Log*), and *PyArchInit* is on the right. The tabs are on top, with the icon of each pane; the title
+bar under them names the pane in front.
+
+* **Move**: drag a pane by its tab (or the whole group by its title bar) to another side of the
+  window, onto another pane - they become tabs of one group - or beside it, which splits the side.
+* **Float**: the first button of the title bar, or a double click on it, makes the pane a window of
+  its own (on a second screen, for instance); a double click on the title of that window, or dragging
+  it back onto the main window, docks it again.
+* **Close**: the second button of the title bar. *Area di lavoro*, *Riferimenti* and *Layer* are
+  always there: they move and float, but they have no close button.
+* **Open again**: *Vista > Pannelli* lists every pane with a tick (the three fixed ones ticked and
+  grey); ticking a closed pane brings it back where it was, in front. The program also brings back by
+  itself the pane it shows you - *Riferimenti*, *Layer*, *Sezioni*, *Foto*, *Multispettrale* when
+  photos with bands are added, the *Console Python* with Ctrl+Shift+P - closed or floating as it may be.
+* **From pane to pane**: click the tabs, or *Vista > Pannelli > Pannello successivo* (F6) and
+  *Pannello precedente* (Shift+F6), which go round the panes tabbed with the one holding the keyboard
+  focus (with the focus elsewhere, those on the left).
+* **Default layout**: *Vista > Pannelli > Ripristina la disposizione dei pannelli* puts every pane
+  back in its first place, all of them open, *Area di lavoro* and *Foto* in front.
+
+The layout is saved when the window closes and comes back at the next start, the panes of the
+plugins included (a pane of a plugin goes back where you left it). The layout of a version before
+1.3.4, when the panes were the tabs of two docks, is not applied: the first start of 1.3.4 shows the
+default layout.
 
 The window fits a laptop screen, down to about 1000 x 650 pixels: the buttons of the panes
 wrap onto more lines when a pane is narrow, a pane that is too short for its content
@@ -236,7 +266,9 @@ From the command line `ppg update` tells whether a newer version exists and `ppg
   demo database, publish orthomosaic/DEM/model with links to US, publish drawn units to
   `pyunitastratigrafiche`, load existing unit polygons onto the orthomosaic, publish spot
   heights to `pyarchinit_quote`.
-* **Vista**: panes, views (F2 model, F3 orthomosaic/DEM, F4 photo), console (Ctrl+Shift+P), theme.
+* **Vista**: *Pannelli* (each pane open or closed, F6 / Shift+F6 to the next and previous pane, the
+  default layout: see *Panes* above), the panes themselves, views (F2 model, F3 orthomosaic/DEM,
+  F4 photo), console (Ctrl+Shift+P), theme.
 * **Aiuto**: online documentation, environment diagnosis, log folder, *Controlla aggiornamenti*,
   *Controlla gli aggiornamenti all'avvio*, about.
 

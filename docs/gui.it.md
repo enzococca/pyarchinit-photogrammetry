@@ -39,7 +39,7 @@ dell'ambiente e alla cartella dei log. *File > Pagina iniziale* la fa tornare.
 
 ## Il pannello Multispettrale
 
-La scheda *Multispettrale* del dock del progetto resta aperta ed elenca i sette passi in ordine,
+Il pannello *Multispettrale* (una scheda fra i pannelli di sinistra) elenca i sette passi in ordine,
 ognuno con il suo stato e il suo pulsante: le riprese, l'allineamento, la superficie (mappe di
 profondità, nuvola densa e DEM in un passo solo con le scelte predefinite), il pannello di
 calibrazione, l'ortofoto di riflettanza (*Mostra* in falso colore NIR-Red-Green, in colori veri, o
@@ -113,6 +113,38 @@ gli altri layer e si esportano in GeoPackage, CSV o GeoJSON (*Esporta i punti di
 | In basso: **Log** | ora, livello e messaggio di tutto ciò che è accaduto; filtro (tutto / avvisi ed errori / errori), ricerca, *Copia*, *Salva...*, *Cartella log*, *Pulisci*; il traceback di un errore è nel tooltip della riga e nel file salvato |
 | Destra: **PyArchInit** | connessione, siti, unità stratigrafiche e documentazione |
 | Barra di stato | avanzamento dell'attività con un pulsante di arresto mentre qualcosa gira; coordinate del cursore |
+
+### Pannelli
+
+Ogni pannello è un dock a sé, come in Metashape. Al primo avvio i pannelli di sinistra sono le schede
+di un gruppo (*Area di lavoro*, *Riferimenti*, *Layer*, *Proxy US*, *Multispettrale*, *Termico* e i
+pannelli dei plugin), quelli in basso di un altro (*Foto*, *Sezioni*, *Console Python*, *Log*), e
+*PyArchInit* è a destra. Le schede stanno in alto, con l'icona di ogni pannello; la barra del titolo
+sotto di loro dice qual è il pannello in primo piano.
+
+* **Spostare**: si trascina un pannello per la sua scheda (o tutto il gruppo per la barra del titolo)
+  su un altro lato della finestra, sopra un altro pannello - diventano schede di un solo gruppo - o
+  accanto, e il lato si divide.
+* **Staccare**: il primo pulsante della barra del titolo, o un doppio clic su di essa, fa del
+  pannello una finestra a sé (su un secondo schermo, per esempio); un doppio clic sul titolo di quella
+  finestra, o trascinarla di nuovo sulla finestra principale, lo riaggancia.
+* **Chiudere**: il secondo pulsante della barra del titolo. *Area di lavoro*, *Riferimenti* e *Layer*
+  ci sono sempre: si spostano e si staccano, ma non hanno il pulsante di chiusura.
+* **Riaprire**: *Vista > Pannelli* elenca tutti i pannelli con una spunta (i tre fissi spuntati e
+  in grigio); spuntare un pannello chiuso lo riporta dov'era, in primo piano. Il programma riporta da
+  solo anche il pannello che ti mostra - *Riferimenti*, *Layer*, *Sezioni*, *Foto*, *Multispettrale*
+  quando si aggiungono foto con le bande, la *Console Python* con Ctrl+Maiusc+P - chiuso o staccato
+  che sia.
+* **Da un pannello all'altro**: si fa clic sulle schede, oppure *Vista > Pannelli > Pannello
+  successivo* (F6) e *Pannello precedente* (Maiusc+F6), che girano fra i pannelli raggruppati con
+  quello in cui si trova il cursore della tastiera (con il cursore altrove, quelli di sinistra).
+* **Disposizione iniziale**: *Vista > Pannelli > Ripristina la disposizione dei pannelli* rimette ogni
+  pannello al suo posto iniziale, tutti aperti, *Area di lavoro* e *Foto* in primo piano.
+
+La disposizione si salva quando la finestra si chiude e torna all'avvio successivo, compresi i
+pannelli dei plugin (un pannello di un plugin torna dove lo si è lasciato). Quella di una versione
+precedente alla 1.3.4, quando i pannelli erano le schede di due dock, non viene applicata: il primo
+avvio della 1.3.4 mostra la disposizione iniziale.
 
 La finestra sta nello schermo di un portatile, fino a circa 1000 x 650 pixel: i pulsanti dei
 pannelli vanno a capo su più righe quando un pannello è stretto, un pannello troppo basso per il suo
@@ -237,7 +269,9 @@ Dalla riga di comando `ppg update` dice se esiste una versione più nuova e `ppg
   database demo, pubblicazione di ortofoto/DEM/modello con i collegamenti alle US, pubblicazione delle
   unità disegnate in `pyunitastratigrafiche`, caricamento dei poligoni delle unità esistenti
   sull'ortofoto, pubblicazione delle quote in `pyarchinit_quote`.
-* **Vista**: pannelli, viste (F2 modello, F3 ortofoto/DEM, F4 foto), console (Ctrl+Maiusc+P), tema.
+* **Vista**: *Pannelli* (ogni pannello aperto o chiuso, F6 / Maiusc+F6 per il pannello successivo e
+  il precedente, la disposizione iniziale: vedi *Pannelli* sopra), i singoli pannelli, viste (F2
+  modello, F3 ortofoto/DEM, F4 foto), console (Ctrl+Maiusc+P), tema.
 * **Aiuto**: documentazione in linea, diagnostica dell'ambiente, cartella dei log, *Controlla aggiornamenti*,
   *Controlla gli aggiornamenti all'avvio*, informazioni.
 
