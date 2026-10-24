@@ -7,14 +7,66 @@ writes a QGIS project next to the `.ppg` (`<name>_qgis/<name>_ppg.qgs`) and open
 
 * rasters: the orthomosaic, the DEM (hillshade, hidden at first) and the DEM values;
 * vectors, in the group *Disegni (aggiornati dal vivo)*: the tables of one GeoPackage,
-  `disegni_ppg.gpkg`: `unita` (unit polygons, label = `etichetta`), `sezioni` (section
-  traces), `curve` (contour lines, label = elevation), `linee` (other lines), `punti` (spot
-  heights, label = `z`).
+  `disegni_ppg.gpkg`: `unita` (unit polygons with the columns of `pyunitastratigrafiche`,
+  label = `etichetta`), `poligoni` (zones, stones, patches, the polygons of plugins), `sezioni`
+  (section traces), `curve` (contour lines, label = elevation), `linee` (other lines), `punti`
+  (measuring points and other points) and `quote` (spot heights with the columns of
+  `pyarchinit_quote`, label = `quota_q`).
 
 The GeoPackage is updated 0.4 s after every change in the interface (new drawing, removed
-layer, edited attribute), in place and one transaction per changed table, and the project
-asks QGIS to redraw those layers every second: QGIS reads a GeoPackage again at every
-redraw, so what you draw here appears in QGIS by itself, without *Refresh*.
+layer, edited attribute), in place and in one transaction, and the project asks QGIS to redraw
+those layers every second: QGIS reads a GeoPackage again at every redraw, so what you draw here
+appears in QGIS by itself, without *Refresh*.
+
+### Both ways
+
+With *QGIS > Collegamento dal vivo con QGIS (nei due sensi)* on (it is turned on by *Apri in
+QGIS*, and stays on for a project already linked), what is saved in QGIS comes back too. Edit
+the layers *Unita' stratigrafiche (ppg)*, *Quote (ppg)* or *Sezioni (ppg)* in QGIS as any layer
+(*Toggle Editing*, draw, move vertices, change attributes in the attribute table, delete) and save
+the edits: within a second the window has them.
+
+* **Units**: the outline and the columns of `pyunitastratigrafiche` - `us_s`, `area_s`,
+  `unita_tipo_s`, `scavo_s`, `stratigraph_index_us`, `tipo_us_s`, `disegnatore`, `data`... - and
+  the other columns (also those added in QGIS) as attributes of the unit. A unit of several
+  polygons is one row per part (`ppg_parte`). A unit drawn in QGIS becomes a unit here, in the
+  layer *Unita' stratigrafiche*, with the site of the project when `scavo_s` is empty. A polygon
+  loaded from PyArchInit and changed in QGIS waits, as when it is changed here, for *Salva
+  modifiche in PyArchInit*.
+* **Spot heights**: the point and the columns of `pyarchinit_quote` (`quota_q`, `us_q`...).
+* **Sections**: the name (`etichetta`) and the trace (its first and last vertex). A section whose
+  trace moved, or drawn in QGIS, is cut again in the background with the options of the chunk,
+  when it has the model (or the dense cloud); the drawings of a section deleted in QGIS stay in
+  `sezioni/`.
+
+Each save made in QGIS is one entry of *Modifica > Annulla* (*Annulla: Da QGIS: US 6
+modificata*; several features: *Da QGIS: 3 modifiche*) and a line of the log for each feature.
+The drawings are stored in the chunk, the layers drawn again, and the GeoPackage brought to the
+program's version of those rows (its label, its area...). When the outline of a unit that has a
+3D proxy changes, the proxy is built again by itself, with the base it was built with (the plane,
+the thickness or the DEM after the removal, kept with the proxy since this version; for a proxy
+of an earlier version the missing value is asked once); when only its number changes the proxy
+takes the new name. Undoing the entry brings the proxies back with the polygons.
+
+How the program tells the edits of QGIS from its own: every feature has an identity, `ppg_id` (a
+UUID kept with the unit, the spot height or the section, and also used by the QField package),
+and the rows are written one by one by that identity, so a row keeps its `fid` while its feature
+lives and an edit session of QGIS never loses its rows. Each row also holds `ppg_sig`, the
+signature of what the program last wrote in it: a row whose geometry or attributes no longer
+match was edited by another program. Rows without an identity were drawn there (they get one at
+once); rows that disappeared were deleted there. The window looks once a second whether another
+program committed to the file (`PRAGMA data_version` of a connection kept open: its own writes do
+not count), and never writes over an edit it has not read yet. Since the signatures live in the
+file, the edits made in QGIS while the program was closed come back when the project is opened
+again (deletions made meanwhile excepted: the program writes those features again).
+
+* **Invalid outlines** (a polygon crossing itself) are made valid; one with no area left, or a
+  feature without geometry, is skipped, with a line in the log.
+* **Reference system**: a layer whose reference system is not the project's is refused (a line
+  in the log), as is a single feature written in another one.
+* **QGIS holding the file** while it saves: the window reads a moment later.
+* **One way only**: contour lines, zones, stones, patches, measuring points and the drawings of
+  plugins are computed by the program; an edit made to them in QGIS is not read back.
 
 Up to 0.4.1 the drawings were GeoJSON files set to *reload data every second*, and new
 drawings appeared only after *Refresh*: QGIS keeps GeoJSON in memory, and QGIS 3.34-3.42
