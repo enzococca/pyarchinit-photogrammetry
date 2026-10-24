@@ -184,6 +184,22 @@ on the public WorldView-3 datasets.
   and triplets (local affine approximation of the RPC per tile, rectification, dense matching,
   triangulation), checked on the public WorldView-3 datasets with lidar truth.
 
+## Next
+
+Open points, in no fixed order:
+
+* Network nodes: they already share the key points of the photos and the depth maps among
+  computers; the texture and the orthomosaic tiles not yet. Useful only with several computers.
+* Satellite: the surface model is made from pairs of images, not yet from triplets.
+* Check of the satellite processing on the public WorldView-3 datasets with lidar truth.
+* Parts never tried on real data: MicaSense multispectral captures, the import from WebODM, a real
+  satellite scene, `ppg remote` on a remote machine.
+* Windows ARM64: the VTK 3D view (the simpler renderer is used) and E57 are still missing.
+* Ideas proposed but not decided yet:
+    * a raster calculator (formulas on any raster of the project);
+    * a samgeo plugin (segmenting the orthomosaic by writing "stones", "walls");
+    * a geoai plugin (training on your own drawings, comparison between dates).
+
 ## Not planned
 
 Planetary coordinate systems; the boresight calibration of aerial lidar (no trajectory data to

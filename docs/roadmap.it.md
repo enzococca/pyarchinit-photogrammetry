@@ -185,6 +185,22 @@ dataset pubblici WorldView-3.
   stereo (approssimazione affine locale dell'RPC per tassello, rettifica, matching denso,
   triangolazione), verificati sui dataset pubblici WorldView-3 con lidar di riferimento.
 
+## Prossimi passi
+
+Punti aperti, senza un ordine fisso:
+
+* Nodi di rete: dividono già tra più computer i punti delle foto e le mappe di profondità; texture
+  e tasselli dell'ortofoto non ancora. Serve solo se si lavora con più computer.
+* Satellite: il modello di superficie si fa da coppie di immagini, non ancora da terne.
+* Verifica dell'elaborazione satellitare sui dataset pubblici WorldView-3 con lidar di riferimento.
+* Parti mai provate su dati veri: riprese multispettrali MicaSense, import da WebODM, una scena
+  satellitare reale, `ppg remote` su una macchina remota.
+* Windows ARM64: mancano ancora la vista 3D VTK (si usa quella più semplice) e l'E57.
+* Idee proposte ma non ancora decise:
+    * calcolatore raster (formule su qualsiasi raster del progetto);
+    * plugin samgeo (segmentare l'ortofoto scrivendo «pietre», «muri»);
+    * plugin geoai (addestramento sui propri disegni, confronto fra date).
+
 ## Non previsto
 
 Sistemi di coordinate planetari; la calibrazione del boresight del lidar aereo (nessun dato di
