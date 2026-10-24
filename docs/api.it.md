@@ -195,10 +195,18 @@ foto e del 14 % con i piani. Guadagni, piani, termini radiali, la loro dispersio
 banda stanno in `meta["multispectral"]["balance"]`. `index_raster(chunk, "NDVI")` (anche NDRE, GNDVI,
 SAVI, NDWI, OSAVI, CIRE, Thermal, o una formula qualsiasi sui nomi delle bande) fa l'indice sulla
 stessa griglia; `export_zoning(chunk, "NDVI", "zone.gpkg", classes=3, method="quantiles" | "equal"
-| "kmeans")` lo taglia in classi (le macchie piccole assorbite dal contorno) e scrive i poligoni
+| "jenks" | "kmeans")` lo taglia in classi (le macchie piccole assorbite dal contorno) e scrive i poligoni
 con classe, intervallo, media e area in un GeoPackage - la mappa di prescrizione dell'agricoltura;
-in archeologia le tracce sulle colture sopra muri e fossati sepolti. `ppg multispectral PROGETTO
-add|panel|reflectance|index|zoning|bands`.
+in archeologia le tracce sulle colture sopra muri e fossati sepolti. `jenks` sono le interruzioni
+naturali di Fisher (`natural_breaks(values, classes)`): le soglie con la minima somma dei quadrati
+degli scarti dalle medie delle classi, l'ottimo che il k-means cerca per approssimazioni successive
+senza la garanzia di raggiungerlo. Su un indice con suolo nudo sul 60 % del campo, erba sul 30 % e
+una traccia sulle colture sul 10 %, i quantili tagliano in mezzo al suolo e all'erba, il k-means
+divide il suolo e unisce erba e traccia, le interruzioni naturali tengono separate le tre. Sono
+esatte su 3000 valori a ranghi equidistanti dell'indice (presi fra 200.000 celle estratte con un
+seme fisso quando sono di più: sempre le stesse soglie), trovate per programmazione dinamica in un
+decimo di secondo; una soglia sta a metà fra l'ultimo valore di una classe e il primo della
+successiva. `ppg multispectral PROGETTO add|panel|reflectance|index|zoning|bands` (`--method jenks`).
 
 ### Camere termiche
 

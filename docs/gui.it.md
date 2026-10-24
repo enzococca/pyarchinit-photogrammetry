@@ -46,8 +46,11 @@ calibrazione, l'ortofoto di riflettanza (*Mostra* in falso colore NIR-Red-Green,
 una banda da sola in scala di grigi: NIR, red edge...), l'indice (NDVI, NDRE, GNDVI, SAVI, NDWI,
 OSAVI, CIRE, Thermal o una formula propria sui nomi delle bande, calcolato e mostrato sulla scala di
 colori scelta lì accanto - rosso-giallo-verde, scala di grigi, viridis o turbo; la scelta ricolora
-l'indice mostrato e viene ricordata) e la zonizzazione (classi e metodo, i poligoni in un
-GeoPackage, mostrati per classe con i poligoni come layer).
+l'indice mostrato e viene ricordata) e la zonizzazione (le classi e il metodo: quantili, lo stesso
+numero di celle per classe; intervalli uguali; interruzioni naturali (Jenks), le soglie che rendono
+le classi il più omogenee possibile - la scelta giusta quando l'indice ha popolazioni distinte, come
+suolo nudo, erba e una traccia sulle colture; oppure k-means, lo stesso scopo per approssimazioni
+successive; i poligoni in un GeoPackage, mostrati per classe con i poligoni come layer).
 
 I file di una camera multispettrale vengono riconosciuti quando aggiungi foto (*Foto* o *Aggiungi
 cartella*): la finestra propone di aggiungerli come riprese e apre questo pannello, così le bande

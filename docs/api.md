@@ -187,10 +187,19 @@ point disagreed by 27 % between the photos, 18 % with a gain per photo and 14 % 
 Gains, planes, radial terms, their spread and what is left per band are kept in
 `meta["multispectral"]["balance"]`. `index_raster(chunk, "NDVI")` (also NDRE, GNDVI, SAVI, NDWI, OSAVI, CIRE,
 Thermal, or any formula over the band names) makes the index on the same grid; `export_zoning(chunk,
-"NDVI", "zone.gpkg", classes=3, method="quantiles" | "equal" | "kmeans")` cuts it into classes
+"NDVI", "zone.gpkg", classes=3, method="quantiles" | "equal" | "jenks" | "kmeans")` cuts it into classes
 (small patches given to their surroundings) and writes the polygons with class, range, mean and
 area into a GeoPackage - the prescription map of agriculture; in archaeology the crop marks over
-buried walls and ditches. `ppg multispectral PROJECT add|panel|reflectance|index|zoning|bands`.
+buried walls and ditches. `jenks` are Fisher's natural breaks (`natural_breaks(values, classes)`):
+the breaks with the least sum of squared deviations from the means of the classes, the optimum
+k-means looks for by successive approximations with no guarantee of reaching it. On an index with
+bare soil on 60 % of a field, grass on 30 % and a crop mark on 10 %, the quantiles cut through the
+soil and the grass, k-means splits the soil and merges grass and crop mark, the natural breaks
+keep the three apart. They are exact on 3000 values at evenly spaced ranks of the index (of
+200 000 cells drawn with a fixed seed when there are more: the same breaks every time), found by
+dynamic programming in a tenth of a second; a break lies halfway between the last value of a
+class and the first of the next. `ppg multispectral PROJECT add|panel|reflectance|index|zoning|bands`
+(`--method jenks`).
 
 ### Thermal cameras
 

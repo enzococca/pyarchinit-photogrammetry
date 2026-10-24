@@ -45,8 +45,12 @@ and DEM in one step with the default choices), the calibration panel, the reflec
 (*Mostra* in false colour NIR-Red-Green, in true colour, or one band on its own in greyscale: NIR,
 red edge...), the index (NDVI, NDRE, GNDVI, SAVI, NDWI, OSAVI, CIRE, Thermal or an own formula over
 the band names, computed and shown on the colour ramp chosen beside it - red-yellow-green, greyscale,
-viridis or turbo; the choice recolours the index shown and is remembered) and the zoning (classes
-and method, the polygons in a GeoPackage, shown by class with the polygons as a layer).
+viridis or turbo; the choice recolours the index shown and is remembered) and the zoning (the
+classes and the method: quantiles, the same number of cells per class; equal intervals; natural
+breaks (Jenks), the breaks that make the classes as homogeneous as possible - the choice when the
+index has distinct populations, such as bare soil, grass and a crop mark; or k-means, the same aim
+by successive approximations; the polygons in a GeoPackage, shown by class with the polygons as a
+layer).
 
 The files of a multispectral camera are recognised when you add photos (*Foto* or *Aggiungi
 cartella*): the window offers to add them as captures and opens this pane, so the bands are not
