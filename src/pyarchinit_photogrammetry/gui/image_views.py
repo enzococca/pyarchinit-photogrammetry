@@ -382,7 +382,11 @@ class RasterView(_ZoomView):
     ``freehand`` press, draw and release);
     ``line`` (two clicks: a section trace); ``measure`` (two clicks: distance and
     height difference); ``point`` (one click: elevation / SAM prompt); ``crop`` and ``patch``
-    (drag a box, or click the vertices of a polygon: an area to cut, or whose photos to choose).
+    (drag a box, or click the vertices of a polygon: an area to cut, or whose photos to choose);
+    ``vertices`` (click a unit: drag its vertices, drag the middle of a side for a new one, Alt+click
+    or right click removes one; Enter or another unit keeps the outline, Esc puts it back);
+    ``reshape`` (click the vertices of a line that crosses the outline of a unit, double click or
+    Enter: as *Reshape Features* in QGIS).
 
     Snapping (``snap_vertex``, ``snap_segment``, tolerance ``snap_px`` in screen pixels) moves
     the points of every drawing tool onto the vertices or the segments of the visible layers.
@@ -392,9 +396,11 @@ class RasterView(_ZoomView):
     file at the resolution of the screen, up to the full one (``detail``), in a thread."""
 
     DRAW_MODES = ("polygon", "line", "measure", "quota", "marker", "crop", "patch", "dem_edit", "probe",
-                  "req_polygon", "req_line", "req_point")
+                  "req_polygon", "req_line", "req_point", "reshape")
     AREA_MODES = ("crop", "patch", "dem_edit", "area", "chart", "req_polygon")  # drag a box or click a polygon
     REQUEST_MODES = ("req_polygon", "req_line", "req_point")  # the drawing lent to a plugin (request_geometry)
+    LINE_MODES = ("req_line", "reshape")  # click the vertices, double click or Enter to end
+    VERTEX_PX = 7.0  # vertex editing: how near (screen pixels) a press grabs a vertex or the middle of a side
     SAM_TOOLS = ("tap", "box", "area")
 
     mouse_world = Signal(float, float, object)  # x, y, z or None
@@ -414,6 +420,8 @@ class RasterView(_ZoomView):
     probe_clicked = Signal(float, float)  # a measuring point at world x, y (elevation, temperature, bands)
     request_finished = Signal(object)  # (N,2) world XY drawn for a request: polygon, line or one point
     request_cancelled = Signal()  # Esc during a request
+    vertices_edited = Signal(str, object, object)  # layer, attributes of the unit part (the dict itself), outline (N,2)
+    reshape_finished = Signal(object)  # (N,2) world XY: the line of a reshape
     raster_loaded = Signal()  # a raster, an empty frame or nothing is now shown: layers must be drawn again
     photos_at_point = Signal(float, float)  # filter the photos that see world x, y
     photos_in_area_requested = Signal()  # filter the photos that frame the selected polygon
@@ -454,7 +462,9 @@ class RasterView(_ZoomView):
         self.snap_segment = False
         self.snap_px = 12.0
         self._snap_cache = None  # (vertices (n, 2), segments (m, 2, 2)) in world coordinates
+        self._snap_skip = None  # the feature whose vertices are being moved: not a snapping target
         self._snap_marks: dict = {}
+        self._vedit: dict | None = None  # the unit outline whose vertices are being edited
         self._batch = 0  # > 0 inside batch(): one layers_changed at the end
         self._batch_changed = False
         self._inv_of = self._inv = None  # self.tr and its inverse
@@ -941,6 +951,9 @@ class RasterView(_ZoomView):
 
     def clear_overlays(self) -> None:
         self.clear_selection()
+        if self._vedit is not None:  # its feature goes with the overlays
+            self._vedit_clear()
+            self._vedit = None
         self._snap_cache = None
         for it in self.overlays:
             self.scene().removeItem(it)
@@ -999,6 +1012,8 @@ class RasterView(_ZoomView):
         return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
 
     def set_mode(self, mode: str) -> None:
+        if self._vedit is not None:
+            self.end_vertex_edit(commit=True)
         if mode != "select" and self.selection:
             self.clear_selection()
         if mode != "sam":
@@ -1023,9 +1038,9 @@ class RasterView(_ZoomView):
             for lay in self.layers.values():
                 if not lay["visible"]:
                     continue
-                for _item, _label, attrs in lay["features"]:
+                for item, _label, attrs in lay["features"]:
                     gtype, coords = attrs.get("_geom", (None, None))
-                    if gtype is None:
+                    if gtype is None or item is self._snap_skip:
                         continue
                     if gtype == "Point":
                         verts.append(np.asarray([coords], float)[:, :2])
@@ -1234,10 +1249,22 @@ class RasterView(_ZoomView):
             self.clear_selection()
 
     def keyPressEvent(self, ev) -> None:
-        if self.mode in self.REQUEST_MODES:
+        if self.mode == "vertices" and self._vedit is not None:
+            if ev.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.end_vertex_edit(commit=True)
+                return
             if ev.key() == Qt.Key.Key_Escape:
-                self.set_mode(self.mode)
-                self.request_cancelled.emit()
+                self.end_vertex_edit(commit=False)
+                return
+            if ev.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and self._vedit["current"] is not None:
+                self.remove_vertex(self._vedit["current"])
+                return
+        if self.mode in (*self.REQUEST_MODES, "reshape"):
+            if ev.key() == Qt.Key.Key_Escape:
+                mode = self.mode
+                self.set_mode(mode)
+                if mode in self.REQUEST_MODES:
+                    self.request_cancelled.emit()
                 return
             if ev.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 self._finish_request()
@@ -1287,6 +1314,12 @@ class RasterView(_ZoomView):
         sp = self.mapToScene(ev.position().toPoint())
         x, y = self.world(sp)
         self.mouse_world.emit(x, y, self.elevation(x, y))
+        if self.mode == "vertices" and self._vedit is not None and self._vedit["drag"] is not None:
+            snapped, kind, xy = self.snap_world(sp)
+            self._show_snap(snapped if kind else None, kind)
+            self._vedit["xy"][self._vedit["drag"]] = [xy[0], xy[1]]
+            self._vedit_draw()
+            return
         if self.mode in self.DRAW_MODES:
             snapped, kind, xy = self.snap_world(sp)
             self._show_snap(snapped if kind else None, kind)
@@ -1311,6 +1344,10 @@ class RasterView(_ZoomView):
                 self._band.setRect(QRectF(self._band_origin, sp).normalized())
 
     def mouseReleaseEvent(self, ev) -> None:
+        if self.mode == "vertices" and self._vedit is not None and self._vedit["drag"] is not None:
+            self._vedit["drag"] = None
+            self._show_snap(None, None)
+            return
         if self._stroking and ev.button() == Qt.MouseButton.LeftButton:
             self._finish_stroke()
             return
@@ -1380,6 +1417,9 @@ class RasterView(_ZoomView):
         if self.mode == "pan" or self.tr is None or ev.button() == Qt.MouseButton.MiddleButton:
             return super().mousePressEvent(ev)
         sp = self.mapToScene(ev.position().toPoint())
+        if self.mode == "vertices":
+            self._vertex_press(ev, sp)
+            return
         if self.mode == "select":
             if ev.button() == Qt.MouseButton.LeftButton:
                 self.setFocus()
@@ -1441,7 +1481,7 @@ class RasterView(_ZoomView):
     def mouseDoubleClickEvent(self, ev) -> None:
         if self.mode == "sam":  # a second press: nothing more (Enter accepts the mask)
             return
-        if self.mode == "req_line":
+        if self.mode in self.LINE_MODES:
             self._finish_request()
             return
         if self.mode in ("polygon", *self.AREA_MODES) and len(self._click_xy) >= 3:
@@ -1459,7 +1499,7 @@ class RasterView(_ZoomView):
     def _finish_request(self) -> None:
         """The geometry of a request, when it has enough vertices (polygon 3, line 2, point 1); a
         vertex clicked again on the same screen pixel (a slow double click) counts once."""
-        need = {"req_polygon": 3, "req_line": 2, "req_point": 1}[self.mode]
+        need = {"req_polygon": 3, "req_line": 2, "req_point": 1, "reshape": 2}[self.mode]
         # one screen pixel in world units: a relative tolerance would join vertices metres apart in UTM
         pixel = abs(self.tr.a) / max(self.transform().m11(), 1e-12) if self.tr is not None else 0.0
         xy = [p for i, p in enumerate(self._click_xy)
@@ -1468,7 +1508,147 @@ class RasterView(_ZoomView):
             return
         mode = self.mode
         self.set_mode(mode)
-        self.request_finished.emit(np.array(xy, float))
+        (self.reshape_finished if mode == "reshape" else self.request_finished).emit(np.array(xy, float))
+
+    # ----------------------------------------------------------- vertex editing
+    def editing_vertices(self) -> bool:
+        """An outline is being edited (its vertices shown)."""
+        return self._vedit is not None
+
+    def begin_vertex_edit(self, item) -> bool:
+        """The vertices of the unit part drawn by ``item`` shown, to move, add or remove; False when
+        it is not the outline of a unit."""
+        layer = item.data(0)
+        lay = self.layers.get(layer)
+        if lay is None or lay["kind"] != "polygon":
+            return False
+        attrs = next((f[2] for f in lay["features"] if f[0] is item), None)
+        if attrs is None or "_unit" not in attrs:
+            return False
+        coords = (attrs.get("_geom") or (None, []))[1] or []
+        xy = [[float(c[0]), float(c[1])] for c in coords]
+        if len(xy) > 3 and xy[0] == xy[-1]:
+            xy = xy[:-1]
+        if len(xy) < 3:
+            return False
+        self._vedit = {"layer": layer, "attrs": attrs, "item": item, "xy": xy, "orig": [list(p) for p in xy],
+                       "path": QPainterPath(item.path()), "drag": None, "current": None, "marks": []}
+        self._snap_skip, self._snap_cache = item, None
+        self._vedit_draw()
+        return True
+
+    def end_vertex_edit(self, commit: bool = True) -> None:
+        """The edit ends: with ``commit`` and a changed outline :attr:`vertices_edited`, else the outline as it was."""
+        ed, self._vedit = self._vedit, None
+        if ed is None:
+            return
+        self._vedit_clear(ed)
+        self._snap_skip, self._snap_cache = None, None
+        self._show_snap(None, None)
+        if commit and ed["xy"] != ed["orig"]:
+            self.vertices_edited.emit(ed["layer"], ed["attrs"], np.array(ed["xy"], float))
+        elif shiboken6.isValid(ed["item"]):
+            ed["item"].setPath(ed["path"])
+
+    def move_vertex(self, index: int, x: float, y: float) -> None:
+        """Vertex ``index`` of the outline being edited to world ``x``, ``y``."""
+        self._vedit["xy"][index] = [float(x), float(y)]
+        self._vedit["current"] = index
+        self._vedit_draw()
+
+    def insert_vertex(self, after: int, x: float, y: float) -> int:
+        """A new vertex after vertex ``after``, at world ``x``, ``y``; returns its index."""
+        self._vedit["xy"].insert(after + 1, [float(x), float(y)])
+        self._vedit["current"] = after + 1
+        self._vedit_draw()
+        return after + 1
+
+    def remove_vertex(self, index: int) -> bool:
+        """Vertex ``index`` away (an outline keeps three at least)."""
+        xy = self._vedit["xy"]
+        if len(xy) <= 3 or not 0 <= index < len(xy):
+            return False
+        del xy[index]
+        self._vedit["current"] = None
+        self._vedit_draw()
+        return True
+
+    def _vedit_clear(self, ed: dict | None = None) -> None:
+        for m in (ed or self._vedit or {}).get("marks", []):
+            if shiboken6.isValid(m) and m.scene() is self.scene():
+                self.scene().removeItem(m)
+        if ed is None and self._vedit is not None:
+            self._vedit["marks"] = []
+
+    def _vedit_mids(self) -> list:
+        xy = self._vedit["xy"]
+        return [[(xy[i][0] + xy[(i + 1) % len(xy)][0]) / 2, (xy[i][1] + xy[(i + 1) % len(xy)][1]) / 2]
+                for i in range(len(xy))]
+
+    def _vedit_draw(self) -> None:
+        """The outline being edited with its vertices (squares) and the middles of its sides (circles)."""
+        ed = self._vedit
+        self._vedit_clear()
+        pts = [self.scene_pt(x, y) for x, y in ed["xy"]]
+        path = QPainterPath()
+        path.addPolygon(QPolygonF(pts))
+        path.closeSubpath()
+        if shiboken6.isValid(ed["item"]):
+            ed["item"].setPath(path)
+        pen = self._pen("#202020", 1.2)
+        for k, p in enumerate(pts):
+            m = self.scene().addRect(QRectF(-4.5, -4.5, 9, 9), pen,
+                                     QBrush(QColor("#ff3030" if k == ed["current"] else "#ffffff")))
+            m.setFlag(m.GraphicsItemFlag.ItemIgnoresTransformations)
+            m.setPos(p)
+            m.setZValue(10003)
+            ed["marks"].append(m)
+        for x, y in self._vedit_mids():
+            m = self.scene().addEllipse(QRectF(-3, -3, 6, 6), pen, QBrush(QColor("#00e5ff")))
+            m.setFlag(m.GraphicsItemFlag.ItemIgnoresTransformations)
+            m.setPos(self.scene_pt(x, y))
+            m.setZValue(10003)
+            ed["marks"].append(m)
+
+    def _vedit_hit(self, view_pos) -> tuple[str, int] | None:
+        """``("vertex", i)`` or ``("mid", i)`` (the middle of the side after vertex ``i``) under a
+        position of the view; vertices first."""
+        for kind, pts in (("vertex", self._vedit["xy"]), ("mid", self._vedit_mids())):
+            best, near = None, self.VERTEX_PX
+            for i, (x, y) in enumerate(pts):
+                q = self.mapFromScene(self.scene_pt(x, y))
+                d = float(np.hypot(q.x() - view_pos.x(), q.y() - view_pos.y()))
+                if d <= near:
+                    best, near = i, d
+            if best is not None:
+                return kind, best
+        return None
+
+    def _vertex_press(self, ev, sp) -> None:
+        self.setFocus()
+        hit = self._vedit_hit(ev.position()) if self._vedit is not None else None
+        if ev.button() == Qt.MouseButton.RightButton or (
+                ev.button() == Qt.MouseButton.LeftButton and hit and hit[0] == "vertex"
+                and ev.modifiers() & Qt.KeyboardModifier.AltModifier):
+            if hit and hit[0] == "vertex":
+                self.remove_vertex(hit[1])
+            return
+        if ev.button() != Qt.MouseButton.LeftButton:
+            return
+        if hit is not None:
+            kind, i = hit
+            if kind == "mid":
+                x, y = self._vedit_mids()[i]
+                i = self.insert_vertex(i, x, y)
+            self._vedit["drag"] = self._vedit["current"] = i
+            self._vedit_draw()
+            return
+        if self._vedit is not None and self.item_at(sp) is self._vedit["item"]:
+            return
+        self.end_vertex_edit(commit=True)  # the outline kept, then the unit clicked (drawn again meanwhile)
+        it = self.item_at(sp)
+        if it is not None:
+            self.begin_vertex_edit(it)
 
 
 class PhotoView(_ZoomView):
