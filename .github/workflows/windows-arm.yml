@@ -528,7 +528,23 @@ jobs:
           # the runner has no graphics driver with OpenGL 3.2 (VTK's minimum): Microsoft's OpenGL over
           # Direct3D 12 (the "OpenCL, OpenGL, and Vulkan Compatibility Pack" Snapdragon laptops come with),
           # if the Store can be reached from here; Mesa publishes no software OpenGL for Windows ARM64
-          winget install --id 9NQPSL29BFFF --source msstore --accept-package-agreements --accept-source-agreements --disable-interactivity
+          # (the runner image has no winget: App Installer registered, or installed from its GitHub release)
+          $wingetExe = "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe"
+          if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+            try { Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe } catch { $_ }
+          }
+          if (-not (Test-Path $wingetExe)) {
+            $base = "https://github.com/microsoft/winget-cli/releases/latest/download"
+            Invoke-WebRequest "$base/DesktopAppInstaller_Dependencies.zip" -OutFile deps.zip
+            Expand-Archive deps.zip -DestinationPath deps
+            Get-ChildItem -Recurse deps -Filter *.appx | Where-Object { $_.FullName -match "arm64" } |
+              ForEach-Object { try { Add-AppxPackage $_.FullName } catch { $_ } }
+            Invoke-WebRequest "$base/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle" -OutFile winget.msixbundle
+            Add-AppxPackage winget.msixbundle
+          }
+          & $wingetExe --version
+          & $wingetExe install --id 9NQPSL29BFFF --source msstore --accept-package-agreements --accept-source-agreements --disable-interactivity
+          Get-AppxPackage *D3DMappingLayers* | Select-Object Name, Version, InstallLocation
           Set-Content render.py @'
           import pyvista as pv
           p = pv.Plotter(off_screen=True, window_size=(320, 240))
