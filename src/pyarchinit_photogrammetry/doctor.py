@@ -174,6 +174,11 @@ def run_checks(gui: bool = True) -> Report:
     r.add("IfcOpenShell", OK if v else WARN, v or "missing (IFC export disabled)",
           "" if v else "pip install \"pyarchinit-photogrammetry[bim]\"")
     v = _version("pye57")
+    if v == "?":  # no metadata in the packaged application: the version is a submodule of pye57
+        try:
+            from pye57.__version__ import __version__ as v
+        except Exception:
+            pass
     r.add("E57 scans (pye57)", OK if v else WARN, v or "missing (E57 import and export disabled; PTX works)",
           "" if v else "pip install \"pyarchinit-photogrammetry[scans]\"")
     from .ai import sam_env
