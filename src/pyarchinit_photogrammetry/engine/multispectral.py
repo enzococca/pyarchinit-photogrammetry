@@ -23,8 +23,8 @@ ratios of bands, still work, their absolute values do not.
 The reflectance orthomosaic (:func:`build_reflectance`) is the orthophoto engine run on the
 reference band's geometry with the registered bands as float values: one GeoTIFF, a float32
 band per spectral band, NaN where nothing. Indices (:func:`index_raster`, :data:`INDICES`) are
-rasters of the same grid; :func:`zoning` cuts an index into classes (quantiles, equal intervals
-or k-means) and gives polygons with the class and the mean, exported as GeoPackage
+rasters of the same grid; :func:`zoning` cuts an index into classes (quantiles, equal intervals,
+natural breaks or k-means) and gives polygons with the class and the mean, exported as GeoPackage
 (:func:`export_zoning`), the format farm software and QGIS read.
 """
 from __future__ import annotations
@@ -1101,10 +1101,87 @@ def index_raster(chunk: Chunk, name: str, formula: str | None = None) -> Path:
     return target
 
 
+ZONING_METHODS = ("quantiles", "equal", "jenks", "kmeans")
+ZONING_SAMPLE = 200_000  # cells drawn (fixed seed) when an index has more, for k-means and natural breaks
+JENKS_SAMPLE = 3000  # values the natural breaks are exact on (a table of n x n sums: 72 MB, 0.13 s for 10 classes)
+
+
+def _zoning_sample(v: np.ndarray) -> np.ndarray:
+    """At most :data:`ZONING_SAMPLE` of the values ``v``, always the same ones (seed 0)."""
+    return v if v.size <= ZONING_SAMPLE else np.random.default_rng(0).choice(v, ZONING_SAMPLE, replace=False)
+
+
+def _fisher_jenks(x: np.ndarray, w: np.ndarray, k: int, block: int = 512) -> list[int]:
+    """Fisher's optimal partition of the sorted distinct values ``x`` (weighed by their counts
+    ``w``, ``k`` < len(x)) into ``k`` runs of least total sum of squared deviations from their
+    means: dynamic programming over the sums of every run ``x[a:b]``, from cumulative sums of the
+    values centred on their mean in double precision. Returns the index of the first value of
+    every class after the first."""
+    u = x.size
+    y = x - np.sum(w * x) / np.sum(w)
+    n, s, q = (np.concatenate([[0.0], np.cumsum(t)]) for t in (w, w * y, w * y * y))
+    cost = np.full((u, u), np.inf)  # cost[a, b - 1]: the run x[a:b], a < b
+    for b0 in range(1, u + 1, block):
+        b = np.arange(b0, min(u, b0 + block - 1) + 1)
+        a = np.arange(b[-1])[:, None]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            c = (q[b] - q[a]) - (s[b] - s[a]) ** 2 / (n[b] - n[a])
+        cost[:b[-1], b0 - 1:b[-1]] = np.where(a < b, np.maximum(c, 0.0), np.inf)
+    best = cost[0]  # best[b - 1]: the least sum with one class over the first b values
+    first = np.zeros((k + 1, u), np.int64)  # first[j, b - 1]: where the j-th class starts in the best of b values
+    for j in range(2, k + 1):
+        before = np.concatenate([[np.inf], best])  # j - 1 classes over the first a values
+        new = np.empty(u)
+        for b0 in range(0, u, block):
+            cols = slice(b0, min(u, b0 + block))
+            total = before[:cols.stop, None] + cost[:cols.stop, cols]
+            a = np.argmin(total, axis=0)
+            new[cols] = total[a, np.arange(total.shape[1])]
+            first[j, cols] = a
+        best = new
+    starts, b = [], u
+    for j in range(k, 1, -1):
+        b = int(first[j, b - 1])
+        starts.append(b)
+    return starts[::-1]
+
+
+def _between(low: float, high: float) -> float:
+    """A break halfway between two values that keeps ``low`` below and ``high`` above it once
+    cast to float32, as :func:`zoning` compares (two neighbouring floats: ``high``)."""
+    mid = np.float32((float(low) + float(high)) / 2)
+    return float(mid if mid > np.float32(low) else np.float32(high))
+
+
+def natural_breaks(values: np.ndarray, classes: int) -> list[float]:
+    """Fisher's natural breaks (Jenks): the ``classes - 1`` breaks that make the classes the most
+    homogeneous - the least sum of squared deviations from the means of the classes, the optimum
+    k-means looks for by successive approximations with no guarantee of reaching it (on an index
+    with a large population beside small ones it can stop splitting the large one and merging
+    the small ones). Exact on a sorted sample of at most :data:`JENKS_SAMPLE` values: all the
+    finite values when there are no more, else the values at evenly spaced ranks of the finite
+    values (of :data:`ZONING_SAMPLE` of them drawn with a fixed seed when there are more), which
+    stand for the distribution better than as many random cells. A break lies halfway between
+    the last value of a class and the first of the next. With fewer distinct values than classes
+    every value is a class and there are fewer breaks."""
+    v = np.asarray(values).ravel()
+    v = v[np.isfinite(v)]
+    if v.size == 0 or classes < 2:
+        return []
+    if v.size > JENKS_SAMPLE:
+        v = np.sort(_zoning_sample(v))
+        v = v[((np.arange(JENKS_SAMPLE) + 0.5) * v.size / JENKS_SAMPLE).astype(np.int64)]
+    x, w = np.unique(v.astype(np.float64), return_counts=True)
+    starts = list(range(1, x.size)) if x.size <= classes else _fisher_jenks(x, w.astype(np.float64), classes)
+    return [_between(x[i - 1], x[i]) for i in starts]
+
+
 def zoning(values: np.ndarray, classes: int = 3, method: str = "quantiles", min_cells: int = 20) -> tuple[np.ndarray, list[float]]:
     """``values`` cut into ``classes`` (1 = the lowest): by ``quantiles`` (as many cells each),
-    ``equal`` intervals or ``kmeans`` (natural breaks); patches smaller than ``min_cells``
-    given to their surroundings. Returns the class raster (0 where NaN) and the breaks."""
+    ``equal`` intervals, natural breaks (``jenks``: :func:`natural_breaks`, the most homogeneous
+    classes) or ``kmeans`` (the same aim by successive approximations from the quantiles);
+    patches smaller than ``min_cells`` given to their surroundings. Returns the class raster (0
+    where NaN) and the breaks."""
     valid = np.isfinite(values)
     v = values[valid]
     if v.size == 0:
@@ -1114,8 +1191,10 @@ def zoning(values: np.ndarray, classes: int = 3, method: str = "quantiles", min_
     elif method == "equal":
         lo, hi = float(v.min()), float(v.max())
         breaks = [lo + (hi - lo) * k / classes for k in range(1, classes)]
+    elif method == "jenks":
+        breaks = natural_breaks(v, classes)
     elif method == "kmeans":
-        sample = v if v.size <= 200_000 else np.random.default_rng(0).choice(v, 200_000, replace=False)
+        sample = _zoning_sample(v)
         centres = np.quantile(sample, [(k + 0.5) / classes for k in range(classes)]).astype(np.float32)
         for _ in range(30):
             labels = np.argmin(np.abs(sample[:, None] - centres[None, :]), axis=1)
@@ -1126,7 +1205,7 @@ def zoning(values: np.ndarray, classes: int = 3, method: str = "quantiles", min_
         centres = np.sort(centres)
         breaks = [float((centres[k] + centres[k + 1]) / 2) for k in range(classes - 1)]
     else:
-        raise ValueError("method: quantiles, equal or kmeans")
+        raise ValueError("method: " + ", ".join(ZONING_METHODS))
     cls = np.zeros(values.shape, np.int32)
     cls[valid] = 1 + np.searchsorted(np.asarray(breaks, np.float32), v, side="right")
     if min_cells > 1:
