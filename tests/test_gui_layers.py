@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -392,7 +393,7 @@ def test_merge_and_delete_write_back_to_pyarchinit(window, qapp, pa_db, monkeypa
 
 def test_preferences_stay_in_the_test_folder(window, tmp_path):
     """The window must not read or write the user's real preferences while tested."""
-    assert str(tmp_path) in window.settings.fileName()
+    assert Path(window.settings.fileName()).is_relative_to(tmp_path)  # Qt writes / on Windows too
 
 
 class _AcceptUnit:

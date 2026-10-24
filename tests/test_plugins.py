@@ -309,7 +309,7 @@ def test_new_plugin_project(tmp_path):
     target = scaffold.create(tmp_path, "Conta Foto", title="Conta foto", description="counts the photos",
                              author="Enzo Cocca", email="enzo@example.org")
     assert target == tmp_path / "ppg-conta-foto"
-    files = {str(p.relative_to(target)) for p in target.rglob("*") if p.is_file()}
+    files = {p.relative_to(target).as_posix() for p in target.rglob("*") if p.is_file()}
     assert files == {"pyproject.toml", "ppg_conta_foto/__init__.py", "tests/conftest.py", "tests/test_ppg_conta_foto.py",
                      "README.md", "README.it.md", "LICENSE", ".gitignore", ".github/workflows/release.yml"}
     pyproject = (target / "pyproject.toml").read_text()

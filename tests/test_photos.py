@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 
 import pytest
 import rasterio
@@ -56,8 +57,8 @@ def test_relink_photos_to_another_folder(processed, tmp_path):
     copy = tmp_path / "ssd" / "missione" / "foto"
     copy.mkdir(parents=True)
     for cam in ch.cameras:
-        shutil.copy2(cam.path, copy / cam.path.split("/")[-1])
-        cam.path = str(tmp_path / "dropbox" / cam.path.split("/")[-1])  # gone
+        shutil.copy2(cam.path, copy / Path(cam.path).name)
+        cam.path = str(tmp_path / "dropbox" / Path(cam.path).name)  # gone
     assert len(ch.unreadable_photos()) == len(ch.aligned_cameras)
     report = ch.relink_photos(tmp_path / "ssd")
     assert report["relinked"] == len(ch.cameras) and not report["not_found"] and report["unreadable"] == 0
@@ -69,7 +70,7 @@ def test_relink_photos_to_another_folder(processed, tmp_path):
     other.mkdir()
     moved = ch.cameras[::2]
     for cam in moved:
-        shutil.move(cam.path, other / cam.path.split("/")[-1])
+        shutil.move(cam.path, other / Path(cam.path).name)
     assert len(ch.unreadable_photos(ch.cameras)) == len(moved)
     report = ch.relink_photos(other, only_unreadable=True)
     assert report["relinked"] == len(moved) and report["unreadable"] == 0
@@ -78,5 +79,5 @@ def test_relink_photos_to_another_folder(processed, tmp_path):
     names = ch.meta["sfm"]["names"]
     for cam in ch.cameras:
         linked = (tmp_path / folder / names[str(cam.key)]).resolve()
-        assert linked == (other / cam.path.split("/")[-1]).resolve() or linked.parent == copy.resolve()
+        assert linked == (other / Path(cam.path).name).resolve() or linked.parent == copy.resolve()
     assert ch.unreadable_photos() == []
