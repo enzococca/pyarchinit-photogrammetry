@@ -531,3 +531,72 @@ def test_plugins_borrow_the_drawing_and_follow_the_view(tmp_path, qapp):
     finally:
         w.setWindowModified(False)
         w.close()
+
+
+@pytest.fixture
+def window_settings(tmp_path, monkeypatch):
+    """The preferences of the windows of a test in its own file, never the user's."""
+    from PySide6.QtCore import QSettings
+
+    import pyarchinit_photogrammetry.gui as gui
+
+    path = tmp_path / "preferenze.ini"
+    monkeypatch.setattr(gui, "app_settings", lambda: QSettings(str(path), QSettings.Format.IniFormat))
+    return path
+
+
+def test_the_list_of_the_3d_view_names_the_mesh_a_plugin_shows(tmp_path, qapp, window_settings):
+    """Reported: after the geoarchaeology plugin showed its units in the 3D view - a mesh of its own
+    given to ``model_view.show_version`` on a chunk without a model - the list *Mostra* read "Camere".
+    The list names the kind shown, with an entry of its own that goes away with the mesh; a kept
+    version of a product the chunk has adds none; when the window shows the project again, or a kind
+    the chunk has not is asked for, the list and the view agree."""
+    import trimesh
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.core.pointcloud import PointCloud
+    from pyarchinit_photogrammetry.gui import main_window as mw
+    from pyarchinit_photogrammetry.gui.i18n import tr
+    from pyarchinit_photogrammetry.gui.model_view import VIEW_LABELS
+
+    doc = ppg.Document()
+    ch = doc.add_chunk("scavo")
+    doc.save(tmp_path / "progetto.ppg")
+    w = mw.MainWindow(doc, autoconnect=False, check_updates=False)
+    mv = w.model_view
+
+    def entries():
+        return [mv.combo.itemData(i) for i in range(mv.combo.count())]
+
+    units = ch.data_dir / "geoarcheologia" / "unita_vista.ply"
+    units.parent.mkdir(parents=True)
+    trimesh.creation.box(extents=(2.0, 2.0, 1.0)).export(units)
+    try:
+        assert entries() == ["cameras"] and mv.kind == "cameras"
+        mv.show_version("model", units, "Unità geoarcheologiche (3 unità)")  # as the plugin 0.1.3 does
+        assert mv.kind == "model" and mv.combo.currentData() == "model" and len(mv.sd.mesh_faces) == 12
+        assert mv.combo.currentText() == tr(VIEW_LABELS["model"]) and entries() == ["cameras", "model"]
+        cloud = PointCloud([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.5]]).save(ch.data_dir / "punti.ply")
+        mv.show_version("point_cloud", cloud, "Punti del plugin", version=False)  # one entry at a time
+        assert mv.kind == "point_cloud" and entries() == ["cameras", "point_cloud"] and len(mv.sd.points) == 3
+        assert mv.version_label.text() == "Punti del plugin"
+        w.refresh_all()  # the window shows the project again: its products, the list as the view
+        assert mv.kind == "cameras" and mv.combo.currentData() == "cameras" and entries() == ["cameras"]
+        assert not mv.paths and not mv.version_label.isVisibleTo(mv)
+        # a chunk with a model: a kept version is named beside the entry of the model
+        trimesh.creation.box(extents=(3.0, 3.0, 1.0)).export(ch.data_dir / "model.ply")
+        ch.products["model"] = "model.ply"
+        w._show_model("model")
+        assert entries() == ["cameras", "model"] and mv.kind == "model"
+        mv.show_version("model", units, "Prima della pulizia")
+        assert entries() == ["cameras", "model"] and mv.combo.currentData() == "model"
+        assert "Prima della pulizia" in mv.version_label.text() and mv.paths
+        mv.combo.setCurrentIndex(mv.combo.findData("cameras"))
+        assert entries() == ["cameras", "model"] and not mv.paths
+        # a kind the chunk has not: the best it has, named in the list
+        del ch.products["model"]
+        w._show_model("model")
+        assert mv.kind == "cameras" and mv.combo.currentData() == "cameras"
+    finally:
+        w.setWindowModified(False)
+        w.close()

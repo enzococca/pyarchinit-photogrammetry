@@ -691,6 +691,7 @@ class ModelView(QWidget):
         self.sd = None  # what is shown (heights exaggerated)
         self.base_sd = None  # the same in true scene coordinates
         self.paths: dict = {}  # files shown instead of the active products (a kept version)
+        self._own_entry: str | None = None  # the kind of an entry of the list only for the file shown
         self.highlight = None  # mask over the dense cloud shown in red (what a cleaning would remove)
         self._project = None
         self._filling = False
@@ -700,26 +701,38 @@ class ModelView(QWidget):
     def backend(self) -> str:
         return "vtk" if isinstance(self.canvas, VtkCanvas) else "software"
 
-    def show_version(self, kind: str, path, title: str) -> None:
-        """Show a kept version (``path``) of the dense cloud or the model; choosing a view in
-        the list goes back to the active products."""
+    def show_version(self, kind: str, path, title: str, version: bool = True) -> None:
+        """Show a kept version (``path``) of the dense cloud or the model - or, ``version`` False, a
+        file of a plugin named ``title`` (the units of a model of the deposits) - instead of the
+        active product; choosing a view in the list goes back to the active products. The list
+        names the kind shown: when the chunk has nothing of that kind, with an entry of its own that
+        goes away with the file."""
+        self._clear_version()
         self.paths = {kind: str(path)}
-        self.version_label.setText(tr("Versione: {0} (non attiva)", title))
+        self.version_label.setText(tr("Versione: {0} (non attiva)", title) if version else title)
+        self.version_label.setToolTip(tr("Scegli un'altra vista nell'elenco per tornare ai prodotti del chunk"))
         self.version_label.setVisible(True)
-        if self.kind == kind:
-            self.refresh(reset=False)
-        else:
-            self._filling = True
-            i = self.combo.findData(kind)
-            if i >= 0:
-                self.combo.setCurrentIndex(i)
-            self._filling = False
-            self.kind = kind
-            self.refresh(reset=True)
+        self._filling = True
+        i = self.combo.findData(kind)
+        if i < 0:
+            self.combo.addItem(tr(VIEW_LABELS.get(kind, kind)), kind)
+            i = self.combo.count() - 1
+            self._own_entry = kind
+        self.combo.setCurrentIndex(i)
+        self._filling = False
+        reset = self.kind != kind
+        self.kind = kind
+        self.refresh(reset=reset)
 
     def _clear_version(self) -> None:
         self.paths = {}
         self.version_label.setVisible(False)
+        kind, self._own_entry = self._own_entry, None
+        i = self.combo.findData(kind) if kind is not None else -1
+        if i >= 0:  # the entry of the file shown goes with it (the last one: the choice stays)
+            filling, self._filling = self._filling, True
+            self.combo.removeItem(i)
+            self._filling = filling
 
     def set_chunk(self, chunk, kind: str | None = None) -> None:
         self._clear_version()
@@ -732,7 +745,8 @@ class ModelView(QWidget):
             self.combo.addItem(tr(VIEW_LABELS[v]), v)
         from .scene import best_view
 
-        kind = kind or (best_view(chunk) if chunk is not None else None)
+        if kind not in views:  # none asked, or the chunk has nothing of that kind: the best it has
+            kind = best_view(chunk) if chunk is not None else None
         if kind in views:
             self.combo.setCurrentIndex(views.index(kind))
         self._filling = False
