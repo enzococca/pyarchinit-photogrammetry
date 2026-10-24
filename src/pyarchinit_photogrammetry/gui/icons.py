@@ -89,7 +89,14 @@ ICONS = {
     "doc": ("mdi6.file-document-outline", "grey"),
     "tie_points": ("mdi6.dots-grid", "teal"), "point_cloud": ("mdi6.dots-hexagon", "green"),
     "model_textured": ("mdi6.texture-box", "pink"), "orthomosaic": ("mdi6.map-outline", "amber"),
-    "hillshade": ("mdi6.weather-sunny", "amber"),
+    "hillshade": ("mdi6.weather-sunny", "amber"), "depth_maps": ("mdi6.image-filter-hdr", "teal"),
+    "chunk_off": ("mdi6.cube-off-outline", "grey"),
+    # the toolbar of the workspace (as Metashape's Workspace pane): saturated colours, which read on the light
+    # and on the dark theme and tell an enabled button from a disabled (grey) one
+    "add_chunk": ("mdi6.package-variant-plus", "teal"), "add_photos": ("mdi6.image-plus-outline", "blue"),
+    "add_folder": ("mdi6.folder-plus-outline", "blue"), "activate": ("mdi6.radiobox-marked", "blue"),
+    "enable": ("mdi6.check-circle-outline", "green"), "disable": ("mdi6.cancel", "orange"),
+    "rename": ("mdi6.rename-outline", "cyan"), "remove": ("mdi6.delete-outline", "red"),
     # cleaning and cropping
     "crop": ("mdi6.crop", "cyan"), "patch": ("mdi6.image-edit-outline", "pink"),
     "patch_update": ("mdi6.image-refresh-outline", "pink"), "patch_remove": ("mdi6.image-remove-outline", "pink"),

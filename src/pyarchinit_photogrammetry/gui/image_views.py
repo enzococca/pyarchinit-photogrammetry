@@ -1525,6 +1525,16 @@ class PhotoView(_ZoomView):
         if focus is not None:
             self.focus_marker(focus)
 
+    def clear_photo(self, text: str = "") -> None:
+        """No photo shown (it, or its chunk, went out of the project), ``text`` in its place."""
+        self.chunk, self.camera = None, None
+        self.scene().clear()
+        self.items, self.residual_items = [], []
+        self.pixmap_item = None
+        self.mask_item, self._mask_poly, self._mask_poly_item = None, [], None
+        if text:
+            self.scene().addText(text)
+
     def marker_xy(self, marker):
         """Where a marker (or an internal point) is in this photo: its flag, else where the survey
         projects it; None when it is not in the frame."""

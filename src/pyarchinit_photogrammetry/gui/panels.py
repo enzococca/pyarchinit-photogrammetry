@@ -5,10 +5,11 @@ import code
 import contextlib
 import io
 import logging
+import os
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSize, Qt, QThread, Signal
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, QThread, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QImage, QKeyEvent, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QSizePolicy,
@@ -23,6 +24,22 @@ from .image_views import to_qimage
 PRODUCT_LABELS = {"tie_points": "Punti di legame", "point_cloud": "Nuvola densa", "model": "Modello 3D",
                   "model_textured": "Modello con texture", "dem": "DEM", "orthomosaic": "Ortofoto",
                   "hillshade": "Ombreggiatura", "report": "Report"}
+OTHER_PRODUCTS = {"depth_maps": "Mappe di profondità", "coverage": "Copertura delle foto",
+                  "dem_precision": "Precisione del DEM (sigma Z)", "slope": "Pendenza", "aspect": "Esposizione",
+                  "svf": "Sky-view factor", "openness_pos": "Openness positiva", "openness_neg": "Openness negativa",
+                  "slrm": "Rilievo locale (SLRM)", "msrm": "Rilievo multiscala (MSRM)",
+                  "multi_hillshade": "Ombreggiatura da 16 direzioni", "ms:reflectance": "Ortofoto di riflettanza",
+                  "ms:thermal": "Ortofoto termica", "ms:thermal_anomaly": "Anomalie termiche"}
+
+
+def product_name(key: str) -> str:
+    """The name of a product of the workspace (a key of ``chunk.products``, ``depth_maps``, ``ms:...``) in
+    the language of the interface."""
+    if key.startswith("ms:index:"):
+        return tr("Indice {0}", key[len("ms:index:"):])
+    if key.startswith("ms:zones:"):
+        return tr("Zone {0}", key[len("ms:zones:"):])
+    return tr(OTHER_PRODUCTS.get(key) or PRODUCT_LABELS.get(key) or key)
 
 
 _SUMMARIES: dict = {}
@@ -106,12 +123,22 @@ def _tool(name: str, text: str, tip: str = "") -> QToolButton:
     return b
 
 
+# the kinds of the items of the workspace that can be removed (Rimuovi, the Delete key)
+REMOVABLE = {"chunk", "product", "version", "elevation", "camera", "cameras", "marker", "markers", "scalebar",
+             "scalebars"}
+
+
 class WorkspaceTree(QTreeWidget):
     """Document > chunks > photos / markers / scale bars / products, and the products of the plugins
-    (:meth:`plugins.api.Context.add_tree_items`) under them."""
+    (:meth:`plugins.api.Context.add_tree_items`) under them, as Metashape's Workspace: a double click
+    (or Enter) makes a chunk active and opens a photo or a product, the selection takes several items
+    (Cmd/Ctrl and Shift + click), Delete or Backspace asks to remove them, F2 renames."""
 
     activated_item = Signal(str, object, object)  # kind, chunk, payload
     context_requested = Signal(str, object, object, object)  # kind, chunk, payload, global position
+    remove_requested = Signal(object)  # [(kind, chunk, payload)] of the items selected
+    rename_requested = Signal(str, object, object)  # kind, chunk, payload of the current item
+    populated = Signal()  # filled again (the selection is gone)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -119,8 +146,8 @@ class WorkspaceTree(QTreeWidget):
         self.setColumnCount(1)
         self.setIconSize(QSize(18, 18))
         self.setIndentation(16)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.itemDoubleClicked.connect(self._double)
-        self.itemClicked.connect(self._single)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._context)
         self.document = None
@@ -128,11 +155,30 @@ class WorkspaceTree(QTreeWidget):
         self._plugin_items: list[tuple[str, dict]] = []  # (plugin, item) shown (their index is in the data)
         self._plugin_nodes: list[tuple[QTreeWidgetItem, tuple]] = []  # their nodes, by plugin, chunk and labels
 
+    @staticmethod
+    def _place(item) -> tuple | None:
+        """What a node is, apart from its text: the expansion the user gave it stays when the tree is
+        filled again."""
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data or data[0] == "plugin":
+            return None
+        kind, chunk, payload = data
+        if not isinstance(payload, (str, int, tuple, type(None))):
+            payload = payload.get("id") if isinstance(payload, dict) else getattr(payload, "key", None)
+        return kind, getattr(chunk, "key", None), payload
+
     def populate(self, document) -> None:
-        try:  # the nodes of the plugins keep the expansion the user gave them
+        try:  # the nodes of the plugins keep the expansion the user gave them, and so do the others
             states = {key: node.isExpanded() for node, key in self._plugin_nodes}
+            opened = {}
+            if self.document is document:
+                for item in self._walk():
+                    place = self._place(item)
+                    if place is not None and item.childCount():
+                        opened[place] = item.isExpanded()
+            scroll = self.verticalScrollBar().value()
         except RuntimeError:  # pragma: no cover - the tree was destroyed
-            states = {}
+            states, opened, scroll = {}, {}, 0
         self._plugin_items, self._plugin_nodes = [], []
         self.document = document
         self.clear()
@@ -140,16 +186,28 @@ class WorkspaceTree(QTreeWidget):
         root = QTreeWidgetItem([tr("{0}  ({1} chunk)", name, len(document.chunks))])
         root.setIcon(0, icon("project"))
         root.setData(0, Qt.ItemDataRole.UserRole, ("document", None, None))
+        root.setToolTip(0, tr("Tasto destro: aggiungi un chunk"))
         self.addTopLevelItem(root)
+        from . import theme
+
+        dark = theme.is_dark()
         for ch in document.chunks:
             n_al = len(ch.aligned_cameras)
             active = tr("  [attivo]") if ch is document.chunk else ""
-            ci = QTreeWidgetItem([tr("{0}{1}   {2} foto, {3} allineate", ch.label, active, len(ch.cameras), n_al)])
-            ci.setIcon(0, icon("chunk", "blue" if ch is document.chunk else None))
+            off = "" if ch.enabled else tr("  (disattivato)")
+            ci = QTreeWidgetItem([tr("{0}{1}   {2} foto, {3} allineate", ch.label, active, len(ch.cameras), n_al)
+                                  + off])
+            ci.setIcon(0, icon("chunk_off") if not ch.enabled else  # slate does not show on the dark theme
+                       icon("chunk", "blue" if ch is document.chunk else ("grey" if dark else None)))
             ci.setData(0, Qt.ItemDataRole.UserRole, ("chunk", ch, None))
+            ci.setToolTip(0, tr("Chunk attivo: gli strumenti lavorano su di lui. Tasto destro: rinomina, attiva o "
+                                "disattiva, rimuovi") if ch is document.chunk else
+                          tr("Doppio clic per renderlo attivo; tasto destro: rinomina, attiva o disattiva, rimuovi"))
             f = ci.font(0)
             f.setBold(ch is document.chunk)
             ci.setFont(0, f)
+            if not ch.enabled:
+                ci.setForeground(0, QColor(PALETTE["grey"]))
             root.addChild(ci)
             info = QTreeWidgetItem([tr("Sistema di riferimento: {0}", ch.crs)])
             info.setIcon(0, icon("crs"))
@@ -161,10 +219,14 @@ class WorkspaceTree(QTreeWidget):
             cams.setData(0, Qt.ItemDataRole.UserRole, ("cameras", ch, None))
             ci.addChild(cams)
             for cam in ch.cameras:
-                it = QTreeWidgetItem([cam.label])
+                it = QTreeWidgetItem([cam.label + ("" if cam.enabled else tr("  (disattivata)"))])
                 it.setIcon(0, icon("camera_ok" if cam.aligned else "camera_bad"))
                 it.setData(0, Qt.ItemDataRole.UserRole, ("camera", ch, cam))
-                if not cam.aligned:
+                if not cam.enabled:
+                    it.setForeground(0, QColor(PALETTE["grey"]))
+                    it.setToolTip(0, tr("Disattivata: resta fuori dal prossimo allineamento e dalle prossime "
+                                        "costruzioni"))
+                elif not cam.aligned:
                     it.setForeground(0, QColor(PALETTE["red"]))
                     it.setToolTip(0, tr("Non allineata"))
                 cams.addChild(it)
@@ -182,13 +244,22 @@ class WorkspaceTree(QTreeWidget):
             if ch.scalebars:
                 sb = QTreeWidgetItem([tr("Barre di scala  ({0})", len(ch.scalebars))])
                 sb.setIcon(0, icon("scalebar"))
+                sb.setData(0, Qt.ItemDataRole.UserRole, ("scalebars", ch, None))
                 ci.addChild(sb)
                 for s in ch.scalebars:
-                    sb.addChild(QTreeWidgetItem([f"{s.label}: {s.distance:.4f} m" + ("  check" if s.checkpoint else "")
-                                                 + ("" if s.enabled else tr("  (non usata)"))]))
+                    it = QTreeWidgetItem([f"{s.label}: {s.distance:.4f} m" + ("  check" if s.checkpoint else "")
+                                          + ("" if s.enabled else tr("  (non usata)"))])
+                    it.setIcon(0, icon("scalebar"))
+                    it.setData(0, Qt.ItemDataRole.UserRole, ("scalebar", ch, s))
+                    sb.addChild(it)
             from ..core import versions
 
-            for key in ("tie_points", "point_cloud", "model", "model_textured", "dem", "orthomosaic"):
+            for key in ("tie_points", "depth_maps", "point_cloud", "model", "model_textured", "dem", "orthomosaic"):
+                if key == "depth_maps":
+                    item = self._depth_maps_item(ch)
+                    if item is not None:
+                        ci.addChild(item)
+                    continue
                 kept = versions.versions(ch, key) if key in versions.PRODUCTS else []
                 if not ch.product_path(key) and not kept:
                     continue
@@ -204,7 +275,10 @@ class WorkspaceTree(QTreeWidget):
                 it.setIcon(0, icon(key))
                 it.setData(0, Qt.ItemDataRole.UserRole, ("product", ch, key))
                 if key in versions.PRODUCTS:
-                    it.setToolTip(0, tr("Doppio clic per vederlo; tasto destro: versioni (conserva, rinomina...)"))
+                    it.setToolTip(0, tr("Doppio clic per vederlo; tasto destro: versioni (conserva, rinomina...), "
+                                        "rimuovi"))
+                elif key == "tie_points":
+                    it.setToolTip(0, tr("Doppio clic per vederli; tasto destro: rimuovi (con l'allineamento)"))
                 ci.addChild(it)
                 for e in reversed(kept):
                     when = e["created"][:16].replace("T", " ")
@@ -316,6 +390,51 @@ class WorkspaceTree(QTreeWidget):
             self._add_plugin_items(ci, ch, states)
             ci.setExpanded(ch is document.chunk)
         root.setExpanded(True)
+        if opened:  # filled again (something removed, a product built): the nodes as the user left them,
+            for item in self._walk():  # the active chunk open
+                place = self._place(item)
+                if place in opened and item.childCount():
+                    item.setExpanded(opened[place] or (place[0] == "chunk" and place[1] == getattr(document.chunk,
+                                                                                                    "key", None)))
+            self.verticalScrollBar().setValue(scroll)
+        self.populated.emit()
+
+    def _walk(self):
+        """Every node of the tree, parents before their children, in the order of the tree."""
+        def walk(item):
+            yield item
+            for i in range(item.childCount()):
+                yield from walk(item.child(i))
+        for i in range(self.topLevelItemCount()):
+            yield from walk(self.topLevelItem(i))
+
+    @staticmethod
+    def _depth_maps_item(chunk) -> QTreeWidgetItem | None:
+        """The depth maps of the chunk (``<data>/dense``), as Metashape lists them: how many and with which
+        quality; removing them frees most of the space a chunk takes."""
+        settings = chunk.meta.get("dense") or {}
+        if not settings:  # written with the maps (and taken away with them)
+            return None
+        folder = chunk.data_dir / "dense" / "stereo" / "depth_maps"
+        names = set()
+        try:
+            for e in os.scandir(folder):
+                for suffix in (".geometric.bin", ".photometric.bin"):
+                    if e.name.endswith(suffix):
+                        names.add(e.name[:-len(suffix)])
+        except OSError:
+            pass
+        from .dialogs import QUALITY
+
+        quality = dict(QUALITY).get(settings.get("quality"), settings.get("quality") or "")
+        label = (tr("Mappe di profondità  ({0}, qualità {1})", len(names), tr(quality)) if quality
+                 else tr("Mappe di profondità  ({0})", len(names)))
+        it = QTreeWidgetItem([label])
+        it.setIcon(0, icon("depth_maps"))
+        it.setData(0, Qt.ItemDataRole.UserRole, ("product", chunk, "depth_maps"))
+        it.setToolTip(0, tr("Le mappe di profondità delle foto: servono alla nuvola densa, alla confidenza e alla "
+                            "mesh dalle mappe. Tasto destro: rimuovi, per liberare spazio"))
+        return it
 
     # ---------------------------------------------------------------- the products of the plugins
     def _add_plugin_items(self, parent: QTreeWidgetItem, chunk, states: dict) -> None:
@@ -336,13 +455,44 @@ class WorkspaceTree(QTreeWidget):
             for node, key, default in expand:  # in the tree now: a node out of it does not expand
                 node.setExpanded(states.get(key, default))
 
+    @staticmethod
+    def _renameable(data) -> bool:
+        """A chunk, a kept version, a product with versions (its active version is renamed)."""
+        return bool(data) and (data[0] in ("chunk", "version") or
+                               (data[0] == "product" and data[2] in ("point_cloud", "model", "dem", "orthomosaic")))
+
+    def event(self, event) -> bool:
+        """F2 renames in the tree (elsewhere it shows the 3D view), Delete and Backspace remove: the tree
+        takes these keys before the shortcuts of the window."""
+        if event.type() == QEvent.Type.ShortcutOverride and not event.modifiers():
+            key = event.key()
+            if (key == Qt.Key.Key_F2 and self._renameable(self._data(self.currentItem()))) or \
+                    key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+                event.accept()
+                return True
+        return super().event(event)
+
     def keyPressEvent(self, event) -> None:
-        """Enter on an item of a plugin activates it, as a double click."""
+        """Enter opens the current item as a double click does (makes a chunk active), Delete or
+        Backspace asks to remove the items selected, F2 renames the current one."""
         data = self._data(self.currentItem())
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and data and data[0] == "plugin":
+        key = event.key()
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and data:
             self.activated_item.emit(*data)
             return
+        if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            items = self.selected_items()
+            if items:
+                self.remove_requested.emit(items)
+                return
+        if key == Qt.Key.Key_F2 and self._renameable(data):
+            self.rename_requested.emit(*data)
+            return
         super().keyPressEvent(event)
+
+    def selected_items(self) -> list[tuple]:
+        """``(kind, chunk, payload)`` of the items selected, in the order of the tree."""
+        return [data for data in (self._data(item) for item in self._walk() if item.isSelected()) if data]
 
     def _plugin_node(self, chunk, plugin: str, item: dict, path: tuple, expand: list) -> QTreeWidgetItem:
         label = str(item.get("label") or "")
@@ -376,11 +526,6 @@ class WorkspaceTree(QTreeWidget):
         data = self._data(item)
         if data:
             self.activated_item.emit(*data)
-
-    def _single(self, item, _col) -> None:
-        data = item.data(0, Qt.ItemDataRole.UserRole)
-        if data and data[0] == "chunk":
-            self.activated_item.emit("select_chunk", data[1], None)
 
     def _context(self, pos) -> None:
         data = self._data(self.itemAt(pos))

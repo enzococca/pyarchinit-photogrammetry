@@ -2,9 +2,11 @@
 (every action is a call that a script could make through ``ppg.app.document``)."""
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import traceback
@@ -107,6 +109,24 @@ SAM_MODELS = [("tiny", "Molto veloce (tiny)"), ("small", "Veloce (small)"), ("ba
 
 
 CLASSIFIER_FILE = "classificatore.ppgclf"  # classifier trained in a chunk, kept in its data folder
+
+
+class _Removed:
+    """An entry of Modifica > Annulla: what a removal from the workspace took away (``core.removal``),
+    undone and redone by the window. ``active``: the active chunk, when it was among the chunks removed
+    (it comes back as the active one); ``after``: the chunk made active in its place; ``created``: the
+    empty chunk added when no chunk was left (a project always has one)."""
+
+    def __init__(self, window, removals, active=None):
+        self.window, self.removals, self.active = window, removals, active
+        self.after = None
+        self.created = None
+
+    def undo(self) -> None:
+        self.window._undo_removed(self)
+
+    def redo(self) -> None:
+        self.window._redo_removed(self)
 
 
 class MainWindow(QMainWindow):
@@ -251,6 +271,8 @@ class MainWindow(QMainWindow):
         self.workspace = WorkspaceTree()
         self.workspace.activated_item.connect(self._workspace_item)
         self.workspace.context_requested.connect(self._workspace_menu)
+        self.workspace.remove_requested.connect(lambda items: self.remove_workspace_items(items))
+        self.workspace.rename_requested.connect(self._workspace_rename)
         self.reference = ReferencePane()
         self.reference.import_requested.connect(self.import_reference)
         self.reference.update_requested.connect(self.update_transform)
@@ -281,6 +303,7 @@ class MainWindow(QMainWindow):
         # on the right PyArchInit (in front) and the panes of the tools: they show beside the fixed panes
         self.d_pa = add(self.pa_pane, "PyArchInit", icon("database"), name="pane_pyarchinit", area="right")
         add(self.workspace, tr("Area di lavoro"), icon("workspace"), name="pane_workspace", fixed=True)
+        self._build_workspace_toolbar()
         add(self.reference, tr("Riferimenti"), icon("reference_pane"), name="pane_reference", fixed=True)
         self.layers_pane = LayersPane()
         self.layers_pane.set_view(self.ortho_view)
@@ -1040,7 +1063,20 @@ class MainWindow(QMainWindow):
     def set_document(self, doc: Document, progress=None) -> None:
         """Show a project. ``progress(fraction, text)`` follows the loading of the views."""
         step = progress or (lambda *_a, **_k: None)
+        shown = getattr(self, "_shown_doc", None)
+        if shown is not None and shown is not doc:  # the session of the project left ends
+            self._settle_removals(shown)
+        self._shown_doc = doc
         application.document = doc
+        if doc.path is not None:  # what a session that crashed left aside, settled now
+            try:
+                done = doc.recover_removed()
+            except Exception as exc:  # noqa: BLE001 - the project opens anyway
+                log.warning("Elementi rimossi non sistemati: %s", exc)
+            else:
+                if done["restored"] or done["deleted"]:
+                    log.info("Elementi rimossi in una sessione interrotta: %d rimessi al loro posto, %d cancellati",
+                             done["restored"], done["deleted"])
         if not doc.chunks:
             doc.add_chunk("Chunk 1")
         self.units = []
@@ -1257,6 +1293,7 @@ class MainWindow(QMainWindow):
         for a in self._processing_actions:
             a.setEnabled(not busy)
         self.reference.setEnabled(not busy)
+        self._update_workspace_actions()
 
     def _need_chunk(self, what: str = "", aligned: bool = False, product: str | None = None) -> bool:
         ch = self.chunk
@@ -2090,6 +2127,7 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard():
             ev.ignore()
             return
+        self._settle_removals(self.doc)  # the files of what was removed: deleted, or back if never saved
         self.photos.stop()
         self.log_pane.detach()
         self.settings.setValue("geometry", self.saveGeometry())
@@ -2615,10 +2653,25 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- workflow
     def add_chunk(self) -> None:
-        label, ok = QInputDialog.getText(self, tr("Nuovo chunk"), tr("Nome:"), text=f"Chunk {len(self.doc.chunks) + 1}")
-        if ok:
-            self._activate_chunk(self.doc.add_chunk(label))
-            self._dirty(True)
+        """Aggiungi chunk (the toolbar of the Area di lavoro, Flusso di lavoro): an empty chunk with the
+        name asked, which becomes the active one, as in Metashape."""
+        default = self._new_chunk_name()
+        v = ParamDialog.ask(self, "Nuovo chunk", [Field("label", "Nome", default, kind="text")],
+                            intro="Il nuovo chunk diventa quello attivo: le foto aggiunte e gli strumenti lavorano "
+                                  "su di lui.")
+        if not v:
+            return
+        label = (v.get("label") or "").strip() or default
+        self._activate_chunk(self.doc.add_chunk(label))
+        self._dirty(True)
+        self.log_pane.info(tr("Chunk «{0}» aggiunto: è il chunk attivo", label))
+
+    def _new_chunk_name(self) -> str:
+        labels = {c.label for c in self.doc.chunks}
+        n = len(self.doc.chunks) + 1
+        while f"Chunk {n}" in labels:
+            n += 1
+        return f"Chunk {n}"
 
     def _two_chunks(self) -> bool:
         if len(self.doc.chunks) < 2:
@@ -3013,7 +3066,11 @@ class MainWindow(QMainWindow):
         if self.runner.busy:
             self.statusBar().showMessage(tr("Aspetta che finisca l'elaborazione in corso"), 6000)
             return
-        text = self.history.undo() if self.history is not None else None
+        try:
+            text = self.history.undo() if self.history is not None else None
+        except Exception as exc:  # noqa: BLE001 - a removal that cannot come back (its place is taken)
+            self._exc(tr("Annulla non riuscito"), exc)
+            return
         if text:
             self.statusBar().showMessage(tr("Annullato: {0}", text), 6000)
 
@@ -3021,7 +3078,11 @@ class MainWindow(QMainWindow):
         if self.runner.busy:
             self.statusBar().showMessage(tr("Aspetta che finisca l'elaborazione in corso"), 6000)
             return
-        text = self.history.redo() if self.history is not None else None
+        try:
+            text = self.history.redo() if self.history is not None else None
+        except Exception as exc:  # noqa: BLE001
+            self._exc(tr("Ripeti non riuscito"), exc)
+            return
         if text:
             self.statusBar().showMessage(tr("Ripetuto: {0}", text), 6000)
 
@@ -5075,15 +5136,9 @@ class MainWindow(QMainWindow):
             shutil.copy2(frame, Path(folder) / f"{stem}_piano.json")
         self._info("Prospetto", tr("Ortofoto, rilievo e piano di «{0}» in {1}.", entry['name'], folder))
 
-    def delete_elevation(self, entry: dict) -> None:
-        from ..engine.elevation import remove_elevation
-
-        if choice(self, "question", "Elimina prospetto", tr("Eliminare «{0}» e i suoi file?", entry['name']),
-                  ["Elimina"]) != 0:
-            return
-        remove_elevation(self.chunk, entry["id"])
-        self.workspace.populate(self.doc)
-        self._dirty(True)
+    def delete_elevation(self, entry: dict, chunk=None) -> None:
+        """The elevation out of the project, as Rimuovi in the workspace (Modifica > Annulla brings it back)."""
+        self.remove_workspace_items([("elevation", chunk or self.chunk, entry)])
 
     # ---------------------------------------------------------------- masks
     def set_mask_mode(self, mode: str | None) -> None:
@@ -5296,15 +5351,19 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- views and workspace
     def _workspace_item(self, kind: str, chunk, payload) -> None:
+        """A double click (or Enter) in the Area di lavoro: a chunk becomes the active one; a photo, a
+        product, a version... opens, its chunk made the active one first."""
         if kind == "plugin":  # an item a plugin put in the tree (Context.add_tree_items)
             self._plugin_item_call(chunk, payload[0], payload[1].get("activate"))
             return
         if chunk is not None and chunk is not self.chunk and kind in ("select_chunk", "chunk"):
             self._activate_chunk(chunk)
             return
+        if chunk is not None and chunk is not self.chunk and any(chunk is c for c in self.doc.chunks):
+            self._activate_chunk(chunk)  # what is shown and what the tools use belong to the active chunk
         if kind == "camera":
             self.open_photo(payload)
-        elif kind == "product":
+        elif kind == "product" and payload != "depth_maps":
             if payload in ("slope", "aspect"):
                 self.show_terrain_raster(payload)
             elif payload in RELIEF_KINDS:
@@ -5334,6 +5393,13 @@ class MainWindow(QMainWindow):
                 self.open_photo(cams[0])
         elif kind == "crs":
             self.set_crs()
+        elif kind in ("scalebar", "scalebars"):
+            self._show_pane(self.left_tabs, self.reference)
+        elif kind == "product" and payload == "depth_maps":
+            info = self.chunk.meta.get("dense") or {}
+            self.statusBar().showMessage(
+                tr("Mappe di profondità: qualità {0}, filtro {1}. Servono alla nuvola densa, alla confidenza e alla "
+                   "mesh dalle mappe", info.get("quality", "?"), info.get("filter", "?")), 15000)
 
     def _plugin_item_call(self, chunk, plugin: str, callback) -> None:
         """A callback of an item a plugin put in the workspace, with the chunk of the item the active one."""
@@ -6042,13 +6108,21 @@ class MainWindow(QMainWindow):
         units exposed in that phase of the excavation), those of the new one come back."""
         if chunk is self.chunk:
             return
-        self._store_drawings()
+        self._switch_chunk(chunk)
+        if self.history is not None:
+            self.history.reset(keep_document=True)  # the history belongs to a chunk; the removals stay
+
+    def _switch_chunk(self, chunk, store: bool = True) -> None:
+        """``chunk`` the active one and the window on it; ``store``: the drawings of the chunk left go
+        into it first (not when it has just gone out of the project: they went with it)."""
+        if store:
+            self._store_drawings()
         self._sam_cancel()
         self.doc.chunk = chunk
         self._reload_drawings(redraw=False)
+        self.proxies_pane.set_proxies(chunk.meta.get("proxies", []) if chunk is not None else [])
         self.refresh_all(reset_views=True)
-        if self.history is not None:
-            self.history.reset()  # the history belongs to a chunk
+        self._clear_stale_photo()
 
     def _reload_drawings(self, redraw: bool = True) -> None:
         """The drawings of the active chunk read again from the project; the units loaded from
@@ -8083,9 +8157,158 @@ class MainWindow(QMainWindow):
 
         return wrapped
 
+    # ---------------------------------------------------------------- the Area di lavoro, as Metashape's Workspace
+    def _build_workspace_toolbar(self) -> None:
+        """The bar above the Area di lavoro, as Metashape's Workspace pane has: add a chunk, photos or a
+        folder of photos to the active chunk; make the chunk selected the active one, enable or disable
+        chunks and photos, rename; remove what is selected. Icons only (the tooltips name them): it fits
+        a narrow pane, and the >> of the bar holds the buttons that do not."""
+        from PySide6.QtWidgets import QToolBar
+
+        bar = QToolBar(tr("Area di lavoro"))
+        bar.setObjectName("paneToolbar")
+        bar.setIconSize(QSize(18, 18))
+        bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        bar.setMovable(False)
+
+        def add(name: str, text: str, tip: str, slot) -> QAction:
+            a = QAction(icon(name), text, self)
+            a.setToolTip(tip)
+            a.setStatusTip(tip)
+            a.triggered.connect(lambda _=False: slot())
+            bar.addAction(a)
+            return a
+
+        self.a_ws_add_chunk = add("add_chunk", tr("Aggiungi chunk"),
+                                  tr("Aggiungi chunk: un chunk vuoto, che diventa quello attivo"), self.add_chunk)
+        self.a_ws_add_photos = add("add_photos", tr("Aggiungi foto..."), tr("Aggiungi foto al chunk attivo"),
+                                   self.add_photos)
+        self.a_ws_add_folder = add("add_folder", tr("Aggiungi cartella..."),
+                                   tr("Aggiungi una cartella di foto al chunk attivo"), lambda: self.add_photos(folder=True))
+        bar.addSeparator()
+        self.a_ws_activate = add("activate", tr("Rendi attivo"),
+                                 tr("Rendi attivo il chunk selezionato: gli strumenti lavorano su di lui (anche con un "
+                                    "doppio clic)"), self._workspace_activate)
+        self.a_ws_enable = add("enable", tr("Attiva"), tr("Attiva i chunk o le foto selezionati"),
+                               lambda: self._workspace_enable(True))
+        self.a_ws_disable = add("disable", tr("Disattiva"),
+                                tr("Disattiva i chunk o le foto selezionati: restano nel progetto, fuori dalle "
+                                   "elaborazioni"), lambda: self._workspace_enable(False))
+        self.a_ws_rename = add("rename", tr("Rinomina..."), tr("Rinomina il chunk o la versione selezionati (F2)"),
+                               self._workspace_rename_selected)
+        bar.addSeparator()
+        self.a_ws_remove = add("remove", tr("Rimuovi"),
+                               tr("Rimuovi gli elementi selezionati (Canc): Modifica > Annulla li rimette finché il "
+                                  "progetto è aperto"), lambda: self.remove_workspace_items())
+        self.workspace_toolbar = bar
+        self.panes.dock(self.workspace).set_toolbar(bar)
+        self.workspace.itemSelectionChanged.connect(self._update_workspace_actions)
+        self.workspace.populated.connect(self._update_workspace_actions)
+        self._update_workspace_actions()
+
+    def _selected_chunk(self, items=None):
+        """The chunk the selection is about: the chunk selected, or the chunk of all the items selected."""
+        items = self.workspace.selected_items() if items is None else items
+        chunks = []
+        for _kind, ch, _payload in items:
+            if ch is not None and not any(ch is c for c in chunks):
+                chunks.append(ch)
+        return chunks[0] if len(chunks) == 1 and any(chunks[0] is c for c in self.doc.chunks) else None
+
+    def _update_workspace_actions(self) -> None:
+        """The buttons of the bar of the Area di lavoro for what is selected."""
+        if not hasattr(self, "a_ws_remove"):
+            return
+        from .panels import REMOVABLE
+
+        busy = self.runner.busy
+        try:
+            items = self.workspace.selected_items()
+        except RuntimeError:  # pragma: no cover - the window is closing
+            return
+        chunks = [c for k, c, _p in items if k == "chunk"]
+        cams = [p for k, _c, p in items if k == "camera"]
+        target = self._selected_chunk(items)
+        self.a_ws_add_photos.setEnabled(not busy)
+        self.a_ws_add_folder.setEnabled(not busy)
+        self.a_ws_activate.setEnabled(target is not None and target is not self.chunk)
+        self.a_ws_enable.setEnabled(any(not c.enabled for c in chunks + cams))
+        self.a_ws_disable.setEnabled(any(c.enabled for c in chunks + cams))
+        self.a_ws_rename.setEnabled(len(items) == 1 and self.workspace._renameable(items[0]))
+        self.a_ws_remove.setEnabled(not busy and any(k in REMOVABLE for k, _c, _p in items))
+
+    def _workspace_activate(self) -> None:
+        chunk = self._selected_chunk()
+        if chunk is not None:
+            self._activate_chunk(chunk)
+
+    def _workspace_enable(self, enabled: bool, items=None) -> None:
+        """Attiva / Disattiva: the chunks and the photos selected (or ``items``)."""
+        items = self.workspace.selected_items() if items is None else items
+        chunks = [c for k, c, _p in items if k == "chunk"]
+        cams = [p for k, _c, p in items if k == "camera"]
+        if chunks:
+            self.set_chunks_enabled(chunks, enabled)
+        if cams:
+            self.enable_photos(cams, enabled)
+            self.workspace.populate(self.doc)
+
+    def set_chunks_enabled(self, chunks, enabled: bool) -> None:
+        """Chunks enabled or disabled, as in Metashape: a disabled chunk stays in the project, out of the batch
+        steps on the enabled chunks and of the chunks proposed by Allinea chunk and Unisci chunk."""
+        for c in chunks:
+            c.enabled = bool(enabled)
+        self._dirty(True)
+        self.workspace.populate(self.doc)
+        names = ", ".join(f"«{c.label}»" for c in chunks)
+        self.statusBar().showMessage(
+            tr("Chunk attivati: {0}", names) if enabled else
+            tr("Chunk disattivati: {0}. Restano nel progetto, fuori dal batch sui chunk attivati e dalle scelte di "
+               "Allinea chunk e Unisci chunk", names), 10000)
+
+    def rename_chunk(self, chunk=None) -> None:
+        """Rinomina... (F2): the name of a chunk."""
+        chunk = chunk or self.chunk
+        if chunk is None:
+            return
+        v = ParamDialog.ask(self, "Rinomina chunk", [Field("label", "Nome", chunk.label, kind="text")])
+        label = (v or {}).get("label", "").strip()
+        if not label or label == chunk.label:
+            return
+        old, chunk.label = chunk.label, label
+        self._dirty(True)
+        self.workspace.populate(self.doc)
+        self.log_pane.info(tr("Chunk «{0}» rinominato «{1}»", old, label))
+
+    def _workspace_rename(self, kind: str, chunk, payload) -> None:
+        """F2 on an item: a chunk, a kept version, the active version of a product."""
+        from ..core import versions
+
+        if kind == "chunk":
+            self.rename_chunk(chunk)
+        elif kind == "version":
+            self.rename_version(*payload, chunk=chunk)
+        elif kind == "product" and payload in versions.PRODUCTS:
+            self.rename_version(payload, None, chunk=chunk)
+
+    def _workspace_rename_selected(self) -> None:
+        items = self.workspace.selected_items()
+        if len(items) == 1:
+            self._workspace_rename(*items[0])
+
+    @staticmethod
+    def _same_item(a, b) -> bool:
+        if a[0] != b[0] or a[1] is not b[1]:
+            return False
+        pa, pb = a[2], b[2]
+        return pa is pb or (isinstance(pa, (str, int, tuple)) and pa == pb)
+
     def _workspace_menu(self, kind: str, chunk, payload, pos) -> None:
-        """Right click in the workspace: the versions of the dense cloud, model, DEM, orthomosaic; the
-        actions of an item a plugin put there."""
+        """Right click in the Area di lavoro, as in Metashape: on a chunk *Rendi attivo*, *Rinomina...*,
+        *Attiva*/*Disattiva*, *Rimuovi chunk*; on the products their versions and *Rimuovi*; on photos,
+        markers and scale bars what fits them and *Rimuovi*; on several items selected what they share.
+        Removing, renaming, enabling act on the chunk of the item, whichever is active; showing and the
+        versions make its chunk the active one first. An item a plugin put there: the plugin's actions."""
         from ..core import versions
 
         if kind == "plugin":
@@ -8098,36 +8321,420 @@ class MainWindow(QMainWindow):
                     action.triggered.connect(lambda _=False, c=callback: self._plugin_item_call(chunk, plugin, c))
                 menu.exec(pos)
             return
-        if chunk is self.chunk and kind == "elevation":
-            menu = QMenu(self)
-            menu.addAction(icon("view"), tr("Mostra"), lambda: self.show_elevation(payload))
-            menu.addAction(icon("export"), tr("Esporta..."), lambda: self.export_elevation(payload))
+        clicked = (kind, chunk, payload)
+        selected = self.workspace.selected_items()
+        if len(selected) > 1 and any(self._same_item(clicked, s) for s in selected):
+            self._selection_menu(selected, pos)
+            return
+        here = chunk is None or chunk is self.chunk
+
+        def on(fn):
+            """``fn`` with the chunk of the item the active one."""
+            def run():
+                if not here and any(chunk is c for c in self.doc.chunks):
+                    self._activate_chunk(chunk)
+                fn()
+            return run
+
+        def remove(text: str):
             menu.addSeparator()
-            menu.addAction(icon("delete"), tr("Elimina"), lambda: self.delete_elevation(payload))
-            menu.exec(pos)
-            return
-        if chunk is not self.chunk or kind not in ("product", "version"):
-            return
-        product, vid = (payload, None) if kind == "product" else payload
-        if product not in versions.PRODUCTS:
-            return
+            menu.addAction(icon("remove"), text, lambda: self.remove_workspace_items([clicked]))
+
         menu = QMenu(self)
-        if vid is None:
-            menu.addAction(icon("view"), tr("Mostra"), lambda: self._workspace_item("product", chunk, product))
-            menu.addAction(icon("recent"), tr("Conserva una copia come versione"),
-                           lambda: self.keep_version_copy(product))
-            menu.addAction(icon("edit"), tr("Rinomina questa versione..."), lambda: self.rename_version(product, None))
-        else:
-            menu.addAction(icon("view"), tr("Mostra"), lambda: self.show_version(product, vid))
+        if kind == "document":
+            menu.addAction(icon("add_chunk"), tr("Aggiungi chunk"), self.add_chunk)
+        elif kind == "chunk":
+            a = menu.addAction(icon("activate"), tr("Rendi attivo"), lambda: self._activate_chunk(chunk))
+            a.setEnabled(chunk is not self.chunk)
+            menu.addAction(icon("rename"), tr("Rinomina..."), lambda: self.rename_chunk(chunk))
+            if chunk.enabled:
+                menu.addAction(icon("disable"), tr("Disattiva"), lambda: self.set_chunks_enabled([chunk], False))
+            else:
+                menu.addAction(icon("enable"), tr("Attiva"), lambda: self.set_chunks_enabled([chunk], True))
+            remove(tr("Rimuovi chunk"))
+        elif kind == "crs":
+            menu.addAction(icon("crs"), tr("Cambia il sistema di riferimento..."), on(self.set_crs))
+        elif kind in ("cameras", "markers", "scalebars"):
+            n = len(getattr(chunk, kind))
+            if kind == "markers" and n:
+                menu.addAction(icon("reference_pane"), tr("Mostra in Riferimenti"),
+                               on(lambda: self._show_pane(self.left_tabs, self.reference)))
+            if n:
+                remove({"cameras": tr("Rimuovi tutte le foto ({0})", n), "markers": tr("Rimuovi tutti i marker ({0})", n),
+                        "scalebars": tr("Rimuovi tutte le barre di scala ({0})", n)}[kind])
+        elif kind == "camera":
+            menu.addAction(icon("photos"), tr("Apri"), on(lambda: self.open_photo(payload)))
+            if payload.enabled:
+                menu.addAction(icon("disable"), tr("Disattiva"), lambda: self._workspace_enable(False, [clicked]))
+            else:
+                menu.addAction(icon("enable"), tr("Attiva"), lambda: self._workspace_enable(True, [clicked]))
+            remove(tr("Rimuovi la foto"))
+        elif kind == "marker":
+            menu.addAction(icon("filter"), tr("Filtra le foto di {0}", payload.label),
+                           on(lambda: self.filter_photos_by_markers([payload.key])))
+            remove(tr("Rimuovi il marker"))
+        elif kind == "scalebar":
+            menu.addAction(icon("reference_pane"), tr("Mostra in Riferimenti"),
+                           on(lambda: self._show_pane(self.left_tabs, self.reference)))
+            remove(tr("Rimuovi la barra di scala"))
+        elif kind in ("multispectral", "thermal"):
+            pane = self.ms_pane if kind == "multispectral" else self.thermal_pane
+            menu.addAction(icon(kind), tr("Apri il pannello"), on(lambda: self._show_pane(self.left_tabs, pane)))
+        elif kind == "product":
+            present = self._removable(chunk, kind, payload)  # a product with kept versions only: nothing active
+            if payload != "depth_maps" and present:
+                menu.addAction(icon("view"), tr("Mostra"), on(lambda: self._workspace_item("product", chunk, payload)))
+            if payload in versions.PRODUCTS and present:
+                menu.addAction(icon("recent"), tr("Conserva una copia come versione"),
+                               on(lambda: self.keep_version_copy(payload)))
+                menu.addAction(icon("edit"), tr("Rinomina questa versione..."),
+                               lambda: self.rename_version(payload, None, chunk=chunk))
+            if present:
+                remove({"tie_points": tr("Rimuovi (con l'allineamento)"), "model": tr("Rimuovi (con la texture)"),
+                        "model_textured": tr("Rimuovi la texture")}.get(payload, tr("Rimuovi")))
+        elif kind == "version":
+            product, vid = payload
+            menu.addAction(icon("view"), tr("Mostra"), on(lambda: self.show_version(product, vid)))
             menu.addAction(icon("ok"), tr("Rendi attiva (la usano gli altri strumenti)"),
-                           lambda: self.activate_version(product, vid))
+                           on(lambda: self.activate_version(product, vid)))
             if product == "dem" and chunk.dem_path:
-                menu.addAction(icon("dem"), tr("Differenza con il DEM attivo"), lambda: self.dem_difference(vid))
-            menu.addAction(icon("export"), tr("Esporta..."), lambda: self.export_version(product, vid))
-            menu.addAction(icon("edit"), tr("Rinomina..."), lambda: self.rename_version(product, vid))
-            menu.addSeparator()
-            menu.addAction(icon("delete"), tr("Elimina"), lambda: self.delete_version(product, vid))
-        menu.exec(pos)
+                menu.addAction(icon("dem"), tr("Differenza con il DEM attivo"), on(lambda: self.dem_difference(vid)))
+            menu.addAction(icon("export"), tr("Esporta..."), on(lambda: self.export_version(product, vid)))
+            menu.addAction(icon("edit"), tr("Rinomina..."), lambda: self.rename_version(product, vid, chunk=chunk))
+            remove(tr("Rimuovi"))
+        elif kind == "elevation":
+            menu.addAction(icon("view"), tr("Mostra"), on(lambda: self.show_elevation(payload)))
+            menu.addAction(icon("export"), tr("Esporta..."), on(lambda: self.export_elevation(payload)))
+            remove(tr("Rimuovi"))
+        if menu.actions():
+            menu.exec(pos)
+
+    def _selection_menu(self, items, pos) -> None:
+        """Right click on several items selected: enable or disable the chunks and photos among them,
+        remove them all."""
+        from .panels import REMOVABLE
+
+        menu = QMenu(self)
+        toggles = [it for it in items if it[0] in ("chunk", "camera")]
+        if toggles:
+            menu.addAction(icon("enable"), tr("Attiva"), lambda: self._workspace_enable(True, items))
+            menu.addAction(icon("disable"), tr("Disattiva"), lambda: self._workspace_enable(False, items))
+        removable = [it for it in items if it[0] in REMOVABLE]
+        if removable:
+            if menu.actions():
+                menu.addSeparator()
+            menu.addAction(icon("remove"), tr("Rimuovi {0} elementi", len(removable)),
+                           lambda: self.remove_workspace_items(removable))
+        if menu.actions():
+            menu.exec(pos)
+
+    # ---------------------------------------------------------------- removing what the workspace lists
+    def _removal_plan(self, items) -> dict:
+        """What ``items`` of the workspace remove: whole chunks (the items inside them go with them) and,
+        chunk by chunk, its products, kept versions, elevations, photos, markers and scale bars."""
+        doc = self.doc
+
+        def has(seq, obj) -> bool:
+            return any(obj is x or (isinstance(obj, (str, tuple)) and obj == x) for x in seq)
+
+        chunks = [c for c in doc.chunks if any(k == "chunk" and ch is c for k, ch, _p in items)]
+        per: list = []
+        for kind, ch, payload in items:
+            if ch is None or has(chunks, ch) or not has(doc.chunks, ch):
+                continue
+            entry = next((e for c, e in per if c is ch), None)
+            if entry is None:
+                entry = {k: [] for k in ("products", "versions", "elevations", "cameras", "markers", "scalebars")}
+                per.append((ch, entry))
+            if kind in ("product", "version", "elevation") and not self._removable(ch, kind, payload):
+                continue  # e.g. a product listed for its kept versions only: nothing active to remove
+            if kind == "product":
+                group, values = "products", [payload]
+            elif kind == "version":
+                group, values = "versions", [tuple(payload)]
+            elif kind == "elevation":
+                group, values = "elevations", [payload]
+            elif kind in ("camera", "marker", "scalebar"):
+                group, values = kind + "s", [payload]
+            elif kind in ("cameras", "markers", "scalebars"):
+                group, values = kind, list(getattr(ch, kind))
+            else:
+                continue
+            for v in values:
+                if not has(entry[group], v):
+                    entry[group].append(v)
+        return {"chunks": chunks, "items": [(c, e) for c, e in per if any(e.values())]}
+
+    @staticmethod
+    def _removable(chunk, kind: str, payload) -> bool:
+        """Whether a product, a version or an elevation of ``chunk`` is there to be removed."""
+        from ..core import removal
+
+        if kind == "product" and not isinstance(payload, str):
+            return False
+        try:
+            return removal.make_part(chunk, kind, payload).capture(chunk) is not None
+        except (ValueError, TypeError):
+            return False
+
+    @staticmethod
+    def _removal_items(entry: dict) -> list:
+        """The items of :class:`core.removal.ItemsRemoval`: the products first, then the versions and the
+        elevations, the photos, the markers, the scale bars (put back in the reverse order)."""
+        out = [("product", k) for k in entry["products"]]
+        out += [("version", v) for v in entry["versions"]] + [("elevation", e) for e in entry["elevations"]]
+        for group in ("cameras", "markers", "scalebars"):
+            if entry[group]:
+                out.append((group, list(entry[group])))
+        return out
+
+    def _removal_text(self, plan: dict) -> tuple[str, str]:
+        """The question before a removal - what goes, what happens to the files - and the name of the step
+        in Modifica > Annulla."""
+        from ..core import versions
+        from .panels import product_name
+
+        lines, notes, names = [], [], []
+        for ch in plan["chunks"]:
+            lines.append(tr("• il chunk «{0}» ({1} foto) con i suoi prodotti", ch.label, len(ch.cameras)))
+            names.append(tr("il chunk «{0}»", ch.label))
+        if plan["chunks"]:
+            notes.append(tr("I file delle foto non vengono toccati."))
+            if any(c is self.chunk for c in plan["chunks"]):
+                after = self._next_active(plan["chunks"])
+                notes.append(tr("«{0}» è il chunk attivo: diventa attivo «{1}».", self.chunk.label, after.label) if after
+                             else tr("Non resta nessun chunk: il progetto ne riceve uno vuoto, come un progetto nuovo."))
+        for ch, e in plan["items"]:
+            what = [product_name(k) for k in e["products"]]
+            for product, vid in e["versions"]:
+                entry = next((v for v in versions.versions(ch, product) if v["id"] == vid), {})
+                what.append(tr("la versione «{0}»", entry.get("name", vid)))
+            what += [tr("il prospetto «{0}»", el.get("name", "")) for el in e["elevations"]]
+            cams, marks, bars = e["cameras"], e["markers"], e["scalebars"]
+            if cams:
+                what.append(tr("la foto «{0}»", cams[0].label) if len(cams) == 1 else tr("{0} foto", len(cams)))
+            if marks:
+                what.append(tr("il marker «{0}»", marks[0].label) if len(marks) == 1 else tr("{0} marker", len(marks)))
+            if bars:
+                what.append(tr("la barra di scala «{0}»", bars[0].label) if len(bars) == 1
+                            else tr("{0} barre di scala", len(bars)))
+            lines.append(tr("• di «{0}»: {1}", ch.label, ", ".join(what)))
+            names += what
+            products = e["products"]
+            if "tie_points" in products:
+                notes.append(tr("Con i punti di legame va via l'allineamento: le foto di «{0}» tornano non allineate; "
+                                "nuvola densa, modello, DEM e ortofoto restano.", ch.label))
+            if "model" in products and ch.product_path("model_textured") is not None:
+                notes.append(tr("Con il modello va via la sua texture."))
+            kept = [product_name(k) for k in products if k in versions.PRODUCTS and versions.versions(ch, k)]
+            if kept:
+                notes.append(tr("Le versioni conservate di {0} restano (tasto destro su una versione per rimuoverla).",
+                                ", ".join(kept)))
+            outside = []
+            for k in products:
+                path = ch.product_path(k) if k in ch.products else None
+                if path is not None and not os.path.abspath(path).startswith(os.path.abspath(ch.data_dir) + os.sep):
+                    outside.append(path.name)
+            if outside:
+                notes.append(tr("{0}: file di un altro programma, esce dal progetto ma resta dov'è.", ", ".join(outside)))
+            if e["cameras"]:
+                notes.append(tr("I file delle foto restano dove sono; i prodotti già costruiti restano, il prossimo "
+                                "allineamento non usa le foto rimosse."))
+            if e["markers"] and any(sb.marker_a in {m.key for m in e["markers"]} or sb.marker_b in {m.key for m in e["markers"]}
+                                    for sb in ch.scalebars):
+                notes.append(tr("Le barre di scala che finiscono sui marker rimossi vanno con loro."))
+        files = tr("I file restano nella cartella del progetto finché è aperto: Modifica > Annulla rimette tutto "
+                   "com'era. Quando lo chiudi vengono cancellati, se il progetto è salvato senza di loro.")
+        question = "\n\n".join([tr("Rimuovere dal progetto:") + "\n" + "\n".join(lines)] + (["\n".join(notes)] if notes
+                                                                                             else []) + [files])
+        step = (tr("Rimuovi {0}", names[0]) if len(names) == 1 else
+                tr("Rimuovi {0} chunk", len(plan["chunks"])) if names and len(names) == len(plan["chunks"]) else
+                tr("Rimuovi {0} elementi", len(names)))
+        return question, step
+
+    @contextlib.contextmanager
+    def _history_paused(self):
+        """What the window does here is part of a step pushed to the history: no entry of its own."""
+        h = self.history
+        was = h.applying if h is not None else False
+        if h is not None:
+            h.applying = True
+        try:
+            yield
+        finally:
+            if h is not None:
+                h.applying = was
+
+    def remove_workspace_items(self, items=None, confirm: bool = True) -> bool:
+        """*Rimuovi* (the bar and the right click of the Area di lavoro, Delete or Backspace): the items
+        selected - or ``items``, ``(kind, chunk, payload)`` as the tree gives them - out of the project,
+        after a question that says what goes and what happens to the files. Modifica > Annulla brings
+        everything back while the project is open (:mod:`core.removal`); the files outside the chunk's own
+        folder are never touched. Returns whether something was removed."""
+        from ..core import removal
+
+        items = self.workspace.selected_items() if items is None else list(items)
+        if self.runner.busy:
+            self.statusBar().showMessage(tr("Aspetta che finisca l'elaborazione in corso"), 6000)
+            return False
+        plan = self._removal_plan(items)
+        if not plan["chunks"] and not plan["items"]:
+            self.statusBar().showMessage(tr("Niente da rimuovere: scegli chunk, prodotti, versioni, foto, marker o "
+                                            "barre di scala"), 8000)
+            return False
+        question, label = self._removal_text(plan)
+        if confirm and choice(self, "question", "Rimuovi", question, ["Rimuovi"]) != 0:
+            return False
+        doc, active = self.doc, self.chunk
+        leaving = any(c is active for c in plan["chunks"])
+        after = self._next_active(plan["chunks"]) if leaving else None
+        touched = leaving or any(c is active for c, _e in plan["items"])
+        kind = self.model_view.kind
+        self._store_drawings()  # the drawings of the active chunk stay with it, removed or not
+        if leaving and self.history is not None:
+            self.history.reset(keep_document=True)  # its edits are its own: they go with it
+        if touched:
+            self._release_views()
+        done = []
+        try:
+            for ch, entry in plan["items"]:
+                r = removal.ItemsRemoval(ch, self._removal_items(entry))
+                r.apply()
+                done.append(r)
+            if plan["chunks"]:
+                r = removal.ChunkRemoval(doc, plan["chunks"])
+                r.apply()
+                done.append(r)
+        except Exception as exc:  # noqa: BLE001 - what was moved goes back, the project as it was
+            for r in reversed(done):
+                try:
+                    r.undo()
+                except Exception as again:  # noqa: BLE001
+                    log.error("Rimozione: %s non rimesso (%s)", r.id, again)
+            self.refresh_all(reset_views=True)
+            self._exc(tr("Rimozione non riuscita"), exc)
+            return False
+        step = _Removed(self, done, active if leaving else None)
+        with self._history_paused():
+            if leaving:
+                step.after = after
+                if step.after is None:
+                    step.created = step.after = doc.add_chunk("Chunk 1")  # a project has always a chunk
+                self._switch_chunk(step.after, store=False)
+            else:
+                self._refresh_after_removal(touched, kind, self._marks_of(done))
+        if self.history is not None:
+            self.history.push(label, step)
+        self._dirty(True)
+        self.log_pane.info(tr("{0}: Modifica > Annulla lo rimette", label))
+        return True
+
+    def _next_active(self, removed):
+        """The chunk that becomes active when the active one is among ``removed``: the next one in the
+        project, else the one before it; None when no chunk is left."""
+        order = list(self.doc.chunks)
+        left = [c for c in order if not any(c is x for x in removed)]
+        active = self.chunk
+        after = [c for c in order[order.index(active) + 1:] if any(c is x for x in left)] if active in order else []
+        return after[0] if after else (left[-1] if left else None)
+
+    @staticmethod
+    def _marks_of(removals) -> bool:
+        """Whether photos, markers or scale bars went: the markers are triangulated again."""
+        return any(k in ("cameras", "markers", "scalebars") for r in removals for k, _p in getattr(r, "items", []))
+
+    def _release_views(self) -> None:
+        """Before files of the active chunk move: nothing of the window holds them open (Windows does not
+        move a file in use, nor one mapped in memory as the 3D view maps the model)."""
+        self._probe_reset()
+        self.model_view.set_chunk(None)
+        self.ortho_view.clear_raster("")
+        self._raster_version = None
+
+    def _clear_stale_photo(self) -> None:
+        """The photo view empty when its photo, or the chunk of it, is no longer in the active chunk."""
+        cam = self.photo_view.camera
+        if cam is not None and not any(cam is c for c in (self.chunk.cameras if self.chunk is not None else [])):
+            self.photo_view.clear_photo()
+
+    def _refresh_after_removal(self, touched: bool, kind=None, markers: bool = False) -> None:
+        """The window after something of a chunk went or came back: the views when it is the active chunk,
+        else the tree."""
+        if touched:
+            self.refresh_all()
+            if kind and self.model_view.kind != kind and kind in [self.model_view.combo.itemData(i)
+                                                                  for i in range(self.model_view.combo.count())]:
+                self.model_view.show_kind(kind)
+            if markers:
+                self._markers_edited()
+            self._clear_stale_photo()
+        else:
+            self.workspace.populate(self.doc)
+            self._update_title()
+
+    def _undo_removed(self, step) -> None:
+        """Modifica > Annulla of a removal: everything back in its place; the chunk that was active, active
+        again; the empty chunk made when none was left away again (unless it was filled meanwhile)."""
+        doc = self.doc
+        current = self.chunk
+        switching = step.active is not None
+        chunks = [getattr(r, "chunk", None) for r in step.removals]
+        touched = switching or any(current is c for c in chunks)
+        kind = self.model_view.kind
+        if switching:
+            self._store_drawings()
+            step.after = current
+        if touched:
+            self._release_views()
+        for r in reversed(step.removals):
+            r.undo()
+        created = step.created
+        if created is not None and any(created is c for c in doc.chunks) and self._empty_chunk(created):
+            doc.chunks[:] = [c for c in doc.chunks if c is not created]
+            shutil.rmtree(doc.files_dir / f"chunk_{created.key}", ignore_errors=True)
+            step.created = None
+        if switching:
+            self._switch_chunk(step.active, store=False)
+        else:
+            self._refresh_after_removal(touched, kind, self._marks_of(step.removals))
+
+    def _redo_removed(self, step) -> None:
+        """Modifica > Ripeti of a removal: everything away again; when the active chunk goes, the one that
+        took its place before (or a new empty one) becomes active."""
+        doc = self.doc
+        current = self.chunk
+        gone = [c for r in step.removals for c in getattr(r, "chunks", [])]
+        leaving = any(current is c for c in gone)
+        touched = leaving or any(current is getattr(r, "chunk", None) for r in step.removals)
+        kind = self.model_view.kind
+        self._store_drawings()
+        if touched:
+            self._release_views()
+        for r in step.removals:
+            r.redo()
+        if leaving:
+            target = step.after if step.after is not None and any(step.after is c for c in doc.chunks) else \
+                (doc.chunks[0] if doc.chunks else None)
+            if target is None:
+                step.created = target = doc.add_chunk("Chunk 1")
+            step.after = target
+            self._switch_chunk(target, store=False)
+        else:
+            self._refresh_after_removal(touched, kind, self._marks_of(step.removals))
+
+    @staticmethod
+    def _empty_chunk(chunk) -> bool:
+        return not (chunk.cameras or chunk.markers or chunk.scalebars or chunk.products)
+
+    def _settle_removals(self, doc) -> None:
+        """The session of ``doc`` ends: the files of what was removed in it deleted, or put back where the
+        project as saved still has them (``Document.settle_removals``)."""
+        if not getattr(doc, "removals", None):
+            return
+        try:
+            doc.settle_removals()
+        except Exception as exc:  # noqa: BLE001 - closing never stops here
+            log.warning("File degli elementi rimossi non sistemati: %s", exc)
 
     def _version_title(self, product: str, vid: str) -> str:
         from ..core import versions
@@ -8175,31 +8782,29 @@ class MainWindow(QMainWindow):
 
         self.run_task("Cambio di versione", lambda p: versions.activate(chunk, product, vid), done)
 
-    def rename_version(self, product: str, vid: str | None) -> None:
+    def rename_version(self, product: str, vid: str | None, chunk=None) -> None:
+        """Rinomina: a kept version (``vid``) or the active one (``vid`` None) of ``chunk`` (the active one)."""
         from ..core import versions
 
-        old = versions.active_info(self.chunk, product)["name"] if vid is None else self._version_title(product, vid)
+        chunk = chunk or self.chunk
+        old = (versions.active_info(chunk, product)["name"] if vid is None else
+               next(e["name"] for e in versions.versions(chunk, product) if e["id"] == vid))
         name, ok = QInputDialog.getText(self, tr("Rinomina versione"), tr("Nome:"), text=old)
         if ok and name.strip():
-            versions.rename(self.chunk, product, vid, name.strip())
+            versions.rename(chunk, product, vid, name.strip())
             self._dirty(True)
             self.workspace.populate(self.doc)
 
     def delete_version(self, product: str, vid: str) -> None:
-        from ..core import versions
-
+        """A kept version out of the project, as Rimuovi in the workspace: Modifica > Annulla brings it back
+        while the project is open."""
         title = self._version_title(product, vid)
-        r = message(self, "question", "Elimina versione", tr("Eliminare la versione «{0}» e i suoi file?", title),
+        r = message(self, "question", "Rimuovi versione",
+                    tr("Rimuovere la versione «{0}»? Modifica > Annulla la rimette finché il progetto è aperto.", title),
                     buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if r != QMessageBox.StandardButton.Yes:
             return
-        if getattr(self, "_raster_version", None) == (product, vid) or self.model_view.paths:
-            self.model_view.set_chunk(self.chunk, self.model_view.kind)
-            self._load_raster()
-        versions.delete(self.chunk, product, vid)
-        self._dirty(True)
-        self.workspace.populate(self.doc)
-        self.log_pane.info(tr("Versione «{0}» eliminata", title))
+        self.remove_workspace_items([("version", self.chunk, (product, vid))], confirm=False)
 
     def export_version(self, product: str, vid: str) -> None:
         import shutil

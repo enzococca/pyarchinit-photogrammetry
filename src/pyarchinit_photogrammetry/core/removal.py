@@ -497,32 +497,53 @@ class Removal:
         (self.folder / MANIFEST).write_text(json.dumps(self._manifest(), indent=1), encoding="utf-8")
 
     def _stash_files(self, side: str, rels: list[str]) -> None:
-        """The files at ``rels`` (inside the files folder) moved to the trash, side ``side``."""
+        """The files at ``rels`` (inside the files folder) moved to the trash, side ``side``; when one
+        cannot be moved, those moved go back and the error goes on."""
         root = self.document.files_dir
         self.files[side] = list(rels)
         self._write_manifest()  # first: a crash while moving leaves the list behind
-        for rel in rels:
-            src = root / rel
-            if src.exists() or src.is_symlink():
-                dst = self.folder / side / rel
-                if dst.exists() or dst.is_symlink():
-                    _delete(dst)
-                _move(src, dst)
+        moved = []
+        try:
+            for rel in rels:
+                src = root / rel
+                if src.exists() or src.is_symlink():
+                    dst = self.folder / side / rel
+                    if dst.exists() or dst.is_symlink():
+                        _delete(dst)
+                    _move(src, dst)
+                    moved.append((src, dst))
+        except Exception:
+            for src, dst in reversed(moved):
+                try:
+                    _move(dst, src)
+                except OSError as exc:  # pragma: no cover - the disk refused twice
+                    log.error("%s left in %s (%s)", src, dst, exc)
+            raise
 
     def _unstash_files(self, side: str, occupant_side: str) -> None:
         """The files of ``side`` back in their place; whatever is there (nothing, as a rule) goes to the
-        trash with ``occupant_side``."""
+        trash with ``occupant_side``. When one cannot be moved, those moved go back and the error goes on."""
         root = self.document.files_dir
-        for rel in self.files[side]:
-            src = self.folder / side / rel
-            if not (src.exists() or src.is_symlink()):
-                continue
-            place = root / rel
-            if not _free(place):
-                _move(place, self.folder / occupant_side / rel)
-                if rel not in self.files[occupant_side]:
-                    self.files[occupant_side].append(rel)
-            _move(src, place)
+        moved = []
+        try:
+            for rel in self.files[side]:
+                src = self.folder / side / rel
+                if not (src.exists() or src.is_symlink()):
+                    continue
+                place = root / rel
+                if not _free(place):
+                    _move(place, self.folder / occupant_side / rel)
+                    if rel not in self.files[occupant_side]:
+                        self.files[occupant_side].append(rel)
+                _move(src, place)
+                moved.append((src, place))
+        except Exception:
+            for src, place in reversed(moved):
+                try:
+                    _move(place, src)
+                except OSError as exc:  # pragma: no cover
+                    log.error("%s left in %s (%s)", src, place, exc)
+            raise
 
     def mark_saved(self) -> None:
         self.saved = self.state
@@ -583,8 +604,12 @@ class ChunkRemoval(Removal):
         self.was_active = next((c for c in self.chunks if c is active), None)
         root = doc.files_dir
         rels = [f"chunk_{c.key}" for c in self.chunks if (root / f"chunk_{c.key}").exists()]
-        self.state = REMOVED
-        self._stash_files(PRESENT, rels)
+        before, self.state = self.state, REMOVED
+        try:
+            self._stash_files(PRESENT, rels)
+        except Exception:
+            self.state = before
+            raise
         doc.chunks[:] = [c for c in doc.chunks if not any(c is x for x in self.chunks)]
         if doc.meta.get("active_chunk") in {c.key for c in self.chunks}:
             doc.meta.pop("active_chunk", None)
@@ -596,8 +621,8 @@ class ChunkRemoval(Removal):
             place = root / rel
             if not _free(place) and (self.folder / PRESENT / rel).exists():
                 raise RemovalConflict(f"{place} is in the way of the chunk that comes back")
-        self.state = RESTORED
         self._unstash_files(PRESENT, ABSENT)
+        self.state = RESTORED
         self._write_manifest()
         for c in sorted(self.chunks, key=lambda c: self.places.get(c.key, len(doc.chunks))):
             if not any(c is x for x in doc.chunks):
@@ -649,25 +674,32 @@ class ItemsRemoval(Removal):
         if not any(p.capture(self.chunk) is not None for p in self.parts):
             raise ValueError("nothing to remove")
         self.state = REMOVED
-        self._stash(PRESENT)
+        try:
+            self._stash(PRESENT)
+        except Exception:
+            self.state = None
+            raise
+
+    def _swap(self, out: str, back: str, state: str) -> None:
+        """What is in place now goes to the trash with ``out``, the side ``back`` comes back; when it
+        cannot, what went out comes back and the error goes on."""
+        for p, st in zip(self.parts, self.states[back]):  # nothing moves when something cannot come back
+            if st is not None:
+                p.check(self.chunk, st)
+        self._stash(out)
+        try:
+            self._unstash(back, out)
+        except Exception:
+            self._unstash(out, back)
+            raise
+        self.state = state
+        self._write_manifest()
 
     def undo(self) -> None:
-        for p, st in zip(self.parts, self.states[PRESENT]):  # nothing moves when something cannot come back
-            if st is not None:
-                p.check(self.chunk, st)
-        self.state = RESTORED
-        self._stash(ABSENT)
-        self._unstash(PRESENT, ABSENT)
-        self._write_manifest()
+        self._swap(ABSENT, PRESENT, RESTORED)
 
     def redo(self) -> None:
-        for p, st in zip(self.parts, self.states[ABSENT]):
-            if st is not None:
-                p.check(self.chunk, st)
-        self.state = REMOVED
-        self._stash(PRESENT)
-        self._unstash(ABSENT, PRESENT)
-        self._write_manifest()
+        self._swap(PRESENT, ABSENT, REMOVED)
 
 
 # ------------------------------------------------------------------------------ after a crash
