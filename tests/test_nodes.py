@@ -1,11 +1,12 @@
 """Work shared with other computers through the project folder: a node (a thread here, another
-computer there) takes units of key points and of depth maps and the main program takes the rest;
-the results are the same as alone. Paths mapped between computers, stale units given back, units
-failed on a node done again here, a cancelled step taken back."""
+computer there) takes units of key points, depth maps, orthomosaic tiles and texture cells and the
+main program takes the rest; the results are the same as alone. Paths mapped between computers,
+stale units given back, units failed on a node done again here, a cancelled step taken back."""
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -16,6 +17,7 @@ import pytest
 
 import pyarchinit_photogrammetry as ppg
 from pyarchinit_photogrammetry import _native
+from pyarchinit_photogrammetry.core.camera import Camera
 from pyarchinit_photogrammetry.core.progress import Cancelled, Progress
 from pyarchinit_photogrammetry.engine import nodes
 
@@ -36,9 +38,20 @@ def _node(files_dir, stop, host=None):
                             kwargs={"stop_event": stop, "idle": 0.2, "log": lambda *a: None, "host": host})
 
 
+def _copy(processed, tmp_path, name="copia"):
+    doc, _ch, _ = processed
+    d = tmp_path / name
+    d.mkdir()
+    shutil.copy2(doc.path, d / doc.path.name)
+    shutil.copytree(doc.files_dir, d / doc.files_dir.name)
+    shutil.copytree(doc.path.parent / "photos", d / "photos")
+    out = ppg.Document.open(d / doc.path.name)
+    return out, out.chunk
+
+
 def _left(files_dir):
     root = files_dir / "nodes"
-    return sorted(p.name for state in ("todo", "taken", "done", "failed") for p in (root / state).iterdir())
+    return sorted(p.name for state in ("todo", "taken", "done", "failed", "state") for p in (root / state).iterdir())
 
 
 def test_units_taken_once_and_stale_ones_given_back(tmp_path):
@@ -189,6 +202,35 @@ def test_a_cancelled_step_takes_its_units_back(tmp_path):
     assert time.time() - t0 < 10 and _left(tmp_path) == []
 
 
+def test_the_chunk_of_a_step_as_a_node_sees_it(tmp_path):
+    """The chunk as the main program has it in memory (not saved) reaches a node that sees the
+    project folder elsewhere: the photos inside it follow the folder, the others take the prefixes
+    given to the node; the state goes away with the step, and old ones with the next step."""
+    main = tmp_path / "principale"
+    doc = ppg.Document()
+    ch = doc.add_chunk("Saggio")
+    doc.save(main / "scavo.ppg")
+    ch.cameras = [Camera(1, "a", str(main / "foto" / "a.jpg"), 0), Camera(2, "b", "/Users/x/foto/b.jpg", 0)]
+    ch.transform = np.diag([2.0, 2.0, 2.0, 1.0])
+    ch.meta["colour"] = {"gains": {"1": [1.0, 1.1, 0.9]}}  # measured by the step, never saved
+    old = nodes.share_chunk(doc.files_dir, ch)
+    past = time.time() - 2 * nodes.STATE_KEPT
+    os.utime(nodes.folder(doc.files_dir) / "state" / f"{old}.json", (past, past))
+    state = nodes.share_chunk(doc.files_dir, ch, ortho={"tile": 512})
+    np.save(nodes.state_file(nodes.folder(doc.files_dir), state, "faces.npy"), np.arange(3))
+    assert not (nodes.folder(doc.files_dir) / "state" / f"{old}.json").exists()
+    nodes.write_master(doc.files_dir, doc.path)
+    there = tmp_path / "altro" / "progetti"
+    shutil.copytree(main, there)  # the shared disk as the node sees it
+    root = nodes.folder(there / "scavo.ppg.files")
+    got, data = nodes.node_chunk(root, state, nodes.mapping_for(root, ["/Users/x/foto=/mnt/foto"]))
+    assert [c.path for c in got.cameras] == [str((there / "foto" / "a.jpg").resolve()), "/mnt/foto/b.jpg"]
+    assert np.allclose(got.transform, ch.transform) and got.meta["colour"] == ch.meta["colour"]
+    assert got.data_dir == (there / "scavo.ppg.files").resolve() / f"chunk_{ch.key}" and data["ortho"] == {"tile": 512}
+    nodes.forget_state(doc.files_dir, state)
+    assert not list((nodes.folder(doc.files_dir) / "state").iterdir())
+
+
 def test_a_node_reads_where_the_main_program_is_at_every_unit(tmp_path, monkeypatch):
     """A node started before the main program wrote ``master.json`` maps the paths of the units
     that come after it."""
@@ -208,6 +250,76 @@ def test_a_node_reads_where_the_main_program_is_at_every_unit(tmp_path, monkeypa
         stop.set()
         node.join(10)
     assert seen and (str(tmp_path.resolve()), str(tmp_path.resolve())) in seen[0]
+
+
+def test_orthomosaic_and_texture_shared_with_a_node(processed, tmp_path, monkeypatch):
+    """The tiles of the orthomosaic and of the orthophoto of a terrain texture, and the cells of the
+    texture: a node takes units, the main program the rest, and the files are the same as alone -
+    also when every unit fails on the node, the main program doing them again."""
+    import cv2
+    import rasterio
+    from threadpoolctl import threadpool_limits
+
+    from pyarchinit_photogrammetry.engine import ortho, texturing
+    from pyarchinit_photogrammetry.io.mesh_ply import read_mesh
+
+    monkeypatch.setenv("PPG_NODES", "1")
+    monkeypatch.setattr(nodes, "ORTHO_UNIT_TILES", 2)  # a small scene: many small units
+    monkeypatch.setattr(nodes, "TEXTURE_UNIT_TEXELS", 100_000)
+    doc, ch = _copy(processed, tmp_path)
+    files_dir = doc.files_dir
+    options = {"resolution": 0.004, "tile": 128, "colour_correction": True, "fill_holes": True}
+
+    def orthomosaic(name, progress=None):
+        path = ortho.build_orthomosaic(ch, out_path=tmp_path / name, progress=progress, **options)
+        with rasterio.open(path) as src:
+            return src.read()
+
+    def texture(mapping, progress=None):
+        texturing.build_texture(ch, texture_size=1024, mapping=mapping, progress=progress)
+        pages = [cv2.imread(str(p)) for p in texturing.texture_pages(ch)]
+        return pages, read_mesh(ch.product_path("model")).texcoords
+
+    def same_texture(a, b):
+        return len(a[0]) == len(b[0]) and all(np.array_equal(x, y) for x, y in zip(a[0], b[0])) and \
+            np.array_equal(a[1], b[1])
+
+    # one BLAS thread for the whole test: the node is a thread of this process, and the first of two
+    # steps leaving its one-thread section would give the other more threads (other rounding)
+    with threadpool_limits(limits=1, user_api="blas"):
+        alone = orthomosaic("alone.tif")  # measures the colour correction: the node gets it with the chunk
+        generic_alone, plan_alone = texture("generic"), texture("orthophoto")
+        stop = threading.Event()
+        node = _node(files_dir, stop, host="altro-1")
+        node.start()
+        try:
+            for _ in range(50):
+                if nodes.present(files_dir):
+                    break
+                time.sleep(0.1)
+            seen = []
+            assert np.array_equal(orthomosaic("shared.tif", lambda f, m: seen.append(m)), alone)
+            assert any("units of work shared" in m for m in seen) and any("by other computers" in m for m in seen)
+            seen.clear()
+            assert same_texture(texture("generic", lambda f, m: seen.append(m)), generic_alone)
+            assert any(m.startswith("Texture: ") and "units of work shared" in m for m in seen)
+            assert any("units of texture cells (" in m and "by other computers" in m for m in seen)
+            seen.clear()
+            assert same_texture(texture("orthophoto", lambda f, m: seen.append(m)), plan_alone)
+            assert any("units of tiles (" in m and "by other computers" in m for m in seen)
+
+            def broken(payload, mapping, out_dir):
+                raise RuntimeError("no photos here")
+
+            monkeypatch.setattr(ortho, "node_tiles", broken)
+            seen.clear()
+            assert np.array_equal(orthomosaic("again.tif", lambda f, m: seen.append(m)), alone)
+            assert any("A unit failed on altro-1" in m and "done here" in m for m in seen)
+            assert _left(files_dir) == []
+        finally:
+            stop.set()
+            node.join(120)
+    assert not node.is_alive()
 
 
 def test_node_command_leaves_when_nothing_is_left(tmp_path):

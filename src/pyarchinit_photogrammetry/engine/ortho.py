@@ -16,7 +16,9 @@ the photos are corrected as they are read.
 The orthomosaic is made tile by tile and every tile is written at once, so its size is limited
 by the disk, not by the memory (45,000 x 46,000 px for a tell at 1.35 cm/px): the surface is read
 one window at a time, every tile looks only at the few photos that see it best (found from the
-ground footprints of the photos), and tiles are processed in parallel.
+ground footprints of the photos), and tiles are processed in parallel - also by the other
+computers started as nodes on the project folder (:mod:`.nodes`): a tile depends only on the
+photos, the surface and its grid, never on the tiles around it.
 
 Patches (:mod:`.patches`) are polygons whose cells take their colours from photos chosen by
 hand (or from every photo but some): every build applies them, and an update redraws only the
@@ -25,6 +27,7 @@ cells of the patches that changed.
 from __future__ import annotations
 
 import os
+import queue
 import threading
 from collections import OrderedDict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -1166,6 +1169,16 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     progress(0.02, f"Orthomosaic {w}x{h} px at {resolution:.4g} m/px from {len(cams)} photos"
              + (f", {len(ctx.patches)} patches" if ctx.patches else ""))
     tiles = [(r, c) for r in range(0, h, tile) for c in range(0, w, tile)]
+    files_dir = _nodes_folder(chunk, len(tiles)) if source is None else None
+    shared = None
+    if files_dir is not None:  # what a node needs besides the chunk to make the same tiles
+        shared = (files_dir, {"surface": surface, "origin": [float(v) for v in ctx.origin],
+                              "shape": [int(h), int(w)], "resolution": float(resolution), "tile": int(tile),
+                              "blending": blending, "blend_sigma": float(blend_sigma), "max_angle": float(max_angle),
+                              "max_cameras": int(max_cameras), "hide_classes": hidden_classes,
+                              "patches": [dict(p) for p in patches or []], "colour": correction is not None,
+                              "ghosting": bool(ghosting), "fill_holes": bool(fill_holes),
+                              "cameras": [c.key for c in ctx.cams]})
     profile = {"driver": "GTiff", "height": h, "width": w, "count": 4, "dtype": "uint8",
                "transform": from_origin(ctx.origin[0], ctx.origin[1], resolution, resolution),
                "compress": "deflate", "photometric": "RGB", "BIGTIFF": "IF_SAFER"}
@@ -1180,7 +1193,7 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     out_path = Path(out_path) if out_path is not None else chunk.data_dir / "orthomosaic.tif"
     tmp = out_path.with_name(out_path.stem + ".tmp.tif")
     try:
-        _write_tiles(ctx, tmp, profile, tiles, ctx.workers, progress)
+        _write_tiles(ctx, tmp, profile, tiles, ctx.workers, progress, shared)
     except BaseException:
         tmp.unlink(missing_ok=True)  # cancelled or failed: no half-written file left behind
         raise
@@ -1249,8 +1262,9 @@ def _run_tiles(ctx, tiles, workers: int, progress: Progress, put, start: float =
             raise
 
 
-def _write_tiles(ctx, tmp: Path, profile: dict, tiles, workers: int, progress: Progress) -> None:
-    """Make the tiles in parallel and write each one as soon as it is ready, then the overviews."""
+def _write_tiles(ctx, tmp: Path, profile: dict, tiles, workers: int, progress: Progress, shared=None) -> None:
+    """Make the tiles in parallel and write each one as soon as it is ready, then the overviews;
+    ``shared``: the nodes take part (:func:`_share_tiles`)."""
     import rasterio
     from rasterio.enums import ColorInterp, Resampling
     from rasterio.windows import Window
@@ -1259,12 +1273,124 @@ def _write_tiles(ctx, tmp: Path, profile: dict, tiles, workers: int, progress: P
     with rasterio.open(tmp, "w", **profile) as dst:
         if profile.get("dtype") == "uint8":
             dst.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
-        _run_tiles(ctx, tiles, workers, progress,
-                   lambda r0, c0, block: dst.write(block, window=Window(c0, r0, block.shape[2], block.shape[1])))
+
+        def put(r0, c0, block):
+            dst.write(block, window=Window(c0, r0, block.shape[2], block.shape[1]))
+
+        if shared is not None:
+            _share_tiles(ctx, tiles, put, progress, shared)
+        else:
+            _run_tiles(ctx, tiles, workers, progress, put)
         factors = [f for f in (2, 4, 8, 16, 32, 64, 128) if min(h, w) // f >= 64]
         if factors:
             progress(0.95, "Overviews of the orthomosaic")
             dst.build_overviews(factors, Resampling.average)
+
+
+# ---------------------------------------------------------------- tiles made by other computers
+def _nodes_folder(chunk: Chunk, tiles: int):
+    """The files folder of the project when the nodes present take part in making ``tiles`` tiles
+    (:func:`.nodes.sharing`), else None."""
+    from . import nodes
+
+    return nodes.sharing(chunk, -(-tiles // nodes.ORTHO_UNIT_TILES))
+
+
+def _share_tiles(ctx, tiles, put, progress: Progress, shared, start: float = 0.03, span: float = 0.9,
+                 what: str = "Orthomosaic") -> None:
+    """The tiles made by the nodes present and by this program, in units of
+    :data:`~.nodes.ORTHO_UNIT_TILES` tiles, each handed to ``put(r0, c0, block)`` in this thread
+    as soon as it is here (the same pixels as :func:`_run_tiles`). ``shared``: the files folder and
+    what a node needs besides the chunk to make the same tiles (:func:`node_tiles`); ``what``: the
+    step, for its message."""
+    from .. import __version__
+    from . import nodes
+
+    files_dir, spec = shared
+    n = nodes.ORTHO_UNIT_TILES
+    state = nodes.share_chunk(files_dir, ctx.chunk, ortho=spec)
+    units = [{"kind": "ortho_tiles", "version": __version__, "state": state,
+              "tiles": [[int(r), int(c)] for r, c in tiles[k:k + n]]} for k in range(0, len(tiles), n)]
+    here: queue.Queue = queue.Queue()  # the tiles made by this program's worker, written in this thread
+
+    def local(payload, quiet):
+        _run_tiles(ctx, [tuple(t) for t in payload["tiles"]], ctx.workers, quiet,
+                   lambda r0, c0, block: here.put((r0, c0, block)))
+        return {}
+
+    def write_here():
+        while True:
+            try:
+                r0, c0, block = here.get_nowait()
+            except queue.Empty:
+                return
+            put(r0, c0, block)
+
+    def write_theirs(got):
+        res = got.get("result") or {}
+        if not res.get("file"):
+            return
+        path = nodes.folder(files_dir) / "done" / res["file"]
+        with np.load(path) as data:
+            for key in res.get("tiles", []):
+                r0, c0 = (int(v) for v in key.split("_"))
+                put(r0, c0, data[key])
+        path.unlink(missing_ok=True)
+
+    progress(start, f"{what}: {len(units)} units of work shared with {len(nodes.wanted(files_dir))} other computer(s)")
+    try:
+        results = nodes.run(files_dir, units, progress.sub(start, span), "units of tiles",
+                            project_path=ctx.chunk.document.path, local=local, each=write_theirs, tick=write_here)
+    finally:
+        nodes.forget_state(files_dir, state)
+    nodes.forget(files_dir, [r["name"] for r in results])
+
+
+_NODE: dict = {}  # on a node: the step whose units it does (kept for its next units)
+_NODE_LOCK = threading.Lock()
+
+
+def node_tiles(payload: dict, mapping, out_dir) -> dict:
+    """A unit of :func:`_share_tiles` on a node: its tiles made from the chunk and the options the
+    main program shared, saved as ``<unit>.npz`` for it."""
+    out_dir = Path(out_dir)
+    with _NODE_LOCK:
+        if _NODE.get("state") != payload["state"]:
+            _NODE.clear()  # the photos and the mesh of the step before go first
+            _NODE.update(state=payload["state"], ctx=_node_context(out_dir.parent, payload["state"], mapping))
+        ctx = _NODE["ctx"]
+    blocks: dict[str, np.ndarray] = {}
+    _run_tiles(ctx, [tuple(t) for t in payload["tiles"]], ctx.workers, as_progress(None),
+               lambda r0, c0, block: blocks.__setitem__(f"{r0}_{c0}", block))
+    out = out_dir / f"{payload['name']}.npz"
+    np.savez_compressed(out, **blocks)
+    return {"file": out.name, "tiles": sorted(blocks)}
+
+
+def _node_context(root: Path, state: str, mapping):
+    """The context of the tiles of a shared step, rebuilt on a node (:func:`node_tiles`)."""
+    from . import nodes
+
+    chunk, data = nodes.node_chunk(root, state, mapping)
+    spec = data["ortho"]
+    by_key = {c.key: c for c in chunk.cameras}
+    cams = [by_key[k] for k in spec["cameras"]]
+    resolution = float(spec["resolution"])
+    correction = correction_for(chunk) if spec["colour"] else None
+    if spec["colour"] and correction is None:
+        raise RuntimeError("the colour correction of the main program is missing")
+    raycaster = raycaster_for_chunk(chunk)
+    lock = threading.Lock()
+    origin, shape = tuple(spec["origin"]), tuple(spec["shape"])
+    if spec.get("render"):  # the orthophoto of a terrain texture: the model from above on its grid
+        surf = _on_grid(_MeshSurface(chunk, raycaster, resolution, lock), origin, shape, resolution)
+    else:
+        surf = _surface(chunk, resolution, spec["surface"], raycaster, lock)
+        if (tuple(surf.origin), tuple(surf.shape)) != (origin, shape):
+            raise RuntimeError("the surface of the orthomosaic is not the same on this computer")
+    return _context(chunk, resolution, cams, surf, raycaster, spec["blending"], spec["max_angle"],
+                    spec["max_cameras"], None, spec.get("hide_classes"), spec.get("patches"), int(spec["tile"]), lock,
+                    spec["blend_sigma"], correction, spec.get("ghosting", False), spec.get("fill_holes", False))
 
 
 def render_surface(chunk: Chunk, origin, shape, resolution: float, cams=None, raycaster=None,
@@ -1272,8 +1398,9 @@ def render_surface(chunk: Chunk, origin, shape, resolution: float, cams=None, ra
                    max_angle: float = 88.0, tile: int = 512, patches=None, correction=None) -> np.ndarray:
     """RGBA ``(4, h, w)`` of the model seen from above over a grid (``origin`` = top-left corner,
     world units): the orthophoto engine in memory (seamless mosaic), used for the texture of a
-    terrain model. ``patches`` take their colours from the photos assigned to them;
-    ``correction``: a colour correction (:func:`correction_for`)."""
+    terrain model - its tiles also made by the nodes present (:mod:`.nodes`). ``patches`` take
+    their colours from the photos assigned to them; ``correction``: a colour correction
+    (:func:`correction_for`, the one measured in the chunk)."""
     progress = as_progress(progress)
     cams = list(chunk.aligned_cameras if cams is None else cams)
     raycaster = raycaster if raycaster is not None else raycaster_for_chunk(chunk)
@@ -1289,8 +1416,17 @@ def render_surface(chunk: Chunk, origin, shape, resolution: float, cams=None, ra
     def put(r0, c0, block):
         out[:, r0:r0 + block.shape[1], c0:c0 + block.shape[2]] = block
 
-    _run_tiles(ctx, [(r, c) for r in range(0, h, tile) for c in range(0, w, tile)], ctx.workers, progress, put,
-               start=0.0, span=1.0)
+    tiles = [(r, c) for r in range(0, h, tile) for c in range(0, w, tile)]
+    files_dir = _nodes_folder(chunk, len(tiles))
+    if files_dir is not None:
+        spec = {"render": True, "origin": [float(v) for v in ctx.origin], "shape": [int(h), int(w)],
+                "resolution": float(resolution), "tile": int(tile), "blending": "mosaic", "blend_sigma": BLEND_SIGMA,
+                "max_angle": float(max_angle), "max_cameras": int(max_cameras),
+                "patches": [dict(p) for p in patches or []], "colour": correction is not None,
+                "cameras": [c.key for c in ctx.cams]}
+        _share_tiles(ctx, tiles, put, progress, (files_dir, spec), start=0.0, span=1.0, what="Orthophoto of the model")
+    else:
+        _run_tiles(ctx, tiles, ctx.workers, progress, put, start=0.0, span=1.0)
     return out
 
 

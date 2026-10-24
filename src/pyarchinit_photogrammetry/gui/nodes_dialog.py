@@ -36,9 +36,10 @@ class NodesDialog(QDialog):
         self.resize(640, 360)
         lay = QVBoxLayout(self)
         intro = QLabel(tr("Altri computer lavorano a questo progetto dalla cartella condivisa: su ognuno, con la "
-                          "cartella del progetto montata, si avvia ppg node con la cartella qui sotto. Punti chiave e "
-                          "mappe di profondità si dividono fra tutti, questo computer compreso; l'allineamento resta "
-                          "qui. Su una macchina remota via SSH: ppg remote utente@host:/cartella progetto.ppg."))
+                          "cartella del progetto montata, si avvia ppg node con la cartella qui sotto. Punti chiave, "
+                          "mappe di profondità, tasselli dell'ortofoto e celle della texture si dividono fra tutti, "
+                          "questo computer compreso; l'allineamento resta qui. Su una macchina remota via SSH: ppg "
+                          "remote utente@host:/cartella progetto.ppg."))
         intro.setWordWrap(True)
         lay.addWidget(intro)
         row = QHBoxLayout()

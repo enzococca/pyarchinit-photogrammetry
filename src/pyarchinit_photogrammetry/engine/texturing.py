@@ -20,9 +20,14 @@ pages, as Metashape does: ``model_texture.jpg``, ``model_texture_1.jpg``... name
 (``TextureFile`` comments) with the page of every face (``texnumber``). The generic mapping puts
 groups of nearby faces on each page; the orthophoto mapping cuts the plan into tiles, a page each,
 and puts the steep faces on pages of their own.
+
+The other computers started as nodes on the project folder (:mod:`.nodes`) take part: the tiles of
+the orthophoto as for the orthomosaic, and whole rows of cells - every face is decided on its own,
+so a row does not depend on the others.
 """
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import cv2
@@ -116,14 +121,12 @@ def _bake_cells(chunk: Chunk, verts, faces, face_ids, choice, cams, atlas, y0: i
     texture coordinates of their corners ``(len(face_ids), 3, 2)``."""
     height, width = atlas.shape[:2]
     n = len(face_ids)
-    which, bary, tri = _cell_layout(s)
+    which, bary, _tri = _cell_layout(s)
     local = np.arange(n)
     cell = local // 2
     t = local % 2
     cy, cx = np.divmod(cell, per_row)
-    corners = np.stack([tri[0], tri[1]])[t]  # (n, 3, 2)
-    uv_px = corners + np.stack([cx * s, y0 + cy * s], 1)[:, None, :]
-    uv = np.stack([uv_px[..., 0] / width, 1.0 - uv_px[..., 1] / height], -1)
+    uv = _cell_uv(n, y0, per_row, s, width, height)
     cache = cache or ImageCache(chunk, max_items=3)
     local_pix = np.column_stack(np.divmod(np.arange(s * s), s)[::-1])  # (x, y) inside a cell
     used = np.unique(choice[choice >= 0])
@@ -151,6 +154,118 @@ def _bake_cells(chunk: Chunk, verts, faces, face_ids, choice, cams, atlas, y0: i
             atlas[y0 + cy[f_all] * s + local_pix[p_all, 1], cx[f_all] * s + local_pix[p_all, 0]] = col
         progress((done + 1) / max(len(used), 1), f"Texturing from {cams[k].label}")
     return uv
+
+
+def _cell_uv(n: int, y0: int, per_row: int, s: int, width: int, height: int) -> np.ndarray:
+    """The texture coordinates ``(n, 3, 2)`` of ``n`` faces in cells of ``s`` px (two faces a cell,
+    ``per_row`` cells a row from row ``y0``) of an atlas of ``width`` x ``height`` px."""
+    _which, _bary, tri = _cell_layout(s)
+    local = np.arange(n)
+    cy, cx = np.divmod(local // 2, per_row)
+    corners = np.stack([tri[0], tri[1]])[local % 2]  # (n, 3, 2)
+    uv_px = corners + np.stack([cx * s, y0 + cy * s], 1)[:, None, :]
+    return np.stack([uv_px[..., 0] / width, 1.0 - uv_px[..., 1] / height], -1)
+
+
+def _bake(chunk: Chunk, verts, faces, ids, cams, atlas, y0: int, per_row: int, s: int, raycaster, progress: Progress,
+          correction=None, cache=None) -> np.ndarray:
+    """The faces ``ids`` (in this order) in cells of ``s`` px of ``atlas`` (two faces a cell,
+    ``per_row`` cells a row from row ``y0``), each coloured from the photo that sees it best;
+    returns their texture coordinates. With nodes present (:mod:`.nodes`) they take whole rows of
+    cells; ``correction``: the colour correction measured in the chunk, or None."""
+    from .. import __version__
+    from . import nodes
+
+    ids = np.asarray(ids)
+    height, width = atlas.shape[:2]
+    rows = int(np.ceil(np.ceil(len(ids) / 2) / per_row))
+    band = max(1, nodes.TEXTURE_UNIT_TEXELS // max(1, per_row * s * s))  # rows of cells in a unit
+    cache = cache or ImageCache(chunk, 3, correction)
+    files_dir = nodes.sharing(chunk, -(-rows // band))
+    if files_dir is None:
+        choice = _face_camera_choice(chunk, verts, faces[ids], raycaster, progress.sub(0.0, 0.5), cams=cams)
+        return _bake_cells(chunk, verts, faces, ids, choice, cams, atlas, y0, per_row, s, progress.sub(0.5, 0.5),
+                           cache)
+    root = nodes.folder(files_dir)
+    state = nodes.share_chunk(files_dir, chunk, texture={"cameras": [c.key for c in cams],
+                                                         "colour": correction is not None})
+    np.save(nodes.state_file(root, state, "faces.npy"), ids)
+    step = 2 * per_row * band
+    units = [{"kind": "texture_cells", "version": __version__, "state": state, "start": a,
+              "stop": min(len(ids), a + step), "per_row": int(per_row), "s": int(s), "width": int(width)}
+             for a in range(0, len(ids), step)]
+
+    def rows_of(start: int, stop: int) -> slice:
+        r0 = y0 + (start // (2 * per_row)) * s
+        return slice(r0, r0 + int(np.ceil(np.ceil((stop - start) / 2) / per_row)) * s)
+
+    def local(payload, quiet):  # into the atlas itself: the rows of a unit are its own
+        a, b = payload["start"], payload["stop"]
+        choice = _face_camera_choice(chunk, verts, faces[ids[a:b]], raycaster, quiet, cams=cams)
+        _bake_cells(chunk, verts, faces, ids[a:b], choice, cams, atlas[rows_of(a, b)], 0, per_row, s, quiet, cache)
+        return {}
+
+    def write_theirs(got):
+        res = got.get("result") or {}
+        if not res.get("file"):
+            return
+        path = root / "done" / res["file"]
+        with np.load(path) as data:
+            atlas[rows_of(res["start"], res["stop"])] = data["cells"]
+        path.unlink(missing_ok=True)
+
+    progress(0.0, f"Texture: {len(units)} units of work shared with {len(nodes.wanted(files_dir))} other computer(s)")
+    try:
+        results = nodes.run(files_dir, units, progress, "units of texture cells", project_path=chunk.document.path,
+                            local=local, each=write_theirs)
+    finally:
+        nodes.forget_state(files_dir, state)
+    nodes.forget(files_dir, [r["name"] for r in results])
+    return _cell_uv(len(ids), y0, per_row, s, width, height)
+
+
+_NODE: dict = {}  # on a node: the step whose units it does (kept for its next units)
+_NODE_LOCK = threading.Lock()
+
+
+def node_cells(payload: dict, mapping, out_dir) -> dict:
+    """A unit of :func:`_bake` on a node: the photos of its faces chosen and their rows of cells
+    coloured, saved as ``<unit>.npz`` for the main program."""
+    from ..io.mesh_ply import read_mesh
+    from . import nodes
+    from .ortho import correction_for
+
+    out_dir = Path(out_dir)
+    root = out_dir.parent
+    with _NODE_LOCK:
+        if _NODE.get("state") != payload["state"]:
+            _NODE.clear()  # the photos and the mesh of the step before go first
+            chunk, data = nodes.node_chunk(root, payload["state"], mapping)
+            spec = data["texture"]
+            correction = correction_for(chunk) if spec["colour"] else None
+            if spec["colour"] and correction is None:
+                raise RuntimeError("the colour correction of the main program is missing")
+            path = chunk.product_path("model")
+            if path is None or not path.exists():
+                raise RuntimeError("the model is not in the project folder of this computer")
+            mesh = read_mesh(path)
+            by_key = {c.key: c for c in chunk.cameras}
+            _NODE.update(state=payload["state"], chunk=chunk, verts=mesh.xyz, faces=mesh.faces,
+                         raycaster=Raycaster(mesh.xyz, mesh.faces), cams=[by_key[k] for k in spec["cameras"]],
+                         ids=np.load(nodes.state_file(root, payload["state"], "faces.npy")),
+                         cache=ImageCache(chunk, 3, correction))
+        node = dict(_NODE)
+    a, b, per_row, s = int(payload["start"]), int(payload["stop"]), int(payload["per_row"]), int(payload["s"])
+    ids = node["ids"][a:b]
+    quiet = as_progress(None)
+    choice = _face_camera_choice(node["chunk"], node["verts"], node["faces"][ids], node["raycaster"], quiet,
+                                 cams=node["cams"])
+    cells = np.full((int(np.ceil(np.ceil(len(ids) / 2) / per_row)) * s, int(payload["width"]), 3), 127, np.uint8)
+    _bake_cells(node["chunk"], node["verts"], node["faces"], ids, choice, node["cams"], cells, 0, per_row, s, quiet,
+                node["cache"])
+    out = out_dir / f"{payload['name']}.npz"
+    np.savez_compressed(out, cells=cells)
+    return {"file": out.name, "start": a, "stop": b}
 
 
 def _upward(chunk: Chunk, verts, faces) -> tuple[np.ndarray, np.ndarray]:
@@ -226,23 +341,21 @@ def _orthophoto_atlas(chunk: Chunk, verts, faces, cams, texture_size: int, rayca
         uv[flat, :, 1] = 1.0 - ((y1 - pw[..., 1]) / res) / height
     if len(steep):
         progress(0.72, f"Walls and steep faces: {len(steep):,} faces in cells of {cell} px")
-        choice = _face_camera_choice(chunk, verts, faces[steep], raycaster, progress.sub(0.72, 0.13), cams=cams)
-        uv[steep] = _bake_cells(chunk, verts, faces, steep, choice, cams, atlas, ho, per_row, cell,
-                                progress.sub(0.85, 0.13), ImageCache(chunk, 3, correction))
+        uv[steep] = _bake(chunk, verts, faces, steep, cams, atlas, ho, per_row, cell, raycaster,
+                          progress.sub(0.72, 0.26), correction)
     return atlas, uv
 
 
 def _generic_atlas(chunk: Chunk, verts, faces, cams, texture_size: int, raycaster, progress: Progress,
                    correction=None):
     n = len(faces)
-    choice = _face_camera_choice(chunk, verts, faces, raycaster, progress.sub(0, 0.5), cams=cams)
     cells = int(np.ceil(n / 2))
     per_side = int(np.ceil(np.sqrt(cells)))
     s = max(4, texture_size // per_side)
     size = per_side * s
     atlas = np.full((size, size, 3), 127, np.uint8)
-    uv = _bake_cells(chunk, verts, faces, np.arange(n), choice, cams, atlas, 0, per_side, s, progress.sub(0.5, 0.45),
-                     ImageCache(chunk, 3, correction))
+    uv = _bake(chunk, verts, faces, np.arange(n), cams, atlas, 0, per_side, s, raycaster, progress.sub(0, 0.95),
+               correction)
     return atlas, uv
 
 
@@ -274,7 +387,6 @@ def _generic_pages(chunk: Chunk, verts, faces, cams, texture_size: int, page_siz
         atlas, uv = _generic_atlas(chunk, verts, faces, cams, texture_size, raycaster, progress, correction)
         return [atlas], uv, None
     n = len(faces)
-    choice = _face_camera_choice(chunk, verts, faces, raycaster, progress.sub(0, 0.4), cams=cams)
     groups = _split_spatially(verts[faces].mean(1), side * side)
     uv, page, atlases = np.zeros((n, 3, 2)), np.zeros(n, np.int32), []
     cache = ImageCache(chunk, 3, correction)
@@ -282,8 +394,8 @@ def _generic_pages(chunk: Chunk, verts, faces, cams, texture_size: int, page_siz
         per_side = int(np.ceil(np.sqrt(np.ceil(len(ids) / 2))))
         s = max(4, page_size // per_side)
         atlas = np.full((per_side * s, per_side * s, 3), 127, np.uint8)
-        uv[ids] = _bake_cells(chunk, verts, faces, ids, choice[ids], cams, atlas, 0, per_side, s,
-                              progress.sub(0.4 + 0.58 * g / len(groups), 0.58 / len(groups)), cache)
+        uv[ids] = _bake(chunk, verts, faces, ids, cams, atlas, 0, per_side, s, raycaster,
+                        progress.sub(0.98 * g / len(groups), 0.98 / len(groups)), correction, cache)
         page[ids] = g
         atlases.append(atlas)
     return atlases, uv, page
@@ -335,15 +447,14 @@ def _orthophoto_pages(chunk: Chunk, verts, faces, cams, texture_size: int, page_
         per_row = page_size // cell
         per_page = 2 * per_row * per_row
         progress(0.72, f"Walls and steep faces: {len(steep):,} faces in cells of {cell} px")
-        choice = _face_camera_choice(chunk, verts, faces[steep], raycaster, progress.sub(0.72, 0.13), cams=cams)
         groups = _split_spatially(verts[faces[steep]].mean(1), int(np.ceil(len(steep) / per_page)))
         cache = ImageCache(chunk, 3, correction)
         for g, local in enumerate(groups):
             rows = int(np.ceil(np.ceil(len(local) / 2) / per_row))
             atlas = np.full((rows * cell, page_size, 3), 127, np.uint8)
-            uv[steep[local]] = _bake_cells(chunk, verts, faces, steep[local], choice[local], cams, atlas, 0, per_row,
-                                           cell, progress.sub(0.85 + 0.13 * g / len(groups), 0.13 / len(groups)),
-                                           cache)
+            uv[steep[local]] = _bake(chunk, verts, faces, steep[local], cams, atlas, 0, per_row, cell, raycaster,
+                                     progress.sub(0.72 + 0.26 * g / len(groups), 0.26 / len(groups)), correction,
+                                     cache)
             page[steep[local]] = len(atlases)
             atlases.append(atlas)
     return atlases, uv, page
