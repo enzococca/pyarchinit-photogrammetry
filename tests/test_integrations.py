@@ -441,13 +441,17 @@ def test_sam_env_torch_backend(tmp_path):
     fake.write_text("import sys; print('--torch-backend <TORCH_BACKEND>' if 'new' in sys.argv[0] else '--python')")
     new = tmp_path / "new_uv.py"
     new.write_text(fake.read_text())
-    if sys.platform == "win32":
-        pytest.skip("scripts are not executable on Windows")
+    tools = []
     for f in (fake, new):
-        f.write_text("#!" + sys.executable + "\n" + f.read_text())
-        f.chmod(0o755)
-    assert sam_env.torch_backend_args(new) == ["--torch-backend", "auto"]
-    assert sam_env.torch_backend_args(fake) == []
+        if sys.platform == "win32":  # no shebang lines on Windows: a batch file starts the script
+            tools.append(f.with_suffix(".cmd"))
+            tools[-1].write_text(f'@"{sys.executable}" "{f}" %*\r\n')
+        else:
+            f.write_text("#!" + sys.executable + "\n" + f.read_text())
+            f.chmod(0o755)
+            tools.append(f)
+    assert sam_env.torch_backend_args(tools[1]) == ["--torch-backend", "auto"]
+    assert sam_env.torch_backend_args(tools[0]) == []
     assert sam_env.torch_backend_args(tmp_path / "missing") == []
 
 
