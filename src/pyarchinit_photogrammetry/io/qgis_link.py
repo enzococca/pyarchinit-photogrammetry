@@ -1,14 +1,27 @@
 """Live link with QGIS: the orthomosaic, the DEM and everything drawn in the interface
-(stratigraphic units, sections, contour lines, points) open in a QGIS project, and the
-drawings are rewritten on every change while QGIS redraws them every second.
+(stratigraphic units, sections, contour lines, points) open in a QGIS project, the
+drawings rewritten on every change while QGIS redraws them every second, and what is
+edited in QGIS read back.
 
 The drawings live in one GeoPackage (:data:`LIVE_DB`, a table per kind of drawing), updated
-in place, one transaction per changed table. QGIS reads a GeoPackage again at every redraw,
-and the project asks QGIS to redraw those layers every second, so what is drawn here
-appears in QGIS without pressing anything. Up to 0.4.1 the drawings were GeoJSON files with
-"reload data every second": QGIS keeps GeoJSON in memory, and QGIS 3.34-3.42 does not start
-the refresh timer of layers read from a project saved with ``autoRefreshMode``, so the map
-kept its cached image until *Refresh* (see :func:`_legacy_auto_refresh`).
+in place in one transaction. QGIS reads a GeoPackage again at every redraw, and the project
+asks QGIS to redraw those layers every second, so what is drawn here appears in QGIS without
+pressing anything. Up to 0.4.1 the drawings were GeoJSON files with "reload data every
+second": QGIS keeps GeoJSON in memory, and QGIS 3.34-3.42 does not start the refresh timer of
+layers read from a project saved with ``autoRefreshMode``, so the map kept its cached image
+until *Refresh* (see :func:`_legacy_auto_refresh`).
+
+Every feature has an identity, :data:`ID_FIELD` (a UUID the program keeps with its unit, spot
+height or section), and the rows are updated, inserted and deleted one by one by that identity:
+a row keeps its ``fid`` while its feature lives, so an edit session of QGIS keeps its rows.
+:data:`SIG_FIELD` holds the signature of what the program last wrote in the row (its geometry
+and attributes): a row whose content no longer matches it was edited by another program. The
+signature lives in the file, so it also tells the edits made in QGIS while the program was
+closed. Of the tables in :data:`TWO_WAY_TABLES` (units, spot heights, sections) such edits come
+back (:meth:`LiveLink.read_changes`): rows changed, rows drawn in QGIS (no identity yet: they
+get one) and rows deleted; the program never overwrites them before it has read them. The
+other tables are computed by the program (contour lines, zones, plugin drawings) and stay
+one-way.
 
 * :class:`LiveLink` / :func:`export_layers` write the GeoPackage (no GDAL needed).
 * :func:`build_project` creates the ``.qgs`` with QGIS's own Python (styles, labels, auto refresh).
@@ -20,6 +33,7 @@ QGIS is found in the usual places (``/Applications/QGIS*.app``, ``C:\\Program Fi
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 import re
@@ -27,6 +41,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -41,9 +56,24 @@ LIVE_TABLES = {  # table -> (title in QGIS, geometry type)
     "punti": ("Punti (ppg)", "POINT"),
     "quote": ("Quote (ppg)", "POINT"),  # the columns of pyarchinit_quote
 }
+TWO_WAY_TABLES = ("unita", "quote", "sezioni")  # what is edited there in QGIS comes back
+ID_FIELD = "ppg_id"  # the identity of a feature (a UUID)
+SIG_FIELD = "ppg_sig"  # the signature of what the program last wrote in the row
+PART_FIELD = "ppg_parte"  # "unita": the part (1, 2...) of a unit drawn as several polygons
+TECHNICAL_FIELDS = (ID_FIELD, SIG_FIELD, PART_FIELD)
+# the columns a two-way table always has, also before the program wrote a feature into it: a unit
+# drawn in QGIS gets the columns of pyunitastratigrafiche, a spot height those of pyarchinit_quote
+BASE_COLUMNS = {
+    "unita": ["scavo_s", "area_s", "us_s", "unita_tipo_s", "stratigraph_index_us", "tipo_us_s", "rilievo_originale",
+              "disegnatore", "data", "tipo_doc", "nome_doc", "area_m2"],
+    "quote": ["sito_q", "area_q", "us_q", "unita_tipo_q", "quota_q", "unita_misu_q", "data", "disegnatore",
+              "rilievo_originale", "x", "y"],
+    "sezioni": ["lunghezza_m", "svg"],
+}
 NUMERIC_FIELDS = {"quota", "z", "x", "y", "lunghezza_m", "area_m2", "volume_m3", "quota_q"}  # REAL; the rest is TEXT
-INTEGER_FIELDS = {"stratigraph_index_us"}
+INTEGER_FIELDS = {"stratigraph_index_us", PART_FIELD}
 FLAG_FIELDS = {"direttrice"}  # INTEGER 0/1
+_NAMESPACE = uuid.UUID("0b5f2a7e-6a3c-5d1e-9f4b-2c8e7d6a1b30")  # of the identities derived from content
 
 
 @dataclass
@@ -142,16 +172,163 @@ def _shape(gtype: str, coords):
         return None
 
 
+def _feature_shape(attrs: dict):
+    """The geometry a feature goes into the GeoPackage with: its own shape when it carries one
+    (``_shape``: a unit part with its holes), else the one of its ``_geom``."""
+    shape = attrs.get("_shape")
+    if shape is not None:
+        return shape
+    return _shape(*attrs["_geom"])
+
+
+def new_id() -> str:
+    """A new identity for a feature."""
+    return str(uuid.uuid4())
+
+
+def stable_id(*parts) -> str:
+    """An identity derived from ``parts`` (JSON-able): the same parts, the same identity, in every
+    session - for features that had none yet (projects of earlier versions)."""
+    return str(uuid.uuid5(_NAMESPACE, json.dumps(parts, sort_keys=True, ensure_ascii=False, default=str)))
+
+
+def row_signature(wkb: bytes | None, values: dict) -> str:
+    """The signature of a row: its geometry (WKB) and its attribute values, the empty ones and the
+    technical columns left out (a column added in QGIS does not change it)."""
+    items = sorted((str(k), v) for k, v in values.items() if k not in TECHNICAL_FIELDS and v is not None)
+    h = hashlib.sha1(bytes(wkb or b""))
+    h.update(json.dumps(items, ensure_ascii=False, default=str).encode("utf-8"))
+    return h.hexdigest()[:24]
+
+
+def _affinity(declared: str) -> str:
+    """The type affinity SQLite gives a column of the ``declared`` type."""
+    t = (declared or "").upper()
+    if "INT" in t:
+        return "INTEGER"
+    if any(s in t for s in ("CHAR", "CLOB", "TEXT")):
+        return "TEXT"
+    if "BLOB" in t or not t:
+        return "BLOB"
+    if any(s in t for s in ("REAL", "FLOA", "DOUB")):
+        return "REAL"
+    return "NUMERIC"
+
+
+def _bind(affinity: str, v):
+    """``v`` as SQLite keeps it in a column of that affinity, so that the signature of what is
+    written equals the signature of what is read back."""
+    if v is None or (isinstance(v, float) and v != v):
+        return None
+    if affinity == "TEXT":
+        return v if isinstance(v, str) else str(v)
+    if affinity == "REAL":
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return v
+    if affinity in ("INTEGER", "NUMERIC"):
+        if isinstance(v, bool):
+            return int(v)
+        if isinstance(v, float) and v.is_integer() and abs(v) < 2 ** 62:
+            return int(v)
+    return v
+
+
+@dataclass
+class _Wanted:  # a row as the program writes it
+    key: tuple
+    geom: object
+    wkb: bytes
+    values: dict
+    sig: str
+
+
+@dataclass
+class _Stored:  # a row as it is in the GeoPackage
+    fid: int
+    key: tuple  # (identity or None, part)
+    stored_sig: str | None
+    content_sig: str | None = None  # None: the content was not read
+    wkb: bytes | None = None
+    values: dict | None = None
+    srs_id: int | None = None
+
+    @property
+    def external(self) -> bool:
+        """Edited by another program since the program last wrote or read it."""
+        return self.content_sig is not None and self.content_sig != self.stored_sig
+
+
+@dataclass
+class Feature:
+    """A row of a two-way table, as :meth:`LiveLink.read_changes` gives it back."""
+    fid: int
+    id: str  # its identity (given now when it was drawn in QGIS)
+    part: int  # 1, 2... for the parts of a unit drawn as several polygons
+    geometry: object  # shapely, None when it cannot be read
+    values: dict  # column -> value (the technical columns included)
+    srs_id: int | None = None  # of its geometry
+
+
+@dataclass
+class TableChanges:
+    """What another program changed in a two-way table since it was last read."""
+    changed: list = field(default_factory=list)  # Feature: geometry or attributes changed
+    added: list = field(default_factory=list)  # Feature: drawn (or copied) there
+    deleted: list = field(default_factory=list)  # (identity, part) of the rows gone
+    rows: list = field(default_factory=list)  # Feature: every row of the table now
+    refused: tuple | None = None  # (srs of the table, srs of the project): not read
+
+    def __bool__(self) -> bool:
+        return bool(self.changed or self.added or self.deleted or self.refused)
+
+
 class LiveLink:
-    """The GeoPackage QGIS reads the drawings from. Tables are rewritten in place (QGIS keeps
-    the file open, so a replaced file would not be seen) and only when their content
-    changed, in one transaction each: QGIS never reads half a table."""
+    """The GeoPackage QGIS reads the drawings from, and where its edits come back from. Rows are
+    written in place by identity, only those that changed, in one transaction (QGIS never reads
+    half a table, and keeps the file open: a replaced file would not be seen). One connection is
+    kept open: the program's own writes do not change its ``PRAGMA data_version``, the commits of
+    another program do (:meth:`external_change`)."""
 
     def __init__(self, folder: str | Path, crs: str):
         self.path = Path(folder) / LIVE_DB
         self.crs = crs or ""
         self._signatures: dict[str, int] = {}
+        self._known: dict[str, dict[tuple, int]] = {}  # table -> {(identity, part): fid} written or read here
+        self._con: sqlite3.Connection | None = None
+        self._ident = None  # the file the connection is open on
+        self._data_version = None
 
+    # ------------------------------------------------------------------ connection
+    def _file_ident(self):
+        try:
+            st = self.path.stat()
+        except OSError:
+            return None
+        return st.st_dev, st.st_ino
+
+    def _connection(self) -> sqlite3.Connection:
+        from . import gpkg
+
+        ident = self._file_ident()
+        if self._con is not None and ident != self._ident:
+            self.close()  # the file went away or was replaced: what was known of it too
+        if self._con is None:
+            self._con = gpkg.connect(self.path)
+            self._ident = self._file_ident()
+            self._known, self._signatures, self._data_version = {}, {}, None
+        return self._con
+
+    def close(self) -> None:
+        if self._con is not None:
+            try:
+                self._con.close()
+            except sqlite3.Error:
+                pass
+        self._con, self._ident = None, None
+
+    # ------------------------------------------------------------------ writing
     @staticmethod
     def _group(layers: dict[str, dict]) -> dict[str, list]:
         out: dict[str, list] = {t: [] for t in LIVE_TABLES}
@@ -168,7 +345,8 @@ class LiveLink:
         for name, attrs in feats:
             gtype, coords = attrs["_geom"]
             n = len(coords) if coords is not None else 0
-            sig.append((name, id(attrs["_geom"]), gtype, n, str(coords[0]) if n else "", str(coords[-1]) if n else "",
+            sig.append((name, id(attrs["_geom"]), id(attrs.get("_shape")), gtype, n, str(coords[0]) if n else "",
+                        str(coords[-1]) if n else "",
                         tuple(sorted((str(k), str(v)) for k, v in attrs.items() if not str(k).startswith("_")))))
         return hash(tuple(sig))
 
@@ -176,45 +354,272 @@ class LiveLink:
         """Bring the GeoPackage up to date with the layers of the raster view
         (``{name: {"kind", "features"}}``, features as attribute dicts with ``_geom`` or the
         ``(item, label, attrs)`` triples of :class:`gui.image_views.RasterView`). Every table
-        exists even when empty, so QGIS sees deletions."""
+        exists even when empty, so QGIS sees deletions. ``force``: every table compared row by
+        row, also those whose features did not change here (an edit made in QGIS to a one-way
+        table is undone). Rows of the two-way tables edited in QGIS and not read back yet are
+        left as they are."""
         from . import gpkg
 
         groups = self._group(layers)
         new = not gpkg.is_geopackage(self.path)
         if new:
             gpkg.refuse_foreign(self.path)  # never write the drawings into another file of that name
+            self.close()
+        con = self._connection()
         if new:
             self._signatures = {}
         todo = {t: f for t, f in groups.items() if force or new or self._signatures.get(t) != self._signature(f)}
         if todo:
             srs = gpkg.srs_of(self.crs)
-            con = gpkg.connect(self.path)
+            known = {}
             try:
                 con.execute("BEGIN IMMEDIATE")
                 if new:
                     gpkg.create(con, srs)
                 for table, feats in todo.items():
-                    label = STYLES[table][1]
-                    keys = ["layer", "etichetta"] + ([label] if label not in ("layer", "etichetta") else [])
-                    keys += sorted({_column(k) for _, a in feats for k in a if not str(k).startswith("_")} - set(keys))
-                    cols = gpkg.ensure_table(con, table, LIVE_TABLES[table][1], {k: _sql_type(k) for k in keys}, srs[0],
-                                             identifier=LIVE_TABLES[table][0])
-                    rows = []
-                    for name, attrs in feats:
-                        vals = {_column(k): v for k, v in attrs.items() if not str(k).startswith("_")}
-                        vals["layer"] = name
-                        rows.append((_shape(*attrs["_geom"]), {c: _value(c, vals.get(c)) for c in cols}))
-                    gpkg.replace_rows(con, table, cols, rows, srs[0])
+                    known[table] = self._write_table(con, table, feats, srs[0], force)
                 con.execute("COMMIT")
             except BaseException:
                 if con.in_transaction:
                     con.execute("ROLLBACK")
                 raise
-            finally:
-                con.close()
+            self._known.update(known)
             for table, feats in todo.items():
                 self._signatures[table] = self._signature(feats)
         return {t: self.path for t in LIVE_TABLES}
+
+    def _wanted(self, table: str, feats: list, cols: list[str], types: dict) -> list[_Wanted]:
+        import shapely
+
+        counts: dict[str, int] = {}
+        out = []
+        for name, attrs in feats:
+            geom = _feature_shape(attrs)
+            if geom is None or geom.is_empty:
+                continue
+            raw = shapely.to_wkb(geom, byte_order=1, output_dimension=2)
+            vals = {_column(k): v for k, v in attrs.items() if not str(k).startswith("_")}
+            vals["layer"] = name
+            pid = str(vals.get(ID_FIELD) or "").strip() or None
+            explicit = pid is not None
+            if not explicit:  # a feature the program keeps no identity for: one from its content
+                pid = stable_id(table, name, hashlib.sha1(raw).hexdigest(),
+                                sorted((k, str(v)) for k, v in vals.items() if k not in TECHNICAL_FIELDS))
+            n = counts[pid] = counts.get(pid, 0) + 1
+            part = 1
+            if n > 1 and (table != "unita" or not explicit):  # the same identity twice: another feature
+                pid = stable_id(pid, n)
+                counts[pid] = counts.get(pid, 0) + 1
+            elif table == "unita":
+                part = n
+            vals[ID_FIELD] = pid
+            if table == "unita":
+                vals[PART_FIELD] = part
+            values = {c: _bind(_affinity(types.get(c, "")), _value(c, vals.get(c))) for c in cols if c != SIG_FIELD}
+            out.append(_Wanted((pid, part), geom, raw, values, row_signature(raw, values)))
+        return out
+
+    @staticmethod
+    def _scan(con, table: str, cols: list[str], content: bool) -> list[_Stored]:
+        """The rows of ``table`` (by fid); ``content``: their geometry and values read and signed."""
+        from . import gpkg
+
+        q = gpkg.quote
+        part = PART_FIELD in cols
+        out = []
+        if content:
+            names = "".join(f", {q(c)}" for c in cols)
+            for row in con.execute(f"SELECT fid, geom{names} FROM {q(table)} ORDER BY fid"):
+                values = dict(zip(cols, row[2:]))
+                raw = gpkg.wkb(row[1])
+                pid = str(values.get(ID_FIELD) or "").strip() or None
+                key = (pid, int(values.get(PART_FIELD) or 1) if part and pid else 1)
+                out.append(_Stored(int(row[0]), key, values.get(SIG_FIELD), row_signature(raw, values), raw, values,
+                                   gpkg.blob_srs(row[1])))
+        else:
+            extra = f", {q(PART_FIELD)}" if part else ""
+            for row in con.execute(f"SELECT fid, {q(ID_FIELD)}, {q(SIG_FIELD)}{extra} FROM {q(table)} ORDER BY fid"):
+                pid = str(row[1] or "").strip() or None
+                key = (pid, int(row[3] or 1) if part and pid else 1)
+                out.append(_Stored(int(row[0]), key, row[2]))
+        return out
+
+    @staticmethod
+    def _sort(rows: list[_Stored], known: dict) -> tuple[dict, list]:
+        """``{key: row}`` of the rows with an identity, and the others: without one, or copies of
+        a row (QGIS copies every attribute) - the row known here, else the first, is the original."""
+        primary: dict[tuple, _Stored] = {}
+        others = []
+        for s in rows:
+            if s.key[0] is None:
+                others.append(s)
+                continue
+            cur = primary.get(s.key)
+            if cur is None:
+                primary[s.key] = s
+            elif known.get(s.key) == s.fid:
+                others.append(cur)
+                primary[s.key] = s
+            else:
+                others.append(s)
+        return primary, others
+
+    def _write_table(self, con, table: str, feats: list, srs_id: int, force: bool) -> dict:
+        """The rows of ``table`` brought to ``feats`` one by one; returns ``{key: fid}`` of its rows."""
+        from . import gpkg
+
+        q = gpkg.quote
+        label = STYLES[table][1]
+        keys = ["layer", "etichetta"] + ([label] if label not in ("layer", "etichetta") else [])
+        keys += [k for k in BASE_COLUMNS.get(table, []) if k not in keys]
+        keys += sorted({_column(k) for _, a in feats for k in a if not str(k).startswith("_")} - set(keys))
+        keys += [k for k in (ID_FIELD, SIG_FIELD) + ((PART_FIELD,) if table == "unita" else ()) if k not in keys]
+        before = [r[1] for r in con.execute(f"PRAGMA table_info({q(table)})")]
+        cols = gpkg.ensure_table(con, table, LIVE_TABLES[table][1], {k: _sql_type(k) for k in keys}, srs_id,
+                                 identifier=LIVE_TABLES[table][0])
+        types = {r[1]: r[2] for r in con.execute(f"PRAGMA table_info({q(table)})")}
+        if before and ID_FIELD not in before:
+            con.execute(f"DELETE FROM {q(table)}")  # written by an earlier version: rows without identity
+        two_way = table in TWO_WAY_TABLES
+        known = self._known.get(table, {})
+        primary, others = self._sort(self._scan(con, table, cols, content=two_way or force), known)
+        written = [c for c in cols if c != SIG_FIELD]
+        names = "".join(f", {q(c)}" for c in written)
+        insert = f"INSERT INTO {q(table)} (geom{names}) VALUES ({', '.join('?' * (len(written) + 1))})"
+        update = f"UPDATE {q(table)} SET geom = ?{''.join(f', {q(c)} = ?' for c in written)} WHERE fid = ?"
+        touched, after, changed = [], {}, False
+        for w in self._wanted(table, feats, cols, types):
+            s = primary.pop(w.key, None)
+            row = [gpkg.blob(w.geom, srs_id)] + [w.values.get(c) for c in written]
+            if s is None:
+                fid = con.execute(insert, row).lastrowid
+                touched.append(fid)
+            else:
+                fid = s.fid
+                if two_way and s.external:
+                    pass  # edited in QGIS and not read back yet: the reader takes it first
+                elif s.stored_sig != w.sig or (s.content_sig is not None and s.content_sig != w.sig):
+                    con.execute(update, row + [fid])
+                    touched.append(fid)
+            after[w.key] = fid
+        for key, s in primary.items():  # rows of features gone here
+            if two_way and s.external:
+                after[key] = s.fid  # changed in QGIS, deleted here: the reader decides
+                continue
+            con.execute(f"DELETE FROM {q(table)} WHERE fid = ?", (s.fid,))
+            changed = True
+        for s in others:  # drawn or copied in QGIS: in a two-way table the reader gives them an identity
+            if not two_way:
+                con.execute(f"DELETE FROM {q(table)} WHERE fid = ?", (s.fid,))
+                changed = True
+        if touched:
+            self._sign(con, table, cols, touched)
+        if touched or changed:
+            gpkg.set_extent(con, table, _bounds(con, table))
+        return after
+
+    @staticmethod
+    def _sign(con, table: str, cols: list[str], fids: list[int]) -> None:
+        """``ppg_sig`` of the rows just written, from what SQLite keeps of them."""
+        from . import gpkg
+
+        q = gpkg.quote
+        names = "".join(f", {q(c)}" for c in cols)
+        sigs = []
+        for k in range(0, len(fids), 500):
+            chunk = fids[k:k + 500]
+            for row in con.execute(f"SELECT fid, geom{names} FROM {q(table)} WHERE fid IN "
+                                   f"({', '.join('?' * len(chunk))})", chunk):
+                sigs.append((row_signature(gpkg.wkb(row[1]), dict(zip(cols, row[2:]))), row[0]))
+        con.executemany(f"UPDATE {q(table)} SET {q(SIG_FIELD)} = ? WHERE fid = ?", sigs)
+
+    # ------------------------------------------------------------------ reading back
+    def external_change(self) -> bool:
+        """Whether another program committed to the GeoPackage since it was last read here (the
+        program's own writes do not count). False while there is no GeoPackage."""
+        if not self.path.exists():
+            return False
+        con = self._connection()
+        return con.execute("PRAGMA data_version").fetchone()[0] != self._data_version
+
+    def read_changes(self, busy_ms: int = 250) -> dict[str, TableChanges]:
+        """What another program (QGIS) changed in the two-way tables since the last write or read:
+        ``{table: TableChanges}``, only the tables with changes. The rows drawn there get their
+        identity and every row read its signature, in the same transaction: a change is given once.
+        :class:`sqlite3.OperationalError` (database locked) when QGIS holds the file: try again."""
+        from . import gpkg
+
+        if not gpkg.is_geopackage(self.path):
+            return {}
+        q = gpkg.quote
+        con = self._connection()
+        srs = gpkg.srs_of(self.crs)[0]
+        out, known = {}, {}
+        con.execute(f"PRAGMA busy_timeout = {int(busy_ms)}")
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                version = con.execute("PRAGMA data_version").fetchone()[0]
+                for table in TWO_WAY_TABLES:
+                    cols = [r[1] for r in con.execute(f"PRAGMA table_info({q(table)})") if r[1] not in ("fid", "geom")]
+                    if ID_FIELD not in cols:
+                        continue  # not written by this version yet
+                    have = gpkg.table_srs(con, table)
+                    if have is not None and have != srs:
+                        out[table] = TableChanges(refused=(have, srs))
+                        continue
+                    ch, known[table] = self._read_table(con, table, cols)
+                    if ch:
+                        out[table] = ch
+                con.execute("COMMIT")
+            except BaseException:
+                if con.in_transaction:
+                    con.execute("ROLLBACK")
+                raise
+        finally:
+            con.execute("PRAGMA busy_timeout = 10000")
+        self._data_version = version
+        self._known.update(known)
+        return out
+
+    def _read_table(self, con, table: str, cols: list[str]) -> tuple[TableChanges, dict]:
+        from . import gpkg
+
+        q = gpkg.quote
+        known = self._known.get(table, {})
+        primary, others = self._sort(self._scan(con, table, cols, content=True), known)
+        ch = TableChanges()
+        part = PART_FIELD in cols
+        for s in others:  # drawn in QGIS, or a copy: a feature of its own
+            s.key = (new_id(), 1)
+            sets = f"{q(ID_FIELD)} = ?" + (f", {q(PART_FIELD)} = 1" if part else "")
+            con.execute(f"UPDATE {q(table)} SET {sets}, {q(SIG_FIELD)} = ? WHERE fid = ?",
+                        (s.key[0], s.content_sig, s.fid))
+            s.values[ID_FIELD] = s.key[0]
+            if part:
+                s.values[PART_FIELD] = 1
+            ch.added.append(s)
+        for s in primary.values():
+            if s.external:
+                con.execute(f"UPDATE {q(table)} SET {q(SIG_FIELD)} = ? WHERE fid = ?", (s.content_sig, s.fid))
+                ch.changed.append(s)
+        ch.deleted = [k for k in known if k not in primary]
+        rows = list(primary.values()) + others
+        ch.rows = [self._feature(s) for s in rows]
+        by_fid = {f.fid: f for f in ch.rows}
+        ch.changed = [by_fid[s.fid] for s in ch.changed]
+        ch.added = [by_fid[s.fid] for s in ch.added]
+        return ch, {s.key: s.fid for s in rows}
+
+    @staticmethod
+    def _feature(s: _Stored) -> Feature:
+        import shapely
+
+        try:
+            geom = shapely.from_wkb(s.wkb) if s.wkb is not None else None
+        except Exception:  # noqa: BLE001 - a geometry QGIS wrote that shapely cannot read: said by the reader
+            geom = None
+        return Feature(s.fid, s.key[0], s.key[1], geom, dict(s.values or {}), s.srs_id)
 
     def counts(self) -> dict[str, int]:
         """Number of features per table (for checks); zeros before the first write."""
@@ -231,10 +636,36 @@ class LiveLink:
             con.close()
 
 
+def _bounds(con, table: str) -> list:
+    """``(minx, miny, maxx, maxy)`` of every row of ``table``: the envelope of the header when the
+    geometry has one, else the geometry's own."""
+    import struct
+
+    from . import gpkg
+
+    out = []
+    for (data,) in con.execute(f"SELECT geom FROM {gpkg.quote(table)}"):
+        if data is None or len(data) < 8:
+            continue
+        data = bytes(data)
+        if (data[3] >> 1) & 0b111 and not data[3] & 0b10000:
+            minx, maxx, miny, maxy = struct.unpack("<4d" if data[3] & 1 else ">4d", data[8:40])
+            out.append((minx, miny, maxx, maxy))
+        else:
+            g = gpkg.geometry(data)
+            if g is not None and not g.is_empty:
+                out.append(g.bounds)
+    return out
+
+
 def export_layers(folder: str | Path, layers: dict[str, dict], crs: str) -> dict[str, Path]:
     """Write the live GeoPackage from the layers of the raster view (see :meth:`LiveLink.write`);
     returns ``{table: path of the GeoPackage}``."""
-    return LiveLink(folder, crs).write(layers, force=True)
+    link = LiveLink(folder, crs)
+    try:
+        return link.write(layers, force=True)
+    finally:
+        link.close()
 
 
 _BUILD_SCRIPT = r'''
@@ -449,4 +880,5 @@ def open_in_qgis(project_path: str | Path, qgis: QgisInstall | None = None) -> N
 
 
 __all__ = ["find_qgis", "export_layers", "build_project", "open_in_qgis", "classify_layer", "LiveLink", "LIVE_DB",
-           "LIVE_TABLES", "QgisInstall"]
+           "LIVE_TABLES", "QgisInstall", "TWO_WAY_TABLES", "ID_FIELD", "SIG_FIELD", "PART_FIELD", "Feature",
+           "TableChanges", "new_id", "stable_id", "row_signature"]
