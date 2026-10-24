@@ -158,10 +158,11 @@ def write_xlsx(path, tables: Mapping[str, Any], title: str | None = None) -> Pat
         for c, h in enumerate(headers, 1):
             cell = ws.cell(row=1, column=c, value=ILLEGAL_CHARACTERS_RE.sub("", h))
             cell.font, cell.fill, cell.alignment = bold, fill, head_align
-        formats = []
+        formats, given = [], []
         for c in range(ncols):
             dec = sheet.decimals[c] if c < len(sheet.decimals) else None
             formats.append(number_format([r[c] for r in rows], dec))
+            given.append(dec is not None)
         for ri, row in enumerate(rows, 2):
             for c, v in enumerate(row, 1):
                 if isinstance(v, str):
@@ -170,7 +171,10 @@ def write_xlsx(path, tables: Mapping[str, Any], title: str | None = None) -> Pat
                 if isinstance(v, str) and v.startswith("="):
                     cell.data_type = "s"  # a text, never a formula
                 elif formats[c - 1] and isinstance(v, (int, float)) and not isinstance(v, bool):
-                    cell.number_format = formats[c - 1]
+                    fmt = formats[c - 1]
+                    if isinstance(v, int) and "." in fmt and not given[c - 1]:  # a count among measures
+                        fmt = "#,##0" if abs(v) >= 10000 else "0"  # (the values of the project sheet)
+                    cell.number_format = fmt
         for c in range(ncols):
             longest = max([len(w) for w in headers[c].split()] + [len(headers[c]) // 2, 4])
             for r in rows[:2000]:

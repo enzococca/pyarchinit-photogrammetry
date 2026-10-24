@@ -377,11 +377,14 @@ def test_write_xlsx_keeps_numbers_and_makes_valid_sheets(tmp_path):
                               [["P1", 2480001.123456, 12, 0.00123, "=1+1", True],
                                ["P2", np.float64(2480002.5), np.int32(40000), float("nan"), None, False]],
                               [None, 3, None, 4, None, None]),
-              "Misure ": (["a"], [[1]])}
+              "Misure ": (["a"], [[1]]),
+              "Progetto": (["Campo", "Valore"], [["Foto", 57], ["Punti", 316195], ["Errore", 0.7123]])}
     out = write_xlsx(tmp_path / "t", tables, title="Prova")
     assert out.suffix == ".xlsx"
     wb = load_workbook(out)
-    assert wb.sheetnames == ["Misure", "Misure (2)"] and wb.properties.title == "Prova"
+    assert wb.sheetnames == ["Misure", "Misure (2)", "Progetto"] and wb.properties.title == "Prova"
+    kv = wb["Progetto"]  # counts among measures stay whole numbers
+    assert (kv["B2"].number_format, kv["B3"].number_format, kv["B4"].number_format) == ("0", "#,##0", "0.000")
     ws = wb["Misure"]
     assert [c.value for c in ws[1]] == ["Nome", "X", "Punti", "Errore", "Note", "Ok"]
     assert ws["B2"].value == pytest.approx(2480001.123456) and ws["B2"].number_format == "0.000"
