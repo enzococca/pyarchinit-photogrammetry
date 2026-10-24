@@ -15,7 +15,8 @@ os.environ.setdefault("PPG_RENDERER", "software")
 
 from PySide6.QtWidgets import QLabel  # noqa: E402
 
-LEFT = ["pane_workspace", "pane_reference", "pane_layers", "pane_proxies", "pane_multispectral", "pane_thermal"]
+LEFT = ["pane_workspace", "pane_reference", "pane_layers"]  # the fixed panes
+RIGHT = ["pane_pyarchinit", "pane_proxies", "pane_multispectral", "pane_thermal"]  # beside them: the tools
 BOTTOM = ["pane_photos", "pane_sections", "pane_console", "pane_log"]
 
 
@@ -75,29 +76,31 @@ def test_every_pane_is_a_dock_of_its_own(make_window, qapp):
 
     w = make_window()
     docks = {d.objectName(): d for d in w.findChildren(QDockWidget)}
-    panes = dict(zip(LEFT + BOTTOM + ["pane_pyarchinit"],
-                     [w.workspace, w.reference, w.layers_pane, w.proxies_pane, w.ms_pane, w.thermal_pane,
-                      w.photos_panel, w.sections_pane, w.console, w.log_pane, w.pa_pane]))
+    panes = dict(zip(LEFT + RIGHT + BOTTOM,
+                     [w.workspace, w.reference, w.layers_pane, w.pa_pane, w.proxies_pane, w.ms_pane, w.thermal_pane,
+                      w.photos_panel, w.sections_pane, w.console, w.log_pane]))
     assert set(panes) <= set(docks)
     for name, pane in panes.items():  # in a scroll area: a pane taller than a laptop screen scrolls
         scroll = docks[name].widget()
         assert isinstance(scroll, QScrollArea) and scroll.widget() is pane, name
     area = Qt.DockWidgetArea
     assert all(w.dockWidgetArea(docks[n]) == area.LeftDockWidgetArea for n in LEFT)
+    assert all(w.dockWidgetArea(docks[n]) == area.RightDockWidgetArea for n in RIGHT)
     assert all(w.dockWidgetArea(docks[n]) == area.BottomDockWidgetArea for n in BOTTOM)
-    assert w.dockWidgetArea(docks["pane_pyarchinit"]) == area.RightDockWidgetArea and w.d_pa is docks["pane_pyarchinit"]
-    # tabbed as the tabs of 1.3.3: the left ones together, the bottom ones together, tabs on top
+    assert w.d_pa is docks["pane_pyarchinit"]
+    # the fixed panes tabbed on the left, the tools on the right (seen beside them), the bottom ones together
     assert {d.objectName() for d in w.tabifiedDockWidgets(docks["pane_workspace"])} == set(LEFT[1:])
+    assert {d.objectName() for d in w.tabifiedDockWidgets(docks["pane_pyarchinit"])} == set(RIGHT[1:])
     assert {d.objectName() for d in w.tabifiedDockWidgets(docks["pane_photos"])} == set(BOTTOM[1:])
     assert _front(docks["pane_workspace"]) and _front(docks["pane_photos"]) and _front(docks["pane_pyarchinit"])
-    assert not any(_front(docks[n]) for n in LEFT[1:] + BOTTOM[1:])
+    assert not any(_front(docks[n]) for n in LEFT[1:] + RIGHT[1:] + BOTTOM[1:])
     assert w.tabPosition(area.LeftDockWidgetArea) == QTabWidget.TabPosition.North
     assert w.tabPosition(area.BottomDockWidgetArea) == QTabWidget.TabPosition.North
     options = QMainWindow.DockOption
     for option in (options.AllowTabbedDocks, options.AllowNestedDocks, options.GroupedDragging):
         assert w.dockOptions() & option
     bars = w.panes._tab_bars()
-    assert sorted(b.count() for b in bars) == [len(BOTTOM), len(LEFT)]
+    assert sorted(b.count() for b in bars) == sorted([len(LEFT), len(RIGHT), len(BOTTOM)])
     if icons.available():  # the icon of each pane on its tab, as on the tabs of 1.3.3
         assert all(not b.tabIcon(i).isNull() for b in bars for i in range(b.count()))
     for page in (w.layers_pane, w.proxies_pane, w.reference, w.ms_pane):  # still fits a laptop screen
@@ -137,11 +140,11 @@ def test_fixed_panes_stay_the_others_close_and_come_back_from_the_menu(make_wind
     assert ms.close()
     _settle(qapp)
     assert ms.isHidden() and not menu["Multispettrale"].isChecked()
-    assert ms not in w.tabifiedDockWidgets(fixed[0])  # its tab went with it
+    assert ms not in w.tabifiedDockWidgets(w.d_pa)  # its tab went with it
     menu["Multispettrale"].trigger()  # Vista > Pannelli > Multispettrale
     _settle(qapp)
     assert menu["Multispettrale"].isChecked() and _front(ms) and w.left_tabs.currentWidget() is w.ms_pane
-    assert ms in w.tabifiedDockWidgets(fixed[0])  # back among the panes it was tabbed with
+    assert ms in w.tabifiedDockWidgets(w.d_pa)  # back among the panes it was tabbed with (on the right)
     menu["Multispettrale"].trigger()  # unchecked: closed again
     _settle(qapp)
     assert ms.isHidden()
@@ -196,8 +199,8 @@ def test_layout_saved_restored_and_reset(make_window, qapp):
     w2.panes.reset_action.trigger()
     _settle(qapp)
     assert w2.dockWidgetArea(s2) == area.BottomDockWidgetArea and not l2.isHidden() and not t2.isFloating()
-    assert w2.dockWidgetArea(t2) == area.LeftDockWidgetArea
-    assert t2 in w2.tabifiedDockWidgets(w2.panes.dock(w2.workspace))
+    assert w2.dockWidgetArea(t2) == area.RightDockWidgetArea  # the tools start on the right
+    assert t2 in w2.tabifiedDockWidgets(w2.d_pa)
     assert _front(w2.panes.dock(w2.workspace)) and _front(w2.panes.dock(w2.photos_panel))
     # the window keeps its layout when it closes; the next one takes it back
     w.setWindowModified(False)
@@ -218,14 +221,14 @@ def test_next_and_previous_pane(make_window, qapp):
     _settle(qapp)
     assert _front(w.panes.dock(w.reference)) and w.panes.focused() is w.panes.dock(w.reference)
     w.panes.previous_action.trigger()
-    w.panes.previous_action.trigger()  # round to the last pane of the group
+    w.panes.previous_action.trigger()  # round to the last pane tabbed with them
     _settle(qapp)
-    assert _front(w.panes.dock(w.thermal_pane))
+    assert _front(w.panes.dock(w.layers_pane))
     w._show_pane(w.console)  # the focus in the console: the bottom group
     w.console.inp.setFocus()
     w.panes.next_action.trigger()
     _settle(qapp)
-    assert _front(w.panes.dock(w.log_pane)) and _front(w.panes.dock(w.thermal_pane))
+    assert _front(w.panes.dock(w.log_pane)) and _front(w.panes.dock(w.layers_pane))
 
 
 class _TerrainPane(QLabel):
@@ -246,14 +249,15 @@ def test_plugins_written_for_the_tabs_of_1_3_3(make_window, qapp):
     assert k == tabs.indexOf(pane) == tabs.count() - 1 and tabs.widget(k) is pane and tabs.tabText(k) == "Terreno"
     dock = w.panes.dock(pane)
     assert dock.objectName() == "pane_plugin_test_gui_panes"  # from the package of the pane: the same every time
-    assert dock in w.tabifiedDockWidgets(w.panes.dock(w.workspace))
+    assert dock in w.tabifiedDockWidgets(w.d_pa)  # a plugin's pane starts on the right, beside the fixed ones
     assert "Terreno" in [a.text() for a in w.panes.menu.actions()]
     # how they show their pane: setCurrentWidget, then d_work.show() and d_work.raise_()
     tabs.setCurrentWidget(pane)
     w.d_work.show()
     w.d_work.raise_()
     _settle(qapp)
-    assert _front(dock) and not _front(w.panes.dock(w.workspace)) and tabs.currentWidget() is pane
+    # on the right in front, the Area di lavoro still in front on the left: both are seen
+    assert _front(dock) and _front(w.panes.dock(w.workspace)) and tabs.currentWidget() is pane
     dock.close()  # closed by the user: shown again the same way
     _settle(qapp)
     tabs.setCurrentWidget(pane)
@@ -317,8 +321,8 @@ def test_reset_puts_back_panes_that_came_later(make_window, qapp):
     w.panes.reset()
     _settle(qapp)
     workspace = w.panes.dock(w.workspace)
-    assert not dock.isFloating() and dock in w.tabifiedDockWidgets(workspace)
-    assert other in w.tabifiedDockWidgets(workspace) and other not in w.tabifiedDockWidgets(photos)
+    assert not dock.isFloating() and dock in w.tabifiedDockWidgets(w.d_pa)
+    assert other in w.tabifiedDockWidgets(w.d_pa) and other not in w.tabifiedDockWidgets(photos)
     assert not console.isHidden() and console in w.tabifiedDockWidgets(photos)
     assert _front(workspace) and _front(photos)
 
@@ -339,7 +343,7 @@ def test_context_add_pane_show_pane_and_release(make_window, qapp, tmp_path):
     assert isinstance(dock, QDockWidget) and dock.objectName() == "pane_plugin_prova-pannelli"
     assert dock2.objectName() == "pane_plugin_prova-pannelli_2"
     assert dock.features() & QDockWidget.DockWidgetFeature.DockWidgetClosable
-    assert dock in w.tabifiedDockWidgets(w.panes.dock(w.workspace))
+    assert dock in w.tabifiedDockWidgets(w.d_pa)  # on the right by default
     assert dock2 in w.tabifiedDockWidgets(w.panes.dock(w.photos_panel))
     assert dock.windowIcon().isNull() != icons.available()
     assert {"Pannello di prova", "Secondo"} <= {a.text() for a in w.panes.menu.actions()}
@@ -347,7 +351,7 @@ def test_context_add_pane_show_pane_and_release(make_window, qapp, tmp_path):
     _settle(qapp)
     context.show_pane(first)
     _settle(qapp)
-    assert _front(dock) and w.left_tabs.currentWidget() is first
+    assert _front(dock) and w.panes.groups["right"].currentWidget() is first
     context.release()  # the plugin goes: its panes too
     _settle(qapp)
     assert not shiboken6.isValid(dock) and not shiboken6.isValid(dock2)
@@ -404,7 +408,7 @@ class PanesPlugin(Plugin):
     w.plugins.unload()
     _settle(qapp)
     assert w.left_tabs.indexOf(plugin.old) < 0 and w.panes.dock(plugin.new) is None
-    assert {d.objectName() for d in w.panes.docks} == set(LEFT + BOTTOM + ["pane_pyarchinit"])
+    assert {d.objectName() for d in w.panes.docks} == set(LEFT + RIGHT + BOTTOM)
 
 
 def test_panes_in_english(make_window, qapp):

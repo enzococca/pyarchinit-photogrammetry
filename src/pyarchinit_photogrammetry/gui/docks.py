@@ -125,7 +125,9 @@ class PaneGroup:
     def insertTab(self, index: int, widget: QWidget, *args) -> int:  # noqa: N802
         """``insertTab(index, widget, title)`` or ``insertTab(index, widget, icon, title)``."""
         icon, title = (args[0], args[1]) if len(args) >= 2 else (None, args[0] if args else "")
-        dock = self._panes.add(widget, str(title), icon, area=self.area, index=index)
+        # the panes plugins put among the left tabs until 1.3.3 start on the right, beside the fixed panes
+        place = "right" if self.area == "left" else None
+        dock = self._panes.add(widget, str(title), icon, area=self.area, index=index, place=place)
         return self.docks.index(dock)
 
     def removeTab(self, index: int) -> None:  # noqa: N802
@@ -286,17 +288,18 @@ class Panes(QObject):
         return next((d for d in self.docks if d.pane is widget), None)
 
     def add(self, widget: QWidget, title: str, icon=None, *, name: str | None = None, area: str = "left",
-            fixed: bool = False, index: int | None = None) -> PaneDock:
+            fixed: bool = False, index: int | None = None, place: str | None = None) -> PaneDock:
         """``widget`` as a pane of ``area`` ("left", "bottom", "right"), tabbed with the panes there
         or, after the window took back the layout of the last session, where the user left it."""
-        if area not in self.groups:
-            raise ValueError(f"area {area!r}: one of {', '.join(AREAS)}")
+        if area not in self.groups or (place is not None and place not in self.groups):
+            raise ValueError(f"area {area!r}, place {place!r}: one of {', '.join(AREAS)}")
         found = self.dock(widget)
         if found is not None:
             return found
         group = self.groups[area]
         dock = PaneDock(widget, title, self._unique(name or self._plugin_name(widget, title)), group, self.window,
                         _icon(icon), fixed)
+        dock.place = place or area  # the side it starts on (a pane of the left group may start on the right)
         index = len(group.docks) if index is None else max(0, min(int(index), len(group.docks)))
         group.docks.insert(index, dock)
         dock.visibilityChanged.connect(lambda visible, d=dock: self._seen(d, visible))
@@ -355,10 +358,11 @@ class Panes(QObject):
                 group.current = group.docks[0]
 
     def _place(self, dock: PaneDock) -> None:
-        """In its group: tabbed with a pane of the group docked on its side, else on that side."""
-        area = AREAS[dock.group.area]
-        others = [d for d in dock.group.docks
-                  if d is not dock and not d.isFloating() and self.window.dockWidgetArea(d) == area]
+        """On the side it starts on: tabbed with a pane of its group docked there, else with any pane
+        docked there, else alone on that side."""
+        area = AREAS[getattr(dock, "place", dock.group.area)]
+        there = [d for d in self.docks if d is not dock and not d.isFloating() and self.window.dockWidgetArea(d) == area]
+        others = [d for d in there if d.group is dock.group] or there
         anchor = next((d for d in others if not d.isHidden()), others[0] if others else None)
         reopen = False
         if self.window.dockWidgetArea(dock) != Qt.DockWidgetArea.NoDockWidgetArea:  # in the window already

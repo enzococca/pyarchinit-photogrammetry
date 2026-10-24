@@ -116,10 +116,11 @@ gli altri layer e si esportano in GeoPackage, CSV o GeoJSON (*Esporta i punti di
 
 ### Pannelli
 
-Ogni pannello è un dock a sé, come in Metashape. Al primo avvio i pannelli di sinistra sono le schede
-di un gruppo (*Area di lavoro*, *Riferimenti*, *Layer*, *Proxy US*, *Multispettrale*, *Termico* e i
-pannelli dei plugin), quelli in basso di un altro (*Foto*, *Sezioni*, *Console Python*, *Log*), e
-*PyArchInit* è a destra. Le schede stanno in alto, con l'icona di ogni pannello; la barra del titolo
+Ogni pannello è un dock a sé, come in Metashape. Al primo avvio i tre pannelli fissi sono le schede di
+un gruppo a sinistra (*Area di lavoro*, *Riferimenti*, *Layer*); i pannelli degli strumenti stanno a
+destra, nelle schede di *PyArchInit* (*Proxy US*, *Multispettrale*, *Termico* e i pannelli dei plugin),
+così uno strumento si vede accanto all'albero del progetto; quelli in basso sono un altro gruppo
+(*Foto*, *Sezioni*, *Console Python*, *Log*). Le schede stanno in alto, con l'icona di ogni pannello; la barra del titolo
 sotto di loro dice qual è il pannello in primo piano.
 
 * **Spostare**: si trascina un pannello per la sua scheda (o tutto il gruppo per la barra del titolo)

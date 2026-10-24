@@ -115,10 +115,11 @@ exported as GeoPackage, CSV or GeoJSON (*Esporta i punti di misura...*).
 
 ### Panes
 
-Every pane is a dock of its own, as in Metashape. At the first start the panes on the left are the
-tabs of one group (*Area di lavoro*, *Riferimenti*, *Layer*, *Proxy US*, *Multispettrale*, *Termico*
-and the panes of the plugins), those at the bottom of another (*Foto*, *Sezioni*, *Console Python*,
-*Log*), and *PyArchInit* is on the right. The tabs are on top, with the icon of each pane; the title
+Every pane is a dock of its own, as in Metashape. At the first start the three fixed panes are the
+tabs of one group on the left (*Area di lavoro*, *Riferimenti*, *Layer*); the panes of the tools are
+on the right, tabbed with *PyArchInit* (*Proxy US*, *Multispettrale*, *Termico* and the panes of the
+plugins), so a tool shows beside the project tree; those at the bottom are another group (*Foto*,
+*Sezioni*, *Console Python*, *Log*). The tabs are on top, with the icon of each pane; the title
 bar under them names the pane in front.
 
 * **Move**: drag a pane by its tab (or the whole group by its title bar) to another side of the

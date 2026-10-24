@@ -278,6 +278,8 @@ class MainWindow(QMainWindow):
         self.pa_pane.new_site_requested.connect(self.pyarchinit_new_site)
         self.pa_pane.us_requested.connect(lambda sito, area, us, tipo: self.open_us_form(sito, area, us, tipo))
         self.pa_pane.site_changed.connect(self.set_project_site)
+        # on the right PyArchInit (in front) and the panes of the tools: they show beside the fixed panes
+        self.d_pa = add(self.pa_pane, "PyArchInit", icon("database"), name="pane_pyarchinit", area="right")
         add(self.workspace, tr("Area di lavoro"), icon("workspace"), name="pane_workspace", fixed=True)
         add(self.reference, tr("Riferimenti"), icon("reference_pane"), name="pane_reference", fixed=True)
         self.layers_pane = LayersPane()
@@ -293,7 +295,7 @@ class MainWindow(QMainWindow):
         add(self.layers_pane, "Layer", icon("slice"), name="pane_layers", fixed=True)
         self.layers_pane.us_form_requested.connect(self._us_form_from_feature)
         self.proxies_pane = ProxiesPane()
-        add(self.proxies_pane, tr("Proxy US"), icon("us"), name="pane_proxies")
+        add(self.proxies_pane, tr("Proxy US"), icon("us"), name="pane_proxies", place="right")
         self.proxies_pane.create_requested.connect(self.create_proxies)
         self.proxies_pane.show_requested.connect(lambda: self._show_model("proxies"))
         self.proxies_pane.export_requested.connect(self.export_proxies)
@@ -305,9 +307,9 @@ class MainWindow(QMainWindow):
 
         # the multispectral and the thermal steps, each in its tab (the first three steps are the same)
         self.ms_pane = MultispectralPane(mode="spectral")
-        add(self.ms_pane, tr("Multispettrale"), icon("multispectral"), name="pane_multispectral")
+        add(self.ms_pane, tr("Multispettrale"), icon("multispectral"), name="pane_multispectral", place="right")
         self.thermal_pane = MultispectralPane(mode="thermal")
-        add(self.thermal_pane, tr("Termico"), icon("thermal"), name="pane_thermal")
+        add(self.thermal_pane, tr("Termico"), icon("thermal"), name="pane_thermal", place="right")
         self.ms_pane.add_requested.connect(self.ms_add)
         self.thermal_pane.add_requested.connect(lambda: self.ms_add(thermal=True))
         for pane in (self.ms_pane, self.thermal_pane):
@@ -348,7 +350,6 @@ class MainWindow(QMainWindow):
         add(self.sections_pane, tr("Sezioni"), icon("line"), name="pane_sections", area="bottom")
         add(self.console, tr("Console Python"), icon("console"), name="pane_console", area="bottom")
         add(self.log_pane, "Log", icon("log"), name="pane_log", area="bottom")
-        self.d_pa = add(self.pa_pane, "PyArchInit", icon("database"), name="pane_pyarchinit", area="right")
         # until 1.3.3 the docks of the left and of the bottom tabs: now the pane in front of each side
         self.d_work, self.d_photos = GroupDock(self.left_tabs), GroupDock(self.bottom_tabs)
         self.resizeDocks([self.left_tabs.docks[0], self.d_pa], [360, 300], Qt.Orientation.Horizontal)

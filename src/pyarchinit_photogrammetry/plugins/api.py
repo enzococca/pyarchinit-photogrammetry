@@ -377,7 +377,7 @@ class Context:
             pass
 
     # ------------------------------------------------------------------ panes (since 1.3.4)
-    def add_pane(self, widget, title: str, icon=None, area: str = "left"):
+    def add_pane(self, widget, title: str, icon=None, area: str = "right"):
         """Since 1.3.4: ``widget`` as a pane of the window, a dock of its own tabbed with the panes of
         ``area`` ("left", "bottom" or "right"): the user moves it, floats it as a window, closes it and
         opens it again from *Vista > Pannelli*, and the window remembers where it was. ``icon``: a QIcon
