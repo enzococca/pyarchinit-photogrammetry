@@ -201,7 +201,8 @@ Punti aperti, senza un ordine fisso:
   termica, pannello, sensore di luce e registrazione delle bande contro i numeri di MicaSense; banda
   termica entro 0,3 pixel termici; pannello + sensore di luce di predefinito); resta da provare un volo
   MicaSense intero fino all'ortofoto di riflettanza.
-* Windows ARM64: mancano ancora la vista 3D VTK (si usa quella più semplice) e l'E57.
+* Windows ARM64: la vista 3D VTK e l'E57. *Fatto* nella 1.3.5 (VTK 9.7.1 e pye57 compilati per ARM64; la
+  vista provata su una macchina Windows 11 ARM64 con OpenGL 4.3). SpatiaLite aspetta un QGIS per ARM64.
 * Idee proposte ma non ancora decise:
     * calcolatore raster (formule su qualsiasi raster del progetto);
     * plugin samgeo (segmentare l'ortofoto scrivendo «pietre», «muri»);

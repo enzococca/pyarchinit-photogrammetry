@@ -200,7 +200,8 @@ Open points, in no fixed order:
   thermal band, panel, sun sensor and band registration against MicaSense's own numbers; the thermal
   band within 0.3 thermal pixels; panel + sun sensor by default); a whole MicaSense flight to the
   reflectance orthomosaic is still to be tried.
-* Windows ARM64: the VTK 3D view (the simpler renderer is used) and E57 are still missing.
+* Windows ARM64: the VTK 3D view and E57. *Done* in 1.3.5 (VTK 9.7.1 and pye57 built for ARM64; the view
+  checked in a Windows 11 ARM64 machine with OpenGL 4.3). SpatiaLite waits for an ARM64 build of QGIS.
 * Ideas proposed but not decided yet:
     * a raster calculator (formulas on any raster of the project);
     * a samgeo plugin (segmenting the orthomosaic by writing "stones", "walls");
