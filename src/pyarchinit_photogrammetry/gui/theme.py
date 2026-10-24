@@ -1,6 +1,8 @@
 """Light and dark themes: Fusion style, palette and a style sheet shared by all widgets."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
@@ -20,6 +22,7 @@ DARK = {
     "code_bg": "#1b1f24", "scroll": "#4a525c", "progress": "#4ea1ff",
 }
 
+_RESOURCES = Path(__file__).with_name("resources")
 _QSS = """
 QMainWindow, QDialog, QWidget#startPage {{ background: {window}; }}
 QWidget {{ color: {text}; font-size: 13px; }}
@@ -37,12 +40,23 @@ QMenuBar::item:selected {{ background: {hover}; }}
 QMenu {{ background: {panel}; border: 1px solid {border}; padding: 6px; }}
 QMenu::item {{ padding: 6px 28px 6px 10px; border-radius: 4px; }}
 QMenu::item:selected {{ background: {hover}; }}
+QMenu::item:disabled {{ color: {text_dim}; }}  /* also the panes always there in Vista > Pannelli */
 QMenu::separator {{ height: 1px; background: {border}; margin: 5px 8px; }}
 QMenu::icon {{ margin-left: 6px; }}
-QDockWidget {{ titlebar-close-icon: none; titlebar-normal-icon: none; }}
+QDockWidget {{ titlebar-close-icon: url("{dock_close}"); titlebar-normal-icon: url("{dock_float}"); }}
 QDockWidget::title {{ background: {dock_title}; padding: 6px 10px; border: 1px solid {border}; border-bottom: none;
                       font-weight: 600; text-align: left; }}
-QDockWidget > QWidget {{ border: 1px solid {border}; }}
+QDockWidget::close-button, QDockWidget::float-button {{ background: transparent; border: none; border-radius: 4px;
+                                                       icon-size: 22px; }}  /* Qt draws 5/8 of it: 13 px */
+QDockWidget::close-button:hover, QDockWidget::float-button:hover {{ background: {hover}; }}
+QDockWidget::close-button:pressed, QDockWidget::float-button:pressed {{ background: {selected}; }}
+QDockWidget > QScrollArea {{ border: 1px solid {border}; }}
+/* the tabs of the panes; the arrows of a row of tabs too long for its side */
+QMainWindow > QTabBar::tab, QDockWidgetGroupWindow > QTabBar::tab {{ padding: 5px 7px; margin-right: 1px; }}
+QTabBar::scroller {{ width: 28px; }}
+QTabBar QToolButton {{ background: {panel}; border: 1px solid {border}; border-radius: 4px; padding: 0px; margin: 0px;
+                       width: 12px; }}
+QTabBar QToolButton:hover {{ background: {hover}; }}
 QTabWidget::pane {{ border: 1px solid {border}; background: {panel}; top: -1px; }}
 QTabBar::tab {{ background: {tab}; color: {text_dim}; padding: 7px 14px; border: 1px solid {border};
                 border-bottom: none; border-top-left-radius: 6px; border-top-right-radius: 6px; margin-right: 2px; }}
@@ -113,7 +127,9 @@ def apply(app: QApplication, mode: str = "light") -> None:
     pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(tokens["text_dim"]))
     pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, QColor(tokens["text_dim"]))
     app.setPalette(pal)
-    app.setStyleSheet(_QSS.format(**tokens))
+    shade = "dark" if mode == "dark" else "light"  # the float and close buttons of the panes, in the theme's grey
+    buttons = {f"dock_{kind}": (_RESOURCES / f"dock-{kind}-{shade}.svg").as_posix() for kind in ("close", "float")}
+    app.setStyleSheet(_QSS.format(**tokens, **buttons))
     app.setProperty("ppg_theme", mode)
 
 
