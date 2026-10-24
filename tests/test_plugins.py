@@ -503,10 +503,19 @@ def test_plugins_borrow_the_drawing_and_follow_the_view(tmp_path, qapp):
         t.join()
         qapp.processEvents()
         assert ran == [(7, True)]
+        # the window shows the project again: another chunk, a processing step, an undo
+        refreshed = []
+        context.on_refresh(lambda: refreshed.append(w.chunk.label))
+        w.refresh_all()
+        doc.add_chunk("altro")
+        w._activate_chunk(doc.chunks[-1])
+        assert refreshed == ["vuoto", "altro"]
         # a plugin that goes away is no longer told
+        told = len(loaded)
         context.release()
         context.show_frame((0.0, 0.0, 10.0, 10.0), 0.05)
-        assert loaded == ["frame"]
+        w.refresh_all()
+        assert len(loaded) == told and refreshed == ["vuoto", "altro"]
     finally:
         w.setWindowModified(False)
         w.close()

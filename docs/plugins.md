@@ -143,6 +143,7 @@ the next start (`ppg plugin` lists its command at once).
 | `request_polygon(on_finished, on_cancelled=None, hint="")` | since 1.3.2: the user draws a polygon on the 2D view with the program's own tool (drag a box, or click the vertices and double click or Enter; Backspace drops the last vertex, Esc cancels); `on_finished(xy)` gets an `(N, 2)` array in the coordinates of the chunk; `on_cancelled()` when the user picks another tool or another request comes; `False` when there is nothing to draw on |
 | `request_line(...)`, `request_point(...)` | the same for a line of two or more vertices and for one point (`(1, 2)`) |
 | `on_raster_loaded(callback)` | since 1.3.2: `callback()` each time the 2D view shows another raster, an empty frame or nothing: draw your layers and overlays again there (disconnected by itself when the plugin goes away) |
+| `on_refresh(callback)` | since 1.3.3: `callback()` each time the window shows the project again (another project, another active chunk, a processing step done, an undo): a pane of the plugin follows the active chunk there (disconnected by itself when the plugin goes away) |
 | `show_frame(bounds, resolution, text="")` | since 1.3.2: an empty frame on the 2D view (`xmin, ymin, xmax, ymax` in the coordinates of the chunk, metres per pixel) to draw on when the chunk has no orthophoto or DEM |
 | `mark_modified()` | since 1.3.2: the project has changes to save (`chunk.meta` or the plugin's files changed) |
 | `call_in_gui(function, *args)` | since 1.3.2: `function(*args)` in the interface thread, from the function given to `run` or from an exporter |
@@ -157,7 +158,7 @@ took beyond its registrations (open files, timers).
 `Plugin.api` is the plugin API the plugin was written for (`pyarchinit_photogrammetry.plugins.API_VERSION`,
 now 1): a program with an older API refuses the plugin with a message. The index also gives the
 oldest version of the program a plugin works with (`min_app`): a plugin that uses the methods marked
-"since 1.3.2" asks for `min_app` 1.3.2.
+"since 1.3.2" asks for `min_app` 1.3.2, one that uses `on_refresh` 1.3.3.
 
 ## Publishing a plugin
 

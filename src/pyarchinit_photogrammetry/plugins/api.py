@@ -188,6 +188,17 @@ class Context:
         view.raster_loaded.connect(callback)
         self.contributions.connections.append((view.raster_loaded, callback))
 
+    def on_refresh(self, callback: Callable[[], object]) -> None:
+        """Since 1.3.3: ``callback()`` each time the window shows the project again - another project
+        opened, another active chunk, a processing step done, an undo: a pane of the plugin follows the
+        active chunk there. Disconnected by itself when the plugin is disabled. Nothing in the command
+        line."""
+        signal = getattr(self.window, "refreshed", None)
+        if signal is None:
+            return
+        signal.connect(callback)
+        self.contributions.connections.append((signal, callback))
+
     def show_frame(self, bounds, resolution: float, text: str = "") -> None:
         """An empty frame on the 2D view (``bounds`` = xmin, ymin, xmax, ymax in the coordinates of the
         chunk, ``resolution`` metres per pixel of the view) when the chunk has no orthophoto or DEM to

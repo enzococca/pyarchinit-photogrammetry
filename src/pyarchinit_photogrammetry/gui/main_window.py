@@ -111,6 +111,8 @@ CLASSIFIER_FILE = "classificatore.ppgclf"  # classifier trained in a chunk, kept
 
 
 class MainWindow(QMainWindow):
+    refreshed = Signal()  # the window shows the project again (a plugin's Context.on_refresh)
+
     def __init__(self, document: Document | None = None, autoconnect: bool = True, progress=None,
                  check_updates: bool | None = None):
         """``check_updates``: look for a new version a few seconds after start-up (once a day,
@@ -1079,6 +1081,7 @@ class MainWindow(QMainWindow):
         self._load_raster()
         self._update_stack()
         self._capture_states()
+        self.refreshed.emit()
 
     def _load_raster(self, kind: str | None = None, path=None, bands=None) -> None:
         """The orthomosaic or the DEM of the chunk in the raster view (``path``: another file of
