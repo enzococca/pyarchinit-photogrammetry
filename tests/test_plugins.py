@@ -17,11 +17,15 @@ from pyarchinit_photogrammetry.plugins import index as plugin_index
 
 
 @pytest.fixture(scope="module")
-def qapp():
+def qapp(tmp_path_factory):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     os.environ.setdefault("PPG_RENDERER", "software")
+    from PySide6.QtCore import QSettings
     from PySide6.QtWidgets import QApplication
 
+    # the windows of these tests save their geometry and their panes when they close: not in the user's settings
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path_factory.mktemp("settings")))
     return QApplication.instance() or QApplication([])
 
 PLUGIN_CODE = '''
