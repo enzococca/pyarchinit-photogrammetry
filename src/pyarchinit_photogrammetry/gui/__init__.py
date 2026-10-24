@@ -169,9 +169,7 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
     geo = win.settings.value("geometry")
     if geo is not None:
         win.restoreGeometry(geo)
-        state = win.settings.value("state")
-        if state is not None:
-            win.restoreState(state)
+        win.restore_layout(win.settings.value("state"))  # the panes as left (a layout before 1.3.4 is ignored)
     win.show()
     if splash is not None:
         step(100, tr("Pronto"))

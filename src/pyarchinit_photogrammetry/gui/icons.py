@@ -65,6 +65,7 @@ ICONS = {
     "language": ("mdi6.translate", "grey"),
     "top_view": ("mdi6.arrow-collapse-down", "grey"), "home_view": ("mdi6.home-outline", "grey"),
     "workspace": ("mdi6.file-tree-outline", "slate"), "reference_pane": ("mdi6.table", "indigo"),
+    "panes": ("mdi6.page-layout-sidebar-left", "grey"), "reset_layout": ("mdi6.backup-restore", "grey"),
     # help and status
     "help": ("mdi6.help-circle-outline", "blue"), "about": ("mdi6.information-outline", "blue"),
     "donate": ("mdi6.heart-outline", "red"),

@@ -122,7 +122,9 @@ def test_window_in_english(qapp, tmp_path, english):
                 texts += [wd.tabText(i) for i in range(wd.count())]
             if isinstance(wd, QTreeWidget):
                 texts += [wd.headerItem().text(c) for c in range(wd.columnCount())]
-            left += [t for t in texts if t and t in cat]
+            # the panes behind the tab in front are open too (docks out of sight): their texts are checked;
+            # one the same in both languages ("Auto") is not left in Italian
+            left += [t for t in texts if t and t in cat and cat[t] != t]
         assert not left, left
         assert w.language_actions["en"].isChecked()
         # status bar and log: also the messages written in Italian by the engine and the logger

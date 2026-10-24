@@ -13,10 +13,9 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QObject, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
-from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QDockWidget, QFileDialog, QFrame,
-                               QInputDialog, QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
-                               QScrollArea, QStackedWidget, QStatusBar, QTabWidget, QToolBar, QToolButton, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QDockWidget, QFileDialog, QInputDialog,
+                               QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget,
+                               QStatusBar, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from .. import __version__, _native, updates
 from ..app import app as application
@@ -154,6 +153,7 @@ class MainWindow(QMainWindow):
         self._build_actions()
         self._build_statusbar()
         self._load_plugins()
+        self.panes.keep_default()  # the layout of the panes *Vista > Pannelli > Ripristina* puts back
         self.set_document(document or application.document, progress=progress)
         QTimer.singleShot(0, self._autoconnect_pyarchinit)
         self.update_checker = UpdateChecker(self)
@@ -238,21 +238,16 @@ class MainWindow(QMainWindow):
         self.photo_view.marker_created.connect(lambda m: self.filter_photos_by_markers([m.key]))
         self.photo_view.sam_prompt.connect(self._photo_sam_prompt)
 
-    def _dock(self, title: str, widget: QWidget, area, name: str) -> QDockWidget:
-        d = QDockWidget(title, self)
-        d.setObjectName(name)
-        # on a short screen the pane scrolls instead of making the window taller than the screen
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setWidget(widget)
-        d.setWidget(scroll)
-        self.addDockWidget(area, d)
-        return d
-
     def _build_docks(self) -> None:
-        L, B, R = (Qt.DockWidgetArea.LeftDockWidgetArea, Qt.DockWidgetArea.BottomDockWidgetArea,
-                   Qt.DockWidgetArea.RightDockWidgetArea)
+        """The panes, each a dock of its own (see :mod:`.docks`): on the left Area di lavoro, Riferimenti
+        and Layer (always there), Proxy US, Multispettrale, Termico and the panes of the plugins; at the
+        bottom Foto, Sezioni, Console Python and Log; on the right PyArchInit."""
+        from .docks import GroupDock, Panes
+
+        self.panes = Panes(self)
+        add = self.panes.add
+        # the panes of each side with the methods of the tab widgets they were until 1.3.3 (plugins use them)
+        self.left_tabs, self.bottom_tabs = self.panes.groups["left"], self.panes.groups["bottom"]
         self.workspace = WorkspaceTree()
         self.workspace.activated_item.connect(self._workspace_item)
         self.workspace.context_requested.connect(self._workspace_menu)
@@ -283,11 +278,8 @@ class MainWindow(QMainWindow):
         self.pa_pane.new_site_requested.connect(self.pyarchinit_new_site)
         self.pa_pane.us_requested.connect(lambda sito, area, us, tipo: self.open_us_form(sito, area, us, tipo))
         self.pa_pane.site_changed.connect(self.set_project_site)
-        # tab widgets inside docks (more robust than tabified docks across Qt platforms)
-        self.left_tabs = QTabWidget()
-        self.left_tabs.setIconSize(QSize(16, 16))
-        self.left_tabs.addTab(self.workspace, icon("workspace"), tr("Area di lavoro"))
-        self.left_tabs.addTab(self.reference, icon("reference_pane"), tr("Riferimenti"))
+        add(self.workspace, tr("Area di lavoro"), icon("workspace"), name="pane_workspace", fixed=True)
+        add(self.reference, tr("Riferimenti"), icon("reference_pane"), name="pane_reference", fixed=True)
         self.layers_pane = LayersPane()
         self.layers_pane.set_view(self.ortho_view)
         self.layers_pane.attribute_edited.connect(self._attribute_edited)
@@ -298,10 +290,10 @@ class MainWindow(QMainWindow):
         self.b_pa_save.clicked.connect(self.save_pending_units)
         self.b_pa_save.hide()
         self.layers_pane.layout().addWidget(self.b_pa_save)
-        self.left_tabs.addTab(self.layers_pane, icon("slice"), "Layer")
+        add(self.layers_pane, "Layer", icon("slice"), name="pane_layers", fixed=True)
         self.layers_pane.us_form_requested.connect(self._us_form_from_feature)
         self.proxies_pane = ProxiesPane()
-        self.left_tabs.addTab(self.proxies_pane, icon("us"), tr("Proxy US"))
+        add(self.proxies_pane, tr("Proxy US"), icon("us"), name="pane_proxies")
         self.proxies_pane.create_requested.connect(self.create_proxies)
         self.proxies_pane.show_requested.connect(lambda: self._show_model("proxies"))
         self.proxies_pane.export_requested.connect(self.export_proxies)
@@ -313,9 +305,9 @@ class MainWindow(QMainWindow):
 
         # the multispectral and the thermal steps, each in its tab (the first three steps are the same)
         self.ms_pane = MultispectralPane(mode="spectral")
-        self.left_tabs.addTab(self.ms_pane, icon("multispectral"), tr("Multispettrale"))
+        add(self.ms_pane, tr("Multispettrale"), icon("multispectral"), name="pane_multispectral")
         self.thermal_pane = MultispectralPane(mode="thermal")
-        self.left_tabs.addTab(self.thermal_pane, icon("thermal"), tr("Termico"))
+        add(self.thermal_pane, tr("Termico"), icon("thermal"), name="pane_thermal")
         self.ms_pane.add_requested.connect(self.ms_add)
         self.thermal_pane.add_requested.connect(lambda: self.ms_add(thermal=True))
         for pane in (self.ms_pane, self.thermal_pane):
@@ -349,20 +341,19 @@ class MainWindow(QMainWindow):
         self.sections_pane.delete_requested.connect(self._delete_section)
         self.sections_pane.folder_requested.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._sections_dir()))))
         self.ortho_view.feature_clicked.connect(self._feature_clicked)
-        self.bottom_tabs = QTabWidget()
-        self.bottom_tabs.setIconSize(QSize(16, 16))
         self.photos_panel = PhotosPanel(self.photos)
         self.photos_panel.step.connect(self.photo_step)
         self.photos_panel.with_markers.connect(self.filter_photos_with_markers)
-        self.bottom_tabs.addTab(self.photos_panel, icon("photos"), tr("Foto"))
-        self.bottom_tabs.addTab(self.sections_pane, icon("line"), tr("Sezioni"))
-        self.bottom_tabs.addTab(self.console, icon("console"), tr("Console Python"))
-        self.bottom_tabs.addTab(self.log_pane, icon("log"), "Log")
-        self.d_work = self._dock("Progetto", self.left_tabs, L, "workspace")
-        self.d_pa = self._dock("PyArchInit", self.pa_pane, R, "pyarchinit")
-        self.d_photos = self._dock("Foto, console e log", self.bottom_tabs, B, "bottom")
-        self.resizeDocks([self.d_work, self.d_pa], [360, 300], Qt.Orientation.Horizontal)
-        self.resizeDocks([self.d_photos], [230], Qt.Orientation.Vertical)
+        add(self.photos_panel, tr("Foto"), icon("photos"), name="pane_photos", area="bottom")
+        add(self.sections_pane, tr("Sezioni"), icon("line"), name="pane_sections", area="bottom")
+        add(self.console, tr("Console Python"), icon("console"), name="pane_console", area="bottom")
+        add(self.log_pane, "Log", icon("log"), name="pane_log", area="bottom")
+        self.d_pa = add(self.pa_pane, "PyArchInit", icon("database"), name="pane_pyarchinit", area="right")
+        # until 1.3.3 the docks of the left and of the bottom tabs: now the pane in front of each side
+        self.d_work, self.d_photos = GroupDock(self.left_tabs), GroupDock(self.bottom_tabs)
+        self.resizeDocks([self.left_tabs.docks[0], self.d_pa], [360, 300], Qt.Orientation.Horizontal)
+        self.resizeDocks([self.bottom_tabs.docks[0]], [230], Qt.Orientation.Vertical)
+        self.panes.front()
 
     def _build_statusbar(self) -> None:
         self.progress_widget = StatusProgress()
@@ -849,8 +840,7 @@ class MainWindow(QMainWindow):
             QUrl.fromLocalFile(str(self._qgis_dir()))), icon_name="folder")
         # ------------------------------------------------------------ View
         m = mb.addMenu(tr("&Vista"))
-        for d in (self.d_work, self.d_photos, self.d_pa):
-            m.addAction(d.toggleViewAction())
+        self.panes.build_menu(m)  # each pane open or closed, the next and the previous one, the default layout
         m.addSeparator()
         self._act(m, tr("Area di lavoro"), lambda: self._show_pane(self.left_tabs, self.workspace),
                   icon_name="workspace")
@@ -998,10 +988,28 @@ class MainWindow(QMainWindow):
         self._refresh_recent()
         self._apply_draw_options()
 
-    def _show_pane(self, tabs: QTabWidget, widget: QWidget) -> None:
-        dock = self.d_work if tabs is self.left_tabs else self.d_photos
-        dock.show()
-        tabs.setCurrentWidget(widget)
+    def _show_pane(self, tabs, widget: QWidget | None = None) -> None:
+        """A pane in front, also when it was closed or floating. ``tabs`` (``self.left_tabs``...) is
+        its group, as when the panes were the tabs of two docks: ``_show_pane(pane)`` is the same."""
+        self.panes.show(tabs if widget is None else widget)
+
+    def add_pane(self, widget: QWidget, title: str, icon=None, area: str = "left",
+                 name: str | None = None) -> QDockWidget:
+        """A pane of a plugin (``Context.add_pane``): a dock that can be closed, tabbed with the panes
+        of ``area`` ("left", "bottom", "right"); ``icon`` a QIcon or the name of an icon of the program."""
+        return self.panes.add(widget, title, icon, name=name, area=area)
+
+    def show_pane(self, widget: QWidget) -> None:
+        """A pane in front (``Context.show_pane``), also when it was closed or floating."""
+        self.panes.show(widget)
+
+    def remove_pane(self, widget: QWidget) -> QWidget | None:
+        """A pane out of the window (``Context.release``): its dock goes, the widget is returned."""
+        return self.panes.remove(widget)
+
+    def restore_layout(self, state) -> bool:
+        """The panes as the last session left them (``state`` saved when the window closed)."""
+        return self.panes.restore(state)
 
     def show_view(self, widget: QWidget) -> None:
         self.stack.setCurrentWidget(self.tabs)
@@ -2084,7 +2092,7 @@ class MainWindow(QMainWindow):
         self.photos.stop()
         self.log_pane.detach()
         self.settings.setValue("geometry", self.saveGeometry())
-        self.settings.setValue("state", self.saveState())
+        self.settings.setValue("state", self.panes.save())
         super().closeEvent(ev)
         if self._pending_update is not None:
             self._install_pending_update()
