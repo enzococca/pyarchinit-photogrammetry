@@ -6,7 +6,7 @@ fotogrammetrico: la colonna di ogni sondaggio, la superficie dove comincia ogni 
 volume di ogni unità, sezioni lungo qualsiasi linea e un modello 3D con un solido per unità. Tutto sta sul
 DEM e sull'ortofoto del progetto, nel suo sistema di riferimento.
 
-Questa pagina descrive la versione 0.1.2 del plugin, che richiede pyarchinit-photogrammetry 1.2.2 o
+Questa pagina descrive la versione 0.1.3 del plugin, che richiede pyarchinit-photogrammetry 1.3.3 o
 successiva. Il README e il codice sono nel
 [repository dei plugin](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/geoarchaeology).
 
@@ -484,9 +484,9 @@ Avvisi (1):
 
 La scheda *Sondaggi* elenca codice, quota (`*`: letta dal DEM), profondità e unità di ogni sondaggio.
 *Sondaggi nella vista* li disegna sull'ortofoto o sul DEM come un layer di punti rossi,
-*Geoarcheologia: sondaggi*: con lo strumento *Sposta*, un clic su un punto ne mostra codice, quota,
-profondità e unità. Le tabelle lette vengono copiate nel progetto. Tabelle nuove rendono superate le
-superfici: ricostruiscile.
+*Geoarcheologia: sondaggi*, ridisegnato ogni volta che la vista mostra un altro raster: con lo strumento
+*Sposta*, un clic su un punto ne mostra codice, quota, profondità e unità. Le tabelle lette vengono copiate
+nel progetto. Tabelle nuove rendono superate le superfici: ricostruiscile.
 
 ### 2. L'ordine delle unità { #order }
 
@@ -574,8 +574,10 @@ la sovrapposizione; se ne vede una alla volta.
 
 ### 5. Sezioni { #sections }
 
-* *Traccia una sezione*: clicca l'inizio e poi la fine della traccia sull'ortofoto o sul DEM (lo strumento
-  linea del programma, prestato al plugin per una traccia).
+* *Traccia una sezione*: clicca i vertici della traccia sull'ortofoto o sul DEM - due o più - e finiscila
+  con un doppio clic o con Invio (il disegno del programma, prestato al plugin); Backspace toglie l'ultimo
+  vertice, Esc o un altro strumento della barra *Disegno* annulla. Lo strumento linea del programma
+  continua a disegnare le sezioni del programma.
 * *Sezione per i sondaggi*: seleziona due o più sondaggi nella scheda *Sondaggi* (con Ctrl, o Cmd sul Mac);
   la traccia li unisce nell'ordine in cui li hai scelti (un intervallo di righe scelto con Maiusc viene
   nell'ordine della tabella).
@@ -594,8 +596,8 @@ sono un SVG e un PNG; un DXF in coordinate di sezione (distanza lungo la traccia
 senza esagerazione; layer `GEO_TERRENO`, `GEO_CONTATTI`, `GEO_UNITA_<unità>`, `GEO_SONDAGGI`,
 `GEO_TESTI`, `GEO_GRIGLIA`); un CSV del profilo (distanza, x, y, terreno, tetto di ogni unità). *Apri il
 disegno*, o un doppio clic nella scheda *Sezioni*, apre il PNG; le tracce vengono disegnate sulla vista come
-layer *Geoarcheologia: sezioni*. Una sezione è un disegno fatto in quel momento: dopo aver ricostruito le
-superfici, rifallo.
+layer *Geoarcheologia: sezioni*, di nuovo su ogni raster che la vista mostra. Una sezione è un disegno fatto
+in quel momento: dopo aver ricostruito le superfici, rifallo.
 
 <figure markdown="span">
   ![Una sezione nord-sud del tell con le unità e i sondaggi riportati](../img/plugins/geoarchaeology/section-ns.png)
@@ -647,6 +649,16 @@ il colore dell'unità), un OBJ con un oggetto e un materiale per unità (`unita.
 `volumi.csv`; aprili in MeshLab, Blender, CloudCompare o QGIS 3D. Il volume dell'ultima unità dipende
 dal fondo scelto: non è il volume di un deposito.
 
+*Apri come modello di un nuovo chunk* (anche in *Plugin > Geoarcheologia*) mette le unità in un nuovo chunk
+del progetto, *Unità geoarcheologiche - <chunk>*, come suo modello, nel sistema di riferimento del chunk dei
+sondaggi (il programma importa `unita.obj`, rimettendo lo spostamento scritto nella sua intestazione). Il
+nuovo chunk diventa quello attivo e il suo modello compare nella vista 3D, dove il pulsante *Taglia* -
+oppure *Flusso di lavoro > Pulizia e confidenza > Taglia il modello con un piano* - lo taglia in
+orizzontale, in verticale lungo una sezione o per tre punti: ogni unità, un solido chiuso, viene chiusa sul
+taglio nel suo colore, così le facce del taglio mostrano la stratigrafia. Il progetto risulta modificato:
+salvalo per tenere il nuovo chunk. Per tornare ai sondaggi rendi di nuovo attivo il loro chunk nell'area di
+lavoro: il pannello segue il chunk attivo.
+
 <figure markdown="span">
   ![I solidi di cinque unità e un taglio del modello](../img/plugins/geoarchaeology/model-3d.jpg)
   <figcaption>Il modello 3D: un solido chiuso per unità con il suo volume, e un taglio lungo la sezione
@@ -684,6 +696,8 @@ ppg plugin geoarchaeology section scavo.ppg --coords "455,800;760,800" --distanc
 ppg plugin geoarchaeology logs scavo.ppg S1
 ppg plugin geoarchaeology logs scavo.ppg S5 S4 S3 S2 S1 --out colonne_ns.pdf
 ppg plugin geoarchaeology model scavo.ppg --offset 600,800,0
+ppg plugin geoarchaeology model-chunk scavo.ppg --label "Unità da tagliare"
+ppg cut-model scavo.ppg --chunk "Unità da tagliare" --vertical 455,800,760,800 --keep both --out taglio.ply
 ppg plugin geoarchaeology export scavo.ppg geoarcheologia.gpkg
 ppg plugin geoarchaeology export scavo.ppg naturale.tif --id top_4_US_5
 ppg plugin geoarchaeology remove scavo.ppg surfaces
@@ -699,6 +713,7 @@ ppg plugin geoarchaeology remove scavo.ppg surfaces
 | `section PROGETTO` | `--coords "x1,y1;x2,y2;..."`, una traccia di due o più punti nel sistema di riferimento del chunk (`--coords=...` se il primo numero è negativo), oppure `--through S1,S4,S7`, in quell'ordine; `--name`; `--distance` m; `--scale` (la N di 1:N); `--exaggeration` |
 | `logs PROGETTO [CODICI...]` | i sondaggi (tutti se non se ne dà nessuno); `--out` un file `.svg`, `.png` o `.pdf`, altrimenti `logs/<sondaggio>` per un sondaggio e `logs/colonne_<sondaggi>` per un pannello; `--vertical` auto, elevation, depth; `--scale` |
 | `model PROGETTO` | `--cell` m; `--no-clip`; `--floor` quota; `--no-last` lascia fuori l'ultima unità; `--offset X,Y,Z` sottratto alle coordinate dell'OBJ (scritto nella sua intestazione e in `unita.obj.offset.txt`); `--explode` m, le unità separate in verticale in `unita_vista.ply`, il file della vista 3D |
+| `model-chunk PROGETTO` | le unità del modello come modello di un nuovo chunk del progetto, nel sistema di riferimento del chunk (rimesso lo spostamento dell'OBJ); `--label` l'etichetta del nuovo chunk (predefinita *Unità geoarcheologiche - <chunk>*, nella lingua dell'interfaccia, numerata se già presa); il chunk attivo resta lo stesso. `ppg cut-model PROGETTO --chunk ETICHETTA ...` lo taglia, ogni unità chiusa sul taglio nel suo colore |
 | `export PROGETTO OUT` | un GeoPackage con accanto i GeoTIFF e i volumi; con `--id` (un id mostrato da `list`, come `top_4_US_5` o `thickness_US_2`) una superficie in GeoTIFF |
 | `remove PROGETTO [COSA]` | `all` (predefinito) o `boreholes`: tutto quello del plugin nel chunk; `surfaces`, `sections`, `model`; il codice di un sondaggio o il nome di una sezione |
 

@@ -8,7 +8,7 @@ elaborazione, le posa sul rilievo con i picchetti della griglia di prospezione, 
 ti fa disegnare le anomalie che vi leggi e le esporta per un GIS. Anomalia e scavo, mappa magnetica e ortofoto finiscono nello stesso posto e
 nello stesso sistema di riferimento.
 
-Questa pagina descrive la versione 0.1.1 del plugin, che richiede pyarchinit-photogrammetry 1.2.2 o
+Questa pagina descrive la versione 0.1.2 del plugin, che richiede pyarchinit-photogrammetry 1.3.3 o
 successiva. Il README e il codice sono nel
 [repository dei plugin](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/geophysics).
 
@@ -340,8 +340,9 @@ sola in un riquadro della sua misura:
 
 La riga in fondo dice che cosa è mostrato e i valori ai due estremi dei colori, nelle unità della
 griglia (*Area 1 despike highpass: banda 1, colori da -0.941 a 0.657 nT*). Si mostra una griglia alla
-volta; *Nascondi* la toglie. Dopo aver cambiato raster nella vista, sovrapponi di nuovo la griglia;
-disegnare nella vista, o cancellare un disegno, la lascia dov'è.
+volta; *Nascondi* la toglie. Quando la vista mostra un altro raster (l'ortofoto al posto del DEM, un
+rilievo), la griglia vi viene sovrapposta di nuovo con la stessa banda, palette e opacità, fino a
+*Nascondi*; disegnare nella vista, o cancellare un disegno, la lascia dov'è.
 
 ### 5. Anomalie { #anomalies }
 
@@ -350,18 +351,20 @@ griglia selezionata:
 
 1. Seleziona la griglia e, se vuoi, sovrapponila con la banda che stai leggendo (una vista vuota mostra
    prima la griglia).
-2. Premi *Disegna anomalia* e fai clic sui vertici del poligono nella vista; Backspace toglie l'ultimo
-   vertice.
-3. Doppio clic, oppure Invio, per chiuderlo; Esc o il tasto destro annullano, e così la scelta di un altro
-   strumento della barra *Disegno*.
+2. Premi *Disegna anomalia* e trascina un riquadro sulla vista, oppure fai clic sui vertici del poligono;
+   Backspace toglie l'ultimo vertice, il tasto destro ricomincia il poligono. Il disegno è quello del
+   programma, prestato al plugin.
+3. Doppio clic, oppure Invio, per chiuderlo; Esc annulla, e così la scelta di un altro strumento della
+   barra *Disegno*.
 4. Una finestra chiede un'*Etichetta* (A1, A2... in automatico) e una *Nota*, l'interpretazione (*muro*,
    *fossa*, *fornace?*).
 
 L'anomalia tiene il nome della griglia, la banda mostrata (l'etichetta della slice di un GPR) e la sua
 area. Va nel progetto (salvalo con *File > Salva*) e nel layer *Anomalie geofisiche* della vista, in
 arancione: con lo strumento *Sposta* un clic ne mostra gli attributi, con lo strumento *Seleziona* e Canc
-esce dalla vista e dal progetto. Il layer torna ogni volta che la vista mostra un altro raster. Lo
-strumento poligono del programma disegna unità stratigrafiche, non anomalie.
+esce dalla vista e dal progetto. Il layer torna ogni volta che la vista mostra un altro raster; toglierlo
+dalla vista nel pannello *Layer* lascia le anomalie nel progetto. Lo strumento poligono del programma
+disegna unità stratigrafiche, non anomalie.
 
 *File > Esporta > Griglie e anomalie geofisiche (GeoPackage)...* scrive le anomalie nella tabella
 `anomalie`. Con il collegamento dal vivo del programma con QGIS compaiono anche fra i disegni del

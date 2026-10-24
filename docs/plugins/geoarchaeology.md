@@ -6,7 +6,7 @@ the column of every borehole, the surface where each unit begins, the thickness 
 each unit, sections along any line and a 3D model with one solid per unit. Everything lies on the DEM
 and the orthophoto of the project, in its reference system.
 
-This page describes version 0.1.2 of the plugin, which needs pyarchinit-photogrammetry 1.2.2 or later.
+This page describes version 0.1.3 of the plugin, which needs pyarchinit-photogrammetry 1.3.3 or later.
 Its README and source code are in the
 [plugin repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/geoarchaeology).
 
@@ -477,9 +477,9 @@ Warnings (1):
 
 The *Boreholes* tab lists the code, the elevation (`*`: read from the DEM), the depth and the units of
 every borehole. *Boreholes in the view* draws them on the orthophoto or the DEM as a layer of red
-points, *Geoarcheologia: sondaggi*: with the *Move* tool, a click on a point shows its code, elevation,
-depth and units. The tables read are copied into the project. New tables make the surfaces out of date:
-build them again.
+points, *Geoarcheologia: sondaggi*, drawn again each time the view shows another raster: with the *Move*
+tool, a click on a point shows its code, elevation, depth and units. The tables read are copied into the
+project. New tables make the surfaces out of date: build them again.
 
 ### 2. The order of the units { #order }
 
@@ -568,8 +568,10 @@ the cells where a contact was lowered are red, those where it was raised blue, t
 
 ### 5. Sections { #sections }
 
-* *Draw a section*: click the start and then the end of the trace on the orthophoto or the DEM (the
-  line tool of the program, lent to the plugin for one trace).
+* *Draw a section*: click the vertices of the trace on the orthophoto or the DEM - two or more - and
+  double click or press Enter to end it (the drawing of the program, lent to the plugin); Backspace takes
+  the last vertex back, Esc or another tool of the *Drawing* bar cancels. The program's own line tool
+  keeps drawing the program's sections.
 * *Section through the boreholes*: select two or more boreholes in the *Boreholes* tab (with Ctrl, or
   Cmd on the Mac); the trace joins them in the order you picked them (a range picked with Shift comes
   in the order of the table).
@@ -588,8 +590,8 @@ legend of the units. The files are an SVG and a PNG; a DXF in section coordinate
 trace and true elevation, in metres, without exaggeration; layers `GEO_TERRENO`, `GEO_CONTATTI`,
 `GEO_UNITA_<unit>`, `GEO_SONDAGGI`, `GEO_TESTI`, `GEO_GRIGLIA`); a CSV of the profile (distance, x, y,
 ground, top of every unit). *Open the drawing*, or a double click in the *Sections* tab, opens the PNG;
-the traces are drawn on the view as the layer *Geoarcheologia: sezioni*. A section is a drawing made at
-that moment: after building the surfaces again, draw it again.
+the traces are drawn on the view as the layer *Geoarcheologia: sezioni*, again on every raster the view
+shows. A section is a drawing made at that moment: after building the surfaces again, draw it again.
 
 <figure markdown="span">
   ![A north-south section across the mound with the units and the boreholes projected on it](../img/plugins/geoarchaeology/section-ns.png)
@@ -641,6 +643,15 @@ unit), one OBJ with an object and a material per unit (`unita.obj`, `unita.mtl`)
 them in MeshLab, Blender, CloudCompare or QGIS 3D. The volume of the last unit depends on the floor
 chosen: it is not the volume of a deposit.
 
+*Open as the model of a new chunk* (also in *Plugins > Geoarchaeology*) puts the units into a new chunk of
+the project, *Geoarchaeological units - <chunk>*, as its model, in the reference system of the chunk of the
+boreholes (the program imports `unita.obj`, the offset of its header added back). The new chunk becomes
+the active one and its model appears in the 3D view, where the *Cut* button - or *Workflow > Cleaning and
+confidence > Cut the model with a plane* - cuts it horizontally, vertically along a section or through
+three points: every unit, a closed solid, is closed on the cut in its colour, so the faces of the cut show
+the stratigraphy. The project shows as modified: save it to keep the new chunk. To go back to the
+boreholes, make their chunk the active one again in the workspace: the pane follows the active chunk.
+
 <figure markdown="span">
   ![The solids of five units and a cut through the model](../img/plugins/geoarchaeology/model-3d.jpg)
   <figcaption>The 3D model: one closed solid per unit with its volume, and a cut along the east-west
@@ -678,6 +689,8 @@ ppg plugin geoarchaeology section scavo.ppg --coords "455,800;760,800" --distanc
 ppg plugin geoarchaeology logs scavo.ppg S1
 ppg plugin geoarchaeology logs scavo.ppg S5 S4 S3 S2 S1 --out colonne_ns.pdf
 ppg plugin geoarchaeology model scavo.ppg --offset 600,800,0
+ppg plugin geoarchaeology model-chunk scavo.ppg --label "Units to cut"
+ppg cut-model scavo.ppg --chunk "Units to cut" --vertical 455,800,760,800 --keep both --out cut.ply
 ppg plugin geoarchaeology export scavo.ppg geoarcheologia.gpkg
 ppg plugin geoarchaeology export scavo.ppg naturale.tif --id top_4_US_5
 ppg plugin geoarchaeology remove scavo.ppg surfaces
@@ -693,6 +706,7 @@ ppg plugin geoarchaeology remove scavo.ppg surfaces
 | `section PROJECT` | `--coords "x1,y1;x2,y2;..."`, a trace of two or more points in the reference system of the chunk (`--coords=...` when the first number is negative), or `--through S1,S4,S7`, in that order; `--name`; `--distance` m; `--scale` (the N of 1:N); `--exaggeration` |
 | `logs PROJECT [CODES...]` | the boreholes (all when none is given); `--out` an `.svg`, `.png` or `.pdf` file, otherwise `logs/<borehole>` for one borehole and `logs/colonne_<boreholes>` for a panel; `--vertical` auto, elevation, depth; `--scale` |
 | `model PROJECT` | `--cell` m; `--no-clip`; `--floor` elevation; `--no-last` leaves the last unit out; `--offset X,Y,Z` subtracted from the coordinates of the OBJ (written in its header and in `unita.obj.offset.txt`); `--explode` m, the units set apart vertically in `unita_vista.ply`, the file of the 3D view |
+| `model-chunk PROJECT` | the units of the model as the model of a new chunk of the project, in the reference system of the chunk (the offset of the OBJ added back); `--label` the label of the new chunk (default *Geoarchaeological units - <chunk>*, in the language of the interface, numbered when taken); the active chunk stays the same. `ppg cut-model PROJECT --chunk LABEL ...` cuts it, every unit closed on the cut in its colour |
 | `export PROJECT OUT` | a GeoPackage with the GeoTIFFs and the volumes beside it; with `--id` (an id shown by `list`, such as `top_4_US_5` or `thickness_US_2`) one surface as GeoTIFF |
 | `remove PROJECT [WHAT]` | `all` (the default) or `boreholes`: everything of the plugin in the chunk; `surfaces`, `sections`, `model`; the code of a borehole or the name of a section |
 

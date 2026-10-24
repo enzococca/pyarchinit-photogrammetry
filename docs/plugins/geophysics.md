@@ -8,7 +8,7 @@ destripe, high-pass...), lays them over the orthophoto or the DEM with the trans
 lets you draw the anomalies you read on them, and exports them for a GIS. Anomaly and excavation,
 magnetic map and orthophoto end up in the same place and the same reference system.
 
-This page describes version 0.1.1 of the plugin, which needs pyarchinit-photogrammetry 1.2.2 or later.
+This page describes version 0.1.2 of the plugin, which needs pyarchinit-photogrammetry 1.3.3 or later.
 Its README and source code are in the
 [plugin repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/geophysics).
 
@@ -330,8 +330,9 @@ its own size:
 
 The line at the bottom says what is shown and the values at the two ends of the colours, in the units
 of the grid (*Area 1 despike highpass: band 1, colours from -0.941 to 0.657 nT*). One grid is shown at
-a time; *Hide* takes it away. After changing raster in the view, overlay the grid again; drawing in the
-view, or deleting a drawing, leaves it where it is.
+a time; *Hide* takes it away. When the view shows another raster (the orthophoto instead of the DEM, a
+relief), the grid is laid over it again with the same band, palette and opacity, until *Hide*; drawing in
+the view, or deleting a drawing, leaves it where it is.
 
 ### 5. Anomalies { #anomalies }
 
@@ -340,17 +341,19 @@ selected grid:
 
 1. Select the grid and, if you like, overlay it with the band you are reading (an empty view shows the
    grid first).
-2. Press *Draw anomaly* and click the vertices of the polygon on the view; Backspace takes the last vertex
-   back.
-3. Double click, or press Enter, to close it; Esc or a right click cancel, and so does choosing another
-   tool of the *Drawing* bar.
+2. Press *Draw anomaly* and drag a box on the view, or click the vertices of the polygon; Backspace takes
+   the last vertex back, a right click starts the polygon again. The drawing is the program's own, lent to
+   the plugin.
+3. Double click, or press Enter, to close it; Esc cancels, and so does choosing another tool of the
+   *Drawing* bar.
 4. A window asks for a *Label* (A1, A2... by default) and a *Note*, the interpretation (*wall*, *pit*,
    *kiln?*).
 
 The anomaly keeps the name of the grid, the band shown (the label of the slice of a GPR survey) and its
 area. It goes into the project (save it with *File > Save*) and into the layer *Anomalie geofisiche* of
 the view, in orange: with the *Move* tool a click on it shows its attributes, with the *Select* tool and
-Delete it leaves the view and the project. The layer comes back each time the view shows another raster.
+Delete it leaves the view and the project. The layer comes back each time the view shows another raster;
+taking it out of the view in the *Layers* pane leaves the anomalies in the project.
 The program's own polygon tool draws stratigraphic units, not anomalies.
 
 *File > Export > Geophysical grids and anomalies (GeoPackage)...* writes the anomalies in the table
