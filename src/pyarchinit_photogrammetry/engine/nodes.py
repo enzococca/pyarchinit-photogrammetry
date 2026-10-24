@@ -16,6 +16,9 @@ and descriptors back, the main program writes them into its database) and the Pa
 maps (units of a few photos: the node opens the project read-only on the shared folder, computes
 the maps in the workspace there with its GPUs and CPU). The alignment stays on one machine.
 
+A unit that fails on a node (a photo it cannot read) is done again by the main program; the units
+of a step cancelled or failed are taken back.
+
 Paths inside a unit are the main program's: a node maps the main program's project folder to
 its own (``nodes/master.json`` says where the main program sees it) and any other prefix the
 user gives (``--map /Users/x/foto=/mnt/foto``). Over SSH (``ppg remote``) the project folder and
@@ -26,9 +29,11 @@ from __future__ import annotations
 import json
 import os
 import platform
+import queue
 import socket
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -85,6 +90,7 @@ def present(files_dir: str | os.PathLike) -> list[dict]:
 def wanted(files_dir: str | os.PathLike) -> list[dict]:
     """The nodes to share the work with: those present, when sharing is enabled."""
     return present(files_dir) if enabled() else []
+
 
 
 def write_master(files_dir: str | os.PathLike, project_path: str | os.PathLike | None) -> None:
@@ -153,6 +159,7 @@ def take(root: Path, host: str) -> tuple[str, dict] | None:
             os.rename(p, target)
         except OSError:
             continue
+        heartbeat(root, name, host)  # a rename keeps the time it was put: a unit that waited is not stale
         try:
             return name, json.loads(target.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -166,6 +173,24 @@ def heartbeat(root: Path, name: str, host: str) -> None:
         os.utime(p, None)
     except OSError:
         pass
+
+
+@contextmanager
+def _beating(root: Path, name: str, host: str):
+    """The taken file of a unit touched every quarter of :data:`STALE` while the unit is worked on."""
+    beat = threading.Event()
+
+    def beating():
+        while not beat.wait(STALE / 4):
+            heartbeat(root, name, host)
+
+    ticker = threading.Thread(target=beating, daemon=True)
+    ticker.start()
+    try:
+        yield
+    finally:
+        beat.set()
+        ticker.join()
 
 
 def finish(root: Path, name: str, host: str, result: dict | None = None, error: str | None = None) -> None:
@@ -218,6 +243,25 @@ def forget(files_dir: str | os.PathLike, names) -> None:
                     p.unlink()
                 except OSError:
                     pass
+
+
+def _sweep(root: Path) -> None:
+    """What earlier steps left (cancelled, or the main program closed while they ran): units nobody
+    takes any more and results nobody reads. A step starts with no other step running."""
+    for state in ("todo", "taken", "done", "failed"):
+        for p in (root / state).iterdir():
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+def _finished(root: Path, state: str) -> set[str]:
+    """The names of the units with a ``done`` (or ``failed``) file: one listing for every unit."""
+    try:
+        return {e.name[:-5] for e in os.scandir(root / state) if e.name.endswith(".json") and not e.name.startswith(".")}
+    except OSError:
+        return set()
 
 
 # ---------------------------------------------------------------------------- the work
@@ -306,50 +350,87 @@ def import_features(db_path: Path, done_dir: Path, results: list[dict], camera_i
 
 
 # ---------------------------------------------------------------------------- the main program's side
+class _Quiet(Progress):
+    """The progress of a unit done by the main program: it says nothing (the step reports its
+    units) and stops the unit when the step ends."""
+
+    def __call__(self, fraction: float, message: str = "") -> None:
+        self.check()
+
+    def message(self, text: str) -> None:
+        self.check()
+
+    def sub(self, start: float, span: float) -> "Progress":
+        child = _Quiet()
+        child._root = self._root
+        return child
+
+
 def run(files_dir: str | os.PathLike, units: list[dict], progress: Progress | None = None,
         label: str = "units", gpu: str | None = None, project_path=None, local=None) -> list[dict]:
     """The ``units`` done by the nodes present and by this program (a worker thread taking the
-    units nobody took; ``local(payload)`` does one here, :func:`process` by default); returns
-    their outcomes in order (``by``, ``result``). A failed unit stops everything."""
+    units nobody took; ``local(payload, progress)`` does one here - ``progress`` stops it when the
+    step ends - :func:`process` by default); returns their outcomes in order (``by``,
+    ``result``). A unit that fails on another computer is done again here; one that fails here
+    stops everything, and the units nobody took are taken back."""
     progress = as_progress(progress)
     root = folder(files_dir)
+    _sweep(root)
     write_master(files_dir, project_path)
     names = put(files_dir, units)
+    payloads = {n: {"name": n, **u} for n, u in zip(names, units)}
     host = host_name()
     mapping: list[tuple[str, str]] = []  # the main program sees its own paths
     stop = threading.Event()
+    quiet = _Quiet()  # the unit done here: cancelled when the step ends (a copy of a unit a node did)
+    again: queue.Queue = queue.Queue()  # units that failed on another computer
     errors: list[str] = []
+    retried: set[str] = set()
 
     def local_worker():
         while not stop.is_set():
-            got = take(root, host)
-            if got is None:
-                if all(outcome(root, n) is not None for n in names):
-                    return
-                time.sleep(0.5)
-                continue
-            name, payload = got
             try:
-                result = local(payload) if local is not None else process(payload, mapping, gpu, root / "done")
-                finish(root, name, host, result)
-            except Exception as exc:  # noqa: BLE001 - the unit fails, the main loop reports it
-                finish(root, name, host, error=f"{type(exc).__name__}: {exc}")
+                name = again.get_nowait()
+                payload = payloads[name]
+            except queue.Empty:
+                got = take(root, host)
+                if got is None:
+                    stop.wait(0.5)
+                    continue
+                name, payload = got
+            with _beating(root, name, host):
+                try:
+                    result = local(payload, quiet) if local is not None else process(payload, mapping, gpu,
+                                                                                       root / "done")
+                    finish(root, name, host, result)
+                except Exception as exc:  # noqa: BLE001 - the unit fails, the main loop reports it
+                    finish(root, name, host, error=f"{type(exc).__name__}: {exc}")
 
     worker = threading.Thread(target=local_worker, name="ppg-node-local", daemon=True)
     worker.start()
     results: dict[str, dict] = {}
     try:
         while len(results) < len(names) and not errors:
+            ready = _finished(root, "done") | _finished(root, "failed")
             for name in names:
-                if name in results:
+                if name in results or name not in ready:
                     continue
                 got = outcome(root, name)
                 if got is None:
                     continue
                 if got.get("error"):
+                    if got.get("by") != host and name not in retried:  # that computer could not: this one does it
+                        retried.add(name)
+                        try:
+                            (root / "failed" / f"{name}.json").unlink()
+                        except OSError:
+                            pass
+                        again.put(name)
+                        progress.message(f"A unit failed on {got.get('by')} ({got['error']}): done here")
+                        continue
                     errors.append(f"{name} on {got.get('by')}: {got['error']}")
-                else:
-                    results[name] = got
+                    break
+                results[name] = got
             requeue_stale(root)
             by_others = sum(1 for r in results.values() if r.get("by") != host)
             progress(len(results) / max(len(names), 1),
@@ -358,8 +439,11 @@ def run(files_dir: str | os.PathLike, units: list[dict], progress: Progress | No
             if len(results) < len(names) and not errors:
                 time.sleep(0.5)
     finally:
+        quiet.cancel()
         stop.set()
         worker.join()
+        if len(results) < len(names):  # cancelled or failed: nobody takes the rest any more
+            forget(files_dir, names)
     if errors:
         raise RuntimeError("a unit of work failed: " + "; ".join(errors[:3]))
     return [results[n] for n in names]
@@ -367,13 +451,13 @@ def run(files_dir: str | os.PathLike, units: list[dict], progress: Progress | No
 
 # ---------------------------------------------------------------------------- the node
 def serve(node_folder: str | os.PathLike, once: bool = False, gpu: str | None = None, maps=(), log=print,
-          idle: float = 2.0, stop_event: threading.Event | None = None) -> int:
+          idle: float = 2.0, stop_event: threading.Event | None = None, host: str | None = None) -> int:
     """The node loop on ``node_folder`` (the ``<project>.ppg.files`` folder as this computer sees
     it): hello files, units taken and done one after the other. ``once``: leave when ``todo`` is
-    empty. Returns the units done."""
+    empty; ``host``: the name of the node (default: the computer and the process). Returns the
+    units done."""
     root = folder(node_folder)
-    host = host_name()
-    mapping = mapping_for(root, maps)
+    host = host or host_name()
     from .. import _native
 
     hello = root / "hello" / f"{host}.json"
@@ -395,25 +479,16 @@ def serve(node_folder: str | os.PathLike, once: bool = False, gpu: str | None = 
                 continue
             name, payload = got
             log(f"unit {name}: {payload.get('kind')}")
-            beat = threading.Event()
-
-            def beating():
-                while not beat.wait(STALE / 4):
-                    heartbeat(root, name, host)
-
-            ticker = threading.Thread(target=beating, daemon=True)
-            ticker.start()
-            try:
-                result = process(payload, mapping, gpu, root / "done")
-                finish(root, name, host, result)
-                done += 1
-                log(f"unit {name}: done")
-            except Exception as exc:  # noqa: BLE001 - reported to the main program
-                finish(root, name, host, error=f"{type(exc).__name__}: {exc}")
-                log(f"unit {name}: failed ({exc})")
-            finally:
-                beat.set()
-                ticker.join()
+            mapping = mapping_for(root, maps)  # master.json may come after the node started
+            with _beating(root, name, host):
+                try:
+                    result = process(payload, mapping, gpu, root / "done")
+                    finish(root, name, host, result)
+                    done += 1
+                    log(f"unit {name}: done")
+                except Exception as exc:  # noqa: BLE001 - reported to the main program
+                    finish(root, name, host, error=f"{type(exc).__name__}: {exc}")
+                    log(f"unit {name}: failed ({exc})")
     finally:
         try:
             hello.unlink()

@@ -1,6 +1,7 @@
 """Work shared with other computers through the project folder: a node (a thread here, another
 computer there) takes units of key points and of depth maps and the main program takes the rest;
-the results are the same as alone. Paths mapped between computers, stale units given back."""
+the results are the same as alone. Paths mapped between computers, stale units given back, units
+failed on a node done again here, a cancelled step taken back."""
 from __future__ import annotations
 
 import json
@@ -15,6 +16,7 @@ import pytest
 
 import pyarchinit_photogrammetry as ppg
 from pyarchinit_photogrammetry import _native
+from pyarchinit_photogrammetry.core.progress import Cancelled, Progress
 from pyarchinit_photogrammetry.engine import nodes
 
 
@@ -27,10 +29,16 @@ def _project(scene_dir, tmp_path):
     return doc, ch
 
 
-def _node(files_dir, stop):
-    """A node on the same folder, as another computer would run it (the paths need no mapping)."""
-    return threading.Thread(target=nodes.serve, args=(files_dir,), kwargs={"stop_event": stop, "idle": 0.2, "log": lambda *a: None},
-                            daemon=True)
+def _node(files_dir, stop, host=None):
+    """A node on the same folder, as another computer would run it (the paths need no mapping);
+    ``host``: its own name, so that its units count as done by another computer."""
+    return threading.Thread(target=nodes.serve, args=(files_dir,), daemon=True,
+                            kwargs={"stop_event": stop, "idle": 0.2, "log": lambda *a: None, "host": host})
+
+
+def _left(files_dir):
+    root = files_dir / "nodes"
+    return sorted(p.name for state in ("todo", "taken", "done", "failed") for p in (root / state).iterdir())
 
 
 def test_units_taken_once_and_stale_ones_given_back(tmp_path):
@@ -120,6 +128,86 @@ def test_a_failing_unit_stops_the_step(tmp_path, monkeypatch):
     monkeypatch.setattr(nodes, "process", broken)
     with pytest.raises(RuntimeError, match="no photos here"):
         nodes.run(tmp_path, [{"kind": "features", "names": ["x"]}], project_path=None)
+
+
+def test_a_unit_taken_late_is_not_stale_and_a_unit_failed_elsewhere_is_done_here(tmp_path):
+    """A unit that waited in todo longer than STALE is not given back as soon as it is taken; a unit
+    another computer could not do is done by the main program, which reports it."""
+    root = nodes.folder(tmp_path)
+    (name,) = nodes.put(tmp_path, [{"kind": "x"}])
+    old = time.time() - 2 * nodes.STALE
+    os.utime(root / "todo" / f"{name}.json", (old, old))
+    assert nodes.take(root, "uno")[0] == name and nodes.requeue_stale(root) == 0
+    # another computer that fails every unit it takes
+    stop = threading.Event()
+
+    def failing():
+        while not stop.is_set():
+            got = nodes.take(root, "altro-1")
+            if got is None:
+                stop.wait(0.02)
+                continue
+            nodes.finish(root, got[0], "altro-1", error="RuntimeError: no photos here")
+
+    other = threading.Thread(target=failing, daemon=True)
+    other.start()
+    seen = []
+
+    def here(payload, quiet):
+        time.sleep(0.2)  # the other computer takes some units meanwhile
+        return {"n": payload["n"]}
+
+    try:
+        out = nodes.run(tmp_path, [{"kind": "x", "n": i} for i in range(6)], lambda f, m: seen.append(m), local=here)
+    finally:
+        stop.set()
+        other.join(10)
+    assert [o["result"]["n"] for o in out] == list(range(6)) and {o["by"] for o in out} == {nodes.host_name()}
+    assert any(m.startswith("A unit failed on altro-1 (RuntimeError: no photos here): done here") for m in seen)
+    assert _left(tmp_path) == sorted(p.name for p in (root / "done").iterdir())  # only the results, for the caller
+
+
+def test_a_cancelled_step_takes_its_units_back(tmp_path):
+    """Cancelled: the unit being done here stops at once and nobody takes the others; what an earlier
+    step left behind is cleared when a step starts."""
+    root = nodes.folder(tmp_path)
+    nodes.put(tmp_path, [{"kind": "x"}])  # of a step the program never finished
+    (root / "done" / "vecchio.json").write_text("{}")
+    progress = Progress()
+    started = threading.Event()
+
+    def here(payload, quiet):
+        started.set()
+        while True:  # a long unit: only the end of the step stops it
+            quiet.check()
+            time.sleep(0.02)
+
+    threading.Thread(target=lambda: started.wait(10) and progress.cancel(), daemon=True).start()
+    t0 = time.time()
+    with pytest.raises(Cancelled):
+        nodes.run(tmp_path, [{"kind": "x"} for _ in range(4)], progress, local=here)
+    assert time.time() - t0 < 10 and _left(tmp_path) == []
+
+
+def test_a_node_reads_where_the_main_program_is_at_every_unit(tmp_path, monkeypatch):
+    """A node started before the main program wrote ``master.json`` maps the paths of the units
+    that come after it."""
+    seen = []
+    monkeypatch.setattr(nodes, "process", lambda payload, mapping, gpu=None, out_dir=None: seen.append(mapping) or {})
+    stop = threading.Event()
+    node = _node(tmp_path, stop, host="altro-1")
+    node.start()
+    try:
+        nodes.write_master(tmp_path, tmp_path / "scavo.ppg")
+        nodes.put(tmp_path, [{"kind": "x"}])
+        for _ in range(100):
+            if seen:
+                break
+            time.sleep(0.05)
+    finally:
+        stop.set()
+        node.join(10)
+    assert seen and (str(tmp_path.resolve()), str(tmp_path.resolve())) in seen[0]
 
 
 def test_node_command_leaves_when_nothing_is_left(tmp_path):
