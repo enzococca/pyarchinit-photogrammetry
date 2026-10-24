@@ -77,7 +77,7 @@ jobs:
         run: |
           set +e
           export GLOG_minloglevel=2
-          python -m pytest -q --tb=short -rfE --capture=sys -o faulthandler_timeout=1200 \
+          python -m pytest -q --tb=short -rfEs --capture=sys -o faulthandler_timeout=1200 \
             -o faulthandler_exit_on_timeout=true 2>&1 | tee pytest.log
           status=${PIPESTATUS[0]}
           grep -E "^(FAILED|ERROR) " pytest.log | head -10 | while IFS= read -r line; do
