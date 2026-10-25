@@ -876,6 +876,8 @@ def test_plugins_make_units_as_if_drawn(trench, tmp_path):
     context = Context("prova", tmp_path / "dati", w)
     log = w.log_pane.table
     drawn, entries = len(w.units), w.history.index
+    changes = []
+    w.ortho_view.layers_changed.connect(lambda: changes.append(1))
     bowtie = [(x0 + 4, y0 + 4), (x0 + 5, y0 + 5), (x0 + 5, y0 + 4), (x0 + 4, y0 + 5)]  # crossing itself
     added = context.add_units([box(x0 + 1, y0 + 1, x0 + 2, y0 + 2),
                                [(x0 + 3, y0 + 3), (x0 + 3.5, y0 + 3), (x0 + 3.5, y0 + 3.6)],
@@ -883,6 +885,7 @@ def test_plugins_make_units_as_if_drawn(trench, tmp_path):
                               attributes=[{"samgeo_score": 0.91}, {"us": 12, "tipo": "USM", "disegnatore": "E. C."},
                                           {}, {}])
     assert added == 3 and len(w.units) == drawn + 3  # the line encloses no area
+    assert changes == [1]  # the layer pane and the QGIS link updated once for all of them
     first, second, third = w.units[-3:]
     assert first.us is None and first.tipo == "US" and first.sito == "Saggio"
     assert first.attributes["samgeo_score"] == 0.91 and first.geometry.area == pytest.approx(1.0)
@@ -897,10 +900,17 @@ def test_plugins_make_units_as_if_drawn(trench, tmp_path):
     assert len(w.units) == drawn + 3
     assert context.add_units([]) == 0 and w.history.index == entries + 1
 
+    # no orthophoto or DEM shown yet: the units kept, and drawn with the raster
+    w.ortho_view.clear_raster()
+    assert context.add_units([box(x0 + 6, y0 + 6, x0 + 7, y0 + 7), box(x0 + 8, y0 + 6, x0 + 9, y0 + 7)]) == 2
+    assert len(w.units) == drawn + 5 and w.history.index == entries + 2
+    w._load_raster()
+    assert len(w.ortho_view.features("Unita' stratigrafiche")) == drawn + 6
+
     # another chunk: into its drawings, back when it becomes the active one
     other = w.doc.add_chunk("Saggio 2")
     assert context.add_units([box(x0, y0, x0 + 2, y0 + 1)], tipo="USM", chunk=other) == 1
-    assert len(w.units) == drawn + 3
+    assert len(w.units) == drawn + 5
     stored = other.meta["drawings"]["units"]
     assert len(stored) == 1 and stored[0]["tipo"] == "USM" and stored[0]["sito"] == "Saggio"
     context.activate_chunk(other)

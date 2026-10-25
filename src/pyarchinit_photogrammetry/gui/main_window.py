@@ -6424,9 +6424,12 @@ class MainWindow(QMainWindow):
         units = list(units)
         if not units:
             return
-        for u in units:
-            self.units.append(u)
-            self._draw_unit(u, len(self.units) - 1)
+        start = len(self.units)
+        self.units.extend(units)
+        if self.ortho_view.tr is not None:  # else drawn with the orthophoto or the DEM, when shown
+            with self.ortho_view.batch():  # hundreds of units: one update of the panes and of QGIS
+                for i, u in enumerate(units, start):
+                    self._draw_unit(u, i)
         self._dirty(True)
         area = sum(u.geometry.area for u in units)
         self.log_pane.info(tr("{0} unità aggiunte da {1}: area {2} m2", len(units), source or "plugin",
