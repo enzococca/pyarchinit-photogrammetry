@@ -13,7 +13,7 @@ e le produce il workflow `desktop` (`.github/workflows/desktop.yml`, runner `mac
 e `windows-latest`). L'applicazione impacchettata contiene lo stesso codice del pacchetto
 `pip`: Open3D, VTK, qtawesome e IfcOpenShell sono inclusi; Segment Anything (PyTorch)
 no, e viene installato al primo uso in un ambiente separato (vedi
-[integrations.md](integrations.md#segment-anything-21-in-the-packaged-application)).
+[integrations.md](integrations.md#segment-anything-21-nellapplicazione-desktop)).
 
 ## Primo avvio
 
