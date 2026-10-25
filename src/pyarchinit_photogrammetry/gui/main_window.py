@@ -6316,7 +6316,9 @@ class MainWindow(QMainWindow):
             return
         from copy import deepcopy
 
-        ch.meta["layer_labels"] = deepcopy(self.ortho_view.layer_settings)
+        # Keep untouched projects unchanged, including snapshots used by Undo.
+        if self.ortho_view.layer_settings or "layer_labels" in ch.meta:
+            ch.meta["layer_labels"] = deepcopy(self.ortho_view.layer_settings)
         units = [{**u.to_dict(), "layer": (u.attributes or {}).get("_layer")} for u in self.units
                  if not str((u.attributes or {}).get("_layer") or "").startswith("US da PyArchInit - ")]
         quote = [{k: v for k, v in q.items() if not str(k).startswith("_")} for q in self.quote]
