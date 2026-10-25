@@ -321,6 +321,9 @@ class MainWindow(QMainWindow):
         self.layers_pane.layout().addWidget(self.b_pa_save)
         add(self.layers_pane, "Layer", icon("slice"), name="pane_layers", fixed=True)
         self.layers_pane.us_form_requested.connect(self._us_form_from_feature)
+        identify_button = QPushButton(icon("us"), tr("Identifica / raggruppa..."))
+        identify_button.clicked.connect(self.identify_units)
+        self.layers_pane.layout().addWidget(identify_button)
         self.proxies_pane = ProxiesPane()
         add(self.proxies_pane, tr("Proxy US"), icon("us"), name="pane_proxies", place="right")
         self.proxies_pane.create_requested.connect(self.create_proxies)
@@ -637,6 +640,10 @@ class MainWindow(QMainWindow):
             self.draw_group.addAction(a)
             dm.addAction(a)
             self.draw_actions[mode] = a
+        self.a_select_freehand = QAction(icon("freehand"), tr("Selezione a mano libera (lazo)"), self, checkable=True)
+        self.a_select_freehand.setChecked(self.settings.value("draw/select_freehand", "false") in ("true", True))
+        self.a_select_freehand.toggled.connect(self._selection_shape_changed)
+        dm.addAction(self.a_select_freehand)
         # drawing options: freehand units, snapping to vertices / segments of the visible layers
         self.a_freehand = QAction(icon("freehand"), tr("Mano libera"), self, checkable=True)
         self.a_freehand.setToolTip(tr("Disegno a mano libera delle unita': tieni premuto, traccia e rilascia per "
@@ -711,6 +718,7 @@ class MainWindow(QMainWindow):
                                        "stesso layer"))
         for a in (self.a_sel_delete, self.a_sel_merge):
             a.setEnabled(False)
+        self.a_identify_units = self._act(dm, tr("Identifica e raggruppa unità..."), self.identify_units, icon_name="us")
         self.a_clear_drawings = self._act(dm, tr("Cancella disegni"), self.clear_drawings, icon_name="eraser")
         self._act(dm, tr("Ritaglia o esporta con il poligono selezionato..."), self.crop_with_selection,
                   icon_name="crop")
@@ -861,6 +869,7 @@ class MainWindow(QMainWindow):
                   icon_name="publish")
         self._act(m, tr("Pubblica solo le unita' (pyunitastratigrafiche)"), self.pyarchinit_publish_units,
                   processing=True, icon_name="publish")
+        self._act(m, tr("Pubblica schede UT (ut_table)..."), self.pyarchinit_publish_ut, icon_name="publish")
         self._act(m, tr("Pubblica solo le quote (pyarchinit_quote)"), self.pyarchinit_publish_points, processing=True,
                   icon_name="publish")
         self._act(m, tr("Carica poligoni US sull'ortofoto"), self.pyarchinit_load_units, icon_name="load")
@@ -1003,7 +1012,8 @@ class MainWindow(QMainWindow):
             db.addAction(self.draw_actions[mode])
         # in the menus of their buttons, so that the bar keeps its texts on a wide screen: the freehand
         # of Disegna US (as the digitizing techniques of QGIS) and Rimodella next to Vertici
-        for mode, actions in (("polygon", [self.a_freehand]),
+        for mode, actions in (("select", [self.a_select_freehand, self.a_identify_units]),
+                              ("polygon", [self.a_freehand]),
                               ("vertices", [self.draw_actions["vertices"], self.draw_actions["reshape"]])):
             button = db.widgetForAction(self.draw_actions[mode])
             if button is not None:
@@ -5750,7 +5760,7 @@ class MainWindow(QMainWindow):
             return []
         out = []
         for i, u in enumerate(self.units):
-            if not u.us or (u.attributes or {}).get("gid") is not None:
+            if u.tipo == "UT" or not u.us or (u.attributes or {}).get("gid") is not None:
                 continue
             try:
                 rows = self.pa.db.query("us_table", sito=u.sito or site, area=str(u.area) if u.area else None,
@@ -5788,13 +5798,14 @@ class MainWindow(QMainWindow):
         if not self._need_chunk():
             return
         site = self.project_site()
-        todo = [i for i, u in enumerate(self.units) if not u.us and (u.attributes or {}).get("gid") is None]
+        todo = [i for i, u in enumerate(self.units) if u.tipo != "UT" and not u.us
+                and (u.attributes or {}).get("gid") is None]
         numbered = self._without_us_form(site)
         if not todo and not numbered:
             self._warn("Nessuna unita' senza numero di US o senza scheda in PyArchInit: segmenta l'ortofoto con SAM "
                        "(Tutta l'ortofoto) o disegna le unita' prima.")
             return
-        context = [i for i, u in enumerate(self.units) if u.us and i not in numbered] if numbered or todo else []
+        context = [i for i, u in enumerate(self.units) if u.tipo != "UT" and u.us and i not in numbered] if numbered or todo else []
         targets = todo + numbered
         used = [u.us for u in self.units] + [u.us for ch in self.doc.chunks if ch is not self.chunk
                                              for u in units_of(ch)]
@@ -6212,6 +6223,7 @@ class MainWindow(QMainWindow):
     def _apply_draw_options(self) -> None:
         """Freehand and snapping options to the raster view, remembered between sessions."""
         v = self.ortho_view
+        v.selection_shape = "freehand" if self.a_select_freehand.isChecked() else "rectangle"
         v.freehand = self.a_freehand.isChecked()
         self.draw_actions["polygon"].setIcon(icon("freehand" if v.freehand else "polygon"))  # in its menu now
         on = self.a_snap.isChecked()
@@ -6247,8 +6259,11 @@ class MainWindow(QMainWindow):
         self.draw_actions[mode].setChecked(True)
         self.show_view(self.ortho_view)
         hints = {"pan": "Trascina per spostare, rotella per lo zoom, clic su un elemento per i suoi attributi",
-                 "select": "Clic per selezionare, Maiusc/Cmd+clic per aggiungere o togliere, trascina per un riquadro; "
-                           "Canc elimina, Unisci fonde le unita', Esc deseleziona",
+                 "select": ("Traccia a mano libera per selezionare; Maiusc/Cmd aggiunge, Alt sottrae; "
+                            "Identifica / raggruppa assegna nomi e numeri, Esc annulla il gesto"
+                            if self.ortho_view.selection_shape == "freehand" else
+                            "Clic per selezionare, Maiusc/Cmd+clic per aggiungere o togliere, trascina per un riquadro; "
+                            "dal menu Seleziona: mano libera e Identifica / raggruppa"),
                  "polygon": ("Tieni premuto e traccia l'unita' a mano libera, rilascia per chiudere; tasto destro per annullare"
                              if self.ortho_view.freehand else
                              "Clic per i vertici, doppio clic per chiudere, tasto destro per annullare"),
@@ -6505,8 +6520,12 @@ class MainWindow(QMainWindow):
                                      10000)
 
     def _draw_unit(self, u, i: int, layer: str | None = None) -> None:
+        from ..archaeo.unit_identity import unit_layer
+
         if u.attributes is None:
             u.attributes = {}
+        if u.tipo == "UT":
+            layer = unit_layer("UT", u.attributes.get("gruppo", ""))
         layer = layer or u.attributes.get("_layer") or "Unita' stratigrafiche"
         u.attributes["_layer"] = layer  # survives raster reloads (DEM <-> orthomosaic)
         if not u.attributes.get(ID_FIELD):  # its identity in the QGIS link
@@ -6521,7 +6540,7 @@ class MainWindow(QMainWindow):
         if (u.attributes or {}).get("gid") is not None:
             attrs["_gid"] = u.attributes["gid"]
         for g in geoms:  # one feature per part, with its holes for QGIS
-            self.ortho_view.add_polygon(np.asarray(g.exterior.coords)[:, :2], f"{u.tipo} {u.us or '?'}",
+            self.ortho_view.add_polygon(np.asarray(g.exterior.coords)[:, :2], self._unit_name(u),
                                         US_COLORS[i % len(US_COLORS)], layer=layer, attrs={**attrs, "_shape": g})
 
     # ---------------------------------------------------------------- spot heights (pyarchinit_quote)
@@ -7049,11 +7068,23 @@ class MainWindow(QMainWindow):
                 q[key] = value
         elif "_unit" in attrs and 0 <= attrs["_unit"] < len(self.units):
             u = self.units[attrs["_unit"]]
+            if key in ("unita_tipo_s", "tipo") and (str(value).upper() == "UT" or u.tipo == "UT"):
+                from ..archaeo.unit_identity import plan_units
+                from .unit_identity_actions import apply_to_window, reserved_units
+
+                try:
+                    changes = plan_units(self.units, [attrs["_unit"]], tipo=str(value), number_mode="keep",
+                                         progetto=self.project_site() or None, reserved=reserved_units(self))
+                    apply_to_window(self, changes)
+                except (ValueError, RuntimeError) as exc:
+                    self._warn(str(exc))
+                    self._redraw_overlays()
+                return
             fields = {"us_s": "us", "area_s": "area", "unita_tipo_s": "tipo", "scavo_s": "sito",
                       "us": "us", "area": "area", "tipo": "tipo"}  # pyunitastratigrafiche -> UnitPolygon
             if key in fields:
                 setattr(u, fields[key], None if value in ("", None) else str(value))
-                label = f"{u.tipo} {u.us or '?'}"
+                label = self._unit_name(u)
                 for j, other in enumerate(feats):  # every part of a multipolygon
                     if other.get("_unit") == attrs["_unit"]:
                         self.ortho_view.set_feature_attribute(layer, j, key, value)
@@ -7065,6 +7096,12 @@ class MainWindow(QMainWindow):
                     except (TypeError, ValueError):
                         value = 1
                 u.attributes[key] = value
+                if key in ("nome", "gruppo", "ut_letterale"):
+                    from ..archaeo.unit_identity import unit_layer
+
+                    if key == "gruppo":
+                        u.attributes["_layer"] = unit_layer(u.tipo, value)
+                    self._redraw_overlays()
             gid = (u.attributes or {}).get("gid")
             if gid is not None:
                 self.pa_pending[int(gid)] = u
@@ -7123,6 +7160,17 @@ class MainWindow(QMainWindow):
         self.run_task("Aggiornamento unita' in PyArchInit", job, done, refresh=False, save=False)
 
     # ---------------------------------------------------------------- selection: delete and merge
+    def _selection_shape_changed(self, checked: bool) -> None:
+        self.ortho_view.selection_shape = "freehand" if checked else "rectangle"
+        self.settings.setValue("draw/select_freehand", "true" if checked else "false")
+        if self.ortho_view.tr is not None:
+            self.set_draw_mode("select")
+
+    def identify_units(self) -> None:
+        from .unit_identity_actions import identify
+
+        identify(self)
+
     def _selection_changed(self, n: int) -> None:
         self.a_sel_delete.setEnabled(n > 0)
         self.a_sel_merge.setEnabled(n > 1)
@@ -7440,6 +7488,11 @@ class MainWindow(QMainWindow):
             return
         attrs = feats[idx]
         u = self.units[attrs["_unit"]] if "_unit" in attrs and attrs["_unit"] < len(self.units) else None
+        if u is not None and u.tipo == "UT":
+            from .unit_identity_actions import open_ut_form
+
+            open_ut_form(self, u)
+            return
         us = str(attrs.get("us_s") or attrs.get("us") or "").replace("?", "")
         area = str(attrs.get("area_s") or attrs.get("area") or "1")
         tipo = str(attrs.get("unita_tipo_s") or attrs.get("tipo") or "US")
@@ -7843,7 +7896,9 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _unit_name(u) -> str:
-        return f"{u.tipo} {u.us or '?'}"
+        from ..archaeo.unit_identity import unit_label
+
+        return unit_label(u)
 
     def _qgis_units(self, ch, srs: int, proxies: list) -> list[str]:
         """Units changed, drawn or deleted in QGIS; ``proxies`` gets ``(unit, (tipo, us, area) before,
@@ -10648,8 +10703,8 @@ class MainWindow(QMainWindow):
     def _publishable(self) -> tuple[list, list, int]:
         """Units drawn here with a US and not yet in PyArchInit, spot heights not yet written,
         and the number of units still without a US."""
-        units = [u for u in self.units if u.us and (u.attributes or {}).get("gid") is None]
-        no_us = sum(1 for u in self.units if not u.us and (u.attributes or {}).get("gid") is None)
+        units = [u for u in self.units if u.tipo != "UT" and u.us and (u.attributes or {}).get("gid") is None]
+        no_us = sum(1 for u in self.units if u.tipo != "UT" and not u.us and (u.attributes or {}).get("gid") is None)
         quote = [q for q in self.quote if q.get("gid") is None]
         return units, quote, no_us
 
@@ -10701,6 +10756,14 @@ class MainWindow(QMainWindow):
 
     def pyarchinit_publish_units(self) -> None:
         self.pyarchinit_publish_drawings("units")
+
+    def pyarchinit_publish_ut(self) -> None:
+        from .unit_identity_actions import publish_ut_records
+
+        try:
+            publish_ut_records(self)
+        except Exception as exc:
+            self._exc("Pubblicazione UT non riuscita", exc)
 
     def pyarchinit_publish_points(self) -> None:
         self.pyarchinit_publish_drawings("quote")

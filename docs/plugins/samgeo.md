@@ -3,15 +3,34 @@
 The *Samgeo* plugin finds in the orthophoto what you write: *stones*, *walls*, *bricks*, *roof
 tiles*, *pottery sherds*, *trees*, or any English phrase. Every search is a **layer of proposals** on
 the 2D view: you check it, delete what is wrong, and only then turn it into stratigraphic units,
-classes of the dense cloud or a GeoPackage. It follows the recipe of `LangSAM` in
+classes of the dense cloud or a GeoPackage. Its default engine follows the `LangSAM` recipe in
 [segment-geospatial](https://github.com/opengeos/segment-geospatial):
 [Grounding DINO](https://huggingface.co/IDEA-Research/grounding-dino-base) finds the boxes of what is
-written, [SAM 2.1](https://github.com/facebookresearch/sam2) draws the outline inside each box. Both
-run on your computer, with open weights and no account.
+written, [SAM 2.1](https://github.com/facebookresearch/sam2) draws the outline inside each box.
+Grounding DINO and SAM 2.1 run on your computer, with open weights and no account. You can also
+choose SAM 3; it requires personal access approved by Meta, as explained below.
 
-This page describes version 0.1.0 of the plugin, which needs pyarchinit-photogrammetry 1.5.0 or
+Version 0.2.0 adds SAM 3 as an optional engine; the plugin needs pyarchinit-photogrammetry 1.5.0 or
 later. Its README and source code are in the
 [plugin repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/samgeo).
+
+## SAM 3 engine: license, access and token
+
+Alongside Grounding DINO + SAM 2.1, you can choose **SAM 3 (SamGeo3 / Transformers)** to find all
+instances of a concept from a short text prompt. SAM 3 and its weights use the
+[Meta SAM license](https://huggingface.co/facebook/sam3/blob/main/LICENSE), separate from the
+plugin's GPL. The plugin does not bundle or redistribute the weights, or accept the terms for you.
+
+To use it, sign in to Hugging Face and [request model access from Meta](https://huggingface.co/facebook/sam3);
+read and accept the terms, then wait for approval. Afterward, create your own
+[Hugging Face access token](https://huggingface.co/settings/tokens) with read permission for the
+model. **The token comes from Hugging Face and does not grant access on its own; Meta must also
+approve your account.** Enter it in the pane's password field for the current session, or configure
+`HF_TOKEN` or `hf auth login`. The plugin does not store it in projects, settings or logs.
+
+On first use, the authorized weights download to the Hugging Face cache and can be reused locally.
+For complete steps and command line examples, see the
+[Samgeo README](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/samgeo#sam-3-license-access-and-your-personal-token).
 
 <figure markdown="span">
   ![The Samgeo pane after a search for bushes](../img/plugins/samgeo/pane.png)
@@ -32,7 +51,8 @@ later. Its README and source code are in the
 
 1. Build the orthophoto of the chunk (*Workflow > Build orthophoto...*).
 2. Open the *Samgeo* pane (*Plugins > Samgeo > Samgeo pane*). The first time, *Install the models...*
-   installs PyTorch and the models in an environment of their own (about 2 GB, a few minutes).
+   installs PyTorch and the selected engine's packages into a dedicated environment; weights download
+   at first use.
 3. Choose what to look for, the raster and where - the whole raster, a polygon you draw, or the part
    shown in the 2D view - and click *Find*.
 4. Check the proposals on the view: delete the wrong ones with *Select* and Del.
@@ -42,7 +62,7 @@ later. Its README and source code are in the
 
 | From a search | What you get |
 |---|---|
-| The layer `samgeo: <name>` | the objects found, each with its number, the text, the phrase that found it, the score (Grounding DINO's confidence) and the area in m²; drawn again on every raster the view shows; a proposal deleted on the view leaves the search too |
+| The layer `samgeo: <name>` | the objects found, each with its number, the text, the phrase that found it, the selected engine's score and the area in m²; drawn again on every raster the view shows; a proposal deleted on the view leaves the search too |
 | Units | the proposals - those selected on the view, those not yet units, or all - become stratigraphic units of the chunk, of the kind chosen (US, USM...), with the text and the score as attributes (`samgeo_prompt`, `samgeo_score`); one entry of *Edit > Undo* for all of them |
 | Classes of the dense cloud | the points inside the proposals, in plan view, get the class `samgeo: <name>` |
 | GeoPackage | the searches chosen, a layer each |
@@ -115,11 +135,25 @@ another text, threshold or resolution: each is a layer of its own (*stones*, *st
 
 ### Units { #units }
 
-*Units...* asks which proposals - those selected on the view, those not yet units, or all - and the
-kind (US, USM, USR, USD, USV; USM for walls and bricks). The units are added to the active chunk
-without a number: *Tools > Propose US and relationships (Extended Matrix)...* numbers them and proposes their relations.
-The proposals already made units stay in the layer as outlines; when they all are, the layer is
-hidden. *Edit > Undo* takes the units away, the search stays.
+With application **1.5.1** and Samgeo **0.3**, *Units...* previews identifiers for proposals not yet
+converted. Choose all or selected proposals, the kind (US, USM, other stratigraphic kinds or survey
+**UT**), and an explicit first number or automatic numbering. Occupied identifiers in project
+drawings and the connected archive are skipped.
+
+**Progressive name** produces names such as `Grave0001`, `Grave0002`; **Shared name / group** assigns
+a common name while preserving individual numeric identifiers. For UT choose a project: the TOC
+shows **Topographic units**, or **Topographic units - group name**. Geometries remain separate.
+UT records use `ut_table`, are excluded from `us_table`, and do not automatically receive
+stratigraphic relationships or Extended Matrix nodes.
+
+For existing units labelled `?`, open **Layers > Identify / group...**. In the **Select** button's
+menu enable **Freehand selection (lasso)** and trace around the group. Shift/Cmd adds, Alt subtracts;
+Esc or right-click cancels the stroke. Choose selected, unnumbered or all units in the preview.
+One **Edit > Undo** restores the names, identifiers, kind and TOC group of the bulk edit.
+
+Converted proposals remain tracked by their search; when all have become units, their proposal
+layer is hidden. Older application versions retain the original conversion dialog; the new
+identification workflow and freehand selection also require updating the application.
 
 ### Classes of the dense cloud { #classes }
 

@@ -119,6 +119,32 @@ def test_a_failing_plugin_is_left_out_and_the_others_work(tmp_path):
     assert m.get("sano").active and list(m.commands) == ["sano"]
 
 
+def test_folder_plugins_can_import_a_dependency_that_sorts_after_them(tmp_path):
+    """GeoAI depends on ppg-samgeo: plugin activation order must not hide that module."""
+    folder = tmp_path / "plugins"
+    _install_folder(folder, "samgeo")
+    (folder / "samgeo" / "ppg_samgeo").mkdir()
+    (folder / "samgeo" / "ppg_samgeo" / "__init__.py").write_text("VALUE = 'shared AI environment'\n")
+
+    geo = folder / "geoai"
+    dist = geo / "ppg_geoai_test-0.1.0.dist-info"
+    dist.mkdir(parents=True)
+    (dist / "METADATA").write_text("Metadata-Version: 2.1\nName: ppg-geoai-test\nVersion: 0.1.0\n")
+    (dist / "entry_points.txt").write_text("[pyarchinit_photogrammetry.plugins]\ngeoai = geoai_plugin:GeoaiPlugin\n")
+    (geo / "geoai_plugin.py").write_text('''from pyarchinit_photogrammetry.plugins import Plugin
+from ppg_samgeo import VALUE
+class GeoaiPlugin(Plugin):
+    title = "GeoAI"
+    def activate(self, context):
+        context.add_command("geoai", lambda: VALUE)
+''')
+    manager = Manager(folder)
+    manager.load()
+    assert [i.name for i in manager.plugins] == ["geoai", "samgeo"]
+    assert manager.get("geoai").active and manager.get("samgeo").active
+    assert manager.commands["geoai"].function() == "shared AI environment"
+
+
 def test_disabled_plugins_stay_off_and_safe_mode(tmp_path, monkeypatch):
     folder = tmp_path / "plugins"
     _install_folder(folder, "spento")

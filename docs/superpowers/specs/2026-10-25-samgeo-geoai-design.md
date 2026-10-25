@@ -80,9 +80,11 @@ The mask of a run is a GeoTIFF in the chunk folder, which the raster calculator 
   written, SAM 2.1 draws the mask in each box - with Grounding DINO from Hugging Face `transformers`
   (`IDEA-Research/grounding-dino-base`) instead of the `groundingdino-py` package, which compiles C++
   at installation (a compiler is rarely there on Windows and macOS). Apache-2.0 weights, no account.
-* **SAM 3**: samgeo's `SamGeo3`, which finds every instance of a concept at once. Its weights on
-  Hugging Face (`facebook/sam3`) are given by Meta after a request, which some users wait for or are
-  refused: the pane takes a Hugging Face token, and says so when the access is missing.
+* **SAM 3**: samgeo's `SamGeo3`, which finds every instance of a concept at once. The weights on
+  Hugging Face (`facebook/sam3`) are subject to Meta's separate SAM License, not the plugin's GPL.
+  Each user requests and accepts model access on Hugging Face, then uses their own Hugging Face read
+  token. A token alone does not grant access; the pane explains the two steps and never stores the
+  token in a project, settings or logs.
 
 ### Environment and worker
 
@@ -166,4 +168,21 @@ the two orthomosaics must lie on each other (the DEM coregistration of the phase
 2. samgeo 0.1.0: environment, worker, open engine, pipeline, pane, command line, tests.
 3. samgeo 0.2.0: SAM 3.
 4. geoai 0.1.0: learning from the drawings and applying a model.
-5. geoai 0.2.0: change between two dates.
+5. geoai 0.2.0: optional DEM, multispectral and thermal raster inputs, alone or combined with RGB;
+   windowed alignment to a common reference grid, channel/unit schema and train-only normalisation.
+6. geoai 0.3.0: change between two dates, after the optional-input workflow has been evaluated on a
+   real annotated survey. Requires a registered pair of dates; DEM differences accompany proposed changes.
+
+## Optional raster inputs (2026-10-25)
+
+Approved by the author after the first release. RGB remains the default. The user may select an
+ordered set of named raster sources and band numbers (DEM, multispectral, thermal, numeric derived
+rasters), with resampling and physical units. The first source defines the reference grid in chunk
+coordinates. Additional sources are read on that grid with WarpedVRT; unknown CRS is not guessed,
+nodata/nonfinite pixels in any input are ignored, and GeoTIFF scales/offsets are applied. This aligns
+grids, not misregistered surveys; sensor calibration and unit conversion remain explicit user work.
+
+New numeric datasets/models use format 2 with per-channel mean/std calculated only from valid labelled
+training pixels; saved statistics and the ordered semantic schema are required at application time.
+Format 1 RGB models remain usable. Custom numeric channels use one U-Net input channel per band and
+start without ImageNet weights. No complete resampled raster stack is written, to limit disk usage.

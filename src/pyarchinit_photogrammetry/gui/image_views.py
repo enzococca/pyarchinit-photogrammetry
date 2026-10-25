@@ -1,7 +1,6 @@
 """2D views: orthomosaic/DEM with drawing tools, and photos with marker placement."""
 from __future__ import annotations
 
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
@@ -377,7 +376,8 @@ class _ZoomView(QGraphicsView):
 class RasterView(_ZoomView):
     """Orthomosaic or DEM in world coordinates, with drawing tools.
 
-    Modes: ``pan``; ``select`` (click, shift/cmd-click or drag a box to select features,
+    Modes: ``pan``; ``select`` (click, shift/cmd-click or drag a box to select features;
+    ``selection_shape='freehand'`` draws a lasso instead, Alt subtracts,
     Delete to remove them); ``polygon`` (click vertices, double click to close: a unit; with
     ``freehand`` press, draw and release);
     ``line`` (two clicks: a section trace); ``measure`` (two clicks: distance and
@@ -453,6 +453,9 @@ class RasterView(_ZoomView):
         self._sel_marks: list = []  # highlight items drawn over the selection
         self._band_origin: QPointF | None = None
         self._band = None
+        self._selection_shape = "rectangle"
+        self._lasso_points: list[QPointF] = []
+        self._lasso_item: QGraphicsPathItem | None = None
         self._crop_press_xy = None  # world point of the press that may start a crop box
         self._press_mods = Qt.KeyboardModifier.NoModifier
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # Delete / Esc in select mode
@@ -518,6 +521,7 @@ class RasterView(_ZoomView):
         that pointed to its items."""
         had_selection = bool(self.selection)
         self.selection, self._sel_marks, self._band, self._band_origin = [], [], None, None  # deleted by clear()
+        self._lasso_points, self._lasso_item = [], None
         self._snap_marks, self._snap_cache, self._stroking = {}, None, False
         self._sam_items = []
         self._detail_item, self._detail_key = None, None
@@ -1027,8 +1031,11 @@ class RasterView(_ZoomView):
             self.scene().removeItem(self._rubber)
             self._rubber = None
         self._end_band()
+        self._end_lasso()
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag if mode == "pan" else QGraphicsView.DragMode.NoDrag)
-        cursor = {"pan": Qt.CursorShape.OpenHandCursor, "select": Qt.CursorShape.ArrowCursor}
+        cursor = {"pan": Qt.CursorShape.OpenHandCursor,
+                  "select": Qt.CursorShape.CrossCursor if self.selection_shape == "freehand"
+                            else Qt.CursorShape.ArrowCursor}
         self.viewport().setCursor(cursor.get(mode, Qt.CursorShape.CrossCursor))
 
     # ----------------------------------------------------------- snapping
@@ -1129,6 +1136,22 @@ class RasterView(_ZoomView):
         self.set_mode(self.mode)
 
     # ----------------------------------------------------------- selection
+    @property
+    def selection_shape(self) -> str:
+        return self._selection_shape
+
+    @selection_shape.setter
+    def selection_shape(self, shape: str) -> None:
+        if shape not in ("rectangle", "freehand"):
+            raise ValueError("Selection shape must be 'rectangle' or 'freehand'")
+        if shape != self._selection_shape:
+            self._end_band()
+            self._end_lasso()
+        self._selection_shape = shape
+        if self.mode == "select":
+            self.viewport().setCursor(Qt.CursorShape.CrossCursor if shape == "freehand"
+                                      else Qt.CursorShape.ArrowCursor)
+
     def _feature_items(self, items) -> list:
         """Feature items (not labels, highlights or the raster) among graphics items, visible only."""
         return [it for it in items if it.data(0) in self.layers and it.isVisible()]
@@ -1144,32 +1167,102 @@ class RasterView(_ZoomView):
         return self._feature_items(self.scene().items(rect.normalized(), Qt.ItemSelectionMode.IntersectsItemShape,
                                                       Qt.SortOrder.AscendingOrder, self.viewportTransform()))
 
+    def items_in_polygon(self, scene_points) -> list:
+        """Visible feature shapes intersecting a closed lasso in scene coordinates.
+
+        Qt's shape test includes polygons that contain the lasso, as well as features enclosed
+        by it; labels, selection highlights and hidden layers are excluded like box selection.
+        """
+        points = list(scene_points)
+        if len(points) < 3:
+            return []
+        path = QPainterPath()
+        path.addPolygon(QPolygonF(points))
+        path.closeSubpath()
+        path = path.simplified()
+        if path.isEmpty():
+            return []
+        return self._feature_items(self.scene().items(path, Qt.ItemSelectionMode.IntersectsItemShape,
+                                                      Qt.SortOrder.AscendingOrder, self.viewportTransform()))
+
     def select_items(self, items, mode: str = "replace") -> None:
-        """``mode``: replace, add or toggle."""
+        """``mode``: replace, add, remove or toggle."""
         items = list(dict.fromkeys(items))
         if mode == "replace":
             sel = items
         elif mode == "add":
             sel = self.selection + [it for it in items if it not in self.selection]
-        else:
+        elif mode == "remove":
+            sel = [it for it in self.selection if it not in items]
+        elif mode == "toggle":
             sel = [it for it in self.selection if it not in items] + [it for it in items if it not in self.selection]
+        else:
+            raise ValueError("Unknown selection operation")
         self.selection = sel
         self._draw_selection()
         self.selection_changed.emit(len(self.selection))
 
-    def select_at(self, scene_pos: QPointF, toggle: bool = False) -> None:
+    def select_at(self, scene_pos: QPointF, toggle: bool = False, *, mode: str | None = None) -> None:
+        mode = mode or ("toggle" if toggle else "replace")
         it = self.item_at(scene_pos)
         if it is None:
-            if not toggle:
+            if mode == "replace":
                 self.select_items([])
             return
-        self.select_items([it], "toggle" if toggle else "replace")
+        self.select_items([it], mode)
         if len(self.selection) == 1:  # one feature: show its attributes like a click in navigation mode
             ref = self.selected_features()[0]
             self.feature_clicked.emit(ref[0], {**ref[2], "_index": ref[1]})
 
-    def select_in_rect(self, rect: QRectF, add: bool = False) -> None:
-        self.select_items(self.items_in_rect(rect), "add" if add else "replace")
+    def select_in_rect(self, rect: QRectF, add: bool = False, *, mode: str | None = None) -> None:
+        self.select_items(self.items_in_rect(rect), mode or ("add" if add else "replace"))
+
+    def select_in_polygon(self, scene_points, mode: str = "replace") -> None:
+        self.select_items(self.items_in_polygon(scene_points), mode)
+
+    @staticmethod
+    def _selection_operation(modifiers, *, click=False) -> str:
+        if modifiers & Qt.KeyboardModifier.AltModifier:
+            return "remove"
+        if modifiers & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier
+                         | Qt.KeyboardModifier.MetaModifier):
+            return "toggle" if click else "add"
+        return "replace"
+
+    def _update_lasso(self) -> None:
+        path = QPainterPath(self._lasso_points[0])
+        for point in self._lasso_points[1:]:
+            path.lineTo(point)
+        path.closeSubpath()
+        if self._lasso_item is None:
+            pen = self._pen("#00e5ff", 1.5)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            self._lasso_item = self.scene().addPath(path, pen, QBrush(QColor(0, 229, 255, 40)))
+            self._lasso_item.setZValue(10001)
+        else:
+            self._lasso_item.setPath(path)
+
+    def _end_lasso(self) -> None:
+        if self._lasso_item is not None and self._lasso_item.scene() is self.scene():
+            self.scene().removeItem(self._lasso_item)
+        self._lasso_item = None
+        self._lasso_points = []
+
+    def _finish_lasso(self, point: QPointF) -> None:
+        points, modifiers = self._lasso_points + [point], self._press_mods
+        origin = self.mapFromScene(points[0])
+        dragged = any((self.mapFromScene(p) - origin).manhattanLength() > 4 for p in points[1:])
+        self._end_lasso()
+        if dragged:
+            # An incomplete stroke is cancelled without replacing the existing selection.
+            if len(points) >= 3:
+                path = QPainterPath()
+                path.addPolygon(QPolygonF(points))
+                path.closeSubpath()
+                if not path.simplified().isEmpty():
+                    self.select_in_polygon(points, self._selection_operation(modifiers))
+        else:
+            self.select_at(points[0], mode=self._selection_operation(modifiers, click=True))
 
     def clear_selection(self) -> None:
         if self.selection or self._sel_marks:
@@ -1291,7 +1384,11 @@ class RasterView(_ZoomView):
                 self.delete_requested.emit()
                 return
             if ev.key() == Qt.Key.Key_Escape:
-                self.clear_selection()
+                if self._lasso_points or self._band_origin is not None:
+                    self._end_lasso()
+                    self._end_band()
+                else:
+                    self.clear_selection()
                 return
         super().keyPressEvent(ev)
 
@@ -1315,6 +1412,12 @@ class RasterView(_ZoomView):
         sp = self.mapToScene(ev.position().toPoint())
         x, y = self.world(sp)
         self.mouse_world.emit(x, y, self.elevation(x, y))
+        if self.mode == "select" and self._lasso_points:
+            last = self.mapFromScene(self._lasso_points[-1])
+            if (ev.position().toPoint() - last).manhattanLength() >= 3:
+                self._lasso_points.append(sp)
+                self._update_lasso()
+            return
         if self.mode == "vertices" and self._vedit is not None and self._vedit["drag"] is not None:
             snapped, kind, xy = self.snap_world(sp)
             self._show_snap(snapped if kind else None, kind)
@@ -1345,6 +1448,9 @@ class RasterView(_ZoomView):
                 self._band.setRect(QRectF(self._band_origin, sp).normalized())
 
     def mouseReleaseEvent(self, ev) -> None:
+        if self.mode == "select" and self._lasso_points and ev.button() == Qt.MouseButton.LeftButton:
+            self._finish_lasso(self.mapToScene(ev.position().toPoint()))
+            return
         if self.mode == "vertices" and self._vedit is not None and self._vedit["drag"] is not None:
             self._vedit["drag"] = None
             self._show_snap(None, None)
@@ -1383,16 +1489,14 @@ class RasterView(_ZoomView):
             return
         if self.mode == "select" and self._band_origin is not None and ev.button() == Qt.MouseButton.LeftButton:
             mods = self._press_mods
-            extend = bool(mods & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier
-                                  | Qt.KeyboardModifier.MetaModifier))
             if self._band is not None:
                 rect = self._band.rect()
                 self._end_band()
-                self.select_in_rect(rect, add=extend)
+                self.select_in_rect(rect, mode=self._selection_operation(mods))
             else:
                 origin = self._band_origin
                 self._end_band()
-                self.select_at(origin, toggle=extend)
+                self.select_at(origin, mode=self._selection_operation(mods, click=True))
             return
         super().mouseReleaseEvent(ev)
 
@@ -1424,9 +1528,18 @@ class RasterView(_ZoomView):
         if self.mode == "select":
             if ev.button() == Qt.MouseButton.LeftButton:
                 self.setFocus()
-                self._band_origin, self._press_mods = sp, ev.modifiers()
-            elif ev.button() == Qt.MouseButton.RightButton and self.selection:
-                self._selection_menu(ev.globalPosition().toPoint())
+                self._press_mods = ev.modifiers()
+                if self.selection_shape == "freehand":
+                    self._lasso_points = [sp]
+                    self._update_lasso()
+                else:
+                    self._band_origin = sp
+            elif ev.button() == Qt.MouseButton.RightButton:
+                if self._lasso_points or self._band_origin is not None:
+                    self._end_lasso()
+                    self._end_band()
+                elif self.selection:
+                    self._selection_menu(ev.globalPosition().toPoint())
             return
         if self.mode == "sam":
             self.setFocus()

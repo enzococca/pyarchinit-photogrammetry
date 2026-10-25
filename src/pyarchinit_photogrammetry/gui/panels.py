@@ -1703,7 +1703,7 @@ class LayersPane(QWidget):
         self.b_none = _tool("eraser", tr("Nessuno"), tr("Nascondi tutti i layer"))
         self.b_zoom = _tool("search", "Zoom", tr("Zoom sul layer o sull'elemento selezionato"))
         self.b_remove = _tool("clear", tr("Rimuovi"), tr("Rimuovi il layer selezionato dalla vista"))
-        self.b_us = _tool("us", tr("Scheda US"), tr("Apri (o crea) la scheda PyArchInit dell'unita' selezionata"))
+        self.b_us = _tool("us", tr("Scheda unità"), tr("Apri (o crea) la scheda PyArchInit dell'unita' selezionata"))
         self.b_us.clicked.connect(lambda: self.us_form_requested.emit(*self._current) if self._current else None)
         for b in (self.b_all, self.b_none, self.b_zoom, self.b_remove, self.b_us):
             bar.addWidget(b)

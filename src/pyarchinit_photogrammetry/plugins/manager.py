@@ -141,6 +141,13 @@ class Manager:
         self.discover()
         if os.environ.get("PPG_NO_PLUGINS", "") not in ("", "0"):
             return self.plugins
+        # Folder-installed plugins can depend on another folder-installed plugin. Make their
+        # packages importable before any entry point is loaded: alphabetical activation order
+        # (for example geoai before samgeo) must not decide whether a dependency works.
+        for info in reversed(self.plugins):
+            if info.location is not None and str(info.location) not in sys.path:
+                sys.path.insert(0, str(info.location))
+                _ON_PATH.add(_norm(info.location))
         for info in self.plugins:
             if info.enabled:
                 self._activate(info)

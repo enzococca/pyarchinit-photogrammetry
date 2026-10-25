@@ -215,8 +215,10 @@ Punti aperti, senza un ordine fisso:
     * plugin samgeo (segmentare l'ortofoto scrivendo «pietre», «muri»). *Fatto* con la 1.5.0: il plugin
       samgeo 0.1.0 - Grounding DINO e SAM 2.1 in un ambiente loro trovano quello che è scritto, come layer
       di proposte che diventa US (`context.add_units`, nuovo nella 1.5.0), classi della nuvola densa o un
-      GeoPackage; SAM 3 in arrivo;
-    * plugin geoai (addestramento sui propri disegni, confronto fra date).
+      GeoPackage; samgeo 0.2.0 aggiunge SAM 3 opzionale, con accesso ai pesi approvato da Meta e token personale;
+    * plugin geoai: 0.1.0 addestra sui disegni verificati e produce proposte; 0.2.0 aggiunge input
+      opzionali DEM, multispettrali e termici, anche combinati con RGB. Passo successivo: confronto fra
+      due date registrate e differenze di quota dei DEM, dopo la verifica su un rilievo annotato reale.
 
 ## Non previsto
 

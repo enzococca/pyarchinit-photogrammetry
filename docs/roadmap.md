@@ -214,8 +214,10 @@ Open points, in no fixed order:
     * a samgeo plugin (segmenting the orthomosaic by writing "stones", "walls"). *Done* with 1.5.0: the
       plugin samgeo 0.1.0 - Grounding DINO and SAM 2.1 in an environment of their own find what is written,
       as a layer of proposals that becomes units (`context.add_units`, new in 1.5.0), classes of the dense
-      cloud or a GeoPackage; SAM 3 to come;
-    * a geoai plugin (training on your own drawings, comparison between dates).
+      cloud or a GeoPackage; samgeo 0.2.0 adds optional SAM 3 with Meta-approved model access and a personal token;
+    * geoai: 0.1.0 trains on reviewed drawings and produces proposals; 0.2.0 adds optional DEM,
+      multispectral and thermal inputs, alone or combined with RGB. Next: compare two coregistered
+      dates and DEM height differences, after evaluation on a real annotated survey.
 
 ## Not planned
 

@@ -51,7 +51,21 @@ installarli con pip in un ambiente Python, vedi [Plugin](../plugins.md).
 | Mesh (MeshLab) (`mesh-tools`) | i filtri di MeshLab sul modello del chunk: decimazione che conserva la texture, rimaglia isotropa, levigatura Taubin e HC, buchi chiusi lasciando aperto il contorno, topologia riparata, misure; ogni risultato una nuova versione del modello | [Mesh (MeshLab)](mesh-tools.md) |
 | Sentinel-2 (`sentinel2`) | serie temporali Sentinel-2 sul rilievo per cercare i crop mark: ricerca in un catalogo pubblico, nuvole mascherate, NDVI, NDRE e NDMI per data, serie e grafico, compositi e mappe dei crop mark sopra l'ortofoto, QGIS ed esportazioni | [Sentinel-2](sentinel2.md) |
 | Blender ed EMtools (`blender-em`) | i proxy 3D delle unità, il rilievo e le camere con le loro foto in un progetto Extended Matrix, con i nomi dei nodi dell'em.json di PyArchInit o EMStudio; Blender aperto sul progetto e aggiornato dal vivo quando i proxy cambiano; ciò che si modella in Blender di nuovo nel programma come proxy con il suo volume; la selezione condivisa dal vivo con EMtools 1.6, che crea i proxy delle unità che non ne hanno | [Blender ed EMtools](blender-em.md) |
-| Samgeo (`samgeo`) | quello che scrivi trovato nell'ortofoto - pietre, muri, mattoni, tegole e coppi, frammenti ceramici, alberi, persone - con Grounding DINO e SAM 2.1 sul tuo computer: un layer di proposte da controllare nella vista, poi US, classi della nuvola densa o un GeoPackage | [Samgeo](samgeo.md) |
+| Samgeo (`samgeo`) | ricerca testuale con Grounding DINO + SAM 2.1 o SAM 3 opzionale; proposte da controllare, numerazione e nomi in blocco, gruppi selezionati a mano libera e UT di ricognizione nella TOC “Unità topografiche” | [Samgeo](samgeo.md) |
+| GeoAI (`geoai`) | addestramento dai disegni verificati con RGB e input opzionali DEM, multispettrali o termici, da soli o combinati; modelli da applicare come proposte da controllare | [GeoAI](geoai.md) |
+
+## Numerare e raggruppare molte unità
+
+Con l'app **1.5.1** e Samgeo **0.3**, la conversione delle proposte include l'anteprima di numeri,
+nomi e tipo. Per correggere anche unità già create, apri **Layer > Identifica / raggruppa...**.
+Dal menu del pulsante **Seleziona**, attiva **Selezione a mano libera (lazo)** e traccia il gruppo
+sul canvas; Maiusc/Cmd aggiunge, Alt sottrae. Scegli **Solo selezionate** e **Stesso nome / gruppo**:
+le unità condividono il nome ma conservano identificativi distinti e geometrie separate.
+
+Per la ricognizione scegli **UT**, indicando il progetto: nella TOC comparirà **Unità topografiche**,
+eventualmente seguita dal nome del gruppo. Per lo scavo rimangono US, USM e gli altri tipi. La
+numerazione salta i numeri già occupati; **Modifica > Annulla** ripristina l'intera operazione.
+I dati UT si riferiscono alla scheda `ut_table` di PyArchInit e non vengono pubblicati come schede US.
 
 Ogni guida ha le stesse parti: che cosa fa il plugin e che cosa serve prima, i dati e come prepararli, i
 passi nel programma e dalla riga di comando, come leggere i risultati, i file che scrive.

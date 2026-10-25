@@ -3,15 +3,35 @@
 Il plugin *Samgeo* trova nell'ortofoto quello che scrivi: *pietre*, *muri*, *mattoni*, *tegole e
 coppi*, *frammenti ceramici*, *alberi*, o una frase qualsiasi in inglese. Ogni ricerca è un **layer di
 proposte** nella vista 2D: lo controlli, elimini quello che è sbagliato, e solo dopo lo trasformi in
-unità stratigrafiche, classi della nuvola densa o un GeoPackage. Segue la ricetta di `LangSAM` di
+unità stratigrafiche, classi della nuvola densa o un GeoPackage. Il motore predefinito segue la
+ricetta di `LangSAM` di
 [segment-geospatial](https://github.com/opengeos/segment-geospatial):
 [Grounding DINO](https://huggingface.co/IDEA-Research/grounding-dino-base) trova i riquadri di quello
 che è scritto, [SAM 2.1](https://github.com/facebookresearch/sam2) disegna il contorno dentro ogni
-riquadro. Girano entrambi sul tuo computer, con pesi aperti e senza account.
+riquadro. Grounding DINO e SAM 2.1 girano sul tuo computer, con pesi aperti e senza account. Puoi
+scegliere anche SAM 3: richiede un accesso personale approvato da Meta; vedi la sezione qui sotto.
 
-Questa pagina descrive la versione 0.1.0 del plugin, che richiede pyarchinit-photogrammetry 1.5.0 o
+La versione 0.2.0 aggiunge SAM 3 come motore opzionale; richiede pyarchinit-photogrammetry 1.5.0 o
 successivo. Il README e il codice sono nel
 [repository dei plugin](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/samgeo).
+
+## Motore SAM 3: licenza, accesso e token
+
+Oltre a Grounding DINO + SAM 2.1 puoi scegliere **SAM 3 (SamGeo3 / Transformers)** per trovare tutte
+le istanze di un concetto espresso con un testo breve. SAM 3 e i suoi pesi sono soggetti alla
+[licenza SAM di Meta](https://huggingface.co/facebook/sam3/blob/main/LICENSE), distinta dalla GPL del
+plugin. Il plugin non include né redistribuisce i pesi e non accetta le condizioni al posto tuo.
+
+Per usarlo, accedi a Hugging Face e [richiedi a Meta l'accesso al modello](https://huggingface.co/facebook/sam3);
+leggi e accetta le condizioni e attendi l'approvazione. Poi crea un tuo
+[token personale Hugging Face](https://huggingface.co/settings/tokens) con permesso di lettura sul
+modello. **Il token è di Hugging Face e da solo non concede l'accesso: serve anche l'approvazione di
+Meta.** Inseriscilo nel campo protetto del pannello per usarlo nella sessione corrente, oppure configura
+`HF_TOKEN` o `hf auth login`. Il plugin non lo salva nei progetti, nelle impostazioni o nei log.
+
+Al primo uso i pesi autorizzati vengono scaricati nella cache Hugging Face e possono essere riutilizzati
+localmente. Per i comandi e i passaggi completi, vedi il
+[README Samgeo](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/samgeo#sam-3-licenza-accesso-e-token-personale).
 
 <figure markdown="span">
   ![Il pannello Samgeo dopo una ricerca di cespugli](../img/plugins/samgeo/pane.png)
@@ -32,7 +52,8 @@ successivo. Il README e il codice sono nel
 
 1. Costruisci l'ortofoto del chunk (*Flusso di lavoro > Costruisci ortofoto...*).
 2. Apri il pannello *Samgeo* (*Plugin > Samgeo > Pannello Samgeo*). La prima volta, *Installa i
-   modelli...* installa PyTorch e i modelli in un ambiente loro (circa 2 GB, qualche minuto).
+   modelli...* installa PyTorch e i pacchetti del motore scelto in un ambiente dedicato; i pesi si
+   scaricano al primo uso.
 3. Scegli cosa cercare, il raster e dove - tutto il raster, un poligono che disegni o la parte visibile
    nella vista 2D - e premi *Trova*.
 4. Controlla le proposte nella vista: elimina quelle sbagliate con *Seleziona* e Canc.
@@ -42,7 +63,7 @@ successivo. Il README e il codice sono nel
 
 | Da una ricerca | Che cosa ottieni |
 |---|---|
-| Il layer `samgeo: <nome>` | gli oggetti trovati, ciascuno con il suo numero, il testo, la frase che l'ha trovato, il punteggio (la confidenza di Grounding DINO) e l'area in m²; ridisegnato su ogni raster che la vista mostra; una proposta eliminata nella vista esce anche dalla ricerca |
+| Il layer `samgeo: <nome>` | gli oggetti trovati, ciascuno con il suo numero, il testo, la frase che l'ha trovato, il punteggio del motore selezionato e l'area in m²; ridisegnato su ogni raster che la vista mostra; una proposta eliminata nella vista esce anche dalla ricerca |
 | US | le proposte - quelle selezionate nella vista, quelle non ancora US, o tutte - diventano unità stratigrafiche del chunk, del tipo scelto (US, USM...), con il testo e il punteggio come attributi (`samgeo_prompt`, `samgeo_score`); una sola voce di *Modifica > Annulla* per tutte |
 | Classi della nuvola densa | i punti dentro le proposte, in pianta, prendono la classe `samgeo: <nome>` |
 | GeoPackage | le ricerche scelte, un layer ciascuna |
@@ -116,11 +137,26 @@ layer a sé (*pietre*, *pietre 2*...).
 
 ### US { #units }
 
-*US...* chiede quali proposte - quelle selezionate nella vista, quelle non ancora US, o tutte - e il
-tipo (US, USM, USR, USD, USV; USM per muri e mattoni). Le US si aggiungono al chunk attivo senza
-numero: *Strumenti > Proponi US e rapporti (Extended Matrix)...* le numera e ne propone i rapporti. Le
-proposte già US restano nel layer con il solo contorno; quando lo sono tutte, il layer viene nascosto.
-*Modifica > Annulla* toglie le US, la ricerca resta.
+Con app **1.5.1** e Samgeo **0.3**, *US...* apre l'anteprima degli identificativi delle proposte non
+ancora convertite. Scegli tutte o soltanto quelle selezionate, il tipo (US, USM, gli altri tipi
+stratigrafici oppure **UT** per la ricognizione), il primo numero o la numerazione automatica.
+I numeri già occupati nei disegni del progetto e nell'archivio collegato vengono saltati.
+
+**Nome progressivo** produce, per esempio, `Tomba0001`, `Tomba0002`; **Stesso nome / gruppo** assegna
+un nome comune conservando numeri individuali. Il numero rimane separato dal nome. Per le UT indica
+il progetto: saranno nella TOC **Unità topografiche**, o **Unità topografiche - nome del gruppo**.
+Le geometrie rimangono separate. Le UT hanno schede `ut_table`, non sono inserite in `us_table` e
+non ricevono automaticamente rapporti stratigrafici o nodi Extended Matrix.
+
+Per sistemare anche le unità già create con `?`, usa **Layer > Identifica / raggruppa...**. Dal menu
+del pulsante **Seleziona**, attiva **Selezione a mano libera (lazo)** e traccia il contorno del gruppo
+sul canvas. Maiusc/Cmd aggiunge, Alt sottrae; Esc o tasto destro annullano il gesto. Nell'anteprima
+scegli **Solo selezionate**, **Solo senza numero** oppure **Tutte le unità**. Un solo **Modifica >
+Annulla** ripristina nomi, numeri, tipo e gruppo della modifica in blocco.
+
+Le proposte convertite restano tracciate nella ricerca e, quando sono tutte unità, il layer viene
+nascosto. Sulle versioni precedenti dell'app rimane disponibile il dialogo originale; per il nuovo
+flusso e la selezione a mano libera occorre aggiornare anche l'app.
 
 ### Classi della nuvola densa { #classes }
 

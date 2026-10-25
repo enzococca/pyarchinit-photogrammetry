@@ -50,7 +50,21 @@ them with pip in a Python environment, see [Plugins](../plugins.md).
 | Mesh (MeshLab) (`mesh-tools`) | MeshLab's filters on the model of the chunk: decimation that keeps the texture, isotropic remeshing, Taubin and HC smoothing, holes closed with the outline left open, topology repaired, measures; every result a new version of the model | [Mesh (MeshLab)](mesh-tools.md) |
 | Sentinel-2 (`sentinel2`) | Sentinel-2 time series over the survey to look for crop marks: a public catalog searched, clouds masked, NDVI, NDRE and NDMI per date, series and chart, composites and crop-mark maps over the orthophoto, QGIS and exports | [Sentinel-2](sentinel2.md) |
 | Blender and EMtools (`blender-em`) | the 3D proxies of the units, the survey and the cameras with their photos into an Extended Matrix project, named after the nodes of the em.json of PyArchInit or EMStudio; Blender opened on it and kept up to date while the proxies change; what is modelled in Blender back into the program as proxies with their volume; the selection shared live with EMtools 1.6, which makes the proxies of the units without one | [Blender and EMtools](blender-em.md) |
-| Samgeo (`samgeo`) | what you write found in the orthophoto - stones, walls, bricks, roof tiles, pottery sherds, trees, people - with Grounding DINO and SAM 2.1 on your computer: a layer of proposals to check on the view, then stratigraphic units, classes of the dense cloud or a GeoPackage | [Samgeo](samgeo.md) |
+| Samgeo (`samgeo`) | text search with Grounding DINO + SAM 2.1 or optional SAM 3; reviewable proposals, bulk identifiers/names, freehand-selected groups and survey UT under Topographic units in the TOC | [Samgeo](samgeo.md) |
+| GeoAI (`geoai`) | train from reviewed drawings with RGB and optional DEM, multispectral or thermal inputs, alone or combined; apply models as proposals to review | [GeoAI](geoai.md) |
+
+## Number and group many units
+
+With application **1.5.1** and Samgeo **0.3**, converting proposals includes a preview of identifiers,
+names and kinds. To edit existing units, open **Layers > Identify / group...**. In the **Select**
+button's menu, enable **Freehand selection (lasso)** and trace around a group on the canvas;
+Shift/Cmd adds and Alt subtracts. Choose **Selected units only** and **Shared name / group**:
+units share a name while retaining separate identifiers and geometries.
+
+For survey records choose **UT** and enter a project: the TOC shows **Topographic units**, optionally
+followed by the group name. Excavation workflows retain US, USM and the other kinds. Numbering skips
+occupied identifiers; **Edit > Undo** restores the entire operation. UT records use PyArchInit's
+separate `ut_table` forms and are excluded from US form publication.
 
 Every guide has the same parts: what the plugin does and what it needs first, the data and how to
 prepare them, the steps in the program and on the command line, how to read the results, the files it

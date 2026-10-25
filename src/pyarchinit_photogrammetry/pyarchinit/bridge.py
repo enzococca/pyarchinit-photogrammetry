@@ -21,6 +21,7 @@ from ..core import crs as crs_mod
 from ..core import paradata
 from .database import PyArchInitDB, connect, reproject_wkt
 from .media import register_media
+from .topographic import TopographicMixin, guard_stratigraphic_kind
 
 US_FIELDS = ["sito", "area", "us", "unita_tipo", "d_stratigrafica", "d_interpretativa", "descrizione",
              "interpretazione", "periodo_iniziale", "fase_iniziale", "periodo_finale", "fase_finale",
@@ -31,7 +32,7 @@ POTTERY_WEIGHTS = {"diametro_rim": 2.0, "diametro_max": 1.0, "diametro_bottom": 
 UNKNOWN_SHAPE = 0.1  # the difference of shape given to a form saved without its profile
 
 
-class PyArchInit:
+class PyArchInit(TopographicMixin):
     def __init__(self, db: PyArchInitDB, media_root: str | Path | None = None):
         self.db = db
         self.media_root = Path(media_root) if media_root else None
@@ -135,6 +136,7 @@ class PyArchInit:
     def create_us(self, sito: str, area: str, us: str, unita_tipo: str = "US", **fields) -> int:
         """New ``us_table`` record (the site record is created when missing). Unknown fields
         are ignored; ``rapporti`` may be a list of ``(relation, us, area, sito)``."""
+        guard_stratigraphic_kind(unita_tipo)
         if self.us_record(sito, area, us, unita_tipo) is not None:
             raise FileExistsError(f"{unita_tipo} {us} (area {area}) esiste gia' in {sito}")
         self.ensure_site(sito)
@@ -144,6 +146,7 @@ class PyArchInit:
             return int(self.db.insert(conn, "us_table", values, id_column="id_us"))
 
     def update_us(self, id_us: int, **fields) -> int:
+        guard_stratigraphic_kind(fields.get("unita_tipo"))
         values = self._us_values(fields, default_site=fields.get("sito"))
         values.pop("id_us", None)
         if not values:
@@ -595,6 +598,9 @@ class PyArchInit:
         """Write unit polygons into ``pyunitastratigrafiche`` (US must be set on each unit).
         The columns a unit carries in its attributes (``stratigraph_index_us``, ``tipo_us_s``,
         ``disegnatore``, ``data``...) win over the arguments, which are the defaults."""
+        units = list(units)
+        for unit in units:
+            guard_stratigraphic_kind(unit.tipo)
         self.ensure_site(sito)
         gids = []
         with self.db.begin() as conn:
@@ -621,6 +627,7 @@ class PyArchInit:
         """Change a polygon already in ``pyunitastratigrafiche``: attributes (``us``,
         ``area``, ``tipo``, or any column name) and/or its ``geometry`` (shapely, in ``crs``;
         e.g. after merging units). Returns the number of rows updated."""
+        guard_stratigraphic_kind(fields.get("tipo", fields.get("unita_tipo_s")))
         names = {"us": "us_s", "area": "area_s", "tipo": "unita_tipo_s", "sito": "scavo_s"}
         cols = self.db.columns("pyunitastratigrafiche")
         values = {names.get(k, k): (None if v is None else str(v)) for k, v in fields.items()}
