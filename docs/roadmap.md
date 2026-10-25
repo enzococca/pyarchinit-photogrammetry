@@ -190,7 +190,7 @@ Open points, in no fixed order:
 
 * Network nodes: they already share the key points of the photos and the depth maps among
   computers; the texture and the orthomosaic tiles not yet. Useful only with several computers.
-  *Done*: the tiles of the orthomosaic and of the orthophoto of a terrain texture, and the rows of
+  *Done* in 1.4.0: the tiles of the orthomosaic and of the orthophoto of a terrain texture, and the rows of
   cells of the texture, made from the chunk the main program shares as it has it in memory; the
   pixels are the same as alone. A unit a node cannot do is done again by the main program, and a
   cancelled step takes its units back.
@@ -207,7 +207,7 @@ Open points, in no fixed order:
 * Windows ARM64: the VTK 3D view and E57. *Done* in 1.3.5 (VTK 9.7.1 and pye57 built for ARM64; the view
   checked in a Windows 11 ARM64 machine with OpenGL 4.3). SpatiaLite waits for an ARM64 build of QGIS.
 * Ideas proposed but not decided yet:
-    * a raster calculator (formulas on any raster of the project). *Done*: *Strumenti > Calcolatore raster*,
+    * a raster calculator (formulas on any raster of the project). *Done* in 1.4.0: *Strumenti > Calcolatore raster*,
       `ppg calc`, `engine.rastercalc`: formulas as in QGIS on every raster of a chunk, those of the plugins
       too (found in the chunk folder, or named by the plugin with `context.add_rasters`), on the grid of one
       of them, block by block;

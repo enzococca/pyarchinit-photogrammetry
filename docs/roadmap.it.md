@@ -190,8 +190,8 @@ dataset pubblici WorldView-3.
 Punti aperti, senza un ordine fisso:
 
 * Nodi di rete: dividono già tra più computer i punti delle foto e le mappe di profondità; texture
-  e tasselli dell'ortofoto non ancora. Serve solo se si lavora con più computer. *Fatto*: i tasselli
-  dell'ortofoto e dell'ortofoto della texture di un terreno, e le righe di celle della texture, fatti
+  e tasselli dell'ortofoto non ancora. Serve solo se si lavora con più computer. *Fatto* nella 1.4.0: i
+  tasselli dell'ortofoto e dell'ortofoto della texture di un terreno, e le righe di celle della texture, fatti
   dal chunk che il programma principale condivide come lo ha in memoria; i pixel sono gli stessi di
   quando lavora da solo. Un'unità che un nodo non riesce a fare la rifà il programma principale, e un
   passo annullato ritira le sue unità.
@@ -208,8 +208,8 @@ Punti aperti, senza un ordine fisso:
 * Windows ARM64: la vista 3D VTK e l'E57. *Fatto* nella 1.3.5 (VTK 9.7.1 e pye57 compilati per ARM64; la
   vista provata su una macchina Windows 11 ARM64 con OpenGL 4.3). SpatiaLite aspetta un QGIS per ARM64.
 * Idee proposte ma non ancora decise:
-    * calcolatore raster (formule su qualsiasi raster del progetto). *Fatto*: *Strumenti > Calcolatore
-      raster*, `ppg calc`, `engine.rastercalc`: formule come in QGIS su tutti i raster di un chunk, anche
+    * calcolatore raster (formule su qualsiasi raster del progetto). *Fatto* nella 1.4.0: *Strumenti >
+      Calcolatore raster*, `ppg calc`, `engine.rastercalc`: formule come in QGIS su tutti i raster di un chunk, anche
       quelli dei plugin (trovati nella cartella del chunk, o con il nome che dà loro il plugin con
       `context.add_rasters`), sulla griglia di uno di essi, a blocchi;
     * plugin samgeo (segmentare l'ortofoto scrivendo «pietre», «muri»);
