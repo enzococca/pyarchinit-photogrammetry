@@ -95,6 +95,41 @@ def _polygons(geom) -> list:
     return [p for part in getattr(geom, "geoms", []) for p in _polygons(part)]
 
 
+def units_from_polygons(polygons, tipo: str = "US", attributes=None, sito: str | None = None) -> list[UnitPolygon]:
+    """Units from ``polygons`` - shapely (Multi)Polygons, or vertex lists ``(N, 2)`` in the coordinates
+    of the chunk - each with its ``attributes`` (one dict for all, or a list with one per polygon):
+    ``us``, ``area``, ``tipo``, ``sito`` and the columns of pyunitastratigrafiche (:data:`UNIT_FIELDS`);
+    any other key stays an attribute of the unit. An invalid outline is made valid; one that is empty or
+    encloses no area is left out."""
+    from shapely.geometry import MultiPolygon, Polygon
+    from shapely.geometry.base import BaseGeometry
+    from shapely.validation import make_valid
+
+    polygons = list(polygons)
+    if attributes is None or isinstance(attributes, dict):
+        rows = [dict(attributes or {}) for _ in polygons]
+    else:
+        rows = [dict(a or {}) for a in attributes]
+        if len(rows) != len(polygons):
+            raise ValueError(f"{len(rows)} dicts of attributes for {len(polygons)} polygons")
+    units = []
+    for p, a in zip(polygons, rows):
+        try:
+            geom = p if isinstance(p, BaseGeometry) else Polygon(np.asarray(p, dtype=float)[:, :2])
+        except (ValueError, IndexError, TypeError):  # fewer than three vertices, or no vertices at all
+            continue
+        parts = _polygons(geom if geom.is_valid else make_valid(geom))
+        if not parts:
+            continue
+        geom = parts[0] if len(parts) == 1 else MultiPolygon(parts)
+        us, area = a.pop("us", None), a.pop("area", None)
+        kind, site = a.pop("tipo", None) or tipo, a.pop("sito", None) or sito
+        units.append(UnitPolygon(geom, us=str(us) if us not in (None, "") else None,
+                                 area=str(area) if area not in (None, "") else None, tipo=str(kind or "US"),
+                                 attributes=a, sito=str(site) if site else None))
+    return units
+
+
 def reshape_polygon(polygon, line):
     """QGIS's *Reshape Features* on one polygon: ``line`` (a shapely LineString or its vertices)
     crosses the outline at least twice; the outline between the first and the last crossing is

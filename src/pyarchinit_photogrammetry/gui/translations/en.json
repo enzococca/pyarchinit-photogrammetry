@@ -2860,6 +2860,7 @@
   "{0} unita' numerate nel progetto": "{0} units numbered in the project",
   "{0} unita' senza numero di US nel chunk {1}. I numeri partono dopo l'ultima US del sito {2} e del progetto.": "{0} units without a US number in the chunk {1}. The numbers start after the last US of the site {2} and of the project.",
   "{0} unita', {1} tagli proposti, {2} rapporti": "{0} units, {1} cuts proposed, {2} relationships",
+  "{0} unità aggiunte da {1}: area {2} m2": "{0} units added by {1}: area {2} m2",
   "{0} x {1} celle a {2} m da {3} coppie, {4}% con una quota; {5}: versione del DEM «{6}»": "{0} x {1} cells at {2} m from {3} pairs, {4}% with a height; {5}: version of the DEM «{6}»",
   "{0} x {1} celle a {2} m, base/altezza {3}, {4}% abbinato: versione del DEM «{5}»": "{0} x {1} cells at {2} m, base to height {3}, {4}% matched: version of the DEM “{5}”",
   "{0} x {1} px a {2} m, {3}% con dati: versione dell'ortofoto «{4}»": "{0} x {1} px at {2} m, {3}% with data: version of the orthomosaic “{4}”",
