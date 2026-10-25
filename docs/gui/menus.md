@@ -207,7 +207,7 @@ thermal and satellite captures, plugins.
 | **Pottery profile from a mesh...** | diameters, height and profile of a vessel or a sherd ([pottery](archaeology.md#pottery-profiles)) |
 | **3D proxies of the units...** | the solids of the units for the Extended Matrix and BIM ([proxies](archaeology.md#us-proxies)) |
 | **Classification of the cloud** | ground, vegetation, masonry...: [see below](#tools-classification-of-the-cloud) |
-| **Segment Anything 2.1** | units and stones drawn by AI: [see below](#tools-segment-anything-21) |
+| **Segment Anything 2.1** | units and stones drawn by SAM 2.1: [see below](#tools-segment-anything-21) |
 | **Export IFC (BIM)...** | the units or their proxies in an IFC file ([BIM and IFC](../bim.md)) |
 | **Run Python script...** | a script with the modules of the program ([API](../api.md)) |
 | **Multispectral** · **Thermal** | multispectral and thermal captures: [see below](#tools-multispectral) |
@@ -251,7 +251,7 @@ texture.
 | **Show the masks** | shows or hides the red |
 | **Import masks (images)...** · **Masks from the alpha channel of the photos** | masks made with another program |
 | **Masks from the background...** · **Masks from a colour (backdrop)...** | from photos without the object, or from the colour of the backdrop |
-| **Masks from the model** · **Masks with SAM 2.1** | only the object stays: from the model or by AI (the object at the centre of the photo) |
+| **Masks from the model** · **Masks with SAM 2.1** | only the object stays: from the model or with SAM 2.1 (the object at the centre of the photo) |
 | **Export masks...** · **Remove...** | saves the masks, or removes them from the selected photos or all of them |
 
 ### Tools > Drawing on the orthophoto
@@ -270,7 +270,7 @@ These are the tools of the *Drawing* bar, described with their windows in [Drawi
 | **Spot height** · **Measuring point** | a spot height for PyArchInit; a point with elevation, temperature, bands and indices |
 | **Marker** | a marker where you click, projected on the photos that see it |
 | **Crop** · **Orthophoto patch** · **Edit DEM** | work on an area: cut, choose the photos, fill the DEM from the ground around it |
-| **Segment Anything (SAM)** | units drawn by AI: touch, box, area, stones |
+| **Segment Anything (SAM)** | units drawn by SAM: touch, box, area, stones |
 | **Snap** | snaps the points to the vertices and segments of the visible layers |
 | **Delete selected** · **Merge selected** · **Clear drawings** | remove or merge features |
 | **Crop or export with the selected polygon...** | the crop of the products on a unit |
