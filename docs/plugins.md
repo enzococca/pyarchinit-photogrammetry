@@ -157,6 +157,7 @@ the next start (`ppg plugin` lists its command at once).
 | `show_pane(widget)` | since 1.3.4: a pane of the plugin in front, also when the user closed it or floated it |
 | `add_rasters(provider)` | since 1.4.0: the plugin's rasters by name in the raster calculator (*Strumenti > Calcolatore raster*, `engine.rastercalc`): `provider(chunk)` returns dicts `{"name", "label", "path"}` (`name` in the formulas: letters, digits and `_`, made so if it is not). Without it the calculator finds every GeoTIFF of the chunk folder anyway, named by its folder and file (`terrain_twi`) or by its `ppg_name` tag; taken out with the plugin, also in the command line |
 | `rasters(chunk=None)` | since 1.4.0: every raster of `chunk` (the active one) the calculator reads, with its name in the formulas: dicts `name`, `label`, `path`, `source`, `bands`, `width`, `height`, `resolution`; a formula on them: `engine.rastercalc.calculate(chunk, formula, name)` |
+| `add_units(polygons, tipo="US", attributes=None, chunk=None)` | since 1.5.0: stratigraphic units made by the plugin, as if drawn in the window - in the live QGIS link, numbered by *Proponi US e rapporti*, in the US forms of PyArchInit. `polygons`: shapely (Multi)Polygons or vertex lists `(N, 2)` in the coordinates of the chunk (an invalid outline is made valid, one with no area left out); `attributes`: one dict for all or one per polygon - `us`, `area`, `tipo`, `sito` and the columns of `pyunitastratigrafiche`, any other key an attribute of the unit; the site is the project's when not given. On the active chunk they are drawn and are one entry of *Modifica > Annulla*; on another chunk, and in the command line, they go into `chunk.meta["drawings"]`. Only in the interface thread; returns how many were added |
 
 `progress(fraction, message)` reports 0-1 and raises `Cancelled` when the user cancels: call it
 often in long loops. Widgets are touched only in the callbacks of actions and in `done`, never in
@@ -169,7 +170,7 @@ took beyond its registrations (open files, timers).
 now 1): a program with an older API refuses the plugin with a message. The index also gives the
 oldest version of the program a plugin works with (`min_app`): a plugin that uses the methods marked
 "since 1.3.2" asks for `min_app` 1.3.2, one that uses `on_refresh` 1.3.3, one that uses those "since 1.3.4"
-1.3.4. The plugins written before 1.3.4 put their pane among the tabs of the window with
+1.3.4, `add_rasters` and `rasters` 1.4.0, `add_units` 1.5.0. The plugins written before 1.3.4 put their pane among the tabs of the window with
 `window.left_tabs.addTab(pane, icon, title)`, show it with `window.left_tabs.setCurrentWidget(pane)`
 followed by `window.d_work.show()` and `window.d_work.raise_()`, and take it away with
 `removeTab(indexOf(pane))`: since 1.3.4 every pane is a dock of its own, and these calls still work -

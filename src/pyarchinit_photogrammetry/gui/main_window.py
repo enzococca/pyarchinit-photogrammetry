@@ -6417,6 +6417,22 @@ class MainWindow(QMainWindow):
                            + (tr(" (sito {0})", u.sito) if u.sito else ""))
         self._matrix_hint([u])
 
+    def add_units(self, units, source: str = "") -> None:
+        """Units made elsewhere (a plugin: ``context.add_units``) added to those drawn on the active
+        chunk: drawn on the view, one entry of Modifica > Annulla for all of them, one line of the log,
+        the hint about the US forms not yet in PyArchInit."""
+        units = list(units)
+        if not units:
+            return
+        for u in units:
+            self.units.append(u)
+            self._draw_unit(u, len(self.units) - 1)
+        self._dirty(True)
+        area = sum(u.geometry.area for u in units)
+        self.log_pane.info(tr("{0} unità aggiunte da {1}: area {2} m2", len(units), source or "plugin",
+                              f"{area:.3f}"))
+        self._matrix_hint(units)
+
     def _unit_drawn(self, xy) -> None:
         from shapely.geometry import Polygon
 

@@ -399,6 +399,46 @@ class Context:
         except RuntimeError:  # the window is being closed
             pass
 
+    # ------------------------------------------------------------------ units (since 1.5.0)
+    def add_units(self, polygons, tipo: str = "US", attributes=None, chunk=None) -> int:
+        """Since 1.5.0: stratigraphic units made by the plugin, as if drawn in the window: in the live
+        QGIS link, in the US proposal (*Proponi US e rapporti* numbers those without a number), in the
+        US forms of PyArchInit. ``polygons``: shapely (Multi)Polygons, or vertex lists ``(N, 2)`` in the
+        coordinates of the chunk; an invalid outline is made valid, one that encloses no area is left
+        out. ``attributes``: one dict for all, or a list with one per polygon - ``us``, ``area``,
+        ``tipo``, ``sito`` and the columns of ``pyunitastratigrafiche``; any other key stays an attribute
+        of the unit (kept with the project, a column in QGIS). The site is the project's when not given.
+        ``chunk``: the active one when None. In the window, on the active chunk, the units are drawn and
+        are one entry of *Modifica > Annulla*; on another chunk, and in the command line, they go into
+        ``chunk.meta["drawings"]``, where the window finds them when that chunk becomes the active one
+        (the command line saves the project). Only in the interface thread (an action, ``done``), as
+        :meth:`store_drawings`. Returns how many units were added."""
+        import threading
+
+        from ..archaeo.stratigraphy import units_from_polygons
+
+        window = self.window
+        if window is not None and threading.current_thread() is not threading.main_thread():
+            raise RuntimeError("add_units() changes the window: call it in the interface thread, "
+                               "not in the function given to run() or in an exporter")
+        doc = getattr(window, "doc", None) if window is not None else None
+        if doc is None:
+            doc = getattr(chunk, "document", None) or self.app.document
+        chunk = chunk if chunk is not None else doc.chunk
+        if chunk is None or not any(c is chunk for c in doc.chunks):
+            raise ValueError("the chunk does not belong to the open project")
+        units = units_from_polygons(polygons, tipo, attributes, sito=str(doc.meta.get("sito") or "") or None)
+        if not units:
+            return 0
+        if window is not None and chunk is getattr(window, "chunk", None) and hasattr(window, "add_units"):
+            window.add_units(units, source=self.name)
+            return len(units)
+        drawings = chunk.meta.setdefault("drawings", {})
+        drawings.setdefault("units", []).extend({**u.to_dict(), "layer": None} for u in units)
+        drawings.setdefault("quote", [])
+        self.mark_modified()
+        return len(units)
+
     # ------------------------------------------------------------------ panes (since 1.3.4)
     def add_pane(self, widget, title: str, icon=None, area: str = "right"):
         """Since 1.3.4: ``widget`` as a pane of the window, a dock of its own tabbed with the panes of

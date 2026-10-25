@@ -157,6 +157,7 @@ prossimo avvio (`ppg plugin` elenca subito il suo comando).
 | `show_pane(widget)` | dalla 1.3.4: un pannello del plugin in primo piano, anche se l'utente lo ha chiuso o staccato |
 | `add_rasters(provider)` | dalla 1.4.0: i raster del plugin con un nome nel calcolatore raster (*Strumenti > Calcolatore raster*, `engine.rastercalc`): `provider(chunk)` restituisce dizionari `{"name", "label", "path"}` (`name` nelle formule: lettere, cifre e `_`, reso tale se non lo è). Senza di esso il calcolatore trova comunque ogni GeoTIFF della cartella del chunk, con il nome della cartella e del file (`terrain_twi`) o del suo tag `ppg_name`; tolto con il plugin, anche dalla riga di comando |
 | `rasters(chunk=None)` | dalla 1.4.0: tutti i raster di `chunk` (quello attivo) che il calcolatore legge, con il loro nome nelle formule: dizionari `name`, `label`, `path`, `source`, `bands`, `width`, `height`, `resolution`; una formula su di essi: `engine.rastercalc.calculate(chunk, formula, name)` |
+| `add_units(polygons, tipo="US", attributes=None, chunk=None)` | dalla 1.5.0: unità stratigrafiche fatte dal plugin, come se fossero disegnate nella finestra - nel collegamento dal vivo con QGIS, numerate da *Proponi US e rapporti*, nelle schede US di PyArchInit. `polygons`: (Multi)Polygon di shapely o liste di vertici `(N, 2)` nelle coordinate del chunk (un contorno non valido viene reso valido, uno senza area lasciato fuori); `attributes`: un dizionario per tutte o uno per poligono - `us`, `area`, `tipo`, `sito` e le colonne di `pyunitastratigrafiche`, ogni altra chiave un attributo dell'unità; il sito è quello del progetto quando non è dato. Sul chunk attivo vengono disegnate e sono una voce di *Modifica > Annulla*; su un altro chunk, e dalla riga di comando, vanno in `chunk.meta["drawings"]`. Solo nel thread dell'interfaccia; restituisce quante ne ha aggiunte |
 
 `progress(fraction, message)` riporta un valore tra 0 e 1 e solleva `Cancelled` quando l'utente annulla:
 chiamala spesso nei cicli lunghi. I widget si toccano solo nelle callback delle azioni e in `done`, mai
@@ -169,7 +170,7 @@ ha preso oltre alle sue registrazioni (file aperti, timer).
 ora 1): un programma con un'API più vecchia rifiuta il plugin con un messaggio. L'indice dà anche la
 versione più vecchia del programma con cui un plugin funziona (`min_app`): un plugin che usa i metodi
 indicati "dalla 1.3.2" chiede `min_app` 1.3.2, uno che usa `on_refresh` 1.3.3, uno che usa quelli "dalla 1.3.4"
-1.3.4. I plugin scritti prima della 1.3.4 mettono il loro pannello fra le schede della
+1.3.4, `add_rasters` e `rasters` 1.4.0, `add_units` 1.5.0. I plugin scritti prima della 1.3.4 mettono il loro pannello fra le schede della
 finestra con `window.left_tabs.addTab(pane, icon, title)`, lo mostrano con
 `window.left_tabs.setCurrentWidget(pane)` seguito da `window.d_work.show()` e `window.d_work.raise_()`,
 e lo tolgono con `removeTab(indexOf(pane))`: dalla 1.3.4 ogni pannello è un dock a sé, e queste

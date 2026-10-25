@@ -853,3 +853,86 @@ def test_plugins_put_their_products_in_the_workspace(tmp_path, qapp, window_sett
         context.release()
         w.setWindowModified(False)
         w.close()
+
+
+def test_plugins_make_units_as_if_drawn(trench, tmp_path):
+    """Since 1.5.0 a plugin makes stratigraphic units: on the active chunk they are drawn on the view, with
+    the site of the project, all of them one entry of Modifica > Annulla and one line of the log; an
+    outline crossing itself is made valid, one that encloses no area is left out. On another chunk, and in
+    the command line, they go into the drawings of the chunk, where the window finds them. Never from
+    another thread."""
+    import threading
+
+    from shapely.geometry import box
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+    from pyarchinit_photogrammetry.plugins.api import Context
+
+    from conftest import TRENCH_ORIGIN
+
+    w, app, _mw = trench
+    x0, y0 = TRENCH_ORIGIN
+    context = Context("prova", tmp_path / "dati", w)
+    log = w.log_pane.table
+    drawn, entries = len(w.units), w.history.index
+    bowtie = [(x0 + 4, y0 + 4), (x0 + 5, y0 + 5), (x0 + 5, y0 + 4), (x0 + 4, y0 + 5)]  # crossing itself
+    added = context.add_units([box(x0 + 1, y0 + 1, x0 + 2, y0 + 2),
+                               [(x0 + 3, y0 + 3), (x0 + 3.5, y0 + 3), (x0 + 3.5, y0 + 3.6)],
+                               bowtie, [(x0, y0), (x0 + 1, y0)]],
+                              attributes=[{"samgeo_score": 0.91}, {"us": 12, "tipo": "USM", "disegnatore": "E. C."},
+                                          {}, {}])
+    assert added == 3 and len(w.units) == drawn + 3  # the line encloses no area
+    first, second, third = w.units[-3:]
+    assert first.us is None and first.tipo == "US" and first.sito == "Saggio"
+    assert first.attributes["samgeo_score"] == 0.91 and first.geometry.area == pytest.approx(1.0)
+    assert second.us == "12" and second.tipo == "USM" and second.attributes["disegnatore"] == "E. C."
+    assert third.geometry.is_valid and third.geometry.area == pytest.approx(0.5)  # the two triangles
+    assert len(w.ortho_view.features("Unita' stratigrafiche")) == drawn + 4  # one feature per part
+    assert w.history.index == entries + 1 and w.isWindowModified()  # one entry for all of them
+    assert log.item(log.rowCount() - 1, 2).text() == "3 unità aggiunte da prova: area 1.650 m2"
+    w.undo()
+    assert len(w.units) == drawn and len(w.ortho_view.features("Unita' stratigrafiche")) == drawn
+    w.redo()
+    assert len(w.units) == drawn + 3
+    assert context.add_units([]) == 0 and w.history.index == entries + 1
+
+    # another chunk: into its drawings, back when it becomes the active one
+    other = w.doc.add_chunk("Saggio 2")
+    assert context.add_units([box(x0, y0, x0 + 2, y0 + 1)], tipo="USM", chunk=other) == 1
+    assert len(w.units) == drawn + 3
+    stored = other.meta["drawings"]["units"]
+    assert len(stored) == 1 and stored[0]["tipo"] == "USM" and stored[0]["sito"] == "Saggio"
+    context.activate_chunk(other)
+    assert [u.tipo for u in w.units] == ["USM"] and w.units[0].geometry.area == pytest.approx(2.0)
+
+    failed = []
+    worker = threading.Thread(target=lambda: failed.append(_raises(context.add_units, [box(0, 0, 1, 1)])))
+    worker.start()
+    worker.join()
+    assert failed == [RuntimeError]
+    with pytest.raises(ValueError):
+        context.add_units([box(0, 0, 1, 1)], chunk=ppg.Document().add_chunk("di un altro progetto"))
+    with pytest.raises(ValueError):
+        context.add_units([box(0, 0, 1, 1), box(1, 1, 2, 2)], attributes=[{}])  # one dict per polygon
+    context.release()
+
+    # the command line: into the drawings of the chunk, saved by the plugin, read by the window
+    doc = ppg.Document()
+    ch = doc.add_chunk("rilievo")
+    doc.meta["sito"] = "Altro scavo"
+    doc.save(tmp_path / "riga.ppg")
+    line = Context("prova", tmp_path / "dati")
+    assert line.add_units([[(0, 0), (4, 0), (4, 1), (0, 1)]], attributes={"us": "3"}, chunk=ch) == 1
+    doc.save()
+    again = ppg.Document.open(tmp_path / "riga.ppg")
+    units = [UnitPolygon.from_dict(d) for d in again.chunk.meta["drawings"]["units"]]
+    assert [(u.us, u.sito, round(u.geometry.area, 3)) for u in units] == [("3", "Altro scavo", 4.0)]
+
+
+def _raises(function, *args):
+    try:
+        function(*args)
+    except Exception as exc:  # noqa: BLE001 - its kind is the result
+        return type(exc)
+    return None
