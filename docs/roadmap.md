@@ -211,7 +211,10 @@ Open points, in no fixed order:
       `ppg calc`, `engine.rastercalc`: formulas as in QGIS on every raster of a chunk, those of the plugins
       too (found in the chunk folder, or named by the plugin with `context.add_rasters`), on the grid of one
       of them, block by block;
-    * a samgeo plugin (segmenting the orthomosaic by writing "stones", "walls");
+    * a samgeo plugin (segmenting the orthomosaic by writing "stones", "walls"). *Done* with 1.5.0: the
+      plugin samgeo 0.1.0 - Grounding DINO and SAM 2.1 in an environment of their own find what is written,
+      as a layer of proposals that becomes units (`context.add_units`, new in 1.5.0), classes of the dense
+      cloud or a GeoPackage; SAM 3 to come;
     * a geoai plugin (training on your own drawings, comparison between dates).
 
 ## Not planned
