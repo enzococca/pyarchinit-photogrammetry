@@ -13,8 +13,8 @@ ground: 50 looking straight down and 7 oblique ones at the end. From them you wi
 
 There are no ground control points: the survey is placed by the GPS of the drone, within a few
 metres in position and height. Shape, distances, areas and volumes are right; to put the survey on a
-national grid within centimetres you add targets measured with a GNSS receiver (see the
-[desktop interface](../gui.md#layout), pane *Reference*).
+national grid within centimetres you add targets measured with a GNSS receiver (see the pane
+[*Reference*](../gui/panes.md#reference) of the desktop interface).
 
 ## The data
 

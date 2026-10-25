@@ -83,7 +83,7 @@ ricostruzioni si modellano in Blender; i proxy delle unità scavate li costruisc
 
 * **Il plugin**, installato dal programma: vedi [Guide ai plugin](guides.md#install).
 * **I proxy delle unità nel chunk**, fatti con *Strumenti > Proxy 3D delle US...* (vedi
-  [Interfaccia](../gui.md)), e/o **un modello**. Senza nessuno dei due non c'è niente da mandare.
+  [Proxy 3D delle US](../gui/archaeology.md#proxy-3d-delle-us)), e/o **un modello**. Senza nessuno dei due non c'è niente da mandare.
 * **L'em.json del sito**, consigliato. Lo scrive PyArchInit (*Extended Matrix → Esporta sito in em.json…*, s3dgraphy 1.6), come
   EMStudio ed EMtools 1.6. Senza, i proxy tengono i nomi del programma (`US12`, `USM3`) ed EMtools li
   abbina solo se la sua matrice usa quei nomi.

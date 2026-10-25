@@ -75,6 +75,15 @@ plugins:
             Blender and EMtools: Blender ed EMtools
             Guide: Guida
             Desktop interface: Interfaccia
+            Menus: Menu
+            Panes: Pannelli
+            Photos and markers: Foto e marker
+            Processing: Elaborazione
+            Drawing and measures: Disegno e misure
+            Tools for archaeology: Strumenti per l'archeologia
+            Multispectral and thermal: Multispettrale e termico
+            Exports and reports: Esportazioni e rapporti
+            Errors and updates: Errori e aggiornamenti
             Python API: API Python
             PyArchInit: PyArchInit
             QGIS, Metashape, WebODM, Photo3D: QGIS, Metashape, WebODM, Photo3D
@@ -100,6 +109,7 @@ markdown_extensions:
   - pymdownx.details
   - pymdownx.highlight
   - pymdownx.inlinehilite
+  - pymdownx.keys
   - pymdownx.superfences
   - pymdownx.tabbed:
       alternate_style: true
@@ -126,7 +136,17 @@ nav:
       - Sentinel-2: plugins/sentinel2.md
       - Blender and EMtools: plugins/blender-em.md
   - Guide:
-      - Desktop interface: gui.md
+      - Desktop interface:
+          - gui/index.md
+          - Menus: gui/menus.md
+          - Panes: gui/panes.md
+          - Photos and markers: gui/photos-markers.md
+          - Processing: gui/processing.md
+          - Drawing and measures: gui/drawing.md
+          - Tools for archaeology: gui/archaeology.md
+          - Multispectral and thermal: gui/multispectral.md
+          - Exports and reports: gui/exports.md
+          - Errors and updates: gui/help.md
       - Python API: api.md
       - PyArchInit: pyarchinit.md
       - QGIS, Metashape, WebODM, Photo3D: integrations.md

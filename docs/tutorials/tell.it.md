@@ -11,8 +11,8 @@ dal suolo: 50 verticali e 7 oblique alla fine. In circa 7 minuti su un portatile
 
 Non ci sono punti di controllo a terra: il rilievo è collocato dal GPS del drone, con pochi metri di
 incertezza in posizione e quota. Forma, distanze, aree e volumi sono giusti; per portare il rilievo su
-un sistema nazionale al centimetro si aggiungono target misurati con un ricevitore GNSS (vedi
-l'[interfaccia](../gui.md#layout), pannello *Riferimenti*).
+un sistema nazionale al centimetro si aggiungono target misurati con un ricevitore GNSS (vedi il
+pannello [*Riferimenti*](../gui/panes.md#riferimenti) dell'interfaccia).
 
 ## I dati
 

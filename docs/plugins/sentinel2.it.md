@@ -70,7 +70,7 @@ Con 10 m per pixel, Sentinel-2 vede gli elementi più grandi - recinti, fossati 
 metro, ville, il perimetro di un insediamento - e soprattutto **quando** i campi li mostrano: i
 satelliti passano ogni pochi giorni, anno dopo anno, dal 2015. Un muro da solo, una buca di palo, un
 fossato stretto sono più piccoli di un pixel: quelli sono per il drone e la sua camera multispettrale
-(vedi [Il pannello Multispettrale](../gui.md#il-pannello-multispettrale)).
+(vedi [Multispettrale e termico](../gui/multispectral.md#multispettrale)).
 
 ## Che cosa serve prima { #before }
 
