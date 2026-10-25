@@ -3,6 +3,9 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from copy import deepcopy
+import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -430,6 +433,7 @@ class RasterView(_ZoomView):
     sam_key = Signal(str)  # "accept" (Enter) or "cancel" (Esc)
     measured = Signal(str)
     layers_changed = Signal()
+    labels_changed = Signal()  # user label visibility changed (save with the chunk)
     feature_clicked = Signal(str, dict)  # layer name, attributes (query in pan mode)
     selection_changed = Signal(int)  # number of selected features
     delete_requested = Signal()  # Delete/Backspace or context menu in select mode
@@ -449,6 +453,7 @@ class RasterView(_ZoomView):
         self.overlays: list = []
         self.layers: dict[str, dict] = {}  # name -> {"kind", "visible", "features": [(item, label_item, attrs)]}
         self.layer_order: list[str] = []
+        self.layer_settings: dict[str, dict] = {}
         self.selection: list = []  # graphics items of the selected features
         self._sel_marks: list = []  # highlight items drawn over the selection
         self._band_origin: QPointF | None = None
@@ -790,7 +795,8 @@ class RasterView(_ZoomView):
     def _layer(self, name: str, kind: str) -> dict:
         lay = self.layers.get(name)
         if lay is None:
-            lay = {"kind": kind, "visible": True, "features": []}
+            lay = {"kind": kind, "visible": True, "features": [],
+                   "labels_visible": self.layer_settings.get(name, {}).get("labels_visible", True)}
             self.layers[name] = lay
             self.layer_order.append(name)
         return lay
@@ -798,13 +804,21 @@ class RasterView(_ZoomView):
     def _register(self, layer: str, kind: str, item, label_item, attrs: dict | None) -> None:
         lay = self._layer(layer, kind)
         attrs = dict(attrs or {})  # the same dict is shared with the item: edits are visible everywhere
+        attrs.setdefault("_default_label", label_item.text() if label_item is not None else "")
+        overrides = self.layer_settings.get(layer, {}).get("label_overrides", {})
+        override = overrides.get(self._label_key(attrs)) if overrides else None
+        if override is not None:
+            attrs["etichetta"] = override
+            if label_item is None:
+                label_item = self._new_feature_label(item, kind)
+            label_item.setText(override)
         item.setData(0, layer)
         item.setData(1, attrs)
         lay["features"].append((item, label_item, attrs))
         self._snap_cache = None
         for it in (item, label_item):
             if it is not None:
-                it.setVisible(lay["visible"])
+                it.setVisible(lay["visible"] and (it is item or lay["labels_visible"]))
                 self.overlays.append(it)
         self._changed()
 
@@ -869,7 +883,7 @@ class RasterView(_ZoomView):
                                                    **(attrs or {}), "_geom": ("Point", [float(x), float(y)])})
         return mark
 
-    def set_feature_attribute(self, name: str, index: int, key: str, value) -> dict | None:
+    def set_feature_attribute(self, name: str, index: int, key: str, value, *, remember_label: bool = True) -> dict | None:
         """Change one attribute of a feature; ``etichetta`` also changes the label on the map."""
         lay = self.layers.get(name)
         if lay is None or not 0 <= index < len(lay["features"]):
@@ -877,10 +891,76 @@ class RasterView(_ZoomView):
         item, label_item, attrs = lay["features"][index]
         attrs[key] = value
         item.setData(1, attrs)
-        if key == "etichetta" and label_item is not None:
-            label_item.setText(str(value))
+        if key == "etichetta":
+            text = str(value) if value is not None else ""
+            attrs[key] = text
+            if label_item is None:
+                label_item = self._new_feature_label(item, lay["kind"])
+                lay["features"][index] = (item, label_item, attrs)
+                self.overlays.append(label_item)
+            label_item.setText(text)
+            label_item.setVisible(lay["visible"] and lay["labels_visible"])
+            settings = self.layer_settings.setdefault(name, {})
+            overrides = settings.setdefault("label_overrides", {})
+            if remember_label:
+                overrides[self._label_key(attrs)] = text
+            else:
+                overrides.pop(self._label_key(attrs), None)
+                attrs["_default_label"] = text
         self._changed()
         return attrs
+
+    @staticmethod
+    def _label_key(attrs: dict) -> str:
+        """Stable feature identity; geometry is a fallback for imported anonymous features."""
+        for key in ("ppg_id", "_label_id"):
+            if attrs.get(key) is not None:
+                return f"{key}:{attrs[key]}"
+        return hashlib.sha256(json.dumps(attrs.get("_geom"), sort_keys=True).encode()).hexdigest()
+
+    def _new_feature_label(self, item, kind: str):
+        label = QGraphicsSimpleTextItem()
+        color = "white" if kind == "polygon" else (
+            item.brush().color() if kind == "point" else item.pen().color())
+        label.setBrush(QColor(color))
+        label.setFlag(label.GraphicsItemFlag.ItemIgnoresTransformations)
+        if kind == "polygon":
+            label.setFont(QFont(self.font().family(), 11, QFont.Weight.Bold))
+        label.setPos(item.mapToScene(item.boundingRect().center()))
+        self.scene().addItem(label)
+        return label
+
+    def set_layer_labels_visible(self, name: str, visible: bool) -> None:
+        lay = self.layers.get(name)
+        if lay is None:
+            return
+        lay["labels_visible"] = bool(visible)
+        self.layer_settings.setdefault(name, {})["labels_visible"] = bool(visible)
+        for _item, label, _attrs in lay["features"]:
+            if label is not None:
+                label.setVisible(lay["visible"] and bool(visible))
+        self.labels_changed.emit()
+        self._changed()
+
+    def restore_layer_settings(self, settings: dict) -> None:
+        """Replace chunk preferences without treating project loading as a user edit."""
+        self.layer_settings = deepcopy(settings or {})
+        for name, lay in self.layers.items():
+            lay["labels_visible"] = self.layer_settings.get(name, {}).get("labels_visible", True)
+            for index, (item, label, attrs) in enumerate(lay["features"]):
+                overrides = self.layer_settings.get(name, {}).get("label_overrides", {})
+                override = (overrides.get(self._label_key(attrs), attrs.get("_default_label", ""))
+                            if overrides else attrs.get("_default_label", ""))
+                if override is not None:
+                    attrs["etichetta"] = override
+                    if label is None:
+                        label = self._new_feature_label(item, lay["kind"])
+                        lay["features"][index] = (item, label, attrs)
+                        self.overlays.append(label)
+                    label.setText(override)
+                    item.setData(1, attrs)
+                if label is not None:
+                    label.setVisible(lay["visible"] and lay["labels_visible"])
 
     def features(self, name: str) -> list[dict]:
         """Attribute dicts (with the hidden ``_geom``) of a layer, in drawing order."""
@@ -896,7 +976,7 @@ class RasterView(_ZoomView):
         for item, label_item, _ in lay["features"]:
             item.setVisible(visible)
             if label_item is not None:
-                label_item.setVisible(visible)
+                label_item.setVisible(visible and lay["labels_visible"])
 
     def remove_layer(self, name: str) -> None:
         lay = self.layers.pop(name, None)

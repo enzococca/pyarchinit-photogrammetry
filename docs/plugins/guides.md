@@ -66,6 +66,11 @@ followed by the group name. Excavation workflows retain US, USM and the other ki
 occupied identifiers; **Edit > Undo** restores the entire operation. UT records use PyArchInit's
 separate `ut_table` forms and are excluded from US form publication.
 
+From application **1.5.2**, the **Labels** menu in the Layer pane lets you show or hide a layer's
+labels without hiding its geometries, or show or hide every layer's labels at once. Select a feature
+and choose **Edit label...** to customize its map text without changing its US or UT number. These
+choices are saved with the project for each chunk; see the [Layer pane](../gui/panes.md#layer).
+
 Every guide has the same parts: what the plugin does and what it needs first, the data and how to
 prepare them, the steps in the program and on the command line, how to read the results, the files it
 writes.

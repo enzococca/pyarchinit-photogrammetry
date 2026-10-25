@@ -147,7 +147,13 @@ stones, patches.
   here and in the status bar.
 * **Editing the attributes**: double click a value under *Attributes* to change it (US, area, type, label,
   any free field; computed fields such as m2 and length are read-only).
-* *US form* opens the PyArchInit form of the unit selected.
+* **Labels** (application **1.5.2**): select a layer, then use **Labels > Show labels** to show or hide
+  its text on the map while keeping the geometries visible. **Show all** and **Hide all** in this menu
+  control the labels of every layer; the *All* and *None* buttons still control the layers themselves.
+* To change a label, select a feature and choose **Labels > Edit label...**, or edit its `etichetta`
+  attribute. A custom map label does not change the unit's US or UT number. Label text and visibility
+  are saved in the project for each chunk and restored when you reopen it.
+* *Unit form* opens the PyArchInit form of the unit selected.
 
 <div style="clear: both"></div>
 

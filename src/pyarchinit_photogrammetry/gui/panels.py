@@ -12,7 +12,7 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QObject, QSize, Qt, QThread, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QImage, QKeyEvent, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QSizePolicy,
+                               QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QSizePolicy,
                                QSplitter, QTableWidget, QTableWidgetItem, QToolButton, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
@@ -1705,7 +1705,14 @@ class LayersPane(QWidget):
         self.b_remove = _tool("clear", tr("Rimuovi"), tr("Rimuovi il layer selezionato dalla vista"))
         self.b_us = _tool("us", tr("Scheda unità"), tr("Apri (o crea) la scheda PyArchInit dell'unita' selezionata"))
         self.b_us.clicked.connect(lambda: self.us_form_requested.emit(*self._current) if self._current else None)
-        for b in (self.b_all, self.b_none, self.b_zoom, self.b_remove, self.b_us):
+        self.b_labels = _tool("label", tr("Etichette"), tr("Mostra, nascondi o modifica le etichette"))
+        from PySide6.QtWidgets import QMenu
+
+        self._labels_menu = QMenu(self.b_labels)
+        self._labels_menu.aboutToShow.connect(self._fill_labels_menu)
+        self.b_labels.setMenu(self._labels_menu)
+        self.b_labels.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        for b in (self.b_all, self.b_none, self.b_zoom, self.b_labels, self.b_remove, self.b_us):
             bar.addWidget(b)
         lay.addLayout(bar)
         self.tree = QTreeWidget()
@@ -1756,6 +1763,8 @@ class LayersPane(QWidget):
         if self.view is None:
             return
         self._filling = True
+        current = self.tree.currentItem()
+        current_key = current.data(0, Qt.ItemDataRole.UserRole) if current else None
         expanded = {self.tree.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole)[0]
                     for i in range(self.tree.topLevelItemCount()) if self.tree.topLevelItem(i).isExpanded()}
         self.tree.clear()
@@ -1767,6 +1776,8 @@ class LayersPane(QWidget):
             top.setCheckState(0, Qt.CheckState.Checked if lay["visible"] else Qt.CheckState.Unchecked)
             top.setData(0, Qt.ItemDataRole.UserRole, (name, -1))
             self.tree.addTopLevelItem(top)
+            if current_key == (name, -1):
+                self.tree.setCurrentItem(top)
             feats = lay["features"]
             for i, (_item, _label, attrs) in enumerate(feats[:self.MAX_LISTED]):
                 shown = [(k, v) for k, v in attrs.items() if not str(k).startswith("_")]
@@ -1774,6 +1785,8 @@ class LayersPane(QWidget):
                 child = QTreeWidgetItem([text or tr("elemento {0}", i + 1)])
                 child.setData(0, Qt.ItemDataRole.UserRole, (name, i))
                 top.addChild(child)
+                if current_key == (name, i):
+                    self.tree.setCurrentItem(child)
             if len(feats) > self.MAX_LISTED:  # thousands of contour lines: listing them would only slow down
                 more = QTreeWidgetItem([tr("... altri {0} elementi (clic sulla mappa per interrogarli)",
                                            len(feats) - self.MAX_LISTED)])
@@ -1811,6 +1824,8 @@ class LayersPane(QWidget):
         name, idx = item.data(0, Qt.ItemDataRole.UserRole)
         if idx >= 0:
             self.show_attributes(name, {**self.view.layers[name]["features"][idx][2], "_index": idx})
+        else:
+            self._current = None
 
     def _remove_current(self) -> None:
         item = self.tree.currentItem()
@@ -1823,17 +1838,63 @@ class LayersPane(QWidget):
         item = self.tree.itemAt(pos) or self.tree.currentItem()
         if item is None or self.view is None:
             return
-        self.layer_menu(item.data(0, Qt.ItemDataRole.UserRole)[0]).exec(self.tree.viewport().mapToGlobal(pos))
+        self.tree.setCurrentItem(item)
+        name, idx = item.data(0, Qt.ItemDataRole.UserRole)
+        self.layer_menu(name, idx).exec(self.tree.viewport().mapToGlobal(pos))
 
-    def layer_menu(self, name: str):
+    def layer_menu(self, name: str, index: int = -1):
         """The context menu of a layer of the tree: its attributes into Excel."""
         from PySide6.QtWidgets import QMenu
 
         menu = QMenu(self)
+        self._add_label_actions(menu, name, index)
+        menu.addSeparator()
         a = menu.addAction(icon("excel"), tr("Esporta gli attributi di {0} in Excel...", translate(name)))
         a.triggered.connect(lambda _=False: self.export_layer(name))
         a.setEnabled(self.view is not None and bool(self.view.features(name)))
         return menu
+
+    def _fill_labels_menu(self) -> None:
+        self._labels_menu.clear()
+        current = self.tree.currentItem()
+        data = current.data(0, Qt.ItemDataRole.UserRole) if current else self._current
+        if self._current and (data is None or data[0] == self._current[0]):
+            data = self._current
+        if data and self.view is not None and data[0] in self.view.layers:
+            self._add_label_actions(self._labels_menu, *data)
+            self._labels_menu.addSeparator()
+        self._labels_menu.addAction(tr("Mostra tutte"), lambda: self._set_all_labels(True))
+        self._labels_menu.addAction(tr("Nascondi tutte"), lambda: self._set_all_labels(False))
+
+    def _add_label_actions(self, menu, name: str, index: int) -> None:
+        lay = self.view.layers.get(name) if self.view is not None else None
+        a = menu.addAction(tr("Mostra etichette"))
+        a.setCheckable(True)
+        a.setChecked(bool(lay and lay["labels_visible"]))
+        a.setEnabled(lay is not None)
+        a.toggled.connect(lambda checked: self.view.set_layer_labels_visible(name, checked))
+        edit = menu.addAction(tr("Modifica etichetta..."))
+        edit.setEnabled(lay is not None and 0 <= index < len(lay["features"]))
+        edit.triggered.connect(lambda: self.edit_feature_label(name, index))
+
+    def _set_all_labels(self, visible: bool) -> None:
+        if self.view is not None:
+            with self.view.batch():
+                for name in self.view.layer_order:
+                    self.view.set_layer_labels_visible(name, visible)
+
+    def edit_feature_label(self, name: str, index: int) -> None:
+        from PySide6.QtWidgets import QInputDialog
+
+        feats = self.view.features(name) if self.view is not None else []
+        if not 0 <= index < len(feats):
+            return
+        value, ok = QInputDialog.getText(self, tr("Modifica etichetta..."), tr("Testo dell'etichetta:"),
+                                        text=str(feats[index].get("etichetta") or ""))
+        if ok:
+            self.view.set_feature_attribute(name, index, "etichetta", value)
+            self.attribute_edited.emit(name, index, "etichetta", value)
+            self.show_attributes(name, {**self.view.features(name)[index], "_index": index})
 
     def layer_table(self, name: str) -> tuple[list[str], list[list]]:
         """The attributes of every feature of a layer: the fields of all of them, a row each."""
@@ -1855,6 +1916,12 @@ class LayersPane(QWidget):
     def show_attributes(self, layer: str, attrs: dict) -> None:
         idx = int(attrs.get("_index", -1))
         self._current = (layer, idx) if idx >= 0 else None
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            if top.data(0, Qt.ItemDataRole.UserRole)[0] == layer:
+                child = top.child(idx) if 0 <= idx < min(top.childCount(), self.MAX_LISTED) else None
+                self.tree.setCurrentItem(child or top)
+                break
         rows = [("layer", layer)] + [(k, v) for k, v in attrs.items() if not str(k).startswith("_")]
         self._filling = True
         self.attrs.setRowCount(len(rows))

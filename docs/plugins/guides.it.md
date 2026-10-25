@@ -67,5 +67,11 @@ eventualmente seguita dal nome del gruppo. Per lo scavo rimangono US, USM e gli 
 numerazione salta i numeri già occupati; **Modifica > Annulla** ripristina l'intera operazione.
 I dati UT si riferiscono alla scheda `ut_table` di PyArchInit e non vengono pubblicati come schede US.
 
+Dall'app **1.5.2**, il menu **Etichette** nel pannello Layer permette di accendere o spegnere le
+scritte di un layer mantenendo visibili le geometrie, oppure le etichette di tutti i layer insieme.
+Seleziona un elemento e scegli **Modifica etichetta...** per personalizzarne il testo sulla mappa senza
+cambiare il numero US o UT. Le scelte si salvano nel progetto per ciascun chunk; vedi il
+[pannello Layer](../gui/panes.md#layer).
+
 Ogni guida ha le stesse parti: che cosa fa il plugin e che cosa serve prima, i dati e come prepararli, i
 passi nel programma e dalla riga di comando, come leggere i risultati, i file che scrive.

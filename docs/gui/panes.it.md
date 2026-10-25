@@ -150,7 +150,15 @@ patch.
   curva...) qui e nella barra di stato.
 * **Modificare gli attributi**: doppio clic su un valore sotto *Attributi* per cambiarlo (US, area, tipo,
   etichetta, qualunque campo libero; i campi calcolati come m2 e lunghezza sono in sola lettura).
-* *Scheda US* apre la scheda PyArchInit dell'unità selezionata.
+* **Etichette** (app **1.5.2**): seleziona un layer, poi usa **Etichette > Mostra etichette** per
+  accendere o spegnere le sue scritte sulla mappa mantenendo visibili le geometrie. **Mostra tutte** e
+  **Nascondi tutte** in questo menu agiscono sulle etichette di tutti i layer; i pulsanti *Tutti* e
+  *Nessuno* continuano a mostrare o nascondere i layer stessi.
+* Per cambiare una scritta, seleziona un elemento e scegli **Etichette > Modifica etichetta...**, oppure
+  modifica il suo attributo `etichetta`. L'etichetta personalizzata sulla mappa non cambia il numero US
+  o UT dell'unità. Testi e visibilità delle etichette si salvano nel progetto per ciascun chunk e si
+  ritrovano alla riapertura.
+* *Scheda unità* apre la scheda PyArchInit dell'unità selezionata.
 
 <div style="clear: both"></div>
 

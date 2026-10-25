@@ -33,7 +33,7 @@ from .i18n import tr
 
 log = logging.getLogger("pyarchinit_photogrammetry")
 
-PART_NAMES = {"units": "Disegni", "quote": "Quote", "sections": "Sezioni", "pa": "Modifiche per PyArchInit",
+PART_NAMES = {"units": "Disegni", "labels": "Etichette", "quote": "Quote", "sections": "Sezioni", "pa": "Modifiche per PyArchInit",
               "markers": "Marker", "excluded": "Marker", "scalebars": "Barre di scala",
               "patches": "Patch dell'ortofoto", "region": "Regione di ricostruzione"}
 PRODUCT_NAMES = {"point_cloud": "Nuvola densa", "model": "Modello", "tie_points": "Punti di legame",

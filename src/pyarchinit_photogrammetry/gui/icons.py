@@ -88,6 +88,7 @@ ICONS = {
     "gcp": ("mdi6.map-marker-check", "green"), "checkpoint": ("mdi6.map-marker-question", "amber"),
     "crs": ("mdi6.earth", "indigo"), "scalebar": ("mdi6.ruler", "teal"), "project": ("mdi6.briefcase-outline", "slate"),
     "site": ("mdi6.map-marker-outline", "olive"), "us": ("mdi6.layers-triple-outline", "brown"),
+    "label": ("mdi6.label-outline", "blue"),
     "doc": ("mdi6.file-document-outline", "grey"),
     "tie_points": ("mdi6.dots-grid", "teal"), "point_cloud": ("mdi6.dots-hexagon", "green"),
     "model_textured": ("mdi6.texture-box", "pink"), "orthomosaic": ("mdi6.map-outline", "amber"),

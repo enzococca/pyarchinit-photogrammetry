@@ -26,7 +26,7 @@ from ..core.document import Document
 from ..io.qgis_link import ID_FIELD, new_id, stable_id
 from . import i18n, theme
 from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelectionDialog, IfcPreviewDialog,
-                      ImageDialog, ParamDialog, PatchDialog,
+                      ParamDialog, PatchDialog,
                       PublishDialog, QuotaDialog, SiteChoiceDialog, SiteDialog, TableDialog, UnitDialog, UsFormDialog,
                       accept_dji_licence, choice, message, short_label)
 from .i18n import decimal_comma, number, thousands_points, tr, translate
@@ -312,6 +312,7 @@ class MainWindow(QMainWindow):
         self.layers_pane = LayersPane()
         self.layers_pane.set_view(self.ortho_view)
         self.layers_pane.attribute_edited.connect(self._attribute_edited)
+        self.ortho_view.labels_changed.connect(self._labels_changed)
         self.pa_pending: dict[int, object] = {}  # gid -> UnitPolygon edited, to write back to PyArchInit
         self.pa_deleted: set[int] = set()  # gid of polygons deleted or merged away here
         self.pa_geom_changed: set[int] = set()  # gid whose geometry changed (merge, part removed)
@@ -3080,6 +3081,7 @@ class MainWindow(QMainWindow):
         """What Modifica > Annulla takes back, as JSON-able parts (see ``gui.undo``)."""
         ch = self.chunk
         state = {"chunk": None if ch is None else ch.key,
+                 "labels": self.ortho_view.layer_settings,
                  "units": [{**u.to_dict(), "attributes": dict(u.attributes or {})} for u in self.units],
                  "quote": [dict(q) for q in self.quote], "sections": [dict(x) for x in self.sections],
                  "probe": [dict(q) for q in self.probe_points],
@@ -3094,6 +3096,11 @@ class MainWindow(QMainWindow):
     def _undo_apply(self, state: dict, parts: set, products: list) -> None:
         """Put back the ``parts`` of a snapshot (and show the ``products`` whose files came back)."""
         ch = self.chunk
+        if "labels" in parts:
+            self.ortho_view.restore_layer_settings(state.get("labels") or {})
+            self._store_drawings()
+            if not parts & {"units", "quote", "sections", "pa", "probe"}:
+                self._redraw_overlays()
         if parts & {"units", "quote", "sections", "pa", "probe"}:
             from ..archaeo.stratigraphy import UnitPolygon
 
@@ -3771,7 +3778,8 @@ class MainWindow(QMainWindow):
                 continue
             x, y, z = ch.to_world(m.position[None])[0]
             view.add_point(float(x), float(y), color="#00e5ff" if not m.checkpoint else "#ff9f1c", label=m.label,
-                           layer="Marker", attrs={"marker": m.label, "z": round(float(z), 3)})
+                           layer="Marker", attrs={"marker": m.label, "z": round(float(z), 3),
+                                                  "_label_id": f"marker:{m.key}"})
 
     def optimize_cameras(self) -> None:
         if not self._need_chunk(aligned=True):
@@ -6306,6 +6314,9 @@ class MainWindow(QMainWindow):
         ch = self.chunk
         if ch is None:
             return
+        from copy import deepcopy
+
+        ch.meta["layer_labels"] = deepcopy(self.ortho_view.layer_settings)
         units = [{**u.to_dict(), "layer": (u.attributes or {}).get("_layer")} for u in self.units
                  if not str((u.attributes or {}).get("_layer") or "").startswith("US da PyArchInit - ")]
         quote = [{k: v for k, v in q.items() if not str(k).startswith("_")} for q in self.quote]
@@ -6355,6 +6366,7 @@ class MainWindow(QMainWindow):
         from ..archaeo.stratigraphy import UnitPolygon
 
         ch = self.chunk
+        self.ortho_view.restore_layer_settings(ch.meta.get("layer_labels", {}) if ch is not None else {})
         data = (ch.meta.get("drawings") or {}) if ch is not None else {}
         self.units, self.quote = [], []
         for d in data.get("units", []):
@@ -7050,12 +7062,25 @@ class MainWindow(QMainWindow):
             self.ortho_view.remove_layer("Sezioni")
             self._draw_sections()
 
+    def _labels_changed(self) -> None:
+        self._store_drawings()
+        self._dirty(True)
+
     def _attribute_edited(self, layer: str, idx: int, key: str, value) -> None:
         """An attribute changed in the Layers pane: update the unit / section behind it."""
         feats = self.ortho_view.features(layer)
         if not 0 <= idx < len(feats):
             return
         attrs = feats[idx]
+        if key == "etichetta" and "_unit" in attrs and 0 <= attrs["_unit"] < len(self.units):
+            u = self.units[attrs["_unit"]]
+            u.attributes["etichetta"] = str(value) if value is not None else ""
+            for j, other in enumerate(feats):
+                if j != idx and other.get("_unit") == attrs["_unit"]:
+                    self.ortho_view.set_feature_attribute(layer, j, key, value)
+            self._store_drawings()
+            self._dirty(True)
+            return
         if "_quota" in attrs and 0 <= attrs["_quota"] < len(self.quote):
             q = self.quote[attrs["_quota"]]
             if key == "quota_q":
@@ -7063,7 +7088,8 @@ class MainWindow(QMainWindow):
                     value = round(float(value), 3)
                 except (TypeError, ValueError):
                     value = None
-                self.ortho_view.set_feature_attribute(layer, idx, "etichetta", "?" if value is None else f"{value:.2f}")
+                self.ortho_view.set_feature_attribute(layer, idx, "etichetta", "?" if value is None else f"{value:.2f}",
+                                                       remember_label=False)
             if key != "etichetta":
                 q[key] = value
         elif "_unit" in attrs and 0 <= attrs["_unit"] < len(self.units):
@@ -7088,7 +7114,7 @@ class MainWindow(QMainWindow):
                 for j, other in enumerate(feats):  # every part of a multipolygon
                     if other.get("_unit") == attrs["_unit"]:
                         self.ortho_view.set_feature_attribute(layer, j, key, value)
-                        self.ortho_view.set_feature_attribute(layer, j, "etichetta", label)
+                        self.ortho_view.set_feature_attribute(layer, j, "etichetta", label, remember_label=False)
             elif key != "etichetta":
                 if key == "stratigraph_index_us":
                     try:
@@ -7113,6 +7139,8 @@ class MainWindow(QMainWindow):
                     sdict["label"] = str(value)
             self._save_sections()
             self.sections_pane.set_sections(self.sections)
+        if key == "etichetta":
+            self._store_drawings()
         self._dirty(True)
         self._schedule_qgis()
         self.log_pane.info(f"{layer}: {key} = {value}")
@@ -7436,7 +7464,8 @@ class MainWindow(QMainWindow):
         for name, kind, attrs, color in others:
             gtype, coords = attrs.get("_geom", (None, None))
             label = attrs.get("etichetta", "")
-            extra = {k: val for k, val in attrs.items() if not k.startswith("_") and k not in ("etichetta", "x", "y")}
+            extra = {k: val for k, val in attrs.items()
+                     if (not k.startswith("_") or k == "_default_label") and k not in ("etichetta", "x", "y")}
             if gtype == "Point":
                 v.add_point(coords[0], coords[1], color, label, layer=name, attrs=extra)
             elif gtype == "LineString":
@@ -7898,6 +7927,8 @@ class MainWindow(QMainWindow):
     def _unit_name(u) -> str:
         from ..archaeo.unit_identity import unit_label
 
+        if "etichetta" in (u.attributes or {}):
+            return str(u.attributes["etichetta"] or "")
         return unit_label(u)
 
     def _qgis_units(self, ch, srs: int, proxies: list) -> list[str]:
