@@ -48,7 +48,9 @@ jobs:
             dist/*.zip
           if-no-files-found: error
       - name: Attach to the release
-        if: github.event_name == 'release'
+        # macOS on CI has no Developer ID / Apple notary credentials. Keep that build as
+        # a workflow artifact; packaging/mac_release.sh uploads the signed, notarized DMG.
+        if: github.event_name == 'release' && runner.os != 'macOS'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
