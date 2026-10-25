@@ -207,7 +207,7 @@ multispettrali, termiche e satellitari, i plugin.
 | **Profilo ceramico da mesh...** | diametri, altezza e profilo di un vaso o di un frammento ([ceramica](archaeology.md#profili-ceramici)) |
 | **Proxy 3D delle US...** | i solidi delle unità per l'Extended Matrix e il BIM ([proxy](archaeology.md#proxy-3d-delle-us)) |
 | **Classificazione della nuvola** | terreno, vegetazione, murature...: [vedi sotto](#strumenti-classificazione-della-nuvola) |
-| **Segment Anything 2.1** | unità e pietre disegnate dall'IA: [vedi sotto](#strumenti-segment-anything-21) |
+| **Segment Anything 2.1** | unità e pietre disegnate da SAM 2.1: [vedi sotto](#strumenti-segment-anything-21) |
 | **Esporta IFC (BIM)...** | le unità o i loro proxy in un file IFC ([BIM e IFC](../bim.md)) |
 | **Esegui script Python...** | uno script con i moduli del programma ([API](../api.md)) |
 | **Multispettrale** · **Termico** | le riprese multispettrali e termiche: [vedi sotto](#strumenti-multispettrale) |
@@ -251,7 +251,7 @@ nell'ortofoto e nella texture.
 | **Mostra le maschere** | mostra o nasconde il rosso |
 | **Importa maschere (immagini)...** · **Maschere dal canale alfa delle foto** | maschere fatte con un altro programma |
 | **Maschere dallo sfondo...** · **Maschere da un colore (fondale)...** | dalle foto senza l'oggetto, o dal colore del fondale |
-| **Maschere dal modello** · **Maschere con SAM 2.1** | resta solo l'oggetto: dal modello o dall'IA (l'oggetto al centro della foto) |
+| **Maschere dal modello** · **Maschere con SAM 2.1** | resta solo l'oggetto: dal modello o con SAM 2.1 (l'oggetto al centro della foto) |
 | **Esporta maschere...** · **Rimuovi...** | salva le maschere, o le toglie dalle foto selezionate o da tutte |
 
 ### Strumenti > Disegno su ortofoto
@@ -270,7 +270,7 @@ Sono gli strumenti della barra *Disegno*, descritti con le loro finestre in [Dis
 | **Quota puntuale** · **Punto di misura** | una quota per PyArchInit; un punto con quota, temperatura, bande e indici |
 | **Marker** | un marker dove si fa clic, proiettato sulle foto che lo vedono |
 | **Ritaglio** · **Patch dell'ortofoto** · **Modifica DEM** | lavorare su un'area: tagliare, scegliere le foto, riempire il DEM dal terreno attorno |
-| **Segment Anything (SAM)** | le unità disegnate dall'IA: tocco, riquadro, area, pietre |
+| **Segment Anything (SAM)** | le unità disegnate da SAM: tocco, riquadro, area, pietre |
 | **Snap** | aggancia i punti ai vertici e ai segmenti dei layer visibili |
 | **Elimina selezionati** · **Unisci selezionati** · **Cancella disegni** | togliere o unire elementi |
 | **Ritaglia o esporta con il poligono selezionato...** | il ritaglio dei prodotti su un'unità |
