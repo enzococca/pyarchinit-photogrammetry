@@ -40,7 +40,7 @@ are reachable from *PyArchInit > Connetti*. The builds are unsigned: on macOS ri
 the first time (or `xattr -dr com.apple.quarantine "/Applications/PyArchInit Photogrammetry.app"`),
 on Windows choose *More info > Run anyway*. Details in [docs/packaging.md](docs/packaging.md).
 The application looks for new versions at start-up (at most once a day) and, on macOS, installs
-them and restarts; see *Updates* in [docs/gui.md](docs/gui.md).
+them and restarts; see *Updates* in [docs/gui/help.md](docs/gui/help.md#updates).
 
 ## Installation with pip
 
@@ -397,7 +397,7 @@ pane with the drawings; a log pane with level filter, search, copy and
 save; error windows with a hint, the traceback and a *Copia* button; light and dark themes;
 *Aiuto > Diagnostica ambiente* (the same checks as `ppg doctor`); a PyArchInit menu to
 connect, publish orthophotos, DEMs and models, and write unit polygons and spot heights.
-See [docs/gui.md](docs/gui.md).
+See [docs/gui/index.md](docs/gui/index.md).
 
 ## Quick start (Python)
 

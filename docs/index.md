@@ -22,7 +22,7 @@ library on the same engine, running on the CPU (Apple Silicon included). GPL-2.0
 
     Step by step, with the demo project and with real photos of a tell.
 
--   :material-monitor: **[Desktop interface](gui.md)**
+-   :material-monitor: **[Desktop interface](gui/index.md)**
 
     Every menu, pane and tool of the window.
 

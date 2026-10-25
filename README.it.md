@@ -40,7 +40,7 @@ PostgreSQL/PostGIS si raggiungono da *PyArchInit > Connetti*. Le build non sono 
 volta tasto destro > *Apri* (oppure `xattr -dr com.apple.quarantine "/Applications/PyArchInit Photogrammetry.app"`),
 su Windows *Ulteriori informazioni > Esegui comunque*. Dettagli in [docs/packaging.md](docs/packaging.md).
 L'applicazione cerca le nuove versioni all'avvio (al massimo una volta al giorno) e, su macOS, le
-installa e si riavvia; vedi *Updates* in [docs/gui.md](docs/gui.md).
+installa e si riavvia; vedi *Aggiornamenti* in [docs/gui/help.it.md](docs/gui/help.it.md#aggiornamenti).
 
 ## Installazione con pip
 
@@ -404,7 +404,7 @@ livello e quote; pannello *Sezioni* con i disegni; pannello log con filtro per
 livello, ricerca, copia e salvataggio; finestre di errore con suggerimento, traceback e
 pulsante *Copia*; tema chiaro e scuro; *Aiuto > Diagnostica ambiente* (gli stessi controlli di
 `ppg doctor`); menu PyArchInit per connettersi al database, pubblicare ortofoto/DEM/modelli,
-scrivere i poligoni delle US e le quote. Guida in [docs/gui.md](docs/gui.md).
+scrivere i poligoni delle US e le quote. Guida in [docs/gui/index.it.md](docs/gui/index.it.md).
 
 ## Uso da Python
 

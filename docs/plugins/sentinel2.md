@@ -66,8 +66,8 @@ Its README and source code are in the
 At 10 m a pixel, Sentinel-2 sees the larger features - enclosures, ditches and roads several metres
 wide, villas, the outline of a settlement - and above all **when** the fields show them: the
 satellites pass every few days, year after year since 2015. A single wall, a posthole, a narrow
-ditch are smaller than a pixel: those are for the drone and its multispectral camera (see [The
-Multispectral pane](../gui.md#the-multispectral-pane)).
+ditch are smaller than a pixel: those are for the drone and its multispectral camera (see [Multispectral
+and thermal](../gui/multispectral.md#multispectral)).
 
 ## What you need first { #before }
 

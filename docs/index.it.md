@@ -22,7 +22,7 @@ Python sullo stesso motore, che gira sulla CPU (anche Apple Silicon). Licenza GP
 
     Passo per passo, con il progetto dimostrativo e con le foto vere di un tell.
 
--   :material-monitor: **[Interfaccia](gui.md)**
+-   :material-monitor: **[Interfaccia](gui/index.md)**
 
     Menu, pannelli e strumenti della finestra (in inglese).
 

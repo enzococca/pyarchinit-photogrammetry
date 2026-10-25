@@ -82,7 +82,7 @@ reconstructions are modelled in Blender; the proxies of the units dug are built 
 
 * **The plugin**, installed from the program: see [Plugin guides](guides.md#install).
 * **Proxies of the units in the chunk**, made with *Tools > 3D proxies of the units...* (see
-  [Desktop interface](../gui.md)), and/or **a model**. Without either there is nothing to send.
+  [US proxies](../gui/archaeology.md#us-proxies)), and/or **a model**. Without either there is nothing to send.
 * **The em.json of the site** - recommended. PyArchInit writes it (*Extended Matrix → Esporta sito in em.json…*, s3dgraphy 1.6),
   as EMStudio and EMtools 1.6 do. Without it the proxies keep the program's names (`US12`, `USM3`) and
   EMtools pairs them only if its matrix uses those names.
