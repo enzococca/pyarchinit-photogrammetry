@@ -73,6 +73,7 @@ plugins:
             Mesh (MeshLab): Mesh (MeshLab)
             Sentinel-2: Sentinel-2
             Blender and EMtools: Blender ed EMtools
+            Samgeo: Samgeo
             Guide: Guida
             Desktop interface: Interfaccia
             Menus: Menu
@@ -135,6 +136,7 @@ nav:
       - Mesh (MeshLab): plugins/mesh-tools.md
       - Sentinel-2: plugins/sentinel2.md
       - Blender and EMtools: plugins/blender-em.md
+      - Samgeo: plugins/samgeo.md
   - Guide:
       - Desktop interface:
           - gui/index.md
