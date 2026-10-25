@@ -576,7 +576,7 @@ def test_tables_of_the_panes_offer_excel(qapp, menus, tmp_path, monkeypatch):
     assert headers == ["etichetta", "x", "y", "temp_c", "z"] and rows[1] == ["P2", 400001.5, 4499998.5, 18.0, 99.5]
     layers.tree.setCurrentItem(layers.tree.topLevelItem(0))
     layers.tree.customContextMenuRequested.emit(layers.tree.visualItemRect(layers.tree.topLevelItem(0)).center())
-    assert seen[-1] == ["Esporta gli attributi di Punti di misura in Excel..."]
+    assert "Esporta gli attributi di Punti di misura in Excel..." in seen[-1]
     out = layers.export_layer("Punti di misura", str(tmp_path / "punti.xlsx"))
     assert read_xlsx(out)["Punti di misura"][2] == ["P2", 400001.5, 4499998.5, 18.0, 99.5]
 

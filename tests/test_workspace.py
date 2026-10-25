@@ -728,3 +728,23 @@ def test_a_removal_not_saved_comes_back_when_the_window_closes(window, qapp):
     assert not (doc.files_dir / removal.TRASH).exists()
     again = Document.open(doc.path)
     assert [c.label for c in again.chunks] == ["Scavo", "Rilievo 2"] and again.chunks[0].point_cloud is not None
+
+
+def test_store_drawings_preserves_layer_label_metadata(window):
+    """Saving drawings keeps absent metadata absent and copies label settings."""
+    w = window
+    ch = w.chunk
+    ch.meta.pop("layer_labels", None)
+    w.ortho_view.layer_settings.clear()
+    w._store_drawings()
+    assert "layer_labels" not in ch.meta
+
+    w.ortho_view.layer_settings["Punti di misura"] = {"visible": False}
+    w._store_drawings()
+    assert ch.meta["layer_labels"] == {"Punti di misura": {"visible": False}}
+    w.ortho_view.layer_settings["Punti di misura"]["visible"] = True
+    assert ch.meta["layer_labels"]["Punti di misura"]["visible"] is False
+
+    w.ortho_view.layer_settings.clear()
+    w._store_drawings()
+    assert ch.meta["layer_labels"] == {}

@@ -70,15 +70,12 @@ def test_console_and_photo_view(window, qapp):
     assert cam.key not in m.projections
 
 
-def test_drawing_tools_and_section(window, qapp, monkeypatch):
-    from pyarchinit_photogrammetry.gui import main_window as mw
-
+def test_drawing_tools_and_section(window, qapp):
     w = window
     x0, y0 = w.chunk.to_world(w.chunk.aligned_cameras[0].center)[:2]
     z = w.ortho_view.elevation(x0, y0)
     assert z is not None and 99.0 < z < 101.0
-    # section across the trench, no dialog
-    monkeypatch.setattr(mw.ImageDialog, "exec", lambda self: 0)
+    # Sections are saved and listed in the pane without opening a dialog.
     a = np.array([2480000.0 + 1.0, 4500000.0 + 1.5])
     b = np.array([2480000.0 + 3.0, 4500000.0 + 1.5])
     w._section_drawn(a, b)
