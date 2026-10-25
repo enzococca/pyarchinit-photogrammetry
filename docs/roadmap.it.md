@@ -212,7 +212,10 @@ Punti aperti, senza un ordine fisso:
       Calcolatore raster*, `ppg calc`, `engine.rastercalc`: formule come in QGIS su tutti i raster di un chunk, anche
       quelli dei plugin (trovati nella cartella del chunk, o con il nome che dà loro il plugin con
       `context.add_rasters`), sulla griglia di uno di essi, a blocchi;
-    * plugin samgeo (segmentare l'ortofoto scrivendo «pietre», «muri»);
+    * plugin samgeo (segmentare l'ortofoto scrivendo «pietre», «muri»). *Fatto* con la 1.5.0: il plugin
+      samgeo 0.1.0 - Grounding DINO e SAM 2.1 in un ambiente loro trovano quello che è scritto, come layer
+      di proposte che diventa US (`context.add_units`, nuovo nella 1.5.0), classi della nuvola densa o un
+      GeoPackage; SAM 3 in arrivo;
     * plugin geoai (addestramento sui propri disegni, confronto fra date).
 
 ## Non previsto
