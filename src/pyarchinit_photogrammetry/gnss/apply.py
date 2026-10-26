@@ -1,7 +1,12 @@
 """Putting a position and its accuracy on a camera."""
 from __future__ import annotations
 
+from collections import Counter
+from pathlib import Path
+
 from ..core.camera import Camera, Reference
+from ..core.chunk import IMAGE_EXTENSIONS, Chunk
+from . import dji
 
 FACTOR = 2.0
 FLOORS = {"fix": 0.01, "float": 0.20, "single": 1.0}
@@ -26,3 +31,49 @@ def set_camera_position(cam: Camera, location: list[float], crs: str, accuracy: 
     cam.meta["reference_crs"] = crs
     cam.meta["gnss"] = {"source": source, "status": status, "accuracy": list(accuracy), "height": height,
                         **(extra or {})}
+
+
+def apply_mrk(chunk: Chunk, mrk_path: str | Path, photos_folder: str | Path | None = None) -> dict:
+    """Give the photos of ``chunk`` the position of their shot in a DJI ``Timestamp.MRK``: the camera, not the
+    antenna (the lever arm of the shot is applied), in ``EPSG:4979`` with its ellipsoidal height, with the
+    accuracy of the shot's standard deviations and RTK flag. It replaces any position the photo had, so doing it
+    again changes nothing.
+
+    The photos are the images in ``photos_folder`` (default: the folder of the MRK), in the order of their names.
+    A DJI photo is paired with the line whose index is the shot number in its name; the photos that have none
+    are paired by order, but only when the MRK has as many lines as the folder has photos. Returns
+    ``{"matched", "shots", "photos", "status": {status: count}, "unmatched": [label]}``: ``unmatched`` are the
+    photos of the folder left without a position (no line for them, or not in the chunk)."""
+    mrk_path = Path(mrk_path)
+    shots = dji.read_mrk(mrk_path)
+    folder = Path(photos_folder) if photos_folder else mrk_path.parent
+    files = sorted((f for f in folder.iterdir() if f.is_file() and not f.name.startswith(".")
+                    and f.suffix.lower() in IMAGE_EXTENSIONS), key=lambda f: f.name)
+    numbers = [dji.shot_number(f.name) for f in files]
+    if any(n is not None for n in numbers):
+        by_index = {}
+        for shot in shots:
+            if shot.index in by_index:
+                raise ValueError(f"{mrk_path.name}: shot {shot.index} appears twice")
+            by_index[shot.index] = shot
+        paired = [(f, by_index.get(n)) for f, n in zip(files, numbers)]
+    elif len(shots) == len(files):
+        paired = list(zip(files, shots))
+    else:
+        raise ValueError(f"{mrk_path.name} has {len(shots)} shots and {folder} has {len(files)} photos, and the "
+                         "photo names carry no shot number: they cannot be paired by order")
+    cameras = {Path(c.path).resolve(): c for c in chunk.cameras}
+    status, unmatched = Counter(), []
+    for f, shot in paired:
+        cam = cameras.get(f.resolve())
+        if cam is None or shot is None:
+            unmatched.append(f.stem)
+            continue
+        state = dji.STATUS.get(shot.flag, "unknown")
+        north, east, vertical = shot.std
+        set_camera_position(cam, list(dji.camera_position(shot)), "EPSG:4979",
+                            accuracy(state, [east, north, vertical]), "dji_mrk", status=state, height="ellipsoidal",
+                            extra={"mrk": mrk_path.name, "shot": shot.index, "utc": shot.utc.isoformat()})
+        status[state] += 1
+    return {"matched": sum(status.values()), "shots": len(shots), "photos": len(files), "status": dict(status),
+            "unmatched": unmatched}
