@@ -20,8 +20,9 @@ pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 
 [build-dependencies]
-# RTKLIB (vendor/rtklib, C) for the post-processing of GNSS observations
-cc = "1"
+# RTKLIB (vendor/rtklib, C) for the post-processing of GNSS observations; build.rs needs
+# Tool::is_like_clang_cl, which cc has from 1.2.8
+cc = "1.2.8"
 
 [profile.release]
 lto = "thin"
