@@ -59,8 +59,9 @@ def read_positions(path: str | Path, delimiter: str | None = None) -> list[dict]
     ``label,x,y,z`` or ``label,x,y,z,sx,sy,sz``. The header may also be the first comment.
 
     Fields are separated by a tab, a semicolon or a comma (the first of them in the first line), or by spaces
-    when there is none of those; ``delimiter`` forces one (a space for runs of spaces). With a delimiter other
-    than the comma, ``,`` is a decimal comma. Lines starting with ``#`` and empty lines are skipped. Anything
+    when there is none of those; ``delimiter`` forces one (spaces for runs of spaces; a tab or any
+    other character separates exactly, so an empty cell is a column). With a delimiter other than the comma, ``,``
+    is a decimal comma. Lines starting with ``#``, empty lines and lines of separators alone are skipped. Anything
     wrong in the file - a number that is not one, a missing column - raises ``ValueError`` naming the line."""
     path = Path(path)
     data = path.read_bytes()
@@ -68,18 +69,20 @@ def read_positions(path: str | Path, delimiter: str | None = None) -> list[dict]
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError:  # a spreadsheet saved in the Windows code page
         text = data.decode("cp1252", errors="replace")
-    sep = _AUTO if delimiter is None else (None if not delimiter.strip() else delimiter)
+    sep = _AUTO if delimiter is None else (None if not delimiter.strip(" ") else delimiter)  # a tab is a separator
     fields: dict[str, int] | None = None
     rows: list[dict] = []
     for number, raw in enumerate(text.splitlines(), 1):
-        line = raw.strip()
+        line = raw.strip(" ")  # not the tabs: an empty first cell is a column
         comment = line.startswith("#")
         if comment:
-            line = line.lstrip("#").strip()
+            line = line.lstrip("#").strip(" ")
         if not line:
             continue
         use = _separator(line) if sep is _AUTO else sep
         tokens = _split(line, use)
+        if not any(tokens):  # a line of separators alone, as a spreadsheet leaves at the end
+            continue
         where = f"{path.name}:{number}"
         if comment:  # the header may be the first comment; any other comment is skipped
             try:
@@ -113,7 +116,8 @@ def apply_positions(chunk: Chunk, rows: list[dict], crs: str, height: str = "ell
 
     The accuracy of a row is its ``accuracy`` as given, else twice its standard deviations ``sx``, ``sy``, ``sz``
     as for the RTK of DJI photos (and never below the floor of its ``status``, when it has one), else
-    ``default_accuracy``. Returns ``{"matched", "rows", "unmatched": [label]}``: ``unmatched`` are the rows whose
+    ``default_accuracy`` (also raised to the floor of the ``status`` of the row: 0.01, 0.20, 1 m for fix, float,
+    single, 5/5/10 m for none). Returns ``{"matched", "rows", "unmatched": [label]}``: ``unmatched`` are the rows whose
     photo is not in the chunk."""
     if height not in HEIGHTS:
         raise ValueError(f"height must be one of {', '.join(HEIGHTS)}, not '{height}'")
@@ -168,6 +172,8 @@ def _accuracy_of(row: dict, status: str | None, default: list[float]) -> tuple[l
     if all(k in row for k in ("sx", "sy", "sz")):
         std = [float(row["sx"]), float(row["sy"]), float(row["sz"])]
         return (accuracy(status, std) if status else [FACTOR * s for s in std]), {"std": std}
+    if status:  # a declared status is never more accurate than its floor
+        return [max(d, f) for d, f in zip(default, accuracy(status, None))], {}
     return list(default), {}
 
 

@@ -353,6 +353,24 @@ def test_positions_file_formats(tmp_path):
     assert (rows[0]["sx"], rows[0]["sy"], rows[0]["sz"]) == (0.004, 0.004, 0.009)
 
 
+def test_a_tab_delimiter_keeps_its_empty_cells(tmp_path):
+    p = tmp_path / "gaps.tsv"
+    p.write_text("name\tx\ty\tz\tyaw\tpitch\na.jpg\t1\t2\t3\t\t-80\n")
+    expected = {"label": "a.jpg", "x": 1.0, "y": 2.0, "z": 3.0, "pitch": -80.0}  # no yaw: its cell is empty
+    assert positions.read_positions(p) == [expected]
+    assert positions.read_positions(p, delimiter="\t") == [expected]
+    # an empty first cell is an empty name, not the start of the next column
+    p.write_text("name\tx\ty\tz\n\t1\t2\t3\n")
+    for kw in ({}, {"delimiter": "\t"}):
+        with pytest.raises(ValueError, match=r"gaps\.tsv:2.*no name"):
+            positions.read_positions(p, **kw)
+    # a line of separators alone (the empty rows of a spreadsheet) is skipped; only spaces mean runs of spaces
+    p.write_text("name;x;y;z\na.jpg;1;2;3\n;;;\n")
+    assert len(positions.read_positions(p)) == 1
+    p.write_text("a.jpg   1  2   3\n")
+    assert positions.read_positions(p, delimiter=" ") == [{"label": "a.jpg", "x": 1.0, "y": 2.0, "z": 3.0}]
+
+
 def test_positions_accuracy_follows_the_status(tmp_path):
     ch = _chunk_with(tmp_path, "a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg")
     rows = [
@@ -372,6 +390,25 @@ def test_positions_accuracy_follows_the_status(tmp_path):
     assert (a.meta["gnss"]["status"], d.meta["gnss"]["status"], e.meta["gnss"]["status"]) == ("fix", "fix", None)
     assert (e.meta["gnss"]["yaw"], e.meta["gnss"]["pitch"], e.meta["gnss"]["roll"]) == (12.0, -90.0, 1.5)
     assert e.meta["reference_crs"] == "LOCAL"
+
+
+def test_positions_status_floors_the_default_accuracy(tmp_path):
+    ch = _chunk_with(tmp_path, "a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg", "f.jpg")
+    where = {"x": 1.0, "y": 2.0, "z": 3.0}
+    rows = [{"label": name, "status": status, **where} for name, status in
+            zip("abcdef", ("fix", "float", "single", "none", "unknown", None))]
+    positions.apply_positions(ch, rows, "LOCAL")
+    fix, flt, single, none, unknown, plain = (c.reference.accuracy for c in ch.cameras)
+    assert fix == [0.05, 0.05, 0.10]  # the default is already above the floor of a fix
+    assert flt == pytest.approx([0.2] * 3) and single == pytest.approx([1.0] * 3)
+    assert none == [5.0, 5.0, 10.0] and unknown == pytest.approx([1.0] * 3)  # as for the RTK of the photos
+    assert plain == [0.05, 0.05, 0.10]
+    # a default above the floor stays, axis by axis
+    positions.apply_positions(ch, rows, "LOCAL", default_accuracy=(0.1, 0.5, 0.3))
+    fix, flt, single, none, unknown, plain = (c.reference.accuracy for c in ch.cameras)
+    assert fix == [0.1, 0.5, 0.3] and flt == pytest.approx([0.2, 0.5, 0.3]) and plain == [0.1, 0.5, 0.3]
+    assert single == pytest.approx([1.0] * 3) and none == [5.0, 5.0, 10.0]
+    assert [c.meta["gnss"]["accuracy"] for c in ch.cameras] == [c.reference.accuracy for c in ch.cameras]
 
 
 def test_positions_matched_by_name_and_folder(tmp_path):
