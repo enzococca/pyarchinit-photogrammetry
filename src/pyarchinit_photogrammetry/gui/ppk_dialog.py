@@ -1,7 +1,9 @@
 """The files of a PPK run and the position of its base, asked before RTKLIB runs: the Timestamp.MRK and its shots, the
 drone's RINEX found beside it, the base's RINEX with what its header says, the navigation files beside them, and the
-base at the position of its RINEX header - with the warning that it can be metres off - or at a position typed in.
-What can be checked before the run is checked here: the files, their times, the work folder of the PPK."""
+base at the position of its RINEX header - with the warning that it can be metres off - or at a position typed in;
+whether the photos with an RTK fix of the drone itself take the PPK position too. The dialog starts from the last run
+of the chunk. What can be checked before the run is checked here: the files, their times, the work folder of the
+PPK."""
 from __future__ import annotations
 
 import math
@@ -12,11 +14,13 @@ from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QEvent, Qt, QTimer
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-                               QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit, QListWidget, QListWidgetItem,
-                               QPushButton, QRadioButton, QScrollArea, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
+                               QFormLayout, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit, QListWidget,
+                               QListWidgetItem, QPushButton, QRadioButton, QScrollArea, QVBoxLayout, QWidget)
 
 from ..gnss import dji, ppk, rinex
+from ..gnss.apply import onboard_fix
+from .gnss_pane import length
 from .i18n import number, tr
 
 _DJI_ROVER = "_rinex.obs"  # what a DJI drone writes beside its <flight>_Timestamp.MRK: <flight>_Rinex.obs
@@ -57,6 +61,16 @@ def _number(text: str) -> float | None:
     except ValueError:
         return None
     return value if math.isfinite(value) else None
+
+
+def _same_file(a, b) -> bool:
+    """``a`` and ``b`` name the same file (or the same path, when either is missing)."""
+    if not a or not b:
+        return False
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return os.path.abspath(a) == os.path.abspath(b)
 
 
 def _when(value) -> str:
@@ -124,19 +138,25 @@ class _FileField(QWidget):
 
 class PpkDialog(QDialog):
     """The files and the base of a PPK run: the shots of the ``mrk`` (read at once), the drone's observations (found
-    beside it), the base's observations with what their header says, the navigation files (found beside both, taken
-    away or added by hand) and the position of the base: the one of the header of its file, with the warning that it
-    can be metres off, or the surveyed one of its mark, typed (a warning when it is far from the header's). ``work`` is
-    the work folder of the PPK, which no input may be in. *OK* checks everything that can be checked before the run
-    and says in the dialog what is missing or wrong.
+    beside it), the base's observations with what their header says - and that the phase-centre offset of its antenna
+    is not applied - the navigation files (found beside both, taken away or added by hand), the position of the base:
+    the one of the header of its file, with the warning that it can be metres off, or the surveyed one of its mark,
+    typed (a warning when it is far from the header's, and when the same base was typed elsewhere for other photos of
+    ``chunk``), and whether the photos with an RTK fix of the drone itself take the PPK position too. ``work`` is the
+    work folder of the PPK, which no input may be in. *OK* checks everything that can be checked before the run and
+    says in the dialog what is missing or wrong.
 
-    The files named in the fields are read after a pause in typing, once while they stay the same; the dialog is as
-    tall as what it shows (the form scrolls only on a screen too short for it)."""
+    With ``chunk`` the dialog starts from its last PPK run (:func:`.ppk.last_run`): the base, its position typed or
+    from its header, the navigation files still there, the choice about the onboard fixes, and the drone's
+    observations too when the MRK is the one of that run. The files named in the fields are read after a pause in
+    typing, once while they stay the same; the dialog is as tall as what it shows (the form scrolls only on a screen
+    too short for it)."""
 
-    def __init__(self, mrk, parent=None, work=None):
+    def __init__(self, mrk, parent=None, work=None, chunk=None):
         super().__init__(parent)
         self.mrk = Path(mrk)
         self.work = Path(work) if work is not None else None
+        self.chunk = chunk
         self.setWindowTitle(tr("Correzioni PPK"))
         self.setMinimumWidth(600)
         self._headers: dict[str, tuple] = {}  # path -> (its time and size, its header, the error reading it)
@@ -144,6 +164,7 @@ class PpkDialog(QDialog):
         self._added: list[Path] = []  # navigation files added by hand
         self._removed: set[Path] = set()  # navigation files taken away: not listed again when found beside a file
         self._sources: tuple | None = None  # the rover and base the navigation files were listed for
+        self._flight: set | None = None  # the keys of the cameras in the folder of the MRK (this run replaces them)
         try:
             self.shots = dji.read_mrk(self.mrk)
             self._mrk_problem = None if self.shots else tr("Il file non ha scatti.")
@@ -176,7 +197,8 @@ class PpkDialog(QDialog):
         form.addRow(tr("Osservazioni del drone"), _stack(self.rover, self.rover_info))
         self.base = _FileField("", tr("Osservazioni della base"), observations, self.mrk.parent)
         self.base_info = _label()
-        form.addRow(tr("Osservazioni della base"), _stack(self.base, self.base_info))
+        self.antenna_warning = _label(_WARNING)  # the phase-centre offset of the base's antenna is not applied
+        form.addRow(tr("Osservazioni della base"), _stack(self.base, self.base_info, self.antenna_warning))
 
         navs = QWidget()
         nav_lay = QVBoxLayout(navs)
@@ -224,8 +246,21 @@ class PpkDialog(QDialog):
         pos_lay.addWidget(self.header_warning)
         self.far_warning = _label(_WARNING)
         pos_lay.addWidget(self.far_warning)
+        self.reuse_warning = _label(_WARNING)  # the same base typed elsewhere for other photos of the chunk
+        pos_lay.addWidget(self.reuse_warning)
         pos_lay.addStretch(1)
         form.addRow(tr("Posizione della base"), position)
+
+        self.replace_fix = QCheckBox(tr("Sostituisci anche i fix RTK del drone"))
+        self.fix_note = _label()
+        fixes = self._onboard_fixes()
+        self.fix_note.setText(
+            tr("{0} foto del chunk hanno un fix RTK del drone stesso (XMP o MRK di DJI): lo tengono e il PPK corregge "
+               "le altre; con la spunta prendono anche loro la posizione PPK, così tutte stanno nel sistema della "
+               "base.", fixes) if fixes else
+            tr("Le foto con un fix RTK del drone stesso (XMP o MRK di DJI) lo tengono e il PPK corregge le altre; con "
+               "la spunta prendono anche loro la posizione PPK, così tutte stanno nel sistema della base."))
+        form.addRow(tr("Fix RTK del drone"), _stack(self.replace_fix, self.fix_note))
 
         self.scroll = QScrollArea()
         self.scroll.setWidget(self.body)
@@ -246,6 +281,7 @@ class PpkDialog(QDialog):
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
 
+        self._prefill(ppk.last_run(chunk))  # before the fields are watched: read once below
         self.rover.edit.textChanged.connect(self._typing)
         self.base.edit.textChanged.connect(self._typing)
         self.typed.toggled.connect(lambda _on: self._update_position())
@@ -254,6 +290,44 @@ class PpkDialog(QDialog):
         self.b_add_nav.clicked.connect(self._add_navs)
         self.b_remove_nav.clicked.connect(self._remove_navs)
         self._update()
+
+    # ------------------------------------------------------------ the last run of the chunk
+    def _prefill(self, last: dict | None) -> None:
+        """The answers of the last PPK run of the chunk: the base file, its position typed or from its header, the
+        navigation files still there (but the ones beside the drone's observations of another flight), the choice
+        about the onboard fixes; the drone's observations too when the MRK is the one of that run."""
+        if not last:
+            return
+        same = _same_file(last.get("mrk"), self.mrk)
+        rover = last.get("rover")
+        if same and rover and Path(rover).is_file():
+            self.rover.edit.setText(rover)
+        if last.get("base"):
+            self.base.edit.setText(last["base"])
+        drone = Path(rover).parent if rover else None
+        for text in last.get("navs") or []:
+            path = Path(text)
+            if path.is_file() and path not in self._added and (same or drone is None or path.parent != drone):
+                self._added.append(path)
+        position = last.get("position")
+        if last.get("position_source") == "typed" and position and len(position) == 3:
+            lon, lat, h = (float(v) for v in position)
+            self.typed.setChecked(True)
+            for edit, value in ((self.lat, lat), (self.lon, lon), (self.ellh, h)):
+                edit.setText(repr(value))
+        self.replace_fix.setChecked(bool(last.get("replace_fix")))
+
+    def _onboard_fixes(self) -> int:
+        """How many photos of the chunk have an RTK fix of the drone itself (:func:`.apply.onboard_fix`)."""
+        return sum(1 for cam in self.chunk.cameras if onboard_fix(cam)) if self.chunk is not None else 0
+
+    def _flight_keys(self) -> set:
+        """The keys of the cameras whose photos are in the folder of the MRK: this run gives them their positions."""
+        if self._flight is None:
+            folder = self.mrk.resolve().parent
+            self._flight = {cam.key for cam in (self.chunk.cameras if self.chunk is not None else [])
+                            if Path(cam.path).resolve().parent == folder}
+        return self._flight
 
     # ------------------------------------------------------------ the size
     def showEvent(self, event) -> None:
@@ -356,7 +430,8 @@ class PpkDialog(QDialog):
 
     def _describe_base(self, path: Path | None, info) -> str:
         if info is None:
-            return tr("Il RINEX di una base che registrava durante il volo: la tua o una stazione permanente vicina.")
+            return tr("Il RINEX di una base che registrava durante tutto il volo, in un solo file: la tua o una "
+                      "stazione permanente vicina.")
         if isinstance(info, str):
             return info
         lines = [tr("Base {0}: ricevitore {1}, antenna {2}; osservazioni dal {3} al {4} (ora GPS).",
@@ -384,6 +459,21 @@ class PpkDialog(QDialog):
                             "dell'antenna del file della base, {0} m.", number(delta[0], 3)))
         return "\n".join(lines)
 
+    @staticmethod
+    def _antenna_text(info) -> str:
+        """That the offset of the phase centre of the base's antenna is not applied, naming the antenna of its header;
+        nothing without the header of a base."""
+        if not isinstance(info, rinex.RinexInfo):
+            return ""
+        kind = ppk.antenna_type(info)
+        if kind:
+            return tr("Lo scostamento del centro di fase dell'antenna {0} della base non viene applicato (le "
+                      "calibrazioni delle antenne arriveranno in una versione successiva): le quote possono risultare "
+                      "più basse di qualche centimetro, oltre 10 cm con alcune antenne choke ring.", kind)
+        return tr("L'intestazione della base non dice il tipo della sua antenna: lo scostamento del suo centro di fase "
+                  "non viene applicato (le calibrazioni delle antenne arriveranno in una versione successiva), e le "
+                  "quote possono risultare più basse di qualche centimetro, oltre 10 cm con alcune antenne choke ring.")
+
     def _typing(self) -> None:
         """A file name is being typed: the files are read after a pause."""
         self.error.setText("")
@@ -396,10 +486,13 @@ class PpkDialog(QDialog):
 
     def _update(self) -> None:
         rover, base = self.rover.path(), self.base.path()
-        rover_info = self._observations(rover)
+        rover_info, base_info = self._observations(rover), self._observations(base)
         self.mrk_info.setText(self._describe_mrk(rover_info))
         self.rover_info.setText(self._describe_rover(rover_info))
-        self.base_info.setText(self._describe_base(base, self._observations(base)))
+        self.base_info.setText(self._describe_base(base, base_info))
+        antenna = self._antenna_text(base_info)
+        self.antenna_warning.setText(antenna)
+        self.antenna_warning.setVisible(bool(antenna))
         if (rover, base) != self._sources:
             self._sources = (rover, base)
             self._fill_navs()
@@ -483,6 +576,24 @@ class PpkDialog(QDialog):
                   "della base: controlla che latitudine e longitudine non siano scambiate o senza il segno, e che la "
                   "quota sia sull'ellissoide, non sul livello del mare.", apart, number(offset[1], 1))
 
+    def _reuse_text(self) -> str:
+        """The warning for a typed position of a base that was typed at another one, more than a few centimetres
+        away, for photos of the chunk (but those in the folder of the MRK, which this run gives their positions):
+        :func:`.ppk.other_typed_position`; nothing otherwise."""
+        typed, base = self._typed_position(), self.base.path()
+        info = self._observations(base)
+        if self.chunk is None or isinstance(typed, str) or not isinstance(info, rinex.RinexInfo):
+            return ""
+        lat, lon, h = typed
+        name = ppk.base_name(base, info)
+        other = ppk.other_typed_position(self.chunk, name, [lon, lat, h], exclude=self._flight_keys())
+        if other is None:
+            return ""
+        (lon0, lat0, h0), apart = other
+        return tr("La base {0} è già stata usata in questo chunk nella posizione scritta {1}, {2}, {3} m, a {4} da "
+                  "questa: se è lo stesso punto, una delle due è sbagliata. Correggi questa, o calcola di nuovo i voli "
+                  "fatti con l'altra.", name, number(lat0, 8), number(lon0, 8), number(h0, 3), length(apart))
+
     def _update_position(self) -> None:
         typed = self.typed.isChecked()
         for edit in (self.lat, self.lon, self.ellh):
@@ -491,6 +602,9 @@ class PpkDialog(QDialog):
         far = self._far_text() if typed else ""
         self.far_warning.setText(far)
         self.far_warning.setVisible(bool(far))
+        reuse = self._reuse_text() if typed else ""
+        self.reuse_warning.setText(reuse)
+        self.reuse_warning.setVisible(bool(reuse))
         self.error.setText("")
         self._fit()
 
@@ -548,13 +662,15 @@ class PpkDialog(QDialog):
         return None
 
     def values(self) -> dict:
-        """``{"rover", "base", "navs", "base_position"}``: the files, and the position typed (latitude, longitude,
-        height above the ellipsoid) or None for the one of the header of the base's file; a ``ValueError`` for a typed
+        """``{"rover", "base", "navs", "base_position", "replace_fix"}``: the files, the position typed (latitude,
+        longitude, height above the ellipsoid, as typed) or None for the one of the header of the base's file, and
+        whether the photos with an RTK fix of the drone itself take the PPK position too; a ``ValueError`` for a typed
         position that is not one (see :meth:`problem`)."""
         typed = self._typed_position() if self.typed.isChecked() else None
         if isinstance(typed, str):
             raise ValueError(typed)
-        return {"rover": self.rover.path(), "base": self.base.path(), "navs": self.nav_paths(), "base_position": typed}
+        return {"rover": self.rover.path(), "base": self.base.path(), "navs": self.nav_paths(), "base_position": typed,
+                "replace_fix": self.replace_fix.isChecked()}
 
     def accept(self) -> None:
         problem = self.problem()
@@ -565,8 +681,8 @@ class PpkDialog(QDialog):
             self._fit()
 
     @classmethod
-    def ask(cls, parent, mrk, work=None) -> dict | None:
-        """The answer of the dialog for the Timestamp.MRK ``mrk`` and the work folder ``work`` (:meth:`values`),
-        None when it is cancelled."""
-        dialog = cls(mrk, parent, work)
+    def ask(cls, parent, mrk, work=None, chunk=None) -> dict | None:
+        """The answer of the dialog for the Timestamp.MRK ``mrk``, the work folder ``work`` and the chunk ``chunk``
+        (its last run, its photos: :class:`PpkDialog`) (:meth:`values`), None when it is cancelled."""
+        dialog = cls(mrk, parent, work, chunk)
         return dialog.values() if dialog.exec() == QDialog.DialogCode.Accepted else None

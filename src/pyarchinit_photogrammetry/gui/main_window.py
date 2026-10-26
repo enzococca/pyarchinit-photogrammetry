@@ -3001,11 +3001,12 @@ class MainWindow(QMainWindow):
 
     def gnss_ppk(self) -> None:
         """*Strumenti > GNSS > Correzioni PPK* and *Calcola PPK* of the GNSS pane: the ``Timestamp.MRK``, then the RINEX
-        of the drone and of a base, the navigation files and the position of the base (:class:`PpkDialog`), the folder
-        of the photos when the MRK is away from them; RTKLIB in the background in the folder of the chunk
-        (:func:`gnss.ppk.solve`), then every photo the camera below the antenna of the solution at its shot, with the
-        status and accuracy of the solution (:func:`gnss.apply.apply_ppk`). What goes wrong in the background is shown
-        as every failed step is, with its message and traceback; nothing changes then."""
+        of the drone and of a base, the navigation files, the position of the base and whether the onboard RTK fixes
+        take the PPK position too (:class:`PpkDialog`, from the last run of the chunk), the folder of the photos when
+        the MRK is away from them; RTKLIB in the background in the folder of the chunk (:func:`gnss.ppk.solve`), then
+        every photo the camera below the antenna of the solution at its shot, with the status and accuracy of the
+        solution (:func:`gnss.apply.apply_ppk`). What goes wrong in the background is shown as every failed step is,
+        with its message and traceback; nothing changes then."""
         if self.runner.busy:  # as the menu, which is off while a step runs
             self.statusBar().showMessage(tr("Un'elaborazione e' gia' in corso"), 8000)
             return
@@ -3025,7 +3026,7 @@ class MainWindow(QMainWindow):
         from ..gnss import ppk
 
         ch = self.chunk
-        v = PpkDialog.ask(self, path, ppk.work_folder(ch))
+        v = PpkDialog.ask(self, path, ppk.work_folder(ch), chunk=ch)
         if not v:
             return
         photos = self._photos_of_mrk(path)
@@ -3037,21 +3038,33 @@ class MainWindow(QMainWindow):
             solution = ppk.solve(v["rover"], v["base"], v["navs"] or None, v["base_position"],
                                  folder=ppk.work_folder(ch))
             p(0.9, "Posizioni delle foto agli scatti")
-            return solution, gnss.apply_ppk(ch, path, solution, photos or None)
+            return solution, gnss.apply_ppk(ch, path, solution, photos or None,
+                                            replace_fix=bool(v.get("replace_fix")))
 
         # like an MRK or a positions file: the positions change and the project is to be saved, not saved at once
         self.run_task("Calcolo PPK", job, self._ppk_done, refresh=False, save=False)
 
     def _ppk_done(self, out) -> None:
         """What a PPK run gave: the counts in the log and in the status bar with the photos and the shots left without
-        a position, the warnings of the run in the log, the tables read again; the base at the position of its RINEX
-        header, which can be metres off, also in a message."""
+        a position, the photos that kept their onboard RTK fix, the base and how far it is from the flight, the warnings
+        of the run in the log (the phase-centre offset of the base's antenna not applied among them), the tables read
+        again; the base at the position of its RINEX header, which can be metres off, also in a message. When no photo
+        took a PPK position because they kept their onboard fixes nothing changed, and a message says how to replace
+        them."""
         from .gnss_pane import status_names
 
         solution, result = out
+        kept = result.get("kept_fix", 0)
+        base = solution.base or {}
         if not result["matched"]:
             for text in result["warnings"]:
                 self.log_pane.warning(text)
+            if kept:
+                self._info(tr("Correzioni PPK"), tr(
+                    "Nessuna foto ha preso la posizione PPK: {0} foto di questo volo hanno un fix RTK del drone stesso "
+                    "e lo tengono. Per dar loro la posizione PPK calcola di nuovo con «Sostituisci anche i fix RTK del "
+                    "drone».", kept))
+                return
             self._warn(tr("Nessuna foto del chunk ha preso una posizione PPK: controlla la cartella delle foto e che "
                           "l'MRK sia del volo delle osservazioni del drone."))
             return
@@ -3059,6 +3072,12 @@ class MainWindow(QMainWindow):
         detail = ", ".join(f"{names.get(k, k)} {n}" for k, n in sorted(result["status"].items(), key=lambda p: -p[1]))
         self._gnss_done(tr("PPK: {0} foto su {1} hanno la posizione corretta del loro scatto ({2})", result["matched"],
                            result["photos"], detail), result["unmatched"])
+        if kept:
+            self.log_pane.info(tr("Foto che hanno tenuto il fix RTK del drone stesso: {0}", kept))
+        baseline = result.get("baseline_km")
+        if baseline is not None:
+            self.log_pane.info(tr("Base {0} (antenna {1}) a {2} km dal volo; soluzione {3}", base.get("name"),
+                                  base.get("antenna") or "-", number(baseline, 1), Path(solution.path).name))
         shots = [str(i) for i in result["shots_unmatched"]]
         if shots:
             self.log_pane.warning(tr("Scatti dell'MRK senza posizione PPK ({0}): {1}", len(shots),
@@ -3066,9 +3085,8 @@ class MainWindow(QMainWindow):
         for text in result["warnings"]:
             self.log_pane.warning(text)
         self._gnss_changed()
-        base = solution.base or {}
         if base.get("position_source") == "header":
-            lat, lon, h = base["position"]
+            lon, lat, h = base["position"]
             message(self, "warning", tr("Correzioni PPK"), tr(
                 "La posizione della base {0} viene dalla sua intestazione RINEX ({1}, {2}, {3} m): può essere "
                 "sbagliata di metri, e tutto il rilievo si sposta con lei. Per una posizione assoluta accurata calcola "

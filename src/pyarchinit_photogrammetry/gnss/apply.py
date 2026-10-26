@@ -23,6 +23,22 @@ ZONE_TOLERANCE_S = 120.0  # ... give or take the drift of its clock ...
 ZONE_MAX_S = 14 * 3600.0  # ... and never more than 14 hours
 # a PPK solution that puts the antenna this far (median, m) from the drone's own positions in the MRK: a warning
 FAR_FROM_MRK_M = 50.0
+# where the drone's own RTK puts a photo: the XMP of a DJI photo (added with the photos) and a DJI Timestamp.MRK
+ONBOARD_SOURCES = ("dji_xmp", "dji_mrk")
+# onboard RTK fixes kept beside PPK positions this far (median, m) from the PPK positions of the same shots: a warning
+FIX_DISAGREES_M = 0.10
+
+
+def onboard_fix(cam: Camera) -> bool:
+    """The position of ``cam`` is an RTK fix of the drone itself: from the XMP of a DJI photo or from a DJI
+    ``Timestamp.MRK`` (:data:`ONBOARD_SOURCES`), with the status ``"fix"``."""
+    gnss = cam.meta.get("gnss") or {}
+    return gnss.get("source") in ONBOARD_SOURCES and gnss.get("status") == "fix"
+
+
+def _length(metres: float) -> str:
+    """A distance as a sentence says it: in centimetres below a metre, else in metres."""
+    return f"{metres * 100.0:.0f} cm" if metres < 1.0 else f"{metres:.2f} m"
 
 
 def accuracy(status: str | None, std: list[float] | None) -> list[float]:
@@ -76,25 +92,35 @@ def apply_mrk(chunk: Chunk, mrk_path: str | Path, photos_folder: str | Path | No
 
 
 def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
-              photos_folder: str | Path | None = None) -> dict:
+              photos_folder: str | Path | None = None, replace_fix: bool = False) -> dict:
     """Give the photos of ``chunk`` the PPK position of their shot in a DJI ``Timestamp.MRK``: the antenna where the
     post-processed ``solution`` puts it at the GPS time of the shot (:func:`.ppk.at`: an epoch, or the line between
     two epochs at most a second apart) plus the lever arm of the shot, in ``EPSG:4979`` with its ellipsoidal height;
     the status from the quality Q of the solution (1 fix, 2 and 4 float, any other single) and the accuracy from its
     standard deviations (twice, never below the floor of the status). ``meta["gnss"]`` keeps what it keeps for an MRK,
-    the antenna being the one of the solution, with the ``q`` and the ``base``, ``rover`` and ``solution`` (file name)
-    of the solution. It replaces any position the photo had, so doing it again changes nothing.
+    the antenna being the one of the solution, with the ``q`` and the ``base`` (its ``position`` ``[lon, lat, h]``),
+    ``rover`` and ``solution`` (the name of the solution file of the run) of the solution. It replaces any position the
+    photo had, so doing it again changes nothing - but an RTK fix of the drone itself (:func:`onboard_fix`: the XMP
+    of a DJI photo, a DJI MRK), which the photo keeps unless ``replace_fix``: the PPK is for the photos that are not
+    fix.
 
     The photos are paired with the shots and checked against their times as by :func:`apply_mrk`, with its errors. A
     photo whose shot falls where the solution has no position (more than a second between two of its epochs, before
     its first or after its last) keeps the position it had and is among the unmatched, its shot among the shots
     unmatched. A ``ValueError`` and nothing changed when no shot of the MRK falls within the time of the solution (the
-    MRK and the solution of different flights), or when the solution has no positions.
+    MRK and the solution of different flights), or when the solution has no positions. A run that gives photos their
+    positions is recorded in ``chunk.meta`` (:func:`.ppk.last_run`).
 
-    Returns what :func:`apply_mrk` returns with ``"warnings"``: those of the solution (the base at the position of its
-    RINEX header can be metres off), how many photos fell where the solution has no position, and whether the solution
-    puts the antenna more than :data:`FAR_FROM_MRK_M` (median) from where the drone's own receiver put it in the MRK
-    (the observations of the base taken for the rover's, those of another receiver)."""
+    Returns what :func:`apply_mrk` returns - the photos that kept their onboard fix are neither matched nor unmatched -
+    with ``"kept_fix"`` (how many kept it), ``"baseline_km"`` (:func:`.ppk.baseline_km`, None without the position of
+    the base) and ``"warnings"``: those of the solution (the base at the position of its RINEX header can be metres off,
+    the phase-centre offset of its antenna is not applied), how many photos fell where the solution has no position,
+    whether the solution puts the antenna more than :data:`FAR_FROM_MRK_M` (median) from where the drone's own receiver
+    put it in the MRK (the observations of the base taken for the rover's, those of another receiver), a base more
+    than :data:`.ppk.BASELINE_WARNING_KM` from the flight, a base typed elsewhere for other photos of the chunk
+    (:func:`.ppk.other_typed_position`), the onboard fixes kept more than :data:`FIX_DISAGREES_M` (median, in height
+    too when both heights are ellipsoidal) from the PPK positions of the same shots, and the onboard fixes replaced by
+    positions that are not fix."""
     pairing = _pair_shots(chunk, mrk_path, photos_folder)
     name = Path(solution.path).name
     times = np.asarray(solution.times, dtype=np.float64)
@@ -107,22 +133,41 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
         raise ValueError(f"{pairing.mrk}: {shots}, and the solution {name} {covered}: they are not of the same flight")
     llh, q, sd, ok = ppk.at(solution, [shot.gps_time for _f, shot, _cam in pairing.kept])
     positions, apart = [], []  # all of them first: nothing changes when something goes wrong
+    kept, disagree, downgraded = [], [], 0  # the onboard fixes kept, their distance from the PPK, those replaced worse
     for (f, shot, cam), antenna, quality, deviations, found in zip(pairing.kept, llh, q, sd, ok):
+        onboard = onboard_fix(cam)
         if not found:
+            if onboard and not replace_fix:
+                kept.append((f, shot))
             continue
         lat, lon, h = (float(v) for v in antenna)
         state = ppk.status(quality)
+        location = list(dji.lever_arm(lat, lon, h, shot.offset_ned_mm))
+        apart.append(ppk.horizontal_m(shot.lat, shot.lon, lat, lon))
+        if onboard and not replace_fix:
+            kept.append((f, shot))
+            if cam.reference.location and cam.meta.get("reference_crs") in ("EPSG:4326", "EPSG:4979"):
+                # the heights compared only when both are ellipsoidal: the altitude of an EXIF may be above the sea
+                ellipsoidal = (cam.meta.get("gnss") or {}).get("height") == "ellipsoidal"
+                disagree.append(ppk.distance_m(cam.reference.location, location, heights=ellipsoidal))
+            continue
+        if onboard and state != "fix":
+            downgraded += 1
         extra = {**_shot_record(pairing.mrk, shot, [lon, lat, h]), "q": int(quality),
                  "base": copy.deepcopy(solution.base), "rover": solution.rover, "solution": name}
-        positions.append((f, shot, cam, list(dji.lever_arm(lat, lon, h, shot.offset_ned_mm)),
-                          accuracy(state, [float(v) for v in deviations]), state, extra))
-        apart.append(ppk.horizontal_m(shot.lat, shot.lon, lat, lon))
+        positions.append((f, shot, cam, location, accuracy(state, [float(v) for v in deviations]), state, extra))
+    base = solution.base or {}
+    baseline = ppk.baseline_km(solution)
+    retyped = None
+    if base.get("position_source") == "typed" and base.get("position"):
+        retyped = ppk.other_typed_position(chunk, base.get("name"), base["position"],
+                                           exclude={cam.key for _f, _shot, cam, *_rest in positions})
     placed = []
     for f, shot, cam, location, acc, state, extra in positions:
         set_camera_position(cam, location, "EPSG:4979", acc, "ppk", status=state, height="ellipsoidal", extra=extra)
         placed.append((f, shot, state))
     warnings = list(solution.warnings)
-    gaps = len(pairing.kept) - len(placed)
+    gaps = len(pairing.kept) - len(placed) - len(kept)
     if gaps:
         photos = "photos were" if gaps > 1 else "photo was"
         keep = "they keep the position they had" if gaps > 1 else "it keeps the position it had"
@@ -133,7 +178,44 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
         warnings.append(f"the solution {name} puts the antenna {float(np.median(apart)):.0f} m (median) from where the "
                         f"drone's own receiver put it in {pairing.mrk}: the rover's observations may be those of the "
                         "base, or of another receiver")
-    return {**_result(pairing, placed), "warnings": warnings}
+    if baseline is not None and baseline > ppk.BASELINE_WARNING_KM:
+        warnings.append(f"the base {base.get('name')} is {baseline:.1f} km from the flight: beyond "
+                        f"{ppk.BASELINE_WARNING_KM:g} km the ambiguities are hard to fix, and the positions are mostly "
+                        "float")
+    if retyped is not None:
+        (lon0, lat0, h0), far = retyped
+        warnings.append(f"the base {base.get('name')} was typed at another position for other photos of this chunk "
+                        f"(latitude {lat0:.8f}, longitude {lon0:.8f}, {h0:.3f} m), {_length(far)} from this one: "
+                        "one of the two is likely mistyped; compute again the flights that used the wrong one")
+    if disagree and float(np.median(disagree)) > FIX_DISAGREES_M:
+        photos = (f"{len(disagree)} photos with an onboard RTK fix kept their positions, which are"
+                  if len(disagree) > 1 else "1 photo with an onboard RTK fix kept its position, which is")
+        warnings.append(f"{photos} {_length(float(np.median(disagree)))} (median) from the PPK positions of the same "
+                        "shots: the base is likely in another reference frame than the drone's RTK corrections (a "
+                        "network in ETRF and a base in ITRF, or the other way round) or at a wrong position, and the "
+                        "flight now mixes the two. Check the position of the base, or compute again replacing the "
+                        "onboard fixes too, so that every photo is in the frame of the base")
+    if downgraded:
+        photos = f"{downgraded} photos" if downgraded > 1 else "1 photo"
+        warnings.append(f"{photos} had an onboard RTK fix and now {'have' if downgraded > 1 else 'has'} a PPK "
+                        "position that is not fix (float or single)")
+    if placed:
+        _remember(chunk, mrk_path, photos_folder, solution, replace_fix)
+    return {**_result(pairing, placed, kept), "kept_fix": len(kept), "baseline_km": baseline, "warnings": warnings}
+
+
+def _remember(chunk: Chunk, mrk_path: str | Path, photos_folder: str | Path | None, solution: ppk.Solution,
+              replace_fix: bool) -> None:
+    """Record the run in ``chunk.meta`` (:func:`.ppk.last_run`): its files, its base and how it was placed (the typed
+    position ``[lon, lat, h]``), whether it replaced the onboard fixes."""
+    base, inputs = solution.base or {}, solution.inputs or {}
+    typed = base.get("position_source") == "typed" and base.get("position")
+    chunk.meta[ppk.MEMORY] = {"last": {
+        "mrk": str(Path(mrk_path).absolute()), "photos": str(Path(photos_folder).absolute()) if photos_folder else None,
+        "rover": inputs.get("rover"), "base": inputs.get("base"), "navs": list(inputs.get("navs") or []),
+        "base_name": base.get("name"), "position_source": base.get("position_source"),
+        "position": [float(v) for v in base["position"]] if typed else None, "replace_fix": bool(replace_fix),
+        "solution": Path(solution.path).name}}
 
 
 @dataclass
@@ -182,10 +264,13 @@ def _shot_record(mrk: str, shot: dji.MrkShot, antenna: list[float]) -> dict:
             "antenna": list(antenna)}
 
 
-def _result(pairing: _Pairing, placed: list[tuple[Path, dji.MrkShot, str]]) -> dict:
+def _result(pairing: _Pairing, placed: list[tuple[Path, dji.MrkShot, str]],
+            kept: list[tuple[Path, dji.MrkShot]] = ()) -> dict:
     """What :func:`apply_mrk` returns once the ``(photo, shot, status)`` of ``placed`` took the position of their
-    shot."""
-    files, used = {f for f, _shot, _state in placed}, {id(shot) for _f, shot, _state in placed}
+    shot; the ``(photo, shot)`` of ``kept`` kept a position of their shot they had (an onboard RTK fix): neither
+    matched nor unmatched."""
+    files = {f for f, _shot, _state in placed} | {f for f, _shot in kept}
+    used = {id(shot) for _f, shot, _state in placed} | {id(shot) for _f, shot in kept}
     return {"matched": len(placed), "shots": len(pairing.shots), "photos": len(pairing.files),
             "status": dict(Counter(state for _f, _shot, state in placed)),
             "unmatched": [f.stem for f, _shot in pairing.paired if f not in files],

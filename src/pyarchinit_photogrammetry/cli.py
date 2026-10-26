@@ -2525,14 +2525,19 @@ def gnss_ppk(project: Path,
                                                          "which can be metres off"),
              photos: Optional[Path] = typer.Option(None, "--photos", help="folder of the photos (default: the folder "
                                                    "of the MRK)"),
+             replace_fix: bool = typer.Option(False, "--replace-fix", help="give the PPK position also to the photos "
+                                              "with an RTK fix of the drone itself (DJI XMP or MRK), which keep it by "
+                                              "default"),
              chunk: Optional[str] = None):
     """Give the photos the PPK position of their shot: RTKLIB's solution of the drone's RINEX against a base.
 
     RTKLIB computes where the antenna of the drone was against the base (the antenna height of the base's RINEX
-    header is added to its position), then every photo takes the camera below the antenna at the time of its shot in
-    the Timestamp.MRK (the lever arm of the shot), with the status and accuracy of the solution; a photo shot where the
-    solution has no position keeps the one it had. The photos are paired with the shots as by ``ppg gnss mrk``.
-    RTKLIB works in the folder of the chunk (gnss/ppk); it needs the native core 0.5 or later, or PPG_RNX2RTKP."""
+    header is added to its position, not the phase-centre offset of its antenna: a warning says so), then every photo
+    takes the camera below the antenna at the time of its shot in the Timestamp.MRK (the lever arm of the shot), with
+    the status and accuracy of the solution; a photo shot where the solution has no position keeps the one it had, and
+    so does a photo with an RTK fix of the drone itself unless --replace-fix. The photos are paired with the shots as
+    by ``ppg gnss mrk``. The base is one RINEX file that covers the whole flight. RTKLIB works in the folder of the
+    chunk (gnss/ppk, a solution-<date>-<time>.pos per run); it needs the native core 0.5 or later, or PPG_RNX2RTKP."""
     from .gnss import apply as gnss
     from .gnss import ppk
 
@@ -2540,25 +2545,36 @@ def gnss_ppk(project: Path,
     doc, ch = _open(project, chunk)
     try:
         solution = ppk.solve(rover, base, nav or None, position, folder=ppk.work_folder(ch))
-        result = gnss.apply_ppk(ch, mrk, solution, photos)
+        result = gnss.apply_ppk(ch, mrk, solution, photos, replace_fix=replace_fix)
     except (OSError, ValueError, RuntimeError) as exc:
         _gnss_failed(exc)
     states = ", ".join(f"{k} {n}" for k, n in sorted(result["status"].items(), key=lambda p: -p[1]))
     if result["matched"]:
         typer.echo(f"{result['matched']} of {result['photos']} photos took the PPK position of their shot ({states})")
+    kept = result["kept_fix"]
+    if kept:
+        typer.echo(f"{kept} photo{'s' if kept > 1 else ''} with an RTK fix of the drone itself kept "
+                   f"{'their positions' if kept > 1 else 'its position'} (--replace-fix gives them the PPK one)")
     where = solution.base
-    lat, lon, h = where["position"]
+    lon, lat, h = where["position"]
     delta = where["antenna_delta_hen"]
-    typer.echo(f"base {where['name']}: {lat:.8f}, {lon:.8f}, {h:.3f} m "
+    baseline = result["baseline_km"]
+    typer.echo(f"base {where['name']}: latitude {lat:.8f}, longitude {lon:.8f}, {h:.3f} m above the ellipsoid "
                f"({'typed' if where['position_source'] == 'typed' else 'from its RINEX header'}), "
-               + (f"antenna {delta[0]:.3f} m above it" if delta else "no antenna height in its RINEX header"))
+               + (f"antenna {delta[0]:.3f} m above it" if delta else "no antenna height in its RINEX header")
+               + (f"; {baseline:.1f} km from the flight" if baseline is not None else ""))
+    typer.echo(f"solution: {solution.path}")
     for warning in result["warnings"]:
         typer.echo(f"warning: {warning}")
-    if not result["matched"]:
+    if not result["matched"] and not kept:
         _gnss_failed(ValueError("no photo of the chunk took a PPK position: check the folder of the photos and that "
                                 "the MRK is of the flight of the drone's observations"))
-    gnss.keep_only_fix(ch)
-    doc.save()
+    if result["matched"]:
+        gnss.keep_only_fix(ch)
+        doc.save()
+    else:  # nothing changed: the photos of the flight with a PPK position are onboard fixes, which keep theirs
+        typer.echo("no photo took a PPK position: the photos of the flight have an RTK fix of the drone itself and "
+                   "keep it (--replace-fix gives them the PPK one)")
     _unmatched(result["unmatched"], "without a PPK position")
     _unmatched([str(i) for i in result["shots_unmatched"]], "shots of the MRK without a PPK position")
 

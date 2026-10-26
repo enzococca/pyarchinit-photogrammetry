@@ -1003,6 +1003,17 @@ def _user_files(folder: Path) -> dict[str, bytes]:
     return {str(p.relative_to(folder)): p.read_bytes() for p in sorted(folder.rglob("*")) if p.is_file()}
 
 
+RUN_NAME = r"solution-\d{8}-\d{6}(?:-\d+)?"  # the name of the files of a run: its time, a number after it if taken
+
+
+def _run_files(run: dict) -> tuple[str, str]:
+    """The names of the options file and of the solution a run of the fake rnx2rtkp was given: the same name of the
+    run, .conf and .pos."""
+    conf, out = Path(run["args"][1]).name, Path(run["args"][3]).name
+    assert re.fullmatch(RUN_NAME + r"\.conf", conf) and out == conf[:-len(".conf")] + ".pos", (conf, out)
+    return conf, out
+
+
 def test_solve_gives_rtklib_plain_copies_of_the_inputs(tmp_path, fake_rtklib):
     # the user's files have names RTKLIB would read as wild cards, keywords or comments, and a compressed base
     user = tmp_path / "campagna è 100%r #1"
@@ -1021,8 +1032,8 @@ def test_solve_gives_rtklib_plain_copies_of_the_inputs(tmp_path, fake_rtklib):
     (run,) = fake_rtklib()
     copies = work.resolve() / ppk.INPUTS_FOLDER
     expected = [str(copies / name) for name in ("rover.obs", "base.obs", "nav1.nav")]
-    assert run["args"] == ["-k", str(work.resolve() / "ppk.conf"), "-o", str(work.resolve() / "solution.pos"),
-                           *expected]
+    conf, out = _run_files(run)
+    assert run["args"] == ["-k", str(work.resolve() / conf), "-o", str(work.resolve() / out), *expected]
     assert run["folder"] == ["base.obs", "nav1.nav", "rover.obs"]  # the copies, nothing else
     # the copies RTKLIB read are the user's files, the base decompressed
     assert run["inputs"] == [_sha256(PPK_ROVER.read_bytes()), _sha256(PPK_BASE.read_bytes()),
@@ -1032,27 +1043,37 @@ def test_solve_gives_rtklib_plain_copies_of_the_inputs(tmp_path, fake_rtklib):
     mark = list(rinex.ecef_to_llh(rinex.header(PPK_BASE).approx_xyz))
     options = _options(run["options"])
     assert options == _options(ppk.config(mark)) and options["ant2-postype"] == "llh"
-    # the copies are gone, the options and the solution stay; the user's folder is as it was
-    assert sorted(p.name for p in work.iterdir()) == ["ppk.conf", "solution.pos"]
+    # the copies are gone, the options and the solution of the run stay; the user's folder is as it was
+    assert sorted(p.name for p in work.iterdir()) == [conf, out]
     assert _user_files(user) == before
-    # the solution: the rows of the file, where it is, the base from its header with the warning
+    # the solution: the rows of the file, where it is, the files of the run, the base from its header (longitude
+    # first, as every position the program keeps) with the warning, the antenna of its header not calibrated
     _check_rows(solution)
-    assert solution.path == work.resolve() / "solution.pos"
-    assert solution.base == {"name": "0759", "position": pytest.approx(mark), "position_source": "header",
+    assert solution.path == work.resolve() / out
+    assert solution.inputs == {"rover": str(rover.absolute()), "base": str(base.absolute()),
+                               "navs": [str(nav.absolute())]}
+    assert solution.base == {"name": "0759", "position": pytest.approx([mark[1], mark[0], mark[2]]),
+                             "position_source": "header", "antenna": "TRM29659.00",
                              "antenna_delta_hen": [0.0, 0.0, 0.0], "file": "base è.05o.gz"}
-    assert len(solution.warnings) == 1
-    assert "0759" in solution.warnings[0] and "header" in solution.warnings[0] and "metres" in solution.warnings[0]
+    header, antenna = solution.warnings
+    assert "0759" in header and "header" in header and "metres" in header
+    assert f"latitude {mark[0]:.7f}, longitude {mark[1]:.7f}" in header
+    assert antenna == ("the phase-centre offset of the antenna TRM29659.00 of the base 0759 is not applied: no "
+                       "antenna calibration is given to RTKLIB yet, so the heights can be a few centimetres too low, "
+                       "more than 10 cm with some choke-ring antennas (calibrated antennas come in a later version)")
 
 
 def test_solve_with_a_typed_base_position(tmp_path, fake_rtklib):
+    # typed as latitude, longitude, height; given to RTKLIB so; kept as every position of the program: [lon, lat, h]
     work = tmp_path / "work"
     solution = ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], (35.16, 139.61, 70.0), folder=work)
     options = _options(fake_rtklib()[0]["options"])
     assert options["ant2-postype"] == "llh"
     assert [float(options[f"ant2-pos{i}"]) for i in (1, 2, 3)] == [35.16, 139.61, 70.0]
-    assert solution.base == {"name": "0759", "position": [35.16, 139.61, 70.0], "position_source": "typed",
-                             "antenna_delta_hen": [0.0, 0.0, 0.0], "file": "07590920.05o"}
-    assert solution.warnings == []
+    assert solution.base == {"name": "0759", "position": [139.61, 35.16, 70.0], "position_source": "typed",
+                             "antenna": "TRM29659.00", "antenna_delta_hen": [0.0, 0.0, 0.0], "file": "07590920.05o"}
+    (antenna,) = solution.warnings  # only the one of every run: the antenna of the base is not calibrated
+    assert antenna.startswith("the phase-centre offset of the antenna TRM29659.00 of the base 0759 is not applied")
     with pytest.raises(ValueError, match="latitude"):
         ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], (135.16, 139.61, 70.0), folder=work)
     assert len(fake_rtklib()) == 1  # RTKLIB did not run again
@@ -1134,14 +1155,16 @@ def test_solve_warns_of_a_time_system_it_does_not_know(tmp_path, fake_rtklib):
     base = _rinex2(tmp_path / "base.24o", V2_HEADER)
     typed = rinex.ecef_to_llh(rinex.header(base).approx_xyz)  # where its header puts it: no warning about the base
     solution = ppk.solve(rover, base, [PPK_NAV], typed, folder=tmp_path / "work")
-    assert len(solution.warnings) == 1
-    assert "rover.24o" in solution.warnings[0] and "UTC" in solution.warnings[0]
+    time, antenna = solution.warnings
+    assert "rover.24o" in time and "UTC" in time
+    assert antenna.startswith("the phase-centre offset of the antenna TRM57971.00 NONE of the base BASE")
 
 
 def test_solve_when_rtklib_computes_nothing_or_fails(tmp_path, fake_rtklib, monkeypatch):
     work = tmp_path / "work"
-    ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], folder=work)  # a solution from an earlier run is there
-    assert (work / "solution.pos").exists()
+    first = ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], folder=work)  # a solution from an earlier run is there
+    earlier = sorted(p.name for p in work.iterdir())
+    assert earlier == sorted([first.path.name, first.path.with_suffix(".conf").name])
     # exit status 0 and no solution: nothing was computed, and the earlier solution is not taken for this one
     monkeypatch.delenv("PPG_FAKE_POS")
     monkeypatch.setenv("PPG_FAKE_MESSAGE", "error : no obs data")
@@ -1153,19 +1176,22 @@ def test_solve_when_rtklib_computes_nothing_or_fails(tmp_path, fake_rtklib, monk
     monkeypatch.setenv("PPG_FAKE_POS", str(empty))
     with pytest.raises(ValueError, match="nothing was computed: error : no obs data"):
         ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], folder=work)
-    # a full solution with an error message: the message is a warning
+    # a full solution with an error message: the message is a warning (after the one of every run)
     monkeypatch.setenv("PPG_FAKE_POS", str(tmp_path / "tools" / "canned.pos"))
     monkeypatch.setenv("PPG_FAKE_MESSAGE", "error : no erp data")
     solution = ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], (35.16, 139.61, 70.0), folder=work)
     _check_rows(solution)
-    assert solution.warnings == ["RTKLIB: error : no erp data"]
+    assert solution.warnings[1:] == ["RTKLIB: error : no erp data"] and "phase-centre" in solution.warnings[0]
     # RTKLIB stopped
     monkeypatch.setenv("PPG_FAKE_EXIT", "1")
     monkeypatch.setenv("PPG_FAKE_MESSAGE", "error : no sat ant pcv in igs.atx")
     with pytest.raises(RuntimeError, match="1.*no sat ant pcv"):
         ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], folder=work)
-    # every time, the copies of the inputs are gone
-    assert sorted(p.name for p in work.iterdir()) == ["ppk.conf", "solution.pos"]
+    # every time, the copies of the inputs are gone and a run without a solution leaves nothing: the files of the two
+    # runs that gave one stay, each under its own name
+    assert len(fake_rtklib()) == 5 and solution.path != first.path
+    assert sorted(p.name for p in work.iterdir()) == sorted(
+        earlier + [solution.path.name, solution.path.with_suffix(".conf").name])
 
 
 def test_solve_refuses_a_gzip_file_cut_short(tmp_path, fake_rtklib):
@@ -1176,7 +1202,7 @@ def test_solve_refuses_a_gzip_file_cut_short(tmp_path, fake_rtklib):
     work = tmp_path / "work"
     with pytest.raises(ValueError, match="cut short"):
         ppk.solve(PPK_ROVER, base, [PPK_NAV], folder=work)
-    assert fake_rtklib() == [] and sorted(p.name for p in work.iterdir()) == ["ppk.conf"]  # no copy left behind
+    assert fake_rtklib() == [] and list(work.iterdir()) == []  # no copy left behind, no options of a run
 
 
 def _ignores_case(folder: Path) -> bool:
@@ -1223,7 +1249,7 @@ def test_solve_runs_rtklib_on_a_folder_of_its_copies_only(tmp_path, fake_rtklib)
     (work / "notes.txt").write_text("the work folder itself is not emptied")
     ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], folder=work)
     assert fake_rtklib()[-1]["folder"] == ["base.obs", "nav1.nav", "rover.obs"]
-    assert sorted(p.name for p in work.iterdir()) == ["notes.txt", "ppk.conf", "solution.pos"]
+    assert sorted(p.name for p in work.iterdir()) == sorted(["notes.txt", *_run_files(fake_rtklib()[-1])])
     if os.name != "nt":  # a link in place of the folder of the copies: the link goes, what it points to stays
         elsewhere = tmp_path / "elsewhere"
         elsewhere.mkdir()
@@ -1248,6 +1274,90 @@ def test_solve_records_the_antenna_height_of_the_base(tmp_path, fake_rtklib):
     rover = _rinex2(tmp_path / "rover.24o", V2_HEADER)
     solution = ppk.solve(rover, base, [PPK_NAV], (45.0, 11.0, 50.0), folder=tmp_path / "work")
     assert solution.base["antenna_delta_hen"] is None
+
+
+def test_solve_says_that_the_phase_centre_of_the_base_antenna_is_not_applied(tmp_path, fake_rtklib):
+    """RTKLIB is given no antenna calibration: the offset of the phase centre of the base's antenna from its reference
+    point is not applied, and every height is that much too low. Every run says so, naming the antenna of the base's
+    header, or that the header names none."""
+    rover = _rinex2(tmp_path / "rover.24o", V2_HEADER)
+    for antenna, said in (("1234                TRM57971.00     NONE", "of the antenna TRM57971.00 NONE of the base"),
+                          ("1234                LEIAR25.R4      LEIT", "of the antenna LEIAR25.R4 LEIT of the base"),
+                          ("", "of the antenna of the base BASE is not applied (its RINEX header names no antenna "
+                               "type)")):
+        header = [_line(antenna, "ANT # / TYPE") if h.endswith("ANT # / TYPE") else h for h in V2_HEADER]
+        base = _rinex2(tmp_path / "base.24o", header)
+        typed = rinex.ecef_to_llh(rinex.header(base).approx_xyz)  # where its header puts it: no warning about that
+        solution = ppk.solve(rover, base, [PPK_NAV], typed, folder=tmp_path / "work")
+        (warning,) = solution.warnings
+        assert said in warning and "heights can be a few centimetres too low" in warning, warning
+        assert "choke-ring" in warning and "later version" in warning
+        assert solution.base["antenna"] == " ".join(antenna[20:].split())
+
+
+def test_solve_writes_a_solution_file_per_run(tmp_path, fake_rtklib, monkeypatch):
+    """Two flights of one chunk, each with its own run: each run writes its options and its solution under a name of
+    its own - the time of the run, a number after it when a run of the same second took it - and the solutions of the
+    earlier runs stay; every photo records the solution of its own run."""
+    when = datetime(2026, 10, 26, 15, 30, 12)
+
+    class Clock(datetime):  # every run in the same second
+        @classmethod
+        def now(cls, tz=None):
+            return when
+
+    monkeypatch.setattr(ppk, "datetime", Clock)
+    work = tmp_path / "work"
+    work.mkdir()
+    assert [p.name for p in ppk._run_files(work)] == ["solution-20261026-153012.conf", "solution-20261026-153012.pos",
+                                                       "solution-20261026-153012_events.pos"]
+    (work / "solution-20261026-153012_events.pos").write_text("")  # RTKLIB's time marks of a run: taken too
+    assert ppk._run_files(work)[1].name == "solution-20261026-153012-2.pos"
+    (work / "solution-20261026-153012_events.pos").unlink()
+
+    pos = tmp_path / "drone.pos"
+    pos.write_text(_pos_text(rows=_drone_rows()), newline="")
+    monkeypatch.setenv("PPG_FAKE_POS", str(pos))
+    first_flight = _ppk_flight(tmp_path / "volo1", [(1, START_2005, (0, 0, 150)), (2, START_2005 + 30.0, (0, 0, 150))])
+    second_flight = _ppk_flight(tmp_path / "volo2", [(1, START_2005 + 3540.0, (0, 0, 150)),
+                                                     (2, START_2005 + 3570.0, (0, 0, 150))])
+    ch = ppg.Document().add_chunk()
+    ch.add_photos([first_flight, second_flight])
+    runs = []
+    for flight in (first_flight, second_flight):
+        solution = ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], folder=work)
+        assert gnss_apply.apply_ppk(ch, flight / "Timestamp.MRK", solution)["matched"] == 2
+        runs.append(solution.path.name)
+    assert runs == ["solution-20261026-153012.pos", "solution-20261026-153012-2.pos"]
+    assert sorted(p.name for p in work.iterdir()) == sorted(runs + [Path(r).with_suffix(".conf").name for r in runs])
+    for cam in ch.cameras:
+        assert cam.meta["gnss"]["solution"] == runs[Path(cam.path).parent == second_flight.resolve()], cam.path
+    assert [Path(call["args"][3]).name for call in fake_rtklib()] == runs
+
+
+def test_solve_refuses_paths_rtklib_cannot_take(tmp_path, fake_rtklib, monkeypatch):
+    """RTKLIB copies the paths of its files into buffers of 1024 bytes: a work folder where they would be 1000 bytes
+    long or longer is refused before RTKLIB runs, saying what to do, and nothing is left in it."""
+    assert ppk.MAX_PATH_BYTES == 1000
+    if os.name != "nt":  # a path as long only where the system takes it
+        deep = tmp_path
+        while len(os.fsencode(str(deep))) < 970:
+            deep = deep / ("p" * max(1, min(200, 970 - len(os.fsencode(str(deep))) - 1)))
+        with pytest.raises(ValueError, match="bytes long, and it takes paths shorter than 1000 bytes: move the "
+                                             "project") as error:
+            ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], folder=deep)
+        assert str(deep.resolve()) in str(error.value)
+        assert fake_rtklib() == [] and list(deep.iterdir()) == []
+    # anywhere: the longest path RTKLIB is given is the one of the time marks of the rover beside the solution
+    work = tmp_path / "work"
+    longest = len(os.fsencode(str(work.resolve() / "solution-20261026-153012_events.pos")))
+    monkeypatch.setattr(ppk, "MAX_PATH_BYTES", longest)
+    with pytest.raises(ValueError, match="_events.pos, a path"):
+        ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], folder=work)
+    assert fake_rtklib() == [] and list(work.iterdir()) == []
+    monkeypatch.setattr(ppk, "MAX_PATH_BYTES", longest + 1)
+    ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], folder=work)
+    assert len(fake_rtklib()) == 1
 
 
 def test_the_work_folder_rtklib_is_given(tmp_path, monkeypatch):
@@ -1357,16 +1467,20 @@ def test_solve_on_rtklib_data(tmp_path, monkeypatch):
         offsets = np.abs(_enu(solution.llh[fixed], station))
         assert np.all(np.median(offsets, axis=0) < [0.02, 0.02, 0.03]), np.median(offsets, axis=0)
         assert solution.base["name"] == "0759" and solution.base["position_source"] == name
-        assert solution.base["position"] == pytest.approx(list(mark))
-        # the copies of the inputs are gone (RTKLIB writes the time marks of the rover beside the solution)
-        assert {p.name for p in solution.path.parent.iterdir()} - {"solution_events.pos"} == {"ppk.conf",
-                                                                                              "solution.pos"}
+        assert solution.base["position"] == pytest.approx([mark[1], mark[0], mark[2]])  # longitude first
+        # the copies of the inputs are gone: the options and the solution of the run (RTKLIB writes the time marks of
+        # the rover beside the solution)
+        stem = solution.path.stem
+        assert re.fullmatch(RUN_NAME, stem) and solution.path.suffix == ".pos"
+        assert {p.name for p in solution.path.parent.iterdir()} - {f"{stem}_events.pos"} == {f"{stem}.conf",
+                                                                                             f"{stem}.pos"}
         assert fixed.sum() >= 0.10 * EPOCHS  # 38 to 115 of 120 from build to build
         assert solution.base["antenna_delta_hen"] == [0.0, 0.0, 0.0]
+        assert "phase-centre offset of the antenna TRM29659.00" in solution.warnings[-1]  # every run
         if name == "header":
-            assert len(solution.warnings) == 1 and "0759" in solution.warnings[0] and "header" in solution.warnings[0]
+            assert len(solution.warnings) == 2 and "0759" in solution.warnings[0] and "header" in solution.warnings[0]
         else:
-            assert solution.warnings == []
+            assert len(solution.warnings) == 1
 
 
 @needs_rtklib
@@ -1586,10 +1700,16 @@ def test_ppk_positions_of_the_cameras_at_their_shots(tmp_path, fake_rtklib, monk
 
     result = gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution)
 
-    assert {k: v for k, v in result.items() if k != "warnings"} == {
+    assert {k: v for k, v in result.items() if k not in ("warnings", "baseline_km")} == {
         "matched": 6, "shots": 9, "photos": 9, "status": {"fix": 2, "float": 3, "single": 1},
-        "unmatched": ["DJI_0001", "DJI_0004", "DJI_0009"], "shots_unmatched": [1, 4, 9]}
-    # the warning of the base at the position of its header, then the one of the photos in the gaps of the solution
+        "unmatched": ["DJI_0001", "DJI_0004", "DJI_0009"], "shots_unmatched": [1, 4, 9], "kept_fix": 0}
+    # the base 0759 (where its header puts it) from the median position of the drone in the solution: 3.3 km
+    mark = rinex.ecef_to_llh(rinex.header(PPK_BASE).approx_xyz)
+    median = np.median(solution.llh, axis=0)
+    apart = Geod(ellps="WGS84").inv(mark[1], mark[0], median[1], median[0])[2] / 1000.0
+    assert result["baseline_km"] == pytest.approx(apart, rel=0.01) and 3.0 < apart < 3.6
+    # the warnings of the solution (the base at the position of its header, its antenna not calibrated), then the one
+    # of the photos in the gaps of the solution; none of a base far from the flight
     assert result["warnings"][:-1] == solution.warnings and "header" in result["warnings"][0]
     assert re.match(r"3 photos\b", result["warnings"][-1]) and "gap" in result["warnings"][-1]
 
@@ -1617,13 +1737,19 @@ def test_ppk_positions_of_the_cameras_at_their_shots(tmp_path, fake_rtklib, monk
             "ppk", state, q, "ellipsoidal", "Timestamp.MRK", index)
         assert g["accuracy"] == cam.reference.accuracy and g["lever_arm_ned_mm"] == list(arms[index])
         assert g["antenna"] == pytest.approx([antenna[1], antenna[0], antenna[2]], abs=1e-9)
-        assert g["base"] == solution.base and (g["rover"], g["solution"]) == ("30400920.05o", "solution.pos")
+        assert g["base"] == solution.base and (g["rover"], g["solution"]) == ("30400920.05o", solution.path.name)
         json.dumps(cam.meta)  # saved with the project
     # the time of the shot in UTC, as for an MRK: GPS time less the 13 leap seconds of 2005
     assert ch.camera("DJI_0002").meta["gnss"]["utc"] == "2005-04-01T23:59:47+00:00"
     assert ch.camera("DJI_0003").meta["gnss"]["utc"] == "2005-04-02T00:00:17.000400+00:00"
     # the photos in the gaps of the solution keep the position they had
     assert [ch.camera(f"DJI_{i:04d}").meta["gnss"]["source"] for i in (1, 4, 9)] == ["exif"] * 3
+    # the run, for the dialog of the next one: its files, its base from the header (no typed position)
+    assert ppk.last_run(ch) == {"mrk": str((folder / "Timestamp.MRK").absolute()), "photos": None,
+                                "rover": str(PPK_ROVER.absolute()), "base": str(PPK_BASE.absolute()),
+                                "navs": [str(PPK_NAV.absolute())], "base_name": "0759", "position_source": "header",
+                                "position": None, "replace_fix": False, "solution": solution.path.name}
+    json.dumps(ch.meta)
 
     again = _snapshot(ch)
     assert gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution) == result
@@ -1676,6 +1802,156 @@ def test_ppk_warns_when_the_solution_is_far_from_the_drones_own_positions(tmp_pa
             said = re.match(r"the solution drone\.pos puts the antenna (\d+) m \(median\) from where the drone's own "
                             r"receiver put it in Timestamp\.MRK", warning)
             assert said and abs(int(said.group(1)) - apart) <= 2.0 and "base" in warning, warning
+
+
+def _onboard_flight(folder: Path, solution: ppk.Solution, epochs, fixes, north_m: float = 0.0) -> Path:
+    """A DJI flight with a shot on each of the ``epochs`` (indices) of ``solution``: its photos and its Timestamp.MRK,
+    whose lines put the antenna where the solution does (``north_m`` metres to the north), with the RTK flag 50 (fix)
+    for the shots in ``fixes``, 16 (single) for the others."""
+    shots = [(i + 1, float(solution.times[k]), (0, 0, 150)) for i, k in enumerate(epochs)]
+    _ppk_flight(folder, shots)
+    lines = []
+    for (index, gps, (north, east, down)), k in zip(shots, epochs):
+        week, seconds = divmod(gps, WEEK)
+        lat, lon, h = solution.llh[k]
+        lines.append(f"{index}\t{seconds:.6f}\t[{int(week)}]\t{north:6d},N\t{east:6d},E\t{down:6d},V\t"
+                     f"{lat + north_m / 111195.0:.10f},Lat\t{lon:.10f},Lon\t{h:.4f},Ellh\t0.010, 0.010, 0.020\t"
+                     f"{50 if index in fixes else 16},Q\n")
+    (folder / "Timestamp.MRK").write_text("".join(lines), newline="\n")
+    return folder
+
+
+def test_ppk_keeps_the_onboard_rtk_fixes(tmp_path):
+    """The photos whose position is an RTK fix of the drone itself - the XMP of a DJI photo, a DJI MRK - keep it: the
+    PPK is for the others. They are neither matched nor unmatched, the result counts them; kept far from the PPK
+    positions of the same shots, a warning says what it likely means. With ``replace_fix`` they take the PPK position
+    too, with a warning for those that are no longer fix."""
+    from pyarchinit_photogrammetry.core.camera import Camera
+
+    for source, status, onboard in [("dji_xmp", "fix", True), ("dji_mrk", "fix", True), ("dji_mrk", "float", False),
+                                    ("dji_xmp", "single", False), ("ppk", "fix", False),
+                                    ("positions_file", "fix", False), ("exif", None, False)]:
+        cam = Camera(key=0, label="x", path="x.jpg", sensor_key=0, meta={"gnss": {"source": source, "status": status}})
+        assert gnss_apply.onboard_fix(cam) is onboard, (source, status)
+
+    pos = tmp_path / "drone.pos"
+    pos.write_text(_pos_text(rows=_drone_rows()), newline="")
+    solution = ppk.read_pos(pos)
+    epochs = [0, 1, 2, 4, 120]  # fix, float, fix, single, fix (the 120th row is the last epoch, 3570 s)
+    assert [ppk.status(solution.q[k]) for k in epochs] == ["fix", "float", "fix", "single", "fix"]
+
+    def flight(name: str, north_m: float = 0.0):
+        folder = _onboard_flight(tmp_path / name, solution, epochs, fixes={1, 2, 3}, north_m=north_m)
+        ch = ppg.Document().add_chunk()
+        ch.add_photos([folder])
+        assert gnss_apply.apply_mrk(ch, folder / "Timestamp.MRK")["status"] == {"fix": 3, "single": 2}
+        return ch, folder
+
+    # the onboard fixes where the PPK puts them: kept, no warning; the two single photos take the PPK
+    ch, folder = flight("concordi")
+    before = {c.label: c.meta["gnss"] for c in ch.cameras}
+    result = gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution)
+    assert (result["matched"], result["kept_fix"], result["status"]) == (2, 3, {"single": 1, "fix": 1})
+    assert (result["unmatched"], result["shots_unmatched"], result["warnings"]) == ([], [], [])
+    sources = {c.label: c.meta["gnss"]["source"] for c in ch.cameras}
+    assert sources == {"DJI_0001": "dji_mrk", "DJI_0002": "dji_mrk", "DJI_0003": "dji_mrk", "DJI_0004": "ppk",
+                       "DJI_0005": "ppk"}
+    assert all(ch.camera(f"DJI_{i:04d}").meta["gnss"] == before[f"DJI_{i:04d}"] for i in (1, 2, 3))
+    # the onboard fixes 30 cm north of the PPK positions of the same shots: the base in another frame, or misplaced
+    ch, folder = flight("discordi", north_m=0.30)
+    result = gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution)
+    assert (result["matched"], result["kept_fix"]) == (2, 3)
+    (warning,) = result["warnings"]
+    assert warning.startswith("3 photos with an onboard RTK fix kept their positions, which are 30 cm (median) from "
+                              "the PPK positions of the same shots: the base is likely in another reference frame")
+    assert "or at a wrong position" in warning and "compute again replacing the onboard fixes too" in warning
+    # 4 cm: within what two good solutions give
+    ch, folder = flight("vicini", north_m=0.04)
+    assert gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution)["warnings"] == []
+    # replace_fix: every photo takes the PPK position; one onboard fix is now float, and a warning says so
+    ch, folder = flight("sostituiti", north_m=0.30)
+    result = gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution, replace_fix=True)
+    assert (result["matched"], result["kept_fix"], result["status"]) == (5, 0, {"fix": 3, "float": 1, "single": 1})
+    assert result["warnings"] == ["1 photo had an onboard RTK fix and now has a PPK position that is not fix (float "
+                                  "or single)"]
+    assert {c.meta["gnss"]["source"] for c in ch.cameras} == {"ppk"} and ppk.last_run(ch)["replace_fix"] is True
+    # the XMP of a DJI photo: its altitude may be above the sea level, so only the horizontal distance counts
+    ch, folder = flight("xmp")
+    for cam in ch.cameras:
+        if gnss_apply.onboard_fix(cam):
+            lon, lat, h = cam.reference.location
+            gnss_apply.set_camera_position(cam, [lon, lat, h - 45.0], "EPSG:4326", [0.02, 0.02, 0.04], "dji_xmp",
+                                           status="fix", extra={"flag": 50})
+    result = gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution)
+    assert (result["kept_fix"], result["warnings"]) == (3, [])
+    # a flight of onboard fixes only: nothing changes, nothing is recorded
+    ch, folder = flight("solo_fix")
+    for cam in ch.cameras:
+        cam.meta["gnss"]["status"] = "fix"
+    before = _snapshot(ch)
+    result = gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution)
+    assert (result["matched"], result["kept_fix"], result["unmatched"]) == (0, 5, [])
+    assert _snapshot(ch) == before and ppk.last_run(ch) is None
+
+
+def test_ppk_says_how_far_the_base_is_from_the_flight(tmp_path):
+    """The baseline: the horizontal distance from the base to the median position of the drone in the solution, in
+    the result; beyond 20 km a warning (the ambiguities are hard to fix, the positions mostly float)."""
+    pos = tmp_path / "drone.pos"
+    pos.write_text(_pos_text(rows=_drone_rows()), newline="")
+    solution = ppk.read_pos(pos)
+    assert ppk.baseline_km(solution) is None  # a solution read from a file knows no base
+    folder = _ppk_flight(tmp_path / "volo", [(i, START_2005 + 30.0 * i, (0, 0, 150)) for i in (1, 2, 3)])
+    lat, lon = np.median(solution.llh[:, 0]), np.median(solution.llh[:, 1])
+    geod = Geod(ellps="WGS84")
+    for km in (3.0, 25.0):
+        lon_b, lat_b, _back = geod.fwd(lon, lat, 90.0, km * 1000.0)  # due east
+        solution.base = {"name": "STAZ", "position": [lon_b, lat_b, 60.0], "position_source": "typed"}
+        ch = ppg.Document().add_chunk()
+        ch.add_photos([folder])
+        result = gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution)
+        assert result["baseline_km"] == pytest.approx(km, rel=0.005)
+        far = [w for w in result["warnings"] if "from the flight" in w]
+        if km < 20.0:
+            assert far == []
+        else:
+            (warning,) = far
+            said = re.fullmatch(r"the base STAZ is (\d+\.\d) km from the flight: beyond 20 km the ambiguities are hard "
+                                r"to fix, and the positions are mostly float", warning)
+            assert said and float(said.group(1)) == pytest.approx(result["baseline_km"], abs=0.05), warning
+    # across the 180th meridian the short way
+    across = _solution([0.0, 1.0], [[-16.5, 179.99, 10.0], [-16.5, 179.99, 10.0]])
+    across.base = {"position": [-179.99, -16.5, 10.0]}
+    assert ppk.baseline_km(across) == pytest.approx(2.135, abs=0.01)
+
+
+def test_ppk_says_when_one_base_was_typed_at_two_positions(tmp_path):
+    """The same base typed at two positions more than 5 cm apart in one chunk: one of them is likely mistyped. A
+    warning when the photos of another flight were computed against the other position; none when the run gives its
+    photos their positions again, or when the two are within 5 cm."""
+    pos = tmp_path / "drone.pos"
+    pos.write_text(_pos_text(rows=_drone_rows()), newline="")
+    solution = ppk.read_pos(pos)
+    first = _ppk_flight(tmp_path / "volo1", [(i, START_2005 + 30.0 * i, (0, 0, 150)) for i in (1, 2)])
+    second = _ppk_flight(tmp_path / "volo2", [(i, START_2005 + 30.0 * i + 600.0, (0, 0, 150)) for i in (1, 2)])
+    ch = ppg.Document().add_chunk()
+    ch.add_photos([first, second])
+    here = [139.6138, 35.1609, 71.25]
+
+    def run(folder: Path, position) -> list[str]:
+        solution.base = {"name": "0759", "position": list(position), "position_source": "typed"}
+        return [w for w in gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution)["warnings"] if "typed" in w]
+
+    assert run(first, here) == []
+    assert run(first, [here[0], here[1], here[2] + 0.30]) == []  # the same flight again: its photos are replaced
+    assert run(second, [here[0], here[1], here[2] + 0.33]) == []  # 3 cm from the first flight's
+    (warning,) = run(second, [here[0], here[1], here[2] + 0.10])  # 20 cm
+    assert warning == ("the base 0759 was typed at another position for other photos of this chunk (latitude "
+                       "35.16090000, longitude 139.61380000, 71.550 m), 20 cm from this one: one of the two is likely "
+                       "mistyped; compute again the flights that used the wrong one")
+    assert ppk.other_typed_position(ch, "0759", [here[0], here[1], here[2] + 0.30]) == (
+        [pytest.approx(v) for v in [here[0], here[1], here[2] + 0.10]], pytest.approx(0.20))
+    assert ppk.other_typed_position(ch, "ALTRA", here) is None  # another base
 
 
 def test_one_table_of_rtklib_states_for_ppk_and_positions_files(tmp_path):
@@ -1773,20 +2049,29 @@ def test_ppk_command_line(tmp_path, fake_rtklib, monkeypatch):
     assert result.exit_code == 0, result.output
     lines = result.output.splitlines()
     assert lines[0] == "6 of 9 photos took the PPK position of their shot (float 3, fix 2, single 1)"
+    # the base, latitude and longitude said by name, and how far it is from the median position of the drone
     mark = rinex.ecef_to_llh(rinex.header(PPK_BASE).approx_xyz)
-    assert lines[1] == (f"base 0759: {mark[0]:.8f}, {mark[1]:.8f}, {mark[2]:.3f} m (from its RINEX header), "
-                        "antenna 0.000 m above it")
+    drone = ppk.read_pos(pos)
+    drone.base = {"position": [mark[1], mark[0], mark[2]]}
+    assert lines[1] == (f"base 0759: latitude {mark[0]:.8f}, longitude {mark[1]:.8f}, {mark[2]:.3f} m above the "
+                        "ellipsoid (from its RINEX header), antenna 0.000 m above it; "
+                        f"{ppk.baseline_km(drone):.1f} km from the flight")
+    # the solution of the run, in the work folder of the chunk
+    work = (project.parent / "volo.ppg.files" / "chunk_0" / "gnss" / "ppk").resolve()
+    (call,) = fake_rtklib()
+    conf, out = _run_files(call)
+    assert lines[2] == f"solution: {work / out}"
     warnings = [line for line in lines if line.startswith("warning: ")]
-    assert len(warnings) == 2
+    assert len(warnings) == 3
     assert warnings[0].startswith("warning: the position of the base 0759 comes from its RINEX header")
-    assert "metres" in warnings[0] and "3 photos were taken where the solution solution.pos has no position" in \
-        warnings[1]
+    assert "metres" in warnings[0]
+    assert warnings[1].startswith("warning: the phase-centre offset of the antenna TRM29659.00 of the base 0759 is not "
+                                  "applied")
+    assert f"3 photos were taken where the solution {out} has no position" in warnings[2]
     assert "without a PPK position (3): DJI_0001, DJI_0004, DJI_0009" in lines
     assert "shots of the MRK without a PPK position (3): 1, 4, 9" in lines
     # RTKLIB worked in the folder of the chunk, on the files given
-    work = (project.parent / "volo.ppg.files" / "chunk_0" / "gnss" / "ppk").resolve()
-    (call,) = fake_rtklib()
-    assert call["args"][:4] == ["-k", str(work / "ppk.conf"), "-o", str(work / "solution.pos")]
+    assert call["args"][:4] == ["-k", str(work / conf), "-o", str(work / out)]
     assert call["inputs"] == [_sha256(p.read_bytes()) for p in (PPK_ROVER, PPK_BASE, PPK_NAV)]
     # the positions are in the project, the photos in the gaps keep theirs, the fix-only filter decided again
     ch = ppg.Document.open(project).chunk
@@ -1795,24 +2080,29 @@ def test_ppk_command_line(tmp_path, fake_rtklib, monkeypatch):
                       "DJI_0004": ("exif", None), "DJI_0005": ("ppk", "float"), "DJI_0006": ("ppk", "single"),
                       "DJI_0007": ("ppk", "float"), "DJI_0008": ("ppk", "fix"), "DJI_0009": ("exif", None)}
     assert ch.camera("DJI_0002").meta["gnss"]["base"]["position_source"] == "header"
-    assert ch.camera("DJI_0002").meta["gnss"]["solution"] == "solution.pos"
+    assert ch.camera("DJI_0002").meta["gnss"]["solution"] == out
     enabled = {c.label for c in ch.cameras if c.reference.enabled}
     assert enabled == {"DJI_0002", "DJI_0008"}
     assert sorted(ch.meta["gnss_only_fix"]["disabled"]) == sorted(c.key for c in ch.cameras
                                                                   if c.label not in enabled)
+    assert ppk.last_run(ch)["base"] == str(PPK_BASE.absolute())  # the run, for the dialog of the next one
 
     # the base at its surveyed position (a few metres from the header's), written with points and spaces: no warning
-    # about it, RTKLIB given it
+    # about it, RTKLIB given it, kept as every position of the program: longitude first
     result = run(app, _ppk_command(project, folder, "--nav", str(PPK_NAV), "--base-position",
                                    " 35.1609000, 139.6138000 ,71.25 "))
     assert result.exit_code == 0, result.output
     lines = result.output.splitlines()
-    assert lines[1] == "base 0759: 35.16090000, 139.61380000, 71.250 m (typed), antenna 0.000 m above it"
+    assert re.fullmatch(r"base 0759: latitude 35\.16090000, longitude 139\.61380000, 71\.250 m above the ellipsoid "
+                        r"\(typed\), antenna 0\.000 m above it; \d+\.\d km from the flight", lines[1]), lines[1]
     assert not any("RINEX header" in line for line in lines if line.startswith("warning: "))
     options = _options(fake_rtklib()[-1]["options"])
     assert [float(options[f"ant2-pos{i}"]) for i in (1, 2, 3)] == [35.1609, 139.6138, 71.25]
-    base = ppg.Document.open(project).chunk.camera("DJI_0002").meta["gnss"]["base"]
-    assert base["position_source"] == "typed" and base["position"] == [35.1609, 139.6138, 71.25]
+    ch = ppg.Document.open(project).chunk
+    base = ch.camera("DJI_0002").meta["gnss"]["base"]
+    assert base["position_source"] == "typed" and base["position"] == [139.6138, 35.1609, 71.25]
+    assert ch.camera("DJI_0002").meta["gnss"]["solution"] == _run_files(fake_rtklib()[-1])[1] != out
+    assert ppk.last_run(ch)["position"] == [139.6138, 35.1609, 71.25]
 
     # typed far from the header's position (a wrong degree, a height above the sea level): computed, with a warning
     result = run(app, _ppk_command(project, folder, "--nav", str(PPK_NAV), "--base-position", "35.6,139.6,20"))
@@ -1825,6 +2115,58 @@ def test_ppk_command_line(tmp_path, fake_rtklib, monkeypatch):
     assert said, far
     apart = Geod(ellps="WGS84").inv(mark[1], mark[0], 139.6, 35.6)[2] / 1000.0
     assert abs(float(said.group(1)) - apart) < 0.2 and float(said.group(2)) == pytest.approx(20 - mark[2], abs=0.05)
+
+
+def test_ppk_command_line_keeps_the_onboard_fixes_unless_told(tmp_path, fake_rtklib, monkeypatch):
+    """ppg gnss ppk after ppg gnss mrk: the photos with an RTK fix of the drone itself keep it and the command says how
+    many; --replace-fix gives them the PPK position too; a flight of onboard fixes only changes nothing, and that is
+    no error."""
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    pos = tmp_path / "drone.pos"
+    pos.write_text(_pos_text(rows=_drone_rows()), newline="")
+    monkeypatch.setenv("PPG_FAKE_POS", str(pos))
+    solution = ppk.read_pos(pos)
+    run = CliRunner().invoke
+
+    def project(name: str, fixes) -> tuple[Path, Path]:
+        folder = _onboard_flight(tmp_path / name / "100MEDIA", solution, [0, 1, 2, 4, 120], fixes=fixes)
+        doc = ppg.Document()
+        doc.add_chunk("Volo").add_photos([folder])
+        doc.save(tmp_path / name / "volo.ppg")
+        mrk = run(app, ["gnss", "mrk", str(tmp_path / name / "volo.ppg"), str(folder / "Timestamp.MRK")])
+        assert mrk.exit_code == 0, mrk.output
+        return tmp_path / name / "volo.ppg", folder
+
+    path, folder = project("misto", fixes={1, 2, 3})
+    result = run(app, _ppk_command(path, folder, "--nav", str(PPK_NAV)))
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert lines[:2] == ["2 of 5 photos took the PPK position of their shot (single 1, fix 1)",
+                         "3 photos with an RTK fix of the drone itself kept their positions (--replace-fix gives them "
+                         "the PPK one)"]
+    ch = ppg.Document.open(path).chunk
+    assert [c.meta["gnss"]["source"] for c in ch.cameras] == ["dji_mrk"] * 3 + ["ppk"] * 2
+    assert not any("without a PPK position" in line for line in lines)
+
+    result = run(app, _ppk_command(path, folder, "--nav", str(PPK_NAV), "--replace-fix"))
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert lines[0] == "5 of 5 photos took the PPK position of their shot (fix 3, float 1, single 1)"
+    assert not any("kept" in line for line in lines)
+    assert ("warning: 1 photo had an onboard RTK fix and now has a PPK position that is not fix (float or single)"
+            in lines)
+    assert {c.meta["gnss"]["source"] for c in ppg.Document.open(path).chunk.cameras} == {"ppk"}
+
+    path, folder = project("solo_fix", fixes={1, 2, 3, 4, 5})
+    before = _snapshot(ppg.Document.open(path).chunk)
+    result = run(app, _ppk_command(path, folder, "--nav", str(PPK_NAV)))
+    assert result.exit_code == 0, result.output
+    assert ("no photo took a PPK position: the photos of the flight have an RTK fix of the drone itself and keep it "
+            "(--replace-fix gives them the PPK one)") in result.output.splitlines()
+    assert _snapshot(ppg.Document.open(path).chunk) == before
 
 
 def test_ppk_command_line_says_what_went_wrong_and_changes_nothing(tmp_path, fake_rtklib, monkeypatch):
@@ -2015,6 +2357,8 @@ def test_ppk_dialog_finds_the_files_and_checks_the_base(tmp_path, qt_app, monkey
     assert dlg.rover_info.text() == ("Ricevitore TRIMBLE 5700; osservazioni dal 2005-04-02 00:00:00 al "
                                      "2005-04-02 00:59:29 (ora GPS).")
     assert dlg.problem() == "Scegli le osservazioni della base."
+    assert "in un solo file" in dlg.base_info.text()  # one base file that covers the whole flight
+    assert not dlg.antenna_warning.isVisibleTo(dlg)
     # the base of a station in a folder of its own: what its header says, its navigation file after the drone's
     base = _station(tmp_path)
     station = base.parent
@@ -2023,13 +2367,23 @@ def test_ppk_dialog_finds_the_files_and_checks_the_base(tmp_path, qt_app, monkey
     for said in ("Base 0759", "TRIMBLE 5700", "TRM29659.00", "2005-04-02 00:00:00", "2005-04-02 00:59:30",
                  "Posizione nell'intestazione", "altezza dell'antenna nulla"):
         assert said in info, (said, info)
+    # a note in sight, not a tooltip: the phase-centre offset of the antenna of its header is not applied
+    assert dlg.antenna_warning.isVisibleTo(dlg) and dlg.antenna_warning.text().startswith(
+        "Lo scostamento del centro di fase dell'antenna TRM29659.00 della base non viene applicato")
+    assert "più basse di qualche centimetro" in dlg.antenna_warning.text()
     assert dlg.nav_paths() == [drone_nav, station / "07590920.05n"]
     # the position of the header by default, with its warning; the fields of a typed position off
     assert dlg.from_header.isChecked() and dlg.header_warning.isVisibleTo(dlg)
     assert "sbagliata di metri" in dlg.header_warning.text() and not dlg.lat.isEnabled()
     assert dlg.problem() is None
+    # the onboard fixes kept unless told, said beside the choice
+    assert not dlg.replace_fix.isChecked() and dlg.fix_note.text().startswith("Le foto con un fix RTK del drone")
     assert dlg.values() == {"rover": card / f"{DJI_FLIGHT}_Rinex.obs", "base": base,
-                            "navs": [drone_nav, station / "07590920.05n"], "base_position": None}
+                            "navs": [drone_nav, station / "07590920.05n"], "base_position": None,
+                            "replace_fix": False}
+    dlg.replace_fix.setChecked(True)
+    assert dlg.values()["replace_fix"] is True
+    dlg.replace_fix.setChecked(False)
     # typed: the warning goes, three numbers with a comma or a point for the decimals
     dlg.typed.setChecked(True)
     assert not dlg.header_warning.isVisibleTo(dlg) and dlg.lat.isEnabled()
@@ -2284,11 +2638,83 @@ def test_the_ppk_step_says_which_bases_and_how_they_were_placed(qt_app, monkeypa
     assert text.startswith("PPK: 4 foto su 5 (fix 3, float 1). La base BASE è nella posizione della sua intestazione "
                            "RINEX, che può essere sbagliata di metri")
     assert text.endswith("della base. Base CORS nella posizione scritta.")
+    # one base typed at two positions: within 5 cm nothing, further a warning that one is likely wrong
+    typed = {"name": "CORS", "position_source": "typed", "position": [11.0, 44.0, 50.0]}
+    photo(5, {"source": "ppk", "status": "fix", "base": typed})
+    photo(6, {"source": "ppk", "status": "fix", "base": {**typed, "position": [11.0, 44.0, 50.03]}})
+    assert ppk_state(ch).endswith("Base CORS nella posizione scritta.")
+    photo(7, {"source": "ppk", "status": "fix", "base": {**typed, "position": [11.0, 44.0, 49.88]}})
+    assert ppk_state(ch).endswith("Base CORS nella posizione scritta. La base CORS è stata scritta in posizioni "
+                                  "diverse in questo chunk, fino a 15 cm l'una dall'altra: se è lo stesso punto, una "
+                                  "è sbagliata; calcola di nuovo i voli con quella giusta.")
 
 
-def _sample_answer(parent, mrk, work=None) -> dict:
-    """What the PPK dialog answers in the window tests: the RTKLIB sample data, the base at its header's position."""
-    return {"rover": PPK_ROVER, "base": PPK_BASE, "navs": [PPK_NAV], "base_position": None}
+def test_ppk_dialog_starts_from_the_last_run_of_the_chunk(tmp_path, qt_app, fake_rtklib, monkeypatch):
+    """The dialog starts from the last PPK run of the chunk: the base, its typed position, the navigation files still
+    there (not those beside the drone's observations of another flight), the choice about the onboard fixes; the
+    drone's observations too for the MRK of that run. The same base typed elsewhere for other photos of the chunk is a
+    warning in the dialog; the photos of the chunk with an onboard fix are counted beside the choice."""
+    from pyarchinit_photogrammetry.gui.ppk_dialog import PpkDialog
+
+    pos = tmp_path / "drone.pos"
+    pos.write_text(_pos_text(rows=_drone_rows()), newline="")
+    monkeypatch.setenv("PPG_FAKE_POS", str(pos))
+    base = _station(tmp_path)
+    extra = tmp_path / "effemeridi"
+    extra.mkdir()
+    brdc = Path(shutil.copyfile(DATA / "30400920.05n", extra / "brdc0920.05n"))
+    drone = tmp_path / "drone"
+    drone.mkdir()
+    rover = Path(shutil.copyfile(PPK_ROVER, drone / "volo1_Rinex.obs"))
+    rover_nav = Path(shutil.copyfile(DATA / "30400920.05n", drone / "volo1_Rinex.nav"))
+    first = _ppk_flight(tmp_path / "volo1", [(i, START_2005 + 30.0 * i, (0, 0, 150)) for i in (1, 2)])
+    ch = ppg.Document().add_chunk()
+    ch.add_photos([first])
+    assert PpkDialog(first / "Timestamp.MRK", chunk=ch).base.path() is None  # no run yet: nothing to start from
+
+    solution = ppk.solve(rover, base, [base.parent / "07590920.05n", brdc, rover_nav], (35.1609, 139.6138, 71.25),
+                         folder=tmp_path / "work")
+    gnss_apply.apply_ppk(ch, first / "Timestamp.MRK", solution, replace_fix=True)
+    ch.cameras[0].meta["gnss"] = {**ch.cameras[0].meta["gnss"], "source": "dji_xmp", "status": "fix"}
+
+    # another flight: its own drone file, the base and its typed position of the last run, its navigation files but
+    # the one beside the drone file of the other flight, the onboard fixes replaced again
+    card = _dji_card(tmp_path)
+    dlg = PpkDialog(card / f"{DJI_FLIGHT}_Timestamp.MRK", chunk=ch)
+    assert dlg.rover.path() == card / f"{DJI_FLIGHT}_Rinex.obs" and dlg.base.path() == base
+    assert dlg.typed.isChecked() and (dlg.lat.text(), dlg.lon.text(), dlg.ellh.text()) == ("35.1609", "139.6138",
+                                                                                           "71.25")
+    assert dlg.nav_paths() == [card / f"{DJI_FLIGHT}_PPKNAV.nav", base.parent / "07590920.05n", brdc]
+    assert dlg.replace_fix.isChecked() and dlg.fix_note.text().startswith("1 foto del chunk hanno un fix RTK")
+    assert dlg.problem() is None and not dlg.reuse_warning.isVisibleTo(dlg)
+    assert dlg.values()["base_position"] == (35.1609, 139.6138, 71.25)
+    # the same base typed 11 m away: a warning in the dialog, not a refusal
+    dlg.lat.setText("35.1610")
+    assert dlg.reuse_warning.isVisibleTo(dlg) and dlg.problem() is None
+    said = re.match(r"La base 0759 è già stata usata in questo chunk nella posizione scritta 35,16090000, "
+                    r"139,61380000, 71,250 m, a (\d+),(\d\d) m da questa: se è lo stesso punto, una delle due è "
+                    r"sbagliata", dlg.reuse_warning.text())
+    assert said and 10.0 < float(f"{said.group(1)}.{said.group(2)}") < 12.0, dlg.reuse_warning.text()
+    dlg.lat.setText("35.1609")
+    assert not dlg.reuse_warning.isVisibleTo(dlg)
+    # the flight of the last run: its drone file too; a navigation file gone is not listed
+    brdc.unlink()
+    again = PpkDialog(first / "Timestamp.MRK", chunk=ch)
+    assert again.rover.path() == rover and again.base.path() == base
+    assert again.nav_paths() == [rover_nav, base.parent / "07590920.05n"]
+    # the photos of this flight are given their positions again: the base typed elsewhere for them is no warning
+    again.lat.setText("35.1610")
+    assert not again.reuse_warning.isVisibleTo(again)
+    # a run with the position of the header: the dialog starts there
+    gnss_apply.apply_ppk(ch, first / "Timestamp.MRK", ppk.solve(rover, base, folder=tmp_path / "work"))
+    header = PpkDialog(card / f"{DJI_FLIGHT}_Timestamp.MRK", chunk=ch)
+    assert header.from_header.isChecked() and header.lat.text() == "" and not header.replace_fix.isChecked()
+
+
+def _sample_answer(parent, mrk, work=None, chunk=None) -> dict:
+    """What the PPK dialog answers in the window tests: the RTKLIB sample data, the base at its header's position, the
+    onboard fixes kept."""
+    return {"rover": PPK_ROVER, "base": PPK_BASE, "navs": [PPK_NAV], "base_position": None, "replace_fix": False}
 
 
 @pytest.fixture
@@ -2322,10 +2748,10 @@ def test_ppk_step_of_the_gnss_pane(ppk_window, fake_rtklib, monkeypatch, tmp_pat
     monkeypatch.setattr(w, "_error", lambda summary, details="", logged=True: errors.append(summary))
     monkeypatch.setattr(mw, "message", lambda parent, kind, title, text, *a, **k: boxes.append((kind, text)))
     monkeypatch.setattr(mw.QFileDialog, "getOpenFileName", lambda *a, **k: (str(folder / "Timestamp.MRK"), ""))
-    answer = {"rover": PPK_ROVER, "base": PPK_BASE, "navs": [PPK_NAV], "base_position": None}
+    answer = {"rover": PPK_ROVER, "base": PPK_BASE, "navs": [PPK_NAV], "base_position": None, "replace_fix": False}
 
-    def ask(parent, mrk, work=None):
-        asked.append((Path(mrk), Path(work)))
+    def ask(parent, mrk, work=None, chunk=None):
+        asked.append((Path(mrk), Path(work), chunk))
         return dict(answer)
 
     monkeypatch.setattr(mw.PpkDialog, "ask", staticmethod(ask))
@@ -2334,12 +2760,14 @@ def test_ppk_step_of_the_gnss_pane(ppk_window, fake_rtklib, monkeypatch, tmp_pat
     pane.b_ppk.click()
     w.runner.wait()
 
-    # the dialog was given the MRK and the work folder of the chunk, which no input may be in
-    assert errors == [] and asked == [(folder / "Timestamp.MRK", chunk.data_dir / "gnss" / "ppk")]
+    # the dialog was given the MRK, the work folder of the chunk, which no input may be in, and the chunk (its last run)
+    assert errors == [] and asked == [(folder / "Timestamp.MRK", chunk.data_dir / "gnss" / "ppk", chunk)]
     states = {c.label: c.meta["gnss"]["status"] for c in chunk.cameras if c.meta["gnss"]["source"] == "ppk"}
     assert states == {"DJI_0002": "fix", "DJI_0003": "float", "DJI_0005": "float", "DJI_0006": "single",
                       "DJI_0007": "float", "DJI_0008": "fix"}
-    assert w.isWindowModified() and (chunk.data_dir / "gnss" / "ppk" / "solution.pos").is_file()
+    run = chunk.camera("DJI_0002").meta["gnss"]["solution"]  # the solution file of the run, kept in the work folder
+    assert re.fullmatch(RUN_NAME + r"\.pos", run) and (chunk.data_dir / "gnss" / "ppk" / run).is_file()
+    assert w.isWindowModified() and ppk.last_run(chunk)["solution"] == run
     text = pane.states["ppk"].text()
     assert text.startswith("PPK: 6 foto su 9 (float 3, fix 2, singola 1).") and "0759" in text
     assert "intestazione RINEX" in text and "metri" in text
@@ -2348,12 +2776,18 @@ def test_ppk_step_of_the_gnss_pane(ppk_window, fake_rtklib, monkeypatch, tmp_pat
     assert "PPK: 6 foto su 9 hanno la posizione corretta del loro scatto (float 3, fix 2, singola 1)" in logged
     assert "Senza corrispondenza (3): DJI_0001, DJI_0004, DJI_0009" in logged
     assert "Scatti dell'MRK senza posizione PPK (3): 1, 4, 9" in logged
+    # the base, how far from the flight, the solution; the warnings of the run, the antenna of the base among them
+    assert any(re.fullmatch(rf"Base 0759 \(antenna TRM29659\.00\) a 3,\d km dal volo; soluzione {run}", t)
+               for t in logged), logged
     assert any(t.startswith("the position of the base 0759 comes from its RINEX header") for t in logged)
-    assert any(t.startswith("3 photos were taken where the solution solution.pos has no position") for t in logged)
+    assert any(t.startswith("the phase-centre offset of the antenna TRM29659.00 of the base 0759 is not applied")
+               for t in logged)
+    assert any(t.startswith(f"3 photos were taken where the solution {run} has no position") for t in logged)
     ((kind, said),) = boxes  # the base at the position of its header: also in a message
     assert kind == "warning" and "0759" in said and "intestazione RINEX" in said and "metri" in said
 
-    # the base at a typed position: no message, the pane says it; 3 km from the header's, the log says that too
+    # the base at a typed position: no message, the pane says it; 3 km from the header's, the log says that too; the
+    # position kept longitude first, a solution file of its own
     boxes.clear()
     answer["base_position"] = (35.132, 139.623, 70.25)
     w.gnss_ppk()
@@ -2361,7 +2795,8 @@ def test_ppk_step_of_the_gnss_pane(ppk_window, fake_rtklib, monkeypatch, tmp_pat
     assert errors == [] and boxes == []
     assert "Base 0759 nella posizione scritta." in pane.states["ppk"].text()
     assert "intestazione" not in pane.states["ppk"].text()
-    assert chunk.camera("DJI_0002").meta["gnss"]["base"]["position"] == [35.132, 139.623, 70.25]
+    assert chunk.camera("DJI_0002").meta["gnss"]["base"]["position"] == [139.623, 35.132, 70.25]
+    assert chunk.camera("DJI_0002").meta["gnss"]["solution"] != run
     assert any(re.match(r"the typed position of the base 0759 is 3\.\d km away horizontally", entry[2])
                for entry in w.log_pane.entries)
 
@@ -2463,6 +2898,44 @@ def test_ppk_step_says_when_no_photo_took_a_position(ppk_window, fake_rtklib, mo
     assert said == ["Nessuna foto del chunk ha preso una posizione PPK: controlla la cartella delle foto e che l'MRK "
                     "sia del volo delle osservazioni del drone."]
     assert _snapshot(chunk) == before and not w.isWindowModified() and len(fake_rtklib()) == 1
+    assert ppk.last_run(chunk) is None  # a run that placed nothing is not the run the next dialog starts from
     logged = [entry[2] for entry in w.log_pane.entries]
-    assert any(t.startswith("9 photos were taken where the solution solution.pos has no position") for t in logged)
+    assert any(re.match(rf"9 photos were taken where the solution {RUN_NAME}\.pos has no position", t) for t in logged)
     assert any(t.startswith("the position of the base 0759 comes from its RINEX header") for t in logged)
+
+
+def test_ppk_step_says_when_the_onboard_fixes_kept_their_positions(ppk_window, fake_rtklib, monkeypatch, tmp_path):
+    """Every photo of the flight has an RTK fix of the drone itself and keeps it (those shot where the solution has no
+    position too): nothing changed, and a message says how to give them the PPK position; with some photos placed,
+    the log counts those that kept their fix."""
+    w, folder, mw = ppk_window
+    chunk = w.chunk
+    pos = tmp_path / "drone.pos"
+    pos.write_text(_pos_text(rows=_drone_rows()), newline="")
+    monkeypatch.setenv("PPG_FAKE_POS", str(pos))
+    infos = []
+    monkeypatch.setattr(w, "_info", lambda title, text: infos.append(text))
+    monkeypatch.setattr(w, "_warn", lambda text: pytest.fail(f"a warning: {text}"))
+    monkeypatch.setattr(mw, "message", lambda *a, **k: None)
+    monkeypatch.setattr(mw.QFileDialog, "getOpenFileName", lambda *a, **k: (str(folder / "Timestamp.MRK"), ""))
+    monkeypatch.setattr(mw.PpkDialog, "ask", staticmethod(_sample_answer))
+    for cam in chunk.cameras:  # as the XMP of a DJI drone with an RTK fix gives them
+        cam.meta["gnss"] = {**cam.meta["gnss"], "source": "dji_xmp", "status": "fix"}
+    before = _snapshot(chunk)
+    w.setWindowModified(False)
+
+    w.gnss_ppk()
+    w.runner.wait()
+
+    assert infos == ["Nessuna foto ha preso la posizione PPK: 9 foto di questo volo hanno un fix RTK del drone stesso "
+                     "e lo tengono. Per dar loro la posizione PPK calcola di nuovo con «Sostituisci anche i fix RTK "
+                     "del drone»."]
+    assert _snapshot(chunk) == before and not w.isWindowModified()
+    # two photos without the fix take the PPK position, the others keep their fix: counted in the log
+    for label in ("DJI_0002", "DJI_0003"):
+        chunk.camera(label).meta["gnss"]["status"] = "float"
+    w.gnss_ppk()
+    w.runner.wait()
+    assert {c.label for c in chunk.cameras if c.meta["gnss"]["source"] == "ppk"} == {"DJI_0002", "DJI_0003"}
+    logged = [entry[2] for entry in w.log_pane.entries]
+    assert "Foto che hanno tenuto il fix RTK del drone stesso: 7" in logged and w.isWindowModified()

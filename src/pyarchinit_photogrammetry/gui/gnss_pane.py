@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QHeaderView, QLabel
                                QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .. import _native
+from ..gnss import ppk
 from ..gnss.apply import ONLY_FIX
 from ..gnss.quality import mixed_heights, summary
 from .flow_layout import FlowLayout
@@ -44,6 +45,11 @@ def lengths(values) -> str:
     return " / ".join(number(v * k, 1 if centimetres else 2) for v in values) + (" cm" if centimetres else " m")
 
 
+def length(metres: float) -> str:
+    """One distance in metres as a sentence says it: ``12 cm`` under a metre, else ``3,45 m``."""
+    return f"{number(metres * 100.0, 0)} cm" if metres < 1.0 else f"{number(metres, 2)} m"
+
+
 def ppk_tip() -> str:
     """What *Calcola PPK* (and *Strumenti > GNSS > Correzioni PPK*) does, as its tooltip says it."""
     return tr("Il RINEX del drone e il Timestamp.MRK del volo, il RINEX di una base che registrava durante il volo (la "
@@ -54,7 +60,8 @@ def ppk_tip() -> str:
 def ppk_state(chunk) -> str:
     """What the PPK step says of ``chunk``: how many photos have a PPK position and of which status, the base each
     position was computed against and how its position was set (the one of its RINEX header with the warning that it
-    can be metres off); without PPK positions what the step needs, and whether RTKLIB is there to compute them."""
+    can be metres off; typed at positions more than a few centimetres apart, with the warning that one is likely
+    wrong); without PPK positions what the step needs, and whether RTKLIB is there to compute them."""
     cameras = list(chunk.cameras) if chunk is not None else []
     records = [c.meta["gnss"] for c in cameras if (c.meta.get("gnss") or {}).get("source") == "ppk"]
     if not records:
@@ -68,9 +75,15 @@ def ppk_state(chunk) -> str:
     detail = ", ".join(f"{names.get(k, k)} {n}" for k, n in sorted(states.items(), key=lambda p: -p[1]))
     text = tr("PPK: {0} foto su {1} ({2}).", len(records), len(cameras), detail)
     bases: dict[str, set] = {}  # the bases of the positions, in the order of the photos: how their position was set
+    typed: dict[str, list] = {}  # the typed positions of each base [lon, lat, h], each once
     for r in records:
         base = r.get("base") or {}
-        bases.setdefault(str(base.get("name") or "?"), set()).add(base.get("position_source"))
+        name = str(base.get("name") or "?")
+        bases.setdefault(name, set()).add(base.get("position_source"))
+        if base.get("position_source") == "typed" and base.get("position"):
+            position = [float(v) for v in base["position"]]
+            if position not in typed.setdefault(name, []):
+                typed[name].append(position)
     for name, sources in bases.items():
         if "header" in sources:  # also when some of its positions came from a typed one: the warning wins
             text += " " + tr("La base {0} è nella posizione della sua intestazione RINEX, che può essere sbagliata di "
@@ -78,6 +91,12 @@ def ppk_state(chunk) -> str:
                              name)
         elif "typed" in sources:
             text += " " + tr("Base {0} nella posizione scritta.", name)
+        positions = typed.get(name) or []
+        apart = max((ppk.distance_m(a, b) for i, a in enumerate(positions) for b in positions[i + 1:]), default=0.0)
+        if apart > ppk.SAME_BASE_M:
+            text += " " + tr("La base {0} è stata scritta in posizioni diverse in questo chunk, fino a {1} l'una "
+                             "dall'altra: se è lo stesso punto, una è sbagliata; calcola di nuovo i voli con quella "
+                             "giusta.", name, length(apart))
     return text
 
 
