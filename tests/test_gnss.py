@@ -10,7 +10,7 @@ from pyproj import Transformer
 
 import pyarchinit_photogrammetry as ppg
 from pyarchinit_photogrammetry.gnss import apply as gnss_apply
-from pyarchinit_photogrammetry.gnss import dji
+from pyarchinit_photogrammetry.gnss import dji, positions
 
 
 def _xmp(body: str) -> str:
@@ -187,8 +187,8 @@ def _flight(folder, names, lines=MRK_LINES, xmp_first=False):
 
 
 def _snapshot(chunk):
-    return {c.label: (c.reference.location, c.reference.accuracy, c.reference.enabled, dict(c.meta["gnss"]),
-                      c.meta["reference_crs"]) for c in chunk.cameras}
+    return {c.label: (c.reference.location, c.reference.accuracy, c.reference.enabled, dict(c.meta.get("gnss") or {}),
+                      c.meta.get("reference_crs")) for c in chunk.cameras}
 
 
 def test_mrk_matched_by_shot_number_and_by_order(tmp_path):
@@ -257,3 +257,187 @@ def test_mrk_by_order_only_with_the_same_number_of_shots(tmp_path):
     elsewhere.mkdir()
     (elsewhere / "Timestamp.MRK").write_text(MRK_LINES)
     assert gnss_apply.apply_mrk(ch, elsewhere / "Timestamp.MRK", str(folder))["matched"] == 3
+
+
+# --- positions from a file -------------------------------------------------------------------------------------
+
+def _chunk_with(tmp_path, *names):
+    """A chunk with photos called ``names`` (each with an EXIF position of its own)."""
+    folder = tmp_path / "photos"
+    folder.mkdir(exist_ok=True)
+    ch = ppg.Document().add_chunk()
+    ch.add_photos([_jpeg(folder / n, None) for n in names])
+    return ch
+
+
+def test_positions_file_with_header_and_without(tmp_path):
+    ch = _chunk_with(tmp_path, "IMG_0001.JPG", "IMG_0002.JPG", "IMG_0003.JPG")
+    # the columns are found by name, so latitude may come before longitude; one standard deviation for the three axes
+    named = tmp_path / "named.csv"
+    named.write_text("name,lat,lon,ellh,std\n"
+                     "IMG_0001,41.134,14.266,94.35,0.01\n"
+                     "img_0002.jpg,41.135,14.267,94.50,0.02\n"
+                     "GONE.JPG,41.136,14.268,94.60,0.01\n")
+    rows = positions.read_positions(named)
+    assert [r["label"] for r in rows] == ["IMG_0001", "img_0002.jpg", "GONE.JPG"]
+    assert (rows[0]["x"], rows[0]["y"], rows[0]["z"]) == (14.266, 41.134, 94.35)
+    assert (rows[0]["sx"], rows[0]["sy"], rows[0]["sz"]) == (0.01, 0.01, 0.01)
+
+    result = positions.apply_positions(ch, rows, "EPSG:4979")
+    assert result == {"matched": 2, "rows": 3, "unmatched": ["GONE.JPG"]}
+    first, second, third = ch.cameras
+    assert first.reference.location == [14.266, 41.134, 94.35] and first.reference.enabled
+    assert second.reference.location == [14.267, 41.135, 94.5]
+    # twice the declared standard deviation, as for the RTK of the photos
+    assert first.reference.accuracy == pytest.approx([0.02] * 3)
+    assert second.reference.accuracy == pytest.approx([0.04] * 3)
+    assert first.meta["reference_crs"] == "EPSG:4979"
+    assert first.meta["gnss"] == {"source": "positions_file", "status": None, "accuracy": first.reference.accuracy,
+                                  "height": "ellipsoidal", "std": [0.01] * 3}
+    assert third.meta["gnss"]["source"] == "exif" and third.meta["reference_crs"] == "EPSG:4326"  # not in the file
+
+    again = _snapshot(ch)
+    assert positions.apply_positions(ch, positions.read_positions(named), "EPSG:4979") == result
+    assert _snapshot(ch) == again
+
+    # without a header: label, x, y, z, with the default accuracy of a file that has none ...
+    bare = tmp_path / "bare.txt"
+    bare.write_text("IMG_0001.JPG,500000.5,4500000.25,101.5\nIMG_0002.JPG,500010.5,4500000.25,101.75\n")
+    rows = positions.read_positions(bare)
+    assert rows == [{"label": "IMG_0001.JPG", "x": 500000.5, "y": 4500000.25, "z": 101.5},
+                    {"label": "IMG_0002.JPG", "x": 500010.5, "y": 4500000.25, "z": 101.75}]
+    result = positions.apply_positions(ch, rows, "EPSG:32633", height="exif")
+    assert result == {"matched": 2, "rows": 2, "unmatched": []}
+    # ... which replaces what the first file gave: location, system, accuracy and what the record said
+    assert first.reference.location == [500000.5, 4500000.25, 101.5] and first.meta["reference_crs"] == "EPSG:32633"
+    assert first.reference.accuracy == [0.05, 0.05, 0.10]
+    assert first.meta["gnss"] == {"source": "positions_file", "status": None, "accuracy": [0.05, 0.05, 0.10],
+                                  "height": "exif"}
+    assert positions.apply_positions(ch, rows, "EPSG:32633", default_accuracy=(0.02, 0.02, 0.04))["matched"] == 2
+    assert first.reference.accuracy == [0.02, 0.02, 0.04]
+
+    # ... or label, x, y, z, sx, sy, sz
+    seven = tmp_path / "seven.txt"
+    seven.write_text("IMG_0003\t500020\t4500000\t102\t0.01\t0.02\t0.05\n")
+    positions.apply_positions(ch, positions.read_positions(seven), "EPSG:32633")
+    assert third.reference.accuracy == pytest.approx([0.02, 0.04, 0.10])
+    assert third.meta["gnss"]["std"] == [0.01, 0.02, 0.05]
+
+
+def test_positions_file_formats(tmp_path):
+    one = {"label": "a.jpg", "x": 14.5, "y": 41.25, "z": 100.5}
+    # Excel in Italian: semicolons, decimal commas, a byte order mark, a comment, units in the headers
+    p = tmp_path / "it.csv"
+    p.write_bytes("\ufeff# survey of the trench\nFoto;Longitudine (deg);Latitudine (deg);Quota [m];Accuracy\n"
+                  "\n# a comment\na.jpg;14,5;41,25;100,5;0,03\n".encode("utf-8"))
+    (row,) = positions.read_positions(p)
+    assert row == {**one, "accuracy": 0.03}
+    # tabs, and spaces (the label cannot hold any)
+    p = tmp_path / "tabs.tsv"
+    p.write_text("easting\tnorthing\theight\timage\tyaw\tpitch\troll\n14.5\t41.25\t100.5\ta.jpg\t90\t-80\t0\n")
+    (row,) = positions.read_positions(p)
+    assert row == {**one, "yaw": 90.0, "pitch": -80.0, "roll": 0.0}
+    p = tmp_path / "spaces.txt"
+    p.write_text("a.jpg   14.5  41.25   100.5\n")
+    assert positions.read_positions(p) == [one]
+    # the header may be the first comment, and a delimiter can be forced
+    p = tmp_path / "hash.csv"
+    p.write_text("#label|x|y|z\na.jpg|14.5|41.25|100.5\n")
+    assert positions.read_positions(p, delimiter="|") == [one]
+    # a file with a header of the trimmed name list and a status
+    p = tmp_path / "status.csv"
+    p.write_text("label,x,y,z,sde,sdn,sdu,q\na.jpg,1,2,3,0.004,0.004,0.009,1\nb.jpg,1,2,3,0.1,0.1,0.2,2\n"
+                 "c.jpg,1,2,3,0.5,0.5,0.9,5\nd.jpg,1,2,3,0.5,0.5,0.9,0\ne.jpg,1,2,3,0.5,0.5,0.9,\n")
+    rows = positions.read_positions(p)
+    assert [r.get("status") for r in rows] == ["fix", "float", "single", "none", None]
+    assert (rows[0]["sx"], rows[0]["sy"], rows[0]["sz"]) == (0.004, 0.004, 0.009)
+
+
+def test_positions_accuracy_follows_the_status(tmp_path):
+    ch = _chunk_with(tmp_path, "a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg")
+    rows = [
+        {"label": "a", "x": 1.0, "y": 2.0, "z": 3.0, "sx": 0.004, "sy": 0.004, "sz": 0.009, "status": "fix"},
+        {"label": "b", "x": 1.0, "y": 2.0, "z": 3.0, "sx": 0.05, "sy": 0.05, "sz": 0.05, "status": "float"},
+        {"label": "c", "x": 1.0, "y": 2.0, "z": 3.0, "sx": 0.3, "sy": 0.4, "sz": 0.5},  # no status: no floor
+        {"label": "d", "x": 1.0, "y": 2.0, "z": 3.0, "accuracy": 0.03, "status": "fix"},  # an accuracy is as given
+        {"label": "e", "x": 1.0, "y": 2.0, "z": 3.0, "yaw": 12.0, "pitch": -90.0, "roll": 1.5},
+    ]
+    positions.apply_positions(ch, rows, "LOCAL")
+    a, b, c, d, e = ch.cameras
+    assert a.reference.accuracy == pytest.approx([0.01, 0.01, 0.018])
+    assert b.reference.accuracy == pytest.approx([0.2] * 3)
+    assert c.reference.accuracy == pytest.approx([0.6, 0.8, 1.0])
+    assert d.reference.accuracy == pytest.approx([0.03] * 3) and "std" not in d.meta["gnss"]
+    assert e.reference.accuracy == [0.05, 0.05, 0.10]
+    assert (a.meta["gnss"]["status"], d.meta["gnss"]["status"], e.meta["gnss"]["status"]) == ("fix", "fix", None)
+    assert (e.meta["gnss"]["yaw"], e.meta["gnss"]["pitch"], e.meta["gnss"]["roll"]) == (12.0, -90.0, 1.5)
+    assert e.meta["reference_crs"] == "LOCAL"
+
+
+def test_positions_matched_by_name_and_folder(tmp_path):
+    ch = ppg.Document().add_chunk()
+    for folder in ("100MEDIA", "101MEDIA"):
+        (tmp_path / folder).mkdir()
+        ch.add_photos([_jpeg(tmp_path / folder / "DJI_0001.JPG", None)])
+    ch.add_photos([_jpeg(tmp_path / "100MEDIA" / "DJI_0002.JPG", None)])
+    ch.add_photos([_jpeg(tmp_path / "100MEDIA" / "DJI_0002.png", None)])
+    before = _snapshot(ch)
+    row = {"x": 1.0, "y": 2.0, "z": 3.0}
+
+    # the same name in two folders, or a name without the extension of two files: refused, nothing changes
+    with pytest.raises(ValueError, match="DJI_0001.JPG.*2 photos"):
+        positions.apply_positions(ch, [{"label": "DJI_0001.JPG", **row}, {"label": "DJI_0002.jpg", **row}], "LOCAL")
+    with pytest.raises(ValueError, match="DJI_0002.*2 photos"):
+        positions.apply_positions(ch, [{"label": "DJI_0002", **row}], "LOCAL")
+    assert _snapshot(ch) == before
+    # two rows for one photo
+    with pytest.raises(ValueError, match="twice"):
+        positions.apply_positions(ch, [{"label": "DJI_0002.jpg", **row}, {"label": "DJI_0002.JPG", **row}], "LOCAL")
+    assert _snapshot(ch) == before
+
+    # the folder tells them apart, with either kind of slash and with or without the extension
+    result = positions.apply_positions(ch, [{"label": "101MEDIA/DJI_0001", **row},
+                                            {"label": "100MEDIA\\DJI_0001.jpg", "x": 5.0, "y": 6.0, "z": 7.0},
+                                            {"label": str((tmp_path / "100MEDIA" / "DJI_0002.png").resolve()), **row},
+                                            {"label": "elsewhere/DJI_0001.JPG", **row}], "LOCAL")
+    assert result == {"matched": 3, "rows": 4, "unmatched": ["elsewhere/DJI_0001.JPG"]}
+    first, second, third, fourth = ch.cameras
+    assert second.reference.location == [1.0, 2.0, 3.0] and first.reference.location == [5.0, 6.0, 7.0]
+    assert fourth.meta["gnss"]["source"] == "positions_file" and third.meta["gnss"]["source"] == "exif"
+
+
+def test_positions_files_that_cannot_be_used(tmp_path):
+    def read(text, **kw):
+        p = tmp_path / "f.csv"
+        p.write_text(text)
+        return positions.read_positions(p, **kw)
+
+    with pytest.raises(ValueError, match="no positions"):
+        read("# nothing\n\n")
+    with pytest.raises(ValueError, match="height"):
+        read("name,lat,lon\na.jpg,41,14\n")
+    with pytest.raises(ValueError, match="name"):
+        read("lat,lon,ellh\n41,14,90\n")
+    with pytest.raises(ValueError, match="sx, sy and sz"):
+        read("name,lat,lon,ellh,sx,sy\na.jpg,41,14,90,0.1,0.1\n")
+    with pytest.raises(ValueError, match="5 columns"):
+        read("a.jpg,41,14,90,0.5\n")  # label, x, y, z and a fifth column nobody named
+    with pytest.raises(ValueError, match=r"f\.csv:3.*'abc'"):
+        read("name,lat,lon,ellh\na.jpg,41,14,90\nb.jpg,abc,14,90\n")
+    with pytest.raises(ValueError, match=r"f\.csv:2"):
+        read("name,lat,lon,ellh\na.jpg,41,nan,90\n")
+    with pytest.raises(ValueError, match="accuracy"):
+        read("name,lat,lon,ellh,std\na.jpg,41,14,90,0\n")
+    with pytest.raises(ValueError, match=r"f\.csv:2.*sy"):
+        read("name,lat,lon,ellh,sx,sy,sz\na.jpg,41,14,90,0.1,,0.1\n")
+
+    ch = _chunk_with(tmp_path, "a.jpg")
+    good = [{"label": "a", "x": 14.0, "y": 41.0, "z": 90.0}]
+    before = _snapshot(ch)
+    with pytest.raises(ValueError, match="latitude"):  # longitude and latitude swapped
+        positions.apply_positions(ch, [{"label": "a", "x": 41.0, "y": 114.0, "z": 90.0}], "EPSG:4979")
+    with pytest.raises(ValueError, match="height"):
+        positions.apply_positions(ch, good, "EPSG:4979", height="geoid")
+    with pytest.raises(Exception, match="coordinate system"):
+        positions.apply_positions(ch, good, "EPSG:no")
+    assert _snapshot(ch) == before
