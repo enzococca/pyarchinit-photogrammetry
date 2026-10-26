@@ -765,6 +765,41 @@ def test_frames_of_other_thermal_cameras(tmp_path):
     assert np.max(np.abs(thermal.decode_file(thermal.thermal_file(cams[0]), thermal.params_of(ch)) - t)) < 0.006
 
 
+def test_thermal_frames_keep_the_rtk_status_of_their_files(tmp_path):
+    """The 8-bit copy of a thermal frame has the EXIF of the original but not its XMP: the position stays, the accuracy
+    comes from the RTK tags of the original file."""
+    from PIL import Image
+
+    yy, xx = np.mgrid[0:48, 0:64]
+    t = (18.0 + 0.05 * xx + 0.02 * yy).astype(np.float32)
+    exif = Image.Exif()
+    exif[271] = "DJI"
+    exif.get_ifd(0x8825).update({1: "N", 2: (41.0, 8.0, 0.0), 3: "E", 4: (14.0, 15.0, 0.0), 5: 0, 6: 83.5})
+    blob = exif.tobytes()
+    xmp = (b"http://ns.adobe.com/xap/1.0/\x00" + b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF '
+           b'xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" '
+           b'xmlns:drone-dji="http://www.dji.com/drone-dji/1.0/" drone-dji:RtkFlag="50" drone-dji:RtkStdLon="0.004" '
+           b'drone-dji:RtkStdLat="0.003" drone-dji:RtkStdHgt="0.008"/></rdf:RDF></x:xmpmeta>')
+    folder = tmp_path / "volo"
+    folder.mkdir()
+    for i in range(2):
+        path = thermal.write_flir_jpeg(folder / f"FLIR{i:04d}.jpg", t + i, dict(thermal.DEFAULTS, distance=10.0))
+        raw = path.read_bytes()
+        exif_segment = b"\xff\xe1" + struct.pack(">H", 2 + len(blob)) + blob
+        xmp_segment = b"\xff\xe1" + struct.pack(">H", 2 + len(xmp)) + xmp
+        path.write_bytes(raw[:2] + exif_segment + xmp_segment + raw[2:])  # EXIF and XMP right after the start of the image
+    doc = ppg.Document()
+    ch = doc.add_chunk("Volo termico")
+    doc.save(tmp_path / "volo.ppg")
+    cams = ms.add_captures(ch, [folder])
+    assert len(cams) == 2 and ch.meta["multispectral"]["reference"] == "LWIR"
+    for cam in cams:
+        assert cam.meta["gnss"]["status"] == "fix" and cam.meta["gnss"]["source"] == "dji_xmp"
+        assert cam.reference.accuracy == pytest.approx([0.01, 0.01, 0.016])  # twice the deviation, the floor of a fix
+        assert cam.reference.location == pytest.approx([14.25, 41.1333333, 83.5], abs=1e-6)
+        assert cam.meta["reference_crs"] == "EPSG:4326"
+
+
 def test_what_went_wrong_with_docker():
     """Docker's last line says nothing ("Run 'docker run --help'..."): the error is the line that says
     it, and a disk of Docker turned read-only (the computer's disk filled up) says what to do."""

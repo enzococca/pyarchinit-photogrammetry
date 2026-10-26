@@ -288,6 +288,17 @@ _EXIF_SETTINGS = {33434: "ExposureTime", 34867: "ISOSpeed", 34855: "ISOSpeedRati
                   41486: "FocalPlaneXResolution", 41487: "FocalPlaneYResolution"}
 
 
+def _raw_xmp(im) -> str:
+    """The XMP packet of an open image as text ("" when it has none): ``info["xmp"]`` or, in a TIFF,
+    tag 700."""
+    raw = im.info.get("xmp") or b""
+    if not raw and hasattr(im, "tag_v2"):  # the XMP tag of a TIFF
+        raw = im.tag_v2.get(700) or b""
+        if isinstance(raw, (tuple, list)):
+            raw = raw[0] if raw else b""
+    return raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+
+
 def xmp_of(path) -> dict:
     """The XMP tags of a photo as ``{name: value}`` (the names without their namespaces) plus the
     few EXIF tags the radiometry needs when the XMP has not got them (the black level of a DJI
@@ -297,13 +308,7 @@ def xmp_of(path) -> dict:
     out: dict = {}
     try:
         with Image.open(path) as im:
-            raw = im.info.get("xmp") or b""
-            if not raw and hasattr(im, "tag_v2"):  # the XMP tag of a TIFF
-                raw = im.tag_v2.get(700) or b""
-                if isinstance(raw, (tuple, list)):
-                    raw = raw[0] if raw else b""
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8", "replace")
+            raw = _raw_xmp(im)
             if raw:
                 out = parse_xmp(raw)
             elif hasattr(im, "getxmp"):
@@ -1389,6 +1394,8 @@ def add_captures(chunk: Chunk, paths, reference: str | None = None, recursive: b
             continue
         cam.meta["bands"] = {b: str(p) for b, p in files.items()}
         cam.meta["capture"] = stem
+        if copies[stem] != Path(files[reference]):  # the copy has the EXIF of the band, not its XMP
+            _keep_rtk(cam, files[reference])
     ms.update({"reference": reference, "bands": bands, "captures": len(existing) + len(cams)})
     ms.setdefault("panel", None)
     if not ms.get("registration"):
@@ -1398,6 +1405,27 @@ def add_captures(chunk: Chunk, paths, reference: str | None = None, recursive: b
     if reference not in NON_SPECTRAL:
         ms["radiometry"] = radiometry_method(chunk)
     return cams
+
+
+def _keep_rtk(cam, band: Path) -> None:
+    """The RTK state a DJI drone wrote in the XMP of the original ``band`` file becomes the accuracy of the
+    position ``cam`` has from the EXIF of its copy. The position stays; a band without RTK tags changes nothing."""
+    from PIL import Image
+
+    from ..gnss.apply import accuracy, set_camera_position
+    from ..gnss.dji import rtk_from_xmp
+
+    if cam.reference.location is None:
+        return
+    try:
+        with Image.open(band) as im:
+            rtk = rtk_from_xmp(_raw_xmp(im))
+    except Exception:  # noqa: BLE001 - a band that cannot be read here has been reported by the copy
+        return
+    if rtk:
+        set_camera_position(cam, cam.reference.location, cam.meta["reference_crs"],
+                            accuracy(rtk["status"], rtk["std"]), "dji_xmp", status=rtk["status"],
+                            extra={k: v for k, v in rtk.items() if k != "status"})
 
 
 def reference_copy(src: Path, dst: Path) -> Path:

@@ -311,9 +311,11 @@ def test_command_line_and_the_menu(scene_dir, tmp_path, monkeypatch):
     w.close()
 
 
-def _p4m_capture(folder: Path, number: int, uuid: str, rng, shift=(0, 0)) -> None:
+def _p4m_capture(folder: Path, number: int, uuid: str, rng, shift=(0, 0), gps=None, rtk: str = "") -> None:
     """Six files as a DJI P4 Multispectral writes them: DJI_nnn0.JPG (RGB) and five 16-bit TIFFs
-    with the band, the capture and the radiometry as XMP attributes, the black level in the EXIF."""
+    with the band, the capture and the radiometry as XMP attributes, the black level in the EXIF.
+    ``gps`` = ``(lon, lat, alt)`` goes in the GPS directory of every band, ``rtk`` is more XMP attributes
+    (``drone-dji:RtkFlag="16" ...``)."""
     from PIL import Image
     from PIL.TiffImagePlugin import ImageFileDirectory_v2
 
@@ -329,10 +331,15 @@ def _p4m_capture(folder: Path, number: int, uuid: str, rng, shift=(0, 0)) -> Non
                f'drone-dji:BandName="{band}" drone-dji:CaptureUUID="{uuid}" drone-dji:Irradiance="3500.5" '
                f'drone-dji:SensorGain="1.000" drone-dji:ExposureTime="{exposure}" drone-dji:SensorGainAdjustment="1.5" '
                f'drone-dji:CalibratedOpticalCenterX="160.0" drone-dji:CalibratedOpticalCenterY="130.0" '
-               f'drone-dji:VignettingData="0.0002, 1.0e-6, 0, 0, 0, 0"/></rdf:RDF></x:xmpmeta>').encode()
+               f'drone-dji:VignettingData="0.0002, 1.0e-6, 0, 0, 0, 0" {rtk}/></rdf:RDF></x:xmpmeta>').encode()
         info = ImageFileDirectory_v2()
         info[700] = xmp
         info[50714] = 4096
+        if gps:
+            lon, lat, alt = gps
+            info[34853] = {1: "N", 2: (float(int(lat)), float(int((lat % 1) * 60)), ((lat % 1) * 60 % 1) * 60),
+                           3: "E", 4: (float(int(lon)), float(int((lon % 1) * 60)), ((lon % 1) * 60 % 1) * 60),
+                           5: 0, 6: alt}
         Image.fromarray(dn).save(folder / f"DJI_{number + k:04d}.TIF", tiffinfo=info)
 
 
@@ -343,9 +350,11 @@ def test_dji_p4_multispectral_files(tmp_path):
     a, b = tmp_path / "100MEDIA", tmp_path / "101MEDIA"
     a.mkdir()
     b.mkdir()
-    _p4m_capture(a, 10, "aaaa1", rng)
-    _p4m_capture(a, 20, "aaaa2", rng, shift=(3, -2))
-    _p4m_capture(b, 10, "bbbb1", rng)
+    here = (14.2661, 41.1342, 83.5)
+    rtk = 'drone-dji:RtkFlag="16" drone-dji:RtkStdLon="0.9" drone-dji:RtkStdLat="1.1" drone-dji:RtkStdHgt="2.0"'
+    _p4m_capture(a, 10, "aaaa1", rng, gps=here, rtk=rtk)
+    _p4m_capture(a, 20, "aaaa2", rng, shift=(3, -2), gps=here)  # a position without the RTK state
+    _p4m_capture(b, 10, "bbbb1", rng)  # no position at all
     caps = ms.detect_bands([a, b])
     assert set(caps) == {"DJI_0011", "DJI_0021", "101MEDIA_DJI_0011"}
     assert set(ms.detect_bands([tmp_path], recursive=True)) == set(caps) and not ms.detect_bands([tmp_path])
@@ -364,6 +373,16 @@ def test_dji_p4_multispectral_files(tmp_path):
     assert {c.meta["capture"] for c in ms.multispectral_cameras(ch)} == {"DJI_0011", "DJI_0021", "101MEDIA_DJI_0011"}
     assert ms.add_captures(ch, [a, b]) == [] and ch.meta["multispectral"]["captures"] == 3
     assert len({Path(c.path).name for c in ch.cameras}) == 3
+    # the photo is a JPEG copy of the Red band without its XMP: it takes the RTK state of the original band
+    first, second, third = (ch.camera(n) for n in ("DJI_0011", "DJI_0021", "101MEDIA_DJI_0011"))
+    assert first.meta["gnss"]["status"] == "single" and first.meta["gnss"]["source"] == "dji_xmp"
+    assert first.meta["gnss"]["std"] == [0.9, 1.1, 2.0] and first.meta["gnss"]["height"] == "exif"
+    assert first.meta["gnss"]["accuracy"] == pytest.approx([1.8, 2.2, 4.0])
+    assert first.reference.accuracy == pytest.approx([1.8, 2.2, 4.0]) and first.reference.enabled
+    assert first.reference.location == pytest.approx([14.2661, 41.1342, 83.5], abs=1e-4)  # the position is kept
+    assert first.meta["reference_crs"] == "EPSG:4326"
+    assert second.meta["gnss"]["source"] == "exif" and second.reference.accuracy == [5.0, 5.0, 10.0]
+    assert third.reference.location is None and "gnss" not in third.meta
     assert all(set(c) == {"Blue", "Green", "Red", "RedEdge", "NIR"} for c in caps.values())
     assert caps["DJI_0021"]["NIR"].name == "DJI_0025.TIF" and caps["101MEDIA_DJI_0011"]["Red"].parent == b
     tags = ms.xmp_of(caps["DJI_0011"]["Red"])
