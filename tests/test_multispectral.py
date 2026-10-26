@@ -343,6 +343,29 @@ def _p4m_capture(folder: Path, number: int, uuid: str, rng, shift=(0, 0), gps=No
         Image.fromarray(dn).save(folder / f"DJI_{number + k:04d}.TIF", tiffinfo=info)
 
 
+def test_only_fix_decides_for_the_captures_added_later(tmp_path):
+    """With *only the fix positions* on, the captures added later are decided with the RTK state of their bands."""
+    from pyarchinit_photogrammetry.gnss import apply as gnss_apply
+
+    rng = np.random.default_rng(7)
+    rolls = [tmp_path / "100MEDIA", tmp_path / "101MEDIA", tmp_path / "102MEDIA"]
+    here = (14.2661, 41.1342, 83.5)
+    for roll, flag, std in zip(rolls, ("50", "16", "50"), ("0.01", "0.9", "0.01")):
+        roll.mkdir()
+        _p4m_capture(roll, 10, roll.name, rng, gps=here, rtk=f'drone-dji:RtkFlag="{flag}" drone-dji:RtkStdLon="{std}" '
+                     f'drone-dji:RtkStdLat="{std}" drone-dji:RtkStdHgt="{std}"')
+    doc = ppg.Document()
+    ch = doc.add_chunk("Campo")
+    doc.save(tmp_path / "campo.ppg")
+    (first,) = ms.add_captures(ch, [rolls[0]])
+    assert gnss_apply.only_fix(ch) == 0
+    (single,) = ms.add_captures(ch, [rolls[1]])
+    (fix,) = ms.add_captures(ch, [rolls[2]])
+    assert [c.meta["gnss"]["status"] for c in (first, single, fix)] == ["fix", "single", "fix"]
+    assert [c.reference.enabled for c in (first, single, fix)] == [True, False, True]
+    assert ch.meta["gnss_only_fix"]["disabled"] == [single.key]
+
+
 def test_dji_p4_multispectral_files(tmp_path):
     """The P4 Multispectral: bands and captures from the XMP (CaptureUUID), the numbering that
     starts again in a second folder, the black level from the EXIF, DJI's radiometric model."""

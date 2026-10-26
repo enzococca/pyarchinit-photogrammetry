@@ -1404,6 +1404,10 @@ def add_captures(chunk: Chunk, paths, reference: str | None = None, recursive: b
     chunk.meta["multispectral"] = ms
     if reference not in NON_SPECTRAL:
         ms["radiometry"] = radiometry_method(chunk)
+    if cams:  # the RTK state of the bands came after the photos were added: *only the fix positions* decides again
+        from ..gnss.apply import keep_only_fix
+
+        keep_only_fix(chunk)
     return cams
 
 

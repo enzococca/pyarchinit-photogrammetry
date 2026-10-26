@@ -44,8 +44,8 @@ def set_camera_position(cam: Camera, location: list[float], crs: str, accuracy: 
 def apply_mrk(chunk: Chunk, mrk_path: str | Path, photos_folder: str | Path | None = None) -> dict:
     """Give the photos of ``chunk`` the position of their shot in a DJI ``Timestamp.MRK``: the camera, not the
     antenna (the lever arm of the shot is applied), in ``EPSG:4979`` with its ellipsoidal height, with the
-    accuracy of the shot's standard deviations and RTK flag. It replaces any position the photo had, so doing it
-    again changes nothing.
+    accuracy of the shot's standard deviations and RTK flag; ``meta["gnss"]`` keeps the lever arm and the antenna
+    position of the line. It replaces any position the photo had, so doing it again changes nothing.
 
     The photos are the images in ``photos_folder`` (default: the folder of the MRK), in the order of their names.
     A DJI photo is paired with the line whose index is the shot number in its name; the photos that have none
@@ -86,7 +86,9 @@ def apply_mrk(chunk: Chunk, mrk_path: str | Path, photos_folder: str | Path | No
         north, east, vertical = shot.std
         set_camera_position(cam, list(dji.camera_position(shot)), "EPSG:4979",
                             accuracy(state, [east, north, vertical]), "dji_mrk", status=state, height="ellipsoidal",
-                            extra={"mrk": mrk_path.name, "shot": shot.index, "utc": shot.utc.isoformat()})
+                            extra={"mrk": mrk_path.name, "shot": shot.index, "utc": shot.utc.isoformat(),
+                                   "lever_arm_ned_mm": list(shot.offset_ned_mm),
+                                   "antenna": [shot.lon, shot.lat, shot.ellh]})
         status[state] += 1
         used.add(id(shot))
     placed = {f for f, _shot, _cam in kept}

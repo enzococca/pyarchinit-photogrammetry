@@ -157,8 +157,9 @@ class Chunk:
     def add_photos(self, paths: Iterable[str | os.PathLike], *, recursive: bool = False) -> list[Camera]:
         """Add photos (files or folders). Photos sharing camera body, lens and
         resolution share one :class:`Sensor`. EXIF GPS becomes the camera reference; its accuracy comes from
-        the RTK state in the XMP of DJI photos, else it is [5, 5, 10] m."""
-        from ..gnss.apply import accuracy, set_camera_position
+        the RTK state in the XMP of DJI photos, else it is [5, 5, 10] m. With *only the fix positions* on, the
+        references of the photos added are switched off unless they are RTK fixes."""
+        from ..gnss.apply import accuracy, keep_only_fix, set_camera_position
         from ..io.exif import read_exif
 
         files: list[Path] = []
@@ -186,6 +187,8 @@ class Chunk:
                                     extra={k: v for k, v in rtk.items() if k != "status"})
             self.cameras.append(cam)
             added.append(cam)
+        if added:
+            keep_only_fix(self)
         return added
 
     def _sensor_for(self, info: dict) -> Sensor:

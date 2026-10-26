@@ -43,6 +43,12 @@ def test_rtk_flags_and_missing_standard_deviations():
     assert dji.rtk_from_xmp(_xmp('drone-dji:RtkFlag="0">'))["status"] == "none"
     assert dji.rtk_from_xmp(_xmp('drone-dji:RtkFlag="7">'))["status"] == "unknown"
     assert dji.rtk_from_xmp(_xmp('drone-dji:RtkFlag="50" drone-dji:RtkStdLon="n/a">'))["std"] is None
+    # a standard deviation that is not a finite number is none: the accuracy is the floor of the status
+    for bad in ("nan", "inf", "-inf"):
+        rtk = dji.rtk_from_xmp(_xmp(f'drone-dji:RtkFlag="50" drone-dji:RtkStdLon="{bad}" drone-dji:RtkStdLat="0.01" '
+                                    'drone-dji:RtkStdHgt="0.02" drone-dji:RtkDiffAge="nan">'))
+        assert rtk["std"] is None and rtk["diff_age"] is None
+        assert gnss_apply.accuracy(rtk["status"], rtk["std"]) == pytest.approx([0.01] * 3)
 
 
 def test_accuracy_from_status():
@@ -228,6 +234,8 @@ def test_mrk_matched_by_shot_number_and_by_order(tmp_path):
         assert (g["source"], g["height"], g["mrk"], g["shot"]) == ("dji_mrk", "ellipsoidal", "Timestamp.MRK",
                                                                    shot.index)
         assert g["utc"] == shot.utc.isoformat() and g["status"] == dji.STATUS[shot.flag]
+        # what the line said, to check the position of the camera against it
+        assert g["lever_arm_ned_mm"] == list(shot.offset_ned_mm) and g["antenna"] == [shot.lon, shot.lat, shot.ellh]
     # twice the standard deviation of east, north, height (the order of the position: lon, lat, height)
     fix, single, flt = ch.cameras
     assert fix.reference.accuracy == pytest.approx([0.021878, 0.024024, 0.044956])
@@ -566,6 +574,8 @@ def test_positions_files_that_cannot_be_used(tmp_path):
         read("name,lat,lon,ellh,std\na.jpg,41,14,90,0\n")
     with pytest.raises(ValueError, match=r"f\.csv:2.*sy"):
         read("name,lat,lon,ellh,sx,sy,sz\na.jpg,41,14,90,0.1,,0.1\n")
+    with pytest.raises(ValueError, match=r"f\.csv:3.*status"):
+        read("name,lat,lon,ellh,status\na.jpg,41,14,90,50\nb.jpg,41,14,90,inf\n")
 
     ch = _chunk_with(tmp_path, "a.jpg")
     good = [{"label": "a", "x": 14.0, "y": 41.0, "z": 90.0}]
@@ -998,6 +1008,19 @@ def test_gnss_mrk_copied_away_from_its_photos(gnss_window, monkeypatch, tmp_path
     menu = next(a.menu() for a in w.menuBar().actions() if a.text() == "&Strumenti")
     gnss = next(a.menu() for a in menu.actions() if a.menu() is not None and a.text() == "GNSS")
     assert [a.text() for a in gnss.actions()] == ["File MRK di DJI...", "File di posizioni...", "Pannello GNSS"]
+
+
+def test_only_fix_decides_for_the_photos_added_later(tmp_path):
+    rtk = _jpeg(tmp_path / "rtk.jpg", _xmp('drone-dji:RtkFlag="50" drone-dji:RtkStdLon="0.004" '
+                                          'drone-dji:RtkStdLat="0.004" drone-dji:RtkStdHgt="0.009">'))
+    plain = _jpeg(tmp_path / "plain.jpg", None)
+    ch = ppg.Document().add_chunk()
+    (fix,) = ch.add_photos([rtk])
+    assert gnss_apply.only_fix(ch) == 0
+    (added,) = ch.add_photos([plain])  # the GPS of the EXIF, no RTK: off at once
+    assert not added.reference.enabled and fix.reference.enabled
+    assert ch.meta["gnss_only_fix"]["disabled"] == [added.key]
+    assert gnss_apply.only_fix(ch, False) == 1 and added.reference.enabled
 
 
 def test_only_fix_is_kept_when_positions_are_applied_again(tmp_path):

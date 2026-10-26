@@ -20,10 +20,12 @@ def _value(text: str, key: str) -> str | None:
 
 
 def _number(text: str, key: str) -> float | None:
+    """The value of ``drone-dji:<key>`` as a finite number, None when it is missing or is not one."""
     try:
-        return float(_value(text, key))
+        value = float(_value(text, key))
     except (TypeError, ValueError):
         return None
+    return value if math.isfinite(value) else None
 
 
 def rtk_from_xmp(text: str) -> dict | None:

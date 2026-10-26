@@ -285,7 +285,10 @@ def _row(tokens: list[str], fields: dict[str, int], decimal_comma: bool, where: 
         if cell(angle):
             row[angle] = number(angle)
     if cell("status"):
-        row["status"] = _status(cell("status"))
+        try:
+            row["status"] = _status(cell("status"))
+        except OverflowError:  # a number too large to be a flag: inf
+            raise ValueError(f"{where}: status '{cell('status')}' is not a status") from None
     return row
 
 
