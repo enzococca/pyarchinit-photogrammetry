@@ -799,7 +799,7 @@ def reimport_model(ch, psx: str | os.PathLike | None = None, progress=None) -> d
     warnings: list = []
     if not _import_model(mc, ch, warnings, progress.sub(0.05, 0.95), dense_from_mesh=False, frame=frame):
         raise RuntimeError("; ".join(warnings) or "model not imported")
-    versions.set_active_name(ch, "model", "Modello di Metashape")
+    versions.set_active_name(ch, "model", versions.label("Modello di Metashape"))
     from ..io.mesh_ply import face_count
 
     progress(1.0, "Modello di Metashape reimportato")

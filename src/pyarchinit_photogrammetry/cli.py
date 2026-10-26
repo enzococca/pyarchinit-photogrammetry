@@ -1302,7 +1302,7 @@ def crop(project: Path,
                 ch.crop_model(region, zmin=zmin, zmax=zmax)
             else:
                 ch.crop_point_cloud(region=region, zmin=zmin, zmax=zmax)
-            versions.set_active_name(ch, k, "Ritagliato")
+            versions.set_active_name(ch, k, versions.label("Ritagliato"))
             typer.echo(f"{k}: cropped in the project")
         doc.save()
         return

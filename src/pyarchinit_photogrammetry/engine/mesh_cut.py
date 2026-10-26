@@ -397,8 +397,10 @@ def cut_model(chunk, point, normal, keep: str = "above", thickness: float | None
 
 
 def _default_name(keep: str) -> str:
-    return {"above": "Tagliato: parte sopra il piano", "below": "Tagliato: parte sotto il piano",
-            "slab": "Tagliato: fetta"}[keep]
+    from ..core import versions
+
+    return versions.label({"above": "Tagliato: parte sopra il piano", "below": "Tagliato: parte sotto il piano",
+                           "slab": "Tagliato: fetta"}[keep])
 
 
 def write_part(chunk, mesh, path) -> Path:

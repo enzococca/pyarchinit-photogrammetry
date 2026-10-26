@@ -423,7 +423,7 @@ def import_model(chunk, path, frame: str = "world", offset=None, scale: float = 
         chunk.meta["texture"] = {"mapping": "import", "size": written["size"], "pages": written["pages"]}
     else:
         chunk.meta.pop("texture", None)
-    versions.set_active_name(chunk, "model", name or f"Importato da {path.name}")
+    versions.set_active_name(chunk, "model", name or versions.label("Importato da {0}", path.name))
     report = {"file": str(path), "vertices": int(len(internal)), "faces": int(len(mesh.faces)),
               "pages": written["pages"], "colours": mesh.colors is not None, "objects": mesh.info.get("objects", 1),
               "missing_textures": mesh.info.get("missing_textures", []), "frame": frame, "up": up,

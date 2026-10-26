@@ -19,6 +19,23 @@ PARAMS = {"point_cloud": "dense", "model": "model", "dem": "dem", "orthomosaic":
 FILES = {"point_cloud": "point_cloud.ply", "model": "model.ply", "dem": "dem.tif", "orthomosaic": "orthomosaic.tif"}
 
 
+_translator = None  # the interface's: tr(text, *args); None in scripts and the command line (Italian)
+
+
+def set_translator(translate) -> None:
+    """The names given here to versions are written in the language of the interface: the window
+    passes its translation, ``translate(text, *args)``, a template filled with ``args``."""
+    global _translator
+    _translator = translate
+
+
+def label(text: str, *args) -> str:
+    """A name or a part of one in the language of the interface (Italian without a window)."""
+    if _translator is not None:
+        return _translator(text, *args)
+    return text.format(*args) if args else text
+
+
 def _check(product: str) -> None:
     if product not in PRODUCTS:
         raise ValueError(f"no versions for {product!r}: {', '.join(PRODUCTS)}")
@@ -62,17 +79,18 @@ def _describe(chunk, product: str) -> str:
     bits = []
     if product == "point_cloud":  # where the active cloud comes from (the depth-map settings may be of a later try)
         if chunk.meta.get("point_cloud_source"):
-            bits.append(str(chunk.meta["point_cloud_source"]))
+            bits.append(label(str(chunk.meta["point_cloud_source"])))
         elif meta.get("quality"):
-            bits.append(f"qualita' {meta['quality']}")
+            bits.append(label("qualita' {0}", meta["quality"]))
     elif product == "model" and meta.get("source"):
-        bits.append({"depth_maps": "mappe di profondita'", "point_cloud": "nuvola densa",
-                     "tie_points": "punti di legame", "import": f"importato da {meta.get('file', 'un file')}"}
-                    .get(meta["source"], meta["source"]))
+        source = meta["source"]
+        bits.append(label("importato da {0}", meta.get("file", label("un file"))) if source == "import" else
+                    label({"depth_maps": "mappe di profondita'", "point_cloud": "nuvola densa",
+                           "tie_points": "punti di legame"}.get(source, source)))
     if meta.get("classes"):
-        bits.append("classi " + ", ".join(str(c) for c in meta["classes"]))
+        bits.append(label("classi {0}", ", ".join(str(c) for c in meta["classes"])))
     if product == "orthomosaic" and meta.get("hidden_classes"):
-        bits.append("senza classi " + ", ".join(str(c) for c in meta["hidden_classes"]))
+        bits.append(label("senza classi {0}", ", ".join(str(c) for c in meta["hidden_classes"])))
     return "; ".join(bits)
 
 
@@ -87,7 +105,7 @@ def active_info(chunk, product: str) -> dict:
     if not info.get("name"):
         when = datetime.fromisoformat(info["created"]).strftime("%d/%m %H:%M")
         desc = _describe(chunk, product)
-        info["name"] = f"{PRODUCTS[product]} del {when}" + (f" ({desc})" if desc else "")
+        info["name"] = label("{0} del {1}", label(PRODUCTS[product]), when) + (f" ({desc})" if desc else "")
     return info
 
 

@@ -142,6 +142,11 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setStatusBar(_StatusBar(self))
         self._autoconnect = autoconnect
+        # the names the program gives to versions, in the language of the interface (descriptions already
+        # composed in Italian, like the source of a cloud, are recognised from the catalog's templates)
+        from ..core import versions as _versions
+
+        _versions.set_translator(lambda text, *args: tr(text, *args) if args else translate(text))
         self.setWindowTitle(APP_TITLE)
         self.setWindowIcon(app_icon())
         avail = self.screen().availableGeometry()  # a laptop screen is smaller than the default size
@@ -4221,7 +4226,7 @@ class MainWindow(QMainWindow):
                 ch.meta["point_cloud_cleaning"] = info
                 return out
 
-            self.run_task("Pulizia della nuvola", self._versioned_edit("point_cloud", v, apply, "Nuvola pulita"),
+            self.run_task("Pulizia della nuvola", self._versioned_edit("point_cloud", v, apply, tr("Nuvola pulita")),
                           lambda out: (self.log_pane.info(tr("Nuvola pulita: tolti {0} punti, restano {1} ({2})",
                                                              _it(out['removed']), _it(out['kept']), parts)),
                                        self._show_model("point_cloud")))
@@ -4294,7 +4299,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(text, 15000)
             self._show_model("model")
 
-        self.run_task("Pulizia del modello", self._versioned_edit("model", v, job, "Modello pulito"), done)
+        self.run_task("Pulizia del modello", self._versioned_edit("model", v, job, tr("Modello pulito")), done)
 
     def clean_tie_points(self) -> None:
         """Gradual selection of the tie points: thresholds with live counts, removal, optimization."""
@@ -4560,7 +4565,7 @@ class MainWindow(QMainWindow):
                     if kept is not None:
                         versions.delete(ch, k, kept["id"])
                     raise
-                versions.set_active_name(ch, k, "Ritagliato")
+                versions.set_active_name(ch, k, tr("Ritagliato"))
                 done.append(k)
             return done
 
@@ -8821,7 +8826,7 @@ class MainWindow(QMainWindow):
             keep_selected = action == "keep"
             self.run_task("Lazo sulla nuvola", self._versioned_edit(
                 "point_cloud", v, lambda p: delete_points(self.chunk, mask, keep_selected=keep_selected),
-                "Nuvola modificata con il lazo"),
+                tr("Nuvola modificata con il lazo")),
                 lambda out: (self.log_pane.info(tr("Lazo: tolti {0} punti, restano {1}",
                                                    _it(out['removed']), _it(out['kept']))),
                              self.model_view.refresh(reset=False)), refresh=False)
@@ -8863,7 +8868,7 @@ class MainWindow(QMainWindow):
         keep_selected = v.get("action", "delete") == "keep"
         self.run_task("Lazo sul modello", self._versioned_edit(
             "model", v, lambda p: delete_faces(self.chunk, mask, keep_selected=keep_selected),
-            "Modello modificato con il lazo"),
+            tr("Modello modificato con il lazo")),
             lambda out: (self.log_pane.info(tr("Lazo: tolte {0} facce, restano {1}",
                                                _it(out['removed_faces']), _it(out['faces']))),
                          self._show_model("model")))

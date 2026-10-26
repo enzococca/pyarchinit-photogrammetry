@@ -1183,7 +1183,7 @@ def coregister_chunk(chunk, reference, stable=None, exclude=None, tilt: bool = T
     record.update(info, reference=label, version=kept["id"] if kept else None,
                   when=datetime.now().isoformat(timespec="seconds"))
     chunk.meta["dem"] = {**params, "coregistration": record}
-    name = (name or f"DEM coregistrato su {label}")[:80]
+    name = (name or versions.label("DEM coregistrato su {0}", label))[:80]
     versions.set_active_name(chunk, "dem", name)
     progress(1.0, f"DEM coregistered on {label}: shift {result.shift:.4f} m, dz {result.dz:+.4f} m")
     return {**record, "name": name}
