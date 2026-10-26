@@ -65,10 +65,14 @@ used* until you choose it.
 
 **The table** has a row per flight (a pause of more than 20 minutes starts another; the photos with no date are
 the *no date* row): the photos with a fix, a float, a single position, with a position and no RTK data, with no
-position at all, and those whose reference is switched off; the median accuracy per axis; and, once the chunk is
-aligned and georeferenced, how far the cameras ended from their positions (root mean square per axis and the
-largest distance). A flight whose offsets are far larger than its accuracy has a bias (a base on a wrong point)
-or positions that do not belong to it.
+position at all, and those whose reference is switched off; the median accuracy per axis; the kinds of height of
+the positions (*ellipsoidal* from the GNSS and the MRK, *EXIF*, *unknown* for positions read from another
+program); and, once the chunk is aligned and georeferenced, how far the cameras ended from their positions (root
+mean square per axis and the largest distance). A flight whose offsets are far larger than its accuracy has a
+bias (a base on a wrong point) or positions that do not belong to it. When the positions in use, accurate in
+height (under a metre), have heights of different kinds - the ellipsoidal ones of an MRK and those of the EXIF of
+other photos, which can be tens of metres apart - the pane says so under the positions (and `ppg gnss status`
+prints a warning): check them before using them together.
 
 **Only the fix positions** switches off the references of the photos whose position is not an RTK fix: they stay
 in the chunk and are aligned, but no longer pull the cameras. A position with no RTK state (the GPS of the EXIF, a

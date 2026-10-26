@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QHeaderView, QLabel
                                QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ..gnss.apply import ONLY_FIX
-from ..gnss.quality import summary
+from ..gnss.quality import mixed_heights, summary
 from .flow_layout import FlowLayout
 from .i18n import number, tr
 from .icons import icon
@@ -26,6 +26,11 @@ def status_names() -> dict[str, str]:
     """The states of a position (``meta["gnss"]["status"]``) in running text."""
     return {"fix": tr("fix"), "float": tr("float"), "single": tr("singola"), "none": tr("senza RTK"),
             "unknown": tr("stato sconosciuto")}
+
+
+def height_names() -> dict[str, str]:
+    """The kinds of height of a position (``meta["gnss"]["height"]``) as the pane says them."""
+    return {"ellipsoidal": tr("ellissoidica"), "exif": tr("EXIF"), "unknown": tr("sconosciuta")}
 
 
 def lengths(values) -> str:
@@ -106,6 +111,8 @@ class GnssPane(QWidget):
                  (tr("Senza posizione"), tr("Foto senza alcuna posizione")),
                  (tr("Disattivate"), tr("Foto con una posizione il cui riferimento è disattivato")),
                  (tr("Accuratezza"), tr("Mediana dell'accuratezza dei riferimenti, per asse (x / y / z)")),
+                 (tr("Tipo di quota"), tr("Il tipo di quota delle posizioni: ellissoidica (GNSS, MRK), dell'EXIF "
+                                          "(sul livello del mare) o sconosciuta")),
                  (tr("Scarto RMS"), tr("Distanza fra le camere allineate e le loro posizioni, per asse, quadratica media")),
                  (tr("Scarto max"), tr("La distanza maggiore fra una camera allineata e la sua posizione"))]
         self.table = QTableWidget(0, len(heads))
@@ -147,7 +154,13 @@ class GnssPane(QWidget):
             text = tr("{0} foto su {1} con una posizione", positioned, photos)
             if sources:
                 text += ": " + ", ".join(f"{names.get(s, s)} {n}" for s, n in sorted(sources.items(), key=lambda p: -p[1]))
-            self.states["positions"].setText(text + ".")
+            text += "."
+            mixed = mixed_heights(chunk)
+            if mixed:
+                heights = height_names()
+                text += " " + tr("Le quote di queste posizioni sono di tipo diverso ({0}): controllale prima di usarle "
+                                 "insieme.", " / ".join(heights.get(k, k) for k in mixed))
+            self.states["positions"].setText(text)
         self._fill(rows)
         aligned = any(r["residual_rms"] is not None for r in rows)
         self.states["quality"].setText(
@@ -166,11 +179,13 @@ class GnssPane(QWidget):
 
     def _fill(self, rows: list[dict]) -> None:
         self.table.setRowCount(len(rows))
+        heights = height_names()
         for i, r in enumerate(rows):
             status = r["status"]
+            kinds = ", ".join(f"{heights.get(k, k)} {n}" for k, n in sorted(r["heights"].items(), key=lambda p: -p[1]))
             cells = [str(r["flight"]) if r["flight"] else tr("senza data"), str(r["photos"]), str(status["fix"]),
                      str(status["float"]), str(status["single"]), str(status["none"]), str(r["no_position"]),
-                     str(r["disabled"]), lengths(r["accuracy_median"]),
+                     str(r["disabled"]), lengths(r["accuracy_median"]), kinds or "-",
                      lengths(r["residual_rms"]) if r["residual_rms"] else "-",
                      lengths([r["residual_max"]]) if r["residual_max"] is not None else "-"]
             for j, text in enumerate(cells):

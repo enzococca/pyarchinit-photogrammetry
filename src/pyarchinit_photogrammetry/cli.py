@@ -2419,10 +2419,10 @@ def gnss_status(project: Path, chunk: Optional[str] = None):
     """Where the positions of the photos come from and how good they are, flight by flight.
 
     A table per flight: the photos by RTK state (fix, float, single, none = a position and no RTK data), those
-    without a position, the references switched off, the median accuracy and, once aligned and georeferenced, how
-    far the cameras are from their positions."""
+    without a position, the references switched off, the median accuracy, once aligned and georeferenced how far the
+    cameras are from their positions, and the kinds of height of the positions (ellipsoidal, exif, unknown)."""
     from .gnss.apply import ONLY_FIX
-    from .gnss.quality import summary
+    from .gnss.quality import mixed_heights, summary
 
     _doc, ch = _open(project, chunk)
     rows = summary(ch)
@@ -2437,13 +2437,18 @@ def gnss_status(project: Path, chunk: Optional[str] = None):
     if not rows:
         return
     typer.echo(f"{'flight':<8}{'photos':>7}{'fix':>6}{'float':>7}{'single':>8}{'none':>6}{'no position':>13}"
-               f"{'disabled':>10}  {'accuracy (m)':<22}{'rms (m)':<22}{'max (m)':<8}")
+               f"{'disabled':>10}  {'accuracy (m)':<22}{'rms (m)':<22}{'max (m)':<10}heights")
     for r in rows:
         s = r["status"]
         biggest = "-" if r["residual_max"] is None else f"{r['residual_max']:.3f}"
+        heights = ",".join(f"{k}:{n}" for k, n in sorted(r["heights"].items(), key=lambda p: -p[1])) or "-"
         typer.echo(f"{r['flight'] or 'undated':<8}{r['photos']:>7}{s['fix']:>6}{s['float']:>7}{s['single']:>8}"
                    f"{s['none']:>6}{r['no_position']:>13}{r['disabled']:>10}  {_metres(r['accuracy_median']):<22}"
-                   f"{_metres(r['residual_rms']):<22}{biggest:<8}")
+                   f"{_metres(r['residual_rms']):<22}{biggest:<10}{heights}")
+    mixed = mixed_heights(ch)
+    if mixed:
+        typer.echo(f"warning: the heights of these positions are of different kinds ({' / '.join(mixed)}): check "
+                   "them before using them together")
     kept = ch.meta.get(ONLY_FIX)
     if kept is not None:
         typer.echo(f"only fix: the references of {len(kept.get('disabled') or [])} photos are switched off")

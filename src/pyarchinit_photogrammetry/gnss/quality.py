@@ -10,6 +10,7 @@ from ..engine import bundle
 from ..markers import gcp
 
 STATUSES = ("fix", "float", "single", "none")
+HEIGHTS = ("ellipsoidal", "exif")
 
 
 def _status(camera) -> str:
@@ -19,6 +20,13 @@ def _status(camera) -> str:
     if state is None:
         return "none"
     return state if state in STATUSES else "single"
+
+
+def _height(camera) -> str:
+    """The kind of height of the position: one of :data:`HEIGHTS`, or ``"unknown"`` for a position that does not
+    say (read from another program)."""
+    kind = (camera.meta.get("gnss") or {}).get("height")
+    return kind if kind in HEIGHTS else "unknown"
 
 
 def _accuracy(camera) -> list[float] | None:
@@ -39,6 +47,8 @@ def summary(chunk: Chunk) -> list[dict]:
       photo with a position and no RTK data is ``"none"``; a status that is none of these (``"unknown"``)
       counts as ``"single"``. Photos with no position at all are in none of them but in ``no_position``;
     * ``sources``: ``{source: n}`` for the photos with a position (``"unknown"`` for one that records none);
+    * ``heights``: ``{kind: n}`` for the photos with a position, the kind of their height: ``"ellipsoidal"`` (GNSS,
+      MRK), ``"exif"`` (the altitude of the EXIF) or ``"unknown"``;
     * ``accuracy_median``: the median per axis of the accuracy of the references, in metres (``None`` if no
       photo of the flight has a position);
     * ``disabled``: the photos whose reference is switched off (they are counted in everything else too);
@@ -65,6 +75,7 @@ def summary(chunk: Chunk) -> list[dict]:
             "photos": len(members),
             "status": dict(status),
             "sources": dict(sources),
+            "heights": dict(Counter(_height(c) for c in positioned)),
             "no_position": len(members) - len(positioned),
             "disabled": sum(1 for c in positioned if not c.reference.enabled),
             "accuracy_median": np.median(accuracies, axis=0).tolist() if accuracies else None,
@@ -72,3 +83,16 @@ def summary(chunk: Chunk) -> list[dict]:
             "residual_max": float(np.max(np.linalg.norm(deltas, axis=1))) if len(deltas) else None,
         })
     return out
+
+
+def mixed_heights(chunk: Chunk, vertical: float = 1.0) -> list[str]:
+    """The kinds of height (``"ellipsoidal"``, ``"exif"``, ``"unknown"``, sorted) of the photos of ``chunk`` whose
+    reference is switched on and accurate in height (under ``vertical`` metres), when they are more than one: an
+    ellipsoidal height and one of the EXIF of the same place can be tens of metres apart, and both would pull the
+    block. An empty list when the heights are of one kind."""
+    kinds = set()
+    for cam in chunk.cameras:
+        acc = _accuracy(cam)
+        if cam.enabled and cam.reference.enabled and cam.reference.location and acc is not None and acc[2] < vertical:
+            kinds.add(_height(cam))
+    return sorted(kinds) if len(kinds) > 1 else []

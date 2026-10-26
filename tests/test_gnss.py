@@ -628,6 +628,37 @@ def test_summary_per_flight(monkeypatch):
     assert nodate["accuracy_median"] == pytest.approx([0.01, 0.01, 0.02])
 
 
+def test_kinds_of_height_per_flight_and_mixed(monkeypatch):
+    monkeypatch.setattr(ppg.markers.gcp, "camera_reference_errors", lambda chunk: {})
+    ch = ppg.Document().add_chunk()
+    ch.cameras = [_camera(0, "2026:10:26 10:00:00", "fix", accuracy=[0.01, 0.01, 0.02]),  # the RTK of the XMP
+                  _camera(1, "2026:10:26 10:00:30", None, source="exif"),
+                  _camera(2, "2026:10:26 10:01:00", position=False)]
+    (one,) = quality.summary(ch)
+    assert one["heights"] == {"exif": 2}  # the photos with a position
+    assert quality.mixed_heights(ch) == []
+
+    # an ellipsoidal height of 10 m accuracy beside a height of the EXIF: not enough to matter
+    gnss_apply.set_camera_position(ch.cameras[1], [14.0, 41.0, 140.0], "EPSG:4979", [5.0, 5.0, 10.0], "dji_mrk",
+                                   status="none", height="ellipsoidal")
+    (one,) = quality.summary(ch)
+    assert one["heights"] == {"exif": 1, "ellipsoidal": 1}
+    assert quality.mixed_heights(ch) == []
+    # both accurate in height: heights of two kinds pull the block apart
+    ch.cameras[1].reference.accuracy = [0.02, 0.02, 0.04]
+    assert quality.mixed_heights(ch) == ["ellipsoidal", "exif"]
+    ch.cameras[0].reference.enabled = False  # not if one of them is switched off
+    assert quality.mixed_heights(ch) == []
+    ch.cameras[0].reference.enabled = True
+
+    # a position from somewhere that does not say its kind of height
+    ch.cameras[2].reference = ppg.core.camera.Reference(location=[500000.0, 4500000.0, 90.0], accuracy=[0.01] * 3,
+                                                        enabled=True)
+    (one,) = quality.summary(ch)
+    assert one["heights"] == {"exif": 1, "ellipsoidal": 1, "unknown": 1}
+    assert quality.mixed_heights(ch) == ["ellipsoidal", "exif", "unknown"]
+
+
 def test_summary_residuals_of_the_aligned_cameras(monkeypatch):
     ch = ppg.Document().add_chunk()
     ch.cameras = [_camera(k, f"2026:10:26 1{k // 2}:00:00", "fix") for k in range(4)]  # k // 2: two flights
@@ -762,8 +793,10 @@ def test_gnss_command_line(tmp_path):
     cams = ppg.Document.open(project).chunk.cameras
     assert [c.meta["gnss"]["source"] for c in cams] == ["dji_mrk"] * 3
     assert [c.meta["gnss"]["status"] for c in cams] == ["fix", "single", "float"]
-    row = _rows(run(app, ["gnss", "status", str(project)]).output)["undated"]
-    assert row[:8] == ["undated", "3", "1", "1", "1", "0", "0", "0"]
+    result = run(app, ["gnss", "status", str(project)])
+    row = _rows(result.output)["undated"]
+    assert row[:8] == ["undated", "3", "1", "1", "1", "0", "0", "0"] and row[-1] == "ellipsoidal:3"
+    assert "different kinds" not in result.output
 
     # a positions file in a projected system, for the photos it names
     table = tmp_path / "positions.csv"
@@ -775,6 +808,10 @@ def test_gnss_command_line(tmp_path):
     first = ppg.Document.open(project).chunk.cameras[0]
     assert first.reference.location == [500000.5, 4500000.25, 101.5]
     assert first.meta["reference_crs"] == "EPSG:32633" and first.meta["gnss"]["height"] == "exif"
+    # its height of the EXIF and the ellipsoidal one of the float, both under a metre: said
+    result = run(app, ["gnss", "status", str(project)])
+    assert _rows(result.output)["undated"][-1] == "ellipsoidal:2,exif:1"
+    assert "the heights of these positions are of different kinds (ellipsoidal / exif)" in result.output
 
     # what cannot be used is said and nothing changes
     table.write_text("name,x,y\na,1,2\n")
@@ -864,6 +901,14 @@ def test_gnss_pane_shows_the_flights(gnss_window):
     chunk.cameras.remove(nowhere)
     w.gnss_only_fix(False)
     assert single.reference.enabled
+
+    # the kinds of height per flight; heights of two kinds, both under a metre, are said under the positions
+    assert _cells(pane.table, 0)[heads.index("Tipo di quota")] == "ellissoidica 2"
+    assert "tipo diverso" not in pane.states["positions"].text()
+    gnss_apply.set_camera_position(flt, [14.0, 41.0, 90.0], "EPSG:4326", [0.02, 0.02, 0.04], "dji_xmp", status="fix")
+    pane.set_state(chunk)
+    assert _cells(pane.table, 1)[heads.index("Tipo di quota")] == "EXIF 1"
+    assert "Le quote di queste posizioni sono di tipo diverso (ellissoidica / EXIF)" in pane.states["positions"].text()
 
 
 def test_gnss_window_actions(gnss_window, monkeypatch):

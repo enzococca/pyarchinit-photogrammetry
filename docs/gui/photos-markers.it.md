@@ -65,10 +65,14 @@ camere, e quell'opzione è su *non usate* finché non la scegli.
 
 **La tabella** ha una riga per volo (una pausa di oltre 20 minuti ne comincia un altro; le foto senza data sono
 la riga *senza data*): le foto con una posizione fix, float, singola, con una posizione e nessun dato RTK, senza
-alcuna posizione, e quelle il cui riferimento è disattivato; l'accuratezza mediana per asse; e, quando il chunk è
-allineato e georeferenziato, quanto le camere sono finite lontano dalle loro posizioni (quadratica media per asse
-e distanza maggiore). Un volo i cui scarti sono molto più grandi della sua accuratezza ha un bias (una base su un
-punto sbagliato) o posizioni che non gli appartengono.
+alcuna posizione, e quelle il cui riferimento è disattivato; l'accuratezza mediana per asse; il tipo di quota
+delle posizioni (*ellissoidica* dal GNSS e dall'MRK, *EXIF*, *sconosciuta* per posizioni lette da un altro
+programma); e, quando il chunk è allineato e georeferenziato, quanto le camere sono finite lontano dalle loro
+posizioni (quadratica media per asse e distanza maggiore). Un volo i cui scarti sono molto più grandi della sua
+accuratezza ha un bias (una base su un punto sbagliato) o posizioni che non gli appartengono. Quando le posizioni
+in uso, accurate in quota (sotto il metro), hanno quote di tipo diverso - quelle ellissoidiche di un MRK e quelle
+dell'EXIF di altre foto, che possono distare decine di metri - il pannello lo dice sotto le posizioni (e `ppg gnss
+status` stampa un avviso): controllale prima di usarle insieme.
 
 **Solo le posizioni fix** disattiva i riferimenti delle foto la cui posizione non è un RTK fissato: restano nel
 chunk e si allineano, ma non tirano più le camere. Una posizione senza stato RTK (il GPS dell'EXIF, un file di
