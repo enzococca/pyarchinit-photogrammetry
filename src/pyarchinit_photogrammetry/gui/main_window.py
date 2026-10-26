@@ -349,6 +349,13 @@ class MainWindow(QMainWindow):
         add(self.ms_pane, tr("Multispettrale"), icon("multispectral"), name="pane_multispectral", place="right")
         self.thermal_pane = MultispectralPane(mode="thermal")
         add(self.thermal_pane, tr("Termico"), icon("thermal"), name="pane_thermal", place="right")
+        from .gnss_pane import GnssPane
+
+        self.gnss_pane = GnssPane()
+        add(self.gnss_pane, "GNSS", icon("reference"), name="pane_gnss", place="right")
+        self.gnss_pane.mrk_requested.connect(self.gnss_apply_mrk)
+        self.gnss_pane.positions_requested.connect(self.gnss_apply_positions)
+        self.gnss_pane.only_fix_toggled.connect(self.gnss_only_fix)
         self.ms_pane.add_requested.connect(self.ms_add)
         self.thermal_pane.add_requested.connect(lambda: self.ms_add(thermal=True))
         for pane in (self.ms_pane, self.thermal_pane):
@@ -846,6 +853,16 @@ class MainWindow(QMainWindow):
         self._act(th_menu, tr("Esporta i punti di misura..."), self.export_probe_points, icon_name="export")
         self._act(th_menu, tr("Pannello Termico"), lambda: self._show_pane(self.left_tabs, self.thermal_pane),
                   icon_name="thermal")
+        gnss_menu = m.addMenu(icon("reference"), "GNSS")
+        self._act(gnss_menu, tr("File MRK di DJI..."), self.gnss_apply_mrk, icon_name="load",
+                  tip=tr("Il Timestamp.MRK della scheda del drone: la posizione di ogni scatto, con il braccio "
+                         "di leva dell'antenna, il suo stato RTK e le deviazioni standard"))
+        self._act(gnss_menu, tr("File di posizioni..."), self.gnss_apply_positions, icon_name="load",
+                  tip=tr("Un file di testo con una riga per foto: nome, x, y, quota e, se ci sono, le "
+                         "deviazioni standard o l'accuratezza e lo stato (drone costruito in casa, "
+                         "soluzione PPK di un altro programma)"))
+        self._act(gnss_menu, tr("Pannello GNSS"), lambda: self._show_pane(self.left_tabs, self.gnss_pane),
+                  icon_name="reference")
         sat_menu = m.addMenu(tr("Immagini satellitari"))
         self._act(sat_menu, tr("Ortorettifica una scena..."), self.sat_ortho, processing=True,
                   tip=tr("Una scena satellitare con i suoi RPC sul DEM del rilievo, come versione dell'ortofoto"))
@@ -1537,10 +1554,12 @@ class MainWindow(QMainWindow):
                       lambda path: (self._capture_states(), self.ms_show("thermal")), refresh=True)
 
     def _capture_states(self) -> None:
-        """The steps of the Multispettrale and Termico tabs read again from the chunk."""
+        """The steps of the Multispettrale and Termico tabs and the table of the GNSS pane read again from
+        the chunk."""
         for pane in (self.ms_pane, self.thermal_pane):
             pane.set_state(self.chunk)
             pane.set_points(len(self.probe_points))
+        self.gnss_pane.set_state(self.chunk)
 
     def _capture_pane(self):
         """The tab for the captures of the chunk: Termico when they have a thermal band and no
@@ -2908,6 +2927,111 @@ class MainWindow(QMainWindow):
                 return
         self.run_task("Aggiunta foto", lambda p: self.chunk.add_photos(paths, recursive=folder),
                       lambda cams: self.statusBar().showMessage(tr("{0} foto aggiunte", len(cams)), 8000))
+
+    # ---------------------------------------------------------------- GNSS positions of the photos
+    def _gnss_changed(self) -> None:
+        """The positions or the references of the photos changed: the filter on the fixes (when it is on) decided
+        again, the project marked as changed, the tables read again."""
+        from ..gnss import apply as gnss
+
+        ch = self.chunk
+        gnss.keep_only_fix(ch)
+        self._dirty(True)
+        self.reference.set_chunk(ch, self.last_report)
+        self.photos.update_flags()
+        self.gnss_pane.set_state(ch)
+
+    def _gnss_done(self, text: str, unmatched: list[str]) -> None:
+        """Say in the log and in the status bar how it went; what did not find its photo (or its shot) is listed
+        in the log."""
+        self.log_pane.info(text)
+        self.statusBar().showMessage(text, 15000)
+        if unmatched:
+            shown = ", ".join(unmatched[:8]) + (" ..." if len(unmatched) > 8 else "")
+            self.log_pane.warning(tr("Senza corrispondenza ({0}): {1}", len(unmatched), shown))
+
+    def gnss_apply_mrk(self) -> None:
+        """*Strumenti > GNSS > File MRK di DJI*: the position of each shot of a ``Timestamp.MRK`` (the camera, not the
+        antenna) to the photo it belongs to, with its RTK state and accuracy (:func:`gnss.apply.apply_mrk`)."""
+        if not self._need_chunk():
+            return
+        path, _ = QFileDialog.getOpenFileName(self, tr("Timestamp.MRK di DJI"), self._last_dir(),
+                                              tr("File MRK (*.MRK *.mrk);;Tutti i file (*)"))
+        if not path:
+            return
+        from ..gnss import apply as gnss
+        from .gnss_pane import status_names
+
+        folder = Path(path).parent
+        photos = None
+        if folder.resolve() not in {Path(c.path).resolve().parent for c in self.chunk.cameras}:
+            # the MRK was copied away from the photos: the folder of the photos tells which ones it belongs to
+            photos = QFileDialog.getExistingDirectory(self, tr("Cartella delle foto di questo MRK"), str(folder))
+            if not photos:
+                return
+        try:
+            result = gnss.apply_mrk(self.chunk, path, photos)
+        except (OSError, ValueError) as exc:
+            self._exc(tr("Lettura dell'MRK non riuscita"), exc)
+            return
+        if not result["matched"]:
+            self._warn(tr("Nessuna foto del chunk ha trovato il suo scatto nell'MRK: controlla la cartella delle foto."))
+            return
+        names = status_names()
+        detail = ", ".join(f"{names.get(k, k)} {n}" for k, n in sorted(result["status"].items(), key=lambda p: -p[1]))
+        self._gnss_done(tr("MRK: {0} foto su {1} hanno la posizione del loro scatto ({2})", result["matched"],
+                           result["photos"], detail), result["unmatched"])
+        self._gnss_changed()
+
+    def gnss_apply_positions(self) -> None:
+        """*Strumenti > GNSS > File di posizioni*: the positions of a text file (name, x, y, height and, when it has
+        them, standard deviations, accuracy, status) to the photos it names (:func:`gnss.positions.apply_positions`)."""
+        if not self._need_chunk():
+            return
+        path, _ = QFileDialog.getOpenFileName(self, tr("Posizioni delle foto"), self._last_dir(),
+                                              tr("Testo (*.csv *.txt *.tsv *.pos *.dat);;Tutti i file (*)"))
+        if not path:
+            return
+        v = ParamDialog.ask(self, "Posizioni delle foto da un file", [
+            Field("crs", "Sistema di coordinate del file (EPSG:4979 = longitudine, latitudine, quota; o es. "
+                         "EPSG:32633; LOCAL)", "EPSG:4979", kind="text"),
+            Field("height", "Tipo di quota", "ellipsoidal",
+                  choices=[("ellipsoidal", "Ellissoidica (GNSS, MRK)"), ("exif", "Dell'EXIF (livello del mare)")])],
+            intro=tr("Una riga per foto con il nome, x, y e la quota; in più, se ci sono, le deviazioni standard o "
+                     "l'accuratezza e lo stato RTK. Le posizioni sostituiscono quelle che le foto avevano."))
+        if not v:
+            return
+        from ..gnss import positions
+
+        try:
+            result = positions.apply_positions(self.chunk, positions.read_positions(path), str(v["crs"]).strip(),
+                                               height=v["height"])
+        except (OSError, ValueError) as exc:
+            self._exc(tr("Lettura delle posizioni non riuscita"), exc)
+            return
+        if not result["matched"]:
+            self._warn(tr("Nessuna riga del file ha trovato la sua foto nel chunk: i nomi devono essere quelli "
+                          "delle foto, con o senza estensione."))
+            return
+        self._gnss_done(tr("Posizioni: {0} righe su {1} hanno trovato la loro foto", result["matched"], result["rows"]),
+                        result["unmatched"])
+        self._gnss_changed()
+
+    def gnss_only_fix(self, on: bool) -> None:
+        """Use only the photos whose position is an RTK fix (their references on), or all of them again."""
+        from ..gnss import apply as gnss
+
+        ch = self.chunk
+        if ch is None:
+            return
+        n = gnss.only_fix(ch, bool(on))
+        text = (tr("Solo le posizioni fix: {0} riferimenti disattivati", n) if on else
+                tr("Tutte le posizioni contano: {0} riferimenti riattivati", n))
+        self.log_pane.info(text)
+        self.statusBar().showMessage(text, 8000)
+        self._dirty(True)
+        self.reference.set_chunk(ch, self.last_report)
+        self.gnss_pane.set_state(ch)
 
     def add_video(self) -> None:
         """Workflow > Aggiungi video: frames chosen for the reconstruction, GPS from DJI subtitles."""

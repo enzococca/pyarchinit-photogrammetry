@@ -559,3 +559,262 @@ def test_summary_of_a_georeferenced_chunk_and_of_an_empty_one():
     (entry,) = quality.summary(ch)
     assert entry["residual_rms"] == pytest.approx([0.03, 0.0, 0.0], abs=1e-6)
     assert entry["residual_max"] == pytest.approx(0.03, abs=1e-6)
+
+
+# --- ppg gnss and the GNSS pane --------------------------------------------------------------------------------
+
+def _project(tmp_path, names=("a.JPG", "b.JPG", "c.JPG")):
+    """A saved project with the photos of ``names`` (with their EXIF position and the MRK beside them; names with
+    no shot number, so the MRK is paired by order)."""
+    folder = _flight(tmp_path / "100MEDIA", list(names))
+    doc = ppg.Document()
+    doc.add_chunk("Flight").add_photos([folder])
+    doc.save(tmp_path / "flight.ppg")
+    return tmp_path / "flight.ppg", folder
+
+
+def _rows(output: str) -> dict:
+    """The lines of ``ppg gnss status`` that start with a flight: flight -> the cells of the line."""
+    return {line.split()[0]: line.split() for line in output.splitlines()
+            if line.split() and (line.split()[0].isdigit() or line.split()[0] == "undated")}
+
+
+def test_gnss_command_line(tmp_path):
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    project, folder = _project(tmp_path)
+    run = CliRunner().invoke
+
+    # the photos only have the GPS of their EXIF: one flight (they have no date), no RTK data, 5/5/10 m
+    result = run(app, ["gnss", "status", str(project)])
+    assert result.exit_code == 0, result.output
+    assert "Flight: 3 photos, 3 with a position" in result.output and "exif 3" in result.output
+    assert _rows(result.output)["undated"][:9] == ["undated", "3", "0", "0", "0", "3", "0", "0", "5.000/5.000/10.000"]
+
+    # the MRK gives the three shots their position: the fix, the float and the single of its lines
+    result = run(app, ["gnss", "mrk", str(project), str(folder / "Timestamp.MRK")])
+    assert result.exit_code == 0, result.output
+    assert "3 of 3 photos" in result.output and "fix 1" in result.output and "single 1" in result.output
+    cams = ppg.Document.open(project).chunk.cameras
+    assert [c.meta["gnss"]["source"] for c in cams] == ["dji_mrk"] * 3
+    assert [c.meta["gnss"]["status"] for c in cams] == ["fix", "single", "float"]
+    row = _rows(run(app, ["gnss", "status", str(project)]).output)["undated"]
+    assert row[:8] == ["undated", "3", "1", "1", "1", "0", "0", "0"]
+
+    # a positions file in a projected system, for the photos it names
+    table = tmp_path / "positions.csv"
+    table.write_text("name,x,y,z,sx,sy,sz\na,500000.5,4500000.25,101.5,0.01,0.01,0.02\n"
+                     "gone,500010,4500000,101,0.01,0.01,0.02\n")
+    result = run(app, ["gnss", "positions", str(project), str(table), "--crs", "EPSG:32633", "--height", "exif"])
+    assert result.exit_code == 0, result.output
+    assert "1 of 2 rows" in result.output and "gone" in result.output
+    first = ppg.Document.open(project).chunk.cameras[0]
+    assert first.reference.location == [500000.5, 4500000.25, 101.5]
+    assert first.meta["reference_crs"] == "EPSG:32633" and first.meta["gnss"]["height"] == "exif"
+
+    # what cannot be used is said and nothing changes
+    table.write_text("name,x,y\na,1,2\n")
+    result = run(app, ["gnss", "positions", str(project), str(table), "--crs", "EPSG:32633"])
+    assert result.exit_code == 1 and "error:" in result.output and "height" in result.output
+    result = run(app, ["gnss", "positions", str(project), str(table), "--crs", "EPSG:32633", "--height", "geoid"])
+    assert result.exit_code != 0
+    (folder / "Timestamp.MRK").write_text(MRK_LINES + _numbered(MRK_LINES.splitlines(keepends=True)[0], 4))
+    result = run(app, ["gnss", "mrk", str(project), str(folder / "Timestamp.MRK")])
+    assert result.exit_code == 1 and "error:" in result.output and "4 shots" in result.output
+    assert ppg.Document.open(project).chunk.cameras[0].meta["reference_crs"] == "EPSG:32633"
+
+
+@pytest.fixture
+def gnss_window(tmp_path):
+    """A window with a chunk of three photos with the position of an MRK (fix, single, float), the first two
+    shot at 10:00 and the third an hour later: two flights."""
+    pytest.importorskip("PySide6")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("PPG_RENDERER", "software")
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    folder = _flight(tmp_path / "100MEDIA", ["a.JPG", "b.JPG", "c.JPG"])
+    doc = ppg.Document()
+    chunk = doc.add_chunk("Flight")
+    chunk.add_photos([folder])
+    gnss_apply.apply_mrk(chunk, folder / "Timestamp.MRK")
+    for cam, when in zip(chunk.cameras, ("2026:10:26 10:00:00", "2026:10:26 10:00:30", "2026:10:26 11:30:00")):
+        cam.meta["datetime"] = when
+    w = mw.MainWindow(doc, autoconnect=False, check_updates=False)
+    w.runner.show_dialog = False
+    w.resize(1400, 900)
+    w.show()
+    app.processEvents()
+    yield w, chunk, folder, mw
+    w.setWindowModified(False)
+    w.close()
+    app.processEvents()
+
+
+def _cells(table, row):
+    return [table.item(row, c).text() if table.item(row, c) else "" for c in range(table.columnCount())]
+
+
+def test_gnss_pane_shows_the_flights(gnss_window):
+    w, chunk, folder, mw = gnss_window
+    pane = w.gnss_pane
+    assert w.panes.dock(pane).objectName() == "pane_gnss"
+    assert pane.table.rowCount() == 2  # one row per flight
+    fix, single, flt = chunk.cameras
+    heads = [pane.table.horizontalHeaderItem(c).text() for c in range(pane.table.columnCount())]
+    column = {name: heads.index(name) for name in ("Volo", "Foto", "Fix", "Float", "Singola", "Senza RTK")}
+    one, two = _cells(pane.table, 0), _cells(pane.table, 1)
+    assert [one[column[n]] for n in ("Volo", "Foto", "Fix", "Float", "Singola", "Senza RTK")] == ["1", "2", "1", "0", "1", "0"]
+    assert [two[column[n]] for n in ("Volo", "Foto", "Fix", "Float", "Singola", "Senza RTK")] == ["2", "1", "0", "1", "0", "0"]
+    assert "3" in pane.states["positions"].text() and "MRK" in pane.states["positions"].text()
+
+    # only the fix: the references of the others are switched off, the photos stay
+    assert not pane.c_only_fix.isChecked() and [c.reference.enabled for c in chunk.cameras] == [True] * 3
+    flt.reference.enabled = False  # one the user switched off by hand
+    pane.c_only_fix.click()
+    assert [c.reference.enabled for c in chunk.cameras] == [True, False, False]
+    assert chunk.meta["gnss_only_fix"]["disabled"] == [single.key]
+    assert w.isWindowModified()
+    assert _cells(pane.table, 0)[heads.index("Disattivate")] == "1"
+    pane.c_only_fix.click()  # and again: only the ones it switched off come back
+    assert [c.reference.enabled for c in chunk.cameras] == [True, True, False]
+    assert "gnss_only_fix" not in chunk.meta and not pane.c_only_fix.isChecked()
+
+    # a photo without a position is left alone, and the filter is kept when positions are applied again
+    nowhere = ppg.core.camera.Camera(key=99, label="nowhere", path=str(folder / "nowhere.jpg"), sensor_key=0)
+    chunk.cameras.append(nowhere)
+    w.gnss_only_fix(True)
+    assert nowhere.reference.location is None and chunk.meta["gnss_only_fix"]["disabled"] == [single.key]
+    assert not single.reference.enabled and pane.c_only_fix.isChecked()
+    chunk.cameras.remove(nowhere)
+    w.gnss_only_fix(False)
+    assert single.reference.enabled
+
+
+def test_gnss_window_actions(gnss_window, monkeypatch):
+    w, chunk, folder, mw = gnss_window
+    pane = w.gnss_pane
+    said = []
+    monkeypatch.setattr(w, "_warn", lambda text: said.append(("warn", text)))
+    monkeypatch.setattr(w, "_exc", lambda prefix, exc: said.append(("error", f"{prefix}: {exc}")))
+    asked = {}
+    monkeypatch.setattr(mw.QFileDialog, "getOpenFileName", lambda parent, title, *args, **kwargs: (asked["file"], ""))
+
+    # an MRK of four shots for three photos cannot be paired by order: said in a message, nothing changes
+    mrk = folder / "Timestamp.MRK"
+    lines = mrk.read_text()
+    (folder / "bad.MRK").write_text(lines + _numbered(lines.splitlines(keepends=True)[0], 4))
+    asked["file"] = str(folder / "bad.MRK")
+    before = _snapshot(chunk)
+    pane.mrk_requested.emit()
+    assert said and said[-1][0] == "error" and "4 shots" in said[-1][1]
+    assert _snapshot(chunk) == before
+
+    # the right one: the photos take the positions of their shots, the pane shows it (the references back on)
+    for cam in chunk.cameras:
+        cam.reference.location, cam.meta["gnss"] = None, {}
+    asked["file"] = str(mrk)
+    w.setWindowModified(False)
+    w.gnss_apply_mrk()
+    assert [c.meta["gnss"]["source"] for c in chunk.cameras] == ["dji_mrk"] * 3
+    assert w.isWindowModified()
+    assert _cells(pane.table, 0)[4] == "1" and _cells(pane.table, 1)[3] == "1"  # single, float
+
+    # with only the fix positions on, positions applied again do not bring the others back
+    w.gnss_only_fix(True)
+    assert [c.reference.enabled for c in chunk.cameras] == [True, False, False]
+    w.gnss_apply_mrk()
+    assert [c.reference.enabled for c in chunk.cameras] == [True, False, False] and pane.c_only_fix.isChecked()
+    w.gnss_only_fix(False)
+    assert [c.reference.enabled for c in chunk.cameras] == [True, True, True]
+
+    # a positions file: the dialog of the system and of the kind of height, the default system EPSG:4979
+    table = folder / "positions.csv"
+    table.write_text("name,lon,lat,h\na,14.1,41.1,90.5\nb,14.2,41.2,91.5\n")
+    asked["file"] = str(table)
+    fields = {}
+
+    def ask(cls, parent, title, field_list, intro=""):
+        fields.update({f.name: f for f in field_list})
+        return {"crs": "EPSG:4979", "height": "ellipsoidal"}
+    monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(ask))
+    pane.positions_requested.emit()
+    assert fields["crs"].default == "EPSG:4979" and fields["height"].default == "ellipsoidal"
+    assert [v for v, _label in fields["height"].choices] == ["ellipsoidal", "exif"]
+    first, second, third = chunk.cameras
+    assert first.reference.location == [14.1, 41.1, 90.5] and first.meta["gnss"]["source"] == "positions_file"
+    assert second.reference.accuracy == [0.05, 0.05, 0.10]  # a file that gives none
+    assert third.meta["gnss"]["source"] == "dji_mrk"
+
+
+def test_gnss_mrk_copied_away_from_its_photos(gnss_window, monkeypatch, tmp_path):
+    w, chunk, folder, mw = gnss_window
+    said = []
+    monkeypatch.setattr(w, "_warn", lambda text: said.append(text))
+    card = tmp_path / "card"
+    card.mkdir()
+    (card / "Timestamp.MRK").write_text((folder / "Timestamp.MRK").read_text())
+    monkeypatch.setattr(mw.QFileDialog, "getOpenFileName", lambda *a, **k: (str(card / "Timestamp.MRK"), ""))
+    for cam in chunk.cameras:
+        cam.reference.location, cam.meta["gnss"] = None, {}
+
+    # no photo of the chunk is beside the MRK: the window asks where they are (and does nothing if it is refused)
+    monkeypatch.setattr(mw.QFileDialog, "getExistingDirectory", lambda *a, **k: "")
+    w.gnss_apply_mrk()
+    assert all(c.reference.location is None for c in chunk.cameras)
+    monkeypatch.setattr(mw.QFileDialog, "getExistingDirectory", lambda *a, **k: str(folder))
+    w.gnss_apply_mrk()
+    assert [c.meta["gnss"]["source"] for c in chunk.cameras] == ["dji_mrk"] * 3 and not said
+
+    # a folder whose photos are not in the chunk: said, and nothing marked as changed
+    other = _flight(tmp_path / "other", ["x.JPG", "y.JPG", "z.JPG"])
+    monkeypatch.setattr(mw.QFileDialog, "getExistingDirectory", lambda *a, **k: str(other))
+    monkeypatch.setattr(mw.QFileDialog, "getOpenFileName", lambda *a, **k: (str(other / "Timestamp.MRK"), ""))
+    w.setWindowModified(False)
+    w.gnss_apply_mrk()
+    assert said and "MRK" in said[-1] and not w.isWindowModified()
+
+    # the menu has the three commands
+    menu = next(a.menu() for a in w.menuBar().actions() if a.text() == "&Strumenti")
+    gnss = next(a.menu() for a in menu.actions() if a.menu() is not None and a.text() == "GNSS")
+    assert [a.text() for a in gnss.actions()] == ["File MRK di DJI...", "File di posizioni...", "Pannello GNSS"]
+
+
+def test_only_fix_is_kept_when_positions_are_applied_again(tmp_path):
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    project, folder = _project(tmp_path)
+    doc = ppg.Document.open(project)
+    chunk = doc.chunk
+    gnss_apply.apply_mrk(chunk, folder / "Timestamp.MRK")  # a fix, a single position, a float
+    chunk.cameras[2].reference.enabled = False  # switched off by hand
+    assert gnss_apply.only_fix(chunk) == 1  # the single: the float was off already
+    assert [c.reference.enabled for c in chunk.cameras] == [True, False, False]
+    assert chunk.meta["gnss_only_fix"] == {"disabled": [chunk.cameras[1].key]}
+    doc.save()
+
+    # the MRK again from the command line: its positions switch every reference on, the choice decides again
+    result = CliRunner().invoke(app, ["gnss", "mrk", str(project), str(folder / "Timestamp.MRK")])
+    assert result.exit_code == 0, result.output
+    chunk = ppg.Document.open(project).chunk
+    assert [c.reference.enabled for c in chunk.cameras] == [True, False, False]
+    assert chunk.meta["gnss_only_fix"] == {"disabled": [chunk.cameras[1].key, chunk.cameras[2].key]}
+    assert "only fix: the references of 2 photos are switched off" in CliRunner().invoke(
+        app, ["gnss", "status", str(project)]).output
+
+    # off: the ones it switched off come back
+    assert gnss_apply.only_fix(chunk, False) == 2 and "gnss_only_fix" not in chunk.meta
+    assert [c.reference.enabled for c in chunk.cameras] == [True] * 3
+    assert gnss_apply.only_fix(chunk, False) == 0  # nothing to give back

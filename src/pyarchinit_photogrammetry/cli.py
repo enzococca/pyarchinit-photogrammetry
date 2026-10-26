@@ -9,7 +9,7 @@ import json
 import runpy
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import NoReturn, Optional
 
 import typer
 
@@ -21,9 +21,11 @@ app = typer.Typer(add_completion=False, help="pyarchinit-photogrammetry: open-so
 markers_app = typer.Typer(help="Coded targets: printable sheets and turntable mats")
 pa_app = typer.Typer(help="PyArchInit database bridge")
 plugins_app = typer.Typer(help="Plugins: those found, the index of the plugin repository, installing, enabling")
+gnss_app = typer.Typer(help="GNSS positions of the photos: their quality per flight, DJI MRK files, positions files")
 app.add_typer(markers_app, name="markers")
 app.add_typer(pa_app, name="pyarchinit")
 app.add_typer(plugins_app, name="plugins")
+app.add_typer(gnss_app, name="gnss")
 
 
 CLASSES_HELP = "point classes, e.g. 2,64 (2 ground, 3-5 vegetation, 64 masonry, 71 equipment)"
@@ -2403,6 +2405,113 @@ def remote(target: str, project: Path,
         if proc.poll() is None:
             proc.terminate()
     typer.echo("the remote node left")
+
+
+# ----------------------------------------------------------------------------- GNSS positions of the photos
+
+def _metres(values) -> str:
+    """Metres per axis as ``0.010/0.010/0.018``, ``-`` for none."""
+    return "/".join(f"{v:.3f}" for v in values) if values else "-"
+
+
+@gnss_app.command("status")
+def gnss_status(project: Path, chunk: Optional[str] = None):
+    """Where the positions of the photos come from and how good they are, flight by flight.
+
+    A table per flight: the photos by RTK state (fix, float, single, none = a position and no RTK data), those
+    without a position, the references switched off, the median accuracy and, once aligned and georeferenced, how
+    far the cameras are from their positions."""
+    from .gnss.apply import ONLY_FIX
+    from .gnss.quality import summary
+
+    _doc, ch = _open(project, chunk)
+    rows = summary(ch)
+    photos = sum(r["photos"] for r in rows)
+    positioned = photos - sum(r["no_position"] for r in rows)
+    sources: dict[str, int] = {}
+    for r in rows:
+        for name, n in r["sources"].items():
+            sources[name] = sources.get(name, 0) + n
+    where = ", ".join(f"{name} {n}" for name, n in sorted(sources.items(), key=lambda p: -p[1]))
+    typer.echo(f"{ch.label}: {photos} photos, {positioned} with a position" + (f" ({where})" if where else ""))
+    if not rows:
+        return
+    typer.echo(f"{'flight':<8}{'photos':>7}{'fix':>6}{'float':>7}{'single':>8}{'none':>6}{'no position':>13}"
+               f"{'disabled':>10}  {'accuracy (m)':<22}{'rms (m)':<22}{'max (m)':<8}")
+    for r in rows:
+        s = r["status"]
+        biggest = "-" if r["residual_max"] is None else f"{r['residual_max']:.3f}"
+        typer.echo(f"{r['flight'] or 'undated':<8}{r['photos']:>7}{s['fix']:>6}{s['float']:>7}{s['single']:>8}"
+                   f"{s['none']:>6}{r['no_position']:>13}{r['disabled']:>10}  {_metres(r['accuracy_median']):<22}"
+                   f"{_metres(r['residual_rms']):<22}{biggest:<8}")
+    kept = ch.meta.get(ONLY_FIX)
+    if kept is not None:
+        typer.echo(f"only fix: the references of {len(kept.get('disabled') or [])} photos are switched off")
+
+
+def _gnss_failed(exc: Exception) -> NoReturn:
+    typer.echo(f"error: {exc}", err=True)
+    raise typer.Exit(1)
+
+
+def _unmatched(names: list[str], what: str) -> None:
+    if names:
+        typer.echo(f"{what} ({len(names)}): " + ", ".join(names[:8]) + (" ..." if len(names) > 8 else ""))
+
+
+@gnss_app.command("mrk")
+def gnss_mrk(project: Path, file: Path,
+             photos: Optional[Path] = typer.Option(None, "--photos", help="folder of the photos (default: the folder "
+                                                   "of the MRK)"),
+             chunk: Optional[str] = None):
+    """Give the photos the position of their shot in a DJI Timestamp.MRK.
+
+    The camera, not the antenna, with its RTK state and accuracy. The photos are paired by the shot number in their
+    names, else by order when the MRK has as many lines as the folder has photos. Doing it again changes nothing."""
+    from .gnss import apply as gnss
+
+    doc, ch = _open(project, chunk)
+    try:
+        result = gnss.apply_mrk(ch, file, photos)
+    except (OSError, ValueError) as exc:
+        _gnss_failed(exc)
+    if not result["matched"]:
+        _gnss_failed(ValueError("no photo of the chunk found its shot in the MRK: check the folder of the photos"))
+    gnss.keep_only_fix(ch)
+    doc.save()
+    states = ", ".join(f"{k} {n}" for k, n in sorted(result["status"].items(), key=lambda p: -p[1]))
+    typer.echo(f"{result['matched']} of {result['photos']} photos took the position of their shot ({states})")
+    _unmatched(result["unmatched"], "without a position from the MRK")
+
+
+@gnss_app.command("positions")
+def gnss_positions(project: Path, file: Path,
+                   crs: str = typer.Option(..., "--crs", help="coordinate system of the file: EPSG:4979 (longitude, "
+                                           "latitude, ellipsoidal height), a projected system such as EPSG:32633, "
+                                           "or LOCAL"),
+                   height: str = typer.Option("ellipsoidal", "--height", help="ellipsoidal (GNSS) or exif (above the "
+                                              "sea level)"),
+                   chunk: Optional[str] = None):
+    """Give the photos named in a text file their position and accuracy.
+
+    One line per photo: name, x, y, height and, when there are any, sx, sy, sz (standard deviations) or accuracy,
+    and status; a header names the columns. Doing it again changes nothing."""
+    from .gnss import positions
+    from .gnss.apply import keep_only_fix
+
+    if height not in positions.HEIGHTS:
+        raise typer.BadParameter(f"--height: one of {', '.join(positions.HEIGHTS)}")
+    doc, ch = _open(project, chunk)
+    try:
+        result = positions.apply_positions(ch, positions.read_positions(file), crs, height=height)
+    except (OSError, ValueError) as exc:
+        _gnss_failed(exc)
+    if not result["matched"]:
+        _gnss_failed(ValueError("no line of the file found its photo in the chunk"))
+    keep_only_fix(ch)
+    doc.save()
+    typer.echo(f"{result['matched']} of {result['rows']} rows found their photo")
+    _unmatched(result["unmatched"], "not in the chunk")
 
 
 def main():  # pragma: no cover - console entry point

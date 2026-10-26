@@ -77,3 +77,38 @@ def apply_mrk(chunk: Chunk, mrk_path: str | Path, photos_folder: str | Path | No
         status[state] += 1
     return {"matched": sum(status.values()), "shots": len(shots), "photos": len(files), "status": dict(status),
             "unmatched": unmatched}
+
+
+ONLY_FIX = "gnss_only_fix"
+
+
+def only_fix(chunk: Chunk, on: bool = True) -> int:
+    """Switch off the references of the photos whose position is not an RTK fix (``on``), or give them back.
+
+    A photo counts as fix when ``meta["gnss"]["status"]`` is ``"fix"``: a position with no status (the EXIF GPS, a
+    positions file with no status column) does not. Only references that are on and have a position are
+    switched off; the keys of the ones switched off are kept in ``chunk.meta["gnss_only_fix"]["disabled"]``, so
+    ``on=False`` switches back on exactly those and a reference the user had switched off by hand stays off. Doing
+    it again with ``on=True`` takes back what was switched off before and decides anew (after positions were
+    applied again). Returns how many references were switched off, or back on."""
+    cameras = {c.key: c for c in chunk.cameras}
+    before = (chunk.meta.get(ONLY_FIX) or {}).get("disabled") or []
+    for key in before:
+        if key in cameras:
+            cameras[key].reference.enabled = True
+    if not on:
+        chunk.meta.pop(ONLY_FIX, None)
+        return len([k for k in before if k in cameras])
+    off = [c.key for c in chunk.cameras if c.reference.location and c.reference.enabled
+           and (c.meta.get("gnss") or {}).get("status") != "fix"]
+    for key in off:
+        cameras[key].reference.enabled = False
+    chunk.meta[ONLY_FIX] = {"disabled": off}
+    return len(off)
+
+
+def keep_only_fix(chunk: Chunk) -> None:
+    """After positions were applied (they switch every reference they set on): when *only the fix positions* is on
+    for ``chunk``, decide again which references it switches off."""
+    if ONLY_FIX in chunk.meta:
+        only_fix(chunk, True)
