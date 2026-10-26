@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import PureWindowsPath
 
 import numpy as np
 import pytest
@@ -582,6 +583,23 @@ def test_positions_matched_by_name_and_folder(tmp_path):
     first, second, third, fourth = ch.cameras
     assert second.reference.location == [1.0, 2.0, 3.0] and first.reference.location == [5.0, 6.0, 7.0]
     assert fourth.meta["gnss"]["source"] == "positions_file" and third.meta["gnss"]["source"] == "exif"
+
+
+def test_positions_matched_by_a_windows_path():
+    # the drive of a Windows path is "C:\\" among its parts and "c:" in a label split on the slashes; a share is one part
+    drive = PureWindowsPath(r"C:\Users\me\100MEDIA\DJI_0002.png")
+    share = PureWindowsPath(r"\\server\rilievi\100MEDIA\DJI_0003.JPG")
+    assert positions._parts(drive) == ("c:", "users", "me", "100media", "dji_0002.png")
+    assert positions._parts(share) == ("server", "rilievi", "100media", "dji_0003.jpg")
+    index = ({}, {})
+    for cam, path in (("a", drive), ("b", share)):
+        parts = positions._parts(path)
+        index[0].setdefault(parts[-1], []).append((cam, parts))
+        index[1].setdefault(PureWindowsPath(parts[-1]).stem, []).append((cam, parts))
+    assert positions._find(index, str(drive)) == ["a"]
+    assert positions._find(index, "C:/Users/me/100MEDIA/DJI_0002") == ["a"]
+    assert positions._find(index, str(share)) == ["b"]
+    assert positions._find(index, r"D:\Users\me\100MEDIA\DJI_0002.png") == []
 
 
 def test_positions_files_that_cannot_be_used(tmp_path):

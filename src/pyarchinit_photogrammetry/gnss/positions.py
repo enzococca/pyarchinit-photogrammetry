@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 import math
 import re
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from ..core import crs as crs_mod
 from ..core.chunk import Chunk
@@ -134,7 +134,7 @@ def apply_positions(chunk: Chunk, rows: list[dict], crs: str, height: str = "ell
 
     index = ({}, {})  # the cameras by lower case file name and by name without extension
     for cam in chunk.cameras:
-        parts = tuple(p.lower() for p in Path(cam.path).parts)
+        parts = _parts(Path(cam.path))
         index[0].setdefault(parts[-1], []).append((cam, parts))
         index[1].setdefault(Path(parts[-1]).stem, []).append((cam, parts))
     plan: dict[int, tuple] = {}
@@ -175,6 +175,12 @@ def _accuracy_of(row: dict, status: str | None, default: list[float]) -> tuple[l
     if status:  # a declared status is never more accurate than its floor
         return [max(d, f) for d, f in zip(default, accuracy(status, None))], {}
     return list(default), {}
+
+
+def _parts(path: PurePath) -> tuple[str, ...]:
+    """The folders and the file name of ``path`` in lower case, split as :func:`_find` splits a label: the root goes,
+    a drive is ``c:`` and a network share is its server and its share."""
+    return tuple(p for part in path.parts for p in re.split(r"[\\/]+", part.lower()) if p)
 
 
 def _find(index: tuple[dict, dict], label: str) -> list:
