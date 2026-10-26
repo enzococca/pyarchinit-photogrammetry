@@ -52,6 +52,7 @@ PROBE_LAYER = "Punti di misura"  # points with the values of the products: eleva
 CROP_LAYER = "Ritaglio"  # the polygon drawn with the crop tool
 PATCH_LAYER = "Patch ortofoto"  # areas of the orthomosaic coloured from photos chosen by hand
 STONES_LAYER = "Pietre"  # stone-by-stone drawing (archaeo.stones), per raster: orthomosaic or elevation
+PROFILE_LAYER = "Profilo della sezione"  # the line where the plane of a section cuts the model
 
 
 def _outlined(rgba: np.ndarray, polygon, bounds) -> np.ndarray:
@@ -209,6 +210,8 @@ class MainWindow(QMainWindow):
         self.model_view.section_requested.connect(self._section_in_3d)
         self.model_view.slice_requested.connect(self._slice_in_3d)
         self.model_view.cut_requested.connect(self._cut_in_3d)
+        self.model_view.elevation_requested.connect(
+            lambda kind, data: self.build_elevation(view=data) if kind == "view" else self.build_elevation(points=data))
         self.model_view.move_marker_requested.connect(self._marker_moved_in_3d)
         self.model_view.photos_point_requested.connect(self.filter_photos_by_point)
         self.ortho_view = RasterView()
@@ -5133,33 +5136,73 @@ class MainWindow(QMainWindow):
                    _it(info['dz_max'] * 100, 1)))))
 
     # ---------------------------------------------------------------- elevations
-    def _elevation_fields(self, kind: str) -> list:
+    def _elevation_fields(self, kind: str, markers: list | None = None) -> list:
+        """Fields of the elevation dialog: ``kind`` plane (a trace), cylinder, view (the 3D view) or
+        points (markers, three clicks); ``markers``: ``(key, label)`` of the selected markers, for the
+        axes of their plane."""
         fields = []
+        if kind != "cylinder":
+            fields.append(Field("type", tr("Che cosa"), "elevation",
+                                choices=[("elevation", tr("Prospetto (la superficie vista dal piano)")),
+                                         ("section", tr("Sezione (taglia quello che sta davanti al piano)"))],
+                                tip=tr("Sezione: il modello davanti al piano viene tolto e la linea del taglio "
+                                       "(il profilo) viene disegnata sull'ortofoto")))
         if kind == "plane":
             fields.append(Field("side", "Lato da cui guardare", "auto",
                                 choices=[("auto", "Dove sono le foto"), ("left", "A sinistra della traccia"),
                                          ("right", "A destra della traccia")]))
+        if kind == "view":
+            fields.append(Field("extent", tr("Estensione"), "view",
+                                choices=[("view", tr("Quello che si vede nella vista")),
+                                         ("all", tr("Tutto il modello"))]))
+        if markers:
+            labels = [(k, label) for k, label in markers]
+            fields += [
+                Field("axis_from", tr("Marker: asse orizzontale da"), labels[0][0], choices=labels,
+                      tip=tr("u = 0 su questo marker e cresce verso il secondo")),
+                Field("axis_to", tr("Marker: asse orizzontale verso"), labels[1][0], choices=labels),
+                Field("vert_from", tr("Marker: asse verticale da"), None,
+                      choices=[(None, tr("perpendicolare all'orizzontale, verso l'alto"))] + labels),
+                Field("vert_to", tr("Marker: asse verticale verso"), None,
+                      choices=[(None, tr("perpendicolare all'orizzontale, verso l'alto"))] + labels)]
         if kind == "cylinder":
             fields.append(Field("inside", "Visto", True, choices=[(True, "Dall'interno (pozzo, abside)"),
                                                                    (False, "Dall'esterno (torre, colonna)")]))
+        if kind != "view":
+            fields += [
+                Field("front", "Profondita' davanti (m)", 0.5, minimum=0.0, maximum=1000.0, decimals=3,
+                      tip="Cio' che sta piu' avanti (impalcature, una sezione davanti al muro) non copre la parete"),
+                Field("back", "Profondita' dietro (m)", 0.5, minimum=0.0, maximum=1000.0, decimals=3)]
         return fields + [
-            Field("front", "Profondita' davanti (m)", 0.5, minimum=0.0, maximum=1000.0, decimals=3,
-                  tip="Cio' che sta piu' avanti (impalcature, una sezione davanti al muro) non copre la parete"),
-            Field("back", "Profondita' dietro (m)", 0.5, minimum=0.0, maximum=1000.0, decimals=3),
             Field("resolution", "Risoluzione (m/pixel)", None, kind="optional_float"),
             Field("blending", "Fusione", "mosaic",
                   choices=[("mosaic", "Mosaico senza cuciture"), ("disabled", "Nessuna (una foto per cella)")]),
             Field("colour", "Correzione colore", True),
             Field("name", "Nome", "", kind="text")]
 
-    def build_elevation(self, section: dict | None = None) -> None:
-        """Workflow > Prospetto: on the trace of a section, on the plane of the selected markers,
-        or on the cylinder of the selected polygon (a well, a tower)."""
+    def build_elevation(self, section: dict | None = None, view: dict | None = None, points=None) -> None:
+        """Workflow > Prospetto: on the trace of a section, on the plane of the selected markers (the
+        axes chosen among them), on the cylinder of the selected polygon (a well, a tower), on the
+        plane of the 3D view as it looks now (``view``, from :meth:`ModelView.view_frame`) or on the
+        plane of three points clicked in the 3D view (``points``, internal frame). An elevation or a
+        section (what stands in front of the plane taken away, the profile of the cut drawn)."""
         if not self._need_chunk(aligned=True, product="model"):
             return
         from ..engine import elevation as E
 
-        if section is None:
+        ch = self.chunk
+        cams = ch.to_world(np.array([c.center for c in ch.aligned_cameras]))
+        if view is not None:
+            v = ParamDialog.ask(self, tr("Ortofoto da questa vista"), self._elevation_fields("view"),
+                                intro=tr("Ortofoto e rilievo del modello sul piano perpendicolare alla vista, con "
+                                         "l'alto dello schermo in alto e la destra a destra."))
+            kind = "view"
+        elif points is not None:
+            v = ParamDialog.ask(self, tr("Prospetto sul piano dei tre punti"), self._elevation_fields("points"),
+                                intro=tr("Il piano passa per i tre punti cliccati; l'asse orizzontale va dal primo "
+                                         "al secondo."))
+            kind = "points"
+        elif section is None:
             markers = self.reference.selected_markers()
             poly = self._selected_polygon()
             choices = []
@@ -5175,8 +5218,10 @@ class MainWindow(QMainWindow):
                            "marker sulla parete nel pannello Riferimenti, oppure seleziona un poligono attorno a un "
                            "pozzo o a una torre.")
                 return
+            labels = [(k, ch.marker_by_key(k).label) for k in markers] if len(markers) >= 3 else None
             v = ParamDialog.ask(self, "Prospetto", [Field("source", "Superficie", choices[0][0], choices=choices)]
-                                + self._elevation_fields("cylinder" if choices[0][0][0] == "cylinder" else "plane"),
+                                + self._elevation_fields("cylinder" if choices[0][0][0] == "cylinder" else "plane",
+                                                         labels),
                                 intro="Ortofoto della parete e rilievo (distanza dal piano o dal cilindro) costruiti "
                                       "sul modello.")
             if not v:
@@ -5186,60 +5231,105 @@ class MainWindow(QMainWindow):
                 section = self.sections[idx]
         else:
             v = ParamDialog.ask(self, f"Prospetto lungo {section['label']}", self._elevation_fields("plane"))
-            if not v:
-                return
             kind = "section"
+        if not v:
+            return
+        what = "section" if v.get("type") == "section" else "elevation"
+        bounds = None
         try:
-            if kind == "section":
+            if kind == "view":
+                frame = E.plane_from_view(view["centre"], view["toward"], view["up"])
+                if v.get("extent", "view") == "view":
+                    uv = frame.coords(np.asarray(view["corners"], float))[:, :2]
+                    bounds = (float(uv[:, 0].min()), float(uv[:, 1].min()), float(uv[:, 0].max()),
+                              float(uv[:, 1].max()))
+                name = v.get("name") or ("Sezione dalla vista 3D" if what == "section" else "Ortofoto dalla vista 3D")
+            elif kind == "points":
+                world = ch.to_world(np.asarray(points, float))
+                frame = E.plane_from_markers(world, world[0], world[1], toward=cams.mean(axis=0))
+                name = v.get("name") or ("Sezione per tre punti" if what == "section" else "Prospetto per tre punti")
+            elif kind == "section":
                 a, b = np.asarray(section["p1"], float), np.asarray(section["p2"], float)
                 side = None
                 if v.get("side") in ("left", "right"):
                     d = b - a
                     left = np.array([-d[1], d[0]])
                     side = (a + b) / 2 + (left if v["side"] == "left" else -left)
-                frame = E.plane_from_line(self.chunk, a, b, side)
-                name = v.get("name") or f"Prospetto {section['label']}"
+                frame = E.plane_from_line(ch, a, b, side)
+                name = v.get("name") or f"{'Sezione' if what == 'section' else 'Prospetto'} {section['label']}"
             elif kind == "markers":
-                ms = [self.chunk.marker_by_key(k) for k in self.reference.selected_markers()]
-                pts = [m.position for m in ms if m.position is not None]
-                if len(pts) < 3:
+                ms = [ch.marker_by_key(k) for k in self.reference.selected_markers()]
+                placed = {m.key: ch.to_world(m.position[None])[0] for m in ms if m.position is not None}
+                if len(placed) < 3:
                     self._warn("I marker selezionati non hanno ancora una posizione (allinea le foto).")
                     return
-                world = self.chunk.to_world(np.array(pts))
-                cams = self.chunk.to_world(np.array([c.center for c in self.chunk.aligned_cameras]))
-                frame = E.plane_from_points(world, toward=cams.mean(axis=0))
-                name = v.get("name") or "Prospetto sui marker"
+
+                def at(key):
+                    if key not in placed:
+                        raise ValueError(tr("Il marker {0} non ha ancora una posizione", ch.marker_by_key(key).label))
+                    return placed[key]
+
+                axis = (v.get("axis_from"), v.get("axis_to"))
+                if None in axis:  # the dialog without the axes (older callers): the first two markers
+                    axis = tuple(list(placed)[:2])
+                a, b = at(axis[0]), at(axis[1])
+                c = d = None
+                if v.get("vert_from") is not None and v.get("vert_to") is not None:
+                    c, d = at(v["vert_from"]), at(v["vert_to"])
+                frame = E.plane_from_markers(list(placed.values()), a, b, c, d, toward=cams.mean(axis=0))
+                name = v.get("name") or ("Sezione sui marker" if what == "section" else "Prospetto sui marker")
             else:
                 poly = self._selected_polygon()
                 ring = np.asarray(poly.exterior.coords if hasattr(poly, "exterior") else poly.geoms[0].exterior.coords)
-                frame = E.cylinder_from_circle(self.chunk, ring, inside=bool(v.get("inside", True)))
+                frame = E.cylinder_from_circle(ch, ring, inside=bool(v.get("inside", True)))
                 name = v.get("name") or ("Sviluppo interno" if frame.inside else "Sviluppo esterno")
+                what = "elevation"
         except Exception as exc:
             self._exc("Superficie del prospetto non valida", exc)
             return
-        depth = (-float(v.get("back", 0.5)), float(v.get("front", 0.5)))
-        chunk = self.chunk
+        # the view: the whole model as the view sees it (a section: all that lies behind the plane)
+        depth = None if kind == "view" else (-float(v.get("back", 0.5)), float(v.get("front", 0.5)))
         self.run_task("Prospetto", lambda p: E.build_elevation(
-            chunk, frame, v.get("resolution"), name, depth, v.get("blending", "mosaic"),
-            bool(v.get("colour", True)), progress=p), self.show_elevation, refresh=False)
+            ch, frame, v.get("resolution"), name, depth, v.get("blending", "mosaic"),
+            bool(v.get("colour", True)), progress=p, bounds=bounds, kind=what), self.show_elevation, refresh=False)
 
     def show_elevation(self, entry: dict) -> None:
-        from ..engine.elevation import elevation_paths
+        from ..engine import elevation as E
 
-        ortho, relief = elevation_paths(self.chunk, entry)
+        ortho, relief = E.elevation_paths(self.chunk, entry)
         if not ortho.exists():
             self._warn(tr("Il prospetto «{0}» non ha piu' i suoi file.", entry['name']))
             return
+        self._raster_version = ("elevation", entry["id"])
         self.ortho_view.load(ortho, "ortho")
         if relief.exists():
             self.ortho_view.set_dem(relief)
         self._draw_stones()
-        self._raster_version = ("elevation", entry["id"])
+        self._draw_elevation_layers(entry)
         self.show_view(self.ortho_view)
         self.workspace.populate(self.doc)
-        self.statusBar().showMessage(tr("{0}: coordinate del prospetto in metri (u lungo la parete, v in alto); Z = "
-                                        "rilievo verso chi guarda", entry['name']), 15000)
+        if entry.get("v_is_height"):
+            text = tr("{0}: coordinate del prospetto in metri (u lungo la parete, v = quota); Z = rilievo verso chi "
+                      "guarda", entry['name'])
+        else:
+            text = tr("{0}: coordinate del prospetto in metri (u lungo la parete, v in alto); Z = rilievo verso chi "
+                      "guarda", entry['name'])
+        self.statusBar().showMessage(text, 15000)
         self._dirty(True)
+
+    def _draw_elevation_layers(self, entry: dict) -> None:
+        """On an elevation: the markers where they fall on its plane, and the profile of a section."""
+        from ..engine import elevation as E
+
+        view = self.ortho_view
+        view.remove_layer("Marker")
+        view.remove_layer(PROFILE_LAYER)
+        with view.batch():
+            for line in E.read_profile(self.chunk, entry):
+                view.add_line(line, "#ff2d2d", "", layer=PROFILE_LAYER, width=2.0)
+            for label, u, v, d in E.markers_on(self.chunk, entry):
+                view.add_point(u, v, color="#00e5ff", label=label, layer="Marker",
+                               attrs={"marker": label, "d": round(d, 3)})
 
     def export_elevation(self, entry: dict) -> None:
         import shutil
@@ -5257,6 +5347,11 @@ class MainWindow(QMainWindow):
         frame = ortho.parent / "frame.json"
         if frame.exists():
             shutil.copy2(frame, Path(folder) / f"{stem}_piano.json")
+        from ..engine.elevation import write_profile_dxf
+
+        if write_profile_dxf(self.chunk, entry, Path(folder) / f"{stem}_profilo.dxf") is not None:
+            self._info("Prospetto", tr("Ortofoto, rilievo, piano e profilo (DXF) di «{0}» in {1}.", entry['name'], folder))
+            return
         self._info("Prospetto", tr("Ortofoto, rilievo e piano di «{0}» in {1}.", entry['name'], folder))
 
     def delete_elevation(self, entry: dict, chunk=None) -> None:

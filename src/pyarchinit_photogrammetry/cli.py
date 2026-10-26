@@ -192,6 +192,79 @@ def cut_model_cmd(project: Path,
         typer.echo(f)
 
 
+@app.command("elevation")
+def elevation_cmd(project: Path,
+                  trace: Optional[str] = typer.Option(None, help="vertical plane on the trace X1,Y1,X2,Y2 (chunk CRS)"),
+                  side: Optional[str] = typer.Option(None, help="with --trace: a point X,Y on the viewer's side "
+                                                     "(default: where the photos are)"),
+                  markers: Optional[str] = typer.Option(None, help="plane of the markers A,B,C[,...] (labels, three "
+                                                        "or more): u from A towards B, 0 at A"),
+                  vertical: Optional[str] = typer.Option(None, help="with --markers: the vertical axis C,D (labels); "
+                                                         "default perpendicular to A-B, upwards"),
+                  facing: Optional[str] = typer.Option(None, help="the plane of a view: NX,NY,NZ from the model "
+                                                       "towards the viewer, through --centre"),
+                  centre: Optional[str] = typer.Option(None, help="with --facing: the point X,Y,Z the plane goes "
+                                                       "through"),
+                  up: str = typer.Option("0,0,1", help="with --facing: the up of the view"),
+                  section: bool = typer.Option(False, help="a section: what stands in front of the plane is taken "
+                                               "away and the line of the cut saved as the profile"),
+                  front: float = typer.Option(0.5, help="metres kept in front of the plane (not for a section)"),
+                  back: float = typer.Option(0.5, help="metres kept behind the plane"),
+                  resolution: Optional[float] = typer.Option(None, help="metres per pixel (default: the GSD)"),
+                  name: Optional[str] = None, chunk: Optional[str] = None):
+    """Orthophoto and relief of the model on a plane - an elevation or a section: on a trace, on the
+    plane of markers with the axes chosen, or on the plane of a view. With --facing the whole model
+    is kept (a section: all behind the plane)."""
+    import numpy as np
+
+    from .engine import elevation as E
+
+    def numbers(text, n, what):
+        values = [float(v) for v in text.replace(";", ",").split(",")]
+        if len(values) != n:
+            raise typer.BadParameter(f"{what}: {n} numbers separated by commas")
+        return np.asarray(values)
+
+    if sum(v is not None for v in (trace, markers, facing)) != 1:
+        raise typer.BadParameter("give one plane: --trace, --markers or --facing")
+    doc, ch = _open(project, chunk)
+    depth = (-back, front)
+    if trace is not None:
+        v = numbers(trace, 4, "--trace")
+        frame = E.plane_from_line(ch, v[:2], v[2:], numbers(side, 2, "--side") if side else None)
+    elif markers is not None:
+        by_label = {m.label: m for m in ch.markers if m.position is not None}
+        labels = [s.strip() for s in markers.split(",") if s.strip()]
+        missing = [s for s in labels if s not in by_label]
+        if missing or len(labels) < 3:
+            raise typer.BadParameter(f"three markers with a position at least; not found or not placed: {missing}")
+        pos = {s: ch.to_world(by_label[s].position[None])[0] for s in labels}
+        c = d = None
+        if vertical:
+            cd = [s.strip() for s in vertical.split(",")]
+            if len(cd) != 2 or any(s not in by_label for s in cd):
+                raise typer.BadParameter("--vertical: two placed markers C,D")
+            c, d = (ch.to_world(by_label[s].position[None])[0] for s in cd)
+        cams = ch.to_world(np.array([cam.center for cam in ch.aligned_cameras]))
+        frame = E.plane_from_markers(list(pos.values()), pos[labels[0]], pos[labels[1]], c, d,
+                                     toward=cams.mean(axis=0))
+    else:
+        if centre is None:
+            raise typer.BadParameter("--facing needs --centre")
+        frame = E.plane_from_view(numbers(centre, 3, "--centre"), numbers(facing, 3, "--facing"),
+                                  numbers(up, 3, "--up"))
+        depth = None
+    entry = E.build_elevation(ch, frame, resolution, name, depth, kind="section" if section else "elevation",
+                              progress=print_progress)
+    doc.save()
+    ortho, relief = E.elevation_paths(ch, entry)
+    w, h = entry["size"]
+    typer.echo(f"{entry['name']}: {w} x {h} px at {entry['resolution']:.4g} m/px"
+               + ("; v = height" if entry.get("v_is_height") else "")
+               + (f"; profile: {len(E.read_profile(ch, entry))} lines" if entry.get("profile") else ""))
+    typer.echo(f"{ortho}\n{relief}")
+
+
 @app.command("colour-scan")
 def colour_scan(project: Path, scan: str = typer.Option(..., help="label of the chunk to colour"),
                 photos: str = typer.Option(..., help="label of the chunk with the aligned photos")):

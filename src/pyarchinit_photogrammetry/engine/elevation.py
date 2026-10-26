@@ -179,6 +179,82 @@ def plane_from_points(points, toward=None) -> Plane:
     return Plane(c + min(pc @ u) * u + min(pc @ v) * v, u, v)
 
 
+VERTICAL_TOLERANCE = np.cos(np.radians(1.0))  # a v axis within 1 degree of the vertical measures heights
+
+
+def with_heights(plane: Plane) -> Plane:
+    """``plane`` moved along its ``v`` axis so that ``v`` is the height (world Z) when that axis is
+    vertical within a degree: the elevation of a wall, a section, read with its true heights.
+    Other planes are returned as they are."""
+    if plane.v_axis[2] < VERTICAL_TOLERANCE:
+        return plane
+    origin = plane.origin - (plane.origin[2] / plane.v_axis[2]) * plane.v_axis
+    return Plane(origin, plane.u_axis, plane.v_axis)
+
+
+def heights_measured(frame) -> bool:
+    """Whether ``v`` of the frame is the height (world Z) of the point."""
+    return bool(frame.kind == "plane" and frame.v_axis[2] >= VERTICAL_TOLERANCE and abs(frame.origin[2]) < 1e-6)
+
+
+def plane_from_markers(points, a, b, c=None, d=None, toward=None, heights: bool = True) -> Plane:
+    """The plane of markers with the axes chosen, as Metashape's planar projection on markers:
+    the plane fitted to ``points`` (world, three or more, ``a`` and ``b`` among them), ``u`` along
+    ``a`` -> ``b`` and ``u`` = 0 at ``a``; ``v`` along ``c`` -> ``d`` when given, else perpendicular to
+    ``u`` in the plane and upwards. The plane faces ``toward`` (a world point on the viewer's side,
+    the cameras): when ``a`` -> ``b`` runs from right to left as the viewer sees it, ``u`` grows the
+    other way (``b`` at a negative ``u``) - the surface is never seen from behind.
+
+    ``heights``: when ``v`` is vertical (within a degree), ``v`` is the world height (see
+    :func:`with_heights`); otherwise ``v`` = 0 at ``a``."""
+    p = np.asarray(points, np.float64).reshape(-1, 3)
+    a, b = np.asarray(a, np.float64), np.asarray(b, np.float64)
+    if len(p) < 3:
+        raise ValueError("three markers at least")
+    centre = p.mean(axis=0)
+    w, vecs = np.linalg.eigh((p - centre).T @ (p - centre))
+    if w[1] < 1e-12 * max(w[2], 1e-30):
+        raise ValueError("the markers lie on a line: they do not make a plane")
+    normal = vecs[:, 0]
+    if toward is not None and (np.asarray(toward, np.float64) - centre) @ normal < 0:
+        normal = -normal
+    u = b - a
+    u = u - (u @ normal) * normal
+    if np.linalg.norm(u) < 1e-9:
+        raise ValueError("the two markers of the horizontal axis coincide (or are aligned with the view)")
+    u = _unit(u)
+    if c is not None and d is not None:
+        v = np.asarray(d, np.float64) - np.asarray(c, np.float64)
+        v = v - (v @ normal) * normal - (v @ u) * u
+        if np.linalg.norm(v) < 1e-9:
+            raise ValueError("the vertical axis is parallel to the horizontal one")
+        v = _unit(v)
+        if np.cross(u, v) @ normal < 0:
+            u = -u  # seen from the cameras' side: u flips, v stays as chosen
+    else:
+        v = np.cross(normal, u)  # u x v = normal: the plane faces the viewer
+        if abs(normal[2]) < VERTICAL_TOLERANCE and v[2] < 0:
+            u, v = -u, -v  # upwards; a horizontal plane keeps u along a -> b
+    origin = a - ((a - centre) @ normal) * normal
+    plane = Plane(origin, u, v)
+    return with_heights(plane) if heights else plane
+
+
+def plane_from_view(centre, toward, up, heights: bool = True) -> Plane:
+    """The plane of what a view shows: through ``centre`` (world), facing ``toward`` (a direction
+    from the scene towards the viewer), ``v`` along the ``up`` of the screen, ``u`` to the right -
+    the orthophoto of the model as the 3D view looks at it (Metashape's planar projection on the
+    current view)."""
+    normal = _unit(toward)
+    v = np.asarray(up, np.float64)
+    v = v - (v @ normal) * normal
+    if np.linalg.norm(v) < 1e-9:
+        raise ValueError("the up of the view is along the line of sight")
+    v = _unit(v)
+    plane = Plane(np.asarray(centre, np.float64), np.cross(v, normal), v)
+    return with_heights(plane) if heights else plane
+
+
 def cylinder_from_circle(chunk: Chunk, points, inside: bool = True) -> Cylinder:
     """The vertical cylinder through a circle fitted to plan points (three or more on the rim of a
     well or around a tower, chunk CRS)."""
@@ -252,13 +328,113 @@ def elevations(chunk: Chunk) -> list[dict]:
     return list(chunk.meta.get("elevations") or [])
 
 
+def cut_profile(chunk: Chunk, frame: Plane, bounds=None, simplify: float = 0.0) -> list[np.ndarray]:
+    """The line where ``frame`` cuts the model, as polylines of ``(u, v)`` (frame metres): the
+    profile of a section. ``bounds`` (u0, v0, u1, v1) keeps the parts inside; ``simplify`` in metres."""
+    from shapely.geometry import MultiLineString, box
+    from shapely.ops import linemerge
+
+    from ..io.mesh_ply import read_mesh
+
+    mesh = read_mesh(chunk.product_path("model"))
+    xyz = chunk.to_world(np.asarray(mesh.xyz, np.float64))
+    faces = np.asarray(mesh.faces, np.int64)
+    s = (xyz - frame.origin) @ frame.normal
+    above = s >= 0
+    fa = above[faces]
+    cross = fa.any(axis=1) & ~fa.all(axis=1)
+    f = faces[cross]
+    if not len(f):
+        return []
+    seg = []
+    for i, j in ((0, 1), (1, 2), (2, 0)):
+        vi, vj = f[:, i], f[:, j]
+        edge = above[vi] != above[vj]
+        t = s[vi] / np.where(edge, s[vi] - s[vj], 1.0)
+        seg.append((xyz[vi] + t[:, None] * (xyz[vj] - xyz[vi]), edge))
+    points = np.stack([p for p, _ in seg], axis=1)  # (F, 3 edges, 3)
+    edges = np.stack([e for _, e in seg], axis=1)
+    order = np.argsort(~edges, axis=1, kind="stable")[:, :2]  # the two edges that cross, in face order
+    ends = np.take_along_axis(points, order[:, :, None], axis=1)
+    uv = frame.coords(ends.reshape(-1, 3))[:, :2].reshape(-1, 2, 2)
+    lines = MultiLineString([tuple(map(tuple, s2)) for s2 in uv if np.linalg.norm(s2[1] - s2[0]) > 1e-12])
+    merged = linemerge(lines)
+    if bounds is not None:
+        merged = merged.intersection(box(*bounds))
+    if simplify > 0:
+        merged = merged.simplify(simplify)
+    parts = getattr(merged, "geoms", [merged])
+    return [np.asarray(g.coords) for g in parts if not g.is_empty and g.geom_type == "LineString" and len(g.coords) > 1]
+
+
+def markers_on(chunk: Chunk, entry: dict, margin: float = 0.05) -> list[tuple[str, float, float, float]]:
+    """``(label, u, v, d)`` of the markers of the chunk that lie on the elevation ``entry``: inside
+    its bounds and its depth band (``margin`` metres more each way)."""
+    frame = frame_from_dict(entry["frame"])
+    ms = [m for m in chunk.markers if m.position is not None]
+    if not ms:
+        return []
+    uvd = frame.coords(chunk.to_world(np.array([m.position for m in ms], np.float64)))
+    lo, hi = entry.get("depth") or (-np.inf, np.inf)
+    u0, v0, u1, v1 = entry.get("bounds") or (-np.inf, -np.inf, np.inf, np.inf)
+    keep = (uvd[:, 2] >= lo - margin) & (uvd[:, 2] <= hi + margin) & (uvd[:, 0] >= u0 - margin) & \
+        (uvd[:, 0] <= u1 + margin) & (uvd[:, 1] >= v0 - margin) & (uvd[:, 1] <= v1 + margin)
+    return [(m.label, float(x), float(y), float(z)) for m, (x, y, z), k in zip(ms, uvd, keep) if k]
+
+
+def profile_path(chunk: Chunk, entry: dict) -> Path | None:
+    """The profile of a section (``profile.json``: polylines of ``(u, v)``), when the entry has one."""
+    p = chunk.data_dir / entry["profile"] if entry.get("profile") else None
+    return p if p is not None and p.exists() else None
+
+
+def read_profile(chunk: Chunk, entry: dict) -> list[np.ndarray]:
+    p = profile_path(chunk, entry)
+    return [] if p is None else [np.asarray(line, np.float64) for line in json.loads(p.read_text())["lines"]]
+
+
+def write_profile_dxf(chunk: Chunk, entry: dict, path) -> Path | None:
+    """The profile of a section as a DXF in the coordinates of the elevation (u, v in metres; v the
+    height when the plane is upright): polylines on the layer PROFILO, the markers on MARKER. None
+    when the entry has no profile."""
+    import ezdxf
+
+    lines = read_profile(chunk, entry)
+    if not lines:
+        return None
+    dxf = ezdxf.new("R2010")
+    dxf.units = ezdxf.units.M
+    msp = dxf.modelspace()
+    dxf.layers.add("PROFILO", color=1)
+    dxf.layers.add("MARKER", color=4)
+    for line in lines:
+        msp.add_lwpolyline([tuple(map(float, q)) for q in line], dxfattribs={"layer": "PROFILO"})
+    for label, u, v, _d in markers_on(chunk, entry):
+        msp.add_point((u, v), dxfattribs={"layer": "MARKER"})
+        msp.add_text(label, height=max(0.02, 4 * float(entry.get("resolution") or 0.005)),
+                     dxfattribs={"layer": "MARKER"}).set_placement((u, v))
+    path = Path(path)
+    dxf.saveas(path)
+    return path
+
+
 def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: str | None = None,
                     depth: tuple[float, float] | None = None, blending: str = "mosaic",
                     colour_correction: bool | None = None, ghosting: bool = False, fill_holes: bool = True,
-                    progress: Progress | None = None, workers: int | None = None, max_angle: float = 80.0) -> dict:
+                    progress: Progress | None = None, workers: int | None = None, max_angle: float = 80.0,
+                    bounds=None, kind: str = "elevation") -> dict:
     """Orthophoto (RGBA) and DEM (depth ``d`` towards the viewer, float32) of the model on ``frame``,
     written in ``<chunk data>/elevations/<id>/`` (GeoTIFF in frame metres, no CRS; the frame in the
-    tags and in ``frame.json``) and listed in ``chunk.meta["elevations"]``. Returns the entry."""
+    tags and in ``frame.json``) and listed in ``chunk.meta["elevations"]``. Returns the entry.
+
+    ``bounds``: ``(u0, v0, u1, v1)`` of the part to build (default: the model in the depth band).
+    ``kind`` ``section``: nothing in front of the plane is kept (the depth band starts at 0) and the
+    line where the plane cuts the model is saved as the profile (``profile.json``, a plane only)."""
+    if kind == "section":
+        if frame.kind != "plane":
+            raise ValueError("a section is made on a plane")
+        lo = depth[0] if depth is not None else -np.inf
+        depth = (lo, 0.0)
     import rasterio
     from rasterio.enums import ColorInterp, Resampling
     from rasterio.transform import from_origin
@@ -277,7 +453,7 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
     correction = correction_for(chunk, colour_correction, progress.sub(0.0, 0.02))
     raycaster = raycaster_for_chunk(chunk)
     lock = threading.Lock()
-    surf = FrameSurface(chunk, raycaster, frame, resolution, lock, depth)
+    surf = FrameSurface(chunk, raycaster, frame, resolution, lock, depth, bounds)
     tile = 512 if frame.kind == "plane" else max(32, min(512, int(0.15 * frame.radius / resolution)))
     ctx = _context(chunk, resolution, cams, surf, raycaster, blending, max_angle, 8, workers, None, [], tile, lock,
                    correction=correction, ghosting=ghosting, fill_holes=fill_holes)
@@ -316,12 +492,22 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
             dst.write(surf.tile(r0, c0, th, tw).astype(np.float32)[None], window=Window(c0, r0, tw, th))
             if i % 16 == 0:
                 progress(0.86 + 0.12 * (i + 1) / len(tiles), f"Relief {i + 1}/{len(tiles)}")
+    heights = heights_measured(frame)
     (folder / "frame.json").write_text(json.dumps({"frame": frame.to_dict(), "depth": [surf.dmin, surf.dmax],
-                                                   "resolution": resolution}, indent=1))
-    entry = {"id": eid, "name": name or ("Prospetto" if frame.kind == "plane" else "Sviluppo cilindrico"),
+                                                   "resolution": resolution, "kind": kind, "bounds": list(surf.bounds),
+                                                   "v_is_height": heights}, indent=1))
+    default = "Sezione" if kind == "section" else ("Prospetto" if frame.kind == "plane" else "Sviluppo cilindrico")
+    entry = {"id": eid, "name": name or default, "kind": kind,
              "frame": frame.to_dict(), "depth": [surf.dmin, surf.dmax], "resolution": resolution,
+             "bounds": list(surf.bounds), "v_is_height": heights,
              "orthophoto": str(ortho_path.relative_to(chunk.data_dir)), "relief": str(dem_path.relative_to(chunk.data_dir)),
              "size": [w, h], "blending": blending, "colour_correction": correction is not None}
+    if kind == "section":
+        progress(0.985, "Profile of the section")
+        lines = cut_profile(chunk, frame, surf.bounds, simplify=resolution / 2)
+        path = folder / "profile.json"
+        path.write_text(json.dumps({"lines": [line.round(4).tolist() for line in lines]}))
+        entry["profile"] = str(path.relative_to(chunk.data_dir))
     chunk.meta.setdefault("elevations", []).append(entry)
     progress(1.0, f"Elevation {w}x{h} px")
     return entry

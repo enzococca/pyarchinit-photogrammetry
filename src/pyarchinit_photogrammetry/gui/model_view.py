@@ -570,6 +570,7 @@ class ModelView(QWidget):
     slice_requested = Signal(object)  # a point at the height of a plan slice (internal frame)
     move_marker_requested = Signal(int, object)  # a marker (key) to move to this point (internal frame)
     cut_requested = Signal(str, object)  # cut the model: "horizontal" (1 point), "vertical" (2), "points" (3), "values"
+    elevation_requested = Signal(str, object)  # an orthophoto on a plane: "view" (view_frame()), "points" (3, internal)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -649,6 +650,13 @@ class ModelView(QWidget):
         cut_menu.addAction(tr("Piano per tre punti: tre clic"), lambda: self.start_pick("cut_p"))
         cut_menu.addAction(tr("Con i valori..."), lambda: self.cut_requested.emit("values", []))
         self.b_cut.setMenu(cut_menu)
+        self.b_elevation = QPushButton(tr("Prospetto"))
+        self.b_elevation.setToolTip(tr("Ortofoto e rilievo del modello su un piano: quello della vista com'e' ora, o "
+                                       "quello di tre punti cliccati; un prospetto o una sezione"))
+        elev_menu = QMenu(self.b_elevation)
+        elev_menu.addAction(tr("Ortofoto da questa vista"), self._elevation_from_view)
+        elev_menu.addAction(tr("Piano per tre punti: tre clic"), lambda: self.start_pick("elev_p"))
+        self.b_elevation.setMenu(elev_menu)
         self.version_label = QLabel("")
         self.version_label.setObjectName("versionLabel")
         self.version_label.setStyleSheet("color: #b45309; font-weight: bold")
@@ -669,6 +677,7 @@ class ModelView(QWidget):
         bar.addWidget(self.b_section)
         bar.addWidget(self.b_slice)
         bar.addWidget(self.b_cut)
+        bar.addWidget(self.b_elevation)
         bar.addWidget(self.cb_cams)
         bar.addWidget(self.cb_marks)
         bar.addWidget(self.cb_region)
@@ -829,6 +838,7 @@ class ModelView(QWidget):
         self.b_section.setVisible(self.kind in self.PICK_KINDS)
         self.b_slice.setVisible(self.kind in self.PICK_KINDS)
         self.b_cut.setVisible(self.kind in ("model", "model_textured") and not self.paths)
+        self.b_elevation.setVisible(self.kind in self.PICK_KINDS and not self.paths)
         self.b_photos.setVisible(self.kind in self.PICK_KINDS)
         mode = self.color_mode()
         self.legend.setVisible((self.kind in ("point_cloud", "tie_points") and mode == "class")
@@ -862,13 +872,15 @@ class ModelView(QWidget):
         self._purpose = purpose
         if purpose != "section_end":
             self._section_start = None
-        if purpose in ("cut_h", "cut_v", "cut_p"):
+        if purpose in ("cut_h", "cut_v", "cut_p", "elev_p"):
             self._cut_points = []
         what = {"photos": "le foto che lo vedono", "section": "il primo estremo della sezione",
                 "section_end": "il secondo estremo della sezione", "slice": "la quota della pianta",
                 "cut_h": "la quota del piano di taglio", "cut_v": "il primo punto della linea di taglio",
                 "cut_v2": "il secondo punto della linea di taglio", "cut_p": "il primo dei tre punti del piano",
-                "cut_p2": "il secondo dei tre punti del piano", "cut_p3": "il terzo dei tre punti del piano"}.get(
+                "cut_p2": "il secondo dei tre punti del piano", "cut_p3": "il terzo dei tre punti del piano",
+                "elev_p": "il primo punto del prospetto (l'asse orizzontale va dal primo al secondo)",
+                "elev_p2": "il secondo punto del prospetto", "elev_p3": "il terzo punto del prospetto"}.get(
             purpose, "il nuovo posto del marker" if purpose.startswith("move:") else "un nuovo marker")
         self.picker.start(image, tr("Clic su un punto del modello o della nuvola: {0} - Esc o tasto destro annulla",
                                     tr(what)))
@@ -893,6 +905,17 @@ class ModelView(QWidget):
         elif purpose == "slice":
             if point is not None:
                 self.slice_requested.emit(point)
+        elif purpose.startswith("elev_p"):
+            if point is None:
+                return
+            points = getattr(self, "_cut_points", []) + [point]
+            self._cut_points = points
+            follow = {"elev_p": "elev_p2", "elev_p2": "elev_p3"}.get(purpose)
+            if follow is not None:
+                self.start_pick(follow)
+            else:
+                self._cut_points = []
+                self.elevation_requested.emit("points", points)
         elif purpose.startswith("cut_"):
             if point is None:
                 return
@@ -909,6 +932,39 @@ class ModelView(QWidget):
             self.move_marker_requested.emit(int(purpose[5:]), point)
         else:
             self.marker_requested.emit(point)
+
+    def _elevation_from_view(self) -> None:
+        frame = self.view_frame()
+        if frame is not None:
+            self.elevation_requested.emit("view", frame)
+
+    def view_frame(self) -> dict | None:
+        """What the view shows now, for an orthophoto from this view, in world coordinates (the chunk
+        CRS): ``centre`` (the surface under the middle of the view, else the middle of the scene on
+        the line of sight), ``toward`` (from the scene to the viewer), ``up`` (of the screen) and
+        ``corners`` (the four corners of the view on the plane through the centre)."""
+        if self.chunk is None or self.sd is None or self.kind not in self.PICK_KINDS:
+            return None
+        sd, canvas = self.sd, self.canvas
+        w, h = max(canvas.width(), 1), max(canvas.height(), 1)
+        _image, project = canvas.snapshot()
+        ray = canvas.view_ray
+        o, d, _pixel = ray(w / 2, h / 2)
+        picked = self.pick_point(w / 2, h / 2, project, ray)
+        if picked is not None:
+            shown = sd.to_display(self.chunk.to_world(np.asarray(picked)[None]) - sd.offset)[0]
+        else:
+            shown = np.asarray(sd.center, np.float64)
+        pc = o + float((shown - o) @ d) * d  # on the line of sight, at the depth of the surface
+
+        def on_plane(x, y):
+            oc, dc, _ = ray(x, y)
+            return oc + ((pc - oc) @ d) / (dc @ d) * dc
+
+        shown_pts = np.vstack([pc, pc - d, on_plane(w / 2, 0)] + [on_plane(x, y) for x, y in
+                                                                   ((0, 0), (w, 0), (w, h), (0, h))])
+        world = sd.from_display(shown_pts) + sd.offset
+        return {"centre": world[0], "toward": world[1] - world[0], "up": world[2] - world[0], "corners": world[3:]}
 
     def pick_point(self, x: float, y: float, project, ray=None, reach: float = 8.0):
         """The point of the surface under widget pixel (x, y), internal frame: of the points and
