@@ -215,6 +215,11 @@ on the public WorldView-3 datasets.
 * **Units in groups** (1.5.1): bulk identifiers, named UT groups and freehand selection.
 * **Layer labels** (1.5.2 - 1.5.3): labels shown or hidden per layer and edited without changing the US/UT
   number, saved per chunk, kept by *Annulla* and *Ripeti*.
+* **Elevations and sections like Metashape's planar orthomosaics** (1.5.5): on the plane of the 3D view as it
+  looks now, of markers with the axes chosen (u from one marker towards another, v perpendicular or between two
+  more), of three points clicked in the 3D view; a section takes away what stands in front of the plane and
+  saves the profile of the cut (drawn on the orthophoto, exported as DXF); v is the height on upright planes,
+  the markers are drawn on the elevation; `ppg elevation`.
 
 ## Next
 

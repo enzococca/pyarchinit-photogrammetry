@@ -1280,15 +1280,23 @@ ray from the viewer side on the model, kept within `depth=(dmin, dmax)` (what st
 | --- | --- |
 | `engine.elevation.plane_from_line(chunk, p1, p2, side=None)` | the vertical plane through a wall trace (plan points), seen from `side` (default: where the photos are) |
 | `plane_from_points(points, toward=None)` | the plane of three or more world points (markers on a wall) |
+| `plane_from_markers(points, a, b, c=None, d=None, toward=None, heights=True)` | the plane of markers with the axes chosen, as Metashape's planar projection: u from `a` towards `b` (0 at `a`), v along `c` -> `d` or perpendicular and upwards; facing `toward` (the cameras) |
+| `plane_from_view(centre, toward, up, heights=True)` | the plane of a view: through `centre`, facing `toward`, v along the `up` of the screen |
+| `with_heights(plane)`, `heights_measured(frame)` | v made the world height when the v axis is vertical within a degree; whether it is |
 | `cylinder_from_circle(chunk, points, inside=True)` | the vertical cylinder through a circle fitted to plan points |
-| `build_elevation(chunk, frame, resolution=None, name=None, depth=None, blending="mosaic", colour_correction=None, ghosting=False, fill_holes=True, max_angle=80)` | orthophoto and relief (`d`, float32) of the frame as GeoTIFF in frame metres, listed in `chunk.meta["elevations"]` |
+| `build_elevation(chunk, frame, resolution=None, name=None, depth=None, blending="mosaic", colour_correction=None, ghosting=False, fill_holes=True, max_angle=80, bounds=None, kind="elevation")` | orthophoto and relief (`d`, float32) of the frame as GeoTIFF in frame metres, listed in `chunk.meta["elevations"]`; `kind="section"` keeps only what lies behind the plane and saves the profile |
+| `cut_profile(chunk, frame, bounds=None, simplify=0)` | the line where a plane cuts the model, polylines of `(u, v)` |
+| `read_profile(chunk, entry)`, `write_profile_dxf(chunk, entry, path)` | the profile of a section; as a DXF in the coordinates of the elevation (layers PROFILO, MARKER) |
+| `markers_on(chunk, entry)` | `(label, u, v, d)` of the markers lying on an elevation |
 | `elevations(chunk)` | the elevations of a chunk |
 | `elevation_paths(chunk, entry)` | the orthophoto and relief files of one |
 | `remove_elevation(chunk, id)` | removes one |
 
 **`build_elevation(...)`** runs the orthomosaic engine on the frame (same photo choice, blending,
 colour correction) and writes the files in `<chunk data>/elevations/<id>/` (frame in the tags and
-in `frame.json`).
+in `frame.json`). `bounds=(u0, v0, u1, v1)` builds only that part (what a view shows); without it the
+part of the model inside the depth band. The entry says `kind`, `bounds`, `v_is_height` and, for a
+section, the `profile` file. CLI: `ppg elevation`.
 
 ## Masks of the photos
 

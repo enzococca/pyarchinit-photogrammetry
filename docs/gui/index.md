@@ -134,6 +134,8 @@ them (in the workspace ++f2++ renames instead).
     * **Section** (two points of the model or the cloud) and **Plan slice** (a point: the plan at its
       height);
     * **Cut**: the model cut with a plane ([cutting the model](processing.md#cutting-the-model));
+    * **Elevation**: an orthophoto on the plane of the view as it is now, or on the plane of three points
+      clicked; an elevation or a section ([elevations](processing.md#elevations));
     * **Vertical exaggeration** (x0.1 to x50): the heights multiplied around the centre of the scene, so that
       the relief of almost flat ground can be read. Only the view changes: markers, sections and cuts still
       take the true coordinates;

@@ -258,16 +258,42 @@ regione* torna a tutto ciò che vedono le foto.
 
 ## Prospetti
 
-*Flusso di lavoro > Prospetto o sviluppo cilindrico...*, oppure *Prospetto* nel pannello *Sezioni*:
+*Flusso di lavoro > Prospetto o sviluppo cilindrico...*, *Prospetto* nel pannello *Sezioni*, oppure il pulsante
+**Prospetto** della vista 3D. Ortofoto e rilievo del modello vengono costruiti su un piano, o su un cilindro, che
+viene da:
 
-* l'ortofoto e il rilievo di un muro sul **piano verticale di una traccia di sezione** (visto da dove sono le foto,
-  o dal lato scelto), o sul **piano di tre o più marker selezionati**;
-* lo **sviluppo di un pozzo o di una torre** sul cilindro di un poligono selezionato (visto da dentro o da fuori).
+* il **piano verticale di una traccia di sezione**, visto da dove sono le foto o dal lato scelto;
+* il **piano di tre o più marker selezionati**, con gli assi scelti come in Metashape: l'asse orizzontale va da un
+  marker verso un altro (u = 0 sul primo), quello verticale è perpendicolare e verso l'alto, oppure va fra altri
+  due marker. Muri, ma anche superfici inclinate o orizzontali: un pavimento a mosaico, una volta, un muro che
+  pende. Il piano guarda sempre verso le foto: quando il primo marker sta a destra per chi guarda, u cresce
+  nell'altro verso;
+* la **vista 3D com'è ora** (*Prospetto > Ortofoto da questa vista*): il piano perpendicolare alla linea di vista,
+  l'alto dello schermo in alto, la destra a destra; quello che si vede nella vista, o tutto il modello;
+* **tre punti cliccati** nella vista 3D (*Prospetto > Piano per tre punti*): l'asse orizzontale dal primo al
+  secondo;
+* il **cilindro di un poligono selezionato**: lo sviluppo di un pozzo o di una torre, visto da dentro o da fuori.
 
-*Profondità davanti / dietro* tengono solo la superficie vicina al piano: un ponteggio o una sezione davanti al
-muro non lo nascondono. I prospetti sono elencati nell'area di lavoro (*Prospetti*): un doppio clic mostra
-l'ortofoto nella vista raster con il rilievo come Z sotto il cursore (distanza dal piano verso chi guarda:
-rigonfiamenti e strapiombi di un muro); il clic destro esporta ortofoto, rilievo e piano, o li elimina.
+**Prospetto o sezione.** Un prospetto mostra la superficie vista dal piano; *Profondità davanti / dietro* tengono
+solo la superficie vicina al piano, così un ponteggio o una sezione davanti al muro non lo nascondono. Una
+**sezione** toglie tutto quello che sta davanti al piano e mostra quello che c'è dietro; la linea dove il piano
+taglia il modello - il **profilo** - è disegnata in rosso sull'ortofoto ed esportata con lei come DXF.
+
+**Coordinate.** L'ortofoto è in metri del piano: u lungo il piano, v verso l'alto. Quando v è verticale (entro un
+grado: una traccia di sezione, un muro con i marker in piano, una vista in piano) **v è la quota**, così il
+prospetto si legge con le sue quote vere. I marker che stanno sul piano vi sono disegnati con il loro nome.
+
+I prospetti sono elencati nell'area di lavoro (*Prospetti*): un doppio clic mostra l'ortofoto nella vista raster
+con il rilievo come Z sotto il cursore (distanza dal piano verso chi guarda: rigonfiamenti e strapiombi di un
+muro); il clic destro esporta ortofoto, rilievo, piano e profilo, o li elimina. Le misure su un prospetto sono
+nei suoi metri; le US disegnate sulla vista raster appartengono alla pianta, quindi vanno disegnate
+sull'ortofoto. Dalla riga di comando:
+
+```bash
+ppg elevation scavo.ppg --markers M1,M2,M3 [--vertical M4,M5] [--section]
+ppg elevation scavo.ppg --trace X1,Y1,X2,Y2 [--side X,Y] --section --back 2
+ppg elevation scavo.ppg --facing NX,NY,NZ --centre X,Y,Z [--up 0,0,1]
+```
 
 ## Modificare il DEM
 

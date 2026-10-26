@@ -215,6 +215,11 @@ dataset pubblici WorldView-3.
 * **US in gruppi** (1.5.1): identificativi in blocco, gruppi UT con nome e selezione a mano libera.
 * **Etichette dei layer** (1.5.2 - 1.5.3): etichette mostrate o nascoste per layer e modificate senza cambiare
   il numero US/UT, salvate per chunk, conservate da *Annulla* e *Ripeti*.
+* **Prospetti e sezioni come le ortofoto planari di Metashape** (1.5.5): sul piano della vista 3D com'è ora,
+  dei marker con gli assi scelti (u da un marker verso un altro, v perpendicolare o fra altri due), di tre punti
+  cliccati nella vista 3D; una sezione toglie quello che sta davanti al piano e salva il profilo del taglio
+  (disegnato sull'ortofoto, esportato in DXF); v è la quota sui piani verticali, i marker sono disegnati sul
+  prospetto; `ppg elevation`.
 
 ## Prossimi passi
 

@@ -252,17 +252,41 @@ the photos see.
 
 ## Elevations
 
-*Workflow > Elevation or cylindrical development...*, or *Elevation* in the *Sections* pane:
+*Workflow > Elevation or cylindrical development...*, *Elevation* in the *Sections* pane, or the **Elevation** button
+of the 3D view. The orthophoto and the relief of the model are built on a plane, or on a cylinder, that comes from:
 
-* the orthophoto and the relief of a wall on the **vertical plane of a section trace** (seen from where the
-  photos are, or the side chosen), or on the **plane of three or more selected markers**;
-* the **development of a well or a tower** on the cylinder of a selected polygon (seen from inside or from
-  outside).
+* the **vertical plane of a section trace**, seen from where the photos are or from the side chosen;
+* the **plane of three or more selected markers**, with the axes chosen as in Metashape: the horizontal axis runs
+  from one marker towards another (u = 0 on the first), the vertical one is perpendicular to it and upwards, or
+  runs between two more markers. Walls, and also sloping or horizontal surfaces: a mosaic floor, a vault, a
+  leaning wall. The plane always faces the photos: when the first marker is on the right as the viewer sees it,
+  u grows the other way;
+* the **3D view as it looks now** (*Elevation > Orthophoto from this view*): the plane perpendicular to the line
+  of sight, the top of the screen up, the right to the right; what the view shows, or the whole model;
+* **three points clicked** in the 3D view (*Elevation > Plane through three points*): the horizontal axis from
+  the first to the second;
+* the **cylinder of a selected polygon**: the development of a well or a tower, seen from inside or from outside.
 
-*Depth in front / behind* keep only the surface near the plane: scaffolding or a section in front of the wall
-does not hide it. The elevations are listed in the workspace (*Elevations*): a double click shows the orthophoto
-in the raster view with the relief as Z under the cursor (distance from the plane towards the viewer: bulges and
-leans of a wall); the right click exports orthophoto, relief and plane, or deletes them.
+**Elevation or section.** An elevation shows the surface seen from the plane; *Depth in front / behind* keep only
+the surface near the plane, so scaffolding or a section in front of the wall does not hide it. A **section** takes
+away everything in front of the plane and shows what lies behind it; the line where the plane cuts the model - the
+**profile** - is drawn in red on the orthophoto and exported with it as a DXF.
+
+**Coordinates.** The orthophoto is in metres of the plane: u along it, v upwards. When v is vertical (within a
+degree: a section trace, a wall with level markers, a level view) **v is the height**, so the elevation is read
+with its true heights. The markers that lie on the plane are drawn on it with their labels.
+
+The elevations are listed in the workspace (*Elevations*): a double click shows the orthophoto in the raster view
+with the relief as Z under the cursor (distance from the plane towards the viewer: bulges and leans of a wall);
+the right click exports orthophoto, relief, plane and profile, or deletes them. Measures on an elevation are in
+its metres; the units drawn on the raster view belong to the plan, so draw them on the orthomosaic. From the
+command line:
+
+```bash
+ppg elevation scavo.ppg --markers M1,M2,M3 [--vertical M4,M5] [--section]
+ppg elevation scavo.ppg --trace X1,Y1,X2,Y2 [--side X,Y] --section --back 2
+ppg elevation scavo.ppg --facing NX,NY,NZ --centre X,Y,Z [--up 0,0,1]
+```
 
 ## Editing the DEM
 

@@ -139,7 +139,7 @@ products. The step-by-step guide is the [tutorial](../tutorials/tell.md); the de
 | **Build model...** · **Build texture...** | the mesh and its texture |
 | **Build DEM...** · **Build orthophoto...** | the rasters in plan |
 | **Reconstruction region** | [see below](#workflow-reconstruction-region) |
-| **Elevation or cylindrical development...** | orthophoto and relief of a wall on a plane, or of a well or a tower on a cylinder ([elevations](processing.md#elevations)) |
+| **Elevation or cylindrical development...** | orthophoto and relief of a wall, or a section, on a plane (a section trace, markers with the axes chosen), or of a well or a tower on a cylinder ([elevations](processing.md#elevations)) |
 | **Process everything...** ++ctrl+r++ | every step in a row with the default choices |
 
 !!! info "Photos that cannot be read"

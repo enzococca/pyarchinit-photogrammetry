@@ -1320,15 +1320,23 @@ una sezione lasciata davanti al muro - viene attraversato).
 | --- | --- |
 | `engine.elevation.plane_from_line(chunk, p1, p2, side=None)` | il piano verticale per la traccia di un muro (punti in pianta), visto da `side` (predefinito: da dove stanno le foto) |
 | `plane_from_points(points, toward=None)` | il piano di tre o più punti mondo (marker su un muro) |
+| `plane_from_markers(points, a, b, c=None, d=None, toward=None, heights=True)` | il piano dei marker con gli assi scelti, come la proiezione planare di Metashape: u da `a` verso `b` (0 su `a`), v lungo `c` -> `d` o perpendicolare e verso l'alto; rivolto verso `toward` (le camere) |
+| `plane_from_view(centre, toward, up, heights=True)` | il piano di una vista: per `centre`, rivolto verso `toward`, v lungo l'`up` dello schermo |
+| `with_heights(plane)`, `heights_measured(frame)` | v diventa la quota mondo quando l'asse v è verticale entro un grado; se lo è |
 | `cylinder_from_circle(chunk, points, inside=True)` | il cilindro verticale per un cerchio adattato a punti in pianta |
-| `build_elevation(chunk, frame, resolution=None, name=None, depth=None, blending="mosaic", colour_correction=None, ghosting=False, fill_holes=True, max_angle=80)` | ortofoto e rilievo (`d`, float32) del sistema come GeoTIFF in metri del sistema, elencati in `chunk.meta["elevations"]` |
+| `build_elevation(chunk, frame, resolution=None, name=None, depth=None, blending="mosaic", colour_correction=None, ghosting=False, fill_holes=True, max_angle=80, bounds=None, kind="elevation")` | ortofoto e rilievo (`d`, float32) del sistema come GeoTIFF in metri del sistema, elencati in `chunk.meta["elevations"]`; `kind="section"` tiene solo quello che sta dietro al piano e salva il profilo |
+| `cut_profile(chunk, frame, bounds=None, simplify=0)` | la linea dove un piano taglia il modello, polilinee di `(u, v)` |
+| `read_profile(chunk, entry)`, `write_profile_dxf(chunk, entry, path)` | il profilo di una sezione; come DXF nelle coordinate del prospetto (layer PROFILO, MARKER) |
+| `markers_on(chunk, entry)` | `(nome, u, v, d)` dei marker che stanno su un prospetto |
 | `elevations(chunk)` | i prospetti di un chunk |
 | `elevation_paths(chunk, entry)` | i file dell'ortofoto e del rilievo di uno |
 | `remove_elevation(chunk, id)` | ne toglie uno |
 
 **`build_elevation(...)`** fa girare il motore dell'ortofoto sul sistema del prospetto (stessa scelta
 delle foto, fusione, correzione del colore) e scrive i file in `<dati chunk>/elevations/<id>/`
-(sistema nei tag e in `frame.json`).
+(sistema nei tag e in `frame.json`). `bounds=(u0, v0, u1, v1)` costruisce solo quella parte (quello che
+mostra una vista); senza, la parte del modello dentro la fascia di profondità. La voce dice `kind`,
+`bounds`, `v_is_height` e, per una sezione, il file `profile`. Riga di comando: `ppg elevation`.
 
 ## Maschere delle foto
 

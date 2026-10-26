@@ -135,6 +135,8 @@ all'altra (nell'area di lavoro ++f2++ invece rinomina).
     * **Sezione** (due punti del modello o della nuvola) e **Pianta a quota** (un punto: la pianta alla sua
       quota);
     * **Taglia**: il modello tagliato con un piano ([tagliare il modello](processing.md#tagliare-il-modello));
+    * **Prospetto**: un'ortofoto sul piano della vista com'è ora, o sul piano di tre punti cliccati; un
+      prospetto o una sezione ([prospetti](processing.md#prospetti));
     * **Esagerazione verticale** (da x0,1 a x50): le quote moltiplicate attorno al centro della scena, così si
       legge il rilievo di un terreno quasi piano. Cambia solo la vista: marker, sezioni e tagli prendono sempre
       le coordinate vere;
