@@ -52,6 +52,7 @@ them with pip in a Python environment, see [Plugins](../plugins.md).
 | Blender and EMtools (`blender-em`) | the 3D proxies of the units, the survey and the cameras with their photos into an Extended Matrix project, named after the nodes of the em.json of PyArchInit or EMStudio; Blender opened on it and kept up to date while the proxies change; what is modelled in Blender back into the program as proxies with their volume; the selection shared live with EMtools 1.6, which makes the proxies of the units without one | [Blender and EMtools](blender-em.md) |
 | Samgeo (`samgeo`) | text search with Grounding DINO + SAM 2.1 or optional SAM 3; reviewable proposals, bulk identifiers/names, freehand-selected groups and survey UT under Topographic units in the TOC | [Samgeo](samgeo.md) |
 | GeoAI (`geoai`) | train from reviewed drawings with RGB and optional DEM, multispectral or thermal inputs, alone or combined; apply models as proposals to review | [GeoAI](geoai.md) |
+| Underwater (`underwater`) | surveys under water: blurred, hazy and flat photos flagged and excluded, sharp frames from videos and fast ROV sequences, colours restored with the range of every pixel (after Sea-thru) or a quick correction before the alignment, depth logs of ROVs and dive computers that level and scale the chunk | [Underwater](underwater.md) |
 
 ## Number and group many units
 

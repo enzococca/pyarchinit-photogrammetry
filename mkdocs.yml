@@ -75,6 +75,7 @@ plugins:
             Blender and EMtools: Blender ed EMtools
             Samgeo: Samgeo
             GeoAI: GeoAI
+            Underwater: Subacqueo
             Guide: Guida
             Desktop interface: Interfaccia
             Menus: Menu
@@ -139,6 +140,7 @@ nav:
       - Blender and EMtools: plugins/blender-em.md
       - Samgeo: plugins/samgeo.md
       - GeoAI: plugins/geoai.md
+      - Underwater: plugins/underwater.md
   - Guide:
       - Desktop interface:
           - gui/index.md
