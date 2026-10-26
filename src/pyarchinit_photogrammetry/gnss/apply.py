@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime, timedelta
 from pathlib import Path
+
+import numpy as np
 
 from ..core.camera import Camera, Reference
 from ..core.chunk import IMAGE_EXTENSIONS, Chunk
@@ -11,6 +14,11 @@ from . import dji
 FACTOR = 2.0
 FLOORS = {"fix": 0.01, "float": 0.20, "single": 1.0}
 NO_RTK = [5.0, 5.0, 10.0]
+
+CLOCK_TOLERANCE_S = 3.0  # a photo belongs to its shot when its time is this close to the clock of the flight
+ZONE_STEP_S = 900.0  # the camera keeps the local time: whole quarter hours from UTC ...
+ZONE_TOLERANCE_S = 120.0  # ... give or take the drift of its clock ...
+ZONE_MAX_S = 14 * 3600.0  # ... and never more than 14 hours
 
 
 def accuracy(status: str | None, std: list[float] | None) -> list[float]:
@@ -41,9 +49,16 @@ def apply_mrk(chunk: Chunk, mrk_path: str | Path, photos_folder: str | Path | No
 
     The photos are the images in ``photos_folder`` (default: the folder of the MRK), in the order of their names.
     A DJI photo is paired with the line whose index is the shot number in its name; the photos that have none
-    are paired by order, but only when the MRK has as many lines as the folder has photos. Returns
-    ``{"matched", "shots", "photos", "status": {status: count}, "unmatched": [label]}``: ``unmatched`` are the
-    photos of the folder left without a position (no line for them, or not in the chunk)."""
+    are paired by order, but only when the MRK has as many lines as the folder has photos. Every pair is then
+    checked against the time the camera wrote in the photo (its local time): the photos must agree on one clock,
+    a time zone from the UTC of the shots, and a photo more than 3 seconds from it keeps the position it had (a
+    photo of another flight with the same shot number, a photo without a date). When no photo has a date the
+    pairs are kept as they are. A ``ValueError`` and nothing changed when the times agree on no time zone, or when
+    fewer than half of the pairs are on time (the MRK of another flight, a folder of several flights).
+
+    Returns ``{"matched", "shots", "photos", "status": {status: count}, "unmatched": [label],
+    "shots_unmatched": [index]}``: ``unmatched`` are the photos of the folder left without a position (no line
+    for them, not in the chunk, or not on time), ``shots_unmatched`` the shots that gave no photo theirs."""
     mrk_path = Path(mrk_path)
     shots = dji.read_mrk(mrk_path)
     folder = Path(photos_folder) if photos_folder else mrk_path.parent
@@ -63,20 +78,82 @@ def apply_mrk(chunk: Chunk, mrk_path: str | Path, photos_folder: str | Path | No
         raise ValueError(f"{mrk_path.name} has {len(shots)} shots and {folder} has {len(files)} photos, and the "
                          "photo names carry no shot number: they cannot be paired by order")
     cameras = {Path(c.path).resolve(): c for c in chunk.cameras}
-    status, unmatched = Counter(), []
-    for f, shot in paired:
-        cam = cameras.get(f.resolve())
-        if cam is None or shot is None:
-            unmatched.append(f.stem)
-            continue
+    candidates = [(f, shot, cameras.get(f.resolve())) for f, shot in paired]
+    kept = _on_time([p for p in candidates if p[1] is not None and p[2] is not None], mrk_path.name)
+    status, used = Counter(), set()
+    for _f, shot, cam in kept:
         state = dji.STATUS.get(shot.flag, "unknown")
         north, east, vertical = shot.std
         set_camera_position(cam, list(dji.camera_position(shot)), "EPSG:4979",
                             accuracy(state, [east, north, vertical]), "dji_mrk", status=state, height="ellipsoidal",
                             extra={"mrk": mrk_path.name, "shot": shot.index, "utc": shot.utc.isoformat()})
         status[state] += 1
+        used.add(id(shot))
+    placed = {f for f, _shot, _cam in kept}
     return {"matched": sum(status.values()), "shots": len(shots), "photos": len(files), "status": dict(status),
-            "unmatched": unmatched}
+            "unmatched": [f.stem for f, _shot in paired if f not in placed],
+            "shots_unmatched": [s.index for s in shots if id(s) not in used]}
+
+
+def _photo_time(cam: Camera) -> datetime | None:
+    """The time the camera wrote in the EXIF of the photo (its clock: the local time, to the second); None without
+    one."""
+    try:
+        return datetime.strptime(str(cam.meta.get("datetime"))[:19], "%Y:%m:%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _off_zone(offset: float) -> float:
+    """Seconds from ``offset`` (local time less UTC) to the nearest time zone: a whole quarter hour within 14 hours."""
+    zone = min(max(round(offset / ZONE_STEP_S) * ZONE_STEP_S, -ZONE_MAX_S), ZONE_MAX_S)
+    return abs(offset - zone)
+
+
+def _signed(seconds: float) -> str:
+    return ("-" if seconds < 0 else "+") + str(timedelta(seconds=round(abs(seconds))))
+
+
+def _clock(offsets: np.ndarray, name: str) -> float:
+    """The offset between the clock of the photos and UTC (seconds) of the flight of the MRK ``name``: of the groups
+    of offsets within :data:`CLOCK_TOLERANCE_S` of each other that lie on a time zone, the largest (its median),
+    between groups as large the nearest to a time zone. ``ValueError`` when no group lies on a time zone, or when two
+    groups as large both lie exactly on one (the times cannot tell two flights apart)."""
+    s = np.sort(np.asarray(offsets, float))
+    lo = np.searchsorted(s, s - CLOCK_TOLERANCE_S, "left")
+    hi = np.searchsorted(s, s + CLOCK_TOLERANCE_S, "right")
+    groups = sorted({(int(b - a), float(np.median(s[a:b]))) for a, b in zip(lo, hi)},
+                    key=lambda g: (-g[0], _off_zone(g[1])))
+    plausible = [g for g in groups if _off_zone(g[1]) <= ZONE_TOLERANCE_S]
+    if not plausible:
+        raise ValueError(f"{name}: the times of the photos and of the shots do not agree: by the clock of the camera "
+                         f"the photos were taken {_signed(groups[0][1])} from the UTC of their shots, which is no "
+                         "time zone. These are not the photos of this MRK, or the clock of the camera was wrong")
+    size = plausible[0][0]
+    best = [c for n, c in plausible if n == size]
+    exact = sorted(c for c in best if _off_zone(c) <= CLOCK_TOLERANCE_S)
+    if exact and exact[-1] - exact[0] > 2 * CLOCK_TOLERANCE_S:
+        raise ValueError(f"{name}: the times of the photos fit the shots of more than one flight ({size} photos "
+                         f"each at {', '.join(_signed(c) for c in exact)} from UTC): keep the photos of each flight in "
+                         "a folder of their own")
+    return best[0]
+
+
+def _on_time(pairs: list[tuple], name: str) -> list[tuple]:
+    """The ``(file, shot, camera)`` pairs whose photo was taken at the time of its shot (see :func:`apply_mrk`), or
+    all of them when no photo has a date."""
+    times = [_photo_time(cam) for _f, _shot, cam in pairs]
+    if not any(times):
+        return pairs
+    offsets = [None if t is None else (t - shot.utc.replace(tzinfo=None)).total_seconds()
+               for t, (_f, shot, _cam) in zip(times, pairs)]
+    clock = _clock(np.array([o for o in offsets if o is not None]), name)
+    kept = [p for p, o in zip(pairs, offsets) if o is not None and abs(o - clock) <= CLOCK_TOLERANCE_S]
+    if 2 * len(kept) < len(pairs):
+        raise ValueError(f"{name}: only {len(kept)} of {len(pairs)} photos were taken at the time of their shot "
+                         f"(clock of the camera {_signed(clock)} from UTC): the MRK is of another flight, or the "
+                         "folder holds the photos of other flights too")
+    return kept
 
 
 ONLY_FIX = "gnss_only_fix"

@@ -2467,7 +2467,8 @@ def gnss_mrk(project: Path, file: Path,
     """Give the photos the position of their shot in a DJI Timestamp.MRK.
 
     The camera, not the antenna, with its RTK state and accuracy. The photos are paired by the shot number in their
-    names, else by order when the MRK has as many lines as the folder has photos. Doing it again changes nothing."""
+    names, else by order when the MRK has as many lines as the folder has photos, and each pair is checked against
+    the time of the photo (a photo of another flight keeps its position). Doing it again changes nothing."""
     from .gnss import apply as gnss
 
     doc, ch = _open(project, chunk)
@@ -2482,6 +2483,7 @@ def gnss_mrk(project: Path, file: Path,
     states = ", ".join(f"{k} {n}" for k, n in sorted(result["status"].items(), key=lambda p: -p[1]))
     typer.echo(f"{result['matched']} of {result['photos']} photos took the position of their shot ({states})")
     _unmatched(result["unmatched"], "without a position from the MRK")
+    _unmatched([str(i) for i in result["shots_unmatched"]], "shots of the MRK without a photo")
 
 
 @gnss_app.command("positions")

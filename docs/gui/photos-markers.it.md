@@ -39,8 +39,12 @@ migliore del GPS dell'EXIF.
 
 **L'MRK si abbina alle foto con il numero dello scatto nel loro nome** (`DJI_0001.JPG` è la riga 1 del file),
 così una foto cancellata dalla scheda non sposta mai le posizioni delle altre; per ordine solo quando l'MRK ha
-tante righe quante sono le foto della cartella, altrimenti non si fa niente e la finestra dice perché. Le foto
-sono quelle della cartella dell'MRK; se l'MRK è stato copiato altrove la finestra chiede la cartella (`--photos`
+tante righe quante sono le foto della cartella, altrimenti non si fa niente e la finestra dice perché. Ogni coppia
+si controlla poi con l'ora che la camera ha scritto nella foto (la sua ora locale, a un fuso orario dall'UTC
+dell'MRK): una foto scattata a più di 3 secondi dal suo scatto tiene la posizione che aveva, così le foto di un
+altro volo copiate nella stessa cartella, con gli stessi numeri di scatto, restano come sono; quando le ore non
+tornano con nessun fuso orario, o la maggior parte delle foto non è all'ora del suo scatto, non si fa niente. Gli
+scatti che non hanno trovato una foto sono elencati nel registro. Le foto sono quelle della cartella dell'MRK; se l'MRK è stato copiato altrove la finestra chiede la cartella (`--photos`
 da riga di comando). **Il file di posizioni** chiede il suo sistema di coordinate (`EPSG:4979` è longitudine,
 latitudine e quota ellissoidica, come nell'MRK; un sistema proiettato come `EPSG:32633`; `LOCAL`) e il tipo di
 quota (*ellissoidica*, come la dà il GNSS, o *dell'EXIF*, sul livello del mare); una riga si abbina alla sua foto

@@ -1,7 +1,7 @@
 """Precise camera positions: the RTK status of DJI photos, their Timestamp.MRK and the accuracy they give."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pytest
@@ -66,10 +66,13 @@ def test_set_camera_position_records_where_it_comes_from():
                                 "height": "ellipsoidal", "diff_age": 1.0}
 
 
-def _jpeg(path, xmp: str | None):
+def _jpeg(path, xmp: str | None, when: datetime | None = None):
+    """A photo with an EXIF position and, with ``when``, the local time the camera wrote."""
     img = Image.fromarray(np.random.default_rng(0).integers(0, 255, (48, 64, 3), dtype=np.uint8))
     exif = Image.Exif()
     exif.get_ifd(0x8825).update({1: "N", 2: (41, 8, 0.0), 3: "E", 4: (14, 15, 0.0), 5: 0, 6: 123.4})
+    if when is not None:
+        exif.get_ifd(0x8769)[36867] = when.strftime("%Y:%m:%d %H:%M:%S")  # DateTimeOriginal
     kwargs = {"exif": exif}
     if xmp is not None:
         kwargs["xmp"] = xmp.encode()
@@ -177,6 +180,19 @@ def _numbered(line: str, index: int) -> str:
     return f"{index}{line[line.index(chr(9)):]}"
 
 
+def _at(line: str, utc: datetime) -> str:
+    """The MRK ``line`` of a shot taken at ``utc``."""
+    gps = (utc - dji.GPS_EPOCH).total_seconds() + dji.LEAP_SECONDS
+    week, seconds = divmod(gps, 7 * 86400)
+    index, _seconds, _week, rest = line.split("\t", 3)
+    return f"{index}\t{seconds:.6f}\t[{int(week)}]\t{rest}"
+
+
+def _timed(lines: str, utcs) -> str:
+    """The MRK ``lines`` shot at the times ``utcs``, one per line."""
+    return "".join(_at(line, utc) for line, utc in zip(lines.splitlines(keepends=True), utcs, strict=True))
+
+
 def _flight(folder, names, lines=MRK_LINES, xmp_first=False):
     folder.mkdir(exist_ok=True)
     for i, name in enumerate(names):
@@ -202,7 +218,7 @@ def test_mrk_matched_by_shot_number_and_by_order(tmp_path):
 
     result = gnss_apply.apply_mrk(ch, folder / "Timestamp.MRK")
     assert result == {"matched": 3, "shots": 3, "photos": 3, "status": {"fix": 1, "single": 1, "float": 1},
-                      "unmatched": []}
+                      "unmatched": [], "shots_unmatched": []}
 
     shots = dji.read_mrk(folder / "Timestamp.MRK")
     for cam, shot in zip(ch.cameras, shots):
@@ -234,6 +250,7 @@ def test_mrk_missing_a_shot_never_moves_the_others(tmp_path):
     ch.add_photos([folder])
     result = gnss_apply.apply_mrk(ch, folder / "Timestamp.MRK")
     assert (result["matched"], result["shots"], result["photos"], result["unmatched"]) == (3, 4, 4, ["DJI_0001"])
+    assert result["shots_unmatched"] == [5]
     assert ch.camera("DJI_0002").meta["gnss"]["shot"] == 2
     assert ch.camera("DJI_0003").meta["gnss"]["shot"] == 3
     assert ch.camera("DJI_0004").meta["gnss"]["shot"] == 4
@@ -257,6 +274,88 @@ def test_mrk_by_order_only_with_the_same_number_of_shots(tmp_path):
     elsewhere.mkdir()
     (elsewhere / "Timestamp.MRK").write_text(MRK_LINES)
     assert gnss_apply.apply_mrk(ch, elsewhere / "Timestamp.MRK", str(folder))["matched"] == 3
+
+
+_LINE = "{0}\t0\t[0]\t     0,N\t     0,E\t   150,V\t{1:.8f},Lat\t14.26600000,Lon\t94.350,Ellh\t0.01, 0.01, 0.02\t50,Q\n"
+
+
+def test_mrk_of_one_flight_in_a_folder_of_two(tmp_path):
+    # two flights of a Mavic 3 copied into one folder: the shot numbers start again from 1 and the clock of the camera
+    # is the local time (UTC+2 in May); each flight has its MRK, the second one 500 m north of the first
+    folder = tmp_path / "DCIM"
+    folder.mkdir()
+    flights = {"DJI_202405121030_001_Timestamp.MRK": ("20240512103015", datetime(2024, 5, 12, 8, 30, 15, 400000), 41.134),
+               "DJI_202405121137_002_Timestamp.MRK": ("20240512113752", datetime(2024, 5, 12, 9, 37, 52, 300000), 41.1385)}
+    for mrk, (stamp, start, lat) in flights.items():
+        lines = []
+        for i in (1, 2, 3):
+            utc = start + timedelta(seconds=2 * i)
+            _jpeg(folder / f"DJI_{stamp}_{i:04d}_V.JPG", None, when=utc + timedelta(hours=2))
+            lines.append(_at(_LINE.format(i, lat), utc.replace(tzinfo=timezone.utc)))
+        (folder / mrk).write_text("".join(lines))
+    ch = ppg.Document().add_chunk()
+    ch.add_photos([folder])
+    first, second = ch.cameras[:3], ch.cameras[3:]
+    assert all("103015" in c.label for c in first) and all("113752" in c.label for c in second)
+
+    # the MRK of the first flight: its photos only, the ones of the second flight have the same shot numbers but
+    # were taken an hour later
+    result = gnss_apply.apply_mrk(ch, folder / "DJI_202405121030_001_Timestamp.MRK")
+    assert (result["matched"], result["shots"], result["photos"]) == (3, 3, 6)
+    assert result["unmatched"] == [c.label for c in second] and result["shots_unmatched"] == []
+    assert all(c.meta["gnss"]["source"] == "dji_mrk" for c in first)
+    assert [c.reference.location[1] for c in first] == pytest.approx([41.134] * 3, abs=1e-9)
+    assert all(c.meta["gnss"]["source"] == "exif" for c in second)
+
+    # the MRK of the second flight gives its photos theirs and leaves the first flight as it is
+    result = gnss_apply.apply_mrk(ch, folder / "DJI_202405121137_002_Timestamp.MRK")
+    assert result["matched"] == 3 and result["unmatched"] == [c.label for c in first]
+    assert [c.reference.location[1] for c in second] == pytest.approx([41.1385] * 3, abs=1e-9)
+    assert [c.reference.location[1] for c in first] == pytest.approx([41.134] * 3, abs=1e-9)
+
+
+def test_mrk_shots_checked_against_the_time_of_the_photos(tmp_path):
+    start = datetime(2024, 5, 12, 8, 30, 15, 400000)
+    utcs = [start + timedelta(seconds=2 * i) for i in range(4)]
+    local = [t + timedelta(hours=2) for t in utcs]  # the camera on the local time of Italy in May: +02:00
+    names = [f"DJI_{i:04d}.JPG" for i in (1, 2, 3, 4)]
+
+    def flight(name, clock):
+        folder = tmp_path / name
+        folder.mkdir()
+        for photo, when in zip(names, clock):
+            _jpeg(folder / photo, None, when=when)
+        (folder / "Timestamp.MRK").write_text("".join(_at(_LINE.format(i + 1, 41.134), t.replace(tzinfo=timezone.utc))
+                                                      for i, t in enumerate(utcs)))
+        ch = ppg.Document().add_chunk()
+        ch.add_photos([folder])
+        return ch, folder / "Timestamp.MRK"
+
+    ch, mrk = flight("zone", local)
+    result = gnss_apply.apply_mrk(ch, mrk)
+    assert (result["matched"], result["unmatched"], result["shots_unmatched"]) == (4, [], [])
+
+    # a photo taken 10 s away from its shot and one without a date are not paired, and their shots are said
+    ch, mrk = flight("off", [local[0], local[1] + timedelta(seconds=10), None, local[3]])
+    result = gnss_apply.apply_mrk(ch, mrk)
+    assert (result["matched"], result["unmatched"], result["shots_unmatched"]) == (2, ["DJI_0002", "DJI_0003"], [2, 3])
+    assert [c.meta["gnss"]["source"] for c in ch.cameras] == ["dji_mrk", "exif", "exif", "dji_mrk"]
+
+    # the photos 7 minutes away from any time zone, or a year away: not the photos of this MRK, nothing changes
+    for name, clock in (("late", [t + timedelta(hours=2, minutes=7) for t in utcs]),
+                        ("year", [t + timedelta(days=365, hours=2) for t in utcs])):
+        ch, mrk = flight(name, clock)
+        before = _snapshot(ch)
+        with pytest.raises(ValueError, match="times"):
+            gnss_apply.apply_mrk(ch, mrk)
+        assert _snapshot(ch) == before
+
+    # one photo at the time of its shot, the others each at a time of its own: the MRK of another flight
+    ch, mrk = flight("other", [local[0]] + [t + timedelta(seconds=40 * i) for i, t in enumerate(local[1:], 1)])
+    before = _snapshot(ch)
+    with pytest.raises(ValueError, match="1 of 4"):
+        gnss_apply.apply_mrk(ch, mrk)
+    assert _snapshot(ch) == before
 
 
 # --- positions from a file -------------------------------------------------------------------------------------
@@ -643,13 +742,16 @@ def gnss_window(tmp_path):
     QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
     from pyarchinit_photogrammetry.gui import main_window as mw
 
-    folder = _flight(tmp_path / "100MEDIA", ["a.JPG", "b.JPG", "c.JPG"])
+    times = [datetime(2026, 10, 26, 10, 0, 0), datetime(2026, 10, 26, 10, 0, 30), datetime(2026, 10, 26, 11, 30, 0)]
+    # the clock of the camera on the time of Italy (+01:00), the shots of the MRK in UTC
+    folder = _flight(tmp_path / "100MEDIA", ["a.JPG", "b.JPG", "c.JPG"],
+                     lines=_timed(MRK_LINES, [(t - timedelta(hours=1)).replace(tzinfo=timezone.utc) for t in times]))
     doc = ppg.Document()
     chunk = doc.add_chunk("Flight")
     chunk.add_photos([folder])
+    for cam, when in zip(chunk.cameras, times):
+        cam.meta["datetime"] = when.strftime("%Y:%m:%d %H:%M:%S")
     gnss_apply.apply_mrk(chunk, folder / "Timestamp.MRK")
-    for cam, when in zip(chunk.cameras, ("2026:10:26 10:00:00", "2026:10:26 10:00:30", "2026:10:26 11:30:00")):
-        cam.meta["datetime"] = when
     w = mw.MainWindow(doc, autoconnect=False, check_updates=False)
     w.runner.show_dialog = False
     w.resize(1400, 900)

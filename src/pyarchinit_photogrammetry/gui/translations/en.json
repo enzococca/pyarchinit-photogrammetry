@@ -2839,6 +2839,7 @@
   "Salvato {0}": "Saved {0}",
   "Scansioni laser ({0} file)": "Laser scans ({0} files)",
   "Scartate ({0})": "Rejected ({0})",
+  "Scatti dell'MRK senza foto ({0}): {1}": "MRK shots without a photo ({0}): {1}",
   "Scene non trovate: {0}": "Scenes not found: {0}",
   "Scheda ceramica n. {0} salvata; disegno: {1}": "Pottery form no. {0} saved; drawing: {1}",
   "Scheda {0} {1} salvata in PyArchInit ({2})": "Form {0} {1} saved in PyArchInit ({2})",

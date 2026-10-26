@@ -2981,6 +2981,10 @@ class MainWindow(QMainWindow):
         detail = ", ".join(f"{names.get(k, k)} {n}" for k, n in sorted(result["status"].items(), key=lambda p: -p[1]))
         self._gnss_done(tr("MRK: {0} foto su {1} hanno la posizione del loro scatto ({2})", result["matched"],
                            result["photos"], detail), result["unmatched"])
+        shots = [str(i) for i in result["shots_unmatched"]]
+        if shots:
+            self.log_pane.warning(tr("Scatti dell'MRK senza foto ({0}): {1}", len(shots),
+                                     ", ".join(shots[:8]) + (" ..." if len(shots) > 8 else "")))
         self._gnss_changed()
 
     def gnss_apply_positions(self) -> None:

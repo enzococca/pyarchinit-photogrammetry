@@ -39,8 +39,12 @@ position than the GPS of their EXIF.
 
 **The MRK is paired with the photos by the shot number in their names** (`DJI_0001.JPG` is line 1 of the file),
 so a photo deleted from the card never moves the positions of the others; by order only when the MRK has as many
-lines as the folder has photos, otherwise nothing is done and the window says why. The photos are those of the
-folder of the MRK; when the MRK was copied somewhere else the window asks for the folder (`--photos` on the
+lines as the folder has photos, otherwise nothing is done and the window says why. Every pair is then checked
+against the time the camera wrote in the photo (its local time, a time zone away from the UTC of the MRK): a photo
+taken more than 3 seconds away from its shot keeps the position it had, so the photos of another flight copied
+into the same folder, with the same shot numbers, are left alone; when the times agree on no time zone, or most
+photos are not at the time of their shots, nothing is done. The shots that found no photo are listed in the log.
+The photos are those of the folder of the MRK; when the MRK was copied somewhere else the window asks for the folder (`--photos` on the
 command line). **The positions file** is asked its coordinate system (`EPSG:4979` is longitude, latitude and
 ellipsoidal height, as in the MRK; a projected system such as `EPSG:32633`; `LOCAL`) and the kind of height
 (*ellipsoidal*, as the GNSS gives it, or *EXIF*, above the sea level); a row is paired with its photo by the file
