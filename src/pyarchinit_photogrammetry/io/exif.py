@@ -5,6 +5,8 @@ from pathlib import Path
 
 from PIL import ExifTags, Image
 
+from ..gnss.dji import rtk_from_xmp
+
 _TAGS = {v: k for k, v in ExifTags.TAGS.items()}
 _GPS_IFD = 0x8825
 _EXIF_IFD = 0x8769
@@ -26,9 +28,14 @@ def _dms(values, ref) -> float:
 
 def read_exif(path: str | Path) -> dict:
     """Return ``width``, ``height``, ``make``, ``model``, ``lens``, ``focal_length_mm``,
-    ``focal_length_35mm``, ``datetime`` and ``gps`` = ``(lon, lat, alt)`` when present."""
+    ``focal_length_35mm``, ``datetime``, ``gps`` = ``(lon, lat, alt)`` and ``rtk`` (the RTK state a DJI
+    drone writes in the XMP, see :func:`~pyarchinit_photogrammetry.gnss.dji.rtk_from_xmp`) when present."""
     with Image.open(path) as im:
         info: dict = {"width": im.width, "height": im.height}
+        xmp = im.info.get("xmp")
+        rtk = rtk_from_xmp(xmp.decode("utf-8", "ignore") if isinstance(xmp, bytes) else xmp or "")
+        if rtk:
+            info["rtk"] = rtk
         try:
             exif = im.getexif()
         except Exception:

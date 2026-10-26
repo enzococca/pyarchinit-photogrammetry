@@ -156,7 +156,9 @@ class Chunk:
     # ----------------------------------------------------------------- photos
     def add_photos(self, paths: Iterable[str | os.PathLike], *, recursive: bool = False) -> list[Camera]:
         """Add photos (files or folders). Photos sharing camera body, lens and
-        resolution share one :class:`Sensor`. EXIF GPS becomes the camera reference."""
+        resolution share one :class:`Sensor`. EXIF GPS becomes the camera reference; its accuracy comes from
+        the RTK state in the XMP of DJI photos, else it is [5, 5, 10] m."""
+        from ..gnss.apply import accuracy, set_camera_position
         from ..io.exif import read_exif
 
         files: list[Path] = []
@@ -176,10 +178,12 @@ class Chunk:
             info = read_exif(f)
             sensor = self._sensor_for(info)
             cam = Camera(key=self._next_key(self.cameras), label=f.stem, path=str(f), sensor_key=sensor.key,
-                         meta={k: v for k, v in info.items() if k != "gps"})
+                         meta={k: v for k, v in info.items() if k not in ("gps", "rtk")})
             if info.get("gps"):
-                cam.reference = Reference(location=list(info["gps"]), accuracy=[5.0, 5.0, 10.0], enabled=True)
-                cam.meta["reference_crs"] = "EPSG:4326"
+                rtk = info.get("rtk") or {}
+                set_camera_position(cam, info["gps"], "EPSG:4326", accuracy(rtk.get("status"), rtk.get("std")),
+                                    "dji_xmp" if rtk else "exif", status=rtk.get("status"),
+                                    extra={k: v for k, v in rtk.items() if k != "status"})
             self.cameras.append(cam)
             added.append(cam)
         return added
