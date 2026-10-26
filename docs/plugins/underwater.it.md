@@ -5,7 +5,7 @@ con le foto di un subacqueo o le immagini di un ROV. Fa tre cose che il resto de
 colori che l'acqua toglie, dice quali foto e quali fotogrammi di un video vale la pena usare, e usa la profondità
 della camera, letta da un sensore di pressione o da un computer subacqueo, dove un rilievo a terra userebbe il GPS.
 
-Questa pagina descrive la versione 0.1.0 del plugin, che richiede pyarchinit-photogrammetry 1.3.4 o successiva. Il
+Questa pagina descrive la versione 0.1.1 del plugin, che richiede pyarchinit-photogrammetry 1.3.4 o successiva. Il
 README e il codice sorgente sono nel
 [repository dei plugin](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/underwater).
 
@@ -29,8 +29,9 @@ README e il codice sorgente sono nel
    dialogo dell'allineamento (tutte le coppie) aiuta sulla sabbia e sulle superfici con poca tessitura.
 5. Importa il registro di profondità, *Associa alle foto*, *Stima lo scarto* se gli orologi sono diversi, *Metti in
    bolla e in scala*.
-6. Costruisci le mappe di profondità (*Flusso di lavoro > Mappe di profondità*), poi *Ripristino fisico*:
-   *Correggi le foto* e *Usa le foto corrette*.
+6. Costruisci le mappe di profondità (*Flusso di lavoro > Costruisci nuvola densa...*, motore *PatchMatch
+   multi-vista*, *Solo le mappe di profondità*), poi *Ripristino fisico*: *Correggi le foto* e *Usa le foto
+   corrette*.
 7. Costruisci nuvola densa, DEM, ortofoto e modello con texture come sempre: usano le foto ripristinate, in metri,
    con le quote sotto la superficie dell'acqua.
 
@@ -52,8 +53,8 @@ README e il codice sorgente sono nel
 * **Foto o video** del rilievo. Il plugin legge JPEG, PNG e TIFF (8 o 16 bit); i file RAW vanno sviluppati prima,
   con meno elaborazione possibile (niente matrice di colore forte: una camera che porta a zero il canale rosso non
   lascia niente da ripristinare).
-* Per il ripristino, **un chunk allineato con le sue mappe di profondità** (*Flusso di lavoro > Mappe di
-  profondità*, costruite anche dalla nuvola densa). La correzione rapida non chiede niente.
+* Per il ripristino, **un chunk allineato con le sue mappe di profondità** (*Flusso di lavoro > Costruisci
+  nuvola densa...* con *Solo le mappe di profondità*, o la nuvola densa stessa; vedi il [passo 5](#program)). La correzione rapida non chiede niente.
 * Per la messa in bolla, **un registro di profondità** e **l'ora delle foto**: i fotogrammi estratti dal plugin la
   hanno; le foto la hanno nell'EXIF o nel nome.
 
@@ -208,8 +209,10 @@ subacqueo del sub, è la misura che resta.
 Le profondità vengono associate alle foto per ora: l'ora dei fotogrammi estratti dal plugin, l'ora nei nomi dei file,
 o l'ora dell'EXIF con le frazioni di secondo e il fuso. Lo **scarto di tempo** è quanto aggiungere all'orologio della
 camera per leggere quello del registro (una camera un'ora avanti: -3600). Quando gli orologi non erano sincronizzati,
-*Stima lo scarto* prova ogni scarto per un quarto d'ora prima e dopo e tiene quello con cui le profondità si accordano
-meglio con le camere allineate.
+*Stima lo scarto* prova ogni scarto per un quarto d'ora prima e dopo e tiene quello con cui le quote delle camere
+allineate spiegano meglio i cambi di profondità - non la differenza più piccola in metri: uno scarto che mette le
+foto su un tratto piatto del registro (il subacqueo fermo, il fondo) dà profondità quasi uguali, che si adattano a
+qualsiasi cosa. Si confrontano solo gli scarti che danno una profondità a (quasi) tutte le foto.
 
 ### In bolla e in scala
 
@@ -235,6 +238,139 @@ Un sistema di posizionamento acustico (USBL) o alcune foto posizionate a mano da
 (USBL)...* legge una tabella per nome della foto o per ora (interpolate), in un sistema di riferimento dato come
 codice EPSG. Dopo la messa in bolla una similitudine orizzontale mette il chunk su di loro: il nord e la posizione
 sulla carta.
+
+## Passo passo nel programma { #program }
+
+Le immagini di questa sezione vengono da 20 foto del dataset Sea-thru D3 (una formazione di corallo nel Mar Rosso,
+fotografata da 1-3 m; D. Akkaynak, T. Treibitz, [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/))
+e da un registro di profondità **simulato per l'esempio**: il dataset non ne ha, quindi il registro è stato ricavato
+dalle quote delle camere allineate, con 1,5 cm di rumore, un campione al secondo e l'orologio 7 secondi avanti
+rispetto a quello della camera.
+
+### Il pannello
+
+Si apre con *Plugin > Subacqueo > Pannello Subacqueo* e resta a destra della finestra, fra i pannelli degli
+strumenti (*Proxy US*, *Multispettrale*, *Termico*). Ha tre riquadri, nell'ordine del lavoro - **1. Foto e
+fotogrammi**, **2. Colori**, **3. Profondità invece del GPS** - e sotto i pulsanti di ogni riquadro una riga dice a
+che punto è il chunk attivo.
+
+<figure markdown="span">
+  ![La finestra con il pannello Subacqueo a destra](../img/plugins/underwater/pane-window.png)
+  <figcaption>La finestra con il pannello <em>Subacqueo</em> aperto a destra, prima di fare qualsiasi cosa: 20 foto allineate del dataset Sea-thru D3.</figcaption>
+</figure>
+
+
+### 1. Valutare le foto
+
+1. Fai clic su *Valuta le foto*. Ogni foto riceve tre numeri: *qualità* (nitidezza rispetto alle foto più nitide
+   del chunk), *contrasto* (estensione della luminosità), *velo* (la foschia del sedimento in sospensione).
+2. Le tre soglie sopra i pulsanti decidono quali foto vengono segnate. Cambiandone una le foto vengono segnate di
+   nuovo subito, senza valutarle un'altra volta.
+3. La tabella elenca le foto segnate con il motivo. *Escludi le segnate* le disattiva: restano nel chunk, in
+   grigio, e *Riattiva le escluse* le rimette. *Tabella CSV...* scrive i punteggi di tutte le foto.
+
+<figure markdown="span">
+  ![Il riquadro Foto e fotogrammi dopo la valutazione](../img/plugins/underwater/pane-photos.png)
+  <figcaption>Le foto valutate, con la <em>Qualità minima</em> alzata a 0,85: cinque foto segnate come mosse. Con lo 0,50 predefinito nessuna di queste foto viene segnata: D3 è un buon set.</figcaption>
+</figure>
+
+
+### 2. Un primo sguardo ai colori
+
+1. Metti *Metodo* su *Correzione rapida*, scegli una foto nell'elenco sotto le opzioni, fai clic su *Anteprima*: la
+   foto com'è e corretta.
+2. Se le foto sono troppo blu o troppo scure per allinearle, spunta *CLAHE*, poi *Correggi le foto* e *Usa le foto
+   corrette* **prima** dell'allineamento. Le foto dell'esempio si allineano così come sono, quindi qui ci si ferma
+   all'anteprima.
+
+<figure markdown="span">
+  ![L'anteprima della correzione rapida](../img/plugins/underwater/pane-quick.png)
+  <figcaption>L'anteprima della correzione rapida su una foto con la tabella dei colori: rosso ricostruito dal verde, bilanciamento del bianco.</figcaption>
+</figure>
+
+
+### 3. Allineare le foto
+
+*Flusso di lavoro > Allinea foto...* come per ogni rilievo (vedi [In breve](#in-breve), passo 4). Le 20 foto
+dell'esempio si allineano in pochi secondi.
+
+### 4. Il registro di profondità, lo scarto di tempo, la messa in bolla
+
+1. Nel riquadro *3. Profondità invece del GPS* scegli l'*Acqua* (mare o dolce, per i registri di pressione) e
+   lascia *Scarto di tempo* a 0 se non lo conosci.
+2. *Importa il registro...* e scegli il file. Le profondità vengono associate subito alle foto con lo scarto del
+   riquadro. Ogni foto riceve una profondità anche con lo scarto sbagliato - quella di un altro momento - quindi
+   passa al passo successivo.
+
+<figure markdown="span">
+  ![Il registro di profondità importato, senza scarto di tempo](../img/plugins/underwater/pane-depth-log.png)
+  <figcaption>Il registro importato con lo scarto a 0: 114 campioni fra 7,61 e 8,38 m, una profondità per ognuna delle 20 foto, il chunk non ancora in bolla.</figcaption>
+</figure>
+
+
+3. *Stima lo scarto* prova gli scarti entro un quarto d'ora da quello del riquadro e tiene quello con cui le
+   quote delle camere spiegano meglio le profondità; lo scrive nel riquadro e associa di nuovo le profondità.
+   Nell'esempio trova 7,08 secondi per un orologio avanti di 7 secondi.
+4. *Metti in bolla e in scala*: il chunk va in bolla, in metri, con Z = -profondità. La riga sotto i pulsanti dà lo
+   scarto quadratico fra le quote delle camere e le loro profondità (qui 1,1 cm), il massimo (5,2 cm) e
+   l'incertezza della verticale (0,49°).
+
+<figure markdown="span">
+  ![Lo scarto stimato e il chunk in bolla](../img/plugins/underwater/pane-levelled.png)
+  <figcaption>Lo scarto stimato (7,08 s) e il chunk messo in bolla e in scala su 20 camere: scarto quadratico 1,1 cm, incertezza della verticale 0,49°.</figcaption>
+</figure>
+
+
+Nell'esempio le camere restano entro 0,8 m di profondità e la scala trovata differisce del 7 % da quella delle mappe
+di profondità metriche del dataset: meno cambia la profondità, meno dice sulla scala. Con piccoli cambi di
+profondità fanno meglio una barra di scala sul sito e *Scala: dalle barre di scala*.
+
+### 5. Le mappe di profondità per il ripristino
+
+Il ripristino prende la distanza di ogni pixel dalle mappe di profondità del programma. Costruiscile con *Flusso di
+lavoro > Costruisci nuvola densa...*, **Motore: PatchMatch multi-vista** e **Solo le mappe di profondità**
+spuntato.
+
+<figure markdown="span">
+  ![Il dialogo della nuvola densa impostato per le sole mappe di profondità](../img/plugins/underwater/dialog-depth-maps.png)
+  <figcaption><em>Flusso di lavoro > Costruisci nuvola densa...</em> impostato per il ripristino: PatchMatch, solo le mappe di profondità.</figcaption>
+</figure>
+
+
+Il motore automatico, per le foto scattate vicino al soggetto, usa lo stereo a coppie di foto: veloce, ma sulle foto
+dell'esempio copre circa un quinto di ogni foto, PatchMatch tre quarti (in 9 secondi su 20 foto). Dove le mappe non
+arrivano la distanza viene dalla superficie più vicina e i colori sono solo plausibili: dopo il ripristino il plugin
+avverte quando le mappe coprono meno del 40 % delle foto.
+
+### 6. Ripristinare i colori
+
+1. Metti *Metodo* su *Ripristino fisico* e *Coefficienti* su *uno per il rilievo* (la stessa correzione per tutte
+   le foto: niente cuciture di colore nell'ortofoto).
+2. *Correggi le foto*: il modello dell'acqua viene stimato sul rilievo, poi ogni foto viene ripristinata.
+   *Anteprima* mostra una foto prima e dopo con quel modello.
+3. *Usa le foto corrette*: da quel momento ortofoto, texture e mappe di profondità leggono le copie; *Usa le
+   originali* torna indietro.
+
+La riga sotto i pulsanti dice quante foto sono corrette, quali sono in uso e i coefficienti dell'acqua al metro -
+attenuazione βD e retrodiffusione βB di rosso, verde e blu - quando il chunk è in bolla e in metri.
+
+<figure markdown="span">
+  ![Il riquadro Colori dopo il ripristino](../img/plugins/underwater/pane-restored.png)
+  <figcaption>Il ripristino: l'anteprima di una foto, 20 foto corrette in uso, l'attenuazione dai punti visti due volte e i coefficienti dell'acqua al metro.</figcaption>
+</figure>
+
+
+### 7. I prodotti
+
+Sotto il chunk, nell'*Area di lavoro*, il nodo *Subacqueo* riassume quello che è stato fatto: le foto corrette e se
+sono in uso, le foto segnate, le foto con la profondità, la messa in bolla. Le sue voci aprono il pannello; il menu
+del tasto destro ripete le azioni principali. Nuvola densa, DEM, ortofoto e modello con texture si costruiscono poi
+come sempre: usano le foto ripristinate, in metri.
+
+<figure markdown="span">
+  ![Il nodo Subacqueo nell'area di lavoro](../img/plugins/underwater/pane-tree.png)
+  <figcaption>Il nodo <em>Subacqueo</em> sotto il chunk nell'area di lavoro.</figcaption>
+</figure>
 
 ## Dalla riga di comando
 

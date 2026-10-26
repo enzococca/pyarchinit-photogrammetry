@@ -6,7 +6,7 @@ it gives back the colours that the water takes away, it says which photos and wh
 using, and it uses the depth of the camera, read by a pressure sensor or a dive computer, where a survey on land
 would use the GPS.
 
-This page describes version 0.1.0 of the plugin, which needs pyarchinit-photogrammetry 1.3.4 or later. Its README
+This page describes version 0.1.1 of the plugin, which needs pyarchinit-photogrammetry 1.3.4 or later. Its README
 and source code are in the
 [plugin repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/underwater).
 
@@ -29,8 +29,8 @@ and source code are in the
 4. Align the photos (*Workflow > Align photos*). For a sequence, turning off the *Generic preselection* in the
    alignment dialog (all the pairs) helps on sand and other surfaces with little texture.
 5. Import the depth log, *Match to the photos*, *Estimate the offset* if the clocks differ, *Level and scale*.
-6. Build the depth maps (*Workflow > Depth maps*), then *Physics-based restoration*: *Correct the photos* and
-   *Use the corrected photos*.
+6. Build the depth maps (*Workflow > Build dense cloud...*, engine *PatchMatch multi-view*, *Depth maps only*),
+   then *Physics-based restoration*: *Correct the photos* and *Use the corrected photos*.
 7. Build the dense cloud, the DEM, the orthophoto and the textured model as usual: they use the restored photos,
    in metres, with heights below the surface of the water.
 
@@ -52,8 +52,8 @@ and source code are in the
 * **Photos or videos** of the survey. The plugin reads JPEG, PNG and TIFF (8 or 16 bit); RAW files must be
   developed first, with as little processing as possible (no strong colour matrix: a camera that clips the red
   channel to zero leaves nothing to restore).
-* For the restoration, **an aligned chunk with its depth maps** (*Workflow > Depth maps*, also built by the dense
-  cloud). The quick correction needs nothing.
+* For the restoration, **an aligned chunk with its depth maps** (*Workflow > Build dense cloud...* with *Depth maps
+  only*, or the dense cloud itself; see [step 5](#program)). The quick correction needs nothing.
 * For the levelling, **a depth log** and **the time of the photos**: the frames the plugin extracted carry it;
   still photos have it in their EXIF or in their names.
 
@@ -207,7 +207,9 @@ The depths are matched to the photos by time: the time of the frames the plugin 
 names, or the EXIF time with fractions of a second and time zone. The **time offset** is what to add to the clock of
 the camera to read the clock of the log (a camera an hour ahead: -3600). When the clocks were not synchronised,
 *Estimate the offset* tries every offset over a quarter of an hour on each side and keeps the one with which the
-depths fit the aligned cameras best.
+heights of the aligned cameras explain best the changes of depth - not the smallest difference in metres: an
+offset that puts the photos on a flat stretch of the log (the diver hovering, the bottom) gives nearly equal
+depths that anything fits. Only the offsets that give a depth to (nearly) every photo are compared.
 
 ### Level and scale
 
@@ -232,6 +234,137 @@ the plane of the cameras.
 An acoustic positioning system (USBL) or a few photos placed by hand give X and Y: *Known positions (USBL)...* reads
 a table by photo name or by time (interpolated), in a reference system given as an EPSG code. After the levelling a
 horizontal similarity puts the chunk on them: north and the position on the map.
+
+## Step by step in the program { #program }
+
+The pictures of this section come from 20 photos of the Sea-thru D3 dataset (a coral head in the Red Sea,
+photographed from 1-3 m; D. Akkaynak, T. Treibitz, [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/))
+and from a depth log **simulated for the example**: the dataset has none, so the log was made from the heights of
+the aligned cameras, with 1.5 cm of noise, one sample a second and its clock 7 seconds ahead of the camera's.
+
+### The pane
+
+*Plugins > Underwater > Underwater pane* opens it; it stays on the right of the window, among the panes of the
+tools (*US proxies*, *Multispectral*, *Thermal*). It has three boxes, in the order of the work - **1. Photos and
+frames**, **2. Colours**, **3. Depth instead of GPS** - and under the buttons of each box a line says where the
+active chunk stands.
+
+<figure markdown="span">
+  ![The window with the Underwater pane on the right](../img/plugins/underwater/pane-window.png)
+  <figcaption>The window with the <em>Underwater</em> pane open on the right, before anything is done: 20 aligned photos of the Sea-thru D3 dataset.</figcaption>
+</figure>
+
+
+### 1. Score the photos
+
+1. Click *Score the photos*. Every photo gets three numbers: *quality* (sharpness against the sharpest photos of
+   the chunk), *contrast* (the spread of its lightness), *veil* (the haze of the suspended sediment).
+2. The three thresholds above the buttons decide which photos are flagged. Changing one flags the photos again at
+   once, without scoring them again.
+3. The table lists the flagged photos with the reason. *Exclude the flagged* turns them off: they stay in the
+   chunk, greyed, and *Include again* turns them back on. *CSV table...* writes the scores of every photo.
+
+<figure markdown="span">
+  ![The box Photos and frames after the scoring](../img/plugins/underwater/pane-photos.png)
+  <figcaption>The photos scored, with <em>Least quality</em> raised to 0.85: five photos flagged as blurred. With the default 0.50 none of these photos is flagged - D3 is a good set.</figcaption>
+</figure>
+
+
+### 2. A first look at the colours
+
+1. Set *Method* to *Quick correction*, choose a photo in the list under the options, click *Preview*: the photo
+   as it is and corrected.
+2. When the photos are too blue or too dark to align, tick *CLAHE*, then *Correct the photos* and *Use the
+   corrected photos* **before** the alignment. The photos of the example align as they are, so the step stops at
+   the preview.
+
+<figure markdown="span">
+  ![The preview of the quick correction](../img/plugins/underwater/pane-quick.png)
+  <figcaption>The preview of the quick correction on a photo with the colour chart: red rebuilt from the green, white balance.</figcaption>
+</figure>
+
+
+### 3. Align the photos
+
+*Workflow > Align photos...* as for any survey (see [In short](#in-short), step 4). The 20 photos of the example
+align in a few seconds.
+
+### 4. The depth log, the time offset, the levelling
+
+1. In the box *3. Depth instead of GPS* choose the *Water* (sea or fresh, for the logs of pressure) and leave
+   *Time offset* at 0 if you do not know it.
+2. *Import the log...* and choose the file. The depths are matched to the photos at once, with the offset in the
+   box. Every photo gets a depth even with a wrong offset - the depth of another moment - so go on to the next
+   step.
+
+<figure markdown="span">
+  ![The depth log imported, with no time offset](../img/plugins/underwater/pane-depth-log.png)
+  <figcaption>The log imported with the offset at 0: 114 samples between 7.61 and 8.38 m, a depth for each of the 20 photos, the chunk not levelled yet.</figcaption>
+</figure>
+
+
+3. *Estimate the offset* tries the offsets within a quarter of an hour of the one in the box and keeps the one
+   with which the heights of the cameras explain the depths best; it writes it in the box and matches the depths
+   again. In the example it finds 7.08 seconds for a clock 7 seconds ahead.
+4. *Level and scale*: the chunk becomes level, in metres, with Z = -depth. The line under the buttons gives the
+   root mean square difference between the heights of the cameras and their depths (1.1 cm here), the largest
+   (5.2 cm) and the uncertainty of the vertical (0.49°).
+
+<figure markdown="span">
+  ![The offset estimated and the chunk levelled](../img/plugins/underwater/pane-levelled.png)
+  <figcaption>The offset estimated (7.08 s) and the chunk levelled and scaled on 20 cameras: 1.1 cm RMS, uncertainty of the vertical 0.49°.</figcaption>
+</figure>
+
+
+In the example the cameras stay within 0.8 m of depth, and the scale found differs by 7 % from the one of the metric
+depth maps of the dataset: the less the depth changes, the less it says about the scale. With small depth changes,
+a scale bar on the site and *Scale: from the scale bars* do better.
+
+### 5. Depth maps for the restoration
+
+The restoration takes the range of every pixel from the depth maps of the program. Build them with *Workflow >
+Build dense cloud...*, **Engine: PatchMatch multi-view** and **Depth maps only** ticked.
+
+<figure markdown="span">
+  ![The dialog of the dense cloud set to build the depth maps only](../img/plugins/underwater/dialog-depth-maps.png)
+  <figcaption><em>Workflow > Build dense cloud...</em> set for the restoration: PatchMatch, depth maps only.</figcaption>
+</figure>
+
+
+The automatic engine uses the stereo of photo pairs for photos taken close to the subject: fast, but on the photos
+of the example it covers about a fifth of each photo, PatchMatch three quarters (in 9 seconds on 20 photos). Where
+the maps do not reach, the range is taken from the nearest surface and the colours are only plausible: after the
+restoration the plugin warns when the maps cover less than 40 % of the photos.
+
+### 6. Restore the colours
+
+1. Set *Method* to *Physics-based restoration* and *Coefficients* to *one for the survey* (the same correction for
+   every photo: no seams of colour in the orthophoto).
+2. *Correct the photos*: the model of the water is fitted on the survey, then every photo is restored. *Preview*
+   shows a photo before and after with that model.
+3. *Use the corrected photos*: the orthophoto, the texture and the depth maps read the copies from then on; *Use
+   the originals* goes back.
+
+The line under the buttons says how many photos are corrected, which are in use, and the coefficients of the
+water per metre - attenuation βD and backscatter βB of red, green and blue - when the chunk is levelled in metres.
+
+<figure markdown="span">
+  ![The box Colours after the restoration](../img/plugins/underwater/pane-restored.png)
+  <figcaption>The restoration: the preview of a photo, 20 corrected photos in use, the attenuation from the points seen twice and the coefficients of the water per metre.</figcaption>
+</figure>
+
+
+### 7. The products
+
+Under the chunk, in the *Workspace*, the *Underwater* node sums up what was done: the corrected photos and whether
+they are in use, the flagged photos, the photos with a depth, the levelling. Its items open the pane; their right
+click menus repeat the main actions. The dense cloud, the DEM, the orthophoto and the textured model are then built
+as usual: they use the restored photos, in metres.
+
+<figure markdown="span">
+  ![The Underwater node in the workspace](../img/plugins/underwater/pane-tree.png)
+  <figcaption>The <em>Underwater</em> node under the chunk in the workspace.</figcaption>
+</figure>
 
 ## From the command line
 
