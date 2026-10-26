@@ -6,6 +6,19 @@ license:    BSD 2-clause (license.txt beside this file)
 
 Only the sources rnx2rtkp is built from (app/consapp/rnx2rtkp/gcc/makefile) are kept, unchanged,
 in src/: rtklib.h and rtkcmn trace rinex rtkpos postpos solution lambda geoid sbas preceph pntpos
-ephemeris options ppp ppp_ar rtcm rtcm2 rtcm3 rtcm3e ionex tides sofa (.c). The receiver decoders
+ephemeris options ppp ppp_ar rtcm rtcm2 rtcm3 rtcm3e ionex tides (.c). The receiver decoders
 (src/rcv), streams, servers, downloads and the applications are left out. Compile-time settings
 come from native/build.rs; the callbacks RTKLIB asks of an application are in native/src/ppk_shim.c.
+
+Also left out: src/sofa.c, which the makefile of rnx2rtkp lists. It is a bundle of routines of the
+IAU SOFA library (epv00 and moon98 with the functions they need), and SOFA has a licence of its
+own, not BSD: its notes, which the file refers to, are in lib/sofa/src of the upstream repository
+and are not part of this package. rtkcmn.c calls the two functions only if SUNPOS_SOFA or
+MOONPOS_SOFA is defined, an option for more accurate positions of the Sun and the Moon. Neither
+is defined here (nor in the makefile of rnx2rtkp): sunpos_eci() and moonpos_eci() take RTKLIB's
+own series (their #else branches), and nothing refers to sofa.c (rtkcmn.c only declares the two
+functions). sunmoonpos() is reached from the tide corrections (tides.c), PPP (ppp.c) and the
+satellite antenna offsets of precise ephemerides (preceph.c), none of which the post-processing
+of this package uses. RTKLIB's sample data (a static and a kinematic run) gives the same solution
+files, byte for byte, with and without it. Do not put it back, or define either macro, without
+carrying the SOFA licence in this package.

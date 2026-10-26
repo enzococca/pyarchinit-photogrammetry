@@ -25,7 +25,8 @@ fn c_text(text: &str, what: &str) -> PyResult<CString> {
 /// RTKLIB's post-processing as `rnx2rtkp -k conf -o outfile infiles` (API 8): the options file,
 /// the input files (rover observations first, then the base's observations, then navigation
 /// files) and the solution file. Returns RTKLIB's code (0 done, 1 aborted, -1 a file named by
-/// the options could not be read; -2 the options file could not be read, -3 bad arguments, -4 a
+/// the options could not be read; -2 the options file could not be read, -3 bad arguments, a path
+/// of 1000 bytes or more among them (RTKLIB copies paths into buffers of 1024 bytes); -4 a
 /// compressed input, which RTKLIB would decompress through a shell command; -5 the calling thread
 /// could not be put in the "C" locale for numbers, nothing ran) and its last message, the last
 /// error it reported if any. RTKLIB returns 0 also when it computed nothing ("error : no obs

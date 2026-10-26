@@ -7,6 +7,10 @@ observations (ppk_solve):
   RTKLIB-EX v2.5.1 (https://github.com/rtklibexplorer/RTKLIB, tag v2.5.1,
   commit 62d4677ed8425a4e2748c6d390b500d1afb493fc), sources in vendor/rtklib/src, unchanged.
 
+Not part of this package: RTKLIB's receiver decoders, streams and applications, and the routines of
+the IAU SOFA library that RTKLIB bundles in sofa.c for the positions of the Sun and the Moon (an
+option that is not built; SOFA has a licence of its own). See vendor/rtklib/VERSION.
+
 RTKLIB's license (vendor/rtklib/license.txt) follows.
 
 ================================================================================

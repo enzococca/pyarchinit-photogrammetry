@@ -30,4 +30,5 @@ same project (on RTKLIB's test data 115 of 120 instead of about 40).
 License: GPL-2.0-or-later. The extension includes RTKLIB-EX v2.5.1
 (https://github.com/rtklibexplorer/RTKLIB, commit 62d4677ed8425a4e2748c6d390b500d1afb493fc),
 Copyright (c) 2007-2020, T. Takasu, distributed under the BSD 2-clause license: its text is in
-`vendor/rtklib/license.txt` and in `NOTICE`, which come with the package.
+`vendor/rtklib/license.txt` and in `NOTICE`, which come with the package. RTKLIB's optional routines
+of the IAU SOFA library (`sofa.c`, a licence of their own) are not included.

@@ -650,6 +650,39 @@ def test_ppk_core_refuses_compressed_inputs(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["base.25d", "ppk.conf", "rover.25o.gz"]  # no base.25o
 
 
+def test_ppk_core_refuses_paths_rtklib_cannot_hold(tmp_path):
+    """RTKLIB copies a path into buffers of 1024 bytes without looking at its length (and adds
+    ".trace", ".stat" or "_events.pos" to the solution's): a path of 1000 bytes or more, the options
+    file's, an input's or the output's, is refused with code -3 and a message that names it, before
+    anything runs or is written. One byte less goes on to RTKLIB, which reports what it finds."""
+    if _native.kernel("ppk_solve") is None:
+        pytest.skip("native core without RTKLIB (older than 0.5, API 8)")
+    conf, out = tmp_path / "ppk.conf", tmp_path / "out.pos"
+    conf.write_text(PPK_OPTIONS)
+    files = [str(RTKLIB_DATA / name) for name in ("30400920.05o", "07590920.05o", "07590920.05n")]
+
+    def padded(path, length):
+        """``path`` with a longer name, of exactly ``length`` bytes (it does not have to exist)."""
+        text = str(path)
+        return text + "x" * (length - len(text.encode()))
+
+    def run(length):
+        """The three runs, each with one path of ``length`` bytes: {what: (code, message)}."""
+        inputs = [files[0], padded(files[1], length), files[2]]
+        return {
+            "options file": ppg_core.ppk_solve(padded(conf, length), files, str(out)),
+            "input file 2": ppg_core.ppk_solve(str(conf), inputs, str(out)),
+            "output file": ppg_core.ppk_solve(str(conf), files, padded(out, length)),
+        }
+
+    for what, (code, message) in run(1000).items():
+        assert code == -3, (what, code, message)
+        assert what in message and "1000 bytes long" in message and "less than 1000 bytes" in message, message
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["ppk.conf"]  # nothing was written
+    for what, (code, message) in run(999).items():
+        assert code != -3, (what, code, message)  # a name that is not there: RTKLIB's own error, not a refusal
+
+
 def test_ppk_solve_in_threads(tmp_path):
     """Runs from several threads wait for each other (RTKLIB is not reentrant) and give the same
     solution, byte for byte."""

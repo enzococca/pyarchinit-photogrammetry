@@ -3,7 +3,9 @@
 //!
 //! The sources are those rnx2rtkp is made of, with the settings of its builds (all the satellite
 //! systems, three frequencies, three extended observation codes); RTKLIB's files are not changed.
-//! postpos.c is compiled through the shim (see ppk_shim.c).
+//! postpos.c is compiled through the shim (see ppk_shim.c). sofa.c, which rnx2rtkp's makefile also
+//! lists, is not here: it holds routines of the IAU SOFA library (own licence), which rtkcmn.c calls
+//! only if SUNPOS_SOFA or MOONPOS_SOFA is defined, and neither is (see vendor/rtklib/VERSION).
 //!
 //! Every compiler builds it as C99 (old GCCs default to C89, which RTKLIB's loops are not) and
 //! without contractions: a fused multiply-add rounds once where RTKLIB, as written, rounds twice,

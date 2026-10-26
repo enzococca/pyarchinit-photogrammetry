@@ -143,6 +143,25 @@ static int ppg_compressed(const char *path)
     return strlen(p) > 3 && (p[3] == 'd' || p[3] == 'D');
 }
 
+/* RTKLIB copies a path into a buffer of 1024 bytes without looking at its length: expath() the
+   directory of an input (dir[1024]) and the names it finds (buffers of 1024 bytes in rinex.c),
+   execses() the solution's name (outfiletm[1024], to which "_events.pos" is added, and the buffers
+   of its ".trace" and ".stat" files). A path of 1000 bytes or more is refused, which leaves room
+   for what is added: such a path overflows those buffers, on the stack and on the heap ---*/
+#define PPG_MAXPATH 1000
+
+static int ppg_too_long(const char *what, const char *path, char *msg, int msglen)
+{
+    size_t len = strlen(path);
+    char text[PPG_MSGLEN];
+
+    if (len < (size_t)PPG_MAXPATH) return 0;
+    snprintf(text, sizeof(text), "error : the path of the %s is %d bytes long, and RTKLIB holds paths of "
+             "less than %d bytes: use a shorter folder", what, (int)len, PPG_MAXPATH);
+    ppg_message(msg, msglen, text);
+    return 1;
+}
+
 /* the RTKLIB part of ppg_ppk(), from the options to the message: runs in the C locale --*/
 static int ppg_run(const char *conf, const char **infiles, int n, const char *outfile,
                    char *msg, int msglen)
@@ -184,7 +203,8 @@ static int ppg_run(const char *conf, const char **infiles, int n, const char *ou
 *          int    msglen    I   size of msg
 * return : postpos(): 0 done (also when RTKLIB read nothing: see msg),
 *          1 aborted, -1 a file named by the options could not be read;
-*          -2 the options file could not be read, -3 bad arguments,
+*          -2 the options file could not be read, -3 bad arguments (also a
+*          path of 1000 bytes or more: ppg_too_long),
 *          -4 a compressed input (ppg_compressed: decompress it first),
 *          -5 the calling thread could not be put in the "C" locale for
 *          numbers (nothing ran)
@@ -207,11 +227,18 @@ int ppg_ppk(const char *conf, const char **infiles, int n, const char *outfile,
         ppg_message(msg, msglen, text);
         return -3;
     }
+    if (ppg_too_long("options file", conf, msg, msglen) || ppg_too_long("output file", outfile, msg, msglen)) {
+        return -3;
+    }
     for (i = 0; i < n; i++) {
+        char what[32];
+
         if (!infiles[i] || !*infiles[i]) {
             ppg_message(msg, msglen, "error : an input file without a name");
             return -3;
         }
+        snprintf(what, sizeof(what), "input file %d", i + 1);
+        if (ppg_too_long(what, infiles[i], msg, msglen)) return -3;
         if (ppg_compressed(infiles[i])) {
             char text[PPG_MSGLEN];
             snprintf(text, sizeof(text), "error : %s is compressed (gzip, zip, tar or Hatanaka RINEX), "

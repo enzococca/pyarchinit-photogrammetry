@@ -106,6 +106,27 @@ jobs:
           working-directory: native
           command: sdist
           args: --out dist
+      - name: The sdist holds no IAU SOFA code
+        # RTKLIB's sofa.c (routines of the IAU SOFA library, whose licence this package does not carry) is
+        # not vendored and not built: native/vendor/rtklib/VERSION says why. Looked for by name and by
+        # the copyright line of the SOFA routines in any C source.
+        run: |
+          python3 - <<'EOF'
+          import glob, re, sys, tarfile
+          [path] = glob.glob("native/dist/*.tar.gz")
+          found = []
+          with tarfile.open(path) as sdist:
+              for member in sdist:
+                  if re.search(r"(^|/)sofa[^/]*$", member.name, re.IGNORECASE):
+                      found.append(member.name)
+                  elif member.isfile() and member.name.endswith((".c", ".h")):
+                      if b"IAU SOFA Board" in sdist.extractfile(member).read():
+                          found.append(member.name)
+          print(path, "has IAU SOFA code: " + ", ".join(found) if found else "has no IAU SOFA code")
+          if found:
+              print("::error::the sdist holds IAU SOFA code (" + ", ".join(found) + "): its licence is not carried by this package")
+              sys.exit(1)
+          EOF
       - uses: actions/upload-artifact@v4
         with:
           name: sdist
