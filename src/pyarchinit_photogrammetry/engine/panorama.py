@@ -114,7 +114,7 @@ def add_panoramas(chunk: Chunk, paths, size: int | None = None, fov: float = 100
     """Equirectangular photos (files or folders) added to ``chunk`` as the faces of
     :func:`split_panorama`; photos that are not panoramas are left out. Returns the cameras
     added (``meta["panorama"]`` = the panorama, ``meta["face"]`` = the face)."""
-    from ..core.camera import Reference
+    from ..gnss.apply import NO_RTK, set_camera_position
     from ..io.exif import read_exif
 
     progress = as_progress(progress)
@@ -139,8 +139,7 @@ def add_panoramas(chunk: Chunk, paths, size: int | None = None, fov: float = 100
             cam.sensor_key = sensor.key
             cam.meta.update(panorama=pano.name, face=face)
             if info.get("gps"):
-                cam.reference = Reference(location=list(info["gps"]), accuracy=[5.0, 5.0, 10.0], enabled=True)
-                cam.meta["reference_crs"] = "EPSG:4326"
+                set_camera_position(cam, list(info["gps"]), "EPSG:4326", list(NO_RTK), "panorama")
             cams.append(cam)
         progress((i + 1) / len(files), f"360-degree photos {i + 1}/{len(files)}")
     used = {c.sensor_key for c in chunk.cameras}

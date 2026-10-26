@@ -121,6 +121,8 @@ def test_add_video_with_positions(tmp_path):
     refs = [c.reference.location for c in cams]
     assert all(r is not None for r in refs) and np.isclose(refs[0][0], 11.2, atol=1e-3)
     assert cams[0].meta["reference_crs"] == "EPSG:4326"
+    assert cams[0].meta["gnss"]["source"] == "video" and cams[0].meta["gnss"]["height"] == "exif"
+    assert cams[0].reference.accuracy == [3.0, 3.0, 5.0]
 
 
 def test_interface_quality_and_video(processed, tmp_path, monkeypatch):

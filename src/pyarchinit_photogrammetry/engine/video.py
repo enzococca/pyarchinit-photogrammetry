@@ -198,7 +198,7 @@ def add_video(chunk: Chunk, video: str | os.PathLike, folder: str | os.PathLike 
                 break
     track = read_srt(srt) if srt is not None and Path(srt).exists() else []
     if track:
-        from ..core.camera import Reference
+        from ..gnss.apply import set_camera_position
 
         by_path = {Path(f["path"]).resolve(): f for f in frames}
         for cam in cams:
@@ -207,9 +207,7 @@ def add_video(chunk: Chunk, video: str | os.PathLike, folder: str | os.PathLike 
             if pos is None:
                 continue
             lon, lat, alt = pos
-            cam.reference = Reference(location=[lon, lat, alt if alt is not None else 0.0], accuracy=list(accuracy),
-                                      enabled=True)
-            cam.meta["reference_crs"] = "EPSG:4326"
+            set_camera_position(cam, [lon, lat, alt if alt is not None else 0.0], "EPSG:4326", list(accuracy), "video")
     for cam in cams:
         cam.meta["video"] = video.name
     progress(1.0, f"{len(cams)} frames added" + (f" with GPS from {Path(srt).name}" if track else ""))

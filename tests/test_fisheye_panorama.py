@@ -106,6 +106,8 @@ def test_panoramas_align_as_rigs(tmp_path, monkeypatch):
     assert {c.label for c in cams} >= {"P00_front", "P09_down"}
     p00 = [c for c in cams if c.meta["panorama"] == "P00.jpg"]
     assert all(c.reference.location == [11.25, 43.77, 50.0] for c in p00)
+    assert all(c.meta["gnss"]["source"] == "panorama" and c.meta["gnss"]["height"] == "exif"
+               and c.reference.accuracy == [5.0, 5.0, 10.0] and c.meta["reference_crs"] == "EPSG:4326" for c in p00)
     assert all(c.reference.location is None for c in cams if c.meta["panorama"] != "P00.jpg")
     monkeypatch.setattr(exif, "read_exif", read)
     for c in cams:  # keep the georeference out of this test: the scale comes from the chamber
