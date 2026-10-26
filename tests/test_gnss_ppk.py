@@ -1,8 +1,15 @@
-"""Post-processed kinematic positions: what the RINEX files of a base and a rover hold."""
+"""Post-processed kinematic positions: what the RINEX files of a base and a rover hold, and the solution RTKLIB
+computes from them."""
 from __future__ import annotations
 
 import gzip
+import hashlib
+import json
 import math
+import os
+import re
+import shutil
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -10,7 +17,8 @@ import numpy as np
 import pytest
 from pyproj import Transformer
 
-from pyarchinit_photogrammetry.gnss import rinex
+from pyarchinit_photogrammetry import _native
+from pyarchinit_photogrammetry.gnss import ppk, rinex
 
 DATA = Path(__file__).parent / "data" / "rtklib"
 ROVER = DATA / "07590920.05o"
@@ -618,3 +626,569 @@ def test_ecef_to_llh_takes_any_sequence_of_three_numbers():
 def test_the_base_position_of_a_header_is_in_japan():
     lat, lon, h = rinex.ecef_to_llh(rinex.header(BASE).approx_xyz)
     assert 35.0 < lat < 36.0 and 139.0 < lon < 140.0 and 0.0 < h < 100.0
+
+
+# --- the options of RTKLIB --------------------------------------------------------------------------------------
+
+PPK_ROVER = DATA / "30400920.05o"  # the static station 3040, processed as a moving rover
+PPK_BASE = DATA / "07590920.05o"  # 0759, 3.3 km away
+PPK_NAV = DATA / "07590920.05n"
+WEEK = 604800.0
+START_2005 = 1316 * WEEK + 518400.0  # 2005-04-02 00:00:00 GPS time: GPS week 1316, Saturday
+
+
+def _options(text: str) -> dict[str, str]:
+    """The ``name=value`` lines of an options file of RTKLIB, without its comments."""
+    options = {}
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            name, value = line.split("=", 1)
+            options[name.strip()] = value
+    return options
+
+
+def _rtklib_option_names() -> set[str]:
+    """The names of the options RTKLIB knows, from its own table."""
+    source = (Path(__file__).parents[1] / "native" / "vendor" / "rtklib" / "src" / "options.c").read_text()
+    return set(re.findall(r'^\s*\{"([a-z0-9_-]+)",', source, re.MULTILINE | re.IGNORECASE))
+
+
+def test_config_with_a_typed_base_position():
+    text = ppk.config((35.160875039, 139.613837253, 70.1535), elevation_mask=10.0, systems="GRE")
+    options = _options(text)
+    assert options["pos1-posmode"] == "kinematic"
+    assert options["pos1-soltype"] == "combined"
+    assert float(options["pos1-elmask"]) == 10.0
+    assert options["pos1-frequency"] == "l1+l2"
+    assert options["pos1-navsys"] == str(1 + 4 + 8)  # GPS, GLONASS, Galileo
+    assert options["pos2-armode"] == "fix-and-hold"
+    assert options["ant2-postype"] == "llh"
+    assert float(options["ant2-pos1"]) == pytest.approx(35.160875039, abs=1e-10)
+    assert float(options["ant2-pos2"]) == pytest.approx(139.613837253, abs=1e-10)
+    assert float(options["ant2-pos3"]) == pytest.approx(70.1535, abs=1e-4)
+    assert options["ant2-anttype"] == "*"  # the antenna height of the base's header is added to its mark
+    assert options["out-solformat"] == "llh"
+    assert options["out-height"] == "ellipsoidal"
+    assert options["out-timesys"] == "gpst"
+    assert options["out-timeform"] == "tow"
+    assert options["out-outhead"] == "on"
+    # only options RTKLIB knows, no file of any kind, values without a "#" (a comment for RTKLIB) or blanks
+    assert set(options) <= _rtklib_option_names()
+    assert not any(name.startswith("file-") for name in options)
+    assert all(value == value.strip() and value for value in options.values())
+    assert "#" not in "".join(line for line in text.splitlines() if not line.startswith("#"))
+
+
+def test_config_with_the_base_of_the_rinex_header():
+    options = _options(ppk.config(None, mode="static"))
+    assert options["pos1-posmode"] == "static"
+    assert options["ant2-postype"] == "rinexhead"
+    assert not any(name.startswith("ant2-pos") and name != "ant2-postype" for name in options)
+    assert options["pos1-navsys"] == str(1 + 2 + 4 + 8 + 16 + 32 + 64)  # "all": every system RTKLIB knows
+    assert float(options["pos1-elmask"]) == 15.0
+    # the systems as letters, in any order and case, as a list too
+    assert _options(ppk.config(None, systems=["c", "G"]))["pos1-navsys"] == str(1 + 32)
+    assert _options(ppk.config(None, systems="JIS"))["pos1-navsys"] == str(16 + 64 + 2)
+
+
+@pytest.mark.parametrize("arguments, match", [
+    (dict(base_position=(91.0, 10.0, 0.0)), "latitude"),
+    (dict(base_position=(45.0, 360.0, 0.0)), "longitude"),
+    (dict(base_position=(45.0, -180.5, 0.0)), "longitude"),
+    (dict(base_position=(45.0, 10.0, float("nan"))), "height"),
+    (dict(base_position=(45.0, 10.0)), "latitude, longitude"),
+    (dict(base_position=None, mode="ppp-kine"), "mode"),
+    (dict(base_position=None, systems="GX"), "X"),
+    (dict(base_position=None, systems=""), "system"),
+    (dict(base_position=None, elevation_mask=90.0), "elevation"),
+    (dict(base_position=None, elevation_mask=-1.0), "elevation"),
+])
+def test_config_refuses_what_rtklib_cannot_take(arguments, match):
+    with pytest.raises(ValueError, match=match):
+        ppk.config(**arguments)
+
+
+# --- solution files ---------------------------------------------------------------------------------------------
+
+POS_LEGEND = ("% (lat/lon/height=WGS84/ellipsoidal,Q=1:fix,2:float,3:sbas,4:dgps,5:single,6:ppp,"
+              "ns=# of satellites)")
+POS_COLUMNS = ("latitude(deg) longitude(deg)  height(m)   Q  ns   sdn(m)   sde(m)   sdu(m)  sdne(m)  sdeu(m)  sdun(m)"
+               " age(s)  ratio")
+# GPS seconds, latitude, longitude, height, Q, ns, sdn, sde, sdu: out of order, as the file need not be in order
+POS_ROWS = [
+    (START_2005 + 30.0, 35.132066167, 139.624300803, 75.6904, 2, 6, 0.1100, 0.1200, 0.1300),
+    (START_2005, 35.132066159, 139.624300832, 75.6841, 1, 7, 0.0100, 0.0200, 0.0300),
+    (START_2005 + 59.996, 35.132065640, 139.624303673, 75.7671, 5, 5, 1.1000, 1.2000, 2.3000),
+]
+LEAP_2005 = 13  # GPS time was 13 s ahead of UTC in 2005
+
+
+def _pos_time(seconds: float, form: str, system: str) -> str:
+    """A time of a solution row as RTKLIB writes it: GPS week and seconds of the week (tow) or the calendar (hms),
+    in GPS time, UTC or Japan standard time."""
+    seconds -= {"GPST": 0, "UTC": LEAP_2005, "JST": LEAP_2005 - 9 * 3600}[system]
+    if form == "tow":
+        week = int(seconds // WEEK)
+        return f"{week:4d} {seconds - week * WEEK:10.3f}"
+    when = datetime(1980, 1, 6) + timedelta(seconds=seconds)
+    return f"{when:%Y/%m/%d %H:%M:%S}.{round(when.microsecond / 1000):03d}"
+
+
+def _pos_text(rows=POS_ROWS, form: str = "tow", system: str = "GPST", legend: str | None = POS_LEGEND,
+              columns: str = POS_COLUMNS, sep: str = " ") -> str:
+    """A solution file of RTKLIB in latitude, longitude and height."""
+    lines = ["% program   : RTKLIB ver.EX 2.5.1", "% inp file  : rover.obs", "%"]
+    if legend:
+        lines.append(legend)
+    lines.append(f"%  {system:<{16 if form == 'hms' else 8}}{sep}" + sep.join(columns.split()))
+    for seconds, lat, lon, h, q, ns, sdn, sde, sdu in rows:
+        values = [f"{lat:14.9f}", f"{lon:14.9f}", f"{h:10.4f}", f"{q:3d}", f"{ns:3d}", f"{sdn:8.4f}", f"{sde:8.4f}",
+                  f"{sdu:8.4f}", "  0.0000", "  0.0000", "  0.0000", "  0.00", "   3.2"]
+        lines.append(_pos_time(seconds, form, system) + sep + sep.join(values))
+    return "\r\n".join(lines) + "\r\n"  # RTKLIB ends its lines with \r\n
+
+
+def _check_rows(solution: ppk.Solution) -> None:
+    """The rows of POS_ROWS, in time order."""
+    order = np.argsort([r[0] for r in POS_ROWS])
+    rows = [POS_ROWS[i] for i in order]
+    assert solution.times.dtype == np.float64
+    assert np.allclose(solution.times, [r[0] for r in rows], rtol=0, atol=1e-6)
+    assert np.allclose(solution.llh, [r[1:4] for r in rows], rtol=0, atol=1e-10)
+    assert solution.q.tolist() == [r[4] for r in rows] and solution.ns.tolist() == [r[5] for r in rows]
+    assert solution.q.dtype.kind == "i" and solution.ns.dtype.kind == "i"
+    # RTKLIB writes sdn, sde, sdu: the solution has them east, north, up
+    assert np.allclose(solution.sd, [(r[7], r[6], r[8]) for r in rows], rtol=0, atol=1e-9)
+    assert solution.llh.shape == solution.sd.shape == (3, 3)
+
+
+@pytest.mark.parametrize("form, system", [("tow", "GPST"), ("hms", "GPST"), ("tow", "UTC"), ("hms", "UTC"),
+                                          ("hms", "JST")])
+def test_read_pos_gives_gps_seconds_whatever_the_time_of_the_file(tmp_path, form, system):
+    path = tmp_path / "rover.pos"
+    path.write_text(_pos_text(form=form, system=system), newline="")
+    solution = ppk.read_pos(path)
+    _check_rows(solution)
+    assert solution.path == path and solution.base == {} and solution.warnings == []
+
+
+def test_read_pos_reads_the_columns_by_their_names(tmp_path):
+    # commas between the fields (out-fieldsep) and the velocities after the standard deviations (out-outvel)
+    columns = POS_COLUMNS + " vn(m/s) ve(m/s) vu(m/s) sdvn sdve sdvu sdvne sdveu sdvun"
+    text = _pos_text(columns=columns, sep=",", form="hms")
+    lines = [line + (",   0.10000,  -0.20000,   0.00000" + ",  0.01000" * 6 if line[0].isdigit() else "")
+             for line in text.split("\r\n") if line]
+    path = tmp_path / "rover.pos"
+    path.write_text("\n".join(lines) + "\n")
+    _check_rows(ppk.read_pos(path))
+
+
+def test_read_pos_of_a_file_that_does_not_say_its_heights(tmp_path):
+    # RTKLIB leaves out the legend with out-outhead=off: the heights are taken as RTKLIB's default, said in a warning
+    path = tmp_path / "rover.pos"
+    path.write_text(_pos_text(legend=None))
+    solution = ppk.read_pos(path)
+    _check_rows(solution)
+    assert len(solution.warnings) == 1 and "ellipsoidal" in solution.warnings[0]
+
+
+@pytest.mark.parametrize("text, match", [
+    (_pos_text(rows=[]), "nothing was computed"),
+    ("", "nothing was computed"),
+    (_pos_text(legend=POS_LEGEND.replace("ellipsoidal", "geodetic")), "ellipsoidal"),
+    (_pos_text(legend=POS_LEGEND.replace("WGS84", "Tokyo")), "WGS84"),
+    (_pos_text(legend="% (x/y/z-ecef=WGS84,Q=1:fix,2:float,3:sbas,4:dgps,5:single,6:ppp,ns=# of satellites)",
+               columns=POS_COLUMNS.replace("latitude(deg) longitude(deg)  height(m)", "x-ecef(m) y-ecef(m) z-ecef(m)")),
+     "latitude, longitude"),
+    (_pos_text(legend="% (e/n/u-baseline=WGS84,Q=1:fix,2:float,3:sbas,4:dgps,5:single,6:ppp,ns=# of satellites)",
+               columns=POS_COLUMNS.replace("latitude(deg) longitude(deg)  height(m)",
+                                           "e-baseline(m) n-baseline(m) u-baseline(m)")),
+     "latitude, longitude"),
+    (_pos_text(columns=POS_COLUMNS.replace("latitude(deg) longitude(deg)", "latitude(d'\") longitude(d'\")")),
+     "degrees"),
+    (_pos_text().replace("%  GPST    ", "%  TAI     "), "TAI"),
+    ("$GPGGA,000000.00,3507.92397,N,13937.45805,E,4,07,1.0,75.684,M,0.0,M,0.0,0000*6A\r\n", "RTKLIB"),
+    (_pos_text().replace("1316 518430.000", "1316 518430.000 x"), "line"),
+    (_pos_text() + "1316 518490.000   35.13\r\n", "line"),
+], ids=["no rows", "empty", "geoid heights", "Tokyo datum", "xyz", "enu", "dms", "time system", "nmea", "not a number",
+        "short row"])
+def test_read_pos_refuses_what_is_not_a_solution_in_ellipsoidal_heights(tmp_path, text, match):
+    path = tmp_path / "rover.pos"
+    path.write_text(text, newline="")
+    with pytest.raises(ValueError, match=match):
+        ppk.read_pos(path)
+
+
+# --- solve: the checks before RTKLIB runs, the files it is given ------------------------------------------------
+
+
+def _fake_rnx2rtkp(folder: Path) -> Path:
+    """A stand-in for rnx2rtkp: appends to run.log beside it a JSON line with its arguments, the options file and the
+    SHA-256 of every input (the inputs as RTKLIB would find them), copies the file named by PPG_FAKE_POS to its -o
+    file (none: no output, as RTKLIB when it computed nothing), writes PPG_FAKE_MESSAGE to stderr as rnx2rtkp writes
+    its messages and exits with PPG_FAKE_EXIT."""
+    script = folder / "rnx2rtkp"
+    log = folder / "run.log"
+    script.write_text(f"""#!{sys.executable}
+import hashlib, json, os, shutil, sys
+args = sys.argv[1:]
+conf, out, files = args[args.index("-k") + 1], args[args.index("-o") + 1], args[4:]
+entry = {{"args": args, "options": open(conf).read(),
+          "inputs": [hashlib.sha256(open(f, "rb").read()).hexdigest() for f in files]}}
+open({str(log)!r}, "a").write(json.dumps(entry) + "\\n")
+if os.environ.get("PPG_FAKE_POS"):
+    shutil.copyfile(os.environ["PPG_FAKE_POS"], out)
+sys.stderr.write(os.environ.get("PPG_FAKE_MESSAGE", "processing : 2005/04/02 00:59:30.0 Q=1") + "\\r")
+sys.exit(int(os.environ.get("PPG_FAKE_EXIT", "0")))
+""")
+    script.chmod(0o755)
+    if os.name == "nt":  # no shebang lines on Windows: a batch file starts the script
+        wrapper = folder / "rnx2rtkp.cmd"
+        wrapper.write_text(f'@"{sys.executable}" "{script}" %*\r\n')
+        return wrapper
+    return script
+
+
+@pytest.fixture
+def fake_rtklib(tmp_path, monkeypatch):
+    """RTKLIB as the fake rnx2rtkp (the core switched off), writing the solution of POS_ROWS; returns the log of
+    its runs (a list of dicts, read when called)."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    monkeypatch.setenv("PPG_NATIVE", "0")
+    monkeypatch.setenv("PPG_RNX2RTKP", str(_fake_rnx2rtkp(tools)))
+    pos = tools / "canned.pos"
+    pos.write_text(_pos_text(), newline="")
+    monkeypatch.setenv("PPG_FAKE_POS", str(pos))
+    for name in ("PPG_FAKE_MESSAGE", "PPG_FAKE_EXIT"):
+        monkeypatch.delenv(name, raising=False)
+
+    def runs() -> list[dict]:
+        log = tools / "run.log"
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    return runs
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _user_files(folder: Path) -> dict[str, bytes]:
+    """Every file under ``folder`` and its bytes."""
+    return {str(p.relative_to(folder)): p.read_bytes() for p in sorted(folder.rglob("*")) if p.is_file()}
+
+
+def test_solve_gives_rtklib_plain_copies_of_the_inputs(tmp_path, fake_rtklib):
+    # the user's files have names RTKLIB would read as wild cards, keywords or comments, and a compressed base
+    user = tmp_path / "campagna è 100%r #1"
+    user.mkdir()
+    rover = user / ("volo %r #1.05o" if os.name == "nt" else "volo * %r #1.05o")  # no * in a name on Windows
+    shutil.copyfile(PPK_ROVER, rover)
+    base = user / "base è.05o.gz"
+    base.write_bytes(gzip.compress(PPK_BASE.read_bytes()))
+    nav = user / "base è.05n"
+    shutil.copyfile(PPK_NAV, nav)
+    before = _user_files(user)
+    work = tmp_path / "lavoro" / "ppk"  # made when missing
+
+    solution = ppk.solve(rover, base, [nav], folder=work)
+
+    (run,) = fake_rtklib()
+    expected = [str(work.resolve() / name) for name in ("rover.obs", "base.obs", "nav1.nav")]
+    assert run["args"] == ["-k", str(work.resolve() / "ppk.conf"), "-o", str(work.resolve() / "solution.pos"),
+                           *expected]
+    # the copies RTKLIB read are the user's files, the base decompressed
+    assert run["inputs"] == [_sha256(PPK_ROVER.read_bytes()), _sha256(PPK_BASE.read_bytes()),
+                             _sha256(PPK_NAV.read_bytes())]
+    assert _options(run["options"]) == _options(ppk.config(None))
+    # the copies are gone, the options and the solution stay; the user's folder is as it was
+    assert sorted(p.name for p in work.iterdir()) == ["ppk.conf", "solution.pos"]
+    assert _user_files(user) == before
+    # the solution: the rows of the file, where it is, the base from its header with the warning
+    _check_rows(solution)
+    assert solution.path == work.resolve() / "solution.pos"
+    assert solution.base["name"] == "0759" and solution.base["file"] == "base è.05o.gz"
+    assert solution.base["position_source"] == "header"
+    assert solution.base["position"] == pytest.approx(list(rinex.ecef_to_llh(rinex.header(PPK_BASE).approx_xyz)))
+    assert len(solution.warnings) == 1
+    assert "0759" in solution.warnings[0] and "header" in solution.warnings[0] and "metres" in solution.warnings[0]
+
+
+def test_solve_with_a_typed_base_position(tmp_path, fake_rtklib):
+    work = tmp_path / "work"
+    solution = ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], (35.16, 139.61, 70.0), folder=work)
+    options = _options(fake_rtklib()[0]["options"])
+    assert options["ant2-postype"] == "llh"
+    assert [float(options[f"ant2-pos{i}"]) for i in (1, 2, 3)] == [35.16, 139.61, 70.0]
+    assert solution.base == {"name": "0759", "position": [35.16, 139.61, 70.0], "position_source": "typed",
+                             "file": "07590920.05o"}
+    assert solution.warnings == []
+    with pytest.raises(ValueError, match="latitude"):
+        ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], (135.16, 139.61, 70.0), folder=work)
+    assert len(fake_rtklib()) == 1  # RTKLIB did not run again
+
+
+def test_solve_finds_the_navigation_files_beside_the_rover_then_beside_the_base(tmp_path, fake_rtklib):
+    drone, station = tmp_path / "drone", tmp_path / "station"
+    drone.mkdir(), station.mkdir()
+    rover = drone / "DJI_Rinex.obs"
+    shutil.copyfile(PPK_ROVER, rover)
+    base = station / "07590920.05o"
+    shutil.copyfile(PPK_BASE, base)
+    (station / "07590920.05n").write_bytes(PPK_NAV.read_bytes())
+    # no nav beside the drone's file: the base's
+    ppk.solve(rover, base, folder=tmp_path / "work")
+    assert fake_rtklib()[-1]["inputs"][2:] == [_sha256(PPK_NAV.read_bytes())]
+    # a nav beside the drone's file: that one (the base's is not added)
+    shutil.copyfile(DATA / "30400920.05n", drone / "DJI_Rinex.nav")
+    ppk.solve(rover, base, folder=tmp_path / "work")
+    assert fake_rtklib()[-1]["inputs"][2:] == [_sha256((DATA / "30400920.05n").read_bytes())]
+    # a single file is a list of one
+    ppk.solve(rover, base, PPK_NAV, folder=tmp_path / "work")
+    assert fake_rtklib()[-1]["inputs"][2:] == [_sha256(PPK_NAV.read_bytes())]
+
+
+def test_solve_refuses_without_a_navigation_file(tmp_path, fake_rtklib):
+    folder = tmp_path / "obs"
+    folder.mkdir()
+    rover, base = folder / "rover.05o", folder / "base.05o"
+    shutil.copyfile(PPK_ROVER, rover)
+    shutil.copyfile(PPK_BASE, base)
+    (folder / "notes.nav").write_text("not a navigation file\n")  # a .nav that is not RINEX is not one
+    with pytest.raises(ValueError, match="navigation") as error:
+        ppk.solve(rover, base, folder=tmp_path / "work")
+    assert "rover.05o" in str(error.value) and "base.05o" in str(error.value) and ".nav" in str(error.value)
+    # a file given as navigation that holds observations
+    with pytest.raises(ValueError, match="navigation"):
+        ppk.solve(rover, base, [base], folder=tmp_path / "work")
+    assert fake_rtklib() == [] and not (tmp_path / "work").exists()
+
+
+def test_solve_refuses_rover_and_base_without_hours_in_common(tmp_path, fake_rtklib):
+    rover = _rinex2(tmp_path / "rover.24o", V2_HEADER)  # 2024-05-12 10:30:00 to 10:30:02
+    with pytest.raises(ValueError, match="in common") as error:
+        ppk.solve(rover, PPK_BASE, [PPK_NAV], folder=tmp_path / "work")
+    text = str(error.value)
+    assert "rover.24o" in text and "07590920.05o" in text
+    assert "2024-05-12 10:30:00" in text and "2005-04-02 00:00:00" in text and "2005-04-02 00:59:30" in text
+    assert fake_rtklib() == [] and not (tmp_path / "work").exists()
+
+
+def test_solve_refuses_observations_that_are_not_observations(tmp_path, fake_rtklib):
+    with pytest.raises(ValueError, match="rover"):
+        ppk.solve(PPK_NAV, PPK_BASE, [PPK_NAV], folder=tmp_path / "work")
+    with pytest.raises(ValueError, match="base"):
+        ppk.solve(PPK_ROVER, PPK_NAV, [PPK_NAV], folder=tmp_path / "work")
+    empty = _rinex2(tmp_path / "empty.24o", V2_HEADER, epochs=0)
+    with pytest.raises(ValueError, match="no observation"):
+        ppk.solve(PPK_ROVER, empty, [PPK_NAV], folder=tmp_path / "work")
+    assert fake_rtklib() == []
+
+
+def test_solve_refuses_a_base_with_no_position(tmp_path, fake_rtklib):
+    header = [h for h in V2_HEADER if not h.endswith("APPROX POSITION XYZ")]
+    base = _rinex2(tmp_path / "base.24o", header)
+    rover = _rinex2(tmp_path / "rover.24o", V2_HEADER)
+    with pytest.raises(ValueError, match="position") as error:
+        ppk.solve(rover, base, [PPK_NAV], folder=tmp_path / "work")
+    assert "base.24o" in str(error.value)
+    assert fake_rtklib() == []
+    # with its position typed it runs
+    solution = ppk.solve(rover, base, [PPK_NAV], (45.0, 11.0, 50.0), folder=tmp_path / "work")
+    assert solution.base["name"] == "BASE" and solution.base["position_source"] == "typed"
+
+
+def test_solve_warns_of_a_time_system_it_does_not_know(tmp_path, fake_rtklib):
+    header = _first_obs(V2_HEADER, "  2024     5    12    10    30    0.0000000     UTC")
+    rover = _rinex2(tmp_path / "rover.24o", header)
+    base = _rinex2(tmp_path / "base.24o", V2_HEADER)
+    solution = ppk.solve(rover, base, [PPK_NAV], (45.0, 11.0, 50.0), folder=tmp_path / "work")
+    assert len(solution.warnings) == 1
+    assert "rover.24o" in solution.warnings[0] and "UTC" in solution.warnings[0]
+
+
+def test_solve_when_rtklib_computes_nothing_or_fails(tmp_path, fake_rtklib, monkeypatch):
+    work = tmp_path / "work"
+    ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], folder=work)  # a solution from an earlier run is there
+    assert (work / "solution.pos").exists()
+    # exit status 0 and no solution: nothing was computed, and the earlier solution is not taken for this one
+    monkeypatch.delenv("PPG_FAKE_POS")
+    monkeypatch.setenv("PPG_FAKE_MESSAGE", "error : no obs data")
+    with pytest.raises(ValueError, match="nothing was computed: error : no obs data"):
+        ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], folder=work)
+    # a solution file without positions
+    empty = tmp_path / "empty.pos"
+    empty.write_text(_pos_text(rows=[]))
+    monkeypatch.setenv("PPG_FAKE_POS", str(empty))
+    with pytest.raises(ValueError, match="nothing was computed: error : no obs data"):
+        ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], folder=work)
+    # a full solution with an error message: the message is a warning
+    monkeypatch.setenv("PPG_FAKE_POS", str(tmp_path / "tools" / "canned.pos"))
+    monkeypatch.setenv("PPG_FAKE_MESSAGE", "error : no erp data")
+    solution = ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], (35.16, 139.61, 70.0), folder=work)
+    _check_rows(solution)
+    assert solution.warnings == ["RTKLIB: error : no erp data"]
+    # RTKLIB stopped
+    monkeypatch.setenv("PPG_FAKE_EXIT", "1")
+    monkeypatch.setenv("PPG_FAKE_MESSAGE", "error : no sat ant pcv in igs.atx")
+    with pytest.raises(RuntimeError, match="1.*no sat ant pcv"):
+        ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], folder=work)
+    # every time, the copies of the inputs are gone
+    assert sorted(p.name for p in work.iterdir()) == ["ppk.conf", "solution.pos"]
+
+
+def test_solve_refuses_a_gzip_file_cut_short(tmp_path, fake_rtklib):
+    packed = gzip.compress(PPK_BASE.read_bytes())
+    base = tmp_path / "base.05o.gz"
+    base.write_bytes(packed[:len(packed) * 2 // 3])  # a download that stopped: the epochs before the cut are read
+    assert rinex.time_span(base)
+    work = tmp_path / "work"
+    with pytest.raises(ValueError, match="cut short"):
+        ppk.solve(PPK_ROVER, base, [PPK_NAV], folder=work)
+    assert fake_rtklib() == [] and sorted(p.name for p in work.iterdir()) == ["ppk.conf"]  # no copy left behind
+
+
+def test_solve_never_takes_a_users_file_for_its_copy(tmp_path, fake_rtklib):
+    # the user's own rover.obs in the folder given as the work folder: never emptied, never removed
+    rover = tmp_path / "rover.obs"
+    shutil.copyfile(PPK_ROVER, rover)
+    with pytest.raises(ValueError, match="work folder"):
+        ppk.solve(rover, PPK_BASE, [PPK_NAV], folder=tmp_path)
+    assert rover.read_bytes() == PPK_ROVER.read_bytes() and fake_rtklib() == []
+
+
+def test_the_work_folder_rtklib_is_given(tmp_path, monkeypatch):
+    plain, accented = tmp_path / "work", tmp_path / "lavoro è"
+    plain.mkdir(), accented.mkdir()
+    # on macOS and Linux RTKLIB opens UTF-8 paths: any path but RTKLIB's keywords
+    monkeypatch.setattr(ppk, "_on_windows", lambda: False)
+    assert ppk._rtklib_folder(accented) == str(accented.resolve())
+    for keyword in ("%r", "%b"):
+        folder = tmp_path / f"100{keyword}"
+        folder.mkdir()
+        with pytest.raises(RuntimeError, match=keyword):
+            ppk._rtklib_folder(folder)
+    # on Windows RTKLIB opens files with the ANSI C runtime: a path that is not ASCII becomes its short (8.3) name
+    monkeypatch.setattr(ppk, "_on_windows", lambda: True)
+    asked = []
+
+    def short_path(path: str) -> str:
+        asked.append(path)
+        return "C:\\Users\\NICCOL~1\\LAVORO~1"
+
+    monkeypatch.setattr(ppk, "_short_path", short_path)
+    assert ppk._rtklib_folder(plain) == str(plain.resolve()) and asked == []  # ASCII: as it is
+    assert ppk._rtklib_folder(accented) == "C:\\Users\\NICCOL~1\\LAVORO~1" and asked == [str(accented.resolve())]
+    # no short name (switched off on the volume): a clear error
+    monkeypatch.setattr(ppk, "_short_path", lambda path: path)
+    with pytest.raises(RuntimeError, match="ASCII"):
+        ppk._rtklib_folder(accented)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the short names of Windows")
+def test_short_path_on_windows(tmp_path):
+    folder = tmp_path / "a folder with a long name"
+    folder.mkdir()
+    short = ppk._short_path(str(folder))
+    assert Path(short).is_dir() and Path(short).resolve() == folder.resolve()
+
+
+# --- solve with RTKLIB ------------------------------------------------------------------------------------------
+# How many epochs RTKLIB fixes on these data in kinematic mode (fix and hold on 3.3 km of 30 s epochs) changes from
+# build to build, and with a nanometre of the base: from about 40 to 115 of 120. In static mode, the station 3040 being
+# a fixed station, every epoch is fixed on every build: the accurate checks are made on static runs.
+
+needs_rtklib = pytest.mark.skipif(not _native.supports("ppk"), reason="native core without RTKLIB (older than 0.5)")
+EPOCHS = 120  # 00:00:00 to 00:59:30 every 30 s, in both files
+
+
+def _rtklib_run(folder: Path, base_position=None, base: Path = PPK_BASE, mode: str = "static") -> ppk.Solution:
+    """RTKLIB run by the core with the options of ``config`` on the sample data (3040 the rover, 0759 the base)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    conf, out = folder / "ppk.conf", folder / "rover.pos"
+    conf.write_text(ppk.config(base_position, mode=mode))
+    code, message = _native.ppk_solve(str(conf), [str(PPK_ROVER), str(base), str(PPK_NAV)], str(out))
+    assert code == 0, message
+    return ppk.read_pos(out)
+
+
+def _enu(llh: np.ndarray, origin) -> np.ndarray:
+    """East, north, up offsets (m) of positions near ``origin``."""
+    d = np.atleast_2d(llh) - np.asarray(origin)
+    return np.c_[np.radians(d[:, 1]) * 6378137.0 * math.cos(math.radians(origin[0])), np.radians(d[:, 0]) * 6378137.0,
+                 d[:, 2]]
+
+
+def _raised_base(folder: Path, height: float) -> Path:
+    """A copy of the base's observations with its antenna ``height`` above the mark in the header."""
+    lines = PPK_BASE.read_text().splitlines(keepends=True)
+    delta = _line(f"{height:14.4f}        0.0000        0.0000", "ANTENNA: DELTA H/E/N") + "\n"
+    base = folder / "07590920.05o"
+    base.write_text("".join(delta if line.rstrip().endswith("ANTENNA: DELTA H/E/N") else line for line in lines))
+    assert rinex.header(base).antenna_delta_hen == (height, 0.0, 0.0)
+    return base
+
+
+@needs_rtklib
+def test_static_solution_of_the_rtklib_data(tmp_path, monkeypatch):
+    """The options of ``config`` in RTKLIB: 3040 processed as the fixed station it is against 0759 at the position of
+    its header, every epoch fixed at the same place within a centimetre, where the header of 3040 puts it give or
+    take the metres of the base's header position."""
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    static = _rtklib_run(tmp_path)
+    fixed = static.q == 1
+    assert len(static.times) == EPOCHS and fixed.sum() > 0.8 * EPOCHS
+    assert np.all(np.ptp(_enu(static.llh[fixed], static.llh[-1]), axis=0) < 0.01)
+    header_3040 = rinex.header(PPK_ROVER).approx_xyz
+    assert np.linalg.norm(np.subtract(_llh_to_ecef(*static.llh[-1]), header_3040)) < 10.0
+
+
+@needs_rtklib
+def test_solve_on_rtklib_data(tmp_path, monkeypatch):
+    """solve with the rover moving (kinematic, as a drone), the navigation file found beside the rover: a row for
+    every epoch in GPS seconds, at least a quarter of them fixed, the fixed ones where the static solution puts the
+    station. The base at the position of its header, with the warning, or typed there, without it."""
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    static = _rtklib_run(tmp_path / "static")
+    station = static.llh[static.q == 1].mean(axis=0)
+    mark = rinex.ecef_to_llh(rinex.header(PPK_BASE).approx_xyz)
+    for name, base_position in (("header", None), ("typed", mark)):
+        solution = ppk.solve(PPK_ROVER, PPK_BASE, base_position=base_position, folder=tmp_path / name)
+        assert np.allclose(solution.times, START_2005 + 30.0 * np.arange(EPOCHS), rtol=0, atol=0.01)
+        assert solution.llh.shape == solution.sd.shape == (EPOCHS, 3) and np.all(solution.sd >= 0)
+        assert np.all(solution.ns >= 4) and set(solution.q.tolist()) <= set(ppk.QUALITY)
+        fixed = solution.q == 1
+        assert fixed.any()
+        offsets = np.abs(_enu(solution.llh[fixed], station))
+        assert np.all(np.median(offsets, axis=0) < [0.02, 0.02, 0.03]), np.median(offsets, axis=0)
+        assert solution.base["name"] == "0759" and solution.base["position_source"] == name
+        assert solution.base["position"] == pytest.approx(list(mark))
+        # the copies of the inputs are gone (RTKLIB writes the time marks of the rover beside the solution)
+        assert {p.name for p in solution.path.parent.iterdir()} - {"solution_events.pos"} == {"ppk.conf",
+                                                                                              "solution.pos"}
+        if name == "header":
+            assert fixed.sum() >= 0.25 * EPOCHS
+            assert len(solution.warnings) == 1 and "0759" in solution.warnings[0] and "header" in solution.warnings[0]
+        else:
+            assert solution.warnings == []
+
+
+@needs_rtklib
+def test_the_base_typed_or_from_the_header_and_its_antenna_height_in_rtklib(tmp_path, monkeypatch):
+    """The base typed at the position of its header gives the positions of the header, typed a metre higher every
+    position is a metre higher; the antenna height in the base's header (ANTENNA: DELTA H/E/N) is added to its mark,
+    typed or from the header, once (not again by RTKLIB's own reading of the header). Static runs."""
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    header = _rtklib_run(tmp_path / "header")
+    station = header.llh[header.q == 1].mean(axis=0)
+    lat, lon, h = rinex.ecef_to_llh(rinex.header(PPK_BASE).approx_xyz)
+    raised = _raised_base(tmp_path, 1.5)
+    for i, (position, base, rise) in enumerate([((lat, lon, h), PPK_BASE, 0.0), ((lat, lon, h + 1.0), PPK_BASE, 1.0),
+                                                ((lat, lon, h), raised, 1.5), (None, raised, 1.5)]):
+        run = _rtklib_run(tmp_path / f"run{i}", position, base)
+        fixed = run.q == 1
+        assert fixed.sum() > 0.8 * EPOCHS, (position, base.name, fixed.sum())
+        offset = _enu(run.llh[fixed].mean(axis=0), station)[0]
+        assert np.allclose(offset, [0.0, 0.0, rise], rtol=0, atol=0.005), (position, base.name, offset)
