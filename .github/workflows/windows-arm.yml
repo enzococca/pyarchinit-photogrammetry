@@ -56,6 +56,16 @@ jobs:
           maturin build --release -m native/Cargo.toml --out wheels
           pip install (Get-ChildItem wheels/*.whl).FullName
           python -c "import numpy as np, ppg_core; print(ppg_core.__version__, ppg_core.combine_depths(np.ones((2, 3, 4), np.float32), 1, 0.01).shape)"
+      - name: PPK smoke test (RTKLIB inside the core, as the native workflow runs it)
+        # ARM64 compilers fuse multiplications and additions unless told not to, which changed the epochs
+        # RTKLIB fixes (build.rs turns that off). The wheel is uploaded only if, on this runner, the static
+        # run is fixed and where the RINEX header puts the station, and the kinematic run is fixed for a
+        # tenth of its epochs at least (.github/scripts/ppk_smoke.py)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          python .github/scripts/ppk_smoke.py
       - uses: actions/upload-artifact@v4
         with:
           name: win-arm64-core
