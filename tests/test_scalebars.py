@@ -508,6 +508,7 @@ def test_guided_marker_placement_in_the_photos(processed, qapp_bars, tmp_path):
     w.resize(1400, 900)
     w.show()
     qapp_bars.processEvents()
+    assert w.photos_panel.label.text() == f"Tutte le foto ({len(ch.cameras)})"  # counted once the photos are in
     first, second, third = (ch.camera(k) for k in list(seen)[:3])
     w.open_photo(first)
     m = ch.add_marker("point 1")
@@ -556,6 +557,8 @@ def test_guided_marker_placement_in_the_photos(processed, qapp_bars, tmp_path):
     assert third.key not in m.projections and gcp.views_of(ch, m, estimated=True) >= 1
     w.photos.set_filter(None)
     assert len(w.photos.visible_cameras()) == len(ch.cameras)
+    w.photos.set_chunk(None)
+    assert w.photos_panel.label.text() == "Tutte le foto (0)"
     w.setWindowModified(False)
     w.photos.stop()
     w.close()

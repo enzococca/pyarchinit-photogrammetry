@@ -732,12 +732,12 @@ class PhotosPane(QListWidget):
         self.chunk = chunk
         self.clear()
         self._items = {}
+        self._filter, self.filter_title, self.focus = None, "", None
         if chunk is None:
+            self.filter_changed.emit("")
             return
         todo = []
         self._flags = self._marker_flags()
-        self._filter, self.filter_title, self.focus = None, "", None
-        self.filter_changed.emit("")
         for cam in chunk.cameras:
             pm = self._cache.get(cam.path)
             f = self._flags.get(getattr(cam, "key", None), (0, 0, []))
@@ -749,6 +749,7 @@ class PhotosPane(QListWidget):
             self._items.setdefault(cam.path, []).append(it)
             if pm is None and cam.path not in todo:
                 todo.append(cam.path)
+        self.filter_changed.emit("")  # once the photos are in: the panel counts them
         self._done, self._total = 0, len(todo)
         if todo:
             self._loader = _ThumbLoader(self._generation, todo, self)
