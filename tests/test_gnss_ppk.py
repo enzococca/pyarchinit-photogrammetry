@@ -1,5 +1,5 @@
-"""Post-processed kinematic positions: what the RINEX files of a base and a rover hold, and the solution RTKLIB
-computes from them."""
+"""Post-processed kinematic positions: what the RINEX files of a base and a rover hold, the solution RTKLIB computes
+from them and the position of the camera it gives at every shot."""
 from __future__ import annotations
 
 import gzip
@@ -10,15 +10,18 @@ import os
 import re
 import shutil
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
 import pytest
 from pyproj import Transformer
 
+import pyarchinit_photogrammetry as ppg
 from pyarchinit_photogrammetry import _native
-from pyarchinit_photogrammetry.gnss import ppk, rinex
+from pyarchinit_photogrammetry.gnss import apply as gnss_apply
+from pyarchinit_photogrammetry.gnss import dji, ppk, rinex
+from test_gnss import _jpeg, _snapshot  # synthetic photos with the time of their camera, references of a chunk
 
 DATA = Path(__file__).parent / "data" / "rtklib"
 ROVER = DATA / "07590920.05o"
@@ -1321,3 +1324,252 @@ def test_the_base_typed_or_from_the_header_and_its_antenna_height_in_rtklib(tmp_
         assert fixed.sum() > 0.8 * EPOCHS, (position, base.name, fixed.sum())
         offset = _enu(run.llh[fixed].mean(axis=0), station)[0]
         assert np.allclose(offset, [0.0, 0.0, rise], rtol=0, atol=0.005), (position, base.name, offset)
+
+
+# --- the position of the camera at every shot -------------------------------------------------------------------
+
+
+def _solution(times, llh, q=None, sd=None) -> ppk.Solution:
+    """A solution with the epochs ``times`` (seconds of GPS time) at ``llh`` (latitude, longitude, height), fix
+    unless ``q`` says otherwise, with the standard deviations ``sd`` (east, north, up)."""
+    count = len(times)
+    return ppk.Solution(times=np.asarray(times, dtype=np.float64), llh=np.asarray(llh, dtype=np.float64),
+                        q=np.asarray([1] * count if q is None else q), ns=np.full(count, 8),
+                        sd=np.asarray([[0.003, 0.004, 0.009]] * count if sd is None else sd, dtype=np.float64),
+                        base={}, path=Path("synthetic.pos"))
+
+
+def test_at_takes_an_epoch_or_the_line_between_two_epochs_a_second_apart():
+    # 5 Hz epochs, as a DJI drone records them, then two epochs a second apart
+    times = START_2005 + np.array([0.0, 0.2, 0.4, 1.4])
+    llh = np.array([[35.1320660, 139.6243010, 75.690], [35.1320662, 139.6243015, 75.700],
+                    [35.1320670, 139.6243030, 75.740], [35.1320690, 139.6243070, 75.800]])
+    asked = START_2005 + np.array([0.2, 0.2008, 1.4, 0.0, 0.1, 0.9])
+    position, q, sd, ok = ppk.at(_solution(times, llh), asked)
+    assert position.shape == sd.shape == (6, 3) and q.shape == ok.shape == (6,)
+    assert ok.all() and q.tolist() == [1] * 6
+    # an epoch, or a time within the millisecond the times of a solution are written to: the epoch as it is
+    assert np.array_equal(position[:4], llh[[1, 1, 3, 0]])
+    # half-way between two epochs 0.2 s apart, and between two epochs a second apart
+    assert position[4:] == pytest.approx(np.array([(llh[0] + llh[1]) / 2, (llh[2] + llh[3]) / 2]), abs=1e-12)
+    assert sd == pytest.approx(np.array([[0.003, 0.004, 0.009]] * 6))
+
+
+def test_at_leaves_out_the_gaps_and_the_times_outside_the_solution():
+    times = START_2005 + np.array([0.0, 1.0, 2.0, 5.0, 6.0005, 7.01])
+    llh = np.array([[35.0, 139.0, 70.0 + i] for i in range(6)])
+    asked = START_2005 + np.array([3.5, -0.5, 7.5, 6.5, 7.0125, -0.0009, 7.0109, 0.5, 5.5])
+    position, q, sd, ok = ppk.at(_solution(times, llh), asked)
+    # in a gap of 3 s, before the first epoch, after the last, between two epochs 1.0095 s apart, 2.5 ms after the
+    # last epoch: no position, not even the one of the nearest epoch
+    assert ok.tolist() == [False] * 5 + [True] * 4
+    assert np.isnan(position[:5]).all() and np.isnan(sd[:5]).all() and q[:5].tolist() == [0] * 5
+    # within a millisecond of the first and of the last epoch: those epochs
+    assert position[5].tolist() == llh[0].tolist() and position[6].tolist() == llh[5].tolist()
+    # exactly a second apart, and 1.0005 s apart (the times of a solution are written to the millisecond)
+    assert position[7] == pytest.approx([35.0, 139.0, 70.5], abs=1e-12)
+    assert position[8] == pytest.approx([35.0, 139.0, 73.0 + 0.5 / 1.0005], abs=1e-6)  # times of 8e8 s: 1e-7 s
+
+
+def test_at_takes_the_worse_quality_and_the_larger_deviations_of_the_two_epochs():
+    times = START_2005 + np.array([0.0, 0.2, 0.4, 0.6])
+    solution = _solution(times, [[35.0, 139.0, 70.0]] * 4, q=[1, 2, 5, 1],
+                         sd=[[0.01, 0.05, 0.02], [0.03, 0.01, 0.02], [0.30, 0.40, 0.90], [0.02, 0.02, 0.04]])
+    _position, q, sd, ok = ppk.at(solution, START_2005 + np.array([0.1, 0.3, 0.5, 0.2]))
+    assert ok.all() and q.tolist() == [2, 5, 5, 2]
+    assert sd == pytest.approx(np.array([[0.03, 0.05, 0.02], [0.30, 0.40, 0.90], [0.30, 0.40, 0.90],
+                                         [0.03, 0.01, 0.02]]))
+
+
+def test_at_goes_across_the_antimeridian_the_short_way():
+    times = START_2005 + np.array([0.0, 1.0, 2.0])
+    llh = [[-16.5, 179.9999990, 10.0], [-16.5, -179.9999990, 10.0], [-16.5, 179.9999990, 10.0]]
+    position, _q, _sd, ok = ppk.at(_solution(times, llh), START_2005 + np.array([0.25, 0.75, 1.25, 1.75]))
+    assert ok.all()
+    # eastwards over 180 degrees, 2e-6 degrees of longitude in a second (not 360), then back westwards
+    assert position[:, 1] == pytest.approx([179.9999995, -179.9999995, -179.9999995, 179.9999995], abs=1e-9)
+    assert position[:, 0] == pytest.approx([-16.5] * 4) and position[:, 2] == pytest.approx([10.0] * 4)
+
+
+def _gps_shot(when: datetime) -> dji.MrkShot:
+    """A shot taken at ``when`` in GPS time."""
+    week, seconds = divmod((when - datetime(1980, 1, 6)).total_seconds(), WEEK)
+    return dji.MrkShot(index=1, gps_week=int(week), gps_seconds=seconds, offset_ned_mm=(0.0, 0.0, 150.0), lat=35.0,
+                       lon=139.0, ellh=70.0, std=(0.01, 0.01, 0.02), flag=50)
+
+
+def test_the_utc_of_a_shot_takes_the_leap_seconds_of_its_day():
+    utc = timezone.utc
+    assert _gps_shot(datetime(2005, 4, 2)).utc == datetime(2005, 4, 1, 23, 59, 47, tzinfo=utc)  # 13 s in 2005
+    assert _gps_shot(datetime(2024, 5, 12, 8, 30, 33)).utc == datetime(2024, 5, 12, 8, 30, 15, tzinfo=utc)
+    # the leap second at the end of 2016: GPS time 17 s ahead before it, 18 s after it
+    assert _gps_shot(datetime(2017, 1, 1, 0, 0, 10)).utc == datetime(2016, 12, 31, 23, 59, 53, tzinfo=utc)
+    assert _gps_shot(datetime(2017, 1, 1, 0, 0, 18)).utc == datetime(2017, 1, 1, tzinfo=utc)
+
+
+def _mrk_line(index: int, gps: float, arm: tuple[int, int, int]) -> str:
+    """A line of a Timestamp.MRK: shot ``index`` at ``gps`` seconds of GPS time with the lever arm ``arm`` (north, east,
+    down in mm) and the antenna where the drone's own single position put it, metres from the PPK one."""
+    week, seconds = divmod(gps, WEEK)
+    north, east, down = arm
+    return (f"{index}\t{seconds:.6f}\t[{int(week)}]\t{north:6d},N\t{east:6d},E\t{down:6d},V\t35.13208000,Lat\t"
+            "139.62428000,Lon\t74.100,Ellh\t1.2, 1.4, 2.9\t16,Q\n")
+
+
+def _ppk_flight(folder: Path, shots) -> Path:
+    """A DJI flight on the day of the RTKLIB sample data: for each ``(index, gps, arm)`` of ``shots`` a photo
+    DJI_<index>.JPG with the time its camera wrote (in Japan, UTC+9: GPS time less the 13 leap seconds of 2005, plus
+    9 hours, to the second) and its line in the Timestamp.MRK beside the photos."""
+    folder.mkdir(parents=True)
+    for index, gps, _arm in shots:
+        _jpeg(folder / f"DJI_{index:04d}.JPG", None, when=datetime(1980, 1, 6) + timedelta(seconds=gps - LEAP_2005,
+                                                                                            hours=9))
+    (folder / "Timestamp.MRK").write_text("".join(_mrk_line(*shot) for shot in shots))
+    return folder
+
+
+def _ecef(lon: float, lat: float, h: float) -> np.ndarray:
+    return np.array(Transformer.from_crs("EPSG:4979", "EPSG:4978", always_xy=True).transform(lon, lat, h))
+
+
+def _camera_ecef(antenna, arm) -> np.ndarray:
+    """ECEF (m) of a camera ``arm`` (north, east, down in mm) from the antenna at ``antenna`` (latitude, longitude,
+    height), along the axes of the horizon at the antenna and with PROJ: not with the formula of the program."""
+    lat, lon = math.radians(antenna[0]), math.radians(antenna[1])
+    north = np.array([-math.sin(lat) * math.cos(lon), -math.sin(lat) * math.sin(lon), math.cos(lat)])
+    east = np.array([-math.sin(lon), math.cos(lon), 0.0])
+    up = np.array([math.cos(lat) * math.cos(lon), math.cos(lat) * math.sin(lon), math.sin(lat)])
+    return _ecef(antenna[1], antenna[0], antenna[2]) + (arm[0] * north + arm[1] * east - arm[2] * up) / 1000.0
+
+
+# the qualities of a drone's solution away from fix (sdn, sde, sdu as RTKLIB writes them), by epoch
+_NOT_FIX = {1: (2, (0.05, 0.04, 0.08)), 3: (4, (0.30, 0.25, 0.50)), 4: (5, (0.40, 0.45, 0.90))}
+
+
+def _drone_rows() -> list[tuple]:
+    """The rows of a solution of a drone on the epochs of the RTKLIB sample data (every 30 s from 00:00:00 GPS time),
+    the antenna a little further at every epoch: fix, but float at the second epoch, dgps at the fourth and single at
+    the fifth; and one epoch more (float), a second after the sixth."""
+    rows = []
+    for k in range(EPOCHS):
+        q, (sdn, sde, sdu) = _NOT_FIX.get(k, (1, (0.004, 0.003, 0.009)))
+        rows.append((START_2005 + 30.0 * k, 35.1320660 + 1e-7 * k, 139.6243010 + 1e-7 * k, 75.690 + 0.001 * k, q, 7,
+                     sdn, sde, sdu))
+    rows.insert(6, (START_2005 + 151.0, 35.1320671, 139.6243022, 75.712, 2, 6, 0.06, 0.07, 0.12))
+    return rows
+
+
+# shot, seconds after 00:00:00 GPS time, lever arm (north, east, down in mm)
+_DRONE_SHOTS = [(1, -30.0, (-2, 11, 189)),  # before the first epoch: the base started later
+                (2, 0.0, (120, -330, 189)),  # an epoch, fix
+                (3, 30.0004, (0, 0, 150)),  # within a millisecond of an epoch, float
+                (4, 75.0, (35, -40, 170)),  # between two epochs 30 s apart: a gap of the solution
+                (5, 90.0, (-60, 25, 160)),  # dgps
+                (6, 120.0, (80, 90, 140)),  # single
+                (7, 150.4, (-15, 200, 180)),  # between two epochs a second apart
+                (8, 3570.0, (10, -10, 175)),  # the last epoch
+                (9, 3580.0, (5, 5, 150))]  # after the last epoch
+
+
+def test_ppk_positions_of_the_cameras_at_their_shots(tmp_path, fake_rtklib, monkeypatch):
+    pos = tmp_path / "drone.pos"
+    pos.write_text(_pos_text(rows=_drone_rows()), newline="")
+    monkeypatch.setenv("PPG_FAKE_POS", str(pos))
+    solution = ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], folder=tmp_path / "work")  # the base at its header position
+    assert solution.rover == "30400920.05o" and solution.base["position_source"] == "header"
+    shots = [(index, START_2005 + seconds, arm) for index, seconds, arm in _DRONE_SHOTS]
+    folder = _ppk_flight(tmp_path / "100MEDIA", shots)
+    ch = ppg.Document().add_chunk()
+    ch.add_photos([folder])
+
+    result = gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution)
+
+    assert {k: v for k, v in result.items() if k != "warnings"} == {
+        "matched": 6, "shots": 9, "photos": 9, "status": {"fix": 2, "float": 3, "single": 1},
+        "unmatched": ["DJI_0001", "DJI_0004", "DJI_0009"], "shots_unmatched": [1, 4, 9]}
+    # the warning of the base at the position of its header, then the one of the photos in the gaps of the solution
+    assert result["warnings"][:-1] == solution.warnings and "header" in result["warnings"][0]
+    assert re.match(r"3 photos\b", result["warnings"][-1]) and "gap" in result["warnings"][-1]
+
+    def epoch(seconds: float) -> np.ndarray:
+        return solution.llh[int(np.argmin(np.abs(solution.times - (START_2005 + seconds))))]
+
+    # the antenna of the solution at the shot (between two epochs a second apart: on the line between them), the
+    # status of its quality Q (dgps is float; between two epochs the worse) and twice its standard deviations east,
+    # north, up (the larger of the two epochs), at least 0.01 m for fix, 0.20 for float and 1 for single
+    expected = {2: (epoch(0.0), "fix", 1, [0.01, 0.01, 0.018]),
+                3: (epoch(30.0), "float", 2, [0.2, 0.2, 0.2]),
+                5: (epoch(90.0), "float", 4, [0.5, 0.6, 1.0]),
+                6: (epoch(120.0), "single", 5, [1.0, 1.0, 1.8]),
+                7: (epoch(150.0) + 0.4 * (epoch(151.0) - epoch(150.0)), "float", 2, [0.2, 0.2, 0.24]),
+                8: (epoch(3570.0), "fix", 1, [0.01, 0.01, 0.018])}
+    arms = {index: arm for index, _seconds, arm in _DRONE_SHOTS}
+    for index, (antenna, state, q, accuracy) in expected.items():
+        cam = ch.camera(f"DJI_{index:04d}")
+        # the camera below the antenna of the solution, not below the antenna of the MRK line (metres away)
+        assert np.linalg.norm(_ecef(*cam.reference.location) - _camera_ecef(antenna, arms[index])) < 1e-3, index
+        assert cam.reference.accuracy == pytest.approx(accuracy) and cam.reference.enabled
+        assert cam.meta["reference_crs"] == "EPSG:4979"
+        g = cam.meta["gnss"]
+        assert (g["source"], g["status"], g["q"], g["height"], g["mrk"], g["shot"]) == (
+            "ppk", state, q, "ellipsoidal", "Timestamp.MRK", index)
+        assert g["accuracy"] == cam.reference.accuracy and g["lever_arm_ned_mm"] == list(arms[index])
+        assert g["antenna"] == pytest.approx([antenna[1], antenna[0], antenna[2]], abs=1e-9)
+        assert g["base"] == solution.base and (g["rover"], g["solution"]) == ("30400920.05o", "solution.pos")
+        json.dumps(cam.meta)  # saved with the project
+    # the time of the shot in UTC, as for an MRK: GPS time less the 13 leap seconds of 2005
+    assert ch.camera("DJI_0002").meta["gnss"]["utc"] == "2005-04-01T23:59:47+00:00"
+    assert ch.camera("DJI_0003").meta["gnss"]["utc"] == "2005-04-02T00:00:17.000400+00:00"
+    # the photos in the gaps of the solution keep the position they had
+    assert [ch.camera(f"DJI_{i:04d}").meta["gnss"]["source"] for i in (1, 4, 9)] == ["exif"] * 3
+
+    again = _snapshot(ch)
+    assert gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution) == result
+    assert _snapshot(ch) == again
+
+
+def test_ppk_of_an_mrk_outside_the_solution_changes_nothing(tmp_path):
+    pos = tmp_path / "drone.pos"
+    pos.write_text(_pos_text(rows=_drone_rows()), newline="")
+    solution = ppk.read_pos(pos)
+    assert solution.rover == "" and solution.base == {}
+    # the photos and the MRK of the next day
+    folder = _ppk_flight(tmp_path / "100MEDIA", [(i, START_2005 + 86400.0 + 2.0 * i, (0, 0, 150)) for i in (1, 2, 3)])
+    ch = ppg.Document().add_chunk()
+    ch.add_photos([folder])
+    before = _snapshot(ch)
+    with pytest.raises(ValueError, match="same flight") as error:
+        gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution)
+    text = str(error.value)
+    assert "Timestamp.MRK" in text and "drone.pos" in text
+    assert "2005-04-03 00:00:02" in text and "2005-04-02 00:00:00" in text and "2005-04-02 00:59:30" in text
+    assert _snapshot(ch) == before
+
+
+@needs_rtklib
+def test_ppk_positions_from_rtklib_at_the_shots(tmp_path, monkeypatch):
+    """The solution RTKLIB computes from the sample data, with shots on its epochs and one between two of them: every
+    camera where the solution puts the antenna plus the lever arm, with the status and accuracy of its Q and
+    deviations."""
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    solution = ppk.solve(PPK_ROVER, PPK_BASE, folder=tmp_path / "work")
+    epochs = [0, 7, 33, 64, 101, 119]
+    shots = [(i + 1, float(solution.times[k]), (40 * i - 100, 150 - 60 * i, 140 + 10 * i))
+             for i, k in enumerate(epochs)]
+    shots.append((7, float(solution.times[50]) + 15.0, (0, 0, 150)))  # 15 s from the epochs around it
+    folder = _ppk_flight(tmp_path / "100MEDIA", shots)
+    ch = ppg.Document().add_chunk()
+    ch.add_photos([folder])
+
+    result = gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution)
+
+    assert (result["matched"], result["unmatched"], result["shots_unmatched"]) == (6, ["DJI_0007"], [7])
+    assert result["warnings"][:-1] == solution.warnings and re.match(r"1 photo\b", result["warnings"][-1])
+    for (index, _gps, arm), k in zip(shots, epochs):
+        cam = ch.camera(f"DJI_{index:04d}")
+        assert np.linalg.norm(_ecef(*cam.reference.location) - _camera_ecef(solution.llh[k], arm)) < 1e-3, index
+        q = int(solution.q[k])
+        state = {1: "fix", 2: "float", 4: "float"}.get(q, "single")
+        assert (cam.meta["gnss"]["status"], cam.meta["gnss"]["q"]) == (state, q)
+        floor = {"fix": 0.01, "float": 0.20, "single": 1.0}[state]
+        assert cam.reference.accuracy == pytest.approx(np.maximum(2 * solution.sd[k], floor).tolist())

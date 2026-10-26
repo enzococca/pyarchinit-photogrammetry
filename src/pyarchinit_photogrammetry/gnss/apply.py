@@ -1,7 +1,9 @@
 """Putting a position and its accuracy on a camera."""
 from __future__ import annotations
 
+import copy
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -9,7 +11,7 @@ import numpy as np
 
 from ..core.camera import Camera, Reference
 from ..core.chunk import IMAGE_EXTENSIONS, Chunk
-from . import dji
+from . import dji, ppk
 
 FACTOR = 2.0
 FLOORS = {"fix": 0.01, "float": 0.20, "single": 1.0}
@@ -59,6 +61,86 @@ def apply_mrk(chunk: Chunk, mrk_path: str | Path, photos_folder: str | Path | No
     Returns ``{"matched", "shots", "photos", "status": {status: count}, "unmatched": [label],
     "shots_unmatched": [index]}``: ``unmatched`` are the photos of the folder left without a position (no line
     for them, not in the chunk, or not on time), ``shots_unmatched`` the shots that gave no photo theirs."""
+    pairing = _pair_shots(chunk, mrk_path, photos_folder)
+    placed = []
+    for f, shot, cam in pairing.kept:
+        state = dji.STATUS.get(shot.flag, "unknown")
+        north, east, vertical = shot.std
+        set_camera_position(cam, list(dji.camera_position(shot)), "EPSG:4979",
+                            accuracy(state, [east, north, vertical]), "dji_mrk", status=state, height="ellipsoidal",
+                            extra=_shot_record(pairing.mrk, shot, [shot.lon, shot.lat, shot.ellh]))
+        placed.append((f, shot, state))
+    return _result(pairing, placed)
+
+
+def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
+              photos_folder: str | Path | None = None) -> dict:
+    """Give the photos of ``chunk`` the PPK position of their shot in a DJI ``Timestamp.MRK``: the antenna where the
+    post-processed ``solution`` puts it at the GPS time of the shot (:func:`.ppk.at`: an epoch, or the line between
+    two epochs at most a second apart) plus the lever arm of the shot, in ``EPSG:4979`` with its ellipsoidal height;
+    the status from the quality Q of the solution (1 fix, 2 and 4 float, any other single) and the accuracy from its
+    standard deviations (twice, never below the floor of the status). ``meta["gnss"]`` keeps what it keeps for an MRK,
+    the antenna being the one of the solution, with the ``q`` and the ``base``, ``rover`` and ``solution`` (file name)
+    of the solution. It replaces any position the photo had, so doing it again changes nothing.
+
+    The photos are paired with the shots and checked against their times as by :func:`apply_mrk`, with its errors. A
+    photo whose shot falls where the solution has no position (more than a second between two of its epochs, before
+    its first or after its last) keeps the position it had and is among the unmatched, its shot among the shots
+    unmatched. A ``ValueError`` and nothing changed when no shot of the MRK falls within the time of the solution (the
+    MRK and the solution of different flights).
+
+    Returns what :func:`apply_mrk` returns with ``"warnings"``: those of the solution (the base at the position of its
+    RINEX header can be metres off) and how many photos fell where the solution has no position."""
+    pairing = _pair_shots(chunk, mrk_path, photos_folder)
+    name = Path(solution.path).name
+    start, end = solution.times[0], solution.times[-1]
+    shot_times = np.array([shot.gps_time for shot in pairing.shots])
+    if not np.any((shot_times >= start - ppk.TIME_RESOLUTION_S) & (shot_times <= end + ppk.TIME_RESOLUTION_S)):
+        shots = (f"its shots were taken from {_gps_text(shot_times.min())} to {_gps_text(shot_times.max())} GPS time"
+                 if len(shot_times) else "it has no shots")
+        raise ValueError(f"{pairing.mrk}: {shots}, and the solution {name} has positions from {_gps_text(start)} to "
+                         f"{_gps_text(end)}: they are not of the same flight")
+    llh, q, sd, ok = ppk.at(solution, [shot.gps_time for _f, shot, _cam in pairing.kept])
+    positions = []  # all of them first: nothing changes when something goes wrong
+    for (f, shot, cam), antenna, quality, deviations, found in zip(pairing.kept, llh, q, sd, ok):
+        if not found:
+            continue
+        lat, lon, h = (float(v) for v in antenna)
+        state = ppk.status(quality)
+        extra = {**_shot_record(pairing.mrk, shot, [lon, lat, h]), "q": int(quality),
+                 "base": copy.deepcopy(solution.base), "rover": solution.rover, "solution": name}
+        positions.append((f, shot, cam, list(dji.lever_arm(lat, lon, h, shot.offset_ned_mm)),
+                          accuracy(state, [float(v) for v in deviations]), state, extra))
+    placed = []
+    for f, shot, cam, location, acc, state, extra in positions:
+        set_camera_position(cam, location, "EPSG:4979", acc, "ppk", status=state, height="ellipsoidal", extra=extra)
+        placed.append((f, shot, state))
+    warnings = list(solution.warnings)
+    gaps = len(pairing.kept) - len(placed)
+    if gaps:
+        photos = "photos were" if gaps > 1 else "photo was"
+        keep = "they keep the position they had" if gaps > 1 else "it keeps the position it had"
+        warnings.append(f"{gaps} {photos} taken where the solution {name} has no position (a gap of more than "
+                        f"{ppk.MAX_GAP_S:g} s between two of its epochs, or before the first or after the last): "
+                        f"{keep}")
+    return {**_result(pairing, placed), "warnings": warnings}
+
+
+@dataclass
+class _Pairing:
+    """The photos of a folder paired with the shots of a ``Timestamp.MRK`` (:func:`_pair_shots`)."""
+
+    mrk: str  # the name of the MRK file
+    shots: list[dji.MrkShot]  # in the order of the file
+    files: list[Path]  # the photos of the folder, by name
+    paired: list[tuple[Path, dji.MrkShot | None]]  # every photo with its shot, None when the MRK has none for it
+    kept: list[tuple[Path, dji.MrkShot, Camera]]  # the pairs whose photo is in the chunk and was taken at its shot
+
+
+def _pair_shots(chunk: Chunk, mrk_path: str | Path, photos_folder: str | Path | None) -> _Pairing:
+    """The photos of ``photos_folder`` (default: the folder of the MRK) paired with the shots of the DJI
+    ``Timestamp.MRK`` ``mrk_path`` by shot number or by order, and checked against the times of the photos in
+    ``chunk``, as :func:`apply_mrk` says; a ``ValueError`` when they cannot be."""
     mrk_path = Path(mrk_path)
     shots = dji.read_mrk(mrk_path)
     folder = Path(photos_folder) if photos_folder else mrk_path.parent
@@ -80,21 +162,29 @@ def apply_mrk(chunk: Chunk, mrk_path: str | Path, photos_folder: str | Path | No
     cameras = {Path(c.path).resolve(): c for c in chunk.cameras}
     candidates = [(f, shot, cameras.get(f.resolve())) for f, shot in paired]
     kept = _on_time([p for p in candidates if p[1] is not None and p[2] is not None], mrk_path.name)
-    status, used = Counter(), set()
-    for _f, shot, cam in kept:
-        state = dji.STATUS.get(shot.flag, "unknown")
-        north, east, vertical = shot.std
-        set_camera_position(cam, list(dji.camera_position(shot)), "EPSG:4979",
-                            accuracy(state, [east, north, vertical]), "dji_mrk", status=state, height="ellipsoidal",
-                            extra={"mrk": mrk_path.name, "shot": shot.index, "utc": shot.utc.isoformat(),
-                                   "lever_arm_ned_mm": list(shot.offset_ned_mm),
-                                   "antenna": [shot.lon, shot.lat, shot.ellh]})
-        status[state] += 1
-        used.add(id(shot))
-    placed = {f for f, _shot, _cam in kept}
-    return {"matched": sum(status.values()), "shots": len(shots), "photos": len(files), "status": dict(status),
-            "unmatched": [f.stem for f, _shot in paired if f not in placed],
-            "shots_unmatched": [s.index for s in shots if id(s) not in used]}
+    return _Pairing(mrk_path.name, shots, files, paired, kept)
+
+
+def _shot_record(mrk: str, shot: dji.MrkShot, antenna: list[float]) -> dict:
+    """What ``meta["gnss"]`` keeps of the shot a position comes from, to check the camera against it: the MRK and the
+    shot, its time in UTC, its lever arm and the position ``[lon, lat, h]`` of the antenna."""
+    return {"mrk": mrk, "shot": shot.index, "utc": shot.utc.isoformat(), "lever_arm_ned_mm": list(shot.offset_ned_mm),
+            "antenna": list(antenna)}
+
+
+def _result(pairing: _Pairing, placed: list[tuple[Path, dji.MrkShot, str]]) -> dict:
+    """What :func:`apply_mrk` returns once the ``(photo, shot, status)`` of ``placed`` took the position of their
+    shot."""
+    files, used = {f for f, _shot, _state in placed}, {id(shot) for _f, shot, _state in placed}
+    return {"matched": len(placed), "shots": len(pairing.shots), "photos": len(pairing.files),
+            "status": dict(Counter(state for _f, _shot, state in placed)),
+            "unmatched": [f.stem for f, _shot in pairing.paired if f not in files],
+            "shots_unmatched": [s.index for s in pairing.shots if id(s) not in used]}
+
+
+def _gps_text(seconds: float) -> str:
+    """A time in seconds of GPS time since the GPS epoch, written as a date and a time (of GPS time)."""
+    return f"{dji.GPS_EPOCH + timedelta(seconds=float(seconds)):%Y-%m-%d %H:%M:%S}"
 
 
 def _photo_time(cam: Camera) -> datetime | None:

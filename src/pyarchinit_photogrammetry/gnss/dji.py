@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from . import rinex
+
 STATUS = {50: "fix", 34: "float", 16: "single", 0: "none"}
 
 _STD_KEYS = ("RtkStdLon", "RtkStdLat", "RtkStdHgt")
@@ -43,7 +45,7 @@ def rtk_from_xmp(text: str) -> dict | None:
 # --- Timestamp.MRK ---------------------------------------------------------------------------------------------
 
 GPS_EPOCH = datetime(1980, 1, 6, tzinfo=timezone.utc)
-LEAP_SECONDS = 18  # GPS time is ahead of UTC by this many seconds since 2017
+LEAP_SECONDS = 18  # GPS time is ahead of UTC by this many seconds since 2017; MrkShot.utc takes those of its date
 
 _A = 6378137.0  # WGS84 semi-major axis (m)
 _E2 = 0.00669437999014  # WGS84 first eccentricity squared
@@ -73,9 +75,24 @@ class MrkShot:
     flag: int  # 50 fix, 34 float, 16 single
 
     @property
+    def gps_time(self) -> float:
+        """The time of the shot in seconds of GPS time since 6 January 1980, as the times of a PPK solution."""
+        return self.gps_week * 604800.0 + self.gps_seconds  # seconds in a week
+
+    @property
     def utc(self) -> datetime:
-        """The time of the shot in UTC: the GPS week and seconds from 6 January 1980, less the leap seconds."""
-        return GPS_EPOCH + timedelta(weeks=self.gps_week, seconds=self.gps_seconds - LEAP_SECONDS)
+        """The time of the shot in UTC: the GPS week and seconds from 6 January 1980, less the leap seconds GPS time
+        was ahead of UTC by then (13 in 2005, 18 since 2017)."""
+        gps = GPS_EPOCH + timedelta(weeks=self.gps_week, seconds=self.gps_seconds)
+        return gps - timedelta(seconds=_gps_minus_utc(gps.replace(tzinfo=None)))
+
+
+def _gps_minus_utc(gps: datetime) -> int:
+    """The seconds GPS time was ahead of UTC at the GPS time ``gps`` (without a time zone). The table of the leap
+    seconds goes by UTC dates, which GPS time reaches that many seconds earlier: looked up at ``gps`` itself, the last
+    seconds before a new leap second would already count it, so it is looked up again at the UTC time the first look
+    gives."""
+    return rinex.gps_minus_utc(gps - timedelta(seconds=rinex.gps_minus_utc(gps)))
 
 
 def read_mrk(path: str | Path) -> list[MrkShot]:
@@ -96,18 +113,24 @@ def read_mrk(path: str | Path) -> list[MrkShot]:
     return shots
 
 
-def camera_position(shot: MrkShot) -> tuple[float, float, float]:
-    """``(lon, lat, h)`` of the camera: the antenna plus the lever arm of the shot, north, east and DOWN (the
-    camera hangs below the antenna). The arm is turned into degrees with the radii of curvature of the WGS84
-    ellipsoid at the antenna; for an arm under half a metre this is within a millimetre of the exact position."""
-    north, east, down = (v / 1000.0 for v in shot.offset_ned_mm)
-    lat = math.radians(shot.lat)
-    w = 1.0 - _E2 * math.sin(lat) ** 2
+def lever_arm(lat: float, lon: float, h: float, offset_ned_mm) -> tuple[float, float, float]:
+    """``(lon, lat, h)`` of the camera hanging from an antenna at ``lat``, ``lon`` (degrees) and ellipsoidal height
+    ``h``: the antenna plus the lever arm ``offset_ned_mm``, north, east and DOWN in millimetres (the camera hangs
+    below the antenna). The arm is turned into degrees with the radii of curvature of the WGS84 ellipsoid at the
+    antenna; for an arm under half a metre this is within a millimetre of the exact position."""
+    north, east, down = (v / 1000.0 for v in offset_ned_mm)
+    phi = math.radians(lat)
+    w = 1.0 - _E2 * math.sin(phi) ** 2
     meridian = _A * (1.0 - _E2) / w ** 1.5
     prime_vertical = _A / math.sqrt(w)
-    return (shot.lon + math.degrees(east / ((prime_vertical + shot.ellh) * math.cos(lat))),
-            shot.lat + math.degrees(north / (meridian + shot.ellh)),
-            shot.ellh - down)
+    return (lon + math.degrees(east / ((prime_vertical + h) * math.cos(phi))),
+            lat + math.degrees(north / (meridian + h)),
+            h - down)
+
+
+def camera_position(shot: MrkShot) -> tuple[float, float, float]:
+    """``(lon, lat, h)`` of the camera at a shot: the antenna of its line plus its lever arm (:func:`lever_arm`)."""
+    return lever_arm(shot.lat, shot.lon, shot.ellh, shot.offset_ned_mm)
 
 
 def shot_number(name: str) -> int | None:

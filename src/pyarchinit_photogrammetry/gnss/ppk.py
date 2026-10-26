@@ -1,6 +1,7 @@
 """Post-processed kinematic (PPK) positions with RTKLIB: the options of a run, the run on copies of the RINEX files of
-a rover and a base, and the solution RTKLIB writes (a .pos file, also one made with RTKLIB's own programs or with
-Emlid Studio). Times are seconds of GPS time since the GPS epoch, as the shots of a Timestamp.MRK."""
+a rover and a base, the solution RTKLIB writes (a .pos file, also one made with RTKLIB's own programs or with Emlid
+Studio) and where it puts the antenna at the time of a shot. Times are seconds of GPS time since the GPS epoch, as the
+shots of a Timestamp.MRK."""
 from __future__ import annotations
 
 import gzip
@@ -21,6 +22,12 @@ from . import rinex
 from .dji import GPS_EPOCH
 
 QUALITY = {1: "fix", 2: "float", 3: "sbas", 4: "dgps", 5: "single", 6: "ppp"}  # the Q of a row of RTKLIB's solution
+# the status of the position of a photo by the Q of the solution, as for an RTK flag: dgps counts as float; any other Q
+# (sbas, ppp, none) as single
+STATUS = {1: "fix", 2: "float", 4: "float", 5: "single"}
+
+MAX_GAP_S = 1.0  # a time between two epochs further apart than this has no position: none is guessed across a gap
+TIME_RESOLUTION_S = 1e-3  # the times of a solution are written to the millisecond
 
 MODES = ("kinematic", "static", "static-start", "dgps")  # RTKLIB's positioning modes that work with a base
 # the bits of RTKLIB's pos1-navsys, by the letter of the constellation in satellite ids
@@ -58,6 +65,7 @@ class Solution:
     base: dict
     path: Path  # the .pos file
     warnings: list[str] = field(default_factory=list)
+    rover: str = ""  # the name of the rover's observation file; empty from read_pos
 
 
 # --- the options of a run ---------------------------------------------------------------------------------------
@@ -224,6 +232,54 @@ def read_pos(path: str | Path) -> Solution:
     return Solution(times=np.array(times, dtype=np.float64)[order], llh=table[:, 0:3].copy(), q=q.astype(int),
                     ns=ns.astype(int), sd=table[:, [6, 5, 7]].copy(),  # RTKLIB writes sdn, sde, sdu
                     base={}, path=path, warnings=warnings)
+
+
+# --- the antenna at the time of a shot --------------------------------------------------------------------------
+
+
+def status(q: int) -> str:
+    """The status of a position of quality ``q`` (RTKLIB's Q): "fix", "float" (also dgps) or "single" (also sbas, ppp
+    and any other)."""
+    return STATUS.get(int(q), "single")
+
+
+def at(solution: Solution, gps_seconds) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Where ``solution`` puts the antenna at the times ``gps_seconds`` (N of them, in seconds of GPS time since the
+    GPS epoch, as its ``times``): ``(llh, q, sd, ok)``, the latitude, longitude and height (N, 3), the quality Q (N,),
+    the standard deviations east, north, up (N, 3) and whether there is a position at all (N,).
+
+    A time within a millisecond of an epoch (the times of a solution are written to the millisecond) takes that epoch
+    as it is. A time between two epochs at most :data:`MAX_GAP_S` apart, give or take that millisecond, takes the
+    straight line between them (the longitude across the 180th meridian the short way), the worse Q of the two and the
+    larger deviation on each axis. Any other time - in a gap of the solution, before its first epoch or after its last
+    - has no position: ``ok`` False, ``llh`` and ``sd`` NaN, ``q`` 0. A position is never taken from an epoch further
+    away."""
+    t = np.asarray(gps_seconds, dtype=np.float64).reshape(-1)
+    times = np.asarray(solution.times, dtype=np.float64)
+    llh, sd = np.full((len(t), 3), np.nan), np.full((len(t), 3), np.nan)
+    q = np.zeros(len(t), dtype=int)
+    if not len(times):
+        return llh, q, sd, np.zeros(len(t), dtype=bool)
+    last = len(times) - 1
+    after = np.searchsorted(times, t)  # the first epoch at or after each time
+    lo, hi = np.clip(after - 1, 0, last), np.clip(after, 0, last)
+    nearest = np.where(np.abs(times[hi] - t) < np.abs(times[lo] - t), hi, lo)
+    on_epoch = np.abs(times[nearest] - t) <= TIME_RESOLUTION_S
+    between = (~on_epoch & (after > 0) & (after <= last)
+               & (times[hi] - times[lo] <= MAX_GAP_S + TIME_RESOLUTION_S))
+    k = nearest[on_epoch]
+    llh[on_epoch], q[on_epoch], sd[on_epoch] = solution.llh[k], solution.q[k], solution.sd[k]
+    a, b = lo[between], hi[between]
+    weight = ((t[between] - times[a]) / (times[b] - times[a]))[:, None]
+    step = solution.llh[b] - solution.llh[a]
+    step[:, 1] = (step[:, 1] + 180.0) % 360.0 - 180.0  # across the 180th meridian the short way
+    line = solution.llh[a] + weight * step
+    lon = line[:, 1]
+    line[:, 1] = np.where(lon > 180.0, lon - 360.0, np.where(lon <= -180.0, lon + 360.0, lon))
+    llh[between] = line
+    q[between] = np.maximum(solution.q[a], solution.q[b])
+    sd[between] = np.maximum(solution.sd[a], solution.sd[b])
+    return llh, q, sd, on_epoch | between
 
 
 # --- a run of RTKLIB --------------------------------------------------------------------------------------------
@@ -429,6 +485,7 @@ def solve(rover: str | Path, base: str | Path, navs=None, base_position: Sequenc
     if message.lower().startswith("error"):
         warnings.append(f"RTKLIB: {message}")
     solution.base = base_record
+    solution.rover = rover.name
     solution.path = folder.resolve() / SOLUTION_FILE
     solution.warnings = warnings + solution.warnings
     return solution
