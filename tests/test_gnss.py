@@ -660,6 +660,69 @@ def test_summary_of_a_georeferenced_chunk_and_of_an_empty_one():
     assert entry["residual_max"] == pytest.approx(0.03, abs=1e-6)
 
 
+# --- positions in several coordinate systems in one chunk ------------------------------------------------------
+
+def _mixed(first: str, span: float = 2e-4):
+    """Six aligned photos over one place, their positions alternately the GPS of the EXIF (EPSG:4326) and a file in
+    UTM 33N (EPSG:32633), the first in ``first``; and where they truly are in UTM 33N."""
+    to_utm = Transformer.from_crs("EPSG:4326", "EPSG:32633", always_xy=True)
+    other = "EPSG:32633" if first == "EPSG:4326" else "EPSG:4326"
+    ch = ppg.Document().add_chunk()
+    truth = []
+    for i in range(6):
+        lon, lat, h = 14.266 + span * i, 41.134 + span * (i % 3), 120.0 + i
+        e, n = to_utm.transform(lon, lat)
+        truth.append([e, n, h])
+        cam = ppg.core.camera.Camera(key=i, label=f"p{i}", path=f"p{i}.jpg", sensor_key=0)
+        crs = first if i % 2 == 0 else other
+        location = [lon, lat, h] if crs == "EPSG:4326" else [e, n, h]
+        gnss_apply.set_camera_position(cam, location, crs, [1.0, 1.0, 2.0], "exif" if crs == "EPSG:4326" else
+                                       "positions_file")
+        cam.transform = np.eye(4)
+        ch.cameras.append(cam)
+    return ch, np.array(truth)
+
+
+@pytest.mark.parametrize("first", ["EPSG:4326", "EPSG:32633"])
+def test_positions_in_several_systems_on_one_metric_frame(tmp_path, first):
+    import pycolmap
+
+    from pyarchinit_photogrammetry.engine import sfm
+    from pyarchinit_photogrammetry.markers import gcp
+
+    ch, truth = _mixed(first)
+    names = {c.key: f"{c.label}.jpg" for c in ch.cameras}
+
+    # the preselection of the pairs by the positions of the photos: all on the same metric axes
+    positions = sfm._reference_positions(ch, names)
+    assert np.array([positions[names[k]] for k in range(6)]) == pytest.approx(truth, abs=1e-3)
+
+    # the positions holding the block in the alignment
+    db_path = tmp_path / "database.db"
+    db = pycolmap.Database.open(str(db_path))
+    try:
+        camera = db.write_camera(pycolmap.Camera.create_from_model_id(0, pycolmap.CameraModelId.SIMPLE_PINHOLE,
+                                                                      100.0, 64, 48))
+        for name in names.values():
+            db.write_image(pycolmap.Image(name=name, camera_id=camera))
+    finally:
+        db.close()
+    report = sfm._write_pose_priors(ch, db_path, names)
+    assert report["count"] == 6 and report["crs"] == "EPSG:32633"
+    db = pycolmap.Database.open(str(db_path))
+    try:
+        by_image = {image.image_id: image.name for image in db.read_all_images()}
+        priors = {by_image[p.corr_data_id.id]: np.asarray(p.position) for p in db.read_all_pose_priors()}
+    finally:
+        db.close()
+    assert np.array([priors[names[k]] for k in range(6)]) + report["offset"] == pytest.approx(truth, abs=1e-3)
+
+    # how far apart the photos are, in metres, against their accuracy (1 m): a survey or an object on a table
+    span = float(np.linalg.norm(np.ptp(truth[:, :2], axis=0)))
+    assert gcp.cameras_span_their_accuracy(ch, factor=0.9 * span)
+    assert not gcp.cameras_span_their_accuracy(ch, factor=1.1 * span)
+
+
 # --- ppg gnss and the GNSS pane --------------------------------------------------------------------------------
 
 def _project(tmp_path, names=("a.JPG", "b.JPG", "c.JPG")):

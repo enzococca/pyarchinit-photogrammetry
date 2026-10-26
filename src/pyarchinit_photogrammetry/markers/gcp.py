@@ -366,41 +366,65 @@ def camera_reference_errors(chunk) -> dict:
     return out
 
 
+def camera_references(chunk, cameras, crs: str | None = None) -> tuple[dict, str | None]:
+    """The reference positions of ``cameras`` (those that have one) in one coordinate system: ``({camera key:
+    position}, system)``. Every reference is read in its ``meta["reference_crs"]`` (the chunk's when it has none:
+    one chunk can hold the GPS of the EXIF in EPSG:4326 and a positions file in a projected system) and converted to
+    ``crs``; without it, to metric axes: the chunk's system when it is projected, else the first projected system of
+    the references, else the UTM zone of the geographic ones. A reference that cannot be converted (a local frame
+    and a real coordinate system) is left out."""
+    groups: dict[str, list] = {}
+    for cam in cameras:
+        if cam.reference.location:
+            groups.setdefault(cam.meta.get("reference_crs", chunk.crs), []).append(cam)
+    if crs is None:
+        crs = _metric_crs(chunk, groups)
+    out = {}
+    for ref_crs, cams in groups.items():
+        locs = np.array([cam.reference.location for cam in cams], float).reshape(-1, 3)
+        if ref_crs != crs and not (crs_mod.is_local(ref_crs) and crs_mod.is_local(crs)):
+            if crs_mod.is_local(ref_crs) or crs_mod.is_local(crs):
+                continue
+            locs = crs_mod.transform_points(locs, ref_crs, crs)
+        out.update((cam.key, loc) for cam, loc in zip(cams, locs))
+    return out, crs
+
+
+def _metric_crs(chunk, groups: dict[str, list]) -> str | None:
+    """The metric system :func:`camera_references` brings references grouped by system to."""
+    if not crs_mod.is_local(chunk.crs) and not crs_mod.is_geographic(chunk.crs):
+        return chunk.crs
+    real = [g for g in groups if not crs_mod.is_local(g)]
+    if not real:
+        return next(iter(groups), chunk.crs)
+    projected = next((g for g in real if not crs_mod.is_geographic(g)), None)
+    return projected or projected_crs_for(real[0], groups[real[0]][0].reference.location)
+
+
 def _camera_reference_pairs(chunk) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """(internal centres, reference positions in chunk CRS, accuracies) of referenced cameras."""
-    src, dst, acc = [], [], []
-    for cam in chunk.aligned_cameras:
-        ref = cam.reference
-        if not (ref.enabled and ref.location):
-            continue
-        loc = np.asarray(ref.location, float)
-        ref_crs = cam.meta.get("reference_crs", chunk.crs)
-        if not crs_mod.is_local(ref_crs) and ref_crs != chunk.crs:
-            if crs_mod.is_local(chunk.crs):
-                chunk.crs = projected_crs_for(ref_crs, loc) if crs_mod.is_geographic(ref_crs) else ref_crs
-            loc = crs_mod.transform_points(loc[None], ref_crs, chunk.crs)[0]
-        src.append(cam.center)
-        dst.append(loc)
-        acc.append(float(np.mean(ref.accuracy)))
-    return np.asarray(src).reshape(-1, 3), np.asarray(dst).reshape(-1, 3), np.asarray(acc)
+    """(internal centres, reference positions in chunk CRS, accuracies) of referenced cameras; a chunk still in
+    local coordinates takes the metric system of the references."""
+    cams = [cam for cam in chunk.aligned_cameras if cam.reference.enabled and cam.reference.location]
+    positions, crs = camera_references(chunk, cams, None if crs_mod.is_local(chunk.crs) else chunk.crs)
+    if crs_mod.is_local(chunk.crs) and not crs_mod.is_local(crs):
+        chunk.crs = crs
+    cams = [cam for cam in cams if cam.key in positions]
+    return (np.asarray([cam.center for cam in cams]).reshape(-1, 3),
+            np.asarray([positions[cam.key] for cam in cams]).reshape(-1, 3),
+            np.asarray([float(np.mean(cam.reference.accuracy)) for cam in cams]))
 
 
 def cameras_span_their_accuracy(chunk, factor: float = 10.0) -> bool:
     """The camera references (the GPS of the photos) cover an area at least ``factor`` times
     their accuracy: they can place and turn the survey (a flight over a site), not an object
     on a table or a trench of a few metres, where they are only noise."""
-    locs, accs, geographic = [], [], False
-    for cam in chunk.aligned_cameras:
-        ref = cam.reference
-        if ref.enabled and ref.location:
-            locs.append(np.asarray(ref.location, float)[:2])
-            accs.append(float(np.mean(ref.accuracy[:2])) if ref.accuracy else 5.0)
-            geographic |= crs_mod.is_geographic(cam.meta.get("reference_crs", chunk.crs))
-    if len(locs) < 3:
+    cams = [cam for cam in chunk.aligned_cameras if cam.reference.enabled and cam.reference.location]
+    positions, _crs = camera_references(chunk, cams)
+    if len(positions) < 3:
         return False
-    xy = np.array(locs)
-    if geographic:  # longitude, latitude in degrees: metres near the photos
-        xy = np.column_stack([xy[:, 0] * 111_320.0 * np.cos(np.radians(np.mean(xy[:, 1]))), xy[:, 1] * 110_540.0])
+    xy = np.array([positions[cam.key][:2] for cam in cams if cam.key in positions])
+    accs = [float(np.mean(cam.reference.accuracy[:2])) if cam.reference.accuracy else 5.0
+            for cam in cams if cam.key in positions]
     span = float(np.linalg.norm(np.ptp(xy, axis=0)))
     return span >= factor * float(np.median(accs))
 

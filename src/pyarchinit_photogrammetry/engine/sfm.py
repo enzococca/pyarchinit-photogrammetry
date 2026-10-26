@@ -21,7 +21,6 @@ from pathlib import Path, PurePosixPath
 import numpy as np
 
 from .. import _native
-from ..core import crs as crs_mod
 from ..core.chunk import QUALITY_DOWNSCALE, Chunk
 from ..core.pointcloud import PointCloud
 from ..core.progress import Progress, as_progress
@@ -234,15 +233,10 @@ def _nearest_pairs(positions: dict[str, np.ndarray], neighbours: int) -> set[tup
 
 def _reference_positions(chunk: Chunk, names: dict[int, str]) -> dict[str, np.ndarray]:
     """The reference positions of the photos (the GPS of the drone) on metric axes, by name."""
-    cams = [c for c in chunk.cameras if c.enabled and c.key in names and c.reference.location]
-    if not cams:
-        return {}
-    pts = np.array([c.reference.location for c in cams], float)
-    src = cams[0].meta.get("reference_crs", chunk.crs)
-    if crs_mod.is_geographic(src):
-        utm = crs_mod.utm_for_lonlat(*pts[:, :2].mean(0))
-        pts = crs_mod.transform_points(pts, src, utm)
-    return {names[c.key]: p for c, p in zip(cams, pts)}
+    from ..markers.gcp import camera_references
+
+    positions, _crs = camera_references(chunk, [c for c in chunk.cameras if c.enabled and c.key in names])
+    return {names[key]: p for key, p in positions.items()}
 
 
 def _reference_pairs(chunk: Chunk, names: dict[int, str], neighbors: int = REFERENCE_NEIGHBOURS) -> list | None:
@@ -1181,25 +1175,20 @@ def _block_fits_references(chunk: Chunk, rec) -> tuple[bool, float]:
     """:func:`fits_references` for a reconstruction of the chunk's photos against the positions
     of their cameras (the GPS of the photos), brought onto metric axes (the UTM zone of the
     site when they are geographic)."""
-    from ..markers.gcp import projected_crs_for
+    from ..markers.gcp import camera_references
 
     names = {v: int(k) for k, v in chunk.meta["sfm"]["names"].items()}
     by_key = {c.key: c for c in chunk.cameras}
-    groups: dict[str, list] = {}
+    pairs = []
     for image in rec.images.values():
         cam = by_key.get(names.get(image.name)) if image.has_pose else None
-        if cam is None or not (cam.reference.enabled and cam.reference.location):
-            continue
-        groups.setdefault(cam.meta.get("reference_crs", chunk.crs), []).append((image, cam))
-    src, dst, acc = [], [], []
-    for ref_crs, pairs in groups.items():
-        locs = np.array([cam.reference.location for _, cam in pairs], float).reshape(-1, 3)
-        if crs_mod.is_geographic(ref_crs):
-            locs = crs_mod.transform_points(locs, ref_crs, projected_crs_for(ref_crs, locs[0]))
-        for (image, cam), loc in zip(pairs, locs):
-            src.append(np.asarray(image.projection_center(), float))
-            dst.append(loc)
-            acc.append(float(np.mean(cam.reference.accuracy[:2])) if cam.reference.accuracy else 5.0)
+        if cam is not None and cam.reference.enabled and cam.reference.location:
+            pairs.append((image, cam))
+    positions, _crs = camera_references(chunk, [cam for _image, cam in pairs])
+    pairs = [(image, cam) for image, cam in pairs if cam.key in positions]
+    src = [np.asarray(image.projection_center(), float) for image, _cam in pairs]
+    dst = [positions[cam.key] for _image, cam in pairs]
+    acc = [float(np.mean(cam.reference.accuracy[:2])) if cam.reference.accuracy else 5.0 for _image, cam in pairs]
     return fits_references(src, dst, acc) if src else (True, float("nan"))
 
 
@@ -1212,24 +1201,17 @@ def _write_pose_priors(chunk: Chunk, db_path: Path, names: dict[int, str], previ
     report (``count``, ``crs``, ``offset``), None with fewer than three positions."""
     import pycolmap
 
-    from ..markers.gcp import projected_crs_for
+    from ..markers.gcp import camera_references
 
     cams = [c for c in chunk.cameras
             if c.enabled and c.key in names and c.reference.enabled and c.reference.location]
-    if len(cams) < 3:
+    kept = bool(previous and previous.get("crs"))
+    positions, crs = camera_references(chunk, cams, previous["crs"] if kept else None)
+    if len(positions) < 3:
         return None
-    pts = np.array([c.reference.location for c in cams], float)
-    src = cams[0].meta.get("reference_crs", chunk.crs)
-    if previous and previous.get("crs"):
-        crs, offset = previous["crs"], np.asarray(previous["offset"], float)
-    else:
-        crs = projected_crs_for(src, pts[0, :2]) if crs_mod.is_geographic(src) else src
-        offset = None
-    if crs != src:
-        pts = crs_mod.transform_points(pts, src, crs)
-    if offset is None:
-        offset = np.round(pts.mean(axis=0))
-    by_name = {names[c.key]: (p - offset, c.reference.accuracy or [5.0, 5.0, 10.0]) for c, p in zip(cams, pts)}
+    offset = np.asarray(previous["offset"], float) if kept else np.round(np.mean(list(positions.values()), axis=0))
+    by_name = {names[c.key]: (positions[c.key] - offset, c.reference.accuracy or [5.0, 5.0, 10.0])
+               for c in cams if c.key in positions}
     # COLMAP's feature extraction writes a WGS84 prior from the EXIF GPS of every photo that has
     # one (a unique index per image): those go, ours take their place; the CARTESIAN ones written
     # here before stay when the database is kept
