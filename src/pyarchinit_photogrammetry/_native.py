@@ -53,6 +53,14 @@ def supports(model: str) -> bool:
     return model in core.supported_models()
 
 
+def has(feature: str) -> bool:
+    """The installed extension carries the feature ``feature`` of :data:`FEATURES` (``"ppk"``),
+    whether or not ``PPG_NATIVE`` switches it off: what a build holds (the smoke test of the
+    packaged application), where :func:`supports` says what the program uses."""
+    core = _core()
+    return core is not None and feature in FEATURES and hasattr(core, FEATURES[feature])
+
+
 def version() -> str | None:
     core = _core()
     return getattr(core, "__version__", None) if core is not None else None

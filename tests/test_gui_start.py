@@ -134,6 +134,7 @@ def test_launcher_starts_the_window(tmp_path):
     r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=300,
                        close_fds=False)
     assert "GUI check: ok" in r.stdout, r.stdout[-2000:] + r.stderr[-2000:]
+    assert "| ppk: " in r.stdout  # RTKLIB in the core or not: an installation from the sources may lack it
     log = (tmp_path / "ppg-gui.log").read_text()
     assert "Avvio in" in log
     assert np.isfinite(float(log.split("Avvio in ")[1].split(" s")[0]))
@@ -228,6 +229,39 @@ def test_a_stalled_check_says_where_it_stopped(tmp_path):
     assert r.returncode != 0
     text = (tmp_path / "check-hang.txt").read_text()
     assert "stuck_here" in text and "Thread" in text
+
+
+def test_the_check_says_whether_the_core_carries_rtklib(monkeypatch):
+    """``--check`` says whether RTKLIB is inside the native core, and fails only as the packaged application without
+    it (its documentation says the applications include it; a build from a core older than 0.5 would ship without):
+    an installation from the sources, or CI without the core, may lack it. What counts is the build: RTKLIB switched
+    off with PPG_NATIVE or an rnx2rtkp named by PPG_RNX2RTKP changes nothing."""
+    from pyarchinit_photogrammetry import _native
+    from pyarchinit_photogrammetry.gui import check_ppk
+
+    class Core:  # the native core 0.5
+        __version__ = "0.5.0"
+
+        @staticmethod
+        def ppk_solve(conf, infiles, outfile):
+            return 0, ""
+
+    class OldCore:  # 0.4, without RTKLIB
+        __version__ = "0.4.1"
+
+    monkeypatch.setenv("PPG_NATIVE", "0")
+    monkeypatch.setenv("PPG_RNX2RTKP", "rnx2rtkp")
+    monkeypatch.setattr(_native, "_core", lambda: Core)
+    assert check_ppk(frozen=True) == ("RTKLIB in the core 0.5.0", True)
+    monkeypatch.setattr(_native, "_core", lambda: OldCore)
+    assert check_ppk(frozen=True) == ("missing (the native core 0.4.1 has no RTKLIB)", False)
+    assert check_ppk(frozen=False) == ("missing (the native core 0.4.1 has no RTKLIB)", True)
+    monkeypatch.setattr(_native, "_core", lambda: None)
+    assert check_ppk(frozen=True) == ("missing (no native core)", False)
+    assert check_ppk(frozen=False) == ("missing (no native core)", True)
+    assert check_ppk()[1] is True  # this interpreter is not a packaged application
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert check_ppk() == ("missing (no native core)", False)
 
 
 def test_numbers_stay_in_the_c_locale(qapp):

@@ -2939,3 +2939,54 @@ def test_ppk_step_says_when_the_onboard_fixes_kept_their_positions(ppk_window, f
     assert {c.label for c in chunk.cameras if c.meta["gnss"]["source"] == "ppk"} == {"DJI_0002", "DJI_0003"}
     logged = [entry[2] for entry in w.log_pane.entries]
     assert "Foto che hanno tenuto il fix RTK del drone stesso: 7" in logged and w.isWindowModified()
+
+
+# --- ppg doctor ---------------------------------------------------------------------------------------------------
+
+
+def test_doctor_says_where_the_ppk_runs(tmp_path, monkeypatch):
+    """The PPK line of ppg doctor (and of Aiuto > Diagnostica ambiente): RTKLIB inside the native core with its version,
+    the rnx2rtkp named by PPG_RNX2RTKP, or neither, with what to install."""
+    from pyarchinit_photogrammetry import doctor
+    from pyarchinit_photogrammetry.engine import isolate
+
+    class Core:  # the native core 0.5
+        __version__, API = "0.5.0", 8
+
+        @staticmethod
+        def ppk_solve(conf, infiles, outfile):
+            return 0, ""
+
+    class OldCore:  # 0.4, without RTKLIB
+        __version__, API = "0.4.1", 7
+
+    monkeypatch.setenv("PPG_NATIVE", "1")
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    monkeypatch.setattr(_native, "_core", lambda: Core)
+    check = doctor.ppk_check()
+    assert (check.name, check.level, check.detail) == ("PPK (RTKLIB)", doctor.OK,
+                                                       "RTKLIB inside the native core 0.5.0 (API 8)")
+    monkeypatch.setenv("PPG_NATIVE", "0")
+    check = doctor.ppk_check()
+    assert check.level == doctor.WARN and check.detail == ("RTKLIB is inside the native core 0.5.0, which is switched "
+                                                           "off (PPG_NATIVE=0)")
+    monkeypatch.setenv("PPG_NATIVE", "1")
+    monkeypatch.setattr(_native, "_core", lambda: OldCore)
+    check = doctor.ppk_check()
+    assert check.level == doctor.WARN and check.detail == "the native core 0.4.1 has no RTKLIB (0.5 or later has it)"
+    assert 'pip install -U "pyarchinit-photogrammetry-core>=0.5"' in check.hint and "PPG_RNX2RTKP" in check.hint
+    monkeypatch.setattr(_native, "_core", lambda: None)
+    assert doctor.ppk_check().detail == "no native core, and no rnx2rtkp named by PPG_RNX2RTKP"
+    tool = _fake_rnx2rtkp(tmp_path)
+    monkeypatch.setenv("PPG_RNX2RTKP", str(tool))
+    check = doctor.ppk_check()
+    assert (check.level, check.detail) == (doctor.OK, f"external rnx2rtkp named by PPG_RNX2RTKP: {tool}")
+    monkeypatch.setenv("PPG_RNX2RTKP", str(tmp_path / "nowhere" / "rnx2rtkp"))
+    check = doctor.ppk_check()
+    assert check.level == doctor.WARN and "not a program that can run" in check.detail
+    # in the report, after the native core
+    monkeypatch.setattr(isolate, "run_isolated", lambda fn, timeout=None: None)  # no SpatiaLite probe here
+    report = doctor.run_checks(gui=False)
+    names = [c.name for c in report.checks]
+    assert names.index("PPK (RTKLIB)") == names.index("Native core (Rust)") + 1
+    assert "[!!] PPK (RTKLIB)" in report.text()

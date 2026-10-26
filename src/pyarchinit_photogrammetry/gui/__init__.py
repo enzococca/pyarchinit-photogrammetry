@@ -5,7 +5,8 @@ Everything the interface does goes through the Python API on
 as ``doc`` / ``chunk``.
 
 Options: ``--check`` opens the window, renders it and exits (smoke test for the
-packaged application); ``--doctor`` prints the environment diagnosis; ``--run script.py
+packaged application, which fails without RTKLIB in its native core); ``--doctor`` prints the
+environment diagnosis; ``--run script.py
 [arguments]`` runs a Python script with the program's Python and modules, without the window
 (the packaged application can be scripted as Metashape with ``-r``); ``--ppg-worker`` is used
 internally by the packaged application to run isolated worker processes.
@@ -34,6 +35,20 @@ def _hard_exit(code: int) -> None:
 
 def _frozen_posix() -> bool:
     return bool(getattr(sys, "frozen", False)) and os.name != "nt"
+
+
+def check_ppk(frozen: bool | None = None) -> tuple[str, bool]:
+    """What ``--check`` says of the PPK, and whether that is right: the packaged application (``frozen``, default
+    ``sys.frozen``) must carry RTKLIB inside its native core - its documentation says so, and a build from a core
+    older than 0.5 would ship without it - while an installation from the sources may lack it (the program then says
+    what to install). An rnx2rtkp named by PPG_RNX2RTKP does not count: the check is about the build."""
+    from .. import _native
+
+    frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    version = _native.version()
+    if _native.has("ppk"):
+        return f"RTKLIB in the core {version}", True
+    return (f"missing (the native core {version} has no RTKLIB)" if version else "missing (no native core)"), not frozen
 
 
 def run_script(args: list[str]) -> int:
@@ -246,9 +261,11 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
                 libs = f"missing ({str(exc).splitlines()[0][:120]})"
             from .. import _native
 
+            ppk, ppk_ok = check_ppk()  # the packaged application without RTKLIB in its core fails
+            ok = ok and ppk_ok
             print(f"GUI check: {'ok' if ok else 'FAILED'} | window: {win.windowTitle()} | 3D backend: "
                   f"{win.model_view.backend} | vtk: {vtk} | libs: {libs} | native: {_native.version() or 'missing'} | "
-                  f"log: {log_path}", flush=True)
+                  f"ppk: {ppk} | log: {log_path}", flush=True)
             if _frozen_posix():  # see --doctor
                 _hard_exit(0 if ok else 2)
             qapp.exit(0 if ok else 2)

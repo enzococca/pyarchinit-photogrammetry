@@ -4,6 +4,7 @@ install shadowing the right one, the Open3D build that crashes, SciPy wheels tha
 not load, missing SpatiaLite) and says what to do."""
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 import sys
@@ -85,6 +86,34 @@ def _version(mod: str) -> str | None:
         return "?"
 
 
+PPK_HINT = ("pip install -U \"pyarchinit-photogrammetry-core>=0.5\" (the applications include it), or set PPG_RNX2RTKP "
+            "to the rnx2rtkp program of RTKLIB-EX 2.5")
+
+
+def ppk_check() -> Check:
+    """Where the PPK of the GNSS positions runs: RTKLIB inside the native core (its version and API), the rnx2rtkp
+    program named by PPG_RNX2RTKP, or nowhere (and why)."""
+    from . import _native
+
+    name = "PPK (RTKLIB)"
+    version = _native.version()
+    if _native.supports("ppk"):
+        return Check(name, OK, f"RTKLIB inside the native core {version} (API {_native.api()})")
+    tool = os.environ.get("PPG_RNX2RTKP", "").strip()
+    if tool:
+        path = shutil.which(tool) or (tool if Path(tool).is_file() else None)
+        if path and os.access(path, os.X_OK):
+            return Check(name, OK, f"external rnx2rtkp named by PPG_RNX2RTKP: {path}")
+        return Check(name, WARN, f"PPG_RNX2RTKP names {tool}, which is not a program that can run", PPK_HINT)
+    if _native.has("ppk"):
+        detail = f"RTKLIB is inside the native core {version}, which is switched off (PPG_NATIVE=0)"
+    elif version:
+        detail = f"the native core {version} has no RTKLIB (0.5 or later has it)"
+    else:
+        detail = "no native core, and no rnx2rtkp named by PPG_RNX2RTKP"
+    return Check(name, WARN, detail, PPK_HINT)
+
+
 def run_checks(gui: bool = True) -> Report:
     from . import __version__
 
@@ -161,6 +190,7 @@ def run_checks(gui: bool = True) -> Report:
                   "" if chosen is not None else f"PPG_GPU={setting!r} matches no adapter: auto, off, an index or part of a name")
         else:
             r.add("GPU (wgpu)", WARN, "no Metal, Vulkan or DirectX 12 device: the matching runs on the CPU", "")
+    r.checks.append(ppk_check())
     v = _version("open3d")
     if v is None:
         r.add("Open3D", WARN, "missing (Poisson meshing uses COLMAP's PoissonRecon)",
@@ -276,4 +306,4 @@ def main(argv: list[str] | None = None) -> int:
     return 1 if rep.failures else 0
 
 
-__all__ = ["run_checks", "Report", "Check", "main", "OK", "WARN", "FAIL"]
+__all__ = ["run_checks", "ppk_check", "Report", "Check", "main", "OK", "WARN", "FAIL"]
