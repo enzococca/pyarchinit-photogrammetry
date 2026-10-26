@@ -7,6 +7,10 @@ function needed, or switched off with ``PPG_NATIVE=0``, and the tests compare th
 from __future__ import annotations
 
 import os
+import re
+import shutil
+import subprocess
+from pathlib import Path
 
 _module = None
 _loaded = False
@@ -34,10 +38,19 @@ def kernel(name: str):
     return getattr(core, name, None) if core is not None else None
 
 
+# what the extension can do besides the camera models, asked for by name in supports()
+FEATURES = {"ppk": "ppk_solve"}  # RTKLIB's post-processing (API 8)
+
+
 def supports(model: str) -> bool:
-    """The projection kernels know the camera model ``model`` (a COLMAP model name)."""
+    """The projection kernels know the camera model ``model`` (a COLMAP model name), or the
+    extension has the feature ``model`` (``"ppk"``: RTKLIB's post-processing, API 8)."""
     core = _core() if enabled() else None
-    return core is not None and model in core.supported_models()
+    if core is None:
+        return False
+    if model in FEATURES:
+        return hasattr(core, FEATURES[model])
+    return model in core.supported_models()
 
 
 def version() -> str | None:
@@ -155,3 +168,49 @@ def gpu_sift(image, max_features: int = 8192, first_octave: int = -1, num_octave
         raise RuntimeError("the GPU SIFT needs pyarchinit-photogrammetry-core 0.4 (API 6)")
     return fn(image, int(max_features), int(first_octave), int(num_octaves), int(octave_resolution),
               float(peak_threshold), float(edge_threshold), int(max_orientations), bool(upright), int(device))
+
+
+# ------------------------------------------------------------------ RTKLIB's post-processing
+PPK_MISSING = ("PPK needs RTKLIB: install the native core pyarchinit-photogrammetry-core 0.5 or later "
+               "(pip install \"pyarchinit-photogrammetry-core>=0.5\"), or set PPG_RNX2RTKP to an rnx2rtkp "
+               "program of RTKLIB (rtklibexplorer's RTKLIB-EX 2.5 or RTKLIB 2.4.3)")
+
+
+def ppk_solve(conf, infiles, outfile) -> tuple[int, str]:
+    """RTKLIB's post-processing, as ``rnx2rtkp -k conf -o outfile infiles``: the options file
+    ``conf``; the input files rover observations first, then the base's observations, then the
+    navigation files; the solution written to ``outfile``. Returns RTKLIB's code (0 done, 1
+    aborted, -1 a file named in the options could not be read, -2 the options file could not
+    be read, -3 bad arguments; an external rnx2rtkp exits with 1 for any of them) and its last
+    message (the last error it reported, if any). RTKLIB returns 0 also when it computed
+    nothing ("error : no obs data"): read the solution it wrote.
+
+    With the native core (API 8) RTKLIB runs inside it; without it (missing, older than 0.5
+    or switched off) the program named by ``PPG_RNX2RTKP`` runs; otherwise RuntimeError."""
+    files = [str(f) for f in infiles]
+    fn = kernel("ppk_solve")
+    if fn is not None:
+        code, message = fn(str(conf), files, str(outfile))
+        return int(code), str(message)
+    tool = os.environ.get("PPG_RNX2RTKP", "").strip()
+    if not tool:
+        raise RuntimeError(PPK_MISSING)
+    return _rnx2rtkp(tool, str(conf), files, str(outfile))
+
+
+def _rnx2rtkp(tool: str, conf: str, files: list[str], outfile: str) -> tuple[int, str]:
+    """``tool -k conf -o outfile files``: its exit code and its last message on stderr (rnx2rtkp
+    separates them with carriage returns), the last error if it reported one."""
+    path = shutil.which(tool) or (tool if Path(tool).is_file() else None)
+    if path is None:
+        raise RuntimeError(f"PPG_RNX2RTKP names {tool}, which is not there. " + PPK_MISSING)
+    proc = subprocess.run([str(Path(path).resolve()), "-k", conf, "-o", outfile, *files], capture_output=True,
+                          text=True, errors="replace", close_fds=False)
+    return proc.returncode, _last_message(proc.stderr or "")
+
+
+def _last_message(text: str) -> str:
+    """The last error message of RTKLIB's output, or the last message."""
+    parts = [p.strip() for p in re.split(r"[\r\n]+", text) if p.strip()]
+    errors = [p for p in parts if p.lower().startswith("error")]
+    return (errors or parts or [""])[-1]

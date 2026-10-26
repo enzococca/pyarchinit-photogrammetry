@@ -43,6 +43,19 @@ jobs:
         run: |
           pip install numpy native/dist/*.whl
           python -c "import numpy as np, ppg_core; print(ppg_core.__version__, ppg_core.combine_depths(np.ones((2, 3, 4), np.float32), 1, 0.01).shape)"
+          # RTKLIB inside the core: RTKLIB's test station 3040 against 0759 (tests/test_native.py)
+          python - <<'EOF'
+          import pathlib, tempfile, ppg_core
+          data, tmp = pathlib.Path("tests/data/rtklib"), pathlib.Path(tempfile.mkdtemp())
+          (tmp / "ppk.conf").write_text("pos1-posmode=kinematic\npos1-frequency=l1+l2\npos1-soltype=combined\n"
+                                        "pos1-navsys=1\npos2-armode=fix-and-hold\nant2-postype=rinexhead\nout-timeform=tow\n")
+          files = [str(data / name) for name in ("30400920.05o", "07590920.05o", "07590920.05n")]
+          code, message = ppg_core.ppk_solve(str(tmp / "ppk.conf"), files, str(tmp / "rover.pos"))
+          rows = [r.split() for r in (tmp / "rover.pos").read_text().splitlines() if r.strip() and not r.startswith("%")]
+          fixed = sum(r[5] == "1" for r in rows)
+          print("ppk", code, message, len(rows), "epochs,", fixed, "fixed")
+          assert code == 0 and fixed > 96, (code, message, len(rows), fixed)
+          EOF
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.label }}

@@ -10,6 +10,7 @@ mod gpu_fuse;
 mod gpu_patchmatch;
 mod gpu_sift;
 mod patchmatch;
+mod ppk;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -25,7 +26,7 @@ use rayon::prelude::*;
 use camera::{Camera, Pose};
 
 /// Version of the functions offered here: raised when one is added or changes meaning.
-const API: u32 = 7;
+const API: u32 = 8;
 
 // one matcher per GPU, each behind its own lock: several GPUs work at the same time
 fn matchers() -> &'static Mutex<HashMap<i64, Arc<Mutex<gpu::Matcher>>>> {
@@ -726,5 +727,6 @@ fn ppg_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gpu_device_name, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_forget, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_patchmatch_depth, m)?)?;
+    m.add_function(wrap_pyfunction!(ppk::ppk_solve, m)?)?;
     Ok(())
 }

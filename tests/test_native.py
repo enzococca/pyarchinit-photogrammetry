@@ -3,6 +3,7 @@ with the Python function it replaces (``PPG_NATIVE=0`` switches the extension of
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -522,3 +523,83 @@ def test_gpu_fusion_replaces_a_map_given_again():
     assert _native.gpu_fuse_cached(device) == []
     with pytest.raises(RuntimeError):
         _native.gpu_fuse((7, None, k, r, t, 0), [], min_pixels=1, device=device)
+
+
+# ------------------------------------------------------------------ RTKLIB's post-processing
+RTKLIB_DATA = Path(__file__).parent / "data" / "rtklib"
+
+# rnx2rtkp's options file: the rover in motion, the base at the position of its RINEX header
+PPK_OPTIONS = """\
+pos1-posmode       =kinematic
+pos1-frequency     =l1+l2
+pos1-soltype       =combined
+pos1-elmask        =15
+pos1-navsys        =1
+pos2-armode        =fix-and-hold
+ant2-postype       =rinexhead
+out-solformat      =llh
+out-outhead        =on
+out-timesys        =gpst
+out-timeform       =tow
+out-height         =ellipsoidal
+"""
+
+
+def _pos_rows(path) -> np.ndarray:
+    """The solution rows of an RTKLIB .pos (llh, GPS week and seconds): week, tow, lat, lon, h, Q, ns."""
+    rows = [line.split() for line in Path(path).read_text().splitlines() if line.strip() and not line.startswith("%")]
+    return np.array([[float(v) for v in r[:7]] for r in rows]).reshape(-1, 7)
+
+
+def _ecef(lat_deg, lon_deg, h):
+    a, f = 6378137.0, 1 / 298.257223563
+    e2 = f * (2 - f)
+    lat, lon = np.radians(lat_deg), np.radians(lon_deg)
+    n = a / np.sqrt(1 - e2 * np.sin(lat) ** 2)
+    return np.array([(n + h) * np.cos(lat) * np.cos(lon), (n + h) * np.cos(lat) * np.sin(lon),
+                     (n * (1 - e2) + h) * np.sin(lat)])
+
+
+def test_ppk_engine_on_rtklib_data(tmp_path, monkeypatch):
+    """RTKLIB inside the core: the static station 3040 of RTKLIB's test data processed as a moving
+    rover against 0759 (3.3 km away, at the position of its RINEX header) with the broadcast orbits:
+    an hour of 30 s epochs, almost all fixed, the fixed positions within centimetres of each other."""
+    if _native.kernel("ppk_solve") is None:
+        pytest.skip("native core without RTKLIB (older than 0.5, API 8)")
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    assert _native.supports("ppk") and _native.api() >= 8
+    conf = tmp_path / "ppk.conf"
+    conf.write_text(PPK_OPTIONS)
+    files = [str(RTKLIB_DATA / name) for name in ("30400920.05o", "07590920.05o", "07590920.05n")]
+    out = tmp_path / "rover.pos"
+    code, message = _native.ppk_solve(str(conf), files, str(out))
+    assert code == 0, message
+    rows = _pos_rows(out)
+    epochs = 120  # 00:00:00 to 00:59:30 every 30 s in both files
+    fixed = rows[rows[:, 5] == 1]
+    assert len(rows) <= epochs and len(fixed) > 0.8 * epochs, (len(rows), len(fixed), message)
+    lat, lon, h = fixed[:, 2], fixed[:, 3], fixed[:, 4]
+    north = np.radians(lat - lat.mean()) * 6378137.0
+    east = np.radians(lon - lon.mean()) * 6378137.0 * np.cos(np.radians(lat.mean()))
+    assert np.sqrt(np.mean(north ** 2 + east ** 2)) < 0.03 and np.std(h) < 0.06
+    # the station where its header puts it, give or take the metres of the base's header position
+    header_3040 = np.array([-3978242.4348, 3382841.1715, 3649902.7667])
+    assert np.linalg.norm(_ecef(lat.mean(), lon.mean(), h.mean()) - header_3040) < 10.0
+    # a second run in the same process gives the same solution (RTKLIB keeps its state in globals)
+    again = tmp_path / "again.pos"
+    assert _native.ppk_solve(str(conf), files, str(again))[0] == 0
+    assert np.array_equal(_pos_rows(again), rows)
+    # what RTKLIB says when it cannot work comes back as the message
+    code, message = _native.ppk_solve(str(conf), files[:2], str(tmp_path / "no_nav.pos"))
+    assert "no nav data" in message
+    assert not (tmp_path / "no_nav.pos").exists() or len(_pos_rows(tmp_path / "no_nav.pos")) == 0
+    code, message = _native.ppk_solve(str(tmp_path / "nowhere.conf"), files, str(tmp_path / "x.pos"))
+    assert code != 0 and "nowhere.conf" in message
+    # an option of one run does not stay for the next one (RTKLIB's own reset keeps some files)
+    eop = tmp_path / "eop.conf"
+    eop.write_text(PPK_OPTIONS + f"file-eopfile       ={tmp_path / 'nowhere.erp'}\n")
+    assert "no erp data" in _native.ppk_solve(str(eop), files, str(tmp_path / "eop.pos"))[1]
+    # and the solution after the failures is still the same
+    code, message = _native.ppk_solve(str(conf), files, str(again))
+    assert code == 0 and "erp" not in message
+    assert np.array_equal(_pos_rows(again), rows)

@@ -1,8 +1,10 @@
 """Precise camera positions: the RTK status of DJI photos, their Timestamp.MRK and the accuracy they give."""
 from __future__ import annotations
 
+import os
+import sys
 from datetime import datetime, timedelta, timezone
-from pathlib import PureWindowsPath
+from pathlib import Path, PureWindowsPath
 
 import numpy as np
 import pytest
@@ -10,6 +12,7 @@ from PIL import Image
 from pyproj import Transformer
 
 import pyarchinit_photogrammetry as ppg
+from pyarchinit_photogrammetry import _native
 from pyarchinit_photogrammetry.gnss import apply as gnss_apply
 from pyarchinit_photogrammetry.gnss import dji, positions, quality
 
@@ -1103,3 +1106,53 @@ def test_only_fix_is_kept_when_positions_are_applied_again(tmp_path):
     assert gnss_apply.only_fix(chunk, False) == 2 and "gnss_only_fix" not in chunk.meta
     assert [c.reference.enabled for c in chunk.cameras] == [True] * 3
     assert gnss_apply.only_fix(chunk, False) == 0  # nothing to give back
+
+
+def _fake_rnx2rtkp(folder: Path) -> Path:
+    """A stand-in for RTKLIB's rnx2rtkp: writes its arguments into the -o file and, as rnx2rtkp
+    does, its messages to stderr separated by carriage returns; a file named bad.obs makes it
+    fail with an error message and exit code 1."""
+    script = folder / "rnx2rtkp"
+    script.write_text(f"""#!{sys.executable}
+import sys
+args = sys.argv[1:]
+out = args[args.index("-o") + 1]
+sys.stderr.write("reading    : 2005/04/02 00:00:00.0\\r")
+if any(a.endswith("bad.obs") for a in args):
+    sys.stderr.write("error : no obs data\\r")
+    sys.exit(1)
+open(out, "w").write(" ".join(args))
+sys.stderr.write("processing : 2005/04/02 00:59:30.0 Q=1\\r" + " " * 40 + "\\r")
+""")
+    script.chmod(0o755)
+    if os.name == "nt":  # no shebang lines on Windows: a batch file starts the script
+        wrapper = folder / "rnx2rtkp.cmd"
+        wrapper.write_text(f'@"{sys.executable}" "{script}" %*\r\n')
+        return wrapper
+    return script
+
+
+def test_ppk_without_the_core_says_what_to_do(tmp_path, monkeypatch):
+    """Without RTKLIB in the native core (missing, older than 0.5 or switched off) the PPK runs an
+    rnx2rtkp named by PPG_RNX2RTKP, and without that says what to install."""
+    monkeypatch.setenv("PPG_NATIVE", "0")  # as without the core
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    assert not _native.supports("ppk")
+    conf, out = tmp_path / "ppk.conf", tmp_path / "rover.pos"
+    conf.write_text("pos1-posmode =kinematic\n")
+    files = [str(tmp_path / name) for name in ("rover.obs", "base.obs", "base.nav")]
+    with pytest.raises(RuntimeError) as error:
+        _native.ppk_solve(str(conf), files, str(out))
+    text = str(error.value)
+    assert "pyarchinit-photogrammetry-core" in text and "0.5" in text and "PPG_RNX2RTKP" in text and "rnx2rtkp" in text
+    # an rnx2rtkp named by PPG_RNX2RTKP: rnx2rtkp -k options -o output files, its code and last message
+    monkeypatch.setenv("PPG_RNX2RTKP", str(_fake_rnx2rtkp(tmp_path)))
+    code, message = _native.ppk_solve(str(conf), files, str(out))
+    assert code == 0 and message.startswith("processing : 2005/04/02 00:59:30.0")
+    assert out.read_text() == " ".join(["-k", str(conf), "-o", str(out)] + files)
+    code, message = _native.ppk_solve(str(conf), [str(tmp_path / "bad.obs")] + files[1:], str(out))
+    assert code == 1 and message == "error : no obs data"
+    # a PPG_RNX2RTKP that is not there
+    monkeypatch.setenv("PPG_RNX2RTKP", str(tmp_path / "nowhere" / "rnx2rtkp"))
+    with pytest.raises(RuntimeError, match="PPG_RNX2RTKP"):
+        _native.ppk_solve(str(conf), files, str(out))

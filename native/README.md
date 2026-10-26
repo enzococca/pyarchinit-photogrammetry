@@ -9,7 +9,10 @@ Kernels: fusion of the depth maps of one photo, depth z-buffer and normals, proj
 with the COLMAP camera models, scoring of the photos of an orthomosaic tile, agreement of points
 with a depth map (confidence), PatchMatch multi-view stereo of one photo (`patchmatch_depth`: a
 plane per pixel, normalised cross correlation with the best of its neighbouring photos,
-red-black propagation and random refinement, from random planes or from a depth map).
+red-black propagation and random refinement, from random planes or from a depth map), the
+GPU kernels (wgpu: SIFT, descriptor matching, PatchMatch, fusion), and RTKLIB's post-processing
+of GNSS observations (`ppk_solve`, from 0.5: what `rnx2rtkp -k options -o solution files`
+does, with RTKLIB built into the extension).
 
 Build and install in the environment of pyarchinit-photogrammetry (a Rust toolchain is needed):
 
@@ -17,4 +20,10 @@ Build and install in the environment of pyarchinit-photogrammetry (a Rust toolch
 pip install ./native        # or: uv pip install ./native
 ```
 
-License: GPL-2.0-or-later.
+Building it compiles RTKLIB's C sources too (`vendor/rtklib`, with the `cc` crate): a C
+compiler is needed (Xcode's command line tools, gcc or clang, MSVC on Windows).
+
+License: GPL-2.0-or-later. The extension includes RTKLIB-EX v2.5.1
+(https://github.com/rtklibexplorer/RTKLIB, commit 62d4677ed8425a4e2748c6d390b500d1afb493fc),
+Copyright (c) 2007-2020, T. Takasu, distributed under the BSD 2-clause license: its text is in
+`vendor/rtklib/license.txt` and in `NOTICE`, which come with the package.
