@@ -10,7 +10,7 @@ from pyproj import Transformer
 
 import pyarchinit_photogrammetry as ppg
 from pyarchinit_photogrammetry.gnss import apply as gnss_apply
-from pyarchinit_photogrammetry.gnss import dji, positions
+from pyarchinit_photogrammetry.gnss import dji, positions, quality
 
 
 def _xmp(body: str) -> str:
@@ -478,3 +478,84 @@ def test_positions_files_that_cannot_be_used(tmp_path):
     with pytest.raises(Exception, match="coordinate system"):
         positions.apply_positions(ch, good, "EPSG:no")
     assert _snapshot(ch) == before
+
+
+# --- the positions of the photos summed up per flight ----------------------------------------------------------
+
+def _camera(key, when, status=None, source="dji_xmp", accuracy=None, position=True, sensor=0):
+    """A camera shot at ``when`` (EXIF date text), with a position of ``status`` (``False``: none at all)."""
+    cam = ppg.core.camera.Camera(key=key, label=f"c{key}", path=f"c{key}.jpg", sensor_key=sensor,
+                                 meta={"datetime": when})
+    if position:
+        gnss_apply.set_camera_position(cam, [500000.0 + key, 4500000.0, 100.0], "EPSG:32633",
+                                       accuracy or gnss_apply.accuracy(status, None), source, status=status)
+    return cam
+
+
+def test_summary_per_flight(monkeypatch):
+    ch = ppg.Document().add_chunk()
+    ch.cameras = [
+        # first flight: 10:00-10:01, one RTK fix, one photo with a GPS but no RTK data, one without a position
+        _camera(0, "2026:10:26 10:00:00", "fix", accuracy=[0.01, 0.02, 0.03]),
+        _camera(1, "2026:10:26 10:00:30", None, source="exif"),
+        _camera(2, "2026:10:26 10:01:00", position=False),
+        # second flight, 30 minutes later: two fixes (one with its reference disabled), a float, a status DJI does
+        # not know, and a photo with no date at all (flight 0)
+        _camera(3, "2026:10:26 10:31:00", "fix", source="dji_mrk", accuracy=[0.01, 0.01, 0.01]),
+        _camera(4, "2026:10:26 10:31:30", "fix", source="dji_mrk", accuracy=[0.03, 0.01, 0.05]),
+        _camera(5, "2026:10:26 10:32:00", "float", source="positions_file", accuracy=[0.2, 0.2, 0.2]),
+        _camera(6, "2026:10:26 10:32:30", "unknown", source="positions_file", accuracy=[1.0, 1.0, 1.0]),
+        _camera(7, "", "fix", accuracy=[0.01, 0.01, 0.02]),
+    ]
+    ch.cameras[4].reference.enabled = False
+    monkeypatch.setattr(ppg.markers.gcp, "camera_reference_errors", lambda chunk: {})
+
+    nodate, one, two = quality.summary(ch)  # by flight number, the photos with no date (flight 0) first
+    assert [nodate["flight"], one["flight"], two["flight"]] == [0, 1, 2]
+
+    assert one["photos"] == 3 and one["status"] == {"fix": 1, "float": 0, "single": 0, "none": 1}
+    assert one["sources"] == {"dji_xmp": 1, "exif": 1}
+    assert one["no_position"] == 1 and one["disabled"] == 0
+    # the median of the accuracy of the two photos that have one: the fix and the one with no RTK data
+    assert one["accuracy_median"] == pytest.approx([2.505, 2.51, 5.015])
+    assert one["residual_rms"] is None and one["residual_max"] is None  # nothing aligned and georeferenced
+
+    assert two["photos"] == 4 and two["status"] == {"fix": 2, "float": 1, "single": 1, "none": 0}  # unknown = single
+    assert two["sources"] == {"dji_mrk": 2, "positions_file": 2}
+    assert two["no_position"] == 0 and two["disabled"] == 1
+    assert two["accuracy_median"] == pytest.approx([0.115, 0.105, 0.125])
+
+    assert nodate["photos"] == 1 and nodate["status"]["fix"] == 1
+    assert nodate["accuracy_median"] == pytest.approx([0.01, 0.01, 0.02])
+
+
+def test_summary_residuals_of_the_aligned_cameras(monkeypatch):
+    ch = ppg.Document().add_chunk()
+    ch.cameras = [_camera(k, f"2026:10:26 1{k // 2}:00:00", "fix") for k in range(4)]  # k // 2: two flights
+    deltas = {0: [0.03, 0.0, 0.0], 1: [0.0, 0.04, 0.0], 2: [0.0, 0.0, 0.12], 3: [0.03, 0.04, 0.0]}
+    errors = {k: {"reference": np.zeros(3), "estimated": np.array(d), "delta": np.array(d),
+                  "error": float(np.linalg.norm(d))} for k, d in deltas.items() if k != 3}
+    errors[3] = {"reference": np.zeros(3)}  # a camera that is not aligned has a reference and nothing else
+    monkeypatch.setattr(ppg.markers.gcp, "camera_reference_errors", lambda chunk: errors)
+
+    one, two = quality.summary(ch)
+    assert one["residual_rms"] == pytest.approx([np.sqrt(0.03 ** 2 / 2), np.sqrt(0.04 ** 2 / 2), 0.0])
+    assert one["residual_max"] == pytest.approx(0.04)
+    assert two["residual_rms"] == pytest.approx([0.0, 0.0, 0.12])  # the camera 3 is not in it
+    assert two["residual_max"] == pytest.approx(0.12)
+
+
+def test_summary_of_a_georeferenced_chunk_and_of_an_empty_one():
+    assert quality.summary(ppg.Document().add_chunk()) == []
+
+    ch = ppg.Document().add_chunk()
+    ch.crs = "EPSG:32633"
+    ch.cameras = [_camera(k, f"2026:10:26 10:0{k}:00", "fix") for k in range(2)]
+    for cam in ch.cameras:  # the camera 0 is 3 cm east of its reference, the camera 1 is not aligned
+        cam.transform = np.eye(4)
+        cam.transform[:3, 3] = cam.reference.location
+    ch.cameras[0].transform[0, 3] += 0.03
+    ch.cameras[1].transform = None
+    (entry,) = quality.summary(ch)
+    assert entry["residual_rms"] == pytest.approx([0.03, 0.0, 0.0], abs=1e-6)
+    assert entry["residual_max"] == pytest.approx(0.03, abs=1e-6)
