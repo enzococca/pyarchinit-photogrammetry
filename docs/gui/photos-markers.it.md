@@ -35,6 +35,7 @@ migliore del GPS dell'EXIF.
 | --- | --- |
 | Le foto stesse | Il GPS dell'EXIF, con un'accuratezza di 5, 5, 10 m (nessun dato RTK). Le foto di un drone DJI con RTK portano anche lo stato nell'XMP (`RtkFlag`: 50 fix, 34 float, 16 singola, 0 nessuno) e le deviazioni standard, lette quando le foto vengono aggiunte; quelle di una camera multispettrale le prendono dalle loro bande |
 | *Strumenti > GNSS > File MRK di DJI...* | Il `Timestamp.MRK` che il drone scrive sulla scheda: la posizione di ogni scatto, della camera e non dell'antenna (si applica il braccio di leva dello scatto), con la quota ellissoidica, lo stato RTK e le deviazioni standard |
+| *Strumenti > GNSS > Correzioni PPK...* (*Calcola PPK...* nel pannello) | La posizione di ogni scatto del `Timestamp.MRK` calcolata di nuovo dal RINEX del drone e da quello di una base: vedi [PPK](#ppk-correzioni-da-una-base) più sotto |
 | *Strumenti > GNSS > File di posizioni...* | Un file di testo con una riga per foto, per un drone costruito in casa o posizioni calcolate da un altro programma (una soluzione PPK, una stazione totale): nome, x, y, quota e, se ci sono, `sx`, `sy`, `sz` (deviazioni standard) o `accuracy`, `status`, `yaw`, `pitch`, `roll`; un'intestazione dà i nomi delle colonne in qualsiasi ordine (`name`, `lon`/`lat`/`ellh`, `easting`/`northing`, `std`, `q`...); virgola, punto e virgola, tabulazione o spazi |
 
 **L'MRK si abbina alle foto con il numero dello scatto nel loro nome** (`DJI_0001.JPG` è la riga 1 del file),
@@ -92,6 +93,82 @@ ppg gnss positions rilievo.ppg camere.csv --crs EPSG:4979     # --height ellipso
 
 Tutti e tre accettano `--chunk` e dicono cosa hanno fatto; `mrk` e `positions` salvano il progetto, e si fermano
 con un errore, senza cambiare nulla, quando il file non si può usare.
+
+### PPK: correzioni da una base
+
+**Cosa dà.** Un drone senza collegamento RTK (o che l'ha perso) colloca le sue foto a qualche metro. Con il PPK
+(cinematico post-elaborato) RTKLIB ricalcola dove era l'antenna del drone, epoca per epoca, dalle osservazioni dei
+satelliti del drone e da quelle di una base che registrava nello stesso momento; ogni foto prende poi la posizione
+della camera al suo scatto, come con un MRK, con lo stato (fix, float, singola) e l'accuratezza della soluzione. Con
+i fix le foto sono collocate al centimetro, e un rilievo ha bisogno di pochi punti a terra o di nessuno.
+
+**I file.**
+
+| File | Da dove viene |
+| --- | --- |
+| Il RINEX del drone e il suo `Timestamp.MRK` | La cartella del volo sulla scheda del drone: un drone DJI scrive `<volo>_Rinex.obs` accanto a `<volo>_Timestamp.MRK` (spesso con `<volo>_PPKNAV.nav`); un altro ricevitore il suo file di osservazioni (`.obs`, `.##o`) |
+| Il RINEX della base | La tua base (qualsiasi ricevitore che registra in RINEX) su un punto di cui conosci la posizione, oppure il file di una stazione permanente (una rete regionale, EUREF, IGS) che scarichi per le ore del volo. La base deve registrare per tutto il volo, più vicina è meglio è: oltre 20-30 km il fix diventa difficile. L'elenco e lo scaricamento delle stazioni vicine al rilievo arriveranno in una versione successiva |
+| File di navigazione | Le effemeridi trasmesse: `.nav`, `.##n`, `.##g`, `.##p` o i RINEX 3 `*_MN.rnx` - quelli del drone, della base o il file giornaliero di una stazione |
+
+RINEX compressi: un file gzip (`.gz`) si legge così com'è; un file Hatanaka (`.crx`, `.##d`) per ora va prima
+decompresso con CRX2RNX.
+
+**I passi.** *Calcola PPK...* nel pannello (*Strumenti > GNSS > Correzioni PPK...*) chiede il `Timestamp.MRK`, poi
+apre una finestra:
+
+- *Osservazioni del drone*: trovate da sole accanto all'MRK (il `*_Rinex.obs` di un drone DJI, del volo dell'MRK
+  quando la cartella ne ha più di uno; altrimenti l'unico file `*.obs` o `*.##o` che c'è), con le ore che coprono;
+- *Osservazioni della base*: con quello che dice la sua intestazione - il punto, il ricevitore, l'antenna, le ore
+  delle osservazioni, la posizione nell'intestazione e l'altezza dell'antenna;
+- *File di navigazione*: quelli accanto alle osservazioni del drone, poi quelli accanto a quelle della base;
+  *Togli* ne toglie uno, *Aggiungi...* ne aggiunge un altro;
+- *Posizione della base*: dal file della base o scritta (sotto).
+
+*OK* controlla i file e dice nella finestra che cosa manca. Se l'MRK è stato copiato lontano dalle foto la finestra
+chiede la loro cartella, come per un MRK. RTKLIB lavora in background (nella cartella del chunk, `gnss/ppk`, dove
+restano le sue opzioni e la sua soluzione `.pos`); le foto si abbinano agli scatti come per un MRK.
+
+**La posizione della base** decide dove finisce tutto il rilievo: ogni posizione PPK è relativa a lei.
+
+- *Scritta*: la posizione misurata del punto su cui sta la base - latitudine e longitudine in gradi, quota
+  sull'ellissoide in metri (non sul livello del mare), nel sistema di riferimento che vuoi per il rilievo. È la
+  strada per una posizione assoluta accurata.
+- *Dal file della base*: la posizione scritta nella sua intestazione RINEX. Per una stazione permanente di solito è
+  la sua posizione pubblicata; per una base propria è spesso la posizione che il ricevitore ha trovato da solo, che
+  **può essere sbagliata di metri, e tutto il rilievo si sposta con lei**. Il programma lo dice nella finestra, in
+  un messaggio e nel registro dopo il calcolo, nel pannello e in `ppg gnss ppk`: scrivi la posizione misurata e
+  calcola di nuovo.
+
+**L'altezza dell'antenna.** La posizione della base, scritta o dall'intestazione, è quella del punto a terra: il
+programma aggiunge l'altezza dell'antenna scritta nell'intestazione RINEX della base (`ANTENNA: DELTA H/E/N`), come
+la intende il RINEX, e la finestra dice quanto ("il programma aggiunge l'altezza dell'antenna del file della base,
+1,800 m"). Quando l'intestazione non dà l'altezza dell'antenna, o la dà nulla, la posizione dev'essere quella
+dell'antenna stessa.
+
+**Il risultato.** Una foto prende l'antenna della soluzione all'ora del suo scatto (un'epoca, o la retta fra due
+epoche distanti al massimo un secondo) più il braccio di leva del suo scatto nell'MRK; lo stato viene dalla qualità
+di RTKLIB (fix, float - anche dgps - o singola) e l'accuratezza è il doppio delle deviazioni standard della
+soluzione, con i minimi del suo stato. Una foto scattata dove la soluzione non ha una posizione (un buco di oltre un
+secondo, prima dell'inizio, dopo la fine) tiene la posizione che aveva: niente si inventa attraverso un buco, e
+quelle foto e quegli scatti sono elencati nel registro. *Solo le posizioni fix* si decide di nuovo. Il passo del
+pannello dice poi quante foto hanno una posizione PPK e di quale stato, e la base rispetto a cui è stata calcolata
+ciascuna, con l'avviso quando la sua posizione è quella della sua intestazione.
+
+RTKLIB (RTKLIB-EX 2.5.1, licenza BSD) sta nel nucleo nativo 0.5 o più recente, che le applicazioni contengono già;
+senza, il programma dice che cosa installare. In alternativa `PPG_RNX2RTKP` può indicare il programma `rnx2rtkp` di
+RTKLIB-EX 2.5.
+
+```bash
+ppg gnss ppk rilievo.ppg --mrk /scheda/VOLO_Timestamp.MRK --rover /scheda/VOLO_Rinex.obs --base base.obs
+#   --nav FILE (ripetibile; di default quelli accanto alle osservazioni del drone, altrimenti a quelle della base)
+#   --base-position LAT,LON,H (gradi, gradi, metri sull'ellissoide, il punto per i decimali;
+#                              di default la posizione dell'intestazione RINEX della base, con il suo avviso)
+#   --photos CARTELLA, --chunk NOME
+```
+
+Stampa le foto per stato, la base usata e l'altezza della sua antenna, gli avvisi (sempre quello di una base nella
+posizione della sua intestazione), le foto e gli scatti rimasti senza posizione PPK; salva il progetto, e si ferma
+con un errore, senza cambiare nulla, quando i file non si possono usare.
 
 ## Maschere
 
