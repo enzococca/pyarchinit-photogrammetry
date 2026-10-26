@@ -1,0 +1,79 @@
+# Notarization of a macOS dmg signed on the Mac of the release.
+#
+# packaging/mac_release.sh signs the application with the Developer ID certificate, which lives
+# only in the keychain of that Mac, and has Apple notarize the dmg with a notarytool profile of the
+# same keychain; that profile cannot be read while the Mac is locked. This workflow does the
+# notarization instead: the signed dmg is put in a draft release (visible only to the maintainers),
+# Apple notarizes it here, the ticket is stapled, the dmg goes in the release in place of the
+# unsigned or missing one (both names: with and without the version) and the draft is deleted.
+#
+#   gh workflow run notarize.yml -f tag=v1.5.5 -f draft=<id of the draft release>
+#
+# Secrets of the repository (set by the owner of the Apple account): NOTARY_APPLE_ID (the Apple ID
+# of the developer team 668967U5LQ) and NOTARY_PASSWORD (an app-specific password of that Apple ID).
+name: notarize
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release to complete (vX.Y.Z)"
+        required: true
+      draft:
+        description: "Id of the draft release holding the signed dmg"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  notarize:
+    runs-on: macos-15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+      DRAFT: ${{ inputs.draft }}
+      TEAM: 668967U5LQ
+    steps:
+      - name: Signed dmg from the draft
+        run: |
+          mkdir -p work && cd work
+          [ "$(gh api "repos/$GITHUB_REPOSITORY/releases/$DRAFT" --jq .draft)" = true ] \
+            || { echo "::error::release $DRAFT is not a draft"; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/releases/$DRAFT" --jq '.assets[] | select(.name | endswith(".dmg")) | "\(.id) \(.name)"' > assets.txt
+          [ "$(wc -l < assets.txt)" -eq 1 ] || { echo "::error::the draft must hold exactly one dmg"; cat assets.txt; exit 1; }
+          read -r id name < assets.txt
+          gh api -H "Accept: application/octet-stream" "repos/$GITHUB_REPOSITORY/releases/assets/$id" > "$name"
+          ls -l "$name"
+          codesign --verify --strict "$name"
+          codesign -dv --verbose=2 "$name" 2>&1 | grep -qx "TeamIdentifier=$TEAM" \
+            || { echo "::error::$name is not signed by the team $TEAM"; exit 1; }
+          echo "DMG=$name" >> "$GITHUB_ENV"
+      - name: Notarization and stapling
+        env:
+          APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: |
+          [ -n "$APPLE_ID" ] && [ -n "$PASSWORD" ] \
+            || { echo "::error::the secrets NOTARY_APPLE_ID and NOTARY_PASSWORD are not set"; exit 1; }
+          cd work
+          xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" --password "$PASSWORD" --team-id "$TEAM" \
+            --wait --timeout 2h --output-format json > submission.json || true
+          cat submission.json
+          status=$(python3 -c 'import json; print(json.load(open("submission.json")).get("status", ""))' 2>/dev/null || true)
+          if [ "$status" != Accepted ]; then
+            id=$(python3 -c 'import json; print(json.load(open("submission.json")).get("id", ""))' 2>/dev/null || true)
+            [ -n "$id" ] && xcrun notarytool log "$id" --apple-id "$APPLE_ID" --password "$PASSWORD" --team-id "$TEAM" || true
+            echo "::error::notarization: ${status:-failed}"; exit 1
+          fi
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          spctl -a -t open --context context:primary-signature -v "$DMG"
+      - name: Into the release
+        run: |
+          cd work
+          plain="PyArchInit-Photogrammetry-macos-${DMG##*-macos-}"
+          cp "$DMG" "$plain"
+          gh release upload "$TAG" "$DMG" "$plain" -R "$GITHUB_REPOSITORY" --clobber
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$DRAFT"
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name | endswith(".dmg")) | "\(.name) \(.size)"'
