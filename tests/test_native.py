@@ -665,3 +665,79 @@ def test_ppk_solve_in_threads(tmp_path):
     assert [code for code, _ in results] == [0] * 6
     first = outs[0].read_bytes()
     assert len(_pos_rows(outs[0])) == 120 and all(out.read_bytes() == first for out in outs[1:])
+
+
+def _decimal_comma_locale() -> str | None:
+    """The first locale of those the program's users have (Italian, German, French) that the system
+    offers and that writes numbers with a decimal comma, or None."""
+    import locale
+
+    previous = locale.setlocale(locale.LC_NUMERIC)
+    try:
+        for name in ("it_IT.UTF-8", "it_IT", "de_DE.UTF-8", "fr_FR.UTF-8"):
+            try:
+                locale.setlocale(locale.LC_NUMERIC, name)
+            except locale.Error:
+                continue
+            if locale.localeconv()["decimal_point"] != ".":
+                return name
+        return None
+    finally:
+        locale.setlocale(locale.LC_NUMERIC, previous)
+
+
+def test_ppk_numbers_use_a_point_whatever_the_locale(tmp_path):
+    """RTKLIB reads its options and the RINEX files, and writes the solution, with the C library's
+    locale-dependent functions (atof, sscanf, printf). Once a library has called setlocale on an
+    Italian system the process has a decimal comma, and the run computed nothing: code 0, no rows.
+    The core runs RTKLIB in the C numeric locale of the calling thread whatever the locale of the
+    process, and puts the thread's own back: the static run under a decimal-comma locale, from the
+    calling thread and from another one, writes the very bytes of the run in the C locale, and the
+    locale is as it was afterwards."""
+    import locale
+    from concurrent.futures import ThreadPoolExecutor
+
+    if _native.kernel("ppk_solve") is None:
+        pytest.skip("native core without RTKLIB (older than 0.5, API 8)")
+    name = _decimal_comma_locale()
+    if name is None:
+        pytest.skip("no system locale with a decimal comma (it_IT, de_DE, fr_FR)")
+    conf = tmp_path / "static.conf"
+    conf.write_text(PPK_STATIC)
+    files = [str(RTKLIB_DATA / n) for n in ("30400920.05o", "07590920.05o", "07590920.05n")]
+
+    def solve(out):
+        return ppg_core.ppk_solve(str(conf), files, str(out))
+
+    def solve_in_a_thread(out):
+        """The result, and the decimal point of this thread before and after the run."""
+        before = locale.localeconv()["decimal_point"]
+        result = solve(out)
+        return result, before, locale.localeconv()["decimal_point"]
+
+    def epochs(pos: bytes) -> int:
+        return sum(1 for line in pos.splitlines() if line.strip() and not line.startswith(b"%"))
+
+    previous = locale.setlocale(locale.LC_NUMERIC)
+    try:
+        locale.setlocale(locale.LC_NUMERIC, "C")
+        in_c = solve(tmp_path / "c.pos")
+        locale.setlocale(locale.LC_NUMERIC, name)
+        in_effect, comma = locale.setlocale(locale.LC_NUMERIC), locale.localeconv()["decimal_point"]
+        assert comma != "."
+        here = solve(tmp_path / "here.pos")
+        # the run changed neither the locale of the process nor the one of this thread
+        assert locale.setlocale(locale.LC_NUMERIC) == in_effect
+        assert locale.localeconv()["decimal_point"] == comma
+        with ThreadPoolExecutor(1) as pool:
+            there, before, after = pool.submit(solve_in_a_thread, tmp_path / "there.pos").result()
+        assert before == after == comma
+    finally:
+        locale.setlocale(locale.LC_NUMERIC, previous)
+    assert in_c[0] == 0, in_c[1]
+    expected = (tmp_path / "c.pos").read_bytes()
+    assert epochs(expected) == 120
+    for label, file, (code, message) in (("calling thread", "here.pos", here), ("other thread", "there.pos", there)):
+        pos = (tmp_path / file).read_bytes()
+        assert code == 0, (label, message)
+        assert pos == expected, f"{label}, under {name}: {epochs(pos)} epochs, 120 in the C locale ({message})"

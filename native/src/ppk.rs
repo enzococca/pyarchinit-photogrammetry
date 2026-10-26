@@ -26,9 +26,12 @@ fn c_text(text: &str, what: &str) -> PyResult<CString> {
 /// the input files (rover observations first, then the base's observations, then navigation
 /// files) and the solution file. Returns RTKLIB's code (0 done, 1 aborted, -1 a file named by
 /// the options could not be read; -2 the options file could not be read, -3 bad arguments, -4 a
-/// compressed input, which RTKLIB would decompress through a shell command) and its last
-/// message, the last error it reported if any. RTKLIB returns 0 also when it computed
-/// nothing ("error : no obs data"): the caller reads the solution file. Runs without the GIL,
+/// compressed input, which RTKLIB would decompress through a shell command; -5 the calling thread
+/// could not be put in the "C" locale for numbers, nothing ran) and its last message, the last
+/// error it reported if any. RTKLIB returns 0 also when it computed nothing ("error : no obs
+/// data"): the caller reads the solution file. RTKLIB reads and writes its numbers with the C
+/// library's locale-dependent functions: it runs in the "C" numeric locale of the calling thread,
+/// whatever the locale of the process, and the thread's own is put back. Runs without the GIL,
 /// one run at a time in the process.
 #[pyfunction]
 pub fn ppk_solve(py: Python<'_>, conf: &str, infiles: Vec<String>, outfile: &str) -> PyResult<(i32, String)> {

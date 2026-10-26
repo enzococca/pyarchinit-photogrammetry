@@ -198,9 +198,9 @@ def ppk_solve(conf, infiles, outfile) -> tuple[int, str]:
     navigation files; the solution written to ``outfile``. Returns RTKLIB's code and its last
     message (the last error it reported, if any). Codes of the core: 0 done, 1 aborted, -1 a
     file named in the options could not be read, -2 the options file could not be read, -3 bad
-    arguments, -4 a compressed input; an external rnx2rtkp: its exit status, 0 or 1 for any
-    failure. RTKLIB returns 0 also when it computed nothing ("error : no obs data"): read the
-    solution it wrote.
+    arguments, -4 a compressed input, -5 the thread could not be put in the C locale for numbers
+    (nothing ran); an external rnx2rtkp: its exit status, 0 or 1 for any failure. RTKLIB returns
+    0 also when it computed nothing ("error : no obs data"): read the solution it wrote.
 
     Compressed inputs (:func:`compressed_name`: gzip, zip, tar, Hatanaka) raise ValueError
     before anything runs: decompress them first. With the native core (API 8) RTKLIB runs
