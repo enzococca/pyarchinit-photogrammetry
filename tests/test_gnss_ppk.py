@@ -15,12 +15,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from pyproj import Transformer
+from pyproj import Geod, Transformer
 
 import pyarchinit_photogrammetry as ppg
 from pyarchinit_photogrammetry import _native
 from pyarchinit_photogrammetry.gnss import apply as gnss_apply
-from pyarchinit_photogrammetry.gnss import dji, ppk, rinex
+from pyarchinit_photogrammetry.gnss import dji, positions, ppk, rinex
 from test_gnss import _jpeg, _snapshot  # synthetic photos with the time of their camera, references of a chunk
 
 DATA = Path(__file__).parent / "data" / "rtklib"
@@ -37,7 +37,8 @@ def _line(content: str, label: str) -> str:
 
 
 def _write(path: Path, lines: list[str]) -> Path:
-    path.write_text("\n".join(lines) + "\n", encoding="ascii")
+    """``lines`` with "\\n" line ends on every system (not the "\\r\\n" of a text file on Windows)."""
+    path.write_text("\n".join(lines) + "\n", encoding="ascii", newline="\n")
     return path
 
 
@@ -844,14 +845,14 @@ def test_read_pos_reads_the_columns_by_their_names(tmp_path):
     lines = [line + (",   0.10000,  -0.20000,   0.00000" + ",  0.01000" * 6 if line[0].isdigit() else "")
              for line in text.split("\r\n") if line]
     path = tmp_path / "rover.pos"
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", newline="\n")
     _check_rows(ppk.read_pos(path))
 
 
 def test_read_pos_of_a_file_that_does_not_say_its_heights(tmp_path):
     # RTKLIB leaves out the legend with out-outhead=off: the heights are taken as RTKLIB's default, said in a warning
     path = tmp_path / "rover.pos"
-    path.write_text(_pos_text(legend=None))
+    path.write_text(_pos_text(legend=None), newline="")
     solution = ppk.read_pos(path)
     _check_rows(solution)
     assert len(solution.warnings) == 1 and "ellipsoidal" in solution.warnings[0]
@@ -881,6 +882,19 @@ def test_read_pos_refuses_what_is_not_a_solution_in_ellipsoidal_heights(tmp_path
     path = tmp_path / "rover.pos"
     path.write_text(text, newline="")
     with pytest.raises(ValueError, match=match):
+        ppk.read_pos(path)
+
+
+@pytest.mark.parametrize("field, written", [("  0.0100", "     nan"), ("   75.6841", "      -nan"),
+                                            ("  0.0300", "     inf"), ("518400.000", "nan")],
+                         ids=["sdn nan", "height -nan", "sdu inf", "time nan"])
+def test_read_pos_refuses_a_row_with_a_number_that_is_not_finite(tmp_path, field, written):
+    # C's printf writes a number that is not one as nan, -nan or inf: never the position or accuracy of a camera
+    text = _pos_text()
+    assert text.count(field) == 1  # in the row at 00:00:00, the 7th line of the file
+    path = tmp_path / "rover.pos"
+    path.write_text(text.replace(field, written), newline="")
+    with pytest.raises(ValueError, match=r"rover\.pos, line 7: a number that is not finite"):
         ppk.read_pos(path)
 
 
@@ -1090,7 +1104,7 @@ def test_solve_when_rtklib_computes_nothing_or_fails(tmp_path, fake_rtklib, monk
         ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], folder=work)
     # a solution file without positions
     empty = tmp_path / "empty.pos"
-    empty.write_text(_pos_text(rows=[]))
+    empty.write_text(_pos_text(rows=[]), newline="")
     monkeypatch.setenv("PPG_FAKE_POS", str(empty))
     with pytest.raises(ValueError, match="nothing was computed: error : no obs data"):
         ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], folder=work)
@@ -1257,7 +1271,8 @@ def _raised_base(folder: Path, height: float) -> Path:
     lines = PPK_BASE.read_text().splitlines(keepends=True)
     delta = _line(f"{height:14.4f}        0.0000        0.0000", "ANTENNA: DELTA H/E/N") + "\n"
     base = folder / "07590920.05o"
-    base.write_text("".join(delta if line.rstrip().endswith("ANTENNA: DELTA H/E/N") else line for line in lines))
+    base.write_text("".join(delta if line.rstrip().endswith("ANTENNA: DELTA H/E/N") else line for line in lines),
+                    newline="\n")
     assert rinex.header(base).antenna_delta_hen == (height, 0.0, 0.0)
     return base
 
@@ -1340,45 +1355,69 @@ def _solution(times, llh, q=None, sd=None) -> ppk.Solution:
 
 
 def test_at_takes_an_epoch_or_the_line_between_two_epochs_a_second_apart():
-    # 5 Hz epochs, as a DJI drone records them, then two epochs a second apart
-    times = START_2005 + np.array([0.0, 0.2, 0.4, 1.4])
-    llh = np.array([[35.1320660, 139.6243010, 75.690], [35.1320662, 139.6243015, 75.700],
-                    [35.1320670, 139.6243030, 75.740], [35.1320690, 139.6243070, 75.800]])
-    asked = START_2005 + np.array([0.2, 0.2008, 1.4, 0.0, 0.1, 0.9])
-    position, q, sd, ok = ppk.at(_solution(times, llh), asked)
-    assert position.shape == sd.shape == (6, 3) and q.shape == ok.shape == (6,)
-    assert ok.all() and q.tolist() == [1] * 6
-    # an epoch, or a time within the millisecond the times of a solution are written to: the epoch as it is
-    assert np.array_equal(position[:4], llh[[1, 1, 3, 0]])
-    # half-way between two epochs 0.2 s apart, and between two epochs a second apart
-    assert position[4:] == pytest.approx(np.array([(llh[0] + llh[1]) / 2, (llh[2] + llh[3]) / 2]), abs=1e-12)
-    assert sd == pytest.approx(np.array([[0.003, 0.004, 0.009]] * 6))
+    # a drone flying east at 15 m/s recorded at 5 Hz (3 m between epochs), then two epochs a second apart
+    east = math.degrees(15.0 / (6378137.0 * math.cos(math.radians(35.132))))  # degrees of longitude in a second
+    seconds = np.array([0.0, 0.2, 0.4, 1.4])
+    llh = np.c_[np.full(4, 35.132066), 139.624301 + east * seconds, 75.69 + 0.05 * seconds]
+    asked = START_2005 + np.array([0.2, 1.4, 0.0, 0.4 + 3e-7, 0.1, 0.9, 0.2009])
+    position, q, sd, ok = ppk.at(_solution(START_2005 + seconds, llh), asked)
+    assert position.shape == sd.shape == (7, 3) and q.shape == ok.shape == (7,)
+    assert ok.all() and q.tolist() == [1] * 7
+    # an epoch, also with the float noise of a time of 8e8 s: the epoch as it is
+    assert np.array_equal(position[:4], llh[[1, 3, 0, 2]])
+    # half-way between two epochs 0.2 s apart, between two epochs a second apart, and 0.9 ms after an epoch: on the
+    # line between the epochs around it, not on the epoch - 13.5 mm further east at 15 m/s
+    expected = np.array([(llh[0] + llh[1]) / 2, (llh[2] + llh[3]) / 2, llh[1] + 0.0045 * (llh[2] - llh[1])])
+    assert position[4:, :2] == pytest.approx(expected[:, :2], abs=1e-10)  # degrees: 1e-10 is 0.01 mm
+    assert position[4:, 2] == pytest.approx(expected[:, 2], abs=1e-7)  # metres; a time of 8e8 s is a float to 1e-7 s
+    assert _enu(position[6], llh[1])[0] == pytest.approx([0.0135, 0.0, 0.000045], abs=1e-5)
+    assert sd == pytest.approx(np.array([[0.003, 0.004, 0.009]] * 7))
 
 
 def test_at_leaves_out_the_gaps_and_the_times_outside_the_solution():
     times = START_2005 + np.array([0.0, 1.0, 2.0, 5.0, 6.0005, 7.01])
     llh = np.array([[35.0, 139.0, 70.0 + i] for i in range(6)])
-    asked = START_2005 + np.array([3.5, -0.5, 7.5, 6.5, 7.0125, -0.0009, 7.0109, 0.5, 5.5])
+    asked = START_2005 + np.array([3.5, -0.5, 7.5, 6.5, 7.0125, -0.0009, 7.0109, 2.0008, 4.9992, 0.5, 5.5, 1.9995])
     position, q, sd, ok = ppk.at(_solution(times, llh), asked)
     # in a gap of 3 s, before the first epoch, after the last, between two epochs 1.0095 s apart, 2.5 ms after the
     # last epoch: no position, not even the one of the nearest epoch
-    assert ok.tolist() == [False] * 5 + [True] * 4
+    assert ok.tolist() == [False] * 5 + [True] * 7
     assert np.isnan(position[:5]).all() and np.isnan(sd[:5]).all() and q[:5].tolist() == [0] * 5
-    # within a millisecond of the first and of the last epoch: those epochs
-    assert position[5].tolist() == llh[0].tolist() and position[6].tolist() == llh[5].tolist()
-    # exactly a second apart, and 1.0005 s apart (the times of a solution are written to the millisecond)
-    assert position[7] == pytest.approx([35.0, 139.0, 70.5], abs=1e-12)
-    assert position[8] == pytest.approx([35.0, 139.0, 73.0 + 0.5 / 1.0005], abs=1e-6)  # times of 8e8 s: 1e-7 s
+    # within a millisecond of the first and of the last epoch, and of the epochs on the two sides of the gap: those
+    # epochs, as no pair of epochs a second apart is around those times
+    assert position[5:9].tolist() == llh[[0, 5, 2, 3]].tolist()
+    # exactly a second apart, 1.0005 s apart (the times of a solution are written to the millisecond), and half a
+    # millisecond before an epoch with a pair of epochs a second apart around it: on the line between them
+    assert position[9] == pytest.approx([35.0, 139.0, 70.5], abs=1e-12)
+    assert position[10] == pytest.approx([35.0, 139.0, 73.0 + 0.5 / 1.0005], abs=1e-6)  # times of 8e8 s: 1e-7 s
+    assert position[11] == pytest.approx([35.0, 139.0, 71.9995], abs=1e-6)
 
 
 def test_at_takes_the_worse_quality_and_the_larger_deviations_of_the_two_epochs():
-    times = START_2005 + np.array([0.0, 0.2, 0.4, 0.6])
-    solution = _solution(times, [[35.0, 139.0, 70.0]] * 4, q=[1, 2, 5, 1],
-                         sd=[[0.01, 0.05, 0.02], [0.03, 0.01, 0.02], [0.30, 0.40, 0.90], [0.02, 0.02, 0.04]])
-    _position, q, sd, ok = ppk.at(solution, START_2005 + np.array([0.1, 0.3, 0.5, 0.2]))
-    assert ok.all() and q.tolist() == [2, 5, 5, 2]
+    times = START_2005 + np.array([0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2])
+    solution = _solution(times, [[35.0, 139.0, 70.0]] * 7, q=[1, 2, 5, 1, 3, 4, 6],
+                         sd=[[0.01, 0.05, 0.02], [0.03, 0.01, 0.02], [0.30, 0.40, 0.90], [0.02, 0.02, 0.04],
+                             [0.50, 0.50, 0.90], [0.20, 0.30, 0.40], [0.60, 0.10, 0.20]])
+    _position, q, sd, ok = ppk.at(solution, START_2005 + np.array([0.1, 0.3, 0.5, 0.2, 0.9, 1.1]))
+    # the worse is the worse status, not the larger Q: sbas (3) counts as single, dgps (4) as float, ppp (6) single
+    assert ok.all() and q.tolist() == [2, 5, 5, 2, 3, 6]
+    assert [ppk.status(v) for v in q] == ["float", "single", "single", "float", "single", "single"]
     assert sd == pytest.approx(np.array([[0.03, 0.05, 0.02], [0.30, 0.40, 0.90], [0.30, 0.40, 0.90],
-                                         [0.03, 0.01, 0.02]]))
+                                         [0.03, 0.01, 0.02], [0.50, 0.50, 0.90], [0.60, 0.30, 0.40]]))
+
+
+def test_at_gives_no_position_from_an_epoch_with_a_number_that_is_not_finite():
+    times = START_2005 + np.array([0.0, 0.2, 0.4, 0.6, 0.8])
+    llh = np.array([[35.0, 139.0, 70.0 + i] for i in range(5)])
+    llh[2, 0] = np.nan  # a latitude
+    sd = np.array([[0.003, 0.004, 0.009]] * 5)
+    sd[4, 2] = np.inf  # a standard deviation
+    position, q, deviations, ok = ppk.at(_solution(times, llh, sd=sd),
+                                         START_2005 + np.array([0.4, 0.3, 0.5, 0.8, 0.7, 0.1, 0.6]))
+    # on those epochs, or between them and their neighbours: no position; elsewhere as usual
+    assert ok.tolist() == [False] * 5 + [True] * 2
+    assert np.isnan(position[:5]).all() and np.isnan(deviations[:5]).all() and q[:5].tolist() == [0] * 5
+    assert position[5] == pytest.approx([35.0, 139.0, 70.5], abs=1e-6) and position[6].tolist() == llh[3].tolist()
 
 
 def test_at_goes_across_the_antimeridian_the_short_way():
@@ -1389,6 +1428,19 @@ def test_at_goes_across_the_antimeridian_the_short_way():
     # eastwards over 180 degrees, 2e-6 degrees of longitude in a second (not 360), then back westwards
     assert position[:, 1] == pytest.approx([179.9999995, -179.9999995, -179.9999995, 179.9999995], abs=1e-9)
     assert position[:, 0] == pytest.approx([-16.5] * 4) and position[:, 2] == pytest.approx([10.0] * 4)
+
+
+def test_the_camera_below_an_antenna_by_the_antimeridian():
+    # 330 mm east of an antenna 0.01 m west of the 180th meridian, 330 mm west of one 0.01 m east of it: the camera on
+    # the other side, its longitude within [-180, 180), where PROJ puts it (lever_arm: (lat, lon, h) in, (lon, lat, h)
+    # out)
+    for lon, arm in ((179.9999999, (0, 330, 150)), (-179.9999999, (0, -330, 150))):
+        camera = dji.lever_arm(-16.5, lon, 10.0, arm)
+        assert -180.0 <= camera[0] < 180.0 and math.copysign(1.0, camera[0]) == -math.copysign(1.0, lon)
+        assert camera[2] == pytest.approx(9.85, abs=1e-9)
+        assert np.linalg.norm(_ecef(*camera) - _camera_ecef((-16.5, lon, 10.0), arm)) < 1e-3
+    # elsewhere the longitude is as it was
+    assert dji.lever_arm(41.134, 14.266, 94.35, (0, 0, 150)) == (14.266, 41.134, pytest.approx(94.2))
 
 
 def _gps_shot(when: datetime) -> dji.MrkShot:
@@ -1407,24 +1459,27 @@ def test_the_utc_of_a_shot_takes_the_leap_seconds_of_its_day():
     assert _gps_shot(datetime(2017, 1, 1, 0, 0, 18)).utc == datetime(2017, 1, 1, tzinfo=utc)
 
 
-def _mrk_line(index: int, gps: float, arm: tuple[int, int, int]) -> str:
+MRK_LAT = 35.13208  # the drone's own single position in the MRK lines: 2.5 m from the PPK one
+
+
+def _mrk_line(index: int, gps: float, arm: tuple[int, int, int], lat: float = MRK_LAT) -> str:
     """A line of a Timestamp.MRK: shot ``index`` at ``gps`` seconds of GPS time with the lever arm ``arm`` (north, east,
-    down in mm) and the antenna where the drone's own single position put it, metres from the PPK one."""
+    down in mm) and the antenna at latitude ``lat``, where the drone's own single position put it."""
     week, seconds = divmod(gps, WEEK)
     north, east, down = arm
-    return (f"{index}\t{seconds:.6f}\t[{int(week)}]\t{north:6d},N\t{east:6d},E\t{down:6d},V\t35.13208000,Lat\t"
+    return (f"{index}\t{seconds:.6f}\t[{int(week)}]\t{north:6d},N\t{east:6d},E\t{down:6d},V\t{lat:.8f},Lat\t"
             "139.62428000,Lon\t74.100,Ellh\t1.2, 1.4, 2.9\t16,Q\n")
 
 
-def _ppk_flight(folder: Path, shots) -> Path:
+def _ppk_flight(folder: Path, shots, lat: float = MRK_LAT) -> Path:
     """A DJI flight on the day of the RTKLIB sample data: for each ``(index, gps, arm)`` of ``shots`` a photo
     DJI_<index>.JPG with the time its camera wrote (in Japan, UTC+9: GPS time less the 13 leap seconds of 2005, plus
-    9 hours, to the second) and its line in the Timestamp.MRK beside the photos."""
+    9 hours, to the second) and its line in the Timestamp.MRK beside the photos, the antenna at latitude ``lat``."""
     folder.mkdir(parents=True)
     for index, gps, _arm in shots:
         _jpeg(folder / f"DJI_{index:04d}.JPG", None, when=datetime(1980, 1, 6) + timedelta(seconds=gps - LEAP_2005,
                                                                                             hours=9))
-    (folder / "Timestamp.MRK").write_text("".join(_mrk_line(*shot) for shot in shots))
+    (folder / "Timestamp.MRK").write_text("".join(_mrk_line(*shot, lat=lat) for shot in shots), newline="\n")
     return folder
 
 
@@ -1544,6 +1599,51 @@ def test_ppk_of_an_mrk_outside_the_solution_changes_nothing(tmp_path):
     assert "Timestamp.MRK" in text and "drone.pos" in text
     assert "2005-04-03 00:00:02" in text and "2005-04-02 00:00:00" in text and "2005-04-02 00:59:30" in text
     assert _snapshot(ch) == before
+    # a solution without positions (a .pos file never gives one): the same refusal
+    empty = _solution([], np.zeros((0, 3)), sd=np.zeros((0, 3)))
+    with pytest.raises(ValueError, match="solution synthetic.pos has no positions: they are not of the same flight"):
+        gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", empty)
+    assert _snapshot(ch) == before
+
+
+def test_ppk_warns_when_the_solution_is_far_from_the_drones_own_positions(tmp_path):
+    # the observations of the base taken for the rover's, or those of another receiver over the same hours: the
+    # solution puts the antenna far from where the drone's own receiver put it in the MRK, a warning says how far
+    pos = tmp_path / "drone.pos"
+    pos.write_text(_pos_text(rows=_drone_rows()), newline="")
+    solution = ppk.read_pos(pos)
+    shots = [(i, START_2005 + 30.0 * i, (0, 0, 150)) for i in (1, 2, 3)]
+    geod = Geod(ellps="WGS84")
+    for name, lat in (("near", MRK_LAT), ("far", MRK_LAT + 0.001)):  # 2.5 m, then 113 m from the solution
+        folder = _ppk_flight(tmp_path / name, shots, lat=lat)
+        ch = ppg.Document().add_chunk()
+        ch.add_photos([folder])
+        result = gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution)
+        assert result["matched"] == 3  # the positions are given all the same
+        apart = np.median([geod.inv(139.62428, lat, cam.meta["gnss"]["antenna"][0], cam.meta["gnss"]["antenna"][1])[2]
+                           for cam in ch.cameras])
+        if name == "near":
+            assert apart < 3.0 and result["warnings"] == []
+        else:
+            (warning,) = result["warnings"]
+            said = re.match(r"the solution drone\.pos puts the antenna (\d+) m \(median\) from where the drone's own "
+                            r"receiver put it in Timestamp\.MRK", warning)
+            assert said and abs(int(said.group(1)) - apart) <= 2.0 and "base" in warning, warning
+
+
+def test_one_table_of_rtklib_states_for_ppk_and_positions_files(tmp_path):
+    # RTKLIB's quality Q: 1 fix, 2 float, 4 dgps counted as float, any other single - for a PPK solution and for the Q
+    # column of a positions file alike, as numbers and as RTKLIB's names of them
+    expected = {0: "single", 1: "fix", 2: "float", 3: "single", 4: "float", 5: "single", 6: "single", 7: "single"}
+    assert {q: ppk.status(q) for q in expected} == expected
+    path = tmp_path / "positions.csv"
+    path.write_text("label,x,y,z,q\n" + "".join(f"{q}.jpg,1,2,3,{q}\n" for q in range(1, 7))
+                    + "".join(f"{name}.jpg,1,2,3,{name.upper()}\n" for name in ppk.QUALITY.values()), newline="\n")
+    rows = positions.read_positions(path)
+    assert [row["status"] for row in rows] == [expected[q] for q in range(1, 7)] + [expected[q] for q in ppk.QUALITY]
+    # 0 in a positions file is DJI's RtkFlag 0, no RTK at all, as before
+    path.write_text("label,x,y,z,q\na.jpg,1,2,3,0\n", newline="\n")
+    assert positions.read_positions(path)[0]["status"] == "none"
 
 
 @needs_rtklib

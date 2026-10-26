@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -21,6 +22,8 @@ CLOCK_TOLERANCE_S = 3.0  # a photo belongs to its shot when its time is this clo
 ZONE_STEP_S = 900.0  # the camera keeps the local time: whole quarter hours from UTC ...
 ZONE_TOLERANCE_S = 120.0  # ... give or take the drift of its clock ...
 ZONE_MAX_S = 14 * 3600.0  # ... and never more than 14 hours
+# a PPK solution that puts the antenna this far (median, m) from the drone's own positions in the MRK: a warning
+FAR_FROM_MRK_M = 50.0
 
 
 def accuracy(status: str | None, std: list[float] | None) -> list[float]:
@@ -87,21 +90,24 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
     photo whose shot falls where the solution has no position (more than a second between two of its epochs, before
     its first or after its last) keeps the position it had and is among the unmatched, its shot among the shots
     unmatched. A ``ValueError`` and nothing changed when no shot of the MRK falls within the time of the solution (the
-    MRK and the solution of different flights).
+    MRK and the solution of different flights), or when the solution has no positions.
 
     Returns what :func:`apply_mrk` returns with ``"warnings"``: those of the solution (the base at the position of its
-    RINEX header can be metres off) and how many photos fell where the solution has no position."""
+    RINEX header can be metres off), how many photos fell where the solution has no position, and whether the solution
+    puts the antenna more than :data:`FAR_FROM_MRK_M` (median) from where the drone's own receiver put it in the MRK
+    (the observations of the base taken for the rover's, those of another receiver)."""
     pairing = _pair_shots(chunk, mrk_path, photos_folder)
     name = Path(solution.path).name
-    start, end = solution.times[0], solution.times[-1]
+    times = np.asarray(solution.times, dtype=np.float64)
     shot_times = np.array([shot.gps_time for shot in pairing.shots])
-    if not np.any((shot_times >= start - ppk.TIME_RESOLUTION_S) & (shot_times <= end + ppk.TIME_RESOLUTION_S)):
-        shots = (f"its shots were taken from {_gps_text(shot_times.min())} to {_gps_text(shot_times.max())} GPS time"
-                 if len(shot_times) else "it has no shots")
-        raise ValueError(f"{pairing.mrk}: {shots}, and the solution {name} has positions from {_gps_text(start)} to "
-                         f"{_gps_text(end)}: they are not of the same flight")
+    if not len(times) or not np.any((shot_times >= times[0] - ppk.TIME_RESOLUTION_S)
+                                    & (shot_times <= times[-1] + ppk.TIME_RESOLUTION_S)):
+        shots = (f"its shots were taken from {ppk.span_text(shot_times.min(), shot_times.max())}" if len(shot_times)
+                 else "it has no shots")
+        covered = f"has positions from {ppk.span_text(times[0], times[-1])}" if len(times) else "has no positions"
+        raise ValueError(f"{pairing.mrk}: {shots}, and the solution {name} {covered}: they are not of the same flight")
     llh, q, sd, ok = ppk.at(solution, [shot.gps_time for _f, shot, _cam in pairing.kept])
-    positions = []  # all of them first: nothing changes when something goes wrong
+    positions, apart = [], []  # all of them first: nothing changes when something goes wrong
     for (f, shot, cam), antenna, quality, deviations, found in zip(pairing.kept, llh, q, sd, ok):
         if not found:
             continue
@@ -111,6 +117,7 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
                  "base": copy.deepcopy(solution.base), "rover": solution.rover, "solution": name}
         positions.append((f, shot, cam, list(dji.lever_arm(lat, lon, h, shot.offset_ned_mm)),
                           accuracy(state, [float(v) for v in deviations]), state, extra))
+        apart.append(_horizontal_m(shot.lat, shot.lon, lat, lon))
     placed = []
     for f, shot, cam, location, acc, state, extra in positions:
         set_camera_position(cam, location, "EPSG:4979", acc, "ppk", status=state, height="ellipsoidal", extra=extra)
@@ -123,6 +130,10 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
         warnings.append(f"{gaps} {photos} taken where the solution {name} has no position (a gap of more than "
                         f"{ppk.MAX_GAP_S:g} s between two of its epochs, or before the first or after the last): "
                         f"{keep}")
+    if apart and float(np.median(apart)) > FAR_FROM_MRK_M:
+        warnings.append(f"the solution {name} puts the antenna {float(np.median(apart)):.0f} m (median) from where the "
+                        f"drone's own receiver put it in {pairing.mrk}: the rover's observations may be those of the "
+                        "base, or of another receiver")
     return {**_result(pairing, placed), "warnings": warnings}
 
 
@@ -182,9 +193,11 @@ def _result(pairing: _Pairing, placed: list[tuple[Path, dji.MrkShot, str]]) -> d
             "shots_unmatched": [s.index for s in pairing.shots if id(s) not in used]}
 
 
-def _gps_text(seconds: float) -> str:
-    """A time in seconds of GPS time since the GPS epoch, written as a date and a time (of GPS time)."""
-    return f"{dji.GPS_EPOCH + timedelta(seconds=float(seconds)):%Y-%m-%d %H:%M:%S}"
+def _horizontal_m(lat0: float, lon0: float, lat1: float, lon1: float) -> float:
+    """The horizontal distance in metres between two points (degrees), on a sphere as large as the earth: plenty to
+    tell metres from hundreds of metres."""
+    east = math.radians(float(dji.wrap_longitude(lon1 - lon0))) * math.cos(math.radians(lat0))
+    return 6371000.0 * math.hypot(math.radians(lat1 - lat0), east)
 
 
 def _photo_time(cam: Camera) -> datetime | None:

@@ -9,7 +9,7 @@ from pathlib import Path, PurePath
 
 from ..core import crs as crs_mod
 from ..core.chunk import Chunk
-from . import dji
+from . import dji, ppk
 from .apply import FACTOR, accuracy, set_camera_position
 
 SOURCE = "positions_file"
@@ -36,11 +36,11 @@ FIELDS = {
 _FIELD_OF = {name: field for field, names in FIELDS.items() for name in names}
 _ANGLES = ("yaw", "pitch", "roll")
 
-# RTKLIB writes its quality flag Q as 1 fixed, 2 float, 3 SBAS, 4 DGPS, 5 single; DJI writes its RtkFlag
-_STATUS_NUMBERS = {**dji.STATUS, 1: "fix", 2: "float", 3: "single", 4: "single", 5: "single"}
-_STATUS_WORDS = {"fix": "fix", "fixed": "fix", "rtkfix": "fix", "rtkfixed": "fix", "float": "float",
-                 "rtkfloat": "float", "single": "single", "autonomous": "single", "standalone": "single",
-                 "dgps": "single", "sbas": "single", "none": "none", "nofix": "none"}
+# a number in the status column is DJI's RtkFlag (50, 34, 16, 0) or RTKLIB's quality Q (ppk.status); the words are
+# RTKLIB's names of its Q, as ppk.status counts them (dgps float, sbas and ppp single), and the words of others
+_STATUS_WORDS = {**{name: ppk.status(q) for q, name in ppk.QUALITY.items()}, "fixed": "fix", "rtkfix": "fix",
+                 "rtkfixed": "fix", "rtkfloat": "float", "autonomous": "single", "standalone": "single",
+                 "none": "none", "nofix": "none"}
 _AUTO = object()  # the separator is not known yet
 
 
@@ -55,8 +55,9 @@ def read_positions(path: str | Path, delimiter: str | None = None) -> list[dict]
     with units after them: ``name|label|image|photo``, ``x|lon|longitude|easting``, ``y|lat|latitude|northing``,
     ``z|alt|h|height|ellh``, ``sx|std_x|sde|...`` (``sx``, ``sy`` and ``sz`` together), ``std`` (one standard
     deviation for the three axes), ``accuracy``, ``yaw``, ``pitch``, ``roll`` and ``status|q|flag`` (words, the
-    RTKLIB quality flag 1/2/5 or the DJI ``RtkFlag`` 50/34/16/0). Without a header the columns are
-    ``label,x,y,z`` or ``label,x,y,z,sx,sy,sz``. The header may also be the first comment.
+    DJI ``RtkFlag`` 50/34/16/0 or RTKLIB's quality Q: 1 fix, 2 float, 4 dgps as float, any other single, as for a
+    PPK solution). Without a header the columns are ``label,x,y,z`` or ``label,x,y,z,sx,sy,sz``. The header may also
+    be the first comment.
 
     Fields are separated by a tab, a semicolon or a comma (the first of them in the first line), or by spaces
     when there is none of those; ``delimiter`` forces one (spaces for runs of spaces; a tab or any
@@ -299,9 +300,10 @@ def _row(tokens: list[str], fields: dict[str, int], decimal_comma: bool, where: 
 
 
 def _status(text: str) -> str:
-    """``"fix"``, ``"float"``, ``"single"``, ``"none"`` or ``"unknown"`` for the status of a position as a word or
-    as the flag of RTKLIB or DJI."""
+    """``"fix"``, ``"float"``, ``"single"``, ``"none"`` or ``"unknown"`` for the status of a position: a word, DJI's
+    RtkFlag, or RTKLIB's quality Q for any other number, as :func:`.ppk.status` counts it."""
     try:
-        return _STATUS_NUMBERS.get(int(float(text)), "unknown")
+        number = int(float(text))
     except ValueError:
         return _STATUS_WORDS.get(re.sub(r"[\s_\-]+", "", text.lower()), "unknown")
+    return dji.STATUS.get(number) or ppk.status(number)

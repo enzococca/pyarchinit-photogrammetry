@@ -19,15 +19,17 @@ import numpy as np
 
 from .. import _native
 from . import rinex
-from .dji import GPS_EPOCH
+from .dji import GPS_EPOCH, wrap_longitude
 
 QUALITY = {1: "fix", 2: "float", 3: "sbas", 4: "dgps", 5: "single", 6: "ppp"}  # the Q of a row of RTKLIB's solution
-# the status of the position of a photo by the Q of the solution, as for an RTK flag: dgps counts as float; any other Q
-# (sbas, ppp, none) as single
+# the status of a position by RTKLIB's Q, as for the RTK flag of a DJI photo - the one table of it, also for the Q
+# column of a positions file: dgps counts as float; any other Q (sbas, ppp, none) as single
 STATUS = {1: "fix", 2: "float", 4: "float", 5: "single"}
+_RANK = {"fix": 0, "float": 1, "single": 2}  # the statuses from the best to the worst
 
 MAX_GAP_S = 1.0  # a time between two epochs further apart than this has no position: none is guessed across a gap
 TIME_RESOLUTION_S = 1e-3  # the times of a solution are written to the millisecond
+_SAME_EPOCH_S = 1e-6  # a time this close to an epoch is the epoch: times of 8e8 s are floats to 1.2e-7 s
 
 MODES = ("kinematic", "static", "static-start", "dgps")  # RTKLIB's positioning modes that work with a base
 # the bits of RTKLIB's pos1-navsys, by the letter of the constellation in satellite ids
@@ -167,8 +169,9 @@ def read_pos(path: str | Path) -> Solution:
     RTKLIB's programs or Emlid Studio: the times (GPS week and seconds, or the calendar; GPS time, UTC or JST) in
     seconds of GPS time since the GPS epoch, the rows in time order, the standard deviations east, north, up. The
     columns are found by their names in the header. A file without positions, in x/y/z or e/n/u, in degrees,
-    minutes and seconds, on another datum or with heights above the geoid is a ``ValueError`` saying so; a file
-    that does not say what its heights are is read as RTKLIB's default (above the ellipsoid), with a warning."""
+    minutes and seconds, on another datum or with heights above the geoid is a ``ValueError`` saying so, a row with a
+    number that is not finite (nan, inf) one naming its line; a file that does not say what its heights are is read
+    as RTKLIB's default (above the ellipsoid), with a warning."""
     path = Path(path)
     legend = columns = None
     rows: list[tuple[int, str]] = []
@@ -220,10 +223,15 @@ def read_pos(path: str | Path) -> Solution:
         try:
             if len(fields) <= max(where):
                 raise ValueError
-            times.append(_gps_seconds(_file_seconds(fields[0], fields[1]), scale))
-            values.append([float(fields[i]) for i in where])
+            seconds = _file_seconds(fields[0], fields[1])
+            row = [float(fields[i]) for i in where]
         except ValueError:
             raise ValueError(f"{path.name}, line {number}: not a row of a solution: {text[:80]}") from None
+        if not (math.isfinite(seconds) and all(math.isfinite(v) for v in row)):  # C writes nan, -nan, inf
+            raise ValueError(f"{path.name}, line {number}: a number that is not finite in a row of the solution: "
+                             f"{text[:80]}")
+        times.append(_gps_seconds(seconds, scale))
+        values.append(row)
     order = np.argsort(np.array(times), kind="stable")
     table = np.array(values, dtype=np.float64)[order]
     q, ns = table[:, 3], table[:, 4]
@@ -243,17 +251,26 @@ def status(q: int) -> str:
     return STATUS.get(int(q), "single")
 
 
+def _worse(qa: np.ndarray, qb: np.ndarray) -> np.ndarray:
+    """Of the qualities ``qa`` and ``qb`` (RTKLIB's Q), the one whose status is worse (fix, float, single); of two with
+    the same status the larger."""
+    ra, rb = (np.array([_RANK[status(v)] for v in qs], dtype=int) for qs in (qa, qb))
+    return np.where((rb > ra) | ((rb == ra) & (qb > qa)), qb, qa)
+
+
 def at(solution: Solution, gps_seconds) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Where ``solution`` puts the antenna at the times ``gps_seconds`` (N of them, in seconds of GPS time since the
-    GPS epoch, as its ``times``): ``(llh, q, sd, ok)``, the latitude, longitude and height (N, 3), the quality Q (N,),
-    the standard deviations east, north, up (N, 3) and whether there is a position at all (N,).
+    GPS epoch, as its ``times``, which must be in ascending order, as ``read_pos`` gives them): ``(llh, q, sd, ok)``,
+    the latitude, longitude and height (N, 3), the quality Q (N,), the standard deviations east, north, up (N, 3) and
+    whether there is a position at all (N,).
 
-    A time within a millisecond of an epoch (the times of a solution are written to the millisecond) takes that epoch
-    as it is. A time between two epochs at most :data:`MAX_GAP_S` apart, give or take that millisecond, takes the
-    straight line between them (the longitude across the 180th meridian the short way), the worse Q of the two and the
-    larger deviation on each axis. Any other time - in a gap of the solution, before its first epoch or after its last
-    - has no position: ``ok`` False, ``llh`` and ``sd`` NaN, ``q`` 0. A position is never taken from an epoch further
-    away."""
+    A time on an epoch takes that epoch as it is. A time between two epochs at most :data:`MAX_GAP_S` apart, give or
+    take the millisecond the times of a solution are written to, takes the straight line between them (the longitude
+    across the 180th meridian the short way, within [-180, 180)), the Q of the one with the worse status and the
+    larger deviation on each axis. Where no such pair is around it - at the ends of the solution, next to a gap - a
+    time within that millisecond of an epoch takes the epoch. Any other time (in a gap, before the first epoch, after
+    the last) has no position, nor has one that would take an epoch with a number that is not finite: ``ok`` False,
+    ``llh`` and ``sd`` NaN, ``q`` 0. A position is never taken from an epoch further away."""
     t = np.asarray(gps_seconds, dtype=np.float64).reshape(-1)
     times = np.asarray(solution.times, dtype=np.float64)
     llh, sd = np.full((len(t), 3), np.nan), np.full((len(t), 3), np.nan)
@@ -261,12 +278,15 @@ def at(solution: Solution, gps_seconds) -> tuple[np.ndarray, np.ndarray, np.ndar
     if not len(times):
         return llh, q, sd, np.zeros(len(t), dtype=bool)
     last = len(times) - 1
+    finite = np.isfinite(solution.llh).all(axis=1) & np.isfinite(solution.sd).all(axis=1)
     after = np.searchsorted(times, t)  # the first epoch at or after each time
     lo, hi = np.clip(after - 1, 0, last), np.clip(after, 0, last)
     nearest = np.where(np.abs(times[hi] - t) < np.abs(times[lo] - t), hi, lo)
-    on_epoch = np.abs(times[nearest] - t) <= TIME_RESOLUTION_S
-    between = (~on_epoch & (after > 0) & (after <= last)
-               & (times[hi] - times[lo] <= MAX_GAP_S + TIME_RESOLUTION_S))
+    off = np.abs(times[nearest] - t)
+    close = (after > 0) & (after <= last) & (times[hi] - times[lo] <= MAX_GAP_S + TIME_RESOLUTION_S)
+    on_epoch = (off <= _SAME_EPOCH_S) | (~close & (off <= TIME_RESOLUTION_S))
+    between = ~on_epoch & close & finite[lo] & finite[hi]
+    on_epoch &= finite[nearest]
     k = nearest[on_epoch]
     llh[on_epoch], q[on_epoch], sd[on_epoch] = solution.llh[k], solution.q[k], solution.sd[k]
     a, b = lo[between], hi[between]
@@ -274,10 +294,9 @@ def at(solution: Solution, gps_seconds) -> tuple[np.ndarray, np.ndarray, np.ndar
     step = solution.llh[b] - solution.llh[a]
     step[:, 1] = (step[:, 1] + 180.0) % 360.0 - 180.0  # across the 180th meridian the short way
     line = solution.llh[a] + weight * step
-    lon = line[:, 1]
-    line[:, 1] = np.where(lon > 180.0, lon - 360.0, np.where(lon <= -180.0, lon + 360.0, lon))
+    line[:, 1] = wrap_longitude(line[:, 1])
     llh[between] = line
-    q[between] = np.maximum(solution.q[a], solution.q[b])
+    q[between] = _worse(solution.q[a], solution.q[b])
     sd[between] = np.maximum(solution.sd[a], solution.sd[b])
     return llh, q, sd, on_epoch | between
 
@@ -337,8 +356,15 @@ def _observations(path: Path, role: str) -> tuple[rinex.RinexInfo, tuple[datetim
     return info, span
 
 
-def _span_text(span: tuple[datetime, datetime]) -> str:
-    return f"{span[0]:%Y-%m-%d %H:%M:%S} to {span[1]:%Y-%m-%d %H:%M:%S} GPS time"
+def span_text(start: datetime | float, end: datetime | float) -> str:
+    """The time from ``start`` to ``end`` of GPS time - datetimes, or seconds since the GPS epoch - written to the
+    second: ``"2005-04-02 00:00:00 to 2005-04-02 00:59:30 GPS time"``."""
+    def text(when: datetime | float) -> str:
+        if not isinstance(when, datetime):
+            when = _GPS_EPOCH + timedelta(seconds=float(when))
+        return f"{when:%Y-%m-%d %H:%M:%S}"
+
+    return f"{text(start)} to {text(end)} GPS time"
 
 
 def _navigation_info(path: Path) -> rinex.RinexInfo | None:
@@ -444,8 +470,8 @@ def solve(rover: str | Path, base: str | Path, navs=None, base_position: Sequenc
                 for path, info in ((rover, rover_info), (base, base_info))
                 if info.time_system not in _RINEX_TIME_SYSTEMS]
     if max(rover_span[0], base_span[0]) > min(rover_span[1], base_span[1]):
-        raise ValueError(f"the rover {rover.name} ({_span_text(rover_span)}) and the base {base.name} "
-                         f"({_span_text(base_span)}) have no time in common: the base has to record while the rover "
+        raise ValueError(f"the rover {rover.name} ({span_text(*rover_span)}) and the base {base.name} "
+                         f"({span_text(*base_span)}) have no time in common: the base has to record while the rover "
                          "does")
     nav_files = _navigation(navs, rover, base)
     base_record, base_warning = _base(base, base_info, base_position)

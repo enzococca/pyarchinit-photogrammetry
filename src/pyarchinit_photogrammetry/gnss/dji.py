@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import numpy as np
+
 from . import rinex
 
 STATUS = {50: "fix", 34: "float", 16: "single", 0: "none"}
@@ -113,17 +115,24 @@ def read_mrk(path: str | Path) -> list[MrkShot]:
     return shots
 
 
+def wrap_longitude(lon):
+    """A longitude in degrees, or an array of them, on the same meridian within [-180, 180); one already there is
+    returned as it is."""
+    return np.where(lon >= 180.0, lon - 360.0, np.where(lon < -180.0, lon + 360.0, lon))
+
+
 def lever_arm(lat: float, lon: float, h: float, offset_ned_mm) -> tuple[float, float, float]:
-    """``(lon, lat, h)`` of the camera hanging from an antenna at ``lat``, ``lon`` (degrees) and ellipsoidal height
-    ``h``: the antenna plus the lever arm ``offset_ned_mm``, north, east and DOWN in millimetres (the camera hangs
-    below the antenna). The arm is turned into degrees with the radii of curvature of the WGS84 ellipsoid at the
-    antenna; for an arm under half a metre this is within a millimetre of the exact position."""
+    """The antenna ``(lat, lon, h)`` in, the camera ``(lon, lat, h)`` out - mind the two orders. The camera hangs from
+    the antenna (degrees, ellipsoidal height in metres) by the lever arm ``offset_ned_mm``, north, east and DOWN in
+    millimetres, turned into degrees with the radii of curvature of the WGS84 ellipsoid at the antenna; for an arm
+    under half a metre this is within a millimetre of the exact position. The longitude of the camera is within
+    [-180, 180)."""
     north, east, down = (v / 1000.0 for v in offset_ned_mm)
     phi = math.radians(lat)
     w = 1.0 - _E2 * math.sin(phi) ** 2
     meridian = _A * (1.0 - _E2) / w ** 1.5
     prime_vertical = _A / math.sqrt(w)
-    return (lon + math.degrees(east / ((prime_vertical + h) * math.cos(phi))),
+    return (float(wrap_longitude(lon + math.degrees(east / ((prime_vertical + h) * math.cos(phi))))),
             lat + math.degrees(north / (meridian + h)),
             h - down)
 
