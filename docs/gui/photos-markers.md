@@ -43,7 +43,10 @@ lines as the folder has photos, otherwise nothing is done and the window says wh
 against the time the camera wrote in the photo (its local time, a time zone away from the UTC of the MRK): a photo
 taken more than 3 seconds away from its shot keeps the position it had, so the photos of another flight copied
 into the same folder, with the same shot numbers, are left alone; when the times agree on no time zone, or most
-photos are not at the time of their shots, nothing is done. The shots that found no photo are listed in the log.
+photos are not at the time of their shots, nothing is done. When the photos of another flight fit a time zone too
+and are as many as half of the photos of the MRK or more, the times cannot say which flight the MRK is of (its
+own flight may have lost photos): nothing is done and the window asks to keep each flight in a folder of its own.
+The shots that found no photo are listed in the log.
 The photos are those of the folder of the MRK; when the MRK was copied somewhere else the window asks for the folder (`--photos` on the
 command line). **The positions file** is asked its coordinate system (`EPSG:4979` is longitude, latitude and
 ellipsoidal height, as in the MRK; a projected system such as `EPSG:32633`; `LOCAL`) and the kind of height

@@ -43,7 +43,9 @@ tante righe quante sono le foto della cartella, altrimenti non si fa niente e la
 si controlla poi con l'ora che la camera ha scritto nella foto (la sua ora locale, a un fuso orario dall'UTC
 dell'MRK): una foto scattata a più di 3 secondi dal suo scatto tiene la posizione che aveva, così le foto di un
 altro volo copiate nella stessa cartella, con gli stessi numeri di scatto, restano come sono; quando le ore non
-tornano con nessun fuso orario, o la maggior parte delle foto non è all'ora del suo scatto, non si fa niente. Gli
+tornano con nessun fuso orario, o la maggior parte delle foto non è all'ora del suo scatto, non si fa niente. Quando anche le foto di un altro volo tornano con un fuso orario e
+sono almeno la metà delle foto dell'MRK, le ore non dicono di quale volo sia l'MRK (il suo volo può aver perso
+delle foto): non si fa niente e la finestra chiede di tenere ogni volo in una cartella propria. Gli
 scatti che non hanno trovato una foto sono elencati nel registro. Le foto sono quelle della cartella dell'MRK; se l'MRK è stato copiato altrove la finestra chiede la cartella (`--photos`
 da riga di comando). **Il file di posizioni** chiede il suo sistema di coordinate (`EPSG:4979` è longitudine,
 latitudine e quota ellissoidica, come nell'MRK; un sistema proiettato come `EPSG:32633`; `LOCAL`) e il tipo di

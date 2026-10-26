@@ -322,6 +322,40 @@ def test_mrk_of_one_flight_in_a_folder_of_two(tmp_path):
     assert [c.reference.location[1] for c in first] == pytest.approx([41.134] * 3, abs=1e-9)
 
 
+def test_mrk_of_a_flight_that_lost_photos_beside_the_next_flight(tmp_path):
+    # the flight of the MRK lost its fourth photo; the next battery, copied into the same folder, started an hour and
+    # 30 s later with the same interval: its four photos fit a time zone too and are more than the three left of the
+    # flight of the MRK - the times cannot say which flight the MRK is of, so nothing is paired
+    folder = tmp_path / "DCIM"
+    folder.mkdir()
+    start = datetime(2024, 5, 12, 8, 30, 15, 400000)
+    lines = []
+    for i in (1, 2, 3, 4):
+        utc = start + timedelta(seconds=2 * i)
+        if i < 4:
+            _jpeg(folder / f"DJI_20240512103015_{i:04d}_V.JPG", None, when=utc + timedelta(hours=2))
+        _jpeg(folder / f"DJI_20240512113045_{i:04d}_V.JPG", None, when=utc + timedelta(hours=3, seconds=30))
+        lines.append(_at(_LINE.format(i, 41.134), utc.replace(tzinfo=timezone.utc)))
+    (folder / "Timestamp.MRK").write_text("".join(lines))
+    ch = ppg.Document().add_chunk()
+    ch.add_photos([folder])
+    before = _snapshot(ch)
+    with pytest.raises(ValueError, match="more than one flight"):
+        gnss_apply.apply_mrk(ch, folder / "Timestamp.MRK")
+    assert _snapshot(ch) == before
+
+    # the next flight exactly an hour later, as many photos as the flight of the MRK: the same refusal
+    for f in folder.glob("DJI_20240512113045_*"):
+        f.unlink()
+    for i in (1, 2, 3):
+        utc = start + timedelta(seconds=2 * i)
+        _jpeg(folder / f"DJI_20240512113015_{i:04d}_V.JPG", None, when=utc + timedelta(hours=3))
+    ch = ppg.Document().add_chunk()
+    ch.add_photos([folder])
+    with pytest.raises(ValueError, match="more than one flight"):
+        gnss_apply.apply_mrk(ch, folder / "Timestamp.MRK")
+
+
 def test_mrk_shots_checked_against_the_time_of_the_photos(tmp_path):
     start = datetime(2024, 5, 12, 8, 30, 15, 400000)
     utcs = [start + timedelta(seconds=2 * i) for i in range(4)]

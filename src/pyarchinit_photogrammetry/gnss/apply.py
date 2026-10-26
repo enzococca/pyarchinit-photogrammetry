@@ -119,8 +119,9 @@ def _signed(seconds: float) -> str:
 def _clock(offsets: np.ndarray, name: str) -> float:
     """The offset between the clock of the photos and UTC (seconds) of the flight of the MRK ``name``: of the groups
     of offsets within :data:`CLOCK_TOLERANCE_S` of each other that lie on a time zone, the largest (its median),
-    between groups as large the nearest to a time zone. ``ValueError`` when no group lies on a time zone, or when two
-    groups as large both lie exactly on one (the times cannot tell two flights apart)."""
+    between groups as large the nearest to a time zone. ``ValueError`` when no group lies on a time zone, or when
+    another group on a time zone has two photos or more and is at least half as large (another flight in the folder:
+    the times cannot tell which one the MRK is of - its own flight may have lost photos)."""
     s = np.sort(np.asarray(offsets, float))
     lo = np.searchsorted(s, s - CLOCK_TOLERANCE_S, "left")
     hi = np.searchsorted(s, s + CLOCK_TOLERANCE_S, "right")
@@ -131,14 +132,15 @@ def _clock(offsets: np.ndarray, name: str) -> float:
         raise ValueError(f"{name}: the times of the photos and of the shots do not agree: by the clock of the camera "
                          f"the photos were taken {_signed(groups[0][1])} from the UTC of their shots, which is no "
                          "time zone. These are not the photos of this MRK, or the clock of the camera was wrong")
-    size = plausible[0][0]
-    best = [c for n, c in plausible if n == size]
-    exact = sorted(c for c in best if _off_zone(c) <= CLOCK_TOLERANCE_S)
-    if exact and exact[-1] - exact[0] > 2 * CLOCK_TOLERANCE_S:
-        raise ValueError(f"{name}: the times of the photos fit the shots of more than one flight ({size} photos "
-                         f"each at {', '.join(_signed(c) for c in exact)} from UTC): keep the photos of each flight in "
-                         "a folder of their own")
-    return best[0]
+    size, clock = plausible[0]
+    # another flight: at least two photos and half as many as the best group (a single photo late is just late)
+    rivals = sorted({round(c) for n, c in plausible
+                     if n >= max(2, size / 2) and abs(c - clock) > 2 * CLOCK_TOLERANCE_S})
+    if rivals:
+        raise ValueError(f"{name}: the times of the photos fit the shots of more than one flight (at "
+                         f"{', '.join(_signed(c) for c in [clock] + rivals)} from UTC): keep the photos of each flight "
+                         "in a folder of their own")
+    return clock
 
 
 def _on_time(pairs: list[tuple], name: str) -> list[tuple]:
