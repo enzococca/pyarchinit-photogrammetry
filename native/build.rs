@@ -4,6 +4,14 @@
 //! The sources are those rnx2rtkp is made of, with the settings of its builds (all the satellite
 //! systems, three frequencies, three extended observation codes); RTKLIB's files are not changed.
 //! postpos.c is compiled through the shim (see ppk_shim.c).
+//!
+//! Every compiler builds it as C99 (old GCCs default to C89, which RTKLIB's loops are not) and
+//! without contractions: a fused multiply-add rounds once where RTKLIB, as written, rounds twice,
+//! and the integer ambiguities of a kinematic solution are sensitive to that last bit (on RTKLIB's
+//! test data 115 fixed epochs out of 120 with FMA, 40 without). Without contractions the arm64
+//! builds (where GCC and Clang contract by default) round as the x86 ones and as RTKLIB's own
+//! builds; the maths library of each system (sin, cos, exp) and the optimiser still move such a
+//! marginal case a little (39 to 49 fixed epochs on that data, a static solution 120 of 120 on all).
 
 use std::env;
 use std::path::Path;
@@ -31,6 +39,18 @@ fn main() {
     }
     // a third party's code: its warnings are not ours to fix
     build.warnings(false).flag_if_supported("-w");
+    // C99, and multiplications and additions rounded one by one as written (see above)
+    let compiler = build.get_compiler();
+    if compiler.is_like_msvc() {
+        // no contractions under /fp:precise from Visual Studio 2022 (/fp:contract would add them)
+        build.flag("/fp:precise");
+        if compiler.is_like_clang_cl() {
+            // clang's precise model contracts within an expression
+            build.flag("/clang:-ffp-contract=off");
+        }
+    } else if compiler.is_like_gnu() || compiler.is_like_clang() {
+        build.flag("-std=gnu99").flag("-ffp-contract=off");
+    }
     for name in SOURCES {
         build.file(src.join(name));
     }

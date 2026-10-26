@@ -543,12 +543,20 @@ out-timesys        =gpst
 out-timeform       =tow
 out-height         =ellipsoidal
 """
+PPK_STATIC = PPK_OPTIONS.replace("=kinematic", "=static")  # the rover standing still
 
 
 def _pos_rows(path) -> np.ndarray:
     """The solution rows of an RTKLIB .pos (llh, GPS week and seconds): week, tow, lat, lon, h, Q, ns."""
     rows = [line.split() for line in Path(path).read_text().splitlines() if line.strip() and not line.startswith("%")]
     return np.array([[float(v) for v in r[:7]] for r in rows]).reshape(-1, 7)
+
+
+def _offsets(rows, ref):
+    """North, east and up (metres) of the positions of ``rows`` from ``ref`` (lat, lon, h)."""
+    north = np.radians(rows[:, 2] - ref[0]) * 6378137.0
+    east = np.radians(rows[:, 3] - ref[1]) * 6378137.0 * np.cos(np.radians(ref[0]))
+    return north, east, rows[:, 4] - ref[2]
 
 
 def _ecef(lat_deg, lon_deg, h):
@@ -561,30 +569,44 @@ def _ecef(lat_deg, lon_deg, h):
 
 
 def test_ppk_engine_on_rtklib_data(tmp_path, monkeypatch):
-    """RTKLIB inside the core: the static station 3040 of RTKLIB's test data processed as a moving
-    rover against 0759 (3.3 km away, at the position of its RINEX header) with the broadcast orbits:
-    an hour of 30 s epochs, almost all fixed, the fixed positions within centimetres of each other."""
+    """RTKLIB inside the core: the station 3040 of RTKLIB's test data against 0759 (3.3 km away, at
+    the position of its RINEX header) with the broadcast orbits, an hour of 30 s epochs.
+
+    Processed as standing still, every epoch is fixed and the fixed positions agree to centimetres.
+    Processed as a moving rover, how many epochs reach a fix hangs on the last bit of the arithmetic
+    (115 of 120 with fused multiply-adds, which build.rs turns off; 39 to 49 without, with the maths
+    library of each system): checked is what holds on every build, a solution for every epoch, a
+    quarter of them fixed at least, and the fixed ones where the static solution puts the station."""
     if _native.kernel("ppk_solve") is None:
         pytest.skip("native core without RTKLIB (older than 0.5, API 8)")
     monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
     assert _native.supports("ppk") and _native.api() >= 8
+    files = [str(RTKLIB_DATA / name) for name in ("30400920.05o", "07590920.05o", "07590920.05n")]
+    epochs = 120  # 00:00:00 to 00:59:30 every 30 s in both files
+    static_conf = tmp_path / "static.conf"
+    static_conf.write_text(PPK_STATIC)
+    code, message = _native.ppk_solve(str(static_conf), files, str(tmp_path / "static.pos"))
+    assert code == 0, message
+    static = _pos_rows(tmp_path / "static.pos")
+    fixed = static[static[:, 5] == 1]
+    assert len(static) == epochs and len(fixed) > 0.8 * epochs, (len(static), len(fixed), message)
+    station = fixed[:, 2:5].mean(axis=0)
+    north, east, up = _offsets(fixed, station)
+    assert np.sqrt(np.mean(north ** 2 + east ** 2)) < 0.03 and np.std(up) < 0.06
+    # the station where its header puts it, give or take the metres of the base's header position
+    header_3040 = np.array([-3978242.4348, 3382841.1715, 3649902.7667])
+    assert np.linalg.norm(_ecef(*station) - header_3040) < 10.0
+    # moving: a solution for every epoch, the fixed ones on the station
     conf = tmp_path / "ppk.conf"
     conf.write_text(PPK_OPTIONS)
-    files = [str(RTKLIB_DATA / name) for name in ("30400920.05o", "07590920.05o", "07590920.05n")]
     out = tmp_path / "rover.pos"
     code, message = _native.ppk_solve(str(conf), files, str(out))
     assert code == 0, message
     rows = _pos_rows(out)
-    epochs = 120  # 00:00:00 to 00:59:30 every 30 s in both files
-    fixed = rows[rows[:, 5] == 1]
-    assert len(rows) <= epochs and len(fixed) > 0.8 * epochs, (len(rows), len(fixed), message)
-    lat, lon, h = fixed[:, 2], fixed[:, 3], fixed[:, 4]
-    north = np.radians(lat - lat.mean()) * 6378137.0
-    east = np.radians(lon - lon.mean()) * 6378137.0 * np.cos(np.radians(lat.mean()))
-    assert np.sqrt(np.mean(north ** 2 + east ** 2)) < 0.03 and np.std(h) < 0.06
-    # the station where its header puts it, give or take the metres of the base's header position
-    header_3040 = np.array([-3978242.4348, 3382841.1715, 3649902.7667])
-    assert np.linalg.norm(_ecef(lat.mean(), lon.mean(), h.mean()) - header_3040) < 10.0
+    moving = rows[rows[:, 5] == 1]
+    assert len(rows) == epochs and len(moving) >= 0.25 * epochs, (len(rows), len(moving), message)
+    north, east, up = _offsets(moving, station)
+    assert np.sqrt(np.mean(north ** 2 + east ** 2)) < 0.03 and np.sqrt(np.mean(up ** 2)) < 0.06
     # a second run in the same process gives the same solution (RTKLIB keeps its state in globals)
     again = tmp_path / "again.pos"
     assert _native.ppk_solve(str(conf), files, str(again))[0] == 0
@@ -637,4 +659,4 @@ def test_ppk_solve_in_threads(tmp_path):
         results = list(pool.map(lambda out: ppg_core.ppk_solve(str(conf), files, str(out)), outs))
     assert [code for code, _ in results] == [0] * 6
     first = outs[0].read_bytes()
-    assert len(_pos_rows(outs[0])) > 96 and all(out.read_bytes() == first for out in outs[1:])
+    assert len(_pos_rows(outs[0])) == 120 and all(out.read_bytes() == first for out in outs[1:])

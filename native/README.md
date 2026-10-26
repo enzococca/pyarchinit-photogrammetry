@@ -21,7 +21,11 @@ pip install ./native        # or: uv pip install ./native
 ```
 
 Building it compiles RTKLIB's C sources too (`vendor/rtklib`, with the `cc` crate): a C
-compiler is needed (Xcode's command line tools, gcc or clang, MSVC on Windows).
+compiler is needed (Xcode's command line tools, gcc or clang, MSVC on Windows). RTKLIB is built
+as C99 and without fused multiply-add (`-ffp-contract=off`, `/fp:precise` with MSVC): the
+integer ambiguities of a kinematic solution hang on the last bit of the arithmetic, and the arm64
+compilers, which fuse by default, would otherwise fix other epochs than the x86 builds of the
+same project (on RTKLIB's test data 115 of 120 instead of about 40).
 
 License: GPL-2.0-or-later. The extension includes RTKLIB-EX v2.5.1
 (https://github.com/rtklibexplorer/RTKLIB, commit 62d4677ed8425a4e2748c6d390b500d1afb493fc),
