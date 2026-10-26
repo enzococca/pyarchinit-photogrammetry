@@ -230,6 +230,11 @@ Punti aperti, senza un ordine fisso:
 * SpatiaLite su Windows ARM64: aspetta un QGIS per ARM64 (la sua libreria è x64).
 * geoai: confronto fra due date coregistrate e differenze di quota dei loro DEM, dopo la verifica su un
   rilievo annotato reale.
+* **Disegni sui prospetti e sulle sezioni**: le US, le linee, le quote e i punti disegnati su un prospetto o su una
+  sezione tenuti con lui, nelle sue coordinate (u, v; v la quota sui piani verticali), non fra i disegni della
+  pianta; mostrati di nuovo quando il prospetto si riapre, esportati con lui (DXF, GeoPackage) e, per una
+  sezione, mandati a PyArchInit come disegno di sezione. Anche il disegno pietra per pietra dei prospetti tenuto
+  per prospetto (oggi va per nome del file, lo stesso per tutti i prospetti).
 * Idee non ancora decise: un plugin **topology** su topologicpy - i rapporti stratigrafici letti dalle facce
   che i proxy 3D delle US condividono (*copre* dai contatti orizzontali, *si appoggia a* da quelli
   verticali) verso l'Extended Matrix, i proxy che si sovrappongono divisi in celle pulite per i volumi, gli

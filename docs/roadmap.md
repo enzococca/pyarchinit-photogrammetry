@@ -230,6 +230,11 @@ Open points, in no fixed order:
 * SpatiaLite on Windows ARM64: it waits for an ARM64 build of QGIS (its library is x64).
 * geoai: the comparison of two coregistered dates and the height differences of their DEMs, after the
   evaluation on a real annotated survey.
+* **Drawings on elevations and sections**: the units, lines, spot heights and points drawn on an elevation or a
+  section kept with it, in its coordinates (u, v; v the height on upright planes), not among the drawings of the
+  plan; shown again when the elevation is opened, exported with it (DXF, GeoPackage) and, for a section, sent to
+  PyArchInit as a section drawing. The stone-by-stone drawings of elevations kept per elevation too (today they
+  go by the file name, the same for every elevation).
 * Ideas not decided yet: a **topology** plugin on topologicpy - stratigraphic relations read from the faces
   the 3D proxies of the units share (*covers* from horizontal contacts, *abuts* from vertical ones) into the
   Extended Matrix, overlapping proxies split into clean cells for the volumes, the rooms of standing
