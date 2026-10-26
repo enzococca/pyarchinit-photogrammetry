@@ -184,40 +184,51 @@ on the public WorldView-3 datasets.
   and triplets (local affine approximation of the RPC per tile, rectification, dense matching,
   triangulation), checked on the public WorldView-3 datasets with lidar truth.
 
+## Done in 1.3.5 - 1.5
+
+* **Windows like the other systems** (1.3.5): the test suite runs on Windows x64 in CI too, and the bugs it
+  found are fixed (the model file left mapped, DJI thermal decoding, products held open, SpatiaLite of QGIS
+  not found, progress reports of child processes); the Windows ARM64 application has the VTK 3D view and
+  E57 (VTK 9.7.1 and pye57 built for ARM64, the view checked on a Windows 11 ARM64 machine).
+* **Satellite** (1.3.5): surface models from three scenes or more (pairs chosen by intersection angle and
+  date, a relative correction of the RPCs from tie points, the pairs fused per cell), checked on two sites
+  of the public JHU/APL WorldView-3 benchmark against lidar: median error 0.59 m and 1.03 m, 61 % and 38 %
+  of the cells within 1 m (see the benchmark page).
+* **MicaSense** (1.3.5): checked on the sample captures of five cameras against MicaSense's own numbers -
+  radiance, thermal band, panel found from the tags, sun sensor, band registration through the lenses; the
+  thermal band within 0.3 thermal pixels; panel + sun sensor by default.
+* **Network nodes** (1.4.0): the tiles of the orthomosaic and of the orthophoto of a terrain texture, and the
+  rows of cells of the texture, on the nodes too; the pixels are the same as alone.
+* **Raster calculator** (1.4.0): *Strumenti > Calcolatore raster*, `ppg calc`: formulas as in QGIS on every
+  raster of a chunk, those of the plugins too.
+* **QGIS both ways** (1.4.0): what is saved in QGIS in the layers of the units, the spot heights and the
+  sections comes back into the window within a second (changed, drawn there, deleted), one *Annulla* per
+  save.
+* **Editing the units drawn** (1.4.0): *Vertici* (move, add, remove vertices with snapping) and *Rimodella*
+  (QGIS's Reshape Features); the 3D proxy of the unit is built again by itself with its base.
+* **New units into the Extended Matrix** (1.4.0): a unit drawn with its number and without a PyArchInit
+  form is taken by *Proponi US e rapporti*, and reaches EMtools and EMStudio with the next em.json of the
+  site exported by PyArchInit.
+* **Units made by plugins** (1.5.0): `context.add_units`; the plugin **samgeo** finds what is written
+  ("stones", "walls") in the orthophoto (Grounding DINO and SAM 2.1; SAM 3 optional from samgeo 0.2.0) and
+  the plugin **geoai** trains on the drawings checked by hand (DEM, multispectral and thermal inputs too).
+* **Units in groups** (1.5.1): bulk identifiers, named UT groups and freehand selection.
+* **Layer labels** (1.5.2 - 1.5.3): labels shown or hidden per layer and edited without changing the US/UT
+  number, saved per chunk, kept by *Annulla* and *Ripeti*.
+
 ## Next
 
 Open points, in no fixed order:
 
-* Network nodes: they already share the key points of the photos and the depth maps among
-  computers; the texture and the orthomosaic tiles not yet. Useful only with several computers.
-  *Done* in 1.4.0: the tiles of the orthomosaic and of the orthophoto of a terrain texture, and the rows of
-  cells of the texture, made from the chunk the main program shares as it has it in memory; the
-  pixels are the same as alone. A unit a node cannot do is done again by the main program, and a
-  cancelled step takes its units back.
-* Satellite: surface models from three scenes or more. *Done*: pairs chosen by intersection angle and date,
-  a relative correction of the RPCs from tie points, the pairs fused per cell.
-* Check of the satellite processing on the public WorldView-3 datasets with lidar truth. *Done* on two
-  sites of the JHU/APL benchmark: median error 0.59 m and 1.03 m, 61 % and 38 % of the cells within
-  1 m (see the benchmark page).
 * Parts never tried on real data: the import from WebODM, a satellite scene of one's own, `ppg remote`
-  on a remote machine. MicaSense *checked* on the sample captures of five cameras (radiance,
-  thermal band, panel, sun sensor and band registration against MicaSense's own numbers; the thermal
-  band within 0.3 thermal pixels; panel + sun sensor by default); a whole MicaSense flight to the
-  reflectance orthomosaic is still to be tried.
-* Windows ARM64: the VTK 3D view and E57. *Done* in 1.3.5 (VTK 9.7.1 and pye57 built for ARM64; the view
-  checked in a Windows 11 ARM64 machine with OpenGL 4.3). SpatiaLite waits for an ARM64 build of QGIS.
-* Ideas proposed but not decided yet:
-    * a raster calculator (formulas on any raster of the project). *Done* in 1.4.0: *Strumenti > Calcolatore raster*,
-      `ppg calc`, `engine.rastercalc`: formulas as in QGIS on every raster of a chunk, those of the plugins
-      too (found in the chunk folder, or named by the plugin with `context.add_rasters`), on the grid of one
-      of them, block by block;
-    * a samgeo plugin (segmenting the orthomosaic by writing "stones", "walls"). *Done* with 1.5.0: the
-      plugin samgeo 0.1.0 - Grounding DINO and SAM 2.1 in an environment of their own find what is written,
-      as a layer of proposals that becomes units (`context.add_units`, new in 1.5.0), classes of the dense
-      cloud or a GeoPackage; samgeo 0.2.0 adds optional SAM 3 with Meta-approved model access and a personal token;
-    * geoai: 0.1.0 trains on reviewed drawings and produces proposals; 0.2.0 adds optional DEM,
-      multispectral and thermal inputs, alone or combined with RGB. Next: compare two coregistered
-      dates and DEM height differences, after evaluation on a real annotated survey.
+  on a remote machine, a whole MicaSense flight to the reflectance orthomosaic.
+* SpatiaLite on Windows ARM64: it waits for an ARM64 build of QGIS (its library is x64).
+* geoai: the comparison of two coregistered dates and the height differences of their DEMs, after the
+  evaluation on a real annotated survey.
+* Ideas not decided yet: a **topology** plugin on topologicpy - stratigraphic relations read from the faces
+  the 3D proxies of the units share (*covers* from horizontal contacts, *abuts* from vertical ones) into the
+  Extended Matrix, overlapping proxies split into clean cells for the volumes, the rooms of standing
+  buildings as cells. A plugin only: its geometric core is AGPL-3.0 and has no Windows ARM64 build.
 
 ## Not planned
 

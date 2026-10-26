@@ -185,40 +185,51 @@ dataset pubblici WorldView-3.
   stereo (approssimazione affine locale dell'RPC per tassello, rettifica, matching denso,
   triangolazione), verificati sui dataset pubblici WorldView-3 con lidar di riferimento.
 
+## Fatto nelle 1.3.5 - 1.5
+
+* **Windows come gli altri sistemi** (1.3.5): i test girano anche su Windows x64 nella CI, e gli errori che
+  hanno trovato sono corretti (file del modello lasciato mappato, decodifica del termico DJI, prodotti tenuti
+  aperti, SpatiaLite di QGIS non trovato, avanzamento dei processi figli); l'applicazione Windows ARM64 ha la
+  vista 3D VTK e l'E57 (VTK 9.7.1 e pye57 compilati per ARM64, vista provata su una macchina Windows 11 ARM64).
+* **Satellite** (1.3.5): modelli di superficie da tre scene o più (coppie scelte per angolo di intersezione e
+  data, correzione relativa degli RPC dai punti di legame, coppie fuse cella per cella), verificati su due
+  siti del benchmark pubblico WorldView-3 di JHU/APL contro il lidar: errore mediano 0,59 m e 1,03 m, 61 % e
+  38 % delle celle entro 1 m (vedi la pagina del benchmark).
+* **MicaSense** (1.3.5): verificato sulle riprese di esempio di cinque camere contro i numeri di MicaSense -
+  radianza, banda termica, pannello trovato dai tag, sensore di luce, registrazione delle bande attraverso le
+  lenti; banda termica entro 0,3 pixel termici; pannello + sensore di luce di predefinito.
+* **Nodi di rete** (1.4.0): anche i tasselli dell'ortofoto e dell'ortofoto della texture di un terreno, e le
+  righe di celle della texture; i pixel sono gli stessi di quando il programma lavora da solo.
+* **Calcolatore raster** (1.4.0): *Strumenti > Calcolatore raster*, `ppg calc`: formule come in QGIS su tutti i
+  raster di un chunk, anche quelli dei plugin.
+* **QGIS nei due sensi** (1.4.0): quello che si salva in QGIS nei layer delle US, delle quote e delle sezioni
+  torna nella finestra entro un secondo (modificato, disegnato lì, cancellato), un *Annulla* per salvataggio.
+* **Modifica delle US disegnate** (1.4.0): *Vertici* (spostare, aggiungere, togliere vertici, con lo snap) e
+  *Rimodella* (come Reshape Features di QGIS); il proxy 3D dell'unità si ricostruisce da solo con la sua base.
+* **US nuove nell'Extended Matrix** (1.4.0): un'unità disegnata con il suo numero e senza scheda in PyArchInit
+  entra in *Proponi US e rapporti*, e arriva in EMtools ed EMStudio con il prossimo em.json del sito
+  esportato da PyArchInit.
+* **US create dai plugin** (1.5.0): `context.add_units`; il plugin **samgeo** trova nell'ortofoto quello che
+  si scrive («pietre», «muri») con Grounding DINO e SAM 2.1 (SAM 3 facoltativo da samgeo 0.2.0) e il plugin
+  **geoai** si addestra sui disegni controllati a mano (anche con DEM, multispettrale e termico).
+* **US in gruppi** (1.5.1): identificativi in blocco, gruppi UT con nome e selezione a mano libera.
+* **Etichette dei layer** (1.5.2 - 1.5.3): etichette mostrate o nascoste per layer e modificate senza cambiare
+  il numero US/UT, salvate per chunk, conservate da *Annulla* e *Ripeti*.
+
 ## Prossimi passi
 
 Punti aperti, senza un ordine fisso:
 
-* Nodi di rete: dividono già tra più computer i punti delle foto e le mappe di profondità; texture
-  e tasselli dell'ortofoto non ancora. Serve solo se si lavora con più computer. *Fatto* nella 1.4.0: i
-  tasselli dell'ortofoto e dell'ortofoto della texture di un terreno, e le righe di celle della texture, fatti
-  dal chunk che il programma principale condivide come lo ha in memoria; i pixel sono gli stessi di
-  quando lavora da solo. Un'unità che un nodo non riesce a fare la rifà il programma principale, e un
-  passo annullato ritira le sue unità.
-* Satellite: modelli di superficie da tre scene o più. *Fatto*: coppie scelte per angolo di intersezione e
-  data, correzione relativa degli RPC dai punti di legame, coppie fuse cella per cella.
-* Verifica dell'elaborazione satellitare sui dataset pubblici WorldView-3 con lidar di riferimento. *Fatto*
-  su due siti del benchmark JHU/APL: errore mediano 0,59 m e 1,03 m, 61 % e 38 % delle celle entro 1 m
-  (vedi la pagina del benchmark).
 * Parti mai provate su dati veri: import da WebODM, una scena satellitare propria, `ppg remote` su una
-  macchina remota. MicaSense *verificato* sulle riprese di esempio di cinque camere (radianza, banda
-  termica, pannello, sensore di luce e registrazione delle bande contro i numeri di MicaSense; banda
-  termica entro 0,3 pixel termici; pannello + sensore di luce di predefinito); resta da provare un volo
-  MicaSense intero fino all'ortofoto di riflettanza.
-* Windows ARM64: la vista 3D VTK e l'E57. *Fatto* nella 1.3.5 (VTK 9.7.1 e pye57 compilati per ARM64; la
-  vista provata su una macchina Windows 11 ARM64 con OpenGL 4.3). SpatiaLite aspetta un QGIS per ARM64.
-* Idee proposte ma non ancora decise:
-    * calcolatore raster (formule su qualsiasi raster del progetto). *Fatto* nella 1.4.0: *Strumenti >
-      Calcolatore raster*, `ppg calc`, `engine.rastercalc`: formule come in QGIS su tutti i raster di un chunk, anche
-      quelli dei plugin (trovati nella cartella del chunk, o con il nome che dà loro il plugin con
-      `context.add_rasters`), sulla griglia di uno di essi, a blocchi;
-    * plugin samgeo (segmentare l'ortofoto scrivendo «pietre», «muri»). *Fatto* con la 1.5.0: il plugin
-      samgeo 0.1.0 - Grounding DINO e SAM 2.1 in un ambiente loro trovano quello che è scritto, come layer
-      di proposte che diventa US (`context.add_units`, nuovo nella 1.5.0), classi della nuvola densa o un
-      GeoPackage; samgeo 0.2.0 aggiunge SAM 3 opzionale, con accesso ai pesi approvato da Meta e token personale;
-    * plugin geoai: 0.1.0 addestra sui disegni verificati e produce proposte; 0.2.0 aggiunge input
-      opzionali DEM, multispettrali e termici, anche combinati con RGB. Passo successivo: confronto fra
-      due date registrate e differenze di quota dei DEM, dopo la verifica su un rilievo annotato reale.
+  macchina remota, un volo MicaSense intero fino all'ortofoto di riflettanza.
+* SpatiaLite su Windows ARM64: aspetta un QGIS per ARM64 (la sua libreria è x64).
+* geoai: confronto fra due date coregistrate e differenze di quota dei loro DEM, dopo la verifica su un
+  rilievo annotato reale.
+* Idee non ancora decise: un plugin **topology** su topologicpy - i rapporti stratigrafici letti dalle facce
+  che i proxy 3D delle US condividono (*copre* dai contatti orizzontali, *si appoggia a* da quelli
+  verticali) verso l'Extended Matrix, i proxy che si sovrappongono divisi in celle pulite per i volumi, gli
+  ambienti degli edifici come celle. Solo come plugin: il suo nucleo geometrico è AGPL-3.0 e non ha una
+  versione per Windows ARM64.
 
 ## Non previsto
 
