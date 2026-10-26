@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1697,6 +1698,17 @@ def _ppk_command(project: Path, folder: Path, *options: str) -> list[str]:
             "--base", str(PPK_BASE), *options]
 
 
+_TERMINAL_CODES = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")  # the colors and styles a terminal is told (CSI sequences)
+
+
+def _plain_words(output: str) -> str:
+    """What a command printed, as plain words on one line. Typer prints a usage error in a box that wraps the message
+    and, where GITHUB_ACTIONS, FORCE_COLOR or PY_COLORS is set (GitHub's runners), in forced colors that cut
+    ``--base-position`` into three styled pieces: the codes, the box and the line breaks are not what a test of the
+    message is about."""
+    return " ".join(re.sub("[\u2500-\u257f]", " ", _TERMINAL_CODES.sub("", output)).split())
+
+
 def test_ppk_command_line(tmp_path, fake_rtklib, monkeypatch):
     """ppg gnss ppk with RTKLIB's solution of a drone (the fake rnx2rtkp: no native core needed): the counts per
     status, the base, the warnings - the base at the position of its header among them - and what took no position;
@@ -1793,8 +1805,7 @@ def test_ppk_command_line_says_what_went_wrong_and_changes_nothing(tmp_path, fak
         result = run(app, command)
         assert result.exit_code == code, result.output
         assert _snapshot(ppg.Document.open(project).chunk) == before
-        # one line: the usage errors come in a box that wraps them
-        return " ".join(re.sub("[\u2500-\u257f]", " ", result.output).split())
+        return _plain_words(result.output)
 
     # files that are not there, or a folder named as a file: refused before anything is read (a usage error)
     for option in ("--mrk", "--rover", "--base"):
@@ -1907,6 +1918,18 @@ def _choose(dialog, field, path) -> None:
     """``path`` typed in the file ``field`` of the PPK ``dialog``, and the files read at once, without the pause."""
     field.edit.setText(str(path))
     dialog.refresh()
+
+
+def _wait_until(condition, seconds: float = 5.0) -> bool:
+    """Run the event loop until ``condition()`` is true, for ``seconds`` at most; whether it became true. A timer of a
+    few hundred milliseconds can wait much longer in the event loop of a loaded machine (a CI runner): a test waits for
+    what the timer does, not for the time it asked for."""
+    from PySide6.QtTest import QTest
+
+    deadline = time.monotonic() + seconds
+    while not condition() and time.monotonic() < deadline:
+        QTest.qWait(20)
+    return bool(condition())
 
 
 def test_the_drone_rinex_beside_its_mrk(tmp_path, qt_app):
@@ -2111,9 +2134,6 @@ def test_ppk_dialog_checks_the_times_the_work_folder_and_a_typed_base(tmp_path, 
 def test_ppk_dialog_reads_the_files_after_a_pause_in_typing_and_once(tmp_path, qt_app, monkeypatch):
     """A file name typed a key at a time reads nothing until a pause; then the base is read once, and only its folder
     is looked at (the drone's was already); reading again, checking, typing a position read nothing more."""
-    from PySide6.QtTest import QTest
-
-    from pyarchinit_photogrammetry.gui import ppk_dialog
     from pyarchinit_photogrammetry.gui.ppk_dialog import PpkDialog
 
     card = _dji_card(tmp_path)
@@ -2128,8 +2148,7 @@ def test_ppk_dialog_reads_the_files_after_a_pause_in_typing_and_once(tmp_path, q
     for i in range(1, len(text) + 1):
         dlg.base.edit.setText(text[:i])
     assert headers == [] and folders == [] and dlg.base_info.text().startswith("Il RINEX di una base")
-    QTest.qWait(ppk_dialog.TYPING_PAUSE_MS + 300)
-    assert dlg.base_info.text().startswith("Base 0759")
+    assert _wait_until(lambda: dlg.base_info.text().startswith("Base 0759")), dlg.base_info.text()  # the pause is over
     assert headers == ["07590920.05o", "07590920.05n"] and folders == ["07590920.05o"]
     dlg.refresh()
     assert dlg.problem() is None
