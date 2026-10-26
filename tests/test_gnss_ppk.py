@@ -1216,7 +1216,7 @@ def _ignores_case(folder: Path) -> bool:
 
 
 def test_solve_refuses_inputs_inside_the_work_folder(tmp_path, fake_rtklib):
-    # the files of a run in the work folder are replaced and removed: no input may be there, under any name
+    # the program writes and deletes files in the work folder: no input may be there, under any name
     work = tmp_path / "work"
     (work / "data").mkdir(parents=True)
     named_as_a_copy = work / "base.obs"  # a rover under the name of the base's copy
@@ -1804,10 +1804,10 @@ def test_ppk_warns_when_the_solution_is_far_from_the_drones_own_positions(tmp_pa
             assert said and abs(int(said.group(1)) - apart) <= 2.0 and "base" in warning, warning
 
 
-def _onboard_flight(folder: Path, solution: ppk.Solution, epochs, fixes, north_m: float = 0.0) -> Path:
+def _onboard_flight(folder: Path, solution: ppk.Solution, epochs, fixes, north_m: float = 0.0, floats=()) -> Path:
     """A DJI flight with a shot on each of the ``epochs`` (indices) of ``solution``: its photos and its Timestamp.MRK,
     whose lines put the antenna where the solution does (``north_m`` metres to the north), with the RTK flag 50 (fix)
-    for the shots in ``fixes``, 16 (single) for the others."""
+    for the shots in ``fixes``, 34 (float) for those in ``floats``, 16 (single) for the others."""
     shots = [(i + 1, float(solution.times[k]), (0, 0, 150)) for i, k in enumerate(epochs)]
     _ppk_flight(folder, shots)
     lines = []
@@ -1816,7 +1816,7 @@ def _onboard_flight(folder: Path, solution: ppk.Solution, epochs, fixes, north_m
         lat, lon, h = solution.llh[k]
         lines.append(f"{index}\t{seconds:.6f}\t[{int(week)}]\t{north:6d},N\t{east:6d},E\t{down:6d},V\t"
                      f"{lat + north_m / 111195.0:.10f},Lat\t{lon:.10f},Lon\t{h:.4f},Ellh\t0.010, 0.010, 0.020\t"
-                     f"{50 if index in fixes else 16},Q\n")
+                     f"{50 if index in fixes else 34 if index in floats else 16},Q\n")
     (folder / "Timestamp.MRK").write_text("".join(lines), newline="\n")
     return folder
 
@@ -1892,6 +1892,78 @@ def test_ppk_keeps_the_onboard_rtk_fixes(tmp_path):
     result = gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution)
     assert (result["matched"], result["kept_fix"], result["unmatched"]) == (0, 5, [])
     assert _snapshot(ch) == before and ppk.last_run(ch) is None
+
+
+def test_ppk_warns_of_the_photos_it_gives_a_worse_state_than_the_drone_did(tmp_path):
+    """The PPK is for the photos that are not fix, and it can do worse than the drone: a photo whose onboard state (the
+    XMP of a DJI photo, a DJI MRK) is float and whose PPK state is single is counted in a warning, and takes the PPK
+    position all the same. A PPK state as good or better, a position that is not the drone's own and an onboard fix
+    (it has its own warning) are not counted in it."""
+    rows = _drone_rows()
+    rows[5] = (*rows[5][:4], 5, *rows[5][5:])  # the sixth epoch is single as the fifth is
+    pos = tmp_path / "drone.pos"
+    pos.write_text(_pos_text(rows=rows), newline="")
+    solution = ppk.read_pos(pos)
+    epochs = [0, 1, 2, 4, 5, 120]
+    assert [ppk.status(solution.q[k]) for k in epochs] == ["fix", "float", "fix", "single", "single", "fix"]
+
+    def flight(name: str, floats, fixes=(1,)):
+        """Six photos with the position of an MRK: an onboard fix for those in ``fixes``, a float for those in
+        ``floats``, a single for the others."""
+        folder = _onboard_flight(tmp_path / name, solution, epochs, fixes=set(fixes), floats=set(floats))
+        ch = ppg.Document().add_chunk()
+        ch.add_photos([folder])
+        gnss_apply.apply_mrk(ch, folder / "Timestamp.MRK")
+        assert [gnss_apply.onboard_state(c) for c in ch.cameras] == [
+            "fix" if i in fixes else "float" if i in floats else "single" for i in range(1, 7)]
+        return ch, folder
+
+    def worse(result: dict) -> list[str]:
+        return [w for w in result["warnings"] if "worse state" in w]
+
+    # the PPK is single where the drone had a float (photos 4 and 5), float where it had a float (2), fix where it had
+    # a float (6) or a single (3): two photos worse
+    ch, folder = flight("volo", floats={2, 4, 5, 6})
+    result = gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution)
+    assert (result["matched"], result["kept_fix"]) == (5, 1)
+    assert result["status"] == {"fix": 2, "float": 1, "single": 2}
+    (warning,) = result["warnings"]
+    assert warning == ("2 photos got a worse state from the PPK than from the drone's own RTK (float onboard, single "
+                       "in the PPK): their PPK positions are used all the same. The base may be too far from the "
+                       "flight or share too few satellites with the drone: check its distance and its observations")
+    # the PPK position is the one they have, whatever the warning says of them
+    assert [(c.meta["gnss"]["source"], c.meta["gnss"]["status"]) for c in ch.cameras] == [
+        ("dji_mrk", "fix"), *(("ppk", state) for state in ("float", "fix", "single", "single", "fix"))]
+    # the same run again: the photos are the PPK's now, and the warning is not repeated
+    assert worse(gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution)) == []
+
+    # one photo only, in the singular: the float of photo 4 is the XMP of a DJI photo, the one of photo 5 comes from a
+    # file of positions, not from the drone, and is not counted
+    ch, folder = flight("uno", floats={4, 5})
+    xmp = ch.camera("DJI_0004")
+    gnss_apply.set_camera_position(xmp, list(xmp.reference.location), "EPSG:4326", [0.2, 0.2, 0.2], dji.SOURCE_XMP,
+                                   status="float")
+    other = ch.camera("DJI_0005")
+    gnss_apply.set_camera_position(other, list(other.reference.location), "EPSG:4979", [0.2, 0.2, 0.2],
+                                   "positions_file", status="float", height="ellipsoidal")
+    assert (gnss_apply.onboard_state(xmp), gnss_apply.onboard_state(other)) == ("float", None)
+    (warning,) = worse(gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution))
+    assert warning.startswith("1 photo got a worse state from the PPK than from the drone's own RTK (float onboard, "
+                              "single in the PPK): its PPK position is used all the same.")
+    assert (xmp.meta["gnss"]["source"], xmp.meta["gnss"]["status"]) == ("ppk", "single")
+    assert (other.meta["gnss"]["source"], other.meta["gnss"]["status"]) == ("ppk", "single")
+
+    # a PPK as good as the drone, or better: nothing worse
+    ch, folder = flight("pari", floats={2, 6})
+    assert gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution)["warnings"] == []
+    # replace_fix: the onboard fix of photo 2 is float now, which has its own warning; the floats of photos 4 and 5 are
+    # single, which has this one - each photo is counted once
+    ch, folder = flight("sostituiti", floats={4, 5}, fixes={1, 2})
+    result = gnss_apply.apply_ppk(ch, folder / "Timestamp.MRK", solution, replace_fix=True)
+    assert (result["matched"], result["kept_fix"]) == (6, 0)
+    first, second = result["warnings"]
+    assert first == "1 photo had an onboard RTK fix and now has a PPK position that is not fix (float or single)"
+    assert second.startswith("2 photos got a worse state from the PPK than from the drone's own RTK")
 
 
 def test_ppk_says_how_far_the_base_is_from_the_flight(tmp_path):
@@ -2131,8 +2203,8 @@ def test_ppk_command_line_keeps_the_onboard_fixes_unless_told(tmp_path, fake_rtk
     solution = ppk.read_pos(pos)
     run = CliRunner().invoke
 
-    def project(name: str, fixes) -> tuple[Path, Path]:
-        folder = _onboard_flight(tmp_path / name / "100MEDIA", solution, [0, 1, 2, 4, 120], fixes=fixes)
+    def project(name: str, fixes, epochs=(0, 1, 2, 4, 120)) -> tuple[Path, Path]:
+        folder = _onboard_flight(tmp_path / name / "100MEDIA", solution, list(epochs), fixes=fixes)
         doc = ppg.Document()
         doc.add_chunk("Volo").add_photos([folder])
         doc.save(tmp_path / name / "volo.ppg")
@@ -2164,9 +2236,33 @@ def test_ppk_command_line_keeps_the_onboard_fixes_unless_told(tmp_path, fake_rtk
     before = _snapshot(ppg.Document.open(path).chunk)
     result = run(app, _ppk_command(path, folder, "--nav", str(PPK_NAV)))
     assert result.exit_code == 0, result.output
-    assert ("no photo took a PPK position: the photos of the flight have an RTK fix of the drone itself and keep it "
-            "(--replace-fix gives them the PPK one)") in result.output.splitlines()
+    lines = result.output.splitlines()
+    assert ("no photo took a PPK position: 5 photos kept their onboard RTK fix (--replace-fix gives them the PPK one)"
+            in lines)
+    assert not any("without a PPK position" in line for line in lines)  # all of them are accounted for
     assert _snapshot(ppg.Document.open(path).chunk) == before
+
+    # a photo in the folder that is not in the chunk: left without a PPK position, and the line does not say that the
+    # photos of the flight all have an onboard fix - it says how many kept it and how many are left without
+    path, folder = project("con_resto", fixes={1, 2, 3, 4, 5})
+    _jpeg(folder / "DJI_0099.JPG", None)
+    before = _snapshot(ppg.Document.open(path).chunk)
+    result = run(app, _ppk_command(path, folder, "--nav", str(PPK_NAV)))
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert ("no photo took a PPK position: 5 photos kept their onboard RTK fix (--replace-fix gives them the PPK one) "
+            "and 1 is without a PPK position") in lines
+    assert "without a PPK position (1): DJI_0099" in lines
+    assert not any("the photos of the flight" in line for line in lines)
+    assert _snapshot(ppg.Document.open(path).chunk) == before
+
+    # one photo that kept its fix, one more left without: the singular forms
+    path, folder = project("uno", fixes={1}, epochs=(0,))
+    _jpeg(folder / "DJI_0099.JPG", None)
+    result = run(app, _ppk_command(path, folder, "--nav", str(PPK_NAV)))
+    assert result.exit_code == 0, result.output
+    assert ("no photo took a PPK position: 1 photo kept its onboard RTK fix (--replace-fix gives it the PPK one) and 1 "
+            "is without a PPK position") in result.output.splitlines()
 
 
 def test_ppk_command_line_says_what_went_wrong_and_changes_nothing(tmp_path, fake_rtklib, monkeypatch):
@@ -2484,11 +2580,11 @@ def test_ppk_dialog_checks_the_times_the_work_folder_and_a_typed_base(tmp_path, 
     assert broken.problem().startswith("Il Timestamp.MRK non si può usare: Il file non si legge: rotto.MRK")
     (other / "vuoto.MRK").write_text("", newline="\n")
     assert PpkDialog(other / "vuoto.MRK").problem() == "Il Timestamp.MRK non si può usare: Il file non ha scatti."
-    # an input in the work folder of the PPK, whose files every run replaces
+    # an input in the work folder of the PPK, where the program writes and deletes files
     work.mkdir(parents=True)
     _choose(dlg, dlg.base, shutil.copyfile(PPK_BASE, work / "base.05o"))
-    assert dlg.problem() == (f"base.05o è nella cartella di lavoro del PPK ({work}), i cui file si sostituiscono a "
-                             "ogni calcolo: spostalo fuori da lì.")
+    assert dlg.problem() == (f"base.05o è nella cartella di lavoro del PPK ({work}), dove il programma scrive e "
+                             "cancella file: spostalo fuori da lì.")
     _choose(dlg, dlg.base, base)
     # a navigation file listed, then deleted
     extra = Path(shutil.copyfile(DATA / "30400920.05n", tmp_path / "brdc.05n"))

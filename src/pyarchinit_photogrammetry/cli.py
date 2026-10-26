@@ -2572,9 +2572,13 @@ def gnss_ppk(project: Path,
     if result["matched"]:
         gnss.keep_only_fix(ch)
         doc.save()
-    else:  # nothing changed: the photos of the flight with a PPK position are onboard fixes, which keep theirs
-        typer.echo("no photo took a PPK position: the photos of the flight have an RTK fix of the drone itself and "
-                   "keep it (--replace-fix gives them the PPK one)")
+    else:  # nothing changed: some photos kept their onboard fix, the others (if any) have no PPK position
+        many, left = kept > 1, len(result["unmatched"])
+        text = (f"no photo took a PPK position: {kept} photo{'s' if many else ''} kept {'their' if many else 'its'} "
+                f"onboard RTK fix (--replace-fix gives {'them' if many else 'it'} the PPK one)")
+        if left:  # in a gap of the solution, not in the chunk, without a shot or not on time: listed below
+            text += f" and {left} {'are' if left > 1 else 'is'} without a PPK position"
+        typer.echo(text)
     _unmatched(result["unmatched"], "without a PPK position")
     _unmatched([str(i) for i in result["shots_unmatched"]], "shots of the MRK without a PPK position")
 

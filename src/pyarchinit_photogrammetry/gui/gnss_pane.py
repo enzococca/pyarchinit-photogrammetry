@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QHeaderView, QLabel
                                QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .. import _native
-from ..gnss import ppk
+from ..gnss import dji, ppk
 from ..gnss.apply import ONLY_FIX
 from ..gnss.quality import mixed_heights, summary
 from .flow_layout import FlowLayout
@@ -19,7 +19,7 @@ from .icons import icon
 
 def source_names() -> dict[str, str]:
     """Where a position can come from (``meta["gnss"]["source"]``), as the pane says it."""
-    return {"exif": tr("EXIF"), "dji_xmp": tr("XMP di DJI"), "dji_mrk": tr("MRK di DJI"), "ppk": tr("PPK"),
+    return {"exif": tr("EXIF"), dji.SOURCE_XMP: tr("XMP di DJI"), dji.SOURCE_MRK: tr("MRK di DJI"), "ppk": tr("PPK"),
             "positions_file": tr("file di posizioni"), "video": tr("video"), "panorama": tr("foto a 360°"),
             "unknown": tr("sconosciuta")}
 

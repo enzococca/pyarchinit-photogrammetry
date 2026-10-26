@@ -185,7 +185,9 @@ fixes kept are more than 10 cm (median) from where the PPK puts the same shots (
 ellipsoidal, as in an MRK; across only for the altitude of an EXIF), a warning says what it likely means: the base
 in another reference frame than the drone's RTK corrections (a network in ETRF and a base in ITRF, or the other way
 round) or at a wrong position, and the flight now mixes the two - check the position of the base, or compute again
-replacing the onboard fixes.
+replacing the onboard fixes. A photo that is not fix is not always better off with the PPK: when it gets a worse state
+than the drone itself gave it (an onboard float that is single in the PPK), a warning counts those photos - the PPK
+position is used all the same - and the base, its distance from the flight and its observations are what to check.
 
 **The result.** A photo takes the antenna of the solution at the time of its shot (an epoch, or the straight line
 between two epochs at most a second apart) plus the lever arm of its shot in the MRK; its status comes from RTKLIB's
@@ -203,7 +205,7 @@ position is the one of its header.
 
 RTKLIB (RTKLIB-EX 2.5.1, BSD licence) is inside the native core 0.5 or later, which the applications include (their
 smoke test, `--check`, fails if it is missing); without it the program says what to install. `PPG_RNX2RTKP` can name the
-`rnx2rtkp` program of RTKLIB-EX 2.5 instead. `ppg doctor` (*Aiuto > Diagnostica ambiente*) says where the PPK runs:
+`rnx2rtkp` program of RTKLIB-EX 2.5 instead. `ppg doctor` (*Help > Environment diagnosis...*) says where the PPK runs:
 RTKLIB inside the native core and its version, the program named by `PPG_RNX2RTKP`, or what to install.
 
 ```bash

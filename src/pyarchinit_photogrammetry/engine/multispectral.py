@@ -1417,7 +1417,7 @@ def _keep_rtk(cam, band: Path) -> None:
     from PIL import Image
 
     from ..gnss.apply import accuracy, set_camera_position
-    from ..gnss.dji import rtk_from_xmp
+    from ..gnss.dji import SOURCE_XMP, rtk_from_xmp
 
     if cam.reference.location is None:
         return
@@ -1428,7 +1428,7 @@ def _keep_rtk(cam, band: Path) -> None:
         return
     if rtk:
         set_camera_position(cam, cam.reference.location, cam.meta["reference_crs"],
-                            accuracy(rtk["status"], rtk["std"]), "dji_xmp", status=rtk["status"],
+                            accuracy(rtk["status"], rtk["std"]), SOURCE_XMP, status=rtk["status"],
                             extra={k: v for k, v in rtk.items() if k != "status"})
 
 

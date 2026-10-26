@@ -37,13 +37,13 @@ is not, and is installed on first use in a separate environment (see
   VTK draws with OpenGL 3.2 or later: Snapdragon computers have it from their graphics driver or
   from Microsoft's *OpenCL, OpenGL, and Vulkan Compatibility Pack* (Microsoft Store); where Windows
   offers only its own OpenGL 1.1 (virtual machines without a 3D driver) the program finds it out
-  before opening the view and uses the software renderer (*Aiuto > Diagnostica ambiente* shows the
+  before opening the view and uses the software renderer (*Help > Environment diagnosis...* shows the
   OpenGL found). The x64 application runs under the emulation of Windows 11 too - checked on
   Windows 11 ARM64 with `--check` and `--doctor` and with the window.
 
 Logs are written in `~/Library/Logs/pyarchinit-photogrammetry` (macOS) or
-`%LOCALAPPDATA%\pyarchinit-photogrammetry\logs` (Windows); *Aiuto > Apri cartella dei log*
-opens the folder, *Aiuto > Diagnostica ambiente* runs the same checks as `ppg doctor`.
+`%LOCALAPPDATA%\pyarchinit-photogrammetry\logs` (Windows); *Help > Open the log folder*
+opens the folder, *Help > Environment diagnosis...* runs the same checks as `ppg doctor`.
 
 The application runs Python scripts too, with its own Python and modules and without the
 window, as Metashape does with `-r` (the exit code is the script's):

@@ -100,8 +100,8 @@ pytest -q
 
 ## When something does not work
 
-* `ppg doctor` (in the window: *Aiuto > Diagnostica ambiente*) lists versions and known problems.
-* The log of the window: *Aiuto > Apri cartella dei log*.
+* `ppg doctor` (in the window: *Help > Environment diagnosis...*) lists versions and known problems.
+* The log of the window: *Help > Open the log folder*.
 * `ppg-gui` does nothing: an older copy installed in another Python comes first on `PATH`
   (`which ppg-gui` must point inside the environment).
 * More in [Packaging](packaging.md) and in the

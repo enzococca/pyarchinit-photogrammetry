@@ -13,6 +13,11 @@ from . import rinex
 
 STATUS = {50: "fix", 34: "float", 16: "single", 0: "none"}
 
+# where a position comes from (``meta["gnss"]["source"]``) when the drone's own RTK gave it: the XMP of a DJI photo, a
+# Timestamp.MRK. The one definition of the two names: projects keep them, so their values never change
+SOURCE_XMP = "dji_xmp"
+SOURCE_MRK = "dji_mrk"
+
 _STD_KEYS = ("RtkStdLon", "RtkStdLat", "RtkStdHgt")
 
 

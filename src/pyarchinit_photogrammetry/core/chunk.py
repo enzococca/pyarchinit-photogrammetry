@@ -160,6 +160,7 @@ class Chunk:
         the RTK state in the XMP of DJI photos, else it is [5, 5, 10] m. With *only the fix positions* on, the
         references of the photos added are switched off unless they are RTK fixes."""
         from ..gnss.apply import accuracy, keep_only_fix, set_camera_position
+        from ..gnss.dji import SOURCE_XMP
         from ..io.exif import read_exif
 
         files: list[Path] = []
@@ -183,7 +184,7 @@ class Chunk:
             if info.get("gps"):
                 rtk = info.get("rtk") or {}
                 set_camera_position(cam, info["gps"], "EPSG:4326", accuracy(rtk.get("status"), rtk.get("std")),
-                                    "dji_xmp" if rtk else "exif", status=rtk.get("status"),
+                                    SOURCE_XMP if rtk else "exif", status=rtk.get("status"),
                                     extra={k: v for k, v in rtk.items() if k != "status"})
             self.cameras.append(cam)
             added.append(cam)

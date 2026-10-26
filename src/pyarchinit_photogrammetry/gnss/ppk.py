@@ -29,7 +29,7 @@ QUALITY = {1: "fix", 2: "float", 3: "sbas", 4: "dgps", 5: "single", 6: "ppp"}  #
 # the status of a position by RTKLIB's Q, as for the RTK flag of a DJI photo - the one table of it, also for the Q
 # column of a positions file: dgps counts as float; any other Q (sbas, ppp, none) as single
 STATUS = {1: "fix", 2: "float", 4: "float", 5: "single"}
-_RANK = {"fix": 0, "float": 1, "single": 2}  # the statuses from the best to the worst
+RANK = {"fix": 0, "float": 1, "single": 2}  # the statuses from the best to the worst
 
 MAX_GAP_S = 1.0  # a time between two epochs further apart than this has no position: none is guessed across a gap
 # a typed position of a base this far from the position of its RINEX header (horizontally, in height, metres) is
@@ -272,7 +272,7 @@ def status(q: int) -> str:
 def _worse(qa: np.ndarray, qb: np.ndarray) -> np.ndarray:
     """Of the qualities ``qa`` and ``qb`` (RTKLIB's Q), the one whose status is worse (fix, float, single); of two with
     the same status the larger."""
-    ra, rb = (np.array([_RANK[status(v)] for v in qs], dtype=int) for qs in (qa, qb))
+    ra, rb = (np.array([RANK[status(v)] for v in qs], dtype=int) for qs in (qa, qb))
     return np.where((rb > ra) | ((rb == ra) & (qb > qa)), qb, qa)
 
 
@@ -651,10 +651,10 @@ def solve(rover: str | Path, base: str | Path, navs=None, base_position: Sequenc
     warnings.append(antenna_warning(base_record["name"], base_info))
 
     folder = Path(folder)
-    for source in (rover, base, *(path for path, _ in nav_files)):  # the files of a run are replaced and removed
+    for source in (rover, base, *(path for path, _ in nav_files)):  # the program writes and deletes files in there
         if inside(source, folder):
-            raise ValueError(f"{source} is in {folder}, the work folder of the PPK, whose files are replaced at every "
-                             f"run: move it out of {folder} first")
+            raise ValueError(f"{source} is in {folder}, the work folder of the PPK, where the program writes and "
+                             f"deletes files: move it out of {folder} first")
     folder.mkdir(parents=True, exist_ok=True)
     work = Path(_rtklib_folder(folder))
     copies = work / INPUTS_FOLDER  # RTKLIB matches the names of its inputs ignoring the case: nothing else in there

@@ -252,6 +252,38 @@ def test_mrk_matched_by_shot_number_and_by_order(tmp_path):
     assert _snapshot(ch) == again
 
 
+def test_the_sources_of_the_drones_own_rtk_have_one_name_in_every_writer(tmp_path):
+    """Where the drone's own RTK puts a photo is named once, in ``dji``, and written into projects: the XMP of a photo
+    added to a chunk, the XMP of a band of a multispectral capture and a Timestamp.MRK write that name, and the table
+    of the onboard fixes reads the same."""
+    from pyarchinit_photogrammetry.engine import multispectral as ms
+
+    assert (dji.SOURCE_XMP, dji.SOURCE_MRK) == ("dji_xmp", "dji_mrk")  # what saved projects hold: never changes
+    assert gnss_apply.ONBOARD_SOURCES == (dji.SOURCE_XMP, dji.SOURCE_MRK)
+    rtk = 'drone-dji:RtkFlag="{}" drone-dji:RtkStdLon="0.004" drone-dji:RtkStdLat="0.004" drone-dji:RtkStdHgt="0.009">'
+    fix = _jpeg(tmp_path / "fix.jpg", _xmp(rtk.format(50)))
+    plain = _jpeg(tmp_path / "plain.jpg", None)
+    band = _jpeg(tmp_path / "band.jpg", _xmp(rtk.format(34)))
+
+    # the XMP of a photo added with the photos
+    ch = ppg.Document().add_chunk()
+    cams = {c.label: c for c in ch.add_photos([fix, plain])}
+    assert cams["fix"].meta["gnss"]["source"] == dji.SOURCE_XMP and gnss_apply.onboard_fix(cams["fix"])
+    assert cams["plain"].meta["gnss"]["source"] == "exif" and gnss_apply.onboard_state(cams["plain"]) is None
+    # the XMP of the band a multispectral capture takes its RTK state from
+    ms._keep_rtk(cams["plain"], band)
+    assert cams["plain"].meta["gnss"]["source"] == dji.SOURCE_XMP and cams["plain"].meta["gnss"]["status"] == "float"
+    assert gnss_apply.onboard_state(cams["plain"]) == "float" and not gnss_apply.onboard_fix(cams["plain"])
+    # a Timestamp.MRK: fix, single, float
+    folder = _flight(tmp_path / "100MEDIA", [f"DJI_{i:04d}.JPG" for i in (1, 2, 3)])
+    ch = ppg.Document().add_chunk()
+    ch.add_photos([folder])
+    gnss_apply.apply_mrk(ch, folder / "Timestamp.MRK")
+    assert [c.meta["gnss"]["source"] for c in ch.cameras] == [dji.SOURCE_MRK] * 3
+    assert [gnss_apply.onboard_state(c) for c in ch.cameras] == ["fix", "single", "float"]
+    assert [gnss_apply.onboard_fix(c) for c in ch.cameras] == [True, False, False]
+
+
 def test_mrk_missing_a_shot_never_moves_the_others(tmp_path):
     names = [f"DJI_{i:04d}.JPG" for i in (1, 2, 3, 4)]
     first, second, third = MRK_LINES.splitlines(keepends=True)

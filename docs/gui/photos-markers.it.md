@@ -188,7 +188,10 @@ sono a più di 10 cm (mediana) da dove il PPK mette gli stessi scatti (anche in 
 ellissoidiche, come in un MRK; solo in pianta per la quota di un EXIF), un avviso dice che cosa vuol dire
 probabilmente: la base in un sistema di riferimento diverso da quello delle correzioni RTK del drone (una rete in ETRF
 e una base in ITRF, o il contrario) o in una posizione sbagliata, e il volo ora li mescola - controlla la posizione
-della base, o calcola di nuovo sostituendo anche i fix di bordo.
+della base, o calcola di nuovo sostituendo anche i fix di bordo. Una foto che non è fix non sta sempre meglio con il
+PPK: quando prende uno stato peggiore di quello che le aveva dato il drone (un float di bordo che nel PPK è singola),
+un avviso conta quelle foto - la posizione PPK si usa lo stesso - e vanno controllati la base, la sua distanza dal volo
+e le sue osservazioni.
 
 **Il risultato.** Una foto prende l'antenna della soluzione all'ora del suo scatto (un'epoca, o la retta fra due
 epoche distanti al massimo un secondo) più il braccio di leva del suo scatto nell'MRK; lo stato viene dalla qualità

@@ -651,8 +651,8 @@ class PpkDialog(QDialog):
         if self.work is not None:
             for path in (rover, base, *navs):
                 if ppk.inside(path, self.work):
-                    return tr("{0} è nella cartella di lavoro del PPK ({1}), i cui file si sostituiscono a ogni "
-                              "calcolo: spostalo fuori da lì.", path.name, str(self.work))
+                    return tr("{0} è nella cartella di lavoro del PPK ({1}), dove il programma scrive e cancella "
+                              "file: spostalo fuori da lì.", path.name, str(self.work))
         if self.typed.isChecked():
             typed = self._typed_position()
             return typed if isinstance(typed, str) else None

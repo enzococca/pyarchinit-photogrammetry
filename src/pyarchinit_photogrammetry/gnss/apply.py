@@ -24,16 +24,23 @@ ZONE_MAX_S = 14 * 3600.0  # ... and never more than 14 hours
 # a PPK solution that puts the antenna this far (median, m) from the drone's own positions in the MRK: a warning
 FAR_FROM_MRK_M = 50.0
 # where the drone's own RTK puts a photo: the XMP of a DJI photo (added with the photos) and a DJI Timestamp.MRK
-ONBOARD_SOURCES = ("dji_xmp", "dji_mrk")
+ONBOARD_SOURCES = (dji.SOURCE_XMP, dji.SOURCE_MRK)
 # onboard RTK fixes kept beside PPK positions this far (median, m) from the PPK positions of the same shots: a warning
 FIX_DISAGREES_M = 0.10
+
+
+def onboard_state(cam: Camera) -> str | None:
+    """The RTK state (``"fix"``, ``"float"``, ``"single"``, ...) the drone itself gave the position of ``cam``: from the
+    XMP of a DJI photo or from a DJI ``Timestamp.MRK`` (:data:`ONBOARD_SOURCES`); None for a position from anywhere
+    else."""
+    gnss = cam.meta.get("gnss") or {}
+    return gnss.get("status") if gnss.get("source") in ONBOARD_SOURCES else None
 
 
 def onboard_fix(cam: Camera) -> bool:
     """The position of ``cam`` is an RTK fix of the drone itself: from the XMP of a DJI photo or from a DJI
     ``Timestamp.MRK`` (:data:`ONBOARD_SOURCES`), with the status ``"fix"``."""
-    gnss = cam.meta.get("gnss") or {}
-    return gnss.get("source") in ONBOARD_SOURCES and gnss.get("status") == "fix"
+    return onboard_state(cam) == "fix"
 
 
 def _length(metres: float) -> str:
@@ -85,7 +92,8 @@ def apply_mrk(chunk: Chunk, mrk_path: str | Path, photos_folder: str | Path | No
         state = dji.STATUS.get(shot.flag, "unknown")
         north, east, vertical = shot.std
         set_camera_position(cam, list(dji.camera_position(shot)), "EPSG:4979",
-                            accuracy(state, [east, north, vertical]), "dji_mrk", status=state, height="ellipsoidal",
+                            accuracy(state, [east, north, vertical]), dji.SOURCE_MRK, status=state,
+                            height="ellipsoidal",
                             extra=_shot_record(pairing.mrk, shot, [shot.lon, shot.lat, shot.ellh]))
         placed.append((f, shot, state))
     return _result(pairing, placed)
@@ -119,8 +127,9 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
     put it in the MRK (the observations of the base taken for the rover's, those of another receiver), a base more
     than :data:`.ppk.BASELINE_WARNING_KM` from the flight, a base typed elsewhere for other photos of the chunk
     (:func:`.ppk.other_typed_position`), the onboard fixes kept more than :data:`FIX_DISAGREES_M` (median, in height
-    too when both heights are ellipsoidal) from the PPK positions of the same shots, and the onboard fixes replaced by
-    positions that are not fix."""
+    too when both heights are ellipsoidal) from the PPK positions of the same shots, the onboard fixes replaced by
+    positions that are not fix, and the photos whose onboard float (a DJI XMP or MRK) is single in the PPK, which take
+    the PPK position all the same."""
     pairing = _pair_shots(chunk, mrk_path, photos_folder)
     name = Path(solution.path).name
     times = np.asarray(solution.times, dtype=np.float64)
@@ -134,8 +143,9 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
     llh, q, sd, ok = ppk.at(solution, [shot.gps_time for _f, shot, _cam in pairing.kept])
     positions, apart = [], []  # all of them first: nothing changes when something goes wrong
     kept, disagree, downgraded = [], [], 0  # the onboard fixes kept, their distance from the PPK, those replaced worse
+    worse = 0  # the photos whose onboard float or single is better than the state the PPK gives them
     for (f, shot, cam), antenna, quality, deviations, found in zip(pairing.kept, llh, q, sd, ok):
-        onboard = onboard_fix(cam)
+        onboard, before = onboard_fix(cam), onboard_state(cam)
         if not found:
             if onboard and not replace_fix:
                 kept.append((f, shot))
@@ -153,6 +163,8 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
             continue
         if onboard and state != "fix":
             downgraded += 1
+        elif before in ("float", "single") and ppk.RANK[state] > ppk.RANK[before]:
+            worse += 1
         extra = {**_shot_record(pairing.mrk, shot, [lon, lat, h]), "q": int(quality),
                  "base": copy.deepcopy(solution.base), "rover": solution.rover, "solution": name}
         positions.append((f, shot, cam, location, accuracy(state, [float(v) for v in deviations]), state, extra))
@@ -199,6 +211,12 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
         photos = f"{downgraded} photos" if downgraded > 1 else "1 photo"
         warnings.append(f"{photos} had an onboard RTK fix and now {'have' if downgraded > 1 else 'has'} a PPK "
                         "position that is not fix (float or single)")
+    if worse:
+        photos = f"{worse} photos" if worse > 1 else "1 photo"
+        warnings.append(f"{photos} got a worse state from the PPK than from the drone's own RTK (float onboard, single "
+                        f"in the PPK): {'their PPK positions are' if worse > 1 else 'its PPK position is'} used all "
+                        "the same. The base may be too far from the flight or share too few satellites with the "
+                        "drone: check its distance and its observations")
     if placed:
         _remember(chunk, mrk_path, photos_folder, solution, replace_fix)
     return {**_result(pairing, placed, kept), "kept_fix": len(kept), "baseline_km": baseline, "warnings": warnings}

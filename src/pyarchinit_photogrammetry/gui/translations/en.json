@@ -3132,7 +3132,7 @@
   "{0} {1} ({2:,} punti)": "{0} {1} ({2:,} points)",
   "{0} {1} ({2} punti)": "{0} {1} ({2} points)",
   "{0} {1} installato: si attiva al prossimo avvio.": "{0} {1} installed: it becomes active at the next start.",
-  "{0} è nella cartella di lavoro del PPK ({1}), i cui file si sostituiscono a ogni calcolo: spostalo fuori da lì.": "{0} is in the work folder of the PPK ({1}), whose files are replaced at every computation: move it out of there.",
+  "{0} è nella cartella di lavoro del PPK ({1}), dove il programma scrive e cancella file: spostalo fuori da lì.": "{0} is in the work folder of the PPK ({1}), where the program writes and deletes files: move it out of there.",
   "{0}% piu' {1}": "{0}% {1}",
   "{0}, pulita": "{0}, cleaned",
   "{0}, versione: {1}": "{0}, version: {1}",
