@@ -709,6 +709,67 @@ def test_config_refuses_what_rtklib_cannot_take(arguments, match):
         ppk.config(**arguments)
 
 
+def _rtklib_options_table() -> list[tuple[str, int, str]]:
+    """RTKLIB's table of options (sysopts of options.c) in its order: the name, the format (0 integer, 1 number,
+    2 text, 3 one of a list) and the comment, which for a list is its "number:label" items."""
+    source = (Path(__file__).parents[1] / "native" / "vendor" / "rtklib" / "src" / "options.c").read_text()
+    macros = dict(re.findall(r'^#define\s+(\w+)\s+"([^"]*)"', source, re.MULTILINE))
+    table = source[source.index("opt_t sysopts[]"):]
+    table = table[:table.index("};")]
+    entries = re.findall(r'\{"([^"]+)",\s*(\d+),\s*\(void \*\)[^,]*,\s*(\w+|"[^"]*")\s*\}', table)
+    return [(name, int(kind), macros[comment] if comment in macros else comment.strip('"'))
+            for name, kind, comment in entries]
+
+
+def _rtklib_enum(value: str, comment: str) -> int | None:
+    """The number RTKLIB's str2enum (options.c) gives ``value`` from a comment like "0:off,1:on": the digits before
+    the ":" that comes before the first match of ``value`` that has them, or a number written as such; None when
+    RTKLIB refuses the value (and keeps its default)."""
+    start = 0
+    while (i := comment.find(value, start)) >= 0:
+        start = i + 1
+        digits = re.search(r"(\d+):$", comment[:i])
+        if digits:
+            return int(digits.group(1))
+    i = comment.find(value[:30] + ":")
+    number = re.match(r"\d+", comment[i:]) if i >= 0 else None
+    return int(number.group()) if number else None
+
+
+def test_every_value_config_writes_is_one_rtklib_takes():
+    # RTKLIB skips an option it does not know and keeps its default for a value it cannot read, with only a message
+    # on stderr: every line of every kind of options file must be taken as meant
+    table = _rtklib_options_table()
+    assert len(table) > 100 and ("pos1-posmode", 3, "0:single,1:dgps,2:kinematic,3:static,4:static-start,5:movingbase,"
+                                 "6:fixed,7:ppp-kine,8:ppp-static,9:ppp-fixed") in table
+    texts = [ppk.config(None), ppk.config((35.16, 139.61, 70.0)), ppk.config((-33.9, 151.2, -10.5), elevation_mask=0.0),
+             ppk.config(None, elevation_mask=89.5)]
+    texts += [ppk.config((45.0, 11.0, 50.0), mode=mode) for mode in ppk.MODES]
+    texts += [ppk.config((45.0, 359.9, 100.0), systems=systems) for systems in ("all", "G", "GRECJIS", ["c", "G"],
+                                                                                "JIS", "E,R")]
+    seen = set()
+    for text in texts:
+        for name, value in _options(text).items():
+            # RTKLIB takes the first option whose name holds the one written (searchopt): it must be that one
+            option = next(entry for entry in table if name in entry[0])
+            assert option[0] == name, (name, option[0])
+            kind, comment = option[1], option[2]
+            if kind == 3:
+                labels = {label: int(number) for number, label in (item.split(":", 1) for item in comment.split(","))}
+                assert value in labels and _rtklib_enum(value, comment) == labels[value], (name, value, comment)
+            elif kind == 0:
+                bits = sum(int(n) for n in re.findall(r"(\d+):", comment)) if ":" in comment else None
+                assert re.fullmatch(r"\d+", value) and (bits is None or int(value) & ~bits == 0), (name, value)
+            elif kind == 1:
+                assert math.isfinite(float(value)), (name, value)
+            seen.add((name, value))
+    assert ("pos1-posmode", "static-start") in seen and ("ant2-postype", "rinexhead") in seen
+    assert ("pos1-navsys", "127") in seen and ("ant2-anttype", "*") in seen
+    # the reader of the test refuses what RTKLIB refuses, and does not take a label for a longer one
+    assert _rtklib_enum("kinematik", "0:single,1:dgps,2:kinematic") is None
+    assert _rtklib_enum("combined", "0:forward,1:backward,2:combined,3:combined-nophasereset") == 2
+
+
 # --- solution files ---------------------------------------------------------------------------------------------
 
 POS_LEGEND = ("% (lat/lon/height=WGS84/ellipsoidal,Q=1:fix,2:float,3:sbas,4:dgps,5:single,6:ppp,"
@@ -824,8 +885,9 @@ def test_read_pos_refuses_what_is_not_a_solution_in_ellipsoidal_heights(tmp_path
 
 
 def _fake_rnx2rtkp(folder: Path) -> Path:
-    """A stand-in for rnx2rtkp: appends to run.log beside it a JSON line with its arguments, the options file and the
-    SHA-256 of every input (the inputs as RTKLIB would find them), copies the file named by PPG_FAKE_POS to its -o
+    """A stand-in for rnx2rtkp: appends to run.log beside it a JSON line with its arguments, the options file, what
+    the folder of the first input holds and the SHA-256 of every input (the inputs as RTKLIB would find them),
+    copies the file named by PPG_FAKE_POS to its -o
     file (none: no output, as RTKLIB when it computed nothing), writes PPG_FAKE_MESSAGE to stderr as rnx2rtkp writes
     its messages and exits with PPG_FAKE_EXIT."""
     script = folder / "rnx2rtkp"
@@ -834,7 +896,7 @@ def _fake_rnx2rtkp(folder: Path) -> Path:
 import hashlib, json, os, shutil, sys
 args = sys.argv[1:]
 conf, out, files = args[args.index("-k") + 1], args[args.index("-o") + 1], args[4:]
-entry = {{"args": args, "options": open(conf).read(),
+entry = {{"args": args, "options": open(conf).read(), "folder": sorted(os.listdir(os.path.dirname(files[0]))),
           "inputs": [hashlib.sha256(open(f, "rb").read()).hexdigest() for f in files]}}
 open({str(log)!r}, "a").write(json.dumps(entry) + "\\n")
 if os.environ.get("PPG_FAKE_POS"):
@@ -896,22 +958,27 @@ def test_solve_gives_rtklib_plain_copies_of_the_inputs(tmp_path, fake_rtklib):
     solution = ppk.solve(rover, base, [nav], folder=work)
 
     (run,) = fake_rtklib()
-    expected = [str(work.resolve() / name) for name in ("rover.obs", "base.obs", "nav1.nav")]
+    copies = work.resolve() / ppk.INPUTS_FOLDER
+    expected = [str(copies / name) for name in ("rover.obs", "base.obs", "nav1.nav")]
     assert run["args"] == ["-k", str(work.resolve() / "ppk.conf"), "-o", str(work.resolve() / "solution.pos"),
                            *expected]
+    assert run["folder"] == ["base.obs", "nav1.nav", "rover.obs"]  # the copies, nothing else
     # the copies RTKLIB read are the user's files, the base decompressed
     assert run["inputs"] == [_sha256(PPK_ROVER.read_bytes()), _sha256(PPK_BASE.read_bytes()),
                              _sha256(PPK_NAV.read_bytes())]
-    assert _options(run["options"]) == _options(ppk.config(None))
+    # the base from its header is written as its position, as a typed one (RTKLIB 2.4.3 would add the antenna height
+    # of the header twice with rinexhead)
+    mark = list(rinex.ecef_to_llh(rinex.header(PPK_BASE).approx_xyz))
+    options = _options(run["options"])
+    assert options == _options(ppk.config(mark)) and options["ant2-postype"] == "llh"
     # the copies are gone, the options and the solution stay; the user's folder is as it was
     assert sorted(p.name for p in work.iterdir()) == ["ppk.conf", "solution.pos"]
     assert _user_files(user) == before
     # the solution: the rows of the file, where it is, the base from its header with the warning
     _check_rows(solution)
     assert solution.path == work.resolve() / "solution.pos"
-    assert solution.base["name"] == "0759" and solution.base["file"] == "base è.05o.gz"
-    assert solution.base["position_source"] == "header"
-    assert solution.base["position"] == pytest.approx(list(rinex.ecef_to_llh(rinex.header(PPK_BASE).approx_xyz)))
+    assert solution.base == {"name": "0759", "position": pytest.approx(mark), "position_source": "header",
+                             "antenna_delta_hen": [0.0, 0.0, 0.0], "file": "base è.05o.gz"}
     assert len(solution.warnings) == 1
     assert "0759" in solution.warnings[0] and "header" in solution.warnings[0] and "metres" in solution.warnings[0]
 
@@ -923,7 +990,7 @@ def test_solve_with_a_typed_base_position(tmp_path, fake_rtklib):
     assert options["ant2-postype"] == "llh"
     assert [float(options[f"ant2-pos{i}"]) for i in (1, 2, 3)] == [35.16, 139.61, 70.0]
     assert solution.base == {"name": "0759", "position": [35.16, 139.61, 70.0], "position_source": "typed",
-                             "file": "07590920.05o"}
+                             "antenna_delta_hen": [0.0, 0.0, 0.0], "file": "07590920.05o"}
     assert solution.warnings == []
     with pytest.raises(ValueError, match="latitude"):
         ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], (135.16, 139.61, 70.0), folder=work)
@@ -1050,13 +1117,74 @@ def test_solve_refuses_a_gzip_file_cut_short(tmp_path, fake_rtklib):
     assert fake_rtklib() == [] and sorted(p.name for p in work.iterdir()) == ["ppk.conf"]  # no copy left behind
 
 
-def test_solve_never_takes_a_users_file_for_its_copy(tmp_path, fake_rtklib):
-    # the user's own rover.obs in the folder given as the work folder: never emptied, never removed
-    rover = tmp_path / "rover.obs"
-    shutil.copyfile(PPK_ROVER, rover)
-    with pytest.raises(ValueError, match="work folder"):
-        ppk.solve(rover, PPK_BASE, [PPK_NAV], folder=tmp_path)
-    assert rover.read_bytes() == PPK_ROVER.read_bytes() and fake_rtklib() == []
+def _ignores_case(folder: Path) -> bool:
+    """The file system of ``folder`` takes names in any letter case for the same file (macOS, Windows)."""
+    probe = folder / "case_probe"
+    probe.write_text("")
+    try:
+        return (folder / "CASE_PROBE").exists()
+    finally:
+        probe.unlink()
+
+
+def test_solve_refuses_inputs_inside_the_work_folder(tmp_path, fake_rtklib):
+    # the files of a run in the work folder are replaced and removed: no input may be there, under any name
+    work = tmp_path / "work"
+    (work / "data").mkdir(parents=True)
+    named_as_a_copy = work / "base.obs"  # a rover under the name of the base's copy
+    nested_rover, nested_nav = work / "data" / "rover.obs", work / "data" / "nav.05n"
+    for path, original in ((named_as_a_copy, PPK_ROVER), (nested_rover, PPK_ROVER), (nested_nav, PPK_NAV)):
+        shutil.copyfile(original, path)
+    for rover, nav, misplaced in ((named_as_a_copy, PPK_NAV, named_as_a_copy), (nested_rover, PPK_NAV, nested_rover),
+                                  (PPK_ROVER, nested_nav, nested_nav)):
+        with pytest.raises(ValueError, match="work folder") as error:
+            ppk.solve(rover, PPK_BASE, [nav], folder=work)
+        assert str(misplaced) in str(error.value)
+    if _ignores_case(tmp_path):  # the work folder written in another letter case is the same folder
+        with pytest.raises(ValueError, match="work folder"):
+            ppk.solve(named_as_a_copy, PPK_BASE, [PPK_NAV], folder=tmp_path / "WORK")
+    assert named_as_a_copy.read_bytes() == nested_rover.read_bytes() == PPK_ROVER.read_bytes()
+    assert nested_nav.read_bytes() == PPK_NAV.read_bytes()
+    assert fake_rtklib() == [] and sorted(p.name for p in work.iterdir()) == ["base.obs", "data"]
+
+
+def test_solve_runs_rtklib_on_a_folder_of_its_copies_only(tmp_path, fake_rtklib):
+    # what an earlier run (or anyone) left among the copies: RTKLIB matches the names of its inputs ignoring the case,
+    # so a Rover.OBS beside rover.obs would be read as a second rover on a file system that tells them apart
+    work = tmp_path / "work"
+    copies = work / ppk.INPUTS_FOLDER
+    (copies / "old").mkdir(parents=True)
+    (copies / "Rover.OBS").write_bytes(PPK_BASE.read_bytes())
+    (copies / "nav7.nav").write_bytes(PPK_NAV.read_bytes())
+    (copies / "old" / "rover.obs").write_text("x")
+    (work / "notes.txt").write_text("the work folder itself is not emptied")
+    ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], folder=work)
+    assert fake_rtklib()[-1]["folder"] == ["base.obs", "nav1.nav", "rover.obs"]
+    assert sorted(p.name for p in work.iterdir()) == ["notes.txt", "ppk.conf", "solution.pos"]
+    if os.name != "nt":  # a link in place of the folder of the copies: the link goes, what it points to stays
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "keep.txt").write_text("not RTKLIB's")
+        copies.symlink_to(elsewhere, target_is_directory=True)
+        ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], folder=work)
+        assert fake_rtklib()[-1]["folder"] == ["base.obs", "nav1.nav", "rover.obs"]
+        assert sorted(p.name for p in elsewhere.iterdir()) == ["keep.txt"] and not copies.exists()
+
+
+def test_solve_records_the_antenna_height_of_the_base(tmp_path, fake_rtklib):
+    """The antenna above the mark in the base's RINEX header, which RTKLIB adds to the position of the mark: in the
+    base of the solution, so that it can be shown ("mark + 1.80 m from the RINEX header")."""
+    raised = _raised_base(tmp_path, 1.8)
+    for position in (None, (35.16, 139.61, 70.0)):
+        solution = ppk.solve(PPK_ROVER, raised, [PPK_NAV], position, folder=tmp_path / "work")
+        assert solution.base["antenna_delta_hen"] == [1.8, 0.0, 0.0]
+        assert _options(fake_rtklib()[-1]["options"])["ant2-anttype"] == "*"  # RTKLIB adds it
+    # a header without the line
+    header = [h for h in V2_HEADER if not h.endswith("ANTENNA: DELTA H/E/N")]
+    base = _rinex2(tmp_path / "base.24o", header)
+    rover = _rinex2(tmp_path / "rover.24o", V2_HEADER)
+    solution = ppk.solve(rover, base, [PPK_NAV], (45.0, 11.0, 50.0), folder=tmp_path / "work")
+    assert solution.base["antenna_delta_hen"] is None
 
 
 def test_the_work_folder_rtklib_is_given(tmp_path, monkeypatch):
@@ -1148,8 +1276,8 @@ def test_static_solution_of_the_rtklib_data(tmp_path, monkeypatch):
 @needs_rtklib
 def test_solve_on_rtklib_data(tmp_path, monkeypatch):
     """solve with the rover moving (kinematic, as a drone), the navigation file found beside the rover: a row for
-    every epoch in GPS seconds, at least a quarter of them fixed, the fixed ones where the static solution puts the
-    station. The base at the position of its header, with the warning, or typed there, without it."""
+    every epoch in GPS seconds, some of them fixed, the fixed ones where the static solution puts the station. The
+    base at the position of its header, with the warning, or typed there, without it."""
     monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
     static = _rtklib_run(tmp_path / "static")
     station = static.llh[static.q == 1].mean(axis=0)
@@ -1168,8 +1296,9 @@ def test_solve_on_rtklib_data(tmp_path, monkeypatch):
         # the copies of the inputs are gone (RTKLIB writes the time marks of the rover beside the solution)
         assert {p.name for p in solution.path.parent.iterdir()} - {"solution_events.pos"} == {"ppk.conf",
                                                                                               "solution.pos"}
+        assert fixed.sum() >= 0.10 * EPOCHS  # 38 to 115 of 120 from build to build
+        assert solution.base["antenna_delta_hen"] == [0.0, 0.0, 0.0]
         if name == "header":
-            assert fixed.sum() >= 0.25 * EPOCHS
             assert len(solution.warnings) == 1 and "0759" in solution.warnings[0] and "header" in solution.warnings[0]
         else:
             assert solution.warnings == []

@@ -1151,6 +1151,8 @@ def test_ppk_without_the_core_says_what_to_do(tmp_path, monkeypatch):
         _native.ppk_solve(str(conf), files, str(out))
     text = str(error.value)
     assert "pyarchinit-photogrammetry-core" in text and "0.5" in text and "PPG_RNX2RTKP" in text and "rnx2rtkp" in text
+    # only RTKLIB-EX: RTKLIB 2.4.3 handles the antenna of the base and some options otherwise
+    assert "RTKLIB-EX 2.5" in text and "2.4.3" not in text
     # an rnx2rtkp named by PPG_RNX2RTKP: rnx2rtkp -k options -o output files, its code and last message
     monkeypatch.setenv("PPG_RNX2RTKP", str(_fake_rnx2rtkp(tmp_path)))
     code, message = _native.ppk_solve(str(conf), files, str(out))

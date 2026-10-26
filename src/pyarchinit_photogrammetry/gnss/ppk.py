@@ -36,6 +36,7 @@ _RINEX_TIME_SYSTEMS = ("GPS", "GAL", "QZS", "IRN", "BDT", "GLO")
 # them, and decompresses some extensions with a shell command)
 OPTIONS_FILE = "ppk.conf"
 SOLUTION_FILE = "solution.pos"
+INPUTS_FOLDER = "rtklib_inputs"  # in the work folder: only the copies of a run, emptied when a run starts
 
 _FIELDS = re.compile(r"[,\s]+")  # RTKLIB separates the fields with spaces, or with out-fieldsep (a comma)
 _LEGEND = re.compile(r"lat/lon/height=([^/,)]*)/([^,)]*)")
@@ -51,7 +52,10 @@ class Solution:
     q: np.ndarray  # (N,) int: RTKLIB's quality, 1 fix, 2 float, 4 dgps, 5 single (``QUALITY``)
     ns: np.ndarray  # (N,) int: the satellites used
     sd: np.ndarray  # (N, 3): standard deviations east, north, up (m)
-    base: dict  # name, position [lat, lon, h], position_source "header" | "typed", file; empty from read_pos
+    # name; position [lat, lon, h] of the mark the base stands on; position_source "header" | "typed";
+    # antenna_delta_hen [h, e, n] (m): the antenna above the mark from the RINEX header of the base, which RTKLIB
+    # adds (None when the header has none); file. Empty from read_pos
+    base: dict
     path: Path  # the .pos file
     warnings: list[str] = field(default_factory=list)
 
@@ -99,9 +103,11 @@ def config(base_position: Sequence[float] | None, mode: str = "kinematic", eleva
     combined, the ambiguities fixed and held; the satellites ``elevation_mask`` degrees above the horizon or more, of
     the constellations ``systems`` ("all" or their letters G R E C J I S), on two frequencies. The base at
     ``base_position`` (latitude, longitude in degrees, height above the ellipsoid in metres: the mark it stands on),
-    or with None at the position of its RINEX header; either way the antenna height of its header (ANTENNA: DELTA
-    H/E/N) is added, as RINEX means it. The solution in latitude, longitude and ellipsoidal height, timed in GPS
-    weeks and seconds of GPS time. Only option names of RTKLIB's table, no file of any kind."""
+    to which RTKLIB adds the antenna height of the base's RINEX header (ANTENNA: DELTA H/E/N), as RINEX means it.
+    With None the base is at the position of its RINEX header (rinexhead): RTKLIB-EX adds the antenna height once
+    then too, RTKLIB 2.4.3 twice, which is why ``solve`` always writes the position. The solution in latitude,
+    longitude and ellipsoidal height, timed in GPS weeks and seconds of GPS time. Only option names of RTKLIB's
+    table, no file of any kind."""
     if mode not in MODES:
         raise ValueError(f"positioning mode {mode!r}: it is one of {', '.join(MODES)}")
     mask = float(elevation_mask)
@@ -313,18 +319,37 @@ def _navigation(navs, rover: Path, base: Path) -> list[tuple[Path, rinex.RinexIn
 def _base(path: Path, info: rinex.RinexInfo, position: Sequence[float] | None) -> tuple[dict, str | None]:
     """The base of the solution, typed or from its header, and the warning for a position from the header."""
     stem = path.name[:-3] if path.name.lower().endswith(".gz") else path.name
-    name = info.marker or Path(stem).stem
+    record = {"name": info.marker or Path(stem).stem, "position": None, "position_source": None,
+              "antenna_delta_hen": None if info.antenna_delta_hen is None else list(info.antenna_delta_hen),
+              "file": path.name}
     if position is not None:
-        return {"name": name, "position": list(_base_position(position)), "position_source": "typed",
-                "file": path.name}, None
+        return {**record, "position": list(_base_position(position)), "position_source": "typed"}, None
     if info.approx_xyz is None:
         raise ValueError(f"the base {path.name} has no position in its RINEX header: type the position of the mark it "
                          "stands on (latitude, longitude, height above the ellipsoid)")
     lat, lon, h = rinex.ecef_to_llh(info.approx_xyz)
-    warning = (f"the position of the base {name} comes from its RINEX header ({lat:.7f}, {lon:.7f}, {h:.2f} m): it "
-               "can be metres off, and the whole survey moves with it. Type the surveyed position of the base for "
-               "an accurate absolute position")
-    return {"name": name, "position": [lat, lon, h], "position_source": "header", "file": path.name}, warning
+    warning = (f"the position of the base {record['name']} comes from its RINEX header ({lat:.7f}, {lon:.7f}, "
+               f"{h:.2f} m): it can be metres off, and the whole survey moves with it. Type the surveyed position of "
+               "the base for an accurate absolute position")
+    return {**record, "position": [lat, lon, h], "position_source": "header"}, warning
+
+
+def _inside(path: Path, folder: Path) -> bool:
+    """``path`` is in ``folder`` (or in a folder inside it), also when the two are written differently (letter case
+    on a file system that ignores it, links)."""
+    path, folder = path.resolve(), folder.resolve()
+    if path.is_relative_to(folder):
+        return True
+    return folder.is_dir() and any(parent.is_dir() and os.path.samefile(parent, folder) for parent in path.parents)
+
+
+def _fresh_folder(path: Path) -> None:
+    """``path`` as an empty folder, without what an earlier run left in it."""
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+    path.mkdir()
 
 
 def _copy(source: Path, target: Path, compressed: str | None) -> None:
@@ -344,14 +369,17 @@ def solve(rover: str | Path, base: str | Path, navs=None, base_position: Sequenc
     """The PPK solution of the antenna of ``rover`` (its RINEX observations) against ``base`` (the RINEX observations
     of a base), with the navigation files ``navs`` (one or more; None: those beside the rover, or beside the base
     when the rover has none, as a DJI drone does not always write one). The base at ``base_position`` (latitude,
-    longitude, height above the ellipsoid: the mark it stands on, see ``config``) or, with None, at the position of
-    its RINEX header, with a warning: that one can be metres off. Before RTKLIB runs, a ``ValueError`` when the rover
-    and the base have no time in common, when there is no navigation file or when the base has no position.
+    longitude, height above the ellipsoid of the mark it stands on) or, with None, at the position of its RINEX
+    header, with a warning: that one can be metres off. Either way RTKLIB adds the antenna height of the base's
+    header, recorded in ``Solution.base["antenna_delta_hen"]``. Before RTKLIB runs, a ``ValueError`` when the rover
+    and the base have no time in common, when there is no navigation file, when the base has no position or when an
+    input is in ``folder``.
 
     RTKLIB works in ``folder`` (made when missing; a folder of the program: its ppk.conf and solution.pos are
-    replaced) on copies of the files with plain names, the gzip ones decompressed, removed after the run: it never
-    sees the user's names. A ``ValueError`` when RTKLIB computed nothing (with its message), a ``RuntimeError`` when
-    it stopped; a message of RTKLIB that is an error but came with positions is a warning of the solution."""
+    replaced) on copies of the files with plain names in its subfolder ``INPUTS_FOLDER``, which holds nothing else,
+    the gzip ones decompressed, removed after the run: it never sees the user's names. A ``ValueError`` when RTKLIB
+    computed nothing (with its message), a ``RuntimeError`` when it stopped; a message of RTKLIB that is an error but
+    came with positions is a warning of the solution."""
     rover, base = Path(rover), Path(base)
     rover_info, rover_span = _observations(rover, "rover")
     base_info, base_span = _observations(base, "base")
@@ -369,25 +397,26 @@ def solve(rover: str | Path, base: str | Path, navs=None, base_position: Sequenc
         warnings.append(base_warning)
 
     folder = Path(folder)
+    for source in (rover, base, *(path for path, _ in nav_files)):  # the files of a run are replaced and removed
+        if _inside(source, folder):
+            raise ValueError(f"{source} is in the work folder {folder}, whose files are replaced at every run: choose "
+                             "a work folder apart from the observations")
     folder.mkdir(parents=True, exist_ok=True)
     work = Path(_rtklib_folder(folder))
-    inputs = [(rover, rover_info, work / "rover.obs"), (base, base_info, work / "base.obs")]
-    inputs += [(path, info, work / f"nav{i}.nav") for i, (path, info) in enumerate(nav_files, 1)]
-    for source, _, target in inputs:  # copying a file onto itself would empty it, removing the copy delete it
-        if target.exists() and os.path.samefile(source, target):
-            raise ValueError(f"{source} is in the work folder of RTKLIB under the name of its copy: choose another "
-                             "work folder")
+    copies = work / INPUTS_FOLDER  # RTKLIB matches the names of its inputs ignoring the case: nothing else in there
+    inputs = [(rover, rover_info, copies / "rover.obs"), (base, base_info, copies / "base.obs")]
+    inputs += [(path, info, copies / f"nav{i}.nav") for i, (path, info) in enumerate(nav_files, 1)]
     conf, out = work / OPTIONS_FILE, work / SOLUTION_FILE
-    conf.write_text(config(base_record["position"] if base_record["position_source"] == "typed" else None),
-                    encoding="ascii")
+    # always the position, also the one of the header: RTKLIB 2.4.3 adds the antenna height twice with rinexhead
+    conf.write_text(config(base_record["position"]), encoding="ascii")
     out.unlink(missing_ok=True)  # the solution of an earlier run is not the solution of this one
     try:
+        _fresh_folder(copies)
         for source, info, target in inputs:
             _copy(source, target, info.compressed)
         code, message = _native.ppk_solve(str(conf), [str(target) for _, _, target in inputs], str(out))
     finally:
-        for _, _, target in inputs:
-            target.unlink(missing_ok=True)
+        shutil.rmtree(copies, ignore_errors=True)
     if code != 0:
         raise RuntimeError(f"RTKLIB stopped with code {code}: {message or 'no message'}")
     nothing = f"nothing was computed: {message or 'RTKLIB wrote no positions'}"

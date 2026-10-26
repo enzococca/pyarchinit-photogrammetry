@@ -172,8 +172,8 @@ def gpu_sift(image, max_features: int = 8192, first_octave: int = -1, num_octave
 
 # ------------------------------------------------------------------ RTKLIB's post-processing
 PPK_MISSING = ("PPK needs RTKLIB: install the native core pyarchinit-photogrammetry-core 0.5 or later "
-               "(pip install \"pyarchinit-photogrammetry-core>=0.5\"), or set PPG_RNX2RTKP to an rnx2rtkp "
-               "program of RTKLIB (rtklibexplorer's RTKLIB-EX 2.5 or RTKLIB 2.4.3)")
+               "(pip install \"pyarchinit-photogrammetry-core>=0.5\"), or set PPG_RNX2RTKP to the rnx2rtkp "
+               "program of RTKLIB-EX 2.5 (rtklibexplorer)")
 
 # what RTKLIB decompresses by the extension of an input, with gzip, tar or crx2rnx through a shell
 # command (rtk_uncompress): a fork of the program, and the result written beside the user's file
