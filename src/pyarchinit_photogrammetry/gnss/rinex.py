@@ -20,6 +20,11 @@ _HATANAKA_NAME = re.compile(r"\.(?:crx|\d\dd)$", re.IGNORECASE)
 _HATANAKA_MESSAGE = ("{name}: Hatanaka-compressed RINEX is not supported yet. Decompress it with CRX2RNX first "
                      "(support is planned)")
 _NOT_RINEX_MESSAGE = "{name}: not a RINEX file"
+# the archives of the stations (BKG, CDDIS...) also give their files compressed with the Unix compress (.Z) or zipped;
+# only gzip is read as it is. By the name, or by the first bytes for a file renamed
+_ARCHIVES = {".z": "compress (.Z)", ".zip": "zip"}
+_ARCHIVE_MAGIC = ((b"\x1f\x9d", "compress (.Z)"), (b"PK\x03\x04", "zip"), (b"PK\x05\x06", "zip"))
+_ARCHIVE_MESSAGE = "{name} is compressed with {kind}: decompress it first (only gzip files are read as they are)"
 
 # the first line of an epoch: RINEX 2 has a 2-digit year and no marker, RINEX 3 a "> " and a 4-digit year; the last
 # group is the epoch flag
@@ -38,6 +43,11 @@ _NAV_V2 = {"N": "G", "G": "R", "H": "S"}  # the file type of a RINEX 2 navigatio
 _NAV_YEAR_EXTENSION = re.compile(r"\.(\d\d)[ngplc]$", re.IGNORECASE)
 _OBS_YEAR_EXTENSION = re.compile(r"\.(\d\d)o$", re.IGNORECASE)
 _LONG_NAV = re.compile(r"_[A-Z]N\.rnx$", re.IGNORECASE)
+# the daily broadcast file of the IGS in RINEX 2 (brdcDDD0.YYn GPS, .YYg GLONASS), of any station's day
+_BRDC = re.compile(r"^brdc(\d{3})\d\.(\d\d)[ng]$", re.IGNORECASE)
+# the day of an observation file by its name: RINEX 2 short names ssssDDDf.YYo, RINEX 3 long names ..._YYYYDDDHHMM_...
+_OBS_SHORT_DAY = re.compile(r"^[a-z0-9]{4}(\d{3})[a-z0-9]\.(\d\d)o$", re.IGNORECASE)
+_OBS_LONG_DAY = re.compile(r"_(\d{4})(\d{3})\d{4}_", re.IGNORECASE)
 
 # GPS time minus UTC (s) from each date on: GPS time counts every second, UTC leaves out the leap seconds
 _GPS_MINUS_UTC = [(datetime(1981, 7, 1), 1), (datetime(1982, 7, 1), 2), (datetime(1983, 7, 1), 3),
@@ -166,10 +176,24 @@ def _numbers(text: str, count: int = 3, width: int = 14) -> tuple[float, ...] | 
     return values if all(math.isfinite(v) for v in values) else None
 
 
+def _archive(path: Path) -> str | None:
+    """The compression of a file that is not read as it is: Unix compress or zip, by its extension or by its first
+    bytes; None for any other file."""
+    kind = _ARCHIVES.get(path.suffix.lower())
+    if kind:
+        return kind
+    with open(path, "rb") as f:
+        start = f.read(4)
+    return next((kind for magic, kind in _ARCHIVE_MAGIC if start.startswith(magic)), None)
+
+
 def _read_header(path: Path) -> tuple[RinexInfo, bool, int | None]:
     """The header of the file, whether the systems are still to be found in the data, and the leap seconds the
     header gives (None when it gives none)."""
     name = path.name
+    kind = _archive(path)
+    if kind:
+        raise ValueError(_ARCHIVE_MESSAGE.format(name=name, kind=kind))
     if _HATANAKA_NAME.search(_without_gz(name)):
         raise ValueError(_HATANAKA_MESSAGE.format(name=name))
     labels: dict[str, list[str]] = {}
@@ -381,13 +405,46 @@ def time_span(path: str | Path) -> tuple[datetime, datetime] | None:
     return _span(path, info, leap)
 
 
+def _obs_day(name: str) -> datetime | None:
+    """The day of an observation file by its name - the day of the year of a RINEX 2 short name (``siteDDDf.YYo``) or
+    of a RINEX 3 long name (``..._YYYYDDDHHMM_...``) - or None when its name does not say."""
+    short, long = _OBS_SHORT_DAY.match(name), _OBS_LONG_DAY.search(name)
+    try:
+        if short:
+            return datetime(_year(int(short.group(2))), 1, 1) + timedelta(days=int(short.group(1)) - 1)
+        if long:
+            return datetime(int(long.group(1)), 1, 1) + timedelta(days=int(long.group(2)) - 1)
+    except ValueError:
+        return None
+    return None
+
+
+def _broadcast_day(name: str, obs: str) -> bool:
+    """``name`` is a daily broadcast file of the IGS (``brdcDDD0.YYn``, ``.YYg``) for the observation file ``obs``:
+    of its day or of the day before or after (a flight across midnight) when the name of ``obs`` gives its day, of the
+    year of its ``.YYo`` extension when only that is given, of any day otherwise."""
+    brdc = _BRDC.match(name)
+    if not brdc:
+        return False
+    day = _obs_day(obs)
+    if day is not None:
+        try:
+            broadcast = datetime(_year(int(brdc.group(2))), 1, 1) + timedelta(days=int(brdc.group(1)) - 1)
+        except ValueError:
+            return False
+        return abs((broadcast - day).days) <= 1
+    year = _OBS_YEAR_EXTENSION.search(obs)
+    return not year or year.group(1) == brdc.group(2)
+
+
 def find_companions(obs: str | Path) -> list[Path]:
     """The navigation files that go with an observation file, from the folder it is in: the files with its name
     and a navigation extension (``.nav``, ``.24n`` ``.24g`` ``.24p`` ``.24l`` ``.24c`` for the year of the
-    observations), every RINEX 3 ``*_MN.rnx`` ``*_GN.rnx`` ... of any station (a station is served by the combined
-    broadcast file ``BRDC00IGS_R_..._MN.rnx``) and every ``.nav`` (a DJI drone writes ``*_Rinex.nav`` beside
-    ``*_Rinex.obs``), each also as a .gz. Sorted; never the file itself, never a hidden file (on an external drive
-    macOS leaves a ``._x.nav`` beside every ``x.nav``)."""
+    observations), the daily broadcast files of the IGS in RINEX 2 (``brdcDDD0.24n``, ``.24g``, of the day of the
+    observations and the days around it when their name says it), every RINEX 3 ``*_MN.rnx`` ``*_GN.rnx`` ... of any
+    station (a station is served by the combined broadcast file ``BRDC00IGS_R_..._MN.rnx``) and every ``.nav`` (a DJI
+    drone writes ``*_Rinex.nav`` beside ``*_Rinex.obs``), each also as a .gz. Sorted; never the file itself, never a
+    hidden file (on an external drive macOS leaves a ``._x.nav`` beside every ``x.nav``)."""
     obs = Path(obs)
     own = _without_gz(obs.name)
     stem = own.rsplit(".", 1)[0]
@@ -402,6 +459,8 @@ def find_companions(obs: str | Path) -> list[Path]:
             found.append(entry)
         elif (year_ext and name[:year_ext.start()].lower() == stem.lower()
               and (not obs_year or year_ext.group(1) == obs_year.group(1))):
+            found.append(entry)
+        elif _broadcast_day(name, own):
             found.append(entry)
         elif _LONG_NAV.search(name):
             found.append(entry)

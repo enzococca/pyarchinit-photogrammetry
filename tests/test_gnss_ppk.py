@@ -571,6 +571,48 @@ def test_companions_of_an_observation_file_alone(tmp_path):
     assert rinex.find_companions(tmp_path / "site.24o") == []
 
 
+def test_companions_take_the_daily_broadcast_files_of_the_igs(tmp_path):
+    """The RINEX 2 broadcast file of the IGS (brdcDDD0.YYn GPS, .YYg GLONASS, also .gz, any letter case) beside an
+    observation file of another name: of its day and of the days around it (a flight across midnight) when the name of
+    the observations says the day, of its year when only the extension says it, any otherwise."""
+    _touch(tmp_path, "07590920.05o", "brdc0920.05n", "BRDC0920.05G", "brdc0910.05n.gz", "brdc0930.05n", "brdc0950.05n",
+           "brdc0920.04n", "brdc0920.05o", "brdc092.05n", "notes.txt")
+    # (sorted by name here: Windows sorts paths ignoring the letter case)
+    assert sorted(_names(rinex.find_companions(tmp_path / "07590920.05o"))) == [
+        "BRDC0920.05G", "brdc0910.05n.gz", "brdc0920.05n", "brdc0930.05n"]
+    # a RINEX 3 long name gives its day too; the first day of a year takes the last of the year before
+    _touch(tmp_path, "ABCD00ITA_R_20240010000_01D_30S_MO.rnx", "brdc0010.24n", "brdc3640.23n", "brdc3650.23n")
+    assert _names(rinex.find_companions(tmp_path / "ABCD00ITA_R_20240010000_01D_30S_MO.rnx")) == [
+        "brdc0010.24n", "brdc3650.23n"]
+    # only the year in the extension; no day nor year in the name of a DJI file: every broadcast file there
+    year = tmp_path / "anno"
+    year.mkdir()
+    _touch(year, "site.05o", "brdc0920.05n", "brdc2000.05g", "brdc0920.06n")
+    assert _names(rinex.find_companions(year / "site.05o")) == ["brdc0920.05n", "brdc2000.05g"]
+    dji = tmp_path / "dji"
+    dji.mkdir()
+    _touch(dji, "DJI_202405121030_012_Rinex.obs", "brdc1330.24n", "brdc0920.05n")
+    assert _names(rinex.find_companions(dji / "DJI_202405121030_012_Rinex.obs")) == ["brdc0920.05n", "brdc1330.24n"]
+
+
+@pytest.mark.parametrize("name, magic, kind", [("base.05o.Z", b"\x1f\x9d\x90", "compress (.Z)"),
+                                                ("base.05d.Z", b"\x1f\x9d\x90", "compress (.Z)"),
+                                                ("base.05o.zip", b"PK\x03\x04", "zip"),
+                                                ("BASE.ZIP", b"PK\x03\x04", "zip"),
+                                                ("base.05o", b"\x1f\x9d\x90", "compress (.Z)"),  # renamed
+                                                ("base.obs", b"PK\x03\x04", "zip")])
+def test_files_compressed_with_compress_or_zip_are_said_to_be(tmp_path, name, magic, kind):
+    """The archives of the stations give files compressed with the Unix compress (.Z) or zipped: not "not a RINEX file"
+    but what they are and what to do; a gzip file is read as it is."""
+    path = tmp_path / name
+    path.write_bytes(magic + bytes(range(256)))
+    for call in (rinex.header, rinex.time_span):
+        with pytest.raises(ValueError) as error:
+            call(path)
+        assert str(error.value) == (f"{name} is compressed with {kind}: decompress it first (only gzip files are read "
+                                    "as they are)")
+
+
 # --- the position in the header ---------------------------------------------------------------------------------
 
 
