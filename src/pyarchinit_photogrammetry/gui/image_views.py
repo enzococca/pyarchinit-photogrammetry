@@ -376,6 +376,13 @@ class _ZoomView(QGraphicsView):
         return pen
 
 
+# The style of the labels of a layer (``layer_settings[layer]["label_style"]``); None = the default of the
+# layer's kind: units in bold white 11 pt, lines and points in their own colour, the window's font.
+LABEL_STYLE_KEYS = ("font", "size", "bold", "italic", "color", "halo", "halo_color", "halo_width")
+LABEL_STYLE_DEFAULT = {"font": None, "size": None, "bold": None, "italic": False, "color": None, "halo": False,
+                       "halo_color": "#000000", "halo_width": 1.5}
+
+
 class RasterView(_ZoomView):
     """Orthomosaic or DEM in world coordinates, with drawing tools.
 
@@ -814,6 +821,8 @@ class RasterView(_ZoomView):
             label_item.setText(override)
         item.setData(0, layer)
         item.setData(1, attrs)
+        if label_item is not None:
+            self._style_label(label_item, layer, kind, item)
         lay["features"].append((item, label_item, attrs))
         self._snap_cache = None
         for it in (item, label_item):
@@ -928,7 +937,63 @@ class RasterView(_ZoomView):
             label.setFont(QFont(self.font().family(), 11, QFont.Weight.Bold))
         label.setPos(item.mapToScene(item.boundingRect().center()))
         self.scene().addItem(label)
+        layer = item.data(0)
+        if layer:
+            self._style_label(label, layer, kind, item)
         return label
+
+    def label_style(self, name: str) -> dict:
+        """The style of the labels of a layer: its own keys over :data:`LABEL_STYLE_DEFAULT`."""
+        own = (self.layer_settings.get(name) or {}).get("label_style") or {}
+        return {**LABEL_STYLE_DEFAULT, **{k: v for k, v in own.items() if k in LABEL_STYLE_KEYS}}
+
+    def _style_label(self, label, layer: str, kind: str, item) -> None:
+        """Font, colour and halo of one label, from the style of its layer (defaults by kind)."""
+        style = self.label_style(layer)
+        polygon = kind == "polygon"
+        font = QFont(style["font"] or self.font().family())
+        size = style["size"] or (11 if polygon else self.font().pointSizeF())
+        font.setPointSizeF(float(size) if size and size > 0 else 11.0)
+        bold = polygon if style["bold"] is None else bool(style["bold"])
+        font.setWeight(QFont.Weight.Bold if bold else QFont.Weight.Normal)
+        font.setItalic(bool(style["italic"]))
+        label.setFont(font)
+        if style["color"]:
+            colour = QColor(style["color"])
+        elif polygon:
+            colour = QColor("white")
+        else:
+            colour = item.brush().color() if kind == "point" else item.pen().color()
+        label.setBrush(colour)
+        if style["halo"]:
+            pen = QPen(QColor(style["halo_color"] or "#000000"))
+            pen.setWidthF(max(0.1, float(style["halo_width"] or 1.5)))
+            label.setPen(pen)
+        else:
+            label.setPen(QPen(Qt.PenStyle.NoPen))
+
+    def set_layer_label_style(self, name: str | None, style: dict | None) -> None:
+        """The style of the labels of layer ``name`` (every layer when None); ``style`` None or empty
+        puts back the default. Saved with the layer settings of the chunk, undone with Modifica > Annulla."""
+        names = [n for n in self.layer_order if n in self.layers] if name is None else [name]
+        clean = {k: v for k, v in (style or {}).items() if k in LABEL_STYLE_KEYS and v != LABEL_STYLE_DEFAULT[k]}
+        for n in names:
+            settings = self.layer_settings.setdefault(n, {})
+            if clean:
+                settings["label_style"] = dict(clean)
+            else:
+                settings.pop("label_style", None)
+            self._restyle_layer(n)
+        self.labels_changed.emit()
+        self._changed()
+
+    def _restyle_layer(self, name: str) -> None:
+        lay = self.layers.get(name)
+        if lay is None:
+            return
+        for item, label, _attrs in lay["features"]:
+            if label is not None:
+                self._style_label(label, name, lay["kind"], item)
 
     def set_layer_labels_visible(self, name: str, visible: bool) -> None:
         lay = self.layers.get(name)
@@ -961,6 +1026,7 @@ class RasterView(_ZoomView):
                     item.setData(1, attrs)
                 if label is not None:
                     label.setVisible(lay["visible"] and lay["labels_visible"])
+            self._restyle_layer(name)
 
     def features(self, name: str) -> list[dict]:
         """Attribute dicts (with the hidden ``_geom``) of a layer, in drawing order."""

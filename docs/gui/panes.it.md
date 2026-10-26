@@ -158,6 +158,12 @@ patch.
   modifica il suo attributo `etichetta`. L'etichetta personalizzata sulla mappa non cambia il numero US
   o UT dell'unità. Testi e visibilità delle etichette si salvano nel progetto per ciascun chunk e si
   ritrovano alla riapertura.
+* **Stile delle etichette** (app **1.5.4**): **Etichette > Stile delle etichette...** sceglie carattere,
+  dimensione, grassetto e corsivo, colore (o quello del layer) e un alone intorno alle lettere - un contorno
+  scuro che le rende leggibili su qualsiasi ortofoto - per le etichette del layer selezionato; **Etichette >
+  Stile di tutte le etichette...** lo fa per tutti i layer, e *Ripristina predefiniti* rimette lo stile di
+  partenza. Lo stile si salva con il chunk, vale anche per gli elementi aggiunti dopo e si annulla con
+  *Modifica > Annulla*.
 * *Scheda unità* apre la scheda PyArchInit dell'unità selezionata.
 
 <div style="clear: both"></div>

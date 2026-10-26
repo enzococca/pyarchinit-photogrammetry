@@ -238,3 +238,80 @@ def test_label_text_edit_is_one_undoable_action_even_after_redraw(trench, monkey
     if kind == "unit":
         assert w.units[0].us == "7"
 
+
+
+def test_label_style_of_a_layer_and_of_all(view):
+    """Font, size, bold, italic, colour and halo of the labels of a layer; the default comes back."""
+    from PySide6.QtCore import Qt
+
+    v = view
+    v.add_polygon([(1, 1), (2, 1), (2, 2), (1, 2)], "US 1", layer="US")
+    v.add_point(5, 5, color="#30ff60", label="Q 1", layer="Quote")
+    v.set_layer_label_style("US", {"size": 20, "bold": False, "italic": True, "color": "#ff0000",
+                                   "halo": True, "halo_color": "#000000", "halo_width": 2})
+    label = v.layers["US"]["features"][0][1]
+    assert label.font().pointSizeF() == 20 and not label.font().bold() and label.font().italic()
+    assert label.brush().color().name() == "#ff0000"
+    assert label.pen().style() != Qt.PenStyle.NoPen and label.pen().widthF() == 2
+    # a feature added later takes the style of its layer
+    v.add_polygon([(3, 3), (4, 3), (4, 4), (3, 4)], "US 2", layer="US")
+    assert v.layers["US"]["features"][1][1].font().pointSizeF() == 20
+    # the other layer keeps its own colour; "all" styles every layer
+    assert v.layers["Quote"]["features"][0][1].brush().color().name() == "#30ff60"
+    v.set_layer_label_style(None, {"size": 14})
+    assert all(f[1].font().pointSizeF() == 14 for n in ("US", "Quote") for f in v.layers[n]["features"])
+    assert v.layers["Quote"]["features"][0][1].brush().color().name() == "#30ff60"  # its colour, not set
+    # saved with the layer settings, and put back from them (project opened, undo)
+    saved = {k: dict(s) for k, s in v.layer_settings.items()}
+    v.set_layer_label_style("US", None)
+    label = v.layers["US"]["features"][0][1]
+    assert label.font().pointSizeF() == 11 and label.font().bold() and label.brush().color().name() == "#ffffff"
+    assert "label_style" not in v.layer_settings["US"]
+    v.restore_layer_settings(saved)
+    assert v.layers["US"]["features"][0][1].font().pointSizeF() == 14
+
+
+def test_label_style_dialog_from_the_layers_pane(view, monkeypatch):
+    from pyarchinit_photogrammetry.gui.panels import LabelStyleDialog, LayersPane
+
+    v = view
+    v.add_line([(3, 1), (4, 2)], label="Confine", layer="Confini")
+    pane = LayersPane()
+    pane.set_view(v)
+    dlg = LabelStyleDialog(v.label_style("Confini"), "Confini", "Helvetica")
+    dlg.size.setValue(16)
+    dlg.halo.setChecked(True)
+    style = dlg.style()
+    assert style["size"] == 16 and style["halo"] and style["color"] is None and style["bold"] is None
+
+    class Fake:
+        def __init__(self, *args):
+            pass
+
+        def exec(self):
+            return True
+
+        def style(self):
+            return style
+
+    monkeypatch.setattr(LayersPane, "LabelStyleDialog", Fake)
+    pane.edit_label_style("Confini")
+    assert v.layers["Confini"]["features"][0][1].font().pointSizeF() == 16
+    assert v.layer_settings["Confini"]["label_style"]["halo"] is True
+
+
+def test_label_style_is_undone(trench):
+    w, _, _ = trench
+    v = w.ortho_view
+    v.add_point(2480001, 4500001, label="Ingresso", layer="Punti prova")
+    w.history.reset()
+    v.set_layer_label_style("Punti prova", {"size": 18})
+    assert len(w.history.entries) == 1
+    w._redraw_overlays()
+    assert v.layers["Punti prova"]["features"][0][1].font().pointSizeF() == 18
+    w.history.undo()
+    w._redraw_overlays()
+    assert v.layers["Punti prova"]["features"][0][1].font().pointSizeF() != 18
+    w.history.redo()
+    w._redraw_overlays()
+    assert v.layers["Punti prova"]["features"][0][1].font().pointSizeF() == 18

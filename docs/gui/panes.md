@@ -153,6 +153,11 @@ stones, patches.
 * To change a label, select a feature and choose **Labels > Edit label...**, or edit its `etichetta`
   attribute. A custom map label does not change the unit's US or UT number. Label text and visibility
   are saved in the project for each chunk and restored when you reopen it.
+* **Label style** (application **1.5.4**): **Labels > Label style...** sets the font, the size, bold and
+  italic, the colour (or the colour of the layer) and a halo around the letters - a dark outline that keeps
+  them readable on any orthophoto - for the labels of the layer selected; **Labels > Style of all
+  labels...** does it for every layer, and *Restore Defaults* puts the default back. The style is saved with
+  the chunk, taken by the features added later, and undone with *Modifica > Annulla*.
 * *Unit form* opens the PyArchInit form of the unit selected.
 
 <div style="clear: both"></div>

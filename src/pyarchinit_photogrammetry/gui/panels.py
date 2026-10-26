@@ -1865,6 +1865,7 @@ class LayersPane(QWidget):
             self._labels_menu.addSeparator()
         self._labels_menu.addAction(tr("Mostra tutte"), lambda: self._set_all_labels(True))
         self._labels_menu.addAction(tr("Nascondi tutte"), lambda: self._set_all_labels(False))
+        self._labels_menu.addAction(tr("Stile di tutte le etichette..."), lambda: self.edit_label_style(None))
 
     def _add_label_actions(self, menu, name: str, index: int) -> None:
         lay = self.view.layers.get(name) if self.view is not None else None
@@ -1876,6 +1877,9 @@ class LayersPane(QWidget):
         edit = menu.addAction(tr("Modifica etichetta..."))
         edit.setEnabled(lay is not None and 0 <= index < len(lay["features"]))
         edit.triggered.connect(lambda: self.edit_feature_label(name, index))
+        style = menu.addAction(tr("Stile delle etichette..."))
+        style.setEnabled(lay is not None)
+        style.triggered.connect(lambda: self.edit_label_style(name))
 
     def _set_all_labels(self, visible: bool) -> None:
         if self.view is not None:
@@ -1895,6 +1899,18 @@ class LayersPane(QWidget):
             self.view.set_feature_attribute(name, index, "etichetta", value)
             self.attribute_edited.emit(name, index, "etichetta", value)
             self.show_attributes(name, {**self.view.features(name)[index], "_index": index})
+
+    LabelStyleDialog = None  # set below: replaced in the tests (a modal dialog)
+
+    def edit_label_style(self, name: str | None) -> None:
+        """Font, size, colour and halo of the labels of layer ``name`` (of every layer when None)."""
+        if self.view is None or (name is not None and name not in self.view.layers):
+            return
+        first = name if name is not None else next(iter(self.view.layer_order), None)
+        style = self.view.label_style(first) if first else None
+        dlg = self.LabelStyleDialog(style, translate(name) if name else None, self.font().family(), self)
+        if dlg.exec():
+            self.view.set_layer_label_style(name, dlg.style())
 
     def layer_table(self, name: str) -> tuple[list[str], list[list]]:
         """The attributes of every feature of a layer: the fields of all of them, a row each."""
@@ -2174,3 +2190,109 @@ class ProxiesPane(QWidget):
         vol = sum(e["volume_m3"] for e in entries)
         self.total.setText(tr("{0} proxy, volume totale {1:.3f} m3", len(entries), vol) if entries else
                            tr("Nessun proxy: crea i solidi delle US con 'Crea proxy'"))
+
+
+def _label_style_dialog_class():
+    from PySide6.QtWidgets import (QCheckBox, QColorDialog, QDialog, QDialogButtonBox, QDoubleSpinBox,
+                                   QFontComboBox, QFormLayout)
+
+    class _LabelStyleDialog(QDialog):
+        """The style of the labels of a layer: font, size, bold, italic, colour (the layer's own when
+        not chosen), halo of a colour and width around the letters, so they read on any orthophoto."""
+
+        def __init__(self, style: dict | None, layer: str | None, default_font: str, parent=None):
+            super().__init__(parent)
+            from .image_views import LABEL_STYLE_DEFAULT
+
+            s = {**LABEL_STYLE_DEFAULT, **(style or {})}
+            self.setWindowTitle(tr("Stile delle etichette di {0}", layer) if layer else tr("Stile di tutte le etichette"))
+            form = QFormLayout(self)
+            self.font_box = QFontComboBox()
+            self.font_box.setCurrentFont(QFont(s["font"] or default_font))
+            form.addRow(tr("Carattere"), self.font_box)
+            self.size = QDoubleSpinBox()
+            self.size.setRange(0, 96)
+            self.size.setDecimals(1)
+            self.size.setSpecialValueText(tr("automatica"))
+            self.size.setValue(float(s["size"] or 0))
+            form.addRow(tr("Dimensione (pt)"), self.size)
+            self.bold = QCheckBox(tr("Grassetto"))
+            self.bold.setTristate(True)
+            self.bold.setCheckState(Qt.CheckState.PartiallyChecked if s["bold"] is None
+                                    else Qt.CheckState.Checked if s["bold"] else Qt.CheckState.Unchecked)
+            self.bold.setToolTip(tr("A meta': come il tipo del layer (grassetto per le US)"))
+            self.italic = QCheckBox(tr("Corsivo"))
+            self.italic.setChecked(bool(s["italic"]))
+            row = QHBoxLayout()
+            row.addWidget(self.bold)
+            row.addWidget(self.italic)
+            form.addRow("", row)
+            self.own_colour = QCheckBox(tr("Colore del layer"))
+            self.own_colour.setChecked(not s["color"])
+            self.colour = QColor(s["color"] or "#ffffff")
+            self.b_colour = QToolButton()
+            self.b_colour.clicked.connect(lambda: self._pick("colour", self.b_colour))
+            self.own_colour.toggled.connect(lambda on: self.b_colour.setEnabled(not on))
+            self.b_colour.setEnabled(not self.own_colour.isChecked())
+            row = QHBoxLayout()
+            row.addWidget(self.own_colour)
+            row.addWidget(self.b_colour)
+            form.addRow(tr("Colore"), row)
+            self.halo = QCheckBox(tr("Alone intorno alle lettere"))
+            self.halo.setChecked(bool(s["halo"]))
+            self.halo_colour = QColor(s["halo_color"] or "#000000")
+            self.b_halo = QToolButton()
+            self.b_halo.clicked.connect(lambda: self._pick("halo_colour", self.b_halo))
+            self.halo_width = QDoubleSpinBox()
+            self.halo_width.setRange(0.5, 6)
+            self.halo_width.setSingleStep(0.5)
+            self.halo_width.setValue(float(s["halo_width"] or 1.5))
+            row = QHBoxLayout()
+            row.addWidget(self.halo)
+            row.addWidget(self.b_halo)
+            row.addWidget(self.halo_width)
+            form.addRow(tr("Alone"), row)
+            self._paint(self.b_colour, self.colour)
+            self._paint(self.b_halo, self.halo_colour)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+                                       | QDialogButtonBox.StandardButton.RestoreDefaults)
+            buttons.accepted.connect(self.accept)
+            buttons.rejected.connect(self.reject)
+            buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).clicked.connect(self._defaults)
+            form.addRow(buttons)
+            self._default = False
+
+        @staticmethod
+        def _paint(button, colour: QColor) -> None:
+            button.setText(colour.name())
+            button.setStyleSheet(f"background-color: {colour.name()}; color: "
+                                 f"{'#000000' if colour.lightness() > 128 else '#ffffff'};")
+
+        def _pick(self, attr: str, button) -> None:
+            chosen = QColorDialog.getColor(getattr(self, attr), self, tr("Colore"),
+                                           QColorDialog.ColorDialogOption.DontUseNativeDialog)
+            if chosen.isValid():
+                setattr(self, attr, chosen)
+                self._paint(button, chosen)
+
+        def _defaults(self) -> None:
+            self._default = True
+            self.accept()
+
+        def style(self) -> dict | None:
+            """The style chosen; None for the default."""
+            if self._default:
+                return None
+            bold = self.bold.checkState()
+            return {"font": self.font_box.currentFont().family(), "size": self.size.value() or None,
+                    "bold": None if bold == Qt.CheckState.PartiallyChecked else bold == Qt.CheckState.Checked,
+                    "italic": self.italic.isChecked(),
+                    "color": None if self.own_colour.isChecked() else self.colour.name(),
+                    "halo": self.halo.isChecked(), "halo_color": self.halo_colour.name(),
+                    "halo_width": self.halo_width.value()}
+
+    return _LabelStyleDialog
+
+
+LabelStyleDialog = _label_style_dialog_class()
+LayersPane.LabelStyleDialog = LabelStyleDialog
