@@ -117,6 +117,8 @@ CRX2RNX first, for now.
 **The steps.** *Compute PPK...* in the pane (*Tools > GNSS > PPK corrections...*) asks for the `Timestamp.MRK`, then
 opens a dialog:
 
+- *Timestamp.MRK*: its shots and the hours they were taken, and how many fall outside the drone's observations
+  (their photos will keep the position they have);
 - *Observations of the drone*: found by itself beside the MRK (the `*_Rinex.obs` of a DJI drone, of the flight of the
   MRK when the folder holds several; else the only `*.obs` or `*.##o` file there), with the hours it covers;
 - *Observations of the base*: with what its header says - the mark, the receiver, the antenna, the hours of its
@@ -125,15 +127,21 @@ opens a dialog:
   *Add...* adds another;
 - *Position of the base*: from the file of the base or typed (below).
 
-*OK* checks the files and says in the dialog what is missing. When the MRK was copied away from the photos the
-window asks for their folder, as for an MRK. RTKLIB runs in the background (in the folder of the chunk,
-`gnss/ppk`, where its options and its `.pos` solution stay); the photos are paired with the shots as for an MRK.
+*OK* checks, before anything runs, what can be checked and says in the dialog what is missing or wrong: the files
+(observations that are observations, navigation files still there), their times (the drone and the base with hours
+in common, the shots of the MRK within the drone's observations), no file in the work folder of the PPK, the
+position of the base. The files are read once, after a pause in typing their names; the dialog is as tall as what it
+says, and on a short screen its form scrolls. When the MRK was copied away from the photos the window asks for their
+folder, as for an MRK. RTKLIB runs in the background (in the folder of the chunk, `gnss/ppk`, where its options and
+its `.pos` solution stay); the photos are paired with the shots as for an MRK.
 
 **The position of the base** decides where the whole survey ends up: every PPK position is relative to it.
 
 - *Typed*: the surveyed position of the mark the base stands on - latitude and longitude in degrees, height above
   the ellipsoid in metres (not above the sea level), in the reference frame you want for the survey. This is the way
-  to an accurate absolute position.
+  to an accurate absolute position. Typed more than 1 km away from the position of the base's header, or more than
+  30 m higher or lower, it gives a warning (in the dialog, in the log and in `ppg gnss ppk`): latitude and longitude
+  swapped or without their sign, a height above the sea level.
 - *From the file of the base*: the position written in its RINEX header. For a permanent station it is usually its
   published position; for your own base it is often the position the receiver found by itself, which **can be
   metres off, and the whole survey moves with it**. The program says so in the dialog, in a message and in the log
@@ -165,8 +173,9 @@ ppg gnss ppk survey.ppg --mrk /card/FLIGHT_Timestamp.MRK --rover /card/FLIGHT_Ri
 ```
 
 It prints the photos per status, the base used and its antenna height, the warnings (always the one of a base at
-the position of its header), the photos and shots left without a PPK position; it saves the project, and stops
-with an error, changing nothing, when the files cannot be used.
+the position of its header, and the one of a typed position far from it), the photos and shots left without a PPK
+position; it saves the project, and stops with an error, changing nothing, when the files cannot be used (a file
+named that is not there stops it before anything is read).
 
 ## Masks
 

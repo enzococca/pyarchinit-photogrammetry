@@ -180,6 +180,8 @@ class GnssPane(QWidget):
         self.b_positions.clicked.connect(self.positions_requested)
         self.b_ppk.clicked.connect(self.ppk_requested)
         self.c_only_fix.toggled.connect(self.only_fix_toggled)
+        self._busy = False  # another step is running: the PPK cannot start
+        self._photos = 0
         self.set_state(None)
 
     # --------------------------------------------------------------- state
@@ -190,7 +192,8 @@ class GnssPane(QWidget):
         positioned = photos - sum(r["no_position"] for r in rows)
         self.b_mrk.setEnabled(photos > 0)
         self.b_positions.setEnabled(photos > 0)
-        self.b_ppk.setEnabled(photos > 0)
+        self._photos = photos
+        self.b_ppk.setEnabled(photos > 0 and not self._busy)
         self.states["ppk"].setText(ppk_state(chunk) if photos else "")
         if not rows:
             self.states["positions"].setText(tr("Nessuna foto nel chunk: aggiungi le foto, poi applica l'MRK o un file "
@@ -224,6 +227,11 @@ class GnssPane(QWidget):
             tr("Disattivati i riferimenti di {0} foto senza posizione fix: non contano nell'allineamento.",
                len(kept.get("disabled") or [])) if kept is not None else
             tr("Tutte le posizioni contano, ognuna con la sua accuratezza.") if rows else "")
+
+    def set_busy(self, busy: bool) -> None:
+        """Another step is running (``busy``) or has ended: *Calcola PPK* waits for it, as the menu does."""
+        self._busy = bool(busy)
+        self.b_ppk.setEnabled(self._photos > 0 and not self._busy)
 
     def _fill(self, rows: list[dict]) -> None:
         self.table.setRowCount(len(rows))

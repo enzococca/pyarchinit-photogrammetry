@@ -28,6 +28,9 @@ STATUS = {1: "fix", 2: "float", 4: "float", 5: "single"}
 _RANK = {"fix": 0, "float": 1, "single": 2}  # the statuses from the best to the worst
 
 MAX_GAP_S = 1.0  # a time between two epochs further apart than this has no position: none is guessed across a gap
+# a typed position of a base this far from the position of its RINEX header (horizontally, in height, metres) is
+# likely a mistake: latitude and longitude swapped or without their sign, a height above the sea level
+FAR_FROM_HEADER_M = (1000.0, 30.0)
 TIME_RESOLUTION_S = 1e-3  # the times of a solution are written to the millisecond
 _SAME_EPOCH_S = 1e-6  # a time this close to an epoch is the epoch: times of 8e8 s are floats to 1.2e-7 s
 
@@ -47,7 +50,7 @@ OPTIONS_FILE = "ppk.conf"
 SOLUTION_FILE = "solution.pos"
 INPUTS_FOLDER = "rtklib_inputs"  # in the work folder: only the copies of a run, emptied when a run starts
 
-_FIELDS =re.compile(r"[,\s]+")  # RTKLIB separates the fields with spaces, or with out-fieldsep (a comma)
+_FIELDS = re.compile(r"[,\s]+")  # RTKLIB separates the fields with spaces, or with out-fieldsep (a comma)
 _LEGEND = re.compile(r"lat/lon/height=([^/,)]*)/([^,)]*)")
 _COLUMNS = ("latitude(deg)", "longitude(deg)", "height(m)", "Q", "ns", "sdn(m)", "sde(m)", "sdu(m)")
 
@@ -340,13 +343,14 @@ def _rtklib_folder(folder: Path) -> str:
         short = _short_path(path)
         if not short.isascii():
             raise RuntimeError(f"RTKLIB opens files with the ANSI C runtime of Windows, which cannot open {path}, and "
-                               "Windows has no short name for it: choose a work folder whose path has only ASCII "
-                               "letters")
+                               "Windows has no short name for it: move the project, where the PPK works, to a folder "
+                               "whose path has only plain ASCII letters")
         path = short
     for keyword in ("%r", "%b"):
         if keyword in path:
             raise RuntimeError(f"RTKLIB reads {keyword} in a path as the name of a station and cannot work in "
-                               f"{path}: choose a work folder without {keyword} in its path")
+                               f"{path}: move the project, where the PPK works, to a folder without {keyword} in its "
+                               "path")
     return path
 
 
@@ -373,10 +377,11 @@ def span_text(start: datetime | float, end: datetime | float) -> str:
     return f"{text(start)} to {text(end)} GPS time"
 
 
-def _navigation_info(path: Path) -> rinex.RinexInfo | None:
-    """The header of a navigation file, None when ``path`` is not one."""
+def navigation_info(path: str | Path, read=rinex.header) -> rinex.RinexInfo | None:
+    """The header of a navigation file, None when ``path`` is not one (or cannot be read); ``read`` reads a header, as
+    :func:`rinex.header` (a caller can give one that keeps the headers it read)."""
     try:
-        info = rinex.header(path)
+        info = read(Path(path))
     except (ValueError, OSError):
         return None
     return info if info.kind == "nav" else None
@@ -397,21 +402,60 @@ def _navigation(navs, rover: Path, base: Path) -> list[tuple[Path, rinex.RinexIn
             given.append((path, info))
         return given
     for obs in (rover, base):
-        found = [(path, info) for path in rinex.find_companions(obs) if (info := _navigation_info(path))]
+        found = [(path, info) for path in rinex.find_companions(obs) if (info := navigation_info(path))]
         if found:
             return found
     raise ValueError(f"no navigation file beside the rover {rover.name} or the base {base.name}: add the navigation "
                      "file of the base or of the drone (.nav, .##n, .##g, .##p or *_MN.rnx)")
 
 
+def base_name(path: str | Path, info: rinex.RinexInfo) -> str:
+    """The name of a base: the marker of the header of its RINEX file ``path``, else the name of the file without its
+    extension (and without .gz)."""
+    name = Path(path).name
+    return info.marker or Path(name[:-3] if name.lower().endswith(".gz") else name).stem
+
+
+def horizontal_m(lat0: float, lon0: float, lat1: float, lon1: float) -> float:
+    """The horizontal distance in metres between two points (degrees), on a sphere as large as the earth: plenty to
+    tell metres from hundreds of metres."""
+    east = math.radians(float(wrap_longitude(lon1 - lon0))) * math.cos(math.radians(lat0))
+    return 6371000.0 * math.hypot(math.radians(lat1 - lat0), east)
+
+
+def offset_from_header(position: Sequence[float], info: rinex.RinexInfo) -> tuple[float, float] | None:
+    """How far a typed ``position`` (latitude, longitude, height above the ellipsoid) of a base is from the position of
+    the RINEX header ``info`` of its file: ``(horizontal, height)`` in metres, the height typed less the header's;
+    None when the header has no position."""
+    if info.approx_xyz is None:
+        return None
+    lat, lon, h = (float(v) for v in position)
+    lat0, lon0, h0 = rinex.ecef_to_llh(info.approx_xyz)
+    return horizontal_m(lat0, lon0, lat, lon), h - h0
+
+
+def far_from_header(offset: tuple[float, float] | None) -> bool:
+    """The offset of :func:`offset_from_header` is more than :data:`FAR_FROM_HEADER_M`."""
+    return offset is not None and (offset[0] > FAR_FROM_HEADER_M[0] or abs(offset[1]) > FAR_FROM_HEADER_M[1])
+
+
 def _base(path: Path, info: rinex.RinexInfo, position: Sequence[float] | None) -> tuple[dict, str | None]:
-    """The base of the solution, typed or from its header, and the warning for a position from the header."""
-    stem = path.name[:-3] if path.name.lower().endswith(".gz") else path.name
-    record = {"name": info.marker or Path(stem).stem, "position": None, "position_source": None,
+    """The base of the solution, typed or from its header, and the warning for a position from the header or for a
+    typed one far from it (:func:`far_from_header`)."""
+    record = {"name": base_name(path, info), "position": None, "position_source": None,
               "antenna_delta_hen": None if info.antenna_delta_hen is None else list(info.antenna_delta_hen),
               "file": path.name}
     if position is not None:
-        return {**record, "position": list(_base_position(position)), "position_source": "typed"}, None
+        typed = list(_base_position(position))
+        offset = offset_from_header(typed, info)
+        warning = None
+        if far_from_header(offset):
+            apart = f"{offset[0] / 1000.0:.1f} km" if offset[0] >= 1000.0 else f"{offset[0]:.0f} m"
+            warning = (f"the typed position of the base {record['name']} is {apart} away horizontally and "
+                       f"{offset[1]:+.1f} m in height from the position of its RINEX header: check that latitude and "
+                       "longitude are not swapped or without their sign, and that the height is above the ellipsoid, "
+                       "not above the sea level")
+        return {**record, "position": typed, "position_source": "typed"}, warning
     if info.approx_xyz is None:
         raise ValueError(f"the base {path.name} has no position in its RINEX header: type the position of the mark it "
                          "stands on (latitude, longitude, height above the ellipsoid)")
@@ -422,10 +466,10 @@ def _base(path: Path, info: rinex.RinexInfo, position: Sequence[float] | None) -
     return {**record, "position": [lat, lon, h], "position_source": "header"}, warning
 
 
-def _inside(path: Path, folder: Path) -> bool:
+def inside(path: str | Path, folder: str | Path) -> bool:
     """``path`` is in ``folder`` (or in a folder inside it), also when the two are written differently (letter case
     on a file system that ignores it, links)."""
-    path, folder = path.resolve(), folder.resolve()
+    path, folder = Path(path).resolve(), Path(folder).resolve()
     if path.is_relative_to(folder):
         return True
     return folder.is_dir() and any(parent.is_dir() and os.path.samefile(parent, folder) for parent in path.parents)
@@ -458,7 +502,8 @@ def solve(rover: str | Path, base: str | Path, navs=None, base_position: Sequenc
     of a base), with the navigation files ``navs`` (one or more; None: those beside the rover, or beside the base
     when the rover has none, as a DJI drone does not always write one). The base at ``base_position`` (latitude,
     longitude, height above the ellipsoid of the mark it stands on) or, with None, at the position of its RINEX
-    header, with a warning: that one can be metres off. Either way RTKLIB adds the antenna height of the base's
+    header, with a warning: that one can be metres off; a typed one far from the header's (:func:`far_from_header`)
+    has a warning too. Either way RTKLIB adds the antenna height of the base's
     header, recorded in ``Solution.base["antenna_delta_hen"]``. Before RTKLIB runs, a ``ValueError`` when the rover
     and the base have no time in common, when there is no navigation file, when the base has no position or when an
     input is in ``folder``.
@@ -486,9 +531,9 @@ def solve(rover: str | Path, base: str | Path, navs=None, base_position: Sequenc
 
     folder = Path(folder)
     for source in (rover, base, *(path for path, _ in nav_files)):  # the files of a run are replaced and removed
-        if _inside(source, folder):
-            raise ValueError(f"{source} is in the work folder {folder}, whose files are replaced at every run: choose "
-                             "a work folder apart from the observations")
+        if inside(source, folder):
+            raise ValueError(f"{source} is in {folder}, the work folder of the PPK, whose files are replaced at every "
+                             f"run: move it out of {folder} first")
     folder.mkdir(parents=True, exist_ok=True)
     work = Path(_rtklib_folder(folder))
     copies = work / INPUTS_FOLDER  # RTKLIB matches the names of its inputs ignoring the case: nothing else in there

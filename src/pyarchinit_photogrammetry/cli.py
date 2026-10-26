@@ -2509,13 +2509,16 @@ def _base_position(text: str) -> tuple[float, float, float]:
 
 @gnss_app.command("ppk")
 def gnss_ppk(project: Path,
-             mrk: Path = typer.Option(..., "--mrk", help="the Timestamp.MRK of the flight"),
-             rover: Path = typer.Option(..., "--rover", help="the RINEX observations of the drone (DJI: *_Rinex.obs "
-                                        "beside the MRK)"),
-             base: Path = typer.Option(..., "--base", help="the RINEX observations of a base that recorded during the "
-                                       "flight: your own, or a permanent station"),
-             nav: Optional[list[Path]] = typer.Option(None, "--nav", help="a navigation file (repeat it for several; "
-                                                      "default: those beside the rover, else those beside the base)"),
+             mrk: Path = typer.Option(..., "--mrk", exists=True, dir_okay=False,
+                                      help="the Timestamp.MRK of the flight"),
+             rover: Path = typer.Option(..., "--rover", exists=True, dir_okay=False,
+                                        help="the RINEX observations of the drone (DJI: *_Rinex.obs beside the MRK)"),
+             base: Path = typer.Option(..., "--base", exists=True, dir_okay=False,
+                                       help="the RINEX observations of a base that recorded during the flight: your "
+                                       "own, or a permanent station"),
+             nav: Optional[list[Path]] = typer.Option(None, "--nav", exists=True, dir_okay=False,
+                                                      help="a navigation file (repeat it for several; default: those "
+                                                      "beside the rover, else those beside the base)"),
              base_position: Optional[str] = typer.Option(None, "--base-position", help="LAT,LON,H: the surveyed "
                                                          "position of the mark the base stands on, height above the "
                                                          "ellipsoid; default: the position of the base's RINEX header, "

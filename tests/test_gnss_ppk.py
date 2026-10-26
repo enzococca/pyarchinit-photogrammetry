@@ -1089,7 +1089,8 @@ def test_solve_warns_of_a_time_system_it_does_not_know(tmp_path, fake_rtklib):
     header = _first_obs(V2_HEADER, "  2024     5    12    10    30    0.0000000     UTC")
     rover = _rinex2(tmp_path / "rover.24o", header)
     base = _rinex2(tmp_path / "base.24o", V2_HEADER)
-    solution = ppk.solve(rover, base, [PPK_NAV], (45.0, 11.0, 50.0), folder=tmp_path / "work")
+    typed = rinex.ecef_to_llh(rinex.header(base).approx_xyz)  # where its header puts it: no warning about the base
+    solution = ppk.solve(rover, base, [PPK_NAV], typed, folder=tmp_path / "work")
     assert len(solution.warnings) == 1
     assert "rover.24o" in solution.warnings[0] and "UTC" in solution.warnings[0]
 
@@ -1157,7 +1158,8 @@ def test_solve_refuses_inputs_inside_the_work_folder(tmp_path, fake_rtklib):
                                   (PPK_ROVER, nested_nav, nested_nav)):
         with pytest.raises(ValueError, match="work folder") as error:
             ppk.solve(rover, PPK_BASE, [nav], folder=work)
-        assert str(misplaced) in str(error.value)
+        # what to do, not a choice the window and the command line do not give (they fix the work folder)
+        assert str(misplaced) in str(error.value) and f"move it out of {work} first" in str(error.value)
     if _ignores_case(tmp_path):  # the work folder written in another letter case is the same folder
         with pytest.raises(ValueError, match="work folder"):
             ppk.solve(named_as_a_copy, PPK_BASE, [PPK_NAV], folder=tmp_path / "WORK")
@@ -1214,7 +1216,7 @@ def test_the_work_folder_rtklib_is_given(tmp_path, monkeypatch):
     for keyword in ("%r", "%b"):
         folder = tmp_path / f"100{keyword}"
         folder.mkdir()
-        with pytest.raises(RuntimeError, match=keyword):
+        with pytest.raises(RuntimeError, match=f"move the project, where the PPK works, to a folder without {keyword}"):
             ppk._rtklib_folder(folder)
     # on Windows RTKLIB opens files with the ANSI C runtime: a path that is not ASCII becomes its short (8.3) name
     monkeypatch.setattr(ppk, "_on_windows", lambda: True)
@@ -1229,7 +1231,8 @@ def test_the_work_folder_rtklib_is_given(tmp_path, monkeypatch):
     assert ppk._rtklib_folder(accented) == "C:\\Users\\NICCOL~1\\LAVORO~1" and asked == [str(accented.resolve())]
     # no short name (switched off on the volume): a clear error
     monkeypatch.setattr(ppk, "_short_path", lambda path: path)
-    with pytest.raises(RuntimeError, match="ASCII"):
+    with pytest.raises(RuntimeError, match="move the project, where the PPK works, to a folder whose path has only "
+                                           "plain ASCII letters"):
         ppk._rtklib_folder(accented)
 
 
@@ -1744,17 +1747,30 @@ def test_ppk_command_line(tmp_path, fake_rtklib, monkeypatch):
     assert sorted(ch.meta["gnss_only_fix"]["disabled"]) == sorted(c.key for c in ch.cameras
                                                                   if c.label not in enabled)
 
-    # the base at its surveyed position, written with points and spaces: no warning about it, RTKLIB given it
+    # the base at its surveyed position (a few metres from the header's), written with points and spaces: no warning
+    # about it, RTKLIB given it
     result = run(app, _ppk_command(project, folder, "--nav", str(PPK_NAV), "--base-position",
-                                   " 35.1320000, 139.6230000 ,70.25 "))
+                                   " 35.1609000, 139.6138000 ,71.25 "))
     assert result.exit_code == 0, result.output
     lines = result.output.splitlines()
-    assert lines[1] == "base 0759: 35.13200000, 139.62300000, 70.250 m (typed), antenna 0.000 m above it"
+    assert lines[1] == "base 0759: 35.16090000, 139.61380000, 71.250 m (typed), antenna 0.000 m above it"
     assert not any("RINEX header" in line for line in lines if line.startswith("warning: "))
     options = _options(fake_rtklib()[-1]["options"])
-    assert [float(options[f"ant2-pos{i}"]) for i in (1, 2, 3)] == [35.132, 139.623, 70.25]
+    assert [float(options[f"ant2-pos{i}"]) for i in (1, 2, 3)] == [35.1609, 139.6138, 71.25]
     base = ppg.Document.open(project).chunk.camera("DJI_0002").meta["gnss"]["base"]
-    assert base["position_source"] == "typed" and base["position"] == [35.132, 139.623, 70.25]
+    assert base["position_source"] == "typed" and base["position"] == [35.1609, 139.6138, 71.25]
+
+    # typed far from the header's position (a wrong degree, a height above the sea level): computed, with a warning
+    result = run(app, _ppk_command(project, folder, "--nav", str(PPK_NAV), "--base-position", "35.6,139.6,20"))
+    assert result.exit_code == 0, result.output
+    (far,) = [line for line in result.output.splitlines() if "typed position" in line]
+    said = re.match(r"warning: the typed position of the base 0759 is ([\d.]+) km away horizontally and "
+                    r"(-[\d.]+) m in height from the position of its RINEX header: check that latitude and longitude "
+                    r"are not swapped or without their sign, and that the height is above the ellipsoid, not above "
+                    r"the sea level$", far)
+    assert said, far
+    apart = Geod(ellps="WGS84").inv(mark[1], mark[0], 139.6, 35.6)[2] / 1000.0
+    assert abs(float(said.group(1)) - apart) < 0.2 and float(said.group(2)) == pytest.approx(20 - mark[2], abs=0.05)
 
 
 def test_ppk_command_line_says_what_went_wrong_and_changes_nothing(tmp_path, fake_rtklib, monkeypatch):
@@ -1777,8 +1793,14 @@ def test_ppk_command_line_says_what_went_wrong_and_changes_nothing(tmp_path, fak
         result = run(app, command)
         assert result.exit_code == code, result.output
         assert _snapshot(ppg.Document.open(project).chunk) == before
-        return result.output
+        # one line: the usage errors come in a box that wraps them
+        return " ".join(re.sub("[\u2500-\u257f]", " ", result.output).split())
 
+    # files that are not there, or a folder named as a file: refused before anything is read (a usage error)
+    for option in ("--mrk", "--rover", "--base"):
+        assert "does not exist" in refused(**{option[2:]: tmp_path / "missing.obs"}, code=2)
+    assert "does not exist" in refused("--nav", str(tmp_path / "missing.nav"), code=2)
+    assert "is a directory" in refused(rover=tmp_path, code=2)
     # no navigation file beside the rover or the base, and none given
     alone = tmp_path / "rinex"
     alone.mkdir()
@@ -1858,17 +1880,33 @@ def qt_app(tmp_path):
 DJI_FLIGHT = "DJI_202604021000_001"
 
 
-def _dji_card(tmp_path: Path) -> Path:
-    """The folder of a flight as a DJI drone writes it: the Timestamp.MRK beside the RINEX observations and the
-    navigation messages of its receiver, the raw file, and the AppleDouble file macOS leaves on an external drive."""
+def _dji_card(tmp_path: Path, shots=(30.0, 60.0, 90.0)) -> Path:
+    """The folder of a flight as a DJI drone writes it: the Timestamp.MRK (shots ``shots`` seconds after 00:00:00 GPS
+    time on the day of the RTKLIB sample data) beside the RINEX observations and the navigation messages of its
+    receiver, the raw file, and the AppleDouble file macOS leaves on an external drive."""
     folder = tmp_path / f"{DJI_FLIGHT}_Rilievo"
     folder.mkdir()
-    (folder / f"{DJI_FLIGHT}_Timestamp.MRK").write_text("", newline="\n")
+    (folder / f"{DJI_FLIGHT}_Timestamp.MRK").write_text(
+        "".join(_mrk_line(i, START_2005 + seconds, (0, 0, 150)) for i, seconds in enumerate(shots, 1)), newline="\n")
     shutil.copyfile(PPK_ROVER, folder / f"{DJI_FLIGHT}_Rinex.obs")
     shutil.copyfile(DATA / "30400920.05n", folder / f"{DJI_FLIGHT}_PPKNAV.nav")
     (folder / f"{DJI_FLIGHT}_PPKRAW.bin").write_bytes(b"\xb5\x62")
     (folder / f"._{DJI_FLIGHT}_PPKNAV.nav").write_bytes(b"\x00\x05\x16\x07")
     return folder
+
+
+def _station(tmp_path: Path) -> Path:
+    """The observations of the base 0759 in a folder of their own beside its navigation file; returns them."""
+    station = tmp_path / "stazione"
+    station.mkdir()
+    shutil.copyfile(PPK_NAV, station / "07590920.05n")
+    return Path(shutil.copyfile(PPK_BASE, station / "07590920.05o"))
+
+
+def _choose(dialog, field, path) -> None:
+    """``path`` typed in the file ``field`` of the PPK ``dialog``, and the files read at once, without the pause."""
+    field.edit.setText(str(path))
+    dialog.refresh()
 
 
 def test_the_drone_rinex_beside_its_mrk(tmp_path, qt_app):
@@ -1904,19 +1942,18 @@ def test_ppk_dialog_finds_the_files_and_checks_the_base(tmp_path, qt_app, monkey
     card = _dji_card(tmp_path)
     drone_nav = card / f"{DJI_FLIGHT}_PPKNAV.nav"
     dlg = PpkDialog(card / f"{DJI_FLIGHT}_Timestamp.MRK")
-    # the drone's observations beside the MRK and its navigation file (not the AppleDouble one)
+    # the shots of the MRK, read at once; the drone's observations beside it and its navigation file (not the
+    # AppleDouble one); the drone's receiver and the time it covers, to the second (its last epoch is at 00:59:29.996)
+    assert dlg.mrk_info.text() == "Scatti: 3, dal 2005-04-02 00:00:30 al 2005-04-02 00:01:30 (ora GPS)."
     assert dlg.rover.path() == card / f"{DJI_FLIGHT}_Rinex.obs"
     assert dlg.nav_paths() == [drone_nav]
-    # its receiver and the time it covers, to the second (its last epoch is at 00:59:29.996)
     assert dlg.rover_info.text() == ("Ricevitore TRIMBLE 5700; osservazioni dal 2005-04-02 00:00:00 al "
                                      "2005-04-02 00:59:29 (ora GPS).")
     assert dlg.problem() == "Scegli le osservazioni della base."
     # the base of a station in a folder of its own: what its header says, its navigation file after the drone's
-    station = tmp_path / "stazione"
-    station.mkdir()
-    base = Path(shutil.copyfile(PPK_BASE, station / "07590920.05o"))
-    shutil.copyfile(PPK_NAV, station / "07590920.05n")
-    dlg.base.edit.setText(str(base))
+    base = _station(tmp_path)
+    station = base.parent
+    _choose(dlg, dlg.base, base)
     info = dlg.base_info.text()
     for said in ("Base 0759", "TRIMBLE 5700", "TRM29659.00", "2005-04-02 00:00:00", "2005-04-02 00:59:30",
                  "Posizione nell'intestazione", "altezza dell'antenna nulla"):
@@ -1932,17 +1969,19 @@ def test_ppk_dialog_finds_the_files_and_checks_the_base(tmp_path, qt_app, monkey
     dlg.typed.setChecked(True)
     assert not dlg.header_warning.isVisibleTo(dlg) and dlg.lat.isEnabled()
     assert dlg.problem().startswith("Scrivi la posizione della base")
-    dlg.lat.setText("35,132")
-    dlg.lon.setText(" 139.623 ")
-    dlg.height.setText("70,25")
-    assert dlg.problem() is None and dlg.values()["base_position"] == (35.132, 139.623, 70.25)
+    dlg.lat.setText("35,1609")
+    dlg.lon.setText(" 139.6138 ")
+    dlg.ellh.setText("71,25")
+    assert dlg.problem() is None and dlg.values()["base_position"] == (35.1609, 139.6138, 71.25)
+    assert dlg.height() is not None  # the field of the height does not hide QWidget.height()
     dlg.lat.setText("95")
     dlg.accept()  # refused, the reason in the dialog
-    assert dlg.result() != QDialog.DialogCode.Accepted and "latitudine" in dlg.error.text()
-    dlg.lat.setText("35,132")
+    assert dlg.result() != QDialog.DialogCode.Accepted
+    assert dlg.error.text() == "La latitudine della base deve essere fra -90 e 90 gradi."
+    dlg.lat.setText("35,1609")
     dlg.lon.setText("-181")
-    assert "longitudine" in dlg.problem()
-    dlg.lon.setText("139.623")
+    assert dlg.problem() == "La longitudine della base deve essere fra -180 e 180 gradi."
+    dlg.lon.setText("139.6138")
     # a navigation file taken away stays away when the files change, one added stays
     dlg.navs.setCurrentRow(0)
     dlg.b_remove_nav.click()
@@ -1954,30 +1993,206 @@ def test_ppk_dialog_finds_the_files_and_checks_the_base(tmp_path, qt_app, monkey
     # the base with the antenna 1.5 m above its mark, in another folder
     high = tmp_path / "alta"
     high.mkdir()
-    dlg.base.edit.setText(str(_raised_base(high, 1.5)))
+    _choose(dlg, dlg.base, _raised_base(high, 1.5))
     assert "aggiunge l'altezza dell'antenna del file della base, 1,500 m" in dlg.base_info.text()
     assert dlg.nav_paths() == [added]  # no navigation file beside that base
     # no navigation file at all
     dlg.navs.setCurrentRow(0)
     dlg.b_remove_nav.click()
     assert dlg.problem().startswith("Nessun file di navigazione")
-    dlg.base.edit.setText(str(base))  # the one added and taken away again is gone, the base's is back
+    _choose(dlg, dlg.base, base)  # the one added and taken away again is gone, the base's is back
     assert dlg.nav_paths() == [station / "07590920.05n"] and dlg.problem() is None
     # what cannot be a base: a navigation file, the drone's own file, a Hatanaka file, a missing file
-    dlg.base.edit.setText(str(station / "07590920.05n"))
+    _choose(dlg, dlg.base, station / "07590920.05n")
     assert "navigazione, non osservazioni" in dlg.base_info.text() and "base" in dlg.problem()
-    dlg.base.edit.setText(str(card / f"{DJI_FLIGHT}_Rinex.obs"))
+    _choose(dlg, dlg.base, card / f"{DJI_FLIGHT}_Rinex.obs")
     assert "stesso file" in dlg.problem()
     crx = tmp_path / "base.crx"
     crx.write_text("1.0                 COMPACT RINEX FORMAT                    CRINEX VERS   / TYPE\n")
-    dlg.base.edit.setText(str(crx))
+    _choose(dlg, dlg.base, crx)
     assert "CRX2RNX" in dlg.base_info.text() and "CRX2RNX" in dlg.problem()
-    dlg.base.edit.setText(str(tmp_path / "nowhere.05o"))
+    _choose(dlg, dlg.base, tmp_path / "nowhere.05o")
     assert dlg.base_info.text() == "Il file non esiste." and dlg.problem() is not None
     # a typed base needs no position in the header; the header one does
-    dlg.base.edit.setText(str(base))
+    _choose(dlg, dlg.base, base)
     dlg.from_header.setChecked(True)
     assert dlg.problem() is None
+
+
+def test_ppk_dialog_checks_the_times_the_work_folder_and_a_typed_base(tmp_path, qt_app, monkeypatch):
+    """Before the run: rover and base with hours in common, the shots of the MRK among the drone's observations, no
+    input in the work folder of the PPK, the navigation files still there; a typed position far from the header's is
+    a warning, not a refusal; *Togli* takes away at the first click a file both added by hand and found."""
+    from pyarchinit_photogrammetry.gui import ppk_dialog
+    from pyarchinit_photogrammetry.gui.i18n import number
+    from pyarchinit_photogrammetry.gui.ppk_dialog import PpkDialog
+
+    card = _dji_card(tmp_path)
+    rover = card / f"{DJI_FLIGHT}_Rinex.obs"
+    base = _station(tmp_path)
+    work = tmp_path / "volo.ppg.files" / "chunk_0" / "gnss" / "ppk"
+    dlg = PpkDialog(card / f"{DJI_FLIGHT}_Timestamp.MRK", work=work)
+    _choose(dlg, dlg.base, base)
+    assert dlg.problem() is None
+    # a base of another day: no hours in common with the drone
+    _choose(dlg, dlg.base, _rinex2(tmp_path / "base.24o", V2_HEADER))
+    assert dlg.problem() == ("Il drone (dal 2005-04-02 00:00:00 al 2005-04-02 00:59:29) e la base (dal 2024-05-12 "
+                             "10:30:00 al 2024-05-12 10:30:02) non hanno ore in comune: la base deve registrare mentre "
+                             "il drone vola.")
+    _choose(dlg, dlg.base, base)
+    # the MRK of another flight: its shots outside the drone's observations; some outside only: said, not refused
+    other = tmp_path / "altro"
+    other.mkdir()
+    (other / "Timestamp.MRK").write_text(_mrk_line(1, START_2005 + 86400.0, (0, 0, 150)), newline="\n")
+    late = PpkDialog(other / "Timestamp.MRK", work=work)
+    _choose(late, late.rover, rover)
+    _choose(late, late.base, base)
+    assert late.problem() == ("Gli scatti del Timestamp.MRK (dal 2005-04-03 00:00:00 al 2005-04-03 00:00:00) sono "
+                              "fuori dalle osservazioni del drone (dal 2005-04-02 00:00:00 al 2005-04-02 00:59:29): "
+                              "non sono dello stesso volo.")
+    (other / "parte.MRK").write_text("".join(_mrk_line(i, START_2005 + s, (0, 0, 150))
+                                             for i, s in ((1, 30.0), (2, 3600.0), (3, 3630.0))), newline="\n")
+    part = PpkDialog(other / "parte.MRK", work=work)
+    _choose(part, part.rover, rover)
+    _choose(part, part.base, base)
+    assert part.mrk_info.text() == ("Scatti: 3, dal 2005-04-02 00:00:30 al 2005-04-02 01:00:30 (ora GPS). Scatti fuori "
+                                    "dalle osservazioni del drone: 2; le loro foto terranno la posizione che hanno.")
+    assert part.problem() is None
+    # an MRK that is not one, or without shots
+    (other / "rotto.MRK").write_text("not an MRK line\n", newline="\n")
+    broken = PpkDialog(other / "rotto.MRK")
+    assert broken.mrk_info.text().startswith("Il file non si legge: rotto.MRK, line 1: not a DJI Timestamp.MRK line")
+    assert broken.problem().startswith("Il Timestamp.MRK non si può usare: Il file non si legge: rotto.MRK")
+    (other / "vuoto.MRK").write_text("", newline="\n")
+    assert PpkDialog(other / "vuoto.MRK").problem() == "Il Timestamp.MRK non si può usare: Il file non ha scatti."
+    # an input in the work folder of the PPK, whose files every run replaces
+    work.mkdir(parents=True)
+    _choose(dlg, dlg.base, shutil.copyfile(PPK_BASE, work / "base.05o"))
+    assert dlg.problem() == (f"base.05o è nella cartella di lavoro del PPK ({work}), i cui file si sostituiscono a "
+                             "ogni calcolo: spostalo fuori da lì.")
+    _choose(dlg, dlg.base, base)
+    # a navigation file listed, then deleted
+    extra = Path(shutil.copyfile(DATA / "30400920.05n", tmp_path / "brdc.05n"))
+    monkeypatch.setattr(ppk_dialog.QFileDialog, "getOpenFileNames", lambda *a, **k: ([str(extra)], ""))
+    dlg.b_add_nav.click()
+    extra.unlink()
+    assert dlg.problem() == "brdc.05n non esiste più."
+    dlg.navs.setCurrentRow(dlg.nav_paths().index(extra))
+    dlg.b_remove_nav.click()
+    # Togli on a navigation file found beside the base and added by hand too: away at the first click
+    station_nav = base.parent / "07590920.05n"
+    monkeypatch.setattr(ppk_dialog.QFileDialog, "getOpenFileNames", lambda *a, **k: ([str(station_nav)], ""))
+    dlg.b_add_nav.click()
+    assert dlg.nav_paths().count(station_nav) == 1
+    dlg.navs.setCurrentRow(dlg.nav_paths().index(station_nav))
+    dlg.b_remove_nav.click()
+    assert station_nav not in dlg.nav_paths() and dlg.problem() is None
+    # typed near the header's position: no warning; far from it, horizontally or in height: a warning, not a refusal
+    mark = rinex.ecef_to_llh(rinex.header(PPK_BASE).approx_xyz)
+    dlg.typed.setChecked(True)
+    dlg.lat.setText("35,1609")
+    dlg.lon.setText("139,6138")
+    dlg.ellh.setText("71,25")
+    assert not dlg.far_warning.isVisibleTo(dlg) and dlg.problem() is None
+    dlg.lon.setText("139,7138")  # 0.1 degrees east: 9 km
+    said = re.match(r"La posizione scritta è a (\d+,\d) km in pianta e a ([-\d,]+) m in quota da quella "
+                    r"dell'intestazione del file della base: controlla", dlg.far_warning.text())
+    apart = Geod(ellps="WGS84").inv(mark[1], mark[0], 139.7138, 35.1609)[2] / 1000.0
+    assert said and abs(float(said.group(1).replace(",", ".")) - apart) < 0.1 and dlg.far_warning.isVisibleTo(dlg)
+    assert dlg.problem() is None
+    dlg.lon.setText("139,6138")
+    dlg.ellh.setText("25")  # above the sea level
+    assert dlg.far_warning.isVisibleTo(dlg)
+    assert f"a {number(25.0 - mark[2], 1)} m in quota" in dlg.far_warning.text()
+    assert "Latitudine e longitudine in gradi; la quota in metri sull'ellissoide" in " ".join(
+        label.text() for label in dlg.findChildren(type(dlg.far_warning)) if label.isVisibleTo(dlg))
+
+
+def test_ppk_dialog_reads_the_files_after_a_pause_in_typing_and_once(tmp_path, qt_app, monkeypatch):
+    """A file name typed a key at a time reads nothing until a pause; then the base is read once, and only its folder
+    is looked at (the drone's was already); reading again, checking, typing a position read nothing more."""
+    from PySide6.QtTest import QTest
+
+    from pyarchinit_photogrammetry.gui import ppk_dialog
+    from pyarchinit_photogrammetry.gui.ppk_dialog import PpkDialog
+
+    card = _dji_card(tmp_path)
+    base = _station(tmp_path)
+    dlg = PpkDialog(card / f"{DJI_FLIGHT}_Timestamp.MRK")
+    headers, folders = [], []
+    real_header, real_companions = rinex.header, rinex.find_companions
+    monkeypatch.setattr(rinex, "header", lambda path: headers.append(Path(path).name) or real_header(path))
+    monkeypatch.setattr(rinex, "find_companions",
+                        lambda obs: folders.append(Path(obs).name) or real_companions(obs))
+    text = str(base)
+    for i in range(1, len(text) + 1):
+        dlg.base.edit.setText(text[:i])
+    assert headers == [] and folders == [] and dlg.base_info.text().startswith("Il RINEX di una base")
+    QTest.qWait(ppk_dialog.TYPING_PAUSE_MS + 300)
+    assert dlg.base_info.text().startswith("Base 0759")
+    assert headers == ["07590920.05o", "07590920.05n"] and folders == ["07590920.05o"]
+    dlg.refresh()
+    assert dlg.problem() is None
+    dlg.typed.setChecked(True)
+    for key in "35,16":
+        dlg.lat.setText(dlg.lat.text() + key)
+    assert headers == ["07590920.05o", "07590920.05n"] and folders == ["07590920.05o"]
+
+
+def _cut_labels(dialog) -> list:
+    """The word-wrapped labels the dialog shows less tall than their text needs at their width."""
+    from PySide6.QtWidgets import QLabel
+
+    return [(label.text()[:40], label.height(), label.heightForWidth(label.width()))
+            for label in dialog.findChildren(QLabel) if label.isVisible() and label.wordWrap() and label.text()
+            and label.heightForWidth(label.width()) > label.height()]
+
+
+def test_ppk_dialog_shows_all_it_says(tmp_path, qt_app, monkeypatch):
+    """No text of the dialog is cut: opened without a base, then with one (five lines more), typed far from the
+    header (a warning more), with an error under the form. It grows with what it says, stays on the screen and
+    scrolls only when the screen is full; on a short screen the form scrolls and still nothing is cut."""
+    from pyarchinit_photogrammetry.gui.ppk_dialog import PpkDialog
+
+    card = _dji_card(tmp_path)
+    base = _station(tmp_path)
+    dlg = PpkDialog(card / f"{DJI_FLIGHT}_Timestamp.MRK")
+    dlg.show()
+
+    def shown() -> None:
+        qt_app.processEvents()
+        assert _cut_labels(dlg) == []
+        room = dlg.screen().availableGeometry()
+        assert room.contains(dlg.frameGeometry())
+        if dlg.scroll.verticalScrollBar().isVisible():  # the form scrolls only when the screen is full
+            assert dlg.frameGeometry().height() >= room.height() - 1
+
+    try:
+        shown()
+        opened = dlg.height()
+        _choose(dlg, dlg.base, base)
+        shown()
+        # it grew with the description of the base, unless the screen was full already
+        full = dlg.screen().availableGeometry().height() - 1
+        assert dlg.height() > opened or dlg.frameGeometry().height() >= full
+        dlg.typed.setChecked(True)
+        dlg.lat.setText("35,6")
+        dlg.lon.setText("139,6")
+        dlg.ellh.setText("20")
+        shown()
+        assert dlg.far_warning.isVisible()
+        dlg.ellh.setText("")
+        dlg.accept()
+        shown()
+        assert dlg.error.isVisible() and dlg.error.text().startswith("Scrivi la posizione della base")
+        # a short screen: as tall as the screen lets it be, the form scrolls, nothing cut
+        monkeypatch.setattr(dlg, "_room", lambda: 420)
+        dlg.refresh()
+        qt_app.processEvents()
+        assert dlg.height() == 420 and dlg.scroll.verticalScrollBar().isVisible()
+        assert _cut_labels(dlg) == []
+    finally:
+        dlg.close()
 
 
 def test_the_ppk_step_says_which_bases_and_how_they_were_placed(qt_app, monkeypatch):
@@ -2008,6 +2223,11 @@ def test_the_ppk_step_says_which_bases_and_how_they_were_placed(qt_app, monkeypa
     assert text.startswith("PPK: 4 foto su 5 (fix 3, float 1). La base BASE è nella posizione della sua intestazione "
                            "RINEX, che può essere sbagliata di metri")
     assert text.endswith("della base. Base CORS nella posizione scritta.")
+
+
+def _sample_answer(parent, mrk, work=None) -> dict:
+    """What the PPK dialog answers in the window tests: the RTKLIB sample data, the base at its header's position."""
+    return {"rover": PPK_ROVER, "base": PPK_BASE, "navs": [PPK_NAV], "base_position": None}
 
 
 @pytest.fixture
@@ -2043,8 +2263,8 @@ def test_ppk_step_of_the_gnss_pane(ppk_window, fake_rtklib, monkeypatch, tmp_pat
     monkeypatch.setattr(mw.QFileDialog, "getOpenFileName", lambda *a, **k: (str(folder / "Timestamp.MRK"), ""))
     answer = {"rover": PPK_ROVER, "base": PPK_BASE, "navs": [PPK_NAV], "base_position": None}
 
-    def ask(parent, mrk):
-        asked.append(Path(mrk))
+    def ask(parent, mrk, work=None):
+        asked.append((Path(mrk), Path(work)))
         return dict(answer)
 
     monkeypatch.setattr(mw.PpkDialog, "ask", staticmethod(ask))
@@ -2053,7 +2273,8 @@ def test_ppk_step_of_the_gnss_pane(ppk_window, fake_rtklib, monkeypatch, tmp_pat
     pane.b_ppk.click()
     w.runner.wait()
 
-    assert errors == [] and asked == [folder / "Timestamp.MRK"]
+    # the dialog was given the MRK and the work folder of the chunk, which no input may be in
+    assert errors == [] and asked == [(folder / "Timestamp.MRK", chunk.data_dir / "gnss" / "ppk")]
     states = {c.label: c.meta["gnss"]["status"] for c in chunk.cameras if c.meta["gnss"]["source"] == "ppk"}
     assert states == {"DJI_0002": "fix", "DJI_0003": "float", "DJI_0005": "float", "DJI_0006": "single",
                       "DJI_0007": "float", "DJI_0008": "fix"}
@@ -2071,7 +2292,7 @@ def test_ppk_step_of_the_gnss_pane(ppk_window, fake_rtklib, monkeypatch, tmp_pat
     ((kind, said),) = boxes  # the base at the position of its header: also in a message
     assert kind == "warning" and "0759" in said and "intestazione RINEX" in said and "metri" in said
 
-    # the base at its surveyed position: no message, the pane says it
+    # the base at a typed position: no message, the pane says it; 3 km from the header's, the log says that too
     boxes.clear()
     answer["base_position"] = (35.132, 139.623, 70.25)
     w.gnss_ppk()
@@ -2080,6 +2301,8 @@ def test_ppk_step_of_the_gnss_pane(ppk_window, fake_rtklib, monkeypatch, tmp_pat
     assert "Base 0759 nella posizione scritta." in pane.states["ppk"].text()
     assert "intestazione" not in pane.states["ppk"].text()
     assert chunk.camera("DJI_0002").meta["gnss"]["base"]["position"] == [35.132, 139.623, 70.25]
+    assert any(re.match(r"the typed position of the base 0759 is 3\.\d km away horizontally", entry[2])
+               for entry in w.log_pane.entries)
 
     # an error of the run: said, nothing changed
     before = _snapshot(chunk)
@@ -2120,8 +2343,7 @@ def test_ppk_step_asks_for_rtklib_and_for_the_photos(ppk_window, fake_rtklib, mo
     card.mkdir()
     shutil.copyfile(folder / "Timestamp.MRK", card / "Timestamp.MRK")
     monkeypatch.setattr(mw.QFileDialog, "getOpenFileName", lambda *a, **k: (str(card / "Timestamp.MRK"), ""))
-    monkeypatch.setattr(mw.PpkDialog, "ask", staticmethod(
-        lambda parent, mrk: {"rover": PPK_ROVER, "base": PPK_BASE, "navs": [PPK_NAV], "base_position": None}))
+    monkeypatch.setattr(mw.PpkDialog, "ask", staticmethod(_sample_answer))
     monkeypatch.setattr(mw, "message", lambda *a, **k: None)
     monkeypatch.setattr(mw.QFileDialog, "getExistingDirectory", lambda *a, **k: "")
     w.gnss_ppk()  # the folder of the photos not given: nothing runs
@@ -2131,3 +2353,55 @@ def test_ppk_step_asks_for_rtklib_and_for_the_photos(ppk_window, fake_rtklib, mo
     w.gnss_ppk()
     w.runner.wait()
     assert len(fake_rtklib()) == 1 and sum(c.meta["gnss"]["source"] == "ppk" for c in chunk.cameras) == 6
+
+
+def test_ppk_step_waits_for_a_running_step(ppk_window, monkeypatch):
+    """While another step runs *Calcola PPK* is off, also after the pane is read again, and the command asks nothing:
+    it says in the status bar what the menu would."""
+    w, folder, mw = ppk_window
+    pane = w.gnss_pane
+    monkeypatch.setattr(mw.QFileDialog, "getOpenFileName", lambda *a, **k: pytest.fail("a file was asked for"))
+    assert pane.b_ppk.isEnabled()
+    w._busy(True)
+    assert not pane.b_ppk.isEnabled()
+    pane.set_state(w.chunk)
+    assert not pane.b_ppk.isEnabled()
+    w._busy(False)
+    assert pane.b_ppk.isEnabled()
+    w.runner.thread = object()  # a step running (put back before the window closes, which would wait for it)
+    try:
+        assert w.runner.busy
+        w.gnss_ppk()
+        assert w.statusBar().currentMessage() == "Un'elaborazione e' gia' in corso"
+    finally:
+        w.runner.thread = None
+
+
+def test_ppk_step_says_when_no_photo_took_a_position(ppk_window, fake_rtklib, monkeypatch, tmp_path):
+    """A solution that has no position at any shot (every one in a gap): said in a message, the warnings of the run in
+    the log, nothing changed, no message about the base."""
+    w, folder, mw = ppk_window
+    chunk = w.chunk
+    pos = tmp_path / "gaps.pos"
+    pos.write_text(_pos_text(rows=[(START_2005 + 10.0, 35.1320660, 139.6243010, 75.690, 1, 7, 0.004, 0.003, 0.009),
+                                   (START_2005 + 3590.0, 35.1320670, 139.6243020, 75.700, 1, 7, 0.004, 0.003, 0.009)]),
+                   newline="")
+    monkeypatch.setenv("PPG_FAKE_POS", str(pos))
+    said = []
+    monkeypatch.setattr(w, "_warn", lambda text: said.append(text))
+    monkeypatch.setattr(mw, "message", lambda *a, **k: pytest.fail("a message about the base of a run that placed "
+                                                                    "nothing"))
+    monkeypatch.setattr(mw.QFileDialog, "getOpenFileName", lambda *a, **k: (str(folder / "Timestamp.MRK"), ""))
+    monkeypatch.setattr(mw.PpkDialog, "ask", staticmethod(_sample_answer))
+    before = _snapshot(chunk)
+    w.setWindowModified(False)
+
+    w.gnss_ppk()
+    w.runner.wait()
+
+    assert said == ["Nessuna foto del chunk ha preso una posizione PPK: controlla la cartella delle foto e che l'MRK "
+                    "sia del volo delle osservazioni del drone."]
+    assert _snapshot(chunk) == before and not w.isWindowModified() and len(fake_rtklib()) == 1
+    logged = [entry[2] for entry in w.log_pane.entries]
+    assert any(t.startswith("9 photos were taken where the solution solution.pos has no position") for t in logged)
+    assert any(t.startswith("the position of the base 0759 comes from its RINEX header") for t in logged)

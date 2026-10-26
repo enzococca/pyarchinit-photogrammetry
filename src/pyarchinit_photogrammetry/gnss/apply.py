@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import copy
-import math
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -117,7 +116,7 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
                  "base": copy.deepcopy(solution.base), "rover": solution.rover, "solution": name}
         positions.append((f, shot, cam, list(dji.lever_arm(lat, lon, h, shot.offset_ned_mm)),
                           accuracy(state, [float(v) for v in deviations]), state, extra))
-        apart.append(_horizontal_m(shot.lat, shot.lon, lat, lon))
+        apart.append(ppk.horizontal_m(shot.lat, shot.lon, lat, lon))
     placed = []
     for f, shot, cam, location, acc, state, extra in positions:
         set_camera_position(cam, location, "EPSG:4979", acc, "ppk", status=state, height="ellipsoidal", extra=extra)
@@ -191,13 +190,6 @@ def _result(pairing: _Pairing, placed: list[tuple[Path, dji.MrkShot, str]]) -> d
             "status": dict(Counter(state for _f, _shot, state in placed)),
             "unmatched": [f.stem for f, _shot in pairing.paired if f not in files],
             "shots_unmatched": [s.index for s in pairing.shots if id(s) not in used]}
-
-
-def _horizontal_m(lat0: float, lon0: float, lat1: float, lon1: float) -> float:
-    """The horizontal distance in metres between two points (degrees), on a sphere as large as the earth: plenty to
-    tell metres from hundreds of metres."""
-    east = math.radians(float(dji.wrap_longitude(lon1 - lon0))) * math.cos(math.radians(lat0))
-    return 6371000.0 * math.hypot(math.radians(lat1 - lat0), east)
 
 
 def _photo_time(cam: Camera) -> datetime | None:

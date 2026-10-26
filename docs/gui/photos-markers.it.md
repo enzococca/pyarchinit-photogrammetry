@@ -116,6 +116,8 @@ decompresso con CRX2RNX.
 **I passi.** *Calcola PPK...* nel pannello (*Strumenti > GNSS > Correzioni PPK...*) chiede il `Timestamp.MRK`, poi
 apre una finestra:
 
+- *Timestamp.MRK*: i suoi scatti e le ore in cui sono stati fatti, e quanti cadono fuori dalle osservazioni del drone
+  (le loro foto terranno la posizione che hanno);
 - *Osservazioni del drone*: trovate da sole accanto all'MRK (il `*_Rinex.obs` di un drone DJI, del volo dell'MRK
   quando la cartella ne ha più di uno; altrimenti l'unico file `*.obs` o `*.##o` che c'è), con le ore che coprono;
 - *Osservazioni della base*: con quello che dice la sua intestazione - il punto, il ricevitore, l'antenna, le ore
@@ -124,15 +126,22 @@ apre una finestra:
   *Togli* ne toglie uno, *Aggiungi...* ne aggiunge un altro;
 - *Posizione della base*: dal file della base o scritta (sotto).
 
-*OK* controlla i file e dice nella finestra che cosa manca. Se l'MRK è stato copiato lontano dalle foto la finestra
-chiede la loro cartella, come per un MRK. RTKLIB lavora in background (nella cartella del chunk, `gnss/ppk`, dove
-restano le sue opzioni e la sua soluzione `.pos`); le foto si abbinano agli scatti come per un MRK.
+*OK* controlla, prima che parta qualsiasi cosa, quello che si può controllare e dice nella finestra che cosa manca o
+non va: i file (osservazioni che siano osservazioni, file di navigazione ancora al loro posto), le loro ore (il drone
+e la base con ore in comune, gli scatti dell'MRK dentro le osservazioni del drone), nessun file nella cartella di
+lavoro del PPK, la posizione della base. I file si leggono una volta, dopo una pausa nella scrittura dei loro nomi; la
+finestra è alta quanto quello che dice, e su uno schermo basso il suo modulo scorre. Se l'MRK è stato copiato lontano
+dalle foto la finestra chiede la loro cartella, come per un MRK. RTKLIB lavora in background (nella cartella del
+chunk, `gnss/ppk`, dove restano le sue opzioni e la sua soluzione `.pos`); le foto si abbinano agli scatti come per
+un MRK.
 
 **La posizione della base** decide dove finisce tutto il rilievo: ogni posizione PPK è relativa a lei.
 
 - *Scritta*: la posizione misurata del punto su cui sta la base - latitudine e longitudine in gradi, quota
   sull'ellissoide in metri (non sul livello del mare), nel sistema di riferimento che vuoi per il rilievo. È la
-  strada per una posizione assoluta accurata.
+  strada per una posizione assoluta accurata. Scritta a più di 1 km dalla posizione dell'intestazione della base, o
+  più alta o più bassa di oltre 30 m, dà un avviso (nella finestra, nel registro e in `ppg gnss ppk`): latitudine e
+  longitudine scambiate o senza il segno, una quota sul livello del mare.
 - *Dal file della base*: la posizione scritta nella sua intestazione RINEX. Per una stazione permanente di solito è
   la sua posizione pubblicata; per una base propria è spesso la posizione che il ricevitore ha trovato da solo, che
   **può essere sbagliata di metri, e tutto il rilievo si sposta con lei**. Il programma lo dice nella finestra, in
@@ -167,8 +176,9 @@ ppg gnss ppk rilievo.ppg --mrk /scheda/VOLO_Timestamp.MRK --rover /scheda/VOLO_R
 ```
 
 Stampa le foto per stato, la base usata e l'altezza della sua antenna, gli avvisi (sempre quello di una base nella
-posizione della sua intestazione), le foto e gli scatti rimasti senza posizione PPK; salva il progetto, e si ferma
-con un errore, senza cambiare nulla, quando i file non si possono usare.
+posizione della sua intestazione, e quello di una posizione scritta lontana da lei), le foto e gli scatti rimasti
+senza posizione PPK; salva il progetto, e si ferma con un errore, senza cambiare nulla, quando i file non si possono
+usare (un file indicato che non c'è la ferma prima che si legga qualsiasi cosa).
 
 ## Maschere
 

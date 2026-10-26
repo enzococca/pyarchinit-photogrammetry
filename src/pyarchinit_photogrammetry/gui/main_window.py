@@ -1364,6 +1364,8 @@ class MainWindow(QMainWindow):
         for a in self._processing_actions:
             a.setEnabled(not busy)
         self.reference.setEnabled(not busy)
+        if getattr(self, "gnss_pane", None) is not None:
+            self.gnss_pane.set_busy(busy)
         self._update_workspace_actions()
 
     def _need_chunk(self, what: str = "", aligned: bool = False, product: str | None = None) -> bool:
@@ -3004,6 +3006,9 @@ class MainWindow(QMainWindow):
         (:func:`gnss.ppk.solve`), then every photo the camera below the antenna of the solution at its shot, with the
         status and accuracy of the solution (:func:`gnss.apply.apply_ppk`). What goes wrong in the background is shown
         as every failed step is, with its message and traceback; nothing changes then."""
+        if self.runner.busy:  # as the menu, which is off while a step runs
+            self.statusBar().showMessage(tr("Un'elaborazione e' gia' in corso"), 8000)
+            return
         if not self._need_chunk():
             return
         if not _native.ppk_available():
@@ -3016,16 +3021,16 @@ class MainWindow(QMainWindow):
                                               tr("File MRK (*.MRK *.mrk);;Tutti i file (*)"))
         if not path:
             return
-        v = PpkDialog.ask(self, path)
+        from ..gnss import apply as gnss
+        from ..gnss import ppk
+
+        ch = self.chunk
+        v = PpkDialog.ask(self, path, ppk.work_folder(ch))
         if not v:
             return
         photos = self._photos_of_mrk(path)
         if photos is None:
             return
-        from ..gnss import apply as gnss
-        from ..gnss import ppk
-
-        ch = self.chunk
 
         def job(p):
             p(0.02, "Calcolo PPK con RTKLIB")
