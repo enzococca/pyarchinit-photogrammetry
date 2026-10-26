@@ -50,9 +50,14 @@ Applicare le posizioni sostituisce quelle che le foto avevano, e farlo due volte
 **L'accuratezza** di una posizione è il doppio delle sue deviazioni standard dichiarate (quelle di una soluzione
 RTK sono ottimistiche), mai sotto il minimo del suo stato: 1 cm per un fix, 20 cm per un float, 1 m per una
 posizione singola. Senza dati RTK resta 5, 5, 10 m. In un file di posizioni `accuracy` vale così com'è; una riga
-senza accuratezza né deviazioni prende 5, 5, 10 cm, portati al minimo del suo `status` se ce l'ha. L'allineamento,
-*Ottimizza camere* e il motore *Proprio* pesano ogni foto per la sua accuratezza: un blocco di fix e qualche
-posizione singola non è trattato come fatto di pari.
+senza accuratezza né deviazioni prende 5, 5, 10 cm, portati al minimo del suo `status` se ce l'ha. Due passi
+pesano ogni foto per la sua accuratezza, così un blocco di fix e qualche posizione singola non è trattato come
+fatto di pari: *Allinea foto...* tiene il blocco alle posizioni durante l'allineamento incrementale (l'opzione
+*Posizioni GPS delle foto nell'allineamento*, attiva quando le foto hanno posizioni; il metodo globale non le usa,
+e la scelta automatica torna all'incrementale quando il blocco globale le manca), e *Ottimizza camere* con il
+motore *Proprio* quando *Posizioni GNSS delle foto (motore proprio)* è su *usate con la loro accuratezza* o
+*usate, con un bias per volo*. Il motore predefinito di *Ottimizza camere*, COLMAP, ignora le posizioni delle
+camere, e quell'opzione è su *non usate* finché non la scegli.
 
 **La tabella** ha una riga per volo (una pausa di oltre 20 minuti ne comincia un altro; le foto senza data sono
 la riga *senza data*): le foto con una posizione fix, float, singola, con una posizione e nessun dato RTK, senza

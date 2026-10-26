@@ -50,9 +50,14 @@ positions replaces the ones the photos had, and doing it twice changes nothing.
 **The accuracy** of a position is twice its declared standard deviations (the ones of an RTK solution are
 optimistic), never below the floor of its state: 1 cm for a fix, 20 cm for a float, 1 m for a single position.
 Without RTK data it stays 5, 5, 10 m. In a positions file `accuracy` is taken as it is; a line with no accuracy
-and no deviations gets 5, 5, 10 cm, raised to the floor of its `status` when it has one. The alignment, *Optimize
-cameras* and the engine *Own* weigh every photo by its accuracy, so a block of fixes and a few singles is not
-treated as one of equals.
+and no deviations gets 5, 5, 10 cm, raised to the floor of its `status` when it has one. Two steps weigh every
+photo by its accuracy, so a block of fixes and a few singles is not treated as one of equals: *Align photos...*
+holds the block to the positions during the incremental alignment (the option *GPS positions of the photos in the
+alignment*, on when the photos have positions; the global method does not use them, and the automatic choice
+goes back to the incremental one when the global block misses them), and *Optimise cameras* with the engine
+*Own* when *GNSS positions of the photos (own engine)* is *used with their accuracy* or *used, with a bias per
+flight*. The default engine of *Optimise cameras*, COLMAP, ignores the camera positions, and that option is *not
+used* until you choose it.
 
 **The table** has a row per flight (a pause of more than 20 minutes starts another; the photos with no date are
 the *no date* row): the photos with a fix, a float, a single position, with a position and no RTK data, with no
