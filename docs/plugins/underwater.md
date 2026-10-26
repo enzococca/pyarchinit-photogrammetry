@@ -10,6 +10,13 @@ This page describes version 0.1.0 of the plugin, which needs pyarchinit-photogra
 and source code are in the
 [plugin repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/underwater).
 
+<figure markdown="span">
+  ![A photo of the Sea-thru dataset as developed and with its colours restored](../img/plugins/underwater/restored.jpg)
+  <figcaption>A coral head at 1-3 m from the camera in the Red Sea (Sea-thru dataset D3, Akkaynak and Treibitz):
+  the photo as the camera developed it, and with its colours restored by the plugin with the range of every
+  pixel. Photo: D. Akkaynak, T. Treibitz, [Sea-thru dataset](https://www.kaggle.com/datasets/colorlabeilat/seathru-dataset), [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/); developed and restored by us, the figure is under the
+  same licence.</figcaption>
+</figure>
 
 ## In short
 
@@ -152,6 +159,12 @@ The pane shows the coefficients per metre of the survey (attenuation βD and bac
 Pixels the depth maps do not reach (the open water above the horizon, the margins) take the range of the nearest
 surface, smoothed: there the restoration is only plausible.
 
+<figure markdown="span">
+  ![The grey scale of a colour chart under water](../img/plugins/underwater/chart.jpg)
+  <figcaption>The colour chart of a Sea-thru D3 photo at 0.9 m: as developed, with the quick correction, restored.
+  The right column is a grey scale: restored, its patches are grey. Photo: D. Akkaynak, T. Treibitz, [Sea-thru dataset](https://www.kaggle.com/datasets/colorlabeilat/seathru-dataset),
+  [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/); cropped, developed and corrected by us, the figure is under the same licence.</figcaption>
+</figure>
 
 ### The quick correction
 

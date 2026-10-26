@@ -9,6 +9,13 @@ Questa pagina descrive la versione 0.1.0 del plugin, che richiede pyarchinit-pho
 README e il codice sorgente sono nel
 [repository dei plugin](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/underwater).
 
+<figure markdown="span">
+  ![Una foto del dataset Sea-thru come sviluppata e con i colori ripristinati](../img/plugins/underwater/restored.jpg)
+  <figcaption>Una formazione di corallo a 1-3 m dalla camera nel Mar Rosso (dataset Sea-thru D3, Akkaynak e
+  Treibitz): la foto come l'ha sviluppata la camera, e con i colori ripristinati dal plugin con la distanza di ogni
+  pixel. Foto: D. Akkaynak, T. Treibitz, [dataset Sea-thru](https://www.kaggle.com/datasets/colorlabeilat/seathru-dataset),
+  [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/); sviluppata e ripristinata da noi, la figura ha la stessa licenza.</figcaption>
+</figure>
 
 ## In breve
 
@@ -152,6 +159,13 @@ sequenza, un video).
 I pixel che le mappe di profondità non raggiungono (l'acqua aperta sopra l'orizzonte, i margini) prendono la distanza
 della superficie più vicina, ammorbidita: lì il ripristino è solo plausibile.
 
+<figure markdown="span">
+  ![La scala dei grigi di una tabella dei colori sott'acqua](../img/plugins/underwater/chart.jpg)
+  <figcaption>La tabella dei colori di una foto di Sea-thru D3 a 0,9 m: come sviluppata, con la correzione rapida,
+  ripristinata. La colonna di destra è una scala di grigi: ripristinati, i suoi tasselli sono grigi. Foto:
+  D. Akkaynak, T. Treibitz, [dataset Sea-thru](https://www.kaggle.com/datasets/colorlabeilat/seathru-dataset),
+  [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/); ritagliata, sviluppata e corretta da noi, la figura ha la stessa licenza.</figcaption>
+</figure>
 
 ### La correzione rapida
 
