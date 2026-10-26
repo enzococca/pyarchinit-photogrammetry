@@ -603,3 +603,38 @@ def test_ppk_engine_on_rtklib_data(tmp_path, monkeypatch):
     code, message = _native.ppk_solve(str(conf), files, str(again))
     assert code == 0 and "erp" not in message
     assert np.array_equal(_pos_rows(again), rows)
+
+
+def test_ppk_core_refuses_compressed_inputs(tmp_path):
+    """The core refuses what RTKLIB would decompress through a shell command (gzip, zip, tar,
+    Hatanaka): code -4, nothing run, nothing written beside the file."""
+    if _native.kernel("ppk_solve") is None:
+        pytest.skip("native core without RTKLIB (older than 0.5, API 8)")
+    conf = tmp_path / "ppk.conf"
+    conf.write_text(PPK_OPTIONS)
+    hatanaka, gz = tmp_path / "base.25d", tmp_path / "rover.25o.gz"
+    hatanaka.write_text("not really Hatanaka\n")
+    gz.write_bytes(b"not really gzip")
+    for name in (hatanaka, gz):
+        files = [str(RTKLIB_DATA / "30400920.05o"), str(name), str(RTKLIB_DATA / "07590920.05n")]
+        code, message = ppg_core.ppk_solve(str(conf), files, str(tmp_path / "out.pos"))
+        assert code == -4 and str(name) in message and "decompress" in message, (code, message)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["base.25d", "ppk.conf", "rover.25o.gz"]  # no base.25o
+
+
+def test_ppk_solve_in_threads(tmp_path):
+    """Runs from several threads wait for each other (RTKLIB is not reentrant) and give the same
+    solution, byte for byte."""
+    if _native.kernel("ppk_solve") is None:
+        pytest.skip("native core without RTKLIB (older than 0.5, API 8)")
+    from concurrent.futures import ThreadPoolExecutor
+
+    conf = tmp_path / "ppk.conf"
+    conf.write_text(PPK_OPTIONS)
+    files = [str(RTKLIB_DATA / name) for name in ("30400920.05o", "07590920.05o", "07590920.05n")]
+    outs = [tmp_path / f"rover_{i}.pos" for i in range(6)]
+    with ThreadPoolExecutor(3) as pool:
+        results = list(pool.map(lambda out: ppg_core.ppk_solve(str(conf), files, str(out)), outs))
+    assert [code for code, _ in results] == [0] * 6
+    first = outs[0].read_bytes()
+    assert len(_pos_rows(outs[0])) > 96 and all(out.read_bytes() == first for out in outs[1:])

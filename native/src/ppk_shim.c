@@ -42,6 +42,32 @@ static void ppg_message(char *msg, int msglen, const char *text)
     if (msg && msglen > 0) snprintf(msg, (size_t)msglen, "%s", text);
 }
 
+/* RTKLIB decompresses an input with gzip, tar or crx2rnx through system()
+   (rtk_uncompress in rtkcmn.c) when the text after the last dot of its path is
+   .z .gz .zip .tar .crx or has a 'd' as third character (Hatanaka RINEX 2,
+   .25d): a fork of the program and a file written beside the input. Such
+   names are refused (any case), as _native.compressed_name does ------------*/
+static int ppg_same_nocase(const char *text, const char *lower)
+{
+    while (*text && *lower && tolower((unsigned char)*text) == *lower) {
+        text++;
+        lower++;
+    }
+    return !*text && !*lower;
+}
+static int ppg_compressed(const char *path)
+{
+    static const char *exts[] = {".z", ".gz", ".zip", ".tar", ".crx"};
+    const char *p = strrchr(path, '.');
+    size_t i;
+
+    if (!p) return 0;
+    for (i = 0; i < sizeof(exts) / sizeof(*exts); i++) {
+        if (ppg_same_nocase(p, exts[i])) return 1;
+    }
+    return strlen(p) > 3 && (p[3] == 'd' || p[3] == 'D');
+}
+
 /* post-processing as rnx2rtkp -k conf -o outfile infiles ----------------------
 * args   : char  *conf      I   options file (rnx2rtkp's -k)
 *          char **infiles   I   input files: rover obs, base obs, nav, ...
@@ -51,7 +77,8 @@ static void ppg_message(char *msg, int msglen, const char *text)
 *          int    msglen    I   size of msg
 * return : postpos(): 0 done (also when RTKLIB read nothing: see msg),
 *          1 aborted, -1 a file named by the options could not be read;
-*          -2 the options file could not be read, -3 bad arguments
+*          -2 the options file could not be read, -3 bad arguments,
+*          -4 a compressed input (ppg_compressed: decompress it first)
 *-----------------------------------------------------------------------------*/
 int ppg_ppk(const char *conf, const char **infiles, int n, const char *outfile,
             char *msg, int msglen)
@@ -76,6 +103,13 @@ int ppg_ppk(const char *conf, const char **infiles, int n, const char *outfile,
         if (!infiles[i] || !*infiles[i]) {
             ppg_message(msg, msglen, "error : an input file without a name");
             return -3;
+        }
+        if (ppg_compressed(infiles[i])) {
+            char text[PPG_MSGLEN];
+            snprintf(text, sizeof(text), "error : %s is compressed (gzip, zip, tar or Hatanaka RINEX), "
+                     "and RTKLIB would decompress it with a shell command: decompress it first", infiles[i]);
+            ppg_message(msg, msglen, text);
+            return -4;
         }
     }
     /* every option back to RTKLIB's defaults, files too (resetsysopts() keeps

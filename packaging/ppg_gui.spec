@@ -4,7 +4,8 @@ import os
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
+from PyInstaller.compat import importlib_metadata
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules, copy_metadata
 
 ROOT = Path(SPECPATH).resolve().parent
 NAME = "PyArchInit Photogrammetry"
@@ -44,6 +45,10 @@ datas = ([(str(ROOT / "src" / "pyarchinit_photogrammetry" / "ai" / name), "pyarc
          + collect_data_files("pyvista") + collect_data_files("rasterio") + collect_data_files("pyproj")
          + collect_data_files("ezdxf") + collect_data_files("trimesh")
          + collect_data_files("fpdf"))  # its colour profile (importlib.resources)
+try:  # the native core carries RTKLIB (BSD 2-clause): its notice goes with the application, in the core's
+    datas += copy_metadata("pyarchinit-photogrammetry-core")  # dist-info (licenses/NOTICE, license.txt)
+except importlib_metadata.PackageNotFoundError:  # no core, no RTKLIB
+    pass
 binaries = collect_dynamic_libs("pycolmap")
 for optional in ("open3d", "ifcopenshell", "pye57", "psycopg"):  # pye57: E57 laser scans (its xerces library);
     try:                                                         # psycopg: PostgreSQL without psycopg2 (ARM64)

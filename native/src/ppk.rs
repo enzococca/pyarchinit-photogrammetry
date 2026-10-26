@@ -25,8 +25,9 @@ fn c_text(text: &str, what: &str) -> PyResult<CString> {
 /// RTKLIB's post-processing as `rnx2rtkp -k conf -o outfile infiles` (API 8): the options file,
 /// the input files (rover observations first, then the base's observations, then navigation
 /// files) and the solution file. Returns RTKLIB's code (0 done, 1 aborted, -1 a file named by
-/// the options could not be read; -2 the options file could not be read, -3 bad arguments) and
-/// its last message, the last error it reported if any. RTKLIB returns 0 also when it computed
+/// the options could not be read; -2 the options file could not be read, -3 bad arguments, -4 a
+/// compressed input, which RTKLIB would decompress through a shell command) and its last
+/// message, the last error it reported if any. RTKLIB returns 0 also when it computed
 /// nothing ("error : no obs data"): the caller reads the solution file. Runs without the GIL,
 /// one run at a time in the process.
 #[pyfunction]

@@ -1109,18 +1109,24 @@ def test_only_fix_is_kept_when_positions_are_applied_again(tmp_path):
 
 
 def _fake_rnx2rtkp(folder: Path) -> Path:
-    """A stand-in for RTKLIB's rnx2rtkp: writes its arguments into the -o file and, as rnx2rtkp
-    does, its messages to stderr separated by carriage returns; a file named bad.obs makes it
-    fail with an error message and exit code 1."""
+    """A stand-in for RTKLIB-EX's rnx2rtkp: writes its arguments into the -o file and, as rnx2rtkp
+    does, its messages to stderr separated by carriage returns. As RTKLIB-EX, a rover without
+    observations (noobs.obs) is "error : no obs data" with exit status 0 and no output; a run.log
+    beside it lists every run; old.obs exits 255 as RTKLIB 2.4.3 does for -1."""
     script = folder / "rnx2rtkp"
+    log = folder / "run.log"
     script.write_text(f"""#!{sys.executable}
 import sys
 args = sys.argv[1:]
 out = args[args.index("-o") + 1]
+open({str(log)!r}, "a").write(" ".join(args) + "\\n")
 sys.stderr.write("reading    : 2005/04/02 00:00:00.0\\r")
-if any(a.endswith("bad.obs") for a in args):
-    sys.stderr.write("error : no obs data\\r")
-    sys.exit(1)
+if any(a.endswith("noobs.obs") for a in args):
+    sys.stderr.write("error : no obs data\\r" + " " * 40 + "\\r")
+    sys.exit(0)
+if any(a.endswith("old.obs") for a in args):
+    sys.stderr.write("error : no sat ant pcv in igs.atx\\r")
+    sys.exit(255)
 open(out, "w").write(" ".join(args))
 sys.stderr.write("processing : 2005/04/02 00:59:30.0 Q=1\\r" + " " * 40 + "\\r")
 """)
@@ -1150,9 +1156,48 @@ def test_ppk_without_the_core_says_what_to_do(tmp_path, monkeypatch):
     code, message = _native.ppk_solve(str(conf), files, str(out))
     assert code == 0 and message.startswith("processing : 2005/04/02 00:59:30.0")
     assert out.read_text() == " ".join(["-k", str(conf), "-o", str(out)] + files)
-    code, message = _native.ppk_solve(str(conf), [str(tmp_path / "bad.obs")] + files[1:], str(out))
-    assert code == 1 and message == "error : no obs data"
-    # a PPG_RNX2RTKP that is not there
+    # nothing computed is exit status 0 with RTKLIB's error, as in the core
+    nothing = tmp_path / "nothing.pos"
+    code, message = _native.ppk_solve(str(conf), [str(tmp_path / "noobs.obs")] + files[1:], str(nothing))
+    assert code == 0 and message == "error : no obs data" and not nothing.exists()
+    # any other exit status is 1 (RTKLIB 2.4.3 exits with postpos's -1, 255 or 4294967295)
+    code, message = _native.ppk_solve(str(conf), [str(tmp_path / "old.obs")] + files[1:], str(out))
+    assert code == 1 and message == "error : no sat ant pcv in igs.atx"
+    # a PPG_RNX2RTKP that is not there, or not a program
     monkeypatch.setenv("PPG_RNX2RTKP", str(tmp_path / "nowhere" / "rnx2rtkp"))
     with pytest.raises(RuntimeError, match="PPG_RNX2RTKP"):
+        _native.ppk_solve(str(conf), files, str(out))
+    if os.name != "nt":  # Windows has no execute permission
+        text_file = tmp_path / "rnx2rtkp.txt"
+        text_file.write_text("not a program")
+        monkeypatch.setenv("PPG_RNX2RTKP", str(text_file))
+        with pytest.raises(RuntimeError, match="PPG_RNX2RTKP"):
+            _native.ppk_solve(str(conf), files, str(out))
+
+
+@pytest.mark.parametrize("name", ["base.25d", "BASE.25D", "rover.obs.gz", "rover.25o.Z", "base.crx", "obs.zip",
+                                  "obs.tar", "obs.TAR.GZ"])
+def test_ppk_refuses_compressed_inputs(name, tmp_path, monkeypatch):
+    """RTKLIB decompresses gzip, zip, tar and Hatanaka files by their extension through a shell
+    command (a fork of the program, the output beside the user's file): refused before RTKLIB or
+    rnx2rtkp run, with or without the core."""
+    conf, out = tmp_path / "ppk.conf", tmp_path / "rover.pos"
+    conf.write_text("pos1-posmode =kinematic\n")
+    files = [str(tmp_path / "rover.25o"), str(tmp_path / name), str(tmp_path / "base.25n")]
+    assert _native.compressed_name(name) and not any(_native.compressed_name(f) for f in files[::2])
+    assert not any(_native.compressed_name(n) for n in ("x.obs", "x.rnx", "x.nav", "x.25p", "x.sp3", "x.rtcm3", "x"))
+    monkeypatch.setenv("PPG_NATIVE", "0")
+    monkeypatch.setenv("PPG_RNX2RTKP", str(_fake_rnx2rtkp(tmp_path)))
+    with pytest.raises(ValueError, match="decompress") as error:
+        _native.ppk_solve(str(conf), files, str(out))
+    assert name in str(error.value)
+    assert not (tmp_path / "run.log").exists() and not out.exists()  # rnx2rtkp never ran
+    # with the core too, before it is called
+    monkeypatch.setenv("PPG_NATIVE", "1")
+
+    def core_ppk(*args):
+        raise AssertionError("the core ran with a compressed input")
+
+    monkeypatch.setattr(_native, "kernel", lambda fn: core_ppk if fn == "ppk_solve" else None)
+    with pytest.raises(ValueError, match="decompress"):
         _native.ppk_solve(str(conf), files, str(out))

@@ -175,19 +175,42 @@ PPK_MISSING = ("PPK needs RTKLIB: install the native core pyarchinit-photogramme
                "(pip install \"pyarchinit-photogrammetry-core>=0.5\"), or set PPG_RNX2RTKP to an rnx2rtkp "
                "program of RTKLIB (rtklibexplorer's RTKLIB-EX 2.5 or RTKLIB 2.4.3)")
 
+# what RTKLIB decompresses by the extension of an input, with gzip, tar or crx2rnx through a shell
+# command (rtk_uncompress): a fork of the program, and the result written beside the user's file
+COMPRESSED = (".z", ".gz", ".zip", ".tar", ".crx")
+
+
+def compressed_name(path) -> bool:
+    """RTKLIB would decompress ``path`` through a shell command: the text after the last dot of
+    the whole path, as RTKLIB reads it, is .z, .gz, .zip, .tar or .crx (any case), or has a d as
+    its third character (Hatanaka RINEX 2: .25d)."""
+    text = str(path)
+    dot = text.rfind(".")
+    if dot < 0:
+        return False
+    ext = text[dot:]
+    return ext.lower() in COMPRESSED or (len(ext) > 3 and ext[3] in "dD")
+
 
 def ppk_solve(conf, infiles, outfile) -> tuple[int, str]:
     """RTKLIB's post-processing, as ``rnx2rtkp -k conf -o outfile infiles``: the options file
     ``conf``; the input files rover observations first, then the base's observations, then the
-    navigation files; the solution written to ``outfile``. Returns RTKLIB's code (0 done, 1
-    aborted, -1 a file named in the options could not be read, -2 the options file could not
-    be read, -3 bad arguments; an external rnx2rtkp exits with 1 for any of them) and its last
-    message (the last error it reported, if any). RTKLIB returns 0 also when it computed
-    nothing ("error : no obs data"): read the solution it wrote.
+    navigation files; the solution written to ``outfile``. Returns RTKLIB's code and its last
+    message (the last error it reported, if any). Codes of the core: 0 done, 1 aborted, -1 a
+    file named in the options could not be read, -2 the options file could not be read, -3 bad
+    arguments, -4 a compressed input; an external rnx2rtkp: its exit status, 0 or 1 for any
+    failure. RTKLIB returns 0 also when it computed nothing ("error : no obs data"): read the
+    solution it wrote.
 
-    With the native core (API 8) RTKLIB runs inside it; without it (missing, older than 0.5
-    or switched off) the program named by ``PPG_RNX2RTKP`` runs; otherwise RuntimeError."""
+    Compressed inputs (:func:`compressed_name`: gzip, zip, tar, Hatanaka) raise ValueError
+    before anything runs: decompress them first. With the native core (API 8) RTKLIB runs
+    inside it; without it (missing, older than 0.5 or switched off) the program named by
+    ``PPG_RNX2RTKP`` runs; otherwise RuntimeError."""
     files = [str(f) for f in infiles]
+    for name in files:
+        if compressed_name(name):
+            raise ValueError(f"{name} is compressed (gzip, zip, tar or Hatanaka RINEX), and RTKLIB would "
+                             "decompress it with a shell command: decompress it first")
     fn = kernel("ppk_solve")
     if fn is not None:
         code, message = fn(str(conf), files, str(outfile))
@@ -199,14 +222,17 @@ def ppk_solve(conf, infiles, outfile) -> tuple[int, str]:
 
 
 def _rnx2rtkp(tool: str, conf: str, files: list[str], outfile: str) -> tuple[int, str]:
-    """``tool -k conf -o outfile files``: its exit code and its last message on stderr (rnx2rtkp
-    separates them with carriage returns), the last error if it reported one."""
+    """``tool -k conf -o outfile files``: 0 or 1 for any other exit status (RTKLIB-EX exits 1,
+    RTKLIB 2.4.3 with postpos's -1), and its last message on stderr (rnx2rtkp separates them with
+    carriage returns), the last error if it reported one."""
     path = shutil.which(tool) or (tool if Path(tool).is_file() else None)
     if path is None:
         raise RuntimeError(f"PPG_RNX2RTKP names {tool}, which is not there. " + PPK_MISSING)
+    if not os.access(path, os.X_OK):
+        raise RuntimeError(f"PPG_RNX2RTKP names {tool}, which is not a program that can run. " + PPK_MISSING)
     proc = subprocess.run([str(Path(path).resolve()), "-k", conf, "-o", outfile, *files], capture_output=True,
                           text=True, errors="replace", close_fds=False)
-    return proc.returncode, _last_message(proc.stderr or "")
+    return (0 if proc.returncode == 0 else 1), _last_message(proc.stderr or "")
 
 
 def _last_message(text: str) -> str:
