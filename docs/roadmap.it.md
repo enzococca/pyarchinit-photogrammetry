@@ -228,18 +228,22 @@ dataset pubblici WorldView-3.
 * **Posizioni GNSS delle foto, PPK**: le posizioni degli scatti di un `Timestamp.MRK` ricalcolate dal RINEX del
   drone e da quello di una base - propria o una stazione permanente - con RTKLIB-EX 2.5.1 dentro il nucleo nativo
   0.5 (senza, l'`rnx2rtkp` di `PPG_RNX2RTKP`): la base nella sua posizione misurata o in quella della sua
-  intestazione RINEX, con l'avviso che può essere sbagliata di metri, la sua altezza dell'antenna aggiunta; la
-  camera sotto l'antenna con il braccio di leva dello scatto, lo stato e l'accuratezza della soluzione, niente
-  inventato attraverso i suoi buchi; *Calcola PPK...* nel pannello *GNSS*, `ppg gnss ppk`.
+  intestazione RINEX, con l'avviso che può essere sbagliata di metri, la sua altezza dell'antenna aggiunta (non
+  ancora lo scostamento del centro di fase della sua antenna, che ogni calcolo dice); la camera sotto l'antenna con
+  il braccio di leva dello scatto, lo stato e l'accuratezza della soluzione, niente inventato attraverso i suoi buchi;
+  i fix RTK di bordo tenuti se non si sostituiscono, un file di soluzione per calcolo, la finestra che riparte
+  dall'ultimo calcolo; *Calcola PPK...* nel pannello *GNSS*, `ppg gnss ppk`.
 
 ## Prossimi passi
 
 Punti aperti, senza un ordine fisso:
 
 * **GNSS, i prossimi passi**: la posizione della base da una stazione permanente vicina o da un PPP statico,
-  l'elenco e lo scaricamento delle stazioni pubbliche vicine a un rilievo, i RINEX Hatanaka letti così come sono, il
-  sistema di riferimento e l'epoca delle posizioni e le quote sul geoide, la qualità per volo nel rapporto PDF; gli
-  eventi di un ricevitore e i log di ArduPilot e PX4 per i droni costruiti da sé.
+  l'elenco e lo scaricamento delle stazioni pubbliche vicine a un rilievo, i RINEX Hatanaka letti così come sono, le
+  calibrazioni delle antenne delle basi (gli scostamenti del centro di fase, dai file dell'IGS e dell'NGS), una base
+  da più file (i file orari di una stazione, un volo a cavallo della mezzanotte), il sistema di riferimento e l'epoca
+  delle posizioni e le quote sul geoide, la qualità per volo nel rapporto PDF; gli eventi di un ricevitore e i log di
+  ArduPilot e PX4 per i droni costruiti da sé.
 
 * Parti mai provate su dati veri: import da WebODM, una scena satellitare propria, `ppg remote` su una
   macchina remota, un volo MicaSense intero fino all'ortofoto di riflettanza.

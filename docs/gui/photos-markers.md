@@ -101,18 +101,21 @@ changing nothing, when the file cannot be used.
 (post-processed kinematic) RTKLIB computes again where the drone's antenna was, epoch by epoch, from the drone's own
 satellite observations and from those of a base that recorded at the same time; every photo then takes the
 position of the camera at its shot, as with an MRK, with the status (fix, float, single) and the accuracy of the
-solution. With fixes the photos are placed to the centimetre, and a survey needs few or no ground control points.
+solution. With fixes the photos are placed to a few centimetres against the base, and a survey needs few or no
+ground control points - in height less the phase-centre offset of the base's antenna, which is not applied yet (see
+*The phase centre of the base antenna* below): a few centimetres, more than 10 cm with some choke rings.
 
 **The files.**
 
 | File | Where it comes from |
 | --- | --- |
 | The drone's RINEX and its `Timestamp.MRK` | The folder of the flight on the drone's card: a DJI drone writes `<flight>_Rinex.obs` beside `<flight>_Timestamp.MRK` (often with `<flight>_PPKNAV.nav`); another receiver its observation file (`.obs`, `.##o`) |
-| The base's RINEX | Your own base (any receiver that records RINEX) on a mark whose position you know, or the file of a permanent station (a regional network, EUREF, IGS) that you download for the hours of the flight. The base must record during the whole flight, the nearer the better: beyond 20-30 km a fix gets hard. Listing and downloading the stations near a survey is coming in a later version |
-| Navigation files | The broadcast ephemerides: `.nav`, `.##n`, `.##g`, `.##p` or the RINEX 3 `*_MN.rnx` - the drone's, the base's or the daily file of a station |
+| The base's RINEX | Your own base (any receiver that records RINEX) on a mark whose position you know, or the file of a permanent station (a regional network, EUREF, IGS) that you download for the hours of the flight. The base must record during the whole flight, **in one file that covers it all**: the hourly files of a station, or the two daily files of a flight across midnight (UTC), must be joined into one with another tool for now - joining them comes with the next phase. The nearer the better: beyond 20 km a fix gets hard (the program warns). Listing and downloading the stations near a survey is coming in a later version |
+| Navigation files | The broadcast ephemerides: `.nav`, `.##n`, `.##g`, `.##p` or the RINEX 3 `*_MN.rnx` - the drone's, the base's or the daily file of a station; the daily broadcast file of the IGS in RINEX 2 (`brdcDDD0.YYn`, `.YYg`) is found too beside the observations, for their day and the days around it |
 
 Compressed RINEX: a gzip file (`.gz`) is read as it is; a Hatanaka file (`.crx`, `.##d`) must be decompressed with
-CRX2RNX first, for now.
+CRX2RNX first, for now, and so must a file compressed with the Unix compress (`.Z`) or zipped (`.zip`), as the
+archives of the stations often give them: the program says which it is.
 
 **The steps.** *Compute PPK...* in the pane (*Tools > GNSS > PPK corrections...*) asks for the `Timestamp.MRK`, then
 opens a dialog:
@@ -122,18 +125,27 @@ opens a dialog:
 - *Observations of the drone*: found by itself beside the MRK (the `*_Rinex.obs` of a DJI drone, of the flight of the
   MRK when the folder holds several; else the only `*.obs` or `*.##o` file there), with the hours it covers;
 - *Observations of the base*: with what its header says - the mark, the receiver, the antenna, the hours of its
-  observations, the position in the header and the antenna height;
+  observations, the position in the header and the antenna height - and, in sight, the note that the phase-centre
+  offset of that antenna is not applied;
 - *Navigation files*: those beside the drone's observations, then those beside the base's; *Remove* takes one away,
   *Add...* adds another;
-- *Position of the base*: from the file of the base or typed (below).
+- *Position of the base*: from the file of the base or typed (below);
+- *Drone's RTK fixes*: whether the photos with an RTK fix of the drone itself take the PPK position too (below).
+
+The dialog starts from the last run of the chunk: the base file, its position from the header or typed, the
+navigation files still there (not those beside the drone's observations of another flight), the choice about the
+onboard fixes; for the same MRK the drone's observations too. With several flights against one base the base and
+its position are typed once.
 
 *OK* checks, before anything runs, what can be checked and says in the dialog what is missing or wrong: the files
 (observations that are observations, navigation files still there), their times (the drone and the base with hours
 in common, the shots of the MRK within the drone's observations), no file in the work folder of the PPK, the
 position of the base. The files are read once, after a pause in typing their names; the dialog is as tall as what it
 says, and on a short screen its form scrolls. When the MRK was copied away from the photos the window asks for their
-folder, as for an MRK. RTKLIB runs in the background (in the folder of the chunk, `gnss/ppk`, where its options and
-its `.pos` solution stay); the photos are paired with the shots as for an MRK.
+folder, as for an MRK. RTKLIB runs in the background in the folder of the chunk, `gnss/ppk`, where every run writes
+its options and its solution under a name of its own, `solution-<date>-<time>.conf` and `.pos`: the solutions of
+the earlier runs (the other flights) stay, and every photo records the solution of its run. The photos are paired
+with the shots as for an MRK.
 
 **The position of the base** decides where the whole survey ends up: every PPK position is relative to it.
 
@@ -141,7 +153,9 @@ its `.pos` solution stay); the photos are paired with the shots as for an MRK.
   the ellipsoid in metres (not above the sea level), in the reference frame you want for the survey. This is the way
   to an accurate absolute position. Typed more than 1 km away from the position of the base's header, or more than
   30 m higher or lower, it gives a warning (in the dialog, in the log and in `ppg gnss ppk`): latitude and longitude
-  swapped or without their sign, a height above the sea level.
+  swapped or without their sign, a height above the sea level. The same base (by the name of its mark, else of its
+  file) typed at a position more than 5 cm away from the one used for other photos of the chunk gives a warning
+  too - a typo in one flight moves that flight - and the pane says when one base has positions further apart.
 - *From the file of the base*: the position written in its RINEX header. For a permanent station it is usually its
   published position; for your own base it is often the position the receiver found by itself, which **can be
   metres off, and the whole survey moves with it**. The program says so in the dialog, in a message and in the log
@@ -152,30 +166,62 @@ program adds the antenna height written in the base's RINEX header (`ANTENNA: DE
 the dialog says how much ("the program adds the antenna height of the file of the base, 1.800 m"). When the header
 gives no antenna height, or zero, the position must be that of the antenna itself.
 
+**The phase centre of the base antenna.** The antenna height brings the base to the reference point of its antenna
+(usually the bottom of its mount); the satellites are measured at its phase centre, which sits higher by an offset
+of its own for every antenna model: a few centimetres for survey antennas, more than 10 cm for some choke rings.
+RTKLIB is not given the antenna calibrations yet, so it puts the phase centre at the reference point, and **every
+PPK height comes out lower by that offset** - the same for all the photos of a run, but different from one base
+antenna to another, so surveys computed against different bases differ by it too (DEM differences, volumes). The
+dialog (under the base), the log and `ppg gnss ppk` say so at every run, naming the antenna type of the base's
+header (or that the header names none). Until the calibrated antennas come, with the next phase: check the heights
+against a ground control point, or type the height of the base with the vertical offset of its antenna added (from
+its datasheet or calibration).
+
+**Photos with an RTK fix of the drone itself.** A photo whose position is an RTK fix of the drone itself - from the
+XMP of a DJI photo or from a DJI MRK - keeps it: the PPK is for the photos that are not fix. *Replace the drone's own
+RTK fixes too* in the dialog (`--replace-fix` on the command line) gives them the PPK position as well, so that
+every photo is in the frame of the base; the program warns when an onboard fix becomes float or single. When the
+fixes kept are more than 10 cm (median) from where the PPK puts the same shots (in height too when both heights are
+ellipsoidal, as in an MRK; across only for the altitude of an EXIF), a warning says what it likely means: the base
+in another reference frame than the drone's RTK corrections (a network in ETRF and a base in ITRF, or the other way
+round) or at a wrong position, and the flight now mixes the two - check the position of the base, or compute again
+replacing the onboard fixes.
+
 **The result.** A photo takes the antenna of the solution at the time of its shot (an epoch, or the straight line
 between two epochs at most a second apart) plus the lever arm of its shot in the MRK; its status comes from RTKLIB's
 quality (fix, float - also dgps - or single) and its accuracy is twice the standard deviations of the solution,
 with the floors of its status. A photo shot where the solution has no position (a gap of more than a second,
 before it starts, after it ends) keeps the position it had: nothing is guessed across a gap, and such photos and
-shots are listed in the log. *Only the fix positions* is decided again. The step of the pane then says how many
+shots are listed in the log. *Only the fix positions* is decided again. The log also says how many photos kept
+their onboard fix, the base with its antenna, how far it is from the flight (from the median position of the drone
+in the solution: beyond 20 km a warning, the ambiguities are hard to fix and the positions mostly float) and the
+solution file. Every photo keeps, with its position, the base it was computed against - its name, its position as
+longitude, latitude and height (the order of every position of the program), how it was placed, the antenna of its
+header - the drone's observation file and the solution file of its run. The step of the pane then says how many
 photos have a PPK position and of which status, and the base each was computed against, with the warning when its
 position is the one of its header.
 
-RTKLIB (RTKLIB-EX 2.5.1, BSD licence) is inside the native core 0.5 or later, which the applications include; without
-it the program says what to install. `PPG_RNX2RTKP` can name the `rnx2rtkp` program of RTKLIB-EX 2.5 instead.
+RTKLIB (RTKLIB-EX 2.5.1, BSD licence) is inside the native core 0.5 or later, which the applications include (their
+smoke test, `--check`, fails if it is missing); without it the program says what to install. `PPG_RNX2RTKP` can name the
+`rnx2rtkp` program of RTKLIB-EX 2.5 instead. `ppg doctor` (*Aiuto > Diagnostica ambiente*) says where the PPK runs:
+RTKLIB inside the native core and its version, the program named by `PPG_RNX2RTKP`, or what to install.
 
 ```bash
 ppg gnss ppk survey.ppg --mrk /card/FLIGHT_Timestamp.MRK --rover /card/FLIGHT_Rinex.obs --base base.obs
 #   --nav FILE (repeat it; default: those beside the drone's observations, else beside the base's)
 #   --base-position LAT,LON,H (degrees, degrees, metres above the ellipsoid, a point for the decimals;
 #                              default: the position of the base's RINEX header, with its warning)
+#   --replace-fix (the photos with an RTK fix of the drone itself take the PPK position too)
 #   --photos FOLDER, --chunk NAME
 ```
 
-It prints the photos per status, the base used and its antenna height, the warnings (always the one of a base at
-the position of its header, and the one of a typed position far from it), the photos and shots left without a PPK
-position; it saves the project, and stops with an error, changing nothing, when the files cannot be used (a file
-named that is not there stops it before anything is read).
+It prints the photos per status, how many kept their onboard fix, the base used (latitude, longitude and height),
+its antenna height and how far it is from the flight, the solution file of the run, the warnings (always the one of
+the phase-centre offset of the base antenna; the one of a base at the position of its header, of a typed position
+far from it or from the one of other photos) and the photos and shots left without a PPK position; it saves the
+project, and stops with an error, changing nothing, when the files cannot be used (a file named that is not there
+stops it before anything is read). A flight whose photos all kept their onboard fix changes nothing and is no
+error.
 
 ## Masks
 

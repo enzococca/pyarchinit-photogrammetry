@@ -56,7 +56,8 @@ pip install -U pip && pip install "pyarchinit-photogrammetry[all]"
 Munsell; `[sam]` aggiunge Segment Anything 2.1 (PyTorch). Il nucleo nativo in Rust (mappe di
 profondità e ortofoto molto più veloci) si costruisce dai sorgenti (sotto); le applicazioni desktop
 lo contengono già. Il PPK delle posizioni GNSS richiede il nucleo 0.5 o più recente, che contiene
-RTKLIB (`pip install "pyarchinit-photogrammetry-core>=0.5"`); senza, il programma lo dice.
+RTKLIB (`pip install "pyarchinit-photogrammetry-core>=0.5"`); senza, il programma lo dice, e `ppg doctor`
+dice dove gira il PPK.
 
 ```bash
 ppg doctor                       # controlla l'ambiente e dice cosa sistemare

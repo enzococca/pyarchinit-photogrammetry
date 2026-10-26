@@ -56,7 +56,8 @@ pip install -U pip && pip install "pyarchinit-photogrammetry[all]"
 colours; `[sam]` adds Segment Anything 2.1 (PyTorch). The native core in Rust (depth maps and
 orthophotos several times faster) is built from the source (below); the desktop applications
 include it. The PPK of the GNSS positions needs the core 0.5 or later, which holds RTKLIB
-(`pip install "pyarchinit-photogrammetry-core>=0.5"`); without it the program says so.
+(`pip install "pyarchinit-photogrammetry-core>=0.5"`); without it the program says so, and `ppg doctor`
+says where the PPK runs.
 
 ```bash
 ppg doctor                       # checks the environment and says what to fix

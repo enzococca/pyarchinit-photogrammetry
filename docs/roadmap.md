@@ -228,18 +228,22 @@ on the public WorldView-3 datasets.
 * **GNSS positions of the photos, PPK**: the positions of the shots of a `Timestamp.MRK` computed again
   from the RINEX of the drone and of a base - one's own or a permanent station - by RTKLIB-EX 2.5.1 inside the
   native core 0.5 (the `rnx2rtkp` of `PPG_RNX2RTKP` without it): the base at its surveyed position or at the one of
-  its RINEX header, with the warning that it can be metres off, its antenna height added; the camera below the
-  antenna by the lever arm of the shot, the status and accuracy of the solution, nothing guessed across its gaps;
-  *Compute PPK...* in the *GNSS* pane, `ppg gnss ppk`.
+  its RINEX header, with the warning that it can be metres off, its antenna height added (not yet the phase-centre
+  offset of its antenna, which every run says); the camera below the antenna by the lever arm of the shot, the
+  status and accuracy of the solution, nothing guessed across its gaps; the onboard RTK fixes kept unless replaced,
+  a solution file per run, the dialog starting from the last run; *Compute PPK...* in the *GNSS* pane,
+  `ppg gnss ppk`.
 
 ## Next
 
 Open points, in no fixed order:
 
 * **GNSS, the next steps**: the position of the base from a nearby permanent station or from a static PPP, the
-  list and the download of the public stations near a survey, Hatanaka RINEX read as they are, the reference frame
-  and epoch of the positions and heights above the geoid, the quality per flight in the PDF report; the events of a
-  receiver and the logs of ArduPilot and PX4 for drones built by hand.
+  list and the download of the public stations near a survey, Hatanaka RINEX read as they are, the calibrations of
+  the base antennas (their phase-centre offsets, from the files of the IGS and NGS), one base from several files (the
+  hourly files of a station, a flight across midnight), the reference frame and epoch of the positions and heights
+  above the geoid, the quality per flight in the PDF report; the events of a receiver and the logs of ArduPilot and
+  PX4 for drones built by hand.
 
 * Parts never tried on real data: the import from WebODM, a satellite scene of one's own, `ppg remote`
   on a remote machine, a whole MicaSense flight to the reflectance orthomosaic.
