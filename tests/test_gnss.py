@@ -1059,10 +1059,11 @@ def test_gnss_mrk_copied_away_from_its_photos(gnss_window, monkeypatch, tmp_path
     w.gnss_apply_mrk()
     assert said and "MRK" in said[-1] and not w.isWindowModified()
 
-    # the menu has the three commands
+    # the menu has the four commands
     menu = next(a.menu() for a in w.menuBar().actions() if a.text() == "&Strumenti")
     gnss = next(a.menu() for a in menu.actions() if a.menu() is not None and a.text() == "GNSS")
-    assert [a.text() for a in gnss.actions()] == ["File MRK di DJI...", "File di posizioni...", "Pannello GNSS"]
+    assert [a.text() for a in gnss.actions()] == ["File MRK di DJI...", "File di posizioni...", "Correzioni PPK...",
+                                                 "Pannello GNSS"]
 
 
 def test_only_fix_decides_for_the_photos_added_later(tmp_path):

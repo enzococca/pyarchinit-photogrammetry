@@ -47,7 +47,7 @@ OPTIONS_FILE = "ppk.conf"
 SOLUTION_FILE = "solution.pos"
 INPUTS_FOLDER = "rtklib_inputs"  # in the work folder: only the copies of a run, emptied when a run starts
 
-_FIELDS = re.compile(r"[,\s]+")  # RTKLIB separates the fields with spaces, or with out-fieldsep (a comma)
+_FIELDS =re.compile(r"[,\s]+")  # RTKLIB separates the fields with spaces, or with out-fieldsep (a comma)
 _LEGEND = re.compile(r"lat/lon/height=([^/,)]*)/([^,)]*)")
 _COLUMNS = ("latitude(deg)", "longitude(deg)", "height(m)", "Q", "ns", "sdn(m)", "sde(m)", "sdu(m)")
 
@@ -302,6 +302,12 @@ def at(solution: Solution, gps_seconds) -> tuple[np.ndarray, np.ndarray, np.ndar
 
 
 # --- a run of RTKLIB --------------------------------------------------------------------------------------------
+
+
+def work_folder(chunk) -> Path:
+    """The work folder of the PPK runs of ``chunk``: ``gnss/ppk`` in the folder of its data, a folder of the program
+    whose files every run replaces (the ``folder`` of :func:`solve`)."""
+    return Path(chunk.data_dir) / "gnss" / "ppk"
 
 
 def _on_windows() -> bool:

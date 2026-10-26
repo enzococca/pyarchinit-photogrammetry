@@ -192,6 +192,13 @@ def compressed_name(path) -> bool:
     return ext.lower() in COMPRESSED or (len(ext) > 3 and ext[3] in "dD")
 
 
+def ppk_available() -> bool:
+    """:func:`ppk_solve` has an RTKLIB to run: the native core (API 8), or the program named by
+    ``PPG_RNX2RTKP`` (whether it is there and runs is checked when it is run); otherwise it would
+    raise the RuntimeError of :data:`PPK_MISSING`."""
+    return kernel("ppk_solve") is not None or bool(os.environ.get("PPG_RNX2RTKP", "").strip())
+
+
 def ppk_solve(conf, infiles, outfile) -> tuple[int, str]:
     """RTKLIB's post-processing, as ``rnx2rtkp -k conf -o outfile infiles``: the options file
     ``conf``; the input files rover observations first, then the base's observations, then the

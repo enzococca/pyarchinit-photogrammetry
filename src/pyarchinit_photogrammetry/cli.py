@@ -21,7 +21,8 @@ app = typer.Typer(add_completion=False, help="pyarchinit-photogrammetry: open-so
 markers_app = typer.Typer(help="Coded targets: printable sheets and turntable mats")
 pa_app = typer.Typer(help="PyArchInit database bridge")
 plugins_app = typer.Typer(help="Plugins: those found, the index of the plugin repository, installing, enabling")
-gnss_app = typer.Typer(help="GNSS positions of the photos: their quality per flight, DJI MRK files, positions files")
+gnss_app = typer.Typer(help="GNSS positions of the photos: their quality per flight, DJI MRK files, PPK with a base, "
+                            "positions files")
 app.add_typer(markers_app, name="markers")
 app.add_typer(pa_app, name="pyarchinit")
 app.add_typer(plugins_app, name="plugins")
@@ -2489,6 +2490,74 @@ def gnss_mrk(project: Path, file: Path,
     typer.echo(f"{result['matched']} of {result['photos']} photos took the position of their shot ({states})")
     _unmatched(result["unmatched"], "without a position from the MRK")
     _unmatched([str(i) for i in result["shots_unmatched"]], "shots of the MRK without a photo")
+
+
+def _base_position(text: str) -> tuple[float, float, float]:
+    """``--base-position``: latitude, longitude and height above the ellipsoid as three numbers with a point for the
+    decimals and commas between them (spaces allowed)."""
+    parts = text.split(",")
+    try:
+        if len(parts) != 3:
+            raise ValueError
+        lat, lon, h = (float(part.strip()) for part in parts)
+    except ValueError:
+        raise typer.BadParameter(f"--base-position takes LAT,LON,H: the latitude and longitude (degrees) and the "
+                                 f"height above the ellipsoid (m) of the base, three numbers with a point for the "
+                                 f"decimals: {text!r}") from None
+    return lat, lon, h
+
+
+@gnss_app.command("ppk")
+def gnss_ppk(project: Path,
+             mrk: Path = typer.Option(..., "--mrk", help="the Timestamp.MRK of the flight"),
+             rover: Path = typer.Option(..., "--rover", help="the RINEX observations of the drone (DJI: *_Rinex.obs "
+                                        "beside the MRK)"),
+             base: Path = typer.Option(..., "--base", help="the RINEX observations of a base that recorded during the "
+                                       "flight: your own, or a permanent station"),
+             nav: Optional[list[Path]] = typer.Option(None, "--nav", help="a navigation file (repeat it for several; "
+                                                      "default: those beside the rover, else those beside the base)"),
+             base_position: Optional[str] = typer.Option(None, "--base-position", help="LAT,LON,H: the surveyed "
+                                                         "position of the mark the base stands on, height above the "
+                                                         "ellipsoid; default: the position of the base's RINEX header, "
+                                                         "which can be metres off"),
+             photos: Optional[Path] = typer.Option(None, "--photos", help="folder of the photos (default: the folder "
+                                                   "of the MRK)"),
+             chunk: Optional[str] = None):
+    """Give the photos the PPK position of their shot: RTKLIB's solution of the drone's RINEX against a base.
+
+    RTKLIB computes where the antenna of the drone was against the base (the antenna height of the base's RINEX
+    header is added to its position), then every photo takes the camera below the antenna at the time of its shot in
+    the Timestamp.MRK (the lever arm of the shot), with the status and accuracy of the solution; a photo shot where the
+    solution has no position keeps the one it had. The photos are paired with the shots as by ``ppg gnss mrk``.
+    RTKLIB works in the folder of the chunk (gnss/ppk); it needs the native core 0.5 or later, or PPG_RNX2RTKP."""
+    from .gnss import apply as gnss
+    from .gnss import ppk
+
+    position = _base_position(base_position) if base_position is not None else None
+    doc, ch = _open(project, chunk)
+    try:
+        solution = ppk.solve(rover, base, nav or None, position, folder=ppk.work_folder(ch))
+        result = gnss.apply_ppk(ch, mrk, solution, photos)
+    except (OSError, ValueError, RuntimeError) as exc:
+        _gnss_failed(exc)
+    states = ", ".join(f"{k} {n}" for k, n in sorted(result["status"].items(), key=lambda p: -p[1]))
+    if result["matched"]:
+        typer.echo(f"{result['matched']} of {result['photos']} photos took the PPK position of their shot ({states})")
+    where = solution.base
+    lat, lon, h = where["position"]
+    delta = where["antenna_delta_hen"]
+    typer.echo(f"base {where['name']}: {lat:.8f}, {lon:.8f}, {h:.3f} m "
+               f"({'typed' if where['position_source'] == 'typed' else 'from its RINEX header'}), "
+               + (f"antenna {delta[0]:.3f} m above it" if delta else "no antenna height in its RINEX header"))
+    for warning in result["warnings"]:
+        typer.echo(f"warning: {warning}")
+    if not result["matched"]:
+        _gnss_failed(ValueError("no photo of the chunk took a PPK position: check the folder of the photos and that "
+                                "the MRK is of the flight of the drone's observations"))
+    gnss.keep_only_fix(ch)
+    doc.save()
+    _unmatched(result["unmatched"], "without a PPK position")
+    _unmatched([str(i) for i in result["shots_unmatched"]], "shots of the MRK without a PPK position")
 
 
 @gnss_app.command("positions")

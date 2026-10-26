@@ -1,5 +1,5 @@
-"""The GNSS positions of the photos as a pane that stays open: where the positions come from, how good they are
-flight by flight, and the choice to trust only the RTK fixes."""
+"""The GNSS positions of the photos as a pane that stays open: where the positions come from, their PPK correction
+against a base, how good they are flight by flight, and the choice to trust only the RTK fixes."""
 from __future__ import annotations
 
 from collections import Counter
@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QHeaderView, QLabel, QPushButton, QScrollArea,
                                QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
+from .. import _native
 from ..gnss.apply import ONLY_FIX
 from ..gnss.quality import mixed_heights, summary
 from .flow_layout import FlowLayout
@@ -17,7 +18,7 @@ from .icons import icon
 
 def source_names() -> dict[str, str]:
     """Where a position can come from (``meta["gnss"]["source"]``), as the pane says it."""
-    return {"exif": tr("EXIF"), "dji_xmp": tr("XMP di DJI"), "dji_mrk": tr("MRK di DJI"),
+    return {"exif": tr("EXIF"), "dji_xmp": tr("XMP di DJI"), "dji_mrk": tr("MRK di DJI"), "ppk": tr("PPK"),
             "positions_file": tr("file di posizioni"), "video": tr("video"), "panorama": tr("foto a 360°"),
             "unknown": tr("sconosciuta")}
 
@@ -43,15 +44,54 @@ def lengths(values) -> str:
     return " / ".join(number(v * k, 1 if centimetres else 2) for v in values) + (" cm" if centimetres else " m")
 
 
+def ppk_tip() -> str:
+    """What *Calcola PPK* (and *Strumenti > GNSS > Correzioni PPK*) does, as its tooltip says it."""
+    return tr("Il RINEX del drone e il Timestamp.MRK del volo, il RINEX di una base che registrava durante il volo (la "
+              "tua o una stazione permanente) e i file di navigazione: RTKLIB calcola la traiettoria dell'antenna e "
+              "ogni foto prende la posizione della camera al suo scatto")
+
+
+def ppk_state(chunk) -> str:
+    """What the PPK step says of ``chunk``: how many photos have a PPK position and of which status, the base each
+    position was computed against and how its position was set (the one of its RINEX header with the warning that it
+    can be metres off); without PPK positions what the step needs, and whether RTKLIB is there to compute them."""
+    cameras = list(chunk.cameras) if chunk is not None else []
+    records = [c.meta["gnss"] for c in cameras if (c.meta.get("gnss") or {}).get("source") == "ppk"]
+    if not records:
+        text = tr("Nessuna posizione PPK. Servono il RINEX del drone e il Timestamp.MRK del volo, il RINEX di una base "
+                  "che registrava durante il volo e i file di navigazione.")
+        if not _native.ppk_available():
+            text += " " + tr("Per calcolarle serve il nucleo nativo 0.5 o più recente, che contiene RTKLIB.")
+        return text
+    names = status_names()
+    states = Counter(r.get("status") for r in records)
+    detail = ", ".join(f"{names.get(k, k)} {n}" for k, n in sorted(states.items(), key=lambda p: -p[1]))
+    text = tr("PPK: {0} foto su {1} ({2}).", len(records), len(cameras), detail)
+    bases: dict[str, set] = {}  # the bases of the positions, in the order of the photos: how their position was set
+    for r in records:
+        base = r.get("base") or {}
+        bases.setdefault(str(base.get("name") or "?"), set()).add(base.get("position_source"))
+    for name, sources in bases.items():
+        if "header" in sources:  # also when some of its positions came from a typed one: the warning wins
+            text += " " + tr("La base {0} è nella posizione della sua intestazione RINEX, che può essere sbagliata di "
+                             "metri e sposta tutto il rilievo: calcola di nuovo con la posizione misurata della base.",
+                             name)
+        elif "typed" in sources:
+            text += " " + tr("Base {0} nella posizione scritta.", name)
+    return text
+
+
 class GnssPane(QWidget):
     """The positions of the photos: where they come from (the RTK of the photos, a DJI ``Timestamp.MRK``, a file of
-    positions), a table of the quality of each flight and the switch that trusts only the fixes. Each step shows
-    its state under its buttons; the window does the work and tells the pane to read the chunk again."""
+    positions), their PPK correction against a base, a table of the quality of each flight and the switch that trusts
+    only the fixes. Each step shows its state under its buttons; the window does the work and tells the pane to read
+    the chunk again."""
 
     MAX_ROWS = 8
 
     mrk_requested = Signal()
     positions_requested = Signal()
+    ppk_requested = Signal()
     only_fix_toggled = Signal(bool)
 
     def __init__(self, parent=None):
@@ -67,8 +107,9 @@ class GnssPane(QWidget):
         lay = QVBoxLayout(body)
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(4)
-        intro = QLabel(tr("Posizioni GNSS delle foto: l'RTK dei droni DJI, il file MRK, un file di posizioni. Ogni "
-                          "posizione porta il suo stato (fix, float, singola) e la sua accuratezza."))
+        intro = QLabel(tr("Posizioni GNSS delle foto: l'RTK dei droni DJI, il file MRK, il PPK con una base, un file "
+                          "di posizioni. Ogni posizione porta il suo stato (fix, float, singola) e la sua "
+                          "accuratezza."))
         intro.setWordWrap(True)
         lay.addWidget(intro)
         self.states: dict[str, QLabel] = {}
@@ -102,6 +143,10 @@ class GnssPane(QWidget):
                                        "soluzione PPK di un altro programma)"))
         step(0, "positions", tr("Posizioni delle foto"), [self.b_mrk, self.b_positions])
 
+        self.b_ppk = QPushButton(icon("run"), tr("Calcola PPK..."))
+        self.b_ppk.setToolTip(ppk_tip())
+        step(1, "ppk", tr("Correzioni (PPK)"), [self.b_ppk])
+
         heads = [(tr("Volo"), tr("Un volo finisce con una pausa di oltre 20 minuti; le foto senza data sono nel volo 0")),
                  (tr("Foto"), tr("Le foto del volo")),
                  (tr("Fix"), tr("Foto con una posizione RTK fissata")),
@@ -123,16 +168,17 @@ class GnssPane(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        step(1, "quality", tr("Qualità per volo"), [], table=self.table)
+        step(2, "quality", tr("Qualità per volo"), [], table=self.table)
 
         self.c_only_fix = QCheckBox(tr("Usa solo le foto con posizione fix"))
         self.c_only_fix.setToolTip(tr("Disattiva i riferimenti delle foto la cui posizione non è un RTK fissato: non "
                                       "contano più nell'allineamento e nell'ottimizzazione. Togli la spunta per "
                                       "riattivarli (quelli che avevi disattivato a mano restano disattivati)"))
-        step(2, "only_fix", tr("Solo le posizioni fix"), [self.c_only_fix])
+        step(3, "only_fix", tr("Solo le posizioni fix"), [self.c_only_fix])
         lay.addStretch(1)
         self.b_mrk.clicked.connect(self.mrk_requested)
         self.b_positions.clicked.connect(self.positions_requested)
+        self.b_ppk.clicked.connect(self.ppk_requested)
         self.c_only_fix.toggled.connect(self.only_fix_toggled)
         self.set_state(None)
 
@@ -144,6 +190,8 @@ class GnssPane(QWidget):
         positioned = photos - sum(r["no_position"] for r in rows)
         self.b_mrk.setEnabled(photos > 0)
         self.b_positions.setEnabled(photos > 0)
+        self.b_ppk.setEnabled(photos > 0)
+        self.states["ppk"].setText(ppk_state(chunk) if photos else "")
         if not rows:
             self.states["positions"].setText(tr("Nessuna foto nel chunk: aggiungi le foto, poi applica l'MRK o un file "
                                                 "di posizioni."))
