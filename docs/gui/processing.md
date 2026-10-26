@@ -267,10 +267,30 @@ of the 3D view. The orthophoto and the relief of the model are built on a plane,
   the first to the second;
 * the **cylinder of a selected polygon**: the development of a well or a tower, seen from inside or from outside.
 
+<figure markdown="span">
+  ![The 3D view with the Elevation button](../img/gui/elevation-3d-view.png)
+  <figcaption>The 3D view looking at a tell from the south: <em>Elevation > Orthophoto from this view</em> takes this plane.</figcaption>
+</figure>
+
+<figure markdown="span">
+  ![The dialog of the orthophoto from this view](../img/gui/elevation-view-dialog.png)
+  <figcaption>The dialog: elevation or section, what the view shows or the whole model.</figcaption>
+</figure>
+
+<figure markdown="span">
+  ![The orthophoto from the view in the raster view](../img/gui/elevation-from-view.png)
+  <figcaption>The result: an orthophoto of the model as the view looked at it, in metres of its plane (Tell Sultan, local reference system).</figcaption>
+</figure>
+
 **Elevation or section.** An elevation shows the surface seen from the plane; *Depth in front / behind* keep only
 the surface near the plane, so scaffolding or a section in front of the wall does not hide it. A **section** takes
 away everything in front of the plane and shows what lies behind it; the line where the plane cuts the model - the
 **profile** - is drawn in red on the orthophoto and exported with it as a DXF.
+
+<figure markdown="span">
+  ![A section across a tell with its profile](../img/gui/elevation-section.png)
+  <figcaption>A section west-east across the tell, seen from the south: the profile of the cut in red, what lies behind the plane coloured; v is the height.</figcaption>
+</figure>
 
 **Coordinates.** The orthophoto is in metres of the plane: u along it, v upwards. When v is vertical (within a
 degree: a section trace, a wall with level markers, a level view) **v is the height**, so the elevation is read

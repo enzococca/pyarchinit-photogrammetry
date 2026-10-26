@@ -274,10 +274,30 @@ viene da:
   secondo;
 * il **cilindro di un poligono selezionato**: lo sviluppo di un pozzo o di una torre, visto da dentro o da fuori.
 
+<figure markdown="span">
+  ![La vista 3D con il pulsante Prospetto](../img/gui/elevation-3d-view.png)
+  <figcaption>La vista 3D che guarda un tell da sud: <em>Prospetto > Ortofoto da questa vista</em> prende questo piano.</figcaption>
+</figure>
+
+<figure markdown="span">
+  ![Il dialogo dell'ortofoto da questa vista](../img/gui/elevation-view-dialog.png)
+  <figcaption>Il dialogo: prospetto o sezione, quello che si vede nella vista o tutto il modello.</figcaption>
+</figure>
+
+<figure markdown="span">
+  ![L'ortofoto dalla vista nella vista raster](../img/gui/elevation-from-view.png)
+  <figcaption>Il risultato: un'ortofoto del modello come lo guardava la vista, in metri del suo piano (Tell Sultan, sistema di riferimento locale).</figcaption>
+</figure>
+
 **Prospetto o sezione.** Un prospetto mostra la superficie vista dal piano; *Profondità davanti / dietro* tengono
 solo la superficie vicina al piano, così un ponteggio o una sezione davanti al muro non lo nascondono. Una
 **sezione** toglie tutto quello che sta davanti al piano e mostra quello che c'è dietro; la linea dove il piano
 taglia il modello - il **profilo** - è disegnata in rosso sull'ortofoto ed esportata con lei come DXF.
+
+<figure markdown="span">
+  ![Una sezione attraverso un tell con il suo profilo](../img/gui/elevation-section.png)
+  <figcaption>Una sezione ovest-est attraverso il tell, vista da sud: il profilo del taglio in rosso, quello che sta dietro al piano a colori; v è la quota.</figcaption>
+</figure>
 
 **Coordinate.** L'ortofoto è in metri del piano: u lungo il piano, v verso l'alto. Quando v è verticale (entro un
 grado: una traccia di sezione, un muro con i marker in piano, una vista in piano) **v è la quota**, così il
