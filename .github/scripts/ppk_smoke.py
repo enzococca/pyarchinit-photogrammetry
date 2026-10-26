@@ -1,7 +1,7 @@
 """PPK smoke test of the native core: RTKLIB inside ppg_core (ppk_solve) on RTKLIB's test data, the
 station 3040 against 0759 (tests/data/rtklib; tests/test_native.py has the same runs). The native and
 the windows-arm workflows run it after the wheel of the core is installed, each on the platforms it
-builds for: python .github/scripts/ppk_smoke.py
+builds for, and the desktop workflow on the core of the Windows ARM64 app: python .github/scripts/ppk_smoke.py
 
 Standing still every epoch is fixed and the station is where its RINEX header puts it: that run is
 the proof of accuracy. Moving, how many epochs reach a fix hangs on the last bit of the arithmetic

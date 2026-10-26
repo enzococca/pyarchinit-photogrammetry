@@ -107,6 +107,8 @@ jobs:
           maturin build --release -m native/Cargo.toml --out core_wheels
           pip install (Get-ChildItem core_wheels/*.whl).FullName
           python -c "import open3d, pycolmap, cv2, lazrs, ppg_core, PySide6, pye57, pyvistaqt, pyarchinit_photogrammetry as ppg; from vtkmodules.vtkCommonCore import vtkVersion; print(ppg.__version__, open3d.__version__, pycolmap.__version__, cv2.__version__, ppg_core.__version__, vtkVersion.GetVTKVersion())"
+          # RTKLIB inside the core this app ships: a PPK on RTKLIB's test data (.github/scripts/ppk_smoke.py)
+          python .github/scripts/ppk_smoke.py
       - name: libpq for psycopg
         shell: pwsh
         run: |
