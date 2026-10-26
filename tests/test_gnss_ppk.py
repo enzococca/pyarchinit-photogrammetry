@@ -85,6 +85,11 @@ def _epoch3(when: datetime, count: int) -> list[str]:
     return lines
 
 
+def _first_obs(header: list[str], text: str) -> list[str]:
+    """The header with another TIME OF FIRST OBS line."""
+    return [_line(text, "TIME OF FIRST OBS") if h.endswith("TIME OF FIRST OBS") else h for h in header]
+
+
 def _rinex2(path: Path, header: list[str], epochs: int = 3, extra: list[str] | None = None) -> Path:
     """A RINEX 2.11 observation file: ``epochs`` epochs a second apart from 10:30:00, 14 satellites in each,
     the last of them Galileo."""
@@ -119,6 +124,7 @@ def test_header_of_a_rtklib_observation_file():
     assert info.antenna_delta_hen == (0.0, 0.0, 0.0)
     assert info.interval == 30.0
     assert info.first == datetime(2005, 4, 2, 0, 0, 0)
+    assert info.time_system == "GPS"
     assert info.systems == ("G",)
     assert info.compressed is None
 
@@ -242,6 +248,85 @@ def test_header_of_a_dji_file_with_empty_fields(tmp_path):
     assert info.last == datetime(2024, 5, 12, 10, 31, 30)
 
 
+def test_a_clock_offset_on_an_epoch_line_is_not_a_satellite(tmp_path):
+    # two GLONASS satellites and the receiver clock offset (F12.9 from column 68): the blank slots after the
+    # two satellites are not GPS
+    epoch = " 24  5 12 10 30  0.0000000  0  2R 5R 6".ljust(68) + " 0.123456789"
+    path = _write(tmp_path / "clock.24o", V2_HEADER + [END_OF_HEADER, epoch, *_observations2(2)])
+    assert rinex.header(path).systems == ("R",)
+
+
+def test_only_the_satellites_an_epoch_declares_are_read(tmp_path):
+    # 13 declared: 12 on the epoch line and one on the continuation line, which has room for more
+    sats = ["G 1", "G 2", "G 3", "G 4", "G 5", "G 6", "G 7", "G 8", "G 9", "G10", "G11", "G12", "C 1"]
+    lines = _epoch2(datetime(2024, 5, 12, 10, 30), sats)
+    assert len(lines) == 2
+    lines[1] += "E21"  # a slot the epoch does not declare
+    path = _write(tmp_path / "declared.24o", V2_HEADER + [END_OF_HEADER] + lines + _observations2(13))
+    assert rinex.header(path).systems == ("G", "C")
+
+
+def test_a_year_padded_with_a_space_in_an_epoch_is_read(tmp_path):
+    header = [h for h in V2_HEADER if "TIME OF FIRST OBS" not in h]
+    lines = []
+    for seconds in (0, 30):
+        epoch = _epoch2(datetime(2005, 4, 2, 0, 0, seconds), ["G 3"])
+        lines += ["  5" + epoch[0][3:]] + _observations2(1)
+    path = _write(tmp_path / "padded.05o", header + [END_OF_HEADER] + lines)
+    assert rinex.time_span(path) == (datetime(2005, 4, 2, 0, 0, 0), datetime(2005, 4, 2, 0, 0, 30))
+    assert rinex.header(path).systems == ("G",)
+
+
+def test_two_digit_years_of_the_last_century(tmp_path):
+    header = [h for h in V2_HEADER if "TIME OF FIRST OBS" not in h]
+    lines = []
+    for when in (datetime(1999, 12, 31, 23, 59, 59), datetime(2000, 1, 1, 0, 0, 0)):
+        lines += _epoch2(when, ["G 3"]) + _observations2(1)
+    path = _write(tmp_path / "millennium.99o", header + [END_OF_HEADER] + lines)
+    assert rinex.time_span(path) == (datetime(1999, 12, 31, 23, 59, 59), datetime(2000, 1, 1, 0, 0, 0))
+    only_old = _write(tmp_path / "old.99o", header + [END_OF_HEADER] + lines[:2])
+    assert rinex.header(only_old).first == datetime(1999, 12, 31, 23, 59, 59)
+
+
+@pytest.mark.parametrize("version", [2, 3])
+def test_a_file_with_windows_line_ends_is_read_the_same(tmp_path, version):
+    if version == 2:
+        plain = _rinex2(tmp_path / "unix.24o", V2_HEADER)
+    else:
+        plain = _rinex3(tmp_path / "unix.rnx", V3_HEADER)
+    dos = tmp_path / ("dos" + plain.suffix)
+    dos.write_bytes(plain.read_bytes().replace(b"\n", b"\r\n"))
+    assert b"\r\n" in dos.read_bytes()
+    assert rinex.header(dos) == rinex.header(plain)
+    assert rinex.time_span(dos) == rinex.time_span(plain)
+    assert rinex.header(dos).marker in ("BASE", "ROVR")
+
+
+def test_an_event_before_the_first_epoch_is_not_the_first_epoch(tmp_path):
+    event = [" 24  5 12 10 20  0.0000000  3  1", _line("moved to the first point", "COMMENT")]
+    lines = V2_HEADER + [END_OF_HEADER] + event
+    for n in range(3):
+        lines += _epoch2(datetime(2024, 5, 12, 10, 30, n), ["G 3"]) + _observations2(1)
+    path = _write(tmp_path / "event.24o", [h for h in lines if "TIME OF FIRST OBS" not in h])
+    assert rinex.time_span(path) == (datetime(2024, 5, 12, 10, 30, 0), datetime(2024, 5, 12, 10, 30, 2))
+
+
+def test_cycle_slip_records_have_the_time_of_an_observation_epoch(tmp_path):
+    # the flag 6 line is followed by observation-like records at a time of the observations: it is an epoch
+    lines = V2_HEADER + [END_OF_HEADER]
+    lines += _epoch2(datetime(2024, 5, 12, 10, 30, 0), ["G 3"]) + _observations2(1)
+    lines += _epoch2(datetime(2024, 5, 12, 10, 30, 1), ["G 3"], flag=6) + _observations2(1)
+    assert rinex.header(_write(tmp_path / "slips.24o", lines)).last == datetime(2024, 5, 12, 10, 30, 1)
+
+
+def test_a_line_of_numbers_that_is_not_three_numbers_is_not_a_position(tmp_path):
+    for content in ("        1.0000        2.0000        3.0000 9", "1.0 2.0", "x y z"):
+        header = [h for h in V2_HEADER if "APPROX POSITION" not in h and "DELTA H/E/N" not in h]
+        header += [_line(content, "APPROX POSITION XYZ"), _line(content, "ANTENNA: DELTA H/E/N")]
+        info = rinex.header(_rinex2(tmp_path / "numbers.24o", header))
+        assert info.approx_xyz is None and info.antenna_delta_hen is None, content
+
+
 def test_a_gzip_file_is_read_as_it_is(tmp_path):
     plain = _rinex2(tmp_path / "plain.24o", V2_HEADER)
     packed = tmp_path / "packed.24o.gz"
@@ -334,6 +419,85 @@ def test_rinex3_navigation_with_several_systems(tmp_path):
     assert (info.kind, info.systems) == ("nav", ("G", "E", "C"))
 
 
+# --- time systems -------------------------------------------------------------------------------------------------
+
+
+def test_gps_minus_utc_follows_the_leap_seconds():
+    for when, seconds in [(datetime(1980, 1, 6), 0), (datetime(1981, 6, 30, 23, 59, 59), 0),
+                          (datetime(1981, 7, 1), 1), (datetime(1998, 12, 31, 23, 59, 59), 12),
+                          (datetime(1999, 1, 1), 13), (datetime(2005, 4, 2), 13), (datetime(2006, 1, 1), 14),
+                          (datetime(2009, 1, 1), 15), (datetime(2012, 7, 1), 16), (datetime(2015, 7, 1), 17),
+                          (datetime(2016, 12, 31, 23, 59, 59), 17), (datetime(2017, 1, 1), 18),
+                          (datetime(2024, 5, 12, 10, 30), 18)]:
+        assert rinex.gps_minus_utc(when) == seconds, when
+
+
+def test_glonass_time_is_utc_and_becomes_gps_time_with_the_leap_seconds_of_the_header(tmp_path):
+    header = _first_obs(V2_HEADER, "  2024     5    12    10    30    0.0000000     GLO")
+    header.append(_line("    17", "LEAP SECONDS"))  # not the 18 of the table: the header is what counts
+    path = _rinex2(tmp_path / "glo.24o", header)
+    info = rinex.header(path)
+    assert info.time_system == "GLO"
+    assert info.first == datetime(2024, 5, 12, 10, 30, 17)
+    assert info.last == datetime(2024, 5, 12, 10, 30, 19)
+    assert rinex.time_span(path) == (datetime(2024, 5, 12, 10, 30, 17), datetime(2024, 5, 12, 10, 30, 19))
+
+
+def test_glonass_time_without_leap_seconds_in_the_header_uses_the_table(tmp_path):
+    header = _first_obs(V2_HEADER, "  2024     5    12    10    30    0.0000000     GLO")
+    path = _rinex2(tmp_path / "glo.24o", header)
+    assert rinex.header(path).first == datetime(2024, 5, 12, 10, 30, 18)
+    assert rinex.time_span(path)[1] == datetime(2024, 5, 12, 10, 30, 20)
+    # a file of 2005: 13 s
+    old = [" 05  4  2  0  0  0.0000000  0  1G 3", *_observations2(1)]
+    header = _first_obs(V2_HEADER, "  2005     4     2     0     0    0.0000000     GLO")
+    path = _write(tmp_path / "old.05o", header + [END_OF_HEADER] + old)
+    assert rinex.header(path).first == datetime(2005, 4, 2, 0, 0, 13)
+    assert rinex.header(path).last == datetime(2005, 4, 2, 0, 0, 13)
+
+
+def test_beidou_time_is_fourteen_seconds_behind_gps_time(tmp_path):
+    header = _first_obs(V3_HEADER, "  2024     5    12    10    30   30.0000000     BDT")
+    path = _rinex3(tmp_path / "bdt.rnx", header)
+    info = rinex.header(path)
+    assert info.time_system == "BDT"
+    assert info.first == datetime(2024, 5, 12, 10, 30, 44)
+    assert info.last == datetime(2024, 5, 12, 10, 31, 44)
+    assert rinex.time_span(path) == (datetime(2024, 5, 12, 10, 30, 44), datetime(2024, 5, 12, 10, 31, 44))
+
+
+@pytest.mark.parametrize("system", ["GPS", "GAL", "QZS", "IRN"])
+def test_other_time_systems_are_gps_time(tmp_path, system):
+    header = _first_obs(V3_HEADER, f"  2024     5    12    10    30   30.0000000     {system}")
+    info = rinex.header(_rinex3(tmp_path / "t.rnx", header))
+    assert info.time_system == system
+    assert (info.first, info.last) == (datetime(2024, 5, 12, 10, 30, 30), datetime(2024, 5, 12, 10, 31, 30))
+
+
+def test_a_blank_time_system_is_the_default_of_the_systems_of_the_file(tmp_path):
+    blank = "  2024     5    12    10    30    0.0000000"
+    # a RINEX 2 file with GLONASS only is in GLONASS time
+    glonass = _line("     2.11           OBSERVATION DATA    R (GLONASS)", "RINEX VERSION / TYPE")
+    path = _rinex2(tmp_path / "glo.24o", _first_obs([glonass] + V2_HEADER[1:], blank))
+    info = rinex.header(path)
+    assert (info.time_system, info.first) == ("GLO", datetime(2024, 5, 12, 10, 30, 18))
+    # a RINEX 3 file with BeiDou only, in BeiDou time
+    bds = _line("     3.03           OBSERVATION DATA    C: BeiDou", "RINEX VERSION / TYPE")
+    header = _first_obs([bds] + [h for h in V3_HEADER[1:] if "SYS /" not in h], blank)
+    info = rinex.header(_rinex3(tmp_path / "bds.rnx", header))
+    assert (info.time_system, info.first) == ("BDT", datetime(2024, 5, 12, 10, 30, 14))
+    # mixed or GPS only: GPS time
+    for name, letter in [("mixed", V2_HEADER[0]), ("gps", _line("     2.11           OBSERVATION DATA    G (GPS)",
+                                                              "RINEX VERSION / TYPE"))]:
+        header = _first_obs([letter] + V2_HEADER[1:], blank)
+        info = rinex.header(_rinex2(tmp_path / f"{name}.24o", header))
+        assert (info.time_system, info.first) == ("GPS", datetime(2024, 5, 12, 10, 30, 0))
+
+
+def test_the_time_system_of_a_navigation_file_is_its_default():
+    assert rinex.header(DATA / "07590920.05n").time_system == "GPS"
+
+
 # --- navigation files next to an observation file -------------------------------------------------------------------
 
 
@@ -372,10 +536,20 @@ def test_companions_of_a_rinex3_long_name_file(tmp_path):
     obs = "ABCD00ITA_R_20241330000_01D_30S_MO.rnx"
     _touch(tmp_path, obs, "ABCD00ITA_R_20241330000_01D_MN.rnx", "ABCD00ITA_R_20241330000_01D_GN.rnx.gz",
            "ABCD00ITA_R_20241330000_01D_EN.rnx", "EFGH00ITA_R_20241330000_01D_MN.rnx",
-           "ABCD00ITA_R_20241330000_01D_30S_MO.crx")
+           "BRDC00IGS_R_20241330000_01D_MN.rnx", "ABCD00ITA_R_20241330000_01D_30S_MO.crx")
+    # the combined broadcast file of the IGS (BRDC00IGS) is the usual navigation file of a station: it comes too,
+    # and so does the one of another station
     assert _names(rinex.find_companions(tmp_path / obs)) == [
         "ABCD00ITA_R_20241330000_01D_EN.rnx", "ABCD00ITA_R_20241330000_01D_GN.rnx.gz",
-        "ABCD00ITA_R_20241330000_01D_MN.rnx"]
+        "ABCD00ITA_R_20241330000_01D_MN.rnx", "BRDC00IGS_R_20241330000_01D_MN.rnx",
+        "EFGH00ITA_R_20241330000_01D_MN.rnx"]
+
+
+def test_companions_leave_out_hidden_files_and_the_apple_double_ones_of_an_external_drive(tmp_path):
+    _touch(tmp_path, "site.24o", "site.24n", "._site.24n", "._site.24o", "._x.nav", ".hidden.nav", "x.nav",
+           "._ABCD00ITA_R_20241330000_01D_MN.rnx", "ABCD00ITA_R_20241330000_01D_MN.rnx")
+    assert _names(rinex.find_companions(tmp_path / "site.24o")) == ["ABCD00ITA_R_20241330000_01D_MN.rnx", "site.24n",
+                                                                    "x.nav"]
 
 
 def test_companions_of_an_observation_file_alone(tmp_path):
