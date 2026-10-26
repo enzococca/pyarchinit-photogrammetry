@@ -3,6 +3,7 @@ with the Python function it replaces (``PPG_NATIVE=0`` switches the extension of
 from __future__ import annotations
 
 import shutil
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -686,6 +687,23 @@ def _decimal_comma_locale() -> str | None:
         locale.setlocale(locale.LC_NUMERIC, previous)
 
 
+def _thread_locale_mode(switch_to: int = 0) -> int | None:
+    """Windows: how the C runtime keeps the numeric locale of the calling thread, 2 = the locale of the
+    process (setlocale() changes it for every thread that has not asked for its own: a new thread, and
+    the main thread to begin with), 1 = a locale of its own (setlocale() then changes this thread's alone).
+    Python and the core (its C code is built with /MD) use the same Universal C Runtime, so this is the
+    state the core finds. Returns the mode the thread was in; 1 or 2 puts it in that mode, 0 changes
+    nothing. None on the other systems, where the core uses uselocale() and nothing stays behind it."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+
+    configthreadlocale = ctypes.CDLL("ucrtbase")._configthreadlocale
+    configthreadlocale.argtypes = [ctypes.c_int]
+    configthreadlocale.restype = ctypes.c_int
+    return configthreadlocale(switch_to)
+
+
 def test_ppk_numbers_use_a_point_whatever_the_locale(tmp_path):
     """RTKLIB reads its options and the RINEX files, and writes the solution, with the C library's
     locale-dependent functions (atof, sscanf, printf). Once a library has called setlocale on an
@@ -693,7 +711,13 @@ def test_ppk_numbers_use_a_point_whatever_the_locale(tmp_path):
     The core runs RTKLIB in the C numeric locale of the calling thread whatever the locale of the
     process, and puts the thread's own back: the static run under a decimal-comma locale, from the
     calling thread and from another one, writes the very bytes of the run in the C locale, and the
-    locale is as it was afterwards."""
+    locale is as it was afterwards.
+    On Windows the C runtime keeps for each thread either the locale of the process or a locale of
+    its own (see _thread_locale_mode), and the core must leave the thread in the one it found. The
+    main thread of a test session is not always in the same: GEOS, which Shapely loads, gives the
+    thread that writes a WKT a locale of its own and never takes it back, and from then on the main
+    thread's setlocale() no longer reaches the other threads. So each thread sets the decimal comma
+    itself, and the other thread runs in both modes."""
     import locale
     from concurrent.futures import ThreadPoolExecutor
 
@@ -707,37 +731,58 @@ def test_ppk_numbers_use_a_point_whatever_the_locale(tmp_path):
     files = [str(RTKLIB_DATA / n) for n in ("30400920.05o", "07590920.05o", "07590920.05n")]
 
     def solve(out):
-        return ppg_core.ppk_solve(str(conf), files, str(out))
+        """The run, which leaves the mode of the calling thread's locale as it was (Windows)."""
+        mode = _thread_locale_mode()
+        result = ppg_core.ppk_solve(str(conf), files, str(out))
+        after = _thread_locale_mode()
+        assert after == mode, f"the run left the thread's locale in mode {after}, it was in {mode}"
+        return result
 
-    def solve_in_a_thread(out):
-        """The result, and the decimal point of this thread before and after the run."""
-        before = locale.localeconv()["decimal_point"]
-        result = solve(out)
-        return result, before, locale.localeconv()["decimal_point"]
+    def solve_in_a_thread(out, own_locale):
+        """From a new thread, whose locale is set here (on Windows the main thread's setlocale() may
+        reach only the main thread): the result, and the decimal point before and after the run.
+        With own_locale, on Windows, the thread has asked for a locale of its own first."""
+        outside = locale.setlocale(locale.LC_NUMERIC)
+        if own_locale:
+            _thread_locale_mode(1)
+        try:
+            locale.setlocale(locale.LC_NUMERIC, name)
+            before = locale.localeconv()["decimal_point"]
+            result = solve(out)
+            return result, before, locale.localeconv()["decimal_point"]
+        finally:
+            locale.setlocale(locale.LC_NUMERIC, outside)
+            if own_locale:
+                _thread_locale_mode(2)
 
     def epochs(pos: bytes) -> int:
         return sum(1 for line in pos.splitlines() if line.strip() and not line.startswith(b"%"))
 
     previous = locale.setlocale(locale.LC_NUMERIC)
+    runs = []
     try:
         locale.setlocale(locale.LC_NUMERIC, "C")
         in_c = solve(tmp_path / "c.pos")
         locale.setlocale(locale.LC_NUMERIC, name)
         in_effect, comma = locale.setlocale(locale.LC_NUMERIC), locale.localeconv()["decimal_point"]
         assert comma != "."
-        here = solve(tmp_path / "here.pos")
+        runs.append(("calling thread", "here.pos", solve(tmp_path / "here.pos")))
         # the run changed neither the locale of the process nor the one of this thread
         assert locale.setlocale(locale.LC_NUMERIC) == in_effect
         assert locale.localeconv()["decimal_point"] == comma
-        with ThreadPoolExecutor(1) as pool:
-            there, before, after = pool.submit(solve_in_a_thread, tmp_path / "there.pos").result()
-        assert before == after == comma
+        for own_locale in ((False, True) if sys.platform == "win32" else (False,)):
+            label = "other thread with a locale of its own" if own_locale else "other thread"
+            file = "there_own.pos" if own_locale else "there.pos"
+            with ThreadPoolExecutor(1) as pool:
+                result, before, after = pool.submit(solve_in_a_thread, tmp_path / file, own_locale).result()
+            assert before == after == comma, (label, before, after, comma)
+            runs.append((label, file, result))
     finally:
         locale.setlocale(locale.LC_NUMERIC, previous)
     assert in_c[0] == 0, in_c[1]
     expected = (tmp_path / "c.pos").read_bytes()
     assert epochs(expected) == 120
-    for label, file, (code, message) in (("calling thread", "here.pos", here), ("other thread", "there.pos", there)):
+    for label, file, (code, message) in runs:
         pos = (tmp_path / file).read_bytes()
         assert code == 0, (label, message)
         assert pos == expected, f"{label}, under {name}: {epochs(pos)} epochs, 120 in the C locale ({message})"
