@@ -440,16 +440,15 @@ def problem_from_chunk(chunk, rec, use_markers: bool = True, gnss: str = "off", 
                 pb.bars.append((mpos[sb.marker_a], mpos[sb.marker_b], sb.distance / s, max(sb.accuracy, 1e-6) / s))
     if gnss in ("plain", "bias"):
         groups = flights(chunk.cameras)
-        for iid in image_ids:
-            key = key_of.get(rec.images[iid].name)
-            if key is None:
-                continue
-            cam = chunk.camera(key)
-            ref = cam.reference
-            if ref.enabled and ref.location:
-                target = chunk.to_internal(np.asarray([ref.location], float))[0]
-                sigma = np.maximum(np.asarray(ref.accuracy, float), 1e-6) / s
-                pb.gnss.append((index[iid], target, sigma, groups.get(key, 0)))
+        cams = {iid: chunk.camera(key_of[rec.images[iid].name]) for iid in image_ids if rec.images[iid].name in key_of}
+        # each position in the coordinate system of the chunk (one read in longitude and latitude is converted; one
+        # that cannot be, on a chunk still in local coordinates, is left out)
+        positions, _crs = gcp.camera_references(chunk, [c for c in cams.values() if c.reference.enabled], chunk.crs)
+        for iid, cam in cams.items():
+            if cam.key in positions:
+                target = chunk.to_internal(np.asarray([positions[cam.key]], float))[0]
+                sigma = np.maximum(np.asarray(cam.reference.accuracy, float), 1e-6) / s
+                pb.gnss.append((index[iid], target, sigma, groups.get(cam.key, 0)))
     absolute = len(pb.gcps) >= 3 or len(pb.gnss) >= 3
     if not absolute and not pb.fixed_images and len(image_ids) >= 2:
         pb.fixed_images = {0}  # the block needs a place: the first photo holds it

@@ -163,3 +163,31 @@ def test_own_adjustment_of_the_trench(processed, tmp_path):
     copy.save()
     again = ppg.Document.open(d / doc.path.name).chunk  # the adjusted block is saved
     assert len(again.aligned_cameras) == len(ch.aligned_cameras)
+
+
+def test_gnss_positions_in_the_coordinate_system_of_the_chunk(processed):
+    """The GNSS term pulls each camera towards its position in the coordinate system of the chunk: a position read in
+    longitude and latitude (EXIF, XMP, MRK) is converted first, never taken as metres; on a chunk still in local
+    coordinates such a position cannot be placed and is left out."""
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.core import crs as crs_mod
+    from pyarchinit_photogrammetry.engine.sfm import load_reconstruction
+    from pyarchinit_photogrammetry.gnss.apply import set_camera_position
+
+    doc, _, _ = processed
+    ch = ppg.Document.open(doc.path).chunk  # a copy in memory: nothing is saved
+    assert ch.crs == "EPSG:3004" and len(ch.aligned_cameras) > 3
+    for cam in ch.aligned_cameras:
+        world = ch.to_world(np.asarray([cam.center], float))
+        lonlat = crs_mod.transform_points(world, ch.crs, "EPSG:4979")[0]
+        set_camera_position(cam, list(lonlat), "EPSG:4979", [0.01, 0.01, 0.02], "dji_mrk", status="fix",
+                            height="ellipsoidal")
+    rec = load_reconstruction(ch)
+    pb, _ids = bundle.problem_from_chunk(ch, rec, use_markers=False, gnss="plain")
+    assert len(pb.gnss) == len(ch.aligned_cameras)
+    for index, target, _sigma, _flight in pb.gnss:  # each camera where its position says, within a centimetre
+        assert np.linalg.norm(target - pb.centres[index]) * ch.scale < 0.01
+
+    ch.crs = crs_mod.LOCAL
+    pb, _ids = bundle.problem_from_chunk(ch, rec, use_markers=False, gnss="plain")
+    assert pb.gnss == []
