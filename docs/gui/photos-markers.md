@@ -25,6 +25,59 @@ face of a 360° photo names its photo.
     sharpest ones (in the tooltip; *blurred* under 0.5), and *Disable the blurred photos* leaves them out of
     the next alignment.
 
+## GNSS positions of the photos
+
+Every photo has a position, where it comes from and how good it is. The *GNSS* pane (*Tools > GNSS > GNSS pane*,
+on the right with *Multispectral* and *Thermal*) shows them and holds the commands that give photos a better
+position than the GPS of their EXIF.
+
+| Source | What it gives |
+| --- | --- |
+| The photos themselves | The GPS of the EXIF, with an accuracy of 5, 5, 10 m (no RTK data). The photos of a DJI drone with RTK also carry its state in the XMP (`RtkFlag`: 50 fix, 34 float, 16 single, 0 none) and its standard deviations, read when the photos are added; those of a multispectral camera take them from their bands |
+| *Tools > GNSS > DJI MRK file...* | The `Timestamp.MRK` the drone writes on its card: the position of every shot, of the camera and not of the antenna (the lever arm of the shot is applied), with its ellipsoidal height, its RTK state and its standard deviations |
+| *Tools > GNSS > Positions file...* | A text file with a line per photo, for a drone built by hand or positions computed by another program (a PPK solution, a total station): name, x, y, height and, when there are any, `sx`, `sy`, `sz` (standard deviations) or `accuracy`, `status`, `yaw`, `pitch`, `roll`; a header names the columns in any order (`name`, `lon`/`lat`/`ellh`, `easting`/`northing`, `std`, `q`...); comma, semicolon, tab or spaces |
+
+**The MRK is paired with the photos by the shot number in their names** (`DJI_0001.JPG` is line 1 of the file),
+so a photo deleted from the card never moves the positions of the others; by order only when the MRK has as many
+lines as the folder has photos, otherwise nothing is done and the window says why. The photos are those of the
+folder of the MRK; when the MRK was copied somewhere else the window asks for the folder (`--photos` on the
+command line). **The positions file** is asked its coordinate system (`EPSG:4979` is longitude, latitude and
+ellipsoidal height, as in the MRK; a projected system such as `EPSG:32633`; `LOCAL`) and the kind of height
+(*ellipsoidal*, as the GNSS gives it, or *EXIF*, above the sea level); a row is paired with its photo by the file
+name, with or without the extension (`100MEDIA/DJI_0001` when the same name is in two folders). Applying
+positions replaces the ones the photos had, and doing it twice changes nothing.
+
+**The accuracy** of a position is twice its declared standard deviations (the ones of an RTK solution are
+optimistic), never below the floor of its state: 1 cm for a fix, 20 cm for a float, 1 m for a single position.
+Without RTK data it stays 5, 5, 10 m. In a positions file `accuracy` is taken as it is; a line with no accuracy
+and no deviations gets 5, 5, 10 cm, raised to the floor of its `status` when it has one. The alignment, *Optimize
+cameras* and the engine *Own* weigh every photo by its accuracy, so a block of fixes and a few singles is not
+treated as one of equals.
+
+**The table** has a row per flight (a pause of more than 20 minutes starts another; the photos with no date are
+the *no date* row): the photos with a fix, a float, a single position, with a position and no RTK data, with no
+position at all, and those whose reference is switched off; the median accuracy per axis; and, once the chunk is
+aligned and georeferenced, how far the cameras ended from their positions (root mean square per axis and the
+largest distance). A flight whose offsets are far larger than its accuracy has a bias (a base on a wrong point)
+or positions that do not belong to it.
+
+**Only the fix positions** switches off the references of the photos whose position is not an RTK fix: they stay
+in the chunk and are aligned, but no longer pull the cameras. A position with no RTK state (the GPS of the EXIF, a
+positions file with no `status` column) counts as not fix. The photos switched off are remembered: unticking
+switches back on exactly those, one you had switched off by hand stays off, and positions applied again keep the
+choice.
+
+From the command line:
+
+```bash
+ppg gnss status survey.ppg                                    # the table, per flight
+ppg gnss mrk survey.ppg /card/DCIM/100MEDIA/Timestamp.MRK     # --photos FOLDER if the photos are elsewhere
+ppg gnss positions survey.ppg cameras.csv --crs EPSG:4979     # --height ellipsoidal|exif
+```
+
+All three take `--chunk` and say what they did; `mrk` and `positions` save the project, and stop with an error,
+changing nothing, when the file cannot be used.
+
 ## Masks
 
 The masked parts of a photo (red on it) are not used to align, in the depth maps, in the orthophoto or in

@@ -220,6 +220,11 @@ dataset pubblici WorldView-3.
   cliccati nella vista 3D; una sezione toglie quello che sta davanti al piano e salva il profilo del taglio
   (disegnato sull'ortofoto, esportato in DXF); v è la quota sui piani verticali, i marker sono disegnati sul
   prospetto; `ppg elevation`.
+* **Posizioni GNSS delle foto, primo passo**: lo stato RTK e le deviazioni standard delle foto DJI (e delle
+  bande delle riprese multispettrali), gli scatti di un `Timestamp.MRK` con il braccio di leva dell'antenna,
+  file di posizioni di qualsiasi drone o programma, l'accuratezza di ogni foto (il doppio delle deviazioni
+  dichiarate, con i minimi del suo stato) e il pannello *GNSS* con una tabella per volo, gli scarti delle camere
+  allineate e *Solo le posizioni fix*; `ppg gnss`.
 
 ## Prossimi passi
 

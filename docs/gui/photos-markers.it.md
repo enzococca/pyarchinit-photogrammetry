@@ -25,6 +25,59 @@ Il suggerimento di una faccia di una foto 360° dice da quale foto viene.
     nitide (nel suggerimento; *sfocata* sotto 0,5), e *Disattiva le foto sfocate* le lascia fuori dal prossimo
     allineamento.
 
+## Posizioni GNSS delle foto
+
+Ogni foto ha una posizione, sa da dove viene e quanto è buona. Il pannello *GNSS* (*Strumenti > GNSS > Pannello
+GNSS*, a destra con *Multispettrale* e *Termico*) le mostra e ha i comandi che danno alle foto una posizione
+migliore del GPS dell'EXIF.
+
+| Fonte | Cosa dà |
+| --- | --- |
+| Le foto stesse | Il GPS dell'EXIF, con un'accuratezza di 5, 5, 10 m (nessun dato RTK). Le foto di un drone DJI con RTK portano anche lo stato nell'XMP (`RtkFlag`: 50 fix, 34 float, 16 singola, 0 nessuno) e le deviazioni standard, lette quando le foto vengono aggiunte; quelle di una camera multispettrale le prendono dalle loro bande |
+| *Strumenti > GNSS > File MRK di DJI...* | Il `Timestamp.MRK` che il drone scrive sulla scheda: la posizione di ogni scatto, della camera e non dell'antenna (si applica il braccio di leva dello scatto), con la quota ellissoidica, lo stato RTK e le deviazioni standard |
+| *Strumenti > GNSS > File di posizioni...* | Un file di testo con una riga per foto, per un drone costruito in casa o posizioni calcolate da un altro programma (una soluzione PPK, una stazione totale): nome, x, y, quota e, se ci sono, `sx`, `sy`, `sz` (deviazioni standard) o `accuracy`, `status`, `yaw`, `pitch`, `roll`; un'intestazione dà i nomi delle colonne in qualsiasi ordine (`name`, `lon`/`lat`/`ellh`, `easting`/`northing`, `std`, `q`...); virgola, punto e virgola, tabulazione o spazi |
+
+**L'MRK si abbina alle foto con il numero dello scatto nel loro nome** (`DJI_0001.JPG` è la riga 1 del file),
+così una foto cancellata dalla scheda non sposta mai le posizioni delle altre; per ordine solo quando l'MRK ha
+tante righe quante sono le foto della cartella, altrimenti non si fa niente e la finestra dice perché. Le foto
+sono quelle della cartella dell'MRK; se l'MRK è stato copiato altrove la finestra chiede la cartella (`--photos`
+da riga di comando). **Il file di posizioni** chiede il suo sistema di coordinate (`EPSG:4979` è longitudine,
+latitudine e quota ellissoidica, come nell'MRK; un sistema proiettato come `EPSG:32633`; `LOCAL`) e il tipo di
+quota (*ellissoidica*, come la dà il GNSS, o *dell'EXIF*, sul livello del mare); una riga si abbina alla sua foto
+con il nome del file, con o senza estensione (`100MEDIA/DJI_0001` quando lo stesso nome sta in due cartelle).
+Applicare le posizioni sostituisce quelle che le foto avevano, e farlo due volte non cambia nulla.
+
+**L'accuratezza** di una posizione è il doppio delle sue deviazioni standard dichiarate (quelle di una soluzione
+RTK sono ottimistiche), mai sotto il minimo del suo stato: 1 cm per un fix, 20 cm per un float, 1 m per una
+posizione singola. Senza dati RTK resta 5, 5, 10 m. In un file di posizioni `accuracy` vale così com'è; una riga
+senza accuratezza né deviazioni prende 5, 5, 10 cm, portati al minimo del suo `status` se ce l'ha. L'allineamento,
+*Ottimizza camere* e il motore *Proprio* pesano ogni foto per la sua accuratezza: un blocco di fix e qualche
+posizione singola non è trattato come fatto di pari.
+
+**La tabella** ha una riga per volo (una pausa di oltre 20 minuti ne comincia un altro; le foto senza data sono
+la riga *senza data*): le foto con una posizione fix, float, singola, con una posizione e nessun dato RTK, senza
+alcuna posizione, e quelle il cui riferimento è disattivato; l'accuratezza mediana per asse; e, quando il chunk è
+allineato e georeferenziato, quanto le camere sono finite lontano dalle loro posizioni (quadratica media per asse
+e distanza maggiore). Un volo i cui scarti sono molto più grandi della sua accuratezza ha un bias (una base su un
+punto sbagliato) o posizioni che non gli appartengono.
+
+**Solo le posizioni fix** disattiva i riferimenti delle foto la cui posizione non è un RTK fissato: restano nel
+chunk e si allineano, ma non tirano più le camere. Una posizione senza stato RTK (il GPS dell'EXIF, un file di
+posizioni senza la colonna `status`) conta come non fix. Le foto disattivate si ricordano: togliendo la spunta si
+riattivano proprio quelle, un riferimento disattivato a mano resta disattivato, e riapplicando le posizioni la
+scelta si mantiene.
+
+Da riga di comando:
+
+```bash
+ppg gnss status rilievo.ppg                                   # la tabella, per volo
+ppg gnss mrk rilievo.ppg /scheda/DCIM/100MEDIA/Timestamp.MRK  # --photos CARTELLA se le foto stanno altrove
+ppg gnss positions rilievo.ppg camere.csv --crs EPSG:4979     # --height ellipsoidal|exif
+```
+
+Tutti e tre accettano `--chunk` e dicono cosa hanno fatto; `mrk` e `positions` salvano il progetto, e si fermano
+con un errore, senza cambiare nulla, quando il file non si può usare.
+
 ## Maschere
 
 Le parti mascherate di una foto (in rosso) non si usano per allineare, nelle mappe di profondità, nell'ortofoto

@@ -220,6 +220,11 @@ on the public WorldView-3 datasets.
   more), of three points clicked in the 3D view; a section takes away what stands in front of the plane and
   saves the profile of the cut (drawn on the orthophoto, exported as DXF); v is the height on upright planes,
   the markers are drawn on the elevation; `ppg elevation`.
+* **GNSS positions of the photos, first step**: the RTK state and standard deviations of DJI photos (and of the
+  bands of multispectral captures), the shots of a `Timestamp.MRK` with the lever arm of the antenna, positions
+  files of any drone or program, the accuracy of each photo (twice the declared deviations, with the floors of
+  its state) and the *GNSS* pane with a table per flight, the offsets of the aligned cameras and *Only the fix
+  positions*; `ppg gnss`.
 
 ## Next
 
