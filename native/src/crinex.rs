@@ -506,6 +506,10 @@ impl<R: BufRead, W: Write> Decoder<R, W> {
             Some(n) => n,
             None => return refuse(number, "the number of satellites of the epoch is not a number"),
         };
+        // the spaces at the end of a line are gone: with no satellite, the blank columns 36-41 of RINEX 3 too
+        if self.epoch.len() < list_at {
+            self.epoch.resize(list_at, b' ');
+        }
         let list = match self.epoch.get(list_at..list_at + 3 * count) {
             Some(list) => list.to_vec(),
             None => return refuse(number, format!("the epoch line lists fewer satellites than its {count}")),

@@ -141,6 +141,39 @@ def test_not_crinex_refused(tmp_path):
 
 
 @needs_the_core
+def test_epochs_without_satellites_given_in_full(tmp_path):
+    """An epoch with no satellite given in full: in RINEX 3 its line has lost the blank columns 36-41 with the
+    other trailing spaces of a Compact RINEX line, and is still an epoch, as the first one, after an event, and as
+    the line the next one differs from; in RINEX 2 the line ends at column 32."""
+    header3 = ["3.0                 COMPACT RINEX FORMAT                    CRINEX VERS   / TYPE",
+               "RNX2CRX ver.4.2.0                       27-Oct-26 05:23     CRINEX PROG / DATE",
+               "     3.04           OBSERVATION DATA    M (MIXED)           RINEX VERSION / TYPE",
+               "G    1 C1C                                                  SYS / # / OBS TYPES",
+               "                                                            END OF HEADER"]
+    epochs3 = ["> 2026 10 26 10 00 00.0000000  0  0", "",  # the first epoch, no satellite: 35 columns
+               " " * 19 + "3" + " " * 14 + "1" + " " * 6 + "G05", "", "3&21213460160",  # 10:00:30, differenced
+               "> 2026 10 26 10 00 45.0000000  4  1", "AFTER THE EVENT".ljust(60) + "COMMENT",
+               "> 2026 10 26 10 01 00.0000000  0  0", "3&-123456789"]  # after the event, a clock offset alone
+    header2 = ["1.0                 COMPACT RINEX FORMAT                    CRINEX VERS   / TYPE",
+               "RNX2CRX ver.4.2.0                       27-Oct-26 05:23     CRINEX PROG / DATE",
+               "     2.11           OBSERVATION DATA    G (GPS)             RINEX VERSION / TYPE",
+               "     1    C1                                                # / TYPES OF OBSERV",
+               "                                                            END OF HEADER"]
+    epochs2 = ["&26 10 26 10  0  0.0000000  0  0", "", " " * 16 + "3" + " " * 14 + "1G05", "", "3&21213460160"]
+    src, dst = tmp_path / "empty.crx", tmp_path / "empty.rnx"
+    src.write_text("\n".join(header3 + epochs3) + "\n")
+    _native.crx2rnx(src, dst)
+    assert dst.read_text().splitlines()[3:] == [
+        "> 2026 10 26 10 00 00.0000000  0  0", "> 2026 10 26 10 00 30.0000000  0  1", "G05  21213460.160",
+        "> 2026 10 26 10 00 45.0000000  4  1", "AFTER THE EVENT".ljust(60) + "COMMENT",
+        "> 2026 10 26 10 01 00.0000000  0  0" + " " * 6 + " -.000123456789"]
+    src.write_text("\n".join(header2 + epochs2) + "\n")
+    _native.crx2rnx(src, dst)
+    assert dst.read_text().splitlines()[3:] == [" 26 10 26 10  0  0.0000000  0  0",
+                                                " 26 10 26 10  0 30.0000000  0  1G05", "  21213460.160"]
+
+
+@needs_the_core
 def test_negative_clock_offsets_are_written_as_they_are(tmp_path):
     """CRX2RNX 4.2.0 writes a negative receiver clock offset that is a whole number of tenths of a millisecond
     (RINEX 3) or of tenths of a second (RINEX 2) one tenth nearer zero (-0.001 s as -.000900000000, -0.5 s as
