@@ -846,7 +846,8 @@ class MainWindow(QMainWindow):
                   tip=tr("La temperatura meno quella dei dintorni: i muri e i fossati sepolti cambiano il suolo sopra di loro"))
         ex_menu = th_menu.addMenu(icon("export"), tr("Esporta le temperature"))
         for fmt, text in (("tif", tr("GeoTIFF in gradi Celsius (32 bit)")), ("tif16", tr("GeoTIFF in centikelvin (16 bit)")),
-                          ("csv", tr("CSV (x, y, temperatura)")), ("flir", tr("JPEG radiometrici FLIR (tasselli con world file)"))):
+                          ("csv", tr("CSV (x, y, temperatura)")),
+                          ("flir", tr("JPEG radiometrico FLIR (un file; tasselli oltre 8,4 milioni di pixel)"))):
             self._act(ex_menu, text + "...", lambda _c=False, f=fmt: self.ms_thermal_export(f))
         th_menu.addSeparator()
         self._act(th_menu, tr("Punto di misura"), lambda: self.set_draw_mode("probe"), icon_name="probe",
@@ -1604,14 +1605,32 @@ class MainWindow(QMainWindow):
                       refresh=True)
 
     def ms_thermal_export(self, fmt: str = "tif") -> None:
-        """The temperatures into a file that keeps them (degrees or centikelvin GeoTIFF, CSV, FLIR JPEGs)."""
+        """The temperatures into a file that keeps them (degrees or centikelvin GeoTIFF, CSV, FLIR JPEGs).
+        An orthomosaic that does not fit in one FLIR file asks first: one file with larger cells, or tiles
+        at full resolution."""
         if not self._need_chunk():
             return
         from ..engine import thermal as th
 
-        if th.thermal_path(self.chunk) is None:
+        source = th.thermal_path(self.chunk)
+        if source is None:
             self._warn("Costruisci prima l'ortofoto termica.")
             return
+        single = False
+        if fmt == "flir":
+            plan = th.flir_plan(source)
+            if not plan["fits"]:
+                answer = choice(
+                    self, "question", "Esporta le temperature",
+                    tr("L'ortofoto termica ha {0} x {1} celle, più di quante ne contenga un solo JPEG radiometrico FLIR "
+                       "(8,4 milioni al massimo).\n\nUn solo file ha celle più grandi: ognuna è la temperatura media di "
+                       "un blocco di {2} x {2} celle. I tasselli tengono la piena risoluzione, ognuno con il suo world "
+                       "file e un indice.", number(plan["cols"]), number(plan["rows"]), plan["factor"]),
+                    [tr("Un solo file con celle più grandi ({0} cm)", number(plan["coarse_cell"] * 100.0, 1)),
+                     tr("Tasselli a piena risoluzione ({0} file)", plan["tiles"])])
+                if answer is None:
+                    return
+                single = answer == 0
         suffix, filt = {"tif": ("_C.tif", "GeoTIFF (*.tif)"), "tif16": ("_centikelvin.tif", "GeoTIFF (*.tif)"),
                         "csv": (".csv", "CSV (*.csv)"), "flir": ("_flir.jpg", "JPEG FLIR (*.jpg)")}[fmt]
         start = str(Path(self._last_dir()) / f"temperatura{suffix}")
@@ -1619,7 +1638,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         palette = str(self.settings.value("thermal/palette", "iron") or "iron")
-        self.run_task("Esporta le temperature", lambda p: th.export(self.chunk, path, fmt, palette=palette),
+        self.run_task("Esporta le temperature", lambda p: th.export(self.chunk, path, fmt, palette=palette, single=single),
                       lambda out: self._info(tr("Temperature esportate"), str(out)))
 
     def _ms_palette_changed(self, palette: str) -> None:

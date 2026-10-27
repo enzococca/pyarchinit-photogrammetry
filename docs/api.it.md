@@ -318,18 +318,26 @@ grado), conservando il livello medio. `anomalies(chunk, radius_m)` è la tempera
 dintorni (`thermal_anomaly.tif`, gradi attorno allo zero); `difference` sottrae un'altra ortofoto
 termica dello stesso terreno (notte contro giorno). `export(chunk, path, "tif" | "tif16" | "csv" |
 "flir")` conserva le temperature: GeoTIFF float32 in gradi, GeoTIFF a 16 bit in centikelvin (gradi =
-valore / 100 - 273,15, con scala e offset impostati), CSV di x, y e temperatura, i parametri nei tag o
-nell'intestazione, oppure JPEG radiometrici FLIR (`export_flir`, `write_flir_jpeg`): tasselli di 2048
-celle di lato (`tile`, al massimo 2800: un file FLIR sta in 256 segmenti APP1) chiamati
-`<nome>_r<riga>_c<colonna>.jpg`, ognuno con il suo world file (`.jgw`) e il sistema di riferimento
-(`.aux.xml`), e un indice `<nome>_tiles.csv`. L'immagine è la resa con la tavolozza; i conteggi grezzi
-sono costruiti con l'inversa del modello di FLIR (raw2temp di Thermimage) per i parametri della misura
-come li stampa ExifTool, così ExifTool, i programmi di FLIR e quelli costruiti su di essi
-(Thermal-Image-Analysis, flirimageextractor, flyr) rileggono gli stessi gradi, entro 0,01 °C. Il
-formato non ha un valore vuoto: le celle senza temperatura prendono la più fredda del tassello (nere
-nell'immagine). I JPEG radiometrici FLIR si leggono anche (`read_flir`, `decode_flir`: i dati grezzi
-come conteggi a 16 bit o come PNG, le costanti di Planck della camera, i parametri della misura del
-chunk). `ppg thermal PROGETTO status|params|build|anomalies|export [--format flir --tile 2048]`.
+valore / 100 - 273,15, con scala e offset impostati), CSV di x, y e temperatura, i parametri nei tag
+o nell'intestazione, oppure JPEG radiometrici FLIR (`export_flir`, `write_flir_jpeg`): un file
+`<nome>.jpg` a piena risoluzione quando l'ortofoto sta in un file FLIR (256 segmenti APP1:
+`FLIR_MAX_CELLS`, 8.386.048 celle, qualunque sia la forma, e al massimo 65.500 celle per lato:
+`flir_fits`), con il suo world file (`.jgw`) e il sistema di riferimento (`.aux.xml`). Quando non ci
+sta, `single=True` scrive un solo file con celle più grandi - le temperature mediate su blocchi di k
+x k celle, senza contare le celle vuote e leggendo a strisce, con k il più piccolo numero intero che
+la fa stare (`flir_factor`) - con il world file delle celle più grandi; altrimenti tasselli chiamati
+`<nome>_r<riga>_c<colonna>.jpg`, ognuno con il suo world file e il suo sistema di riferimento,
+grandi quanto il formato permette (`tile`: di norma il quadrato più grande, 2895 celle, e non di
+più; un `tile` indicato taglia in tasselli anche un'ortofoto che starebbe in un file) e un indice
+`<nome>_tiles.csv`. `flir_plan(source)` dice quale di queste serve a un'ortofoto (le celle, `fits`,
+`factor`, i tasselli). L'immagine è la resa con la tavolozza; i conteggi grezzi sono costruiti con
+l'inversa del modello di FLIR (raw2temp di Thermimage) per i parametri della misura come li stampa
+ExifTool, così ExifTool, i programmi di FLIR e quelli costruiti su di essi (Thermal-Image-Analysis,
+flirimageextractor, flyr) rileggono gli stessi gradi, entro 0,01 °C. Il formato non ha un valore
+vuoto: le celle senza temperatura prendono la più fredda dell'immagine (nere nell'immagine). I JPEG
+radiometrici FLIR si leggono anche (`read_flir`, `decode_flir`: i dati grezzi come conteggi a 16 bit
+o come PNG, le costanti di Planck della camera, i parametri della misura del chunk). `ppg thermal
+PROGETTO status|params|build|anomalies|export [--format flir --tile N --single]`.
 
 `engine.probe` legge cosa contengono i prodotti in un punto, a piena risoluzione: `Probe(chunk)` tiene
 aperti il DEM, l'ortofoto termica e le sue anomalie, la riflettanza e gli indici; `probe.at(x, y,

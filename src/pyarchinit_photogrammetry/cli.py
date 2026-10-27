@@ -2196,8 +2196,14 @@ def thermal(project: Path, what: str = typer.Argument(..., help="status, params,
             balance: bool = typer.Option(True, help="build: take away the offsets between frames"),
             radius: float = typer.Option(2.0, help="anomalies: the radius of the surroundings, metres"),
             fmt: Optional[str] = typer.Option(None, "--format", help="export: tif (degrees, float32), tif16 (centikelvin), "
-                                                                     "csv, or flir (FLIR radiometric JPEGs in tiles with world files)"),
-            tile: int = typer.Option(2048, help="export flir: the side of the tiles, cells (at most 2800)"),
+                                                                     "csv, or flir (FLIR radiometric JPEG with a world file: one "
+                                                                     "file when the orthomosaic fits in one, else tiles or --single)"),
+            tile: Optional[int] = typer.Option(None, help="export flir: the side of the tiles, cells (default: the largest "
+                                                          "square a FLIR file holds, 2895; a side given cuts into tiles even "
+                                                          "an orthomosaic that fits in one file)"),
+            single: bool = typer.Option(False, "--single", help="export flir: when the orthomosaic does not fit in one file, "
+                                                                "write one with larger cells (the temperatures averaged over "
+                                                                "blocks of k x k cells) instead of tiles"),
             palette: str = typer.Option("iron", help="export flir: the colours of the picture (iron, inferno, rainbow, grey)"),
             chunk: Optional[str] = None):
     """Thermal frames (a DJI R-JPEG camera, MicaSense LWIR, temperature TIFFs) added with
@@ -2232,7 +2238,7 @@ def thermal(project: Path, what: str = typer.Argument(..., help="status, params,
     elif what == "export":
         if target is None:
             raise typer.BadParameter("export needs the file to write")
-        typer.echo(str(th.export(ch, target, fmt, tile=tile, palette=palette)))
+        typer.echo(str(th.export(ch, target, fmt, tile=tile, palette=palette, single=single)))
     else:
         raise typer.BadParameter("what: status, params, build, anomalies or export")
 

@@ -31,12 +31,14 @@ away, the mean level kept - the strips between flight lines go. :func:`anomalies
 deviation (the temperature minus its surroundings): what a buried wall or ditch does to the soil.
 :func:`export` writes the temperatures as float32 GeoTIFF (degrees Celsius), 16-bit GeoTIFF in
 centikelvin (the integer format of MicaSense and of most tools), CSV of x, y, temperature, or
-FLIR radiometric JPEGs (:func:`write_flir_jpeg`, tiles with world files) that the tools made for
-FLIR cameras read as thermograms.
+FLIR radiometric JPEGs (:func:`export_flir`: one file with a world file when the orthomosaic fits in
+one, else tiles or one file with larger cells) that the tools made for FLIR cameras read as
+thermograms.
 """
 from __future__ import annotations
 
 import json
+import math
 import os
 import platform
 import shutil
@@ -389,7 +391,9 @@ def decode_file(path, params: dict | None = None, distance: float | None = None)
 FLIR_PLANCK = {"R1": 21106.77, "B": 1501.0, "F": 1.0, "O": -7340.0, "R2": 0.012545258}  # Thermimage's defaults
 FLIR_ATMOSPHERE = {"ATA1": 0.006569, "ATA2": 0.01262, "ATB1": -0.002276, "ATB2": -0.00667, "ATX": 1.9}
 FLIR_SEGMENT = 65524  # bytes of the FFF in one APP1 segment, as FLIR's cameras write them
-FLIR_TILE = 2048  # side of the exported tiles: 256 segments hold 16.7 MB, a raw frame of 2896 x 2896 at most
+# 256 segments at most hold 16.7 MB: the raw counts (16 bit) of 8,386,048 cells, a square of 2895 x 2895
+FLIR_MAX_CELLS = (256 * FLIR_SEGMENT - 2048) // 2
+FLIR_MAX_SIDE = 65500  # the most cells a side of a JPEG can have (the raw header of the FFF holds 16 bits)
 _CAMERA_INFO_SIZE = 0x5D0
 _PNG = b"\x89PNG\r\n\x1a\n"
 
@@ -595,6 +599,53 @@ def _fff_bytes(raw: np.ndarray, p: dict, model: str) -> bytes:
     return bytes(head) + entries + raw_rec + bytes(cam)
 
 
+def _cdiv(a: int, b: int) -> int:
+    """``a`` / ``b`` rounded up."""
+    return -(-a // b)
+
+
+def flir_fits(rows: int, cols: int) -> bool:
+    """Whether ``rows`` x ``cols`` cells go into one FLIR file: its 256 APP1 segments hold
+    :data:`FLIR_MAX_CELLS` cells, whatever their shape, and a JPEG has :data:`FLIR_MAX_SIDE` cells a
+    side at most."""
+    return rows * cols <= FLIR_MAX_CELLS and max(rows, cols) <= FLIR_MAX_SIDE
+
+
+def flir_factor(rows: int, cols: int) -> int:
+    """The smallest whole number k at which ``rows`` x ``cols`` cells averaged over blocks of k x k
+    cells go into one FLIR file (1 when they do as they are)."""
+    # no k under these can do (cells: k * k >= rows * cols / most; side: k >= longest / most), so the
+    # search starts there and finds the smallest
+    k = max(1, math.isqrt(rows * cols // FLIR_MAX_CELLS), _cdiv(max(rows, cols), FLIR_MAX_SIDE))
+    while not flir_fits(_cdiv(rows, k), _cdiv(cols, k)):
+        k += 1
+    return k
+
+
+def flir_tile_side(tile: int | None = None) -> int:
+    """The side of the tiles, in cells: ``tile`` (64 at least), or the largest square one file holds
+    (2895 cells) when it is None or larger."""
+    most = math.isqrt(FLIR_MAX_CELLS)
+    return most if tile is None else int(min(max(tile, 64), most))
+
+
+def flir_plan(source, tile: int | None = None) -> dict:
+    """How the temperature orthomosaic ``source`` (a GeoTIFF) goes into FLIR files: its ``rows`` x
+    ``cols`` cells of ``cell`` (the size of one, in the units of its reference system); ``fits`` when
+    one file holds it as it is; ``factor``, the smallest k at which blocks of k x k cells make it fit
+    (1 when it does), and ``coarse_cell``, the cell of that file; the ``tile`` side and the number of
+    ``tiles`` that cover it at full resolution (:func:`export_flir` leaves out those with no value)."""
+    import rasterio
+
+    with rasterio.open(source) as src:
+        rows, cols, tr = src.height, src.width, src.transform
+    cell = float(math.hypot(tr.a, tr.d))
+    k = flir_factor(rows, cols)
+    side = flir_tile_side(tile)
+    return {"rows": rows, "cols": cols, "cell": cell, "fits": k == 1, "factor": k, "coarse_cell": cell * k,
+            "tile": side, "tiles": _cdiv(rows, side) * _cdiv(cols, side)}
+
+
 def write_flir_jpeg(path, t: np.ndarray, params: dict, lims: tuple[float, float] | None = None,
                     palette: str = "iron", model: str = "pyarchinit-photogrammetry") -> Path:
     """A FLIR radiometric JPEG of the temperatures ``t`` (degrees Celsius, NaN where nothing): the
@@ -603,10 +654,11 @@ def write_flir_jpeg(path, t: np.ndarray, params: dict, lims: tuple[float, float]
     :func:`_printed`), so ExifTool, FLIR's tools and the programs built on them (Thermal-Image-Analysis,
     flirimageextractor, flyr) read these temperatures back, within 0.01 degrees. The format has no
     empty value: cells without a temperature get the coldest of the image (black in the picture).
-    At most 2896 x 2896 cells (:data:`FLIR_TILE`)."""
+    At most :data:`FLIR_MAX_CELLS` cells (a square of 2895 x 2895) and :data:`FLIR_MAX_SIDE` a side
+    (:func:`flir_fits`)."""
     t = np.asarray(t, np.float32)
     h, w = t.shape
-    if h * w * 2 + 2048 > 256 * FLIR_SEGMENT:
+    if not flir_fits(h, w):
         raise ValueError(f"{w} x {h} cells do not fit in a FLIR file: export in tiles")
     ok = np.isfinite(t)
     if not ok.any():
@@ -1467,13 +1519,15 @@ def difference(chunk: Chunk, other: Path, name: str = "thermal_difference") -> P
     return out
 
 
-def export(chunk: Chunk, path, fmt: str | None = None, source: Path | None = None, tile: int = FLIR_TILE,
-           palette: str = "iron") -> Path:
+def export(chunk: Chunk, path, fmt: str | None = None, source: Path | None = None, tile: int | None = None,
+           palette: str = "iron", single: bool = False) -> Path:
     """The temperatures in a file that keeps them: ``tif`` float32 GeoTIFF in degrees Celsius,
     ``tif16`` 16-bit GeoTIFF in centikelvin (0 = nothing; degrees = value / 100 - 273.15, as
     MicaSense writes its thermal band), ``csv`` one line per cell with x, y and the temperature,
-    ``flir`` FLIR radiometric JPEGs (:func:`export_flir`: tiles of ``tile`` cells with world files).
-    The parameters of the measure go with it (tags, the CSV's header, the FLIR camera information)."""
+    ``flir`` FLIR radiometric JPEGs with world files (:func:`export_flir`: one file when the
+    orthomosaic fits in one, else tiles of ``tile`` cells, or with ``single`` one file with larger
+    cells). The parameters of the measure go with it (tags, the CSV's header, the FLIR camera
+    information)."""
     import rasterio
 
     src_path = Path(source) if source is not None else thermal_path(chunk)
@@ -1482,7 +1536,7 @@ def export(chunk: Chunk, path, fmt: str | None = None, source: Path | None = Non
     path = Path(path)
     fmt = fmt or {".csv": "csv", ".txt": "csv", ".jpg": "flir", ".jpeg": "flir"}.get(path.suffix.lower(), "tif")
     if fmt == "flir":
-        return export_flir(chunk, path, src_path, tile=tile, palette=palette)
+        return export_flir(chunk, path, src_path, tile=tile, palette=palette, single=single)
     with rasterio.open(src_path) as src:
         t = src.read(1).astype(np.float32)
         profile = src.profile.copy()
@@ -1526,53 +1580,109 @@ def _export_distance(chunk: Chunk, params: dict, sample: int = 40) -> float:
     return float(np.median([_distance(params, f) for f in files[::step]]))
 
 
-def export_flir(chunk: Chunk, path, source: Path, tile: int = FLIR_TILE, palette: str = "iron") -> Path:
-    """The temperature orthomosaic as FLIR radiometric JPEGs (:func:`write_flir_jpeg`): one file when
-    it fits in ``tile`` cells a side, else tiles ``<name>_r<row>_c<column>.jpg`` with an index
-    ``<name>_tiles.csv`` (file, bounds, coldest and hottest degrees, cells with a value). Every JPEG
-    has its world file (``.jgw``) and its reference system (``.aux.xml``): QGIS and GDAL place it.
-    The colours of all the tiles share the ramp of the whole orthomosaic. The object parameters
-    written are those the temperatures were measured with (the distance: the median flight height).
-    Returns the file, or the index of the tiles."""
+def _mean_blocks(t: np.ndarray, k: int) -> np.ndarray:
+    """The mean of the values of ``t`` in each block of k x k cells, NaN-aware: a block without a value
+    is NaN. A shape that is not a multiple of k leaves smaller blocks at the right and bottom edges."""
+    h, w = t.shape
+    hb, wb = _cdiv(h, k), _cdiv(w, k)
+    ok = np.isfinite(t)
+    v = np.where(ok, t, np.float32(0))
+    if (hb * k, wb * k) != (h, w):
+        v = np.pad(v, ((0, hb * k - h), (0, wb * k - w)))
+        ok = np.pad(ok, ((0, hb * k - h), (0, wb * k - w)))
+    total = v.reshape(hb, k, wb * k).sum(axis=1, dtype=np.float64).reshape(hb, wb, k).sum(axis=2)
+    count = ok.reshape(hb, k, wb * k).sum(axis=1, dtype=np.int64).reshape(hb, wb, k).sum(axis=2)
+    return np.where(count > 0, total / np.maximum(count, 1), np.nan).astype(np.float32)
+
+
+def _block_means(src, k: int, strip_cells: int = 4_000_000) -> np.ndarray:
+    """The first band of the open raster ``src`` averaged over blocks of k x k cells (:func:`_mean_blocks`).
+    It is read in strips of whole block rows of about ``strip_cells`` cells, so the memory in use does
+    not grow with the raster: only the result, ``k`` x ``k`` times smaller, is whole in memory."""
+    from rasterio.windows import Window
+
+    h, w = src.height, src.width
+    out = np.full((_cdiv(h, k), _cdiv(w, k)), np.nan, np.float32)
+    rows = k * max(1, strip_cells // (k * w))
+    for r0 in range(0, h, rows):
+        t = src.read(1, window=Window(0, r0, w, min(rows, h - r0)))
+        means = _mean_blocks(t, k)
+        out[r0 // k:r0 // k + means.shape[0]] = means
+    return out
+
+
+def _flir_georeference(jpg: Path, transform, wkt: str | None) -> None:
+    """The world file (``.jgw``: the size of a cell of the JPEG and the centre of its first one) and the
+    reference system (``.aux.xml``) that let QGIS and GDAL place a FLIR JPEG whose cells are those of
+    ``transform``."""
+    jpg.with_suffix(".jgw").write_text("\n".join(f"{v:.10f}" for v in (
+        transform.a, transform.d, transform.b, transform.e,
+        transform.c + transform.a / 2 + transform.b / 2, transform.f + transform.d / 2 + transform.e / 2)) + "\n")
+    if wkt:
+        from xml.sax.saxutils import escape
+
+        Path(str(jpg) + ".aux.xml").write_text(f"<PAMDataset>\n  <SRS>{escape(wkt)}</SRS>\n</PAMDataset>\n")
+
+
+def export_flir(chunk: Chunk, path, source: Path, tile: int | None = None, palette: str = "iron",
+                single: bool = False) -> Path:
+    """The temperature orthomosaic as FLIR radiometric JPEGs (:func:`write_flir_jpeg`).
+
+    One file ``<name>.jpg`` at full resolution when the whole orthomosaic fits in a FLIR file
+    (:func:`flir_fits`: :data:`FLIR_MAX_CELLS` cells, whatever its shape). When it does not:
+
+    * ``single=True``: still one file, with larger cells - the temperatures averaged over blocks of
+      k x k cells, NaN-aware (a block with no value stays empty), k the smallest whole number that
+      makes it fit (:func:`flir_factor`); the memory in use stays bounded, the raster is read in strips;
+    * else tiles ``<name>_r<row>_c<column>.jpg`` of ``tile`` cells a side - by default the largest square
+      a file holds (:func:`flir_tile_side`) - with an index ``<name>_tiles.csv`` (file, bounds,
+      coldest and hottest degrees, cells with a value; tiles with no value are left out). A ``tile``
+      given asks for tiles of that side even when the orthomosaic would fit in a file (one file when it
+      is no larger than a tile). ``single`` wins over ``tile``.
+
+    Every JPEG has its world file (``.jgw``, the cells of that file) and its reference system
+    (``.aux.xml``): QGIS and GDAL place it. The colours of all the tiles share the ramp of the whole
+    orthomosaic. The object parameters written are those the temperatures were measured with (the
+    distance: the median flight height). Returns the file, or the index of the tiles."""
     import rasterio
+    from rasterio.transform import Affine
     from rasterio.windows import Window
 
     path = Path(path).with_suffix(".jpg")
-    tile = int(min(max(tile, 64), 2800))
+    side = flir_tile_side(tile)
     params = params_of(chunk)
     params = {**params, "distance": _export_distance(chunk, params)}
     with rasterio.open(source) as src:
         wkt = src.crs.to_wkt() if src.crs else None
         tr = src.transform
         h, w = src.height, src.width
+        one_file = single or (flir_fits(h, w) if tile is None else (h <= side and w <= side))
+        if one_file:
+            k = flir_factor(h, w)  # 1 when the orthomosaic fits as it is
+            t = _block_means(src, k) if k > 1 else src.read(1).astype(np.float32, copy=False)
+            if not np.isfinite(t).any():
+                raise RuntimeError("the temperature orthomosaic is empty")
+            write_flir_jpeg(path, t, params, limits(t), palette)
+            _flir_georeference(path, Affine(tr.a * k, tr.b * k, tr.c, tr.d * k, tr.e * k, tr.f), wkt)  # k x k cells
+            return path
         step = max(1, int(np.ceil(max(h, w) / 2000)))
         lims = limits(src.read(1, out_shape=(max(1, h // step), max(1, w // step))).astype(np.float32))
         tiles = []
-        for r0 in range(0, h, tile):
-            for c0 in range(0, w, tile):
-                win = Window(c0, r0, min(tile, w - c0), min(tile, h - r0))
+        for r0 in range(0, h, side):
+            for c0 in range(0, w, side):
+                win = Window(c0, r0, min(side, w - c0), min(side, h - r0))
                 t = src.read(1, window=win).astype(np.float32)
                 ok = np.isfinite(t)
                 if not ok.any():
                     continue
-                single = h <= tile and w <= tile
-                out = path if single else path.with_name(f"{path.stem}_r{r0 // tile:02d}_c{c0 // tile:02d}.jpg")
+                out = path.with_name(f"{path.stem}_r{r0 // side:02d}_c{c0 // side:02d}.jpg")
                 write_flir_jpeg(out, t, params, lims, palette)
-                wt = rasterio.windows.transform(win, tr)
-                # the world file: the size of a cell and the centre of the first one
-                out.with_suffix(".jgw").write_text("\n".join(f"{v:.10f}" for v in (
-                    wt.a, wt.d, wt.b, wt.e, wt.c + wt.a / 2 + wt.b / 2, wt.f + wt.d / 2 + wt.e / 2)) + "\n")
-                if wkt:
-                    from xml.sax.saxutils import escape
-
-                    Path(str(out) + ".aux.xml").write_text(f"<PAMDataset>\n  <SRS>{escape(wkt)}</SRS>\n</PAMDataset>\n")
+                _flir_georeference(out, rasterio.windows.transform(win, tr), wkt)
                 b = rasterio.windows.bounds(win, tr)
                 tiles.append((out.name, b[0], b[1], b[2], b[3], float(np.min(t[ok])), float(np.max(t[ok])),
                               int(ok.sum())))
     if not tiles:
         raise RuntimeError("the temperature orthomosaic is empty")
-    if len(tiles) == 1 and tiles[0][0] == path.name:
-        return path
     index = path.with_name(f"{path.stem}_tiles.csv")
     with open(index, "w", encoding="utf-8") as f:
         f.write("# FLIR radiometric JPEGs of " + Path(source).name + "; " + json.dumps(_printed(params)) + "\n")

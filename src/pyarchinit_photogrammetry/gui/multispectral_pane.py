@@ -199,7 +199,7 @@ class MultispectralPane(QWidget):
         self.c_texport.addItem(tr("GeoTIFF in gradi Celsius (32 bit)"), "tif")
         self.c_texport.addItem(tr("GeoTIFF in centikelvin (16 bit)"), "tif16")
         self.c_texport.addItem(tr("CSV (x, y, temperatura)"), "csv")
-        self.c_texport.addItem(tr("JPEG radiometrici FLIR (tasselli con world file)"), "flir")
+        self.c_texport.addItem(tr("JPEG radiometrico FLIR (un file; tasselli oltre 8,4 milioni di pixel)"), "flir")
         self.b_texport = QPushButton(icon("export"), tr("Esporta..."))
         step(10, "thermal_export", tr("Esporta le temperature (restano in gradi)"), [self.c_texport, self.b_texport])
         self.b_tparams.clicked.connect(self.thermal_params_requested)

@@ -72,7 +72,7 @@ Dopo le riprese, l'allineamento e la superficie vengono i passi delle temperatur
 | **Parametri di misura** (*Parametri...*) | emissività, temperatura riflessa e ambiente, umidità, distanza; i valori di fabbrica delle camere DJI di base |
 | **Ortofoto termica** (*Costruisci...*) | l'ortofoto in gradi Celsius, mostrata su una scala - iron, inferno, arcobaleno, grigi - tra due temperature che scegli, come il calcolatore raster di Metashape restringe la scala termica; *Auto* torna al 2°-98° percentile |
 | **Anomalie termiche** | la temperatura meno quella dei dintorni entro un raggio: muri e fossati sepolti cambiano il suolo sopra di loro |
-| **Esportazione** | tenendo i gradi: GeoTIFF float32 in gradi Celsius, GeoTIFF a 16 bit in centikelvin, CSV, o JPEG radiometrici FLIR in tasselli con world file, che i programmi per le camere FLIR aprono come termogrammi |
+| **Esportazione** | tenendo i gradi: GeoTIFF float32 in gradi Celsius, GeoTIFF a 16 bit in centikelvin, CSV, o un JPEG radiometrico FLIR con il suo world file - un solo file, o tasselli oltre gli 8,4 milioni di pixel: il programma chiede allora un solo file con celle più grandi o tasselli a piena risoluzione - che i programmi per le camere FLIR aprono come termogrammi |
 
 !!! note "Il DJI Thermal SDK"
     Le R-JPEG DJI si decodificano con il Thermal SDK gratuito di DJI, che non viene distribuito con il programma.
