@@ -24,6 +24,11 @@ from pyarchinit_photogrammetry import _native
 from pyarchinit_photogrammetry.gnss import apply as gnss_apply
 from pyarchinit_photogrammetry.gnss import dji, download, positions, ppk, rinex
 from test_gnss import _jpeg, _snapshot  # synthetic photos with the time of their camera, references of a chunk
+from gnss_helpers import LEAP_2005, POS_COLUMNS, POS_LEGEND, POS_ROWS, START_2005, WEEK, needs_rtklib
+from gnss_helpers import enu as _enu
+from gnss_helpers import pos_text as _pos_text
+from gnss_helpers import rtklib_option_names as _rtklib_option_names
+from gnss_helpers import rtklib_options as _options
 
 DATA = Path(__file__).parent / "data" / "rtklib"
 ROVER = DATA / "07590920.05o"
@@ -728,25 +733,6 @@ def test_the_base_position_of_a_header_is_in_japan():
 PPK_ROVER = DATA / "30400920.05o"  # the static station 3040, processed as a moving rover
 PPK_BASE = DATA / "07590920.05o"  # 0759, 3.3 km away
 PPK_NAV = DATA / "07590920.05n"
-WEEK = 604800.0
-START_2005 = 1316 * WEEK + 518400.0  # 2005-04-02 00:00:00 GPS time: GPS week 1316, Saturday
-
-
-def _options(text: str) -> dict[str, str]:
-    """The ``name=value`` lines of an options file of RTKLIB, without its comments."""
-    options = {}
-    for line in text.splitlines():
-        line = line.split("#", 1)[0].strip()
-        if line:
-            name, value = line.split("=", 1)
-            options[name.strip()] = value
-    return options
-
-
-def _rtklib_option_names() -> set[str]:
-    """The names of the options RTKLIB knows, from its own table."""
-    source = (Path(__file__).parents[1] / "native" / "vendor" / "rtklib" / "src" / "options.c").read_text()
-    return set(re.findall(r'^\s*\{"([a-z0-9_-]+)",', source, re.MULTILINE | re.IGNORECASE))
 
 
 def test_config_with_a_typed_base_position():
@@ -892,44 +878,6 @@ def test_every_value_config_writes_is_one_rtklib_takes():
 
 
 # --- solution files ---------------------------------------------------------------------------------------------
-
-POS_LEGEND = ("% (lat/lon/height=WGS84/ellipsoidal,Q=1:fix,2:float,3:sbas,4:dgps,5:single,6:ppp,"
-              "ns=# of satellites)")
-POS_COLUMNS = ("latitude(deg) longitude(deg)  height(m)   Q  ns   sdn(m)   sde(m)   sdu(m)  sdne(m)  sdeu(m)  sdun(m)"
-               " age(s)  ratio")
-# GPS seconds, latitude, longitude, height, Q, ns, sdn, sde, sdu: out of order, as the file need not be in order
-POS_ROWS = [
-    (START_2005 + 30.0, 35.132066167, 139.624300803, 75.6904, 2, 6, 0.1100, 0.1200, 0.1300),
-    (START_2005, 35.132066159, 139.624300832, 75.6841, 1, 7, 0.0100, 0.0200, 0.0300),
-    (START_2005 + 59.996, 35.132065640, 139.624303673, 75.7671, 5, 5, 1.1000, 1.2000, 2.3000),
-]
-LEAP_2005 = 13  # GPS time was 13 s ahead of UTC in 2005
-
-
-def _pos_time(seconds: float, form: str, system: str) -> str:
-    """A time of a solution row as RTKLIB writes it: GPS week and seconds of the week (tow) or the calendar (hms),
-    in GPS time, UTC or Japan standard time."""
-    seconds -= {"GPST": 0, "UTC": LEAP_2005, "JST": LEAP_2005 - 9 * 3600}[system]
-    if form == "tow":
-        week = int(seconds // WEEK)
-        return f"{week:4d} {seconds - week * WEEK:10.3f}"
-    when = datetime(1980, 1, 6) + timedelta(seconds=seconds)
-    return f"{when:%Y/%m/%d %H:%M:%S}.{round(when.microsecond / 1000):03d}"
-
-
-def _pos_text(rows=POS_ROWS, form: str = "tow", system: str = "GPST", legend: str | None = POS_LEGEND,
-              columns: str = POS_COLUMNS, sep: str = " ") -> str:
-    """A solution file of RTKLIB in latitude, longitude and height."""
-    lines = ["% program   : RTKLIB ver.EX 2.5.1", "% inp file  : rover.obs", "%"]
-    if legend:
-        lines.append(legend)
-    lines.append(f"%  {system:<{16 if form == 'hms' else 8}}{sep}" + sep.join(columns.split()))
-    for seconds, lat, lon, h, q, ns, sdn, sde, sdu in rows:
-        values = [f"{lat:14.9f}", f"{lon:14.9f}", f"{h:10.4f}", f"{q:3d}", f"{ns:3d}", f"{sdn:8.4f}", f"{sde:8.4f}",
-                  f"{sdu:8.4f}", "  0.0000", "  0.0000", "  0.0000", "  0.00", "   3.2"]
-        lines.append(_pos_time(seconds, form, system) + sep + sep.join(values))
-    return "\r\n".join(lines) + "\r\n"  # RTKLIB ends its lines with \r\n
-
 
 def _check_rows(solution: ppk.Solution) -> None:
     """The rows of POS_ROWS, in time order."""
@@ -1809,7 +1757,6 @@ def test_short_path_on_windows(tmp_path):
 # build to build, and with a nanometre of the base: from about 40 to 115 of 120. In static mode, the station 3040 being
 # a fixed station, every epoch is fixed on every build: the accurate checks are made on static runs.
 
-needs_rtklib = pytest.mark.skipif(not _native.supports("ppk"), reason="native core without RTKLIB (older than 0.5)")
 EPOCHS = 120  # 00:00:00 to 00:59:30 every 30 s, in both files
 
 
@@ -1823,13 +1770,6 @@ def _rtklib_run(folder: Path, base_position=None, base: Path = PPK_BASE, mode: s
     code, message = _native.ppk_solve(str(conf), [str(PPK_ROVER), str(base), str(PPK_NAV)], str(out))
     assert code == 0, message
     return ppk.read_pos(out)
-
-
-def _enu(llh: np.ndarray, origin) -> np.ndarray:
-    """East, north, up offsets (m) of positions near ``origin``."""
-    d = np.atleast_2d(llh) - np.asarray(origin)
-    return np.c_[np.radians(d[:, 1]) * 6378137.0 * math.cos(math.radians(origin[0])), np.radians(d[:, 0]) * 6378137.0,
-                 d[:, 2]]
 
 
 def _raised_base(folder: Path, height: float) -> Path:

@@ -19,7 +19,17 @@ import pytest
 from pyarchinit_photogrammetry import _native
 from pyarchinit_photogrammetry.gnss import download, lzw, ppk, rinex
 import test_gnss_ppk
-from test_gnss_ppk import PPK_BASE, PPK_NAV, PPK_ROVER, _options, _sha256, needs_rtklib
+from gnss_helpers import header_and_body as _header_and_body
+from gnss_helpers import label as _label
+from gnss_helpers import needs_rtklib
+from gnss_helpers import on_label as _on_label
+from gnss_helpers import rewrite_header as _rewrite_header
+from gnss_helpers import rinex_lines as _lines
+from gnss_helpers import rinex_piece as _piece
+from gnss_helpers import rinex_records as _records
+from gnss_helpers import rtklib_options as _options
+from gnss_helpers import with_last_obs as _with_last_obs
+from test_gnss_ppk import PPK_BASE, PPK_NAV, PPK_ROVER, _sha256
 
 DATA = Path(__file__).parent / "data"
 WHOLE = DATA / "rtklib" / "07590920.05o"  # station 0759: RINEX 2.10, GPS, 120 epochs at 30 s, event records
@@ -63,88 +73,6 @@ def _zip(target: Path, members: list[tuple[str, bytes]]) -> Path:
         for name, data in members:
             archive.writestr(name, data)
     return target
-
-
-def _lines(path: Path) -> list[str]:
-    return path.read_text().splitlines()
-
-
-def _header_and_body(lines: list[str]) -> tuple[list[str], list[str]]:
-    end = next(i for i, line in enumerate(lines) if line.rstrip().endswith("END OF HEADER")) + 1
-    return lines[:end], lines[end:]
-
-
-_EPOCH_V2 = re.compile(r"^ \d\d +\d+ +\d+ +\d+ +\d+ +[\d.]+ +0 ")
-
-
-def _records(path: Path) -> tuple[list[str], list[list[str]]]:
-    """The header of a RINEX file and its records, each an epoch line with the lines up to the next epoch (the event
-    records after an epoch are its)."""
-    header, body = _header_and_body(_lines(path))
-    records: list[list[str]] = []
-    for line in body:
-        if line.startswith(">") or _EPOCH_V2.match(line):
-            records.append([line])
-        else:
-            records[-1].append(line)
-    return header, records
-
-
-def _label(line: str) -> str:
-    return line[60:].strip()
-
-
-def _last_obs_line(epoch: str, system: str = "GPS") -> str:
-    """The TIME OF LAST OBS line of the observations whose last epoch line is ``epoch``."""
-    fields = epoch.lstrip("> ").split()[:6]
-    year = int(fields[0]) if epoch.startswith(">") else int(fields[0]) + (1900 if int(fields[0]) >= 80 else 2000)
-    y, mo, d, h, mi = year, *(int(f) for f in fields[1:5])
-    return f"{y:6d}{mo:6d}{d:6d}{h:6d}{mi:6d}{float(fields[5]):13.7f}     {system}".ljust(60) + "TIME OF LAST OBS"
-
-
-def _with_last_obs(header: list[str], epoch: str) -> list[str]:
-    """``header`` with a TIME OF LAST OBS line of the epoch ``epoch`` (after the TIME OF FIRST OBS line)."""
-    lines = [line for line in header if _label(line) != "TIME OF LAST OBS"]
-    i = next(k for k, line in enumerate(lines) if _label(line) == "TIME OF FIRST OBS")
-    return lines[:i + 1] + [_last_obs_line(epoch)] + lines[i + 1:]
-
-
-def _piece(path: Path, header: list[str], records: list[list[str]], last_obs: bool = False) -> Path:
-    """``records`` with ``header`` as a RINEX file, with the TIME OF LAST OBS of its own last epoch when asked."""
-    lines = _with_last_obs(header, records[-1][0]) if last_obs else list(header)
-    for record in records:
-        lines += record
-    path.write_text("\n".join(lines) + "\n", newline="\n")
-    return path
-
-
-def _card(content: str, label: str) -> str:
-    """A header line: the content in the first 60 columns, the label after them."""
-    return content.ljust(60) + label
-
-
-def _rewrite_header(source: Path, target: Path, change) -> Path:
-    """A copy of ``source`` whose header lines go through ``change(line)`` (a new line, or None to leave it out)."""
-    lines, in_header = [], True
-    for line in _lines(source):
-        if in_header:
-            in_header = _label(line) != "END OF HEADER"
-            line = change(line) if in_header else line
-            if line is None:
-                continue
-        lines.append(line)
-    target.write_text("\n".join(lines) + "\n", newline="\n")
-    return target
-
-
-def _on_label(label: str, content: str | None):
-    """A ``change`` for :func:`_rewrite_header`: the line with ``label`` gets ``content`` (None: it goes)."""
-    def change(line: str):
-        if _label(line) != label:
-            return line
-        return None if content is None else _card(content, label)
-
-    return change
 
 
 def _epoch_time(record: list[str]) -> datetime:

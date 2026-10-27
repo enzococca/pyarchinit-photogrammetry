@@ -21,8 +21,8 @@ import pytest
 from pyarchinit_photogrammetry import _native
 from pyarchinit_photogrammetry.core.progress import Cancelled, Progress
 from pyarchinit_photogrammetry.gnss import atx, download, frames, ppk, ppp, rinex
-from test_gnss_ppk import START_2005, WEEK, _enu, _options, _pos_text, _rtklib_option_names, needs_rtklib
-from test_gnss_rinex_files import _on_label, _piece, _records, _rewrite_header
+from gnss_helpers import (START_2005, WEEK, enu, needs_rtklib, on_label, pos_text, rewrite_header, rinex_piece,
+                          rinex_records, rtklib_option_names, rtklib_options)
 
 DATA = Path(__file__).parent / "data" / "rtklib"
 OWN = DATA / "30400920.05o"  # the user's base: 3040, standing still from 00:00:00 to 00:59:30 every 30 s
@@ -93,15 +93,20 @@ def _mjd(day: date) -> int:
 
 
 def _sp3_text(day: date, note: str = "") -> str:
-    """The beginning of an SP3-d file of ``day``: what tells it apart."""
+    """The header of an SP3-d file of ``day``, what tells it apart and the time it covers: its first epoch, 288 epochs,
+    5 minutes apart."""
+    seconds = (datetime(day.year, day.month, day.day) - datetime(1980, 1, 6)).total_seconds()
     return (f"#dP{day.year:4d} {day.month:2d} {day.day:2d}  0  0  0.00000000     288 ORBIT IGS20 FIT  TST\n"
+            f"## {int(seconds // WEEK):4d} {seconds % WEEK:15.8f} {300.0:14.8f} {_mjd(day):5d} {0.0:15.13f}\n"
             f"/* {note}\nEOF\n")
 
 
-def _clk_text(day: date, note: str = "") -> str:
+def _clk_text(day: date, note: str = "", last: tuple[int, int, int] = (23, 59, 30)) -> str:
+    """A RINEX clock file of ``day``: its first two epochs, 30 s apart, and its ``last`` (hour, minute, second)."""
+    records = "".join(f"AS G01  {day.year:4d} {day.month:02d} {day.day:02d} {h:02d} {m:02d}{float(sec):10.6f}  1    "
+                      "1.000000000000E-04\n" for h, m, sec in ((0, 0, 0), (0, 0, 30), last))
     return ("     3.00           C                   M                   RINEX VERSION / TYPE\n"
-            f"{note:<60}COMMENT\n" + " " * 60 + "END OF HEADER\n"
-            f"AS G01  {day.year:4d} {day.month:02d} {day.day:02d} 00 00  0.000000  1    1.000000000000E-04\n")
+            f"{note:<60}COMMENT\n" + " " * 60 + "END OF HEADER\n" + records)
 
 
 def _erp_text(rows) -> str:
@@ -187,6 +192,32 @@ def test_centres_are_the_public_archives():
         assert centre.credit and centre.name in centre.credit
     assert ppp.CENTRES[0].addresses(day)["sp3"] == ("https://navigation-office.esa.int/products/gnss-products/2442/"
                                                     "ESA0OPSFIN_20262990000_01D_05M_ORB.SP3.gz")
+
+
+ESA_PRODUCTS = "https://navigation-office.esa.int/products/gnss-products/"
+CODE_PRODUCTS = "https://www.aiub.unibe.ch/download/CODE/"
+BKG_PRODUCTS = "https://igs.bkg.bund.de/root_ftp/IGS/products/"
+
+
+@pytest.mark.parametrize("day, d, year", [(date(2024, 12, 31), "2024366", "2024"),
+                                          (date(2025, 1, 1), "2025001", "2025")], ids=["2024-12-31", "2025-01-01"])
+def test_the_names_across_the_new_year(day, d, year):
+    """The last day of a leap year is day 366, the next one day 001 of the next year; both are in the folder of GPS
+    week 2347 at ESA and BKG, and each in the folder of its own year at CODE; the weekly ERP of the final products of
+    the IGS is named by the Sunday of the week, 2024-12-29 (day 364), for both."""
+    esa, code, igs_final, igs_rapid = ppp.CENTRES
+    assert esa.addresses(day) == {"sp3": f"{ESA_PRODUCTS}2347/ESA0OPSFIN_{d}0000_01D_05M_ORB.SP3.gz",
+                                  "clk": f"{ESA_PRODUCTS}2347/ESA0OPSFIN_{d}0000_01D_30S_CLK.CLK.gz",
+                                  "erp": f"{ESA_PRODUCTS}2347/ESA0OPSFIN_{d}0000_01D_01D_ERP.ERP.gz"}
+    assert code.addresses(day) == {"sp3": f"{CODE_PRODUCTS}{year}/COD0OPSFIN_{d}0000_01D_05M_ORB.SP3.gz",
+                                   "clk": f"{CODE_PRODUCTS}{year}/COD0OPSFIN_{d}0000_01D_30S_CLK.CLK.gz",
+                                   "erp": f"{CODE_PRODUCTS}{year}/COD0OPSFIN_{d}0000_01D_01D_ERP.ERP.gz"}
+    assert igs_final.addresses(day) == {"sp3": f"{BKG_PRODUCTS}2347/IGS0OPSFIN_{d}0000_01D_15M_ORB.SP3.gz",
+                                        "clk": f"{BKG_PRODUCTS}2347/IGS0OPSFIN_{d}0000_01D_30S_CLK.CLK.gz",
+                                        "erp": f"{BKG_PRODUCTS}2347/IGS0OPSFIN_20243640000_07D_01D_ERP.ERP.gz"}
+    assert igs_rapid.addresses(day) == {"sp3": f"{BKG_PRODUCTS}2347/IGS0OPSRAP_{d}0000_01D_15M_ORB.SP3.gz",
+                                        "clk": f"{BKG_PRODUCTS}2347/IGS0OPSRAP_{d}0000_01D_05M_CLK.CLK.gz",
+                                        "erp": f"{BKG_PRODUCTS}2347/IGS0OPSRAP_{d}0000_01D_01D_ERP.ERP.gz"}
 
 
 @pytest.mark.parametrize("present, chosen", [
@@ -309,6 +340,30 @@ def test_products_not_published_says_when(archives, tmp_path, monkeypatch):
     assert "27 November 2022" in str(error.value)
 
 
+@pytest.mark.parametrize("now, waiting, due, dates, past", [
+    (datetime(2026, 10, 28, 12, 0), 3, 1, ["2026-10-31"], ["2026-10-27 17:00"]),
+    (datetime(2026, 11, 14, 12, 0), 1, 3, [], ["2026-10-27 17:00", "2026-10-31"]),
+    (datetime(2026, 12, 26, 12, 0), 0, 4, [], ["2026-10-27 17:00", "2026-10-31"]),
+], ids=["rapid due", "IGS finals by the week", "all due"])
+def test_products_that_should_be_published_by_now_say_so(archives, tmp_path, monkeypatch, now, waiting, due, dates,
+                                                          past):
+    """Once the products should be published - the rapid ones of the IGS 17 hours after the end of the last day of
+    the session, the final ones of ESA 4 days after it - the message says so, and to try again later or to give them
+    by hand, with no date that is gone. The final products of the IGS come a GPS week at a time: they are waited for
+    from the end of the week of the session (Saturday 2026-10-31), not from the end of its day."""
+    monkeypatch.setattr(ppp, "_now", lambda: now.replace(tzinfo=timezone.utc))
+    with pytest.raises(ValueError) as error:
+        ppp.products(*SESSION, tmp_path / "products")
+    text = str(error.value)
+    assert text.count("not published yet") == waiting and text.count("should be published by now") == due
+    if waiting == 1:
+        assert "IGS0OPSFIN_20262990000_01D_15M_ORB.SP3.gz" in [line for line in text.splitlines()
+                                                               if "not published yet" in line][0]
+    assert "should already be published" in text and "try again later" in text and "by hand" in text
+    assert all(when in text for when in dates) and not any(when in text for when in past)
+    assert "ultra-rapid" in text
+
+
 def test_a_damaged_product_is_fetched_again_or_its_centre_passed_over(archives, tmp_path, monkeypatch, caplog):
     """A copy in the GNSS folder that is cut short is downloaded again; a file of the archive that is no good, not
     even downloaded again, passes the centre over for the next one, and is not kept."""
@@ -402,7 +457,7 @@ def test_ppp_config_options():
     satellite and receiver antenna models, phase wind-up, eclipsing satellites out, RAIM, GPS and Galileo, precise
     orbits and clocks, no ambiguity fixing (RTKLIB-EX makes float PPP solutions only), the antenna of the RINEX
     header, igs20.atx for the satellites and the receiver, the ERP, one position for the session."""
-    options = _options(ppp.config(ANTENNAS, [ROTATION], 2.0))
+    options = rtklib_options(ppp.config(ANTENNAS, [ROTATION], 2.0))
     expected = {"pos1-posmode": "ppp-static", "pos1-frequency": "l1+l2", "pos1-soltype": "forward",
                 "pos1-ionoopt": "dual-freq", "pos1-tropopt": "est-ztd", "pos1-tidecorr": "5", "pos1-posopt1": "on",
                 "pos1-posopt2": "on", "pos1-posopt3": "on", "pos1-posopt4": "on", "pos1-posopt5": "on",
@@ -414,11 +469,11 @@ def test_ppp_config_options():
                 "out-height": "ellipsoidal"}
     for name, value in expected.items():
         assert options.get(name) == value, name
-    assert set(options) <= _rtklib_option_names()
+    assert set(options) <= rtklib_option_names()
     assert not any(name.startswith("ant2-") for name in options)  # no base: the receiver is positioned on its own
-    assert _options(ppp.config(ANTENNAS, [ROTATION], 5.0))["pos1-tropopt"] == "est-ztdgrad"
-    assert _options(ppp.config(ANTENNAS, [ROTATION], 4.0))["pos1-tropopt"] == "est-ztdgrad"
-    assert _options(ppp.config(ANTENNAS, [ROTATION], 3.99))["pos1-tropopt"] == "est-ztd"
+    assert rtklib_options(ppp.config(ANTENNAS, [ROTATION], 5.0))["pos1-tropopt"] == "est-ztdgrad"
+    assert rtklib_options(ppp.config(ANTENNAS, [ROTATION], 4.0))["pos1-tropopt"] == "est-ztdgrad"
+    assert rtklib_options(ppp.config(ANTENNAS, [ROTATION], 3.99))["pos1-tropopt"] == "est-ztd"
 
 
 @pytest.mark.parametrize("antenna, eops, hours, match", [
@@ -485,7 +540,7 @@ def fake_ppp(monkeypatch):
     state = SimpleNamespace(runs=[], q=6, llh=_header_llh(OWN), sd=(0.012, 0.009, 0.031), message="", rows=True)
 
     def solve(conf, infiles, outfile):
-        options = _options(Path(conf).read_text())
+        options = rtklib_options(Path(conf).read_text())
         state.runs.append({"options": options, "inputs": [Path(f).name for f in infiles],
                            "sha": [_sha256(Path(f)) for f in infiles],
                            "erp": Path(options["file-eopfile"]).read_text(),
@@ -493,7 +548,7 @@ def fake_ppp(monkeypatch):
                            "folder": sorted(p.name for p in Path(infiles[0]).parent.iterdir())})
         lat, lon, h = state.llh
         rows = [(START_2005, lat, lon, h, state.q, 9, *state.sd)] if state.rows else []
-        Path(outfile).write_text(_pos_text(rows), newline="")
+        Path(outfile).write_text(pos_text(rows), newline="")
         return 0, state.message or f"processing : 2005/04/02 00:59:30 Q={state.q}"
 
     monkeypatch.setattr(_native, "ppk_solve", solve)
@@ -511,7 +566,7 @@ def _no_downloads(monkeypatch) -> None:
 def test_read_pos_reads_a_ppp_row(tmp_path):
     """A row of a PPP solution (Q 6, RTKLIB's "ppp") is read as any other."""
     path = tmp_path / "ppp.pos"
-    path.write_text(_pos_text([(START_2005, 35.1, 139.6, 75.0, 6, 9, 0.02, 0.01, 0.05)]), newline="")
+    path.write_text(pos_text([(START_2005, 35.1, 139.6, 75.0, 6, 9, 0.02, 0.01, 0.05)]), newline="")
     solution = ppk.read_pos(path)
     assert solution.q.tolist() == [6] and ppk.QUALITY[6] == "ppp"
     assert ppk.static_position(path) == ((35.1, 139.6, 75.0), 6, (0.01, 0.02, 0.05))
@@ -563,18 +618,17 @@ def test_ppp_joins_the_erp_of_the_days_into_one_file(tmp_path, fake_ppp):
     assert [line.split()[0] for line in run["erp"].splitlines() if line[:1].isdigit()] == ["53462.50", "53463.50"]
 
 
-def _session(folder: Path, hours: float) -> Path:
-    """The observations of 3040, whose hour is repeated, for ``hours`` from 2005-04-02 00:00:00 every 30 s."""
-    header, records = _records(OWN)
+def _session(folder: Path, hours: float, start: datetime = datetime(2005, 4, 2)) -> Path:
+    """The observations of 3040, whose hour is repeated, for ``hours`` from ``start`` every 30 s."""
+    header, records = rinex_records(OWN)
     lines = list(header)
-    start = datetime(2005, 4, 2)
     for k in range(round(hours * 120)):
         record = records[k % len(records)]
         when = start + timedelta(seconds=30 * k)
         epoch = (f" {when.year % 100:02d} {when.month:2d} {when.day:2d} {when.hour:2d} {when.minute:2d}"
                  f"{when.second:11.7f}")
         lines += [epoch + record[0][26:], *record[1:]]
-    path = folder / f"3040_{hours:g}h.05o"
+    path = folder / f"3040_{start:%Y%m%d%H}_{hours:g}h.{start:%y}o"
     folder.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", newline="\n")
     return path
@@ -606,9 +660,9 @@ def test_short_session_warns(tmp_path, fake_ppp, caplog, hours, short, station, 
 
 def test_ppp_with_the_base_in_two_files(tmp_path, fake_ppp):
     """A base recorded in two files (given in any order) is the base of the whole session; the joined file goes."""
-    header, records = _records(OWN)
-    first = _piece(tmp_path / "first.05o", header, records[:60])
-    second = _piece(tmp_path / "second.05o", header, records[60:])
+    header, records = rinex_records(OWN)
+    first = rinex_piece(tmp_path / "first.05o", header, records[:60])
+    second = rinex_piece(tmp_path / "second.05o", header, records[60:])
     r = ppp.solve_static([second, first], tmp_path / "work", products=_given_products(tmp_path / "given"),
                          atx=ATX_EXCERPT)
     assert r.hours == 1.0 and r.position.epoch == pytest.approx(MID_2005, abs=1e-9)
@@ -618,14 +672,56 @@ def test_ppp_with_the_base_in_two_files(tmp_path, fake_ppp):
 @pytest.mark.parametrize("q, what", [(5, "single"), (2, "float"), (1, "fix")])
 def test_ppp_refuses_a_solution_that_is_not_ppp(tmp_path, fake_ppp, q, what):
     """RTKLIB-EX makes float PPP solutions (Q 6) only: a row of any other quality is no PPP - a single position is
-    metres off - and is refused; the solution stays, named in the message."""
-    fake_ppp.q = q
+    metres off - and is refused; the solution stays, named in the message, with what RTKLIB said, which is often
+    why."""
+    fake_ppp.q, fake_ppp.message = q, "error : no erp data rotation.erp"
     with pytest.raises(ValueError) as error:
         ppp.solve_static(OWN, tmp_path / "work", products=_given_products(tmp_path / "given"), atx=ATX_EXCERPT)
     text = str(error.value)
     assert f"Q={q}" in text and what in text and "3040" in text
+    assert "error : no erp data rotation.erp" in text
     (kept,) = (tmp_path / "work" / "ppp").glob("*.pos")
     assert kept.name in text
+
+
+def test_products_given_by_hand_must_cover_the_session(tmp_path, fake_ppp):
+    """Products given by hand are checked against the session: orbits or clocks that leave part of it without products
+    are refused - RTKLIB would compute nothing there, and the hours would claim it - naming the files, the time they
+    cover and the time they leave out; the products of every day of the session pass."""
+    obs = _session(tmp_path / "obs", 2.0, start=datetime(2005, 4, 1, 23))  # 23:00:00 to 00:59:30
+    second_day = _given_products(tmp_path / "given", (date(2005, 4, 2),))
+    with pytest.raises(ValueError) as error:
+        ppp.solve_static(obs, tmp_path / "work", products=second_day, atx=ATX_EXCERPT)
+    text = str(error.value)
+    assert "orbits" in text and "orbits_2005092.sp3 covers 2005-04-02 00:00:00 to 2005-04-03 00:00:00" in text
+    assert "60 minutes" in text and "2005-04-01 23:00:00 to 2005-04-02 00:00:00 GPS time" in text
+    both = _given_products(tmp_path / "both", (date(2005, 4, 1), date(2005, 4, 2)))
+    r = ppp.solve_static(obs, tmp_path / "work", products=both, atx=ATX_EXCERPT)
+    assert r.hours == 2.0 and r.position.detail["hours"] == 2.0
+    clocks_of_one_day = dataclasses.replace(both, clk=both.clk[1:])
+    with pytest.raises(ValueError, match="clocks") as error:
+        ppp.solve_static(obs, tmp_path / "work", products=clocks_of_one_day, atx=ATX_EXCERPT)
+    assert "clocks_2005092.clk.gz" in str(error.value) and "60 minutes" in str(error.value)
+    # clocks that stop at 00:30:00: the last half hour of the hour of 3040 has none
+    stopping = _given_products(tmp_path / "stopping")
+    stopping.clk[0].write_bytes(gzip.compress(_clk_text(date(2005, 4, 2), last=(0, 30, 0)).encode()))
+    with pytest.raises(ValueError) as error:
+        ppp.solve_static(OWN, tmp_path / "work", products=stopping, atx=ATX_EXCERPT)
+    assert "29 minutes" in str(error.value) and "2005-04-02 00:30:30 to 2005-04-02 00:59:30" in str(error.value)
+    assert len(fake_ppp.runs) == 1
+
+
+def test_products_before_igs20_warn_of_their_frame_and_antennas(tmp_path, fake_ppp):
+    """Before GPS week 2238 (27 November 2022) the products of the IGS and its centres are of IGb14, made for
+    igs14.atx: a position computed with igs20.atx and called ITRF2020 can be centimetres off, and is said to be."""
+    r = ppp.solve_static(OWN, tmp_path / "old", products=_given_products(tmp_path / "given"), atx=ATX_EXCERPT)
+    (note,) = [w for w in r.warnings if "IGb14" in w]
+    assert "igs14.atx" in note and "igs20_excerpt.atx" in note and "ITRF2020" in note and "centimetres" in note
+    later = _session(tmp_path / "obs", 1.0, start=datetime(2026, 10, 26, 9))
+    r = ppp.solve_static(later, tmp_path / "new", products=_given_products(tmp_path / "given26", (date(2026, 10, 26),)),
+                         atx=ATX_EXCERPT)
+    assert r.position.epoch == pytest.approx(frames.decimal_year(datetime(2026, 10, 26, 9, 29, 27)), abs=1e-9)
+    assert not [w for w in r.warnings if "IGb14" in w]
 
 
 def test_ppp_needs_the_antenna_calibrations(tmp_path, fake_ppp, monkeypatch):
@@ -666,7 +762,7 @@ def test_ppp_needs_the_antenna_calibrations(tmp_path, fake_ppp, monkeypatch):
 def _antenna(folder: Path, kind: str) -> Path:
     """A copy of 3040 whose header names the antenna ``kind`` (type and radome)."""
     folder.mkdir(parents=True, exist_ok=True)
-    return _rewrite_header(OWN, folder / OWN.name, _on_label("ANT # / TYPE", f"{'':20}{kind}"))
+    return rewrite_header(OWN, folder / OWN.name, on_label("ANT # / TYPE", f"{'':20}{kind}"))
 
 
 def test_ppp_warns_of_an_antenna_without_its_calibration(tmp_path, fake_ppp, caplog):
@@ -874,19 +970,19 @@ def test_ppp_gives_the_mark_under_the_antenna(tmp_path, broadcast, monkeypatch):
     products = _products_of(broadcast)
     plain = ppp.solve_static(OWN, tmp_path / "plain", products=products, atx=ATX_EXCERPT)
     assert not [w for w in plain.warnings if w.startswith("RTKLIB")], plain.warnings
-    offset = _enu(_llh(plain.position), _header_llh(OWN))[0]  # broadcast orbits and clocks: metres, not centimetres
+    offset = enu(_llh(plain.position), _header_llh(OWN))[0]  # broadcast orbits and clocks: metres, not centimetres
     assert math.hypot(offset[0], offset[1]) < 5.0 and abs(offset[2]) < 5.0, offset
     assert plain.position.detail["q"] == 6 and plain.position.sd is not None
     raised = tmp_path / "raised" / OWN.name
     raised.parent.mkdir()
-    _rewrite_header(OWN, raised, _on_label("ANTENNA: DELTA H/E/N", f"{1.5:14.4f}{0.0:14.4f}{0.0:14.4f}"))
+    rewrite_header(OWN, raised, on_label("ANTENNA: DELTA H/E/N", f"{1.5:14.4f}{0.0:14.4f}{0.0:14.4f}"))
     assert rinex.header(raised).antenna_delta_hen == (1.5, 0.0, 0.0)
     lower = ppp.solve_static(raised, tmp_path / "lower", products=products, atx=ATX_EXCERPT)
-    offset = _enu(_llh(lower.position), _llh(plain.position))[0]
+    offset = enu(_llh(lower.position), _llh(plain.position))[0]
     assert np.allclose(offset, [0.0, 0.0, -1.5], rtol=0, atol=0.005), offset
     absent = ppp.solve_static(_antenna(tmp_path / "absent", "TRM41249.00     NONE"), tmp_path / "absent-work",
                               products=products, atx=ATX_EXCERPT)
-    offset = _enu(_llh(absent.position), _llh(plain.position))[0]
+    offset = enu(_llh(absent.position), _llh(plain.position))[0]
     assert np.allclose(offset, [0.0, 0.0, 0.100], rtol=0, atol=0.002), offset
 
 
@@ -906,4 +1002,4 @@ def test_rtklib_reads_the_erp_of_the_days_joined(tmp_path, broadcast, monkeypatc
     second.write_text(_erp_text([(53462.5, 3.06, 3.41, -0.56), (53463.5, 3.07, 3.42, -0.57)]))
     moved = ppp.solve_static(OWN, tmp_path / "moved", products=_products_of(broadcast, [second, first]),
                              atx=ATX_EXCERPT)
-    assert np.linalg.norm(_enu(_llh(moved.position), _llh(one.position))[0]) > 0.01
+    assert np.linalg.norm(enu(_llh(moved.position), _llh(one.position))[0]) > 0.01
