@@ -99,11 +99,12 @@ GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
 
 # ------------------------------------------------------------------------------------------- the network
 def http(url: str, token: str | None = None, payload: dict | None = None, method: str | None = None,
-         accept: str = "application/vnd.github+json", raw: bool = False):
+         accept: str = "application/vnd.github+json", raw: bool = False, extra: dict | None = None):
     """One request; the answer as JSON (or as text with raw). An error of the server raises HTTPError."""
     headers = {"Accept": accept, "User-Agent": "pyarchinit-photogrammetry-stats", "X-GitHub-Api-Version": "2022-11-28"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    headers.update(extra or {})
     body = None
     if payload is not None:
         body, headers["Content-Type"] = json.dumps(payload).encode(), "application/json"
@@ -338,11 +339,13 @@ def goatcounter(token: str, path: str, **params) -> dict:
     unknown token, a permission the token lacks), which never holds the token."""
     time.sleep(PAUSE)
     token = token.strip().removeprefix("Bearer ").strip()
-    try:
-        return http(f"{GOATCOUNTER}/{path}?{urllib.parse.urlencode(params)}", token, accept="application/json")
+    try:  # with the JSON content type GoatCounter answers its errors in JSON, not in an HTML page
+        return http(f"{GOATCOUNTER}/{path}?{urllib.parse.urlencode(params)}", token, accept="application/json",
+                    extra={"Content-Type": "application/json"})
     except urllib.error.HTTPError as error:
-        reason = error.read(300).decode(errors="replace").strip()
-        raise RuntimeError(f"GoatCounter {path}: HTTP {error.code}: {reason or error.reason}") from None
+        body = error.read(4000).decode(errors="replace")
+        text = " ".join(re.sub(r"(?s)<style.*?</style>|<script.*?</script>|<[^>]+>", " ", body).split())
+        raise RuntimeError(f"GoatCounter {path}: HTTP {error.code}: {text[-200:] or error.reason}") from None
 
 
 def update_goatcounter(data: dict, token: str, now: datetime) -> None:

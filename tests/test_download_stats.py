@@ -75,7 +75,7 @@ class FakeBigQuery:
 
 def fake_web(calls: list):
     """The answers of GitHub, GoatCounter and pypistats.org, by URL."""
-    def web(url, token=None, payload=None, method=None, accept=None, raw=False):
+    def web(url, token=None, payload=None, method=None, accept=None, raw=False, extra=None):
         parts = urllib.parse.urlsplit(url)
         query = dict(urllib.parse.parse_qsl(parts.query))
         calls.append((method or ("POST" if payload else "GET"), parts.netloc, parts.path, query))
