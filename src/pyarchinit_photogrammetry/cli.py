@@ -3028,6 +3028,9 @@ def gnss_crs(project: Path,
     typer.echo(f"{ch.label}: {old} -> {result['crs']}")
     if result["updated"]:
         typer.echo("the georeference was fitted again in the new system")
+    if result.get("transform_rms") is not None:
+        typer.echo("the georeference was converted by a similarity fitted on the extent of the chunk "
+                   f"({result['transform_rms'] * 1000:.1f} mm off)")
     converted = [f"{kind} {n}" for kind, n in result["converted"].items() if n]
     if converted:
         typer.echo(f"converted: {', '.join(converted)}")
@@ -3038,6 +3041,10 @@ def gnss_crs(project: Path,
     if result["heights_unchanged"]:
         typer.echo("warning: the old system has no heights of its own: the heights of the markers, spot heights and "
                    "measuring points pass into the new one as they are, right only if they were above the sea level")
+    if result.get("heights_from_ellipsoid"):
+        typer.echo("the heights of the chunk were above the ellipsoid (GNSS positions of the photos): spot heights, "
+                   "measuring points and drawn units went onto the geoid with the model; the heights of the markers "
+                   "passed as they are")
 
 
 @gnss_app.command("positions")

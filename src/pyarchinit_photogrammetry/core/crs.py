@@ -18,9 +18,11 @@ def to_pyproj(crs: str):
     return CRS.from_user_input(crs)
 
 
+@functools.lru_cache(maxsize=256)
 def horizontal(crs: str | None) -> str | None:
     """``crs`` without heights of its own: the horizontal part of a compound system (its EPSG code, else its WKT) -
-    through which heights pass as they are - and any other system (or a local frame) as it is."""
+    through which heights pass as they are - and any other system (or a local frame) as it is. Kept: reading a compound
+    system takes a millisecond, and the drawings of a chunk ask it for every geometry."""
     if is_local(crs):
         return crs
     system = to_pyproj(crs)

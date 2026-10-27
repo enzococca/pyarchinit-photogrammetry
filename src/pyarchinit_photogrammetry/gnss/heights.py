@@ -349,9 +349,10 @@ def check(chunk) -> list[str]:
 
 # --- the coordinate system of a survey -------------------------------------------------------------------------------
 
-# Italy, coarsely (longitude, latitude; a few kilometres out to sea): the mainland with its islands near the coast, Elba
-# and the Tuscan islands, Ponza and Ventotene, Capri and Ischia, the Tremiti; Sicily with the Aeolian islands, the Egadi
-# and Ustica; Sardinia; Pantelleria; the Pelagie. Corsica, Malta, Nice, Ticino, Istria are out.
+# Italy, coarsely (longitude, latitude; a few kilometres out to sea, less in the strait of Messina, which the mainland
+# and Sicily share along its middle): the mainland with its islands near the coast, Elba and the Tuscan islands, Ponza
+# and Ventotene, Capri and Ischia, the Tremiti; Sicily with the Aeolian islands, the Egadi and Ustica; Sardinia;
+# Pantelleria; the Pelagie. Corsica, Malta, Nice, Ticino, Istria are out.
 ITALY = (
     ((7.53, 43.78), (7.67, 44.18), (6.95, 44.32), (6.85, 44.53), (7.05, 44.7), (6.62, 45.1), (7.13, 45.25),
      (6.8, 45.65), (6.8, 45.83), (7.05, 45.93), (7.66, 45.98), (7.87, 45.92), (8.1, 46.25), (8.44, 46.46),
@@ -360,13 +361,22 @@ ITALY = (
      (12.7, 46.65), (13.72, 46.52), (13.38, 46.32), (13.55, 46.05), (13.65, 45.9), (13.92, 45.68), (13.77, 45.58),
      (13.4, 45.66), (13.1, 45.6), (12.45, 45.3), (12.6, 44.95), (12.4, 44.4), (12.75, 44.0), (13.75, 43.55),
      (14.4, 42.4), (15.05, 42.05), (15.6, 42.2), (16.3, 41.9), (17.0, 41.15), (18.05, 40.65), (18.6, 40.15),
-     (18.4, 39.72), (17.9, 40.05), (17.1, 40.45), (16.55, 40.0), (17.25, 39.0), (16.6, 38.6), (16.1, 37.85),
-     (15.59, 37.95), (15.595, 38.17), (15.645, 38.27), (15.7, 38.4), (15.85, 38.7), (16.0, 39.4), (15.65, 40.0),
-     (14.8, 40.55), (14.15, 40.48), (13.8, 40.65), (13.45, 40.72), (12.8, 40.85), (12.55, 41.4), (12.2, 41.7),
-     (11.7, 42.05), (11.15, 42.2), (10.25, 42.15), (9.98, 42.55), (9.95, 42.95), (9.76, 42.98), (9.76, 43.12),
-     (9.85, 43.48), (10.2, 43.7), (9.8, 44.05), (9.0, 44.35), (8.4, 44.2), (8.0, 43.82)),
-    ((15.63, 38.27), (15.35, 38.9), (14.3, 38.85), (13.05, 38.8), (12.35, 38.15), (11.95, 38.0), (12.3, 37.6),
-     (13.05, 37.4), (14.2, 36.95), (15.05, 36.55), (15.4, 37.0), (15.3, 37.8), (15.575, 37.95), (15.58, 38.17)),
+     (18.4, 39.72), (17.9, 40.05), (17.1, 40.45),
+     # the gulf of Taranto, Cirò and Punta Alice, Capo Colonna and Capo Rizzuto, Punta Stilo, Capo Spartivento
+     (16.75, 40.12), (16.68, 39.95), (16.58, 39.8), (16.7, 39.68), (16.97, 39.55), (17.2, 39.42), (17.2, 39.25),
+     (17.27, 39.02), (17.14, 38.85), (16.64, 38.44), (16.52, 38.31), (16.3, 38.2), (16.19, 38.03), (16.08, 37.89),
+     (15.78, 37.88), (15.66, 37.92),
+     # the strait of Messina, along its middle
+     (15.59, 37.95), (15.605, 38.17), (15.625, 38.22), (15.665, 38.258), (15.72, 38.3),
+     # Capo Vaticano, the Tyrrhenian coast of Calabria, the gulf of Policastro, the Cilento
+     (15.7, 38.4), (15.78, 38.62), (15.85, 38.72), (15.98, 39.36), (15.88, 39.52), (15.79, 39.63), (15.76, 39.7),
+     (15.73, 39.85), (15.66, 39.98), (15.37, 39.955), (15.24, 39.99), (15.12, 40.11), (15.0, 40.15), (14.86, 40.24),
+     (14.93, 40.35), (14.8, 40.55), (14.15, 40.48), (13.8, 40.65), (13.45, 40.72), (12.8, 40.85), (12.55, 41.4),
+     (12.2, 41.7), (11.7, 42.05), (11.15, 42.2), (10.25, 42.15), (9.98, 42.55), (9.95, 42.95), (9.76, 42.98),
+     (9.76, 43.12), (9.85, 43.48), (10.2, 43.7), (9.8, 44.05), (9.0, 44.35), (8.4, 44.2), (8.0, 43.82)),
+    ((15.665, 38.275), (15.35, 38.9), (14.3, 38.85), (13.05, 38.8), (12.35, 38.15), (11.95, 38.0), (12.3, 37.6),
+     (13.05, 37.4), (14.2, 36.95), (14.45, 36.74), (14.85, 36.66), (15.05, 36.55), (15.4, 37.0), (15.3, 37.8),
+     (15.575, 37.95), (15.585, 38.17), (15.61, 38.22), (15.655, 38.255)),
     ((8.1, 41.15), (9.2, 41.32), (9.55, 41.3), (9.85, 40.95), (9.9, 40.4), (9.75, 39.9), (9.7, 39.1), (9.05, 39.0),
      (8.55, 38.8), (8.25, 38.9), (8.15, 39.2), (8.3, 39.6), (8.3, 40.1), (8.05, 40.6)),
     ((11.88, 36.7), (12.1, 36.7), (12.1, 36.88), (11.88, 36.88)),
@@ -482,6 +492,10 @@ def _survey_system(crs: str) -> None:
 
 # what was drawn on the products of a chunk, in the coordinates of its system
 
+SIMILARITY_RMS = 0.005  # metres: how far the similarity that converts a georeference may miss (set_survey_crs)
+MIN_EXTENT = 1.0  # metres: the least side of the box that similarity is fitted on
+
+
 def _finite(value) -> bool:
     try:
         return math.isfinite(float(value))
@@ -502,23 +516,31 @@ def _plan(xy, old: str, new: str, chunk) -> np.ndarray:
                                     legacy=frames.Legacy(DRAWN, chunk))[:, :2]
 
 
-def _wkt(text: str, old: str, new: str, chunk) -> str:
-    """A geometry (WKT) with its plan from ``old`` to ``new``."""
+def _wkt(text: str, old: str, new: str, chunk, heights_from: str | None = None) -> str:
+    """A geometry (WKT) from ``old`` to ``new``: its plan, and the heights of a geometry that has them (``Z``) as those
+    of the spot heights (:func:`_move_rows`)."""
     import shapely
 
-    return shapely.transform(shapely.from_wkt(text), lambda xy: _plan(xy, old, new, chunk)).wkt
+    from . import frames
+
+    shape = shapely.from_wkt(text)
+    if shape.has_z:
+        return shapely.transform(shape, lambda xyz: crs_mod.transform_points(
+            xyz, heights_from or old, new, legacy=frames.Legacy(DRAWN, chunk)), include_z=True).wkt
+    return shapely.transform(shape, lambda xy: _plan(xy, old, new, chunk)).wkt
 
 
-def _move_rows(rows: list[dict], height: str, old: str, new: str, chunk) -> None:
+def _move_rows(rows: list[dict], height: str, old: str, new: str, chunk, heights_from: str | None = None) -> None:
     """Records with ``x``, ``y`` and the height ``height`` from ``old`` to ``new``, in place: the plan, and the height
     by the rule of every conversion (:func:`..core.crs.transform_points`: through a system without heights of its own
-    as it is); a record without a height its plan only."""
+    as it is) from ``heights_from`` (:func:`_heights_from`: the system the heights of the chunk are in, ``old`` when
+    not given); a record without a height its plan only."""
     from . import frames
 
     tall = [r for r in rows if _finite(r.get(height))]
     if tall:
-        xyz = crs_mod.transform_points([[float(r["x"]), float(r["y"]), float(r[height])] for r in tall], old, new,
-                                       legacy=frames.Legacy(DRAWN, chunk))
+        xyz = crs_mod.transform_points([[float(r["x"]), float(r["y"]), float(r[height])] for r in tall],
+                                       heights_from or old, new, legacy=frames.Legacy(DRAWN, chunk))
         for r, (x, y, z) in zip(tall, xyz.tolist()):
             r["x"], r["y"], r[height] = x, y, z
     flat = [r for r in rows if not _finite(r.get(height))]
@@ -562,8 +584,9 @@ def _project_sections(chunk, old: str) -> tuple[list | None, str]:
     return sections, ("kept" if others else "convert")
 
 
-def _counts(chunk, georeferenced: bool, refit: bool, sections: list | None, fate: str) -> dict:
-    """How many of each kind of :data:`CONVERTED` :func:`set_survey_crs` converts."""
+def _counts(chunk, georeferenced: bool, moves: bool, sections: list | None, fate: str) -> dict:
+    """How many of each kind of :data:`CONVERTED` :func:`set_survey_crs` converts (``moves``: the georeference is
+    fitted again or converted, and the region goes with it)."""
     meta, counts = chunk.meta, dict.fromkeys(CONVERTED, 0)
     if not georeferenced:
         return counts
@@ -576,7 +599,7 @@ def _counts(chunk, georeferenced: bool, refit: bool, sections: list | None, fate
     counts["sections"] = len(sections) if fate == "convert" and sections else 0
     counts["patches"] = len((meta.get("orthomosaic") or {}).get("patches") or [])
     counts["texture_patches"] = sum(1 for p in (meta.get("texture") or {}).get("patches") or [] if p.get("polygon"))
-    counts["region"] = int(refit and bool(meta.get("region")))
+    counts["region"] = int(moves and bool(meta.get("region")))
     counts["colour_chart"] = int(bool((meta.get("colour_chart") or {}).get("bounds")))
     return counts
 
@@ -617,24 +640,25 @@ def _kept(chunk, georeferenced: bool, sections: list | None, fate: str) -> list[
     return kept
 
 
-def _drawn(chunk, old: str, new: str, sections: list | None) -> tuple[dict, list | None]:
+def _drawn(chunk, old: str, new: str, sections: list | None,
+           heights_from: str | None = None) -> tuple[dict, list | None]:
     """What was drawn on the products of ``chunk``, converted from ``old`` to ``new`` aside (nothing of the chunk
-    changes; a conversion that cannot be made raises here): the new values of the keys of ``chunk.meta`` and the new
-    sections of the project (None to leave them)."""
+    changes; a conversion that cannot be made raises here), its heights from ``heights_from`` (:func:`_heights_from`):
+    the new values of the keys of ``chunk.meta`` and the new sections of the project (None to leave them)."""
     import copy
 
     meta, values = chunk.meta, {}
     if meta.get("drawings"):
         drawings = copy.deepcopy(meta["drawings"])
         for unit in _units(drawings):
-            unit["wkt"] = _wkt(unit["wkt"], old, new, chunk)
-        _move_rows(_rows(drawings, "quote"), "quota_q", old, new, chunk)
-        _move_rows(_rows(drawings, "points"), "z", old, new, chunk)
+            unit["wkt"] = _wkt(unit["wkt"], old, new, chunk, heights_from)
+        _move_rows(_rows(drawings, "quote"), "quota_q", old, new, chunk, heights_from)
+        _move_rows(_rows(drawings, "points"), "z", old, new, chunk, heights_from)
         values["drawings"] = drawings
     ortho = _ortho_name(chunk)
     if (meta.get("stones") or {}).get(ortho):
         stones = copy.deepcopy(meta["stones"])
-        stones[ortho] = [_wkt(w, old, new, chunk) for w in stones[ortho]]
+        stones[ortho] = [_wkt(w, old, new, chunk, heights_from) for w in stones[ortho]]
         values["stones"] = stones
     for key, lists in (("orthomosaic", ("patches", "applied_patches")), ("texture", ("patches",))):
         if any((meta.get(key) or {}).get(name) for name in lists):
@@ -703,23 +727,166 @@ def _pinned_references(chunk, old: str) -> None:
             cam.meta["reference_crs"] = old
 
 
-def survey_crs_changes(chunk, crs: str) -> dict:
-    """What :func:`set_survey_crs` would do to ``chunk`` with ``crs``, nothing changed: ``{"crs", "refit": whether the
-    georeference would be fitted again, "convert": {kind: how many} of :data:`CONVERTED`, "rebuild", "kept",
-    "heights_unchanged"}`` as :func:`set_survey_crs` describes them - for a window to show before applying. A
-    ``ValueError`` for a system that is not one of a survey."""
+def _placing_cameras(chunk) -> list:
+    """The aligned photos whose positions, switched on, :func:`..markers.gcp.update_transform` fits the georeference of
+    ``chunk`` on when it has fewer than three control markers."""
+    return [cam for cam in chunk.aligned_cameras if cam.reference.enabled and cam.reference.location]
+
+
+def _georeference_source(chunk) -> str | None:
+    """What :func:`..markers.gcp.update_transform` would fit the georeference of ``chunk`` on, counted as it counts:
+    ``"markers"`` (three control markers or more, placed in its internal frame or seen in two of its aligned photos),
+    ``"cameras"`` (with fewer, the positions of its aligned photos that are switched on), or None - nothing: the
+    chunk cannot be fitted again in another system (a scan, a model or a cloud imported, a satellite chunk, a chunk
+    whose references are gone)."""
+    from ..markers import gcp
+
+    aligned = {cam.key for cam in chunk.aligned_cameras}
+    control = [m for m in chunk.markers if not m.checkpoint and m.reference.enabled and m.reference.location
+               and (m.position is not None
+                    or sum(1 for key, p in m.projections.items() if p.measured and key in aligned) >= 2)]
+    if len(control) >= 3:
+        return "markers"
+    cams = _placing_cameras(chunk)
+    if cams and gcp.control_scalebars(chunk) and not gcp.cameras_span_their_accuracy(chunk):
+        cams = []  # an object, a trench: the bars scale it in local coordinates
+    return "cameras" if cams and len(control) + len(cams) >= 3 else None
+
+
+def _heights_from(chunk, old: str, new: str) -> str:
+    """The system the heights of what was drawn on ``chunk`` go from into ``new``: ``old`` - but when ``old`` has no
+    heights of its own, ``new`` has, and the chunk is placed by the positions of its photos
+    (:func:`_georeference_source`) whose heights are all above the ellipsoid (GNSS: an MRK, a PPK;
+    ``meta["gnss"]["height"]``), the heights of the chunk are above the ellipsoid - the georeference fitted again on
+    those positions takes them onto the heights of ``new`` -, and so are those drawn on it: ``old`` with heights above
+    the ellipsoid."""
+    if height_kind(old) != NONE or height_kind(new) == NONE or _georeference_source(chunk) != "cameras":
+        return old
+    if not all((cam.meta.get("gnss") or {}).get("height") == ELLIPSOIDAL for cam in _placing_cameras(chunk)):
+        return old
+    try:
+        tall = crs_mod.to_pyproj(old).to_3d().to_wkt()
+    except Exception:  # noqa: BLE001 - a system PROJ cannot give heights above the ellipsoid: by the rule
+        return old
+    return tall if height_kind(tall) == ELLIPSOIDAL else old
+
+
+def _file_box(path: Path) -> tuple[np.ndarray, np.ndarray] | None:
+    """The box of the points of a cloud or of the vertices of a model (internal coordinates; only the coordinates are
+    read from a binary PLY), None when the file cannot be read."""
+    from ..core.pointcloud import PointCloud
+
+    try:
+        columns = [PointCloud.read_column(path, axis) for axis in "xyz"] if path.suffix.lower() == ".ply" else []
+        if columns and all(c is not None for c in columns):
+            xyz = np.column_stack(columns)
+        else:
+            xyz = PointCloud.load(path).xyz
+    except Exception:  # noqa: BLE001 - a file that cannot be read marks no extent
+        return None
+    xyz = np.asarray(xyz, float).reshape(-1, 3)
+    xyz = xyz[np.isfinite(xyz).all(axis=1)]
+    return (xyz.min(axis=0), xyz.max(axis=0)) if len(xyz) else None
+
+
+def _internal_box(chunk) -> tuple[np.ndarray, np.ndarray] | None:
+    """The box (internal coordinates) of what lives in the internal frame of ``chunk`` - its model, its dense cloud
+    and its tie points, its aligned cameras, its placed markers -; None when nothing does."""
+    boxes = []
+    for name in ("model", "point_cloud", "tie_points"):
+        path = chunk.product_path(name)
+        if path is not None and path.exists():
+            box = _file_box(path)
+            if box is not None:
+                boxes.append(box)
+    placed = ([cam.center for cam in chunk.aligned_cameras]
+              + [m.position for m in chunk.markers if m.position is not None])
+    if placed:
+        xyz = np.asarray(placed, float).reshape(-1, 3)
+        boxes.append((xyz.min(axis=0), xyz.max(axis=0)))
+    if not boxes:
+        return None
+    return np.min([lo for lo, _hi in boxes], axis=0), np.max([hi for _lo, hi in boxes], axis=0)
+
+
+_GRID = np.array([[i, j, k] for i in (-0.5, 0.0, 0.5) for j in (-0.5, 0.0, 0.5) for k in (-0.5, 0.0, 0.5)])
+
+
+def _extent_points(chunk) -> np.ndarray | None:
+    """Points spread over the extent of ``chunk`` in the coordinates of its system: a grid of 3 x 3 x 3 over its region,
+    else over the box of what lives in its internal frame, taken through its georeference (sides of at least
+    :data:`MIN_EXTENT`); None when nothing lives there."""
+    from ..engine.region import get_region
+
+    region = get_region(chunk)
+    if region is not None:
+        return region.center + (_GRID * np.maximum(region.size, MIN_EXTENT)) @ region.rotation.T
+    box = _internal_box(chunk)
+    if box is None:
+        return None
+    lo, hi = box
+    least = MIN_EXTENT / max(float(chunk.scale), 1e-12)  # in the units of the internal frame
+    return chunk.to_world((lo + hi) / 2 + _GRID * np.maximum(hi - lo, least))
+
+
+def _similarity(chunk, old: str, heights_from: str, new: str) -> tuple[np.ndarray, float] | None:
+    """The georeference of ``chunk`` from ``old`` into ``new`` when nothing fits it again there: a similarity (with
+    scale) fitted from points spread over the extent of the chunk (:func:`_extent_points`, its heights in
+    ``heights_from``) to their conversion, and how far it misses them (RMS, metres); None when nothing lives in the
+    internal frame of the chunk (its georeference places nothing). A ``ValueError`` when it misses by more than
+    :data:`SIMILARITY_RMS` - a site too large for one similarity between the two systems -, and the refusal of a
+    conversion that cannot be made."""
+    from ..core import geometry
+    from . import frames
+
+    points = _extent_points(chunk)
+    if points is None:
+        return None
+    moved = crs_mod.transform_points(points, heights_from, new, legacy=frames.Legacy(DRAWN, chunk))
+    fit = geometry.umeyama(points, moved, with_scale=True)
+    rms = float(np.sqrt(np.mean(np.sum((geometry.apply(fit, points) - moved) ** 2, axis=1))))
+    if not math.isfinite(rms) or rms > SIMILARITY_RMS:
+        span = float(np.linalg.norm(np.ptp(points, axis=0)))
+        raise ValueError(f"{_label(new)} cannot take the chunk: no one similarity converts its georeference from "
+                         f"{_label(old)} (what lives in its internal frame - the model, the clouds - and its region): "
+                         f"over the {span:.0f} m across the chunk it misses by {rms * 1000:.1f} mm, more than "
+                         f"{SIMILARITY_RMS * 1000:.0f} mm; nothing was changed")
+    return fit, rms
+
+
+def _change(chunk, crs: str) -> dict:
+    """What :func:`set_survey_crs` would do to ``chunk`` with ``crs`` (:func:`survey_crs_changes`), with what it needs
+    to do it: ``"_similarity"`` (the matrix that converts the georeference, or None) and ``"_heights_from"``
+    (:func:`_heights_from`). Nothing of the chunk changes; the refusals are raised here."""
     _survey_system(crs)
     old = chunk.crs
     if crs == old:
         return {"crs": crs, "refit": False, "convert": dict.fromkeys(CONVERTED, 0), "rebuild": [], "kept": [],
-                "heights_unchanged": False}
+                "heights_unchanged": False, "heights_from_ellipsoid": False, "transform_rms": None,
+                "_similarity": None, "_heights_from": old}
     georeferenced = not crs_mod.is_local(old)
-    refit = georeferenced and bool(chunk.aligned_cameras)
+    refit = georeferenced and _georeference_source(chunk) is not None
+    heights_from = _heights_from(chunk, old, crs) if georeferenced else old
+    similarity = _similarity(chunk, old, heights_from, crs) if georeferenced and not refit else None
     sections, fate = _project_sections(chunk, old)
-    return {"crs": crs, "refit": refit, "convert": _counts(chunk, georeferenced, refit, sections, fate),
+    tall = heights_from != old
+    return {"crs": crs, "refit": refit,
+            "convert": _counts(chunk, georeferenced, refit or similarity is not None, sections, fate),
             "rebuild": [name for name in IN_THE_SYSTEM if chunk.products.get(name)],
             "kept": _kept(chunk, georeferenced, sections, fate),
-            "heights_unchanged": georeferenced and height_kind(old) == NONE and height_kind(crs) != NONE}
+            "heights_unchanged": georeferenced and not tall and height_kind(old) == NONE and height_kind(crs) != NONE,
+            "heights_from_ellipsoid": tall, "transform_rms": None if similarity is None else similarity[1],
+            "_similarity": None if similarity is None else similarity[0], "_heights_from": heights_from}
+
+
+def survey_crs_changes(chunk, crs: str) -> dict:
+    """What :func:`set_survey_crs` would do to ``chunk`` with ``crs``, nothing changed: ``{"crs", "refit": whether the
+    georeference would be fitted again, "convert": {kind: how many} of :data:`CONVERTED`, "rebuild", "kept",
+    "heights_unchanged", "heights_from_ellipsoid", "transform_rms"}`` as :func:`set_survey_crs` describes them - for a
+    window to show before applying. A ``ValueError`` for a system that is not one of a survey, and for what
+    :func:`set_survey_crs` refuses before changing anything (the georeference of a site too large for one similarity,
+    a conversion that cannot be made)."""
+    return {key: value for key, value in _change(chunk, crs).items() if not key.startswith("_")}
 
 
 def set_survey_crs(chunk, crs: str) -> dict:
@@ -728,42 +895,59 @@ def set_survey_crs(chunk, crs: str) -> dict:
     no local frame):
 
     * the references of its markers - measured coordinates - are converted into it (as points that carry no frame and
-      epoch), the positions of the photos are read from their own system as always, and an aligned chunk has its
-      georeference fitted again on them (:func:`..markers.gcp.update_transform`, the precision of the old fit dropped);
+      epoch), the positions of the photos are read from their own system as always;
+    * its georeference follows: fitted again on its references (:func:`..markers.gcp.update_transform`, the precision
+      of the old fit dropped) when they can fit it - three control markers, or the positions of its aligned photos -,
+      else converted (a scan, a model or a cloud imported, a satellite chunk, a chunk whose references are gone): a
+      similarity fitted from points spread over its extent - its region, else what lives in its internal frame, taken
+      through the georeference - to their conversion, composed with it, which takes the model, the clouds and the tie
+      points along (``transform_rms``: how far it misses those points, refused, nothing changed, beyond
+      :data:`SIMILARITY_RMS`: a site too large for one similarity between the two systems); a chunk with nothing in
+      its internal frame keeps its georeference, which places nothing;
     * what was drawn on its products (:data:`CONVERTED`) is converted too: the units, the spot heights and the measuring
       points (``chunk.meta["drawings"]``), the stones of the orthomosaic, the sections of the project
       (``sezioni/sezioni.json`` beside its file, when no other chunk of the project is still in the old system), the
       patches of the orthomosaic and of the texture, the box of the colour chart - their plan by the conversion of the
-      two systems, the heights by the rule of every conversion (:func:`..core.crs.transform_points`); the region of the
-      reconstruction follows the chunk (from its old georeference to the new one), so that it encloses the same part of
-      the reconstruction. A window that holds the drawings stores them into the chunk first and reads them again after.
+      two systems, the heights (of the units that have them too) by the rule of every conversion
+      (:func:`..core.crs.transform_points`); the region of the reconstruction follows the georeference, so that it
+      encloses the same part of the reconstruction. A window that holds the drawings stores them into the chunk first
+      and reads them again after.
 
-    The heights of the markers, spot heights and measuring points of a system without heights of its own (2D) pass
-    into the new one as they are (``heights_unchanged``): right only if they were heights above the sea level, as the
-    new system's are with EGM2008, not heights above the ellipsoid. From a local frame the chunk only takes the system:
-    its markers and what was drawn stay where they are (``kept``, ``"drawn"``); fit its georeference after.
+    The heights of what was drawn are those of the chunk: in a system without heights of its own (2D) the heights of a
+    chunk placed by the GNSS positions of its photos, all above the ellipsoid (an MRK, a PPK), are above the ellipsoid
+    (``heights_from_ellipsoid``), and go onto the heights of the new system with the georeference fitted again on those
+    positions - with the grid of the geoid, refused without it (:class:`GridMissing`); those of a chunk placed by
+    markers, or by heights above the sea level of its photos (the EXIF), pass as they are (``heights_unchanged``):
+    right only if they were heights above the sea level, as the new system's are with EGM2008. The heights of the
+    markers, typed, pass from a 2D system as they are. From a local frame the chunk only takes the system: its markers
+    and what was drawn stay where they are (``kept``, ``"drawn"``); fit its georeference after.
 
-    Returns ``{"crs", "updated": whether the georeference was fitted again, "rebuild": the products built in the
-    coordinates of the old system (DEM, orthomosaic, precision, coverage) - to build again -, "kept": what stays in the
-    old system and cannot be converted, ``[{"what", "names"}]`` - inactive versions of the DEM and the orthomosaic,
-    elevations (frames, and the stones drawn on them), multispectral, thermal and satellite rasters, the rasters of the
-    relief and of the raster calculator, the proxies of the units, the drawings (SVG, DXF) of the sections, or the
-    sections themselves -, "converted": {kind: how many}, "heights_unchanged", "report": the report of the fit or
-    None}``; the clouds, the model and the tie points are in the internal frame of the chunk, which the georeference
-    places. :func:`survey_crs_changes` tells all of it before. A ``ValueError``, and the chunk, its drawings and the
-    file of the sections as they were, for a system that is not one of a survey, when the references or the drawings
-    cannot go into it (heights above the geoid without the grid: :class:`GridMissing`) and when nothing fits the
-    georeference again (no control markers, no positions of the photos)."""
+    Returns ``{"crs", "updated": whether the georeference was fitted again, "transform_rms": how far the similarity
+    that converted it misses (metres) or None, "rebuild": the products built in the coordinates of the old system (DEM,
+    orthomosaic, precision, coverage) - to build again -, "kept": what stays in the old system and cannot be converted,
+    ``[{"what", "names"}]`` - inactive versions of the DEM and the orthomosaic, elevations (frames, and the stones drawn
+    on them), multispectral, thermal and satellite rasters, the rasters of the relief and of the raster calculator, the
+    proxies of the units, the drawings (SVG, DXF) of the sections, or the sections themselves -, "converted": {kind:
+    how many}, "heights_unchanged", "heights_from_ellipsoid", "report": the report of the fit or None}``; the clouds,
+    the model and the tie points are in the internal frame of the chunk, which the georeference places.
+    :func:`survey_crs_changes` tells all of it before. A ``ValueError``, and the chunk, its drawings and the file of the
+    sections as they were, for a system that is not one of a survey, when the references, the georeference or the
+    drawings cannot go into it (heights above the geoid without the grid: :class:`GridMissing`; a site too large for
+    one similarity)."""
     from ..markers import gcp
 
-    changes = survey_crs_changes(chunk, crs)
+    plan = _change(chunk, crs)
+    changes = {key: value for key, value in plan.items() if not key.startswith("_")}
     if crs == chunk.crs:
-        return {"crs": crs, "updated": False, "rebuild": [], "kept": [], "converted": changes["convert"],
-                "heights_unchanged": False, "report": None}
+        return {"crs": crs, "updated": False, "transform_rms": None, "rebuild": [], "kept": [],
+                "converted": changes["convert"], "heights_unchanged": False, "heights_from_ellipsoid": False,
+                "report": None}
     old = chunk.crs
     georeferenced, refit = not crs_mod.is_local(old), changes["refit"]
+    heights_from, similarity, rms = plan["_heights_from"], plan["_similarity"], changes["transform_rms"]
     sections, fate = _project_sections(chunk, old)
-    values, moved = _drawn(chunk, old, crs, sections if fate == "convert" else None) if georeferenced else ({}, None)
+    values, moved = (_drawn(chunk, old, crs, sections if fate == "convert" else None, heights_from)
+                     if georeferenced else ({}, None))
     before = (chunk.crs, chunk.transform.copy(),
               [(m, m.reference, None if m.position is None else m.position.copy()) for m in chunk.markers],
               [cam for cam in chunk.cameras if "reference_crs" not in cam.meta],
@@ -776,10 +960,17 @@ def set_survey_crs(chunk, crs: str) -> dict:
         if refit:
             report = gcp.update_transform(chunk)
             if report["method"] is None or not ("markers" in report["method"] or "cameras" in report["method"]):
-                raise ValueError(f"nothing fits the georeference of the chunk again in {crs}: no control markers and "
-                                 "no positions of the photos, the system was not changed")
-            if chunk.meta.get("region"):
-                values["region"] = _region_follows(chunk.meta["region"], before[1], chunk.transform)
+                # nothing fitted it after all (control markers the alignment did not place, in a line): its old
+                # georeference converted instead
+                chunk.crs, chunk.transform, report = crs, before[1].copy(), None
+                for m, _reference, position in before[2]:
+                    m.position = position
+                found = _similarity(chunk, old, heights_from, crs)
+                similarity, rms = (None, None) if found is None else found
+        if similarity is not None:
+            chunk.transform = similarity @ before[1]
+        if (report is not None or similarity is not None) and chunk.meta.get("region"):
+            values["region"] = _region_follows(chunk.meta["region"], before[1], chunk.transform)
         chunk.meta.update(values)
         if moved is not None:
             _write_sections(_sections_file(chunk), moved)
@@ -797,5 +988,7 @@ def set_survey_crs(chunk, crs: str) -> dict:
         raise
     if report is not None:
         chunk.forget_precision()
-    return {"crs": crs, "updated": report is not None, "rebuild": changes["rebuild"], "kept": changes["kept"],
-            "converted": changes["convert"], "heights_unchanged": changes["heights_unchanged"], "report": report}
+    return {"crs": crs, "updated": report is not None, "transform_rms": rms, "rebuild": changes["rebuild"],
+            "kept": changes["kept"], "converted": changes["convert"],
+            "heights_unchanged": changes["heights_unchanged"],
+            "heights_from_ellipsoid": changes["heights_from_ellipsoid"], "report": report}

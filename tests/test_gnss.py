@@ -1191,6 +1191,23 @@ def test_gnss_survey_crs_from_the_pane(gnss_window, monkeypatch, tmp_path):
     assert chunk.crs == "EPSG:32632+3855"
 
 
+def test_survey_crs_changes_say_the_converted_georeference_and_the_heights():
+    """What the window shows before it changes the system of a chunk says when the georeference is converted (a chunk
+    without photos to fit it again: by how much the similarity misses) and when the heights of what was drawn go onto
+    the geoid with the chunk (placed by GNSS positions of its photos), the markers' as they are."""
+    pytest.importorskip("PySide6")
+    from pyarchinit_photogrammetry.gui.survey_crs_dialog import changes_text
+
+    base = {"crs": "EPSG:32632", "refit": False, "convert": {"units": 2}, "rebuild": [], "kept": [],
+            "heights_unchanged": False, "heights_from_ellipsoid": False, "transform_rms": 0.0018}
+    text = changes_text("EPSG:32633", base)
+    assert "similitudine" in text and "(scarto 1,8 mm)" in text and "ellissoide" not in text
+    text = changes_text("EPSG:32633", {**base, "crs": "EPSG:32633+3855", "refit": True, "transform_rms": None,
+                                       "heights_from_ellipsoid": True})
+    assert "similitudine" not in text and "calcolata di nuovo" in text
+    assert "sull'ellissoide" in text and "le quote dei marker passano come sono" in text
+
+
 def test_a_missing_geoid_grid_is_offered_and_the_step_tried_again(gnss_window, monkeypatch):
     """A step in the background that needs the grid of the geoid and does not have it (heights.GridMissing, also as the
     cause of another error): the window says so in its own words, offers the download (and its size) and runs the step

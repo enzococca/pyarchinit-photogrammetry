@@ -782,7 +782,8 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     generic, reference = _preselection(pair_selection, generic, reference)
     try:  # the matching needs no system: what the alignment would refuse is only said here
         gcp.preflight(chunk)
-    except ValueError as exc:  # the references of the photos may still be switched off before the alignment
+    except Exception as exc:  # noqa: BLE001 - whatever it is (no grid, a system PROJ does not know): the references
+        # of the photos may still be switched off before the alignment, which says it again
         log.warning("the alignment will not place the chunk by the positions of the photos while they are switched on: "
                     "%s", exc)
     work = _sfm_dir(chunk)

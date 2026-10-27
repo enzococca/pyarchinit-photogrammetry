@@ -163,6 +163,17 @@ def test_relative_geometry_needs_no_geoid(tmp_path):
             out["match"] = str(exc)
         sfm._sfm_dir = sfm_dir
         out["match_warnings"] = [w for w in warnings if "us_nga_egm08_25" in w]
+        odd = chunk("EPSG:32633")  # positions in a system PROJ does not know: the matching says so, and goes on
+        for cam in odd.cameras:
+            cam.meta["reference_crs"] = "EPSG:999999"
+        warnings.clear()
+        sfm._sfm_dir = past_the_check
+        try:
+            odd.match_photos()
+        except RuntimeError as exc:
+            out["odd"] = str(exc)
+        sfm._sfm_dir = sfm_dir
+        out["odd_warnings"] = len(warnings)
         out["align"] = refused(lambda: ch.align_cameras(use_gps=False))
         out["align_gps"] = refused(lambda: ch.align_cameras())
         out["started"] = "sfm" in ch.meta  # nothing was started
@@ -181,6 +192,7 @@ def test_relative_geometry_needs_no_geoid(tmp_path):
     assert plain == geoid and plain["aerial"] is True and plain["mapper"] == "global" and plain["span"] is True
     assert plain["pairs"] > 0
     assert out.get("match") == "past the check"  # warned, not refused
+    assert out.get("odd") == "past the check" and out["odd_warnings"] == 1
     assert len(out["match_warnings"]) == 1
     _says_how_to_get_egm2008(out["match_warnings"][0])
     assert out["started"] is False
@@ -389,7 +401,19 @@ def test_survey_crs(tmp_path):
                   "ajaccio": (8.7369, 41.9192), "tunis": (10.1815, 36.8065), "ljubljana": (14.5058, 46.0569),
                   "klagenfurt": (14.3053, 46.6247), "zagreb": (15.9819, 45.815), "valletta": (14.5146, 35.8989),
                   "sarajevo": (18.4131, 43.8563)}
-        out = {}
+        # Italian coasts: Cilento, the gulf of Policastro, Calabria on both seas, the strait, south-east Sicily
+        coast = {"velia": (15.154, 40.16), "palinuro": (15.284, 40.036), "agropoli": (14.993, 40.35),
+                 "castellabate": (14.948, 40.285), "acciaroli": (15.031, 40.176), "punta licosa": (14.906, 40.251),
+                 "marina di camerota": (15.374, 40.003), "policastro": (15.52, 40.075), "scario": (15.49, 40.054),
+                 "diamante": (15.817, 39.678), "belvedere marittimo": (15.862, 39.627), "cirella": (15.805, 39.7),
+                 "kaulon": (16.565, 38.451), "riace marina": (16.534, 38.406), "caulonia marina": (16.47, 38.345),
+                 "punta stilo": (16.58, 38.453), "capo rizzuto": (17.093, 38.896), "ciro marina": (17.128, 39.367),
+                 "punta alice": (17.155, 39.398), "cariati": (16.955, 39.495), "roseto capo spulico": (16.618, 39.981),
+                 "melito di porto salvo": (15.783, 37.918), "lago di faro": (15.637, 38.266),
+                 "capo peloro": (15.652, 38.268), "villa san giovanni": (15.637, 38.22), "messina": (15.554, 38.193),
+                 "punta secca": (14.493, 36.787), "marina di ragusa": (14.551, 36.783)}
+        out = {"coast": {name: [heights.in_italy(lon, lat), heights.survey_crs(lon, lat, "ETRF2000")]
+                         for name, (lon, lat) in coast.items()}}
         for name, (lon, lat) in places.items():
             for frame in ("WGS84", "ETRF2000"):
                 out[f"{name} {frame}"] = heights.survey_crs(lon, lat, frame)
@@ -416,6 +440,8 @@ def test_survey_crs(tmp_path):
     assert out["rome plain"] == "EPSG:7792"
     assert out["rome itrf2020"] == "EPSG:32633+3855"  # ITRF2020 is WGS 84 for the program
     assert "NAD83" in out["refused"] and "latitude" in out["off"]
+    for place, (italy, system) in out["coast"].items():  # all in zone 33: RDN2008 / UTM 33N
+        assert italy and system == "EPSG:7792+3855", place
 
 
 def test_check_warns_for_ellipsoidal_heights_in_a_2d_crs(tmp_path):
@@ -514,8 +540,8 @@ def test_set_survey_crs(tmp_path):
     fitted again on the positions converted into it (a photo given in the system of the chunk, as the old projects
     have them, keeps that system), the markers' coordinates are converted, the precision of the old fit is dropped and
     the products built in the old system are named to be built again; a system with EGM2008 heights without the grid
-    is refused and nothing changes, as when nothing can fit the georeference again; a chunk not aligned only takes the
-    system."""
+    is refused and nothing changes; the same chunk with no reference left has its georeference converted (a similarity,
+    within a millimetre of the conversion); a chunk in a local frame only takes the system."""
     out = _run(tmp_path, '''
         import copy
         import pyarchinit_photogrammetry as ppg
@@ -543,11 +569,11 @@ def test_set_survey_crs(tmp_path):
             ch.cameras.append(cam)
         marker = ch.add_marker("P1")
         marker.reference = Reference(location=list(utm[0] + [1.0, 2.0, -3.0]), accuracy=[0.01] * 3, enabled=True)
-        bare = copy.deepcopy(ch)  # the same chunk without a reference: nothing places it again
+        out = {"fitted": ch.update_transform()["method"]}
+        bare = copy.deepcopy(ch)  # the same chunk, placed, without a reference left: nothing fits it again
         for cam in bare.cameras:
             cam.reference = Reference()
         bare.markers = []
-        out = {"fitted": ch.update_transform()["method"]}
         ch.products.update({"dem": "dem.tif", "orthomosaic": "orthomosaic.tif", "point_cloud": "point_cloud.ply",
                             "tie_points": "tie_points.ply", "dem_precision": "dem_precision.tif"})
         ch.meta["precision"] = {"median_m": 0.01}
@@ -569,10 +595,18 @@ def test_set_survey_crs(tmp_path):
         out["not_projected"] = [refused(lambda: heights.set_survey_crs(ch, system))
                                 for system in ("EPSG:4978", "EPSG:3855", "EPSG:4326+3855")]
         out["still"] = state(ch) == before
-        before = state(bare)
-        out["nothing_fits"] = refused(lambda: heights.set_survey_crs(bare, "EPSG:32632"))
-        out["bare_unchanged"] = state(bare) == before
-        loose = ppg.Document().add_chunk()  # not aligned: it only takes the system
+        where = np.array([bare.to_world(c.center) for c in bare.cameras])
+        preview = heights.survey_crs_changes(bare, "EPSG:32632")
+        result = heights.set_survey_crs(bare, "EPSG:32632")
+        out["bare"] = {"preview": [preview["refit"], preview["transform_rms"]],
+                       "result": [result["updated"], result["transform_rms"], bare.crs],
+                       "cameras": float(np.abs(np.array([bare.to_world(c.center) for c in bare.cameras])
+                                               - crs.transform_points(where, "EPSG:32633", "EPSG:32632")).max())}
+        crs.horizontal("EPSG:32633+3855")  # kept: asked for every geometry drawn
+        hits = crs.horizontal.cache_info().hits
+        out["horizontal_kept"] = crs.horizontal("EPSG:32633+3855") == "EPSG:32633" and (
+            crs.horizontal.cache_info().hits == hits + 1)
+        loose = ppg.Document().add_chunk()  # in a local frame: it only takes the system
         result = heights.set_survey_crs(loose, "EPSG:7792+3855")
         out["loose"] = {k: result[k] for k in ("crs", "updated", "rebuild")}
         print(json.dumps(out))
@@ -588,7 +622,10 @@ def test_set_survey_crs(tmp_path):
     assert "geographic" in out["geographic"]
     geocentric, vertical, geographic = out["not_projected"]  # only a projected plan: EPSG:4978 was taken
     assert "geocentric" in geocentric and "vertical" in vertical and "geographic" in geographic and out["still"]
-    assert "nothing fits" in out["nothing_fits"] and out["bare_unchanged"]
+    bare = out["bare"]  # its georeference converted: the cameras where the conversion takes them, within a millimetre
+    assert bare["preview"][0] is False and bare["preview"][1] < 0.001
+    assert bare["result"] == [False, bare["preview"][1], "EPSG:32632"] and bare["cameras"] < 0.001
+    assert out["horizontal_kept"]
     assert out["loose"] == {"crs": "EPSG:7792+3855", "updated": False, "rebuild": []}
 
 
@@ -607,13 +644,13 @@ places = [[12.4964 + dx, 41.9028 + dy, 100.0 + dz] for dx, dy, dz in
 utm = crs.transform_points(places, "EPSG:4979", "EPSG:32633")
 
 
-def surveyed(doc=None):
+def surveyed(doc=None, system="EPSG:4979", height="ellipsoidal"):
     ch = (doc or ppg.Document()).add_chunk()
     ch.crs = "EPSG:32633"
     for key, (place, at) in enumerate(zip(places, utm)):
         cam = Camera(key=key, label=f"c{key}", path=f"c{key}.jpg", sensor_key=0)
-        gnss_apply.set_camera_position(cam, place, "EPSG:4979", [0.02, 0.02, 0.04], "mrk", status="fix",
-                                       height="ellipsoidal")
+        gnss_apply.set_camera_position(cam, place, system, [0.02, 0.02, 0.04],
+                                       "mrk" if height == "ellipsoidal" else "exif", status="fix", height=height)
         cam.transform = np.eye(4)
         cam.transform[:3, 3] = at - utm.mean(axis=0)
         ch.cameras.append(cam)
@@ -747,25 +784,166 @@ def test_set_survey_crs_converts_what_was_drawn_on_the_chunk(tmp_path):
 
 
 def test_set_survey_crs_says_when_heights_pass_as_they_are(tmp_path):
-    """From a system without heights of its own into one with EGM2008 heights the georeference takes the heights of
-    the photos above the geoid (40 m lower with a geoid of 40 m), while the heights of the markers and of what was
-    drawn pass as they are - right only if they were heights above the sea level: the result says so."""
+    """From a system without heights of its own into one with EGM2008 heights, a chunk placed by the heights above the
+    sea level of its photos (the EXIF) keeps them: the georeference, the markers and what was drawn - spot heights,
+    measuring points, units with heights - pass as they are, right only if they were heights above the sea level, and
+    the result says so."""
     out = _run(tmp_path, _SURVEYED + textwrap.dedent('''
         write_grid(value=40.0)
+        ch = surveyed(system="EPSG:4326", height="exif")
+        marker = ch.add_marker("P1")
+        marker.reference = Reference(location=list(utm[0] + [1.0, 2.0, -2.0]), accuracy=[0.01] * 3)
+        x0, y0, _ = utm.mean(axis=0)
+        unit = shapely.Polygon([(x0, y0, 99.0), (x0 + 2, y0, 99.2), (x0 + 2, y0 + 2, 99.4)]).wkt
+        ch.meta["drawings"] = {"units": [{"wkt": unit}], "quote": [{"x": x0, "y": y0, "quota_q": 99.5}],
+                               "points": [{"x": x0 + 1, "y": y0, "z": 98.25}]}
+        preview = heights.survey_crs_changes(ch, "EPSG:32633+3855")
+        result = heights.set_survey_crs(ch, "EPSG:32633+3855")
+        drawn = shapely.from_wkt(ch.meta["drawings"]["units"][0]["wkt"])
+        print(json.dumps({"preview": [preview["heights_unchanged"], preview["heights_from_ellipsoid"]],
+                          "result": [result["heights_unchanged"], result["heights_from_ellipsoid"], result["updated"]],
+                          "cameras": [float(ch.to_world(c.center)[2]) for c in ch.cameras],
+                          "marker": marker.reference.location[2], "quote": ch.meta["drawings"]["quote"][0]["quota_q"],
+                          "point": ch.meta["drawings"]["points"][0]["z"],
+                          "unit": [drawn.has_z, [c[2] for c in drawn.exterior.coords[:3]]],
+                          "converted": result["converted"]}))
+    '''))
+    assert out["preview"] == [True, False] and out["result"] == [True, False, True]
+    assert out["cameras"] == pytest.approx([100.0, 101.0, 102.0, 100.5], abs=0.01)  # as they were
+    assert out["marker"] == pytest.approx(98.0) and out["quote"] == 99.5 and out["point"] == 98.25
+    assert out["unit"][0] is True and out["unit"][1] == pytest.approx([99.0, 99.2, 99.4], abs=1e-9)
+    assert out["converted"] == {"markers": 1, "units": 1, "quote": 1, "points": 1, "stones": 0, "sections": 0,
+                                "patches": 0, "texture_patches": 0, "region": 0, "colour_chart": 0}
+
+
+def test_set_survey_crs_takes_the_heights_of_a_chunk_placed_by_gnss(tmp_path):
+    """A chunk in a system without heights of its own placed by GNSS positions of its photos (an MRK: heights above the
+    ellipsoid) has heights above the ellipsoid: into a system with EGM2008 heights its georeference is fitted again
+    40 m lower (a geoid of 40 m) and what was drawn on it goes with it - spot heights, measuring points, units with
+    heights, 40 m lower, still on the model -, while the heights of the markers, typed, pass as they are. Without the
+    grid of the geoid it is refused and nothing changes."""
+    out = _run(tmp_path, _SURVEYED + textwrap.dedent('''
         ch = surveyed()
         marker = ch.add_marker("P1")
         marker.reference = Reference(location=list(utm[0] + [1.0, 2.0, -2.0]), accuracy=[0.01] * 3)
         x0, y0, _ = utm.mean(axis=0)
-        ch.meta["drawings"] = {"units": [], "quote": [{"x": x0, "y": y0, "quota_q": 99.5}]}
+        unit = shapely.Polygon([(x0, y0, 99.0), (x0 + 2, y0, 99.2), (x0 + 2, y0 + 2, 99.4)]).wkt
+        ch.meta["drawings"] = {"units": [{"wkt": unit}], "quote": [{"x": x0 + 1, "y": y0 + 1, "quota_q": 99.5}],
+                               "points": [{"x": x0 + 2, "y": y0 + 2, "z": 98.25}]}
+        before = json.dumps([ch.crs, ch.transform.tolist(), ch.meta], sort_keys=True)
+        out = {"refused": refused(lambda: heights.set_survey_crs(ch, "EPSG:32633+3855"))}
+        out["unchanged"] = json.dumps([ch.crs, ch.transform.tolist(), ch.meta], sort_keys=True) == before
+        write_grid(value=40.0)
+        inside = ch.to_internal(np.array([[x0 + 1, y0 + 1, 99.5]]))[0]  # the point of the model under the spot height
         preview = heights.survey_crs_changes(ch, "EPSG:32633+3855")
         result = heights.set_survey_crs(ch, "EPSG:32633+3855")
-        heights_now = [float(ch.to_world(c.center)[2]) for c in ch.cameras]
-        print(json.dumps({"preview": preview["heights_unchanged"], "result": result["heights_unchanged"],
-                          "cameras": heights_now, "marker": marker.reference.location[2],
-                          "quote": ch.meta["drawings"]["quote"][0]["quota_q"], "converted": result["converted"]}))
+        d = ch.meta["drawings"]
+        q, drawn = d["quote"][0], shapely.from_wkt(d["units"][0]["wkt"])
+        out.update({"preview": [preview["heights_unchanged"], preview["heights_from_ellipsoid"]],
+                    "result": [result["heights_unchanged"], result["heights_from_ellipsoid"], result["updated"]],
+                    "cameras": [float(ch.to_world(c.center)[2]) for c in ch.cameras],
+                    "quote": [q["x"] - (x0 + 1), q["y"] - (y0 + 1), q["quota_q"]], "point": d["points"][0]["z"],
+                    "unit": [drawn.has_z, [c[2] for c in drawn.exterior.coords[:3]]],
+                    "marker": marker.reference.location[2],
+                    "on_the_model": float(np.abs(ch.to_world(inside) - [q["x"], q["y"], q["quota_q"]]).max())})
+        print(json.dumps(out))
     '''))
-    assert out["preview"] is True and out["result"] is True
+    _says_how_to_get_egm2008(out["refused"])
+    assert out["unchanged"]
+    assert out["preview"] == [False, True] and out["result"] == [False, True, True]
     assert out["cameras"] == pytest.approx([60.0, 61.0, 62.0, 60.5], abs=0.01)  # above the geoid
-    assert out["marker"] == pytest.approx(98.0) and out["quote"] == 99.5  # as they were
-    assert out["converted"] == {"markers": 1, "units": 0, "quote": 1, "points": 0, "stones": 0, "sections": 0,
-                                "patches": 0, "texture_patches": 0, "region": 0, "colour_chart": 0}
+    assert out["quote"] == pytest.approx([0.0, 0.0, 59.5], abs=1e-6) and out["point"] == pytest.approx(58.25, abs=1e-6)
+    assert out["unit"][0] is True and out["unit"][1] == pytest.approx([59.0, 59.2, 59.4], abs=1e-6)
+    assert out["marker"] == pytest.approx(98.0)  # typed: as it was
+    assert out["on_the_model"] < 0.001
+
+
+def test_set_survey_crs_converts_the_georeference_of_a_chunk_without_photos(tmp_path):
+    """A chunk georeferenced without photos to fit it again - a scan, a model or a cloud imported, a satellite chunk -
+    has its georeference converted: a similarity fitted on its extent (its region, else what lives in its internal
+    frame) from the old system to the new one, so that the model stays with what was drawn on it and the region with
+    both, within millimetres; how far the similarity misses is said before and after. Into another zone and into
+    RDN2008; a site too large for one similarity is refused and nothing changes."""
+    out = _run(tmp_path, textwrap.dedent('''
+        import shapely
+        import pyarchinit_photogrammetry as ppg
+        from pyarchinit_photogrammetry.core import geometry
+        from pyarchinit_photogrammetry.engine.region import Region
+        from pyarchinit_photogrammetry.io.mesh_ply import write_mesh_ply
+
+        folder = Path(sys.argv[1])
+        gx, gy = np.meshgrid(np.linspace(0.0, 40.0, 21), np.linspace(0.0, 30.0, 16))
+        vertices = np.column_stack([gx.ravel(), gy.ravel(), (3.0 * np.sin(gx / 7.0) + 0.1 * gy).ravel()])
+        grid = np.arange(len(vertices)).reshape(gx.shape)
+        a, b, c, d = (grid[:-1, :-1].ravel(), grid[:-1, 1:].ravel(), grid[1:, :-1].ravel(), grid[1:, 1:].ravel())
+        faces = np.vstack([np.column_stack([a, b, d]), np.column_stack([a, d, c])])
+        turn = np.radians(20.0)
+        rot = np.array([[np.cos(turn), -np.sin(turn), 0.0], [np.sin(turn), np.cos(turn), 0.0], [0.0, 0.0, 1.0]])
+
+        def scanned(name, region=None):
+            """A chunk as a scan or an imported model leaves it: a model in its internal frame, a georeference of its
+            own (a round origin, turned), no photos; a unit, a unit with heights, a spot height and a measuring point
+            drawn on the model."""
+            doc = ppg.Document()
+            ch = doc.add_chunk(name)
+            doc.save(folder / f"{name}.ppg")
+            ch.crs = "EPSG:32633"
+            ch.transform = geometry.compose_similarity(1.0, rot, np.array([292000.0, 4642000.0, 40.0]))
+            ch._set_product("model", write_mesh_ply(ch.data_dir / "model.ply", vertices, faces))
+            world = ch.to_world(vertices)
+            ch.meta["drawings"] = {
+                "units": [{"wkt": shapely.Polygon(world[[20, 40, 60, 80], :2]).wkt},
+                          {"wkt": shapely.Polygon(world[[100, 120, 150]]).wkt}],
+                "quote": [{"x": world[200, 0], "y": world[200, 1], "quota_q": world[200, 2]}],
+                "points": [{"x": world[250, 0], "y": world[250, 1], "z": world[250, 2]}]}
+            if region is not None:
+                ch.meta["region"] = Region(world.mean(axis=0), region, rot).to_dict()
+            doc.save()
+            return ch
+
+        def state(ch):
+            return json.dumps([ch.crs, ch.transform.tolist(), ch.meta, ch.products], sort_keys=True, default=str)
+
+        def apart(ch):
+            """How far what was drawn is from the model it was drawn on, now (metres)."""
+            world = ch.to_world(vertices)
+            d = ch.meta["drawings"]
+            flat = np.asarray(shapely.from_wkt(d["units"][0]["wkt"]).exterior.coords)[:4]
+            tall = np.asarray(shapely.from_wkt(d["units"][1]["wkt"]).exterior.coords)[:3]
+            q, p = d["quote"][0], d["points"][0]
+            return max(float(np.abs(flat - world[[20, 40, 60, 80], :2]).max()),
+                       float(np.abs(tall - world[[100, 120, 150]]).max()),
+                       float(np.abs(np.array([q["x"], q["y"], q["quota_q"]]) - world[200]).max()),
+                       float(np.abs(np.array([p["x"], p["y"], p["z"]]) - world[250]).max()))
+
+        out = {}
+        for name, system, region in (("zone", "EPSG:32632", None), ("rdn2008", "EPSG:7792", [50.0, 40.0, 12.0])):
+            ch = scanned(name, region)
+            corners = None if region is None else Region.from_dict(ch.meta["region"]).corners()
+            before = state(ch)
+            preview = heights.survey_crs_changes(ch, system)
+            unchanged = state(ch) == before
+            result = heights.set_survey_crs(ch, system)
+            out[name] = {"preview": [preview["refit"], preview["transform_rms"], preview["convert"]["region"]],
+                         "unchanged": unchanged,
+                         "result": [result["updated"], result["transform_rms"], result["kept"], ch.crs],
+                         "apart": apart(ch)}
+            if corners is not None:  # the region where the conversion takes its corners
+                now = Region.from_dict(ch.meta["region"]).corners()
+                out[name]["region"] = float(np.abs(now - crs.transform_points(corners, "EPSG:32633", system)).max())
+        huge = scanned("huge", [60000.0, 60000.0, 50.0])  # a region of 60 km: no one similarity into another zone
+        before = state(huge)
+        out["huge"] = [refused(lambda: heights.survey_crs_changes(huge, "EPSG:32632")),
+                       refused(lambda: heights.set_survey_crs(huge, "EPSG:32632")), state(huge) == before]
+        print(json.dumps(out))
+    '''), str(tmp_path))
+    for name in ("zone", "rdn2008"):
+        got = out[name]
+        refit, rms, region = got["preview"]
+        assert refit is False and rms < 0.003 and got["unchanged"], name
+        assert got["result"] == [False, rms, [], "EPSG:32632" if name == "zone" else "EPSG:7792"], name
+        assert got["apart"] < 0.003, name  # the model and what was drawn on it: together
+        assert region == (name == "rdn2008")
+    assert out["rdn2008"]["region"] < 0.003
+    preview, applied, unchanged = out["huge"]
+    assert "similarity" in preview and "mm" in preview and preview == applied and unchanged

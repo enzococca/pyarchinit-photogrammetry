@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QDialogButtonBo
 
 from ..core import crs as crs_mod
 from ..gnss import heights
-from .i18n import tr
+from .i18n import number, tr
 
 EGM2008 = "3855"  # the EPSG code of the heights above EGM2008 ("EGM2008 height")
 
@@ -51,12 +51,17 @@ def product_names() -> dict[str, str]:
 
 def changes_text(old: str, changes: dict) -> str:
     """What putting a chunk from ``old`` into the system of ``changes`` (:func:`..gnss.heights.survey_crs_changes`)
-    does: the system, the georeference fitted again, what is converted, the products to build again, what stays in the
-    old system, and the heights that pass as they are."""
+    does: the system, the georeference fitted again or converted (by how much the similarity misses), what is
+    converted, the products to build again, what stays in the old system, the heights that pass as they are and those
+    that go onto the geoid with the chunk."""
     lines = [tr("Sistema: {0} → {1}.", old, changes["crs"])]
     if changes.get("refit"):
         lines.append(tr("La georeferenziazione viene calcolata di nuovo nel nuovo sistema, sui marker e sulle "
                         "posizioni delle foto."))
+    elif changes.get("transform_rms") is not None:
+        lines.append(tr("La georeferenziazione viene convertita nel nuovo sistema con una similitudine adattata "
+                        "all'estensione del chunk (scarto {0} mm): modello e nuvole restano con i disegni.",
+                        number(changes["transform_rms"] * 1000, 1)))
     names = _converted_names()
     converted = [f"{names.get(kind, kind)} {n}" for kind, n in (changes.get("convert") or {}).items() if n]
     if converted:
@@ -72,6 +77,9 @@ def changes_text(old: str, changes: dict) -> str:
     if changes.get("heights_unchanged"):
         lines.append(tr("Il sistema di prima non ha quote proprie: le quote di marker, quote e punti di misura passano "
                         "come sono nel nuovo, giuste solo se erano sul livello del mare."))
+    if changes.get("heights_from_ellipsoid"):
+        lines.append(tr("Le quote del chunk sono sull'ellissoide (posizioni GNSS delle foto): quote, punti di misura e "
+                        "unità disegnate vanno sul geoide con il modello; le quote dei marker passano come sono."))
     return "\n".join(lines)
 
 
