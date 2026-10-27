@@ -4,6 +4,7 @@ both imported by path. Nothing here goes on the network: every source answers wi
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import types
 import urllib.error
@@ -94,6 +95,8 @@ def fake_web(calls: list):
                         {"path": "/enzococca/pyarchinit-photogrammetry/releases", "title": "y", "count": 20, "uniques": 6},
                         {"path": "/enzococca/pyarchinit-photogrammetry/actions", "title": "z", "count": 29, "uniques": 1}]
         if parts.netloc == "pyarchinit-photogrammetry.goatcounter.com":
+            if path == "/api/v0/me":
+                return {"user": {"id": 1}}
             assert query["start"] == "2026-10-01T00:00:00Z" and query["end"] == "2026-10-27T05:00:00Z"
             if events:
                 assert query["include_paths"] == ",".join(stats.EVENTS) and query["path_by_name"] == "true"
@@ -408,6 +411,37 @@ def test_a_failing_source_keeps_its_numbers(tmp_path, web, monkeypatch):
     data = _update(tmp_path, ALL, FakeBigQuery(3.0, ROWS), now=datetime(2026, 11, 3, 5, 30, tzinfo=timezone.utc))
     assert data["sources"]["goatcounter"] == {"status": "error", "checked": "2026-11-03"}
     assert data["page"]["site"]["site"]["total"] == 1234
+
+
+def test_goatcounter_without_visits_yet(tmp_path, web, monkeypatch):
+    """GoatCounter's statistics answer 404 while the site has no visit in the span: once the token and the site
+    answer, that is no visit, not an error."""
+    real = stats.http
+
+    def empty(url, *args, **kwargs):
+        if "goatcounter.com/api/v0/stats/" in url:
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b'{"error":"not found"}'))
+        return real(url, *args, **kwargs)
+
+    monkeypatch.setattr(stats, "http", empty)
+    data = _update(tmp_path, ALL, FakeBigQuery(3.0, ROWS))
+    assert data["sources"]["goatcounter"]["status"] == "ok"
+    assert data["goatcounter"]["days"] == {} and data["goatcounter"]["clicks"] == {} and data["goatcounter"]["pages"] == []
+
+
+def test_goatcounter_unknown_token_says_why(tmp_path, web, monkeypatch, capsys):
+    """An unknown token stops the source at the first request, with GoatCounter's reason in the log."""
+    real = stats.http
+
+    def refused(url, *args, **kwargs):
+        if "goatcounter.com/api/v0/me" in url:
+            raise urllib.error.HTTPError(url, 401, "Unauthorized", {}, io.BytesIO(b'{"error":"unknown token"}'))
+        return real(url, *args, **kwargs)
+
+    monkeypatch.setattr(stats, "http", refused)
+    data = _update(tmp_path, ALL, FakeBigQuery(3.0, ROWS))
+    assert data["sources"]["goatcounter"]["status"] == "error"
+    assert "unknown token" in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------------- the branch "stats"

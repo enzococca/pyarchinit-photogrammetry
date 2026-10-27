@@ -333,16 +333,19 @@ def update_pypistats(data: dict) -> None:
 
 
 # ------------------------------------------------------------------------------------------ visits of the site
-def goatcounter(token: str, path: str, **params) -> dict:
+def goatcounter(token: str, path: str, empty_if_missing: bool = False, **params) -> dict:
     """One request to the API of GoatCounter with the API token ``token`` (spaces around it and a "Bearer " pasted
     with it are taken off). An answer that is an error raises a RuntimeError with the reason GoatCounter gives (an
-    unknown token, a permission the token lacks), which never holds the token."""
+    unknown token, a permission the token lacks), which never holds the token; with ``empty_if_missing`` a 404 is an
+    empty answer instead: GoatCounter's statistics answer 404 while the site has no visit in the span yet."""
     time.sleep(PAUSE)
     token = token.strip().removeprefix("Bearer ").strip()
     try:  # with the JSON content type GoatCounter answers its errors in JSON, not in an HTML page
         return http(f"{GOATCOUNTER}/{path}?{urllib.parse.urlencode(params)}", token, accept="application/json",
                     extra={"Content-Type": "application/json"})
     except urllib.error.HTTPError as error:
+        if empty_if_missing and error.code == 404:
+            return {}
         body = error.read(4000).decode(errors="replace")
         text = " ".join(re.sub(r"(?s)<style.*?</style>|<script.*?</script>|<[^>]+>", " ", body).split())
         raise RuntimeError(f"GoatCounter {path}: HTTP {error.code}: {text[-200:] or error.reason}") from None
@@ -351,8 +354,9 @@ def goatcounter(token: str, path: str, **params) -> dict:
 def update_goatcounter(data: dict, token: str, now: datetime) -> None:
     """Everything since START at every run: GoatCounter keeps it all. Visitors of the pages = all the visitors
     of a day less the download clicks (events) of that day. All or nothing: a failed request keeps the old numbers."""
+    goatcounter(token, "me")  # the token and the site first: then a 404 of the statistics is a site without visits
     store: dict = {}
-    span = {"start": f"{START}T00:00:00Z", "end": now.strftime("%Y-%m-%dT%H:00:00Z")}
+    span = {"start": f"{START}T00:00:00Z", "end": now.strftime("%Y-%m-%dT%H:00:00Z"), "empty_if_missing": True}
     events = {"include_paths": ",".join(EVENTS), "path_by_name": "true"}
 
     def per_day(answer):
