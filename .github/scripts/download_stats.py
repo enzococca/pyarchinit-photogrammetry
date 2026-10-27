@@ -333,8 +333,16 @@ def update_pypistats(data: dict) -> None:
 
 # ------------------------------------------------------------------------------------------ visits of the site
 def goatcounter(token: str, path: str, **params) -> dict:
+    """One request to the API of GoatCounter with the API token ``token`` (spaces around it and a "Bearer " pasted
+    with it are taken off). An answer that is an error raises a RuntimeError with the reason GoatCounter gives (an
+    unknown token, a permission the token lacks), which never holds the token."""
     time.sleep(PAUSE)
-    return http(f"{GOATCOUNTER}/{path}?{urllib.parse.urlencode(params)}", token, accept="application/json")
+    token = token.strip().removeprefix("Bearer ").strip()
+    try:
+        return http(f"{GOATCOUNTER}/{path}?{urllib.parse.urlencode(params)}", token, accept="application/json")
+    except urllib.error.HTTPError as error:
+        reason = error.read(300).decode(errors="replace").strip()
+        raise RuntimeError(f"GoatCounter {path}: HTTP {error.code}: {reason or error.reason}") from None
 
 
 def update_goatcounter(data: dict, token: str, now: datetime) -> None:
