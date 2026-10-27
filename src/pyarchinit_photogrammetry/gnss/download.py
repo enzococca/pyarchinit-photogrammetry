@@ -29,6 +29,10 @@ FIRST_WAIT = 2.0  # ... waiting 2 s after the first failure, 4 s after the secon
 BLOCK = 1 << 20
 LISTING_SECONDS = 600.0  # a listing is kept in memory for ten minutes
 LISTING_LIMIT = 64 << 20  # the largest page that is read as a listing
+# a listing is a small page: a site that has not answered in this many seconds (to connect, or between two pieces of
+# the page) is taken for one that does not answer - three attempts and their waits are half a minute, where a port
+# closed by a firewall (RING's 44324) held a run for three minutes at the 60 s of a download
+LISTING_TIMEOUT = 8.0
 
 
 def gnss_dir() -> Path:
@@ -142,13 +146,25 @@ def _opened(url: str, timeout: float):
         raise _Transient(f"{url}: could not connect ({exc})", url) from exc
 
 
+def site(url: str) -> str:
+    """The site an address is on, as a message names it: its host and port (``webring.gm.ingv.it:44324``), or its
+    scheme for an address without one (``file``)."""
+    parts = urllib.parse.urlsplit(url)
+    return parts.netloc or parts.scheme or url
+
+
 def _retrying(url: str, attempts: int, action, progress=None):
     """``action()``, again after a wait (2 s and then 4 s) while it fails with something that may pass; the last
-    failure is raised as a :class:`DownloadError` that names the address."""
+    failure is raised as a :class:`DownloadError` that names the address. With ``progress`` every attempt on the
+    network says which site it contacts, and a cancel stops before the next attempt."""
     attempts = max(1, int(attempts))
+    remote = urllib.parse.urlsplit(url).scheme.lower() in ("http", "https")
     for attempt in range(1, attempts + 1):
         if progress is not None:
             progress.check()
+            if remote:
+                again = f" (attempt {attempt} of {attempts})" if attempt > 1 else ""
+                progress.message(f"Contacting {site(url)}{again}")
         try:
             return action()
         except _Transient as exc:
@@ -275,7 +291,7 @@ def _children(page: str, hrefs: list[str]) -> list[str]:
     return names
 
 
-def _page(url: str, timeout: float = 60.0) -> tuple[str, bytes]:
+def _page(url: str, timeout: float = LISTING_TIMEOUT) -> tuple[str, bytes]:
     """One attempt: the page at ``url`` and the address that answered (after the redirections)."""
     response = _opened(url, timeout)
     try:
@@ -302,28 +318,30 @@ def _page(url: str, timeout: float = 60.0) -> tuple[str, bytes]:
 _LISTINGS: dict[str, tuple[float, list[str]]] = {}
 
 
-def listing(url: str) -> list[str]:
+def listing(url: str, progress=None) -> list[str]:
     """The names in the folder that the page at ``url`` lists, as its links give them (a folder keeps the slash its
     link has: ``C2400/``), kept in memory for ten minutes. ``url`` can also be a folder on the computer
-    (``file:///.../``), whose entries are listed, or a page there. Raises :class:`NotPublished` when there is no page
-    and :class:`DownloadError` when it cannot be read."""
+    (``file:///.../``), whose entries are listed, or a page there. A site is given :data:`LISTING_TIMEOUT` seconds to
+    answer, three times; ``progress`` (the usual callback) hears which site is contacted, and a cancel stops between
+    two attempts. Raises :class:`NotPublished` when there is no page and :class:`DownloadError` when it cannot be
+    read."""
     now = _clock()
     kept = _LISTINGS.get(url)
     if kept is not None and now - kept[0] < LISTING_SECONDS:
         return list(kept[1])
-    names = _read_listing(url)
+    names = _read_listing(url, None if progress is None else as_progress(progress))
     for stale in [key for key, (when, _names) in _LISTINGS.items() if now - when >= LISTING_SECONDS]:
         del _LISTINGS[stale]
     _LISTINGS[url] = (now, names)
     return list(names)
 
 
-def _read_listing(url: str) -> list[str]:
+def _read_listing(url: str, progress=None) -> list[str]:
     if urllib.parse.urlsplit(url).scheme.lower() == "file":
         path = _local_path(url)
         if path.is_dir():
             return sorted(entry.name + ("/" if entry.is_dir() else "") for entry in path.iterdir())
-    final, data = _retrying(url, ATTEMPTS, lambda: _page(url))
+    final, data = _retrying(url, ATTEMPTS, lambda: _page(url), progress)
     parser = _Links()
     parser.feed(data.decode("utf-8", errors="replace"))
     parser.close()

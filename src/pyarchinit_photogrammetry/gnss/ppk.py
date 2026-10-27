@@ -503,10 +503,13 @@ def work_folder(chunk) -> Path:
 
 def last_run(chunk) -> dict | None:
     """The last PPK run that gave photos of ``chunk`` their positions (recorded by :func:`.apply.apply_ppk`): ``{"mrk",
-    "photos", "rover", "base", "navs", "base_name", "position_source", "position", "replace_fix", "solution"}``, the
-    files as absolute paths (None for those a solution read from a file does not know; ``base`` a list of paths when
-    the base is in several files), ``position`` the typed one ``[lon, lat, h]`` (None for the one of the header); None
-    when there was none."""
+    "photos", "rover", "base", "navs", "base_name", "position_source", "position", "frame", "epoch", "station",
+    "replace_fix", "solution"}``, the files as absolute paths (None for those a solution read from a file does not
+    know; ``rover`` and ``base`` each a path, or a list of paths when it came in several files), ``position_source``
+    one of :data:`BASE_SOURCES`, ``position`` the typed one ``[lon, lat, h]`` (None for any other source), ``frame``
+    and ``epoch`` those of the position of the base, ``station`` the permanent station of a base that is a station or
+    was placed by a baseline from one (``{"id", "name", "networks", "lat", "lon", "h", "xyz"}``, None otherwise); a run
+    recorded before the frames lacks the last three. None when there was none."""
     record = (getattr(chunk, "meta", None) or {}).get(MEMORY) if chunk is not None else None
     last = record.get("last") if isinstance(record, dict) else None
     return dict(last) if isinstance(last, dict) else None
@@ -721,7 +724,8 @@ def antenna_warning(name: str, info: rinex.RinexInfo, calibration: dict | None =
     found from a base or a station too low, and the mark of the user's base too high.
 
     Without a file of antenna calibrations (None) the offset of the phase centre of the antenna from its reference
-    point is not applied, which every run says, naming the antenna of the header. With a file, that its antenna is
+    point is not applied, which every run says, naming the antenna of the header - for the base of a flight, with how
+    to have the calibrations of the IGS (igs20.atx, downloaded once). With a file, that its antenna is
     not in it, so RTKLIB applies nothing for it, or that the antenna of the header is not the entry RTKLIB uses - it
     took the type without the radome, or a name that holds the header's - naming the entry; nothing when the entry
     is the antenna of the header."""
@@ -733,12 +737,12 @@ def antenna_warning(name: str, info: rinex.RinexInfo, calibration: dict | None =
     which = (f"of the antenna {kind} of {who} is not applied" if kind else
              f"of the antenna of {who} is not applied (its RINEX header names no antenna type)")
     if calibration is None:
-        if role == "base":  # the words of the PPK of a flight (to be told again with its option to download igs20.atx)
-            return (f"the phase-centre offset {which}: no antenna calibration is given to RTKLIB yet, so the heights "
-                    "can be a few centimetres too low, more than 10 cm with some choke-ring antennas (calibrated "
-                    "antennas come in a later version)")
-        return (f"the phase-centre offset {which}: no antenna calibrations were given to RTKLIB, so {effect}, more "
+        text = (f"the phase-centre offset {which}: no antenna calibrations were given to RTKLIB, so {effect}, more "
                 "than 10 cm with some choke-ring antennas")
+        if role == "base":  # the base of the PPK of a flight: how to have them
+            text += (". The calibrations of the IGS (igs20.atx, 62 MB) are downloaded once by the PPK window, with its "
+                     "option for the antenna of the base, or by `ppg gnss atx --download`")
+        return text
     file, entry = calibration["file"], calibration["entry"]
     if entry is None:
         why = (f"the antenna is not in {file}, so RTKLIB has no calibration for it" if kind else

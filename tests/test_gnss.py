@@ -13,7 +13,7 @@ from pyproj import Transformer
 import pyarchinit_photogrammetry as ppg
 from pyarchinit_photogrammetry import _native
 from pyarchinit_photogrammetry.gnss import apply as gnss_apply
-from pyarchinit_photogrammetry.gnss import dji, positions, quality
+from pyarchinit_photogrammetry.gnss import dji, frames, heights, positions, quality, stations
 from gnss_helpers import jpeg as _jpeg  # a photo with its position and the time of its camera
 from gnss_helpers import snapshot as _snapshot  # the references of a chunk, to check that nothing changed
 
@@ -1079,6 +1079,364 @@ def test_gnss_mrk_copied_away_from_its_photos(gnss_window, monkeypatch, tmp_path
     gnss = next(a.menu() for a in menu.actions() if a.menu() is not None and a.text() == "GNSS")
     assert [a.text() for a in gnss.actions()] == ["File MRK di DJI...", "File di posizioni...", "Correzioni PPK...",
                                                  "Pannello GNSS"]
+
+
+ITALY = ((14.266, 41.134), (14.270, 41.136), (14.272, 41.131))  # longitude, latitude of three shots near Capua
+
+
+def _in_italy(chunk, crs: str = "EPSG:4979", **kwargs) -> None:
+    """The photos of ``chunk`` at ITALY, with GNSS heights above the ellipsoid."""
+    for cam, (lon, lat) in zip(chunk.cameras, ITALY):
+        gnss_apply.set_camera_position(cam, [lon, lat, 120.0], crs, [0.02, 0.02, 0.04], "dji_mrk", status="fix",
+                                       height="ellipsoidal", **kwargs)
+
+
+def test_gnss_pane_frames_and_heights_step(gnss_window):
+    """The step Sistema e quote of the GNSS pane: the frames of the positions of the photos and their epochs, the
+    coordinate system of the chunk and the kind of its heights, whether the grid of the geoid is there and what does
+    not fit (heights.check); its two buttons."""
+    w, chunk, folder, mw = gnss_window
+    pane = w.gnss_pane
+    gnss_apply.set_camera_position(chunk.cameras[2], [12.5, 41.9, 120.0], "EPSG:9989", [0.02, 0.02, 0.04], "ppk",
+                                   status="fix", height="ellipsoidal", frame="ITRF2020", epoch=2026.8213)
+    pane.set_state(chunk)
+    text = pane.states["heights"].text()
+    assert text.startswith("Posizioni delle foto: sistema sconosciuto (WGS 84) 2, ITRF2020 1 (epoca 2026,82).")
+    assert "Il chunk è in coordinate locali" in text and "Griglia del geoide EGM2008 non installata." in text
+    assert pane.b_survey_crs.isEnabled() and pane.b_geoid.isEnabled()
+    assert pane.b_geoid.text() == "Scarica il geoide EGM2008 (81 MB)..."
+    assert pane.b_survey_crs.text() == "Sistema del rilievo..."
+    # heights above EGM2008 without the grid: what heights.check says, naming the grid
+    chunk.crs = "EPSG:32633+3855"
+    pane.set_state(chunk)
+    text = pane.states["heights"].text()
+    assert "Sistema del chunk: EPSG:32633+3855 (WGS 84 / UTM zone 33N + EGM2008 height), quote sul geoide." in text
+    assert ("non diventano quote sul geoide del sistema del chunk senza la griglia del geoide EGM2008 "
+            "(us_nga_egm08_25.tif)") in text and "ppg gnss geoid --download" in text
+    # a system without heights of its own: the heights of the photos pass as they are, which heights.check says
+    chunk.crs = "EPSG:32633"
+    pane.set_state(chunk)
+    text = pane.states["heights"].text()
+    assert "senza quote proprie" in text and "il sistema del chunk, EPSG:32633, non ha quote proprie" in text
+    # positions of ITRF2020 at several epochs; no positions at all
+    gnss_apply.set_camera_position(chunk.cameras[1], [12.5, 41.9, 120.0], "EPSG:9989", [0.02, 0.02, 0.04], "ppk",
+                                   status="fix", height="ellipsoidal", frame="ITRF2020", epoch=2026.7)
+    pane.set_state(chunk)
+    assert "ITRF2020 2 (epoche dal 2026,70 al 2026,82)" in pane.states["heights"].text()
+    for cam in chunk.cameras:
+        cam.reference.location = None
+    pane.set_state(chunk)
+    assert pane.states["heights"].text().startswith("Nessuna posizione delle foto.")
+
+
+def test_gnss_survey_crs_from_the_pane(gnss_window, monkeypatch, tmp_path):
+    """Sistema del rilievo...: the systems heights.survey_crs proposes where the survey is; what changes, shown before
+    and confirmed; the drawings the window holds stored first and read again after, in the new system; the project
+    saved. With heights above EGM2008 and no grid, the grid is offered first."""
+    from PySide6.QtWidgets import QMessageBox
+
+    from pyarchinit_photogrammetry.gui import survey_crs_dialog
+
+    w, chunk, folder, mw = gnss_window
+    _in_italy(chunk)
+    chunk.crs = "EPSG:32633"
+    w.doc.save(tmp_path / "rilievo.ppg")
+    x, y = 522000.0, 4553000.0
+    w.quote.append({"x": x, "y": y, "quota_q": 120.5})  # drawn in the window, not yet in the chunk
+    asked, said = [], []
+
+    def ask(parent, current, choices, *args, **kwargs):
+        asked.append((current, choices))
+        return {"crs": "EPSG:32632"}
+
+    monkeypatch.setattr(survey_crs_dialog.SurveyCrsDialog, "ask", staticmethod(ask))
+    monkeypatch.setattr(mw, "message", lambda parent, kind, title, text, *a, **k: said.append((kind, text))
+                        or QMessageBox.StandardButton.Yes)
+    errors = []
+    monkeypatch.setattr(w, "_error", lambda summary, details="", logged=True: errors.append(summary))
+
+    w.gnss_pane.b_survey_crs.click()
+    w.runner.wait()
+
+    assert errors == []
+    ((current, choices),) = asked
+    assert current == "EPSG:32633" and [crs for crs, _label in choices] == ["EPSG:32633", "EPSG:7792"]
+    ((kind, text),) = said  # the changes, confirmed
+    assert kind == "question" and "EPSG:32633 → EPSG:32632" in text and "quote 1" in text
+    expected = Transformer.from_crs("EPSG:32633", "EPSG:32632", always_xy=True).transform(x, y)
+    assert chunk.crs == "EPSG:32632" and (w.quote[0]["x"], w.quote[0]["y"]) == pytest.approx(expected)
+    saved = ppg.Document.open(tmp_path / "rilievo.ppg").chunk
+    assert saved.crs == "EPSG:32632" and saved.meta["drawings"]["quote"][0]["x"] == pytest.approx(expected[0])
+    assert not w.isWindowModified()
+
+    # heights above EGM2008 without the grid: the grid offered first (its size), then the changes, then the system
+    downloads = []
+    monkeypatch.setattr(heights, "download_geoid", lambda progress=None: downloads.append(1)
+                        or heights.grid_folder() / heights.GEOID_GRID)
+    monkeypatch.setattr(survey_crs_dialog.SurveyCrsDialog, "ask",
+                        staticmethod(lambda *a, **k: {"crs": "EPSG:32632+3855"}))
+    said.clear()
+    w.gnss_survey_crs()
+    w.runner.wait()
+    w.runner.wait()
+    assert errors == [] and downloads == [1] and len(said) == 2
+    assert "81 MB" in said[0][1] and "EGM2008" in said[0][1]
+    assert "EPSG:32632 → EPSG:32632+3855" in said[1][1] and "come sono" in said[1][1]  # heights pass as they are
+    assert chunk.crs == "EPSG:32632+3855"
+    # refused: nothing changes
+    monkeypatch.setattr(mw, "message", lambda *a, **k: QMessageBox.StandardButton.No)
+    monkeypatch.setattr(survey_crs_dialog.SurveyCrsDialog, "ask", staticmethod(lambda *a, **k: {"crs": "EPSG:7792"}))
+    w.gnss_survey_crs()
+    w.runner.wait()
+    assert chunk.crs == "EPSG:32632+3855"
+
+
+def test_a_missing_geoid_grid_is_offered_and_the_step_tried_again(gnss_window, monkeypatch):
+    """A step in the background that needs the grid of the geoid and does not have it (heights.GridMissing, also as the
+    cause of another error): the window says so in its own words, offers the download (and its size) and runs the step
+    again after it; refused, nothing more. When no grid helps it says to choose another system; another grid is named,
+    with the folder to copy it into."""
+    w, chunk, folder, mw = gnss_window
+    errors, asked, said, downloads, results, runs = [], [], [], [], [], []
+    monkeypatch.setattr(w, "_error", lambda summary, details="", logged=True: errors.append(summary))
+    monkeypatch.setattr(mw, "choice", lambda parent, kind, title, text, options, *a, **k:
+                        asked.append((text, options)) or 0)
+    monkeypatch.setattr(mw, "message", lambda parent, kind, title, text, *a, **k: said.append(text))
+    monkeypatch.setattr(heights, "download_geoid", lambda progress=None: downloads.append(1)
+                        or heights.grid_folder() / heights.GEOID_GRID)
+
+    def job(progress):
+        runs.append(1)
+        if len(runs) == 1:
+            try:
+                raise heights.GridMissing("heights above the ellipsoid cannot become heights above the geoid",
+                                          [heights.GEOID_GRID])
+            except heights.GridMissing as exc:
+                raise ValueError("the georeference could not be fitted") from exc
+        return 7
+
+    w.run_task("Georeferenziazione", job, results.append, refresh=False, save=False)
+    w.runner.wait()
+    w.runner.wait()
+    assert errors == [] and runs == [1, 1] and downloads == [1] and results == [7]
+    ((text, options),) = asked
+    assert "Georeferenziazione" in text and "us_nga_egm08_25.tif" in text and "81 MB" in text
+    assert "ppg gnss geoid --download" in text and "GNSS > Sistema e quote > Scarica il geoide EGM2008" in text
+    assert options == ["Scarica e riprova"]
+    # refused: nothing downloaded, nothing run again
+    runs.clear()
+    downloads.clear()
+    monkeypatch.setattr(mw, "choice", lambda *a, **k: None)
+    w.run_task("Georeferenziazione", job, results.append, refresh=False, save=False)
+    w.runner.wait()
+    assert runs == [1] and downloads == [] and errors == []
+
+    def nowhere(progress):
+        raise heights.GridMissing("no transformation where the points are", [])
+
+    w.run_task("Allineamento", nowhere, refresh=False, save=False)
+    w.runner.wait()
+    assert "Allineamento" in said[-1] and "scegli un altro sistema di coordinate" in said[-1]
+
+    def italgeo(progress):
+        raise heights.GridMissing("PROJ needs the grid geo_igm_mar06.grd", ["geo_igm_mar06.grd"])
+
+    w.run_task("Allineamento", italgeo, refresh=False, save=False)
+    w.runner.wait()
+    assert "geo_igm_mar06.grd" in said[-1] and str(heights.grid_folder()) in said[-1]
+    assert errors == [] and downloads == []
+
+
+def test_the_alignment_refuses_before_the_matching(gnss_window, monkeypatch, tmp_path):
+    """Photo positions switched on with heights above the ellipsoid, a chunk with heights above EGM2008 and no grid:
+    Allinea foto, Elabora tutto, ppg align, ppg process and the batch refuse before the matching - which would take its
+    time for nothing - naming the grid."""
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry import batch
+    from pyarchinit_photogrammetry.cli import app
+    from pyarchinit_photogrammetry.core.chunk import Chunk
+
+    w, chunk, folder, mw = gnss_window
+    matched = []
+    monkeypatch.setattr(Chunk, "match_photos", lambda self, *a, **k: matched.append(1))
+    _in_italy(chunk)
+    chunk.crs = "EPSG:32633+3855"
+    project = w.doc.save(tmp_path / "rilievo.ppg") or tmp_path / "rilievo.ppg"
+    offers = []
+    monkeypatch.setattr(mw, "choice", lambda parent, kind, title, text, options, *a, **k: offers.append(text) or None)
+    w._align({"quality": "high", "keypoint_limit": 40000, "tiepoint_limit": 8000, "gps": True})
+    w.runner.wait()
+    assert matched == [] and len(offers) == 1 and "us_nga_egm08_25.tif" in offers[0]
+    monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(lambda cls, *a, **k: {
+        "markers": False, "target_type": "aruco_4x4_50", "align_quality": "high", "dense_quality": "medium",
+        "surface": "arbitrary", "texture": False, "dem": False, "ortho": False, "report": False}))
+    monkeypatch.setattr(w, "_photos_to_skip", lambda *a, **k: False)
+    w.process_all()
+    w.runner.wait()
+    assert matched == [] and len(offers) == 2
+    run = CliRunner().invoke
+    for command in (["align", str(project)], ["process", str(project), str(folder), "--targets", ""]):
+        result = run(app, command)
+        assert result.exit_code == 1 and "us_nga_egm08_25.tif" in result.output, result.output
+    with pytest.raises(heights.GridMissing):
+        batch.run_step(w.doc, chunk, "align_photos", {"quality": "high"})
+    assert matched == []
+
+
+def test_cli_gnss_stations_near(tmp_path, monkeypatch):
+    """ppg gnss stations: the permanent stations nearest to a point, or to the survey of a project, with their networks
+    and distance (the lists of M3G and of the IGS of tests/data/gnss)."""
+    from pyproj import Geod
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    data = Path(__file__).parent / "data" / "gnss"
+    monkeypatch.setenv("PPG_GNSS_DIR", str(tmp_path / "gnss"))
+    monkeypatch.setattr(stations, "M3G_GEOJSON", data.as_uri() + "/m3g_{network}.geojson")
+    monkeypatch.setattr(stations, "IGS_NETWORK", (data / "IGSNetwork.json").as_uri())
+    run = CliRunner().invoke
+    listed = stations.station_list()
+    geod = Geod(ellps="GRS80")
+
+    def nearest(lat, lon, n):
+        return sorted(listed, key=lambda s: geod.inv(lon, lat, s.lon, s.lat)[2])[:n]
+
+    result = run(app, ["gnss", "stations", "--near", "41.9028,12.4964", "--limit", "3"])
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert lines[0].split() == ["station", "km", "networks", "name"]
+    assert [line.split()[0] for line in lines[1:4]] == [s.id for s in nearest(41.9028, 12.4964, 3)]
+    first = lines[1].split()
+    assert first[:3] == ["M0SE00ITA", f"{geod.inv(12.4964, 41.9028, 12.493258, 41.893113)[2] / 1000:.1f}", "EPN,IGS"]
+    # near the survey of a project: the median of the positions of its photos
+    project, _folder = _project(tmp_path)
+    result = run(app, ["gnss", "stations", str(project), "--limit", "2", "--refresh"])
+    assert result.exit_code == 0, result.output
+    place = heights.survey_place(ppg.Document.open(project).chunk)
+    assert [line.split()[0] for line in result.output.splitlines()[1:3]] == [
+        s.id for s in nearest(place[1], place[0], 2)]
+    result = run(app, ["gnss", "stations"])
+    assert result.exit_code != 0 and "--near" in result.output
+
+
+def test_cli_geoid_without_grid_says_how(tmp_path, monkeypatch):
+    """ppg gnss geoid: whether the grid of EGM2008 is there, the folder where PROJ looks for the grids, and how to have
+    it; --download brings it (here replaced)."""
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    run = CliRunner().invoke
+    result = run(app, ["gnss", "geoid"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "EGM2008 geoid (us_nga_egm08_25.tif): not installed" in out
+    assert "ppg gnss geoid --download" in out and "81 MB" in out and str(heights.grid_folder()) in out
+    downloaded = []
+    monkeypatch.setattr(heights, "download_geoid", lambda progress=None: downloaded.append(1)
+                        or heights.grid_folder() / heights.GEOID_GRID)
+    result = run(app, ["gnss", "geoid", "--download"])
+    assert result.exit_code == 0 and downloaded == [1], result.output
+    assert f"EGM2008 geoid downloaded: {heights.grid_folder() / heights.GEOID_GRID}" in result.output
+
+
+def test_cli_crs_survey(tmp_path):
+    """ppg gnss crs: the system of the chunk, the kind of its heights, the frames of the positions and the systems of
+    a survey there; --survey puts the chunk into the one for the frame of its positions (heights above EGM2008 only
+    with the grid, else it says how to have it), --set into any projected system."""
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    project, folder = _project(tmp_path)
+    table = tmp_path / "positions.csv"
+    table.write_text("name,lon,lat,h\n" + "".join(f"{name},{lon},{lat},120\n" for name, (lon, lat) in
+                                                  zip(("a", "b", "c"), ITALY)))
+    run = CliRunner().invoke
+    assert run(app, ["gnss", "positions", str(project), str(table), "--crs", "EPSG:4979"]).exit_code == 0
+    result = run(app, ["gnss", "crs", str(project)])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "Flight: LOCAL (local coordinates)" in out
+    assert "positions of the photos: frame unknown: WGS 84 3" in out
+    assert "a survey here: EPSG:32633 (WGS 84 / UTM zone 33N) for positions in WGS 84 or ITRF2020" in out
+    assert "EPSG:7792 (RDN2008 / UTM zone 33N) for positions in ETRF2000 (RDN2008)" in out
+    assert "+3855" in out and "ppg gnss geoid --download" in out
+    result = run(app, ["gnss", "crs", str(project), "--survey", "--no-geoid"])
+    assert result.exit_code == 0, result.output
+    assert "Flight: LOCAL -> EPSG:32633" in result.output
+    assert ppg.Document.open(project).chunk.crs == "EPSG:32633"
+    result = run(app, ["gnss", "crs", str(project), "--survey"])  # heights above EGM2008: no grid
+    assert result.exit_code == 1 and "EPSG:32633+3855" in result.output and "ppg gnss geoid --download" in (
+        result.output)
+    assert ppg.Document.open(project).chunk.crs == "EPSG:32633"
+    result = run(app, ["gnss", "crs", str(project), "--survey", "--frame", "ETRF2000", "--no-geoid"])
+    assert result.exit_code == 0 and "EPSG:32633 -> EPSG:7792" in result.output, result.output
+    result = run(app, ["gnss", "crs", str(project), "--set", "EPSG:4326"])
+    assert result.exit_code == 1 and "geographic" in result.output
+    result = run(app, ["gnss", "crs", str(project), "--set", "EPSG:32633", "--survey"])
+    assert result.exit_code != 0 and "--set" in result.output
+    result = run(app, ["gnss", "crs", str(project), "--set", "EPSG:32633"])
+    assert result.exit_code == 0 and ppg.Document.open(project).chunk.crs == "EPSG:32633", result.output
+
+
+def test_positions_in_itrf2020_with_their_epoch(tmp_path, gnss_window, monkeypatch):
+    """A positions file in a system of ITRF2020 needs the epoch of its coordinates: given (a decimal year or a date), or
+    the date of each photo (its EXIF), and refused, naming the photo, when a photo has none; ppg gnss positions --epoch
+    and the field of the window give it."""
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    for text, year in (("2026.82", 2026.82), ("2026,82", 2026.82), ("2026-10-27", None), ("27/10/2026", None)):
+        value = frames.parse_epoch(text)
+        assert value == pytest.approx(year if year else frames.decimal_year(datetime(2026, 10, 27)))
+    for wrong in ("ieri", "1850", "2026-13-01", ""):
+        with pytest.raises(ValueError):
+            frames.parse_epoch(wrong)
+    rows = [{"label": name, "x": lon, "y": lat, "z": 120.0} for name, (lon, lat) in zip(("a", "b", "c"), ITALY)]
+    ch = _chunk_with(tmp_path, "a.jpg", "b.jpg", "c.jpg")
+    with pytest.raises(ValueError, match="a.jpg.*epoch"):
+        positions.apply_positions(ch, rows, "EPSG:9989")
+    positions.apply_positions(ch, rows, "EPSG:9989", epoch=2026.82)
+    assert {(c.meta["gnss"]["frame"], c.meta["gnss"]["epoch"]) for c in ch.cameras} == {("ITRF2020", 2026.82)}
+    for cam, day in zip(ch.cameras, (1, 2, 3)):
+        cam.meta["datetime"] = f"2026:10:{day:02d} 10:00:00"
+    positions.apply_positions(ch, rows, "EPSG:9989")
+    assert [c.meta["gnss"]["epoch"] for c in ch.cameras] == pytest.approx(
+        [frames.decimal_year(datetime(2026, 10, day, 10)) for day in (1, 2, 3)])
+    positions.apply_positions(ch, rows, "EPSG:4979")  # no frame that moves: no epoch needed
+    assert {c.meta["gnss"]["frame"] for c in ch.cameras} == {"unknown"}
+    # the command line
+    (tmp_path / "progetto").mkdir()
+    project, folder = _project(tmp_path / "progetto")
+    table = tmp_path / "itrf.csv"
+    table.write_text("name,lon,lat,h\n" + "".join(f"{r['label']},{r['x']},{r['y']},120\n" for r in rows))
+    run = CliRunner().invoke
+    result = run(app, ["gnss", "positions", str(project), str(table), "--crs", "EPSG:9989"])
+    assert result.exit_code == 1 and "--epoch" in result.output
+    result = run(app, ["gnss", "positions", str(project), str(table), "--crs", "EPSG:9989", "--epoch", "2026,82"])
+    assert result.exit_code == 0, result.output
+    assert {c.meta["gnss"]["epoch"] for c in ppg.Document.open(project).chunk.cameras} == {2026.82}
+    # the window: the field of the epoch of the positions dialog
+    w, chunk, folder, mw = gnss_window
+    _in_italy(chunk)
+    table = folder / "itrf.csv"
+    table.write_text("name,lon,lat,h\n" + "".join(f"{r['label']},{r['x']},{r['y']},120\n" for r in rows))
+    monkeypatch.setattr(mw.QFileDialog, "getOpenFileName", lambda *a, **k: (str(table), ""))
+    fields = {}
+
+    def ask(cls, parent, title, field_list, intro=""):
+        fields.update({f.name: f for f in field_list})
+        return {"crs": "EPSG:9989", "height": "ellipsoidal", "epoch": "2026-10-27"}
+
+    monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(ask))
+    w.gnss_apply_positions()
+    assert fields["epoch"].default == ""
+    day = frames.decimal_year(datetime(2026, 10, 27))
+    assert [c.meta["gnss"]["epoch"] for c in chunk.cameras] == pytest.approx([day] * 3)
 
 
 def test_only_fix_decides_for_the_photos_added_later(tmp_path):

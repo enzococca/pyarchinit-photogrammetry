@@ -69,6 +69,20 @@ def _outlined(rgba: np.ndarray, polygon, bounds) -> np.ndarray:
     return out
 
 
+def _grid_missing(exc: BaseException | None):
+    """The :class:`..gnss.heights.GridMissing` that ``exc`` is, or that caused it (its cause or context, a few levels
+    down); None when there is none."""
+    from ..gnss.heights import GridMissing
+
+    for _level in range(6):
+        if exc is None:
+            return None
+        if isinstance(exc, GridMissing):
+            return exc
+        exc = exc.__cause__ or exc.__context__
+    return None
+
+
 def _compass(deg: float) -> str:
     """The point of the compass of a direction in degrees from north (initials of the interface language)."""
     points = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"] if i18n.current() == "it" else \
@@ -362,6 +376,8 @@ class MainWindow(QMainWindow):
         self.gnss_pane.mrk_requested.connect(self.gnss_apply_mrk)
         self.gnss_pane.positions_requested.connect(self.gnss_apply_positions)
         self.gnss_pane.ppk_requested.connect(self.gnss_ppk)
+        self.gnss_pane.survey_crs_requested.connect(lambda: self.gnss_survey_crs())
+        self.gnss_pane.geoid_requested.connect(lambda: self.gnss_download_geoid())
         self.gnss_pane.only_fix_toggled.connect(self.gnss_only_fix)
         self.ms_pane.add_requested.connect(self.ms_add)
         self.thermal_pane.add_requested.connect(lambda: self.ms_add(thermal=True))
@@ -2099,14 +2115,64 @@ class MainWindow(QMainWindow):
         ErrorDialog("Errore", first, details, parent=self).exec()
 
     def _exc(self, prefix: str, exc: BaseException) -> None:
+        missing = _grid_missing(exc)
+        if missing is not None:  # the grid of a geoid: the window's own words, and the download offered
+            log.warning("%s: %s", prefix, exc)
+            self._grid_missing(missing, prefix)
+            return
         self._error(f"{prefix}: {exc}", traceback.format_exc(), logged=False)
+
+    def _grid_missing(self, exc, label: str, retry=None) -> None:
+        """A step that needs a grid of a geoid PROJ does not have (:class:`..gnss.heights.GridMissing`, ``label`` the
+        name of the step): said in the window's own words from the grids it names - EGM2008 offered for download (its
+        size), then ``retry`` (the step again) when given; another grid named, with the folder to copy it into; no grid
+        at all, another system to choose."""
+        from ..gnss import heights
+
+        grids = list(getattr(exc, "grids", ()) or ())
+        if heights.GEOID_GRID in grids:
+            text = tr("«{0}» non è andato a buon fine: per convertire le quote fra l'ellissoide e il geoide serve la "
+                      "griglia del geoide EGM2008 ({1}), che non è installata. Il programma può scaricarla adesso ({2} "
+                      "MB, dominio pubblico) nella sua cartella{3}. Si scarica anche da {4}, o con «{5}».", label,
+                      heights.GEOID_GRID, round(heights.GEOID_BYTES / 1e6),
+                      tr(" e ripetere «{0}»", label) if retry is not None else "", heights.DOWNLOAD_IN_THE_PROGRAM,
+                      heights.DOWNLOAD_COMMAND)
+            options = [tr("Scarica e riprova") if retry is not None else tr("Scarica")]
+            if choice(self, "question", tr("Griglia del geoide"), text, options) == 0:
+                self._download_geoid(then=retry)
+            return
+        if grids:
+            text = tr("«{0}» non è andato a buon fine: per convertire le quote serve la griglia {1}, che non è "
+                      "installata. Copiala nella cartella {2}, dove il programma la fa cercare a PROJ, e ripeti «{0}».",
+                      label, ", ".join(grids), str(heights.grid_folder()))
+        else:
+            text = tr("«{0}» non è andato a buon fine: qui le quote non si possono convertire fra l'ellissoide e il "
+                      "geoide del sistema del chunk, con nessuna griglia: PROJ non ha una trasformazione che lo faccia "
+                      "in questo luogo. Nel pannello GNSS (Sistema e quote) scegli un altro sistema di coordinate.",
+                      label)
+        self.log_pane.warning(text)
+        message(self, "warning", tr("Griglia del geoide"), text)
 
     def run_task(self, label: str, fn, on_done=None, refresh: bool = True, save: bool = True,
                  undo: bool = False) -> bool:
         """``fn(progress)`` in the background, then the project saved and the views refreshed.
         ``undo``: the step is an edit (refined markers, a patch) that Modifica > Annulla takes back;
-        so is a step announced with ``history.backup`` (points, faces); a processing step is not."""
+        so is a step announced with ``history.backup`` (points, faces); a processing step is not.
+        A step that stops for want of the grid of a geoid (:class:`..gnss.heights.GridMissing`, also as
+        the cause of another error) is said in the window's own words, with the download offered and the
+        step run again after it (:meth:`_grid_missing`)."""
+        again = (label, fn, on_done, refresh, save, undo)
         label = tr(label)  # also the name of the step in Modifica > Annulla
+        missing: list = []
+
+        def guarded(progress):
+            try:
+                return fn(progress)
+            except Exception as exc:
+                found = _grid_missing(exc)
+                if found is not None:
+                    missing.append(found)
+                raise
 
         def done(result):
             self._task_done = True
@@ -2134,9 +2200,13 @@ class MainWindow(QMainWindow):
         def failed(*args):
             if self.history is not None:
                 self.history.discard_pending()
+            if missing:
+                log.warning("%s", args[0] if args else label)
+                self._grid_missing(missing[0], label, lambda: self.run_task(*again))
+                return
             self._error(*args)
 
-        return self.runner.run(label, fn, done, failed)
+        return self.runner.run(label, guarded, done, failed)
 
     # ---------------------------------------------------------------- file
     def new_document(self) -> None:
@@ -3006,12 +3076,14 @@ class MainWindow(QMainWindow):
 
     def gnss_ppk(self) -> None:
         """*Strumenti > GNSS > Correzioni PPK* and *Calcola PPK* of the GNSS pane: the ``Timestamp.MRK``, then the RINEX
-        of the drone and of a base, the navigation files, the position of the base and whether the onboard RTK fixes
-        take the PPK position too (:class:`PpkDialog`, from the last run of the chunk), the folder of the photos when
-        the MRK is away from them; RTKLIB in the background in the folder of the chunk (:func:`gnss.ppk.solve`), then
-        every photo the camera below the antenna of the solution at its shot, with the status and accuracy of the
-        solution (:func:`gnss.apply.apply_ppk`). What goes wrong in the background is shown as every failed step is,
-        with its message and traceback; nothing changes then."""
+        of the drone and of a base, the navigation files, how the base is placed and whether the onboard RTK fixes take
+        the PPK position too (:class:`PpkDialog`, from the last run of the chunk), the folder of the photos when the MRK
+        is away from them; then in the background (:meth:`_ppk_job`) what the base needs - igs20.atx, the observations
+        and coordinates of a permanent station, a static baseline or PPP of the user's base, the navigation of the
+        flight -, RTKLIB in the folder of the chunk (:func:`gnss.ppk.solve`), and every photo the camera below the
+        antenna of the solution at its shot, with the status and accuracy of the solution
+        (:func:`gnss.apply.apply_ppk`). What goes wrong in the background is shown as every failed step is, with its
+        message and traceback; nothing changes then."""
         if self.runner.busy:  # as the menu, which is off while a step runs
             self.statusBar().showMessage(tr("Un'elaborazione e' gia' in corso"), 8000)
             return
@@ -3039,28 +3111,83 @@ class MainWindow(QMainWindow):
             return
 
         def job(p):
-            p(0.02, "Calcolo PPK con RTKLIB")
-            solution = ppk.solve(v["rover"], v["base"], v["navs"] or None, v["base_position"],
-                                 folder=ppk.work_folder(ch))
+            solution, notes = self._ppk_job(ch, v, p)
             p(0.9, "Posizioni delle foto agli scatti")
             return solution, gnss.apply_ppk(ch, path, solution, photos or None,
-                                            replace_fix=bool(v.get("replace_fix")))
+                                            replace_fix=bool(v.get("replace_fix"))), notes
 
         # like an MRK or a positions file: the positions change and the project is to be saved, not saved at once
         self.run_task("Calcolo PPK", job, self._ppk_done, refresh=False, save=False)
 
+    @staticmethod
+    def _ppk_job(ch, v: dict, p) -> tuple:
+        """The PPK of the answer ``v`` of :class:`PpkDialog` for ``ch``, in the background: what the base needs (by
+        ``v["base_mode"]``: igs20.atx downloaded once when asked and missing; the observations and the coordinates of a
+        permanent station in the GNSS folder of the chunk; the user's base placed by a static baseline from a station
+        or by a static PPP), the navigation of the flight downloaded when a computed base has none beside the files,
+        then RTKLIB (:func:`gnss.ppk.solve`). Returns the solution and what to tell (the warnings of a baseline or of a
+        PPP, igs20.atx that could not be had, the navigation downloaded)."""
+        from ..gnss import atx as antex
+        from ..gnss import base as gbase
+        from ..gnss import download
+        from ..gnss import ppk
+        from ..gnss import ppp as gppp
+        from ..gnss import rinex, stations
+
+        mode = v.get("base_mode") or ("typed" if v.get("base_position") else "header")
+        folder = ppk.work_folder(ch).parent  # beside the work folder of RTKLIB, which no input may be in
+        rover, bases, navs = v["rover"], v.get("base"), list(v.get("navs") or [])
+        position, notes = v.get("base_position"), []
+        if mode == "typed" and position is not None:
+            lat, lon, h = position
+            position = ppk.BasePosition(lat, lon, h, "typed", frame=v.get("base_frame") or "unknown",
+                                        epoch=v.get("base_epoch"))
+        if mode in ("header", "typed") and v.get("atx") == "download" and antex.cached_atx() is None:
+            p(0.01, "igs20.atx: le calibrazioni delle antenne dell'IGS")
+            try:
+                antex.atx_file(progress=p.sub(0.01, 0.09))
+            except (download.DownloadError, ValueError, OSError) as exc:
+                notes.append(tr("Le calibrazioni delle antenne dell'IGS ({0}) non si sono potute scaricare, e lo "
+                                "scostamento del centro di fase dell'antenna della base non viene applicato: {1}",
+                                antex.FILE_NAME, exc))
+        if mode == "station":
+            bases, position = gbase.station_base(rover, v["station"], folder / "base", progress=p.sub(0.1, 0.4))
+        elif mode == "baseline":
+            found = gbase.baseline(bases, v["station"], folder / "baseline", progress=p.sub(0.1, 0.4))
+            position, notes = found.position, notes + found.warnings
+        elif mode == "ppp":
+            found = gppp.solve_static(bases, folder / "ppp", progress=p.sub(0.1, 0.4))
+            position, notes = found.position, notes + found.warnings
+        if not navs and mode in ("station", "baseline", "ppp"):
+            # the flight's own beside the drone's file (or the user's base), else the broadcast messages of its hours
+            beside = ppk.navigation_beside([rover] + ([] if mode == "station" else
+                                                      ([bases] if isinstance(bases, (str, Path)) else list(bases))))
+            navs = [nav for nav, _info in beside]
+            if not navs:
+                start, end = rinex.time_span(rover) or (None, None)
+                if start is None:
+                    raise ValueError(f"{Path(rover).name} has no observation epochs")
+                navs = stations.download_navigation(start, end, folder / "base", progress=p.sub(0.5, 0.1))
+                notes.append(tr("File di navigazione scaricati per il volo: {0}", ", ".join(n.name for n in navs)))
+        p(0.6, "Calcolo PPK con RTKLIB")
+        solution = ppk.solve(rover, bases, navs or None, position, folder=ppk.work_folder(ch))
+        return solution, notes
+
     def _ppk_done(self, out) -> None:
         """What a PPK run gave: the counts in the log and in the status bar with the photos and the shots left without
-        a position, the photos that kept their onboard RTK fix, the base and how far it is from the flight, the warnings
-        of the run in the log (the phase-centre offset of the base's antenna not applied among them), the tables read
-        again; the base at the position of its RINEX header, which can be metres off, also in a message. When no photo
-        took a PPK position because they kept their onboard fixes nothing changed, and a message says how to replace
-        them."""
-        from .gnss_pane import status_names
+        a position, the photos that kept their onboard RTK fix, the base - where its position comes from, its frame and
+        the epoch of its coordinates - and how far it is from the flight, the warnings of the run and of the base in
+        the log (the phase-centre offset of the base's antenna when RTKLIB had no calibration for it among them), the
+        tables read again; the base at the position of its RINEX header, which can be metres off, also in a message.
+        When no photo took a PPK position because they kept their onboard fixes nothing changed, and a message says
+        how to replace them."""
+        from .gnss_pane import base_source_text, frame_text, status_names
 
-        solution, result = out
+        solution, result, notes = out if len(out) == 3 else (*out, [])
         kept = result.get("kept_fix", 0)
         base = solution.base or {}
+        for text in notes:
+            self.log_pane.warning(text)
         if not result["matched"]:
             for text in result["warnings"]:
                 self.log_pane.warning(text)
@@ -3081,8 +3208,10 @@ class MainWindow(QMainWindow):
             self.log_pane.info(tr("Foto che hanno tenuto il fix RTK del drone stesso: {0}", kept))
         baseline = result.get("baseline_km")
         if baseline is not None:
-            self.log_pane.info(tr("Base {0} (antenna {1}) a {2} km dal volo; soluzione {3}", base.get("name"),
-                                  base.get("antenna") or "-", number(baseline, 1), Path(solution.path).name))
+            self.log_pane.info(tr("Base {0} (antenna {1}): {2}, {3}; a {4} km dal volo; soluzione {5}",
+                                  base.get("name"), base.get("antenna") or "-", base_source_text(base),
+                                  frame_text(base.get("frame"), base.get("epoch")), number(baseline, 1),
+                                  Path(solution.path).name))
         shots = [str(i) for i in result["shots_unmatched"]]
         if shots:
             self.log_pane.warning(tr("Scatti dell'MRK senza posizione PPK ({0}): {1}", len(shots),
@@ -3111,16 +3240,22 @@ class MainWindow(QMainWindow):
             Field("crs", "Sistema di coordinate del file (EPSG:4979 = longitudine, latitudine, quota; o es. "
                          "EPSG:32633; LOCAL)", "EPSG:4979", kind="text"),
             Field("height", "Tipo di quota", "ellipsoidal",
-                  choices=[("ellipsoidal", "Ellissoidica (GNSS, MRK)"), ("exif", "Dell'EXIF (livello del mare)")])],
+                  choices=[("ellipsoidal", "Ellissoidica (GNSS, MRK)"), ("exif", "Dell'EXIF (livello del mare)")]),
+            Field("epoch", "Epoca delle posizioni (anno decimale o data; vuoto: la data delle foto)", "", kind="text",
+                  tip="Una posizione in ITRF2020 (EPSG:9989 e i sistemi su ITRF2020) si muove con la placca, 2-3 cm "
+                      "l'anno in Europa: serve l'epoca delle sue coordinate, per esempio 2026,82 o 2026-10-27. "
+                      "Vuoto: per ogni foto la data della sua EXIF")],
             intro=tr("Una riga per foto con il nome, x, y e la quota; in più, se ci sono, le deviazioni standard o "
                      "l'accuratezza e lo stato RTK. Le posizioni sostituiscono quelle che le foto avevano."))
         if not v:
             return
-        from ..gnss import positions
+        from ..gnss import frames, positions
 
         try:
+            written = str(v.get("epoch") or "").strip()
+            epoch = frames.parse_epoch(written) if written else None
             result = positions.apply_positions(self.chunk, positions.read_positions(path), str(v["crs"]).strip(),
-                                               height=v["height"])
+                                               height=v["height"], epoch=epoch)
         except (OSError, ValueError) as exc:
             self._exc(tr("Lettura delle posizioni non riuscita"), exc)
             return
@@ -3147,6 +3282,147 @@ class MainWindow(QMainWindow):
         self._dirty(True)
         self.reference.set_chunk(ch, self.last_report)
         self.gnss_pane.set_state(ch)
+
+    # ---------------------------------------------------------------- the system and the heights of the survey
+    def gnss_download_geoid(self, then=None, why: str = "") -> None:
+        """*GNSS > Sistema e quote > Scarica il geoide EGM2008*: the grid of EGM2008 (81 MB, public domain) downloaded
+        in the background once the user says so (``why``: what it is needed for, said first), then ``then``; nothing to
+        download when PROJ has it already (``then`` at once)."""
+        from ..gnss import heights
+
+        if self.runner.busy:
+            self.statusBar().showMessage(tr("Un'elaborazione e' gia' in corso"), 8000)
+            return
+        if heights.geoid_available():
+            if then is not None:
+                then()
+            else:
+                self.statusBar().showMessage(tr("La griglia del geoide EGM2008 è già installata."), 8000)
+            return
+        text = tr("Scaricare adesso la griglia del geoide EGM2008 ({0}, {1} MB, dominio pubblico) da cdn.proj.org "
+                  "nella cartella del programma ({2})? Serve a convertire le quote ellissoidiche del GNSS in quote "
+                  "sul livello del mare.", heights.GEOID_GRID, round(heights.GEOID_BYTES / 1e6),
+                  str(heights.grid_folder()))
+        r = message(self, "question", tr("Geoide EGM2008"), (why + "\n\n" if why else "") + text,
+                    buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    default=QMessageBox.StandardButton.Yes)
+        if r == QMessageBox.StandardButton.Yes:
+            self._download_geoid(then)
+
+    def _download_geoid(self, then=None) -> None:
+        """The grid of EGM2008 downloaded in the background (:func:`..gnss.heights.download_geoid`), then the GNSS pane
+        read again and ``then``."""
+        from ..gnss import heights
+
+        def done(path) -> None:
+            text = tr("Griglia del geoide EGM2008 scaricata in {0}.", str(path))
+            self.log_pane.info(text)
+            self.statusBar().showMessage(text, 15000)
+            self.gnss_pane.set_state(self.chunk)
+            if then is not None:
+                then()
+
+        self.run_task("Scarica il geoide EGM2008", lambda p: heights.download_geoid(p), done, refresh=False,
+                      save=False)
+
+    def gnss_survey_crs(self) -> None:
+        """*GNSS > Sistema e quote > Sistema del rilievo*: the systems :func:`..gnss.heights.survey_crs` proposes where
+        the survey is (:func:`..gnss.heights.survey_place`) for the frames of its positions, or another one, with the
+        heights above the geoid EGM2008 or not (the grid offered for download first when it is missing); then
+        :meth:`_set_survey_crs`."""
+        if self.runner.busy:
+            self.statusBar().showMessage(tr("Un'elaborazione e' gia' in corso"), 8000)
+            return
+        if not self._need_chunk():
+            return
+        from ..core import crs as crs_mod
+        from ..gnss import heights
+        from . import survey_crs_dialog as dialog
+        from .gnss_pane import frame_text
+
+        ch = self.chunk
+        try:
+            place = heights.survey_place(ch)
+        except ValueError as exc:
+            self._exc(tr("Il programma non sa dove è il rilievo"), exc)
+            return
+        if place is None:
+            self._warn(tr("Il programma non sa dove è il rilievo: servono le posizioni delle foto (GNSS, EXIF) o le "
+                          "coordinate dei marker in un sistema di coordinate."))
+            return
+        lon, lat, frame = place
+        choices, default = [], None
+        for of, says in (("WGS84", tr("per posizioni in WGS 84 o ITRF2020")),
+                         ("ETRF2000", tr("per posizioni in ETRF2000 (RDN2008), ETRF2014, ETRF2020"))):
+            crs = heights.survey_crs(lon, lat, of, geoid=False)
+            if crs in [c for c, _label in choices]:
+                continue
+            try:
+                name = crs_mod.to_pyproj(crs).name
+            except Exception:  # noqa: BLE001 - its code says it
+                name = crs
+            choices.append((crs, f"{crs} - {name} ({says})"))
+            if (of == "ETRF2000") == (frame in ("ETRF2000", "ETRF2014", "ETRF2020")):
+                default = crs
+        v = dialog.SurveyCrsDialog.ask(self, ch.crs, choices, default,
+                                       tr("Le posizioni delle foto sono in {0}.", frame_text(frame)),
+                                       heights.geoid_available())
+        if not v or not v.get("crs"):
+            return
+        crs = v["crs"]
+        if heights.above_egm2008(crs) and not heights.geoid_available():
+            self.gnss_download_geoid(then=lambda: self._set_survey_crs(crs),
+                                     why=tr("Le quote di {0} sono sul geoide EGM2008: per convertire quelle del GNSS "
+                                            "serve la sua griglia.", crs))
+            return
+        self._set_survey_crs(crs)
+
+    def _set_survey_crs(self, crs: str) -> None:
+        """The chunk into ``crs`` (:func:`..gnss.heights.set_survey_crs`): the drawings and the sections the window
+        holds stored first, what changes shown (:func:`..gnss.heights.survey_crs_changes`) and confirmed, the change
+        in the background, the drawings, layers and sections read again in the new system, the project saved."""
+        from ..gnss import heights
+        from .survey_crs_dialog import changes_text
+
+        ch = self.chunk
+        self._store_drawings()
+        self._save_sections()
+        try:
+            changes = heights.survey_crs_changes(ch, crs)
+        except ValueError as exc:
+            self._warn(tr("{0} non può essere il sistema del rilievo: {1}", crs, exc))
+            return
+        old = ch.crs
+        if crs == old:
+            self.statusBar().showMessage(tr("Il chunk è già in {0}.", crs), 8000)
+            return
+        r = message(self, "question", tr("Sistema del rilievo"), changes_text(old, changes) + "\n\n" + tr("Applicare?"),
+                    buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    default=QMessageBox.StandardButton.Yes)
+        if r != QMessageBox.StandardButton.Yes:
+            return
+
+        def done(result) -> None:
+            self._reload_drawings(redraw=False)  # converted into the new system by set_survey_crs
+            self._load_sections()
+            if self.doc.path:
+                self.doc.save()
+                self._dirty(False)
+            else:
+                self._dirty(True)
+            self.refresh_all()
+            text = tr("Sistema del rilievo: {0} → {1}", old, result["crs"])
+            self.log_pane.info(text)
+            self.statusBar().showMessage(text, 15000)
+            if result.get("rebuild"):
+                from .survey_crs_dialog import product_names
+
+                names = product_names()
+                self.log_pane.warning(tr("Da costruire di nuovo nel nuovo sistema: {0}.",
+                                         ", ".join(names.get(n, n) for n in result["rebuild"])))
+
+        self.run_task("Sistema del rilievo", lambda p: heights.set_survey_crs(ch, crs), done, refresh=False,
+                      save=False)
 
     def add_video(self) -> None:
         """Workflow > Aggiungi video: frames chosen for the reconstruction, GPS from DJI subtitles."""
@@ -3792,8 +4068,13 @@ class MainWindow(QMainWindow):
         self._align(v)
 
     def _align(self, v: dict) -> None:
-        """Matching and alignment with the choices of :meth:`align_photos`."""
+        """Matching and alignment with the choices of :meth:`align_photos`. What would keep the chunk from being placed
+        by the positions of its photos (the grid of a geoid missing: :func:`..markers.gcp.preflight`) stops the step
+        before the matching, not after it."""
+        from ..markers import gcp
+
         def job(p):
+            gcp.preflight(self.chunk, bool(v.get("gps")))
             self.chunk.match_photos(v["quality"], v["keypoint_limit"], v["tiepoint_limit"], progress=p.sub(0, 0.5),
                                     exclude_stationary=bool(v.get("stationary")), generic=bool(v.get("generic")),
                                     reference=v.get("reference") or None, apply_masks=v.get("masks", "keypoints"),
@@ -5827,6 +6108,7 @@ class MainWindow(QMainWindow):
             for c in self.chunk.cameras:
                 if c.key in bad:
                     c.enabled = False
+        from ..markers import gcp
 
         def job(p):
             ch = self.chunk
@@ -5843,6 +6125,7 @@ class MainWindow(QMainWindow):
             if v["markers"]:
                 ch.detect_markers(v["target_type"], progress=sp())
             q = sp()
+            gcp.preflight(ch)  # what would keep the alignment from placing the chunk: before the matching
             ch.match_photos(v["align_quality"], progress=q.sub(0, 0.5))
             ch.align_cameras(progress=q.sub(0.5, 0.5))
             if any(m.reference.location for m in ch.markers):

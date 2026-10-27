@@ -9,8 +9,8 @@ from pathlib import Path, PurePath
 
 from ..core import crs as crs_mod
 from ..core.chunk import Chunk
-from . import dji, ppk
-from .apply import FACTOR, accuracy, set_camera_position
+from . import dji, frames, ppk
+from .apply import FACTOR, _photo_time, accuracy, set_camera_position
 
 SOURCE = "positions_file"
 HEIGHTS = ("ellipsoidal", "exif")
@@ -105,10 +105,16 @@ def read_positions(path: str | Path, delimiter: str | None = None) -> list[dict]
 
 
 def apply_positions(chunk: Chunk, rows: list[dict], crs: str, height: str = "ellipsoidal",
-                    default_accuracy: tuple[float, float, float] = (0.05, 0.05, 0.10)) -> dict:
+                    default_accuracy: tuple[float, float, float] = (0.05, 0.05, 0.10),
+                    epoch: float | None = None) -> dict:
     """Give the photos of ``chunk`` the positions in ``rows`` (from :func:`read_positions`), which are in the
     coordinate system ``crs`` (``"EPSG:4979"`` for longitude, latitude and ellipsoidal height, a projected system,
     or ``"LOCAL"``) with heights of the kind ``height`` (``"ellipsoidal"`` or ``"exif"``).
+
+    ``epoch`` is the epoch of the coordinates (a decimal year, :func:`.frames.parse_epoch` reads what a person
+    writes): in a system of ITRF2020, where positions move with time, every position needs it, and without it each
+    photo takes the date its camera wrote in the EXIF (a photo without one is refused, before anything changes); in
+    any other system it is recorded when given.
 
     A row is paired with a photo by the name of its file, with or without the extension and in any case; when the
     name is not enough (the same name in two folders, ``DJI_0001.JPG`` in ``100MEDIA`` and ``101MEDIA``) the label
@@ -132,6 +138,9 @@ def apply_positions(chunk: Chunk, rows: list[dict], crs: str, height: str = "ell
     default = [float(a) for a in default_accuracy]
     if len(default) != 3 or any(not a > 0 for a in default):
         raise ValueError("default_accuracy needs three accuracies above 0")
+    if epoch is not None:
+        epoch = frames.valid_epoch(epoch)
+    dynamic = not crs_mod.is_local(crs) and frames.dynamic(crs)
 
     index = ({}, {})  # the cameras by lower case file name and by name without extension
     for cam in chunk.cameras:
@@ -160,10 +169,23 @@ def apply_positions(chunk: Chunk, rows: list[dict], crs: str, height: str = "ell
         status = row.get("status")
         acc, extra = _accuracy_of(row, status, default)
         extra.update({a: float(row[a]) for a in _ANGLES if a in row})
-        plan[cam.key] = (label, cam, [x, y, z], acc, status, extra)
-    for _label, cam, location, acc, status, extra in plan.values():
-        set_camera_position(cam, location, crs, acc, SOURCE, status=status, height=height, extra=extra)
+        plan[cam.key] = (label, cam, [x, y, z], acc, status, extra, _epoch_of(cam, crs, dynamic, epoch))
+    for _label, cam, location, acc, status, extra, when in plan.values():
+        set_camera_position(cam, location, crs, acc, SOURCE, status=status, height=height, extra=extra, epoch=when)
     return {"matched": len(plan), "rows": len(rows), "unmatched": unmatched}
+
+
+def _epoch_of(cam, crs: str, dynamic: bool, epoch: float | None) -> float | None:
+    """The epoch of the position of ``cam`` in ``crs``: the one given, else - in a system of ITRF2020 (``dynamic``) -
+    the date its camera wrote in the EXIF, as a decimal year; a ``ValueError`` naming the photo when it has none."""
+    if epoch is not None or not dynamic:
+        return epoch
+    taken = _photo_time(cam)
+    if taken is None:
+        raise ValueError(f"{Path(cam.path).name} has no date in its EXIF to give the epoch of its position in {crs}, a "
+                         "system of ITRF2020 where positions move with time: give the epoch of the positions (a "
+                         "decimal year or a date: --epoch, or the field in the window)")
+    return frames.decimal_year(taken)
 
 
 def _accuracy_of(row: dict, status: str | None, default: list[float]) -> tuple[list[float], dict]:

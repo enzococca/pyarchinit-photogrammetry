@@ -181,6 +181,19 @@ def height_kind(crs: str | None) -> str:
     return NONE
 
 
+def above_egm2008(crs: str | None) -> bool:
+    """``crs`` has heights above the geoid EGM2008 (its vertical part is ``EPSG:3855``, as :func:`survey_crs` writes
+    it): GNSS heights go into it only with the grid of the geoid (:data:`GEOID_GRID`)."""
+    if crs_mod.is_local(crs):
+        return False
+    try:
+        system = crs_mod.to_pyproj(crs)
+    except Exception:  # noqa: BLE001 - a system PROJ cannot read: whoever uses it says why
+        return False
+    parts = system.sub_crs_list if system.is_compound else [system]
+    return any(part.is_vertical and part.to_epsg() == 3855 for part in parts)
+
+
 def kinds_differ(src: str | None, dst: str | None) -> bool:
     """A conversion from ``src`` to ``dst`` turns heights above the ellipsoid into heights above a geoid, or back."""
     kinds = {height_kind(src), height_kind(dst)}
@@ -415,6 +428,37 @@ def survey_crs(lon: float, lat: float, frame: str = "WGS84", geoid: bool = True)
             system = f"EPSG:{25800 + zone}"
     system = system or crs_mod.utm_for_lonlat(lon, lat)
     return f"{system}+3855" if geoid else system
+
+
+def survey_place(chunk) -> tuple[float, float, str] | None:
+    """Where the survey of ``chunk`` is, and in which frame its positions are, for :func:`survey_crs`: the longitude and
+    latitude (degrees) of the median of the positions of its photos that are switched on - of its markers when no photo
+    has one - and the frame of most of those photo positions (:func:`.frames.position_frame`, ``"WGS84"`` for those
+    whose frame nobody knows), or for the markers the frame of the system of the chunk. None when nothing of the chunk
+    has a position on the earth (a local frame)."""
+    from collections import Counter
+
+    from ..markers import gcp
+    from . import frames
+
+    cams = [cam for cam in chunk.cameras if cam.reference.location and cam.reference.enabled]
+    found, _crs = gcp.camera_references(chunk, cams, "EPSG:4326") if cams else ({}, None)
+    placed = [cam for cam in cams if cam.key in found]
+    if placed:
+        lonlat = np.array([found[cam.key][:2] for cam in placed], float)
+        frame = Counter(frames.position_frame(cam.meta.get("gnss")) for cam in placed).most_common(1)[0][0]
+    else:
+        marked = [m for m in chunk.markers if m.reference.location]
+        if not marked or crs_mod.is_local(chunk.crs):
+            return None
+        lonlat = crs_mod.transform_points(np.array([m.reference.location for m in marked], float), chunk.crs,
+                                          "EPSG:4326", legacy=frames.Legacy(gcp.MARKERS_READ, chunk))[:, :2]
+        frame = frames.frame_of(chunk.crs) or frames.WGS84
+    lonlat = lonlat[np.isfinite(lonlat).all(axis=1)]
+    if not len(lonlat):
+        return None
+    lon, lat = (float(v) for v in np.median(lonlat, axis=0))
+    return lon, lat, frames.WGS84 if frame == frames.UNKNOWN else frame
 
 
 def _survey_system(crs: str) -> None:

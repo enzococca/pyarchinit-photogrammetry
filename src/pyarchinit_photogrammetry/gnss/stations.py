@@ -292,15 +292,16 @@ def nearby(lat: float, lon: float, limit: int = 10, within_km: float = 200.0,
 # --- files that are downloaded and kept ---------------------------------------------------------------------------
 
 
-def _cached(url: str, name: str, max_age: timedelta | None, progress) -> Path:
+def _cached(url: str, name: str, max_age: timedelta | None, progress, timeout: float = 60.0) -> Path:
     """The file of ``url`` in the stations folder as ``name``: the copy there when it is younger than ``max_age`` (any
-    age for None), else fetched again - and the old copy, with a warning, when that fails."""
+    age for None), else fetched again (``timeout``: the seconds the site has to answer) - and the old copy, with a
+    warning, when that fails."""
     path = _stations_dir() / name
     saved = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc) if path.exists() else None
     if saved is not None and (max_age is None or _now() - saved < max_age):
         return path
     try:
-        return download.fetch(url, path, progress)
+        return download.fetch(url, path, progress, timeout=timeout)
     except download.DownloadError as exc:
         if saved is None:
             raise
@@ -327,14 +328,14 @@ def _fresh_epn_file(progress) -> tuple[Path, str]:
     """The multi-year solution of the EPN in IGS20 of the newest ``Cwwww`` folder that has one, and the name of the
     folder (``"C2400"``): the copy kept when the week is the one that is kept, else downloaded."""
     root = EPN_REFERENCE_FRAME if EPN_REFERENCE_FRAME.endswith("/") else EPN_REFERENCE_FRAME + "/"
-    names = download.listing(root)
+    names = download.listing(root, progress)
     weeks = sorted((int(m.group(1)) for m in map(_WEEK.fullmatch, names) if m), reverse=True)
     failure: download.DownloadError | None = None
     for week in weeks[:EPN_FOLDERS]:
         folder = f"C{week}"
         url = f"{root}{folder}/"
         try:
-            files = sorted((m for m in map(_EPN_SSC.fullmatch, download.listing(url)) if m),
+            files = sorted((m for m in map(_EPN_SSC.fullmatch, download.listing(url, progress)) if m),
                            key=lambda m: m.group("end"))
         except download.DownloadError as exc:  # the folder before may be fine
             failure = exc
@@ -669,7 +670,7 @@ def _from_ring(station: Station, epoch: float, progress) -> StationCoordinates |
     """The line through the last two years of the series of RING, at ``epoch``. For an epoch that the series covers
     it is the two years around it: it does not matter how the station moved after."""
     name = re.sub(r"[^A-Za-z0-9_-]", "_", station.id)  # the id of a Station made by hand is not trusted in a name
-    path = _cached(RING_POS.format(id=station.id), f"ring_{name}.pos", RING_POS_AGE, progress)
+    path = _cached(RING_POS.format(id=station.id), f"ring_{name}.pos", RING_POS_AGE, progress, timeout=RING_TIMEOUT)
     t, xyz = _read_pos(path)
     if t[-1] - t[0] <= 2 * WINDOW:
         keep = np.ones(len(t), dtype=bool)
@@ -714,7 +715,8 @@ def coordinates(station: Station, epoch: float, progress=None) -> StationCoordin
         except download.NotPublished as exc:
             log.info("%s: no coordinates from %s: %s", station.id, label, exc)
         except (download.DownloadError, ValueError, OSError) as exc:
-            log.warning("%s: the coordinates from %s were not used: %s", station.id, label, exc)
+            hint = f" ({_ring_hint()})" if label == "RING" and isinstance(exc, download.DownloadError) else ""
+            log.warning("%s: the coordinates from %s were not used: %s%s", station.id, label, exc, hint)
         else:
             if found is not None:
                 progress(1.0, f"{station.id}: coordinates from {found.source}")
@@ -733,6 +735,9 @@ def coordinates(station: Station, epoch: float, progress=None) -> StationCoordin
 BKG_ROOT = "https://igs.bkg.bund.de/root_ftp/"
 RING_RINEX = "https://webring.gm.ingv.it:44324/rinex/RING/"
 RING_PORT = 44324
+# the seconds RING has to answer a download (its series, its files): a firewall that closes its port would otherwise
+# hold a run for three minutes at the 60 s of other downloads; three attempts and their waits are half a minute
+RING_TIMEOUT = download.LISTING_TIMEOUT
 
 MARGIN = timedelta(minutes=10)  # the base is wanted this long before the flight and after it
 LATE = timedelta(hours=3)  # a file that is not there is "not published yet" until this long after it was due
@@ -920,13 +925,13 @@ def _name_start(match: re.Match) -> datetime | None:
         return None
 
 
-def _find(station: Station, archive: _Archive, kind: _Kind, slot: datetime) -> RemoteFile | None:
+def _find(station: Station, archive: _Archive, kind: _Kind, slot: datetime, progress=None) -> RemoteFile | None:
     """The file of ``station`` of this ``kind`` that begins at ``slot``, as the listing of the folder of the archive
     has it, or None. Of the names that are the station's, for this time, length and interval, R is taken before S
-    before U."""
+    before U. ``progress`` hears which site is contacted (:func:`download.listing`)."""
     folder = kind.folder(slot)
     try:
-        names = download.listing(folder)
+        names = download.listing(folder, progress)
     except download.NotPublished:
         return None  # a folder that is not there has no file
     except download.DownloadError as exc:
@@ -958,7 +963,7 @@ def _missing(station: Station, archive: _Archive, kind: _Kind, slot: datetime) -
 
 
 def _cover(station: Station, archive: _Archive, interval: float, start: datetime, end: datetime,
-           whole: bool) -> tuple[list[RemoteFile], bool, list[str]]:
+           whole: bool, progress=None) -> tuple[list[RemoteFile], bool, list[str]]:
     """The files of one archive, with epochs ``interval`` seconds apart, for the flight and :data:`MARGIN` on each side
     of it; whether they hold it (all of it when ``whole``, else the flight, and the margins as far as there are files);
     why not. The kinds of file are tried in the order of the archive, each for the time that the ones before did not
@@ -970,7 +975,7 @@ def _cover(station: Station, archive: _Archive, interval: float, start: datetime
         left = []
         for a, b in windows:
             for slot in _slots(kind.period, a, b):
-                remote = _find(station, archive, kind, slot)
+                remote = _find(station, archive, kind, slot, progress)
                 if remote is not None:
                     found[remote.name] = remote
                 else:
@@ -984,7 +989,7 @@ def _cover(station: Station, archive: _Archive, interval: float, start: datetime
 
 
 def _choose(station: Station, interval: float, start: datetime, end: datetime, whole: bool,
-            down: dict[str, str]) -> tuple[list[RemoteFile] | None, list[str]]:
+            down: dict[str, str], progress=None) -> tuple[list[RemoteFile] | None, list[str]]:
     """The files of the first archive that holds the flight (:func:`_cover`), or None and what the archives lack. A site
     that cannot be reached is put in ``down`` with the reason and is not asked again."""
     notes: list[str] = []
@@ -992,7 +997,7 @@ def _choose(station: Station, interval: float, start: datetime, end: datetime, w
         if archive.site in down:
             continue
         try:
-            files, complete, why = _cover(station, archive, interval, start, end, whole)
+            files, complete, why = _cover(station, archive, interval, start, end, whole, progress)
         except _Unreachable as exc:
             down[exc.site] = str(exc)
             continue
@@ -1026,7 +1031,8 @@ def _no_files(station: Station, start: datetime, end: datetime, notes: dict[floa
     return "\n".join(lines)
 
 
-def observation_files(station: Station, start: datetime, end: datetime, rate: str = "auto") -> list[RemoteFile]:
+def observation_files(station: Station, start: datetime, end: datetime, rate: str = "auto",
+                      progress=None) -> list[RemoteFile]:
     """The files that hold the observations of ``station`` for a flight from ``start`` to ``end`` (GPS time without a
     zone) and :data:`MARGIN` on each side of it, in time order. The station is looked for in the archive of each of its
     networks, BKG's before RING's, and the files are all of one archive. The names are those of the listings of the
@@ -1040,12 +1046,14 @@ def observation_files(station: Station, start: datetime, end: datetime, rate: st
 
     A ``ValueError`` when there are none: it names the files that are missing and where they are not, says when such
     files usually come online if the time is recent, whether the other rate is there, and that BKG or RING could not be
-    reached (RING is on the port 44324, which some firewalls close)."""
-    return _observation_files(station, start, end, rate)
+    reached (RING is on the port 44324, which some firewalls close). ``progress`` hears which site is contacted, and a
+    cancel stops between two attempts: a site that does not answer is given up after half a minute
+    (:data:`download.LISTING_TIMEOUT`)."""
+    return _observation_files(station, start, end, rate, progress=progress)
 
 
 def _observation_files(station: Station, start: datetime, end: datetime, rate: str = "auto",
-                       other_rate: bool = True) -> list[RemoteFile]:
+                       other_rate: bool = True, progress=None) -> list[RemoteFile]:
     """:func:`observation_files`. With ``other_rate`` False the error for a rate asked for neither looks at the other
     rate nor says whether it is there: for the 30 s files tried when the 1 s ones were given up, which the error must
     not send the user back to."""
@@ -1060,7 +1068,7 @@ def _observation_files(station: Station, start: datetime, end: datetime, rate: s
     plan = [(1.0, True), (30.0, False), (1.0, False)] if rate == "auto" else [(_RATES[rate], False)]
     notes: dict[float, list[str]] = {}
     for interval, whole in plan:
-        files, why = _choose(station, interval, start, end, whole, down)
+        files, why = _choose(station, interval, start, end, whole, down, progress)
         if files is not None:
             log.info("%s: %d files with an epoch every %s", station.id, len(files), _RATE_TEXT[interval])
             return files
@@ -1070,7 +1078,7 @@ def _observation_files(station: Station, start: datetime, end: datetime, rate: s
     looked = any(archive.site not in down for archive in _archives(station))  # else no archive was looked at
     if other_rate and rate != "auto" and looked:
         spare = 30.0 if _RATES[rate] == 1.0 else 1.0
-        other = (spare, _choose(station, spare, start, end, False, down)[0] is not None)
+        other = (spare, _choose(station, spare, start, end, False, down, progress)[0] is not None)
     raise ValueError(_no_files(station, start, end, notes, down, other))
 
 
@@ -1085,13 +1093,15 @@ def _inside(folder: Path, name: str, pattern: re.Pattern, owner: str) -> Path:
 
 
 def _fetch(url: str, path: Path, progress) -> None:
-    """``download.fetch``, its failures given as the ``ValueError`` that this module raises for files it cannot have."""
+    """``download.fetch``, its failures given as the ``ValueError`` that this module raises for files it cannot have; a
+    file of RING has :data:`RING_TIMEOUT` seconds to come."""
+    ring = url.startswith(_slash(RING_RINEX))
     try:
-        download.fetch(url, path, progress)
+        download.fetch(url, path, progress, timeout=RING_TIMEOUT if ring else 60.0)
     except download.NotPublished as exc:
         raise ValueError(f"{path.name} was in the listing of the archive and is not there now: {exc}") from exc
     except download.DownloadError as exc:
-        hint = f" ({_ring_hint()})" if url.startswith(_slash(RING_RINEX)) else ""
+        hint = f" ({_ring_hint()})" if ring else ""
         raise ValueError(f"{path.name} could not be downloaded: {exc}{hint}") from exc
 
 
@@ -1221,7 +1231,7 @@ def download_observations(station: Station, start: datetime, end: datetime, fold
     _checked(station)
     start, end = _gps_span(start, end)
     rate = _rate(rate)
-    files = observation_files(station, start, end, rate)
+    files = observation_files(station, start, end, rate, progress)
     folder = Path(folder)
     fine = rate == "auto" and files[0].interval == 1.0  # a base at 1 s may be given up for the files at 30 s
     try:
@@ -1232,15 +1242,16 @@ def download_observations(station: Station, start: datetime, end: datetime, fold
         log.warning("%s; trying the 30 s files", first)  # the message names the station or its file
         try:
             # the error of the 30 s files does not send the user back to the 1 s files: they were just given up
-            out, span = _joined(station, _observation_files(station, start, end, "30s", other_rate=False), start, end,
-                                folder, progress.sub(0.7, 0.3))
+            out, span = _joined(station, _observation_files(station, start, end, "30s", other_rate=False,
+                                                            progress=progress), start, end, folder,
+                                progress.sub(0.7, 0.3))
         except ValueError as other:
             raise ValueError(f"{first}\nThe 30 s files, tried next, do not do either: {other}") from other
     progress(1.0, f"{station.id}: observations from {span[0]:%Y-%m-%d %H:%M:%S} to {span[1]:%H:%M:%S} (GPS time)")
     return out
 
 
-def _navigation_name(day: date) -> tuple[str, str]:
+def _navigation_name(day: date, progress=None) -> tuple[str, str]:
     """The name of the navigation file of a day and its address, from the listing of BKG's folder
     ``IGS/BRDC/<yyyy>/<ddd>/``: of ``BRDC00WRD`` the S copy, else R, else U. A ``ValueError`` when it is not there,
     which says when it comes if the day is recent."""
@@ -1248,7 +1259,7 @@ def _navigation_name(day: date) -> tuple[str, str]:
     stamp = f"{day:%Y}{_doy(day)}0000"
     pattern = re.compile(rf"{_NAV_PRODUCT}_(?P<source>[RSU])_{stamp}_01D_MN\.rnx\.gz")
     try:
-        names = download.listing(where)
+        names = download.listing(where, progress)
     except download.NotPublished:
         names = []
     except download.DownloadError as exc:
@@ -1303,7 +1314,7 @@ def download_navigation(start: datetime, end: datetime, folder: str | Path, prog
     start, end = _gps_span(start, end)
     folder = Path(folder)
     days = [start.date() + timedelta(days=n) for n in range((end.date() - start.date()).days + 1)]
-    chosen = [_navigation_name(day) for day in days]
+    chosen = [_navigation_name(day, progress) for day in days]
     folder.mkdir(parents=True, exist_ok=True)
     return [_navigation_file(day, name, url, folder, progress.sub(n / len(days), 1 / len(days)))
             for n, (day, (name, url)) in enumerate(zip(days, chosen))]

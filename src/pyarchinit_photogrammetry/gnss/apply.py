@@ -11,7 +11,7 @@ import numpy as np
 
 from ..core.camera import Camera, Reference
 from ..core.chunk import IMAGE_EXTENSIONS, Chunk
-from . import dji, frames, ppk
+from . import dji, frames, ppk, rinex
 
 FACTOR = 2.0
 FLOORS = {"fix": 0.01, "float": 0.20, "single": 1.0}
@@ -156,7 +156,8 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
     Returns what :func:`apply_mrk` returns - the photos that kept their onboard fix are neither matched nor unmatched -
     with ``"kept_fix"`` (how many kept it), ``"baseline_km"`` (:func:`.ppk.baseline_km`, None without the position of
     the base) and ``"warnings"``: those of the solution (the base at the position of its RINEX header can be metres off,
-    the phase-centre offset of its antenna is not applied), how many photos fell where the solution has no position,
+    the phase-centre offset of its antenna not applied when RTKLIB had no calibration for it:
+    :func:`.ppk.antenna_warning`), how many photos fell where the solution has no position,
     whether the solution puts the antenna more than :data:`FAR_FROM_MRK_M` (median) from where the drone's own receiver
     put it in the MRK (the observations of the base taken for the rover's, those of another receiver), a base more
     than :data:`.ppk.BASELINE_WARNING_KM` from the flight, a base typed elsewhere for other photos of the chunk
@@ -262,17 +263,41 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
     return {**_result(pairing, placed, kept), "kept_fix": len(kept), "baseline_km": baseline, "warnings": warnings}
 
 
+def _station_of(base: dict) -> dict | None:
+    """The permanent station of a base that is one (``position_source`` ``"station"``) or that a static baseline from
+    one placed (``"baseline"``), as the PPK dialog chooses it again: ``{"id", "name", "networks", "lat", "lon", "h",
+    "xyz"}`` from what its position records (:mod:`.base`); None for any other base, or one that records no station."""
+    source, detail = base.get("position_source"), base.get("detail") or {}
+    if source not in ("station", "baseline") or not detail.get("station"):
+        return None
+    try:
+        if source == "station":
+            xyz = [float(v) for v in (detail.get("coordinates") or {})["xyz"]]
+            lat, lon, h = rinex.ecef_to_llh(xyz)
+        else:
+            where = detail["station_position"]
+            lat, lon, h = (float(where[k]) for k in ("lat", "lon", "h"))
+            xyz = list(rinex.llh_to_ecef((lat, lon, h)))
+    except (KeyError, TypeError, ValueError):
+        return None
+    return {"id": str(detail["station"]), "name": str(detail.get("name") or detail["station"]),
+            "networks": [str(n) for n in detail.get("networks") or []], "lat": lat, "lon": lon, "h": h,
+            "xyz": [float(v) for v in xyz]}
+
+
 def _remember(chunk: Chunk, mrk_path: str | Path, photos_folder: str | Path | None, solution: ppk.Solution,
               replace_fix: bool) -> None:
     """Record the run in ``chunk.meta`` (:func:`.ppk.last_run`): its files, its base and how it was placed (the typed
-    position ``[lon, lat, h]``), whether it replaced the onboard fixes."""
+    position ``[lon, lat, h]``, the frame and the epoch of its position, the permanent station it came from), whether
+    it replaced the onboard fixes."""
     base, inputs = solution.base or {}, solution.inputs or {}
     typed = base.get("position_source") == "typed" and base.get("position")
     chunk.meta[ppk.MEMORY] = {"last": {
         "mrk": str(Path(mrk_path).absolute()), "photos": str(Path(photos_folder).absolute()) if photos_folder else None,
         "rover": inputs.get("rover"), "base": inputs.get("base"), "navs": list(inputs.get("navs") or []),
         "base_name": base.get("name"), "position_source": base.get("position_source"),
-        "position": [float(v) for v in base["position"]] if typed else None, "replace_fix": bool(replace_fix),
+        "position": [float(v) for v in base["position"]] if typed else None, "frame": base.get("frame"),
+        "epoch": base.get("epoch"), "station": _station_of(base), "replace_fix": bool(replace_fix),
         "solution": Path(solution.path).name}}
 
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 import functools
 import logging
 import math
+import re
 import weakref
 from datetime import datetime, timezone
 from typing import NamedTuple
@@ -162,7 +163,8 @@ def legacy_warning(legacy: Legacy, crs: str) -> None:
     if (legacy.what, crs) in said:
         return
     said.add((legacy.what, crs))
-    advice = ("To convert them exactly, import them again with their epoch, or in ETRF2000 (RDN2008)" if legacy.photos
+    advice = ("To convert them exactly, import them again with their epoch (the epoch of the positions file: "
+              "`ppg gnss positions --epoch`, or its field in the window), or in ETRF2000 (RDN2008)" if legacy.photos
               else "To avoid it, give them in the coordinate system of the chunk (in Italy, ETRF2000 / RDN2008)")
     log.warning("%s in %s carry no reference frame and epoch: they are converted by PROJ's own transformation where it "
                 "has one that is no ballpark, else as positions on WGS 84, an approximation - about a metre off in "
@@ -192,6 +194,26 @@ def valid_epoch(epoch) -> float:
     if not (math.isfinite(value) and EPOCHS[0] <= value <= EPOCHS[1]):
         raise _not_a_year(epoch)
     return value
+
+
+_ISO_DATE = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})")
+_DMY_DATE = re.compile(r"(\d{1,2})/(\d{1,2})/(\d{4})")
+
+
+def parse_epoch(text) -> float:
+    """An epoch as a person writes it, as a decimal year: a year with a point or a comma for the decimals (``2026.82``,
+    ``2026,82``) or a day, ``2026-10-27`` or ``27/10/2026`` (its midnight, UTC). A ``ValueError`` for anything else and
+    for a year that is no epoch (:func:`valid_epoch`)."""
+    written = str(text).strip()
+    for pattern, order in ((_ISO_DATE, (1, 2, 3)), (_DMY_DATE, (3, 2, 1))):
+        found = pattern.fullmatch(written)
+        if found:
+            year, month, day = (int(found.group(k)) for k in order)
+            try:
+                return valid_epoch(decimal_year(datetime(year, month, day)))
+            except ValueError:
+                raise _not_a_year(text) from None
+    return valid_epoch(written.replace(",", ".") if written else text)
 
 
 def frame_and_epoch(frame: str, epoch=None) -> tuple[str, float | None]:

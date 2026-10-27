@@ -345,10 +345,10 @@ def test_epn_goes_on_to_the_next_folder_when_one_cannot_be_listed(archives, monk
     (archives.epn / "C2401").mkdir()
     real = download.listing
 
-    def listing(url):
+    def listing(url, progress=None):
         if "C2401" in url:
             raise download.DownloadError("could not be listed", url)
-        return real(url)
+        return real(url, progress)
 
     monkeypatch.setattr(download, "listing", listing)
     c = stations.coordinates(_station("ASIR00ITA"), 2026.5)
@@ -406,10 +406,10 @@ def test_epn_uses_the_saved_solution_when_no_week_can_be_found(archives, monkeyp
     else:
         real = download.listing
 
-        def listing(url):
+        def listing(url, progress=None):
             if re.search(r"/C\d{4}/?$", url):
                 raise download.DownloadError("no answer", url)
-            return real(url)
+            return real(url, progress)
 
         monkeypatch.setattr(download, "listing", listing)
     download._LISTINGS.clear()
@@ -945,6 +945,45 @@ def test_listing_is_kept_ten_minutes(web, monkeypatch):
     assert download.listing(url) == ["two.gz"] and len(web.requests) == 2  # ten minutes have passed
 
 
+def test_a_site_that_does_not_answer_is_given_up_within_half_a_minute(web, tmp_path, monkeypatch, caplog):
+    """A firewall that drops what goes to the port of RING (44324): a listing waits download.LISTING_TIMEOUT for an
+    answer, three times with 2 s and 4 s between the attempts - half a minute at most, not three minutes - while the
+    progress names the site; the error says that the port may be closed. The coordinates of RING give up as soon, and
+    say so in the log. A cancel between two attempts stops at once."""
+    monkeypatch.setattr(stations, "RING_RINEX", "https://webring.gm.ingv.it:44324/rinex/RING/")
+    monkeypatch.setattr(stations, "RING_POS", "https://webring.gm.ingv.it:44324/products/POS/IGS2/{id}/{id}.pos")
+    ring = _made("INGR00ITA", "RING")
+    web.plan = [socket.timeout("timed out") for _ in range(3)]
+    messages = []
+    with pytest.raises(ValueError) as error:
+        stations.download_observations(ring, _t(26, 10), _t(26, 10, 30), tmp_path / "out",
+                                       progress=lambda fraction, message: messages.append(message))
+    assert len(web.requests) == 3 and {timeout for _r, timeout, _k in web.requests} == {download.LISTING_TIMEOUT}
+    assert 3 * download.LISTING_TIMEOUT + sum(web.sleeps) <= 30.0
+    assert "RING is on port 44324" in str(error.value)
+    assert any(message.startswith("Contacting webring.gm.ingv.it:44324") for message in messages), messages
+    # the coordinates of a station of RING alone: the same wait, the port named in the log
+    web.requests.clear()
+    web.sleeps.clear()
+    web.plan = [socket.timeout("timed out") for _ in range(3)]
+    with caplog.at_level(logging.WARNING):
+        found = stations.coordinates(ring, 2026.8)
+    assert found.source == "approximate"
+    assert len(web.requests) == 3 and {timeout for _r, timeout, _k in web.requests} == {stations.RING_TIMEOUT}
+    assert any("RING is on port 44324" in text for text in _warnings(caplog))
+    # cancelled while it waits: no other attempt
+    progress = Progress()
+
+    def first(request, timeout=None, **kwargs):
+        progress.cancel()
+        raise socket.timeout("timed out")
+
+    monkeypatch.setattr(urllib.request, "urlopen", first)
+    download._LISTINGS.clear()
+    with pytest.raises(Cancelled):
+        stations.download_observations(ring, _t(26, 10), _t(26, 10, 30), tmp_path / "out", progress=progress)
+
+
 # --- the observations and the navigation of a station -----------------------------------------------------------------
 #
 # BKG and RING as trees of files in the layout of their archives (their index pages, looked at on 2026-10-27):
@@ -1225,10 +1264,11 @@ def test_names_from_a_listing_stay_in_the_cache_folder(trees, tmp_path, monkeypa
     hostile = [good + ":evil", "D:x.gz", good + "\n", "\n" + good, good + " ", good + "\nx", good + "/..", "../" + good,
                "..\\" + good, "KRAW00POL_R_٢٠٢٦٢٩٩١٠٠٠_01H_30S_MO.crx.gz",  # Arabic-Indic digits
                "KRAW00POL_R_2026299100_01H_30S_MO.crx.gz", "kraw00pol_R_20262991000_01H_30S_MO.crx.gz"]
-    monkeypatch.setattr(download, "listing", lambda url: hostile + ([good] if url.endswith("/nrt/299/10/") else []))
+    monkeypatch.setattr(download, "listing",
+                        lambda url, progress=None: hostile + ([good] if url.endswith("/nrt/299/10/") else []))
     assert _names(stations.observation_files(kraw, _t(26, 10, 20), _t(26, 10, 35), rate="30s")) == [good]
     # with only the hostile names the file is missing, and nothing is fetched
-    monkeypatch.setattr(download, "listing", lambda url: hostile)
+    monkeypatch.setattr(download, "listing", lambda url, progress=None: hostile)
     calls = _fetches(monkeypatch)
     with pytest.raises(ValueError, match="is not in"):
         stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), tmp_path / "base", rate="30s")
@@ -1934,14 +1974,14 @@ def test_navigation_names_from_a_listing_stay_in_their_folders(trees, tmp_path, 
     hostile = [good + ":evil", good + "\n", "\n" + good, "D:" + good, "../" + good, "..\\" + good, good + "/..",
                "BRDC00WRD_S_٢٠٢٦٢٩٩٠٠٠٠_01D_MN.rnx.gz", "brdc00wrd_S_20262990000_01D_MN.rnx.gz",
                "BRDC00WRD_X_20262990000_01D_MN.rnx.gz"]
-    monkeypatch.setattr(download, "listing", lambda url: hostile)
+    monkeypatch.setattr(download, "listing", lambda url, progress=None: hostile)
     calls = _fetches(monkeypatch)
     with pytest.raises(ValueError, match="No broadcast navigation file for 2026-10-26"):
         stations.download_navigation(_t(26, 10), _t(26, 11), tmp_path / "nav")
     assert calls == [] and not list(tmp_path.rglob("*evil*")) and not list(tmp_path.rglob("*.gz"))
     # the good name among them is the one that is taken
     _brdc(trees, _t(26), BRDC00WRD_S=NAV_A)
-    monkeypatch.setattr(download, "listing", lambda url: hostile + [good])
+    monkeypatch.setattr(download, "listing", lambda url, progress=None: hostile + [good])
     files = stations.download_navigation(_t(26, 10), _t(26, 11), tmp_path / "nav")
     assert [f.name for f in files] == ["BRDC00WRD_S_20262990000_01D_MN.rnx"] and len(calls) == 1
 
