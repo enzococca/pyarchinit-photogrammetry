@@ -783,10 +783,27 @@ def test_config_with_the_base_of_the_rinex_header():
     (dict(base_position=None, systems=""), "system"),
     (dict(base_position=None, elevation_mask=90.0), "elevation"),
     (dict(base_position=None, elevation_mask=-1.0), "elevation"),
+    (dict(base_position=None, solution="smoothed"), "solution"),
+    (dict(base_position=None, static_single=True), "static"),  # a single position of a moving rover
+    (dict(base_position=None, mode="dgps", static_single=True), "static"),
 ])
 def test_config_refuses_what_rtklib_cannot_take(arguments, match):
     with pytest.raises(ValueError, match=match):
         ppk.config(**arguments)
+
+
+def test_config_of_a_single_static_solution():
+    """A receiver standing still for a session (a base whose mark is sought), solved forward and written as one
+    position, its antenna and the antenna's height above the mark from its header; by default the forward and backward
+    solutions combined, a position for every epoch."""
+    options = _options(ppk.config((35.16, 139.61, 70.0), mode="static", rover_antenna="*", solution="forward",
+                                  static_single=True))
+    assert options["pos1-posmode"] == "static" and options["pos1-soltype"] == "forward"
+    assert options["out-solstatic"] == "single" and options["ant1-anttype"] == "*"
+    assert _options(ppk.config(None, mode="static-start", static_single=True))["out-solstatic"] == "single"
+    default = _options(ppk.config(None))
+    assert default["pos1-soltype"] == "combined" and "out-solstatic" not in default
+    assert _options(ppk.config(None, solution="backward"))["pos1-soltype"] == "backward"
 
 
 def _rtklib_options_table() -> list[tuple[str, int, str]]:
@@ -830,6 +847,8 @@ def test_every_value_config_writes_is_one_rtklib_takes():
     texts += [ppk.config(None, antenna_file="/work/ppk/rtklib_inputs/antennas.atx"),
               ppk.config((45.0, 11.0, 50.0), antenna_file="/Users/Enzo Cocca/Città/antennas.atx", rover_antenna="*"),
               ppk.config(None, antenna_file="C:\\Users\\enzo\\ppk\\antennas.atx", rover_antenna="TRM57971.00     NONE")]
+    texts += [ppk.config((45.0, 11.0, 50.0), mode="static", rover_antenna="*", solution="forward", static_single=True),
+              ppk.config(None, mode="static-start", solution="backward", static_single=True)]
     seen = set()
     for text in texts:
         for name, value in _options(text).items():
@@ -850,6 +869,8 @@ def test_every_value_config_writes_is_one_rtklib_takes():
     assert ("pos1-navsys", "127") in seen and ("ant2-anttype", "*") in seen and ("misc-timeinterp", "on") in seen
     assert ("pos1-posopt2", "on") in seen and ("ant1-anttype", "*") in seen
     assert ("file-rcvantfile", "/work/ppk/rtklib_inputs/antennas.atx") in seen
+    assert ("out-solstatic", "single") in seen and ("pos1-soltype", "forward") in seen
+    assert ("pos1-soltype", "backward") in seen and ("pos1-soltype", "combined") in seen
     # the reader of the test refuses what RTKLIB refuses, and does not take a label for a longer one
     assert _rtklib_enum("kinematik", "0:single,1:dgps,2:kinematic") is None
     assert _rtklib_enum("combined", "0:forward,1:backward,2:combined,3:combined-nophasereset") == 2
@@ -964,6 +985,25 @@ def test_read_pos_refuses_what_is_not_a_solution_in_ellipsoidal_heights(tmp_path
     path.write_text(text, newline="")
     with pytest.raises(ValueError, match=match):
         ppk.read_pos(path)
+
+
+def test_static_position_reads_the_one_position(tmp_path):
+    """The one position of a single static solution: latitude, longitude, height, its quality and its deviations east,
+    north, up (RTKLIB writes sdn, sde, sdu); a file of several positions is no single static solution."""
+    single = tmp_path / "single.pos"
+    single.write_text(_pos_text([POS_ROWS[1]]), newline="")
+    (lat, lon, h), q, sd = ppk.static_position(single)
+    assert (lat, lon, h) == pytest.approx(POS_ROWS[1][1:4], abs=1e-10) and q == 1
+    assert sd == pytest.approx((0.02, 0.01, 0.03), abs=1e-12)
+    assert all(type(v) is float for v in (lat, lon, h, *sd)) and type(q) is int
+    several = tmp_path / "all.pos"
+    several.write_text(_pos_text(), newline="")
+    with pytest.raises(ValueError, match="all.pos: 3 positions"):
+        ppk.static_position(several)
+    empty = tmp_path / "empty.pos"
+    empty.write_text(_pos_text([]), newline="")
+    with pytest.raises(ValueError, match="nothing was computed"):
+        ppk.static_position(empty)
 
 
 @pytest.mark.parametrize("field, written", [("  0.0100", "     nan"), ("   75.6841", "      -nan"),
@@ -1525,6 +1565,77 @@ def test_solve_leaves_out_the_calibrations_it_keeps_when_rtklib_cannot_read_thei
     # a work folder whose path RTKLIB reads as it is: the calibrations are used
     ok = ppk.solve(rover, base, [PPK_NAV], typed, folder=tmp_path / "Scavo 3" / "ppk")
     assert fake_rtklib()[-1]["antenna"] == _sha256(ATX_EXCERPT.read_bytes()) and ok.warnings == []
+
+
+def test_solve_with_the_options_of_a_static_run(tmp_path, fake_rtklib):
+    """The rover standing still, solved forward and written as one position, its antenna from its header: the options
+    RTKLIB is given are those of ``config``; options it cannot take are refused before anything is written."""
+    work = tmp_path / "work"
+    for wrong, match in ((dict(solution="smoothed"), "solution"), (dict(static_single=True), "static"),
+                         (dict(mode="ppp-static"), "mode")):
+        with pytest.raises(ValueError, match=match):
+            ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], folder=work, **wrong)
+    assert fake_rtklib() == [] and not work.exists()
+    mark = rinex.ecef_to_llh(rinex.header(PPK_BASE).approx_xyz)
+    static = dict(mode="static", rover_antenna="*", solution="forward", static_single=True)
+    solution = ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], mark, folder=work, **static)
+    assert _options(fake_rtklib()[-1]["options"]) == _options(ppk.config(mark, **static))
+    assert solution.rover_calibration is None  # no file of antenna calibrations was given
+
+
+def _rover_of(folder: Path, antenna: str) -> Path:
+    """A RINEX 2 rover whose header names ``antenna`` (its type and radome) as its antenna."""
+    named = _line("5678                " + antenna, "ANT # / TYPE")
+    return _rinex2(folder / "rover.24o", [named if h.endswith("ANT # / TYPE") else h for h in V2_HEADER])
+
+
+# the antenna of the rover's header, the antenna of the base's header, whether RTKLIB is given the file, the entries it
+# takes for the rover and for the base
+ROVER_CALIBRATION_CASES = [
+    ("TRM57971.00     NONE", CALIBRATED, True, "TRM57971.00     NONE", CALIBRATED),
+    ("TRM57971.00     NONE", "LEIAR25.R4      LEIT", True, "TRM57971.00     NONE", None),  # for the rover alone
+    ("LEIAR25.R4      LEIT", CALIBRATED, True, None, CALIBRATED),
+    ("LEIAR25.R4      LEIT", "LEIAR25.R4      LEIT", False, None, None),
+]
+
+
+@pytest.mark.parametrize("rover_antenna, base_antenna, given, rover_entry, base_entry", ROVER_CALIBRATION_CASES)
+def test_solve_calibrates_the_antenna_of_the_rover_when_asked(tmp_path, fake_rtklib, rover_antenna, base_antenna,
+                                                               given, rover_entry, base_entry):
+    """With the antenna of the rover from its header (``rover_antenna="*"``: a receiver standing on a mark, as a base
+    placed by a static baseline) the antenna calibrations are given to RTKLIB when either antenna is in them, and the
+    solution says which entry RTKLIB took for each."""
+    atx = tmp_path / "igs20.atx"
+    shutil.copyfile(ATX_EXCERPT, atx)
+    rover, base = _rover_of(tmp_path, rover_antenna), _base_of(tmp_path, base_antenna)
+    typed = rinex.ecef_to_llh(rinex.header(base).approx_xyz)
+    solution = ppk.solve(rover, base, [PPK_NAV], typed, folder=tmp_path / "work", atx=atx, mode="static",
+                         rover_antenna="*")
+    run = fake_rtklib()[-1]
+    assert (run["antenna"] is not None) == given and ("file-rcvantfile" in _options(run["options"])) == given
+    assert solution.rover_calibration["file"] == "igs20.atx" and solution.rover_calibration["entry"] == rover_entry
+    assert solution.base["antenna_calibration"]["entry"] == base_entry
+    # the rover's antenna not asked for: nothing said of it, the file given for the antenna of the base alone
+    plain = ppk.solve(rover, base, [PPK_NAV], typed, folder=tmp_path / "plain", atx=atx, mode="static")
+    assert plain.rover_calibration is None
+    assert (fake_rtklib()[-1]["antenna"] is not None) == (base_entry is not None)
+
+
+def test_solve_gives_no_calibrations_that_rtklib_would_take_from_a_satellite(tmp_path, fake_rtklib):
+    """RTKLIB's search does not tell a satellite's antenna from a receiver's: an antenna of the rover that it would find
+    in a satellite (BLOCK IIA, 2.25 m up) keeps the file from RTKLIB, also when the antenna of the base is in it."""
+    atx = tmp_path / "igs20.atx"
+    shutil.copyfile(ATX_EXCERPT, atx)
+    rover, base = _rover_of(tmp_path, "BLOCK IIA"), _base_of(tmp_path, CALIBRATED)
+    typed = rinex.ecef_to_llh(rinex.header(base).approx_xyz)
+    solution = ppk.solve(rover, base, [PPK_NAV], typed, folder=tmp_path / "work", atx=atx, mode="static",
+                         rover_antenna="*")
+    run = fake_rtklib()[-1]
+    assert run["antenna"] is None and "file-rcvantfile" not in _options(run["options"])
+    assert solution.rover_calibration is None and solution.base["antenna_calibration"] is None
+    left_out, base_note = solution.warnings
+    assert "igs20.atx" in left_out and "satellite" in left_out and "BLOCK IIA" in left_out and "rover" in left_out
+    assert "phase-centre offset of the antenna TRM29659.00 NONE of the base BASE" in base_note
 
 
 @pytest.mark.skipif(os.name == "nt", reason="RTKLIB is given the short ASCII name of the folder on Windows")

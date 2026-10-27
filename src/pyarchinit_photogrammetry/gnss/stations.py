@@ -1041,6 +1041,14 @@ def observation_files(station: Station, start: datetime, end: datetime, rate: st
     A ``ValueError`` when there are none: it names the files that are missing and where they are not, says when such
     files usually come online if the time is recent, whether the other rate is there, and that BKG or RING could not be
     reached (RING is on the port 44324, which some firewalls close)."""
+    return _observation_files(station, start, end, rate)
+
+
+def _observation_files(station: Station, start: datetime, end: datetime, rate: str = "auto",
+                       other_rate: bool = True) -> list[RemoteFile]:
+    """:func:`observation_files`. With ``other_rate`` False the error for a rate asked for neither looks at the other
+    rate nor says whether it is there: for the 30 s files tried when the 1 s ones were given up, which the error must
+    not send the user back to."""
     _checked(station)
     start, end = _gps_span(start, end)
     rate = _rate(rate)
@@ -1059,7 +1067,8 @@ def observation_files(station: Station, start: datetime, end: datetime, rate: st
         if not whole:
             notes[interval] = why
     other = None
-    if rate != "auto" and any(archive.site not in down for archive in _archives(station)):  # else none was looked at
+    looked = any(archive.site not in down for archive in _archives(station))  # else no archive was looked at
+    if other_rate and rate != "auto" and looked:
         spare = 30.0 if _RATES[rate] == 1.0 else 1.0
         other = (spare, _choose(station, spare, start, end, False, down)[0] is not None)
     raise ValueError(_no_files(station, start, end, notes, down, other))
@@ -1203,9 +1212,11 @@ def download_observations(station: Station, start: datetime, end: datetime, fold
     once, then refused naming it, and is never kept. The base has to cover the flight, by its epochs: epochs from the
     start to the end, and no hole of more than :data:`MAX_HOLE` (30 s) during the flight - a hole of up to that is
     accepted, with a warning in the log, and holes in the margins do not matter. With ``rate="auto"`` a base at 1 s that
-    does not cover the flight is given up for the 30 s files, and the error, if those fail too, has both reasons; with
-    a rate asked for it is an error. A file that is not there, a site that cannot be reached (the message of RING names
-    its port, 44324) and files that do not join are a ``ValueError`` too, and no file is left."""
+    cannot be had whole - it does not cover the flight, a file is no good or cannot be downloaded, the files do not
+    join - is given up for the 30 s files, and the error, if those fail too, has both reasons; not for a missing
+    Hatanaka decoder, which the 30 s files need as much. With a rate asked for it is an error. A file that is not
+    there, a site that cannot be reached (the message of RING names its port, 44324) and files that do not join are a
+    ``ValueError`` too, and no file is left."""
     progress = as_progress(progress)
     _checked(station)
     start, end = _gps_span(start, end)
@@ -1215,15 +1226,16 @@ def download_observations(station: Station, start: datetime, end: datetime, fold
     fine = rate == "auto" and files[0].interval == 1.0  # a base at 1 s may be given up for the files at 30 s
     try:
         out, span = _joined(station, files, start, end, folder, progress.sub(0.0, 0.7) if fine else progress)
-    except _NotCovered as hole:
-        if not fine:
+    except ValueError as first:
+        if not fine or _native.CRINEX_MISSING in str(first):  # the 30 s files are Hatanaka too
             raise
-        log.warning("%s; trying the 30 s files", hole)  # the message starts with the station
+        log.warning("%s; trying the 30 s files", first)  # the message names the station or its file
         try:
-            out, span = _joined(station, observation_files(station, start, end, "30s"), start, end, folder,
-                                progress.sub(0.7, 0.3))
+            # the error of the 30 s files does not send the user back to the 1 s files: they were just given up
+            out, span = _joined(station, _observation_files(station, start, end, "30s", other_rate=False), start, end,
+                                folder, progress.sub(0.7, 0.3))
         except ValueError as other:
-            raise ValueError(f"{hole}\nThe 30 s files, tried next, do not do either: {other}") from other
+            raise ValueError(f"{first}\nThe 30 s files, tried next, do not do either: {other}") from other
     progress(1.0, f"{station.id}: observations from {span[0]:%Y-%m-%d %H:%M:%S} to {span[1]:%H:%M:%S} (GPS time)")
     return out
 

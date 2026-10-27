@@ -41,6 +41,8 @@ TIME_RESOLUTION_S = 1e-3  # the times of a solution are written to the milliseco
 _SAME_EPOCH_S = 1e-6  # a time this close to an epoch is the epoch: times of 8e8 s are floats to 1.2e-7 s
 
 MODES = ("kinematic", "static", "static-start", "dgps")  # RTKLIB's positioning modes that work with a base
+STATIC_MODES = ("static", "static-start")  # those of a rover standing still
+SOLUTIONS = ("forward", "backward", "combined")  # RTKLIB's pos1-soltype: the epochs in their order, reversed, or both
 # the bits of RTKLIB's pos1-navsys, by the letter of the constellation in satellite ids
 SYSTEM_BITS = {"G": 1, "S": 2, "R": 4, "E": 8, "J": 16, "C": 32, "I": 64}
 
@@ -102,6 +104,9 @@ class Solution:
     # the files of the run, absolute: "rover" and "base" (paths; "base" a list of paths when the base is in several
     # files), "navs" (a list of paths); empty from read_pos
     inputs: dict = field(default_factory=dict)
+    # with an antenna of the rover (solve's rover_antenna), what the antenna file gives it, as
+    # base["antenna_calibration"] for the base: None without an antenna of the rover or without a file given to RTKLIB
+    rover_calibration: dict | None = None
 
 
 @dataclass
@@ -216,11 +221,15 @@ def _path_problem(path: str) -> str | None:
 
 def config(base_position: Sequence[float] | None, mode: str = "kinematic", elevation_mask: float = 15.0,
            systems: str | Iterable[str] = "all", interpolate_base: bool = False,
-           antenna_file: str | os.PathLike | None = None, rover_antenna: str = "") -> str:
+           antenna_file: str | os.PathLike | None = None, rover_antenna: str = "", solution: str = "combined",
+           static_single: bool = False) -> str:
     """The options file of RTKLIB for a PPK run (the text of rnx2rtkp's -k file). The rover moving (``mode``
-    "kinematic") or still ("static", "static-start"; "dgps" for code only); the forward and backward solutions
-    combined, the ambiguities fixed and held; the satellites ``elevation_mask`` degrees above the horizon or more, of
-    the constellations ``systems`` ("all" or their letters G R E C J I S), on two frequencies. The base at
+    "kinematic") or still ("static", "static-start"; "dgps" for code only); the epochs solved forward and backward and
+    the two solutions combined (``solution`` "combined"; "forward" or "backward" for one of them), the ambiguities
+    fixed and held; the satellites ``elevation_mask`` degrees above the horizon or more, of the constellations
+    ``systems`` ("all" or their letters G R E C J I S), on two frequencies. With ``static_single`` and a rover standing
+    still RTKLIB writes one position for the whole session (``out-solstatic=single``: the last of the epochs with the
+    best quality, at the time of the first epoch it solved) instead of one for every epoch. The base at
     ``base_position`` (latitude, longitude in degrees, height above the ellipsoid in metres: the mark it stands on),
     to which RTKLIB adds the antenna height of the base's RINEX header (ANTENNA: DELTA H/E/N), as RINEX means it.
     With None the base is at the position of its RINEX header (rinexhead): RTKLIB-EX adds the antenna height once
@@ -234,14 +243,20 @@ def config(base_position: Sequence[float] | None, mode: str = "kinematic", eleva
     the same search) and applies the offset of its phase centre from the reference point, and the variations of it
     with the angle from the zenith; an antenna that is not in the file gets nothing. ``rover_antenna`` is the antenna
     of the rover for the same search: "*" for the one of the header of its RINEX file, "" (the default) for none,
-    which is right for a drone. A path is refused that RTKLIB would read differently from the way it is written
-    (:func:`_path_problem`). Only option names of RTKLIB's table; the only file is ``antenna_file``."""
+    which is right for a drone; with "*" RTKLIB also takes the antenna height above the mark from that header, so the
+    positions are of the mark the rover stands on. A path is refused that RTKLIB would read differently from the way it
+    is written (:func:`_path_problem`). Only option names of RTKLIB's table; the only file is ``antenna_file``."""
     if mode not in MODES:
         raise ValueError(f"positioning mode {mode!r}: it is one of {', '.join(MODES)}")
+    if solution not in SOLUTIONS:
+        raise ValueError(f"solution type {solution!r}: it is one of {', '.join(SOLUTIONS)}")
+    if static_single and mode not in STATIC_MODES:
+        raise ValueError(f"one position for the whole session (static_single) is for a rover standing still: the mode "
+                         f"is one of {', '.join(STATIC_MODES)}, not {mode!r}")
     mask = float(elevation_mask)
     if not 0.0 <= mask < 90.0:
         raise ValueError(f"the elevation mask, {elevation_mask}, is not between 0 and 90 degrees")
-    options = [("pos1-posmode", mode), ("pos1-frequency", "l1+l2"), ("pos1-soltype", "combined"),
+    options = [("pos1-posmode", mode), ("pos1-frequency", "l1+l2"), ("pos1-soltype", solution),
                ("pos1-elmask", f"{mask:g}"), ("pos1-navsys", str(_navsys(systems))), ("pos2-armode", "fix-and-hold")]
     if interpolate_base:
         options.append(("misc-timeinterp", "on"))
@@ -268,6 +283,8 @@ def config(base_position: Sequence[float] | None, mode: str = "kinematic", eleva
         options += [("file-rcvantfile", path), ("pos1-posopt2", "on")]
     options += [("out-solformat", "llh"), ("out-outhead", "on"), ("out-timesys", "gpst"), ("out-timeform", "tow"),
                 ("out-height", "ellipsoidal")]
+    if static_single:
+        options.append(("out-solstatic", "single"))
     return "# RTKLIB options of a PPK run (pyarchinit-photogrammetry)\n" + "".join(
         f"{name:<18}={value}\n" for name, value in options)
 
@@ -375,6 +392,21 @@ def read_pos(path: str | Path) -> Solution:
     return Solution(times=np.array(times, dtype=np.float64)[order], llh=table[:, 0:3].copy(), q=q.astype(int),
                     ns=ns.astype(int), sd=table[:, [6, 5, 7]].copy(),  # RTKLIB writes sdn, sde, sdu
                     base={}, path=path, warnings=warnings)
+
+
+def static_position(path: str | Path) -> tuple[tuple[float, float, float], int, tuple[float, float, float]]:
+    """The one position of a static solution that RTKLIB wrote as a single one (:func:`config` ``static_single``) in
+    the file ``path``: ``((latitude, longitude, height), Q, (east, north, up))`` - degrees and metres above the
+    ellipsoid, RTKLIB's quality (1 fix, 2 float: :data:`QUALITY`) and the standard deviations in metres, which the file
+    has as sdn, sde, sdu. A ``ValueError`` for what :func:`read_pos` refuses (a file without positions among them) and
+    for a file of more than one position: it is no single static solution."""
+    solution = read_pos(path)
+    if len(solution.times) != 1:
+        raise ValueError(f"{solution.path.name}: {len(solution.times)} positions, not the one of a single static "
+                         "solution (out-solstatic=single)")
+    lat, lon, h = (float(v) for v in solution.llh[0])
+    east, north, up = (float(v) for v in solution.sd[0])  # read_pos has them east, north, up
+    return (lat, lon, h), int(solution.q[0]), (east, north, up)
 
 
 # --- the antenna at the time of a shot --------------------------------------------------------------------------
@@ -626,7 +658,7 @@ def antenna_type(info: rinex.RinexInfo) -> str:
     return " ".join((info.antenna or "").split())
 
 
-def _same_antenna(entry: str, kind: str) -> bool:
+def same_antenna(entry: str, kind: str) -> bool:
     """The entry of an antenna file is the antenna ``kind`` of a header: the same type and the same radome, a radome the
     header omits being NONE (the first two words are compared, as RTKLIB's search uses no more)."""
     def words(text: str) -> tuple[str, str]:
@@ -663,7 +695,7 @@ def antenna_warning(name: str, info: rinex.RinexInfo, calibration: dict | None =
         return (f"the antenna {kind} of the base {name} is not in {file} with its radome: RTKLIB used the calibration "
                 f"of {used}, the same antenna type with another radome, so the phase-centre offset can be a few "
                 "millimetres off")
-    if not _same_antenna(entry, kind):
+    if not same_antenna(entry, kind):
         return (f"the antenna {kind} of the base {name} is not in {file} as its RINEX header writes it: RTKLIB used "
                 f"the calibration of {used}, the nearest name it found, so the phase-centre offset can be a few "
                 "millimetres off, and more if it is another antenna")
@@ -694,16 +726,25 @@ def _atx_source(atx) -> tuple[Path | None, list[str], bool]:
     return path, [], False
 
 
-def _calibration(source: Path | None, info: rinex.RinexInfo) -> dict | None:
-    """The record of what the antenna file ``source`` gives the antenna of the base whose RINEX header is ``info``
-    (``Solution.base["antenna_calibration"]``); None without a file."""
+def _satellite_found(source: Path | None, kind: str) -> str | None:
+    """The antenna of a satellite that RTKLIB's search finds in the antenna file ``source`` for the receiver antenna
+    ``kind`` - RTKLIB does not tell a satellite's antenna from a receiver's: "BLOCK IIA" is found by a header that holds
+    those words - or None when it finds a receiver's antenna or none."""
     if source is None:
         return None
-    entry, without_radome = antex.lookup(source, antenna_type(info))
-    if entry is not None and entry not in antex.receiver_antennas(source):
-        # RTKLIB's search does not tell a satellite's antenna from a receiver's ("BLOCK IIA" is found by a header that
-        # holds those words) but a satellite's offsets are no receiver's: such an entry is no calibration, and the file
-        # is not given to RTKLIB, which would apply it
+    entry = antex.lookup(source, kind)[0]
+    return entry if entry is not None and entry not in antex.receiver_antennas(source) else None
+
+
+def _calibration(source: Path | None, kind: str) -> dict | None:
+    """The record of what the antenna file ``source`` gives the antenna ``kind`` - its type and radome as a RINEX
+    header writes them (``Solution.base["antenna_calibration"]``); None without a file."""
+    if source is None:
+        return None
+    entry, without_radome = antex.lookup(source, kind)
+    if _satellite_found(source, kind):
+        # a satellite's offsets are no receiver's: such an entry is no calibration, and the file is not given to
+        # RTKLIB, which would apply it
         entry, without_radome = None, False
     return {"file": source.name, "entry": entry, "without_radome": without_radome,
             "up_m": antex.up_offset(source, entry) if entry is not None else None}
@@ -822,7 +863,8 @@ def _remove(*paths: Path) -> None:
 
 def solve(rover: str | Path, base: str | Path | Sequence[str | Path], navs=None,
           base_position: BasePosition | Sequence[float] | None = None, *, folder: str | Path,
-          atx: str | Path | None = "auto") -> Solution:
+          atx: str | Path | None = "auto", mode: str = "kinematic", rover_antenna: str = "",
+          solution: str = "combined", static_single: bool = False) -> Solution:
     """The PPK solution of the antenna of ``rover`` (its RINEX observations) against ``base`` (the RINEX observations
     of a base: one file that covers the whole flight, or several that make it - pieces of an hour, say - which
     :func:`rinex.join` joins in the order of their time, in any order given; a hole between them inside the time of
@@ -846,7 +888,18 @@ def solve(rover: str | Path, base: str | Path | Sequence[str | Path], navs=None,
     file, as :func:`.atx.lookup` does, and ``Solution.base["antenna_calibration"]`` says which entry it took; the
     antenna not being in the file, or not as the header writes it, is a warning (:func:`antenna_warning`), as is,
     without a file, that the offset is not applied and every height is that much too low.
-    ``Solution.base["position"]`` is ``[lon, lat, h]``. Before RTKLIB runs, a ``ValueError`` when the rover and the
+    ``Solution.base["position"]`` is ``[lon, lat, h]``.
+
+    The run is the rover moving with the forward and backward solutions combined, or what ``mode``, ``rover_antenna``,
+    ``solution`` and ``static_single`` make of it, as in :func:`config`: a receiver standing still on a mark, solved
+    forward into one position for the whole session, its antenna and the antenna's height above the mark from its
+    header, say (the user's own base placed by a static baseline, :func:`.base.baseline`). With an antenna of the rover
+    the file of antenna calibrations is given to RTKLIB when either antenna is in it, and never when RTKLIB's search
+    would find a satellite's antenna for one of them (a note says so); ``Solution.rover_calibration`` says which entry
+    RTKLIB took for the rover's antenna, for the caller to tell. Options RTKLIB cannot take are a ``ValueError``
+    before any file is read or written.
+
+    Before RTKLIB runs, a ``ValueError`` when the rover and the
     base have no time in common, when there is no navigation file, when the base has no position, when the files of
     the base are not of one receiver (:func:`rinex.join`), when an input is in ``folder``, when a path RTKLIB would be
     given is too long (:data:`MAX_PATH_BYTES`) or has a "#" (:func:`_path_problem`), or when the file named by ``atx``
@@ -860,19 +913,22 @@ def solve(rover: str | Path, base: str | Path | Sequence[str | Path], navs=None,
     (``solution-<YYYYmmdd-HHMMSS>.conf`` and ``.pos``), and the solutions of earlier runs stay; a run that gives no
     solution leaves nothing. A ``ValueError`` when RTKLIB computed nothing (with its message), a ``RuntimeError`` when
     it stopped; a message of RTKLIB that is an error but came with positions is a warning of the solution."""
+    run = {"mode": mode, "rover_antenna": rover_antenna, "solution": solution, "static_single": static_single}
+    config(None, **run)  # what RTKLIB cannot take is refused before anything is read or written
     rover, pieces = Path(rover), _base_files(base)
     if len(pieces) == 1:
-        return _solve(rover, pieces, pieces[0], [], navs, base_position, folder, atx)
+        return _solve(rover, pieces, pieces[0], [], navs, base_position, folder, atx, run)
     with tempfile.TemporaryDirectory(prefix="ppg-base-") as scratch:  # the base in one file, for the length of the run
         joined = Path(scratch) / "base.obs"
         _info, holes = rinex.join(pieces, joined)
-        return _solve(rover, pieces, joined, holes, navs, base_position, folder, atx)
+        return _solve(rover, pieces, joined, holes, navs, base_position, folder, atx, run)
 
 
 def _solve(rover: Path, pieces: list[Path], base: Path, holes: list[tuple[datetime, datetime]], navs,
-           base_position: BasePosition | Sequence[float] | None, folder: str | Path, atx) -> Solution:
+           base_position: BasePosition | Sequence[float] | None, folder: str | Path, atx, run: dict) -> Solution:
     """:func:`solve` with the files of the base - ``pieces``, as the user gave them - and the file that RTKLIB is given
-    a copy of: that one file, or the file the pieces make joined, with the ``holes`` (GPS time) between them."""
+    a copy of: that one file, or the file the pieces make joined, with the ``holes`` (GPS time) between them. ``run``
+    holds the options of :func:`config` that are not the base's: mode, rover_antenna, solution, static_single."""
     rover_info, rover_span = _observations(rover, "rover")
     base_info, base_span = _observations(base, "base")
     names = _names(pieces)
@@ -914,17 +970,32 @@ def _solve(rover: Path, pieces: list[Path], base: Path, holes: list[tuple[dateti
     inputs = [(rover, rover_info, copies / "rover.obs"), (base, base_info, copies / "base.obs")]
     inputs += [(path, info, copies / f"nav{i}.nav") for i, (path, info) in enumerate(nav_files, 1)]
     conf, out, events = _run_files(work)
-    # the file is given to RTKLIB when the antenna of the base is in it (without it RTKLIB would apply nothing, and the
-    # copy of a file of 60 MB would be for nothing): a copy among the others, its path in the options, which RTKLIB has
-    # to read back as it is
-    calibration = _calibration(antenna_source, base_info)
-    antenna_copy = copies / ANTENNA_COPY if calibration and calibration["entry"] is not None else None
+    # the file is given to RTKLIB when the antenna of the base, or the one of the rover it is told to look for, is in
+    # it (without, RTKLIB would apply nothing, and the copy of a file of 60 MB would be for nothing): a copy among the
+    # others, its path in the options, which RTKLIB has to read back as it is
+    calibration = _calibration(antenna_source, antenna_type(base_info))
+    rover_kind = None  # the antenna of the rover RTKLIB looks for: the one of its header ("*"), or the one named
+    if run["rover_antenna"]:
+        rover_kind = antenna_type(rover_info) if run["rover_antenna"] == "*" else " ".join(run["rover_antenna"].split())
+    rover_calibration = None if rover_kind is None else _calibration(antenna_source, rover_kind)
+    found = any(record is not None and record["entry"] is not None for record in (calibration, rover_calibration))
+    searched = ((f"the base {base_record['name']}", antenna_type(base_info)),
+                (f"the rover {base_name(rover, rover_info)}", rover_kind))
+    satellites = [(who, kind, entry) for who, kind in searched
+                  if kind is not None and (entry := _satellite_found(antenna_source, kind))]
+    if found and satellites:  # RTKLIB would apply the offsets of a satellite's antenna to a receiver
+        who, kind, entry = satellites[0]
+        antenna_notes.append(f"the antenna calibrations of {antenna_source.name} are left out of the run: for the "
+                             f"antenna {kind} of {who} RTKLIB's search finds {' '.join(entry.split())}, the antenna of "
+                             "a satellite, whose offsets are no receiver's")
+        calibration, rover_calibration, found = None, None, False
+    antenna_copy = copies / ANTENNA_COPY if found else None
     problem = _path_problem(str(antenna_copy)) if antenna_copy else None
     if problem and not automatic:
         raise ValueError(problem)
     if problem:  # the file the program keeps: the run is a good run without it
         antenna_notes.append(f"the antenna calibrations of {antenna_source.name} are left out of the run: {problem}")
-        calibration, antenna_copy = None, None
+        calibration, rover_calibration, antenna_copy = None, None, None
     warnings += antenna_notes
     note = antenna_warning(base_record["name"], base_info, calibration)
     if note:
@@ -934,7 +1005,8 @@ def _solve(rover: Path, pieces: list[Path], base: Path, holes: list[tuple[dateti
     try:
         # always the position, also the one of the header: RTKLIB 2.4.3 adds the antenna height twice with rinexhead.
         # In the encoding of the system's paths (the path of the antenna file is in it), as RTKLIB opens them
-        text = config(mark, interpolate_base=interpolate, antenna_file=str(antenna_copy) if antenna_copy else None)
+        text = config(mark, interpolate_base=interpolate, antenna_file=str(antenna_copy) if antenna_copy else None,
+                      **run)
         conf.write_bytes(os.fsencode(text))
         try:
             _fresh_folder(copies)
@@ -965,5 +1037,6 @@ def _solve(rover: Path, pieces: list[Path], base: Path, holes: list[tuple[dateti
     solution.inputs = {"rover": str(rover.absolute()),
                        "base": str(pieces[0].absolute()) if len(pieces) == 1 else [str(p.absolute()) for p in pieces],
                        "navs": [str(path.absolute()) for path, _ in nav_files]}
+    solution.rover_calibration = rover_calibration
     solution.warnings = warnings + solution.warnings
     return solution

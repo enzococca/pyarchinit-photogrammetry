@@ -1540,16 +1540,26 @@ def test_a_gap_in_the_base_during_the_flight_is_refused_but_not_one_in_the_margi
         stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), base, rate="30s")
 
 
-def test_pieces_that_cannot_be_joined_are_refused_naming_the_station(trees, tmp_path):
-    """The pieces of a station have one antenna: a change in the middle of them is reported, not hidden."""
-    kraw = _made("KRAW00POL", "EPN")
-    _quarters(trees.bkg, kraw.id, _t(26, 10), _t(26, 11))
-    piece = trees.bkg / "EUREF/highrate/2026/299/k/KRAW00POL_R_20262991030_15M_01S_MO.crx.gz"
+def _another_antenna(piece: Path) -> None:
+    """The piece of a station with another antenna in its header: it does not join the pieces before it."""
     piece.write_bytes(gzip.compress(gzip.decompress(piece.read_bytes()).replace(b"ASH701945C_M    SNOW",
                                                                                 b"TRM59800.00     NONE")))
+
+
+def test_pieces_that_cannot_be_joined_are_refused_naming_the_station(trees, tmp_path):
+    """The pieces of a station have one antenna: a change in the middle of them is reported, not hidden. With "auto"
+    the 30 s files are tried next, and there are none here: both reasons are given, and nothing says to ask for the 1 s
+    files that were just tried. With the rate asked for, no other rate is tried."""
+    kraw = _made("KRAW00POL", "EPN")
+    _quarters(trees.bkg, kraw.id, _t(26, 10), _t(26, 11))
+    _another_antenna(trees.bkg / "EUREF/highrate/2026/299/k/KRAW00POL_R_20262991030_15M_01S_MO.crx.gz")
     with pytest.raises(ValueError, match="KRAW00POL: .*TRM59800.00") as error:
         stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), tmp_path / "base")
-    assert "tried next" not in str(error.value)  # pieces that do not join are no hole: "auto" has no 30 s files to try
+    message = str(error.value)
+    assert "tried next" in message and "30S_MO.crx.gz is not in" in message and "ask for the rate" not in message
+    with pytest.raises(ValueError, match="KRAW00POL: .*TRM59800.00") as error:
+        stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), tmp_path / "base", rate="1s")
+    assert "tried next" not in str(error.value)
     assert not (tmp_path / "base").exists() or not list((tmp_path / "base").iterdir())
 
 
@@ -1773,6 +1783,7 @@ def test_when_the_fall_back_fails_too_both_reasons_are_given(trees, tmp_path, mo
     assert "10:20:09 to 10:20:45" in message  # why the base at 1 s was not taken
     assert "tried next" in message  # and why the 30 s files were not taken either
     assert "KRAW00POL_[RSU]_20262990000_01D_30S_MO.crx.gz is not in" in message
+    assert "ask for the rate" not in message  # the 1 s files are there, and were just given up
     # the file of the day has a hole of its own in the flight
     _day(trees.bkg, kraw.id, _t(26), _t(26, 10), _t(26, 11), skip=[(_t(26, 10, 19, 30), _t(26, 10, 21))])
     download._LISTINGS.clear()
@@ -1781,6 +1792,51 @@ def test_when_the_fall_back_fails_too_both_reasons_are_given(trees, tmp_path, mo
     message = str(error.value)
     assert "10:20:09 to 10:20:45" in message and "10:19:00 to 10:21:00" in message and "tried next" in message
     assert not base.exists() or not list(base.glob("*.obs"))
+
+
+# What can keep a base at 1 s from being had whole, other than a hole, done to the second of its two pieces, and the
+# end of the flight: the second piece holds its last half minute, or only the margin after it
+ONE_SECOND_TROUBLES = {
+    "pieces that do not join": (_another_antenna, _t(26, 10, 30, 30)),
+    "a piece that is no good": (lambda piece: piece.write_bytes(_HTML), _t(26, 10, 30, 30)),
+    "a piece with only a header": (lambda piece: piece.write_bytes(_rinex_gz(_t(26, 10, 30), _t(26, 10, 30), step=1)),
+                                   _t(26, 10, 30, 30)),
+    "a piece of the margin that is no good": (lambda piece: piece.write_bytes(_HTML), _t(26, 10, 29, 50)),
+}
+
+
+@pytest.mark.parametrize("trouble", list(ONE_SECOND_TROUBLES))
+def test_auto_falls_back_to_thirty_seconds_when_the_one_second_pieces_cannot_be_used(trees, tmp_path, monkeypatch,
+                                                                                    caplog, trouble):
+    """With "auto" a base at 1 s that cannot be had whole for any reason - its pieces do not join, one is no good even
+    when downloaded again (also one that only holds the margin), one has no epochs - is given up for the 30 s files,
+    as one that does not cover the flight is."""
+    monkeypatch.setattr(stations, "MARGIN", timedelta(minutes=1))
+    kraw = _made("KRAW00POL", "EPN")
+    _quarters(trees.bkg, kraw.id, _t(26, 10, 15), _t(26, 10, 45), step=1)  # the flight needs the pieces of 10:15, 10:30
+    _day(trees.bkg, kraw.id, _t(26), _t(26, 10), _t(26, 11))
+    damage, end = ONE_SECOND_TROUBLES[trouble]
+    damage(trees.bkg / "EUREF/highrate/2026/299/k/KRAW00POL_R_20262991030_15M_01S_MO.crx.gz")
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        out = stations.download_observations(kraw, _t(26, 10, 29, 30), end, tmp_path / "base")
+    assert rinex.header(out).interval == 30.0 and _epochs(out) == 120  # the file of the day
+    assert any("trying the 30 s files" in warning for warning in _warnings(caplog))
+
+
+def test_a_missing_decoder_is_no_reason_to_try_the_thirty_seconds_files(trees, tmp_path, monkeypatch):
+    """Without a Hatanaka decoder the 30 s files could not be read either: the error says what to install, at once."""
+    monkeypatch.setattr(stations, "MARGIN", timedelta(minutes=1))
+    kraw = _made("KRAW00POL", "EPN")
+    _one_second_base(trees, kraw)
+    calls = _fetches(monkeypatch)
+
+    def no_decoder(path, folder=None):
+        raise ValueError(f"{Path(path).name}: {_native.CRINEX_MISSING}")
+
+    monkeypatch.setattr(rinex, "plain", no_decoder)
+    with pytest.raises(ValueError, match="native core") as error:
+        stations.download_observations(kraw, *SHORT, tmp_path / "base")
+    assert "tried next" not in str(error.value) and len(calls) == 1
 
 
 def test_auto_that_chose_thirty_seconds_has_nothing_to_fall_back_to(trees, tmp_path, monkeypatch):
