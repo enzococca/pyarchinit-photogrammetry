@@ -2063,6 +2063,253 @@ def _marker_report(chunk: Chunk) -> dict:
     return out
 
 
+GNSS_MODES = ("auto", "off", "plain", "bias")  # the GNSS positions of the photos in optimize_cameras
+GNSS_PRIOR_MAX_M = 0.5  # m: positions this accurate (mean horizontal accuracy: fix, float, PPK) hold the block
+GNSS_PRIOR_SPREAD = 50.0  # the positions must spread across the block this many times their accuracy
+BEND_FACTOR = 3.0  # an optimisation that leaves the cameras farther from their accurate positions than this
+BEND_MARGIN_M = 0.3  # many times the offsets before, and this much more, is undone
+
+
+def accurate_gnss(camera) -> bool:
+    """The position of ``camera`` (its enabled reference) is accurate enough to hold the block in the
+    optimisation: a mean horizontal accuracy within :data:`GNSS_PRIOR_MAX_M` - an RTK or PPK fix or float, not a
+    single position nor the GPS of a drone without RTK (5/5/10 m)."""
+    ref = camera.reference
+    if not (camera.enabled and ref.enabled and ref.location and ref.accuracy):
+        return False
+    acc = np.resize(np.asarray(ref.accuracy, float).reshape(-1), 3)
+    return bool(np.all(np.isfinite(acc)) and float(np.mean(acc[:2])) <= GNSS_PRIOR_MAX_M)
+
+
+def _gnss_states(cameras) -> dict:
+    """{RTK state: photos} of ``cameras`` (``"fix"``, ``"float"``, ...; ``"none"`` for a position without one)."""
+    from collections import Counter
+
+    return dict(Counter((c.meta.get("gnss") or {}).get("status") or "none" for c in cameras))
+
+
+def _held_positions(chunk: Chunk, cameras) -> tuple[list, dict, str | None]:
+    """The cameras among ``cameras`` whose accurate GNSS positions (:func:`accurate_gnss`) can hold the block, and
+    those positions in the internal frame: ``(cameras, {key: position}, why not)``. Each position is read in the
+    coordinate system of the chunk (one in another system is converted; one that cannot be - a chunk in local
+    coordinates and a position in a real system - is left out) and brought into the internal frame by the
+    chunk's transform. Three or more are needed, spread across the block (the second axis of their spread at
+    least :data:`GNSS_PRIOR_SPREAD` times their accuracy): positions along a single strip cannot tell how the
+    block is turned about it, and the adjustment, which first places the block on them, would turn it at random.
+    ``why`` is ``"none"`` (no accurate position) or ``"place"`` (they cannot place the block)."""
+    from ..core import crs as crs_mod
+    from ..markers import gcp
+
+    cams = [c for c in cameras if accurate_gnss(c)]
+    if not cams:
+        return [], {}, "none"
+    if crs_mod.is_geographic(chunk.crs):
+        return [], {}, "place"
+    world, _crs = gcp.camera_references(chunk, cams, chunk.crs)
+    cams = [c for c in cams if c.key in world and np.all(np.isfinite(world[c.key]))]
+    if len(cams) < 3:
+        return [], {}, "place"
+    xyz = np.array([world[c.key] for c in cams], float)
+    centred = xyz - xyz.mean(axis=0)
+    axes = np.linalg.svd(centred, full_matrices=False)[2]
+    across = float(np.ptp(centred @ axes[1]))
+    typical = float(np.median([np.mean(np.resize(np.asarray(c.reference.accuracy, float), 3)[:2]) for c in cams]))
+    if not across >= GNSS_PRIOR_SPREAD * typical:
+        return [], {}, "place"
+    internal = chunk.to_internal(xyz)
+    return cams, {c.key: internal[n] for n, c in enumerate(cams)}, None
+
+
+def gnss_hold(chunk: Chunk, use_markers: bool = True) -> dict:
+    """What the GNSS positions of the photos do in :func:`optimize_cameras` with COLMAP and ``gnss="auto"``:
+    ``{"photos", "states", "accurate", "why"}`` - ``photos`` aligned photos hold the block with their positions
+    (``states``: {RTK state: photos}); 0 when they do not, and ``why``: ``"none"`` (no aligned photo has an
+    accurate position, :func:`accurate_gnss`), ``"markers"`` (3 or more control points or 2 or more control
+    scale bars hold it with ``use_markers``), ``"rigs"`` (faces of 360-degree photos) or ``"place"`` (the
+    positions cannot place the block: fewer than three, along a line, a chunk in local coordinates);
+    ``accurate``: the aligned photos with an accurate position."""
+    from ..markers import gcp
+
+    accurate = [c for c in chunk.aligned_cameras if accurate_gnss(c)]
+    out = {"photos": 0, "states": _gnss_states(accurate), "accurate": len(accurate), "why": None}
+    controls = [m for m in chunk.markers if not m.checkpoint and m.reference.enabled and m.reference.location]
+    if not accurate:
+        out["why"] = "none"
+    elif use_markers and (len(controls) >= 3 or len(gcp.control_scalebars(chunk)) >= 2):
+        out["why"] = "markers"
+    elif (chunk.meta.get("sfm") or {}).get("rigs"):
+        out["why"] = "rigs"
+    else:
+        cams, _positions, out["why"] = _held_positions(chunk, accurate)
+        out["photos"] = len(cams)
+        out["states"] = _gnss_states(cams) if cams else out["states"]
+    return out
+
+
+def _gnss_priors(chunk: Chunk, rec) -> tuple[list, list]:
+    """COLMAP pose priors for the images of ``rec`` whose photos have positions that can hold the block
+    (:func:`_held_positions`): the position in the internal frame, its covariance the accuracies squared on the
+    axes of the chunk's system carried into the internal frame (the rotation and the scale of
+    ``chunk.transform``). Returns ``(priors, cameras)``; none for a reconstruction with rigs."""
+    import pycolmap
+
+    if any(len(list(f.image_ids)) > 1 for f in rec.frames.values()):
+        return [], []
+    names = {v: int(k) for k, v in chunk.meta["sfm"]["names"].items()}
+    by_key = {c.key: c for c in chunk.cameras}
+    images = {names[im.name]: iid for iid, im in rec.images.items() if im.has_pose and names.get(im.name) in by_key}
+    cams, internal, _why = _held_positions(chunk, [by_key[k] for k in images])
+    if not cams:
+        return [], []
+    s = float(chunk.scale)
+    rot = np.asarray(chunk.transform, float)[:3, :3] / s
+    priors = []
+    for cam in cams:
+        acc = np.maximum(np.resize(np.asarray(cam.reference.accuracy, float).reshape(-1), 3), 1e-3)
+        prior = pycolmap.PosePrior(position=np.asarray(internal[cam.key], float),
+                                   position_covariance=rot.T @ np.diag(acc ** 2) @ rot / s ** 2,
+                                   coordinate_system=pycolmap.PosePriorCoordinateSystem.CARTESIAN)
+        prior.corr_data_id = rec.images[images[cam.key]].data_id
+        priors.append(prior)
+    return priors, cams
+
+
+def _adjust_with_priors(rec, opts, priors, fixed_cameras=()) -> None:
+    """Bundle adjustment of the aligned images of ``rec`` held by the GNSS positions of the photos (COLMAP's
+    pose-prior adjuster, ``priors`` from :func:`_gnss_priors`): it places the block on the positions, then adjusts
+    tie points and positions together, each position weighted by its covariance. The positions fix the gauge
+    and the soft modes of a free adjustment - the dome of a nadir block over flat ground, which the radial
+    distortion and the focal length make up for in the photos.
+
+    The focal length found by the alignment is held (the distortion, and the principal point when asked, are
+    refined): with the positions holding the cameras, photos taken looking down from one height cannot tell the
+    focal length from the distance to the ground - the focal length and every depth scaled together (the radial
+    terms with them) leave each photo as it is - and refined it slid along that trade (a synthetic block at 40 m:
+    from 1000 to 180 or 6900 px, the cameras on their positions, the ground 33 m above or 234 m below its
+    place). The intrinsics of ``fixed_cameras`` are held."""
+    import copy
+
+    import pycolmap
+
+    opts = copy.deepcopy(opts)
+    opts.refine_focal_length = False
+    config = pycolmap.BundleAdjustmentConfig()
+    for iid, image in rec.images.items():
+        if image.has_pose:
+            config.add_image(iid)
+    for cid in fixed_cameras:
+        config.set_constant_cam_intrinsics(cid)
+    if fixed_cameras:
+        opts.refine_sensor_from_rig = False
+    prior_opts = pycolmap.PosePriorBundleAdjustmentOptions()
+    pycolmap.create_pose_prior_bundle_adjuster(opts, prior_opts, config, priors, rec).solve()
+
+
+NET_CAMERAS = 5  # the safety net judges a block with at least this many accurate positions
+
+
+def _gnss_offsets(chunk: Chunk, placed: bool = False) -> dict:
+    """{camera key: distance in metres from its position} of the aligned photos with an accurate GNSS position
+    (:func:`accurate_gnss`) in a georeferenced chunk (the positions and the cameras of
+    :func:`markers.gcp.camera_reference_errors`). ``placed``: once the cameras are placed on the positions by the
+    similarity that fits them best - the shape of the block against the shape of the positions, whatever the
+    georeference (control points measured in another height system than the GNSS, a base on a wrong point: the
+    whole block moves, nothing bends). Empty with fewer than :data:`NET_CAMERAS`; not a number for a camera that
+    is not one."""
+    from ..core import geometry
+    from ..markers import gcp
+
+    accurate = {c.key for c in chunk.cameras if accurate_gnss(c)}
+    if len(accurate) < NET_CAMERAS:
+        return {}
+    rows = [(k, e) for k, e in gcp.camera_reference_errors(chunk).items()
+            if k in accurate and "estimated" in e and np.all(np.isfinite(e["reference"]))]
+    if len(rows) < NET_CAMERAS:
+        return {}
+    estimated = np.array([e["estimated"] for _k, e in rows], float)
+    reference = np.array([e["reference"] for _k, e in rows], float)
+    if not np.all(np.isfinite(estimated)):
+        return {k: float("nan") for k, _e in rows}
+    if placed:
+        m = geometry.umeyama(estimated, reference, with_scale=True)
+        estimated = estimated @ m[:3, :3].T + m[:3, 3]
+    return {k: float(d) for (k, _e), d in zip(rows, np.linalg.norm(estimated - reference, axis=1))}
+
+
+def _keep_alignment(chunk: Chunk) -> dict | None:
+    """What an optimisation changes, kept to put it back: a copy of the COLMAP model next to it, the
+    georeference, the marker positions. None without a model (the optimisation says so)."""
+    model = chunk.product_path("reconstruction")
+    if model is None or not model.is_dir():
+        return None
+    kept = model.with_name(model.name + ".before_optimize")
+    shutil.rmtree(kept, ignore_errors=True)
+    shutil.copytree(model, kept)
+    return {"model": kept, "transform": np.array(chunk.transform, float), "crs": chunk.crs,
+            "markers": {m.key: None if m.position is None else np.array(m.position, float) for m in chunk.markers}}
+
+
+def _put_back(chunk: Chunk, kept: dict) -> float:
+    """The alignment kept by :func:`_keep_alignment` back in place: the model on disk, the cameras, the
+    calibration and the tie points from it, the georeference and the markers. Returns its mean reprojection
+    error."""
+    model = chunk.product_path("reconstruction")
+    bent = model.with_name(model.name + ".bent")
+    shutil.rmtree(bent, ignore_errors=True)
+    os.replace(model, bent)
+    try:
+        os.replace(kept["model"], model)
+    except OSError:  # never no model at all: the optimised one stays
+        os.replace(bent, model)
+        raise
+    shutil.rmtree(bent, ignore_errors=True)
+    rec = load_reconstruction(chunk)
+    import_reconstruction(chunk, rec)
+    chunk.transform = kept["transform"]
+    chunk.crs = kept["crs"]
+    for m in chunk.markers:
+        if m.key in kept["markers"]:
+            m.position = kept["markers"][m.key]
+    rec.update_point_3d_errors()
+    err = float(rec.compute_mean_reprojection_error())
+    chunk.meta.setdefault("sfm", {})["reprojection_error"] = err
+    return err
+
+
+def _undo_a_bend(chunk: Chunk, before: dict, kept: dict, err: float, progress: Progress) -> float:
+    """The safety net of :func:`optimize_cameras`: the distances of the cameras from their accurate GNSS
+    positions (:func:`_gnss_offsets`) before and after the adjustment, root mean square over the same photos -
+    as they are when the georeference is the one of before, else once the best similarity places the block on
+    its positions (the optimisation fitted a new georeference: control points, our own adjustment). ``before``
+    holds both. When after is more than :data:`BEND_FACTOR` times before and :data:`BEND_MARGIN_M` more (or not
+    a number), the adjustment bent the block - a soft mode that the photos alone do not hold - and the alignment
+    of before is put back (:func:`_put_back`). The report gets ``camera_offsets`` (``cameras``, ``before``,
+    ``after`` in metres, ``placed``) and ``reverted``. Returns the mean reprojection error of the alignment
+    kept."""
+    placed = chunk.crs != kept["crs"] or not np.allclose(chunk.transform, kept["transform"], rtol=0.0, atol=1e-9)
+    before = before[placed]
+    after = _gnss_offsets(chunk, placed)
+    keys = sorted(set(before) & set(after))
+    if not keys:
+        return err
+    b = float(np.sqrt(np.mean([before[k] ** 2 for k in keys])))
+    a = float(np.sqrt(np.mean([after[k] ** 2 for k in keys])))
+    if not np.isfinite(b):  # nothing to judge by
+        return err
+    bent = not np.isfinite(a) or a > max(BEND_FACTOR * b, b + BEND_MARGIN_M)
+    report = chunk.meta.setdefault("sfm", {}).setdefault("optimize", {})
+    report["camera_offsets"] = {"cameras": len(keys), "before": b, "after": a, "placed": placed}
+    report["reverted"] = bool(bent)
+    if not bent:
+        return err
+    log.warning("camera optimisation bent the block: the cameras ended %.3f m (RMS) off their GNSS positions, "
+                "%.3f m before; the alignment before it is put back", a, b)
+    err = _put_back(chunk, kept)
+    progress(1.0, f"The optimisation bent the block (cameras {a:.3f} m off their GNSS positions, {b:.3f} m "
+                  "before): the alignment before it is kept")
+    return err
+
+
 def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gnss: str, rolling_shutter: bool,
                   progress: Progress) -> float:
     """:func:`optimize_cameras` with our own adjustment (:mod:`.bundle`): control points weighted by
@@ -2092,9 +2339,12 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
         gcp.update_transform(chunk)
     err = float(rec.compute_mean_reprojection_error())
     lin = chunk.transform[:3, :3] if chunk.transform is not None else np.eye(3)
+    key_of = {v: int(k) for k, v in chunk.meta["sfm"]["names"].items()}
+    held = [chunk.camera(key_of[rec.images[ids["images"][i]].name]) for i, *_ in pb.gnss]
     report = {"engine": "ppg", "reprojection_error": err, "iterations": res.iterations, "converged": res.success,
               "control_points": len(pb.gcps), "scale_bars": len(pb.bars), "gnss_positions": len(pb.gnss),
-              "gnss_bias": {str(f): [float(v) for v in lin @ b] for f, b in res.bias.items()}}
+              "gnss_bias": {str(f): [float(v) for v in lin @ b] for f, b in res.bias.items()},
+              "gnss": {"mode": gnss, "photos": len(held), "states": _gnss_states(held)}}
     if res.rolling_shutter is not None:
         speed = np.linalg.norm(lin @ res.rolling_shutter[:, :3].T, axis=0)
         report["rolling_shutter_m"] = {"median": float(np.median(speed)), "max": float(speed.max())}
@@ -2108,7 +2358,7 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
 
 def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_markers: bool = True,
                      marker_weight: int = 4, progress: Progress | None = None, engine: str = "colmap",
-                     gnss: str = "off", rolling_shutter: bool = False) -> float:
+                     gnss: str = "auto", rolling_shutter: bool = False) -> float:
     """Global bundle adjustment of poses, calibration and tie points.
 
     With ``use_markers`` the control points and the control scale bars take part in it, as in
@@ -2123,19 +2373,64 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     (reprojection error, control/check point and bar errors before and after) goes into
     ``chunk.meta["sfm"]["optimize"]``. Returns the mean reprojection error in pixels.
 
+    ``gnss``: the GNSS positions of the photos. ``"auto"``: without fixed points (fewer than three
+    control points in use, fewer than two control bars) the accurate positions - a mean horizontal
+    accuracy within :data:`GNSS_PRIOR_MAX_M`: fix, float, PPK - hold the block, each weighted by its
+    accuracy (COLMAP's pose priors, :func:`_adjust_with_priors`, in the internal frame of the chunk,
+    as the incremental alignment holds it; the focal length of the alignment is kept): a free
+    adjustment of a nadir block over flat ground lets it curve into a dome while the radial
+    distortion and the focal length make up for it in the photos (82 RTK-fix captures of a DJI P4
+    Multispectral: cameras from 3 cm to metres off their positions, the reprojection error
+    unchanged). With fixed points the markers hold it as above:
+    fixed points and positions together in COLMAP's pose-prior adjuster diverge (Tell Tuqan).
+    ``"off"``: the positions take no part (the adjustment of before). ``report["gnss"]`` says how
+    many photos held the block (``photos``, ``states``).
+
+    A safety net for every engine: with accurate positions, the root mean square distance of the
+    cameras from them is measured before and after (:func:`_undo_a_bend`; when the optimisation fits a
+    new georeference, once the best similarity places the block on its positions: a new georeference
+    does not count, a bend does); an adjustment that leaves it above :data:`BEND_FACTOR` times and
+    :data:`BEND_MARGIN_M` more than before bent the block, and the alignment of before is put back,
+    the model on disk included (``report["reverted"]``, ``report["camera_offsets"]``, a warning in
+    the log).
+
     ``engine="ppg"``: our own adjustment (:mod:`.bundle`) instead of COLMAP's, with the control
     points pulled to their coordinates by their accuracy, the bars as distances between their
     markers, the GNSS positions of the photos (``gnss`` "plain", or "bias" with a bias per
-    flight) and the ``rolling_shutter`` of the camera (a velocity per photo)."""
+    flight; "auto" is "plain" when the photos have accurate positions) and the
+    ``rolling_shutter`` of the camera (a velocity per photo)."""
+    progress = as_progress(progress)
+    if engine not in ("colmap", "ppg"):
+        raise ValueError(f"unknown adjustment engine {engine!r}: colmap or ppg")
+    if gnss not in GNSS_MODES:
+        raise ValueError(f"gnss: one of {', '.join(GNSS_MODES)}, not {gnss!r}")
+    if engine == "colmap" and gnss in ("plain", "bias"):
+        raise ValueError(f"gnss={gnss!r} is an option of engine='ppg': COLMAP's adjustment takes 'auto' or 'off'")
+    before = {False: _gnss_offsets(chunk), True: _gnss_offsets(chunk, placed=True)}
+    kept = _keep_alignment(chunk) if before[False] else None  # what the safety net puts back
+    try:
+        if engine == "ppg":
+            mode = gnss
+            if gnss == "auto":
+                mode = "plain" if _held_positions(chunk, chunk.aligned_cameras)[0] else "off"
+            err = _optimize_own(chunk, fit_principal_point, use_markers, mode, rolling_shutter, progress)
+        else:
+            err = _optimize_colmap(chunk, fit_principal_point, use_markers, marker_weight, gnss, progress)
+        if kept is not None:
+            err = _undo_a_bend(chunk, before, kept, err, progress)
+    finally:
+        if kept is not None:
+            shutil.rmtree(kept["model"], ignore_errors=True)
+    return err
+
+
+def _optimize_colmap(chunk: Chunk, fit_principal_point: bool, use_markers: bool, marker_weight: int, gnss: str,
+                     progress: Progress) -> float:
+    """:func:`optimize_cameras` with COLMAP's adjustment."""
     import pycolmap
 
     from ..markers import gcp
 
-    progress = as_progress(progress)
-    if engine == "ppg":
-        return _optimize_own(chunk, fit_principal_point, use_markers, gnss, rolling_shutter, progress)
-    if engine != "colmap":
-        raise ValueError(f"unknown adjustment engine {engine!r}: colmap or ppg")
     rec = load_reconstruction(chunk)
     drop_missing_points(rec)  # models written from imported poses by earlier versions
 
@@ -2157,7 +2452,9 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     if constrained:
         gcp.update_transform(chunk)  # the reference coordinates and the bars in the internal frame
     before = errors() if constrained else {}
-    progress(0.1, "Optimizing camera alignment" + (" on the control points and scale bars" if constrained else ""))
+    priors, held = ([], []) if gnss == "off" or constrained else _gnss_priors(chunk, rec)
+    progress(0.1, "Optimizing camera alignment" + (" on the control points and scale bars" if constrained else "")
+             + (f" held by the GNSS positions of {len(priors)} photos" if priors else ""))
     _square_pixels(chunk, rec)
     opts = pycolmap.BundleAdjustmentOptions()
     try:
@@ -2201,7 +2498,12 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
             steps = _adjust_towards(rec, opts, pids, copies, starts, fixed_cams, progress.sub(0.5, 0.45))
     else:
         pids, points = _drop_points(rec, pids), []
-        _adjust(rec, opts, fixed_cameras=fixed_cams)
+        if constrained and gnss != "off":  # the markers could not be fixed: the positions hold the block
+            priors, held = _gnss_priors(chunk, rec)
+        if priors:
+            _adjust_with_priors(rec, opts, priors, fixed_cams)
+        else:
+            _adjust(rec, opts, fixed_cameras=fixed_cams)
     pids = _drop_points(rec, pids)
     _restore_sensor_models(chunk, rec)
     rec.update_point_3d_errors()  # the adjustment does not refresh the stored errors
@@ -2211,7 +2513,8 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     used = used if points else set()
     report = {"reprojection_error": err,
               "control_points": sum(1 for m in controls if m.key in used) if with_gcps else 0,
-              "scale_bars": sum(1 for sb in bars if {sb.marker_a, sb.marker_b} <= used), "steps": steps}
+              "scale_bars": sum(1 for sb in bars if {sb.marker_a, sb.marker_b} <= used), "steps": steps,
+              "gnss": {"mode": gnss, "photos": len(priors), "states": _gnss_states(held)}}
     if points or gcp.control_scalebars(chunk):
         gcp.update_transform(chunk)  # the bars and the control points on the adjusted block
     else:

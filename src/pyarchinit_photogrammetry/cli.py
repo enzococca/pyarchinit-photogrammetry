@@ -797,11 +797,22 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
              principal_point: bool = False,
              engine: str = typer.Option("colmap", help="colmap, or ppg: our own adjustment (control points by their "
                                                        "accuracy, bars as distances, GNSS, rolling shutter)"),
-             gnss: str = typer.Option("off", help="with --engine ppg: off, plain (the GNSS positions of the photos) or "
-                                                  "bias (with a bias per flight)"),
+             gnss: str = typer.Option("auto", help="the GNSS positions of the photos: auto (the accurate ones - fix, float, "
+                                                   "PPK, 0.5 m or better - hold the block when fewer than 3 control "
+                                                   "points take part), off; with --engine ppg also plain (every "
+                                                   "position by its accuracy) or bias (with a bias per flight)"),
              rolling_shutter: bool = typer.Option(False, help="with --engine ppg: a velocity per photo while it is read"),
              chunk: Optional[str] = None):
-    """Optimize the cameras (global bundle adjustment), on the control points and scale bars when there are any."""
+    """Optimize the cameras (global bundle adjustment), on the control points and scale bars when there are any, else
+    held by the accurate GNSS positions of the photos; an optimisation that bends the block away from those
+    positions is undone."""
+    from .engine.sfm import GNSS_MODES
+
+    if gnss not in GNSS_MODES:
+        raise typer.BadParameter(f"one of {', '.join(GNSS_MODES)}", param_hint="--gnss")
+    if engine == "colmap" and gnss in ("plain", "bias"):
+        raise typer.BadParameter(f"{gnss} needs --engine ppg (COLMAP's adjustment takes auto or off)",
+                                 param_hint="--gnss")
     doc, ch = _open(project, chunk)
     err = ch.optimize_cameras(fit_principal_point=principal_point, use_markers=markers, marker_weight=marker_weight,
                               progress=print_progress, engine=engine, gnss=gnss, rolling_shutter=rolling_shutter)
@@ -810,6 +821,16 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
     doc.save()
     rep = ch.meta["sfm"]["optimize"]
     text = f"reprojection error {err:.3f} px"
+    held = rep.get("gnss") or {}
+    if held.get("photos"):
+        text += (f", held by the GNSS positions of {held['photos']} photos ("
+                 + ", ".join(f"{state} {n}" for state, n in sorted(held["states"].items(), key=lambda s: -s[1])) + ")")
+    offsets = rep.get("camera_offsets")
+    if offsets and rep.get("reverted"):
+        text += (f"; the optimisation bent the block (cameras {offsets['after']:.3f} m off their GNSS positions, "
+                 f"{offsets['before']:.3f} m before): the alignment before it is kept")
+    elif offsets:
+        text += f", camera offsets from their GNSS positions {offsets['before']:.3f} -> {offsets['after']:.3f} m (RMS)"
     b, a = rep.get("before", {}), rep.get("after", {})
     if rep.get("control_points"):
         text += (f", {rep['control_points']} control points: RMSE {b['control']} -> {a['control']} m"

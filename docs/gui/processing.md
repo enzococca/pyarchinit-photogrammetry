@@ -39,6 +39,26 @@ Under *Advanced*:
 Then *Import references...* and *Update georeference* place the survey on the control points, and *Optimise
 cameras* adjusts the block again with them and with the [scale bars](photos-markers.md#scale-bars).
 
+### Optimising the cameras
+
+*Workflow > Optimise cameras* adjusts poses, calibration and tie points together. What holds the block:
+
+* **3 or more control points**, or 2 or more control scale bars: fixed at their coordinates, the block bends to
+  pass through them; check points and check bars measure the result;
+* otherwise **the GNSS positions of the photos**, when they are accurate - an RTK or PPK fix or float, 0.5 m or
+  better (*GNSS positions of the photos*: *automatic*): every photo weighs by its accuracy, and the focal length
+  found by the alignment is kept, because from a single height, looking down, the positions cannot tell the focal
+  length from the distance to the ground. The window says how many photos hold the block and with which RTK state
+  (*GNSS positions used as a constraint: 82 photos, fix*).
+
+Held by neither, a nadir block over flat ground can bend into a dome while the reprojection error stays the same:
+the radial distortion makes up for it in the photos (82 RTK-fix captures of a P4 Multispectral ended metres from
+their positions). **A safety net** watches every optimisation: when the cameras end farther from their accurate
+GNSS positions than three times the offset they had, and 30 cm more than it, the alignment before it is put
+back, and the log and a message say so. *not used* leaves the positions out (the optimisation of earlier versions, still
+watched by the net). From the command line: `ppg optimize project.ppg --gnss auto|off` (`plain` and `bias` with
+`--engine ppg`).
+
 ### Diagnostics of the alignment
 
 *Tools > Diagnostics of the alignment* tells why an alignment fails:

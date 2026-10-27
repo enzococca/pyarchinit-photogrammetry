@@ -61,10 +61,12 @@ senza accuratezza né deviazioni prende 5, 5, 10 cm, portati al minimo del suo `
 pesano ogni foto per la sua accuratezza, così un blocco di fix e qualche posizione singola non è trattato come
 fatto di pari: *Allinea foto...* tiene il blocco alle posizioni durante l'allineamento incrementale (l'opzione
 *Posizioni GPS delle foto nell'allineamento*, attiva quando le foto hanno posizioni; il metodo globale non le usa,
-e la scelta automatica torna all'incrementale quando il blocco globale le manca), e *Ottimizza camere* con il
-motore *Proprio* quando *Posizioni GNSS delle foto (motore proprio)* è su *usate con la loro accuratezza* o
-*usate, con un bias per volo*. Il motore predefinito di *Ottimizza camere*, COLMAP, ignora le posizioni delle
-camere, e quell'opzione è su *non usate* finché non la scegli.
+e la scelta automatica torna all'incrementale quando il blocco globale le manca), e *Ottimizza camere*: con il
+motore predefinito, COLMAP, le posizioni accurate (fix, float, PPK: 0,5 m o meglio) tengono il blocco quando non
+lo tengono 3 punti di controllo o 2 barre di scala (*Posizioni GNSS delle foto*: *automatico*, vedi
+[Ottimizzare le camere](processing.md#ottimizzare-le-camere)); con il motore *Proprio* ogni posizione entra
+secondo la sua accuratezza quando quell'opzione è su *usate con la loro accuratezza (motore proprio)* o *usate,
+con un bias per volo (motore proprio)*.
 
 **La tabella** ha una riga per volo (una pausa di oltre 20 minuti ne comincia un altro; le foto senza data sono
 la riga *senza data*): le foto con una posizione fix, float, singola, con una posizione e nessun dato RTK, senza

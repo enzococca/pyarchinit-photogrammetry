@@ -81,6 +81,11 @@ def _it(value: float, decimals: int = 0) -> str:
     return number(value, decimals)
 
 
+def _length(metres: float) -> str:
+    """A distance as the interface writes it: in centimetres below a metre, else in metres."""
+    return f"{_it(metres * 100.0, 1)} cm" if abs(metres) < 1.0 else f"{_it(metres, 2)} m"
+
+
 class _GuiCalls(QObject):
     """Runs functions in the interface thread: emitted from any thread, received there (queued)."""
 
@@ -4023,25 +4028,56 @@ class MainWindow(QMainWindow):
                            layer="Marker", attrs={"marker": m.label, "z": round(float(z), 3),
                                                   "_label_id": f"marker:{m.key}"})
 
+    @staticmethod
+    def _gnss_states_text(states: dict) -> str:
+        """The RTK states of the photos as a dialog says them: ``fix``, or ``80 fix, 2 float`` when they differ."""
+        items = sorted(states.items(), key=lambda s: -s[1])
+        names = {"none": tr("senza stato RTK")}
+        if len(items) == 1:
+            return names.get(items[0][0], items[0][0])
+        return ", ".join(f"{n} {names.get(state, state)}" for state, n in items)
+
+    def _gnss_hold_text(self, hold: dict) -> str:
+        """What the GNSS positions of the photos will do in *Ottimizza camere* (:func:`engine.sfm.gnss_hold`)."""
+        if hold["photos"]:
+            return tr("Posizioni GNSS usate come vincolo: {0} foto, {1}.", hold["photos"],
+                      self._gnss_states_text(hold["states"]))
+        if hold["why"] == "none":
+            return tr("Nessuna foto allineata ha una posizione GNSS accurata (fix, float, PPK): le posizioni non "
+                      "tengono il blocco.")
+        states = self._gnss_states_text(hold["states"])
+        if hold["why"] == "markers":
+            return tr("Posizioni GNSS accurate: {0} foto, {1}; usando i punti di controllo o le barre di scala il "
+                      "blocco segue quelli, altrimenti lo tengono le posizioni.", hold["accurate"], states)
+        if hold["why"] == "rigs":
+            return tr("Posizioni GNSS accurate: {0} foto, {1}; le foto a 360 gradi non le usano nell'ottimizzazione.",
+                      hold["accurate"], states)
+        return tr("Posizioni GNSS accurate: {0} foto, {1}; non bastano a collocare il blocco (meno di tre, lungo una "
+                  "sola strisciata, o un chunk in coordinate locali).", hold["accurate"], states)
+
     def optimize_cameras(self) -> None:
         if not self._need_chunk(aligned=True):
             return
         ch = self.chunk
+        from ..engine import sfm
         from ..markers import gcp
 
         controls = [m for m in ch.markers if not m.checkpoint and m.reference.enabled and m.reference.location]
         checks = [m for m in ch.markers if m.checkpoint and m.reference.location]
         bars = gcp.control_scalebars(ch)
+        with_markers = len(controls) >= 3 or len(bars) >= 2
         v = ParamDialog.ask(self, "Ottimizza camere", [
             Field("markers", tr("Usa punti di controllo e barre di scala nell'ottimizzazione ({0} GCP, {1} barre)",
-                                len(controls), len(bars)), len(controls) >= 3 or len(bars) >= 2),
+                                len(controls), len(bars)), with_markers),
             Field("weight", "Peso di una misura di marker (in osservazioni di punti di legame)", 4, minimum=1, maximum=50),
             Field("pp", "Ottimizza anche il punto principale (cx, cy)", False),
             Field("engine", "Motore", "colmap", choices=[
                 ("colmap", "COLMAP"),
                 ("ppg", "Proprio: GCP secondo la loro accuratezza, barre come distanze, GNSS, rolling shutter")]),
-            Field("gnss", "Posizioni GNSS delle foto (motore proprio)", "off", choices=[
-                ("off", "non usate"), ("plain", "usate con la loro accuratezza"), ("bias", "usate, con un bias per volo")]),
+            Field("gnss", "Posizioni GNSS delle foto", "auto", choices=[
+                ("auto", "automatico: quelle accurate (fix, float, PPK) tengono il blocco"), ("off", "non usate"),
+                ("plain", "usate con la loro accuratezza (motore proprio)"),
+                ("bias", "usate, con un bias per volo (motore proprio)")]),
             Field("rolling", "Rolling shutter: la camera si muove mentre legge l'immagine (motore proprio)", False)],
             intro=tr("Bundle adjustment globale di posizioni, orientamenti e calibrazione. Con 3 o piu' punti di "
                      "controllo i GCP entrano nel calcolo come punti fissi alle loro coordinate: il blocco si piega "
@@ -4056,16 +4092,26 @@ class MainWindow(QMainWindow):
                      "un bias per volo (base RTK su un punto sbagliato, offset dell'antenna) e la velocita' di ogni "
                      "foto durante la lettura del sensore (rolling shutter dei droni). Su terreno piatto con sole "
                      "foto nadirali il bias verticale si confonde con la focale: servono GCP o foto oblique.",
-                     len(checks)))
+                     len(checks)) + "\n\n" + tr(
+                "Le posizioni GNSS accurate delle foto (fix, float, PPK: 0,5 m o meglio) tengono il blocco quando "
+                "non ci sono 3 punti di controllo o 2 barre di scala che lo tengano: ogni foto pesa secondo la sua "
+                "accuratezza e la focale resta quella dell'allineamento (da una sola quota, guardando in basso, le "
+                "posizioni non distinguono la focale dalla distanza dal suolo). Senza vincoli un blocco nadirale su "
+                "terreno piatto si piega a cupola mentre l'errore di riproiezione resta lo stesso: se "
+                "l'ottimizzazione allontana le camere dalle loro posizioni accurate (oltre 3 volte lo scarto di "
+                "prima e 30 cm in piu'), si rimette l'allineamento di prima. Con COLMAP le scelte del motore "
+                "proprio valgono come automatico.") + "\n\n" + self._gnss_hold_text(sfm.gnss_hold(ch, with_markers)))
         if not v:
             return
 
         def job(p):
             own = v.get("engine", "colmap") == "ppg"
+            gnss = v.get("gnss", "auto")
+            if not own and gnss in ("plain", "bias"):  # options of our own engine: COLMAP holds the block on its own
+                gnss = "auto"
             err = ch.optimize_cameras(fit_principal_point=v["pp"], use_markers=v["markers"],
                                       marker_weight=int(v["weight"]), progress=p, engine="ppg" if own else "colmap",
-                                      gnss=v.get("gnss", "off") if own else "off",
-                                      rolling_shutter=bool(v.get("rolling")) and own)
+                                      gnss=gnss, rolling_shutter=bool(v.get("rolling")) and own)
             if any(m.reference.location for m in ch.markers) or ch.scalebars:
                 self.last_report = ch.update_transform()
             return err
@@ -4092,8 +4138,20 @@ class MainWindow(QMainWindow):
                 text += tr("; bias GNSS del volo {0}: {1}", flight, " ".join(mm(x) for x in bias))
             if rep.get("rolling_shutter_m"):
                 text += tr("; rolling shutter: {0} per immagine (mediana)", mm(rep["rolling_shutter_m"]["median"]))
+            held = rep.get("gnss") or {}
+            if held.get("photos"):
+                text += tr("; blocco tenuto dalle posizioni GNSS di {0} foto ({1})", held["photos"],
+                           self._gnss_states_text(held["states"]))
+            offsets = rep.get("camera_offsets")
+            if offsets and not rep.get("reverted"):
+                text += tr("; scarto delle camere dalle posizioni GNSS {0} -> {1}", _length(offsets["before"]),
+                           _length(offsets["after"]))
             self.log_pane.info(tr("Ottimizzazione camere: ") + text)
             self.statusBar().showMessage(text, 15000)
+            if offsets and rep.get("reverted"):
+                self._warn(tr("L'ottimizzazione piegava il blocco: le camere finivano a {0} dalle loro posizioni "
+                              "GNSS (prima {1}). E' stato rimesso l'allineamento di prima.",
+                              _length(offsets["after"]), _length(offsets["before"])))
 
         self.run_task("Ottimizzazione camere", job, done)
 

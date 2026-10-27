@@ -313,13 +313,16 @@ class Chunk:
         return n
 
     def optimize_cameras(self, fit_principal_point: bool = False, use_markers: bool = True, marker_weight: int = 4,
-                         progress: ProgressCallback | None = None, engine: str = "colmap", gnss: str = "off",
+                         progress: ProgressCallback | None = None, engine: str = "colmap", gnss: str = "auto",
                          rolling_shutter: bool = False) -> float:
         """Global bundle adjustment; with 3 or more control points, or 2 or more control scale
-        bars, they are part of it (the block bends to fit them; see
+        bars, they are part of it (the block bends to fit them), else ``gnss="auto"`` holds the
+        block to the accurate GNSS positions of the photos (fix, float, PPK; ``"off"``: not used);
+        an adjustment that bends the block away from those positions is undone (see
         :func:`engine.sfm.optimize_cameras`; ``engine="ppg"``: our own adjustment, with the GNSS
-        positions of the photos and the rolling shutter). Returns the mean reprojection error in
-        pixels; the control/check point and scale bar report is in ``meta["sfm"]["optimize"]``."""
+        positions of the photos - ``gnss`` "plain" or "bias" - and the rolling shutter). Returns
+        the mean reprojection error in pixels; the control/check point, scale bar and GNSS report
+        is in ``meta["sfm"]["optimize"]``."""
         from ..engine import sfm
 
         err = sfm.optimize_cameras(self, fit_principal_point=fit_principal_point, use_markers=use_markers,

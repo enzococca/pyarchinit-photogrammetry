@@ -39,6 +39,27 @@ Sotto *Avanzate*:
 Poi *Importa riferimenti...* e *Aggiorna georeferenziazione* collocano il rilievo sui punti di controllo, e
 *Ottimizza camere* ricalcola il blocco con loro e con le [barre di scala](photos-markers.md#barre-di-scala).
 
+### Ottimizzare le camere
+
+*Flusso di lavoro > Ottimizza camere* compensa insieme pose, calibrazione e punti di legame. Che cosa tiene il
+blocco:
+
+* **3 o più punti di controllo**, o 2 o più barre di scala di controllo: fissati alle loro coordinate, il blocco si
+  piega per passarci; i check point e le barre di check misurano il risultato;
+* altrimenti **le posizioni GNSS delle foto**, quando sono accurate - un fix o un float RTK o PPK, 0,5 m o meglio
+  (*Posizioni GNSS delle foto*: *automatico*): ogni foto pesa secondo la sua accuratezza, e la focale trovata
+  dall'allineamento resta quella, perché da una sola quota, guardando in basso, le posizioni non distinguono la
+  focale dalla distanza dal suolo. La finestra dice quante foto tengono il blocco e con quale stato RTK
+  (*Posizioni GNSS usate come vincolo: 82 foto, fix*).
+
+Senza né gli uni né le altre, un blocco nadirale su terreno piatto può piegarsi a cupola mentre l'errore di
+riproiezione resta lo stesso: la distorsione radiale lo compensa nelle foto (82 riprese RTK fix di un P4
+Multispectral finivano a metri dalle loro posizioni). **Una rete di sicurezza** controlla ogni ottimizzazione:
+quando le camere finiscono più lontane dalle loro posizioni GNSS accurate di tre volte lo scarto che avevano, e di
+30 cm più di quello, si rimette l'allineamento di prima, e il registro e un messaggio lo dicono. *non usate* lascia fuori le
+posizioni (l'ottimizzazione delle versioni precedenti, sempre sotto la rete). Dalla riga di comando:
+`ppg optimize progetto.ppg --gnss auto|off` (`plain` e `bias` con `--engine ppg`).
+
 ### Diagnostica dell'allineamento
 
 *Strumenti > Diagnostica dell'allineamento* dice perché un allineamento non va:
