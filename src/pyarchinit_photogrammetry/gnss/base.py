@@ -245,8 +245,9 @@ def baseline(base_obs: str | Path | Sequence[str | Path], station: stations.Stat
     """The mark of the user's own base - a receiver left on a mark nobody surveyed - by a static baseline from the
     permanent ``station``: RTKLIB solves the base (``base_obs``, its RINEX observations: one file, or several, which
     :func:`.ppk.solve` joins) as a rover standing still for the whole session against the station, forward, into one
-    position (:func:`.ppk.config` ``mode="static", rover_antenna="*", solution="forward", static_single=True``). RTKLIB
-    takes off the antenna height of the header of the base's RINEX file: the position is of the mark on the ground.
+    position, with the ionosphere and the troposphere estimated - the station can be tens of kilometres away
+    (:func:`.ppk.config` ``mode="static", rover_antenna="*", solution="forward", static_single=True``). RTKLIB takes
+    off the antenna height of the header of the base's RINEX file: the position is of the mark on the ground.
 
     The station is given by its observations ``station_obs`` and its position ``station_position`` (a
     :class:`.ppk.BasePosition`, as :func:`station_base` makes it), or, for those not given, the program downloads them

@@ -42,6 +42,13 @@ _SAME_EPOCH_S = 1e-6  # a time this close to an epoch is the epoch: times of 8e8
 
 MODES = ("kinematic", "static", "static-start", "dgps")  # RTKLIB's positioning modes that work with a base
 STATIC_MODES = ("static", "static-start")  # those of a rover standing still
+# A rover standing still for the whole session ("static": the user's own base placed by a static baseline from a
+# permanent station, tens of kilometres away) has the ionosphere and the troposphere estimated, slant delay by slant
+# delay and as a zenith delay at each end: with RTKLIB's broadcast model and Saastamoinen alone the difference of the
+# atmosphere above the two goes into the fixed position. On a real day of the EPN (2026-10-06, 2 hours at midday)
+# baselines of 23 km were 2.3-2.7 cm off across and 2.8-3.3 cm in height that way, within 0.6 cm estimated, and one of
+# 57 km 6.2 cm off across, 0.6 cm estimated. The rover of a flight (kinematic, static-start) keeps RTKLIB's models.
+STATIC_ATMOSPHERE = (("pos1-ionoopt", "est-stec"), ("pos1-tropopt", "est-ztd"))
 SOLUTIONS = ("forward", "backward", "combined")  # RTKLIB's pos1-soltype: the epochs in their order, reversed, or both
 # the bits of RTKLIB's pos1-navsys, by the letter of the constellation in satellite ids
 SYSTEM_BITS = {"G": 1, "S": 2, "R": 4, "E": 8, "J": 16, "C": 32, "I": 64}
@@ -250,9 +257,11 @@ def config(base_position: Sequence[float] | None, mode: str = "kinematic", eleva
     "kinematic") or still ("static", "static-start"; "dgps" for code only); the epochs solved forward and backward and
     the two solutions combined (``solution`` "combined"; "forward" or "backward" for one of them), the ambiguities
     fixed and held; the satellites ``elevation_mask`` degrees above the horizon or more, of the constellations
-    ``systems`` ("all" or their letters G R E C J I S), on two frequencies. With ``static_single`` and a rover standing
-    still RTKLIB writes one position for the whole session (``out-solstatic=single``: the last of the epochs with the
-    best quality, at the time of the first epoch it solved) instead of one for every epoch. The base at
+    ``systems`` ("all" or their letters G R E C J I S), on two frequencies. A rover still for the whole session
+    ("static") has the ionosphere and the troposphere estimated (:data:`STATIC_ATMOSPHERE`: ``est-stec``,
+    ``est-ztd``); the others keep RTKLIB's broadcast ionosphere and Saastamoinen. With ``static_single`` and a rover
+    standing still RTKLIB writes one position for the whole session (``out-solstatic=single``: the last of the epochs
+    with the best quality, at the time of the first epoch it solved) instead of one for every epoch. The base at
     ``base_position`` (latitude, longitude in degrees, height above the ellipsoid in metres: the mark it stands on),
     to which RTKLIB adds the antenna height of the base's RINEX header (ANTENNA: DELTA H/E/N), as RINEX means it.
     With None the base is at the position of its RINEX header (rinexhead): RTKLIB-EX adds the antenna height once
@@ -281,6 +290,8 @@ def config(base_position: Sequence[float] | None, mode: str = "kinematic", eleva
         raise ValueError(f"the elevation mask, {elevation_mask}, is not between 0 and 90 degrees")
     options = [("pos1-posmode", mode), ("pos1-frequency", "l1+l2"), ("pos1-soltype", solution),
                ("pos1-elmask", f"{mask:g}"), ("pos1-navsys", str(_navsys(systems))), ("pos2-armode", "fix-and-hold")]
+    if mode == "static":
+        options += STATIC_ATMOSPHERE
     if interpolate_base:
         options.append(("misc-timeinterp", "on"))
     if base_position is None:

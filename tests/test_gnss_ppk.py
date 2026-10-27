@@ -812,6 +812,19 @@ def test_config_of_a_single_static_solution():
     assert _options(ppk.config(None, solution="backward"))["pos1-soltype"] == "backward"
 
 
+def test_a_static_rover_has_the_atmosphere_estimated():
+    """A receiver still for the whole session - the user's base against a permanent station tens of kilometres away -
+    has the slant delays of the ionosphere and the zenith delay of the troposphere estimated: the broadcast model and
+    Saastamoinen alone put the difference of the atmosphere above the two into the position (2-3 cm on a real day of
+    the EPN, 23 km at midday). A flight - kinematic, or static at the start - keeps RTKLIB's models."""
+    static = _options(ppk.config((35.16, 139.61, 70.0), mode="static", rover_antenna="*", solution="forward",
+                                 static_single=True))
+    assert static["pos1-ionoopt"] == "est-stec" and static["pos1-tropopt"] == "est-ztd"
+    for mode in ("kinematic", "static-start", "dgps"):
+        options = _options(ppk.config(None, mode=mode))
+        assert "pos1-ionoopt" not in options and "pos1-tropopt" not in options, mode
+
+
 def _rtklib_options_table() -> list[tuple[str, int, str]]:
     """RTKLIB's table of options (sysopts of options.c) in its order: the name, the format (0 integer, 1 number,
     2 text, 3 one of a list) and the comment, which for a list is its "number:label" items."""
@@ -1741,13 +1754,16 @@ def _raised_base(folder: Path, height: float) -> Path:
 @needs_rtklib
 def test_static_solution_of_the_rtklib_data(tmp_path, monkeypatch):
     """The options of ``config`` in RTKLIB: 3040 processed as the fixed station it is against 0759 at the position of
-    its header, every epoch fixed at the same place within a centimetre, where the header of 3040 puts it give or
-    take the metres of the base's header position."""
+    its header, every epoch fixed at the same place within a centimetre across and 3 cm in height, where the header of
+    3040 puts it give or take the metres of the base's header position. A static rover has the atmosphere estimated:
+    the heights of the epochs move 21.2 mm over the hour as the zenith delay of the troposphere settles (3.0 mm with
+    RTKLIB's broadcast ionosphere and Saastamoinen), across 3.6 and 2.4 mm (1.1 and 0.6)."""
     monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
     static = _rtklib_run(tmp_path)
     fixed = static.q == 1
     assert len(static.times) == EPOCHS and fixed.sum() > 0.8 * EPOCHS
-    assert np.all(np.ptp(_enu(static.llh[fixed], static.llh[-1]), axis=0) < 0.01)
+    spread = np.ptp(_enu(static.llh[fixed], static.llh[-1]), axis=0)
+    assert np.all(spread < [0.01, 0.01, 0.03]), spread
     header_3040 = rinex.header(PPK_ROVER).approx_xyz
     assert np.linalg.norm(np.subtract(_llh_to_ecef(*static.llh[-1]), header_3040)) < 10.0
 

@@ -103,7 +103,11 @@ def test_baseline_finds_the_base(tmp_path, monkeypatch):
     assert r.q == 1
     assert abs(r.baseline_km - 3.335) < 0.01
     assert ppk.static_position(r.solution) == ((r.position.lat, r.position.lon, r.position.h), 1, r.sd)
-    assert r.position.source == "baseline" and r.position.sd == r.sd and all(0.0 < v < 0.01 for v in r.sd)
+    # the formal deviations with the atmosphere estimated, as for every static baseline: 2.9, 3.7 and 21.3 mm on this
+    # hour (0.7, 0.9 and 2.5 mm with RTKLIB's broadcast ionosphere and Saastamoinen) - the zenith delay of the
+    # troposphere, estimated over an hour, weighs on the height
+    assert r.position.source == "baseline" and r.position.sd == r.sd
+    assert all(0.0 < v < 0.01 for v in r.sd[:2]) and 0.0 < r.sd[2] < 0.03, r.sd
     assert r.hours == 1.0  # 120 epochs 30 s apart, whatever the milliseconds of the clocks of the receivers
     assert r.solution.parent == (tmp_path / "work").resolve() / "baseline" and r.solution.suffix == ".pos"
     # fixed, near, an hour: only the antennas, which no calibration corrects here (atx=None), are told of - the two
