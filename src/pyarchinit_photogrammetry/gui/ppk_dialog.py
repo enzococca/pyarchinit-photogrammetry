@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComb
                                QListWidgetItem, QPushButton, QRadioButton, QScrollArea, QVBoxLayout, QWidget)
 
 from ..gnss import atx as antex
+from ..gnss import base as gbase
 from ..gnss import dji, frames, ppk, rinex
 from ..gnss.apply import onboard_fix
 from ..gnss.stations import Station
@@ -41,7 +42,7 @@ _NOTE = "color: #6c7a89"
 # every way a RINEX file comes: plain, Hatanaka (.crx, .##d), and packed in gzip, the Unix compress or zip
 _OBSERVATION_PATTERNS = "*.obs *.??o *.??d *.rnx *.crx *.gz *.Z *.zip"
 _NAVIGATION_PATTERNS = "*.nav *.??n *.??g *.??p *.??l *.??c *.rnx *.gz *.Z *.zip"
-MODES = ("header", "typed", "station", "baseline", "ppp")  # how the position of the base is set (values()["base_mode"])
+MODES = gbase.BASE_MODES  # how the position of the base is set (values()["base_mode"])
 _WITH_STATION = ("station", "baseline")  # the modes that need a permanent station
 _ATX_MB = 62  # the size of igs20.atx the dialog says
 
@@ -183,8 +184,8 @@ class _FileField(QWidget):
 
 class _FilesField(_FileField):
     """A file typed or chosen with *Sfoglia*, or several added with *Aggiungi...* - the pieces of a base: files of an
-    hour, the two days of a flight across midnight -: the field then says how many and lists them in its tooltip.
-    *Sfoglia* chooses one file again; typing in the field too."""
+    hour, the two days of a flight across midnight -: the field then says how many, lists them in its tooltip and
+    cannot be typed in (read-only); only *Sfoglia* goes back to one file."""
 
     def __init__(self, text: str, title: str, filters: str, folder: Path, parent=None):
         super().__init__(text, title, filters, folder, parent)
@@ -415,7 +416,8 @@ class PpkDialog(QDialog):
         epoch_lay.setContentsMargins(0, 0, 0, 0)
         epoch_lay.addWidget(QLabel(tr("Epoca delle coordinate")))
         self.epoch = QLineEdit()
-        self.epoch.setPlaceholderText(tr("anno decimale (2026,82) o data (2026-10-27)"))
+        self.epoch.setPlaceholderText(tr("anno decimale (2026,82) o data (2026-10-27); vuota: la metà delle "
+                                         "osservazioni del drone"))
         epoch_lay.addWidget(self.epoch)
         epoch_lay.addStretch(1)
         pos_lay.addWidget(self.epoch_row)
@@ -832,14 +834,15 @@ class PpkDialog(QDialog):
 
     def _typed_epoch(self) -> float | str | None:
         """The epoch of the typed coordinates in a frame that moves with time (ITRF2020), or the text that says what is
-        wrong with it; None in another frame."""
-        if self.frame.currentData() not in frames.DYNAMIC:
+        wrong with it; None in another frame, and when none is written: then the run takes the middle of the drone's
+        observations (:func:`.base.flight_epoch`, as ``ppg gnss ppk`` does)."""
+        if self.frame.currentData() not in frames.DYNAMIC or not self.epoch.text().strip():
             return None
         try:
             return frames.parse_epoch(self.epoch.text())
         except ValueError:
             return tr("Scrivi l'epoca della posizione in ITRF2020: un anno decimale fra 1980 e 2100 (2026,82) o una "
-                      "data (2026-10-27).")
+                      "data (2026-10-27), o lasciala vuota per la metà delle osservazioni del drone.")
 
     def _flight_place(self) -> tuple[float, float] | None:
         """Where the drone flew: the median latitude and longitude of the shots of the MRK; None without shots."""
@@ -852,12 +855,12 @@ class PpkDialog(QDialog):
         return (lats[middle - 1] + lats[middle]) / 2.0, (lons[middle - 1] + lons[middle]) / 2.0
 
     def _flight_epoch(self) -> float | None:
-        """The middle of the shots of the MRK as a decimal year (UTC); None without shots."""
-        if not self.shots:
+        """The epoch a typed position in ITRF2020 takes when none is written: the middle of the drone's observations
+        as the header of its file says them (:func:`.base.middle_epoch`); None while it is not known."""
+        info = self._observations(self.rover.path())
+        if not isinstance(info, rinex.RinexInfo) or info.first is None or info.last is None:
             return None
-        first = min(self.shots, key=lambda shot: shot.gps_time).utc
-        last = max(self.shots, key=lambda shot: shot.gps_time).utc
-        return frames.decimal_year(first + (last - first) / 2)
+        return gbase.middle_epoch(info.first, info.last)
 
     def _station_place(self) -> tuple[float, float] | None:
         """Where the stations are looked for: for a baseline the position in the header of the user's base, else (and
@@ -955,11 +958,7 @@ class PpkDialog(QDialog):
                   "fatti con l'altra.", name, number(lat0, 8), number(lon0, 8), number(h0, 3), length(apart))
 
     def _frame_changed(self) -> None:
-        """The frame of the typed position: in ITRF2020 its epoch, the flight's when none is written."""
-        if self.frame.currentData() in frames.DYNAMIC and not self.epoch.text().strip():
-            epoch = self._flight_epoch()
-            if epoch is not None:
-                self.epoch.setText(decimal_comma(f"{epoch:.4f}"))
+        """The frame of the typed position: in ITRF2020 its epoch is asked (:meth:`_update_mode`)."""
         self._update_mode()
 
     def _atx_toggled(self, on: bool) -> None:
@@ -974,6 +973,12 @@ class PpkDialog(QDialog):
         for widget in (self.lat, self.lon, self.ellh, self.frame):
             widget.setEnabled(typed)
         self.epoch_row.setVisible(typed and self.frame.currentData() in frames.DYNAMIC)
+        if self.epoch_row.isVisibleTo(self):  # left empty: the middle of the drone's observations, said when known
+            epoch = self._flight_epoch()
+            self.epoch.setPlaceholderText(
+                tr("vuota: {0}, la metà delle osservazioni del drone", decimal_comma(f"{epoch:.4f}"))
+                if epoch is not None else
+                tr("anno decimale (2026,82) o data (2026-10-27); vuota: la metà delle osservazioni del drone"))
         self.header_warning.setVisible(mode == "header")
         far = self._far_text() if typed else ""
         self.far_warning.setText(far)

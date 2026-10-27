@@ -2597,22 +2597,6 @@ def _station_by_id(sid: str):
                      "--near LAT,LON` lists those near a place")
 
 
-def _middle_epoch(rover: Path) -> float:
-    """The middle of the observations of ``rover`` as a decimal year (UTC), as a base computed for the flight has it."""
-    from datetime import timedelta
-
-    from .gnss import frames, rinex
-
-    span = rinex.time_span(rover)
-    if span is None:
-        raise ValueError(f"{rover.name} has no observation epochs")
-    middle = span[0] + (span[1] - span[0]) / 2
-    return frames.decimal_year(middle - timedelta(seconds=rinex.gps_minus_utc(middle)))
-
-
-ATX_CHOICES = ("auto", "download", "off")
-
-
 @gnss_app.command("ppk")
 def gnss_ppk(project: Path,
              mrk: Path = typer.Option(..., "--mrk", exists=True, dir_okay=False,
@@ -2630,11 +2614,12 @@ def gnss_ppk(project: Path,
                                                          "position of the mark the base stands on, height above the "
                                                          "ellipsoid; default: the position of the base's RINEX header, "
                                                          "which can be metres off"),
-             base_frame: str = typer.Option("unknown", "--base-frame", help="the frame of --base-position: unknown "
-                                            "(WGS 84), ITRF2020, ETRF2000 (RDN2008), ETRF2014 or ETRF2020"),
+             base_frame: Optional[str] = typer.Option(None, "--base-frame", help="the frame of --base-position: "
+                                                      "unknown (WGS 84, the default), ITRF2020, ETRF2000 (RDN2008), "
+                                                      "ETRF2014 or ETRF2020"),
              base_epoch: Optional[str] = typer.Option(None, "--base-epoch", help="the epoch of the coordinates of "
-                                                      "--base-position, a decimal year or a date (in ITRF2020; "
-                                                      "default: the middle of the flight)"),
+                                                      "--base-position, a decimal year or a date (default in "
+                                                      "ITRF2020: the middle of the drone's observations)"),
              base_station: Optional[str] = typer.Option(None, "--base-station", help="a permanent station as the "
                                                         "base (its id): its observations for the hours of the flight "
                                                         "and its coordinates in ITRF2020 are downloaded"),
@@ -2642,9 +2627,10 @@ def gnss_ppk(project: Path,
                                                          "a static baseline from this permanent station (its id)"),
              base_ppp: bool = typer.Option(False, "--base-ppp", help="your base (--base) placed by a static PPP on the "
                                            "precise products of the IGS and its centres"),
-             atx: str = typer.Option("auto", "--atx", help="the calibration of the antenna of the base: auto "
-                                     "(igs20.atx when the program has it), download (igs20.atx downloaded once, 62 "
-                                     "MB, when missing) or off"),
+             atx: str = typer.Option("auto", "--atx", help="the calibration of the antennas: auto (igs20.atx when "
+                                     "the program has it; a station, a baseline and a PPP download it when missing), "
+                                     "download (igs20.atx downloaded once, 62 MB, when missing) or off (none, nothing "
+                                     "downloaded; not with --base-ppp, which needs it)"),
              photos: Optional[Path] = typer.Option(None, "--photos", help="folder of the photos (default: the folder "
                                                    "of the MRK)"),
              replace_fix: bool = typer.Option(False, "--replace-fix", help="give the PPK position also to the photos "
@@ -2666,15 +2652,24 @@ def gnss_ppk(project: Path,
     works in the folder of the chunk (gnss/ppk, a solution-<date>-<time>.pos per run); it needs the native core 0.5 or
     later, or PPG_RNX2RTKP."""
     from .gnss import apply as gnss
-    from .gnss import atx as antex
     from .gnss import base as gbase
-    from .gnss import download, frames, ppk, stations
-    from .gnss import ppp as gppp
+    from .gnss import download, frames, ppk
 
-    if atx not in ATX_CHOICES:
-        raise typer.BadParameter(f"one of {', '.join(ATX_CHOICES)}", param_hint="--atx")
-    if base_frame not in frames.FRAMES and base_frame != frames.WGS84:
+    if atx not in gbase.ATX_CHOICES:
+        raise typer.BadParameter(f"one of {', '.join(gbase.ATX_CHOICES)}", param_hint="--atx")
+    if base_frame is not None and base_frame not in frames.FRAMES and base_frame != frames.WGS84:
         raise typer.BadParameter(f"one of {', '.join(frames.FRAMES)}", param_hint="--base-frame")
+    if base_position is None and (base_frame is not None or base_epoch is not None):
+        raise typer.BadParameter("--base-frame and --base-epoch are those of --base-position: give it too",
+                                 param_hint="--base-frame/--base-epoch")
+    try:
+        epoch = frames.parse_epoch(base_epoch) if base_epoch is not None else None
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--base-epoch") from None
+    if base_ppp and atx == "off":
+        raise typer.BadParameter("a static PPP needs the antenna calibrations of the IGS (igs20.atx): the precise "
+                                 "orbits are of the centres of mass of the satellites, whose antennas are up to metres "
+                                 "from them - give --atx auto or download", param_hint="--atx")
     position = _base_position(base_position) if base_position is not None else None
     ways = [way for way, given in (("--base-station", base_station), ("--base-baseline", base_baseline),
                                    ("--base-ppp", base_ppp), ("--base-position", base_position is not None)) if given]
@@ -2688,46 +2683,27 @@ def gnss_ppk(project: Path,
     if not base_station and not bases:
         _gnss_failed(ValueError("give the observations of the base (--base), or a permanent station as the base "
                                 "(--base-station)"))
+    mode = ("station" if base_station else "baseline" if base_baseline else "ppp" if base_ppp else
+            "typed" if position is not None else "header")
+    frame = base_frame or frames.UNKNOWN
     doc, ch = _open(project, chunk)
-    folder = ppk.work_folder(ch).parent  # beside the work folder of RTKLIB, which no input may be in
-    notes = []
     try:
-        if atx == "download" and antex.cached_atx() is None:
-            try:
-                antex.atx_file(progress=print_progress)
-            except (download.DownloadError, ValueError, OSError) as exc:
-                notes.append(f"the antenna calibrations of the IGS ({antex.FILE_NAME}) could not be downloaded, so the "
-                             f"phase-centre offset of the antenna of the base is not applied: {exc}")
-        if position is not None:
-            epoch = frames.parse_epoch(base_epoch) if base_epoch else None
-            if epoch is None and base_frame in frames.DYNAMIC:
-                epoch = _middle_epoch(rover)
-                typer.echo(f"the epoch of --base-position: {epoch:.4f}, the middle of the flight (--base-epoch to give "
-                           "another)")
-            position = ppk.BasePosition(*position, "typed", frame=base_frame, epoch=epoch)
-        elif base_station:
-            observations, position = gbase.station_base(rover, _station_by_id(base_station), folder / "base",
-                                                        print_progress)
-            bases = [observations]
-        elif base_baseline:
-            found = gbase.baseline(bases, _station_by_id(base_baseline), folder / "baseline", progress=print_progress)
-            position, notes = found.position, notes + found.warnings
-        elif base_ppp:
-            found = gppp.solve_static(bases, folder / "ppp", progress=print_progress)
-            position, notes = found.position, notes + found.warnings
-        navs = list(nav or [])
-        if not navs and (base_station or base_baseline or base_ppp):
-            # the flight's own beside the drone's file (or your base's), else the broadcast messages of its hours
-            beside = ppk.navigation_beside([rover] if base_station else [rover, *bases])
-            if not beside:
-                start, end = _observation_span(rover)
-                navs = stations.download_navigation(start, end, folder / "base", print_progress)
-                typer.echo(f"navigation files downloaded for the flight: {', '.join(n.name for n in navs)}")
-        solution = ppk.solve(rover, bases[0] if len(bases) == 1 else bases, navs or None, position,
-                             folder=ppk.work_folder(ch), atx=None if atx == "off" else "auto")
+        station = _station_by_id(base_station or base_baseline) if mode in ("station", "baseline") else None
+        prepared = gbase.prepare_base(mode, rover, bases or None, folder=ppk.work_folder(ch).parent, station=station,
+                                      typed=position, frame=frame, epoch=epoch, navs=nav, atx=atx,
+                                      progress=print_progress)
+        if mode == "typed" and epoch is None and frame in frames.DYNAMIC:
+            typer.echo(f"the epoch of --base-position: {prepared.position.epoch:.4f}, the middle of the drone's "
+                       "observations (--base-epoch to give another)")
+        if prepared.downloaded:
+            typer.echo(f"navigation files downloaded for the flight: "
+                       f"{', '.join(path.name for path in prepared.downloaded)}")
+        solution = ppk.solve(rover, prepared.bases, prepared.navs or None, prepared.position,
+                             folder=ppk.work_folder(ch), atx=prepared.atx)
         result = gnss.apply_ppk(ch, mrk, solution, photos, replace_fix=replace_fix)
     except (OSError, ValueError, RuntimeError, download.DownloadError) as exc:
         _gnss_failed(exc)
+    notes = prepared.notes
     states = ", ".join(f"{k} {n}" for k, n in sorted(result["status"].items(), key=lambda p: -p[1]))
     if result["matched"]:
         typer.echo(f"{result['matched']} of {result['photos']} photos took the PPK position of their shot ({states})")
@@ -2761,16 +2737,6 @@ def gnss_ppk(project: Path,
         typer.echo(text)
     _unmatched(result["unmatched"], "without a PPK position")
     _unmatched([str(i) for i in result["shots_unmatched"]], "shots of the MRK without a PPK position")
-
-
-def _observation_span(path: Path):
-    """The first and last epoch of the observation file ``path`` (GPS time); a ``ValueError`` when it has none."""
-    from .gnss import rinex
-
-    span = rinex.time_span(path)
-    if span is None:
-        raise ValueError(f"{path.name} has no observation epochs")
-    return span
 
 
 def _deviations(sd) -> str:
@@ -2814,7 +2780,11 @@ def gnss_stations(project: Optional[Path] = typer.Argument(None, help="a project
             raise typer.BadParameter(f"LAT,LON: two numbers in degrees, not {near!r}", param_hint="--near") from None
     elif project is not None:
         _doc, ch = _open(project, chunk)
-        place = heights.survey_place(ch)
+        try:
+            place = heights.survey_place(ch)
+        except (ValueError, RuntimeError, OSError) as exc:  # PROJ's: a system it cannot read
+            _gnss_failed(ValueError(f"where the survey of {ch.label} is could not be read ({exc}): give --near "
+                                    "LAT,LON"))
         if place is None:
             _gnss_failed(ValueError(f"{ch.label} has no position on the earth (photos or markers): give --near "
                                     "LAT,LON"))
@@ -2938,6 +2908,11 @@ def gnss_geoid(download_it: bool = typer.Option(False, "--download", help="downl
                "is copied there)")
 
 
+# what PROJ raises for a system or a conversion it cannot make (pyproj's CRSError and ProjError are RuntimeErrors): the
+# commands say it, never with a traceback
+_PROJ_FAILURES = (ValueError, RuntimeError, OSError)
+
+
 def _crs_status(ch) -> None:
     """The system of the chunk, the kind of its heights, the frames of the positions of its photos, the systems of a
     survey where it is, and what does not fit between the heights (heights.check)."""
@@ -2949,9 +2924,13 @@ def _crs_status(ch) -> None:
     if crs_mod.is_local(ch.crs):
         typer.echo(f"{ch.label}: {ch.crs} (local coordinates)")
     else:
-        kind = {heights.ELLIPSOIDAL: "above the ellipsoid", heights.ORTHOMETRIC: "above the geoid",
-                heights.NONE: "none of its own"}[heights.height_kind(ch.crs)]
-        typer.echo(f"{ch.label}: {ch.crs} ({crs_mod.to_pyproj(ch.crs).name}), heights {kind}")
+        try:
+            kind = {heights.ELLIPSOIDAL: "above the ellipsoid", heights.ORTHOMETRIC: "above the geoid",
+                    heights.NONE: "none of its own"}[heights.height_kind(ch.crs)]
+            typer.echo(f"{ch.label}: {ch.crs} ({crs_mod.to_pyproj(ch.crs).name}), heights {kind}")
+        except _PROJ_FAILURES as exc:
+            typer.echo(f"{ch.label}: {ch.crs}, a system PROJ cannot read ({exc}): `ppg gnss crs --set CRS` puts the "
+                       "chunk into another one")
     placed = [cam for cam in ch.cameras if cam.reference.location]
     counts = Counter(frames.position_frame(cam.meta.get("gnss")) for cam in placed)
     parts = []
@@ -2961,20 +2940,27 @@ def _crs_status(ch) -> None:
         when = (f" (epochs {epochs[0]:.4f} to {epochs[-1]:.4f})" if frame in frames.DYNAMIC and epochs else "")
         parts.append(f"{_frame_words(frame)} {n}{when}")
     typer.echo(f"positions of the photos: {', '.join(parts) if parts else 'none'}")
-    place = heights.survey_place(ch)
-    if place is not None:
-        lon, lat, _frame = place
-        proposals = []
-        for frame, says in (("WGS84", "for positions in WGS 84 or ITRF2020"),
-                            ("ETRF2000", "for positions in ETRF2000 (RDN2008)")):
-            crs = heights.survey_crs(lon, lat, frame, geoid=False)
-            if crs not in [c for c, _ in proposals]:
-                proposals.append((crs, f"{crs} ({crs_mod.to_pyproj(crs).name}) {says}"))
-        typer.echo("a survey here: " + "; ".join(text for _crs, text in proposals))
-        grid = ("the grid is installed" if heights.geoid_available() else
-                f"the grid is not installed: {heights.DOWNLOAD_COMMAND}")
-        typer.echo(f"with heights above the sea level: +3855 (EGM2008; {grid})")
-    for text in heights.check(ch):
+    try:
+        place = heights.survey_place(ch)
+        if place is not None:
+            lon, lat, _frame = place
+            proposals = []
+            for frame, says in (("WGS84", "for positions in WGS 84 or ITRF2020"),
+                                ("ETRF2000", "for positions in ETRF2000 (RDN2008)")):
+                crs = heights.survey_crs(lon, lat, frame, geoid=False)
+                if crs not in [c for c, _ in proposals]:
+                    proposals.append((crs, f"{crs} ({crs_mod.to_pyproj(crs).name}) {says}"))
+            typer.echo("a survey here: " + "; ".join(text for _crs, text in proposals))
+            grid = ("the grid is installed" if heights.geoid_available() else
+                    f"the grid is not installed: {heights.DOWNLOAD_COMMAND}")
+            typer.echo(f"with heights above the sea level: +3855 (EGM2008; {grid})")
+    except _PROJ_FAILURES as exc:
+        typer.echo(f"warning: where the survey is could not be read, so no system is proposed: {exc}")
+    try:
+        found = heights.check(ch)
+    except _PROJ_FAILURES as exc:
+        found = [f"the heights of the photos and of the system could not be compared: {exc}"]
+    for text in found:
         typer.echo(f"warning: {text}")
 
 
@@ -2985,8 +2971,9 @@ def gnss_crs(project: Path,
                                          "ETRS89 / UTM in Europe for the European frames)"),
              frame: Optional[str] = typer.Option(None, "--frame", help="with --survey: the frame the system is for, "
                                                  "WGS84 or ETRF2000 (default: the frame of most positions)"),
-             geoid: bool = typer.Option(True, "--geoid/--no-geoid", help="with --survey: heights above the geoid "
-                                        "EGM2008 (+3855, its grid needed), or a system without heights of its own"),
+             geoid: Optional[bool] = typer.Option(None, "--geoid/--no-geoid", help="with --survey: heights above the "
+                                                  "geoid EGM2008 (+3855, its grid needed; the default), or a system "
+                                                  "without heights of its own"),
              set_crs: Optional[str] = typer.Option(None, "--set", help="put the chunk into this projected system "
                                                    "(EPSG:7792, EPSG:32633+3855 ...)"),
              chunk: Optional[str] = None):
@@ -3000,6 +2987,13 @@ def gnss_crs(project: Path,
 
     if survey and set_crs is not None:
         raise typer.BadParameter("give --survey or --set, not both", param_hint="--set")
+    if not survey and (frame is not None or geoid is not None):
+        given = " and ".join(name for name, value in (("--frame", frame), ("--geoid/--no-geoid", geoid))
+                             if value is not None)
+        raise typer.BadParameter(f"{given} choose{'s' if ' and ' not in given else ''} the system of --survey: "
+                                 + ("--set takes the system as it is written (EPSG:7792 without heights of its own, "
+                                    "EPSG:7792+3855 with heights above EGM2008)" if set_crs is not None else
+                                    "give --survey too"), param_hint=given)
     if frame is not None and frame not in (frames.WGS84, *frames.FRAMES):
         raise typer.BadParameter(f"WGS84 or one of {', '.join(frames.FRAMES)}", param_hint="--frame")
     doc, ch = _open(project, chunk)
@@ -3007,11 +3001,14 @@ def gnss_crs(project: Path,
         _crs_status(ch)
         return
     if survey:
-        place = heights.survey_place(ch)
+        try:
+            place = heights.survey_place(ch)
+        except _PROJ_FAILURES as exc:
+            _gnss_failed(ValueError(f"where the survey of {ch.label} is could not be read ({exc}): give --set CRS"))
         if place is None:
             _gnss_failed(ValueError(f"{ch.label} has no position on the earth (photos or markers): give --set CRS"))
         lon, lat, found = place
-        target = heights.survey_crs(lon, lat, frame or found, geoid=geoid)
+        target = heights.survey_crs(lon, lat, frame or found, geoid=True if geoid is None else geoid)
     else:
         target = set_crs.strip()
     if heights.above_egm2008(target) and not heights.geoid_available():
@@ -3022,7 +3019,7 @@ def gnss_crs(project: Path,
     old = ch.crs
     try:
         result = heights.set_survey_crs(ch, target)
-    except (ValueError, OSError) as exc:
+    except _PROJ_FAILURES as exc:
         _gnss_failed(exc)
     doc.save()
     typer.echo(f"{ch.label}: {old} -> {result['crs']}")

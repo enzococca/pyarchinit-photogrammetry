@@ -3421,6 +3421,7 @@ def test_ppk_dialog_base_modes(tmp_path, qt_app, monkeypatch):
     file: its observations are downloaded), a static baseline from a station, a static PPP; the station chosen in the
     stations dialog near the flight; what is downloaded said for each; the base in several files; the calibration of
     the base antenna downloaded once (on by default)."""
+    from pyarchinit_photogrammetry.gnss import base as gbase
     from pyarchinit_photogrammetry.gui import ppk_dialog
     from pyarchinit_photogrammetry.gui.ppk_dialog import PpkDialog
 
@@ -3451,8 +3452,14 @@ def test_ppk_dialog_base_modes(tmp_path, qt_app, monkeypatch):
     assert dlg.values()["base_frame"] == "ETRF2000" and not dlg.epoch.isVisibleTo(dlg)
     dlg.frame.setCurrentIndex(dlg.frame.findData("ITRF2020"))
     shot = dji.read_mrk(card / f"{DJI_FLIGHT}_Timestamp.MRK")[0]
-    assert dlg.epoch.isVisibleTo(dlg) and dlg.epoch.text() == f"{frames.decimal_year(shot.utc):.4f}".replace(".", ",")
-    assert dlg.values()["base_epoch"] == pytest.approx(frames.decimal_year(shot.utc), abs=1e-4)
+    # no epoch written: the middle of the drone's observations, the rule of the run and of ppg gnss ppk
+    info = rinex.header(dlg.rover.path())
+    middle = gbase.middle_epoch(info.first, info.last)
+    assert f"{middle:.4f}" == f"{gbase.flight_epoch(dlg.rover.path()):.4f}"
+    assert dlg.epoch.isVisibleTo(dlg) and dlg.epoch.text() == ""
+    assert dlg.epoch.placeholderText() == (f"vuota: {middle:.4f}".replace(".", ",") +
+                                           ", la metà delle osservazioni del drone")
+    assert dlg.problem() is None and dlg.values()["base_epoch"] is None
     dlg.epoch.setText("2026-10-27")  # a date is an epoch too
     assert dlg.values()["base_epoch"] == pytest.approx(frames.decimal_year(datetime(2026, 10, 27)))
     dlg.epoch.setText("ieri")
@@ -3801,6 +3808,162 @@ def test_cli_ppk_with_a_station_base(tmp_path, fake_rtklib, monkeypatch):
     assert "(typed, ETRF2000)" in result.output
     gnss = ppg.Document.open(project).chunk.camera("DJI_0002").meta["gnss"]
     assert gnss["frame"] == "ETRF2000" and gnss["base"]["frame"] == "ETRF2000"
+
+
+def _placed_bases(monkeypatch) -> list[tuple]:
+    """The static baseline (gnss.base.baseline) and the static PPP (gnss.ppp.solve_static) that place the user's base
+    replaced: 0759 of the RTKLIB sample data placed at the position of its header in ITRF2020, with a warning each.
+    Returns their calls."""
+    from pyarchinit_photogrammetry.gnss import base as gbase
+    from pyarchinit_photogrammetry.gnss import ppp
+
+    llh = rinex.ecef_to_llh(rinex.header(PPK_BASE).approx_xyz)
+    calls: list[tuple] = []
+
+    def baseline(base_obs, station, folder, navs=None, progress=None, *, station_obs=None, station_position=None,
+                 atx="auto"):
+        calls.append(("baseline", station.id, Path(folder), atx))
+        position = ppk.BasePosition(*llh, "baseline", frame="ITRF2020", epoch=2005.25, sd=(0.001, 0.001, 0.002),
+                                    detail={"station": station.id})
+        return gbase.BaselineResult(position, 2, (0.001, 0.001, 0.002), 3.3, 1.0, Path(folder) / "baseline.pos",
+                                    ["the static baseline from 0759 is float: a few centimetres off"])
+
+    def solve_static(obs, folder, products=None, atx="auto", progress=None):
+        calls.append(("ppp", Path(folder), atx))
+        position = ppk.BasePosition(*llh, "ppp", frame="ITRF2020", epoch=2005.25, sd=(0.01, 0.012, 0.03),
+                                    detail={"centre": "ESA", "kind": "final"})
+        return ppp.PppResult(position=position, hours=1.0,
+                             products=ppp.Products([PPK_BASE], [PPK_BASE], [PPK_BASE], "ESA", "final"),
+                             solution=Path(folder) / "ppp.pos",
+                             warnings=["your base 0759 observed for 1 h: a static PPP of less than 2 hours is 10-20 cm "
+                                       "off at best"])
+
+    monkeypatch.setattr(gbase, "baseline", baseline)
+    monkeypatch.setattr(ppp, "solve_static", solve_static)
+    return calls
+
+
+PLACED_WARNINGS = {"baseline": "the static baseline from 0759 is float: a few centimetres off",
+                   "ppp": "your base 0759 observed for 1 h: a static PPP of less than 2 hours is 10-20 cm off at best"}
+
+
+def _own_base_alone(tmp_path: Path) -> Path:
+    """The user's base (0759 of the RTKLIB sample data) in a folder without any navigation file."""
+    folder = tmp_path / "own_base"
+    folder.mkdir()
+    return Path(shutil.copyfile(PPK_BASE, folder / "0759_base.obs"))
+
+
+@pytest.mark.parametrize("mode", ["baseline", "ppp"])
+def test_ppk_step_with_the_base_placed_by_a_baseline_or_a_ppp(ppk_window, fake_rtklib, monkeypatch, tmp_path, mode):
+    """The user's base placed by a static baseline from a permanent station or by a static PPP, then the PPK of the
+    flight against it - the same set-up as ppg gnss ppk (gnss.base.prepare_base): in the GNSS folder of the chunk, the
+    navigation of the flight downloaded when none is beside the drone's file or the base's; the photos in ITRF2020 at
+    the epoch of the base; its warnings and the navigation downloaded in the log."""
+    w, folder, mw = ppk_window
+    chunk = w.chunk
+    pos = tmp_path / "drone.pos"
+    pos.write_text(_pos_text(rows=_drone_rows()), newline="")
+    monkeypatch.setenv("PPG_FAKE_POS", str(pos))
+    downloads = _station_downloads(monkeypatch, tmp_path, GSI_0759)
+    placed = _placed_bases(monkeypatch)
+    errors = []
+    monkeypatch.setattr(w, "_error", lambda summary, details="", logged=True: errors.append(summary))
+    monkeypatch.setattr(mw, "message", lambda *a, **k: pytest.fail("a message for a computed base"))
+    monkeypatch.setattr(mw.QFileDialog, "getOpenFileName", lambda *a, **k: (str(folder / "Timestamp.MRK"), ""))
+    rover = _rover_alone(tmp_path)
+    answer = {"rover": rover, "base": [_own_base_alone(tmp_path)], "navs": [], "base_position": None,
+              "replace_fix": False, "base_mode": mode, "base_frame": None, "base_epoch": None,
+              "station": GSI_0759 if mode == "baseline" else None, "atx": "auto"}
+    monkeypatch.setattr(mw.PpkDialog, "ask", staticmethod(lambda *a, **k: dict(answer)))
+
+    w.gnss_ppk()
+    w.runner.wait()
+
+    assert errors == []
+    gnss = chunk.data_dir / "gnss"
+    assert placed == ([("baseline", "0759", gnss / "baseline", "auto")] if mode == "baseline" else
+                      [("ppp", gnss / "ppp", "auto")])
+    start, end = rinex.time_span(rover)
+    assert downloads["navigation"] == [(start, end, gnss / "base")] and downloads["atx"] == []
+    cam = chunk.camera("DJI_0002")
+    assert cam.meta["gnss"]["frame"] == "ITRF2020" and cam.meta["gnss"]["epoch"] == pytest.approx(2005.25)
+    assert cam.meta["gnss"]["base"]["position_source"] == mode
+    logged = [entry[2] for entry in w.log_pane.entries]
+    assert PLACED_WARNINGS[mode] in logged, logged
+    assert "File di navigazione scaricati per il volo: BRDC00WRD_S_20050920000_01D_MN.rnx" in logged
+    assert ppk.last_run(chunk)["position_source"] == mode
+
+
+@pytest.mark.parametrize("mode", ["baseline", "ppp"])
+def test_cli_ppk_with_the_base_placed_by_a_baseline_or_a_ppp(tmp_path, fake_rtklib, monkeypatch, mode):
+    """ppg gnss ppk --base-baseline / --base-ppp: the user's base placed first, the warnings of the placing and the
+    navigation downloaded for the flight printed, the base line naming how it was placed; --atx off gives a baseline
+    no antenna calibrations and is refused for a PPP, which needs them, before anything runs."""
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    pos = tmp_path / "drone.pos"
+    pos.write_text(_pos_text(rows=_drone_rows()), newline="")
+    monkeypatch.setenv("PPG_FAKE_POS", str(pos))
+    downloads = _station_downloads(monkeypatch, tmp_path, GSI_0759)
+    placed = _placed_bases(monkeypatch)
+    project, folder = _ppk_project(tmp_path)
+    rover = _rover_alone(tmp_path)
+    run = CliRunner().invoke
+    command = ["gnss", "ppk", str(project), "--mrk", str(folder / "Timestamp.MRK"), "--rover", str(rover), "--base",
+               str(_own_base_alone(tmp_path)), *(["--base-baseline", "0759"] if mode == "baseline" else ["--base-ppp"])]
+
+    result = run(app, command)
+
+    assert result.exit_code == 0, result.output
+    gnss = ppg.Document.open(project).chunk.data_dir / "gnss"
+    assert placed == ([("baseline", "0759", gnss / "baseline", "auto")] if mode == "baseline" else
+                      [("ppp", gnss / "ppp", "auto")])
+    lines = result.output.splitlines()
+    assert f"warning: {PLACED_WARNINGS[mode]}" in lines
+    assert "navigation files downloaded for the flight: BRDC00WRD_S_20050920000_01D_MN.rnx" in lines
+    how = ("by a static baseline from the station 0759" if mode == "baseline" else
+           "by a static PPP on the final products of ESA")
+    assert f"({how}, ITRF2020 at 2005.2500)" in result.output
+    assert len(downloads["navigation"]) == 1
+    placed.clear()
+    result = run(app, [*command, "--atx", "off"])
+    if mode == "baseline":
+        assert result.exit_code == 0 and placed == [("baseline", "0759", gnss / "baseline", None)], result.output
+    else:
+        assert result.exit_code == 2 and placed == [], result.output
+        assert "a static PPP needs the antenna calibrations of the IGS" in _plain_words(result.output)
+
+
+def test_cli_ppk_refuses_options_it_would_ignore(tmp_path, fake_rtklib, monkeypatch):
+    """--base-frame and --base-epoch are those of --base-position: refused without it; --atx off with a permanent
+    station as the base downloads no antenna calibrations."""
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    pos = tmp_path / "drone.pos"
+    pos.write_text(_pos_text(rows=_drone_rows()), newline="")
+    monkeypatch.setenv("PPG_FAKE_POS", str(pos))
+    downloads = _station_downloads(monkeypatch, tmp_path, GSI_0759)
+    project, folder = _ppk_project(tmp_path)
+    run = CliRunner().invoke
+    command = ["gnss", "ppk", str(project), "--mrk", str(folder / "Timestamp.MRK"), "--rover",
+               str(_rover_alone(tmp_path))]
+    for options in (["--base", str(PPK_BASE), "--base-frame", "ITRF2020"],
+                    ["--base", str(PPK_BASE), "--base-epoch", "2005.25"],
+                    ["--base-station", "0759", "--base-frame", "ETRF2000"]):
+        result = run(app, [*command, *options])
+        assert result.exit_code == 2, result.output
+        assert "--base-frame and --base-epoch are those of --base-position" in _plain_words(result.output)
+    assert downloads == {"observations": [], "coordinates": [], "navigation": [], "atx": []}
+    result = run(app, [*command, "--base-station", "0759", "--atx", "off"])
+    assert result.exit_code == 0, result.output
+    assert len(downloads["observations"]) == 1 and downloads["atx"] == []
+    result = run(app, [*command, "--base-station", "0759"])
+    assert result.exit_code == 0 and downloads["atx"] == [False], result.output
 
 
 def _single_row(path: Path, llh, q: int = 1) -> Path:

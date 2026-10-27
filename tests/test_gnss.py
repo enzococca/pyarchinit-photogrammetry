@@ -1130,9 +1130,12 @@ def test_gnss_pane_frames_and_heights_step(gnss_window):
 
 
 def test_gnss_survey_crs_from_the_pane(gnss_window, monkeypatch, tmp_path):
-    """Sistema del rilievo...: the systems heights.survey_crs proposes where the survey is; what changes, shown before
-    and confirmed; the drawings the window holds stored first and read again after, in the new system; the project
-    saved. With heights above EGM2008 and no grid, the grid is offered first."""
+    """Sistema del rilievo...: the systems heights.survey_crs proposes where the survey is; what changes, worked out in
+    the background, shown before and confirmed; the drawings the window holds stored first and read again after, in the
+    new system; the project saved. With heights above EGM2008 and no grid, the choice between downloading it first and
+    the same system without heights of its own."""
+    import threading
+
     from PySide6.QtWidgets import QMessageBox
 
     from pyarchinit_photogrammetry.gui import survey_crs_dialog
@@ -1143,15 +1146,21 @@ def test_gnss_survey_crs_from_the_pane(gnss_window, monkeypatch, tmp_path):
     w.doc.save(tmp_path / "rilievo.ppg")
     x, y = 522000.0, 4553000.0
     w.quote.append({"x": x, "y": y, "quota_q": 120.5})  # drawn in the window, not yet in the chunk
-    asked, said = [], []
+    asked, said, threads = [], [], []
 
     def ask(parent, current, choices, *args, **kwargs):
         asked.append((current, choices))
-        return {"crs": "EPSG:32632"}
+        return {"crs": "EPSG:32632", "plain": "EPSG:32632"}
 
+    def changes(ch, crs, real=heights.survey_crs_changes):
+        threads.append(threading.current_thread())
+        return real(ch, crs)
+
+    monkeypatch.setattr(heights, "survey_crs_changes", changes)
     monkeypatch.setattr(survey_crs_dialog.SurveyCrsDialog, "ask", staticmethod(ask))
     monkeypatch.setattr(mw, "message", lambda parent, kind, title, text, *a, **k: said.append((kind, text))
                         or QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(mw, "choice", lambda *a, **k: pytest.fail("nothing to choose with the grid not needed"))
     errors = []
     monkeypatch.setattr(w, "_error", lambda summary, details="", logged=True: errors.append(summary))
 
@@ -1161,40 +1170,129 @@ def test_gnss_survey_crs_from_the_pane(gnss_window, monkeypatch, tmp_path):
     assert errors == []
     ((current, choices),) = asked
     assert current == "EPSG:32633" and [crs for crs, _label in choices] == ["EPSG:32633", "EPSG:7792"]
+    assert threads and threading.main_thread() not in threads  # the preview in the background
     ((kind, text),) = said  # the changes, confirmed
     assert kind == "question" and "EPSG:32633 → EPSG:32632" in text and "quote 1" in text
+    assert "ridisegnare" not in text  # no lines held by the window
     expected = Transformer.from_crs("EPSG:32633", "EPSG:32632", always_xy=True).transform(x, y)
     assert chunk.crs == "EPSG:32632" and (w.quote[0]["x"], w.quote[0]["y"]) == pytest.approx(expected)
     saved = ppg.Document.open(tmp_path / "rilievo.ppg").chunk
     assert saved.crs == "EPSG:32632" and saved.meta["drawings"]["quote"][0]["x"] == pytest.approx(expected[0])
     assert not w.isWindowModified()
 
-    # heights above EGM2008 without the grid: the grid offered first (its size), then the changes, then the system
-    downloads = []
+    # heights above EGM2008 without the grid: downloaded first when the user chooses so, then the changes, the system
+    downloads, offers = [], []
     monkeypatch.setattr(heights, "download_geoid", lambda progress=None: downloads.append(1)
                         or heights.grid_folder() / heights.GEOID_GRID)
     monkeypatch.setattr(survey_crs_dialog.SurveyCrsDialog, "ask",
-                        staticmethod(lambda *a, **k: {"crs": "EPSG:32632+3855"}))
+                        staticmethod(lambda *a, **k: {"crs": "EPSG:32632+3855", "plain": "EPSG:32632"}))
+    monkeypatch.setattr(mw, "choice", lambda parent, kind, title, text, options, *a, **k:
+                        offers.append((text, options)) or 0)
     said.clear()
     w.gnss_survey_crs()
     w.runner.wait()
-    w.runner.wait()
-    assert errors == [] and downloads == [1] and len(said) == 2
-    assert "81 MB" in said[0][1] and "EGM2008" in said[0][1]
-    assert "EPSG:32632 → EPSG:32632+3855" in said[1][1] and "come sono" in said[1][1]  # heights pass as they are
+    assert errors == [] and downloads == [1] and len(said) == 1
+    ((text, options),) = offers
+    assert "81 MB" in text and "EGM2008" in text and "EPSG:32632+3855" in text and "EPSG:32632," in text
+    assert options == ["Scarica e applica", "Applica senza quote sul geoide"]
+    assert "EPSG:32632 → EPSG:32632+3855" in said[0][1] and "come sono" in said[0][1]  # heights pass as they are
     assert chunk.crs == "EPSG:32632+3855"
-    # refused: nothing changes
-    monkeypatch.setattr(mw, "message", lambda *a, **k: QMessageBox.StandardButton.No)
+    # or the system without heights of its own, nothing downloaded; written with EGM2008 heights, its plan alone
+    for answer, plain in (({"crs": "EPSG:7792+3855", "plain": "EPSG:7792"}, "EPSG:7792"),
+                          ({"crs": "EPSG:32633+3855"}, "EPSG:32633")):
+        monkeypatch.setattr(survey_crs_dialog.SurveyCrsDialog, "ask", staticmethod(lambda *a, answer=answer, **k:
+                                                                                     dict(answer)))
+        monkeypatch.setattr(mw, "choice", lambda *a, **k: 1)
+        downloads.clear()
+        w.gnss_survey_crs()
+        w.runner.wait()
+        assert errors == [] and downloads == [] and chunk.crs == plain
+    # a line the window holds only (a contour, a plan slice), in the old system: listed in the changes, taken away
+    w._add_line_feature("Curve di livello", [[x, y], [x + 5.0, y + 5.0]], "#8b4513")
+    said.clear()
     monkeypatch.setattr(survey_crs_dialog.SurveyCrsDialog, "ask", staticmethod(lambda *a, **k: {"crs": "EPSG:7792"}))
     w.gnss_survey_crs()
     w.runner.wait()
-    assert chunk.crs == "EPSG:32632+3855"
+    assert "Da ridisegnare dopo: Curve di livello" in said[0][1] and chunk.crs == "EPSG:7792"
+    assert w.line_layers == {} and "Curve di livello" not in w.ortho_view.layers
+    assert "Da ridisegnare nel nuovo sistema: Curve di livello." in [entry[2] for entry in w.log_pane.entries]
+    # refused: nothing changes
+    monkeypatch.setattr(mw, "message", lambda *a, **k: QMessageBox.StandardButton.No)
+    monkeypatch.setattr(survey_crs_dialog.SurveyCrsDialog, "ask", staticmethod(lambda *a, **k: {"crs": "EPSG:32632"}))
+    w.gnss_survey_crs()
+    w.runner.wait()
+    assert chunk.crs == "EPSG:7792"
+
+
+def test_gnss_survey_crs_says_why_not_and_what_happened(gnss_window, monkeypatch, tmp_path):
+    """A system the preview refuses (a site too large for one similarity) is said, not an error with its traceback; one
+    that needs the grid of the geoid has it offered, then the preview again; after the change the log says whether the
+    georeference was fitted again or converted by a similarity (by how much it misses)."""
+    from PySide6.QtWidgets import QMessageBox
+
+    from pyarchinit_photogrammetry.gui import survey_crs_dialog
+
+    w, chunk, folder, mw = gnss_window
+    _in_italy(chunk)
+    chunk.crs = "EPSG:32633"
+    errors, said, offers, downloads = [], [], [], []
+    monkeypatch.setattr(w, "_error", lambda summary, details="", logged=True: errors.append(summary))
+    monkeypatch.setattr(mw, "message", lambda parent, kind, title, text, *a, **k: said.append((kind, text))
+                        or QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(mw, "choice", lambda parent, kind, title, text, options, *a, **k:
+                        offers.append((text, options)) or 0)
+    monkeypatch.setattr(heights, "download_geoid", lambda progress=None: downloads.append(1)
+                        or heights.grid_folder() / heights.GEOID_GRID)
+    monkeypatch.setattr(survey_crs_dialog.SurveyCrsDialog, "ask", staticmethod(lambda *a, **k: {"crs": "EPSG:32632"}))
+    real_changes = heights.survey_crs_changes
+
+    def too_large(ch, crs):
+        raise ValueError("the site is too large for one similarity between the two systems")
+
+    monkeypatch.setattr(heights, "survey_crs_changes", too_large)
+    w.gnss_survey_crs()
+    w.runner.wait()
+    assert errors == [] and offers == [] and chunk.crs == "EPSG:32633"
+    ((kind, text),) = said
+    assert kind == "warning" and "EPSG:32632 non può essere il sistema del rilievo" in text and "too large" in text
+
+    previews = []
+
+    def wants_the_grid(ch, crs):
+        previews.append(crs)
+        if len(previews) == 1:
+            raise heights.GridMissing("heights above the ellipsoid cannot become heights above the geoid",
+                                      [heights.GEOID_GRID])
+        return real_changes(ch, crs)
+
+    monkeypatch.setattr(heights, "survey_crs_changes", wants_the_grid)
+    for result in ({"updated": True, "transform_rms": None}, {"updated": False, "transform_rms": 0.0018}):
+        def converted(ch, crs, result=result):
+            ch.crs = crs
+            return {"crs": crs, "rebuild": [], **result}
+
+        monkeypatch.setattr(heights, "set_survey_crs", converted)
+        said.clear()
+        previews.clear()
+        w.gnss_survey_crs()
+        w.runner.wait()
+        assert errors == [] and chunk.crs == "EPSG:32632"
+        if result["updated"]:  # the grid offered for the preview, then the preview again
+            assert previews == ["EPSG:32632", "EPSG:32632"] and downloads == [1]
+            assert offers[-1][1] == ["Scarica e riprova"]
+        logged = [entry[2] for entry in w.log_pane.entries]
+        assert ("La georeferenziazione è stata calcolata di nuovo nel nuovo sistema." if result["updated"] else
+                "La georeferenziazione è stata convertita nel nuovo sistema con una similitudine (scarto 1,8 mm).") in (
+            logged)
+        chunk.crs = "EPSG:32633"
 
 
 def test_survey_crs_changes_say_the_converted_georeference_and_the_heights():
     """What the window shows before it changes the system of a chunk says when the georeference is converted (a chunk
-    without photos to fit it again: by how much the similarity misses) and when the heights of what was drawn go onto
-    the geoid with the chunk (placed by GNSS positions of its photos), the markers' as they are."""
+    without photos to fit it again: by how much the similarity misses), that one fitted again is converted when its
+    references cannot fit it after all (as set_survey_crs does), when the heights of what was drawn go onto the geoid
+    with the chunk (placed by GNSS positions of its photos), the markers' as they are, and the lines the window holds
+    only, to draw again."""
     pytest.importorskip("PySide6")
     from pyarchinit_photogrammetry.gui.survey_crs_dialog import changes_text
 
@@ -1202,10 +1300,15 @@ def test_survey_crs_changes_say_the_converted_georeference_and_the_heights():
             "heights_unchanged": False, "heights_from_ellipsoid": False, "transform_rms": 0.0018}
     text = changes_text("EPSG:32633", base)
     assert "similitudine" in text and "(scarto 1,8 mm)" in text and "ellissoide" not in text
+    assert "calcolata di nuovo" not in text and "ridisegnare" not in text
     text = changes_text("EPSG:32633", {**base, "crs": "EPSG:32633+3855", "refit": True, "transform_rms": None,
                                        "heights_from_ellipsoid": True})
-    assert "similitudine" not in text and "calcolata di nuovo" in text
+    assert "calcolata di nuovo" in text and "(scarto" not in text
+    assert "se non bastano a calcolarla, viene convertita con una similitudine" in text
     assert "sull'ellissoide" in text and "le quote dei marker passano come sono" in text
+    text = changes_text("EPSG:32633", base, ["Curve di livello", "Sezione in pianta"])
+    assert ("Da ridisegnare dopo: Curve di livello, Sezione in pianta (linee che sono solo nella finestra, nel "
+            "sistema di prima: vengono tolte).") in text
 
 
 def test_a_missing_geoid_grid_is_offered_and_the_step_tried_again(gnss_window, monkeypatch):
@@ -1262,6 +1365,57 @@ def test_a_missing_geoid_grid_is_offered_and_the_step_tried_again(gnss_window, m
     w.runner.wait()
     assert "geo_igm_mar06.grd" in said[-1] and str(heights.grid_folder()) in said[-1]
     assert errors == [] and downloads == []
+
+
+def test_the_geoid_grid_offer_in_the_right_words(gnss_window, monkeypatch):
+    """The grid of EGM2008 named while the program has it: PROJ could not use it, and nothing is offered for download
+    (which would change nothing); an error raised ``from None`` while a grid was missing is not that grid's - an error
+    as any other -, one raised while handling it is; in English the way to the download is said in English."""
+    from pyarchinit_photogrammetry.gui import i18n
+
+    w, chunk, folder, mw = gnss_window
+    errors, asked, said = [], [], []
+    monkeypatch.setattr(w, "_error", lambda summary, details="", logged=True: errors.append(summary))
+    monkeypatch.setattr(mw, "choice", lambda parent, kind, title, text, options, *a, **k: asked.append(text) or None)
+    monkeypatch.setattr(mw, "message", lambda parent, kind, title, text, *a, **k: said.append(text))
+    monkeypatch.setattr(heights, "download_geoid", lambda progress=None: pytest.fail("nothing to download"))
+
+    def egm2008(progress):
+        raise heights.GridMissing("PROJ needs the grid us_nga_egm08_25.tif", [heights.GEOID_GRID])
+
+    monkeypatch.setattr(heights, "geoid_available", lambda: True)
+    w.run_task("Georeferenziazione", egm2008, refresh=False, save=False)
+    w.runner.wait()
+    assert asked == [] and errors == [] and len(said) == 1
+    assert "«Georeferenziazione»" in said[0] and "che pure è installata" in said[0] and "Chiudi e riapri" in said[0]
+    monkeypatch.setattr(heights, "geoid_available", lambda: False)
+
+    def hidden(progress):
+        try:
+            egm2008(progress)
+        except heights.GridMissing:
+            raise ValueError("the georeference could not be fitted") from None
+
+    w.run_task("Georeferenziazione", hidden, refresh=False, save=False)
+    w.runner.wait()
+    assert asked == [] and len(errors) == 1 and len(said) == 1
+    for suppress, found in ((True, None), (False, heights.GridMissing)):
+        try:
+            try:
+                egm2008(None)
+            except heights.GridMissing as grid:
+                error = ValueError("the georeference could not be fitted")
+                error.__context__, error.__suppress_context__ = grid, suppress
+                raise error
+        except ValueError as exc:
+            assert (found is None and mw._grid_missing(exc) is None) or isinstance(mw._grid_missing(exc), found)
+    i18n.set_current("en")
+    try:
+        w._grid_missing(heights.GridMissing("PROJ needs the grid", [heights.GEOID_GRID]), "Alignment")
+    finally:
+        i18n.set_current("it")
+    assert "GNSS > System and heights > Download the EGM2008 geoid" in asked[-1], asked[-1]
+    assert "Sistema e quote" not in asked[-1]
 
 
 def test_the_alignment_refuses_before_the_matching(gnss_window, monkeypatch, tmp_path):
@@ -1397,6 +1551,46 @@ def test_cli_crs_survey(tmp_path):
     assert result.exit_code != 0 and "--set" in result.output
     result = run(app, ["gnss", "crs", str(project), "--set", "EPSG:32633"])
     assert result.exit_code == 0 and ppg.Document.open(project).chunk.crs == "EPSG:32633", result.output
+
+
+def test_cli_crs_and_stations_refuse_what_they_would_ignore_and_say_what_proj_cannot(tmp_path, monkeypatch):
+    """--frame and --geoid/--no-geoid choose the system of --survey: refused with --set (which takes the system as it is
+    written) and without --survey; a chunk in a system PROJ cannot read, and a survey PROJ cannot place, are said by
+    ppg gnss crs and ppg gnss stations PROJECT - never with a traceback."""
+    from pyproj.exceptions import CRSError
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+    from test_gnss_ppk import _plain_words
+
+    project, _folder = _project(tmp_path)
+    run = CliRunner().invoke
+    for options, said in ((["--set", "EPSG:7792", "--frame", "WGS84"], "--set takes the system as it is written"),
+                          (["--set", "EPSG:7792", "--no-geoid"], "--geoid/--no-geoid chooses the system of --survey"),
+                          (["--geoid"], "give --survey too"),
+                          (["--frame", "ETRF2000", "--no-geoid"], "--frame and --geoid/--no-geoid choose the system")):
+        result = run(app, ["gnss", "crs", str(project), *options])
+        assert result.exit_code == 2 and said in _plain_words(result.output), result.output
+    assert ppg.Document.open(project).chunk.crs == "LOCAL"
+    doc = ppg.Document.open(project)
+    doc.chunk.crs = "EPSG:999999"  # no such system
+    doc.save()
+    result = run(app, ["gnss", "crs", str(project)])
+    assert result.exit_code == 0, result.output
+    assert "Flight: EPSG:999999, a system PROJ cannot read" in result.output
+    assert "warning: the heights of the photos and of the system could not be compared" in result.output
+
+    def unplaced(chunk):
+        raise CRSError("Invalid projection: EPSG:999999")
+
+    monkeypatch.setattr(heights, "survey_place", unplaced)
+    for command, code, said in ((["gnss", "crs", str(project)], 0, "no system is proposed"),
+                                (["gnss", "crs", str(project), "--survey"], 1, "give --set CRS"),
+                                (["gnss", "stations", str(project)], 1, "give --near LAT,LON")):
+        result = run(app, command)
+        assert result.exit_code == code and not isinstance(result.exception, CRSError), result.output
+        assert said in result.output and "Invalid projection: EPSG:999999" in result.output
+    assert ppg.Document.open(project).chunk.crs == "EPSG:999999"
 
 
 def test_positions_in_itrf2020_with_their_epoch(tmp_path, gnss_window, monkeypatch):

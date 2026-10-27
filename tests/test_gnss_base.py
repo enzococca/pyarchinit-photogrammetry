@@ -602,3 +602,186 @@ def test_station_base_says_what_it_does_and_can_be_cancelled(tmp_path, monkeypat
     progress.cancel_requested = True
     with pytest.raises(Cancelled):
         base.station_base(OWN, AQUI, tmp_path / "other", progress=progress)
+
+
+# --- the base of a flight set up for its PPK, as the window and ppg gnss ppk do (prepare_base) ----------------------
+
+
+def _rover_alone(tmp_path: Path) -> Path:
+    """The drone's observations (the hour of 3040) in a folder of their own, without any navigation file beside."""
+    folder = tmp_path / "drone"
+    folder.mkdir()
+    return Path(shutil.copyfile(OWN, folder / "3040_Rinex.obs"))
+
+
+def _navigation_downloads(monkeypatch) -> list[tuple]:
+    """The broadcast messages of the hours of a flight replaced by those of 0759; returns the calls."""
+    calls: list[tuple] = []
+
+    def navigation(start, end, folder, progress=None):
+        calls.append((start, end, Path(folder)))
+        Path(folder).mkdir(parents=True, exist_ok=True)
+        return [Path(shutil.copyfile(NAV, Path(folder) / "BRDC00WRD_S_20050920000_01D_MN.rnx"))]
+
+    monkeypatch.setattr(stations, "download_navigation", navigation)
+    return calls
+
+
+def test_prepare_base_at_the_header_or_typed(tmp_path, monkeypatch):
+    """A base at the position of its RINEX header: its files as they are, no position, the navigation left to
+    ppk.solve (beside the drone's file, else the base's), igs20.atx not asked for; typed: the position in its frame - in
+    ITRF2020, where positions move, at the epoch given, else at the middle of the drone's observations, the one rule of
+    the window and of ppg gnss ppk. Nothing is downloaded for either."""
+    _no_downloads(monkeypatch)
+    folder = tmp_path / "gnss_of_the_chunk"
+    prepared = base.prepare_base("header", OWN, [STATION_OBS], folder=folder)
+    assert (prepared.bases, prepared.position, prepared.navs, prepared.atx, prepared.downloaded, prepared.notes) == (
+        STATION_OBS, None, [], "auto", [], [])
+    pieces = _halves(tmp_path / "halves")  # a base in two files stays in two
+    assert base.prepare_base("header", OWN, pieces, folder=folder).bases == pieces
+    llh = _header_llh(STATION_OBS)
+    position = base.prepare_base("typed", OWN, STATION_OBS, folder=folder, typed=llh, frame="ITRF2020").position
+    assert ((position.lat, position.lon, position.h), position.source, position.frame) == (llh, "typed", "ITRF2020")
+    assert position.epoch == pytest.approx(MID_2005, abs=1e-9) and base.flight_epoch(OWN) == position.epoch
+    assert base.prepare_base("typed", OWN, STATION_OBS, folder=folder, typed=llh, frame="ITRF2020",
+                             epoch=2026.5).position.epoch == 2026.5
+    etrf = base.prepare_base("typed", OWN, STATION_OBS, folder=folder, typed=llh, frame="ETRF2000").position
+    assert etrf.frame == "ETRF2000" and etrf.epoch is None  # a frame whose positions do not move: no epoch
+    given = base.prepare_base("header", OWN, STATION_OBS, folder=folder, navs=[NAV], atx="off")
+    assert given.navs == [NAV] and given.atx is None and given.downloaded == []
+    assert not folder.exists()  # nothing written for these
+
+
+def test_prepare_base_refuses_before_anything_is_downloaded(tmp_path, monkeypatch):
+    """What cannot be is refused before any download: a way or a choice of the antenna calibrations the program does
+    not know, files of a base with a station (its observations are downloaded), no files for the other ways, a station
+    or a baseline without a station, a typed base without its position, a static PPP without the antenna calibrations
+    (the offsets of the satellites' antennas)."""
+    _no_downloads(monkeypatch)
+    folder = tmp_path / "gnss_of_the_chunk"
+    station = _station_0759()
+    for args, kwargs, said in (
+            (("nowhere", OWN, STATION_OBS), {}, "one of the ways"),
+            (("header", OWN, STATION_OBS), {"atx": "always"}, "auto, download, off"),
+            (("station", OWN, STATION_OBS), {"station": station}, "takes no files of a base"),
+            (("header", OWN, None), {}, "no files of the base"),
+            (("baseline", OWN, []), {"station": station}, "no files of the base"),
+            (("station", OWN, None), {}, "needs a permanent station"),
+            (("baseline", OWN, STATION_OBS), {}, "needs a permanent station"),
+            (("typed", OWN, STATION_OBS), {}, "needs its position"),
+            (("ppp", OWN, STATION_OBS), {"atx": "off"}, "igs20.atx")):
+        with pytest.raises(ValueError, match=said):
+            base.prepare_base(*args, folder=folder, **kwargs)
+    assert not folder.exists()
+
+
+def test_prepare_base_downloads_the_antenna_calibrations_when_asked(tmp_path, monkeypatch):
+    """``atx="download"``: igs20.atx downloaded first when the program has none, in any way of placing the base - one
+    that cannot be had is a note, and the PPK goes on (a station does not try again); ``"auto"`` asks for nothing for a
+    base at its header or typed; with a copy in the program nothing is downloaded."""
+    calls = []
+
+    def offline(refresh=False, progress=None):
+        calls.append(refresh)
+        raise download.DownloadError("https://files.igs.org/pub/station/general/igs20.atx: no network", "")
+
+    monkeypatch.setattr(atx, "atx_file", offline)
+    folder = tmp_path / "gnss_of_the_chunk"
+    prepared = base.prepare_base("header", OWN, STATION_OBS, folder=folder, atx="download")
+    assert calls == [False] and prepared.atx == "auto"
+    (note,) = prepared.notes
+    assert "igs20.atx" in note and "no network" in note
+    calls.clear()
+    assert base.prepare_base("header", OWN, STATION_OBS, folder=folder).notes == [] and calls == []
+    # a station: igs20.atx that could not be had is not waited for a second time
+    station = _replaced_station(monkeypatch, tmp_path)
+    monkeypatch.setattr(atx, "atx_file", offline)
+    _navigation_downloads(monkeypatch)
+    prepared = base.prepare_base("station", _rover_alone(tmp_path), folder=folder, station=AQUI, atx="download")
+    assert calls == [False] and len(prepared.notes) == 1 and prepared.atx == "auto"
+    assert [call[0] for call in station] == ["coordinates", "observations"]
+    calls.clear()
+    monkeypatch.setattr(atx, "cached_atx", lambda: ATX_EXCERPT)
+    assert base.prepare_base("header", OWN, STATION_OBS, folder=folder, atx="download").notes == [] and calls == []
+
+
+def test_prepare_base_with_a_permanent_station(tmp_path, monkeypatch):
+    """A permanent station as the base: its observations and coordinates for the flight in ``<folder>/base``,
+    igs20.atx made sure of (``"auto"``) or nothing about the antennas at all (``"off"``); the navigation of the hours
+    of the flight downloaded into ``<folder>/base`` and given when none is beside the drone's file - never looked for
+    beside the station's -, left to ppk.solve when there is."""
+    calls = _replaced_station(monkeypatch, tmp_path)
+    navigation = _navigation_downloads(monkeypatch)
+    rover = _rover_alone(tmp_path)
+    folder = tmp_path / "gnss_of_the_chunk"
+    (folder / "base").mkdir(parents=True)
+    shutil.copyfile(NAV, folder / "base" / "another_day.nav")  # beside the station's files: never taken
+    prepared = base.prepare_base("station", rover, folder=folder, station=AQUI)
+    assert prepared.bases == folder / "base" / "AQUI00ITA_20050402-0000_0059.obs" and prepared.atx == "auto"
+    assert prepared.position.source == "station" and prepared.position.epoch == pytest.approx(MID_2005, abs=1e-9)
+    assert [call[0] for call in calls] == ["coordinates", "observations", "atx"]
+    start, end = rinex.time_span(rover)
+    downloaded = folder / "base" / "BRDC00WRD_S_20050920000_01D_MN.rnx"
+    assert navigation == [(start, end, folder / "base")]
+    assert prepared.navs == prepared.downloaded == [downloaded] and prepared.notes == []
+    # off: no antenna calibrations, none downloaded
+    calls.clear()
+    prepared = base.prepare_base("station", rover, folder=folder, station=AQUI, atx="off")
+    assert [call[0] for call in calls] == ["coordinates", "observations"] and prepared.atx is None
+    # the drone's own navigation beside its file: ppk.solve takes it, nothing downloaded
+    shutil.copyfile(NAV, rover.with_name("3040_Rinex.nav"))
+    navigation.clear()
+    prepared = base.prepare_base("station", rover, folder=folder, station=AQUI)
+    assert navigation == [] and prepared.navs == [] and prepared.downloaded == []
+
+
+def test_prepare_base_by_a_baseline_or_a_static_ppp(tmp_path, monkeypatch):
+    """The user's base placed by a static baseline from a station (in ``<folder>/baseline``, the antenna calibrations as
+    asked: none with ``"off"``) or by a static PPP (in ``<folder>/ppp``): their position, their warnings among the
+    notes; the navigation of the flight downloaded when none is beside the drone's file or the base's, else left to
+    ppk.solve."""
+    from pyarchinit_photogrammetry.gnss import ppp
+
+    llh = _header_llh(OWN)
+    asked = []
+
+    def baseline(base_obs, station, folder, navs=None, progress=None, *, station_obs=None, station_position=None,
+                 atx="auto"):
+        asked.append(("baseline", base_obs, station.id, Path(folder), atx))
+        position = ppk.BasePosition(*llh, "baseline", frame="ITRF2020", epoch=2005.25)
+        return base.BaselineResult(position, 1, (0.001, 0.001, 0.002), 3.3, 1.0, Path(folder) / "baseline.pos",
+                                   ["the station is 3.3 km from your base"])
+
+    def solve_static(obs, folder, products=None, atx="auto", progress=None):
+        asked.append(("ppp", obs, Path(folder), atx))
+        position = ppk.BasePosition(*llh, "ppp", frame="ITRF2020", epoch=2005.25, detail={"centre": "ESA"})
+        return ppp.PppResult(position=position, hours=1.0, products=ppp.Products([OWN], [OWN], [OWN], "ESA", "final"),
+                             solution=Path(folder) / "ppp.pos", warnings=["less than 2 hours: 10-20 cm off at best"])
+
+    monkeypatch.setattr(base, "baseline", baseline)
+    monkeypatch.setattr(ppp, "solve_static", solve_static)
+    navigation = _navigation_downloads(monkeypatch)
+    rover = _rover_alone(tmp_path)
+    own = tmp_path / "own"
+    own.mkdir()
+    pieces = [Path(shutil.copyfile(OWN, own / "3040_base.obs"))]  # the user's base, no navigation beside it either
+    folder = tmp_path / "gnss_of_the_chunk"
+    station = _station_0759()
+    prepared = base.prepare_base("baseline", rover, pieces, folder=folder, station=station, atx="off")
+    assert asked == [("baseline", pieces, "0759", folder / "baseline", None)]
+    assert prepared.position.source == "baseline" and prepared.bases == pieces[0] and prepared.atx is None
+    assert prepared.notes == ["the station is 3.3 km from your base"]
+    start, end = rinex.time_span(rover)
+    assert navigation == [(start, end, folder / "base")] and prepared.navs == prepared.downloaded
+    asked.clear()
+    navigation.clear()
+    prepared = base.prepare_base("ppp", rover, pieces, folder=folder)
+    assert asked == [("ppp", pieces, folder / "ppp", "auto")] and prepared.atx == "auto"
+    assert prepared.position.source == "ppp" and prepared.notes == ["less than 2 hours: 10-20 cm off at best"]
+    assert len(navigation) == 1
+    # the navigation of the user's base beside its file: ppk.solve takes it (the drone's first), nothing downloaded
+    shutil.copyfile(DATA / "30400920.05n", own / "3040_base.nav")
+    navigation.clear()
+    asked.clear()
+    prepared = base.prepare_base("baseline", rover, pieces, folder=folder, station=station)
+    assert navigation == [] and prepared.navs == [] and asked[0][-1] == "auto"

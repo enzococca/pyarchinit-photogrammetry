@@ -321,10 +321,11 @@ _LISTINGS: dict[str, tuple[float, list[str]]] = {}
 def listing(url: str, progress=None) -> list[str]:
     """The names in the folder that the page at ``url`` lists, as its links give them (a folder keeps the slash its
     link has: ``C2400/``), kept in memory for ten minutes. ``url`` can also be a folder on the computer
-    (``file:///.../``), whose entries are listed, or a page there. A site is given :data:`LISTING_TIMEOUT` seconds to
-    answer, three times; ``progress`` (the usual callback) hears which site is contacted, and a cancel stops between
-    two attempts. Raises :class:`NotPublished` when there is no page and :class:`DownloadError` when it cannot be
-    read."""
+    (``file:///.../``), whose entries are listed, or a page there. Every listing - of BKG, of the EPN, of RING alike -
+    gives its site :data:`LISTING_TIMEOUT` seconds to answer (to connect, and between two pieces of the page), three
+    times, where a download waits 60 s: a page is small, and a site that stays silent that long is down or closed by a
+    firewall. ``progress`` (the usual callback) hears which site is contacted, and a cancel stops between two attempts.
+    Raises :class:`NotPublished` when there is no page and :class:`DownloadError` when it cannot be read."""
     now = _clock()
     kept = _LISTINGS.get(url)
     if kept is not None and now - kept[0] < LISTING_SECONDS:

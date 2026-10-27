@@ -360,7 +360,7 @@ def _result(pairing: _Pairing, placed: list[tuple[Path, dji.MrkShot, str]],
             "shots_unmatched": [s.index for s in pairing.shots if id(s) not in used]}
 
 
-def _photo_time(cam: Camera) -> datetime | None:
+def photo_time(cam: Camera) -> datetime | None:
     """The time the camera wrote in the EXIF of the photo (its clock: the local time, to the second); None without
     one."""
     try:
@@ -409,7 +409,7 @@ def _clock(offsets: np.ndarray, name: str) -> float:
 def _on_time(pairs: list[tuple], name: str) -> list[tuple]:
     """The ``(file, shot, camera)`` pairs whose photo was taken at the time of its shot (see :func:`apply_mrk`), or
     all of them when no photo has a date."""
-    times = [_photo_time(cam) for _f, _shot, cam in pairs]
+    times = [photo_time(cam) for _f, _shot, cam in pairs]
     if not any(times):
         return pairs
     offsets = [None if t is None else (t - shot.utc.replace(tzinfo=None)).total_seconds()

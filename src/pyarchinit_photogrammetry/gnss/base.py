@@ -7,6 +7,10 @@ the user's own base - a receiver left on a mark that nobody surveyed - is placed
 the mark it finds, in the frame and at the epoch of the coordinates of the station, is the position of the base for
 the PPK of the flight.
 
+:func:`prepare_base` sets up the base of the PPK of a flight in any of the ways the window and ``ppg gnss ppk`` offer
+(:data:`BASE_MODES`): at the position of its RINEX header, typed, a permanent station, a static baseline, a static PPP
+(:mod:`.ppp`) - with the antenna calibrations and the navigation of the flight it needs.
+
 Positions are latitude, longitude (degrees) and height above the ellipsoid (m), as :class:`.ppk.BasePosition` keeps
 them; times are GPS time without a time zone, as :func:`.rinex.header` gives them."""
 from __future__ import annotations
@@ -38,6 +42,14 @@ SIGMA_KINDS = {"EPN": "formal", "IGS": "formal", "RING": "scatter"}
 STATION_FOLDER = "station"
 WORK_FOLDER = "baseline"
 ROLES = ("your base", "station")  # how the run of a baseline names its two receivers (ppk.RUN_ROLES)
+# how the position of the base of a flight is set (prepare_base): from its RINEX header, typed by the user, a permanent
+# station as the base, the user's base placed by a static baseline from a station or by a static PPP
+BASE_MODES = ("header", "typed", "station", "baseline", "ppp")
+COMPUTED = ("station", "baseline", "ppp")  # the modes whose base the program computes, downloading what it needs
+ATX_CHOICES = ("auto", "download", "off")  # the antenna calibrations of a run: those kept, downloaded once, none
+# in the GNSS folder of a chunk (prepare_base): what is downloaded for a station as the base of a flight (and the
+# navigation of a flight), a static baseline, a static PPP - beside the work folder of the PPK, which no input may be in
+BASE_FOLDER, BASELINE_FOLDER, PPP_FOLDER = "base", "baseline", "ppp"
 
 
 @dataclass
@@ -82,10 +94,18 @@ def _session(pieces: Sequence[Path]) -> tuple[datetime, datetime, float]:
     return min(a for a, _ in spans), max(b for _, b in spans), min(steps, default=0.0)
 
 
-def _middle_epoch(start: datetime, end: datetime) -> float:
+def middle_epoch(start: datetime, end: datetime) -> float:
     """The decimal year of the middle of the time from ``start`` to ``end`` (GPS time, taken back to UTC)."""
     middle = start + (end - start) / 2
     return frames.decimal_year(middle - timedelta(seconds=rinex.gps_minus_utc(middle)))
+
+
+def flight_epoch(rover: str | Path) -> float:
+    """The middle of the observations of the drone, its RINEX file ``rover``, as a decimal year of UTC: the epoch of the
+    coordinates of a permanent station that is the base of the flight, and the one a position typed in ITRF2020 is
+    given when none is written (:func:`prepare_base`). A ``ValueError`` for a file without observation epochs."""
+    rover = Path(rover)
+    return middle_epoch(*_span(rover, f"the rover {rover.name}"))
 
 
 def _enu_sd(sigma: Sequence[float] | None, lat: float, lon: float) -> tuple[float, float, float] | None:
@@ -181,7 +201,7 @@ def _notes(name: str, station: stations.Station, q: int, km: float, hours: float
 
 
 def station_base(rover: str | Path, station: stations.Station, folder: str | Path,
-                 progress=None) -> tuple[Path, ppk.BasePosition]:
+                 progress=None, *, atx: str | Path | None = "auto") -> tuple[Path, ppk.BasePosition]:
     """A permanent station as the base of the flight whose RINEX observations are ``rover``: the file of the station's
     observations for the time of the flight (:func:`.stations.download_observations`, at 1 s when the archive has them
     for the whole flight, else at 30 s, with ten minutes on each side), into ``folder``, and its position. ``folder``
@@ -197,20 +217,21 @@ def station_base(rover: str | Path, station: stations.Station, folder: str | Pat
     ``coordinates`` (``source`` EPN, IGS or RING, ``frame``, ``epoch``, ``xyz``, ``sigma_xyz``), ``sigma`` (``"formal"``
     for the EPN and the IGS, ``"scatter"`` of the daily positions for RING, None without) and ``citation``.
 
-    The antenna calibrations of the IGS (igs20.atx) are downloaded too when the program has no recent copy, for the
-    PPK that follows (``ppk.solve(atx="auto")`` reads only that copy); not having them is a warning in the log. A
-    ``ValueError`` when the station has only its approximate position (good to metres: no base), when ``rover`` is not
-    a file of observations, and when the observations cannot be had (:func:`.stations.download_observations` says
-    why)."""
+    With ``atx="auto"`` the antenna calibrations of the IGS (igs20.atx) are downloaded too when the program has no
+    recent copy, for the PPK that follows (``ppk.solve(atx="auto")`` reads only that copy); not having them is a warning
+    in the log. With None (no calibrations) or an ANTEX file of the user's nothing is downloaded. A ``ValueError`` when
+    the station has only its approximate position (good to metres: no base), when ``rover`` is not a file of
+    observations, and when the observations cannot be had (:func:`.stations.download_observations` says why)."""
     progress = as_progress(progress)
     progress(0.0, f"{station.id}: the base of the flight")
     rover = Path(rover)
     start, end = _span(rover, f"the rover {rover.name}")
-    position = _station_position(station, _middle_epoch(start, end), progress.sub(0.0, 0.1))
+    position = _station_position(station, middle_epoch(start, end), progress.sub(0.0, 0.1))
     observations = stations.download_observations(station, start, end, folder, progress.sub(0.1, 0.6), rate="auto")
-    note = _antenna_calibrations(progress.sub(0.7, 0.3))
-    if note:
-        log.warning("%s", note)
+    if isinstance(atx, str) and atx == "auto":
+        note = _antenna_calibrations(progress.sub(0.7, 0.3))
+        if note:
+            log.warning("%s", note)
     progress(1.0, f"{station.id}: the base of the flight, in ITRF2020 at {position.epoch:.4f}")
     return observations, position
 
@@ -264,7 +285,7 @@ def baseline(base_obs: str | Path | Sequence[str | Path], station: stations.Stat
     name = ppk.base_name(pieces[0], info)
     fetched = folder / STATION_FOLDER
     if station_position is None:  # first: no download for a station that cannot be a base
-        station_position = _station_position(station, _middle_epoch(first, last), progress.sub(0.0, 0.1))
+        station_position = _station_position(station, middle_epoch(first, last), progress.sub(0.0, 0.1))
     given = station_obs is not None
     if not given:
         station_obs = stations.download_observations(station, first, last, fetched, progress.sub(0.1, 0.5),
@@ -318,3 +339,111 @@ def baseline(base_obs: str | Path | Sequence[str | Path], station: stations.Stat
     progress(1.0, f"{name}: {ppk.status(q)}, {km:.3f} km from {station.id}")
     return BaselineResult(position=position, q=q, sd=sd, baseline_km=km, hours=hours, solution=solution.path,
                           warnings=warnings)
+
+
+# --- the base of the PPK of a flight, whichever way it is placed -----------------------------------------------------
+
+
+@dataclass
+class PreparedBase:
+    """The base of the PPK of a flight as :func:`prepare_base` sets it up, for :func:`.ppk.solve`: ``bases``, its RINEX
+    observations (one path, or a list for a base in several files); ``position`` (None: the position of the header of
+    its file); ``navs``, the navigation files to give (empty: those :func:`.ppk.solve` finds beside the files of the
+    rover and of the base); ``atx``, what :func:`.ppk.solve` takes for the antenna calibrations ("auto", or None for
+    none); ``downloaded``, the navigation files downloaded for the flight (in ``navs`` too); ``notes``, what to tell -
+    the warnings of a baseline or of a PPP, igs20.atx that could not be downloaded."""
+
+    bases: Path | list[Path]
+    position: ppk.BasePosition | None
+    navs: list[Path]
+    atx: str | None
+    downloaded: list[Path] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+
+def prepare_base(mode: str, rover: str | Path, bases=None, *, folder: str | Path,
+                 station: stations.Station | None = None, typed: Sequence[float] | None = None,
+                 frame: str = frames.UNKNOWN, epoch: float | None = None, navs=None, atx: str = "auto",
+                 progress=None) -> PreparedBase:
+    """The base of the PPK of the flight whose RINEX observations are ``rover`` (one file), placed as ``mode`` says
+    (:data:`BASE_MODES`), ready for :func:`.ppk.solve` - the one way the window and ``ppg gnss ppk`` set it up:
+
+    * ``"header"``: the files ``bases`` (one or several) at the position of their RINEX header;
+    * ``"typed"``: the files ``bases`` at ``typed`` (latitude, longitude, height above the ellipsoid) in ``frame`` (one
+      of :data:`.frames.FRAMES`) at ``epoch``; in ITRF2020, where positions move, an epoch not given is the middle of
+      the observations of the drone (:func:`flight_epoch`), as for a station;
+    * ``"station"``: the permanent ``station`` as the base, no files of a base (:func:`station_base`, in
+      ``<folder>/base``);
+    * ``"baseline"``: the user's base ``bases`` placed by a static baseline from ``station`` (:func:`baseline`, in
+      ``<folder>/baseline``);
+    * ``"ppp"``: the user's base ``bases`` placed by a static PPP (:func:`.ppp.solve_static`, in ``<folder>/ppp``).
+
+    ``folder`` is the GNSS folder of the chunk, beside the work folder of the PPK (which no input may be in). ``atx`` is
+    ``"auto"`` (the copy of igs20.atx the program has, or none; the station, the baseline and the PPP download it
+    when it is missing, since they download anyway), ``"download"`` (igs20.atx downloaded first in every mode when the
+    program has none - not having it is a note, and then the station and the baseline do not try again) or ``"off"``
+    (no calibrations: nothing downloaded, the antennas not corrected; refused for a PPP, which needs the offsets of the
+    antennas of the satellites). ``navs`` are the navigation files given (kept as they are); without any,
+    :func:`.ppk.solve` takes those beside the drone's file, else those beside the base's - except, for a computed base
+    (station, baseline, PPP), when there are none beside the drone's file (or the user's base's, for a baseline and a
+    PPP): then the broadcast messages of the hours of the flight are downloaded into ``<folder>/base``
+    (:func:`.stations.download_navigation`) and given.
+
+    A ``ValueError`` before anything is downloaded for a mode, an ``atx`` the program does not know, files of a base
+    given with a station or missing for the other modes, a station missing for a station or a baseline, ``"off"`` for
+    a PPP, a typed position missing; then what the station, the baseline or the PPP refuse."""
+    from . import ppp
+
+    progress = as_progress(progress)
+    if mode not in BASE_MODES:
+        raise ValueError(f"the base is placed in one of the ways {', '.join(BASE_MODES)}, not {mode!r}")
+    if atx not in ATX_CHOICES:
+        raise ValueError(f"the antenna calibrations are one of {', '.join(ATX_CHOICES)}, not {atx!r}")
+    rover = Path(rover)
+    folder = Path(folder)
+    pieces = ([] if bases is None else [Path(bases)] if isinstance(bases, (str, os.PathLike))
+              else [Path(path) for path in bases])
+    if mode == "station" and pieces:
+        raise ValueError("a permanent station as the base takes no files of a base: its observations for the hours of "
+                         "the flight are downloaded")
+    if mode != "station" and not pieces:
+        raise ValueError("no files of the base: give its RINEX observations")
+    if mode in ("station", "baseline") and station is None:
+        raise ValueError(f"a {'station as the base' if mode == 'station' else 'static baseline'} needs a permanent "
+                         "station")
+    if mode == "ppp" and atx == "off":
+        raise ValueError(ppp._NO_ANTEX)
+    if mode == "typed" and typed is None:
+        raise ValueError("a typed base needs its position: latitude, longitude and height above the ellipsoid")
+    notes: list[str] = []
+    calibrations = None if atx == "off" else "auto"
+    computed = calibrations  # what the station and the baseline take: "auto" downloads igs20.atx when it is missing
+    if atx == "download" and antex.cached_atx() is None:
+        note = _antenna_calibrations(progress.sub(0.0, 0.1))
+        if note:  # not to be had now: the station and the baseline do not wait for it a second time
+            notes.append(note)
+            computed = None
+    position = None
+    if mode == "typed":
+        lat, lon, h = typed
+        if epoch is None and frame in frames.DYNAMIC:
+            epoch = flight_epoch(rover)
+        position = ppk.BasePosition(lat, lon, h, "typed", frame=frame, epoch=epoch)
+    elif mode == "station":
+        observations, position = station_base(rover, station, folder / BASE_FOLDER, progress.sub(0.1, 0.4),
+                                              atx=computed)
+        pieces = [observations]
+    elif mode == "baseline":
+        found = baseline(pieces, station, folder / BASELINE_FOLDER, progress=progress.sub(0.1, 0.4), atx=computed)
+        position, notes = found.position, notes + found.warnings
+    elif mode == "ppp":
+        found = ppp.solve_static(pieces, folder / PPP_FOLDER, progress=progress.sub(0.1, 0.4))
+        position, notes = found.position, notes + found.warnings
+    given, downloaded = [Path(path) for path in navs or []], []
+    # those beside the drone's file (or the user's base's) ppk.solve finds by itself; never those beside the files a
+    # station downloaded, where the navigation of other days may be: the hours of the flight are downloaded instead
+    if not given and mode in COMPUTED and not ppk.navigation_beside([rover] if mode == "station" else [rover, *pieces]):
+        start, end = _span(rover, f"the rover {rover.name}")
+        downloaded = stations.download_navigation(start, end, folder / BASE_FOLDER, progress.sub(0.5, 0.1))
+        given = list(downloaded)
+    return PreparedBase(pieces[0] if len(pieces) == 1 else pieces, position, given, calibrations, downloaded, notes)

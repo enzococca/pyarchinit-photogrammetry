@@ -49,15 +49,17 @@ def product_names() -> dict[str, str]:
             "coverage": tr("copertura")}
 
 
-def changes_text(old: str, changes: dict) -> str:
+def changes_text(old: str, changes: dict, redraw=()) -> str:
     """What putting a chunk from ``old`` into the system of ``changes`` (:func:`..gnss.heights.survey_crs_changes`)
-    does: the system, the georeference fitted again or converted (by how much the similarity misses), what is
-    converted, the products to build again, what stays in the old system, the heights that pass as they are and those
-    that go onto the geoid with the chunk."""
+    does: the system, the georeference fitted again (or converted, when its references cannot fit it after all, as
+    :func:`..gnss.heights.set_survey_crs` does) or converted (by how much the similarity misses), what is converted,
+    the products to build again, what stays in the old system, the lines the window holds only - ``redraw``, the
+    names of their layers: taken away, to draw again -, the heights that pass as they are and those that go onto the
+    geoid with the chunk."""
     lines = [tr("Sistema: {0} → {1}.", old, changes["crs"])]
     if changes.get("refit"):
         lines.append(tr("La georeferenziazione viene calcolata di nuovo nel nuovo sistema, sui marker e sulle "
-                        "posizioni delle foto."))
+                        "posizioni delle foto; se non bastano a calcolarla, viene convertita con una similitudine."))
     elif changes.get("transform_rms") is not None:
         lines.append(tr("La georeferenziazione viene convertita nel nuovo sistema con una similitudine adattata "
                         "all'estensione del chunk (scarto {0} mm): modello e nuvole restano con i disegni.",
@@ -74,6 +76,9 @@ def changes_text(old: str, changes: dict) -> str:
     for kept in changes.get("kept") or []:
         shown = ", ".join(kept["names"][:6]) + (" ..." if len(kept["names"]) > 6 else "")
         lines.append(tr("Restano nel sistema di prima: {0} ({1}).", kept_names.get(kept["what"], kept["what"]), shown))
+    if redraw:
+        lines.append(tr("Da ridisegnare dopo: {0} (linee che sono solo nella finestra, nel sistema di prima: vengono "
+                        "tolte).", ", ".join(redraw)))
     if changes.get("heights_unchanged"):
         lines.append(tr("Il sistema di prima non ha quote proprie: le quote di marker, quote e punti di misura passano "
                         "come sono nel nuovo, giuste solo se erano sul livello del mare."))
@@ -145,9 +150,10 @@ class SurveyCrsDialog(QDialog):
         return next((crs for button, crs in self.options if button.isChecked()), "")
 
     def values(self) -> dict:
-        """``{"crs"}``: the system chosen, with heights above EGM2008 when the box says so."""
+        """``{"crs", "plain"}``: the system chosen, with heights above EGM2008 when the box says so, and as it was
+        chosen (without the heights of the box)."""
         crs = self.chosen()
-        return {"crs": with_geoid(crs) if self.geoid.isChecked() and crs else crs}
+        return {"crs": with_geoid(crs) if self.geoid.isChecked() and crs else crs, "plain": crs}
 
     def accept(self) -> None:
         if not self.chosen():
@@ -165,4 +171,7 @@ class SurveyCrsDialog(QDialog):
             geoid: bool = False) -> dict | None:
         """The answer of the dialog (:meth:`values`), None when it is cancelled."""
         dialog = cls(current, choices, default, note, geoid, parent)
-        return dialog.values() if dialog.exec() == QDialog.DialogCode.Accepted else None
+        try:
+            return dialog.values() if dialog.exec() == QDialog.DialogCode.Accepted else None
+        finally:
+            dialog.deleteLater()  # a child of the window: not kept until it closes

@@ -10,7 +10,7 @@ from pathlib import Path, PurePath
 from ..core import crs as crs_mod
 from ..core.chunk import Chunk
 from . import dji, frames, ppk
-from .apply import FACTOR, _photo_time, accuracy, set_camera_position
+from .apply import FACTOR, accuracy, photo_time, set_camera_position
 
 SOURCE = "positions_file"
 HEIGHTS = ("ellipsoidal", "exif")
@@ -180,7 +180,7 @@ def _epoch_of(cam, crs: str, dynamic: bool, epoch: float | None) -> float | None
     the date its camera wrote in the EXIF, as a decimal year; a ``ValueError`` naming the photo when it has none."""
     if epoch is not None or not dynamic:
         return epoch
-    taken = _photo_time(cam)
+    taken = photo_time(cam)
     if taken is None:
         raise ValueError(f"{Path(cam.path).name} has no date in its EXIF to give the epoch of its position in {crs}, a "
                          "system of ITRF2020 where positions move with time: give the epoch of the positions (a "

@@ -156,4 +156,7 @@ class StationsDialog(QDialog):
     def ask(cls, parent, lat: float, lon: float, when: datetime | None = None) -> stations.Station | None:
         """The station chosen near ``lat``, ``lon`` for a flight at ``when``, None when the dialog is cancelled."""
         dialog = cls(lat, lon, when, parent)
-        return dialog.selected() if dialog.exec() == QDialog.DialogCode.Accepted else None
+        try:
+            return dialog.selected() if dialog.exec() == QDialog.DialogCode.Accepted else None
+        finally:
+            dialog.deleteLater()  # not kept as a child of the window; a list still being read is dropped

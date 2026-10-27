@@ -70,8 +70,9 @@ def _outlined(rgba: np.ndarray, polygon, bounds) -> np.ndarray:
 
 
 def _grid_missing(exc: BaseException | None):
-    """The :class:`..gnss.heights.GridMissing` that ``exc`` is, or that caused it (its cause or context, a few levels
-    down); None when there is none."""
+    """The :class:`..gnss.heights.GridMissing` that ``exc`` is, or that caused it, a few levels down: its cause, else
+    the error it was raised while handling - unless it was raised ``from None``, which says that one is no cause of
+    it; None when there is none."""
     from ..gnss.heights import GridMissing
 
     for _level in range(6):
@@ -79,7 +80,7 @@ def _grid_missing(exc: BaseException | None):
             return None
         if isinstance(exc, GridMissing):
             return exc
-        exc = exc.__cause__ or exc.__context__
+        exc = exc.__cause__ if exc.__cause__ is not None else None if exc.__suppress_context__ else exc.__context__
     return None
 
 
@@ -2125,23 +2126,28 @@ class MainWindow(QMainWindow):
     def _grid_missing(self, exc, label: str, retry=None) -> None:
         """A step that needs a grid of a geoid PROJ does not have (:class:`..gnss.heights.GridMissing`, ``label`` the
         name of the step): said in the window's own words from the grids it names - EGM2008 offered for download (its
-        size), then ``retry`` (the step again) when given; another grid named, with the folder to copy it into; no grid
-        at all, another system to choose."""
+        size), then ``retry`` (the step again) when given, or, when the program has it already, that PROJ could not use
+        it (a download would change nothing); another grid named, with the folder to copy it into; no grid at all,
+        another system to choose."""
         from ..gnss import heights
 
         grids = list(getattr(exc, "grids", ()) or ())
-        if heights.GEOID_GRID in grids:
+        if heights.GEOID_GRID in grids and heights.geoid_available():
+            text = tr("«{0}» non è andato a buon fine: per convertire le quote fra l'ellissoide e il geoide PROJ non "
+                      "ha usato la griglia del geoide EGM2008 ({1}), che pure è installata. Chiudi e riapri il "
+                      "programma, poi ripeti «{0}».", label, heights.GEOID_GRID)
+        elif heights.GEOID_GRID in grids:
+            where = " > ".join(("GNSS", tr("Sistema e quote"), tr("Scarica il geoide EGM2008")))  # the pane, in words
             text = tr("«{0}» non è andato a buon fine: per convertire le quote fra l'ellissoide e il geoide serve la "
                       "griglia del geoide EGM2008 ({1}), che non è installata. Il programma può scaricarla adesso ({2} "
                       "MB, dominio pubblico) nella sua cartella{3}. Si scarica anche da {4}, o con «{5}».", label,
                       heights.GEOID_GRID, round(heights.GEOID_BYTES / 1e6),
-                      tr(" e ripetere «{0}»", label) if retry is not None else "", heights.DOWNLOAD_IN_THE_PROGRAM,
-                      heights.DOWNLOAD_COMMAND)
+                      tr(" e ripetere «{0}»", label) if retry is not None else "", where, heights.DOWNLOAD_COMMAND)
             options = [tr("Scarica e riprova") if retry is not None else tr("Scarica")]
             if choice(self, "question", tr("Griglia del geoide"), text, options) == 0:
                 self._download_geoid(then=retry)
             return
-        if grids:
+        elif grids:
             text = tr("«{0}» non è andato a buon fine: per convertire le quote serve la griglia {1}, che non è "
                       "installata. Copiala nella cartella {2}, dove il programma la fa cercare a PROJ, e ripeti «{0}».",
                       label, ", ".join(grids), str(heights.grid_folder()))
@@ -3121,56 +3127,26 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _ppk_job(ch, v: dict, p) -> tuple:
-        """The PPK of the answer ``v`` of :class:`PpkDialog` for ``ch``, in the background: what the base needs (by
-        ``v["base_mode"]``: igs20.atx downloaded once when asked and missing; the observations and the coordinates of a
-        permanent station in the GNSS folder of the chunk; the user's base placed by a static baseline from a station
-        or by a static PPP), the navigation of the flight downloaded when a computed base has none beside the files,
-        then RTKLIB (:func:`gnss.ppk.solve`). Returns the solution and what to tell (the warnings of a baseline or of a
-        PPP, igs20.atx that could not be had, the navigation downloaded)."""
-        from ..gnss import atx as antex
+        """The PPK of the answer ``v`` of :class:`PpkDialog` for ``ch``, in the background: the base set up as
+        ``v["base_mode"]`` says (:func:`gnss.base.prepare_base`: igs20.atx, a permanent station, a static baseline or
+        PPP, the navigation of the flight) in the GNSS folder of the chunk, then RTKLIB (:func:`gnss.ppk.solve`).
+        Returns the solution and what to tell (the warnings of a baseline or of a PPP, igs20.atx that could not be
+        had, the navigation downloaded). An answer without a mode (older callers) is a base at its header, or typed."""
         from ..gnss import base as gbase
-        from ..gnss import download
         from ..gnss import ppk
-        from ..gnss import ppp as gppp
-        from ..gnss import rinex, stations
 
         mode = v.get("base_mode") or ("typed" if v.get("base_position") else "header")
-        folder = ppk.work_folder(ch).parent  # beside the work folder of RTKLIB, which no input may be in
-        rover, bases, navs = v["rover"], v.get("base"), list(v.get("navs") or [])
-        position, notes = v.get("base_position"), []
-        if mode == "typed" and position is not None:
-            lat, lon, h = position
-            position = ppk.BasePosition(lat, lon, h, "typed", frame=v.get("base_frame") or "unknown",
-                                        epoch=v.get("base_epoch"))
-        if mode in ("header", "typed") and v.get("atx") == "download" and antex.cached_atx() is None:
-            p(0.01, "igs20.atx: le calibrazioni delle antenne dell'IGS")
-            try:
-                antex.atx_file(progress=p.sub(0.01, 0.09))
-            except (download.DownloadError, ValueError, OSError) as exc:
-                notes.append(tr("Le calibrazioni delle antenne dell'IGS ({0}) non si sono potute scaricare, e lo "
-                                "scostamento del centro di fase dell'antenna della base non viene applicato: {1}",
-                                antex.FILE_NAME, exc))
-        if mode == "station":
-            bases, position = gbase.station_base(rover, v["station"], folder / "base", progress=p.sub(0.1, 0.4))
-        elif mode == "baseline":
-            found = gbase.baseline(bases, v["station"], folder / "baseline", progress=p.sub(0.1, 0.4))
-            position, notes = found.position, notes + found.warnings
-        elif mode == "ppp":
-            found = gppp.solve_static(bases, folder / "ppp", progress=p.sub(0.1, 0.4))
-            position, notes = found.position, notes + found.warnings
-        if not navs and mode in ("station", "baseline", "ppp"):
-            # the flight's own beside the drone's file (or the user's base), else the broadcast messages of its hours
-            beside = ppk.navigation_beside([rover] + ([] if mode == "station" else
-                                                      ([bases] if isinstance(bases, (str, Path)) else list(bases))))
-            navs = [nav for nav, _info in beside]
-            if not navs:
-                start, end = rinex.time_span(rover) or (None, None)
-                if start is None:
-                    raise ValueError(f"{Path(rover).name} has no observation epochs")
-                navs = stations.download_navigation(start, end, folder / "base", progress=p.sub(0.5, 0.1))
-                notes.append(tr("File di navigazione scaricati per il volo: {0}", ", ".join(n.name for n in navs)))
+        prepared = gbase.prepare_base(mode, v["rover"], v.get("base"), folder=ppk.work_folder(ch).parent,
+                                      station=v.get("station"), typed=v.get("base_position"),
+                                      frame=v.get("base_frame") or "unknown", epoch=v.get("base_epoch"),
+                                      navs=v.get("navs"), atx=v.get("atx") or "auto", progress=p.sub(0.0, 0.6))
+        notes = list(prepared.notes)
+        if prepared.downloaded:
+            notes.append(tr("File di navigazione scaricati per il volo: {0}",
+                            ", ".join(path.name for path in prepared.downloaded)))
         p(0.6, "Calcolo PPK con RTKLIB")
-        solution = ppk.solve(rover, bases, navs or None, position, folder=ppk.work_folder(ch))
+        solution = ppk.solve(v["rover"], prepared.bases, prepared.navs or None, prepared.position,
+                             folder=ppk.work_folder(ch), atx=prepared.atx)
         return solution, notes
 
     def _ppk_done(self, out) -> None:
@@ -3284,30 +3260,26 @@ class MainWindow(QMainWindow):
         self.gnss_pane.set_state(ch)
 
     # ---------------------------------------------------------------- the system and the heights of the survey
-    def gnss_download_geoid(self, then=None, why: str = "") -> None:
+    def gnss_download_geoid(self) -> None:
         """*GNSS > Sistema e quote > Scarica il geoide EGM2008*: the grid of EGM2008 (81 MB, public domain) downloaded
-        in the background once the user says so (``why``: what it is needed for, said first), then ``then``; nothing to
-        download when PROJ has it already (``then`` at once)."""
+        in the background once the user says so; nothing to download when PROJ has it already."""
         from ..gnss import heights
 
         if self.runner.busy:
             self.statusBar().showMessage(tr("Un'elaborazione e' gia' in corso"), 8000)
             return
         if heights.geoid_available():
-            if then is not None:
-                then()
-            else:
-                self.statusBar().showMessage(tr("La griglia del geoide EGM2008 è già installata."), 8000)
+            self.statusBar().showMessage(tr("La griglia del geoide EGM2008 è già installata."), 8000)
             return
         text = tr("Scaricare adesso la griglia del geoide EGM2008 ({0}, {1} MB, dominio pubblico) da cdn.proj.org "
                   "nella cartella del programma ({2})? Serve a convertire le quote ellissoidiche del GNSS in quote "
                   "sul livello del mare.", heights.GEOID_GRID, round(heights.GEOID_BYTES / 1e6),
                   str(heights.grid_folder()))
-        r = message(self, "question", tr("Geoide EGM2008"), (why + "\n\n" if why else "") + text,
+        r = message(self, "question", tr("Geoide EGM2008"), text,
                     buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     default=QMessageBox.StandardButton.Yes)
         if r == QMessageBox.StandardButton.Yes:
-            self._download_geoid(then)
+            self._download_geoid()
 
     def _download_geoid(self, then=None) -> None:
         """The grid of EGM2008 downloaded in the background (:func:`..gnss.heights.download_geoid`), then the GNSS pane
@@ -3328,8 +3300,8 @@ class MainWindow(QMainWindow):
     def gnss_survey_crs(self) -> None:
         """*GNSS > Sistema e quote > Sistema del rilievo*: the systems :func:`..gnss.heights.survey_crs` proposes where
         the survey is (:func:`..gnss.heights.survey_place`) for the frames of its positions, or another one, with the
-        heights above the geoid EGM2008 or not (the grid offered for download first when it is missing); then
-        :meth:`_set_survey_crs`."""
+        heights above the geoid EGM2008 or not - when they are and the grid is missing, the choice between downloading
+        it first and the same system without heights of its own; then :meth:`_set_survey_crs`."""
         if self.runner.busy:
             self.statusBar().showMessage(tr("Un'elaborazione e' gia' in corso"), 8000)
             return
@@ -3371,38 +3343,81 @@ class MainWindow(QMainWindow):
             return
         crs = v["crs"]
         if heights.above_egm2008(crs) and not heights.geoid_available():
-            self.gnss_download_geoid(then=lambda: self._set_survey_crs(crs),
-                                     why=tr("Le quote di {0} sono sul geoide EGM2008: per convertire quelle del GNSS "
-                                            "serve la sua griglia.", crs))
+            plain = v.get("plain") or crs  # the system as chosen, without the heights the box added
+            if heights.above_egm2008(plain):  # written with EGM2008 heights: its plan alone
+                plain = crs_mod.horizontal(plain)
+            text = tr("Le quote di {0} sono sul geoide EGM2008: per convertire quelle del GNSS serve la griglia del "
+                      "geoide ({1}), che non è installata. Il programma può scaricarla adesso ({2} MB, dominio "
+                      "pubblico) da cdn.proj.org nella sua cartella ({3}) e poi mettere il chunk in {0}; oppure "
+                      "metterlo in {4}, senza quote proprie: le quote restano come sono.", crs, heights.GEOID_GRID,
+                      round(heights.GEOID_BYTES / 1e6), str(heights.grid_folder()), plain)
+            answer = choice(self, "question", tr("Geoide EGM2008"), text,
+                            [tr("Scarica e applica"), tr("Applica senza quote sul geoide")])
+            if answer == 0:
+                self._download_geoid(then=lambda: self._set_survey_crs(crs))
+            elif answer == 1:
+                self._set_survey_crs(plain)
             return
         self._set_survey_crs(crs)
 
     def _set_survey_crs(self, crs: str) -> None:
         """The chunk into ``crs`` (:func:`..gnss.heights.set_survey_crs`): the drawings and the sections the window
-        holds stored first, what changes shown (:func:`..gnss.heights.survey_crs_changes`) and confirmed, the change
-        in the background, the drawings, layers and sections read again in the new system, the project saved."""
+        holds stored first, what changes worked out in the background (:func:`..gnss.heights.survey_crs_changes`
+        converts with PROJ, which takes its time on a large chunk and may want the grid of a geoid: offered, then the
+        preview again), then shown and confirmed (:meth:`_confirm_survey_crs`)."""
+        from ..gnss import heights
+
+        ch = self.chunk
+        if ch is None:
+            return
+        if crs == ch.crs:
+            self.statusBar().showMessage(tr("Il chunk è già in {0}.", crs), 8000)
+            return
+        self._store_drawings()
+        self._save_sections()
+
+        def preview(progress):
+            progress(0.0, tr("Cosa cambia in {0}", crs))
+            try:
+                return heights.survey_crs_changes(ch, crs)
+            except heights.GridMissing:
+                raise  # the grid offered, then the preview again (run_task)
+            except ValueError as exc:  # a system that cannot be the survey's: said, without a traceback
+                return exc
+
+        self.run_task("Sistema del rilievo", preview, lambda changes: self._confirm_survey_crs(ch, crs, changes),
+                      refresh=False, save=False)
+
+    def _confirm_survey_crs(self, ch, crs: str, changes) -> None:
+        """What putting ``ch`` into ``crs`` changes (``changes``, or the ``ValueError`` that says why it cannot be),
+        shown with the lines the window holds in the old system - contour lines, plan slices: taken away, to draw
+        again - and confirmed; then the change in the background, the drawings, layers and sections read again in the
+        new system, the project saved and what happened to the georeference in the log."""
         from ..gnss import heights
         from .survey_crs_dialog import changes_text
 
-        ch = self.chunk
-        self._store_drawings()
-        self._save_sections()
-        try:
-            changes = heights.survey_crs_changes(ch, crs)
-        except ValueError as exc:
-            self._warn(tr("{0} non può essere il sistema del rilievo: {1}", crs, exc))
+        if isinstance(changes, ValueError):
+            self._warn(tr("{0} non può essere il sistema del rilievo: {1}", crs, changes))
+            return
+        if ch is not self.chunk:  # another chunk active meanwhile: asked again from its pane
             return
         old = ch.crs
-        if crs == old:
-            self.statusBar().showMessage(tr("Il chunk è già in {0}.", crs), 8000)
-            return
-        r = message(self, "question", tr("Sistema del rilievo"), changes_text(old, changes) + "\n\n" + tr("Applicare?"),
+        redraw = sorted(self.line_layers)
+        r = message(self, "question", tr("Sistema del rilievo"),
+                    changes_text(old, changes, redraw) + "\n\n" + tr("Applicare?"),
                     buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     default=QMessageBox.StandardButton.Yes)
         if r != QMessageBox.StandardButton.Yes:
             return
 
+        def apply(progress):
+            progress(0.0, tr("Sistema del rilievo: {0} → {1}", old, crs))  # cancelled before, never after the change
+            return heights.set_survey_crs(ch, crs)
+
         def done(result) -> None:
+            for name in redraw:  # in the old system: away, not drawn in the wrong place
+                self.ortho_view.remove_layer(name)
+                self.line_layers.pop(name, None)
             self._reload_drawings(redraw=False)  # converted into the new system by set_survey_crs
             self._load_sections()
             if self.doc.path:
@@ -3414,6 +3429,13 @@ class MainWindow(QMainWindow):
             text = tr("Sistema del rilievo: {0} → {1}", old, result["crs"])
             self.log_pane.info(text)
             self.statusBar().showMessage(text, 15000)
+            if result.get("updated"):
+                self.log_pane.info(tr("La georeferenziazione è stata calcolata di nuovo nel nuovo sistema."))
+            elif result.get("transform_rms") is not None:
+                self.log_pane.info(tr("La georeferenziazione è stata convertita nel nuovo sistema con una similitudine "
+                                      "(scarto {0} mm).", number(result["transform_rms"] * 1000, 1)))
+            if redraw:
+                self.log_pane.warning(tr("Da ridisegnare nel nuovo sistema: {0}.", ", ".join(redraw)))
             if result.get("rebuild"):
                 from .survey_crs_dialog import product_names
 
@@ -3421,8 +3443,7 @@ class MainWindow(QMainWindow):
                 self.log_pane.warning(tr("Da costruire di nuovo nel nuovo sistema: {0}.",
                                          ", ".join(names.get(n, n) for n in result["rebuild"])))
 
-        self.run_task("Sistema del rilievo", lambda p: heights.set_survey_crs(ch, crs), done, refresh=False,
-                      save=False)
+        self.run_task("Sistema del rilievo", apply, done, refresh=False, save=False)
 
     def add_video(self) -> None:
         """Workflow > Aggiungi video: frames chosen for the reconstruction, GPS from DJI subtitles."""
