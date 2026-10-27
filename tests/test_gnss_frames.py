@@ -39,6 +39,18 @@ FRAMES_LOG = "pyarchinit_photogrammetry.gnss.frames"
 # --- the frames and their coordinate systems --------------------------------------------------------------------
 
 
+def _proj_knows(system: str) -> bool:
+    """Whether the PROJ database of the installed pyproj has ``system``."""
+    from pyproj import CRS
+    from pyproj.exceptions import CRSError
+
+    try:
+        CRS.from_user_input(system)
+    except CRSError:
+        return False
+    return True
+
+
 def test_the_frames_of_the_coordinate_systems():
     assert frames.FRAMES == {"ITRF2020": "EPSG:9989", "ETRF2000": "EPSG:7931", "ETRF2014": "EPSG:8403",
                              "ETRF2020": "EPSG:10570", "unknown": "EPSG:4979"}
@@ -55,6 +67,12 @@ def test_the_frames_of_the_coordinate_systems():
         # any other datum, a local frame, no system at all
         "EPSG:3004": None, "LOCAL": None, None: None}
     for system, frame in expected.items():
+        if system == "EPSG:10784" and not _proj_knows(system):
+            # IGb20 is in the EPSG database after v11.022, that of the PROJ 9.5.1 of the pyproj of Python 3.10 and 3.11:
+            # an older PROJ does not know the system, and frame_of has no frame to give. The program needs IGb20 only to
+            # name the frame of a system, never to convert
+            assert frames.frame_of(system) is None
+            continue
         assert frames.frame_of(system) == frame, system
         if frame is not None:  # every frame frame_of gives has its system
             assert frames.frame_of(frames.crs_of(frame)) == frame
