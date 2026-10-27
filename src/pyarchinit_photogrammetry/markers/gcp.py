@@ -12,6 +12,10 @@ from ..core.camera import Reference
 from ..core.marker import Marker
 from ..gnss import frames
 
+# what converts positions that carry no frame and epoch, as the warning of frames.legacy_warning names it
+CAMERA_REFERENCES = "the positions of the photos"
+MARKERS_READ = "the coordinates of the markers"
+
 
 def triangulate_markers(chunk, min_views: int = 2) -> None:
     """Triangulate every marker seen in at least ``min_views`` aligned photos. A marker measured
@@ -289,8 +293,8 @@ def import_reference(chunk, path, crs: str | None = None, delimiter: str | None 
             chunk.crs = projected_crs_for(src_crs, parsed[0][1]) if crs_mod.is_geographic(src_crs) else src_crs
     count = 0
     for vals, xyz in parsed:
-        if not crs_mod.is_local(src_crs) and src_crs != chunk.crs:
-            xyz = crs_mod.transform_points(xyz[None], src_crs, chunk.crs)[0]
+        if not crs_mod.is_local(src_crs) and src_crs != chunk.crs:  # markers carry no frame and epoch: as before
+            xyz = crs_mod.transform_points(xyz[None], src_crs, chunk.crs, legacy=MARKERS_READ)[0]
         label = vals["n"].strip()
         marker = _find_marker(chunk, label)
         if marker is None:
@@ -345,8 +349,8 @@ def camera_reference_errors(chunk) -> dict:
     reference position (the GPS of the photos): the reference in the chunk CRS (converted from
     the CRS it was read in, as the georeferencing does) and, for an aligned camera of a
     georeferenced chunk, the estimated centre and ``estimated - reference`` in metres. A
-    reference in ITRF2020 (a GNSS position against a permanent station) is converted at its own
-    epoch (:func:`_epochs`). Nothing of the chunk changes; references that cannot be compared yet
+    reference in ITRF2020 converts at its own epoch, one written before the frames as before
+    (:func:`_converted`). Nothing of the chunk changes; references that cannot be compared yet
     (a chunk still in local coordinates) are left out."""
     groups: dict[str, list] = {}
     for cam in chunk.cameras:
@@ -358,7 +362,7 @@ def camera_reference_errors(chunk) -> dict:
         if ref_crs != chunk.crs:
             if crs_mod.is_local(ref_crs) or crs_mod.is_local(chunk.crs) or crs_mod.is_geographic(chunk.crs):
                 continue
-            locs = crs_mod.transform_points(locs, ref_crs, chunk.crs, epoch=_epochs(cams, ref_crs))
+            locs = _converted(cams, locs, ref_crs, chunk.crs)
         for cam, loc in zip(cams, locs):
             entry = {"reference": loc}
             if cam.aligned and not crs_mod.is_local(chunk.crs):
@@ -373,9 +377,9 @@ def camera_references(chunk, cameras, crs: str | None = None) -> tuple[dict, str
     position}, system)``. Every reference is read in its ``meta["reference_crs"]`` (the chunk's when it has none:
     one chunk can hold the GPS of the EXIF in EPSG:4326 and a positions file in a projected system) and converted to
     ``crs``; without it, to metric axes: the chunk's system when it is projected, else the first projected system of
-    the references, else the UTM zone of the geographic ones. A reference in ITRF2020 (a GNSS position against a
-    permanent station) is converted at its own epoch (:func:`_epochs`). A reference that cannot be converted (a local
-    frame and a real coordinate system) is left out."""
+    the references, else the UTM zone of the geographic ones. A reference in ITRF2020 converts at its own epoch, one
+    written before the frames as before (:func:`_converted`). A reference that cannot be converted (a local frame and a
+    real coordinate system) is left out."""
     groups: dict[str, list] = {}
     for cam in cameras:
         if cam.reference.location:
@@ -388,19 +392,29 @@ def camera_references(chunk, cameras, crs: str | None = None) -> tuple[dict, str
         if ref_crs != crs and not (crs_mod.is_local(ref_crs) and crs_mod.is_local(crs)):
             if crs_mod.is_local(ref_crs) or crs_mod.is_local(crs):
                 continue
-            locs = crs_mod.transform_points(locs, ref_crs, crs, epoch=_epochs(cams, ref_crs))
+            locs = _converted(cams, locs, ref_crs, crs)
         out.update((cam.key, loc) for cam, loc in zip(cams, locs))
     return out, crs
 
 
-def _epochs(cams, ref_crs: str | None) -> np.ndarray | None:
-    """The epochs of the references of ``cams`` (decimal years, ``meta["gnss"]["epoch"]``; NaN for one that has none)
-    when their system ``ref_crs`` is in a frame where positions move with time (ITRF2020), None otherwise: there the
-    epoch changes nothing. One conversion for the whole group, each position at its own epoch."""
+def _converted(cams, locs: np.ndarray, ref_crs: str, dst: str) -> np.ndarray:
+    """``locs``, the references of ``cams`` in their system ``ref_crs``, in ``dst``. In a system of ITRF2020, where
+    positions move with time, a reference whose record names its frame (:func:`..gnss.frames.position_frame`, as the
+    program writes them from the frames on) converts at its epoch (``meta["gnss"]["epoch"]``); one whose record names
+    none - written before the frames: its frame is unknown, as :mod:`..gnss.quality` counts it - converts as before,
+    by PROJ's own choice, and a warning says so (:func:`..gnss.frames.legacy_warning`). One conversion for each kind,
+    each position at its own epoch."""
     if not frames.dynamic(ref_crs):
-        return None
-    epochs = [(cam.meta.get("gnss") or {}).get("epoch") for cam in cams]
-    return np.array([np.nan if e is None else e for e in epochs], dtype=np.float64)
+        return crs_mod.transform_points(locs, ref_crs, dst)
+    framed = np.array([frames.position_frame(cam.meta.get("gnss")) in frames.DYNAMIC for cam in cams], bool)
+    out = np.empty((len(locs), 3))
+    if framed.any():
+        epochs = [(cam.meta.get("gnss") or {}).get("epoch") for cam, keep in zip(cams, framed) if keep]
+        out[framed] = crs_mod.transform_points(locs[framed], ref_crs, dst,
+                                               epoch=[np.nan if e is None else e for e in epochs])
+    if not framed.all():
+        out[~framed] = crs_mod.transform_points(locs[~framed], ref_crs, dst, legacy=CAMERA_REFERENCES)
+    return out
 
 
 def _metric_crs(chunk, groups: dict[str, list]) -> str | None:

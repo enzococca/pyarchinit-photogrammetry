@@ -32,9 +32,9 @@ def _height(camera) -> str:
 
 def _frame(camera) -> str:
     """The reference frame of the position: one of :data:`.frames.FRAMES`, ``"unknown"`` for a position that does not
-    say (written before the frames, read from another program)."""
-    frame = (camera.meta.get("gnss") or {}).get("frame")
-    return frame if frame in frames.FRAMES else frames.UNKNOWN
+    say (written before the frames, read from another program) - as :mod:`..markers.gcp` converts it: as before
+    (:func:`.frames.position_frame`)."""
+    return frames.position_frame(camera.meta.get("gnss"))
 
 
 def _accuracy(camera) -> list[float] | None:

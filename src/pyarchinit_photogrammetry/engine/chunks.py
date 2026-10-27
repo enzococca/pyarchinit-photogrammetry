@@ -52,6 +52,13 @@ from ..core.marker import Marker, Projection, ScaleBar
 from ..core.pointcloud import PointCloud
 from ..core.progress import Progress, as_progress
 
+# what converts points from the system of one chunk to another's: they carry no frame and epoch, and convert as before
+# also from or to ITRF2020 (core.crs.transform_points with legacy; gnss.frames.legacy_warning names them)
+ALIGNED_POINTS = "the points of a chunk aligned on another"
+ALIGNED_MARKERS = "the markers of a chunk aligned on another"
+MERGED_POINTS = "the points of a chunk merged into another"
+MERGED_MARKERS = "the markers of the merged chunks"
+
 if TYPE_CHECKING:  # pragma: no cover
     from ..core.chunk import Chunk
     from ..core.document import Document
@@ -550,7 +557,7 @@ def _reference_guess(ch, ref, frame, ref_frame, samples_internal: np.ndarray) ->
     pts = samples_internal
     if len(pts) > 2000:
         pts = pts[np.random.default_rng(3).choice(len(pts), 2000, replace=False)]
-    world = crs_mod.transform_points(geometry.apply(ch.transform, pts), ch.crs, ref.crs)
+    world = crs_mod.transform_points(geometry.apply(ch.transform, pts), ch.crs, ref.crs, legacy=ALIGNED_POINTS)
     src, dst = frame.local(pts), world - ref_frame.offset
     if not (_spread(src, 1e-3) and _spread(dst, 1e-3)):
         return None
@@ -783,10 +790,12 @@ def _align_points(ch, ref, frame, ref_frame, fix_scale, initial, max_points, pro
 
 # ------------------------------------------------------------------ align
 def _convert_references(chunk: "Chunk", src_crs: str, dst_crs: str) -> None:
-    """Marker references to another CRS; camera references keep theirs (converted on use)."""
+    """Marker references to another CRS (as before the frames: a marker carries no frame and epoch); camera references
+    keep theirs (converted on use)."""
     for m in chunk.markers:
         if m.reference.location:
-            loc = crs_mod.transform_points(np.array([m.reference.location], float), src_crs, dst_crs)[0]
+            loc = crs_mod.transform_points(np.array([m.reference.location], float), src_crs, dst_crs,
+                                           legacy=ALIGNED_MARKERS)[0]
             m.reference.location = [float(v) for v in loc]
     for c in chunk.cameras:
         if c.reference.location and "reference_crs" not in c.meta:
@@ -904,7 +913,7 @@ def _frame_to(chunk: "Chunk", first: "Chunk", warnings: list[str]) -> np.ndarray
     pts = np.array(pts, float).reshape(-1, 3)
     if len(pts) < 3:
         raise ValueError(f"chunk {chunk.label}: nothing to place in {first.crs}")
-    world = crs_mod.transform_points(geometry.apply(chunk.transform, pts), chunk.crs, first.crs)
+    world = crs_mod.transform_points(geometry.apply(chunk.transform, pts), chunk.crs, first.crs, legacy=MERGED_POINTS)
     frame = _Frame(first)
     target = world - frame.offset
     W = geometry.umeyama(pts, target, with_scale=True)
@@ -1174,7 +1183,7 @@ def _merge_into(merged, sources, frames, warnings, merge_markers, merge_tie_poin
         def reference(m: Marker) -> Reference:
             loc = m.reference.location
             if loc and convert:
-                loc = crs_mod.transform_points(np.array([loc], float), ch.crs, merged.crs)[0]
+                loc = crs_mod.transform_points(np.array([loc], float), ch.crs, merged.crs, legacy=MERGED_MARKERS)[0]
             return Reference(location=[float(v) for v in loc] if loc is not None and len(loc) else None,
                              accuracy=list(m.reference.accuracy), enabled=m.reference.enabled)
 

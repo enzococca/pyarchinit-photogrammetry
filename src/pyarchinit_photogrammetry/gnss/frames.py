@@ -1,7 +1,7 @@
 """The reference frame and the epoch of a GNSS position, and the conversions that take them into account.
 
-A position measured against a base whose coordinates are in ITRF2020 (a permanent station of the IGS or of the EPN, a
-PPP solution; IGS20, IGb20 and IGc20 are ITRF2020 for the program) is in ITRF2020 at the epoch it was measured at: a
+A position computed against a base whose coordinates are in ITRF2020 (a permanent station of the IGS or of the EPN, a
+PPP solution; IGS20, IGb20 and IGc20 are ITRF2020 for the program) is in ITRF2020 at the epoch of those coordinates: a
 frame in which Europe moves by about 2.5 cm a year. The European frames - ETRF2000 (the frame of RDN2008, and of ETRS89
 in Italy), ETRF2014, ETRF2020 - move with the European plate. From ITRF2020 to them goes the time-dependent Helmert of
 the EPSG ("ITRF2020 to ETRF2000 (1)", ...) at the epoch of the positions: about a metre at Rome in 2026. PROJ left to
@@ -11,16 +11,21 @@ position in ITRF2020 goes through :func:`transform`, which :func:`..core.crs.tra
 
 ITRF2020 and WGS 84 are the same frame for the program (their realisations agree within centimetres): a position in
 ITRF2020 goes to a system on WGS 84 as it is, at any epoch. A position whose frame nobody knows - the drone's own RTK,
-the GPS of a photo, the projects made before the frames - is ``"unknown"``, in WGS 84, as it always was."""
+the GPS of a photo - is ``"unknown"``, in WGS 84, as it always was. What carries no frame and epoch - the positions of a
+project made before the frames, markers, the points of a chunk - converts as before, by PROJ's own choice
+(:func:`..core.crs.transform_points` with ``legacy``), and :func:`legacy_warning` says so once."""
 from __future__ import annotations
 
 import functools
+import logging
 import math
 from datetime import datetime, timezone
 
 import numpy as np
 
 from ..core import crs as crs_mod
+
+log = logging.getLogger(__name__)
 
 UNKNOWN = "unknown"
 WGS84 = "WGS84"  # what frame_of says of a system on WGS 84; for a position, its frame is "unknown"
@@ -32,6 +37,7 @@ DYNAMIC = frozenset({"ITRF2020"})  # the frames in which a position moves with t
 EUROPEAN = ("ETRF2000", "ETRF2014", "ETRF2020")  # those reached from ITRF2020 by the Helmert of the EPSG
 EPOCHS = (1980.0, 2100.0)  # an epoch is a decimal year between these: GPS time starts in 1980
 _HELMERT = "ITRF2020 to ETRF20"  # the step of the operations of the EPSG from ITRF2020 to the European frames
+_LEGACY_WARNED: set[tuple[str, str]] = set()  # (who converts, system): what legacy_warning has said already
 
 # the frame of a datum by its EPSG code: ITRF2020 with its update of 2023 and the realisations of the IGS (IGS20,
 # IGb20); ETRF2000 with RDN2008 and the ETRS89 ensemble; ETRF2014; ETRF2020; WGS 84 and its realisations
@@ -115,6 +121,26 @@ def dynamic(crs: str | None) -> bool:
     return frame_of(crs) in DYNAMIC
 
 
+def position_frame(record: dict | None) -> str:
+    """The frame the record of a position (the ``meta["gnss"]`` of a camera) names: one of :data:`FRAMES`;
+    ``"unknown"`` for a record that names none - a position written before the frames, read from another program - or
+    names one the program does not know."""
+    frame = (record or {}).get("frame")
+    return frame if frame in FRAMES else UNKNOWN
+
+
+def legacy_warning(where: str, crs: str) -> None:
+    """Log, once for each ``where`` (what converts them) and ``crs`` (a system in ITRF2020), that positions carrying no
+    frame and epoch were converted as before, by PROJ's own choice (:func:`..core.crs.transform_points` with
+    ``legacy``): about a metre off in Europe, where the Helmert at their epoch would be exact."""
+    if (where, crs) in _LEGACY_WARNED:
+        return
+    _LEGACY_WARNED.add((where, crs))
+    log.warning("%s in %s carry no reference frame and epoch: they are converted as before, by PROJ's own choice, "
+                "which can be about a metre off in Europe. To convert them exactly, import them again with their "
+                "epoch, or in the coordinate system of the chunk", where, crs)
+
+
 def decimal_year(when: datetime) -> float:
     """The epoch of ``when`` as a decimal year: the year plus the time since its 1 January over the length of that year,
     in UTC (a ``when`` without a time zone is UTC)."""
@@ -124,16 +150,42 @@ def decimal_year(when: datetime) -> float:
     return when.year + (when - start).total_seconds() / (end - start).total_seconds()
 
 
+def _not_a_year(epoch) -> ValueError:
+    return ValueError(f"an epoch is a decimal year (2026.82 for the end of October 2026), not {epoch!r}")
+
+
 def valid_epoch(epoch) -> float:
     """``epoch`` as a decimal year: a ``ValueError`` for anything that is not a number between :data:`EPOCHS` (a time
     in seconds, a date)."""
     try:
         value = float(epoch)
     except (TypeError, ValueError):
-        raise ValueError(f"an epoch is a decimal year (2026.82 for the end of October 2026), not {epoch!r}") from None
+        raise _not_a_year(epoch) from None
     if not (math.isfinite(value) and EPOCHS[0] <= value <= EPOCHS[1]):
-        raise ValueError(f"an epoch is a decimal year (2026.82 for the end of October 2026), not {epoch!r}")
+        raise _not_a_year(epoch)
     return value
+
+
+def frame_and_epoch(frame: str, epoch=None) -> tuple[str, float | None]:
+    """The ``frame`` and the ``epoch`` of a position, checked: the frame one of :data:`FRAMES` (``"WGS84"`` is
+    ``"unknown"``, the frame nobody knows), the epoch a decimal year (:func:`valid_epoch`) or None when it is not known
+    - which a position in a frame that moves with time (ITRF2020) cannot be: it could not be converted to any other
+    system. A ``ValueError`` otherwise."""
+    crs_of(frame)  # a frame the program knows
+    frame = UNKNOWN if frame == WGS84 else frame
+    if epoch is not None:
+        return frame, valid_epoch(epoch)
+    if frame in DYNAMIC:
+        raise ValueError(f"a position in {frame} moves with time: it needs the epoch of its coordinates (a decimal "
+                         "year), or it could not be converted to any other system")
+    return frame, None
+
+
+def _epoch_values(epoch) -> np.ndarray:
+    try:
+        return np.asarray(epoch, dtype=np.float64).reshape(-1)
+    except (TypeError, ValueError):
+        raise _not_a_year(epoch) from None
 
 
 def _epochs(epoch, count: int, src: str, dst: str) -> np.ndarray:
@@ -141,11 +193,8 @@ def _epochs(epoch, count: int, src: str, dst: str) -> np.ndarray:
     is missing or is not a year."""
     if epoch is None:
         raise ValueError(f"positions in ITRF2020 move with time: converting them from {src} to {dst} needs the epoch "
-                         "they were measured at (a decimal year), and none was given")
-    try:
-        values = np.asarray(epoch, dtype=np.float64).reshape(-1)
-    except (TypeError, ValueError):
-        raise ValueError(f"an epoch is a decimal year (2026.82 for the end of October 2026), not {epoch!r}") from None
+                         "of their coordinates (a decimal year), and none was given")
+    values = _epoch_values(epoch)
     if values.size == 1:
         values = np.full(count, values[0])
     elif values.size != count:
@@ -153,10 +202,18 @@ def _epochs(epoch, count: int, src: str, dst: str) -> np.ndarray:
     missing = int(np.count_nonzero(np.isnan(values)))
     if missing:
         raise ValueError(f"positions in ITRF2020 move with time: converting them from {src} to {dst} needs the epoch "
-                         f"each was measured at (a decimal year), and {missing} of {count} have none")
+                         f"of the coordinates of each (a decimal year), and {missing} of {count} have none")
     for value in np.unique(values):
         valid_epoch(value)
     return values
+
+
+def _rows(epoch, keep: np.ndarray):
+    """The epochs of the rows ``keep`` keeps: one epoch for all of them stays as it is."""
+    if epoch is None or np.ndim(epoch) == 0:
+        return epoch
+    values = _epoch_values(epoch)
+    return values[keep] if values.size == keep.size else values
 
 
 # --- the steps of a conversion -------------------------------------------------------------------------------------
@@ -170,8 +227,11 @@ def _transformer(src: str, dst: str):
     return Transformer.from_crs(_parsed(src), _parsed(dst), always_xy=True)
 
 
-def _apply(transformer, points: np.ndarray) -> np.ndarray:
-    x, y, z = transformer.transform(points[:, 0], points[:, 1], points[:, 2])
+def _apply(transformer, points: np.ndarray, inverse: bool = False) -> np.ndarray:
+    from pyproj.enums import TransformDirection
+
+    direction = TransformDirection.INVERSE if inverse else TransformDirection.FORWARD
+    x, y, z = transformer.transform(points[:, 0], points[:, 1], points[:, 2], direction=direction)
     return np.column_stack([x, y, z]).astype(np.float64)
 
 
@@ -234,11 +294,7 @@ def _move(points: np.ndarray, european: str, epochs: np.ndarray, inverse: bool =
 
     direction = TransformDirection.INVERSE if inverse else TransformDirection.FORWARD
     x, y, z, _t = _helmert(european).transform(points[:, 0], points[:, 1], points[:, 2], epochs, direction=direction)
-    moved = np.column_stack([x, y, z]).astype(np.float64)
-    if not np.isfinite(moved).all():
-        raise ValueError(f"the Helmert from ITRF2020 to {european} gave no position for some of the points: are they "
-                         "longitude, latitude and height?")
-    return moved
+    return np.column_stack([x, y, z]).astype(np.float64)
 
 
 def _area(lonlat: np.ndarray) -> tuple[float, float, float, float] | None:
@@ -254,32 +310,44 @@ def _area(lonlat: np.ndarray) -> tuple[float, float, float, float] | None:
 
 
 @functools.lru_cache(maxsize=64)
-def _known(hub: str, crs: str, area: tuple[float, float, float, float] | None) -> bool:
-    """PROJ has a transformation that is no ballpark between ``hub`` and the horizontal part of ``crs`` valid in
-    ``area``."""
+def _operation(hub: str, target: str, area: tuple[float, float, float, float] | None):
+    """The transformation PROJ ranks first from ``hub`` to ``target`` among those that are no ballpark and are valid in
+    ``area`` (the largest area of use there, then the best accuracy), made again from its pipeline (the transformers of
+    a group are not safe to share between threads); None when there is none."""
+    from pyproj import Transformer
     from pyproj.transformer import AreaOfInterest, TransformerGroup
 
-    group = TransformerGroup(_parsed(hub), _horizontal(_parsed(crs)), always_xy=True, allow_ballpark=False,
+    group = TransformerGroup(_parsed(hub), _parsed(target), always_xy=True, allow_ballpark=False,
                              area_of_interest=AreaOfInterest(*area) if area else None)
-    return bool(group.transformers)
+    return Transformer.from_pipeline(group.transformers[0].to_proj4()) if group.transformers else None
 
 
-def _hub(crs: str, frame: str | None, lonlat, src: str, dst: str) -> tuple[str, bool]:
-    """The geographic 3D system a position in ITRF2020 passes through on its way to (or from) ``crs``, whose frame is
-    ``frame``, and whether the Helmert of the EPSG takes it there (``True``: at the epoch) or ITRF2020 is taken as it
-    is (WGS 84). A European frame is its own system; WGS 84 is ``EPSG:4979``; any other datum is reached from ETRF2000
-    when PROJ has a transformation that is no ballpark between ETRF2000 and ``crs`` where the points are (``lonlat``:
-    a callable that gives their longitude and latitude), else from WGS 84 the same way, else a ``ValueError``: PROJ
-    knows that datum only by a ballpark, which can be metres off."""
+def _datum_target(crs: str) -> str:
+    """The system the datum of ``crs`` is reached in: ``crs`` itself or, for a compound system, the geographic 3D system
+    of its horizontal datum, from which a conversion gives the plan and the heights (a missing geoid grid does not hide
+    a transformation of the datum)."""
+    return _geographic(crs) if _parsed(crs).is_compound else crs
+
+
+def _route(crs: str, frame: str | None, lonlat, src: str, dst: str) -> tuple[str, bool, object | None]:
+    """How positions in ITRF2020 go to ``crs`` (or come from it), whose frame is ``frame``: the geographic 3D system
+    they pass through, whether the Helmert of the EPSG takes them there (``True``: at their epochs) or ITRF2020 is taken
+    as it is (WGS 84), and the operation from that system to the datum of ``crs`` (:func:`_datum_target`), or None for
+    PROJ's own from there (a conversion, or its null transformation from ETRF2000 to RDN2008 and ETRS89).
+
+    A European frame is its own system and WGS 84 is ``EPSG:4979``. Any other datum is reached from ETRF2000 by the
+    transformation PROJ ranks first among those that are no ballpark where the points are (``lonlat``: a callable that
+    gives their longitude and latitude), else from WGS 84 the same way, else a ``ValueError``: PROJ knows that datum
+    only by a ballpark, which can be metres off."""
     if frame in EUROPEAN:
-        return FRAMES[frame], True
+        return FRAMES[frame], True, None
     if frame == WGS84:
-        return FRAMES[UNKNOWN], False
-    area = _area(lonlat())
-    if _known(FRAMES["ETRF2000"], crs, area):
-        return FRAMES["ETRF2000"], True
-    if _known(FRAMES[UNKNOWN], crs, area):
-        return FRAMES[UNKNOWN], False
+        return FRAMES[UNKNOWN], False, None
+    area, target = _area(lonlat()), _datum_target(crs)
+    for hub, helmert in ((FRAMES["ETRF2000"], True), (FRAMES[UNKNOWN], False)):
+        operation = _operation(hub, target, area)
+        if operation is not None:
+            return hub, helmert, operation
     raise ValueError(f"cannot convert positions in ITRF2020 from {src} to {dst}: PROJ knows the datum of {crs} only by "
                      "a ballpark, no transformation from ETRF2000 or WGS 84 where the positions are, and a ballpark "
                      "can be metres off. Choose a coordinate system on ETRF2000, ETRS89, RDN2008 or WGS 84")
@@ -292,9 +360,10 @@ def transform(points, src: str, dst: str, epoch=None) -> np.ndarray:
     From ITRF2020 to a European frame (ETRF2000 and the systems of RDN2008 and ETRS89, ETRF2014, ETRF2020) the
     time-dependent Helmert of the EPSG (``ITRF2020 to ETRF2000 (1)``...) at the epochs, then PROJ from the geographic
     system of that frame to ``dst`` (a conversion, or PROJ's null transformation from ETRF2000 to RDN2008 and ETRS89);
-    to a system on WGS 84 ITRF2020 as it is, with no epoch needed; to another datum through ETRF2000 at the epochs when
-    PROJ has a transformation that is no ballpark from ETRF2000 to it where the points are, else through WGS 84 the same
-    way. The other way round the same steps backwards; between two systems of ITRF2020 conversions only. A
+    to a system on WGS 84 ITRF2020 as it is, with no epoch needed; to another datum through ETRF2000 at the epochs by
+    the transformation PROJ ranks first among those that are no ballpark where the points are, else through WGS 84 the
+    same way (:func:`_route`). The other way round the same steps backwards; between two systems of ITRF2020
+    conversions only. A row without a finite number is no position: it stays without one (NaN) and needs no epoch. A
     ``ValueError`` without the epoch where the Helmert is applied, for an epoch that is not a year, and for a datum PROJ
     knows only by a ballpark. Between systems that are not in ITRF2020 :func:`..core.crs.transform_points`."""
     pts = np.atleast_2d(np.asarray(points, dtype=np.float64))
@@ -303,15 +372,26 @@ def transform(points, src: str, dst: str, epoch=None) -> np.ndarray:
     source, target = frame_of(src), frame_of(dst)
     if source not in DYNAMIC and target not in DYNAMIC:
         return crs_mod.transform_points(pts, src, dst)
+    whole = np.isfinite(pts).all(axis=1)
+    if not whole.all():
+        out = np.full(pts.shape, np.nan)
+        if whole.any():
+            out[whole] = transform(pts[whole], src, dst, _rows(epoch, whole))
+        return out
     if source in DYNAMIC and target in DYNAMIC:
         return _from_itrf2020(_to_itrf2020(pts, src), dst)
     if source in DYNAMIC:
         lonlat = _to_itrf2020(pts, src)
-        hub, helmert = _hub(dst, target, lambda: lonlat, src, dst)
+        hub, helmert, operation = _route(dst, target, lambda: lonlat, src, dst)
         moved = _move(lonlat, _european(hub), _epochs(epoch, len(pts), src, dst)) if helmert else lonlat
-        return _convert(moved, hub, dst)
-    hub, helmert = _hub(src, source, lambda: _convert(pts, src, _geographic(src)), src, dst)
-    at_hub = _convert(pts, src, hub)
+        if operation is None:
+            return _convert(moved, hub, dst)
+        return _convert(_apply(operation, moved), _datum_target(dst), dst)
+    hub, helmert, operation = _route(src, source, lambda: _convert(pts, src, _geographic(src)), src, dst)
+    if operation is None:
+        at_hub = _convert(pts, src, hub)
+    else:
+        at_hub = _apply(operation, _convert(pts, src, _datum_target(src)), inverse=True)
     lonlat = _move(at_hub, _european(hub), _epochs(epoch, len(pts), src, dst), inverse=True) if helmert else at_hub
     return _from_itrf2020(lonlat, dst)
 

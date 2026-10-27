@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import itertools
+import json
 import math
 import os
 import re
@@ -107,11 +108,19 @@ class Solution:
 class BasePosition:
     """The position of the mark a base stands on - latitude, longitude (degrees), height above the ellipsoid (m) - and
     what is known of it: where it comes from (``source``, one of :data:`BASE_SOURCES`), its reference ``frame`` (one of
-    :data:`.frames.FRAMES`: the positions computed from the base are in it; ``"unknown"`` when nobody knows it) and the
+    :data:`.frames.FRAMES`: the positions computed from the base are in it; ``"unknown"`` when nobody knows it), the
     ``epoch`` of its coordinates (a decimal year; a position in ITRF2020 cannot be without it), its standard deviations
-    ``sd`` east, north, up (m) when known, and ``detail``, what its source says of it (the station, the solution...).
+    ``sd`` east, north, up (m) when known, and ``detail``, what its source says of it (the station, the solution...),
+    a dict of what JSON writes: it is copied into every photo and saved with the project.
+
+    A position of the rover is the base's coordinates plus the baseline, so in a frame that moves with time (ITRF2020)
+    the positions computed from the base are at the epoch of the base's coordinates, not at the epoch of the flight:
+    coordinates of a station at 2015.0 make positions at 2015.0, which the program converts as such
+    (:func:`.apply.apply_ppk`); carried to the day of the flight, they make positions of that day.
+
     A ``ValueError`` for a position off the earth, a source or a frame the program does not know, an epoch that is not
-    a year or that is missing in ITRF2020, deviations that are not three numbers of zero or more."""
+    a year or that is missing in ITRF2020 (:func:`.frames.frame_and_epoch`), deviations that are not three numbers of
+    zero or more, a detail that is not a dict JSON can write."""
 
     lat: float
     lon: float
@@ -127,14 +136,7 @@ class BasePosition:
         if self.source not in BASE_SOURCES:
             raise ValueError(f"the position of a base comes from one of {', '.join(BASE_SOURCES)}, not from "
                              f"{self.source!r}")
-        frames.crs_of(self.frame)  # a frame the program knows
-        if self.frame == frames.WGS84:
-            self.frame = frames.UNKNOWN  # a position on WGS 84: nobody knows its frame
-        if self.epoch is not None:
-            self.epoch = frames.valid_epoch(self.epoch)
-        elif self.frame in frames.DYNAMIC:
-            raise ValueError(f"the position of the base is in {self.frame}, which moves with time: give the epoch of "
-                             "its coordinates (a decimal year)")
+        self.frame, self.epoch = frames.frame_and_epoch(self.frame, self.epoch)
         if self.sd is not None:
             try:
                 sd = tuple(float(v) for v in self.sd)
@@ -144,7 +146,15 @@ class BasePosition:
                 raise ValueError(f"the standard deviations of the base are three numbers of metres (east, north, up), "
                                  f"not {self.sd!r}")
             self.sd = sd
-        self.detail = dict(self.detail or {})
+        detail = {} if self.detail is None else self.detail
+        try:
+            if not isinstance(detail, dict):
+                raise TypeError(f"a {type(detail).__name__}, not a dict")
+            json.dumps(detail)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"the detail of the position of the base is copied into every photo and saved with the "
+                             f"project: a dict of what JSON writes (text, numbers, lists, dicts) - {exc}") from None
+        self.detail = copy.deepcopy(detail)
 
 
 # --- the options of a run ---------------------------------------------------------------------------------------

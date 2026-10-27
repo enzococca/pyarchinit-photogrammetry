@@ -36,19 +36,26 @@ def is_geographic(crs: str | None) -> bool:
     return not is_local(crs) and to_pyproj(crs).is_geographic
 
 
-def transform_points(points: np.ndarray, src: str, dst: str, epoch=None) -> np.ndarray:
+def transform_points(points: np.ndarray, src: str, dst: str, epoch=None, legacy: str | None = None) -> np.ndarray:
     """Transform ``(N,3)`` points between two CRS (heights passed through). When one of the two is in ITRF2020, a
     frame where positions move with time (a GNSS position against a permanent station or PPP), the points go through
     :func:`..gnss.frames.transform` at their ``epoch``: a decimal year for all of them, or one for each (PROJ alone
-    would take a ballpark, or the epoch 2015.0)."""
+    would take a ballpark, or the epoch 2015.0).
+
+    Points that carry no frame and epoch - the positions of a project made before the frames, markers, the points of a
+    chunk - are converted as before, by PROJ's own choice, also from or to ITRF2020, when the caller names itself in
+    ``legacy`` (what it converts): :func:`..gnss.frames.legacy_warning` logs it, once for each caller and system."""
     if src == dst or (is_local(src) and is_local(dst)):
         return np.asarray(points, float).copy()
     if is_local(src) or is_local(dst):
         raise ValueError("cannot transform between a local frame and a geodetic CRS")
     from ..gnss import frames
 
-    if frames.dynamic(src) or frames.dynamic(dst):
+    moving = [system for system in (src, dst) if frames.dynamic(system)]
+    if moving and legacy is None:
         return frames.transform(points, src, dst, epoch)
+    if moving:
+        frames.legacy_warning(legacy, moving[0])
     from pyproj import Transformer
 
     tr = Transformer.from_crs(to_pyproj(src), to_pyproj(dst), always_xy=True)
