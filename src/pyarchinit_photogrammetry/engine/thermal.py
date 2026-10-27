@@ -625,17 +625,36 @@ def flir_factor(rows: int, cols: int) -> int:
 
 
 def flir_tile_shape(rows: int, cols: int, tile: int | None = None) -> tuple[int, int]:
-    """The rows and columns of the tiles of a ``rows`` x ``cols`` orthomosaic. With a ``tile`` asked for:
-    that many cells a side, exactly (64 at least, and at most the largest square one file holds, 2895),
-    the last tiles of a row or a column being what is left. Without: balanced tiles - each length in as
-    many equal parts as it takes to get under 2895 cells, ``ceil(length / 2895)`` of them, each of
-    ``ceil(length / parts)`` cells - so 3000 x 3000 cells are 4 tiles of 1500 x 1500, not 2895 and a
-    sliver of 105."""
-    most = math.isqrt(FLIR_MAX_CELLS)
+    """The rows and columns of the tiles of a ``rows`` x ``cols`` orthomosaic.
+
+    With a ``tile`` asked for: that many cells a side, exactly (64 at least, and at most the largest square
+    one file holds, 2895), the last tiles of a row or a column being what is left.
+
+    Without: the fewest tiles. The rows are cut in ``n_rows`` equal parts of ``ceil(rows / n_rows)`` cells
+    and the columns in ``n_cols`` of ``ceil(cols / n_cols)``, with the smallest ``n_rows * n_cols`` for
+    which a tile fits in a file (:func:`flir_fits`: its cells, and the side of a JPEG); among the plans
+    with that many tiles, the one whose tiles are closest to square, then the one with the fewest row
+    parts. For each ``n_rows`` the smallest ``n_cols`` is known at once, so only ``n_rows`` is searched.
+    Equal parts leave no sliver: 9000 x 1000 cells are 2 tiles of 4500 x 1000, 3000 x 3000 cells are 2 of
+    3000 x 1500, an orthomosaic that fits in a file is one tile."""
     if tile is not None:
-        side = int(min(max(tile, 64), most))
+        side = int(min(max(tile, 64), math.isqrt(FLIR_MAX_CELLS)))
         return side, side
-    return _cdiv(rows, max(1, _cdiv(rows, most))), _cdiv(cols, max(1, _cdiv(cols, most)))
+    rows, cols = max(1, int(rows)), max(1, int(cols))
+    fewest_cols = _cdiv(cols, FLIR_MAX_SIDE)  # a tile is 65500 cells wide at most: no plan has fewer column parts
+    best = None  # ((tiles, elongation), tile rows, tile columns)
+    n_rows = _cdiv(rows, FLIR_MAX_SIDE)
+    while n_rows <= rows and (best is None or n_rows * fewest_cols <= best[0][0]):
+        th = _cdiv(rows, n_rows)
+        widest = min(FLIR_MAX_SIDE, FLIR_MAX_CELLS // th)  # the columns of a tile of th rows that fit in a file
+        if widest:
+            n_cols = _cdiv(cols, widest)
+            tw = _cdiv(cols, n_cols)
+            key = (n_rows * n_cols, max(th, tw) / min(th, tw))
+            if best is None or key < best[0]:  # a tie keeps the first, the one with the fewest row parts
+                best = (key, th, tw)
+        n_rows += 1
+    return best[1], best[2]
 
 
 def flir_plan(source, tile: int | None = None) -> dict:
@@ -1535,7 +1554,7 @@ def export(chunk: Chunk, path, fmt: str | None = None, source: Path | None = Non
     ``tif16`` 16-bit GeoTIFF in centikelvin (0 = nothing; degrees = value / 100 - 273.15, as
     MicaSense writes its thermal band), ``csv`` one line per cell with x, y and the temperature,
     ``flir`` FLIR radiometric JPEGs with world files (:func:`export_flir`: one file when the
-    orthomosaic fits in one, else balanced tiles - or exact tiles of ``tile`` cells - or with ``single``
+    orthomosaic fits in one, else the fewest tiles - or exact tiles of ``tile`` cells - or with ``single``
     one file with larger cells). The parameters of the measure go with it (tags, the CSV's header, the
     FLIR camera information)."""
     import rasterio
@@ -1646,10 +1665,11 @@ def export_flir(chunk: Chunk, path, source: Path, tile: int | None = None, palet
       makes it fit (:func:`flir_factor`); the memory in use stays bounded, the raster is read in strips;
     * else tiles ``<name>_r<row>_c<column>.jpg`` (the row and column of the tile, from 00) with an index
       ``<name>_tiles.csv`` (file, bounds, coldest and hottest degrees, cells with a value; tiles with no
-      value are left out). By default they are balanced, of up to 2895 cells a side
-      (:func:`flir_tile_shape`): 3000 x 3000 cells are 4 tiles of 1500 x 1500. A ``tile`` given asks for
-      exact tiles of that side (the last of a row or column is what is left), even when the orthomosaic
-      would fit in a file (one file when it is no larger than a tile). ``single`` wins over ``tile``.
+      value are left out). By default the fewest tiles a file can hold, in equal parts and as square as
+      possible (:func:`flir_tile_shape`): 9000 x 1000 cells are 2 tiles of 4500 x 1000. A ``tile`` given
+      asks for exact tiles of that side (the last of a row or column is what is left), even when the
+      orthomosaic would fit in a file (one file when it is no larger than a tile). ``single`` wins over
+      ``tile``.
 
     Every JPEG has its world file (``.jgw``, the cells of that file) and its reference system
     (``.aux.xml``): QGIS and GDAL place it. The colours of every picture - the one file, the one with

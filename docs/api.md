@@ -316,18 +316,19 @@ fits in a FLIR file (256 APP1 segments: `FLIR_MAX_CELLS`, 8,386,048 cells, whate
 temperatures averaged over blocks of k x k cells, NaN-aware and read in strips, k the smallest whole
 number that makes it fit (`flir_factor`) - with the world file of the coarser cells; otherwise tiles
 named `<name>_r<row>_c<column>.jpg` (the row and the column of the tile), each with its own world
-file and reference system, balanced and of up to 2895 cells a side (without `tile`: 3000 x 3000
-cells are 4 tiles of 1500 x 1500, not 2895 and a sliver of 105; a `tile` given makes exact tiles of
-that side, even for an orthomosaic that would fit in one file) and an index `<name>_tiles.csv`. All
-the pictures share the colour ramp of the whole orthomosaic. `flir_plan(source)` says which of these
-an orthomosaic needs (its cells, `fits`, `factor`, the tiles). The picture is the palette rendering;
-the raw counts are made with the inverse of FLIR's model (Thermimage's raw2temp) for the parameters
-of the measure as ExifTool prints them, so ExifTool, FLIR's tools and the programs built on them
-(Thermal-Image-Analysis, flirimageextractor, flyr) read the same degrees back, within 0.01 °C. The
-format has no empty value: cells without a temperature get the coldest of the image (black in the
-picture). FLIR radiometric JPEGs are read too (`read_flir`, `decode_flir`: the raw data as 16-bit
-counts or as a PNG, the camera's Planck constants, the measure's parameters of the chunk). `ppg
-thermal PROJECT status|params|build|anomalies|export [--format flir --tile N --single]`.
+file and reference system, the fewest that fit in a file, in equal parts and as square as possible
+(without `tile`: 9000 x 1000 cells are 2 tiles of 4500 x 1000 and 3000 x 3000 cells 2 of 3000 x
+1500; a `tile` given makes exact tiles of that side, at most 2895, even for an orthomosaic that
+would fit in one file) and an index `<name>_tiles.csv`. All the pictures share the colour ramp of
+the whole orthomosaic. `flir_plan(source)` says which of these an orthomosaic needs (its cells,
+`fits`, `factor`, the tiles). The picture is the palette rendering; the raw counts are made with the
+inverse of FLIR's model (Thermimage's raw2temp) for the parameters of the measure as ExifTool prints
+them, so ExifTool, FLIR's tools and the programs built on them (Thermal-Image-Analysis,
+flirimageextractor, flyr) read the same degrees back, within 0.01 °C. The format has no empty value:
+cells without a temperature get the coldest of the image (black in the picture). FLIR radiometric
+JPEGs are read too (`read_flir`, `decode_flir`: the raw data as 16-bit counts or as a PNG, the
+camera's Planck constants, the measure's parameters of the chunk). `ppg thermal PROJECT
+status|params|build|anomalies|export [--format flir --tile N --single]`.
 
 `engine.probe` reads what the products hold at a point, at full resolution: `Probe(chunk)` keeps
 the DEM, the thermal orthomosaic and its anomalies, the reflectance and the indices open;
