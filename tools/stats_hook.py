@@ -62,7 +62,10 @@ TEXT = {
         "pip_raw_pypistats": "pip installs (PyPI), raw: robots and mirrors included",
         "site": "Visitors of this site", "repository": "Visitors of the repository (unique per day)",
         "not_configured": "not configured yet", "error": "not updated at the last run: the source did not answer",
-        "skipped": "not updated: the query would have read {gb} GB, more than the limit of {limit} GB",
+        "budget": "stopped until next month: this month's queries billed {gb} GB, and one more day would pass "
+                  "the {budget} GB the workflow allows itself",
+        "paused": "stopped until next month: one day of downloads billed {gb} GB, more than {limit} GB, so the "
+                  "table does not narrow the query to this project",
         "no_data": "no data yet",
         "application": "Application", "pip": "pip installs", "this_site": "This site", "repo": "Repository",
         "chart_app": "Downloads of the application per month",
@@ -93,7 +96,10 @@ TEXT = {
         "site": "Visitatori di questo sito", "repository": "Visitatori del repository (unici per giorno)",
         "not_configured": "non ancora configurato",
         "error": "non aggiornato all'ultima esecuzione: la fonte non ha risposto",
-        "skipped": "non aggiornato: la query avrebbe letto {gb} GB, oltre il limite di {limit} GB",
+        "budget": "fermo fino al mese prossimo: le query di questo mese hanno fatturato {gb} GB, e un altro giorno "
+                  "supererebbe i {budget} GB che il workflow si concede",
+        "paused": "fermo fino al mese prossimo: un giorno di download ha fatturato {gb} GB, oltre {limit} GB: la "
+                  "tabella non restringe la query a questo progetto",
         "no_data": "ancora nessun dato",
         "application": "Applicazione", "pip": "Installazioni con pip", "this_site": "Questo sito",
         "repo": "Repository",
@@ -196,8 +202,9 @@ def _status(source: dict | None, t: dict, lang: str) -> str:
     status = (source or {}).get("status")
     if status == "not configured":
         return t["not_configured"]
-    if status == "skipped":
-        return t["skipped"].format(gb=_num(source.get("gb"), lang), limit=_num(source.get("limit"), lang))
+    if status in ("budget", "paused"):  # BigQuery
+        return t[status].format(gb=_num(source.get("gb"), lang), budget=_num(source.get("budget"), lang),
+                                limit=_num(source.get("limit"), lang))
     if status == "error":
         return t["error"]
     return t["no_data"]
@@ -209,7 +216,7 @@ def _sentence(text: str) -> str:
 
 def _note(name: str, source: dict | None, t: dict, lang: str) -> list[str]:
     """A line under a section whose numbers were not updated at the last run."""
-    if (source or {}).get("status") in ("skipped", "error"):
+    if (source or {}).get("status") in ("budget", "paused", "error"):
         return [f'!!! warning "{name}"', f"    {_sentence(_status(source, t, lang))}", ""]
     return []
 

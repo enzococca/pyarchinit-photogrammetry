@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import types
 import urllib.error
 import urllib.parse
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -57,16 +58,19 @@ ROWS = [
 
 
 class FakeBigQuery:
-    def __init__(self, gb: float, rows=()):
-        self.gb, self.found, self.calls = gb, list(rows), []
+    """The two calls of download_stats.BigQuery: the clustering of the table and the groups of one day, billing
+    gb gigabytes (or gb(day))."""
 
-    def estimate(self, start, end):
-        self.calls.append(("dry run", start, end))
-        return int(self.gb * 1e9)
+    def __init__(self, gb=0.5, rows=(), clustering=("project", "country_code")):
+        self.gb, self.found, self.fields, self.calls = gb, list(rows), list(clustering), []
 
-    def rows(self, start, end):
-        self.calls.append(("query", start, end))
-        return [r for r in self.found if start <= r["day"] < end]
+    def clustering(self):
+        return self.fields
+
+    def day(self, day, column):
+        self.calls.append(day)
+        gb = self.gb(day) if callable(self.gb) else self.gb
+        return [r for r in self.found if r["day"] == day], int(gb * 1e9)
 
 
 def fake_web(calls: list):
@@ -155,38 +159,122 @@ def test_real_installs(installer, ci, python, real):
     assert stats.is_real(installer, ci, python) is real
 
 
-def test_bigquery_rows_grouped_by_day():
-    days = stats.bigquery_days(ROWS[:2])
-    assert list(days) == ["2026-10-20"]
-    assert sorted(days["2026-10-20"]) == [[PIP, "IT", "pip", None, "Darwin", "3.12", "1.6.0", "bdist_wheel", 40],
-                                          [PIP, "US", "pip", True, "Linux", "3.12", "1.6.0", "bdist_wheel", 500]]
+def test_day_rows():
+    assert stats.day_rows(ROWS[:2]) == [[PIP, "IT", "pip", None, "Darwin", "3.12", "1.6.0", "bdist_wheel", 40],
+                                        [PIP, "US", "pip", True, "Linux", "3.12", "1.6.0", "bdist_wheel", 500]]
 
 
-def test_dry_run_guard():
+def _days(first: date, n: int) -> list:
+    return [first + timedelta(days=i) for i in range(n)]
+
+
+def test_bigquery_reads_the_missing_days_one_at_a_time():
     data = stats.empty()
-    big = FakeBigQuery(150.0, ROWS)
-    assert stats.update_bigquery(data, big, date(2026, 10, 27)) == {"status": "skipped", "gb": 150.0, "limit": 100}
-    assert big.calls == [("dry run", date(2026, 10, 1), date(2026, 10, 27))]  # the first run backfills; nothing read
-    assert data["pypi"]["days"] == {}
-    small = FakeBigQuery(4.2, ROWS)
-    assert stats.update_bigquery(data, small, date(2026, 10, 27)) == {"status": "ok", "gb": 4.2}
-    assert [c[0] for c in small.calls] == ["dry run", "query"]
+    first = FakeBigQuery(0.5, ROWS)
+    assert stats.update_bigquery(data, first, date(2026, 10, 27)) == {"status": "ok", "days": 26}
+    assert first.calls == _days(date(2026, 10, 1), 26)  # from START, oldest first, complete days only
+    store = data["pypi"]
+    assert store["billed"] == {"2026-10": 13 * 10**9} and store["last_billed"] == 5 * 10**8
+    assert store["days"]["2026-10-05"] == [] and len(store["days"]["2026-10-20"]) == 2  # a day without downloads is kept too
+    later = FakeBigQuery(0.5, ROWS)
+    assert stats.update_bigquery(data, later, date(2026, 11, 2)) == {"status": "ok", "days": 8}
+    assert later.calls == _days(date(2026, 10, 25), 8)  # the last 2 kept again, then the days not kept yet
+    assert store["billed"] == {"2026-10": 13 * 10**9, "2026-11": 4 * 10**9}  # by calendar month
+    assert stats.bigquery_complete(store["days"], date(2026, 11, 2))
+    assert not stats.bigquery_complete(store["days"], date(2026, 11, 4))
+
+
+def test_days_read_again_replace_the_kept_ones():
+    data = stats.empty()
+    stats.update_bigquery(data, FakeBigQuery(0.1, ROWS), date(2026, 10, 23))  # kept up to the 22nd
+    kept = dict(data["pypi"]["days"])
+    late = [r for r in ROWS if r["day"] != date(2026, 10, 21)] + [_row(date(2026, 10, 22), "pip", None, "3.12", 9, version="1.6.1")]
+    again = FakeBigQuery(0.1, late)
+    stats.update_bigquery(data, again, date(2026, 10, 24))
     days = data["pypi"]["days"]
-    assert min(days) == "2026-10-01" and max(days) == "2026-10-26" and len(days) == 26  # complete days only
-    assert sum(r[-1] for rows in days.values() for r in rows) == sum(r["downloads"] for r in ROWS)
-    later = FakeBigQuery(1.0)
-    stats.update_bigquery(data, later, date(2026, 11, 2))  # a week later: the last 9 days again
-    assert later.calls[0] == ("dry run", date(2026, 10, 24), date(2026, 11, 2))
-    missed = FakeBigQuery(1.0)
-    stats.update_bigquery(data, missed, date(2026, 11, 30))  # runs missed: from the day after the last one kept
-    assert missed.calls[0] == ("dry run", date(2026, 11, 2), date(2026, 11, 30))
+    assert again.calls == [date(2026, 10, 21), date(2026, 10, 22), date(2026, 10, 23)]
+    assert days["2026-10-22"] == stats.day_rows([r for r in late if r["day"] == date(2026, 10, 22)])  # rows arrived late
+    assert days["2026-10-21"] == []  # read again, nothing found: replaced all the same
+    assert days["2026-10-20"] == kept["2026-10-20"]  # not read again
 
 
-def test_merging_days():
-    old, new = [[PIP, "IT", "pip", None, "Linux", "3.12", "1.5.5", "sdist", 3]], [[PIP, "IT", "pip", None, "Linux", "3.12", "1.6.0", "sdist", 5]]
-    days = {"2026-10-20": old, "2026-10-24": old, "2026-10-25": old}
-    stats.merge_days(days, {"2026-10-24": new}, date(2026, 10, 24), date(2026, 10, 27))
-    assert days == {"2026-10-20": old, "2026-10-24": new, "2026-10-25": [], "2026-10-26": []}
+def test_bigquery_month_budget():
+    data = stats.empty()
+    status = stats.update_bigquery(data, FakeBigQuery(90.0), date(2026, 10, 27))
+    assert status == {"status": "budget", "gb": 720.0, "budget": 800, "days": 8}  # a ninth day (1.2 x 90 GB) would pass 800
+    assert sorted(data["pypi"]["days"]) == [d.isoformat() for d in _days(date(2026, 10, 1), 8)]
+    same_month = FakeBigQuery(90.0)
+    assert stats.update_bigquery(data, same_month, date(2026, 10, 30))["status"] == "budget" and same_month.calls == []
+    november = FakeBigQuery(1.0)
+    assert stats.update_bigquery(data, november, date(2026, 11, 2)) == {"status": "ok", "days": 26}
+    assert november.calls[:3] == [date(2026, 10, 7), date(2026, 10, 8), date(2026, 10, 9)]
+    assert data["pypi"]["billed"] == {"2026-10": 720 * 10**9, "2026-11": 26 * 10**9}
+
+
+def test_bigquery_pauses_when_one_day_bills_too_much():
+    data = stats.empty()
+    costly = FakeBigQuery(lambda day: 150.0 if day == date(2026, 10, 3) else 0.2, ROWS)
+    assert stats.update_bigquery(data, costly, date(2026, 10, 27)) == {"status": "paused", "gb": 150.0, "limit": 100, "days": 3}
+    assert sorted(data["pypi"]["days"]) == ["2026-10-01", "2026-10-02", "2026-10-03"]  # what was read is kept
+    assert data["pypi"]["paused"] == {"month": "2026-10", "gb": 150.0}
+    same_month = FakeBigQuery(0.2, ROWS)
+    assert stats.update_bigquery(data, same_month, date(2026, 10, 30)) == {"status": "paused", "gb": 150.0, "limit": 100, "days": 0}
+    assert same_month.calls == []  # nothing for the rest of the month
+    next_month = FakeBigQuery(0.2, ROWS)
+    assert stats.update_bigquery(data, next_month, date(2026, 11, 2)) == {"status": "ok", "days": 31}
+    assert next_month.calls[0] == date(2026, 10, 2)
+
+
+def test_a_costly_day_does_not_stop_bigquery_for_good():
+    data = stats.empty()
+    stats.update_bigquery(data, FakeBigQuery(700.0), date(2026, 10, 27))  # 1.2 x 700 GB would pass 800 GB
+    assert data["pypi"]["paused"] == {"month": "2026-10", "gb": 700.0}
+    november = FakeBigQuery(0.2)
+    assert stats.update_bigquery(data, november, date(2026, 11, 2)) == {"status": "ok", "days": 32}  # tried again
+
+
+class FakeClient:
+    """The two calls of google.cloud.bigquery.Client the script makes: the table's metadata and a query."""
+
+    def __init__(self, clustering):
+        self.clustering, self.queries = clustering, []
+
+    def get_table(self, name):
+        assert name == "bigquery-public-data.pypi.file_downloads"
+        return types.SimpleNamespace(clustering_fields=self.clustering)
+
+    def query(self, sql, job_config):
+        self.queries.append((sql, job_config))
+        row = {"project": PIP, "country": "IT", "installer": "pip", "ci": None, "system": "Linux", "python": "3.12",
+               "version": "1.6.0", "type": "bdist_wheel", "downloads": 3}
+        return types.SimpleNamespace(result=lambda: [row], total_bytes_billed=10485760)  # the 10 MB a query bills at least
+
+
+class FakeLibrary:  # the classes of google.cloud.bigquery the script uses, as plain records
+    QueryJobConfig = staticmethod(lambda **kwargs: kwargs)
+    ScalarQueryParameter = staticmethod(lambda *args: args)
+    ArrayQueryParameter = staticmethod(lambda *args: args)
+
+
+@pytest.mark.parametrize("clustering, column", [
+    (["project", "country_code"], "project"),  # clustered on the top-level project: BigQuery reads only its blocks
+    (None, "file.project"),  # not clustered
+    (["country_code"], "file.project"),
+])
+def test_clustering_of_the_table_decides_the_column(clustering, column):
+    bq = object.__new__(stats.BigQuery)
+    bq.bq, bq.client = FakeLibrary, FakeClient(clustering)
+    data = stats.empty()
+    assert stats.update_bigquery(data, bq, date(2026, 10, 3)) == {"status": "ok", "days": 2}
+    assert data["pypi"]["clustering"] == list(clustering or []) and data["pypi"]["column"] == column
+    sql, config = bq.client.queries[0]
+    assert f"SELECT\n  {column} AS project," in sql
+    assert f"WHERE DATE(timestamp) = @day AND {column} IN UNNEST(@projects)" in sql  # always on the partition
+    assert config["query_parameters"] == [("day", "DATE", date(2026, 10, 1)), ("projects", "STRING", list(stats.PROJECTS))]
+    assert data["pypi"]["days"]["2026-10-02"] == [[PIP, "IT", "pip", None, "Linux", "3.12", "1.6.0", "bdist_wheel", 3]]
+    assert data["pypi"]["billed"] == {"2026-10": 2 * 10485760}
+    with pytest.raises(ValueError):
+        stats.query("project; DROP TABLE x")
 
 
 # --------------------------------------------------------------------------------- downloads of the application
@@ -399,12 +487,19 @@ def test_page_without_data_and_without_sources(tmp_path, web):
     assert "non ancora configurato" in hook.render(data, "it")
 
 
-def test_skipped_bigquery_on_the_page(tmp_path, web):
+def test_stopped_bigquery_on_the_page(tmp_path, web):
+    (tmp_path / "budget").mkdir()
+    data = _update(tmp_path / "budget", ALL, FakeBigQuery(90.0, ROWS))
+    assert data["sources"]["bigquery"] == {"status": "budget", "gb": 720.0, "budget": 800, "days": 8, "checked": "2026-10-27"}
+    assert data["page"]["pip"]["source"] == "pypistats"  # BigQuery has not read every day: the raw numbers meanwhile
+    en, it = hook.render(data, "en"), hook.render(data, "it")
+    assert "this month's queries billed 720 GB, and one more day would pass the 800 GB" in en
+    assert "pip installs (PyPI), raw: robots and mirrors included" in en
+    assert "le query di questo mese hanno fatturato 720 GB, e un altro giorno supererebbe i 800 GB" in it
     data = _update(tmp_path, ALL, FakeBigQuery(1234.5, ROWS))
-    assert data["sources"]["bigquery"] == {"status": "skipped", "gb": 1234.5, "limit": 100, "checked": "2026-10-27"}
-    assert data["sources"]["pypistats"]["status"] == "ok"  # the raw numbers meanwhile
-    assert "would have read 1,234.5 GB, more than the limit of 100 GB" in hook.render(data, "en")
-    assert "avrebbe letto 1.234,5 GB, oltre il limite di 100 GB" in hook.render(data, "it")
+    assert data["sources"]["bigquery"] == {"status": "paused", "gb": 1234.5, "limit": 100, "days": 1, "checked": "2026-10-27"}
+    assert "one day of downloads billed 1,234.5 GB, more than 100 GB" in hook.render(data, "en")
+    assert "un giorno di download ha fatturato 1.234,5 GB, oltre 100 GB" in hook.render(data, "it")
 
 
 def test_hook_fills_the_placeholder(tmp_path, sample, monkeypatch):

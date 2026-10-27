@@ -14,23 +14,32 @@ Every source is optional: without its secret it is left out and the page says it
   month of their release.
 * goatcounter: visitors of the site per day, countries, sources, pages, systems and browsers, and the download
   clicks of the installation page (events of docs/js/download.js) (GOATCOUNTER_TOKEN).
-* bigquery: pip installs of the two PyPI projects from the public dataset of PyPI, grouped per day; every query
-  is a dry run first and one that would read more than MAX_GB is skipped (GCP_PROJECT, GCP_SA_KEY). The first
-  run reads from START, the later ones the last REQUERY_DAYS days again and replace them.
-* pypistats: raw numbers of pypistats.org, while BigQuery has given nothing (no secret needed).
+* bigquery: pip installs of the two PyPI projects from the public dataset of PyPI (GCP_PROJECT, GCP_SA_KEY), one
+  query per day, oldest first: every day since START not kept yet, and the last REQUERY_LAST kept days again.
+  The table's metadata (free) says how it is clustered: the queries filter on its first clustering field when
+  that is the project, so BigQuery reads only the blocks of these projects, otherwise on file.project; always
+  on DATE(timestamp), the partition. A dry run would not help: on a clustered table it gives only an upper
+  bound. The bytes each job billed are added up per calendar month instead, and the run stops when the next
+  day (1.2 times the last one) would take the month past MONTH_BUDGET_GB, or for the rest of the month when one
+  day bills more than DAY_LIMIT_GB (the clustering does not narrow the query to these projects).
+* pypistats: raw numbers of pypistats.org, while BigQuery has not read every day since START (no secret needed).
 * traffic: views and unique visitors of the repository per day, added up by date (GitHub keeps 14 days), and
   the referrers and paths of the last 14 days (STATS_TOKEN, a token with "Administration: read").
 
 stats.json (schema 1; days are ISO dates in UTC; "rows" of tables are lists):
 
     schema, updated               1, the time of the last run
-    sources.<source>              {"status": "ok" | "not configured" | "skipped" | "error", "checked": day,
-                                   "gb", "limit": the dry-run estimate of the BigQuery query, its limit}
+    sources.<source>              {"status": "ok" | "not configured" | "error", "checked": day}; BigQuery also
+                                   "budget" ("gb" read this month, "budget") or "paused" ("gb" of the day,
+                                   "limit"), and "days" read by the run
     releases.assets.<asset id>    {"tag": "v1.6.0", "platform": "macos" | "windows-x64" | "windows-arm64",
                                    "published": day of the release}
     releases.readings[]           {"date": day, "counts": {asset id: download_count}}
     pypi.days.<day>               [[project, country, installer, ci, system, python, version, type, downloads]]
                                   (BigQuery groups; ci true/false/null, python "3.12" or "" when unknown)
+    pypi.billed.<month>           bytes billed by the BigQuery jobs of that month; pypi.last_billed: the last job
+    pypi.paused                   {"month", "gb"}: a day billed more than DAY_LIMIT_GB in that month
+    pypi.clustering, pypi.column  the clustering fields of the table at the last run; the column the queries filter on
     pypistats.days.<day>          downloads without the known mirrors; pypistats.systems.<system>.<day>;
                                   pypistats.recent {"last_day", "last_week", "last_month"}
     goatcounter.days.<day>        visitors of the pages; goatcounter.clicks.<day>: download clicks
@@ -61,8 +70,10 @@ AUTHOR = {"name": "Enzo Cocca", "email": "enzo.ccc@gmail.com"}
 START = "2026-10-01"  # the first day of the daily series (BigQuery backfills from here)
 PROJECTS = ("pyarchinit-photogrammetry", "pyarchinit-photogrammetry-core")
 HUMAN_INSTALLERS = frozenset({"pip", "uv", "poetry", "pdm", "pipenv", "Browser"})
-REQUERY_DAYS = 9  # BigQuery: the days read again at every run (rows that arrive late)
-MAX_GB = 100  # BigQuery: a query whose dry run says it would read more is skipped
+TABLE = "bigquery-public-data.pypi.file_downloads"
+REQUERY_LAST = 2  # BigQuery: the last days kept, read again at every run (rows that arrive late)
+MONTH_BUDGET_GB = 800  # BigQuery: the bytes billed in a calendar month stop here (the sandbox gives 1 TB)
+DAY_LIMIT_GB = 100  # BigQuery: a day billing more means the clustering does not narrow the query
 GOATCOUNTER = "https://pyarchinit-photogrammetry.goatcounter.com/api/v0"
 EVENTS = ("download-macos", "download-windows-x64", "download-windows-arm64")  # docs/js/download.js
 PAUSE = 0.3  # GoatCounter answers at most 4 requests a second
@@ -70,8 +81,7 @@ TOP = 15  # rows of a table on the page
 
 QUERY = r"""
 SELECT
-  DATE(timestamp) AS day,
-  project,
+  {column} AS project,
   IFNULL(country_code, '') AS country,
   IFNULL(details.installer.name, '') AS installer,
   details.ci AS ci,
@@ -80,10 +90,9 @@ SELECT
   IFNULL(file.version, '') AS version,
   IFNULL(file.type, '') AS type,
   COUNT(*) AS downloads
-FROM `bigquery-public-data.pypi.file_downloads`
-WHERE timestamp >= TIMESTAMP(@start) AND timestamp < TIMESTAMP(@end)
-  AND project IN UNNEST(@projects)
-GROUP BY day, project, country, installer, ci, system, python, version, type
+FROM `{table}`
+WHERE DATE(timestamp) = @day AND {column} IN UNNEST(@projects)
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
 """
 
 
@@ -203,8 +212,9 @@ def is_real(installer: str, ci, python: str) -> bool:
 
 
 class BigQuery:
-    """The dry run and the query, with google-cloud-bigquery (the workflow installs it only when the secrets
-    GCP_PROJECT and GCP_SA_KEY exist). The key of the service account stays in memory: no file is written."""
+    """The table's metadata and the query of one day, with google-cloud-bigquery (the workflow installs it only
+    when the secrets GCP_PROJECT and GCP_SA_KEY exist). The key of the service account stays in memory: no file
+    is written."""
 
     def __init__(self, project: str, key: str):
         from google.cloud import bigquery
@@ -214,58 +224,82 @@ class BigQuery:
         credentials = service_account.Credentials.from_service_account_info(json.loads(key))
         self.client = bigquery.Client(project=project, credentials=credentials)
 
-    def _job(self, start: date, end: date, dry_run: bool):
+    def clustering(self) -> list[str]:
+        """The clustering fields of the table: metadata, which costs nothing."""
+        return list(self.client.get_table(TABLE).clustering_fields or [])
+
+    def day(self, day: date, column: str) -> tuple[list[dict], int]:
+        """The groups of one day and the bytes the job billed."""
         bq = self.bq
-        config = bq.QueryJobConfig(dry_run=dry_run, use_query_cache=False, query_parameters=[
-            bq.ScalarQueryParameter("start", "DATE", start), bq.ScalarQueryParameter("end", "DATE", end),
-            bq.ArrayQueryParameter("projects", "STRING", list(PROJECTS))])
-        return self.client.query(QUERY, job_config=config)
-
-    def estimate(self, start: date, end: date) -> int:
-        """The bytes the query would read: a dry run, which reads nothing and costs nothing."""
-        return int(self._job(start, end, True).total_bytes_processed or 0)
-
-    def rows(self, start: date, end: date) -> list[dict]:
-        return [dict(row.items()) for row in self._job(start, end, False).result()]
+        config = bq.QueryJobConfig(query_parameters=[
+            bq.ScalarQueryParameter("day", "DATE", day), bq.ArrayQueryParameter("projects", "STRING", list(PROJECTS))])
+        job = self.client.query(query(column), job_config=config)
+        rows = [dict(row.items()) for row in job.result()]
+        return rows, int(job.total_bytes_billed or 0)
 
 
-def bigquery_days(rows: list[dict]) -> dict:
-    """BigQuery rows -> {day: [[project, country, installer, ci, system, python, version, type, downloads]]}."""
-    days: dict = {}
-    for r in rows:
-        day = r["day"].isoformat() if hasattr(r["day"], "isoformat") else str(r["day"])
-        days.setdefault(day, []).append([r["project"], r["country"] or "", r["installer"] or "", r["ci"],
-                                         r["system"] or "", r["python"] or "", r["version"] or "", r["type"] or "",
-                                         int(r["downloads"])])
-    return {d: sorted(found, key=lambda x: [str(v) for v in x]) for d, found in days.items()}
+def project_column(clustering: list[str] | None) -> str:
+    """The column the queries filter on: the first clustering field of the table when it is the project, so that
+    BigQuery reads only the blocks of these projects; otherwise file.project (the whole day is read)."""
+    first = (clustering or [""])[0]
+    return first if first in ("project", "file.project") else "file.project"
 
 
-def merge_days(days: dict, new: dict, start: date, end: date) -> None:
-    """Every day from start to end (excluded) takes what the new query found there, even nothing: the days
-    read again replace the old ones, the others stay."""
-    day = start
-    while day < end:
-        days[day.isoformat()] = new.get(day.isoformat(), [])
+def query(column: str) -> str:
+    if column not in ("project", "file.project"):  # never a name from elsewhere in the text of the query
+        raise ValueError(column)
+    return QUERY.format(column=column, table=TABLE)
+
+
+def day_rows(rows: list[dict]) -> list:
+    """The groups of a day as [[project, country, installer, ci, system, python, version, type, downloads]]."""
+    return sorted(([r["project"], r["country"] or "", r["installer"] or "", r["ci"], r["system"] or "", r["python"] or "",
+                    r["version"] or "", r["type"] or "", int(r["downloads"])] for r in rows), key=lambda x: [str(v) for v in x])
+
+
+def bigquery_todo(days: dict, today: date) -> list[date]:
+    """The days to read, oldest first: every complete day since START not kept yet, and the last REQUERY_LAST
+    kept days again (rows arrive late)."""
+    again, todo, day = set(sorted(days)[-REQUERY_LAST:]), [], date.fromisoformat(START)
+    while day < today:
+        if day.isoformat() not in days or day.isoformat() in again:
+            todo.append(day)
         day += timedelta(days=1)
+    return todo
+
+
+def bigquery_complete(days: dict, today: date) -> bool:
+    """BigQuery has read every day since START: only then the page shows its numbers."""
+    return not any(d.isoformat() not in days for d in bigquery_todo({}, today))
 
 
 def update_bigquery(data: dict, bq, today: date) -> dict:
-    """The complete days from START (first run) or the last REQUERY_DAYS days, and those missed since the last
-    run; skipped when the dry run says the query would read more than MAX_GB."""
-    days = data["pypi"]["days"]
-    start = date.fromisoformat(START)
-    if days:
-        start = max(start, min(today - timedelta(days=REQUERY_DAYS), date.fromisoformat(max(days)) + timedelta(days=1)))
-    if start >= today:
-        return {"status": "ok"}
-    estimate = bq.estimate(start, today)
-    gb = round(estimate / 1e9, 1)
-    if estimate > MAX_GB * 1e9:
-        print(f"::warning::BigQuery skipped: the query from {start} would read {gb} GB (limit {MAX_GB} GB)")
-        return {"status": "skipped", "gb": gb, "limit": MAX_GB}
-    merge_days(days, bigquery_days(bq.rows(start, today)), start, today)
-    print(f"BigQuery: {start} to {today - timedelta(days=1)}, dry run {gb} GB")
-    return {"status": "ok", "gb": gb}
+    """The days of bigquery_todo, one job each, within the budget of the month: before each day but the first of
+    a month, the bytes billed this month plus 1.2 times those of the last job must stay within MONTH_BUDGET_GB; a
+    day billing more than DAY_LIMIT_GB stops BigQuery until the next month. What was read is kept also when the run
+    stops or fails."""
+    store, month = data["pypi"], today.strftime("%Y-%m")
+    store["clustering"] = bq.clustering()
+    column = store["column"] = project_column(store["clustering"])
+    paused = store.get("paused") or {}
+    if paused.get("month") == month:
+        return {"status": "paused", "gb": paused["gb"], "limit": DAY_LIMIT_GB, "days": 0}
+    billed, done = store.setdefault("billed", {}), 0
+    for day in bigquery_todo(store["days"], today):
+        used = billed.get(month, 0)  # the first day of a month always runs: one costly day must not stop BigQuery for good
+        if used and used + 1.2 * store.get("last_billed", 0) > MONTH_BUDGET_GB * 1e9:
+            print(f"::warning::BigQuery stopped for {month}: {used / 1e9:.1f} GB billed, the next day would pass {MONTH_BUDGET_GB} GB")
+            return {"status": "budget", "gb": round(used / 1e9, 1), "budget": MONTH_BUDGET_GB, "days": done}
+        rows, cost = bq.day(day, column)
+        store["days"][day.isoformat()] = day_rows(rows)
+        billed[month] = used + cost
+        store["last_billed"], done = cost, done + 1
+        if cost > DAY_LIMIT_GB * 1e9:
+            store["paused"] = {"month": month, "gb": round(cost / 1e9, 1)}
+            print(f"::warning::BigQuery stopped for {month}: {day} billed {cost / 1e9:.1f} GB (clustering {store['clustering']})")
+            return {"status": "paused", "gb": store["paused"]["gb"], "limit": DAY_LIMIT_GB, "days": done}
+    print(f"BigQuery: {done} days on {column} (clustering {store['clustering']}), {billed.get(month, 0) / 1e9:.2f} GB billed in {month}")
+    return {"status": "ok", "days": done}
 
 
 def update_pypistats(data: dict) -> None:
@@ -400,10 +434,10 @@ def releases_page(store: dict, today: date) -> dict | None:
 
 
 def pip_page(data: dict, today: date) -> dict | None:
-    """pip installs: from BigQuery (raw and real) when it has given something, otherwise the raw numbers of
-    pypistats.org. Months are [raw, real] or [raw]."""
+    """pip installs: from BigQuery (raw and real) when it has read every day since START, otherwise the raw
+    numbers of pypistats.org. Months are [raw, real] or [raw]."""
     days = data["pypi"]["days"]
-    if days:
+    if days and bigquery_complete(days, today):
         raw, real, projects = {}, {}, {p: [0, 0] for p in PROJECTS}
         tables: dict = {k: {} for k in ("versions", "systems", "python", "countries")}
         for day, rows in days.items():
@@ -532,9 +566,9 @@ def update(path: Path, env=os.environ, now: datetime | None = None, bigquery=Big
     run("goatcounter", ["GOATCOUNTER_TOKEN"], lambda: update_goatcounter(data, env["GOATCOUNTER_TOKEN"], now))
     run("bigquery", ["GCP_PROJECT", "GCP_SA_KEY"],
         lambda: update_bigquery(data, bigquery(env["GCP_PROJECT"], env["GCP_SA_KEY"]), today))
-    if data["pypi"]["days"]:
+    if bigquery_complete(data["pypi"]["days"], today):
         data["sources"].pop("pypistats", None)
-    else:  # until BigQuery has given something, the raw numbers of pypistats.org
+    else:  # until BigQuery has read every day, the raw numbers of pypistats.org
         run("pypistats", None, lambda: update_pypistats(data))
     run("traffic", ["STATS_TOKEN"], lambda: update_traffic(data, env["STATS_TOKEN"], today))
     data["updated"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")

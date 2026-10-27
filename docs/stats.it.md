@@ -23,9 +23,9 @@ download dalla pagina delle release di GitHub, o dall'aggiornamento automatico, 
 grezzo comprende tutto: integrazione continua, mirror, cache e scanner. Quello reale tiene gli installatori che
 usano le persone (pip, uv, poetry, pdm, pipenv e il browser), ed esclude i download che dichiarano un ambiente di
 integrazione continua e quelli da un Python più vecchio della 3.10, su cui il programma non gira (sono scanner).
-Il nucleo nativo, `pyarchinit-photogrammetry-core`, ha una riga a parte. Finché BigQuery non è configurato, la
-pagina mostra i numeri grezzi di [pypistats.org](https://pypistats.org/packages/pyarchinit-photogrammetry), che
-escludono solo i mirror noti.
+Il nucleo nativo, `pyarchinit-photogrammetry-core`, ha una riga a parte. Finché BigQuery non è configurato e non
+ha letto ogni giorno dal 1° ottobre 2026, la pagina mostra i numeri grezzi di
+[pypistats.org](https://pypistats.org/packages/pyarchinit-photogrammetry), che escludono solo i mirror noti.
 
 **Visitatori di questo sito.** [GoatCounter](https://www.goatcounter.com) conta un visitatore una volta per
 pagina in una sessione di al massimo 8 ore, ed esclude i robot. Sono esclusi anche i browser dell'autore.

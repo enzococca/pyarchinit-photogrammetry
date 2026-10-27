@@ -9,21 +9,26 @@
 # downloads of the application (GitHub releases) need nothing. Setup, once:
 #
 #   1. GoatCounter (visits of the site, download clicks; free for non-commercial projects): sign up at
-#      https://www.goatcounter.com/signup with the site code pyarchinit-photogrammetry (extra.goatcounter in
-#      mkdocs.yml: until the code is registered the counting script of the site has nowhere to send).
-#   2. GoatCounter API token: on https://pyarchinit-photogrammetry.goatcounter.com, your name in the top menu
+#      https://www.goatcounter.com/signup with the site code pyarchinit-photogrammetry.
+#   2. Then, and only then, uncomment extra.goatcounter in mkdocs.yml: the site starts loading the counting
+#      script and the download buttons count their clicks. Before the code is registered, anyone could take
+#      it and receive the visits of the site.
+#   3. GoatCounter API token: on https://pyarchinit-photogrammetry.goatcounter.com, your name in the top menu
 #      > API > a new token with the permission "Read statistics".
-#   3. Your own visits left out: open https://enzococca.github.io/pyarchinit-photogrammetry/#toggle-goatcounter
+#   4. Your own visits left out: open https://enzococca.github.io/pyarchinit-photogrammetry/#toggle-goatcounter
 #      once in every browser you use (the same link counts that browser again).
-#   4. pip installs from BigQuery: a Google Cloud project in the BigQuery sandbox (no billing account,
+#   5. pip installs from BigQuery: a Google Cloud project in the BigQuery sandbox (no billing account,
 #      https://console.cloud.google.com/bigquery), in it a service account with the role "BigQuery Job User"
-#      and a JSON key of that account. Without it the page shows the raw numbers of pypistats.org.
-#   5. Visits of the repository: a fine-grained personal access token (https://github.com/settings/tokens),
+#      and a JSON key of that account. A sandbox has no billing, so it can never be charged: past the free
+#      1 TB a month its queries fail until the next month. The script reads one day per query and stops by
+#      itself at 800 GB billed in a month, or for the rest of the month when one day bills more than 100 GB.
+#      Without BigQuery the page shows the raw numbers of pypistats.org.
+#   6. Visits of the repository: a fine-grained personal access token (https://github.com/settings/tokens),
 #      repository access "Only select repositories" > this one, permission "Administration: Read-only".
-#   6. The secrets, in Settings > Secrets and variables > Actions > New repository secret:
-#      GOATCOUNTER_TOKEN (2), GCP_PROJECT (the id of the project of 4), GCP_SA_KEY (the whole JSON key of 4),
-#      STATS_TOKEN (5).
-#   7. A first run: gh workflow run stats.yml (Actions > stats > Run workflow).
+#   7. The secrets, in Settings > Secrets and variables > Actions > New repository secret:
+#      GOATCOUNTER_TOKEN (3), GCP_PROJECT (the id of the project of 5), GCP_SA_KEY (the whole JSON key of 5),
+#      STATS_TOKEN (6).
+#   8. A first run: gh workflow run stats.yml (Actions > stats > Run workflow).
 name: stats
 
 on:

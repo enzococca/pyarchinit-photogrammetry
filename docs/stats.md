@@ -23,9 +23,9 @@ the releases page of GitHub, or by the updater, is not a click.
 everything: continuous integration, mirrors, caches and scanners. The real count keeps the installers people use
 (pip, uv, poetry, pdm, pipenv and the browser), and leaves out the downloads that declare a CI environment and
 those from a Python older than 3.10, which the program does not run on (they are scanners). The native core,
-`pyarchinit-photogrammetry-core`, has a line of its own. Until BigQuery is configured, the page shows the raw
-numbers of [pypistats.org](https://pypistats.org/packages/pyarchinit-photogrammetry), which leave out only the
-known mirrors.
+`pyarchinit-photogrammetry-core`, has a line of its own. Until BigQuery is configured and has read every day since
+1 October 2026, the page shows the raw numbers of
+[pypistats.org](https://pypistats.org/packages/pyarchinit-photogrammetry), which leave out only the known mirrors.
 
 **Visitors of this site.** [GoatCounter](https://www.goatcounter.com) counts a visitor once per page in a session
 of up to 8 hours, and leaves out robots. The author's own browsers are left out too.
