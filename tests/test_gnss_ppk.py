@@ -726,7 +726,11 @@ def test_llh_to_ecef_is_the_inverse_of_ecef_to_llh():
         xyz = rinex.llh_to_ecef((lat, lon, h))
         assert all(type(v) is float for v in xyz)
         assert np.allclose(xyz, geocentric.transform(lon, lat, h), rtol=0, atol=1e-6), (lat, lon, h)
-        assert np.allclose(rinex.ecef_to_llh(xyz), (lat, lon, h), rtol=0, atol=1e-9)
+        # back to the same place to a micrometre (1e-11 degrees is 1.1 micrometres on the ground): the floating point
+        # of the platform's mathematics library leaves nanometres - 1.9 nm of height on Windows at (-33.9, 151.2, -10.5)
+        back = np.array(rinex.ecef_to_llh(xyz))
+        assert np.allclose(back[:2], (lat, lon), rtol=0, atol=1e-11), (lat, lon, h)
+        assert np.allclose(back[2], h, rtol=0, atol=1e-6), (lat, lon, h)
     assert rinex.llh_to_ecef(np.array([35.0, 139.0, 70.0])) == rinex.llh_to_ecef([35.0, 139.0, 70.0])
     with pytest.raises(ValueError, match="three"):
         rinex.llh_to_ecef((35.0, 139.0))

@@ -56,6 +56,15 @@ _settings_of_the_tests()
 
 
 @pytest.fixture(autouse=True)
+def _plain_command_line_output(monkeypatch):
+    """The help and the errors of the command line as plain text, as on a developer's computer: on GitHub Actions
+    Typer forces a terminal (GITHUB_ACTIONS, FORCE_COLOR or PY_COLORS, read when it is imported) and rich writes colour
+    and bold codes into what CliRunner captures, between the words the tests look for. Rich writes none to a dumb
+    terminal, forced or not. Set for each test, so that pytest's own colours stay."""
+    monkeypatch.setenv("TERM", "dumb")
+
+
+@pytest.fixture(autouse=True)
 def _no_modal_dialogs(monkeypatch):
     """A modal dialog in an offscreen test would wait forever (the CI job hangs without a
     log). Once Qt widgets are loaded, ``exec()`` returns "rejected" at once and the test
