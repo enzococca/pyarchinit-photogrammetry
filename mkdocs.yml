@@ -101,12 +101,11 @@ plugins:
 hooks:
   - tools/stats_hook.py  # the numbers of docs/stats.md, from build/stats.json (see .github/workflows/stats.yml)
 
-# The visit counter of the page "Downloads and visits" (GoatCounter, no cookies). Set it only once the site code
-# is registered at goatcounter.com (step 1 of .github/workflows/stats.yml): a code nobody owns could be taken by
-# anyone, who would then receive the visits of the site. Until then no counting script is loaded and the download
+# The visit counter of the page "Downloads and visits" (GoatCounter, no cookies), with the site code registered at
+# goatcounter.com (step 1 of .github/workflows/stats.yml). Without it no counting script is loaded and the download
 # buttons count nothing.
-# extra:
-#   goatcounter: pyarchinit-photogrammetry
+extra:
+  goatcounter: pyarchinit-photogrammetry
 
 extra_css:
   - css/download.css
