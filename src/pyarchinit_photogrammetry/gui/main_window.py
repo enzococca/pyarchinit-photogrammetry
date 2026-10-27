@@ -3432,8 +3432,13 @@ class MainWindow(QMainWindow):
             if result.get("updated"):
                 self.log_pane.info(tr("La georeferenziazione è stata calcolata di nuovo nel nuovo sistema."))
             elif result.get("transform_rms") is not None:
+                from .survey_crs_dialog import relief_text
+
                 self.log_pane.info(tr("La georeferenziazione è stata convertita nel nuovo sistema con una similitudine "
                                       "(scarto {0} mm).", number(result["transform_rms"] * 1000, 1)))
+                relief = relief_text(result)
+                if relief:
+                    self.log_pane.info(relief)
             if redraw:
                 self.log_pane.warning(tr("Da ridisegnare nel nuovo sistema: {0}.", ", ".join(redraw)))
             if result.get("rebuild"):

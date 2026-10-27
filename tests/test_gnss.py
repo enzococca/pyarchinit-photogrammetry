@@ -1123,6 +1123,12 @@ def test_gnss_pane_frames_and_heights_step(gnss_window):
                                    status="fix", height="ellipsoidal", frame="ITRF2020", epoch=2026.7)
     pane.set_state(chunk)
     assert "ITRF2020 2 (epoche dal 2026,70 al 2026,82)" in pane.states["heights"].text()
+    # positions with heights above the sea level (EXIF) in a system with heights above the ellipsoid: said
+    gnss_apply.set_camera_position(chunk.cameras[0], [12.5, 41.9, 120.0], "EPSG:4979", [0.02, 0.02, 0.04], "positions",
+                                   status="fix", height="exif")
+    pane.set_state(chunk)
+    text = pane.states["heights"].text()
+    assert "Quote sul livello del mare (EXIF) in un sistema con quote ellissoidiche (EPSG:4979) per 1 foto" in text
     for cam in chunk.cameras:
         cam.reference.location = None
     pane.set_state(chunk)
@@ -1306,6 +1312,10 @@ def test_survey_crs_changes_say_the_converted_georeference_and_the_heights():
     assert "calcolata di nuovo" in text and "(scarto" not in text
     assert "se non bastano a calcolarla, viene convertita con una similitudine" in text
     assert "sull'ellissoide" in text and "le quote dei marker passano come sono" in text
+    text = changes_text("EPSG:32633", {**base, "transform_relief": 50.0, "transform_vertical": 0.0252})
+    assert "Sui 50 m di dislivello le quote del modello si scostano fino a 25,2 mm da quelle dei disegni" in text
+    flat = {**base, "transform_relief": 2.0, "transform_vertical": 0.0002}  # less than a millimetre: not said
+    assert "dislivello" not in changes_text("EPSG:32633", flat)
     text = changes_text("EPSG:32633", base, ["Curve di livello", "Sezione in pianta"])
     assert ("Da ridisegnare dopo: Curve di livello, Sezione in pianta (linee che sono solo nella finestra, nel "
             "sistema di prima: vengono tolte).") in text

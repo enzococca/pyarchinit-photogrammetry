@@ -49,10 +49,23 @@ def product_names() -> dict[str, str]:
             "coverage": tr("copertura")}
 
 
+def relief_text(changes: dict) -> str | None:
+    """What the conversion of a georeference by a similarity does to the heights of the model over its relief
+    (``transform_relief``, ``transform_vertical`` of :func:`..gnss.heights.survey_crs_changes` and
+    :func:`..gnss.heights.set_survey_crs`), None below a millimetre."""
+    vertical, relief = changes.get("transform_vertical"), changes.get("transform_relief")
+    if vertical is None or relief is None or vertical < 0.001:
+        return None
+    return tr("Sui {0} m di dislivello le quote del modello si scostano fino a {1} mm da quelle dei disegni: nel nuovo "
+              "sistema cambia la scala della pianta, come in ogni georeferenziazione.", number(relief, 0),
+              number(vertical * 1000, 1))
+
+
 def changes_text(old: str, changes: dict, redraw=()) -> str:
     """What putting a chunk from ``old`` into the system of ``changes`` (:func:`..gnss.heights.survey_crs_changes`)
     does: the system, the georeference fitted again (or converted, when its references cannot fit it after all, as
-    :func:`..gnss.heights.set_survey_crs` does) or converted (by how much the similarity misses), what is converted,
+    :func:`..gnss.heights.set_survey_crs` does) or converted (by how much the similarity misses, and what it does to
+    the heights over the relief: :func:`relief_text`), what is converted,
     the products to build again, what stays in the old system, the lines the window holds only - ``redraw``, the
     names of their layers: taken away, to draw again -, the heights that pass as they are and those that go onto the
     geoid with the chunk."""
@@ -64,6 +77,9 @@ def changes_text(old: str, changes: dict, redraw=()) -> str:
         lines.append(tr("La georeferenziazione viene convertita nel nuovo sistema con una similitudine adattata "
                         "all'estensione del chunk (scarto {0} mm): modello e nuvole restano con i disegni.",
                         number(changes["transform_rms"] * 1000, 1)))
+        relief = relief_text(changes)
+        if relief:
+            lines.append(relief)
     names = _converted_names()
     converted = [f"{names.get(kind, kind)} {n}" for kind, n in (changes.get("convert") or {}).items() if n]
     if converted:

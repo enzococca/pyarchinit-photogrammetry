@@ -178,14 +178,22 @@ def _system_text(crs: str) -> str:
 
 def _check_lines(chunk) -> list[str]:
     """What does not fit between the heights of the photos of ``chunk`` and those of its system
-    (:func:`.heights.check`): its two common cases - the grid of EGM2008 missing, a system without heights of its own -
-    in the words of the window, any other as the engine says it."""
+    (:func:`.heights.check`): its common cases - the grid of EGM2008 missing, a system without heights of its own,
+    heights above the sea level in a system of heights above the ellipsoid - in the words of the window, any other as
+    the engine says it."""
     lines = []
     for text in heights.check(chunk):
         if heights.GEOID_GRID in text:
             lines.append(tr("Le quote ellissoidiche delle posizioni delle foto non diventano quote sul geoide del "
                             "sistema del chunk senza la griglia del geoide EGM2008 ({0}): scaricala con «Scarica il "
                             "geoide EGM2008» qui sopra, o con «{1}».", heights.GEOID_GRID, heights.DOWNLOAD_COMMAND))
+        elif "marked as heights above the sea level" in text:
+            marked = heights.exif_heights_in_ellipsoidal_systems(chunk)
+            systems = ", ".join(sorted({cam.meta.get("reference_crs", chunk.crs) for cam in marked}))
+            lines.append(tr("Quote sul livello del mare (EXIF) in un sistema con quote ellissoidiche ({0}) per {1} "
+                            "foto: ogni conversione le prende come quote ellissoidiche, 40-50 m di differenza in "
+                            "Italia. Dalle in un sistema senza quote proprie (EPSG:4326) o segnale come ellissoidiche.",
+                            systems, len(marked)))
         elif "has no heights of its own" in text:
             lines.append(tr("Le foto hanno quote ellissoidiche (GNSS) e il sistema del chunk, {0}, non ha quote "
                             "proprie: le quote del rilievo restano sull'ellissoide, 40-50 m da quelle sul livello del "

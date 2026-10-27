@@ -3027,7 +3027,11 @@ def gnss_crs(project: Path,
         typer.echo("the georeference was fitted again in the new system")
     if result.get("transform_rms") is not None:
         typer.echo("the georeference was converted by a similarity fitted on the extent of the chunk "
-                   f"({result['transform_rms'] * 1000:.1f} mm off)")
+                   f"({result['transform_rms'] * 1000:.1f} mm off in plan)")
+        if (result.get("transform_vertical") or 0.0) >= 0.001:
+            typer.echo(f"over its {result['transform_relief']:.0f} m of relief the heights of the model part from "
+                       f"those of the drawings by up to {result['transform_vertical'] * 1000:.1f} mm: the scale of the "
+                       "plan changes in the new system, as for every georeference")
     converted = [f"{kind} {n}" for kind, n in result["converted"].items() if n]
     if converted:
         typer.echo(f"converted: {', '.join(converted)}")
