@@ -69,3 +69,36 @@ a listing seen today.
   the earthquake as reference epoch and `----` as solution.
 - The RING `.pos` files have 25 columns; the position is `X Y Z` in columns 4 to 6 and the epoch is the date and
   the modified Julian day in columns 1 to 3; the first line names the frame (`Reference Frame : IGS20`).
+
+## Antenna calibrations: `igs20_excerpt.atx`
+
+For `tests/test_gnss_atx.py` and the calibration tests of `tests/test_gnss_ppk.py`. The tests never use the network:
+they point `atx.ATX_URL` at this file (`file://`), or give it to `ppk.solve` as the antenna file.
+
+It is cut from `igs20.atx`, the antenna calibrations of the IGS (an ANTEX 1.4 file of 61.6 MB, 926 antennas, 414 of
+them satellites), captured on 2026-10-27 at about 09:35 UTC with `curl` and no account, from
+`https://files.igs.org/pub/station/general/igs20.atx` (`Last-Modified` 2026-09-28 16:05 GMT; the last change its
+header lists is GPS week 2438). Open data of the IGS. 180 lines, 16 KB, written by a script (not kept) from that file:
+
+| What | How it is in the excerpt |
+|---|---|
+| The first two lines (`ANTEX VERSION / SYST`, `PCV TYPE / REFANT`) | As they are |
+| The comment block of the header (576 lines in the real file) | Replaced by ten lines of ours that say what this file is and that one entry is synthetic |
+| Two satellites: `BLOCK IIA` G01 (G032) and `GLONASS-M` R01 (R730) | Whole, as they are (they have `VALID FROM` and `VALID UNTIL`, no azimuth rows) |
+| `ASH700699.L1    NONE` (L1 only) | Whole, as it is |
+| `ASH700829.2     SNOW`, `LEIAR25.R3      NONE`, `LEIAR25.R3      LEIT`, `TRM57971.00     NONE` | The lines of the real entry, without the azimuth rows (the `NOAZI` row stays) and so with `DAZI` 0.0; only the frequencies G01 G02 G05 R01 R02 (`# OF FREQUENCIES` says how many); without the `PCV #a #c #s` comment lines, which describe all the frequency sets. `ASH700829.2` is in the real file only with the `SNOW` radome; `LEIAR25.R3` has `NONE` before `LEIT`, as in the real file |
+| `TRM29659.00     NONE` | **Made up.** See below |
+
+The order of the file is the real one: satellites, then receiver antennas by name. RTKLIB takes the first entry that
+fits (`searchpcv`), so the order matters to the tests.
+
+**`TRM29659.00     NONE` is synthetic, not the calibration of the IGS.** That antenna is the one in the RINEX files of
+`tests/data/rtklib` (the stations 0759 and 3040). The real entry has its G01 phase centre 90.51 mm above the reference
+point and an offset in each frequency; this one has 100.00 mm on G01 and G02, 0.00 north and east, and zero variations
+(a `NOAZI` row of zeros), so that the test that gives the file to RTKLIB can check an exact figure: the base is 0.100 m
+higher than the program thought it, and so is every height of the rover. The file says so in the comment lines of its
+header and in two `COMMENT` lines inside the entry. The tests that search `TRM29659.00     SCIS`, a radome the file does
+not have, get this entry too.
+
+The file is read by RTKLIB (`readpcv`, `searchpcv`) as `atx.receiver_antennas` and `atx.lookup` read it: the same
+entries, the same offsets. The bytes are kept as they are when the file is checked out (`.gitattributes`).

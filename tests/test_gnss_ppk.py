@@ -22,7 +22,7 @@ from pyproj import Geod, Transformer
 import pyarchinit_photogrammetry as ppg
 from pyarchinit_photogrammetry import _native
 from pyarchinit_photogrammetry.gnss import apply as gnss_apply
-from pyarchinit_photogrammetry.gnss import dji, positions, ppk, rinex
+from pyarchinit_photogrammetry.gnss import dji, download, positions, ppk, rinex
 from test_gnss import _jpeg, _snapshot  # synthetic photos with the time of their camera, references of a chunk
 
 DATA = Path(__file__).parent / "data" / "rtklib"
@@ -827,6 +827,9 @@ def test_every_value_config_writes_is_one_rtklib_takes():
     texts += [ppk.config((45.0, 11.0, 50.0), mode=mode) for mode in ppk.MODES]
     texts += [ppk.config((45.0, 359.9, 100.0), systems=systems) for systems in ("all", "G", "GRECJIS", ["c", "G"],
                                                                                 "JIS", "E,R")]
+    texts += [ppk.config(None, antenna_file="/work/ppk/rtklib_inputs/antennas.atx"),
+              ppk.config((45.0, 11.0, 50.0), antenna_file="/Users/Enzo Cocca/Città/antennas.atx", rover_antenna="*"),
+              ppk.config(None, antenna_file="C:\\Users\\enzo\\ppk\\antennas.atx", rover_antenna="TRM57971.00     NONE")]
     seen = set()
     for text in texts:
         for name, value in _options(text).items():
@@ -845,6 +848,8 @@ def test_every_value_config_writes_is_one_rtklib_takes():
             seen.add((name, value))
     assert ("pos1-posmode", "static-start") in seen and ("ant2-postype", "rinexhead") in seen
     assert ("pos1-navsys", "127") in seen and ("ant2-anttype", "*") in seen and ("misc-timeinterp", "on") in seen
+    assert ("pos1-posopt2", "on") in seen and ("ant1-anttype", "*") in seen
+    assert ("file-rcvantfile", "/work/ppk/rtklib_inputs/antennas.atx") in seen
     # the reader of the test refuses what RTKLIB refuses, and does not take a label for a longer one
     assert _rtklib_enum("kinematik", "0:single,1:dgps,2:kinematic") is None
     assert _rtklib_enum("combined", "0:forward,1:backward,2:combined,3:combined-nophasereset") == 2
@@ -979,8 +984,8 @@ def test_read_pos_refuses_a_row_with_a_number_that_is_not_finite(tmp_path, field
 
 def _fake_rnx2rtkp(folder: Path) -> Path:
     """A stand-in for rnx2rtkp: appends to run.log beside it a JSON line with its arguments, the options file, what
-    the folder of the first input holds and the SHA-256 of every input (the inputs as RTKLIB would find them),
-    copies the file named by PPG_FAKE_POS to its -o
+    the folder of the first input holds, the SHA-256 of every input (the inputs as RTKLIB would find them) and of the
+    antenna file the options name (none: null), copies the file named by PPG_FAKE_POS to its -o
     file (none: no output, as RTKLIB when it computed nothing), writes PPG_FAKE_MESSAGE to stderr as rnx2rtkp writes
     its messages and exits with PPG_FAKE_EXIT."""
     script = folder / "rnx2rtkp"
@@ -989,8 +994,11 @@ def _fake_rnx2rtkp(folder: Path) -> Path:
 import hashlib, json, os, shutil, sys
 args = sys.argv[1:]
 conf, out, files = args[args.index("-k") + 1], args[args.index("-o") + 1], args[4:]
-entry = {{"args": args, "options": open(conf).read(), "folder": sorted(os.listdir(os.path.dirname(files[0]))),
-          "inputs": [hashlib.sha256(open(f, "rb").read()).hexdigest() for f in files]}}
+options = open(conf).read()
+antenna = [l.split("=", 1)[1] for l in options.splitlines() if l.startswith("file-rcvantfile")]
+entry = {{"args": args, "options": options, "folder": sorted(os.listdir(os.path.dirname(files[0]))),
+          "inputs": [hashlib.sha256(open(f, "rb").read()).hexdigest() for f in files],
+          "antenna": hashlib.sha256(open(antenna[0], "rb").read()).hexdigest() if antenna else None}}
 open({str(log)!r}, "a").write(json.dumps(entry) + "\\n")
 if os.environ.get("PPG_FAKE_POS"):
     shutil.copyfile(os.environ["PPG_FAKE_POS"], out)
@@ -1086,7 +1094,8 @@ def test_solve_gives_rtklib_plain_copies_of_the_inputs(tmp_path, fake_rtklib):
                                "navs": [str(nav.absolute())]}
     assert solution.base == {"name": "0759", "position": pytest.approx([mark[1], mark[0], mark[2]]),
                              "position_source": "header", "antenna": "TRM29659.00",
-                             "antenna_delta_hen": [0.0, 0.0, 0.0], "file": "base è.05o.gz"}
+                             "antenna_delta_hen": [0.0, 0.0, 0.0], "file": "base è.05o.gz",
+                             "antenna_calibration": None}
     header, antenna = solution.warnings
     assert "0759" in header and "header" in header and "metres" in header
     assert f"latitude {mark[0]:.7f}, longitude {mark[1]:.7f}" in header
@@ -1103,7 +1112,8 @@ def test_solve_with_a_typed_base_position(tmp_path, fake_rtklib):
     assert options["ant2-postype"] == "llh"
     assert [float(options[f"ant2-pos{i}"]) for i in (1, 2, 3)] == [35.16, 139.61, 70.0]
     assert solution.base == {"name": "0759", "position": [139.61, 35.16, 70.0], "position_source": "typed",
-                             "antenna": "TRM29659.00", "antenna_delta_hen": [0.0, 0.0, 0.0], "file": "07590920.05o"}
+                             "antenna": "TRM29659.00", "antenna_delta_hen": [0.0, 0.0, 0.0], "file": "07590920.05o",
+                             "antenna_calibration": None}
     (antenna,) = solution.warnings  # only the one of every run: the antenna of the base is not calibrated
     assert antenna.startswith("the phase-centre offset of the antenna TRM29659.00 of the base 0759 is not applied")
     with pytest.raises(ValueError, match="latitude"):
@@ -1327,6 +1337,208 @@ def test_solve_says_that_the_phase_centre_of_the_base_antenna_is_not_applied(tmp
         assert solution.base["antenna"] == " ".join(antenna[20:].split())
 
 
+# --- the calibration of the base's antenna ------------------------------------------------------------------------
+
+ATX_EXCERPT = Path(__file__).parent / "data" / "gnss" / "igs20_excerpt.atx"  # see tests/data/gnss/README.md
+CALIBRATED = "TRM29659.00     NONE"  # its entry in the excerpt is synthetic: 0.100 m up on G01 and G02
+
+
+def _base_of(folder: Path, antenna: str) -> Path:
+    """A RINEX 2 base whose header names ``antenna`` (its type and radome; "" for none) as its antenna."""
+    named = _line("1234                " + antenna if antenna else "", "ANT # / TYPE")
+    header = [named if h.endswith("ANT # / TYPE") else h for h in V2_HEADER]
+    return _rinex2(folder / "base.24o", header)
+
+
+def _solve_with(folder: Path, antenna: str, **kwargs) -> ppk.Solution:
+    """``solve`` of a rover against a base whose header names ``antenna``, typed where that header puts it (no warning
+    about its position)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    rover = _rinex2(folder / "rover.24o", V2_HEADER)
+    base = _base_of(folder, antenna)
+    return ppk.solve(rover, base, [PPK_NAV], rinex.ecef_to_llh(rinex.header(base).approx_xyz), folder=folder / "work",
+                     **kwargs)
+
+
+def test_solve_gives_rtklib_the_calibration_of_the_antenna_of_the_base(tmp_path, fake_rtklib):
+    user = tmp_path / "user"
+    user.mkdir()
+    atx = user / "antennas.ATX"  # whatever its name: RTKLIB reads a copy that is called what it needs
+    shutil.copyfile(ATX_EXCERPT, atx)
+    before = _user_files(user)
+    work = tmp_path / "work"
+    mark = rinex.ecef_to_llh(rinex.header(PPK_BASE).approx_xyz)
+    solution = ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], mark, folder=work, atx=atx)
+    (run,) = fake_rtklib()
+    copies = work.resolve() / ppk.INPUTS_FOLDER
+    options = _options(run["options"])
+    # the file of the receiver antennas is a copy beside the other copies, with the extension RTKLIB knows it by, and
+    # its phase centre variations are on; the run is the one it was without a file in all else
+    assert options["file-rcvantfile"] == str(copies / ppk.ANTENNA_COPY) and ppk.ANTENNA_COPY.endswith(".atx")
+    assert options["pos1-posopt2"] == "on" and "ant1-anttype" not in options and "file-satantfile" not in options
+    assert {k: v for k, v in options.items() if k not in ("file-rcvantfile", "pos1-posopt2")} == _options(
+        ppk.config(mark))
+    assert run["folder"] == sorted(["base.obs", "nav1.nav", "rover.obs", ppk.ANTENNA_COPY])
+    assert run["antenna"] == _sha256(ATX_EXCERPT.read_bytes())  # RTKLIB read the user's file
+    assert run["inputs"] == [_sha256(PPK_ROVER.read_bytes()), _sha256(PPK_BASE.read_bytes()),
+                             _sha256(PPK_NAV.read_bytes())]  # and the antenna file is no input
+    # the copies are gone, the user's folder is as it was
+    assert not copies.exists() and _user_files(user) == before
+    # the antenna of the base is in the excerpt: no warning of an offset that is not applied; the record of what was
+    # given, in the base and so in every photo
+    assert solution.warnings == []
+    assert solution.base["antenna_calibration"] == {"file": "antennas.ATX", "entry": CALIBRATED,
+                                                    "without_radome": False, "up_m": pytest.approx(0.1)}
+    # without a file: the run as it was, the offset not applied, and nothing recorded
+    plain = ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], mark, folder=tmp_path / "plain", atx=None)
+    options = _options(fake_rtklib()[-1]["options"])
+    assert options == _options(ppk.config(mark)) and fake_rtklib()[-1]["antenna"] is None
+    assert fake_rtklib()[-1]["folder"] == ["base.obs", "nav1.nav", "rover.obs"]
+    assert plain.base["antenna_calibration"] is None
+    (warning,) = plain.warnings
+    assert "phase-centre offset of the antenna TRM29659.00 of the base 0759 is not applied" in warning
+
+
+# header antenna, entry given to RTKLIB, whether it is the type without the radome, its L1 offset up (m), what the
+# warning says (None: no warning)
+CALIBRATION_CASES = [
+    ("TRM29659.00     NONE", CALIBRATED, False, 0.1, None),
+    ("TRM29659.00", CALIBRATED, False, 0.1, None),  # no radome in the header is no radome: NONE
+    ("TRM29659.00     SCIS", CALIBRATED, True, 0.1,
+     ["TRM29659.00 SCIS of the base BASE", "radome", "igs20.atx", "calibration of TRM29659.00 NONE", "millimetres"]),
+    ("ASH700829.2     NONE", "ASH700829.2     SNOW", True, 0.06954,
+     ["ASH700829.2 NONE of the base BASE", "radome", "calibration of ASH700829.2 SNOW"]),
+    ("ASH700829.2", "ASH700829.2     SNOW", False, 0.06954,  # the only entry of the type has a dome the header omits
+     ["ASH700829.2 of the base BASE", "header writes it", "calibration of ASH700829.2 SNOW"]),
+    ("RM29659.00     NONE", CALIBRATED, False, 0.1,  # RTKLIB's search finds the words in the middle of a name
+     ["RM29659.00 NONE of the base BASE", "header writes it", "calibration of TRM29659.00 NONE", "another antenna"]),
+    ("LEIAR25.R4      LEIT", None, False, None,
+     ["antenna LEIAR25.R4 LEIT of the base BASE is not applied", "not in igs20.atx", "no calibration",
+      "heights can be a few centimetres too low", "choke-ring"]),
+    ("", None, False, None,
+     ["antenna of the base BASE is not applied (its RINEX header names no antenna type)", "igs20.atx",
+      "heights can be a few centimetres too low", "choke-ring"]),
+    # RTKLIB's search would land on the satellite BLOCK IIA, whose offsets (2.25 m up) are no receiver's: the file is
+    # not given to it
+    ("BLOCK IIA", None, False, None, ["antenna BLOCK IIA of the base BASE is not applied", "not in igs20.atx"]),
+]
+
+
+@pytest.mark.parametrize("antenna, entry, without_radome, up, said", CALIBRATION_CASES,
+                         ids=[c[0] or "no antenna" for c in CALIBRATION_CASES])
+def test_solve_says_which_calibration_it_gave_rtklib(tmp_path, fake_rtklib, antenna, entry, without_radome, up, said):
+    """RTKLIB finds the calibration of an antenna by the words of its name, and takes the type without the radome when
+    it does not find the radome: the program says which entry it gave RTKLIB, or that the antenna is not calibrated."""
+    atx = tmp_path / "igs20.atx"
+    shutil.copyfile(ATX_EXCERPT, atx)
+    solution = _solve_with(tmp_path, antenna, atx=atx)
+    assert solution.base["antenna_calibration"] == {"file": "igs20.atx", "entry": entry,
+                                                    "without_radome": without_radome,
+                                                    "up_m": pytest.approx(up) if up is not None else None}
+    run = fake_rtklib()[-1]
+    # RTKLIB is given the file when the antenna is in it; when it is not it would apply nothing, and the run is as it
+    # was without a file
+    assert (run["antenna"] is not None) == (entry is not None)
+    assert ("file-rcvantfile" in _options(run["options"])) == (entry is not None)
+    if said is None:
+        assert solution.warnings == []
+        return
+    (warning,) = solution.warnings
+    for text in said:
+        assert text in warning, (text, warning)
+    assert "later version" not in warning and " yet" not in warning
+
+
+def test_solve_uses_the_calibrations_the_program_keeps_and_never_downloads(tmp_path, fake_rtklib, monkeypatch):
+    gnss = tmp_path / "gnss"
+    monkeypatch.setenv("PPG_GNSS_DIR", str(gnss))
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("solve downloaded something")
+
+    monkeypatch.setattr(download, "fetch", no_network)
+    # nothing kept: the run of every version before
+    plain = _solve_with(tmp_path / "a", CALIBRATED)
+    assert fake_rtklib()[-1]["antenna"] is None and plain.base["antenna_calibration"] is None
+    assert "no antenna calibration is given to RTKLIB yet" in plain.warnings[0]
+    # igs20.atx kept by the program: used, by default
+    kept = gnss / "atx" / "igs20.atx"
+    kept.parent.mkdir(parents=True)
+    shutil.copyfile(ATX_EXCERPT, kept)
+    year_old = time.time() - 400 * 86400.0  # even a copy that is a year old: asking for one is not a download
+    os.utime(kept, (year_old, year_old))
+    solution = _solve_with(tmp_path / "b", CALIBRATED)
+    assert fake_rtklib()[-1]["antenna"] == _sha256(ATX_EXCERPT.read_bytes()) and solution.warnings == []
+    assert solution.base["antenna_calibration"]["file"] == "igs20.atx"
+    # an antenna that is not in it
+    other = _solve_with(tmp_path / "c", "SEPCHOKE_B3E6   NONE")
+    assert other.base["antenna_calibration"]["entry"] is None
+    assert "not in igs20.atx" in other.warnings[0] and fake_rtklib()[-1]["antenna"] is None
+    # None: not used
+    none = _solve_with(tmp_path / "d", CALIBRATED, atx=None)
+    assert fake_rtklib()[-1]["antenna"] is None and none.base["antenna_calibration"] is None
+    # a copy that is not an ANTEX file (a page the hotel gave): the run goes on without it, and says so
+    kept.write_text("<html><body>You are connected to the hotel wifi</body></html>")
+    broken = _solve_with(tmp_path / "e", CALIBRATED)
+    assert fake_rtklib()[-1]["antenna"] is None and broken.base["antenna_calibration"] is None
+    assert len(broken.warnings) == 2 and "igs20.atx" in broken.warnings[0] and "ANTEX" in broken.warnings[0]
+    assert "phase-centre offset of the antenna TRM29659.00" in broken.warnings[1]
+
+
+def test_solve_refuses_an_antenna_file_it_cannot_give_rtklib(tmp_path, fake_rtklib):
+    rover = _rinex2(tmp_path / "rover.24o", V2_HEADER)
+    base = _rinex2(tmp_path / "base.24o", V2_HEADER)
+    typed = rinex.ecef_to_llh(rinex.header(base).approx_xyz)
+    html = tmp_path / "page.atx"
+    html.write_text("<html><body>You are connected to the hotel wifi</body></html>")
+    cut = tmp_path / "cut.atx"
+    cut.write_bytes(ATX_EXCERPT.read_bytes()[:-100])
+    for given, match in ((tmp_path / "nothing.atx", "nothing.atx.*not a file"), (tmp_path, "not a file"),
+                         (html, "page.atx.*ANTEX"), (cut, "cut.atx.*cut short")):
+        with pytest.raises(ValueError, match=match):
+            ppk.solve(rover, base, [PPK_NAV], typed, folder=tmp_path / "work", atx=given)
+    assert fake_rtklib() == []  # before RTKLIB ran
+    # the path RTKLIB would be given has to be one it reads back as it is: a "#" is the start of a comment in its
+    # options file. A file the user gave is refused; the one the program keeps is left out, with a note, as the
+    # run without it was a good run
+    hashed = tmp_path / "Scavo #3" / "ppk"
+    with pytest.raises(ValueError, match="#"):
+        ppk.solve(rover, base, [PPK_NAV], typed, folder=hashed, atx=ATX_EXCERPT)
+    assert fake_rtklib() == []
+
+
+def test_solve_leaves_out_the_calibrations_it_keeps_when_rtklib_cannot_read_their_path(tmp_path, fake_rtklib,
+                                                                                        monkeypatch):
+    monkeypatch.setenv("PPG_GNSS_DIR", str(tmp_path / "gnss"))
+    kept = tmp_path / "gnss" / "atx" / "igs20.atx"
+    kept.parent.mkdir(parents=True)
+    shutil.copyfile(ATX_EXCERPT, kept)
+    rover = _rinex2(tmp_path / "rover.24o", V2_HEADER)
+    base = _base_of(tmp_path, CALIBRATED)
+    typed = rinex.ecef_to_llh(rinex.header(base).approx_xyz)
+    solution = ppk.solve(rover, base, [PPK_NAV], typed, folder=tmp_path / "Scavo #3" / "ppk")
+    run = fake_rtklib()[-1]
+    assert run["antenna"] is None and "file-rcvantfile" not in _options(run["options"])
+    assert solution.base["antenna_calibration"] is None
+    assert len(solution.warnings) == 2 and "#" in solution.warnings[0] and "igs20.atx" in solution.warnings[0]
+    assert "phase-centre offset of the antenna TRM29659.00" in solution.warnings[1]
+    # a work folder whose path RTKLIB reads as it is: the calibrations are used
+    ok = ppk.solve(rover, base, [PPK_NAV], typed, folder=tmp_path / "Scavo 3" / "ppk")
+    assert fake_rtklib()[-1]["antenna"] == _sha256(ATX_EXCERPT.read_bytes()) and ok.warnings == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="RTKLIB is given the short ASCII name of the folder on Windows")
+def test_solve_writes_options_with_a_path_that_is_not_ascii(tmp_path, fake_rtklib):
+    # the options file holds the path of the copy of the antenna file, as the system names it: a project folder with
+    # letters of Italian is not a reason for the run to fail
+    work = tmp_path / "Città di Roma" / "ppk"
+    mark = rinex.ecef_to_llh(rinex.header(PPK_BASE).approx_xyz)
+    solution = ppk.solve(PPK_ROVER, PPK_BASE, [PPK_NAV], mark, folder=work, atx=ATX_EXCERPT)
+    run = fake_rtklib()[-1]
+    assert run["antenna"] == _sha256(ATX_EXCERPT.read_bytes()) and solution.warnings == []
+    assert "Città di Roma" in _options(run["options"])["file-rcvantfile"]
+
+
 def test_solve_writes_a_solution_file_per_run(tmp_path, fake_rtklib, monkeypatch):
     """Two flights of one chunk, each with its own run: each run writes its options and its solution under a name of
     its own - the time of the run, a number after it when a run of the same second took it - and the solutions of the
@@ -1438,11 +1650,13 @@ needs_rtklib = pytest.mark.skipif(not _native.supports("ppk"), reason="native co
 EPOCHS = 120  # 00:00:00 to 00:59:30 every 30 s, in both files
 
 
-def _rtklib_run(folder: Path, base_position=None, base: Path = PPK_BASE, mode: str = "static") -> ppk.Solution:
-    """RTKLIB run by the core with the options of ``config`` on the sample data (3040 the rover, 0759 the base)."""
+def _rtklib_run(folder: Path, base_position=None, base: Path = PPK_BASE, mode: str = "static",
+                antenna_file: Path | None = None) -> ppk.Solution:
+    """RTKLIB run by the core with the options of ``config`` on the sample data (3040 the rover, 0759 the base), with
+    the antenna calibrations of ``antenna_file`` if one is given."""
     folder.mkdir(parents=True, exist_ok=True)
     conf, out = folder / "ppk.conf", folder / "rover.pos"
-    conf.write_text(ppk.config(base_position, mode=mode))
+    conf.write_text(ppk.config(base_position, mode=mode, antenna_file=str(antenna_file) if antenna_file else None))
     code, message = _native.ppk_solve(str(conf), [str(PPK_ROVER), str(base), str(PPK_NAV)], str(out))
     assert code == 0, message
     return ppk.read_pos(out)
@@ -1532,6 +1746,61 @@ def test_the_base_typed_or_from_the_header_and_its_antenna_height_in_rtklib(tmp_
         assert fixed.sum() > 0.8 * EPOCHS, (position, base.name, fixed.sum())
         offset = _enu(run.llh[fixed].mean(axis=0), station)[0]
         assert np.allclose(offset, [0.0, 0.0, rise], rtol=0, atol=0.005), (position, base.name, offset)
+
+
+@needs_rtklib
+def test_calibrated_base_raises_the_heights(tmp_path, monkeypatch):
+    """The excerpt puts the phase centre of the antenna of the base 0.100 m above its reference point (a synthetic
+    entry for TRM29659.00): the base is higher by that much than the program thought it, and every height of the rover
+    is higher by as much. RTKLIB, not a stand-in."""
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    # a static run: every epoch fixed in both, at the same place in the plane and 0.100 m higher
+    plain = _rtklib_run(tmp_path / "static-plain")
+    calibrated = _rtklib_run(tmp_path / "static-calibrated", antenna_file=ATX_EXCERPT)
+    assert (plain.q == 1).all() and (calibrated.q == 1).all() and len(plain.times) == EPOCHS
+    rise = calibrated.llh[:, 2] - plain.llh[:, 2]
+    assert np.all(np.abs(rise - 0.100) < 0.001), (rise.min(), rise.max())
+    assert np.all(np.abs(_enu(calibrated.llh, plain.llh[0])[:, :2] - _enu(plain.llh, plain.llh[0])[:, :2]) < 0.001)
+    # solve, the rover moving as a drone: which epochs RTKLIB fixes changes with the calibration (a kinematic run
+    # is a chain of decisions), so the heights of the epochs fixed in both runs are compared
+    mark = rinex.ecef_to_llh(rinex.header(PPK_BASE).approx_xyz)
+    without = ppk.solve(PPK_ROVER, PPK_BASE, base_position=mark, folder=tmp_path / "plain", atx=None)
+    with_atx = ppk.solve(PPK_ROVER, PPK_BASE, base_position=mark, folder=tmp_path / "calibrated", atx=ATX_EXCERPT)
+    assert np.allclose(with_atx.times, without.times, rtol=0, atol=0.01)
+    both = (without.q == 1) & (with_atx.q == 1)
+    assert both.sum() >= 8, ((without.q == 1).sum(), (with_atx.q == 1).sum())
+    assert np.median(with_atx.llh[both, 2] - without.llh[both, 2]) == pytest.approx(0.100, abs=0.002)
+    # the offset is not applied in one run and applied in the other, and the program says so
+    assert len(without.warnings) == 1 and "phase-centre offset of the antenna TRM29659.00" in without.warnings[0]
+    assert with_atx.warnings == [] and with_atx.base["antenna_calibration"]["entry"] == CALIBRATED
+
+
+@needs_rtklib
+def test_rtklib_takes_the_entry_the_search_says(tmp_path, monkeypatch):
+    """What ``atx.lookup`` says RTKLIB uses is what RTKLIB uses: whichever way the header spells the antenna of the base
+    (the radome of the file, no radome, a radome the file does not have, words of the name), the heights rise by the
+    offset of the entry the program names. Real RTKLIB."""
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    mark = rinex.ecef_to_llh(rinex.header(PPK_BASE).approx_xyz)
+    bases = tmp_path / "bases"
+    bases.mkdir()
+    lines = PPK_BASE.read_text().splitlines(keepends=True)
+    without = ppk.solve(PPK_ROVER, PPK_BASE, base_position=mark, folder=tmp_path / "plain", atx=None)
+    for i, (antenna, rise) in enumerate([("TRM29659.00     NONE", 0.1), ("TRM29659.00", 0.1),
+                                         ("TRM29659.00     SCIS", 0.1),  # a radome the file does not have
+                                         ("RM29659.00     NONE", 0.1),  # the words of a name, not the name
+                                         ("TRM41249.00     NONE", 0.0)]):  # not in the file: not given to RTKLIB
+        named = _line(f"{'':20}{antenna}", "ANT # / TYPE") + "\n"
+        path = bases / f"b{i}.05o"
+        text = "".join(named if line.rstrip().endswith("ANT # / TYPE") else line for line in lines)
+        path.write_text(text, newline="\n")
+        assert rinex.header(path).antenna == antenna.strip()
+        solution = ppk.solve(PPK_ROVER, path, base_position=mark, folder=tmp_path / f"run{i}", atx=ATX_EXCERPT)
+        entry = solution.base["antenna_calibration"]["entry"]
+        assert (entry is not None) == (rise != 0.0), (antenna, entry)
+        both = (without.q == 1) & (solution.q == 1)
+        assert both.sum() >= 8, (antenna, both.sum())
+        assert np.median(solution.llh[both, 2] - without.llh[both, 2]) == pytest.approx(rise, abs=0.002), antenna
 
 
 # --- the position of the camera at every shot -------------------------------------------------------------------
