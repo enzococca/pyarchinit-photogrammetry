@@ -1802,6 +1802,8 @@ ONE_SECOND_TROUBLES = {
     "a piece with only a header": (lambda piece: piece.write_bytes(_rinex_gz(_t(26, 10, 30), _t(26, 10, 30), step=1)),
                                    _t(26, 10, 30, 30)),
     "a piece of the margin that is no good": (lambda piece: piece.write_bytes(_HTML), _t(26, 10, 29, 50)),
+    # listed, then gone from the archive: NotPublished, a ValueError of _fetch
+    "a piece that cannot be downloaded": (lambda piece: piece.unlink(), _t(26, 10, 30, 30)),
 }
 
 
@@ -1809,13 +1811,14 @@ ONE_SECOND_TROUBLES = {
 def test_auto_falls_back_to_thirty_seconds_when_the_one_second_pieces_cannot_be_used(trees, tmp_path, monkeypatch,
                                                                                     caplog, trouble):
     """With "auto" a base at 1 s that cannot be had whole for any reason - its pieces do not join, one is no good even
-    when downloaded again (also one that only holds the margin), one has no epochs - is given up for the 30 s files,
-    as one that does not cover the flight is."""
+    when downloaded again (also one that only holds the margin), one has no epochs, one that the listing of its folder
+    names cannot be downloaded - is given up for the 30 s files, as one that does not cover the flight is."""
     monkeypatch.setattr(stations, "MARGIN", timedelta(minutes=1))
     kraw = _made("KRAW00POL", "EPN")
     _quarters(trees.bkg, kraw.id, _t(26, 10, 15), _t(26, 10, 45), step=1)  # the flight needs the pieces of 10:15, 10:30
     _day(trees.bkg, kraw.id, _t(26), _t(26, 10), _t(26, 11))
     damage, end = ONE_SECOND_TROUBLES[trouble]
+    assert stations.observation_files(kraw, _t(26, 10, 29, 30), end)[0].interval == 1.0  # the folders listed: 1 s
     damage(trees.bkg / "EUREF/highrate/2026/299/k/KRAW00POL_R_20262991030_15M_01S_MO.crx.gz")
     with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
         out = stations.download_observations(kraw, _t(26, 10, 29, 30), end, tmp_path / "base")

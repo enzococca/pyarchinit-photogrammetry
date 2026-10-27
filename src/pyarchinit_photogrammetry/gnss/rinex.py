@@ -24,8 +24,8 @@ from . import download, lzw
 
 SYSTEMS = "GRECJIS"  # GPS, GLONASS, Galileo, BeiDou, QZSS, NavIC, SBAS: the letters of the satellite ids
 
-_A = 6378137.0  # WGS84 semi-major axis (m)
-_E2 = 0.00669437999014  # WGS84 first eccentricity squared
+WGS84_A = 6378137.0  # the semi-major axis of the WGS84 ellipsoid (m)
+WGS84_E2 = 0.00669437999014  # its first eccentricity squared
 
 _NOT_RINEX_MESSAGE = "{name}: not a RINEX file"
 
@@ -1008,16 +1008,29 @@ def ecef_to_llh(xyz: Sequence[float]) -> tuple[float, float, float]:
         raise ValueError("ecef_to_llh takes the three coordinates x, y, z")
     x, y, z = values
     p = math.hypot(x, y)
-    lat = math.atan2(z, p * (1.0 - _E2))
+    lat = math.atan2(z, p * (1.0 - WGS84_E2))
     for _ in range(30):  # every step cuts the error by about e2 (1/150): a handful reach the precision of a double
         sin_lat = math.sin(lat)
-        n = _A / math.sqrt(1.0 - _E2 * sin_lat * sin_lat)
-        step = math.atan2(z + _E2 * n * sin_lat, p)
+        n = WGS84_A / math.sqrt(1.0 - WGS84_E2 * sin_lat * sin_lat)
+        step = math.atan2(z + WGS84_E2 * n * sin_lat, p)
         done = abs(step - lat) < 1e-14
         lat = step
         if done:
             break
     sin_lat, cos_lat = math.sin(lat), math.cos(lat)
     # not p / cos(lat) - n: that one is lost at the poles
-    height = p * cos_lat + z * sin_lat - _A * math.sqrt(1.0 - _E2 * sin_lat * sin_lat)
+    height = p * cos_lat + z * sin_lat - WGS84_A * math.sqrt(1.0 - WGS84_E2 * sin_lat * sin_lat)
     return math.degrees(lat), math.degrees(math.atan2(y, x)), height
+
+
+def llh_to_ecef(llh: Sequence[float]) -> tuple[float, float, float]:
+    """``(x, y, z)`` in the Earth-centred Earth-fixed frame, in metres, of a position given as ``(latitude, longitude,
+    height)`` on the WGS84 ellipsoid, in degrees and metres above the ellipsoid: the inverse of :func:`ecef_to_llh`."""
+    values = [float(v) for v in llh]
+    if len(values) != 3:
+        raise ValueError("llh_to_ecef takes the three numbers latitude, longitude, height")
+    lat, lon, h = values
+    phi, lam = math.radians(lat), math.radians(lon)
+    n = WGS84_A / math.sqrt(1.0 - WGS84_E2 * math.sin(phi) ** 2)
+    return ((n + h) * math.cos(phi) * math.cos(lam), (n + h) * math.cos(phi) * math.sin(lam),
+            (n * (1.0 - WGS84_E2) + h) * math.sin(phi))

@@ -38,7 +38,6 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from .. import _native
 from ..core.progress import as_progress
 from . import atx as antex
 from . import download, frames, ppk, rinex, stations
@@ -476,7 +475,7 @@ def config(antenna_file: str, eop_files: list[str], hours: float) -> str:
     A ``ValueError`` for a path RTKLIB would read otherwise than written, for no ERP file or several, and for hours
     that are not a number above 0."""
     antenna = os.fspath(antenna_file)
-    problem = ppk._path_problem(antenna)
+    problem = ppk.path_problem(antenna)
     if problem:
         raise ValueError(problem)
     eops = [os.fspath(eop_files)] if isinstance(eop_files, (str, os.PathLike)) else [os.fspath(p) for p in eop_files]
@@ -584,21 +583,6 @@ def _middle(start: datetime, end: datetime) -> float:
     return frames.decimal_year(middle - timedelta(seconds=rinex.gps_minus_utc(middle)))
 
 
-def _antenna_note(name: str, info: rinex.RinexInfo, calibration: dict) -> str | None:
-    """What to tell about the calibration of the antenna of the base ``name`` (``calibration``: what the antenna file
-    gives it, as :func:`.ppk.solve` records it), or None. In a PPP nothing cancels the offset of the phase centre of
-    the antenna: without it the phase centre is taken for the reference point of the antenna, and the mark is found
-    that much too high."""
-    if calibration["entry"] is None:
-        kind = ppk.antenna_type(info)
-        which = (f"the antenna {kind} of the base {name} is not in {calibration['file']}" if kind else
-                 f"the RINEX header of the base {name} names no antenna type to look for in {calibration['file']}")
-        return (f"{which}: RTKLIB applies no calibration to it, and in a PPP the whole offset of its phase centre goes "
-                "into the height: the mark found can be a few centimetres too high, more than 10 cm with some "
-                "choke-ring antennas")
-    return ppk.antenna_warning(name, info, calibration)  # another radome, or the nearest name: millimetres
-
-
 def _session_notes(name: str, hours: float) -> list[str]:
     """What to tell about a session of ``hours``: under :data:`SHORT_H` a PPP is 10-20 cm off, under
     :data:`STATION_BETTER_H` a static baseline from a station nearby is better."""
@@ -621,55 +605,41 @@ def _citation(found: Products, antennas: Path) -> str:
     return f"{credit}; antenna calibrations: {antennas.name}{of_igs}"
 
 
+def _product(source: Path, role: str):
+    """What writes the product ``source`` (``"sp3"`` or ``"clk"``) among the copies of the run, and checks the copy
+    (:func:`_check`)."""
+    copy = ppk.copier(source, _layers(source))
+
+    def write(target: Path) -> None:
+        copy(target)
+        _check(target, role, source.name)
+
+    return write
+
+
 def _run(own: Path, info: rinex.RinexInfo, found: Products, antennas: Path, folder: Path,
          hours: float) -> tuple[Path, str]:
     """RTKLIB's static PPP of the base ``own`` (whose header is ``info``) in the work folder ``folder``: the solution
-    file and RTKLIB's last message. As :func:`.ppk.solve` does, RTKLIB works on plain copies of the inputs under names
-    of their own in the subfolder ``INPUTS_FOLDER`` - the observations, the orbits (``.sp3``) and the clocks
-    (``.clk``), which it tells by their extensions, the ERP of all the days in one file and the antenna file - removed
-    after the run, and writes its options and its solution under a name of its own; a run that gives no solution
-    leaves nothing."""
-    for source in (own, antennas, *found.sp3, *found.clk, *found.erp):
-        if ppk.inside(source, folder):
-            raise ValueError(f"{source} is in {folder}, the work folder of the PPP, where the program writes and "
-                             f"deletes files: move it out of {folder} first")
-    folder.mkdir(parents=True, exist_ok=True)
-    work = Path(ppk._rtklib_folder(folder))
-    copies = work / ppk.INPUTS_FOLDER
+    file and RTKLIB's last message. As :func:`.ppk.solve` does (:func:`.ppk.new_run`, :func:`.ppk.run_rtklib`), RTKLIB
+    works on plain copies of the inputs under names of their own in the subfolder ``INPUTS_FOLDER`` - the
+    observations, the orbits (``.sp3``) and the clocks (``.clk``), which it tells by their extensions, the ERP of all
+    the days in one file and the antenna file - removed after the run, and writes its options and its solution under
+    a name of its own; a run that gives no solution leaves nothing."""
+    files = ppk.new_run(folder, (own, antennas, *found.sp3, *found.clk, *found.erp), "PPP")
+    copies = files.copies
     observations, rotation, antenna = copies / "base.obs", copies / ERP_COPY, copies / ppk.ANTENNA_COPY
     orbits = [copies / f"orbit{i}.sp3" for i in range(1, len(found.sp3) + 1)]
     clocks = [copies / f"clock{i}.clk" for i in range(1, len(found.clk) + 1)]
-    conf, out, events = ppk._run_files(work)
-    ppk._short_enough([conf, out, events, observations, rotation, antenna, *orbits, *clocks])
-    text = config(str(antenna), [str(rotation)], hours)  # what RTKLIB would read otherwise is refused here
-    try:
-        conf.write_bytes(os.fsencode(text))  # in the encoding of the system's paths, as RTKLIB opens them
-        try:
-            ppk._fresh_folder(copies)
-            ppk._copy(own, observations, info.compressed)
-            for role, sources, targets in (("sp3", found.sp3, orbits), ("clk", found.clk, clocks)):
-                for source, target in zip(sources, targets):
-                    ppk._copy(source, target, _layers(source))
-                    _check(target, role, source.name)
-            join_erp(found.erp, rotation)
-            shutil.copyfile(antennas, antenna)
-            code, message = _native.ppk_solve(str(conf), [str(observations), *map(str, orbits), *map(str, clocks)],
-                                              str(out))
-        finally:
-            shutil.rmtree(copies, ignore_errors=True)
-        if code != 0:
-            raise RuntimeError(f"RTKLIB stopped with code {code}: {message or 'no message'}")
-        nothing = f"RTKLIB computed no PPP solution: {message or 'it wrote no positions'}"
-        if not out.exists():
-            raise ValueError(nothing)
-        try:
-            ppk.read_pos(out)
-        except ppk._NoPositions:
-            raise ValueError(nothing) from None
-    except BaseException:
-        ppk._remove(conf, out, events)
-        raise
-    return folder.resolve() / out.name, message
+    inputs = [(observations, ppk.copier(own, info.compressed)),
+              *zip(orbits, (_product(source, "sp3") for source in found.sp3)),
+              *zip(clocks, (_product(source, "clk") for source in found.clk))]
+    others = [(rotation, lambda target: join_erp(found.erp, target)),
+              (antenna, lambda target: shutil.copyfile(antennas, target))]
+    # what RTKLIB would read otherwise than written is refused by config, before anything is written
+    solution, message = ppk.run_rtklib(
+        files, lambda: config(str(antenna), [str(rotation)], hours), inputs, others,
+        nothing=lambda said: f"RTKLIB computed no PPP solution: {said or 'it wrote no positions'}")
+    return solution.path, message
 
 
 def solve_static(obs: Path | Sequence[Path], folder: Path, products: Products | None = None, atx="auto",
@@ -733,15 +703,15 @@ def _solve_static(pieces: list[Path], own: Path, holes: list[tuple[datetime, dat
     hours = _hours(own, info, span, holes)
     antennas = _antenna_file(atx, progress.sub(0.0, 0.2))
     kind = ppk.antenna_type(info)
-    satellite = ppk._satellite_found(antennas, kind)
+    satellite = ppk.satellite_entry(antennas, kind)
     if satellite:
         raise ValueError(f"for the antenna {kind} of the base {name} RTKLIB's search in {antennas.name} finds "
                          f"{' '.join(satellite.split())}, the antenna of a satellite, whose offsets it would apply to "
                          "the receiver: write the type of the antenna in the RINEX header of the base (ANT # / TYPE)")
-    calibration = ppk._calibration(antennas, kind)
+    calibration = ppk.antenna_calibration(antennas, kind)
     found = given if given is not None else products(start, end, folder / PRODUCTS_FOLDER, progress.sub(0.2, 0.6))
     warnings: list[str] = []
-    note = _antenna_note(name, info, calibration)
+    note = ppk.antenna_warning(name, info, calibration, role="ppp")  # in a PPP it all weighs on the height
     if note:
         warnings.append(note)
     warnings += _session_notes(name, hours)

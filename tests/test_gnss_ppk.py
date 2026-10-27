@@ -703,6 +703,21 @@ def test_ecef_to_llh_takes_any_sequence_of_three_numbers():
         rinex.ecef_to_llh((1.0, 2.0))
 
 
+def test_llh_to_ecef_is_the_inverse_of_ecef_to_llh():
+    """The forward conversion beside the inverse one: as PROJ makes it (WGS 84, EPSG:4979 to EPSG:4978) to a
+    micrometre, and back to the same latitude, longitude and height."""
+    geocentric = Transformer.from_crs("EPSG:4979", "EPSG:4978", always_xy=True)
+    for lat, lon, h in ((35.160875039, 139.613837253, 70.1535), (-33.9, 151.2, -10.5), (89.999, -179.5, 8000.0),
+                        (0.0, 0.0, 0.0), (-90.0, 12.5, 100.0)):
+        xyz = rinex.llh_to_ecef((lat, lon, h))
+        assert all(type(v) is float for v in xyz)
+        assert np.allclose(xyz, geocentric.transform(lon, lat, h), rtol=0, atol=1e-6), (lat, lon, h)
+        assert np.allclose(rinex.ecef_to_llh(xyz), (lat, lon, h), rtol=0, atol=1e-9)
+    assert rinex.llh_to_ecef(np.array([35.0, 139.0, 70.0])) == rinex.llh_to_ecef([35.0, 139.0, 70.0])
+    with pytest.raises(ValueError, match="three"):
+        rinex.llh_to_ecef((35.0, 139.0))
+
+
 def test_the_base_position_of_a_header_is_in_japan():
     lat, lon, h = rinex.ecef_to_llh(rinex.header(BASE).approx_xyz)
     assert 35.0 < lat < 36.0 and 139.0 < lon < 140.0 and 0.0 < h < 100.0
@@ -1619,6 +1634,43 @@ def test_solve_calibrates_the_antenna_of_the_rover_when_asked(tmp_path, fake_rtk
     plain = ppk.solve(rover, base, [PPK_NAV], typed, folder=tmp_path / "plain", atx=atx, mode="static")
     assert plain.rover_calibration is None
     assert (fake_rtklib()[-1]["antenna"] is not None) == (base_entry is not None)
+
+
+# the role of the receiver, the record of the calibration of its antenna, and what the warning says (None: nothing)
+ROLE_CASES = [
+    ("base", None, ["antenna TRM29659.00 NONE of the base BASE is not applied", "heights", "too low"]),
+    ("station", None, ["antenna TRM29659.00 NONE of the station BASE is not applied", "no antenna calibrations were "
+                       "given to RTKLIB", "the mark found for your base", "too low"]),
+    ("your base", None, ["antenna TRM29659.00 NONE of your base BASE is not applied", "mark found", "too high"]),
+    ("ppp", None, ["antenna TRM29659.00 NONE of your base BASE is not applied", "in a PPP", "height", "too high"]),
+    ("station", dict(entry=None), ["of the station BASE", "not in igs20.atx", "for your base", "too low"]),
+    ("your base", dict(entry=None), ["of your base BASE", "not in igs20.atx", "too high"]),
+    ("ppp", dict(entry=None), ["of your base BASE", "not in igs20.atx", "in a PPP", "too high"]),
+    ("station", dict(entry="TRM29659.00     SCIS", without_radome=True),
+     ["TRM29659.00 NONE of the station BASE", "radome", "phase-centre offset can be a few millimetres off"]),
+    ("ppp", dict(entry="TRM29659.00     SCIS", without_radome=True),
+     ["TRM29659.00 NONE of your base BASE", "radome", "height found can be a few millimetres off", "in a PPP"]),
+    ("your base", dict(entry=CALIBRATED), None),
+]
+
+
+@pytest.mark.parametrize("role, record, said", ROLE_CASES)
+def test_antenna_warning_names_the_receiver_by_its_role(tmp_path, role, record, said):
+    """The base of a PPK, the station of a static baseline, the user's base it places and the user's base of a PPP: the
+    warning names the receiver as such and says which way an antenna that is not calibrated moves what is found -
+    what is found from a base or a station too low, the mark of the user's base too high."""
+    info = rinex.header(_base_of(tmp_path, CALIBRATED))
+    calibration = None if record is None else {"file": "igs20.atx", "entry": None, "without_radome": False,
+                                               "up_m": None, **record}
+    warning = ppk.antenna_warning("BASE", info, calibration, role=role)
+    if said is None:
+        assert warning is None
+        return
+    for text in said:
+        assert text in warning, (text, warning)
+    assert "later version" not in warning or role == "base"
+    with pytest.raises(ValueError, match="role"):
+        ppk.antenna_warning("BASE", info, calibration, role="drone")
 
 
 def test_solve_gives_no_calibrations_that_rtklib_would_take_from_a_satellite(tmp_path, fake_rtklib):

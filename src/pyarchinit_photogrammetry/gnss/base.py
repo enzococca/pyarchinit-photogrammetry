@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 import math
 import os
-import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -29,6 +28,8 @@ from . import download, frames, ppk, rinex, stations
 log = logging.getLogger(__name__)
 
 MIN_HOURS = 1.0  # a static baseline of a shorter session may not fix its ambiguities, or fix them wrong
+GAP_WARNING_S = 60.0  # a hole in the observations of the user's base longer than this during the session is told of
+FIX_OR_FLOAT = (1, 2)  # RTKLIB's Q of a static baseline that places a base: any other is a position of the code alone
 # what the sigma of the coordinates of a station is, by where they come from: the formal error of a multi-year solution
 # (EPN, IGS), the scatter of the daily positions about their line (RING)
 SIGMA_KINDS = {"EPN": "formal", "IGS": "formal", "RING": "scatter"}
@@ -36,7 +37,7 @@ SIGMA_KINDS = {"EPN": "formal", "IGS": "formal", "RING": "scatter"}
 # the latter, so the two are side by side)
 STATION_FOLDER = "station"
 WORK_FOLDER = "baseline"
-_A, _E2 = 6378137.0, 6.69437999014e-3  # the WGS84 ellipsoid: semi-major axis (m), first eccentricity squared
+ROLES = ("your base", "station")  # how the run of a baseline names its two receivers (ppk.RUN_ROLES)
 
 
 @dataclass
@@ -45,8 +46,9 @@ class BaselineResult:
     antenna, a :class:`.ppk.BasePosition` of source ``"baseline"`` in the frame and at the epoch of the coordinates of
     the station, with RTKLIB's standard deviations; ``q`` RTKLIB's quality of the solution (1 fix, 2 float:
     :data:`.ppk.QUALITY`), ``sd`` its standard deviations east, north, up (m), ``baseline_km`` the distance from the
-    station to the mark, ``hours`` how long the base and the station observed together, ``solution`` the file of
-    RTKLIB's solution, ``warnings`` what to tell the user (also in the log)."""
+    station to the mark across, as :func:`.ppk.baseline_km` measures it, ``hours`` how long the base and the station
+    observed together, less the holes in the observations of the base, ``solution`` the file of RTKLIB's solution,
+    ``warnings`` what to tell the user (also in the log)."""
 
     position: ppk.BasePosition
     q: int
@@ -57,18 +59,27 @@ class BaselineResult:
     warnings: list[str] = field(default_factory=list)
 
 
-# --- helpers --------------------------------------------------------------------------------------------------------
+# --- helpers ---------------------------------------------------------------------------------------------------------
 
 
-def _span(path: Path, what: str) -> tuple[datetime, datetime]:
-    """The first and last epoch (GPS time) of the observation file ``path``, which is ``what``; a ``ValueError`` naming
-    it for a file of navigation messages or without epochs."""
+def _span(path: Path, who: str) -> tuple[datetime, datetime]:
+    """The first and last epoch (GPS time) of the observation file ``path``; a ``ValueError`` naming it as ``who`` ("the
+    rover DJI_0001.obs") for a file of navigation messages or without epochs."""
     if rinex.header(path).kind != "obs":
-        raise ValueError(f"{what} {path.name} holds navigation messages, not observations")
+        raise ValueError(f"{who} holds navigation messages, not observations")
     span = rinex.time_span(path)
     if span is None:
-        raise ValueError(f"{what} {path.name} has no observation epochs")
+        raise ValueError(f"{who} has no observation epochs")
     return span
+
+
+def _session(pieces: Sequence[Path]) -> tuple[datetime, datetime, float]:
+    """The first and the last epoch (GPS time) of the observations of the user's base, in one file or several, and the
+    seconds between its epochs (those of its file that has them closest, as :func:`.rinex.join` writes them; 0 when
+    none says)."""
+    spans = [_span(piece, f"your base {piece.name}") for piece in pieces]
+    steps = [step for piece in pieces if (step := rinex.epoch_interval(piece))]
+    return min(a for a, _ in spans), max(b for _, b in spans), min(steps, default=0.0)
 
 
 def _middle_epoch(start: datetime, end: datetime) -> float:
@@ -90,14 +101,6 @@ def _enu_sd(sigma: Sequence[float] | None, lat: float, lon: float) -> tuple[floa
     covariance = to_enu @ np.diag(np.square(np.asarray(sigma, dtype=np.float64))) @ to_enu.T
     east, north, up = (float(v) for v in np.sqrt(np.diag(covariance)))
     return east, north, up
-
-
-def _geocentric(lat: float, lon: float, h: float) -> np.ndarray:
-    """X, Y, Z (m) of a position on the WGS84 ellipsoid."""
-    phi, lam = math.radians(lat), math.radians(lon)
-    n = _A / math.sqrt(1.0 - _E2 * math.sin(phi) ** 2)
-    return np.array([(n + h) * math.cos(phi) * math.cos(lam), (n + h) * math.cos(phi) * math.sin(lam),
-                     (n * (1.0 - _E2) + h) * math.sin(phi)])
 
 
 def _station_position(station: stations.Station, epoch: float, progress) -> ppk.BasePosition:
@@ -130,59 +133,47 @@ def _antenna_calibrations(progress) -> str | None:
     return None
 
 
-def _navigation_beside(paths: Sequence[Path]) -> bool:
-    """A navigation file is beside one of the observation files ``paths``, where :func:`.ppk.solve` looks for one."""
-    return any(ppk.navigation_info(companion) for path in paths for companion in rinex.find_companions(path))
+def _hours(own: tuple[datetime, datetime, float], station: tuple[datetime, datetime, float],
+           holes: Sequence[tuple[datetime, datetime]]) -> tuple[float, list[tuple[datetime, datetime, float]]]:
+    """How long the user's base (``own``: its first and last epoch and the seconds between its epochs) and the
+    ``station`` (the same) observed together, in hours, and the ``holes`` of the base (each from the epoch before it to
+    the epoch after it) in that time, with the seconds each takes from it. The time is from the later first epoch to
+    the earlier end of the interval of the last epochs (n epochs a second apart are n seconds of observations), less
+    the holes, to the second (the epochs of a receiver are a few milliseconds off one)."""
+    begin = max(own[0], station[0])
+    finish = min(own[1] + timedelta(seconds=own[2]), station[1] + timedelta(seconds=station[2]))
+    lost = []
+    for before, after in holes:
+        gone = (min(after, finish) - max(before + timedelta(seconds=own[2]), begin)).total_seconds()
+        if gone > 0.0:
+            lost.append((before, after, gone))
+    seconds = (finish - begin).total_seconds() - sum(gone for _, _, gone in lost)
+    return round(seconds) / 3600.0, lost
 
 
-def _observed(path: Path, span: tuple[datetime, datetime]) -> tuple[datetime, datetime]:
-    """The time the observations of ``path``, whose epochs span ``span``, stand for: from the first epoch to the end of
-    the interval of the last (n epochs a second apart are n seconds of observations)."""
-    step = rinex.epoch_interval(path) or 0.0
-    return span[0], span[1] + timedelta(seconds=step)
-
-
-def _own_antenna_note(name: str, info: rinex.RinexInfo, calibration: dict | None) -> str | None:
-    """What to tell about the phase centre of the antenna of the user's base ``name`` (``info``: the header of its RINEX
-    file; ``calibration``: what the antenna file gave it, ``Solution.rover_calibration``), or None. An offset that is
-    not applied puts the phase centre at the reference point of the antenna, and the mark found that much too high."""
-    kind = ppk.antenna_type(info)
-    if calibration is None or calibration["entry"] is None:
-        which = (f"the antenna {kind} of the base {name}" if kind else
-                 f"the antenna of the base {name} (its RINEX header names no antenna type)")
-        why = ("no antenna calibrations were given to RTKLIB" if calibration is None else
-               f"it is not in {calibration['file']}, so RTKLIB has no calibration for it")
-        return (f"the phase-centre offset of {which} is not applied: {why}, and the mark found can be a few "
-                "centimetres too high, more than 10 cm with some choke-ring antennas")
-    file, used = calibration["file"], " ".join(calibration["entry"].split())
-    if calibration["without_radome"]:
-        return (f"the antenna {kind} of the base {name} is not in {file} with its radome: RTKLIB used the calibration "
-                f"of {used}, the same antenna type with another radome, so the mark found can be a few millimetres "
-                "off")
-    if not ppk.same_antenna(calibration["entry"], kind):
-        return (f"the antenna {kind} of the base {name} is not in {file} as its RINEX header writes it: RTKLIB used "
-                f"the calibration of {used}, the nearest name it found, so the mark found can be a few millimetres "
-                "off, and more if it is another antenna")
-    return None
-
-
-def _quality_notes(name: str, station: stations.Station, q: int, km: float, hours: float) -> list[str]:
-    """What to tell about a static baseline of quality ``q`` (RTKLIB's Q), ``km`` long, of ``hours``."""
+def _notes(name: str, station: stations.Station, q: int, km: float, hours: float,
+           lost: Sequence[tuple[datetime, datetime, float]]) -> list[str]:
+    """What to tell about a static baseline of quality ``q`` (RTKLIB's Q: fix or float), ``km`` long, of ``hours``,
+    with the holes ``lost`` in the observations of the user's base (:func:`_hours`)."""
     notes = []
-    status = ppk.status(q)
     if q != 1:
-        off = "metres" if status == "single" else "decimetres"
-        notes.append(f"the static solution of the base {name} is {status} (Q={q}), not fixed: its position can be "
-                     f"{off} off, and every position of the survey with it. A longer session, or a station nearer the "
-                     "base, helps RTKLIB fix it")
+        notes.append(f"the static solution of your base {name} is {ppk.status(q)} (Q={q}), not fixed: its position can "
+                     "be decimetres off, and every position of the survey with it. A longer session, or a station "
+                     "nearer the base, helps RTKLIB fix it")
     if km > ppk.BASELINE_WARNING_KM:
-        notes.append(f"the base {name} is {km:.1f} km from the station {station.id}: beyond "
+        notes.append(f"your base {name} is {km:.1f} km from the station {station.id}: beyond "
                      f"{ppk.BASELINE_WARNING_KM:g} km the ambiguities are hard to fix and the atmosphere is not the "
                      "same above the two, so the position can be centimetres or decimetres off. A nearer station is "
                      "better")
+    long = [hole for hole in lost if hole[2] > GAP_WARNING_S]
+    if long:
+        before, after, gone = max(long, key=lambda hole: hole[2])
+        more = f", and {len(long) - 1} more holes" if len(long) > 1 else ""
+        notes.append(f"your base {name} has no observations from {ppk.span_text(before, after)} ({round(gone / 60)} "
+                     f"minutes{more}): the session is counted without {'them' if more else 'it'}, {hours:.2f} hours")
     if hours < MIN_HOURS:
-        notes.append(f"the base {name} and the station {station.id} observed together for {round(hours * 60)} minutes: "
-                     f"a static baseline wants an hour or more, and longer the further the station")
+        notes.append(f"your base {name} and the station {station.id} observed together for {round(hours * 60)} "
+                     "minutes: a static baseline wants an hour or more, and longer the further the station")
     return notes
 
 
@@ -194,7 +185,9 @@ def station_base(rover: str | Path, station: stations.Station, folder: str | Pat
     """A permanent station as the base of the flight whose RINEX observations are ``rover``: the file of the station's
     observations for the time of the flight (:func:`.stations.download_observations`, at 1 s when the archive has them
     for the whole flight, else at 30 s, with ten minutes on each side), into ``folder``, and its position. ``folder``
-    must not be the work folder of the PPK of the flight, where :func:`.ppk.solve` refuses inputs.
+    must not be the work folder of the PPK of the flight nor a folder inside it: :func:`.ppk.solve` refuses inputs
+    anywhere in there. No navigation file is downloaded: the PPK of the flight takes the drone's, or one of
+    :func:`.stations.download_navigation`.
 
     The position is the coordinates of the station (:func:`.stations.coordinates`: those of its marker, to which RTKLIB
     adds the antenna height of the header of its RINEX file, as for any base) in ITRF2020 at the middle of the flight:
@@ -211,7 +204,8 @@ def station_base(rover: str | Path, station: stations.Station, folder: str | Pat
     why)."""
     progress = as_progress(progress)
     progress(0.0, f"{station.id}: the base of the flight")
-    start, end = _span(Path(rover), "the rover")
+    rover = Path(rover)
+    start, end = _span(rover, f"the rover {rover.name}")
     position = _station_position(station, _middle_epoch(start, end), progress.sub(0.0, 0.1))
     observations = stations.download_observations(station, start, end, folder, progress.sub(0.1, 0.6), rate="auto")
     note = _antenna_calibrations(progress.sub(0.7, 0.3))
@@ -228,86 +222,90 @@ def baseline(base_obs: str | Path | Sequence[str | Path], station: stations.Stat
              progress=None, *, station_obs: str | Path | None = None,
              station_position: ppk.BasePosition | None = None, atx: str | Path | None = "auto") -> BaselineResult:
     """The mark of the user's own base - a receiver left on a mark nobody surveyed - by a static baseline from the
-    permanent ``station``: RTKLIB solves the base (``base_obs``, its RINEX observations: one file, or several that
-    :func:`.rinex.join` joins) as a rover standing still for the whole session against the station, forward, into one
-    position (:func:`.ppk.config` ``mode="static", rover_antenna="*", solution="forward", static_single=True``), with
-    the navigation files ``navs`` (None: those beside the base, as :func:`.ppk.solve` looks for them). RTKLIB takes off
-    the antenna height of the header of the base's RINEX file: the position is of the mark on the ground.
+    permanent ``station``: RTKLIB solves the base (``base_obs``, its RINEX observations: one file, or several, which
+    :func:`.ppk.solve` joins) as a rover standing still for the whole session against the station, forward, into one
+    position (:func:`.ppk.config` ``mode="static", rover_antenna="*", solution="forward", static_single=True``). RTKLIB
+    takes off the antenna height of the header of the base's RINEX file: the position is of the mark on the ground.
 
     The station is given by its observations ``station_obs`` and its position ``station_position`` (a
     :class:`.ppk.BasePosition`, as :func:`station_base` makes it), or, for those not given, the program downloads them
-    into the ``station`` folder of ``folder``: its observations for the time of the base (at 1 s or 30 s), its
-    coordinates at the middle of the session (refused when only approximate) and, when no navigation file is given or
-    beside the base, the broadcast navigation messages. With both given nothing of the station is downloaded. RTKLIB
-    works in the ``baseline`` folder of ``folder`` (:func:`.ppk.solve`: its solution stays there). ``atx`` is the file
-    of antenna calibrations, as for :func:`.ppk.solve`; with "auto" igs20.atx is downloaded first when the program has
-    no recent copy (not having it is a warning), so that both antennas, the station's and the base's, are corrected.
+    into the ``station`` folder of ``folder``: its observations for the time of the base (at 1 s or 30 s) and its
+    coordinates at the middle of the session (refused when only approximate). The navigation files are ``navs``, or,
+    with None, those beside the files of the base (:func:`.ppk.navigation_beside`), else those beside the station's
+    file when it is given, else the broadcast navigation messages of the session, downloaded into the ``station``
+    folder (:func:`.stations.download_navigation`); with all given nothing is downloaded but, with ``atx="auto"``,
+    igs20.atx. RTKLIB works in the ``baseline`` folder of ``folder`` (:func:`.ppk.solve`: its solution stays there).
+    ``atx`` is the file of antenna calibrations, as for :func:`.ppk.solve`; with "auto" igs20.atx is downloaded first
+    when the program has no recent copy (not having it is a warning), so that both antennas, the station's and the
+    base's, are corrected.
 
     The mark is the station's coordinates plus the baseline: its :class:`.ppk.BasePosition` is in the frame and at the
     epoch of the station's position, of source ``"baseline"``, with RTKLIB's standard deviations east, north, up and in
     ``detail`` the station, its position (with its own detail and citation), the base's antenna, its height and
-    calibration, ``baseline_km``, ``q``, ``status``, ``hours`` and the name of the solution file. The warnings -
-    those of :func:`.ppk.solve`, the antenna of the base not calibrated, a solution that is not fixed, a station
-    further than :data:`.ppk.BASELINE_WARNING_KM`, a session under :data:`MIN_HOURS` - are in the result and in the
-    log.
+    calibration, ``baseline_km``, ``q``, ``status``, ``hours`` and the name of the solution file. The warnings name the
+    two receivers "your base" and "the station": those of :func:`.ppk.solve`, the antenna of the base not calibrated,
+    a solution that is float, not fixed, a station further than :data:`.ppk.BASELINE_WARNING_KM`, a hole of more than
+    :data:`GAP_WARNING_S` seconds in the observations of the base, a session under :data:`MIN_HOURS` - they are in the
+    result and in the log.
 
     A ``ValueError`` when the base and the station have no time in common, when a file is not one of observations,
-    when the coordinates of the station are only approximate, and for what :func:`.ppk.solve` refuses."""
+    when the coordinates of the station are only approximate, for what :func:`.ppk.solve` refuses, and when RTKLIB's
+    solution is neither fixed nor float (:data:`FIX_OR_FLOAT`): a position of the code alone, metres off - the file of
+    the solution is kept, and named."""
     progress = as_progress(progress)
     pieces = [Path(base_obs)] if isinstance(base_obs, (str, os.PathLike)) else [Path(p) for p in base_obs]
     if not pieces:
-        raise ValueError("no file given for the base")
+        raise ValueError("no file given for your base")
     folder = Path(folder)
-    progress(0.0, f"The base by a static baseline from {station.id}")
-    if len(pieces) == 1:
-        return _baseline(pieces, pieces[0], station, folder, navs, progress, station_obs, station_position, atx)
-    folder.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".base-", dir=folder) as scratch:  # the base in one file, beside the rest
-        joined = Path(scratch) / "base.obs"
-        rinex.join(pieces, joined)
-        return _baseline(pieces, joined, station, folder, navs, progress, station_obs, station_position, atx)
-
-
-def _baseline(pieces: list[Path], own: Path, station: stations.Station, folder: Path, navs, progress,
-              station_obs: str | Path | None, station_position: ppk.BasePosition | None, atx) -> BaselineResult:
-    """:func:`baseline` with the files of the base as the user gave them (``pieces``) and the one file they make
-    (``own``)."""
-    info = rinex.header(own)
-    span = _span(own, "the base")
+    progress(0.0, f"Your base by a static baseline from {station.id}")
+    own = _session(pieces)
+    first, last = own[0], own[1]
+    info = rinex.header(pieces[0])  # its antenna, its height and its marker: the same in every file of one receiver
     name = ppk.base_name(pieces[0], info)
-    warnings: list[str] = []
     fetched = folder / STATION_FOLDER
     if station_position is None:  # first: no download for a station that cannot be a base
-        station_position = _station_position(station, _middle_epoch(*span), progress.sub(0.0, 0.1))
-    if station_obs is None:
-        station_obs = stations.download_observations(station, *span, fetched, progress.sub(0.1, 0.5), rate="auto")
-        if navs is None and not _navigation_beside(pieces):
-            navs = stations.download_navigation(*span, fetched, progress.sub(0.6, 0.1))
+        station_position = _station_position(station, _middle_epoch(first, last), progress.sub(0.0, 0.1))
+    given = station_obs is not None
+    if not given:
+        station_obs = stations.download_observations(station, first, last, fetched, progress.sub(0.1, 0.5),
+                                                     rate="auto")
     station_obs = Path(station_obs)
-    station_span = _span(station_obs, f"the station {station.id}")
-    if max(span[0], station_span[0]) > min(span[1], station_span[1]):
-        raise ValueError(f"the base {name} ({ppk.span_text(*span)}) and the station {station.id} "
+    station_span = _span(station_obs, f"the station {station.id} ({station_obs.name})")
+    if max(first, station_span[0]) > min(last, station_span[1]):
+        raise ValueError(f"your base {name} ({ppk.span_text(first, last)}) and the station {station.id} "
                          f"({ppk.span_text(*station_span)}) have no time in common: the station has to record while "
-                         "the base does")
+                         "your base does")
+    if navs is None:
+        # a file the archive downloaded is never looked beside: the navigation files of other days may be there
+        beside = ppk.navigation_beside(pieces) or (ppk.navigation_beside([station_obs]) if given else [])
+        navs = ([path for path, _ in beside] or
+                stations.download_navigation(first, last, fetched, progress.sub(0.6, 0.1)))
+    warnings: list[str] = []
     if isinstance(atx, str) and atx == "auto":
         note = _antenna_calibrations(progress.sub(0.7, 0.2))
         if note:
             warnings.append(note)
     progress(0.9, f"RTKLIB: the static baseline from {station.id} to {name}")
-    solution = ppk.solve(own, station_obs, navs, station_position, folder=folder / WORK_FOLDER, atx=atx,
-                         mode="static", rover_antenna="*", solution="forward", static_single=True)
+    solution = ppk.solve(pieces, station_obs, navs, station_position, folder=folder / WORK_FOLDER, atx=atx,
+                         mode="static", rover_antenna="*", solution="forward", static_single=True, roles=ROLES)
     (lat, lon, h), q, sd = ppk.static_position(solution.path)
-    sp = station_position
-    km = float(np.linalg.norm(_geocentric(lat, lon, h) - _geocentric(sp.lat, sp.lon, sp.h))) / 1000.0
-    (begin, finish), (first, last) = _observed(own, span), _observed(station_obs, station_span)
-    hours = round((min(finish, last) - max(begin, first)).total_seconds()) / 3600.0  # epochs are a few ms off a second
+    if q not in FIX_OR_FLOAT:
+        raise ValueError(f"RTKLIB found no relative position of your base {name} from the station {station.id}: its "
+                         f"static solution is {ppk.QUALITY.get(q, 'of no known quality')} (Q={q}), not fixed (Q=1) "
+                         "or float (Q=2) - a position of the code alone, metres off, which as a base would move the "
+                         "whole survey by as much. The two receivers may not have observed the same satellites for "
+                         f"long enough, or the navigation messages do not cover the session. The solution is kept in "
+                         f"{solution.path}")
+    km = ppk.baseline_km(solution)
+    hours, lost = _hours(own, (*station_span, rinex.epoch_interval(station_obs) or 0.0), solution.rover_holes)
     warnings += solution.warnings
-    own_note = _own_antenna_note(name, info, solution.rover_calibration)
+    own_note = ppk.antenna_warning(name, info, solution.rover_calibration, role=ROLES[0])
     if own_note:
         warnings.append(own_note)
-    warnings += _quality_notes(name, station, q, km, hours)
+    warnings += _notes(name, station, q, km, hours, lost)
     for text in warnings:
         log.warning("%s", text)
+    sp = station_position
     detail = {"station": station.id, "name": station.name, "networks": list(station.networks),
               "station_position": {"lat": sp.lat, "lon": sp.lon, "h": sp.h, "source": sp.source, "frame": sp.frame,
                                    "epoch": sp.epoch, "sd": None if sp.sd is None else list(sp.sd),

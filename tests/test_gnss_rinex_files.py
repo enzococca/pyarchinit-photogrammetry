@@ -835,6 +835,42 @@ def test_solve_with_a_base_in_pieces_gives_rtklib_one_file(tmp_path, fake_rtklib
     assert len(fake_rtklib()) == 2
 
 
+def test_solve_with_a_rover_in_pieces(tmp_path, fake_rtklib):
+    """A rover in several files, as a base can be: joined for RTKLIB, its navigation file found beside them, named by
+    its files in what is said of it, with its holes; the two receivers named by their roles."""
+    folder = tmp_path / "own"
+    (folder / "later").mkdir(parents=True)
+    header, records = _records(PPK_ROVER)
+    first = _piece(folder / "first.05o", header, records[:40])  # to 00:19:30
+    second = _piece(folder / "later" / "second.05o", header, records[80:])  # from 00:40:00
+    # beside the file given second only: the IGS's daily broadcast file
+    shutil.copyfile(DATA / "rtklib" / "30400920.05n", folder / "brdc0920.05n")
+    mark = rinex.ecef_to_llh(rinex.header(PPK_BASE).approx_xyz)
+    solution = ppk.solve([second, first], PPK_BASE, base_position=mark, folder=tmp_path / "work")
+    (run,) = fake_rtklib()
+    joined = tmp_path / "joined.05o"
+    rinex.join([first, second], joined)
+    assert run["inputs"] == [_sha256(joined.read_bytes()), _sha256(PPK_BASE.read_bytes()),
+                             _sha256((DATA / "rtklib" / "30400920.05n").read_bytes())]
+    assert solution.rover == "second.05o, first.05o"
+    assert solution.inputs["rover"] == [str(second.absolute()), str(first.absolute())]
+    ((before, after),) = solution.rover_holes
+    assert (before.hour, before.minute, after.hour, after.minute) == (0, 19, 0, 39)  # the epochs around the hole
+    # what is said of the rover names its files, and the roles of the receivers
+    late = _piece(folder / "late.05o", header, records[100:])  # from 00:50:00
+    station_header, station_records = _records(PPK_BASE)
+    early = _piece(tmp_path / "early.05o", station_header, station_records[:40])
+    with pytest.raises(ValueError, match="in common") as error:
+        ppk.solve([late], early, [PPK_NAV], folder=tmp_path / "work", roles=("your base", "station"))
+    assert str(error.value).startswith("your base late.05o (") and "and the station early.05o (" in str(error.value)
+    assert "the station has to record while your base does" in str(error.value)
+    with pytest.raises(ValueError, match="roles"):
+        ppk.solve(first, PPK_BASE, [PPK_NAV], folder=tmp_path / "work", roles=("rover", "station"))
+    with pytest.raises(ValueError, match="no file given for the rover"):
+        ppk.solve([], PPK_BASE, [PPK_NAV], folder=tmp_path / "work")
+    assert len(fake_rtklib()) == 1
+
+
 def test_solve_warns_of_a_hole_in_the_base_while_the_rover_flies(tmp_path, fake_rtklib):
     base_header, base_records = _records(PPK_BASE)
     before = _piece(tmp_path / "before.05o", base_header, base_records[:40])  # to 00:19:30

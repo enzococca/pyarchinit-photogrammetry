@@ -54,9 +54,6 @@ def rtk_from_xmp(text: str) -> dict | None:
 GPS_EPOCH = datetime(1980, 1, 6, tzinfo=timezone.utc)
 LEAP_SECONDS = 18  # GPS time is ahead of UTC by this many seconds since 2017; MrkShot.utc takes those of its date
 
-_A = 6378137.0  # WGS84 semi-major axis (m)
-_E2 = 0.00669437999014  # WGS84 first eccentricity squared
-
 _NUM = r"[-+]?\d+(?:\.\d+)?"
 # index, GPS seconds of the week, [GPS week], lever arm N, E, V (mm), antenna lat, lon, ellipsoidal height,
 # standard deviations N, E, V (m), quality flag; tabs and padding spaces are both just white space
@@ -134,9 +131,9 @@ def lever_arm(lat: float, lon: float, h: float, offset_ned_mm) -> tuple[float, f
     [-180, 180)."""
     north, east, down = (v / 1000.0 for v in offset_ned_mm)
     phi = math.radians(lat)
-    w = 1.0 - _E2 * math.sin(phi) ** 2
-    meridian = _A * (1.0 - _E2) / w ** 1.5
-    prime_vertical = _A / math.sqrt(w)
+    w = 1.0 - rinex.WGS84_E2 * math.sin(phi) ** 2
+    meridian = rinex.WGS84_A * (1.0 - rinex.WGS84_E2) / w ** 1.5
+    prime_vertical = rinex.WGS84_A / math.sqrt(w)
     return (float(wrap_longitude(lon + math.degrees(east / ((prime_vertical + h) * math.cos(phi))))),
             lat + math.degrees(north / (meridian + h)),
             h - down)

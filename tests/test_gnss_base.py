@@ -106,11 +106,14 @@ def test_baseline_finds_the_base(tmp_path, monkeypatch):
     assert r.position.source == "baseline" and r.position.sd == r.sd and all(0.0 < v < 0.01 for v in r.sd)
     assert r.hours == 1.0  # 120 epochs 30 s apart, whatever the milliseconds of the clocks of the receivers
     assert r.solution.parent == (tmp_path / "work").resolve() / "baseline" and r.solution.suffix == ".pos"
-    # fixed, near, an hour: only the antennas, which no calibration corrects here (atx=None), are told of
+    # fixed, near, an hour: only the antennas, which no calibration corrects here (atx=None), are told of - the two
+    # receivers by their roles, and which way each moves the mark
     assert len(r.warnings) == 2, r.warnings
     station_note, own_note = r.warnings
-    assert "TRM29659.00 of the base 0759" in station_note
-    assert "TRM29659.00 of the base 3040" in own_note and "too high" in own_note
+    assert "TRM29659.00 of the station 0759" in station_note and "your base can be a few centimetres too low" in (
+        station_note)
+    assert "TRM29659.00 of your base 3040" in own_note and "too high" in own_note
+    assert not [w for w in r.warnings if "the base" in w or "later version" in w]
 
 
 def _raised(source: Path, target: Path, height: float) -> Path:
@@ -140,6 +143,53 @@ def test_baseline_gives_the_mark_under_the_antenna(tmp_path, monkeypatch):
     assert lowered.position.detail["antenna_delta_hen"] == [1.5, 0.0, 0.0]
 
 
+def _to_enu(origin) -> np.ndarray:
+    """The rows east, north, up at ``origin`` (latitude, longitude in degrees) of the turn from X, Y, Z."""
+    phi, lam = np.radians(origin[0]), np.radians(origin[1])
+    return np.array([[-np.sin(lam), np.cos(lam), 0.0],
+                     [-np.sin(phi) * np.cos(lam), -np.sin(phi) * np.sin(lam), np.cos(phi)],
+                     [np.cos(phi) * np.cos(lam), np.cos(phi) * np.sin(lam), np.sin(phi)]])
+
+
+def _moved(llh, enu) -> tuple[float, float, float]:
+    """``llh`` moved by ``enu`` metres east, north and up, exactly (through X, Y, Z)."""
+    return rinex.ecef_to_llh(np.add(rinex.llh_to_ecef(llh), _to_enu(llh).T @ np.asarray(enu)))
+
+
+def _enu_between(llh, origin) -> np.ndarray:
+    """East, north, up (m) of ``llh`` from ``origin``, exactly (through X, Y, Z)."""
+    return _to_enu(origin) @ np.subtract(rinex.llh_to_ecef(llh), rinex.llh_to_ecef(origin))
+
+
+@needs_rtklib
+def test_baseline_moves_with_the_station(tmp_path, monkeypatch):
+    """The mark is the coordinates given to the station plus the baseline: the station moved by (1, -0.5, 0.25) m east,
+    north and up moves the mark of the user's base by as much, within millimetres - real RTKLIB uses the position it
+    is given, not the one of the header of the station."""
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    station = _station_0759()
+    shift = (1.0, -0.5, 0.25)
+    plain = base.baseline(OWN, station, tmp_path / "plain", station_obs=STATION_OBS,
+                          station_position=_station_position(), atx=None)
+    moved = base.baseline(OWN, station, tmp_path / "moved", station_obs=STATION_OBS,
+                          station_position=_station_position(llh=_moved(_header_llh(STATION_OBS), shift)), atx=None)
+    assert plain.q == moved.q == 1
+    assert np.allclose(_enu_between(_llh(moved.position), _llh(plain.position)), shift, rtol=0, atol=0.003)
+
+
+@needs_rtklib
+def test_the_reversed_baseline_finds_the_other_header(tmp_path, monkeypatch):
+    """The baseline the other way, 0759 placed from 3040 held at the position of its header, finds the disagreement of
+    the two headers with the opposite sign: it is theirs, not of which receiver is the base."""
+    monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
+    xyz = rinex.header(OWN).approx_xyz
+    station_3040 = stations.Station("3040", "GSI 3040", ("IGS",), *_header_llh(OWN), tuple(xyz))
+    held = ppk.BasePosition(*_header_llh(OWN), "station", frame="ITRF2020", epoch=2005.25)
+    r = base.baseline(STATION_OBS, station_3040, tmp_path / "work", station_obs=OWN, station_position=held, atx=None)
+    assert r.q == 1
+    assert np.allclose(_enu(_llh(r.position), _header_llh(STATION_OBS))[0], -HEADERS_APART, rtol=0, atol=0.008)
+
+
 @needs_rtklib
 def test_baseline_calibrates_both_antennas(tmp_path, monkeypatch):
     """With the antenna calibrations both antennas are corrected: the excerpt puts the phase centre of TRM29659.00
@@ -167,28 +217,100 @@ def test_baseline_calibrates_both_antennas(tmp_path, monkeypatch):
     own_not = run("own-not", renamed(OWN, "own"), STATION_OBS, ATX_EXCERPT)
     assert own_not.position.h - both.position.h == pytest.approx(0.100, abs=0.002)
     (note,) = own_not.warnings
-    assert "TRM41249.00 NONE of the base 3040" in note and "igs20_excerpt.atx" in note and "too high" in note
+    assert "TRM41249.00 NONE of your base 3040" in note and "igs20_excerpt.atx" in note and "too high" in note
     station_not = run("station-not", OWN, renamed(STATION_OBS, "station"), ATX_EXCERPT)
     assert station_not.position.h - both.position.h == pytest.approx(-0.100, abs=0.002)
     (note,) = station_not.warnings
-    assert "TRM41249.00 NONE of the base 0759" in note
+    assert "TRM41249.00 NONE of the station 0759" in note and "too low" in note
     assert station_not.position.detail["antenna_calibration"]["entry"] == "TRM29659.00     NONE"
+
+
+def _halves(folder: Path, navigation: bool = True, apart: bool = False) -> list[Path]:
+    """The hour of 3040 in two files of half an hour, in ``folder``, with the broadcast navigation file of the day
+    beside them as the IGS names it (``brdc0920.05n``: beside both, one file) when ``navigation``; ``apart``, the
+    second half in a folder of its own, where there is none."""
+    folder.mkdir(parents=True, exist_ok=True)
+    header, records = _records(OWN)
+    first = _piece(folder / "first.05o", header, records[:60])
+    if apart:
+        (folder / "later").mkdir()
+    second = _piece(folder / "later" / "second.05o" if apart else folder / "second.05o", header, records[60:])
+    if navigation:
+        shutil.copyfile(DATA / "30400920.05n", folder / "brdc0920.05n")
+    return [second, first]  # not in the order of their time: the second half first
 
 
 @needs_rtklib
 def test_baseline_with_the_base_in_two_files(tmp_path, monkeypatch):
-    """A base recorded in two files (half an hour each, given in any order) is the base of the whole hour."""
+    """A base recorded in two files (half an hour each, given in any order) is the base of the whole hour, with the
+    navigation file found beside them as for one file - a station file with none beside it."""
     monkeypatch.delenv("PPG_RNX2RTKP", raising=False)
-    header, records = _records(OWN)
-    first = _piece(tmp_path / "first.05o", header, records[:60])
-    second = _piece(tmp_path / "second.05o", header, records[60:])
-    whole = base.baseline(OWN, _station_0759(), tmp_path / "whole", [NAV], station_obs=STATION_OBS,
+    station = tmp_path / "station"
+    station.mkdir()
+    station_obs = Path(shutil.copyfile(STATION_OBS, station / STATION_OBS.name))
+    whole = base.baseline(OWN, _station_0759(), tmp_path / "whole", station_obs=station_obs,
                           station_position=_station_position(), atx=None)
-    halves = base.baseline([second, first], _station_0759(), tmp_path / "halves", [NAV], station_obs=STATION_OBS,
+    halves = base.baseline(_halves(tmp_path / "own"), _station_0759(), tmp_path / "halves", station_obs=station_obs,
                            station_position=_station_position(), atx=None)
     assert halves.q == 1 and halves.hours == 1.0
     assert np.all(np.abs(_enu(_llh(halves.position), _llh(whole.position))[0]) < 0.001)
-    assert sorted(p.name for p in (tmp_path / "halves").iterdir()) == ["baseline"]  # the joined file is gone
+    assert sorted(p.name for p in (tmp_path / "halves").iterdir()) == ["baseline"]  # nothing joined left behind
+
+
+def _refused(*args, **kwargs):
+    raise AssertionError("the navigation messages are not downloaded here")
+
+
+@pytest.mark.parametrize("apart", [False, True], ids=["files together", "files apart"])
+@pytest.mark.parametrize("station_given", [True, False], ids=["station given", "station downloaded"])
+def test_baseline_takes_the_navigation_beside_the_files_of_the_base(tmp_path, fake_rtklib, monkeypatch,
+                                                                    station_given, apart):
+    """With no navigation file given, those beside the files of the base are the run's - beside any of them (here
+    beside the file given second), each once (a file beside two of them) - whether the station's observations are
+    given or downloaded, with none beside them: none is downloaded."""
+    monkeypatch.setenv("PPG_FAKE_POS", str(_single_static_row(tmp_path)))
+    monkeypatch.setattr(stations, "download_navigation", _refused)
+    station = tmp_path / "station"
+    station.mkdir()
+    lone_station = Path(shutil.copyfile(STATION_OBS, station / STATION_OBS.name))
+
+    def observations(st, start, end, folder, progress=None, rate="auto"):
+        Path(folder).mkdir(parents=True, exist_ok=True)
+        return Path(shutil.copyfile(STATION_OBS, Path(folder) / "0759_20050402-0000_0059.obs"))
+
+    monkeypatch.setattr(stations, "download_observations", observations)
+    r = base.baseline(_halves(tmp_path / "own", apart=apart), _station_0759(), tmp_path / "work",
+                      station_obs=lone_station if station_given else None, station_position=_station_position(),
+                      atx=None)
+    assert r.q == 1
+    (run,) = fake_rtklib()
+    assert run["inputs"][1:] == [_sha256(STATION_OBS), _sha256(DATA / "30400920.05n")]  # the station, one navigation
+
+
+def test_baseline_downloads_the_navigation_only_when_there_is_none(tmp_path, fake_rtklib, monkeypatch):
+    """No navigation file beside the files of the base: the one beside the station's file when it is given, and when
+    there is none there either the broadcast messages of the session, downloaded into the station folder."""
+    monkeypatch.setenv("PPG_FAKE_POS", str(_single_static_row(tmp_path)))
+    asked: list[tuple] = []
+
+    def navigation(start, end, folder, progress=None):
+        asked.append((start, end, Path(folder)))
+        Path(folder).mkdir(parents=True, exist_ok=True)
+        return [Path(shutil.copyfile(NAV, Path(folder) / "BRDC00WRD_S_20050920000_01D_MN.rnx"))]
+
+    monkeypatch.setattr(stations, "download_navigation", navigation)
+    pieces = _halves(tmp_path / "own", navigation=False)
+    base.baseline(pieces, _station_0759(), tmp_path / "beside", station_obs=STATION_OBS,  # 07590920.05n beside it
+                  station_position=_station_position(), atx=None)
+    assert asked == [] and fake_rtklib()[-1]["inputs"][2:] == [_sha256(NAV)]
+    station = tmp_path / "station"
+    station.mkdir()
+    lone_station = Path(shutil.copyfile(STATION_OBS, station / STATION_OBS.name))
+    work = tmp_path / "work"
+    base.baseline(pieces, _station_0759(), work, station_obs=lone_station, station_position=_station_position(),
+                  atx=None)
+    assert asked == [(*rinex.time_span(OWN), work / "station")]
+    assert fake_rtklib()[-1]["inputs"][2:] == [_sha256(NAV)]
 
 
 # --- the user's base by a static baseline: the run, its frame and its warnings (RTKLIB a stand-in) ------------------
@@ -210,7 +332,11 @@ def test_baseline_keeps_the_station_frame_and_epoch(tmp_path, fake_rtklib, monke
     assert (r.position.lat, r.position.lon, r.position.h) == (pytest.approx(lat, abs=1e-9),
                                                               pytest.approx(lon, abs=1e-9), pytest.approx(h, abs=1e-4))
     assert r.sd == r.position.sd == (0.0007, 0.0011, 0.0024)  # RTKLIB writes sdn, sde, sdu: east, north, up
-    assert r.q == 1 and r.warnings[-1].startswith("the phase-centre offset of the antenna TRM29659.00 of the base 3040")
+    assert r.q == 1
+    assert r.warnings[-1].startswith("the phase-centre offset of the antenna TRM29659.00 of your base 3040")
+    # across, as ppk.baseline_km measures a base from a flight: BASELINE_WARNING_KM means the same in both
+    assert r.baseline_km == ppk.horizontal_m(station_position.lat, station_position.lon, r.position.lat,
+                                             r.position.lon) / 1000.0
     (run,) = fake_rtklib()
     options = _options(run["options"])
     assert options["pos1-posmode"] == "static" and options["pos1-soltype"] == "forward"
@@ -241,6 +367,40 @@ def test_float_baseline_warns(tmp_path, fake_rtklib, monkeypatch, caplog):
     (warning,) = [w for w in r.warnings if "float" in w]
     assert "3040" in warning and "not fixed" in warning and "decimetres" in warning
     assert warning in [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+
+
+@pytest.mark.parametrize("q", [5, 4])
+def test_baseline_refuses_a_solution_neither_fixed_nor_float(tmp_path, fake_rtklib, monkeypatch, q):
+    """A single (Q=5) or code-differential (Q=4) static solution is a position of the code alone, metres off: no base,
+    as a station with only an approximate position is none. The solution stays, and the error names it."""
+    monkeypatch.setenv("PPG_FAKE_POS", str(_single_static_row(tmp_path, q=q, sd=(1.2, 0.9, 2.5))))
+    with pytest.raises(ValueError, match=f"Q={q}") as error:
+        base.baseline(OWN, _station_0759(), tmp_path / "work", station_obs=STATION_OBS,
+                      station_position=_station_position(), atx=None)
+    (kept,) = (tmp_path / "work" / "baseline").glob("solution-*.pos")
+    assert str(kept.resolve()) in str(error.value) and "metres off" in str(error.value)
+
+
+def test_baseline_counts_the_session_without_the_holes_of_the_base(tmp_path, fake_rtklib, monkeypatch, caplog):
+    """The hours of the session are the time the base observed with the station less its holes, and a hole of more
+    than a minute is told of: here the base has none from 00:19:30 to 00:40:00, 20 minutes of the hour."""
+    monkeypatch.setenv("PPG_FAKE_POS", str(_single_static_row(tmp_path)))
+    header, records = _records(OWN)
+    before = _piece(tmp_path / "before.05o", header, records[:40])  # to 00:19:30
+    after = _piece(tmp_path / "after.05o", header, records[80:])  # from 00:40:00
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        r = base.baseline([before, after], _station_0759(), tmp_path / "work", [NAV], station_obs=STATION_OBS,
+                          station_position=_station_position(), atx=None)
+    assert r.hours == pytest.approx(40 / 60, abs=1e-12) and r.position.detail["hours"] == r.hours
+    (hole,) = [w for w in r.warnings if "no observations" in w]
+    assert hole.startswith("your base 3040 has no observations from 2005-04-02 00:19:29") and "20 minutes" in hole
+    assert "40 minutes" in " ".join(r.warnings)  # under an hour, counted without the hole
+    assert hole in [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    # a hole of a minute counts, but is not told of
+    short = _piece(tmp_path / "short.05o", header, records[42:])  # from 00:21:00
+    r = base.baseline([before, short], _station_0759(), tmp_path / "other", [NAV], station_obs=STATION_OBS,
+                      station_position=_station_position(), atx=None)
+    assert r.hours == pytest.approx(59 / 60, abs=1e-12) and not [w for w in r.warnings if "no observations" in w]
 
 
 def test_baseline_warns_of_a_far_station_and_a_short_session(tmp_path, fake_rtklib, monkeypatch, caplog):
