@@ -335,12 +335,14 @@ def flights(cameras) -> dict:
 
 
 def problem_from_chunk(chunk, rec, use_markers: bool = True, gnss: str = "off", rolling_shutter: bool = False,
-                       fit_principal_point: bool = False) -> tuple[Problem, dict]:
+                       fit_principal_point: bool = False, hold_focal: bool = False) -> tuple[Problem, dict]:
     """The adjustment of ``chunk`` (its reconstruction ``rec``, internal frame): tie points; with
     ``use_markers`` the measured projections of the markers, the control points (enabled
     reference, not check points) with their accuracy and the enabled control scale bars; with
     ``gnss`` "plain" or "bias" the camera references (with a bias per flight); rolling shutter.
-    Returns the problem and the ids that :func:`write_back` needs."""
+    ``hold_focal``: the focal lengths are not refined (photos looking down from one height cannot
+    tell them from the distance to the ground). Returns the problem and the ids that
+    :func:`write_back` needs."""
     from ..markers import gcp
     from .sfm import _rec_fixed_cameras
 
@@ -397,9 +399,10 @@ def problem_from_chunk(chunk, rec, use_markers: bool = True, gnss: str = "off", 
         if True in held:
             pb.free_intrinsics.append([])
             continue
-        principal = (1, 2) if model_name in ("SIMPLE_PINHOLE", "SIMPLE_RADIAL", "RADIAL", "SIMPLE_RADIAL_FISHEYE",
-                                             "RADIAL_FISHEYE") else (2, 3)
-        pb.free_intrinsics.append([k for k in range(n) if fit_principal_point or k not in principal])
+        single = model_name in ("SIMPLE_PINHOLE", "SIMPLE_RADIAL", "RADIAL", "SIMPLE_RADIAL_FISHEYE", "RADIAL_FISHEYE")
+        principal = (1, 2) if single else (2, 3)
+        focal = ((0,) if single else (0, 1)) if hold_focal else ()
+        pb.free_intrinsics.append([k for k in range(n) if (fit_principal_point or k not in principal) and k not in focal])
     marker_keys = []
     if use_markers:
         controls = {m.key: m for m in chunk.markers if not m.checkpoint and m.reference.enabled

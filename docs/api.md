@@ -464,15 +464,23 @@ Without fixed points `gnss="auto"` (the default) holds the block to the accurate
 the photos (mean horizontal accuracy within `engine.sfm.GNSS_PRIOR_MAX_M`, 0.5 m: fix, float, PPK),
 spread across the block: COLMAP's pose-prior adjuster, each position with its covariance carried into
 the internal frame, the focal length of the alignment held (photos looking down from one height cannot
-tell it from the distance to the ground). `engine.sfm.gnss_hold(chunk)` says what the positions will
-do, `report["gnss"]` how many photos held the block; `gnss="off"` leaves them out. A safety net for
-every engine: when the cameras end farther from their accurate positions than 3 times the offset
-before and 0.3 m more than it (root mean square; once the best similarity places the block when the
-optimisation fits a new georeference), the alignment before it is put back, the model on disk included
-(`report["reverted"]`, `report["camera_offsets"]`).
+tell it from the distance to the ground). Fixed points are `engine.sfm.fixed_points_hold(chunk,
+use_markers)`, the one rule of both engines and of the dialog; `engine.sfm.gnss_hold(chunk)` says what
+the positions will do. `report["gnss"]` says how many photos held the block, with the `termination` of
+the solve and whether it is `usable` (a solve that is not holds nothing), `report["focal_held"]`
+whether the focal length of the alignment was kept; `gnss="off"` leaves the positions out. A safety
+net for every engine: when the cameras end farther from their accurate positions than 3 times the
+offset before and 0.3 m more than it (root mean square; once the best similarity places the block when
+the optimisation fits a new georeference; each position less the bias of its flight after our
+adjustment with `gnss="bias"`), the optimisation is undone: it bent the block, or the positions
+disagree with the control points (switch off the camera references to keep it). The alignment before
+it is put back, the model on disk included, and the report then describes it (`reprojection_error`,
+`reverted`, `camera_offsets`; the run undone under `undone`). The alignment is put back as well when
+the optimisation stops with an error or is cancelled.
 
-`engine="ppg"` uses our own adjustment instead (below), with `gnss="plain"` or `"bias"` (`"auto"`
-is `"plain"` when the photos have accurate positions) and `rolling_shutter=True`.
+`engine="ppg"` uses our own adjustment instead (below), with `gnss="plain"` or `"bias"` (both refine
+the focal length; `"auto"` is `"plain"` with the focal length held when the positions can hold the
+block and no fixed points do, else `"off"`) and `rolling_shutter=True`.
 
 ### Our own bundle adjustment
 

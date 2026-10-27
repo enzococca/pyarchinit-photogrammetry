@@ -4065,7 +4065,7 @@ class MainWindow(QMainWindow):
         controls = [m for m in ch.markers if not m.checkpoint and m.reference.enabled and m.reference.location]
         checks = [m for m in ch.markers if m.checkpoint and m.reference.location]
         bars = gcp.control_scalebars(ch)
-        with_markers = len(controls) >= 3 or len(bars) >= 2
+        with_markers = sfm.fixed_points_hold(ch)  # the engine's own rule
         v = ParamDialog.ask(self, "Ottimizza camere", [
             Field("markers", tr("Usa punti di controllo e barre di scala nell'ottimizzazione ({0} GCP, {1} barre)",
                                 len(controls), len(bars)), with_markers),
@@ -4096,11 +4096,12 @@ class MainWindow(QMainWindow):
                 "Le posizioni GNSS accurate delle foto (fix, float, PPK: 0,5 m o meglio) tengono il blocco quando "
                 "non ci sono 3 punti di controllo o 2 barre di scala che lo tengano: ogni foto pesa secondo la sua "
                 "accuratezza e la focale resta quella dell'allineamento (da una sola quota, guardando in basso, le "
-                "posizioni non distinguono la focale dalla distanza dal suolo). Senza vincoli un blocco nadirale su "
-                "terreno piatto si piega a cupola mentre l'errore di riproiezione resta lo stesso: se "
-                "l'ottimizzazione allontana le camere dalle loro posizioni accurate (oltre 3 volte lo scarto di "
-                "prima e 30 cm in piu'), si rimette l'allineamento di prima. Con COLMAP le scelte del motore "
-                "proprio valgono come automatico.") + "\n\n" + self._gnss_hold_text(sfm.gnss_hold(ch, with_markers)))
+                "posizioni non distinguono la focale dalla distanza dal suolo), con entrambi i motori. Senza vincoli "
+                "un blocco nadirale su terreno piatto si piega a cupola mentre l'errore di riproiezione resta lo "
+                "stesso: se l'ottimizzazione allontana le camere dalle loro posizioni accurate (oltre 3 volte lo "
+                "scarto di prima e 30 cm in piu'), si rimette l'allineamento di prima - o piegava il blocco, o le "
+                "posizioni non concordano con i punti di controllo; per tenerla, togli la spunta alle camere nel "
+                "pannello Riferimenti. Con COLMAP le scelte del motore proprio valgono come automatico.") + "\n\n" + self._gnss_hold_text(sfm.gnss_hold(ch, with_markers)))
         if not v:
             return
 
@@ -4118,6 +4119,18 @@ class MainWindow(QMainWindow):
 
         def done(err):
             rep = ch.meta.get("sfm", {}).get("optimize", {})
+            offsets = rep.get("camera_offsets")
+            if rep.get("reverted"):  # the report describes the alignment kept, the run undone is under "undone"
+                text = tr("Errore di riproiezione {0:.3f} px (l'allineamento tenuto)", err)
+                self.log_pane.info(tr("Ottimizzazione camere: ") + text)
+                self.statusBar().showMessage(text, 15000)
+                self._warn(tr("Ottimizzazione annullata: le camere finivano a {0} dalle loro posizioni GNSS (prima "
+                              "{1}). O l'ottimizzazione piegava il blocco, o le posizioni GNSS non concordano con i "
+                              "punti di controllo. E' stato rimesso l'allineamento di prima. Per tenere "
+                              "un'ottimizzazione che allontana le camere dalle loro posizioni, togli la spunta alle "
+                              "camere nel pannello Riferimenti (tasto destro: Non usare i riferimenti delle camere) e "
+                              "ripetila.", _length(offsets["after"]), _length(offsets["before"])))
+                return
             text = tr("Errore di riproiezione {0:.3f} px", err)
             b, a = rep.get("before", {}), rep.get("after", {})
 
@@ -4142,16 +4155,16 @@ class MainWindow(QMainWindow):
             if held.get("photos"):
                 text += tr("; blocco tenuto dalle posizioni GNSS di {0} foto ({1})", held["photos"],
                            self._gnss_states_text(held["states"]))
-            offsets = rep.get("camera_offsets")
-            if offsets and not rep.get("reverted"):
+            elif held.get("termination") and not held.get("usable"):
+                text += tr("; la compensazione con le posizioni GNSS non e' riuscita ({0}): il blocco resta come "
+                           "l'ha lasciato l'allineamento", held["termination"])
+            if rep.get("focal_held"):
+                text += tr("; focale dell'allineamento tenuta")
+            if offsets:
                 text += tr("; scarto delle camere dalle posizioni GNSS {0} -> {1}", _length(offsets["before"]),
                            _length(offsets["after"]))
             self.log_pane.info(tr("Ottimizzazione camere: ") + text)
             self.statusBar().showMessage(text, 15000)
-            if offsets and rep.get("reverted"):
-                self._warn(tr("L'ottimizzazione piegava il blocco: le camere finivano a {0} dalle loro posizioni "
-                              "GNSS (prima {1}). E' stato rimesso l'allineamento di prima.",
-                              _length(offsets["after"]), _length(offsets["before"])))
 
         self.run_task("Ottimizzazione camere", job, done)
 

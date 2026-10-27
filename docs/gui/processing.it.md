@@ -56,9 +56,16 @@ Senza né gli uni né le altre, un blocco nadirale su terreno piatto può piegar
 riproiezione resta lo stesso: la distorsione radiale lo compensa nelle foto (82 riprese RTK fix di un P4
 Multispectral finivano a metri dalle loro posizioni). **Una rete di sicurezza** controlla ogni ottimizzazione:
 quando le camere finiscono più lontane dalle loro posizioni GNSS accurate di tre volte lo scarto che avevano, e di
-30 cm più di quello, si rimette l'allineamento di prima, e il registro e un messaggio lo dicono. *non usate* lascia fuori le
-posizioni (l'ottimizzazione delle versioni precedenti, sempre sotto la rete). Dalla riga di comando:
-`ppg optimize progetto.ppg --gnss auto|off` (`plain` e `bias` con `--engine ppg`).
+30 cm più di quello, l'ottimizzazione viene annullata e si rimette l'allineamento di prima (anche quando si ferma
+per un errore o viene annullata a mano). O piegava il blocco, o le posizioni non concordano con i punti di
+controllo (una base su un punto sbagliato, posizioni in un altro sistema di quote): per tenere un'ottimizzazione
+così, togli la spunta alle camere in *Riferimenti* (clic destro: *Non usare i riferimenti delle camere*) e
+ripetila. *non usate* lascia fuori le posizioni (l'ottimizzazione delle versioni precedenti, sempre sotto la
+rete). Il motore *Proprio* in *automatico* tiene il blocco allo stesso modo, focale compresa; *usate con la loro
+accuratezza* e *usate, con un bias per volo* rifiniscono la focale (con un bias per volo la rete giudica ogni
+posizione meno il bias del suo volo). Dalla riga di comando: `ppg optimize progetto.ppg --gnss auto|off`
+(`plain` e `bias` con `--engine ppg`); l'uscita dice quante foto hanno tenuto il blocco e se la focale è rimasta
+quella dell'allineamento.
 
 ### Diagnostica dell'allineamento
 

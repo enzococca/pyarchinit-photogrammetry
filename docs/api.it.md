@@ -479,16 +479,24 @@ Senza punti fissi `gnss="auto"` (il predefinito) tiene il blocco alle posizioni 
 foto (accuratezza orizzontale media entro `engine.sfm.GNSS_PRIOR_MAX_M`, 0,5 m: fix, float, PPK),
 sparse su tutto il blocco: il pose-prior adjuster di COLMAP, ogni posizione con la sua covarianza
 portata nel sistema interno, la focale dell'allineamento tenuta ferma (foto che guardano in basso da
-una sola quota non la distinguono dalla distanza dal suolo). `engine.sfm.gnss_hold(chunk)` dice che
-cosa faranno le posizioni, `report["gnss"]` quante foto hanno tenuto il blocco; `gnss="off"` le lascia
-fuori. Una rete di sicurezza per ogni motore: quando le camere finiscono più lontane dalle loro
-posizioni accurate di 3 volte lo scarto di prima e di 0,3 m più di quello (scarto quadratico medio; dopo
-la similarità che meglio colloca il blocco quando l'ottimizzazione calcola una nuova georeferenziazione),
-si rimette l'allineamento di prima, modello su disco compreso (`report["reverted"]`,
-`report["camera_offsets"]`).
+una sola quota non la distinguono dalla distanza dal suolo). I punti fissi sono
+`engine.sfm.fixed_points_hold(chunk, use_markers)`, l'unica regola dei due motori e del dialogo;
+`engine.sfm.gnss_hold(chunk)` dice che cosa faranno le posizioni. `report["gnss"]` dice quante foto
+hanno tenuto il blocco, con la `termination` della soluzione e se è `usable` (una soluzione che non lo è
+non tiene nulla), `report["focal_held"]` se la focale dell'allineamento è rimasta quella; `gnss="off"`
+lascia fuori le posizioni. Una rete di sicurezza per ogni motore: quando le camere finiscono più lontane
+dalle loro posizioni accurate di 3 volte lo scarto di prima e di 0,3 m più di quello (scarto quadratico
+medio; dopo la similarità che meglio colloca il blocco quando l'ottimizzazione calcola una nuova
+georeferenziazione; ogni posizione meno il bias del suo volo dopo la nostra compensazione con
+`gnss="bias"`), l'ottimizzazione viene annullata: piegava il blocco, o le posizioni non concordano con i
+punti di controllo (per tenerla, disattivare i riferimenti delle camere). Si rimette l'allineamento di
+prima, modello su disco compreso, e il resoconto descrive quello (`reprojection_error`, `reverted`,
+`camera_offsets`; l'ottimizzazione annullata in `undone`). L'allineamento torna anche quando
+l'ottimizzazione si ferma per un errore o viene annullata a mano.
 
-`engine="ppg"` usa invece la nostra compensazione (sotto), con `gnss="plain"` o `"bias"` (`"auto"`
-vale `"plain"` quando le foto hanno posizioni accurate) e `rolling_shutter=True`.
+`engine="ppg"` usa invece la nostra compensazione (sotto), con `gnss="plain"` o `"bias"` (entrambe
+rifiniscono la focale; `"auto"` vale `"plain"` con la focale tenuta quando le posizioni possono tenere il
+blocco e nessun punto fisso lo tiene, altrimenti `"off"`) e `rolling_shutter=True`.
 
 ### La nostra compensazione
 

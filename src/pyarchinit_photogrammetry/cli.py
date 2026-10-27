@@ -798,14 +798,17 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
              engine: str = typer.Option("colmap", help="colmap, or ppg: our own adjustment (control points by their "
                                                        "accuracy, bars as distances, GNSS, rolling shutter)"),
              gnss: str = typer.Option("auto", help="the GNSS positions of the photos: auto (the accurate ones - fix, float, "
-                                                   "PPK, 0.5 m or better - hold the block when fewer than 3 control "
-                                                   "points take part), off; with --engine ppg also plain (every "
-                                                   "position by its accuracy) or bias (with a bias per flight)"),
+                                                   "PPK, 0.5 m or better - hold the block when no fixed points do: "
+                                                   "fewer than 3 control points, fewer than 2 control bars; the focal "
+                                                   "length of the alignment is then kept), off; with --engine ppg also "
+                                                   "plain (every position by its accuracy) or bias (with a bias per "
+                                                   "flight), both refining the focal length"),
              rolling_shutter: bool = typer.Option(False, help="with --engine ppg: a velocity per photo while it is read"),
              chunk: Optional[str] = None):
     """Optimize the cameras (global bundle adjustment), on the control points and scale bars when there are any, else
-    held by the accurate GNSS positions of the photos; an optimisation that bends the block away from those
-    positions is undone."""
+    held by the accurate GNSS positions of the photos; an optimisation that takes the cameras away from those
+    positions is undone (it bent the block, or the positions disagree with the control points: switch off the camera
+    references to keep it)."""
     from .engine.sfm import GNSS_MODES
 
     if gnss not in GNSS_MODES:
@@ -820,16 +823,25 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
         ch.update_transform()
     doc.save()
     rep = ch.meta["sfm"]["optimize"]
+    offsets = rep.get("camera_offsets")
+    if rep.get("reverted"):  # the report describes the alignment kept; the run undone is under "undone"
+        typer.echo(f"reprojection error {err:.3f} px (the alignment kept); the optimisation was undone: the cameras "
+                   f"ended {offsets['after']:.3f} m off their GNSS positions ({offsets['before']:.3f} m before) - it "
+                   "bent the block, or the positions disagree with the control points. To keep such an optimisation, "
+                   "switch off the camera references (the photos in Riferimenti in the window, "
+                   "camera.reference.enabled = False in Python) and optimise again")
+        return
     text = f"reprojection error {err:.3f} px"
     held = rep.get("gnss") or {}
     if held.get("photos"):
         text += (f", held by the GNSS positions of {held['photos']} photos ("
                  + ", ".join(f"{state} {n}" for state, n in sorted(held["states"].items(), key=lambda s: -s[1])) + ")")
-    offsets = rep.get("camera_offsets")
-    if offsets and rep.get("reverted"):
-        text += (f"; the optimisation bent the block (cameras {offsets['after']:.3f} m off their GNSS positions, "
-                 f"{offsets['before']:.3f} m before): the alignment before it is kept")
-    elif offsets:
+    elif held.get("termination") and not held.get("usable"):
+        text += (f", the adjustment held by the GNSS positions failed ({held['termination']}): the block is left as "
+                 "the alignment made it")
+    if rep.get("focal_held"):
+        text += ", focal length of the alignment held"
+    if offsets:
         text += f", camera offsets from their GNSS positions {offsets['before']:.3f} -> {offsets['after']:.3f} m (RMS)"
     b, a = rep.get("before", {}), rep.get("after", {})
     if rep.get("control_points"):

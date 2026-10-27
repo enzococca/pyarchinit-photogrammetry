@@ -54,10 +54,16 @@ cameras* adjusts the block again with them and with the [scale bars](photos-mark
 Held by neither, a nadir block over flat ground can bend into a dome while the reprojection error stays the same:
 the radial distortion makes up for it in the photos (82 RTK-fix captures of a P4 Multispectral ended metres from
 their positions). **A safety net** watches every optimisation: when the cameras end farther from their accurate
-GNSS positions than three times the offset they had, and 30 cm more than it, the alignment before it is put
-back, and the log and a message say so. *not used* leaves the positions out (the optimisation of earlier versions, still
-watched by the net). From the command line: `ppg optimize project.ppg --gnss auto|off` (`plain` and `bias` with
-`--engine ppg`).
+GNSS positions than three times the offset they had, and 30 cm more than it, the optimisation is undone and the
+alignment before it put back (also when it stops with an error or is cancelled). Either it bent the block, or the
+positions disagree with the control points (a base on a wrong point, positions in another height system): to
+keep such an optimisation, untick the cameras in *Reference* (right click: *Do not use the camera references*)
+and run it again. *not used* leaves the positions out (the optimisation of earlier versions, still watched by the
+net). The engine *Own* on *automatic* holds the block the same way, focal length included; *used with their
+accuracy* and *used, with a bias per flight* refine the focal length (with a bias per flight the net judges each
+position less the bias of its flight). From the command line: `ppg optimize project.ppg --gnss auto|off`
+(`plain` and `bias` with `--engine ppg`); the output says how many photos held the block and whether the focal
+length was kept.
 
 ### Diagnostics of the alignment
 

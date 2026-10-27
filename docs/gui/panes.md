@@ -111,7 +111,9 @@ touched; the next alignment leaves them out), markers (with the scale bars that 
 The markers and the cameras with their coordinates, as Metashape's Reference pane:
 
 * the markers with *Use* and *Check*, coordinates and accuracy (double click to change them), the errors in
-  metres and in pixels; the camera positions;
+  metres and in pixels; the camera positions, each with its tick: unticked, the position of the photo no longer
+  counts in the georeference and in the optimisation (right click: *Use the camera references* / *Do not use the
+  camera references*, for the selected cameras or all of them);
 * the scale bars below the markers ([scale bars](photos-markers.md#scale-bars));
 * the RMSE of the control and check points and of the bars.
 

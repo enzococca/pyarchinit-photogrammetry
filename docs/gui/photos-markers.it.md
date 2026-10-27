@@ -64,9 +64,9 @@ fatto di pari: *Allinea foto...* tiene il blocco alle posizioni durante l'alline
 e la scelta automatica torna all'incrementale quando il blocco globale le manca), e *Ottimizza camere*: con il
 motore predefinito, COLMAP, le posizioni accurate (fix, float, PPK: 0,5 m o meglio) tengono il blocco quando non
 lo tengono 3 punti di controllo o 2 barre di scala (*Posizioni GNSS delle foto*: *automatico*, vedi
-[Ottimizzare le camere](processing.md#ottimizzare-le-camere)); con il motore *Proprio* ogni posizione entra
-secondo la sua accuratezza quando quell'opzione è su *usate con la loro accuratezza (motore proprio)* o *usate,
-con un bias per volo (motore proprio)*.
+[Ottimizzare le camere](processing.md#ottimizzare-le-camere)), e così anche con il motore *Proprio* su
+*automatico*; con il motore *Proprio* ogni posizione entra secondo la sua accuratezza quando quell'opzione è su
+*usate con la loro accuratezza (motore proprio)* o *usate, con un bias per volo (motore proprio)*.
 
 **La tabella** ha una riga per volo (una pausa di oltre 20 minuti ne comincia un altro; le foto senza data sono
 la riga *senza data*): le foto con una posizione fix, float, singola, con una posizione e nessun dato RTK, senza

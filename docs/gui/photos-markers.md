@@ -65,9 +65,9 @@ alignment*, on when the photos have positions; the global method does not use th
 goes back to the incremental one when the global block misses them), and *Optimise cameras*: with its default
 engine, COLMAP, the accurate positions (fix, float, PPK: 0.5 m or better) hold the block when 3 control points or
 2 scale bars do not (*GNSS positions of the photos*: *automatic*, see
-[Optimising the cameras](processing.md#optimising-the-cameras)); with the engine *Own* every position takes part
-by its accuracy when that option is *used with their accuracy (own engine)* or *used, with a bias per flight (own
-engine)*.
+[Optimising the cameras](processing.md#optimising-the-cameras)), and so do they with the engine *Own* on
+*automatic*; with the engine *Own* every position takes part by its accuracy when that option is *used with their
+accuracy (own engine)* or *used, with a bias per flight (own engine)*.
 
 **The table** has a row per flight (a pause of more than 20 minutes starts another; the photos with no date are
 the *no date* row): the photos with a fix, a float, a single position, with a position and no RTK data, with no
