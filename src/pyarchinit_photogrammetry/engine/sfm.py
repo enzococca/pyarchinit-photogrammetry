@@ -232,10 +232,12 @@ def _nearest_pairs(positions: dict[str, np.ndarray], neighbours: int) -> set[tup
 
 
 def _reference_positions(chunk: Chunk, names: dict[int, str]) -> dict[str, np.ndarray]:
-    """The reference positions of the photos (the GPS of the drone) on metric axes, by name."""
+    """The reference positions of the photos (the GPS of the drone) on metric axes, by name: only relative to each
+    other (no geoid needed: :func:`..markers.gcp.camera_references` with ``relative``)."""
     from ..markers.gcp import camera_references
 
-    positions, _crs = camera_references(chunk, [c for c in chunk.cameras if c.enabled and c.key in names])
+    positions, _crs = camera_references(chunk, [c for c in chunk.cameras if c.enabled and c.key in names],
+                                        relative=True)
     return {names[key]: p for key, p in positions.items()}
 
 
@@ -767,6 +769,7 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     guided matching, which is COLMAP's."""
     import pycolmap
 
+    from ..markers import gcp
     from . import learned
     from .masks import colmap_mask_folder
     from .panorama import panorama_cameras, rig_configs
@@ -777,6 +780,7 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     if matcher not in learned.MATCHERS:
         raise ValueError(f"matcher: one of {', '.join(learned.MATCHERS)}")
     generic, reference = _preselection(pair_selection, generic, reference)
+    gcp.preflight(chunk)  # what would refuse to place the chunk, before the points of the photos are detected
     work = _sfm_dir(chunk)
     db_path = work / "database.db"
     root, names = image_root_and_names(chunk)
@@ -1184,7 +1188,7 @@ def _block_fits_references(chunk: Chunk, rec) -> tuple[bool, float]:
         cam = by_key.get(names.get(image.name)) if image.has_pose else None
         if cam is not None and cam.reference.enabled and cam.reference.location:
             pairs.append((image, cam))
-    positions, _crs = camera_references(chunk, [cam for _image, cam in pairs])
+    positions, _crs = camera_references(chunk, [cam for _image, cam in pairs], relative=True)  # a shape: no geoid
     pairs = [(image, cam) for image, cam in pairs if cam.key in positions]
     src = [np.asarray(image.projection_center(), float) for image, _cam in pairs]
     dst = [positions[cam.key] for _image, cam in pairs]
@@ -1417,7 +1421,10 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = 
     thousand photos sixty times."""
     import pycolmap
 
+    from ..markers import gcp
+
     progress = as_progress(progress)
+    gcp.preflight(chunk, use_gps)  # what would refuse to place the chunk after the alignment, before it
     work = _sfm_dir(chunk)
     db_path = work / "database.db"
     if not db_path.exists():

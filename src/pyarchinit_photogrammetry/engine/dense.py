@@ -60,13 +60,18 @@ def _tool(name: str) -> str:
 
 def aerial_survey(chunk: Chunk | None) -> bool:
     """The photos are a survey from the air: their GPS positions spread over the site (at least ten
-    times their accuracy), not an object, a turntable or a trench of a few metres."""
+    times their accuracy), not an object, a turntable or a trench of a few metres. Their heights do not
+    matter here (no grid of a geoid is needed); a refusal of the grid of a geoid is never taken for an
+    answer, which would change the settings of the alignment and of the dense cloud without a word."""
     if chunk is None:
         return False
+    from ..gnss.heights import GridMissing
     from ..markers.gcp import cameras_span_their_accuracy
 
     try:
         return bool(cameras_span_their_accuracy(chunk))
+    except GridMissing:
+        raise
     except Exception:  # pragma: no cover - references in a CRS that cannot be read
         return False
 

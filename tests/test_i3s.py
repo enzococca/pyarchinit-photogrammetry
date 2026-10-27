@@ -154,6 +154,7 @@ def test_global_mode(processed, tmp_path):
     pkg = i3s.read_slpk(path)
     layer, nodes = pkg["layer"], pkg["nodes"]
     assert layer["spatialReference"]["wkid"] == 4326 and layer["store"]["normalReferenceFrame"] == "earth-centered"
+    assert layer["heightModelInfo"]["heightModel"] == "ellipsoidal"  # on the globe: above the ellipsoid of WGS 84
     lon0, lat0, lon1, lat1 = layer["store"]["extent"]
     assert -180 < lon0 < lon1 < 180 and -90 < lat0 < lat1 < 90
     back = Transformer.from_crs("EPSG:4326", ch.crs, always_xy=True)

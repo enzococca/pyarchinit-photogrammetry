@@ -372,20 +372,27 @@ def camera_reference_errors(chunk) -> dict:
     return out
 
 
-def camera_references(chunk, cameras, crs: str | None = None) -> tuple[dict, str | None]:
+def camera_references(chunk, cameras, crs: str | None = None, relative: bool = False) -> tuple[dict, str | None]:
     """The reference positions of ``cameras`` (those that have one) in one coordinate system: ``({camera key:
     position}, system)``. Every reference is read in its ``meta["reference_crs"]`` (the chunk's when it has none:
     one chunk can hold the GPS of the EXIF in EPSG:4326 and a positions file in a projected system) and converted to
     ``crs``; without it, to metric axes: the chunk's system when it is projected, else the first projected system of
     the references, else the UTM zone of the geographic ones. A reference in ITRF2020 converts at its own epoch, one
     written before the frames as before (:func:`_converted`). A reference that cannot be converted (a local frame and a
-    real coordinate system) is left out."""
+    real coordinate system) is left out.
+
+    ``relative``: only where the photos are relative to each other matters (the pairs of photos, the span of a flight,
+    how a block fits them): without ``crs`` they go on the horizontal part of those metric axes
+    (:func:`..core.crs.horizontal`), through which their heights pass as they are - no grid of a geoid is needed, and a
+    height common to all of them does not matter."""
     groups: dict[str, list] = {}
     for cam in cameras:
         if cam.reference.location:
             groups.setdefault(cam.meta.get("reference_crs", chunk.crs), []).append(cam)
     if crs is None:
         crs = _metric_crs(chunk, groups)
+        if relative:
+            crs = crs_mod.horizontal(crs)
     out = {}
     for ref_crs, cams in groups.items():
         locs = np.array([cam.reference.location for cam in cams], float).reshape(-1, 3)
@@ -443,12 +450,35 @@ def _camera_reference_pairs(chunk) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
             np.asarray([float(np.mean(cam.reference.accuracy)) for cam in cams]))
 
 
+def preflight(chunk, use_gps: bool | None = None) -> None:
+    """The refusal the georeference of ``chunk`` would meet, raised before the work that comes before it (the points
+    of the photos, the alignment): the position of one photo of each system of the references converted as
+    :func:`update_transform` and the pose priors of the alignment convert them all - into the system of the chunk
+    (into the metric axes of the references for a chunk still in a local frame). A conversion that cannot be made -
+    heights above the geoid without the grid of the geoid (:class:`..gnss.heights.GridMissing`), an epoch missing -
+    raises here. Nothing to check when fewer than three photos have a position, for a geographic system (the
+    georeference says it), and - with ``use_gps`` False, the positions not holding the alignment - when three control
+    markers seen in two photos each place the chunk."""
+    cams = [cam for cam in chunk.cameras if cam.enabled and cam.reference.enabled and cam.reference.location]
+    if len(cams) < 3 or crs_mod.is_geographic(chunk.crs):
+        return
+    if use_gps is False:
+        markers = [m for m in chunk.markers if not m.checkpoint and m.reference.enabled and m.reference.location
+                   and (m.position is not None or sum(p.measured for p in m.projections.values()) >= 2)]
+        if len(markers) >= 3:
+            return
+    first: dict[str, object] = {}
+    for cam in cams:
+        first.setdefault(cam.meta.get("reference_crs", chunk.crs), cam)
+    camera_references(chunk, list(first.values()), None if crs_mod.is_local(chunk.crs) else chunk.crs)
+
+
 def cameras_span_their_accuracy(chunk, factor: float = 10.0) -> bool:
     """The camera references (the GPS of the photos) cover an area at least ``factor`` times
     their accuracy: they can place and turn the survey (a flight over a site), not an object
     on a table or a trench of a few metres, where they are only noise."""
     cams = [cam for cam in chunk.aligned_cameras if cam.reference.enabled and cam.reference.location]
-    positions, _crs = camera_references(chunk, cams)
+    positions, _crs = camera_references(chunk, cams, relative=True)  # a span: no geoid needed
     if len(positions) < 3:
         return False
     xy = np.array([positions[cam.key][:2] for cam in cams if cam.key in positions])

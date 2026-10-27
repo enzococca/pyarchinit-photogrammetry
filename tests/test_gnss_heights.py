@@ -110,6 +110,102 @@ def test_without_the_grid_heights_are_refused(tmp_path):
     assert out["plain"][2] == 100.0 and out["geoid_to_plain"][2] == 52.0  # no heights of its own: as they are
 
 
+def test_relative_geometry_needs_no_geoid(tmp_path):
+    """A chunk in a system with EGM2008 heights, photos with GNSS heights above the ellipsoid (an MRK), no grid: what
+    needs only where the photos are relative to each other - a survey from the air or not, the pairs of photos by their
+    positions, the span of the flight - needs no geoid (a height common to all does not matter) and works as in a
+    system without heights; what will put the chunk in its system refuses at once, before the points of the photos are
+    detected or the cameras aligned, naming the grid - unless three control markers place it and the GPS of the photos
+    is not used."""
+    out = _run(tmp_path, '''
+        import pyarchinit_photogrammetry as ppg
+        from pyarchinit_photogrammetry.core.camera import Camera, Reference
+        from pyarchinit_photogrammetry.engine import dense, sfm
+        from pyarchinit_photogrammetry.gnss import apply as gnss_apply
+        from pyarchinit_photogrammetry.markers import gcp
+
+        def chunk(system):
+            ch = ppg.Document().add_chunk()
+            ch.crs = system
+            for key in range(8):  # a flight of 8 photos over 300 m, 2 cm fixes, aligned: a survey from the air
+                cam = Camera(key=key, label=f"c{key}", path=str(Path(sys.argv[1]) / f"c{key}.jpg"), sensor_key=0)
+                gnss_apply.set_camera_position(cam, [12.4964 + key % 4 * 0.001, 41.9028 + key // 4 * 0.001, 100.0],
+                                               "EPSG:4979", [0.02, 0.02, 0.04], "mrk", status="fix",
+                                               height="ellipsoidal")
+                cam.transform = np.eye(4)
+                cam.transform[:3, 3] = [key % 4 * 83.0, key // 4 * 111.0, 0.0]
+                ch.cameras.append(cam)
+            return ch
+
+        out = {}
+        for system in ("EPSG:32633", "EPSG:32633+3855"):
+            ch = chunk(system)
+            names = {c.key: f"{c.label}.jpg" for c in ch.cameras}
+            out[system] = {"aerial": dense.aerial_survey(ch), "mapper": sfm.auto_mapper(ch, 100),
+                           "span": gcp.cameras_span_their_accuracy(ch),
+                           "pairs": len(sfm._reference_pairs(ch, names, neighbors=3) or [])}
+        ch = chunk("EPSG:32633+3855")
+        out["match"] = refused(lambda: ch.match_photos())
+        out["matched"] = "sfm" in ch.meta  # nothing was started
+        out["align"] = refused(lambda: ch.align_cameras(use_gps=False))
+        out["align_gps"] = refused(lambda: ch.align_cameras())
+        for i in range(3):  # three control markers, in the system of the chunk, seen by two photos each
+            m = ch.add_marker(f"P{i}")
+            m.reference = Reference(location=[292400.0 + 50 * i, 4642100.0 + 30 * i, 52.0], accuracy=[0.01] * 3)
+            for cam in ch.cameras[i:i + 2]:
+                ch.add_marker_projection(m, cam, 100.0, 100.0)
+        try:
+            ch.align_cameras(use_gps=False)
+        except Exception as exc:  # past the check: to the work, which needs the matches
+            out["markers_place_it"] = f"{type(exc).__name__}: {exc}"
+        print(json.dumps(out))
+    ''', str(tmp_path / "photos"))
+    plain, geoid = out["EPSG:32633"], out["EPSG:32633+3855"]
+    assert plain == geoid and plain["aerial"] is True and plain["mapper"] == "global" and plain["span"] is True
+    assert plain["pairs"] > 0
+    _says_how_to_get_egm2008(out["match"])
+    assert out["matched"] is False
+    _says_how_to_get_egm2008(out["align"])
+    _says_how_to_get_egm2008(out["align_gps"])
+    assert out["markers_place_it"].startswith("RuntimeError") and "match_photos" in out["markers_place_it"]
+
+
+def test_the_exports_on_the_globe_take_heights_above_the_ellipsoid(tmp_path):
+    """3D Tiles and I3S place the model on the globe by heights above the ellipsoid of WGS 84: from a system with
+    EGM2008 heights they are converted with the grid (40 m higher with a geoid of 40 m), refused without it; from a
+    system without heights of its own they go as they are, as before. I3S takes a system with EGM2008 heights (its plan
+    is projected, with an EPSG code)."""
+    out = _run(tmp_path, '''
+        from pyproj import Transformer
+        import pyarchinit_photogrammetry as ppg
+        from pyarchinit_photogrammetry.io import i3s, web
+
+        utm = crs.transform_points(ROME, "EPSG:4979", "EPSG:32633")[0]
+        centre = [utm[0], utm[1], 60.0]
+        to_ecef = Transformer.from_crs("EPSG:4979", "EPSG:4978", always_xy=True)
+
+        def placed(system):
+            ch = ppg.Document().add_chunk()
+            ch.crs = system
+            return [web._enu_to_ecef(ch, centre)[12:15], i3s._Global(system).geo(np.array([centre]))[0].tolist()]
+
+        out = {"epsg": i3s.projected_epsg("EPSG:32633+3855"), "plain": placed("EPSG:32633"),
+               "refused": refused(lambda: placed("EPSG:32633+3855"))}
+        write_grid(value=40.0)
+        out["geoid"] = placed("EPSG:32633+3855")
+        out["expected"] = [list(to_ecef.transform(*ROME[0][:2], h)) for h in (60.0, 100.0)]
+        out["rome"] = ROME[0][:2]
+        print(json.dumps(out))
+    ''')
+    assert out["epsg"] == 32633
+    _says_how_to_get_egm2008(out["refused"])
+    ecef60, ecef100 = out["expected"]
+    tiles, geo = out["plain"]
+    assert tiles == pytest.approx(ecef60, abs=1e-3) and geo == pytest.approx([*out["rome"], 60.0], abs=1e-6)
+    tiles, geo = out["geoid"]
+    assert tiles == pytest.approx(ecef100, abs=1e-3) and geo == pytest.approx([*out["rome"], 100.0], abs=1e-6)
+
+
 def test_the_folder_of_the_grids_leaves_proj_data_to_rasterio(tmp_path):
     """The folder of the grids is in pyproj's search, not in PROJ_DATA: rasterio hands PROJ_DATA to GDAL as one folder
     at every rasterio.open, and with two folders there GDAL lost proj.db (every GeoTIFF with a system, in this process
@@ -208,7 +304,13 @@ def test_survey_crs(tmp_path):
     and 34), ETRS89 / UTM elsewhere in Europe, WGS 84 / UTM beyond; with heights above EGM2008 or none of their own."""
     out = _run(tmp_path, '''
         places = {"rome": (12.4964, 41.9028), "milan": (9.19, 45.4642), "lecce": (18.1718, 40.3515),
-                  "paris": (2.3522, 48.8566), "new_york": (-74.006, 40.7128), "santiago": (-70.6693, -33.4489)}
+                  "paris": (2.3522, 48.8566), "new_york": (-74.006, 40.7128), "santiago": (-70.6693, -33.4489),
+                  "cagliari": (9.1217, 39.2238), "palermo": (13.3615, 38.1157),
+                  # in the box of the area of use of RDN2008, not in Italy
+                  "bern": (7.4474, 46.948), "geneva": (6.1432, 46.2044), "nice": (7.262, 43.7102),
+                  "ajaccio": (8.7369, 41.9192), "tunis": (10.1815, 36.8065), "ljubljana": (14.5058, 46.0569),
+                  "klagenfurt": (14.3053, 46.6247), "zagreb": (15.9819, 45.815), "valletta": (14.5146, 35.8989),
+                  "sarajevo": (18.4131, 43.8563)}
         out = {}
         for name, (lon, lat) in places.items():
             for frame in ("WGS84", "ETRF2000"):
@@ -223,6 +325,12 @@ def test_survey_crs(tmp_path):
     assert out["milan ETRF2000"] == "EPSG:7791+3855"
     assert out["new_york WGS84"] == "EPSG:32618+3855"
     assert out["lecce ETRF2000"] == "EPSG:7793+3855"  # Salento, east of 18 E
+    assert out["cagliari ETRF2000"] == "EPSG:7791+3855" and out["palermo ETRF2000"] == "EPSG:7792+3855"
+    for city in ("bern", "geneva", "nice", "ajaccio", "tunis"):  # ETRS89 / UTM 32N, not RDN2008
+        assert out[f"{city} ETRF2000"] == "EPSG:25832+3855", city
+    for city in ("ljubljana", "klagenfurt", "zagreb", "valletta"):
+        assert out[f"{city} ETRF2000"] == "EPSG:25833+3855", city
+    assert out["sarajevo ETRF2000"] == "EPSG:25834+3855"
     assert out["rome WGS84"] == "EPSG:32633+3855" and out["milan WGS84"] == "EPSG:32632+3855"
     assert out["paris ETRF2000"] == "EPSG:25831+3855"  # ETRS89 / UTM 31N outside Italy
     assert out["new_york ETRF2000"] == "EPSG:32618+3855"  # no ETRS89 / UTM there
@@ -379,6 +487,10 @@ def test_set_survey_crs(tmp_path):
                                      - crs.transform_points([utm[0] + [1.0, 2.0, -3.0]], "EPSG:32633",
                                                             "EPSG:32632")[0]).max())
         out["geographic"] = refused(lambda: heights.set_survey_crs(ch, "EPSG:4326"))
+        before = state(ch)
+        out["not_projected"] = [refused(lambda: heights.set_survey_crs(ch, system))
+                                for system in ("EPSG:4978", "EPSG:3855", "EPSG:4326+3855")]
+        out["still"] = state(ch) == before
         before = state(bare)
         out["nothing_fits"] = refused(lambda: heights.set_survey_crs(bare, "EPSG:32632"))
         out["bare_unchanged"] = state(bare) == before
@@ -396,5 +508,186 @@ def test_set_survey_crs(tmp_path):
     assert out["pinned"] == "EPSG:32633"
     assert out["cameras"] < 0.01 and out["marker"] < 1e-6
     assert "geographic" in out["geographic"]
+    geocentric, vertical, geographic = out["not_projected"]  # only a projected plan: EPSG:4978 was taken
+    assert "geocentric" in geocentric and "vertical" in vertical and "geographic" in geographic and out["still"]
     assert "nothing fits" in out["nothing_fits"] and out["bare_unchanged"]
     assert out["loose"] == {"crs": "EPSG:7792+3855", "updated": False, "rebuild": []}
+
+
+# a chunk aligned and placed by the GNSS positions of its photos (an MRK), in EPSG:32633: what a survey is before the
+# system is changed; ``utm`` the positions of the photos in it
+_SURVEYED = '''
+import copy
+import shapely
+import pyarchinit_photogrammetry as ppg
+from pyarchinit_photogrammetry.core.camera import Camera, Reference
+from pyarchinit_photogrammetry.engine.region import Region
+from pyarchinit_photogrammetry.gnss import apply as gnss_apply
+
+places = [[12.4964 + dx, 41.9028 + dy, 100.0 + dz] for dx, dy, dz in
+          [(0, 0, 0), (0.001, 0, 1), (0, 0.001, 2), (0.001, 0.001, 0.5)]]
+utm = crs.transform_points(places, "EPSG:4979", "EPSG:32633")
+
+
+def surveyed(doc=None):
+    ch = (doc or ppg.Document()).add_chunk()
+    ch.crs = "EPSG:32633"
+    for key, (place, at) in enumerate(zip(places, utm)):
+        cam = Camera(key=key, label=f"c{key}", path=f"c{key}.jpg", sensor_key=0)
+        gnss_apply.set_camera_position(cam, place, "EPSG:4979", [0.02, 0.02, 0.04], "mrk", status="fix",
+                                       height="ellipsoidal")
+        cam.transform = np.eye(4)
+        cam.transform[:3, 3] = at - utm.mean(axis=0)
+        ch.cameras.append(cam)
+    ch.update_transform()
+    return ch
+'''
+
+
+def test_set_survey_crs_converts_what_was_drawn_on_the_chunk(tmp_path):
+    """Into another system go also what was drawn on the products of the chunk - the units, the spot heights, the
+    measuring points, the stones of the orthomosaic, the sections of the project, the patches of the orthomosaic and
+    of the texture, the colour chart (their plan by the conversion of the systems, the heights by the rule of the
+    conversions) - and the region of the reconstruction, which follows the chunk; what cannot be converted (versions,
+    elevations, rasters of other products, proxies, the drawings of the sections) is listed as kept in the old system.
+    What would change can be asked before (nothing changes then), and a refusal leaves everything as it was, the file
+    of the sections too."""
+    out = _run(tmp_path, _SURVEYED + textwrap.dedent('''
+        folder = Path(sys.argv[1])
+        doc = ppg.Document()
+        ch = surveyed(doc)
+        doc.save(folder / "scavo.ppg")
+        x0, y0, _ = utm.mean(axis=0)
+        square = [(x0, y0), (x0 + 5, y0), (x0 + 5, y0 + 5), (x0, y0 + 5)]
+        wkt = shapely.Polygon(square).wkt
+        ch.meta["drawings"] = {
+            "units": [{"wkt": wkt, "sito": "S", "area": "1", "us": "1", "tipo": "US", "attributes": {}}],
+            "quote": [{"x": x0 + 1, "y": y0 + 1, "quota_q": 99.5, "sito_q": "S"}],
+            "points": [{"x": x0 + 2, "y": y0 + 2, "z": 98.25, "temp_c": 20.5}]}
+        ch.products.update({"orthomosaic": "orthomosaic.tif", "dem": "dem.tif"})
+        triangle = shapely.Polygon([(0, 0), (1, 0), (1, 1)]).wkt  # a stone of an elevation, in its own frame
+        ch.meta["stones"] = {"orthomosaic.tif": [wkt], "prospetto_nord.tif": [triangle]}
+        patch = {"id": "p1", "polygon": [list(p) for p in square], "photos": ["c0"], "mode": "assign", "surface": "dem"}
+        ch.meta["orthomosaic"] = {"patches": [dict(patch)], "applied_patches": [dict(patch)]}
+        ch.meta["texture"] = {"patches": [{"faces": 10, "photos": ["c1"], "mode": "assign",
+                                           "polygon": [list(p) for p in square]}]}
+        region = Region([x0, y0, 95.0], [40.0, 30.0, 20.0], np.eye(3))
+        ch.meta["region"] = region.to_dict()
+        ch.meta["colour_chart"] = {"ccm": [[1, 0, 0]], "loss": 0.1, "bounds": [x0, y0, x0 + 1, y0 + 0.5]}
+        ch.meta["versions"] = {"dem": [{"id": "v1", "name": "DEM del 30/09"}], "point_cloud": [{"id": "v2",
+                                                                                              "name": "Nuvola"}]}
+        ch.meta["elevations"] = [{"id": "e1", "name": "Prospetto nord"}]
+        ch.meta["multispectral"] = {"reflectance": "multispectral/reflectance.tif",
+                                    "indices": {"NDVI": {"file": "multispectral/NDVI.tif"}}}
+        ch.meta["thermal"] = {"file": "multispectral/thermal.tif"}
+        ch.meta["proxies"] = [{"name": "US1", "file": "proxies/US1.ply"}]
+        sections_file = folder / "sezioni" / "sezioni.json"
+        sections_file.parent.mkdir()
+        sections_file.write_text(json.dumps([{"label": "Sezione 1", "p1": [x0, y0], "p2": [x0 + 10, y0], "length": 10.0,
+                                              "svg": "s1.svg", "dxf": "s1.dxf", "kind": "vertical"}]))
+
+        def state(c):
+            return json.dumps([c.crs, c.transform.tolist(), c.meta, sections_file.read_text()], sort_keys=True,
+                              default=str)
+
+        def moved(points):  # plan, from the old system to the new one
+            pts = np.column_stack([np.asarray(points, float)[:, :2], np.zeros(len(points))])
+            return crs.transform_points(pts, "EPSG:32633", "EPSG:32632")[:, :2]
+
+        before = state(ch)
+        preview = heights.survey_crs_changes(ch, "EPSG:32632")
+        out = {"preview_changes_nothing": state(ch) == before,
+               "preview": {k: preview[k] for k in ("refit", "convert", "rebuild", "kept", "heights_unchanged")}}
+        # a system it cannot go into without the grid: refused after the drawings were converted aside
+        out["refused"] = refused(lambda: heights.set_survey_crs(ch, "EPSG:7792+3855"))
+        out["refused_unchanged"] = state(ch) == before
+        old = ch.transform.copy()
+        result = heights.set_survey_crs(ch, "EPSG:32632")
+        out["result"] = {k: result[k] for k in ("crs", "updated", "rebuild", "kept", "converted", "heights_unchanged")}
+        d = ch.meta["drawings"]
+        unit = np.asarray(shapely.from_wkt(d["units"][0]["wkt"]).exterior.coords)[:4]
+        out["unit"] = float(np.abs(unit - moved(square)).max())
+        q, p = d["quote"][0], d["points"][0]
+        out["quote"] = [float(np.abs(np.array([q["x"], q["y"]]) - moved([[x0 + 1, y0 + 1]])[0]).max()), q["quota_q"],
+                        q["sito_q"]]
+        out["point"] = [float(np.abs(np.array([p["x"], p["y"]]) - moved([[x0 + 2, y0 + 2]])[0]).max()), p["z"],
+                        p["temp_c"]]
+        stone = np.asarray(shapely.from_wkt(ch.meta["stones"]["orthomosaic.tif"][0]).exterior.coords)[:4]
+        out["stone"] = float(np.abs(stone - moved(square)).max())
+        out["elevation_stone"] = ch.meta["stones"]["prospetto_nord.tif"]
+        out["patches"] = [float(np.abs(np.asarray(x["polygon"]) - moved(square)).max())
+                          for x in (ch.meta["orthomosaic"]["patches"][0], ch.meta["orthomosaic"]["applied_patches"][0],
+                                    ch.meta["texture"]["patches"][0])]
+        s = json.loads(sections_file.read_text())[0]
+        ends = moved([[x0, y0], [x0 + 10, y0]])
+        out["section"] = [float(np.abs(np.array([s["p1"], s["p2"]]) - ends).max()),
+                          abs(s["length"] - float(np.hypot(*(ends[1] - ends[0])))), s["svg"]]
+        follows = ch.transform @ np.linalg.inv(old)  # the chunk, from its old world to its new one
+        r = Region.from_dict(ch.meta["region"])
+        scale = np.linalg.norm(follows[:3, 0])
+        expected = Region(follows[:3, :3] @ region.center + follows[:3, 3], region.size * scale,
+                          follows[:3, :3] / scale)
+        out["region"] = float(np.abs(r.corners() - expected.corners()).max())
+        b = ch.meta["colour_chart"]["bounds"]
+        corners = moved([[x0, y0], [x0 + 1, y0], [x0, y0 + 0.5], [x0 + 1, y0 + 0.5]])
+        out["chart"] = float(np.abs(np.array(b) - [*corners.min(axis=0), *corners.max(axis=0)]).max())
+        other = doc.add_chunk()  # another chunk of the project in the system of this one: the sections stay with it
+        other.crs = ch.crs
+        again = heights.survey_crs_changes(ch, "EPSG:32633")
+        out["shared_sections"] = [again["convert"]["sections"], [k for k in again["kept"] if k["what"] == "sections"]]
+        loose = doc.add_chunk()  # a local frame: what was drawn on it stays where it is
+        loose.meta["drawings"] = {"units": [{"wkt": wkt}], "quote": []}
+        loose.meta["stones"] = {"orthomosaic.tif": [wkt]}
+        out["local"] = heights.survey_crs_changes(loose, "EPSG:32633")
+        print(json.dumps(out))
+    '''), str(tmp_path))
+    assert out["preview_changes_nothing"]
+    _says_how_to_get_egm2008(out["refused"])
+    assert out["refused_unchanged"]
+    result = out["result"]
+    assert result["crs"] == "EPSG:32632" and result["updated"] is True and result["heights_unchanged"] is False
+    assert result["rebuild"] == ["dem", "orthomosaic"]
+    assert result["converted"] == {"markers": 0, "units": 1, "quote": 1, "points": 1, "stones": 1, "sections": 1,
+                                   "patches": 1, "texture_patches": 1, "region": 1, "colour_chart": 1}
+    kept = {k["what"]: k["names"] for k in result["kept"]}
+    assert kept == {"versions": ["dem: DEM del 30/09"], "elevations": ["Prospetto nord"],
+                    "multispectral": ["reflectance", "NDVI"], "thermal": ["temperature"], "proxies": ["US1"],
+                    "stones": ["prospetto_nord.tif"], "section_drawings": ["Sezione 1"]}
+    assert out["preview"] == {"refit": True, "convert": result["converted"], "rebuild": result["rebuild"],
+                              "kept": result["kept"], "heights_unchanged": False}
+    assert out["unit"] < 1e-6 and out["stone"] < 1e-6 and max(out["patches"]) < 1e-6 and out["chart"] < 1e-6
+    assert out["quote"][0] < 1e-6 and out["quote"][1:] == [99.5, "S"]  # 2D to 2D: the heights as they are
+    assert out["point"][0] < 1e-6 and out["point"][1:] == [98.25, 20.5]
+    assert out["elevation_stone"] == ["POLYGON ((0 0, 1 0, 1 1, 0 0))"]  # in the frame of its elevation: as it was
+    assert out["section"][0] < 1e-6 and out["section"][1] < 1e-6 and out["section"][2] == "s1.svg"
+    assert out["region"] < 1e-6
+    assert out["shared_sections"] == [0, [{"what": "sections", "names": ["Sezione 1"]}]]
+    local = out["local"]
+    assert local["refit"] is False and not any(local["convert"].values())
+    assert local["kept"] == [{"what": "stones", "names": ["orthomosaic.tif"]},
+                             {"what": "sections", "names": ["Sezione 1"]}, {"what": "drawn", "names": ["units"]}]
+
+
+def test_set_survey_crs_says_when_heights_pass_as_they_are(tmp_path):
+    """From a system without heights of its own into one with EGM2008 heights the georeference takes the heights of
+    the photos above the geoid (40 m lower with a geoid of 40 m), while the heights of the markers and of what was
+    drawn pass as they are - right only if they were heights above the sea level: the result says so."""
+    out = _run(tmp_path, _SURVEYED + textwrap.dedent('''
+        write_grid(value=40.0)
+        ch = surveyed()
+        marker = ch.add_marker("P1")
+        marker.reference = Reference(location=list(utm[0] + [1.0, 2.0, -2.0]), accuracy=[0.01] * 3)
+        x0, y0, _ = utm.mean(axis=0)
+        ch.meta["drawings"] = {"units": [], "quote": [{"x": x0, "y": y0, "quota_q": 99.5}]}
+        preview = heights.survey_crs_changes(ch, "EPSG:32633+3855")
+        result = heights.set_survey_crs(ch, "EPSG:32633+3855")
+        heights_now = [float(ch.to_world(c.center)[2]) for c in ch.cameras]
+        print(json.dumps({"preview": preview["heights_unchanged"], "result": result["heights_unchanged"],
+                          "cameras": heights_now, "marker": marker.reference.location[2],
+                          "quote": ch.meta["drawings"]["quote"][0]["quota_q"], "converted": result["converted"]}))
+    '''))
+    assert out["preview"] is True and out["result"] is True
+    assert out["cameras"] == pytest.approx([60.0, 61.0, 62.0, 60.5], abs=0.01)  # above the geoid
+    assert out["marker"] == pytest.approx(98.0) and out["quote"] == 99.5  # as they were
+    assert out["converted"] == {"markers": 1, "units": 0, "quote": 1, "points": 0, "stones": 0, "sections": 0,
+                                "patches": 0, "texture_patches": 0, "region": 0, "colour_chart": 0}

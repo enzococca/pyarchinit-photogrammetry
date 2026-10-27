@@ -113,15 +113,16 @@ def export_glb(chunk, path: str | os.PathLike) -> Path:
 
 def _enu_to_ecef(chunk, centre) -> list[float]:
     """Column-major 4 x 4 transform from east, north, up at ``centre`` (world, CRS of the chunk) to
-    earth-centred coordinates; identity for local coordinates."""
+    earth-centred coordinates; identity for local coordinates. The globe takes heights above the
+    ellipsoid of WGS 84: heights above a geoid are converted with its grid, refused without it
+    (:func:`..core.crs.transform_points`); those of a system without heights of its own go as they are."""
     from ..core import crs as crs_mod
 
     if crs_mod.is_local(chunk.crs):
         return [1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0]
     from pyproj import Transformer
 
-    lon, lat = Transformer.from_crs(chunk.crs, "EPSG:4326", always_xy=True).transform(centre[0], centre[1])
-    h = float(centre[2])
+    lon, lat, h = crs_mod.transform_points([[float(v) for v in centre[:3]]], chunk.crs, "EPSG:4979")[0]
     x, y, z = Transformer.from_crs("EPSG:4979", "EPSG:4978", always_xy=True).transform(lon, lat, h)
     lo, la = np.radians(lon), np.radians(lat)
     east = [-np.sin(lo), np.cos(lo), 0.0]

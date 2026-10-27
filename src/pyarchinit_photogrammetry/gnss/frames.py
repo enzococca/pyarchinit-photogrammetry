@@ -378,13 +378,8 @@ def _datum_target(crs: str) -> str:
     (its EPSG code, else its WKT). The transformation to it gives the plan position only: the height above the geoid of
     a compound system comes from the static path (:func:`transform`), so that the transformation of the datum is the
     same with the geoid grid and without, and a height above the ellipsoid of the local datum never stands for one
-    above the geoid."""
-    system = _parsed(crs)
-    if not system.is_compound:
-        return crs
-    horizontal = system.sub_crs_list[0]
-    code = horizontal.to_epsg()
-    return f"EPSG:{code}" if code else horizontal.to_wkt()
+    above the geoid (:func:`..core.crs.horizontal`)."""
+    return crs_mod.horizontal(crs)
 
 
 def _route(crs: str, frame: str | None, lonlat, src: str, dst: str) -> tuple[str, bool, object | None]:

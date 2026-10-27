@@ -1,6 +1,8 @@
 """Coordinate reference systems (thin wrapper around pyproj)."""
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 
 LOCAL = "LOCAL"  # arbitrary local engineering frame (metres)
@@ -14,6 +16,19 @@ def to_pyproj(crs: str):
     from pyproj import CRS
 
     return CRS.from_user_input(crs)
+
+
+def horizontal(crs: str | None) -> str | None:
+    """``crs`` without heights of its own: the horizontal part of a compound system (its EPSG code, else its WKT) -
+    through which heights pass as they are - and any other system (or a local frame) as it is."""
+    if is_local(crs):
+        return crs
+    system = to_pyproj(crs)
+    if not system.is_compound:
+        return crs
+    part = system.sub_crs_list[0]
+    code = part.to_epsg()
+    return f"EPSG:{code}" if code else part.to_wkt()
 
 
 def epsg_code(crs: str | None) -> int | None:
@@ -72,16 +87,30 @@ def by_proj(points: np.ndarray, src: str, dst: str) -> np.ndarray:
     never a ballpark - which, without the grid of the geoid, gives the heights as they are: heights above the ellipsoid
     passed off as heights above the geoid, 48 m off at Rome - and every point with numbers comes out with numbers, or a
     :class:`..gnss.heights.GridMissing` (a ``ValueError``) names the grid PROJ lacks and how to get it."""
-    from pyproj import Transformer
-
     from ..gnss import heights
 
     pts = np.atleast_2d(np.asarray(points, float))
     if heights.kinds_differ(src, dst):
         return _between_heights(pts, src, dst)
-    tr = Transformer.from_crs(to_pyproj(src), to_pyproj(dst), always_xy=True)
-    x, y, z = tr.transform(pts[:, 0], pts[:, 1], pts[:, 2])
+    x, y, z = _transformer(src, dst).transform(pts[:, 0], pts[:, 1], pts[:, 2])
     return np.column_stack([x, y, z])
+
+
+@functools.lru_cache(maxsize=128)
+def _transformer(src: str, dst: str, ballpark: bool = True):
+    """PROJ's transformation from ``src`` to ``dst`` (longitude first), kept: making one can take a tenth of a second
+    (into a national system with heights above a geoid), using it a fraction of a millisecond. ``ballpark`` False:
+    never a ballpark (a ``ProjError`` when PROJ has no other it can use). A pyproj transformer is made again in each
+    thread that uses it."""
+    from pyproj import Transformer
+
+    return Transformer.from_crs(to_pyproj(src), to_pyproj(dst), always_xy=True, allow_ballpark=ballpark)
+
+
+def forget_transformers() -> None:
+    """Forget the kept transformations (:func:`_transformer`): made again with the grids PROJ finds now
+    (:func:`..gnss.heights.refresh`)."""
+    _transformer.cache_clear()
 
 
 def _between_heights(pts: np.ndarray, src: str, dst: str) -> np.ndarray:
@@ -102,12 +131,10 @@ def _between_heights(pts: np.ndarray, src: str, dst: str) -> np.ndarray:
 def _no_ballpark(pts: np.ndarray, src: str, dst: str) -> np.ndarray | None:
     """``pts`` by PROJ's choice among its transformations that are no ballpark, or None when it has none it can use,
     or one point with numbers comes out without (where none reaches)."""
-    from pyproj import Transformer
     from pyproj.exceptions import ProjError
 
     try:
-        tr = Transformer.from_crs(to_pyproj(src), to_pyproj(dst), always_xy=True, allow_ballpark=False)
-        x, y, z = tr.transform(pts[:, 0], pts[:, 1], pts[:, 2])
+        x, y, z = _transformer(src, dst, False).transform(pts[:, 0], pts[:, 1], pts[:, 2])
     except ProjError:
         return None
     out = np.column_stack([x, y, z])
