@@ -91,7 +91,8 @@ def fake_web(calls: list):
                 return [{"referrer": "github.com", "count": 40, "uniques": 8}, {"referrer": "Google", "count": 5, "uniques": 3}]
             if path.endswith("/traffic/popular/paths"):
                 return [{"path": "/enzococca/pyarchinit-photogrammetry", "title": "x", "count": 60, "uniques": 10},
-                        {"path": "/enzococca/pyarchinit-photogrammetry/releases", "title": "y", "count": 20, "uniques": 6}]
+                        {"path": "/enzococca/pyarchinit-photogrammetry/releases", "title": "y", "count": 20, "uniques": 6},
+                        {"path": "/enzococca/pyarchinit-photogrammetry/actions", "title": "z", "count": 29, "uniques": 1}]
         if parts.netloc == "pyarchinit-photogrammetry.goatcounter.com":
             assert query["start"] == "2026-10-01T00:00:00Z" and query["end"] == "2026-10-27T05:00:00Z"
             if events:
@@ -350,7 +351,7 @@ def test_update_traffic(web):
     stats.update_traffic(data, "s", date(2026, 10, 27))
     store = data["traffic"]
     assert store["days"] == {"2026-10-20": [50, 9], "2026-10-21": [31, 7]}
-    assert store["paths"] == {"until": "2026-10-27", "rows": [["/", 60, 10], ["/releases", 20, 6]]}
+    assert store["paths"] == {"until": "2026-10-27", "rows": [["/", 60, 10], ["/releases", 20, 6], ["/actions", 29, 1]]}
     assert {c[3].get("per") for c in web if c[2].endswith("/views")} == {"day"}
 
 
@@ -492,6 +493,23 @@ def test_page_in_english(sample):
     assert "<script>" not in text and "&lt;script&gt;" in text  # anyone can send a visit
     assert "<td>spam | *bold* [x](y)</td>" in text  # inside raw HTML, which Markdown leaves alone
     assert "macOS" in text and "Windows ARM64" in text and "not configured yet" not in text
+
+
+def test_pages_of_the_repository_seen_by_one_visitor_are_left_out(sample):
+    for lang, note in (("en", "Pages seen by only one visitor are left out."),
+                       ("it", "Le pagine viste da un solo visitatore sono escluse.")):
+        repository = hook.render(sample, lang).split("\n## ")[-1]
+        assert "<td>/releases</td>" in repository and "/actions" not in repository  # 29 views, 1 visitor: the author
+        assert f'<p class="ppg-stats-note">{note}</p>' in repository
+
+
+def test_wide_tables_stack_and_narrow_ones_sit_side_by_side(sample):
+    sections = {s.split("\n", 1)[0]: s for s in hook.render(sample, "en").split("\n## ")}
+    assert "ppg-stats-grid" not in sections["Repository"]  # sources and pages: three columns each, one under the other
+    grid = [line for line in sections["pip installs"].splitlines() if "ppg-stats-grid" in line]
+    assert len(grid) == 1 and grid[0].count("<table>") == 4  # versions, systems, Python, countries
+    assert "<strong>Projects</strong>" not in grid[0]  # three columns: the whole width
+    assert ".ppg-stats-grid>*{min-width:0}" in hook.STYLE  # a cell never grows past its column
 
 
 def test_page_in_italian(sample):

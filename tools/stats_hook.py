@@ -22,6 +22,7 @@ except ImportError:  # the tests import the hook without MkDocs
     PluginError = ValueError
 
 PLACEHOLDER = re.compile(r"<!--\s*ppg-stats\s+(en|it)\s*-->")
+MIN_UNIQUES = 2  # the pages of the repository seen by fewer unique visitors are left out
 PLATFORMS = {"macos": "macOS", "windows-x64": "Windows x64", "windows-arm64": "Windows ARM64"}
 SYSTEMS = {"darwin": "macOS", "linux": "Linux", "windows": "Windows"}
 COUNTRIES = {  # the common ones, named in the language of the page; the others show flag and code
@@ -84,6 +85,7 @@ TEXT = {
         "chart_repo": "Visits of the repository per month", "views": "views", "uniques": "unique visitors (per day)",
         "repo_refs": "Sources, 14 days to {date}", "repo_paths": "Most visited pages, 14 days to {date}",
         "views_col": "Views", "uniques_col": "Unique visitors", "unknown": "unknown", "other": "other",
+        "one_visitor": "Pages seen by only one visitor are left out.",
     },
     "it": {
         "nodata": "I numeri sono pubblicati da un workflow del repository che gira ogni settimana: compaiono qui "
@@ -120,6 +122,7 @@ TEXT = {
         "uniques": "visitatori unici (per giorno)",
         "repo_refs": "Provenienza, 14 giorni fino al {date}", "repo_paths": "Pagine più visitate, 14 giorni fino al {date}",
         "views_col": "Visualizzazioni", "uniques_col": "Visitatori unici", "unknown": "sconosciuto", "other": "altri",
+        "one_visitor": "Le pagine viste da un solo visitatore sono escluse.",
     },
 }
 STYLE = """<style>
@@ -130,6 +133,14 @@ STYLE = """<style>
 .ppg-stats-chart .b0{fill:var(--md-default-fg-color--lighter)}
 .ppg-key{display:inline-block;width:.75em;height:.75em;margin:0 .35em 0 1em;border-radius:.1em}
 .ppg-key:first-child{margin-left:0}
+.ppg-stats-grid>*{min-width:0}
+.ppg-stats-table td:first-child{overflow-wrap:anywhere}
+@media screen and (max-width:44.9375em){
+.md-typeset .ppg-stats-table table:not([class]) th{min-width:0}
+.md-typeset .ppg-stats-table table:not([class]) th,.md-typeset .ppg-stats-table table:not([class]) td{padding:.6em .7em}
+.ppg-stats-chart text{font-size:17px}
+}
+.md-typeset .ppg-stats-note{margin-top:-.5em;font-size:.64rem;color:var(--md-default-fg-color--light)}
 .ppg-key.b1{background:var(--md-typeset-a-color)}
 .ppg-key.b0{background:var(--md-default-fg-color--lighter)}
 </style>"""
@@ -281,18 +292,36 @@ def chart(months: dict, series: list, title: str, lang: str, stacked: bool = Fal
     return f'<div class="ppg-stats-chart">{"".join(out)}<p>{legend}</p></div>'
 
 
-def table(caption: str, headers: list, rows: list, lang: str) -> str:
-    """A table of a grid cell: the first column is text (already escaped), the others are numbers."""
+def table(caption: str, headers: list, rows: list, lang: str, note: str = "") -> tuple[str, bool]:
+    """A table and whether it is wide: the first column is text (already escaped), the others are numbers; a
+    note in small print below it. Tables of three columns or more take the whole width of the page, the
+    narrower ones go side by side (_grid)."""
     right = ' align="right"'
     head = "".join(f"<th{right if i else ''}>{_esc(h)}</th>" for i, h in enumerate(headers))
     body = "".join("<tr>" + "".join(f'<td align="right">{_num(c, lang)}</td>' if i else f"<td>{c}</td>"
                                     for i, c in enumerate(row)) + "</tr>" for row in rows)
-    return f"<div><p><strong>{_esc(caption)}</strong></p><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>"
+    html_ = f"<p><strong>{_esc(caption)}</strong></p>"
+    if rows:
+        html_ += f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
+    if note:
+        html_ += f'<p class="ppg-stats-note">{_esc(note)}</p>'
+    return f'<div class="ppg-stats-table">{html_}</div>', len(headers) >= 3
 
 
-def _grid(cells: list[str]) -> list[str]:
-    cells = [c for c in cells if c]
-    return [f'<div class="grid">{"".join(cells)}</div>', ""] if cells else []
+def _grid(cells: list[tuple[str, bool]]) -> list[str]:
+    """Wide tables one under the other, the narrow ones in a grid whose cells never grow past their column (a
+    table too wide for it scrolls, in the wrapper the theme puts around every table)."""
+    out, narrow = [], []
+    for html_, wide in cells + [("", True)]:
+        if not wide:
+            narrow.append(html_)
+            continue
+        if narrow:
+            out += [f'<div class="grid ppg-stats-grid">{"".join(narrow)}</div>', ""]
+            narrow = []
+        if html_:
+            out += [html_, ""]
+    return out
 
 
 # ---------------------------------------------------------------------------------------------- the sections
@@ -317,7 +346,7 @@ def _summary(page: dict, t: dict, lang: str) -> str:
         body.append(f"<tr><td>{_esc(t[key])}</td>{cells}</tr>")
     head = (f'<tr><th></th><th align="right">{_esc(t["last30"])}</th><th align="right">{_esc(t["total"])}</th>'
             f'<th>{_esc(t["since"])}</th></tr>')
-    return f"<table><thead>{head}</thead><tbody>{''.join(body)}</tbody></table>"
+    return f'<div class="ppg-stats-table"><table><thead>{head}</thead><tbody>{"".join(body)}</tbody></table></div>'
 
 
 def _application(page: dict, t: dict, lang: str) -> list[str]:
@@ -385,11 +414,12 @@ def _repository(page: dict, t: dict, lang: str) -> list[str]:
     out += [chart(repo["months"], [("b0", t["views"]), ("b1", t["uniques"])], t["chart_repo"], lang), ""]
     header = [t["views_col"], t["uniques_col"]]
     refs, paths = repo["referrers"], repo["paths"]
+    seen = [row for row in paths.get("rows", []) if row[2] >= MIN_UNIQUES]  # one visitor: mostly the author
     return out + _grid([
         table(t["repo_refs"].format(date=_date(refs.get("until"), lang)), [t["source"]] + header,
               [[_label(r, t)] + v for r, *v in refs.get("rows", [])], lang),
         table(t["repo_paths"].format(date=_date(paths.get("until"), lang)), [t["page"]] + header,
-              [[_label(p, t)] + v for p, *v in paths.get("rows", [])], lang)])
+              [[_label(p, t)] + v for p, *v in seen], lang, note=t["one_visitor"])])
 
 
 def render(data: dict | None, lang: str) -> str:
