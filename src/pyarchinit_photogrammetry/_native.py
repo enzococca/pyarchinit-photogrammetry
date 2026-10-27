@@ -39,12 +39,16 @@ def kernel(name: str):
 
 
 # what the extension can do besides the camera models, asked for by name in supports()
-FEATURES = {"ppk": "ppk_solve"}  # RTKLIB's post-processing (API 8)
+FEATURES = {
+    "ppk": "ppk_solve",  # RTKLIB's post-processing (API 8)
+    "crinex": "crx2rnx",  # Hatanaka-compressed RINEX decoded (API 9)
+}
 
 
 def supports(model: str) -> bool:
     """The projection kernels know the camera model ``model`` (a COLMAP model name), or the
-    extension has the feature ``model`` (``"ppk"``: RTKLIB's post-processing, API 8)."""
+    extension has the feature ``model`` of :data:`FEATURES` (``"ppk"``: RTKLIB's post-processing,
+    API 8; ``"crinex"``: Hatanaka-compressed RINEX decoded, API 9)."""
     core = _core() if enabled() else None
     if core is None:
         return False
@@ -54,7 +58,7 @@ def supports(model: str) -> bool:
 
 
 def has(feature: str) -> bool:
-    """The installed extension carries the feature ``feature`` of :data:`FEATURES` (``"ppk"``),
+    """The installed extension carries the feature ``feature`` of :data:`FEATURES` (``"ppk"``, ``"crinex"``),
     whether or not ``PPG_NATIVE`` switches it off: what a build holds (the smoke test of the
     packaged application), where :func:`supports` says what the program uses."""
     core = _core()
@@ -255,3 +259,58 @@ def _last_message(text: str) -> str:
     parts = [p.strip() for p in re.split(r"[\r\n]+", text) if p.strip()]
     errors = [p for p in parts if p.lower().startswith("error")]
     return (errors or parts or [""])[-1]
+
+
+# ------------------------------------------------------------ Hatanaka-compressed RINEX (CRINEX)
+CRINEX_MISSING = ("Hatanaka-compressed RINEX (Compact RINEX) needs the native core pyarchinit-photogrammetry-core "
+                  "0.6 or later (pip install \"pyarchinit-photogrammetry[fast]\"), or the CRX2RNX program of "
+                  "RNXCMP (https://terras.gsi.go.jp/ja/crx2rnx.html) in the PATH or named by PPG_CRX2RNX")
+
+
+def _crx2rnx_program() -> str | None:
+    """The CRX2RNX to run without the core: the program named by ``PPG_CRX2RNX`` (whether it is there
+    is checked when it runs), otherwise CRX2RNX or crx2rnx in the PATH, otherwise None."""
+    named = os.environ.get("PPG_CRX2RNX", "").strip()
+    if named:
+        return named
+    return shutil.which("CRX2RNX") or shutil.which("crx2rnx")
+
+
+def crx2rnx(src: str | Path, dst: str | Path) -> None:
+    """The RINEX observation file of the Hatanaka-compressed (Compact RINEX 1.0, 3.0 or 3.1) file
+    ``src``, written to ``dst`` as RNXCMP's CRX2RNX writes it: first beside it, as ``dst`` + ".part",
+    renamed when complete, so that a ``dst`` is always whole.
+
+    With the native core (API 9) the decoder runs inside it, without the GIL; a damaged or truncated
+    file raises ``ValueError("<name of src>, line <n>: <what is wrong>")``. Without it (missing,
+    older than 0.6 or switched off) the program named by ``PPG_CRX2RNX``, or CRX2RNX in the PATH,
+    runs with ``src`` on its standard input and ``dst`` on its standard output (ValueError with its
+    message when it fails); without either, RuntimeError (:data:`CRINEX_MISSING`)."""
+    fn = kernel("crx2rnx")
+    if fn is not None:
+        fn(str(src), str(dst))
+        return
+    tool = _crx2rnx_program()
+    if tool is None:
+        raise RuntimeError(CRINEX_MISSING)
+    _run_crx2rnx(tool, Path(src), Path(dst))
+
+
+def _run_crx2rnx(tool: str, src: Path, dst: Path) -> None:
+    """``tool < src > dst``, through ``dst`` + ".part"; ValueError with its last message when it fails."""
+    path = shutil.which(tool) or (tool if Path(tool).is_file() else None)
+    if path is None:
+        raise RuntimeError(f"PPG_CRX2RNX names {tool}, which is not there. " + CRINEX_MISSING)
+    if not os.access(path, os.X_OK):
+        raise RuntimeError(f"PPG_CRX2RNX names {tool}, which is not a program that can run. " + CRINEX_MISSING)
+    part = dst.with_name(dst.name + ".part")
+    try:
+        with open(src, "rb") as stdin, open(part, "wb") as stdout:
+            proc = subprocess.run([str(Path(path).resolve())], stdin=stdin, stdout=stdout, stderr=subprocess.PIPE,
+                                  close_fds=False)
+        if proc.returncode != 0:
+            message = _last_message(proc.stderr.decode("utf-8", "replace"))
+            raise ValueError(f"{src.name}: CRX2RNX could not decode it: {message or f'exit status {proc.returncode}'}")
+        os.replace(part, dst)
+    finally:
+        part.unlink(missing_ok=True)

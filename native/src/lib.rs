@@ -4,6 +4,7 @@
 //! stays the fallback and the reference of the tests. The work runs without the GIL on all cores.
 
 mod camera;
+mod crinex;
 mod depth;
 mod gpu;
 mod gpu_fuse;
@@ -25,8 +26,8 @@ use rayon::prelude::*;
 
 use camera::{Camera, Pose};
 
-/// Version of the functions offered here: raised when one is added or changes meaning.
-const API: u32 = 8;
+/// Version of the functions offered here: raised when one is added or changes meaning (9: crx2rnx).
+const API: u32 = 9;
 
 // one matcher per GPU, each behind its own lock: several GPUs work at the same time
 fn matchers() -> &'static Mutex<HashMap<i64, Arc<Mutex<gpu::Matcher>>>> {
@@ -728,5 +729,6 @@ fn ppg_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gpu_forget, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_patchmatch_depth, m)?)?;
     m.add_function(wrap_pyfunction!(ppk::ppk_solve, m)?)?;
+    m.add_function(wrap_pyfunction!(crinex::crx2rnx, m)?)?;
     Ok(())
 }

@@ -10,9 +10,12 @@ with the COLMAP camera models, scoring of the photos of an orthomosaic tile, agr
 with a depth map (confidence), PatchMatch multi-view stereo of one photo (`patchmatch_depth`: a
 plane per pixel, normalised cross correlation with the best of its neighbouring photos,
 red-black propagation and random refinement, from random planes or from a depth map), the
-GPU kernels (wgpu: SIFT, descriptor matching, PatchMatch, fusion), and RTKLIB's post-processing
+GPU kernels (wgpu: SIFT, descriptor matching, PatchMatch, fusion), RTKLIB's post-processing
 of GNSS observations (`ppk_solve`, from 0.5: what `rnx2rtkp -k options -o solution files`
-does, with RTKLIB built into the extension).
+does, with RTKLIB built into the extension), and the decoding of Hatanaka-compressed RINEX
+(`crx2rnx`, from 0.6: Compact RINEX 1.0, 3.0 and 3.1 into the RINEX that RNXCMP's CRX2RNX
+writes, by a decoder of our own written from the description of the format in Hatanaka (2008),
+Bulletin of the Geographical Survey Institute 55, 21-30).
 
 Build and install in the environment of pyarchinit-photogrammetry (a Rust toolchain is needed):
 
