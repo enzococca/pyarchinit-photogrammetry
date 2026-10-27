@@ -1,9 +1,12 @@
 # Download and visit statistics for the page "Downloads and visits" of the documentation site (docs/stats.md).
 #
-# Every Monday, and on demand (gh workflow run stats.yml), .github/scripts/download_stats.py takes stats.json
-# from the orphan branch "stats", adds the new numbers of every source and writes it back through the GitHub
-# API: commits by Enzo Cocca on that branch only, never on main. Then the docs workflow builds the site again
-# and its hook (tools/stats_hook.py) puts the numbers on the page.
+# Every Monday, and on demand (gh workflow run stats.yml), two jobs:
+#   collect  reads stats.json from the orphan branch "stats" and adds the new numbers of every source with
+#            .github/scripts/download_stats.py. It holds only read-only tokens, because it is the one that
+#            installs the BigQuery client from PyPI, and hands the file on as an artifact.
+#   publish  installs nothing. It checks the file and writes it back through the GitHub API (commits by Enzo
+#            Cocca on that branch only, never on main), then starts the docs workflow, whose hook
+#            (tools/stats_hook.py) puts the numbers on the page.
 #
 # Every source is optional: without its secret it is left out and the page says "not configured yet". The
 # downloads of the application (GitHub releases) need nothing. Setup, once:
@@ -36,43 +39,66 @@ on:
     - cron: "30 5 * * 1"  # Monday 05:30 UTC
   workflow_dispatch:
 
-permissions:
-  contents: write  # the branch stats
-  actions: write  # starts the docs workflow
+permissions: {}  # each job asks for its own
 
 concurrency:
   group: stats
   cancel-in-progress: false
 
 jobs:
-  stats:
+  collect:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     env:
       HAS_BIGQUERY: ${{ secrets.GCP_PROJECT != '' && secrets.GCP_SA_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: BigQuery client (only with the secrets GCP_PROJECT and GCP_SA_KEY)
         if: env.HAS_BIGQUERY == 'true'
-        run: python -m pip install "google-cloud-bigquery>=3.20,<4"
+        run: python -m pip install "google-cloud-bigquery==3.46.1"
       - name: Statistics kept on the branch stats
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}  # read-only here: GitHub's rate limit, not access
         run: python .github/scripts/download_stats.py get "$RUNNER_TEMP/stats.json"
       - name: New numbers
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}  # read-only: the public releases
           GOATCOUNTER_TOKEN: ${{ secrets.GOATCOUNTER_TOKEN }}
           GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           STATS_TOKEN: ${{ secrets.STATS_TOKEN }}
         run: python .github/scripts/download_stats.py update "$RUNNER_TEMP/stats.json"
-      - name: Back on the branch stats
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stats
+          path: ${{ runner.temp }}/stats.json
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    needs: collect
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write  # the branch stats
+      actions: write  # starts the docs workflow
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: stats
+          path: ${{ runner.temp }}/collected
+      - name: Checked and written back on the branch stats
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python .github/scripts/download_stats.py put "$RUNNER_TEMP/stats.json"
+        run: python3 .github/scripts/download_stats.py put "$RUNNER_TEMP/collected/stats.json"
       - name: Site
         env:
           GH_TOKEN: ${{ github.token }}
