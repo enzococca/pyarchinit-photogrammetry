@@ -364,24 +364,55 @@ def test_a_gzip_file_cut_short_still_gives_the_epochs_before_the_cut(tmp_path):
     assert rinex.header(packed).systems == ("G", "R", "E")
 
 
-@pytest.mark.parametrize("name", ["base.crx", "base.24d", "BASE.24D.gz", "base.crx.gz"])
-def test_hatanaka_files_are_refused_by_name(tmp_path, name):
+HATANAKA_NAMES = ["base.crx", "base.24d", "BASE.24D.gz", "base.crx.gz"]
+needs_a_crinex_decoder = pytest.mark.skipif(_native.kernel("crx2rnx") is None and _native._crx2rnx_program() is None,
+                                            reason="neither the native core 0.6 (API 9) nor a CRX2RNX program")
+
+
+@pytest.mark.parametrize("name", HATANAKA_NAMES)
+def test_a_name_does_not_make_a_file_hatanaka(tmp_path, name):
+    """A file is Hatanaka by its first line, not by its name: what is called .crx and is not RINEX is not RINEX."""
     path = tmp_path / name
     path.write_bytes(b"whatever")
-    with pytest.raises(ValueError, match="Hatanaka") as error:
+    with pytest.raises(ValueError, match="not a RINEX file") as error:
         rinex.header(path)
-    assert "CRX2RNX" in str(error.value) and name in str(error.value)
+    assert name in str(error.value)
 
 
-def test_hatanaka_files_are_refused_by_their_first_line(tmp_path):
+@needs_a_crinex_decoder
+@pytest.mark.parametrize("name", HATANAKA_NAMES)
+def test_hatanaka_files_are_read(tmp_path, monkeypatch, name):
+    """Compact RINEX, alone or in a gzip file, is read as the RINEX it holds (tests/test_gnss_rinex_files.py): the
+    files that used to be refused by their names."""
+    monkeypatch.setenv("PPG_GNSS_DIR", str(tmp_path / "gnss"))  # the decompressed copy stays with the test
+    crx = DATA.parent / "crinex" / "07590920.05d"  # the sample of station 0759, RTKLIB's, in Compact RINEX 1.0
+    path = tmp_path / name
+    path.write_bytes(gzip.compress(crx.read_bytes()) if name.lower().endswith(".gz") else crx.read_bytes())
+    info = rinex.header(path)
+    assert info.compressed == ("gzip+hatanaka" if name.lower().endswith(".gz") else "hatanaka")
+    assert (info.marker, info.antenna, info.interval) == ("0759", "TRM29659.00", 30.0)
+    assert rinex.time_span(path) == rinex.time_span(ROVER)
+
+
+@pytest.mark.parametrize("gz", [False, True])
+def test_hatanaka_files_are_refused_without_a_decoder(tmp_path, monkeypatch, gz):
+    """Without the native core 0.6 or a CRX2RNX, a file whose first line is that of Compact RINEX is refused, with its
+    name and what to install - the other files are read all the same."""
+    def no_decoder(*_args):
+        raise RuntimeError(_native.CRINEX_MISSING)
+
+    monkeypatch.setattr(_native, "crx2rnx", no_decoder)
     first = _line("3.0                 COMPACT RINEX FORMAT", "CRINEX VERS   / TYPE")
     path = _write(tmp_path / "base.rnx", [first, V3_HEADER[0], END_OF_HEADER])
-    with pytest.raises(ValueError, match="Hatanaka"):
-        rinex.header(path)
-    packed = tmp_path / "base2.rnx.gz"
-    packed.write_bytes(gzip.compress(path.read_bytes()))
-    with pytest.raises(ValueError, match="Hatanaka"):
-        rinex.time_span(packed)
+    if gz:
+        packed = tmp_path / "base2.rnx.gz"
+        packed.write_bytes(gzip.compress(path.read_bytes()))
+        path = packed
+    for call in (rinex.header, rinex.time_span):
+        with pytest.raises(ValueError, match="Hatanaka") as error:
+            call(path)
+        assert "CRX2RNX" in str(error.value) and path.name in str(error.value)
+    assert rinex.header(ROVER).marker == "0759"
 
 
 def test_files_that_are_not_rinex_are_refused_with_their_name(tmp_path):
@@ -601,16 +632,17 @@ def test_companions_take_the_daily_broadcast_files_of_the_igs(tmp_path):
                                                 ("BASE.ZIP", b"PK\x03\x04", "zip"),
                                                 ("base.05o", b"\x1f\x9d\x90", "compress (.Z)"),  # renamed
                                                 ("base.obs", b"PK\x03\x04", "zip")])
-def test_files_compressed_with_compress_or_zip_are_said_to_be(tmp_path, name, magic, kind):
-    """The archives of the stations give files compressed with the Unix compress (.Z) or zipped: not "not a RINEX file"
-    but what they are and what to do; a gzip file is read as it is."""
+def test_files_compressed_with_compress_or_zip_are_read_or_said_to_be_damaged(tmp_path, name, magic, kind):
+    """The archives of the stations give files compressed with the Unix compress (.Z) or zipped (they are read:
+    tests/test_gnss_rinex_files.py). A file that starts like one and holds nothing of the kind is told by its first
+    bytes, whatever its name, and named when it is read."""
     path = tmp_path / name
     path.write_bytes(magic + bytes(range(256)))
+    assert rinex.compression(path) == (("compress",) if kind.startswith("compress") else ("zip",))
     for call in (rinex.header, rinex.time_span):
         with pytest.raises(ValueError) as error:
             call(path)
-        assert str(error.value) == (f"{name} is compressed with {kind}: decompress it first (only gzip files are read "
-                                    "as they are)")
+        assert name in str(error.value)
 
 
 # --- the position in the header ---------------------------------------------------------------------------------
@@ -791,7 +823,7 @@ def test_every_value_config_writes_is_one_rtklib_takes():
     assert len(table) > 100 and ("pos1-posmode", 3, "0:single,1:dgps,2:kinematic,3:static,4:static-start,5:movingbase,"
                                  "6:fixed,7:ppp-kine,8:ppp-static,9:ppp-fixed") in table
     texts = [ppk.config(None), ppk.config((35.16, 139.61, 70.0)), ppk.config((-33.9, 151.2, -10.5), elevation_mask=0.0),
-             ppk.config(None, elevation_mask=89.5)]
+             ppk.config(None, elevation_mask=89.5), ppk.config((35.16, 139.61, 70.0), interpolate_base=True)]
     texts += [ppk.config((45.0, 11.0, 50.0), mode=mode) for mode in ppk.MODES]
     texts += [ppk.config((45.0, 359.9, 100.0), systems=systems) for systems in ("all", "G", "GRECJIS", ["c", "G"],
                                                                                 "JIS", "E,R")]
@@ -812,7 +844,7 @@ def test_every_value_config_writes_is_one_rtklib_takes():
                 assert math.isfinite(float(value)), (name, value)
             seen.add((name, value))
     assert ("pos1-posmode", "static-start") in seen and ("ant2-postype", "rinexhead") in seen
-    assert ("pos1-navsys", "127") in seen and ("ant2-anttype", "*") in seen
+    assert ("pos1-navsys", "127") in seen and ("ant2-anttype", "*") in seen and ("misc-timeinterp", "on") in seen
     # the reader of the test refuses what RTKLIB refuses, and does not take a label for a longer one
     assert _rtklib_enum("kinematik", "0:single,1:dgps,2:kinematic") is None
     assert _rtklib_enum("combined", "0:forward,1:backward,2:combined,3:combined-nophasereset") == 2
@@ -2524,8 +2556,14 @@ def test_ppk_dialog_finds_the_files_and_checks_the_base(tmp_path, qt_app, monkey
     assert "stesso file" in dlg.problem()
     crx = tmp_path / "base.crx"
     crx.write_text("1.0                 COMPACT RINEX FORMAT                    CRINEX VERS   / TYPE\n")
-    _choose(dlg, dlg.base, crx)
-    assert "CRX2RNX" in dlg.base_info.text() and "CRX2RNX" in dlg.problem()
+
+    def no_decoder(*_args):
+        raise RuntimeError(_native.CRINEX_MISSING)
+
+    with monkeypatch.context() as no_crx2rnx:  # a Hatanaka file is read when there is a decoder: without, it is said so
+        no_crx2rnx.setattr(_native, "crx2rnx", no_decoder)
+        _choose(dlg, dlg.base, crx)
+        assert "CRX2RNX" in dlg.base_info.text() and "CRX2RNX" in dlg.problem()
     _choose(dlg, dlg.base, tmp_path / "nowhere.05o")
     assert dlg.base_info.text() == "Il file non esiste." and dlg.problem() is not None
     # a typed base needs no position in the header; the header one does
@@ -2805,6 +2843,10 @@ def test_ppk_dialog_starts_from_the_last_run_of_the_chunk(tmp_path, qt_app, fake
     gnss_apply.apply_ppk(ch, first / "Timestamp.MRK", ppk.solve(rover, base, folder=tmp_path / "work"))
     header = PpkDialog(card / f"{DJI_FLIGHT}_Timestamp.MRK", chunk=ch)
     assert header.from_header.isChecked() and header.lat.text() == "" and not header.replace_fix.isChecked()
+    # a run with a base in several files (the API takes them): the dialog, which asks for one file, starts without it
+    ch.meta[ppk.MEMORY]["last"]["base"] = [str(base), str(base)]
+    several = PpkDialog(card / f"{DJI_FLIGHT}_Timestamp.MRK", chunk=ch)
+    assert several.base.path() is None and several.rover.path() == card / f"{DJI_FLIGHT}_Rinex.obs"
 
 
 def _sample_answer(parent, mrk, work=None, chunk=None) -> dict:

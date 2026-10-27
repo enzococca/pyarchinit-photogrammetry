@@ -302,7 +302,7 @@ class PpkDialog(QDialog):
         rover = last.get("rover")
         if same and rover and Path(rover).is_file():
             self.rover.edit.setText(rover)
-        if last.get("base"):
+        if isinstance(last.get("base"), str) and last["base"]:  # several files (a list): not offered here yet
             self.base.edit.setText(last["base"])
         drone = Path(rover).parent if rover else None
         for text in last.get("navs") or []:

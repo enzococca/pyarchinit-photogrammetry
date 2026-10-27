@@ -17,6 +17,11 @@ import tempfile  # noqa: E402
 
 os.environ.setdefault("PPG_PLUGINS_DIR", tempfile.mkdtemp(prefix="ppg-test-plugins-"))
 os.environ.setdefault("PPG_PLUGINS_ENVIRONMENT", "0")  # nor those installed with pip in the environment
+# the GNSS downloads and caches of the tests go to a folder of their own, never to the user's
+os.environ.setdefault("PPG_GNSS_DIR", tempfile.mkdtemp(prefix="ppg-test-gnss-"))
+# PROJ never goes to the network (a shell with PROJ_NETWORK=ON would have it download a geoid grid in silence, and
+# heights above the geoid would be wrong offline): forced, whatever the shell of the developer says
+os.environ["PROJ_NETWORK"] = "OFF"
 
 # A native crash prints both stacks: pycolmap installs glog's failure signal handler when it is
 # imported, and pytest's faulthandler (enabled when pytest configures, after this file) dumps the

@@ -7,13 +7,12 @@ A position the program keeps - the base of a solution, the reference of a photo 
 first; a position typed by the user, and the options of RTKLIB, are latitude, longitude, height."""
 from __future__ import annotations
 
-import gzip
 import itertools
 import math
 import os
 import re
 import shutil
-import zlib
+import tempfile
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -84,7 +83,8 @@ class Solution:
     path: Path  # the .pos file
     warnings: list[str] = field(default_factory=list)
     rover: str = ""  # the name of the rover's observation file; empty from read_pos
-    # the files of the run, absolute: "rover" and "base" (paths), "navs" (a list of paths); empty from read_pos
+    # the files of the run, absolute: "rover" and "base" (paths; "base" a list of paths when the base is in several
+    # files), "navs" (a list of paths); empty from read_pos
     inputs: dict = field(default_factory=dict)
 
 
@@ -125,7 +125,7 @@ def _navsys(systems: str | Iterable[str]) -> int:
 
 
 def config(base_position: Sequence[float] | None, mode: str = "kinematic", elevation_mask: float = 15.0,
-           systems: str | Iterable[str] = "all") -> str:
+           systems: str | Iterable[str] = "all", interpolate_base: bool = False) -> str:
     """The options file of RTKLIB for a PPK run (the text of rnx2rtkp's -k file). The rover moving (``mode``
     "kinematic") or still ("static", "static-start"; "dgps" for code only); the forward and backward solutions
     combined, the ambiguities fixed and held; the satellites ``elevation_mask`` degrees above the horizon or more, of
@@ -134,8 +134,9 @@ def config(base_position: Sequence[float] | None, mode: str = "kinematic", eleva
     to which RTKLIB adds the antenna height of the base's RINEX header (ANTENNA: DELTA H/E/N), as RINEX means it.
     With None the base is at the position of its RINEX header (rinexhead): RTKLIB-EX adds the antenna height once
     then too, RTKLIB 2.4.3 twice, which is why ``solve`` always writes the position. The solution in latitude,
-    longitude and ellipsoidal height, timed in GPS weeks and seconds of GPS time. Only option names of RTKLIB's
-    table, no file of any kind."""
+    longitude and ellipsoidal height, timed in GPS weeks and seconds of GPS time. With ``interpolate_base`` RTKLIB
+    interpolates the observations of the base to the epochs of the rover (``misc-timeinterp``), for a base whose epochs
+    are further apart than the rover's. Only option names of RTKLIB's table, no file of any kind."""
     if mode not in MODES:
         raise ValueError(f"positioning mode {mode!r}: it is one of {', '.join(MODES)}")
     mask = float(elevation_mask)
@@ -143,6 +144,8 @@ def config(base_position: Sequence[float] | None, mode: str = "kinematic", eleva
         raise ValueError(f"the elevation mask, {elevation_mask}, is not between 0 and 90 degrees")
     options = [("pos1-posmode", mode), ("pos1-frequency", "l1+l2"), ("pos1-soltype", "combined"),
                ("pos1-elmask", f"{mask:g}"), ("pos1-navsys", str(_navsys(systems))), ("pos2-armode", "fix-and-hold")]
+    if interpolate_base:
+        options.append(("misc-timeinterp", "on"))
     if base_position is None:
         options.append(("ant2-postype", "rinexhead"))
     else:
@@ -331,8 +334,9 @@ def work_folder(chunk) -> Path:
 def last_run(chunk) -> dict | None:
     """The last PPK run that gave photos of ``chunk`` their positions (recorded by :func:`.apply.apply_ppk`): ``{"mrk",
     "photos", "rover", "base", "navs", "base_name", "position_source", "position", "replace_fix", "solution"}``, the
-    files as absolute paths (None for those a solution read from a file does not know), ``position`` the typed one
-    ``[lon, lat, h]`` (None for the one of the header); None when there was none."""
+    files as absolute paths (None for those a solution read from a file does not know; ``base`` a list of paths when
+    the base is in several files), ``position`` the typed one ``[lon, lat, h]`` (None for the one of the header); None
+    when there was none."""
     record = (getattr(chunk, "meta", None) or {}).get(MEMORY) if chunk is not None else None
     last = record.get("last") if isinstance(record, dict) else None
     return dict(last) if isinstance(last, dict) else None
@@ -451,9 +455,9 @@ def navigation_info(path: str | Path, read=rinex.header) -> rinex.RinexInfo | No
     return info if info.kind == "nav" else None
 
 
-def _navigation(navs, rover: Path, base: Path) -> list[tuple[Path, rinex.RinexInfo]]:
+def _navigation(navs, rover: Path, bases: Sequence[Path]) -> list[tuple[Path, rinex.RinexInfo]]:
     """The navigation files of the run: those given (one or more; a ``ValueError`` for a file of observations), or
-    those beside the rover, or, when there are none, beside the base."""
+    those beside the rover, or, when there are none, beside the files of the base."""
     if isinstance(navs, (str, os.PathLike)):
         navs = [navs]
     if navs:
@@ -465,19 +469,18 @@ def _navigation(navs, rover: Path, base: Path) -> list[tuple[Path, rinex.RinexIn
                                  "of the base or of the drone (.nav, .##n, .##p, *_MN.rnx)")
             given.append((path, info))
         return given
-    for obs in (rover, base):
+    for obs in (rover, *bases):
         found = [(path, info) for path in rinex.find_companions(obs) if (info := navigation_info(path))]
         if found:
             return found
-    raise ValueError(f"no navigation file beside the rover {rover.name} or the base {base.name}: add the navigation "
-                     "file of the base or of the drone (.nav, .##n, .##g, .##p or *_MN.rnx)")
+    raise ValueError(f"no navigation file beside the rover {rover.name} or the base {_names(bases)}: add the "
+                     "navigation file of the base or of the drone (.nav, .##n, .##g, .##p or *_MN.rnx)")
 
 
 def base_name(path: str | Path, info: rinex.RinexInfo) -> str:
     """The name of a base: the marker of the header of its RINEX file ``path``, else the name of the file without its
-    extension (and without .gz)."""
-    name = Path(path).name
-    return info.marker or Path(name[:-3] if name.lower().endswith(".gz") else name).stem
+    extension (and without .gz, .Z or .zip)."""
+    return info.marker or Path(rinex._without_packing(Path(path).name)).stem
 
 
 def horizontal_m(lat0: float, lon0: float, lat1: float, lon1: float) -> float:
@@ -568,15 +571,27 @@ def _fresh_folder(path: Path) -> None:
 
 
 def _copy(source: Path, target: Path, compressed: str | None) -> None:
-    """``source`` into ``target`` as plain text, a gzip file decompressed a piece at a time."""
-    if compressed != "gzip":
-        shutil.copyfile(source, target)
-        return
-    try:
-        with gzip.open(source, "rb") as packed, open(target, "wb") as plain:
-            shutil.copyfileobj(packed, plain, 1 << 20)
-    except (EOFError, gzip.BadGzipFile, zlib.error) as error:
-        raise ValueError(f"{source.name} is cut short or damaged ({error}): download it again") from None
+    """``source`` into ``target`` as plain text: a gzip file decompressed a piece at a time, a file under other layers
+    (the Unix compress, zip, Hatanaka) from its decompressed copy (:func:`rinex.plain`: the header of the file made it
+    already)."""
+    if compressed == "gzip":
+        rinex.gunzip(source, target)
+    else:
+        shutil.copyfile(rinex.plain(source), target)
+
+
+def _names(paths: Sequence[Path]) -> str:
+    return ", ".join(path.name for path in paths)
+
+
+def _base_files(base: str | os.PathLike | Sequence[str | os.PathLike]) -> list[Path]:
+    """The files of a base: ``base`` is one file or several; a ``ValueError`` when it is none."""
+    if isinstance(base, (str, os.PathLike)):
+        return [Path(base)]
+    files = [Path(path) for path in base]
+    if not files:
+        raise ValueError("no file given for the base")
+    return files
 
 
 def _run_files(work: Path) -> tuple[Path, Path, Path]:
@@ -612,11 +627,15 @@ def _remove(*paths: Path) -> None:
             pass
 
 
-def solve(rover: str | Path, base: str | Path, navs=None, base_position: Sequence[float] | None = None, *,
-          folder: str | Path) -> Solution:
+def solve(rover: str | Path, base: str | Path | Sequence[str | Path], navs=None,
+          base_position: Sequence[float] | None = None, *, folder: str | Path) -> Solution:
     """The PPK solution of the antenna of ``rover`` (its RINEX observations) against ``base`` (the RINEX observations
-    of a base: one file that covers the whole flight), with the navigation files ``navs`` (one or more; None: those
-    beside the rover, or beside the base when the rover has none, as a DJI drone does not always write one). The base
+    of a base: one file that covers the whole flight, or several that make it - pieces of an hour, say - which
+    :func:`rinex.join` joins in the order of their time, in any order given; a hole between them inside the time of
+    the rover is a warning), with the navigation files ``navs`` (one or more; None: those beside the rover, or beside
+    the base when the rover has none, as a DJI drone does not always write one). Any file may be packed: gzip, the Unix
+    compress, a zip archive of one file, Hatanaka (:func:`rinex.plain`). When the epochs of the base are further apart
+    than those of the rover (by their ``INTERVAL``) RTKLIB interpolates the base to the epochs of the rover. The base
     at ``base_position`` (latitude, longitude, height above the ellipsoid of the mark it stands on) or, with None, at
     the position of its RINEX header, with a warning: that one can be metres off; a typed one far from the header's
     (:func:`far_from_header`) has a warning too. Either way RTKLIB adds the antenna height of the base's header,
@@ -624,34 +643,55 @@ def solve(rover: str | Path, base: str | Path, navs=None, base_position: Sequenc
     (RTKLIB is given no antenna calibration): every run warns of it, naming the antenna of the header
     (:func:`antenna_warning`). ``Solution.base["position"]`` is ``[lon, lat, h]``. Before RTKLIB runs, a
     ``ValueError`` when the rover and the base have no time in common, when there is no navigation file, when the
-    base has no position, when an input is in ``folder`` or when a path RTKLIB would be given is too long
-    (:data:`MAX_PATH_BYTES`).
+    base has no position, when the files of the base are not of one receiver (:func:`rinex.join`), when an input is
+    in ``folder`` or when a path RTKLIB would be given is too long (:data:`MAX_PATH_BYTES`).
 
     RTKLIB works in ``folder`` (made when missing; a folder of the program) on copies of the files with plain names in
-    its subfolder ``INPUTS_FOLDER``, which holds nothing else, the gzip ones decompressed, removed after the run: it
-    never sees the user's names. Every run writes its options and its solution under a name of its own
+    its subfolder ``INPUTS_FOLDER``, which holds nothing else, every layer taken off them (a base in several files is
+    one file there), removed after the run: it never sees the user's names, and never a packed file (it would run a
+    shell command for it). Every run writes its options and its solution under a name of its own
     (``solution-<YYYYmmdd-HHMMSS>.conf`` and ``.pos``), and the solutions of earlier runs stay; a run that gives no
     solution leaves nothing. A ``ValueError`` when RTKLIB computed nothing (with its message), a ``RuntimeError`` when
     it stopped; a message of RTKLIB that is an error but came with positions is a warning of the solution."""
-    rover, base = Path(rover), Path(base)
+    rover, pieces = Path(rover), _base_files(base)
+    if len(pieces) == 1:
+        return _solve(rover, pieces, pieces[0], [], navs, base_position, folder)
+    with tempfile.TemporaryDirectory(prefix="ppg-base-") as scratch:  # the base in one file, for the length of the run
+        joined = Path(scratch) / "base.obs"
+        _info, holes = rinex.join(pieces, joined)
+        return _solve(rover, pieces, joined, holes, navs, base_position, folder)
+
+
+def _solve(rover: Path, pieces: list[Path], base: Path, holes: list[tuple[datetime, datetime]], navs,
+           base_position: Sequence[float] | None, folder: str | Path) -> Solution:
+    """:func:`solve` with the files of the base - ``pieces``, as the user gave them - and the file that RTKLIB is given
+    a copy of: that one file, or the file the pieces make joined, with the ``holes`` (GPS time) between them."""
     rover_info, rover_span = _observations(rover, "rover")
     base_info, base_span = _observations(base, "base")
-    warnings = [f"{path.name} writes its times in {info.time_system}, which is not a time system of RINEX: they are "
+    names = _names(pieces)
+    warnings = [f"{name} writes its times in {info.time_system}, which is not a time system of RINEX: they are "
                 "read as GPS time, so the time the rover and the base have in common may be off"
-                for path, info in ((rover, rover_info), (base, base_info))
+                for name, info in ((rover.name, rover_info), (names, base_info))
                 if info.time_system not in _RINEX_TIME_SYSTEMS]
     if max(rover_span[0], base_span[0]) > min(rover_span[1], base_span[1]):
-        raise ValueError(f"the rover {rover.name} ({span_text(*rover_span)}) and the base {base.name} "
+        raise ValueError(f"the rover {rover.name} ({span_text(*rover_span)}) and the base {names} "
                          f"({span_text(*base_span)}) have no time in common: the base has to record while the rover "
                          "does")
-    nav_files = _navigation(navs, rover, base)
-    base_record, base_warning, mark = _base(base, base_info, base_position)
+    warnings += [f"the base has no observations from {span_text(start, end)}, while the rover records: the positions "
+                 "there are single (from the rover alone) at best" for start, end in holes
+                 if start < rover_span[1] and end > rover_span[0]]
+    nav_files = _navigation(navs, rover, pieces)
+    base_record, base_warning, mark = _base(pieces[0], base_info, base_position)
+    base_record["file"] = names
     if base_warning:
         warnings.append(base_warning)
     warnings.append(antenna_warning(base_record["name"], base_info))
+    # a base whose epochs are further apart than the rover's: RTKLIB interpolates it to the epochs of the rover
+    interpolate = (rover_info.interval is not None and base_info.interval is not None
+                   and base_info.interval > rover_info.interval + 1e-6)
 
     folder = Path(folder)
-    for source in (rover, base, *(path for path, _ in nav_files)):  # the program writes and deletes files in there
+    for source in (rover, *pieces, *(path for path, _ in nav_files)):  # the program writes and deletes files in there
         if inside(source, folder):
             raise ValueError(f"{source} is in {folder}, the work folder of the PPK, where the program writes and "
                              f"deletes files: move it out of {folder} first")
@@ -664,7 +704,7 @@ def solve(rover: str | Path, base: str | Path, navs=None, base_position: Sequenc
     _short_enough([conf, out, events, *(target for _, _, target in inputs)])
     try:
         # always the position, also the one of the header: RTKLIB 2.4.3 adds the antenna height twice with rinexhead
-        conf.write_text(config(mark), encoding="ascii")
+        conf.write_text(config(mark, interpolate_base=interpolate), encoding="ascii")
         try:
             _fresh_folder(copies)
             for source, info, target in inputs:
@@ -689,7 +729,8 @@ def solve(rover: str | Path, base: str | Path, navs=None, base_position: Sequenc
     solution.base = base_record
     solution.rover = rover.name
     solution.path = folder.resolve() / out.name
-    solution.inputs = {"rover": str(rover.absolute()), "base": str(base.absolute()),
+    solution.inputs = {"rover": str(rover.absolute()),
+                       "base": str(pieces[0].absolute()) if len(pieces) == 1 else [str(p.absolute()) for p in pieces],
                        "navs": [str(path.absolute()) for path, _ in nav_files]}
     solution.warnings = warnings + solution.warnings
     return solution
