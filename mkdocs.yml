@@ -13,6 +13,7 @@ exclude_docs: |
 
 theme:
   name: material
+  custom_dir: overrides  # main.html: the counting script of GoatCounter when extra.goatcounter is set
   logo: img/logo.svg
   favicon: img/logo.svg
   features:
@@ -95,6 +96,13 @@ plugins:
             Packaging: Pacchetti
             Benchmark: Benchmark
             Roadmap: Roadmap
+            Downloads and visits: Download e visite
+
+hooks:
+  - tools/stats_hook.py  # the numbers of docs/stats.md, from build/stats.json (see .github/workflows/stats.yml)
+
+extra:
+  goatcounter: pyarchinit-photogrammetry  # site code of the visit counter (no cookies)
 
 extra_css:
   - css/download.css
@@ -161,3 +169,4 @@ nav:
       - Packaging: packaging.md
   - Benchmark: benchmark.md
   - Roadmap: roadmap.md
+  - Downloads and visits: stats.md

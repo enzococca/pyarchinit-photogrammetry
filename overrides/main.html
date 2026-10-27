@@ -1,0 +1,9 @@
+{#- The counting script of GoatCounter on every page, when extra.goatcounter in mkdocs.yml names the site
+    code: visits without cookies, for the page "Downloads and visits" (docs/stats.md). -#}
+{% extends "base.html" %}
+{% block analytics %}
+  {{ super() }}
+  {% if config.extra.goatcounter %}
+    <script data-goatcounter="https://{{ config.extra.goatcounter }}.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
+  {% endif %}
+{% endblock %}

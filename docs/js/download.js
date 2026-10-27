@@ -2,9 +2,23 @@
    reader's system (macOS: the dmg; Windows: the ARM64 zip when the browser says the machine is
    ARM, the x64 zip otherwise) and a menu with every build. The links are the fixed ones of the
    latest release (releases/latest/download/<file without version>): they download without any
-   script; the GitHub API, when it answers, only adds the version and the size. */
+   script; the GitHub API, when it answers, only adds the version and the size. A download followed from
+   here is counted as an event of GoatCounter (download-macos, download-windows-x64, download-windows-arm64)
+   when the counter is on the page (extra.goatcounter in mkdocs.yml): country and source of those who
+   download from the site, for the page "Downloads and visits". */
 (function () {
   var API = "https://api.github.com/repos/enzococca/pyarchinit-photogrammetry/releases/latest";
+
+  function count(system) {
+    var gc = window.goatcounter;
+    if (!system || !gc || typeof gc.count !== "function") return;
+    gc.count({path: "download-" + system, title: "Download " + system, event: true});
+  }
+
+  function counted(link, system) {  // left and middle click (a new tab downloads as well)
+    link.addEventListener("click", function () { count(system()); });
+    link.addEventListener("auxclick", function (e) { if (e.button === 1) count(system()); });
+  }
 
   function detect() {
     var ua = navigator.userAgent || "";
@@ -33,10 +47,13 @@
       if (!entry) return;
       main.href = entry.href;
       main.setAttribute("download", "");
+      main.setAttribute("data-ppg-current", system);
       main.textContent = prefix + entry.getAttribute("data-ppg-label");
       entries.forEach(function (a) { a.classList.toggle("ppg-download__current", a === entry); });
     }
     detect().then(choose);
+    counted(main, function () { return main.getAttribute("data-ppg-current"); });  // none: the releases page
+    entries.forEach(function (a) { counted(a, function () { return a.getAttribute("data-ppg-system"); }); });
 
     function close() { menu.hidden = true; toggle.setAttribute("aria-expanded", "false"); }
     toggle.addEventListener("click", function (e) {
