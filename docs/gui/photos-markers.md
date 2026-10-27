@@ -380,9 +380,10 @@ system without heights of its own (*Apply without heights above the geoid*). Bef
 out, in the background, what the change does, shows it and asks *Apply?*:
 
 - the georeference follows the chunk into the new system, with the model, the clouds and the tie points;
-- what is converted: the references of the markers and what was drawn on the products - units, spot heights,
-  measuring points, stones, the sections of the project, the patches of the orthomosaic and of the texture, the
-  region of the reconstruction, the colour chart;
+- the references of the markers are converted; what was drawn on the products - units, spot heights, measuring
+  points, stones, the sections of the project, the patches of the orthomosaic and of the texture, the region of the
+  reconstruction, the colour chart - goes with the georeference, so that it stays on the model (on a chunk with
+  nothing to follow it is converted as the markers are);
 - what is to be built again in the new system: the DEM, the orthomosaic, the precision of the DEM, the coverage;
 - what stays in the old system and is to be made again if needed: the inactive versions of the DEM and of the
   orthomosaic, the elevations, the multispectral, thermal and satellite rasters, the relief and the raster

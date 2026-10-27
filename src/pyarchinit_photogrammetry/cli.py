@@ -2981,8 +2981,9 @@ def gnss_crs(project: Path,
 
     Without options: the system of the chunk and the kind of its heights, the frames of the positions of its photos,
     the systems of a survey where it is, and what does not fit between the heights. With --survey or --set the
-    references of the markers and what was drawn are converted, the georeference is fitted again, and the DEM and the
-    orthomosaic are to be built again; heights above EGM2008 need its grid (`ppg gnss geoid --download`)."""
+    references of the markers are converted, the georeference is fitted again (or converted), what was drawn follows
+    the model, and the DEM and the orthomosaic are to be built again; heights above EGM2008 need its grid
+    (`ppg gnss geoid --download`)."""
     from .gnss import frames, heights
 
     if survey and set_crs is not None:
@@ -3029,9 +3030,26 @@ def gnss_crs(project: Path,
         typer.echo("the georeference was converted by a similarity fitted on the extent of the chunk "
                    f"({result['transform_rms'] * 1000:.1f} mm off in plan)")
         if (result.get("transform_vertical") or 0.0) >= 0.001:
-            typer.echo(f"over its {result['transform_relief']:.0f} m of relief the heights of the model part from "
-                       f"those of the drawings by up to {result['transform_vertical'] * 1000:.1f} mm: the scale of the "
-                       "plan changes in the new system, as for every georeference")
+            vertical = result["transform_vertical"] * 1000
+            typer.echo(f"over its {result['transform_relief']:.0f} m of relief the new scale of the plan changes the "
+                       f"relief of the model, and of what was drawn with it, by {vertical:.1f} mm against the "
+                       "conversion of the coordinates (at one point at most half of it), as for every georeference in "
+                       "the new system")
+    drawn = [kind for kind in ("units", "quote", "points", "stones", "sections", "patches", "texture_patches",
+                               "colour_chart") if result["converted"].get(kind)]
+    if result.get("drawings") == "follow" and result.get("drawings_lift") is not None:
+        low, high = result["drawings_lift"]
+        said = "what was drawn followed the model into the new system"
+        if max(abs(low), abs(high)) >= 0.001:
+            said += (f"; its heights changed by {(low + high) / 2:+.3f} m" if high - low < 0.001 else
+                     f"; its heights changed by {low:+.3f} to {high:+.3f} m")
+        if (result.get("drawings_shift") or 0.0) >= 0.001:
+            said += (f"; in plan it is up to {result['drawings_shift']:.3f} m from the conversion of its coordinates: "
+                     "the new georeference of the model is not only the conversion of the old one")
+        typer.echo(said)
+    elif result.get("drawings") == "convert" and drawn:
+        typer.echo("the chunk has nothing in its internal frame to follow (model, clouds, aligned photos): what was "
+                   "drawn was converted as coordinates, as the markers")
     converted = [f"{kind} {n}" for kind, n in result["converted"].items() if n]
     if converted:
         typer.echo(f"converted: {', '.join(converted)}")
@@ -3040,12 +3058,9 @@ def gnss_crs(project: Path,
     for kept in result["kept"]:
         typer.echo(f"kept in the old system: {kept['what']} ({', '.join(kept['names'])})")
     if result["heights_unchanged"]:
-        typer.echo("warning: the old system has no heights of its own: the heights of the markers, spot heights and "
-                   "measuring points pass into the new one as they are, right only if they were above the sea level")
-    if result.get("heights_from_ellipsoid"):
-        typer.echo("the heights of the chunk were above the ellipsoid (GNSS positions of the photos): spot heights, "
-                   "measuring points and drawn units went onto the geoid with the model; the heights of the markers "
-                   "passed as they are")
+        typer.echo("warning: the old system has no heights of its own: the heights of the markers"
+                   + (", spot heights and measuring points" if result.get("drawings") == "convert" else "")
+                   + " pass into the new one as they are, right only if they were above the sea level")
 
 
 @gnss_app.command("positions")

@@ -1294,28 +1294,43 @@ def test_gnss_survey_crs_says_why_not_and_what_happened(gnss_window, monkeypatch
 
 
 def test_survey_crs_changes_say_the_converted_georeference_and_the_heights():
-    """What the window shows before it changes the system of a chunk says when the georeference is converted (a chunk
-    without photos to fit it again: by how much the similarity misses), that one fitted again is converted when its
-    references cannot fit it after all (as set_survey_crs does), when the heights of what was drawn go onto the geoid
-    with the chunk (placed by GNSS positions of its photos), the markers' as they are, and the lines the window holds
-    only, to draw again."""
+    """What the window shows before it changes the system of a chunk says whether the georeference is fitted again (the
+    preview fits it: no "if they cannot") or converted (a chunk without photos to fit it again: by how much the
+    similarity misses in plan, and how much the new scale of the plan changes the relief of the model, peak to peak -
+    at one point at most half of it), that what was drawn follows the model and by how much its heights change (and how
+    far in plan from the conversion of its coordinates), or is converted as coordinates on a chunk with nothing to
+    follow, that the heights of the markers pass as they are from a system without heights of its own, and the lines
+    the window holds only, to draw again."""
     pytest.importorskip("PySide6")
     from pyarchinit_photogrammetry.gui.survey_crs_dialog import changes_text
 
-    base = {"crs": "EPSG:32632", "refit": False, "convert": {"units": 2}, "rebuild": [], "kept": [],
-            "heights_unchanged": False, "heights_from_ellipsoid": False, "transform_rms": 0.0018}
+    base = {"crs": "EPSG:32632", "refit": False, "method": None, "convert": {"units": 2}, "rebuild": [], "kept": [],
+            "drawings": "follow", "drawings_shift": 0.0002, "drawings_lift": [0.0, 0.0004], "heights_unchanged": False,
+            "transform_rms": 0.0018}
     text = changes_text("EPSG:32633", base)
-    assert "similitudine" in text and "(scarto 1,8 mm)" in text and "ellissoide" not in text
-    assert "calcolata di nuovo" not in text and "ridisegnare" not in text
-    text = changes_text("EPSG:32633", {**base, "crs": "EPSG:32633+3855", "refit": True, "transform_rms": None,
-                                       "heights_from_ellipsoid": True})
-    assert "calcolata di nuovo" in text and "(scarto" not in text
-    assert "se non bastano a calcolarla, viene convertita con una similitudine" in text
-    assert "sull'ellissoide" in text and "le quote dei marker passano come sono" in text
+    assert "similitudine" in text and "(scarto 1,8 mm)" in text and "calcolata di nuovo" not in text
+    assert "seguono il modello" in text and "cambiano" not in text and "si scostano" not in text  # under a millimetre
+    assert "ridisegnare" not in text and "come sono" not in text
+    text = changes_text("EPSG:32633", {**base, "crs": "EPSG:32633+3855", "refit": True, "method": "cameras",
+                                       "transform_rms": None, "drawings_lift": [-40.0, -40.0],
+                                       "heights_unchanged": True})
+    assert "calcolata di nuovo" in text and "(scarto" not in text and "se non bastano" not in text
+    assert "Le loro quote cambiano di -40,000 m." in text
+    assert "le quote dei marker passano come sono nel nuovo" in text and "punti di misura passano" not in text
+    text = changes_text("EPSG:32633", {**base, "refit": True, "transform_rms": None, "drawings_lift": [-0.02, 0.01],
+                                       "drawings_shift": 1.029})
+    assert "Le loro quote cambiano da -0,020 a +0,010 m." in text
+    assert "In pianta si scostano fino a 1,029 m dalla conversione delle loro coordinate" in text
     text = changes_text("EPSG:32633", {**base, "transform_relief": 50.0, "transform_vertical": 0.0252})
-    assert "Sui 50 m di dislivello le quote del modello si scostano fino a 25,2 mm da quelle dei disegni" in text
+    assert ("Sui 50 m di dislivello la nuova scala della pianta cambia il dislivello del modello, e dei disegni con "
+            "lui, di 25,2 mm rispetto alla conversione delle coordinate (in un punto al più la metà)") in text
     flat = {**base, "transform_relief": 2.0, "transform_vertical": 0.0002}  # less than a millimetre: not said
     assert "dislivello" not in changes_text("EPSG:32633", flat)
+    converted = {**base, "drawings": "convert", "drawings_shift": None, "drawings_lift": None, "transform_rms": None,
+                 "heights_unchanged": True}
+    text = changes_text("EPSG:32633", converted)
+    assert "seguono il modello" not in text and "convertiti come coordinate, come i marker" in text
+    assert "le quote di marker, quote e punti di misura passano come sono nel nuovo" in text
     text = changes_text("EPSG:32633", base, ["Curve di livello", "Sezione in pianta"])
     assert ("Da ridisegnare dopo: Curve di livello, Sezione in pianta (linee che sono solo nella finestra, nel "
             "sistema di prima: vengono tolte).") in text

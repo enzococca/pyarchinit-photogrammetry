@@ -383,9 +383,10 @@ applicare lo stesso sistema senza quote proprie (*Applica senza quote sul geoide
 finestra calcola, in background, che cosa fa il cambio, lo mostra e chiede *Applicare?*:
 
 - la georeferenziazione segue il chunk nel nuovo sistema, con il modello, le nuvole e i punti di legame;
-- che cosa si converte: i riferimenti dei marker e quello che è stato disegnato sui prodotti - unità, quote, punti di
-  misura, pietre, le sezioni del progetto, le patch dell'ortofoto e della texture, la regione della ricostruzione, la
-  carta dei colori;
+- si convertono i riferimenti dei marker; quello che è stato disegnato sui prodotti - unità, quote, punti di misura,
+  pietre, le sezioni del progetto, le patch dell'ortofoto e della texture, la regione della ricostruzione, la carta
+  dei colori - va con la georeferenziazione, così resta sul modello (su un chunk senza niente da seguire si converte
+  come i marker);
 - che cosa va costruito di nuovo nel nuovo sistema: il DEM, l'ortofoto, la precisione del DEM, la copertura;
 - che cosa resta nel sistema di prima e va rifatto se serve: le versioni non attive di DEM e ortofoto, i prospetti, i
   raster multispettrali, termici e satellitari, i rilievi del DEM e il calcolatore raster, i proxy delle US, le

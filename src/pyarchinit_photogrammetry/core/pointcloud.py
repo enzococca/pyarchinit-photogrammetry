@@ -90,11 +90,14 @@ class PointCloud:
         """At most ``at_most`` points of a cloud file (or the vertices of a model), spread evenly through it, as
         ``(N, 3)`` float64: from a binary PLY a stride through its memory-mapped points, without reading the rest into
         memory; any other file is loaded."""
+        def stride(count: int) -> int:  # every so many points: at most ``at_most`` of them
+            return max(1, -(-count // max(at_most, 1)))
+
         arr = _read_binary_ply_vertices(Path(path), mmap=True)
         if arr is None or not {"x", "y", "z"} <= set(arr.dtype.names or ()):
             xyz = PointCloud.load(path).xyz
-            return xyz[::max(1, len(xyz) // max(at_most, 1))]
-        part = arr[::max(1, len(arr) // max(at_most, 1))]
+            return xyz[::stride(len(xyz))]
+        part = arr[::stride(len(arr))]
         return np.column_stack([part["x"], part["y"], part["z"]]).astype(np.float64)
 
     @staticmethod

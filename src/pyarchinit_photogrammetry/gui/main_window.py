@@ -3362,9 +3362,10 @@ class MainWindow(QMainWindow):
 
     def _set_survey_crs(self, crs: str) -> None:
         """The chunk into ``crs`` (:func:`..gnss.heights.set_survey_crs`): the drawings and the sections the window
-        holds stored first, what changes worked out in the background (:func:`..gnss.heights.survey_crs_changes`
-        converts with PROJ, which takes its time on a large chunk and may want the grid of a geoid: offered, then the
-        preview again), then shown and confirmed (:meth:`_confirm_survey_crs`)."""
+        holds stored first, what changes worked out in the background (:func:`..gnss.heights.survey_crs_changes` does
+        the change and undoes it - the georeference fitted again, what was drawn carried along -, which takes its time
+        on a large chunk and may want the grid of a geoid: offered, then the preview again; the window waits for it,
+        as for every task), then shown and confirmed (:meth:`_confirm_survey_crs`)."""
         from ..gnss import heights
 
         ch = self.chunk
@@ -3439,6 +3440,11 @@ class MainWindow(QMainWindow):
                 relief = relief_text(result)
                 if relief:
                     self.log_pane.info(relief)
+            from .survey_crs_dialog import drawings_text
+
+            drawn = drawings_text(result)  # with the model, by how much: as the preview said
+            if drawn:
+                self.log_pane.info(drawn)
             if redraw:
                 self.log_pane.warning(tr("Da ridisegnare nel nuovo sistema: {0}.", ", ".join(redraw)))
             if result.get("rebuild"):

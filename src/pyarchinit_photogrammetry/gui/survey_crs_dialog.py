@@ -52,27 +52,63 @@ def product_names() -> dict[str, str]:
 def relief_text(changes: dict) -> str | None:
     """What the conversion of a georeference by a similarity does to the heights of the model over its relief
     (``transform_relief``, ``transform_vertical`` of :func:`..gnss.heights.survey_crs_changes` and
-    :func:`..gnss.heights.set_survey_crs`), None below a millimetre."""
+    :func:`..gnss.heights.set_survey_crs`): the relief of the model - and of what was drawn, which goes with it -
+    changes by that much against the conversion of the coordinates, peak to peak, at one point by half of it at most;
+    None below a millimetre."""
     vertical, relief = changes.get("transform_vertical"), changes.get("transform_relief")
     if vertical is None or relief is None or vertical < 0.001:
         return None
-    return tr("Sui {0} m di dislivello le quote del modello si scostano fino a {1} mm da quelle dei disegni: nel nuovo "
-              "sistema cambia la scala della pianta, come in ogni georeferenziazione.", number(relief, 0),
-              number(vertical * 1000, 1))
+    return tr("Sui {0} m di dislivello la nuova scala della pianta cambia il dislivello del modello, e dei disegni con "
+              "lui, di {1} mm rispetto alla conversione delle coordinate (in un punto al più la metà), come in ogni "
+              "georeferenziazione nel nuovo sistema.", number(relief, 0), number(vertical * 1000, 1))
+
+
+# what survey_crs_changes counts of what was drawn on the products of a chunk
+DRAWN = ("units", "quote", "points", "stones", "sections", "patches", "texture_patches", "colour_chart")
+
+
+def _signed(value: float) -> str:
+    """A change of height in metres, to the millimetre, with its sign."""
+    return ("+" if round(value, 3) > 0 else "") + number(value, 3)
+
+
+def drawings_text(changes: dict) -> str | None:
+    """What becomes of what was drawn on the chunk (``drawings``, ``drawings_lift`` and ``drawings_shift`` of
+    :func:`..gnss.heights.survey_crs_changes` and :func:`..gnss.heights.set_survey_crs`): it follows the model into the
+    new system - and by how much its heights change, and how far in plan it goes from the conversion of its
+    coordinates, from a millimetre - or, on a chunk with nothing to follow, it is converted as coordinates; None when
+    nothing was drawn, and for a chunk in local coordinates."""
+    mode, lift, shift = changes.get("drawings"), changes.get("drawings_lift"), changes.get("drawings_shift")
+    counts = changes.get("convert") or changes.get("converted") or {}  # of the preview, of the result
+    if mode == "convert" and any(counts.get(kind) for kind in DRAWN):
+        return tr("Il chunk non ha niente da seguire nel suo sistema interno (modello, nuvole, foto allineate): i "
+                  "disegni vengono convertiti come coordinate, come i marker.")
+    if mode != "follow" or lift is None:
+        return None
+    parts = [tr("I disegni (unità, quote, punti di misura, pietre, sezioni, patch) seguono il modello nella nuova "
+                "georeferenziazione.")]
+    low, high = lift
+    if max(abs(low), abs(high)) >= 0.001:
+        parts.append(tr("Le loro quote cambiano di {0} m.", _signed((low + high) / 2)) if high - low < 0.001 else
+                     tr("Le loro quote cambiano da {0} a {1} m.", _signed(low), _signed(high)))
+    if shift is not None and shift >= 0.001:
+        parts.append(tr("In pianta si scostano fino a {0} m dalla conversione delle loro coordinate: la nuova "
+                        "georeferenziazione del modello non è solo la conversione di quella di prima.",
+                        number(shift, 3)))
+    return " ".join(parts)
 
 
 def changes_text(old: str, changes: dict, redraw=()) -> str:
-    """What putting a chunk from ``old`` into the system of ``changes`` (:func:`..gnss.heights.survey_crs_changes`)
-    does: the system, the georeference fitted again (or converted, when its references cannot fit it after all, as
-    :func:`..gnss.heights.set_survey_crs` does) or converted (by how much the similarity misses, and what it does to
-    the heights over the relief: :func:`relief_text`), what is converted,
-    the products to build again, what stays in the old system, the lines the window holds only - ``redraw``, the
-    names of their layers: taken away, to draw again -, the heights that pass as they are and those that go onto the
-    geoid with the chunk."""
+    """What putting a chunk from ``old`` into the system of ``changes`` (:func:`..gnss.heights.survey_crs_changes`,
+    which does it and undoes it: what it says is what the change does) does: the system, the georeference fitted again
+    or converted (by how much the similarity misses, and what it does to the heights over the relief:
+    :func:`relief_text`), what becomes of what was drawn (:func:`drawings_text`), what is converted, the products to
+    build again, what stays in the old system, the lines the window holds only - ``redraw``, the names of their layers:
+    taken away, to draw again -, the heights that pass as they are."""
     lines = [tr("Sistema: {0} → {1}.", old, changes["crs"])]
     if changes.get("refit"):
-        lines.append(tr("La georeferenziazione viene calcolata di nuovo nel nuovo sistema, sui marker e sulle "
-                        "posizioni delle foto; se non bastano a calcolarla, viene convertita con una similitudine."))
+        lines.append(tr("La georeferenziazione viene calcolata di nuovo nel nuovo sistema sui suoi riferimenti (marker "
+                        "e posizioni delle foto)."))
     elif changes.get("transform_rms") is not None:
         lines.append(tr("La georeferenziazione viene convertita nel nuovo sistema con una similitudine adattata "
                         "all'estensione del chunk (scarto {0} mm): modello e nuvole restano con i disegni.",
@@ -80,6 +116,9 @@ def changes_text(old: str, changes: dict, redraw=()) -> str:
         relief = relief_text(changes)
         if relief:
             lines.append(relief)
+    drawn = drawings_text(changes)
+    if drawn:
+        lines.append(drawn)
     names = _converted_names()
     converted = [f"{names.get(kind, kind)} {n}" for kind, n in (changes.get("convert") or {}).items() if n]
     if converted:
@@ -97,10 +136,10 @@ def changes_text(old: str, changes: dict, redraw=()) -> str:
                         "tolte).", ", ".join(redraw)))
     if changes.get("heights_unchanged"):
         lines.append(tr("Il sistema di prima non ha quote proprie: le quote di marker, quote e punti di misura passano "
-                        "come sono nel nuovo, giuste solo se erano sul livello del mare."))
-    if changes.get("heights_from_ellipsoid"):
-        lines.append(tr("Le quote del chunk sono sull'ellissoide (posizioni GNSS delle foto): quote, punti di misura e "
-                        "unità disegnate vanno sul geoide con il modello; le quote dei marker passano come sono."))
+                        "come sono nel nuovo, giuste solo se erano sul livello del mare.")
+                     if changes.get("drawings") == "convert" else
+                     tr("Il sistema di prima non ha quote proprie: le quote dei marker passano come sono nel nuovo, "
+                        "giuste solo se erano sul livello del mare."))
     return "\n".join(lines)
 
 
