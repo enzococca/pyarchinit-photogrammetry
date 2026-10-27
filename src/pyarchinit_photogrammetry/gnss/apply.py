@@ -11,7 +11,7 @@ import numpy as np
 
 from ..core.camera import Camera, Reference
 from ..core.chunk import IMAGE_EXTENSIONS, Chunk
-from . import dji, ppk
+from . import dji, frames, ppk
 
 FACTOR = 2.0
 FLOORS = {"fix": 0.01, "float": 0.20, "single": 1.0}
@@ -59,20 +59,53 @@ def accuracy(status: str | None, std: list[float] | None) -> list[float]:
 
 
 def set_camera_position(cam: Camera, location: list[float], crs: str, accuracy: list[float], source: str,
-                        status: str | None = None, height: str = "exif", extra: dict | None = None) -> None:
+                        status: str | None = None, height: str = "exif", extra: dict | None = None, *,
+                        frame: str | None = None, epoch: float | None = None) -> None:
     """Use ``location`` (in ``crs``) as the reference of ``cam`` and record in ``cam.meta["gnss"]`` where it
-    comes from, its status and whether the height is ``"exif"`` or ``"ellipsoidal"``."""
+    comes from, its status, whether the height is ``"exif"`` or ``"ellipsoidal"``, its reference ``frame`` and its
+    ``epoch``.
+
+    The ``frame`` is one of :data:`.frames.FRAMES`, by default the frame of the datum of ``crs``
+    (:func:`.frames.frame_of`; ``"unknown"`` for WGS 84 and for any datum that is none of them), and must be that one: a
+    GNSS position is written in the geographic system of its frame (:func:`.frames.crs_of`), a position of a file keeps
+    the system of the file.
+    The ``epoch`` is the decimal year the position was measured at (:func:`.frames.decimal_year`), None when it is not
+    known - which a position in a frame that moves with time (ITRF2020) cannot be: it could not be converted. A
+    ``ValueError``, and nothing changed, for a frame that is not the one of ``crs``, for a frame the program does not
+    know, and for an epoch that is not a year or is missing in ITRF2020."""
+    frame, epoch = _frame_and_epoch(crs, frame, epoch)
     cam.reference = Reference(location=list(location), accuracy=list(accuracy), enabled=True)
     cam.meta["reference_crs"] = crs
     cam.meta["gnss"] = {"source": source, "status": status, "accuracy": list(accuracy), "height": height,
-                        **(extra or {})}
+                        **(extra or {}), "frame": frame, "epoch": epoch}
+
+
+def _frame_and_epoch(crs: str, frame: str | None, epoch: float | None) -> tuple[str, float | None]:
+    """The frame and the epoch :func:`set_camera_position` records for a position in ``crs``, checked."""
+    own = frames.frame_of(crs)
+    own = frames.UNKNOWN if own in (None, frames.WGS84) else own  # a position on WGS 84: nobody knows its frame
+    if frame is None:
+        frame = own
+    else:
+        frames.crs_of(frame)  # a frame the program knows
+        frame = frames.UNKNOWN if frame == frames.WGS84 else frame
+        if frame != own:
+            raise ValueError(f"the frame of a position in {crs} is {own}, not {frame}: the positions in {frame} are "
+                             f"written in {frames.crs_of(frame)}")
+    if epoch is not None:
+        epoch = frames.valid_epoch(epoch)
+    elif frame in frames.DYNAMIC:
+        raise ValueError(f"a position in {frame} moves with time: it needs the epoch it was measured at (a decimal "
+                         "year), or it could not be converted to any other system")
+    return frame, epoch
 
 
 def apply_mrk(chunk: Chunk, mrk_path: str | Path, photos_folder: str | Path | None = None) -> dict:
     """Give the photos of ``chunk`` the position of their shot in a DJI ``Timestamp.MRK``: the camera, not the
     antenna (the lever arm of the shot is applied), in ``EPSG:4979`` with its ellipsoidal height, with the
     accuracy of the shot's standard deviations and RTK flag; ``meta["gnss"]`` keeps the lever arm and the antenna
-    position of the line. It replaces any position the photo had, so doing it again changes nothing.
+    position of the line, the frame ``"unknown"`` (the drone's own RTK: a network in ETRF, the drone's own base...) and
+    the epoch of the shot. It replaces any position the photo had, so doing it again changes nothing.
 
     The photos are the images in ``photos_folder`` (default: the folder of the MRK), in the order of their names.
     A DJI photo is paired with the line whose index is the shot number in its name; the photos that have none
@@ -91,10 +124,11 @@ def apply_mrk(chunk: Chunk, mrk_path: str | Path, photos_folder: str | Path | No
     for f, shot, cam in pairing.kept:
         state = dji.STATUS.get(shot.flag, "unknown")
         north, east, vertical = shot.std
-        set_camera_position(cam, list(dji.camera_position(shot)), "EPSG:4979",
+        set_camera_position(cam, list(dji.camera_position(shot)), frames.crs_of(frames.UNKNOWN),
                             accuracy(state, [east, north, vertical]), dji.SOURCE_MRK, status=state,
                             height="ellipsoidal",
-                            extra=_shot_record(pairing.mrk, shot, [shot.lon, shot.lat, shot.ellh]))
+                            extra=_shot_record(pairing.mrk, shot, [shot.lon, shot.lat, shot.ellh]),
+                            frame=frames.UNKNOWN, epoch=frames.decimal_year(shot.utc))
         placed.append((f, shot, state))
     return _result(pairing, placed)
 
@@ -103,21 +137,24 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
               photos_folder: str | Path | None = None, replace_fix: bool = False) -> dict:
     """Give the photos of ``chunk`` the PPK position of their shot in a DJI ``Timestamp.MRK``: the antenna where the
     post-processed ``solution`` puts it at the GPS time of the shot (:func:`.ppk.at`: an epoch, or the line between
-    two epochs at most a second apart) plus the lever arm of the shot, in ``EPSG:4979`` with its ellipsoidal height;
-    the status from the quality Q of the solution (1 fix, 2 and 4 float, any other single) and the accuracy from its
-    standard deviations (twice, never below the floor of the status). ``meta["gnss"]`` keeps what it keeps for an MRK,
-    the antenna being the one of the solution, with the ``q`` and the ``base`` (its ``position`` ``[lon, lat, h]``),
-    ``rover`` and ``solution`` (the name of the solution file of the run) of the solution. It replaces any position the
-    photo had, so doing it again changes nothing - but an RTK fix of the drone itself (:func:`onboard_fix`: the XMP
-    of a DJI photo, a DJI MRK), which the photo keeps unless ``replace_fix``: the PPK is for the photos that are not
-    fix.
+    two epochs at most a second apart) plus the lever arm of the shot, with its ellipsoidal height, in the frame of the
+    base of the solution (``base["frame"]``: the positions of a base in ITRF2020 are in ITRF2020, ``EPSG:9989``; those
+    of a base whose frame nobody knows - typed, from the RINEX header, a solution read from a file - in ``EPSG:4979``,
+    :func:`.frames.crs_of`) at the epoch of the shot; the status from the quality Q of the solution (1 fix, 2 and 4
+    float, any other single) and the accuracy from its standard deviations (twice, never below the floor of the
+    status). ``meta["gnss"]`` keeps what it keeps for an MRK, the antenna being the one of the solution, with the ``q``
+    and the ``base`` (its ``position`` ``[lon, lat, h]``, its ``frame`` and ``epoch``), ``rover`` and ``solution`` (the
+    name of the solution file of the run) of the solution. It replaces any position the photo had, so doing it again
+    changes nothing - but an RTK fix of the drone itself (:func:`onboard_fix`: the XMP of a DJI photo, a DJI MRK),
+    which the photo keeps unless ``replace_fix``: the PPK is for the photos that are not fix.
 
     The photos are paired with the shots and checked against their times as by :func:`apply_mrk`, with its errors. A
     photo whose shot falls where the solution has no position (more than a second between two of its epochs, before
     its first or after its last) keeps the position it had and is among the unmatched, its shot among the shots
     unmatched. A ``ValueError`` and nothing changed when no shot of the MRK falls within the time of the solution (the
-    MRK and the solution of different flights), or when the solution has no positions. A run that gives photos their
-    positions is recorded in ``chunk.meta`` (:func:`.ppk.last_run`).
+    MRK and the solution of different flights), when the solution has no positions, or when its base is in a frame the
+    program does not know. A run that gives photos their positions is recorded in ``chunk.meta``
+    (:func:`.ppk.last_run`).
 
     Returns what :func:`apply_mrk` returns - the photos that kept their onboard fix are neither matched nor unmatched -
     with ``"kept_fix"`` (how many kept it), ``"baseline_km"`` (:func:`.ppk.baseline_km`, None without the position of
@@ -140,6 +177,8 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
                  else "it has no shots")
         covered = f"has positions from {ppk.span_text(times[0], times[-1])}" if len(times) else "has no positions"
         raise ValueError(f"{pairing.mrk}: {shots}, and the solution {name} {covered}: they are not of the same flight")
+    frame = (solution.base or {}).get("frame") or frames.UNKNOWN  # the positions are in the frame of the base
+    system = frames.crs_of(frame)
     llh, q, sd, ok = ppk.at(solution, [shot.gps_time for _f, shot, _cam in pairing.kept])
     positions, apart = [], []  # all of them first: nothing changes when something goes wrong
     kept, disagree, downgraded = [], [], 0  # the onboard fixes kept, their distance from the PPK, those replaced worse
@@ -176,7 +215,8 @@ def apply_ppk(chunk: Chunk, mrk_path: str | Path, solution: ppk.Solution,
                                            exclude={cam.key for _f, _shot, cam, *_rest in positions})
     placed = []
     for f, shot, cam, location, acc, state, extra in positions:
-        set_camera_position(cam, location, "EPSG:4979", acc, "ppk", status=state, height="ellipsoidal", extra=extra)
+        set_camera_position(cam, location, system, acc, "ppk", status=state, height="ellipsoidal", extra=extra,
+                            frame=frame, epoch=frames.decimal_year(shot.utc))
         placed.append((f, shot, state))
     warnings = list(solution.warnings)
     gaps = len(pairing.kept) - len(placed) - len(kept)

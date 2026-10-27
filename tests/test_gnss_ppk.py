@@ -1095,7 +1095,7 @@ def test_solve_gives_rtklib_plain_copies_of_the_inputs(tmp_path, fake_rtklib):
     assert solution.base == {"name": "0759", "position": pytest.approx([mark[1], mark[0], mark[2]]),
                              "position_source": "header", "antenna": "TRM29659.00",
                              "antenna_delta_hen": [0.0, 0.0, 0.0], "file": "base è.05o.gz",
-                             "antenna_calibration": None}
+                             "antenna_calibration": None, "frame": "unknown", "epoch": None, "sd": None, "detail": {}}
     header, antenna = solution.warnings
     assert "0759" in header and "header" in header and "metres" in header
     assert f"latitude {mark[0]:.7f}, longitude {mark[1]:.7f}" in header
@@ -1113,7 +1113,7 @@ def test_solve_with_a_typed_base_position(tmp_path, fake_rtklib):
     assert [float(options[f"ant2-pos{i}"]) for i in (1, 2, 3)] == [35.16, 139.61, 70.0]
     assert solution.base == {"name": "0759", "position": [139.61, 35.16, 70.0], "position_source": "typed",
                              "antenna": "TRM29659.00", "antenna_delta_hen": [0.0, 0.0, 0.0], "file": "07590920.05o",
-                             "antenna_calibration": None}
+                             "antenna_calibration": None, "frame": "unknown", "epoch": None, "sd": None, "detail": {}}
     (antenna,) = solution.warnings  # only the one of every run: the antenna of the base is not calibrated
     assert antenna.startswith("the phase-centre offset of the antenna TRM29659.00 of the base 0759 is not applied")
     with pytest.raises(ValueError, match="latitude"):

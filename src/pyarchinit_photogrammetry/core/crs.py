@@ -36,12 +36,19 @@ def is_geographic(crs: str | None) -> bool:
     return not is_local(crs) and to_pyproj(crs).is_geographic
 
 
-def transform_points(points: np.ndarray, src: str, dst: str) -> np.ndarray:
-    """Transform ``(N,3)`` points between two CRS (heights passed through)."""
+def transform_points(points: np.ndarray, src: str, dst: str, epoch=None) -> np.ndarray:
+    """Transform ``(N,3)`` points between two CRS (heights passed through). When one of the two is in ITRF2020, a
+    frame where positions move with time (a GNSS position against a permanent station or PPP), the points go through
+    :func:`..gnss.frames.transform` at their ``epoch``: a decimal year for all of them, or one for each (PROJ alone
+    would take a ballpark, or the epoch 2015.0)."""
     if src == dst or (is_local(src) and is_local(dst)):
         return np.asarray(points, float).copy()
     if is_local(src) or is_local(dst):
         raise ValueError("cannot transform between a local frame and a geodetic CRS")
+    from ..gnss import frames
+
+    if frames.dynamic(src) or frames.dynamic(dst):
+        return frames.transform(points, src, dst, epoch)
     from pyproj import Transformer
 
     tr = Transformer.from_crs(to_pyproj(src), to_pyproj(dst), always_xy=True)

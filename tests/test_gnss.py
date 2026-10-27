@@ -72,8 +72,9 @@ def test_set_camera_position_records_where_it_comes_from():
     assert cam.reference.location == [14.0, 41.0, 100.0] and cam.reference.enabled
     assert cam.reference.accuracy == [0.01, 0.01, 0.02]
     assert cam.meta["reference_crs"] == "EPSG:4326"
+    # the frame of a position on WGS 84 is the one nobody knows, and the epoch was not given
     assert cam.meta["gnss"] == {"source": "dji_xmp", "status": "fix", "accuracy": [0.01, 0.01, 0.02],
-                                "height": "ellipsoidal", "diff_age": 1.0}
+                                "height": "ellipsoidal", "diff_age": 1.0, "frame": "unknown", "epoch": None}
 
 
 def _jpeg(path, xmp: str | None, when: datetime | None = None):
@@ -470,7 +471,7 @@ def test_positions_file_with_header_and_without(tmp_path):
     assert second.reference.accuracy == pytest.approx([0.04] * 3)
     assert first.meta["reference_crs"] == "EPSG:4979"
     assert first.meta["gnss"] == {"source": "positions_file", "status": None, "accuracy": first.reference.accuracy,
-                                  "height": "ellipsoidal", "std": [0.01] * 3}
+                                  "height": "ellipsoidal", "std": [0.01] * 3, "frame": "unknown", "epoch": None}
     assert third.meta["gnss"]["source"] == "exif" and third.meta["reference_crs"] == "EPSG:4326"  # not in the file
 
     again = _snapshot(ch)
@@ -489,7 +490,7 @@ def test_positions_file_with_header_and_without(tmp_path):
     assert first.reference.location == [500000.5, 4500000.25, 101.5] and first.meta["reference_crs"] == "EPSG:32633"
     assert first.reference.accuracy == [0.05, 0.05, 0.10]
     assert first.meta["gnss"] == {"source": "positions_file", "status": None, "accuracy": [0.05, 0.05, 0.10],
-                                  "height": "exif"}
+                                  "height": "exif", "frame": "unknown", "epoch": None}
     assert positions.apply_positions(ch, rows, "EPSG:32633", default_accuracy=(0.02, 0.02, 0.04))["matched"] == 2
     assert first.reference.accuracy == [0.02, 0.02, 0.04]
 

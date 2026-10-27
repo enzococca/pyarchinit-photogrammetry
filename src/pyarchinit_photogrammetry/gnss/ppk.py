@@ -7,6 +7,7 @@ A position the program keeps - the base of a solution, the reference of a photo 
 first; a position typed by the user, and the options of RTKLIB, are latitude, longitude, height."""
 from __future__ import annotations
 
+import copy
 import itertools
 import math
 import os
@@ -22,7 +23,7 @@ import numpy as np
 
 from .. import _native
 from . import atx as antex
-from . import rinex
+from . import frames, rinex
 from .dji import GPS_EPOCH, wrap_longitude
 
 QUALITY = {1: "fix", 2: "float", 3: "sbas", 4: "dgps", 5: "single", 6: "ppp"}  # the Q of a row of RTKLIB's solution
@@ -63,6 +64,9 @@ MAX_PATH_BYTES = 1000
 
 BASELINE_WARNING_KM = 20.0  # a base further than this from the flight: the ambiguities are hard to fix
 SAME_BASE_M = 0.05  # one base typed at two positions further apart than this in one chunk: one of them is likely wrong
+# where the position of a base comes from: typed by the user, the position of its RINEX header, the coordinates of a
+# permanent station, a baseline from a permanent station, a PPP solution
+BASE_SOURCES = ("typed", "header", "station", "baseline", "ppp")
 MEMORY = "gnss_ppk"  # chunk.meta[MEMORY]["last"]: the last PPK run of the chunk (last_run), where the dialog starts
 
 _FIELDS = re.compile(r"[,\s]+")  # RTKLIB separates the fields with spaces, or with out-fieldsep (a comma)
@@ -80,7 +84,10 @@ class Solution:
     ns: np.ndarray  # (N,) int: the satellites used
     sd: np.ndarray  # (N, 3): standard deviations east, north, up (m)
     # name; position [lon, lat, h] of the mark the base stands on (longitude first, as every position the program
-    # keeps: the reference of a photo, its antenna); position_source "header" | "typed"; antenna: its type and radome
+    # keeps: the reference of a photo, its antenna); position_source: one of BASE_SOURCES; frame: the reference frame
+    # of the position (frames.FRAMES, "unknown" when nobody knows it: typed, from the header), epoch: the decimal year
+    # of its coordinates (None when not known), sd: its standard deviations [e, n, u] (m, None when not known),
+    # detail: what its source says of it (BasePosition.detail); antenna: its type and radome
     # in the RINEX header of the base ("" when it names none); antenna_delta_hen [h, e, n] (m): the antenna above the
     # mark from that header, which RTKLIB adds (None when the header has none); file; antenna_calibration: None when
     # RTKLIB was given no file of antenna calibrations, else {"file": its name, "entry": the entry RTKLIB takes for
@@ -94,6 +101,50 @@ class Solution:
     # the files of the run, absolute: "rover" and "base" (paths; "base" a list of paths when the base is in several
     # files), "navs" (a list of paths); empty from read_pos
     inputs: dict = field(default_factory=dict)
+
+
+@dataclass
+class BasePosition:
+    """The position of the mark a base stands on - latitude, longitude (degrees), height above the ellipsoid (m) - and
+    what is known of it: where it comes from (``source``, one of :data:`BASE_SOURCES`), its reference ``frame`` (one of
+    :data:`.frames.FRAMES`: the positions computed from the base are in it; ``"unknown"`` when nobody knows it) and the
+    ``epoch`` of its coordinates (a decimal year; a position in ITRF2020 cannot be without it), its standard deviations
+    ``sd`` east, north, up (m) when known, and ``detail``, what its source says of it (the station, the solution...).
+    A ``ValueError`` for a position off the earth, a source or a frame the program does not know, an epoch that is not
+    a year or that is missing in ITRF2020, deviations that are not three numbers of zero or more."""
+
+    lat: float
+    lon: float
+    h: float
+    source: str
+    frame: str = frames.UNKNOWN
+    epoch: float | None = None
+    sd: tuple | None = None
+    detail: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.lat, self.lon, self.h = _base_position((self.lat, self.lon, self.h))
+        if self.source not in BASE_SOURCES:
+            raise ValueError(f"the position of a base comes from one of {', '.join(BASE_SOURCES)}, not from "
+                             f"{self.source!r}")
+        frames.crs_of(self.frame)  # a frame the program knows
+        if self.frame == frames.WGS84:
+            self.frame = frames.UNKNOWN  # a position on WGS 84: nobody knows its frame
+        if self.epoch is not None:
+            self.epoch = frames.valid_epoch(self.epoch)
+        elif self.frame in frames.DYNAMIC:
+            raise ValueError(f"the position of the base is in {self.frame}, which moves with time: give the epoch of "
+                             "its coordinates (a decimal year)")
+        if self.sd is not None:
+            try:
+                sd = tuple(float(v) for v in self.sd)
+            except (TypeError, ValueError):
+                sd = ()
+            if len(sd) != 3 or not all(math.isfinite(v) and v >= 0.0 for v in sd):
+                raise ValueError(f"the standard deviations of the base are three numbers of metres (east, north, up), "
+                                 f"not {self.sd!r}")
+            self.sd = sd
+        self.detail = dict(self.detail or {})
 
 
 # --- the options of a run ---------------------------------------------------------------------------------------
@@ -649,32 +700,39 @@ def _calibration(source: Path | None, info: rinex.RinexInfo) -> dict | None:
 
 
 def _base(path: Path, info: rinex.RinexInfo,
-          position: Sequence[float] | None) -> tuple[dict, str | None, tuple[float, float, float]]:
-    """The base of the solution, typed or from its header (its ``position`` ``[lon, lat, h]``), the warning for a
-    position from the header or for a typed one far from it (:func:`far_from_header`), and the position as RTKLIB
-    is given it (latitude, longitude, height)."""
+          position: BasePosition | Sequence[float] | None) -> tuple[dict, str | None, tuple[float, float, float]]:
+    """The base of the solution: at ``position`` (a :class:`BasePosition`; three numbers are typed, in a frame nobody
+    knows) or, with None, at the position of its header; its record (``position`` ``[lon, lat, h]``, where it comes
+    from, its frame, epoch, deviations and detail), the warning for a position from the header or for a typed one far
+    from it (:func:`far_from_header`), and the position as RTKLIB is given it (latitude, longitude, height)."""
     record = {"name": base_name(path, info), "position": None, "position_source": None, "antenna": antenna_type(info),
               "antenna_delta_hen": None if info.antenna_delta_hen is None else list(info.antenna_delta_hen),
               "file": path.name}
-    if position is not None:
-        lat, lon, h = _base_position(position)
+    if position is None:
+        if info.approx_xyz is None:
+            raise ValueError(f"the base {path.name} has no position in its RINEX header: type the position of the mark "
+                             "it stands on (latitude, longitude, height above the ellipsoid)")
+        position = BasePosition(*rinex.ecef_to_llh(info.approx_xyz), "header")
+    elif not isinstance(position, BasePosition):
+        position = BasePosition(*_base_position(position), "typed")
+    lat, lon, h = position.lat, position.lon, position.h
+    warning = None
+    if position.source == "header":
+        warning = (f"the position of the base {record['name']} comes from its RINEX header (latitude {lat:.7f}, "
+                   f"longitude {lon:.7f}, {h:.2f} m): it can be metres off, and the whole survey moves with it. Type "
+                   "the surveyed position of the base for an accurate absolute position")
+    elif position.source == "typed":
         offset = offset_from_header((lat, lon, h), info)
-        warning = None
         if far_from_header(offset):
             apart = f"{offset[0] / 1000.0:.1f} km" if offset[0] >= 1000.0 else f"{offset[0]:.0f} m"
             warning = (f"the typed position of the base {record['name']} is {apart} away horizontally and "
                        f"{offset[1]:+.1f} m in height from the position of its RINEX header: check that latitude and "
                        "longitude are not swapped or without their sign, and that the height is above the ellipsoid, "
                        "not above the sea level")
-        return {**record, "position": [lon, lat, h], "position_source": "typed"}, warning, (lat, lon, h)
-    if info.approx_xyz is None:
-        raise ValueError(f"the base {path.name} has no position in its RINEX header: type the position of the mark it "
-                         "stands on (latitude, longitude, height above the ellipsoid)")
-    lat, lon, h = rinex.ecef_to_llh(info.approx_xyz)
-    warning = (f"the position of the base {record['name']} comes from its RINEX header (latitude {lat:.7f}, "
-               f"longitude {lon:.7f}, {h:.2f} m): it can be metres off, and the whole survey moves with it. Type the "
-               "surveyed position of the base for an accurate absolute position")
-    return {**record, "position": [lon, lat, h], "position_source": "header"}, warning, (lat, lon, h)
+    record.update(position=[lon, lat, h], position_source=position.source, frame=position.frame,
+                  epoch=position.epoch, sd=None if position.sd is None else list(position.sd),
+                  detail=copy.deepcopy(position.detail))
+    return record, warning, (lat, lon, h)
 
 
 def inside(path: str | Path, folder: str | Path) -> bool:
@@ -753,7 +811,7 @@ def _remove(*paths: Path) -> None:
 
 
 def solve(rover: str | Path, base: str | Path | Sequence[str | Path], navs=None,
-          base_position: Sequence[float] | None = None, *, folder: str | Path,
+          base_position: BasePosition | Sequence[float] | None = None, *, folder: str | Path,
           atx: str | Path | None = "auto") -> Solution:
     """The PPK solution of the antenna of ``rover`` (its RINEX observations) against ``base`` (the RINEX observations
     of a base: one file that covers the whole flight, or several that make it - pieces of an hour, say - which
@@ -763,10 +821,13 @@ def solve(rover: str | Path, base: str | Path | Sequence[str | Path], navs=None,
     compress, a zip archive of one file, Hatanaka (:func:`rinex.plain`). When the epochs of the base are further apart
     than those of the rover (by their ``INTERVAL`` or, when a header does not say, by what their first epochs show,
     :func:`rinex.epoch_interval`) RTKLIB interpolates the base to the epochs of the rover. The base
-    at ``base_position`` (latitude, longitude, height above the ellipsoid of the mark it stands on) or, with None, at
-    the position of its RINEX header, with a warning: that one can be metres off; a typed one far from the header's
-    (:func:`far_from_header`) has a warning too. Either way RTKLIB adds the antenna height of the base's header,
-    recorded in ``Solution.base["antenna_delta_hen"]``.
+    at ``base_position``, the mark it stands on: a :class:`BasePosition` (where it comes from, its reference frame and
+    the epoch of its coordinates, which ``Solution.base`` keeps as ``frame``, ``epoch``, ``sd`` and ``detail``: the
+    positions of the solution are in that frame), or three numbers typed by the user - latitude, longitude, height
+    above the ellipsoid - in a frame nobody knows (``"unknown"``); with None at the position of its RINEX header, with
+    a warning: that one can be metres off; a typed one far from the header's (:func:`far_from_header`) has a warning
+    too. Either way RTKLIB adds the antenna height of the base's header, recorded in
+    ``Solution.base["antenna_delta_hen"]``.
 
     The offset of the phase centre of the base's antenna from its reference point is applied when RTKLIB is given
     the calibrations of the antennas: ``atx`` is an ANTEX file (``.atx``), or None for none, or "auto" (the default)
@@ -799,7 +860,7 @@ def solve(rover: str | Path, base: str | Path | Sequence[str | Path], navs=None,
 
 
 def _solve(rover: Path, pieces: list[Path], base: Path, holes: list[tuple[datetime, datetime]], navs,
-           base_position: Sequence[float] | None, folder: str | Path, atx) -> Solution:
+           base_position: BasePosition | Sequence[float] | None, folder: str | Path, atx) -> Solution:
     """:func:`solve` with the files of the base - ``pieces``, as the user gave them - and the file that RTKLIB is given
     a copy of: that one file, or the file the pieces make joined, with the ``holes`` (GPS time) between them."""
     rover_info, rover_span = _observations(rover, "rover")
