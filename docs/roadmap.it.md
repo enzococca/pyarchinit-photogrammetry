@@ -220,30 +220,37 @@ dataset pubblici WorldView-3.
   cliccati nella vista 3D; una sezione toglie quello che sta davanti al piano e salva il profilo del taglio
   (disegnato sull'ortofoto, esportato in DXF); v è la quota sui piani verticali, i marker sono disegnati sul
   prospetto; `ppg elevation`.
-* **Posizioni GNSS delle foto, primo passo**: lo stato RTK e le deviazioni standard delle foto DJI (e delle
-  bande delle riprese multispettrali), gli scatti di un `Timestamp.MRK` con il braccio di leva dell'antenna,
+* **Posizioni GNSS delle foto, primo passo** (1.5.5): lo stato RTK e le deviazioni standard delle foto DJI (e
+  delle bande delle riprese multispettrali), gli scatti di un `Timestamp.MRK` con il braccio di leva dell'antenna,
   file di posizioni di qualsiasi drone o programma, l'accuratezza di ogni foto (il doppio delle deviazioni
   dichiarate, con i minimi del suo stato) e il pannello *GNSS* con una tabella per volo, gli scarti delle camere
   allineate e *Solo le posizioni fix*; `ppg gnss`.
-* **Posizioni GNSS delle foto, PPK**: le posizioni degli scatti di un `Timestamp.MRK` ricalcolate dal RINEX del
-  drone e da quello di una base - propria o una stazione permanente - con RTKLIB-EX 2.5.1 dentro il nucleo nativo
-  0.5 (senza, l'`rnx2rtkp` di `PPG_RNX2RTKP`): la base nella sua posizione misurata o in quella della sua
-  intestazione RINEX, con l'avviso che può essere sbagliata di metri, la sua altezza dell'antenna aggiunta (non
-  ancora lo scostamento del centro di fase della sua antenna, che ogni calcolo dice); la camera sotto l'antenna con
-  il braccio di leva dello scatto, lo stato e l'accuratezza della soluzione, niente inventato attraverso i suoi buchi;
-  i fix RTK di bordo tenuti se non si sostituiscono, un file di soluzione per calcolo, la finestra che riparte
-  dall'ultimo calcolo; *Calcola PPK...* nel pannello *GNSS*, `ppg gnss ppk`.
+* **Posizioni GNSS delle foto, PPK** (1.6.0): le posizioni degli scatti di un `Timestamp.MRK` ricalcolate dal
+  RINEX del drone e da quello di una base - propria o una stazione permanente - con RTKLIB-EX 2.5.1 dentro il
+  nucleo nativo 0.5 (senza, l'`rnx2rtkp` di `PPG_RNX2RTKP`): la base nella sua posizione misurata o in quella
+  della sua intestazione RINEX, con l'avviso che può essere sbagliata di metri, la sua altezza dell'antenna
+  aggiunta (non ancora lo scostamento del centro di fase della sua antenna, che ogni calcolo dice); la camera
+  sotto l'antenna con il braccio di leva dello scatto, lo stato e l'accuratezza della soluzione, niente inventato
+  attraverso i suoi buchi; i fix RTK di bordo tenuti se non si sostituiscono, un file di soluzione per calcolo, la
+  finestra che riparte dall'ultimo calcolo; *Calcola PPK...* nel pannello *GNSS*, `ppg gnss ppk`.
+* **GNSS, la base, il suo sistema e le quote** (1.6.1): la base di un PPK da una stazione permanente dell'EPN,
+  dell'IGS o di RING vicina al rilievo (le stazioni elencate per distanza; scaricate le sue osservazioni per le
+  ore del volo e le sue coordinate in ITRF2020 all'epoca del volo), o la propria base posta con una linea di base
+  statica da una stazione o con un PPP statico sui prodotti precisi di ESA, CODE e dell'IGS; l'antenna della base
+  calibrata con igs20.atx; i RINEX Hatanaka, `.Z` e zip letti così come sono, una base in più file; ogni posizione
+  con il suo sistema di riferimento e la sua epoca, ITRF2020 portato a ETRF2000 e RDN2008 con l'Helmert dell'EPSG
+  a quell'epoca; le quote sul geoide con EGM2008, scaricato quando lo si chiede, o una griglia propria, e il
+  sistema del rilievo con l'anteprima di quello che cambia; *Ottimizza camere* tenuto dalle posizioni GNSS
+  accurate, con una rete di sicurezza; la parte GNSS del rapporto PDF, con i crediti dei dati usati; `ppg gnss
+  stations`, `baseline`, `ppp`, `atx`, `geoid`, `crs`.
 
 ## Prossimi passi
 
 Punti aperti, senza un ordine fisso:
 
-* **GNSS, i prossimi passi**: la posizione della base da una stazione permanente vicina o da un PPP statico,
-  l'elenco e lo scaricamento delle stazioni pubbliche vicine a un rilievo, i RINEX Hatanaka letti così come sono, le
-  calibrazioni delle antenne delle basi (gli scostamenti del centro di fase, dai file dell'IGS e dell'NGS), una base
-  da più file (i file orari di una stazione, un volo a cavallo della mezzanotte), il sistema di riferimento e l'epoca
-  delle posizioni e le quote sul geoide, la qualità per volo nel rapporto PDF; gli eventi di un ricevitore e i log di
-  ArduPilot e PX4 per i droni costruiti da sé.
+* **GNSS, il prossimo passo**: gli eventi di un ricevitore (i segnali di scatto che una camera lascia nelle
+  osservazioni di un ricevitore proprio), i log di ArduPilot e PX4 per i droni costruiti da sé, i file grezzi dei
+  ricevitori u-blox ed Emlid, i file `.DAT` di una base DJI D-RTK.
 
 * Parti mai provate su dati veri: import da WebODM, una scena satellitare propria, `ppg remote` su una
   macchina remota, un volo MicaSense intero fino all'ortofoto di riflettanza.

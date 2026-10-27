@@ -55,9 +55,10 @@ pip install -U pip && pip install "pyarchinit-photogrammetry[all]"
 `[all]` brings the mesh (Open3D), IFC, PostgreSQL, the desktop interface, E57 scans and Munsell
 colours; `[sam]` adds Segment Anything 2.1 (PyTorch). The native core in Rust (depth maps and
 orthophotos several times faster) is built from the source (below); the desktop applications
-include it. The PPK of the GNSS positions needs the core 0.5 or later, which holds RTKLIB
-(`pip install "pyarchinit-photogrammetry-core>=0.5"`); without it the program says so, and `ppg doctor`
-says where the PPK runs.
+include it. The PPK of the GNSS positions needs the core 0.5 or later, which holds RTKLIB, and the
+RINEX files compressed with Hatanaka (`.crx`, `.##d`, as the archives of the permanent stations give them)
+the core 0.6 or later (`pip install "pyarchinit-photogrammetry-core>=0.6"`), or the `CRX2RNX` program of
+RNXCMP in the `PATH`; without them the program says so, and `ppg doctor` says where the PPK runs.
 
 ```bash
 ppg doctor                       # checks the environment and says what to fix
@@ -97,6 +98,26 @@ uv pip install -e ".[all,dev]"
 uv pip install ./native        # optional: the native core (needs a Rust toolchain)
 pytest -q
 ```
+
+## GNSS data
+
+The GNSS work downloads only what a run needs, from public archives that ask for no account, and keeps it in
+the GNSS folder of the program: `~/Library/Application Support/pyarchinit-photogrammetry/gnss` on macOS,
+`%LOCALAPPDATA%\pyarchinit-photogrammetry\gnss` on Windows, `~/.local/share/pyarchinit-photogrammetry/gnss`
+on Linux (`PPG_GNSS_DIR` names another one). There are the lists and the files of the permanent stations, the
+precise products of a PPP, the antenna calibrations igs20.atx (62 MB) and the grids of the geoid
+([PPK](gui/photos-markers.md#ppk-corrections-from-a-base)).
+
+* **The geoid EGM2008** (`us_nga_egm08_25.tif`, 81 MB, public domain), which heights above the sea level need,
+  is downloaded only when asked: *Download the EGM2008 geoid (81 MB)...* in the step *System and heights* of
+  the GNSS pane, or `ppg gnss geoid --download`. Without it a conversion into heights above the geoid is
+  refused: heights above the ellipsoid are never passed off as heights above the sea level.
+* **A grid of your own**, such as ITALGEO2005 of the IGM (`geo_igm_mar06.grd`), goes into the `proj` folder
+  of the GNSS folder, which `ppg gnss geoid` prints: PROJ looks for grids there too.
+* PROJ never goes to the network by itself, even when the shell sets `PROJ_NETWORK=ON`: a grid is used only
+  when it is on the disk.
+
+More in [Heights above the geoid and the system of the survey](gui/photos-markers.md#heights-above-the-geoid-and-the-system-of-the-survey).
 
 ## When something does not work
 

@@ -104,20 +104,26 @@ changing nothing, when the file cannot be used.
 satellite observations and from those of a base that recorded at the same time; every photo then takes the
 position of the camera at its shot, as with an MRK, with the status (fix, float, single) and the accuracy of the
 solution. With fixes the photos are placed to a few centimetres against the base, and a survey needs few or no
-ground control points - in height less the phase-centre offset of the base's antenna, which is not applied yet (see
-*The phase centre of the base antenna* below): a few centimetres, more than 10 cm with some choke rings.
+ground control points. The base decides where the whole survey ends up: your own receiver, a permanent station near
+the survey, or your receiver placed by a static baseline from a station or by a static PPP
+([The position of the base](#the-position-of-the-base)); its antenna is calibrated with the file of the IGS,
+igs20.atx ([The antenna of the base](#the-antenna-of-the-base)); and every position keeps the reference frame and
+the epoch of its coordinates ([Reference frames and epochs](#reference-frames-and-epochs)).
 
 **The files.**
 
 | File | Where it comes from |
 | --- | --- |
 | The drone's RINEX and its `Timestamp.MRK` | The folder of the flight on the drone's card: a DJI drone writes `<flight>_Rinex.obs` beside `<flight>_Timestamp.MRK` (often with `<flight>_PPKNAV.nav`); another receiver its observation file (`.obs`, `.##o`) |
-| The base's RINEX | Your own base (any receiver that records RINEX) on a mark whose position you know, or the file of a permanent station (a regional network, EUREF, IGS) that you download for the hours of the flight. The base must record during the whole flight, **in one file that covers it all**: the hourly files of a station, or the two daily files of a flight across midnight (UTC), must be joined into one with another tool for now - joining them comes with the next phase. The nearer the better: beyond 20 km a fix gets hard (the program warns). Listing and downloading the stations near a survey is coming in a later version |
-| Navigation files | The broadcast ephemerides: `.nav`, `.##n`, `.##g`, `.##p` or the RINEX 3 `*_MN.rnx` - the drone's, the base's or the daily file of a station; the daily broadcast file of the IGS in RINEX 2 (`brdcDDD0.YYn`, `.YYg`) is found too beside the observations, for their day and the days around it |
+| The base's RINEX | Your own base (any receiver that records RINEX) on a mark, or a permanent station near the survey: the program downloads the observations of a station of the EPN, the IGS or RING for the hours of the flight (*A permanent station nearby as the base*, below), or you give the file of a station you downloaded yourself. The base must record during the whole flight, in one file or in **several**: the hourly files of a station, the two daily files of a flight across midnight (UTC), the pieces a receiver writes - *Add...* takes them all, and the program joins them into one (they must be of one receiver: the same marker, antenna and observation types) and says where the holes of the base fall within the flight. The nearer the better: beyond 20 km a fix gets hard (the program warns) |
+| Navigation files | The broadcast ephemerides: `.nav`, `.##n`, `.##g`, `.##p` or the RINEX 3 `*_MN.rnx` - the drone's, the base's or the daily file of a station; the daily broadcast file of the IGS in RINEX 2 (`brdcDDD0.YYn`, `.YYg`) is found too beside the observations, for their day and the days around it. For a station, a baseline or a PPP, when none is beside the drone's file, the program downloads the broadcast messages of the hours of the flight (`BRDC00WRD`, from BKG) |
 
-Compressed RINEX: a gzip file (`.gz`) is read as it is; a Hatanaka file (`.crx`, `.##d`) must be decompressed with
-CRX2RNX first, for now, and so must a file compressed with the Unix compress (`.Z`) or zipped (`.zip`), as the
-archives of the stations often give them: the program says which it is.
+**Compressed files** are read as they are, as the archives of the stations give them: gzip (`.gz`), the Unix compress
+(`.Z`), a zip with one file in it (`.zip`) and Hatanaka (`.crx`, `.##d`: Compact RINEX 1.0, 3.0 and 3.1), one inside
+another too (`.crx.gz`, `.##d.Z`). Hatanaka files are decoded by the native core 0.6 or later, which the applications
+include; without it by the `CRX2RNX` program of RNXCMP found in the `PATH` (or named by `PPG_CRX2RNX`), else the
+program says what to install. The decompressed copy is kept in the GNSS folder of the program and used again until
+the file changes; RTKLIB is never given a compressed file.
 
 **The steps.** *Compute PPK...* in the pane (*Tools > GNSS > PPK corrections...*) asks for the `Timestamp.MRK`, then
 opens a dialog:
@@ -126,58 +132,115 @@ opens a dialog:
   (their photos will keep the position they have);
 - *Observations of the drone*: found by itself beside the MRK (the `*_Rinex.obs` of a DJI drone, of the flight of the
   MRK when the folder holds several; else the only `*.obs` or `*.##o` file there), with the hours it covers;
-- *Observations of the base*: with what its header says - the mark, the receiver, the antenna, the hours of its
-  observations, the position in the header and the antenna height - and, in sight, the note that the phase-centre
-  offset of that antenna is not applied;
+- *Position of the base*: one of the five ways below - with the coordinates, their frame and their epoch when they
+  are typed, with *Choose the station...* for a permanent station;
+- *Observations of the base*: one file or more (*Add...*; the field then says how many), with what the header says -
+  the mark, the receiver, the antenna, the hours of the observations of all the files, the position in the header
+  and the antenna height - and, in sight, whether the phase-centre offset of that antenna will be applied; a
+  permanent station as the base needs none;
 - *Navigation files*: those beside the drone's observations, then those beside the base's; *Remove* takes one away,
   *Add...* adds another;
-- *Position of the base*: from the file of the base or typed (below);
+- *Antenna of the base*: *Calibration of the antenna of the base: download igs20.atx (62 MB), once*
+  ([below](#the-antenna-of-the-base));
+- *Downloads*: what will be downloaded for the run - the coordinates and the observations of a station, the precise
+  products of a PPP, igs20.atx, the navigation messages of the flight - and the frame and the epoch the positions of
+  the photos will have;
 - *Drone's RTK fixes*: whether the photos with an RTK fix of the drone itself take the PPK position too (below).
 
-The dialog starts from the last run of the chunk: the base file, its position from the header or typed, the
-navigation files still there (not those beside the drone's observations of another flight), the choice about the
-onboard fixes; for the same MRK the drone's observations too. With several flights against one base the base and
-its position are typed once.
+The dialog starts from the last run of the chunk: the files of the base, how the base was placed (its typed position
+with its frame and epoch, or its station), the navigation files still there (not those beside the drone's
+observations of another flight), the choice about the onboard fixes; for the same MRK the drone's observations too.
+With several flights against one base the base and its position are given once.
 
 *OK* checks, before anything runs, what can be checked and says in the dialog what is missing or wrong: the files
 (observations that are observations, navigation files still there), their times (the drone and the base with hours
 in common, the shots of the MRK within the drone's observations), no file in the work folder of the PPK, the
-position of the base. The files are read once, after a pause in typing their names; the dialog is as tall as what it
-says, and on a short screen its form scrolls. When the MRK was copied away from the photos the window asks for their
-folder, as for an MRK. RTKLIB runs in the background in the folder of the chunk, `gnss/ppk`, where every run writes
-its options and its solution under a name of its own, `solution-<date>-<time>.conf` and `.pos`: the solutions of
-the earlier runs (the other flights) stay, and every photo records the solution of its run. The photos are paired
-with the shots as for an MRK.
+position of the base, the station chosen. The files are read once, after a pause in typing their names; the dialog
+is as tall as what it says, and on a short screen its form scrolls. When the MRK was copied away from the photos the
+window asks for their folder, as for an MRK. The work runs in the background: the station, the baseline or the PPP
+first, with what they download (given to RTKLIB from `gnss/base`, `gnss/baseline` and `gnss/ppp` of the folder of
+the chunk; the files of the stations and the precise products stay in the GNSS folder of the program, where a second
+run finds them), then RTKLIB in `gnss/ppk`, where every run writes its options and its solution under a name of its
+own, `solution-<date>-<time>.conf` and `.pos`: the solutions of the earlier runs (the other flights) stay, and every
+photo records the solution of its run. The photos are paired with the shots as for an MRK.
 
-**The position of the base** decides where the whole survey ends up: every PPK position is relative to it.
+#### The position of the base
 
-- *Typed*: the surveyed position of the mark the base stands on - latitude and longitude in degrees, height above
-  the ellipsoid in metres (not above the sea level), in the reference frame you want for the survey. This is the way
-  to an accurate absolute position. Typed more than 1 km away from the position of the base's header, or more than
-  30 m higher or lower, it gives a warning (in the dialog, in the log and in `ppg gnss ppk`): latitude and longitude
-  swapped or without their sign, a height above the sea level. The same base (by the name of its mark, else of its
-  file) typed at a position more than 5 cm away from the one used for other photos of the chunk gives a warning
-  too - a typo in one flight moves that flight - and the pane says when one base has positions further apart.
-- *From the file of the base*: the position written in its RINEX header. For a permanent station it is usually its
-  published position; for your own base it is often the position the receiver found by itself, which **can be
-  metres off, and the whole survey moves with it**. The program says so in the dialog, in a message and in the log
-  after the computation, in the pane and in `ppg gnss ppk`: type the surveyed position and compute again.
+Every PPK position is relative to the base: where the base is, the whole survey goes. Five ways to place it, in the
+dialog and in `ppg gnss ppk`:
+
+| Way | What it is | What to expect |
+| --- | --- | --- |
+| *From the file of the base (RINEX header)* | the position written in the header of its RINEX file | for a permanent station usually its published position; for your own base often the position the receiver found by itself, which **can be metres off, and the whole survey moves with it** |
+| *Typed* | the surveyed position of the mark the base stands on, in the frame of its coordinates | as good as the survey of the mark |
+| *A permanent station nearby as the base* | a station of the EPN, the IGS or RING: its observations for the hours of the flight and its coordinates in ITRF2020 at the middle of the flight are downloaded | coordinates good to a centimetre or better; the photos as good as a PPK at that distance - within 20 km, the nearer the better |
+| *Computed by a baseline from a station nearby* | your own base on a mark nobody surveyed, placed by a static baseline from a station | fixed and good to the centimetre with an hour or more of observations together and a station within 20 km; a further station wants a longer session |
+| *Computed by static PPP* | your own base placed on its own, on the precise orbits and clocks of the IGS and of its analysis centres | 10-20 cm with less than 2 hours of observations, a few centimetres with 4 hours or more, 1-2 cm across and 2-4 cm in height after a day: under 4 hours a baseline from a station nearby is better |
+
+- **From the file of the base**: the program says that the position can be metres off in the dialog, in a message
+  and in the log after the computation, in the pane and in `ppg gnss ppk`: type the surveyed position, or place the
+  base with a station or a PPP, and compute again.
+- **Typed**: latitude and longitude in degrees, height above the ellipsoid in metres (not above the sea level), in
+  the frame of the coordinates (*Frame of the typed coordinates*: *Unknown (WGS 84)*, ITRF2020, ETRF2000 (RDN2008),
+  ETRF2014, ETRF2020) and, in ITRF2020, at their epoch (*Epoch of the coordinates*: a decimal year such as 2026.82,
+  or a date; empty, the middle of the drone's observations). This is the way to an accurate absolute position with
+  a mark you surveyed. Typed more than 1 km away from the position of the base's header, or more than 30 m higher or
+  lower, it gives a warning (in the dialog, in the log and in `ppg gnss ppk`): latitude and longitude swapped or
+  without their sign, a height above the sea level. The same base (by the name of its mark, else of its file) typed
+  at a position more than 5 cm away from the one used for other photos of the chunk gives a warning too - a typo in
+  one flight moves that flight - and the pane says when one base has positions further apart.
+- **A permanent station as the base**: *Choose the station...* opens *Permanent stations nearby*: the stations of the
+  EPN, the IGS and RING within 200 km of the survey, the nearest first, with their networks and their distance (the
+  list is downloaded again once a week, and the copy serves offline; *Try again* when it cannot be had). Whether the
+  archives have the files of a station for the hours of the flight is found out when it is used: its observations
+  at 1 s when the archive has them for the whole flight, else at 30 s, with ten minutes before and after (BKG's data
+  centre for the stations of the EPN and of the IGS, RING's own archive, on the port 44324 that some firewalls close,
+  for those of RING); the program says when they are not online yet. Its coordinates come from the multi-year
+  solution of the EPN, from IGc20 of the IGS or from a straight line through two years of the daily positions of
+  RING, brought to the epoch of the flight: the positions of the photos are in ITRF2020 at that epoch. A station
+  known only by its approximate position (good to metres) is refused. The coordinates are those of the marker of the
+  station: the program adds the antenna height of the header of its RINEX file, as for any base.
+- **A baseline from a station**: your base records for a session (an hour or more) on a mark nobody surveyed;
+  *Computed by a baseline from a station nearby* downloads the station's observations for that session and its
+  coordinates at the middle of it, and RTKLIB solves your base as a receiver standing still for the whole session
+  against the station, into one position. It takes off the antenna height of your base's header: the position is
+  the one of the mark on the ground, in ITRF2020 at the epoch of the station's coordinates. A solution that is float,
+  a station beyond 20 km, a session shorter than an hour, holes of more than a minute in the observations of the base
+  give warnings; a solution of the code alone (no fix, no float), metres off, is refused. `ppg gnss baseline` finds
+  the mark alone, to type it for several flights.
+- **A static PPP**: your base alone, on the precise products of one centre and one kind: the final orbits and clocks
+  of ESA (online about 4 days after the day), of CODE (about 9 days) or of the IGS (two weeks or more), else the
+  rapid ones of the IGS (about 17 hours); never the ultra-rapid ones, which are half predicted. igs20.atx is always
+  used, for the antennas of the satellites and of your base. RTKLIB-EX solves a PPP as float only (it fixes no
+  ambiguities): the durations in the table are what to expect. The mark is in ITRF2020 at the epoch of the middle of
+  the session. A session under 2 hours, under 4 hours (a station nearby is better), rapid products (compute again
+  when the final ones are out) and a session before 27 November 2022 (GPS week 2238: the products were made for
+  igs14.atx) give warnings. `ppg gnss ppp` finds the mark alone.
+
+#### The antenna of the base
 
 **The antenna height.** The position of the base, typed or from the header, is that of the mark on the ground: the
 program adds the antenna height written in the base's RINEX header (`ANTENNA: DELTA H/E/N`), as RINEX means it, and
 the dialog says how much ("the program adds the antenna height of the file of the base, 1.800 m"). When the header
 gives no antenna height, or zero, the position must be that of the antenna itself.
 
-**The phase centre of the base antenna.** The antenna height brings the base to the reference point of its antenna
-(usually the bottom of its mount); the satellites are measured at its phase centre, which sits higher by an offset
-of its own for every antenna model: a few centimetres for survey antennas, more than 10 cm for some choke rings.
-RTKLIB is not given the antenna calibrations yet, so it puts the phase centre at the reference point, and **every
-PPK height comes out lower by that offset** - the same for all the photos of a run, but different from one base
-antenna to another, so surveys computed against different bases differ by it too (DEM differences, volumes). The
-dialog (under the base), the log and `ppg gnss ppk` say so at every run, naming the antenna type of the base's
-header (or that the header names none). Until the calibrated antennas come, with the next phase: check the heights
-against a ground control point, or type the height of the base with the vertical offset of its antenna added (from
-its datasheet or calibration).
+**The phase centre.** The antenna height brings the base to the reference point of its antenna (usually the bottom of
+its mount); the satellites are measured at its phase centre, which sits higher by an offset of its own for every
+antenna model, radome and frequency: a few centimetres for survey antennas, more than 10 cm for some choke rings.
+RTKLIB corrects it with the antenna calibrations of the IGS, **igs20.atx**, where the program looks for the antenna
+named in the base's RINEX header (its type and radome) as RTKLIB does. *Calibration of the antenna of the base:
+download igs20.atx (62 MB), once* in the dialog (ticked; `--atx download` on the command line, or
+`ppg gnss atx --download`) downloads it into the GNSS folder of the program when it has none; once there every run applies it,
+unticked too. A station, a baseline and a PPP download it anyway, so that every antenna is calibrated, and they renew
+a copy older than 30 days, as `ppg gnss atx --download` does; `--atx off` gives no calibrations. In the dialog, under
+the base, the program says whether the offset will be applied; after the run it warns when it was not - no
+calibrations given (`--atx off`), the antenna not in igs20.atx, a header that names no antenna - and when RTKLIB took
+the same antenna with another radome, or the nearest name it found (a few millimetres, more if it is another antenna).
+Without the calibration every PPK height comes out lower by the offset - the same for all the photos of a run, but
+different from one base antenna to another, so surveys computed against different bases differ by it too (DEM
+differences, volumes): check the heights against a ground control point, or type the height of the base with the
+vertical offset of its antenna added. The [PDF report](exports.md#pdf-report) names, for every run, the entry used
+("calibrated with TRM57971.00 NONE of igs20.atx") or why there was none.
 
 **Photos with an RTK fix of the drone itself.** A photo whose position is an RTK fix of the drone itself - from the
 XMP of a DJI photo or from a DJI MRK - keeps it: the PPK is for the photos that are not fix. *Replace the drone's own
@@ -200,32 +263,147 @@ shots are listed in the log. *Only the fix positions* is decided again. The log 
 their onboard fix, the base with its antenna, how far it is from the flight (from the median position of the drone
 in the solution: beyond 20 km a warning, the ambiguities are hard to fix and the positions mostly float) and the
 solution file. Every photo keeps, with its position, the base it was computed against - its name, its position as
-longitude, latitude and height (the order of every position of the program), how it was placed, the antenna of its
-header - the drone's observation file and the solution file of its run. The step of the pane then says how many
-photos have a PPK position and of which status, and the base each was computed against, with the warning when its
-position is the one of its header.
+longitude, latitude and height (the order of every position of the program), how it was placed and what the source
+of its position says (the station and the solution of its coordinates, the baseline, the PPP and its products), its
+frame and epoch, the antenna of its header and its calibration - the drone's observation file and the solution file
+of its run. The step of the pane then says how many photos have a PPK position and of which status, and for each
+base where its position comes from, in which frame and at which epoch, with the warning when its position is the
+one of its header. With accurate positions, *Optimise cameras* holds the block to them when no control points do
+([Optimising the cameras](processing.md#optimising-the-cameras)).
 
 RTKLIB (RTKLIB-EX 2.5.1, BSD licence) is inside the native core 0.5 or later, which the applications include (their
 smoke test, `--check`, fails if it is missing); without it the program says what to install. `PPG_RNX2RTKP` can name the
 `rnx2rtkp` program of RTKLIB-EX 2.5 instead. `ppg doctor` (*Help > Environment diagnosis...*) says where the PPK runs:
 RTKLIB inside the native core and its version, the program named by `PPG_RNX2RTKP`, or what to install.
 
+**Credits.** What the program downloads is public and free, with its credits: the observations and coordinates of
+the stations of the EPN (CC BY 4.0; the multi-year solution is cited with the DOI of its weekly folder,
+`10.24414/ROB-EUREF-Cwwww`) and of RING of INGV (CC BY 4.0), IGc20 and igs20.atx of the IGS, the precise products of
+ESA, CODE and the IGS by their names, the geoid EGM2008 of the NGA (public domain). The PDF report credits those that
+each survey used: the station and the folder of the solution of its coordinates, the centre of the products of a
+PPP.
+
+#### From the command line
+
 ```bash
 ppg gnss ppk survey.ppg --mrk /card/FLIGHT_Timestamp.MRK --rover /card/FLIGHT_Rinex.obs --base base.obs
+#   --base FILE (repeat it for a base in several files: hourly files, two days)
 #   --nav FILE (repeat it; default: those beside the drone's observations, else beside the base's)
 #   --base-position LAT,LON,H (degrees, degrees, metres above the ellipsoid, a point for the decimals;
 #                              default: the position of the base's RINEX header, with its warning)
+#   --base-frame unknown|ITRF2020|ETRF2000|ETRF2014|ETRF2020, --base-epoch 2026.82 (or 2026-10-27):
+#                              the frame and the epoch of --base-position (in ITRF2020 the epoch defaults to
+#                              the middle of the drone's observations)
+#   --base-station ID (a permanent station as the base: its files are downloaded, no --base)
+#   --base-baseline ID (your --base placed by a static baseline from the station ID)
+#   --base-ppp (your --base placed by a static PPP)
+#   --atx auto|download|off (the antenna calibrations: igs20.atx when the program has it, downloaded once, none)
 #   --replace-fix (the photos with an RTK fix of the drone itself take the PPK position too)
 #   --photos FOLDER, --chunk NAME
+ppg gnss stations survey.ppg                     # the permanent stations within 200 km of the survey
+#   --near LAT,LON instead of a project, --limit N, --refresh (the lists downloaded again)
+ppg gnss baseline base.obs --station AQUI00ITA   # the mark of your base by a static baseline (--folder DIR)
+ppg gnss ppp base_1.obs base_2.obs               # the mark of your base by a static PPP (--folder DIR)
+ppg gnss atx --download                          # igs20.atx (62 MB): where it is, or downloaded
 ```
 
-It prints the photos per status, how many kept their onboard fix, the base used (latitude, longitude and height),
-its antenna height and how far it is from the flight, the solution file of the run, the warnings (always the one of
-the phase-centre offset of the base antenna; the one of a base at the position of its header, of a typed position
-far from it or from the one of other photos) and the photos and shots left without a PPK position; it saves the
+`ppg gnss ppk` prints the photos per status, how many kept their onboard fix, the base used (latitude, longitude and
+height, how it was placed, its frame and epoch), its antenna height and how far it is from the flight, the navigation
+files downloaded for the flight, the solution file of the run, the warnings (the phase-centre offset of the base
+antenna when it is not applied; a base at the position of its header, a typed position far from it or from the one of
+other photos; those of a baseline or a PPP) and the photos and shots left without a PPK position; it saves the
 project, and stops with an error, changing nothing, when the files cannot be used (a file named that is not there
-stops it before anything is read). A flight whose photos all kept their onboard fix changes nothing and is no
-error.
+stops it before anything is read). A flight whose photos all kept their onboard fix changes nothing and is no error.
+`ppg gnss baseline` and `ppg gnss ppp` print the mark found with its frame, epoch and standard deviations, the
+warnings, and the options that give it to `ppg gnss ppk`
+(`--base-position ... --base-frame ITRF2020 --base-epoch ...`).
+
+### Reference frames and epochs
+
+Every position of a photo keeps the reference frame and the epoch of its coordinates, and the program converts it
+at that epoch.
+
+- **ITRF2020** (and IGS20, IGb20, IGc20, the same for the program): the global frame of the products of the IGS, of
+  the coordinates of the permanent stations and of a PPP. In it the ground moves with its plate - Europe by about
+  2.5 cm a year - so a position in ITRF2020 needs its epoch. A PPK against a station, or against a base placed by a
+  baseline or a PPP, gives positions in ITRF2020 at the epoch of the coordinates of the base.
+- **ETRF2000**, and the other European frames ETRF2014 and ETRF2020, move with the European plate: a point on the
+  ground keeps its coordinates. **RDN2008**, the Italian reference network (and ETRS89 in Italy), is ETRF2000 at the
+  epoch 2008.0: the program takes ETRF2000 as RDN2008.
+- **Unknown (WGS 84)**: the drone's own RTK (a network in ETRF, the drone's own base), the GPS of the photos, the
+  positions written before the frames: taken as WGS 84, as always.
+
+**Why ITRF2020 and ETRF2000 differ by about a metre in Italy.** The two frames coincided in 1989, when ETRS89 was
+defined on the European plate; since then Europe has moved in the global frame by about 2.5 cm a year towards the
+north-east, so that in 2026 the same point has coordinates about a metre apart in the two (0.99 m at Milan, 1.03 m at
+Rome, 1.06 m at Palermo; the heights within a centimetre). A survey placed by a station in ITRF2020 and drawn on maps
+in RDN2008 is a metre off when the frames are not converted, and still 30 cm off when they are converted without the
+epoch (PROJ alone takes 2015.0). The program converts from ITRF2020 to ETRF2000 - and so to RDN2008 and to ETRS89 /
+UTM - with the time-dependent Helmert transformation of the EPSG (*ITRF2020 to ETRF2000 (1)*, EPSG:10586) at the
+epoch of each position; from ITRF2020 to a system on WGS 84 the positions pass as they are (the two agree within
+centimetres). The motion of Italy within its plate since 2008 - a few millimetres a year, more in the south and
+around the volcanoes - is not in it: RDN2008 is ETRF2000 at 2008.0.
+
+The frame and the epoch come with the position: a typed base its own (*Frame of the typed coordinates*, *Epoch of the
+coordinates*; `--base-frame`, `--base-epoch`); a positions file in a system of ITRF2020 (`EPSG:9989` and the systems
+on it) the *Epoch of the positions* of its dialog (`ppg gnss positions --epoch`; empty, the EXIF date of each photo);
+the MRK and the photos are *unknown (WGS 84)*. Points that carry no frame and epoch in a system of ITRF2020 - the
+markers, the positions of a project made before - are converted as before, by PROJ's own transformation where it has
+one, else as positions on WGS 84: an approximation, about a metre off in Europe, which the log says once. Give them
+again with their epoch, or in ETRF2000 (RDN2008).
+
+The GNSS pane has five steps: *Positions of the photos*, *Corrections (PPK)*, **System and heights**, *Quality per
+flight* and *Only the fix positions*. *System and heights* lists the frames of the positions with their epochs, the
+system of the chunk and the kind of its heights, whether the grid of the geoid EGM2008 is installed and what does not
+fit between the heights of the photos and those of the chunk; its buttons are *Survey system...* and *Download the
+EGM2008 geoid (81 MB)...* (below).
+
+### Heights above the geoid and the system of the survey
+
+GNSS gives heights above the ellipsoid; the heights of a survey are above the sea level, the geoid, which in Italy is
+40-50 m away (48 m at Rome). The program converts between the two with the grid of the geoid **EGM2008**
+(`us_nga_egm08_25.tif`, 81 MB, public domain), which it does not ship and **downloads only when asked**: *Download the
+EGM2008 geoid (81 MB)...* in the step *System and heights* of the GNSS pane, or `ppg gnss geoid --download`, into the
+GNSS folder of the program, checked against its published size and SHA-256. PROJ never goes to the network by itself.
+Without the grid every conversion between the two kinds of height is refused, naming the grid and how to get it:
+heights above the ellipsoid are never passed off as heights above the sea level. A grid of your own - such as
+**ITALGEO2005** of the IGM (`geo_igm_mar06.grd`, the heights of Genova 1942, EPSG:5214) - is copied into the folder
+of the grids of the program, which `ppg gnss geoid` prints (`proj` in the GNSS folder); systems with those heights,
+such as `EPSG:7792+5214`, then use it.
+
+**The system of the survey.** *Survey system...* proposes the coordinate system of the survey where it is, for the
+frame of its positions: the UTM zone on WGS 84 for positions in WGS 84 or ITRF2020; RDN2008 / UTM in Italy (EPSG:7791,
+7792, 7793) and ETRS89 / UTM elsewhere in Europe for positions in ETRF2000, ETRF2014 or ETRF2020; or another system
+(*Other:*, an EPSG code or a WKT). *Heights above the EGM2008 geoid* gives it heights above the sea level (`+3855`);
+when the grid is not installed the window offers to download it first (*Download and apply*) or to apply the same
+system without heights of its own (*Apply without heights above the geoid*). Before anything changes the window works
+out, in the background, what the change does, shows it and asks *Apply?*:
+
+- the georeference follows the chunk into the new system, with the model, the clouds and the tie points;
+- what is converted: the references of the markers and what was drawn on the products - units, spot heights,
+  measuring points, stones, the sections of the project, the patches of the orthomosaic and of the texture, the
+  region of the reconstruction, the colour chart;
+- what is to be built again in the new system: the DEM, the orthomosaic, the precision of the DEM, the coverage;
+- what stays in the old system and is to be made again if needed: the inactive versions of the DEM and of the
+  orthomosaic, the elevations, the multispectral, thermal and satellite rasters, the relief and the raster
+  calculator, the US proxies, the stones drawn on other rasters, the drawings (SVG, DXF) of the sections; the lines
+  that are only in the window (contour lines, plan slices, measures) are taken away, to draw again.
+
+A chunk in local coordinates only takes the system: its markers and drawings stay where they are, and its
+georeference is fitted afterwards.
+
+A site too large to be converted by one similarity between the two systems (it would miss the plan by more than
+5 mm) is refused, nothing changed. The [PDF report](exports.md#pdf-report) names the system of the chunk, the grid of
+its geoid with its SHA-256 and how the positions in ITRF2020 were converted.
+
+```bash
+ppg gnss crs survey.ppg                     # the system and its heights, the frames of the positions, what does not fit
+ppg gnss crs survey.ppg --survey            # into the system of a survey where it is (--frame WGS84|ETRF2000, --no-geoid)
+ppg gnss crs survey.ppg --set EPSG:7792+3855
+ppg gnss geoid                              # the grid of EGM2008 installed or not, the folder of the grids
+ppg gnss geoid --download                   # EGM2008 (81 MB, public domain)
+ppg gnss positions survey.ppg cameras.csv --crs EPSG:9989 --epoch 2026.82   # positions in ITRF2020 at their epoch
+```
 
 ## Masks
 
