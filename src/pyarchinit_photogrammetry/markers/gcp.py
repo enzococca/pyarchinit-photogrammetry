@@ -451,14 +451,16 @@ def _camera_reference_pairs(chunk) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 def preflight(chunk, use_gps: bool | None = None) -> None:
-    """The refusal the georeference of ``chunk`` would meet, raised before the work that comes before it (the points
-    of the photos, the alignment): the position of one photo of each system of the references converted as
-    :func:`update_transform` and the pose priors of the alignment convert them all - into the system of the chunk
-    (into the metric axes of the references for a chunk still in a local frame). A conversion that cannot be made -
-    heights above the geoid without the grid of the geoid (:class:`..gnss.heights.GridMissing`), an epoch missing -
-    raises here. Nothing to check when fewer than three photos have a position, for a geographic system (the
-    georeference says it), and - with ``use_gps`` False, the positions not holding the alignment - when three control
-    markers seen in two photos each place the chunk."""
+    """The refusal the georeference of ``chunk`` would meet, raised before the alignment
+    (:func:`..engine.sfm.align_cameras`) when its pose priors or the georeference after it will convert the references
+    of the photos that are switched on: the position of one photo of each system of those references converted as
+    :func:`update_transform` and the pose priors convert them all - into the system of the chunk (into the metric axes
+    of the references for a chunk still in a local frame). A conversion that cannot be made - heights above the geoid
+    without the grid of the geoid (:class:`..gnss.heights.GridMissing`), an epoch missing - raises here. Nothing to
+    check when fewer than three photos have a position switched on, for a geographic system (the georeference says
+    it), and - with ``use_gps`` False, the positions not holding the alignment - when three control markers seen in
+    two photos each place the chunk. :func:`..engine.sfm.match_photos` only logs it as a warning: the matching needs
+    no system, and the references of the photos may still be switched off before the alignment."""
     cams = [cam for cam in chunk.cameras if cam.enabled and cam.reference.enabled and cam.reference.location]
     if len(cams) < 3 or crs_mod.is_geographic(chunk.crs):
         return

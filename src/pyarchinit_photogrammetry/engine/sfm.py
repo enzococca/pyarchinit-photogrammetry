@@ -780,7 +780,11 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     if matcher not in learned.MATCHERS:
         raise ValueError(f"matcher: one of {', '.join(learned.MATCHERS)}")
     generic, reference = _preselection(pair_selection, generic, reference)
-    gcp.preflight(chunk)  # what would refuse to place the chunk, before the points of the photos are detected
+    try:  # the matching needs no system: what the alignment would refuse is only said here
+        gcp.preflight(chunk)
+    except ValueError as exc:  # the references of the photos may still be switched off before the alignment
+        log.warning("the alignment will not place the chunk by the positions of the photos while they are switched on: "
+                    "%s", exc)
     work = _sfm_dir(chunk)
     db_path = work / "database.db"
     root, names = image_root_and_names(chunk)

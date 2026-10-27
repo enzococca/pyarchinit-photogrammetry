@@ -114,10 +114,12 @@ def test_relative_geometry_needs_no_geoid(tmp_path):
     """A chunk in a system with EGM2008 heights, photos with GNSS heights above the ellipsoid (an MRK), no grid: what
     needs only where the photos are relative to each other - a survey from the air or not, the pairs of photos by their
     positions, the span of the flight - needs no geoid (a height common to all does not matter) and works as in a
-    system without heights; what will put the chunk in its system refuses at once, before the points of the photos are
-    detected or the cameras aligned, naming the grid - unless three control markers place it and the GPS of the photos
-    is not used."""
+    system without heights. The matching needs no system either: it only warns, naming the grid and how to get it
+    (the positions of the photos may be switched off before the alignment); the alignment, which puts the chunk in its
+    system by them, refuses at once, before the cameras are aligned, naming the grid - unless three control markers
+    place it and the GPS of the photos is not used."""
     out = _run(tmp_path, '''
+        import logging
         import pyarchinit_photogrammetry as ppg
         from pyarchinit_photogrammetry.core.camera import Camera, Reference
         from pyarchinit_photogrammetry.engine import dense, sfm
@@ -145,10 +147,25 @@ def test_relative_geometry_needs_no_geoid(tmp_path):
                            "span": gcp.cameras_span_their_accuracy(ch),
                            "pairs": len(sfm._reference_pairs(ch, names, neighbors=3) or [])}
         ch = chunk("EPSG:32633+3855")
-        out["match"] = refused(lambda: ch.match_photos())
-        out["matched"] = "sfm" in ch.meta  # nothing was started
+        warnings = []
+        catcher = logging.Handler(logging.WARNING)
+        catcher.emit = lambda record: warnings.append(record.getMessage())
+        logging.getLogger("pyarchinit_photogrammetry").addHandler(catcher)
+        sfm_dir = sfm._sfm_dir
+
+        def past_the_check(chunk):  # where the work of the matching starts
+            raise RuntimeError("past the check")
+
+        sfm._sfm_dir = past_the_check
+        try:
+            ch.match_photos()
+        except RuntimeError as exc:
+            out["match"] = str(exc)
+        sfm._sfm_dir = sfm_dir
+        out["match_warnings"] = [w for w in warnings if "us_nga_egm08_25" in w]
         out["align"] = refused(lambda: ch.align_cameras(use_gps=False))
         out["align_gps"] = refused(lambda: ch.align_cameras())
+        out["started"] = "sfm" in ch.meta  # nothing was started
         for i in range(3):  # three control markers, in the system of the chunk, seen by two photos each
             m = ch.add_marker(f"P{i}")
             m.reference = Reference(location=[292400.0 + 50 * i, 4642100.0 + 30 * i, 52.0], accuracy=[0.01] * 3)
@@ -163,11 +180,72 @@ def test_relative_geometry_needs_no_geoid(tmp_path):
     plain, geoid = out["EPSG:32633"], out["EPSG:32633+3855"]
     assert plain == geoid and plain["aerial"] is True and plain["mapper"] == "global" and plain["span"] is True
     assert plain["pairs"] > 0
-    _says_how_to_get_egm2008(out["match"])
-    assert out["matched"] is False
+    assert out.get("match") == "past the check"  # warned, not refused
+    assert len(out["match_warnings"]) == 1
+    _says_how_to_get_egm2008(out["match_warnings"][0])
+    assert out["started"] is False
     _says_how_to_get_egm2008(out["align"])
     _says_how_to_get_egm2008(out["align_gps"])
     assert out["markers_place_it"].startswith("RuntimeError") and "match_photos" in out["markers_place_it"]
+
+
+def test_markers_alone_place_a_chunk_whose_photo_references_are_off(scene_dir, tmp_path):
+    """The chunk in a system with EGM2008 heights, the GNSS positions of the photos (heights above the ellipsoid)
+    switched off, the control points typed in the system of the chunk, no grid: nothing has to go through the geoid -
+    the photos are matched and aligned and the markers place the chunk, as in a system without heights. Switched on
+    again, the positions of the photos would hold the alignment: it refuses before it starts, naming the grid, and the
+    alignment there is stays as it is."""
+    out = _run(tmp_path, '''
+        import logging
+        from pyproj import Transformer
+        import pyarchinit_photogrammetry as ppg
+        from pyarchinit_photogrammetry.gnss import apply as gnss_apply
+        from pyarchinit_photogrammetry.testing.synthetic import camera_poses, make_scene
+
+        scene_dir, folder = Path(sys.argv[1]), Path(sys.argv[2])
+        warnings = []
+        catcher = logging.Handler(logging.WARNING)
+        catcher.emit = lambda record: warnings.append(record.getMessage())
+        logging.getLogger("pyarchinit_photogrammetry").addHandler(catcher)
+
+        doc = ppg.Document()
+        ch = doc.add_chunk("Saggio")
+        doc.save(folder / "project.ppg")
+        ch.crs = "EPSG:32633+3855"
+        ch.add_photos([scene_dir / "photos"])
+        ch.detect_markers("aruco_4x4_50")
+        scene = make_scene()  # the trench of the photos, in Gauss-Boaga
+        poses = camera_poses(scene)
+        to_lonlat = Transformer.from_crs(scene.crs, "EPSG:4326", always_xy=True)
+        for cam in ch.cameras:  # where the photos were taken, with heights above the ellipsoid: switched off
+            x, y, z = poses[int(cam.label.split("_")[-1])][:3, 3] + np.asarray(scene.origin)
+            gnss_apply.set_camera_position(cam, [*to_lonlat.transform(x, y), z + 48.0], "EPSG:4979",
+                                           [0.02, 0.02, 0.04], "mrk", status="fix", height="ellipsoidal")
+            cam.reference.enabled = False
+        to_utm = Transformer.from_crs(scene.crs, "EPSG:32633", always_xy=True)
+        typed = folder / "gcp_utm.csv"  # the control points typed in the system of the chunk
+        typed.write_text("".join(f"{code},{','.join(str(v) for v in [*to_utm.transform(x, y), z])}\\n"
+                                 for code, (x, y, z) in scene.targets.items()))
+        ch.import_reference(typed, crs=ch.crs)
+        ch.match_photos(quality="high")
+        aligned = ch.align_cameras()
+        report = ch.update_transform()
+        out = {"photos": len(ch.cameras), "aligned": aligned, "markers": len(ch.markers), "method": report["method"],
+               "control": report["control_rmse"], "crs": ch.crs, "priors": ch.meta["sfm"]["gps_priors"],
+               "grid": heights.geoid_available(), "warnings": warnings}
+        before = ch.transform.copy()
+        for cam in ch.cameras:
+            cam.reference.enabled = True
+        out["switched_on"] = refused(lambda: ch.align_cameras())
+        out["kept"] = bool(np.array_equal(before, ch.transform)) and len(ch.aligned_cameras) == aligned
+        print(json.dumps(out))
+    ''', str(scene_dir), str(tmp_path))
+    assert out["grid"] is False
+    assert out["aligned"] == out["photos"] and out["markers"] == 8 and out["priors"] is None
+    assert out["crs"] == "EPSG:32633+3855" and out["method"] == "markers" and out["control"] < 0.002
+    assert not [w for w in out["warnings"] if "us_nga_egm08_25" in w]
+    _says_how_to_get_egm2008(out["switched_on"])
+    assert out["kept"] is True
 
 
 def test_the_exports_on_the_globe_take_heights_above_the_ellipsoid(tmp_path):
