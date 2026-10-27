@@ -2198,8 +2198,8 @@ def thermal(project: Path, what: str = typer.Argument(..., help="status, params,
             fmt: Optional[str] = typer.Option(None, "--format", help="export: tif (degrees, float32), tif16 (centikelvin), "
                                                                      "csv, or flir (FLIR radiometric JPEG with a world file: one "
                                                                      "file when the orthomosaic fits in one, else tiles or --single)"),
-            tile: Optional[int] = typer.Option(None, help="export flir: the side of the tiles, cells (default: the largest "
-                                                          "square a FLIR file holds, 2895; a side given cuts into tiles even "
+            tile: Optional[int] = typer.Option(None, help="export flir: the side of the tiles, cells (default: balanced "
+                                                          "tiles of up to 2895; a side given makes exact tiles, even of "
                                                           "an orthomosaic that fits in one file)"),
             single: bool = typer.Option(False, "--single", help="export flir: when the orthomosaic does not fit in one file, "
                                                                 "write one with larger cells (the temperatures averaged over "

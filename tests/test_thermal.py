@@ -332,14 +332,25 @@ def _nanmean_blocks(t: np.ndarray, k: int) -> np.ndarray:
     return out
 
 
-def test_flir_layout_follows_what_a_file_holds():
+def test_flir_layout_follows_what_a_file_holds(tmp_path):
     """What one FLIR file holds - 256 APP1 segments, and a JPEG has 65500 cells a side at most - and
-    what a larger orthomosaic needs: the tile as large as a file allows, or the smallest k for cells
-    of k x k."""
+    what a larger orthomosaic needs: balanced tiles under 2895 cells a side (or the exact ones asked
+    for), or the smallest k for cells of k x k."""
     side = math.isqrt(thermal.FLIR_MAX_CELLS)
     assert thermal.FLIR_MAX_CELLS == (256 * thermal.FLIR_SEGMENT - 2048) // 2
-    assert side == 2895 and thermal.flir_tile_side() == side
-    assert thermal.flir_tile_side(5000) == side and thermal.flir_tile_side(2048) == 2048 and thermal.flir_tile_side(3) == 64
+    assert side == 2895
+    # the tiles asked for are exact: that side, 64 at least, 2895 at most
+    assert thermal.flir_tile_shape(3000, 3000, 2048) == (2048, 2048)
+    assert thermal.flir_tile_shape(3000, 3000, 5000) == (side, side) and thermal.flir_tile_shape(3000, 3000, 3) == (64, 64)
+    # the automatic ones are balanced: ceil(length / 2895) parts a side, each of ceil(length / parts) cells
+    assert thermal.flir_tile_shape(3000, 3000) == (1500, 1500)  # not 2895 and a sliver of 105
+    assert thermal.flir_tile_shape(2896, 2896) == (1448, 1448)  # not 2895 and a strip of 1
+    assert thermal.flir_tile_shape(side, side) == (side, side) and thermal.flir_tile_shape(100, 70000) == (100, 2800)
+    assert thermal.flir_tile_shape(5791, 100) == (1931, 100) and thermal.flir_tile_shape(6000, 9000) == (2000, 2250)
+    for length in (2896, 3000, 5790, 5791, 8686, 8687, 12345, 46000, 65500):  # no sliver: the last is nearly as large
+        tile, parts = thermal.flir_tile_shape(length, 10)[0], -(-length // side)
+        assert tile <= side and -(-length // tile) == parts, length
+        assert length - (parts - 1) * tile >= tile - (parts - 1), length
     # by the number of cells, whatever the shape
     assert thermal.flir_fits(2200, 2500) and thermal.flir_fits(side, side) and not thermal.flir_fits(side + 1, side + 1)
     assert thermal.flir_fits(1000, 8000) and thermal.flir_fits(8000, 1000) and not thermal.flir_fits(1000, 9000)
@@ -347,7 +358,8 @@ def test_flir_layout_follows_what_a_file_holds():
     # a JPEG is 65500 cells wide at most, however few cells it has
     assert thermal.flir_fits(100, 65500) and not thermal.flir_fits(100, 65501) and not thermal.flir_fits(65501, 3)
     with pytest.raises(ValueError, match="tiles"):
-        thermal.write_flir_jpeg(Path("never.jpg"), np.zeros((3, 65501), np.float32), thermal.DEFAULTS)
+        thermal.write_flir_jpeg(tmp_path / "never.jpg", np.zeros((3, 65501), np.float32), thermal.DEFAULTS)
+    assert not (tmp_path / "never.jpg").exists()
     # the coarser file: the smallest whole k at which ceil(h / k) x ceil(w / k) fits
     assert thermal.flir_factor(2200, 2500) == 1 and thermal.flir_factor(side, side) == 1
     assert thermal.flir_factor(3000, 3000) == 2
@@ -397,14 +409,14 @@ def test_flir_export_is_one_file_when_the_orthomosaic_fits(tmp_path, rows, cols)
     assert "<SRS>" in (out_dir / "t.jpg.aux.xml").read_text()
 
 
-def test_flir_export_tiles_are_as_large_as_a_file_holds(tmp_path):
-    """An orthomosaic of 3000 x 3000 cells does not fit in one file: tiles of the largest square a file
-    holds (2895 cells a side) with an index; every tile is its part of the orthomosaic, placed by its
-    own world file."""
+def test_flir_export_balanced_tiles_when_it_does_not_fit(tmp_path):
+    """An orthomosaic of 3000 x 3000 cells does not fit in one file: balanced tiles under 2895 cells a side
+    - 2 a side of 1500 cells, not 2895 and a sliver of 105 - with an index; every tile is its part of the
+    orthomosaic, placed by its own world file."""
     doc, ch, t = _flir_chunk(tmp_path, 3000, 3000)
     assert thermal.flir_plan(thermal.thermal_path(ch)) == {
         "rows": 3000, "cols": 3000, "cell": pytest.approx(0.05), "fits": False, "factor": 2,
-        "coarse_cell": pytest.approx(0.1), "tile": 2895, "tiles": 4}
+        "coarse_cell": pytest.approx(0.1), "tile": (1500, 1500), "tiles": 4}
     out_dir = tmp_path / "ex"
     out_dir.mkdir()
     index = thermal.export(ch, out_dir / "t.jpg", "flir")
@@ -413,13 +425,14 @@ def test_flir_export_tiles_are_as_large_as_a_file_holds(tmp_path):
     assert rows[1].startswith("file,xmin,ymin,xmax,ymax,tmin_c,tmax_c,cells")
     names = [r.split(",")[0] for r in rows[2:]]
     assert names == ["t_r00_c00.jpg", "t_r00_c01.jpg", "t_r01_c00.jpg", "t_r01_c01.jpg"]
+    assert rows[2].split(",")[1:5] == ["400000.000", "4499925.000", "400075.000", "4500000.000"]  # 1500 cells of 5 cm
     assert not (out_dir / "t.jpg").exists()
-    side = 2895
+    side = 1500
     for name, (r0, c0) in zip(names, ((0, 0), (0, side), (side, 0), (side, side))):
         jpg = out_dir / name
         raw, tags = _exiftool_like(jpg)
         want = t[r0:r0 + side, c0:c0 + side]
-        assert raw.shape == want.shape
+        assert raw.shape == want.shape == (side, side)
         ok = np.isfinite(want[::5, ::5])
         got = _flir_reference_temperature(raw[::5, ::5], tags)
         assert np.max(np.abs(got[ok] - want[::5, ::5][ok])) < 0.01
@@ -496,18 +509,18 @@ def test_flir_single_file_with_blocks_cut_by_the_edges(tmp_path, monkeypatch):
 
 def test_flir_export_of_a_road_survey_longer_than_a_jpeg_can_be(tmp_path):
     """A strip of 70000 x 100 cells has few cells (7 million) but no JPEG is 70000 cells wide: it does
-    not fit in one file. The tiles are the largest squares a file holds (25, 2895 x 100 cells but the
-    last); single=True halves it to 35000 x 50 cells in one file."""
+    not fit in one file. The tiles are balanced (25 of 2800 x 100 cells, not 24 of 2895 and a short one);
+    single=True halves it to 35000 x 50 cells in one file."""
     doc, ch, t = _flir_chunk(tmp_path, 100, 70000)
     plan = thermal.flir_plan(thermal.thermal_path(ch))
-    assert (plan["fits"], plan["factor"], plan["tiles"]) == (False, 2, 25)
+    assert (plan["fits"], plan["factor"], plan["tiles"], plan["tile"]) == (False, 2, 25, (100, 2800))
     out_dir = tmp_path / "ex"
     out_dir.mkdir()
     index = thermal.export(ch, out_dir / "r.jpg", "flir")
     rows = index.read_text().splitlines()
     assert len(rows) == 2 + 25 and rows[-1].split(",")[0] == "r_r00_c24.jpg"
     raw, tags = _exiftool_like(out_dir / "r_r00_c24.jpg")
-    assert raw.shape == (100, 70000 - 24 * 2895)
+    assert raw.shape == (100, 2800)
     one = thermal.export(ch, out_dir / "s.jpg", "flir", single=True)
     assert one == out_dir / "s.jpg"
     raw, tags = _exiftool_like(one)
@@ -518,6 +531,30 @@ def test_flir_export_of_a_road_survey_longer_than_a_jpeg_can_be(tmp_path):
     ok = np.isfinite(want)
     assert np.max(np.abs(_flir_reference_temperature(raw, tags)[ok] - want[ok])) < 0.01
     assert _world_file(one)[0] == pytest.approx(0.1)
+
+
+def test_flir_export_uses_one_colour_ramp_in_every_mode(tmp_path, monkeypatch):
+    """One file, one file with larger cells and tiles are pictures of the same orthomosaic: they share its
+    colour ramp, the percentiles of the whole orthomosaic, not of what each file happens to hold."""
+    doc, ch, t = _flir_chunk(tmp_path, 300, 2400)  # wider than the 2000 cells the ramp is read at
+    out_dir = tmp_path / "ex"
+    out_dir.mkdir()
+    ramps = {}
+    real = thermal.write_flir_jpeg
+
+    def spy(path, temperatures, params, lims=None, *args, **kwargs):
+        ramps.setdefault(Path(path).stem.split("_")[0], []).append(lims)
+        return real(path, temperatures, params, lims, *args, **kwargs)
+
+    monkeypatch.setattr(thermal, "write_flir_jpeg", spy)
+    thermal.export(ch, out_dir / "one.jpg", "flir")  # 720,000 cells: one file
+    monkeypatch.setattr(thermal, "FLIR_MAX_CELLS", 300_000)  # now it does not fit
+    thermal.export(ch, out_dir / "single.jpg", "flir", single=True)
+    thermal.export(ch, out_dir / "tiles.jpg", "flir")
+    assert sorted(ramps) == ["one", "single", "tiles"] and [len(v) for v in ramps.values()] == [1, 1, 5]
+    every = [lims for group in ramps.values() for lims in group]
+    assert all(lims == every[0] for lims in every) and every[0] is not None
+    assert every[0] == pytest.approx(tuple(np.nanpercentile(t, (2, 98))), abs=0.3)  # the whole orthomosaic's
 
 
 def test_block_means_are_nan_aware_and_read_in_strips(tmp_path):
@@ -1028,7 +1065,7 @@ def test_flir_export_asks_how_when_the_orthomosaic_does_not_fit(tmp_path, monkey
         w_.runner.wait()
         assert asked == [] and sorted(p.name for p in out_dir.iterdir()) == ["fits.jgw", "fits.jpg", "fits.jpg.aux.xml"]
         assert _exiftool_like(out_dir / "fits.jpg")[0].shape == t.shape
-        # it does not (a file holds 5000 cells: tiles of 70, 2 x 2 of them; cells of 10 cm in one file)
+        # it does not (a file holds 5000 cells: 4 tiles of 60 x 50; cells of 10 cm in one file)
         monkeypatch.setattr(thermal, "FLIR_MAX_CELLS", 5000)
         answers.append(None)  # cancel: nothing written, no file dialog
         targets.append("never.jpg")
@@ -1037,7 +1074,8 @@ def test_flir_export_asks_how_when_the_orthomosaic_does_not_fit(tmp_path, monkey
         assert len(asked) == 1 and targets == ["never.jpg"] and len(list(out_dir.iterdir())) == 3
         title, text, options = asked[0]
         assert title == "Esporta le temperature" and "100 x 120" in text and "2 x 2" in text
-        assert options == ["Un solo file con celle più grandi (10,0 cm)", "Tasselli a piena risoluzione (4 file)"]
+        assert "8,4 milioni al massimo e 65.500 per lato" in text  # the side can be what a file cannot hold
+        assert options == ["Un solo file con celle più grandi (10,0 cm)", "Tasselli a piena risoluzione (fino a 4 file)"]
         answers.append(0)  # one file with larger cells, from the button of the pane
         targets[:] = ["single.jpg"]
         pane.c_texport.setCurrentIndex(flir_item)
@@ -1046,13 +1084,13 @@ def test_flir_export_asks_how_when_the_orthomosaic_does_not_fit(tmp_path, monkey
         assert len(asked) == 2 and (out_dir / "single.jpg").exists() and not (out_dir / "single_tiles.csv").exists()
         assert _exiftool_like(out_dir / "single.jpg")[0].shape == (60, 50)
         assert _world_file(out_dir / "single.jpg")[:4] == pytest.approx((0.1, 0.0, 0.0, -0.1))
-        answers.append(1)  # tiles at full resolution, from the menu
+        answers.append(1)  # tiles at full resolution (the method the menu items call)
         targets[:] = ["tiles.jpg"]
         w_.ms_thermal_export("flir")
         w_.runner.wait()
         rows = (out_dir / "tiles_tiles.csv").read_text().splitlines()
         assert [r.split(",")[0] for r in rows[2:]] == [f"tiles_r{i:02d}_c{j:02d}.jpg" for i in range(2) for j in range(2)]
-        assert _exiftool_like(out_dir / "tiles_r00_c00.jpg")[0].shape == (70, 70)
+        assert _exiftool_like(out_dir / "tiles_r00_c00.jpg")[0].shape == (60, 50)
         assert _world_file(out_dir / "tiles_r00_c00.jpg")[:4] == pytest.approx((0.05, 0.0, 0.0, -0.05))
         assert len(asked) == 3 and answers == []
     finally:
@@ -1061,8 +1099,8 @@ def test_flir_export_asks_how_when_the_orthomosaic_does_not_fit(tmp_path, monkey
 
 
 def test_flir_export_command_line_tile_and_single(tmp_path, monkeypatch):
-    """`ppg thermal ... export --format flir`: tiles of the largest square a file holds by default,
-    --tile for another side, --single for one file with larger cells."""
+    """`ppg thermal ... export --format flir`: balanced tiles by default, --tile for exact tiles of
+    another side, --single for one file with larger cells."""
     from typer.testing import CliRunner
 
     from pyarchinit_photogrammetry.cli import app
@@ -1070,14 +1108,14 @@ def test_flir_export_command_line_tile_and_single(tmp_path, monkeypatch):
     doc, ch, t = _flir_chunk(tmp_path, 120, 100)
     out_dir = tmp_path / "ex"
     out_dir.mkdir()
-    monkeypatch.setattr(thermal, "FLIR_MAX_CELLS", 5000)  # a file holds 5000 cells: tiles of 70 by default
+    monkeypatch.setattr(thermal, "FLIR_MAX_CELLS", 5000)  # a file holds 5000 cells: 4 tiles of 60 x 50 by default
     run = CliRunner().invoke
     base = ["thermal", str(doc.path), "export"]
     r = run(app, base + [str(out_dir / "a.jpg"), "--format", "flir"])
     assert r.exit_code == 0, r.output
     assert r.output.strip().endswith("a_tiles.csv")
     assert len((out_dir / "a_tiles.csv").read_text().splitlines()) == 2 + 4
-    assert _exiftool_like(out_dir / "a_r00_c00.jpg")[0].shape == (70, 70)
+    assert _exiftool_like(out_dir / "a_r00_c00.jpg")[0].shape == (60, 50)
     r = run(app, base + [str(out_dir / "b.jpg"), "--format", "flir", "--tile", "64"])
     assert r.exit_code == 0, r.output
     assert _exiftool_like(out_dir / "b_r00_c00.jpg")[0].shape == (64, 64)

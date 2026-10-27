@@ -1623,11 +1623,12 @@ class MainWindow(QMainWindow):
                 answer = choice(
                     self, "question", "Esporta le temperature",
                     tr("L'ortofoto termica ha {0} x {1} celle, più di quante ne contenga un solo JPEG radiometrico FLIR "
-                       "(8,4 milioni al massimo).\n\nUn solo file ha celle più grandi: ognuna è la temperatura media di "
-                       "un blocco di {2} x {2} celle. I tasselli tengono la piena risoluzione, ognuno con il suo world "
-                       "file e un indice.", number(plan["cols"]), number(plan["rows"]), plan["factor"]),
+                       "(8,4 milioni al massimo e 65.500 per lato).\n\nUn solo file ha celle più grandi: ognuna è la "
+                       "temperatura media di un blocco di {2} x {2} celle. I tasselli tengono la piena risoluzione, "
+                       "ognuno con il suo world file e un indice.",
+                       number(plan["cols"]), number(plan["rows"]), plan["factor"]),
                     [tr("Un solo file con celle più grandi ({0} cm)", number(plan["coarse_cell"] * 100.0, 1)),
-                     tr("Tasselli a piena risoluzione ({0} file)", plan["tiles"])])
+                     tr("Tasselli a piena risoluzione (fino a {0} file)", plan["tiles"])])
                 if answer is None:
                     return
                 single = answer == 0

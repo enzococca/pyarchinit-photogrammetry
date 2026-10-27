@@ -326,13 +326,15 @@ o nell'intestazione, oppure JPEG radiometrici FLIR (`export_flir`, `write_flir_j
 sta, `single=True` scrive un solo file con celle più grandi - le temperature mediate su blocchi di k
 x k celle, senza contare le celle vuote e leggendo a strisce, con k il più piccolo numero intero che
 la fa stare (`flir_factor`) - con il world file delle celle più grandi; altrimenti tasselli chiamati
-`<nome>_r<riga>_c<colonna>.jpg`, ognuno con il suo world file e il suo sistema di riferimento,
-grandi quanto il formato permette (`tile`: di norma il quadrato più grande, 2895 celle, e non di
-più; un `tile` indicato taglia in tasselli anche un'ortofoto che starebbe in un file) e un indice
-`<nome>_tiles.csv`. `flir_plan(source)` dice quale di queste serve a un'ortofoto (le celle, `fits`,
-`factor`, i tasselli). L'immagine è la resa con la tavolozza; i conteggi grezzi sono costruiti con
-l'inversa del modello di FLIR (raw2temp di Thermimage) per i parametri della misura come li stampa
-ExifTool, così ExifTool, i programmi di FLIR e quelli costruiti su di essi (Thermal-Image-Analysis,
+`<nome>_r<riga>_c<colonna>.jpg` (la riga e la colonna del tassello), ognuno con il suo world file e
+il suo sistema di riferimento, bilanciati e di al massimo 2895 celle per lato (senza `tile`: 3000 x
+3000 celle sono 4 tasselli di 1500 x 1500, non 2895 e una striscia di 105; un `tile` indicato fa
+tasselli esatti di quel lato, anche per un'ortofoto che starebbe in un file) e un indice
+`<nome>_tiles.csv`. Tutte le immagini hanno la stessa scala di colori, quella dell'intera ortofoto.
+`flir_plan(source)` dice quale di queste serve a un'ortofoto (le celle, `fits`, `factor`, i
+tasselli). L'immagine è la resa con la tavolozza; i conteggi grezzi sono costruiti con l'inversa del
+modello di FLIR (raw2temp di Thermimage) per i parametri della misura come li stampa ExifTool, così
+ExifTool, i programmi di FLIR e quelli costruiti su di essi (Thermal-Image-Analysis,
 flirimageextractor, flyr) rileggono gli stessi gradi, entro 0,01 °C. Il formato non ha un valore
 vuoto: le celle senza temperatura prendono la più fredda dell'immagine (nere nell'immagine). I JPEG
 radiometrici FLIR si leggono anche (`read_flir`, `decode_flir`: i dati grezzi come conteggi a 16 bit

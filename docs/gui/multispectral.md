@@ -72,7 +72,7 @@ After the captures, the alignment and the surface come the steps of the temperat
 | **Measure parameters** (*Parameters...*) | emissivity, reflected and ambient temperature, humidity, distance; the factory values of the DJI cameras by default |
 | **Thermal orthomosaic** (*Build...*) | the orthophoto in degrees Celsius, shown on a ramp - iron, inferno, rainbow, greys - between two temperatures you set, as Metashape's raster calculator narrows the thermal scale; *Auto* goes back to the 2nd-98th percentile |
 | **Thermal anomalies** | the temperature minus its surroundings within a radius: buried walls and ditches change the soil above them |
-| **Export** | keeping the degrees: GeoTIFF float32 in degrees Celsius, 16-bit GeoTIFF in centikelvin, CSV, or a FLIR radiometric JPEG with its world file - one file, or tiles beyond 8.4 million pixels: the program then asks for one file with larger cells or tiles at full resolution - which the programs for FLIR cameras open as thermograms |
+| **Export** | keeping the degrees: GeoTIFF float32 in degrees Celsius, 16-bit GeoTIFF in centikelvin, CSV, or a FLIR radiometric JPEG with its world file - one file, or tiles beyond 8.4 million pixels: the program then asks whether to write one file with larger cells or tiles at full resolution - which the programs for FLIR cameras open as thermograms |
 
 !!! note "The DJI Thermal SDK"
     DJI R-JPEGs are decoded with DJI's free Thermal SDK, which is not shipped with the program. *Download DJI Thermal

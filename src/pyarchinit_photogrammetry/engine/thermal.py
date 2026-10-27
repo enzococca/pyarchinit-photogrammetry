@@ -393,7 +393,9 @@ FLIR_ATMOSPHERE = {"ATA1": 0.006569, "ATA2": 0.01262, "ATB1": -0.002276, "ATB2":
 FLIR_SEGMENT = 65524  # bytes of the FFF in one APP1 segment, as FLIR's cameras write them
 # 256 segments at most hold 16.7 MB: the raw counts (16 bit) of 8,386,048 cells, a square of 2895 x 2895
 FLIR_MAX_CELLS = (256 * FLIR_SEGMENT - 2048) // 2
-FLIR_MAX_SIDE = 65500  # the most cells a side of a JPEG can have (the raw header of the FFF holds 16 bits)
+# libjpeg's JPEG_MAX_DIMENSION: no JPEG has more cells than this a side. It is the binding limit, lower than
+# the 65535 that the 16 bits of the FFF's raw header could count: do not raise it
+FLIR_MAX_SIDE = 65500
 _CAMERA_INFO_SIZE = 0x5D0
 _PNG = b"\x89PNG\r\n\x1a\n"
 
@@ -622,28 +624,36 @@ def flir_factor(rows: int, cols: int) -> int:
     return k
 
 
-def flir_tile_side(tile: int | None = None) -> int:
-    """The side of the tiles, in cells: ``tile`` (64 at least), or the largest square one file holds
-    (2895 cells) when it is None or larger."""
+def flir_tile_shape(rows: int, cols: int, tile: int | None = None) -> tuple[int, int]:
+    """The rows and columns of the tiles of a ``rows`` x ``cols`` orthomosaic. With a ``tile`` asked for:
+    that many cells a side, exactly (64 at least, and at most the largest square one file holds, 2895),
+    the last tiles of a row or a column being what is left. Without: balanced tiles - each length in as
+    many equal parts as it takes to get under 2895 cells, ``ceil(length / 2895)`` of them, each of
+    ``ceil(length / parts)`` cells - so 3000 x 3000 cells are 4 tiles of 1500 x 1500, not 2895 and a
+    sliver of 105."""
     most = math.isqrt(FLIR_MAX_CELLS)
-    return most if tile is None else int(min(max(tile, 64), most))
+    if tile is not None:
+        side = int(min(max(tile, 64), most))
+        return side, side
+    return _cdiv(rows, max(1, _cdiv(rows, most))), _cdiv(cols, max(1, _cdiv(cols, most)))
 
 
 def flir_plan(source, tile: int | None = None) -> dict:
     """How the temperature orthomosaic ``source`` (a GeoTIFF) goes into FLIR files: its ``rows`` x
     ``cols`` cells of ``cell`` (the size of one, in the units of its reference system); ``fits`` when
     one file holds it as it is; ``factor``, the smallest k at which blocks of k x k cells make it fit
-    (1 when it does), and ``coarse_cell``, the cell of that file; the ``tile`` side and the number of
-    ``tiles`` that cover it at full resolution (:func:`export_flir` leaves out those with no value)."""
+    (1 when it does), and ``coarse_cell``, the cell of that file; the ``tile`` (rows, columns) and the
+    number of ``tiles`` that cover it at full resolution (:func:`flir_tile_shape`; :func:`export_flir`
+    leaves out those with no value, so there can be fewer files)."""
     import rasterio
 
     with rasterio.open(source) as src:
         rows, cols, tr = src.height, src.width, src.transform
     cell = float(math.hypot(tr.a, tr.d))
     k = flir_factor(rows, cols)
-    side = flir_tile_side(tile)
+    th, tw = flir_tile_shape(rows, cols, tile)
     return {"rows": rows, "cols": cols, "cell": cell, "fits": k == 1, "factor": k, "coarse_cell": cell * k,
-            "tile": side, "tiles": _cdiv(rows, side) * _cdiv(cols, side)}
+            "tile": (th, tw), "tiles": _cdiv(rows, th) * _cdiv(cols, tw)}
 
 
 def write_flir_jpeg(path, t: np.ndarray, params: dict, lims: tuple[float, float] | None = None,
@@ -1525,9 +1535,9 @@ def export(chunk: Chunk, path, fmt: str | None = None, source: Path | None = Non
     ``tif16`` 16-bit GeoTIFF in centikelvin (0 = nothing; degrees = value / 100 - 273.15, as
     MicaSense writes its thermal band), ``csv`` one line per cell with x, y and the temperature,
     ``flir`` FLIR radiometric JPEGs with world files (:func:`export_flir`: one file when the
-    orthomosaic fits in one, else tiles of ``tile`` cells, or with ``single`` one file with larger
-    cells). The parameters of the measure go with it (tags, the CSV's header, the FLIR camera
-    information)."""
+    orthomosaic fits in one, else balanced tiles - or exact tiles of ``tile`` cells - or with ``single``
+    one file with larger cells). The parameters of the measure go with it (tags, the CSV's header, the
+    FLIR camera information)."""
     import rasterio
 
     src_path = Path(source) if source is not None else thermal_path(chunk)
@@ -1634,48 +1644,50 @@ def export_flir(chunk: Chunk, path, source: Path, tile: int | None = None, palet
     * ``single=True``: still one file, with larger cells - the temperatures averaged over blocks of
       k x k cells, NaN-aware (a block with no value stays empty), k the smallest whole number that
       makes it fit (:func:`flir_factor`); the memory in use stays bounded, the raster is read in strips;
-    * else tiles ``<name>_r<row>_c<column>.jpg`` of ``tile`` cells a side - by default the largest square
-      a file holds (:func:`flir_tile_side`) - with an index ``<name>_tiles.csv`` (file, bounds,
-      coldest and hottest degrees, cells with a value; tiles with no value are left out). A ``tile``
-      given asks for tiles of that side even when the orthomosaic would fit in a file (one file when it
-      is no larger than a tile). ``single`` wins over ``tile``.
+    * else tiles ``<name>_r<row>_c<column>.jpg`` (the row and column of the tile, from 00) with an index
+      ``<name>_tiles.csv`` (file, bounds, coldest and hottest degrees, cells with a value; tiles with no
+      value are left out). By default they are balanced, of up to 2895 cells a side
+      (:func:`flir_tile_shape`): 3000 x 3000 cells are 4 tiles of 1500 x 1500. A ``tile`` given asks for
+      exact tiles of that side (the last of a row or column is what is left), even when the orthomosaic
+      would fit in a file (one file when it is no larger than a tile). ``single`` wins over ``tile``.
 
     Every JPEG has its world file (``.jgw``, the cells of that file) and its reference system
-    (``.aux.xml``): QGIS and GDAL place it. The colours of all the tiles share the ramp of the whole
-    orthomosaic. The object parameters written are those the temperatures were measured with (the
-    distance: the median flight height). Returns the file, or the index of the tiles."""
+    (``.aux.xml``): QGIS and GDAL place it. The colours of every picture - the one file, the one with
+    larger cells, all the tiles - share the same ramp, the percentiles of the whole orthomosaic. The
+    object parameters written are those the temperatures were measured with (the distance: the median
+    flight height). Returns the file, or the index of the tiles."""
     import rasterio
     from rasterio.transform import Affine
     from rasterio.windows import Window
 
     path = Path(path).with_suffix(".jpg")
-    side = flir_tile_side(tile)
     params = params_of(chunk)
     params = {**params, "distance": _export_distance(chunk, params)}
     with rasterio.open(source) as src:
         wkt = src.crs.to_wkt() if src.crs else None
         tr = src.transform
         h, w = src.height, src.width
-        one_file = single or (flir_fits(h, w) if tile is None else (h <= side and w <= side))
+        step = max(1, int(np.ceil(max(h, w) / 2000)))
+        lims = limits(src.read(1, out_shape=(max(1, h // step), max(1, w // step))).astype(np.float32))
+        th, tw = flir_tile_shape(h, w, tile)
+        one_file = single or (flir_fits(h, w) if tile is None else (h <= th and w <= tw))
         if one_file:
             k = flir_factor(h, w)  # 1 when the orthomosaic fits as it is
             t = _block_means(src, k) if k > 1 else src.read(1).astype(np.float32, copy=False)
             if not np.isfinite(t).any():
                 raise RuntimeError("the temperature orthomosaic is empty")
-            write_flir_jpeg(path, t, params, limits(t), palette)
+            write_flir_jpeg(path, t, params, lims, palette)
             _flir_georeference(path, Affine(tr.a * k, tr.b * k, tr.c, tr.d * k, tr.e * k, tr.f), wkt)  # k x k cells
             return path
-        step = max(1, int(np.ceil(max(h, w) / 2000)))
-        lims = limits(src.read(1, out_shape=(max(1, h // step), max(1, w // step))).astype(np.float32))
         tiles = []
-        for r0 in range(0, h, side):
-            for c0 in range(0, w, side):
-                win = Window(c0, r0, min(side, w - c0), min(side, h - r0))
+        for r0 in range(0, h, th):
+            for c0 in range(0, w, tw):
+                win = Window(c0, r0, min(tw, w - c0), min(th, h - r0))
                 t = src.read(1, window=win).astype(np.float32)
                 ok = np.isfinite(t)
                 if not ok.any():
                     continue
-                out = path.with_name(f"{path.stem}_r{r0 // side:02d}_c{c0 // side:02d}.jpg")
+                out = path.with_name(f"{path.stem}_r{r0 // th:02d}_c{c0 // tw:02d}.jpg")
                 write_flir_jpeg(out, t, params, lims, palette)
                 _flir_georeference(out, rasterio.windows.transform(win, tr), wkt)
                 b = rasterio.windows.bounds(win, tr)
