@@ -21,11 +21,14 @@ Quick start::
 """
 from ._env import glog_flushes_each_line as _glog_flushes_each_line
 from ._env import load_open3d_first as _load_open3d_first
+from ._env import proj_offline as _proj_offline
 from ._env import use_bundled_proj_data as _use_bundled_proj_data
 
 _glog_flushes_each_line()  # before pycolmap loads: its log is tailed for the progress (see _env.py)
 
 _load_open3d_first()  # Open3D's OpenMP runtime must be bound before rasterio/scipy (see _env.py)
+
+_proj_offline()  # PROJ never goes to the network, whatever the shell says: before anything opens a CRS (see _env.py)
 
 _use_bundled_proj_data()  # before anything opens a CRS (see _env.py)
 
@@ -36,6 +39,15 @@ from .core.progress import Cancelled, Progress, print_progress
 from . import demo  # noqa: E402  (ppg.demo.create_demo)
 
 __version__ = "1.6.0"
+
+from .gnss import heights as _heights  # noqa: E402
+
+# the folder of the geoid grids in pyproj's search before any conversion, in the main thread before any other starts
+# (see gnss/heights.py)
+try:
+    _heights.register()
+except Exception:  # pragma: no cover - no folder of the program (no home, no PROJ data): only PROJ's own grids
+    pass
 
 __all__ = ["app", "Document", "Chunk", "Camera", "Sensor", "Marker", "Projection", "Reference", "ScaleBar",
            "PointCloud", "ASPRS_CLASSES", "ARCHAEO_CLASSES", "Progress", "Cancelled", "print_progress", "__version__"]

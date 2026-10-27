@@ -1,16 +1,22 @@
-"""Helpers shared by the tests of the GNSS work (test_gnss_ppk, test_gnss_rinex_files, test_gnss_ppp): RTKLIB's
-options and solution files as the tests read and write them, the mark of the tests that need RTKLIB, offsets east,
-north and up, and RINEX observation files cut into their records, written in pieces, and with their header changed.
-They live in a module of their own, so that a test file can be changed without breaking the others."""
+"""Helpers shared by the tests of the GNSS work (test_gnss, test_gnss_ppk, test_gnss_rinex_files, test_gnss_ppp,
+test_gnss_frames): RTKLIB's options and solution files as the tests read and write them, the mark of the tests that need
+RTKLIB, offsets east, north and up, RINEX observation files cut into their records, written in pieces, and with their
+header changed, photos with their time and position, a DJI flight on the day of RTKLIB's sample data, and RTKLIB as a
+stand-in program. They live in a module of their own, so that a test file can be changed without breaking the
+others."""
 from __future__ import annotations
 
+import json
 import math
+import os
 import re
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from pyarchinit_photogrammetry import _native
 
@@ -167,3 +173,125 @@ def on_label(name: str, content: str | None):
         return None if content is None else card(content, name)
 
     return change
+
+
+# --- photos, a DJI flight on the day of RTKLIB's sample data, RTKLIB as a stand-in program -------------------------
+
+RTKLIB_DATA = Path(__file__).parent / "data" / "rtklib"
+PPK_ROVER = RTKLIB_DATA / "30400920.05o"  # the static station 3040, processed as a moving rover
+PPK_BASE = RTKLIB_DATA / "07590920.05o"  # 0759, 3.3 km away
+PPK_NAV = RTKLIB_DATA / "07590920.05n"
+EPOCHS = 120  # 00:00:00 to 00:59:30 every 30 s, in both files
+
+
+def jpeg(path, xmp: str | None, when: datetime | None = None):
+    """A photo with an EXIF position and, with ``when``, the local time the camera wrote."""
+    img = Image.fromarray(np.random.default_rng(0).integers(0, 255, (48, 64, 3), dtype=np.uint8))
+    exif = Image.Exif()
+    exif.get_ifd(0x8825).update({1: "N", 2: (41, 8, 0.0), 3: "E", 4: (14, 15, 0.0), 5: 0, 6: 123.4})
+    if when is not None:
+        exif.get_ifd(0x8769)[36867] = when.strftime("%Y:%m:%d %H:%M:%S")  # DateTimeOriginal
+    kwargs = {"exif": exif}
+    if xmp is not None:
+        kwargs["xmp"] = xmp.encode()
+    img.save(path, **kwargs)
+    return path
+
+
+def snapshot(chunk):
+    """The references of the photos of ``chunk`` and what is recorded of them: to check that nothing changed."""
+    return {c.label: (c.reference.location, c.reference.accuracy, c.reference.enabled, dict(c.meta.get("gnss") or {}),
+                      c.meta.get("reference_crs")) for c in chunk.cameras}
+
+
+MRK_LAT = 35.13208  # the drone's own single position in the MRK lines: 2.5 m from the PPK one
+
+
+def mrk_line(index: int, gps: float, arm: tuple[int, int, int], lat: float = MRK_LAT) -> str:
+    """A line of a Timestamp.MRK: shot ``index`` at ``gps`` seconds of GPS time with the lever arm ``arm`` (north, east,
+    down in mm) and the antenna at latitude ``lat``, where the drone's own single position put it."""
+    week, seconds = divmod(gps, WEEK)
+    north, east, down = arm
+    return (f"{index}\t{seconds:.6f}\t[{int(week)}]\t{north:6d},N\t{east:6d},E\t{down:6d},V\t{lat:.8f},Lat\t"
+            "139.62428000,Lon\t74.100,Ellh\t1.2, 1.4, 2.9\t16,Q\n")
+
+
+def ppk_flight(folder: Path, shots, lat: float = MRK_LAT) -> Path:
+    """A DJI flight on the day of the RTKLIB sample data: for each ``(index, gps, arm)`` of ``shots`` a photo
+    DJI_<index>.JPG with the time its camera wrote (in Japan, UTC+9: GPS time less the 13 leap seconds of 2005, plus
+    9 hours, to the second) and its line in the Timestamp.MRK beside the photos, the antenna at latitude ``lat``."""
+    folder.mkdir(parents=True)
+    for index, gps, _arm in shots:
+        jpeg(folder / f"DJI_{index:04d}.JPG", None, when=datetime(1980, 1, 6) + timedelta(seconds=gps - LEAP_2005,
+                                                                                           hours=9))
+    (folder / "Timestamp.MRK").write_text("".join(mrk_line(*shot, lat=lat) for shot in shots), newline="\n")
+    return folder
+
+
+# the qualities of a drone's solution away from fix (sdn, sde, sdu as RTKLIB writes them), by epoch
+NOT_FIX = {1: (2, (0.05, 0.04, 0.08)), 3: (4, (0.30, 0.25, 0.50)), 4: (5, (0.40, 0.45, 0.90))}
+
+
+def drone_rows() -> list[tuple]:
+    """The rows of a solution of a drone on the epochs of the RTKLIB sample data (every 30 s from 00:00:00 GPS time),
+    the antenna a little further at every epoch: fix, but float at the second epoch, dgps at the fourth and single at
+    the fifth; and one epoch more (float), a second after the sixth."""
+    rows = []
+    for k in range(EPOCHS):
+        q, (sdn, sde, sdu) = NOT_FIX.get(k, (1, (0.004, 0.003, 0.009)))
+        rows.append((START_2005 + 30.0 * k, 35.1320660 + 1e-7 * k, 139.6243010 + 1e-7 * k, 75.690 + 0.001 * k, q, 7,
+                     sdn, sde, sdu))
+    rows.insert(6, (START_2005 + 151.0, 35.1320671, 139.6243022, 75.712, 2, 6, 0.06, 0.07, 0.12))
+    return rows
+
+
+def fake_rnx2rtkp(folder: Path) -> Path:
+    """A stand-in for rnx2rtkp: appends to run.log beside it a JSON line with its arguments, the options file, what
+    the folder of the first input holds, the SHA-256 of every input (the inputs as RTKLIB would find them) and of the
+    antenna file the options name (none: null), copies the file named by PPG_FAKE_POS to its -o
+    file (none: no output, as RTKLIB when it computed nothing), writes PPG_FAKE_MESSAGE to stderr as rnx2rtkp writes
+    its messages and exits with PPG_FAKE_EXIT."""
+    script = folder / "rnx2rtkp"
+    log = folder / "run.log"
+    script.write_text(f"""#!{sys.executable}
+import hashlib, json, os, shutil, sys
+args = sys.argv[1:]
+conf, out, files = args[args.index("-k") + 1], args[args.index("-o") + 1], args[4:]
+options = open(conf).read()
+antenna = [l.split("=", 1)[1] for l in options.splitlines() if l.startswith("file-rcvantfile")]
+entry = {{"args": args, "options": options, "folder": sorted(os.listdir(os.path.dirname(files[0]))),
+          "inputs": [hashlib.sha256(open(f, "rb").read()).hexdigest() for f in files],
+          "antenna": hashlib.sha256(open(antenna[0], "rb").read()).hexdigest() if antenna else None}}
+open({str(log)!r}, "a").write(json.dumps(entry) + "\\n")
+if os.environ.get("PPG_FAKE_POS"):
+    shutil.copyfile(os.environ["PPG_FAKE_POS"], out)
+sys.stderr.write(os.environ.get("PPG_FAKE_MESSAGE", "processing : 2005/04/02 00:59:30.0 Q=1") + "\\r")
+sys.exit(int(os.environ.get("PPG_FAKE_EXIT", "0")))
+""")
+    script.chmod(0o755)
+    if os.name == "nt":  # no shebang lines on Windows: a batch file starts the script
+        wrapper = folder / "rnx2rtkp.cmd"
+        wrapper.write_text(f'@"{sys.executable}" "{script}" %*\r\n')
+        return wrapper
+    return script
+
+
+@pytest.fixture
+def fake_rtklib(tmp_path, monkeypatch):
+    """RTKLIB as the fake rnx2rtkp (the core switched off), writing the solution of POS_ROWS; returns the log of
+    its runs (a list of dicts, read when called)."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    monkeypatch.setenv("PPG_NATIVE", "0")
+    monkeypatch.setenv("PPG_RNX2RTKP", str(fake_rnx2rtkp(tools)))
+    pos = tools / "canned.pos"
+    pos.write_text(pos_text(), newline="")
+    monkeypatch.setenv("PPG_FAKE_POS", str(pos))
+    for name in ("PPG_FAKE_MESSAGE", "PPG_FAKE_EXIT"):
+        monkeypatch.delenv(name, raising=False)
+
+    def runs() -> list[dict]:
+        log = tools / "run.log"
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    return runs

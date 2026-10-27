@@ -9,7 +9,6 @@ import math
 import os
 import re
 import shutil
-import sys
 import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -23,12 +22,21 @@ import pyarchinit_photogrammetry as ppg
 from pyarchinit_photogrammetry import _native
 from pyarchinit_photogrammetry.gnss import apply as gnss_apply
 from pyarchinit_photogrammetry.gnss import dji, download, positions, ppk, rinex
-from test_gnss import _jpeg, _snapshot  # synthetic photos with the time of their camera, references of a chunk
-from gnss_helpers import LEAP_2005, POS_COLUMNS, POS_LEGEND, POS_ROWS, START_2005, WEEK, needs_rtklib
+import gnss_helpers
+from gnss_helpers import (EPOCHS, MRK_LAT, POS_COLUMNS, POS_LEGEND, POS_ROWS, PPK_BASE, PPK_NAV, PPK_ROVER, START_2005,
+                          WEEK, needs_rtklib)
+from gnss_helpers import drone_rows as _drone_rows
 from gnss_helpers import enu as _enu
+from gnss_helpers import fake_rnx2rtkp as _fake_rnx2rtkp
+from gnss_helpers import jpeg as _jpeg  # synthetic photos with the time of their camera
+from gnss_helpers import mrk_line as _mrk_line
 from gnss_helpers import pos_text as _pos_text
+from gnss_helpers import ppk_flight as _ppk_flight
 from gnss_helpers import rtklib_option_names as _rtklib_option_names
 from gnss_helpers import rtklib_options as _options
+from gnss_helpers import snapshot as _snapshot  # the references of a chunk
+
+fake_rtklib = gnss_helpers.fake_rtklib  # the fixture: RTKLIB as a script that logs its runs
 
 DATA = Path(__file__).parent / "data" / "rtklib"
 ROVER = DATA / "07590920.05o"
@@ -730,10 +738,6 @@ def test_the_base_position_of_a_header_is_in_japan():
 
 # --- the options of RTKLIB --------------------------------------------------------------------------------------
 
-PPK_ROVER = DATA / "30400920.05o"  # the static station 3040, processed as a moving rover
-PPK_BASE = DATA / "07590920.05o"  # 0759, 3.3 km away
-PPK_NAV = DATA / "07590920.05n"
-
 
 def test_config_with_a_typed_base_position():
     text = ppk.config((35.160875039, 139.613837253, 70.1535), elevation_mask=10.0, systems="GRE")
@@ -983,58 +987,6 @@ def test_read_pos_refuses_a_row_with_a_number_that_is_not_finite(tmp_path, field
 
 
 # --- solve: the checks before RTKLIB runs, the files it is given ------------------------------------------------
-
-
-def _fake_rnx2rtkp(folder: Path) -> Path:
-    """A stand-in for rnx2rtkp: appends to run.log beside it a JSON line with its arguments, the options file, what
-    the folder of the first input holds, the SHA-256 of every input (the inputs as RTKLIB would find them) and of the
-    antenna file the options name (none: null), copies the file named by PPG_FAKE_POS to its -o
-    file (none: no output, as RTKLIB when it computed nothing), writes PPG_FAKE_MESSAGE to stderr as rnx2rtkp writes
-    its messages and exits with PPG_FAKE_EXIT."""
-    script = folder / "rnx2rtkp"
-    log = folder / "run.log"
-    script.write_text(f"""#!{sys.executable}
-import hashlib, json, os, shutil, sys
-args = sys.argv[1:]
-conf, out, files = args[args.index("-k") + 1], args[args.index("-o") + 1], args[4:]
-options = open(conf).read()
-antenna = [l.split("=", 1)[1] for l in options.splitlines() if l.startswith("file-rcvantfile")]
-entry = {{"args": args, "options": options, "folder": sorted(os.listdir(os.path.dirname(files[0]))),
-          "inputs": [hashlib.sha256(open(f, "rb").read()).hexdigest() for f in files],
-          "antenna": hashlib.sha256(open(antenna[0], "rb").read()).hexdigest() if antenna else None}}
-open({str(log)!r}, "a").write(json.dumps(entry) + "\\n")
-if os.environ.get("PPG_FAKE_POS"):
-    shutil.copyfile(os.environ["PPG_FAKE_POS"], out)
-sys.stderr.write(os.environ.get("PPG_FAKE_MESSAGE", "processing : 2005/04/02 00:59:30.0 Q=1") + "\\r")
-sys.exit(int(os.environ.get("PPG_FAKE_EXIT", "0")))
-""")
-    script.chmod(0o755)
-    if os.name == "nt":  # no shebang lines on Windows: a batch file starts the script
-        wrapper = folder / "rnx2rtkp.cmd"
-        wrapper.write_text(f'@"{sys.executable}" "{script}" %*\r\n')
-        return wrapper
-    return script
-
-
-@pytest.fixture
-def fake_rtklib(tmp_path, monkeypatch):
-    """RTKLIB as the fake rnx2rtkp (the core switched off), writing the solution of POS_ROWS; returns the log of
-    its runs (a list of dicts, read when called)."""
-    tools = tmp_path / "tools"
-    tools.mkdir()
-    monkeypatch.setenv("PPG_NATIVE", "0")
-    monkeypatch.setenv("PPG_RNX2RTKP", str(_fake_rnx2rtkp(tools)))
-    pos = tools / "canned.pos"
-    pos.write_text(_pos_text(), newline="")
-    monkeypatch.setenv("PPG_FAKE_POS", str(pos))
-    for name in ("PPG_FAKE_MESSAGE", "PPG_FAKE_EXIT"):
-        monkeypatch.delenv(name, raising=False)
-
-    def runs() -> list[dict]:
-        log = tools / "run.log"
-        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
-
-    return runs
 
 
 def _sha256(data: bytes) -> str:
@@ -1755,9 +1707,8 @@ def test_short_path_on_windows(tmp_path):
 # --- solve with RTKLIB ------------------------------------------------------------------------------------------
 # How many epochs RTKLIB fixes on these data in kinematic mode (fix and hold on 3.3 km of 30 s epochs) changes from
 # build to build, and with a nanometre of the base: from about 40 to 115 of 120. In static mode, the station 3040 being
-# a fixed station, every epoch is fixed on every build: the accurate checks are made on static runs.
-
-EPOCHS = 120  # 00:00:00 to 00:59:30 every 30 s, in both files
+# a fixed station, every epoch is fixed on every build: the accurate checks are made on static runs. EPOCHS
+# (gnss_helpers): the 120 epochs from 00:00:00 to 00:59:30 every 30 s, in both files.
 
 
 def _rtklib_run(folder: Path, base_position=None, base: Path = PPK_BASE, mode: str = "static",
@@ -2024,30 +1975,6 @@ def test_the_utc_of_a_shot_takes_the_leap_seconds_of_its_day():
     assert _gps_shot(datetime(2017, 1, 1, 0, 0, 18)).utc == datetime(2017, 1, 1, tzinfo=utc)
 
 
-MRK_LAT = 35.13208  # the drone's own single position in the MRK lines: 2.5 m from the PPK one
-
-
-def _mrk_line(index: int, gps: float, arm: tuple[int, int, int], lat: float = MRK_LAT) -> str:
-    """A line of a Timestamp.MRK: shot ``index`` at ``gps`` seconds of GPS time with the lever arm ``arm`` (north, east,
-    down in mm) and the antenna at latitude ``lat``, where the drone's own single position put it."""
-    week, seconds = divmod(gps, WEEK)
-    north, east, down = arm
-    return (f"{index}\t{seconds:.6f}\t[{int(week)}]\t{north:6d},N\t{east:6d},E\t{down:6d},V\t{lat:.8f},Lat\t"
-            "139.62428000,Lon\t74.100,Ellh\t1.2, 1.4, 2.9\t16,Q\n")
-
-
-def _ppk_flight(folder: Path, shots, lat: float = MRK_LAT) -> Path:
-    """A DJI flight on the day of the RTKLIB sample data: for each ``(index, gps, arm)`` of ``shots`` a photo
-    DJI_<index>.JPG with the time its camera wrote (in Japan, UTC+9: GPS time less the 13 leap seconds of 2005, plus
-    9 hours, to the second) and its line in the Timestamp.MRK beside the photos, the antenna at latitude ``lat``."""
-    folder.mkdir(parents=True)
-    for index, gps, _arm in shots:
-        _jpeg(folder / f"DJI_{index:04d}.JPG", None, when=datetime(1980, 1, 6) + timedelta(seconds=gps - LEAP_2005,
-                                                                                            hours=9))
-    (folder / "Timestamp.MRK").write_text("".join(_mrk_line(*shot, lat=lat) for shot in shots), newline="\n")
-    return folder
-
-
 def _ecef(lon: float, lat: float, h: float) -> np.ndarray:
     return np.array(Transformer.from_crs("EPSG:4979", "EPSG:4978", always_xy=True).transform(lon, lat, h))
 
@@ -2060,23 +1987,6 @@ def _camera_ecef(antenna, arm) -> np.ndarray:
     east = np.array([-math.sin(lon), math.cos(lon), 0.0])
     up = np.array([math.cos(lat) * math.cos(lon), math.cos(lat) * math.sin(lon), math.sin(lat)])
     return _ecef(antenna[1], antenna[0], antenna[2]) + (arm[0] * north + arm[1] * east - arm[2] * up) / 1000.0
-
-
-# the qualities of a drone's solution away from fix (sdn, sde, sdu as RTKLIB writes them), by epoch
-_NOT_FIX = {1: (2, (0.05, 0.04, 0.08)), 3: (4, (0.30, 0.25, 0.50)), 4: (5, (0.40, 0.45, 0.90))}
-
-
-def _drone_rows() -> list[tuple]:
-    """The rows of a solution of a drone on the epochs of the RTKLIB sample data (every 30 s from 00:00:00 GPS time),
-    the antenna a little further at every epoch: fix, but float at the second epoch, dgps at the fourth and single at
-    the fifth; and one epoch more (float), a second after the sixth."""
-    rows = []
-    for k in range(EPOCHS):
-        q, (sdn, sde, sdu) = _NOT_FIX.get(k, (1, (0.004, 0.003, 0.009)))
-        rows.append((START_2005 + 30.0 * k, 35.1320660 + 1e-7 * k, 139.6243010 + 1e-7 * k, 75.690 + 0.001 * k, q, 7,
-                     sdn, sde, sdu))
-    rows.insert(6, (START_2005 + 151.0, 35.1320671, 139.6243022, 75.712, 2, 6, 0.06, 0.07, 0.12))
-    return rows
 
 
 # shot, seconds after 00:00:00 GPS time, lever arm (north, east, down in mm)

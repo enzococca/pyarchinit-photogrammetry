@@ -27,6 +27,7 @@ from typing import NamedTuple
 import numpy as np
 
 from ..core import crs as crs_mod
+from . import heights
 
 log = logging.getLogger(__name__)
 
@@ -271,7 +272,21 @@ def _apply(transformer, points: np.ndarray, inverse: bool = False) -> np.ndarray
 
 
 def _convert(points: np.ndarray, src: str, dst: str) -> np.ndarray:
-    return points.copy() if src == dst else _apply(_transformer(src, dst), points)
+    """``points`` from ``src`` to ``dst`` by PROJ (a conversion, or its own transformation); between heights above the
+    ellipsoid and heights above a geoid never its ballpark (:func:`..core.crs.by_proj`, which refuses without the grid
+    of the geoid)."""
+    if src == dst:
+        return points.copy()
+    if heights.kinds_differ(src, dst):
+        return crs_mod.by_proj(points, src, dst)
+    return _apply(_transformer(src, dst), points)
+
+
+def forget_operations() -> None:
+    """Forget the operations of PROJ kept for the conversions (:func:`_transformer`, :func:`_operation`,
+    :func:`_own_areas`): chosen again with the grids PROJ finds now (:func:`.heights.refresh`)."""
+    for kept in (_transformer, _operation, _own_areas):
+        kept.cache_clear()
 
 
 @functools.lru_cache(maxsize=64)
@@ -360,9 +375,10 @@ def _operation(hub: str, target: str, area: tuple[float, float, float, float] | 
 @functools.lru_cache(maxsize=64)
 def _datum_target(crs: str) -> str:
     """The system the datum of ``crs`` is reached in: ``crs`` itself or, for a compound system, its horizontal part
-    (its EPSG code, else its WKT), whose transformation keeps the height as it is - the height a position of any other
-    frame keeps going into that system (a missing geoid grid does not hide the transformation of the datum, nor turns an
-    ellipsoidal height of the local datum into a height above the geoid)."""
+    (its EPSG code, else its WKT). The transformation to it gives the plan position only: the height above the geoid of
+    a compound system comes from the static path (:func:`transform`), so that the transformation of the datum is the
+    same with the geoid grid and without, and a height above the ellipsoid of the local datum never stands for one
+    above the geoid."""
     system = _parsed(crs)
     if not system.is_compound:
         return crs
@@ -408,12 +424,13 @@ def transform(points, src: str, dst: str, epoch=None) -> np.ndarray:
     the transformation PROJ ranks first among those that are no ballpark where the points are, else through WGS 84 the
     same way (:func:`_route`) - into a system with heights above a geoid on such a datum, the plan by that
     transformation to its horizontal part and the height as the static path gives it for the point of ETRF2000 (or
-    ITRF2020) read as WGS 84, with the geoid grid or without, as for every other position. The other way round the same
-    steps backwards; between two systems of
-    ITRF2020 conversions only. A row without a finite number is no position: it stays without one (NaN) and needs no
-    epoch. A ``ValueError`` without the epoch where the Helmert is applied, for an epoch that is not a year, and for a
-    datum PROJ knows only by a ballpark. Between systems that are not in ITRF2020
-    :func:`..core.crs.transform_points`."""
+    ITRF2020) read as WGS 84. The other way round the same steps backwards; between two systems of ITRF2020
+    conversions only. Between heights above the ellipsoid and heights above a geoid every step is the static path's
+    (:func:`..core.crs.by_proj`): with the grid of the geoid, or a :class:`.heights.GridMissing` that names it.
+
+    A row without a finite number is no position: it stays without one (NaN) and needs no epoch. A ``ValueError``
+    without the epoch where the Helmert is applied, for an epoch that is not a year, and for a datum PROJ knows only by
+    a ballpark. Between systems that are not in ITRF2020 :func:`..core.crs.transform_points`."""
     pts = np.atleast_2d(np.asarray(points, dtype=np.float64))
     if src == dst or crs_mod.is_local(src) or crs_mod.is_local(dst):
         return crs_mod.transform_points(pts, src, dst)  # a copy, or the refusal of a local frame

@@ -8,13 +8,14 @@ from pathlib import Path, PureWindowsPath
 
 import numpy as np
 import pytest
-from PIL import Image
 from pyproj import Transformer
 
 import pyarchinit_photogrammetry as ppg
 from pyarchinit_photogrammetry import _native
 from pyarchinit_photogrammetry.gnss import apply as gnss_apply
 from pyarchinit_photogrammetry.gnss import dji, positions, quality
+from gnss_helpers import jpeg as _jpeg  # a photo with its position and the time of its camera
+from gnss_helpers import snapshot as _snapshot  # the references of a chunk, to check that nothing changed
 
 
 def _xmp(body: str) -> str:
@@ -75,20 +76,6 @@ def test_set_camera_position_records_where_it_comes_from():
     # the frame of a position on WGS 84 is the one nobody knows, and the epoch was not given
     assert cam.meta["gnss"] == {"source": "dji_xmp", "status": "fix", "accuracy": [0.01, 0.01, 0.02],
                                 "height": "ellipsoidal", "diff_age": 1.0, "frame": "unknown", "epoch": None}
-
-
-def _jpeg(path, xmp: str | None, when: datetime | None = None):
-    """A photo with an EXIF position and, with ``when``, the local time the camera wrote."""
-    img = Image.fromarray(np.random.default_rng(0).integers(0, 255, (48, 64, 3), dtype=np.uint8))
-    exif = Image.Exif()
-    exif.get_ifd(0x8825).update({1: "N", 2: (41, 8, 0.0), 3: "E", 4: (14, 15, 0.0), 5: 0, 6: 123.4})
-    if when is not None:
-        exif.get_ifd(0x8769)[36867] = when.strftime("%Y:%m:%d %H:%M:%S")  # DateTimeOriginal
-    kwargs = {"exif": exif}
-    if xmp is not None:
-        kwargs["xmp"] = xmp.encode()
-    img.save(path, **kwargs)
-    return path
 
 
 def test_added_photos_take_their_rtk_accuracy(tmp_path):
@@ -211,11 +198,6 @@ def _flight(folder, names, lines=MRK_LINES, xmp_first=False):
                                   'drone-dji:RtkStdHgt="0.009">') if xmp_first and i == 0 else None)
     (folder / "Timestamp.MRK").write_text(lines)
     return folder
-
-
-def _snapshot(chunk):
-    return {c.label: (c.reference.location, c.reference.accuracy, c.reference.enabled, dict(c.meta.get("gnss") or {}),
-                      c.meta.get("reference_crs")) for c in chunk.cameras}
 
 
 def test_mrk_matched_by_shot_number_and_by_order(tmp_path):

@@ -37,15 +37,20 @@ def is_geographic(crs: str | None) -> bool:
 
 
 def transform_points(points: np.ndarray, src: str, dst: str, epoch=None, legacy=None) -> np.ndarray:
-    """Transform ``(N,3)`` points between two CRS (heights passed through). When one of the two is in ITRF2020, a
-    frame where positions move with time (a GNSS position against a permanent station or PPP), the points go through
+    """Transform ``(N,3)`` points between two CRS. When one of the two is in ITRF2020, a frame where positions move
+    with time (a GNSS position against a permanent station or PPP), the points go through
     :func:`..gnss.frames.transform` at their ``epoch``: a decimal year for all of them, or one for each (PROJ alone
     would take a ballpark, or the epoch 2015.0).
 
     Points that carry no frame and epoch - the positions of a project made before the frames, markers, the points of a
     chunk - say so with ``legacy`` (a :class:`..gnss.frames.Legacy`: what they are, their chunk): from or to ITRF2020
     they go by PROJ's own transformation where it has one that is no ballpark, else as positions on WGS 84, with a
-    warning (:func:`..gnss.frames.legacy_transform`)."""
+    warning (:func:`..gnss.frames.legacy_transform`).
+
+    The heights go as the two systems have them: between heights above the ellipsoid and heights above a geoid
+    (:func:`..gnss.heights.height_kind`), on every route, only by a transformation that is no ballpark and with the
+    grid of the geoid - else a :class:`..gnss.heights.GridMissing` (a ``ValueError``) names the grid and how to get it
+    (:func:`by_proj`); a system without heights of its own (2D) takes them, and gives them, as they are."""
     if src == dst or (is_local(src) and is_local(dst)):
         return np.asarray(points, float).copy()
     if is_local(src) or is_local(dst):
@@ -61,13 +66,53 @@ def transform_points(points: np.ndarray, src: str, dst: str, epoch=None, legacy=
 
 def by_proj(points: np.ndarray, src: str, dst: str) -> np.ndarray:
     """``(N,3)`` points from ``src`` to ``dst`` by PROJ's own choice (longitude first): what :func:`transform_points`
-    does between systems that are not in ITRF2020."""
+    does between systems that are not in ITRF2020.
+
+    Between heights above the ellipsoid and heights above a geoid (:func:`..gnss.heights.kinds_differ`) PROJ's choice is
+    never a ballpark - which, without the grid of the geoid, gives the heights as they are: heights above the ellipsoid
+    passed off as heights above the geoid, 48 m off at Rome - and every point with numbers comes out with numbers, or a
+    :class:`..gnss.heights.GridMissing` (a ``ValueError``) names the grid PROJ lacks and how to get it."""
     from pyproj import Transformer
 
-    tr = Transformer.from_crs(to_pyproj(src), to_pyproj(dst), always_xy=True)
+    from ..gnss import heights
+
     pts = np.atleast_2d(np.asarray(points, float))
+    if heights.kinds_differ(src, dst):
+        return _between_heights(pts, src, dst)
+    tr = Transformer.from_crs(to_pyproj(src), to_pyproj(dst), always_xy=True)
     x, y, z = tr.transform(pts[:, 0], pts[:, 1], pts[:, 2])
     return np.column_stack([x, y, z])
+
+
+def _between_heights(pts: np.ndarray, src: str, dst: str) -> np.ndarray:
+    """:func:`by_proj` between heights above the ellipsoid and heights above a geoid: by a transformation that is no
+    ballpark, tried once more after PROJ looks for its grids again (:func:`..gnss.heights.refresh`: a grid downloaded
+    or copied after PROJ looked for it in this thread), else the refusal that says which grid is missing."""
+    from ..gnss import heights
+
+    out = _no_ballpark(pts, src, dst)
+    if out is None:
+        heights.refresh()
+        out = _no_ballpark(pts, src, dst)
+    if out is None:
+        raise heights.refusal(src, dst)
+    return out
+
+
+def _no_ballpark(pts: np.ndarray, src: str, dst: str) -> np.ndarray | None:
+    """``pts`` by PROJ's choice among its transformations that are no ballpark, or None when it has none it can use,
+    or one point with numbers comes out without (where none reaches)."""
+    from pyproj import Transformer
+    from pyproj.exceptions import ProjError
+
+    try:
+        tr = Transformer.from_crs(to_pyproj(src), to_pyproj(dst), always_xy=True, allow_ballpark=False)
+        x, y, z = tr.transform(pts[:, 0], pts[:, 1], pts[:, 2])
+    except ProjError:
+        return None
+    out = np.column_stack([x, y, z])
+    given = np.isfinite(pts).all(axis=1)
+    return out if np.isfinite(out[given]).all() else None
 
 
 def utm_for_lonlat(lon: float, lat: float) -> str:

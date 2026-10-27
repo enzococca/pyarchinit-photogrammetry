@@ -8,7 +8,7 @@ import numpy as np
 from ..core.chunk import Chunk
 from ..engine import bundle
 from ..markers import gcp
-from . import frames
+from . import frames, heights
 
 STATUSES = ("fix", "float", "single", "none")
 HEIGHTS = ("ellipsoidal", "exif")
@@ -65,12 +65,16 @@ def summary(chunk: Chunk) -> list[dict]:
     * ``disabled``: the photos whose reference is switched off (they are counted in everything else too);
     * ``residual_rms`` (per axis, metres) and ``residual_max`` (the largest distance, metres): how far the
       aligned cameras are from their references, in the CRS of the chunk. ``None`` for a flight with no aligned
-      camera, and for every flight while the chunk is not georeferenced."""
+      camera, for every flight while the chunk is not georeferenced, and while the references cannot go into the
+      heights above the geoid of its system for want of the grid of the geoid (:func:`.heights.check` says so)."""
     cameras = list(chunk.cameras)
     if not cameras:
         return []
     flight_of = bundle.flights(cameras)
-    errors = gcp.camera_reference_errors(chunk)
+    try:
+        errors = gcp.camera_reference_errors(chunk)
+    except heights.GridMissing:
+        errors = {}
     out = []
     for number in sorted(set(flight_of.values())):
         members = [c for c in cameras if flight_of[c.key] == number]

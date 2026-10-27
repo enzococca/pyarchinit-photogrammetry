@@ -10,11 +10,48 @@ environment, so without the rewrite every EPSG lookup in a worker thread (all th
 background tasks of the interface) would still fail. pyproj wheels already prefer
 their bundled data. Nothing happens when rasterio has no bundled data (conda-forge
 or QGIS builds, whose PROJ matches the environment).
+
+PROJ never goes to the network (:func:`proj_offline`): with ``PROJ_NETWORK=ON`` (the shell of Anaconda) PROJ downloads
+the geoid grids it lacks in silence, and on a computer without the network - the application started from the Finder -
+it gives heights above the ellipsoid for heights above the geoid. The grids the program downloads go in a folder of its
+own, which :func:`add_proj_folder` puts in pyproj's search (:func:`..gnss.heights.register`) - not in ``PROJ_DATA``:
+rasterio hands ``PROJ_DATA`` to GDAL as one folder at every ``rasterio.open`` (``GDALEnv.start``), and two folders
+there leave GDAL without ``proj.db``, in this process and in those it starts. Every conversion of coordinates goes
+through pyproj; rasterio's GDAL needs no grid of the geoid.
 """
 from __future__ import annotations
 
 import os
 from pathlib import Path
+
+
+def proj_offline() -> None:
+    """PROJ never goes to the network: ``PROJ_NETWORK=OFF`` for every PROJ that reads the environment (rasterio's,
+    those of the processes the program starts) and the network of pyproj switched off, whatever the shell said. Called
+    when the package is imported, before anything opens a coordinate system: the grids PROJ needs are local, or a
+    conversion that needs one says it is missing."""
+    os.environ["PROJ_NETWORK"] = "OFF"
+    try:
+        from pyproj import network
+    except Exception:  # pragma: no cover - pyproj missing
+        return
+    network.set_network_enabled(False)
+
+
+def add_proj_folder(folder: str | os.PathLike) -> bool:
+    """``folder`` (absolute) among the folders where pyproj's PROJ looks for its grids, after its own data: read by the
+    PROJ of every thread that starts using pyproj from now on, and by the current one at once (a thread that used pyproj
+    before keeps the folders it had: :func:`..gnss.heights.refresh`). ``PROJ_DATA`` stays as it is (see the module).
+    Returns whether the folder was not there yet."""
+    try:
+        import pyproj.datadir
+    except Exception:  # pragma: no cover - pyproj missing
+        return False
+    folder = str(folder)
+    if folder in pyproj.datadir.get_data_dir().split(os.pathsep):
+        return False
+    pyproj.datadir.append_data_dir(folder)
+    return True
 
 
 def use_bundled_proj_data() -> str | None:
