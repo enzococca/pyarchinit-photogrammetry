@@ -1205,22 +1205,33 @@ class ReferencePane(QWidget):
             cam.reference.enabled = on
             self.changed.emit()
 
-    def _camera_menu(self, pos) -> None:
+    def camera_menu(self):
+        """The right click on the cameras: the export to Excel and, when photos have positions, their references
+        switched on or off for the selected cameras (a right click selects the one under the cursor) or for all of
+        them."""
         from .table_export import excel_menu
 
         menu = excel_menu(self.cams, tr("Camere"))
         if self.chunk is not None and any(c.reference.location for c in self.chunk.cameras):
             menu.addSeparator()
-            menu.addAction(tr("Usa i riferimenti delle camere"), lambda: self.use_camera_references(True))
-            menu.addAction(tr("Non usare i riferimenti delle camere"), lambda: self.use_camera_references(False))
-        menu.exec(self.cams.viewport().mapToGlobal(pos))
+            menu.addAction(tr("Usa i riferimenti delle camere selezionate"), lambda: self.use_camera_references(True))
+            menu.addAction(tr("Usa i riferimenti di tutte le camere"),
+                           lambda: self.use_camera_references(True, every=True))
+            menu.addAction(tr("Non usare i riferimenti delle camere selezionate"),
+                           lambda: self.use_camera_references(False))
+            menu.addAction(tr("Non usare i riferimenti di tutte le camere"),
+                           lambda: self.use_camera_references(False, every=True))
+        return menu
 
-    def use_camera_references(self, on: bool) -> int:
-        """The references of the selected cameras (of all of them when none is selected) switched on or off, as the
-        tick of each one: how many changed."""
+    def _camera_menu(self, pos) -> None:
+        self.camera_menu().exec(self.cams.viewport().mapToGlobal(pos))
+
+    def use_camera_references(self, on: bool, every: bool = False) -> int:
+        """The references of the selected cameras (``every``: of all of them) switched on or off, as the tick of
+        each one: how many changed."""
         if self.chunk is None:
             return 0
-        rows = sorted({i.row() for i in self.cams.selectedItems()}) or range(len(self.chunk.cameras))
+        rows = range(len(self.chunk.cameras)) if every else sorted({i.row() for i in self.cams.selectedItems()})
         changed = 0
         for r in rows:
             cam = self.chunk.cameras[r]

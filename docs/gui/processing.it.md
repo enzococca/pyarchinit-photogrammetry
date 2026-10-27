@@ -57,10 +57,11 @@ riproiezione resta lo stesso: la distorsione radiale lo compensa nelle foto (82 
 Multispectral finivano a metri dalle loro posizioni). **Una rete di sicurezza** controlla ogni ottimizzazione:
 quando le camere finiscono più lontane dalle loro posizioni GNSS accurate di tre volte lo scarto che avevano, e di
 30 cm più di quello, l'ottimizzazione viene annullata e si rimette l'allineamento di prima (anche quando si ferma
-per un errore o viene annullata a mano). O piegava il blocco, o le posizioni non concordano con i punti di
-controllo (una base su un punto sbagliato, posizioni in un altro sistema di quote): per tenere un'ottimizzazione
-così, togli la spunta alle camere in *Riferimenti* (clic destro: *Non usare i riferimenti delle camere*) e
-ripetila. *non usate* lascia fuori le posizioni (l'ottimizzazione delle versioni precedenti, sempre sotto la
+per un errore o viene annullata a mano). O piegava il blocco, o le posizioni di una parte del blocco non
+concordano con i punti di controllo - un volo spostato di una quantità sua, quote miste fra MRK ed EXIF (uno
+spostamento uguale per tutte le posizioni, come una base su un punto sbagliato o un altro sistema di quote, lo
+prende la georeferenziazione e non annulla nulla): per tenere un'ottimizzazione così, togli la spunta alle camere
+in *Riferimenti* (clic destro: *Non usare i riferimenti di tutte le camere*) e ripetila. *non usate* lascia fuori le posizioni (l'ottimizzazione delle versioni precedenti, sempre sotto la
 rete). Il motore *Proprio* in *automatico* tiene il blocco allo stesso modo, focale compresa; *usate con la loro
 accuratezza* e *usate, con un bias per volo* rifiniscono la focale (con un bias per volo la rete giudica ogni
 posizione meno il bias del suo volo). Dalla riga di comando: `ppg optimize progetto.ppg --gnss auto|off`

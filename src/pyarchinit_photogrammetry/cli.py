@@ -828,8 +828,8 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
         typer.echo(f"reprojection error {err:.3f} px (the alignment kept); the optimisation was undone: the cameras "
                    f"ended {offsets['after']:.3f} m off their GNSS positions ({offsets['before']:.3f} m before) - it "
                    "bent the block, or the positions disagree with the control points. To keep such an optimisation, "
-                   "switch off the camera references (the photos in Riferimenti in the window, "
-                   "camera.reference.enabled = False in Python) and optimise again")
+                   "switch off the camera references (in the window: Reference pane, right click, Do not use the "
+                   "references of all the cameras; in Python: camera.reference.enabled = False) and optimise again")
         return
     text = f"reprojection error {err:.3f} px"
     held = rep.get("gnss") or {}

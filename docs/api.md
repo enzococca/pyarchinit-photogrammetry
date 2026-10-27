@@ -476,7 +476,8 @@ adjustment with `gnss="bias"`), the optimisation is undone: it bent the block, o
 disagree with the control points (switch off the camera references to keep it). The alignment before
 it is put back, the model on disk included, and the report then describes it (`reprojection_error`,
 `reverted`, `camera_offsets`; the run undone under `undone`). The alignment is put back as well when
-the optimisation stops with an error or is cancelled.
+the optimisation stops with an error or is cancelled, with the report of the optimisation before it (none when
+there was none).
 
 `engine="ppg"` uses our own adjustment instead (below), with `gnss="plain"` or `"bias"` (both refine
 the focal length; `"auto"` is `"plain"` with the focal length held when the positions can hold the

@@ -327,6 +327,15 @@ def test_cli_optimize_gnss_option(tmp_path, monkeypatch):
     assert saved.meta["sfm"]["optimize"]["gnss"]["photos"] == 40
     assert np.abs(_offsets(saved)[:, 2]).max() <= 0.05
 
+    with monkeypatch.context() as bending:  # an optimisation the net undoes: the way out, in English
+        bending.setattr(pycolmap, "bundle_adjustment", lambda rec, *args, **kwargs: _dome(rec))
+        result = run(app, ["optimize", str(doc.path), "--gnss", "off"])
+    assert result.exit_code == 0, result.output
+    said = " ".join(result.output.split())
+    assert "(the alignment kept); the optimisation was undone" in said
+    assert "Reference pane, right click, Do not use the references of all the cameras" in said
+    assert "Riferimenti" not in said
+
     seen = []
 
     def optimise(self, **kwargs):
@@ -397,6 +406,7 @@ def test_dialog_says_how_many_photos_hold_the_block(tmp_path, monkeypatch):
         assert len(warned) == 1 and "Ottimizzazione annullata" in warned[0]
         assert "non concordano con i punti di controllo" in warned[0]
         assert "togli la spunta alle camere nel pannello Riferimenti" in warned[0]
+        assert "Non usare i riferimenti di tutte le camere" in warned[0]
         log = " ".join(e[2] for e in w.log_pane.entries)
         assert "(l'allineamento tenuto)" in log
         # the way out: the camera references switched off in Riferimenti (a tick per photo, or all at once)
@@ -406,14 +416,25 @@ def test_dialog_says_how_many_photos_hold_the_block(tmp_path, monkeypatch):
         assert first.flags() & Qt.ItemFlag.ItemIsUserCheckable and first.checkState() == Qt.CheckState.Checked
         first.setCheckState(Qt.CheckState.Unchecked)
         assert w.chunk.cameras[0].reference.enabled is False
-        assert pane.use_camera_references(False) == 39
+
+        def entries():  # the right click on the cameras
+            return {a.text(): a for a in pane.camera_menu().actions() if a.text()}
+
+        pane.cams.selectRow(3)  # what a right click on a row does: that camera selected
+        entries()["Non usare i riferimenti delle camere selezionate"].trigger()
+        assert [c.key for c in w.chunk.cameras if not c.reference.enabled] == [0, 3]
+        assert {"Usa i riferimenti delle camere selezionate", "Usa i riferimenti di tutte le camere",
+                "Non usare i riferimenti di tutte le camere"} <= set(entries())
+        pane.cams.selectRow(7)
+        entries()["Non usare i riferimenti di tutte le camere"].trigger()  # the one the warning names
         assert not any(c.reference.enabled for c in w.chunk.cameras)
         assert pane.cams.item(5, 0).checkState() == Qt.CheckState.Unchecked
         w.optimize_cameras()  # the same bending adjustment: nothing to judge it by, it stays
         w.runner.wait()
         app.processEvents()
         assert "reverted" not in w.chunk.meta["sfm"]["optimize"] and len(warned) == 1
-        assert pane.use_camera_references(True) == 40 and all(c.reference.enabled for c in w.chunk.cameras)
+        entries()["Usa i riferimenti di tutte le camere"].trigger()
+        assert all(c.reference.enabled for c in w.chunk.cameras)
     finally:
         w.setWindowModified(False)
         w.close()
@@ -472,26 +493,35 @@ def test_everything_the_optimisation_changed_is_put_back(tmp_path, monkeypatch):
 
 
 def test_a_cancelled_optimisation_puts_the_alignment_back(tmp_path, monkeypatch):
-    """Cancelled half way - the model written and the cameras imported, the net not reached - the optimisation
-    puts the alignment of before back and the cancellation goes on; no copy is left."""
+    """Cancelled half way - the model written, the cameras imported and the report of the run written, the net
+    not reached - the optimisation puts the alignment of before back, its report too (none when there was none:
+    the PDF and the tables print it as the optimisation step), and the cancellation goes on; no copy is left."""
     from pyarchinit_photogrammetry.core.progress import Cancelled, Progress
 
     doc, ch = _rtk_block(tmp_path)
     centres = {c.key: c.center for c in ch.cameras}
     model = _model_centres(ch)
-    progress = Progress(lambda fraction, message: None)
+    error = _mean_reprojection_error(ch)
+    running = {}
 
     def bend_then_cancel(rec, *args, **kwargs):
         _dome(rec)
-        progress.cancel()  # pressed while the adjustment ran: the next report of progress stops the step
+        running["progress"].cancel()  # pressed while the adjustment ran: the next report of progress stops the step
 
     monkeypatch.setattr(pycolmap, "bundle_adjustment", bend_then_cancel)
-    with pytest.raises(Cancelled):
-        ch.optimize_cameras(gnss="off", progress=progress)
-    for cam in ch.cameras:
-        assert np.allclose(cam.center, centres[cam.key], atol=1e-9)
-    assert np.allclose(_model_centres(ch), model, atol=1e-9)
-    assert not list((ch.data_dir / "sfm").glob("model.*"))
+    for previous in (None, {"reprojection_error": 0.5, "control_points": 0, "steps": 0}):
+        if previous is not None:
+            ch.meta["sfm"]["optimize"] = dict(previous)
+        assert ("optimize" in ch.meta["sfm"]) == (previous is not None)
+        running["progress"] = Progress(lambda fraction, message: None)
+        with pytest.raises(Cancelled):
+            ch.optimize_cameras(gnss="off", progress=running["progress"])
+        for cam in ch.cameras:
+            assert np.allclose(cam.center, centres[cam.key], atol=1e-9)
+        assert np.allclose(_model_centres(ch), model, atol=1e-9)
+        assert not list((ch.data_dir / "sfm").glob("model.*"))
+        assert ch.meta["sfm"].get("optimize") == previous  # no report of the run that stopped
+        assert ch.meta["sfm"]["reprojection_error"] == pytest.approx(error)
 
 
 def test_a_copy_that_cannot_be_made_leaves_nothing(tmp_path, monkeypatch):
@@ -595,3 +625,29 @@ def test_our_engine_holds_the_focal_length_under_auto(tmp_path, monkeypatch):
     rep = ch.meta["sfm"]["optimize"]
     assert rep["gnss"]["mode"] == "off" and rep["gnss"]["photos"] == 0 and rep["focal_held"] is False
     assert seen[-1].gnss == [] and len(seen[-1].gcps) == 5
+
+
+def test_the_report_names_the_rows_of_the_optimisation(tmp_path, monkeypatch):
+    """The PDF and the tables print the optimisation's parameters with their names in both languages - the focal
+    length held, an optimisation undone - and, for one undone, the alignment kept rather than the run undone."""
+    from pyarchinit_photogrammetry.io import report_content as rc
+
+    def rows(ch, language):
+        w = rc.Words(language)
+        return [(label, value) for step, label, value in rc.parameter_rows(ch, w) if step == w("step_optimize")]
+
+    doc, ch = _rtk_block(tmp_path)
+    ch.optimize_cameras()
+    english = rows(ch, "en")
+    assert ("Focal length of the alignment held", "yes") in english
+    assert ("Undone by the safety net", "no") in english
+    assert all(label in {t[1] for t in rc.TEXT.values()} for label, _value in english), english  # no raw key
+    italian = rows(ch, "it")
+    assert ("Focale dell'allineamento tenuta", "si") in italian and ("Annullata dalla rete di sicurezza", "no") in italian
+
+    kept = _mean_reprojection_error(ch)
+    monkeypatch.setattr(pycolmap, "bundle_adjustment", lambda rec, *args, **kwargs: _dome(rec))
+    ch.optimize_cameras(gnss="off")
+    english = rows(ch, "en")
+    assert [label for label, _value in english] == ["Reprojection error (px)", "Undone by the safety net"]
+    assert english[1][1] == "yes" and float(english[0][1]) == pytest.approx(kept, abs=1e-3)

@@ -4128,8 +4128,8 @@ class MainWindow(QMainWindow):
                               "{1}). O l'ottimizzazione piegava il blocco, o le posizioni GNSS non concordano con i "
                               "punti di controllo. E' stato rimesso l'allineamento di prima. Per tenere "
                               "un'ottimizzazione che allontana le camere dalle loro posizioni, togli la spunta alle "
-                              "camere nel pannello Riferimenti (tasto destro: Non usare i riferimenti delle camere) e "
-                              "ripetila.", _length(offsets["after"]), _length(offsets["before"])))
+                              "camere nel pannello Riferimenti (tasto destro: Non usare i riferimenti di tutte le "
+                              "camere) e ripetila.", _length(offsets["after"]), _length(offsets["before"])))
                 return
             text = tr("Errore di riproiezione {0:.3f} px", err)
             b, a = rep.get("before", {}), rep.get("after", {})

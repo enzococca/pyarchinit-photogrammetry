@@ -492,7 +492,8 @@ georeferenziazione; ogni posizione meno il bias del suo volo dopo la nostra comp
 punti di controllo (per tenerla, disattivare i riferimenti delle camere). Si rimette l'allineamento di
 prima, modello su disco compreso, e il resoconto descrive quello (`reprojection_error`, `reverted`,
 `camera_offsets`; l'ottimizzazione annullata in `undone`). L'allineamento torna anche quando
-l'ottimizzazione si ferma per un errore o viene annullata a mano.
+l'ottimizzazione si ferma per un errore o viene annullata a mano, con il resoconto dell'ottimizzazione di prima
+(nessuno quando non c'era).
 
 `engine="ppg"` usa invece la nostra compensazione (sotto), con `gnss="plain"` o `"bias"` (entrambe
 rifiniscono la focale; `"auto"` vale `"plain"` con la focale tenuta quando le posizioni possono tenere il

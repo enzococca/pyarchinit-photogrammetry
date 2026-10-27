@@ -2280,8 +2280,11 @@ def _flight_bias(chunk: Chunk) -> dict:
 def _keep_alignment(chunk: Chunk) -> dict | None:
     """What an optimisation changes, kept to put it back: a copy of the COLMAP model next to it (a copy that
     cannot be finished - a full disk - is removed and the error raised), the georeference, the marker positions,
-    the rolling-shutter velocities our adjustment writes into the cameras. None without a model (the optimisation
-    says so)."""
+    the rolling-shutter velocities our adjustment writes into the cameras, the report of the optimisation before
+    (``meta["sfm"]["optimize"]``, which the PDF and the tables print as the optimisation step). None without a
+    model (the optimisation says so)."""
+    import copy
+
     model = chunk.product_path("reconstruction")
     if model is None or not model.is_dir():
         return None
@@ -2296,12 +2299,14 @@ def _keep_alignment(chunk: Chunk) -> dict | None:
             "markers": {m.key: None if m.position is None else np.array(m.position, float) for m in chunk.markers},
             "rolling_shutter": {c.key: list(c.meta["rolling_shutter"]) for c in chunk.cameras
                                 if c.meta.get("rolling_shutter") is not None},
-            "restored": False}
+            "report": copy.deepcopy((chunk.meta.get("sfm") or {}).get("optimize")),
+            "had_report": "optimize" in (chunk.meta.get("sfm") or {}), "restored": False}
 
 
 def _put_back(chunk: Chunk, kept: dict) -> float:
     """The alignment kept by :func:`_keep_alignment` back in place: the model on disk, the cameras, the
-    calibration and the tie points from it, the georeference, the markers and the rolling-shutter velocities.
+    calibration and the tie points from it, the georeference, the markers, the rolling-shutter velocities and the
+    report of the optimisation before (none when there was none: a run that stopped leaves no report of its own).
     Returns its mean reprojection error."""
     model = chunk.product_path("reconstruction")
     bent = model.with_name(model.name + ".bent")
@@ -2327,7 +2332,12 @@ def _put_back(chunk: Chunk, kept: dict) -> float:
             c.meta.pop("rolling_shutter", None)
     rec.update_point_3d_errors()
     err = float(rec.compute_mean_reprojection_error())
-    chunk.meta.setdefault("sfm", {})["reprojection_error"] = err
+    sfm_meta = chunk.meta.setdefault("sfm", {})
+    sfm_meta["reprojection_error"] = err
+    if kept["had_report"]:
+        sfm_meta["optimize"] = kept["report"]
+    else:
+        sfm_meta.pop("optimize", None)
     kept["restored"] = True
     return err
 
@@ -2371,8 +2381,9 @@ def _undo_a_bend(chunk: Chunk, before: dict, kept: dict, err: float, progress: P
                 "before it is put back (to keep such an optimisation, switch off the camera references)", a, b)
     err = _put_back(chunk, kept)
     undone = {k: v for k, v in report.items() if k not in ("camera_offsets", "reverted")}
-    report.clear()  # what is left describes the alignment kept
-    report.update({"reprojection_error": err, "reverted": True, "camera_offsets": offsets, "undone": undone})
+    # the report of this run describes the alignment kept, the run undone under "undone"
+    chunk.meta["sfm"]["optimize"] = {"reprojection_error": err, "reverted": True, "camera_offsets": offsets,
+                                     "undone": undone}
     progress(1.0, f"The optimisation was undone: the cameras ended {a:.3f} m off their GNSS positions ({b:.3f} m "
                   "before); it bent the block or the positions disagree with the control points (switch off the "
                   "camera references to keep it)")
