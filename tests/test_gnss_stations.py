@@ -18,6 +18,7 @@ import socket
 import ssl
 import urllib.error
 import urllib.request
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -996,11 +997,15 @@ def _kraw_hour() -> tuple[list[str], list[list[str]]]:
     return header, epochs[:4]
 
 
-def _rinex_gz(first: datetime, last: datetime, skip=()) -> bytes:
-    """Gzipped RINEX with an epoch every 30 s from ``first`` up to ``last``, none in the ``skip`` spans (from, to)."""
+def _rinex_gz(first: datetime, last: datetime, skip=(), step: int = 30, header_first: datetime | None = None) -> bytes:
+    """Gzipped RINEX with an epoch every ``step`` s from ``first`` up to ``last``, none in the ``skip`` spans (from,
+    to). The header says that the first epoch is ``header_first`` when that is given: a header that lies."""
     header, template = _kraw_hour()
-    top = header[:-1] + [(f"{first.year:6d}{first.month:6d}{first.day:6d}{first.hour:6d}{first.minute:6d}"
-                          f"{first.second:13.7f}     GPS").ljust(60) + "TIME OF FIRST OBS", header[-1]]
+    said = header_first or first
+    interval = f"{step:10.3f}".ljust(60) + "INTERVAL"
+    top = [interval if line[60:].strip() == "INTERVAL" else line for line in header[:-1]] + [
+        (f"{said.year:6d}{said.month:6d}{said.day:6d}{said.hour:6d}{said.minute:6d}{said.second:13.7f}     GPS"
+         ).ljust(60) + "TIME OF FIRST OBS", header[-1]]
     body, when, n = [], first, 0
     while when < last:
         if not any(a <= when < b for a, b in skip):
@@ -1008,7 +1013,7 @@ def _rinex_gz(first: datetime, last: datetime, skip=()) -> bytes:
             record[0] = re.sub(r"^> \d{4} \d\d \d\d \d\d \d\d [ \d]\d\.\d{7}",
                                f"> {when:%Y %m %d %H %M} {when.second:02d}.0000000", record[0])
             body += record
-        when += timedelta(seconds=30)
+        when += timedelta(seconds=step)
         n += 1
     return gzip.compress(("\n".join(top + body) + "\n").encode())
 
@@ -1021,14 +1026,14 @@ def _put(tree: Path, relative: str, data: bytes = b"x") -> Path:
 
 
 def _quarters(tree: Path, sid: str, first: datetime, last: datetime, root: str = "EUREF/highrate", source: str = "R",
-              skip=()) -> None:
+              skip=(), step: int = 30) -> None:
     """The pieces of 15 minutes at 1 s of a station from ``first`` up to ``last``: BKG keeps a folder for each hour,
     named by a letter (a is the hour 0)."""
     when = first
     while when < last:
         name = f"{sid}_{source}_{when:%Y}{_doy(when)}{when:%H%M}_15M_01S_MO.crx.gz"
         _put(tree, f"{root}/{when:%Y}/{_doy(when)}/{chr(97 + when.hour)}/{name}",
-             _rinex_gz(when, when + timedelta(minutes=15), skip))
+             _rinex_gz(when, when + timedelta(minutes=15), skip, step))
         when += timedelta(minutes=15)
 
 
@@ -1043,10 +1048,11 @@ def _hours(tree: Path, sid: str, first: datetime, last: datetime, root: str = "E
 
 
 def _day(tree: Path, sid: str, day: datetime, first: datetime, last: datetime, root: str = "EUREF/obs",
-         source: str = "R") -> str:
-    """The file of a day at 30 s, which holds only the observations from ``first`` up to ``last``; its name."""
+         source: str = "R", skip=()) -> str:
+    """The file of a day at 30 s, which holds only the observations from ``first`` up to ``last`` (less the ``skip``
+    spans); its name."""
     name = f"{sid}_{source}_{day:%Y}{_doy(day)}0000_01D_30S_MO.crx.gz"
-    _put(tree, f"{root}/{day:%Y}/{_doy(day)}/{name}", _rinex_gz(first, last))
+    _put(tree, f"{root}/{day:%Y}/{_doy(day)}/{name}", _rinex_gz(first, last, skip))
     return name
 
 
@@ -1523,6 +1529,7 @@ def test_a_gap_in_the_base_during_the_flight_is_refused_but_not_one_in_the_margi
         stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), base)
     message = str(error.value)
     assert "10:23:30" in message and "10:27:00" in message and "flight" in message and "KRAW00POL" in message
+    assert "tried next" in message  # "auto" tried the 30 s files after the 1 s ones: there are none, and it says so
     assert not out.exists()  # the base of the last run is not left for something else to take
 
     # a base that begins after the flight does: the same refusal
@@ -1540,8 +1547,9 @@ def test_pieces_that_cannot_be_joined_are_refused_naming_the_station(trees, tmp_
     piece = trees.bkg / "EUREF/highrate/2026/299/k/KRAW00POL_R_20262991030_15M_01S_MO.crx.gz"
     piece.write_bytes(gzip.compress(gzip.decompress(piece.read_bytes()).replace(b"ASH701945C_M    SNOW",
                                                                                 b"TRM59800.00     NONE")))
-    with pytest.raises(ValueError, match="KRAW00POL: .*TRM59800.00"):
+    with pytest.raises(ValueError, match="KRAW00POL: .*TRM59800.00") as error:
         stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), tmp_path / "base")
+    assert "tried next" not in str(error.value)  # pieces that do not join are no hole: "auto" has no 30 s files to try
     assert not (tmp_path / "base").exists() or not list((tmp_path / "base").iterdir())
 
 
@@ -1599,6 +1607,190 @@ def test_download_reports_progress_and_can_be_cancelled(trees, tmp_path):
     with pytest.raises(Cancelled):
         stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), tmp_path / "other", progress=progress)
     assert not (tmp_path / "other").exists()
+
+
+# --- files that are no good, holes in the base, and the fall back to 30 s -------------------------------------------
+
+
+def _flip(data: bytes, at: int) -> bytes:
+    broken = bytearray(data)
+    broken[at] ^= 0xFF
+    return bytes(broken)
+
+
+_HTML = b"<html><body>Service temporarily unavailable</body></html>"
+
+
+def _zipped(data: bytes) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("piece.rnx", data)
+    return buffer.getvalue()
+
+
+# What an archive can give instead of a good file, made from a good one. Damage in the first bytes of a gzip file leaves
+# nothing to inflate for a look at its layers; an empty file, a page of HTML and a gzip file of something else are all
+# "files", and a file that is cut short has its fault in the last bytes.
+BAD_FILES = {
+    "flipped byte 12": lambda good: _flip(good, 12),
+    "flipped byte 30": lambda good: _flip(good, 30),
+    "flipped byte 200": lambda good: _flip(good, 200),
+    "flipped byte in the middle": lambda good: _flip(good, len(good) // 2),
+    "cut short": lambda good: good[:-40],
+    "empty": lambda good: b"",
+    "html": lambda good: _HTML,
+    "gzip of html": lambda good: gzip.compress(_HTML),
+    "gzip of navigation messages": lambda good: gzip.compress(NAV_A.read_bytes()),
+    "not gzip": lambda good: gzip.decompress(good),  # the text itself under the name of a gzip file
+    "zip": lambda good: _zipped(gzip.decompress(good)),  # RINEX that a reader could open, but not a gzip file
+}
+
+
+def _good_piece(source: str) -> bytes:
+    """An hour of KRAW00POL as gzip: RINEX as it is, or Hatanaka as BKG distributes it."""
+    return _rinex_gz(_t(26, 10), _t(26, 11)) if source == "plain" else gzip.compress(KRAW_HOUR.read_bytes())
+
+
+@pytest.mark.parametrize("source", ["plain", pytest.param("hatanaka", marks=needs_a_decoder)])
+@pytest.mark.parametrize("damage", list(BAD_FILES))
+def test_a_piece_that_is_no_good_is_fetched_again_once_and_never_kept(trees, tmp_path, monkeypatch, source, damage):
+    """Whatever the archive gives instead of a file of observations is fetched again once and then refused, naming
+    the file; it is never kept: when the archive is mended the next call fetches the good file, and a bad copy that is
+    in the cache is replaced."""
+    kraw = _made("KRAW00POL", "EPN")
+    good = _good_piece(source)
+    bad = BAD_FILES[damage](good)
+    archive = _put(trees.bkg, f"EUREF/nrt/299/10/{KRAW_NAME}", bad)
+    calls = _fetches(monkeypatch)
+    cache = download.gnss_dir() / "stations" / "KRAW00POL"
+    base = tmp_path / "base"
+
+    def ask():
+        return stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), base, rate="30s")
+
+    with pytest.raises(ValueError) as error:
+        ask()
+    assert KRAW_NAME in str(error.value) and "again" in str(error.value)
+    assert len(calls) == 2  # fetched, no good, fetched again, no good: refused
+    assert list(cache.iterdir()) == [] and not base.exists()
+    archive.write_bytes(good)  # the archive is mended: nothing was kept, the good file is fetched
+    out = ask()
+    assert len(calls) == 3 and _epochs(out) == 120
+    (cache / KRAW_NAME).write_bytes(bad)  # a bad copy in the cache (from before) is replaced, once
+    assert ask() == out and len(calls) == 4 and _epochs(out) == 120
+
+
+def test_the_epochs_decide_whether_a_base_covers_the_flight_not_its_header(trees, tmp_path):
+    """The header of the joined file is that of its first piece. One that says 10:00:00 over epochs that begin at 10:25
+    must not let a base through that is shorter than the flight."""
+    kraw = _made("KRAW00POL", "EPN")
+    _put(trees.bkg, f"EUREF/nrt/299/10/{KRAW_NAME}", _rinex_gz(_t(26, 10, 25), _t(26, 11), header_first=_t(26, 10)))
+    base = tmp_path / "base"
+    with pytest.raises(ValueError, match="do not cover the flight") as error:
+        stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), base, rate="30s")
+    assert "10:25:00" in str(error.value) and not list(base.glob("*.obs"))  # what the epochs say is what is told
+    # a flight inside the epochs is covered by the same file, whatever the header says
+    out = stations.download_observations(kraw, _t(26, 10, 30), _t(26, 10, 40), base, rate="30s")
+    assert rinex.header(out).first == _t(26, 10) and rinex.time_span(out)[0] == _t(26, 10, 25)  # the header does lie
+
+
+SHORT = (_t(26, 10, 20), _t(26, 10, 20, 40))  # a flight of 40 seconds
+
+
+def _one_second_base(trees, kraw, skip=(), thirty_seconds: bool = True, thirty_skip=()) -> None:
+    """With a margin of a minute (the test sets it) the flight SHORT needs one piece of 15 minutes at 1 s, the one of
+    10:15, and as the 30 s fall back the file of the day with the hour 10."""
+    _quarters(trees.bkg, kraw.id, _t(26, 10, 15), _t(26, 10, 30), skip=skip, step=1)
+    if thirty_seconds:
+        _day(trees.bkg, kraw.id, _t(26), _t(26, 10), _t(26, 11), skip=thirty_skip)
+
+
+@pytest.mark.parametrize("until, accepted", [(39, True), (40, False)])
+def test_in_a_one_second_base_a_hole_of_thirty_seconds_is_accepted_and_a_longer_one_is_not(
+        trees, tmp_path, monkeypatch, caplog, until, accepted):
+    """RTKLIB takes base observations up to 30 s old: a hole of 30 s in the base during the flight is accepted, with a
+    warning. One of 31 s sends "auto" to the 30 s files, which have no hole."""
+    monkeypatch.setattr(stations, "MARGIN", timedelta(minutes=1))
+    kraw = _made("KRAW00POL", "EPN")
+    # no epoch from 10:20:10 to 10:20:<until>: the epochs around the hole are at 10:20:09 and at 10:20:<until>
+    _one_second_base(trees, kraw, skip=[(_t(26, 10, 20, 10), _t(26, 10, 20, until))])
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        out = stations.download_observations(kraw, *SHORT, tmp_path / "base")
+    warned = " ".join(_warnings(caplog))
+    if accepted:
+        assert rinex.header(out).interval == 1.0 and _epochs(out) == 900 - (until - 10)
+        assert "10:20:09" in warned and "10:20:39" in warned and "30 s" in warned and "accepted" in warned
+    else:
+        assert rinex.header(out).interval == 30.0 and _epochs(out) == 120  # the file of the day
+        assert "10:20:09" in warned and "10:20:40" in warned and "trying the 30 s files" in warned
+
+
+def test_many_small_holes_in_a_one_second_base_are_one_warning(trees, tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(stations, "MARGIN", timedelta(minutes=1))
+    kraw = _made("KRAW00POL", "EPN")
+    _one_second_base(trees, kraw, skip=[(_t(26, 10, 20, second), _t(26, 10, 20, second + 3)) for second in (5, 15, 25)])
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        out = stations.download_observations(kraw, *SHORT, tmp_path / "base")
+    assert rinex.header(out).interval == 1.0 and _epochs(out) == 900 - 9  # three holes of 4 s between epochs
+    holes = [w for w in _warnings(caplog) if "hole" in w]
+    assert len(holes) == 1 and "3 holes" in holes[0] and "accepted" in holes[0]
+
+
+def test_a_long_hole_in_a_one_second_base_is_an_error_when_the_rate_was_asked_for(trees, tmp_path, monkeypatch):
+    monkeypatch.setattr(stations, "MARGIN", timedelta(minutes=1))
+    kraw = _made("KRAW00POL", "EPN")
+    _one_second_base(trees, kraw, skip=[(_t(26, 10, 20, 10), _t(26, 10, 20, 40))])
+    calls = _fetches(monkeypatch)
+    with pytest.raises(ValueError, match="10:20:09 to 10:20:40") as error:
+        stations.download_observations(kraw, *SHORT, tmp_path / "base", rate="1s")
+    assert "tried next" not in str(error.value) and len(calls) == 1  # no 30 s file was looked for, none was fetched
+    assert not (tmp_path / "base").exists() or not list((tmp_path / "base").glob("*.obs"))
+
+
+def test_auto_falls_back_to_thirty_seconds_when_the_one_second_base_ends_before_the_flight(
+        trees, tmp_path, monkeypatch):
+    monkeypatch.setattr(stations, "MARGIN", timedelta(minutes=1))
+    monkeypatch.setattr(download, "BLOCK", 1024)  # a download reports its progress many times, not once
+    kraw = _made("KRAW00POL", "EPN")
+    _one_second_base(trees, kraw, skip=[(_t(26, 10, 20, 30), _t(26, 10, 30))])  # no epoch after 10:20:29
+    seen: list[float] = []
+    out = stations.download_observations(kraw, *SHORT, tmp_path / "base", progress=lambda f, m: seen.append(f))
+    assert rinex.header(out).interval == 30.0 and _epochs(out) == 120
+    assert len(seen) > 20 and seen == sorted(seen) and seen[-1] == 1.0  # the bar does not go back for the 30 s files
+    with pytest.raises(ValueError, match="do not cover the flight") as error:  # with the rate asked for: refused
+        stations.download_observations(kraw, *SHORT, tmp_path / "other", rate="1s")
+    assert "10:20:29" in str(error.value)
+
+
+def test_when_the_fall_back_fails_too_both_reasons_are_given(trees, tmp_path, monkeypatch):
+    monkeypatch.setattr(stations, "MARGIN", timedelta(minutes=1))
+    kraw = _made("KRAW00POL", "EPN")
+    base = tmp_path / "base"
+    _one_second_base(trees, kraw, skip=[(_t(26, 10, 20, 10), _t(26, 10, 20, 45))], thirty_seconds=False)
+    with pytest.raises(ValueError) as error:  # there are no 30 s files at all
+        stations.download_observations(kraw, *SHORT, base)
+    message = str(error.value)
+    assert "10:20:09 to 10:20:45" in message  # why the base at 1 s was not taken
+    assert "tried next" in message  # and why the 30 s files were not taken either
+    assert "KRAW00POL_[RSU]_20262990000_01D_30S_MO.crx.gz is not in" in message
+    # the file of the day has a hole of its own in the flight
+    _day(trees.bkg, kraw.id, _t(26), _t(26, 10), _t(26, 11), skip=[(_t(26, 10, 19, 30), _t(26, 10, 21))])
+    download._LISTINGS.clear()
+    with pytest.raises(ValueError) as error:
+        stations.download_observations(kraw, *SHORT, base)
+    message = str(error.value)
+    assert "10:20:09 to 10:20:45" in message and "10:19:00 to 10:21:00" in message and "tried next" in message
+    assert not base.exists() or not list(base.glob("*.obs"))
+
+
+def test_auto_that_chose_thirty_seconds_has_nothing_to_fall_back_to(trees, tmp_path, monkeypatch):
+    kraw = _made("KRAW00POL", "EPN")
+    _put(trees.bkg, f"EUREF/nrt/299/10/{KRAW_NAME}",
+         _rinex_gz(_t(26, 10), _t(26, 11), skip=[(_t(26, 10, 24), _t(26, 10, 27))]))
+    calls = _fetches(monkeypatch)
+    with pytest.raises(ValueError, match="10:23:30 to 10:27:00") as error:
+        stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), tmp_path / "base")
+    assert "tried next" not in str(error.value) and len(calls) == 1
 
 
 # --- the navigation files -------------------------------------------------------------------------------------------
@@ -1707,6 +1899,42 @@ def test_a_damaged_navigation_file_is_downloaded_again_once(trees, tmp_path, mon
     assert not list((download.gnss_dir() / "navigation").glob("*.gz")) and not list((tmp_path / "nav").glob("*.rnx"))
     path.write_bytes(good)
     assert stations.download_navigation(_t(26, 10), _t(26, 11), tmp_path / "nav")[0].read_bytes() == NAV_A.read_bytes()
+
+
+NAV_BAD_FILES = {
+    "empty": lambda good: b"",
+    "gzip of nothing": lambda good: gzip.compress(b""),
+    "gzip of html": lambda good: gzip.compress(_HTML),
+    "html": lambda good: _HTML,
+    "flipped byte 12": lambda good: _flip(good, 12),
+    "cut short": lambda good: good[:-30],
+    "gzip of observations": lambda good: gzip.compress((RTKLIB / "07590920.05o").read_bytes()),
+}
+
+
+@pytest.mark.parametrize("damage", list(NAV_BAD_FILES))
+def test_a_navigation_file_that_is_no_good_is_fetched_again_once_and_never_kept(trees, tmp_path, monkeypatch, damage):
+    """A file that is empty, or of HTML, or of observations, is not navigation messages even if gzip can read it: it is
+    fetched again once and refused, naming the file; it does not stay in the folder or in what is kept for later."""
+    _brdc(trees, _t(26), BRDC00WRD_S=NAV_A)
+    archive = trees.bkg / "IGS/BRDC/2026/299/BRDC00WRD_S_20262990000_01D_MN.rnx.gz"
+    good = archive.read_bytes()
+    bad = NAV_BAD_FILES[damage](good)
+    archive.write_bytes(bad)
+    calls = _fetches(monkeypatch)
+    kept, folder = download.gnss_dir() / "navigation", tmp_path / "nav"
+
+    def ask():
+        return stations.download_navigation(_t(26, 10), _t(26, 11), folder)
+
+    with pytest.raises(ValueError, match="BRDC00WRD_S_20262990000_01D_MN.rnx.gz.*again"):
+        ask()
+    assert len(calls) == 2
+    assert not list(kept.glob("*.gz")) and not list(folder.glob("*.rnx"))  # nothing kept, nothing left
+    archive.write_bytes(good)  # the archive is mended
+    assert ask()[0].read_bytes() == NAV_A.read_bytes() and len(calls) == 3
+    (kept / archive.name).write_bytes(bad)  # a bad copy that was kept is replaced, once
+    assert ask()[0].read_bytes() == NAV_A.read_bytes() and len(calls) == 4
 
 
 def test_navigation_when_bkg_cannot_be_reached(trees, tmp_path, web, monkeypatch):

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import calendar
 import dataclasses
+import gzip
 import json
 import logging
 import math
@@ -30,6 +31,7 @@ import os
 import re
 import shutil
 import tempfile
+import zlib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -735,6 +737,9 @@ RING_PORT = 44324
 MARGIN = timedelta(minutes=10)  # the base is wanted this long before the flight and after it
 LATE = timedelta(hours=3)  # a file that is not there is "not published yet" until this long after it was due
 NAV_SETTLE = timedelta(hours=1)  # the navigation file of a day is final this long after the end of the day
+# A hole in the base during the flight is accepted up to this long: RTKLIB takes base observations up to pos2-maxage =
+# 30 s old, and interpolates between epochs (misc-timeinterp). A longer one is not.
+MAX_HOLE = timedelta(seconds=30)
 _BKG_DAILY = "BKG daily files are online about 30 minutes after midnight UTC"
 
 # The names of the files of observations (RINEX 3, "long" names): station, source (R receiver, S stream, U unknown),
@@ -742,6 +747,7 @@ _BKG_DAILY = "BKG daily files are online about 30 minutes after midnight UTC"
 # letters and digits (\d takes other digits too), and a name is taken only whole (``fullmatch``).
 _OBS_NAME = re.compile(r"(?P<id>[A-Z0-9]{9})_(?P<source>[RSU])_(?P<year>[0-9]{4})(?P<day>[0-9]{3})(?P<hour>[0-9]{2})"
                        r"(?P<minute>[0-9]{2})_(?P<period>[0-9]{2}[SMHD])_(?P<rate>[0-9]{2}[SMHD])_MO\.crx\.gz")
+_PIECE_LAYERS = (("gzip", "hatanaka"), ("gzip",))  # how the archives pack a file of observations
 _NAV_PRODUCT = "BRDC00WRD"  # the broadcast messages of all constellations, merged for the world
 _NAV_NAME = re.compile(rf"{_NAV_PRODUCT}_[RSU]_[0-9]{{11}}_01D_MN\.rnx(?:\.gz)?")
 _UNITS = {"S": 1, "M": 60, "H": 3600, "D": 86400}
@@ -871,6 +877,14 @@ def _gps_span(start: datetime, end: datetime) -> tuple[datetime, datetime]:
     if end < start:
         raise ValueError(f"the end of the flight ({end}) is before its start ({start})")
     return start, end
+
+
+def _rate(rate: str) -> str:
+    """``rate`` as ``"auto"``, ``"1s"`` or ``"30s"``: a ``ValueError`` for anything else."""
+    rate = str(rate).strip().lower()
+    if rate != "auto" and rate not in _RATES:
+        raise ValueError(f"the rate is \"1s\", \"30s\" or \"auto\", not {rate!r}")
+    return rate
 
 
 def _gps_now() -> datetime:
@@ -1029,9 +1043,7 @@ def observation_files(station: Station, start: datetime, end: datetime, rate: st
     reached (RING is on the port 44324, which some firewalls close)."""
     _checked(station)
     start, end = _gps_span(start, end)
-    rate = str(rate).strip().lower()
-    if rate != "auto" and rate not in _RATES:
-        raise ValueError(f"the rate is \"1s\", \"30s\" or \"auto\", not {rate!r}")
+    rate = _rate(rate)
     if not _archives(station):
         raise ValueError(f"{station.id} is in none of the networks ({', '.join(NETWORKS)}): there is no archive that "
                          "this program reads to ask for its observations")
@@ -1074,42 +1086,109 @@ def _fetch(url: str, path: Path, progress) -> None:
         raise ValueError(f"{path.name} could not be downloaded: {exc}{hint}") from exc
 
 
-def _downloaded(url: str, name: str, path: Path, decode: Callable[[Path], object], progress) -> None:
-    """``path`` holds the file at ``url`` and ``decode(path)`` works on it: the copy that is there, else fetched. A
-    file that does not decode (its integrity is that of the checksum of gzip and of the decoder) is removed and fetched
-    again, once; a second failure is a ``ValueError`` naming the file. A missing decoder is no damage: that error is
-    raised at once, the file is not fetched again."""
+def _downloaded(url: str, name: str, path: Path, check: Callable[[Path], object], progress) -> None:
+    """``path`` holds the file at ``url`` and ``check(path)`` accepts it: the copy that is there, else fetched. A file
+    that ``check`` refuses with a ``ValueError`` - damaged, cut short, empty, of something else - is removed and
+    fetched again, once; a second refusal is a ``ValueError`` naming the file. The check is the only judge of a file:
+    whatever it accepts is kept for later calls. A missing decoder is no damage: that error is raised at once, the
+    file is not fetched again."""
     problem: ValueError | None = None
     for _attempt in range(2):
         progress.check()
         if not path.exists():
             _fetch(url, path, progress)
         try:
-            decode(path)
+            check(path)
             return
         except ValueError as exc:
             if _native.CRINEX_MISSING in str(exc):
                 raise
             problem = exc
             path.unlink(missing_ok=True)
-    raise ValueError(f"{name} ({url}) does not decode, not even when downloaded again: {problem}") from problem
+    raise ValueError(f"{name} ({url}) is no good, not even when downloaded again: {problem}") from problem
 
 
-def _uncovered(station: Station, info: rinex.RinexInfo, gaps: list[tuple[datetime, datetime]], start: datetime,
-               end: datetime) -> str | None:
-    """Why a base does not cover the flight, or None: a hole between two of its epochs during the flight, or a first
-    epoch after the start or a last one before the end. Holes in the margins do not matter."""
+def _inflate(path: Path) -> None:
+    """Read the gzip file ``path`` to its end, where its checksum is: a ``ValueError`` naming it if it is cut short or
+    damaged anywhere."""
+    try:
+        with gzip.open(path, "rb") as stream:
+            while stream.read(1 << 20):
+                pass
+    except (EOFError, gzip.BadGzipFile, zlib.error) as exc:
+        raise ValueError(f"{path.name} is cut short or damaged ({exc})") from None
+
+
+def _check_piece(path: Path) -> None:
+    """Whether ``path`` is a file of observations as the archives give it: gzip around RINEX, Hatanaka compressed or
+    not; a ``ValueError`` naming it if it is not, whatever is wrong: empty, a page of HTML, a gzip file of something
+    else, cut short or damaged anywhere. Damage in the first bytes of a gzip file leaves nothing to look at, so its
+    layers cannot be told and :func:`rinex.plain` does not read it: a gzip file around text is read to its checksum
+    here, and what is in the file is asked of its header."""
+    layers = rinex.compression(path)
+    if layers not in _PIECE_LAYERS:
+        what = "empty" if path.stat().st_size == 0 else ("packed in " + " and ".join(layers) if layers else "not gzip")
+        raise ValueError(f"{path.name} is not a gzip file of RINEX observations ({what})")
+    if rinex.plain(path) == path:  # gzip around text: nothing has read it yet
+        _inflate(path)
+    kind = rinex.header(path).kind
+    if kind != "obs":
+        raise ValueError(f"{path.name} holds {'navigation messages' if kind == 'nav' else kind}, not observations")
+
+
+class _NotCovered(ValueError):
+    """The base does not cover the flight; the message says how."""
+
+
+def _covered(station: Station, out: Path, gaps: list[tuple[datetime, datetime]], start: datetime,
+             end: datetime) -> tuple[datetime, datetime]:
+    """The first and last epoch of the base ``out`` if it covers the flight, else a :class:`_NotCovered`. They are read
+    from its epochs: a header says what it likes. It covers the flight if it has epochs from the start to the end and
+    no hole of more than :data:`MAX_HOLE` during it; ``gaps`` are the holes that :func:`rinex.join` found (for data at
+    1 s a step of more than 2 s). Holes up to :data:`MAX_HOLE` are accepted, and logged; holes in the margins do not
+    matter."""
     flight = f"{start:%Y-%m-%d %H:%M:%S} to {end:%H:%M:%S}" if start.date() == end.date() else f"{start} to {end}"
     inside = [(a, b) for a, b in gaps if a < end and b > start]
-    if inside:
-        a, b = inside[0]
-        more = f" (and {len(inside) - 1} more)" if len(inside) > 1 else ""
-        return (f"{station.id}: the observations have no epoch from {a:%Y-%m-%d %H:%M:%S} to {b:%H:%M:%S} (GPS time) "
-                f"during the flight, {flight}{more}: use the other rate, or another station")
-    if info.first is None or info.last is None or info.first > start or info.last < end:
-        return (f"{station.id}: the observations run from {info.first} to {info.last} (GPS time) and do not cover the "
-                f"flight, {flight}")
-    return None
+    long = [(a, b) for a, b in inside if b - a > MAX_HOLE]
+    if long:
+        a, b = long[0]
+        more = f" (and {len(long) - 1} more)" if len(long) > 1 else ""
+        raise _NotCovered(f"{station.id}: the observations have no epoch from {a:%Y-%m-%d %H:%M:%S} to {b:%H:%M:%S} "
+                          f"(GPS time) during the flight, {flight}{more}: a hole of more than {MAX_HOLE.seconds} s is "
+                          "not accepted")
+    span = rinex.time_span(out)
+    if span is None or span[0] > start or span[1] < end:
+        got = "no epoch" if span is None else f"run from {span[0]} to {span[1]}"
+        raise _NotCovered(f"{station.id}: the observations {got} (GPS time) and do not cover the flight, {flight}")
+    if inside:  # one warning, however many: a receiver that drops a few epochs does it again and again
+        a, b = max(inside, key=lambda hole: hole[1] - hole[0])
+        what = f"{len(inside)} holes during the flight, the longest" if len(inside) > 1 else "a hole during the flight"
+        log.warning("%s: the base has %s, from %s to %s (GPS time), %d s: accepted, RTKLIB takes base data up to "
+                    "%d s old", station.id, what, f"{a:%Y-%m-%d %H:%M:%S}", f"{b:%H:%M:%S}", (b - a).total_seconds(),
+                    MAX_HOLE.seconds)
+    return span
+
+
+def _joined(station: Station, files: list[RemoteFile], start: datetime, end: datetime, folder: Path,
+            progress) -> tuple[Path, tuple[datetime, datetime]]:
+    """The ``files`` fetched, checked and joined into the file of the flight in ``folder``, and its first and last
+    epoch. A :class:`_NotCovered`, and no file, when the base does not cover the flight."""
+    cache = _stations_dir() / station.id
+    owner = f"the station {station.id}"
+    paths = [_inside(cache, remote.name, _OBS_NAME, owner) for remote in files]  # all names, before any fetch
+    for n, (remote, path) in enumerate(zip(files, paths)):
+        _downloaded(remote.url, remote.name, path, _check_piece, progress.sub(0.9 * n / len(files), 0.9 / len(files)))
+    out = folder / f"{station.id}_{start:%Y%m%d-%H%M}_{end:%H%M}.obs"
+    progress(0.9, f"Joining the {len(paths)} files of {station.id}")
+    try:
+        _info, gaps = rinex.join(paths, out)
+    except ValueError as exc:
+        raise ValueError(f"{station.id}: the files cannot be joined: {exc}") from exc
+    try:
+        return out, _covered(station, out, gaps, start, end)
+    except _NotCovered:
+        out.unlink(missing_ok=True)
+        raise
 
 
 def download_observations(station: Station, start: datetime, end: datetime, folder: str | Path, progress=None,
@@ -1120,30 +1199,32 @@ def download_observations(station: Station, start: datetime, end: datetime, fold
     GNSS folder, where they stay as the archive names them and a second call finds them; they are decoded (Hatanaka,
     gzip) and joined (:func:`rinex.join`).
 
-    A file that does not decode is fetched again once, then refused naming it. The base has to cover the flight: a hole
-    in its epochs during the flight, or epochs that begin after its start or end before its end, are a ``ValueError``
-    and no file is left; holes in the margins are not. A file that is not there, a site that cannot be reached (the
-    message of RING names its port, 44324) and files that do not join are a ``ValueError`` too."""
+    A file that is no good - damaged or cut short anywhere, empty, a page of HTML, not observations - is fetched again
+    once, then refused naming it, and is never kept. The base has to cover the flight, by its epochs: epochs from the
+    start to the end, and no hole of more than :data:`MAX_HOLE` (30 s) during the flight - a hole of up to that is
+    accepted, with a warning in the log, and holes in the margins do not matter. With ``rate="auto"`` a base at 1 s that
+    does not cover the flight is given up for the 30 s files, and the error, if those fail too, has both reasons; with
+    a rate asked for it is an error. A file that is not there, a site that cannot be reached (the message of RING names
+    its port, 44324) and files that do not join are a ``ValueError`` too, and no file is left."""
     progress = as_progress(progress)
     _checked(station)
-    files = observation_files(station, start, end, rate)
     start, end = _gps_span(start, end)
-    cache = _stations_dir() / station.id
-    owner = f"the station {station.id}"
-    paths = [_inside(cache, remote.name, _OBS_NAME, owner) for remote in files]  # all names, before any fetch
-    for n, (remote, path) in enumerate(zip(files, paths)):
-        _downloaded(remote.url, remote.name, path, rinex.plain, progress.sub(0.9 * n / len(files), 0.9 / len(files)))
-    out = Path(folder) / f"{station.id}_{start:%Y%m%d-%H%M}_{end:%H%M}.obs"
-    progress(0.9, f"Joining the {len(paths)} files of {station.id}")
+    rate = _rate(rate)
+    files = observation_files(station, start, end, rate)
+    folder = Path(folder)
+    fine = rate == "auto" and files[0].interval == 1.0  # a base at 1 s may be given up for the files at 30 s
     try:
-        info, gaps = rinex.join(paths, out)
-    except ValueError as exc:
-        raise ValueError(f"{station.id}: the files cannot be joined: {exc}") from exc
-    problem = _uncovered(station, info, gaps, start, end)
-    if problem:
-        out.unlink(missing_ok=True)
-        raise ValueError(problem)
-    progress(1.0, f"{station.id}: observations from {info.first:%Y-%m-%d %H:%M:%S} to {info.last:%H:%M:%S} (GPS time)")
+        out, span = _joined(station, files, start, end, folder, progress.sub(0.0, 0.7) if fine else progress)
+    except _NotCovered as hole:
+        if not fine:
+            raise
+        log.warning("%s; trying the 30 s files", hole)  # the message starts with the station
+        try:
+            out, span = _joined(station, observation_files(station, start, end, "30s"), start, end, folder,
+                                progress.sub(0.7, 0.3))
+        except ValueError as other:
+            raise ValueError(f"{hole}\nThe 30 s files, tried next, do not do either: {other}") from other
+    progress(1.0, f"{station.id}: observations from {span[0]:%Y-%m-%d %H:%M:%S} to {span[1]:%H:%M:%S} (GPS time)")
     return out
 
 
@@ -1170,6 +1251,21 @@ def _navigation_name(day: date) -> tuple[str, str]:
     raise ValueError(text)
 
 
+def _unpack_navigation(packed: Path, plain: Path, name: str) -> None:
+    """``packed``, a gzip file of navigation messages, decompressed into ``plain``. A ``ValueError`` naming ``name``,
+    and no ``plain``, if it is cut short or damaged or is not navigation messages: gzip reads an empty file, and a
+    gzip file of HTML or of observations, without a word."""
+    rinex.gunzip(packed, plain, name)
+    try:
+        kind = rinex.header(plain).kind
+    except ValueError as exc:
+        plain.unlink(missing_ok=True)
+        raise ValueError(f"{name} is not a file of navigation messages ({exc})") from None
+    if kind != "nav":
+        plain.unlink(missing_ok=True)
+        raise ValueError(f"{name} holds {'observations' if kind == 'obs' else kind}, not navigation messages")
+
+
 def _navigation_file(day: date, name: str, url: str, folder: Path, progress) -> Path:
     """The navigation file of ``day`` decompressed into ``folder``. When the day is over it is kept (``navigation`` in
     the GNSS folder) and used again. BKG writes the file of the day all day long, so until an hour after the end of the
@@ -1180,7 +1276,7 @@ def _navigation_file(day: date, name: str, url: str, folder: Path, progress) -> 
     plain = _inside(folder, name[:-3], _NAV_NAME, "the navigation files")
     with tempfile.TemporaryDirectory(prefix=".nav-", dir=kept) as scratch:
         packed = _inside(kept if final else Path(scratch), name, _NAV_NAME, "the navigation files")
-        _downloaded(url, name, packed, lambda path: rinex.gunzip(path, plain, name), progress)
+        _downloaded(url, name, packed, lambda path: _unpack_navigation(path, plain, name), progress)
     return plain
 
 
@@ -1189,7 +1285,8 @@ def download_navigation(start: datetime, end: datetime, folder: str | Path, prog
     of each day the file ``BRDC00WRD_<S|R|U>_<yyyy><ddd>0000_01D_MN.rnx.gz`` of BKG's ``IGS/BRDC/<yyyy>/<ddd>/``,
     decompressed into ``folder`` without its ``.gz``, in the order of the days (a flight over midnight takes two). All
     the days are looked up in the archive before any is fetched; a day that is not there is a ``ValueError`` that names
-    the file and says when it comes if the day is recent. A file that does not decode is fetched again once."""
+    the file and says when it comes if the day is recent. A file that is no good - damaged, empty, a page of HTML, not
+    navigation messages - is fetched again once, then refused, and is never kept."""
     progress = as_progress(progress)
     start, end = _gps_span(start, end)
     folder = Path(folder)
