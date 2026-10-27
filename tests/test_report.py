@@ -364,6 +364,276 @@ def test_pdf_without_a_unicode_font(tmp_path, monkeypatch):
     assert {"Termico", "Punti di misura"} <= set(outline(data))
 
 
+# ---------------------------------------------------------------------------------------- GNSS
+DATA = Path(__file__).parent / "data"
+ATX_EXCERPT = DATA / "gnss" / "igs20_excerpt.atx"  # TRM29659.00 NONE (synthetic), LEIAR25.R3 NONE and LEIT, ...
+RINEX_BASE = DATA / "rtklib" / "07590920.05o"  # a RINEX header with the antenna TRM29659.00 (RTKLIB's sample data)
+PLACE = (42.5, 12.5, 300.0)  # a made-up place: latitude, longitude (degrees), height above the ellipsoid (m)
+EPOCH = 2026.82
+EPN_CITATION = ("EUREF Permanent GNSS Network (EPN), multi-year position and velocity solution C2400 in IGS20, EPN "
+                "Central Bureau, Royal Observatory of Belgium, doi:10.24414/ROB-EUREF-C2400, CC BY 4.0")
+RING_CITATION = ("INGV RING, GipsyX daily solutions in IGS20 (https://doi.org/10.13127/gnss/gipos), CC BY 4.0: a "
+                 "straight line through two years of daily positions")
+
+
+def _station(networks=("EPN",), station_id="PROV00ITA", name="Stazione di prova"):
+    from pyarchinit_photogrammetry.gnss import rinex, stations
+
+    lat, lon, h = PLACE
+    return stations.Station(station_id, name, tuple(networks), lat, lon, h, tuple(rinex.llh_to_ecef(PLACE)))
+
+
+def _station_position(monkeypatch, station, source="EPN", citation=EPN_CITATION, sigma=(0.0011, 0.0009, 0.0021)):
+    """The position of ``station`` as the base of a flight, as gnss.base records it: its coordinates in ITRF2020 at
+    EPOCH from ``source`` with its ``citation``, given instead of downloaded."""
+    from pyarchinit_photogrammetry.gnss import base, stations
+
+    def coordinates(st, epoch, progress=None):
+        return stations.StationCoordinates(st, st.xyz, (st.lat, st.lon, st.h), "ITRF2020", epoch, source, sigma,
+                                           citation)
+
+    monkeypatch.setattr(stations, "coordinates", coordinates)
+    return base._station_position(station, EPOCH, None)
+
+
+def _base_record(position, atx_file, name, antenna=None) -> dict:
+    """``Solution.base`` as ppk.solve makes it: the base at ``position`` with the antenna of a RINEX header (or
+    ``antenna``) and what the antenna file ``atx_file`` gives it (None: no file given to RTKLIB)."""
+    from pyarchinit_photogrammetry.gnss import ppk, rinex
+
+    record, _warning, _llh = ppk._base(RINEX_BASE, rinex.header(RINEX_BASE), position)
+    record["name"] = name
+    if antenna is not None:
+        record["antenna"] = antenna
+    record["antenna_calibration"] = None if atx_file is None else ppk.antenna_calibration(atx_file, record["antenna"])
+    return record
+
+
+def _ppk_photos(ch, record: dict, solution: str, first: int, count: int, when: str, states=("fix",)) -> None:
+    """``count`` photos taken a second apart from ``when`` with the PPK positions apply_ppk gives them against the base
+    ``record`` (the states of ``states`` in turn), 1.2 km north of the base."""
+    import copy
+    from datetime import datetime, timedelta
+
+    from pyarchinit_photogrammetry.core.camera import Camera
+    from pyarchinit_photogrammetry.gnss import apply, frames
+
+    lon0, lat0, h0 = record["position"]
+    frame = record.get("frame") or frames.UNKNOWN
+    for i in range(count):
+        taken = datetime.strptime(when, "%Y:%m:%d %H:%M:%S") + timedelta(seconds=i)
+        cam = Camera(first + i, f"DJI_{first + i:04d}", f"DJI_{first + i:04d}.JPG", 0,
+                     meta={"datetime": f"{taken:%Y:%m:%d %H:%M:%S}"})
+        state = states[i % len(states)]
+        lon, lat, h = lon0 + 0.0001 * i, lat0 + 0.0108, h0 + 60.0
+        extra = {"mrk": "VOLO_Timestamp.MRK", "shot": i + 1, "utc": taken.isoformat(), "lever_arm_ned_mm": [0, 0, 120],
+                 "antenna": [lon, lat, h + 0.12], "q": {"fix": 1, "float": 2}.get(state, 5),
+                 "base": copy.deepcopy(record), "rover": "VOLO_Rinex.obs", "solution": solution}
+        apply.set_camera_position(cam, [lon, lat, h], frames.crs_of(frame), apply.accuracy(state, [0.008, 0.009, 0.015]),
+                                  "ppk", status=state, height="ellipsoidal", extra=extra, frame=frame,
+                                  epoch=record["epoch"] if frame in frames.DYNAMIC else frames.decimal_year(taken))
+        ch.cameras.append(cam)
+
+
+def _exif_photos(ch, first: int, count: int, when: str) -> None:
+    """``count`` photos with the GPS of their EXIF, as Chunk.add_photos gives it (no RTK data)."""
+    from pyarchinit_photogrammetry.core.camera import Camera
+    from pyarchinit_photogrammetry.gnss import apply
+
+    lat, lon, h = PLACE
+    for i in range(count):
+        cam = Camera(first + i, f"IMG_{first + i:04d}", f"IMG_{first + i:04d}.JPG", 0, meta={"datetime": when})
+        apply.set_camera_position(cam, [lon + 0.001 * i, lat + 0.011, h + 15.0], "EPSG:4326", list(apply.NO_RTK), "exif")
+        ch.cameras.append(cam)
+
+
+def gnss_project(tmp_path, monkeypatch):
+    """A chunk whose first flight has six photos placed by PPK against a permanent station of the EPN as the base (five
+    fix, one float; the station's coordinates in ITRF2020 at the epoch of the flight, its antenna calibrated by an
+    excerpt of igs20.atx), and a second flight, an hour later, two photos with the GPS of their EXIF; the system of the
+    chunk has heights above the geoid EGM2008."""
+    import shutil
+
+    from pyarchinit_photogrammetry.core.camera import Sensor
+
+    doc = ppg.Document()
+    ch = doc.add_chunk("Volo RTK")
+    doc.save(tmp_path / "rilievo.ppg")
+    ch.sensors[0] = Sensor(0, "FC6310R", 5472, 3648)
+    atx_file = Path(shutil.copyfile(ATX_EXCERPT, tmp_path / "igs20.atx"))
+    station = _station()
+    record = _base_record(_station_position(monkeypatch, station), atx_file, station.id)
+    _ppk_photos(ch, record, "solution-20261027-101500.pos", 0, 6, "2026:10:27 10:15:00", ("fix",) * 5 + ("float",))
+    _exif_photos(ch, 6, 2, "2026:10:27 11:30:00")
+    ch.crs = "EPSG:7792+3855"
+    doc.save()
+    return doc, ch
+
+
+def _gnss_parts(report) -> tuple[rc.Section, dict]:
+    """The GNSS part of the first chunk of ``report`` and its parts by title."""
+    sec = next(s for s in report.sections[0].blocks
+               if isinstance(s, rc.Section) and s.title in ("GNSS positions", "Posizioni GNSS"))
+    return sec, {s.title: s for s in rc.walk([sec]) if s is not sec}
+
+
+def _rows(section: rc.Section) -> dict:
+    return dict(next(b for b in section.blocks if isinstance(b, rc.KeyValues)).rows)
+
+
+def test_report_gnss_section(tmp_path, monkeypatch):
+    """The GNSS part of the report of a chunk whose photos have PPK positions against a permanent station of the EPN:
+    where the positions come from, their frames and epochs, the quality of every flight; the base of the PPK with its
+    station, where the station's coordinates come from and what their sigma is, its frame and epoch, the calibration of
+    its antenna named by its entry in igs20.atx (never as a number of centimetres: the L1 offset is not what moves the
+    heights); the system of the chunk with the grid of its geoid and its SHA-256, the Helmert that takes ITRF2020 there;
+    the credits of the station's coordinates with the DOI of the EPN; English and Italian, and in the PDF."""
+    from pyarchinit_photogrammetry.gnss import heights
+
+    doc, ch = gnss_project(tmp_path, monkeypatch)
+    english = rc.collect(ch, language="en")
+    assert "GNSS positions" in _titles(english)[1]
+    assert not any("could not be read" in n for n in _notes(english)), _notes(english)
+    sec, parts = _gnss_parts(english)
+    rows = _rows(sec)
+    assert rows["Photos with a position"] == "8 of 8"
+    assert rows["Where the positions come from"] == "PPK: 6; EXIF GPS: 2"
+    assert rows["Frame of the positions"] == "ITRF2020 at the epoch 2026.82: 6; unknown (WGS 84): 2"
+    assert rows["System of the chunk"].startswith("EPSG:7792+3855 - ")
+    assert rows["Heights of the chunk"] == "above the geoid (EGM2008 height)"
+    assert heights.GEOID_GRID in rows["Geoid grid"] and heights.GEOID_SHA256 in rows["Geoid grid"]
+    assert "ITRF2020 to ETRF2000 (1) (EPSG:10586)" in rows["Conversion of the positions"]
+    flights = next(b for b in parts["Quality per flight"].blocks if isinstance(b, rc.Table))
+    assert flights.headers[:7] == ["Flight", "Photos", "Fix", "Float", "Single", "No RTK", "No position"]
+    assert [r[:7] for r in flights.rows] == [["1", "6", "5", "1", "0", "0", "0"], ["2", "2", "0", "0", "0", "2", "0"]]
+    assert flights.rows[0][7] == "1.6 / 1.8 / 3.0 cm" and flights.rows[1][7] == "5.00 / 5.00 / 10.00 m"
+    run = _rows(parts["PPK against the base PROV00ITA"])
+    assert run["Solution"] == "solution-20261027-101500.pos" and run["Photos"] == "6 (fix 5, float 1)"
+    assert run["Position of the base"] == "a permanent station as the base"
+    assert run["Permanent station"] == "PROV00ITA - Stazione di prova (EPN)"
+    assert run["Coordinates of the station"] == "EPN, ITRF2020 at the epoch 2026.82"
+    assert run["Standard deviations of the station (E / N / U)"].endswith(" mm, formal error of the solution")
+    assert run["Frame and epoch of the base"] == "ITRF2020 at the epoch 2026.82"
+    assert run["Calibration of the base antenna"] == "calibrated with TRM29659.00 NONE of igs20.atx"
+    assert not any("0.100" in v or "100.0 mm" in v or "10.0 cm" in v for v in run.values())  # never the L1 offset
+    assert run["Distance from the flight (median)"] == "1.20 km"
+    credits = _rows(parts["Credits"])
+    assert credits["Coordinates of the station PROV00ITA"] == EPN_CITATION
+    assert credits["Observations of the station PROV00ITA"] == "EUREF Permanent GNSS Network (EPN), CC BY 4.0"
+    assert "igs20.atx" in credits["Antenna calibrations"] and "EGM2008" in credits["Geoid"]
+    italian = rc.collect(doc, language="it")
+    sec, parts = _gnss_parts(italian)
+    rows = _rows(sec)
+    assert rows["Foto con una posizione"] == "8 di 8"
+    assert rows["Sistema delle posizioni"] == "ITRF2020 all'epoca 2026,82: 6; sconosciuto (WGS 84): 2"
+    assert heights.GEOID_SHA256 in rows["Griglia del geoide"]
+    run = _rows(parts["PPK rispetto alla base PROV00ITA"])
+    assert run["Stazione permanente"] == "PROV00ITA - Stazione di prova (EPN)"
+    assert run["Coordinate della stazione"] == "EPN, ITRF2020 all'epoca 2026,82"
+    assert run["Deviazioni standard della stazione (E / N / U)"].endswith(" mm, errore formale della soluzione")
+    assert run["Sistema ed epoca della base"] == "ITRF2020 all'epoca 2026,82"
+    assert run["Calibrazione dell'antenna della base"] == "calibrata con TRM29659.00 NONE di igs20.atx"
+    assert _rows(parts["Crediti"])["Coordinate della stazione PROV00ITA"] == EPN_CITATION
+    data = generate_pdf_report(doc, tmp_path / "rapporto.pdf", language="it").read_bytes()
+    assert {"Posizioni GNSS", "Qualita' per volo", "PPK rispetto alla base PROV00ITA", "Crediti"} <= set(outline(data))
+    text = pdf_text(data)
+    for t in ("PROV00ITA - Stazione di prova (EPN)", "ITRF2020", "2026,82", "igs20.atx", "doi:10.24414/ROB-EUREF-C2400",
+              heights.GEOID_GRID):
+        assert t in text, t
+    page = ch.generate_report(tmp_path / "gnss.html", language="en").read_text(encoding="utf-8")
+    assert "GNSS positions" in page and "PPK against the base PROV00ITA" in page and "ROB-EUREF-C2400" in page
+
+
+def test_report_gnss_bases_placed_in_other_ways(tmp_path, monkeypatch):
+    """Three PPK runs in one chunk, each with its base: one placed by a static baseline from a station of RING (whose
+    sigma is the scatter of its daily positions), one by a static PPP (its products named and their centre credited;
+    its antenna not in the antenna file: not calibrated), one at the position of its RINEX header with no antenna
+    calibrations given; the system of the chunk with heights above a geoid of the user's own (ITALGEO2005), whose grid
+    is named."""
+    import shutil
+
+    from pyarchinit_photogrammetry.core.camera import Sensor
+    from pyarchinit_photogrammetry.gnss import ppk, ppp
+
+    doc = ppg.Document()
+    ch = doc.add_chunk("Tre voli")
+    doc.save(tmp_path / "voli.ppg")
+    ch.sensors[0] = Sensor(0, "FC6310R", 5472, 3648)
+    atx_file = Path(shutil.copyfile(ATX_EXCERPT, tmp_path / "igs20.atx"))
+    ring = _station(("RING",), "PROV01ITA", "Stazione RING di prova")
+    sp = _station_position(monkeypatch, ring, "RING", RING_CITATION, (0.0015, 0.0012, 0.0040))
+    lat, lon, h = sp.lat + 0.03, sp.lon + 0.02, sp.h - 20.0
+    detail = {"station": ring.id, "name": ring.name, "networks": list(ring.networks),
+              "station_position": {"lat": sp.lat, "lon": sp.lon, "h": sp.h, "source": sp.source, "frame": sp.frame,
+                                   "epoch": sp.epoch, "sd": list(sp.sd), "detail": sp.detail},
+              "citation": sp.detail.get("citation"), "base": "BASE1", "antenna": "LEIAR25.R3 LEIT",
+              "antenna_delta_hen": [1.5, 0.0, 0.0], "antenna_calibration": ppk.antenna_calibration(atx_file, "LEIAR25.R3 LEIT"),
+              "baseline_km": 4.2, "q": 1, "status": "fix", "hours": 2.0, "solution": "solution-20261027-070000.pos"}
+    by_baseline = ppk.BasePosition(lat, lon, h, "baseline", frame=sp.frame, epoch=sp.epoch, sd=(0.004, 0.005, 0.011),
+                                   detail=detail)
+    _ppk_photos(ch, _base_record(by_baseline, atx_file, "BASE1", "LEIAR25.R3 LEIT"), "solution-20261027-101500.pos", 0,
+                3, "2026:10:27 10:15:00")
+    products = ppp.Products([tmp_path / "ESA0OPSFIN_20263000000_01D_05M_ORB.SP3.gz"],
+                            [tmp_path / "ESA0OPSFIN_20263000000_01D_30S_CLK.CLK.gz"],
+                            [tmp_path / "ESA0OPSFIN_20263000000_01D_01D_ERP.ERP.gz"], "ESA", "final")
+    detail = {"base": "BASE2", "centre": "ESA", "kind": "final",
+              "products": [p.name for p in (*products.sp3, *products.clk, *products.erp)],
+              "citation": ppp._citation(products, atx_file), "hours": 4.0,
+              "session": ["2026-10-27T06:00:00", "2026-10-27T10:00:00"], "antenna": "JAVRINGANT_DM NONE",
+              "antenna_delta_hen": [0.0, 0.0, 0.0], "antenna_calibration": None, "q": 6, "quality": "ppp",
+              "solution": "solution-20261027-100500.pos"}
+    by_ppp = ppk.BasePosition(lat + 0.05, lon, h, "ppp", frame="ITRF2020", epoch=EPOCH, sd=(0.03, 0.03, 0.06), detail=detail)
+    _ppk_photos(ch, _base_record(by_ppp, atx_file, "BASE2", "JAVRINGANT_DM NONE"), "solution-20261027-130000.pos", 3, 2,
+                "2026:10:27 13:00:00")
+    header = ppk.BasePosition(lat - 0.04, lon, h, "header")
+    _ppk_photos(ch, _base_record(header, None, "BASE3"), "solution-20261027-160000.pos", 5, 2, "2026:10:27 16:00:00")
+    ch.crs = "EPSG:7792+5214"  # RDN2008 / UTM 33N and the heights of Genova 1942: ITALGEO2005, a grid of the user's own
+    doc.save()
+    sec, parts = _gnss_parts(rc.collect(ch, language="en"))
+    rows = _rows(sec)
+    assert rows["Heights of the chunk"].startswith("above the geoid (") and "geo_igm_mar06.grd" in rows["Geoid grid"]
+    first = _rows(parts["PPK against the base BASE1"])
+    assert first["Position of the base"] == "computed by a static baseline from a permanent station"
+    assert first["Permanent station"] == "PROV01ITA - Stazione RING di prova (RING)"
+    assert first["Coordinates of the station"] == "RING, ITRF2020 at the epoch 2026.82"
+    assert first["Standard deviations of the station (E / N / U)"].endswith(" mm, scatter of the daily positions")
+    assert first["Static baseline"] == "4.200 km from the station, fix (Q=1), 2.00 hours observed together"
+    assert first["Standard deviations of the base (E / N / U)"] == "0.4 / 0.5 / 1.1 cm"
+    assert first["Antenna of the base"] == "LEIAR25.R3 LEIT, 0.000 m above the mark (RINEX header)"
+    assert first["Calibration of the base antenna"] == "calibrated with LEIAR25.R3 LEIT of igs20.atx"
+    second = _rows(parts["PPK against the base BASE2"])
+    assert second["Position of the base"] == "computed by static PPP on precise products"
+    assert second["Static PPP"] == "4.00 hours, final products of ESA"
+    assert second["Precise products"].startswith("ESA0OPSFIN_20263000000_01D_05M_ORB.SP3.gz, ")
+    assert second["Calibration of the base antenna"] == ("not calibrated: igs20.atx has no entry for the antenna "
+                                                          "JAVRINGANT_DM NONE")
+    third = _rows(parts["PPK against the base BASE3"])
+    assert third["Position of the base"].startswith("from the RINEX header of the base: it can be metres off")
+    assert third["Frame and epoch of the base"] == "unknown (WGS 84)"
+    assert third["Calibration of the base antenna"] == "not calibrated: RTKLIB was given no file of antenna calibrations"
+    credits = _rows(parts["Credits"])
+    assert credits["Coordinates of the station PROV01ITA"] == RING_CITATION
+    assert credits["Observations of the station PROV01ITA"] == "INGV RING, CC BY 4.0"
+    assert credits["Precise products"] == ppp._citation(products, atx_file)
+    assert "ESA final orbits" in credits["Precise products"] and "Geoid" not in credits
+
+
+def test_report_without_gnss_has_no_section(tmp_path):
+    """Photos without a position, or no photos: no GNSS part."""
+    from pyarchinit_photogrammetry.core.camera import Camera, Sensor
+
+    doc = ppg.Document()
+    empty = doc.add_chunk("Vuoto")
+    photos = doc.add_chunk("Senza posizioni")
+    photos.sensors[0] = Sensor(0, "camera", 64, 48)
+    photos.cameras.append(Camera(0, "IMG_0001", "IMG_0001.JPG", 0, meta={"datetime": "2026:10:27 10:00:00"}))
+    doc.save(tmp_path / "senza.ppg")
+    w = rc.Words("en")
+    assert rc._gnss(empty, w) is None and rc._gnss(photos, w) is None
+    titles = [s.title for s in rc.walk(rc.collect(doc, language="en").sections)]
+    assert "Chunk: Senza posizioni" in titles and "GNSS positions" not in titles
+
+
 # ---------------------------------------------------------------------------------------- Excel
 def test_write_xlsx_keeps_numbers_and_makes_valid_sheets(tmp_path):
     from openpyxl import load_workbook
