@@ -162,7 +162,7 @@ def legacy_warning(legacy: Legacy, crs: str) -> None:
         return
     said.add((legacy.what, crs))
     advice = ("To convert them exactly, import them again with their epoch, or in ETRF2000 (RDN2008)" if legacy.photos
-              else "To avoid it, give them in ETRF2000 (RDN2008) or in WGS 84")
+              else "To avoid it, give them in the coordinate system of the chunk (in Italy, ETRF2000 / RDN2008)")
     log.warning("%s in %s carry no reference frame and epoch: they are converted by PROJ's own transformation where it "
                 "has one that is no ballpark, else as positions on WGS 84, an approximation - about a metre off in "
                 "Europe, more where the transformation of the datum is less accurate. %s", legacy.what, crs, advice)
@@ -390,9 +390,11 @@ def _route(crs: str, frame: str | None, lonlat, src: str, dst: str) -> tuple[str
         operation = _operation(hub, target, area)
         if operation is not None:
             return hub, helmert, operation
-    raise ValueError(f"cannot convert positions in ITRF2020 from {src} to {dst}: PROJ knows the datum of {crs} only by "
-                     "a ballpark, no transformation from ETRF2000 or WGS 84 where the positions are, and a ballpark "
-                     "can be metres off. Choose a coordinate system on ETRF2000, ETRS89, RDN2008 or WGS 84")
+    what = (f"cannot convert positions in ITRF2020 from {src} to {dst}" if dynamic(src) else
+            f"cannot convert positions from {src} to {dst}, a system of ITRF2020")
+    raise ValueError(f"{what}: PROJ knows the datum of {crs} only by a ballpark, no transformation from ETRF2000 "
+                     "or WGS 84 where the positions are, and a ballpark can be metres off. Choose a coordinate system "
+                     "on ETRF2000, ETRS89, RDN2008 or WGS 84")
 
 
 def transform(points, src: str, dst: str, epoch=None) -> np.ndarray:
@@ -404,8 +406,10 @@ def transform(points, src: str, dst: str, epoch=None) -> np.ndarray:
     system of that frame to ``dst`` (a conversion, or PROJ's null transformation from ETRF2000 to RDN2008 and ETRS89);
     to a system on WGS 84 ITRF2020 as it is, with no epoch needed; to another datum through ETRF2000 at the epochs by
     the transformation PROJ ranks first among those that are no ballpark where the points are, else through WGS 84 the
-    same way (:func:`_route`) - into a system with heights above a geoid on such a datum, to its horizontal part, the
-    height kept as every other position keeps it. The other way round the same steps backwards; between two systems of
+    same way (:func:`_route`) - into a system with heights above a geoid on such a datum, the plan by that
+    transformation to its horizontal part and the height as the static path gives it for the point of ETRF2000 (or
+    ITRF2020) read as WGS 84, with the geoid grid or without, as for every other position. The other way round the same
+    steps backwards; between two systems of
     ITRF2020 conversions only. A row without a finite number is no position: it stays without one (NaN) and needs no
     epoch. A ``ValueError`` without the epoch where the Helmert is applied, for an epoch that is not a year, and for a
     datum PROJ knows only by a ballpark. Between systems that are not in ITRF2020
@@ -430,12 +434,17 @@ def transform(points, src: str, dst: str, epoch=None) -> np.ndarray:
         moved = _move(lonlat, _european(hub), _epochs(epoch, len(pts), src, dst)) if helmert else lonlat
         if operation is None:
             return _convert(moved, hub, dst)
-        return _apply(operation, moved)  # the plan of dst (of its horizontal part), the height kept
+        across = _apply(operation, moved)  # the plan of dst (of its horizontal part)
+        if _datum_target(dst) != dst:  # heights above a geoid: as the static path gives them, the point read as WGS 84
+            across[:, 2] = crs_mod.transform_points(moved, FRAMES[UNKNOWN], dst)[:, 2]
+        return across
     hub, helmert, operation = _route(src, source, lambda: _convert(pts, src, _geographic(src)), src, dst)
     if operation is None:
         at_hub = _convert(pts, src, hub)
     else:
-        at_hub = _apply(operation, pts, inverse=True)  # from the plan of src, the height kept
+        at_hub = _apply(operation, pts, inverse=True)  # from the plan of src
+        if _datum_target(src) != src:  # heights above a geoid: back as the static path takes them to WGS 84
+            at_hub[:, 2] = crs_mod.transform_points(pts, src, FRAMES[UNKNOWN])[:, 2]
     lonlat = _move(at_hub, _european(hub), _epochs(epoch, len(pts), src, dst), inverse=True) if helmert else at_hub
     return _from_itrf2020(lonlat, dst)
 
@@ -446,22 +455,41 @@ def _european(hub: str) -> str:
 
 
 @functools.lru_cache(maxsize=64)
-def _no_ballpark(src: str, dst: str, area: tuple[float, float, float, float] | None) -> bool:
-    """PROJ has a transformation from ``src`` to ``dst`` that is no ballpark and is valid in ``area``."""
+def _own_areas(src: str, dst: str, area: tuple[float, float, float, float] | None) -> tuple:
+    """The areas of use (west, south, east, north in degrees; None for everywhere) of PROJ's transformations from
+    ``src`` to ``dst`` that are no ballpark, among those valid in ``area``: none when PROJ has only a ballpark."""
     from pyproj.transformer import AreaOfInterest, TransformerGroup
 
     group = TransformerGroup(_parsed(src), _parsed(dst), always_xy=True, allow_ballpark=False,
                              area_of_interest=AreaOfInterest(*area) if area else None)
-    return bool(group.transformers)
+    return tuple(None if t.area_of_use is None else tuple(float(v) for v in t.area_of_use.bounds)
+                 for t in group.transformers)
+
+
+def _inside(lonlat: np.ndarray, areas: tuple) -> np.ndarray:
+    """For each point (longitude, latitude), whether it is inside one of ``areas`` (west, south, east, north; across
+    the 180th meridian when west is east of east; None for everywhere): where PROJ's own choice is one of their
+    transformations, not its ballpark."""
+    lon = (lonlat[:, 0] + 180.0) % 360.0 - 180.0
+    lat = lonlat[:, 1]
+    inside = np.zeros(len(lonlat), dtype=bool)
+    for bounds in areas:
+        if bounds is None:
+            return np.ones(len(lonlat), dtype=bool)
+        west, south, east, north = bounds
+        across = (lon >= west) & (lon <= east) if west <= east else (lon >= west) | (lon <= east)
+        inside |= across & (lat >= south) & (lat <= north)
+    return inside
 
 
 def legacy_transform(points, src: str, dst: str, legacy: Legacy) -> np.ndarray:
     """``(N, 3)`` points that carry no frame and epoch from ``src`` to ``dst``, one of the two a system of ITRF2020: by
-    PROJ's own transformation where it has one that is no ballpark at the points - what the 1.6.0 did, bit for bit (into
-    ETRS89 a Helmert at 2015.0, into WGS 84 as they are) - else as positions on WGS 84, whose frame nobody knows: the
-    numbers of ITRF2020 taken for those of WGS 84 (``EPSG:4979``), then converted as every position on WGS 84 is (into
-    RDN2008 the very numbers of the 1.6.0; into Monte Mario, CH1903+ or DHDN within the accuracy of the transformation
-    of the datum, where PROJ's ballpark was 73 to 163 m off). Never a ballpark from ITRF2020. Between two systems of
+    PROJ's own transformation for the points inside the area of use of one that is no ballpark - what the 1.6.0 did,
+    bit for bit (into ETRS89 a Helmert at 2015.0, into WGS 84 as they are) - the others as positions on WGS 84, whose
+    frame nobody knows: the numbers of ITRF2020 taken for those of WGS 84 (``EPSG:4979``), then converted as every
+    position on WGS 84 is (into RDN2008 the very numbers of the 1.6.0; into Monte Mario, CH1903+ or DHDN within the
+    accuracy of the transformation of the datum, where PROJ's ballpark was 73 to 163 m off). Never a ballpark from
+    ITRF2020: PROJ would take its own beyond the edge of the area of its transformations. Between two systems of
     ITRF2020 conversions only, exact. :func:`legacy_warning` says it for the chunk of ``legacy`` (not for a system on
     WGS 84, where nothing is off)."""
     pts = np.atleast_2d(np.asarray(points, dtype=np.float64))
@@ -469,12 +497,16 @@ def legacy_transform(points, src: str, dst: str, legacy: Legacy) -> np.ndarray:
         return transform(pts, src, dst)
     moving, other = (src, dst) if dynamic(src) else (dst, src)
     lonlat = _to_itrf2020(pts, src) if dynamic(src) else _convert(pts, src, _geographic(src))
-    if _no_ballpark(src, dst, _area(lonlat)):
-        out = crs_mod.by_proj(pts, src, dst)
-    elif dynamic(src):
-        out = crs_mod.transform_points(lonlat, FRAMES[UNKNOWN], dst)
-    else:
-        out = _from_itrf2020(crs_mod.transform_points(pts, src, FRAMES[UNKNOWN]), dst)
+    own = _inside(lonlat, _own_areas(src, dst, _area(lonlat)))
+    out = np.empty(pts.shape, dtype=np.float64)
+    if own.any():
+        out[own] = crs_mod.by_proj(pts[own], src, dst)
+    if not own.all():
+        rest = ~own
+        if dynamic(src):
+            out[rest] = crs_mod.transform_points(lonlat[rest], FRAMES[UNKNOWN], dst)
+        else:
+            out[rest] = _from_itrf2020(crs_mod.transform_points(pts[rest], src, FRAMES[UNKNOWN]), dst)
     if frame_of(other) != WGS84:
         legacy_warning(legacy, moving)
     return out

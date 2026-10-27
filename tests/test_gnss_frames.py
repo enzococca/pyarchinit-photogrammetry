@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -182,17 +184,61 @@ def test_other_datums_through_etrf2000_or_wgs84():
                                                 ("EPSG:7415", "EPSG:28992", [5.3872, 52.1552, 50.0])])
 def test_heights_into_a_national_datum_as_the_static_route(target, plan, place):
     """Into a system with heights above a geoid on a datum outside the frames (Monte Mario, CH1903+, Amersfoort) a
-    position in ITRF2020 keeps its height, as every other position does (the static route): the ellipsoidal height of
+    position in ITRF2020 gets its height as every other position does (the static route): the ellipsoidal height of
     the local datum is not taken for a height above the geoid (46-50 m lower without the geoid grid). The plan position
-    is the one of the horizontal system."""
+    is the one of the horizontal system. With the grid see test_heights_with_a_geoid_grid_as_the_static_route."""
     static = crs.transform_points([place], "EPSG:4979", target)[0]
     framed = frames.transform([place], "EPSG:9989", target, epoch=2026.82)[0]
-    # the height kept is the one of ETRF2000 (the Helmert moves it by centimetres), not one of the local datum
+    # the height of the static path for the point of ETRF2000 (the Helmert moves it by centimetres) read as WGS 84
     etrf2000 = frames.transform([place], "EPSG:9989", "EPSG:7931", epoch=2026.82)[0]
-    assert framed[2] == pytest.approx(etrf2000[2], abs=1e-6)
-    assert framed[2] == pytest.approx(static[2], abs=0.05)  # the static route keeps its own: no 46-50 m drop
+    assert framed[2] == pytest.approx(crs.transform_points([etrf2000], "EPSG:4979", target)[0][2], abs=1e-6)
+    assert framed[2] == pytest.approx(static[2], abs=0.05)  # the static route's own: no 46-50 m drop
     assert np.allclose(framed[:2], frames.transform([place], "EPSG:9989", plan, epoch=2026.82)[0][:2], atol=1e-6)
     assert np.allclose(frames.transform([framed], target, "EPSG:9989", epoch=2026.82)[0], place, atol=1e-7)
+
+
+# a synthetic EGM2008 (45 m everywhere over Europe) under the name PROJ looks for, in a folder PROJ is told about, then
+# heights above it from ITRF2020 and from WGS 84, in a national datum and in RDN2008: a process of its own, as PROJ
+# keeps the grids it found
+_WITH_A_GRID = """
+import json, sys
+from pathlib import Path
+import pyarchinit_photogrammetry  # its PROJ data first, as the program
+import numpy as np, pyproj, rasterio
+from rasterio.transform import from_origin
+from pyarchinit_photogrammetry.core import crs
+from pyarchinit_photogrammetry.gnss import frames
+folder = Path(sys.argv[1])
+with rasterio.open(folder / "us_nga_egm08_25.tif", "w", driver="GTiff", width=21, height=21, count=1,
+                   dtype="float32", crs="EPSG:4326", transform=from_origin(-0.5, 55.5, 1.0, 1.0)) as grid:
+    grid.write(np.full((1, 21, 21), 45.0, dtype="float32"))
+    grid.update_tags(TYPE="VERTICAL_OFFSET_GEOGRAPHIC_TO_VERTICAL")
+    grid.set_band_description(1, "geoid_undulation")
+    grid.update_tags(1, UNITTYPE="metre")
+pyproj.datadir.append_data_dir(str(folder))
+place, out = [12.4964, 41.9028, 100.0], {}
+for target in ("EPSG:3004+3855", "EPSG:7792+3855"):
+    static = crs.transform_points([place], "EPSG:4979", target)[0]
+    framed = frames.transform([place], "EPSG:9989", target, epoch=2026.82)[0]
+    back = frames.transform([framed], target, "EPSG:9989", epoch=2026.82)[0]
+    out[target] = {"static": static.tolist(), "framed": framed.tolist(), "back": back.tolist()}
+print(json.dumps(out))
+"""
+
+
+def test_heights_with_a_geoid_grid_as_the_static_route(tmp_path):
+    """With the geoid grid of the target there, a position in ITRF2020 gets the height above the geoid the static route
+    gives - in a national datum (Monte Mario + EGM2008) as in RDN2008 - not its ellipsoidal height (48 m off at Rome
+    with the real EGM2008); and back to ITRF2020 the ellipsoidal height it had."""
+    run = subprocess.run([sys.executable, "-c", _WITH_A_GRID, str(tmp_path)], capture_output=True, text=True,
+                         timeout=300)
+    assert run.returncode == 0, run.stderr[-3000:]
+    out = json.loads(run.stdout.strip().splitlines()[-1])
+    for target, heights in out.items():
+        assert heights["static"][2] == pytest.approx(55.0, abs=1e-6), target  # the grid was found: 100 - 45
+        assert heights["framed"][2] == pytest.approx(heights["static"][2], abs=0.01), target
+        assert np.allclose(heights["back"][:2], ROME[0][:2], atol=1e-7), target
+        assert heights["back"][2] == pytest.approx(100.0, abs=1e-3), target
 
 
 def test_rows_without_a_position_pass_through():
@@ -209,8 +255,32 @@ def test_unknown_datum_refused():
     unknown = "+proj=longlat +ellps=intl +no_defs +type=crs"  # a datum PROJ knows only by a ballpark
     with pytest.raises(ValueError, match="ballpark"):
         frames.transform(ROME, "EPSG:9989", unknown, epoch=2026.82)
-    with pytest.raises(ValueError, match="ballpark"):
+    with pytest.raises(ValueError, match="ballpark") as refused:  # the other way: said of the system it goes to
         crs.transform_points(ROME, unknown, "EPSG:9989", epoch=2026.82)
+    assert "EPSG:9989, a system of ITRF2020" in str(refused.value)
+    assert "positions in ITRF2020 from" not in str(refused.value)
+
+
+def test_a_ballpark_is_never_taken_at_the_edge_of_a_transformation(monkeypatch):
+    """PROJ's own transformation from ITRF2020 is used only for the points inside the area of use of one that is no
+    ballpark: at the edge of the European ones (east of 38.01 E, south of 33.26 N) PROJ would take its ballpark, so
+    those points go as positions on WGS 84."""
+    given = []
+    by_proj = crs.by_proj
+
+    def spy(points, src, dst):
+        given.append((np.atleast_2d(np.asarray(points, float)).copy(), src))
+        return by_proj(points, src, dst)
+
+    monkeypatch.setattr(crs, "by_proj", spy)
+    points = np.array([[37.9, 50.0, 100.0], [39.5, 50.0, 100.0], [10.0, 33.27, 10.0], [10.0, 33.256, 10.0]])
+    frames.legacy_transform(points, "EPSG:9989", "EPSG:3035", frames.Legacy("test points"))
+    own = np.vstack([rows for rows, src in given if src == "EPSG:9989"])
+    assert np.array_equal(own, points[[0, 2]])  # inside the area: by PROJ's own route, as before
+    proj = Transformer.from_crs("EPSG:9989", "EPSG:3035", always_xy=True)
+    for row in own:  # and there PROJ's own route is no ballpark
+        proj.transform(*row)
+        assert "Ballpark" not in proj.get_last_used_operation().description
 
 
 # --- the positions of the photos -----------------------------------------------------------------------------------
@@ -330,7 +400,8 @@ def test_markers_in_itrf2020_convert_as_before(tmp_path, caplog):
     said = [r.getMessage() for r in caplog.records if r.name == FRAMES_LOG]
     assert len(said) == 3  # the import and the conversion of the chunks in the first, the import in the other
     # markers have no epoch to give them: the advice is a frame
-    assert all("ETRF2000" in text and "WGS 84" in text and "again with their epoch" not in text for text in said)
+    assert all("coordinate system of the chunk" in text and "ETRF2000" in text and "again with their epoch" not in text
+               for text in said)
 
 
 @pytest.mark.parametrize("system, place", [("EPSG:3004", [12.4964, 41.9028, 100.0]),
