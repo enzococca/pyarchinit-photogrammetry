@@ -4,9 +4,11 @@ The list is the union of the stations of the EPN and of RING (M3G, the metadata 
 the network of the IGS, each with an approximate position - enough to sort them by distance. The precise position
 comes, in this order, from the multi-year solution of the EPN in IGS20, from IGc20 (the IGS realisation of ITRF2020),
 from the daily solutions of RING (a straight line through the last two years) and, when there is nothing else, from
-the approximate position, which is only good to metres. IGc20 is used only where its own header allows it: not for a
-station that has post-seismic deformation terms (``psd_IGc20.snx``), and only with the solution that
-``soln_IGc20.snx`` says is valid at the epoch, which ``IGc20.ssc`` lacks after a break that came after March 2025.
+the approximate position, which is only good to metres. Each takes the solution that is valid at the epoch from the
+catalogue of discontinuities beside it (``EPN_discontinuities.snx`` of the EPN, ``soln_IGc20.snx`` of the IGS), and a
+station whose valid solution its file lacks - a break after the end of the data of the file - is refused there, never
+given another solution. IGc20 is also refused for a station that has post-seismic deformation terms
+(``psd_IGc20.snx``), as its own header says.
 Everything is in ITRF2020 (IGS20) and at the epoch asked for: the stations move with their plate, about 2 cm a year in
 Europe, and a base is only good to the centimetre at the epoch of its coordinates.
 
@@ -71,6 +73,16 @@ _EPN_NAME = r"EUR0OPSSNX_\d{7}_(?P<end>\d{7})_\d{2}[A-Z]_SOL\.SSC"
 _EPN_SSC = re.compile(_EPN_NAME, re.IGNORECASE)
 # a copy kept in the stations folder: epn_Cwwww_ and the name, nothing after it (not the .part of a download that was killed)
 _EPN_COPY = re.compile(rf"epn_C(?P<week>\d{{4}})_{_EPN_NAME}", re.IGNORECASE)
+# The SSC file of the EPN Central Bureau is not SINEX but text in columns (the "SSC format" of the README of its
+# folder): a title that names the reference frame, then for each solution of a station the line of its position -
+# DOMES, site name, GPS, code, X Y Z and their sigmas, the solution, DATA_START, DATA_END, the reference epoch - and the
+# line of its velocity - DOMES, VX VY VZ and their sigmas. Which solution is valid at an epoch the catalogue of
+# discontinuities of the same folder says, a SINEX file with the layout of soln_IGc20.snx.
+EPN_DISCONTINUITIES = "EPN_discontinuities.snx"
+_EPN_TITLE = re.compile(r"REFERENCE FRAME:\s*(\S+)", re.IGNORECASE)
+_EPN_TITLE_LINES = 10  # the title is read from this many first lines
+_EPN_FRAMES = ("IGS20", "IGB20", "IGC20", "ITRF2020")  # the names of ITRF2020 the title may give
+_SINEX_EPOCH_TEXT = re.compile(r"\d{2}:\d{3}:\d{5}")
 _SINEX_TYPES = ("STAX", "STAY", "STAZ", "VELX", "VELY", "VELZ")
 _PSD_TYPE = re.compile(r"[AT](?:LOG|EXP)_[ENU]")  # the terms of a post-seismic model: amplitude and time, log and exp
 # CODE PT SOLN T DATA_START DATA_END EVENT comment: EVENT is P for a break of the position and V for one of the velocity
@@ -552,17 +564,110 @@ def _at_epoch(station: Station, epoch: float, solution: _Solution, where: str, s
     return StationCoordinates(station, xyz, tuple(rinex.ecef_to_llh(xyz)), FRAME, epoch, source, sigma, citation)
 
 
+def _epn_layout(path: Path) -> str:
+    """How the multi-year solution of the EPN in ``path`` is written: ``"columns"``, as the Central Bureau writes its
+    SSC file, or ``"sinex"``. A ``ValueError`` naming the file for anything else: its layout is not guessed at."""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        head = [f.readline() for _ in range(_EPN_TITLE_LINES)]
+    if head[0].startswith("%=SNX"):
+        return "sinex"
+    if any("STATION POSITIONS AND VELOCITIES" in line.upper() for line in head) and any(map(_EPN_TITLE.search, head)):
+        return "columns"
+    raise ValueError(f"{path.name}: neither SINEX nor the columns of the SSC file of the EPN Central Bureau: its "
+                     "layout is not one this program reads")
+
+
+def _read_epn_columns(path: Path, code: str) -> list[_Solution]:
+    """The solutions of the station ``code`` (4 characters) in the SSC file of the EPN Central Bureau (the layout the
+    comment above :data:`EPN_DISCONTINUITIES` gives): each with the span of its data (``DATA_START``, ``DATA_END``),
+    its position and velocity at the reference epoch and their sigmas. A ``ValueError`` names the file - and the
+    line - when its title is not in IGS20 (ITRF2020) or names no frame, when the line of a position is not followed by
+    the one of its velocity or cannot be read, and when the code is the one of two monuments; ``_Absent`` when the
+    station is not in it."""
+    found: list[_Solution] = []
+    domes: set[str] = set()
+    frame = None
+    position = None  # (line number, fields) of the position of a solution of the station, until its velocity
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for number, line in enumerate(f, start=1):
+            if frame is None and number <= _EPN_TITLE_LINES and (match := _EPN_TITLE.search(line)):
+                frame = match.group(1)
+                if frame.upper() not in _EPN_FRAMES:
+                    raise ValueError(f"{path.name} is in {frame}, not in IGS20 (ITRF2020)")
+            fields = line.split()
+            is_position = (len(fields) >= 14 and fields[-12] == "GPS"
+                           and all(_SINEX_EPOCH_TEXT.fullmatch(v) for v in fields[-3:]))
+            if position is None:
+                if is_position and fields[-11].upper() == code:
+                    position = (number, fields)
+                continue
+            first, values = position
+            position = None
+            if is_position or len(fields) != 7 or fields[0] != values[0]:
+                raise ValueError(f"{path.name}, line {number}: the line after the position of {code} (line {first}) "
+                                 "is not its velocity")
+            try:
+                ref = _sinex_epoch(values[-1])
+                if ref is None:
+                    raise ValueError("no reference epoch")
+                found.append(_Solution(int(values[-4]), _sinex_epoch(values[-3]), _sinex_epoch(values[-2]), ref,
+                                       tuple(_float(v) for v in values[-10:-7]), tuple(_float(v) for v in fields[1:4]),
+                                       tuple(_float(v) for v in values[-7:-4]), tuple(_float(v) for v in fields[4:7])))
+            except ValueError as exc:
+                raise ValueError(f"{path.name}, line {first}: {exc}") from None
+            domes.add(values[0])
+    if position is not None:
+        raise ValueError(f"{path.name}, line {position[0]}: the position of {code} is the last line, without its "
+                         "velocity")
+    if frame is None:
+        raise ValueError(f"{path.name}: its title does not name the reference frame (REFERENCE FRAME:)")
+    if not found:
+        raise _Absent(f"{code} is not in {path.name}")
+    if len(domes) > 1:
+        raise ValueError(f"{path.name}: {code} is the code of several monuments ({', '.join(sorted(domes))})")
+    return found
+
+
+def _epn_discontinuities(folder: str, progress) -> Path:
+    """The catalogue of discontinuities of the folder ``folder`` (``"C2415"``) of the EPN, kept beside the solution
+    (``epn_<folder>_EPN_discontinuities.snx``: the files of a folder do not change) and used again. Without it the
+    solution of the folder is not used, and a plain ``DownloadError`` says so."""
+    root = EPN_REFERENCE_FRAME if EPN_REFERENCE_FRAME.endswith("/") else EPN_REFERENCE_FRAME + "/"
+    try:
+        return _cached(f"{root}{folder}/{EPN_DISCONTINUITIES}", f"epn_{folder}_{EPN_DISCONTINUITIES}", None, progress)
+    except download.DownloadError as exc:
+        raise download.DownloadError(f"{exc}; the solution of the EPN is not used without {EPN_DISCONTINUITIES}",
+                                     exc.url) from exc
+
+
 def _from_epn(station: Station, epoch: float, progress) -> StationCoordinates | None:
-    """The EPN solution is read as a SINEX file, like IGc20.ssc, whose layout is the only one of its family that has been
-    seen: the Central Bureau did not answer when this was written (2026-10-27). A file laid out in another way is not
-    guessed at: it is a ``ValueError`` that names it, and the next source answers."""
+    """The multi-year solution of the EPN in IGS20 at ``epoch``. As the Central Bureau writes it (columns), the solution
+    used is the one that the catalogue of discontinuities of the same folder says is valid at the epoch, as for IGc20:
+    a station whose valid solution the file lacks (a break after the end of its data) is refused with a ``ValueError``
+    that says which, and the next source answers - never another solution. A SINEX file is read as before: the solution
+    whose data cover the epoch (:func:`_covering`). The citation names the folder and its DOI."""
     if "EPN" not in station.networks:
         return None
     path, folder = _epn_file(progress)
+    code = station.id[:4].upper()
     citation = (f"EUREF Permanent GNSS Network (EPN), multi-year position and velocity solution {folder} in IGS20, "
                 f"EPN Central Bureau, Royal Observatory of Belgium, doi:10.24414/ROB-EUREF-{folder}, CC BY 4.0")
-    solution = _covering(_read_sinex(path, station.id[:4].upper()), epoch)
-    return _at_epoch(station, epoch, solution, path.name, "EPN", citation)
+    if _epn_layout(path) == "sinex":
+        return _at_epoch(station, epoch, _covering(_read_sinex(path, code), epoch), path.name, "EPN", citation)
+    solutions = _read_epn_columns(path, code)  # _Absent for a station that the solution does not have
+    catalogue = _epn_discontinuities(folder, progress)
+    valid = _valid_at(_read_discontinuities(catalogue, code), epoch)
+    if valid is None:
+        raise ValueError(f"{EPN_DISCONTINUITIES} of {folder} has no solution of {code} that is valid at {epoch:.2f}")
+    number, start, _end = valid
+    chosen = next((s for s in solutions if s.number == number), None)
+    if chosen is None:
+        held = ", ".join(str(s.number) for s in solutions)
+        since = f" (since {start:.2f})" if start is not None else ""
+        raise ValueError(f"{EPN_DISCONTINUITIES} of {folder} puts {code} at {epoch:.2f} in solution {number}{since}, "
+                         f"which {path.name} does not hold: it has solutions {held} of the station - the break came "
+                         "after the end of its data")
+    return _at_epoch(station, epoch, chosen, path.name, "EPN", citation)
 
 
 def _igs_companion(name: str, max_age: timedelta, progress) -> Path:
@@ -699,8 +804,9 @@ def coordinates(station: Station, epoch: float, progress=None) -> StationCoordin
     the multi-year solution of the EPN in IGS20 (for the stations of the EPN), IGc20 (for those of the IGS, where its
     own conditions hold: no post-seismic terms, and the solution that is valid at ``epoch`` in the file), the daily
     solutions of RING, and in the end the approximate position of the list, with no ``sigma``. Where a station has a
-    discontinuity (a new antenna, an earthquake) the solution that covers ``epoch`` is used. A source that cannot
-    be reached, or does not make sense, is skipped with a message in the log; the files are kept for the next time and
+    discontinuity (a new antenna, an earthquake) the solution valid at ``epoch`` is used, as the catalogue of
+    discontinuities of the EPN or of the IGS says; a source that lacks it skips the station. A source that cannot be
+    reached, or does not make sense, is skipped with a message in the log; the files are kept for the next time and
     used when the network is gone."""
     if not (isinstance(epoch, (int, float)) and 1980.0 <= epoch <= 2200.0):
         raise ValueError(f"the epoch is a decimal year such as 2026.5, not {epoch!r}")

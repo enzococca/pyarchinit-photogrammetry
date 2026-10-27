@@ -1,9 +1,9 @@
 """Permanent GNSS stations (EPN, IGS, RING): the list, the nearest ones and their coordinates at the epoch of a flight,
 the download helpers they use, and the observation and navigation files of a station for the hours of a flight. The
 services are never reached: the URL constants of ``gnss/stations.py`` point at files (``file://``) - the excerpts of
-tests/data/gnss, captured on 2026-10-27 from M3G, the IGS and RING, and the EPN multi-year solution, which is synthetic
-because the EPN Central Bureau did not answer (see the README there) - or at trees of files that the tests write in the
-layout of the archives of BKG and RING."""
+tests/data/gnss, captured on 2026-10-27 from M3G, the IGS, RING and the EPN Central Bureau (its multi-year solution
+in columns and its catalogue of discontinuities), and a synthetic EPN solution in SINEX (see the README there) - or at
+trees of files that the tests write in the layout of the archives of BKG and RING."""
 from __future__ import annotations
 
 import functools
@@ -55,6 +55,16 @@ MEDI_IGS = {  # solutions 1 (1997 day 26 to 2000 day 320) and 2 (from 2000 day 3
                        v=(-0.0180923962952918, 0.0191334696817523, 0.0113657719780606), t0=2020.0),
     2: SimpleNamespace(x0=(4461400.47305538, 919593.864907257, 4449504.93785650),
                        v=(-0.0180923845960119, 0.0191334642564910, 0.0113657614008432), t0=2020.0)}
+# The live solution of the EPN in columns (release C2415, tests/data/gnss): MEDI00ITA's solution 2, valid since 2000
+# day 320, and AQUI00ITA's solutions 2 to 4 around the earthquake of L'Aquila (2009 day 96, 01:32:39) and a new antenna
+# (2017 day 327, 12:00), copied from the excerpt by hand.
+EPN_COLUMNS = "EUR0OPSSNX_1996001_2026115_00U_SOL.SSC"
+MEDI_EPN = SimpleNamespace(x0=(4461400.47249, 919593.86400, 4449504.93760), v=(-0.01815, 0.01907, 0.01138), t0=2020.0,
+                           sx0=(6e-5, 2e-5, 6e-5), sv=(1e-5, 1e-5, 1e-5))
+AQUI_COLUMNS = {
+    2: SimpleNamespace(x0=(4592507.32230, 1089876.63406, 4276393.18332), v=(-0.01650, 0.01816, 0.01254), t0=2020.0),
+    3: SimpleNamespace(x0=(4592507.29408, 1089876.63681, 4276393.08471), v=(-0.01650, 0.01815, 0.01253), t0=2020.0),
+    4: SimpleNamespace(x0=(4592507.29569, 1089876.63124, 4276393.08072), v=(-0.01650, 0.01815, 0.01254), t0=2020.0)}
 
 
 def _at(solution, epoch):
@@ -454,6 +464,150 @@ def test_solution_valid_at_the_epoch(archives, epoch, soln):
     assert np.abs(np.array(c.xyz) - _at(M0SE_EPN[3 - soln], epoch)).max() > 2e-3  # the jump is 11, 7 and 3 mm
 
 
+# --- the solution of the EPN as its Central Bureau writes it ---------------------------------------------------------
+
+
+@pytest.fixture
+def epn_release(archives):
+    """The folder C2415 of the reference frame of the EPN with the excerpts of the live solution in columns and of its
+    catalogue of discontinuities, and the file of another frame beside them, as the real folder has: newer than the
+    synthetic C2399 and C2400 of ``archives``, it is the one that is read."""
+    folder = archives.epn / "C2415"
+    folder.mkdir()
+    for name in (EPN_COLUMNS, "EPN_discontinuities.snx"):
+        shutil.copy(DATA / name, folder / name)
+    etrf = (DATA / EPN_COLUMNS).read_bytes().replace(b"IGS20   ", b"ETRF2000")
+    etrf = etrf.replace(b"4461400.47249", b"4461401.47249")  # MEDI a metre away: it shows if the file were read
+    (folder / EPN_COLUMNS.replace("_SOL.SSC", "_SOL_ETRF2000.SSC")).write_bytes(etrf)
+    return folder
+
+
+def _enu_of(delta, llh) -> np.ndarray:
+    """A difference of X, Y, Z (m) as east, north, up at ``llh`` (degrees)."""
+    phi, lam = np.radians(llh[0]), np.radians(llh[1])
+    return np.array([[-np.sin(lam), np.cos(lam), 0.0],
+                     [-np.sin(phi) * np.cos(lam), -np.sin(phi) * np.sin(lam), np.cos(phi)],
+                     [np.cos(phi) * np.cos(lam), np.cos(phi) * np.sin(lam), np.sin(phi)]]) @ np.asarray(delta)
+
+
+def test_epn_solution_in_columns_at_the_epoch(epn_release):
+    """The solution of the EPN as the Central Bureau writes it, in columns: MEDI00ITA at 2026.5 on the line of the
+    solution its catalogue says is valid (the second, since 2000 day 320), with the formal error brought to the epoch
+    and the citation of the folder that was used; the solution and the catalogue are kept under the name of the
+    folder."""
+    c = stations.coordinates(_station("MEDI00ITA"), 2026.5)
+    assert c.source == "EPN" and c.frame == "ITRF2020" and c.epoch == 2026.5
+    assert np.allclose(c.xyz, _at(MEDI_EPN, 2026.5), rtol=0, atol=1e-6)
+    assert np.allclose(c.sigma, np.hypot(MEDI_EPN.sx0, np.array(MEDI_EPN.sv) * 6.5), rtol=1e-9, atol=0)
+    assert "multi-year position and velocity solution C2415" in c.citation
+    assert "10.24414/ROB-EUREF-C2415" in c.citation and "CC BY 4.0" in c.citation
+    _check_llh(c)
+    kept = {p.name for p in (download.gnss_dir() / "stations").iterdir()}
+    assert {f"epn_C2415_{EPN_COLUMNS}", "epn_C2415_EPN_discontinuities.snx"} <= kept
+
+
+def test_the_epn_and_igc20_agree_on_a_station_of_both(epn_release):
+    """MEDI00ITA is in the solution of the EPN and in IGc20, two solutions of ITRF2020 made apart: at 2026.5 they put it
+    within 1.5 mm of each other (IGc20 1.1 mm east, 0.7 mm south and 1.0 mm above the EPN)."""
+    c = stations.coordinates(_station("MEDI00ITA"), 2026.5)
+    apart = _enu_of(_at(MEDI_IGS[2], 2026.5) - np.array(c.xyz), c.llh)
+    assert np.all(np.abs(apart) < 0.0015), apart
+
+
+@pytest.mark.parametrize("epoch, soln", [(2005.0, 2), (2009.2616, 3), (2017.5, 3), (2018.0, 4), (2026.5, 4)])
+def test_epn_solution_valid_by_its_catalogue(epn_release, epoch, soln):
+    """AQUI00ITA: the catalogue starts solution 3 with the earthquake of L'Aquila, 2009 day 96 at 01:32:39, while the
+    data of solution 2 run to the end of that day; at noon of that day (2009.2616) the solution is the third, the one
+    the catalogue says, not the one whose data cover the time (2.8 cm across and 9.9 cm in height from it)."""
+    c = stations.coordinates(_station("AQUI00ITA"), epoch)
+    assert c.source == "EPN"
+    assert np.allclose(c.xyz, _at(AQUI_COLUMNS[soln], epoch), rtol=0, atol=1e-6)
+    other = 2 if soln == 3 else 3
+    assert np.abs(np.array(c.xyz) - _at(AQUI_COLUMNS[other], epoch)).max() > 0.004
+
+
+def test_epn_refuses_a_solution_its_file_does_not_hold(epn_release, caplog):
+    """A break after the end of the data of the file (2026 day 115): a catalogue of a later day starts a third solution
+    of MEDI00ITA on 2026 day 200, for which the file has no coordinates. From then on the EPN does not give the
+    station - IGc20 does - never the second solution carried past its break; before it, the second stands."""
+    catalogue = epn_release / "EPN_discontinuities.snx"
+    catalogue.write_bytes(catalogue.read_bytes().replace(
+        b" MEDI  A    2 P 00:320:00000 00:000:00000 P -\n",
+        b" MEDI  A    2 P 00:320:00000 26:200:00000 P - antenna change\n"
+        b" MEDI  A    3 P 26:200:00000 00:000:00000 P -\n"))
+    medi = _station("MEDI00ITA")
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        after = stations.coordinates(medi, 2026.7)
+    assert after.source == "IGS" and np.allclose(after.xyz, _at(MEDI_IGS[2], 2026.7), rtol=0, atol=1e-6)
+    assert any("solution 3" in w and "EPN_discontinuities.snx" in w and "MEDI" in w and "does not hold" in w
+               for w in _warnings(caplog))
+    before = stations.coordinates(medi, 2026.4)
+    assert before.source == "EPN" and np.allclose(before.xyz, _at(MEDI_EPN, 2026.4), rtol=0, atol=1e-6)
+
+
+def test_the_epn_solution_in_columns_needs_its_catalogue(epn_release, caplog):
+    """Without the catalogue of discontinuities of its folder the solution in columns is not used - no solution would be
+    known to be valid at the epoch: MEDI00ITA comes from IGc20, ASIR00ITA (of the EPN alone) only approximately."""
+    (epn_release / "EPN_discontinuities.snx").unlink()
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        assert stations.coordinates(_station("MEDI00ITA"), 2026.5).source == "IGS"
+        assert stations.coordinates(_station("ASIR00ITA"), 2026.5).source == "approximate"
+    assert any("EPN_discontinuities.snx" in w and "not used without" in w for w in _warnings(caplog))
+
+
+def test_the_epn_solution_in_columns_offline(epn_release, archives, monkeypatch):
+    """The solution and the catalogue of a folder are kept: with the archive gone, the copies give the same position."""
+    medi = _station("MEDI00ITA")
+    first = stations.coordinates(medi, 2026.5)
+    monkeypatch.setattr(stations, "EPN_REFERENCE_FRAME", _uri(archives.root / "gone") + "/")
+    download._LISTINGS.clear()
+    assert stations.coordinates(medi, 2026.5) == first
+
+
+def test_an_epn_file_in_another_frame_is_refused(epn_release, caplog):
+    """A file with the name of the solution in IGS20 whose title says ETRF2000 (a metre from ITRF2020 in Italy) is not
+    read as ITRF2020."""
+    path = epn_release / EPN_COLUMNS
+    path.write_bytes(path.read_bytes().replace(b"REFERENCE FRAME:    IGS20 ", b"REFERENCE FRAME: ETRF2000 "))
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        c = stations.coordinates(_station("MEDI00ITA"), 2026.5)
+    assert c.source == "IGS"
+    assert any("ETRF2000" in w and "not in IGS20" in w for w in _warnings(caplog))
+
+
+def test_the_columns_of_the_epn_as_they_are_written():
+    """Every solution of a station, each its position line and the velocity line after it; a position line without
+    its velocity is an error that names the line."""
+    solutions = stations._read_epn_columns(DATA / EPN_COLUMNS, "M0SE")
+    assert [s.number for s in solutions] == [1, 2, 3, 4, 5]
+    last = solutions[-1]
+    assert last.xyz == (4642432.25432, 1028629.70072, 4236854.41823) and last.velocity == (-0.01489, 0.01801, 0.01198)
+    assert last.sx == (7e-5, 3e-5, 6e-5) and last.sv == (1e-5, 1e-5, 1e-5) and last.ref == 2020.0
+    assert last.start == pytest.approx(2016 + 304 / 366)
+    assert last.end == pytest.approx(2026 + (114 + 86370 / 86400) / 365)
+    with pytest.raises(stations._Absent):
+        stations._read_epn_columns(DATA / EPN_COLUMNS, "BOLG")
+
+
+@pytest.mark.parametrize("which", ["a velocity line", "the last velocity line", "the title"])
+def test_the_columns_of_the_epn_refuse_what_is_missing(tmp_path, which):
+    lines = (DATA / EPN_COLUMNS).read_bytes().split(b"\n")
+    code = "MEDI"
+    if which == "a velocity line":
+        del lines[11]  # the velocity of the second solution of MEDI (the position is line 11)
+        match = r"line 12: the line after the position of MEDI \(line 11\) is not its velocity"
+    elif which == "the last velocity line":
+        del lines[-2]  # the velocity of ASIR, the last line of the file
+        code, match = "ASIR", r"line 31: the position of ASIR is the last line, without its velocity"
+    else:
+        lines = [line for line in lines if b"REFERENCE FRAME" not in line]
+        match = "does not name the reference frame"
+    path = tmp_path / EPN_COLUMNS
+    path.write_bytes(b"\n".join(lines))
+    with pytest.raises(ValueError, match=match):
+        stations._read_epn_columns(path, code)
+
+
 @pytest.mark.parametrize("epoch, soln", [(1999.5, 1), (2000.8, 1), (2000.9, 2), (2005.0, 2)])
 def test_solution_valid_at_the_epoch_in_the_file_of_the_igs(archives, epoch, soln):
     """MEDI00ITA is not in the file of the EPN: the file of the IGS answers, with its own discontinuity in 2000."""
@@ -678,14 +832,15 @@ def test_approximate_coordinates_have_no_sigma(archives, caplog):
     assert any("RMPO00ITA" in w and "approximate" in w for w in _warnings(caplog))  # and warns of the metres
 
 
-def test_a_file_that_is_not_sinex_is_skipped_with_a_warning(archives, caplog):
-    """A file of the EPN that is not laid out as the SINEX ones is not guessed at: the next source answers."""
+def test_a_file_of_another_layout_is_skipped_with_a_warning(archives, caplog):
+    """A file of the EPN laid out neither as SINEX nor in the columns of the Central Bureau (here the line of the names
+    of the columns without the title that names the frame) is not guessed at: the next source answers."""
     for solution in archives.epn.glob("C*/*_SOL.SSC"):
         solution.write_text("DOMES NB. SITE NAME TECH. ID. X/Vx Y/Vy Z/Vz SOLN DATA_START DATA_END\n")
     with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
         c = stations.coordinates(_station("M0SE00ITA"), 2026.5)
     assert c.source == "IGS"  # M0SE00ITA is in the file of the IGS as well
-    assert any("not a SINEX" in w and "_SOL.SSC" in w for w in _warnings(caplog))
+    assert any("neither SINEX nor the columns" in w and "_SOL.SSC" in w for w in _warnings(caplog))
 
 
 def test_a_station_of_another_place_with_the_same_code_is_refused(archives, caplog):

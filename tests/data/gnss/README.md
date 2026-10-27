@@ -3,8 +3,8 @@
 Small excerpts of what the public services give, for `tests/test_gnss_stations.py`. The tests never use the network:
 they point the URL constants of `gnss/stations.py` at these files (`file://`).
 
-Captured on 2026-10-27, between 07:12 and 07:23 UTC (`psd_IGc20.snx` and `soln_IGc20.snx` at 08:17 UTC), with
-`curl` and no account, from the services named below. Each
+Captured on 2026-10-27, between 07:12 and 07:23 UTC (`psd_IGc20.snx` and `soln_IGc20.snx` at 08:17 UTC, the two files
+of the EPN at 22:28 UTC), with `curl` and no account, from the services named below. Each
 excerpt keeps the format of the service and the real values; what was cut is said in the table.
 
 | File | What it is | Where it comes from | Licence |
@@ -18,30 +18,38 @@ excerpt keeps the format of the service and the real values; what was cut is sai
 | `INGR00ITA.gipsyX.IGS20.pos` | The daily positions of the RING station INGR00ITA in IGS20 (GipsyX): the whole header and the last 150 of 8955 rows (2025-09-14 to 2026-04-04) | `https://webring.gm.ingv.it:44324/products/POS/IGS2/INGR00ITA/INGR00ITA.gipsyX.IGS20.pos` | CC BY 4.0, INGV RING, DOI `10.13127/gnss/gipos` (it is in the header) |
 | `index_igs_IGc20.html` | The page that lists the folder IGc20 (Apache: relative links, sort links with `?C=N;O=D`, the link to the parent folder and one to another site). Whole | `https://files.igs.org/pub/station/coord/IGc20/` | - |
 | `index_ring_IGS2.html` | The page that lists `products/POS/IGS2` of RING (IIS: links as paths from the root, no slash after a folder, links to the parent folders and to assets). The head and the end of the page are whole, 4 of the 2958 entries are kept: INGP00ITA, INGR00ITA, INSA00FRA, INVE00GBR | `https://webring.gm.ingv.it:44324/products/POS/IGS2/` | - |
-| `EPN_synthetic.SSC` | **Not a capture. Made up.** The EPN multi-year solution in the layout of `IGc20.ssc` | see below | - |
+| `EUR0OPSSNX_1996001_2026115_00U_SOL.SSC` | The multi-year position and velocity solution of the EPN in IGS20, release C2415 (GPS weeks 834 to 2415, data to 2026 day 115), in the columns of the Central Bureau (not SINEX): its title and the names of its columns (the first 8 lines), then the lines of MEDI00ITA (2 solutions), AQUI00ITA (4), M0SE00ITA (5) and ASIR00ITA (1), each solution a line of the position and one of the velocity, in the order of the file, as they are. 483 stations in the real file (368,994 bytes) | `https://epncb.oma.be/pub/product/referenceframe/C2415/EUR0OPSSNX_1996001_2026115_00U_SOL.SSC` | CC BY 4.0, EPN Central Bureau (Royal Observatory of Belgium), DOI `10.24414/ROB-EUREF-C2415` |
+| `EPN_discontinuities.snx` | The catalogue of discontinuities that goes with it (SINEX 1.00, one `SOLUTION/DISCONTINUITY` block, the layout of `soln_IGc20.snx`): the validity of every solution. Its first three lines and its last three, and all the rows (position, event `P`, and velocity, event `V`) of AQUI, ASIR, M0SE and MEDI, as they are. The real file (117,025 bytes) is Latin-1 (names such as Düzce in its comments); the excerpt is ASCII | `https://epncb.oma.be/pub/product/referenceframe/C2415/EPN_discontinuities.snx` | CC BY 4.0, as above |
+| `EPN_synthetic.SSC` | **Not a capture. Made up.** An EPN multi-year solution in SINEX, the layout of `IGc20.ssc`: for the program's way of reading a solution in SINEX | see below | - |
 
-## The EPN multi-year solution is not here
+## The EPN multi-year solution
 
-The EPN Central Bureau (`epncb.oma.be`, which answers to 193.190.230.11) did not answer on 2026-10-27: ports 21, 80 and
-443 all timed out, from the same Mac that reached M3G and the IGS minutes before and RING minutes after. The research note
-(`design/2026-10-26-gnss-phase3-research.md`) had the same problem the day before and took the names from copies of
-the pages kept by the Wayback Machine.
+The EPN Central Bureau (`epncb.oma.be`) did not answer in the morning of 2026-10-27 (ports 21, 80 and 443 timed out),
+so the first version of the program read its solution as SINEX, like `IGc20.ssc`, on the synthetic file below. It
+answered in the evening, and its solution is **not SINEX**: `EUR0OPSSNX_1996001_2026115_00U_SOL.SSC` above, in the
+columns that the README of the folder calls the SSC format. The folder `C2415/` (the newest of `C2370/`, `C2385/`,
+`C2400/`, `C2415/`, besides `archive/` and `latest/`) holds the solution in IGS20 (no frame in the name), the same in
+ETRF2000, ETRF2014 and ETRF2020 (`_ETRF2000` ... before `.SSC`), the positions of the stations with less than three
+years in a `_short.SSC` of each frame, the SINEX of each frame (`.SNX.gz`, 350 MB), `.CRD` and `.VEL` files,
+`EPN_discontinuities.snx`, `EPN_outliers.lst` and plots. The SSC holds only "stations with more than 3 years and
+without post-seismic deformation"; its classes A/B are no longer marked (the column `CLASS` of the title is empty).
 
-`EPN_synthetic.SSC` stands in for `EUR0OPSSNX_1996001_2025270_00U_SOL.SSC`, the version in IGS20 (no frame in the
-name) of the EPN multi-year position and velocity solution. It was written by a script, not copied from the EPN:
+`EPN_synthetic.SSC` stays for the program's way of reading a solution in SINEX (a file that begins with `%=SNX`),
+which the tests keep. It stands in for `EUR0OPSSNX_1996001_2025270_00U_SOL.SSC` and was written by a script, not copied
+from the EPN:
 
 - the layout is the one of the real `IGc20.ssc` above (a SINEX 2.02 file: `SOLUTION/EPOCHS` with `DATA_START` and
-  `DATA_END`, `SOLUTION/ESTIMATE` with `STAX`..`VELZ` at a reference epoch), because the IGS names `.ssc` the files of
-  that kind (`ITRF96_IGS_RS47.SSC` of 1998, in the same tree, is also a SINEX file) and the `IGc20.snx.gz` next to it
-  is 405 MB while the `.ssc` is 1.3 MB; whether the `.SSC` of the EPN has the same layout is **not verified**;
+  `DATA_END`, `SOLUTION/ESTIMATE` with `STAX`..`VELZ` at a reference epoch), which the live `.SSC` of the EPN does not
+  have;
 - the numbers are made up: the approximate positions of the site logs (`m3g_EPN.geojson`) moved by a few centimetres,
   a reference epoch of 2015.0 (the IGS file has 2020.0, so that the tests see both), velocities close to the real ones
   of the stations of Rome, and one discontinuity (M0SE, a second solution from 2023 day 152);
 - the file says so in its comment block.
 
-The names of the files and folders of the EPN that the tests build (`C2399/`, `C2400/`,
-`EUR0OPSSNX_1996001_2025270_00U_SOL[_ETRF2000|_ETRF2014|_ETRF2020|_short].SSC`) come from the research note, not from
-a listing seen today.
+The names of the files and folders of the EPN that the tests build for the SINEX file (`C2399/`, `C2400/`,
+`EUR0OPSSNX_1996001_2025270_00U_SOL[_ETRF2000|_ETRF2014|_ETRF2020|_short].SSC`) come from the research note; the
+listing of `C2415/` seen on 2026-10-27 has the same pattern of names (`_SOL_ETRF2000.SSC`, `_SOL_short.SSC`), and
+the tests of the files in columns put the two excerpts in a folder `C2415/`.
 
 ## What the live services return (and the research note did not say)
 
@@ -69,6 +77,14 @@ a listing seen today.
   the earthquake as reference epoch and `----` as solution.
 - The RING `.pos` files have 25 columns; the position is `X Y Z` in columns 4 to 6 and the epoch is the date and
   the modified Julian day in columns 1 to 3; the first line names the frame (`Reference Frame : IGS20`).
+- The SSC of the EPN: five lines of title (the frame, `REFERENCE FRAME:    IGS20    AT EPOCH OF 2020.0`, the GPS
+  weeks, the release name `EPN_IGS20_C2415`, the date), the names of the columns, a line of `CLASS` and one of dashes;
+  then for each solution of a station `DOMES SITE GPS CODE X Y Z sX sY sZ SOLN DATA_START DATA_END REF_EPOCH` (m) and
+  the line of its velocity, `DOMES VX VY VZ sVX sVY sVZ` (m/y). `DATA_START` and `DATA_END` are the span of its data:
+  the solution valid at an epoch is the one of `EPN_discontinuities.snx`, whose `P` rows give the validity, from a
+  break to the next (AQUI: the earthquake of 2009 day 96 at 01:32:39 starts solution 3, while the data of solution 2
+  run to the end of that day). The numbers of the solutions are those of the SSC. No position solution of the
+  catalogue of C2415 starts after the end of the data of the solution (2026 day 115). There is no footer.
 
 ## Antenna calibrations: `igs20_excerpt.atx`
 

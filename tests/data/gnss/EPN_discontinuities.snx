@@ -1,0 +1,22 @@
+%=SNX 1.00 IGS 26:246:43237 IGN 96:000:00000 18:036:00000 P 00000 1 X        
+*-------------------------------------------------------------------------------
++SOLUTION/DISCONTINUITY 
+ AQUI  A    1 P 00:000:00000 01:239:00000 P - antenna & cut off & receiver change
+ AQUI  A    2 P 01:239:00000 09:096:05559 P - EQ M6.3 - central Italy
+ AQUI  A    3 P 09:096:05559 17:327:43200 P - antenna & receiver change
+ AQUI  A    4 P 17:327:43200 00:000:00000 P -
+ AQUI  A    1 P 00:000:00000 00:000:00000 V -
+ ASIR  A    1 P 00:000:00000 00:000:00000 P -
+ ASIR  A    1 P 00:000:00000 00:000:00000 V -
+ M0SE  A    1 P 00:000:00000 07:170:00000 P - antenna & receiver change
+ M0SE  A    2 P 07:170:00000 09:096:05559 P - EQ M6.3 - 3 km SE of Sassa, Italy
+ M0SE  A    3 P 09:096:05559 12:104:00000 P - antenna & cut off & receiver change
+ M0SE  A    4 P 12:104:00000 16:304:24019 P - EQ M6.6 - 5 km ESE of Preci, Italy
+ M0SE  A    5 P 16:304:24019 00:000:00000 P -
+ M0SE  A    1 P 00:000:00000 00:000:00000 V -
+ MEDI  A    1 P 00:000:00000 00:320:00000 P - Unknown
+ MEDI  A    2 P 00:320:00000 00:000:00000 P -
+ MEDI  A    1 P 00:000:00000 00:000:00000 V -
+-SOLUTION/DISCONTINUITY
+*----------------------------------------------------------------
+%ENDSNX
