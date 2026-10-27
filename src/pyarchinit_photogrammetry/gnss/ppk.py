@@ -635,7 +635,8 @@ def solve(rover: str | Path, base: str | Path | Sequence[str | Path], navs=None,
     the rover is a warning), with the navigation files ``navs`` (one or more; None: those beside the rover, or beside
     the base when the rover has none, as a DJI drone does not always write one). Any file may be packed: gzip, the Unix
     compress, a zip archive of one file, Hatanaka (:func:`rinex.plain`). When the epochs of the base are further apart
-    than those of the rover (by their ``INTERVAL``) RTKLIB interpolates the base to the epochs of the rover. The base
+    than those of the rover (by their ``INTERVAL`` or, when a header does not say, by what their first epochs show,
+    :func:`rinex.epoch_interval`) RTKLIB interpolates the base to the epochs of the rover. The base
     at ``base_position`` (latitude, longitude, height above the ellipsoid of the mark it stands on) or, with None, at
     the position of its RINEX header, with a warning: that one can be metres off; a typed one far from the header's
     (:func:`far_from_header`) has a warning too. Either way RTKLIB adds the antenna height of the base's header,
@@ -686,9 +687,13 @@ def _solve(rover: Path, pieces: list[Path], base: Path, holes: list[tuple[dateti
     if base_warning:
         warnings.append(base_warning)
     warnings.append(antenna_warning(base_record["name"], base_info))
-    # a base whose epochs are further apart than the rover's: RTKLIB interpolates it to the epochs of the rover
-    interpolate = (rover_info.interval is not None and base_info.interval is not None
-                   and base_info.interval > rover_info.interval + 1e-6)
+    # a base whose epochs are further apart than the rover's: RTKLIB interpolates it to the epochs of the rover. The
+    # intervals are those of the headers - which RINEX leaves optional - or what the first epochs show; a base in
+    # several files is as far apart as its closest file
+    rover_step = rinex.epoch_interval(rover, rover_info)
+    steps = [rinex.epoch_interval(piece, base_info if len(pieces) == 1 else None) for piece in pieces]
+    base_step = min((step for step in steps if step is not None), default=None)
+    interpolate = rover_step is not None and base_step is not None and base_step > rover_step + 1e-6
 
     folder = Path(folder)
     for source in (rover, *pieces, *(path for path, _ in nav_files)):  # the program writes and deletes files in there

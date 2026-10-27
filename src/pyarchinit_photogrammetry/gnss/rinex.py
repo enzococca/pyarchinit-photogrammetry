@@ -74,7 +74,7 @@ class RinexInfo:
     antenna: str  # the type, with the radome
     approx_xyz: tuple[float, float, float] | None  # ECEF (m); None when absent or all zeros
     antenna_delta_hen: tuple[float, float, float] | None  # the antenna above the mark, then east, north (m)
-    interval: float | None  # seconds between epochs
+    interval: float | None  # seconds between epochs, as the header says (``epoch_interval`` also reads the epochs)
     first: datetime | None  # of the first and last epoch, in GPS time (converted from the time system of the file),
     last: datetime | None  # without a time zone
     time_system: str  # the one the times of the file are written in: GPS, GLO (UTC), GAL, QZS, BDT or IRN
@@ -270,16 +270,37 @@ def _undo_hatanaka(src: Path, dst: Path, name: str) -> None:
 _UNDO = {"gzip": _undo_gzip, "compress": _undo_compress, "zip": _undo_zip, "hatanaka": _undo_hatanaka}
 
 
+def _whole_lines(path: Path, name: str) -> None:
+    """A ``ValueError`` unless the text in ``path``, which a compress layer gave, ends with a newline. compress writes
+    no end mark and no checksum, so a file cut short decodes to its beginning without a word; RINEX, Compact RINEX and
+    navigation files always end with a line end (and an empty text is left to say what it is). The error names the
+    file ``name`` and the line the text stops in."""
+    size = path.stat().st_size
+    if size == 0:
+        return
+    with open(path, "rb") as f:
+        f.seek(size - 1)
+        if f.read(1) == b"\n":
+            return
+        f.seek(0)
+        line = 1 + sum(chunk.count(b"\n") for chunk in iter(lambda: f.read(1 << 20), b""))
+    raise ValueError(f"{name}, line {line}: the text ends in the middle of this line, the file is cut short or "
+                     "damaged: download it again")
+
+
 def _unpack(path: Path, layers: tuple[str, ...], target: Path) -> None:
     """The text of ``path`` under all its ``layers``, written to ``target``: each layer undone into a file of a private
     folder beside ``target``, the last one renamed to ``target``, which is there only when it is whole (and is never
-    written by two runs at once). Errors name ``path``, the file the user gave."""
+    written by two runs at once). The text a compress layer gives (that of RINEX or of Compact RINEX) has to end with a
+    newline, or the file is cut short. Errors name ``path``, the file the user gave."""
     scratch = Path(tempfile.mkdtemp(prefix=".unpack-", dir=target.parent))
     try:
         source = path
         for i, layer in enumerate(layers):
             out = scratch / f"layer{i + 1}"
             _UNDO[layer](source, out, path.name)
+            if layer == "compress" and layers[i + 1:i + 2] in ((), ("hatanaka",)):
+                _whole_lines(out, path.name)
             source = out
         os.replace(source, target)
     finally:
@@ -315,7 +336,8 @@ def plain(path: str | Path, folder: str | Path | None = None) -> Path:
     one file), Hatanaka - in ``folder`` (by default the cache of the program, :func:`download.cache_dir`), made once and
     used again as long as the size and the time of the file are the same. The copy is written beside itself and renamed
     when it is whole, so a file that is damaged or cut short leaves nothing: it is a ``ValueError`` naming the file (and
-    the line, for a Hatanaka file), or the files of an archive that holds several. A Hatanaka file needs a decoder
+    the line, for a Hatanaka file and for text under the Unix compress that does not end with a newline, which has no
+    checksum to tell it is cut short), or the files of an archive that holds several. A Hatanaka file needs a decoder
     (``_native.crx2rnx``): without one it is a ``ValueError`` that says what to install."""
     path = Path(path)
     return _plain(path, compression(path), folder)
@@ -642,6 +664,20 @@ def _header_lines(path: Path) -> list[str]:
             if _header_end(line):
                 break
     return lines
+
+
+def epoch_interval(path: str | Path, info: RinexInfo | None = None) -> float | None:
+    """The seconds between the epochs of an observation file: the ``INTERVAL`` of its header, which RINEX leaves
+    optional, else what its first epochs show (the middle step of the first 30); None for a file that does not say and
+    shows no step (a single epoch) and for a navigation file. ``info`` is the :func:`header` of the file when the
+    caller has it."""
+    path = Path(path)
+    info = info or header(path)
+    if info.kind != "obs":
+        return None
+    if info.interval is not None:
+        return info.interval
+    return _observed_interval(plain(path), info.version)
 
 
 def _observed_interval(path: Path, version: float) -> float | None:

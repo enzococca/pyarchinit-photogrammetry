@@ -26,6 +26,10 @@ WHOLE = DATA / "rtklib" / "07590920.05o"  # station 0759: RINEX 2.10, GPS, 120 e
 CRINEX = DATA / "crinex"
 HOUR = "KRAW00POL_R_20262991000_01H_30S_MO.crx"  # an hour of the EPN station KRAW00POL in Compact RINEX 3.0
 COMPRESS = DATA / "unix_compress"
+# the sample of station 0759 once more, from a folder whose files are not converted when they are checked out
+# (-text): those of tests/data/rtklib are, and a checkout on Windows may make them CRLF - what the decoders give back
+# is compared with these bytes, not with the files of RTKLIB
+WHOLE_BYTES = (CRINEX / "07590920.05d.expected").read_bytes()
 
 fake_rtklib = test_gnss_ppk.fake_rtklib  # the fixture of the tests of the PPK: RTKLIB as a stand-in program
 
@@ -37,10 +41,16 @@ needs_a_decoder = pytest.mark.skipif(_native.kernel("crx2rnx") is None and _nati
 
 
 def _files(folder: Path) -> list[str]:
-    """The names of the files under ``folder`` (not of its folders); none when there is no folder."""
+    """The names of the files under ``folder`` (not of its folders), with "/" between the folders on every system;
+    none when there is no folder."""
     if not folder.exists():
         return []
-    return sorted(str(p.relative_to(folder)) for p in folder.rglob("*") if p.is_file())
+    return sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*") if p.is_file())
+
+
+def _first_lines(path: Path, count: int) -> bytes:
+    """The first ``count`` lines of a text file as bytes with LF line ends, whatever a checkout did to its own."""
+    return b"".join(line + b"\n" for line in path.read_bytes().replace(b"\r\n", b"\n").split(b"\n")[:count])
 
 
 def _gz(source: Path, target: Path) -> Path:
@@ -193,7 +203,21 @@ def test_compress_z_with_other_widths_and_a_cleared_dictionary(tmp_path, name, s
     that compress pads when the width grows or the dictionary is cleared."""
     out = tmp_path / "original"
     lzw.decompress(COMPRESS / name, out)
-    assert out.read_bytes() == WHOLE.read_bytes()[:size]
+    assert out.read_bytes() == WHOLE_BYTES[:size]
+
+
+def test_the_sample_of_the_decoders_is_the_sample_of_rtklib():
+    """What the decoders are compared with is the sample of tests/data/rtklib (that a checkout may give CRLF)."""
+    assert WHOLE_BYTES.replace(b"\r\n", b"\n") == WHOLE.read_bytes().replace(b"\r\n", b"\n")
+    assert b"\r" not in WHOLE_BYTES
+
+
+def test_compress_z_of_a_navigation_file(tmp_path):
+    out = tmp_path / "nav"
+    lzw.decompress(COMPRESS / "nav-first300lines-b12.Z", out)
+    assert out.read_bytes() == _first_lines(PPK_NAV, 300)
+    info = rinex.header(COMPRESS / "nav-first300lines-b12.Z")
+    assert (info.kind, info.compressed, info.systems) == ("nav", "compress", ("G",))
 
 
 def _stream(groups: list[tuple[int, list[int]]], max_bits: int = 16, block: bool = True) -> bytes:
@@ -207,6 +231,24 @@ def _stream(groups: list[tuple[int, list[int]]], max_bits: int = 16, block: bool
         size = width if i < len(groups) - 1 else -(-len(codes) * width // 8)
         data += word.to_bytes(width, "little")[:size]
     return bytes(data)
+
+
+def _literal_z(data: bytes, max_bits: int = 16) -> bytes:
+    """A compress stream that codes every byte as itself, so that nothing is compressed: made without compress for any
+    content (the uncompress of the system reads it). The codes are as wide as the dictionary of the decoder needs, which
+    gains an entry with each of them: 9 bits for the first 256, 10 for the next 512, and so on; eight to a group."""
+    out = bytearray([0x1F, 0x9D, 0x80 | max_bits])
+    i, bits = 0, 9
+    while i < len(data):
+        if i and 256 + i > (1 << bits) - 1 and bits < max_bits:
+            bits += 1
+        group = data[i:i + 8]
+        word = 0
+        for k, byte in enumerate(group):
+            word |= byte << (k * bits)
+        out += word.to_bytes(bits, "little")[:-(-len(group) * bits // 8)]
+        i += len(group)
+    return bytes(out)
 
 
 def _unpacked(tmp_path: Path, data: bytes, name: str = "made.Z") -> bytes:
@@ -232,6 +274,14 @@ def test_compress_streams_made_by_hand(tmp_path):
     # only the header: nothing; the bits left at the end of the last group, not enough for a code, are nothing
     assert _unpacked(tmp_path, _stream([])) == b""
     assert _unpacked(tmp_path, _stream([(9, [a, b])])) == b"ab"  # 18 bits in 3 bytes
+
+
+@pytest.mark.parametrize("size", [0, 1, 255, 256, 257, 263, 264, 767, 768, 769, 5000, 70000])
+def test_compress_streams_of_literals_at_the_widths_changes(tmp_path, size):
+    """Streams that code each byte as itself (the dictionary gains an entry with each), around the sizes where the
+    codes get wider and with the dictionary full: the bytes come back."""
+    data = bytes((i * 7 + i // 256) % 256 for i in range(size))
+    assert _unpacked(tmp_path, _literal_z(data)) == data
 
 
 @pytest.mark.parametrize("data, match", [
@@ -342,7 +392,7 @@ def test_plain_reused_until_the_file_changes(tmp_path):
     shutil.copyfile(COMPRESS / "b11-whole.Z", packed)
     cache = tmp_path / "cache"
     first = rinex.plain(packed, cache)
-    assert first.parent == cache and first.suffix == ".rnx" and first.read_bytes() == WHOLE.read_bytes()
+    assert first.parent == cache and first.suffix == ".rnx" and first.read_bytes() == WHOLE_BYTES
     stamp = first.stat().st_mtime_ns
     assert rinex.plain(packed, cache) == first and first.stat().st_mtime_ns == stamp  # used again, not made again
     text = first.read_bytes()
@@ -353,9 +403,9 @@ def test_plain_reused_until_the_file_changes(tmp_path):
     assert second != first and second.read_bytes() == text
     assert _files(cache) == [second.name]
     # another size: another copy of what the file holds now
-    shutil.copyfile(COMPRESS / "b9-first40k.Z", packed)
+    shutil.copyfile(COMPRESS / "nav-first300lines-b12.Z", packed)
     third = rinex.plain(packed, cache)
-    assert third not in (first, second) and third.read_bytes() == WHOLE.read_bytes()[:40960]
+    assert third not in (first, second) and third.read_bytes() == _first_lines(PPK_NAV, 300)
     other = tmp_path / "other.05d.Z"  # another file keeps its copy
     shutil.copyfile(COMPRESS / "b11-whole.Z", other)
     fourth = rinex.plain(other, cache)
@@ -415,6 +465,61 @@ def test_a_damaged_z_file_is_named(tmp_path, name, magic):
         with pytest.raises(ValueError) as error:  # damaged, or text that is not RINEX: either way the file is named
             call(path)
         assert name in str(error.value)
+
+
+def test_a_compress_file_cut_short_is_refused(tmp_path, gnss_folder, fake_rtklib):
+    """compress writes no end mark and no checksum, so a file that stops decodes to its beginning without a word. RINEX,
+    Compact RINEX and navigation files all end with a newline: text that does not is a file cut short. It is refused,
+    with the file and the line it stops in; nothing of it stays in the cache, and RTKLIB never runs on it."""
+    observations = (COMPRESS / "b11-whole.Z").read_bytes()
+    navigation = (COMPRESS / "nav-first300lines-b12.Z").read_bytes()
+    cut_observations = observations[:len(observations) * 2 // 3]
+    cuts = {"base.05o.Z": cut_observations, "brdc0920.05n.Z": navigation[:len(navigation) // 2],
+            "base.05o.Z.gz": gzip.compress(cut_observations)}  # a gzip file around the one that is cut
+    for name, data in cuts.items():
+        packed = gzip.decompress(data) if name.endswith(".gz") else data
+        assert not lzw.head(packed, 1 << 30).endswith(b"\n"), name  # the cut is in the middle of a line
+        path = tmp_path / name
+        path.write_bytes(data)
+        for call in (rinex.header, rinex.time_span, rinex.plain):
+            with pytest.raises(ValueError, match="cut short") as error:
+                call(path)
+            assert name in str(error.value) and re.search(r"line \d+", str(error.value)), str(error.value)
+        assert _files(gnss_folder) == [] and not list(gnss_folder.rglob(".unpack-*")), name
+    # the files RTKLIB would be given: refused before it runs, and before the work folder is made
+    work = tmp_path / "work"
+    with pytest.raises(ValueError, match="cut short"):
+        ppk.solve(PPK_ROVER, tmp_path / "base.05o.Z", [PPK_NAV], folder=work)
+    with pytest.raises(ValueError, match="cut short"):
+        ppk.solve(PPK_ROVER, PPK_BASE, [tmp_path / "brdc0920.05n.Z"], folder=work)
+    assert fake_rtklib() == [] and not work.exists()
+    # whole, they are read
+    assert rinex.header(COMPRESS / "b11-whole.Z").marker == "0759"
+    assert rinex.header(COMPRESS / "nav-first300lines-b12.Z").kind == "nav"
+
+
+def test_the_text_under_compress_has_to_end_with_a_newline(tmp_path, gnss_folder):
+    """The rule exactly: RINEX text under the Unix compress that ends with a line end is read, text that stops short of
+    it is cut short, and a layer that is not text (a gzip file under compress) is not asked for one."""
+    text = _first_lines(PPK_NAV, 60)
+    whole = tmp_path / "brdc0920.05n.Z"
+    whole.write_bytes(_literal_z(text))
+    info = rinex.header(whole)
+    assert (info.kind, info.compressed) == ("nav", "compress") and rinex.plain(whole).read_bytes() == text
+    stops = tmp_path / "stops.05n.Z"
+    stops.write_bytes(_literal_z(text[:-1]))  # the last line without its line end
+    with pytest.raises(ValueError, match="cut short") as error:
+        rinex.header(stops)
+    assert str(error.value).startswith("stops.05n.Z, line 60:")
+    around = tmp_path / "around.05n.Z"
+    around.write_bytes(_literal_z(gzip.compress(text)))  # a gzip file ends with the size of the text, not a newline
+    assert rinex.compression(around) == ("compress", "gzip")
+    info = rinex.header(around)
+    assert (info.kind, info.compressed) == ("nav", "compress+gzip") and rinex.plain(around).read_bytes() == text
+    empty = tmp_path / "empty.05n.Z"  # nothing is not a cut: it is not RINEX
+    empty.write_bytes(_literal_z(b""))
+    with pytest.raises(ValueError, match="not a RINEX file"):
+        rinex.header(empty)
 
 
 @needs_a_decoder
@@ -559,6 +664,7 @@ def test_join_a_piece_of_rinex_3_and_a_hatanaka_file(tmp_path):
     assert (info.first, info.last) == rinex.time_span(expected)
     # (the decoded hour is in the cache, which is in the folder of the test)
     assert [f for f in _files(tmp_path) if not f.startswith("gnss/")] == ["first.rnx", "hour.rnx"]
+    assert len(_files(tmp_path / "gnss")) == 1
 
 
 def test_join_reports_gaps(tmp_path):
@@ -680,20 +786,23 @@ def test_join_names_a_gzip_piece_that_is_cut_short(tmp_path):
 
 
 def test_solve_reads_compressed_inputs_as_they_are(tmp_path, fake_rtklib):
-    """RTKLIB is given plain copies of a rover in a zip, a base under the Unix compress and a navigation file in a
-    gzip (it would run a shell command for any of them): the bytes of the files they hold."""
+    """RTKLIB is given plain copies of a rover in a zip, a base under the Unix compress and navigation files in a
+    gzip and under the Unix compress (it would run a shell command for any of them): the bytes of the files they
+    hold."""
     rover = _zip(tmp_path / "rover.zip", [("30400920.05o", PPK_ROVER.read_bytes())])
     base = tmp_path / "base.05d.Z"  # compress only: the Hatanaka layer needs the core, which the fake switches off
     shutil.copyfile(COMPRESS / "b11-whole.Z", base)
     nav = _gz(PPK_NAV, tmp_path / "nav.05n.gz")
+    nav_z = tmp_path / "brdc0920.05n.Z"
+    shutil.copyfile(COMPRESS / "nav-first300lines-b12.Z", nav_z)
     work = tmp_path / "work"
-    solution = ppk.solve(rover, base, [nav], folder=work)
+    solution = ppk.solve(rover, base, [nav, nav_z], folder=work)
     (run,) = fake_rtklib()
-    assert run["inputs"] == [_sha256(PPK_ROVER.read_bytes()), _sha256(PPK_BASE.read_bytes()),
-                             _sha256(PPK_NAV.read_bytes())]
-    assert run["folder"] == ["base.obs", "nav1.nav", "rover.obs"]
+    assert run["inputs"] == [_sha256(PPK_ROVER.read_bytes()), _sha256(WHOLE_BYTES), _sha256(PPK_NAV.read_bytes()),
+                             _sha256(_first_lines(PPK_NAV, 300))]
+    assert run["folder"] == ["base.obs", "nav1.nav", "nav2.nav", "rover.obs"]
     assert solution.inputs == {"rover": str(rover.absolute()), "base": str(base.absolute()),
-                               "navs": [str(nav.absolute())]}
+                               "navs": [str(nav.absolute()), str(nav_z.absolute())]}
     assert solution.base["file"] == "base.05d.Z" and solution.base["name"] == "0759"
     assert sorted(p.name for p in work.iterdir()) == sorted(
         [solution.path.name, solution.path.with_suffix(".conf").name])
@@ -774,6 +883,55 @@ def test_base_interval_longer_than_rover_interpolates(tmp_path, fake_rtklib):
     rover = _rewrite_header(PPK_ROVER, tmp_path / "rover-20.05o", _on_label("INTERVAL", f"{20.0:10.3f}"))
     ppk.solve(rover, [a, b], [PPK_NAV], folder=work)
     assert _options(fake_rtklib()[-1]["options"])["misc-timeinterp"] == "on"  # 30 s over 20
+
+
+def _retimed(records: list[list[str]], seconds: float) -> list[list[str]]:
+    """The records of a RINEX 2 file of 2005-04-02 with their epochs ``seconds`` apart from 00:00:00."""
+    out = []
+    for k, record in enumerate(records):
+        minute, second = divmod(k * seconds, 60)
+        out.append([f" 05  4  2  0 {int(minute):2d}{second:11.7f}" + record[0][26:]] + record[1:])
+    return out
+
+
+def test_an_interval_the_header_does_not_say_is_read_from_the_epochs(tmp_path, fake_rtklib):
+    """INTERVAL is optional in RINEX: a rover that records every second without saying so still has a base of 30 s
+    interpolated (RTKLIB would pair each of its epochs with a base epoch up to 30 s old), also a base that is in pieces
+    that do not say it either. A rover that is at 30 s, or has one epoch, is not."""
+    header, records = _records(PPK_ROVER)
+    no_interval = [line for line in header if _label(line) != "INTERVAL"]
+    fast = _piece(tmp_path / "fast.05o", no_interval, _retimed(records[:20], 1.0))
+    slow = _piece(tmp_path / "slow.05o", no_interval, records[:20])
+    single = _piece(tmp_path / "single.05o", no_interval, records[:1])
+    assert [rinex.header(p).interval for p in (fast, slow, single)] == [None, None, None]
+    assert [rinex.epoch_interval(p) for p in (fast, slow, single)] == [1.0, 30.0, None]
+    assert rinex.epoch_interval(PPK_ROVER) == 30.0  # the header says it
+    assert rinex.epoch_interval(PPK_NAV) is None  # not observations
+    work = tmp_path / "work"
+
+    def interpolated(rover, base) -> bool:
+        ppk.solve(rover, base, [PPK_NAV], folder=work)
+        return "misc-timeinterp" in _options(fake_rtklib()[-1]["options"])
+
+    base_no_interval = _rewrite_header(PPK_BASE, tmp_path / "base.05o", _on_label("INTERVAL", None))
+    assert rinex.header(base_no_interval).interval is None
+    assert interpolated(fast, PPK_BASE) and interpolated(fast, base_no_interval)
+    assert not interpolated(slow, PPK_BASE) and not interpolated(slow, base_no_interval)
+    assert not interpolated(single, PPK_BASE)  # one epoch says nothing
+    # the base in pieces without the line: the joined header has no interval either
+    base_header, base_records = _records(PPK_BASE)
+    no_base_interval = [line for line in base_header if _label(line) != "INTERVAL"]
+    pieces = [_piece(tmp_path / f"b{k}.05o", no_base_interval, base_records[a:b])
+              for k, (a, b) in enumerate([(0, 60), (58, 120)])]
+    assert interpolated(fast, pieces) and not interpolated(slow, pieces)
+    # the closest of the pieces, wherever it is: one at 10 s among pieces at 30 s is not a base further apart than a
+    # rover at 20 s, whether it says so or not (the other piece says 30)
+    ten = _piece(tmp_path / "ten.05o", no_base_interval, _retimed(base_records[:30], 10.0))
+    twenty = _piece(tmp_path / "twenty.05o", no_interval, _retimed(records[:20], 20.0))
+    said = _piece(tmp_path / "said.05o", base_header, base_records[58:120])  # INTERVAL 30.0000
+    assert rinex.epoch_interval(said) == 30.0 and rinex.epoch_interval(ten) == 10.0
+    assert not interpolated(twenty, [pieces[1], ten]) and not interpolated(twenty, [said, ten])
+    assert interpolated(twenty, pieces) and interpolated(twenty, [said, pieces[0]])
 
 
 def test_config_interpolates_the_base_when_asked():
