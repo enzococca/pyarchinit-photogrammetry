@@ -39,6 +39,12 @@ BSHM_IGS = SimpleNamespace(  # solution 4, valid from 2023 day 38 to 2025 day 75
     x0=(4395951.15585911, 3080707.24503006, 3433498.28069637),
     v=(-0.0236629173713173, 0.0122074062138220, 0.0197278101932037), t0=2020.0,
     sx0=(5.34490e-3, 4.19440e-3, 4.30940e-3), sv=(1.26590e-3, 9.90940e-4, 1.02120e-3))
+ADIS_IGS = SimpleNamespace(  # solution 3, valid from 2022 day 103 to 2024 day 362: the last one that IGc20.ssc holds
+    x0=(4913652.57570628, 3945922.84024369, 995383.512247445),
+    v=(-0.0231480595363631, 0.0124181475699407, 0.0168693261520704), t0=2020.0)
+DRAG_IGS = SimpleNamespace(  # solution 2, from 2023 day 37 (the earthquake of Kahramanmaras)
+    x0=(4432980.34795523, 3149432.30002256, 3322110.74250749),
+    v=(-0.0198569875254135, 0.0142578667509555, 0.0187333162957293), t0=2020.0)
 MEDI_IGS = {  # solutions 1 (1997 day 26 to 2000 day 320) and 2 (from 2000 day 320)
     1: SimpleNamespace(x0=(4461400.47523980, 919593.864627125, 4449504.94200374),
                        v=(-0.0180923962952918, 0.0191334696817523, 0.0113657719780606), t0=2020.0),
@@ -133,8 +139,9 @@ def _m3g(name: str) -> dict:
 
 def test_station_list_merges_networks(archives, tmp_path, monkeypatch):
     listed = {s.id: s for s in stations.station_list()}
-    assert sorted(listed) == ["AQUI00ITA", "ASIR00ITA", "BSHM00ISR", "INGR00ITA", "M0SE00ITA", "MARN00ITA",
-                              "MEDI00ITA", "RMPO00ITA", "ZNTE00GRC"]
+    assert sorted(listed) == ["ADIS00ETH", "AQUI00ITA", "ASIR00ITA", "BSHM00ISR", "DRAG00ISR", "INGR00ITA",
+                              "M0SE00ITA", "MARN00ITA", "MEDI00ITA", "RMPO00ITA", "ZNTE00GRC"]
+    assert listed["DRAG00ISR"].networks == ("EPN", "IGS") and listed["ADIS00ETH"].networks == ("IGS",)
     assert all(len(s.id) == 9 and s.id == s.id.upper() for s in listed.values())
     # in the lists of the EPN and of the IGS: one station with the two networks, the position of the site log
     moses = listed["M0SE00ITA"]
@@ -184,7 +191,7 @@ def test_names_that_are_not_stations_are_left_out(archives, tmp_path, monkeypatc
     (folder / "IGSNetwork.json").write_text(json.dumps(igs))
     monkeypatch.setattr(stations, "M3G_GEOJSON", _uri(folder) + "/m3g_{network}.geojson")
     monkeypatch.setattr(stations, "IGS_NETWORK", _uri(folder / "IGSNetwork.json"))
-    assert len(stations.station_list()) == 9
+    assert len(stations.station_list()) == 11
 
 
 def test_station_list_reads_a_feature_collection_too(archives, tmp_path, monkeypatch):
@@ -195,7 +202,7 @@ def test_station_list_reads_a_feature_collection_too(archives, tmp_path, monkeyp
         features = json.loads((DATA / f"m3g_{network}.geojson").read_text())
         (folder / f"m3g_{network}.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": features}))
     monkeypatch.setattr(stations, "M3G_GEOJSON", _uri(folder) + "/m3g_{network}.geojson")
-    assert len(stations.station_list()) == 9
+    assert len(stations.station_list()) == 11
 
 
 def test_a_station_is_removed_from_the_day_it_is_removed(archives, tmp_path, monkeypatch):
@@ -343,6 +350,95 @@ def test_epn_goes_on_to_the_next_folder_when_one_cannot_be_listed(archives, monk
     assert c.source == "EPN" and "C2400" in c.citation
 
 
+def test_epn_newer_folder_with_an_unreadable_file_uses_the_saved_older_one(archives, monkeypatch, caplog):
+    aqui = _station("AQUI00ITA")
+    first = stations.coordinates(aqui, 2026.5)  # saves the solution of C2400
+    assert first.source == "EPN" and "C2400" in first.citation
+    (archives.epn / "C2415").mkdir()
+    (archives.epn / "C2415" / "EUR0OPSSNX_1996001_2026100_00U_SOL.SSC").write_text("a file that cannot be downloaded")
+    download._LISTINGS.clear()  # the listing of the weeks is kept for ten minutes
+    real = download.fetch
+
+    def fetch(url, *args, **kwargs):
+        if "C2415" in url:
+            raise download.DownloadError("the server refused", url)
+        return real(url, *args, **kwargs)
+
+    monkeypatch.setattr(download, "fetch", fetch)
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        again = stations.coordinates(aqui, 2026.5)
+    assert again == first  # the metres of the approximate position would be the result without the saved file
+    assert any("C2400" in w and "saved" in w for w in _warnings(caplog))  # and the log names the week
+
+
+def test_a_part_file_is_never_taken_for_the_saved_solution(archives, monkeypatch):
+    """Offline, the newest complete copy is used: not a ``.part`` that a killed download left, whatever its week."""
+    aqui = _station("AQUI00ITA")
+    first = stations.coordinates(aqui, 2026.5)
+    kept = download.gnss_dir() / "stations"
+    c2400 = next(kept.glob("epn_C2400_*"))
+    c2399 = kept / "epn_C2399_EUR0OPSSNX_1996001_2025263_00U_SOL.SSC"  # the week before, complete
+    shutil.copy(next((archives.epn / "C2399").glob("*_00U_SOL.SSC")), c2399)
+    (kept / f"{c2400.name}.1a2b3c4d.part").write_text("what a download that was killed leaves")
+    (kept / "epn_C2415_EUR0OPSSNX_1996001_2026100_00U_SOL.SSC.5e6f7a8b.part").write_text("and one of a newer week")
+    (kept / "epn_C2416_EUR0OPSSNX_1996001_2026110_00U_SOL.SSC").mkdir()  # nor a folder that has the name of a copy
+    monkeypatch.setattr(stations, "EPN_REFERENCE_FRAME", _uri(archives.root / "gone") + "/")
+    assert stations.coordinates(aqui, 2026.5) == first  # the newest complete copy: C2400
+    c2400.unlink()
+    older = stations.coordinates(aqui, 2026.5)
+    assert older.source == "EPN" and "C2399" in older.citation  # the next complete one, never a part file
+    c2399.unlink()
+    assert stations.coordinates(aqui, 2026.5).source == "approximate"  # part files alone are nothing
+
+
+@pytest.mark.parametrize("trouble", ["no weekly folder is listed", "no weekly folder can be read"])
+def test_epn_uses_the_saved_solution_when_no_week_can_be_found(archives, monkeypatch, caplog, trouble):
+    aqui = _station("AQUI00ITA")
+    first = stations.coordinates(aqui, 2026.5)
+    if trouble == "no weekly folder is listed":
+        for folder in archives.epn.glob("C2???"):
+            shutil.rmtree(folder)
+    else:
+        real = download.listing
+
+        def listing(url):
+            if re.search(r"/C\d{4}/?$", url):
+                raise download.DownloadError("no answer", url)
+            return real(url)
+
+        monkeypatch.setattr(download, "listing", listing)
+    download._LISTINGS.clear()
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        again = stations.coordinates(aqui, 2026.5)
+    assert again == first
+    assert any("C2400" in w and "saved" in w for w in _warnings(caplog))
+
+
+def test_epn_with_no_solution_to_use_is_a_warning(archives, caplog):
+    """An archive that answers and has no weekly folder is not a quiet miss, as a station that RING does not have is."""
+    for folder in archives.epn.glob("C2???"):
+        shutil.rmtree(folder)
+    with caplog.at_level(logging.INFO, logger="pyarchinit_photogrammetry"):
+        c = stations.coordinates(_station("AQUI00ITA"), 2026.5)
+    assert c.source == "approximate"
+    assert any("no folder of the EPN" in w for w in _warnings(caplog))
+
+
+def test_an_etrf_name_is_never_the_igs20_file(archives):
+    """With a frame in the name it is not the IGS20 solution: an ETRF2000 file read as ITRF2020 is a metre off in Italy."""
+    assert stations._EPN_SSC.fullmatch("EUR0OPSSNX_1996001_2025270_00U_SOL.SSC")
+    for name in ("EUR0OPSSNX_1996001_2025270_00U_ETRF2000_SOL.SSC", "EUR0OPSSNX_1996001_2025270_00U_SOL_ETRF2000.SSC",
+                 "EUR0OPSSNX_1996001_2025270_00U_SOL_short.SSC", "EUR0OPSSNX_1996001_2025270_ETRF2000_SOL.SSC"):
+        assert not stations._EPN_SSC.fullmatch(name), name
+    # the newest folder holds the IGS20 numbers under a name with a frame in the middle: it is not read, the week before is
+    newest = archives.epn / "C2400"
+    for solution in newest.glob("*_00U_SOL.SSC"):
+        solution.rename(newest / solution.name.replace("_00U_SOL.SSC", "_00U_ETRF2000_SOL.SSC"))
+    c = stations.coordinates(_station("AQUI00ITA"), 2026.5)
+    assert c.source == "EPN" and "C2399" in c.citation
+    assert abs(c.xyz[0] - (_at(AQUI_EPN, 2026.5)[0] + 0.05)) < 1e-4  # the numbers of C2399, 5 cm from those of C2400
+
+
 @pytest.mark.parametrize("epoch, soln", [(2020.0, 1), (2023.41, 1), (2023.42, 2), (2026.5, 2)])
 def test_solution_valid_at_the_epoch(archives, epoch, soln):
     """M0SE00ITA has a discontinuity (a second solution from 2023 day 152, that is 2023.4137): the solution that covers
@@ -370,6 +466,107 @@ def test_igs_solution_is_extrapolated_beyond_its_last_epoch(archives):
     assert np.allclose(c.xyz, _at(BSHM_IGS, 2026.5), atol=1e-6)
     assert np.allclose(c.sigma, np.hypot(BSHM_IGS.sx0, np.array(BSHM_IGS.sv) * 6.5), rtol=1e-6)
     _check_llh(c)
+
+
+@pytest.fixture
+def igs_folder(archives, tmp_path, monkeypatch):
+    """A copy of the folder of IGc20 (the solutions, the post-seismic models, the list of discontinuities) that a test can
+    change; the other services stay the ones of ``archives``."""
+    folder = tmp_path / "igs" / "IGc20"
+    folder.mkdir(parents=True)
+    for name in ("IGc20.ssc", "psd_IGc20.snx", "soln_IGc20.snx"):
+        shutil.copy(DATA / name, folder / name)
+    monkeypatch.setattr(stations, "IGS_SSC", _uri(folder / "IGc20.ssc"))
+    return folder
+
+
+def _without(path: Path, code: str) -> None:
+    """``path`` without the lines about the station ``code``."""
+    path.write_text("".join(line for line in path.read_text().splitlines(keepends=True) if f" {code} " not in line))
+
+
+def test_igc20_is_refused_for_a_station_with_post_seismic_terms(archives, caplog):
+    """The header of IGc20 says that the positions and velocities of such a station cannot be used without the model of
+    psd_IGc20.snx, which this program does not apply. DRAG00ISR is one: the earthquake of Kahramanmaras, 2023."""
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        c = stations.coordinates(_station("DRAG00ISR"), 2026.5)
+    assert c.source == "approximate" and c.sigma is None  # not even the plain line of IGc20, with its millimetres
+    assert any("post-seismic" in w and "DRAG" in w and "psd_IGc20.snx" in w for w in _warnings(caplog))
+
+
+def test_the_post_seismic_file_is_what_refuses_the_station(igs_folder):
+    _without(igs_folder / "psd_IGc20.snx", "DRAG")
+    c = stations.coordinates(_station("DRAG00ISR"), 2026.5)
+    assert c.source == "IGS" and np.allclose(c.xyz, _at(DRAG_IGS, 2026.5), atol=1e-6)
+
+
+def test_igc20_is_refused_when_the_solution_of_the_epoch_is_not_in_its_file(archives, caplog):
+    """ADIS00ETH had breaks after March 2025: soln_IGc20.snx lists solutions 4 to 7, IGc20.ssc has no coordinates for them.
+    From 2025 day 81 the solution is the sixth, from 2026 day 90 the seventh; the third (2022 to 2024) is in the file."""
+    adis = _station("ADIS00ETH")
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        for epoch in (2025.5, 2026.5):
+            assert stations.coordinates(adis, epoch).source == "approximate"
+    warned = _warnings(caplog)
+    assert any("solution 6" in w and "soln_IGc20.snx" in w and "ADIS" in w for w in warned)
+    assert any("solution 7" in w and "soln_IGc20.snx" in w and "ADIS" in w for w in warned)
+    c = stations.coordinates(adis, 2024.5)
+    assert c.source == "IGS" and np.allclose(c.xyz, _at(ADIS_IGS, 2024.5), atol=1e-6)
+
+
+def test_the_discontinuity_list_says_which_solution_is_valid_not_the_span_of_the_data(archives):
+    """BSHM00ISR: the data of its last solution end in March 2025, but soln_IGc20.snx has it valid from 2023 day 37 on."""
+    c = stations.coordinates(_station("BSHM00ISR"), 2030.0)
+    assert c.source == "IGS" and np.allclose(c.xyz, _at(BSHM_IGS, 2030.0), atol=1e-6)
+
+
+@pytest.mark.parametrize("broken, name", [("no psd file", "psd_IGc20.snx"), ("no discontinuity file", "soln_IGc20.snx"),
+                                          ("station not in the discontinuity file", "soln_IGc20.snx"),
+                                          ("discontinuity file that is not SINEX", "soln_IGc20.snx")])
+def test_igc20_is_not_used_without_the_files_that_say_when_it_holds(igs_folder, caplog, broken, name):
+    """What cannot be checked is not used: the next source answers, with a warning that names the file."""
+    if broken == "no psd file":
+        (igs_folder / "psd_IGc20.snx").unlink()
+    elif broken == "no discontinuity file":
+        (igs_folder / "soln_IGc20.snx").unlink()
+    elif broken == "station not in the discontinuity file":
+        _without(igs_folder / "soln_IGc20.snx", "BSHM")
+    else:
+        (igs_folder / "soln_IGc20.snx").write_text("<html>moved</html>\n")
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        c = stations.coordinates(_station("BSHM00ISR"), 2026.5)
+    assert c.source == "approximate"
+    assert any(name in w for w in _warnings(caplog))
+
+
+def test_the_later_solution_holds_at_a_break_and_nothing_outside_the_list_does():
+    spans = [(1, None, 2000.0), (2, 2000.0, 2010.5), (3, 2010.5, None)]
+    assert stations._valid_at(spans, 1999.999)[0] == 1
+    assert stations._valid_at(spans, 2000.0)[0] == 2  # the break belongs to the solution that begins there
+    assert stations._valid_at(spans, 2010.5)[0] == 3 and stations._valid_at(spans, 2100.0)[0] == 3
+    assert stations._valid_at([(1, 2000.0, 2001.0)], 2002.0) is None and stations._valid_at([(1, 2000.0, 2001.0)], 1999.0) is None
+
+
+def test_a_break_of_the_velocity_alone_is_not_a_position_solution(igs_folder):
+    """soln_IGc20.snx lists the breaks of the position (event P) and of the velocity (event V) with numbers of their own;
+    IGc20.ssc follows the first."""
+    soln = igs_folder / "soln_IGc20.snx"
+    soln.write_text(soln.read_text().replace(
+        " BSHM  A    2 P 23:037:04654 00:000:00000 V - \n",
+        " BSHM  A    2 P 23:037:04654 24:001:00000 V - \n BSHM  A    9 P 24:001:00000 00:000:00000 V - made up\n"))
+    c = stations.coordinates(_station("BSHM00ISR"), 2026.5)
+    assert c.source == "IGS" and np.allclose(c.xyz, _at(BSHM_IGS, 2026.5), atol=1e-6)  # solution 4, not a ninth
+
+
+def test_the_files_that_go_with_igc20_are_fetched_for_its_stations_only(archives, monkeypatch):
+    calls = _fetches(monkeypatch)
+    nowhere = stations.Station("ZZZZ00XXX", "not in IGc20", ("IGS",), 0.0, 0.0, 0.0, (6378137.0, 0.0, 0.0))
+    assert stations.coordinates(nowhere, 2026.5).source == "approximate"
+    assert [u for u in calls if "IGc20" in u] == [_uri(DATA / "IGc20.ssc")]  # only the solutions, to look for it
+    stations.coordinates(_station("BSHM00ISR"), 2026.5)
+    assert _uri(DATA / "psd_IGc20.snx") in calls and _uri(DATA / "soln_IGc20.snx") in calls  # the same folder
+    kept = {p.name for p in (download.gnss_dir() / "stations").iterdir()}
+    assert {"IGc20.ssc", "psd_IGc20.snx", "soln_IGc20.snx"} <= kept  # and the same cache
 
 
 def _write_pos(ring: Path, sid: str, whens: list[datetime], positions: np.ndarray) -> None:
@@ -696,6 +893,17 @@ def test_listing_reads_an_index(web):
     web.plan = [_Reply((DATA / "index_ring_IGS2.html").read_bytes())]
     ring = download.listing("https://webring.gm.ingv.it:44324/products/POS/IGS2/")
     assert ring == ["INGP00ITA", "INGR00ITA", "INSA00FRA", "INVE00GBR"]
+
+
+def test_listing_does_not_return_names_that_leave_the_folder(web):
+    """A link is decoded before it is judged: %2E%2E is .., ..%2F..%2Fetc%2Fpasswd goes up and down, %5C is a backslash,
+    %00 ends a name in some languages. Task 4 writes files under a name that comes from here."""
+    hostile = ["%2E%2E", "%2e%2e", "%2E", "..%2F..%2Fetc%2Fpasswd", "x%2Fy.gz", "..%5C..%5Cevil.gz", "a%5Cb.gz",
+               "a%00b.gz", "sub%2F%2F", "..", "../", ".", "./", "%2F", "//evil.example/x.gz"]
+    page = "".join(f'<a href="{href}">x</a>' for href in hostile + ["ok%20file.gz", "folder/", "plain.gz"])
+    web.plan = [_Reply(page.encode())]
+    assert download.listing("https://example.org/pub/") == ["ok file.gz", "folder/", "plain.gz"]
+    assert not download._is_entry("sub//") and not download._is_entry("/") and download._is_entry("sub/")
 
 
 def test_listing_follows_the_address_after_a_redirection(web):

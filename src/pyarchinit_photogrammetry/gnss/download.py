@@ -242,11 +242,19 @@ class _Links(HTMLParser):
             self.hrefs.extend(value for key, value in attrs if key == "href" and value)
 
 
+def _is_entry(name: str) -> bool:
+    """Whether a link name, decoded, is one entry of a folder and nothing that leads out of it: not ``.`` or ``..``, no
+    ``/`` but the one that ends the name of a folder, and no backslash or NUL (a separator, or the end of a name, to some
+    systems). Names end up as the names of files: ``..%2F..%2Fetc%2Fpasswd`` must not become a path."""
+    bare = name[:-1] if name.endswith("/") else name
+    return bool(bare) and bare not in (".", "..") and not any(c in bare for c in "/\\\0")
+
+
 def _children(page: str, hrefs: list[str]) -> list[str]:
     """The names of the entries of the folder that ``page`` (the address of the page) lists, among its links: the ones
     that lead to something directly inside that folder. Apache writes relative links, IIS paths from the root without
     a slash after a folder; both are met, and so are skipped the sort links (``?C=N;O=D``), the parent folder, the folders
-    above it, the assets and the links to other sites."""
+    above it, the assets and the links to other sites. A name is decoded once, then judged by :func:`_is_entry`."""
     base = urllib.parse.urlsplit(page)
     folder = base.path if base.path.endswith("/") else base.path.rsplit("/", 1)[0] + "/"
     names: list[str] = []
@@ -262,7 +270,7 @@ def _children(page: str, hrefs: list[str]) -> list[str]:
         if not rest.strip("/") or "/" in rest.rstrip("/"):
             continue
         name = urllib.parse.unquote(rest)
-        if name not in names:
+        if _is_entry(name) and name not in names:
             names.append(name)
     return names
 

@@ -4,9 +4,11 @@ The list is the union of the stations of the EPN and of RING (M3G, the metadata 
 the network of the IGS, each with an approximate position - enough to sort them by distance. The precise position
 comes, in this order, from the multi-year solution of the EPN in IGS20, from IGc20 (the IGS realisation of ITRF2020),
 from the daily solutions of RING (a straight line through the last two years) and, when there is nothing else, from
-the approximate position, which is only good to metres. Everything is in ITRF2020 (IGS20) and at the epoch asked for:
-the stations move with their plate, about 2 cm a year in Europe, and a base is only good to the centimetre at the
-epoch of its coordinates.
+the approximate position, which is only good to metres. IGc20 is used only where its own header allows it: not for a
+station that has post-seismic deformation terms (``psd_IGc20.snx``), and only with the solution that
+``soln_IGc20.snx`` says is valid at the epoch, which ``IGc20.ssc`` lacks after a break that came after March 2025.
+Everything is in ITRF2020 (IGS20) and at the epoch asked for: the stations move with their plate, about 2 cm a year in
+Europe, and a base is only good to the centimetre at the epoch of its coordinates.
 
 The addresses, and the layout of what they return, are those of ``tests/data/gnss/README.md``; the files that are
 downloaded are kept in ``stations`` in the GNSS folder (:func:`download.gnss_dir`)."""
@@ -42,7 +44,8 @@ RING_POS = "https://webring.gm.ingv.it:44324/products/POS/IGS2/{id}/{id}.gipsyX.
 NETWORKS = ("EPN", "IGS", "RING")
 FRAME = "ITRF2020"
 LIST_AGE = timedelta(days=7)  # the list of stations is fetched again after a week
-IGS_SSC_AGE = timedelta(days=30)  # the file of IGc20 (made once a year) after a month
+IGS_SSC_AGE = timedelta(days=30)  # the file of IGc20 and its post-seismic models (made once a year) after a month
+IGS_SOLN_AGE = timedelta(days=7)  # the list of its discontinuities, which grows as breaks come, after a week
 RING_POS_AGE = timedelta(days=7)  # a series of RING (it grows every few months) after a week
 EPN_FOLDERS = 3  # how many of the newest Cwwww folders are looked into for the multi-year solution
 MAX_DISTANCE = 1000.0  # m: a precise position farther than this from the position in the list is another station
@@ -51,9 +54,16 @@ MIN_DAYS = 30  # the fewest daily positions that make a series
 
 _ID = re.compile(r"[A-Z0-9]{9}")  # a station: four characters, the monument and receiver numbers, the country
 _WEEK = re.compile(r"C(\d{4})/?")
-# the multi-year solution of the EPN: with no frame in the name it is the IGS20 one (the others end in _ETRF2000 ...)
-_EPN_SSC = re.compile(r"EUR0OPSSNX_(\d{7})_(\d{7})_\w+?_SOL\.SSC", re.IGNORECASE)
+# The multi-year solution of the EPN: with no frame in the name it is the IGS20 one (the others end in _ETRF2000 ...).
+# Between the dates and _SOL there is only the length (00U): a frame there would be read as ITRF2020.
+_EPN_NAME = r"EUR0OPSSNX_\d{7}_(?P<end>\d{7})_\d{2}[A-Z]_SOL\.SSC"
+_EPN_SSC = re.compile(_EPN_NAME, re.IGNORECASE)
+# a copy kept in the stations folder: epn_Cwwww_ and the name, nothing after it (not the .part of a download that was killed)
+_EPN_COPY = re.compile(rf"epn_C(?P<week>\d{{4}})_{_EPN_NAME}", re.IGNORECASE)
 _SINEX_TYPES = ("STAX", "STAY", "STAZ", "VELX", "VELY", "VELZ")
+_PSD_TYPE = re.compile(r"[AT](?:LOG|EXP)_[ENU]")  # the terms of a post-seismic model: amplitude and time, log and exp
+# CODE PT SOLN T DATA_START DATA_END EVENT comment: EVENT is P for a break of the position and V for one of the velocity
+_DISCONTINUITY = re.compile(r"\s*(\w{4})\s+(\S+)\s+(\d+)\s+\w\s+(\d\d:\d{3}:\d{5})\s+(\d\d:\d{3}:\d{5})\s+([PV])\b")
 
 
 def _now() -> datetime:
@@ -287,32 +297,59 @@ def _cached(url: str, name: str, max_age: timedelta | None, progress) -> Path:
         return path
 
 
-def _epn_file(progress) -> tuple[Path, str]:
-    """The multi-year solution of the EPN in IGS20 and the name of the folder it comes from (``"C2400"``): the file of
-    the newest ``Cwwww`` folder that has one."""
+def _saved_epn_solution() -> tuple[Path, str] | None:
+    """The newest complete copy of the EPN solution in the stations folder and the name of its week (``"C2400"``), or None:
+    the name has to be exactly ``epn_Cwwww_`` and the name of the file, so a ``.part`` that a download left when it was
+    killed is never one."""
+    copies = []
+    for path in _stations_dir().iterdir():
+        match = _EPN_COPY.fullmatch(path.name)
+        if match and path.is_file():
+            copies.append(((int(match.group("week")), match.group("end")), path))
+    if not copies:
+        return None
+    (week, _end), path = max(copies)
+    return path, f"C{week}"
+
+
+def _fresh_epn_file(progress) -> tuple[Path, str]:
+    """The multi-year solution of the EPN in IGS20 of the newest ``Cwwww`` folder that has one, and the name of the
+    folder (``"C2400"``): the copy kept when the week is the one that is kept, else downloaded."""
     root = EPN_REFERENCE_FRAME if EPN_REFERENCE_FRAME.endswith("/") else EPN_REFERENCE_FRAME + "/"
-    try:
-        names = download.listing(root)
-    except download.DownloadError as exc:
-        kept = sorted(_stations_dir().glob("epn_C[0-9][0-9][0-9][0-9]_*"), key=lambda p: p.name)
-        if not kept:
-            raise
-        log.warning("%s; using the file of the EPN saved on %s: %s", exc,
-                    datetime.fromtimestamp(kept[-1].stat().st_mtime).date().isoformat(), kept[-1].name)
-        return kept[-1], kept[-1].name.split("_", 2)[1]
+    names = download.listing(root)
     weeks = sorted((int(m.group(1)) for m in map(_WEEK.fullmatch, names) if m), reverse=True)
     failure: download.DownloadError | None = None
     for week in weeks[:EPN_FOLDERS]:
         folder = f"C{week}"
         url = f"{root}{folder}/"
         try:
-            files = sorted((m for m in map(_EPN_SSC.fullmatch, download.listing(url)) if m), key=lambda m: m.group(2))
+            files = sorted((m for m in map(_EPN_SSC.fullmatch, download.listing(url)) if m),
+                           key=lambda m: m.group("end"))
         except download.DownloadError as exc:  # the folder before may be fine
             failure = exc
             continue
         if files:
             return _cached(url + files[-1].group(0), f"epn_{folder}_{files[-1].group(0)}", None, progress), folder
     raise failure or download.NotPublished(f"{root}: no folder of the EPN has the multi-year solution in IGS20", root)
+
+
+def _epn_file(progress) -> tuple[Path, str]:
+    """The multi-year solution of the EPN in IGS20 and the name of its folder (``"C2400"``). Whenever a fresh one cannot
+    be had - the archive does not answer, lists no weekly folder, cannot list them or the newest has a file that does not
+    come - the newest complete copy that is kept is used, with a warning that names its week; without one the error
+    stands (an archive that answers and has no solution is an error too, not a quiet miss)."""
+    try:
+        return _fresh_epn_file(progress)
+    except download.DownloadError as exc:
+        kept = _saved_epn_solution()
+        if kept is None:
+            if isinstance(exc, download.NotPublished):
+                raise download.DownloadError(str(exc), exc.url) from exc
+            raise
+        path, folder = kept
+        log.warning("%s; using the solution of the EPN %s saved on %s", exc, folder,
+                    datetime.fromtimestamp(path.stat().st_mtime).date().isoformat())
+        return path, folder
 
 
 # --- SINEX: the solutions of a station ------------------------------------------------------------------------------
@@ -352,6 +389,25 @@ def _float(text: str) -> float:
     return float(text.replace("D", "E").replace("d", "e"))
 
 
+def _sinex_rows(path: Path, blocks: set[str]):
+    """The data lines of a SINEX file as ``(block, number, line)``: those inside a block that are not blank or a comment.
+    The names of the blocks met are added to ``blocks``. A ``ValueError`` names the file when its first line does not
+    start with ``%=SNX``."""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        if not f.readline().startswith("%=SNX"):
+            raise ValueError(f"{path.name}: not a SINEX file (the first line should start with %=SNX): its layout is "
+                             "not one this program reads")
+        block = ""
+        for number, line in enumerate(f, start=2):
+            if line.startswith("+"):
+                block = (line[1:].split() or [""])[0]
+                blocks.add(block)
+            elif line.startswith("-"):
+                block = ""
+            elif line.strip() and line[0] not in "*%":
+                yield block, number, line
+
+
 def _read_sinex(path: Path, code: str) -> list[_Solution]:
     """The solutions of the station ``code`` (4 characters) in a SINEX file: from ``SOLUTION/EPOCHS`` the span of each
     (``DATA_START``, ``DATA_END``) and from ``SOLUTION/ESTIMATE`` its ``STAX``..``STAZ`` and ``VELX``..``VELZ`` at the
@@ -361,41 +417,28 @@ def _read_sinex(path: Path, code: str) -> list[_Solution]:
     values: dict[int, dict[str, tuple[float, float]]] = {}
     refs: dict[int, float | None] = {}
     points: set[str] = set()
-    block, estimates = "", False
-    with open(path, encoding="utf-8", errors="replace") as f:
-        if not f.readline().startswith("%=SNX"):
-            raise ValueError(f"{path.name}: not a SINEX file (the first line should start with %=SNX): its layout is "
-                             "not one this program reads")
-        for number, line in enumerate(f, start=2):
-            if line.startswith("+"):
-                block = line[1:].strip()
-                estimates = estimates or block == "SOLUTION/ESTIMATE"
-                continue
-            if line.startswith("-"):
-                block = ""
-                continue
-            if not line.strip() or line[0] in "*%":
-                continue
-            fields = line.split()
-            try:
-                if block == "SOLUTION/EPOCHS":
-                    # CODE PT SOLN T DATA_START DATA_END MEAN_EPOCH: counted from the end, the point may be blank
-                    if len(fields) >= 6 and fields[0].upper() == code:
-                        points.add(fields[1] if len(fields) == 7 else "")
-                        spans[int(fields[-5])] = (_sinex_epoch(fields[-3]), _sinex_epoch(fields[-2]))
-                elif block == "SOLUTION/ESTIMATE":
-                    # INDEX TYPE CODE PT SOLN REF_EPOCH UNIT S VALUE STD_DEV
-                    if len(fields) >= 9 and fields[2].upper() == code and fields[1] in _SINEX_TYPES:
-                        kind, unit = fields[1], fields[-4]
-                        if unit != ("m" if kind.startswith("STA") else "m/y"):
-                            raise ValueError(f"{kind} in {unit}")
-                        soln = int(fields[-6])
-                        values.setdefault(soln, {})[kind] = (_float(fields[-2]), _float(fields[-1]))
-                        if kind == "STAX":
-                            refs[soln] = _sinex_epoch(fields[-5])
-            except ValueError as exc:
-                raise ValueError(f"{path.name}, line {number}: {exc}") from None
-    if not estimates:
+    blocks: set[str] = set()
+    for block, number, line in _sinex_rows(path, blocks):
+        fields = line.split()
+        try:
+            if block == "SOLUTION/EPOCHS":
+                # CODE PT SOLN T DATA_START DATA_END MEAN_EPOCH: counted from the end, the point may be blank
+                if len(fields) >= 6 and fields[0].upper() == code:
+                    points.add(fields[1] if len(fields) == 7 else "")
+                    spans[int(fields[-5])] = (_sinex_epoch(fields[-3]), _sinex_epoch(fields[-2]))
+            elif block == "SOLUTION/ESTIMATE":
+                # INDEX TYPE CODE PT SOLN REF_EPOCH UNIT S VALUE STD_DEV
+                if len(fields) >= 9 and fields[2].upper() == code and fields[1] in _SINEX_TYPES:
+                    kind, unit = fields[1], fields[-4]
+                    if unit != ("m" if kind.startswith("STA") else "m/y"):
+                        raise ValueError(f"{kind} in {unit}")
+                    soln = int(fields[-6])
+                    values.setdefault(soln, {})[kind] = (_float(fields[-2]), _float(fields[-1]))
+                    if kind == "STAX":
+                        refs[soln] = _sinex_epoch(fields[-5])
+        except ValueError as exc:
+            raise ValueError(f"{path.name}, line {number}: {exc}") from None
+    if "SOLUTION/ESTIMATE" not in blocks:
         raise ValueError(f"{path.name}: not a SINEX file of coordinates (it has no SOLUTION/ESTIMATE block)")
     if not values:
         raise _Absent(f"{code} is not in {path.name}")
@@ -413,6 +456,55 @@ def _read_sinex(path: Path, code: str) -> list[_Solution]:
         raise ValueError(f"{path.name}: {code} has no solution with a position, a velocity, an epoch for them and "
                          "the span of its data")
     return found
+
+
+def _read_psd(path: Path, code: str) -> list[float | None]:
+    """The epochs (decimal years; None where SINEX gives none) of the earthquakes for which a SINEX file of
+    post-seismic models (``psd_IGc20.snx``) has terms for the station ``code``: ``ALOG_E``, ``TLOG_E``, ``AEXP_N``,
+    ``TEXP_N`` ... in ``SOLUTION/ESTIMATE``, whose reference epoch is the earthquake. Empty when it has none."""
+    epochs: list[float | None] = []
+    blocks: set[str] = set()
+    for block, number, line in _sinex_rows(path, blocks):
+        fields = line.split()
+        if (block == "SOLUTION/ESTIMATE" and len(fields) >= 9 and fields[2].upper() == code
+                and _PSD_TYPE.fullmatch(fields[1])):
+            try:
+                epoch = _sinex_epoch(fields[-5])
+            except ValueError as exc:
+                raise ValueError(f"{path.name}, line {number}: {exc}") from None
+            if epoch not in epochs:
+                epochs.append(epoch)
+    if "SOLUTION/ESTIMATE" not in blocks:
+        raise ValueError(f"{path.name}: not a SINEX file of post-seismic models (it has no SOLUTION/ESTIMATE block)")
+    return sorted(epochs, key=lambda e: -math.inf if e is None else e)
+
+
+def _read_discontinuities(path: Path, code: str) -> list[tuple[int, float | None, float | None]]:
+    """The position solutions of the station ``code`` in a SINEX list of discontinuities (``soln_IGc20.snx``): ``(number,
+    start, end)`` in decimal years, None for no limit. These are the validity periods of the solutions, which are
+    not the spans of their data; the rows of the breaks of the velocity (event ``V``) are left out. A ``ValueError``
+    names the file when it is not such a list or has nothing about the station."""
+    spans: list[tuple[int, float | None, float | None]] = []
+    blocks: set[str] = set()
+    for block, number, line in _sinex_rows(path, blocks):
+        match = _DISCONTINUITY.match(line) if block == "SOLUTION/DISCONTINUITY" else None
+        if match and match.group(1).upper() == code and match.group(6) == "P":
+            try:
+                spans.append((int(match.group(3)), _sinex_epoch(match.group(4)), _sinex_epoch(match.group(5))))
+            except ValueError as exc:
+                raise ValueError(f"{path.name}, line {number}: {exc}") from None
+    if "SOLUTION/DISCONTINUITY" not in blocks:
+        raise ValueError(f"{path.name}: not a SINEX list of discontinuities (it has no SOLUTION/DISCONTINUITY block)")
+    if not spans:
+        raise ValueError(f"{path.name} has no position solution of {code}")
+    return sorted(spans)
+
+
+def _valid_at(spans: list[tuple[int, float | None, float | None]], epoch: float):
+    """The ``(number, start, end)`` among ``spans`` that is valid at ``epoch``, from its start up to but not including its
+    end (at a break the later one holds), or None."""
+    valid = [s for s in spans if (s[1] is None or s[1] <= epoch) and (s[2] is None or epoch < s[2])]
+    return max(valid, key=lambda s: s[0]) if valid else None
 
 
 def _covering(solutions: list[_Solution], epoch: float) -> _Solution:
@@ -435,14 +527,15 @@ def _same_place(station: Station, xyz, where: str) -> None:
                          f"{station.id}: another station")
 
 
-def _from_sinex(station: Station, epoch: float, path: Path, source: str, citation: str) -> StationCoordinates:
-    solution = _covering(_read_sinex(path, station.id[:4].upper()), epoch)
+def _at_epoch(station: Station, epoch: float, solution: _Solution, where: str, source: str,
+              citation: str) -> StationCoordinates:
+    """The position of ``station`` at ``epoch`` on the line of ``solution``, with its error brought to the epoch."""
     dt = epoch - solution.ref
     xyz = tuple(float(x + v * dt) for x, v in zip(solution.xyz, solution.velocity))
     sigma = tuple(math.hypot(sx, sv * dt) for sx, sv in zip(solution.sx, solution.sv))
-    _same_place(station, xyz, path.name)
+    _same_place(station, xyz, where)
     span = f"{solution.start or 0:.2f} to {solution.end or 0:.2f}"
-    log.info("%s: solution %d of %s (data %s) at %.3f from %.1f", station.id, solution.number, path.name, span, epoch,
+    log.info("%s: solution %d of %s (data %s) at %.3f from %.1f", station.id, solution.number, where, span, epoch,
              solution.ref)
     return StationCoordinates(station, xyz, tuple(rinex.ecef_to_llh(xyz)), FRAME, epoch, source, sigma, citation)
 
@@ -456,16 +549,53 @@ def _from_epn(station: Station, epoch: float, progress) -> StationCoordinates | 
     path, folder = _epn_file(progress)
     citation = (f"EUREF Permanent GNSS Network (EPN), multi-year position and velocity solution {folder} in IGS20, "
                 f"EPN Central Bureau, Royal Observatory of Belgium, doi:10.24414/ROB-EUREF-{folder}, CC BY 4.0")
-    return _from_sinex(station, epoch, path, "EPN", citation)
+    solution = _covering(_read_sinex(path, station.id[:4].upper()), epoch)
+    return _at_epoch(station, epoch, solution, path.name, "EPN", citation)
+
+
+def _igs_companion(name: str, max_age: timedelta, progress) -> Path:
+    """A file of the folder of IGc20.ssc that says when its coordinates can be used, kept in the same cache. Without it
+    IGc20 is not used, and a plain ``DownloadError`` says so (a ``NotPublished`` would pass for a quiet miss)."""
+    try:
+        return _cached(IGS_SSC.rsplit("/", 1)[0] + "/" + name, name, max_age, progress)
+    except download.DownloadError as exc:
+        raise download.DownloadError(f"{exc}; IGc20 is not used without {name}", exc.url) from exc
 
 
 def _from_igs(station: Station, epoch: float, progress) -> StationCoordinates | None:
+    """IGc20 where its own header allows it. That header says that the positions and velocities of a station with
+    post-seismic deformation models (``psd_IGc20.snx``) cannot be used without them, and that after a break that came
+    later than the data of the frame (15 March 2025) the station has no coordinates: the solution that is valid at the
+    epoch is the one ``soln_IGc20.snx`` gives, not the last one of IGc20.ssc. The line of an IGc20 solution is used
+    only for a station without post-seismic terms and with the valid solution in the file; otherwise a ``ValueError``
+    says why and the next source answers. The two files come from the folder of IGc20.ssc and are fetched only for a
+    station that is in it."""
     if "IGS" not in station.networks:
         return None
-    path = _cached(IGS_SSC, "igc20.ssc", IGS_SSC_AGE, progress)
+    code = station.id[:4].upper()
+    ssc = _cached(IGS_SSC, "IGc20.ssc", IGS_SSC_AGE, progress)
+    solutions = _read_sinex(ssc, code)  # _Absent for a station that IGc20 does not have
+    psd = _igs_companion("psd_IGc20.snx", IGS_SSC_AGE, progress)
+    quakes = _read_psd(psd, code)
+    if quakes:
+        known = [q for q in quakes if q is not None]
+        when = f" (the earthquake of {known[0]:.2f})" if known else ""
+        raise ValueError(f"{code} has post-seismic deformation terms in {psd.name}{when}: IGc20 says that its positions "
+                         "and velocities cannot be used without that model, which this program does not apply")
+    soln = _igs_companion("soln_IGc20.snx", IGS_SOLN_AGE, progress)
+    valid = _valid_at(_read_discontinuities(soln, code), epoch)
+    if valid is None:
+        raise ValueError(f"{soln.name} has no solution of {code} that is valid at {epoch:.2f}")
+    number, start, _end = valid
+    chosen = next((s for s in solutions if s.number == number), None)
+    if chosen is None:
+        held = ", ".join(str(s.number) for s in solutions)
+        since = f" (since {start:.2f})" if start is not None else ""
+        raise ValueError(f"{soln.name} puts {code} at {epoch:.2f} in solution {number}{since}, which {ssc.name} does not "
+                         f"hold: it has solutions {held} of the station, none from a break after March 2025")
     citation = ("IGS reference frame IGc20 (the IGS realisation of ITRF2020-u2024, aligned to ITRF2020), "
                 "International GNSS Service, https://files.igs.org/pub/station/coord/IGc20/IGc20.ssc")
-    return _from_sinex(station, epoch, path, "IGS", citation)
+    return _at_epoch(station, epoch, chosen, ssc.name, "IGS", citation)
 
 
 # --- RING: a straight line through the daily positions ------------------------------------------------------------------
@@ -554,7 +684,8 @@ def _from_ring(station: Station, epoch: float, progress) -> StationCoordinates |
 
 def coordinates(station: Station, epoch: float, progress=None) -> StationCoordinates:
     """The position of ``station`` at ``epoch`` (a decimal year such as 2026.5) in ITRF2020, the best that is available:
-    the multi-year solution of the EPN in IGS20 (for the stations of the EPN), IGc20 (for those of the IGS), the daily
+    the multi-year solution of the EPN in IGS20 (for the stations of the EPN), IGc20 (for those of the IGS, where its
+    own conditions hold: no post-seismic terms, and the solution that is valid at ``epoch`` in the file), the daily
     solutions of RING, and in the end the approximate position of the list, with no ``sigma``. Where a station has a
     discontinuity (a new antenna, an earthquake) the solution that covers ``epoch`` is used. A source that cannot
     be reached, or does not make sense, is skipped with a message in the log; the files are kept for the next time and
