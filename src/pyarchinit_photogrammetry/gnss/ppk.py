@@ -83,7 +83,7 @@ class Solution:
 
     times: np.ndarray  # (N,) float64: seconds of GPS time since the GPS epoch (GPS week x 604800 + seconds of week)
     llh: np.ndarray  # (N, 3): latitude, longitude (degrees), height above the WGS84 ellipsoid (m)
-    q: np.ndarray  # (N,) int: RTKLIB's quality, 1 fix, 2 float, 4 dgps, 5 single (``QUALITY``)
+    q: np.ndarray  # (N,) int: RTKLIB's quality, 1 fix, 2 float, 4 dgps, 5 single, 6 ppp (``QUALITY``)
     ns: np.ndarray  # (N,) int: the satellites used
     sd: np.ndarray  # (N, 3): standard deviations east, north, up (m)
     # name; position [lon, lat, h] of the mark the base stands on (longitude first, as every position the program
@@ -319,7 +319,8 @@ def _gps_seconds(seconds: float, scale: str) -> float:
 def read_pos(path: str | Path) -> Solution:
     """The solution of an RTKLIB .pos file in latitude, longitude and ellipsoidal height on WGS84, also one made with
     RTKLIB's programs or Emlid Studio: the times (GPS week and seconds, or the calendar; GPS time, UTC or JST) in
-    seconds of GPS time since the GPS epoch, the rows in time order, the standard deviations east, north, up. The
+    seconds of GPS time since the GPS epoch, the rows in time order, the standard deviations east, north, up, the
+    quality Q of each row as RTKLIB writes it (:data:`QUALITY`: 6 for a PPP solution, :mod:`.ppp`). The
     columns are found by their names in the header. A file without positions, in x/y/z or e/n/u, in degrees,
     minutes and seconds, on another datum or with heights above the geoid is a ``ValueError`` saying so, a row with a
     number that is not finite (nan, inf) one naming its line; a file that does not say what its heights are is read
@@ -397,9 +398,9 @@ def read_pos(path: str | Path) -> Solution:
 def static_position(path: str | Path) -> tuple[tuple[float, float, float], int, tuple[float, float, float]]:
     """The one position of a static solution that RTKLIB wrote as a single one (:func:`config` ``static_single``) in
     the file ``path``: ``((latitude, longitude, height), Q, (east, north, up))`` - degrees and metres above the
-    ellipsoid, RTKLIB's quality (1 fix, 2 float: :data:`QUALITY`) and the standard deviations in metres, which the file
-    has as sdn, sde, sdu. A ``ValueError`` for what :func:`read_pos` refuses (a file without positions among them) and
-    for a file of more than one position: it is no single static solution."""
+    ellipsoid, RTKLIB's quality (1 fix, 2 float, 6 ppp: :data:`QUALITY`) and the standard deviations in metres, which
+    the file has as sdn, sde, sdu. A ``ValueError`` for what :func:`read_pos` refuses (a file without positions among
+    them) and for a file of more than one position: it is no single static solution."""
     solution = read_pos(path)
     if len(solution.times) != 1:
         raise ValueError(f"{solution.path.name}: {len(solution.times)} positions, not the one of a single static "
