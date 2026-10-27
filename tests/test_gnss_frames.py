@@ -102,6 +102,10 @@ def test_itrf2020_without_epoch_refused():
         crs.transform_points(ROME, "EPSG:9989", "EPSG:7792")
     with pytest.raises(ValueError, match="epoch"):  # the other way too
         crs.transform_points([[292335.0, 4642015.0, 100.0]], "EPSG:7792", "EPSG:9989")
+    # positions of RDN2008 into a system of ITRF2020: the epoch is the one to give them, in the system they go to
+    with pytest.raises(ValueError, match="EPSG:9988 is a system of ITRF2020") as refused:
+        crs.transform_points([[292335.0, 4642015.0, 100.0]], "EPSG:7792", "EPSG:9988")
+    assert "positions in ITRF2020" not in str(refused.value)
     # one epoch per position: none may be missing, and an epoch is a year
     with pytest.raises(ValueError, match="epoch"):
         frames.transform(ROME * 2, "EPSG:9989", "EPSG:7792", epoch=[2026.82, None])
@@ -172,6 +176,25 @@ def test_other_datums_through_etrf2000_or_wgs84():
     assert np.allclose(frames.transform(ed50, "EPSG:23033", "EPSG:9989"), campania, atol=1e-7)
 
 
+@pytest.mark.filterwarnings("ignore:Best transformation is not available")  # RDNAPTRANS, as for every position
+@pytest.mark.parametrize("target, plan, place", [("EPSG:3004+3855", "EPSG:3004", [12.4964, 41.9028, 100.0]),
+                                                ("EPSG:2056+5728", "EPSG:2056", [7.4474, 46.9480, 600.0]),
+                                                ("EPSG:7415", "EPSG:28992", [5.3872, 52.1552, 50.0])])
+def test_heights_into_a_national_datum_as_the_static_route(target, plan, place):
+    """Into a system with heights above a geoid on a datum outside the frames (Monte Mario, CH1903+, Amersfoort) a
+    position in ITRF2020 keeps its height, as every other position does (the static route): the ellipsoidal height of
+    the local datum is not taken for a height above the geoid (46-50 m lower without the geoid grid). The plan position
+    is the one of the horizontal system."""
+    static = crs.transform_points([place], "EPSG:4979", target)[0]
+    framed = frames.transform([place], "EPSG:9989", target, epoch=2026.82)[0]
+    # the height kept is the one of ETRF2000 (the Helmert moves it by centimetres), not one of the local datum
+    etrf2000 = frames.transform([place], "EPSG:9989", "EPSG:7931", epoch=2026.82)[0]
+    assert framed[2] == pytest.approx(etrf2000[2], abs=1e-6)
+    assert framed[2] == pytest.approx(static[2], abs=0.05)  # the static route keeps its own: no 46-50 m drop
+    assert np.allclose(framed[:2], frames.transform([place], "EPSG:9989", plan, epoch=2026.82)[0][:2], atol=1e-6)
+    assert np.allclose(frames.transform([framed], target, "EPSG:9989", epoch=2026.82)[0], place, atol=1e-7)
+
+
 def test_rows_without_a_position_pass_through():
     # a row with no number is no position, as PROJ has it: it stays without one, needs no epoch, stops nothing
     rows = [[np.nan, np.nan, np.nan], ROME[0], [12.5, np.nan, 100.0]]
@@ -216,6 +239,9 @@ def test_every_position_with_its_frame_and_epoch():
                                        epoch=2026.82)
     with pytest.raises(ValueError, match="NAD83"):
         gnss_apply.set_camera_position(cam, [12.5, 41.9, 100.0], "EPSG:4979", [0.02] * 3, "ppk", frame="NAD83")
+    # the system and the frame disagree: said first, before the epoch that is missing too
+    with pytest.raises(ValueError, match="the frame of a position in EPSG:4979 is unknown, not ITRF2020"):
+        gnss_apply.set_camera_position(cam, [12.5, 41.9, 100.0], "EPSG:4979", [0.02] * 3, "ppk", frame="ITRF2020")
     assert (cam.reference, json.dumps(cam.meta)) == before  # nothing changed
 
 
@@ -240,11 +266,11 @@ def test_camera_references_use_each_epoch():
 
 @pytest.mark.filterwarnings("ignore:Best transformation is not available")  # PROJ's own route to ETRS89, as before
 @pytest.mark.parametrize("system", ["EPSG:7792", "EPSG:25833"])
-def test_old_projects_as_before(system, monkeypatch, caplog):
+def test_old_projects_as_before(system, caplog):
     """Positions written before the frames - a record without frame and epoch, or no record at all - convert as they
-    always did: PROJ's own choice from their system to the one of the chunk, also those of a positions file typed in
-    ITRF2020 with the 1.6.0, with a warning said once."""
-    monkeypatch.setattr(frames, "_LEGACY_WARNED", set())
+    always did: PROJ's own choice from their system to the one of the chunk, bit for bit, also those of a positions
+    file typed in ITRF2020 with the 1.6.0 (into RDN2008 the WGS 84 route gives the very numbers of PROJ's ballpark,
+    into ETRS89 PROJ has a transformation of its own), with a warning said once for the chunk."""
     ch = ppg.Document().add_chunk()
     ch.crs = system
     places = [("EPSG:4326", [12.4964, 41.9028, 100.0]), ("EPSG:4979", [12.4970, 41.9030, 101.0]),
@@ -267,9 +293,10 @@ def test_old_projects_as_before(system, monkeypatch, caplog):
     for cam, expected in zip(ch.cameras, before):
         assert np.array_equal(positions[cam.key], expected) and np.array_equal(errors[cam.key]["reference"], expected)
     assert flight["frames"] == {"unknown": 6}
-    # said once, not once a photo nor once a call: converted as before, about a metre off, how to do better
+    # said once for the chunk, not once a photo nor once a call: how, how far off, and what to do for the photos
     (said,) = [r.getMessage() for r in caplog.records if r.name == FRAMES_LOG]
-    assert "EPSG:9989" in said and "as before" in said and "metre" in said and "epoch" in said
+    assert "EPSG:9989" in said and "about a metre" in said and "WGS 84" in said and "approximation" in said
+    assert "again with their epoch" in said and "ETRF2000" in said
     # the georeference fitted on them puts the cameras where PROJ puts their references
     offset = np.mean(before, axis=0)
     for cam, expected in zip(ch.cameras, before):
@@ -280,10 +307,9 @@ def test_old_projects_as_before(system, monkeypatch, caplog):
         assert np.allclose(ch.to_world(cam.center), expected, atol=1e-6)
 
 
-def test_markers_in_itrf2020_convert_as_before(tmp_path, monkeypatch, caplog):
+def test_markers_in_itrf2020_convert_as_before(tmp_path, caplog):
     """Markers carry no frame and no epoch: control points in ITRF2020 go into a chunk on RDN2008, and from the system
-    of one chunk to another's, as before, by PROJ's own choice, with the warning."""
-    monkeypatch.setattr(frames, "_LEGACY_WARNED", set())
+    of one chunk to another's, as before (bit for bit), with the warning, said for each chunk."""
     points = [[12.4964, 41.9028, 100.0], [12.4970, 41.9030, 101.0], [12.4980, 41.9020, 102.0]]
     table = tmp_path / "gcp.csv"
     table.write_text("".join(f"P{i},{x},{y},{z}\n" for i, (x, y, z) in enumerate(points)))
@@ -295,11 +321,40 @@ def test_markers_in_itrf2020_convert_as_before(tmp_path, monkeypatch, caplog):
         for m, point in zip(ch.markers, points):
             assert np.array_equal(m.reference.location, to_rdn.transform(*point))
         chunks._convert_references(ch, "EPSG:7792", "EPSG:9989")
+        other = ppg.Document().add_chunk()  # another project: its own warning, not one for the whole session
+        other.crs = "EPSG:7792"
+        assert gcp.import_reference(other, table, crs="EPSG:9989") == 3
     back = Transformer.from_crs("EPSG:7792", "EPSG:9989", always_xy=True)
     for m, point in zip(ch.markers, points):
         assert np.array_equal(m.reference.location, back.transform(*to_rdn.transform(*point)))
     said = [r.getMessage() for r in caplog.records if r.name == FRAMES_LOG]
-    assert len(said) == 2 and all("as before" in text for text in said)  # the import, the chunks
+    assert len(said) == 3  # the import and the conversion of the chunks in the first, the import in the other
+    # markers have no epoch to give them: the advice is a frame
+    assert all("ETRF2000" in text and "WGS 84" in text and "again with their epoch" not in text for text in said)
+
+
+@pytest.mark.parametrize("system, place", [("EPSG:3004", [12.4964, 41.9028, 100.0]),
+                                           ("EPSG:2056", [7.4474, 46.9480, 600.0])])
+def test_old_positions_never_take_a_ballpark(system, place, tmp_path):
+    """Where PROJ's own route from ITRF2020 is a ballpark (Monte Mario, CH1903+: 73 m off at Rome, 163 m at Bern with
+    the 1.6.0), positions and markers that carry no frame go as positions on WGS 84, as every position whose frame
+    nobody knows: within the accuracy of the transformation of the datum, metres, not a hundred."""
+    ch = ppg.Document().add_chunk()
+    ch.crs = system
+    cam = _camera(0)
+    cam.reference = Reference(location=list(place), accuracy=[1.0, 1.0, 2.0], enabled=True)
+    cam.meta["reference_crs"] = "EPSG:9989"
+    cam.meta["gnss"] = {"source": "positions_file", "status": None, "accuracy": [1.0] * 3, "height": "ellipsoidal"}
+    ch.cameras.append(cam)
+    as_wgs84 = crs.transform_points([place], "EPSG:4979", system)[0]
+    ballpark = np.array(Transformer.from_crs("EPSG:9989", system, always_xy=True).transform(*place))
+    assert np.linalg.norm(ballpark[:2] - as_wgs84[:2]) > 70.0  # what the 1.6.0 gave
+    positions, _system = gcp.camera_references(ch, ch.cameras, ch.crs)
+    assert np.allclose(positions[cam.key], as_wgs84, atol=1e-6)
+    table = tmp_path / "gcp.csv"
+    table.write_text("P,{},{},{}\n".format(*place))
+    assert gcp.import_reference(ch, table, crs="EPSG:9989") == 1
+    assert np.allclose(ch.markers[0].reference.location, as_wgs84, atol=1e-6)
 
 
 def test_the_frames_of_a_flight():

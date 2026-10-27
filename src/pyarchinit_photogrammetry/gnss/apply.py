@@ -82,14 +82,17 @@ def set_camera_position(cam: Camera, location: list[float], crs: str, accuracy: 
 
 
 def _frame_and_epoch(crs: str, frame: str | None, epoch: float | None) -> tuple[str, float | None]:
-    """The frame and the epoch :func:`set_camera_position` records for a position in ``crs``, checked."""
+    """The frame and the epoch :func:`set_camera_position` records for a position in ``crs``, checked: a frame that is
+    not the one of ``crs`` first, then the epoch (:func:`.frames.frame_and_epoch`)."""
     own = frames.frame_of(crs)
     own = frames.UNKNOWN if own in (None, frames.WGS84) else own  # a position on WGS 84: nobody knows its frame
-    frame, epoch = frames.frame_and_epoch(own if frame is None else frame, epoch)
-    if frame != own:
-        raise ValueError(f"the frame of a position in {crs} is {own}, not {frame}: the positions in {frame} are "
-                         f"written in {frames.crs_of(frame)}")
-    return frame, epoch
+    if frame is not None:
+        frames.crs_of(frame)  # a frame the program knows
+        given = frames.UNKNOWN if frame == frames.WGS84 else frame
+        if given != own:
+            raise ValueError(f"the frame of a position in {crs} is {own}, not {given}: the positions in {given} are "
+                             f"written in {frames.crs_of(given)}")
+    return frames.frame_and_epoch(own, epoch)
 
 
 def apply_mrk(chunk: Chunk, mrk_path: str | Path, photos_folder: str | Path | None = None) -> dict:
