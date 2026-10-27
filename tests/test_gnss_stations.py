@@ -1,9 +1,13 @@
 """Permanent GNSS stations (EPN, IGS, RING): the list, the nearest ones and their coordinates at the epoch of a flight,
-and the download helpers they use. The services are never reached: the URL constants of ``gnss/stations.py`` point at
-files (``file://``) - the excerpts of tests/data/gnss, captured on 2026-10-27 from M3G, the IGS and RING, and the EPN
-multi-year solution, which is synthetic because the EPN Central Bureau did not answer (see the README there)."""
+the download helpers they use, and the observation and navigation files of a station for the hours of a flight. The
+services are never reached: the URL constants of ``gnss/stations.py`` point at files (``file://``) - the excerpts of
+tests/data/gnss, captured on 2026-10-27 from M3G, the IGS and RING, and the EPN multi-year solution, which is synthetic
+because the EPN Central Bureau did not answer (see the README there) - or at trees of files that the tests write in the
+layout of the archives of BKG and RING."""
 from __future__ import annotations
 
+import functools
+import gzip
 import hashlib
 import io
 import json
@@ -22,9 +26,9 @@ import numpy as np
 import pyproj
 import pytest
 
-from pyarchinit_photogrammetry import __version__
+from pyarchinit_photogrammetry import __version__, _native
 from pyarchinit_photogrammetry.core.progress import Cancelled, Progress
-from pyarchinit_photogrammetry.gnss import download, stations
+from pyarchinit_photogrammetry.gnss import download, rinex, stations
 
 DATA = Path(__file__).parent / "data" / "gnss"
 ROME = (41.9028, 12.4964)
@@ -938,3 +942,775 @@ def test_listing_is_kept_ten_minutes(web, monkeypatch):
     assert download.listing(url) == ["one.gz"] and len(web.requests) == 1  # kept in memory, and not by reference
     clock[0] += 2
     assert download.listing(url) == ["two.gz"] and len(web.requests) == 2  # ten minutes have passed
+
+
+# --- the observations and the navigation of a station -----------------------------------------------------------------
+#
+# BKG and RING as trees of files in the layout of their archives (their index pages, looked at on 2026-10-27):
+#   BKG   EUREF|IGS/obs/<yyyy>/<ddd>/                daily files at 30 s
+#         EUREF|IGS/nrt/<ddd>/<hh>/                  hourly files at 30 s
+#         EUREF|IGS/highrate/<yyyy>/<ddd>/<a-x>/     pieces of 15 minutes at 1 s (IGS/highrate_permanent/ the same)
+#         IGS/BRDC/<yyyy>/<ddd>/                     the navigation messages of the day
+#   RING  <yyyy>/<ddd>/                              daily files at 30 s;   <yyyy>/<ddd>/<hh>/   hourly files at 1 s
+# The files hold the observations of the hour of the EPN station KRAW00POL in tests/data/crinex with the times changed
+# to those of their name. The epochs are 30 s apart whatever the interval in the name (a name is what is chosen, and a
+# day at 1 s would be 100 MB); only the tests of the Hatanaka decoder use the file as BKG distributes it.
+
+CRINEX = Path(__file__).parent / "data" / "crinex"
+RTKLIB = Path(__file__).parent / "data" / "rtklib"
+KRAW_HOUR = CRINEX / "KRAW00POL_R_20262991000_01H_30S_MO.crx"  # Compact RINEX 3.0, 2026-10-26 10:00:00 to 10:59:30 GPS
+KRAW_NAME = "KRAW00POL_R_20262991000_01H_30S_MO.crx.gz"  # what BKG calls it in EUREF/nrt/299/10/
+NAV_A, NAV_B = RTKLIB / "07590920.05n", RTKLIB / "30400920.05n"  # two navigation files with different text
+
+needs_a_decoder = pytest.mark.skipif(_native.kernel("crx2rnx") is None and _native._crx2rnx_program() is None,
+                                     reason="neither the native core 0.6 (API 9) nor a CRX2RNX program")
+
+
+def _t(day: int, hour: int = 0, minute: int = 0, second: int = 0) -> datetime:
+    """A time of October 2026 (the 26th is the day 299 of the year, the 27th the day 300), GPS time without a zone."""
+    return datetime(2026, 10, day, hour, minute, second)
+
+
+def _doy(when: datetime) -> str:
+    return f"{when.timetuple().tm_yday:03d}"
+
+
+def _made(sid: str, *networks: str) -> stations.Station:
+    return stations.Station(sid, sid, networks, 50.0, 19.9, 300.0, (3856933.0, 1397750.0, 4867718.0))
+
+
+@functools.lru_cache(maxsize=1)
+def _kraw_hour() -> tuple[list[str], list[list[str]]]:
+    """The header (without the lines that count the observations of that hour or name its first and last epoch) and four
+    epochs of the hour of KRAW00POL in plain RINEX 3.04."""
+    lines = (CRINEX / f"{KRAW_HOUR.name}.expected").read_text().splitlines()
+    end = next(i for i, line in enumerate(lines) if line.rstrip().endswith("END OF HEADER")) + 1
+    dropped = ("# OF SATELLITES", "PRN / # OF OBS", "TIME OF FIRST OBS", "TIME OF LAST OBS")
+    header = [line for line in lines[:end] if line[60:].strip() not in dropped]
+    epochs: list[list[str]] = []
+    for line in lines[end:]:
+        if line.startswith(">"):
+            epochs.append([line])
+        else:
+            epochs[-1].append(line)
+    return header, epochs[:4]
+
+
+def _rinex_gz(first: datetime, last: datetime, skip=()) -> bytes:
+    """Gzipped RINEX with an epoch every 30 s from ``first`` up to ``last``, none in the ``skip`` spans (from, to)."""
+    header, template = _kraw_hour()
+    top = header[:-1] + [(f"{first.year:6d}{first.month:6d}{first.day:6d}{first.hour:6d}{first.minute:6d}"
+                          f"{first.second:13.7f}     GPS").ljust(60) + "TIME OF FIRST OBS", header[-1]]
+    body, when, n = [], first, 0
+    while when < last:
+        if not any(a <= when < b for a, b in skip):
+            record = list(template[n % len(template)])
+            record[0] = re.sub(r"^> \d{4} \d\d \d\d \d\d \d\d [ \d]\d\.\d{7}",
+                               f"> {when:%Y %m %d %H %M} {when.second:02d}.0000000", record[0])
+            body += record
+        when += timedelta(seconds=30)
+        n += 1
+    return gzip.compress(("\n".join(top + body) + "\n").encode())
+
+
+def _put(tree: Path, relative: str, data: bytes = b"x") -> Path:
+    path = tree / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+def _quarters(tree: Path, sid: str, first: datetime, last: datetime, root: str = "EUREF/highrate", source: str = "R",
+              skip=()) -> None:
+    """The pieces of 15 minutes at 1 s of a station from ``first`` up to ``last``: BKG keeps a folder for each hour,
+    named by a letter (a is the hour 0)."""
+    when = first
+    while when < last:
+        name = f"{sid}_{source}_{when:%Y}{_doy(when)}{when:%H%M}_15M_01S_MO.crx.gz"
+        _put(tree, f"{root}/{when:%Y}/{_doy(when)}/{chr(97 + when.hour)}/{name}",
+             _rinex_gz(when, when + timedelta(minutes=15), skip))
+        when += timedelta(minutes=15)
+
+
+def _hours(tree: Path, sid: str, first: datetime, last: datetime, root: str = "EUREF/nrt", source: str = "R") -> None:
+    """The hourly files at 30 s of a station for the hours from ``first`` up to ``last``, in the folders of the day
+    and the hour."""
+    when = first
+    while when < last:
+        name = f"{sid}_{source}_{when:%Y}{_doy(when)}{when:%H%M}_01H_30S_MO.crx.gz"
+        _put(tree, f"{root}/{_doy(when)}/{when:%H}/{name}", _rinex_gz(when, when + timedelta(hours=1)))
+        when += timedelta(hours=1)
+
+
+def _day(tree: Path, sid: str, day: datetime, first: datetime, last: datetime, root: str = "EUREF/obs",
+         source: str = "R") -> str:
+    """The file of a day at 30 s, which holds only the observations from ``first`` up to ``last``; its name."""
+    name = f"{sid}_{source}_{day:%Y}{_doy(day)}0000_01D_30S_MO.crx.gz"
+    _put(tree, f"{root}/{day:%Y}/{_doy(day)}/{name}", _rinex_gz(first, last))
+    return name
+
+
+def _ring_hours(ring: Path, sid: str, first: datetime, last: datetime) -> None:
+    """RING's hourly files at 1 s: <yyyy>/<ddd>/<hh>/."""
+    when = first
+    while when < last:
+        name = f"{sid}_R_{when:%Y}{_doy(when)}{when:%H}00_01H_01S_MO.crx.gz"
+        _put(ring, f"{when:%Y}/{_doy(when)}/{when:%H}/{name}", _rinex_gz(when, when + timedelta(hours=1)))
+        when += timedelta(hours=1)
+
+
+def _ring_day(ring: Path, sid: str, day: datetime, first: datetime, last: datetime) -> str:
+    name = f"{sid}_R_{day:%Y}{_doy(day)}0000_01D_30S_MO.crx.gz"
+    _put(ring, f"{day:%Y}/{_doy(day)}/{name}", _rinex_gz(first, last))
+    return name
+
+
+@pytest.fixture
+def trees(tmp_path, monkeypatch):
+    """Empty archives of BKG and RING, and a clock two days after the sample hour: everything of the 26th is old."""
+    bkg, ring = tmp_path / "bkg", tmp_path / "ring-rinex"
+    bkg.mkdir()
+    ring.mkdir()
+    monkeypatch.setattr(stations, "BKG_ROOT", _uri(bkg) + "/")
+    monkeypatch.setattr(stations, "RING_RINEX", _uri(ring) + "/")
+    monkeypatch.setattr(stations, "_now", lambda: datetime(2026, 10, 28, 9, 0, tzinfo=timezone.utc))
+    return SimpleNamespace(bkg=bkg, ring=ring, url=_uri(bkg) + "/", ring_url=_uri(ring) + "/")
+
+
+def _remote(url: str, name: str, start: datetime, hours: float, interval: float) -> stations.RemoteFile:
+    return stations.RemoteFile(url + name, name, start, start + timedelta(hours=hours), interval)
+
+
+def _names(files) -> list[str]:
+    return [f.name for f in files]
+
+
+def _epochs(path: Path) -> int:
+    return sum(1 for line in path.read_text().splitlines() if line.startswith(">"))
+
+
+def _clock(monkeypatch, *when: int) -> None:
+    """The clock (UTC) of the program set to a time of 2026."""
+    monkeypatch.setattr(stations, "_now", lambda: datetime(2026, *when, tzinfo=timezone.utc))
+
+
+# --- which files ------------------------------------------------------------------------------------------------------
+
+
+def test_one_second_files_when_they_cover_the_flight(trees):
+    """1 s is chosen when its pieces of 15 minutes cover the flight and 10 minutes on each side, even when the 30 s
+    files are there too; a piece is wanted only when it overlaps that time (the window is open at its end)."""
+    kraw = _made("KRAW00POL", "EPN")
+    _quarters(trees.bkg, kraw.id, _t(26, 9, 30), _t(26, 12))
+    _day(trees.bkg, kraw.id, _t(26), _t(26, 9), _t(26, 13))
+    _hours(trees.bkg, kraw.id, _t(26, 9), _t(26, 13))
+    folder = trees.url + "EUREF/highrate/2026/299/k/"
+
+    files = stations.observation_files(kraw, _t(26, 10, 20), _t(26, 10, 35))  # 10:10 to 10:45 with the margin
+    assert files == [_remote(folder, f"KRAW00POL_R_2026299{hhmm}_15M_01S_MO.crx.gz", _t(26, 10, minute), 0.25, 1.0)
+                     for hhmm, minute in (("1000", 0), ("1015", 15), ("1030", 30))]
+    assert stations.MARGIN == timedelta(minutes=10)
+    # one minute more of flight and the piece of 10:45 is wanted; from 10:25 the one of 10:00 is not
+    longer = stations.observation_files(kraw, _t(26, 10, 20), _t(26, 10, 36))
+    later = stations.observation_files(kraw, _t(26, 10, 25), _t(26, 10, 35))
+    assert longer[-1].name.endswith("1045_15M_01S_MO.crx.gz") and later[0].name.endswith("1015_15M_01S_MO.crx.gz")
+    # a flight over an hour takes the folders of both hours
+    over = stations.observation_files(kraw, _t(26, 10, 50), _t(26, 11, 5))
+    assert [f.url.split("/")[-2] for f in over] == ["k", "k", "l"] and over[-1].name.endswith("1100_15M_01S_MO.crx.gz")
+    # the rate "1s" gives the same, and "30s" the file of the day
+    assert stations.observation_files(kraw, _t(26, 10, 20), _t(26, 10, 35), rate="1s") == files
+    assert stations.observation_files(kraw, _t(26, 10, 20), _t(26, 10, 35), rate="30s") == [
+        _remote(trees.url + "EUREF/obs/2026/299/", "KRAW00POL_R_20262990000_01D_30S_MO.crx.gz", _t(26), 24, 30.0)]
+
+
+def test_thirty_seconds_when_one_second_files_miss_an_hour(trees):
+    """The 1 s pieces are there for the hour 10 and not for the hour 11, which the flight (with its margin) reaches: the
+    30 s files are used - the file of the day when the listing has it, else the hourly files of nrt."""
+    kraw = _made("KRAW00POL", "EPN")
+    _quarters(trees.bkg, kraw.id, _t(26, 10), _t(26, 11))
+    daily = _day(trees.bkg, kraw.id, _t(26), _t(26, 9), _t(26, 13))
+    _hours(trees.bkg, kraw.id, _t(26, 9), _t(26, 13))
+    start, end = _t(26, 10, 50), _t(26, 11, 10)
+
+    assert stations.observation_files(kraw, start, end) == [
+        _remote(trees.url + "EUREF/obs/2026/299/", daily, _t(26), 24, 30.0)]
+    # an explicit "1s" does not fall back: it names the pieces that are missing, and says that 30 s files are there
+    with pytest.raises(ValueError) as error:
+        stations.observation_files(kraw, start, end, rate="1s")
+    assert "KRAW00POL_[RSU]_20262991100_15M_01S_MO.crx.gz" in str(error.value)
+    assert "The 30 s files for these hours are online" in str(error.value)
+
+    (trees.bkg / "EUREF/obs/2026/299" / daily).unlink()  # no file of the day: the hourly files of nrt
+    download._LISTINGS.clear()
+    assert stations.observation_files(kraw, start, end) == [
+        _remote(trees.url + "EUREF/nrt/299/10/", "KRAW00POL_R_20262991000_01H_30S_MO.crx.gz", _t(26, 10), 1, 30.0),
+        _remote(trees.url + "EUREF/nrt/299/11/", "KRAW00POL_R_20262991100_01H_30S_MO.crx.gz", _t(26, 11), 1, 30.0)]
+
+
+def test_a_flight_over_midnight_takes_the_day_or_the_hours_of_each_day(trees):
+    kraw = _made("KRAW00POL", "EPN")
+    first_day = _day(trees.bkg, kraw.id, _t(26), _t(26, 23), _t(27))
+    start, end = _t(26, 23, 50), _t(27, 0, 20)  # 23:40 to 00:30 with the margin
+    _hours(trees.bkg, kraw.id, _t(27, 0), _t(27, 1))  # the file of the day 300 is not out: its first hour is
+    got = stations.observation_files(kraw, start, end)
+    assert _names(got) == [first_day, "KRAW00POL_R_20263000000_01H_30S_MO.crx.gz"]
+    assert [(f.start, f.end) for f in got] == [(_t(26), _t(27)), (_t(27), _t(27, 1))]
+    _day(trees.bkg, kraw.id, _t(27), _t(27), _t(27, 2))  # it comes out: a file for each day
+    download._LISTINGS.clear()
+    assert _names(stations.observation_files(kraw, start, end)) == [
+        first_day, "KRAW00POL_R_20263000000_01D_30S_MO.crx.gz"]
+
+
+def test_the_flight_is_enough_when_the_margin_is_not_there(trees, monkeypatch):
+    """The file of the hour 11 is not out, and the flight ends at 10:56, 4 minutes before it: the hour 10 holds the
+    whole flight and is used. Auto does not take 1 s pieces that miss a margin when 30 s files do the work, and ends
+    with them when nothing else holds the flight."""
+    _clock(monkeypatch, 10, 26, 11, 2)
+    kraw = _made("KRAW00POL", "EPN")
+    _hours(trees.bkg, kraw.id, _t(26, 10), _t(26, 11))
+    _quarters(trees.bkg, kraw.id, _t(26, 10), _t(26, 11))
+    # 1 s needs 11:00 for the margin (until 11:06): not complete, so auto takes the hourly file of 30 s
+    assert _names(stations.observation_files(kraw, _t(26, 10, 50), _t(26, 10, 56))) == [KRAW_NAME]
+    # an explicit rate accepts what holds the flight: the pieces of 10:30 and 10:45
+    assert len(stations.observation_files(kraw, _t(26, 10, 50), _t(26, 10, 56), rate="1s")) == 2
+    # a flight that reaches into the hour 11 needs its file
+    with pytest.raises(ValueError, match="KRAW00POL_.RSU._20262991100_01H_30S_MO.crx.gz"):
+        stations.observation_files(kraw, _t(26, 10, 50), _t(26, 11, 1), rate="30s")
+    # no 30 s files at all: the 1 s pieces that hold the flight
+    shutil.rmtree(trees.bkg / "EUREF/nrt")
+    download._LISTINGS.clear()
+    assert len(stations.observation_files(kraw, _t(26, 10, 50), _t(26, 10, 56))) == 2
+
+
+def test_only_real_names_of_the_listing_are_taken(trees, monkeypatch):
+    """Nothing is made up: the folder is listed and the names that are the station's, for this time, interval and kind
+    of file, are taken - R before S before U when a time has several - and nothing else is ever asked for."""
+    kraw = _made("KRAW00POL", "EPN")
+    folder = "EUREF/nrt/299/10/"
+    for name in ("KRAW00POL_S_20262991000_01H_30S_MO.crx.gz",  # the copy from the stream: R is preferred
+                 KRAW_NAME,
+                 "KRAW00POL_R_20262991000_01H_MN.rnx.gz",  # navigation messages
+                 "KRAW00POL_R_20262991000_01H_05S_MO.crx.gz",  # another interval
+                 "KRAW00POL_R_20262991000_01H_30S_MM.rnx.gz",  # meteorology
+                 "KRAW00POL_R_20262991000_01H_30S_MO.rnx.gz",  # not Hatanaka
+                 "KRAW00POL_R_20262991100_01H_30S_MO.crx.gz",  # another hour
+                 "KRAW00POL_R_20262991000_15M_30S_MO.crx.gz",  # another length of file
+                 "KRAW01POL_R_20262991000_01H_30S_MO.crx.gz",  # another station
+                 "AQUI00ITA_R_20262991000_01H_30S_MO.crx.gz"):
+        _put(trees.bkg, folder + name)
+    calls = _fetches(monkeypatch)
+    span = (_t(26, 10, 20), _t(26, 10, 35))
+    assert _names(stations.observation_files(kraw, *span, rate="30s")) == [KRAW_NAME]
+    (trees.bkg / folder / KRAW_NAME).unlink()
+    download._LISTINGS.clear()
+    assert _names(stations.observation_files(kraw, *span, rate="30s")) == ["KRAW00POL_S_20262991000_01H_30S_MO.crx.gz"]
+    (trees.bkg / folder / "KRAW00POL_S_20262991000_01H_30S_MO.crx.gz").unlink()
+    _put(trees.bkg, folder + "KRAW00POL_U_20262991000_01H_30S_MO.crx.gz")
+    download._LISTINGS.clear()
+    assert _names(stations.observation_files(kraw, *span, rate="30s")) == ["KRAW00POL_U_20262991000_01H_30S_MO.crx.gz"]
+    assert calls == [] and not (download.gnss_dir() / "stations").exists()  # choosing files downloads and writes none
+
+
+def test_names_from_a_listing_stay_in_the_cache_folder(trees, tmp_path, monkeypatch):
+    """A listing can name anything: a colon (a drive on Windows), a new line, other digits, a way out of the folder.
+    Only a name that is wholly the name of a file of the station is taken, and nothing is written outside the folder."""
+    kraw = _made("KRAW00POL", "EPN")
+    good = KRAW_NAME
+    hostile = [good + ":evil", "D:x.gz", good + "\n", "\n" + good, good + " ", good + "\nx", good + "/..", "../" + good,
+               "..\\" + good, "KRAW00POL_R_٢٠٢٦٢٩٩١٠٠٠_01H_30S_MO.crx.gz",  # Arabic-Indic digits
+               "KRAW00POL_R_2026299100_01H_30S_MO.crx.gz", "kraw00pol_R_20262991000_01H_30S_MO.crx.gz"]
+    monkeypatch.setattr(download, "listing", lambda url: hostile + ([good] if url.endswith("/nrt/299/10/") else []))
+    assert _names(stations.observation_files(kraw, _t(26, 10, 20), _t(26, 10, 35), rate="30s")) == [good]
+    # with only the hostile names the file is missing, and nothing is fetched
+    monkeypatch.setattr(download, "listing", lambda url: hostile)
+    calls = _fetches(monkeypatch)
+    with pytest.raises(ValueError, match="is not in"):
+        stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), tmp_path / "base", rate="30s")
+    assert calls == []
+
+    # a name that got through anyway (a plan made by hand) is not written: it is checked before anything is fetched
+    escaped = tmp_path / "escaped.crx.gz"
+    for name in ("../escaped.crx.gz", "D:escaped.crx.gz", "sub/../../escaped.crx.gz", str(escaped), "escaped.crx.gz\n"):
+        remote = stations.RemoteFile(trees.url + "x", name, _t(26, 10), _t(26, 11), 30.0)
+        with monkeypatch.context() as patch:
+            patch.setattr(stations, "observation_files", lambda *a, remote=remote, **k: [remote])
+            with pytest.raises(ValueError, match="folder of the station"):
+                stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), tmp_path / "base")
+    assert calls == [] and not list(tmp_path.rglob("escaped*")) and not escaped.exists()
+    # the same for a station whose id would be a path
+    with pytest.raises(ValueError, match="station"):
+        stations.observation_files(_made("../../ABC", "EPN"), _t(26, 10, 20), _t(26, 10, 35))
+
+
+def test_an_epn_station_comes_from_euref_and_an_igs_station_from_igs(trees):
+    span = (_t(26, 10, 20), _t(26, 10, 35))
+    _hours(trees.bkg, "KRAW00POL", _t(26, 10), _t(26, 11))
+    _hours(trees.bkg, "BSHM00ISR", _t(26, 10), _t(26, 11), root="IGS/nrt")
+    assert [f.url for f in stations.observation_files(_made("KRAW00POL", "EPN"), *span)] == [
+        trees.url + "EUREF/nrt/299/10/" + KRAW_NAME]
+    assert [f.url for f in stations.observation_files(_made("BSHM00ISR", "IGS"), *span)] == [
+        trees.url + "IGS/nrt/299/10/BSHM00ISR_R_20262991000_01H_30S_MO.crx.gz"]
+    # each looks in its own tree only
+    with pytest.raises(ValueError, match="BSHM00ISR_.RSU._20262991000_01H_30S_MO.crx.gz"):
+        stations.observation_files(_made("BSHM00ISR", "EPN"), *span)
+    # a station of both networks: EUREF first, then IGS
+    both = _made("M0SE00ITA", "EPN", "IGS")
+    _hours(trees.bkg, both.id, _t(26, 10), _t(26, 11), root="IGS/nrt")
+    download._LISTINGS.clear()
+    assert stations.observation_files(both, *span)[0].url.startswith(trees.url + "IGS/nrt/299/10/")
+    _hours(trees.bkg, both.id, _t(26, 10), _t(26, 11))
+    download._LISTINGS.clear()
+    assert stations.observation_files(both, *span)[0].url.startswith(trees.url + "EUREF/nrt/299/10/")
+
+
+def test_igs_one_second_pieces_come_from_highrate_or_the_permanent_folder(trees):
+    span = (_t(26, 10, 20), _t(26, 10, 35))
+    bshm = _made("BSHM00ISR", "IGS")
+    _quarters(trees.bkg, bshm.id, _t(26, 9, 30), _t(26, 11, 30), root="IGS/highrate_permanent")
+    got = stations.observation_files(bshm, *span)
+    permanent = trees.url + "IGS/highrate_permanent/2026/299/k/"
+    assert len(got) == 3 and all(f.url.startswith(permanent) and f.interval == 1.0 for f in got)
+    # the folder of the recent pieces is the first choice for a time it has; the other fills in what it lacks
+    _quarters(trees.bkg, bshm.id, _t(26, 10), _t(26, 10, 30), root="IGS/highrate")
+    download._LISTINGS.clear()
+    assert [f.url.split("/")[-5] for f in stations.observation_files(bshm, *span)] == [
+        "highrate", "highrate", "highrate_permanent"]
+
+
+def test_a_ring_station_comes_from_ring(trees):
+    span = (_t(26, 10, 20), _t(26, 10, 35))
+    _ring_hours(trees.ring, "INGR00ITA", _t(26, 9), _t(26, 12))
+    _ring_day(trees.ring, "INGR00ITA", _t(26), _t(26, 9), _t(26, 13))
+    ingr = _made("INGR00ITA", "RING")
+    assert stations.observation_files(ingr, *span) == [
+        _remote(trees.ring_url + "2026/299/10/", "INGR00ITA_R_20262991000_01H_01S_MO.crx.gz", _t(26, 10), 1, 1.0)]
+    assert stations.observation_files(ingr, *span, rate="30s") == [
+        _remote(trees.ring_url + "2026/299/", "INGR00ITA_R_20262990000_01D_30S_MO.crx.gz", _t(26), 24, 30.0)]
+    assert len(stations.observation_files(ingr, _t(26, 10, 50), _t(26, 11, 5))) == 2  # the hours 10 and 11
+    # RING has no hourly files at 30 s, and BKG's folders are not its own
+    _hours(trees.bkg, "INGR00ITA", _t(26, 10), _t(26, 11))
+    (trees.ring / "2026/299/INGR00ITA_R_20262990000_01D_30S_MO.crx.gz").unlink()
+    download._LISTINGS.clear()
+    with pytest.raises(ValueError, match="INGR00ITA_.RSU._20262990000_01D_30S_MO.crx.gz"):
+        stations.observation_files(ingr, *span, rate="30s")
+
+
+def test_bkg_first_and_ring_when_bkg_does_not_have_the_span(trees):
+    """A station of the EPN and of RING: the whole span from BKG when BKG has it, else the whole span from RING (the
+    pieces of one archive join; those of two are of two processings)."""
+    span = (_t(26, 10, 20), _t(26, 10, 35))
+    both = _made("M0SE00ITA", "EPN", "RING")
+    _ring_hours(trees.ring, both.id, _t(26, 9), _t(26, 12))
+    assert stations.observation_files(both, *span, rate="1s")[0].url.startswith(trees.ring_url)  # BKG has no 1 s files
+    _quarters(trees.bkg, both.id, _t(26, 9, 30), _t(26, 11, 30))
+    download._LISTINGS.clear()
+    got = stations.observation_files(both, *span, rate="1s")
+    assert len(got) == 3 and all(f.url.startswith(trees.url + "EUREF/highrate/") for f in got)
+    # one piece of the span missing at BKG: RING's file, which holds all of it
+    (trees.bkg / "EUREF/highrate/2026/299/k/M0SE00ITA_R_20262991015_15M_01S_MO.crx.gz").unlink()
+    download._LISTINGS.clear()
+    assert [f.url for f in stations.observation_files(both, *span, rate="1s")] == [
+        trees.ring_url + "2026/299/10/M0SE00ITA_R_20262991000_01H_01S_MO.crx.gz"]
+
+
+def test_a_station_of_no_network_has_no_archive(trees):
+    with pytest.raises(ValueError, match="no archive"):
+        stations.observation_files(_made("ZZZZ00XXX"), _t(26, 10, 20), _t(26, 10, 35))
+
+
+def test_the_times_are_gps_times_and_the_rate_is_one_of_three(trees, tmp_path):
+    kraw = _made("KRAW00POL", "EPN")
+    aware = datetime(2026, 10, 26, 10, 20, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="GPS time without a time zone"):
+        stations.observation_files(kraw, aware, _t(26, 10, 35))
+    with pytest.raises(ValueError, match="GPS time without a time zone"):
+        stations.download_observations(kraw, _t(26, 10, 20), aware, tmp_path)
+    with pytest.raises(ValueError, match="GPS time without a time zone"):
+        stations.download_navigation(aware, _t(26, 10, 35), tmp_path)
+    with pytest.raises(ValueError, match="before"):
+        stations.observation_files(kraw, _t(26, 10, 35), _t(26, 10, 20))
+    with pytest.raises(ValueError, match="rate"):
+        stations.observation_files(kraw, _t(26, 10, 20), _t(26, 10, 35), rate="5s")
+
+
+# --- what is not there, and when it comes ----------------------------------------------------------------------------
+
+
+def test_today_not_published_says_when(trees, monkeypatch):
+    """The 27th, 08:50 UTC: the flight of 07:40 to 08:10 has the hourly file of 07 but not the one of 08 (they come
+    after the hour) and no file of the day (30 minutes after midnight). The error names the files, says when they come
+    and that the 1 s pieces are there."""
+    _clock(monkeypatch, 10, 27, 8, 50)
+    kraw = _made("KRAW00POL", "EPN")
+    _hours(trees.bkg, kraw.id, _t(27, 7), _t(27, 8))
+    _quarters(trees.bkg, kraw.id, _t(27, 7, 30), _t(27, 8, 30))  # to the piece of 08:15, which was out at 08:45
+    with pytest.raises(ValueError) as error:
+        stations.observation_files(kraw, _t(27, 7, 40), _t(27, 8, 10), rate="30s")
+    message = str(error.value)
+    assert "KRAW00POL_[RSU]_20263000800_01H_30S_MO.crx.gz" in message  # the file, not a guess of its letter
+    assert "KRAW00POL_[RSU]_20263000000_01D_30S_MO.crx.gz" in message
+    assert "BKG hourly files are online after the hour" in message
+    assert "BKG daily files are online about 30 minutes after midnight UTC" in message
+    assert "not published yet" in message
+    assert "The 1 s files for these hours are online" in message  # the other rate is there: say so
+    assert "KRAW00POL_[RSU]_20263000700_01H" not in message  # the hour that is there is not complained of
+    assert not isinstance(error.value, download.DownloadError)  # a file that is not out yet is not a failure to connect
+    # with "auto" the 1 s pieces are what comes out
+    assert len(stations.observation_files(kraw, _t(27, 7, 40), _t(27, 8, 10))) == 4
+
+
+def test_nothing_published_yet_names_both_rates(trees, monkeypatch):
+    _clock(monkeypatch, 10, 27, 8, 50)
+    kraw = _made("KRAW00POL", "EPN")
+    with pytest.raises(ValueError) as error:
+        stations.observation_files(kraw, _t(27, 8, 5), _t(27, 8, 35))
+    message = str(error.value)
+    assert "30 s files:" in message and "1 s files:" in message
+    assert "KRAW00POL_[RSU]_20263000800_01H_30S_MO.crx.gz" in message
+    assert "KRAW00POL_[RSU]_20263000800_15M_01S_MO.crx.gz" in message
+    assert "BKG 15 minute files are online after each quarter of an hour" in message
+    # asking for one rate says that the other is not there either
+    with pytest.raises(ValueError, match="The 1 s files for these hours are not there either"):
+        stations.observation_files(kraw, _t(27, 8, 5), _t(27, 8, 35), rate="30s")
+
+
+def test_the_clock_that_says_a_file_is_late_is_gps_time(monkeypatch):
+    _clock(monkeypatch, 10, 27, 8, 50)
+    assert stations._gps_now() == datetime(2026, 10, 27, 8, 50, 18)  # 18 s ahead of UTC since 2017
+
+
+def test_an_old_missing_file_is_not_called_unpublished(trees):
+    """Two days later nothing is going to come: the message says where the file is not, not that it is late."""
+    kraw = _made("KRAW00POL", "EPN")
+    with pytest.raises(ValueError) as error:
+        stations.observation_files(kraw, _t(26, 8, 5), _t(26, 8, 35), rate="30s")
+    message = str(error.value)
+    assert "KRAW00POL_[RSU]_20262990800_01H_30S_MO.crx.gz is not in " + trees.url + "EUREF/nrt/299/08/" in message
+    assert "not published yet" not in message and "online" not in message
+
+
+def test_ring_unreachable_names_the_port(trees, web, monkeypatch):
+    """RING answers on the port 44324, which some firewalls close: the error says what could not be reached, which port,
+    and that a firewall may be why."""
+    monkeypatch.setattr(stations, "RING_RINEX", "https://webring.gm.ingv.it:44324/rinex/RING/")
+    web.plan = [urllib.error.URLError(ConnectionRefusedError())] * 40
+    ingr = _made("INGR00ITA", "RING")
+    with pytest.raises(ValueError) as error:
+        stations.observation_files(ingr, _t(26, 10, 20), _t(26, 10, 35))
+    message = str(error.value)
+    assert "44324" in message and "a firewall may block it" in message and "RING could not be reached" in message
+    assert "webring.gm.ingv.it" in message  # the address that did not answer
+    assert len(web.requests) == 3 and web.sleeps == [2, 4]  # three attempts, once: not again for each rate
+    assert "files:" not in message and "not there either" not in message  # nothing was looked at: nothing is claimed
+    web.plan = [urllib.error.URLError(ConnectionRefusedError())] * 40
+    with pytest.raises(ValueError, match="a firewall may block it") as asked:  # a rate asked for says the same
+        stations.observation_files(ingr, _t(26, 10, 20), _t(26, 10, 35), rate="30s")
+    assert "not there either" not in str(asked.value)
+
+    # files that are found and then cannot be fetched say the same
+    monkeypatch.setattr(stations, "RING_RINEX", trees.ring_url)
+    _ring_hours(trees.ring, "INGR00ITA", _t(26, 9), _t(26, 12))
+
+    def refused(url, *args, **kwargs):
+        raise download.DownloadError(f"{url}: could not connect (refused) (after 3 attempts)", url)
+
+    monkeypatch.setattr(download, "fetch", refused)
+    with pytest.raises(ValueError) as error:
+        stations.download_observations(ingr, _t(26, 10, 20), _t(26, 10, 35), trees.ring.parent / "base")
+    assert "44324" in str(error.value) and "a firewall may block it" in str(error.value)
+    assert "INGR00ITA_R_20262991000_01H_01S_MO.crx.gz" in str(error.value)
+
+
+def test_ring_serves_a_station_of_the_epn_when_bkg_cannot_be_reached(trees, web, monkeypatch):
+    monkeypatch.setattr(stations, "BKG_ROOT", "https://igs.bkg.bund.de/root_ftp/")
+    web.plan = [urllib.error.URLError(ConnectionRefusedError())] * 40  # BKG does not answer
+    both = _made("M0SE00ITA", "EPN", "IGS", "RING")
+    _ring_hours(trees.ring, both.id, _t(26, 9), _t(26, 12))
+    got = stations.observation_files(both, _t(26, 10, 20), _t(26, 10, 35))
+    assert [f.url for f in got] == [trees.ring_url + "2026/299/10/M0SE00ITA_R_20262991000_01H_01S_MO.crx.gz"]
+    assert len(web.requests) == 3  # BKG was tried once, for its two trees and for every rate
+
+
+def test_bkg_alone_is_enough_for_an_epn_station_and_ring_is_not_asked(trees, web, monkeypatch):
+    monkeypatch.setattr(stations, "RING_RINEX", "https://webring.gm.ingv.it:44324/rinex/RING/")
+    web.plan = []  # any request to RING would fail the test
+    both = _made("M0SE00ITA", "EPN", "RING")
+    _hours(trees.bkg, both.id, _t(26, 10), _t(26, 11))
+    assert len(stations.observation_files(both, _t(26, 10, 20), _t(26, 10, 35), rate="30s")) == 1
+    assert web.requests == []  # (with "auto" RING's hourly pieces at 1 s would be looked for: they beat 30 s files)
+    # BKG has nothing and RING cannot be reached: the message tells both stories
+    shutil.rmtree(trees.bkg / "EUREF")
+    web.plan = [urllib.error.URLError(ConnectionRefusedError())] * 40
+    download._LISTINGS.clear()
+    with pytest.raises(ValueError) as error:
+        stations.observation_files(both, _t(26, 10, 20), _t(26, 10, 35))
+    assert "M0SE00ITA_[RSU]_20262991000_01H_30S_MO.crx.gz is not in" in str(error.value) and "44324" in str(error.value)
+
+
+# --- download, decode and join --------------------------------------------------------------------------------------
+
+
+def test_download_joins_and_reuses_the_cache(trees, tmp_path, monkeypatch):
+    kraw = _made("KRAW00POL", "EPN")
+    _quarters(trees.bkg, kraw.id, _t(26, 10), _t(26, 11))
+    calls = _fetches(monkeypatch)
+    base = tmp_path / "base"
+
+    out = stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), base)
+    assert out == base / "KRAW00POL_20261026-1020_1035.obs"
+    assert [url.rsplit("_", 3)[0].rsplit("_", 1)[1] for url in calls] == [
+        "2026299" + hhmm for hhmm in ("1000", "1015", "1030")]  # the start of each piece, as the name says
+    # the three pieces, once each: 10:00:00 to 10:44:30, an epoch every 30 s, no hole
+    info = rinex.header(out)
+    assert (info.first, info.last) == (_t(26, 10), _t(26, 10, 44, 30)) and info.marker == "KRAW00POL"
+    assert _epochs(out) == 90
+    cache = download.gnss_dir() / "stations" / "KRAW00POL"  # the pieces stay as the archive names them
+    assert sorted(p.name for p in cache.iterdir()) == [f"KRAW00POL_R_2026299{h}_15M_01S_MO.crx.gz"
+                                                       for h in ("1000", "1015", "1030")]
+    # a second call fetches nothing, and makes the file again when it is gone
+    out.unlink()
+    assert stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), base) == out
+    assert len(calls) == 3 and _epochs(out) == 90
+    # another flight over the same pieces: only the piece it did not have is fetched
+    other = stations.download_observations(kraw, _t(26, 10, 31), _t(26, 10, 36), base)
+    assert other.name == "KRAW00POL_20261026-1031_1036.obs" and len(calls) == 4
+    assert calls[-1].endswith("1045_15M_01S_MO.crx.gz")
+
+
+def test_the_name_of_the_file_over_midnight(trees, tmp_path):
+    kraw = _made("KRAW00POL", "EPN")
+    _day(trees.bkg, kraw.id, _t(26), _t(26, 23), _t(27))
+    _day(trees.bkg, kraw.id, _t(27), _t(27), _t(27, 1))
+    out = stations.download_observations(kraw, _t(26, 23, 50), _t(27, 0, 20), tmp_path / "base")
+    assert out.name == "KRAW00POL_20261026-2350_0020.obs"  # the end is a time of day, as the start is of a date
+    info = rinex.header(out)
+    assert (info.first, info.last) == (_t(26, 23), _t(27, 0, 59, 30)) and _epochs(out) == 240
+
+
+@needs_a_decoder
+def test_an_hour_as_bkg_distributes_it_is_decoded_and_joined(trees, tmp_path):
+    """The file of EUREF/nrt as it is (Hatanaka inside gzip): what comes out is the RINEX that CRX2RNX makes of it."""
+    kraw = _made("KRAW00POL", "EPN")
+    _put(trees.bkg, f"EUREF/nrt/299/10/{KRAW_NAME}", gzip.compress(KRAW_HOUR.read_bytes()))
+    out = stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), tmp_path / "base")
+    expected = (CRINEX / f"{KRAW_HOUR.name}.expected").read_text().splitlines()
+    produced = out.read_text().splitlines()
+
+    def body(lines):
+        return lines[next(i for i, line in enumerate(lines) if line.rstrip().endswith("END OF HEADER")) + 1:]
+
+    assert body(produced) == body(expected) and len(body(produced)) > 1000
+    assert rinex.header(out).marker == "KRAW00POL"
+
+
+def test_a_gap_in_the_base_during_the_flight_is_refused_but_not_one_in_the_margins(trees, tmp_path):
+    kraw = _made("KRAW00POL", "EPN")
+    base = tmp_path / "base"
+    # no epoch from 10:12:00 to 10:15:00 and from 10:38:00 to 10:41:00: in the 10 minutes before the flight, and in
+    # the 10 minutes after it - the base is whole where the flight is
+    _quarters(trees.bkg, kraw.id, _t(26, 10), _t(26, 11),
+              skip=[(_t(26, 10, 12), _t(26, 10, 15)), (_t(26, 10, 38), _t(26, 10, 41))])
+    out = stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), base)
+    assert out.exists() and _epochs(out) == 90 - 12
+
+    # a hole in the flight: the base is refused, with the hole and the flight in the message, and no file is left
+    # (the pieces are other files with the same names: the copies of the first ones are forgotten)
+    shutil.rmtree(trees.bkg / "EUREF")
+    shutil.rmtree(download.gnss_dir() / "stations" / kraw.id)
+    _quarters(trees.bkg, kraw.id, _t(26, 10), _t(26, 11), skip=[(_t(26, 10, 24), _t(26, 10, 27))])
+    download._LISTINGS.clear()
+    with pytest.raises(ValueError) as error:
+        stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), base)
+    message = str(error.value)
+    assert "10:23:30" in message and "10:27:00" in message and "flight" in message and "KRAW00POL" in message
+    assert not out.exists()  # the base of the last run is not left for something else to take
+
+    # a base that begins after the flight does: the same refusal
+    shutil.rmtree(trees.bkg / "EUREF")
+    _put(trees.bkg, f"EUREF/nrt/299/10/{KRAW_NAME}", _rinex_gz(_t(26, 10, 22), _t(26, 11)))  # the receiver started late
+    download._LISTINGS.clear()
+    with pytest.raises(ValueError, match="do not cover the flight"):
+        stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), base, rate="30s")
+
+
+def test_pieces_that_cannot_be_joined_are_refused_naming_the_station(trees, tmp_path):
+    """The pieces of a station have one antenna: a change in the middle of them is reported, not hidden."""
+    kraw = _made("KRAW00POL", "EPN")
+    _quarters(trees.bkg, kraw.id, _t(26, 10), _t(26, 11))
+    piece = trees.bkg / "EUREF/highrate/2026/299/k/KRAW00POL_R_20262991030_15M_01S_MO.crx.gz"
+    piece.write_bytes(gzip.compress(gzip.decompress(piece.read_bytes()).replace(b"ASH701945C_M    SNOW",
+                                                                                b"TRM59800.00     NONE")))
+    with pytest.raises(ValueError, match="KRAW00POL: .*TRM59800.00"):
+        stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), tmp_path / "base")
+    assert not (tmp_path / "base").exists() or not list((tmp_path / "base").iterdir())
+
+
+@needs_a_decoder
+def test_a_damaged_piece_is_downloaded_again_once_then_refused(trees, tmp_path, monkeypatch):
+    kraw = _made("KRAW00POL", "EPN")
+    data = bytearray(gzip.compress(KRAW_HOUR.read_bytes()))
+    data[len(data) // 2] ^= 0xFF  # inside the deflate stream: the checksum of gzip or the inflater says so
+    _put(trees.bkg, f"EUREF/nrt/299/10/{KRAW_NAME}", bytes(data))
+    calls = _fetches(monkeypatch)
+    base = tmp_path / "base"
+    with pytest.raises(ValueError) as error:
+        stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), base, rate="30s")
+    assert KRAW_NAME in str(error.value) and "again" in str(error.value)
+    assert len(calls) == 2  # fetched, found damaged, fetched again, found damaged: refused
+    cache = download.gnss_dir() / "stations" / "KRAW00POL"
+    assert list(cache.iterdir()) == [] and not base.exists()  # a damaged file is not kept for the next call to trust
+
+    # the archive is mended: the next call fetches the file and works
+    _put(trees.bkg, f"EUREF/nrt/299/10/{KRAW_NAME}", gzip.compress(KRAW_HOUR.read_bytes()))
+    out = stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), base, rate="30s")
+    assert _epochs(out) == 120 and len(calls) == 3
+    # a copy in the cache that went bad is replaced, once
+    cached = cache / KRAW_NAME
+    cached.write_bytes(cached.read_bytes()[:-40])
+    assert stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), base, rate="30s") == out
+    assert len(calls) == 4 and _epochs(out) == 120
+
+
+def test_without_a_decoder_nothing_is_downloaded_again(trees, tmp_path, monkeypatch):
+    """A file that cannot be decoded because there is no decoder is not damaged: say what to install, and ask once."""
+    kraw = _made("KRAW00POL", "EPN")
+    _hours(trees.bkg, kraw.id, _t(26, 10), _t(26, 11))
+    calls = _fetches(monkeypatch)
+
+    def no_decoder(path, folder=None):
+        raise ValueError(f"{Path(path).name}: {_native.CRINEX_MISSING}")
+
+    monkeypatch.setattr(rinex, "plain", no_decoder)
+    with pytest.raises(ValueError, match="native core"):
+        stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), tmp_path / "base")
+    assert len(calls) == 1
+
+
+def test_download_reports_progress_and_can_be_cancelled(trees, tmp_path):
+    kraw = _made("KRAW00POL", "EPN")
+    _quarters(trees.bkg, kraw.id, _t(26, 10), _t(26, 11))
+    seen: list[float] = []
+    stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), tmp_path / "base",
+                                   progress=lambda fraction, message: seen.append(fraction))
+    assert seen == sorted(seen) and seen[-1] == 1.0 and len(seen) >= 4
+
+    progress = Progress()
+    progress.cancel_requested = True
+    with pytest.raises(Cancelled):
+        stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), tmp_path / "other", progress=progress)
+    assert not (tmp_path / "other").exists()
+
+
+# --- the navigation files -------------------------------------------------------------------------------------------
+
+
+def _brdc(trees, day: datetime, **products) -> None:
+    """The navigation folder of a day of BKG with the files of the products given (name_source -> text or file)."""
+    for name, content in products.items():
+        data = content.read_bytes() if isinstance(content, Path) else content
+        file = f"{name}_{day:%Y}{_doy(day)}0000_01D_MN.rnx.gz"
+        _put(trees.bkg, f"IGS/BRDC/{day:%Y}/{_doy(day)}/{file}", gzip.compress(data))
+
+
+def test_navigation_for_every_day_of_the_span(trees, tmp_path, monkeypatch):
+    """A flight over midnight UTC takes the files of both days, one within a day takes one. The names are those of the
+    listing: of the products there, BRDC00WRD (S before R before U)."""
+    _brdc(trees, _t(26), BRDC00WRD_S=NAV_A, BRDC00WRD_R=b"the other copy", BRDC00IGS_R=b"not this product",
+          BRD400DLR_S=b"nor this one")
+    _brdc(trees, _t(27), BRDC00WRD_R=NAV_B)  # the day 300 has only the R copy
+    calls = _fetches(monkeypatch)
+    folder = tmp_path / "nav"
+
+    files = stations.download_navigation(_t(26, 23, 50), _t(27, 0, 20), folder)
+    assert files == [folder / "BRDC00WRD_S_20262990000_01D_MN.rnx", folder / "BRDC00WRD_R_20263000000_01D_MN.rnx"]
+    assert files[0].read_bytes() == NAV_A.read_bytes() and files[1].read_bytes() == NAV_B.read_bytes()
+    assert [c.rsplit("/", 1)[1] for c in calls] == ["BRDC00WRD_S_20262990000_01D_MN.rnx.gz",
+                                                    "BRDC00WRD_R_20263000000_01D_MN.rnx.gz"]
+    assert sorted(p.name for p in folder.iterdir()) == sorted(f.name for f in files)  # no scratch file is left
+    assert rinex.header(files[0]).kind == "nav"
+    # a flight within a day: one file, and the files of days that are over are kept: nothing is fetched again
+    one = stations.download_navigation(_t(26, 10, 20), _t(26, 10, 35), tmp_path / "one")
+    assert [p.name for p in one] == ["BRDC00WRD_S_20262990000_01D_MN.rnx"] and len(calls) == 2
+    assert stations.download_navigation(_t(26, 23, 50), _t(27, 0, 20), folder) == files and len(calls) == 2
+    kept = download.gnss_dir() / "navigation"
+    assert sorted(p.name for p in kept.iterdir()) == ["BRDC00WRD_R_20263000000_01D_MN.rnx.gz",
+                                                      "BRDC00WRD_S_20262990000_01D_MN.rnx.gz"]
+
+
+def test_navigation_of_a_day_that_is_not_over_is_never_kept(trees, tmp_path, monkeypatch):
+    """BKG writes the file of the day all day long: the copy of 09:00 lacks the hours after it. It is fetched every time
+    and not kept, so that a copy of the middle of a day is never taken for the whole of it."""
+    _brdc(trees, _t(27), BRDC00WRD_S=NAV_A)
+    calls = _fetches(monkeypatch)
+    _clock(monkeypatch, 10, 27, 9, 0)
+    folder = tmp_path / "nav"
+
+    assert stations.download_navigation(_t(27, 8), _t(27, 8, 30), folder)[0].read_bytes() == NAV_A.read_bytes()
+    stations.download_navigation(_t(27, 8), _t(27, 8, 30), folder)
+    assert len(calls) == 2
+    kept = download.gnss_dir() / "navigation"
+    assert not kept.exists() or list(kept.iterdir()) == []
+    # the file grows during the day: what was fetched last is what is used
+    _brdc(trees, _t(27), BRDC00WRD_S=NAV_B)
+    assert stations.download_navigation(_t(27, 8), _t(27, 8, 30), folder)[0].read_bytes() == NAV_B.read_bytes()
+    # an hour after the day is over it is final: kept
+    _clock(monkeypatch, 10, 28, 1, 30)
+    stations.download_navigation(_t(27, 8), _t(27, 8, 30), folder)
+    stations.download_navigation(_t(27, 8), _t(27, 8, 30), folder)
+    assert len(calls) == 4
+
+
+def test_a_navigation_file_that_is_not_there_says_when_it_comes(trees, tmp_path, monkeypatch):
+    _brdc(trees, _t(26), BRDC00WRD_S=NAV_A)
+    calls = _fetches(monkeypatch)
+    _clock(monkeypatch, 10, 27, 0, 10)
+    with pytest.raises(ValueError) as error:  # a flight of the 26th over midnight, ten minutes into the 27th
+        stations.download_navigation(_t(26, 23, 50), _t(27, 0, 5), tmp_path / "nav")
+    message = str(error.value)
+    assert "BRDC00WRD_[RSU]_20263000000_01D_MN.rnx.gz is not in " + trees.url + "IGS/BRDC/2026/300/" in message
+    assert "not published yet" in message
+    assert "BKG daily files are online about 30 minutes after midnight UTC" in message
+    assert calls == []  # the file that is there is not fetched for nothing
+    # for a day long past it is only not there
+    _clock(monkeypatch, 12, 1, 0, 0)
+    with pytest.raises(ValueError) as error:
+        stations.download_navigation(_t(25, 10), _t(25, 11), tmp_path / "nav")
+    assert "BRDC00WRD_[RSU]_20262980000_01D_MN.rnx.gz is not in" in str(error.value) and "yet" not in str(error.value)
+
+
+def test_navigation_names_from_a_listing_stay_in_their_folders(trees, tmp_path, monkeypatch):
+    good = "BRDC00WRD_S_20262990000_01D_MN.rnx.gz"
+    hostile = [good + ":evil", good + "\n", "\n" + good, "D:" + good, "../" + good, "..\\" + good, good + "/..",
+               "BRDC00WRD_S_٢٠٢٦٢٩٩٠٠٠٠_01D_MN.rnx.gz", "brdc00wrd_S_20262990000_01D_MN.rnx.gz",
+               "BRDC00WRD_X_20262990000_01D_MN.rnx.gz"]
+    monkeypatch.setattr(download, "listing", lambda url: hostile)
+    calls = _fetches(monkeypatch)
+    with pytest.raises(ValueError, match="No broadcast navigation file for 2026-10-26"):
+        stations.download_navigation(_t(26, 10), _t(26, 11), tmp_path / "nav")
+    assert calls == [] and not list(tmp_path.rglob("*evil*")) and not list(tmp_path.rglob("*.gz"))
+    # the good name among them is the one that is taken
+    _brdc(trees, _t(26), BRDC00WRD_S=NAV_A)
+    monkeypatch.setattr(download, "listing", lambda url: hostile + [good])
+    files = stations.download_navigation(_t(26, 10), _t(26, 11), tmp_path / "nav")
+    assert [f.name for f in files] == ["BRDC00WRD_S_20262990000_01D_MN.rnx"] and len(calls) == 1
+
+
+def test_a_damaged_navigation_file_is_downloaded_again_once(trees, tmp_path, monkeypatch):
+    _brdc(trees, _t(26), BRDC00WRD_S=NAV_A)
+    path = trees.bkg / "IGS/BRDC/2026/299/BRDC00WRD_S_20262990000_01D_MN.rnx.gz"
+    good = path.read_bytes()
+    path.write_bytes(good[:-30])  # cut short
+    calls = _fetches(monkeypatch)
+    with pytest.raises(ValueError, match="BRDC00WRD_S_20262990000_01D_MN.rnx.gz.*again"):
+        stations.download_navigation(_t(26, 10), _t(26, 11), tmp_path / "nav")
+    assert len(calls) == 2
+    assert not list((download.gnss_dir() / "navigation").glob("*.gz")) and not list((tmp_path / "nav").glob("*.rnx"))
+    path.write_bytes(good)
+    assert stations.download_navigation(_t(26, 10), _t(26, 11), tmp_path / "nav")[0].read_bytes() == NAV_A.read_bytes()
+
+
+def test_navigation_when_bkg_cannot_be_reached(trees, tmp_path, web, monkeypatch):
+    monkeypatch.setattr(stations, "BKG_ROOT", "https://igs.bkg.bund.de/root_ftp/")
+    web.plan = [urllib.error.URLError(ConnectionRefusedError())] * 6
+    with pytest.raises(ValueError, match="BKG could not be reached.*igs.bkg.bund.de"):
+        stations.download_navigation(_t(26, 10), _t(26, 11), tmp_path / "nav")

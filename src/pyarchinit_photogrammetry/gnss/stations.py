@@ -11,7 +11,14 @@ Everything is in ITRF2020 (IGS20) and at the epoch asked for: the stations move 
 Europe, and a base is only good to the centimetre at the epoch of its coordinates.
 
 The addresses, and the layout of what they return, are those of ``tests/data/gnss/README.md``; the files that are
-downloaded are kept in ``stations`` in the GNSS folder (:func:`download.gnss_dir`)."""
+downloaded are kept in ``stations`` in the GNSS folder (:func:`download.gnss_dir`).
+
+A station can also be the base of a survey: :func:`observation_files` says which files of the archives hold its
+observations for the hours of a flight (at 1 s or at 30 s, BKG's data centre for the stations of the EPN and of the IGS,
+RING's for those of RING), :func:`download_observations` brings them, one at a time, into ``stations/<id>`` and joins
+them into one RINEX file, and :func:`download_navigation` brings the broadcast navigation messages of the days of the
+flight. The names of the files are never made up: the folder of the archive is listed and the names that are the
+station's are taken."""
 from __future__ import annotations
 
 import calendar
@@ -23,12 +30,14 @@ import os
 import re
 import shutil
 import tempfile
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
 
+from .. import _native
 from ..core.progress import as_progress
 from . import download, rinex
 
@@ -713,3 +722,479 @@ def coordinates(station: Station, epoch: float, progress=None) -> StationCoordin
     return StationCoordinates(
         station, station.xyz, (station.lat, station.lon, station.h), FRAME, epoch, "approximate", None,
         "approximate position from the site log (M3G, IGS network table): good to metres only")
+
+
+# --- the observations and the navigation of a station, for the hours of a flight ---------------------------------
+
+# The archives. BKG's data centre keeps the stations of the EPN (EUREF) and of the IGS (IGS); RING keeps its own, on a
+# port that some firewalls close. Both are read with no account.
+BKG_ROOT = "https://igs.bkg.bund.de/root_ftp/"
+RING_RINEX = "https://webring.gm.ingv.it:44324/rinex/RING/"
+RING_PORT = 44324
+
+MARGIN = timedelta(minutes=10)  # the base is wanted this long before the flight and after it
+LATE = timedelta(hours=3)  # a file that is not there is "not published yet" until this long after it was due
+NAV_SETTLE = timedelta(hours=1)  # the navigation file of a day is final this long after the end of the day
+_BKG_DAILY = "BKG daily files are online about 30 minutes after midnight UTC"
+
+# The names of the files of observations (RINEX 3, "long" names): station, source (R receiver, S stream, U unknown),
+# the start of the file, its length, the interval of its epochs, MO (observations), Hatanaka inside gzip. Only ASCII
+# letters and digits (\d takes other digits too), and a name is taken only whole (``fullmatch``).
+_OBS_NAME = re.compile(r"(?P<id>[A-Z0-9]{9})_(?P<source>[RSU])_(?P<year>[0-9]{4})(?P<day>[0-9]{3})(?P<hour>[0-9]{2})"
+                       r"(?P<minute>[0-9]{2})_(?P<period>[0-9]{2}[SMHD])_(?P<rate>[0-9]{2}[SMHD])_MO\.crx\.gz")
+_NAV_PRODUCT = "BRDC00WRD"  # the broadcast messages of all constellations, merged for the world
+_NAV_NAME = re.compile(rf"{_NAV_PRODUCT}_[RSU]_[0-9]{{11}}_01D_MN\.rnx(?:\.gz)?")
+_UNITS = {"S": 1, "M": 60, "H": 3600, "D": 86400}
+_RATES = {"1s": 1.0, "30s": 30.0}
+_RATE_TEXT = {1.0: "1 s", 30.0: "30 s"}
+_SHOWN = 4  # how many of the missing files an error message lists for a rate
+
+
+def _seconds(code: str) -> int:
+    """The seconds of a length or an interval as the names write it: ``"15M"`` is 900."""
+    return int(code[:-1]) * _UNITS[code[-1]]
+
+
+def _doy(when: datetime | date) -> str:
+    return f"{when.timetuple().tm_yday:03d}"
+
+
+def _slash(url: str) -> str:
+    return url if url.endswith("/") else url + "/"
+
+
+def _ring_hint() -> str:
+    return f"RING is on port {RING_PORT}; a firewall may block it"
+
+
+@dataclass(frozen=True)
+class RemoteFile:
+    """One file of a station in an archive: its address and its name, the time it holds by its name (``start`` to
+    ``end``, GPS time without a zone; a file of a day begins at midnight and ends at the next one) and the seconds
+    between its epochs."""
+
+    url: str
+    name: str
+    start: datetime
+    end: datetime
+    interval: float
+
+
+@dataclass(frozen=True)
+class _Kind:
+    """A kind of file that an archive keeps: how long a file is and the interval of its epochs (as the names write
+    them, ``01D`` and ``30S``), the address of the folder of the files that begin at a time, and when they come
+    online."""
+
+    label: str
+    period_code: str
+    rate_code: str
+    folder: Callable[[datetime], str]
+    when: str
+
+    @property
+    def period(self) -> timedelta:
+        return timedelta(seconds=_seconds(self.period_code))
+
+    @property
+    def interval(self) -> float:
+        return float(_seconds(self.rate_code))
+
+
+@dataclass(frozen=True)
+class _Archive:
+    """A place that keeps observations: its name, the site it is reached at (``"BKG"``, ``"RING"``: if one archive of a
+    site cannot be reached the others cannot either), its kinds of file in the order they are tried, and what to add to
+    the complaint that it cannot be reached."""
+
+    label: str
+    site: str
+    kinds: tuple[_Kind, ...]
+    hint: str = ""
+
+
+def _bkg(tree: str) -> _Archive:
+    """The tree ``tree`` (``"EUREF"`` or ``"IGS"``) of BKG's data centre: files of a day in ``obs/<yyyy>/<ddd>/``, of
+    an hour in ``nrt/<ddd>/<hh>/`` and, for some stations, pieces of 15 minutes at 1 s in
+    ``highrate/<yyyy>/<ddd>/<a-x>/`` (a folder for each hour, named by a letter; the IGS keeps older ones in
+    ``highrate_permanent``)."""
+    root = _slash(BKG_ROOT) + tree + "/"
+
+    def fine(folder: str) -> _Kind:
+        return _Kind("15 minute 1 s", "15M", "01S", lambda t: f"{root}{folder}/{t:%Y}/{_doy(t)}/{chr(97 + t.hour)}/",
+                     "BKG 15 minute files are online after each quarter of an hour")
+
+    kinds = [_Kind("daily 30 s", "01D", "30S", lambda t: f"{root}obs/{t:%Y}/{_doy(t)}/", _BKG_DAILY),
+             _Kind("hourly 30 s", "01H", "30S", lambda t: f"{root}nrt/{_doy(t)}/{t:%H}/",
+                   "BKG hourly files are online after the hour"),
+             fine("highrate")]
+    if tree == "IGS":
+        kinds.append(fine("highrate_permanent"))
+    return _Archive(f"BKG {tree}", "BKG", tuple(kinds))
+
+
+def _ring() -> _Archive:
+    """RING: files of a day at 30 s in ``<yyyy>/<ddd>/`` and of an hour at 1 s in ``<yyyy>/<ddd>/<hh>/``."""
+    root = _slash(RING_RINEX)
+    return _Archive("RING", "RING", (
+        _Kind("daily 30 s", "01D", "30S", lambda t: f"{root}{t:%Y}/{_doy(t)}/",
+              "RING daily files are online after midnight UTC"),
+        _Kind("hourly 1 s", "01H", "01S", lambda t: f"{root}{t:%Y}/{_doy(t)}/{t:%H}/",
+              "RING hourly files are online after the hour")), _ring_hint())
+
+
+def _archives(station: Station) -> list[_Archive]:
+    """The archives that keep the station, in the order they are tried: BKG's before RING's."""
+    found = []
+    if "EPN" in station.networks:
+        found.append(_bkg("EUREF"))
+    if "IGS" in station.networks:
+        found.append(_bkg("IGS"))
+    if "RING" in station.networks:
+        found.append(_ring())
+    return found
+
+
+def _checked(station: Station) -> None:
+    """The id of the station ends up in names of files and folders: a ``ValueError`` unless it is nine capital letters
+    or digits."""
+    if not _ID.fullmatch(station.id):
+        raise ValueError(f"{station.id!r} is not the id of a station (nine capital letters or digits, as AQUI00ITA)")
+
+
+def _gps_span(start: datetime, end: datetime) -> tuple[datetime, datetime]:
+    """The flight as times in GPS time without a zone (what :func:`rinex.header` gives), the start not after the end."""
+    for when in (start, end):
+        if not isinstance(when, datetime) or when.tzinfo is not None:
+            raise ValueError("the start and the end of the flight are datetimes in GPS time without a time zone, as "
+                             "rinex.header gives them")
+    if end < start:
+        raise ValueError(f"the end of the flight ({end}) is before its start ({start})")
+    return start, end
+
+
+def _gps_now() -> datetime:
+    """Now in GPS time without a zone (the clock of the program, :func:`_now`, is UTC)."""
+    utc = _now().astimezone(timezone.utc).replace(tzinfo=None)
+    return utc + timedelta(seconds=rinex.gps_minus_utc(utc))
+
+
+def _slots(period: timedelta, a: datetime, b: datetime) -> Iterator[datetime]:
+    """The starts of the files of length ``period`` (counted from midnight) that overlap the time from ``a`` to
+    ``b``."""
+    midnight = a.replace(hour=0, minute=0, second=0, microsecond=0)
+    slot = midnight + (a - midnight) // period * period
+    while slot < b:
+        yield slot
+        slot += period
+
+
+class _Unreachable(Exception):
+    """A site that cannot be asked: ``site`` is its name, the message says why."""
+
+    def __init__(self, site: str, message: str):
+        super().__init__(message)
+        self.site = site
+
+
+def _name_start(match: re.Match) -> datetime | None:
+    """The time a file begins, by its name; None for a date that does not exist."""
+    try:
+        return datetime(int(match["year"]), 1, 1) + timedelta(days=int(match["day"]) - 1, hours=int(match["hour"]),
+                                                              minutes=int(match["minute"]))
+    except (ValueError, OverflowError):
+        return None
+
+
+def _find(station: Station, archive: _Archive, kind: _Kind, slot: datetime) -> RemoteFile | None:
+    """The file of ``station`` of this ``kind`` that begins at ``slot``, as the listing of the folder of the archive
+    has it, or None. Of the names that are the station's, for this time, length and interval, R is taken before S
+    before U."""
+    folder = kind.folder(slot)
+    try:
+        names = download.listing(folder)
+    except download.NotPublished:
+        return None  # a folder that is not there has no file
+    except download.DownloadError as exc:
+        hint = f" ({archive.hint})" if archive.hint else ""
+        raise _Unreachable(archive.site, f"{archive.site} could not be reached: {exc}{hint}") from exc
+    best = None
+    for name in names:
+        match = _OBS_NAME.fullmatch(name)
+        if (match is None or match["id"] != station.id or _name_start(match) != slot
+                or _seconds(match["period"]) != _seconds(kind.period_code)
+                or _seconds(match["rate"]) != _seconds(kind.rate_code)):
+            continue
+        key = ("RSU".index(match["source"]), name)
+        if best is None or key < best:
+            best = key
+    if best is None:
+        return None
+    return RemoteFile(folder + best[1], best[1], slot, slot + kind.period, kind.interval)
+
+
+def _missing(station: Station, archive: _Archive, kind: _Kind, slot: datetime) -> str:
+    """Why there is no file: which one it would be and where it is not and, if it is not long since it was due, when it
+    usually comes online. The name has its source as ``[RSU]``: it says what is missing, no file is asked for by it."""
+    name = f"{station.id}_[RSU]_{slot:%Y}{_doy(slot)}{slot:%H%M}_{kind.period_code}_{kind.rate_code}_MO.crx.gz"
+    text = f"{archive.label}, {kind.label} files: {name} is not in {kind.folder(slot)}"
+    if _gps_now() < slot + kind.period + LATE:
+        text += f" - not published yet: {kind.when}"
+    return text
+
+
+def _cover(station: Station, archive: _Archive, interval: float, start: datetime, end: datetime,
+           whole: bool) -> tuple[list[RemoteFile], bool, list[str]]:
+    """The files of one archive, with epochs ``interval`` seconds apart, for the flight and :data:`MARGIN` on each side
+    of it; whether they hold it (all of it when ``whole``, else the flight, and the margins as far as there are files);
+    why not. The kinds of file are tried in the order of the archive, each for the time that the ones before did not
+    cover: the file of a day, and for a day that has none the files of its hours. Raises :class:`_Unreachable`."""
+    found: dict[str, RemoteFile] = {}
+    windows = [(start - MARGIN, end + MARGIN)]
+    misses: list[tuple[datetime, datetime, str]] = []
+    for kind in (k for k in archive.kinds if k.interval == interval):
+        left = []
+        for a, b in windows:
+            for slot in _slots(kind.period, a, b):
+                remote = _find(station, archive, kind, slot)
+                if remote is not None:
+                    found[remote.name] = remote
+                else:
+                    window = (max(a, slot), min(b, slot + kind.period))  # what this file would have covered
+                    left.append(window)
+                    misses.append((*window, _missing(station, archive, kind, slot)))
+        windows = left
+    needed = windows if whole else [(a, b) for a, b in windows if a <= end and b > start]
+    notes = [note for a, b, note in misses if any(a < d and c < b for c, d in needed)]
+    return sorted(found.values(), key=lambda f: f.start), not needed, notes
+
+
+def _choose(station: Station, interval: float, start: datetime, end: datetime, whole: bool,
+            down: dict[str, str]) -> tuple[list[RemoteFile] | None, list[str]]:
+    """The files of the first archive that holds the flight (:func:`_cover`), or None and what the archives lack. A site
+    that cannot be reached is put in ``down`` with the reason and is not asked again."""
+    notes: list[str] = []
+    for archive in _archives(station):
+        if archive.site in down:
+            continue
+        try:
+            files, complete, why = _cover(station, archive, interval, start, end, whole)
+        except _Unreachable as exc:
+            down[exc.site] = str(exc)
+            continue
+        if complete:
+            return files, notes
+        notes += why
+    return None, notes
+
+
+def _no_files(station: Station, start: datetime, end: datetime, notes: dict[float, list[str]], down: dict[str, str],
+              other: tuple[float, bool] | None) -> str:
+    """The message when no archive has the files: the time, the sites that did not answer, for each rate the first of
+    the files that are missing and, when a rate was asked for, whether the other rate is there."""
+    until = f"{end:%H:%M}" if start.date() == end.date() else f"{end:%Y-%m-%d %H:%M}"
+    lines = [f"{station.id}: no observation files can be had for {start:%Y-%m-%d %H:%M} to {until} (GPS time)."]
+    lines += down.values()
+    for interval, why in notes.items():
+        if not why:
+            continue  # every archive that could be asked was out of reach: the sites above say so
+        lines.append(f"{_RATE_TEXT[interval]} files:")
+        lines += [f"  {note}" for note in why[:_SHOWN]]
+        if len(why) > _SHOWN:
+            lines.append(f"  and {len(why) - _SHOWN} more")
+    if other is not None:
+        interval, there = other
+        if there:
+            lines.append(f"The {_RATE_TEXT[interval]} files for these hours are online: ask for the rate "
+                         f"\"{interval:g}s\" (or \"auto\").")
+        else:
+            lines.append(f"The {_RATE_TEXT[interval]} files for these hours are not there either.")
+    return "\n".join(lines)
+
+
+def observation_files(station: Station, start: datetime, end: datetime, rate: str = "auto") -> list[RemoteFile]:
+    """The files that hold the observations of ``station`` for a flight from ``start`` to ``end`` (GPS time without a
+    zone) and :data:`MARGIN` on each side of it, in time order. The station is looked for in the archive of each of its
+    networks, BKG's before RING's, and the files are all of one archive. The names are those of the listings of the
+    folders (``download.listing``): none is made up.
+
+    ``rate`` is ``"1s"``, ``"30s"`` or ``"auto"``. 1 s files are BKG's pieces of 15 minutes (``highrate``) or RING's of
+    an hour; 30 s files are the file of a day where the archive has one, else the files of its hours (BKG's ``nrt``).
+    With ``"auto"``, 1 s when its files hold the flight and both margins, else 30 s, and when neither is whole the 1 s
+    files that hold the flight. With a rate asked for, the files that hold the flight, and the margins as far as the
+    archive has files for them.
+
+    A ``ValueError`` when there are none: it names the files that are missing and where they are not, says when such
+    files usually come online if the time is recent, whether the other rate is there, and that BKG or RING could not be
+    reached (RING is on the port 44324, which some firewalls close)."""
+    _checked(station)
+    start, end = _gps_span(start, end)
+    rate = str(rate).strip().lower()
+    if rate != "auto" and rate not in _RATES:
+        raise ValueError(f"the rate is \"1s\", \"30s\" or \"auto\", not {rate!r}")
+    if not _archives(station):
+        raise ValueError(f"{station.id} is in none of the networks ({', '.join(NETWORKS)}): there is no archive that "
+                         "this program reads to ask for its observations")
+    down: dict[str, str] = {}
+    # (interval, whole): 1 s if it holds the margins too, else 30 s, and last the 1 s that holds the flight
+    plan = [(1.0, True), (30.0, False), (1.0, False)] if rate == "auto" else [(_RATES[rate], False)]
+    notes: dict[float, list[str]] = {}
+    for interval, whole in plan:
+        files, why = _choose(station, interval, start, end, whole, down)
+        if files is not None:
+            log.info("%s: %d files with an epoch every %s", station.id, len(files), _RATE_TEXT[interval])
+            return files
+        if not whole:
+            notes[interval] = why
+    other = None
+    if rate != "auto" and any(archive.site not in down for archive in _archives(station)):  # else none was looked at
+        spare = 30.0 if _RATES[rate] == 1.0 else 1.0
+        other = (spare, _choose(station, spare, start, end, False, down)[0] is not None)
+    raise ValueError(_no_files(station, start, end, notes, down, other))
+
+
+def _inside(folder: Path, name: str, pattern: re.Pattern, owner: str) -> Path:
+    """``folder / name`` for a ``name`` that is wholly the name of a file of the archive (``pattern``) and that, once
+    resolved, is directly in ``folder``. A name from a listing is data from the network: it must not write anywhere else
+    (``..``, a drive, an absolute path, a new line). Otherwise a ``ValueError``."""
+    if pattern.fullmatch(name) is None or (folder / name).resolve().parent != folder.resolve():
+        raise ValueError(f"{name!r} is not the name of a file of the archive, or would not stay in the folder of "
+                         f"{owner}")
+    return folder / name
+
+
+def _fetch(url: str, path: Path, progress) -> None:
+    """``download.fetch``, its failures given as the ``ValueError`` that this module raises for files it cannot have."""
+    try:
+        download.fetch(url, path, progress)
+    except download.NotPublished as exc:
+        raise ValueError(f"{path.name} was in the listing of the archive and is not there now: {exc}") from exc
+    except download.DownloadError as exc:
+        hint = f" ({_ring_hint()})" if url.startswith(_slash(RING_RINEX)) else ""
+        raise ValueError(f"{path.name} could not be downloaded: {exc}{hint}") from exc
+
+
+def _downloaded(url: str, name: str, path: Path, decode: Callable[[Path], object], progress) -> None:
+    """``path`` holds the file at ``url`` and ``decode(path)`` works on it: the copy that is there, else fetched. A
+    file that does not decode (its integrity is that of the checksum of gzip and of the decoder) is removed and fetched
+    again, once; a second failure is a ``ValueError`` naming the file. A missing decoder is no damage: that error is
+    raised at once, the file is not fetched again."""
+    problem: ValueError | None = None
+    for _attempt in range(2):
+        progress.check()
+        if not path.exists():
+            _fetch(url, path, progress)
+        try:
+            decode(path)
+            return
+        except ValueError as exc:
+            if _native.CRINEX_MISSING in str(exc):
+                raise
+            problem = exc
+            path.unlink(missing_ok=True)
+    raise ValueError(f"{name} ({url}) does not decode, not even when downloaded again: {problem}") from problem
+
+
+def _uncovered(station: Station, info: rinex.RinexInfo, gaps: list[tuple[datetime, datetime]], start: datetime,
+               end: datetime) -> str | None:
+    """Why a base does not cover the flight, or None: a hole between two of its epochs during the flight, or a first
+    epoch after the start or a last one before the end. Holes in the margins do not matter."""
+    flight = f"{start:%Y-%m-%d %H:%M:%S} to {end:%H:%M:%S}" if start.date() == end.date() else f"{start} to {end}"
+    inside = [(a, b) for a, b in gaps if a < end and b > start]
+    if inside:
+        a, b = inside[0]
+        more = f" (and {len(inside) - 1} more)" if len(inside) > 1 else ""
+        return (f"{station.id}: the observations have no epoch from {a:%Y-%m-%d %H:%M:%S} to {b:%H:%M:%S} (GPS time) "
+                f"during the flight, {flight}{more}: use the other rate, or another station")
+    if info.first is None or info.last is None or info.first > start or info.last < end:
+        return (f"{station.id}: the observations run from {info.first} to {info.last} (GPS time) and do not cover the "
+                f"flight, {flight}")
+    return None
+
+
+def download_observations(station: Station, start: datetime, end: datetime, folder: str | Path, progress=None,
+                          rate: str = "auto") -> Path:
+    """The observations of ``station`` for the flight from ``start`` to ``end`` (GPS time without a zone) as one RINEX
+    file, ``<folder>/<id>_<YYYYmmdd-HHMM>_<HHMM>.obs`` (the start of the flight, then the time of its end). The files
+    that :func:`observation_files` finds (``rate`` as there) are fetched one at a time into ``stations/<id>`` of the
+    GNSS folder, where they stay as the archive names them and a second call finds them; they are decoded (Hatanaka,
+    gzip) and joined (:func:`rinex.join`).
+
+    A file that does not decode is fetched again once, then refused naming it. The base has to cover the flight: a hole
+    in its epochs during the flight, or epochs that begin after its start or end before its end, are a ``ValueError``
+    and no file is left; holes in the margins are not. A file that is not there, a site that cannot be reached (the
+    message of RING names its port, 44324) and files that do not join are a ``ValueError`` too."""
+    progress = as_progress(progress)
+    _checked(station)
+    files = observation_files(station, start, end, rate)
+    start, end = _gps_span(start, end)
+    cache = _stations_dir() / station.id
+    owner = f"the station {station.id}"
+    paths = [_inside(cache, remote.name, _OBS_NAME, owner) for remote in files]  # all names, before any fetch
+    for n, (remote, path) in enumerate(zip(files, paths)):
+        _downloaded(remote.url, remote.name, path, rinex.plain, progress.sub(0.9 * n / len(files), 0.9 / len(files)))
+    out = Path(folder) / f"{station.id}_{start:%Y%m%d-%H%M}_{end:%H%M}.obs"
+    progress(0.9, f"Joining the {len(paths)} files of {station.id}")
+    try:
+        info, gaps = rinex.join(paths, out)
+    except ValueError as exc:
+        raise ValueError(f"{station.id}: the files cannot be joined: {exc}") from exc
+    problem = _uncovered(station, info, gaps, start, end)
+    if problem:
+        out.unlink(missing_ok=True)
+        raise ValueError(problem)
+    progress(1.0, f"{station.id}: observations from {info.first:%Y-%m-%d %H:%M:%S} to {info.last:%H:%M:%S} (GPS time)")
+    return out
+
+
+def _navigation_name(day: date) -> tuple[str, str]:
+    """The name of the navigation file of a day and its address, from the listing of BKG's folder
+    ``IGS/BRDC/<yyyy>/<ddd>/``: of ``BRDC00WRD`` the S copy, else R, else U. A ``ValueError`` when it is not there,
+    which says when it comes if the day is recent."""
+    where = f"{_slash(BKG_ROOT)}IGS/BRDC/{day:%Y}/{_doy(day)}/"
+    stamp = f"{day:%Y}{_doy(day)}0000"
+    pattern = re.compile(rf"{_NAV_PRODUCT}_(?P<source>[RSU])_{stamp}_01D_MN\.rnx\.gz")
+    try:
+        names = download.listing(where)
+    except download.NotPublished:
+        names = []
+    except download.DownloadError as exc:
+        raise ValueError(f"BKG could not be reached: {exc}") from exc
+    found = sorted((m for m in map(pattern.fullmatch, names) if m), key=lambda m: ("SRU".index(m["source"]), m.string))
+    if found:
+        return found[0].string, where + found[0].string
+    name = f"{_NAV_PRODUCT}_[RSU]_{stamp}_01D_MN.rnx.gz"
+    text = f"No broadcast navigation file for {day:%Y-%m-%d}: {name} is not in {where}"
+    if _gps_now() < datetime(day.year, day.month, day.day) + timedelta(days=1) + LATE:
+        text += f" - not published yet: {_BKG_DAILY}"
+    raise ValueError(text)
+
+
+def _navigation_file(day: date, name: str, url: str, folder: Path, progress) -> Path:
+    """The navigation file of ``day`` decompressed into ``folder``. When the day is over it is kept (``navigation`` in
+    the GNSS folder) and used again. BKG writes the file of the day all day long, so until an hour after the end of the
+    day it is fetched every time and not kept: a copy of the middle of a day is never taken for the whole of it."""
+    kept = download.gnss_dir() / "navigation"
+    final = datetime(day.year, day.month, day.day) + timedelta(days=1) + NAV_SETTLE <= _gps_now()
+    kept.mkdir(parents=True, exist_ok=True)
+    plain = _inside(folder, name[:-3], _NAV_NAME, "the navigation files")
+    with tempfile.TemporaryDirectory(prefix=".nav-", dir=kept) as scratch:
+        packed = _inside(kept if final else Path(scratch), name, _NAV_NAME, "the navigation files")
+        _downloaded(url, name, packed, lambda path: rinex.gunzip(path, plain, name), progress)
+    return plain
+
+
+def download_navigation(start: datetime, end: datetime, folder: str | Path, progress=None) -> list[Path]:
+    """The broadcast navigation messages for the days of a flight from ``start`` to ``end`` (GPS time without a zone):
+    of each day the file ``BRDC00WRD_<S|R|U>_<yyyy><ddd>0000_01D_MN.rnx.gz`` of BKG's ``IGS/BRDC/<yyyy>/<ddd>/``,
+    decompressed into ``folder`` without its ``.gz``, in the order of the days (a flight over midnight takes two). All
+    the days are looked up in the archive before any is fetched; a day that is not there is a ``ValueError`` that names
+    the file and says when it comes if the day is recent. A file that does not decode is fetched again once."""
+    progress = as_progress(progress)
+    start, end = _gps_span(start, end)
+    folder = Path(folder)
+    days = [start.date() + timedelta(days=n) for n in range((end.date() - start.date()).days + 1)]
+    chosen = [_navigation_name(day) for day in days]
+    folder.mkdir(parents=True, exist_ok=True)
+    return [_navigation_file(day, name, url, folder, progress.sub(n / len(days), 1 / len(days)))
+            for n, (day, (name, url)) in enumerate(zip(days, chosen))]
