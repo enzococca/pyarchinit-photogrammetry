@@ -60,6 +60,8 @@ ERP_COPY = "rotation.erp"  # the ERP of the session among RTKLIB's inputs: RTKLI
 # the IGS and its centres name their products by the long names of these patterns from GPS week 2238 on
 LONG_NAMES = date(2022, 11, 27)
 _GPS_EPOCH = date(1980, 1, 6)
+# how the messages name the receiver of a PPP, the user's own on a mark: as the antenna warnings do ("your base")
+_YOUR_BASE = ppk.ROLES["ppp"]
 # what RTKLIB-EX's readerp looks for in an ERP file, as it spells it: the line of the version, the line that names the
 # columns, and the characters of a line of numbers
 _ERP_VERSION = ("version 2", "VERSION 2")
@@ -743,11 +745,11 @@ def _uncovered(spans, start: datetime, end: datetime) -> list[tuple[datetime, da
     return [(a, b) for a, b in missing if b > a]
 
 
-def _coverage_problem(found: Products, start: datetime, end: datetime) -> str | None:
-    """Why the orbits or the clocks of ``found`` leave part of the session from ``start`` to ``end`` (its first and
-    last epoch) without products - each file and the time it covers, the time left out and how long it is - or None
-    when they cover all of it: RTKLIB computes nothing where it has no orbits or clocks, and the hours of the session
-    would claim that time."""
+def _coverage_problem(found: Products, name: str, start: datetime, end: datetime) -> str | None:
+    """Why the orbits or the clocks of ``found`` leave part of the session of the base ``name`` from ``start`` to
+    ``end`` (its first and last epoch) without products - each file and the time it covers, the time left out and how
+    long it is - or None when they cover all of it: RTKLIB computes nothing where it has no orbits or clocks, and the
+    hours of the session would claim that time."""
     for what, files, span_of in (("orbits", found.sp3, _sp3_span), ("clocks", found.clk, _clock_span)):
         spans = [(span_of(path), path) for path in files]
         missing = _uncovered([span for span, _ in spans], start, end)
@@ -755,9 +757,9 @@ def _coverage_problem(found: Products, start: datetime, end: datetime) -> str | 
             seconds = sum((b - a).total_seconds() for a, b in missing)
             covers = "; ".join(f"{path.name} covers {_between(a, b)}" for (a, b), path in spans)
             left = ", ".join(_between(a, b) for a, b in missing)
-            return (f"the precise {what} do not cover the session of the base, from {_between(start, end)}: "
-                    f"{covers} - {_duration(seconds)} of the session ({left}) would have no {what}, and RTKLIB "
-                    f"computes nothing there. Give the {what} of every day of the session")
+            return (f"the precise {what} do not cover the session of {_YOUR_BASE} {name}, from "
+                    f"{_between(start, end)}: {covers} - {_duration(seconds)} of the session ({left}) would have no "
+                    f"{what}, and RTKLIB computes nothing there. Give the {what} of every day of the session")
     return None
 
 
@@ -767,11 +769,12 @@ def _session_notes(name: str, hours: float) -> list[str]:
     duration = _duration(hours * 3600.0)
     notes = []
     if hours < SHORT_H:
-        notes.append(f"the base {name} observed for {duration}: a static PPP of less than {SHORT_H:g} hours is "
+        notes.append(f"{_YOUR_BASE} {name} observed for {duration}: a static PPP of less than {SHORT_H:g} hours is "
                      "10-20 cm off at best, and every position of the survey with it")
     if hours < STATION_BETTER_H:
-        notes.append(f"the base {name} observed for {duration}: under {STATION_BETTER_H:g} hours a static baseline "
-                     "from a permanent station nearby places it better than a PPP, to a few centimetres or less")
+        notes.append(f"{_YOUR_BASE} {name} observed for {duration}: under {STATION_BETTER_H:g} hours a static "
+                     "baseline from a permanent station nearby places it better than a PPP, to a few centimetres or "
+                     "less")
     return notes
 
 
@@ -857,9 +860,9 @@ def solve_static(obs: Path | Sequence[Path], folder: Path, products: Products | 
         raise ValueError(_NO_ANTEX)
     pieces = [Path(obs)] if isinstance(obs, (str, os.PathLike)) else [Path(path) for path in obs]
     if not pieces:
-        raise ValueError("no file given for the base")
+        raise ValueError(f"no file given for {_YOUR_BASE}")
     folder = Path(folder)
-    progress(0.0, "The base by static PPP")
+    progress(0.0, f"{_YOUR_BASE.capitalize()} by static PPP")
     if len(pieces) == 1:
         return _solve_static(pieces, pieces[0], [], folder, products, atx, progress)
     folder.mkdir(parents=True, exist_ok=True)
@@ -875,10 +878,10 @@ def _solve_static(pieces: list[Path], own: Path, holes: list[tuple[datetime, dat
     (``own``) and the holes between them."""
     info = rinex.header(own)
     if info.kind != "obs":
-        raise ValueError(f"the base {pieces[0].name} holds navigation messages, not observations")
+        raise ValueError(f"{_YOUR_BASE} {pieces[0].name} holds navigation messages, not observations")
     span = rinex.time_span(own)
     if span is None:
-        raise ValueError(f"the base {pieces[0].name} has no observation epochs")
+        raise ValueError(f"{_YOUR_BASE} {pieces[0].name} has no observation epochs")
     start, end = span
     name = ppk.base_name(pieces[0], info)
     hours = _hours(own, info, span, holes)
@@ -886,12 +889,13 @@ def _solve_static(pieces: list[Path], own: Path, holes: list[tuple[datetime, dat
     kind = ppk.antenna_type(info)
     satellite = ppk.satellite_entry(antennas, kind)
     if satellite:
-        raise ValueError(f"for the antenna {kind} of the base {name} RTKLIB's search in {antennas.name} finds "
+        raise ValueError(f"for the antenna {kind} of {_YOUR_BASE} {name} RTKLIB's search in {antennas.name} finds "
                          f"{' '.join(satellite.split())}, the antenna of a satellite, whose offsets it would apply to "
-                         "the receiver: write the type of the antenna in the RINEX header of the base (ANT # / TYPE)")
+                         f"the receiver: write the type of the antenna in the RINEX header of {_YOUR_BASE} (ANT # / "
+                         "TYPE)")
     calibration = ppk.antenna_calibration(antennas, kind)
     found = given if given is not None else products(start, end, folder / PRODUCTS_FOLDER, progress.sub(0.2, 0.6))
-    problem = _coverage_problem(found, start, end)
+    problem = _coverage_problem(found, name, start, end)
     if problem:
         raise ValueError(problem)
     warnings: list[str] = []
@@ -901,14 +905,14 @@ def _solve_static(pieces: list[Path], own: Path, holes: list[tuple[datetime, dat
     warnings += _session_notes(name, hours)
     if found.kind == "rapid":
         warnings.append(f"the precise products are rapid ones ({found.centre}): the final ones are a little better - "
-                        f"ESA's come about {_words(FINAL_DELAY)} after the session - and the base can be computed "
-                        "again with them then")
+                        f"ESA's come about {_words(FINAL_DELAY)} after the session - and {_YOUR_BASE} can be "
+                        "computed again with them then")
     if start.date() < LONG_NAMES:
-        warnings.append(f"the base {name} observed before GPS week 2238 (27 November 2022), when the precise products "
-                        "were of IGb14 and made for the antenna calibrations of igs14.atx (save those of the third "
-                        f"reprocessing of the IGS, repro3), while the position is computed with {antennas.name} and "
-                        "called ITRF2020: the two frames are millimetres apart, but the antenna offsets of the two "
-                        "files differ by up to centimetres, and the mark can be that much off")
+        warnings.append(f"{_YOUR_BASE} {name} observed before GPS week 2238 (27 November 2022), when the precise "
+                        "products were of IGb14 and made for the antenna calibrations of igs14.atx (save those of the "
+                        "third reprocessing of the IGS, repro3), while the position is computed with "
+                        f"{antennas.name} and called ITRF2020: the two frames are millimetres apart, but the antenna "
+                        "offsets of the two files differ by up to centimetres, and the mark can be that much off")
     progress(0.8, f"RTKLIB: the static PPP of {name}")
     path, message = _run(own, info, found, antennas, folder / WORK_FOLDER, hours)
     if message.lower().startswith("error"):
@@ -916,7 +920,7 @@ def _solve_static(pieces: list[Path], own: Path, holes: list[tuple[datetime, dat
     (lat, lon, h), q, sd = ppk.static_position(path)
     if q != Q_PPP:
         said = f" RTKLIB said: {message}." if message else ""
-        raise ValueError(f"RTKLIB made no PPP solution of the base {name}: its solution is "
+        raise ValueError(f"RTKLIB made no PPP solution of {_YOUR_BASE} {name}: its solution is "
                          f"{ppk.QUALITY.get(q, 'of no known quality')} (Q={q}), not ppp (Q={Q_PPP}) - the precise "
                          "orbits and clocks may not fit the observations, or these are not on two frequencies."
                          f"{said} The solution is kept in {path}")

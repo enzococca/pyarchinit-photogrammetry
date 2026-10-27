@@ -808,6 +808,39 @@ def test_a_run_that_computes_nothing_is_an_error_and_leaves_nothing(tmp_path, fa
     assert list((tmp_path / "work" / "ppp").iterdir()) == []
 
 
+def test_ppp_messages_name_your_base(tmp_path, fake_ppp):
+    """The receiver of a PPP is the user's own, on a mark: every message names it as the antenna warning does - "your
+    base 3040" - the warnings, the refusals and what the progress says."""
+    products = dataclasses.replace(_given_products(tmp_path / "given"), centre="IGS", kind="rapid")
+    said: list[str] = []
+    r = ppp.solve_static(_antenna(tmp_path / "absent", "TRM41249.00     NONE"), tmp_path / "w1", products=products,
+                         atx=ATX_EXCERPT, progress=lambda fraction, message: said.append(message))
+    # the antenna without its calibration, the short session (two), the rapid products, the products of IGb14
+    named = [w for w in r.warnings if "3040" in w]
+    assert len(named) == 4 and all("your base 3040" in w for w in named), r.warnings
+    assert any("your base can be computed again" in w for w in r.warnings)
+    assert said[0] == "Your base by static PPP"
+    refusals = []
+    fake_ppp.q = 5
+    with pytest.raises(ValueError) as error:
+        ppp.solve_static(OWN, tmp_path / "w2", products=_given_products(tmp_path / "given2"), atx=ATX_EXCERPT)
+    refusals.append(str(error.value))
+    with pytest.raises(ValueError) as error:
+        ppp.solve_static(_antenna(tmp_path / "satellite", "BLOCK IIA"), tmp_path / "w3", products=products,
+                         atx=ATX_EXCERPT)
+    refusals.append(str(error.value))
+    with pytest.raises(ValueError) as error:
+        ppp.solve_static(_session(tmp_path / "obs", 2.0, start=datetime(2005, 4, 1, 23)), tmp_path / "w4",
+                         products=products, atx=ATX_EXCERPT)
+    refusals.append(str(error.value))
+    assert all("your base 3040" in text and "the base" not in text for text in refusals), refusals
+    with pytest.raises(ValueError, match="your base 30400920.05n holds navigation messages"):
+        ppp.solve_static(NAV, tmp_path / "w5", products=products, atx=ATX_EXCERPT)
+    with pytest.raises(ValueError, match="no file given for your base"):
+        ppp.solve_static([], tmp_path / "w6", products=products, atx=ATX_EXCERPT)
+    assert not [w for w in r.warnings + refusals if "the base 3040" in w]
+
+
 def test_solve_static_downloads_the_products_it_is_not_given(archives, tmp_path, fake_ppp, monkeypatch):
     """Without products, those of the day of the session are downloaded into the folder of the PPP, beside the folder
     RTKLIB works in."""
