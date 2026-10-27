@@ -103,7 +103,9 @@ def fake_web(calls: list):
                 ("hits", False): {"hits": [
                     {"path": "/pyarchinit-photogrammetry/install/", "title": "Installation", "count": 300},
                     {"path": "download-macos", "count": 2, "event": True},
-                    {"path": "/pyarchinit-photogrammetry/<script>alert(1)</script>", "count": 1}]},
+                    {"path": "/pyarchinit-photogrammetry/<script>alert(1)</script>", "count": 1},
+                    {"path": "/casino-bonus/", "title": "spam", "count": 50},  # not a page of the site
+                    {"path": "https://spam.example/", "count": 9}]},
                 ("hits", True): {"hits": [{"path": "download-macos", "count": 2, "event": True},
                                           {"path": "download-windows-x64", "count": 1, "event": True}]},
                 ("locations", False): {"stats": [{"id": "IT", "name": "Italy", "count": 900},
@@ -140,6 +142,7 @@ def web(monkeypatch):
     calls: list = []
     monkeypatch.setattr(stats, "http", fake_web(calls))
     monkeypatch.setattr(stats, "PAUSE", 0)
+    monkeypatch.setattr(stats, "REPO", "enzococca/pyarchinit-photogrammetry")  # the fakes answer for this one
     return calls
 
 
@@ -367,7 +370,9 @@ def test_update_with_every_source(tmp_path, web):
     assert site["site"] == {"last30": 1234, "total": 1234, "since": "2026-10-20"}  # the clicks are not visits
     assert site["clicks"] == {"last30": 3, "total": 3, "since": "2026-10-21"}
     assert site["clicks_systems"] == [["macos", 2], ["windows-x64", 1]]
-    assert site["pages"][0] == ["/install/", 300] and all(not p.startswith("download-") for p, _ in site["pages"])
+    assert site["pages"] == [["/install/", 300], ["/<script>alert(1)</script>", 1]]  # no events, no paths of others
+    assert [p for p, _t, _n in data["goatcounter"]["pages"]] == ["/pyarchinit-photogrammetry/install/",
+                                                                 "/pyarchinit-photogrammetry/<script>alert(1)</script>"]
     assert site["countries"][:2] == [["IT", "Italy", 900, 2], ["SY", "Syria", 30, 0]]
     repo = data["page"]["repository"]
     assert repo["summary"] == {"last30": 16, "total": 16, "since": "2026-10-20"}
@@ -406,13 +411,13 @@ def test_a_failing_source_keeps_its_numbers(tmp_path, web, monkeypatch):
 
 # --------------------------------------------------------------------------------- the branch "stats"
 class FakeGitHub:
-    def __init__(self, head=None):
-        self.head, self.calls = head, []
+    def __init__(self, head=None, file=True):
+        self.head, self.file, self.calls = head, file, []
 
     def __call__(self, url, token=None, payload=None, method=None, accept=None, raw=False):
         self.calls.append((method or ("POST" if payload is not None else "GET"), url.split("/git/")[-1], payload))
         if url.endswith("/git/ref/heads/stats") or "/contents/" in url:
-            if self.head is None:
+            if self.head is None or ("/contents/" in url and not self.file):
                 raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
             return '{"schema": 1}' if raw else {"object": {"sha": self.head}}
         if url.endswith("/git/trees"):
@@ -425,9 +430,10 @@ class FakeGitHub:
 def test_branch_stats_created_without_a_parent_then_fast_forwarded(monkeypatch):
     github = FakeGitHub()
     monkeypatch.setattr(stats, "http", github)
-    assert stats.get_file("t") is None
+    assert stats.get_file("t") is None  # no file, no branch: the first run
+    github.calls.clear()
     assert stats.put_file("t", '{"schema": 1}', "chore(stats): x") == "commit1"
-    (_, _, tree), (_, _, commit), (method, ref, create) = github.calls[2:]
+    (_, _, tree), (_, _, commit), (method, ref, create) = github.calls[1:]
     assert tree == {"tree": [{"path": "stats.json", "mode": "100644", "type": "blob", "content": '{"schema": 1}'}]}
     assert commit["parents"] == [] and commit["author"] == commit["committer"] == stats.AUTHOR
     assert (method, ref, create) == ("POST", "refs", {"ref": "refs/heads/stats", "sha": "commit1"})
@@ -437,6 +443,26 @@ def test_branch_stats_created_without_a_parent_then_fast_forwarded(monkeypatch):
     stats.put_file("t", "{}", "chore(stats): y")
     assert github.calls[-2][2]["parents"] == ["old"]
     assert github.calls[-1] == ("PATCH", "refs/heads/stats", {"sha": "commit1", "force": False})
+
+
+def test_a_branch_without_its_file_stops_the_run(monkeypatch):
+    github = FakeGitHub(head="old", file=False)
+    monkeypatch.setattr(stats, "http", github)
+    with pytest.raises(SystemExit, match="exists"):
+        stats.get_file("t")
+    assert [c[0] for c in github.calls] == ["GET", "GET"]  # the file, then the branch; nothing written
+
+
+def test_the_file_is_checked_before_it_is_written(tmp_path, web, monkeypatch):
+    data = _update(tmp_path, {})
+    assert stats.check(json.dumps(data)) == data
+    for broken in ("[]", '{"schema": 1}', json.dumps({**data, "schema": 2}), json.dumps({**data, "updated": None})):
+        with pytest.raises(SystemExit):
+            stats.check(broken)
+    (tmp_path / "broken.json").write_text('{"schema": 1}')
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    with pytest.raises(SystemExit, match="not a statistics file"):  # before any request
+        stats.main(["put", str(tmp_path / "broken.json")])
 
 
 def test_reading_the_branch_fails_loudly(monkeypatch):
@@ -483,7 +509,7 @@ def test_page_without_data_and_without_sources(tmp_path, web):
     data = _update(tmp_path, {})
     text = hook.render(data, "en")
     assert text.count("not configured yet") >= 4  # clicks, real pip installs, visitors of the site and of the repository
-    assert "pip installs (PyPI), raw: robots and mirrors included" in text and text.count("<svg") == 2
+    assert "pip installs (PyPI), raw: robots included, known mirrors left out" in text and text.count("<svg") == 2
     assert "non ancora configurato" in hook.render(data, "it")
 
 
@@ -494,8 +520,9 @@ def test_stopped_bigquery_on_the_page(tmp_path, web):
     assert data["page"]["pip"]["source"] == "pypistats"  # BigQuery has not read every day: the raw numbers meanwhile
     en, it = hook.render(data, "en"), hook.render(data, "it")
     assert "this month's queries billed 720 GB, and one more day would pass the 800 GB" in en
-    assert "pip installs (PyPI), raw: robots and mirrors included" in en
-    assert "le query di questo mese hanno fatturato 720 GB, e un altro giorno supererebbe i 800 GB" in it
+    assert "pip installs (PyPI), raw: robots included, known mirrors left out" in en
+    assert "le query di questo mese hanno fatturato 720 GB, e un altro giorno supererebbe il limite di 800 GB" in it
+    assert "grezze: robot compresi, mirror noti esclusi" in it
     data = _update(tmp_path, ALL, FakeBigQuery(1234.5, ROWS))
     assert data["sources"]["bigquery"] == {"status": "paused", "gb": 1234.5, "limit": 100, "days": 1, "checked": "2026-10-27"}
     assert "one day of downloads billed 1,234.5 GB, more than 100 GB" in hook.render(data, "en")
@@ -513,7 +540,7 @@ def test_hook_fills_the_placeholder(tmp_path, sample, monkeypatch):
     broken = tmp_path / "broken.json"
     broken.write_text("{not json")
     monkeypatch.setenv("PPG_STATS_JSON", str(broken))
-    with pytest.raises(ValueError):
+    with pytest.raises((ValueError, hook.PluginError)):  # MkDocs' PluginError when MkDocs is installed
         hook.on_page_markdown("<!-- ppg-stats en -->", page=None, config=config, files=None)
     monkeypatch.setenv("PPG_STATS_JSON", str(tmp_path / "missing.json"))
     assert "every week" in hook.on_page_markdown("<!-- ppg-stats en -->", page=None, config=config, files=None)

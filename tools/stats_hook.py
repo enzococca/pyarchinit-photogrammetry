@@ -59,7 +59,7 @@ TEXT = {
         "summary": "Summary", "last30": "Last 30 days", "total": "Total", "since": "Since",
         "app": "Downloads of the application (GitHub)", "clicks": "Download clicks on the installation page",
         "pip_real": "pip installs (PyPI), real", "pip_raw": "pip installs (PyPI), raw",
-        "pip_raw_pypistats": "pip installs (PyPI), raw: robots and mirrors included",
+        "pip_raw_pypistats": "pip installs (PyPI), raw: robots included, known mirrors left out",
         "site": "Visitors of this site", "repository": "Visitors of the repository (unique per day)",
         "not_configured": "not configured yet", "error": "not updated at the last run: the source did not answer",
         "budget": "stopped until next month: this month's queries billed {gb} GB, and one more day would pass "
@@ -92,12 +92,12 @@ TEXT = {
         "summary": "Riepilogo", "last30": "Ultimi 30 giorni", "total": "Totale", "since": "Dal",
         "app": "Download dell'applicazione (GitHub)", "clicks": "Clic di download nella pagina di installazione",
         "pip_real": "Installazioni con pip (PyPI), reali", "pip_raw": "Installazioni con pip (PyPI), grezze",
-        "pip_raw_pypistats": "Installazioni con pip (PyPI), grezze: robot e mirror compresi",
+        "pip_raw_pypistats": "Installazioni con pip (PyPI), grezze: robot compresi, mirror noti esclusi",
         "site": "Visitatori di questo sito", "repository": "Visitatori del repository (unici per giorno)",
         "not_configured": "non ancora configurato",
         "error": "non aggiornato all'ultima esecuzione: la fonte non ha risposto",
         "budget": "fermo fino al mese prossimo: le query di questo mese hanno fatturato {gb} GB, e un altro giorno "
-                  "supererebbe i {budget} GB che il workflow si concede",
+                  "supererebbe il limite di {budget} GB che il workflow si concede",
         "paused": "fermo fino al mese prossimo: un giorno di download ha fatturato {gb} GB, oltre {limit} GB: la "
                   "tabella non restringe la query a questo progetto",
         "no_data": "ancora nessun dato",

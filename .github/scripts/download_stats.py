@@ -76,6 +76,7 @@ MONTH_BUDGET_GB = 800  # BigQuery: the bytes billed in a calendar month stop her
 DAY_LIMIT_GB = 100  # BigQuery: a day billing more means the clustering does not narrow the query
 GOATCOUNTER = "https://pyarchinit-photogrammetry.goatcounter.com/api/v0"
 EVENTS = ("download-macos", "download-windows-x64", "download-windows-arm64")  # docs/js/download.js
+SITE_PATH = "/pyarchinit-photogrammetry/"  # the pages of the site; GoatCounter takes any path anyone sends
 PAUSE = 0.3  # GoatCounter answers at most 4 requests a second
 TOP = 15  # rows of a table on the page
 
@@ -113,14 +114,31 @@ def http(url: str, token: str | None = None, payload: dict | None = None, method
 
 
 def get_file(token: str | None) -> str | None:
-    """stats.json of the branch "stats", or None before the first run (no branch yet)."""
+    """stats.json of the branch "stats", or None before the first run, when the branch does not exist. A branch
+    without the file stops the run: starting again from nothing would lose the readings and the traffic that
+    GitHub no longer gives."""
     try:
         return http(f"{GITHUB}/repos/{REPO}/contents/{FILE}?ref={BRANCH}", token,
                     accept="application/vnd.github.raw+json", raw=True)
     except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+    try:
+        http(f"{GITHUB}/repos/{REPO}/git/ref/heads/{BRANCH}", token)
+    except urllib.error.HTTPError as e:
         if e.code == 404:
             return None
         raise
+    raise SystemExit(f"the branch {BRANCH} exists but GitHub gives no {FILE}: stopped, so that a new file does not "
+                     "take the place of its history")
+
+
+def check(text: str) -> dict:
+    """The statistics about to be written: a JSON object of schema 1 with every top-level key."""
+    data = json.loads(text)
+    if not isinstance(data, dict) or data.get("schema") != 1 or not data.get("updated") or set(empty()) - set(data):
+        raise SystemExit(f"not a statistics file of schema 1: {sorted(data) if isinstance(data, dict) else type(data).__name__}")
+    return data
 
 
 def put_file(token: str, text: str, message: str) -> str:
@@ -336,7 +354,8 @@ def update_goatcounter(data: dict, token: str, now: datetime) -> None:
     store["days"] = {d: max(0, n - clicks.get(d, 0)) for d, n in every.items()}
     store["clicks"] = clicks
     hits = goatcounter(token, "stats/hits", **span, limit=40).get("hits") or []
-    store["pages"] = [[h.get("path", ""), h.get("title") or "", int(h.get("count") or 0)] for h in hits if not h.get("event")]
+    store["pages"] = [[h["path"], h.get("title") or "", int(h.get("count") or 0)] for h in hits
+                      if not h.get("event") and str(h.get("path")).startswith(SITE_PATH)]  # anyone can send a path
     hits = goatcounter(token, "stats/hits", **span, **events, limit=len(EVENTS)).get("hits") or []
     store["clicks_systems"] = [[h["path"].removeprefix("download-"), "", int(h.get("count") or 0)] for h in hits if h.get("path") in EVENTS]
     for table, page in (("countries", "locations"), ("refs", "toprefs"), ("systems", "systems"), ("browsers", "browsers")):
@@ -495,7 +514,7 @@ def goatcounter_page(store: dict, today: date) -> dict | None:
         "months": _months(store["days"]),
         "countries": sorted(countries.values(), key=lambda r: (-r[2] - r[3], r[0]))[:20],
         "refs": [[name, n] for _id, name, n in store.get("refs", [])][:TOP],
-        "pages": [[path.removeprefix("/pyarchinit-photogrammetry") or "/", n] for path, _title, n in store.get("pages", [])][:TOP],
+        "pages": [["/" + path.removeprefix(SITE_PATH), n] for path, _title, n in store.get("pages", []) if path.startswith(SITE_PATH)][:TOP],
         "systems": [[name, n] for _id, name, n in store.get("systems", [])][:10],
         "browsers": [[name, n] for _id, name, n in store.get("browsers", [])][:10],
         "clicks_systems": [[name, n] for name, _x, n in store.get("clicks_systems", [])],
@@ -582,7 +601,8 @@ def update(path: Path, env=os.environ, now: datetime | None = None, bigquery=Big
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Statistics of the page Downloads and visits: get, update or put stats.json.")
+    ap = argparse.ArgumentParser(description="Statistics of the page Downloads and visits: get, update or put "
+                                             "stats.json (put checks it first).")
     ap.add_argument("command", choices=("get", "update", "put"))
     ap.add_argument("file", nargs="?", type=Path, default=Path(FILE))
     args = ap.parse_args(argv)
@@ -600,8 +620,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         if not token:
             raise SystemExit("GITHUB_TOKEN is needed to write the branch")
-        data = json.loads(args.file.read_text())
-        print("commit", put_file(token, args.file.read_text(), f"chore(stats): the numbers of {data['updated']}"))
+        text = args.file.read_text()
+        data = check(text)
+        print("commit", put_file(token, text, f"chore(stats): the numbers of {data['updated']}"))
     return 0
 
 
