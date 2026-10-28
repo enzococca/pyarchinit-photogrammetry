@@ -1,0 +1,58 @@
+name: gnss-check
+
+# The GNSS engine on a real day of a permanent station, run on demand: the static PPP of the station (24 hours checked,
+# 4 and 2 hours printed), a static baseline of 2 hours to a station of the EPN 20-60 km away and the Hatanaka files of
+# the archive, against the multi-year solution of the EPN and the official CRX2RNX (what is checked and how far:
+# .github/scripts/gnss_station_check.py). The program and the native core are built from the branch it runs on;
+# everything is downloaded from public archives that ask for no account (BKG, the EPN Central Bureau, ESA, CODE, the
+# IGS, GSI), and no secret is used.
+on:
+  workflow_dispatch:
+    inputs:
+      station:
+        description: "The station (9 characters, of the EPN): Medicina, EPN and IGS, by default"
+        type: string
+        default: "MEDI00ITA"
+      day:
+        description: "The day, YYYY-MM-DD (empty: 21 days ago, when the final products are out)"
+        type: string
+        default: ""
+      partner:
+        description: "The station of the baseline (empty: the nearest of the EPN 20-60 km away that has the day)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: The program and the native core of this branch (Rust, RTKLIB, crx2rnx)
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+          pip install ./native
+      - name: The official CRX2RNX (RNXCMP 4.2.0 of GSI), to compare the decoding with
+        run: |
+          curl -fsSL --retry 3 -A "pyarchinit-photogrammetry/gnss-check" -o "$RUNNER_TEMP/rnxcmp.tar.gz" \
+            https://terras.gsi.go.jp/ja/crx2rnx/RNXCMP_4.2.0_Linux_gcc_64bit.tar.gz
+          echo "bb23428e10500357159d579ac8e8a877be73083405f759a94f5062141aabe5a0  $RUNNER_TEMP/rnxcmp.tar.gz" \
+            | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/rnxcmp.tar.gz" -C "$RUNNER_TEMP"
+          chmod +x "$RUNNER_TEMP/RNXCMP_4.2.0_Linux_gcc_64bit/CRX2RNX"
+      - name: Check
+        env:
+          STATION: ${{ inputs.station }}
+          DAY: ${{ inputs.day }}
+          PARTNER: ${{ inputs.partner }}
+          PPG_GNSS_DIR: ${{ runner.temp }}/gnss
+        run: >
+          python .github/scripts/gnss_station_check.py --station "$STATION" --day "$DAY" --partner "$PARTNER"
+          --crx2rnx "$RUNNER_TEMP/RNXCMP_4.2.0_Linux_gcc_64bit/CRX2RNX" --work "$RUNNER_TEMP/work"

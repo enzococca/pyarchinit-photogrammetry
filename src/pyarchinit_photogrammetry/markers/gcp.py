@@ -10,6 +10,11 @@ from ..core import crs as crs_mod
 from ..core import geometry
 from ..core.camera import Reference
 from ..core.marker import Marker
+from ..gnss import frames
+
+# what is converted that carries no frame and epoch, as the warning of frames.legacy_warning names it
+CAMERA_REFERENCES = "the positions of the photos"
+MARKERS_READ = "the coordinates of the markers"
 
 
 def triangulate_markers(chunk, min_views: int = 2) -> None:
@@ -287,9 +292,11 @@ def import_reference(chunk, path, crs: str | None = None, delimiter: str | None 
         if not crs_mod.is_local(src_crs):
             chunk.crs = projected_crs_for(src_crs, parsed[0][1]) if crs_mod.is_geographic(src_crs) else src_crs
     count = 0
+    frame = None if crs_mod.is_local(src_crs) else frames.frame_of(src_crs)
+    frame = frame if frame in frames.EUROPEAN else None  # recorded: the European frames (heights.mixed_frames)
     for vals, xyz in parsed:
-        if not crs_mod.is_local(src_crs) and src_crs != chunk.crs:
-            xyz = crs_mod.transform_points(xyz[None], src_crs, chunk.crs)[0]
+        if not crs_mod.is_local(src_crs) and src_crs != chunk.crs:  # markers carry no frame and epoch
+            xyz = crs_mod.transform_points(xyz[None], src_crs, chunk.crs, legacy=frames.Legacy(MARKERS_READ, chunk))[0]
         label = vals["n"].strip()
         marker = _find_marker(chunk, label)
         if marker is None:
@@ -298,6 +305,16 @@ def import_reference(chunk, path, crs: str | None = None, delimiter: str | None 
             marker = chunk.add_marker(label)
         acc = float(vals["a"]) if vals.get("a") else marker.reference.accuracy[0]
         marker.reference = Reference(location=xyz.tolist(), accuracy=[acc, acc, acc], enabled=True)
+        # the frame the marker was measured in (a European one: a network RTK in RDN2008), for heights.mixed_frames
+        recorded = chunk.meta.get("marker_frames") or {}
+        if frame:
+            recorded[marker.label] = frame
+        else:
+            recorded.pop(marker.label, None)
+        if recorded:
+            chunk.meta["marker_frames"] = recorded
+        else:
+            chunk.meta.pop("marker_frames", None)
         count += 1
     return count
 
@@ -343,9 +360,10 @@ def camera_reference_errors(chunk) -> dict:
     """``{camera key: {"reference", "estimated", "delta", "error"}}`` for the cameras with a
     reference position (the GPS of the photos): the reference in the chunk CRS (converted from
     the CRS it was read in, as the georeferencing does) and, for an aligned camera of a
-    georeferenced chunk, the estimated centre and ``estimated - reference`` in metres. Nothing
-    of the chunk changes; references that cannot be compared yet (a chunk still in local
-    coordinates) are left out."""
+    georeferenced chunk, the estimated centre and ``estimated - reference`` in metres. A
+    reference in ITRF2020 converts at its own epoch, one written before the frames as before
+    (:func:`_converted`). Nothing of the chunk changes; references that cannot be compared yet
+    (a chunk still in local coordinates) are left out."""
     groups: dict[str, list] = {}
     for cam in chunk.cameras:
         if cam.reference.location:
@@ -356,7 +374,7 @@ def camera_reference_errors(chunk) -> dict:
         if ref_crs != chunk.crs:
             if crs_mod.is_local(ref_crs) or crs_mod.is_local(chunk.crs) or crs_mod.is_geographic(chunk.crs):
                 continue
-            locs = crs_mod.transform_points(locs, ref_crs, chunk.crs)
+            locs = _converted(chunk, cams, locs, ref_crs, chunk.crs)
         for cam, loc in zip(cams, locs):
             entry = {"reference": loc}
             if cam.aligned and not crs_mod.is_local(chunk.crs):
@@ -366,28 +384,66 @@ def camera_reference_errors(chunk) -> dict:
     return out
 
 
-def camera_references(chunk, cameras, crs: str | None = None) -> tuple[dict, str | None]:
+def camera_references(chunk, cameras, crs: str | None = None, relative: bool = False) -> tuple[dict, str | None]:
     """The reference positions of ``cameras`` (those that have one) in one coordinate system: ``({camera key:
     position}, system)``. Every reference is read in its ``meta["reference_crs"]`` (the chunk's when it has none:
     one chunk can hold the GPS of the EXIF in EPSG:4326 and a positions file in a projected system) and converted to
     ``crs``; without it, to metric axes: the chunk's system when it is projected, else the first projected system of
-    the references, else the UTM zone of the geographic ones. A reference that cannot be converted (a local frame
-    and a real coordinate system) is left out."""
+    the references, else the UTM zone of the geographic ones. A reference in ITRF2020 converts at its own epoch, one
+    written before the frames as before (:func:`_converted`). A reference that cannot be converted (a local frame and a
+    real coordinate system) is left out.
+
+    ``relative``: only where the photos are relative to each other matters (the pairs of photos, the span of a flight,
+    how a block fits them): without ``crs`` they go on the horizontal part of those metric axes
+    (:func:`..core.crs.horizontal`), through which their heights pass as they are - no grid of a geoid is needed, and a
+    height common to all of them does not matter."""
     groups: dict[str, list] = {}
     for cam in cameras:
         if cam.reference.location:
             groups.setdefault(cam.meta.get("reference_crs", chunk.crs), []).append(cam)
     if crs is None:
         crs = _metric_crs(chunk, groups)
+        if relative:
+            crs = crs_mod.horizontal(crs)
     out = {}
     for ref_crs, cams in groups.items():
         locs = np.array([cam.reference.location for cam in cams], float).reshape(-1, 3)
         if ref_crs != crs and not (crs_mod.is_local(ref_crs) and crs_mod.is_local(crs)):
             if crs_mod.is_local(ref_crs) or crs_mod.is_local(crs):
                 continue
-            locs = crs_mod.transform_points(locs, ref_crs, crs)
+            locs = _converted(chunk, cams, locs, ref_crs, crs)
         out.update((cam.key, loc) for cam, loc in zip(cams, locs))
     return out, crs
+
+
+def _converted(chunk, cams, locs: np.ndarray, ref_crs: str, dst: str) -> np.ndarray:
+    """``locs``, the references of ``cams`` (photos of ``chunk``) in their system ``ref_crs``, in ``dst``. In a system
+    of ITRF2020, where positions move with time, a reference whose record names its frame
+    (:func:`..gnss.frames.position_frame`, as the program writes them from the frames on) converts at its epoch
+    (``meta["gnss"]["epoch"]``); one whose record names none - written before the frames: its frame is unknown, as
+    :mod:`..gnss.quality` counts it - by PROJ's own transformation where it has one that is no ballpark, else as a
+    position on WGS 84, with a warning for the chunk (:func:`..gnss.frames.legacy_transform`). Between two European
+    frames (a base typed in ETRF2014 or ETRF2020, a chunk in RDN2008 or ETRS89: :func:`..gnss.frames.european_hop`) at
+    the epoch of each shot - the one of its record, else the date of the photo, else the epoch of the survey. One
+    conversion for each kind, each position at its own epoch."""
+    if not frames.dynamic(ref_crs):
+        if not (frames.european_hop(ref_crs, dst) or frames.dynamic(dst)):
+            return crs_mod.transform_points(locs, ref_crs, dst)
+        epochs = [frames.shot_epoch(cam) for cam in cams]
+        if any(e is None for e in epochs):
+            survey = frames.survey_epoch(chunk)
+            epochs = [survey if e is None else e for e in epochs]
+        return crs_mod.transform_points(locs, ref_crs, dst, epoch=epochs)
+    framed = np.array([frames.position_frame(cam.meta.get("gnss")) in frames.DYNAMIC for cam in cams], bool)
+    out = np.empty((len(locs), 3))
+    if framed.any():
+        epochs = [(cam.meta.get("gnss") or {}).get("epoch") for cam, keep in zip(cams, framed) if keep]
+        out[framed] = crs_mod.transform_points(locs[framed], ref_crs, dst,
+                                               epoch=[np.nan if e is None else e for e in epochs])
+    if not framed.all():
+        out[~framed] = crs_mod.transform_points(locs[~framed], ref_crs, dst,
+                                                legacy=frames.Legacy(CAMERA_REFERENCES, chunk, photos=True))
+    return out
 
 
 def _metric_crs(chunk, groups: dict[str, list]) -> str | None:
@@ -414,12 +470,42 @@ def _camera_reference_pairs(chunk) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
             np.asarray([float(np.mean(cam.reference.accuracy)) for cam in cams]))
 
 
+def preflight(chunk, use_gps: bool | None = None) -> None:
+    """The refusal the georeference of ``chunk`` would meet, raised before the alignment
+    (:func:`..engine.sfm.align_cameras`) when its pose priors or the georeference after it will convert the references
+    of the photos that are switched on: the position of the first photo of each system of those references is
+    converted as :func:`update_transform` and the pose priors convert them all - into the system of the chunk (into the
+    metric axes of the references for a chunk still in a local frame) -, so that what the system needs - the grid of a
+    geoid (:class:`..gnss.heights.GridMissing`), an epoch in a frame that moves - raises here; what only another photo
+    of the same system lacks (its own epoch) is not checked, and is met by the conversion of all of them.
+
+    Nothing to check when fewer than three photos have a position switched on, for a geographic system (the
+    georeference says it), and - with ``use_gps`` False, the positions not holding the alignment - when three control
+    markers have a position or two measured projections: :func:`update_transform` places the chunk on the markers
+    the alignment triangulates, which this cannot know before it (markers whose photos it does not align leave the
+    positions of the photos to place the chunk, and the refusal comes after the alignment).
+    :func:`..engine.sfm.match_photos` only logs it as a warning: the matching needs no system, and the references of
+    the photos may still be switched off before the alignment."""
+    cams = [cam for cam in chunk.cameras if cam.enabled and cam.reference.enabled and cam.reference.location]
+    if len(cams) < 3 or crs_mod.is_geographic(chunk.crs):
+        return
+    if use_gps is False:
+        markers = [m for m in chunk.markers if not m.checkpoint and m.reference.enabled and m.reference.location
+                   and (m.position is not None or sum(p.measured for p in m.projections.values()) >= 2)]
+        if len(markers) >= 3:
+            return
+    first: dict[str, object] = {}
+    for cam in cams:
+        first.setdefault(cam.meta.get("reference_crs", chunk.crs), cam)
+    camera_references(chunk, list(first.values()), None if crs_mod.is_local(chunk.crs) else chunk.crs)
+
+
 def cameras_span_their_accuracy(chunk, factor: float = 10.0) -> bool:
     """The camera references (the GPS of the photos) cover an area at least ``factor`` times
     their accuracy: they can place and turn the survey (a flight over a site), not an object
     on a table or a trench of a few metres, where they are only noise."""
     cams = [cam for cam in chunk.aligned_cameras if cam.reference.enabled and cam.reference.location]
-    positions, _crs = camera_references(chunk, cams)
+    positions, _crs = camera_references(chunk, cams, relative=True)  # a span: no geoid needed
     if len(positions) < 3:
         return False
     xy = np.array([positions[cam.key][:2] for cam in cams if cam.key in positions])

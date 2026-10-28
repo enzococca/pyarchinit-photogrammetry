@@ -220,30 +220,37 @@ on the public WorldView-3 datasets.
   more), of three points clicked in the 3D view; a section takes away what stands in front of the plane and
   saves the profile of the cut (drawn on the orthophoto, exported as DXF); v is the height on upright planes,
   the markers are drawn on the elevation; `ppg elevation`.
-* **GNSS positions of the photos, first step**: the RTK state and standard deviations of DJI photos (and of the
-  bands of multispectral captures), the shots of a `Timestamp.MRK` with the lever arm of the antenna, positions
-  files of any drone or program, the accuracy of each photo (twice the declared deviations, with the floors of
-  its state) and the *GNSS* pane with a table per flight, the offsets of the aligned cameras and *Only the fix
-  positions*; `ppg gnss`.
-* **GNSS positions of the photos, PPK**: the positions of the shots of a `Timestamp.MRK` computed again
+* **GNSS positions of the photos, first step** (1.5.5): the RTK state and standard deviations of DJI photos (and
+  of the bands of multispectral captures), the shots of a `Timestamp.MRK` with the lever arm of the antenna,
+  positions files of any drone or program, the accuracy of each photo (twice the declared deviations, with the
+  floors of its state) and the *GNSS* pane with a table per flight, the offsets of the aligned cameras and *Only
+  the fix positions*; `ppg gnss`.
+* **GNSS positions of the photos, PPK** (1.6.0): the positions of the shots of a `Timestamp.MRK` computed again
   from the RINEX of the drone and of a base - one's own or a permanent station - by RTKLIB-EX 2.5.1 inside the
-  native core 0.5 (the `rnx2rtkp` of `PPG_RNX2RTKP` without it): the base at its surveyed position or at the one of
-  its RINEX header, with the warning that it can be metres off, its antenna height added (not yet the phase-centre
-  offset of its antenna, which every run says); the camera below the antenna by the lever arm of the shot, the
-  status and accuracy of the solution, nothing guessed across its gaps; the onboard RTK fixes kept unless replaced,
-  a solution file per run, the dialog starting from the last run; *Compute PPK...* in the *GNSS* pane,
-  `ppg gnss ppk`.
+  native core 0.5 (the `rnx2rtkp` of `PPG_RNX2RTKP` without it): the base at its surveyed position or at the one
+  of its RINEX header, with the warning that it can be metres off, its antenna height added (not yet the
+  phase-centre offset of its antenna, which every run says); the camera below the antenna by the lever arm of the
+  shot, the status and accuracy of the solution, nothing guessed across its gaps; the onboard RTK fixes kept
+  unless replaced, a solution file per run, the dialog starting from the last run; *Compute PPK...* in the *GNSS*
+  pane, `ppg gnss ppk`.
+* **GNSS, the base, its frame and the heights** (1.6.1): the base of a PPK from a permanent station of the EPN,
+  the IGS or RING near the survey (the stations listed by distance; its observations for the hours of the flight
+  and its coordinates in ITRF2020 at the epoch of the flight downloaded), or one's own base placed by a static
+  baseline from a station or by a static PPP on the precise products of ESA, CODE and the IGS; the antenna of the
+  base calibrated from igs20.atx; Hatanaka, `.Z` and zip RINEX read as they are, a base in several files; every
+  position with its reference frame and epoch, ITRF2020 taken to ETRF2000 and RDN2008 by the Helmert of the EPSG
+  at that epoch; heights above the geoid with EGM2008, downloaded when asked, or a grid of one's own, and the
+  system of the survey with a preview of what changes; *Optimise cameras* held by the accurate GNSS positions,
+  with a safety net; the GNSS part of the PDF report, with the credits of the data used; `ppg gnss stations`,
+  `baseline`, `ppp`, `atx`, `geoid`, `crs`.
 
 ## Next
 
 Open points, in no fixed order:
 
-* **GNSS, the next steps**: the position of the base from a nearby permanent station or from a static PPP, the
-  list and the download of the public stations near a survey, Hatanaka RINEX read as they are, the calibrations of
-  the base antennas (their phase-centre offsets, from the files of the IGS and NGS), one base from several files (the
-  hourly files of a station, a flight across midnight), the reference frame and epoch of the positions and heights
-  above the geoid, the quality per flight in the PDF report; the events of a receiver and the logs of ArduPilot and
-  PX4 for drones built by hand.
+* **GNSS, the next step**: the events of a receiver (the time marks a camera leaves in the observations of a
+  receiver of one's own), the logs of ArduPilot and PX4 for drones built by hand, the raw files of u-blox and Emlid
+  receivers, the `.DAT` files of a DJI D-RTK base.
 
 * Parts never tried on real data: the import from WebODM, a satellite scene of one's own, `ppg remote`
   on a remote machine, a whole MicaSense flight to the reflectance orthomosaic.

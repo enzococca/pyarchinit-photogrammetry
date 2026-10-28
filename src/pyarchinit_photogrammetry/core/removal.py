@@ -551,6 +551,12 @@ class Removal:
     def mark_saved(self) -> None:
         self.saved = self.state
 
+    def make_final(self) -> None:
+        """This removal final now, as the end of a session makes it after a save: what it took away no longer comes
+        back, and its files in the trash are deleted. For a project just saved, or one without a file."""
+        self.mark_saved()
+        self.settle()
+
     def settle(self) -> None:
         """End of the session: the files as the project last saved wants them (the item back in place
         when that project still has it, else deleted) and the trash of this removal emptied."""
@@ -704,6 +710,26 @@ class ItemsRemoval(Removal):
     def redo(self) -> None:
         self._swap(PRESENT, ABSENT, REMOVED)
 
+    def holds_coordinates(self) -> bool:
+        """Whether what this removal took away carries coordinates in the system of its chunk, with no system of their
+        own: markers with their references, photos with a position and no ``meta["reference_crs"]``. Put back after a
+        change of the chunk's system they would come back in the old one (:func:`holding_coordinates`)."""
+        for part, state in zip(self.parts, self.states[PRESENT]):
+            objects = [o for _i, o in (state or {}).get("objects", [])]
+            if isinstance(part, _Markers) and any(m.reference.location for m in objects):
+                return True
+            if isinstance(part, _Cameras) and any(c.reference.location and "reference_crs" not in c.meta
+                                                  for c in objects):
+                return True
+        return False
+
+
+def holding_coordinates(document, chunk) -> list[ItemsRemoval]:
+    """The removals of ``chunk`` in force - taken away, not undone - whose items carry coordinates in its system
+    (:meth:`ItemsRemoval.holds_coordinates`): those an undo must not put back after a change of the chunk's system."""
+    return [r for r in document.removals if isinstance(r, ItemsRemoval) and r.chunk is chunk and r.state == REMOVED
+            and r.holds_coordinates()]
+
 
 # ------------------------------------------------------------------------------ after a crash
 _CHUNK_DIR = re.compile(r"^chunk_(-?\d+)$")
@@ -755,4 +781,5 @@ def recover(document) -> dict:
     return out
 
 
-__all__ = ["TRASH", "RemovalConflict", "Removal", "ChunkRemoval", "ItemsRemoval", "make_part", "recover"]
+__all__ = ["TRASH", "RemovalConflict", "Removal", "ChunkRemoval", "ItemsRemoval", "make_part", "holding_coordinates",
+           "recover"]

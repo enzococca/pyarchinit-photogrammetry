@@ -922,9 +922,9 @@ class ReferencePane(QWidget):
         self.cams.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.cams.setAlternatingRowColors(True)
         self.cams.verticalHeader().setVisible(False)
-        from .table_export import install_excel_menu
-
-        install_excel_menu(self.cams, tr("Camere"))
+        self.cams.itemChanged.connect(self._camera_edited)
+        self.cams.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.cams.customContextMenuRequested.connect(self._camera_menu)
         split.addWidget(self.cams)
         lay.addWidget(split, 1)
         self.summary = QLabel("")
@@ -1054,6 +1054,11 @@ class ReferencePane(QWidget):
                 it = QTableWidgetItem(v)
                 if k == 0:
                     it.setIcon(icon("camera_ok" if cam.aligned else "camera_bad"))
+                    if cam.reference.location:  # ticked: the position of the photo counts
+                        it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                        it.setCheckState(Qt.CheckState.Checked if cam.reference.enabled else Qt.CheckState.Unchecked)
+                        it.setToolTip(tr("Con la spunta la posizione della foto (GPS, GNSS) conta nella "
+                                         "georeferenziazione e nell'ottimizzazione"))
                 self.cams.setItem(r, k, it)
         rep = self.last_report or {}
         parts = []
@@ -1189,6 +1194,54 @@ class ReferencePane(QWidget):
             return
         refill()  # the error of the bar with its new distance
         self.changed.emit()
+
+    def _camera_edited(self, item) -> None:
+        """A camera's tick: its reference (the position of the photo) counts or not."""
+        if self._filling or self.chunk is None or item.column() != 0 or item.row() >= len(self.chunk.cameras):
+            return
+        cam = self.chunk.cameras[item.row()]
+        on = item.checkState() == Qt.CheckState.Checked
+        if cam.reference.location and cam.reference.enabled != on:
+            cam.reference.enabled = on
+            self.changed.emit()
+
+    def camera_menu(self):
+        """The right click on the cameras: the export to Excel and, when photos have positions, their references
+        switched on or off for the selected cameras (a right click selects the one under the cursor) or for all of
+        them."""
+        from .table_export import excel_menu
+
+        menu = excel_menu(self.cams, tr("Camere"))
+        if self.chunk is not None and any(c.reference.location for c in self.chunk.cameras):
+            menu.addSeparator()
+            menu.addAction(tr("Usa i riferimenti delle camere selezionate"), lambda: self.use_camera_references(True))
+            menu.addAction(tr("Usa i riferimenti di tutte le camere"),
+                           lambda: self.use_camera_references(True, every=True))
+            menu.addAction(tr("Non usare i riferimenti delle camere selezionate"),
+                           lambda: self.use_camera_references(False))
+            menu.addAction(tr("Non usare i riferimenti di tutte le camere"),
+                           lambda: self.use_camera_references(False, every=True))
+        return menu
+
+    def _camera_menu(self, pos) -> None:
+        self.camera_menu().exec(self.cams.viewport().mapToGlobal(pos))
+
+    def use_camera_references(self, on: bool, every: bool = False) -> int:
+        """The references of the selected cameras (``every``: of all of them) switched on or off, as the tick of
+        each one: how many changed."""
+        if self.chunk is None:
+            return 0
+        rows = range(len(self.chunk.cameras)) if every else sorted({i.row() for i in self.cams.selectedItems()})
+        changed = 0
+        for r in rows:
+            cam = self.chunk.cameras[r]
+            if cam.reference.location and cam.reference.enabled != on:
+                cam.reference.enabled = on
+                changed += 1
+        if changed:
+            self.set_chunk(self.chunk)
+            self.changed.emit()
+        return changed
 
     def _edited(self, item) -> None:
         if self._filling or self.chunk is None:

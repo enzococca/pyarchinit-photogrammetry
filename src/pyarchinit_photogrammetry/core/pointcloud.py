@@ -86,6 +86,21 @@ class PointCloud:
         return np.array(arr[name]) if name in arr.dtype.names else None
 
     @staticmethod
+    def sample_xyz(path: str | Path, at_most: int = 1_000_000) -> np.ndarray:
+        """At most ``at_most`` points of a cloud file (or the vertices of a model), spread evenly through it, as
+        ``(N, 3)`` float64: from a binary PLY a stride through its memory-mapped points, without reading the rest into
+        memory; any other file is loaded."""
+        def stride(count: int) -> int:  # every so many points: at most ``at_most`` of them
+            return max(1, -(-count // max(at_most, 1)))
+
+        arr = _read_binary_ply_vertices(Path(path), mmap=True)
+        if arr is None or not {"x", "y", "z"} <= set(arr.dtype.names or ()):
+            xyz = PointCloud.load(path).xyz
+            return xyz[::stride(len(xyz))]
+        part = arr[::stride(len(arr))]
+        return np.column_stack([part["x"], part["y"], part["z"]]).astype(np.float64)
+
+    @staticmethod
     def read_class_counts(path: str | Path) -> dict[int, int]:
         """Points per class of a point cloud file, reading only its class column when it is a
         binary PLY (a large dense cloud is not loaded)."""

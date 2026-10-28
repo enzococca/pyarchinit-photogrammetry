@@ -374,8 +374,7 @@ class LiveLink:
             known = {}
             try:
                 con.execute("BEGIN IMMEDIATE")
-                if new:
-                    gpkg.create(con, srs)
+                gpkg.create(con, srs)  # idempotent: the system of the chunk listed, also after it changed
                 for table, feats in todo.items():
                     known[table] = self._write_table(con, table, feats, srs[0], force)
                 con.execute("COMMIT")
@@ -474,14 +473,17 @@ class LiveLink:
         keys += [k for k in BASE_COLUMNS.get(table, []) if k not in keys]
         keys += sorted({_column(k) for _, a in feats for k in a if not str(k).startswith("_")} - set(keys))
         keys += [k for k in (ID_FIELD, SIG_FIELD) + ((PART_FIELD,) if table == "unita" else ()) if k not in keys]
-        before = [r[1] for r in con.execute(f"PRAGMA table_info({q(table)})")]
+        # a table in another system (the chunk changed its own) is made again in this one: QGIS reads the rows in the
+        # system they are written in, and the rows known in it are no more
+        recreated = gpkg.table_srs(con, table) not in (None, srs_id)
+        before = [] if recreated else [r[1] for r in con.execute(f"PRAGMA table_info({q(table)})")]
         cols = gpkg.ensure_table(con, table, LIVE_TABLES[table][1], {k: _sql_type(k) for k in keys}, srs_id,
-                                 identifier=LIVE_TABLES[table][0])
+                                 identifier=LIVE_TABLES[table][0], recreate=True)
         types = {r[1]: r[2] for r in con.execute(f"PRAGMA table_info({q(table)})")}
         if before and ID_FIELD not in before:
             con.execute(f"DELETE FROM {q(table)}")  # written by an earlier version: rows without identity
         two_way = table in TWO_WAY_TABLES
-        known = self._known.get(table, {})
+        known = {} if recreated else self._known.get(table, {})
         primary, others = self._sort(self._scan(con, table, cols, content=two_way or force), known)
         written = [c for c in cols if c != SIG_FIELD]
         names = "".join(f", {q(c)}" for c in written)
@@ -812,6 +814,16 @@ STYLES = {  # table -> (colour, label field, label colour)
 }
 
 
+def project_crs(crs: str | None) -> str:
+    """The system a QGIS project and its layers get for the chunk's ``crs``: ``EPSG:<code>`` of its plan - QGIS 3 does
+    not read a compound system such as ``EPSG:7792+3855`` (heights above a geoid), and the layers are 2D
+    (:func:`..core.crs.epsg_code`) -, or ``""`` (none) for a local frame and a system without an EPSG code."""
+    from ..core import crs as crs_mod
+
+    code = crs_mod.epsg_code(crs)
+    return f"EPSG:{code}" if code else ""
+
+
 def build_project(project_path: str | Path, crs: str, layer_files: dict[str, Path], rasters: list[dict],
                   title: str = "pyarchinit-photogrammetry", refresh_ms: int = 1000,
                   qgis: QgisInstall | None = None, extra_vectors: list[dict] | None = None) -> dict:
@@ -834,7 +846,7 @@ def build_project(project_path: str | Path, crs: str, layer_files: dict[str, Pat
     for v in extra_vectors or []:
         if v.get("path") and Path(v["path"]).exists():
             vectors.append({"label": "", "label_color": "#202020", **v})
-    cfg = {"project": str(project_path), "crs": crs if str(crs).upper().startswith("EPSG:") else "",
+    cfg = {"project": str(project_path), "crs": project_crs(crs),
            "vectors": vectors, "rasters": [r for r in rasters if r.get("path") and Path(r["path"]).exists()],
            "title": title, "refresh_ms": refresh_ms}
     Path(project_path).parent.mkdir(parents=True, exist_ok=True)
@@ -882,6 +894,6 @@ def open_in_qgis(project_path: str | Path, qgis: QgisInstall | None = None) -> N
         subprocess.Popen([qgis.app, "--project", str(project_path)], close_fds=False)
 
 
-__all__ = ["find_qgis", "export_layers", "build_project", "open_in_qgis", "classify_layer", "LiveLink", "LIVE_DB",
+__all__ = ["find_qgis", "export_layers", "build_project", "project_crs", "open_in_qgis", "classify_layer", "LiveLink", "LIVE_DB",
            "LIVE_TABLES", "QgisInstall", "TWO_WAY_TABLES", "ID_FIELD", "SIG_FIELD", "PART_FIELD", "Feature",
            "TableChanges", "new_id", "stable_id", "row_signature"]

@@ -23,7 +23,7 @@ spiegazioni più lunghe seguono la tabella.
 | `detect_markers(target_type="aruco_4x4_50")` | marker `target <codice>` con le loro proiezioni |
 | `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True, gpu=None, matcher="sift")` | punti chiave e corrispondenze, con le scelte di *Allinea foto* di Metashape (*Coppie*, sotto); SIFT o punti appresi (*Punti appresi*, sotto) |
 | `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None)` | le foto collocate, dal mapper globale, da quello incrementale o da quello gerarchico (*Mapper*, sotto), tenute al GPS delle foto; la trasformazione viene azzerata e la georeferenziazione rifatta quando ci sono riferimenti |
-| `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4)` | compensazione di pose, calibrazione e punti di legame, sui punti di controllo e sulle barre di scala quando ce ne sono (*Ottimizzazione delle camere*, sotto); restituisce l'errore di riproiezione (px) |
+| `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4, gnss="auto")` | compensazione di pose, calibrazione e punti di legame, sui punti di controllo e sulle barre di scala quando ce ne sono, altrimenti tenuta dalle posizioni GNSS accurate delle foto (*Ottimizzazione delle camere*, sotto); restituisce l'errore di riproiezione (px) |
 | `import_reference(csv, crs, columns="nxyz")` | riferimenti di marker e camere da un file di testo: `n` etichetta, `x y z`, `a` accuratezza, `-` salta |
 | `export_reference(csv)` | i riferimenti in un file di testo |
 | `add_marker(...)`, `add_marker_projection(...)` | marker a mano (come vengono collocati: *Barre di scala*) |
@@ -486,8 +486,29 @@ sono fissati a `engine.sfm.bar_anchors` (vedi *Barre di scala*).
 `meta["sfm"]["optimize"]` riporta `control_points`, `scale_bars`, `steps` e l'RMSE di punti e barre di
 controllo e di verifica prima e dopo (`ppg optimize`).
 
-`engine="ppg"` usa invece la nostra compensazione (sotto), con `gnss="plain"` o `"bias"` e
-`rolling_shutter=True`.
+Senza punti fissi `gnss="auto"` (il predefinito) tiene il blocco alle posizioni GNSS accurate delle
+foto (accuratezza orizzontale media entro `engine.sfm.GNSS_PRIOR_MAX_M`, 0,5 m: fix, float, PPK),
+sparse su tutto il blocco: il pose-prior adjuster di COLMAP, ogni posizione con la sua covarianza
+portata nel sistema interno, la focale dell'allineamento tenuta ferma (foto che guardano in basso da
+una sola quota non la distinguono dalla distanza dal suolo). I punti fissi sono
+`engine.sfm.fixed_points_hold(chunk, use_markers)`, l'unica regola dei due motori e del dialogo;
+`engine.sfm.gnss_hold(chunk)` dice che cosa faranno le posizioni. `report["gnss"]` dice quante foto
+hanno tenuto il blocco, con la `termination` della soluzione e se è `usable` (una soluzione che non lo è
+non tiene nulla), `report["focal_held"]` se la focale dell'allineamento è rimasta quella; `gnss="off"`
+lascia fuori le posizioni. Una rete di sicurezza per ogni motore: quando le camere finiscono più lontane
+dalle loro posizioni accurate di 3 volte lo scarto di prima e di 0,3 m più di quello (scarto quadratico
+medio; dopo la similarità che meglio colloca il blocco quando l'ottimizzazione calcola una nuova
+georeferenziazione; ogni posizione meno il bias del suo volo dopo la nostra compensazione con
+`gnss="bias"`), l'ottimizzazione viene annullata: piegava il blocco, o le posizioni non concordano con i
+punti di controllo (per tenerla, disattivare i riferimenti delle camere). Si rimette l'allineamento di
+prima, modello su disco compreso, e il resoconto descrive quello (`reprojection_error`, `reverted`,
+`camera_offsets`; l'ottimizzazione annullata in `undone`). L'allineamento torna anche quando
+l'ottimizzazione si ferma per un errore o viene annullata a mano, con il resoconto dell'ottimizzazione di prima
+(nessuno quando non c'era).
+
+`engine="ppg"` usa invece la nostra compensazione (sotto), con `gnss="plain"` o `"bias"` (entrambe
+rifiniscono la focale; `"auto"` vale `"plain"` con la focale tenuta quando le posizioni possono tenere il
+blocco e nessun punto fisso lo tiene, altrimenti `"off"`) e `rolling_shutter=True`.
 
 ### La nostra compensazione
 

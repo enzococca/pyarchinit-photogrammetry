@@ -1,0 +1,45 @@
+%=SNX 2.01 IGN 26:253:10208 IGN 00:000:00000 00:000:00000 P     0 1 X V
+*-------------------------------------------------------------------------------
++FILE/COMMENT
+ Discontinuity list to be used with IGc20.snx
+-FILE/COMMENT
+*-------------------------------------------------------------------------------
++SOLUTION/DISCONTINUITY
+ ADIS  A    1 P 00:000:00000 19:343:00000 P - unknown
+ ADIS  A    2 P 19:343:00000 22:103:46800 P - antenna change
+ ADIS  A    3 P 22:103:46800 24:362:00000 P - dike intrusion, Fentale volcano
+ ADIS  A    4 P 24:362:00000 25:007:00000 P - dike intrusion, Fentale volcano
+ ADIS  A    5 P 25:007:00000 25:081:00000 P - end of dike intrusion (?)
+ ADIS  A    6 P 25:081:00000 26:090:00000 P - unknown
+ ADIS  A    7 P 26:090:00000 00:000:00000 P - 
+ ADIS  A    1 P 00:000:00000 22:103:46800 V - antenna change
+ ADIS  A    2 P 22:103:46800 24:362:00000 V - dike intrusion, Fentale volcano
+ ADIS  A    3 P 24:362:00000 25:007:00000 V - dike intrusion, Fentale volcano
+ ADIS  A    4 P 25:007:00000 25:081:00000 V - end of dike intrusion (?)
+ ADIS  A    5 P 25:081:00000 00:000:00000 V - 
+*
+ BSHM  A    1 P 00:000:00000 02:028:00000 P - unknown
+ BSHM  A    2 P 02:028:00000 09:201:00000 P - antenna change
+ BSHM  A    3 P 09:201:00000 23:037:04654 P - EQ M7.8 - Pazarcik earthquake
+ BSHM  A    4 P 23:037:04654 00:000:00000 P - 
+ BSHM  A    1 P 00:000:00000 23:037:04654 V - EQ M7.8 - Pazarcik earthquake
+ BSHM  A    2 P 23:037:04654 00:000:00000 V - 
+*
+ DRAG  A    1 P 00:000:00000 23:037:04654 P - EQ M7.8 - Pazarcik earthquake
+ DRAG  A    2 P 23:037:04654 00:000:00000 P - 
+ DRAG  A    1 P 00:000:00000 00:000:00000 V - 
+*
+ M0SE  A    1 P 00:000:00000 07:170:00000 P - antenna change
+ M0SE  A    2 P 07:170:00000 09:096:05559 P - EQ M6.3 - 3 km SE of Sassa, Italy
+ M0SE  A    3 P 09:096:05559 12:104:00000 P - antenna change
+ M0SE  A    4 P 12:104:00000 16:304:24019 P - EQ M6.6 - 5 km ESE of Preci, Italy
+ M0SE  A    5 P 16:304:24019 00:000:00000 P - 
+ M0SE  A    1 P 00:000:00000 00:000:00000 V - 
+*
+ MEDI  A    1 P 00:000:00000 00:320:00000 P - unknown
+ MEDI  A    2 P 00:320:00000 00:000:00000 P - 
+ MEDI  A    1 P 00:000:00000 00:000:00000 V - 
+*
+-SOLUTION/DISCONTINUITY
+*----------------------------------------------------------------
+%ENDSNX

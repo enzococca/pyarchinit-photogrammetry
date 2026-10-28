@@ -66,6 +66,12 @@ jobs:
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
           python .github/scripts/ppk_smoke.py
+      - name: Hatanaka smoke test (the Compact RINEX of the permanent stations, as the native workflow runs it)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          python .github/scripts/crinex_smoke.py
       - uses: actions/upload-artifact@v4
         with:
           name: win-arm64-core

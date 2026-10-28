@@ -23,7 +23,7 @@ longer explanations follow the table.
 | `detect_markers(target_type="aruco_4x4_50")` | markers `target <code>` with their projections |
 | `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True, gpu=None, matcher="sift")` | keypoints and matches, with the choices of Metashape's *Align Photos* (*Pairs*, below); SIFT or learned points (*Learned points*, below) |
 | `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None)` | the photos placed, by the global, the incremental or the hierarchical mapper (*Mappers*, below), held to the GPS of the photos; the transform is reset and the georeference made again when references exist |
-| `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4)` | bundle adjustment of poses, calibration and tie points, on the control points and scale bars when there are any (*Camera optimisation*, below); returns the reprojection error (px) |
+| `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4, gnss="auto")` | bundle adjustment of poses, calibration and tie points, on the control points and scale bars when there are any, else held by the accurate GNSS positions of the photos (*Camera optimisation*, below); returns the reprojection error (px) |
 | `import_reference(csv, crs, columns="nxyz")` | references of markers and cameras from a text file: `n` label, `x y z`, `a` accuracy, `-` skip |
 | `export_reference(csv)` | the references to a text file |
 | `add_marker(...)`, `add_marker_projection(...)` | markers by hand (how they are placed: *Scale bars*) |
@@ -470,8 +470,28 @@ same way: their markers are fixed at `engine.sfm.bar_anchors` (see *Scale bars*)
 `meta["sfm"]["optimize"]` reports `control_points`, `scale_bars`, `steps` and the control/check point
 and bar RMSE before and after (`ppg optimize`).
 
-`engine="ppg"` uses our own adjustment instead (below), with `gnss="plain"` or `"bias"` and
-`rolling_shutter=True`.
+Without fixed points `gnss="auto"` (the default) holds the block to the accurate GNSS positions of
+the photos (mean horizontal accuracy within `engine.sfm.GNSS_PRIOR_MAX_M`, 0.5 m: fix, float, PPK),
+spread across the block: COLMAP's pose-prior adjuster, each position with its covariance carried into
+the internal frame, the focal length of the alignment held (photos looking down from one height cannot
+tell it from the distance to the ground). Fixed points are `engine.sfm.fixed_points_hold(chunk,
+use_markers)`, the one rule of both engines and of the dialog; `engine.sfm.gnss_hold(chunk)` says what
+the positions will do. `report["gnss"]` says how many photos held the block, with the `termination` of
+the solve and whether it is `usable` (a solve that is not holds nothing), `report["focal_held"]`
+whether the focal length of the alignment was kept; `gnss="off"` leaves the positions out. A safety
+net for every engine: when the cameras end farther from their accurate positions than 3 times the
+offset before and 0.3 m more than it (root mean square; once the best similarity places the block when
+the optimisation fits a new georeference; each position less the bias of its flight after our
+adjustment with `gnss="bias"`), the optimisation is undone: it bent the block, or the positions
+disagree with the control points (switch off the camera references to keep it). The alignment before
+it is put back, the model on disk included, and the report then describes it (`reprojection_error`,
+`reverted`, `camera_offsets`; the run undone under `undone`). The alignment is put back as well when
+the optimisation stops with an error or is cancelled, with the report of the optimisation before it (none when
+there was none).
+
+`engine="ppg"` uses our own adjustment instead (below), with `gnss="plain"` or `"bias"` (both refine
+the focal length; `"auto"` is `"plain"` with the focal length held when the positions can hold the
+block and no fixed points do, else `"off"`) and `rolling_shutter=True`.
 
 ### Our own bundle adjustment
 

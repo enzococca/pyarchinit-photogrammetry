@@ -8,6 +8,7 @@ import numpy as np
 from ..core.chunk import Chunk
 from ..engine import bundle
 from ..markers import gcp
+from . import frames, heights
 
 STATUSES = ("fix", "float", "single", "none")
 HEIGHTS = ("ellipsoidal", "exif")
@@ -27,6 +28,13 @@ def _height(camera) -> str:
     say (read from another program)."""
     kind = (camera.meta.get("gnss") or {}).get("height")
     return kind if kind in HEIGHTS else "unknown"
+
+
+def _frame(camera) -> str:
+    """The reference frame of the position: one of :data:`.frames.FRAMES`, ``"unknown"`` for a position that does not
+    say (written before the frames, read from another program) - as :mod:`..markers.gcp` converts it: as before
+    (:func:`.frames.position_frame`)."""
+    return frames.position_frame(camera.meta.get("gnss"))
 
 
 def _accuracy(camera) -> list[float] | None:
@@ -49,17 +57,24 @@ def summary(chunk: Chunk) -> list[dict]:
     * ``sources``: ``{source: n}`` for the photos with a position (``"unknown"`` for one that records none);
     * ``heights``: ``{kind: n}`` for the photos with a position, the kind of their height: ``"ellipsoidal"`` (GNSS,
       MRK), ``"exif"`` (the altitude of the EXIF) or ``"unknown"``;
+    * ``frames``: ``{frame: n}`` for the photos with a position, the reference frame of each (one of
+      :data:`.frames.FRAMES`: ``"ITRF2020"`` for a PPK against a permanent station, ``"unknown"`` for the drone's own
+      RTK, the GPS of a photo and the positions written before the frames);
     * ``accuracy_median``: the median per axis of the accuracy of the references, in metres (``None`` if no
       photo of the flight has a position);
     * ``disabled``: the photos whose reference is switched off (they are counted in everything else too);
     * ``residual_rms`` (per axis, metres) and ``residual_max`` (the largest distance, metres): how far the
       aligned cameras are from their references, in the CRS of the chunk. ``None`` for a flight with no aligned
-      camera, and for every flight while the chunk is not georeferenced."""
+      camera, for every flight while the chunk is not georeferenced, and while the references cannot go into the
+      heights above the geoid of its system for want of the grid of the geoid (:func:`.heights.check` says so)."""
     cameras = list(chunk.cameras)
     if not cameras:
         return []
     flight_of = bundle.flights(cameras)
-    errors = gcp.camera_reference_errors(chunk)
+    try:
+        errors = gcp.camera_reference_errors(chunk)
+    except heights.GridMissing:
+        errors = {}
     out = []
     for number in sorted(set(flight_of.values())):
         members = [c for c in cameras if flight_of[c.key] == number]
@@ -76,6 +91,7 @@ def summary(chunk: Chunk) -> list[dict]:
             "status": dict(status),
             "sources": dict(sources),
             "heights": dict(Counter(_height(c) for c in positioned)),
+            "frames": dict(Counter(_frame(c) for c in positioned)),
             "no_position": len(members) - len(positioned),
             "disabled": sum(1 for c in positioned if not c.reference.enabled),
             "accuracy_median": np.median(accuracies, axis=0).tolist() if accuracies else None,

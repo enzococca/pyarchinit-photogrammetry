@@ -1,0 +1,2 @@
+# the parsers are tested on the bytes the services wrote: no line-end conversion when the files are checked out
+* -text

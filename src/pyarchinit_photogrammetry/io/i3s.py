@@ -72,15 +72,15 @@ GEOMETRY_DEFINITION = {
 
 
 def projected_epsg(crs: str | None) -> int:
-    """The EPSG code of a projected CRS in metres, as an I3S layer in local mode needs it;
-    ValueError otherwise."""
+    """The EPSG code of a projected CRS in metres - the plan of a system with heights above a geoid
+    (``EPSG:32633+3855``: 32633) -, as an I3S layer in local mode needs it; ValueError otherwise."""
     from pyproj import CRS
 
     from ..core import crs as crs_mod
 
     if not crs or crs_mod.is_local(crs):
         raise ValueError("I3S needs the model in a projected CRS with an EPSG code (e.g. UTM): georeference the chunk")
-    c = CRS.from_user_input(crs)
+    c = CRS.from_user_input(crs_mod.horizontal(crs))
     epsg = c.to_epsg()
     units = {a.unit_name.lower() for a in c.axis_info[:2]}
     if not c.is_projected or epsg is None or not units <= {"metre", "meter"}:
@@ -154,18 +154,22 @@ def _corner_normals(v: np.ndarray, f: np.ndarray) -> np.ndarray:
 
 
 class _Global:
-    """Nodes in WGS84: oriented boxes east, north, up at their centre."""
+    """Nodes in WGS84: oriented boxes east, north, up at their centre, heights above the ellipsoid."""
 
     def __init__(self, crs: str):
         from pyproj import Transformer
 
-        self.to_geo = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
+        self.crs = crs
         self.to_ecef = Transformer.from_crs("EPSG:4979", "EPSG:4978", always_xy=True)
         self.from_ecef = Transformer.from_crs("EPSG:4978", "EPSG:4979", always_xy=True)
 
     def geo(self, v: np.ndarray) -> np.ndarray:
-        lon, lat = self.to_geo.transform(v[:, 0], v[:, 1])
-        return np.column_stack([lon, lat, v[:, 2]])
+        """Longitude, latitude and height above the ellipsoid of WGS 84 of ``v`` (CRS of the chunk): heights above a
+        geoid converted with its grid, refused without it (:func:`..core.crs.transform_points`); those of a system
+        without heights of its own as they are."""
+        from ..core import crs as crs_mod
+
+        return crs_mod.transform_points(np.asarray(v, np.float64).reshape(-1, 3), self.crs, "EPSG:4979")
 
     def ecef(self, g: np.ndarray) -> np.ndarray:
         return np.column_stack(self.to_ecef.transform(g[:, 0], g[:, 1], g[:, 2]))
@@ -424,7 +428,11 @@ def export_slpk(chunk, path, max_faces: int = FACES_PER_NODE, texture_size: int 
         "description": f"pyarchinit-photogrammetry: {chunk.label}", "copyrightText": "",
         "capabilities": ["View", "Query"],
         "spatialReference": {"wkid": wkid, "latestWkid": wkid},
-        "heightModelInfo": {"heightModel": "gravity_related_height", "vertCRS": "unknown", "heightUnit": "meter"},
+        # on the globe the heights are above the ellipsoid of WGS 84 (_Global.geo); in the projected system of the
+        # chunk they are its own
+        "heightModelInfo": ({"heightModel": "ellipsoidal", "vertCRS": "WGS_84", "heightUnit": "meter"}
+                            if mode == "global" else
+                            {"heightModel": "gravity_related_height", "vertCRS": "unknown", "heightUnit": "meter"}),
         "store": {"id": "{" + str(uuid.uuid4()).upper() + "}", "profile": "meshpyramids", "version": "1.7",
                   "resourcePattern": ["Geometry", "Texture"], "extent": [float(lo[0]), float(lo[1]), float(hi[0]), float(hi[1])],
                   "indexCRS": f"http://www.opengis.net/def/crs/EPSG/0/{wkid}",

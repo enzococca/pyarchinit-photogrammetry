@@ -1,0 +1,193 @@
+%=SNX 2.02 IGN 25:286:44586 IGN 94:002:00000 25:075:00000 P  9402 2 S
++FILE/COMMENT
+ 
+ IGc20 reference frame: the IGS realization of ITRF2020-u2024
+ ============================================================
+ 
+ Station selection:
+   IGc20 is a subset of 346 stable, well-performing IGS stations from the 2024
+   update of ITRF2020, ITRF2020-u2024. Compared to the previous IGb20 reference
+   frame, IGc20 contains 3 new stations, in areas previously sparsely covered
+   by IGS reference frame stations: CASC (Cascais, Portugal), MANA (Managua,
+   Nicaragua) and MAYG (Dzaoudzi, Mayotte).
+ 
+ Consistency with ground antenna calibrations:
+   The IGc20 (= ITRF2020-u2024) station coordinates are consistent with the
+   ground antenna calibrations compiled in igs20.atx:
+   https://files.igs.org/pub/station/general/igs20.atx.
+ 
+ Transformation parameters:
+   ITRF2020-u2024 is aligned in origin, scale and orientation to ITRF2020. The
+   transformation parameters between ITRF2020, IGS20, ITRF2020-u2024 and IGc20
+   are therefore all zero. The transformation parameters between ITRF2020 /
+   IGS20 / ITRF2020-u2024 / IGc20 and past ITRF realizations can be found at:
+   https://itrf.ign.fr/docs/solutions/itrf2020/Transfo-ITRF2020_TRFs.txt
+ 
+ Discontinuities:
+   IGc20 station coordinates are generally represented by piecewise linear
+   functions, i.e., several position+velocity sets valid over successive time
+   intervals. Each set is denoted by a solution number (soln) whose validity
+   period is given in:
+   ftp://igs-rf.ign.fr/pub/IGc20/soln_IGc20.snx
+   The discontinuity list in soln_IGc20.snx is based on the ITRF2020-u2024
+   discontinuity list but also includes recent discontinuities and will be
+   continuously updated as new breaks occur. Because IGc20 does not contain
+   coordinates for solns starting after 15 March 2025 (end of ITRF2020-u2024
+   input data), stations affected by such recent discontinuities cannot be used
+   as reference frame stations anymore.
+ 
+ Post-seismic deformation models:
+   The reference coordinates of some IGc20 stations include post-seismic
+   deformation models in the form of exponential and/or logarithmic functions.
+   These models are given in:
+   ftp://igs-rf.ign.fr/pub/IGc20/psd_IGc20.snx
+   Details on their application can be found at:
+   https://itrf.ign.fr/ftp/pub/itrf/itrf2020/ITRF2020-PSD-model-eqs-IGN.pdf
+   The IGc20 positions+velocities of the affected stations cannot be used
+   without the post-seismic deformation models.
+ 
+ Seasonal terms:
+   While coefficients of annual and semi-annual station displacements were
+   provided with ITRF2020-u2024, it was agreed among IGS ACs not to implement
+   these seasonal terms for the time being. IGc20 is thus provided without
+   seasonal terms. Users wishing to experiment with the ITRF2020-u2024 seasonal
+   terms may nevertheless add them to the IGc20 piecewise linear coordinates +
+   post-seismic deformation models.
+ 
+ IGc20 core network:
+   For the purpose of aligning global GNSS solutions to IGc20, a well-
+   distributed sub-network of IGc20 stations, called IGc20 core network, was
+   designed. It is composed of 55 clusters of stations (i.e., 55 primary
+   stations, each with possible substitutes) selected to ensure a homogeneous
+   global distribution and the best possible temporal stability of the core
+   network. The list of IGc20 core stations can be found at:
+   ftp://igs-rf.ign.fr/pub/IGc20/IGc20_core.txt
+ 
+-FILE/COMMENT
++SITE/ID
+*CODE PT __DOMES__ T _STATION DESCRIPTION__ _LONGITUDE_ _LATITUDE__ HEIGHT_
+ ADIS  A 31502M001 P Addis Ababa University  38 45 58.7   9 02 06.4  2439.1
+ BSHM  A 20705M001 P HAIFA, ISRAEL           35 01 22.7  32 46 44.3   225.1
+ DRAG  A 20710S001 P METZOKI DRAGOT, ISRAEL  35 23 31.4  31 35 35.5    31.9
+ M0SE  A 12772M001 P ROME - S. Pietro in Vi  12 29 35.7  41 53 35.2   120.6
+ MEDI  A 12711M003 P Medicina, ITALY         11 38 48.5  44 31 11.8    50.0
+-SITE/ID
++SOLUTION/EPOCHS
+*CODE PT SOLN T _DATA_START_ __DATA_END__ _MEAN_EPOCH_
+ ADIS  A    1 P 07:205:00000 19:310:86370 13:257:43185
+ ADIS  A    2 P 19:343:00000 21:062:86370 20:203:43185
+ ADIS  A    3 P 22:105:00000 24:362:00000 23:233:43200
+ BSHM  A    1 P 00:003:00000 01:359:86370 00:364:43185
+ BSHM  A    2 P 02:028:00000 09:178:86370 05:285:86385
+ BSHM  A    3 P 09:210:00000 23:038:00000 16:124:43200
+ BSHM  A    4 P 23:038:00000 25:075:00000 24:057:00000
+ DRAG  A    1 P 00:038:00000 23:037:86370 11:220:43185
+ DRAG  A    2 P 23:038:00000 25:074:86370 24:056:86385
+ M0SE  A    1 P 04:289:00000 07:162:86370 06:042:86385
+ M0SE  A    2 P 07:177:00000 09:096:86370 08:137:43185
+ M0SE  A    3 P 09:097:00000 12:102:86370 10:282:43185
+ M0SE  A    4 P 12:106:00000 16:304:86399 14:205:00000
+ M0SE  A    5 P 16:305:00000 25:070:86399 21:005:00000
+ MEDI  A    1 P 97:026:00000 00:320:00000 98:355:43200
+ MEDI  A    2 P 00:320:00000 25:074:86399 13:014:43200
+-SOLUTION/EPOCHS
++SOLUTION/ESTIMATE
+*INDEX _TYPE_ CODE PT SOLN _REF_EPOCH__ UNIT S ___ESTIMATED_VALUE___ __STD_DEV__
+    49 STAX   ADIS  A    1 20:001:00000 m    2  4.91365257345821e+06 8.79430e-04
+    50 STAY   ADIS  A    1 20:001:00000 m    2  3.94592284024617e+06 8.08190e-04
+    51 STAZ   ADIS  A    1 20:001:00000 m    2  9.95383514478186e+05 3.62050e-04
+    52 VELX   ADIS  A    1 20:001:00000 m/y  2 -1.92154471225954e-02 1.19430e-04
+    53 VELY   ADIS  A    1 20:001:00000 m/y  2  1.67576857489948e-02 1.04820e-04
+    54 VELZ   ADIS  A    1 20:001:00000 m/y  2  1.81963587191209e-02 4.66290e-05
+    55 STAX   ADIS  A    2 20:001:00000 m    2  4.91365256559239e+06 1.44780e-03
+    56 STAY   ADIS  A    2 20:001:00000 m    2  3.94592283283144e+06 1.25420e-03
+    57 STAZ   ADIS  A    2 20:001:00000 m    2  9.95383511189483e+05 5.84560e-04
+    58 VELX   ADIS  A    2 20:001:00000 m/y  2 -1.92154465746031e-02 1.19440e-04
+    59 VELY   ADIS  A    2 20:001:00000 m/y  2  1.67576849761240e-02 1.04830e-04
+    60 VELZ   ADIS  A    2 20:001:00000 m/y  2  1.81963583463525e-02 4.66390e-05
+    61 STAX   ADIS  A    3 20:001:00000 m    2  4.91365257570628e+06 5.45200e-03
+    62 STAY   ADIS  A    3 20:001:00000 m    2  3.94592284024369e+06 4.55060e-03
+    63 STAZ   ADIS  A    3 20:001:00000 m    2  9.95383512247445e+05 2.21590e-03
+    64 VELX   ADIS  A    3 20:001:00000 m/y  2 -2.31480595363631e-02 1.39560e-03
+    65 VELY   ADIS  A    3 20:001:00000 m/y  2  1.24181475699407e-02 1.16670e-03
+    66 VELZ   ADIS  A    3 20:001:00000 m/y  2  1.68693261520704e-02 5.66840e-04
+  1015 STAX   BSHM  A    1 20:001:00000 m    2  4.39595120080768e+06 3.87530e-03
+  1016 STAY   BSHM  A    1 20:001:00000 m    2  3.08070726416541e+06 2.97220e-03
+  1017 STAZ   BSHM  A    1 20:001:00000 m    2  3.43349830272448e+06 3.01040e-03
+  1018 VELX   BSHM  A    1 20:001:00000 m/y  2 -2.13421808270237e-02 6.74530e-05
+  1019 VELY   BSHM  A    1 20:001:00000 m/y  2  1.23695915303816e-02 5.41920e-05
+  1020 VELZ   BSHM  A    1 20:001:00000 m/y  2  1.66812602271720e-02 5.45580e-05
+  1021 STAX   BSHM  A    2 20:001:00000 m    2  4.39595116533851e+06 1.53010e-03
+  1022 STAY   BSHM  A    2 20:001:00000 m    2  3.08070724580266e+06 1.22980e-03
+  1023 STAZ   BSHM  A    2 20:001:00000 m    2  3.43349828046559e+06 1.21340e-03
+  1024 VELX   BSHM  A    2 20:001:00000 m/y  2 -2.13421809113001e-02 6.74460e-05
+  1025 VELY   BSHM  A    2 20:001:00000 m/y  2  1.23695918317149e-02 5.41820e-05
+  1026 VELZ   BSHM  A    2 20:001:00000 m/y  2  1.66812600669417e-02 5.45490e-05
+  1027 STAX   BSHM  A    3 20:001:00000 m    2  4.39595115694852e+06 4.51510e-04
+  1028 STAY   BSHM  A    3 20:001:00000 m    2  3.08070724669203e+06 4.31180e-04
+  1029 STAZ   BSHM  A    3 20:001:00000 m    2  3.43349828110249e+06 3.61990e-04
+  1030 VELX   BSHM  A    3 20:001:00000 m/y  2 -2.13421813876946e-02 6.74380e-05
+  1031 VELY   BSHM  A    3 20:001:00000 m/y  2  1.23695944686797e-02 5.41730e-05
+  1032 VELZ   BSHM  A    3 20:001:00000 m/y  2  1.66812579275907e-02 5.45400e-05
+  1033 STAX   BSHM  A    4 20:001:00000 m    2  4.39595115585911e+06 5.34490e-03
+  1034 STAY   BSHM  A    4 20:001:00000 m    2  3.08070724503006e+06 4.19440e-03
+  1035 STAZ   BSHM  A    4 20:001:00000 m    2  3.43349828069637e+06 4.30940e-03
+  1036 VELX   BSHM  A    4 20:001:00000 m/y  2 -2.36629173713173e-02 1.26590e-03
+  1037 VELY   BSHM  A    4 20:001:00000 m/y  2  1.22074062138220e-02 9.90940e-04
+  1038 VELZ   BSHM  A    4 20:001:00000 m/y  2  1.97278101932037e-02 1.02120e-03
+  2149 STAX   DRAG  A    1 20:001:00000 m    2  4.43298035662783e+06 4.88710e-04
+  2150 STAY   DRAG  A    1 20:001:00000 m    2  3.14943230296791e+06 4.56670e-04
+  2151 STAZ   DRAG  A    1 20:001:00000 m    2  3.32211074019988e+06 3.72280e-04
+  2152 VELX   DRAG  A    1 20:001:00000 m/y  2 -1.98569869299554e-02 4.51950e-05
+  2153 VELY   DRAG  A    1 20:001:00000 m/y  2  1.42578660974808e-02 3.82580e-05
+  2154 VELZ   DRAG  A    1 20:001:00000 m/y  2  1.87333159890347e-02 3.43780e-05
+  2155 STAX   DRAG  A    2 20:001:00000 m    2  4.43298034795523e+06 2.00750e-03
+  2156 STAY   DRAG  A    2 20:001:00000 m    2  3.14943230002256e+06 1.65340e-03
+  2157 STAZ   DRAG  A    2 20:001:00000 m    2  3.32211074250749e+06 1.52640e-03
+  2158 VELX   DRAG  A    2 20:001:00000 m/y  2 -1.98569875254135e-02 4.52060e-05
+  2159 VELY   DRAG  A    2 20:001:00000 m/y  2  1.42578667509555e-02 3.82710e-05
+  2160 VELZ   DRAG  A    2 20:001:00000 m/y  2  1.87333162957293e-02 3.43920e-05
+  4123 STAX   M0SE  A    1 20:001:00000 m    2  4.64243224859296e+06 4.25110e-03
+  4124 STAY   M0SE  A    1 20:001:00000 m    2  1.02862970697173e+06 1.68670e-03
+  4125 STAZ   M0SE  A    1 20:001:00000 m    2  4.23685441964407e+06 3.90880e-03
+  4126 VELX   M0SE  A    1 20:001:00000 m/y  2 -1.49870722609436e-02 1.93580e-04
+  4127 VELY   M0SE  A    1 20:001:00000 m/y  2  1.78384270763868e-02 8.16220e-05
+  4128 VELZ   M0SE  A    1 20:001:00000 m/y  2  1.19552114865369e-02 1.74020e-04
+  4129 STAX   M0SE  A    2 20:001:00000 m    2  4.64243225682922e+06 2.94520e-03
+  4130 STAY   M0SE  A    2 20:001:00000 m    2  1.02862970653019e+06 1.21320e-03
+  4131 STAZ   M0SE  A    2 20:001:00000 m    2  4.23685442737111e+06 2.65350e-03
+  4132 VELX   M0SE  A    2 20:001:00000 m/y  2 -1.49870721309633e-02 1.93580e-04
+  4133 VELY   M0SE  A    2 20:001:00000 m/y  2  1.78384270029562e-02 8.16160e-05
+  4134 VELZ   M0SE  A    2 20:001:00000 m/y  2  1.19552113453072e-02 1.74020e-04
+  4135 STAX   M0SE  A    3 20:001:00000 m    2  4.64243225637621e+06 2.22590e-03
+  4136 STAY   M0SE  A    3 20:001:00000 m    2  1.02862970367080e+06 9.19720e-04
+  4137 STAZ   M0SE  A    3 20:001:00000 m    2  4.23685442450777e+06 1.99550e-03
+  4138 VELX   M0SE  A    3 20:001:00000 m/y  2 -1.49870713933454e-02 1.93580e-04
+  4139 VELY   M0SE  A    3 20:001:00000 m/y  2  1.78384260438112e-02 8.16100e-05
+  4140 VELZ   M0SE  A    3 20:001:00000 m/y  2  1.19552107907486e-02 1.74020e-04
+  4141 STAX   M0SE  A    4 20:001:00000 m    2  4.64243225136599e+06 1.20900e-03
+  4142 STAY   M0SE  A    4 20:001:00000 m    2  1.02862970094700e+06 5.47860e-04
+  4143 STAZ   M0SE  A    4 20:001:00000 m    2  4.23685441917475e+06 1.08240e-03
+  4144 VELX   M0SE  A    4 20:001:00000 m/y  2 -1.49870711338314e-02 1.93570e-04
+  4145 VELY   M0SE  A    4 20:001:00000 m/y  2  1.78384271145627e-02 8.16040e-05
+  4146 VELZ   M0SE  A    4 20:001:00000 m/y  2  1.19552104484395e-02 1.74010e-04
+  4147 STAX   M0SE  A    5 20:001:00000 m    2  4.64243225494432e+06 5.60990e-04
+  4148 STAY   M0SE  A    5 20:001:00000 m    2  1.02862970099626e+06 3.23490e-04
+  4149 STAZ   M0SE  A    5 20:001:00000 m    2  4.23685441850462e+06 4.91620e-04
+  4150 VELX   M0SE  A    5 20:001:00000 m/y  2 -1.49870672381116e-02 1.93570e-04
+  4151 VELY   M0SE  A    5 20:001:00000 m/y  2  1.78384250223445e-02 8.16000e-05
+  4152 VELZ   M0SE  A    5 20:001:00000 m/y  2  1.19552069069680e-02 1.74010e-04
+  4621 STAX   MEDI  A    1 20:001:00000 m    2  4.46140047523980e+06 1.02410e-03
+  4622 STAY   MEDI  A    1 20:001:00000 m    2  9.19593864627125e+05 4.47890e-04
+  4623 STAZ   MEDI  A    1 20:001:00000 m    2  4.44950494200374e+06 9.62260e-04
+  4624 VELX   MEDI  A    1 20:001:00000 m/y  2 -1.80923962952918e-02 3.63920e-05
+  4625 VELY   MEDI  A    1 20:001:00000 m/y  2  1.91334696817523e-02 2.07430e-05
+  4626 VELZ   MEDI  A    1 20:001:00000 m/y  2  1.13657719780606e-02 3.41960e-05
+  4627 STAX   MEDI  A    2 20:001:00000 m    2  4.46140047305538e+06 4.03990e-04
+  4628 STAY   MEDI  A    2 20:001:00000 m    2  9.19593864907257e+05 2.76000e-04
+  4629 STAZ   MEDI  A    2 20:001:00000 m    2  4.44950493785650e+06 3.75520e-04
+  4630 VELX   MEDI  A    2 20:001:00000 m/y  2 -1.80923845960119e-02 3.63780e-05
+  4631 VELY   MEDI  A    2 20:001:00000 m/y  2  1.91334642564910e-02 2.07190e-05
+  4632 VELZ   MEDI  A    2 20:001:00000 m/y  2  1.13657614008432e-02 3.41820e-05
+-SOLUTION/ESTIMATE
+%ENDSNX

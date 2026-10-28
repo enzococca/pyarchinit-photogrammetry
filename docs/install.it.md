@@ -56,8 +56,9 @@ pip install -U pip && pip install "pyarchinit-photogrammetry[all]"
 Munsell; `[sam]` aggiunge Segment Anything 2.1 (PyTorch). Il nucleo nativo in Rust (mappe di
 profondità e ortofoto molto più veloci) si costruisce dai sorgenti (sotto); le applicazioni desktop
 lo contengono già. Il PPK delle posizioni GNSS richiede il nucleo 0.5 o più recente, che contiene
-RTKLIB (`pip install "pyarchinit-photogrammetry-core>=0.5"`); senza, il programma lo dice, e `ppg doctor`
-dice dove gira il PPK.
+RTKLIB, e i file RINEX compressi con Hatanaka (`.crx`, `.##d`, come li danno gli archivi delle stazioni
+permanenti) il nucleo 0.6 o più recente (`pip install "pyarchinit-photogrammetry-core>=0.6"`), o il
+programma `CRX2RNX` di RNXCMP nel `PATH`; senza, il programma lo dice, e `ppg doctor` dice dove gira il PPK.
 
 ```bash
 ppg doctor                       # controlla l'ambiente e dice cosa sistemare
@@ -97,6 +98,26 @@ uv pip install -e ".[all,dev]"
 uv pip install ./native        # facoltativo: il nucleo nativo (serve Rust)
 pytest -q
 ```
+
+## Dati GNSS
+
+Il lavoro GNSS scarica solo quello che serve a un calcolo, da archivi pubblici che non chiedono un account, e lo
+tiene nella cartella GNSS del programma: `~/Library/Application Support/pyarchinit-photogrammetry/gnss` su
+macOS, `%LOCALAPPDATA%\pyarchinit-photogrammetry\gnss` su Windows,
+`~/.local/share/pyarchinit-photogrammetry/gnss` su Linux (`PPG_GNSS_DIR` ne indica un'altra). Lì ci sono gli
+elenchi e i file delle stazioni permanenti, i prodotti precisi di un PPP, le calibrazioni delle antenne
+igs20.atx (62 MB) e le griglie del geoide ([PPK](gui/photos-markers.md#ppk-correzioni-da-una-base)).
+
+* **Il geoide EGM2008** (`us_nga_egm08_25.tif`, 81 MB, dominio pubblico), che serve alle quote sul livello del
+  mare, si scarica solo se lo chiedi: *Scarica il geoide EGM2008 (81 MB)...* nel passo *Sistema e quote* del
+  pannello GNSS, o `ppg gnss geoid --download`. Senza, una conversione in quote sul geoide si rifiuta: le quote
+  sull'ellissoide non passano mai per quote sul livello del mare.
+* **Una griglia tua**, come ITALGEO2005 dell'IGM (`geo_igm_mar06.grd`), va nella cartella `proj` della
+  cartella GNSS, che `ppg gnss geoid` stampa: PROJ cerca le griglie anche lì.
+* PROJ non va mai in rete da solo, anche quando la shell imposta `PROJ_NETWORK=ON`: una griglia si usa solo
+  quando è sul disco.
+
+Di più in [Quote sul geoide e sistema del rilievo](gui/photos-markers.md#quote-sul-geoide-e-sistema-del-rilievo).
 
 ## Quando qualcosa non va
 

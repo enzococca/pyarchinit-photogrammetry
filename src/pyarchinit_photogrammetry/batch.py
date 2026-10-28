@@ -103,10 +103,15 @@ def _fill(value, doc, chunk):
 
 
 def run_step(doc, chunk, op: str, params: dict, progress: Progress | None = None):
-    """One operation on one chunk (see :data:`OPERATIONS`)."""
+    """One operation on one chunk (see :data:`OPERATIONS`). The alignment refuses before the matching what would keep
+    it from placing the chunk by the positions of the photos (:func:`.markers.gcp.preflight`: the grid of a geoid
+    missing), not after it."""
     progress = as_progress(progress)
     p = {k: _fill(v, doc, chunk) for k, v in params.items()}
     if op == "align_photos":
+        from .markers import gcp
+
+        gcp.preflight(chunk)
         chunk.match_photos(progress=progress.sub(0.0, 0.5), **p)
         return chunk.align_cameras(progress=progress.sub(0.5, 0.5))
     if op == "update_transform":

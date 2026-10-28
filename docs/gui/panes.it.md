@@ -114,7 +114,9 @@ prospetti, le foto (i loro file non vengono mai toccati; il prossimo allineament
 I marker e le camere con le loro coordinate, come il pannello Reference di Metashape:
 
 * i marker con *Usa* e *Check*, coordinate e accuratezza (doppio clic per cambiarle), gli errori in metri e in
-  pixel; le posizioni delle camere;
+  pixel; le posizioni delle camere, ognuna con la sua spunta: senza, la posizione della foto non conta più nella
+  georeferenziazione e nell'ottimizzazione (clic destro: *Usa* o *Non usare i riferimenti delle camere
+  selezionate* - il clic destro seleziona la camera sotto il cursore - e *... di tutte le camere*);
 * le barre di scala sotto i marker ([barre di scala](photos-markers.md#barre-di-scala));
 * gli RMSE dei punti di controllo e di check e delle barre.
 

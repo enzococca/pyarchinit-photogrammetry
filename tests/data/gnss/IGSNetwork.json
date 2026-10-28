@@ -1,0 +1,300 @@
+{
+    "ADIS00ETH": {
+        "CountryOrRegion": "ETH",
+        "X": 4913652.76087,
+        "Y": 3945922.66962,
+        "Z": 995383.33311,
+        "Latitude": "9.035",
+        "Longitude": "38.766",
+        "Height": "2439.149",
+        "Receiver": {
+            "Name": "LEICA GR50",
+            "SatelliteSystem": "GPS+GLO+GAL+BDS+SBAS",
+            "SerialNumber": "1871020",
+            "FirmwareVersion": "4.52/7.711",
+            "ElevCutoff": "0.0",
+            "DateInstalled": "2022-04-13T13:30Z"
+        },
+        "Antenna": {
+            "Name": "LEIAR20",
+            "Radome": "LEIM",
+            "SerialNumber": "22078003",
+            "ARP": "BAM",
+            "MarkerUp": "0.0762",
+            "MarkerNorth": "0.0",
+            "MarkerEast": "0.0",
+            "DateInstalled": "2022-04-13T13:00Z"
+        },
+        "Clock": {
+            "Type": "",
+            "InputFrequency": "",
+            "EffectiveDates": "CCYY-MM-DD/CCYY-MM-DD"
+        },
+        "LastData": "2026-10-24",
+        "RealTime": {
+            "ADIS00ETH1": {
+                "GPS": "1004",
+                "GLO": "1012,1020"
+            }
+        },
+        "Product": {
+            "Final": {
+                "mit": "2026-09-20",
+                "esa": "2025-01-19",
+                "jgx": "2025-12-31",
+                "ngs": "2026-09-20",
+                "sio": "2026-09-13",
+                "emr": "2026-09-20",
+                "grg": "2026-09-20",
+                "jpl": "2026-09-20",
+                "cod": "2026-09-20"
+            },
+            "Rapid": {
+                "jgx": "2025-10-16",
+                "ngs": "2026-10-01",
+                "emr": "2026-05-06",
+                "whu": "2026-09-30",
+                "cod": "2026-09-24",
+                "usn": "2026-10-01"
+            }
+        }
+    },
+    "BSHM00ISR": {
+        "CountryOrRegion": "ISR",
+        "X": 4395951.1833,
+        "Y": 3080707.2289,
+        "Z": 3433498.2609,
+        "Latitude": "32.779",
+        "Longitude": "35.023",
+        "Height": "225.066",
+        "Receiver": {
+            "Name": "SEPT POLARX5",
+            "SatelliteSystem": "GPS+GLO+GAL+BDS+QZSS+IRNSS",
+            "SerialNumber": "3013570",
+            "FirmwareVersion": "5.7.0",
+            "ElevCutoff": "0.0",
+            "DateInstalled": "2026-04-14T14:19Z"
+        },
+        "Antenna": {
+            "Name": "TRM59800.00",
+            "Radome": "SCIS",
+            "SerialNumber": "4811A47089",
+            "ARP": "BPA",
+            "MarkerUp": "0.0",
+            "MarkerNorth": "0.0",
+            "MarkerEast": "0.0",
+            "DateInstalled": "2009-07-20T00:00Z"
+        },
+        "Clock": {
+            "Type": "INTERNAL",
+            "InputFrequency": "",
+            "EffectiveDates": "2009-07-20/CCYY-MM-DD"
+        },
+        "LastData": "2026-10-24",
+        "RealTime": {
+            "BSHM00ISR0": {
+                "GPS": "1076"
+            }
+        },
+        "Product": {
+            "Final": {
+                "esa": "2025-01-19",
+                "jgx": "2026-09-26",
+                "ngs": "2026-09-20",
+                "gfz": "2026-09-20",
+                "cod": "2026-09-20",
+                "mit": "2026-09-20",
+                "emr": "2026-09-20",
+                "jpl": "2026-09-20"
+            },
+            "Rapid": {
+                "jgx": "2026-10-04",
+                "ngs": "2026-10-04",
+                "grg": "2024-04-20",
+                "gfz": "2026-01-28",
+                "cod": "2026-10-04",
+                "usn": "2026-10-03",
+                "emr": "2026-07-21",
+                "sio": "2026-09-20",
+                "jpl": "2025-03-09"
+            },
+            "Ultra": {
+                "jgx": "2026-10-04",
+                "grg": "2023-10-22",
+                "cod": "2026-09-28",
+                "emr": "2026-07-22",
+                "sio": "2026-06-04",
+                "jpl": "2025-03-04"
+            }
+        }
+    },
+    "DRAG00ISR": {
+        "CountryOrRegion": "ISR",
+        "X": 4432980.662,
+        "Y": 3149432.093,
+        "Z": 3322110.441,
+        "Latitude": "31.593",
+        "Longitude": "35.392",
+        "Height": "31.800",
+        "Receiver": {
+            "Name": "JAVAD TRE_3 DELTA",
+            "SatelliteSystem": "GPS+GLO",
+            "SerialNumber": "02631",
+            "FirmwareVersion": "3.6.14",
+            "ElevCutoff": "0.0",
+            "DateInstalled": "2019-01-24T00:00Z"
+        },
+        "Antenna": {
+            "Name": "ASH700936D_M",
+            "Radome": "SNOW",
+            "SerialNumber": "CR14346",
+            "ARP": "BPA",
+            "MarkerUp": "0.0",
+            "MarkerNorth": "0.0",
+            "MarkerEast": "0.0",
+            "DateInstalled": "2000-02-07T00:00Z"
+        },
+        "Clock": {
+            "Type": "INTERNAL",
+            "InputFrequency": "",
+            "EffectiveDates": "2000-02-07/CCYY-MM-DD"
+        },
+        "LastData": "2026-10-23",
+        "Product": {
+            "Final": {
+                "emr": "2024-06-30",
+                "esa": "2024-11-24",
+                "ngs": "2024-03-03",
+                "mit": "2026-09-20",
+                "jpl": "2024-10-27",
+                "sio": "2026-09-13"
+            },
+            "Rapid": {
+                "emr": "2024-03-25",
+                "ngs": "2024-03-05",
+                "gfz": "2026-10-04",
+                "whu": "2026-07-25"
+            }
+        }
+    },
+    "M0SE00ITA": {
+        "CountryOrRegion": "ITA",
+        "X": 4642432.5,
+        "Y": 1028629.4,
+        "Z": 4236854.2,
+        "Latitude": "41.893",
+        "Longitude": "12.493",
+        "Height": "120.600",
+        "Receiver": {
+            "Name": "LEICA GR50",
+            "SatelliteSystem": "GPS+GLO+GAL+BDS+SBAS",
+            "SerialNumber": "1830126",
+            "FirmwareVersion": "4.70/7.813",
+            "ElevCutoff": "0.0",
+            "DateInstalled": "2023-10-30T12:00Z"
+        },
+        "Antenna": {
+            "Name": "LEIAR25.R4",
+            "Radome": "LEIT",
+            "SerialNumber": "725219",
+            "ARP": "BPA",
+            "MarkerUp": "0.0",
+            "MarkerNorth": "0.0",
+            "MarkerEast": "0.0",
+            "DateInstalled": "2012-04-13T00:00Z"
+        },
+        "Clock": {
+            "Type": "EXTERNAL RUBIDIUM",
+            "InputFrequency": "10.0",
+            "EffectiveDates": "2012-04-13/CCYY-MM-DD"
+        },
+        "LastData": "2026-10-24",
+        "RealTime": {
+            "M0SE00ITA0": {
+                "GPS": "1019,1077",
+                "GLO": "1020,1087,1230",
+                "GAL": "1045,1046,1097",
+                "BDS": "1042,1127"
+            }
+        },
+        "Product": {
+            "Final": {
+                "jpl": "2024-12-08",
+                "ngs": "2026-09-20",
+                "jgx": "2026-09-26",
+                "cod": "2026-09-20"
+            },
+            "Rapid": {
+                "jpl": "2024-11-13",
+                "ngs": "2026-10-04",
+                "jgx": "2026-10-04",
+                "emr": "2026-10-04"
+            },
+            "Ultra": {
+                "jpl": "2023-09-27",
+                "jgx": "2026-09-22",
+                "emr": "2026-08-05"
+            }
+        }
+    },
+    "MEDI00ITA": {
+        "CountryOrRegion": "ITA",
+        "X": 4461400.894,
+        "Y": 919593.443,
+        "Z": 4449504.669,
+        "Latitude": "44.520",
+        "Longitude": "11.647",
+        "Height": "50.000",
+        "Receiver": {
+            "Name": "LEICA GR10",
+            "SatelliteSystem": "GPS+GLO+GAL",
+            "SerialNumber": "1704161",
+            "FirmwareVersion": "4.83/6.525",
+            "ElevCutoff": "0.0",
+            "DateInstalled": "2026-05-15T00:00Z"
+        },
+        "Antenna": {
+            "Name": "LEIAR20",
+            "Radome": "LEIM",
+            "SerialNumber": "18345001",
+            "ARP": "BAM",
+            "MarkerUp": "0.0",
+            "MarkerNorth": "0.0",
+            "MarkerEast": "0.0",
+            "DateInstalled": "2018-10-17T11:30Z"
+        },
+        "Clock": {
+            "Type": "EXTERNAL H-MASER",
+            "InputFrequency": "10.0",
+            "EffectiveDates": "2016-09-19/CCYY-MM-DD"
+        },
+        "LastData": "2026-10-24",
+        "RealTime": {
+            "MEDI00ITA0": {
+                "GPS": "1004,1019",
+                "GLO": "1012,1020,1230"
+            }
+        },
+        "Product": {
+            "Final": {
+                "ngs": "2026-09-20",
+                "esa": "2025-01-19",
+                "mit": "2026-09-20",
+                "sio": "2026-09-13",
+                "cod": "2026-09-20"
+            },
+            "Rapid": {
+                "ngs": "2026-10-04",
+                "grg": "2024-06-14",
+                "jpl": "2024-10-14",
+                "sio": "2023-05-26",
+                "cod": "2026-09-09"
+            },
+            "Ultra": {
+                "grg": "2024-06-14",
+                "emr": "2026-07-21",
+                "cod": "2026-08-02"
+            }
+        }
+    }
+}

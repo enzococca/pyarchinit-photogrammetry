@@ -1,0 +1,2 @@
+# the tests compare the bytes of these files: no line-end conversion when they are checked out
+* -text

@@ -4,19 +4,38 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import sqlite3
-
 import numpy as np
 import pytest
 
 os.environ.setdefault("GLOG_minloglevel", "2")
 os.environ.setdefault("PPG_NO_UPDATE_CHECK", "1")  # the windows of the tests never ask GitHub
 os.environ.setdefault("PPG_LANG", "it")  # the tests read the Italian texts (test_i18n switches to English)
-# the windows of the tests load the plugins of an empty folder, never those of the user
+import shutil  # noqa: E402
 import tempfile  # noqa: E402
 
-os.environ.setdefault("PPG_PLUGINS_DIR", tempfile.mkdtemp(prefix="ppg-test-plugins-"))
+# the temporary folders the session makes, removed when it ends (pytest_sessionfinish)
+_MADE: list[str] = []
+
+
+def _folder(prefix: str) -> str:
+    path = tempfile.mkdtemp(prefix=prefix)
+    _MADE.append(path)
+    return path
+
+
+# the windows of the tests load the plugins of an empty folder, never those of the user
+if "PPG_PLUGINS_DIR" not in os.environ:
+    os.environ["PPG_PLUGINS_DIR"] = _folder("ppg-test-plugins-")
 os.environ.setdefault("PPG_PLUGINS_ENVIRONMENT", "0")  # nor those installed with pip in the environment
+# the GNSS downloads and caches of the tests go to a folder of their own, never to the user's
+if "PPG_GNSS_DIR" not in os.environ:
+    os.environ["PPG_GNSS_DIR"] = _folder("ppg-test-gnss-")
+# PROJ never goes to the network (a shell with PROJ_NETWORK=ON would have it download a geoid grid in silence, and
+# heights above the geoid would be wrong offline): forced, whatever the shell of the developer says
+os.environ["PROJ_NETWORK"] = "OFF"
+# and finds no grid of the user's (PROJ also looks in its own folder of the user, where projsync puts the grids): the
+# tests that refuse heights above the geoid without the grid refuse on every computer
+os.environ["PROJ_USER_WRITABLE_DIRECTORY"] = _folder("ppg-test-proj-")
 
 # A native crash prints both stacks: pycolmap installs glog's failure signal handler when it is
 # imported, and pytest's faulthandler (enabled when pytest configures, after this file) dumps the
@@ -40,11 +59,75 @@ def _settings_of_the_tests() -> None:
     except ImportError:  # no interface installed: no window either
         return
     QSettings.setDefaultFormat(QSettings.Format.IniFormat)
-    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope,
-                      tempfile.mkdtemp(prefix="ppg-test-settings-"))
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, _folder("ppg-test-settings-"))
 
 
 _settings_of_the_tests()
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "network: a test that reaches a server on the network (none should)")
+
+
+def _this_computer(host) -> bool:
+    """``host`` is this computer: a loopback address or name (the tests may talk to themselves, never further)."""
+    import ipaddress
+
+    if host in (None, "", "localhost", b"localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host.decode() if isinstance(host, bytes) else str(host).split("%")[0]).is_loopback
+    except ValueError:
+        return False
+
+
+@pytest.fixture(autouse=True)
+def _no_network(request, monkeypatch):
+    """No test reaches the network: a name looked up or a connection to anything but this computer is refused with an
+    OSError that says so (the archives of the GNSS are file:// trees in the tests, PROJ is offline). A test that must
+    would carry the marker ``network`` - none does. Processes the tests start are not watched: they get file:// and an
+    endpoint of PROJ on this computer."""
+    if request.node.get_closest_marker("network"):
+        yield
+        return
+    import socket
+
+    def refused(what) -> OSError:
+        return OSError(f"a test tried to reach {what} on the network: the tests never go to the network")
+
+    real_getaddrinfo, real_connect, real_connect_ex = socket.getaddrinfo, socket.socket.connect, socket.socket.connect_ex
+
+    def getaddrinfo(host, *args, **kwargs):
+        if not _this_computer(host):
+            raise refused(host)
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    def far(sock, address) -> bool:
+        return sock.family in (socket.AF_INET, socket.AF_INET6) and not _this_computer(address[0])
+
+    def connect(sock, address):
+        if far(sock, address):
+            raise refused(address)
+        return real_connect(sock, address)
+
+    def connect_ex(sock, address):
+        if far(sock, address):
+            raise refused(address)
+        return real_connect_ex(sock, address)
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _plain_command_line_output(monkeypatch):
+    """The help and the errors of the command line as plain text, as on a developer's computer: on GitHub Actions
+    Typer forces a terminal (GITHUB_ACTIONS, FORCE_COLOR or PY_COLORS, read when it is imported) and rich writes colour
+    and bold codes into what CliRunner captures, between the words the tests look for. Rich writes none to a dumb
+    terminal, forced or not. Set for each test, so that pytest's own colours stay."""
+    monkeypatch.setenv("TERM", "dumb")
 
 
 @pytest.fixture(autouse=True)
@@ -290,6 +373,8 @@ _exit_status = {"code": 0}
 
 def pytest_sessionfinish(session, exitstatus):
     _exit_status["code"] = int(exitstatus)
+    for path in _MADE:  # the temporary folders of the session (the exit guard skips the handlers of atexit)
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def pytest_unconfigure(config):

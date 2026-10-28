@@ -2,14 +2,16 @@
 or as an HTML page (:mod:`io.report`).
 
 For every chunk: the survey (photos, alignment, tie points, reprojection error, ground resolution,
-the camera positions over the orthomosaic), the calibration of the cameras, the references and
-their errors (control and check points, scale bars, the GPS of the photos), the processing
-parameters kept in ``chunk.meta``, the products with their numbers and figures (dense cloud and its
-classes, model, DEM, orthomosaic), the multispectral products (bands, radiometric calibration,
-registration, balance of the photos, reflectance in false colour, every index with its statistics,
-the zones with their areas), the thermal products (decoder, the parameters of the measure, the
-temperature orthomosaic in degrees with its statistics, the anomalies) and the measuring points.
-Each part is there only when the chunk has it.
+the camera positions over the orthomosaic), the calibration of the cameras, the references and their
+errors (control and check points, scale bars, the GPS of the photos), the GNSS positions of the
+photos (where they come from, their frames and epochs, the quality of every flight, the base of
+every PPK run, the system of the chunk with the grid of its geoid, the credits of what was used),
+the processing parameters kept in ``chunk.meta``, the products with their numbers and figures (dense
+cloud and its classes, model, DEM, orthomosaic), the multispectral products (bands, radiometric
+calibration, registration, balance of the photos, reflectance in false colour, every index with its
+statistics, the zones with their areas), the thermal products (decoder, the parameters of the
+measure, the temperature orthomosaic in degrees with its statistics, the anomalies) and the
+measuring points. Each part is there only when the chunk has it.
 
 The report speaks Italian or English (``language``, :func:`language_of`); its texts are here
 (:data:`TEXT`), not in the catalogue of the interface. A figure is a small image (at most
@@ -18,10 +20,13 @@ legend, scale bar and north arrow.
 """
 from __future__ import annotations
 
+import functools
+import hashlib
 import io
 import logging
 import math
 import os
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -170,6 +175,9 @@ TEXT: dict[str, tuple[str, str]] = {  # key: (Italian, English)
     "p_control_points": ("Punti di controllo", "Control points"),
     "p_scale_bars": ("Barre di scala", "Scale bars"),
     "p_steps": ("Passi verso i riferimenti", "Steps towards the references"),
+    "p_gnss_positions": ("Posizioni GNSS nella compensazione", "GNSS positions in the adjustment"),
+    "p_focal_held": ("Focale dell'allineamento tenuta", "Focal length of the alignment held"),
+    "p_reverted": ("Annullata dalla rete di sicurezza", "Undone by the safety net"),
     "p_backend": ("Motore", "Engine"),
     "p_filter": ("Filtro", "Filter"),
     "p_fusion": ("Fusione", "Fusion"),
@@ -309,6 +317,140 @@ TEXT: dict[str, tuple[str, str]] = {  # key: (Italian, English)
     "anomalies": ("Anomalie termiche", "Thermal anomalies"),
     "anomaly_c": ("Scarto (°C)", "Deviation (°C)"),
     "anomaly_caption": ("Temperatura meno quella dei dintorni entro {0} m", "Temperature minus that of its surroundings within {0} m"),
+    # GNSS positions of the photos
+    "gnss_title": ("Posizioni GNSS", "GNSS positions"),
+    "gnss_positioned": ("Foto con una posizione", "Photos with a position"),
+    "gnss_positioned_value": ("{0} di {1}", "{0} of {1}"),
+    "gnss_sources": ("Origine delle posizioni", "Where the positions come from"),
+    "gnss_frames": ("Sistema delle posizioni", "Frame of the positions"),
+    "gnss_heights": ("Tipo di quota delle posizioni", "Kind of height of the positions"),
+    "gnss_only_fix": ("Solo le posizioni fix", "Only the fix positions"),
+    "gnss_only_fix_value": ("riferimenti disattivati per {0} foto senza una posizione fix",
+                            "references switched off for {0} photos without a fix position"),
+    "gnss_mixed": ("Le quote delle posizioni in uso sono di tipo diverso ({0}): vanno controllate prima di usarle "
+                   "insieme.", "The heights of the positions in use are of different kinds ({0}): check them before "
+                   "using them together."),
+    "gnss_mixed_frames": ("Le posizioni in ITRF2020 di {0} foto e {1} riferimenti in un sistema europeo (RDN2008, "
+                          "ETRF) sono insieme in {2}, un sistema su WGS 84: in Europa sono a circa un metro fra loro. "
+                          "In un sistema di ETRF2000{3} arrivano tutti esatti.",
+                          "The ITRF2020 positions of {0} photos and {1} references in a European frame (RDN2008, ETRF) "
+                          "are together in {2}, a system on WGS 84: in Europe they are about a metre apart. In a "
+                          "system of ETRF2000{3} all arrive exactly."),
+    "gnss_crs": ("Sistema del chunk", "System of the chunk"),
+    "gnss_crs_heights": ("Quote del chunk", "Heights of the chunk"),
+    "kind_orthometric": ("sul geoide ({0})", "above the geoid ({0})"),
+    "kind_ellipsoidal": ("ellissoidiche", "above the ellipsoid"),
+    "kind_none": ("nessuna propria: le quote delle posizioni passano come sono",
+                  "none of its own: the heights of the positions pass as they are"),
+    "gnss_geoid_grid": ("Griglia del geoide", "Geoid grid"),
+    "grid_sha256": ("{0}, SHA-256 {1}", "{0}, SHA-256 {1}"),
+    "grid_published_sha256": ("{0}, SHA-256 pubblicato {1}", "{0}, published SHA-256 {1}"),
+    "grid_not_installed": ("{0}, non installata su questo computer", "{0}, not installed on this computer"),
+    "gnss_conversion": ("Conversione delle posizioni", "Conversion of the positions"),
+    "conversion_helmert": ("da ITRF2020 a {0} con la trasformazione di Helmert {1}, all'epoca di ogni posizione",
+                           "from ITRF2020 to {0} by the Helmert transformation {1}, at the epoch of each position"),
+    "conversion_wgs84": ("ITRF2020 presa come WGS 84: lo stesso sistema entro i centimetri",
+                         "ITRF2020 taken as WGS 84: the same frame within centimetres"),
+    "src_exif": ("GPS dell'EXIF", "EXIF GPS"),
+    "src_dji_xmp": ("RTK del drone (XMP di DJI)", "the drone's RTK (DJI XMP)"),
+    "src_dji_mrk": ("MRK di DJI", "DJI MRK"),
+    "src_ppk": ("PPK", "PPK"),
+    "src_positions_file": ("file di posizioni", "positions file"),
+    "src_video": ("video", "video"),
+    "src_panorama": ("foto a 360 gradi", "360-degree photos"),
+    "src_unknown": ("sconosciuta", "unknown"),
+    "frame_unknown": ("sconosciuto (WGS 84)", "unknown (WGS 84)"),
+    "frame_etrf2000": ("ETRF2000 (RDN2008)", "ETRF2000 (RDN2008)"),
+    "frame_epoch": ("{0} all'epoca {1}", "{0} at the epoch {1}"),
+    "frame_epochs": ("{0}, epoche dal {1} al {2}", "{0}, epochs {1} to {2}"),
+    "height_ellipsoidal": ("ellissoidiche", "ellipsoidal"),
+    "height_exif": ("dell'EXIF, sul livello del mare", "EXIF, above the sea level"),
+    "height_unknown": ("sconosciute", "unknown"),
+    "gnss_flights": ("Qualita' per volo", "Quality per flight"),
+    "h_flight": ("Volo", "Flight"),
+    "h_fix": ("Fix", "Fix"),
+    "h_float": ("Float", "Float"),
+    "h_single": ("Singola", "Single"),
+    "h_no_rtk": ("Senza RTK", "No RTK"),
+    "h_no_position": ("Senza posizione", "No position"),
+    "h_accuracy": ("Accuratezza", "Accuracy"),
+    "h_rms_offset": ("Scarto RMS", "RMS offset"),
+    "h_max_offset": ("Scarto max", "Max offset"),
+    "no_date": ("senza data", "no date"),
+    "flights_note": ("Un volo finisce con una pausa di oltre 20 minuti; l'accuratezza e' la mediana di quella dei "
+                     "riferimenti delle foto, per asse (x / y / z) come lo scarto RMS.", "A flight ends with a pause "
+                     "of more than 20 minutes; the accuracy is the median of that of the references of the photos, "
+                     "per axis (x / y / z) as the RMS offset."),
+    "offsets_note": ("Gli scarti sono la distanza fra le camere allineate e le loro posizioni, nel sistema del chunk.",
+                     "The offsets are how far the aligned cameras are from their positions, in the system of the "
+                     "chunk."),
+    "offsets_later": ("Gli scarti si misurano dopo l'allineamento di un chunk georeferenziato.",
+                      "The offsets are measured once the chunk is aligned and georeferenced."),
+    "ppk_title": ("PPK rispetto alla base {0}", "PPK against the base {0}"),
+    "ppk_title_at": ("PPK rispetto alla base {0}, {1}", "PPK against the base {0}, {1}"),
+    "ppk_title_solution": ("PPK: {0}", "PPK: {0}"),
+    "ppk_solution": ("Soluzione", "Solution"),
+    "ppk_rover": ("Osservazioni del drone", "Observations of the drone"),
+    "ppk_photos": ("Foto", "Photos"),
+    "ppk_placed": ("Posizione della base", "Position of the base"),
+    "placed_header": ("dall'intestazione RINEX della base: puo' essere sbagliata di metri, e tutto il rilievo con lei",
+                      "from the RINEX header of the base: it can be metres off, and the whole survey with it"),
+    "placed_typed": ("scritta: la posizione misurata del punto su cui sta la base",
+                     "typed: the surveyed position of the mark the base stands on"),
+    "placed_station": ("una stazione permanente come base", "a permanent station as the base"),
+    "placed_baseline": ("calcolata con una linea di base statica da una stazione permanente",
+                        "computed by a static baseline from a permanent station"),
+    "placed_ppp": ("calcolata con il PPP statico sui prodotti precisi", "computed by static PPP on precise products"),
+    "placed_unknown": ("di origine sconosciuta", "of unknown origin"),
+    "ppk_station": ("Stazione permanente", "Permanent station"),
+    "ppk_station_coordinates": ("Coordinate della stazione", "Coordinates of the station"),
+    "ppk_station_sd": ("Deviazioni standard della stazione (E / N / U)", "Standard deviations of the station (E / N / U)"),
+    "sigma_formal": ("errore formale della soluzione", "formal error of the solution"),
+    "sigma_scatter": ("dispersione delle posizioni giornaliere", "scatter of the daily positions"),
+    "ppk_baseline": ("Linea di base statica", "Static baseline"),
+    "baseline_km": ("{0} km dalla stazione", "{0} km from the station"),
+    "baseline_hours": ("{0} ore di osservazioni insieme", "{0} hours observed together"),
+    "ppk_ppp": ("PPP statico", "Static PPP"),
+    "ppp_value": ("{0} ore, prodotti {1} di {2}", "{0} hours, {1} products of {2}"),
+    "products_final": ("finali", "final"),
+    "products_rapid": ("rapidi", "rapid"),
+    "ppk_products": ("Prodotti precisi", "Precise products"),
+    "ppk_coordinates": ("Coordinate della base", "Coordinates of the base"),
+    "coordinates_value": ("latitudine {0}°, longitudine {1}°, quota ellissoidica {2} m",
+                          "latitude {0}°, longitude {1}°, ellipsoidal height {2} m"),
+    "ppk_frame": ("Sistema ed epoca della base", "Frame and epoch of the base"),
+    "ppk_base_sd": ("Deviazioni standard della base (E / N / U)", "Standard deviations of the base (E / N / U)"),
+    "ppk_antenna": ("Antenna della base", "Antenna of the base"),
+    "antenna_height": ("{0}, {1} m sopra il punto (intestazione RINEX)", "{0}, {1} m above the mark (RINEX header)"),
+    "antenna_no_height": ("{0}, nessuna altezza dell'antenna nell'intestazione RINEX",
+                          "{0}, no antenna height in the RINEX header"),
+    "antenna_unnamed": ("tipo non scritto nell'intestazione RINEX", "type not named in the RINEX header"),
+    "ppk_calibration": ("Calibrazione dell'antenna della base", "Calibration of the base antenna"),
+    "calibration_entry": ("calibrata con {0} di {1}", "calibrated with {0} of {1}"),
+    "calibration_without_radome": (", la voce senza il radome dell'intestazione",
+                                   ", the entry without the radome of the header"),
+    "calibration_missing": ("non calibrata: {0} non ha l'antenna {1}", "not calibrated: {0} has no entry for the antenna {1}"),
+    "calibration_no_l1": ("non calibrata: la voce {0} di {1} non ha gli scostamenti di L1 (G01)",
+                          "not calibrated: the entry {0} of {1} has no offsets of L1 (G01)"),
+    "calibration_unnamed": ("non calibrata: l'intestazione RINEX non dice il tipo dell'antenna",
+                            "not calibrated: the RINEX header does not name the antenna type"),
+    "calibration_none": ("non calibrata: a RTKLIB non e' stato dato un file di calibrazioni delle antenne",
+                         "not calibrated: RTKLIB was given no file of antenna calibrations"),
+    "ppk_distance": ("Distanza dal volo (mediana)", "Distance from the flight (median)"),
+    "status_fix": ("fix", "fix"),
+    "status_float": ("float", "float"),
+    "status_single": ("singola", "single"),
+    "credits": ("Crediti", "Credits"),
+    "credit_coordinates": ("Coordinate della stazione {0}", "Coordinates of the station {0}"),
+    "credit_observations": ("Osservazioni della stazione {0}", "Observations of the station {0}"),
+    "credit_products": ("Prodotti precisi", "Precise products"),
+    "credit_atx": ("Calibrazioni delle antenne", "Antenna calibrations"),
+    "credit_atx_value": ("igs20.atx dell'International GNSS Service (IGS)",
+                         "igs20.atx of the International GNSS Service (IGS)"),
+    "credit_geoid": ("Geoide", "Geoid"),
+    "credit_geoid_value": ("EGM2008 della National Geospatial-Intelligence Agency (NGA), dominio pubblico: la griglia "
+                           "{0} di PROJ", "EGM2008 of the National Geospatial-Intelligence Agency (NGA), public domain: "
+                           "the grid {0} of PROJ"),
     # measuring points
     "points_title": ("Punti di misura", "Measurement points"),
     "h_point": ("Punto", "Point"),
@@ -906,8 +1048,8 @@ PARAM_STEPS = [  # (key in chunk.meta, title, parameters in order)
                          "generic", "reference", "neighbours", "pairs", "guided_matching", "apply_masks",
                          "stationary_removed", "mapper", "global_fallback", "masked_tie_points", "gpu", "gpu_pairs",
                          "cpu_pairs", "reprojection_error"]),
-    ("optimize", "step_optimize", ["engine", "reprojection_error", "iterations", "converged", "control_points",
-                                   "scale_bars", "steps"]),
+    ("optimize", "step_optimize", ["engine", "reprojection_error", "reverted", "iterations", "converged",
+                                   "control_points", "scale_bars", "steps", "gnss_positions", "focal_held"]),
     ("dense", "step_dense", ["backend", "quality", "filter", "fusion", "skipped_photos"]),
     ("point_cloud_source", "step_point_cloud", []),
     ("model", "step_model", ["source", "surface", "classes", "face_count"]),
@@ -1304,6 +1446,484 @@ def _method(chunk, w: Words, markers: list[dict], cam_refs: dict) -> str:
     else:
         return ""
     return text + (w("plus_scalebars") if bars else "")
+
+
+# ---------------------------------------------------------------------------------------- GNSS
+# who the observations of a permanent station belong to, by its network, and their licence: what a station used as the
+# base of a flight, or for a static baseline, was downloaded with (its coordinates are credited by their own citation)
+NETWORK_CREDITS = {"EPN": "EUREF Permanent GNSS Network (EPN), CC BY 4.0", "IGS": "International GNSS Service (IGS)",
+                   "RING": "INGV RING, CC BY 4.0"}
+
+
+def _gnss(chunk, w: Words) -> Section | None:
+    """The GNSS positions of the photos: how many have one, where they come from, their reference frames and epochs,
+    the kinds of their heights; the system of the chunk with its heights (above a geoid: its grid and the SHA-256 of
+    the grid) and how the positions in ITRF2020 reach its frame; a table of the quality of every flight; the base of
+    every PPK run (:func:`_ppk_run`); whom to credit for the data used (:func:`_credits`). None when no photo has a
+    position."""
+    from collections import Counter
+
+    from ..gnss import apply as gnss_apply
+    from ..gnss import heights, quality
+
+    cams = [c for c in chunk.cameras if c.reference.location]
+    if not cams:
+        return None
+    sec = Section(w("gnss_title"))
+    records = [c.meta.get("gnss") or {} for c in cams]
+    sources = Counter(r.get("source") or "unknown" for r in records)
+    kinds = Counter(r.get("height") if r.get("height") in quality.HEIGHTS else "unknown" for r in records)
+    rows = [(w("gnss_positioned"), w("gnss_positioned_value", w.integer(len(cams)), w.integer(len(chunk.cameras)))),
+            (w("gnss_sources"), _counted(w, sources, "src_")),
+            (w("gnss_frames"), _position_frames(w, cams)),
+            (w("gnss_heights"), _counted(w, kinds, "height_"))]
+    kept = chunk.meta.get(gnss_apply.ONLY_FIX)
+    if kept is not None:
+        rows.append((w("gnss_only_fix"), w("gnss_only_fix_value", w.integer(len(kept.get("disabled") or [])))))
+    try:
+        rows += _system_rows(w, chunk, cams)
+    except Exception as exc:  # noqa: BLE001 - a system PROJ cannot read: the code of the system, the rest of the part
+        log.warning("report: the system of %s: %s", chunk.label, exc)
+        rows.append((w("gnss_crs"), str(chunk.crs)))
+    sec.blocks.append(KeyValues(rows))
+    mixed = quality.mixed_heights(chunk)
+    if mixed:
+        sec.blocks.append(Paragraph(w("gnss_mixed", " / ".join(w(f"height_{kind}") for kind in mixed)), note=True))
+    try:
+        apart = heights.mixed_frames(chunk)
+    except Exception as exc:  # noqa: BLE001 - a survey PROJ cannot place: nothing said of its frames
+        log.warning("report: the frames of %s: %s", chunk.label, exc)
+        apart = None
+    if apart:
+        european = sum(apart["photos"].values()) + sum(apart["markers"].values())
+        sec.blocks.append(Paragraph(w("gnss_mixed_frames", w.integer(apart["itrf2020"]), w.integer(european),
+                                      apart["crs"], f" ({apart['proposal']})" if apart["proposal"] else ""),
+                                    note=True))
+    try:
+        flights = quality.summary(chunk)
+    except Exception as exc:  # noqa: BLE001 - the offsets in a system PROJ cannot convert to
+        log.warning("report: the flights of %s: %s", chunk.label, exc)
+        flights = []
+    if flights:
+        sec.blocks.append(_flights(w, flights))
+    runs = _ppk_runs(chunk)
+    named = Counter((members[0].meta.get("gnss") or {}).get("base", {}).get("name") for _s, members in runs)
+    for solution, members in runs:  # several runs against one base: told apart by the time of their first shot
+        shared = named[(members[0].meta.get("gnss") or {}).get("base", {}).get("name")] > 1
+        sec.blocks.append(_ppk_run(w, solution, members, shared))
+    credits = _credits(w, chunk, [(members[0].meta.get("gnss") or {}).get("base") or {} for _s, members in runs])
+    if credits:
+        sub = Section(w("credits"), level=2)
+        sub.blocks.append(KeyValues(credits))
+        sec.blocks.append(sub)
+    return sec
+
+
+def _year(w: Words, epoch) -> str:
+    """A decimal year as the report writes an epoch: ``2026.82`` (``2026,82`` in Italian)."""
+    return w.number(float(epoch), 2, group=False)
+
+
+def _frame_text(w: Words, frame, epoch=None) -> str:
+    """A reference frame (one of :data:`..gnss.frames.FRAMES`), with the epoch of the coordinates in one that moves
+    with time: ``ITRF2020 at the epoch 2026.82``, ``ETRF2000 (RDN2008)``, ``unknown (WGS 84)``."""
+    from ..gnss import frames
+
+    if frame in (None, frames.UNKNOWN, frames.WGS84):
+        return w("frame_unknown")
+    name = w("frame_etrf2000") if frame == "ETRF2000" else str(frame)
+    return w("frame_epoch", name, _year(w, epoch)) if epoch is not None and frame in frames.DYNAMIC else name
+
+
+def _lengths(w: Words, values) -> str:
+    """Lengths in metres (one per axis) as ``1.6 / 1.8 / 3.0 cm``: in millimetres when all are under a centimetre, in
+    centimetres when all are under a metre, else in metres; ``-`` for none."""
+    if not values:
+        return "-"
+    lengths = [abs(float(v)) for v in values]
+    if max(lengths) < 0.01:
+        return " / ".join(w.number(v * 1000.0, 1) for v in lengths) + " mm"
+    if max(lengths) < 1.0:
+        return " / ".join(w.number(v * 100.0, 1) for v in lengths) + " cm"
+    return " / ".join(w.number(v, 2) for v in lengths) + " m"
+
+
+def _counted(w: Words, counts, prefix: str) -> str:
+    """``name: n; name: n`` of ``counts`` (``{key: n}``), the most first, each key named by the text ``prefix + key``
+    (as it is when there is none)."""
+    return "; ".join(f"{w(prefix + str(k)) if prefix + str(k) in TEXT else k}: {w.integer(n)}"
+                     for k, n in sorted(counts.items(), key=lambda pair: -pair[1]))
+
+
+def _position_frames(w: Words, cams) -> str:
+    """The reference frames of the positions of ``cams``, how many each, the most first, with the epochs of those in a
+    frame that moves with time."""
+    from collections import Counter
+
+    from ..gnss import frames
+
+    frame_of = {c.key: frames.position_frame(c.meta.get("gnss")) for c in cams}
+    parts = []
+    for frame, n in sorted(Counter(frame_of.values()).items(), key=lambda pair: -pair[1]):
+        text = _frame_text(w, frame)
+        epochs = sorted(float(e) for c in cams
+                        if frame_of[c.key] == frame and (e := (c.meta.get("gnss") or {}).get("epoch")) is not None)
+        if frame in frames.DYNAMIC and epochs:
+            first, last = _year(w, epochs[0]), _year(w, epochs[-1])
+            text = w("frame_epoch", text, first) if first == last else w("frame_epochs", text, first, last)
+        parts.append(f"{text}: {w.integer(n)}")
+    return "; ".join(parts)
+
+
+def _system_rows(w: Words, chunk, cams) -> list[tuple[str, str]]:
+    """The system of the chunk and the kind of its heights; above a geoid the grid of the geoid with its SHA-256
+    (:func:`_geoid_grids`); how the positions in ITRF2020 reach its frame (:func:`_conversion`)."""
+    from ..core import crs as crs_mod
+    from ..gnss import heights
+
+    if crs_mod.is_local(chunk.crs):
+        return [(w("gnss_crs"), w("local"))]
+    name = _crs_name(chunk.crs)
+    rows = [(w("gnss_crs"), f"{chunk.crs} - {name}" if name else str(chunk.crs))]
+    kind = heights.height_kind(chunk.crs)
+    if kind == heights.ORTHOMETRIC:
+        rows.append((w("gnss_crs_heights"), w("kind_orthometric", _vertical_name(chunk.crs))))
+        grids = _geoid_grids(w, chunk.crs)
+        if grids:
+            rows.append((w("gnss_geoid_grid"), "; ".join(grids)))
+    else:
+        rows.append((w("gnss_crs_heights"), w(f"kind_{kind}")))
+    try:
+        conversion = _conversion(w, chunk.crs, cams)
+    except Exception as exc:  # noqa: BLE001 - PROJ cannot name the transformation: the rows before it stand
+        log.warning("report: the conversion of the positions of %s: %s", chunk.label, exc)
+        conversion = None
+    if conversion:
+        rows.append((w("gnss_conversion"), conversion))
+    return rows
+
+
+def _vertical_name(crs: str) -> str:
+    """The name of the heights of ``crs``, a system with heights above a geoid: ``EGM2008 height``."""
+    from ..core import crs as crs_mod
+
+    system = crs_mod.to_pyproj(crs)
+    if system.is_bound:
+        system = system.source_crs
+    parts = system.sub_crs_list if system.is_compound else [system]
+    return ", ".join(part.name for part in parts if part.is_vertical) or system.name
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _geoid_grids(w: Words, crs: str) -> list[str]:
+    """The grids of the geoid that take heights above the ellipsoid into the heights of ``crs`` (a system with heights
+    above a geoid), each with its SHA-256, or saying it is not installed: EGM2008 with the SHA-256 of the file in use -
+    the copy of the program, else the one PROJ finds -, and the published one (:data:`..gnss.heights.GEOID_SHA256`,
+    which the download checks), so labelled, when it is not installed on this computer; for any other geoid - a grid
+    of the user's own, ITALGEO2005 in the folder of the grids of the program - the grids of the transformation PROJ
+    takes from heights above the ellipsoid (``EPSG:4979``) into ``crs``, as PROJ names them, with the SHA-256 of the
+    file PROJ reads; those of the first one it cannot use, said not installed, when it can use none."""
+    from pyproj.transformer import TransformerGroup
+
+    from ..core import crs as crs_mod
+    from ..gnss import heights
+
+    if heights.above_egm2008(crs):
+        in_use = _egm2008_in_use(crs)
+        if in_use is not None:
+            return [w("grid_sha256", heights.GEOID_GRID, _file_sha256(in_use))]
+        return [w("grid_not_installed", w("grid_published_sha256", heights.GEOID_GRID, heights.GEOID_SHA256))]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # "Best transformation is not available": what is asked here
+        group = TransformerGroup(crs_mod.to_pyproj("EPSG:4979"), crs_mod.to_pyproj(crs), always_xy=True,
+                                 allow_ballpark=False)
+    out = []
+    if group.transformers:
+        for operation in group.transformers[0].operations or ():
+            for grid in operation.grids:
+                path = Path(grid.full_name) if grid.full_name else heights.grid_folder() / grid.short_name
+                out.append(w("grid_sha256", grid.short_name, _file_sha256(path)) if path.is_file() else grid.short_name)
+    elif group.unavailable_operations:
+        out = [w("grid_not_installed", grid.short_name) for grid in group.unavailable_operations[0].grids]
+    return out
+
+
+def _egm2008_in_use(crs: str) -> Path | None:
+    """The file of the EGM2008 grid that converts into ``crs``: the copy in the folder of the grids of the program, else
+    the one PROJ reports for the transformation from heights above the ellipsoid; None when there is none."""
+    from pyproj.transformer import TransformerGroup
+
+    from ..core import crs as crs_mod
+    from ..gnss import heights
+
+    own = heights.grid_folder() / heights.GEOID_GRID
+    if own.is_file():
+        return own
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        group = TransformerGroup(crs_mod.to_pyproj("EPSG:4979"), crs_mod.to_pyproj(crs), always_xy=True,
+                                 allow_ballpark=False)
+    for transformer in group.transformers:
+        for operation in transformer.operations or ():
+            for grid in operation.grids:
+                if grid.short_name == heights.GEOID_GRID and grid.full_name and Path(grid.full_name).is_file():
+                    return Path(grid.full_name)
+    return None
+
+
+def _conversion(w: Words, crs: str, cams) -> str | None:
+    """How the positions in ITRF2020 of ``cams`` reach the frame of ``crs``, as :func:`..gnss.frames.transform` takes
+    them: by the Helmert of the EPSG at the epoch of each position to a European frame, or ITRF2020 taken as WGS 84.
+    None when no position is in ITRF2020, or when the frame of ``crs`` is neither (another datum: PROJ's own route)."""
+    from ..gnss import frames
+
+    if not any(frames.position_frame(c.meta.get("gnss")) in frames.DYNAMIC for c in cams):
+        return None
+    target = frames.frame_of(crs)
+    if target == frames.WGS84:
+        return w("conversion_wgs84")
+    if target in frames.EUROPEAN:
+        name = _helmert_name(target)
+        return w("conversion_helmert", _frame_text(w, target), name) if name else None
+    return None
+
+
+@functools.lru_cache(maxsize=8)
+def _helmert_name(european: str) -> str | None:
+    """The time-dependent Helmert of the EPSG from ITRF2020 to the European frame ``european`` that the conversions
+    apply, as the EPSG names it: ``ITRF2020 to ETRF2000 (1) (EPSG:10586)``; None when PROJ has none."""
+    from pyproj.transformer import TransformerGroup
+
+    from ..gnss import frames
+
+    group = TransformerGroup(frames.crs_of("ITRF2020"), frames.crs_of(european), always_xy=True, allow_ballpark=False)
+    for transformer in group.transformers:
+        for operation in transformer.operations or ():
+            if (operation.name or "").startswith(f"ITRF2020 to {european}"):
+                ident = operation.to_json_dict().get("id") or {}
+                code = f" ({ident['authority']}:{ident['code']})" if ident.get("authority") and "code" in ident else ""
+                return f"{operation.name}{code}"
+    return None
+
+
+def _flights(w: Words, flights: list[dict]) -> Section:
+    """The quality of every flight (:func:`..gnss.quality.summary`): the photos by state, the median accuracy of their
+    references and, once aligned and georeferenced, how far the cameras are from their positions."""
+    sub = Section(w("gnss_flights"), level=2)
+    rows = []
+    for r in flights:
+        s = r["status"]
+        rows.append([str(r["flight"]) if r["flight"] else w("no_date"), w.integer(r["photos"]), w.integer(s["fix"]),
+                     w.integer(s["float"]), w.integer(s["single"]), w.integer(s["none"]), w.integer(r["no_position"]),
+                     _lengths(w, r["accuracy_median"]), _lengths(w, r["residual_rms"]),
+                     _lengths(w, [r["residual_max"]]) if r["residual_max"] is not None else "-"])
+    sub.blocks.append(Table([w("h_flight"), w("h_photos"), w("h_fix"), w("h_float"), w("h_single"), w("h_no_rtk"),
+                             w("h_no_position"), w("h_accuracy"), w("h_rms_offset"), w("h_max_offset")], rows,
+                            align=["L"] + ["R"] * 9))
+    measured = any(r["residual_rms"] is not None for r in flights)
+    sub.blocks.append(Paragraph(f"{w('flights_note')} {w('offsets_note' if measured else 'offsets_later')}", note=True))
+    return sub
+
+
+def _ppk_runs(chunk) -> list[tuple[str, list]]:
+    """The photos with a PPK position by the solution of the run that gave it (``meta["gnss"]["solution"]``, a file of
+    its own for every run), in the order of the runs: their files are named by date and time."""
+    runs: dict[str, list] = {}
+    for cam in chunk.cameras:
+        record = cam.meta.get("gnss") or {}
+        if record.get("source") == "ppk":
+            runs.setdefault(str(record.get("solution") or ""), []).append(cam)
+    return sorted(runs.items())
+
+
+def _status_name(w: Words, state) -> str:
+    return w(f"status_{state}") if f"status_{state}" in TEXT else str(state)
+
+
+def _ppk_run(w: Words, solution: str, cams: list, shared: bool = False) -> Section:
+    """A PPK run and its base, from what every photo keeps of it (:func:`..gnss.apply.apply_ppk`: the base of the
+    solution, ``Solution.base``): the photos by state; how the base was placed; the permanent station it is or that
+    placed it, where the station's coordinates come from and what their sigma is (:func:`_station_rows`); the static
+    baseline or the static PPP and its products; the coordinates of the base, their frame and epoch and their standard
+    deviations; its antenna and whether it was calibrated (:func:`_calibration_text`); how far it is from the flight.
+    Titled by its base - with the time of its first shot when other runs share the base (``shared``) - or, with none
+    (a solution read from a file), by its solution file."""
+    from collections import Counter
+
+    first = cams[0].meta.get("gnss") or {}
+    base = first.get("base") or {}
+    detail = base.get("detail") or {}
+    source = base.get("position_source")
+    name = base.get("name")
+    if not name:
+        title = w("ppk_title_solution", solution or "-")
+    elif shared:
+        shots = sorted(str(t) for c in cams if (t := (c.meta.get("gnss") or {}).get("utc")))
+        title = w("ppk_title_at", name, shots[0][:16].replace("T", " ")) if shots else w("ppk_title", name)
+    else:
+        title = w("ppk_title", name)
+    sub = Section(title, level=2)
+    states = Counter((c.meta.get("gnss") or {}).get("status") for c in cams)
+    order = [s for s in ("fix", "float", "single") if states.get(s)] + [s for s in states
+                                                                       if s not in ("fix", "float", "single")]
+    count = ", ".join(f"{_status_name(w, s)} {w.integer(states[s])}" for s in order)
+    rows = [(w("ppk_solution"), solution or "-")]
+    if first.get("rover"):
+        rows.append((w("ppk_rover"), str(first["rover"])))
+    rows.append((w("ppk_photos"), f"{w.integer(len(cams))} ({count})" if count else w.integer(len(cams))))
+    rows.append((w("ppk_placed"), w(f"placed_{source}") if f"placed_{source}" in TEXT else w("placed_unknown")))
+    if source in ("station", "baseline"):
+        rows += _station_rows(w, base, detail, source)
+    if source == "baseline":
+        parts = []
+        if detail.get("baseline_km") is not None:
+            parts.append(w("baseline_km", w.number(detail["baseline_km"], 3)))
+        if detail.get("status"):
+            q = detail.get("q")
+            parts.append(_status_name(w, detail["status"]) + (f" (Q={q})" if q is not None else ""))
+        if detail.get("hours") is not None:
+            parts.append(w("baseline_hours", w.number(detail["hours"], 2)))
+        if parts:
+            rows.append((w("ppk_baseline"), ", ".join(parts)))
+    if source == "ppp":
+        kind = str(detail.get("kind") or "")
+        if detail.get("centre"):
+            hours = detail.get("hours")
+            rows.append((w("ppk_ppp"), w("ppp_value", w.number(hours, 2) if hours is not None else "-",
+                                         w(f"products_{kind}") if f"products_{kind}" in TEXT else kind,
+                                         detail["centre"])))
+        if detail.get("products"):
+            rows.append((w("ppk_products"), ", ".join(str(p) for p in detail["products"])))
+    position = base.get("position")
+    if position and len(position) == 3:
+        lon, lat, h = (float(v) for v in position)
+        rows.append((w("ppk_coordinates"), w("coordinates_value", w.coordinate(lat, 8), w.coordinate(lon, 8),
+                                             w.coordinate(h, 3))))
+    rows.append((w("ppk_frame"), _frame_text(w, base.get("frame"), base.get("epoch"))))
+    if base.get("sd") and source != "station":  # those of a station have their own row
+        rows.append((w("ppk_base_sd"), _lengths(w, base["sd"])))
+    if base:  # a solution read from a file says nothing of its base
+        rows.append((w("ppk_antenna"), _antenna_text(w, base)))
+        rows.append((w("ppk_calibration"), _calibration_text(w, base)))
+    distance = _flight_distance(base, cams)
+    if distance is not None:
+        rows.append((w("ppk_distance"), f"{w.number(distance, 0)} m" if distance < 1000.0 else
+                     f"{w.number(distance / 1000.0, 2)} km"))
+    sub.blocks.append(KeyValues(rows))
+    return sub
+
+
+def _station_rows(w: Words, base: dict, detail: dict, source: str) -> list[tuple[str, str]]:
+    """The permanent station of a base that is one (``source`` ``"station"``) or that a static baseline from one placed
+    (``"baseline"``): its id, name and networks, where its coordinates come from, in which frame and at which epoch,
+    and their standard deviations east, north, up with what they are - the formal error of the solution of the EPN or
+    of the IGS, the scatter of the daily positions of RING (``detail["sigma"]``, :mod:`..gnss.base`)."""
+    station = detail.get("station")
+    if not station:
+        return []
+    name, networks = detail.get("name"), ", ".join(str(n) for n in detail.get("networks") or [])
+    text = f"{station} - {name}" if name and name != station else str(station)
+    rows = [(w("ppk_station"), f"{text} ({networks})" if networks else text)]
+    if source == "station":
+        own, sd = detail, base.get("sd")
+    else:
+        placed = detail.get("station_position") or {}
+        own, sd = placed.get("detail") or {}, placed.get("sd")
+    coordinates = own.get("coordinates") or {}
+    if coordinates:
+        rows.append((w("ppk_station_coordinates"), f"{coordinates.get('source') or '-'}, "
+                     f"{_frame_text(w, coordinates.get('frame'), coordinates.get('epoch'))}"))
+    if sd:
+        kind = own.get("sigma")
+        rows.append((w("ppk_station_sd"), _lengths(w, sd) + (f", {w('sigma_' + kind)}" if kind in ("formal", "scatter")
+                                                             else "")))
+    return rows
+
+
+def _antenna_text(w: Words, base: dict) -> str:
+    """The antenna of a base as its RINEX header names it, and its height above the mark from that header (which
+    RTKLIB adds to the position of the base)."""
+    kind = " ".join(str(base.get("antenna") or "").split()) or w("antenna_unnamed")
+    delta = base.get("antenna_delta_hen")
+    if delta:
+        return w("antenna_height", kind, w.number(float(delta[0]), 3))
+    return w("antenna_no_height", kind)
+
+
+def _calibration_text(w: Words, base: dict) -> str:
+    """Whether the phase-centre offset of the antenna of a base was applied: with which entry of which file of antenna
+    calibrations (``base["antenna_calibration"]``, :func:`..gnss.ppk.antenna_calibration`), or why not. Never the
+    offset itself: the vertical offset of L1 in the entry is not what moves the heights of a solution on L1 and L2."""
+    calibration = base.get("antenna_calibration")
+    if not calibration:  # none given to RTKLIB (and every run before the calibrations)
+        return w("calibration_none")
+    file = str(calibration.get("file") or "-")
+    entry = calibration.get("entry")
+    if entry:
+        text = w("calibration_entry", " ".join(str(entry).split()), file)
+        return text + (w("calibration_without_radome") if calibration.get("without_radome") else "")
+    if calibration.get("no_l1"):  # an entry with nothing for L1: no calibration RTKLIB applies
+        return w("calibration_no_l1", " ".join(str(calibration["no_l1"]).split()), file)
+    kind = " ".join(str(base.get("antenna") or "").split())
+    return w("calibration_missing", file, kind) if kind else w("calibration_unnamed")
+
+
+def _flight_distance(base: dict, cams) -> float | None:
+    """How far the base is from the flight, as :func:`..gnss.ppk.baseline_km` measures it: the horizontal distance (m)
+    from its position to the median position of the antenna of the drone at the shots of ``cams``; None without the
+    position of the base or of the antenna."""
+    from ..gnss.ppk import horizontal_m
+
+    position = base.get("position")
+    antennas = [a for a in ((c.meta.get("gnss") or {}).get("antenna") for c in cams) if a and len(a) >= 2]
+    if not position or not antennas:
+        return None
+    lonlat = np.array([[float(a[0]), float(a[1])] for a in antennas])
+    lon0, lat0 = float(position[0]), float(position[1])
+    east = (lonlat[:, 0] - lon0 + 180.0) % 360.0 - 180.0  # across the 180th meridian the short way
+    return horizontal_m(lat0, lon0, float(np.median(lonlat[:, 1])), lon0 + float(np.median(east)))
+
+
+def _credits(w: Words, chunk, bases: list[dict]) -> list[tuple[str, str]]:
+    """Whom to credit for what the positions of the photos were computed with - what was used, not a fixed list: the
+    coordinates of a permanent station with the citation they came with (the EPN with the DOI of the folder of the
+    solution used, IGc20, RING), its observations by the networks it belongs to (:data:`NETWORK_CREDITS`), the precise
+    products of a PPP with their centre, igs20.atx when it calibrated the antenna of a base, EGM2008 when the heights of
+    the chunk are above it."""
+    from ..gnss import heights
+    from ..gnss.atx import FILE_NAME
+
+    rows: list[tuple[str, str]] = []
+
+    def add(label: str, text) -> None:
+        if text and (label, str(text)) not in rows:
+            rows.append((label, str(text)))
+
+    for base in bases:
+        source, detail = base.get("position_source"), base.get("detail") or {}
+        station = detail.get("station")
+        if source in ("station", "baseline") and station:
+            add(w("credit_coordinates", station), detail.get("citation"))
+            add(w("credit_observations", station),
+                "; ".join(NETWORK_CREDITS[n] for n in detail.get("networks") or [] if n in NETWORK_CREDITS))
+        if source == "ppp":
+            add(w("credit_products"), detail.get("citation"))
+        calibration = base.get("antenna_calibration") or {}
+        if calibration.get("entry") and calibration.get("file") == FILE_NAME:
+            add(w("credit_atx"), w("credit_atx_value"))
+    try:
+        if heights.above_egm2008(chunk.crs):
+            add(w("credit_geoid"), w("credit_geoid_value", heights.GEOID_GRID))
+    except Exception:  # noqa: BLE001 - a system PROJ cannot read: no geoid to credit
+        pass
+    return rows
 
 
 def _parameters(chunk, w: Words) -> Section | None:
@@ -1864,7 +2484,8 @@ def chunk_sections(chunk, w: Words, index_palette: str = "rdylgn", thermal_palet
         log.warning("report: alignment of %s not read: %s", chunk.label, exc)
         align = {}
     parts = [("survey", lambda: _survey(chunk, w, align, dem, ortho)), ("calibration", lambda: _sensors(chunk, w)),
-             ("reference", lambda: _reference(chunk, w)), ("parameters", lambda: _parameters(chunk, w))]
+             ("reference", lambda: _reference(chunk, w)), ("gnss_title", lambda: _gnss(chunk, w)),
+             ("parameters", lambda: _parameters(chunk, w))]
     if attached:
         parts += [("dense_cloud", lambda: _dense(chunk, w)), ("model_title", lambda: _model(chunk, w)),
                   ("dem_title", lambda: _dem(chunk, w, dem) if dem is not None else None),

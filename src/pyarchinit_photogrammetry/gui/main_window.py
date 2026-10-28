@@ -69,6 +69,21 @@ def _outlined(rgba: np.ndarray, polygon, bounds) -> np.ndarray:
     return out
 
 
+def _grid_missing(exc: BaseException | None):
+    """The :class:`..gnss.heights.GridMissing` that ``exc`` is, or that caused it, a few levels down: its cause, else
+    the error it was raised while handling - unless it was raised ``from None``, which says that one is no cause of
+    it; None when there is none."""
+    from ..gnss.heights import GridMissing
+
+    for _level in range(6):
+        if exc is None:
+            return None
+        if isinstance(exc, GridMissing):
+            return exc
+        exc = exc.__cause__ if exc.__cause__ is not None else None if exc.__suppress_context__ else exc.__context__
+    return None
+
+
 def _compass(deg: float) -> str:
     """The point of the compass of a direction in degrees from north (initials of the interface language)."""
     points = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"] if i18n.current() == "it" else \
@@ -79,6 +94,11 @@ def _compass(deg: float) -> str:
 def _it(value: float, decimals: int = 0) -> str:
     """A number as the interface writes it: 1.234,56 in Italian, 1,234.56 in English."""
     return number(value, decimals)
+
+
+def _length(metres: float) -> str:
+    """A distance as the interface writes it: in centimetres below a metre, else in metres."""
+    return f"{_it(metres * 100.0, 1)} cm" if abs(metres) < 1.0 else f"{_it(metres, 2)} m"
 
 
 class _GuiCalls(QObject):
@@ -357,6 +377,8 @@ class MainWindow(QMainWindow):
         self.gnss_pane.mrk_requested.connect(self.gnss_apply_mrk)
         self.gnss_pane.positions_requested.connect(self.gnss_apply_positions)
         self.gnss_pane.ppk_requested.connect(self.gnss_ppk)
+        self.gnss_pane.survey_crs_requested.connect(lambda: self.gnss_survey_crs())
+        self.gnss_pane.geoid_requested.connect(lambda: self.gnss_download_geoid())
         self.gnss_pane.only_fix_toggled.connect(self.gnss_only_fix)
         self.ms_pane.add_requested.connect(self.ms_add)
         self.thermal_pane.add_requested.connect(lambda: self.ms_add(thermal=True))
@@ -413,7 +435,7 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.coord_label)
         self._qgis_timer = QTimer(self)
         self._qgis_timer.setSingleShot(True)
-        self._qgis_timer.timeout.connect(self._export_qgis_layers)
+        self._qgis_timer.timeout.connect(self._qgis_timer_fired)
         self.ortho_view.layers_changed.connect(self._schedule_qgis)
         self._qgis_poll = QTimer(self)  # the edits saved in QGIS, looked for once a second
         self._qgis_poll.setInterval(1000)
@@ -2114,14 +2136,69 @@ class MainWindow(QMainWindow):
         ErrorDialog("Errore", first, details, parent=self).exec()
 
     def _exc(self, prefix: str, exc: BaseException) -> None:
+        missing = _grid_missing(exc)
+        if missing is not None:  # the grid of a geoid: the window's own words, and the download offered
+            log.warning("%s: %s", prefix, exc)
+            self._grid_missing(missing, prefix)
+            return
         self._error(f"{prefix}: {exc}", traceback.format_exc(), logged=False)
+
+    def _grid_missing(self, exc, label: str, retry=None) -> None:
+        """A step that needs a grid of a geoid PROJ does not have (:class:`..gnss.heights.GridMissing`, ``label`` the
+        name of the step): said in the window's own words from the grids it names - EGM2008 offered for download (its
+        size), then ``retry`` (the step again) when given, or, when the program has it already, that PROJ could not use
+        it (a download would change nothing); another grid named, with the folder to copy it into; no grid at all,
+        another system to choose."""
+        from ..gnss import heights
+
+        grids = list(getattr(exc, "grids", ()) or ())
+        if heights.GEOID_GRID in grids and heights.geoid_available():
+            text = tr("«{0}» non è andato a buon fine: per convertire le quote fra l'ellissoide e il geoide PROJ non "
+                      "ha usato la griglia del geoide EGM2008 ({1}), che pure è installata. Chiudi e riapri il "
+                      "programma, poi ripeti «{0}».", label, heights.GEOID_GRID)
+        elif heights.GEOID_GRID in grids:
+            where = " > ".join(("GNSS", tr("Sistema e quote"), tr("Scarica il geoide EGM2008")))  # the pane, in words
+            text = tr("«{0}» non è andato a buon fine: per convertire le quote fra l'ellissoide e il geoide serve la "
+                      "griglia del geoide EGM2008 ({1}), che non è installata. Il programma può scaricarla adesso ({2} "
+                      "MB, dominio pubblico) nella sua cartella{3}. Si scarica anche da {4}, o con «{5}».", label,
+                      heights.GEOID_GRID, round(heights.GEOID_BYTES / 1e6),
+                      tr(" e ripetere «{0}»", label) if retry is not None else "", where, heights.DOWNLOAD_COMMAND)
+            options = [tr("Scarica e riprova") if retry is not None else tr("Scarica")]
+            if choice(self, "question", tr("Griglia del geoide"), text, options) == 0:
+                self._download_geoid(then=retry)
+            return
+        elif grids:
+            text = tr("«{0}» non è andato a buon fine: per convertire le quote serve la griglia {1}, che non è "
+                      "installata. Copiala nella cartella {2}, dove il programma la fa cercare a PROJ, e ripeti «{0}».",
+                      label, ", ".join(grids), str(heights.grid_folder()))
+        else:
+            text = tr("«{0}» non è andato a buon fine: qui le quote non si possono convertire fra l'ellissoide e il "
+                      "geoide del sistema del chunk, con nessuna griglia: PROJ non ha una trasformazione che lo faccia "
+                      "in questo luogo. Nel pannello GNSS (Sistema e quote) scegli un altro sistema di coordinate.",
+                      label)
+        self.log_pane.warning(text)
+        message(self, "warning", tr("Griglia del geoide"), text)
 
     def run_task(self, label: str, fn, on_done=None, refresh: bool = True, save: bool = True,
                  undo: bool = False) -> bool:
         """``fn(progress)`` in the background, then the project saved and the views refreshed.
         ``undo``: the step is an edit (refined markers, a patch) that Modifica > Annulla takes back;
-        so is a step announced with ``history.backup`` (points, faces); a processing step is not."""
+        so is a step announced with ``history.backup`` (points, faces); a processing step is not.
+        A step that stops for want of the grid of a geoid (:class:`..gnss.heights.GridMissing`, also as
+        the cause of another error) is said in the window's own words, with the download offered and the
+        step run again after it (:meth:`_grid_missing`)."""
+        again = (label, fn, on_done, refresh, save, undo)
         label = tr(label)  # also the name of the step in Modifica > Annulla
+        missing: list = []
+
+        def guarded(progress):
+            try:
+                return fn(progress)
+            except Exception as exc:
+                found = _grid_missing(exc)
+                if found is not None:
+                    missing.append(found)
+                raise
 
         def done(result):
             self._task_done = True
@@ -2149,9 +2226,13 @@ class MainWindow(QMainWindow):
         def failed(*args):
             if self.history is not None:
                 self.history.discard_pending()
+            if missing:
+                log.warning("%s", args[0] if args else label)
+                self._grid_missing(missing[0], label, lambda: self.run_task(*again))
+                return
             self._error(*args)
 
-        return self.runner.run(label, fn, done, failed)
+        return self.runner.run(label, guarded, done, failed)
 
     # ---------------------------------------------------------------- file
     def new_document(self) -> None:
@@ -3021,12 +3102,14 @@ class MainWindow(QMainWindow):
 
     def gnss_ppk(self) -> None:
         """*Strumenti > GNSS > Correzioni PPK* and *Calcola PPK* of the GNSS pane: the ``Timestamp.MRK``, then the RINEX
-        of the drone and of a base, the navigation files, the position of the base and whether the onboard RTK fixes
-        take the PPK position too (:class:`PpkDialog`, from the last run of the chunk), the folder of the photos when
-        the MRK is away from them; RTKLIB in the background in the folder of the chunk (:func:`gnss.ppk.solve`), then
-        every photo the camera below the antenna of the solution at its shot, with the status and accuracy of the
-        solution (:func:`gnss.apply.apply_ppk`). What goes wrong in the background is shown as every failed step is,
-        with its message and traceback; nothing changes then."""
+        of the drone and of a base, the navigation files, how the base is placed and whether the onboard RTK fixes take
+        the PPK position too (:class:`PpkDialog`, from the last run of the chunk), the folder of the photos when the MRK
+        is away from them; then in the background (:meth:`_ppk_job`) what the base needs - igs20.atx, the observations
+        and coordinates of a permanent station, a static baseline or PPP of the user's base, the navigation of the
+        flight -, RTKLIB in the folder of the chunk (:func:`gnss.ppk.solve`), and every photo the camera below the
+        antenna of the solution at its shot, with the status and accuracy of the solution
+        (:func:`gnss.apply.apply_ppk`). What goes wrong in the background is shown as every failed step is, with its
+        message and traceback; nothing changes then."""
         if self.runner.busy:  # as the menu, which is off while a step runs
             self.statusBar().showMessage(tr("Un'elaborazione e' gia' in corso"), 8000)
             return
@@ -3054,28 +3137,53 @@ class MainWindow(QMainWindow):
             return
 
         def job(p):
-            p(0.02, "Calcolo PPK con RTKLIB")
-            solution = ppk.solve(v["rover"], v["base"], v["navs"] or None, v["base_position"],
-                                 folder=ppk.work_folder(ch))
+            solution, notes = self._ppk_job(ch, v, p)
             p(0.9, "Posizioni delle foto agli scatti")
             return solution, gnss.apply_ppk(ch, path, solution, photos or None,
-                                            replace_fix=bool(v.get("replace_fix")))
+                                            replace_fix=bool(v.get("replace_fix"))), notes
 
         # like an MRK or a positions file: the positions change and the project is to be saved, not saved at once
         self.run_task("Calcolo PPK", job, self._ppk_done, refresh=False, save=False)
 
+    @staticmethod
+    def _ppk_job(ch, v: dict, p) -> tuple:
+        """The PPK of the answer ``v`` of :class:`PpkDialog` for ``ch``, in the background: the base set up as
+        ``v["base_mode"]`` says (:func:`gnss.base.prepare_base`: igs20.atx, a permanent station, a static baseline or
+        PPP, the navigation of the flight) in the GNSS folder of the chunk, then RTKLIB (:func:`gnss.ppk.solve`).
+        Returns the solution and what to tell (the warnings of a baseline or of a PPP, igs20.atx that could not be
+        had, the navigation downloaded). An answer without a mode (older callers) is a base at its header, or typed."""
+        from ..gnss import base as gbase
+        from ..gnss import ppk
+
+        mode = v.get("base_mode") or ("typed" if v.get("base_position") else "header")
+        prepared = gbase.prepare_base(mode, v["rover"], v.get("base"), folder=ppk.work_folder(ch).parent,
+                                      station=v.get("station"), typed=v.get("base_position"),
+                                      frame=v.get("base_frame") or "unknown", epoch=v.get("base_epoch"),
+                                      navs=v.get("navs"), atx=v.get("atx") or "auto", progress=p.sub(0.0, 0.6))
+        notes = list(prepared.notes)
+        if prepared.downloaded:
+            notes.append(tr("File di navigazione scaricati per il volo: {0}",
+                            ", ".join(path.name for path in prepared.downloaded)))
+        p(0.6, "Calcolo PPK con RTKLIB")
+        solution = ppk.solve(v["rover"], prepared.bases, prepared.navs or None, prepared.position,
+                             folder=ppk.work_folder(ch), atx=prepared.atx)
+        return solution, notes
+
     def _ppk_done(self, out) -> None:
         """What a PPK run gave: the counts in the log and in the status bar with the photos and the shots left without
-        a position, the photos that kept their onboard RTK fix, the base and how far it is from the flight, the warnings
-        of the run in the log (the phase-centre offset of the base's antenna not applied among them), the tables read
-        again; the base at the position of its RINEX header, which can be metres off, also in a message. When no photo
-        took a PPK position because they kept their onboard fixes nothing changed, and a message says how to replace
-        them."""
-        from .gnss_pane import status_names
+        a position, the photos that kept their onboard RTK fix, the base - where its position comes from, its frame and
+        the epoch of its coordinates - and how far it is from the flight, the warnings of the run and of the base in
+        the log (the phase-centre offset of the base's antenna when RTKLIB had no calibration for it among them), the
+        tables read again; the base at the position of its RINEX header, which can be metres off, also in a message.
+        When no photo took a PPK position because they kept their onboard fixes nothing changed, and a message says
+        how to replace them."""
+        from .gnss_pane import base_source_text, frame_text, status_names
 
-        solution, result = out
+        solution, result, notes = out if len(out) == 3 else (*out, [])
         kept = result.get("kept_fix", 0)
         base = solution.base or {}
+        for text in notes:
+            self.log_pane.warning(text)
         if not result["matched"]:
             for text in result["warnings"]:
                 self.log_pane.warning(text)
@@ -3096,8 +3204,10 @@ class MainWindow(QMainWindow):
             self.log_pane.info(tr("Foto che hanno tenuto il fix RTK del drone stesso: {0}", kept))
         baseline = result.get("baseline_km")
         if baseline is not None:
-            self.log_pane.info(tr("Base {0} (antenna {1}) a {2} km dal volo; soluzione {3}", base.get("name"),
-                                  base.get("antenna") or "-", number(baseline, 1), Path(solution.path).name))
+            self.log_pane.info(tr("Base {0} (antenna {1}): {2}, {3}; a {4} km dal volo; soluzione {5}",
+                                  base.get("name"), base.get("antenna") or "-", base_source_text(base),
+                                  frame_text(base.get("frame"), base.get("epoch")), number(baseline, 1),
+                                  Path(solution.path).name))
         shots = [str(i) for i in result["shots_unmatched"]]
         if shots:
             self.log_pane.warning(tr("Scatti dell'MRK senza posizione PPK ({0}): {1}", len(shots),
@@ -3126,16 +3236,22 @@ class MainWindow(QMainWindow):
             Field("crs", "Sistema di coordinate del file (EPSG:4979 = longitudine, latitudine, quota; o es. "
                          "EPSG:32633; LOCAL)", "EPSG:4979", kind="text"),
             Field("height", "Tipo di quota", "ellipsoidal",
-                  choices=[("ellipsoidal", "Ellissoidica (GNSS, MRK)"), ("exif", "Dell'EXIF (livello del mare)")])],
+                  choices=[("ellipsoidal", "Ellissoidica (GNSS, MRK)"), ("exif", "Dell'EXIF (livello del mare)")]),
+            Field("epoch", "Epoca delle posizioni (anno decimale o data; vuoto: la data delle foto)", "", kind="text",
+                  tip="Una posizione in ITRF2020 (EPSG:9989 e i sistemi su ITRF2020) si muove con la placca, 2-3 cm "
+                      "l'anno in Europa: serve l'epoca delle sue coordinate, per esempio 2026,82 o 2026-10-27. "
+                      "Vuoto: per ogni foto la data della sua EXIF")],
             intro=tr("Una riga per foto con il nome, x, y e la quota; in più, se ci sono, le deviazioni standard o "
                      "l'accuratezza e lo stato RTK. Le posizioni sostituiscono quelle che le foto avevano."))
         if not v:
             return
-        from ..gnss import positions
+        from ..gnss import frames, positions
 
         try:
+            written = str(v.get("epoch") or "").strip()
+            epoch = frames.parse_epoch(written) if written else None
             result = positions.apply_positions(self.chunk, positions.read_positions(path), str(v["crs"]).strip(),
-                                               height=v["height"])
+                                               height=v["height"], epoch=epoch)
         except (OSError, ValueError) as exc:
             self._exc(tr("Lettura delle posizioni non riuscita"), exc)
             return
@@ -3162,6 +3278,282 @@ class MainWindow(QMainWindow):
         self._dirty(True)
         self.reference.set_chunk(ch, self.last_report)
         self.gnss_pane.set_state(ch)
+
+    # ---------------------------------------------------------------- the system and the heights of the survey
+    def gnss_download_geoid(self) -> None:
+        """*GNSS > Sistema e quote > Scarica il geoide EGM2008*: the grid of EGM2008 (81 MB, public domain) downloaded
+        in the background once the user says so; nothing to download when PROJ has it already."""
+        from ..gnss import heights
+
+        if self.runner.busy:
+            self.statusBar().showMessage(tr("Un'elaborazione e' gia' in corso"), 8000)
+            return
+        if heights.geoid_available():
+            self.statusBar().showMessage(tr("La griglia del geoide EGM2008 è già installata."), 8000)
+            return
+        text = tr("Scaricare adesso la griglia del geoide EGM2008 ({0}, {1} MB, dominio pubblico) da cdn.proj.org "
+                  "nella cartella del programma ({2})? Serve a convertire le quote ellissoidiche del GNSS in quote "
+                  "sul livello del mare.", heights.GEOID_GRID, round(heights.GEOID_BYTES / 1e6),
+                  str(heights.grid_folder()))
+        r = message(self, "question", tr("Geoide EGM2008"), text,
+                    buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    default=QMessageBox.StandardButton.Yes)
+        if r == QMessageBox.StandardButton.Yes:
+            self._download_geoid()
+
+    def _download_geoid(self, then=None) -> None:
+        """The grid of EGM2008 downloaded in the background (:func:`..gnss.heights.download_geoid`), then the GNSS pane
+        read again and ``then``."""
+        from ..gnss import heights
+
+        def done(path) -> None:
+            text = tr("Griglia del geoide EGM2008 scaricata in {0}.", str(path))
+            self.log_pane.info(text)
+            self.statusBar().showMessage(text, 15000)
+            self.gnss_pane.set_state(self.chunk)
+            if then is not None:
+                then()
+
+        self.run_task("Scarica il geoide EGM2008", lambda p: heights.download_geoid(p), done, refresh=False,
+                      save=False)
+
+    def gnss_survey_crs(self) -> None:
+        """*GNSS > Sistema e quote > Sistema del rilievo*: the system :func:`..gnss.heights.survey_crs` proposes where
+        the survey is (:func:`..gnss.heights.survey_place`) - in Europe a system of ETRF2000, where positions in ITRF2020
+        and in the European frames arrive exactly, beyond it UTM on WGS 84 - first and chosen, the other one, or
+        another one written, with the heights above the geoid EGM2008 or not - when they are and the grid is missing,
+        the choice between downloading it first and the same system without heights of its own; then
+        :meth:`_set_survey_crs`."""
+        if self.runner.busy:
+            self.statusBar().showMessage(tr("Un'elaborazione e' gia' in corso"), 8000)
+            return
+        if not self._need_chunk():
+            return
+        from ..core import crs as crs_mod
+        from ..gnss import heights
+        from . import survey_crs_dialog as dialog
+        from .gnss_pane import frame_text
+
+        ch = self.chunk
+        try:
+            place = heights.survey_place(ch)
+        except Exception as exc:  # noqa: BLE001 - a ValueError, PROJ's own (CRSError): said, never a traceback
+            self._exc(tr("Il programma non sa dove è il rilievo"), exc)
+            return
+        if place is None:
+            self._warn(tr("Il programma non sa dove è il rilievo: servono le posizioni delle foto (GNSS, EXIF) o le "
+                          "coordinate dei marker in un sistema di coordinate."))
+            return
+        lon, lat, frame = place
+        default = heights.survey_crs(lon, lat, geoid=False)  # the place decides: ETRF2000 in Europe, WGS 84 beyond
+        if heights.in_europe(lon, lat):
+            options = ((default, tr("consigliato in Europa: le posizioni in ITRF2020 (stazioni permanenti, PPP) e nei "
+                                    "sistemi europei (RDN2008, reti RTK) vi arrivano esatte, senza deriva fra i voli")),
+                       (heights.survey_crs(lon, lat, "WGS84", geoid=False),
+                        tr("su WGS 84: le posizioni in ITRF2020 restano come sono, quelle nei sistemi europei a circa "
+                           "un metro")))
+        else:
+            options = ((default, tr("consigliato qui, per posizioni in WGS 84 o ITRF2020")),
+                       (heights.survey_crs(lon, lat, "ETRF2000", geoid=False),
+                        tr("per posizioni in ETRF2000 (RDN2008), ETRF2014, ETRF2020")))
+        choices = []
+        for crs, says in options:
+            if crs in [c for c, _label in choices]:
+                continue
+            try:
+                name = crs_mod.to_pyproj(crs).name
+            except Exception:  # noqa: BLE001 - its code says it
+                name = crs
+            choices.append((crs, f"{crs} - {name} ({says})"))
+        v = dialog.SurveyCrsDialog.ask(self, ch.crs, choices, default,
+                                       tr("Le posizioni delle foto sono in {0}.", frame_text(frame)),
+                                       heights.geoid_available())
+        if not v or not v.get("crs"):
+            return
+        crs = v["crs"]
+        if heights.above_egm2008(crs) and not heights.geoid_available():
+            plain = v.get("plain") or crs  # the system as chosen, without the heights the box added
+            if heights.above_egm2008(plain):  # written with EGM2008 heights: its plan alone
+                plain = crs_mod.horizontal(plain)
+            text = tr("Le quote di {0} sono sul geoide EGM2008: per convertire quelle del GNSS serve la griglia del "
+                      "geoide ({1}), che non è installata. Il programma può scaricarla adesso ({2} MB, dominio "
+                      "pubblico) da cdn.proj.org nella sua cartella ({3}) e poi mettere il chunk in {0}; oppure "
+                      "metterlo in {4}, senza quote proprie: le quote restano come sono.", crs, heights.GEOID_GRID,
+                      round(heights.GEOID_BYTES / 1e6), str(heights.grid_folder()), plain)
+            answer = choice(self, "question", tr("Geoide EGM2008"), text,
+                            [tr("Scarica e applica"), tr("Applica senza quote sul geoide")])
+            if answer == 0:
+                self._download_geoid(then=lambda: self._set_survey_crs(crs))
+            elif answer == 1:
+                self._set_survey_crs(plain)
+            return
+        self._set_survey_crs(crs)
+
+    def _set_survey_crs(self, crs: str) -> None:
+        """The chunk into ``crs`` (:func:`..gnss.heights.set_survey_crs`): the drawings and the sections the window
+        holds stored first, what changes worked out in the background (:func:`..gnss.heights.survey_crs_changes` does
+        the change and undoes it - the georeference fitted again, what was drawn carried along -, which takes its time
+        on a large chunk and may want the grid of a geoid: offered, then the preview again; the window waits for it,
+        as for every task), then shown and confirmed (:meth:`_confirm_survey_crs`)."""
+        from ..gnss import heights
+
+        ch = self.chunk
+        if ch is None:
+            return
+        if crs == ch.crs:
+            self.statusBar().showMessage(tr("Il chunk è già in {0}.", crs), 8000)
+            return
+        self._store_drawings()
+        self._save_sections()
+
+        def preview(progress):
+            progress(0.0, tr("Cosa cambia in {0}", crs))
+            try:
+                changes = heights.survey_crs_changes(ch, crs)
+            except heights.GridMissing:
+                raise  # the grid offered, then the preview again (run_task)
+            except ValueError as exc:  # a system that cannot be the survey's: said, without a traceback
+                return exc
+            progress(1.0, tr("Cosa cambia in {0}", crs))  # Annulla pressed meanwhile: nothing asked
+            return changes
+
+        self.run_task("Sistema del rilievo", preview, lambda changes: self._confirm_survey_crs(ch, crs, changes),
+                      refresh=False, save=False)
+
+    def _confirm_survey_crs(self, ch, crs: str, changes) -> None:
+        """What putting ``ch`` into ``crs`` changes (``changes``, or the ``ValueError`` that says why it cannot be),
+        shown with the lines the window holds in the old system - contour lines, plan slices: taken away, to draw
+        again - and confirmed; then the change in the background, the drawings, layers and sections read again in the
+        new system, the project saved and what happened to the georeference in the log."""
+        from ..core import crs as crs_mod
+        from ..core import removal
+        from ..gnss import heights
+        from .survey_crs_dialog import changes_text
+
+        if isinstance(changes, ValueError):
+            self._warn(tr("{0} non può essere il sistema del rilievo: {1}", crs, changes))
+            return
+        if ch is not self.chunk:  # another chunk active meanwhile: asked again from its pane
+            return
+        old = ch.crs
+        redraw = sorted(self.line_layers)
+        r = message(self, "question", tr("Sistema del rilievo"),
+                    changes_text(old, changes, redraw) + "\n\n" + tr("Applicare?"),
+                    buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    default=QMessageBox.StandardButton.Yes)
+        if r != QMessageBox.StandardButton.Yes:
+            return
+
+        def apply(progress):
+            progress(0.0, tr("Sistema del rilievo: {0} → {1}", old, crs))  # cancelled before, never after the change
+            return heights.set_survey_crs(ch, crs)
+
+        def done(result) -> None:
+            # the chunk is in the new system: whatever fails from here on, the window still reads it again, marks the
+            # project modified unless it was saved, and says what did not go through
+            failed: list[str] = []
+
+            def step(what: str, action) -> bool:
+                try:
+                    action()
+                    return True
+                except Exception as exc:  # noqa: BLE001 - the change is made: the rest goes on, then said
+                    log.error("Sistema del rilievo, %s: %s\n%s", what, exc, traceback.format_exc())
+                    failed.append(tr("{0}: {1}", what, exc))
+                    return False
+
+            for name in redraw:  # in the old system: away, not drawn in the wrong place
+                self.ortho_view.remove_layer(name)
+                self.line_layers.pop(name, None)
+            step(tr("poligoni US caricati da PyArchInit"), lambda: self._carry_pyarchinit_units(ch, old, result["crs"]))
+            step(tr("disegni"), lambda: self._reload_drawings(redraw=False))  # converted by set_survey_crs
+            step(tr("sezioni"), self._load_sections)
+            # what was removed from the chunk with coordinates in the old system (markers, photos placed in the system
+            # of the chunk): put back by Modifica > Annulla it would come back there, unconverted - made final instead
+            final = [] if crs_mod.is_local(old) else removal.holding_coordinates(self.doc, ch)
+            if self.history is not None:
+                # Modifica > Annulla does not cross a change of system: the snapshots before it hold what was drawn in
+                # the old system's coordinates (undone, a spot height would come back kilometres off). The change is
+                # no step to undo; the other removals from the workspace stay.
+                for e in self.history.entries:
+                    if isinstance(e.action, _Removed):
+                        e.action.removals = [r for r in e.action.removals if not any(r is f for f in final)]
+                self.history.reset(keep_document=True,
+                                   keep_entry=lambda e: not isinstance(e.action, _Removed) or bool(e.action.removals))
+            saved = bool(self.doc.path) and step(tr("salvataggio del progetto"), self.doc.save)
+            if saved or not self.doc.path:  # else they stay pending: the end of the session settles them on the file
+                for r in final:
+                    step(tr("elementi rimossi"), r.make_final)
+            self._dirty(not saved)
+            step(tr("finestra"), self.refresh_all)
+            if getattr(self, "a_qgis_live", None) is not None and self.a_qgis_live.isChecked():
+                self._export_qgis_layers(force=True)  # the GeoPackage of QGIS in the new system at once
+            text = tr("Sistema del rilievo: {0} → {1}", old, result["crs"])
+            self.log_pane.info(text)
+            self.statusBar().showMessage(text, 15000)
+            if final:
+                self.log_pane.info(tr("Rimozioni non più annullabili (marker o foto con le coordinate del vecchio "
+                                      "sistema): {0}", len(final)))
+            if result.get("updated"):
+                self.log_pane.info(tr("La georeferenziazione è stata calcolata di nuovo nel nuovo sistema."))
+            elif result.get("transform_rms") is not None:
+                from .survey_crs_dialog import relief_text
+
+                self.log_pane.info(tr("La georeferenziazione è stata convertita nel nuovo sistema con una similitudine "
+                                      "(scarto {0} mm).", number(result["transform_rms"] * 1000, 1)))
+                relief = relief_text(result)
+                if relief:
+                    self.log_pane.info(relief)
+            from .survey_crs_dialog import drawings_text, parting_text
+
+            drawn = drawings_text(result)  # with the model, by how much: as the preview said
+            if drawn:
+                self.log_pane.info(drawn)
+            for line in parting_text(result):  # the model, and the markers that part from it
+                self.log_pane.info(line)
+            if redraw:
+                self.log_pane.warning(tr("Da ridisegnare nel nuovo sistema: {0}.", ", ".join(redraw)))
+            if result.get("rebuild"):
+                from .survey_crs_dialog import product_names
+
+                names = product_names()
+                self.log_pane.warning(tr("Da costruire di nuovo nel nuovo sistema: {0}.",
+                                         ", ".join(names.get(n, n) for n in result["rebuild"])))
+            if failed:
+                said = tr("Il chunk è ora in {0}, ma qualcosa non è andato a buon fine (i dettagli nel log):\n{1}",
+                          result["crs"], "\n".join(failed))
+                if not saved:
+                    said += "\n" + tr("Il progetto non è stato salvato: salvalo per tenere il cambio di sistema.")
+                self._warn(said)
+
+        self.run_task("Sistema del rilievo", apply, done, refresh=False, save=False)
+
+    def _carry_pyarchinit_units(self, ch, old: str, new: str) -> None:
+        """The units the window loaded from PyArchInit (not in the chunk: :func:`..gnss.heights.set_survey_crs` does not
+        see them) into the system ``new`` of ``ch``: by their coordinates, as the layer of PyArchInit has them, so that
+        what is saved back to PyArchInit lands where it was. Loaded on a chunk in ``old``, they came reprojected into
+        it; on a chunk whose system has no EPSG code - a local frame - in the system of their layer, as they are
+        (:meth:`..pyarchinit.bridge.PyArchInit.us_polygons`): then they go from that one, ``EPSG:<srid>`` of the layer,
+        which the connection to PyArchInit tells (a ``ValueError`` without it: they stay as they are)."""
+        import shapely
+
+        from ..core import crs as crs_mod
+        from ..gnss import heights
+
+        loaded = [u for u in self.units
+                  if str((u.attributes or {}).get("_layer") or "").startswith("US da PyArchInit - ")]
+        if not loaded:
+            return
+        source = old
+        if crs_mod.epsg_code(old) is None:
+            srid = self.pa.srid() if self.pa is not None else None
+            if not srid or srid <= 0:
+                raise ValueError(tr("il sistema del loro layer non si conosce (PyArchInit non collegato, o un layer "
+                                    "senza SRID): {0} restano come sono, da ricaricare dal menu PyArchInit",
+                                    len(loaded)))
+            source = f"EPSG:{srid}"
+        for u in loaded:
+            u.geometry = shapely.transform(u.geometry, lambda xy: heights.plan(xy, source, new, ch))
 
     def add_video(self) -> None:
         """Workflow > Aggiungi video: frames chosen for the reconstruction, GPS from DJI subtitles."""
@@ -3807,8 +4199,13 @@ class MainWindow(QMainWindow):
         self._align(v)
 
     def _align(self, v: dict) -> None:
-        """Matching and alignment with the choices of :meth:`align_photos`."""
+        """Matching and alignment with the choices of :meth:`align_photos`. What would keep the chunk from being placed
+        by the positions of its photos (the grid of a geoid missing: :func:`..markers.gcp.preflight`) stops the step
+        before the matching, not after it."""
+        from ..markers import gcp
+
         def job(p):
+            gcp.preflight(self.chunk, bool(v.get("gps")))
             self.chunk.match_photos(v["quality"], v["keypoint_limit"], v["tiepoint_limit"], progress=p.sub(0, 0.5),
                                     exclude_stationary=bool(v.get("stationary")), generic=bool(v.get("generic")),
                                     reference=v.get("reference") or None, apply_masks=v.get("masks", "keypoints"),
@@ -4043,25 +4440,56 @@ class MainWindow(QMainWindow):
                            layer="Marker", attrs={"marker": m.label, "z": round(float(z), 3),
                                                   "_label_id": f"marker:{m.key}"})
 
+    @staticmethod
+    def _gnss_states_text(states: dict) -> str:
+        """The RTK states of the photos as a dialog says them: ``fix``, or ``80 fix, 2 float`` when they differ."""
+        items = sorted(states.items(), key=lambda s: -s[1])
+        names = {"none": tr("senza stato RTK")}
+        if len(items) == 1:
+            return names.get(items[0][0], items[0][0])
+        return ", ".join(f"{n} {names.get(state, state)}" for state, n in items)
+
+    def _gnss_hold_text(self, hold: dict) -> str:
+        """What the GNSS positions of the photos will do in *Ottimizza camere* (:func:`engine.sfm.gnss_hold`)."""
+        if hold["photos"]:
+            return tr("Posizioni GNSS usate come vincolo: {0} foto, {1}.", hold["photos"],
+                      self._gnss_states_text(hold["states"]))
+        if hold["why"] == "none":
+            return tr("Nessuna foto allineata ha una posizione GNSS accurata (fix, float, PPK): le posizioni non "
+                      "tengono il blocco.")
+        states = self._gnss_states_text(hold["states"])
+        if hold["why"] == "markers":
+            return tr("Posizioni GNSS accurate: {0} foto, {1}; usando i punti di controllo o le barre di scala il "
+                      "blocco segue quelli, altrimenti lo tengono le posizioni.", hold["accurate"], states)
+        if hold["why"] == "rigs":
+            return tr("Posizioni GNSS accurate: {0} foto, {1}; le foto a 360 gradi non le usano nell'ottimizzazione.",
+                      hold["accurate"], states)
+        return tr("Posizioni GNSS accurate: {0} foto, {1}; non bastano a collocare il blocco (meno di tre, lungo una "
+                  "sola strisciata, o un chunk in coordinate locali).", hold["accurate"], states)
+
     def optimize_cameras(self) -> None:
         if not self._need_chunk(aligned=True):
             return
         ch = self.chunk
+        from ..engine import sfm
         from ..markers import gcp
 
         controls = [m for m in ch.markers if not m.checkpoint and m.reference.enabled and m.reference.location]
         checks = [m for m in ch.markers if m.checkpoint and m.reference.location]
         bars = gcp.control_scalebars(ch)
+        with_markers = sfm.fixed_points_hold(ch)  # the engine's own rule
         v = ParamDialog.ask(self, "Ottimizza camere", [
             Field("markers", tr("Usa punti di controllo e barre di scala nell'ottimizzazione ({0} GCP, {1} barre)",
-                                len(controls), len(bars)), len(controls) >= 3 or len(bars) >= 2),
+                                len(controls), len(bars)), with_markers),
             Field("weight", "Peso di una misura di marker (in osservazioni di punti di legame)", 4, minimum=1, maximum=50),
             Field("pp", "Ottimizza anche il punto principale (cx, cy)", False),
             Field("engine", "Motore", "colmap", choices=[
                 ("colmap", "COLMAP"),
                 ("ppg", "Proprio: GCP secondo la loro accuratezza, barre come distanze, GNSS, rolling shutter")]),
-            Field("gnss", "Posizioni GNSS delle foto (motore proprio)", "off", choices=[
-                ("off", "non usate"), ("plain", "usate con la loro accuratezza"), ("bias", "usate, con un bias per volo")]),
+            Field("gnss", "Posizioni GNSS delle foto", "auto", choices=[
+                ("auto", "automatico: quelle accurate (fix, float, PPK) tengono il blocco"), ("off", "non usate"),
+                ("plain", "usate con la loro accuratezza (motore proprio)"),
+                ("bias", "usate, con un bias per volo (motore proprio)")]),
             Field("rolling", "Rolling shutter: la camera si muove mentre legge l'immagine (motore proprio)", False)],
             intro=tr("Bundle adjustment globale di posizioni, orientamenti e calibrazione. Con 3 o piu' punti di "
                      "controllo i GCP entrano nel calcolo come punti fissi alle loro coordinate: il blocco si piega "
@@ -4076,22 +4504,45 @@ class MainWindow(QMainWindow):
                      "un bias per volo (base RTK su un punto sbagliato, offset dell'antenna) e la velocita' di ogni "
                      "foto durante la lettura del sensore (rolling shutter dei droni). Su terreno piatto con sole "
                      "foto nadirali il bias verticale si confonde con la focale: servono GCP o foto oblique.",
-                     len(checks)))
+                     len(checks)) + "\n\n" + tr(
+                "Le posizioni GNSS accurate delle foto (fix, float, PPK: 0,5 m o meglio) tengono il blocco quando "
+                "non ci sono 3 punti di controllo o 2 barre di scala che lo tengano: ogni foto pesa secondo la sua "
+                "accuratezza e la focale resta quella dell'allineamento (da una sola quota, guardando in basso, le "
+                "posizioni non distinguono la focale dalla distanza dal suolo), con entrambi i motori. Senza vincoli "
+                "un blocco nadirale su terreno piatto si piega a cupola mentre l'errore di riproiezione resta lo "
+                "stesso: se l'ottimizzazione allontana le camere dalle loro posizioni accurate (oltre 3 volte lo "
+                "scarto di prima e 30 cm in piu'), si rimette l'allineamento di prima - o piegava il blocco, o le "
+                "posizioni non concordano con i punti di controllo; per tenerla, togli la spunta alle camere nel "
+                "pannello Riferimenti. Con COLMAP le scelte del motore proprio valgono come automatico.") + "\n\n" + self._gnss_hold_text(sfm.gnss_hold(ch, with_markers)))
         if not v:
             return
 
         def job(p):
             own = v.get("engine", "colmap") == "ppg"
+            gnss = v.get("gnss", "auto")
+            if not own and gnss in ("plain", "bias"):  # options of our own engine: COLMAP holds the block on its own
+                gnss = "auto"
             err = ch.optimize_cameras(fit_principal_point=v["pp"], use_markers=v["markers"],
                                       marker_weight=int(v["weight"]), progress=p, engine="ppg" if own else "colmap",
-                                      gnss=v.get("gnss", "off") if own else "off",
-                                      rolling_shutter=bool(v.get("rolling")) and own)
+                                      gnss=gnss, rolling_shutter=bool(v.get("rolling")) and own)
             if any(m.reference.location for m in ch.markers) or ch.scalebars:
                 self.last_report = ch.update_transform()
             return err
 
         def done(err):
             rep = ch.meta.get("sfm", {}).get("optimize", {})
+            offsets = rep.get("camera_offsets")
+            if rep.get("reverted"):  # the report describes the alignment kept, the run undone is under "undone"
+                text = tr("Errore di riproiezione {0:.3f} px (l'allineamento tenuto)", err)
+                self.log_pane.info(tr("Ottimizzazione camere: ") + text)
+                self.statusBar().showMessage(text, 15000)
+                self._warn(tr("Ottimizzazione annullata: le camere finivano a {0} dalle loro posizioni GNSS (prima "
+                              "{1}). O l'ottimizzazione piegava il blocco, o le posizioni GNSS non concordano con i "
+                              "punti di controllo. E' stato rimesso l'allineamento di prima. Per tenere "
+                              "un'ottimizzazione che allontana le camere dalle loro posizioni, togli la spunta alle "
+                              "camere nel pannello Riferimenti (tasto destro: Non usare i riferimenti di tutte le "
+                              "camere) e ripetila.", _length(offsets["after"]), _length(offsets["before"])))
+                return
             text = tr("Errore di riproiezione {0:.3f} px", err)
             b, a = rep.get("before", {}), rep.get("after", {})
 
@@ -4112,6 +4563,18 @@ class MainWindow(QMainWindow):
                 text += tr("; bias GNSS del volo {0}: {1}", flight, " ".join(mm(x) for x in bias))
             if rep.get("rolling_shutter_m"):
                 text += tr("; rolling shutter: {0} per immagine (mediana)", mm(rep["rolling_shutter_m"]["median"]))
+            held = rep.get("gnss") or {}
+            if held.get("photos"):
+                text += tr("; blocco tenuto dalle posizioni GNSS di {0} foto ({1})", held["photos"],
+                           self._gnss_states_text(held["states"]))
+            elif held.get("termination") and not held.get("usable"):
+                text += tr("; la compensazione con le posizioni GNSS non e' riuscita ({0}): il blocco resta come "
+                           "l'ha lasciato l'allineamento", held["termination"])
+            if rep.get("focal_held"):
+                text += tr("; focale dell'allineamento tenuta")
+            if offsets:
+                text += tr("; scarto delle camere dalle posizioni GNSS {0} -> {1}", _length(offsets["before"]),
+                           _length(offsets["after"]))
             self.log_pane.info(tr("Ottimizzazione camere: ") + text)
             self.statusBar().showMessage(text, 15000)
 
@@ -5776,6 +6239,7 @@ class MainWindow(QMainWindow):
             for c in self.chunk.cameras:
                 if c.key in bad:
                     c.enabled = False
+        from ..markers import gcp
 
         def job(p):
             ch = self.chunk
@@ -5792,6 +6256,7 @@ class MainWindow(QMainWindow):
             if v["markers"]:
                 ch.detect_markers(v["target_type"], progress=sp())
             q = sp()
+            gcp.preflight(ch)  # what would keep the alignment from placing the chunk: before the matching
             ch.match_photos(v["align_quality"], progress=q.sub(0, 0.5))
             ch.align_cameras(progress=q.sub(0.5, 0.5))
             if any(m.reference.location for m in ch.markers):
@@ -8079,6 +8544,14 @@ class MainWindow(QMainWindow):
                 link.close()
             link = self._live_link = LiveLink(folder, crs)
         return link
+
+    def _qgis_timer_fired(self) -> None:
+        """The drawings written for QGIS when the timer fires - not while a step runs, which may be changing the chunk
+        (its system, its drawings): a moment later then."""
+        if self.runner.busy:
+            self._qgis_timer.start(3000)
+            return
+        self._export_qgis_layers()
 
     def _qgis_live_toggled(self, on: bool) -> None:
         """The live link with QGIS on or off: the drawings written for QGIS, its edits looked for."""
