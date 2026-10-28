@@ -1118,14 +1118,27 @@ def solve(rover: str | Path | Sequence[str | Path], base: str | Path | Sequence[
                          f"{roles!r}")
     roles = tuple(roles)
     rovers, bases = _files(rover, ROLES[roles[0]]), _files(base, ROLES[roles[1]])
-    Path(folder).mkdir(parents=True, exist_ok=True)
+    if len(rovers) == 1 and len(bases) == 1:  # nothing to join: nothing is made before the checks
+        return _solve(rovers, rovers[0], [], bases, bases[0], [], navs, base_position, folder, atx, run, roles)
     # files in pieces joined in the work folder, on its disk (a day of a station at 1 s is gigabytes), and moved among
-    # the inputs of the run (mover): no copy in the temporary folder of the system, no second copy
-    with tempfile.TemporaryDirectory(prefix=".join-", dir=folder) as scratch:
-        rover_file, rover_holes = _one_file(rovers, Path(scratch) / "rover.obs")
-        base_file, base_holes = _one_file(bases, Path(scratch) / "base.obs")
-        return _solve(rovers, rover_file, rover_holes, bases, base_file, base_holes, navs, base_position, folder,
-                      atx, run, roles)
+    # the inputs of the run (mover): no copy in the temporary folder of the system, no second copy. The folders made
+    # for it go again when the run is refused and nothing else came into them
+    folder = Path(folder)
+    made = [path for path in (folder, *folder.parents) if not path.exists()]
+    folder.mkdir(parents=True, exist_ok=True)
+    try:
+        with tempfile.TemporaryDirectory(prefix=".join-", dir=folder) as scratch:
+            rover_file, rover_holes = _one_file(rovers, Path(scratch) / "rover.obs")
+            base_file, base_holes = _one_file(bases, Path(scratch) / "base.obs")
+            return _solve(rovers, rover_file, rover_holes, bases, base_file, base_holes, navs, base_position, folder,
+                          atx, run, roles)
+    except BaseException:
+        for path in made:  # the deepest first
+            try:
+                path.rmdir()
+            except OSError:  # something of an earlier step, or of the user, is in it
+                break
+        raise
 
 
 def _solve(rovers: list[Path], rover: Path, rover_holes: list[tuple[datetime, datetime]], bases: list[Path],

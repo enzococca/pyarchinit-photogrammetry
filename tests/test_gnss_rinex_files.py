@@ -853,6 +853,16 @@ def test_solve_with_a_base_in_pieces_gives_rtklib_one_file(tmp_path, fake_rtklib
     with pytest.raises(ValueError, match="marker"):
         ppk.solve(PPK_ROVER, [first, other], [PPK_NAV], folder=work)
     assert len(fake_rtklib()) == 2
+    # a run refused after the join leaves no folder of its own behind: neither the work folder nor its scratch
+    fresh = tmp_path / "fresh" / "work"
+    with pytest.raises(ValueError, match="marker"):
+        ppk.solve(PPK_ROVER, [first, other], [PPK_NAV], folder=fresh)
+    (tmp_path / "alone").mkdir()
+    rover = shutil.copyfile(PPK_ROVER, tmp_path / "alone" / PPK_ROVER.name)  # no navigation file beside it
+    with pytest.raises(ValueError, match="navigation"):
+        ppk.solve(rover, [second, first], folder=fresh)
+    assert not (tmp_path / "fresh").exists() and not list(work.glob(".join-*"))
+    assert len(fake_rtklib()) == 2
 
 
 def test_solve_with_a_rover_in_pieces(tmp_path, fake_rtklib):
