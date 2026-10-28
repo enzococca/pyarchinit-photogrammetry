@@ -170,3 +170,25 @@ def test_texture_of_faces_chosen_with_the_lasso(win, qapp, monkeypatch):
     rec = ch.meta["texture"]["patches"][-1]
     assert rec["faces"] == len(up) and rec["photos"] == sorted(c["label"] for c in dlg.candidates[:2])
     assert len(read_mesh(ch.product_path("model")).faces) == len(mesh.faces)  # nothing deleted
+
+
+def test_photos_of_the_selected_area(win, monkeypatch):
+    """*Foto dell'area selezionata*: the window's selection is a shapely geometry (one polygon or several merged);
+    the photos that frame it are the ones shown."""
+    import rasterio
+    from shapely.geometry import MultiPolygon, box
+
+    ch = win.chunk
+    with rasterio.open(ch.orthomosaic_path) as src:
+        b = src.bounds
+    w8, h8 = (b.right - b.left) / 8, (b.top - b.bottom) / 8
+    corner = box(b.left, b.bottom, b.left + w8, b.bottom + h8)
+    monkeypatch.setattr(win, "_selected_polygon", lambda: corner)
+    win._photos_in_selected_area()
+    one = {c.key for c in win.photos.visible_cameras()}
+    assert 0 < len(one) < len(ch.cameras)
+    other = box(b.right - w8, b.top - h8, b.right, b.top)
+    monkeypatch.setattr(win, "_selected_polygon", lambda: MultiPolygon([corner, other]))
+    win._photos_in_selected_area()
+    both = {c.key for c in win.photos.visible_cameras()}
+    assert one <= both

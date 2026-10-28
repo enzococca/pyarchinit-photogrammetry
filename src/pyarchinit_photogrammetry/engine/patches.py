@@ -39,13 +39,17 @@ SURFACES = ("dem", "ground")
 
 # ---------------------------------------------------------------- the patches of a chunk
 def _geometry(polygon):
-    """A valid shapely polygon from ``[[x, y], ...]``."""
+    """A valid shapely polygon from ``[[x, y], ...]``, or the shapely (multi)polygon itself (the selection of the
+    window: several polygons merged)."""
     from shapely.geometry import Polygon
 
-    xy = np.asarray(polygon, float)[:, :2]
-    if len(xy) < 3:
-        raise ValueError("a patch needs a polygon of at least three points")
-    geom = Polygon(xy)
+    if hasattr(polygon, "geom_type"):
+        geom = polygon
+    else:
+        xy = np.asarray(polygon, float)[:, :2]
+        if len(xy) < 3:
+            raise ValueError("a patch needs a polygon of at least three points")
+        geom = Polygon(xy)
     if not geom.is_valid:
         geom = geom.buffer(0)
     if geom.is_empty or geom.area <= 0:
