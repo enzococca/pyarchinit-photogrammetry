@@ -702,6 +702,8 @@ def test_products_given_by_hand_must_cover_the_session(tmp_path, fake_ppp):
     with pytest.raises(ValueError, match="clocks") as error:
         ppp.solve_static(obs, tmp_path / "work", products=clocks_of_one_day, atx=ATX_EXCERPT)
     assert "clocks_2005092.clk.gz" in str(error.value) and "60 minutes" in str(error.value)
+    # where the precise clocks are missing RTKLIB would not stop: it would take the coarse ones of the orbits
+    assert "coarse clocks of the orbit file" in str(error.value) and "computes nothing" not in str(error.value)
     # clocks that stop at 00:30:00: the last half hour of the hour of 3040 has none
     stopping = _given_products(tmp_path / "stopping")
     stopping.clk[0].write_bytes(gzip.compress(_clk_text(date(2005, 4, 2), last=(0, 30, 0)).encode()))
@@ -713,15 +715,42 @@ def test_products_given_by_hand_must_cover_the_session(tmp_path, fake_ppp):
 
 def test_products_before_igs20_warn_of_their_frame_and_antennas(tmp_path, fake_ppp):
     """Before GPS week 2238 (27 November 2022) the products of the IGS and its centres are of IGb14, made for
-    igs14.atx: a position computed with igs20.atx and called ITRF2020 can be centimetres off, and is said to be."""
+    igs14.atx: a position computed with igs20.atx and called ITRF2020 can be centimetres off, and is said to be; with
+    igs14.atx given, only the name of the frame is said."""
     r = ppp.solve_static(OWN, tmp_path / "old", products=_given_products(tmp_path / "given"), atx=ATX_EXCERPT)
     (note,) = [w for w in r.warnings if "IGb14" in w]
     assert "igs14.atx" in note and "igs20_excerpt.atx" in note and "ITRF2020" in note and "centimetres" in note
+    own = Path(shutil.copyfile(ATX_EXCERPT, tmp_path / "igs14.atx"))
+    r = ppp.solve_static(OWN, tmp_path / "old14", products=_given_products(tmp_path / "given14"), atx=own)
+    (note,) = [w for w in r.warnings if "IGb14" in w]
+    assert "ITRF2020" in note and "differ" not in note and "two files" not in note
     later = _session(tmp_path / "obs", 1.0, start=datetime(2026, 10, 26, 9))
     r = ppp.solve_static(later, tmp_path / "new", products=_given_products(tmp_path / "given26", (date(2026, 10, 26),)),
                          atx=ATX_EXCERPT)
     assert r.position.epoch == pytest.approx(frames.decimal_year(datetime(2026, 10, 26, 9, 29, 27)), abs=1e-9)
     assert not [w for w in r.warnings if "IGb14" in w]
+
+
+def test_clocks_of_rinex_3_04_every_5_minutes_cover_their_day(tmp_path):
+    """A clock file of RINEX clock 3.04 (the names five characters longer: its epochs further right) with records
+    every 5 minutes covers its day from its first epoch to its last and one step after; an SP3 header that says
+    nonsense is refused naming the file, never an OverflowError."""
+    day = date(2026, 10, 26)
+    records = "".join(f"AS G01       {day.year:4d} {day.month:02d} {day.day:02d} {minute // 60:02d} {minute % 60:02d}"
+                      f"{0.0:10.6f}  1    1.000000000000E-04\n" for minute in range(0, 24 * 60, 5))
+    text = ("     3.04           C                   M                   RINEX VERSION / TYPE\n"
+            + " " * 60 + "END OF HEADER\n" + records)
+    clock = _gz(tmp_path / "IGS0OPSFIN_20262990000_01D_05M_CLK.CLK.gz", text)
+    assert ppp._clock_span(clock) == (datetime(2026, 10, 26), datetime(2026, 10, 27))
+    plain = tmp_path / "plain.clk"
+    plain.write_text(text)
+    assert ppp._clock_span(plain) == (datetime(2026, 10, 26), datetime(2026, 10, 27))
+    sp3 = tmp_path / "absurd.sp3"
+    sp3.write_text(_sp3_text(day, "absurd").replace("     288 ", " 9999999 ", 1).replace("  300.00000000",
+                                                                                          "9.99999999e+99", 1))
+    with pytest.raises(ValueError, match="absurd.sp3"):
+        ppp._sp3_span(sp3)
+    assert ppp._duration(1.0) == "1 second" and ppp._duration(45.0) == "45 seconds"
 
 
 def test_ppp_needs_the_antenna_calibrations(tmp_path, fake_ppp, monkeypatch):

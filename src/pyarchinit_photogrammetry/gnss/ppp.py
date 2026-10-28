@@ -333,10 +333,11 @@ def _sp3_span(path: Path) -> tuple[datetime, datetime]:
         epochs, interval = int(first[32:39]), float(second[24:38])
         if epochs <= 0 or not interval > 0.0:
             raise ValueError
+        end = start + timedelta(seconds=epochs * interval)
     except (ValueError, OverflowError):
         raise ValueError(f"{path.name}: its SP3 header does not say when its orbits start, how many epochs it has and "
                          "how far apart they are") from None
-    return start, start + timedelta(seconds=epochs * interval)
+    return start, end
 
 
 def _clock_offset(path: Path) -> int:
@@ -717,9 +718,9 @@ def _middle(start: datetime, end: datetime) -> float:
 
 
 def _duration(seconds: float) -> str:
-    """``45 seconds``, ``90 minutes`` (up to 2 hours), ``3.5 hours``."""
+    """``45 seconds`` (``1 second``), ``90 minutes`` (up to 2 hours), ``3.5 hours``."""
     if seconds < 90.0:
-        return f"{round(seconds)} seconds"
+        return f"{round(seconds)} second{'' if round(seconds) == 1 else 's'}"
     if seconds < 7200.0:
         return f"{round(seconds / 60.0)} minutes"
     return f"{round(seconds / 3600.0, 1):g} hours"
@@ -748,8 +749,9 @@ def _uncovered(spans, start: datetime, end: datetime) -> list[tuple[datetime, da
 def _coverage_problem(found: Products, name: str, start: datetime, end: datetime) -> str | None:
     """Why the orbits or the clocks of ``found`` leave part of the session of the base ``name`` from ``start`` to
     ``end`` (its first and last epoch) without products - each file and the time it covers, the time left out and how
-    long it is - or None when they cover all of it: RTKLIB computes nothing where it has no orbits or clocks, and the
-    hours of the session would claim that time."""
+    long it is - or None when they cover all of it: where it has no orbits RTKLIB computes nothing, and where it has
+    no precise clocks it falls back, without a word, to the clocks of the orbit file, 5 to 15 minutes apart; the hours
+    of the session would claim that time either way."""
     for what, files, span_of in (("orbits", found.sp3, _sp3_span), ("clocks", found.clk, _clock_span)):
         spans = [(span_of(path), path) for path in files]
         missing = _uncovered([span for span, _ in spans], start, end)
@@ -757,9 +759,12 @@ def _coverage_problem(found: Products, name: str, start: datetime, end: datetime
             seconds = sum((b - a).total_seconds() for a, b in missing)
             covers = "; ".join(f"{path.name} covers {_between(a, b)}" for (a, b), path in spans)
             left = ", ".join(_between(a, b) for a, b in missing)
+            there = ("RTKLIB computes nothing there" if what == "orbits" else
+                     "RTKLIB would take the coarse clocks of the orbit file there, 5 to 15 minutes apart, without a "
+                     "word")
             return (f"the precise {what} do not cover the session of {_YOUR_BASE} {name}, from "
                     f"{_between(start, end)}: {covers} - {_duration(seconds)} of the session ({left}) would have no "
-                    f"{what}, and RTKLIB computes nothing there. Give the {what} of every day of the session")
+                    f"{what}, and {there}. Give the {what} of every day of the session")
     return None
 
 
@@ -909,7 +914,11 @@ def _solve_static(pieces: list[Path], own: Path, holes: list[tuple[datetime, dat
         warnings.append(f"the precise products are rapid ones ({found.centre}): the final ones are a little better - "
                         f"ESA's come about {_words(FINAL_DELAY)} after the session - and {_YOUR_BASE} can be "
                         "computed again with them then")
-    if start.date() < LONG_NAMES:
+    if start.date() < LONG_NAMES and antennas.name.lower() == "igs14.atx":  # the calibrations of the products
+        warnings.append(f"{_YOUR_BASE} {name} observed before GPS week 2238 (27 November 2022), when the precise "
+                        "products were of IGb14: the position, computed with their antenna calibrations (igs14.atx), "
+                        "is called ITRF2020, millimetres from IGb14")
+    elif start.date() < LONG_NAMES:
         warnings.append(f"{_YOUR_BASE} {name} observed before GPS week 2238 (27 November 2022), when the precise "
                         "products were of IGb14 and made for the antenna calibrations of igs14.atx (save those of the "
                         "third reprocessing of the IGS, repro3), while the position is computed with "
