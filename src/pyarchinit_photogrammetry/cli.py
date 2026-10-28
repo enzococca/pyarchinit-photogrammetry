@@ -2040,7 +2040,7 @@ def plugins_available():
         problem = e.problem()
         line = f"{e.name:28} {e.version:10} {e.title or e.description}" + (f"  [{problem}]" if problem else "")
         info = installed.get(e.name)
-        what = updates.status(e, info, ready) if info is not None else ""
+        what = updates.status(e, info, ready, manager.folder)[0] if info is not None else ""
         if what == "staged":
             line += f"  (update to {e.version} ready: active from the next start)"
         elif what == "available":
@@ -2062,13 +2062,15 @@ def plugins_update(dry_run: bool = typer.Option(False, "--dry-run", help="only s
         raise typer.Exit(1)
     for name, old, new in result.updated:
         typer.echo(f"{name} {old} -> {new} (active from the next start)")
+    for name, old, new in result.pending:
+        typer.echo(f"{name} {old} -> {new} ready: active from the next start")
     for name, old, new in result.available:
         typer.echo(f"{name} {old} -> {new} can be updated")
     for name, version, problem in result.waiting:
         typer.echo(f"{name} {version} waits: {problem}")
     for name, message in result.failed:
         typer.echo(f"{name} failed: {message}", err=True)
-    if not result:
+    if not result and not result.pending:
         typer.echo("The plugins are up to date.")
     if result.failed:
         raise typer.Exit(1)

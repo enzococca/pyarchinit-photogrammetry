@@ -230,10 +230,10 @@ class Manager:
                 pass
         if info.context is not None:
             info.context.release()
-        shutil.rmtree(info.location)
-        from .index import STAGING  # that module imports this one
+        from .index import drop_staged  # that module imports this one
 
-        shutil.rmtree(self.folder / STAGING / name, ignore_errors=True)  # an update staged for it would bring it back
+        drop_staged(self.folder, name)  # first: should the deletion below stop half way, no update brings it back
+        shutil.rmtree(info.location)
         self.plugins = [i for i in self.plugins if i.name != name]
 
     # ------------------------------------------------------------------ what the plugins added
