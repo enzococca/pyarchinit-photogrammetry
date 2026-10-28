@@ -104,9 +104,15 @@ def create(con: sqlite3.Connection, srs: tuple[int, str, str]) -> None:
 
 
 def ensure_table(con: sqlite3.Connection, table: str, geometry_type: str, columns: dict[str, str], srs_id: int,
-                 identifier: str | None = None) -> list[str]:
+                 identifier: str | None = None, recreate: bool = False) -> list[str]:
     """Create a feature table (``columns``: name -> SQL type) or add its missing columns;
-    returns the attribute columns of the table, in order."""
+    returns the attribute columns of the table, in order. ``recreate``, for a caller that writes the
+    whole content of the table (:func:`write_table`, the live link with QGIS): a table in another
+    reference system than ``srs_id`` - written before a change of the system of the chunk - is
+    dropped and made again in ``srs_id``, so that QGIS reads the rows in the system they are in
+    (without it the table keeps its rows and its system: a caller that adds to a table keeps both)."""
+    if recreate and table_srs(con, table) not in (None, srs_id):
+        drop_table(con, table)
     have = [r[1] for r in con.execute(f"PRAGMA table_info({quote(table)})")]
     if not have:
         cols = "".join(f", {quote(c)} {t}" for c, t in columns.items())
@@ -121,6 +127,19 @@ def ensure_table(con: sqlite3.Connection, table: str, geometry_type: str, column
             con.execute(f"ALTER TABLE {quote(table)} ADD COLUMN {quote(c)} {t}")
             have.append(c)
     return [c for c in have if c not in ("fid", "geom")]
+
+
+def drop_table(con: sqlite3.Connection, table: str) -> None:
+    """A feature table dropped with what describes it: its rows in the metadata tables of the
+    GeoPackage (those GDAL and QGIS add too: extensions, feature count, data columns) and its spatial
+    index (``rtree_<table>_geom``, whose triggers go with the table). Call inside a transaction."""
+    con.execute(f"DROP TABLE IF EXISTS {quote(f'rtree_{table}_geom')}")
+    present = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    for meta in ("gpkg_extensions", "gpkg_ogr_contents", "gpkg_data_columns", "gpkg_metadata_reference",
+                 "gpkg_geometry_columns", "gpkg_contents"):
+        if meta in present:
+            con.execute(f"DELETE FROM {meta} WHERE table_name = ?", (table,))
+    con.execute(f"DROP TABLE IF EXISTS {quote(table)}")
 
 
 def replace_rows(con: sqlite3.Connection, table: str, columns: list[str], features, srs_id: int) -> int:
@@ -155,7 +174,7 @@ def write_table(path: str | Path, table: str, geometry_type: str, columns: dict[
     try:
         con.execute("BEGIN IMMEDIATE")
         create(con, srs)
-        cols = ensure_table(con, table, geometry_type, columns, srs[0], identifier)
+        cols = ensure_table(con, table, geometry_type, columns, srs[0], identifier, recreate=True)
         replace_rows(con, table, cols, features, srs[0])
         con.execute("COMMIT")
     except BaseException:
@@ -227,5 +246,5 @@ def read_table(path: str | Path, table: str) -> list[tuple[object, dict]]:
         con.close()
 
 
-__all__ = ["write_table", "is_geopackage", "refuse_foreign", "srs_of", "blob", "create", "ensure_table", "replace_rows", "connect",
-           "quote", "geometry", "read_table", "wkb", "blob_srs", "table_srs", "set_extent"]
+__all__ = ["write_table", "is_geopackage", "refuse_foreign", "srs_of", "blob", "create", "ensure_table", "drop_table",
+           "replace_rows", "connect", "quote", "geometry", "read_table", "wkb", "blob_srs", "table_srs", "set_extent"]

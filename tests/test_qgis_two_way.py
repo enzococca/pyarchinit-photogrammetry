@@ -257,6 +257,84 @@ def test_a_table_in_another_crs_is_refused(tmp_path):
     qgis.close()
 
 
+def test_after_a_change_of_system_the_tables_are_written_in_the_new_one(tmp_path):
+    """The chunk changed its system (EPSG:32633 into EPSG:32632, another zone of UTM): the GeoPackage QGIS reads is
+    written in the new one - every table made again in it, its rows in it, the system listed - and what QGIS saves
+    after it is read back. Before, the tables kept the old system: QGIS drew the converted drawings in it, about 500 km
+    off, and its edits were refused."""
+    from pyproj import Transformer
+
+    from pyarchinit_photogrammetry.io.qgis_link import LIVE_TABLES
+
+    to = Transformer.from_crs("EPSG:32633", "EPSG:32632", always_xy=True).transform
+    x, y = 438000.0, 4553000.0
+    unit = _unit(1, x, y)
+    spot = {"quota_q": 120.5, "us_q": "1", "ppg_id": new_id(), "_geom": ("Point", [x, y])}
+    old = LiveLink(tmp_path, "EPSG:32633")
+    old.write(_layers([unit], quote=[spot]))
+    assert old.read_changes() == {}
+    old.close()
+    # the drawings converted by the window, written by the link of the new system (the window makes a new one)
+    moved = dict(unit, _geom=("Polygon", [list(to(px, py)) for px, py in unit["_geom"][1]]))
+    moved_spot = dict(spot, _geom=("Point", list(to(x, y))))
+    link = LiveLink(tmp_path, "EPSG:32632")
+    link.write(_layers([moved], quote=[moved_spot]))
+    con = sqlite3.connect(link.path)
+    try:
+        for table in LIVE_TABLES:
+            assert gpkg.table_srs(con, table) == 32632, table
+            assert con.execute("SELECT srs_id FROM gpkg_contents WHERE table_name = ?", (table,)).fetchone() == (32632,)
+        assert con.execute("SELECT count(*) FROM gpkg_spatial_ref_sys WHERE srs_id = 32632").fetchone() == (1,)
+        assert [gpkg.blob_srs(r[0]) for r in con.execute('SELECT geom FROM "unita"')] == [32632]
+        assert [gpkg.blob_srs(r[0]) for r in con.execute('SELECT geom FROM "quote"')] == [32632]
+    finally:
+        con.close()
+    (row,) = _rows(link.path, "unita")
+    assert row[ID_FIELD] == unit["ppg_id"]
+    assert row["geom"].equals_exact(Polygon(moved["_geom"][1]), 1e-6)
+    (point,) = _rows(link.path, "quote")
+    assert (point["geom"].x, point["geom"].y) == pytest.approx(to(x, y)) and point["quota_q"] == 120.5
+    assert link.read_changes() == {}  # nothing refused, nothing taken for a change of QGIS
+    qgis = Qgis(link.path)
+    assert qgis.srs == 32632
+    nx, ny = to(x, y)
+    qgis.save(qgis.move("unita", row["fid"], box(nx, ny, nx + 1.0, ny + 1.0)))
+    got = link.read_changes()
+    assert got["unita"].refused is None and [f.id for f in got["unita"].changed] == [unit["ppg_id"]]
+    qgis.close()
+
+
+def test_a_table_written_whole_in_another_system_is_made_again(tmp_path):
+    """A table that :func:`gpkg.write_table` writes whole, in a GeoPackage written before in another system (QGIS had
+    given it a spatial index): made again in the new system, the index and its metadata gone with it; other tables
+    kept. A table added to (``ensure_table`` without ``recreate``, as an archive does) keeps its rows and its system."""
+    path = tmp_path / "zone.gpkg"
+    gpkg.write_table(path, "zone", "POLYGON", {"zona": "INTEGER"}, [(box(0, 0, 1, 1), {"zona": 1})], "EPSG:32633")
+    gpkg.write_table(path, "altro", "POINT", {"n": "INTEGER"}, [(Point(5, 5), {"n": 1})], "EPSG:32633")
+    con = sqlite3.connect(path, isolation_level=None)
+    con.execute('CREATE TABLE "rtree_zone_geom" (id INTEGER PRIMARY KEY, minx, maxx, miny, maxy)')  # as GDAL's
+    con.execute("CREATE TABLE gpkg_extensions (table_name TEXT, column_name TEXT, extension_name TEXT NOT NULL, "
+                "definition TEXT NOT NULL, scope TEXT NOT NULL)")
+    con.execute("INSERT INTO gpkg_extensions VALUES ('zone', 'geom', 'gpkg_rtree_index', 'GeoPackage 1.0', "
+                "'write-only')")
+    con.close()
+    gpkg.write_table(path, "zone", "POLYGON", {"zona": "INTEGER"}, [(box(2, 2, 3, 3), {"zona": 2})], "EPSG:32632")
+    con = sqlite3.connect(path, isolation_level=None)
+    try:
+        assert gpkg.table_srs(con, "zone") == 32632 and gpkg.table_srs(con, "altro") == 32633
+        names = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert "rtree_zone_geom" not in names and "altro" in names
+        assert con.execute("SELECT count(*) FROM gpkg_extensions").fetchone() == (0,)
+        assert con.execute("SELECT zona FROM zone").fetchall() == [(2,)]
+        con.execute("BEGIN IMMEDIATE")  # adding to a table: its rows and its system stay
+        gpkg.create(con, gpkg.srs_of("EPSG:32632"))
+        gpkg.ensure_table(con, "altro", "POINT", {"n": "INTEGER"}, 32632)
+        con.execute("COMMIT")
+        assert gpkg.table_srs(con, "altro") == 32633 and con.execute("SELECT n FROM altro").fetchall() == [(1,)]
+    finally:
+        con.close()
+
+
 def test_signatures_do_not_depend_on_empty_columns():
     raw = shapely.to_wkb(LineString([(0, 0), (1, 1)]), byte_order=1, output_dimension=2)
     assert row_signature(raw, {"a": 1.5, "b": None}) == row_signature(raw, {"a": 1.5, "nuova": None})
