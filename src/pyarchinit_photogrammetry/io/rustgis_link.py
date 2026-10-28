@@ -3,14 +3,19 @@ the token it made, and talking to it.
 
 While the user ticks *Let your Agents Control RustGIS* in its AI Assistant settings, RustGIS serves the tools of its
 MCP server (``list_layers``, ``run_command``, ``run``, ``read_features``...) to the programs of this computer over HTTP:
-``POST http://127.0.0.1:8768/mcp``, one JSON-RPC message per request, a JSON reply, and ``Authorization: Bearer
-<token>``, the token being the one RustGIS keeps in ``mcp-http.token`` of its settings folder. A request that carries
-an ``Origin`` header or names another host is refused before the token is read. That box is RustGIS's own consent: the
-program never writes RustGIS's settings, and the token is read from its file at each request, never kept, logged or
-shown (an exception does not carry it either).
+``POST http://127.0.0.1:<port>/mcp`` (8768 unless it was started with another), one JSON-RPC message per request, a
+JSON reply, and ``Authorization: Bearer <token>``, the token being the one RustGIS keeps in ``mcp-http.token`` of its
+settings folder. A request that carries an ``Origin`` header or names another host is refused before the token is read.
+That box is RustGIS's own consent: the program never writes RustGIS's settings, and the token is read from its file at
+each request, never kept, logged or shown (an exception does not carry it either).
+
+The token stays in the settings folder for good, so its file says nothing about who listens at a port: loopback is
+shared by every program of every account of the computer. The address is therefore taken only from what a RUNNING
+RustGIS publishes, its ``endpoint.json`` (``pid``, ``http_url``, ``http_token_file``) in :func:`token_dir`, and only
+while its ``pid`` runs. There is no default address to try when that is missing.
 
 * :func:`find_rustgis` finds the app and ``rustgis-cli``; :func:`open_app` starts the app.
-* :func:`endpoint` says where RustGIS listens (None while no token was made: agent control never ticked).
+* :func:`endpoint` says where a running RustGIS listens (None: it is not running, or its agent control is off).
 * :class:`HttpTransport` is the channel to the app, :class:`StdioTransport` the same tools over the pipes of
   ``rustgis-cli mcp``, the engine without the window that the tests run against.
 
@@ -49,10 +54,10 @@ log = logging.getLogger(__name__)
 
 MIN_VERSION = (0, 4, 0)  # the command ids and parameters the link uses are those of RustGIS 0.4.0
 MIN_TEXT = ".".join(str(n) for n in MIN_VERSION)
-HTTP_PORT = 8768  # of RustGIS's MCP over HTTP, unless RUSTGIS_MCP_HTTP_PORT names another
-HTTP_PORT_ENV = "RUSTGIS_MCP_HTTP_PORT"
+HTTP_PORT = 8768  # where RustGIS's MCP over HTTP listens unless started with another: endpoint.json tells, never tried
 CONFIG_ENV = "RUSTGIS_CONFIG_DIR"  # RustGIS's own variable for its settings folder
-TOKEN_FILE = "mcp-http.token"  # in the settings folder: made by RustGIS once agent control is ticked
+TOKEN_FILE = "mcp-http.token"  # in the settings folder: made by RustGIS once agent control is ticked, kept for good
+ENDPOINT_FILE = "endpoint.json"  # what a running RustGIS publishes in token_dir(): its pid and listeners' addresses
 CLI_ENV = "PPG_RUSTGIS_CLI"  # the rustgis-cli to use (the tests of the real engine), else the one on the PATH
 RELEASES_URL = "https://github.com/opengeos/RustGIS/releases"
 RASTER_SAMPLES = 120_000_000  # width x height x bands RustGIS loads whole; a larger raster is read in place, by range
@@ -67,8 +72,8 @@ class RustGisError(RuntimeError):
 
 
 class RustGisOff(RustGisError):
-    """RustGIS cannot be reached: no token (agent control never ticked), nothing listens (RustGIS closed, or the box
-    unticked), or the token is not the running RustGIS's."""
+    """RustGIS cannot be reached: it publishes no address (not running, or the box unticked), no token can be read,
+    nothing listens at the address, or the token is not the running RustGIS's."""
 
 
 class RustGisBusy(RustGisError):
@@ -99,8 +104,8 @@ class RustGisInstall:
 
 @dataclass
 class Endpoint:
-    url: str  # http://127.0.0.1:<port>/mcp
-    token_file: Path  # the token is read from it at each request
+    url: str  # http://127.0.0.1:<port>/mcp, as the running RustGIS published it
+    token_file: Path  # where it keeps its token (published too): read from it at each request
 
 
 def _platform() -> str:
@@ -186,22 +191,87 @@ def settings_dir() -> Path | None:
     return Path(base) / "rustgis" if base else None
 
 
-def http_port() -> int:
-    """The port of RustGIS's MCP over HTTP: ``RUSTGIS_MCP_HTTP_PORT`` when it holds a port number (1 to 65535), else
-    :data:`HTTP_PORT`."""
-    text = (os.environ.get(HTTP_PORT_ENV) or "").strip()
-    if re.fullmatch(r"\+?[0-9]+", text) and 0 < int(text) < 65536:
-        return int(text)
-    return HTTP_PORT
+def token_dir() -> Path:
+    """The folder where a running RustGIS keeps its run files, ``endpoint.json`` among them (its own rule): ``rustgis``
+    in ``$XDG_RUNTIME_DIR`` when that is an absolute folder that exists, else ``rustgis-mcp-<user>`` in the temporary
+    folder, <user> being ``$USER`` (``$USERNAME`` when there is no ``USER`` at all) kept to its letters, digits, ``-``
+    and ``_``, and ``user`` when nothing is left. The folder itself may not exist (RustGIS not run yet)."""
+    runtime = _env("XDG_RUNTIME_DIR")
+    if runtime and Path(runtime).is_absolute() and Path(runtime).is_dir():
+        return Path(runtime) / "rustgis"
+    user = os.environ["USER"] if "USER" in os.environ else os.environ.get("USERNAME", "")
+    name = re.sub(r"[^A-Za-z0-9_-]", "", user) or "user"
+    return Path(tempfile.gettempdir()) / f"rustgis-mcp-{name}"
+
+
+# kernel32: OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE), the wait that times out, access denied
+_WINDOWS_ACCESS, _WINDOWS_WAIT_TIMEOUT, _WINDOWS_ACCESS_DENIED = 0x1000 | 0x100000, 0x102, 5
+
+
+def _kernel32():
+    """kernel32 through ctypes, with the signatures of the calls :func:`_running_on_windows` makes (Windows only)."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return kernel32
+
+
+def _running_on_windows(pid: int) -> bool:
+    """Whether process ``pid`` is running, asked through OpenProcess: ``os.kill`` there terminates the process."""
+    import ctypes
+
+    kernel32 = _kernel32()
+    handle = kernel32.OpenProcess(_WINDOWS_ACCESS, False, pid)
+    if not handle:  # access denied: it is there, it is not ours to open; anything else: there is no such process
+        return ctypes.get_last_error() == _WINDOWS_ACCESS_DENIED
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == _WINDOWS_WAIT_TIMEOUT  # asks, never waits: unsignalled = runs
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _process_runs(pid: int) -> bool:
+    """Whether process ``pid`` (more than 0: 0 and less are groups of processes) is running, whoever owns it: signal 0
+    only asks (POSIX); Windows opens the process (:func:`_running_on_windows`)."""
+    if _platform() == "win32":
+        return _running_on_windows(pid)
+    try:
+        os.kill(pid, 0)
+    except PermissionError:  # a process of another user is there
+        return True
+    except (OSError, OverflowError):  # ProcessLookupError: gone; the rest: not a process we can tell is RustGIS
+        return False
+    return True
 
 
 def endpoint() -> Endpoint | None:
-    """Where RustGIS's MCP over HTTP listens, once RustGIS made its token (agent control ticked): None without the
-    token file. Nothing is asked of the network; whether RustGIS is running is for the first request to find out."""
-    folder = settings_dir()
-    if folder is None or not (folder / TOKEN_FILE).is_file():
+    """Where a running RustGIS's MCP over HTTP listens, as RustGIS publishes it: the ``http_url`` and
+    ``http_token_file`` of its ``endpoint.json`` in :func:`token_dir`, taken only while its ``pid`` runs. None when
+    there is no such file, it cannot be read or is not what RustGIS writes, its ``pid`` does not run (a RustGIS that
+    crashed leaves its file behind), or it names no HTTP address (the relay runs, agent control is off).
+
+    There is no default address to fall back on: RustGIS keeps its token for good, and any program of any account may be
+    listening at 127.0.0.1:8768 when RustGIS is not, so the token goes only to the address of a RustGIS that was seen
+    running. Nothing is asked of the network: whether it still answers is for the first request to find out."""
+    try:
+        info = json.loads((token_dir() / ENDPOINT_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return None
-    return Endpoint(f"http://127.0.0.1:{http_port()}/mcp", folder / TOKEN_FILE)
+    if not isinstance(info, dict):
+        return None
+    pid, url, token_file = info.get("pid"), info.get("http_url"), info.get("http_token_file")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    if not all(isinstance(value, str) and value for value in (url, token_file)):
+        return None
+    return Endpoint(url, Path(token_file)) if _process_runs(pid) else None
 
 
 def _result_of(reply: object) -> dict:
@@ -297,7 +367,8 @@ class HttpTransport(_Transport):
 
     def _gave_up(self) -> RustGisBusy:
         return RustGisBusy(f"RustGIS did not answer within {self.timeout:g} s: it does not draw (minimized, hidden, a "
-                           "dialog open) or is slow, and the request may still run when it is back", outcome_unknown=True)
+                           "dialog open) or is slow, and the request may still run when it is back",
+                           outcome_unknown=True)
 
     def _refusal(self, status: int, body: str) -> RustGisError:
         """What an HTTP status of the listener itself means (its body is ``{"error": "..."}``)."""
@@ -349,7 +420,7 @@ class HttpTransport(_Transport):
         try:
             reply = json.loads(body)
         except ValueError:
-            raise RustGisError(f"the answer of {self.endpoint.url} is not JSON: not RustGIS that answers there") from None
+            raise RustGisError(f"the answer of {self.endpoint.url} is not JSON: not RustGIS that answers") from None
         return _result_of(reply)
 
 
@@ -462,7 +533,7 @@ class StdioTransport(_Transport):
         self.close()
 
 
-__all__ = ["find_rustgis", "open_app", "settings_dir", "http_port", "endpoint", "too_old", "HttpTransport",
+__all__ = ["find_rustgis", "open_app", "settings_dir", "token_dir", "endpoint", "too_old", "HttpTransport",
            "StdioTransport", "RustGisInstall", "Endpoint", "RustGisError", "RustGisOff", "RustGisBusy",
-           "RustGisRefused", "RustGisTooOld", "MIN_VERSION", "HTTP_PORT", "TOKEN_FILE", "RASTER_SAMPLES", "TOLERANCE_M",
-           "BUSY_CODES"]
+           "RustGisRefused", "RustGisTooOld", "MIN_VERSION", "HTTP_PORT", "TOKEN_FILE", "ENDPOINT_FILE",
+           "RASTER_SAMPLES", "TOLERANCE_M", "BUSY_CODES"]

@@ -1,7 +1,8 @@
-"""Finding RustGIS and talking to it (io/rustgis_link): where its settings folder and token are, MCP over HTTP against a
-fake RustGIS (an http.server on this computer that checks every request the way the real listener does), the same
-tools over the pipes of an engine, how each failure is named, and the line of the diagnosis. The real engine runs only
-when PPG_RUSTGIS_CLI names a rustgis-cli; the open app has its own opt-in test (test_rustgis_app.py)."""
+"""Finding RustGIS and talking to it (io/rustgis_link): where it publishes its address (the endpoint.json of a running
+RustGIS) and its token, MCP over HTTP against a fake RustGIS (an http.server on this computer that checks every request
+the way the real listener does), the same tools over the pipes of an engine, how each failure is named, and the line of
+the diagnosis. The real engine runs only when PPG_RUSTGIS_CLI names a rustgis-cli; the open app has its own opt-in test
+(test_rustgis_app.py)."""
 from __future__ import annotations
 
 import json
@@ -11,7 +12,9 @@ import plistlib
 import socket
 import socketserver
 import stat
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -52,7 +55,8 @@ class FakeRustGis:
         self.delays: dict[str, float] = {}
         self.requests: list[dict] = []  # path, headers (lower case) and message of each request that got through
         self.refused: list[str] = []
-        self.folder: Path | None = None  # the settings folder the fixture makes for it
+        self.folder: Path | None = None  # the settings folder the fixture makes for it, with the token in it
+        self.runtime: Path | None = None  # the run folder (XDG_RUNTIME_DIR) where it publishes its endpoint.json
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -124,16 +128,40 @@ class FakeRustGis:
         return 200, json.dumps({"jsonrpc": "2.0", "id": message["id"], **reply})
 
 
+def publish_endpoint(runtime: Path, port: int, token_file: Path, **changes) -> Path:
+    """The endpoint.json a running RustGIS publishes (the fields ``relay.rs`` writes) in ``rustgis`` of the run folder
+    that XDG_RUNTIME_DIR names, for this process, which runs. ``changes`` replace fields; ``...`` takes one out."""
+    info = {"schema": 1, "host": "127.0.0.1", "port": 8767, "url": "tcp://127.0.0.1:8767", "pid": os.getpid(),
+            "started_at": "2026-10-28T12:00:00Z", "version": "0.4.0",
+            "token_file": str(runtime / "rustgis" / "8767.token"), "attach": "rustgis-cli mcp --attach 8767",
+            "http_url": f"http://127.0.0.1:{port}/mcp", "http_token_file": str(token_file)}
+    info.update(changes)
+    folder = runtime / "rustgis"
+    folder.mkdir(exist_ok=True)
+    (folder / "endpoint.json").write_text(json.dumps({k: v for k, v in info.items() if v is not ...}), encoding="utf-8")
+    return folder / "endpoint.json"
+
+
+def dead_pid() -> int:
+    """The pid of a process that has run and ended."""
+    done = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True, text=True,
+                          close_fds=False, check=True)
+    return int(done.stdout)
+
+
 @pytest.fixture
 def fake_rustgis(tmp_path, monkeypatch):
-    """A fake RustGIS on a free port, with its settings folder (and the token in it) in tmp_path: the environment
-    variables RustGIS reads point the module at it."""
+    """A fake RustGIS on a free port that publishes itself as the real one does: an endpoint.json in the run folder
+    XDG_RUNTIME_DIR names, for this process (which runs), whose http_token_file is the token file in its settings
+    folder (``fake.folder``). The program finds it only so."""
     fake = FakeRustGis()
     fake.folder = tmp_path / "RustGIS"
     fake.folder.mkdir()
     (fake.folder / link.TOKEN_FILE).write_text(TOKEN + "\n", encoding="utf-8")
-    monkeypatch.setenv("RUSTGIS_CONFIG_DIR", str(fake.folder))
-    monkeypatch.setenv("RUSTGIS_MCP_HTTP_PORT", str(fake.port))
+    fake.runtime = tmp_path / "run"
+    fake.runtime.mkdir()
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(fake.runtime))
+    publish_endpoint(fake.runtime, fake.port, fake.folder / link.TOKEN_FILE)
     yield fake
     fake.close()
 
@@ -147,24 +175,180 @@ def test_the_constants_of_the_link():
 
 
 def test_settings_folder_and_token_file(tmp_path, monkeypatch):
+    """RustGIS makes its token in the settings folder once agent control is ticked and keeps it for good; where it
+    listens is what a RUNNING RustGIS publishes in endpoint.json, and only that."""
+    runtime = tmp_path / "run"
+    runtime.mkdir()
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
     monkeypatch.setenv("RUSTGIS_CONFIG_DIR", str(tmp_path))
-    monkeypatch.delenv("RUSTGIS_MCP_HTTP_PORT", raising=False)
     assert link.settings_dir() == tmp_path
-    assert link.endpoint() is None  # agent control never ticked: RustGIS made no token
+    assert link.endpoint() is None  # nothing published: RustGIS is not running, or its agent control is off
     (tmp_path / "mcp-http.token").write_text(TOKEN + "\n")
-    ep = link.endpoint()
-    assert ep.url == "http://127.0.0.1:8768/mcp" and ep.token_file == tmp_path / "mcp-http.token"
-    monkeypatch.setenv("RUSTGIS_MCP_HTTP_PORT", "9123")
+    assert link.endpoint() is None  # the token that stays proves nothing about who listens at 127.0.0.1:8768
+    published = publish_endpoint(runtime, 9123, tmp_path / link.TOKEN_FILE)  # for this process, which runs
+    assert published == link.token_dir() / "endpoint.json"
+    assert link.endpoint() == link.Endpoint("http://127.0.0.1:9123/mcp", tmp_path / "mcp-http.token")
+    publish_endpoint(runtime, 9123, tmp_path / link.TOKEN_FILE, pid=dead_pid())  # RustGIS died and left its file
+    assert link.endpoint() is None
+    published.unlink()  # RustGIS quit
+    assert link.endpoint() is None
+
+
+def test_there_is_no_default_address(fake_rustgis, monkeypatch):
+    """A token and a listener (here on the port RUSTGIS_MCP_HTTP_PORT names) are not an address: without the
+    endpoint.json of a running RustGIS the program does not know who listens, and the token stays where it is."""
+    fake = fake_rustgis
+    (fake.runtime / "rustgis" / "endpoint.json").unlink()
+    monkeypatch.setenv("RUSTGIS_CONFIG_DIR", str(fake.folder))
+    monkeypatch.setenv("RUSTGIS_MCP_HTTP_PORT", str(fake.port))
+    assert (fake.folder / link.TOKEN_FILE).is_file()
+    assert link.endpoint() is None
+    assert not hasattr(link, "http_port") and fake.requests == []
+
+
+def test_endpoint_json_is_found_in_the_temporary_folder_without_a_run_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setenv("USER", "enzo")
+    (tmp_path / "tmp").mkdir()
+    publish_endpoint(tmp_path / "tmp", 9123, tmp_path / link.TOKEN_FILE)  # makes tmp/rustgis ...
+    assert link.endpoint() is None  # ... which is not the folder RustGIS uses here
+    (tmp_path / "tmp" / "rustgis").rename(tmp_path / "tmp" / "rustgis-mcp-enzo")
     assert link.endpoint().url == "http://127.0.0.1:9123/mcp"
 
 
-@pytest.mark.parametrize("text, port", [("9123", 9123), (" 9123 ", 9123), ("+9123", 9123), ("65535", 65535), ("1", 1),
-                                        ("", 8768), ("abc", 8768), ("0", 8768), ("65536", 8768), ("-5", 8768),
-                                        ("9_123", 8768), ("91.5", 8768)])
-def test_the_port_is_a_port_number_or_the_default(monkeypatch, text, port):
-    """The rule of RustGIS: the variable when it holds a port number (1 to 65535), else 8768."""
-    monkeypatch.setenv("RUSTGIS_MCP_HTTP_PORT", text)
-    assert link.http_port() == port
+@pytest.mark.parametrize("changes", [
+    pytest.param({"http_url": None}, id="the http listener is off"),
+    pytest.param({"http_url": None, "http_token_file": None}, id="the relay only"),
+    pytest.param({"http_url": ...}, id="no http_url"),
+    pytest.param({"http_token_file": ...}, id="no http_token_file"),
+    pytest.param({"pid": ...}, id="no pid"),
+    pytest.param({"http_url": ""}, id="empty http_url"),
+    pytest.param({"http_token_file": ""}, id="empty http_token_file"),
+    pytest.param({"http_url": 8768}, id="http_url not a string"),
+    pytest.param({"http_token_file": ["x"]}, id="http_token_file not a string"),
+    pytest.param({"pid": None}, id="pid null"),
+    pytest.param({"pid": 0}, id="pid 0"),
+    pytest.param({"pid": -1}, id="pid -1"),
+    pytest.param({"pid": True}, id="pid true"),
+    pytest.param({"pid": "1234"}, id="pid a string"),
+    pytest.param({"pid": 12.5}, id="pid a float"),
+    pytest.param({"pid": 2 ** 70}, id="pid too large"),
+])
+def test_an_endpoint_file_that_is_not_a_running_rustgis_with_http_gives_nothing(fake_rustgis, monkeypatch, changes):
+    real_kill = os.kill
+
+    def kill(pid, sig):  # a pid of 0 or less would be a group of processes, not a process
+        assert pid > 0
+        return real_kill(pid, sig)
+
+    monkeypatch.setattr(os, "kill", kill)
+    assert link.endpoint() is not None
+    publish_endpoint(fake_rustgis.runtime, fake_rustgis.port, fake_rustgis.folder / link.TOKEN_FILE, **changes)
+    assert link.endpoint() is None
+
+
+@pytest.mark.parametrize("content", [b"", b"not json", b"[1, 2]", b'"text"', b"null", b"{", b'{"pid": 1',
+                                     b"\xff\xfe\x00"])
+def test_a_file_that_is_not_what_rustgis_writes_gives_nothing(fake_rustgis, content):
+    published = fake_rustgis.runtime / "rustgis" / "endpoint.json"
+    published.write_bytes(content)
+    assert link.endpoint() is None
+    published.unlink()
+    published.mkdir()  # a folder in its place
+    assert link.endpoint() is None
+
+
+def test_the_run_folder_follows_rustgis(tmp_path, monkeypatch):
+    """RustGIS's token_dir: ``rustgis`` in XDG_RUNTIME_DIR when that is an absolute folder, else
+    ``rustgis-mcp-<user>`` in the temporary folder; the user is $USER (an empty one included) or, when there is none,
+    $USERNAME, kept to its letters, digits, - and _, and ``user`` when nothing is left."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
+    (tmp_path / "a file").write_text("x")
+    runtime = tmp_path / "run"
+    runtime.mkdir()
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    assert link.token_dir() == runtime / "rustgis"  # the folder in it need not exist yet
+    monkeypatch.setenv("USER", "enzo")
+    for unusable in ("", "run/relative", str(tmp_path / "missing"), str(tmp_path / "a file")):
+        monkeypatch.setenv("XDG_RUNTIME_DIR", unusable)
+        assert link.token_dir() == tmp_path / "tmp" / "rustgis-mcp-enzo", unusable
+    monkeypatch.delenv("XDG_RUNTIME_DIR")
+    assert link.token_dir() == tmp_path / "tmp" / "rustgis-mcp-enzo"
+    for user, folder in (("Enzo.Cocca-2_x \u00e9/..", "EnzoCocca-2_x"), ("///", "user"), ("", "user")):
+        monkeypatch.setenv("USER", user)
+        monkeypatch.setenv("USERNAME", "ignored")  # only when there is no USER at all
+        assert link.token_dir() == tmp_path / "tmp" / f"rustgis-mcp-{folder}", user
+    monkeypatch.delenv("USER")
+    assert link.token_dir() == tmp_path / "tmp" / "rustgis-mcp-ignored"
+    monkeypatch.delenv("USERNAME")
+    assert link.token_dir() == tmp_path / "tmp" / "rustgis-mcp-user"
+
+
+def test_a_process_that_runs_is_asked_with_signal_zero(fake_rustgis, monkeypatch):
+    """os.kill(pid, 0) only asks: no such process is a RustGIS that is gone, 'not allowed' a process of another user
+    that is there (running); anything else is not a running RustGIS."""
+    monkeypatch.setattr(link, "_platform", lambda: "linux")
+    asked = []
+    for error, runs in ((None, True), (PermissionError(1, "not permitted"), True),
+                        (ProcessLookupError(3, "no such process"), False), (OverflowError("too large"), False),
+                        (OSError(22, "invalid"), False)):
+        def kill(pid, sig, error=error):
+            asked.append((pid, sig))
+            if error is not None:
+                raise error
+
+        monkeypatch.setattr(os, "kill", kill)
+        assert (link.endpoint() is not None) is runs, error
+    assert set(asked) == {(os.getpid(), 0)}
+
+
+def test_on_windows_a_process_is_asked_through_openprocess_never_signalled(fake_rustgis, monkeypatch):
+    """os.kill terminates a process on Windows (any signal but Ctrl-C is TerminateProcess): never there."""
+    monkeypatch.setattr(link, "_platform", lambda: "win32")
+    monkeypatch.setattr(os, "kill", lambda pid, sig: pytest.fail("os.kill on Windows terminates the process"))
+    asked = []
+    monkeypatch.setattr(link, "_running_on_windows", lambda pid: asked.append(pid) or True)
+    assert link.endpoint() is not None and asked == [os.getpid()]
+    monkeypatch.setattr(link, "_running_on_windows", lambda pid: False)
+    assert link.endpoint() is None
+
+
+class FakeKernel32:
+    """The calls of kernel32 the check makes, answering as the test says."""
+
+    def __init__(self):
+        self.handle, self.wait, self.opened, self.closed = 1234, 0x102, [], []
+
+    def OpenProcess(self, access, inherit, pid):
+        self.opened.append((access, inherit, pid))
+        return self.handle
+
+    def WaitForSingleObject(self, handle, milliseconds):
+        assert (handle, milliseconds) == (1234, 0)  # asks, never waits
+        return self.wait
+
+    def CloseHandle(self, handle):
+        self.closed.append(handle)
+        return 1
+
+
+def test_the_windows_check_of_a_process(monkeypatch):
+    import ctypes
+
+    kernel = FakeKernel32()
+    monkeypatch.setattr(link, "_kernel32", lambda: kernel)
+    assert link._running_on_windows(4321) is True  # the wait times out: it runs
+    # query limited information + synchronize, not inherited; the handle is given back
+    assert kernel.opened == [(0x1000 | 0x100000, False, 4321)] and kernel.closed == [1234]
+    kernel.wait = 0  # signalled: it has exited
+    assert link._running_on_windows(4321) is False
+    assert kernel.closed == [1234, 1234]  # the handle is always given back
+    kernel.handle = None  # it cannot be opened
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5, raising=False)  # access denied: there, not ours to open
+    assert link._running_on_windows(4321) is True
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 87, raising=False)  # invalid parameter: no such process
+    assert link._running_on_windows(4321) is False
 
 
 def test_settings_folder_by_system(tmp_path, monkeypatch):
@@ -602,7 +786,9 @@ def _installed(version):
 
 def test_doctor_line(monkeypatch, tmp_path, fake_rustgis):
     fake = fake_rustgis
-    nowhere = tmp_path / "no settings"
+    token = fake.folder / link.TOKEN_FILE
+    published = fake.runtime / "rustgis" / "endpoint.json"
+    published.unlink()  # RustGIS is not running: nothing published
     # not installed: not a problem, and how to install it
     monkeypatch.setattr(link, "find_rustgis", lambda: None)
     check = doctor.rustgis_check()
@@ -611,18 +797,24 @@ def test_doctor_line(monkeypatch, tmp_path, fake_rustgis):
     monkeypatch.setattr(link, "find_rustgis", lambda: link.RustGisInstall(None, Path("/x/rustgis-cli"), None))
     assert "not installed" in doctor.rustgis_check().detail  # the engine alone is not the app
     # installed, older than the link needs
-    monkeypatch.setenv("RUSTGIS_CONFIG_DIR", str(nowhere))
     monkeypatch.setattr(link, "find_rustgis", _installed("0.3.0"))
     check = doctor.rustgis_check()
     assert check.level == doctor.WARN and "0.3.0" in check.detail and "0.4.0" in check.detail
     assert "github.com/opengeos/RustGIS" in check.hint
-    # installed, agent control off (no token yet): fine, and how to turn it on
+    # installed, agent control off (nothing published): fine, and how to turn it on
     monkeypatch.setattr(link, "find_rustgis", _installed("0.4.0"))
     check = doctor.rustgis_check()
     assert check.level == doctor.OK and "0.4.0" in check.detail and "agent control is off" in check.detail
     assert "Let your Agents Control RustGIS" in check.hint and "AI Assistant" in check.hint
-    # the token of an earlier run and nothing listening (RustGIS closed): the same
-    monkeypatch.setenv("RUSTGIS_CONFIG_DIR", str(fake.folder))
+    # RustGIS runs with the box unticked (the relay is up, the HTTP listener is not), or it crashed and left its file
+    # with a pid that does not run, or it runs and nothing answers at its address (the token of an earlier run stays
+    # in its settings folder all the while): the same
+    for changes in ({"http_url": None, "http_token_file": None}, {"pid": dead_pid()}):
+        publish_endpoint(fake.runtime, fake.port, token, **changes)
+        check = doctor.rustgis_check()
+        assert check.level == doctor.OK and "agent control is off" in check.detail and "not running" in check.detail
+        assert "Let your Agents Control RustGIS" in check.hint
+    publish_endpoint(fake.runtime, fake.port, token)
     fake.close()
     check = doctor.rustgis_check()
     assert check.level == doctor.OK and "agent control is off" in check.detail and "not running" in check.detail

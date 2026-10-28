@@ -186,7 +186,7 @@ def rustgis_check() -> Check:
         running = link.HttpTransport(where, timeout=4.0).initialize()
     except link.RustGisTooOld as exc:
         return Check(name, WARN, str(exc), update)
-    except link.RustGisOff:  # the token of an earlier run, and nothing listening
+    except link.RustGisOff:  # it published an address and nothing answers there (it just quit), or the token is not its
         return idle()
     except link.RustGisBusy:
         return Check(name, OK, f"{installed or 'installed'}; agent control is on at {where.url} but RustGIS is not "

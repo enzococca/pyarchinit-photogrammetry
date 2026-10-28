@@ -1,7 +1,7 @@
 """RustGIS itself, the app the user has open. The link talks to it over HTTP only while the user ticks *Let your Agents
 Control RustGIS* in its AI Assistant settings - consent that nothing here gives for them - so this file is opt-in:
-PPG_RUSTGIS_LIVE=1 (the tests then read the user's real RustGIS settings folder, which the other tests never do), run
-with RustGIS open and the box ticked:
+PPG_RUSTGIS_LIVE=1 (the tests then read the user's real RustGIS folders - its settings and the run folder where it
+publishes its address - which the other tests never do), run with RustGIS open and the box ticked:
 
     PPG_RUSTGIS_LIVE=1 pytest tests/test_rustgis_app.py -s
 
@@ -25,8 +25,9 @@ pytestmark = pytest.mark.skipif(os.environ.get("PPG_RUSTGIS_LIVE") != "1",
 def _transport(timeout: float = 30.0) -> link.HttpTransport:
     where = link.endpoint()
     if where is None:
-        pytest.fail("RustGIS has made no token yet: open it and tick \"Let your Agents Control RustGIS\" in its AI "
-                    f"Assistant settings (it looks for {link.TOKEN_FILE} in {link.settings_dir()})")
+        pytest.fail("RustGIS publishes no address: open it and tick \"Let your Agents Control RustGIS\" in its AI "
+                    f"Assistant settings (a running RustGIS writes {link.ENDPOINT_FILE} in {link.token_dir()}, with "
+                    "the address of its HTTP listener, only while the box is ticked)")
     return link.HttpTransport(where, timeout=timeout)
 
 
