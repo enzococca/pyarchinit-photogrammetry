@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyarchinit-photogrammetry"
-version = "1.6.0"
+version = "1.6.1"
 description = "Open-source photogrammetry engine for archaeology and BIM, integrated with PyArchInit"
 readme = "README.md"
 license = "GPL-2.0-or-later"
@@ -49,7 +49,7 @@ postgis = ["psycopg2-binary>=2.9; sys_platform != 'win32' or platform_machine !=
 sam = ["torch>=2.3", "sam2>=1.1", "huggingface_hub>=0.20"]  # the weights come from the Hugging Face hub
 learned = ["torch>=2.3", "kornia>=0.8"]  # learned key points + LightGlue (engine.learned), run in a worker process
 learn = ["scikit-learn>=1.3"]  # trainable point classification (ai.learn)
-fast = ["pyarchinit-photogrammetry-core>=0.5.0"]  # native kernels in Rust (native/), optional
+fast = ["pyarchinit-photogrammetry-core>=0.6.0"]  # native kernels in Rust (native/), optional
 scans = ["pye57>=0.4"]  # laser scans in E57 (io.scans; PTX needs nothing)
 munsell = ["colour-science>=0.4.4"]  # Munsell notation of the colours (archaeo.munsell)
 coreg = ["xdem>=0.2"]  # DEM coregistration with xdem (archaeo.coreg, method="xdem"): never in "all" nor in the app
