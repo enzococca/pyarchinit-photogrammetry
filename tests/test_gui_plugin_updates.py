@@ -1,5 +1,6 @@
 """Plugin updates in the window: the look at the plugin index that goes with the daily check of the program (in the
-background, one at a time), the summary of what it found, the switch *Aggiorna i plugin da soli*, the lines in the log
+background, one at a time), the summary of what it found - each plugin that waits, update that is not installed or
+update that failed told once, the windows one at a time - the switch *Aggiorna i plugin da soli*, the lines in the log
 and the note of the plugin manager. Nothing reaches the network, no modal window opens: the look is a function of the
 test and the summary window a fake."""
 from __future__ import annotations
@@ -16,6 +17,7 @@ pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("PPG_RENDERER", "software")
 
+from pyarchinit_photogrammetry import updates as program_updates  # noqa: E402
 from pyarchinit_photogrammetry.gui import i18n, update_dialog  # noqa: E402
 from pyarchinit_photogrammetry.plugins import Manager  # noqa: E402
 from pyarchinit_photogrammetry.plugins import index as plugin_index  # noqa: E402
@@ -43,6 +45,9 @@ def windows(tmp_path):
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])
+    stale = QApplication.activeModalWidget()
+    if stale is not None:  # a window another test left open would hold back the summaries of these tests
+        stale.close()
     QSettings.setDefaultFormat(QSettings.Format.IniFormat)
     QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
     from pyarchinit_photogrammetry.core.document import Document
@@ -57,9 +62,13 @@ def windows(tmp_path):
         return w
 
     yield make, app
+    running = [w for w in made if w.plugin_checker.running]
     for w in made:
         w.setWindowModified(False)
         w.close()
+    # a look left running hands its answer to the next test, where the fakes of this one are gone and the real summary
+    # window opens (conftest then fails *that* test): every test of this file ends with no look running
+    assert not running, "the test left a look at the plugin index running"
 
 
 @pytest.fixture
@@ -98,6 +107,11 @@ def _rows(w) -> list[tuple[int, str]]:
     return [(level, text) for _time, level, text, _details in w.log_pane.entries]
 
 
+def _release():
+    """A newer version of the program, as the program's own check hands it over."""
+    return program_updates.Release(version="9.9.9", tag="v9.9.9", url="https://example.org/release")
+
+
 def _counting(w) -> list:
     """A list that gains an item each time a look of the window ``w`` is over and the window has dealt with what it
     found: the receiver is connected after the window's own slots, and slots run in the order they were connected."""
@@ -114,23 +128,39 @@ def _counting(w) -> list:
     return ended
 
 
+def _looker(w, app):
+    """``look(manual=False)``: one look of the window ``w``, to the end - the window has dealt with what it found."""
+    ended = _counting(w)
+
+    def look(manual: bool = False) -> None:
+        n = len(ended)
+        assert w._check_plugins(manual=manual)
+        _wait(app, lambda: len(ended) > n, "the look to end")
+
+    return look
+
+
 def _fake_run(monkeypatch, result=None, error=None) -> list[dict]:
-    """The look at the plugin index of these tests: nothing is read or downloaded. The calls are listed."""
+    """The look at the plugin index of these tests: nothing is read or downloaded. The calls are listed. ``result`` is
+    what each look finds - or a list of them, one per look, the last one for the looks after it."""
     calls: list[dict] = []
 
     def run(seen=None, *, folder=None, update=True, url=None, progress=None):
         calls.append({"seen": seen, "folder": folder, "update": update})
         if error is not None:
             raise error
+        if isinstance(result, list):
+            return result[min(len(calls), len(result)) - 1]
         return result if result is not None else PluginUpdates()
 
     monkeypatch.setattr(plugin_updates, "run", run)
     return calls
 
 
-def _fake_dialog(monkeypatch, answer=None) -> list[str]:
+def _fake_dialog(monkeypatch, answer=None, order=None, during=None) -> list[str]:
     """Stands in for the summary window (a modal window never opens in a test): the html it would show is added to the
-    list, ``exec()`` returns at once and the ``action`` is ``answer``."""
+    list, ``exec()`` returns at once and the ``action`` is ``answer``. ``order`` (a list) gets "the summary opens" and
+    "the summary closes"; ``during()`` runs in between, while the window is "open"."""
     from pyarchinit_photogrammetry.gui import main_window as mw
 
     shown: list[str] = []
@@ -140,12 +170,37 @@ def _fake_dialog(monkeypatch, answer=None) -> list[str]:
             self.result, self.action = result, None
 
         def exec(self):
+            if order is not None:
+                order.append("the summary opens")
             shown.append(update_dialog.plugin_summary_html(self.result))
+            if during is not None:
+                during()
+            if order is not None:
+                order.append("the summary closes")
             self.action = answer
             return 0
 
     monkeypatch.setattr(mw, "PluginUpdatesDialog", Summary)
     return shown
+
+
+def _fake_program_dialog(monkeypatch, order, during=None) -> None:
+    """The same for the window of the program's own update: ``order`` gets "the window of the program opens" and
+    "... closes", ``during()`` runs in between."""
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    class Program:
+        def __init__(self, release, parent=None):
+            self.action, self.command = "later", None
+
+        def exec(self):
+            order.append("the window of the program opens")
+            if during is not None:
+                during()
+            order.append("the window of the program closes")
+            return 0
+
+    monkeypatch.setattr(mw, "UpdateDialog", Program)
 
 
 def _new_entry(name: str = "nuovo", **extra) -> plugin_index.Entry:
@@ -243,23 +298,18 @@ def test_a_manual_check_that_fails_warns_in_the_log(window, monkeypatch):
     shown = _fake_dialog(monkeypatch)
     before = len(w.log_pane.entries)
     assert w._check_plugins(manual=True)
-    _wait(app, lambda: any(level == logging.WARNING for level, _ in _rows(w)[before:]), "the warning in the log")
-    warning = [text for level, text in _rows(w)[before:] if level == logging.WARNING]
-    assert len(warning) == 1 and "offline" in warning[0] and not shown  # no window for a failed look either
+    _wait(app, lambda: len(w.log_pane.entries) > before, "the warning in the log")
+    app.processEvents()
+    rows = _rows(w)[before:]
+    assert len(rows) == 1  # one row, not a line of the logger and another of the window
+    assert rows[0][0] == logging.WARNING and "could not be read: offline" in rows[0][1] and not shown
 
 
 def test_the_names_seen_are_remembered_between_looks(window, monkeypatch):
     w, app = window
     calls = _fake_run(monkeypatch, PluginUpdates(seen=["a", "b"]))
     _fake_dialog(monkeypatch)
-    ended = _counting(w)
-
-    def look():
-        """One look, to the end: the window has dealt with what it found."""
-        n = len(ended)
-        assert w._check_plugins(manual=False)
-        _wait(app, lambda: len(ended) > n, "the look to end")
-
+    look = _looker(w, app)
     look()  # nothing stored: the first look
     assert calls[0]["seen"] is None
     look()
@@ -276,33 +326,31 @@ def test_two_real_looks_at_an_index(windows, tmp_path, monkeypatch):
     _install_folder(folder, "a")
     newer = _entry(_wheel(tmp_path / "a-0.2.0-py3-none-any.whl", "a", version="0.2.0"), "a", version="0.2.0")
     zeta = _entry(_wheel(tmp_path / "z-0.1.0-py3-none-any.whl", "z"), "z", title="Zeta", description="Una novità")
+    eta = _entry(_wheel(tmp_path / "eta-0.1.0-py3-none-any.whl", "eta"), "eta", title="Eta", description="Un'altra")
     monkeypatch.setenv("PPG_PLUGINS_DIR", str(folder))
-    monkeypatch.setenv("PPG_PLUGIN_INDEX", _index(tmp_path, [newer]))  # the index is a file of the test
+    monkeypatch.setenv("PPG_PLUGIN_INDEX", _index(tmp_path, [newer, zeta]))  # the index is a file of the test
     w = make()
     shown = _fake_dialog(monkeypatch)
-    ended = _counting(w)
-
-    def look(manual=False):
-        n = len(ended)
-        assert w._check_plugins(manual=manual)
-        _wait(app, lambda: len(ended) > n, "the look to end")
-
-    look()  # the first look: the update is downloaded, the index is only recorded
+    look = _looker(w, app)
+    look()  # the first look: the update is downloaded, the plugin the user does not have is only recorded
     assert len(shown) == 1 and "a 0.1.0 → 0.2.0" in _text(shown[0]) and "Zeta" not in _text(shown[0])
     assert plugin_updates.staged(folder) == {"a": "0.2.0"}
     assert [i.version for i in Manager(folder).discover()] == ["0.1.0"]  # in use at the next start, not before
-    assert json.loads(w.settings.value("plugins_seen")) == ["a"]
-    monkeypatch.setenv("PPG_PLUGIN_INDEX", _index(tmp_path, [newer, zeta]))  # the index gains a plugin
+    assert json.loads(w.settings.value("plugins_seen")) == ["a", "z"]
+    monkeypatch.setenv("PPG_PLUGIN_INDEX", _index(tmp_path, [newer, zeta, eta]))  # the index gains a plugin
     look()
     assert len(shown) == 2
     text = _text(shown[1])
-    assert "Zeta" in text and "Una novità" in text  # announced as new
+    assert "Eta" in text and "Un'altra" in text  # announced as new
+    assert "Zeta" not in text  # the first look recorded it
     assert "0.2.0" not in text  # the update waiting for the restart is not told again
-    assert not (folder / "z").exists()  # a new plugin is never installed by itself
+    assert not (folder / "z").exists() and not (folder / "eta").exists()  # a new plugin is never installed by itself
     look()  # nothing new now: nothing said
-    assert len(shown) == 2 and json.loads(w.settings.value("plugins_seen")) == ["a", "z"]
-    look(manual=True)
-    assert (logging.INFO, "Plugin: nessun aggiornamento") in _rows(w)
+    assert len(shown) == 2 and json.loads(w.settings.value("plugins_seen")) == ["a", "eta", "z"]
+    look(manual=True)  # the update staged is ready, and the manual look says so
+    rows = _rows(w)
+    assert (logging.INFO, "Plugin a: la 0.2.0 è pronta, attiva dal prossimo avvio") in rows
+    assert (logging.INFO, "Plugin: nessun aggiornamento") not in rows and len(shown) == 2
 
 
 def test_the_switch_turns_installing_off(window, monkeypatch):
@@ -311,20 +359,18 @@ def test_the_switch_turns_installing_off(window, monkeypatch):
     assert w.a_plugins_auto_update.text() == "Aggiorna i plugin da soli"
     calls = _fake_run(monkeypatch, PluginUpdates(available=[("a", "0.1.0", "0.2.0")], seen=["a"]))
     shown = _fake_dialog(monkeypatch)
+    look = _looker(w, app)  # every look is waited for to its end: a look left running reaches the next test
     w.a_plugins_auto_update.setChecked(False)
     assert w.settings.value("plugins_auto_update") == "false"
-    assert w._check_plugins(manual=False)
-    _wait(app, lambda: shown, "the summary")
-    assert calls[0]["update"] is False and calls[0]["folder"] == w.plugins.folder
+    look()
+    assert len(shown) == 1 and calls[0]["update"] is False and calls[0]["folder"] == w.plugins.folder
     text = _text(shown[0])
     assert "Aggiornamenti disponibili" in text and "a 0.1.0 → 0.2.0" in text  # told, not installed
     assert "spento" in text and "attivi dal prossimo avvio" not in text
-    _wait(app, lambda: not w.plugin_checker.running, "the look to end")
     w.a_plugins_auto_update.setChecked(True)
     assert w.settings.value("plugins_auto_update") == "true"
-    assert w._check_plugins(manual=False)
-    _wait(app, lambda: len(calls) == 2, "the second look")
-    assert calls[1]["update"] is True
+    look()
+    assert len(calls) == 2 and calls[1]["update"] is True  # the look after it downloads
 
 
 def test_the_switch_is_in_the_help_menu_and_remembered(windows):
@@ -397,19 +443,214 @@ def test_one_check_at_a_time(window, monkeypatch, tmp_path):
     _wait(app, lambda: not w.plugin_checker.running, "the second look to end")
 
 
+# ---------------------------------------------------------------------------------------- told once
+# kind -> (what a look finds of that kind at a version, the key kept in ``plugins_told`` for it)
+KINDS = {
+    "waiting": (lambda v: PluginUpdates(waiting=[("b", v, REASON)], seen=["b"]), "waiting:b:{}"),
+    "available": (lambda v: PluginUpdates(available=[("b", "0.1.0", v)], seen=["b"]), "available:b:{}"),
+    # a failed update has no version of its own in the result: the message stands in its place
+    "failed": (lambda v: PluginUpdates(failed=[("b", f"b: the wheel could not be downloaded ({v})")], seen=["b"]),
+               "failed:b:b: the wheel could not be downloaded ({})"),
+}
+
+
+@pytest.mark.parametrize("kind", list(KINDS))
+def test_the_daily_look_tells_an_item_once_per_version(window, monkeypatch, kind):
+    w, app = window
+    make, key = KINDS[kind]
+    gone = PluginUpdates(seen=["b"])
+    _fake_run(monkeypatch, [make("0.3.0"), make("0.3.0"), make("0.4.0"), make("0.4.0"), gone, make("0.4.0")])
+    shown = _fake_dialog(monkeypatch)
+    look = _looker(w, app)
+
+    def told():
+        return json.loads(w.settings.value("plugins_told"))
+
+    look()  # the first day: told, and remembered
+    assert len(shown) == 1 and "0.3.0" in _text(shown[0]) and told() == [key.format("0.3.0")]
+    look()  # the next day, the same item: nothing opens
+    assert len(shown) == 1 and told() == [key.format("0.3.0")]
+    look()  # another version of it: the summary opens with that item alone, and the old entry is dropped
+    assert len(shown) == 2 and "0.4.0" in _text(shown[1]) and "0.3.0" not in _text(shown[1])
+    assert told() == [key.format("0.4.0")]
+    look(manual=True)  # the user asks: everything is shown again
+    assert len(shown) == 3 and "0.4.0" in _text(shown[2])
+    look()  # the item is gone ...
+    assert len(shown) == 3 and told() == []
+    look()  # ... and back: told again
+    assert len(shown) == 4
+
+
+def test_the_daily_summary_has_only_what_was_not_told(window, monkeypatch):
+    w, app = window
+    waiting = ("b", "0.3.0", REASON)
+    nuovo = _new_entry("nuovo", title="Plugin nuovo")
+    news = PluginUpdates(updated=[("a", "0.1.0", "0.2.0")], waiting=[waiting], new=[nuovo], seen=["a", "b", "nuovo"])
+    _fake_run(monkeypatch, [PluginUpdates(waiting=[waiting], seen=["b"]), news])
+    shown = _fake_dialog(monkeypatch)
+    look = _looker(w, app)
+    look()
+    assert len(shown) == 1 and "b 0.3.0" in _text(shown[0])
+    look()  # an update made and a new plugin are always news; the plugin that waits was told
+    assert len(shown) == 2
+    text = _text(shown[1])
+    assert "a 0.1.0 → 0.2.0" in text and "Plugin nuovo" in text
+    assert "b 0.3.0" not in text and "In attesa" not in text
+    assert json.loads(w.settings.value("plugins_told")) == ["waiting:b:0.3.0"]  # and is still remembered
+
+
+def test_a_damaged_list_of_what_was_told_is_an_empty_one(window, monkeypatch):
+    w, app = window
+    _fake_run(monkeypatch, PluginUpdates(waiting=[("b", "0.3.0", REASON)], seen=["b"]))
+    shown = _fake_dialog(monkeypatch)
+    look = _looker(w, app)
+    for garbage in ("not json", "{}", '"a"', "42"):
+        w.settings.setValue("plugins_told", garbage)
+        look()
+        assert len(shown) > 0 and json.loads(w.settings.value("plugins_told")) == ["waiting:b:0.3.0"], garbage
+        shown.clear()
+
+
+def test_a_manual_check_tells_the_updates_waiting_for_the_restart(window, monkeypatch):
+    w, app = window
+    pending = [("a", "0.1.0", "0.2.0"), ("b", "0.3.0", "0.4.0")]
+    _fake_run(monkeypatch, PluginUpdates(pending=pending, seen=["a", "b"]))
+    shown = _fake_dialog(monkeypatch)
+    look = _looker(w, app)
+    before = len(w.log_pane.entries)
+    look()  # the daily look says nothing of them: they were told when they were downloaded
+    assert len(w.log_pane.entries) == before
+    look(manual=True)  # the manual one does: one line for each, not "no updates"
+    assert _rows(w)[before:] == [(logging.INFO, "Plugin a: la 0.2.0 è pronta, attiva dal prossimo avvio"),
+                                 (logging.INFO, "Plugin b: la 0.4.0 è pronta, attiva dal prossimo avvio")]
+    assert not shown
+
+
+def test_an_index_with_no_plugin_records_nothing(window, monkeypatch):
+    w, app = window
+    both = PluginUpdates(seen=["a", "b"])
+    calls = _fake_run(monkeypatch, [PluginUpdates(seen=[]), both, both])
+    _fake_dialog(monkeypatch)
+    look = _looker(w, app)
+    look()  # the index is valid and holds no plugin yet
+    assert w.settings.value("plugins_seen", "") == ""  # nothing is recorded: the first look is still to come
+    look()
+    assert calls[1]["seen"] is None  # so this is the first look, and it announces no plugin as new
+    assert json.loads(w.settings.value("plugins_seen")) == ["a", "b"]
+    look()
+    assert calls[2]["seen"] == ["a", "b"]
+
+
+# ---------------------------------------------------------------------------------------- one window at a time
+def test_the_summary_waits_for_the_window_of_the_program_update(window, monkeypatch):
+    w, app = window
+    order = []
+    shown = _fake_dialog(monkeypatch, order=order)
+    result = PluginUpdates(updated=[("a", "0.1.0", "0.2.0")], seen=["a"])
+    # the look of the plugins ends while the window of the program's update is open
+    _fake_program_dialog(monkeypatch, order, during=lambda: w.plugin_checker.finished.emit(result, None, False))
+    w._updates_checked(_release(), None, False)
+    assert order == ["the window of the program opens", "the window of the program closes",
+                     "the summary opens", "the summary closes"]
+    assert len(shown) == 1
+
+
+def test_the_window_of_the_program_update_waits_for_the_summary(window, monkeypatch):
+    w, app = window
+    order = []
+    _fake_program_dialog(monkeypatch, order)
+    _fake_dialog(monkeypatch, order=order, during=lambda: w.update_checker.finished.emit(_release(), None, False))
+    w._plugins_checked(PluginUpdates(updated=[("a", "0.1.0", "0.2.0")], seen=["a"]), None, False)
+    assert order == ["the summary opens", "the summary closes",
+                     "the window of the program opens", "the window of the program closes"]
+
+
+def test_the_summary_waits_for_any_modal_window(window, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    w, app = window
+    monkeypatch.setattr(mw.MainWindow, "UPDATE_WINDOW_POLL_MS", 20)  # the wait for a window to close, shortened
+    shown = _fake_dialog(monkeypatch)
+    other = QDialog(w)  # a window of the program, open when the look ends
+    other.setModal(True)
+    other.show()
+    app.processEvents()
+    try:
+        w._plugins_checked(PluginUpdates(waiting=[("b", "0.3.0", REASON)], seen=["b"]), None, False)
+        for _ in range(10):
+            time.sleep(0.02)
+            app.processEvents()
+        assert not shown and w.settings.value("plugins_told", "") == ""  # held back, and not remembered as told
+        w._plugins_checked(PluginUpdates(waiting=[("b", "0.4.0", REASON)], seen=["b"]), None, False)  # a newer answer
+    finally:
+        other.close()
+    _wait(app, lambda: shown, "the summary, once the window was closed")
+    app.processEvents()
+    assert len(shown) == 1 and "0.4.0" in _text(shown[0])  # the newer answer replaced the one that waited
+    assert json.loads(w.settings.value("plugins_told")) == ["waiting:b:0.4.0"]
+
+
+# ---------------------------------------------------------------------------------------- a manual request
+def test_a_manual_request_met_by_the_look_that_runs_is_answered(window, monkeypatch):
+    w, app = window
+    gate, started = threading.Event(), threading.Event()
+    calls = []
+
+    def slow_first(seen=None, *, folder=None, update=True, url=None, progress=None):
+        calls.append(1)
+        if len(calls) == 1:
+            started.set()
+            gate.wait(10)
+        return PluginUpdates(seen=["a"])
+
+    monkeypatch.setattr(plugin_updates, "run", slow_first)
+    _fake_dialog(monkeypatch)
+    ended = _counting(w)
+    before = len(w.log_pane.entries)
+    try:
+        assert w._check_plugins(manual=False)  # the daily look
+        assert started.wait(5)
+        assert not w._check_plugins(manual=True)  # asked for while it runs: refused, but the look answers for it too
+    finally:
+        gate.set()
+    _wait(app, lambda: len(ended) == 1, "the daily look to end")
+    assert _rows(w)[before:] == [(logging.INFO, "Plugin: nessun aggiornamento")]
+    assert w._check_plugins(manual=False)  # that was one request, not every look after it
+    _wait(app, lambda: len(ended) == 2, "the next look to end")
+    assert _rows(w)[before:] == [(logging.INFO, "Plugin: nessun aggiornamento")]
+
+
+@pytest.mark.parametrize("program, plugins, text", [
+    (True, True, "Controllo degli aggiornamenti..."),
+    (True, False, "Controllo degli aggiornamenti... (il controllo dei plugin è già in corso)"),
+    (False, True, "Controllo degli aggiornamenti... (il controllo della versione del programma è già in corso)"),
+    (False, False, "Controllo degli aggiornamenti gia' in corso"),
+])
+def test_the_manual_check_says_which_look_is_already_running(window, monkeypatch, program, plugins, text):
+    w, app = window
+    monkeypatch.setattr(w.update_checker, "start", lambda manual=False, skip=None: program)
+    monkeypatch.setattr(w.plugin_checker, "start", lambda *args: plugins)
+    w.check_updates()
+    assert w.statusBar().currentMessage() == text
+
+
 # ---------------------------------------------------------------------------------------- the checker
 def test_the_checker_reports_in_the_interface_thread(window, tmp_path):
+    import shiboken6
     from PySide6.QtCore import QObject, Slot
 
     _, app = window
     got = []
+    owner = QObject()  # the parent of the checkers and the receiver: deleted at the end, here, in the interface thread
 
     class Receiver(QObject):
         @Slot(object, object, bool)
         def done(self, result, error, manual):
             got.append((result, error, manual, threading.current_thread() is threading.main_thread()))
 
-    receiver = Receiver()
+    receiver = Receiver(owner)
     result = PluginUpdates(seen=["a"])
     calls = []
 
@@ -417,23 +658,27 @@ def test_the_checker_reports_in_the_interface_thread(window, tmp_path):
         calls.append((seen, folder, update))
         return result
 
-    ok = update_dialog.PluginUpdateChecker(run=run)
-    ok.finished.connect(receiver.done)
-    assert ok.start(True, ["a"], False, tmp_path)
     error = plugin_index.PluginError("the plugin index could not be read: down")
 
     def fail(seen=None, *, folder=None, update=True, url=None, progress=None):
         raise error
 
-    bad = update_dialog.PluginUpdateChecker(run=fail)
-    bad.finished.connect(receiver.done)
-    assert bad.start(False, None, True, tmp_path)
-    _wait(app, lambda: len(got) == 2 and not ok.running and not bad.running, "both looks")
-    assert (result, None, True, True) in got and (None, error, False, True) in got
-    assert calls == [(["a"], tmp_path, False)]  # what start() was given is what run() gets
+    try:
+        ok = update_dialog.PluginUpdateChecker(owner, run=run)
+        ok.finished.connect(receiver.done)
+        assert ok.start(True, ["a"], False, tmp_path)
+        bad = update_dialog.PluginUpdateChecker(owner, run=fail)
+        bad.finished.connect(receiver.done)
+        assert bad.start(False, None, True, tmp_path)
+        _wait(app, lambda: len(got) == 2 and not ok.running and not bad.running, "both looks")
+        assert (result, None, True, True) in got and (None, error, False, True) in got
+        assert calls == [(["a"], tmp_path, False)]  # what start() was given is what run() gets
+    finally:
+        shiboken6.delete(owner)  # no QObject is left to be deleted by a collection in some other thread
 
 
-def test_a_look_that_ends_after_the_window_closed_is_silent(tmp_path, windows, monkeypatch):
+@pytest.mark.parametrize("which", ["program", "plugins"])
+def test_a_check_that_ends_after_the_window_closed_is_silent(tmp_path, windows, monkeypatch, caplog, which):
     import shiboken6
     from PySide6.QtCore import QObject
 
@@ -443,17 +688,33 @@ def test_a_look_that_ends_after_the_window_closed_is_silent(tmp_path, windows, m
     monkeypatch.setattr(threading, "excepthook", lambda args: unhandled.append(args.exc_value))
     owner = QObject()
 
-    def slow(seen=None, *, folder=None, update=True, url=None, progress=None):
+    def slow_program(skip=None):
+        gate.wait(10)
+        return None
+
+    def slow_plugins(seen=None, *, folder=None, update=True, url=None, progress=None):
         gate.wait(10)
         return PluginUpdates()
 
-    checker = update_dialog.PluginUpdateChecker(owner, run=slow)
-    assert checker.start(False, None, True, tmp_path)
-    thread = next(t for t in threading.enumerate() if t.name == "ppg-plugin-update-check")
-    shiboken6.delete(owner)  # the window and its checker are gone
-    gate.set()
-    thread.join(10)
+    if which == "program":
+        checker = update_dialog.UpdateChecker(owner, check=slow_program)
+        assert checker.start(False, None)
+    else:
+        checker = update_dialog.PluginUpdateChecker(owner, run=slow_plugins)
+        assert checker.start(False, None, True, tmp_path)
+    thread = next(t for t in threading.enumerate() if t.name == checker.thread_name)
+    with caplog.at_level(logging.DEBUG, logger=update_dialog.__name__):
+        shiboken6.delete(owner)  # the window and its checker are gone
+        gate.set()
+        thread.join(10)
     assert not thread.is_alive() and unhandled == []
+    assert any("closed" in record.getMessage() for record in caplog.records)  # said at the debug level, not lost
+
+
+def test_both_checkers_are_one_check_in_a_thread():
+    assert issubclass(update_dialog.UpdateChecker, update_dialog.BackgroundCheck)
+    assert issubclass(update_dialog.PluginUpdateChecker, update_dialog.BackgroundCheck)
+    assert update_dialog.UpdateChecker.thread_name != update_dialog.PluginUpdateChecker.thread_name
 
 
 # ---------------------------------------------------------------------------------------- the summary
@@ -550,6 +811,7 @@ def test_applied_updates_are_written_in_the_log(windows, tmp_path, monkeypatch):
     w = make()
     assert w.plugins.applied == [("a", "0.1.0", "0.2.0")] and w.plugins.get("a").version == "0.2.0"
     assert (logging.INFO, "Plugin a aggiornato dalla 0.1.0 alla 0.2.0") in _rows(w)
+    assert not any("updated from" in text for _level, text in _rows(w))  # not once more, in English, from the engine
     monkeypatch.setenv("PPG_PLUGINS_DIR", str(tmp_path / "other-plugins"))  # a start with nothing staged
     assert not any("aggiornato dalla" in text for _level, text in _rows(make()))
 
@@ -581,10 +843,13 @@ def test_the_plugin_manager_says_when_an_update_is_ready(windows, tmp_path, monk
     folder = tmp_path / "plugins"
     for name in "abcde":
         _install_folder(folder, name)
+    _install_folder(folder, "g", version="0.2.0")  # the index says "0.2": the same version
+    _install_folder(folder, "h", version="0.3.0")  # newer than the index has
     (folder / "e").rename(folder / "my-e")  # by hand: an update would go to <folder>/e
     entries = {}
     for name, version, extra in [("a", "0.2.0", {}), ("b", "0.2.0", {}), ("c", "0.3.0", {"min_app": "99.0"}),
-                                 ("d", "0.1.0", {}), ("e", "0.2.0", {}), ("f", "0.1.0", {})]:
+                                 ("d", "0.1.0", {}), ("e", "0.2.0", {}), ("f", "0.1.0", {}), ("g", "0.2", {}),
+                                 ("h", "0.2.0", {})]:
         wheel = _wheel(tmp_path / f"{name}-{version}-py3-none-any.whl", name, version=version)
         entries[name] = _entry(wheel, name, version=version, **extra)
     monkeypatch.setenv("PPG_PLUGINS_DIR", str(folder))
@@ -601,6 +866,7 @@ def test_the_plugin_manager_says_when_an_update_is_ready(windows, tmp_path, monk
     assert notes["b"] == "installata la 0.1.0: aggiornabile"
     assert notes["c"] == REASON
     assert notes["d"] == "installato (0.1.0)"
+    assert notes["g"] == "installato (0.2.0)" and notes["h"] == "installato (0.3.0)"  # 0.2 is 0.2.0, not "aggiornabile"
     assert "update it by hand" in notes["e"] and str(folder / "my-e") in notes["e"]
     assert notes["f"] == ""
     dialog.close()

@@ -167,15 +167,16 @@ class PluginsDialog(QDialog):
         beyond it - an update downloaded already, one that waits (the plugin is not where an update would go), or one
         that can be installed (:func:`..plugins.updates.status`)."""
         from ..plugins import updates
+        from ..updates import is_newer
 
         state, why = updates.status(entry, info, ready, self.manager.folder)
         if state == "staged":
             return tr("pronta la {0}: attiva dal prossimo avvio", entry.version)
         if state == "waiting":
             return translate(why)
-        if info.version == entry.version:
-            return tr("installato ({0})", info.version)
-        return tr("installata la {0}: aggiornabile", info.version)
+        if is_newer(entry.version, info.version):  # one installed with pip: the index has a newer one too
+            return tr("installata la {0}: aggiornabile", info.version)
+        return tr("installato ({0})", info.version)  # 0.2 is 0.2.0, and a version newer than the index's is no update
 
     def fetch(self) -> None:
         from ..plugins import index, updates

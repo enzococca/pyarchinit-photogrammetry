@@ -4,7 +4,9 @@ look at the plugin index and the summary of what it found (the work is done by
 :mod:`pyarchinit_photogrammetry.plugins.updates`)."""
 from __future__ import annotations
 
+import dataclasses
 import html
+import logging
 import threading
 from pathlib import Path
 
@@ -16,6 +18,8 @@ from .. import __version__, updates
 from ..plugins import updates as plugin_updates
 
 from .i18n import tr, translate
+
+log = logging.getLogger(__name__)
 
 ERROR_TEXTS = {
     "offline": "GitHub non e' raggiungibile: controlla la connessione a Internet.",
@@ -32,39 +36,55 @@ def error_text(exc: Exception) -> str:
     return tr(ERROR_TEXTS.get(getattr(exc, "kind", ""), "Controllo degli aggiornamenti non riuscito."))
 
 
-class UpdateChecker(QObject):
-    """Asks GitHub for the latest release in a background thread. ``finished(release, error,
-    manual)`` is delivered in the GUI thread: the checker lives there, so the connection to its
-    receivers is queued."""
+class BackgroundCheck(QObject):
+    """A check that runs in a background thread, one at a time. ``finished(result, error, manual)`` is delivered in the
+    GUI thread: the checker lives there, so the connection to its receivers is queued."""
 
     finished = Signal(object, object, bool)
+    thread_name = "ppg-check"
 
-    def __init__(self, parent=None, check=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
         self.running = False
-        self._check = check or updates.check
         self.finished.connect(self._done)
 
-    def start(self, manual: bool = False, skip: str | None = None) -> bool:
-        """``skip``: a version the user chose to skip (ignored when the check is ``manual``)."""
+    def _launch(self, manual: bool, check) -> bool:
+        """Run ``check()`` in a thread of its own; False when a check is running already."""
         if self.running:
             return False
         self.running = True
 
         def work():
-            release = error = None
+            result = error = None
             try:
-                release = self._check(skip=None if manual else skip)
+                result = check()
             except Exception as exc:  # a failed check must never break the interface
                 error = exc
-            self.finished.emit(release, error, manual)
+            try:
+                self.finished.emit(result, error, manual)
+            except RuntimeError:  # the checker is gone - its window was closed - while the check went on
+                log.debug("%s: the window was closed before the check ended", self.thread_name)
 
-        threading.Thread(target=work, name="ppg-update-check", daemon=True).start()
+        threading.Thread(target=work, name=self.thread_name, daemon=True).start()
         return True
 
     @Slot(object, object, bool)
     def _done(self, *_):
         self.running = False
+
+
+class UpdateChecker(BackgroundCheck):
+    """Asks GitHub for the latest release in a background thread. ``finished(release, error, manual)``."""
+
+    thread_name = "ppg-update-check"
+
+    def __init__(self, parent=None, check=None):
+        super().__init__(parent)
+        self._check = check or updates.check
+
+    def start(self, manual: bool = False, skip: str | None = None) -> bool:
+        """``skip``: a version the user chose to skip (ignored when the check is ``manual``)."""
+        return self._launch(manual, lambda: self._check(skip=None if manual else skip))
 
 
 class UpdateDialog(QDialog):
@@ -134,46 +154,51 @@ class UpdateDialog(QDialog):
             self.accept()
 
 
-class PluginUpdateChecker(QObject):
+class PluginUpdateChecker(BackgroundCheck):
     """Looks at the plugin index in a background thread (:func:`..plugins.updates.run`: the newer versions
     of the plugins installed by the program are downloaded and kept for the next start, unless ``update``
-    is off). ``finished(result, error, manual)`` is delivered in the GUI thread, as with
-    :class:`UpdateChecker`; ``result`` is a :class:`..plugins.updates.PluginUpdates`. Built as
-    :class:`UpdateChecker` is: ``run`` stands in for ``plugins.updates.run`` (the tests give their own)."""
+    is off). ``finished(result, error, manual)``; ``result`` is a :class:`..plugins.updates.PluginUpdates`.
+    ``run`` stands in for ``plugins.updates.run`` (the tests give their own)."""
 
-    finished = Signal(object, object, bool)
+    thread_name = "ppg-plugin-update-check"
 
     def __init__(self, parent=None, run=None):
         super().__init__(parent)
-        self.running = False
         self._run = run
-        self.finished.connect(self._done)
 
     def start(self, manual: bool, seen: list[str] | None, update: bool, folder: Path) -> bool:
         """``seen``: the names of the index told so far (None: the first look, which tells no plugin as new);
         ``update``: download the newer versions (else only say they exist); ``folder``: the plugin folder.
         False when a look is running already."""
-        if self.running:
-            return False
-        self.running = True
+        return self._launch(manual, lambda: (self._run or plugin_updates.run)(seen, folder=folder, update=update))
 
-        def work():
-            result = error = None
-            try:
-                result = (self._run or plugin_updates.run)(seen, folder=folder, update=update)
-            except Exception as exc:  # a failed look must never break the interface
-                error = exc
-            try:
-                self.finished.emit(result, error, manual)
-            except RuntimeError:  # the window was closed while the look went on
-                pass
 
-        threading.Thread(target=work, name="ppg-plugin-update-check", daemon=True).start()
-        return True
+def _told_items(result: plugin_updates.PluginUpdates):
+    """The items of ``result`` a daily look tells once, as ``(key, kind, item)``: the plugins that wait and the updates
+    that could be installed but were not (the key is ``kind:name:version``, the version of the index), and the updates
+    that failed (the result holds no version for them: the message stands in its place)."""
+    for item in result.waiting:
+        yield f"waiting:{item[0]}:{item[1]}", "waiting", item
+    for item in result.available:
+        yield f"available:{item[0]}:{item[2]}", "available", item
+    for item in result.failed:
+        yield f"failed:{item[0]}:{item[1]}", "failed", item
 
-    @Slot(object, object, bool)
-    def _done(self, *_):
-        self.running = False
+
+def told_keys(result: plugin_updates.PluginUpdates) -> list[str]:
+    """What the window keeps (``plugins_told``) of a look: the keys of the items it tells once, sorted. Whatever is not
+    in the lists of the look any more drops out of it, so an item that goes away and comes back is told again."""
+    return sorted(key for key, _kind, _item in _told_items(result))
+
+
+def untold(result: plugin_updates.PluginUpdates, told) -> plugin_updates.PluginUpdates:
+    """``result`` with only the waiting, available and failed items whose key is not in ``told``: what a daily look
+    shows. The updates made and the new plugins are always news."""
+    fresh: dict[str, list] = {"waiting": [], "available": [], "failed": []}
+    for key, kind, item in _told_items(result):
+        if key not in told:
+            fresh[kind].append(item)
+    return dataclasses.replace(result, **fresh)
 
 
 def plugin_summary_html(result: plugin_updates.PluginUpdates) -> str:
