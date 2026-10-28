@@ -108,6 +108,36 @@ aarch64) e, su un tag `core-v*`, le pubblica su PyPI; il workflow `tests` esegue
 con il nucleo nativo e 3.11 senza; il workflow `desktop` lo include nelle applicazioni.
 
 
+## Nuove versioni di pycolmap e Open3D
+
+Il programma prende pycolmap e Open3D fino alle versioni con cui è stato provato (`pycolmap>=4.2.1,<4.3` e
+`open3d>=0.18,!=0.20.0,<0.21` in `pyproject.toml`): una loro release arriva a chi installa con pip solo dopo essere
+stata provata. Le applicazioni impacchettate contengono le versioni con cui sono state costruite e non cambiano da
+sole.
+
+Il workflow `upstream` prova le più nuove ogni lunedì, e a richiesta con una versione da provare. Installa la versione
+più nuova di ciascuna su PyPI oltre a quella installata - comprese le pre-release, escluse le versioni tolte con
+`!=` - confronta la loro API pubblica con quella installata ed esegue i test con loro, quelli falliti una seconda
+volta. Il riassunto del run elenca che cosa tolgono di quello che il programma usa (con file e righe), che cosa
+aggiungono (tra cui un back-end o un dispositivo GPU), i test falliti e che cosa fare:
+
+* i test passano e la versione è oltre il tetto: alzare il tetto in `pyproject.toml`, poi pubblicare;
+* falliscono e la versione è oltre il tetto: chi usa pip è al sicuro; adattare il programma prima di alzarlo;
+* falliscono e la versione è dentro l'intervallo (una release di correzione): chi usa pip la riceve già; escluderla
+  (`!=X.Y.Z`) e pubblicare.
+
+Una nuova versione di una delle due vuol dire anche nuove wheel ARM (la sezione seguente) e una nuova build delle
+applicazioni.
+
+Che cosa le due librerie sanno eseguire su una GPU si chiede a loro, non si deduce dalle versioni: `ppg doctor`
+(*Aiuto > Diagnostica ambiente*) ha le righe "COLMAP GPU" (i flag `has_<nome>` di pycolmap: CUDA con le wheel CUDA di
+Linux, nessuno con quelle di PyPI per macOS e Windows) e "Open3D GPU" (i dispositivi di `open3d.core` disponibili), e
+avvisa di una versione di una delle due con cui questa installazione non è stata provata. Un back-end che una build
+successiva aggiunge - Metal, per esempio - compare lì il giorno in cui viene installata; usarlo è una scelta misurata
+contro i kernel GPU del programma (wgpu: Metal, Vulkan, DirectX 12), che restano per i sistemi che la libreria non
+copre.
+
+
 ## Linux su ARM (aarch64): pycolmap e Open3D
 
 pycolmap 4.2.1 e Open3D 0.19.0 non pubblicano wheel per Linux su ARM (Open3D 0.20.0 sì, ma la sua

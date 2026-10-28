@@ -248,6 +248,12 @@ on the public WorldView-3 datasets.
 
 Open points, in no fixed order:
 
+* **RustGIS both ways** (planned for 1.6.2): the drawings and the products of a chunk in the
+  [RustGIS](https://github.com/opengeos/RustGIS) that is open, in the system of the chunk, and what is drawn, changed
+  or deleted there back into the window, as with QGIS; through RustGIS's own interface for other programs (it
+  has to be turned on in RustGIS: *Let your Agents Control RustGIS*). PyArchInit stays on the side of the program:
+  the units drawn in RustGIS reach it from the window.
+
 * **GNSS, the next step**: the events of a receiver (the time marks a camera leaves in the observations of a
   receiver of one's own), the logs of ArduPilot and PX4 for drones built by hand, the raw files of u-blox and Emlid
   receivers, the `.DAT` files of a DJI D-RTK base.

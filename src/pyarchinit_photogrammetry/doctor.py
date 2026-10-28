@@ -86,6 +86,73 @@ def _version(mod: str) -> str | None:
         return "?"
 
 
+def _requires() -> list[str] | None:
+    """The requirements of this install of the program, read from its metadata; None in the packaged application,
+    which carries the versions it was built and tested with, or without metadata (a source tree on the path)."""
+    from importlib import metadata
+
+    if getattr(sys, "frozen", False):
+        return None
+    try:
+        return metadata.requires("pyarchinit-photogrammetry") or []
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def outside(dist: str, version: str | None) -> str | None:
+    """The requirement of this install on ``dist`` that ``version`` does not meet (``"pycolmap<4.3,>=4.2.1"``: what
+    to install to go back to a version the program was tested with), or None: met, not bounded by the program, the
+    version unknown, or no metadata (:func:`_requires`)."""
+    requires = _requires()
+    if not requires or not version or version == "?":
+        return None
+    from packaging.requirements import InvalidRequirement, Requirement
+    from packaging.utils import canonicalize_name
+    from packaging.version import InvalidVersion, Version
+
+    for line in requires:
+        try:
+            req = Requirement(line)
+        except InvalidRequirement:
+            continue
+        if canonicalize_name(req.name) != canonicalize_name(dist):
+            continue
+        try:
+            met = req.specifier.contains(Version(version), prereleases=True)
+        except InvalidVersion:
+            return None
+        return None if met else f"{req.name}{req.specifier}"
+    return None
+
+
+def colmap_gpu_check() -> Check:
+    """What COLMAP itself can run on a GPU here (:func:`.engine.upstream.colmap_gpu`): CUDA makes the depth maps with
+    COLMAP's PatchMatch; a back-end of a later build is named, and used once measured against the program's own
+    kernels (the line "GPU (wgpu)")."""
+    from .engine import upstream
+
+    found = upstream.colmap_gpu()
+    if not found:
+        return Check("COLMAP GPU", OK, "none (COLMAP runs on the CPU)")
+    parts = ["CUDA: COLMAP's PatchMatch makes the depth maps"] if "cuda" in found else []
+    others = [name.upper() for name in found if name != "cuda"]
+    if others:
+        parts.append(f"{', '.join(others)}: not used yet (the program's own kernels do that work)")
+    return Check("COLMAP GPU", OK, "; ".join(parts))
+
+
+def open3d_gpu_check() -> Check:
+    """The devices besides the CPU of this build of Open3D (:func:`.engine.upstream.open3d_gpu`): the program runs
+    Open3D on the CPU (fusion of the depth maps, Poisson), so a device found is named, not used."""
+    from .engine import upstream
+
+    found = upstream.open3d_gpu()
+    if not found:
+        return Check("Open3D GPU", OK, "none (Open3D runs on the CPU)")
+    return Check("Open3D GPU", OK, f"{', '.join(name.upper() for name in found)} available, not used: the program "
+                                   "runs Open3D on the CPU (fusion of the depth maps, Poisson)")
+
+
 PPK_HINT = ("pip install -U \"pyarchinit-photogrammetry-core>=0.5\" (the applications include it), or set PPG_RNX2RTKP "
             "to the rnx2rtkp program of RTKLIB-EX 2.5")
 
@@ -179,7 +246,11 @@ def run_checks(gui: bool = True) -> Report:
                        ("pyproj", "pyproj"), ("shapely", "shapely"), ("trimesh", "trimesh"), ("laspy", "laspy"),
                        ("ezdxf", "ezdxf"), ("sqlalchemy", "SQLAlchemy")):
         v = _version(mod)
-        r.add(label, OK if v else FAIL, v or "missing", "" if v else "pip install \"pyarchinit-photogrammetry[all]\"")
+        req = outside(mod, v) if mod == "pycolmap" else None
+        if req:
+            r.add(label, WARN, f"{v}: not a version this install was tested with", f'pip install "{req}"')
+        else:
+            r.add(label, OK if v else FAIL, v or "missing", "" if v else "pip install \"pyarchinit-photogrammetry[all]\"")
     try:
         from scipy.optimize import least_squares  # noqa: F401
         from scipy.sparse.linalg import svds  # noqa: F401
@@ -229,8 +300,12 @@ def run_checks(gui: bool = True) -> Report:
     elif v == "0.20.0":
         r.add("Open3D", WARN, v, "Open3D 0.20.0 crashes in Poisson reconstruction on some systems: the mesh step "
                                  "falls back to a height field. Install 0.19: pip install \"open3d==0.19.0\".")
+    elif req := outside("open3d", v):
+        r.add("Open3D", WARN, f"{v}: not a version this install was tested with", f'pip install "{req}"')
     else:
         r.add("Open3D", OK, v)
+    r.checks.append(colmap_gpu_check())
+    r.checks.append(open3d_gpu_check())
     v = _version("ifcopenshell")
     r.add("IfcOpenShell", OK if v else WARN, v or "missing (IFC export disabled)",
           "" if v else "pip install \"pyarchinit-photogrammetry[bim]\"")
