@@ -4,9 +4,11 @@ is never touched).
 :func:`check` compares them with the index of the plugin repository and *stages* each newer version this
 program can run: :func:`.index.install` downloads, checks and unpacks it into ``<plugins>/.updates/<name>/``
 and leaves the plugin in use as it is. :func:`apply_staged` puts it in place at the next start
-(:meth:`.Manager.load`, before any plugin is imported), so a running session never meets new modules of a
-plugin among its old ones; it also puts back a plugin an earlier swap left in a work folder and deletes what
-a crashed run left behind. :func:`run` is the whole check, for the window and for ``ppg plugins update``.
+(:meth:`.Manager.load`, before any plugin is imported), so the session that starts never meets new modules of a
+plugin among its old ones; any copy of the program that starts does it, also one started while a window is open
+(the window keeps the modules it loaded and should be restarted). It also puts back a plugin an earlier swap left
+in a work folder and deletes what a crashed run left behind. :func:`run` is the whole check, for the window and
+for ``ppg plugins update``.
 """
 from __future__ import annotations
 
@@ -188,13 +190,13 @@ def apply_staged(folder: str | os.PathLike) -> list[tuple[str, str, str]]:
         name = sub.name
         claim = sub.parent / f".applying-{name}-{os.getpid()}"
         try:
+            os.utime(sub)  # a rename keeps the time of the unpacking: touched first, no sweep sees the claim as old
+        except OSError:
+            pass
+        try:
             sub.rename(claim)
         except OSError:
             continue  # another program starting now has it
-        try:
-            os.utime(claim)  # a rename keeps the time of the unpacking: from now on the claim is fresh
-        except OSError:
-            pass
         installed = folder / name
         old = _version_of(installed, name) if installed.is_dir() else None
         new = _version_of(claim, name)

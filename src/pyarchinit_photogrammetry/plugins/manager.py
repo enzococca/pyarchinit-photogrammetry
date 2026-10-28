@@ -161,7 +161,8 @@ class Manager:
 
     def _apply_staged(self) -> None:
         """Put in place the updates staged in ``<folder>/.updates/``, once per folder per process: a
-        plugin imported already is never replaced under a running session."""
+        plugin this process imported already is never replaced by it (another copy of the program that
+        starts meanwhile may replace the files: the window then should be restarted)."""
         key = _norm(self.folder)
         if key in _UPDATED:
             return

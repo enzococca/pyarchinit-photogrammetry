@@ -494,6 +494,86 @@ def test_a_staged_update_claimed_after_days_is_fresh_for_the_sweep(tmp_path, fol
     assert time.time() - (folder / ".updates" / "a").stat().st_mtime < 3600  # claimed now, given back
 
 
+def test_the_claim_is_never_a_day_old_for_a_sweep_that_comes_right_after_it(tmp_path, folder, monkeypatch):
+    """A second copy of the program that starts just as the first claims an update runs the sweep: a claim still dated
+    from the unpacking, days ago, would be deleted as one a crashed run left behind."""
+    updates.check([_newer(tmp_path, "a", "0.2.0")], _installed(folder), None, folder)
+    days_ago = time.time() - 5 * 24 * 3600
+    os.utime(folder / ".updates" / "a", (days_ago, days_ago))  # unpacked days ago, a rename keeps that
+    real, swept = Path.rename, []
+
+    def rename(self, destination):
+        result = real(self, destination)
+        if Path(destination).name.startswith(".applying-"):  # the claim is made: the other copy sweeps now
+            updates._sweep(folder)
+            swept.append(Path(destination).exists())
+        return result
+
+    monkeypatch.setattr(Path, "rename", rename)
+    assert updates.apply_staged(folder) == [("a", "0.1.0", "0.2.0")]
+    assert swept == [True]  # the claim was still there after the sweep
+
+
+def _folders_to_swap(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """``new`` (just unpacked), ``target`` (the plugin it replaces) and the work folder of a swap."""
+    new, target, work = tmp_path / "unpacked", tmp_path / "plugins" / "a", tmp_path / "work"
+    for path, text in ((new, "new"), (target, "old")):
+        path.mkdir(parents=True)
+        (path / "version").write_text(text)
+    work.mkdir()
+    return new, target, work
+
+
+def _refuse_rename_of(monkeypatch, path: Path, times: int) -> list:
+    """From now on ``Path.rename`` raises a PermissionError for ``path`` (``times`` of them at most); the list holds
+    what was refused."""
+    real, refused = Path.rename, []
+
+    def rename(self, destination):
+        if self == path and len(refused) < times:
+            refused.append(destination)
+            raise PermissionError(13, "Access is denied")  # what Windows says while an antivirus holds the files
+        return real(self, destination)
+
+    monkeypatch.setattr(Path, "rename", rename)
+    return refused
+
+
+def test_a_rename_refused_for_a_moment_on_windows_is_tried_again(tmp_path, monkeypatch):
+    new, target, work = _folders_to_swap(tmp_path)
+    refused, pauses = _refuse_rename_of(monkeypatch, new, 2), []
+    monkeypatch.setattr(plugin_index.time, "sleep", pauses.append)
+    with monkeypatch.context() as on_windows:
+        on_windows.setattr(os, "name", "nt")
+        plugin_index.swap_folder(new, target, work)
+    assert len(refused) == 2 and pauses == [0.2, 0.2]  # refused twice, a short pause each time, then it went through
+    assert (target / "version").read_text() == "new" and not new.exists()
+
+
+def test_a_rename_that_windows_keeps_refusing_fails_and_the_old_plugin_stays(tmp_path, monkeypatch):
+    new, target, work = _folders_to_swap(tmp_path)
+    refused, pauses = _refuse_rename_of(monkeypatch, new, 99), []
+    monkeypatch.setattr(plugin_index.time, "sleep", pauses.append)
+    with monkeypatch.context() as on_windows:
+        on_windows.setattr(os, "name", "nt")
+        with pytest.raises(PermissionError):
+            plugin_index.swap_folder(new, target, work)
+    assert len(refused) == 6 and pauses == [0.2] * 5  # the first try and five more, with a pause before each of them
+    assert (target / "version").read_text() == "old" and (new / "version").read_text() == "new"  # nothing is lost
+
+
+def test_a_refused_rename_is_not_tried_again_on_other_systems(tmp_path, monkeypatch):
+    new, target, work = _folders_to_swap(tmp_path)
+    refused, pauses = _refuse_rename_of(monkeypatch, new, 99), []
+    monkeypatch.setattr(plugin_index.time, "sleep", pauses.append)
+    with monkeypatch.context() as elsewhere:
+        elsewhere.setattr(os, "name", "posix")
+        with pytest.raises(PermissionError):
+            plugin_index.swap_folder(new, target, work)
+    assert len(refused) == 1 and pauses == []  # nothing to wait for there
+    assert (target / "version").read_text() == "old"
+
+
 def test_staged_versions_are_compared_as_versions(tmp_path, folder):
     entry = dataclasses.replace(_newer(tmp_path, "a", "0.2.0"), version="0.2")  # the index says 0.2, the wheel 0.2.0
     assert updates.check([entry], _installed(folder), None, folder).updated == [("a", "0.1.0", "0.2")]

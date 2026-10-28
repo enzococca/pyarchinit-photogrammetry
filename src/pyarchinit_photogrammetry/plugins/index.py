@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import urllib.error
 import zipfile
 from dataclasses import dataclass, field
@@ -32,6 +33,8 @@ INDEX_URL = "https://raw.githubusercontent.com/enzococca/pyarchinit-photogrammet
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 STAGING = ".updates"  # in the plugin folder: the updates downloaded, put in place at the next start
 SWAPPING = "swapping"  # in a work folder: the name of the plugin moved aside into "previous", until the swap is done
+RENAME_RETRIES = 5  # on Windows, a rename right after unpacking is tried again this many times ...
+RENAME_PAUSE = 0.2  # ... with this pause (seconds) before each of them
 
 
 class PluginError(Exception):
@@ -141,6 +144,21 @@ def _forget(marker: Path) -> None:
         pass
 
 
+def _rename_new(new: Path, target: Path) -> None:
+    """``new.rename(target)`` for a folder unpacked a moment ago. On Windows an antivirus scanning the new files may
+    refuse it for a moment (a PermissionError): it is tried again a few times with a short pause before it fails."""
+    tries = 1 + (RENAME_RETRIES if os.name == "nt" else 0)
+    for attempt in range(tries):
+        if attempt:
+            time.sleep(RENAME_PAUSE)
+        try:
+            new.rename(target)
+            return
+        except PermissionError:
+            if attempt == tries - 1:
+                raise
+
+
 def swap_folder(new: Path, target: Path, work: Path) -> None:
     """Put the complete folder ``new`` in place of ``target`` by renames only: the old ``target`` goes into
     ``work`` first and comes back if ``new`` cannot be put in place (for whatever reason, Ctrl+C included),
@@ -153,7 +171,7 @@ def swap_folder(new: Path, target: Path, work: Path) -> None:
         if target.exists():
             marker.write_text(os.path.relpath(target, work.parent))
             target.rename(old)
-        new.rename(target)
+        _rename_new(new, target)
     except BaseException:
         back = True
         if old.exists() and not target.exists():  # moved aside, and nothing has taken its place
