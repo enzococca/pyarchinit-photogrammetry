@@ -3358,13 +3358,13 @@ class MainWindow(QMainWindow):
                         tr("per posizioni in ETRF2000 (RDN2008), ETRF2014, ETRF2020")))
         choices = []
         for crs, says in options:
-            if crs in [c for c, _label in choices]:
+            if crs in [choice[0] for choice in choices]:
                 continue
             try:
                 name = crs_mod.to_pyproj(crs).name
             except Exception:  # noqa: BLE001 - its code says it
                 name = crs
-            choices.append((crs, f"{crs} - {name} ({says})"))
+            choices.append((crs, f"{crs} - {name}", says))  # what it is for under its button
         v = dialog.SurveyCrsDialog.ask(self, ch.crs, choices, default,
                                        tr("Le posizioni delle foto sono in {0}.", frame_text(frame)),
                                        heights.geoid_available())

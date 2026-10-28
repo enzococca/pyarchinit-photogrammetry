@@ -1184,8 +1184,9 @@ def test_gnss_survey_crs_from_the_pane(gnss_window, monkeypatch, tmp_path):
     assert errors == []
     ((current, choices, default),) = asked
     # in Italy RDN2008 / UTM first and chosen (ITRF2020 and the European frames arrive there exactly), then WGS 84
-    assert current == "EPSG:32633" and [crs for crs, _label in choices] == ["EPSG:7792", "EPSG:32633"]
-    assert default == "EPSG:7792" and "consigliato in Europa" in choices[0][1]
+    assert current == "EPSG:32633" and [choice[0] for choice in choices] == ["EPSG:7792", "EPSG:32633"]
+    assert choices[0][1] == "EPSG:7792 - RDN2008 / UTM zone 33N"  # the system on its button, what it is for under it
+    assert default == "EPSG:7792" and "consigliato in Europa" in choices[0][2]
     assert threads and threading.main_thread() not in threads  # the preview in the background
     ((kind, text),) = said  # the changes, confirmed
     assert kind == "question" and "EPSG:32633 → EPSG:32632" in text and "quote 1" in text
@@ -1238,6 +1239,36 @@ def test_gnss_survey_crs_from_the_pane(gnss_window, monkeypatch, tmp_path):
     w.gnss_survey_crs()
     w.runner.wait()
     assert chunk.crs == "EPSG:7792"
+
+
+def test_the_survey_crs_dialog_fits_a_laptop(gnss_window):
+    """The systems offered one on a line each, what each one is for under it and wrapped: the window stays narrow (with
+    the explanations on the buttons it was 1300-1400 pixels wide); a choice without an explanation works as before."""
+    from PySide6.QtWidgets import QApplication, QLabel
+
+    from pyarchinit_photogrammetry.gui.survey_crs_dialog import SurveyCrsDialog
+
+    w = gnss_window[0]
+    note = ("consigliato in Europa: le posizioni in ITRF2020 (stazioni permanenti, PPP) e nei sistemi europei (RDN2008, "
+            "reti RTK) vi arrivano esatte, senza deriva fra i voli")
+    choices = [("EPSG:7792", "EPSG:7792 - RDN2008 / UTM zone 33N", note),
+               ("EPSG:32633", "EPSG:32633 - WGS 84 / UTM zone 33N",
+                "su WGS 84: le posizioni in ITRF2020 restano come sono, quelle nei sistemi europei a circa un metro"),
+               ("EPSG:4326", "EPSG:4326 - WGS 84")]
+    d = SurveyCrsDialog("EPSG:3004", choices, "EPSG:7792", "Le posizioni delle foto sono in ITRF2020.", False, w)
+    d.show()
+    QApplication.processEvents()
+    try:
+        assert d.width() <= 760, d.width()
+        assert [button.text() for button, _crs in d.options] == [
+            "EPSG:7792 - RDN2008 / UTM zone 33N", "EPSG:32633 - WGS 84 / UTM zone 33N", "EPSG:4326 - WGS 84"]
+        explained = [label for label in d.findChildren(QLabel) if label.text() == note]
+        assert len(explained) == 1 and explained[0].wordWrap()
+        assert d.values() == {"crs": "EPSG:7792+3855", "plain": "EPSG:7792"}
+        d.options[2][0].setChecked(True)
+        assert d.values()["plain"] == "EPSG:4326"
+    finally:
+        d.close()
 
 
 def test_gnss_survey_crs_says_why_not_and_what_happened(gnss_window, monkeypatch, tmp_path):

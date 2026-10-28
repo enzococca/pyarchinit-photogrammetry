@@ -177,12 +177,13 @@ def changes_text(old: str, changes: dict, redraw=()) -> str:
 
 
 class SurveyCrsDialog(QDialog):
-    """The system for the survey: one of ``choices`` (``(crs, label)``: the systems proposed where the survey is),
+    """The system for the survey: one of ``choices`` (``(crs, label)`` or ``(crs, label, note)``: the systems proposed
+    where the survey is, ``note`` what each one is for, written under its button where it wraps),
     ``default`` the one chosen at first, or another one written; *Quote sul geoide EGM2008* gives it heights above the
     geoid (an EPSG code gets ``+3855``). ``current`` is the system of the chunk, ``note`` what the dialog says of the
     positions, ``geoid`` whether the grid of EGM2008 is there (the dialog says it is downloaded first)."""
 
-    def __init__(self, current: str, choices: list[tuple[str, str]], default: str | None = None, note: str = "",
+    def __init__(self, current: str, choices: list[tuple[str, ...]], default: str | None = None, note: str = "",
                  geoid: bool = False, parent=None):
         super().__init__(parent)
         self.setWindowTitle(tr("Sistema del rilievo"))
@@ -195,11 +196,18 @@ class SurveyCrsDialog(QDialog):
         lay.addWidget(intro)
         self.group = QButtonGroup(self)
         self.options: list[tuple[QRadioButton, str]] = []
-        for crs, label in choices:
+        for crs, label, *what in choices:
             button = QRadioButton(label)
             self.group.addButton(button)
             self.options.append((button, crs))
             lay.addWidget(button)
+            if what and what[0]:  # under the button, wrapped: on the button it made the window as wide as the text
+                says = QLabel(what[0])
+                says.setWordWrap(True)
+                says.setStyleSheet("color: #6c7a89")
+                says.setContentsMargins(button.style().pixelMetric(button.style().PixelMetric.PM_ExclusiveIndicatorWidth)
+                                        + 8, 0, 0, 4)
+                lay.addWidget(says)
             if crs == default:
                 button.setChecked(True)
         other_row = QHBoxLayout()
@@ -255,7 +263,7 @@ class SurveyCrsDialog(QDialog):
         super().accept()
 
     @classmethod
-    def ask(cls, parent, current: str, choices: list[tuple[str, str]], default: str | None = None, note: str = "",
+    def ask(cls, parent, current: str, choices: list[tuple[str, ...]], default: str | None = None, note: str = "",
             geoid: bool = False) -> dict | None:
         """The answer of the dialog (:meth:`values`), None when it is cancelled."""
         dialog = cls(current, choices, default, note, geoid, parent)
