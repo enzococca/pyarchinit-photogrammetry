@@ -26,7 +26,7 @@ while its ``pid`` runs. There is no default address to try when that is missing.
   one script RustGIS may run twice without harm.
 * :func:`raster_route` tells a raster RustGIS loads whole from a larger one, which it would open from an overview: the
   link serves that one from this computer (:class:`RasterServer`, 127.0.0.1, by range) and RustGIS reads it in place,
-  at full resolution where its view needs it.
+  at full resolution where its view needs it, when it can; one RustGIS cannot read as it is goes as a copy it reads.
 
 What goes wrong has a name a caller can wait for: :class:`RustGisOff` (nobody listens: agent control is off, or RustGIS
 is closed), :class:`RustGisBusy` (try later: RustGIS does not draw, minimized or hidden, a dialog is open, too many
@@ -37,6 +37,7 @@ what is harmless to repeat (a read) should be given a short timeout.
 """
 from __future__ import annotations
 
+import contextlib
 import errno
 import hashlib
 import http.client
@@ -560,24 +561,128 @@ class StdioTransport(_Transport):
 
 # ---------------------------------------------------------------- the rasters RustGIS reads in place, by range
 MEDIA_TYPES = {".tif": "image/tiff", ".tiff": "image/tiff"}  # what the raster server says a file is; else bytes
+# the GeoTIFF compressions RustGIS 0.4.0 decodes, from a file and in place (there a JPEG only of RGB or grey pixels: a
+# YCbCr one shows its raw Y, Cb and Cr); WebP, LERC, LZMA and the others it refuses as a file and leaves blank in place
+READ_CODECS = frozenset({"NONE", "DEFLATE", "LZW", "ZSTD", "PACKBITS", "JPEG"})
+COPY_SPACE = 1.5  # free disk a copy for RustGIS needs: this many times the size of the raster it copies
+STOP_WAIT = 5.0  # seconds stop() waits for RustGIS's list of tile layers before it leaves them there
 
 
 def raster_route(path: Path) -> str:
-    """How RustGIS is given the raster at ``path``: ``"file"`` (``layer.addData``: it loads it whole) when its width x
-    height x bands is within :data:`RASTER_SAMPLES`, else ``"url"`` (``layer.addUrl`` of the address a
-    :class:`RasterServer` gives it): RustGIS would open a larger file from its largest overview that fits, while by its
-    address it reads a tiled GeoTIFF in place, the tiles of the overview each part of its view needs, down to full
-    resolution. Only the header is read (rasterio). What rasterio cannot read goes as a file: RustGIS says whether it
-    reads it."""
+    """How RustGIS is given the raster at ``path`` (only its header is read, with rasterio):
+
+    * ``"url"``: by the address a :class:`RasterServer` gives it, which RustGIS reads in place by range, the tiles of
+      the overview each part of its view needs, down to full resolution - a GeoTIFF larger than RustGIS loads whole
+      (width x height x bands above :data:`RASTER_SAMPLES`), tiled, with internal overviews (an ``.ovr`` beside it is
+      never served), compressed as RustGIS decodes in place (:data:`READ_CODECS`, its pixels RGB or grey);
+    * ``"file"``: its file (``layer.addData``), which RustGIS loads whole up to :data:`RASTER_SAMPLES` and from an
+      overview when larger - one made as it reads a GeoTIFF in strips or without overviews; a YCbCr JPEG converted to
+      RGB. Also what rasterio cannot read: RustGIS says whether it reads it;
+    * ``"copy"``: neither - a GeoTIFF compressed as RustGIS does not decode (WebP, LERC, LZMA...), or a raster larger
+      than it loads whole that is no GeoTIFF: a copy it reads goes in its place (:meth:`RustGisLink.start`)."""
     import rasterio
     from rasterio.errors import RasterioError
 
     try:
         with rasterio.open(path) as src:
             samples = src.width * src.height * src.count
+            structure = src.tags(ns="IMAGE_STRUCTURE")
+            geotiff, tiled = src.driver == "GTiff", bool(src.profile.get("tiled"))
+        internal = False
+        if geotiff and samples > RASTER_SAMPLES:  # an .ovr beside it is not counted: the server never serves it
+            with rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR"), rasterio.open(path) as src:
+                internal = bool(src.overviews(1))
     except (OSError, RasterioError):
         return "file"
-    return "file" if samples <= RASTER_SAMPLES else "url"
+    compression = str(structure.get("COMPRESSION") or "NONE").upper()
+    if geotiff and ("JPEG" if compression.endswith("JPEG") else compression) not in READ_CODECS:  # "YCbCr JPEG" too
+        return "copy"
+    if samples <= RASTER_SAMPLES:
+        return "file"
+    if not geotiff:
+        return "copy"
+    if structure.get("SOURCE_COLOR_SPACE") or not tiled or not internal:  # YCbCr (or CMYK) pixels, strips, no overviews
+        return "file"
+    return "url"
+
+
+def _write_copy(source: Path, target: Path) -> None:
+    """``source`` written again at ``target`` as RustGIS reads it in place: tiles of 512 pixels, internal overviews,
+    JPEG of RGB pixels (never YCbCr) for 8-bit RGB imagery with nothing transparent, else Deflate - an alpha band kept,
+    an internal mask made an alpha band (RustGIS draws a masked cell black, a transparent one not at all), the nodata
+    value kept. Block by block, never whole in memory, through a temporary file: no half copy is ever left."""
+    import numpy as np
+    import rasterio
+    from rasterio.enums import ColorInterp, MaskFlags, Resampling
+
+    with rasterio.open(source) as src:
+        colours = list(src.colorinterp)
+        alpha = ColorInterp.alpha in colours
+        dtype = np.dtype(src.dtypes[0])
+        masked = not alpha and dtype == np.uint8 and MaskFlags.per_dataset in src.mask_flag_enums[0]
+        profile = {"driver": "GTiff", "width": src.width, "height": src.height, "count": src.count + masked,
+                   "dtype": dtype.name, "crs": src.crs, "transform": src.transform, "nodata": src.nodata,
+                   "tiled": True, "blockxsize": 512, "blockysize": 512, "BIGTIFF": "IF_SAFER"}
+        if src.count == 3 and dtype == np.uint8 and src.nodata is None and not masked:
+            profile.update(compress="jpeg", photometric="RGB", jpeg_quality=90)
+        else:
+            profile.update(compress="deflate", predictor=3 if dtype.kind == "f" else 2)
+            if dtype == np.uint8 and src.count + masked in (3, 4) and colours[0] == ColorInterp.red:
+                profile["photometric"] = "RGB"
+        temporary = target.with_name(target.name + ".tmp")
+        try:
+            with rasterio.open(temporary, "w", **profile) as dst:
+                if alpha or masked:
+                    dst.colorinterp = colours + [ColorInterp.alpha] * masked
+                for _, window in dst.block_windows(1):
+                    block = src.read(window=window).astype(dtype, copy=False)
+                    if masked:
+                        block = np.concatenate([block, src.read_masks(1, window=window)[None].astype(dtype)])
+                    dst.write(block, window=window)
+                factors = [f for f in (2 ** n for n in range(1, 16)) if min(src.width, src.height) // f >= 64]
+                if factors:
+                    dst.build_overviews(factors, Resampling.average)
+            os.replace(temporary, target)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+
+
+@dataclass
+class LinkedRaster:
+    """A raster :meth:`RustGisLink.start` gave RustGIS: its own layer there (``layer``: loaded from the file, or
+    downloaded whole), or a tile layer RustGIS reads in place from the link's server (``url``: of the raster, or of
+    its ``copy``)."""
+    name: str  # as RustGIS shows it (two rasters may have the same)
+    path: Path  # the raster given
+    hidden: bool = False  # given hidden: shown when the user ticks it in RustGIS
+    opacity: float | None = None  # 0-1 as given; None: RustGIS's own
+    layer: str | None = None  # the id of RustGIS's layer of it
+    url: str | None = None  # the address RustGIS reads it from in place: a tile layer, in no group
+    copy: Path | None = None  # what is served in its place, a copy RustGIS reads (:func:`raster_route` "copy")
+
+
+def _opacity(value) -> float | None:
+    """An ``"opacity"`` given with a raster as RustGIS takes it, 0 to 1; None when there is none (or not a number)."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return min(1.0, max(0.0, number)) if math.isfinite(number) else None
+
+
+@contextlib.contextmanager
+def _waiting_at_most(transport, seconds: float):
+    """The transport's wait for each answer cut to ``seconds`` meanwhile (one that has none is left as it is)."""
+    before = getattr(transport, "timeout", None)
+    if isinstance(before, (int, float)) and not isinstance(before, bool) and before > seconds:
+        transport.timeout = seconds
+        try:
+            yield
+        finally:
+            transport.timeout = before
+    else:
+        yield
 
 
 def _byte_range(header: str | None, size: int):
@@ -601,6 +706,11 @@ def _byte_range(header: str | None, size: int):
     if first >= size:
         return False
     return first, size - 1 if last is None else min(last, size - 1)
+
+
+def _version(status: os.stat_result) -> tuple:
+    """What tells one version of a file from another: its device, inode, size and time of modification."""
+    return status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns
 
 
 def _open_regular(path: Path):
@@ -643,11 +753,15 @@ class _RasterRequest(BaseHTTPRequestHandler):
         self._serve(body=False)
 
     def _serve(self, body: bool) -> None:
-        path = self.server.lookup(self.path, self.headers.get("Host"))
-        handle = _open_regular(path) if path is not None else None
+        found = self.server.lookup(self.path, self.headers.get("Host"))
+        handle = _open_regular(found[0]) if found is not None else None
+        if handle is not None and _version(os.fstat(handle.fileno())) != found[1]:  # another file since it was given
+            handle.close()
+            handle = None
         if handle is None:
             self._nothing(404)
             return
+        path = found[0]
         with handle:
             size = os.fstat(handle.fileno()).st_size
             span = _byte_range(self.headers.get("Range"), size)
@@ -698,18 +812,22 @@ class RasterServer(ThreadingHTTPServer):
     (a random prefix of 32 hexadecimal characters for the server, a random name for each file), to GET and HEAD with
     single and suffix byte ranges (206, 416 past the end), as RustGIS reads a tiled GeoTIFF: its header, then the tiles
     of the overview each part of its view needs. Anything else is not found (404): no path is taken from a request, no
-    folder is listed, no link put where a file was is followed, and a request that names a host other than the address
+    folder is listed, no link put where a file was is followed, an address answers only while its file is the one it
+    was given for (rebuilt or replaced, it has a new address), and a request that names a host other than the address
     given (a web page that took this computer for another name) is not answered. Files are read and sent a chunk at a
-    time. It serves from a daemon thread (:attr:`thread`), says nothing about requests, and stops with :meth:`close`."""
+    time; at most :attr:`CONNECTIONS` connections are served at once (more are closed at once). It serves from a
+    daemon thread (:attr:`thread`), says nothing about requests, and stops with :meth:`close`."""
 
     daemon_threads = True
     allow_reuse_address = False  # a port of its own: on Windows another program could take one that allows reuse
     CHUNK = 1 << 20  # bytes read and sent at a time
     TIMEOUT = 300.0  # seconds a connection waits for its next request: longer than readers keep one idle
+    CONNECTIONS = 32  # connections served at once: each holds a thread
 
     def __init__(self) -> None:
         self.prefix = secrets.token_hex(16)
-        self._files: dict[str, Path] = {}  # the path of each address -> the file, resolved when it was given
+        # the path of each address -> the file, resolved when it was given, and that version of it (_version)
+        self._files: dict[str, tuple[Path, tuple]] = {}
         self._open: set = set()  # the connections being served: ended by close()
         self._lock = threading.Condition()
         self._closed = False
@@ -728,24 +846,26 @@ class RasterServer(ThreadingHTTPServer):
         self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
 
     def url(self, path: Path) -> str:
-        """The address of the file at ``path`` (a link given names the file it points to, resolved now), a new one at
-        each call, all answered until :meth:`close`: :attr:`base` and a random name with the file's extension, by which
-        RustGIS tells its format. :class:`FileNotFoundError` when ``path`` is not a regular file; :class:`RuntimeError`
-        once the server is closed."""
+        """The address of the file at ``path`` as it is now (a link given names the file it points to, resolved now), a
+        new one at each call, answered until :meth:`close` while the file is that same version: :attr:`base` and a
+        random name with the file's extension, by which RustGIS tells its format. :class:`FileNotFoundError` when
+        ``path`` is not a regular file; :class:`RuntimeError` once the server is closed."""
         real = Path(os.path.realpath(path))
-        if not real.is_file():
+        status = os.stat(real)
+        if not stat.S_ISREG(status.st_mode):
             raise FileNotFoundError(errno.ENOENT, "not a file the raster server can give", str(path))
         suffix = real.suffix.lower()
         name = secrets.token_hex(16) + (suffix if re.fullmatch(r"\.[a-z0-9]{1,8}", suffix) else "")
         with self._lock:
             if self._closed:
                 raise RuntimeError("the raster server is closed")
-            self._files[f"/{self.prefix}/{name}"] = real
+            self._files[f"/{self.prefix}/{name}"] = real, _version(status)
         return self.base + name
 
-    def lookup(self, target: str, host: str | None) -> Path | None:
+    def lookup(self, target: str, host: str | None) -> tuple[Path, tuple] | None:
         """The file given to :meth:`url` that a request for ``target`` (its path; a query after ``?`` changes nothing)
-        asks for, when it names this server as its address does (``host``: ``127.0.0.1:<port>``); else None."""
+        asks for, and the version of it given (:func:`_version`), when the request names this server as its address
+        does (``host``: ``127.0.0.1:<port>``); else None."""
         if (host or "").strip().lower() != f"127.0.0.1:{self.server_address[1]}":
             return None
         with self._lock:
@@ -753,10 +873,10 @@ class RasterServer(ThreadingHTTPServer):
 
     def process_request(self, request, client_address) -> None:
         with self._lock:
-            closing = self._closed
-            if not closing:
+            refused = self._closed or len(self._open) >= self.CONNECTIONS
+            if not refused:
                 self._open.add(request)
-        if closing:
+        if refused:
             self.shutdown_request(request)
             return
         super().process_request(request, client_address)
@@ -1337,23 +1457,25 @@ class RustGisLink:
     :meth:`start` gives RustGIS the chunk's tables and remembers what it loaded; :meth:`push` sends it the rows the
     program changed since (what came from RustGIS is never sent back: it matches what RustGIS had), :attr:`pending` says
     whether there are any, :meth:`status_changed` whether something was edited there since the last look, and
-    :meth:`stop` forgets the layers (RustGIS keeps them) and stops the server of the rasters RustGIS reads in place
-    (:attr:`server`)."""
+    :meth:`stop` forgets the layers (RustGIS keeps them), takes away the tile layers RustGIS reads from the link's
+    raster server and stops it (:attr:`server`).
 
-    def __init__(self, live: LiveLink, transport, chunk_label: str, crs: str):
+    ``data_dir``: the chunk's data folder, where the copies of rasters RustGIS cannot read as they are go (its
+    ``rustgis`` folder, :attr:`copies`); without it, a folder of :attr:`scratch`."""
+
+    def __init__(self, live: LiveLink, transport, chunk_label: str, crs: str, data_dir: Path | None = None):
         self.live = live
         self.transport = transport  # HttpTransport (the app) or StdioTransport (the engine): call(tool, args)
         self.chunk_label = chunk_label
         self.crs = crs
+        self.copies = Path(data_dir) / SCRATCH_DIR if data_dir is not None else self.scratch / "rasters"
         self.layers: dict[str, str] = {}  # table of the live GeoPackage -> the id of RustGIS's layer that holds it
         # per table, (ppg_id, ppg_parte) -> (geometry, values) of the row as RustGIS last had it, after normalize():
         # compared only within TOLERANCE_M (matches_baseline)
         self.baseline: dict[str, dict[tuple, tuple]] = {}
         self.drawn: dict[str, list[Drawn]] = {}  # per table, what RustGIS has without an identity (see Drawn)
-        self.rasters: dict[str, str] = {}  # name -> the id of RustGIS's layer of each raster it loaded at the start
-        # name -> the address RustGIS reads each larger raster from, in place: a tile layer there, in no group
-        self.tiles: dict[str, str] = {}
-        self.server: RasterServer | None = None  # serves those addresses while the link lives
+        self.rasters: list[LinkedRaster] = []  # each raster RustGIS took at the start, in the order given
+        self.server: RasterServer | None = None  # serves the rasters RustGIS reads in place, while the link lives
         self._group = None  # the id of the chunk's group in RustGIS
         self._status: str | None = None  # RustGIS's edit status at the last look (status_changed)
         self._owed = False  # rows a send did not deliver: RustGIS busy, an answer lost, more than one script holds
@@ -1660,82 +1782,73 @@ class RustGisLink:
         anything; then RustGIS's version, and the system: a point of the chunk's system, read by RustGIS, exported in
         longitude and latitude and removed again in one step, must come back where pyproj puts it (within
         :data:`TOLERANCE_M`: RustGIS takes some systems it cannot convert, a Cassini or polyconic projection, and places
-        them elsewhere) - else :class:`RustGisRefused` naming the system. Then the ``rasters`` (``{"path", "name"}``):
-        one RustGIS loads whole (:func:`raster_route`) as its file (``layer.addData``: :attr:`rasters`), a larger one by
-        the address the link's :class:`RasterServer` gives it (``layer.addUrl``), which RustGIS reads in place by range,
-        the tiles of the overview each part of its view needs, down to full resolution: a tile layer there
-        (:attr:`tiles`), drawn under its layers and in no group, RustGIS groups only layers (one it cannot read in
-        place, a GeoTIFF in strips, it downloads whole as a layer, as a file's). One RustGIS refuses, or a file gone, is
-        left out and said in ``"refused"``. Then every table of :data:`.qgis_link.LIVE_TABLES` from the live GeoPackage
-        (empty ones too: the units are drawn in RustGIS on a chunk that has none) named as in QGIS, above the rasters,
-        all in a group named after the chunk. What RustGIS loaded is remembered right after (:meth:`remember`: its own
-        export of the two-way tables; the file as it was read for the others).
+        them elsewhere) - else :class:`RustGisRefused` naming the system. Then the ``rasters`` (``{"path", "name"}``,
+        ``"hidden"``: False, ``"opacity"``: 0-1), each as :func:`raster_route` says (:meth:`_give`): one RustGIS loads
+        whole, or opens from an overview, as its file (``layer.addData``), into the group with the tables; a larger one
+        by the address the link's :class:`RasterServer` gives it (``layer.addUrl``), which RustGIS reads in place by
+        range, the tiles of the overview each part of its view needs, down to full resolution - a tile layer there,
+        drawn under its layers and in no group (RustGIS groups only layers); one RustGIS cannot read as it is by the
+        address of a copy it reads. Those given hidden are hidden, so that a DEM does not cover the orthophoto
+        (:meth:`_show`). Each is in :attr:`rasters`; one RustGIS refuses, or a file gone, is left out and said in
+        ``"refused"``. Then every table of :data:`.qgis_link.LIVE_TABLES` from the live GeoPackage (empty ones too: the
+        units are drawn in RustGIS on a chunk that has none) named as in QGIS, above the rasters, all in a group named
+        after the chunk. What RustGIS loaded is remembered right after (:meth:`remember`: its own export of the two-way
+        tables; the file as it was read for the others).
 
         Returns ``{"layers": n, "rasters": n, "version": "..."}``. A start that fails (RustGIS busy, a refusal) leaves
-        the link stopped, its raster server closed, and takes out of RustGIS what it added when RustGIS still answers
-        (the tile layers found by their address)."""
+        the link stopped (:meth:`stop`: the tile layers taken away when RustGIS answers, the raster server closed), and
+        takes out of RustGIS the layers it added when RustGIS still answers."""
+        from rasterio.errors import RasterioError
+
         code = self._epsg()
         if not gpkg.is_geopackage(self.live.path):
             raise RuntimeError(f"{self.live.path} is not written yet: the drawings go to RustGIS from it")
         self.stop()
         version = self.transport.initialize()
         self._check_system(code)
-        added: list[int] = []
+        given: list[LinkedRaster] = []
+        tables: list[int] = []
         refused: dict[str, str] = {}
-        rasters_added: dict[str, str] = {}
-        tiles: dict[str, str] = {}
         try:
             for raster in rasters:
                 path = Path(raster["path"]).absolute()
-                name = str(raster.get("name") or path.stem)
+                entry = LinkedRaster(str(raster.get("name") or path.stem), path, bool(raster.get("hidden")),
+                                     _opacity(raster.get("opacity")))
                 try:
-                    if raster_route(path) == "file":
-                        answer = self._command("layer.addData", {"path": str(path), "name": name})
-                    else:
-                        address = self._address(path)
-                        answer = self._command("layer.addUrl", {"url": address, "name": name})
-                        if isinstance(answer, dict) and answer.get("inPlace") is True:
-                            tiles[name] = address
-                            continue
-                        log.info("RustGIS downloaded the raster %s whole, not reading it in place (it is not tiled): "
-                                 "it shows it from an overview", name)
-                    lid = _added_layer(answer)
+                    self._give(entry)
                 except RustGisRefused as exc:
-                    log.warning("RustGIS did not take the raster %s: %s", name, exc)
-                    refused[name] = str(exc)
+                    log.warning("RustGIS did not take the raster %s: %s", entry.name, exc)
+                    refused[entry.name] = str(exc)
                     continue
-                except OSError as exc:  # gone since it was routed, or the server could not start
-                    log.warning("The raster %s cannot be given to RustGIS: %s", name, exc)
-                    refused[name] = str(exc)
+                except (OSError, RasterioError) as exc:  # gone since it was routed, a copy that failed, no server
+                    log.warning("The raster %s cannot be given to RustGIS: %s", entry.name, exc)
+                    refused[entry.name] = str(exc)
                     continue
-                added.append(lid)
-                rasters_added[name] = str(lid)
+                given.append(entry)
             stamp = self._fingerprint()  # what RustGIS reads now: written later, it is sent
             one_way = {t: self._file_rows(t) for t in LIVE_TABLES if t not in TWO_WAY_TABLES}
             layers: dict[str, str] = {}
             for table, (title, _) in LIVE_TABLES.items():
                 lid = _added_layer(self._command("layer.addData", self._loading(table, title)))
-                added.append(lid)
+                tables.append(lid)
                 layers[table] = str(lid)
-            self.layers, self.rasters, self.tiles = layers, rasters_added, tiles
+            self.layers, self.rasters = layers, given
             self.remember()  # right after RustGIS loaded them: an edit made there later is an edit
             self.baseline.update(one_way)
             self.extras.update({t: set() for t in one_way})
-            members = [_ref(i) for i in (*layers.values(), *rasters_added.values())]
+            members = [_ref(i) for i in (*layers.values(), *(r.layer for r in given if r.layer))]
             group = self._command("group.add", {"name": self.chunk_label, "layers": members})
             self._group = group.get("group") if isinstance(group, dict) else None
+            self._show(given)
             self._status = _status_key(self._command("edit.status", {}))
         except BaseException as exc:
-            base = self.server.base if self.server is not None else None
             self.stop()
-            if not isinstance(exc, (RustGisBusy, RustGisOff)):
-                if added:
-                    self._remove(added)
-                if tiles and base:
-                    self._remove_tiles(base)
+            added = [int(r.layer) for r in given if r.layer] + tables
+            if added and not isinstance(exc, (RustGisBusy, RustGisOff)):
+                self._remove(added)
             raise
         self._pushed_at = stamp
-        out = {"layers": len(layers), "rasters": len(rasters_added) + len(tiles), "version": version}
+        out = {"layers": len(layers), "rasters": len(given), "version": version}
         if refused:
             out["refused"] = refused
         return out
@@ -1823,13 +1936,15 @@ class RustGisLink:
         return _status_key(self._command("edit.status", {})) != self._status
 
     def stop(self) -> None:
-        """Forgets RustGIS's layers: nothing more is sent or asked. RustGIS keeps them, with what they have; the raster
-        server stops (:attr:`server`), so the tile layers RustGIS reads from it (:attr:`tiles`) draw nothing from then
-        on."""
-        server, self.server, self.tiles = self.server, None, {}
+        """Forgets RustGIS's layers: after it nothing is sent or asked. RustGIS keeps them, with what they have - all
+        but the tile layers it reads from the link's raster server, which would draw nothing once the server stops:
+        those are taken away first, as far as RustGIS answers in a few seconds (:meth:`_remove_tiles`; never raised),
+        then the server stops (:attr:`server`)."""
+        server, self.server = self.server, None
         if server is not None:
+            self._remove_tiles(server.base)
             server.close()
-        self.layers, self.baseline, self.drawn, self.rasters, self.extras = {}, {}, {}, {}, {}
+        self.layers, self.baseline, self.drawn, self.rasters, self.extras = {}, {}, {}, [], {}
         self._group = self._status = self._pushed_at = None
         self._owed, self._unsure, self._discard, self._digests = False, {}, {}, {}
         self.aside, self._partners, self._held, self.in_flight, self._waits = {}, {}, {}, {}, set()
@@ -1942,17 +2057,29 @@ class RustGisLink:
             log.warning("RustGIS keeps %d layers of a link that did not start: %s", len(ids), exc)
 
     def _remove_tiles(self, base: str) -> None:
-        """Takes out of RustGIS the tile layers of a start that failed - those it reads from the link's raster server,
-        their address starting with ``base`` (a tile layer of the user's with the same name stays) - as far as it
-        answers. RustGIS removes a tile layer by its place in the list (0 = top): from the bottom up, so the places of
-        the others hold."""
-        try:
-            listing = self.transport.call("list_layers", {})
-            tiles = [t for t in listing.get("tileLayers") or [] if isinstance(t, dict)]
-            for place in reversed([n for n, t in enumerate(tiles) if str(t.get("url") or "").startswith(base)]):
-                self._command("map.removeTiles", {"index": place})
-        except RustGisError as exc:
-            log.warning("RustGIS keeps rasters of a link that did not start: %s", exc)
+        """Takes out of RustGIS the tile layers it reads from the link's raster server - those whose address starts
+        with ``base``; a tile layer of the user's stays, whatever its name - as far as RustGIS answers within
+        :data:`STOP_WAIT`: its list read once (busy: nothing is sent), then every removal in one script, from the bottom
+        of that list up, each by its place in the list as RustGIS gave it (counted here, every entry included: never an
+        empty or a missing place, which would take away the top tile layer or all of them, the user's basemaps
+        included). A script whose answer was lost is not sent again: run later, it would take away the same places.
+        What fails is said in the log, never raised."""
+        with _waiting_at_most(self.transport, STOP_WAIT):
+            try:
+                listing = self.transport.call("list_layers", {})
+            except RustGisError as exc:
+                log.warning("RustGIS link: the tile layers of the rasters stay in RustGIS (it did not list them: %s)",
+                            exc)
+                return
+            raw = listing.get("tileLayers") if isinstance(listing, dict) else None
+            places = [n for n, t in enumerate(raw if isinstance(raw, list) else [])
+                      if isinstance(t, dict) and isinstance(t.get("url"), str) and t["url"].startswith(base)]
+            if not places:
+                return
+            try:
+                self._run([_line("map.removeTiles", {"index": n}) for n in reversed(places)])
+            except RustGisError as exc:
+                log.warning("RustGIS link: %d tile layers of the rasters stay in RustGIS: %s", len(places), exc)
 
     def _address(self, path: Path) -> str:
         """The address the link's raster server gives ``path``, which RustGIS reads in place (the server started at the
@@ -1960,6 +2087,87 @@ class RustGisLink:
         if self.server is None:
             self.server = RasterServer()
         return self.server.url(path)
+
+    def _give(self, entry: LinkedRaster) -> None:
+        """``entry``'s raster given to RustGIS as :func:`raster_route` says - as its file, by its address, or by the
+        address of a copy RustGIS reads (as its file when the disk has no room for the copy) - and what RustGIS made of
+        it written into ``entry``: its layer, or the address of its tile layer."""
+        route = raster_route(entry.path)
+        if route == "copy":
+            entry.copy = self._copy_for(entry.path)
+            route = "file" if entry.copy is None else "url"
+        if route == "file":
+            answer = self._command("layer.addData", {"path": str(entry.path), "name": entry.name})
+            entry.layer = str(_added_layer(answer))
+            return
+        address = self._address(entry.copy or entry.path)
+        answer = self._command("layer.addUrl", {"url": address, "name": entry.name})
+        if isinstance(answer, dict) and answer.get("inPlace") is True:
+            entry.url = address
+            return
+        entry.layer = str(_added_layer(answer))
+        log.info("RustGIS downloaded the raster %s whole instead of reading it in place: it shows it from an overview",
+                 entry.name)
+
+    def _show(self, rasters: list) -> None:
+        """The rasters given hidden, or with an opacity, shown so in RustGIS: their layers hidden in one
+        ``layer.visibility`` - a layer is drawn over every tile layer, so a DEM left visible covers the orthophoto read
+        in place - and made transparent with ``layer.transparency``; their tile layers set with ``map.setTiles``, by
+        their place in RustGIS's list found by their address, in one script with the transparencies (``map.setTiles``
+        alone answers with no object). What RustGIS refuses is said in the log: a layer can still be hidden there."""
+        hidden = [_ref(r.layer) for r in rasters if r.layer and r.hidden]
+        if hidden:
+            try:
+                self._command("layer.visibility", {"layer": hidden, "visible": False})
+            except RustGisRefused as exc:
+                log.warning("RustGIS link: %d raster layers given hidden are shown: %s", len(hidden), exc)
+        lines = [_line("layer.transparency", {"layer": _ref(r.layer), "value": round(100 * (1 - r.opacity))})
+                 for r in rasters if r.layer and r.opacity is not None]
+        tiles = [r for r in rasters if r.url and (r.hidden or r.opacity is not None)]
+        if tiles:
+            listing = self.transport.call("list_layers", {})
+            raw = listing.get("tileLayers") if isinstance(listing, dict) else None
+            places = {t["url"]: n for n, t in enumerate(raw if isinstance(raw, list) else [])
+                      if isinstance(t, dict) and isinstance(t.get("url"), str)}
+            for r in tiles:
+                if r.url in places:
+                    props = {"index": places[r.url], **({"visible": False} if r.hidden else {}),
+                             **({"opacity": r.opacity} if r.opacity is not None else {})}
+                    lines.append(_line("map.setTiles", props))
+        if lines:
+            try:
+                self._run(lines)
+            except RustGisRefused as exc:
+                log.warning("RustGIS link: the rasters keep the opacity and visibility RustGIS gave them: %s", exc)
+
+    def _copy_for(self, path: Path) -> Path | None:
+        """A copy of the raster at ``path`` that RustGIS reads in place (:func:`_write_copy`), in :attr:`copies`, named
+        after the raster and its place: reused while the raster is the file it was made from (device, inode, size and
+        time of modification, kept beside the copy), made again otherwise. None, said in the log, when the disk has less
+        free space than :data:`COPY_SPACE` times the size of the raster."""
+        status = os.stat(path)
+        identity = list(_version(status))
+        digest = hashlib.sha1(os.fsencode(os.path.realpath(path))).hexdigest()[:12]
+        copy = self.copies / f"{path.stem}-{digest}.tif"
+        note = copy.with_name(copy.name + ".json")
+        try:
+            made = json.loads(note.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            made = None
+        if copy.is_file() and isinstance(made, dict) and made.get("identity") == identity:
+            return copy
+        self.copies.mkdir(parents=True, exist_ok=True)
+        free = shutil.disk_usage(self.copies).free
+        if free < COPY_SPACE * status.st_size:
+            log.warning("RustGIS link: %s goes to RustGIS as it is, which cannot read it: a copy it reads would need "
+                        "%.1f GB free in %s, there are %.1f", path.name, COPY_SPACE * status.st_size / 1e9,
+                        self.copies, free / 1e9)
+            return None
+        note.unlink(missing_ok=True)
+        log.info("RustGIS link: %s copied as RustGIS reads it, into %s", path.name, copy)
+        _write_copy(path, copy)
+        note.write_text(json.dumps({"source": str(path), "identity": identity}), encoding="utf-8")
+        return copy
 
     def _file_rows(self, table: str) -> dict:
         """A one-way table of the live GeoPackage as what RustGIS has of it (``{key: (geometry, values)}``), read just
@@ -2571,4 +2779,5 @@ __all__ = ["find_rustgis", "open_app", "settings_dir", "token_dir", "endpoint", 
            "StdioTransport", "RustGisInstall", "Endpoint", "RustGisError", "RustGisOff", "RustGisBusy",
            "RustGisRefused", "RustGisTooOld", "RustGisLink", "Drawn", "normalize", "MIN_VERSION", "HTTP_PORT",
            "TOKEN_FILE", "ENDPOINT_FILE", "RASTER_SAMPLES", "TOLERANCE_M", "BUSY_CODES", "SCRATCH_DIR", "SCRIPT_LINES",
-           "SCRIPT_BYTES", "WHERE_CHARS", "PLACEHOLDER"]
+           "SCRIPT_BYTES", "WHERE_CHARS", "PLACEHOLDER", "raster_route", "RasterServer", "LinkedRaster", "READ_CODECS",
+           "COPY_SPACE", "STOP_WAIT"]
