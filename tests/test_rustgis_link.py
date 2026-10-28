@@ -1562,11 +1562,12 @@ class FakeEngine:
     unless ``layer.addData`` says ``"stream": false``, and then refuses every edit, as RustGIS does past 100,000.
     ``layer.addUrl`` reads the first 64 KiB of the address by range, as RustGIS does, and adds a TIFF as a tile layer
     read in place (kind ``cog``, ``tile_layers``, top first: not a layer, in no group), or, with ``whole``, downloads it
-    whole as a raster layer, as RustGIS does a GeoTIFF in strips; what it read is in ``fetched``. ``map.setTiles``
+    whole as a raster layer, as RustGIS does a GeoTIFF in strips; what it read is in ``fetched``. A tile layer is named
+    by its place or by its name (the first of that name, in any case); ``map.setTiles`` (visible, opacity, rename)
     answers with no object (refused as a command, as the transport refuses it; it works in a script), and a removal of
     tile layers by an empty or missing place, which in RustGIS takes away the top tile layer or all of them, fails the
-    test. ``shift``: metres east by which it misplaces what it reads (a system it does not know). Every call is in
-    ``calls``, every script in ``scripts``."""
+    test; what was removed is in ``removed``. ``shift``: metres east by which it misplaces what it reads (a system it
+    does not know). Every call is in ``calls``, every script in ``scripts``."""
 
     def __init__(self, version: str = "0.4.0", shift: float = 0.0):
         self.version, self.shift = version, shift
@@ -1588,6 +1589,7 @@ class FakeEngine:
         self.tile_layers: list[dict] = []  # top first: name, url, kind (what layer.addUrl reads in place)
         self.fetched: list = []  # (url, range, status) of each first read of an address
         self.whole = False  # layer.addUrl downloads the file whole, as a raster layer
+        self.removed: list[dict] = []  # each tile layer map.removeTiles took away
 
     def initialize(self) -> str:
         return self.version
@@ -1693,6 +1695,18 @@ class FakeEngine:
             g["layers"] = [i for i in g["layers"] if i != lid]
 
     # -- the commands
+    def _tile(self, p: dict) -> dict:
+        """The tile layer a command names: by its place in the list, or by its name - the first of that name, in any
+        case, as RustGIS finds it."""
+        if "index" in p:
+            if not 0 <= p["index"] < len(self.tile_layers):
+                raise link.RustGisRefused("no tile layer at that index")
+            return self.tile_layers[p["index"]]
+        found = next((t for t in self.tile_layers if t["name"].lower() == str(p.get("name")).lower()), None)
+        if found is None:
+            raise link.RustGisRefused(f"no tile layer '{p.get('name')}'")
+        return found
+
     def _layer(self, ref) -> dict:
         if isinstance(ref, int):
             found = next((l for l in self.layers if l["id"] == ref), None)
@@ -1822,18 +1836,14 @@ class FakeEngine:
             if not ({"index", "name"} & set(p)) or p.get("id") == "" or ("index" in p and (
                     isinstance(p["index"], bool) or not isinstance(p["index"], int) or p["index"] < 0)):
                 raise AssertionError(f"map.removeTiles {p}: RustGIS takes away the top tile layer or all of them")
-            if "index" in p:
-                chosen = self.tile_layers[p["index"]:p["index"] + 1]
-            else:
-                chosen = [t for t in self.tile_layers if t["name"] == p["name"]][:1]
-            if not chosen:
-                raise link.RustGisRefused(f"no tile layer '{p.get('name', p.get('index'))}'")
-            for tile in chosen:
-                self.tile_layers.remove(tile)
-            return {"removed": [t["name"] for t in chosen]}
+            self.removed.append(self._tile(p))
+            self.tile_layers.remove(self.removed[-1])
+            return {"removed": [self.removed[-1]["name"]]}
         if command == "map.setTiles":
-            tile = self.tile_layers[p["index"]]
+            tile = self._tile(p)
             tile.update({k: p[k] for k in ("visible", "opacity") if k in p})
+            if "rename" in p:
+                tile["name"] = p["rename"]
             return [dict(t, index=n) for n, t in enumerate(self.tile_layers)]
         if command == "layer.visibility":
             refs = p["layer"] if isinstance(p["layer"], list) else [p["layer"]]
@@ -1948,7 +1958,7 @@ class FakeEngine:
         lines = text.split("\n")
         assert len(lines) <= 10_000, "RustGIS reads no further than the 10,000th line, and says nothing"
         lines = lines if self.cut is None else lines[:self.cut]
-        saved = copy.deepcopy((self.layers, self.groups, self.next_id, self.status, self.tile_layers))
+        saved = copy.deepcopy((self.layers, self.groups, self.next_id, self.status, self.tile_layers, self.removed))
         result, ran = None, 0
         try:
             for number, line in enumerate(lines, 1):
@@ -1971,7 +1981,7 @@ class FakeEngine:
 
     def _restore(self, saved) -> None:
         """The project as it was before a script that failed, its layers the same objects (a test holds them)."""
-        layers, self.groups, self.next_id, self.status, self.tile_layers = saved
+        layers, self.groups, self.next_id, self.status, self.tile_layers, self.removed = saved
         now = {layer["id"]: layer for layer in self.layers}
         for n, before in enumerate(layers):
             layer = now.get(before["id"])
@@ -2531,17 +2541,22 @@ TILED = {"tiled": True, "blockxsize": 256, "blockysize": 256}
 
 
 def _header_only(path: Path, width: int, height: int, count: int, overviews: str | None = "internal",
-                 **options) -> Path:
+                 palette: bool = False, **options) -> Path:
     """A GeoTIFF of that size with no pixel written: GDAL leaves its blocks out (SPARSE_OK), so the file is its header
     and directories alone, a few kilobytes whatever its size. ``options``: how it is written (else tiled, Deflate);
-    ``overviews``: "internal" (built inside it), "external" (an .ovr beside it), or None."""
+    ``overviews``: "internal" (built inside it), "external" (an .ovr beside it), or None; ``palette``: one band of
+    indices coloured by a palette."""
     import rasterio
     from rasterio.enums import Resampling
     from rasterio.transform import from_origin
 
     options = options or {**TILED, "compress": "deflate"}
+    if palette:
+        options["photometric"] = "palette"
     with rasterio.open(path, "w", driver="GTiff", width=width, height=height, count=count, dtype="uint8", crs=GB,
                        transform=from_origin(GX, GY + height * 0.01, 0.01, 0.01), sparse_ok=True, **options) as dst:
+        if palette:
+            dst.write_colormap(1, {1: (200, 60, 30, 255), 9: (30, 60, 200, 255)})
         if overviews == "internal":
             dst.build_overviews([2, 4, 8, 16, 32, 64], Resampling.average)
     if overviews == "external":
@@ -2617,11 +2632,13 @@ def _waited(condition, seconds: float = 5.0) -> bool:
 def test_raster_route(tmp_path):
     """By address (read in place, at full resolution) only what RustGIS reads so and would otherwise open from an
     overview: a GeoTIFF above RASTER_SAMPLES (width x height x bands), tiled, with internal overviews, compressed as
-    RustGIS decodes in place. Above the limit by file what RustGIS opens right from an overview: in strips, without
-    internal overviews (an .ovr beside it is never served), a YCbCr JPEG (RustGIS converts it from a file, in place it
-    would show raw Y, Cb, Cr). A copy for what RustGIS decodes neither way (WebP, LERC, LZMA, whatever the size), and
-    for a raster above the limit that is no GeoTIFF. Below the limit, and what rasterio cannot read, by file: RustGIS
-    says whether it reads it. Every large case is a header-only sparse file."""
+    RustGIS decodes in place, without a palette. Above the limit by file what RustGIS opens right from an overview: in
+    strips, without internal overviews (an .ovr beside it is never served), a YCbCr JPEG (RustGIS converts it from a
+    file, in place it would show raw Y, Cb, Cr), a palette (applied to a file only). A copy for what RustGIS decodes
+    neither way (WebP, LERC, LZMA) and for the formats it does not load as files (a VRT it refuses, a PNG it draws
+    without its world file), whatever the size; a JPEG 2000 or an ERDAS IMG by file (RustGIS converts them with
+    GDAL). Below the limit, and what rasterio cannot read, by file: RustGIS says whether it reads it. Every large case
+    is a header-only sparse file."""
     import numpy as np
     import rasterio
     import rasterio.shutil
@@ -2642,16 +2659,21 @@ def test_raster_route(tmp_path):
     assert link.raster_route(_header_only(tmp_path / "strisce.tif", 8000, 6000, 4, None, compress="deflate")) == "file"
     assert link.raster_route(_header_only(tmp_path / "senza.tif", 8000, 6000, 4, None)) == "file"
     assert link.raster_route(_header_only(tmp_path / "accanto.tif", 8000, 6000, 4, "external")) == "file"
+    assert link.raster_route(_header_only(tmp_path / "palette.tif", 12_000, 11_000, 1, palette=True)) == "file"
     # decoded neither way: a copy, whatever the size
     for codec in ("webp", "lerc", "lzma"):
         large = _header_only(tmp_path / f"{codec}.tif", 8000, 6000, 3, None, compress=codec, **TILED)
         assert link.raster_route(large) == "copy", codec
     assert link.raster_route(_two_tone(tmp_path / "webp_piccolo.tif", compress="webp", **TILED)) == "copy"
-    # no GeoTIFF: above the limit a copy, below it its file
+    # other formats: a copy, but for those RustGIS loads as files (through GDAL's tools)
     rasterio.shutil.copy(good, tmp_path / "buona.vrt", driver="VRT")
     assert link.raster_route(tmp_path / "buona.vrt") == "copy"
-    rasterio.shutil.copy(small, tmp_path / "piccolo.png", driver="PNG")
-    assert link.raster_route(tmp_path / "piccolo.png") == "file"
+    rasterio.shutil.copy(small, tmp_path / "piccolo.png", driver="PNG", WORLDFILE="YES")
+    assert link.raster_route(tmp_path / "piccolo.png") == "copy"
+    rasterio.shutil.copy(small, tmp_path / "piccolo.jp2", driver="JP2OpenJPEG")
+    assert link.raster_route(tmp_path / "piccolo.jp2") == "file"
+    rasterio.shutil.copy(small, tmp_path / "piccolo.img", driver="HFA")
+    assert link.raster_route(tmp_path / "piccolo.img") == "file"
     (tmp_path / "rotto.tif").write_bytes(b"not a raster")
     assert link.raster_route(tmp_path / "rotto.tif") == "file"
     assert link.raster_route(tmp_path / "manca.tif") == "file"
@@ -2825,10 +2847,19 @@ def test_start_sends_large_rasters_by_address(tmp_path):
     assert fake.tile_layers == [] and len(fake.layers) == 9
 
 
+def _marked(script: str) -> list:
+    """The commands of a script, each mark of a tile layer (TILE_MARK and 16 hexadecimal digits) written "<mark>"."""
+    def plain(value):
+        mark = isinstance(value, str) and re.fullmatch(rf"{link.TILE_MARK}-[0-9a-f]{{16}}", value)
+        return "<mark>" if mark else value
+
+    return [(command, {k: plain(v) for k, v in params.items()}) for command, params in _commands(script)]
+
+
 def test_a_start_that_fails_takes_away_the_rasters_it_served(tmp_path):
-    """A start that fails after RustGIS took rasters by address takes those tile layers away - found by their address,
-    in one script, from the bottom of RustGIS's list up: a tile layer of the user's with the same name stays - and
-    closes the server."""
+    """A start that fails after RustGIS took rasters by address takes those tile layers away - marked by their
+    places, their address checked, removed by their marks - and closes the server: a tile layer of the user's with the
+    same name stays, its name as it was."""
     large = _header_only(tmp_path / "ortofoto.tif", 8000, 6000, 4)
     live = LiveLink(tmp_path / "qgis", GB)
     live.write(_drawings([_unit(1, GX, GY)]))
@@ -2842,18 +2873,21 @@ def test_a_start_that_fails_takes_away_the_rasters_it_served(tmp_path):
             rl.start([{"path": large, "name": "Ortofoto"}, {"path": large, "name": "Ortofoto"}])
     finally:
         rl.stop()
-    assert fake.tile_layers == [mine] and fake.layers == []
-    (removal,) = [script for script in fake.scripts if "map.removeTiles" in script]
-    assert _commands(removal) == [("map.removeTiles", {"index": 1}), ("map.removeTiles", {"index": 0})]
+    assert fake.tile_layers == [mine] and fake.layers == [] and len(fake.removed) == 2
+    renaming, removal = [script for script in fake.scripts if "Tiles " in script]
+    assert _marked(renaming) == [("map.setTiles", {"index": 0, "rename": "<mark>"}),
+                                 ("map.setTiles", {"index": 1, "rename": "<mark>"})]
+    assert _marked(removal) == [("map.removeTiles", {"name": "<mark>"})] * 2
     assert rl.server is None and rl.rasters == [] and rl.layers == {}
 
 
 def test_stop_takes_away_only_the_links_tile_layers(tmp_path, caplog):
-    """stop() takes away the tile layers RustGIS reads from the link's server - found by their address, in one
-    script, each by its place in RustGIS's list (never an empty one: RustGIS would take away the top one or all) - and
-    leaves the user's, whatever their name, above and below. RustGIS busy: nothing sent, said in the log; a script it
-    refuses, or whose answer was lost, said in the log and never sent again; never raised; the server closes all the
-    same."""
+    """stop() marks the tile layers RustGIS reads from the link's server with names of their own (by their places, in
+    one script), reads the list again, and removes by their marks those found on an address of the server (one
+    script): the user's, whatever their name, above and below, stay as they were. RustGIS busy at the first reading:
+    nothing sent; a removal it refuses: said in the log, the marked ones given their names back; a renaming whose
+    answer was lost: nothing removed (it may still run: marks are all it leaves); a removal whose answer was lost:
+    never sent again. Never raised; the server closes all the same."""
     large = _header_only(tmp_path / "ortofoto.tif", 8000, 6000, 4)
     live = LiveLink(tmp_path / "qgis", GB)
     live.write(_drawings([_unit(1, GX, GY)]))
@@ -2871,29 +2905,101 @@ def test_stop_takes_away_only_the_links_tile_layers(tmp_path, caplog):
         fake.scripts.clear()
         return fake, rl
 
+    def names(fake):
+        return [re.sub(rf"{link.TILE_MARK}-[0-9a-f]{{16}}", "<mark>", t["name"]) for t in fake.tile_layers]
+
     try:
         fake, rl = started()
+        ours = rl.rasters[0].url
         rl.stop()
-        assert [t["url"] for t in fake.tile_layers] == [xyz, cog] and rl.server is None
-        assert [tool for tool, _ in fake.calls] == ["list_layers", "run"]
-        assert _commands(fake.scripts[0]) == [("map.removeTiles", {"index": 1})]
+        assert [(t["name"], t["url"]) for t in fake.tile_layers] == [("Ortofoto", xyz), ("Ortofoto", cog)]
+        assert [t["url"] for t in fake.removed] == [ours] and rl.server is None
+        assert [tool for tool, _ in fake.calls] == ["list_layers", "run", "list_layers", "run"]
+        assert _marked(fake.scripts[0]) == [("map.setTiles", {"index": 1, "rename": "<mark>"})]
+        assert _marked(fake.scripts[1]) == [("map.removeTiles", {"name": "<mark>"})]
         fake, rl = started()
         fake.busy.append("list_layers")
         with caplog.at_level(logging.WARNING, logger=link.__name__):
             rl.stop()
-        assert [tool for tool, _ in fake.calls] == ["list_layers"] and len(fake.tile_layers) == 3
-        assert "did not list them" in caplog.text and rl.server is None
+        assert [tool for tool, _ in fake.calls] == ["list_layers"] and names(fake) == ["Ortofoto"] * 3
+        assert "did not list" in caplog.text and rl.server is None
         fake, rl = started()
         fake.rules.append(lambda command, params: "not now" if command == "map.removeTiles" else None)
         caplog.clear()
         with caplog.at_level(logging.WARNING, logger=link.__name__):
             rl.stop()
-        assert len(fake.tile_layers) == 3 and "stay in RustGIS" in caplog.text and rl.server is None
+        assert names(fake) == ["Ortofoto"] * 3 and "stay in RustGIS" in caplog.text and rl.server is None
         fake, rl = started()
-        fake.lost.append("run")
-        rl.stop()
-        assert [tool for tool, _ in fake.calls] == ["list_layers", "run"]  # ran, its answer lost: not sent again
-        assert [t["url"] for t in fake.tile_layers] == [xyz, cog]
+        fake.lost.append("run")  # the renaming runs, its answer lost
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=link.__name__):
+            rl.stop()
+        assert [tool for tool, _ in fake.calls] == ["list_layers", "run"] and fake.removed == []
+        assert names(fake) == ["Ortofoto", "<mark>", "Ortofoto"] and "did not list or mark" in caplog.text
+        fake, rl = started()
+        fake.hooks.append(lambda tool, args: fake.lost.append("run") if "map.removeTiles" in args.get(
+            "script", "") and not fake.lost else None)  # the removal runs, its answer lost
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=link.__name__):
+            rl.stop()
+        assert [tool for tool, _ in fake.calls] == ["list_layers", "run", "list_layers", "run"]
+        assert [t["url"] for t in fake.tile_layers] == [xyz, cog] and "may stay" in caplog.text
+    finally:
+        for rl in links:
+            rl.stop()
+
+
+def test_tile_layers_go_by_their_marks_when_the_list_changes(tmp_path, caplog):
+    """RustGIS's list of tile layers changes while a link takes its own away - another link stopping between the
+    first's reading and its renaming, a basemap the user adds then: a mark that lands on a tile layer of the user's
+    gives it back the name it had (one added meanwhile keeps the mark, said in the log), the link's layer that moved
+    stays, said in the log, and nothing but a tile layer of a link is ever removed."""
+    large = _header_only(tmp_path / "ortofoto.tif", 8000, 6000, 4)
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([_unit(1, GX, GY)]))
+    basemap = {"name": "Basemap dell'utente", "url": "http://127.0.0.1:9/user/{z}/{x}/{y}.png", "kind": "raster"}
+    late = {"name": "Altro sfondo", "url": "http://127.0.0.1:9/late/{z}/{x}/{y}.png", "kind": "raster"}
+    fake = FakeEngine()
+    fake.tile_layers.append(dict(basemap))
+    first, second = link.RustGisLink(live, fake, "Saggio 1", GB), link.RustGisLink(live, fake, "Saggio 2", GB)
+    links = [first, second]
+    try:
+        second.start([{"path": large, "name": "Ortofoto (B)"}])
+        first.start([{"path": large, "name": "Ortofoto (A)"}])
+        a, b = first.rasters[0].url, second.rasters[0].url
+        assert [t["url"] for t in fake.tile_layers] == [a, b, basemap["url"]]
+
+        def meanwhile(tool, args):  # right before the second's renaming: the first stops, whole
+            if tool == "run" and fake.hooks:
+                fake.hooks.clear()
+                first.stop()
+
+        fake.hooks.append(meanwhile)
+        with caplog.at_level(logging.WARNING, logger=link.__name__):
+            second.stop()
+        assert [(t["name"], t["url"]) for t in fake.tile_layers] == [("Ortofoto (B)", b),
+                                                                     (basemap["name"], basemap["url"])]
+        assert [t["url"] for t in fake.removed] == [a] and "moved" in caplog.text
+        # a basemap the user adds between the reading and the renaming
+        fake = FakeEngine()
+        fake.tile_layers.append(dict(basemap))
+        rl = link.RustGisLink(live, fake, "Saggio 1", GB)
+        links.append(rl)
+        rl.start([{"path": large, "name": "Ortofoto"}])
+        ours = rl.rasters[0].url
+
+        def added(tool, args):
+            if tool == "run" and fake.hooks:
+                fake.hooks.clear()
+                fake.tile_layers.insert(0, dict(late))
+
+        fake.hooks.append(added)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=link.__name__):
+            rl.stop()
+        assert fake.removed == [] and [t["url"] for t in fake.tile_layers] == [late["url"], ours, basemap["url"]]
+        assert [t["name"] for t in fake.tile_layers][1:] == ["Ortofoto", basemap["name"]]
+        assert "added to RustGIS meanwhile is named" in caplog.text and "moved" in caplog.text
     finally:
         for rl in links:
             rl.stop()
@@ -2902,8 +3008,9 @@ def test_stop_takes_away_only_the_links_tile_layers(tmp_path, caplog):
 def test_hidden_rasters_leave_the_orthophoto_on_top(tmp_path):
     """RustGIS draws its layers over every tile layer: the rasters given hidden are hidden - their layers in one
     layer.visibility - so the orthophoto read in place is not covered by a DEM; opacities go as well, the layers' by
-    layer.transparency and the tile layers' by map.setTiles at their place in RustGIS's list, in one script
-    (map.setTiles alone answers with no object). A tile layer of the user's is left as it is."""
+    layer.transparency and the tile layers' by map.setTiles - marked first with names of their own, then set by those
+    names and given their names back on the same line, in one script with the transparencies (map.setTiles alone
+    answers with no object). A tile layer of the user's is left as it is."""
     ortho = _header_only(tmp_path / "ortofoto.tif", 8000, 6000, 4)
     reflectance = _header_only(tmp_path / "riflettanza.tif", 8000, 6000, 4)
     dem = _small_dem(tmp_path / "dem.tif")
@@ -2922,10 +3029,12 @@ def test_hidden_rasters_leave_the_orthophoto_on_top(tmp_path):
         assert [params for command, params in commands if command == "layer.visibility"] == [
             {"layer": [int(shaded.layer), int(plain.layer)], "visible": False}]
         assert not [command for command, _ in commands if command in ("map.setTiles", "layer.transparency")]
-        (script,) = [script for script in fake.scripts if "map.setTiles" in script]
-        assert _commands(script) == [("layer.transparency", {"layer": int(shaded.layer), "value": 40}),
-                                     ("map.setTiles", {"index": 1, "opacity": 0.8}),
-                                     ("map.setTiles", {"index": 0, "visible": False})]
+        renaming, setting = [script for script in fake.scripts if "map.setTiles" in script]
+        assert _marked(renaming) == [("map.setTiles", {"index": 0, "rename": "<mark>"}),
+                                     ("map.setTiles", {"index": 1, "rename": "<mark>"})]
+        assert _marked(setting) == [("layer.transparency", {"layer": int(shaded.layer), "value": 40}),
+                                    ("map.setTiles", {"name": "<mark>", "visible": False, "rename": "Riflettanza"}),
+                                    ("map.setTiles", {"name": "<mark>", "opacity": 0.8, "rename": "Ortofoto"})]
         assert [(t["name"], t.get("visible"), t.get("opacity")) for t in fake.tile_layers] == [
             ("Riflettanza", False, None), ("Ortofoto", None, 0.8), ("Sfondo", None, None)]
         assert [fake.layer(int(r.layer))["visible"] for r in (shaded, plain)] == [False, False]
@@ -2935,35 +3044,54 @@ def test_hidden_rasters_leave_the_orthophoto_on_top(tmp_path):
         rl.stop()
 
 
-def test_a_raster_rustgis_cannot_decode_goes_as_a_copy(tmp_path, monkeypatch, caplog):
-    """A raster compressed as RustGIS does not decode (WebP here) goes by the address of a copy in the chunk's data
-    folder (rustgis/): JPEG of RGB pixels for RGB imagery, Deflate with the alpha band for one with transparency
-    (RustGIS ignores an internal mask), tiles of 512, internal overviews. Made once, reused while the raster is the
-    same file, made again when it changes; without room on the disk for it the raster goes as its file, said in the
-    log."""
+def test_a_raster_rustgis_cannot_decode_goes_as_a_copy(tmp_path, monkeypatch):
+    """A raster compressed as RustGIS does not decode (WebP, LZMA here) goes as a copy in the chunk's data folder
+    (rustgis/), given as any raster is - a small one as its file, a larger one by its address: JPEG of RGB pixels for
+    RGB imagery, Deflate with the alpha band for one with transparency (RustGIS ignores an internal mask), a palette
+    kept (its overviews of the nearest cell, never averaged indices); tiles of 512, internal overviews; written
+    through a temporary file of its own. Made once, reused while the raster is the same file, made again when it
+    changes."""
+    import numpy as np
     import rasterio
     from rasterio.enums import ColorInterp
 
     photo = _two_tone(tmp_path / "foto.tif", 3, compress="webp", **TILED)
     ortho = _two_tone(tmp_path / "ortofoto.tif", 4, compress="webp", **TILED)
+    classes = _header_only(tmp_path / "classi.tif", 600, 600, 1, None, palette=True, compress="lzma", **TILED)
+    with rasterio.open(classes, "r+") as dst:
+        dst.write(np.where(np.arange(600)[None, None, :] < 300, 1, 9).repeat(600, axis=1).astype("uint8"))
     data_dir = tmp_path / "progetto.ppg.files" / "chunk_1"
+    (data_dir / "rustgis").mkdir(parents=True)
+    stale = data_dir / "rustgis" / "foto.tif.tmp"  # a fixed name an older copy might have used: never touched
+    stale.write_bytes(b"left there")
     live = LiveLink(tmp_path / "qgis", GB)
     live.write(_drawings([_unit(1, GX, GY)]))
     fake = FakeEngine()
     rl = link.RustGisLink(live, fake, "Saggio 1", GB, data_dir=data_dir)
-    rasters = [{"path": photo, "name": "Foto"}, {"path": ortho, "name": "Ortofoto"}]
+    rasters = [{"path": photo, "name": "Foto"}, {"path": ortho, "name": "Ortofoto"},
+               {"path": classes, "name": "Classi"}]
     try:
-        assert rl.start(rasters)["rasters"] == 2
-        first, second = rl.rasters
-        assert first.copy.parent == second.copy.parent == data_dir / "rustgis"
-        assert first.url and second.url and not first.layer and not second.layer
-        assert [url for url, _, _ in fake.fetched] == [first.url, second.url]  # the copies are what is served
+        assert rl.start(rasters)["rasters"] == 3
+        first, second, third = rl.rasters
+        assert first.copy.parent == second.copy.parent == third.copy.parent == data_dir / "rustgis"
+        assert all(r.layer and r.url is None for r in rl.rasters)  # small: the copies as files
+        given = [params["path"] for tool, args in fake.calls if tool == "run_command"
+                 for params in [args["params"]] if args["command"] == "layer.addData" and "layer" not in params]
+        assert given == [str(first.copy), str(second.copy), str(third.copy)]
         with rasterio.open(first.copy) as copy:
             assert copy.compression.name == "jpeg" and copy.count == 3 and copy.overviews(1)
             assert "SOURCE_COLOR_SPACE" not in copy.tags(ns="IMAGE_STRUCTURE") and copy.block_shapes[0] == (512, 512)
         with rasterio.open(second.copy) as copy, rasterio.open(ortho) as source:
             assert copy.compression.name == "deflate" and copy.colorinterp[3] == ColorInterp.alpha
             assert (copy.read() == source.read()).all() and copy.read(4)[:, :10].max() == 0  # as decoded, alpha kept
+        with rasterio.open(third.copy) as copy, rasterio.open(classes) as source:
+            assert copy.colorinterp[0] == ColorInterp.palette and copy.colormap(1) == source.colormap(1)
+            assert (copy.read() == source.read()).all() and copy.overviews(1)
+        with rasterio.open(third.copy, overview_level=0) as overview:
+            assert set(np.unique(overview.read())) <= {1, 9}  # the nearest cell, no index between
+        assert stale.read_bytes() == b"left there"
+        assert sorted(p.name for p in (data_dir / "rustgis").iterdir() if not p.name.endswith(".json")) == sorted(
+            [first.copy.name, second.copy.name, third.copy.name, stale.name])  # no temporary file left
         made = first.copy.stat().st_mtime_ns
         rl.start(rasters)
         assert rl.rasters[0].copy.stat().st_mtime_ns == made  # the same raster: the copy reused
@@ -2971,22 +3099,75 @@ def test_a_raster_rustgis_cannot_decode_goes_as_a_copy(tmp_path, monkeypatch, ca
         os.utime(photo, ns=(later, later))
         rl.start(rasters)
         assert rl.rasters[0].copy.stat().st_mtime_ns != made  # the raster changed: copied again
-        os.utime(photo, ns=(later + 10**9, later + 10**9))
-        monkeypatch.setattr(link.shutil, "disk_usage", lambda folder: shutil._ntuple_diskusage(10**12, 10**12, 0))
-        caplog.clear()
-        with caplog.at_level(logging.WARNING, logger=link.__name__):
-            rl.start([{"path": photo, "name": "Foto"}])
-        (alone,) = rl.rasters
-        assert alone.layer and alone.copy is None and alone.url is None  # as its file
-        assert "a copy it reads would need" in caplog.text
+        # a larger one (here above a lower limit) goes by the address of its copy
+        large = _two_tone(tmp_path / "grande.tif", 3, side=600, compress="webp", **TILED)
+        monkeypatch.setattr(link, "RASTER_SAMPLES", 1_000_000)
+        rl.start([{"path": large, "name": "Grande"}])
+        (big,) = rl.rasters
+        assert big.copy and big.url and big.layer is None and fake.fetched[-1][0] == big.url
+        # a copy that fails to land leaves no temporary file
+        monkeypatch.setattr(link.os, "replace", lambda *args: (_ for _ in ()).throw(OSError("disk gone")))
+        with pytest.raises(OSError, match="disk gone"):
+            link._write_copy(photo, tmp_path / "copia.tif")
+        assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".copia")] == []
     finally:
         rl.stop()
+
+
+def test_a_copy_needs_room_on_the_disk(tmp_path, monkeypatch):
+    """A copy is made only with room for it on the disk: 1.5 times its size free - the size its pixels give, which
+    can be far larger than the raster's (a VRT is a few kilobytes; a WebP copied as Deflate grows) - and 2 GB left
+    after it. Else nothing is written and the raster, which RustGIS cannot read, is refused, saying why."""
+    import rasterio.shutil
+
+    good = _header_only(tmp_path / "buona.tif", 8000, 6000, 4)
+    mosaic = tmp_path / "mosaico.vrt"
+    rasterio.shutil.copy(good, mosaic, driver="VRT")
+    webp = _header_only(tmp_path / "foto.tif", 8000, 6000, 3, None, compress="webp", **TILED)
+    assert link._copy_bytes(mosaic) == 8000 * 6000 * 4 * 4 // 3  # Deflate, 4 bands, a third more for the overviews
+    assert link._copy_bytes(webp) == 8000 * 6000 * 3 * 4 // 3 // 6  # JPEG: about a sixth
+    data_dir = tmp_path / "chunk_1"
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([_unit(1, GX, GY)]))
+    fake = FakeEngine()
+    rl = link.RustGisLink(live, fake, "Saggio 1", GB, data_dir=data_dir)
+    try:
+        for raster, name, free in ((mosaic, "Mosaico", 300_000_000),  # less than 1.5 times its 256 MB
+                                   (mosaic, "Mosaico", 1_000_000_000),  # 1.5 times, but less than 2 GB left after
+                                   (webp, "Foto", 2_020_000_000)):  # 32 MB: 1.988 GB left after it
+            monkeypatch.setattr(link.shutil, "disk_usage",
+                                lambda folder, free=free: shutil._ntuple_diskusage(10**12, 10**12 - free, free))
+            out = rl.start([{"path": raster, "name": name}])
+            assert rl.rasters == [] and "needs 1.5 times that free and 2 GB left after it" in out["refused"][name]
+        assert [p for p in (data_dir / "rustgis").iterdir()] == []  # nothing written
+    finally:
+        rl.stop()
+
+
+def test_stop_closes_the_server_whatever_happens(tmp_path, monkeypatch):
+    """stop() closes the raster server and forgets the link's state even when taking the tile layers away fails in
+    a way it did not foresee."""
+    large = _header_only(tmp_path / "ortofoto.tif", 8000, 6000, 4)
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([_unit(1, GX, GY)]))
+    rl = link.RustGisLink(live, FakeEngine(), "Saggio 1", GB)
+    rl.start([{"path": large, "name": "Ortofoto"}])
+    server = rl.server
+
+    def broken(base):
+        raise RuntimeError("something unforeseen")
+
+    monkeypatch.setattr(rl, "_remove_tiles", broken)
+    with pytest.raises(RuntimeError, match="unforeseen"):
+        rl.stop()
+    assert rl.server is None and rl.rasters == [] and rl.layers == {} and not server.thread.is_alive()
 
 
 def test_a_raster_downloaded_whole_or_not_served(tmp_path, monkeypatch, caplog):
     """When RustGIS downloads a raster given by its address whole (as it does a GeoTIFF it cannot read in place), it
     is a layer of it: in the group, and said in the log once its answer is read. One the server cannot give (a file
-    gone, a server that cannot start) is left out and said in "refused"; the link starts all the same."""
+    gone, a server that cannot start) is left out and said in "refused" - two of the same name each under its own
+    key; the link starts all the same."""
     large = _header_only(tmp_path / "ortofoto.tif", 8000, 6000, 4)
     live = LiveLink(tmp_path / "qgis", GB)
     live.write(_drawings([_unit(1, GX, GY)]))
@@ -3004,11 +3185,66 @@ def test_a_raster_downloaded_whole_or_not_served(tmp_path, monkeypatch, caplog):
             raise FileNotFoundError(f"gone: {path}")
 
         monkeypatch.setattr(link.RasterServer, "url", gone)
-        out = rl.start([{"path": large, "name": "Ortofoto"}])
-        assert out["rasters"] == 0 and out["layers"] == 7 and "gone" in out["refused"]["Ortofoto"]
-        assert rl.rasters == [] and rl.layers
+        out = rl.start([{"path": large, "name": "Ortofoto"}, {"path": large, "name": "Ortofoto"}])
+        assert out["rasters"] == 0 and out["layers"] == 7 and sorted(out["refused"]) == ["Ortofoto", "Ortofoto (2)"]
+        assert all("gone" in reason for reason in out["refused"].values()) and rl.rasters == [] and rl.layers
     finally:
         rl.stop()
+
+
+class FakeFiles:
+    """The calls of kernel32 the raster server makes to open a file on Windows, answering as the test says."""
+
+    def __init__(self):
+        self.handle, self.attributes, self.informed = 4321, 0x20, 1  # FILE_ATTRIBUTE_ARCHIVE: a plain file
+        self.opened, self.closed = [], []
+
+    def CreateFileW(self, name, access, share, security, disposition, flags, template):
+        self.opened.append((name, access, share, security, disposition, flags, template))
+        return self.handle
+
+    def GetFileInformationByHandle(self, handle, information):
+        information._obj.attributes = self.attributes  # what byref() was given
+        return self.informed
+
+    def CloseHandle(self, handle):
+        self.closed.append(handle)
+        return 1
+
+
+def test_on_windows_a_served_file_is_shared_and_no_reparse_point(tmp_path, monkeypatch):
+    """On Windows the raster server opens a file with CreateFileW shared for reading, writing and deleting - the
+    program replaces or deletes a product RustGIS is reading a tile of - and with FILE_FLAG_OPEN_REPARSE_POINT: a
+    reparse point (a link, a junction) put where the file was is refused, as O_NOFOLLOW refuses a link elsewhere. Its
+    address and its answers go through the same opening."""
+    import ctypes
+
+    raster = tmp_path / "ortofoto.tif"
+    raster.write_bytes(b"pixels")
+    files = FakeFiles()
+    taken = []
+    monkeypatch.setattr(link, "_platform", lambda: "win32")
+    monkeypatch.setattr(link, "_kernel32", lambda: files)
+    monkeypatch.setattr(link, "_osfhandle", lambda handle: taken.append(handle) or os.open(raster, os.O_RDONLY))
+    with link._open_regular(raster) as handle:
+        assert handle.read() == b"pixels"
+    # GENERIC_READ; FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE; OPEN_EXISTING; FILE_FLAG_OPEN_REPARSE_POINT
+    assert files.opened == [(str(raster), 0x80000000, 0x7, None, 3, 0x00200000, None)]
+    assert taken == [4321] and files.closed == []  # the descriptor owns the handle
+    files.attributes = 0x400 | 0x20  # FILE_ATTRIBUTE_REPARSE_POINT
+    assert link._open_regular(raster) is None and files.closed == [4321]
+    files.attributes, files.informed = 0x20, 0  # its information not read
+    assert link._open_regular(raster) is None and files.closed == [4321, 4321]
+    files.handle = ctypes.c_void_p(-1).value  # INVALID_HANDLE_VALUE: nothing to give back
+    assert link._open_regular(raster) is None and files.closed == [4321, 4321]
+    files.handle, files.informed = 4321, 1
+    server = link.RasterServer()
+    try:
+        path = urllib.parse.urlsplit(server.url(raster)).path
+        assert _http(server.server_address[1], path)[2] == b"pixels"
+    finally:
+        server.close()
+    assert len(files.opened) == 6  # the four above, the address, the answer
 
 
 def _orthophoto(path: Path, side: int, pixel: float, crs: str, x0: float, y0: float, colour=None) -> Path:
@@ -3134,8 +3370,9 @@ def test_hidden_dems_leave_the_orthophoto_on_top_with_the_real_engine(tmp_path, 
 
 @pytest.mark.skipif(not CLI, reason="PPG_RUSTGIS_CLI does not name a rustgis-cli")
 def test_stop_takes_away_only_our_tile_layers_with_the_real_engine(tmp_path, monkeypatch):
-    """RustGIS's own engine: the link's orthophoto read in place, then a tile layer of the user's (XYZ) and a COG of
-    the user's read from another server, both named as the link's: stop() takes away only the link's."""
+    """RustGIS's own engine: the link's orthophoto read in place, given hidden and half transparent (set through its
+    mark, its name given back), then a tile layer of the user's (XYZ) and a COG of the user's read from another server,
+    both named as the link's: stop() takes away only the link's, the user's keep their names."""
     x0, y0, crs = 291000.0, 4640000.0, "EPSG:32633"
     ortho = _orthophoto(tmp_path / "orthomosaic.tif", 512, 0.5, crs, x0, y0)
     monkeypatch.setattr(link, "RASTER_SAMPLES", 500_000)
@@ -3146,7 +3383,9 @@ def test_stop_takes_away_only_our_tile_layers_with_the_real_engine(tmp_path, mon
         with link.StdioTransport(Path(CLI), ["mcp", "--yes"]) as engine:
             rl = link.RustGisLink(live, engine, "Saggio 1", crs)
             try:
-                rl.start([{"path": ortho, "name": "Ortofoto"}])
+                rl.start([{"path": ortho, "name": "Ortofoto", "hidden": True, "opacity": 0.4}])
+                (tile,) = engine.call("list_layers", {})["tileLayers"]
+                assert (tile["name"], tile["visible"], round(tile["opacity"], 3)) == ("Ortofoto", False, 0.4)
                 xyz = "http://127.0.0.1:9/{z}/{x}/{y}.png"
                 engine.call("run_command", {"command": "map.addTiles", "params": {"url": xyz, "name": "Ortofoto"}})
                 cog = theirs.url(ortho)
@@ -3154,31 +3393,120 @@ def test_stop_takes_away_only_our_tile_layers_with_the_real_engine(tmp_path, mon
                 assert len(engine.call("list_layers", {})["tileLayers"]) == 3
             finally:
                 rl.stop()
-            assert sorted(t["url"] for t in engine.call("list_layers", {})["tileLayers"]) == sorted([cog, xyz])
+            left = engine.call("list_layers", {})["tileLayers"]
+            assert sorted((t["url"], t["name"]) for t in left) == sorted([(cog, "Ortofoto"), (xyz, "Ortofoto")])
     finally:
         theirs.close()
 
 
+class Hooked:
+    """A transport that calls ``before`` once, right before the next script it is asked to run (armed by setting it)."""
+
+    def __init__(self, transport):
+        self.transport, self.before = transport, None
+
+    @property
+    def timeout(self):
+        return self.transport.timeout
+
+    @timeout.setter
+    def timeout(self, seconds):
+        self.transport.timeout = seconds
+
+    def initialize(self) -> str:
+        return self.transport.initialize()
+
+    def call(self, tool: str, args: dict) -> dict:
+        if tool == "run" and self.before is not None:
+            before, self.before = self.before, None
+            before()
+        return self.transport.call(tool, args)
+
+
 @pytest.mark.skipif(not CLI, reason="PPG_RUSTGIS_CLI does not name a rustgis-cli")
-def test_a_copy_for_a_codec_rustgis_cannot_read_with_the_real_engine(tmp_path):
-    """RustGIS's own engine and a raster it decodes neither as a file nor in place (WebP): the link gives it a copy
-    (JPEG of RGB pixels, in the chunk's data folder) by address, which RustGIS draws in its colours."""
+def test_tile_layers_go_by_their_marks_with_the_real_engine(tmp_path, monkeypatch):
+    """RustGIS's own engine and the reviewer's sequences: two links whose stops interleave (the second reads the
+    list, the first stops whole, the second renames), and a basemap the user adds between a link's reading and its
+    renaming. The user's tile layers always stay, with their names (but one added meanwhile, which keeps the mark);
+    nothing but a link's tile layer is removed; a link's that moved meanwhile stays."""
     x0, y0, crs = 291000.0, 4640000.0, "EPSG:32633"
-    photo = _two_tone(tmp_path / "foto.tif", 3, side=512, crs=crs, x0=x0, y0=y0, pixel=0.5, compress="webp", **TILED)
+    ortho = _orthophoto(tmp_path / "orthomosaic.tif", 512, 0.5, crs, x0, y0)
+    monkeypatch.setattr(link, "RASTER_SAMPLES", 500_000)
+    live = LiveLink(tmp_path / "qgis", crs)
+    live.write(_drawings([_unit(1, x0 + 50, y0 - 50)]))
+    user = "http://127.0.0.1:9/user/{z}/{x}/{y}.png"
+
+    def tiles(engine):
+        return [(t["name"], t["url"]) for t in engine.call("list_layers", {})["tileLayers"]]
+
+    with link.StdioTransport(Path(CLI), ["mcp", "--yes"]) as engine:
+        hooked = Hooked(engine)
+        first, second = link.RustGisLink(live, engine, "Saggio 1", crs), link.RustGisLink(live, hooked, "Saggio 2", crs)
+        try:
+            engine.call("run_command", {"command": "map.addTiles", "params": {"url": user,
+                                                                               "name": "Basemap dell'utente"}})
+            second.start([{"path": ortho, "name": "Ortofoto (B)"}])
+            first.start([{"path": ortho, "name": "Ortofoto (A)"}])
+            a, b = first.rasters[0].url, second.rasters[0].url
+            assert [url for _, url in tiles(engine)] == [a, b, user]
+            hooked.before = first.stop
+            second.stop()
+            left = tiles(engine)
+            assert ("Basemap dell'utente", user) in left and a not in [url for _, url in left]
+            assert all(url in (b, user) for _, url in left)  # the second's stays (it moved) or went: nothing else
+        finally:
+            first.stop()
+            second.stop()
+        for _ in tiles(engine):  # an empty map for the next sequence
+            engine.call("run", {"script": 'map.removeTiles {"index":0}'})
+        # a basemap the user adds between the link's reading and its renaming
+        rl = link.RustGisLink(live, hooked, "Saggio 1", crs)
+        try:
+            engine.call("run_command", {"command": "map.addTiles", "params": {"url": user,
+                                                                               "name": "Basemap dell'utente"}})
+            rl.start([{"path": ortho, "name": "Ortofoto"}])
+            ours = rl.rasters[0].url
+            late = "http://127.0.0.1:9/late/{z}/{x}/{y}.png"
+            hooked.before = lambda: engine.call("run_command", {"command": "map.addTiles", "params": {
+                "url": late, "name": "Altro sfondo"}})
+            rl.stop()
+            left = tiles(engine)
+            assert ("Basemap dell'utente", user) in left and late in [url for _, url in left]
+            assert all(url in (late, ours, user) for _, url in left)
+        finally:
+            rl.stop()
+
+
+@pytest.mark.skipif(not CLI, reason="PPG_RUSTGIS_CLI does not name a rustgis-cli")
+def test_a_copy_for_a_codec_rustgis_cannot_read_with_the_real_engine(tmp_path, monkeypatch):
+    """RustGIS's own engine and rasters it decodes neither as files nor in place (WebP): each goes as a copy in the
+    chunk's data folder (JPEG of RGB pixels) - a small one as its file, a larger one by its address - which RustGIS
+    draws in its colours."""
+    x0, y0, crs = 291000.0, 4640000.0, "EPSG:32633"
+    small = _two_tone(tmp_path / "foto.tif", 3, side=256, crs=crs, x0=x0, y0=y0, pixel=1.0, compress="webp", **TILED)
+    large = _two_tone(tmp_path / "grande.tif", 3, side=1024, crs=crs, x0=x0, y0=y0, pixel=0.25, compress="webp",
+                      **TILED)
+    monkeypatch.setattr(link, "RASTER_SAMPLES", 1_000_000)  # 1024 x 1024 x 3 above it, 256 x 256 x 3 below
     data_dir = tmp_path / "chunk_1"
     live = LiveLink(tmp_path / "qgis", crs)
     live.write(_drawings([_unit(1, x0 + 50, y0 + 50)]))
     with link.StdioTransport(Path(CLI), ["mcp", "--yes"]) as engine:
         rl = link.RustGisLink(live, engine, "Saggio 1", crs, data_dir=data_dir)
         try:
-            rl.start([{"path": photo, "name": "Foto"}])
-            (given,) = rl.rasters
-            assert given.copy.parent == data_dir / "rustgis" and given.url
-            engine.call("run_command", {"command": "map.zoomToTiles", "params": {"name": "Foto"}})
-            left = _drawn_colour(engine, tmp_path / "mappa.png", 0.4)
-            right = _drawn_colour(engine, tmp_path / "mappa.png", 0.6)
-            assert max(abs(a - b) for a, b in zip(left, (200, 60, 30))) <= 4, left
-            assert max(abs(a - b) for a, b in zip(right, (30, 60, 200))) <= 4, right
+            for raster, name, how in ((small, "Foto", "layer"), (large, "Grande", "url")):
+                rl.start([{"path": raster, "name": name}])
+                (given,) = rl.rasters
+                assert given.copy.parent == data_dir / "rustgis" and getattr(given, how)
+                if how == "url":
+                    engine.call("run_command", {"command": "map.zoomToTiles", "params": {"name": name}})
+                else:
+                    engine.call("run_command", {"command": "layer.zoomTo", "params": {"layer": int(given.layer)}})
+                left = _drawn_colour(engine, tmp_path / "mappa.png", 0.4)
+                right = _drawn_colour(engine, tmp_path / "mappa.png", 0.6)
+                assert max(abs(a - b) for a, b in zip(left, (200, 60, 30))) <= 4, (name, left)
+                assert max(abs(a - b) for a, b in zip(right, (30, 60, 200))) <= 4, (name, right)
+                engine.call("run_command", {"command": "layer.remove", "params": {"layer": [
+                    int(lid) for lid in rl.layers.values()] + ([int(given.layer)] if given.layer else [])}})
         finally:
             rl.stop()
 
