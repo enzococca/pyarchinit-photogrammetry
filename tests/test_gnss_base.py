@@ -421,10 +421,28 @@ def test_baseline_warns_of_a_far_station_and_a_short_session(tmp_path, fake_rtkl
     assert 30.0 < r.baseline_km < 35.0 and r.hours == 0.5
     (distance,) = [w for w in r.warnings if "km from the station" in w]
     assert f"{r.baseline_km:.1f} km from the station 0759" in distance and "20 km" in distance
+    # the atmosphere is estimated over a static baseline: what remains is the caution about the ambiguities
+    assert "ambiguities are hard to fix" in distance and "atmosphere" not in distance
     (session,) = [w for w in r.warnings if "minutes" in w]
     assert "30 minutes" in session and "an hour" in session
     logged = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
     assert distance in logged and session in logged
+
+
+def test_pieces_of_a_base_that_cannot_be_joined_are_refused_before_any_download(tmp_path, fake_rtklib, monkeypatch):
+    """The files of the user's base in pieces are looked at - one receiver, one antenna, the same observation types -
+    before the coordinates and the observations of the station are downloaded: a base that cannot be joined costs no
+    download before its error."""
+    header, records = _records(OWN)
+    first = _piece(tmp_path / "first.05o", header, records[:60])
+    other = _rewrite_header(_piece(tmp_path / "second.05o", header, records[60:]), tmp_path / "other.05o",
+                            _on_label("MARKER NAME", "XXXX"))  # the marker of another receiver
+    asked = []
+    monkeypatch.setattr(stations, "coordinates", lambda *a, **k: asked.append("coordinates"))
+    monkeypatch.setattr(stations, "download_observations", lambda *a, **k: asked.append("observations"))
+    with pytest.raises(ValueError, match="cannot be joined") as error:
+        base.baseline([first, other], _station_0759(), tmp_path / "work", [NAV], atx=None)
+    assert "marker" in str(error.value) and asked == [] and fake_rtklib() == []
 
 
 def test_baseline_refuses_a_station_that_did_not_record_with_the_base(tmp_path, fake_rtklib):
@@ -680,9 +698,10 @@ def test_prepare_base_refuses_before_anything_is_downloaded(tmp_path, monkeypatc
 
 
 def test_prepare_base_downloads_the_antenna_calibrations_when_asked(tmp_path, monkeypatch):
-    """``atx="download"``: igs20.atx downloaded first when the program has none, in any way of placing the base - one
-    that cannot be had is a note, and the PPK goes on (a station does not try again); ``"auto"`` asks for nothing for a
-    base at its header or typed; with a copy in the program nothing is downloaded."""
+    """``atx="download"``: igs20.atx downloaded first when the program has none, for a base at its header or typed - one
+    that cannot be had is a note, and the PPK goes on; ``"auto"`` asks for nothing for such a base. A station, a
+    baseline and a PPP take it as ``"auto"``: they download it themselves after their own checks (a station whose files
+    are not there is refused before igs20.atx is asked for). With a copy in the program nothing is downloaded."""
     calls = []
 
     def offline(refresh=False, progress=None):
@@ -699,11 +718,16 @@ def test_prepare_base_downloads_the_antenna_calibrations_when_asked(tmp_path, mo
     assert base.prepare_base("header", OWN, STATION_OBS, folder=folder).notes == [] and calls == []
     # a station: igs20.atx that could not be had is not waited for a second time
     station = _replaced_station(monkeypatch, tmp_path)
-    monkeypatch.setattr(atx, "atx_file", offline)
+
+    def offline_after(refresh=False, progress=None):
+        station.append(("atx",))
+        return offline(refresh, progress)
+
+    monkeypatch.setattr(atx, "atx_file", offline_after)
     _navigation_downloads(monkeypatch)
     prepared = base.prepare_base("station", _rover_alone(tmp_path), folder=folder, station=AQUI, atx="download")
     assert calls == [False] and len(prepared.notes) == 1 and prepared.atx == "auto"
-    assert [call[0] for call in station] == ["coordinates", "observations"]
+    assert [call[0] for call in station] == ["coordinates", "observations", "atx"]  # igs20.atx after its own checks
     calls.clear()
     monkeypatch.setattr(atx, "cached_atx", lambda: ATX_EXCERPT)
     assert base.prepare_base("header", OWN, STATION_OBS, folder=folder, atx="download").notes == [] and calls == []

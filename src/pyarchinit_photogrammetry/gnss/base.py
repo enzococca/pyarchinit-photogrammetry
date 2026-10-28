@@ -41,7 +41,7 @@ SIGMA_KINDS = {"EPN": "formal", "IGS": "formal", "RING": "scatter"}
 # the latter, so the two are side by side)
 STATION_FOLDER = "station"
 WORK_FOLDER = "baseline"
-ROLES = ("your base", "station")  # how the run of a baseline names its two receivers (ppk.RUN_ROLES)
+BASELINE_ROLES = ("your base", "station")  # the roles of the two receivers of a baseline (one of ppk.RUN_ROLES)
 # how the position of the base of a flight is set (prepare_base): from its RINEX header, typed by the user, a permanent
 # station as the base, the user's base placed by a static baseline from a station or by a static PPP
 BASE_MODES = ("header", "typed", "station", "baseline", "ppp")
@@ -88,7 +88,13 @@ def _span(path: Path, who: str) -> tuple[datetime, datetime]:
 def _session(pieces: Sequence[Path]) -> tuple[datetime, datetime, float]:
     """The first and the last epoch (GPS time) of the observations of the user's base, in one file or several, and the
     seconds between its epochs (those of its file that has them closest, as :func:`.rinex.join` writes them; 0 when
-    none says)."""
+    none says). Pieces that cannot be joined - of another receiver, antenna or observation types
+    (:func:`.rinex.joinable`) - are a ``ValueError`` here, before anything is downloaded for them."""
+    if len(pieces) > 1:
+        try:
+            rinex.joinable(pieces)
+        except ValueError as exc:
+            raise ValueError(f"the files of your base cannot be joined: {exc}") from None
     spans = [_span(piece, f"your base {piece.name}") for piece in pieces]
     steps = [step for piece in pieces if (step := rinex.epoch_interval(piece))]
     return min(a for a, _ in spans), max(b for _, b in spans), min(steps, default=0.0)
@@ -182,9 +188,8 @@ def _notes(name: str, station: stations.Station, q: int, km: float, hours: float
                      "nearer the base, helps RTKLIB fix it")
     if km > ppk.BASELINE_WARNING_KM:
         notes.append(f"your base {name} is {km:.1f} km from the station {station.id}: beyond "
-                     f"{ppk.BASELINE_WARNING_KM:g} km the ambiguities are hard to fix and the atmosphere is not the "
-                     "same above the two, so the position can be centimetres or decimetres off. A nearer station is "
-                     "better")
+                     f"{ppk.BASELINE_WARNING_KM:g} km the ambiguities are hard to fix, and a solution that is not fixed "
+                     "can be centimetres or decimetres off. A nearer station is better")
     long = [hole for hole in lost if hole[2] > GAP_WARNING_S]
     if long:
         before, after, gone = max(long, key=lambda hole: hole[2])
@@ -309,7 +314,8 @@ def baseline(base_obs: str | Path | Sequence[str | Path], station: stations.Stat
             warnings.append(note)
     progress(0.9, f"RTKLIB: the static baseline from {station.id} to {name}")
     solution = ppk.solve(pieces, station_obs, navs, station_position, folder=folder / WORK_FOLDER, atx=atx,
-                         mode="static", rover_antenna="*", solution="forward", static_single=True, roles=ROLES)
+                         mode="static", rover_antenna="*", solution="forward", static_single=True,
+                         roles=BASELINE_ROLES)
     (lat, lon, h), q, sd = ppk.static_position(solution.path)
     if q not in FIX_OR_FLOAT:
         raise ValueError(f"RTKLIB found no relative position of your base {name} from the station {station.id}: its "
@@ -321,7 +327,7 @@ def baseline(base_obs: str | Path | Sequence[str | Path], station: stations.Stat
     km = ppk.baseline_km(solution)
     hours, lost = _hours(own, (*station_span, rinex.epoch_interval(station_obs) or 0.0), solution.rover_holes)
     warnings += solution.warnings
-    own_note = ppk.antenna_warning(name, info, solution.rover_calibration, role=ROLES[0])
+    own_note = ppk.antenna_warning(name, info, solution.rover_calibration, role=BASELINE_ROLES[0])
     if own_note:
         warnings.append(own_note)
     warnings += _notes(name, station, q, km, hours, lost)
@@ -381,8 +387,10 @@ def prepare_base(mode: str, rover: str | Path, bases=None, *, folder: str | Path
 
     ``folder`` is the GNSS folder of the chunk, beside the work folder of the PPK (which no input may be in). ``atx`` is
     ``"auto"`` (the copy of igs20.atx the program has, or none; the station, the baseline and the PPP download it
-    when it is missing, since they download anyway), ``"download"`` (igs20.atx downloaded first in every mode when the
-    program has none - not having it is a note, and then the station and the baseline do not try again) or ``"off"``
+    when it is missing, since they download anyway), ``"download"`` (for a base at its header or typed, igs20.atx
+    downloaded first when the program has none - not having it is a note; the station, the baseline and the PPP take it
+    as ``"auto"`` and download it themselves after their own checks, so that a station whose files are not there is
+    refused before anything else is downloaded) or ``"off"``
     (no calibrations: nothing downloaded, the antennas not corrected; refused for a PPP, which needs the offsets of the
     antennas of the satellites). ``navs`` are the navigation files given (kept as they are); without any,
     :func:`.ppk.solve` takes those beside the drone's file, else those beside the base's - except, for a computed base
@@ -419,11 +427,11 @@ def prepare_base(mode: str, rover: str | Path, bases=None, *, folder: str | Path
     notes: list[str] = []
     calibrations = None if atx == "off" else "auto"
     computed = calibrations  # what the station and the baseline take: "auto" downloads igs20.atx when it is missing
-    if atx == "download" and antex.cached_atx() is None:
+    # "download" is "auto" for a computed base: it downloads igs20.atx after its own checks
+    if atx == "download" and mode not in COMPUTED and antex.cached_atx() is None:
         note = _antenna_calibrations(progress.sub(0.0, 0.1))
-        if note:  # not to be had now: the station and the baseline do not wait for it a second time
+        if note:
             notes.append(note)
-            computed = None
     position = None
     if mode == "typed":
         lat, lon, h = typed
@@ -440,6 +448,9 @@ def prepare_base(mode: str, rover: str | Path, bases=None, *, folder: str | Path
     elif mode == "ppp":
         found = ppp.solve_static(pieces, folder / PPP_FOLDER, progress=progress.sub(0.1, 0.4))
         position, notes = found.position, notes + found.warnings
+    if atx == "download" and mode in COMPUTED and antex.cached_atx() is None:  # asked for, and not to be had
+        notes.append(f"the antenna calibrations of the IGS ({antex.FILE_NAME}) could not be had, so the phase centres "
+                     "of the antennas are not corrected (the log says why)")
     given, downloaded = [Path(path) for path in navs or []], []
     # those beside the drone's file (or the user's base's) ppk.solve finds by itself; never those beside the files a
     # station downloaded, where the navigation of other days may be: the hours of the flight are downloaded instead

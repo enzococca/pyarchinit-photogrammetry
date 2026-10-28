@@ -814,6 +814,16 @@ def _alike(first: _Piece, other: _Piece) -> None:
                          f"and {' '.join(types_a.get(system, ()))}): files with other observation types are not joined")
 
 
+def joinable(paths: Iterable[str | Path]) -> None:
+    """A ``ValueError`` - as :func:`join` gives it - unless the files ``paths`` can be joined: observations with epochs,
+    of one receiver and antenna with the same observation types (:func:`_alike`). Their headers and first epochs are
+    read, nothing is written: what is to be done before anything is downloaded for them; :func:`join` checks again as
+    it writes (the events inside a piece)."""
+    pieces = sorted((_piece(Path(path)) for path in paths), key=lambda piece: piece.first)
+    for other in pieces[1:]:
+        _alike(pieces[0], other)
+
+
 def _record_start(line: str, version: float):
     """What the line that starts a record of observations says, ``(time, flag, count, fields)``: the time of the epoch
     (None when the line has none), its flag, the number of satellites - or, for an event, of the lines of its - that
