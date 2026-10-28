@@ -460,7 +460,7 @@ def mixed_frames(chunk) -> dict | None:
     try:
         place = survey_place(chunk)
         proposal = survey_crs(place[0], place[1], "ETRF2000", geoid=False) if place else None
-    except ValueError:  # the place cannot be told: no proposal
+    except Exception:  # noqa: BLE001 - the place cannot be told (PROJ's own errors too): no proposal
         proposal = None
     return {"crs": chunk.crs, "itrf2020": itrf, "photos": dict(photos), "markers": dict(markers),
             "proposal": proposal}
