@@ -10,20 +10,23 @@ import tempfile
 
 import ppg_core
 
-data, tmp = pathlib.Path(__file__).resolve().parents[2] / "tests" / "data" / "crinex", pathlib.Path(tempfile.mkdtemp())
+data = pathlib.Path(__file__).resolve().parents[2] / "tests" / "data" / "crinex"
 assert getattr(ppg_core, "API", 0) >= 9, f"the native core {ppg_core.__version__} has no Hatanaka decoder (API 9)"
-for name in ("07590920.05d", "events.05d", "kraw299k.26d", "kraw_rinex402.crx", "KRAW00POL_R_20262991000_01H_30S_MO.crx"):
-    out = tmp / f"{name}.rnx"
-    ppg_core.crx2rnx(str(data / name), str(out))
-    assert out.read_bytes() == (data / f"{name}.expected").read_bytes(), name
-    print(f"{name}: decoded as CRX2RNX decodes it, {out.stat().st_size} bytes")
-whole = (data / "kraw_rinex402.crx").read_bytes()
-cut, decoded = tmp / "cut.crx", tmp / "cut.rnx"
-cut.write_bytes(whole[: len(whole) // 2 + 7])  # cut in the middle of a line
-try:
-    ppg_core.crx2rnx(str(cut), str(decoded))
-except ValueError as exc:
-    print("a file cut short is refused:", exc)
-else:
-    raise AssertionError("a file cut short was decoded")
-assert not decoded.exists() and not decoded.with_name(decoded.name + ".part").exists(), "a decoded file was left"
+with tempfile.TemporaryDirectory() as folder:  # removed after, whatever happens
+    tmp = pathlib.Path(folder)
+    for name in ("07590920.05d", "events.05d", "kraw299k.26d", "kraw_rinex402.crx",
+                 "KRAW00POL_R_20262991000_01H_30S_MO.crx"):
+        out = tmp / f"{name}.rnx"
+        ppg_core.crx2rnx(str(data / name), str(out))
+        assert out.read_bytes() == (data / f"{name}.expected").read_bytes(), name
+        print(f"{name}: decoded as CRX2RNX decodes it, {out.stat().st_size} bytes")
+    whole = (data / "kraw_rinex402.crx").read_bytes()
+    cut, decoded = tmp / "cut.crx", tmp / "cut.rnx"
+    cut.write_bytes(whole[: len(whole) // 2 + 7])  # cut in the middle of a line
+    try:
+        ppg_core.crx2rnx(str(cut), str(decoded))
+    except ValueError as exc:
+        print("a file cut short is refused:", exc)
+    else:
+        raise AssertionError("a file cut short was decoded")
+    assert not decoded.exists() and not decoded.with_name(decoded.name + ".part").exists(), "a decoded file was left"

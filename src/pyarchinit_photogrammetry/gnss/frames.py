@@ -149,7 +149,9 @@ def european_hop(src: str | None, dst: str | None) -> bool:
 def survey_epoch(chunk) -> float:
     """The epoch of the survey of ``chunk``, for what carries no epoch of its own (markers, the points of a chunk) where
     one is needed - between two European frames (:func:`european_hop`): the median of the epochs of the positions of
-    its photos, else of the dates of its photos, else today. A year off changes such a conversion by 2-3 mm."""
+    its photos, else of the dates of its photos, else today. An epoch off changes such a conversion by 0.3-0.9 mm a
+    year: today (2026.82) for a survey of 2015, from ETRF2014 or ETRF2020 into RDN2008, 4-11 mm - far less than the
+    8-9 cm of PROJ's null shift it takes the place of."""
     epochs = [float(e) for cam in getattr(chunk, "cameras", ()) if (e := (cam.meta.get("gnss") or {}).get("epoch"))
               is not None]
     if not epochs:

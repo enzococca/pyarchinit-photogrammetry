@@ -366,7 +366,8 @@ def test_the_cache_of_decoded_copies_is_pruned(tmp_path):
     """The decoded copies not used for :data:`rinex.CACHE_DAYS` days go, then the least used beyond
     :data:`rinex.CACHE_BYTES`; the scratch folders left by an unpacking that stopped, and the pieces of copies never
     finished, go too. A copy used, or a scratch folder made, within the last hour is never touched: a run may be reading
-    or writing it. Using a copy again marks it used (its access time; its modification time stays)."""
+    or writing it; nor a file the program did not write, a RINEX file among them. Using a copy again marks it used (its
+    access time; its modification time stays)."""
     cache = tmp_path / "cache"
     cache.mkdir()
     now = 2_000_000_000.0
@@ -382,17 +383,21 @@ def test_the_cache_of_decoded_copies_is_pruned(tmp_path):
         os.utime(path, (now - used, now - used))
         return path
 
-    old = made("a-1.rnx", 10, 40 * day)  # not used for 40 days
-    recent = [made(f"b-{i}.rnx", 400, i * day) for i in range(1, 4)]  # used 1, 2 and 3 days ago
-    busy = made("c-1.rnx", 400, 600.0)  # used ten minutes ago: in use
+    def copy_name(n: int) -> str:  # as _plain names a decoded copy: a hash of the path, a hash of the content
+        return f"{n:016x}-{n * 7919:016x}.rnx"
+
+    old = made(copy_name(1), 10, 40 * day)  # not used for 40 days
+    recent = [made(copy_name(10 + i), 400, i * day) for i in range(1, 4)]  # used 1, 2 and 3 days ago
+    busy = made(copy_name(20), 400, 600.0)  # used ten minutes ago: in use
     orphan, live = made(".unpack-old", 5, 2 * day, folder=True), made(".unpack-new", 5, 60.0, folder=True)
-    stale, writing = made("d-1.rnx.part", 7, 2 * day), made("e-1.rnx.part", 7, 30.0)
-    other = made("notes.txt", 3, 90 * day)  # not ours
+    stale, writing = made(copy_name(30) + ".part", 7, 2 * day), made(copy_name(31) + ".part", 7, 30.0)
+    others = [made("notes.txt", 3, 90 * day), made("MEDI00ITA_R_20262990000_01D_30S_MO.rnx", 3000, 90 * day),
+              made("a-1.rnx", 10, 90 * day), made("notes.rnx.part", 3, 90 * day)]  # not ours, old and large or not
     removed = rinex.prune_cache(cache, days=30, size=1000, now=now)
     # 30 days: the old one; then 1600 bytes over 1000: the least used (3 days, 2 days) until under, never the busy one
     assert sorted(p.name for p in removed) == sorted([old.name, recent[2].name, recent[1].name, orphan.name,
                                                       stale.name])
-    assert all(p.exists() for p in (recent[0], busy, live, writing, other))
+    assert all(p.exists() for p in (recent[0], busy, live, writing, *others))
     assert not any(p.exists() for p in removed)
     # a copy used again is marked used now: its access time (its modification time stays)
     packed = tmp_path / "base.05d.Z"

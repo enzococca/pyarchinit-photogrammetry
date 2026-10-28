@@ -318,6 +318,7 @@ def _hash(text: str) -> str:
 CACHE_DAYS = 14
 CACHE_BYTES = 1 << 30
 IN_USE = 3600.0
+_COPY = re.compile(r"[0-9a-f]{16}-[0-9a-f]{16}\.rnx")  # the name _plain gives a decoded copy: nothing else is pruned
 
 
 def _plain(path: Path, layers: tuple[str, ...], folder: str | Path | None) -> Path:
@@ -350,12 +351,13 @@ def _plain(path: Path, layers: tuple[str, ...], folder: str | Path | None) -> Pa
 def prune_cache(folder: str | Path | None = None, days: float = CACHE_DAYS, size: int = CACHE_BYTES,
                 now: float | None = None) -> list[Path]:
     """The cache of decoded copies (``folder``, by default the program's, :func:`download.cache_dir`) kept within
-    ``days`` and ``size`` bytes: the copies (``*.rnx``) not used for ``days`` go, then the least used until the copies
-    take ``size`` bytes at most; the scratch folders of an unpacking that stopped (``.unpack-*``) and the copies never
-    finished (``*.rnx.part``) go too. What was used or made within :data:`IN_USE` seconds of ``now`` is never removed
-    (a run may be reading or writing it), nor a file that cannot be removed (open elsewhere on Windows), nor anything
-    the program did not write there. Returns what was removed. :func:`..stations.download_observations` calls it
-    before it downloads."""
+    ``days`` and ``size`` bytes: the copies (named as :func:`_plain` names them, ``<hash>-<hash>.rnx``) not used for
+    ``days`` go, then the least used until the copies take ``size`` bytes at most; the scratch folders of an unpacking
+    that stopped (``.unpack-*``) and the copies never finished (``<hash>-<hash>.rnx.part``) go too. What was used or
+    made within :data:`IN_USE` seconds of ``now`` is never removed (a run may be reading or writing it), nor a file
+    that cannot be removed (open elsewhere on Windows), nor anything the program did not write there - another
+    ``.rnx`` included. Returns what was removed. :func:`..stations.download_observations` calls it before it
+    downloads."""
     cache = Path(folder) if folder is not None else download.cache_dir("rinex")
     now = time.time() if now is None else now
     removed: list[Path] = []
@@ -370,8 +372,9 @@ def prune_cache(folder: str | Path | None = None, days: float = CACHE_DAYS, size
         except OSError:
             continue
         used = max(stat.st_atime, stat.st_mtime)
-        ours = entry.name.startswith(".unpack-") and entry.is_dir() or entry.name.endswith(".rnx.part")
-        if entry.suffix == ".rnx" and entry.is_file():
+        ours = (entry.name.startswith(".unpack-") and entry.is_dir()
+                or entry.name.endswith(".part") and _COPY.fullmatch(entry.name[:-5]) is not None)
+        if _COPY.fullmatch(entry.name) and entry.is_file():
             copies.append((used, stat.st_size, entry))
         elif ours and now - used >= IN_USE:
             if _removed(entry):
