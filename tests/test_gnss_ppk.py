@@ -2,6 +2,7 @@
 from them and the position of the camera it gives at every shot."""
 from __future__ import annotations
 
+import dataclasses
 import gzip
 import hashlib
 import json
@@ -1592,6 +1593,30 @@ def test_antenna_warning_names_the_receiver_by_its_role(tmp_path, role, record, 
     assert "later version" not in warning
     with pytest.raises(ValueError, match="role"):
         ppk.antenna_warning("BASE", info, calibration, role="drone")
+
+
+def test_an_entry_without_the_offsets_of_l1_is_no_calibration(tmp_path):
+    """An entry of the antenna file with no offsets of L1 (G01; igs20.atx has one, CNTAT600BDS CNTS) is no calibration
+    RTKLIB applies to L1: the antenna is said not calibrated, with a warning that names the entry - never "calibrated"
+    with no offset."""
+    text = ATX_EXCERPT.read_text()
+    start = text.index("ASH700829.2     SNOW")
+    end = text.index("END OF ANTENNA", start)
+    block = text[start:end]
+    g01 = block.index("   G01                                                      START OF FREQUENCY")
+    g01_end = block.index("END OF FREQUENCY", g01) + len("END OF FREQUENCY    \n")
+    only_l2 = block[:g01] + block[g01_end:]
+    only_l2 = only_l2.replace("     2                                                      # OF FREQUENCIES",
+                              "     1                                                      # OF FREQUENCIES")
+    atx = tmp_path / "antennas.atx"
+    atx.write_text(text[:start] + only_l2 + text[end:])
+    calibration = ppk.antenna_calibration(atx, "ASH700829.2 SNOW")
+    assert calibration["entry"] is None and calibration["up_m"] is None
+    assert calibration["no_l1"] == "ASH700829.2     SNOW"
+    info = dataclasses.replace(rinex.header(_base_of(tmp_path, CALIBRATED)), antenna="ASH700829.2     SNOW")
+    warning = ppk.antenna_warning("BASE", info, calibration)
+    assert "ASH700829.2 SNOW" in warning and "no offsets of L1 (G01)" in warning and "antennas.atx" in warning
+    assert "too low" in warning
 
 
 def test_solve_gives_no_calibrations_that_rtklib_would_take_from_a_satellite(tmp_path, fake_rtklib):

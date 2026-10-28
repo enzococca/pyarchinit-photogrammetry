@@ -766,6 +766,10 @@ def antenna_warning(name: str, info: rinex.RinexInfo, calibration: dict | None =
                      "option for the antenna of the base, or by `ppg gnss atx --download`")
         return text
     file, entry = calibration["file"], calibration["entry"]
+    if entry is None and calibration.get("no_l1"):
+        return (f"the phase-centre offset {which}: its entry {' '.join(calibration['no_l1'].split())} in {file} has no "
+                f"offsets of L1 (G01), so RTKLIB has no calibration for it, and {effect}, more than 10 cm with some "
+                "choke-ring antennas")
     if entry is None:
         why = (f"the antenna is not in {file}, so RTKLIB has no calibration for it" if kind else
                f"there is no antenna to look for in {file}, so RTKLIB has no calibration for it")
@@ -820,7 +824,9 @@ def antenna_calibration(source: Path | None, kind: str) -> dict | None:
     (``Solution.rover_calibration``): ``{"file": its name, "entry": the entry RTKLIB takes (None: the antenna is not in
     it, RTKLIB applies nothing), "without_radome": the entry is the type without the radome of the header, "up_m": the
     offset of the phase centre of L1 above the reference point of the antenna in the entry, m}``; None without a
-    file. An antenna for which RTKLIB's search finds a satellite's (:func:`satellite_entry`) has no entry."""
+    file. An antenna for which RTKLIB's search finds a satellite's (:func:`satellite_entry`) has no entry, and neither
+    has one whose entry gives no offsets of L1 (G01: RTKLIB has nothing to apply to L1), which the record names as
+    ``"no_l1"`` for the warning (:func:`antenna_warning`)."""
     if source is None:
         return None
     entry, without_radome = antex.lookup(source, kind)
@@ -828,8 +834,10 @@ def antenna_calibration(source: Path | None, kind: str) -> dict | None:
         # a satellite's offsets are no receiver's: such an entry is no calibration, and the file is not given to
         # RTKLIB, which would apply it
         entry, without_radome = None, False
-    return {"file": source.name, "entry": entry, "without_radome": without_radome,
-            "up_m": antex.up_offset(source, entry) if entry is not None else None}
+    up = antex.up_offset(source, entry) if entry is not None else None
+    if entry is not None and up is None:  # no G01: not calibrated, said with the entry
+        return {"file": source.name, "entry": None, "without_radome": False, "up_m": None, "no_l1": entry}
+    return {"file": source.name, "entry": entry, "without_radome": without_radome, "up_m": up}
 
 
 def _base(path: Path, info: rinex.RinexInfo, position: BasePosition | Sequence[float] | None,

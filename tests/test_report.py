@@ -656,6 +656,15 @@ def test_report_without_gnss_has_no_section(tmp_path):
     assert "Chunk: Senza posizioni" in titles and "GNSS positions" not in titles
 
 
+def test_report_says_an_entry_without_the_offsets_of_l1_is_no_calibration():
+    """An antenna whose entry in the antenna file has no offsets of L1 (G01) is said not calibrated, naming the entry."""
+    base = {"antenna": "ASH700829.2     SNOW", "antenna_calibration": {
+        "file": "igs20.atx", "entry": None, "without_radome": False, "up_m": None, "no_l1": "ASH700829.2     SNOW"}}
+    assert rc._calibration_text(rc.Words("en"), base) == ("not calibrated: the entry ASH700829.2 SNOW of igs20.atx has "
+                                                          "no offsets of L1 (G01)")
+    assert rc._calibration_text(rc.Words("it"), base).startswith("non calibrata: la voce ASH700829.2 SNOW di igs20.atx")
+
+
 # ---------------------------------------------------------------------------------------- Excel
 def test_write_xlsx_keeps_numbers_and_makes_valid_sheets(tmp_path):
     from openpyxl import load_workbook
