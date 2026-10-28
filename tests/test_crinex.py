@@ -142,6 +142,40 @@ def test_not_crinex_refused(tmp_path):
 
 
 @needs_the_core
+def test_a_huge_line_is_refused_not_read_whole(tmp_path):
+    """A file of megabytes without a line end (a binary file named .crx, a damaged one) is refused at the line where
+    it shows, without reading it whole into memory: no line of Compact RINEX is a megabyte long."""
+    src, dst = tmp_path / "huge.crx", tmp_path / "decoded.rnx"
+    head = (DATA / "kraw_rinex402.crx").read_bytes().split(b"\n")[:2]
+    src.write_bytes(b"\n".join(head) + b"\n" + b"x" * (3 << 20))
+    with pytest.raises(ValueError, match=r"^huge\.crx, line 3: a line longer than"):
+        _native.crx2rnx(src, dst)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["huge.crx"]
+
+
+@needs_the_core
+def test_errors_of_the_files_name_them(tmp_path):
+    """A file that cannot be read, or a decoded file that cannot be written, is an OSError that names it."""
+    with pytest.raises(FileNotFoundError, match="nowhere.crx"):
+        _native.crx2rnx(tmp_path / "nowhere.crx", tmp_path / "decoded.rnx")
+    with pytest.raises(OSError, match=re.escape(str(tmp_path / "no" / "such" / "folder"))):
+        _native.crx2rnx(DATA / "kraw_rinex402.crx", tmp_path / "no" / "such" / "folder" / "decoded.rnx")
+
+
+@needs_the_core
+def test_a_full_epoch_line_cut_before_its_count_is_refused(tmp_path):
+    """An epoch line given in full that stops before the number of its satellites is cut short: refused, never decoded
+    as an epoch without satellites (a file of the program's own never has one)."""
+    src, dst = tmp_path / "kraw.crx", tmp_path / "decoded.rnx"
+    lines = (DATA / "kraw_rinex402.crx").read_bytes().split(b"\n")
+    assert lines[69].startswith(b"> 2026 10 26 10 00 00.0000000  0 17")  # line 70, then its clock line
+    src.write_bytes(b"\n".join(lines[:69] + [lines[69][:32], lines[70]]) + b"\n")
+    with pytest.raises(ValueError, match=r"^kraw\.crx, line 70: .*number of its satellites"):
+        _native.crx2rnx(src, dst)
+    assert not dst.exists()
+
+
+@needs_the_core
 def test_epochs_without_satellites_given_in_full(tmp_path):
     """An epoch with no satellite given in full: in RINEX 3 its line has lost the blank columns 36-41 with the
     other trailing spaces of a Compact RINEX line, and is still an epoch, as the first one, after an event, and as

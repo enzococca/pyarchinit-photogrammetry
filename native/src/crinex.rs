@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use pyo3::exceptions::PyValueError;
@@ -20,6 +20,11 @@ use pyo3::prelude::*;
 
 /// The highest order of the differences of a numeric series (the format allows up to 9).
 const MAX_ORDER: usize = 9;
+
+/// The longest line read: a line of Compact RINEX is some hundreds of bytes at most (an epoch line
+/// lists 3 bytes a satellite, the line of a satellite some tens an observation type). A longer one is
+/// no Compact RINEX, and a file of gigabytes without a line end is refused here, not read whole.
+const MAX_LINE: usize = 1 << 20;
 
 /// What stops the decoding: the compressed file is not what the format allows (and the line where
 /// that shows), or a file cannot be read or written.
@@ -65,12 +70,17 @@ struct Lines<R> {
 }
 
 impl<R: BufRead> Lines<R> {
-    fn read(&mut self) -> io::Result<Option<Line>> {
+    fn read(&mut self) -> Result<Option<Line>> {
         let mut text = Vec::new();
-        if self.input.read_until(b'\n', &mut text)? == 0 {
+        let limit = (MAX_LINE + 2) as u64; // the line and its end, CR LF
+        if (&mut self.input).take(limit).read_until(b'\n', &mut text)? == 0 {
             return Ok(None);
         }
         let ended = text.last() == Some(&b'\n');
+        if !ended && text.len() as u64 >= limit {
+            let number = self.number + self.ahead.len() + 1;
+            return refuse(number, format!("a line longer than {MAX_LINE} bytes: not Compact RINEX"));
+        }
         if ended {
             text.pop();
             if text.last() == Some(&b'\r') {
@@ -81,7 +91,7 @@ impl<R: BufRead> Lines<R> {
     }
 
     /// The next line, None at the end of the file; `number` is then its number.
-    fn next(&mut self) -> io::Result<Option<Line>> {
+    fn next(&mut self) -> Result<Option<Line>> {
         let line = match self.ahead.pop_front() {
             Some(line) => Some(line),
             None => self.read()?,
@@ -102,7 +112,7 @@ impl<R: BufRead> Lines<R> {
     }
 
     /// Nothing but empty lines up to the end of the file (they are no epochs: the data are over).
-    fn only_empty_lines_left(&mut self) -> io::Result<bool> {
+    fn only_empty_lines_left(&mut self) -> Result<bool> {
         if self.ahead.iter().any(|line| !line.text.is_empty()) {
             return Ok(false);
         }
@@ -502,6 +512,11 @@ impl<R: BufRead, W: Write> Decoder<R, W> {
             Some(b'0' | b'1') => {}
             _ => return refuse(number, "an epoch line with observations and no epoch flag 0 or 1"),
         }
+        // the number of satellites always ends in a digit, which no trimming takes away: a line that stops before
+        // it is cut short, never an epoch without satellites
+        if self.epoch.len() < count_at.end {
+            return refuse(number, "the epoch line stops before the number of its satellites (cut short?)");
+        }
         let count = match count_in(&self.epoch, count_at) {
             Some(n) => n,
             None => return refuse(number, "the number of satellites of the epoch is not a number"),
@@ -697,17 +712,46 @@ fn part_of(dst: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// `error` with the path of the file it is about in its message, of the same kind.
+fn about(path: &Path, error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+}
+
+/// A file whose errors name it (`about`): what is read from the compressed file, written to the
+/// decoded one.
+struct Named<F> {
+    file: F,
+    path: PathBuf,
+}
+
+impl<F: Read> Read for Named<F> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.file.read(buf).map_err(|error| about(&self.path, error))
+    }
+}
+
+impl<F: Write> Write for Named<F> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.file.write(buf).map_err(|error| about(&self.path, error))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush().map_err(|error| about(&self.path, error))
+    }
+}
+
 fn decode(src: &Path, dst: &Path) -> Result<()> {
-    let input = BufReader::new(File::open(src)?);
+    let opened = File::open(src).map_err(|error| about(src, error))?;
+    let input = BufReader::new(Named { file: opened, path: src.to_path_buf() });
     let part = part_of(dst);
-    let decoded = File::create(&part).map_err(Failure::from).and_then(|file| {
-        let mut decoder = Decoder::new(input, BufWriter::new(file));
+    let decoded = File::create(&part).map_err(|error| Failure::from(about(&part, error))).and_then(|file| {
+        let mut decoder = Decoder::new(input, BufWriter::new(Named { file, path: part.clone() }));
         decoder.header()?;
         decoder.data()?;
         decoder.out.flush()?;
         Ok(())
     });
-    let done = decoded.and_then(|()| fs::rename(&part, dst).map_err(Failure::from));
+    let done = decoded.and_then(|()| fs::rename(&part, dst).map_err(|error| Failure::from(about(dst, error))));
     if done.is_err() {
         let _ = fs::remove_file(&part);
     }
@@ -716,9 +760,10 @@ fn decode(src: &Path, dst: &Path) -> Result<()> {
 
 /// The RINEX observation file of the Hatanaka-compressed file `src` (Compact RINEX 1.0, 3.0 or 3.1),
 /// written to `dst` as CRX2RNX of RNXCMP 4.2.0 writes it, through `dst` + ".part", renamed when
-/// complete (API 9). A file that is damaged or cut short raises ValueError("<name of src>, line <n>:
-/// <what is wrong>") and leaves neither `dst` nor `dst` + ".part"; a file that cannot be read or
-/// written raises OSError. Runs without the GIL.
+/// complete (API 9). A file that is damaged or cut short - a line of a megabyte or more is no Compact
+/// RINEX - raises ValueError("<name of src>, line <n>: <what is wrong>") and leaves neither `dst` nor
+/// `dst` + ".part"; a file that cannot be read or written raises OSError with its path. Runs without
+/// the GIL.
 #[pyfunction]
 pub fn crx2rnx(py: Python<'_>, src: &str, dst: &str) -> PyResult<()> {
     let name = Path::new(src).file_name().map_or_else(|| src.to_string(), |n| n.to_string_lossy().into_owned());
