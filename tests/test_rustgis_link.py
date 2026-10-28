@@ -942,24 +942,35 @@ def _exported(path, name, gtype, types, rows, crs=GB):
 
 
 class FakeExporter:
-    """RustGIS as far as a pull goes: ``share.exportLayer`` copies the GeoPackage the test prepared for that layer into
-    the path asked, refusing a destination where the file or one of its journals exists (as RustGIS does); ``fail``
-    (layer -> exception) makes the export of a layer fail, ``left_out`` (layer -> n) says it left features out. Every
-    call is in ``calls``."""
+    """RustGIS as far as a pull goes: ``list_layers`` lists the layers the test prepared, read from ``source`` (the
+    live GeoPackage), with the fields prepared; ``share.exportLayer`` copies the GeoPackage the test prepared for that
+    layer into the path asked, refusing a destination where the file or one of its journals exists (as RustGIS does);
+    ``fail`` (layer -> exception) makes the export of a layer fail, ``left_out`` (layer -> n) says it left features
+    out. Every call is in ``calls``."""
 
-    def __init__(self, folder: Path):
+    def __init__(self, folder: Path, source: Path | None = None):
         self.folder = folder
         self.folder.mkdir(parents=True, exist_ok=True)
+        self.source = source
         self.prepared: dict[str, Path] = {}
+        self.tables: dict[str, tuple[str, list]] = {}  # layer -> the table and the fields prepared for it
         self.fail: dict[str, Exception] = {}
         self.left_out: dict[str, int] = {}
         self.calls: list[tuple[str, dict]] = []
 
     def prepare(self, layer: str, table: str, types: dict, rows: list, crs: str = GB) -> None:
         self.prepared[layer] = _exported(self.folder / f"{layer}.gpkg", table, EXPORTED_AS[table], types, rows, crs)
+        self.tables[layer] = (table, list(types))
+
+    def exports(self) -> list:
+        return [args for tool, args in self.calls if tool == "run_command"]
 
     def call(self, tool: str, args: dict) -> dict:
         self.calls.append((tool, json.loads(json.dumps(args))))
+        if tool == "list_layers":
+            return {"layers": [{"id": int(layer), "name": table, "type": link.KINDS[LIVE_TABLES[table][1]],
+                                "source": str(self.source), "fields": [f"{name} (Text)" for name in names]}
+                               for layer, (table, names) in self.tables.items()], "groups": []}
         assert tool == "run_command" and args["command"] == "share.exportLayer", (tool, args)
         params = args["params"]
         assert isinstance(params["layer"], int), "a layer id goes as a number: a text is taken for a name first"
@@ -982,7 +993,7 @@ def _linked(tmp_path, drawings, layers=None):
     live = LiveLink(tmp_path / "qgis", GB)
     live.write(drawings)
     assert live.read_changes() == {}
-    fake = FakeExporter(tmp_path / "prepared")
+    fake = FakeExporter(tmp_path / "prepared", live.path)
     rl = link.RustGisLink(live, fake, "Saggio 1", GB)
     rl.layers = dict(layers or {"unita": "7"})
     for table, layer in rl.layers.items():
@@ -1042,8 +1053,9 @@ def test_a_pull_is_read_back_as_an_edit_of_another_program(tmp_path, monkeypatch
     assert rl.pull() == {"unita": (1, 1, 1), "quote": (1, 0, 0)}
     monkeypatch.setattr(gpkg, "connect", real)
     scratch = tmp_path / "qgis" / "rustgis"  # beside the live GeoPackage
-    assert fake.calls == [("run_command", {"command": "share.exportLayer", "params": {
-        "layer": layer, "path": str(scratch / f"{table}.gpkg")}}) for table, layer in (("unita", 7), ("quote", 5))]
+    assert fake.calls[0][0] == "list_layers"  # the layers checked to be the drawings', then exported
+    assert fake.exports() == [{"command": "share.exportLayer", "params": {
+        "layer": layer, "path": str(scratch / f"{table}.gpkg")}} for table, layer in (("unita", 7), ("quote", 5))]
     assert (scratch / "unita.gpkg").is_file() and (scratch / "quote.gpkg").is_file()
     # written as another program writes: a connection of its own, one transaction, closed after it
     said = [s for _, statements in connections for s in statements]
@@ -1160,10 +1172,10 @@ def test_one_way_tables_are_never_pulled(tmp_path):
         fake.prepare(layer, table, types, rows)
     before = _live_table(live.path, "curve")
     assert rl.pull() == {"unita": (0, 0, 0)}
-    assert [call[1]["params"]["layer"] for call in fake.calls] == [7]  # RustGIS is not even asked for it
+    assert [args["params"]["layer"] for args in fake.exports()] == [7]  # RustGIS is not even asked for it
     assert _live_table(live.path, "curve") == before and not live.external_change()
     rl.layers = {"curve": "1", "linee": "2"}
-    assert rl.pull() == {} and len(fake.calls) == 1
+    assert rl.pull() == {} and len(fake.exports()) == 1
 
 
 def test_what_the_program_has_not_sent_yet_is_kept(tmp_path):
@@ -1319,7 +1331,7 @@ def test_a_row_without_identity_given_to_rustgis_is_not_written_again(tmp_path, 
                  (gpkg.blob(box(GX + 3, GY, GX + 4, GY + 1), 3004), "9"))
     qgis.execute("COMMIT")
     qgis.close()
-    fake = FakeExporter(tmp_path / "prepared")
+    fake = FakeExporter(tmp_path / "prepared", live.path)
     rl = link.RustGisLink(live, fake, "Saggio 1", GB)
     rl.layers = {"unita": "7"}
     fake.prepare("7", "unita", *_as_rustgis(live.path, "unita"))  # RustGIS loads the table as it is
@@ -1342,7 +1354,7 @@ def test_what_rustgis_did_not_load_is_never_taken_for_deleted(tmp_path):
     live = LiveLink(tmp_path / "qgis", GB)
     live.write(_drawings([one]))
     assert live.read_changes() == {}
-    fake = FakeExporter(tmp_path / "prepared")
+    fake = FakeExporter(tmp_path / "prepared", live.path)
     fake.prepare("7", "unita", *_as_rustgis(live.path, "unita"))  # what RustGIS loaded: unit 1
     live.write(_drawings([one, two]))  # the program, meanwhile
     qgis = sqlite3.connect(live.path, isolation_level=None)  # and QGIS
@@ -1369,7 +1381,7 @@ def test_what_rustgis_has_beyond_what_it_was_given_comes_in(tmp_path):
     live = LiveLink(tmp_path / "qgis", GB)
     live.write(_drawings([one]))
     assert live.read_changes() == {}
-    fake = FakeExporter(tmp_path / "prepared")
+    fake = FakeExporter(tmp_path / "prepared", live.path)
     types, rows = _as_rustgis(live.path, "unita")
     rows[0][0] = MultiPolygon([rows[0][0].geoms[0], box(GX + 3, GY, GX + 3.5, GY + 0.5)])
     rows.append([MultiPolygon([box(GX + 5, GY, GX + 5.5, GY + 0.5)]), {"us_s": "7"}])
@@ -1423,7 +1435,7 @@ def test_units_drawn_in_rustgis_reach_the_window_as_one_unit_each(trench, tmp_pa
     w._export_qgis_layers()
     w._poll_qgis()
     live = w._qgis_live_link()
-    fake = FakeExporter(tmp_path / "prepared")
+    fake = FakeExporter(tmp_path / "prepared", live.path)
     rl = link.RustGisLink(live, fake, w.chunk.label, w.chunk.crs)
     rl.layers = {"unita": "7"}
     types, rows = _as_rustgis(live.path, "unita")
@@ -1531,11 +1543,13 @@ class FakeEngine:
     longitude and latitude (pyproj from the system of the layer's file); a script run as one step that keeps nothing
     when a line fails, and read to its 10,000th line at most; a selection that mode "new" clears in every layer; a
     delete that refuses an empty selection; fields added only with names of letters, digits and _; a where clause of
-    at most 10,000 characters (evaluated by SQLite: the clauses the link writes are SQL); an export that writes polygons
-    and lines as multi-part geometries in the layer's own system. ``busy``: the next call of each tool named there (or
-    ``run_command:<id>``) answers "not drawing" without running; ``lost``: runs, then its answer is lost (busy, outcome
-    unknown). ``shift``: metres east by which it misplaces what it reads (a system it does not know). Every call is in
-    ``calls``, every script in ``scripts``."""
+    at most 10,000 characters (evaluated by SQLite: the clauses the link writes are SQL; texts compared in either case
+    alike, ASCII only, as RustGIS does); an export that writes polygons and lines as multi-part geometries in the
+    layer's own system. ``busy``: the next call of each tool named there (or ``run_command:<id>``) answers "not drawing"
+    without running; ``lost``: runs, then its answer is lost (busy, outcome unknown); ``rules``: functions of a command
+    and its parameters that refuse it with their text (a domain of a layer, say); ``cut``: runs only that many lines of
+    a script and says so, as RustGIS does past its 10,000th. ``shift``: metres east by which it misplaces what it reads
+    (a system it does not know). Every call is in ``calls``, every script in ``scripts``."""
 
     def __init__(self, version: str = "0.4.0", shift: float = 0.0):
         self.version, self.shift = version, shift
@@ -1547,6 +1561,8 @@ class FakeEngine:
         self.scripts: list[str] = []
         self.busy: list[str] = []
         self.lost: list[str] = []
+        self.rules: list = []
+        self.cut: int | None = None
 
     def initialize(self) -> str:
         return self.version
@@ -1620,6 +1636,12 @@ class FakeEngine:
         feature["geometry"] = _reprojected(geometry, crs, "EPSG:4326")
         self._count(layer, 1)
 
+    def paste(self, layer: dict, pid) -> None:
+        """What edit.copy and edit.paste do to a feature: a copy at the end of its layer, every attribute with it."""
+        feature = next(f for f in layer["features"] if f["attrs"].get(ID_FIELD) == pid)
+        layer["features"].append(copy.deepcopy(feature))
+        self._count(layer, 0)
+
     def remove(self, lid: int) -> None:
         self.layers = [l for l in self.layers if l["id"] != lid]
         for g in self.groups:
@@ -1676,7 +1698,7 @@ class FakeEngine:
         names = list(layer["fields"])
         con = sqlite3.connect(":memory:")
         try:
-            con.execute("CREATE TABLE t (_row INTEGER" + "".join(f', "{n}"' for n in names) + ")")
+            con.execute("CREATE TABLE t (_row INTEGER" + "".join(f', "{n}" COLLATE NOCASE' for n in names) + ")")
             con.executemany(f"INSERT INTO t VALUES (?{', ?' * len(names)})",
                             [(i, *[f["attrs"].get(n) for n in names]) for i, f in enumerate(layer["features"])])
             try:
@@ -1702,6 +1724,10 @@ class FakeEngine:
         return str(value)
 
     def command(self, command: str, p: dict):
+        for rule in self.rules:
+            said = rule(command, p)
+            if said:
+                raise link.RustGisRefused(said)
         if command == "layer.addData":
             path = Path(p["path"])
             if path.suffix.lower() == ".tif":
@@ -1817,6 +1843,7 @@ class FakeEngine:
         self.scripts.append(text)
         lines = text.split("\n")
         assert len(lines) <= 10_000, "RustGIS reads no further than the 10,000th line, and says nothing"
+        lines = lines if self.cut is None else lines[:self.cut]
         saved = copy.deepcopy((self.layers, self.groups, self.next_id, self.status))
         result, ran = None, 0
         try:
@@ -1943,7 +1970,8 @@ def test_push_sends_only_what_the_program_changed(tmp_path):
     live.write(_drawings([moved, two], [spot]))
     assert rl.pending
     assert rl.push() == 2
-    assert [tool for tool, _ in fake.calls] == ["list_layers", "run"]  # what RustGIS has is never read again here
+    # the status first, the layers, the script: what RustGIS has is never read again here (no remember)
+    assert [tool for tool, _ in fake.calls] == ["run_command", "list_layers", "run"]
     (script,) = _sent(fake)
     unita, quote = int(rl.layers["unita"]), int(rl.layers["quote"])
     assert [(c, p.get("layer")) for c, p in script] == [
@@ -1952,8 +1980,9 @@ def test_push_sends_only_what_the_program_changed(tmp_path):
         ("select.clear", None), ("edit.status", None)]
     for block, pid in ((script[:4], one[ID_FIELD]), (script[4:8], spot[ID_FIELD])):
         placeholder, select, _, row = (p for _, p in block)
+        assert placeholder["attributes"][ID_FIELD].startswith("ppg-invio-")  # taken by the LIKE, with any leftover
         assert select["mode"] == "new" and select["where"] == (
-            f"\"ppg_id\" IN ('{placeholder['attributes'][ID_FIELD]}', '{pid}')")
+            f"\"ppg_id\" LIKE 'ppg-invio-%' OR \"ppg_id\" IN ('{pid}')")
         assert row["attributes"][ID_FIELD] == pid
     assert two[ID_FIELD] not in json.dumps(script)
     for (_, row), shape in ((script[3], Polygon(moved["_geom"][1])), (script[7], Point(spot["_geom"][1]))):
@@ -1993,7 +2022,7 @@ def test_layers_are_named_by_number_and_checked(tmp_path):
     fake.calls.clear()
     with pytest.raises(link.RustGisRefused, match="another project"):
         rl.push()
-    assert fake.state() == state and [tool for tool, _ in fake.calls] == ["list_layers"] and rl.pending
+    assert fake.state() == state and [tool for tool, _ in fake.calls] == ["run_command", "list_layers"] and rl.pending
 
 
 def test_what_came_from_rustgis_is_not_sent_back(tmp_path):
@@ -2260,7 +2289,7 @@ def test_status_changed(tmp_path):
     live.write(_drawings([dict(one, us_s="10")]))
     assert rl.push() == 1
     assert not rl.status_changed()
-    assert [args["command"] for tool, args in fake.calls if tool == "run_command"] == ["edit.status"] * 4
+    assert [args["command"] for tool, args in fake.calls if tool == "run_command"] == ["edit.status"] * 5
 
 
 def test_a_start_that_fails_leaves_the_link_stopped(tmp_path):
@@ -2292,11 +2321,15 @@ def test_a_start_that_fails_leaves_the_link_stopped(tmp_path):
 
 def test_an_export_without_identities_is_refused(tmp_path):
     """A layer whose ppg_id field was deleted in RustGIS (or another layer under the linked id) would look drawn there
-    whole, and every row of the program deleted: the pull refuses it and writes nothing."""
+    whole, and every row of the program deleted: the pull refuses it and writes nothing - from the list of the layers,
+    and from the export itself when the list said otherwise."""
     live, fake, rl = _linked(tmp_path, _drawings([_unit(1, GX, GY)]))
     types, rows = _as_rustgis(live.path, "unita")
     del types[ID_FIELD]
     fake.prepare("7", "unita", types, [[g, {k: v for k, v in values.items() if k != ID_FIELD}] for g, values in rows])
+    with pytest.raises(link.RustGisRefused, match="unita"):
+        rl.pull()
+    fake.tables["7"] = ("unita", [*fake.tables["7"][1], ID_FIELD])  # listed with it, exported without it
     with pytest.raises(link.RustGisRefused, match="ppg_id"):
         rl.pull()
     assert not live.external_change() and live.read_changes() == {}
@@ -2444,3 +2477,498 @@ def test_a_system_the_real_engine_misplaces_is_refused(tmp_path):
         with pytest.raises(link.RustGisRefused, match="EPSG:3068"):
             link.RustGisLink(live, engine, "Saggio 1", "EPSG:3068").start([])
         assert engine.call("list_layers", {})["layers"] == []
+
+
+# ---- fix round 1 of the push: copies, the status, foreign layers, adoption, leftovers, set aside
+
+def _moved_last(layer: dict, crs: str, dx: float) -> None:
+    """The last feature of a layer moved ``dx`` metres east (a copy, moved off the feature it copies)."""
+    feature = layer["features"][-1]
+    native = _reprojected(feature["geometry"], "EPSG:4326", crs)
+    feature["geometry"] = _reprojected(affinity.translate(native, xoff=dx), crs, "EPSG:4326")
+
+
+def test_a_unit_pasted_in_rustgis_keeps_both(tmp_path):
+    """Finding 1: unit 1 copied and pasted in RustGIS - the copy carries unit 1's identity. The pull brings the copy in
+    as a unit of its own; the next send takes unit 1 with its copy there (``IN`` takes both) and adds them back, the
+    copy under its new identity; when the program later edits unit 1 nothing else goes, and no pull deletes anything."""
+    one, two = _unit(1, GX, GY), _unit(2, GX + 1, GY)
+    live, fake, rl = _started(tmp_path, _drawings([one, two]))
+    units = fake.linked(rl, "unita")
+    fake.paste(units, one[ID_FIELD])
+    _moved_last(units, GB, 3.0)
+    assert rl.pull()["unita"] == (0, 1, 0)
+    (copied,) = live.read_changes()["unita"].added
+    assert copied.id not in (one[ID_FIELD], two[ID_FIELD]) and copied.values["us_s"] == "1"
+    taken = _taken(copied, us_s="1", etichetta="US 1 (copia)")
+    live.write(_drawings([one, two, taken]))
+    assert rl.push() == 2  # unit 1 again (its copy there went with it) and the copy under its own identity
+    assert rl.push() == 0 and not rl.pending
+    assert sorted(fake.identities(units)) == sorted([one[ID_FIELD], two[ID_FIELD], copied.id])
+    live.write(_drawings([dict(one, _geom=_square(GX + 0.1, GY)), two, taken]))
+    assert rl.push() == 1
+    assert sorted(fake.identities(units)) == sorted([one[ID_FIELD], two[ID_FIELD], copied.id])
+    assert rl.pull()["unita"] == (0, 0, 0) and live.read_changes() == {}
+    _, stored = _live_table(live.path, "unita")
+    assert sorted(v[ID_FIELD] for _, _, v in stored) == sorted([one[ID_FIELD], two[ID_FIELD], copied.id])
+
+
+def test_a_copy_not_read_yet_survives_a_send_of_what_it_copies(tmp_path):
+    """Finding 1: the program edits unit 1 while its copy pasted in RustGIS is pulled but not read by the window yet:
+    the send takes unit 1 and the copy and puts the copy back as it was, under unit 1's identity; once read, the copy
+    goes under its own, and nothing is lost on either side."""
+    one = _unit(1, GX, GY)
+    live, fake, rl = _started(tmp_path, _drawings([one]))
+    units = fake.linked(rl, "unita")
+    fake.paste(units, one[ID_FIELD])
+    _moved_last(units, GB, 3.0)
+    copy_there = _reprojected(units["features"][-1]["geometry"], "EPSG:4326", GB)
+    assert rl.pull()["unita"] == (0, 1, 0)
+    edited = dict(one, _geom=_square(GX, GY, 0.6))
+    live.write(_drawings([edited]))  # the copy's row is in the file, without identity yet
+    assert rl.push() == 1
+    assert fake.identities(units).count(one[ID_FIELD]) == 2  # unit 1 as edited, and the copy put back
+    shapes = sorted(fake.native(units, one[ID_FIELD]), key=lambda g: g.bounds[0])
+    assert link._same_geometry(shapes[0], Polygon(edited["_geom"][1])) and link._same_geometry(shapes[1], copy_there)
+    assert rl.pull()["unita"] == (0, 0, 0)
+    (copied,) = live.read_changes()["unita"].added
+    live.write(_drawings([edited, _taken(copied, us_s="1")]))
+    assert rl.push() == 2 and not rl.pending
+    assert sorted(fake.identities(units)) == sorted([one[ID_FIELD], copied.id])
+    assert rl.pull()["unita"] == (0, 0, 0) and live.read_changes() == {}
+
+
+def test_a_unit_deleted_while_its_copy_is_unread_waits_for_the_window(tmp_path, caplog):
+    """The program deletes unit 1 while its copy pasted in RustGIS is pulled but not read yet: put back under unit 1's
+    identity, the copy would come back at the next pull as unit 1 itself. The send waits (said in the log) until the
+    window reads the copy; then unit 1 goes, the copy stays under its own identity, and nothing comes back."""
+    caplog.set_level(logging.WARNING, logger=link.__name__)
+    one, two = _unit(1, GX, GY), _unit(2, GX + 1, GY)
+    live, fake, rl = _started(tmp_path, _drawings([one, two]))
+    units = fake.linked(rl, "unita")
+    fake.paste(units, one[ID_FIELD])
+    _moved_last(units, GB, 3.0)
+    assert rl.pull()["unita"] == (0, 1, 0)
+    live.write(_drawings([two]))  # unit 1 deleted in the window; the copy's row is not read yet
+    state = fake.state()
+    assert rl.push() == 0 and rl.pending and fake.state() == state
+    assert "the window has not read yet" in caplog.text and one[ID_FIELD] in caplog.text
+    (copied,) = live.read_changes()["unita"].added
+    live.write(_drawings([two, _taken(copied, us_s="1")]))
+    assert rl.push() == 2 and not rl.pending  # unit 1 gone there, the copy under its own identity
+    assert sorted(fake.identities(units)) == sorted([two[ID_FIELD], copied.id])
+    assert rl.pull()["unita"] == (0, 0, 0) and live.read_changes() == {}
+    _, stored = _live_table(live.path, "unita")
+    assert sorted(v[ID_FIELD] for _, _, v in stored) == sorted([two[ID_FIELD], copied.id])
+
+
+def test_a_copy_pasted_since_the_last_pull_makes_the_send_wait(tmp_path, caplog):
+    """Finding 1: a second copy of unit 1 pasted after the last pull: the send that would take unit 1 with its copies
+    finds three where the link knows two, and waits for the next pull - saying so in the log - rather than delete a
+    copy it does not know. After the pull it goes, both copies put back."""
+    caplog.set_level(logging.WARNING, logger=link.__name__)
+    one = _unit(1, GX, GY)
+    live, fake, rl = _started(tmp_path, _drawings([one]))
+    units = fake.linked(rl, "unita")
+    fake.paste(units, one[ID_FIELD])
+    _moved_last(units, GB, 3.0)
+    assert rl.pull()["unita"] == (0, 1, 0)
+    fake.paste(units, one[ID_FIELD])
+    _moved_last(units, GB, 6.0)
+    live.write(_drawings([dict(one, _geom=_square(GX, GY, 0.6))]))
+    assert rl.push() == 0 and rl.pending and fake.identities(units).count(one[ID_FIELD]) == 3
+    assert "RustGIS has 3 of these features, the link knows 2" in caplog.text
+    assert "unita" in caplog.text and one[ID_FIELD] in caplog.text
+    assert rl.pull()["unita"] == (0, 1, 0)
+    assert rl.push() == 1 and not rl.pending
+    assert fake.identities(units).count(one[ID_FIELD]) == 3  # unit 1 as edited, both copies put back
+
+
+def test_a_unit_of_two_polygons_with_a_copy_counts_as_one_feature(tmp_path, caplog):
+    """Finding 1 with ruling 3: unit 1 is copied and pasted in RustGIS, then given a second polygon there (one feature
+    of two polygons). The program edits part 1 before the window reads either: the send that takes unit 1 with its copy
+    counts unit 1 as the one feature RustGIS has, not one per polygon, and goes at once - both parts sent, the copy put
+    back. Once read, the copy goes under its own identity."""
+    caplog.set_level(logging.WARNING, logger=link.__name__)
+    one = _unit(1, GX, GY)
+    live, fake, rl = _started(tmp_path, _drawings([one]))
+    units = fake.linked(rl, "unita")
+    fake.paste(units, one[ID_FIELD])
+    _moved_last(units, GB, 6.0)
+    feature = units["features"][0]
+    there = box(GX + 3, GY, GX + 3.5, GY + 0.5)
+    feature["geometry"] = MultiPolygon([feature["geometry"], _reprojected(there, GB, "EPSG:4326")])
+    assert rl.pull()["unita"] == (0, 2, 0)  # the second polygon, and the copy
+    edited = dict(one, _geom=_square(GX, GY, 0.6))
+    live.write(_drawings([edited]))  # part 2 and the copy are in the file, not read yet
+    assert rl.push() == 2 and not rl.pending and "wait" not in caplog.text
+    assert fake.identities(units).count(one[ID_FIELD]) == 3  # both parts, and the copy put back
+    parts = sorted(fake.native(units, one[ID_FIELD]), key=lambda g: g.bounds[0])
+    assert link._same_geometry(parts[0], Polygon(edited["_geom"][1])) and link._same_geometry(parts[1], there)
+    assert rl.pull()["unita"] == (0, 0, 0)
+    got = live.read_changes()["unita"]
+    (copied,) = got.added
+    second = dict(one, _shape=next(f for f in got.changed if f.part == 2).geometry)
+    live.write(_drawings([edited, second, _taken(copied, us_s="1")]))
+    assert rl.push() == 3 and not rl.pending and "wait" not in caplog.text
+    assert sorted(fake.identities(units)) == sorted([one[ID_FIELD], one[ID_FIELD], copied.id])
+    assert rl.pull()["unita"] == (0, 0, 0) and live.read_changes() == {}
+
+
+def test_an_edit_made_there_before_a_send_is_still_seen(tmp_path):
+    """Finding 2: unit 2 moved in RustGIS, then the program sends unit 1 before the next look: the send reads the
+    status first and does not take as its own a status that already held RustGIS's edit - status_changed() stays
+    true, and the pull that follows brings unit 2 in."""
+    one, two = _unit(1, GX, GY), _unit(2, GX + 1, GY)
+    live, fake, rl = _started(tmp_path, _drawings([one, two]))
+    fake.reshape(fake.linked(rl, "unita"), two[ID_FIELD], box(GX + 1.3, GY, GX + 1.8, GY + 0.5), GB)
+    live.write(_drawings([dict(one, _geom=_square(GX + 0.1, GY)), two]))
+    assert rl.push() == 1
+    assert rl.status_changed()
+    assert rl.pull()["unita"] == (1, 0, 0)
+    assert not rl.status_changed()
+    live.write(_drawings([dict(one, _geom=_square(GX + 0.2, GY)), two]))
+    assert rl.push() == 1 and not rl.status_changed()  # nothing edited there meanwhile: the send's status is taken
+
+
+def test_a_layer_of_another_project_is_never_read(tmp_path):
+    """Finding 3: another project open in RustGIS has a layer of its own under the id of the units' layer, with a US 7
+    of its own and a ppg_id field: no pull and no remember reads it - nothing comes in, nothing is deleted here."""
+    one, two = _unit(1, GX, GY), _unit(2, GX + 1, GY)
+    live, fake, rl = _started(tmp_path, _drawings([one, two]))
+    units = fake.linked(rl, "unita")
+    units["source"] = str(tmp_path / "altro progetto" / "scavo.gpkg")
+    attrs = dict.fromkeys(units["fields"]) | {ID_FIELD: new_id(), "us_s": "7"}
+    units["features"] = [{"geometry": _reprojected(box(GX + 5, GY, GX + 6, GY + 1), GB, "EPSG:4326"), "attrs": attrs}]
+    before, baseline = _live_table(live.path, "unita"), set(rl.baseline["unita"])
+    with pytest.raises(link.RustGisRefused, match="unita"):
+        rl.pull()
+    with pytest.raises(link.RustGisRefused, match="unita"):
+        rl.remember(["unita"])
+    assert _live_table(live.path, "unita") == before and not live.external_change() and live.read_changes() == {}
+    assert set(rl.baseline["unita"]) == baseline == {(one[ID_FIELD], 1), (two[ID_FIELD], 1)}
+
+
+def test_an_adopted_layer_is_compared_with_what_it_loaded(tmp_path):
+    """Finding 4a: the contour lines' layer removed in RustGIS; added again, the answer lost; meanwhile the program
+    computes the contour lines again. The layer found at the next send is compared with what RustGIS loaded - its own
+    export - not with the file as it is then: the new lines go, and RustGIS ends with the program's rows."""
+    curves = [{"quota": 99.0 + n / 10, "_geom": ("LineString", [[GX, GY + n], [GX + 5, GY + n]])} for n in range(3)]
+    one = _unit(1, GX, GY)
+    live, fake, rl = _started(tmp_path, _drawings([one], curves=curves))
+    title = LIVE_TABLES["curve"][0]
+    fake.remove(int(rl.layers["curve"]))
+    fake.lost.append("run_command:layer.addData")
+    with pytest.raises(link.RustGisBusy):
+        rl.push()
+    again = [{"quota": 99.0 + n / 10, "_geom": ("LineString", [[GX, GY + n + 0.5], [GX + 5, GY + n + 0.5]])}
+             for n in range(4)]
+    live.write(_drawings([one], curves=again))
+    assert rl.push() == 7  # three lines gone, four added
+    assert rl.push() == 0 and not rl.pending
+    assert [l["name"] for l in fake.layers].count(title) == 1
+    contours = fake.linked(rl, "curve")
+    assert sorted(round(f["attrs"]["quota"], 1) for f in contours["features"]) == [99.0, 99.1, 99.2, 99.3]
+    assert all(g.bounds[1] > GY + 0.49 for f in contours["features"]
+               for g in [_reprojected(f["geometry"], "EPSG:4326", GB)])
+
+
+def test_a_layer_whose_content_cannot_be_read_is_added_once_more(tmp_path):
+    """Finding 4b: the units' layer added again, but RustGIS does not answer the export that would say what it loaded:
+    that layer is removed at the next send and added again, remembered at once. While RustGIS refuses to remove it the
+    table waits and nothing goes to that layer."""
+    one, two = _unit(1, GX, GY), _unit(2, GX + 1, GY)
+    live, fake, rl = _started(tmp_path, _drawings([one, two]))
+    title = LIVE_TABLES["unita"][0]
+    fake.remove(int(rl.layers["unita"]))
+    fake.busy.append("run_command:share.exportLayer")
+    with pytest.raises(link.RustGisBusy):
+        rl.push()
+    (first,) = [l for l in fake.layers if l["name"] == title]
+    fake.rules.append(lambda c, p: "not now" if c == "layer.remove" and p.get("layer") == first["id"] else None)
+    moved = dict(one, _geom=_square(GX + 0.1, GY))
+    live.write(_drawings([moved, two]))
+    state = fake.state()
+    assert rl.push() == 0 and rl.pending and fake.state() == state  # the table waits: nothing sent to that layer
+    fake.rules.clear()
+    assert rl.push() == 0 and not rl.pending  # removed, added again from the file - its rows whole - remembered
+    (again,) = [l for l in fake.layers if l["name"] == title]
+    assert again["id"] != first["id"] and int(rl.layers["unita"]) == again["id"]
+    (there,) = fake.native(again, one[ID_FIELD])
+    assert link._same_geometry(there, Polygon(moved["_geom"][1]))
+    live.write(_drawings([one, two]))
+    assert rl.push() == 1  # linked again: what the program changes goes there
+
+
+def test_a_script_cut_short_is_not_taken_as_sent(tmp_path):
+    """Finding 5: RustGIS runs only part of a script and says so (past its 10,000th line it drops the others without an
+    error): nothing of it is taken as sent - the rows stay pending - and the next send puts things right, the
+    placeholder left there taken away; the pull never reads that placeholder."""
+    one, two = _unit(1, GX, GY), _unit(2, GX + 1, GY)
+    live, fake, rl = _started(tmp_path, _drawings([one, two]))
+    units = fake.linked(rl, "unita")
+    live.write(_drawings([dict(one, _geom=_square(GX + 0.2, GY)), dict(two, _geom=_square(GX + 1.2, GY))]))
+    fake.cut = 1  # the placeholder is added, nothing else runs
+    with pytest.raises(link.RustGisRefused, match="ran 1 of the"):
+        rl.push()
+    assert rl.pending and any(str(pid).startswith("ppg-invio-") for pid in fake.identities(units))
+    assert rl.pull()["unita"] == (0, 0, 0) and live.read_changes() == {}  # the leftover is nobody's
+    fake.cut = None
+    assert rl.push() == 2 and not rl.pending
+    assert sorted(fake.identities(units)) == sorted([one[ID_FIELD], two[ID_FIELD]])
+
+
+def test_rows_no_script_holds_are_set_aside(tmp_path, monkeypatch, caplog):
+    """Minor 6: units too large for any script are set aside - said in the log, listed in set_aside, the rows pending -
+    and the other changes go; the size counts the bytes the request carries (a letter beyond ASCII is six). Changed by
+    the program to something smaller, they go."""
+    import numpy as np
+
+    caplog.set_level(logging.WARNING, logger=link.__name__)
+    one, two, three = _unit(1, GX, GY), _unit(2, GX + 1, GY), _unit(3, GX + 2, GY)
+    live, fake, rl = _started(tmp_path, _drawings([one, two, three]))
+    monkeypatch.setattr(link, "SCRIPT_BYTES", 6000)
+    angles = np.linspace(0, 2 * np.pi, 400, endpoint=False)
+    ring = [[GX + 0.25 + 0.25 * np.cos(a), GY + 0.25 + 0.25 * np.sin(a)] for a in angles]
+    accents = "è" * 1000  # 1000 characters, 6000 bytes in the request
+    live.write(_drawings([dict(one, _geom=("Polygon", ring)), dict(two, _geom=_square(GX + 1.2, GY)),
+                          dict(three, tipo_us_s=accents)]))
+    assert rl.push() == 1  # unit 2
+    assert rl.set_aside == {"unita": sorted([one[ID_FIELD], three[ID_FIELD]])} and rl.pending
+    assert caplog.text.count("no script holds it") == 2
+    units = fake.linked(rl, "unita")
+    (there,) = fake.native(units, two[ID_FIELD])
+    assert link._same_geometry(there, Polygon(_square(GX + 1.2, GY)[1]))
+    assert rl.push() == 0 and rl.pending  # unchanged: still aside
+    live.write(_drawings([dict(one, _geom=_square(GX, GY, 0.7)), dict(two, _geom=_square(GX + 1.2, GY)),
+                          dict(three, tipo_us_s=TEXT)]))
+    assert rl.push() == 2 and rl.set_aside == {} and not rl.pending
+
+
+def test_features_drawn_there_alike_but_for_letter_case_go_together(tmp_path, caplog):
+    """Minor 7: two units drawn in RustGIS whose values differ only in the case of their letters, which RustGIS's where
+    clause does not tell apart: they go together - the one the window read is replaced, the other put back as it was -
+    and nothing waits."""
+    caplog.set_level(logging.WARNING, logger=link.__name__)
+    one = _unit(1, GX, GY)
+    live, fake, rl = _started(tmp_path, _drawings([one]))
+    units = fake.linked(rl, "unita")
+    fake.draw(units, box(GX + 3, GY, GX + 3.5, GY + 0.5), GB, us_s="US 7")
+    assert rl.pull()["unita"] == (0, 1, 0)
+    (a,) = live.read_changes()["unita"].added
+    live.write(_drawings([one, _taken(a, us_s="US 7")]))
+    second = box(GX + 5, GY, GX + 5.5, GY + 0.5)
+    fake.draw(units, second, GB, us_s="us 7")
+    assert rl.pull()["unita"] == (0, 1, 0)
+    assert rl.push() == 1 and not rl.pending and "wait" not in caplog.text
+    assert sorted(map(str, fake.identities(units))) == sorted([one[ID_FIELD], a.id, "None"])
+    (kept,) = [f for f in units["features"] if f["attrs"][ID_FIELD] is None]
+    assert kept["attrs"]["us_s"] == "us 7"
+    assert link._same_geometry(_reprojected(kept["geometry"], "EPSG:4326", GB), second)
+
+
+def test_a_row_rustgis_refuses_is_set_aside_and_the_others_go(tmp_path, caplog):
+    """Minor 9: RustGIS refuses one row (a domain of its layer): that unit is set aside - said in the log, not sent
+    again until the program changes it - and the send goes again at once with the others."""
+    caplog.set_level(logging.WARNING, logger=link.__name__)
+    one, two = _unit(1, GX, GY), _unit(2, GX + 1, GY)
+    live, fake, rl = _started(tmp_path, _drawings([one, two]))
+    fake.rules.append(lambda c, p: "666 isn't allowed in us_s (its domain)"
+                      if c == "edit.addFeature" and (p.get("attributes") or {}).get("us_s") == "666" else None)
+    live.write(_drawings([dict(one, us_s="666"), dict(two, _geom=_square(GX + 1.2, GY))]))
+    assert rl.push() == 1  # unit 2
+    assert rl.set_aside == {"unita": [one[ID_FIELD]]} and rl.pending
+    assert "666 isn't allowed" in caplog.text and one[ID_FIELD] in caplog.text
+    units = fake.linked(rl, "unita")
+    assert [f["attrs"]["us_s"] for f in units["features"] if f["attrs"][ID_FIELD] == one[ID_FIELD]] == ["1"]
+    assert rl.push() == 0 and rl.pending  # unchanged: not sent again
+    live.write(_drawings([dict(one, us_s="6"), dict(two, _geom=_square(GX + 1.2, GY))]))
+    assert rl.push() == 1 and rl.set_aside == {} and not rl.pending
+    assert [f["attrs"]["us_s"] for f in units["features"] if f["attrs"][ID_FIELD] == one[ID_FIELD]] == ["6"]
+
+
+def test_the_system_of_an_empty_chunk_is_checked_where_it_is_used(tmp_path):
+    """Minor 12: a chunk without any drawing yet: the point that checks the system is put in the middle of the
+    system's area of use, and a system RustGIS places elsewhere is refused there too."""
+    from pyproj import CRS, Transformer
+
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings())
+    fake = FakeEngine()
+    assert link.RustGisLink(live, fake, "Saggio 1", GB).start([])["layers"] == 7
+    source = Path(_commands(fake.scripts[0])[0][1]["path"])
+    (point,) = [g for g, _ in gpkg.read_table(source, "sistema")]
+    lon, lat = Transformer.from_crs(GB, "EPSG:4326", always_xy=True).transform(point.x, point.y)
+    area = CRS.from_user_input(GB).area_of_use
+    assert area.west < lon < area.east and area.south < lat < area.north
+    with pytest.raises(link.RustGisRefused, match="EPSG:3004"):
+        link.RustGisLink(live, FakeEngine(shift=0.002), "Saggio 1", GB).start([])
+
+
+def test_a_send_names_its_lines(tmp_path):
+    """What a refused line is about: the rows of one identity, the features a group puts back, or nothing (the
+    selection, the delete): only the first two are set aside."""
+    one = _unit(1, GX, GY)
+    live, fake, rl = _started(tmp_path, _drawings([one]))
+    live.write(_drawings([dict(one, _geom=_square(GX + 0.1, GY))]))
+    send = rl._send(rl._linked()[0])
+    commands = [line.split(" ", 1)[0] for line in send.lines]
+    owned = {c: o for c, o in zip(commands, send.owners) if o}
+    assert commands == ["edit.addFeature", "select.byAttributes", "edit.delete", "edit.addFeature", "select.clear",
+                        "edit.status"]
+    assert [o is None for o in send.owners] == [False, True, True, False, True, True]
+    assert owned["edit.addFeature"][0] == "unita" and list(owned["edit.addFeature"][1]) == [one[ID_FIELD]]
+    assert link._line_number(link.RustGisRefused(json.dumps({"error": "line 4: edit.addFeature: no"}))) == 4
+
+
+def _engine_ids(engine, layer) -> list:
+    rows = engine.call("read_features", {"layer": int(layer), "where": "", "limit": 200, "fields": [ID_FIELD]})["rows"]
+    return sorted(str(row.get(ID_FIELD)) for row in rows)
+
+
+@pytest.mark.skipif(not CLI, reason="PPG_RUSTGIS_CLI does not name a rustgis-cli")
+def test_copies_with_the_real_engine(tmp_path):
+    """Finding 1 with RustGIS's own engine (edit.copy, edit.paste): the review's sequence - paste, pull, two sends, an
+    edit of unit 1 in the program, a send, a pull - deletes nothing, and the copy keeps its own identity there."""
+    crs, x0, y0 = "EPSG:32633", 291000.0, 4640000.0
+    one, two = _unit(1, x0, y0), _unit(2, x0 + 1, y0)
+    live = LiveLink(tmp_path / "qgis", crs)
+    live.write(_drawings([one, two]))
+    with link.StdioTransport(Path(CLI), ["mcp", "--yes"]) as engine:
+        rl = link.RustGisLink(live, engine, "Saggio 1", crs)
+        rl.start([])
+        units = int(rl.layers["unita"])
+
+        def command(name, **params):
+            return engine.call("run_command", {"command": name, "params": params})
+
+        command("select.byAttributes", layer=units, where=f"\"ppg_id\" = '{one[ID_FIELD]}'", mode="new")
+        command("edit.copy")
+        command("edit.paste", layer=units)
+        assert rl.pull()["unita"] == (0, 1, 0)
+        (copied,) = live.read_changes()["unita"].added
+        taken = _taken(copied, us_s="1")
+        live.write(_drawings([one, two, taken]))
+        assert rl.push() == 2 and rl.push() == 0
+        live.write(_drawings([dict(one, _geom=_square(x0 + 0.1, y0)), two, taken]))
+        assert rl.push() == 1
+        assert rl.pull()["unita"] == (0, 0, 0) and live.read_changes() == {}
+        assert _engine_ids(engine, units) == sorted([one[ID_FIELD], two[ID_FIELD], copied.id])
+        _, stored = _live_table(live.path, "unita")
+        assert sorted(v[ID_FIELD] for _, _, v in stored) == sorted([one[ID_FIELD], two[ID_FIELD], copied.id])
+
+
+@pytest.mark.skipif(not CLI, reason="PPG_RUSTGIS_CLI does not name a rustgis-cli")
+def test_explode_with_the_real_engine(tmp_path):
+    """edit.explode on unit 1 made of two polygons there: the second polygon becomes a feature of its own with unit 1's
+    values - a copy, as Task 2 reads it: a unit of its own here. The program's next edit of unit 1 loses nothing: both
+    stay, there and here."""
+    crs, x0, y0 = "EPSG:32633", 291000.0, 4640000.0
+    one = _unit(1, x0, y0)
+    live = LiveLink(tmp_path / "qgis", crs)
+    live.write(_drawings([one]))
+    second = box(x0 + 3, y0, x0 + 3.5, y0 + 0.5)
+    with link.StdioTransport(Path(CLI), ["mcp", "--yes"]) as engine:
+        rl = link.RustGisLink(live, engine, "Saggio 1", crs)
+        rl.start([])
+        units = int(rl.layers["unita"])
+
+        def command(name, **params):
+            return engine.call("run_command", {"command": name, "params": params})
+
+        two = MultiPolygon([Polygon(one["_geom"][1]), second])
+        command("edit.setGeometry", layer=units, row=0, geometry=_lonlat(two, crs))
+        command("select.byAttributes", layer=units, where=f"\"ppg_id\" = '{one[ID_FIELD]}'", mode="new")
+        assert command("edit.explode")["features"] == 2
+        assert _engine_ids(engine, units) == [one[ID_FIELD]] * 2
+        pulled = rl.pull()["unita"]
+        assert pulled[1:] == (1, 0)  # the piece is added (unit 1 counts as changed when its ring starts elsewhere)
+        got = live.read_changes()["unita"]
+        (piece,) = got.added
+        assert piece.id != one[ID_FIELD] and link._same_geometry(piece.geometry, second)
+        mine = [dict(one, _shape=f.geometry) for f in got.changed] or [one]
+        live.write(_drawings([*mine, _taken(piece, us_s="1")]))
+        assert rl.push() == 2
+        live.write(_drawings([dict(one, _geom=_square(x0, y0, 0.6)), _taken(piece, us_s="1")]))
+        assert rl.push() == 1
+        assert rl.pull()["unita"] == (0, 0, 0) and live.read_changes() == {}
+        assert _engine_ids(engine, units) == sorted([one[ID_FIELD], piece.id])
+        _, stored = _live_table(live.path, "unita")
+        assert sorted(v[ID_FIELD] for _, _, v in stored) == sorted([one[ID_FIELD], piece.id])
+
+
+@pytest.mark.skipif(not CLI, reason="PPG_RUSTGIS_CLI does not name a rustgis-cli")
+def test_split_with_the_real_engine(tmp_path):
+    """edit.split on a section: the second piece becomes a feature of its own with the section's values - a section of
+    its own here, as Task 2 reads it. The program's next edit of the section loses nothing."""
+    crs, x0, y0 = "EPSG:32633", 291000.0, 4640000.0
+    section = {"etichetta": "Sezione 1", ID_FIELD: new_id(),
+               "_geom": ("LineString", [[x0, y0 + 2], [x0 + 4, y0 + 2]])}
+    live = LiveLink(tmp_path / "qgis", crs)
+    live.write(_drawings([_unit(1, x0, y0)], sections=[section]))
+    with link.StdioTransport(Path(CLI), ["mcp", "--yes"]) as engine:
+        rl = link.RustGisLink(live, engine, "Saggio 1", crs)
+        rl.start([])
+        lines = int(rl.layers["sezioni"])
+
+        def command(name, **params):
+            return engine.call("run_command", {"command": name, "params": params})
+
+        command("select.byAttributes", layer=lines, where=f"\"ppg_id\" = '{section[ID_FIELD]}'", mode="new")
+        lon, lat = _lonlat(Point(x0 + 1.5, y0 + 2), crs)["coordinates"]
+        command("edit.split", lon=lon, lat=lat)
+        assert _engine_ids(engine, lines) == [section[ID_FIELD]] * 2
+        assert rl.pull()["sezioni"] == (1, 1, 0)
+        got = live.read_changes()["sezioni"]
+        (shortened,), (piece,) = got.changed, got.added
+        assert shortened.geometry.length == pytest.approx(1.5, abs=1e-3)
+        assert piece.geometry.length == pytest.approx(2.5, abs=1e-3)
+        mine = dict(section, _shape=shortened.geometry)
+        unit = _live_table(live.path, "unita")[1][0][2]
+        drawings = _drawings([dict(_unit(1, x0, y0), **{ID_FIELD: unit[ID_FIELD]})],
+                             sections=[mine, _taken(piece, etichetta="Sezione 1 (seconda parte)")])
+        live.write(drawings)
+        assert rl.push() == 2
+        live.write(_drawings([dict(_unit(1, x0, y0), **{ID_FIELD: unit[ID_FIELD]})],
+                             sections=[dict(mine, etichetta="Sezione 1 rivista"),
+                                       _taken(piece, etichetta="Sezione 1 (seconda parte)")]))
+        assert rl.push() == 1
+        assert rl.pull()["sezioni"] == (0, 0, 0) and live.read_changes() == {}
+        assert _engine_ids(engine, lines) == sorted([section[ID_FIELD], piece.id])
+
+
+@pytest.mark.skipif(not CLI, reason="PPG_RUSTGIS_CLI does not name a rustgis-cli")
+def test_a_leftover_placeholder_is_ignored_and_removed_with_the_real_engine(tmp_path):
+    """Finding 5 with RustGIS's own engine: a placeholder a send left there (``ppg-invio-...``) is not read by a pull,
+    and the next send of that layer takes it away (its first selection takes ``LIKE 'ppg-invio-%'``)."""
+    crs, x0, y0 = "EPSG:32633", 291000.0, 4640000.0
+    one = _unit(1, x0, y0)
+    live = LiveLink(tmp_path / "qgis", crs)
+    live.write(_drawings([one]))
+    with link.StdioTransport(Path(CLI), ["mcp", "--yes"]) as engine:
+        rl = link.RustGisLink(live, engine, "Saggio 1", crs)
+        rl.start([])
+        units = int(rl.layers["unita"])
+        engine.call("run_command", {"command": "edit.addFeature", "params": {
+            "layer": units, "geometry": _lonlat(box(x0 + 3, y0, x0 + 3.5, y0 + 0.5), crs),
+            "attributes": {ID_FIELD: "ppg-invio-0123456789abcdef", "us_s": "9"}}})
+        assert rl.pull()["unita"] == (0, 0, 0) and live.read_changes() == {}
+        live.write(_drawings([dict(one, _geom=_square(x0 + 0.1, y0))]))
+        assert rl.push() == 1
+        assert _engine_ids(engine, units) == [one[ID_FIELD]]
+
+
+@pytest.mark.skipif(not CLI, reason="PPG_RUSTGIS_CLI does not name a rustgis-cli")
+def test_an_empty_chunk_starts_with_the_real_engine(tmp_path):
+    """Minor 12 with RustGIS's own engine: a chunk without drawings, its system checked in the middle of its area of
+    use; a unit drawn in the program afterwards goes there."""
+    crs = "EPSG:32633"
+    live = LiveLink(tmp_path / "qgis", crs)
+    live.write(_drawings())
+    with link.StdioTransport(Path(CLI), ["mcp", "--yes"]) as engine:
+        rl = link.RustGisLink(live, engine, "Saggio 1", crs)
+        assert rl.start([])["layers"] == 7
+        one = _unit(1, 291000.0, 4640000.0)
+        live.write(_drawings([one]))
+        assert rl.push() == 1
+        assert _engine_ids(engine, rl.layers["unita"]) == [one[ID_FIELD]]

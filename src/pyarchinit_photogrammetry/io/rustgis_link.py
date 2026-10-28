@@ -45,6 +45,7 @@ import queue
 import re
 import shutil
 import sqlite3
+import string
 import subprocess
 import sys
 import tempfile
@@ -651,10 +652,12 @@ def _parts(geometry, parted: bool) -> list:
 
 @dataclass
 class Drawn:
-    """A feature RustGIS has without an identity (drawn there) that is already in the live GeoPackage: its parts and
-    values as RustGIS had them at the last look, and the rows (fid) it became there. RustGIS learns their identity -
-    given by LiveLink, or here to a feature of several polygons - only with the program's edits: until then every pull
-    finds the feature again, and knows it by its geometry."""
+    """A feature RustGIS has beyond the rows it was given, that is already in the live GeoPackage: drawn there without
+    an identity, or a copy of one of the program's features - pasted, or a piece edit.explode or edit.split left -
+    which carries that feature's identity (``values`` say which). Its parts and values as RustGIS had them at the last
+    look, and the rows (fid) it became here under an identity of their own (given by LiveLink, or here to a feature of
+    several polygons). RustGIS learns that identity only with the program's edits: until then every pull finds the
+    feature again, and knows it by its geometry."""
     parts: list
     values: dict
     fids: list
@@ -775,9 +778,11 @@ def _rustgis_rows(features: list, parted: bool, here: Iterable = (), had: Iterab
 
 # ---------------------------------------------------------------- the link started, and the program's edits sent
 SCRIPT_LINES = 9_000  # lines of one script: RustGIS runs its first 10,000 and drops the others without a word
-SCRIPT_CHARS = 8_000_000  # characters of one script: RustGIS refuses a request over 16 MiB, JSON escapes included
+SCRIPT_BYTES = 12_000_000  # bytes of one script in the request: RustGIS refuses a request over 16 MiB (see _encoded)
 WHERE_CHARS = 9_000  # characters of one where clause: RustGIS refuses a clause of more than 10,000
 WHERE_TERMS = 250  # terms of one AND chain: RustGIS refuses more than 256
+RETRIES = 20  # sends a push tries in a row, each without the features RustGIS refused in the one before
+TEMPLATE_BYTES = 65_536  # geometry a placeholder copies at most: a larger one is replaced by a speck
 KINDS = {"POLYGON": "Polygon", "LINESTRING": "Polyline", "POINT": "Point"}  # list_layers' type of each kind of table
 FIELD_TYPES = {"INTEGER": "long", "REAL": "double"}  # edit.addField's type of a column of that affinity; else "text"
 CHECK_LAYER = "ppg-sistema"  # the layer of the point that checks the system (a unique suffix added), removed at once
@@ -786,6 +791,7 @@ _NOWHERE = {  # that feature's geometry when no feature of the part can lend it 
     "Polygon": {"type": "Polygon", "coordinates": [[[0.0, 0.0], [1e-6, 0.0], [0.0, 1e-6], [0.0, 0.0]]]},
     "Polyline": {"type": "LineString", "coordinates": [[0.0, 0.0], [1e-6, 0.0]]},
     "Point": {"type": "Point", "coordinates": [0.0, 0.0]}}
+_ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
 
 
 def _ref(layer_id):
@@ -798,6 +804,9 @@ def _ref(layer_id):
 def _quoted(name: str) -> str:
     """A field name as RustGIS's where clauses read it whatever it is (a keyword too): in double quotes."""
     return '"' + str(name).replace('"', '""') + '"'
+
+
+LEFTOVERS = f"{_quoted(ID_FIELD)} LIKE '{PLACEHOLDER}-%'"  # the placeholders a send that did not end left there
 
 
 def _literal(value) -> str | None:
@@ -819,11 +828,24 @@ def _literal(value) -> str | None:
     return None
 
 
+def _fold(text: str) -> str:
+    """``text`` as RustGIS compares two texts in a where clause: the ASCII letters in either case alike (accented
+    letters are not folded: RustGIS does not fold them)."""
+    return text.translate(_ASCII_LOWER)
+
+
+def _encoded(line: str) -> int:
+    """Bytes a script line takes in the request: the transport sends the script as a JSON string - quotes and
+    backslashes escaped, every character beyond ASCII as ``\\uXXXX`` - and the two quotes stand for its newline."""
+    return len(json.dumps(line))
+
+
 def _identity_clauses(identities: Iterable) -> list[str]:
-    """``"ppg_id" IN (...)`` clauses that together name every identity of ``identities``, each short enough for RustGIS
-    (:data:`WHERE_CHARS`): a send names thousands when the program computes a table again."""
+    """Where clauses that together take every identity of ``identities`` (``"ppg_id" IN (...)``, each short enough for
+    RustGIS, :data:`WHERE_CHARS`: a send names thousands when the program computes a table again); the first takes
+    also any placeholder a send that did not end left there (:data:`LEFTOVERS`)."""
     head = f"{_quoted(ID_FIELD)} IN ("
-    out, items, size = [], [], len(head) + 1
+    out, items, size = [], [], len(LEFTOVERS) + len(" OR ") + len(head) + 1
     for identity in identities:
         literal = _literal(str(identity))
         if items and size + len(literal) + 2 > WHERE_CHARS:
@@ -833,7 +855,7 @@ def _identity_clauses(identities: Iterable) -> list[str]:
         size += len(literal) + 2
     if items:
         out.append(head + ", ".join(items) + ")")
-    return out
+    return [f"{LEFTOVERS} OR {out[0]}", *out[1:]] if out else [LEFTOVERS]
 
 
 def _fields(layer) -> dict[str, tuple[str, str]]:
@@ -895,6 +917,12 @@ def _said(exc: Exception) -> str:
     return str(info.get("error") or text) if isinstance(info, dict) else text
 
 
+def _line_number(exc: Exception) -> int | None:
+    """The line of the script RustGIS names in its refusal (``line 12: edit.addFeature: ...``), from 1."""
+    found = re.match(r"\s*line (\d+)\b", _said(exc))
+    return int(found.group(1)) if found else None
+
+
 def _status_key(answer) -> str | None:
     """``edit.status``'s answer as something to compare: per layer the features added, modified and deleted, and
     whether the project is unsaved."""
@@ -917,6 +945,17 @@ def _digest(con, table: str) -> str:
     h = hashlib.sha1()
     for row in con.execute(f"SELECT * FROM {gpkg.quote(table)} ORDER BY fid"):
         h.update(repr(row).encode("utf-8", "backslashreplace"))
+    return h.hexdigest()
+
+
+def _rows_print(rows: list) -> str:
+    """A fingerprint of the rows of one identity here (keys, geometries, values): a feature set aside goes again when
+    the program changes it."""
+    h = hashlib.sha1()
+    for row in sorted(rows, key=lambda r: (r.key[1], r.fid)):
+        shape = None if row.geometry is None else row.geometry.wkb
+        h.update(repr((row.key, shape, sorted(row.values.items(), key=lambda kv: kv[0]))).encode("utf-8",
+                                                                                               "backslashreplace"))
     return h.hexdigest()
 
 
@@ -965,7 +1004,8 @@ def _same_system(con, tables: Iterable, code: int) -> None:
 def _drawn_clause(drawn: Drawn, fields: dict) -> str | None:
     """A where clause that finds a feature RustGIS has without an identity as it had it at the last look: no identity,
     and every value it had - an empty one null, or an empty text - in the fields its layer has now. Others with the
-    same values are found too: the caller counts them. None when no clause RustGIS reads can say it."""
+    same values are found too (texts as RustGIS compares them, :func:`_fold`): the caller counts them. None when no
+    clause RustGIS reads can say it."""
     had = {str(k).lower(): v for k, v in drawn.values.items()}
     terms = [f"{_quoted(fields.get(ID_FIELD, (ID_FIELD, ''))[0])} IS NULL"]
     for low, (name, kind) in sorted(fields.items()):
@@ -981,30 +1021,40 @@ def _drawn_clause(drawn: Drawn, fields: dict) -> str | None:
 
 
 class _Budget:
-    """What one script may still take: lines and characters."""
+    """What one script may still take: lines and bytes."""
 
-    def __init__(self, lines: int, chars: int):
-        self.lines, self.chars = lines, chars
+    def __init__(self, lines: int, size: int):
+        self.lines, self.size = lines, size
 
-    def take(self, lines: int, chars: int) -> bool:
-        if lines > self.lines or chars > self.chars:
+    def take(self, lines: int, size: int) -> bool:
+        if lines > self.lines or size > self.size:
             return False
         self.lines -= lines
-        self.chars -= chars
+        self.size -= size
         return True
 
-    def give(self, lines: int, chars: int) -> None:
+    def give(self, lines: int, size: int) -> None:
         self.lines += lines
-        self.chars += chars
+        self.size += size
+
+
+@dataclass
+class _Group:  # features RustGIS has beyond the rows it was given, that a send replaces, deletes or puts back together
+    identity: str | None  # the program's identity they carry (copies of that feature), or None (drawn without one)
+    clause: str | None  # what finds them there with what they copy: their identity, or their values
+    members: list  # (Drawn, action: replace|delete|keep, the identities of the rows they became here)
+    ids: set  # the identities the send deletes and adds with them
+    back: list = None  # lines that put back, as they were, those the window has not read yet
 
 
 @dataclass
 class _Part:  # what a send does to the layer of one table
     table: str
     lines: list  # its lines of the script
+    owners: list  # per line, {identity: fingerprint of its rows} of the features the line is about, or None
     identities: list  # deleted there by identity, and added again with every row of them the program has
     rows: list  # (key, geometry, values) of the rows added: what RustGIS has of them once the send ran
-    drawn: list  # the features drawn there without identity that it replaces or deletes
+    drawn: list  # the features RustGIS had beyond the rows it was given, that it replaces or deletes
     sent: int  # rows added, and rows deleted for good
     adds: bool  # whether it ends by adding (a feature added is left selected)
 
@@ -1013,7 +1063,8 @@ class _Part:  # what a send does to the layer of one table
 class _Send:  # one script of RustGisLink.push
     parts: list
     lines: list
-    held: bool  # rows wait for the next send: more than one script holds, or features drawn there not told apart yet
+    owners: list  # per line, (table, {identity: fingerprint}) of the features it is about, or None
+    held: bool  # rows wait for the next send: more than one script holds, or features there not told apart yet
     digests: dict  # one-way table -> its content, all of it now in RustGIS
 
     @property
@@ -1054,7 +1105,14 @@ class RustGisLink:
         self._owed = False  # rows a send did not deliver: RustGIS busy, an answer lost, more than one script holds
         self._pushed_at = None  # the live GeoPackage as the file system saw it when RustGIS last got all of it
         self._unsure: dict[str, int] = {}  # table -> the highest id RustGIS had used when it was asked to add it again
+        self._discard: dict[str, int] = {}  # table -> a layer added again whose content is not known: removed first
         self._digests: dict[str, str] = {}  # one-way table -> the content of the live table RustGIS has all of
+        # per table, the keys of the baseline that are a polygon of a feature of several (no feature of their own)
+        self.extras: dict[str, set] = {}
+        # per table, identity -> fingerprint of its rows when it was set aside: what RustGIS refused, or what no send
+        # can carry, waits until the program changes it
+        self.aside: dict[str, dict[str, str]] = {}
+        self._waits: set = set()  # the waits already said in the log
 
     @property
     def scratch(self) -> Path:
@@ -1073,16 +1131,21 @@ class RustGisLink:
             con.close()
 
     def remember(self, tables=None) -> None:
-        """What RustGIS has of ``tables`` (every linked two-way table when None) when the link has just given them to
-        it - when it starts, or when a layer is added again -, taken from RustGIS's own export of each layer, never
-        from the live GeoPackage: a row the program or QGIS wrote meanwhile, or one RustGIS did not load, is not among
-        what it had, so no pull takes it for deleted there (the program's rows go to RustGIS with its edits). The
-        features it has without an identity are found among the live rows by their geometry (:attr:`drawn`, within
-        :data:`TOLERANCE_M`); one with no such row was drawn there meanwhile and comes in at the next pull, as do the
-        polygons it has beyond the rows it was given. The errors of RustGIS (:class:`RustGisBusy`...) leave what was
-        known as it was."""
-        tables = [t for t in (self.layers if tables is None else tables) if t in TWO_WAY_TABLES]
-        exports = {t: self._export(t) for t in self._ready(tables)}  # RustGIS first, then the file as it is now
+        """What RustGIS has of ``tables`` (every linked two-way table when None; a one-way table when named) when the
+        link has just given them to it - when it starts, or when a layer is added again -, taken from RustGIS's own
+        export of each layer, never from the live GeoPackage: a row the program or QGIS wrote meanwhile, or one RustGIS
+        did not load, is not among what it had, so no pull takes it for deleted there (the program's rows go to RustGIS
+        with its edits). The features it has without an identity, or copies of one, are found among the live rows by
+        their geometry (:attr:`drawn`, within :data:`TOLERANCE_M`); one with no such row was drawn there meanwhile and
+        comes in at the next pull, as do the polygons it has beyond the rows it was given (of a one-way table only the
+        program's rows count). The layers are checked first to be the link's (:class:`RustGisRefused` naming one that
+        is not); the errors of RustGIS (:class:`RustGisBusy`...) leave what was known as it was."""
+        named = tables is not None
+        tables = [t for t in (self.layers if tables is None else tables) if named or t in TWO_WAY_TABLES]
+        ready = self._ready(tables)
+        if ready:
+            self._require_ours(ready)
+        exports = {t: self._export(t) for t in ready}  # RustGIS first, then the file as it is now
         found = {}
         if exports:
             con = _read_only(self.live.path)
@@ -1091,6 +1154,7 @@ class RustGisLink:
             finally:
                 con.close()
         for table in tables:
+            self.extras[table] = set()  # a polygon beyond the rows given is left out: the next pull brings it in
             if table not in exports:  # not written by this version yet: nothing RustGIS has of it is known
                 self.baseline[table], self.drawn[table] = {}, []
                 continue
@@ -1098,6 +1162,9 @@ class RustGisLink:
             parted = PART_FIELD in types
             keyed, drawn, extras = _rustgis_rows(exports[table].features, parted, [r.key for r in rows if r.key[0]])
             self.baseline[table] = {key: row for key, row in keyed.items() if key not in extras}
+            if table not in TWO_WAY_TABLES:  # what the program sends there: what RustGIS has of its rows, nothing more
+                self.drawn[table] = []
+                continue
             primary, others = _by_key(rows)
             # without an identity there: the rows given without one (drawn in QGIS, copies), then those given an
             # identity here since RustGIS loaded them
@@ -1133,16 +1200,21 @@ class RustGisLink:
         own, so the reader's connection sees a new ``PRAGMA data_version``. Returns ``(changed, added, deleted)`` rows
         per linked two-way table.
 
-        :class:`RustGisBusy` and the other errors of RustGIS leave the GeoPackage as it was (nothing is lost: try
-        again); :class:`RustGisRefused` too when an export is not in the system of the drawings, and
-        :class:`sqlite3.OperationalError` (database locked) when another program holds the file."""
+        A placeholder a send left there (``ppg-invio-...``) is never read. :class:`RustGisBusy` and the other errors
+        of RustGIS leave the GeoPackage as it was (nothing is lost: try again); :class:`RustGisRefused` too when a
+        linked layer is not the drawings' any more (removed there, or another project open in RustGIS under its id) or
+        an export is not in the system of the drawings, and :class:`sqlite3.OperationalError` (database locked) when
+        another program holds the file."""
         tables = [t for t in TWO_WAY_TABLES if t in self.layers]
         unknown = [t for t in tables if t not in self.baseline]
         if unknown:
             raise RuntimeError(f"what RustGIS was given of {', '.join(unknown)} is not known: remember() the tables "
                                "when RustGIS gets them")
         counts = {t: (0, 0, 0) for t in tables}
-        exports = {t: self._export(t) for t in self._ready(tables)}  # RustGIS first: never asked while the file is held
+        ready = self._ready(tables)
+        if ready:
+            self._require_ours(ready)  # another project's layer under a linked id would be read as the drawings
+        exports = {t: self._export(t) for t in ready}  # RustGIS first: never asked while the file is held
         if not exports:
             return counts
         states = {}
@@ -1159,8 +1231,8 @@ class RustGisLink:
                 raise
         finally:
             con.close()
-        for table, (had, drawn) in states.items():
-            self.baseline[table], self.drawn[table] = had, drawn
+        for table, (had, drawn, extras) in states.items():
+            self.baseline[table], self.drawn[table], self.extras[table] = had, drawn, extras
         return counts
 
     def _export(self, table: str) -> _Export:
@@ -1190,11 +1262,14 @@ class RustGisLink:
         if left_out:
             log.warning("RustGIS left %d features of %s out of its export: none of its rows is taken for deleted",
                         left_out, table)
+        # a placeholder a send left there (it did not end): never the program's, nor drawn there
+        features = [(g, v) for g, v in features if not str(v.get(ID_FIELD) or "").startswith(f"{PLACEHOLDER}-")]
         return _Export(srs, columns, features, left_out)
 
-    def _pull_table(self, con, table: str, export: _Export) -> tuple[tuple[int, int, int], tuple[dict, list]]:
+    def _pull_table(self, con, table: str, export: _Export) -> tuple[tuple[int, int, int], tuple[dict, list, set]]:
         """One table of :meth:`pull`, inside its transaction; returns the rows changed, added and deleted, and what
-        RustGIS has now (the baseline and the features without identity), kept once the transaction is committed."""
+        RustGIS has now (the baseline, the features beyond the rows it was given, and the keys of the baseline that are
+        a polygon of a feature of several), kept once the transaction is committed."""
         q = gpkg.quote
         srs = gpkg.table_srs(con, table)
         if srs is not None and export.srs != srs:
@@ -1212,7 +1287,7 @@ class RustGisLink:
         primary, _ = _by_key(rows)
         by_fid = {r.fid: r for r in rows}
         had, now = self.baseline.get(table, {}), {}
-        keyed, drawn, _ = _rustgis_rows(export.features, parted, [r.key for r in rows if r.key[0]], had)
+        keyed, drawn, extras = _rustgis_rows(export.features, parted, [r.key for r in rows if r.key[0]], had)
         changed = added = deleted = 0
         gone: set[int] = set()
 
@@ -1301,7 +1376,9 @@ class RustGisLink:
                     deleted += 1
         if changed or added or deleted:
             gpkg.set_extent(con, table, _bounds(con, table))
-        return (changed, added, deleted), (now, kept)
+        before = self.extras.get(table, set())  # a key kept for an export that left features out stays as it was
+        extras = {key for key in now if key in extras or (key in before and key not in keyed)}
+        return (changed, added, deleted), (now, kept, extras)
 
     # ------------------------------------------------------------ the link started, and the program's edits sent
     def start(self, rasters: Iterable[dict] = ()) -> dict:
@@ -1350,6 +1427,7 @@ class RustGisLink:
             self.layers, self.rasters = layers, rasters_added
             self.remember()  # right after RustGIS loaded them: an edit made there later is an edit
             self.baseline.update(one_way)
+            self.extras.update({t: set() for t in one_way})
             members = [_ref(i) for i in (*layers.values(), *rasters_added.values())]
             group = self._command("group.add", {"name": self.chunk_label, "layers": members})
             self._group = group.get("group") if isinstance(group, dict) else None
@@ -1368,52 +1446,75 @@ class RustGisLink:
     def push(self) -> int:
         """Sends RustGIS the rows of the live GeoPackage it does not have as they are: those that do not match
         :attr:`baseline` (:meth:`matches_baseline`, within :data:`TOLERANCE_M`: what came from RustGIS is never sent
-        back), and those it has that the program no longer has. One ``run`` script, one step of RustGIS's undo:
-        for each layer, ``select.byAttributes`` by ``ppg_id`` of every identity touched - every part of it: RustGIS may
-        hold several under one feature - and of the features drawn there without identity that the program has given
-        one, or deleted (found by their values, and only when nothing else there has the same), then ``edit.delete``,
-        then ``edit.addFeature`` of every row of those identities, in longitude and latitude. Deleting before adding
-        makes the script harmless to run twice: a send whose answer was lost may run when RustGIS draws again; a
-        feature added first (and selected with the others) keeps the selection from being empty, which RustGIS refuses
-        to delete. A column RustGIS's layer does not have becomes a field first. Returns the rows sent (added, or
-        deleted for good).
+        back), and those it has that the program no longer has. One ``run`` script, one step of RustGIS's undo: for each
+        layer, ``select.byAttributes`` by ``ppg_id`` of every identity touched - every part of it, RustGIS may hold
+        several under one feature, and every copy of it there (pasted, or a piece of an explode or a split) - and of the
+        features drawn there without identity that the program has given one or deleted (found by their values), then
+        ``edit.delete``, then ``edit.addFeature`` of every row of those identities, in longitude and latitude, and of
+        the copies the window has not read yet, as they were. What would take more than the features the link knows
+        there (a copy pasted, a feature drawn with the same values since the last pull) waits for the next pull, said in
+        the log. Deleting before adding makes the script harmless to run twice: a send whose answer was lost may run
+        when RustGIS draws again; a feature added first (and selected with the others, as is any such placeholder a send
+        that did not end left there) keeps the selection from being empty, which RustGIS refuses to delete. A column
+        RustGIS's layer does not have becomes a field first. Returns the rows sent (added, or deleted for good).
 
-        A layer the user removed in RustGIS is added again first, once, its rows whole (:meth:`remember` right after).
-        A send larger than one script holds goes in pieces: :attr:`pending` stays true until the last. The errors of
-        RustGIS (:class:`RustGisBusy`...) leave what RustGIS had as it was and the rows pending: the next push sends
-        them. :class:`RuntimeError` before :meth:`start`."""
+        A layer the user removed in RustGIS is added again first, once, its rows whole (:meth:`remember` right after; a
+        layer whose content cannot be known is removed and added again). A send larger than one script holds goes in
+        pieces: :attr:`pending` stays true until the last. A feature RustGIS refuses (a rule of its layer), or one no
+        script can hold, is set aside with a line in the log - not sent again until the program changes it
+        (:attr:`set_aside`) - and the send goes on without it. RustGIS's edit status is read first: an edit made there
+        meanwhile keeps :meth:`status_changed` true. The errors of RustGIS (:class:`RustGisBusy`...) leave what RustGIS
+        had as it was and the rows pending: the next push sends them. :class:`RuntimeError` before :meth:`start`."""
         if not self.layers:
             raise RuntimeError("the link has not started: start() it first")
         stamp = self._fingerprint()  # the file as it is before it is read: written later, it is sent later
         try:
-            send = self._send(self._linked())
-            answer = None
-            if send.lines:
+            before = _status_key(self._command("edit.status", {}))  # what was edited there before this send
+            fields, skipped = self._linked()
+            for _ in range(RETRIES):
+                send = self._send(fields)
+                answer = None
+                if not send.lines:
+                    break
                 try:
-                    answer = self.transport.call("run", {"script": "\n".join(send.lines)})
+                    answer = self._run(send.lines)
+                    break
                 except RustGisRefused as exc:
-                    raise RustGisRefused(f"RustGIS refused the program's edits: {_said(exc)}") from None
+                    if not self._refused(send, exc):
+                        raise RustGisRefused(f"RustGIS refused the program's edits: {_said(exc)}") from None
+            else:
+                raise RustGisRefused(f"RustGIS refused {RETRIES} sends in a row: the program's edits were not sent")
         except BaseException:
             self._owed = True
             raise
         if send.lines:
-            self._delivered(send, answer)
+            self._delivered(send, answer, before)
         self._digests.update(send.digests)
-        self._owed, self._pushed_at = send.held, stamp
+        self._owed = send.held or bool(skipped) or any(self.aside.values())
+        self._pushed_at = stamp
         return send.sent
 
     @property
     def pending(self) -> bool:
         """Whether the program may have rows RustGIS has not received: a send that did not go through (RustGIS busy,
-        an answer lost) or left rows for the next one, or the live GeoPackage written since the last send. Cheap (the
-        file's dates); :meth:`push` finds which rows, and sends nothing when none differs."""
+        an answer lost) or left rows for the next one, features set aside (:attr:`set_aside`), or the live GeoPackage
+        written since the last send. Cheap (the file's dates); :meth:`push` finds which rows, and sends nothing when
+        none differs."""
         return bool(self.layers) and (self._owed or self._fingerprint() != self._pushed_at)
+
+    @property
+    def set_aside(self) -> dict[str, list]:
+        """``{table: [identity, ...]}`` of the features no send carries until the program changes them: refused by
+        RustGIS (a rule of its layer: a domain, a constraint), too large for one script, or drawn there in a way no
+        where clause finds. Each was said in the log."""
+        return {table: sorted(marks) for table, marks in self.aside.items() if marks}
 
     def status_changed(self) -> bool:
         """Whether RustGIS's edit status (``edit.status``: per layer, the features added, modified and deleted since its
-        project was saved) is not what it was at the last look: one cheap call, to ask often. Each send ends by reading
-        it, so the program's own edits are not taken for RustGIS's. A feature edited twice there may leave it as it
-        was: a pull now and then sees those."""
+        project was saved) is not what it was at the last look: one cheap call, to ask often. A send takes the status
+        it leaves only when nothing was edited there since the last look, so the program's own edits are not taken for
+        RustGIS's and an edit made there just before a send is still seen. A feature edited twice there may leave it as
+        it was: a pull now and then sees those."""
         key = _status_key(self._command("edit.status", {}))
         changed = key != self._status
         self._status = key
@@ -1421,12 +1522,25 @@ class RustGisLink:
 
     def stop(self) -> None:
         """Forgets RustGIS's layers: nothing more is sent or asked. RustGIS keeps them, with what they have."""
-        self.layers, self.baseline, self.drawn, self.rasters = {}, {}, {}, {}
+        self.layers, self.baseline, self.drawn, self.rasters, self.extras = {}, {}, {}, {}, {}
         self._group = self._status = self._pushed_at = None
-        self._owed, self._unsure, self._digests = False, {}, {}
+        self._owed, self._unsure, self._discard, self._digests = False, {}, {}, {}
+        self.aside, self._waits = {}, set()
 
     def _command(self, command: str, params: dict):
         return self.transport.call("run_command", {"command": command, "params": params})
+
+    def _run(self, lines: list) -> dict:
+        """One script (``run``). :class:`RustGisRefused` when RustGIS says it ran fewer lines than it was sent: it runs
+        10,000 at most and drops the others without a word, so what it did is taken as nothing sent (the next send
+        repeats it, and takes away a placeholder it may have left)."""
+        answer = self.transport.call("run", {"script": "\n".join(lines)})
+        ran = answer.get("lines") if isinstance(answer, dict) else None
+        if (isinstance(ran, bool) or not isinstance(ran, int) or ran < len(lines)
+                or (isinstance(answer, dict) and answer.get("success") is False)):
+            raise RustGisRefused(f"RustGIS ran {ran} of the {len(lines)} lines of the script: nothing of it is taken "
+                                 "as done")
+        return answer
 
     def _epsg(self) -> int:
         """The EPSG code of the plan of the chunk's system, which RustGIS places the layers by. :class:`RustGisRefused`
@@ -1472,11 +1586,10 @@ class RustGisLink:
                 Path(f"{path}{suffix}").unlink(missing_ok=True)
         _one_point(source, self.crs, x, y)
         name = f"{CHECK_LAYER}-{uuid.uuid4().hex}"
-        script = "\n".join([_line("layer.addData", {"path": str(source), "name": name}),
-                            _line("share.exportLayer", {"layer": name, "path": str(out)}),
-                            _line("layer.remove", {"layer": name})])
         try:
-            self.transport.call("run", {"script": script})
+            self._run([_line("layer.addData", {"path": str(source), "name": name}),
+                       _line("share.exportLayer", {"layer": name, "path": str(out)}),
+                       _line("layer.remove", {"layer": name})])
         except RustGisRefused as exc:
             raise RustGisRefused(f"RustGIS does not take the chunk's system {system}: {_said(exc)}") from None
         try:
@@ -1539,6 +1652,12 @@ class RustGisLink:
         primary, _ = _by_key(rows)
         return {key: (row.geometry, row.values) for key, row in primary.items() if row.geometry is not None}
 
+    def _listing(self) -> tuple[dict, list]:
+        """RustGIS's layers by id (as text) and its groups, from ``list_layers``."""
+        listing = self.transport.call("list_layers", {})
+        layers = {str(l.get("id")): l for l in listing.get("layers") or [] if isinstance(l, dict)}
+        return layers, [g for g in listing.get("groups") or [] if isinstance(g, dict)]
+
     def _ours(self, layer, table: str) -> bool:
         """Whether a layer ``list_layers`` lists is RustGIS's layer of ``table``: read from the live GeoPackage, of the
         table's kind of geometry, with the identities (a field ``ppg_id``). Another project opened in RustGIS gives
@@ -1546,34 +1665,55 @@ class RustGisLink:
         return (isinstance(layer, dict) and layer.get("type") == KINDS.get(LIVE_TABLES[table][1])
                 and ID_FIELD in _fields(layer) and _same_file(layer.get("source"), self.live.path))
 
-    def _linked(self) -> dict:
+    def _require_ours(self, tables: Iterable) -> None:
+        """:class:`RustGisRefused` naming the first of ``tables`` whose layer in RustGIS is not the link's any more:
+        what it would export is not the drawings (a pull or :meth:`remember` that read it would delete them here)."""
+        layers, _ = self._listing()
+        for table in tables:
+            if not self._ours(layers.get(self.layers.get(table)), table):
+                raise RustGisRefused(f"RustGIS's layer of {table} is not the drawings' any more (removed there, or "
+                                     "another project is open in RustGIS): nothing of it is read, the next send adds "
+                                     "it again")
+
+    def _linked(self) -> tuple[dict, list]:
         """The fields of RustGIS's layer of each linked table (``{table: lower-case name -> (name, type)}``), from
-        ``list_layers``. A layer no longer there (removed in RustGIS) is added again, once: one RustGIS added without
-        its answer reaching the program is taken, never added twice. None of them there: another project is open in
-        RustGIS, or all were removed - :class:`RustGisRefused`."""
-        listing = self.transport.call("list_layers", {})
-        layers = {str(l.get("id")): l for l in listing.get("layers") or [] if isinstance(l, dict)}
+        ``list_layers``, and the tables left out of this send. A layer no longer there (removed in RustGIS) is added
+        again, once: one RustGIS added without its answer reaching the program is taken, never added twice; one whose
+        content could not be read is removed first, and while RustGIS refuses to remove it the table waits. None of them
+        there: another project is open in RustGIS, or all were removed - :class:`RustGisRefused`."""
+        layers, groups = self._listing()
         missing = [t for t, lid in self.layers.items() if not self._ours(layers.get(lid), t)]
         if missing:
             if len(missing) == len(self.layers):
                 raise RustGisRefused(f"RustGIS no longer has the layers of {self.chunk_label}: another project is open "
                                      "there, or they were removed")
-            groups = [g for g in listing.get("groups") or [] if isinstance(g, dict)]
             used = [int(k) for k in layers if k.isascii() and k.isdigit()]
-            used += [g["id"] for g in groups if isinstance(g.get("id"), int)]
+            used += [g["id"] for g in groups if isinstance(g.get("id"), int) and not isinstance(g.get("id"), bool)]
             grouped = self._group is not None and any(g.get("id") == self._group for g in groups)
             for table in missing:
                 self._again(table, layers, max(used, default=0), grouped)
-            listing = self.transport.call("list_layers", {})
-            layers = {str(l.get("id")): l for l in listing.get("layers") or [] if isinstance(l, dict)}
-        return {t: _fields(layers.get(lid)) for t, lid in self.layers.items()}
+            layers, _ = self._listing()
+        fields = {t: _fields(layers.get(lid)) for t, lid in self.layers.items() if self._ours(layers.get(lid), t)}
+        return fields, [t for t in self.layers if t not in fields]
 
     def _again(self, table: str, layers: dict, used: int, grouped: bool) -> None:
         """``table``'s layer added to RustGIS again (or the one it added when its answer was lost, found among
-        ``layers``), what it loaded remembered right after, and put in the chunk's group."""
-        title, two_way = LIVE_TABLES[table][0], table in TWO_WAY_TABLES
+        ``layers``), what it loaded remembered from its own export at once, one-way tables included - never from the
+        file, which may have changed since RustGIS read it - and put in the chunk's group. When that export cannot be
+        read the layer is removed and added again at the next send (:attr:`_discard`); while RustGIS refuses to remove
+        it the table waits, and nothing is sent to that layer."""
+        title = LIVE_TABLES[table][0]
+        doomed = self._discard.get(table)
+        if doomed is not None:
+            if self._ours(layers.get(str(doomed)), table):
+                try:
+                    self._command("layer.remove", {"layer": doomed})
+                except RustGisRefused as exc:
+                    log.warning("RustGIS link, %s: RustGIS does not remove the layer added again (%s): the table waits",
+                                table, exc)
+                    return
+            del self._discard[table]
         lid = self._adopted(table, layers)
-        rows = None if two_way else self._file_rows(table)
         if lid is None:
             try:
                 lid = _added_layer(self._command("layer.addData",
@@ -1585,19 +1725,17 @@ class RustGisLink:
         before = self.layers[table]
         self.layers[table] = str(lid)
         try:
-            if two_way:
-                self.remember([table])
-            else:
-                self.baseline[table] = rows
+            self.remember([table])
         except BaseException:
-            self.layers[table], self._unsure[table] = before, lid - 1  # it is there: the next look takes it
+            self.layers[table], self._discard[table] = before, lid  # what it holds is not known: the next send redoes
             raise
-        log.info("RustGIS's layer of %s was gone: added again", table)
+        self._digests.pop(table, None)  # a one-way table is compared row by row with that export at the next send
+        log.info("RustGIS link, %s: its layer was gone, added again", table)
         if grouped:
             try:
                 self._command("layer.group", {"layer": lid, "group": self._group})
             except RustGisRefused as exc:
-                log.warning("the layer of %s added again stays out of the chunk's group: %s", table, exc)
+                log.warning("RustGIS link, %s: the layer added again stays out of the chunk's group: %s", table, exc)
 
     def _adopted(self, table: str, layers: dict) -> int | None:
         """The layer RustGIS added for ``table`` when its answer did not reach the program: the first above the ids
@@ -1613,14 +1751,16 @@ class RustGisLink:
 
     def _send(self, fields: dict) -> _Send:
         """The next script of :meth:`push`, within what one script may hold (:data:`SCRIPT_LINES`,
-        :data:`SCRIPT_CHARS`): the two-way tables first, then the others in the order of the live GeoPackage."""
+        :data:`SCRIPT_BYTES`): the two-way tables first, then the others in the order of the live GeoPackage."""
         import pyproj
 
-        to = pyproj.Transformer.from_crs(f"EPSG:{self._epsg()}", "EPSG:4326", always_xy=True)
+        code = self._epsg()
+        to = pyproj.Transformer.from_crs(f"EPSG:{code}", "EPSG:4326", always_xy=True)
         order = list(LIVE_TABLES)
-        tables = sorted(self.layers, key=lambda t: (t not in TWO_WAY_TABLES, order.index(t)))
-        found = self._read_live(tables, self._epsg())
-        budget = _Budget(SCRIPT_LINES - 2, SCRIPT_CHARS - 64)  # what closes the script: select.clear, edit.status
+        tables = sorted(fields, key=lambda t: (t not in TWO_WAY_TABLES, order.index(t)))
+        found = self._read_live(tables, code)
+        closing = [_line("select.clear"), _line("edit.status")]
+        budget = _Budget(SCRIPT_LINES - len(closing), SCRIPT_BYTES - sum(map(_encoded, closing)))
         placeholder = f"{PLACEHOLDER}-{uuid.uuid4().hex}"
         parts, digests, held = [], {}, False
         for table in tables:
@@ -1629,18 +1769,23 @@ class RustGisLink:
             digest, types, rows = found[table]
             if rows is None:  # a one-way table RustGIS has all of
                 continue
-            part, waits = self._part(table, types, rows, fields.get(table, {}), to, budget, placeholder)
+            part, waits = self._part(table, types, rows, fields[table], to, budget, placeholder)
             held = held or waits
             if part is not None:
                 parts.append(part)
             if digest is not None and not waits:
                 digests[table] = digest
-        lines = [line for part in parts for line in part.lines]
+        lines, owners = [], []
+        for part in parts:
+            lines += part.lines
+            owners += [None if owner is None else (part.table, owner) for owner in part.owners]
         if lines:
             if parts[-1].adds:
-                lines.append(_line("select.clear"))  # the last feature added would stay selected
-            lines.append(_line("edit.status"))  # what the next status_changed compares with
-        return _Send(parts, lines, held, digests)
+                lines.append(closing[0])  # the last feature added would stay selected
+                owners.append(None)
+            lines.append(closing[1])  # what the next status_changed compares with
+            owners.append(None)
+        return _Send(parts, lines, owners, held, digests)
 
     def _read_live(self, tables: list, code: int) -> dict:
         """The linked tables of the live GeoPackage, read at one moment and let go before RustGIS is asked anything:
@@ -1668,7 +1813,7 @@ class RustGisLink:
     def _part(self, table: str, types: dict, rows: list, fields: dict, to, budget: _Budget,
               placeholder: str) -> tuple[_Part | None, bool]:
         """What a send does to the layer of ``table`` (None: nothing), and whether rows of it wait for a later send."""
-        lid, kind = _ref(self.layers[table]), KINDS[LIVE_TABLES[table][1]]
+        lid, kind, parted = _ref(self.layers[table]), KINDS[LIVE_TABLES[table][1]], PART_FIELD in types
         primary, _ = _by_key(rows)
         base = self.baseline.get(table, {})
         columns, new = {}, {}  # live column -> its field in RustGIS; the fields RustGIS's layer gets, and their types
@@ -1682,93 +1827,110 @@ class RustGisLink:
         def values_of(values: dict) -> dict:  # what RustGIS's layer can hold of a row, under its names
             return {columns[c]: v for c, v in values.items() if c in columns}
 
-        touched = {key[0] for key, row in primary.items() if row.geometry is not None
-                   and not self.matches_baseline(table, key, row.geometry, values_of(row.values))}
-        touched |= {key[0] for key in base if key not in primary}
         rows_of: dict[str, list] = {}
         for key in sorted(primary, key=lambda k: k[1]):
             rows_of.setdefault(key[0], []).append(primary[key])
-        adds = {pid: self._adds(rows_of.get(pid, []), values_of, lid, to) for pid in touched}
-        unplaced = {pid for pid, lines in adds.items() if lines is None}
+
+        def prints(pids) -> dict:  # what a feature set aside is until the program changes it
+            return {pid: _rows_print(rows_of.get(pid, [])) for pid in pids}
+
+        aside = self._kept_aside(table, rows_of)
+        touched = {key[0] for key, row in primary.items() if row.geometry is not None
+                   and not self.matches_baseline(table, key, row.geometry, values_of(row.values))}
+        touched |= {key[0] for key in base if key not in primary}
+        touched -= aside
+        groups = self._groups(table, rows, fields, touched) if table in TWO_WAY_TABLES else []
+        wanted = touched | {g.identity for g in groups if g.identity is not None}
+        adds = {pid: self._adds(rows_of.get(pid, []), values_of, lid, to) for pid in wanted}
+        unplaced = {pid for pid, made in adds.items() if made is None}
         if unplaced:
-            log.warning("%s: %d features have vertices RustGIS cannot be given: not sent", table, len(unplaced))
-        # the features drawn in RustGIS without identity that the pull brought in: replaced by their rows (which have
-        # an identity now), deleted (the program deleted them), or left as they are (not read by the window yet)
-        by_fid = {row.fid: row for row in rows}
-        groups: dict = {}
-        for drawn in self.drawn.get(table, []):
-            here = [by_fid[f] for f in drawn.fids if f in by_fid]
-            ids = {r.key[0] for r in here if r.key[0] is not None}
-            action = "delete" if not here else "replace" if ids else "keep"
-            groups.setdefault(_drawn_clause(drawn, fields), []).append((drawn, action, ids))
-        waiting, held, chosen = set(unplaced), False, {}
-        for clause, members in groups.items():
-            if all(action == "keep" for _, action, _ in members):
+            self._set_aside(table, prints(unplaced), "a vertex has no longitude and latitude")
+        waiting, held, chosen = unplaced | aside, False, []
+        for group in groups:
+            why, passes = self._group_waits(table, group, lid, fields, to, rows_of, parted, waiting)
+            if why is None:
+                chosen.append(group)
                 continue
-            ids = set().union(*(ids for _, _, ids in members))
-            back = self._put_back([d for d, action, _ in members if action == "keep"], fields, lid, to)
-            if clause is None or back is None or ids & unplaced:
-                log.warning("%s: %d features drawn in RustGIS cannot be found there by their values: they keep no "
-                            "identity there", table, len(members))
-                waiting |= ids
-            elif self._found(lid, clause) != len(members):  # others there have those values (drawn since the last
-                waiting |= ids  # look), or some are no longer as they were: after the next pull
+            waiting |= group.ids
+            if passes:
                 held = True
+                self._wait(table, group, why)
             else:
-                chosen[clause] = (members, ids, back)
-        while late := [c for c, (_, ids, _) in chosen.items() if ids & waiting]:  # sharing an identity that waits
-            for clause in late:
-                waiting |= chosen.pop(clause)[1]
+                self._set_aside(table, prints(group.ids), why)
+        while late := [g for g in chosen if g.ids & waiting]:  # features that go with others that wait
+            for group in late:
+                chosen.remove(group)
+                waiting |= group.ids
+                self._wait(table, group, "they go with features that wait")
             held = True
-        touched -= waiting
-        if not touched and not chosen:
+        grouped = set().union(*(g.ids for g in chosen))
+        sending = (touched | grouped) - waiting
+        if not sending and not chosen:
             return None, held
         first: dict = {}
         for row in rows:
             if row.key[0] is not None:
                 first.setdefault(row.key[0], row.fid)
-        group_ids = set().union(*(ids for _, ids, _ in chosen.values())) if chosen else set()
 
         def rank(pid):
             return first.get(pid, math.inf), pid
 
-        order = sorted(group_ids & touched, key=rank) + sorted(touched - group_ids, key=rank)
+        order = sorted(grouped & sending, key=rank) + sorted(sending - grouped, key=rank)
         id_name = fields.get(ID_FIELD, (ID_FIELD, ""))[0]
-        geometry, lent = self._template(order, adds, base, chosen, fields, to, kind)
+        geometry, lent, lender = self._template(order, adds, base, chosen, fields, to, kind)
         opening = _line("edit.addFeature", {"layer": lid, "geometry": geometry,
                                             "attributes": {**lent, id_name: placeholder}})
-        selecting = _line("select.byAttributes", {"layer": lid, "where": "", "mode": "add"})
+        selecting = _line("select.byAttributes", {"layer": lid, "where": LEFTOVERS, "mode": "add"})
         heads = [opening, selecting, _line("edit.delete")]
-        heads += [_line("select.byAttributes", {"layer": lid, "where": c, "mode": "add"}) for c in chosen]
+        heads += [_line("select.byAttributes", {"layer": lid, "where": g.clause, "mode": "add"})
+                  for g in chosen if g.identity is None]
         heads += [_line("edit.addField", {"layer": lid, "name": c, "type": t}) for c, t in new.items()]
         prefix = len(f"{_quoted(ID_FIELD)} IN (") + 1
-        size = prefix + len(_literal(placeholder)) + 2
-        head = (len(heads), sum(len(line) + 1 for line in heads) + size)
+        start = len(LEFTOVERS) + len(" OR ") + prefix
+        head = (len(heads), sum(map(_encoded, heads)))
+        room = (SCRIPT_LINES - 2 - head[0], SCRIPT_BYTES - 64 - head[1])  # what one script holds beside the head
         if not budget.take(*head):
             return None, True
-        taken: list[str] = []
+        size, taken = start, []
 
-        def take(pids: list, more: list = ()) -> bool:  # the identities' rows, and their names in the clauses
-            nonlocal size
-            lines, chars, now = len(more), sum(len(line) + 1 for line in more), size
+        def cost(pids: list, more: list = (), now: int | None = None) -> tuple[int, int, int]:
+            lines, nbytes, now = len(more), sum(map(_encoded, more)), size if now is None else now
             for pid in pids:
                 named = len(_literal(pid)) + 2
                 if now + named > WHERE_CHARS:  # one more select line
-                    lines, chars, now = lines + 1, chars + len(selecting) + 1, prefix
+                    lines, nbytes, now = lines + 1, nbytes + _encoded(selecting), prefix
                 now += named
                 lines += len(adds[pid])
-                chars += named + sum(len(line) + 1 for *_, line in adds[pid])
-            if not budget.take(lines, chars):
+                nbytes += named + sum(_encoded(line) for *_, line in adds[pid])
+            return lines, nbytes, now
+
+        def take(pids: list, more: list = ()) -> bool:  # the identities' rows, and their names in the clauses
+            nonlocal size
+            lines, nbytes, now = cost(pids, more)
+            if not budget.take(lines, nbytes):
                 return False
             size = now
             taken.extend(pids)
             return True
 
-        back = [line for _, _, lines in chosen.values() for line in lines]
-        if chosen and not take([pid for pid in order if pid in group_ids], back):
-            chosen, back, held = {}, [], True
+        def too_large(pids: list, more: list = ()) -> bool:  # for a script of its own
+            lines, nbytes, _ = cost(pids, more, start)
+            return lines > room[0] or nbytes > room[1]
+
+        back = [line for g in chosen for line in g.back]
+        together = [pid for pid in order if pid in grouped]
+        if chosen and not take(together, back):
+            if too_large(together, back):
+                self._set_aside(table, prints(grouped), "no script holds them")
+            else:
+                held = True
+            chosen, back = [], []
         for pid in order:
-            if pid not in group_ids and not take([pid]):
+            if pid in grouped:
+                continue
+            if too_large([pid]):
+                self._set_aside(table, prints([pid]), "no script holds it")
+            elif not take([pid]):
                 held = True
                 break
         if not taken and not chosen:
@@ -1776,19 +1938,101 @@ class RustGisLink:
             return None, held
         sent = [(row, values) for pid in taken for row, values, *_ in adds[pid]]
         used = {name for _, values in sent for name in values} | set(lent)
-        clauses = _identity_clauses([placeholder, *taken]) + list(chosen)
-        lines = [_line("edit.addField", {"layer": lid, "name": c, "type": t}) for c, t in new.items() if c in used]
-        lines.append(opening)
-        lines += [_line("select.byAttributes", {"layer": lid, "where": c, "mode": "add" if n else "new"})
-                  for n, c in enumerate(clauses)]
-        lines.append(_line("edit.delete"))
-        lines += [line for pid in taken for *_, line in adds[pid]] + back
+        lines, owners = [], []
+
+        def put(line: str, owner: dict | None = None) -> None:
+            lines.append(line)
+            owners.append(owner)
+
+        for column, kind_of in new.items():
+            if column in used:
+                put(_line("edit.addField", {"layer": lid, "name": column, "type": kind_of}))
+        put(opening, prints(lender) if lender else None)
+        for n, clause in enumerate(_identity_clauses(taken)):
+            put(_line("select.byAttributes", {"layer": lid, "where": clause, "mode": "add" if n else "new"}))
+        for group in chosen:
+            if group.identity is None:
+                put(_line("select.byAttributes", {"layer": lid, "where": group.clause, "mode": "add"}),
+                    prints(group.ids))
+        put(_line("edit.delete"))
+        for pid in taken:
+            mark = prints([pid])
+            for *_, line in adds[pid]:
+                put(line, mark)
+        for group in chosen:
+            mark = prints(group.ids)
+            for line in group.back:
+                put(line, mark)
         keys, gone = {row.key for row, _ in sent}, set(taken)
-        done = [d for members, _, _ in chosen.values() for d, action, _ in members if action != "keep"]
-        deleted = sum(1 for members, _, _ in chosen.values() for _, action, _ in members if action == "delete")
+        done = [d for g in chosen for d, action, _ in g.members if action != "keep"]
+        deleted = sum(1 for g in chosen for _, action, _ in g.members if action == "delete")
         count = len(sent) + sum(1 for key in base if key[0] in gone and key not in keys) + deleted
-        return _Part(table, lines, taken, [(row.key, row.geometry, values) for row, values in sent], done, count,
-                     bool(sent or back)), held
+        return _Part(table, lines, owners, taken, [(row.key, row.geometry, values) for row, values in sent], done,
+                     count, bool(sent or back)), held
+
+    def _groups(self, table: str, rows: list, fields: dict, touched: set) -> list:
+        """The features RustGIS has beyond the rows it was given (:attr:`drawn`) that this send must take with it: a
+        copy of identity X goes with X (``"ppg_id" IN`` takes them both), the features drawn without identity go with
+        the others that have the same values (as RustGIS compares them: one where clause takes them all). Each is
+        replaced by the rows it became here (which have an identity now), deleted (the program deleted those), or put
+        back as it was (the window has not read it yet). A group goes when X changed or one of its features is replaced
+        or deleted."""
+        by_fid = {row.fid: row for row in rows}
+        found: dict = {}
+        for drawn in self.drawn.get(table, []):
+            here = [by_fid[f] for f in drawn.fids if f in by_fid]
+            ids = {r.key[0] for r in here if r.key[0] is not None}
+            action = "delete" if not here else "replace" if ids else "keep"
+            pid = _identity(drawn.values)
+            if pid is not None:
+                key = ("copies", pid)
+                clause = f"{_quoted(fields.get(ID_FIELD, (ID_FIELD, ''))[0])} = {_literal(pid)}"
+            else:
+                clause = _drawn_clause(drawn, fields)
+                key = ("values", None if clause is None else _fold(clause))
+            group = found.setdefault(key, _Group(pid, clause, [], set()))
+            group.members.append((drawn, action, ids))
+            group.ids |= ids
+        out = []
+        for group in found.values():
+            moving = any(action != "keep" for _, action, _ in group.members)
+            if group.identity is not None:
+                if not moving and group.identity not in touched:
+                    continue  # the copies stay as they are, and so does what they copy
+                group.ids.add(group.identity)
+            elif not moving:
+                continue
+            out.append(group)
+        return out
+
+    def _group_waits(self, table: str, group: _Group, lid, fields: dict, to, rows_of: dict, parted: bool,
+                     waiting: set) -> tuple[str | None, bool]:
+        """Why ``group`` cannot go with this send (None: it goes, its lines putting back what stays made in
+        ``group.back``), and whether that passes by itself - after the next pull - or sets its features aside."""
+        if group.ids & waiting:
+            return "they go with features set aside", False
+        if group.clause is None:
+            return "no where clause RustGIS reads finds them", False
+        back = self._put_back([d for d, action, _ in group.members if action == "keep"], fields, lid, to)
+        if back is None:
+            return "they cannot be put back as they were", False
+        if group.identity is not None:
+            sent = {row.key for row in rows_of.get(group.identity, []) if row.geometry is not None}
+            if any(action == "keep" and (group.identity, _part_of(d.values, parted)) not in sent
+                   for d, action, _ in group.members):  # put back under a part the program no longer sends
+                return "a copy the window has not read yet copies a part the program no longer has", True
+        expected = len(group.members) + (self._features_of(table, group.identity) if group.identity else 0)
+        there = self._count(lid, group.clause)
+        if there != expected:
+            return f"RustGIS has {there} of these features, the link knows {expected}", True
+        group.back = back
+        return None, False
+
+    def _features_of(self, table: str, pid: str) -> int:
+        """How many features RustGIS had under identity ``pid`` at the last look, its copies left out: the keys of the
+        baseline, but one for a feature of several polygons."""
+        extras = self.extras.get(table, set())
+        return sum(1 for key in self.baseline.get(table, {}) if key[0] == pid and key not in extras)
 
     @staticmethod
     def _adds(rows: list, values_of, lid, to) -> list | None:
@@ -1809,8 +2053,8 @@ class RustGisLink:
 
     @staticmethod
     def _put_back(drawn: list, fields: dict, lid, to) -> list | None:
-        """Lines that add again, as RustGIS had them at the last look, features drawn there that a where clause takes
-        with the ones a send replaces. None when one cannot be."""
+        """Lines that add again, as RustGIS had them at the last look, features a send takes with the ones it replaces
+        (a copy, or one drawn with the same values, the window has not read yet). None when one cannot be."""
         from shapely.geometry import MultiPolygon
 
         out = []
@@ -1828,27 +2072,34 @@ class RustGisLink:
         return out
 
     @staticmethod
-    def _template(order: list, adds: dict, base: dict, chosen: dict, fields: dict, to, kind: str) -> tuple:
-        """The geometry and values of the feature a part adds first, so that its selection is never empty: those of a
-        feature it adds - RustGIS's rules of the layer (constraints, domains) take it as they take that one -, else of
-        one it deletes as RustGIS had it, else a speck far from any drawing."""
+    def _template(order: list, adds: dict, base: dict, chosen: list, fields: dict, to, kind: str) -> tuple:
+        """The geometry, values and owners (the identities it copies) of the feature a part adds first, so that its
+        selection is never empty: those of the smallest feature it adds - RustGIS's rules of the layer (constraints,
+        domains) take it as they take that one -, else of one it deletes as RustGIS had it, else a speck far from any
+        drawing. A geometry too large for a placeholder is the speck's."""
+        best = None
         for pid in order:
-            if adds.get(pid):
-                _, values, geojson, _ = adds[pid][0]
-                return geojson, values
-        touched = set(order)
-        candidates = (had for key, had in base.items() if key[0] in touched)
-        drawn = ((d.parts[0], d.values) for members, _, _ in chosen.values() for d, _, _ in members if d.parts)
-        for geometry, values in itertools.chain(candidates, drawn):
+            for _, values, geojson, line in adds.get(pid) or []:
+                if best is None or _encoded(line) < best[0]:
+                    best = (_encoded(line), geojson, values, [pid])
+        if best is not None:
+            size, geojson, values, lender = best
+            return (geojson if size <= TEMPLATE_BYTES else _NOWHERE[kind]), values, lender
+        sending = set(order)
+        candidates = ((had, [key[0]]) for key, had in base.items() if key[0] in sending)
+        drawn = (((d.parts[0], d.values), sorted(g.ids)) for g in chosen for d, _, _ in g.members if d.parts)
+        for (geometry, values), lender in itertools.chain(candidates, drawn):
             try:
                 geojson = _lonlat(geometry, to)
             except (ValueError, TypeError, AttributeError):
                 continue
-            return geojson, {fields[str(k).lower()][0]: v for k, v in values.items()
-                             if v is not None and str(k).lower() in fields and not isinstance(v, bytes)}
-        return _NOWHERE[kind], {}
+            kept = {fields[str(k).lower()][0]: v for k, v in values.items()
+                    if v is not None and str(k).lower() in fields and not isinstance(v, bytes)}
+            small = len(json.dumps(geojson)) <= TEMPLATE_BYTES
+            return (geojson if small else _NOWHERE[kind]), kept, lender
+        return _NOWHERE[kind], {}, None
 
-    def _found(self, layer, clause: str) -> int:
+    def _count(self, layer, clause: str) -> int:
         """How many features of ``layer`` RustGIS finds by ``clause``; -1 when it does not say."""
         try:
             answer = self.transport.call("read_features", {"layer": layer, "where": clause, "limit": 1,
@@ -1858,26 +2109,65 @@ class RustGisLink:
         matched = answer.get("matched")
         return matched if isinstance(matched, int) and not isinstance(matched, bool) else -1
 
-    def _delivered(self, send: _Send, answer) -> None:
-        """What RustGIS has once a send ran: the rows it was given (the baseline of every identity sent is those),
-        the features drawn there that the send replaced or deleted forgotten, and its edit status as it ended."""
+    def _refused(self, send: _Send, exc: RustGisRefused) -> bool:
+        """Sets aside the features of the line RustGIS refused (a rule of its layer: a domain, a constraint; a
+        geometry it does not take), so that the send goes again without them. False when the line is about no
+        feature (the send then fails as it is)."""
+        number = _line_number(exc)
+        if number is None or not 1 <= number <= len(send.owners) or send.owners[number - 1] is None:
+            return False
+        table, marks = send.owners[number - 1]
+        self._set_aside(table, marks, _said(exc))
+        return True
+
+    def _set_aside(self, table: str, marks: dict, why: str) -> None:
+        if marks:
+            self.aside.setdefault(table, {}).update(marks)
+            log.warning("RustGIS link, %s: %s set aside, not sent until the program changes it: %s", table,
+                        ", ".join(sorted(marks)), why)
+
+    def _kept_aside(self, table: str, rows_of: dict) -> set:
+        """The identities of ``table`` still set aside: one whose rows the program changed since goes again."""
+        marks = self.aside.get(table)
+        if not marks:
+            return set()
+        for pid, mark in list(marks.items()):
+            if _rows_print(rows_of.get(pid, [])) != mark:
+                del marks[pid]
+                log.info("RustGIS link, %s: %s changed in the program, sent again", table, pid)
+        return set(marks)
+
+    def _wait(self, table: str, group: _Group, why: str) -> None:
+        """A line in the log for features that wait for the next pull (once for the same features and reason)."""
+        what = group.identity or f"{len(group.members)} features drawn in RustGIS with the same values"
+        said = (table, what, why)
+        if said not in self._waits:
+            self._waits.add(said)
+            log.warning("RustGIS link, %s: %s wait for the next pull: %s", table, what, why)
+
+    def _delivered(self, send: _Send, answer, before) -> None:
+        """What RustGIS has once a send ran: the rows it was given (the baseline of every identity sent is those, each
+        a feature of its own), the features it had beyond them that the send replaced or deleted forgotten, and - when
+        nothing was edited there since the last look (``before``) - its edit status as the send left it."""
         for part in send.parts:
             base = self.baseline.setdefault(part.table, {})
+            extras = self.extras.setdefault(part.table, set())
             sent = set(part.identities)
             for key in [k for k in base if k[0] in sent]:
                 del base[key]
+            extras.difference_update([k for k in extras if k[0] in sent])
             for key, geometry, values in part.rows:
                 base[key] = normalize(geometry, values)
             if part.drawn:
                 self.drawn[part.table] = [d for d in self.drawn.get(part.table, [])
                                           if not any(d is x for x in part.drawn)]
-        result = answer.get("result") if isinstance(answer, dict) else None
-        if isinstance(result, dict):
-            self._status = _status_key(result)
+        end = answer.get("result") if isinstance(answer, dict) else None
+        if isinstance(end, dict) and before == self._status:
+            self._status = _status_key(end)
 
 
 __all__ = ["find_rustgis", "open_app", "settings_dir", "token_dir", "endpoint", "too_old", "HttpTransport",
            "StdioTransport", "RustGisInstall", "Endpoint", "RustGisError", "RustGisOff", "RustGisBusy",
            "RustGisRefused", "RustGisTooOld", "RustGisLink", "Drawn", "normalize", "MIN_VERSION", "HTTP_PORT",
            "TOKEN_FILE", "ENDPOINT_FILE", "RASTER_SAMPLES", "TOLERANCE_M", "BUSY_CODES", "SCRATCH_DIR", "SCRIPT_LINES",
-           "SCRIPT_CHARS", "WHERE_CHARS"]
+           "SCRIPT_BYTES", "WHERE_CHARS", "PLACEHOLDER"]
