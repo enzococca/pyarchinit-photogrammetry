@@ -49,6 +49,7 @@ import os
 import queue
 import re
 import secrets
+import select
 import shutil
 import socket
 import socketserver
@@ -63,6 +64,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import warnings
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -72,6 +74,7 @@ from pathlib import Path
 from .. import __version__
 from ..updates import bundle_version, version_key
 from . import gpkg
+from .files import replace_file
 from .qgis_link import (ID_FIELD, LIVE_TABLES, PART_FIELD, TECHNICAL_FIELDS, TWO_WAY_TABLES, LiveLink, _affinity,
                         _bind, _bounds, _sql_type, new_id)
 
@@ -155,11 +158,12 @@ def too_old(version: str | None) -> bool:
 
 def _find_app() -> tuple[Path | None, str | None]:
     """The app and, where the system keeps it, its version: macOS ``/Applications/RustGIS.app``, then the one in
-    ``~/Applications`` (the version is the bundle's); Windows the folders of its installers; Linux ``rustgis`` on the
-    PATH."""
+    ``~/Applications`` (``HOME``, as RustGIS reads it; the version is the bundle's); Windows the folders of its
+    installers; Linux ``rustgis`` on the PATH."""
     system = _platform()
     if system == "darwin":
-        for folder in (APPLICATIONS, Path(os.path.expanduser("~/Applications"))):
+        home = _env("HOME") or os.path.expanduser("~")  # never USERPROFILE, which expanduser reads on Windows
+        for folder in (APPLICATIONS, Path(home) / "Applications"):
             if (folder / "RustGIS.app").is_dir():
                 return folder / "RustGIS.app", bundle_version(folder / "RustGIS.app")
         return None, None
@@ -602,21 +606,28 @@ def raster_route(path: Path) -> str:
     * ``"copy"``: neither - a GeoTIFF compressed as RustGIS does not decode (WebP, LERC, LZMA...), or any other format:
       RustGIS refuses a VRT, draws a PNG without its world file, and reads a JPEG 2000, an ERDAS IMG and the other
       formats of GDAL only through GDAL's tools, which an app started from the Finder does not find on its PATH. A
-      GeoTIFF copy it reads goes in its place (:meth:`RustGisLink.start`)."""
+      GeoTIFF copy it reads goes in its place (:meth:`RustGisLink.start`);
+    * ``"refused"``: a dataset with no band of its own - a file that holds several rasters, which GDAL opens as their
+      container (a GeoPackage of two raster tables: its subdatasets name them): nothing RustGIS could draw.
+      :meth:`RustGisLink.start` leaves it out, saying what the file holds (:func:`_no_band`)."""
     import rasterio
     from rasterio.enums import ColorInterp
-    from rasterio.errors import RasterioError
+    from rasterio.errors import NotGeoreferencedWarning, RasterioError
 
     try:
-        with rasterio.open(path) as src:
-            samples = src.width * src.height * src.count
-            structure = src.tags(ns="IMAGE_STRUCTURE")
-            driver, tiled, types = src.driver, bool(src.profile.get("tiled")), set(src.dtypes)
-            palette = src.colorinterp[0] == ColorInterp.palette
-        internal = False
-        if driver == "GTiff" and samples > RASTER_SAMPLES:  # an .ovr beside it is not counted: never served
-            with rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR"), rasterio.open(path) as src:
-                internal = bool(src.overviews(1))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", NotGeoreferencedWarning)  # where it is drawn is RustGIS's business
+            with rasterio.open(path) as src:
+                if src.count == 0:  # a container of rasters (its subdatasets): no band to give
+                    return "refused"
+                samples = src.width * src.height * src.count
+                structure = src.tags(ns="IMAGE_STRUCTURE")
+                driver, tiled, types = src.driver, bool(src.profile.get("tiled")), set(src.dtypes)
+                palette = src.colorinterp[0] == ColorInterp.palette
+            internal = False
+            if driver == "GTiff" and samples > RASTER_SAMPLES:  # an .ovr beside it is not counted: never served
+                with rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR"), rasterio.open(path) as src:
+                    internal = bool(src.overviews(1))
     except (OSError, RasterioError):
         return "file"
     if len(types) != 1 or "complex" in next(iter(types)):  # no copy of these: RustGIS says what it makes of them
@@ -629,6 +640,30 @@ def raster_route(path: Path) -> str:
     if samples <= RASTER_SAMPLES or palette or structure.get("SOURCE_COLOR_SPACE") or not tiled or not internal:
         return "file"  # whole; or from an overview: a palette, YCbCr (or CMYK) pixels, strips, no internal overviews
     return "url"
+
+
+class _NothingToGive(ValueError):
+    """A raster the link itself leaves out, saying why (:func:`_no_band`): :meth:`RustGisLink.start` puts the reason
+    in ``"refused"``, a refusal and not an error of the program."""
+
+
+def _no_band(path: Path) -> str:
+    """Why the dataset at ``path`` is refused: it has no band of its own, holding other rasters instead (its
+    subdatasets, as GDAL names them, the first few) or nothing GDAL names."""
+    import rasterio
+    from rasterio.errors import NotGeoreferencedWarning
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", NotGeoreferencedWarning)
+            with rasterio.open(path) as src:
+                inside = list(src.subdatasets)
+    except Exception:
+        inside = []
+    if not inside:
+        return "it has no raster band of its own"
+    shown = ", ".join(inside[:4]) + (f", ... ({len(inside)} in all)" if len(inside) > 4 else "")
+    return f"it has no raster band of its own: it holds {len(inside)} rasters ({shown}); give one of them"
 
 
 def _copy_profile(src) -> tuple[dict, bool, dict | None]:
@@ -704,7 +739,7 @@ def _write_copy(source: Path, target: Path) -> None:
                 factors = [f for f in (2 ** n for n in range(1, 16)) if min(src.width, src.height) // f >= 64]
                 if factors:
                     dst.build_overviews(factors, Resampling.nearest if palette is not None else Resampling.average)
-            os.replace(temporary, target)
+            replace_file(temporary, target)
         except BaseException:
             temporary.unlink(missing_ok=True)
             raise
@@ -793,13 +828,16 @@ def _osfhandle(handle: int) -> int:
 
 def _open_on_windows(path: Path) -> int | None:
     """``path`` opened for reading on Windows, as a file descriptor, shared with every other opening - read, write and
-    delete: while RustGIS reads a tile of a product, the program may replace it (``os.replace``) or delete it, which a
-    file opened as Python opens it would forbid. Never through a name surrogate put where the file was (a symbolic
-    link, a junction: refused, as ``O_NOFOLLOW`` refuses a link elsewhere); the other reparse points are files
-    themselves (deduplicated, tiered, a OneDrive or Dropbox placeholder), opened again without
-    FILE_FLAG_OPEN_REPARSE_POINT - as CPython's lstat and Rust's std draw the line - and kept only when that opening is
-    the same file (volume serial number and file index). Every handle not handed to the descriptor is closed, once.
-    None when it cannot be opened so."""
+    delete: while RustGIS reads a tile of a product, the program may put the product rebuilt in its place
+    (:func:`.files.replace_file`: a rename with POSIX semantics, which a handle that does not share the file's
+    deletion would stop) or delete it, which a file opened as Python opens it would forbid. Its attributes and
+    identity are read from the handle (BY_HANDLE_FILE_INFORMATION; not readable: refused). Never through a name
+    surrogate put where the file was (a symbolic link, a junction: refused, as ``O_NOFOLLOW`` refuses a link
+    elsewhere); the other reparse points are files themselves (deduplicated, tiered, a OneDrive or Dropbox
+    placeholder), opened again without FILE_FLAG_OPEN_REPARSE_POINT - as CPython's lstat and Rust's std draw the line,
+    asking the reparse tag only of a reparse point and refusing one whose tag cannot be read - and kept only when that
+    opening is the same file (volume serial number and file index). Every handle not handed to the descriptor is
+    closed, once. None when it cannot be opened so."""
     import ctypes
 
     class TagInformation(ctypes.Structure):  # FILE_ATTRIBUTE_TAG_INFO
@@ -817,28 +855,38 @@ def _open_on_windows(path: Path) -> int | None:
                                       flags, None)
         return None if not handle or handle == ctypes.c_void_p(-1).value else handle  # INVALID_HANDLE_VALUE
 
-    def file_of(handle):
+    def informed(handle):
+        """The attributes of ``handle``'s file and its (volume serial number, file index high, low); None when they
+        cannot be read."""
         information = FileInformation()
         if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(information)):
             return None
-        return information.volume, information.index_high, information.index_low
+        return information.attributes, (information.volume, information.index_high, information.index_low)
+
+    def tag_of(handle):
+        """The reparse tag of ``handle``'s file (FileAttributeTagInfo); None when it cannot be read."""
+        tag = TagInformation()
+        if not kernel32.GetFileInformationByHandleEx(handle, _WINDOWS_ATTRIBUTE_TAG_INFO, ctypes.byref(tag),
+                                                     ctypes.sizeof(tag)):
+            return None
+        return tag.reparse_tag
 
     first = opened(_WINDOWS_OPEN_REPARSE_POINT)
     if first is None:
         return None
     kept = None
     try:
-        tag = TagInformation()
-        if kernel32.GetFileInformationByHandleEx(first, _WINDOWS_ATTRIBUTE_TAG_INFO, ctypes.byref(tag),
-                                                 ctypes.sizeof(tag)):
-            if not tag.attributes & _WINDOWS_REPARSE_POINT:
-                kept, first = first, None  # a plain file
-            elif not tag.reparse_tag & _WINDOWS_NAME_SURROGATE:  # a file itself: opened again, the same file kept
+        known = informed(first)
+        if known is not None and not known[0] & _WINDOWS_REPARSE_POINT:
+            kept, first = first, None  # a plain file
+        elif known is not None:
+            tag = tag_of(first)
+            if tag is not None and not tag & _WINDOWS_NAME_SURROGATE:  # a file itself: opened again, the same kept
                 second = opened(0)
                 if second is not None:
                     try:
-                        known = file_of(first)
-                        if known is not None and file_of(second) == known:
+                        again = informed(second)
+                        if again is not None and again[1] == known[1]:
                             kept, second = second, None
                     finally:
                         if second is not None:
@@ -857,8 +905,9 @@ def _open_on_windows(path: Path) -> int | None:
 
 def _open_regular(path: Path):
     """``path`` opened for reading (unbuffered) when it is a regular file now, else None: never through a link put
-    where the file was since it was given (``O_NOFOLLOW``; on Windows a reparse point, :func:`_open_on_windows`, which
-    also lets the program replace or delete the file while it is read), and without waiting on a pipe put there
+    where the file was since it was given (``O_NOFOLLOW``; on Windows a name surrogate among the reparse points,
+    :func:`_open_on_windows`, which also lets the program put a product rebuilt in the file's place
+    (:func:`.files.replace_file`) or delete it while it is read), and without waiting on a pipe put there
     (``O_NONBLOCK``: nothing for a regular file)."""
     try:
         if _platform() == "win32":
@@ -878,17 +927,53 @@ def _open_regular(path: Path):
     return None
 
 
+def _end_connection(connection: socket.socket) -> None:
+    """A connection of the raster server shut down for reading and writing, under the thread serving it, when the
+    server closes: where the system ends a blocked call so (POSIX: the thread's receive, waiting for the next request,
+    ends with nothing; its send to a reader that takes nothing, with a broken pipe) the thread finishes at once;
+    elsewhere (Windows leaves such calls blocked) within :attr:`RasterServer.STEP`, as the thread watches the server
+    (:meth:`_RasterRequest.handle`). Never closed under the thread: on BSD systems closing a file another thread polls
+    drops that thread's wait without waking it (seen on macOS: the thread sat out its whole timeout)."""
+    try:
+        connection.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
 class _RasterRequest(BaseHTTPRequestHandler):
     """A connection to a :class:`RasterServer`: GET and HEAD of the files given to it, whole or by one byte range,
-    with ``Accept-Ranges: bytes`` and the length; anything else is not found."""
+    with ``Accept-Ranges: bytes`` and the length; anything else is not found. The connection is kept for the next
+    request (RustGIS reads a tile at a time) and watched :attr:`RasterServer.STEP` at a time - between requests, and
+    while an answer waits for a reader that takes none of it - so that the thread serving it ends by itself, on every
+    system, when the server closes, and when the reader has sent or taken nothing for :attr:`RasterServer.TIMEOUT`."""
 
-    protocol_version = "HTTP/1.1"  # the connection kept for the next request: RustGIS reads a tile at a time
+    protocol_version = "HTTP/1.1"
     server_version = "pyarchinit-photogrammetry"
     sys_version = ""
+    rbufsize = 0  # a request read as it comes, nothing read ahead: the wait for the next one watches the socket
 
     def setup(self) -> None:
-        self.timeout = self.server.TIMEOUT
+        self.timeout = self.server.STEP  # a read or a send blocks STEP at most
         super().setup()
+
+    def handle(self) -> None:
+        self.close_connection = True
+        while self._next_request():
+            self.handle_one_request()
+            if self.close_connection:
+                return
+
+    def _next_request(self) -> bool:
+        """Whether a request, or the end of the connection, has come: waited for STEP at a time, up to TIMEOUT, unless
+        the server closes meanwhile."""
+        deadline = time.monotonic() + self.server.TIMEOUT
+        while not self.server.closing and time.monotonic() < deadline:
+            try:
+                if select.select([self.connection], [], [], self.server.STEP)[0]:
+                    return True
+            except (OSError, ValueError):  # the socket ended under the thread: the request finds its end
+                return True
+        return False
 
     def log_message(self, format, *args) -> None:  # noqa: A002 - quiet: nothing about the requests on stderr
         pass
@@ -935,18 +1020,26 @@ class _RasterRequest(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _copy(self, handle, first: int, count: int) -> None:
-        """``count`` bytes of the file from ``first`` to the reader, :attr:`RasterServer.CHUNK` at a time: a raster may
-        be gigabytes, never read whole. A file that got shorter meanwhile, or a reader gone (RustGIS drops a read it no
-        longer needs), ends the connection with the answer cut."""
+        """``count`` bytes of the file from ``first`` to the reader, :attr:`RasterServer.CHUNK` read at a time and
+        sent as the reader takes them, waited for STEP at a time: a raster may be gigabytes, never read whole. A file
+        that got shorter meanwhile, a reader gone (RustGIS drops a read it no longer needs) or one that takes nothing
+        for TIMEOUT, and the server closing, end the connection with the answer cut."""
         left = count
         try:
             handle.seek(first)
-            while left > 0:
-                data = handle.read(min(self.server.CHUNK, left))
+            while left > 0 and not self.server.closing:
+                data = memoryview(handle.read(min(self.server.CHUNK, left)))
                 if not data:
                     break
-                self.wfile.write(data)
-                left -= len(data)
+                taken = time.monotonic()
+                while data and not self.server.closing:
+                    try:
+                        sent = self.connection.send(data)
+                    except TimeoutError:  # nothing taken for STEP: the reader is busy, or gone quiet
+                        if time.monotonic() - taken > self.server.TIMEOUT:
+                            raise
+                        continue
+                    data, left, taken = data[sent:], left - sent, time.monotonic()
         except OSError:
             left = left or 1
         if left:
@@ -967,9 +1060,11 @@ class RasterServer(ThreadingHTTPServer):
 
     daemon_threads = True
     allow_reuse_address = False  # a port of its own: on Windows another program could take one that allows reuse
-    CHUNK = 1 << 20  # bytes read and sent at a time
-    TIMEOUT = 300.0  # seconds a connection waits for its next request: longer than readers keep one idle
+    CHUNK = 1 << 20  # bytes read at a time
+    TIMEOUT = 300.0  # seconds a connection waits for its next request, or an answer for a reader that takes none
+    STEP = 0.5  # seconds a thread waits at a time, between which it sees the server close
     CONNECTIONS = 32  # connections served at once: each holds a thread
+    CLOSE_WAIT = 5.0  # seconds close() waits for the threads of the connections (they end within STEP)
 
     def __init__(self) -> None:
         self.prefix = secrets.token_hex(16)
@@ -991,6 +1086,11 @@ class RasterServer(ThreadingHTTPServer):
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
+
+    @property
+    def closing(self) -> bool:
+        """Whether :meth:`close` was called: the threads serving connections end at their next step."""
+        return self._closed
 
     def url(self, path: Path) -> str:
         """The address of the file at ``path`` as it is now (a link given names the file it points to, resolved now), a
@@ -1041,8 +1141,10 @@ class RasterServer(ThreadingHTTPServer):
         log.debug("RustGIS raster server: a connection ended: %s", sys.exc_info()[1])
 
     def close(self) -> None:
-        """Stops serving: no address answers any more, the connections still open (kept for a next request) are ended
-        and their threads let finish, and the server's thread is joined. Harmless a second time."""
+        """Stops serving: no address answers any more, the connections still open - kept for a next request, or in
+        the middle of an answer a reader stopped taking - are shut down (:func:`_end_connection`) and their threads,
+        which watch the server :attr:`STEP` at a time, let finish (:attr:`CLOSE_WAIT` at most), and the server's
+        thread is joined. Harmless a second time."""
         with self._lock:
             if self._closed:
                 return
@@ -1052,12 +1154,11 @@ class RasterServer(ThreadingHTTPServer):
         with self._lock:
             still = list(self._open)
         for request in still:
-            try:
-                request.shutdown(socket.SHUT_RDWR)  # a connection waiting for its next request ends at once
-            except OSError:
-                pass
+            _end_connection(request)
         with self._lock:
-            self._lock.wait_for(lambda: not self._open, timeout=5)
+            if not self._lock.wait_for(lambda: not self._open, timeout=self.CLOSE_WAIT):
+                log.debug("RustGIS raster server: %d connections did not end in %.0f s", len(self._open),
+                          self.CLOSE_WAIT)
         self.server_close()
         self.thread.join()
 
@@ -1938,8 +2039,9 @@ class RustGisLink:
         range, the tiles of the overview each part of its view needs, down to full resolution - a tile layer there,
         drawn under its layers and in no group (RustGIS groups only layers); in the place of one RustGIS cannot read as
         it is, a copy it reads. Those given hidden are hidden, so that a DEM does not cover the orthophoto
-        (:meth:`_show`). Each is in :attr:`rasters`; one RustGIS refuses, or that fails on its own (a file gone, no
-        room on the disk for the copy of one RustGIS cannot read, an error of its routing or its copy), is left out and
+        (:meth:`_show`). Each is in :attr:`rasters`; one RustGIS refuses, or that fails on its own (a file gone, a
+        dataset without a band of its own, no room on the disk for the copy of one RustGIS cannot read, an error of
+        its routing or its copy), is left out and
         said in ``"refused"`` (by name; a second of the same name as ``"name (2)"``) - only RustGIS's own failures
         (busy, off) end the start. Then every table of :data:`.qgis_link.LIVE_TABLES` from the live GeoPackage (empty
         ones too: the units are drawn in RustGIS on a chunk that has none) named as in QGIS, above the rasters, all in
@@ -1974,7 +2076,7 @@ class RustGisLink:
                 except RustGisError:  # RustGIS busy, off, or answering what no tool gives: the start fails
                     raise
                 except Exception as exc:  # this raster alone: gone, no room or no copy, no server, an exotic raster
-                    expected = isinstance(exc, (OSError, RasterioError))
+                    expected = isinstance(exc, (OSError, RasterioError, _NothingToGive))
                     log.warning("The raster %s cannot be given to RustGIS: %s", entry.name, exc, exc_info=not expected)
                     refused[_unused(refused, entry.name)] = str(exc) or type(exc).__name__
                     continue
@@ -2342,6 +2444,8 @@ class RustGisLink:
         when small or a palette, else by its address - and what RustGIS made of it written into ``entry``: its layer,
         or the address of its tile layer."""
         route, given = raster_route(entry.path), entry.path
+        if route == "refused":
+            raise _NothingToGive(_no_band(entry.path))
         if route == "copy":
             entry.copy = given = self._copy_for(entry.path)
             route = "url" if raster_route(given) == "url" else "file"

@@ -183,8 +183,8 @@ def test_the_crash_log_never_stops_the_start(tmp_path, monkeypatch):
     # them, the warning that came before the segmentation faults of 21-23 October 2026)
     monkeypatch.setattr(sys, "excepthook", sys.excepthook)
     monkeypatch.setattr(threading, "excepthook", threading.excepthook)
-    root = logging.getLogger()
-    before = list(root.handlers)
+    root, package = logging.getLogger(), logging.getLogger("pyarchinit_photogrammetry")
+    before, level = list(root.handlers), package.level
     try:
         path = logging_setup.install()
         assert path == tmp_path / "ppg-gui.log" and logging_setup._state["crash_file"] is None
@@ -197,6 +197,7 @@ def test_the_crash_log_never_stops_the_start(tmp_path, monkeypatch):
             if h not in before:
                 root.removeHandler(h)
                 h.close()
+        package.setLevel(level)  # install() set it to INFO: the tests after would lose their debug records
     import ppg_launcher
 
     assert ppg_launcher.crash_log() is False and ppg_launcher._crash_file is None

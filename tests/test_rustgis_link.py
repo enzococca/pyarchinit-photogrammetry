@@ -564,7 +564,10 @@ def test_a_rustgis_that_stays_silent_is_busy_and_may_still_run_the_call(fake_rus
 
 def test_the_token_never_reaches_the_log(fake_rustgis, caplog):
     fake = fake_rustgis
-    caplog.set_level(logging.DEBUG)
+    # the link's own logger, explicitly: the window's logging setup (gui/logging_setup.install, run by an earlier test
+    # of the suite) leaves the package's logger at INFO, under which the root logger caplog sets would get no debug
+    # record of the transport
+    caplog.set_level(logging.DEBUG, logger=link.log.name)
     # a RustGIS that quotes in its refusal the header of the request that offended it
     fake.replies["no"] = lambda request: {"result": {"isError": True, "content": [
         {"type": "text", "text": "refused: " + request["headers"]["authorization"]}]}}
@@ -605,6 +608,10 @@ def _bundle(path: Path, version: str) -> Path:
 
 
 def _program(path: Path) -> Path:
+    """An executable at ``path``: on Windows, where a program on the PATH is looked for by the extensions of PATHEXT
+    (shutil.which), with ``.exe``."""
+    if sys.platform == "win32" and not path.suffix:
+        path = path.with_suffix(".exe")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("#!/bin/sh\n")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
@@ -2594,6 +2601,20 @@ def _two_tone(path: Path, count: int = 3, side: int = 256, crs: str = GB, x0: fl
     return path
 
 
+def _two_tables(path: Path) -> Path:
+    """A GeoPackage of two raster tables: GDAL opens the file as their container, with no band of its own (its
+    subdatasets name them)."""
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    for name, value, more in (("alfa", 7, {}), ("beta", 9, {"APPEND_SUBDATASET": "YES"})):
+        with rasterio.open(path, "w", driver="GPKG", width=64, height=64, count=1, dtype="uint8", crs=GB,
+                           transform=from_origin(GX, GY + 64, 1, 1), RASTER_TABLE=name, **more) as dst:
+            dst.write(np.full((1, 64, 64), value, np.uint8))
+    return path
+
+
 def _small_dem(path: Path, side: int = 100, crs: str = GB, x0: float = GX, y0: float = GY, pixel: float = 0.1) -> Path:
     """A small float DEM (heights from 99 to 101) RustGIS loads whole."""
     import numpy as np
@@ -2712,6 +2733,8 @@ def test_raster_route(tmp_path):
     (tmp_path / "rotto.tif").write_bytes(b"not a raster")
     assert link.raster_route(tmp_path / "rotto.tif") == "file"
     assert link.raster_route(tmp_path / "manca.tif") == "file"
+    # a file that holds rasters but has no band of its own (a GeoPackage of two raster tables): nothing to give
+    assert link.raster_route(_two_tables(tmp_path / "due.gpkg")) == "refused"
 
 
 def test_the_server_answers_ranges(tmp_path, monkeypatch, capfd):
@@ -2722,8 +2745,8 @@ def test_the_server_answers_ranges(tmp_path, monkeypatch, capfd):
     climbing out of it, a file's own name, another host, a link put where the file was, the file written again or
     changed in place since its address was given. It reads a few bytes at a time, keeps a connection for the next
     request, serves at most CONNECTIONS at once (one more is closed at once), says nothing on stderr (a reader gone in
-    the middle of an answer included), and close() stops it - a connection still open included - and joins its
-    thread."""
+    the middle of an answer included), and close() stops it, itself ending a connection kept open for a next request
+    and one whose reader stopped taking the answer, and joins its thread."""
     monkeypatch.setattr(link.RasterServer, "CHUNK", 7)  # several reads for every answer
     monkeypatch.setattr(link.RasterServer, "CONNECTIONS", 4)
     data = bytes(range(256)) * 4
@@ -2735,6 +2758,7 @@ def test_the_server_answers_ranges(tmp_path, monkeypatch, capfd):
     port = server.server_address[1]
     kept = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     idle: list = []
+    stuck = None
     try:
         assert server.server_address[0] == "127.0.0.1" and server.thread.daemon
         address = server.url(raster)
@@ -2826,14 +2850,18 @@ def test_the_server_answers_ranges(tmp_path, monkeypatch, capfd):
         reader.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))  # a reset, not a goodbye
         reader.close()
         assert _http(port, path, headers={"Range": "bytes=0-9"})[2] == data[:10]
+        # a reader that stops taking an answer (RustGIS busy): the thread serving it is blocked in a send
+        stuck = _stuck_reader(server, tmp_path / "enorme.tif")
+        assert _waited(lambda: len(server._open) == 2)  # the one kept, the one stuck
     finally:
-        began = time.monotonic()
         server.close()
-        took = time.monotonic() - began
+        left = list(server._open)  # the connections close() did not end itself
         kept.close()
-        for connection in idle:
+        for connection in idle + [stuck] * (stuck is not None):
             connection.close()
-    assert took < 5  # the connections kept open do not hold it
+    # close() ended the connection kept for a next request and the one stuck in an answer, before its wait on them
+    # (CLOSE_WAIT) could run out: judged by that, not by the time it took, which a slow computer stretches
+    assert left == []
     assert not server.thread.is_alive()
     with pytest.raises(OSError):
         socket.create_connection(("127.0.0.1", port), timeout=2).close()
@@ -2842,6 +2870,52 @@ def test_the_server_answers_ranges(tmp_path, monkeypatch, capfd):
         server.url(secret)
     assert capfd.readouterr().err == ""  # no request lines, no tracebacks
 
+
+def _stuck_reader(server, path: Path) -> socket.socket:
+    """A connection that asked ``server`` for a large sparse file at ``path`` (nothing on the disk) and takes no more
+    of the answer: with its receive buffer small, the thread serving it fills the buffers and blocks in a send."""
+    with open(path, "wb") as fh:
+        fh.truncate(32 << 20)
+    port = server.server_address[1]
+    far = urllib.parse.urlsplit(server.url(path)).path
+    stuck = socket.socket()
+    stuck.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    stuck.settimeout(10)
+    stuck.connect(("127.0.0.1", port))
+    stuck.sendall(f"GET {far} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+    assert stuck.recv(12).startswith(b"HTTP/1.1 200")
+    time.sleep(0.2)  # the thread fills the buffers and blocks (close() must end it in any state all the same)
+    return stuck
+
+
+def test_close_ends_the_connections_without_shutting_their_sockets(tmp_path, monkeypatch, capfd):
+    """The threads serving the connections end by themselves when the server closes, within a step: one waiting for
+    the next request on a connection kept open, one sending an answer its reader stopped taking. Here without the
+    shutdown of their sockets close() also does - what makes a thread finish at once on POSIX, and what Windows
+    leaves blocked - and with nothing closed under them (on BSD systems that drops a poll without waking it): close()
+    does not wait CLOSE_WAIT out on any system."""
+    monkeypatch.setattr(link.RasterServer, "CHUNK", 1 << 16)
+    monkeypatch.setattr(link, "_end_connection", lambda connection: None)
+    raster = tmp_path / "ortofoto.tif"
+    raster.write_bytes(bytes(range(256)))
+    server = link.RasterServer()
+    port = server.server_address[1]
+    kept = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    stuck = None
+    try:
+        kept.request("GET", urllib.parse.urlsplit(server.url(raster)).path, headers={"Range": "bytes=0-9"})
+        assert kept.getresponse().read() == bytes(range(10))  # answered: the connection kept for the next request
+        stuck = _stuck_reader(server, tmp_path / "enorme.tif")
+        assert _waited(lambda: len(server._open) == 2)
+        server.close()
+        left = list(server._open)
+    finally:
+        server.close()
+        kept.close()
+        if stuck is not None:
+            stuck.close()
+    assert left == [] and not server.thread.is_alive()
+    assert capfd.readouterr().err == ""  # the threads ended quietly
 
 def test_start_sends_large_rasters_by_address(tmp_path):
     """A raster larger than RustGIS loads whole that RustGIS reads in place goes by the address the link's raster
@@ -3172,8 +3246,8 @@ def test_a_raster_rustgis_cannot_decode_goes_as_a_copy(tmp_path, monkeypatch):
         rl.start([{"path": large, "name": "Grande"}])
         (big,) = rl.rasters
         assert big.copy and big.url and big.layer is None and fake.fetched[-1][0] == big.url
-        # a copy that fails to land leaves no temporary file
-        monkeypatch.setattr(link.os, "replace", lambda *args: (_ for _ in ()).throw(OSError("disk gone")))
+        # a copy that fails to land (replace_file: put in place as a product is) leaves no temporary file
+        monkeypatch.setattr(link, "replace_file", lambda *args: (_ for _ in ()).throw(OSError("disk gone")))
         with pytest.raises(OSError, match="disk gone"):
             link._write_copy(photo, tmp_path / "copia.tif")
         assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".copia")] == []
@@ -3234,6 +3308,27 @@ def test_one_raster_that_fails_never_fails_the_start(tmp_path, monkeypatch, capl
             out = rl.start([{"path": photo, "name": "Foto"}, {"path": dem, "name": "DEM"}])
         assert out["refused"] == {"Foto": "a raster of an exotic type"} and out["layers"] == 7 and out["rasters"] == 1
         assert [r.name for r in rl.rasters] == ["DEM"] and "The raster Foto cannot be given" in caplog.text
+    finally:
+        rl.stop()
+
+
+def test_a_raster_without_a_band_is_refused_with_its_reason(tmp_path, caplog):
+    """A dataset with no band of its own - a GeoPackage holding two raster tables, which GDAL opens as their container
+    - is not given to RustGIS: in "refused" with what the file holds (its subdatasets), said in the log without a
+    traceback; the other rasters and the tables go all the same."""
+    container = _two_tables(tmp_path / "due.gpkg")
+    dem = _small_dem(tmp_path / "dem.tif")
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([_unit(1, GX, GY)]))
+    rl = link.RustGisLink(live, FakeEngine(), "Saggio 1", GB)
+    try:
+        with caplog.at_level(logging.WARNING, logger=link.__name__):
+            out = rl.start([{"path": container, "name": "Due"}, {"path": dem, "name": "DEM"}])
+        reason = out["refused"]["Due"]
+        assert "no raster band of its own" in reason and "2 rasters" in reason and ":alfa" in reason
+        assert ":beta" in reason and out["rasters"] == 1 and [r.name for r in rl.rasters] == ["DEM"]
+        said = [r for r in caplog.records if "The raster Due cannot be given" in r.getMessage()]
+        assert len(said) == 1 and not said[0].exc_info and reason in said[0].getMessage()
     finally:
         rl.stop()
 
@@ -3318,14 +3413,16 @@ def test_a_raster_downloaded_whole_or_not_served(tmp_path, monkeypatch, caplog):
 
 class FakeFiles:
     """The calls of kernel32 the raster server makes to open a file on Windows, answering as the test says: each
-    CreateFileW gives the next handle; ``tag`` is (attributes, reparse tag) of what is opened with
-    FILE_FLAG_OPEN_REPARSE_POINT; ``files`` the (volume serial number, file index high, low) of each handle."""
+    CreateFileW gives the next handle; ``tag`` is (attributes, reparse tag) of what is opened - the attributes given
+    with BY_HANDLE_FILE_INFORMATION (``informed`` says whether that is read), the tag with FileAttributeTagInfo
+    (``tagged``; the handles it was asked of in ``asked``); ``files`` the (volume serial number, file index high, low)
+    of each handle."""
 
     def __init__(self):
         self.next, self.handles = 4321, []
         self.tag, self.tagged, self.informed = (0x20, 0), 1, 1  # FILE_ATTRIBUTE_ARCHIVE: a plain file
         self.files: dict[int, tuple] = {}
-        self.opened, self.closed = [], []
+        self.opened, self.closed, self.asked = [], [], []
 
     def CreateFileW(self, name, access, share, security, disposition, flags, template):
         self.opened.append((name, access, share, security, disposition, flags, template))
@@ -3336,10 +3433,12 @@ class FakeFiles:
 
     def GetFileInformationByHandleEx(self, handle, kind, information, size):
         assert (kind, size) == (9, 8)  # FileAttributeTagInfo: attributes and reparse tag
+        self.asked.append(handle)
         information._obj.attributes, information._obj.reparse_tag = self.tag
         return self.tagged
 
     def GetFileInformationByHandle(self, handle, information):
+        information._obj.attributes = self.tag[0]
         information._obj.volume, information._obj.index_high, information._obj.index_low = self.files[handle]
         return self.informed
 
@@ -3350,11 +3449,13 @@ class FakeFiles:
 
 def test_on_windows_a_served_file_is_shared_and_no_link(tmp_path, monkeypatch):
     """On Windows the raster server opens a file with CreateFileW shared for reading, writing and deleting - the
-    program replaces or deletes a product RustGIS is reading a tile of - and with FILE_FLAG_OPEN_REPARSE_POINT. A name
-    surrogate (a symbolic link, a junction) put where the file was is refused, as O_NOFOLLOW refuses a link elsewhere;
-    another reparse point (deduplicated, a OneDrive or Dropbox placeholder) is a file itself: opened again without the
-    flag and kept when it is the same file (volume serial number, file index). Every handle not handed over is closed
-    exactly once. The address and the answers go through the same opening."""
+    program replaces or deletes a product RustGIS is reading a tile of - and with FILE_FLAG_OPEN_REPARSE_POINT. Its
+    attributes and identity are read from the handle (BY_HANDLE_FILE_INFORMATION; not readable: refused); only a
+    reparse point has its tag asked for, as CPython's lstat and Rust's std do: a name surrogate (a symbolic link, a
+    junction) put where the file was is refused, as O_NOFOLLOW refuses a link elsewhere, and so is a reparse point
+    whose tag cannot be read; another reparse point (deduplicated, a OneDrive or Dropbox placeholder) is a file
+    itself: opened again without the flag and kept when it is the same file (volume serial number, file index).
+    Every handle not handed over is closed exactly once. The address and the answers go through the same opening."""
     import ctypes
 
     raster = tmp_path / "ortofoto.tif"
@@ -3366,41 +3467,49 @@ def test_on_windows_a_served_file_is_shared_and_no_link(tmp_path, monkeypatch):
     monkeypatch.setattr(link, "_osfhandle", lambda handle: taken.append(handle) or os.open(raster, os.O_RDONLY))
 
     def opened():
-        before = (len(files.opened), len(files.closed), len(taken))
+        before = (len(files.opened), len(files.closed), len(taken), len(files.asked))
         handle = link._open_regular(raster)
         data = None
         if handle is not None:
             with handle:
                 data = handle.read()
-        return data, files.opened[before[0]:], files.closed[before[1]:], taken[before[2]:]
+        return data, files.opened[before[0]:], files.closed[before[1]:], taken[before[2]:], files.asked[before[3]:]
 
-    # a plain file: one opening, handed to the descriptor
-    data, made, closed, handed = opened()
+    # a plain file: one opening, no tag asked for, handed to the descriptor
+    data, made, closed, handed, asked = opened()
     # GENERIC_READ; FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE; OPEN_EXISTING; FILE_FLAG_OPEN_REPARSE_POINT
     assert made == [(str(raster), 0x80000000, 0x7, None, 3, 0x00200000, None)]
-    assert (data, closed, handed) == (b"pixels", [], [files.handles[-1]])
-    # a name surrogate (IO_REPARSE_TAG_SYMLINK): refused, its handle closed
+    assert (data, closed, handed, asked) == (b"pixels", [], [files.handles[-1]], [])
+    # a name surrogate (IO_REPARSE_TAG_SYMLINK): its tag asked for, refused, its handle closed
     files.tag = (0x400 | 0x20, 0xA000000C)
-    data, made, closed, handed = opened()
-    assert (data, len(made), closed, handed) == (None, 1, [files.handles[-1]], [])
+    data, made, closed, handed, asked = opened()
+    assert (data, len(made), closed, handed, asked) == (None, 1, [files.handles[-1]], [], [files.handles[-1]])
     # a cloud placeholder (IO_REPARSE_TAG_CLOUD_6) or a deduplicated file (IO_REPARSE_TAG_DEDUP): a file itself
     for tag in (0x9000601A, 0x80000013):
         files.tag = (0x400 | 0x20, tag)
-        data, made, closed, handed = opened()
+        data, made, closed, handed, asked = opened()
         first, second = files.handles[-2:]
         assert [m[5] for m in made] == [0x00200000, 0] and [m[2] for m in made] == [0x7, 0x7]  # the same sharing
-        assert (data, closed, handed) == (b"pixels", [first], [second])
+        assert (data, closed, handed, asked) == (b"pixels", [first], [second], [first])
     # opened again, another file (something put there in between): refused, both closed once
     files.next = 5000
     files.files[5001] = (7, 0, 100)
-    data, made, closed, handed = opened()
+    data, made, closed, handed, asked = opened()
     assert (data, sorted(closed), handed) == (None, [5000, 5001], [])
-    # its tag not read, or nothing opened: refused
-    files.tag, files.tagged = (0x20, 0), 0
-    data, made, closed, handed = opened()
-    assert (data, closed) == (None, [files.handles[-1]])
-    files.tagged, files.next = 1, ctypes.c_void_p(-1).value  # INVALID_HANDLE_VALUE: nothing to close
-    data, made, closed, handed = opened()
+    # the tag of a reparse point not read: refused; a plain file is never asked for its tag
+    files.tagged = 0
+    data, made, closed, handed, asked = opened()
+    assert (data, closed, asked) == (None, [files.handles[-1]], [files.handles[-1]])
+    files.tag = (0x20, 0)
+    data, made, closed, handed, asked = opened()
+    assert (data, closed, asked) == (b"pixels", [], [])
+    files.tagged = 1
+    # its attributes and identity not read, or nothing opened: refused
+    files.informed = 0
+    data, made, closed, handed, asked = opened()
+    assert (data, closed, handed, asked) == (None, [files.handles[-1]], [], [])
+    files.informed, files.next = 1, ctypes.c_void_p(-1).value  # INVALID_HANDLE_VALUE: nothing to close
+    data, made, closed, handed, asked = opened()
     assert (data, len(made), closed) == (None, 1, [])
     assert sorted(files.closed) == sorted(set(files.closed))  # never a handle closed twice
     files.next = 6000
@@ -3415,8 +3524,12 @@ def test_on_windows_a_served_file_is_shared_and_no_link(tmp_path, monkeypatch):
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows only: the sharing of a file opened by the raster server")
 def test_on_windows_a_product_read_by_rustgis_can_be_replaced(tmp_path):
-    """Windows, a real file: while the raster server holds a product open for RustGIS, the program replaces it
-    (os.replace, as a product rebuilt is put in place): FILE_SHARE_DELETE lets it."""
+    """Windows, a real file: while the raster server holds a product open for RustGIS, the program puts the product
+    rebuilt in its place with replace_file - a rename with POSIX semantics, as os.replace (MoveFileEx) refuses to
+    replace a file with a handle open on it, FILE_SHARE_DELETE or not; the handle goes on reading the file it opened,
+    which lives on nameless until it is closed."""
+    from pyarchinit_photogrammetry.io.files import replace_file
+
     product = tmp_path / "orthomosaic.tif"
     product.write_bytes(b"the old pixels")
     rebuilt = tmp_path / "orthomosaic.tmp.tif"
@@ -3424,10 +3537,116 @@ def test_on_windows_a_product_read_by_rustgis_can_be_replaced(tmp_path):
     handle = link._open_regular(product)
     assert handle is not None
     try:
-        os.replace(rebuilt, product)
-        assert product.read_bytes() == b"the new pixels"
+        replace_file(rebuilt, product)
+        assert product.read_bytes() == b"the new pixels" and not rebuilt.exists()
+        assert handle.read() == b"the old pixels"
     finally:
         handle.close()
+    assert [p.name for p in tmp_path.iterdir()] == ["orthomosaic.tif"]
+
+
+class FakeRenames:
+    """The calls of kernel32 replace_file makes on Windows, answering as the test says: CreateFileW gives a handle
+    (INVALID_HANDLE_VALUE when ``invalid``); SetFileInformationByHandle records what it is given and, when
+    ``renames``, renames as Windows would."""
+
+    def __init__(self, renames: bool = True):
+        self.renames, self.invalid = renames, False
+        self.opened, self.renamed, self.closed = [], [], []
+
+    def CreateFileW(self, name, access, share, security, disposition, flags, template):
+        import ctypes
+
+        self.opened.append((name, access, share, security, disposition, flags, template))
+        return ctypes.c_void_p(-1).value if self.invalid else 777
+
+    def SetFileInformationByHandle(self, handle, kind, information, size):
+        given = information._obj
+        self.renamed.append((handle, kind, given.flags, given.root, given.length, given.name, size))
+        if self.renames:
+            os.replace(self.opened[-1][0], given.name)
+        return int(self.renames)
+
+    def CloseHandle(self, handle):
+        self.closed.append(handle)
+        return 1
+
+
+def test_replace_file_renames_with_posix_semantics_on_windows(tmp_path, monkeypatch):
+    """replace_file puts a file in the place of another in one move: os.replace, but on Windows first a rename with
+    POSIX semantics - the file opened for DELETE, shared with every other opening, SetFileInformationByHandle with
+    FileRenameInfoEx, FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS and the new name whole -
+    which a handle open on the file replaced (the raster server's, while RustGIS reads a product) does not stop, as
+    it stops os.replace (MoveFileEx). Where Windows does not do that rename, os.replace, tried again after each of
+    RETRY_DELAYS while a handle refuses it, then raising its refusal."""
+    import ctypes
+
+    from pyarchinit_photogrammetry.io import files
+
+    def written() -> tuple[Path, Path]:
+        src, dst = tmp_path / "orthomosaic.tmp.tif", tmp_path / "orthomosaic.tif"
+        src.write_bytes(b"new")
+        dst.write_bytes(b"old")
+        return src, dst
+
+    slept: list = []
+    monkeypatch.setattr(files.time, "sleep", slept.append)
+    # not Windows: os.replace itself, kernel32 never asked for, no second try
+    monkeypatch.setattr(files, "_windows", lambda: False)
+    monkeypatch.setattr(files, "_kernel32", lambda: pytest.fail("kernel32 asked for outside Windows"))
+    src, dst = written()
+    files.replace_file(src, dst)
+    assert (dst.read_bytes(), src.exists(), slept) == (b"new", False, [])
+    monkeypatch.setattr(files, "_replace", lambda s, d: (_ for _ in ()).throw(PermissionError(13, "held")))
+    src, dst = written()
+    with pytest.raises(PermissionError):
+        files.replace_file(src, dst)
+    assert (dst.read_bytes(), src.exists(), slept) == (b"old", True, [])
+    # Windows: the rename with POSIX semantics, the handle closed, os.replace not needed
+    monkeypatch.setattr(files, "_windows", lambda: True)
+    fake = FakeRenames()
+    monkeypatch.setattr(files, "_kernel32", lambda: fake)
+    src, dst = written()
+    files.replace_file(src, dst)
+    assert (dst.read_bytes(), src.exists(), slept) == (b"new", False, [])
+    # DELETE; FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE; OPEN_EXISTING; FILE_FLAG_BACKUP_SEMANTICS |
+    # FILE_FLAG_OPEN_REPARSE_POINT
+    assert fake.opened == [(str(src), 0x00010000, 0x7, None, 3, 0x02000000 | 0x00200000, None)]
+    name = os.path.abspath(dst)
+    (handle, kind, flags, root, length, given, size), = fake.renamed
+    assert (handle, kind, flags, root, length, given) == (777, 22, 0x3, None, 2 * len(name), name)
+    assert size >= 20 + 2 * (len(name) + 1) and fake.closed == [777]  # FILE_RENAME_INFO with the name and its end
+    # the rename refused (another file system, an older Windows): os.replace, tried again while a handle refuses it
+    refusals = [PermissionError(13, "held by an antivirus")] * 2
+    replaced: list = []
+
+    def replace(s, d):
+        if refusals:
+            raise refusals.pop()
+        replaced.append((s, d))
+        os.replace(s, d)
+
+    monkeypatch.setattr(files, "_replace", replace)
+    fake.renames = False
+    src, dst = written()
+    files.replace_file(src, dst)
+    assert (dst.read_bytes(), replaced, slept) == (b"new", [(src, dst)], list(files.RETRY_DELAYS[:2]))
+    assert fake.closed == [777, 777]  # the handle of the refused rename closed too
+    # refused every time: the last refusal raised, after every delay
+    slept.clear()
+    refusals[:] = [PermissionError(13, "held")] * 9
+    src, dst = written()
+    with pytest.raises(PermissionError, match="held"):
+        files.replace_file(src, dst)
+    assert (dst.read_bytes(), slept) == (b"old", list(files.RETRY_DELAYS))
+    # the file not opened (INVALID_HANDLE_VALUE): os.replace, nothing to close
+    fake.invalid, fake.renames = True, True
+    refusals.clear()
+    slept.clear()
+    src, dst = written()
+    files.replace_file(src, dst)
+    assert (dst.read_bytes(), slept, fake.closed, isinstance(fake.opened[-1][0], str)) == (b"new", [], [777] * 3, True)
+    assert ctypes.sizeof(ctypes.c_uint32) == 4  # the lengths above are those of FILE_RENAME_INFO's DWORDs
 
 
 def _orthophoto(path: Path, side: int, pixel: float, crs: str, x0: float, y0: float, colour=None) -> Path:

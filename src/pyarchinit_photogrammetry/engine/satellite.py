@@ -48,6 +48,7 @@ import numpy as np
 
 from ..core import crs as crs_mod
 from ..core.progress import ProgressCallback, as_progress
+from ..io.files import replace_file
 
 log = logging.getLogger(__name__)
 
@@ -607,7 +608,7 @@ def orthorectify(scene: Path, dem: Path, out: Path, resolution: float | None = N
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
-    tmp.replace(out)
+    replace_file(tmp, out)  # in one move, under a program reading the raster (RustGIS through the link)
     p(1.0, f"{width} x {height} px a {res:g} m")
     return {"path": out, "width": width, "height": height, "resolution": res, "bounds": area, "gsd": s.gsd(h_ref),
             "bands": s.count, "dtype": str(s.dtype), "nodata": nodata, "filled": filled[0] / max(width * height, 1),
@@ -671,7 +672,7 @@ def _write_heights(out: Path, crs: str, origin, width: int, height: int, res: fl
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
-    tmp.replace(out)
+    replace_file(tmp, out)
     return len(tiles)
 
 

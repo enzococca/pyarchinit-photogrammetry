@@ -41,6 +41,7 @@ from pathlib import Path
 import numpy as np
 
 from ..core.progress import Progress, as_progress
+from ..io.files import replace_file
 
 log = logging.getLogger(__name__)
 
@@ -635,7 +636,7 @@ def calculate(chunk, formula: str, name: str, grid: str | None = None, resolutio
     finally:
         for s in sources.values():
             s.close()
-    tmp.replace(out)
+    replace_file(tmp, out)  # in one move, under a program reading the raster (RustGIS through the link)
     stats = {"cells": int(n)}
     if n:
         values = np.concatenate(sample)
