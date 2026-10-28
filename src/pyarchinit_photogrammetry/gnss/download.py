@@ -107,20 +107,27 @@ def _local_path(url: str) -> Path:
 def _opened(url: str, timeout: float):
     """The answer of the server to a request for ``url`` (an object with ``read``, ``headers``, ``geturl`` and ``close``),
     or the error that says why there is none: :class:`NotPublished` when the file is not there, a plain
-    :class:`DownloadError` when asking again would not help, and the private ``_Transient`` when it might."""
+    :class:`DownloadError` when asking again would not help, and the private ``_Transient`` when it might.
+
+    Only HTTPS reaches the network: a plain http address is refused before anything is asked, and an answer that a
+    redirection brought from one is refused before it is read - what comes over plain http can be changed on the way."""
     scheme = urllib.parse.urlsplit(url).scheme.lower()
     try:
         if scheme == "file":
             return _LocalFile(_local_path(url))
-        if scheme not in ("http", "https"):
-            raise DownloadError(f"{url}: only http, https and file addresses can be downloaded", url)
-        kwargs = {}
-        if scheme == "https":
-            from ..updates import _ssl_context
+        if scheme != "https":
+            raise DownloadError(f"{url}: not HTTPS - only https and file addresses are downloaded, what comes over "
+                                "plain http can be changed on the way", url)
+        from ..updates import _ssl_context
 
-            kwargs["context"] = _ssl_context()
         request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        return urllib.request.urlopen(request, timeout=timeout, **kwargs)
+        response = urllib.request.urlopen(request, timeout=timeout, context=_ssl_context())
+        final = response.geturl() if hasattr(response, "geturl") else None
+        if final and urllib.parse.urlsplit(final).scheme.lower() != "https":
+            response.close()
+            raise DownloadError(f"{url}: the server sent the request on to {final}, which is not HTTPS: refused, what "
+                                "comes over plain http can be changed on the way", url)
+        return response
     except DownloadError:
         raise
     except urllib.error.HTTPError as exc:

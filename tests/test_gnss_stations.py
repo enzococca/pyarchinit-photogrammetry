@@ -12,6 +12,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import re
 import shutil
 import socket
@@ -275,6 +276,23 @@ def test_offline_uses_the_cached_list(archives, monkeypatch, caplog):
     assert "m3g_EPN.geojson" in str(error.value) and error.value.url.endswith("m3g_EPN.geojson")
 
 
+def test_an_empty_list_is_not_kept(archives, tmp_path, monkeypatch):
+    """An answer of M3G or of the IGS with no station at all (an empty array, an empty object: a service that answers
+    but has nothing to say) is not a list of the stations: it is not saved for a week, and a list saved before is used."""
+    for network, empty in (("EPN", "[]"), ("IGS", "{}")):
+        folder = tmp_path / f"empty_{network}"
+        folder.mkdir()
+        for other in ("EPN", "RING"):
+            text = empty if other == network else (DATA / f"m3g_{other}.geojson").read_text()
+            (folder / f"m3g_{other}.geojson").write_text(text)
+        (folder / "IGSNetwork.json").write_text(empty if network == "IGS" else (DATA / "IGSNetwork.json").read_text())
+        monkeypatch.setattr(stations, "M3G_GEOJSON", _uri(folder) + "/m3g_{network}.geojson")
+        monkeypatch.setattr(stations, "IGS_NETWORK", _uri(folder / "IGSNetwork.json"))
+        with pytest.raises(download.DownloadError, match="empty"):
+            stations.station_list(refresh=True)
+        assert not (download.gnss_dir() / "stations" / "stations.json").exists()
+
+
 def test_a_list_that_does_not_parse_is_a_download_error(archives, tmp_path, monkeypatch):
     folder = tmp_path / "html"
     folder.mkdir()
@@ -384,6 +402,45 @@ def test_epn_newer_folder_with_an_unreadable_file_uses_the_saved_older_one(archi
         again = stations.coordinates(aqui, 2026.5)
     assert again == first  # the metres of the approximate position would be the result without the saved file
     assert any("C2400" in w and "saved" in w for w in _warnings(caplog))  # and the log names the week
+
+
+def test_a_page_of_html_is_never_kept_for_a_solution(archives, monkeypatch, caplog):
+    """What is downloaded for the coordinates of the stations is looked at before it is kept: a page of HTML (a captive
+    portal, an error page) is never saved as the solution of a newer week of the EPN - which would be used for ever
+    after - nor put in the place of a good copy of IGc20.ssc or of a series of RING; the good copy is used, with a
+    warning."""
+    aqui = _station("AQUI00ITA")
+    first = stations.coordinates(aqui, 2026.5)  # saves the solution of C2400
+    (archives.epn / "C2415").mkdir()
+    (archives.epn / "C2415" / "EUR0OPSSNX_1996001_2026100_00U_SOL.SSC").write_text(
+        "<html><body>Please log in to the network</body></html>")
+    download._LISTINGS.clear()
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        assert stations.coordinates(aqui, 2026.5) == first
+    kept = download.gnss_dir() / "stations"
+    assert not list(kept.glob("epn_C2415_*")) and any("C2400" in w for w in _warnings(caplog))
+    # IGc20.ssc too old to be used as it is, and the archive answers with a page: the good copy stays
+    ssc = stations._cached(stations.IGS_SSC, "IGc20.ssc", stations.IGS_SSC_AGE, None, check=stations._sinex_head)
+    good = ssc.read_bytes()
+    old = (datetime.now() - stations.IGS_SSC_AGE * 2).timestamp()
+    os.utime(ssc, (old, old))
+    page = archives.root / "portal.html"
+    page.write_text("<html>Service temporarily unavailable</html>")
+    monkeypatch.setattr(stations, "IGS_SSC", _uri(page))
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        again = stations._cached(stations.IGS_SSC, "IGc20.ssc", stations.IGS_SSC_AGE, None, check=stations._sinex_head)
+    assert again == ssc and ssc.read_bytes() == good
+    assert any("not the file that was expected" in w for w in _warnings(caplog))
+    assert sorted(p.name for p in kept.iterdir() if p.name.startswith("IGc20")) == ["IGc20.ssc"]
+
+
+def test_a_position_that_is_no_number_is_refused():
+    """The guard that takes a position more than 1 km from the one in the list for another station refuses a position
+    that is no number too: NaN is farther than nothing."""
+    station = stations.Station("ABCD00ITA", "ABCD", ("EPN",), 41.9, 12.5, 50.0, (4642000.0, 1028000.0, 4236000.0))
+    with pytest.raises(ValueError, match="no number"):
+        stations._same_place(station, (float("nan"),) * 3, "a.SSC")
+    stations._same_place(station, (4642000.5, 1028000.0, 4236000.0), "a.SSC")  # half a metre: the same station
 
 
 def test_a_part_file_is_never_taken_for_the_saved_solution(archives, monkeypatch):
@@ -942,6 +999,25 @@ def test_user_agent_names_the_program_and_its_version(web, tmp_path):
     request, timeout, kwargs = web.requests[0]
     assert request.get_header("User-agent") == download.USER_AGENT and timeout == 60.0
     assert "context" in kwargs  # https: with the certificates of the program
+
+
+def test_plain_http_and_a_redirection_to_it_are_refused(web, tmp_path):
+    """Every archive is reached over HTTPS: a plain http address is refused before anything is asked, and an answer
+    that a redirection brought from a plain http address is refused before it is read - its content could have been
+    changed on the way. Nothing is written."""
+    with pytest.raises(download.DownloadError, match="not HTTPS") as error:
+        download.fetch("http://example.org/products/a.gz", tmp_path / "a.gz")
+    assert error.value.url == "http://example.org/products/a.gz" and web.requests == []
+    web.plan = [_Reply(b"data", {"Content-Length": "4"}, url="http://example.org/elsewhere/a.gz")]
+    with pytest.raises(download.DownloadError, match="http://example.org/elsewhere/a.gz"):
+        download.fetch(URL, tmp_path / "b.gz", retries=1)
+    web.plan = [_Reply(b'<a href="x.gz">x</a>', url="http://example.org/pub/")]
+    with pytest.raises(download.DownloadError, match="not HTTPS"):
+        download.listing("https://example.org/pub/")
+    assert sorted(p.name for p in tmp_path.iterdir()) == []
+    # a redirection that stays on HTTPS is followed, as before
+    web.plan = [_Reply(b"data", {"Content-Length": "4"}, url="https://mirror.example.org/a.gz")]
+    assert download.fetch(URL, tmp_path / "c.gz").read_bytes() == b"data"
 
 
 def test_fetch_retries_then_names_the_url(web, tmp_path):

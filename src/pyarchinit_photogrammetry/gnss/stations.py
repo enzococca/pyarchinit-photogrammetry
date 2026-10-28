@@ -33,6 +33,7 @@ import os
 import re
 import shutil
 import tempfile
+import uuid
 import zlib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -184,8 +185,10 @@ def _parse_m3g(data) -> list[Station]:
         found.append(Station(sid, name, (), lat, lon, h, xyz))
     if skipped:
         log.warning("%d entries of the list of M3G have no usable id or position and are left out", skipped)
-    if not found and features:
-        raise ValueError("no entry has an id and a position")
+    if not features:  # a service that answers with nothing: not the list of a network, never kept for a week
+        raise ValueError("an empty list, without a single station")
+    if not found:
+        raise ValueError("no entry has an id and a position" if skipped else "every station of it was removed")
     return found
 
 
@@ -205,7 +208,9 @@ def _parse_igs(data) -> list[Station]:
         if _ID.fullmatch(sid):
             lat, lon, h = rinex.ecef_to_llh(xyz)
             found.append(Station(sid, sid, (), lat, lon, h, xyz))
-    if not found and data:
+    if not data:  # a service that answers with nothing: not the list of the network, never kept for a week
+        raise ValueError("an empty list, without a single station")
+    if not found:
         raise ValueError("no entry has an id and a position")
     return found
 
@@ -304,16 +309,46 @@ def nearby(lat: float, lon: float, limit: int = 10, within_km: float = 200.0,
 # --- files that are downloaded and kept ---------------------------------------------------------------------------
 
 
-def _cached(url: str, name: str, max_age: timedelta | None, progress, timeout: float = 60.0) -> Path:
+def _sinex_head(path: Path) -> None:
+    """A ``ValueError`` unless ``path`` starts as a SINEX file does (``%=SNX``)."""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        if not f.readline().startswith("%=SNX"):
+            raise ValueError(f"{path.name} is not a SINEX file (its first line does not start with %=SNX)")
+
+
+def _ring_head(path: Path) -> None:
+    """A ``ValueError`` unless ``path`` starts as a daily series of RING does (its frame named on the first line)."""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        if not re.search(r"Reference Frame\s*:", f.readline()):
+            raise ValueError(f"{path.name} is not a series of RING (its first line does not name the frame)")
+
+
+def _cached(url: str, name: str, max_age: timedelta | None, progress, timeout: float = 60.0,
+            check: Callable[[Path], object] | None = None) -> Path:
     """The file of ``url`` in the stations folder as ``name``: the copy there when it is younger than ``max_age`` (any
     age for None), else fetched again (``timeout``: the seconds the site has to answer) - and the old copy, with a
-    warning, when that fails."""
+    warning, when that fails. ``check`` looks at what was fetched before it takes the place of a copy (a
+    ``ValueError`` when it is not the file: a page of HTML of a captive portal, an error page), which is then never
+    kept: a download that failed."""
     path = _stations_dir() / name
     saved = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc) if path.exists() else None
     if saved is not None and (max_age is None or _now() - saved < max_age):
         return path
     try:
-        return download.fetch(url, path, progress, timeout=timeout)
+        if check is None:
+            return download.fetch(url, path, progress, timeout=timeout)
+        work = path.with_name(f"{name}.{uuid.uuid4().hex[:8]}.new")
+        try:
+            download.fetch(url, work, progress, timeout=timeout)
+            try:
+                check(work)
+            except ValueError as exc:
+                raise download.DownloadError(f"{url}: not the file that was expected ({str(exc).replace(work.name, name)})",
+                                             url) from exc
+            os.replace(work, path)
+        finally:
+            work.unlink(missing_ok=True)
+        return path
     except download.DownloadError as exc:
         if saved is None:
             raise
@@ -353,7 +388,8 @@ def _fresh_epn_file(progress) -> tuple[Path, str]:
             failure = exc
             continue
         if files:
-            return _cached(url + files[-1].group(0), f"epn_{folder}_{files[-1].group(0)}", None, progress), folder
+            return _cached(url + files[-1].group(0), f"epn_{folder}_{files[-1].group(0)}", None, progress,
+                           check=_epn_layout), folder
     raise failure or download.NotPublished(f"{root}: no folder of the EPN has the multi-year solution in IGS20", root)
 
 
@@ -546,6 +582,8 @@ def _same_place(station: Station, xyz, where: str) -> None:
     """A position that is farther than :data:`MAX_DISTANCE` from the one in the list is of another station: the files
     give four characters, and two stations can have the same."""
     away = float(np.linalg.norm(np.array(xyz) - np.array(station.xyz)))
+    if not math.isfinite(away):  # NaN is farther than nothing
+        raise ValueError(f"{where} gives {station.id} a position that is no number ({', '.join(map(str, xyz))})")
     if away > MAX_DISTANCE:
         raise ValueError(f"{where} has a station with the code {station.id[:4]} {away / 1000:.0f} km from "
                          f"{station.id}: another station")
@@ -634,7 +672,8 @@ def _epn_discontinuities(folder: str, progress) -> Path:
     solution of the folder is not used, and a plain ``DownloadError`` says so."""
     root = EPN_REFERENCE_FRAME if EPN_REFERENCE_FRAME.endswith("/") else EPN_REFERENCE_FRAME + "/"
     try:
-        return _cached(f"{root}{folder}/{EPN_DISCONTINUITIES}", f"epn_{folder}_{EPN_DISCONTINUITIES}", None, progress)
+        return _cached(f"{root}{folder}/{EPN_DISCONTINUITIES}", f"epn_{folder}_{EPN_DISCONTINUITIES}", None, progress,
+                       check=_sinex_head)
     except download.DownloadError as exc:
         raise download.DownloadError(f"{exc}; the solution of the EPN is not used without {EPN_DISCONTINUITIES}",
                                      exc.url) from exc
@@ -674,7 +713,7 @@ def _igs_companion(name: str, max_age: timedelta, progress) -> Path:
     """A file of the folder of IGc20.ssc that says when its coordinates can be used, kept in the same cache. Without it
     IGc20 is not used, and a plain ``DownloadError`` says so (a ``NotPublished`` would pass for a quiet miss)."""
     try:
-        return _cached(IGS_SSC.rsplit("/", 1)[0] + "/" + name, name, max_age, progress)
+        return _cached(IGS_SSC.rsplit("/", 1)[0] + "/" + name, name, max_age, progress, check=_sinex_head)
     except download.DownloadError as exc:
         raise download.DownloadError(f"{exc}; IGc20 is not used without {name}", exc.url) from exc
 
@@ -690,7 +729,7 @@ def _from_igs(station: Station, epoch: float, progress) -> StationCoordinates | 
     if "IGS" not in station.networks:
         return None
     code = station.id[:4].upper()
-    ssc = _cached(IGS_SSC, "IGc20.ssc", IGS_SSC_AGE, progress)
+    ssc = _cached(IGS_SSC, "IGc20.ssc", IGS_SSC_AGE, progress, check=_sinex_head)
     solutions = _read_sinex(ssc, code)  # _Absent for a station that IGc20 does not have
     psd = _igs_companion("psd_IGc20.snx", IGS_SSC_AGE, progress)
     quakes = _read_psd(psd, code)
@@ -775,7 +814,8 @@ def _from_ring(station: Station, epoch: float, progress) -> StationCoordinates |
     """The line through the last two years of the series of RING, at ``epoch``. For an epoch that the series covers
     it is the two years around it: it does not matter how the station moved after."""
     name = re.sub(r"[^A-Za-z0-9_-]", "_", station.id)  # the id of a Station made by hand is not trusted in a name
-    path = _cached(RING_POS.format(id=station.id), f"ring_{name}.pos", RING_POS_AGE, progress, timeout=RING_TIMEOUT)
+    path = _cached(RING_POS.format(id=station.id), f"ring_{name}.pos", RING_POS_AGE, progress, timeout=RING_TIMEOUT,
+                   check=_ring_head)
     t, xyz = _read_pos(path)
     if t[-1] - t[0] <= 2 * WINDOW:
         keep = np.ones(len(t), dtype=bool)
