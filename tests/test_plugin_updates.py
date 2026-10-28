@@ -84,7 +84,7 @@ def test_newer_compatible_versions_are_staged_and_applied_at_the_next_start(tmp_
     # the next start puts it in place, before any plugin is imported
     m = Manager(folder)
     assert m.applied == []
-    with caplog.at_level(logging.INFO, logger=updates.__name__):
+    with caplog.at_level(logging.DEBUG, logger=updates.__name__):
         m.load()
     assert m.applied == [("a", "0.1.0", "0.2.0")]
     assert "plugin a updated from 0.1.0 to 0.2.0" in caplog.text
@@ -96,6 +96,18 @@ def test_newer_compatible_versions_are_staged_and_applied_at_the_next_start(tmp_
     later.load()
     assert later.applied == [] and later.get("a").version == "0.2.0"
     assert updates.staged(folder) == {"a": "0.3.0"}
+
+
+def test_an_applied_update_is_not_logged_above_the_debug_level(tmp_path, folder, caplog):
+    updates.check([_newer(tmp_path, "a", "0.2.0")], _installed(folder), None, folder)
+    with caplog.at_level(logging.INFO, logger=updates.__name__):
+        assert updates.apply_staged(folder) == [("a", "0.1.0", "0.2.0")]
+    # the window and `ppg plugin` tell it in their own words, from Manager.applied: a second row says the same
+    assert "updated from" not in caplog.text
+    updates.check([_newer(tmp_path, "a", "0.3.0")], _installed(folder), None, folder)
+    with caplog.at_level(logging.DEBUG, logger=updates.__name__):
+        assert updates.apply_staged(folder) == [("a", "0.2.0", "0.3.0")]
+    assert "plugin a updated from 0.2.0 to 0.3.0" in caplog.text  # kept for whoever looks
 
 
 def test_an_update_that_needs_a_newer_program_waits(tmp_path, folder):
@@ -503,6 +515,21 @@ def test_a_plugin_placed_under_another_folder_name_is_not_staged(tmp_path, folde
     assert str(folder / "my-a") in why and str(folder / "a") in why
     assert not (result.updated or result.available or result.failed) and result
     assert updates.staged(folder) == {}
+
+
+def test_ppg_plugin_tells_the_updates_the_start_applied(tmp_path, folder, monkeypatch):
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    updates.check([_newer(tmp_path, "a", "0.2.0")], _installed(folder), None, folder)  # downloaded by an earlier run
+    monkeypatch.setenv("PPG_PLUGINS_DIR", str(folder))
+    runner = CliRunner()
+    r = runner.invoke(app, ["plugin"])
+    assert r.exit_code == 0 and "plugin a updated from 0.1.0 to 0.2.0" in r.output
+    assert _versions(folder) == {"a": "0.2.0"}
+    r = runner.invoke(app, ["plugin"])  # the next run has nothing to put in place: nothing to say
+    assert r.exit_code == 0 and "updated from" not in r.output
 
 
 def test_command_line_update(tmp_path, folder, monkeypatch):

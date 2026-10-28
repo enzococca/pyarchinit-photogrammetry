@@ -2136,6 +2136,8 @@ def plugin_command(ctx: typer.Context, name: Optional[str] = typer.Argument(None
 
     m = Manager()
     m.load()
+    for updated, old, new in m.applied:  # downloaded by an earlier run, put in place by this start
+        typer.echo(f"plugin {updated} updated from {old} to {new}", err=True)
     for i in m.plugins:
         if i.error:
             typer.echo(f"plugin {i.name} not loaded: {i.error}", err=True)

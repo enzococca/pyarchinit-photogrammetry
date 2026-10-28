@@ -216,7 +216,7 @@ def apply_staged(folder: str | os.PathLike) -> list[tuple[str, str, str]]:
         finally:
             if work is not None:
                 index.discard_work(work)
-        log.info("plugin %s updated from %s to %s", name, old, new)
+        log.debug("plugin %s updated from %s to %s", name, old, new)  # told by the window and `ppg plugin`: `applied`
         applied.append((name, old, new))
     return applied
 
