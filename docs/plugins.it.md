@@ -20,6 +20,7 @@ servono, i dialoghi, come leggere i risultati - sta nelle [Guide ai plugin](plug
   ```bash
   ppg plugins available          # i plugin dell'indice
   ppg plugins install NOME       # nella cartella dei plugin del programma
+  ppg plugins update [--dry-run] # versioni più nuove dei plugin installati (sotto)
   ppg plugins list               # installati, attivi o no
   ppg plugins disable NOME       # conservato, non caricato
   ppg plugins remove NOME
@@ -41,6 +42,35 @@ shapely, pyproj, SQLAlchemy, PySide6, ...).
 `PPG_NO_PLUGINS=1` avvia il programma senza nessun plugin (`PPG_PLUGINS_ENVIRONMENT=0`: solo quelli
 della cartella dei plugin, nessuno installato con pip); un plugin che fallisce all'avvio viene segnalato
 (nel log e in *Strumenti > Plugin*) e lasciato fuori, il programma va avanti.
+
+## Aggiornamenti
+
+I plugin installati dal programma si aggiornano da soli. Il programma guarda l'indice dei plugin insieme al suo
+controllo di una versione nuova: al massimo una volta al giorno, qualche secondo dopo l'avvio, e subito con
+*Aiuto > Controlla aggiornamenti...*. L'indice viene letto in background, la finestra resta libera.
+*Aiuto > Controlla gli aggiornamenti all'avvio* e `PPG_NO_UPDATE_CHECK=1` spengono il controllo giornaliero.
+
+* Una versione più nuova di un plugin **installato dal programma** viene scaricata, controllata con il suo SHA-256
+  e tenuta da parte. Diventa il plugin al **prossimo avvio**, prima che giri qualunque plugin: un plugin non viene
+  mai sostituito sotto una finestra aperta. Un riepilogo dice che cosa è stato scaricato; *Riavvia ora* chiude la
+  finestra e la riapre con il progetto aperto.
+* Un plugin installato **con pip** non viene mai toccato. Un plugin che hai disattivato viene aggiornato e resta
+  disattivato.
+* Un aggiornamento che richiede un programma più nuovo aspetta. Non viene scaricato: il riepilogo lo elenca sotto
+  *In attesa*, con il motivo (la versione del programma che serve).
+* Un plugin **nuovo** nell'indice viene solo annunciato, una volta. Il programma non installa mai un plugin da
+  solo: *Apri il gestore dei plugin* nel riepilogo porta a *Installa / aggiorna*. Il primo controllo registra
+  soltanto che cosa contiene l'indice e non annuncia niente.
+* L'interruttore *Aiuto > Aggiorna i plugin da soli* (acceso finché non lo spegni) decide se le versioni più nuove
+  vengono scaricate. Spento, il riepilogo le elenca sotto *Aggiornamenti disponibili* e si installano da
+  *Strumenti > Plugin...*, come prima.
+* In *Strumenti > Plugin...* un aggiornamento già scaricato compare nella colonna *Note* come pronto, attivo dal
+  prossimo avvio.
+
+Dalla riga di comando `ppg plugins update` fa lo stesso controllo e scarica le versioni più nuove (con `--dry-run`
+dice soltanto quali si potrebbero aggiornare); `ppg plugins available` segna i plugin installati che ne hanno una
+più nuova. Ogni avvio del programma mette a posto gli aggiornamenti scaricati - anche `ppg plugin NOME` in un
+terminale mentre la finestra è aperta: riavvia poi la finestra, perché giri anche lei la versione nuova.
 
 ## Iniziare un plugin: `ppg plugins new`
 

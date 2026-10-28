@@ -22,7 +22,9 @@ In the program:
 
 The upper table lists the plugins installed - active, disabled, or the error that kept one out - with
 *Enable / disable* and *Remove*. To update a plugin, install it again when its note says it can be
-updated. Plugins are Python code with the same rights as the program: install only those you trust.
+updated - or leave it to the program, which updates the plugins it installed by itself
+([Updates](../plugins.md#updates)). Plugins are Python code with the same rights as the program: install
+only those you trust.
 
 From the command line:
 

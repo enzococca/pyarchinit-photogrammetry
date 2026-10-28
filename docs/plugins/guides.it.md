@@ -22,8 +22,9 @@ Nel programma:
 
 La tabella in alto elenca i plugin installati - attivi, disattivati, o l'errore che ne ha tenuto fuori
 uno - con *Attiva / disattiva* e *Rimuovi*. Per aggiornare un plugin, installalo di nuovo quando la nota
-dice che si può aggiornare. I plugin sono codice Python con gli stessi diritti del programma: installa
-solo quelli di cui ti fidi.
+dice che si può aggiornare - oppure lascia fare al programma, che aggiorna da solo i plugin che ha
+installato ([Aggiornamenti](../plugins.md#aggiornamenti)). I plugin sono codice Python con gli stessi
+diritti del programma: installa solo quelli di cui ti fidi.
 
 Dalla riga di comando:
 

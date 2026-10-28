@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from .i18n import tr
+from .i18n import tr, translate
 
 INSTALLED_HEADERS = ["Plugin", "Versione", "Stato", "Origine", "Descrizione"]
 AVAILABLE_HEADERS = ["Plugin", "Versione", "Autore", "Descrizione", "Note"]
@@ -162,8 +162,23 @@ class PluginsDialog(QDialog):
         self.fill_installed()
 
     # ------------------------------------------------------------------ the index
+    def _installed_note(self, entry, info, ready: dict) -> str:
+        """What the list says of an entry whose plugin is installed: the version in use, and what the index has
+        beyond it - an update downloaded already, one that waits (the plugin is not where an update would go), or one
+        that can be installed (:func:`..plugins.updates.status`)."""
+        from ..plugins import updates
+
+        state, why = updates.status(entry, info, ready, self.manager.folder)
+        if state == "staged":
+            return tr("pronta la {0}: attiva dal prossimo avvio", entry.version)
+        if state == "waiting":
+            return translate(why)
+        if info.version == entry.version:
+            return tr("installato ({0})", info.version)
+        return tr("installata la {0}: aggiornabile", info.version)
+
     def fetch(self) -> None:
-        from ..plugins import index
+        from ..plugins import index, updates
         from .dialogs import message
 
         QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -174,7 +189,8 @@ class PluginsDialog(QDialog):
             message(self, "warning", tr("Plugin"), str(exc))
         finally:
             QGuiApplication.restoreOverrideCursor()
-        installed = {i.name: i.version for i in self.manager.plugins}
+        installed = {i.name: i for i in self.manager.plugins}
+        ready = updates.staged(self.manager.folder)
         t = self.available
         t.setRowCount(0)
         for e in self.entries:
@@ -182,8 +198,7 @@ class PluginsDialog(QDialog):
             t.insertRow(r)
             note = e.problem()
             if not note and e.name in installed:
-                note = tr("installato ({0})", installed[e.name]) if installed[e.name] == e.version else \
-                    tr("installata la {0}: aggiornabile", installed[e.name])
+                note = self._installed_note(e, installed[e.name], ready)
             for c, text in enumerate([e.localized("title") or e.name, e.version, e.author, e.localized("description"),
                                       note]):
                 t.setItem(r, c, _item(text, e.name if c == 0 else None))

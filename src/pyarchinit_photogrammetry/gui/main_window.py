@@ -38,7 +38,7 @@ from .panels import (ConsolePane, LayersPane, LogPane, PhotosPane, PhotosPanel, 
 from .ppk_dialog import PpkDialog
 from .start_page import StartPage
 from .undo import UndoHistory
-from .update_dialog import UpdateChecker, UpdateDialog, error_text
+from .update_dialog import PluginUpdateChecker, PluginUpdatesDialog, UpdateChecker, UpdateDialog, error_text
 from .worker import StatusProgress, TaskRunner
 
 log = logging.getLogger("pyarchinit_photogrammetry.gui")
@@ -207,6 +207,8 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._autoconnect_pyarchinit)
         self.update_checker = UpdateChecker(self)
         self.update_checker.finished.connect(self._updates_checked)
+        self.plugin_checker = PluginUpdateChecker(self)  # the plugin index, looked at with the program's own check
+        self.plugin_checker.finished.connect(self._plugins_checked)
         self._pending_update: Path | None = None  # new application swapped in when the window closes
         self._relaunch_on_close = False  # a new copy starts when this one closes (Vista > Lingua)
         self._timeline = None  # Strumenti > Fasi dello scavo, a window beside this one
@@ -992,6 +994,12 @@ class MainWindow(QMainWindow):
         self.a_update_auto.setChecked(self.settings.value("updates_auto", "true") in ("true", True, 1, "1"))
         self.a_update_auto.toggled.connect(lambda on: self.settings.setValue("updates_auto", "true" if on else "false"))
         m.addAction(self.a_update_auto)
+        self.a_plugins_auto_update = QAction(tr("Aggiorna i plugin da soli"), self, checkable=True)
+        self.a_plugins_auto_update.setChecked(
+            self.settings.value("plugins_auto_update", "true") in ("true", True, 1, "1"))
+        self.a_plugins_auto_update.toggled.connect(
+            lambda on: self.settings.setValue("plugins_auto_update", "true" if on else "false"))
+        m.addAction(self.a_plugins_auto_update)
         m.addSeparator()
         self._act(m, tr("Informazioni"), self.about, icon_name="about")
         # ------------------------------------------------------------ toolbar
@@ -1415,10 +1423,15 @@ class MainWindow(QMainWindow):
 
         self.plugins = Manager(window=self)
         self.plugin_menu: QMenu | None = None
+        loaded = True
         try:
             self.plugins.load()
         except Exception as exc:
+            loaded = False
             log.warning("Plugin non caricati: %s", exc)
+        for name, old, new in self.plugins.applied:  # downloaded by an earlier session, put in place by this start
+            self.log_pane.info(tr("Plugin {0} aggiornato dalla {1} alla {2}", name, old, new))
+        if not loaded:
             return
         for info in self.plugins.plugins:
             if info.error:
@@ -6953,12 +6966,50 @@ class MainWindow(QMainWindow):
             return
         self.settings.setValue("updates_last_check", today)
         self.update_checker.start(manual=False, skip=self.settings.value("updates_skip", "") or None)
+        self._check_plugins(manual=False)  # the plugin index goes with it: the same daily rule
 
     def check_updates(self) -> None:
-        """*Aiuto > Controlla aggiornamenti*: also the versions skipped before."""
+        """*Aiuto > Controlla aggiornamenti*: also the versions skipped before, and the plugin index."""
         started = self.update_checker.start(manual=True)
-        self.statusBar().showMessage(tr("Controllo degli aggiornamenti...") if started
+        plugins = self._check_plugins(manual=True)
+        self.statusBar().showMessage(tr("Controllo degli aggiornamenti...") if started or plugins
                                      else tr("Controllo degli aggiornamenti gia' in corso"), 5000)
+
+    def _plugins_seen(self) -> list[str] | None:
+        """The names of the plugin index told so far (``plugins_seen``, JSON); None before the first look, or when
+        the setting is not a list of names."""
+        try:
+            names = json.loads(self.settings.value("plugins_seen", "") or "")
+        except (TypeError, ValueError):
+            return None
+        return [n for n in names if isinstance(n, str)] if isinstance(names, list) else None
+
+    def _check_plugins(self, manual: bool) -> bool:
+        """Look at the plugin index in the background (``plugin_checker``): the newer versions of the plugins
+        installed by the program are downloaded unless *Aggiorna i plugin da soli* is off (they are put in place
+        at the next start), the plugins new in the index since the last look are told. False when a look is
+        running already."""
+        return self.plugin_checker.start(manual, self._plugins_seen(), self.a_plugins_auto_update.isChecked(),
+                                         self.plugins.folder)
+
+    def _plugins_checked(self, result, error, manual: bool) -> None:
+        """The look at the plugin index is over: one summary window when it found something to tell."""
+        if error is not None:
+            log.info("Controllo dei plugin: %s", error)
+            if manual:
+                self.log_pane.warning(tr("Controllo dei plugin non riuscito: {0}", error))
+            return
+        self.settings.setValue("plugins_seen", json.dumps(result.seen))
+        if not result:
+            if manual:
+                self.log_pane.info(tr("Plugin: nessun aggiornamento"))
+            return
+        dlg = PluginUpdatesDialog(result, parent=self)
+        dlg.exec()
+        if dlg.action == "restart":
+            self.restart()
+        elif dlg.action == "manager":
+            self.show_plugins()
 
     def _updates_checked(self, release, error, manual: bool) -> None:
         if error is not None:

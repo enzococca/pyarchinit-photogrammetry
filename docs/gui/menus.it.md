@@ -422,6 +422,7 @@ Spostare, staccare e riattaccare i pannelli è spiegato in [Pannelli](panes.md#s
 | **Diagnostica ambiente...** | Python, le librerie e i problemi noti, con cosa fare; *Copia* per una segnalazione |
 | **Apri cartella dei log** | i file di log da allegare a una segnalazione |
 | **Controlla aggiornamenti...** · **all'avvio** | una nuova versione, e se cercarla all'avvio ([aggiornamenti](help.md#aggiornamenti)) |
+| **Aggiorna i plugin da soli** | se i plugin installati dal programma scaricano le versioni più nuove, messe a posto al prossimo avvio ([aggiornamenti dei plugin](../plugins.md#aggiornamenti)) |
 | **Sostieni il progetto (PayPal)...** | una donazione |
 | **Informazioni** | versione, librerie e licenza |
 

@@ -223,15 +223,16 @@ def test_automatic_check_once_a_day_and_skip(window, monkeypatch):
 
     w, app = window
     assert w.a_update_auto.isChecked()
-    started = []
+    started, plugins = [], []
     monkeypatch.setattr(w.update_checker, "start", lambda manual=False, skip=None: started.append((manual, skip)) or True)
+    monkeypatch.setattr(w.plugin_checker, "start", lambda *args: plugins.append(args) or True)  # the plugin index too
     w._auto_check_updates()
     w._auto_check_updates()  # the same day: no second request
-    assert started == [(False, None)]
+    assert started == [(False, None)] and len(plugins) == 1
     w.settings.setValue("updates_last_check", "2000-01-01")
     w.a_update_auto.setChecked(False)
     w._auto_check_updates()
-    assert len(started) == 1 and w.settings.value("updates_auto") == "false"
+    assert len(started) == 1 and len(plugins) == 1 and w.settings.value("updates_auto") == "false"
 
     class Skip:
         def __init__(self, release, parent=None):

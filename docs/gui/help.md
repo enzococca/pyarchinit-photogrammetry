@@ -42,6 +42,12 @@ A few seconds after start-up the application asks GitHub for the latest release,
 the GitHub API carrying the version in its User-Agent and nothing else. *Help > Check for updates at start-up* switches it
 off, and so does `PPG_NO_UPDATE_CHECK=1`.
 
+The same look covers the plugins the program installed: it reads the plugin index (one more request of the same kind)
+and downloads the newer versions of those plugins, which become the plugin at the next start; a window then says what
+was downloaded, what waits for a newer program and which plugins are new in the index. *Help > Update the plugins by
+themselves* decides whether the newer versions are downloaded (off, the window only lists them); *Help > Check for
+updates...* does the look at once. The details are in [Plugins](../plugins.md#updates).
+
 When a newer version exists a window shows its notes and offers:
 
 | Button | What it does |
