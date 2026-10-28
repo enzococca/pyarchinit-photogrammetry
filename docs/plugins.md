@@ -60,17 +60,23 @@ switch the daily look off.
   the reason (for example the version of the program it needs).
 * A plugin that is **new** in the index is only announced, once. The program never installs a plugin by itself:
   *Open the plugin manager* in the summary leads to *Install / update*. The first look only records what the
-  index holds and announces nothing.
+  index holds: it announces no plugin as new (the updates and the plugins that wait are told, as at any look).
+* The summary comes up for what is news. A plugin that waits for a newer program, an update that could be
+  installed but was not (the switch below is off) and an update that failed are told **once** for each version -
+  a failed one, once for each message - and again only when the index has a newer version of the plugin.
+  *Help > Check for updates...* (*Aiuto > Controlla aggiornamenti...*) shows them all again. While another
+  window is open, the summary waits until it is closed.
 * The switch *Help > Update the plugins by themselves* (*Aiuto > Aggiorna i plugin da soli*; on until you switch
   it off) decides whether the newer versions are downloaded. Off, the summary lists them under *Updates
   available*, and *Tools > Plugins...* (*Strumenti > Plugin...*) installs them, as before.
-* In *Tools > Plugins...* an update already downloaded shows in the column *Note* as ready, active from the next
+* In *Tools > Plugins...* an update already downloaded shows in the column *Notes* as ready, active from the next
   start.
 
 From the command line, `ppg plugins update` does the same look and downloads the newer versions (`--dry-run` only
 says which ones could be updated); `ppg plugins available` marks the installed plugins that have a newer one.
 Every start of the program puts the downloaded updates in place - also `ppg plugin NAME` in a terminal while the
-window is open: restart the window afterwards, so that it runs the new version too.
+window is open, which prints a line for each one it put in place: restart the window afterwards, so that it runs
+the new version too.
 
 ## Starting a plugin: `ppg plugins new`
 

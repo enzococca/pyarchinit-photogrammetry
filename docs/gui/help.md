@@ -46,7 +46,9 @@ The same look covers the plugins the program installed: it reads the plugin inde
 and downloads the newer versions of those plugins, which become the plugin at the next start; a window then says what
 was downloaded, what waits for a newer program and which plugins are new in the index. *Help > Update the plugins by
 themselves* decides whether the newer versions are downloaded (off, the window only lists them); *Help > Check for
-updates...* does the look at once. The details are in [Plugins](../plugins.md#updates).
+updates...* does the look at once and shows everything it finds. A plugin that waits for a newer program, an update
+that was not installed and an update that failed are told once per version; *Help > Check for updates...* shows them
+again. The details are in [Plugins](../plugins.md#updates).
 
 When a newer version exists a window shows its notes and offers:
 
