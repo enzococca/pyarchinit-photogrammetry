@@ -405,7 +405,7 @@ def with_grids(tmp_path_factory):
     """What the script _WITH_A_GRID gives, run once."""
     folder = tmp_path_factory.mktemp("geoids")
     run = subprocess.run([sys.executable, "-c", _WITH_A_GRID, str(folder), json.dumps(GEOID_SYSTEMS)],
-                         capture_output=True, text=True, timeout=300)
+                         capture_output=True, text=True, timeout=300, close_fds=False)  # posix_spawn: see test_env.py
     assert run.returncode == 0, run.stderr[-3000:]
     return json.loads(run.stdout.strip().splitlines()[-1])
 

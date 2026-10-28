@@ -65,8 +65,10 @@ def _run(tmp_path: Path, script: str, *args: str, **env) -> dict:
     environment = {**os.environ, "PPG_GNSS_DIR": str(tmp_path / "gnss"), "PPG_NO_OPEN3D": "1",
                    "PROJ_USER_WRITABLE_DIRECTORY": str(tmp_path / "proj_user"),
                    "PROJ_NETWORK_ENDPOINT": "http://127.0.0.1:9", **env}
+    # close_fds=False: started by posix_spawn, as the program starts its own processes - on macOS a child forked
+    # after a test has opened a PyArchInit database (SpatiaLite and its PROJ) may die before it runs (tests/test_env.py)
     run = subprocess.run([sys.executable, str(path), *args], capture_output=True, text=True, timeout=300,
-                         env=environment)
+                         env=environment, close_fds=False)
     tail = (f"exit status {run.returncode}\n--- the last lines of its output:\n{run.stdout[-2000:]}\n"
             f"--- the last lines of its errors:\n{run.stderr[-3000:]}")
     assert run.returncode == 0, tail
