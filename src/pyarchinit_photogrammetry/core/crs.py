@@ -34,13 +34,35 @@ def horizontal(crs: str | None) -> str | None:
 
 
 def epsg_code(crs: str | None) -> int | None:
-    """EPSG integer of a CRS string, ``None`` for local/unknown frames."""
+    """The EPSG integer under which a consumer of 2D geometries - a layer of a database (PyArchInit), a GeoPackage
+    (QGIS, QField, zones, measuring points), a QGIS project, IFC - takes the positions of ``crs``: for a compound system
+    (``EPSG:7792+3855``, heights above a geoid), which has no code of its own (or one no such consumer knows), the code
+    of its horizontal part (:func:`horizontal`), the heights staying in the attributes that carry them (a spot height's
+    ``quota_q``, a z column). ``None`` for a local frame, a system PROJ cannot read and a plan without an EPSG code."""
     if is_local(crs):
         return None
     try:
-        return to_pyproj(crs).to_epsg()
+        return to_pyproj(horizontal(crs)).to_epsg()
     except Exception:
         return None
+
+
+def vertical_part(crs: str | None) -> str | None:
+    """The heights of a compound system as their system is named: ``EPSG:3855`` (its EPSG code), else its name; None
+    for a system without a vertical part (a local frame, one PROJ cannot read)."""
+    if is_local(crs):
+        return None
+    try:
+        system = to_pyproj(crs)
+    except Exception:
+        return None
+    if system.is_bound:
+        system = system.source_crs
+    part = next((p for p in (system.sub_crs_list if system.is_compound else ()) if p.is_vertical), None)
+    if part is None:
+        return None
+    code = part.to_epsg()
+    return f"EPSG:{code}" if code else part.name
 
 
 def wkt(crs: str | None) -> str | None:

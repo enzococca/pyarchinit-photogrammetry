@@ -32,7 +32,8 @@ def quote(name: str) -> str:
 
 
 def srs_of(crs: str | None) -> tuple[int, str, str]:
-    """``(srs_id, name, WKT)`` of a CRS string; ``-1`` (undefined cartesian) for local frames."""
+    """``(srs_id, name, WKT)`` of a CRS string - of its horizontal part for a compound system (``EPSG:7792+3855``: the
+    tables are 2D, :func:`..core.crs.epsg_code`); ``-1`` (undefined cartesian) for local frames."""
     from ..core import crs as crs_mod
 
     code = crs_mod.epsg_code(crs)

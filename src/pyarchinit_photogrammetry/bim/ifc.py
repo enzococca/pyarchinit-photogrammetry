@@ -108,10 +108,13 @@ def export_ifc(path: str | Path, elements: list[IfcElement], crs: str | None = N
     origin = np.asarray(origin, float)
     if not crs_mod.is_local(crs):
         ifcopenshell.api.georeference.add_georeferencing(model)
-        epsg = crs_mod.epsg_code(crs)
+        # a compound system (heights above a geoid, EPSG:7792+3855): the projected system of its plan and the vertical
+        # datum of its heights, as IFC names them
+        epsg, vertical = crs_mod.epsg_code(crs), crs_mod.vertical_part(crs)
         ifcopenshell.api.georeference.edit_georeferencing(
             model,
-            projected_crs={"Name": f"EPSG:{epsg}" if epsg else str(crs)},
+            projected_crs={"Name": f"EPSG:{epsg}" if epsg else str(crs_mod.horizontal(crs)),
+                           **({"VerticalDatum": vertical} if vertical else {})},
             coordinate_operation={"Eastings": float(origin[0]), "Northings": float(origin[1]),
                                   "OrthogonalHeight": float(origin[2]), "XAxisAbscissa": 1.0,
                                   "XAxisOrdinate": 0.0, "Scale": 1.0})

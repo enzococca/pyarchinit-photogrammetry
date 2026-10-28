@@ -215,7 +215,7 @@ def export_package(chunk, folder: str | os.PathLike, resolution: float | None = 
 
 def _write_project(folder: Path, name: str, crs: str | None, rasters: list[dict], title: str, qgis=None) -> Path:
     from ..archaeo.stratigraphy import US_TYPES
-    from .qgis_link import find_qgis
+    from .qgis_link import find_qgis, project_crs
 
     qgis = qgis or find_qgis()
     if qgis is None or not qgis.python:
@@ -226,7 +226,7 @@ def _write_project(folder: Path, name: str, crs: str | None, rasters: list[dict]
                 "color": "#e6194b", "label": "etichetta", "value_maps": {"tipo": list(US_TYPES)}},
                {"name": "Quote", "path": str(folder / GPKG), "table": "quote", "geometry": "POINT",
                 "color": "#f59e0b", "label": "quota_q", "value_maps": {"unita_tipo_q": list(US_TYPES)}}]
-    cfg = {"project": str(project), "crs": crs if str(crs or "").upper().startswith("EPSG:") else "",
+    cfg = {"project": str(project), "crs": project_crs(crs),
            "title": title, "vectors": vectors, "rasters": rasters}
     with tempfile.TemporaryDirectory(prefix="ppg-qgis-") as tmp:
         script, conf = Path(tmp) / "build.py", Path(tmp) / "cfg.json"
