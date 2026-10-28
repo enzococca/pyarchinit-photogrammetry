@@ -81,10 +81,15 @@ def transform_points(points: np.ndarray, src: str, dst: str, epoch=None, legacy=
     :func:`..gnss.frames.transform` at their ``epoch``: a decimal year for all of them, or one for each (PROJ alone
     would take a ballpark, or the epoch 2015.0).
 
+    Between two European frames (ETRF2014 or ETRF2020 and ETRF2000 - RDN2008, ETRS89 -: :func:`..gnss.frames.european_hop`)
+    the points go through ITRF2020 at their ``epoch`` too (:func:`..gnss.frames.transform`), never by PROJ's own null
+    through the ETRS89 ensemble (8-9 cm off at Rome in 2026).
+
     Points that carry no frame and epoch - the positions of a project made before the frames, markers, the points of a
     chunk - say so with ``legacy`` (a :class:`..gnss.frames.Legacy`: what they are, their chunk): from or to ITRF2020
     they go by PROJ's own transformation where it has one that is no ballpark, else as positions on WGS 84, with a
-    warning (:func:`..gnss.frames.legacy_transform`).
+    warning (:func:`..gnss.frames.legacy_transform`); between two European frames at the epoch of the survey of their
+    chunk (:func:`..gnss.frames.survey_epoch`), which the log says.
 
     The heights go as the two systems have them: between heights above the ellipsoid and heights above a geoid
     (:func:`..gnss.heights.height_kind`), on every route, only by a transformation that is no ballpark and with the
@@ -100,6 +105,10 @@ def transform_points(points: np.ndarray, src: str, dst: str, epoch=None, legacy=
         if legacy is None:
             return frames.transform(points, src, dst, epoch)
         return frames.legacy_transform(points, src, dst, legacy)
+    if frames.european_hop(src, dst):
+        if epoch is None and legacy is not None:
+            epoch = frames.legacy_epoch(legacy, src, dst)
+        return frames.transform(points, src, dst, epoch)
     return by_proj(points, src, dst)
 
 

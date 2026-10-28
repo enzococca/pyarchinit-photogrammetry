@@ -138,6 +138,43 @@ def dynamic(crs: str | None) -> bool:
     return frame_of(crs) in DYNAMIC
 
 
+def european_hop(src: str | None, dst: str | None) -> bool:
+    """``src`` and ``dst`` are in two different European frames (:data:`EUROPEAN`: ETRF2000 - with RDN2008 and ETRS89 -
+    ETRF2014, ETRF2020): a conversion between them goes through ITRF2020 at the epoch of the positions
+    (:func:`transform`), never by PROJ's own null through the ETRS89 ensemble, 8-9 cm off at Rome in 2026."""
+    source, target = frame_of(src), frame_of(dst)
+    return source in EUROPEAN and target in EUROPEAN and source != target
+
+
+def survey_epoch(chunk) -> float:
+    """The epoch of the survey of ``chunk``, for what carries no epoch of its own (markers, the points of a chunk) where
+    one is needed - between two European frames (:func:`european_hop`): the median of the epochs of the positions of
+    its photos, else of the dates of its photos, else today. A year off changes such a conversion by 2-3 mm."""
+    epochs = [float(e) for cam in getattr(chunk, "cameras", ()) if (e := (cam.meta.get("gnss") or {}).get("epoch"))
+              is not None]
+    if not epochs:
+        epochs = [decimal_year(when) for cam in getattr(chunk, "cameras", ()) if (when := _taken(cam)) is not None]
+    return float(np.median(epochs)) if epochs else decimal_year(datetime.now(timezone.utc))
+
+
+def shot_epoch(cam) -> float | None:
+    """The epoch of the position of a photo: the one of its record (``meta["gnss"]["epoch"]``), else the date its
+    camera wrote in the EXIF (its local time, to the second: hours off at most, nothing for a conversion between frames
+    that move together), else None."""
+    epoch = (cam.meta.get("gnss") or {}).get("epoch")
+    if epoch is not None:
+        return float(epoch)
+    when = _taken(cam)
+    return None if when is None else decimal_year(when)
+
+
+def _taken(cam) -> datetime | None:
+    try:
+        return datetime.strptime(str(cam.meta.get("datetime"))[:19], "%Y:%m:%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
 def position_frame(record: dict | None) -> str:
     """The frame the record of a position (the ``meta["gnss"]`` of a camera) names: one of :data:`FRAMES`;
     ``"unknown"`` for a record that names none - a position written before the frames, read from another program - or
@@ -169,6 +206,15 @@ def legacy_warning(legacy: Legacy, crs: str) -> None:
     log.warning("%s in %s carry no reference frame and epoch: they are converted by PROJ's own transformation where it "
                 "has one that is no ballpark, else as positions on WGS 84, an approximation - about a metre off in "
                 "Europe, more where the transformation of the datum is less accurate. %s", legacy.what, crs, advice)
+
+
+def legacy_epoch(legacy: Legacy, src: str, dst: str) -> float:
+    """The epoch for points that carry none (``legacy``: markers, the points of a chunk) going between two European
+    frames: the epoch of the survey of their chunk (:func:`survey_epoch`), logged."""
+    epoch = survey_epoch(legacy.chunk)
+    log.info("%s go from %s (%s) to %s (%s) through ITRF2020 at the epoch of the survey, %.2f: they carry none of "
+             "their own", legacy.what, src, frame_of(src), dst, frame_of(dst), epoch)
+    return epoch
 
 
 def decimal_year(when: datetime) -> float:
@@ -240,7 +286,11 @@ def _epoch_values(epoch) -> np.ndarray:
 
 def _no_epoch(src: str, dst: str, missing: str) -> ValueError:
     """The error for positions converted from or to a system of ITRF2020 without the epochs they need, said of the side
-    that is in ITRF2020; ``missing`` says what is missing."""
+    that is in ITRF2020 (or of the two European frames they go between); ``missing`` says what is missing."""
+    if european_hop(src, dst):
+        return ValueError(f"positions go from {src} ({frame_of(src)}) to {dst} ({frame_of(dst)}) through ITRF2020 at "
+                          "their epoch, by the Helmerts of the EPSG: converting them needs the epoch of their "
+                          f"coordinates (a decimal year), {missing}")
     if dynamic(src):
         return ValueError(f"positions in ITRF2020 move with time: converting them from {src} to {dst} needs the epoch "
                           f"of their coordinates (a decimal year), {missing}")
@@ -445,6 +495,11 @@ def transform(points, src: str, dst: str, epoch=None) -> np.ndarray:
     conversions only. Between heights above the ellipsoid and heights above a geoid every step is the static path's
     (:func:`..core.crs.by_proj`): with the grid of the geoid, or a :class:`.heights.GridMissing` that names it.
 
+    Between two European frames (ETRF2014 or ETRF2020 and ETRF2000 with the systems of RDN2008 and ETRS89, ETRF2014 and
+    ETRF2020: :func:`european_hop`) through ITRF2020 at the epochs: the inverse of the Helmert from ITRF2020 to the frame
+    of ``src``, then the Helmert to the frame of ``dst`` - never PROJ's own null through the ETRS89 ensemble, 8-9 cm
+    off at Rome in 2026.
+
     A row without a finite number is no position: it stays without one (NaN) and needs no epoch. A ``ValueError``
     without the epoch where the Helmert is applied, for an epoch that is not a year, and for a datum PROJ knows only by
     a ballpark. Between systems that are not in ITRF2020 :func:`..core.crs.transform_points`."""
@@ -452,14 +507,19 @@ def transform(points, src: str, dst: str, epoch=None) -> np.ndarray:
     if src == dst or crs_mod.is_local(src) or crs_mod.is_local(dst):
         return crs_mod.transform_points(pts, src, dst)  # a copy, or the refusal of a local frame
     source, target = frame_of(src), frame_of(dst)
-    if source not in DYNAMIC and target not in DYNAMIC:
-        return crs_mod.transform_points(pts, src, dst)
+    hop = european_hop(src, dst)
+    if source not in DYNAMIC and target not in DYNAMIC and not hop:
+        return crs_mod.by_proj(pts, src, dst)
     whole = np.isfinite(pts).all(axis=1)
     if not whole.all():
         out = np.full(pts.shape, np.nan)
         if whole.any():
             out[whole] = transform(pts[whole], src, dst, _rows(epoch, whole))
         return out
+    if hop:  # ETRF2014 / ETRF2020 / ETRF2000 to another of them: through ITRF2020 at the epochs
+        epochs = _epochs(epoch, len(pts), src, dst)
+        itrf = _move(_convert(pts, src, FRAMES[source]), source, epochs, inverse=True)
+        return _convert(_move(itrf, target, epochs), FRAMES[target], dst)
     if source in DYNAMIC and target in DYNAMIC:
         return _from_itrf2020(_to_itrf2020(pts, src), dst)
     if source in DYNAMIC:

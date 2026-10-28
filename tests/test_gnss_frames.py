@@ -174,6 +174,95 @@ def test_back_to_itrf2020_at_the_epoch():
                        atol=1e-6, rtol=0)
 
 
+def _through_itrf2020(points, src: str, dst: str, epoch: float) -> np.ndarray:
+    """``points`` of the European frame ``src`` into the system ``dst`` of another European frame as the EPSG has it:
+    ITRF2020 at ``epoch`` by the inverse of the Helmert from ITRF2020 to ``src``, then the Helmert to the frame of
+    ``dst``, each by PROJ at that epoch (``tt``)."""
+    def helmert(frame):
+        group = TransformerGroup("EPSG:9989", frames.crs_of(frame), always_xy=True, allow_ballpark=False)
+        return next(t for t in group.transformers
+                    if any((op.name or "").startswith(f"ITRF2020 to {frame}") for op in t.operations or ()))
+
+    from pyproj.enums import TransformDirection
+
+    lon, lat, h = np.asarray(points, float).T
+    x, y, z, _t = helmert(frames.frame_of(src)).transform(lon, lat, h, np.full(lon.shape, epoch),
+                                                         direction=TransformDirection.INVERSE)
+    x, y, z, _t = helmert(frames.frame_of(dst)).transform(x, y, z, np.full(lon.shape, epoch))
+    plan = Transformer.from_crs(frames.crs_of(frames.frame_of(dst)), dst, always_xy=True)
+    return np.column_stack(plan.transform(x, y, z))
+
+
+@pytest.mark.parametrize("frame, shift", [("ETRF2014", (-0.029, 0.079)), ("ETRF2020", (-0.011, 0.088))])
+@pytest.mark.parametrize("target", ["EPSG:7792", "EPSG:25833", "EPSG:7931"])
+def test_etrf2014_and_etrf2020_reach_etrf2000_through_itrf2020_at_the_epoch(frame, shift, target):
+    """A base typed in ETRF2014 or ETRF2020 goes to RDN2008 and ETRS89 / UTM (ETRF2000) through ITRF2020 at its epoch,
+    the two Helmerts of the EPSG - not PROJ's own null through the ETRS89 ensemble, 8-9 cm off at Rome in 2026 (the probe
+    of the final review) - and back the same way; between ETRF2014 and ETRF2020 the same."""
+    exact = _through_itrf2020(ROME, frames.crs_of(frame), target, 2026.82)
+    got = crs.transform_points(ROME, frames.crs_of(frame), target, epoch=2026.82)
+    assert np.allclose(got, exact, atol=1e-6, rtol=0)
+    assert np.allclose(frames.transform(ROME, frames.crs_of(frame), target, epoch=2026.82), exact, atol=1e-6, rtol=0)
+    if target != "EPSG:7931":
+        null = crs.by_proj(ROME, frames.crs_of(frame), target)[0]  # PROJ's own: the 1.6.0
+        assert (null - got[0])[:2] == pytest.approx(shift, abs=0.003)
+    back = crs.transform_points(got, target, frames.crs_of(frame), epoch=2026.82)
+    assert np.allclose(back[0, :2], ROME[0][:2], atol=1e-9, rtol=0) and back[0, 2] == pytest.approx(100.0, abs=1e-4)
+    with pytest.raises(ValueError, match="epoch"):  # no epoch, no conversion: PROJ's null is never taken
+        crs.transform_points(ROME, frames.crs_of(frame), target)
+    other = "ETRF2020" if frame == "ETRF2014" else "ETRF2014"
+    across = crs.transform_points(ROME, frames.crs_of(frame), frames.crs_of(other), epoch=2026.82)
+    assert np.allclose(across, _through_itrf2020(ROME, frames.crs_of(frame), frames.crs_of(other), 2026.82),
+                       atol=1e-9, rtol=0)
+    # within one frame nothing changes, and no epoch is needed
+    assert np.allclose(crs.transform_points(exact, target, "EPSG:7792" if target != "EPSG:7792" else "EPSG:6708"),
+                       crs.by_proj(exact, target, "EPSG:7792" if target != "EPSG:7792" else "EPSG:6708"), atol=1e-9,
+                       rtol=0)
+
+
+def test_photos_in_etrf2014_convert_at_the_epoch_of_their_shot(tmp_path):
+    """The positions of photos in ETRF2014 (PPK on a base typed in ETRF2014) reach the RDN2008 of the chunk at the
+    epoch of their shot - written in their record by the PPK, else the date of the photo (a positions file written
+    without an epoch, a project of the 1.6.0)."""
+    ch = ppg.Document().add_chunk()
+    ch.crs = "EPSG:7792"
+    for key, (epoch, taken) in enumerate(((2026.82, None), (None, "2026:10:27 12:00:00"))):
+        cam = _camera(key)
+        cam.meta["datetime"] = taken
+        gnss_apply.set_camera_position(cam, list(ROME[0]), "EPSG:8403", [0.02, 0.02, 0.04], "ppk", status="fix",
+                                       height="ellipsoidal", frame="ETRF2014", epoch=epoch)
+        ch.cameras.append(cam)
+    positions, system = gcp.camera_references(ch, ch.cameras, ch.crs)
+    assert system == "EPSG:7792"
+    first = _through_itrf2020(ROME, "EPSG:8403", "EPSG:7792", 2026.82)[0]
+    second = _through_itrf2020(ROME, "EPSG:8403", "EPSG:7792", frames.decimal_year(datetime(2026, 10, 27, 12)))[0]
+    assert np.allclose(positions[0], first, atol=1e-6, rtol=0)
+    assert np.allclose(positions[1], second, atol=1e-6, rtol=0)
+    assert np.allclose(gcp.camera_reference_errors(ch)[0]["reference"], first, atol=1e-6, rtol=0)
+
+
+def test_markers_read_in_etrf2014_take_the_epoch_of_the_survey(tmp_path, caplog):
+    """Markers carry no epoch: read in ETRF2014 into a chunk in RDN2008, they take the epoch of the survey - the
+    positions of its photos - and the log says it."""
+    ch = ppg.Document().add_chunk()
+    ch.crs = "EPSG:7792"
+    cam = _camera(0)
+    gnss_apply.set_camera_position(cam, list(ROME[0]), "EPSG:9989", [0.02, 0.02, 0.04], "ppk", status="fix",
+                                   height="ellipsoidal", frame="ITRF2020", epoch=2026.82)
+    ch.cameras.append(cam)
+    assert frames.survey_epoch(ch) == pytest.approx(2026.82)
+    table = tmp_path / "gcp.csv"
+    table.write_text(f"GCP1,{ROME[0][0]},{ROME[0][1]},{ROME[0][2]}\n")
+    with caplog.at_level(logging.INFO, logger=FRAMES_LOG):
+        assert gcp.import_reference(ch, table, crs="EPSG:8403") == 1
+    expected = _through_itrf2020(ROME, "EPSG:8403", "EPSG:7792", 2026.82)[0]
+    assert np.allclose(ch.markers[0].reference.location, expected, atol=1e-6, rtol=0)
+    assert "2026.82" in caplog.text and "ETRF2014" in caplog.text
+    # a chunk with no date at all: the epoch of today
+    bare = ppg.Document().add_chunk()
+    assert frames.survey_epoch(bare) == pytest.approx(frames.decimal_year(datetime.now(timezone.utc)), abs=0.01)
+
+
 def _checked(src: str, dst: str, west: float, south: float, east: float, north: float):
     """The operation PROJ ranks first from ``src`` to ``dst`` among those that are no ballpark, in an area."""
     group = TransformerGroup(src, dst, always_xy=True, allow_ballpark=False,

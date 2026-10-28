@@ -410,10 +410,18 @@ def _converted(chunk, cams, locs: np.ndarray, ref_crs: str, dst: str) -> np.ndar
     (:func:`..gnss.frames.position_frame`, as the program writes them from the frames on) converts at its epoch
     (``meta["gnss"]["epoch"]``); one whose record names none - written before the frames: its frame is unknown, as
     :mod:`..gnss.quality` counts it - by PROJ's own transformation where it has one that is no ballpark, else as a
-    position on WGS 84, with a warning for the chunk (:func:`..gnss.frames.legacy_transform`). One conversion for each
-    kind, each position at its own epoch."""
+    position on WGS 84, with a warning for the chunk (:func:`..gnss.frames.legacy_transform`). Between two European
+    frames (a base typed in ETRF2014 or ETRF2020, a chunk in RDN2008 or ETRS89: :func:`..gnss.frames.european_hop`) at
+    the epoch of each shot - the one of its record, else the date of the photo, else the epoch of the survey. One
+    conversion for each kind, each position at its own epoch."""
     if not frames.dynamic(ref_crs):
-        return crs_mod.transform_points(locs, ref_crs, dst)
+        if not (frames.european_hop(ref_crs, dst) or frames.dynamic(dst)):
+            return crs_mod.transform_points(locs, ref_crs, dst)
+        epochs = [frames.shot_epoch(cam) for cam in cams]
+        if any(e is None for e in epochs):
+            survey = frames.survey_epoch(chunk)
+            epochs = [survey if e is None else e for e in epochs]
+        return crs_mod.transform_points(locs, ref_crs, dst, epoch=epochs)
     framed = np.array([frames.position_frame(cam.meta.get("gnss")) in frames.DYNAMIC for cam in cams], bool)
     out = np.empty((len(locs), 3))
     if framed.any():
