@@ -263,8 +263,9 @@ def _last_message(text: str) -> str:
 
 # ------------------------------------------------------------ Hatanaka-compressed RINEX (CRINEX)
 CRINEX_MISSING = ("Hatanaka-compressed RINEX (Compact RINEX) needs the native core pyarchinit-photogrammetry-core "
-                  "0.6 or later (pip install \"pyarchinit-photogrammetry[fast]\"), or the CRX2RNX program of "
-                  "RNXCMP (https://terras.gsi.go.jp/ja/crx2rnx.html) in the PATH or named by PPG_CRX2RNX")
+                  "0.6 or later (pip install -U \"pyarchinit-photogrammetry-core>=0.6\"; the applications include it "
+                  "from 1.6.1), or the CRX2RNX program of RNXCMP (https://terras.gsi.go.jp/ja/crx2rnx.html) in the "
+                  "PATH or named by PPG_CRX2RNX")
 
 
 def _crx2rnx_program() -> str | None:

@@ -47,6 +47,9 @@ jobs:
           # the station where its RINEX header puts it) and moving (a tenth fixed at least, the median of
           # those on the static station); the script is shared with the windows-arm workflow
           python .github/scripts/ppk_smoke.py
+          # the Hatanaka decoder: the Compact RINEX files of tests/data/crinex as CRX2RNX decoded them, a cut one
+          # refused (every archive of the permanent stations is Compact RINEX)
+          python .github/scripts/crinex_smoke.py
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.label }}

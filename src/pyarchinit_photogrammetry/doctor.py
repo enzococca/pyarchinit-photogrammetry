@@ -114,6 +114,36 @@ def ppk_check() -> Check:
     return Check(name, WARN, detail, PPK_HINT)
 
 
+CRINEX_HINT = ("pip install -U \"pyarchinit-photogrammetry-core>=0.6\" (the applications include it from 1.6.1), or the "
+               "CRX2RNX program of RNXCMP in the PATH or named by PPG_CRX2RNX")
+
+
+def crinex_check() -> Check:
+    """Where the Hatanaka-compressed RINEX (Compact RINEX) of the permanent stations is decoded - every archive of the
+    EPN, the IGS and RING has its observations so: inside the native core (its version and API), by the CRX2RNX
+    program named by PPG_CRX2RNX or in the PATH, or nowhere (and why: a station, a baseline or PPP cannot run)."""
+    from . import _native
+
+    name = "Hatanaka (Compact RINEX)"
+    version = _native.version()
+    if _native.supports("crinex"):
+        return Check(name, OK, f"decoded inside the native core {version} (API {_native.api()})")
+    tool = _native._crx2rnx_program()
+    if tool:
+        path = shutil.which(tool) or (tool if Path(tool).is_file() else None)
+        if path and os.access(path, os.X_OK):
+            return Check(name, OK, f"external CRX2RNX: {path}")
+        return Check(name, WARN, f"PPG_CRX2RNX names {tool}, which is not a program that can run", CRINEX_HINT)
+    if _native.has("crinex"):
+        detail = f"the decoder is inside the native core {version}, which is switched off (PPG_NATIVE=0)"
+    elif version:
+        detail = (f"the native core {version} has no Hatanaka decoder (0.6 or later has it): the files of the "
+                  "permanent stations cannot be read")
+    else:
+        detail = "no native core, and no CRX2RNX: the files of the permanent stations cannot be read"
+    return Check(name, WARN, detail, CRINEX_HINT)
+
+
 def run_checks(gui: bool = True) -> Report:
     from . import __version__
 
@@ -191,6 +221,7 @@ def run_checks(gui: bool = True) -> Report:
         else:
             r.add("GPU (wgpu)", WARN, "no Metal, Vulkan or DirectX 12 device: the matching runs on the CPU", "")
     r.checks.append(ppk_check())
+    r.checks.append(crinex_check())
     v = _version("open3d")
     if v is None:
         r.add("Open3D", WARN, "missing (Poisson meshing uses COLMAP's PoissonRecon)",

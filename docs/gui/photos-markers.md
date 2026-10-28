@@ -121,8 +121,9 @@ the epoch of its coordinates ([Reference frames and epochs](#reference-frames-an
 **Compressed files** are read as they are, as the archives of the stations give them: gzip (`.gz`), the Unix compress
 (`.Z`), a zip with one file in it (`.zip`) and Hatanaka (`.crx`, `.##d`: Compact RINEX 1.0, 3.0 and 3.1), one inside
 another too (`.crx.gz`, `.##d.Z`). Hatanaka files are decoded by the native core 0.6 or later, which the applications
-include; without it by the `CRX2RNX` program of RNXCMP found in the `PATH` (or named by `PPG_CRX2RNX`), else the
-program says what to install. The decompressed copy is kept in the GNSS folder of the program and used again until
+include (their smoke test, `--check`, fails if it is missing); without it by the `CRX2RNX` program of RNXCMP found in
+the `PATH` (or named by `PPG_CRX2RNX`), else the program says what to install. `ppg doctor` (*Help > Environment
+diagnosis...*) says where they are decoded. The decompressed copy is kept in the GNSS folder of the program and used again until
 the file changes; RTKLIB is never given a compressed file.
 
 **The steps.** *Compute PPK...* in the pane (*Tools > GNSS > PPK corrections...*) asks for the `Timestamp.MRK`, then

@@ -120,8 +120,9 @@ coordinate ([Sistemi di riferimento ed epoche](#sistemi-di-riferimento-ed-epoche
 **I file compressi** si leggono così come sono, come li danno gli archivi delle stazioni: gzip (`.gz`), il compress di
 Unix (`.Z`), uno zip con un solo file dentro (`.zip`) e Hatanaka (`.crx`, `.##d`: Compact RINEX 1.0, 3.0 e 3.1),
 anche l'uno dentro l'altro (`.crx.gz`, `.##d.Z`). I file Hatanaka li decodifica il nucleo nativo 0.6 o più recente,
-che le applicazioni contengono già; senza, il programma `CRX2RNX` di RNXCMP trovato nel `PATH` (o indicato da
-`PPG_CRX2RNX`), altrimenti il programma dice che cosa installare. La copia decompressa resta nella cartella GNSS del
+che le applicazioni contengono già (il loro controllo, `--check`, fallisce se manca); senza, il programma `CRX2RNX` di
+RNXCMP trovato nel `PATH` (o indicato da `PPG_CRX2RNX`), altrimenti il programma dice che cosa installare. `ppg doctor`
+(*Aiuto > Diagnostica ambiente*) dice dove si decodificano. La copia decompressa resta nella cartella GNSS del
 programma e si usa di nuovo finché il file non cambia; a RTKLIB non si dà mai un file compresso.
 
 **I passi.** *Calcola PPK...* nel pannello (*Strumenti > GNSS > Correzioni PPK...*) chiede il `Timestamp.MRK`, poi

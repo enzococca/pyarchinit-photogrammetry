@@ -51,6 +51,22 @@ def check_ppk(frozen: bool | None = None) -> tuple[str, bool]:
     return (f"missing (the native core {version} has no RTKLIB)" if version else "missing (no native core)"), not frozen
 
 
+def check_crinex(frozen: bool | None = None) -> tuple[str, bool]:
+    """What ``--check`` says of the Hatanaka decoder, and whether that is right: the packaged application (``frozen``,
+    default ``sys.frozen``) must carry it inside its native core (0.6, API 9) - every archive of the permanent stations
+    is Compact RINEX: without it a station, a baseline or PPP cannot run -, while an installation from the sources may
+    lack it (the program then says what to install). A CRX2RNX named by PPG_CRX2RNX does not count: the check is about
+    the build."""
+    from .. import _native
+
+    frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    version = _native.version()
+    if _native.has("crinex"):
+        return f"Hatanaka decoder in the core {version}", True
+    return (f"missing (the native core {version} has no Hatanaka decoder)" if version
+            else "missing (no native core)"), not frozen
+
+
 def run_script(args: list[str]) -> int:
     """``--run script.py [arguments]``: the script runs as ``__main__`` with ``sys.argv`` set to
     the script and its arguments (``pyarchinit_photogrammetry.app`` holds the open project, as
@@ -262,10 +278,11 @@ def main(argv: list[str] | None = None, splash=None, started: float | None = Non
             from .. import _native
 
             ppk, ppk_ok = check_ppk()  # the packaged application without RTKLIB in its core fails
-            ok = ok and ppk_ok
+            crinex, crinex_ok = check_crinex()  # ... and without the decoder of the stations' files
+            ok = ok and ppk_ok and crinex_ok
             print(f"GUI check: {'ok' if ok else 'FAILED'} | window: {win.windowTitle()} | 3D backend: "
                   f"{win.model_view.backend} | vtk: {vtk} | libs: {libs} | native: {_native.version() or 'missing'} | "
-                  f"ppk: {ppk} | log: {log_path}", flush=True)
+                  f"ppk: {ppk} | crinex: {crinex} | log: {log_path}", flush=True)
             if _frozen_posix():  # see --doctor
                 _hard_exit(0 if ok else 2)
             qapp.exit(0 if ok else 2)

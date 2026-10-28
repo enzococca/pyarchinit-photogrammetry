@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -266,8 +267,8 @@ def test_without_the_core_runs_crx2rnx(tmp_path, monkeypatch):
 
 
 def test_without_anything_says_what_to_install(tmp_path, monkeypatch):
-    """Without the core and without a CRX2RNX the message says what to install: the native core 0.6 through the
-    fast extra of the program, or CRX2RNX."""
+    """Without the core and without a CRX2RNX the message says what to install: the native core 0.6 (a pip install
+    that upgrades an older one; the applications include it), or CRX2RNX."""
     monkeypatch.setattr(_native, "_core", lambda: None)
     monkeypatch.delenv("PPG_CRX2RNX", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path))
@@ -276,5 +277,81 @@ def test_without_anything_says_what_to_install(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError) as error:
         _native.crx2rnx(src, dst)
     text = str(error.value)
-    assert 'pip install "pyarchinit-photogrammetry[fast]"' in text and "0.6" in text and "CRX2RNX" in text
+    assert 'pip install -U "pyarchinit-photogrammetry-core>=0.6"' in text and "CRX2RNX" in text
+    assert "the applications include it" in text
     assert not dst.exists()
+
+
+def test_doctor_says_where_hatanaka_is_decoded(tmp_path, monkeypatch):
+    """ppg doctor: the Hatanaka decoder inside the native core (its version and API), switched off, missing from an
+    older core, a CRX2RNX named by PPG_CRX2RNX or in the PATH, or nothing, with what to install; after the PPK in the
+    report."""
+    from pyarchinit_photogrammetry import doctor
+    from pyarchinit_photogrammetry.engine import isolate
+
+    class Core:  # the native core 0.6
+        __version__, API = "0.6.0", 9
+
+        @staticmethod
+        def crx2rnx(src, dst):
+            pass
+
+    class OldCore:  # 0.5, RTKLIB without the decoder
+        __version__, API = "0.5.0", 8
+
+    monkeypatch.setenv("PPG_NATIVE", "1")
+    monkeypatch.delenv("PPG_CRX2RNX", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(_native, "_core", lambda: Core)
+    check = doctor.crinex_check()
+    assert (check.name, check.level, check.detail) == ("Hatanaka (Compact RINEX)", doctor.OK,
+                                                       "decoded inside the native core 0.6.0 (API 9)")
+    monkeypatch.setenv("PPG_NATIVE", "0")
+    check = doctor.crinex_check()
+    assert check.level == doctor.WARN and "switched off (PPG_NATIVE=0)" in check.detail
+    monkeypatch.setenv("PPG_NATIVE", "1")
+    monkeypatch.setattr(_native, "_core", lambda: OldCore)
+    check = doctor.crinex_check()
+    assert check.level == doctor.WARN and check.detail.startswith("the native core 0.5.0 has no Hatanaka decoder")
+    assert 'pip install -U "pyarchinit-photogrammetry-core>=0.6"' in check.hint and "PPG_CRX2RNX" in check.hint
+    monkeypatch.setattr(_native, "_core", lambda: None)
+    assert doctor.crinex_check().detail.startswith("no native core, and no CRX2RNX")
+    tool = _fake_crx2rnx(tmp_path)
+    check = doctor.crinex_check()  # in the PATH (on Windows a batch file, whatever the case of its extension)
+    assert check.level == doctor.OK and os.path.normcase(check.detail) == os.path.normcase(
+        f"external CRX2RNX: {shutil.which(tool.name) or tool}")
+    monkeypatch.setenv("PPG_CRX2RNX", str(tmp_path / "nowhere" / "CRX2RNX"))
+    check = doctor.crinex_check()
+    assert check.level == doctor.WARN and "not a program that can run" in check.detail
+    monkeypatch.setattr(isolate, "run_isolated", lambda fn, timeout=None: None)  # no SpatiaLite probe here
+    names = [c.name for c in doctor.run_checks(gui=False).checks]
+    assert names.index("Hatanaka (Compact RINEX)") == names.index("PPK (RTKLIB)") + 1
+
+
+def test_the_check_says_whether_the_core_decodes_hatanaka(monkeypatch):
+    """``--check`` says whether the Hatanaka decoder is inside the native core, and fails only as the packaged
+    application without it (every archive of the permanent stations is Compact RINEX); a CRX2RNX named by
+    PPG_CRX2RNX or the core switched off changes nothing: the check is about the build."""
+    pytest.importorskip("PySide6")
+    from pyarchinit_photogrammetry.gui import check_crinex
+
+    class Core:
+        __version__ = "0.6.0"
+
+        @staticmethod
+        def crx2rnx(src, dst):
+            pass
+
+    class OldCore:
+        __version__ = "0.5.0"
+
+    monkeypatch.setenv("PPG_NATIVE", "0")
+    monkeypatch.setenv("PPG_CRX2RNX", "CRX2RNX")
+    monkeypatch.setattr(_native, "_core", lambda: Core)
+    assert check_crinex(frozen=True) == ("Hatanaka decoder in the core 0.6.0", True)
+    monkeypatch.setattr(_native, "_core", lambda: OldCore)
+    assert check_crinex(frozen=True) == ("missing (the native core 0.5.0 has no Hatanaka decoder)", False)
+    assert check_crinex(frozen=False) == ("missing (the native core 0.5.0 has no Hatanaka decoder)", True)
+    monkeypatch.setattr(_native, "_core", lambda: None)
+    assert check_crinex(frozen=True) == ("missing (no native core)", False)
+    assert check_crinex()[1] is True  # this interpreter is not a packaged application
