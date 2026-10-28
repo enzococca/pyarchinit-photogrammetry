@@ -27,6 +27,8 @@ Il suggerimento di una faccia di una foto 360° dice da quale foto viene.
 
 ## Posizioni GNSS delle foto
 
+![Il pannello GNSS: le posizioni delle foto, il loro PPK rispetto a una base, il sistema e le quote, la qualità del volo](../img/gui/pane-gnss.png)
+
 Ogni foto ha una posizione, sa da dove viene e quanto è buona. Il pannello *GNSS* (*Strumenti > GNSS > Pannello
 GNSS*, a destra con *Multispettrale* e *Termico*) le mostra e ha i comandi che danno alle foto una posizione
 migliore del GPS dell'EXIF.
@@ -97,6 +99,8 @@ Tutti e tre accettano `--chunk` e dicono cosa hanno fatto; `mrk` e `positions` s
 con un errore, senza cambiare nulla, quando il file non si può usare.
 
 ### PPK: correzioni da una base
+
+![La finestra Correzioni PPK con una stazione permanente vicina come base](../img/gui/dialog-ppk-station.png)
 
 **Cosa dà.** Un drone senza collegamento RTK (o che l'ha perso) colloca le sue foto a qualche metro. Con il PPK
 (cinematico post-elaborato) RTKLIB ricalcola dove era l'antenna del drone, epoca per epoca, dalle osservazioni dei
@@ -220,6 +224,10 @@ e in `ppg gnss ppk`:
   di nuovo quando escono i finali) e una sessione prima del 27 novembre 2022 (settimana GPS 2238: i prodotti erano
   fatti per igs14.atx) danno avvisi. `ppg gnss ppp` trova il punto da solo.
 
+![Le stazioni permanenti vicine al rilievo, la più vicina per prima](../img/gui/dialog-stations.png)
+
+![La tua base calcolata con il PPP statico: cosa verrà scaricato, e l'avviso di una sessione sotto le 4 ore](../img/gui/dialog-ppk-ppp.png)
+
 #### Antenna della base
 
 **L'altezza dell'antenna.** La posizione della base, scritta o dall'intestazione, è quella del punto a terra: il
@@ -289,6 +297,8 @@ delle stazioni dell'EPN (CC BY 4.0; la soluzione pluriennale si cita con il DOI 
 `10.24414/ROB-EUREF-Cwwww`) e di RING dell'INGV (CC BY 4.0), IGc20 e igs20.atx dell'IGS, i prodotti precisi di ESA,
 CODE e dell'IGS con il loro nome, il geoide EGM2008 dell'NGA (dominio pubblico). Il rapporto PDF cita quelli che ogni
 rilievo ha usato: la stazione e la cartella della soluzione delle sue coordinate, il centro dei prodotti di un PPP.
+
+![La sezione GNSS del rapporto PDF: le posizioni, la qualità del volo, la base del PPK e i crediti](../img/gui/report-gnss.png)
 
 #### Dalla riga di comando
 
@@ -384,6 +394,8 @@ passano mai per quote sul livello del mare. Una griglia tua - come **ITALGEO2005
 quote di Genova 1942, EPSG:5214) - si copia nella cartella delle griglie del programma, che `ppg gnss geoid` stampa
 (`proj` nella cartella GNSS); i sistemi con quelle quote, come `EPSG:7792+5214`, la usano allora.
 
+![La finestra Sistema del rilievo: il sistema proposto dove si trova il rilievo](../img/gui/dialog-survey-crs.png)
+
 **Il sistema del rilievo.** *Sistema del rilievo...* propone il sistema di coordinate del rilievo dove si trova. In
 Europa (dove il datum è ETRS89) un sistema di ETRF2000: RDN2008 / UTM in Italia (EPSG:7791, 7792, 7793, il datum
 nazionale) ed ETRS89 / UTM altrove, dove le posizioni in ITRF2020 (una stazione permanente, una linea di base, un PPP)
@@ -408,6 +420,8 @@ finestra calcola, in background, che cosa fa il cambio, lo mostra e chiede *Appl
   raster multispettrali, termici e satellitari, i rilievi del DEM e il calcolatore raster, i proxy delle US, le
   pietre disegnate su altri raster, i disegni (SVG, DXF) delle sezioni; le linee che sono solo nella finestra (curve
   di livello, piante a quota, misure) si tolgono, da ridisegnare.
+
+![Cosa fa il cambio di sistema, chiesto prima di cambiare qualcosa](../img/gui/dialog-survey-crs-preview.png)
 
 Un chunk in coordinate locali prende solo il sistema: i suoi marker e i suoi disegni restano dove sono, e la sua
 georeferenziazione si calcola dopo. *Modifica > Annulla* non attraversa il cambio: quello che era stato modificato prima

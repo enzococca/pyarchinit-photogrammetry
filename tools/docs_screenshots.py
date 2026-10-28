@@ -7,7 +7,8 @@ project, its menus, bars and panes, in English and in Italian.
 missing. Every picture is written twice: ``<name>.png`` in English and ``<name>.it.png`` in
 Italian, the name the Italian pages of the site pick by themselves (mkdocs-static-i18n). The
 program runs with its own settings, plugins and home folder, so nothing of the user's is read or
-written."""
+written. The GNSS pictures come from a made-up flight over the demo (``tools/docs_gnss.py``), its photos given PPK
+positions in memory only; the lists of the permanent stations are kept in ``DEMO/gnss_data``."""
 from __future__ import annotations
 
 import argparse
@@ -46,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
                                                    "logicalDpi": 96, "logicalBaseDpi": 96, "dpr": 1}]}))
         env = dict(os.environ, PPG_LANG=lang, HOME=str(home), USERPROFILE=str(home), PPG_NO_UPDATE_CHECK="1",
                    PPG_PLUGINS_DIR=str(home / "plugins"), PPG_PLUGINS_ENVIRONMENT="0",
+                   PPG_GNSS_DIR=str(args.demo / "gnss_data"),  # the lists of the permanent stations, read once
                    QT_QPA_PLATFORM=f"offscreen:configfile={screen}",
                    PPG_RENDERER=os.environ.get("PPG_RENDERER", "software"))
         cmd = [sys.executable, __file__, str(args.demo), "--out", str(args.out), "--worker", lang]
@@ -218,11 +220,11 @@ def _worker(args) -> int:
     w.resizeDocks([dock_of(w.photos)], [300], Qt.Orientation.Vertical)  # the names under the thumbnails
     pump(300)
 
-    def tall_shot(widget, name: str) -> None:
+    def tall_shot(widget, name: str, width: int = 400) -> None:
         """A pane of steps floated on its own and tall enough to show all of them."""
         d = dock_of(widget)
         d.setFloating(True)
-        d.resize(400, 1240)
+        d.resize(width, 1240)
         pump(600)
         img = d.grab().toImage()
         bg = img.pixel(img.width() // 2, img.height() - 12)
@@ -317,6 +319,85 @@ def _worker(args) -> int:
         if wanted(name):
             dialog_shot(name, call)
 
+    # ---- GNSS: a made-up flight over the demo (tools/docs_gnss.py), its photos given PPK positions in memory only
+    gnss_pictures = ("pane-gnss", "dialog-ppk-station", "dialog-ppk-ppp", "dialog-stations", "dialog-survey-crs",
+                     "dialog-survey-crs-preview", "report-gnss")
+    if any(wanted(n) for n in gnss_pictures):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import docs_gnss
+        from pyarchinit_photogrammetry.gnss import heights, ppk
+        from pyarchinit_photogrammetry.gui.ppk_dialog import PpkDialog
+        from pyarchinit_photogrammetry.gui.stations_dialog import StationsDialog
+
+        scene = docs_gnss.make_scene(w.chunk, args.demo / "scavo" / "photos", args.demo / "gnss")
+        print(f"  GNSS: {scene.result['status']} against {scene.station.id}, {scene.distance_km:.1f} km")
+        w._gnss_changed()
+        pump(600)
+
+        def neutral(widget) -> None:  # the demo as in a home folder, as fake_exec does
+            from PySide6.QtWidgets import QLabel, QLineEdit
+
+            for field in widget.findChildren(QLineEdit) + widget.findChildren(QLabel):
+                if str(args.demo) in field.text():
+                    field.setText(field.text().replace(str(args.demo), "~/ppg_demo"))
+
+        def window_shot(dlg, name: str, ready=lambda: True, timeout: float = 90.0) -> None:
+            dlg.show()
+            end = time.monotonic() + timeout
+            while time.monotonic() < end and not ready():
+                pump(100)
+            pump(500)
+            neutral(dlg)
+            pump(50)
+            save(dlg.grab(), name)
+            dlg.close()
+
+        if wanted("pane-gnss"):
+            tall_shot(w.gnss_pane, "pane-gnss", width=1100)  # wide: the table of the flights whole
+        if wanted("dialog-ppk-station"):  # the permanent station nearby as the base
+            dlg = PpkDialog(scene.mrk, w, ppk.work_folder(w.chunk), chunk=w.chunk)
+            dlg._added = []  # the navigation files of the last run's base: none of this base
+            dlg.station = scene.station
+            dlg.base.set_paths([])
+            dlg.from_station.setChecked(True)
+            dlg._sources = None  # the list made again for the drone alone
+            dlg._update()
+            window_shot(dlg, "dialog-ppk-station", ready=lambda: not dlg._pending)
+        if wanted("dialog-ppk-ppp"):  # the user's own base, placed by a static PPP
+            dlg = PpkDialog(scene.mrk, w, ppk.work_folder(w.chunk), chunk=w.chunk)
+            dlg.by_ppp.setChecked(True)
+            dlg.base.set_paths([scene.base])
+            dlg._update()
+            window_shot(dlg, "dialog-ppk-ppp", ready=lambda: not dlg._pending)
+        if wanted("dialog-stations"):
+            dlg = StationsDialog(scene.lat, scene.lon, scene.when, parent=w)
+            window_shot(dlg, "dialog-stations", ready=lambda: not dlg.loading)
+        if wanted("dialog-survey-crs"):
+            dialog_shot("dialog-survey-crs", w.gnss_survey_crs)
+        if wanted("dialog-survey-crs-preview"):  # what the change would do, asked before it is done (and refused)
+            w._save_sections = lambda: None  # the sections of the demo left as they are on disk
+            taken.pop("last", None)
+            w._set_survey_crs(heights.survey_crs(scene.lon, scene.lat, geoid=False))
+            end = time.monotonic() + 300
+            while "last" not in taken and time.monotonic() < end:
+                pump(200)
+            if "last" in taken:
+                save(taken["last"], "dialog-survey-crs-preview")
+            else:
+                print("  dialog-survey-crs-preview: no window")
+        if wanted("report-gnss"):
+            from PySide6.QtCore import QSize
+
+            from pyarchinit_photogrammetry.io.pdf_report import generate_pdf_report
+
+            pdf = Path(tempfile.mkdtemp(prefix="ppg-docs-report-")) / "report.pdf"
+            generate_pdf_report(w.doc, pdf, language=lang, chunks=[w.chunk])
+            page = _pdf_page(pdf, ("GNSS", "PPK"), QSize)
+            if page is not None:
+                save(page, "report-gnss")
+            else:
+                print("  report-gnss: no page with the GNSS section")
+
     # ---- the start page (File > Pagina iniziale): its card whole, the panes put aside meanwhile
     if wanted("start-page"):
         from PySide6.QtWidgets import QWidget
@@ -335,6 +416,28 @@ def _worker(args) -> int:
     w.setWindowModified(False)
     w.close()
     return 0
+
+
+def _pdf_page(path: Path, words: tuple[str, ...], QSize):
+    """The first page of the PDF ``path`` that has all ``words``, drawn at about 130 dpi; None when none has them."""
+    from PySide6.QtPdf import QPdfDocument
+
+    doc = QPdfDocument()
+    doc.load(str(path))
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QPainter
+
+    for i in range(doc.pageCount()):
+        if all(word in doc.getAllText(i).text() for word in words):
+            size = doc.pagePointSize(i)
+            page = doc.render(i, QSize(int(size.width() * 1.8), int(size.height() * 1.8)))
+            paper = page.copy()
+            paper.fill(Qt.GlobalColor.white)  # the page is drawn on nothing: on white, as on paper
+            painter = QPainter(paper)
+            painter.drawImage(0, 0, page)
+            painter.end()
+            return paper
+    return None
 
 
 def _icons(bars, folder: Path, lang: str) -> None:

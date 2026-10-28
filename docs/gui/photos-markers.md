@@ -27,6 +27,8 @@ face of a 360° photo names its photo.
 
 ## GNSS positions of the photos
 
+![The GNSS pane: the positions of the photos, their PPK against a base, the system and the heights, the quality of the flight](../img/gui/pane-gnss.png)
+
 Every photo has a position, where it comes from and how good it is. The *GNSS* pane (*Tools > GNSS > GNSS pane*,
 on the right with *Multispectral* and *Thermal*) shows them and holds the commands that give photos a better
 position than the GPS of their EXIF.
@@ -98,6 +100,8 @@ All three take `--chunk` and say what they did; `mrk` and `positions` save the p
 changing nothing, when the file cannot be used.
 
 ### PPK: corrections from a base
+
+![The PPK corrections window with a permanent station nearby as the base](../img/gui/dialog-ppk-station.png)
 
 **What it gives.** A drone without an RTK link (or one that lost it) places its photos to a few metres. With PPK
 (post-processed kinematic) RTKLIB computes again where the drone's antenna was, epoch by epoch, from the drone's own
@@ -219,6 +223,10 @@ dialog and in `ppg gnss ppk`:
   when the final ones are out) and a session before 27 November 2022 (GPS week 2238: the products were made for
   igs14.atx) give warnings. `ppg gnss ppp` finds the mark alone.
 
+![The permanent stations near the survey, the nearest first](../img/gui/dialog-stations.png)
+
+![Your own base placed by a static PPP: what will be downloaded, and the warning of a session under 4 hours](../img/gui/dialog-ppk-ppp.png)
+
 #### The antenna of the base
 
 **The antenna height.** The position of the base, typed or from the header, is that of the mark on the ground: the
@@ -284,6 +292,8 @@ the stations of the EPN (CC BY 4.0; the multi-year solution is cited with the DO
 ESA, CODE and the IGS by their names, the geoid EGM2008 of the NGA (public domain). The PDF report credits those that
 each survey used: the station and the folder of the solution of its coordinates, the centre of the products of a
 PPP.
+
+![The GNSS section of the PDF report: the positions, the quality of the flight, the base of the PPK and the credits](../img/gui/report-gnss.png)
 
 #### From the command line
 
@@ -379,6 +389,8 @@ heights above the ellipsoid are never passed off as heights above the sea level.
 of the grids of the program, which `ppg gnss geoid` prints (`proj` in the GNSS folder); systems with those heights,
 such as `EPSG:7792+5214`, then use it.
 
+![The Survey system window: the system proposed where the survey is](../img/gui/dialog-survey-crs.png)
+
 **The system of the survey.** *Survey system...* proposes the coordinate system of the survey where it is. In Europe
 (where ETRS89 is the datum) a system of ETRF2000: RDN2008 / UTM in Italy (EPSG:7791, 7792, 7793, the national datum)
 and ETRS89 / UTM elsewhere, where positions in ITRF2020 (a permanent station, a baseline, PPP) arrive exactly at their
@@ -403,6 +415,8 @@ out, in the background, what the change does, shows it and asks *Apply?*:
   orthomosaic, the elevations, the multispectral, thermal and satellite rasters, the relief and the raster
   calculator, the US proxies, the stones drawn on other rasters, the drawings (SVG, DXF) of the sections; the lines
   that are only in the window (contour lines, plan slices, measures) are taken away, to draw again.
+
+![What the change of system does, asked before anything changes](../img/gui/dialog-survey-crs-preview.png)
 
 A chunk in local coordinates only takes the system: its markers and drawings stay where they are, and its
 georeference is fitted afterwards. *Edit > Undo* does not cross the change: what was edited before it stays as it is
