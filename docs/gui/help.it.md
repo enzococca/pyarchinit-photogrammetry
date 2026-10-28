@@ -42,6 +42,15 @@ Qualche secondo dopo l'avvio l'applicazione chiede a GitHub l'ultima versione, a
 richiesta HTTPS all'API di GitHub che porta la versione nello User-Agent e nient'altro. *Aiuto > Controlla gli
 aggiornamenti all'avvio* lo spegne, e così `PPG_NO_UPDATE_CHECK=1`.
 
+Lo stesso controllo riguarda i plugin installati dal programma: legge l'indice dei plugin (una richiesta in più dello
+stesso tipo) e scarica le versioni più nuove di quei plugin, che diventano il plugin al prossimo avvio; una finestra
+dice poi che cosa è stato scaricato, che cosa aspetta un programma più nuovo e quali plugin sono nuovi nell'indice.
+*Aiuto > Aggiorna i plugin da soli* decide se le versioni più nuove vengono scaricate (spento, la finestra le elenca
+soltanto); *Aiuto > Controlla aggiornamenti...* fa il controllo subito e mostra tutto quello che trova. Un plugin che
+aspetta un programma più nuovo, un aggiornamento non installato e un aggiornamento fallito vengono detti una volta per
+ogni versione; *Aiuto > Controlla aggiornamenti...* li mostra di nuovo, con gli aggiornamenti scaricati prima che
+aspettano il riavvio. I dettagli sono in [Plugin](../plugins.md#aggiornamenti).
+
 Quando c'è una versione più nuova una finestra mostra le sue note e propone:
 
 | Pulsante | Cosa fa |

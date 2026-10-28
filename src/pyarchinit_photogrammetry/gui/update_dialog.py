@@ -1,16 +1,31 @@
 """New versions from the interface: the background check and the dialog that offers them (the
-work is done by :mod:`pyarchinit_photogrammetry.updates`)."""
+work is done by :mod:`pyarchinit_photogrammetry.updates`), and the same for the plugins: the background
+look at the plugin index and the summary of what it found (the work is done by
+:mod:`pyarchinit_photogrammetry.plugins.updates`)."""
 from __future__ import annotations
 
+import dataclasses
+import html
+import logging
+import re
 import threading
+from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtWidgets import (QApplication, QDialog, QHBoxLayout, QLabel, QPushButton, QTextBrowser,
                                QVBoxLayout)
 
 from .. import __version__, updates
+from ..plugins import updates as plugin_updates
 
-from .i18n import tr
+from .i18n import tr, translate
+
+log = logging.getLogger(__name__)
+
+# ``.install-<name>-<8 random characters>``: the work folder of an install (``tempfile.mkdtemp`` names it, from the
+# letters, digits and "_"), which the message of an OSError may give. The 8 characters end the name: no other name
+# character, no hyphen follows (a plugin called "a-bcdefghi" has 8 letters after a hyphen too).
+WORK_FOLDER = re.compile(r"(\.install-[a-z0-9-]+?-)[a-z0-9_]{8}(?![a-z0-9_-])")
 
 ERROR_TEXTS = {
     "offline": "GitHub non e' raggiungibile: controlla la connessione a Internet.",
@@ -27,39 +42,55 @@ def error_text(exc: Exception) -> str:
     return tr(ERROR_TEXTS.get(getattr(exc, "kind", ""), "Controllo degli aggiornamenti non riuscito."))
 
 
-class UpdateChecker(QObject):
-    """Asks GitHub for the latest release in a background thread. ``finished(release, error,
-    manual)`` is delivered in the GUI thread: the checker lives there, so the connection to its
-    receivers is queued."""
+class BackgroundCheck(QObject):
+    """A check that runs in a background thread, one at a time. ``finished(result, error, manual)`` is delivered in the
+    GUI thread: the checker lives there, so the connection to its receivers is queued."""
 
     finished = Signal(object, object, bool)
+    thread_name = "ppg-check"
 
-    def __init__(self, parent=None, check=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
         self.running = False
-        self._check = check or updates.check
         self.finished.connect(self._done)
 
-    def start(self, manual: bool = False, skip: str | None = None) -> bool:
-        """``skip``: a version the user chose to skip (ignored when the check is ``manual``)."""
+    def _launch(self, manual: bool, check) -> bool:
+        """Run ``check()`` in a thread of its own; False when a check is running already."""
         if self.running:
             return False
         self.running = True
 
         def work():
-            release = error = None
+            result = error = None
             try:
-                release = self._check(skip=None if manual else skip)
+                result = check()
             except Exception as exc:  # a failed check must never break the interface
                 error = exc
-            self.finished.emit(release, error, manual)
+            try:
+                self.finished.emit(result, error, manual)
+            except RuntimeError:  # the checker is gone - its window was closed - while the check went on
+                log.debug("%s: the window was closed before the check ended", self.thread_name)
 
-        threading.Thread(target=work, name="ppg-update-check", daemon=True).start()
+        threading.Thread(target=work, name=self.thread_name, daemon=True).start()
         return True
 
     @Slot(object, object, bool)
     def _done(self, *_):
         self.running = False
+
+
+class UpdateChecker(BackgroundCheck):
+    """Asks GitHub for the latest release in a background thread. ``finished(release, error, manual)``."""
+
+    thread_name = "ppg-update-check"
+
+    def __init__(self, parent=None, check=None):
+        super().__init__(parent)
+        self._check = check or updates.check
+
+    def start(self, manual: bool = False, skip: str | None = None) -> bool:
+        """``skip``: a version the user chose to skip (ignored when the check is ``manual``)."""
+        return self._launch(manual, lambda: self._check(skip=None if manual else skip))
 
 
 class UpdateDialog(QDialog):
@@ -127,3 +158,140 @@ class UpdateDialog(QDialog):
             self.reject()
         else:
             self.accept()
+
+
+class PluginUpdateChecker(BackgroundCheck):
+    """Looks at the plugin index in a background thread (:func:`..plugins.updates.run`: the newer versions
+    of the plugins installed by the program are downloaded and kept for the next start, unless ``update``
+    is off). ``finished(result, error, manual)``; ``result`` is a :class:`..plugins.updates.PluginUpdates`.
+    ``run`` stands in for ``plugins.updates.run`` (the tests give their own)."""
+
+    thread_name = "ppg-plugin-update-check"
+
+    def __init__(self, parent=None, run=None):
+        super().__init__(parent)
+        self._run = run
+
+    def start(self, manual: bool, seen: list[str] | None, update: bool, folder: Path) -> bool:
+        """``seen``: the names of the index told so far (None: the first look, which tells no plugin as new);
+        ``update``: download the newer versions (else only say they exist); ``folder``: the plugin folder.
+        False when a look is running already."""
+        return self._launch(manual, lambda: (self._run or plugin_updates.run)(seen, folder=folder, update=update))
+
+
+def _told_items(result: plugin_updates.PluginUpdates):
+    """The items of ``result`` a daily look tells once, as ``(key, kind, item)``: the plugins that wait and the updates
+    that could be installed but were not (the key is ``kind:name:version``, the version of the index), and the updates
+    that failed (the result holds no version for them: the message stands in its place, without the random name of
+    the work folder it may give - that is not another failure)."""
+    for item in result.waiting:
+        yield f"waiting:{item[0]}:{item[1]}", "waiting", item
+    for item in result.available:
+        yield f"available:{item[0]}:{item[2]}", "available", item
+    for item in result.failed:
+        message = WORK_FOLDER.sub(r"\1", item[1])
+        yield f"failed:{item[0]}:{message}", "failed", item
+
+
+def told_keys(result: plugin_updates.PluginUpdates) -> list[str]:
+    """What the window keeps (``plugins_told``) of a look: the keys of the items it tells once, sorted. Whatever is not
+    in the lists of the look any more drops out of it, so an item that goes away and comes back is told again."""
+    return sorted(key for key, _kind, _item in _told_items(result))
+
+
+def untold(result: plugin_updates.PluginUpdates, told) -> plugin_updates.PluginUpdates:
+    """``result`` with only the waiting, available and failed items whose key is not in ``told``: what a daily look
+    shows. The updates made and the new plugins are always news; the updates downloaded by an earlier look are told
+    only when the user asks (they were told when they were downloaded)."""
+    fresh: dict[str, list] = {"waiting": [], "available": [], "failed": []}
+    for key, kind, item in _told_items(result):
+        if key not in told:
+            fresh[kind].append(item)
+    return dataclasses.replace(result, pending=[], **fresh)
+
+
+def plugin_summary_html(result: plugin_updates.PluginUpdates) -> str:
+    """What a look at the plugin index found, for the summary window: a block for each kind that has something,
+    each under its heading - the plugins updated (active from the next start), those that can be updated (the
+    switch is off), those whose update failed and why, those that wait and why, the new ones of the index with
+    their title and description. The names, versions and texts come from the index and from the plugins: escaped.
+    The reasons are the engine's own messages (English): they go through :func:`.i18n.translate` as the others do."""
+    esc = html.escape
+    blocks: list[str] = []
+
+    def block(heading: str, rows: list[str], note: str = "") -> None:
+        if rows:
+            blocks.append(f"<p><b>{esc(heading)}</b></p>" + (f"<p>{esc(note)}</p>" if note else "")
+                          + "<ul>" + "".join(f"<li>{row}</li>" for row in rows) + "</ul>")
+
+    def change(name: str, old: str, new: str) -> str:
+        return f"<b>{esc(name)}</b> {esc(old)} &rarr; {esc(new)}"
+
+    def reason(name: str, why: str) -> str:
+        """The message of the engine, in the language of the interface, without the name of the plugin that most of
+        them begin with: it stands in front of the line already."""
+        return esc(translate(why.removeprefix(f"{name}: ")))
+
+    block(tr("Aggiornati: attivi dal prossimo avvio"), [change(*u) for u in (*result.updated, *result.pending)])
+    block(tr("Aggiornamenti disponibili"), [change(*u) for u in result.available],
+          tr("L'aggiornamento automatico dei plugin è spento (Aiuto > Aggiorna i plugin da soli): installa le nuove "
+             "versioni dal gestore dei plugin."))
+    block(tr("Aggiornamenti non riusciti"), [f"<b>{esc(name)}</b>: {reason(name, why)}" for name, why in result.failed])
+    block(tr("In attesa"), [f"<b>{esc(name)}</b> {esc(version)}: {reason(name, why)}"
+                            for name, version, why in result.waiting])
+    news = []
+    for entry in result.new:
+        row = f"<b>{esc(entry.localized('title') or entry.name)}</b> {esc(entry.version)}"
+        if entry.localized("description"):
+            row += f"<br>{esc(entry.localized('description'))}"
+        problem = entry.problem()  # one this program cannot install says why
+        if problem:
+            row += f"<br><i>{esc(translate(problem))}</i>"
+        news.append(row)
+    block(tr("Nuovi nel repository dei plugin"), news,
+          tr("Non vengono installati da soli: scegli quali dal gestore dei plugin."))
+    return "".join(blocks)
+
+
+class PluginUpdatesDialog(QDialog):
+    """The summary of a look at the plugin index (:func:`plugin_summary_html`). *Riavvia ora* is offered only
+    when an update was downloaded, now or by an earlier look: it is put in place by the restart. After ``exec()``,
+    ``action`` is ``restart``, ``manager`` (open *Strumenti > Plugin...*) or None."""
+
+    def __init__(self, result: plugin_updates.PluginUpdates, parent=None):
+        super().__init__(parent)
+        self.result = result
+        self.action: str | None = None
+        self.setWindowTitle(tr("Aggiornamenti dei plugin"))
+        lay = QVBoxLayout(self)
+        self.summary = QTextBrowser()
+        self.summary.setHtml(plugin_summary_html(result))
+        self.summary.setMinimumSize(520, 240)
+        lay.addWidget(self.summary)
+        self.resize(620, 420)
+        row = QHBoxLayout()
+        self.buttons: dict[str, QPushButton] = {}
+        waiting_for_the_restart = bool(result.updated or result.pending)
+        if waiting_for_the_restart:
+            self._button(row, "restart", tr("Riavvia ora"), default=True)
+        self._button(row, "manager", tr("Apri il gestore dei plugin"), default=not waiting_for_the_restart)
+        row.addStretch(1)
+        self._button(row, "close", tr("Chiudi"))
+        lay.addLayout(row)
+
+    def _button(self, row, action: str, text: str, default: bool = False) -> QPushButton:
+        b = QPushButton(text)
+        b.setMinimumWidth(b.sizeHint().width() + 24)  # room for the padding of the theme
+        b.setDefault(default)
+        b.setAutoDefault(default)
+        b.clicked.connect(lambda _=False, a=action: self.choose(a))
+        row.addWidget(b)
+        self.buttons[action] = b
+        return b
+
+    def choose(self, action: str) -> None:
+        if action == "close":
+            self.reject()
+            return
+        self.action = action
+        self.accept()

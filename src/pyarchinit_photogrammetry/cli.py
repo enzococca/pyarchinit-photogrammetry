@@ -2025,17 +2025,55 @@ def plugins_list():
 
 @plugins_app.command("available")
 def plugins_available():
-    """The plugins of the index of the plugin repository."""
-    from .plugins import index
+    """The plugins of the index of the plugin repository (for those installed: is there a newer version)."""
+    from .plugins import Manager, index, updates
 
     try:
         entries = index.fetch()
     except index.PluginError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1)
+    manager = Manager()
+    installed = {i.name: i for i in manager.discover()}
+    ready = updates.staged(manager.folder)
     for e in entries:
         problem = e.problem()
-        typer.echo(f"{e.name:28} {e.version:10} {e.title or e.description}" + (f"  [{problem}]" if problem else ""))
+        line = f"{e.name:28} {e.version:10} {e.title or e.description}" + (f"  [{problem}]" if problem else "")
+        info = installed.get(e.name)
+        what = updates.status(e, info, ready, manager.folder)[0] if info is not None else ""
+        if what == "staged":
+            line += f"  (update to {e.version} ready: active from the next start)"
+        elif what == "available":
+            line += f"  (installed {info.version}: can be updated)"
+        typer.echo(line)
+
+
+@plugins_app.command("update")
+def plugins_update(dry_run: bool = typer.Option(False, "--dry-run", help="only say which plugins could be updated")):
+    """Download the newer versions of the plugins installed by the program (active from the next start).
+
+    A plugin installed with pip is never touched; a version that needs a newer program is only reported."""
+    from .plugins import index, updates
+
+    try:
+        result = updates.run(update=not dry_run)
+    except index.PluginError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+    for name, old, new in result.updated:
+        typer.echo(f"{name} {old} -> {new} (active from the next start)")
+    for name, old, new in result.pending:
+        typer.echo(f"{name} {old} -> {new} ready: active from the next start")
+    for name, old, new in result.available:
+        typer.echo(f"{name} {old} -> {new} can be updated")
+    for name, version, problem in result.waiting:
+        typer.echo(f"{name} {version} waits: {problem}")
+    for name, message in result.failed:
+        typer.echo(f"{name} failed: {message}", err=True)
+    if not result and not result.pending:
+        typer.echo("The plugins are up to date.")
+    if result.failed:
+        raise typer.Exit(1)
 
 
 @plugins_app.command("install")
@@ -2098,6 +2136,8 @@ def plugin_command(ctx: typer.Context, name: Optional[str] = typer.Argument(None
 
     m = Manager()
     m.load()
+    for updated, old, new in m.applied:  # downloaded by an earlier run, put in place by this start
+        typer.echo(f"plugin {updated} updated from {old} to {new}", err=True)
     for i in m.plugins:
         if i.error:
             typer.echo(f"plugin {i.name} not loaded: {i.error}", err=True)

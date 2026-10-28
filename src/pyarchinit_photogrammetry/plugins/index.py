@@ -6,17 +6,20 @@ An entry gives a pure-Python wheel (``-py3-none-any.whl``) by URL with its SHA-2
 it was written for, the oldest version of the program it works with and the modules it needs
 beyond those of the program. Installing downloads the wheel, checks the hash, unpacks it into
 ``<plugins>/<name>/`` (in place of an older version) and leaves the activation for the next start.
-``PPG_PLUGIN_INDEX`` points to another index (a file URL in the tests).
+A newer version can also be *staged* in ``<plugins>/.updates/<name>/`` (:mod:`.updates` puts it in
+place at the next start). ``PPG_PLUGIN_INDEX`` points to another index (a file URL in the tests).
 """
 from __future__ import annotations
 
 import hashlib
 import importlib.util
 import json
+import logging
 import os
 import re
 import shutil
 import tempfile
+import time
 import urllib.error
 import zipfile
 from dataclasses import dataclass, field
@@ -25,8 +28,13 @@ from pathlib import Path, PurePosixPath
 from .api import API_VERSION
 from .manager import GROUP, plugins_dir
 
+log = logging.getLogger(__name__)
 INDEX_URL = "https://raw.githubusercontent.com/enzococca/pyarchinit-photogrammetry-plugins/main/index.json"
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+STAGING = ".updates"  # in the plugin folder: the updates downloaded, put in place at the next start
+SWAPPING = "swapping"  # in a work folder: the name of the plugin moved aside into "previous", until the swap is done
+RENAME_RETRIES = 5  # on Windows, a rename right after unpacking is tried again this many times ...
+RENAME_PAUSE = 0.2  # ... with this pause (seconds) before each of them
 
 
 class PluginError(Exception):
@@ -129,13 +137,119 @@ def _safe_extract(archive: zipfile.ZipFile, target: Path) -> None:
     archive.extractall(target)
 
 
-def install(entry: Entry, folder: str | os.PathLike | None = None, progress=None, timeout: float = 60.0) -> Path:
+def _forget(marker: Path) -> None:
+    try:
+        marker.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _rename_new(new: Path, target: Path) -> None:
+    """``new.rename(target)`` for a folder unpacked a moment ago. On Windows an antivirus scanning the new files may
+    refuse it for a moment (a PermissionError): it is tried again a few times with a short pause before it fails."""
+    tries = 1 + (RENAME_RETRIES if os.name == "nt" else 0)
+    for attempt in range(tries):
+        if attempt:
+            time.sleep(RENAME_PAUSE)
+        try:
+            new.rename(target)
+            return
+        except PermissionError:
+            if attempt == tries - 1:
+                raise
+
+
+def swap_folder(new: Path, target: Path, work: Path) -> None:
+    """Put the complete folder ``new`` in place of ``target`` by renames only: the old ``target`` goes into
+    ``work`` first and comes back if ``new`` cannot be put in place (for whatever reason, Ctrl+C included),
+    so a plugin is never missing or half written. If it cannot come back either, ``work`` keeps it - see
+    :func:`interrupted_swap` - and the next start puts it back. The caller deletes ``work`` with
+    :func:`discard_work`."""
+    old = work / "previous"
+    marker = work / SWAPPING  # says where the plugin in "previous" belongs, for as long as it is there
+    try:
+        if target.exists():
+            marker.write_text(os.path.relpath(target, work.parent))
+            target.rename(old)
+        _rename_new(new, target)
+    except BaseException:
+        back = True
+        if old.exists() and not target.exists():  # moved aside, and nothing has taken its place
+            try:
+                old.rename(target)
+            except OSError as exc:
+                back = False
+                log.error("%s could not be put back from %s: %s", target, old, exc)
+        if back:
+            _forget(marker)
+        raise
+    _forget(marker)
+    importlib.invalidate_caches()  # the import system and importlib.metadata listed the folder that was there
+
+
+def interrupted_swap(work: Path) -> tuple[Path, Path] | None:
+    """``(old folder, plugin folder)`` when ``work`` holds the only copy of an installed plugin: a swap moved
+    it aside and could not put it back (it was cut short, or the rename back failed) and the plugin folder is
+    missing. None for any other folder: a swap that finished, or one of a staged update (that is downloaded
+    again)."""
+    try:
+        name = (work / SWAPPING).read_text().strip()
+    except (OSError, ValueError):
+        return None
+    previous = work / "previous"
+    if not name or name in (".", "..") or Path(name).name != name or not previous.is_dir():
+        return None
+    target = work.parent / name
+    return None if target.exists() else (previous, target)
+
+
+def discard_work(work: Path) -> None:
+    """Delete a work folder of :func:`install` or :func:`.updates.apply_staged` - unless it holds the only copy
+    of a plugin (:func:`interrupted_swap`): then it stays, with a warning, and the next start puts the plugin back."""
+    held = interrupted_swap(work)
+    if held is not None:
+        log.warning("plugin %s is kept in %s: it is put back at the next start", held[1].name, work)
+        return
+    shutil.rmtree(work, ignore_errors=True)
+
+
+def drop_staged(folder: Path, name: str) -> None:
+    """Delete the update staged for ``name`` all at once: it is renamed out of ``.updates`` first, so what is
+    left of it, should the deletion stop half way, is never found as an update to apply."""
+    staged = folder / STAGING / name
+    if not staged.exists():
+        return
+    trash = staged.parent / f".trash-{name}-{os.urandom(4).hex()}"
+    try:
+        staged.rename(trash)
+    except OSError as exc:
+        log.warning("the update staged for %s could not be dropped: %s", name, exc)
+        return
+    shutil.rmtree(trash, ignore_errors=True)
+
+
+def install(entry: Entry, folder: str | os.PathLike | None = None, progress=None, timeout: float = 60.0, *,
+            staging: bool = False) -> Path:
     """Download, check and unpack ``entry`` into the plugin folder; returns its folder. Active
-    from the next start of the program."""
+    from the next start of the program. An older version is replaced by renames (:func:`swap_folder`),
+    so a failure leaves it as it was; an update staged for it is dropped: a plugin installed by hand
+    wins over it.
+
+    With ``staging`` the plugin is unpacked into ``<folder>/.updates/<name>/`` instead (replacing an
+    older staged one) and the one installed is not touched: :func:`.updates.apply_staged` puts it in
+    place at the next start. Whatever goes wrong - the download, the archive, the disk - is a
+    :class:`PluginError`."""
     problem = entry.problem()
     if problem:
         raise PluginError(f"{entry.name}: {problem}")
     folder = Path(folder) if folder is not None else plugins_dir()
+    try:
+        return _install(entry, folder, progress, timeout, staging)
+    except OSError as exc:  # unpacking, putting in place: the dialog and the command show a PluginError
+        raise PluginError(f"{entry.name}: could not be put in place: {exc}") from exc
+
+
+def _install(entry: Entry, folder: Path, progress, timeout: float, staging: bool) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix=f".install-{entry.name}-", dir=folder))
     try:
@@ -168,12 +282,13 @@ def install(entry: Entry, folder: str | os.PathLike | None = None, progress=None
         if entry.name not in names:
             raise PluginError(f"{entry.name}: the wheel declares no plugin {entry.name!r} "
                               f"(entry point group {GROUP})")
-        target = folder / entry.name
-        if target.exists():
-            shutil.rmtree(target)
-        unpacked.rename(target)
+        target = folder / STAGING / entry.name if staging else folder / entry.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        swap_folder(unpacked, target, work)
+        if not staging:
+            drop_staged(folder, entry.name)
         if progress is not None:
-            progress(1.0, f"{entry.name} {entry.version} installed")
+            progress(1.0, f"{entry.name} {entry.version} {'staged' if staging else 'installed'}")
         return target
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        discard_work(work)

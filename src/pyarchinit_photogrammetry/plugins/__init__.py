@@ -2,7 +2,9 @@
 
 * :mod:`.api` - :class:`Plugin` (subclassed by a plugin) and :class:`Context` (what it can add);
 * :mod:`.manager` - finding, enabling and activating them (:class:`Manager`);
-* :mod:`.index` - the online index of the plugin repository and installing from it.
+* :mod:`.index` - the online index of the plugin repository and installing from it;
+* :mod:`.updates` - the plugins installed by the program checked against the index, newer versions staged
+  and put in place at the next start.
 
 Writing one: see ``docs/plugins.md``.
 """

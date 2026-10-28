@@ -38,7 +38,8 @@ from .panels import (ConsolePane, LayersPane, LogPane, PhotosPane, PhotosPanel, 
 from .ppk_dialog import PpkDialog
 from .start_page import StartPage
 from .undo import UndoHistory
-from .update_dialog import UpdateChecker, UpdateDialog, error_text
+from .update_dialog import (PluginUpdateChecker, PluginUpdatesDialog, UpdateChecker, UpdateDialog, error_text,
+                            told_keys, untold)
 from .worker import StatusProgress, TaskRunner
 
 log = logging.getLogger("pyarchinit_photogrammetry.gui")
@@ -156,6 +157,7 @@ class _Removed:
 class MainWindow(QMainWindow):
     refreshed = Signal()  # the window shows the project again (a plugin's Context.on_refresh)
     features_deleted = Signal(str, object)  # layer, attributes of the features the user deleted (on_features_deleted)
+    UPDATE_WINDOW_POLL_MS = 400  # a window of the update flow held back looks this often for the open one to close
 
     def __init__(self, document: Document | None = None, autoconnect: bool = True, progress=None,
                  check_updates: bool | None = None):
@@ -207,6 +209,14 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._autoconnect_pyarchinit)
         self.update_checker = UpdateChecker(self)
         self.update_checker.finished.connect(self._updates_checked)
+        self.plugin_checker = PluginUpdateChecker(self)  # the plugin index, looked at with the program's own check
+        self.plugin_checker.finished.connect(self._plugins_checked)
+        self._plugins_asked = False  # a manual check found the look at the plugins running: it answers for it too
+        self._update_windows = 0  # the windows of the update flow open now (a test's fake window has no widget to ask)
+        self._update_waiting: dict[str, object] = {}  # kind ("program", "plugins") -> what opens its window, held back
+        self._update_timer = QTimer(self)  # while a window waits: is the open one closed yet?
+        self._update_timer.setSingleShot(True)
+        self._update_timer.timeout.connect(self._open_waiting)
         self._pending_update: Path | None = None  # new application swapped in when the window closes
         self._relaunch_on_close = False  # a new copy starts when this one closes (Vista > Lingua)
         self._timeline = None  # Strumenti > Fasi dello scavo, a window beside this one
@@ -992,6 +1002,11 @@ class MainWindow(QMainWindow):
         self.a_update_auto.setChecked(self.settings.value("updates_auto", "true") in ("true", True, 1, "1"))
         self.a_update_auto.toggled.connect(lambda on: self.settings.setValue("updates_auto", "true" if on else "false"))
         m.addAction(self.a_update_auto)
+        self.a_plugins_auto_update = QAction(tr("Aggiorna i plugin da soli"), self, checkable=True)
+        self.a_plugins_auto_update.setChecked(
+            self.settings.value("plugins_auto_update", "true") in ("true", True, 1, "1"))
+        self.a_plugins_auto_update.toggled.connect(self._plugins_auto_update_toggled)
+        m.addAction(self.a_plugins_auto_update)
         m.addSeparator()
         self._act(m, tr("Informazioni"), self.about, icon_name="about")
         # ------------------------------------------------------------ toolbar
@@ -1415,10 +1430,15 @@ class MainWindow(QMainWindow):
 
         self.plugins = Manager(window=self)
         self.plugin_menu: QMenu | None = None
+        loaded = True
         try:
             self.plugins.load()
         except Exception as exc:
+            loaded = False
             log.warning("Plugin non caricati: %s", exc)
+        for name, old, new in self.plugins.applied:  # downloaded by an earlier session, put in place by this start
+            self.log_pane.info(tr("Plugin {0} aggiornato dalla {1} alla {2}", name, old, new))
+        if not loaded:
             return
         for info in self.plugins.plugins:
             if info.error:
@@ -2105,11 +2125,16 @@ class MainWindow(QMainWindow):
             return
         NodesDialog(files_dir, self.settings, self).exec()
 
-    def show_plugins(self) -> None:
-        """Strumenti > Plugin: those found and those of the plugin repository."""
+    def show_plugins(self, *, fetch: bool = False) -> None:
+        """Strumenti > Plugin: those found and those of the plugin repository. ``fetch``: with the index already read
+        (the summary of the plugin updates opens it so: what it names is there to install), as *Aggiorna l'elenco*
+        does."""
         from .plugins_dialog import PluginsDialog
 
-        PluginsDialog(self).exec()
+        dlg = PluginsDialog(self)
+        if fetch:
+            dlg.fetch()
+        dlg.exec()
 
     def restart(self) -> None:
         """Close and start again with the same project (after plugins or the language changed)."""
@@ -2353,6 +2378,10 @@ class MainWindow(QMainWindow):
             ev.ignore()
             return
         self._settle_removals(self.doc)  # the files of what was removed: deleted, or back if never saved
+        self._update_timer.stop()  # a window of the update flow held back is not opened for a window that is closed
+        if self._update_waiting:  # the news it carried were not seen: the next start looks again, whatever the day
+            self.settings.remove("updates_last_check")
+        self._update_waiting.clear()
         self._qgis_poll.stop()  # a window closed reads no more edits of QGIS
         self._qgis_timer.stop()
         if getattr(self, "_live_link", None) is not None:
@@ -6953,24 +6982,151 @@ class MainWindow(QMainWindow):
             return
         self.settings.setValue("updates_last_check", today)
         self.update_checker.start(manual=False, skip=self.settings.value("updates_skip", "") or None)
+        self._check_plugins(manual=False)  # the plugin index goes with it: the same daily rule
 
     def check_updates(self) -> None:
-        """*Aiuto > Controlla aggiornamenti*: also the versions skipped before."""
-        started = self.update_checker.start(manual=True)
-        self.statusBar().showMessage(tr("Controllo degli aggiornamenti...") if started
-                                     else tr("Controllo degli aggiornamenti gia' in corso"), 5000)
+        """*Aiuto > Controlla aggiornamenti*: also the versions skipped before, and the plugin index (everything it
+        finds is shown, also what a daily look told before). The message says which look was running already."""
+        program = self.update_checker.start(manual=True)
+        plugins = self._check_plugins(manual=True)
+        if program and plugins:
+            text = tr("Controllo degli aggiornamenti...")
+        elif plugins:
+            text = tr("Controllo degli aggiornamenti... (il controllo della versione del programma è già in corso)")
+        elif program:
+            text = tr("Controllo degli aggiornamenti... (il controllo dei plugin è già in corso)")
+        else:
+            text = tr("Controllo degli aggiornamenti già in corso")
+        self.statusBar().showMessage(text, 5000)
+
+    def _setting_names(self, key: str) -> list[str] | None:
+        """A setting that keeps a JSON list of texts; None when it is missing, is not JSON or is not a list."""
+        try:
+            names = json.loads(self.settings.value(key, "") or "")
+        except (TypeError, ValueError):
+            return None
+        return [n for n in names if isinstance(n, str)] if isinstance(names, list) else None
+
+    def _plugins_seen(self) -> list[str] | None:
+        """The names of the plugin index told so far (``plugins_seen``); None before the first look."""
+        return self._setting_names("plugins_seen")
+
+    def _plugins_told(self) -> set[str]:
+        """What the daily looks told once - the plugins that wait, the updates not installed, the updates that failed
+        - as ``update_dialog.told_keys`` writes them (``plugins_told``)."""
+        return set(self._setting_names("plugins_told") or ())
+
+    def _check_plugins(self, manual: bool) -> bool:
+        """Look at the plugin index in the background (``plugin_checker``): the newer versions of the plugins
+        installed by the program are downloaded unless *Aggiorna i plugin da soli* is off (they are put in place
+        at the next start), the plugins new in the index since the last look are told. False when a look is
+        running already; a manual request that finds it so is remembered, and the look answers it too."""
+        started = self.plugin_checker.start(manual, self._plugins_seen(), self.a_plugins_auto_update.isChecked(),
+                                            self.plugins.folder)
+        if manual and not started:
+            self._plugins_asked = True
+        return started
+
+    def _plugins_checked(self, result, error, manual: bool) -> None:
+        """The look at the plugin index is over. A manual look shows everything it found; a daily one only what was
+        not told before (each plugin that waits, update that is not installed or update that failed is told once per
+        version) and says nothing when that is nothing. A failed look is one row in the log."""
+        manual = manual or self._plugins_asked
+        self._plugins_asked = False
+        if error is not None:
+            (log.warning if manual else log.info)("Controllo dei plugin: %s", error)
+            return
+        shown = result if manual else untold(result, self._plugins_told())
+        if shown or (manual and result.pending):  # what waits for the restart is shown when it is asked for
+            self._open_update_window("plugins", lambda: self._tell_plugins(result, shown))
+            return
+        self._remember_seen(result)  # nothing to show: what the look found is recorded now
+        self._remember_told(result)
+        if manual:
+            self.log_pane.info(tr("Plugin: nessun aggiornamento"))
+
+    def _remember_seen(self, result) -> None:
+        """The plugins of the index are seen - when the summary that may name them as new is shown, or there is none.
+        An index with no plugin records nothing: the first look is still to come."""
+        if result.seen:
+            self.settings.setValue("plugins_seen", json.dumps(result.seen))
+
+    def _remember_told(self, result) -> None:
+        self.settings.setValue("plugins_told", json.dumps(told_keys(result)))
+
+    def _tell_plugins(self, result, shown) -> None:
+        """The summary window of the plugins, and what the user chose in it."""
+        self._remember_seen(result)
+        self._remember_told(result)
+        dlg = PluginUpdatesDialog(shown, parent=self)
+        dlg.exec()
+        if dlg.action == "restart":
+            self.restart()
+        elif dlg.action == "manager":
+            self.show_plugins(fetch=True)
+
+    def _plugins_auto_update_toggled(self, on: bool) -> None:
+        """*Aggiorna i plugin da soli*, kept in the settings. Turned off, the updates already downloaded - they would
+        be put in place by the next start - are dropped, and a row in the log names them."""
+        self.settings.setValue("plugins_auto_update", "true" if on else "false")
+        if on:
+            return
+        from ..plugins import index as plugin_index
+        from ..plugins import updates as plugin_updates
+
+        folder = self.plugins.folder
+        dropped = plugin_updates.staged(folder)
+        for name in dropped:
+            plugin_index.drop_staged(folder, name)
+        if dropped:
+            self.log_pane.info(tr("Aggiornamenti dei plugin già scaricati e tolti: {0}",
+                                  ", ".join(f"{name} {version}" for name, version in sorted(dropped.items()))))
+
+    # ---- the windows of the update flow, one at a time
+    def _modal_open(self) -> bool:
+        """A modal window is open: one of the update flow (a test's fake has no widget to ask) or any other."""
+        return self._update_windows > 0 or QApplication.activeModalWidget() is not None
+
+    def _open_update_window(self, kind: str, show) -> None:
+        """Open a window of the update flow with ``show()`` now - or when no modal window is open any more: the window
+        of the program's own update and the summary of the plugins, both started at the same time, never stack. One
+        window waits for each ``kind``, the newest answer."""
+        if self._modal_open():
+            self._update_waiting[kind] = show
+            self._update_timer.start(self.UPDATE_WINDOW_POLL_MS)  # nothing says when the open window closes
+            return
+        self._update_waiting.pop(kind, None)
+        self._update_windows += 1
+        try:
+            show()
+        finally:
+            self._update_windows -= 1
+        self._open_waiting()  # what came in while it was open
+
+    def _open_waiting(self) -> None:
+        """The windows held back, the program's first, one at a time (held again while another window is open)."""
+        for kind in ("program", "plugins"):
+            show = self._update_waiting.get(kind)
+            if show is not None:
+                self._open_update_window(kind, show)
+                return
 
     def _updates_checked(self, release, error, manual: bool) -> None:
         if error is not None:
             log.info("Controllo degli aggiornamenti: %s", error)
             if manual:
-                self._warn(f"{error_text(error)}\n\n({error})")
+                self._open_update_window("program", lambda: self._warn(f"{error_text(error)}\n\n({error})"))
             return
         if release is None:
             if manual:
-                self._info("Aggiornamenti", tr("Questa e' l'ultima versione ({0}).", __version__))
+                self._open_update_window("program", lambda: self._info(
+                    "Aggiornamenti", tr("Questa e' l'ultima versione ({0}).", __version__)))
             return
         self.log_pane.info(tr("E' disponibile la versione {0} (questa e' la {1})", release.version, __version__))
+        self._open_update_window("program", lambda: self._offer_update(release))
+
+    def _offer_update(self, release) -> None:
+        """The window of a newer version of the program, and what the user chose in it."""
         dlg = UpdateDialog(release, parent=self)
         dlg.exec()
         if dlg.action == "skip":

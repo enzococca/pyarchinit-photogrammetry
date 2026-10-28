@@ -422,6 +422,7 @@ Moving, floating and docking the panes again is in [Panes](panes.md#moving-the-p
 | **Environment diagnosis...** | Python, the libraries and the known problems, with what to do; *Copy* for a bug report |
 | **Open the log folder** | the log files to attach to a bug report |
 | **Check for updates...** · **at start-up** | a newer version, and whether to look for it at start-up ([updates](help.md#updates)) |
+| **Update the plugins by themselves** | whether the plugins installed by the program download their newer versions, put in place at the next start ([plugin updates](../plugins.md#updates)) |
 | **Support the project (PayPal)...** | a donation |
 | **About** | version, libraries and licence |
 
