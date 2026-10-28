@@ -124,7 +124,8 @@ another too (`.crx.gz`, `.##d.Z`). Hatanaka files are decoded by the native core
 include (their smoke test, `--check`, fails if it is missing); without it by the `CRX2RNX` program of RNXCMP found in
 the `PATH` (or named by `PPG_CRX2RNX`), else the program says what to install. `ppg doctor` (*Help > Environment
 diagnosis...*) says where they are decoded. The decompressed copy is kept in the GNSS folder of the program and used again until
-the file changes; RTKLIB is never given a compressed file.
+the file changes (or the decoder does); before the files of a station are downloaded the copies not used for two weeks
+go, and the least used beyond 1 GB. RTKLIB is never given a compressed file.
 
 **The steps.** *Compute PPK...* in the pane (*Tools > GNSS > PPK corrections...*) asks for the `Timestamp.MRK`, then
 opens a dialog:

@@ -1656,8 +1656,12 @@ def test_download_joins_and_reuses_the_cache(trees, tmp_path, monkeypatch):
     _quarters(trees.bkg, kraw.id, _t(26, 10), _t(26, 11))
     calls = _fetches(monkeypatch)
     base = tmp_path / "base"
+    pruned = []
+    real_prune = rinex.prune_cache
+    monkeypatch.setattr(rinex, "prune_cache", lambda *a, **k: pruned.append(1) or real_prune(*a, **k))
 
     out = stations.download_observations(kraw, _t(26, 10, 20), _t(26, 10, 35), base)
+    assert pruned == [1]  # the decoded copies of earlier downloads kept within their days and bytes, first
     assert out == base / "KRAW00POL_20261026-1020_1035.obs"
     assert [url.rsplit("_", 3)[0].rsplit("_", 1)[1] for url in calls] == [
         "2026299" + hhmm for hhmm in ("1000", "1015", "1030")]  # the start of each piece, as the name says

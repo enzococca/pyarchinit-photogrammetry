@@ -799,9 +799,10 @@ def _product(source: Path, role: str):
 
 
 def _run(own: Path, info: rinex.RinexInfo, found: Products, antennas: Path, folder: Path,
-         hours: float) -> tuple[Path, str]:
-    """RTKLIB's static PPP of the base ``own`` (whose header is ``info``) in the work folder ``folder``: the solution
-    file and RTKLIB's last message. As :func:`.ppk.solve` does (:func:`.ppk.new_run`, :func:`.ppk.run_rtklib`), RTKLIB
+         hours: float, joined: bool = False) -> tuple[Path, str]:
+    """RTKLIB's static PPP of the base ``own`` (whose header is ``info``; ``joined``: the program joined it from pieces,
+    and it is moved among the inputs rather than copied) in the work folder ``folder``: the solution file and RTKLIB's
+    last message. As :func:`.ppk.solve` does (:func:`.ppk.new_run`, :func:`.ppk.run_rtklib`), RTKLIB
     works on plain copies of the inputs under names of their own in the subfolder ``INPUTS_FOLDER`` - the
     observations, the orbits (``.sp3``) and the clocks (``.clk``), which it tells by their extensions, the ERP of all
     the days in one file and the antenna file - removed after the run, and writes its options and its solution under
@@ -811,7 +812,7 @@ def _run(own: Path, info: rinex.RinexInfo, found: Products, antennas: Path, fold
     observations, rotation, antenna = copies / "base.obs", copies / ERP_COPY, copies / ppk.ANTENNA_COPY
     orbits = [copies / f"orbit{i}.sp3" for i in range(1, len(found.sp3) + 1)]
     clocks = [copies / f"clock{i}.clk" for i in range(1, len(found.clk) + 1)]
-    inputs = [(observations, ppk.copier(own, info.compressed)),
+    inputs = [(observations, ppk.mover(own) if joined else ppk.copier(own, info.compressed)),
               *zip(orbits, (_product(source, "sp3") for source in found.sp3)),
               *zip(clocks, (_product(source, "clk") for source in found.clk))]
     others = [(rotation, lambda target: join_erp(found.erp, target)),
@@ -865,8 +866,9 @@ def solve_static(obs: Path | Sequence[Path], folder: Path, products: Products | 
     progress(0.0, f"{_YOUR_BASE.capitalize()} by static PPP")
     if len(pieces) == 1:
         return _solve_static(pieces, pieces[0], [], folder, products, atx, progress)
+    # the base in one file, beside the rest, moved among the inputs of the run (no second copy)
     folder.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".base-", dir=folder) as scratch:  # the base in one file, beside the rest
+    with tempfile.TemporaryDirectory(prefix=".base-", dir=folder) as scratch:
         joined = Path(scratch) / "base.obs"
         _info, holes = rinex.join(pieces, joined)
         return _solve_static(pieces, joined, holes, folder, products, atx, progress)
@@ -914,7 +916,7 @@ def _solve_static(pieces: list[Path], own: Path, holes: list[tuple[datetime, dat
                         f"{antennas.name} and called ITRF2020: the two frames are millimetres apart, but the antenna "
                         "offsets of the two files differ by up to centimetres, and the mark can be that much off")
     progress(0.8, f"RTKLIB: the static PPP of {name}")
-    path, message = _run(own, info, found, antennas, folder / WORK_FOLDER, hours)
+    path, message = _run(own, info, found, antennas, folder / WORK_FOLDER, hours, joined=len(pieces) > 1)
     if message.lower().startswith("error"):
         warnings.append(f"RTKLIB: {message}")
     (lat, lon, h), q, sd = ppk.static_position(path)

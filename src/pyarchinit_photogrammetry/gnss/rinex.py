@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import zipfile
 import zlib
 from collections.abc import Iterable, Iterator, Sequence
@@ -311,23 +312,92 @@ def _hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "surrogateescape")).hexdigest()[:16]
 
 
+# the decoded copies of the cache of the program (prune_cache): those not used for so many days go, then the least used
+# beyond so many bytes - a day of a station at 1 s is gigabytes decoded -; a copy used, or a scratch folder of an
+# unpacking made, within IN_USE seconds is never touched: a run may be reading or writing it
+CACHE_DAYS = 14
+CACHE_BYTES = 1 << 30
+IN_USE = 3600.0
+
+
 def _plain(path: Path, layers: tuple[str, ...], folder: str | Path | None) -> Path:
     """:func:`plain` for a file whose ``layers`` are known. The copy is called after a hash of the whole path of the
-    file and a hash of its size and modification time: the same file changed has another copy, and the copies of its
-    earlier states are removed."""
+    file and a hash of its size, its modification time, its layers and - with a Hatanaka layer - who decodes it
+    (:func:`.._native.crinex_decoder`): the same file changed, or decoded by a new decoder, has another copy, and the
+    copies of its earlier states are removed. A copy used again is marked used (its access time) for
+    :func:`prune_cache`."""
     if not layers or layers == ("gzip",):
         return path
     stat = path.stat()
     cache = Path(folder) if folder is not None else download.cache_dir("rinex")
     whose = _hash(str(path.resolve()))
-    copy = cache / f"{whose}-{_hash(f'{stat.st_size}|{stat.st_mtime_ns}')}.rnx"
+    decoder = _native.crinex_decoder() if "hatanaka" in layers else ""
+    copy = cache / f"{whose}-{_hash(f'{stat.st_size}|{stat.st_mtime_ns}|{chr(43).join(layers)}|{decoder}')}.rnx"
     if not copy.exists():
         cache.mkdir(parents=True, exist_ok=True)
         _unpack(path, layers, copy)
         for old in cache.glob(f"{whose}-*.rnx"):
             if old != copy:
                 old.unlink(missing_ok=True)
+    else:
+        try:
+            os.utime(copy, ns=(time.time_ns(), copy.stat().st_mtime_ns))
+        except OSError:  # a cache that cannot be written: used as it is
+            pass
     return copy
+
+
+def prune_cache(folder: str | Path | None = None, days: float = CACHE_DAYS, size: int = CACHE_BYTES,
+                now: float | None = None) -> list[Path]:
+    """The cache of decoded copies (``folder``, by default the program's, :func:`download.cache_dir`) kept within
+    ``days`` and ``size`` bytes: the copies (``*.rnx``) not used for ``days`` go, then the least used until the copies
+    take ``size`` bytes at most; the scratch folders of an unpacking that stopped (``.unpack-*``) and the copies never
+    finished (``*.rnx.part``) go too. What was used or made within :data:`IN_USE` seconds of ``now`` is never removed
+    (a run may be reading or writing it), nor a file that cannot be removed (open elsewhere on Windows), nor anything
+    the program did not write there. Returns what was removed. :func:`..stations.download_observations` calls it
+    before it downloads."""
+    cache = Path(folder) if folder is not None else download.cache_dir("rinex")
+    now = time.time() if now is None else now
+    removed: list[Path] = []
+    copies: list[tuple[float, int, Path]] = []
+    try:
+        entries = list(cache.iterdir())
+    except OSError:
+        return removed
+    for entry in entries:
+        try:
+            stat = entry.stat()
+        except OSError:
+            continue
+        used = max(stat.st_atime, stat.st_mtime)
+        ours = entry.name.startswith(".unpack-") and entry.is_dir() or entry.name.endswith(".rnx.part")
+        if entry.suffix == ".rnx" and entry.is_file():
+            copies.append((used, stat.st_size, entry))
+        elif ours and now - used >= IN_USE:
+            if _removed(entry):
+                removed.append(entry)
+    copies.sort(key=lambda item: item[0])
+    total = sum(item[1] for item in copies)
+    for used, bytes_, entry in copies:
+        if now - used < IN_USE:
+            continue
+        if now - used >= days * 86400.0 or total > size:
+            if _removed(entry):
+                removed.append(entry)
+                total -= bytes_
+    return removed
+
+
+def _removed(path: Path) -> bool:
+    """``path`` removed (a folder with what is in it); False when it cannot be (held open elsewhere)."""
+    try:
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    except OSError:
+        return False
+    return True
 
 
 def plain(path: str | Path, folder: str | Path | None = None) -> Path:

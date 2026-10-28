@@ -268,6 +268,23 @@ CRINEX_MISSING = ("Hatanaka-compressed RINEX (Compact RINEX) needs the native co
                   "PATH or named by PPG_CRX2RNX")
 
 
+def crinex_decoder() -> str:
+    """Who decodes Hatanaka files now: the native core with its version and API, or the CRX2RNX program with its path,
+    size and time; ``""`` for nobody. Part of the name of a decoded copy (``gnss.rinex.plain``): a new decoder decodes
+    the file again."""
+    if kernel("crx2rnx") is not None:
+        return f"ppg_core {version()} API {api()}"
+    tool = _crx2rnx_program()
+    if tool is None:
+        return ""
+    path = shutil.which(tool) or tool
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return f"CRX2RNX {path}"
+    return f"CRX2RNX {path} {stat.st_size} {stat.st_mtime_ns}"
+
+
 def _crx2rnx_program() -> str | None:
     """The CRX2RNX to run without the core: the program named by ``PPG_CRX2RNX`` (whether it is there
     is checked when it runs), otherwise CRX2RNX or crx2rnx in the PATH, otherwise None."""

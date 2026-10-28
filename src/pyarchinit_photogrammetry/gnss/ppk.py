@@ -981,6 +981,12 @@ def copier(source: str | Path, compressed: str | None) -> Callable[[Path], None]
     return lambda target: _copy(Path(source), target, compressed)
 
 
+def mover(source: str | Path) -> Callable[[Path], None]:
+    """What puts ``source`` - a file the program made for the run, the pieces of a receiver joined in its work folder -
+    among the copies of a run (:func:`run_rtklib`): moved there, on the same disk, rather than copied once more."""
+    return lambda target: os.replace(source, target)
+
+
 def _no_positions(message: str) -> str:
     return f"nothing was computed: {message or 'RTKLIB wrote no positions'}"
 
@@ -1093,7 +1099,10 @@ def solve(rover: str | Path | Sequence[str | Path], base: str | Path | Sequence[
                          f"{roles!r}")
     roles = tuple(roles)
     rovers, bases = _files(rover, ROLES[roles[0]]), _files(base, ROLES[roles[1]])
-    with tempfile.TemporaryDirectory(prefix="ppg-ppk-") as scratch:  # files in pieces joined, for the length of the run
+    Path(folder).mkdir(parents=True, exist_ok=True)
+    # files in pieces joined in the work folder, on its disk (a day of a station at 1 s is gigabytes), and moved among
+    # the inputs of the run (mover): no copy in the temporary folder of the system, no second copy
+    with tempfile.TemporaryDirectory(prefix=".join-", dir=folder) as scratch:
         rover_file, rover_holes = _one_file(rovers, Path(scratch) / "rover.obs")
         base_file, base_holes = _one_file(bases, Path(scratch) / "base.obs")
         return _solve(rovers, rover_file, rover_holes, bases, base_file, base_holes, navs, base_position, folder,
@@ -1141,8 +1150,8 @@ def _solve(rovers: list[Path], rover: Path, rover_holes: list[tuple[datetime, da
                              *([antenna_source] if antenna_source else [])))
     # RTKLIB matches the names of its inputs ignoring the case: nothing in there but them and the antenna file
     copies = files.copies
-    inputs = [(copies / "rover.obs", copier(rover, rover_info.compressed)),
-              (copies / "base.obs", copier(base, base_info.compressed))]
+    inputs = [(copies / "rover.obs", mover(rover) if len(rovers) > 1 else copier(rover, rover_info.compressed)),
+              (copies / "base.obs", mover(base) if len(bases) > 1 else copier(base, base_info.compressed))]
     inputs += [(copies / f"nav{i}.nav", copier(path, info.compressed)) for i, (path, info) in enumerate(nav_files, 1)]
     # the file is given to RTKLIB when the antenna of the base, or the one of the rover it is told to look for, is in
     # it (without, RTKLIB would apply nothing, and the copy of a file of 60 MB would be for nothing): a copy among the

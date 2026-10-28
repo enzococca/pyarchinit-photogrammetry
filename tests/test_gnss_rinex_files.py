@@ -9,6 +9,7 @@ import gzip
 import os
 import re
 import shutil
+import time
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -340,6 +341,68 @@ def test_plain_reused_until_the_file_changes(tmp_path):
     assert _files(cache) == sorted([third.name, fourth.name])  # no piece of a copy beside them
     # the folder is the cache of the program unless it is given
     assert rinex.plain(packed).parent == download.cache_dir("rinex")
+
+
+@needs_a_decoder
+def test_a_new_hatanaka_decoder_decodes_again(tmp_path, monkeypatch):
+    """The decoded copy of a Hatanaka file is named after the decoder too: a new core (or another CRX2RNX) decodes the
+    file again, and the copy of the old decoder goes; a file without a Hatanaka layer keeps its copy."""
+    packed = tmp_path / "base.crx"
+    shutil.copyfile(CRINEX / "kraw_rinex402.crx", packed)
+    compressed = tmp_path / "base.05d.Z"
+    shutil.copyfile(COMPRESS / "b11-whole.Z", compressed)
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(_native, "crinex_decoder", lambda: "ppg_core 0.6.0 API 9")
+    first, other = rinex.plain(packed, cache), rinex.plain(compressed, cache)
+    assert rinex.plain(packed, cache) == first
+    monkeypatch.setattr(_native, "crinex_decoder", lambda: "ppg_core 0.6.1 API 10")
+    second = rinex.plain(packed, cache)
+    assert second != first and second.read_bytes() == (CRINEX / "kraw_rinex402.crx.expected").read_bytes()
+    assert not first.exists() and rinex.plain(compressed, cache) == other  # no Hatanaka layer: the same copy
+    assert sorted(_files(cache)) == sorted([second.name, other.name])
+
+
+def test_the_cache_of_decoded_copies_is_pruned(tmp_path):
+    """The decoded copies not used for :data:`rinex.CACHE_DAYS` days go, then the least used beyond
+    :data:`rinex.CACHE_BYTES`; the scratch folders left by an unpacking that stopped, and the pieces of copies never
+    finished, go too. A copy used, or a scratch folder made, within the last hour is never touched: a run may be reading
+    or writing it. Using a copy again marks it used (its access time; its modification time stays)."""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    now = 2_000_000_000.0
+    day = 86400.0
+
+    def made(name, size, used, folder=False):
+        path = cache / name
+        if folder:
+            path.mkdir()
+            (path / "layer1").write_bytes(b"x" * size)
+        else:
+            path.write_bytes(b"x" * size)
+        os.utime(path, (now - used, now - used))
+        return path
+
+    old = made("a-1.rnx", 10, 40 * day)  # not used for 40 days
+    recent = [made(f"b-{i}.rnx", 400, i * day) for i in range(1, 4)]  # used 1, 2 and 3 days ago
+    busy = made("c-1.rnx", 400, 600.0)  # used ten minutes ago: in use
+    orphan, live = made(".unpack-old", 5, 2 * day, folder=True), made(".unpack-new", 5, 60.0, folder=True)
+    stale, writing = made("d-1.rnx.part", 7, 2 * day), made("e-1.rnx.part", 7, 30.0)
+    other = made("notes.txt", 3, 90 * day)  # not ours
+    removed = rinex.prune_cache(cache, days=30, size=1000, now=now)
+    # 30 days: the old one; then 1600 bytes over 1000: the least used (3 days, 2 days) until under, never the busy one
+    assert sorted(p.name for p in removed) == sorted([old.name, recent[2].name, recent[1].name, orphan.name,
+                                                      stale.name])
+    assert all(p.exists() for p in (recent[0], busy, live, writing, other))
+    assert not any(p.exists() for p in removed)
+    # a copy used again is marked used now: its access time (its modification time stays)
+    packed = tmp_path / "base.05d.Z"
+    shutil.copyfile(COMPRESS / "b11-whole.Z", packed)
+    copy = rinex.plain(packed, cache)
+    real = time.time()
+    os.utime(copy, (real - 40 * day, real - 40 * day))
+    assert rinex.plain(packed, cache) == copy
+    assert copy.stat().st_atime > real - 60 and copy.stat().st_mtime < real - 39 * day
+    assert copy not in rinex.prune_cache(cache, days=30, size=1 << 30) and copy.exists()
 
 
 def test_zip_with_one_rinex(tmp_path):
@@ -736,12 +799,21 @@ def test_solve_reads_compressed_inputs_as_they_are(tmp_path, fake_rtklib):
         [solution.path.name, solution.path.with_suffix(".conf").name])
 
 
-def test_solve_with_a_base_in_pieces_gives_rtklib_one_file(tmp_path, fake_rtklib):
+def test_solve_with_a_base_in_pieces_gives_rtklib_one_file(tmp_path, fake_rtklib, monkeypatch):
+    """The pieces of a base are joined in the work folder of the run - on its disk, not in the temporary folder of the
+    system - and the joined file is moved among the inputs of RTKLIB, not copied once more."""
     header, records = _records(PPK_BASE)
     first = _piece(tmp_path / "first.05o", header, records[:70])
     second = _piece(tmp_path / "second.05o", header, records[68:])
     work = tmp_path / "work"
+    joins, copied = [], []
+    real_join, real_copy = rinex.join, shutil.copyfile
+    monkeypatch.setattr(rinex, "join", lambda paths, out: joins.append(Path(out)) or real_join(paths, out))
+    monkeypatch.setattr(ppk.shutil, "copyfile", lambda src, dst, **k: copied.append(Path(src)) or real_copy(src, dst))
     solution = ppk.solve(PPK_ROVER, [second, first], [PPK_NAV], folder=work)  # not in the order of time
+    monkeypatch.setattr(rinex, "join", real_join)
+    (joined_at,) = joins
+    assert work.resolve() in joined_at.resolve().parents and joined_at not in copied and not joined_at.exists()
     (run,) = fake_rtklib()
     joined = tmp_path / "joined.05o"
     rinex.join([first, second], joined)

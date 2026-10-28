@@ -1332,11 +1332,13 @@ def download_observations(station: Station, start: datetime, end: datetime, fold
     join - is given up for the 30 s files, and the error, if those fail too, has both reasons; not for a missing
     Hatanaka decoder, which the 30 s files need as much. With a rate asked for it is an error. A file that is not
     there, a site that cannot be reached (the message of RING names its port, 44324) and files that do not join are a
-    ``ValueError`` too, and no file is left."""
+    ``ValueError`` too, and no file is left. Before it downloads, the decoded copies of earlier files are kept within
+    their days and bytes (:func:`rinex.prune_cache`)."""
     progress = as_progress(progress)
     _checked(station)
     start, end = _gps_span(start, end)
     rate = _rate(rate)
+    rinex.prune_cache()  # the pieces decoded for earlier flights: gigabytes a day at 1 s
     files = observation_files(station, start, end, rate, progress)
     folder = Path(folder)
     fine = rate == "auto" and files[0].interval == 1.0  # a base at 1 s may be given up for the files at 30 s
