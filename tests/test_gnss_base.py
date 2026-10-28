@@ -191,7 +191,12 @@ def test_the_reversed_baseline_finds_the_other_header(tmp_path, monkeypatch):
     held = ppk.BasePosition(*_header_llh(OWN), "station", frame="ITRF2020", epoch=2005.25)
     r = base.baseline(STATION_OBS, station_3040, tmp_path / "work", station_obs=OWN, station_position=held, atx=None)
     assert r.q == 1
-    assert np.allclose(_enu(_llh(r.position), _header_llh(STATION_OBS))[0], -HEADERS_APART, rtol=0, atol=0.008)
+    found = _enu(_llh(r.position), _header_llh(STATION_OBS))[0]
+    # the margin is small (the atmosphere estimated over the short baseline moves it by millimetres): the offset says
+    # by how much it misses, when it does
+    assert np.allclose(found, -HEADERS_APART, rtol=0, atol=0.008), (
+        f"east, north, up {np.round(found * 1000, 2)} mm against {np.round(-np.asarray(HEADERS_APART) * 1000, 2)} mm: "
+        f"{np.round((found + np.asarray(HEADERS_APART)) * 1000, 2)} mm off, 8 mm allowed")
 
 
 @needs_rtklib
