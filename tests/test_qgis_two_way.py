@@ -228,6 +228,63 @@ def test_a_copy_made_in_qgis_is_a_feature_of_its_own(tmp_path):
     qgis.close()
 
 
+def test_a_row_under_an_identity_never_known_here_is_added_as_it_is(tmp_path):
+    """Features pasted in QGIS from another project with their identity, never signed by this program - one unit of
+    one polygon, one of two (as a unit drawn in RustGIS as two polygons comes): added under that identity, every row of
+    it, kept and signed; a new part of a unit known here is a change of that unit, and so is a unit known here whose
+    row was replaced by an unsigned one under its identity."""
+    a, b = _unit(1, X0, Y0), _unit(2, X0 + 1, Y0)
+    link = LiveLink(tmp_path, CRS)
+    link.write(_layers([a, b]))
+    link.read_changes()
+    qgis = Qgis(link.path)
+    other, pair = new_id(), new_id()
+    qgis.save(qgis.insert("unita", box(X0 + 4, Y0, X0 + 4.5, Y0 + 0.5), us_s="5", **{ID_FIELD: other, PART_FIELD: 1}),
+              qgis.insert("unita", box(X0 + 6, Y0, X0 + 6.5, Y0 + 0.5), us_s="6", **{ID_FIELD: pair, PART_FIELD: 1}),
+              qgis.insert("unita", box(X0 + 7, Y0, X0 + 7.5, Y0 + 0.5), us_s="6", **{ID_FIELD: pair, PART_FIELD: 2}),
+              qgis.insert("unita", box(X0, Y0 + 2, X0 + 0.5, Y0 + 2.5), us_s="1",
+                          **{ID_FIELD: a["ppg_id"], PART_FIELD: 2}))
+    got = link.read_changes()["unita"]
+    assert sorted((f.id, f.part) for f in got.added) == sorted([(other, 1), (pair, 1), (pair, 2)])
+    assert [(f.id, f.part) for f in got.changed] == [(a["ppg_id"], 2)] and not got.deleted
+    stored = {r["fid"]: r for r in _rows(link.path, "unita")}
+    assert all(stored[f.fid][ID_FIELD] == f.id and stored[f.fid][SIG_FIELD] for f in got.added)
+    assert link.read_changes() == {}  # given once
+    qgis.save(qgis.move("unita", next(f.fid for f in got.added if f.id == other), box(X0 + 4, Y0, X0 + 5, Y0 + 1)))
+    assert [(f.id, f.part) for f in link.read_changes()["unita"].changed] == [(other, 1)]  # known now: a change
+    old = next(r["fid"] for r in _rows(link.path, "unita") if r[ID_FIELD] == b["ppg_id"])
+    qgis.save(qgis.delete("unita", old),
+              qgis.insert("unita", box(X0 + 1, Y0, X0 + 1.8, Y0 + 0.8), us_s="2",
+                          **{ID_FIELD: b["ppg_id"], PART_FIELD: 3}))
+    got = link.read_changes()["unita"]
+    assert [(f.id, f.part) for f in got.changed] == [(b["ppg_id"], 3)] and not got.added
+    assert got.deleted == [(b["ppg_id"], 1)]
+    qgis.close()
+
+
+def test_a_unit_pasted_in_qgis_with_its_identity_comes_into_the_window(trench):
+    """Through the window: a unit pasted with its identity as two polygons, and a spot height pasted with its own,
+    come in as one unit and one spot height, under those identities."""
+    w, app, mw = trench
+    w.a_qgis_live.setChecked(True)
+    w._export_qgis_layers()
+    path = w._qgis_dir() / LIVE_DB
+    w._poll_qgis()
+    unit, spot = new_id(), new_id()
+    qgis = Qgis(path)
+    qgis.save(qgis.insert("unita", box(X0 + 1, Y0 + 1, X0 + 2, Y0 + 2), us_s="21", area_s="1",
+                          **{ID_FIELD: unit, PART_FIELD: 1}),
+              qgis.insert("unita", box(X0 + 3, Y0 + 1, X0 + 3.5, Y0 + 1.5), us_s="21", area_s="1",
+                          **{ID_FIELD: unit, PART_FIELD: 2}),
+              qgis.insert("quote", Point(X0 + 0.5, Y0 + 0.5), quota_q=100.5, us_q="21", **{ID_FIELD: spot}))
+    w._poll_qgis()
+    (u,) = [u for u in w.units if u.us == "21"]
+    assert u.attributes[ID_FIELD] == unit and u.geometry.geom_type == "MultiPolygon" and len(u.geometry.geoms) == 2
+    assert [(q[ID_FIELD], q["quota_q"]) for q in w.quote] == [(spot, 100.5)]
+    assert sorted(_from_qgis(w)) == ["Da QGIS: US 21 aggiunta", "Da QGIS: quota 100.50 aggiunta"]
+    qgis.close()
+
+
 def test_a_locked_file_is_read_again_later(tmp_path):
     link = LiveLink(tmp_path, CRS)
     a = _unit(1, X0, Y0)

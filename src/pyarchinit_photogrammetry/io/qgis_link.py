@@ -19,7 +19,8 @@ and attributes): a row whose content no longer matches it was edited by another 
 signature lives in the file, so it also tells the edits made in QGIS while the program was
 closed. Of the tables in :data:`TWO_WAY_TABLES` (units, spot heights, sections) such edits come
 back (:meth:`LiveLink.read_changes`): rows changed, rows drawn in QGIS (no identity yet: they
-get one) and rows deleted; the program never overwrites them before it has read them. The
+get one; or under an identity never known here and never signed by the program, which they keep)
+and rows deleted; the program never overwrites them before it has read them. The
 other tables are computed by the program (contour lines, zones, plugin drawings) and stay
 one-way.
 
@@ -275,7 +276,7 @@ class Feature:
 class TableChanges:
     """What another program changed in a two-way table since it was last read."""
     changed: list = field(default_factory=list)  # Feature: geometry or attributes changed
-    added: list = field(default_factory=list)  # Feature: drawn (or copied) there
+    added: list = field(default_factory=list)  # Feature: drawn (or copied) there, given an identity or with its own
     deleted: list = field(default_factory=list)  # (identity, part) of the rows gone
     rows: list = field(default_factory=list)  # Feature: every row of the table now
     refused: tuple | None = None  # (srs of the table, srs of the project): not read
@@ -604,10 +605,15 @@ class LiveLink:
             if part:
                 s.values[PART_FIELD] = 1
             ch.added.append(s)
+        # an identity never known here, none of its rows signed by the program: a feature drawn there under an identity
+        # another program gave it (a unit drawn in RustGIS as several polygons, one copied from another project) is
+        # added, as it is - a new part of a unit known here is a change of it
+        seen = {key[0] for key in known}
+        signed = {s.key[0] for s in primary.values() if s.stored_sig is not None}
         for s in primary.values():
             if s.external:
                 con.execute(f"UPDATE {q(table)} SET {q(SIG_FIELD)} = ? WHERE fid = ?", (s.content_sig, s.fid))
-                ch.changed.append(s)
+                (ch.changed if s.key[0] in seen or s.key[0] in signed else ch.added).append(s)
         ch.deleted = [k for k in known if k not in primary]
         rows = list(primary.values()) + others
         ch.rows = [self._feature(s) for s in rows]

@@ -33,7 +33,7 @@ from shapely.geometry import MultiLineString, MultiPolygon, Point, Polygon, box
 from pyarchinit_photogrammetry import doctor
 from pyarchinit_photogrammetry.io import gpkg
 from pyarchinit_photogrammetry.io import rustgis_link as link
-from pyarchinit_photogrammetry.io.qgis_link import ID_FIELD, PART_FIELD, LiveLink, new_id
+from pyarchinit_photogrammetry.io.qgis_link import ID_FIELD, PART_FIELD, TWO_WAY_TABLES, LiveLink, new_id
 
 TOKEN = "Zq7Kx9Lm2PwR4sT8vB1nC5dF3gH6jY0a"  # 32 letters and digits, as RustGIS makes its token
 
@@ -974,15 +974,19 @@ class FakeExporter:
 
 
 def _linked(tmp_path, drawings, layers=None):
-    """A live GeoPackage the program wrote, and a link to a fake RustGIS that was given its tables (what the start of
-    the link does: ``remember``)."""
+    """A live GeoPackage the program wrote, and a link to a fake RustGIS that was given its tables and loaded them as
+    they are (what the start of the link does: ``remember``, from RustGIS's own export). ``calls`` starts empty."""
     live = LiveLink(tmp_path / "qgis", GB)
     live.write(drawings)
     assert live.read_changes() == {}
     fake = FakeExporter(tmp_path / "prepared")
     rl = link.RustGisLink(live, fake, "Saggio 1", GB)
     rl.layers = dict(layers or {"unita": "7"})
+    for table, layer in rl.layers.items():
+        if table in TWO_WAY_TABLES:
+            fake.prepare(layer, table, *_as_rustgis(live.path, table))
     rl.remember()
+    fake.calls.clear()
     return live, fake, rl
 
 
@@ -1067,8 +1071,8 @@ def test_a_pull_is_read_back_as_an_edit_of_another_program(tmp_path, monkeypatch
 def test_noise_under_a_millimetre_is_no_change(tmp_path):
     """What RustGIS gives back of rows nobody touched: every vertex moved a nanometre (its round trip through longitude
     and latitude), integers as REAL, a text column as INTEGER, NULLs and accented text as they were. Nothing is written
-    and nothing is read back - also with a vertex on a half millimetre, where the rounded signature flips with the
-    noise."""
+    and nothing is read back - also with a vertex on a half millimetre, which the nanometre carries to the other side
+    of a rounding to the millimetre."""
     one = _unit(1, GX, GY, stratigraph_index_us=1, tipo_us_s=TEXT, area_m2=0.25, data=None)
     one["_geom"] = ("Polygon", [[GX + 0.0005, GY], [GX + 0.5, GY], [GX + 0.5, GY + 0.5], [GX, GY + 0.5]])
     spot = {"quota_q": 99.25, "us_q": "1", ID_FIELD: new_id(), "_geom": ("Point", [GX + 0.2, GY + 0.2])}
@@ -1087,12 +1091,15 @@ def test_noise_under_a_millimetre_is_no_change(tmp_path):
         fake.prepare(layer, table, types, rows)
     assert rl.pull() == {"unita": (0, 0, 0), "quote": (0, 0, 0), "sezioni": (0, 0, 0)}
     assert not live.external_change() and live.read_changes() == {}
-    # the half millimetre: the program's row and what RustGIS has now have different rounded signatures, and are
-    # the same within a millimetre
-    _, rows = _as_rustgis(live.path, "unita")
+    # the half millimetre: rounded to the millimetre, the program's vertex and RustGIS's fall on two sides; compared
+    # within a millimetre, the program's row is what RustGIS has (a push sends nothing)
+    import numpy as np
+
     _, stored = _live_table(live.path, "unita")
     key = (one[ID_FIELD], 1)
-    assert rl.baseline["unita"][key] == link.signature(*rows[0]) != link.signature(*stored[0][1:])
+    x = stored[0][1].exterior.coords[0][0]
+    assert x == GX + 0.0005 and np.rint(x / 0.001) != np.rint((x + 1e-9) / 0.001)
+    assert not rl.baseline["unita"][key][0].equals_exact(stored[0][1], 0)  # RustGIS's, a nanometre away
     assert rl.matches_baseline("unita", key, *stored[0][1:])
     assert not rl.matches_baseline("unita", key, affinity.translate(stored[0][1], xoff=0.002), stored[0][2])
     assert not rl.matches_baseline("unita", key, stored[0][1], dict(stored[0][2], us_s="2"))
@@ -1126,13 +1133,14 @@ def test_parts_holes_and_accents(tmp_path):
             assert g.equals_exact(polygon, 1e-6) and len(g.interiors) == len(polygon.interiors) and text == TEXT
     assert [(pid, n) for pid, n, *_ in parts["12"]] == [(None, None)]  # LiveLink gives it its identity
     got = live.read_changes()["unita"]
-    (single,) = got.added
-    assert single.values["us_s"] == "12" and single.id and single.part == 1
-    # the rows of an identity the reader has never seen (unit 1's new part, the unit of two polygons drawn there) come
-    # as changed: the window takes an identity it does not know for a unit added there
-    assert sorted((f.values["us_s"], f.part) for f in got.changed) == [("1", 1), ("1", 2), ("13", 1), ("13", 2)]
-    assert {f.id for f in got.changed if f.values["us_s"] == "13"} == {pid13}
-    assert all(f.values["tipo_us_s"] == TEXT for f in got.changed)
+    # unit 1's new part is a change of a unit known here; the unit drawn there as two polygons comes as one unit added,
+    # under the identity it was given; the single polygon is given one by the reader
+    assert sorted((f.values["us_s"], f.part) for f in got.changed) == [("1", 1), ("1", 2)]
+    assert sorted((f.values["us_s"], f.part) for f in got.added) == [("12", 1), ("13", 1), ("13", 2)]
+    assert {f.id for f in got.added if f.values["us_s"] == "13"} == {pid13}
+    single = next(f for f in got.added if f.values["us_s"] == "12")
+    assert single.id not in (None, pid13, one[ID_FIELD]) and single.part == 1
+    assert all(f.values["tipo_us_s"] == TEXT for f in got.changed + got.added if f.values["us_s"] != "12")
     assert rl.pull() == {"unita": (0, 0, 0)}  # nothing written twice
 
 
@@ -1157,10 +1165,11 @@ def test_one_way_tables_are_never_pulled(tmp_path):
 
 def test_what_the_program_has_not_sent_yet_is_kept(tmp_path):
     """The program changed unit 1 (its number and its outline), deleted unit 2 and drew unit 4 after RustGIS was given
-    the tables, and has not sent them yet: a pull does not undo them - also with a vertex on a half millimetre, where
-    RustGIS's round trip flips the rounded signature. What RustGIS changes meanwhile comes, column by column: unit 3
-    moved there, the drawer of unit 1 set there beside the number and outline changed here; unit 2, deleted here and
-    changed there, comes back, as an edit of QGIS to a unit deleted here does."""
+    the tables, and has not sent them yet: a pull does not undo them - also with a vertex on a half millimetre, which
+    RustGIS's round trip carries to the other side of a rounding to the millimetre. What RustGIS changes meanwhile
+    comes, column by column: unit 3 moved there, the drawer of unit 1 set there beside the number and outline changed
+    here; unit 2, deleted here and changed there, comes back under its identity, as an edit of QGIS to a unit deleted
+    here does."""
     one, two, three = _unit(1, GX, GY), _unit(2, GX + 1, GY), _unit(3, GX + 2, GY)
     one["_geom"] = ("Polygon", [[GX + 0.0005, GY], [GX + 0.5, GY], [GX + 0.5, GY + 0.5], [GX, GY + 0.5]])
     live, fake, rl = _linked(tmp_path, _drawings([one, two, three]))
@@ -1184,8 +1193,9 @@ def test_what_the_program_has_not_sent_yet_is_kept(tmp_path):
     by_id = {f.id: f for f in got.changed}
     assert by_id[one[ID_FIELD]].values["us_s"] == "10" and by_id[one[ID_FIELD]].values["disegnatore"] == "E. C."
     assert by_id[one[ID_FIELD]].geometry.equals_exact(outline, 0)
-    assert by_id[three[ID_FIELD]].geometry.bounds[1] == pytest.approx(GY + 0.2)
-    assert by_id[two[ID_FIELD]].values["us_s"] == "20" and not got.added and not got.deleted
+    assert by_id[three[ID_FIELD]].geometry.bounds[1] == pytest.approx(GY + 0.2) and len(by_id) == 2
+    (back,) = got.added
+    assert back.id == two[ID_FIELD] and back.values["us_s"] == "20" and not got.deleted
     _, stored = _live_table(live.path, "unita")
     assert four[ID_FIELD] in {v[ID_FIELD] for _, _, v in stored}
 
@@ -1267,10 +1277,11 @@ def test_copies_fields_and_identities_rustgis_was_not_given(tmp_path):
     assert sorted(v["us_s"] for k, v in by_id.items() if k) == ["1", "5", "9"] and len(stored) == 4
     assert by_id[None]["us_s"] == "1" and by_id[None]["ppg_sig"] is None  # the copy: LiveLink gives it an identity
     got = live.read_changes()["unita"]
-    (copied,) = got.added
-    assert copied.values["us_s"] == "1" and copied.id != one[ID_FIELD]
-    assert copied.geometry.bounds[0] == pytest.approx(GX + 2)
-    assert sorted((f.values["us_s"], f.id == foreign) for f in got.changed) == [("1", False), ("9", True)]
+    (changed,) = got.changed
+    assert changed.id == one[ID_FIELD] and changed.values["nota"] == "campione"
+    assert sorted((f.values["us_s"], f.id == foreign) for f in got.added) == [("1", False), ("9", True)]
+    copied = next(f for f in got.added if f.id != foreign)
+    assert copied.id != one[ID_FIELD] and copied.geometry.bounds[0] == pytest.approx(GX + 2)
     assert rl.matches_baseline("unita", (later[ID_FIELD], 1), *rows[1])  # RustGIS's version: the program sends its own
     later_row = next(r for r in stored if r[2]["us_s"] == "5")
     assert not rl.matches_baseline("unita", (later[ID_FIELD], 1), *later_row[1:])
@@ -1290,9 +1301,11 @@ def test_what_rustgis_left_out_of_an_export_is_not_taken_for_deleted(tmp_path):
     assert live.read_changes()["unita"].deleted == [(two[ID_FIELD], 1)]
 
 
-def test_a_row_without_identity_given_to_rustgis_is_not_written_again(tmp_path):
+@pytest.mark.parametrize("read_first", [False, True], ids=["read after the pull", "read before the link remembers"])
+def test_a_row_without_identity_given_to_rustgis_is_not_written_again(tmp_path, read_first):
     """A unit drawn in QGIS and not read yet when RustGIS is given the tables reaches RustGIS without an identity: the
-    pull knows it for the row that is already there, and QGIS's drawing is read once."""
+    pull knows it for the row that is already there - also when the window gave the row its identity before the link
+    remembered what RustGIS has -, and QGIS's drawing is read once."""
     one = _unit(1, GX, GY)
     live = LiveLink(tmp_path / "qgis", GB)
     live.write(_drawings([one]))
@@ -1306,13 +1319,88 @@ def test_a_row_without_identity_given_to_rustgis_is_not_written_again(tmp_path):
     fake = FakeExporter(tmp_path / "prepared")
     rl = link.RustGisLink(live, fake, "Saggio 1", GB)
     rl.layers = {"unita": "7"}
+    fake.prepare("7", "unita", *_as_rustgis(live.path, "unita"))  # RustGIS loads the table as it is
+    if read_first:
+        (drawn,) = live.read_changes()["unita"].added
     rl.remember()
     assert [d.fids for d in rl.drawn["unita"]] == [[2]]
-    fake.prepare("7", "unita", *_as_rustgis(live.path, "unita"))
     assert rl.pull() == {"unita": (0, 0, 0)}
-    (drawn,) = live.read_changes()["unita"].added
+    if not read_first:
+        (drawn,) = live.read_changes()["unita"].added
     assert drawn.values["us_s"] == "9" and drawn.fid == 2
     assert rl.pull() == {"unita": (0, 0, 0)} and live.read_changes() == {}
+
+
+def test_what_rustgis_did_not_load_is_never_taken_for_deleted(tmp_path):
+    """RustGIS is given the tables and loads unit 1; before the link remembers what it has, the program writes unit 2
+    and QGIS saves a unit drawn there. What RustGIS has is taken from its own export, not from the file: the first
+    pull deletes nothing, and QGIS's unit is read once (the program's rows go to RustGIS with its edits)."""
+    one, two = _unit(1, GX, GY), _unit(2, GX + 1, GY)
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([one]))
+    assert live.read_changes() == {}
+    fake = FakeExporter(tmp_path / "prepared")
+    fake.prepare("7", "unita", *_as_rustgis(live.path, "unita"))  # what RustGIS loaded: unit 1
+    live.write(_drawings([one, two]))  # the program, meanwhile
+    qgis = sqlite3.connect(live.path, isolation_level=None)  # and QGIS
+    qgis.execute("BEGIN IMMEDIATE")
+    qgis.execute('INSERT INTO "unita" (geom, us_s) VALUES (?, ?)',
+                 (gpkg.blob(box(GX + 3, GY, GX + 4, GY + 1), 3004), "9"))
+    qgis.execute("COMMIT")
+    qgis.close()
+    rl = link.RustGisLink(live, fake, "Saggio 1", GB)
+    rl.layers = {"unita": "7"}
+    rl.remember()
+    assert list(rl.baseline["unita"]) == [(one[ID_FIELD], 1)] and rl.drawn["unita"] == []
+    assert rl.pull() == {"unita": (0, 0, 0)}
+    got = live.read_changes()["unita"]
+    assert not got.deleted and not got.changed and [f.values["us_s"] for f in got.added] == ["9"]
+    _, stored = _live_table(live.path, "unita")
+    assert sorted(v["us_s"] for _, _, v in stored) == ["1", "2", "9"]
+
+
+def test_what_rustgis_has_beyond_what_it_was_given_comes_in(tmp_path):
+    """Between the tables reaching RustGIS and the link remembering what it has, a unit is drawn there and a polygon
+    added there to unit 1: neither is among the rows RustGIS was given, so the first pull brings both in, once."""
+    one = _unit(1, GX, GY)
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([one]))
+    assert live.read_changes() == {}
+    fake = FakeExporter(tmp_path / "prepared")
+    types, rows = _as_rustgis(live.path, "unita")
+    rows[0][0] = MultiPolygon([rows[0][0].geoms[0], box(GX + 3, GY, GX + 3.5, GY + 0.5)])
+    rows.append([MultiPolygon([box(GX + 5, GY, GX + 5.5, GY + 0.5)]), {"us_s": "7"}])
+    fake.prepare("7", "unita", types, rows)
+    rl = link.RustGisLink(live, fake, "Saggio 1", GB)
+    rl.layers = {"unita": "7"}
+    rl.remember()
+    assert list(rl.baseline["unita"]) == [(one[ID_FIELD], 1)] and rl.drawn["unita"] == []
+    assert rl.pull() == {"unita": (0, 2, 0)}
+    got = live.read_changes()["unita"]
+    assert [(f.id, f.part) for f in got.changed] == [(one[ID_FIELD], 2)]  # a new part of unit 1
+    assert [f.values["us_s"] for f in got.added] == ["7"]
+    assert rl.pull() == {"unita": (0, 0, 0)} and live.read_changes() == {}
+
+
+def test_a_polygon_added_in_rustgis_to_a_unit_is_never_lost(tmp_path):
+    """Unit 1 has a second part drawn in the program and not sent yet; in RustGIS a polygon is added to unit 1: it takes
+    a part number after every part the unit has here and there, comes in beside the program's part, and keeps that
+    number at the next pull."""
+    one = _unit(1, GX, GY)
+    live, fake, rl = _linked(tmp_path, _drawings([one]))
+    types, rows = _as_rustgis(live.path, "unita")
+    second = dict(one, _geom=_square(GX, GY + 1))
+    live.write(_drawings([one, second]))  # (unit 1, part 2): the program's, not sent yet
+    there = box(GX + 3, GY, GX + 3.5, GY + 0.5)
+    rows[0][0] = MultiPolygon([rows[0][0].geoms[0], there])
+    fake.prepare("7", "unita", types, rows)
+    assert rl.pull() == {"unita": (0, 1, 0)}
+    _, stored = _live_table(live.path, "unita")
+    assert [(v[ID_FIELD], v[PART_FIELD]) for _, _, v in stored] == [(one[ID_FIELD], n) for n in (1, 2, 3)]
+    assert stored[1][1].equals_exact(Polygon(second["_geom"][1]), 0) and link._same_geometry(stored[2][1], there)
+    got = live.read_changes()["unita"]
+    assert [(f.id, f.part) for f in got.changed] == [(one[ID_FIELD], 3)] and not got.added
+    assert rl.pull() == {"unita": (0, 0, 0)} and live.read_changes() == {}  # the same number: written once
 
 
 def _from_qgis(w):
@@ -1335,8 +1423,9 @@ def test_units_drawn_in_rustgis_reach_the_window_as_one_unit_each(trench, tmp_pa
     fake = FakeExporter(tmp_path / "prepared")
     rl = link.RustGisLink(live, fake, w.chunk.label, w.chunk.crs)
     rl.layers = {"unita": "7"}
-    rl.remember()
     types, rows = _as_rustgis(live.path, "unita")
+    fake.prepare("7", "unita", types, rows)  # RustGIS loads the table as it is
+    rl.remember()
     holed = Polygon(box(GX + 3, GY + 3, GX + 5, GY + 5).exterior.coords,
                     [box(GX + 3.5, GY + 3.5, GX + 4, GY + 4).exterior.coords])
     rows.append([MultiPolygon([box(GX + 3, GY + 1, GX + 3.5, GY + 1.5)]), {"us_s": "12", "area_s": "1"}])
@@ -1405,13 +1494,13 @@ def test_pull_with_the_real_engine(tmp_path):
         assert rl.pull() == {"unita": (1, 3, 0), "quote": (0, 0, 0), "sezioni": (0, 0, 0)}
         assert (tmp_path / "qgis" / "rustgis" / "unita.gpkg").is_file()
         got = live.read_changes()["unita"]
-        (added,) = got.added
-        assert added.values["us_s"] == "12" and link._same_geometry(added.geometry, single)
-        changed = sorted(got.changed, key=lambda f: (f.values["us_s"], f.part))
-        assert [(f.values["us_s"], f.part) for f in changed] == [("1", 1), ("13", 1), ("13", 2)]
-        assert changed[0].id == one[ID_FIELD] and changed[0].values["tipo_us_s"] == TEXT
-        assert changed[1].id == changed[2].id != one[ID_FIELD]
-        assert link._same_geometry(changed[1].geometry, holed) and len(changed[1].geometry.interiors) == 1
-        assert link._same_geometry(changed[2].geometry, pair.geoms[1])
+        (changed,) = got.changed
+        assert changed.id == one[ID_FIELD] and changed.values["tipo_us_s"] == TEXT
+        added = sorted(got.added, key=lambda f: (f.values["us_s"], f.part))
+        assert [(f.values["us_s"], f.part) for f in added] == [("12", 1), ("13", 1), ("13", 2)]
+        assert link._same_geometry(added[0].geometry, single)
+        assert added[1].id == added[2].id and len({one[ID_FIELD], added[0].id, added[1].id}) == 3
+        assert link._same_geometry(added[1].geometry, holed) and len(added[1].geometry.interiors) == 1
+        assert link._same_geometry(added[2].geometry, pair.geoms[1])
         assert rl.pull() == {"unita": (0, 0, 0), "quote": (0, 0, 0), "sezioni": (0, 0, 0)}
         assert live.read_changes() == {}

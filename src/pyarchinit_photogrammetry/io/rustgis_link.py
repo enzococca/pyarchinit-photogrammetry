@@ -55,7 +55,7 @@ from .. import __version__
 from ..updates import bundle_version, version_key
 from . import gpkg
 from .qgis_link import (ID_FIELD, PART_FIELD, TECHNICAL_FIELDS, TWO_WAY_TABLES, LiveLink, _affinity, _bind, _bounds,
-                        _sql_type, new_id, row_signature)
+                        _sql_type, new_id)
 
 log = logging.getLogger(__name__)
 
@@ -584,22 +584,6 @@ def normalize(geometry, values: dict) -> tuple[object, dict]:
     return geometry, {str(k): _typed(str(k), v) for k, v in values.items() if str(k) != "fid"}
 
 
-def signature(geometry, values: dict) -> str:
-    """The signature of a row as RustGIS has it (:attr:`RustGisLink.baseline`): the geometry and values of
-    :func:`normalize`, the coordinates rounded to :data:`TOLERANCE_M`, the technical columns and the empty values left
-    out (:func:`.qgis_link.row_signature`). A coordinate on a rounding boundary may round the other way after RustGIS's
-    round trip: :meth:`RustGisLink.matches_baseline` compares within the tolerance, never by the signature alone."""
-    import numpy as np
-    import shapely
-
-    geometry, values = normalize(geometry, values)
-    raw = b""
-    if geometry is not None:
-        rounded = shapely.transform(geometry, lambda xy: np.rint(xy / TOLERANCE_M) * TOLERANCE_M + 0.0)  # no -0.0
-        raw = shapely.to_wkb(rounded, byte_order=1, output_dimension=2)
-    return row_signature(raw, values)
-
-
 def _layout(geometry) -> tuple:
     """How a geometry is made - its type, parts, rings and number of vertices - without its coordinates."""
     kind = geometry.geom_type
@@ -612,7 +596,9 @@ def _layout(geometry) -> tuple:
 
 def _same_geometry(a, b) -> bool:
     """Whether two geometries (of :func:`normalize`) are the same: made the same way and every vertex within
-    :data:`TOLERANCE_M` (an untouched feature comes back from RustGIS moved by about a nanometre)."""
+    :data:`TOLERANCE_M` (an untouched feature comes back from RustGIS moved by about a nanometre). Never by rounding the
+    coordinates: a nanometre carries a vertex that lies on a half millimetre (SAM's outlines follow a raster grid) to
+    the other side of the rounding."""
     import numpy as np
     import shapely
 
@@ -745,18 +731,24 @@ def _read_export(path: Path) -> tuple[int, list, list]:
         con.close()
 
 
-def _rustgis_rows(features: list, parted: bool) -> tuple[dict, list]:
-    """RustGIS's features as rows of the live table: those with an identity by ``(identity, part)`` - each polygon of a
-    feature of several its own row, the parts after the first numbered after the largest part its identity has -, and
-    the features without one (drawn there, or copies of a feature: every attribute is copied) as ``(parts, values)``.
-    The values are of :func:`normalize`."""
+def _rustgis_rows(features: list, parted: bool, here: Iterable = (), had: Iterable = ()) -> tuple[dict, list, set]:
+    """RustGIS's features as rows of the live table: those with an identity by ``(identity, part)``, and those without
+    one (drawn there, or copies of a feature: every attribute is copied) as ``(parts, values)``; the values are of
+    :func:`normalize`. A feature with an identity drawn as several polygons is a row per polygon: the polygons after the
+    first take the part numbers they took at the last look - the keys RustGIS ``had`` that are no feature's own, in
+    order -, else numbers after every part of that identity in the export, in the live table (``here``) and in ``had``,
+    never the number of a part the program drew and has not sent. Returns ``(keyed, drawn, extras)``, ``extras`` the
+    keys of those polygons."""
     rows = [normalize(g, v) for g, v in features]
-    last: dict[str, int] = {}
-    for _, values in rows:
-        pid = _identity(values)
+    own = {(pid, _part_of(values, parted)) for _, values in rows if (pid := _identity(values)) is not None}
+    largest: dict[str, int] = {}
+    for pid, part in itertools.chain(own, here, had):
         if pid is not None:
-            last[pid] = max(last.get(pid, 0), _part_of(values, parted))
-    keyed, drawn = {}, []
+            largest[pid] = max(largest.get(pid, 0), part)
+    spare: dict[str, list[int]] = {}
+    for pid, part in sorted(key for key in had if key[0] is not None and key not in own):
+        spare.setdefault(pid, []).append(part)
+    keyed, drawn, extras = {}, [], set()
     for geometry, values in rows:
         pid, parts = _identity(values), _parts(geometry, parted)
         first = (pid, _part_of(values, parted))
@@ -765,9 +757,14 @@ def _rustgis_rows(features: list, parted: bool) -> tuple[dict, list]:
             continue
         keyed[first] = (parts[0], values)
         for extra in parts[1:]:
-            last[pid] += 1
-            keyed[(pid, last[pid])] = (extra, values)
-    return keyed, drawn
+            if spare.get(pid):
+                number = spare[pid].pop(0)
+            else:
+                largest[pid] += 1
+                number = largest[pid]
+            keyed[(pid, number)] = (extra, values)
+            extras.add((pid, number))
+    return keyed, drawn, extras
 
 
 class RustGisLink:
@@ -778,8 +775,9 @@ class RustGisLink:
 
     What RustGIS had is what tells an edit made there from one the program has not sent yet: a row RustGIS still has
     as it had it is never written over (the program's version goes to RustGIS), one it changed comes column by column,
-    one it no longer has is deleted. It is taken from the live GeoPackage when RustGIS is given the tables
-    (:meth:`remember`) and from each export after (:meth:`pull`); a pull before :meth:`remember` is refused."""
+    one it no longer has is deleted. It is taken from RustGIS's own export of each layer, when RustGIS is given the
+    tables (:meth:`remember`) and at each pull after (:meth:`pull`) - never from the live GeoPackage, which may hold
+    rows RustGIS has not got; a pull before :meth:`remember` is refused."""
 
     def __init__(self, live: LiveLink, transport, chunk_label: str, crs: str):
         self.live = live
@@ -787,47 +785,71 @@ class RustGisLink:
         self.chunk_label = chunk_label
         self.crs = crs
         self.layers: dict[str, str] = {}  # table of the live GeoPackage -> the id of RustGIS's layer that holds it
-        # per table, (ppg_id, ppg_parte) -> the signature of the row as RustGIS last had it (geometry rounded to
-        # TOLERANCE_M + normalized values); _had holds the rows themselves, compared within the tolerance
-        self.baseline: dict[str, dict[tuple, str]] = {}
-        self._had: dict[str, dict[tuple, tuple]] = {}
+        # per table, (ppg_id, ppg_parte) -> (geometry, values) of the row as RustGIS last had it, after normalize():
+        # compared only within TOLERANCE_M (matches_baseline)
+        self.baseline: dict[str, dict[tuple, tuple]] = {}
         self.drawn: dict[str, list[Drawn]] = {}  # per table, what RustGIS has without an identity (see Drawn)
 
     @property
     def scratch(self) -> Path:
         """The folder beside the live GeoPackage where RustGIS exports the layers for a pull (a file a table,
-        replaced at each pull)."""
+        replaced at each export)."""
         return self.live.path.parent / SCRATCH_DIR
 
-    def _keep(self, table: str, had: dict) -> None:
-        self._had[table] = had
-        self.baseline[table] = {key: signature(g, v) for key, (g, v) in had.items()}
+    def _ready(self, tables: list) -> list:
+        """The tables of ``tables`` the live GeoPackage holds as this version writes them (with their identities)."""
+        if not gpkg.is_geopackage(self.live.path):
+            return []
+        con = _read_only(self.live.path)
+        try:
+            return [t for t in tables if _has_identities(con, t)]
+        finally:
+            con.close()
 
     def remember(self, tables=None) -> None:
-        """RustGIS holds the rows of the live GeoPackage as they are now: the link has just given it ``tables`` (every
-        linked two-way table when None) - when it starts, or when a layer is added again. Their baseline is taken from
-        there; the rows without an identity (drawn in QGIS and not read yet) are features RustGIS has without one.
-        Rows without a geometry are left out: what RustGIS may not show is never taken for deleted there."""
+        """What RustGIS has of ``tables`` (every linked two-way table when None) when the link has just given them to
+        it - when it starts, or when a layer is added again -, taken from RustGIS's own export of each layer, never
+        from the live GeoPackage: a row the program or QGIS wrote meanwhile, or one RustGIS did not load, is not among
+        what it had, so no pull takes it for deleted there (the program's rows go to RustGIS with its edits). The
+        features it has without an identity are found among the live rows by their geometry (:attr:`drawn`, within
+        :data:`TOLERANCE_M`); one with no such row was drawn there meanwhile and comes in at the next pull, as do the
+        polygons it has beyond the rows it was given. The errors of RustGIS (:class:`RustGisBusy`...) leave what was
+        known as it was."""
         tables = [t for t in (self.layers if tables is None else tables) if t in TWO_WAY_TABLES]
+        exports = {t: self._export(t) for t in self._ready(tables)}  # RustGIS first, then the file as it is now
         found = {}
-        if gpkg.is_geopackage(self.live.path):
+        if exports:
             con = _read_only(self.live.path)
             try:
-                found = {t: _live_rows(con, t) for t in tables if _has_identities(con, t)}
+                found = {t: _live_rows(con, t) for t in exports}
             finally:
                 con.close()
         for table in tables:
-            types, rows = found.get(table, ({}, []))
+            if table not in exports:  # not written by this version yet: nothing RustGIS has of it is known
+                self.baseline[table], self.drawn[table] = {}, []
+                continue
+            types, rows = found[table]
             parted = PART_FIELD in types
+            keyed, drawn, extras = _rustgis_rows(exports[table].features, parted, [r.key for r in rows if r.key[0]])
+            self.baseline[table] = {key: row for key, row in keyed.items() if key not in extras}
             primary, others = _by_key(rows)
-            self._keep(table, {k: (r.geometry, r.values) for k, r in primary.items() if r.geometry is not None})
-            self.drawn[table] = [Drawn(_parts(r.geometry, parted), r.values, [r.fid])
-                                 for r in others if r.geometry is not None]
+            # without an identity there: the rows given without one (drawn in QGIS, copies), then those given an
+            # identity here since RustGIS loaded them
+            candidates = others + [r for key, r in primary.items() if key not in keyed]
+            self.drawn[table] = []
+            for parts, values in drawn:
+                row = next((r for r in candidates if _same_parts(parts, _parts(r.geometry, parted))), None)
+                if row is not None:
+                    candidates.remove(row)
+                    self.drawn[table].append(Drawn(parts, values, [row.fid]))
 
     def matches_baseline(self, table: str, key: tuple, geometry, values: dict) -> bool:
-        """Whether RustGIS last had row ``key`` (``(ppg_id, ppg_parte)``) of ``table`` as it is given: the geometry
-        within :data:`TOLERANCE_M` vertex by vertex and the same values (technical and empty ones left out)."""
-        had = self._had.get(table, {}).get(tuple(key))
+        """Whether RustGIS last had row ``key`` (``(ppg_id, ppg_parte)``) of ``table`` with this geometry and these
+        values: both taken through :func:`normalize`, the geometry made the same way (type, parts, rings, number of
+        vertices) with every vertex within :data:`TOLERANCE_M` of RustGIS's, the values equal once the technical
+        columns (``ppg_id``, ``ppg_parte``, ``ppg_sig``) and the empty ones are left out. False when RustGIS did not
+        have that row."""
+        had = self.baseline.get(table, {}).get(tuple(key))
         if had is None:
             return False
         geometry, values = normalize(geometry, values)
@@ -849,19 +871,14 @@ class RustGisLink:
         again); :class:`RustGisRefused` too when an export is not in the system of the drawings, and
         :class:`sqlite3.OperationalError` (database locked) when another program holds the file."""
         tables = [t for t in TWO_WAY_TABLES if t in self.layers]
-        unknown = [t for t in tables if t not in self._had]
+        unknown = [t for t in tables if t not in self.baseline]
         if unknown:
             raise RuntimeError(f"what RustGIS was given of {', '.join(unknown)} is not known: remember() the tables "
                                "when RustGIS gets them")
         counts = {t: (0, 0, 0) for t in tables}
-        if not tables or not gpkg.is_geopackage(self.live.path):
+        exports = {t: self._export(t) for t in self._ready(tables)}  # RustGIS first: never asked while the file is held
+        if not exports:
             return counts
-        con = _read_only(self.live.path)
-        try:
-            ready = [t for t in tables if _has_identities(con, t)]  # written by this version
-        finally:
-            con.close()
-        exports = {t: self._export(t) for t in ready}  # RustGIS first: never asked while the file is held
         states = {}
         con = gpkg.connect(self.live.path)
         try:
@@ -877,8 +894,7 @@ class RustGisLink:
         finally:
             con.close()
         for table, (had, drawn) in states.items():
-            self._keep(table, had)
-            self.drawn[table] = drawn
+            self.baseline[table], self.drawn[table] = had, drawn
         return counts
 
     def _export(self, table: str) -> _Export:
@@ -926,8 +942,8 @@ class RustGisLink:
         parted = PART_FIELD in types
         primary, _ = _by_key(rows)
         by_fid = {r.fid: r for r in rows}
-        keyed, drawn = _rustgis_rows(export.features, parted)
-        had, now = self._had.get(table, {}), {}
+        had, now = self.baseline.get(table, {}), {}
+        keyed, drawn, _ = _rustgis_rows(export.features, parted, [r.key for r in rows if r.key[0]], had)
         changed = added = deleted = 0
         gone: set[int] = set()
 
@@ -1021,5 +1037,5 @@ class RustGisLink:
 
 __all__ = ["find_rustgis", "open_app", "settings_dir", "token_dir", "endpoint", "too_old", "HttpTransport",
            "StdioTransport", "RustGisInstall", "Endpoint", "RustGisError", "RustGisOff", "RustGisBusy",
-           "RustGisRefused", "RustGisTooOld", "RustGisLink", "Drawn", "normalize", "signature", "MIN_VERSION",
-           "HTTP_PORT", "TOKEN_FILE", "ENDPOINT_FILE", "RASTER_SAMPLES", "TOLERANCE_M", "BUSY_CODES", "SCRATCH_DIR"]
+           "RustGisRefused", "RustGisTooOld", "RustGisLink", "Drawn", "normalize", "MIN_VERSION", "HTTP_PORT",
+           "TOKEN_FILE", "ENDPOINT_FILE", "RASTER_SAMPLES", "TOLERANCE_M", "BUSY_CODES", "SCRATCH_DIR"]
