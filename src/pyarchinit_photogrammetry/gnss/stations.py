@@ -620,12 +620,14 @@ def _read_epn_columns(path: Path, code: str) -> list[_Solution]:
     comment above :data:`EPN_DISCONTINUITIES` gives): each with the span of its data (``DATA_START``, ``DATA_END``),
     its position and velocity at the reference epoch and their sigmas. A ``ValueError`` names the file - and the
     line - when its title is not in IGS20 (ITRF2020) or names no frame, when the line of a position is not followed by
-    the one of its velocity or cannot be read, and when the code is the one of two monuments; ``_Absent`` when the
-    station is not in it."""
+    the one of its velocity or cannot be read, when the code is the one of two monuments, and when no line of the file
+    is the position of a station as the Central Bureau writes it (the layout drifted: the EPN would be left out for
+    every station, never said); ``_Absent`` when the station is not in it."""
     found: list[_Solution] = []
     domes: set[str] = set()
     frame = None
     position = None  # (line number, fields) of the position of a solution of the station, until its velocity
+    positions = 0  # the lines of a position of any station
     with open(path, encoding="utf-8", errors="replace") as f:
         for number, line in enumerate(f, start=1):
             if frame is None and number <= _EPN_TITLE_LINES and (match := _EPN_TITLE.search(line)):
@@ -635,6 +637,7 @@ def _read_epn_columns(path: Path, code: str) -> list[_Solution]:
             fields = line.split()
             is_position = (len(fields) >= 14 and fields[-12] == "GPS"
                            and all(_SINEX_EPOCH_TEXT.fullmatch(v) for v in fields[-3:]))
+            positions += is_position
             if position is None:
                 if is_position and fields[-11].upper() == code:
                     position = (number, fields)
@@ -659,6 +662,10 @@ def _read_epn_columns(path: Path, code: str) -> list[_Solution]:
                          "velocity")
     if frame is None:
         raise ValueError(f"{path.name}: its title does not name the reference frame (REFERENCE FRAME:)")
+    if not positions:
+        raise ValueError(f"{path.name}: no line of a position of a station as the EPN Central Bureau writes them "
+                         "(DOMES, site, GPS, code, X Y Z, sigmas, solution, three epochs): its layout is not one this "
+                         "program reads")
     if not found:
         raise _Absent(f"{code} is not in {path.name}")
     if len(domes) > 1:
@@ -684,7 +691,11 @@ def _from_epn(station: Station, epoch: float, progress) -> StationCoordinates | 
     used is the one that the catalogue of discontinuities of the same folder says is valid at the epoch, as for IGc20:
     a station whose valid solution the file lacks (a break after the end of its data) is refused with a ``ValueError``
     that says which, and the next source answers - never another solution. A SINEX file is read as before: the solution
-    whose data cover the epoch (:func:`_covering`). The citation names the folder and its DOI."""
+    whose data cover the epoch (:func:`_covering`). The citation names the folder and its DOI.
+
+    The catalogue of a release knows the breaks up to its making - that of C2415 was made in 2026, day 246, and the
+    folder ``latest/`` holds the same file -: a station moved later (a new antenna, an earthquake) stays on the line of
+    its old solution until a newer release says it, as in every product of the EPN."""
     if "EPN" not in station.networks:
         return None
     path, folder = _epn_file(progress)

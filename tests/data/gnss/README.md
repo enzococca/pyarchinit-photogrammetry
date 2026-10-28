@@ -84,7 +84,9 @@ the tests of the files in columns put the two excerpts in a folder `C2415/`.
   the solution valid at an epoch is the one of `EPN_discontinuities.snx`, whose `P` rows give the validity, from a
   break to the next (AQUI: the earthquake of 2009 day 96 at 01:32:39 starts solution 3, while the data of solution 2
   run to the end of that day). The numbers of the solutions are those of the SSC. No position solution of the
-  catalogue of C2415 starts after the end of the data of the solution (2026 day 115). There is no footer.
+  catalogue of C2415 starts after the end of the data of the solution (2026 day 115). There is no footer. A catalogue
+  knows the breaks up to its making (that of C2415 was made in 2026, day 246; `latest/` holds the same file): a station
+  that moved after it is on the line of its old solution until a newer release.
 
 ## Antenna calibrations: `igs20_excerpt.atx`
 

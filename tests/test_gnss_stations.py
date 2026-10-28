@@ -17,6 +17,7 @@ import re
 import shutil
 import socket
 import ssl
+import sys
 import urllib.error
 import urllib.request
 import zipfile
@@ -644,6 +645,40 @@ def test_the_columns_of_the_epn_as_they_are_written():
     assert last.end == pytest.approx(2026 + (114 + 86370 / 86400) / 365)
     with pytest.raises(stations._Absent):
         stations._read_epn_columns(DATA / EPN_COLUMNS, "BOLG")
+
+
+def test_columns_of_the_epn_with_no_position_line_are_refused(tmp_path):
+    """A file of the EPN whose lines of position no longer match the layout (a column added, a format that drifted) is
+    an error that names it, never a station quietly missing from it: the EPN would be left out for every station."""
+    lines = (DATA / EPN_COLUMNS).read_text().split("\n")
+    drifted = [line.replace(" GPS ", " GPS GNSS ") if " GPS " in line else line for line in lines]
+    path = tmp_path / EPN_COLUMNS
+    path.write_text("\n".join(drifted))
+    with pytest.raises(ValueError, match=f"{EPN_COLUMNS}: no line of a position") as error:
+        stations._read_epn_columns(path, "M0SE")
+    assert not isinstance(error.value, stations._Absent)
+
+
+def test_the_check_script_refuses_a_station_the_catalogue_does_not_have(tmp_path, monkeypatch):
+    """The script of the check on a real day (.github/scripts/gnss_station_check.py) takes the truth of a station from
+    the solution the catalogue of discontinuities says is valid, as the program does - and, as the program, refuses a
+    station without one rather than take its last solution."""
+    import importlib.util
+
+    script = Path(__file__).resolve().parents[1] / ".github" / "scripts" / "gnss_station_check.py"
+    spec = importlib.util.spec_from_file_location("gnss_station_check", script)
+    check = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, check)  # its dataclasses look their module up
+    spec.loader.exec_module(check)
+    catalogue = (DATA / "EPN_discontinuities.snx").read_text(encoding="latin-1")
+    without = tmp_path / "EPN_discontinuities.snx"
+    without.write_text("\n".join(line for line in catalogue.split("\n") if not line.startswith(" MEDI")),
+                       encoding="latin-1")
+    medi = SimpleNamespace(id="MEDI00ITA", xyz=(4461400.4, 919593.9, 4449504.9))
+    truth = check.Reference(DATA / EPN_COLUMNS, DATA / "EPN_discontinuities.snx", "C2415").at(medi, 2026.0)
+    assert truth.solution.number == 2 and "valid at the epoch" in truth.why
+    with pytest.raises(check.CheckError, match="no solution valid at 2026.0000"):
+        check.Reference(DATA / EPN_COLUMNS, without, "C2415").at(medi, 2026.0)
 
 
 @pytest.mark.parametrize("which", ["a velocity line", "the last velocity line", "the title"])

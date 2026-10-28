@@ -168,7 +168,10 @@ def read_discontinuities(path: Path) -> dict[str, list[tuple[int, float | None, 
 
 class Reference:
     """The SSC coordinates of the stations at any epoch: the solution that the catalogue of discontinuities says is
-    valid at the epoch, on the line of its position and velocity."""
+    valid at the epoch, on the line of its position and velocity. A station the catalogue gives no solution valid at
+    the epoch (not in it at all) is refused, as the program refuses it - never its last solution. The catalogue of a
+    release knows the breaks up to its making (that of C2415 was made in 2026, day 246; latest/ holds the same file):
+    a station moved later is on its old line until a newer release."""
 
     def __init__(self, ssc: Path, discontinuities: Path, release: str):
         self.ssc, self.release = ssc, release
@@ -186,16 +189,16 @@ class Reference:
                              "years of data, without a velocity, are not; nor are those with post-seismic models")
         valid = [s for s in self.validity.get(code, [])
                  if (s[1] is None or s[1] <= epoch) and (s[2] is None or epoch < s[2])]
-        if valid:
-            number = max(valid)[0]
-            chosen = next((s for s in solutions if s.number == number), None)
-            if chosen is None:
-                raise CheckError(f"{DISCONTINUITIES} puts {code} at {epoch:.4f} in solution {number}, which "
-                                 f"{self.ssc.name} does not hold: a break after the end of its data")
-            why = f"solution {number}, valid at the epoch by {DISCONTINUITIES}"
-        else:
-            chosen = max(solutions, key=lambda s: s.data[0] or -math.inf)
-            why = f"solution {chosen.number}, the last one ({code} is not in {DISCONTINUITIES})"
+        if not valid:  # the program refuses the station: so does the check
+            absent = "" if code in self.validity else f" ({code} is not in it)"
+            raise CheckError(f"{code} has no solution valid at {epoch:.4f} in {DISCONTINUITIES} of {self.release}"
+                             f"{absent}: the program refuses such a station, and so does the check")
+        number = max(valid)[0]
+        chosen = next((s for s in solutions if s.number == number), None)
+        if chosen is None:
+            raise CheckError(f"{DISCONTINUITIES} puts {code} at {epoch:.4f} in solution {number}, which "
+                             f"{self.ssc.name} does not hold: a break after the end of its data")
+        why = f"solution {number}, valid at the epoch by {DISCONTINUITIES}"
         dt = epoch - chosen.ref
         xyz = np.array(chosen.xyz) + np.array(chosen.velocity) * dt
         if np.linalg.norm(xyz - np.array(station.xyz)) > 1000.0:
