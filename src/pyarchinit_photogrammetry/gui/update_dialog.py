@@ -7,6 +7,7 @@ from __future__ import annotations
 import dataclasses
 import html
 import logging
+import re
 import threading
 from pathlib import Path
 
@@ -20,6 +21,11 @@ from ..plugins import updates as plugin_updates
 from .i18n import tr, translate
 
 log = logging.getLogger(__name__)
+
+# ``.install-<name>-<8 random characters>``: the work folder of an install (``tempfile.mkdtemp`` names it, from the
+# letters, digits and "_"), which the message of an OSError may give. The 8 characters end the name: no other name
+# character, no hyphen follows (a plugin called "a-bcdefghi" has 8 letters after a hyphen too).
+WORK_FOLDER = re.compile(r"(\.install-[a-z0-9-]+?-)[a-z0-9_]{8}(?![a-z0-9_-])")
 
 ERROR_TEXTS = {
     "offline": "GitHub non e' raggiungibile: controlla la connessione a Internet.",
@@ -176,13 +182,15 @@ class PluginUpdateChecker(BackgroundCheck):
 def _told_items(result: plugin_updates.PluginUpdates):
     """The items of ``result`` a daily look tells once, as ``(key, kind, item)``: the plugins that wait and the updates
     that could be installed but were not (the key is ``kind:name:version``, the version of the index), and the updates
-    that failed (the result holds no version for them: the message stands in its place)."""
+    that failed (the result holds no version for them: the message stands in its place, without the random name of
+    the work folder it may give - that is not another failure)."""
     for item in result.waiting:
         yield f"waiting:{item[0]}:{item[1]}", "waiting", item
     for item in result.available:
         yield f"available:{item[0]}:{item[2]}", "available", item
     for item in result.failed:
-        yield f"failed:{item[0]}:{item[1]}", "failed", item
+        message = WORK_FOLDER.sub(r"\1", item[1])
+        yield f"failed:{item[0]}:{message}", "failed", item
 
 
 def told_keys(result: plugin_updates.PluginUpdates) -> list[str]:
@@ -193,12 +201,13 @@ def told_keys(result: plugin_updates.PluginUpdates) -> list[str]:
 
 def untold(result: plugin_updates.PluginUpdates, told) -> plugin_updates.PluginUpdates:
     """``result`` with only the waiting, available and failed items whose key is not in ``told``: what a daily look
-    shows. The updates made and the new plugins are always news."""
+    shows. The updates made and the new plugins are always news; the updates downloaded by an earlier look are told
+    only when the user asks (they were told when they were downloaded)."""
     fresh: dict[str, list] = {"waiting": [], "available": [], "failed": []}
     for key, kind, item in _told_items(result):
         if key not in told:
             fresh[kind].append(item)
-    return dataclasses.replace(result, **fresh)
+    return dataclasses.replace(result, pending=[], **fresh)
 
 
 def plugin_summary_html(result: plugin_updates.PluginUpdates) -> str:
@@ -223,7 +232,7 @@ def plugin_summary_html(result: plugin_updates.PluginUpdates) -> str:
         them begin with: it stands in front of the line already."""
         return esc(translate(why.removeprefix(f"{name}: ")))
 
-    block(tr("Aggiornati: attivi dal prossimo avvio"), [change(*u) for u in result.updated])
+    block(tr("Aggiornati: attivi dal prossimo avvio"), [change(*u) for u in (*result.updated, *result.pending)])
     block(tr("Aggiornamenti disponibili"), [change(*u) for u in result.available],
           tr("L'aggiornamento automatico dei plugin è spento (Aiuto > Aggiorna i plugin da soli): installa le nuove "
              "versioni dal gestore dei plugin."))
@@ -246,8 +255,8 @@ def plugin_summary_html(result: plugin_updates.PluginUpdates) -> str:
 
 class PluginUpdatesDialog(QDialog):
     """The summary of a look at the plugin index (:func:`plugin_summary_html`). *Riavvia ora* is offered only
-    when an update was downloaded: it is put in place by the restart. After ``exec()``, ``action`` is
-    ``restart``, ``manager`` (open *Strumenti > Plugin...*) or None."""
+    when an update was downloaded, now or by an earlier look: it is put in place by the restart. After ``exec()``,
+    ``action`` is ``restart``, ``manager`` (open *Strumenti > Plugin...*) or None."""
 
     def __init__(self, result: plugin_updates.PluginUpdates, parent=None):
         super().__init__(parent)
@@ -262,9 +271,10 @@ class PluginUpdatesDialog(QDialog):
         self.resize(620, 420)
         row = QHBoxLayout()
         self.buttons: dict[str, QPushButton] = {}
-        if result.updated:
+        waiting_for_the_restart = bool(result.updated or result.pending)
+        if waiting_for_the_restart:
             self._button(row, "restart", tr("Riavvia ora"), default=True)
-        self._button(row, "manager", tr("Apri il gestore dei plugin"), default=not result.updated)
+        self._button(row, "manager", tr("Apri il gestore dei plugin"), default=not waiting_for_the_restart)
         row.addStretch(1)
         self._button(row, "close", tr("Chiudi"))
         lay.addLayout(row)

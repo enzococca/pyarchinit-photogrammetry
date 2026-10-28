@@ -230,18 +230,46 @@ def test_the_summary_after_the_daily_check(window, monkeypatch):
     assert json.loads(w.settings.value("plugins_seen")) == ["a", "b", "nuovo"]  # told once: not new at the next look
 
 
-@pytest.mark.parametrize("answer, called", [("restart", "restart"), ("manager", "show_plugins"), (None, None)])
+@pytest.mark.parametrize("answer, called", [("restart", "restart"), ("manager", ("show_plugins", {"fetch": True})),
+                                            (None, None)])
 def test_what_the_summary_asks_for(window, monkeypatch, answer, called):
     w, app = window
     _fake_run(monkeypatch, PluginUpdates(failed=[("a", "no space left")], seen=["a"]))
     shown = _fake_dialog(monkeypatch, answer=answer)
     done = []
     monkeypatch.setattr(w, "restart", lambda: done.append("restart"))
-    monkeypatch.setattr(w, "show_plugins", lambda: done.append("show_plugins"))
+    monkeypatch.setattr(w, "show_plugins", lambda **kw: done.append(("show_plugins", kw)))
     assert w._check_plugins(manual=True)
     _wait(app, lambda: shown, "the summary")
     app.processEvents()
-    assert done == ([called] if called else [])
+    assert done == ([called] if called else [])  # the manager from the summary is opened with the index read
+
+
+def test_the_manager_opened_from_the_summary_has_the_index_read(window, monkeypatch):
+    from pyarchinit_photogrammetry.gui import plugins_dialog
+
+    w, app = window
+    calls = []
+
+    class Manager:  # stands in for the window of the plugin manager (a modal window never opens in a test)
+        def __init__(self, window):
+            calls.append("built")
+
+        def fetch(self):
+            calls.append("the index read")
+
+        def exec(self):
+            calls.append("open")
+            return 0
+
+    monkeypatch.setattr(plugins_dialog, "PluginsDialog", Manager)
+    _fake_run(monkeypatch, PluginUpdates(new=[_new_entry("nuovo", title="Plugin nuovo")], seen=["nuovo"]))
+    shown = _fake_dialog(monkeypatch, answer="manager")
+    _looker(w, app)(manual=True)
+    assert shown and calls == ["built", "the index read", "open"]  # the list of the repository is full when it opens
+    calls.clear()
+    w.show_plugins()  # *Strumenti > Plugin...* is as it was: the list waits for *Aggiorna l'elenco*
+    assert calls == ["built", "open"]
 
 
 def test_nothing_to_say_says_nothing(window, monkeypatch):
@@ -347,10 +375,9 @@ def test_two_real_looks_at_an_index(windows, tmp_path, monkeypatch):
     assert not (folder / "z").exists() and not (folder / "eta").exists()  # a new plugin is never installed by itself
     look()  # nothing new now: nothing said
     assert len(shown) == 2 and json.loads(w.settings.value("plugins_seen")) == ["a", "eta", "z"]
-    look(manual=True)  # the update staged is ready, and the manual look says so
-    rows = _rows(w)
-    assert (logging.INFO, "Plugin a: la 0.2.0 è pronta, attiva dal prossimo avvio") in rows
-    assert (logging.INFO, "Plugin: nessun aggiornamento") not in rows and len(shown) == 2
+    look(manual=True)  # the update staged is ready, and the manual look shows it
+    assert len(shown) == 3 and "a 0.1.0 → 0.2.0" in _text(shown[2])
+    assert (logging.INFO, "Plugin: nessun aggiornamento") not in _rows(w)
 
 
 def test_the_switch_turns_installing_off(window, monkeypatch):
@@ -371,6 +398,27 @@ def test_the_switch_turns_installing_off(window, monkeypatch):
     assert w.settings.value("plugins_auto_update") == "true"
     look()
     assert len(calls) == 2 and calls[1]["update"] is True  # the look after it downloads
+
+
+def test_turning_the_updates_off_drops_the_ones_already_downloaded(windows, tmp_path, monkeypatch):
+    make, app = windows
+    folder = tmp_path / "plugins-of-the-switch"  # a folder of its own: the staged updates are put in place at the start
+    _install_folder(folder, "a")
+    _install_folder(folder, "b")
+    monkeypatch.setenv("PPG_PLUGINS_DIR", str(folder))
+    w = make()
+    entries = [_newer(tmp_path, "a", "0.2.0"), _newer(tmp_path, "b", "0.4.0")]
+    # the look of the day downloaded two updates while the window was open
+    assert [u[0] for u in plugin_updates.check(entries, _installed(folder), None, folder).updated] == ["a", "b"]
+    assert plugin_updates.staged(folder) == {"a": "0.2.0", "b": "0.4.0"}
+    before = len(w.log_pane.entries)
+    w.a_plugins_auto_update.setChecked(False)  # the user does not want updates put in place by themselves
+    assert plugin_updates.staged(folder) == {} and not list((folder / ".updates").iterdir())  # none is left
+    assert _rows(w)[before:] == [(logging.INFO, "Aggiornamenti dei plugin già scaricati e tolti: a 0.2.0, b 0.4.0")]
+    assert {i.name: i.version for i in Manager(folder).discover()} == {"a": "0.1.0", "b": "0.1.0"}  # none at the start
+    w.a_plugins_auto_update.setChecked(True)  # on again, and off with nothing downloaded: nothing to drop, no row
+    w.a_plugins_auto_update.setChecked(False)
+    assert len(_rows(w)[before:]) == 1
 
 
 def test_the_switch_is_in_the_help_menu_and_remembered(windows):
@@ -429,7 +477,7 @@ def test_one_check_at_a_time(window, monkeypatch, tmp_path):
         assert not w.plugin_checker.start(True, None, True, tmp_path)  # a second one is refused ...
         assert not w._check_plugins(manual=True)  # ... also from the window
         w.check_updates()  # *Controlla aggiornamenti* while both run: it says so
-        assert w.statusBar().currentMessage() == "Controllo degli aggiornamenti gia' in corso"
+        assert w.statusBar().currentMessage() == "Controllo degli aggiornamenti già in corso"
     finally:
         gate.set()
     _wait(app, lambda: not w.plugin_checker.running, "the look to end")
@@ -481,6 +529,35 @@ def test_the_daily_look_tells_an_item_once_per_version(window, monkeypatch, kind
     assert len(shown) == 4
 
 
+def test_a_failed_update_is_told_once_whatever_its_work_folder_was_called(window, monkeypatch, tmp_path):
+    """``index.install`` unpacks into ``.install-<name>-<8 random characters>`` (``tempfile.mkdtemp``): the message of
+    an OSError names that folder, so it reads differently every day for the same failure."""
+    import tempfile
+
+    for name in ("a", "gis-archive", "a-bcdefghi"):  # the last: a name that ends in 8 letters after a hyphen
+        keys = set()
+        for _ in range(60):  # what mkdtemp really makes
+            work = tempfile.mkdtemp(prefix=f".install-{name}-", dir=tmp_path)
+            message = (f"{name}: the wheel could not be downloaded: [Errno 28] No space left on device: "
+                       f"'{work}/{name}-0.2.0-py3-none-any.whl'")
+            keys |= set(update_dialog.told_keys(PluginUpdates(failed=[(name, message)])))
+        assert len(keys) == 1, (name, keys)
+    assert update_dialog.told_keys(PluginUpdates(failed=[("a", "a: timed out")])) != \
+        update_dialog.told_keys(PluginUpdates(failed=[("a", "a: HTTP Error 404")]))  # another failure is another key
+    w, app = window
+
+    def failure(token: str) -> PluginUpdates:
+        return PluginUpdates(failed=[("a", f"a: could not be put in place: [Errno 13] Permission denied: "
+                                           f"'/x/plugins/.install-a-{token}/unpacked'")], seen=["a"])
+
+    _fake_run(monkeypatch, [failure("k3j2h1g0"), failure("9z8y7x6w")])
+    shown = _fake_dialog(monkeypatch)
+    look = _looker(w, app)
+    look()  # the first day
+    look()  # the next day: the same failure, its work folder named otherwise
+    assert len(shown) == 1
+
+
 def test_the_daily_summary_has_only_what_was_not_told(window, monkeypatch):
     w, app = window
     waiting = ("b", "0.3.0", REASON)
@@ -511,7 +588,7 @@ def test_a_damaged_list_of_what_was_told_is_an_empty_one(window, monkeypatch):
         shown.clear()
 
 
-def test_a_manual_check_tells_the_updates_waiting_for_the_restart(window, monkeypatch):
+def test_a_manual_check_shows_the_updates_waiting_for_the_restart(window, monkeypatch):
     w, app = window
     pending = [("a", "0.1.0", "0.2.0"), ("b", "0.3.0", "0.4.0")]
     _fake_run(monkeypatch, PluginUpdates(pending=pending, seen=["a", "b"]))
@@ -519,11 +596,26 @@ def test_a_manual_check_tells_the_updates_waiting_for_the_restart(window, monkey
     look = _looker(w, app)
     before = len(w.log_pane.entries)
     look()  # the daily look says nothing of them: they were told when they were downloaded
-    assert len(w.log_pane.entries) == before
-    look(manual=True)  # the manual one does: one line for each, not "no updates"
-    assert _rows(w)[before:] == [(logging.INFO, "Plugin a: la 0.2.0 è pronta, attiva dal prossimo avvio"),
-                                 (logging.INFO, "Plugin b: la 0.4.0 è pronta, attiva dal prossimo avvio")]
-    assert not shown
+    assert not shown and len(w.log_pane.entries) == before
+    look(manual=True)  # the manual one shows them, under the updates made
+    assert len(shown) == 1
+    lines = _text(shown[0]).splitlines()
+    assert lines[:3] == ["Aggiornati: attivi dal prossimo avvio", "a 0.1.0 → 0.2.0", "b 0.3.0 → 0.4.0"]
+    assert (logging.INFO, "Plugin: nessun aggiornamento") not in _rows(w)[before:]
+    # and the window offers the restart that puts them in place
+    assert "restart" in update_dialog.PluginUpdatesDialog(PluginUpdates(pending=pending)).buttons
+
+
+def test_the_daily_summary_never_tells_the_updates_waiting_for_the_restart(window, monkeypatch):
+    w, app = window
+    news = PluginUpdates(pending=[("p", "0.1.0", "0.2.0")], new=[_new_entry("nuovo", title="Plugin nuovo")],
+                         seen=["p", "nuovo"])
+    _fake_run(monkeypatch, news)
+    shown = _fake_dialog(monkeypatch)
+    _looker(w, app)()
+    assert len(shown) == 1
+    text = _text(shown[0])
+    assert "Plugin nuovo" in text and "p 0.1.0" not in text and "Aggiornati" not in text  # a new plugin: it alone
 
 
 def test_an_index_with_no_plugin_records_nothing(window, monkeypatch):
@@ -583,6 +675,7 @@ def test_the_summary_waits_for_any_modal_window(window, monkeypatch):
             time.sleep(0.02)
             app.processEvents()
         assert not shown and w.settings.value("plugins_told", "") == ""  # held back, and not remembered as told
+        assert w.settings.value("plugins_seen", "") == ""  # nor are its plugins marked as seen: nobody saw them yet
         w._plugins_checked(PluginUpdates(waiting=[("b", "0.4.0", REASON)], seen=["b"]), None, False)  # a newer answer
     finally:
         other.close()
@@ -590,6 +683,59 @@ def test_the_summary_waits_for_any_modal_window(window, monkeypatch):
     app.processEvents()
     assert len(shown) == 1 and "0.4.0" in _text(shown[0])  # the newer answer replaced the one that waited
     assert json.loads(w.settings.value("plugins_told")) == ["waiting:b:0.4.0"]
+    assert json.loads(w.settings.value("plugins_seen")) == ["b"]  # shown now: seen now
+
+
+def test_a_summary_dropped_with_the_window_is_not_marked_as_seen(window, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    w, app = window
+    shown = _fake_dialog(monkeypatch)
+    w.settings.setValue("plugins_seen", json.dumps(["a"]))
+    w.settings.setValue("updates_last_check", "2026-10-28")
+    other = QDialog(w)  # a window of the program is open when the look ends: the summary is held back
+    other.setModal(True)
+    other.show()
+    app.processEvents()
+    try:
+        news = PluginUpdates(new=[_new_entry("nuovo", title="Plugin nuovo")], seen=["a", "nuovo"])
+        w._plugins_checked(news, None, False)
+        assert not shown and w._update_waiting  # held back
+        w.setWindowModified(False)
+        w.close()  # the window is closed before it was shown: nobody saw the plugin that is new
+    finally:
+        other.close()
+    assert not shown
+    assert json.loads(w.settings.value("plugins_seen")) == ["a"]  # still new for the next look
+    assert w.settings.value("updates_last_check", "") == ""  # and the next start looks again, whatever the day
+
+
+def test_a_window_closed_with_nothing_held_keeps_the_day_of_the_last_look(window):
+    w, app = window
+    w.settings.setValue("updates_last_check", "2026-10-28")
+    w.setWindowModified(False)
+    w.close()
+    assert w.settings.value("updates_last_check", "") == "2026-10-28"  # nothing was lost: the next start waits a day
+
+
+def test_riavvia_ora_drops_the_window_of_the_program_update_and_the_next_start_looks_again(window, monkeypatch):
+    w, app = window
+    relaunched = []
+    monkeypatch.setattr(w, "_relaunch", lambda: relaunched.append(True))  # the real one starts another program
+    w.settings.setValue("updates_last_check", "2026-10-28")
+    order = []
+    # the summary is open; the program's own look ends meanwhile, its window waits behind the summary;
+    # *Riavvia ora* in the summary ends it all
+    _fake_program_dialog(monkeypatch, order)
+    _fake_dialog(monkeypatch, answer="restart", order=order,
+                 during=lambda: w.update_checker.finished.emit(_release(), None, False))
+    try:
+        w._plugins_checked(PluginUpdates(updated=[("a", "0.1.0", "0.2.0")], seen=["a"]), None, False)
+        assert order == ["the summary opens", "the summary closes"]  # the program's window never opened ...
+        assert relaunched == [True]
+        assert w.settings.value("updates_last_check", "") == ""  # ... so the next start asks again
+    finally:
+        w._relaunch_on_close = False  # the window is closed once more at the end of the test: no program is started
 
 
 # ---------------------------------------------------------------------------------------- a manual request
@@ -626,7 +772,7 @@ def test_a_manual_request_met_by_the_look_that_runs_is_answered(window, monkeypa
     (True, True, "Controllo degli aggiornamenti..."),
     (True, False, "Controllo degli aggiornamenti... (il controllo dei plugin è già in corso)"),
     (False, True, "Controllo degli aggiornamenti... (il controllo della versione del programma è già in corso)"),
-    (False, False, "Controllo degli aggiornamenti gia' in corso"),
+    (False, False, "Controllo degli aggiornamenti già in corso"),
 ])
 def test_the_manual_check_says_which_look_is_already_running(window, monkeypatch, program, plugins, text):
     w, app = window
@@ -725,9 +871,10 @@ def test_the_summary_names_each_kind_under_its_own_heading():
         failed=[("c", "c: the wheel does not match its SHA-256 in the index")],  # as index.install words it
         waiting=[("d", "0.3.0", REASON), ("e", "0.2.0", "installed in /x/my-e, not in /x/e: update it by hand")],
         new=[new])
+    result.pending = [("p", "0.1.0", "0.2.0")]  # downloaded earlier: in the same block, active from the same start
     text = _text(update_dialog.plugin_summary_html(result))
     lines = text.splitlines()
-    assert lines[:2] == ["Aggiornati: attivi dal prossimo avvio", "a 0.1.0 → 0.2.0"]
+    assert lines[:3] == ["Aggiornati: attivi dal prossimo avvio", "a 0.1.0 → 0.2.0", "p 0.1.0 → 0.2.0"]
     assert "Aggiornamenti disponibili" in lines and "b 0.4.0 → 0.5.0" in lines
     assert "Aggiornamenti non riusciti" in lines and "c: the wheel does not match its SHA-256 in the index" in lines
     assert "c: c:" not in text  # the name stands in front of the line once
@@ -789,6 +936,8 @@ def test_the_summary_window_offers_what_fits(window):
     assert staged.buttons["close"].text() == "Chiudi"
     staged.buttons["restart"].click()
     assert staged.action == "restart"
+    waiting_for_the_restart = update_dialog.PluginUpdatesDialog(PluginUpdates(pending=[("a", "0.1.0", "0.2.0")]))
+    assert set(waiting_for_the_restart.buttons) == {"restart", "manager", "close"}  # an update downloaded earlier too
     for nothing_staged in (PluginUpdates(new=[new]), PluginUpdates(available=[("a", "0.1.0", "0.2.0")]),
                            PluginUpdates(waiting=[("a", "0.3.0", REASON)]), PluginUpdates(failed=[("a", "no")])):
         d = update_dialog.PluginUpdatesDialog(nothing_staged)  # no restart to offer

@@ -1005,8 +1005,7 @@ class MainWindow(QMainWindow):
         self.a_plugins_auto_update = QAction(tr("Aggiorna i plugin da soli"), self, checkable=True)
         self.a_plugins_auto_update.setChecked(
             self.settings.value("plugins_auto_update", "true") in ("true", True, 1, "1"))
-        self.a_plugins_auto_update.toggled.connect(
-            lambda on: self.settings.setValue("plugins_auto_update", "true" if on else "false"))
+        self.a_plugins_auto_update.toggled.connect(self._plugins_auto_update_toggled)
         m.addAction(self.a_plugins_auto_update)
         m.addSeparator()
         self._act(m, tr("Informazioni"), self.about, icon_name="about")
@@ -2126,11 +2125,16 @@ class MainWindow(QMainWindow):
             return
         NodesDialog(files_dir, self.settings, self).exec()
 
-    def show_plugins(self) -> None:
-        """Strumenti > Plugin: those found and those of the plugin repository."""
+    def show_plugins(self, *, fetch: bool = False) -> None:
+        """Strumenti > Plugin: those found and those of the plugin repository. ``fetch``: with the index already read
+        (the summary of the plugin updates opens it so: what it names is there to install), as *Aggiorna l'elenco*
+        does."""
         from .plugins_dialog import PluginsDialog
 
-        PluginsDialog(self).exec()
+        dlg = PluginsDialog(self)
+        if fetch:
+            dlg.fetch()
+        dlg.exec()
 
     def restart(self) -> None:
         """Close and start again with the same project (after plugins or the language changed)."""
@@ -2375,6 +2379,8 @@ class MainWindow(QMainWindow):
             return
         self._settle_removals(self.doc)  # the files of what was removed: deleted, or back if never saved
         self._update_timer.stop()  # a window of the update flow held back is not opened for a window that is closed
+        if self._update_waiting:  # the news it carried were not seen: the next start looks again, whatever the day
+            self.settings.remove("updates_last_check")
         self._update_waiting.clear()
         self._qgis_poll.stop()  # a window closed reads no more edits of QGIS
         self._qgis_timer.stop()
@@ -6990,7 +6996,7 @@ class MainWindow(QMainWindow):
         elif program:
             text = tr("Controllo degli aggiornamenti... (il controllo dei plugin è già in corso)")
         else:
-            text = tr("Controllo degli aggiornamenti gia' in corso")
+            text = tr("Controllo degli aggiornamenti già in corso")
         self.statusBar().showMessage(text, 5000)
 
     def _setting_names(self, key: str) -> list[str] | None:
@@ -7030,31 +7036,51 @@ class MainWindow(QMainWindow):
         if error is not None:
             (log.warning if manual else log.info)("Controllo dei plugin: %s", error)
             return
-        if result.seen:  # an index with no plugin records nothing: the first look is still to come
-            self.settings.setValue("plugins_seen", json.dumps(result.seen))
         shown = result if manual else untold(result, self._plugins_told())
-        if shown:
+        if shown or (manual and result.pending):  # what waits for the restart is shown when it is asked for
             self._open_update_window("plugins", lambda: self._tell_plugins(result, shown))
             return
+        self._remember_seen(result)  # nothing to show: what the look found is recorded now
         self._remember_told(result)
         if manual:
-            for name, _old, version in result.pending:  # downloaded earlier, not announced again: asked for, said
-                self.log_pane.info(tr("Plugin {0}: la {1} è pronta, attiva dal prossimo avvio", name, version))
-            if not result.pending:
-                self.log_pane.info(tr("Plugin: nessun aggiornamento"))
+            self.log_pane.info(tr("Plugin: nessun aggiornamento"))
+
+    def _remember_seen(self, result) -> None:
+        """The plugins of the index are seen - when the summary that may name them as new is shown, or there is none.
+        An index with no plugin records nothing: the first look is still to come."""
+        if result.seen:
+            self.settings.setValue("plugins_seen", json.dumps(result.seen))
 
     def _remember_told(self, result) -> None:
         self.settings.setValue("plugins_told", json.dumps(told_keys(result)))
 
     def _tell_plugins(self, result, shown) -> None:
         """The summary window of the plugins, and what the user chose in it."""
+        self._remember_seen(result)
         self._remember_told(result)
         dlg = PluginUpdatesDialog(shown, parent=self)
         dlg.exec()
         if dlg.action == "restart":
             self.restart()
         elif dlg.action == "manager":
-            self.show_plugins()
+            self.show_plugins(fetch=True)
+
+    def _plugins_auto_update_toggled(self, on: bool) -> None:
+        """*Aggiorna i plugin da soli*, kept in the settings. Turned off, the updates already downloaded - they would
+        be put in place by the next start - are dropped, and a row in the log names them."""
+        self.settings.setValue("plugins_auto_update", "true" if on else "false")
+        if on:
+            return
+        from ..plugins import index as plugin_index
+        from ..plugins import updates as plugin_updates
+
+        folder = self.plugins.folder
+        dropped = plugin_updates.staged(folder)
+        for name in dropped:
+            plugin_index.drop_staged(folder, name)
+        if dropped:
+            self.log_pane.info(tr("Aggiornamenti dei plugin già scaricati e tolti: {0}",
+                                  ", ".join(f"{name} {version}" for name, version in sorted(dropped.items()))))
 
     # ---- the windows of the update flow, one at a time
     def _modal_open(self) -> bool:
