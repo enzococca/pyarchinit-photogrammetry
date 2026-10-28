@@ -7,21 +7,25 @@ open app has its own opt-in test (test_rustgis_app.py)."""
 from __future__ import annotations
 
 import copy
+import http.client
 import json
 import logging
 import os
 import plistlib
+import re
 import shutil
 import socket
 import socketserver
 import sqlite3
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import traceback
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -1556,6 +1560,8 @@ class FakeEngine:
     refuse it with their text (a domain of a layer, say); ``cut``: runs only that many lines of a script and says so,
     as RustGIS does past its 10,000th. A GeoPackage table of more than ``stream_above`` features is read in place
     unless ``layer.addData`` says ``"stream": false``, and then refuses every edit, as RustGIS does past 100,000.
+    ``layer.addUrl`` reads the first 64 KiB of the address by range, as RustGIS does, and adds a TIFF as a tile layer
+    read in place (kind ``cog``, ``tile_layers``, top first: not a layer, in no group); what it read is in ``fetched``.
     ``shift``: metres east by which it misplaces what it reads (a system it does not know). Every call is in ``calls``,
     every script in ``scripts``."""
 
@@ -1576,6 +1582,8 @@ class FakeEngine:
         self.cut: int | None = None
         self.stream_above = 100_000
         self.active: int | None = None  # the layer the last command naming one named: edits go to it
+        self.tile_layers: list[dict] = []  # top first: name, url, kind (what layer.addUrl reads in place)
+        self.fetched: list = []  # (url, range, status) of each first read of an address
 
     def initialize(self) -> str:
         return self.version
@@ -1629,7 +1637,8 @@ class FakeEngine:
         return {"layers": [{"id": l["id"], "name": l["name"], "group": group_of(l["id"]), "type": l["kind"],
                             "source": l["source"], "features": 0 if l.get("streamed") else len(l["features"]),
                             "fields": [f"{n} ({k})" for n, k in l["fields"].items()]} for l in self.layers],
-                "groups": [copy.deepcopy(g) for g in self.groups], "unsaved": any(map(any, self.status.values()))}
+                "groups": [copy.deepcopy(g) for g in self.groups], "unsaved": any(map(any, self.status.values())),
+                "tileLayers": [dict(t, index=n) for n, t in enumerate(self.tile_layers)]}
 
     def layer(self, lid: int) -> dict:
         return next(l for l in self.layers if l["id"] == lid)
@@ -1778,6 +1787,36 @@ class FakeEngine:
             self.layers.insert(0, layer)
             return {"layersAdded": [layer["name"]], "result": {"features": len(features), "layer": layer["id"],
                                                                "layers": [layer["id"]], "streamed": streamed}}
+        if command == "layer.addUrl":  # a tiled GeoTIFF by its address: its header read by range, then a tile layer
+            url = p["url"]
+            parts = urllib.parse.urlsplit(url)
+            connection = http.client.HTTPConnection(parts.hostname, parts.port, timeout=10)
+            try:
+                connection.request("GET", parts.path, headers={"Range": "bytes=0-65535"})
+                reply = connection.getresponse()
+                head = reply.read()
+            finally:
+                connection.close()
+            self.fetched.append((url, "bytes=0-65535", reply.status))
+            if reply.status not in (200, 206):
+                raise link.RustGisRefused(f"{url}: http status: {reply.status}")
+            if head[:4] not in (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+"):
+                raise link.RustGisRefused(f"{url}: GeoTIFF: format error: TIFF signature not found")
+            name = p.get("name") or parts.path.rsplit("/", 1)[-1]
+            self.tile_layers.insert(0, {"name": name, "url": url, "kind": "cog"})
+            return {"bounds": [0.0, 0.0, 0.0, 0.0], "inPlace": True, "index": 0, "kind": "cog", "name": name}
+        if command == "map.removeTiles":
+            if "index" in p:
+                chosen = self.tile_layers[p["index"]:p["index"] + 1]
+            elif "name" in p:
+                chosen = [t for t in self.tile_layers if t["name"] == p["name"]][:1]
+            else:
+                chosen = list(self.tile_layers)
+            if not chosen and ("index" in p or "name" in p):
+                raise link.RustGisRefused(f"no tile layer '{p.get('name', p.get('index'))}'")
+            for tile in chosen:
+                self.tile_layers.remove(tile)
+            return {"removed": [t["name"] for t in chosen]}
         if command == "layer.remove":
             refs = p["layer"] if isinstance(p["layer"], list) else [p["layer"]]
             for ref in refs:
@@ -2458,6 +2497,277 @@ def test_start_with_rasters(tmp_path):
     assert out["rasters"] == 1 and out["layers"] == 7 and "not a raster" in out["refused"]["Rotto"]
     assert [l["name"] for l in fake.layers][-1] == "Ortofoto"
     assert fake.layers[-1]["id"] in fake.groups[0]["layers"]
+
+
+# ---- rasters at full resolution: one larger than RustGIS loads whole is read in place, by range
+
+def _header_only(path: Path, width: int, height: int, count: int) -> Path:
+    """A tiled GeoTIFF of that size with no pixel written: GDAL leaves its tiles out (SPARSE_OK), so the file is its
+    header alone, a few kilobytes whatever its size."""
+    import rasterio
+    from rasterio.transform import from_origin
+
+    with rasterio.open(path, "w", driver="GTiff", width=width, height=height, count=count, dtype="uint8", crs=GB,
+                       transform=from_origin(GX, GY + height * 0.01, 0.01, 0.01), tiled=True, blockxsize=256,
+                       blockysize=256, sparse_ok=True):
+        pass
+    assert path.stat().st_size < 100_000  # nothing of the pixels reaches the disk
+    return path
+
+
+def _http(port: int, path: str, method: str = "GET", headers: dict | None = None) -> tuple[int, dict, bytes]:
+    """One request to 127.0.0.1 on a connection of its own (http.client: never through a proxy): the status, the
+    headers in lower case and the body."""
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        connection.request(method, path, headers=headers or {})
+        reply = connection.getresponse()
+        return reply.status, {k.lower(): v for k, v in reply.getheaders()}, reply.read()
+    finally:
+        connection.close()
+
+
+def test_raster_route(tmp_path):
+    """RustGIS loads a raster whole up to RASTER_SAMPLES (width x height x bands): such a one goes as a file, a larger
+    one by the address of the link's raster server, read in place by range (as a file RustGIS would open it from an
+    overview). Only the header is read to tell. What rasterio cannot read goes as a file: RustGIS says whether it reads
+    it."""
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    small = tmp_path / "piccolo.tif"
+    with rasterio.open(small, "w", driver="GTiff", width=100, height=100, count=3, dtype="uint8", crs=GB,
+                       transform=from_origin(GX, GY + 1, 0.01, 0.01)) as dst:
+        dst.write(np.zeros((3, 100, 100), dtype="uint8"))
+    assert link.raster_route(small) == "file"
+    assert link.raster_route(_header_only(tmp_path / "grande.tif", 8000, 6000, 4)) == "url"
+    assert link.raster_route(_header_only(tmp_path / "al_limite.tif", 10_000, 4_000, 3)) == "file"  # 120 M: whole
+    assert link.raster_route(_header_only(tmp_path / "oltre.tif", 10_001, 4_000, 3)) == "url"
+    (tmp_path / "rotto.tif").write_bytes(b"not a raster")
+    assert link.raster_route(tmp_path / "rotto.tif") == "file"
+    assert link.raster_route(tmp_path / "manca.tif") == "file"
+
+
+def test_the_server_answers_ranges(tmp_path, monkeypatch, capfd):
+    """The raster server listens on 127.0.0.1 only, its files under a random prefix of 32 hexadecimal characters and a
+    random name each: a file given to url() whole or by one byte range (206, Content-Range), its last bytes, 416 past
+    its end, HEAD with the length and Accept-Ranges: bytes; several ranges or a malformed one get the whole file (a
+    server may ignore them). Anything else is not found (404): another prefix, a name never given, the folder, a path
+    climbing out of it, a file's own name, another host, a link put where the file was. It reads a few bytes at a time,
+    keeps a connection for the next request, says nothing on stderr (a reader gone in the middle of an answer
+    included), and close() stops it - a connection still open included - and joins its thread."""
+    monkeypatch.setattr(link.RasterServer, "CHUNK", 7)  # several reads for every answer
+    data = bytes(range(256)) * 4
+    raster = tmp_path / "ortofoto.tif"
+    raster.write_bytes(data)
+    secret = tmp_path / "segreto.tif"
+    secret.write_bytes(b"not for RustGIS")
+    server = link.RasterServer()
+    port = server.server_address[1]
+    kept = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        assert server.server_address[0] == "127.0.0.1" and server.thread.daemon
+        address = server.url(raster)
+        parts = urllib.parse.urlsplit(address)
+        assert (parts.scheme, parts.hostname, parts.port) == ("http", "127.0.0.1", port)
+        path = parts.path
+        prefix, name = path.strip("/").split("/")
+        assert re.fullmatch("[0-9a-f]{32}", prefix) and re.fullmatch(r"[0-9a-f]{32}\.tif", name)
+        assert server.base == f"http://127.0.0.1:{port}/{prefix}/" and address.startswith(server.base)
+        status, headers, body = _http(port, path)
+        assert (status, body) == (200, data) and headers["content-length"] == "1024"
+        assert headers["accept-ranges"] == "bytes" and headers["content-type"] == "image/tiff"
+        for asked, part, said in (("bytes=0-99", data[:100], "bytes 0-99/1024"),
+                                  ("bytes=1000-1099", data[1000:], "bytes 1000-1023/1024"),  # cut at the end
+                                  ("bytes=1000-", data[1000:], "bytes 1000-1023/1024"),
+                                  ("bytes=-10", data[-10:], "bytes 1014-1023/1024"),
+                                  ("bytes=-5000", data, "bytes 0-1023/1024")):
+            status, headers, body = _http(port, path, headers={"Range": asked})
+            assert (status, body, headers["content-range"]) == (206, part, said), asked
+            assert headers["content-length"] == str(len(part)) and headers["accept-ranges"] == "bytes"
+        for asked in ("bytes=999999-", "bytes=1024-", "bytes=-0"):
+            status, headers, body = _http(port, path, headers={"Range": asked})
+            assert (status, body, headers["content-range"]) == (416, b"", "bytes */1024"), asked
+        status, headers, body = _http(port, path, "HEAD")
+        assert (status, body, headers["content-length"], headers["accept-ranges"]) == (200, b"", "1024", "bytes")
+        status, headers, body = _http(port, path, "HEAD", {"Range": "bytes=10-19"})
+        assert (status, body, headers["content-length"]) == (206, b"", "10")
+        for asked in ("bytes=0-1,5-6", "bytes=50-10", "items=0-9", "bytes=x-y", "bytes=-"):
+            status, _, body = _http(port, path, headers={"Range": asked})
+            assert (status, body) == (200, data), asked
+        assert _http(port, f"{path}?v=2", headers={"Range": "bytes=0-9"})[2] == data[:10]  # a query changes nothing
+        # nothing but the files given
+        other = "0" * 32 if prefix != "0" * 32 else "1" * 32
+        for elsewhere in (f"/{other}/{name}", f"/{prefix}/{other}.tif", f"/{prefix}/", f"/{prefix}", "/",
+                          f"/{prefix}/segreto.tif", f"/{prefix}/../segreto.tif", f"/{prefix}/{name}/../segreto.tif",
+                          f"/{prefix}/%2e%2e/segreto.tif", f"/{name}", f"/{prefix}/ortofoto.tif", str(secret),
+                          f"{path}/", f"{path}x"):
+            status, _, body = _http(port, elsewhere)
+            assert (status, body) == (404, b""), elsewhere
+        assert _http(port, path, headers={"Host": f"rebound.example:{port}"})[0] == 404
+        assert _http(port, path, "POST")[0] in (405, 501)
+        # each call its own address; a file that is not there has none
+        again = server.url(raster)
+        assert again != address and _http(port, urllib.parse.urlsplit(again).path)[2] == data
+        with pytest.raises(FileNotFoundError):
+            server.url(tmp_path / "manca.tif")
+        # a link given: the file it names is served; a link put later where the file was is never followed
+        alias = tmp_path / "alias.tif"
+        alias.symlink_to(raster)
+        aliased = urllib.parse.urlsplit(server.url(alias)).path
+        assert _http(port, aliased)[2] == data
+        raster.rename(tmp_path / "spostato.tif")
+        raster.symlink_to(secret)
+        assert _http(port, path)[0] == 404 and _http(port, aliased)[0] == 404
+        raster.unlink()
+        raster.write_bytes(data[:512])  # the product written again where it was: served as it is now
+        assert _http(port, path)[2] == data[:512]
+        # one connection, several requests: RustGIS reads a tile at a time
+        for start in (0, 256):
+            kept.request("GET", path, headers={"Range": f"bytes={start}-{start + 9}"})
+            reply = kept.getresponse()
+            assert (reply.status, reply.read()) == (206, data[start:start + 10])
+        # a reader that goes away in the middle of an answer: nothing said, the server goes on
+        monkeypatch.setattr(link.RasterServer, "CHUNK", 1 << 16)
+        large = tmp_path / "grande.tif"
+        large.write_bytes(bytes(4 << 20))
+        far = urllib.parse.urlsplit(server.url(large)).path
+        reader = socket.create_connection(("127.0.0.1", port), timeout=10)
+        reader.sendall(f"GET {far} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+        assert reader.recv(12).startswith(b"HTTP/1.1 200")
+        reader.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))  # a reset, not a goodbye
+        reader.close()
+        assert _http(port, path, headers={"Range": "bytes=0-9"})[2] == data[:10]
+    finally:
+        began = time.monotonic()
+        server.close()
+    assert time.monotonic() - began < 5  # the connection kept open does not hold it
+    assert not server.thread.is_alive()
+    with pytest.raises(OSError):
+        socket.create_connection(("127.0.0.1", port), timeout=2).close()
+    server.close()  # twice is harmless
+    with pytest.raises(RuntimeError, match="closed"):
+        server.url(secret)
+    kept.close()
+    assert capfd.readouterr().err == ""  # no request lines, no tracebacks
+
+
+def test_start_sends_large_rasters_by_address(tmp_path):
+    """A raster larger than RustGIS loads whole goes by the address the link's raster server gives it (layer.addUrl):
+    RustGIS reads it in place, by range, as a tile layer (kind cog), which it draws under its layers and keeps out of
+    groups (it groups only layers); a smaller one goes as a file (layer.addData), into the chunk's group. stop() closes
+    the server."""
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    small = tmp_path / "dem.tif"
+    with rasterio.open(small, "w", driver="GTiff", width=100, height=100, count=1, dtype="float32", crs=GB,
+                       transform=from_origin(GX, GY + 1, 0.01, 0.01)) as dst:
+        dst.write(np.zeros((1, 100, 100), dtype="float32"))
+    large = _header_only(tmp_path / "ortofoto.tif", 8000, 6000, 4)
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([_unit(1, GX, GY)]))
+    fake = FakeEngine()
+    rl = link.RustGisLink(live, fake, "Saggio 1", GB)
+    out = rl.start([{"path": large, "name": "Ortofoto"}, {"path": small, "name": "DEM"}])
+    assert out == {"layers": 7, "rasters": 2, "version": "0.4.0"}
+    commands = [(args["command"], args["params"]) for tool, args in fake.calls if tool == "run_command"]
+    port = rl.server.server_address[1]
+    (by_address,) = [params for command, params in commands if command == "layer.addUrl"]
+    assert set(by_address) == {"url", "name"} and by_address["name"] == "Ortofoto"
+    assert re.fullmatch(rf"http://127\.0\.0\.1:{port}/[0-9a-f]{{32}}/[0-9a-f]{{32}}\.tif", by_address["url"])
+    assert [params for command, params in commands if command == "layer.addData" and "layer" not in params] == [
+        {"path": str(small), "name": "DEM"}]
+    assert fake.fetched == [(by_address["url"], "bytes=0-65535", 206)]  # RustGIS read its header from the server
+    assert fake.tile_layers == [{"name": "Ortofoto", "url": by_address["url"], "kind": "cog"}]
+    assert rl.tiles == {"Ortofoto": by_address["url"]} and list(rl.rasters) == ["DEM"]
+    (group,) = fake.groups
+    assert int(rl.rasters["DEM"]) in group["layers"] and len(group["layers"]) == 8  # the tables and the file
+    rl.stop()
+    assert rl.server is None and rl.tiles == {} and rl.rasters == {}
+    with pytest.raises(OSError):
+        _http(port, urllib.parse.urlsplit(by_address["url"]).path)
+    assert fake.tile_layers  # RustGIS keeps what it has
+
+
+def test_a_start_that_fails_takes_away_the_rasters_it_served(tmp_path):
+    """A start that fails after RustGIS took rasters by address takes those tile layers away - found by their address:
+    a tile layer of the user's with the same name stays - and closes the server."""
+    large = _header_only(tmp_path / "ortofoto.tif", 8000, 6000, 4)
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([_unit(1, GX, GY)]))
+    fake = FakeEngine()
+    mine = {"name": "Ortofoto", "url": "https://example.org/mia.tif", "kind": "cog"}  # the user's own
+    fake.tile_layers.append(dict(mine))
+    fake.rules.append(lambda command, params: "no groups today" if command == "group.add" else None)
+    rl = link.RustGisLink(live, fake, "Saggio 1", GB)
+    with pytest.raises(link.RustGisRefused, match="no groups today"):
+        rl.start([{"path": large, "name": "Ortofoto"}, {"path": large, "name": "Ortofoto"}])
+    assert fake.tile_layers == [mine] and fake.layers == []
+    assert rl.server is None and rl.tiles == {} and rl.layers == {}
+
+
+@pytest.mark.skipif(not CLI, reason="PPG_RUSTGIS_CLI does not name a rustgis-cli")
+def test_rustgis_reads_our_orthophoto_by_range(tmp_path, monkeypatch):
+    """RustGIS's own engine and an orthophoto written as engine/ortho.py writes one (RGBA, Deflate, tiles of 256
+    pixels, BigTIFF when needed, the overviews built inside after the tiles: not a COG, whose directories come first):
+    the link serves it, layer.addUrl takes it in place as a tile layer (kind cog) after reading its header by range,
+    and a map drawn where the full resolution is needed reads full-resolution tiles only, each request one range of
+    whole tiles - never the whole file. The pixels are 50 cm: the engine's map goes no closer than 1:399."""
+    import numpy as np
+    import rasterio
+    from rasterio.enums import ColorInterp, Resampling
+    from rasterio.transform import from_origin
+    from rasterio.windows import Window
+
+    x0, y0, side, crs = 291000.0, 4640000.0, 2048, "EPSG:32633"
+    ortho = tmp_path / "orthomosaic.tif"
+    profile = {"driver": "GTiff", "height": side, "width": side, "count": 4, "dtype": "uint8",  # engine/ortho.py's
+               "transform": from_origin(x0, y0, 0.5, 0.5), "compress": "deflate", "photometric": "RGB",
+               "BIGTIFF": "IF_SAFER", "tiled": True, "blockxsize": 256, "blockysize": 256, "crs": crs}
+    rows, cols = np.mgrid[0:256, 0:side]
+    with rasterio.open(ortho, "w", **profile) as dst:
+        dst.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
+        for r0 in range(0, side, 256):  # a row of tiles at a time, as they are made
+            band = np.stack([cols % 251, (rows + r0) % 241, (rows + r0 + cols) % 239, np.full(cols.shape, 255)])
+            dst.write(band.astype("uint8"), window=Window(0, r0, side, 256))
+        dst.build_overviews([f for f in (2, 4, 8, 16, 32, 64, 128) if side // f >= 64], Resampling.average)
+    with rasterio.open(ortho) as src:  # the bytes of each full-resolution tile
+        tiles = [(int(src.get_tag_item(f"BLOCK_OFFSET_{c}_{r}", "TIFF", bidx=1)),
+                  int(src.get_tag_item(f"BLOCK_SIZE_{c}_{r}", "TIFF", bidx=1))) for r in range(8) for c in range(8)]
+    starts, ends = {s for s, _ in tiles}, {s + n - 1 for s, n in tiles}
+    asked = []
+    serve = link._RasterRequest._serve
+
+    def recording(self, body):
+        asked.append((self.command, self.headers.get("Range")))
+        return serve(self, body)
+
+    monkeypatch.setattr(link._RasterRequest, "_serve", recording)
+    monkeypatch.setattr(link, "RASTER_SAMPLES", 1_000_000)  # 2048 x 2048 x 4 goes by address
+    live = LiveLink(tmp_path / "qgis", crs)
+    live.write(_drawings([_unit(1, x0 + 500, y0 - 500)]))
+    with link.StdioTransport(Path(CLI), ["mcp", "--yes"]) as engine:
+        rl = link.RustGisLink(live, engine, "Saggio 1", crs)
+        out = rl.start([{"path": ortho, "name": "Ortofoto"}])
+        assert out["rasters"] == 1 and list(rl.tiles) == ["Ortofoto"] and rl.rasters == {}
+        (tile,) = engine.call("list_layers", {})["tileLayers"]
+        assert (tile["name"], tile["kind"], tile["url"]) == ("Ortofoto", "cog", rl.tiles["Ortofoto"])
+        assert asked and all(method == "GET" and spec for method, spec in asked)  # its header, by range
+        for command, params in (("map.zoomToTiles", {"name": "Ortofoto"}), ("map.setScale", {"scale": 800})):
+            engine.call("run_command", {"command": command, "params": params})
+        asked.clear()
+        engine.call("run_command", {"command": "share.exportMap", "params": {
+            "path": str(tmp_path / "mappa.png"), "width": 1024, "height": 1024}})
+        spans = [tuple(map(int, spec.removeprefix("bytes=").split("-"))) for _, spec in asked]
+        assert spans and all(first in starts and last in ends for first, last in spans), asked
+        assert sum(last - first + 1 for first, last in spans) < ortho.stat().st_size / 2
+        address = rl.tiles["Ortofoto"]
+        rl.stop()
+    with pytest.raises(OSError):
+        _http(urllib.parse.urlsplit(address).port, urllib.parse.urlsplit(address).path)
 
 
 class Recording:
