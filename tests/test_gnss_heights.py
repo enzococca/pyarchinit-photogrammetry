@@ -67,8 +67,16 @@ def _run(tmp_path: Path, script: str, *args: str, **env) -> dict:
                    "PROJ_NETWORK_ENDPOINT": "http://127.0.0.1:9", **env}
     run = subprocess.run([sys.executable, str(path), *args], capture_output=True, text=True, timeout=300,
                          env=environment)
-    assert run.returncode == 0, run.stderr[-3000:]
-    return json.loads(run.stdout.strip().splitlines()[-1])
+    tail = (f"exit status {run.returncode}\n--- the last lines of its output:\n{run.stdout[-2000:]}\n"
+            f"--- the last lines of its errors:\n{run.stderr[-3000:]}")
+    assert run.returncode == 0, tail
+    # what it printed last as JSON: a library may write a line of its own after it (a warning at exit)
+    for line in reversed(run.stdout.strip().splitlines()):
+        try:
+            return json.loads(line)
+        except ValueError:
+            continue
+    pytest.fail(f"the script printed no line of JSON; {tail}", pytrace=False)
 
 
 def _says_how_to_get_egm2008(message: str | None) -> None:

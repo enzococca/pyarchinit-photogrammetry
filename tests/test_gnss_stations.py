@@ -1036,6 +1036,20 @@ def test_user_agent_names_the_program_and_its_version(web, tmp_path):
     assert "context" in kwargs  # https: with the certificates of the program
 
 
+def test_the_tests_never_go_to_the_network(tmp_path):
+    """The guard of tests/conftest.py: a name looked up or a connection beyond this computer is refused before anything
+    leaves it, so a download that a test forgot to point at a file:// tree fails at once instead of reaching the
+    archive."""
+    with pytest.raises(OSError, match="never go to the network"):
+        socket.create_connection(("files.igs.org", 443), timeout=1)
+    with pytest.raises(OSError, match="never go to the network"):
+        socket.getaddrinfo("epncb.oma.be", 443)
+    with pytest.raises(download.DownloadError, match="never go to the network"):
+        download.fetch("https://files.igs.org/pub/station/general/igs20.atx", tmp_path / "igs20.atx", retries=1)
+    assert not (tmp_path / "igs20.atx").exists()
+    assert socket.getaddrinfo("127.0.0.1", 9)  # this computer is no network
+
+
 def test_plain_http_and_a_redirection_to_it_are_refused(web, tmp_path):
     """Every archive is reached over HTTPS: a plain http address is refused before anything is asked, and an answer
     that a redirection brought from a plain http address is refused before it is read - its content could have been
