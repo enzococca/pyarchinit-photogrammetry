@@ -94,11 +94,13 @@ class UndoHistory:
         state = self.get_state() or {}
         return {k: json.dumps(v, sort_keys=True, default=str) for k, v in state.items()}
 
-    def reset(self, keep_document: bool = False) -> None:
+    def reset(self, keep_document: bool = False, keep_entry=None) -> None:
         """Forget everything (another project or chunk is open) and delete the copies;
         ``keep_document``: the entries of the project that can still be undone (removals from the
-        workspace) stay, as when another chunk becomes the active one."""
-        keep = [e for e in self.entries[:self.index] if e.document] if keep_document else []
+        workspace) stay, as when another chunk becomes the active one - those ``keep_entry(entry)``
+        says yes to, when it is given."""
+        keep = [e for e in self.entries[:self.index] if e.document and (keep_entry is None or keep_entry(e))] \
+            if keep_document else []
         for e in self.entries:
             if not any(e is k for k in keep):
                 self._drop_files(e)

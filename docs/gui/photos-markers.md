@@ -406,7 +406,9 @@ out, in the background, what the change does, shows it and asks *Apply?*:
 
 A chunk in local coordinates only takes the system: its markers and drawings stay where they are, and its
 georeference is fitted afterwards. *Edit > Undo* does not cross the change: what was edited before it stays as it is
-in the new system.
+in the new system; markers, and photos placed in the chunk's system, removed before the change of a georeferenced
+chunk stay removed (they would come back in the old system), while other removals can still be undone. The GeoPackage
+of the live link with QGIS is written again in the new system.
 
 A site too large to be converted by one similarity between the two systems (it would miss the plan by more than
 5 mm) is refused, nothing changed. The [PDF report](exports.md#pdf-report) names the system of the chunk, the grid of

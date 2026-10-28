@@ -411,7 +411,9 @@ finestra calcola, in background, che cosa fa il cambio, lo mostra e chiede *Appl
 
 Un chunk in coordinate locali prende solo il sistema: i suoi marker e i suoi disegni restano dove sono, e la sua
 georeferenziazione si calcola dopo. *Modifica > Annulla* non attraversa il cambio: quello che era stato modificato prima
-resta com'è nel nuovo sistema.
+resta com'è nel nuovo sistema; i marker, e le foto posizionate nel sistema del chunk, rimossi prima del cambio di un
+chunk georeferenziato restano rimossi (tornerebbero nel vecchio sistema), mentre le altre rimozioni si possono ancora
+annullare. Il GeoPackage del collegamento dal vivo con QGIS viene riscritto nel nuovo sistema.
 
 Un sito troppo grande per essere convertito con una sola similitudine fra i due sistemi (sbaglierebbe la pianta di
 più di 5 mm) si rifiuta, senza cambiare nulla. Il [rapporto PDF](exports.md#rapporto-pdf) dice il sistema del chunk,

@@ -1363,6 +1363,116 @@ def test_undo_after_the_survey_crs_keeps_what_was_converted(gnss_window, monkeyp
     assert saved.meta["drawings"]["quote"][0]["x"] == pytest.approx(moved[0])
 
 
+def _change_survey_crs(w, mw, monkeypatch, crs: str) -> tuple[list, list]:
+    """*Sistema del rilievo* into ``crs``, answered yes; the errors and the warnings said meanwhile."""
+    from PySide6.QtWidgets import QMessageBox
+
+    from pyarchinit_photogrammetry.gui import survey_crs_dialog
+
+    monkeypatch.setattr(survey_crs_dialog.SurveyCrsDialog, "ask", staticmethod(lambda *a, **k: {"crs": crs}))
+    monkeypatch.setattr(mw, "message", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    errors, warned = [], []
+    monkeypatch.setattr(w, "_error", lambda summary, details="", logged=True: errors.append(summary))
+    monkeypatch.setattr(w, "_warn", warned.append)
+    w.gnss_survey_crs()
+    w.runner.wait()
+    return errors, warned
+
+
+def test_removals_with_coordinates_do_not_cross_a_change_of_the_survey_crs(gnss_window, monkeypatch, tmp_path):
+    """A marker, and a photo placed in the system of the chunk, removed before a change of the survey system are not
+    put back after it by Modifica > Annulla: they would come back in the old system - the marker 504 km off for a change
+    of UTM zone, about a metre from WGS 84 / UTM into RDN2008, and the next fit bent on it. Those removals become final
+    with the change; one whose items have a system of their own (a photo with a GNSS position) can still be undone, and
+    comes back right."""
+    from pyarchinit_photogrammetry.core import removal
+
+    w, chunk, folder, mw = gnss_window
+    _in_italy(chunk)
+    chunk.crs = "EPSG:32633"
+    x, y = 438000.0, 4553000.0
+    keep, gone = chunk.add_marker("KEEP"), chunk.add_marker("GONE")
+    keep.reference.location = [x, y, 100.0]
+    gone.reference.location = [x + 10.0, y, 100.0]
+    flat, placed = chunk.cameras[2], chunk.cameras[1]
+    flat.meta.pop("reference_crs")
+    flat.reference.location = [x + 20.0, y, 150.0]  # a position in the system of the chunk, as an older project has
+    w.doc.save(tmp_path / "rilievo.ppg")
+    for item in (("marker", chunk, gone), ("camera", chunk, flat), ("camera", chunk, placed)):
+        assert w.remove_workspace_items([item], confirm=False)
+        w.runner.wait()
+    final = removal.holding_coordinates(w.doc, chunk)
+    assert len(final) == 2 and all(r.folder.parent.name == removal.TRASH for r in final)
+    errors, warned = _change_survey_crs(w, mw, monkeypatch, "EPSG:32632")
+    assert errors == [] and warned == [] and chunk.crs == "EPSG:32632"
+    to_32632 = Transformer.from_crs("EPSG:32633", "EPSG:32632", always_xy=True).transform
+    assert keep.reference.location[:2] == pytest.approx(to_32632(x, y))
+    assert not any(r in w.doc.removals for r in final) and not any(r.folder.exists() for r in final)
+    # only the removal of the photo with a system of its own is left to undo
+    assert w.a_undo.text() == f"Annulla: Rimuovi la foto «{placed.label}»"
+    w.undo()
+    assert any(c is placed for c in chunk.cameras) and placed.meta["reference_crs"] == "EPSG:4979"
+    assert not w.history.can_undo()
+    assert [m.label for m in chunk.markers] == ["KEEP"] and not any(c is flat for c in chunk.cameras)
+    w.doc.save()
+    saved = ppg.Document.open(tmp_path / "rilievo.ppg").chunk
+    assert [m.label for m in saved.markers] == ["KEEP"] and len(saved.cameras) == 2
+
+
+def test_the_survey_crs_of_a_local_chunk_with_units_of_pyarchinit(gnss_window, pa_db, monkeypatch, tmp_path):
+    """A local chunk holding units loaded from PyArchInit - in the system of their layer, Monte Mario (EPSG:3004): a
+    local frame has no system to reproject them into - put into RDN2008 / UTM 33N: the units go from the system of
+    their layer. Before, the window tried them from the local frame: an error in the middle of the change, the chunk in
+    the new system in memory and the project on disk in the old one, nothing marked modified. Without the connection to
+    PyArchInit, and with a project that cannot be saved, the change is made all the same and what failed is said: the
+    drawings read again, the history started again, the project marked modified."""
+    from shapely.geometry import box
+
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+    from pyarchinit_photogrammetry.pyarchinit import PyArchInit
+
+    w, chunk, folder, mw = gnss_window
+    _in_italy(chunk)
+    chunk.crs = "LOCAL"
+    w.doc.save(tmp_path / "rilievo.ppg")
+    w.pa = PyArchInit.connect()
+    assert w.pa.srid() == 3004
+    x, y = Transformer.from_crs("EPSG:4326", "EPSG:3004", always_xy=True).transform(12.4964, 41.9028)
+    square = box(x, y, x + 2.0, y + 2.0)
+    loaded = UnitPolygon(square, us="2", area="1", attributes={"gid": 7, "_layer": "US da PyArchInit - Saggio"})
+    w.units.append(loaded)
+    errors, warned = _change_survey_crs(w, mw, monkeypatch, "EPSG:7792")
+    assert errors == [] and warned == [] and chunk.crs == "EPSG:7792"
+    to_7792 = Transformer.from_crs("EPSG:3004", "EPSG:7792", always_xy=True).transform
+    corners = np.asarray([to_7792(cx, cy) for cx, cy in square.exterior.coords])
+    assert np.asarray(loaded.geometry.exterior.coords) == pytest.approx(corners, abs=1e-3)
+    assert ppg.Document.open(tmp_path / "rilievo.ppg").chunk.crs == "EPSG:7792" and not w.isWindowModified()
+
+    # again from a local frame, without the connection, and the project cannot be saved
+    chunk.crs = "LOCAL"
+    w.doc.save()
+    w.pa = None
+    again = UnitPolygon(square, us="3", area="1", attributes={"gid": 8, "_layer": "US da PyArchInit - Saggio"})
+    w.units.append(again)
+    w.quote.append({"x": 10.0, "y": 20.0, "quota_q": 1.5})
+    w._dirty(True)
+    assert w.history.can_undo()
+
+    def refuse(*args, **kwargs):
+        raise OSError("disco pieno")
+
+    monkeypatch.setattr(w.doc, "save", refuse)
+    errors, warned = _change_survey_crs(w, mw, monkeypatch, "EPSG:7792")
+    assert errors == [] and chunk.crs == "EPSG:7792"
+    (said,) = warned
+    assert "EPSG:7792" in said and "PyArchInit" in said and "disco pieno" in said and "non è stato salvato" in said
+    assert np.asarray(again.geometry.exterior.coords) == pytest.approx(np.asarray(square.exterior.coords))
+    assert w.quote[0]["x"] == 10.0  # from a local frame what was drawn stays where it is
+    assert w.isWindowModified() and not w.history.can_undo()
+    monkeypatch.undo()
+    assert ppg.Document.open(tmp_path / "rilievo.ppg").chunk.crs == "LOCAL"  # the file as it was
+
+
 def test_a_cancelled_preview_of_the_survey_crs_asks_nothing(gnss_window, monkeypatch, tmp_path):
     """Annulla while the preview of a change of the survey system works it out: nothing is asked, nothing changes."""
     from pyarchinit_photogrammetry.gui import survey_crs_dialog

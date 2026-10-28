@@ -3405,6 +3405,8 @@ class MainWindow(QMainWindow):
         shown with the lines the window holds in the old system - contour lines, plan slices: taken away, to draw
         again - and confirmed; then the change in the background, the drawings, layers and sections read again in the
         new system, the project saved and what happened to the georeference in the log."""
+        from ..core import crs as crs_mod
+        from ..core import removal
         from ..gnss import heights
         from .survey_crs_dialog import changes_text
 
@@ -3427,26 +3429,51 @@ class MainWindow(QMainWindow):
             return heights.set_survey_crs(ch, crs)
 
         def done(result) -> None:
+            # the chunk is in the new system: whatever fails from here on, the window still reads it again, marks the
+            # project modified unless it was saved, and says what did not go through
+            failed: list[str] = []
+
+            def step(what: str, action) -> bool:
+                try:
+                    action()
+                    return True
+                except Exception as exc:  # noqa: BLE001 - the change is made: the rest goes on, then said
+                    log.error("Sistema del rilievo, %s: %s\n%s", what, exc, traceback.format_exc())
+                    failed.append(tr("{0}: {1}", what, exc))
+                    return False
+
             for name in redraw:  # in the old system: away, not drawn in the wrong place
                 self.ortho_view.remove_layer(name)
                 self.line_layers.pop(name, None)
-            self._carry_pyarchinit_units(ch, old, result["crs"])
-            self._reload_drawings(redraw=False)  # converted into the new system by set_survey_crs
-            self._load_sections()
+            step(tr("poligoni US caricati da PyArchInit"), lambda: self._carry_pyarchinit_units(ch, old, result["crs"]))
+            step(tr("disegni"), lambda: self._reload_drawings(redraw=False))  # converted by set_survey_crs
+            step(tr("sezioni"), self._load_sections)
+            # what was removed from the chunk with coordinates in the old system (markers, photos placed in the system
+            # of the chunk): put back by Modifica > Annulla it would come back there, unconverted - made final instead
+            final = [] if crs_mod.is_local(old) else removal.holding_coordinates(self.doc, ch)
             if self.history is not None:
                 # Modifica > Annulla does not cross a change of system: the snapshots before it hold what was drawn in
                 # the old system's coordinates (undone, a spot height would come back kilometres off). The change is
-                # no step to undo; the removals from the workspace stay.
-                self.history.reset(keep_document=True)
-            if self.doc.path:
-                self.doc.save()
-                self._dirty(False)
-            else:
-                self._dirty(True)
-            self.refresh_all()
+                # no step to undo; the other removals from the workspace stay.
+                for e in self.history.entries:
+                    if isinstance(e.action, _Removed):
+                        e.action.removals = [r for r in e.action.removals if not any(r is f for f in final)]
+                self.history.reset(keep_document=True,
+                                   keep_entry=lambda e: not isinstance(e.action, _Removed) or bool(e.action.removals))
+            saved = bool(self.doc.path) and step(tr("salvataggio del progetto"), self.doc.save)
+            if saved or not self.doc.path:  # else they stay pending: the end of the session settles them on the file
+                for r in final:
+                    step(tr("elementi rimossi"), r.make_final)
+            self._dirty(not saved)
+            step(tr("finestra"), self.refresh_all)
+            if getattr(self, "a_qgis_live", None) is not None and self.a_qgis_live.isChecked():
+                self._export_qgis_layers(force=True)  # the GeoPackage of QGIS in the new system at once
             text = tr("Sistema del rilievo: {0} → {1}", old, result["crs"])
             self.log_pane.info(text)
             self.statusBar().showMessage(text, 15000)
+            if final:
+                self.log_pane.info(tr("Rimozioni non più annullabili (marker o foto con le coordinate del vecchio "
+                                      "sistema): {0}", len(final)))
             if result.get("updated"):
                 self.log_pane.info(tr("La georeferenziazione è stata calcolata di nuovo nel nuovo sistema."))
             elif result.get("transform_rms") is not None:
@@ -3472,20 +3499,41 @@ class MainWindow(QMainWindow):
                 names = product_names()
                 self.log_pane.warning(tr("Da costruire di nuovo nel nuovo sistema: {0}.",
                                          ", ".join(names.get(n, n) for n in result["rebuild"])))
+            if failed:
+                said = tr("Il chunk è ora in {0}, ma qualcosa non è andato a buon fine (i dettagli nel log):\n{1}",
+                          result["crs"], "\n".join(failed))
+                if not saved:
+                    said += "\n" + tr("Il progetto non è stato salvato: salvalo per tenere il cambio di sistema.")
+                self._warn(said)
 
         self.run_task("Sistema del rilievo", apply, done, refresh=False, save=False)
 
     def _carry_pyarchinit_units(self, ch, old: str, new: str) -> None:
         """The units the window loaded from PyArchInit (not in the chunk: :func:`..gnss.heights.set_survey_crs` does not
         see them) into the system ``new`` of ``ch``: by their coordinates, as the layer of PyArchInit has them, so that
-        what is saved back to PyArchInit lands where it was."""
+        what is saved back to PyArchInit lands where it was. Loaded on a chunk in ``old``, they came reprojected into
+        it; on a chunk whose system has no EPSG code - a local frame - in the system of their layer, as they are
+        (:meth:`..pyarchinit.bridge.PyArchInit.us_polygons`): then they go from that one, ``EPSG:<srid>`` of the layer,
+        which the connection to PyArchInit tells (a ``ValueError`` without it: they stay as they are)."""
         import shapely
 
+        from ..core import crs as crs_mod
         from ..gnss import heights
 
-        for u in self.units:
-            if str((u.attributes or {}).get("_layer") or "").startswith("US da PyArchInit - "):
-                u.geometry = shapely.transform(u.geometry, lambda xy: heights.plan(xy, old, new, ch))
+        loaded = [u for u in self.units
+                  if str((u.attributes or {}).get("_layer") or "").startswith("US da PyArchInit - ")]
+        if not loaded:
+            return
+        source = old
+        if crs_mod.epsg_code(old) is None:
+            srid = self.pa.srid() if self.pa is not None else None
+            if not srid or srid <= 0:
+                raise ValueError(tr("il sistema del loro layer non si conosce (PyArchInit non collegato, o un layer "
+                                    "senza SRID): {0} restano come sono, da ricaricare dal menu PyArchInit",
+                                    len(loaded)))
+            source = f"EPSG:{srid}"
+        for u in loaded:
+            u.geometry = shapely.transform(u.geometry, lambda xy: heights.plan(xy, source, new, ch))
 
     def add_video(self) -> None:
         """Workflow > Aggiungi video: frames chosen for the reconstruction, GPS from DJI subtitles."""
