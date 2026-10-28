@@ -18,6 +18,9 @@ while its ``pid`` runs. There is no default address to try when that is missing.
 * :func:`endpoint` says where a running RustGIS listens (None: it is not running, or its agent control is off).
 * :class:`HttpTransport` is the channel to the app, :class:`StdioTransport` the same tools over the pipes of
   ``rustgis-cli mcp``, the engine without the window that the tests run against.
+* :class:`RustGisLink` keeps RustGIS's layers and the live GeoPackage of the QGIS link in step: RustGIS never writes
+  its edits back to a file, so :meth:`RustGisLink.pull` asks it to export the layers and writes what changed there
+  into that GeoPackage as another program would, where :meth:`.qgis_link.LiveLink.read_changes` finds it.
 
 What goes wrong has a name a caller can wait for: :class:`RustGisOff` (nobody listens: agent control is off, or RustGIS
 is closed), :class:`RustGisBusy` (try later: RustGIS does not draw, minimized or hidden, a dialog is open, too many
@@ -36,6 +39,7 @@ import os
 import queue
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -49,6 +53,9 @@ from pathlib import Path
 
 from .. import __version__
 from ..updates import bundle_version, version_key
+from . import gpkg
+from .qgis_link import (ID_FIELD, PART_FIELD, TECHNICAL_FIELDS, TWO_WAY_TABLES, LiveLink, _affinity, _bind, _bounds,
+                        _sql_type, new_id, row_signature)
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +72,8 @@ TOLERANCE_M = 0.001  # a geometry that comes back from RustGIS within 1 mm of th
 BUSY_CODES = (-32004, -32001)  # JSON-RPC errors of RustGIS: it does not draw (minimized, hidden) or is busy: try later
 PROTOCOL = "2025-03-26"  # of MCP, as the messages of the reference clients name it
 APPLICATIONS = Path("/Applications")  # macOS: where RustGIS.app goes for all users (~/Applications is the other place)
+SCRATCH_DIR = "rustgis"  # beside the live GeoPackage: the layers RustGIS exports for a pull, one file a table
+EXPORT_SUFFIXES = ("", "-wal", "-shm", "-journal")  # RustGIS refuses to export where the file or a journal of it is
 
 
 class RustGisError(RuntimeError):
@@ -533,7 +542,484 @@ class StdioTransport(_Transport):
         self.close()
 
 
+# ---------------------------------------------------------------- RustGIS's edits, back into the live GeoPackage
+def _typed(key: str, value):
+    """``value`` of column ``key`` as the GeoPackage of the QGIS link keeps it: REAL for
+    :data:`.qgis_link.NUMERIC_FIELDS`, INTEGER for its integer and flag columns, TEXT for the rest (a number RustGIS
+    gives in a column it typed otherwise is read back as the program wrote it: 6.0 of a text column is "6"); NULL
+    kept, and an empty text is NULL, as the program writes it."""
+    if value is None or (isinstance(value, float) and value != value) or (isinstance(value, str) and value == ""):
+        return None
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value)
+    kind = _sql_type(key)
+    try:
+        if kind == "REAL":
+            return float(value)
+        if kind == "INTEGER":
+            return int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def normalize(geometry, values: dict) -> tuple[object, dict]:
+    """A row as the live GeoPackage of the QGIS link keeps it, so that what RustGIS exports compares with what the
+    program wrote: a multi-part geometry of one part becomes that part (RustGIS exports every polygon as a MultiPolygon
+    and every line as a MultiLineString), 2D, an empty one None; the values typed as that GeoPackage types its columns
+    (:data:`.qgis_link.NUMERIC_FIELDS` REAL, ``INTEGER_FIELDS`` INTEGER, the rest TEXT), NULL kept, the feature id of a
+    GeoPackage (``fid``) left out. A geometry of several parts stays one: :meth:`RustGisLink.pull` writes a unit drawn
+    as several polygons as a row per part (``ppg_parte`` 1, 2...)."""
+    import shapely
+
+    if geometry is not None and geometry.is_empty:
+        geometry = None
+    if geometry is not None:
+        if geometry.has_z:
+            geometry = shapely.force_2d(geometry)
+        if geometry.geom_type.startswith("Multi") and len(geometry.geoms) == 1:
+            geometry = geometry.geoms[0]
+    return geometry, {str(k): _typed(str(k), v) for k, v in values.items() if str(k) != "fid"}
+
+
+def signature(geometry, values: dict) -> str:
+    """The signature of a row as RustGIS has it (:attr:`RustGisLink.baseline`): the geometry and values of
+    :func:`normalize`, the coordinates rounded to :data:`TOLERANCE_M`, the technical columns and the empty values left
+    out (:func:`.qgis_link.row_signature`). A coordinate on a rounding boundary may round the other way after RustGIS's
+    round trip: :meth:`RustGisLink.matches_baseline` compares within the tolerance, never by the signature alone."""
+    import numpy as np
+    import shapely
+
+    geometry, values = normalize(geometry, values)
+    raw = b""
+    if geometry is not None:
+        rounded = shapely.transform(geometry, lambda xy: np.rint(xy / TOLERANCE_M) * TOLERANCE_M + 0.0)  # no -0.0
+        raw = shapely.to_wkb(rounded, byte_order=1, output_dimension=2)
+    return row_signature(raw, values)
+
+
+def _layout(geometry) -> tuple:
+    """How a geometry is made - its type, parts, rings and number of vertices - without its coordinates."""
+    kind = geometry.geom_type
+    if kind == "Polygon":
+        return kind, len(geometry.exterior.coords), tuple(len(ring.coords) for ring in geometry.interiors)
+    if hasattr(geometry, "geoms"):
+        return kind, tuple(_layout(part) for part in geometry.geoms)
+    return kind, len(geometry.coords)
+
+
+def _same_geometry(a, b) -> bool:
+    """Whether two geometries (of :func:`normalize`) are the same: made the same way and every vertex within
+    :data:`TOLERANCE_M` (an untouched feature comes back from RustGIS moved by about a nanometre)."""
+    import numpy as np
+    import shapely
+
+    if a is None or b is None:
+        return a is None and b is None
+    if _layout(a) != _layout(b):
+        return False
+    xa, xb = shapely.get_coordinates(a), shapely.get_coordinates(b)
+    return xa.shape == xb.shape and (xa.size == 0 or float(np.abs(xa - xb).max()) <= TOLERANCE_M)
+
+
+def _same_parts(a: list, b: list) -> bool:
+    return len(a) == len(b) and all(_same_geometry(x, y) for x, y in zip(a, b))
+
+
+def _plain(values: dict) -> dict:
+    """The values that make a row: the technical columns and the empty ones left out."""
+    return {k: v for k, v in values.items() if k not in TECHNICAL_FIELDS and v is not None}
+
+
+def _changes(now: dict, before: dict) -> dict:
+    """The columns of ``now`` (not technical) whose value is not the one ``before`` has."""
+    return {k: v for k, v in now.items() if k not in TECHNICAL_FIELDS and v != before.get(k)}
+
+
+def _identity(values: dict) -> str | None:
+    return str(values.get(ID_FIELD) or "").strip() or None
+
+
+def _part_of(values: dict, parted: bool) -> int:
+    """The part (1, 2...) a row is of its unit, read as :class:`.qgis_link.LiveLink` reads it."""
+    try:
+        return int(values.get(PART_FIELD) or 1) if parted else 1
+    except (TypeError, ValueError):
+        return 1
+
+
+def _parts(geometry, parted: bool) -> list:
+    """The polygons of a unit drawn as several (a table of units: a row each), else the geometry as it is."""
+    if parted and geometry is not None and geometry.geom_type == "MultiPolygon":
+        return list(geometry.geoms)
+    return [geometry]
+
+
+@dataclass
+class Drawn:
+    """A feature RustGIS has without an identity (drawn there) that is already in the live GeoPackage: its parts and
+    values as RustGIS had them at the last look, and the rows (fid) it became there. RustGIS learns their identity -
+    given by LiveLink, or here to a feature of several polygons - only with the program's edits: until then every pull
+    finds the feature again, and knows it by its geometry."""
+    parts: list
+    values: dict
+    fids: list
+
+
+@dataclass
+class _Row:  # a row of the live GeoPackage, normalized
+    fid: int
+    key: tuple  # (identity or None, part), as LiveLink keys it
+    geometry: object
+    values: dict
+
+
+@dataclass
+class _Export:  # a layer as RustGIS exported it
+    srs: int
+    columns: list  # its attribute columns, in order
+    features: list  # (geometry, values) in RustGIS's order
+    left_out: int  # features RustGIS said it could not write: what is missing may still be there
+
+
+def _has_identities(con, table: str) -> bool:
+    """Whether ``table`` of the live GeoPackage is a table this version writes (with :data:`.qgis_link.ID_FIELD`)."""
+    return ID_FIELD in [r[1] for r in con.execute(f"PRAGMA table_info({gpkg.quote(table)})")]
+
+
+def _read_only(path: Path) -> sqlite3.Connection:
+    return sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
+
+
+def _live_rows(con, table: str) -> tuple[dict, list[_Row]]:
+    """The columns of a table of the live GeoPackage (name -> declared type) and its rows by fid, normalized and keyed
+    as :class:`.qgis_link.LiveLink` keys them."""
+    q = gpkg.quote
+    types = {r[1]: r[2] for r in con.execute(f"PRAGMA table_info({q(table)})") if r[1] not in ("fid", "geom")}
+    parted = PART_FIELD in types
+    names = "".join(f", {q(c)}" for c in types)
+    rows = []
+    for r in con.execute(f"SELECT fid, geom{names} FROM {q(table)} ORDER BY fid"):
+        try:
+            geometry = gpkg.geometry(r[1])
+        except Exception:  # noqa: BLE001 - a geometry another program wrote that shapely cannot read
+            geometry = None
+        geometry, values = normalize(geometry, dict(zip(types, r[2:])))
+        pid = _identity(values)
+        rows.append(_Row(int(r[0]), (pid, _part_of(values, parted) if pid else 1), geometry, values))
+    return types, rows
+
+
+def _by_key(rows: list[_Row]) -> tuple[dict, list]:
+    """``{key: row}`` of the rows with an identity (the first of a key: the others are copies), and the others."""
+    primary, others = {}, []
+    for row in rows:
+        if row.key[0] is None or row.key in primary:
+            others.append(row)
+        else:
+            primary[row.key] = row
+    return primary, others
+
+
+def _read_export(path: Path) -> tuple[int, list, list]:
+    """The system, the columns and the features (in RustGIS's order) of the GeoPackage ``share.exportLayer`` wrote: one
+    table, named after the layer, with a feature id of its own (left out)."""
+    q = gpkg.quote
+    con = _read_only(path)
+    try:
+        found = con.execute("SELECT table_name, column_name, srs_id FROM gpkg_geometry_columns").fetchall()
+        if len(found) != 1:
+            raise RustGisRefused(f"RustGIS's export {path.name} is not one table of features")
+        table, geom, srs = found[0]
+        info = con.execute(f"PRAGMA table_info({q(table)})").fetchall()
+        fid = next((r[1] for r in info if r[5]), None)
+        columns = [r[1] for r in info if not r[5] and r[1] != geom]
+        names = "".join(f", {q(c)}" for c in columns)
+        order = f" ORDER BY {q(fid)}" if fid else ""
+        features = [(gpkg.geometry(r[0]), dict(zip(columns, r[1:])))
+                    for r in con.execute(f"SELECT {q(geom)}{names} FROM {q(table)}{order}")]
+        return int(srs), columns, features
+    finally:
+        con.close()
+
+
+def _rustgis_rows(features: list, parted: bool) -> tuple[dict, list]:
+    """RustGIS's features as rows of the live table: those with an identity by ``(identity, part)`` - each polygon of a
+    feature of several its own row, the parts after the first numbered after the largest part its identity has -, and
+    the features without one (drawn there, or copies of a feature: every attribute is copied) as ``(parts, values)``.
+    The values are of :func:`normalize`."""
+    rows = [normalize(g, v) for g, v in features]
+    last: dict[str, int] = {}
+    for _, values in rows:
+        pid = _identity(values)
+        if pid is not None:
+            last[pid] = max(last.get(pid, 0), _part_of(values, parted))
+    keyed, drawn = {}, []
+    for geometry, values in rows:
+        pid, parts = _identity(values), _parts(geometry, parted)
+        first = (pid, _part_of(values, parted))
+        if pid is None or first in keyed:
+            drawn.append((parts, values))
+            continue
+        keyed[first] = (parts[0], values)
+        for extra in parts[1:]:
+            last[pid] += 1
+            keyed[(pid, last[pid])] = (extra, values)
+    return keyed, drawn
+
+
+class RustGisLink:
+    """The drawings of the active chunk in RustGIS and back: which RustGIS layer holds which table of the live
+    GeoPackage of the QGIS link (:attr:`layers`), what RustGIS last had of each row (:attr:`baseline`, :attr:`drawn`),
+    and the edits made there brought into that GeoPackage as another program's (:meth:`pull`), where
+    :meth:`.qgis_link.LiveLink.read_changes` finds them as it finds QGIS's and the window applies them the same way.
+
+    What RustGIS had is what tells an edit made there from one the program has not sent yet: a row RustGIS still has
+    as it had it is never written over (the program's version goes to RustGIS), one it changed comes column by column,
+    one it no longer has is deleted. It is taken from the live GeoPackage when RustGIS is given the tables
+    (:meth:`remember`) and from each export after (:meth:`pull`); a pull before :meth:`remember` is refused."""
+
+    def __init__(self, live: LiveLink, transport, chunk_label: str, crs: str):
+        self.live = live
+        self.transport = transport  # HttpTransport (the app) or StdioTransport (the engine): call(tool, args)
+        self.chunk_label = chunk_label
+        self.crs = crs
+        self.layers: dict[str, str] = {}  # table of the live GeoPackage -> the id of RustGIS's layer that holds it
+        # per table, (ppg_id, ppg_parte) -> the signature of the row as RustGIS last had it (geometry rounded to
+        # TOLERANCE_M + normalized values); _had holds the rows themselves, compared within the tolerance
+        self.baseline: dict[str, dict[tuple, str]] = {}
+        self._had: dict[str, dict[tuple, tuple]] = {}
+        self.drawn: dict[str, list[Drawn]] = {}  # per table, what RustGIS has without an identity (see Drawn)
+
+    @property
+    def scratch(self) -> Path:
+        """The folder beside the live GeoPackage where RustGIS exports the layers for a pull (a file a table,
+        replaced at each pull)."""
+        return self.live.path.parent / SCRATCH_DIR
+
+    def _keep(self, table: str, had: dict) -> None:
+        self._had[table] = had
+        self.baseline[table] = {key: signature(g, v) for key, (g, v) in had.items()}
+
+    def remember(self, tables=None) -> None:
+        """RustGIS holds the rows of the live GeoPackage as they are now: the link has just given it ``tables`` (every
+        linked two-way table when None) - when it starts, or when a layer is added again. Their baseline is taken from
+        there; the rows without an identity (drawn in QGIS and not read yet) are features RustGIS has without one.
+        Rows without a geometry are left out: what RustGIS may not show is never taken for deleted there."""
+        tables = [t for t in (self.layers if tables is None else tables) if t in TWO_WAY_TABLES]
+        found = {}
+        if gpkg.is_geopackage(self.live.path):
+            con = _read_only(self.live.path)
+            try:
+                found = {t: _live_rows(con, t) for t in tables if _has_identities(con, t)}
+            finally:
+                con.close()
+        for table in tables:
+            types, rows = found.get(table, ({}, []))
+            parted = PART_FIELD in types
+            primary, others = _by_key(rows)
+            self._keep(table, {k: (r.geometry, r.values) for k, r in primary.items() if r.geometry is not None})
+            self.drawn[table] = [Drawn(_parts(r.geometry, parted), r.values, [r.fid])
+                                 for r in others if r.geometry is not None]
+
+    def matches_baseline(self, table: str, key: tuple, geometry, values: dict) -> bool:
+        """Whether RustGIS last had row ``key`` (``(ppg_id, ppg_parte)``) of ``table`` as it is given: the geometry
+        within :data:`TOLERANCE_M` vertex by vertex and the same values (technical and empty ones left out)."""
+        had = self._had.get(table, {}).get(tuple(key))
+        if had is None:
+            return False
+        geometry, values = normalize(geometry, values)
+        return _same_geometry(geometry, had[0]) and _plain(values) == _plain(had[1])
+
+    def pull(self) -> dict[str, tuple[int, int, int]]:
+        """What was edited in RustGIS since the last look, written into the live GeoPackage as another program's: each
+        linked two-way table exported by RustGIS (``share.exportLayer``, in the system its layer was read in, the
+        chunk's) into :attr:`scratch`, then compared with what RustGIS had and with the live rows. A row RustGIS
+        changed is updated in place - its geometry when it moved more than :data:`TOLERANCE_M`, the columns changed
+        there; ``ppg_id``, ``ppg_parte`` and ``ppg_sig`` as they are, so the reader takes it for an edit of another
+        program -; a feature drawn there is inserted without an identity (LiveLink gives it one), a unit drawn there
+        as several polygons as a row per part under one new identity; a row RustGIS no longer has is deleted. The
+        program's own edits not sent yet are left as they are. Every write in one transaction of a connection of its
+        own, so the reader's connection sees a new ``PRAGMA data_version``. Returns ``(changed, added, deleted)`` rows
+        per linked two-way table.
+
+        :class:`RustGisBusy` and the other errors of RustGIS leave the GeoPackage as it was (nothing is lost: try
+        again); :class:`RustGisRefused` too when an export is not in the system of the drawings, and
+        :class:`sqlite3.OperationalError` (database locked) when another program holds the file."""
+        tables = [t for t in TWO_WAY_TABLES if t in self.layers]
+        unknown = [t for t in tables if t not in self._had]
+        if unknown:
+            raise RuntimeError(f"what RustGIS was given of {', '.join(unknown)} is not known: remember() the tables "
+                               "when RustGIS gets them")
+        counts = {t: (0, 0, 0) for t in tables}
+        if not tables or not gpkg.is_geopackage(self.live.path):
+            return counts
+        con = _read_only(self.live.path)
+        try:
+            ready = [t for t in tables if _has_identities(con, t)]  # written by this version
+        finally:
+            con.close()
+        exports = {t: self._export(t) for t in ready}  # RustGIS first: never asked while the file is held
+        states = {}
+        con = gpkg.connect(self.live.path)
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                for table, export in exports.items():
+                    counts[table], states[table] = self._pull_table(con, table, export)
+                con.execute("COMMIT")
+            except BaseException:
+                if con.in_transaction:
+                    con.execute("ROLLBACK")
+                raise
+        finally:
+            con.close()
+        for table, (had, drawn) in states.items():
+            self._keep(table, had)
+            self.drawn[table] = drawn
+        return counts
+
+    def _export(self, table: str) -> _Export:
+        """``table``'s layer exported by RustGIS into :attr:`scratch` (the file of the last pull removed first: RustGIS
+        never replaces a file) and read."""
+        import shapely.errors
+
+        self.scratch.mkdir(parents=True, exist_ok=True)
+        path = (self.scratch / f"{table}.gpkg").absolute()
+        for suffix in EXPORT_SUFFIXES:
+            Path(f"{path}{suffix}").unlink(missing_ok=True)
+        answer = self.transport.call("run_command", {"command": "share.exportLayer",
+                                                     "params": {"layer": self.layers[table], "path": str(path)}})
+        if not path.is_file():
+            raise RustGisRefused(f"RustGIS said it exported {table} but wrote no {path}")
+        try:
+            left_out = max(0, int(answer.get("leftOut") or 0))
+        except (TypeError, ValueError):
+            left_out = 0
+        try:
+            srs, columns, features = _read_export(path)
+        except (sqlite3.Error, ValueError, shapely.errors.ShapelyError) as exc:
+            raise RustGisError(f"RustGIS's export of {table} cannot be read: {exc}") from None
+        if left_out:
+            log.warning("RustGIS left %d features of %s out of its export: none of its rows is taken for deleted",
+                        left_out, table)
+        return _Export(srs, columns, features, left_out)
+
+    def _pull_table(self, con, table: str, export: _Export) -> tuple[tuple[int, int, int], tuple[dict, list]]:
+        """One table of :meth:`pull`, inside its transaction; returns the rows changed, added and deleted, and what
+        RustGIS has now (the baseline and the features without identity), kept once the transaction is committed."""
+        q = gpkg.quote
+        srs = gpkg.table_srs(con, table)
+        if srs is not None and export.srs != srs:
+            raise RustGisRefused(f"RustGIS exported {table} in EPSG:{export.srs}, the drawings are in EPSG:{srs}: "
+                                 "its edits were not taken")
+        srs = export.srs if srs is None else srs
+        types, rows = _live_rows(con, table)
+        have = {c.lower() for c in types} | {"fid", "geom"}
+        for column in export.columns:  # a field added in RustGIS: a column of the table, as QGIS adds one
+            if column.lower() not in have and column not in TECHNICAL_FIELDS:
+                con.execute(f"ALTER TABLE {q(table)} ADD COLUMN {q(column)} {_sql_type(column)}")
+                types[column] = _sql_type(column)
+                have.add(column.lower())
+        parted = PART_FIELD in types
+        primary, _ = _by_key(rows)
+        by_fid = {r.fid: r for r in rows}
+        keyed, drawn = _rustgis_rows(export.features, parted)
+        had, now = self._had.get(table, {}), {}
+        changed = added = deleted = 0
+        gone: set[int] = set()
+
+        def insert(geometry, values: dict, key: tuple | None) -> int:
+            cells = {c: _bind(_affinity(types[c]), v) for c, v in values.items()
+                     if c in types and c not in TECHNICAL_FIELDS}
+            if key is not None:  # an identity of its own (else the reader gives it one)
+                cells[ID_FIELD] = key[0]
+                if parted:
+                    cells[PART_FIELD] = key[1]
+            names = "".join(f", {q(c)}" for c in cells)
+            blob = None if geometry is None else gpkg.blob(geometry, srs)
+            return con.execute(f"INSERT INTO {q(table)} (geom{names}) VALUES (?{', ?' * len(cells)})",
+                               (blob, *cells.values())).lastrowid
+
+        def update(row: _Row, geometry, moved: bool, edited: dict) -> bool:
+            sets, args = [], []
+            if moved and not _same_geometry(geometry, row.geometry):
+                sets.append("geom = ?")
+                args.append(None if geometry is None else gpkg.blob(geometry, srs))
+            for column, value in edited.items():
+                if column in types and value != row.values.get(column):
+                    sets.append(f"{q(column)} = ?")
+                    args.append(_bind(_affinity(types[column]), value))
+            if sets:  # never ppg_id, ppg_parte and ppg_sig: the reader takes the row for another program's edit
+                con.execute(f"UPDATE {q(table)} SET {', '.join(sets)} WHERE fid = ?", (*args, row.fid))
+            return bool(sets)
+
+        def delete(fid: int) -> None:
+            con.execute(f"DELETE FROM {q(table)} WHERE fid = ?", (fid,))
+            gone.add(fid)
+
+        for key, (geometry, values) in keyed.items():
+            now[key] = (geometry, values)
+            row, before = primary.get(key), had.get(key)
+            if before is None:  # RustGIS was not given it here (a send not answered, a feature pasted from elsewhere)
+                if row is None:  # an identity the program does not have: it comes in with it
+                    insert(geometry, values, key)
+                    added += 1
+                continue  # else the program's version is the one RustGIS gets
+            moved, edited = not _same_geometry(geometry, before[0]), _changes(values, before[1])
+            if not moved and not edited:
+                continue  # unchanged there: what the program changed waits to be sent
+            if row is None:  # changed there, deleted here: it comes back, as an edit of QGIS to it does
+                insert(geometry, values, key)
+                added += 1
+            elif update(row, geometry, moved, edited):
+                changed += 1
+        for key, before in had.items():
+            if key in keyed:
+                continue
+            if export.left_out:  # perhaps left out of the export, not deleted: RustGIS may still have it
+                now[key] = before
+            elif key in primary:  # deleted there
+                delete(primary[key].fid)
+                deleted += 1
+
+        memory, kept, new = list(self.drawn.get(table, [])), [], []
+        for parts, values in drawn:
+            seen = next((m for m in memory if _same_parts(m.parts, parts)), None)
+            if seen is None:
+                new.append((parts, values))
+                continue
+            memory.remove(seen)
+            edited = _changes(values, seen.values)  # set there since the last look; the program's columns stay
+            for fid in seen.fids:
+                if edited and fid in by_fid and fid not in gone and update(by_fid[fid], None, False, edited):
+                    changed += 1
+            kept.append(Drawn(parts, values, seen.fids))
+        for parts, values in new:  # drawn there since the last look
+            if len(parts) > 1:  # one unit of several polygons: a row each, one identity
+                pid = new_id()
+                fids = [insert(part, values, (pid, n)) for n, part in enumerate(parts, 1)]
+            else:
+                fids = [insert(parts[0], values, None)]
+            added += len(fids)
+            kept.append(Drawn(parts, values, fids))
+        for seen in memory:  # RustGIS no longer has it as it was: deleted there, or it has its identity now
+            if export.left_out:
+                kept.append(seen)
+                continue
+            for fid in seen.fids:
+                row = by_fid.get(fid)
+                if row is not None and fid not in gone and not (row.key[0] is not None and row.key in keyed):
+                    delete(fid)
+                    deleted += 1
+        if changed or added or deleted:
+            gpkg.set_extent(con, table, _bounds(con, table))
+        return (changed, added, deleted), (now, kept)
+
+
 __all__ = ["find_rustgis", "open_app", "settings_dir", "token_dir", "endpoint", "too_old", "HttpTransport",
            "StdioTransport", "RustGisInstall", "Endpoint", "RustGisError", "RustGisOff", "RustGisBusy",
-           "RustGisRefused", "RustGisTooOld", "MIN_VERSION", "HTTP_PORT", "TOKEN_FILE", "ENDPOINT_FILE",
-           "RASTER_SAMPLES", "TOLERANCE_M", "BUSY_CODES"]
+           "RustGisRefused", "RustGisTooOld", "RustGisLink", "Drawn", "normalize", "signature", "MIN_VERSION",
+           "HTTP_PORT", "TOKEN_FILE", "ENDPOINT_FILE", "RASTER_SAMPLES", "TOLERANCE_M", "BUSY_CODES", "SCRATCH_DIR"]
