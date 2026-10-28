@@ -349,7 +349,7 @@ def _convert(points: np.ndarray, src: str, dst: str) -> np.ndarray:
     of the geoid)."""
     if src == dst:
         return points.copy()
-    if heights.kinds_differ(src, dst):
+    if heights.through_a_geoid(src, dst):
         return crs_mod.by_proj(points, src, dst)
     return _apply(_transformer(src, dst), points)
 

@@ -116,14 +116,15 @@ def by_proj(points: np.ndarray, src: str, dst: str) -> np.ndarray:
     """``(N,3)`` points from ``src`` to ``dst`` by PROJ's own choice (longitude first): what :func:`transform_points`
     does between systems that are not in ITRF2020.
 
-    Between heights above the ellipsoid and heights above a geoid (:func:`..gnss.heights.kinds_differ`) PROJ's choice is
+    Between heights above the ellipsoid and heights above a geoid (:func:`..gnss.heights.kinds_differ`), or above two
+    geoids (:func:`..gnss.heights.geoids_differ`: EGM96 into EGM2008, metres apart), PROJ's choice is
     never a ballpark - which, without the grid of the geoid, gives the heights as they are: heights above the ellipsoid
     passed off as heights above the geoid, 48 m off at Rome - and every point with numbers comes out with numbers, or a
     :class:`..gnss.heights.GridMissing` (a ``ValueError``) names the grid PROJ lacks and how to get it."""
     from ..gnss import heights
 
     pts = np.atleast_2d(np.asarray(points, float))
-    if heights.kinds_differ(src, dst):
+    if heights.through_a_geoid(src, dst):  # ellipsoid and geoid, or two geoids: never a ballpark
         return _between_heights(pts, src, dst)
     x, y, z = _transformer(src, dst).transform(pts[:, 0], pts[:, 1], pts[:, 2])
     return np.column_stack([x, y, z])

@@ -110,6 +110,40 @@ def test_without_the_grid_heights_are_refused(tmp_path):
     assert out["plain"][2] == 100.0 and out["geoid_to_plain"][2] == 52.0  # no heights of its own: as they are
 
 
+def test_heights_above_one_geoid_into_another_need_both_grids(tmp_path):
+    """Heights above EGM96 (EPSG:5773) into heights above EGM2008 (EPSG:3855), or above Genova 1942 (ITALGEO2005,
+    EPSG:5214): without the grids they are refused, naming a grid, never passed as they are (the difference of two
+    geoids is metres); with them, converted through the heights above the ellipsoid."""
+    out = _run(tmp_path, '''
+        utm = crs.transform_points(ROME, "EPSG:4979", "EPSG:32633")[0]
+        point = [[utm[0], utm[1], 100.0]]
+        out = {"egm96": None, "italgeo": None}
+        try:
+            crs.transform_points(point, "EPSG:32633+5773", "EPSG:32633+3855")
+        except heights.GridMissing as exc:
+            out["egm96"] = [str(exc), list(exc.grids)]
+        try:
+            crs.transform_points(point, "EPSG:7792+5214", "EPSG:7792+3855")
+        except heights.GridMissing as exc:
+            out["italgeo"] = [str(exc), list(exc.grids)]
+        # both grids: EGM96 52 m above the ellipsoid, EGM2008 50 m - a height of 100 m above EGM96 is 102 m above
+        # EGM2008 (152 m above the ellipsoid)
+        write_grid(value=50.0)
+        write_grid(name="us_nga_egm96_15.tif", value=52.0)
+        heights.refresh()
+        out["converted"] = crs.transform_points(point, "EPSG:32633+5773", "EPSG:32633+3855")[0].tolist()
+        out["same"] = crs.transform_points(point, "EPSG:32633+3855", "EPSG:32633+3855")[0].tolist()
+        print(json.dumps(out))
+    ''')
+    message, grids = out["egm96"]
+    assert grids and "cannot become heights above" in message and "EGM96" in message, message
+    message, grids = out["italgeo"]
+    assert grids[0] == "us_nga_egm08_25.tif" and "geo_igm_mar06.grd" in grids, grids
+    assert "Genoa 1942" in message and "copy it there as well" in message and "48 m" not in message, message
+    assert out["converted"][2] == pytest.approx(102.0, abs=1e-3)
+    assert out["same"][2] == 100.0
+
+
 def test_relative_geometry_needs_no_geoid(tmp_path):
     """A chunk in a system with EGM2008 heights, photos with GNSS heights above the ellipsoid (an MRK), no grid: what
     needs only where the photos are relative to each other - a survey from the air or not, the pairs of photos by their
@@ -1107,6 +1141,9 @@ def test_set_survey_crs_drawings_follow_the_model(tmp_path):
         ch = surveyed(system="EPSG:32633+3855", height="exif")
         for cam in ch.cameras[2:]:
             position(cam, "EPSG:32633+5773", "exif")
+        # from one geoid into the other needs the grids of both (EGM96 here 41 m above the ellipsoid)
+        write_grid(name="us_nga_egm96_15.tif", value=41.0)
+        heights.refresh()
         change("two geoids", ch, X)
         # R1: from heights above the geoid into a system without heights of its own
         for old, new in (("EPSG:32633+3855", "EPSG:32633"), ("EPSG:32633+3855", "EPSG:7792"),

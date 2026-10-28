@@ -200,6 +200,36 @@ def kinds_differ(src: str | None, dst: str | None) -> bool:
     return kinds == {ELLIPSOIDAL, ORTHOMETRIC}
 
 
+@functools.lru_cache(maxsize=256)
+def _vertical_datum(crs: str) -> str | None:
+    """The vertical datum of ``crs``, a system with heights above a geoid, as PROJ names it (its EPSG code, else its
+    name): what two systems with heights above the same geoid share, whatever their units."""
+    system = crs_mod.to_pyproj(crs)
+    if system.is_bound:
+        system = system.source_crs
+    parts = system.sub_crs_list if system.is_compound else [system]
+    vertical = next((part for part in parts if part.is_vertical), None)
+    if vertical is None or vertical.datum is None:
+        return None
+    ident = (vertical.datum.to_json_dict().get("id") or {}) if hasattr(vertical.datum, "to_json_dict") else {}
+    return f"{ident.get('authority')}:{ident.get('code')}" if ident.get("code") else vertical.datum.name
+
+
+def geoids_differ(src: str | None, dst: str | None) -> bool:
+    """A conversion from ``src`` to ``dst`` takes heights above one geoid into heights above another (EGM96 into
+    EGM2008, ITALGEO2005 into EGM2008): through the heights above the ellipsoid, with the grids of both - without them
+    PROJ would pass the heights as they are, metres off."""
+    if height_kind(src) != ORTHOMETRIC or height_kind(dst) != ORTHOMETRIC:
+        return False
+    return _vertical_datum(src) != _vertical_datum(dst)
+
+
+def through_a_geoid(src: str | None, dst: str | None) -> bool:
+    """A conversion from ``src`` to ``dst`` needs the grid of a geoid: between heights above the ellipsoid and above a
+    geoid (:func:`kinds_differ`), or above two geoids (:func:`geoids_differ`)."""
+    return kinds_differ(src, dst) or geoids_differ(src, dst)
+
+
 def _label(crs: str) -> str:
     """``crs`` as a message names it: its code, or the name of a system given as WKT."""
     if len(crs) <= 40:
@@ -211,9 +241,10 @@ def _label(crs: str) -> str:
 
 
 def _missing_grids(src: str, dst: str) -> list[tuple[str, str]]:
-    """The grids PROJ lacks to convert from ``src`` to ``dst`` (name, the address where PROJ publishes it or ""): the
-    EGM2008 grid when one of its operations that are no ballpark needs it, else those of the first of them it cannot
-    use. None when it has one it can use: the points are where that one does not reach."""
+    """The grids PROJ lacks to convert from ``src`` to ``dst`` (name, the address where PROJ publishes it or ""): those
+    of the first of its operations that are no ballpark that needs the EGM2008 grid - that one first -, else those of
+    the first of them it cannot use (from one geoid into another, the grids of both). None when it has one it can use:
+    the points are where that one does not reach."""
     from pyproj.transformer import TransformerGroup
 
     with warnings.catch_warnings():
@@ -228,26 +259,38 @@ def _missing_grids(src: str, dst: str) -> list[tuple[str, str]]:
     lacking = [[(grid.short_name, grid.url or "") for grid in operation.grids if not grid.available]
                for operation in group.unavailable_operations]
     lacking = [missing for missing in lacking if missing]
-    egm2008 = next(((name, url) for missing in lacking for name, url in missing if name == GEOID_GRID), None)
-    if egm2008 is not None:  # the grid the program downloads, before another grid of the same geoid
-        return [egm2008]
+    with_egm2008 = next((missing for missing in lacking if any(name == GEOID_GRID for name, _url in missing)), None)
+    if with_egm2008 is not None:  # the grid the program downloads first, then the others of that operation
+        return sorted(with_egm2008, key=lambda grid: grid[0] != GEOID_GRID)
     return lacking[0] if lacking else []
 
 
 def refusal(src: str, dst: str) -> GridMissing:
     """Why heights cannot go from ``src`` to ``dst`` (one of the two with heights above the ellipsoid, the other above
-    a geoid), and what to do: the grid of the geoid PROJ needs and how to get it - EGM2008 from the program, another one
-    copied into :func:`grid_folder` - or, when it has its grids, that it has no transformation where the points are."""
+    a geoid; or above two geoids), and what to do: the grid of the geoid PROJ needs and how to get it - EGM2008 from
+    the program, another one copied into :func:`grid_folder` - or, when it has its grids, that it has no transformation
+    where the points are."""
     above = {ELLIPSOIDAL: "the ellipsoid", ORTHOMETRIC: "the geoid"}
     here, there = above[height_kind(src)], above[height_kind(dst)]
+    if geoids_differ(src, dst):  # name the two geoids
+        here, there = f"the geoid of {_heights_name(src)}", f"the geoid of {_heights_name(dst)}"
     what = f"heights above {here} ({_label(src)}) cannot become heights above {there} ({_label(dst)})"
     grids = _missing_grids(src, dst)
     names = [name for name, _url in grids]
     if GEOID_GRID in names:
+        off = "metres off" if geoids_differ(src, dst) else "48 m off at Rome"
         message = (f"{what}: PROJ needs the grid of the geoid {GEOID_GRID} (EGM2008), which is not installed, and "
                    f"without it would give the heights as they are - heights above {here} passed off as heights "
-                   f"above {there}, 48 m off at Rome. Download it with {DOWNLOAD_IN_THE_PROGRAM}, or with "
+                   f"above {there}, {off}. Download it with {DOWNLOAD_IN_THE_PROGRAM}, or with "
                    f"`{DOWNLOAD_COMMAND}` (81 MB, public domain), into {grid_folder()}")
+        others = [(name, url) for name, url in grids if name != GEOID_GRID]
+        if others:
+            one = len(others) == 1
+            published = [url for _name, url in others if url]
+            message += (f"; PROJ needs {' and '.join(name for name, _url in others)} too, which "
+                        f"{'is' if one else 'are'} not installed: copy {'it' if one else 'them'} there as well"
+                        + (f" (PROJ publishes {'it' if one else 'them'} at {' and '.join(published)})"
+                           if published else ""))
     elif names:
         published = [url for _name, url in grids if url]
         one = len(names) == 1
@@ -259,6 +302,15 @@ def refusal(src: str, dst: str) -> GridMissing:
     else:
         message = f"{what}: PROJ has no transformation between them that is no ballpark where the points are"
     return GridMissing(message, names)
+
+
+def _heights_name(crs: str) -> str:
+    """The name of the heights of ``crs``, a system with heights above a geoid (``EGM2008 height``)."""
+    system = crs_mod.to_pyproj(crs)
+    if system.is_bound:
+        system = system.source_crs
+    parts = system.sub_crs_list if system.is_compound else [system]
+    return next((part.name for part in parts if part.is_vertical), system.name)
 
 
 def _lonlat(lat, lon) -> tuple[float, float]:
