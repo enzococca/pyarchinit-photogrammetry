@@ -723,8 +723,9 @@ class PpkDialog(QDialog):
                       "10 cm con alcune antenne choke ring.")
         if self._calibrated():
             return tr("Lo scostamento del centro di fase dell'antenna {0} della base viene applicato con le "
-                      "calibrazioni dell'IGS (igs20.atx), se l'antenna vi è: il registro del calcolo dice quale "
-                      "calibrazione RTKLIB ha usato.", kind)
+                      "calibrazioni dell'IGS (igs20.atx), se l'antenna vi è: il registro del calcolo avvisa quando "
+                      "non vi è o quando RTKLIB usa la voce di un altro radome, e il rapporto PDF dice la voce usata.",
+                      kind)
         return tr("Lo scostamento del centro di fase dell'antenna {0} della base non viene applicato: le quote possono "
                   "risultare più basse di qualche centimetro, oltre 10 cm con alcune antenne choke ring. Spunta la "
                   "calibrazione dell'antenna della base per applicarlo.", kind)

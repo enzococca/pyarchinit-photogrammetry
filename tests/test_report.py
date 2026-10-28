@@ -4,6 +4,8 @@
 and the commands ``ppg report`` / ``ppg tables``."""
 from __future__ import annotations
 
+import copy
+import hashlib
 import os
 import re
 import zlib
@@ -654,6 +656,37 @@ def test_report_without_gnss_has_no_section(tmp_path):
     assert rc._gnss(empty, w) is None and rc._gnss(photos, w) is None
     titles = [s.title for s in rc.walk(rc.collect(doc, language="en").sections)]
     assert "Chunk: Senza posizioni" in titles and "GNSS positions" not in titles
+
+
+def test_report_hashes_the_egm2008_grid_in_use(tmp_path, monkeypatch):
+    """The row of the geoid grid gives the SHA-256 of the file in use (the copy of the program), and the published one,
+    so labelled, when the grid is not installed on this computer."""
+    from pyarchinit_photogrammetry.gnss import heights
+
+    monkeypatch.setenv("PPG_GNSS_DIR", str(tmp_path / "gnss"))
+    w = rc.Words("en")
+    (row,) = rc._geoid_grids(w, "EPSG:32633+3855")
+    assert row == f"{heights.GEOID_GRID}, published SHA-256 {heights.GEOID_SHA256}, not installed on this computer"
+    copy = heights.grid_folder() / heights.GEOID_GRID
+    copy.parent.mkdir(parents=True)
+    copy.write_bytes(b"a copy of the grid that is not the published one")
+    (row,) = rc._geoid_grids(w, "EPSG:32633+3855")
+    assert row == f"{heights.GEOID_GRID}, SHA-256 {hashlib.sha256(copy.read_bytes()).hexdigest()}"
+
+
+def test_report_titles_runs_against_one_base_apart(tmp_path, monkeypatch):
+    """Two flights against one base: two runs, told apart in their titles by the time of their first shot; a run whose
+    solution was read from a file, with no base, is titled by its solution file."""
+    doc, ch = gnss_project(tmp_path, monkeypatch)
+    record = copy.deepcopy((ch.cameras[0].meta["gnss"])["base"])
+    _ppk_photos(ch, record, "solution-20261027-121500.pos", 20, 3, "2026:10:27 12:15:00", ("fix",) * 3)
+    titles = [s.title for s in rc.walk(rc.collect(ch, language="en").sections)]
+    runs = [t for t in titles if t.startswith("PPK against the base")]
+    assert runs == ["PPK against the base PROV00ITA, 2026-10-27 10:15", "PPK against the base PROV00ITA, 2026-10-27 12:15"]
+    for cam in (c for c in ch.cameras if c.key >= 20):  # the photos of the second run
+        cam.meta["gnss"]["base"] = {}
+    titles = [s.title for s in rc.walk(rc.collect(ch, language="en").sections)]
+    assert "PPK against the base PROV00ITA" in titles and "PPK: solution-20261027-121500.pos" in titles
 
 
 def test_report_says_an_entry_without_the_offsets_of_l1_is_no_calibration():

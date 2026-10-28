@@ -344,6 +344,7 @@ TEXT: dict[str, tuple[str, str]] = {  # key: (Italian, English)
                   "none of its own: the heights of the positions pass as they are"),
     "gnss_geoid_grid": ("Griglia del geoide", "Geoid grid"),
     "grid_sha256": ("{0}, SHA-256 {1}", "{0}, SHA-256 {1}"),
+    "grid_published_sha256": ("{0}, SHA-256 pubblicato {1}", "{0}, published SHA-256 {1}"),
     "grid_not_installed": ("{0}, non installata su questo computer", "{0}, not installed on this computer"),
     "gnss_conversion": ("Conversione delle posizioni", "Conversion of the positions"),
     "conversion_helmert": ("da ITRF2020 a {0} con la trasformazione di Helmert {1}, all'epoca di ogni posizione",
@@ -386,6 +387,8 @@ TEXT: dict[str, tuple[str, str]] = {  # key: (Italian, English)
     "offsets_later": ("Gli scarti si misurano dopo l'allineamento di un chunk georeferenziato.",
                       "The offsets are measured once the chunk is aligned and georeferenced."),
     "ppk_title": ("PPK rispetto alla base {0}", "PPK against the base {0}"),
+    "ppk_title_at": ("PPK rispetto alla base {0}, {1}", "PPK against the base {0}, {1}"),
+    "ppk_title_solution": ("PPK: {0}", "PPK: {0}"),
     "ppk_solution": ("Soluzione", "Solution"),
     "ppk_rover": ("Osservazioni del drone", "Observations of the drone"),
     "ppk_photos": ("Foto", "Photos"),
@@ -1504,8 +1507,10 @@ def _gnss(chunk, w: Words) -> Section | None:
     if flights:
         sec.blocks.append(_flights(w, flights))
     runs = _ppk_runs(chunk)
-    for solution, members in runs:
-        sec.blocks.append(_ppk_run(w, solution, members))
+    named = Counter((members[0].meta.get("gnss") or {}).get("base", {}).get("name") for _s, members in runs)
+    for solution, members in runs:  # several runs against one base: told apart by the time of their first shot
+        shared = named[(members[0].meta.get("gnss") or {}).get("base", {}).get("name")] > 1
+        sec.blocks.append(_ppk_run(w, solution, members, shared))
     credits = _credits(w, chunk, [(members[0].meta.get("gnss") or {}).get("base") or {} for _s, members in runs])
     if credits:
         sub = Section(w("credits"), level=2)
@@ -1619,8 +1624,9 @@ def _file_sha256(path: Path) -> str:
 
 def _geoid_grids(w: Words, crs: str) -> list[str]:
     """The grids of the geoid that take heights above the ellipsoid into the heights of ``crs`` (a system with heights
-    above a geoid), each with its SHA-256, or saying it is not installed: EGM2008 with the SHA-256 of the grid the
-    program downloads (:data:`..gnss.heights.GEOID_SHA256`, which the download checks); for any other geoid - a grid
+    above a geoid), each with its SHA-256, or saying it is not installed: EGM2008 with the SHA-256 of the file in use -
+    the copy of the program, else the one PROJ finds -, and the published one (:data:`..gnss.heights.GEOID_SHA256`,
+    which the download checks), so labelled, when it is not installed on this computer; for any other geoid - a grid
     of the user's own, ITALGEO2005 in the folder of the grids of the program - the grids of the transformation PROJ
     takes from heights above the ellipsoid (``EPSG:4979``) into ``crs``, as PROJ names them, with the SHA-256 of the
     file PROJ reads; those of the first one it cannot use, said not installed, when it can use none."""
@@ -1630,8 +1636,10 @@ def _geoid_grids(w: Words, crs: str) -> list[str]:
     from ..gnss import heights
 
     if heights.above_egm2008(crs):
-        text = w("grid_sha256", heights.GEOID_GRID, heights.GEOID_SHA256)
-        return [text if heights.geoid_available() else w("grid_not_installed", text)]
+        in_use = _egm2008_in_use(crs)
+        if in_use is not None:
+            return [w("grid_sha256", heights.GEOID_GRID, _file_sha256(in_use))]
+        return [w("grid_not_installed", w("grid_published_sha256", heights.GEOID_GRID, heights.GEOID_SHA256))]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # "Best transformation is not available": what is asked here
         group = TransformerGroup(crs_mod.to_pyproj("EPSG:4979"), crs_mod.to_pyproj(crs), always_xy=True,
@@ -1645,6 +1653,29 @@ def _geoid_grids(w: Words, crs: str) -> list[str]:
     elif group.unavailable_operations:
         out = [w("grid_not_installed", grid.short_name) for grid in group.unavailable_operations[0].grids]
     return out
+
+
+def _egm2008_in_use(crs: str) -> Path | None:
+    """The file of the EGM2008 grid that converts into ``crs``: the copy in the folder of the grids of the program, else
+    the one PROJ reports for the transformation from heights above the ellipsoid; None when there is none."""
+    from pyproj.transformer import TransformerGroup
+
+    from ..core import crs as crs_mod
+    from ..gnss import heights
+
+    own = heights.grid_folder() / heights.GEOID_GRID
+    if own.is_file():
+        return own
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        group = TransformerGroup(crs_mod.to_pyproj("EPSG:4979"), crs_mod.to_pyproj(crs), always_xy=True,
+                                 allow_ballpark=False)
+    for transformer in group.transformers:
+        for operation in transformer.operations or ():
+            for grid in operation.grids:
+                if grid.short_name == heights.GEOID_GRID and grid.full_name and Path(grid.full_name).is_file():
+                    return Path(grid.full_name)
+    return None
 
 
 def _conversion(w: Words, crs: str, cams) -> str | None:
@@ -1716,19 +1747,29 @@ def _status_name(w: Words, state) -> str:
     return w(f"status_{state}") if f"status_{state}" in TEXT else str(state)
 
 
-def _ppk_run(w: Words, solution: str, cams: list) -> Section:
+def _ppk_run(w: Words, solution: str, cams: list, shared: bool = False) -> Section:
     """A PPK run and its base, from what every photo keeps of it (:func:`..gnss.apply.apply_ppk`: the base of the
     solution, ``Solution.base``): the photos by state; how the base was placed; the permanent station it is or that
     placed it, where the station's coordinates come from and what their sigma is (:func:`_station_rows`); the static
     baseline or the static PPP and its products; the coordinates of the base, their frame and epoch and their standard
-    deviations; its antenna and whether it was calibrated (:func:`_calibration_text`); how far it is from the flight."""
+    deviations; its antenna and whether it was calibrated (:func:`_calibration_text`); how far it is from the flight.
+    Titled by its base - with the time of its first shot when other runs share the base (``shared``) - or, with none
+    (a solution read from a file), by its solution file."""
     from collections import Counter
 
     first = cams[0].meta.get("gnss") or {}
     base = first.get("base") or {}
     detail = base.get("detail") or {}
     source = base.get("position_source")
-    sub = Section(w("ppk_title", base.get("name") or "-"), level=2)
+    name = base.get("name")
+    if not name:
+        title = w("ppk_title_solution", solution or "-")
+    elif shared:
+        shots = sorted(str(t) for c in cams if (t := (c.meta.get("gnss") or {}).get("utc")))
+        title = w("ppk_title_at", name, shots[0][:16].replace("T", " ")) if shots else w("ppk_title", name)
+    else:
+        title = w("ppk_title", name)
+    sub = Section(title, level=2)
     states = Counter((c.meta.get("gnss") or {}).get("status") for c in cams)
     order = [s for s in ("fix", "float", "single") if states.get(s)] + [s for s in states
                                                                        if s not in ("fix", "float", "single")]
