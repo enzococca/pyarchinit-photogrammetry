@@ -48,7 +48,8 @@ was downloaded, what waits for a newer program and which plugins are new in the 
 themselves* decides whether the newer versions are downloaded (off, the window only lists them); *Help > Check for
 updates...* does the look at once and shows everything it finds. A plugin that waits for a newer program, an update
 that was not installed and an update that failed are told once per version; *Help > Check for updates...* shows them
-again. The details are in [Plugins](../plugins.md#updates).
+again, with the updates downloaded earlier that wait for the restart. The details are in
+[Plugins](../plugins.md#updates).
 
 When a newer version exists a window shows its notes and offers:
 

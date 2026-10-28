@@ -51,9 +51,11 @@ controllo di una versione nuova: al massimo una volta al giorno, qualche secondo
 *Aiuto > Controlla gli aggiornamenti all'avvio* e `PPG_NO_UPDATE_CHECK=1` spengono il controllo giornaliero.
 
 * Una versione più nuova di un plugin **installato dal programma** viene scaricata, controllata con il suo SHA-256
-  e tenuta da parte. Diventa il plugin al **prossimo avvio**, prima che giri qualunque plugin: un plugin non viene
-  mai sostituito sotto una finestra aperta. Un riepilogo dice che cosa è stato scaricato; *Riavvia ora* chiude la
-  finestra e la riapre con il progetto aperto.
+  e tenuta da parte. Diventa il plugin al **prossimo avvio** del programma, prima che giri qualunque plugin.
+  Ogni copia del programma che parte mette a posto gli aggiornamenti - anche una partita mentre una finestra è
+  aperta (un secondo doppio clic su un progetto in Windows, `ppg plugin NOME` in un terminale): la finestra già
+  aperta tiene i moduli che ha caricato, quindi riavviala. Un riepilogo dice che cosa è stato scaricato; *Riavvia
+  ora* chiude la finestra e la riapre con il progetto aperto.
 * Un plugin installato **con pip** non viene mai toccato. Un plugin che hai disattivato viene aggiornato e resta
   disattivato.
 * Un aggiornamento che richiede un programma più nuovo aspetta. Non viene scaricato: il riepilogo lo elenca sotto
@@ -65,19 +67,19 @@ controllo di una versione nuova: al massimo una volta al giorno, qualche secondo
 * Il riepilogo compare per ciò che è nuovo. Un plugin che aspetta un programma più nuovo, un aggiornamento che si
   potrebbe installare ma non è stato installato (l'interruttore qui sotto è spento) e un aggiornamento fallito
   vengono detti **una volta** per ogni versione - uno fallito, una volta per ogni messaggio - e di nuovo solo quando
-  l'indice ha una versione più nuova del plugin. *Aiuto > Controlla aggiornamenti...* li mostra di nuovo tutti.
-  Finché è aperta un'altra finestra, il riepilogo aspetta che si chiuda.
+  l'indice ha una versione più nuova del plugin. *Aiuto > Controlla aggiornamenti...* li mostra di nuovo tutti, e
+  gli aggiornamenti scaricati prima che aspettano il riavvio. Finché è aperta una finestra di dialogo, il riepilogo
+  aspetta che si chiuda.
 * L'interruttore *Aiuto > Aggiorna i plugin da soli* (acceso finché non lo spegni) decide se le versioni più nuove
   vengono scaricate. Spento, il riepilogo le elenca sotto *Aggiornamenti disponibili* e si installano da
-  *Strumenti > Plugin...*, come prima.
+  *Strumenti > Plugin...*, come prima. Spegnerlo toglie anche gli aggiornamenti già scaricati che aspettano il
+  riavvio: una riga nel log li nomina.
 * In *Strumenti > Plugin...* un aggiornamento già scaricato compare nella colonna *Note* come pronto, attivo dal
   prossimo avvio.
 
 Dalla riga di comando `ppg plugins update` fa lo stesso controllo e scarica le versioni più nuove (con `--dry-run`
 dice soltanto quali si potrebbero aggiornare); `ppg plugins available` segna i plugin installati che ne hanno una
-più nuova. Ogni avvio del programma mette a posto gli aggiornamenti scaricati - anche `ppg plugin NOME` in un
-terminale mentre la finestra è aperta, che scrive una riga per ogni aggiornamento messo a posto: riavvia poi la
-finestra, perché giri anche lei la versione nuova.
+più nuova. `ppg plugin NOME` scrive una riga per ogni aggiornamento che mette a posto.
 
 ## Iniziare un plugin: `ppg plugins new`
 

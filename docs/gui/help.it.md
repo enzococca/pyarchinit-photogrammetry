@@ -48,8 +48,8 @@ dice poi che cosa è stato scaricato, che cosa aspetta un programma più nuovo e
 *Aiuto > Aggiorna i plugin da soli* decide se le versioni più nuove vengono scaricate (spento, la finestra le elenca
 soltanto); *Aiuto > Controlla aggiornamenti...* fa il controllo subito e mostra tutto quello che trova. Un plugin che
 aspetta un programma più nuovo, un aggiornamento non installato e un aggiornamento fallito vengono detti una volta per
-ogni versione; *Aiuto > Controlla aggiornamenti...* li mostra di nuovo. I dettagli sono in
-[Plugin](../plugins.md#aggiornamenti).
+ogni versione; *Aiuto > Controlla aggiornamenti...* li mostra di nuovo, con gli aggiornamenti scaricati prima che
+aspettano il riavvio. I dettagli sono in [Plugin](../plugins.md#aggiornamenti).
 
 Quando c'è una versione più nuova una finestra mostra le sue note e propone:
 

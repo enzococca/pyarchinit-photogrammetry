@@ -52,9 +52,11 @@ in the background, the window stays free. *Help > Check for updates at start-up*
 switch the daily look off.
 
 * A newer version of a plugin **installed by the program** is downloaded, checked against its SHA-256 and kept
-  aside. It becomes the plugin at the **next start**, before any plugin runs: a plugin is never replaced under a
-  window that is open. A summary says what was downloaded; *Restart now* closes the window and opens it again with
-  the open project.
+  aside. It becomes the plugin at the **next start** of the program, before any plugin runs. Any copy of the
+  program that starts puts the updates in place - also one started while a window is open (a second double click
+  on a project on Windows, `ppg plugin NAME` in a terminal): the window already open keeps the modules it has
+  loaded, so restart it. A summary says what was downloaded; *Restart now* closes the window and opens it again
+  with the open project.
 * A plugin installed **with pip** is never touched. A plugin you disabled is updated and stays disabled.
 * An update that needs a newer program waits. It is not downloaded: the summary lists it under *Waiting*, with
   the reason (for example the version of the program it needs).
@@ -64,19 +66,19 @@ switch the daily look off.
 * The summary comes up for what is news. A plugin that waits for a newer program, an update that could be
   installed but was not (the switch below is off) and an update that failed are told **once** for each version -
   a failed one, once for each message - and again only when the index has a newer version of the plugin.
-  *Help > Check for updates...* (*Aiuto > Controlla aggiornamenti...*) shows them all again. While another
-  window is open, the summary waits until it is closed.
+  *Help > Check for updates...* (*Aiuto > Controlla aggiornamenti...*) shows them all again, and the updates
+  downloaded earlier that wait for the restart. While a dialog window is open, the summary waits until it is
+  closed.
 * The switch *Help > Update the plugins by themselves* (*Aiuto > Aggiorna i plugin da soli*; on until you switch
   it off) decides whether the newer versions are downloaded. Off, the summary lists them under *Updates
-  available*, and *Tools > Plugins...* (*Strumenti > Plugin...*) installs them, as before.
+  available*, and *Tools > Plugins...* (*Strumenti > Plugin...*) installs them, as before. Switching it off also
+  drops the updates already downloaded that wait for the restart: a line in the log names them.
 * In *Tools > Plugins...* an update already downloaded shows in the column *Notes* as ready, active from the next
   start.
 
 From the command line, `ppg plugins update` does the same look and downloads the newer versions (`--dry-run` only
 says which ones could be updated); `ppg plugins available` marks the installed plugins that have a newer one.
-Every start of the program puts the downloaded updates in place - also `ppg plugin NAME` in a terminal while the
-window is open, which prints a line for each one it put in place: restart the window afterwards, so that it runs
-the new version too.
+`ppg plugin NAME` prints a line for each update it puts in place.
 
 ## Starting a plugin: `ppg plugins new`
 
