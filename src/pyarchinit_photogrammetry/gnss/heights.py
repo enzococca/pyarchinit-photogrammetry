@@ -37,6 +37,8 @@ GEOID_BYTES = 80585622
 GEOID_SHA256 = "4191d471eefebf24091b56dbc604353cb3b8cf8cc70e448bb9ae56a272bef17a"  # of the file at GEOID_URL
 GEOID_CRS = "EPSG:4326+3855"  # longitude, latitude and height above EGM2008 ("EGM2008 height", EPSG:3855)
 DOWNLOAD_IN_THE_PROGRAM = "GNSS > Sistema e quote > Scarica il geoide EGM2008"
+# the same place in the window in English, as the command line says it (in_english)
+DOWNLOAD_IN_THE_PROGRAM_EN = "GNSS > System and heights > Download the EGM2008 geoid"
 DOWNLOAD_COMMAND = "ppg gnss geoid --download"
 ELLIPSOIDAL, ORTHOMETRIC, NONE = "ellipsoidal", "orthometric", "none"  # the kinds of height of a system
 RDN2008_UTM = {32: "EPSG:7791", 33: "EPSG:7792", 34: "EPSG:7793"}  # RDN2008 / UTM, the zones of Italy (in_italy)
@@ -311,6 +313,12 @@ def _heights_name(crs: str) -> str:
         system = system.source_crs
     parts = system.sub_crs_list if system.is_compound else [system]
     return next((part.name for part in parts if part.is_vertical), system.name)
+
+
+def in_english(text: str) -> str:
+    """``text`` - a message of the engine - with the menu path of the window in English (:data:`DOWNLOAD_IN_THE_PROGRAM`
+    is the Italian window's), as the command line, in English, says it."""
+    return str(text).replace(DOWNLOAD_IN_THE_PROGRAM, DOWNLOAD_IN_THE_PROGRAM_EN)
 
 
 def _lonlat(lat, lon) -> tuple[float, float]:

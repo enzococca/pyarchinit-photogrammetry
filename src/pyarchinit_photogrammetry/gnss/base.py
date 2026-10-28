@@ -421,7 +421,7 @@ def prepare_base(mode: str, rover: str | Path, bases=None, *, folder: str | Path
         raise ValueError(f"a {'station as the base' if mode == 'station' else 'static baseline'} needs a permanent "
                          "station")
     if mode == "ppp" and atx == "off":
-        raise ValueError(ppp._NO_ANTEX)
+        raise ValueError(ppp.NO_ANTEX)
     if mode == "typed" and typed is None:
         raise ValueError("a typed base needs its position: latitude, longitude and height above the ellipsoid")
     notes: list[str] = []

@@ -3389,11 +3389,13 @@ class MainWindow(QMainWindow):
         def preview(progress):
             progress(0.0, tr("Cosa cambia in {0}", crs))
             try:
-                return heights.survey_crs_changes(ch, crs)
+                changes = heights.survey_crs_changes(ch, crs)
             except heights.GridMissing:
                 raise  # the grid offered, then the preview again (run_task)
             except ValueError as exc:  # a system that cannot be the survey's: said, without a traceback
                 return exc
+            progress(1.0, tr("Cosa cambia in {0}", crs))  # Annulla pressed meanwhile: nothing asked
+            return changes
 
         self.run_task("Sistema del rilievo", preview, lambda changes: self._confirm_survey_crs(ch, crs, changes),
                       refresh=False, save=False)

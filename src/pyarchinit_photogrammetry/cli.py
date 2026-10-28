@@ -2504,7 +2504,9 @@ def gnss_status(project: Path, chunk: Optional[str] = None):
 
 
 def _gnss_failed(exc: Exception) -> NoReturn:
-    typer.echo(f"error: {exc}", err=True)
+    from .gnss import heights
+
+    typer.echo(f"error: {heights.in_english(str(exc))}", err=True)  # the menu path of the window, in English
     raise typer.Exit(1)
 
 
@@ -2902,7 +2904,7 @@ def gnss_geoid(download_it: bool = typer.Option(False, "--download", help="downl
     else:
         typer.echo(f"EGM2008 geoid ({heights.GEOID_GRID}): not installed; `{heights.DOWNLOAD_COMMAND}` downloads it "
                    f"({round(heights.GEOID_BYTES / 1e6)} MB, public domain), as does "
-                   f"{heights.DOWNLOAD_IN_THE_PROGRAM} in the window: without it heights above the geoid are refused, "
+                   f"{heights.DOWNLOAD_IN_THE_PROGRAM_EN} in the window: without it heights above the geoid are refused, "
                    "never passed off as heights above the ellipsoid")
     typer.echo(f"grids of PROJ for the program: {heights.grid_folder()} (a grid of your own, such as ITALGEO2005, "
                "is copied there)")
@@ -2970,7 +2972,7 @@ def _crs_status(ch) -> None:
     except _PROJ_FAILURES as exc:
         found = [f"the heights of the photos and of the system could not be compared: {exc}"]
     for text in found:
-        typer.echo(f"warning: {text}")
+        typer.echo(f"warning: {heights.in_english(text)}")
 
 
 @gnss_app.command("crs")
@@ -3024,10 +3026,14 @@ def gnss_crs(project: Path,
     else:
         target = set_crs.strip()
     if heights.above_egm2008(target) and not heights.geoid_available():
+        from .core import crs as crs_mod
+
+        # --set takes the system as it is written: the same system without the heights; --survey has --no-geoid
+        plain = f"--set {crs_mod.horizontal(target)}" if set_crs is not None else "--no-geoid"
         _gnss_failed(ValueError(f"{target} has heights above the geoid EGM2008, whose grid ({heights.GEOID_GRID}) is "
                                 f"not installed: download it first with `{heights.DOWNLOAD_COMMAND}` "
                                 f"({round(heights.GEOID_BYTES / 1e6)} MB), or choose a system without heights of its "
-                                "own (--no-geoid)"))
+                                f"own ({plain})"))
     old = ch.crs
     try:
         result = heights.set_survey_crs(ch, target)

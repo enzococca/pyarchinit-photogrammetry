@@ -1363,6 +1363,27 @@ def test_undo_after_the_survey_crs_keeps_what_was_converted(gnss_window, monkeyp
     assert saved.meta["drawings"]["quote"][0]["x"] == pytest.approx(moved[0])
 
 
+def test_a_cancelled_preview_of_the_survey_crs_asks_nothing(gnss_window, monkeypatch, tmp_path):
+    """Annulla while the preview of a change of the survey system works it out: nothing is asked, nothing changes."""
+    from pyarchinit_photogrammetry.gui import survey_crs_dialog
+
+    w, chunk, folder, mw = gnss_window
+    _in_italy(chunk)
+    chunk.crs = "EPSG:32633"
+    said, real = [], heights.survey_crs_changes
+
+    def cancelled_meanwhile(ch, crs):
+        w.runner.task.cancel()  # the button of the progress window, pressed while the preview works
+        return real(ch, crs)
+
+    monkeypatch.setattr(heights, "survey_crs_changes", cancelled_meanwhile)
+    monkeypatch.setattr(survey_crs_dialog.SurveyCrsDialog, "ask", staticmethod(lambda *a, **k: {"crs": "EPSG:32632"}))
+    monkeypatch.setattr(mw, "message", lambda *a, **k: said.append(a))
+    w.gnss_survey_crs()
+    w.runner.wait()
+    assert said == [] and chunk.crs == "EPSG:32633"
+
+
 def test_the_live_export_to_qgis_waits_for_a_step_that_runs(gnss_window, monkeypatch):
     """The timer that writes the drawings for QGIS does not write while a step runs (the change of the survey system
     changes the chunk in the background): it tries again a moment later."""
@@ -1677,6 +1698,22 @@ def test_cli_crs_survey(tmp_path):
     assert result.exit_code == 0 and "EPSG:32633 -> EPSG:7792" in result.output, result.output
     result = run(app, ["gnss", "crs", str(project), "--set", "EPSG:4326"])
     assert result.exit_code == 1 and "geographic" in result.output
+    # a system written with EGM2008 heights, no grid: the advice is the same system without them (--set refuses
+    # --no-geoid)
+    result = run(app, ["gnss", "crs", str(project), "--set", "EPSG:32633+3855"])
+    assert result.exit_code == 1 and "--set EPSG:32633" in result.output and "--no-geoid" not in result.output
+    # what the engine says with the menu path of the window: in English on the command line
+    doc = ppg.Document.open(project)
+    doc.chunk.crs = "EPSG:32633+3855"
+    doc.save()
+    result = run(app, ["gnss", "crs", str(project)])
+    assert result.exit_code == 0 and "us_nga_egm08_25.tif" in result.output, result.output
+    assert "GNSS > System and heights > Download the EGM2008 geoid" in result.output
+    assert "Sistema e quote" not in result.output
+    result = run(app, ["gnss", "geoid"])
+    assert "GNSS > System and heights > Download the EGM2008 geoid" in result.output
+    doc.chunk.crs = "EPSG:32633"
+    doc.save()
     result = run(app, ["gnss", "crs", str(project), "--set", "EPSG:32633", "--survey"])
     assert result.exit_code != 0 and "--set" in result.output
     result = run(app, ["gnss", "crs", str(project), "--set", "EPSG:32633"])

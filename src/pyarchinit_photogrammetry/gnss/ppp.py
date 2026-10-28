@@ -672,7 +672,7 @@ def join_erp(paths: Sequence[str | Path], target: str | Path) -> Path:
 # --- the base by static PPP ------------------------------------------------------------------------------------
 
 
-_NO_ANTEX = ("a static PPP needs the antenna calibrations of the IGS (igs20.atx): the precise orbits are of the "
+NO_ANTEX = ("a static PPP needs the antenna calibrations of the IGS (igs20.atx): the precise orbits are of the "
              "centres of mass of the satellites, and the phase centres of their antennas are up to metres from them - "
              "without the offsets every position is decimetres off. Give atx=\"auto\" (igs20.atx, downloaded once into "
              "the folder of the program) or an ANTEX file")
@@ -863,7 +863,7 @@ def solve_static(obs: Path | Sequence[Path], folder: Path, products: Products | 
     ``RuntimeError`` when RTKLIB stopped."""
     progress = as_progress(progress)
     if atx is None:
-        raise ValueError(_NO_ANTEX)
+        raise ValueError(NO_ANTEX)
     pieces = [Path(obs)] if isinstance(obs, (str, os.PathLike)) else [Path(path) for path in obs]
     if not pieces:
         raise ValueError(f"no file given for {_YOUR_BASE}")
