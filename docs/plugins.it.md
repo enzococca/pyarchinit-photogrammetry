@@ -45,7 +45,7 @@ della cartella dei plugin, nessuno installato con pip); un plugin che fallisce a
 
 ## Aggiornamenti
 
-I plugin installati dal programma si aggiornano da soli. Il programma guarda l'indice dei plugin insieme al suo
+Dalla versione 1.6.2 i plugin installati dal programma si aggiornano da soli. Il programma guarda l'indice dei plugin insieme al suo
 controllo di una versione nuova: al massimo una volta al giorno, qualche secondo dopo l'avvio, e subito con
 *Aiuto > Controlla aggiornamenti...*. L'indice viene letto in background, la finestra resta libera.
 *Aiuto > Controlla gli aggiornamenti all'avvio* e `PPG_NO_UPDATE_CHECK=1` spengono il controllo giornaliero.

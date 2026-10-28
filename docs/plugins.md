@@ -45,7 +45,7 @@ the log and in *Strumenti > Plugin*) and left out, the program goes on.
 
 ## Updates
 
-The plugins installed by the program update themselves. The program looks at the plugin index together with its
+From version 1.6.2, the plugins installed by the program update themselves. The program looks at the plugin index together with its
 own check for a new version: at most once a day, a few seconds after the start, and at once with
 *Help > Check for updates...* (*Aiuto > Controlla aggiornamenti...* in the Italian interface). The index is read
 in the background, the window stays free. *Help > Check for updates at start-up* and `PPG_NO_UPDATE_CHECK=1`
