@@ -2607,6 +2607,32 @@ def _small_dem(path: Path, side: int = 100, crs: str = GB, x0: float = GX, y0: f
     return path
 
 
+def _mixed_vrt(folder: Path) -> Path:
+    """A VRT of two bands of different types (8-bit and float), each read from a small GeoTIFF of its own."""
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    sources = []
+    for dtype, value in (("uint8", 7), ("float32", 1234.5)):
+        source = folder / f"banda_{dtype}.tif"
+        with rasterio.open(source, "w", driver="GTiff", width=64, height=64, count=1, dtype=dtype, crs=GB,
+                           transform=from_origin(GX, GY + 1, 0.01, 0.01)) as dst:
+            dst.write(np.full((1, 64, 64), value, dtype=dtype))
+        sources.append(source)
+    vrt = folder / "misto.vrt"
+    vrt.write_text(f"""<VRTDataset rasterXSize="64" rasterYSize="64">
+  <SRS>EPSG:3004</SRS>
+  <GeoTransform>{GX}, 0.01, 0, {GY + 1}, 0, -0.01</GeoTransform>
+  <VRTRasterBand dataType="Byte" band="1"><SimpleSource><SourceFilename relativeToVRT="0">{sources[0]}</SourceFilename>
+    <SourceBand>1</SourceBand></SimpleSource></VRTRasterBand>
+  <VRTRasterBand dataType="Float32" band="2"><SimpleSource>
+    <SourceFilename relativeToVRT="0">{sources[1]}</SourceFilename><SourceBand>1</SourceBand></SimpleSource>
+  </VRTRasterBand>
+</VRTDataset>""", encoding="utf-8")
+    return vrt
+
+
 def _http(port: int, path: str, method: str = "GET", headers: dict | None = None) -> tuple[int, dict, bytes]:
     """One request to 127.0.0.1 on a connection of its own (http.client: never through a proxy): the status, the
     headers in lower case and the body."""
@@ -2635,10 +2661,11 @@ def test_raster_route(tmp_path):
     RustGIS decodes in place, without a palette. Above the limit by file what RustGIS opens right from an overview: in
     strips, without internal overviews (an .ovr beside it is never served), a YCbCr JPEG (RustGIS converts it from a
     file, in place it would show raw Y, Cb, Cr), a palette (applied to a file only). A copy for what RustGIS decodes
-    neither way (WebP, LERC, LZMA) and for the formats it does not load as files (a VRT it refuses, a PNG it draws
-    without its world file), whatever the size; a JPEG 2000 or an ERDAS IMG by file (RustGIS converts them with
-    GDAL). Below the limit, and what rasterio cannot read, by file: RustGIS says whether it reads it. Every large case
-    is a header-only sparse file."""
+    neither way (WebP, LERC, LZMA) and for every other format, whatever the size: RustGIS refuses a VRT, draws a PNG
+    without its world file, and reads a JPEG 2000 or an ERDAS IMG only through GDAL's tools, which an app started from
+    the Finder does not find. By file what no copy is made of (complex numbers, bands of different types) and, below
+    the limit, what RustGIS loads whole and what rasterio cannot read: RustGIS says whether it reads it. Every large
+    case is a header-only sparse file."""
     import numpy as np
     import rasterio
     import rasterio.shutil
@@ -2671,9 +2698,17 @@ def test_raster_route(tmp_path):
     rasterio.shutil.copy(small, tmp_path / "piccolo.png", driver="PNG", WORLDFILE="YES")
     assert link.raster_route(tmp_path / "piccolo.png") == "copy"
     rasterio.shutil.copy(small, tmp_path / "piccolo.jp2", driver="JP2OpenJPEG")
-    assert link.raster_route(tmp_path / "piccolo.jp2") == "file"
+    assert link.raster_route(tmp_path / "piccolo.jp2") == "copy"
     rasterio.shutil.copy(small, tmp_path / "piccolo.img", driver="HFA")
-    assert link.raster_route(tmp_path / "piccolo.img") == "file"
+    assert link.raster_route(tmp_path / "piccolo.img") == "copy"
+    # no copy of complex numbers or of bands of different types: by file
+    with rasterio.open(tmp_path / "complessa.tif", "w", driver="GTiff", width=64, height=64, count=1, dtype="complex64",
+                       crs=GB, transform=from_origin(GX, GY + 1, 0.01, 0.01)) as dst:
+        dst.write(np.zeros((1, 64, 64), dtype="complex64"))
+    assert link.raster_route(tmp_path / "complessa.tif") == "file"
+    rasterio.shutil.copy(tmp_path / "complessa.tif", tmp_path / "complessa.vrt", driver="VRT")
+    assert link.raster_route(tmp_path / "complessa.vrt") == "file"
+    assert link.raster_route(_mixed_vrt(tmp_path)) == "file"
     (tmp_path / "rotto.tif").write_bytes(b"not a raster")
     assert link.raster_route(tmp_path / "rotto.tif") == "file"
     assert link.raster_route(tmp_path / "manca.tif") == "file"
@@ -2922,7 +2957,7 @@ def test_stop_takes_away_only_the_links_tile_layers(tmp_path, caplog):
         with caplog.at_level(logging.WARNING, logger=link.__name__):
             rl.stop()
         assert [tool for tool, _ in fake.calls] == ["list_layers"] and names(fake) == ["Ortofoto"] * 3
-        assert "did not list" in caplog.text and rl.server is None
+        assert "stay in RustGIS" in caplog.text and rl.server is None
         fake, rl = started()
         fake.rules.append(lambda command, params: "not now" if command == "map.removeTiles" else None)
         caplog.clear()
@@ -2935,7 +2970,32 @@ def test_stop_takes_away_only_the_links_tile_layers(tmp_path, caplog):
         with caplog.at_level(logging.WARNING, logger=link.__name__):
             rl.stop()
         assert [tool for tool, _ in fake.calls] == ["list_layers", "run"] and fake.removed == []
-        assert names(fake) == ["Ortofoto", "<mark>", "Ortofoto"] and "did not list or mark" in caplog.text
+        assert names(fake) == ["Ortofoto", "<mark>", "Ortofoto"] and "may be named ppg-tile-" in caplog.text
+        assert "the tile layers at places 1 of RustGIS's list" in caplog.text
+        fake, rl = started()
+        fake.hooks.append(lambda tool, args: fake.busy.append("list_layers") if tool == "run" and not fake.busy
+                          else None)  # renamed, then the list not read again
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=link.__name__):
+            rl.stop()
+        assert [tool for tool, _ in fake.calls] == ["list_layers", "run", "list_layers"] and fake.removed == []
+        assert names(fake) == ["Ortofoto", "<mark>", "Ortofoto"] and "are named ppg-tile-" in caplog.text
+        assert "now (RustGIS did not list them again)" in caplog.text
+        fake, rl = started()
+        base, listing = rl.server.base, fake.listing
+
+        def numbered_otherwise():  # RustGIS giving the link's tile layer a place other than its own
+            answer = listing()
+            for tile in answer["tileLayers"]:
+                tile["index"] += tile["url"].startswith(base)
+            return answer
+
+        fake.listing = numbered_otherwise
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=link.__name__):
+            rl.stop()
+        assert [tool for tool, _ in fake.calls] == ["list_layers"] and names(fake) == ["Ortofoto"] * 3
+        assert "at a place other than their own" in caplog.text and fake.removed == []
         fake, rl = started()
         fake.hooks.append(lambda tool, args: fake.lost.append("run") if "map.removeTiles" in args.get(
             "script", "") and not fake.lost else None)  # the removal runs, its answer lost
@@ -2999,7 +3059,7 @@ def test_tile_layers_go_by_their_marks_when_the_list_changes(tmp_path, caplog):
             rl.stop()
         assert fake.removed == [] and [t["url"] for t in fake.tile_layers] == [late["url"], ours, basemap["url"]]
         assert [t["name"] for t in fake.tile_layers][1:] == ["Ortofoto", basemap["name"]]
-        assert "added to RustGIS meanwhile is named" in caplog.text and "moved" in caplog.text
+        assert "the name they had cannot be told" in caplog.text and "moved" in caplog.text
     finally:
         for rl in links:
             rl.stop()
@@ -3095,6 +3155,13 @@ def test_a_raster_rustgis_cannot_decode_goes_as_a_copy(tmp_path, monkeypatch):
         made = first.copy.stat().st_mtime_ns
         rl.start(rasters)
         assert rl.rasters[0].copy.stat().st_mtime_ns == made  # the same raster: the copy reused
+        note = first.copy.with_name(first.copy.name + ".json")
+        noted = json.loads(note.read_text(encoding="utf-8"))
+        assert noted["layout"] == link.COPY_LAYOUT == 1
+        note.write_text(json.dumps(dict(noted, layout=0)), encoding="utf-8")  # a copy written another way
+        rl.start(rasters)
+        assert rl.rasters[0].copy.stat().st_mtime_ns != made and json.loads(note.read_text())["layout"] == 1
+        made = rl.rasters[0].copy.stat().st_mtime_ns
         later = photo.stat().st_mtime_ns + 10**9
         os.utime(photo, ns=(later, later))
         rl.start(rasters)
@@ -3110,6 +3177,63 @@ def test_a_raster_rustgis_cannot_decode_goes_as_a_copy(tmp_path, monkeypatch):
         with pytest.raises(OSError, match="disk gone"):
             link._write_copy(photo, tmp_path / "copia.tif")
         assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".copia")] == []
+    finally:
+        rl.stop()
+
+
+def test_a_mark_gives_back_the_one_name_missing_or_stays(caplog):
+    """A mark that lands on a tile layer of the user's whose address another shares (a basemap added twice, with two
+    names) gives back the one name missing at that address among the tile layers there without a mark; when that is
+    not one name - two marks landed on two layers of one address with different names - the marks stay, said in the
+    log, rather than a guess."""
+    base, osm = "http://127.0.0.1:1/ours/", "http://127.0.0.1:9/osm/{z}/{x}/{y}.png"
+
+    def marked(ours: int):
+        fake = FakeEngine()
+        fake.tile_layers = ([{"name": n, "url": f"http://127.0.0.1:2/other/{n}.tif", "kind": "cog"} for n in "XY"]
+                            + [{"name": "Ortofoto", "url": f"{base}{n}.tif", "kind": "cog"} for n in range(ours)]
+                            + [{"name": "OSM", "url": osm, "kind": "raster"},
+                               {"name": "OSM chiaro", "url": osm, "kind": "raster"}])
+
+        def another_link_stops(tool, args):  # its two tile layers, above, gone right before the renaming
+            if tool == "run" and fake.hooks:
+                fake.hooks.clear()
+                del fake.tile_layers[0:2]
+
+        fake.hooks.append(another_link_stops)
+        rl = link.RustGisLink.__new__(link.RustGisLink)
+        rl.transport = fake
+        marks = rl._mark_tiles(lambda url: url.startswith(base))
+        return [re.sub(rf"{link.TILE_MARK}-[0-9a-f]{{16}}", "<mark>", t["name"]) for t in fake.tile_layers], marks
+
+    with caplog.at_level(logging.WARNING, logger=link.__name__):
+        names, marks = marked(1)
+    assert (names, marks) == (["Ortofoto", "OSM", "OSM chiaro"], {}) and "moved" in caplog.text
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=link.__name__):
+        names, marks = marked(2)
+    assert (names, marks) == (["Ortofoto", "Ortofoto", "<mark>", "<mark>"], {})
+    assert "the name they had cannot be told" in caplog.text
+
+
+def test_one_raster_that_fails_never_fails_the_start(tmp_path, monkeypatch, caplog):
+    """A raster whose routing or copy fails in a way of its own (an exotic raster) is left out and said in
+    "refused", logged with its name; the other rasters and the tables go to RustGIS all the same."""
+    photo = _two_tone(tmp_path / "foto.tif", 3, compress="webp", **TILED)
+    dem = _small_dem(tmp_path / "dem.tif")
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([_unit(1, GX, GY)]))
+    rl = link.RustGisLink(live, FakeEngine(), "Saggio 1", GB, data_dir=tmp_path / "chunk_1")
+
+    def exotic(source):
+        raise TypeError("a raster of an exotic type")
+
+    monkeypatch.setattr(link, "_copy_bytes", exotic)
+    try:
+        with caplog.at_level(logging.WARNING, logger=link.__name__):
+            out = rl.start([{"path": photo, "name": "Foto"}, {"path": dem, "name": "DEM"}])
+        assert out["refused"] == {"Foto": "a raster of an exotic type"} and out["layers"] == 7 and out["rasters"] == 1
+        assert [r.name for r in rl.rasters] == ["DEM"] and "The raster Foto cannot be given" in caplog.text
     finally:
         rl.stop()
 
@@ -3193,18 +3317,30 @@ def test_a_raster_downloaded_whole_or_not_served(tmp_path, monkeypatch, caplog):
 
 
 class FakeFiles:
-    """The calls of kernel32 the raster server makes to open a file on Windows, answering as the test says."""
+    """The calls of kernel32 the raster server makes to open a file on Windows, answering as the test says: each
+    CreateFileW gives the next handle; ``tag`` is (attributes, reparse tag) of what is opened with
+    FILE_FLAG_OPEN_REPARSE_POINT; ``files`` the (volume serial number, file index high, low) of each handle."""
 
     def __init__(self):
-        self.handle, self.attributes, self.informed = 4321, 0x20, 1  # FILE_ATTRIBUTE_ARCHIVE: a plain file
+        self.next, self.handles = 4321, []
+        self.tag, self.tagged, self.informed = (0x20, 0), 1, 1  # FILE_ATTRIBUTE_ARCHIVE: a plain file
+        self.files: dict[int, tuple] = {}
         self.opened, self.closed = [], []
 
     def CreateFileW(self, name, access, share, security, disposition, flags, template):
         self.opened.append((name, access, share, security, disposition, flags, template))
-        return self.handle
+        handle, self.next = self.next, self.next + 1
+        self.handles.append(handle)
+        self.files.setdefault(handle, (7, 0, 99))
+        return handle
+
+    def GetFileInformationByHandleEx(self, handle, kind, information, size):
+        assert (kind, size) == (9, 8)  # FileAttributeTagInfo: attributes and reparse tag
+        information._obj.attributes, information._obj.reparse_tag = self.tag
+        return self.tagged
 
     def GetFileInformationByHandle(self, handle, information):
-        information._obj.attributes = self.attributes  # what byref() was given
+        information._obj.volume, information._obj.index_high, information._obj.index_low = self.files[handle]
         return self.informed
 
     def CloseHandle(self, handle):
@@ -3212,11 +3348,13 @@ class FakeFiles:
         return 1
 
 
-def test_on_windows_a_served_file_is_shared_and_no_reparse_point(tmp_path, monkeypatch):
+def test_on_windows_a_served_file_is_shared_and_no_link(tmp_path, monkeypatch):
     """On Windows the raster server opens a file with CreateFileW shared for reading, writing and deleting - the
-    program replaces or deletes a product RustGIS is reading a tile of - and with FILE_FLAG_OPEN_REPARSE_POINT: a
-    reparse point (a link, a junction) put where the file was is refused, as O_NOFOLLOW refuses a link elsewhere. Its
-    address and its answers go through the same opening."""
+    program replaces or deletes a product RustGIS is reading a tile of - and with FILE_FLAG_OPEN_REPARSE_POINT. A name
+    surrogate (a symbolic link, a junction) put where the file was is refused, as O_NOFOLLOW refuses a link elsewhere;
+    another reparse point (deduplicated, a OneDrive or Dropbox placeholder) is a file itself: opened again without the
+    flag and kept when it is the same file (volume serial number, file index). Every handle not handed over is closed
+    exactly once. The address and the answers go through the same opening."""
     import ctypes
 
     raster = tmp_path / "ortofoto.tif"
@@ -3226,25 +3364,70 @@ def test_on_windows_a_served_file_is_shared_and_no_reparse_point(tmp_path, monke
     monkeypatch.setattr(link, "_platform", lambda: "win32")
     monkeypatch.setattr(link, "_kernel32", lambda: files)
     monkeypatch.setattr(link, "_osfhandle", lambda handle: taken.append(handle) or os.open(raster, os.O_RDONLY))
-    with link._open_regular(raster) as handle:
-        assert handle.read() == b"pixels"
+
+    def opened():
+        before = (len(files.opened), len(files.closed), len(taken))
+        handle = link._open_regular(raster)
+        data = None
+        if handle is not None:
+            with handle:
+                data = handle.read()
+        return data, files.opened[before[0]:], files.closed[before[1]:], taken[before[2]:]
+
+    # a plain file: one opening, handed to the descriptor
+    data, made, closed, handed = opened()
     # GENERIC_READ; FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE; OPEN_EXISTING; FILE_FLAG_OPEN_REPARSE_POINT
-    assert files.opened == [(str(raster), 0x80000000, 0x7, None, 3, 0x00200000, None)]
-    assert taken == [4321] and files.closed == []  # the descriptor owns the handle
-    files.attributes = 0x400 | 0x20  # FILE_ATTRIBUTE_REPARSE_POINT
-    assert link._open_regular(raster) is None and files.closed == [4321]
-    files.attributes, files.informed = 0x20, 0  # its information not read
-    assert link._open_regular(raster) is None and files.closed == [4321, 4321]
-    files.handle = ctypes.c_void_p(-1).value  # INVALID_HANDLE_VALUE: nothing to give back
-    assert link._open_regular(raster) is None and files.closed == [4321, 4321]
-    files.handle, files.informed = 4321, 1
+    assert made == [(str(raster), 0x80000000, 0x7, None, 3, 0x00200000, None)]
+    assert (data, closed, handed) == (b"pixels", [], [files.handles[-1]])
+    # a name surrogate (IO_REPARSE_TAG_SYMLINK): refused, its handle closed
+    files.tag = (0x400 | 0x20, 0xA000000C)
+    data, made, closed, handed = opened()
+    assert (data, len(made), closed, handed) == (None, 1, [files.handles[-1]], [])
+    # a cloud placeholder (IO_REPARSE_TAG_CLOUD_6) or a deduplicated file (IO_REPARSE_TAG_DEDUP): a file itself
+    for tag in (0x9000601A, 0x80000013):
+        files.tag = (0x400 | 0x20, tag)
+        data, made, closed, handed = opened()
+        first, second = files.handles[-2:]
+        assert [m[5] for m in made] == [0x00200000, 0] and [m[2] for m in made] == [0x7, 0x7]  # the same sharing
+        assert (data, closed, handed) == (b"pixels", [first], [second])
+    # opened again, another file (something put there in between): refused, both closed once
+    files.next = 5000
+    files.files[5001] = (7, 0, 100)
+    data, made, closed, handed = opened()
+    assert (data, sorted(closed), handed) == (None, [5000, 5001], [])
+    # its tag not read, or nothing opened: refused
+    files.tag, files.tagged = (0x20, 0), 0
+    data, made, closed, handed = opened()
+    assert (data, closed) == (None, [files.handles[-1]])
+    files.tagged, files.next = 1, ctypes.c_void_p(-1).value  # INVALID_HANDLE_VALUE: nothing to close
+    data, made, closed, handed = opened()
+    assert (data, len(made), closed) == (None, 1, [])
+    assert sorted(files.closed) == sorted(set(files.closed))  # never a handle closed twice
+    files.next = 6000
     server = link.RasterServer()
     try:
         path = urllib.parse.urlsplit(server.url(raster)).path
         assert _http(server.server_address[1], path)[2] == b"pixels"
     finally:
         server.close()
-    assert len(files.opened) == 6  # the four above, the address, the answer
+    assert [m[0] for m in files.opened[-2:]] == [str(raster)] * 2  # the address, the answer
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows only: the sharing of a file opened by the raster server")
+def test_on_windows_a_product_read_by_rustgis_can_be_replaced(tmp_path):
+    """Windows, a real file: while the raster server holds a product open for RustGIS, the program replaces it
+    (os.replace, as a product rebuilt is put in place): FILE_SHARE_DELETE lets it."""
+    product = tmp_path / "orthomosaic.tif"
+    product.write_bytes(b"the old pixels")
+    rebuilt = tmp_path / "orthomosaic.tmp.tif"
+    rebuilt.write_bytes(b"the new pixels")
+    handle = link._open_regular(product)
+    assert handle is not None
+    try:
+        os.replace(rebuilt, product)
+        assert product.read_bytes() == b"the new pixels"
+    finally:
+        handle.close()
 
 
 def _orthophoto(path: Path, side: int, pixel: float, crs: str, x0: float, y0: float, colour=None) -> Path:

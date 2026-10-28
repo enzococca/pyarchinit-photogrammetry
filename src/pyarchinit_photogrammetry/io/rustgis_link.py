@@ -63,6 +63,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -233,9 +234,12 @@ def token_dir() -> Path:
 # kernel32: OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE), the wait that times out, access denied
 _WINDOWS_ACCESS, _WINDOWS_WAIT_TIMEOUT, _WINDOWS_ACCESS_DENIED = 0x1000 | 0x100000, 0x102, 5
 # CreateFileW of a file read by the raster server: GENERIC_READ; FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-# OPEN_EXISTING; FILE_FLAG_OPEN_REPARSE_POINT (the link itself, never what it points to); FILE_ATTRIBUTE_REPARSE_POINT
+# OPEN_EXISTING; FILE_FLAG_OPEN_REPARSE_POINT (the reparse point itself, never what it points to);
+# FILE_ATTRIBUTE_REPARSE_POINT; FileAttributeTagInfo (GetFileInformationByHandleEx); a reparse tag's name surrogate
+# bit (a symbolic link, a junction: a name for another file - not a deduplicated file or a cloud placeholder)
 _WINDOWS_READ, _WINDOWS_SHARE_ALL, _WINDOWS_OPEN_EXISTING = 0x80000000, 0x1 | 0x2 | 0x4, 3
 _WINDOWS_OPEN_REPARSE_POINT, _WINDOWS_REPARSE_POINT = 0x00200000, 0x400
+_WINDOWS_ATTRIBUTE_TAG_INFO, _WINDOWS_NAME_SURROGATE = 9, 0x20000000
 
 
 def _kernel32():
@@ -256,6 +260,8 @@ def _kernel32():
     kernel32.CreateFileW.restype = wintypes.HANDLE
     kernel32.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
     kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.GetFileInformationByHandleEx.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    kernel32.GetFileInformationByHandleEx.restype = wintypes.BOOL
     return kernel32
 
 
@@ -574,12 +580,9 @@ MEDIA_TYPES = {".tif": "image/tiff", ".tiff": "image/tiff"}  # what the raster s
 # the GeoTIFF compressions RustGIS 0.4.0 decodes, from a file and in place (there a JPEG only of RGB or grey pixels: a
 # YCbCr one shows its raw Y, Cb and Cr); WebP, LERC, LZMA and the others it refuses as a file and leaves blank in place
 READ_CODECS = frozenset({"NONE", "DEFLATE", "LZW", "ZSTD", "PACKBITS", "JPEG"})
-# the GDAL drivers of the formats besides GeoTIFF that RustGIS 0.4.0 loads as files (JPEG 2000, ERDAS IMG: it converts
-# them with GDAL's tools, gdal_translate and gdalinfo, when the computer has them); others (a VRT it refuses, a PNG it
-# draws without its world file) go as a copy
-FILE_DRIVERS = frozenset({"JP2OpenJPEG", "JPEG2000", "JP2ECW", "JP2KAK", "JP2MrSID", "HFA"})
 COPY_SPACE = 1.5  # free disk a copy for RustGIS needs: this many times its size (or the raster's, if larger)...
 COPY_RESERVE = 2_000_000_000  # ...and this many bytes left free after it
+COPY_LAYOUT = 1  # how a copy is written (_copy_profile, _write_copy): one noted with another layout is made again
 STOP_WAIT = 5.0  # seconds stop() waits for RustGIS's list of tile layers (a read) before it leaves them there
 TILE_MARK = "ppg-tile"  # what the names a tile layer of the link is given for a moment begin with (+ 16 random hex)
 
@@ -594,11 +597,12 @@ def raster_route(path: Path) -> str:
       palette (RustGIS draws the indices of one read in place, their colours from a file);
     * ``"file"``: its file (``layer.addData``), which RustGIS loads whole up to :data:`RASTER_SAMPLES` and from an
       overview when larger - one made as it reads a GeoTIFF in strips or without overviews; a YCbCr JPEG converted to
-      RGB; a palette in its colours. Also a JPEG 2000 or an ERDAS IMG (:data:`FILE_DRIVERS`), and what rasterio cannot
-      read: RustGIS says whether it reads it;
-    * ``"copy"``: neither - a GeoTIFF compressed as RustGIS does not decode (WebP, LERC, LZMA...), or another format
-      (a VRT it refuses, a PNG it draws without its world file): a GeoTIFF copy it reads goes in its place
-      (:meth:`RustGisLink.start`)."""
+      RGB; a palette in its colours. Also a raster of complex numbers, or of bands of different types (no copy is
+      made of those), and what rasterio cannot read: RustGIS says whether it reads it;
+    * ``"copy"``: neither - a GeoTIFF compressed as RustGIS does not decode (WebP, LERC, LZMA...), or any other format:
+      RustGIS refuses a VRT, draws a PNG without its world file, and reads a JPEG 2000, an ERDAS IMG and the other
+      formats of GDAL only through GDAL's tools, which an app started from the Finder does not find on its PATH. A
+      GeoTIFF copy it reads goes in its place (:meth:`RustGisLink.start`)."""
     import rasterio
     from rasterio.enums import ColorInterp
     from rasterio.errors import RasterioError
@@ -607,7 +611,7 @@ def raster_route(path: Path) -> str:
         with rasterio.open(path) as src:
             samples = src.width * src.height * src.count
             structure = src.tags(ns="IMAGE_STRUCTURE")
-            driver, tiled = src.driver, bool(src.profile.get("tiled"))
+            driver, tiled, types = src.driver, bool(src.profile.get("tiled")), set(src.dtypes)
             palette = src.colorinterp[0] == ColorInterp.palette
         internal = False
         if driver == "GTiff" and samples > RASTER_SAMPLES:  # an .ovr beside it is not counted: never served
@@ -615,8 +619,10 @@ def raster_route(path: Path) -> str:
                 internal = bool(src.overviews(1))
     except (OSError, RasterioError):
         return "file"
+    if len(types) != 1 or "complex" in next(iter(types)):  # no copy of these: RustGIS says what it makes of them
+        return "file"
     if driver != "GTiff":
-        return "file" if driver in FILE_DRIVERS else "copy"
+        return "copy"
     compression = str(structure.get("COMPRESSION") or "NONE").upper()
     if ("JPEG" if compression.endswith("JPEG") else compression) not in READ_CODECS:  # "YCbCr JPEG" too
         return "copy"
@@ -788,27 +794,65 @@ def _osfhandle(handle: int) -> int:
 def _open_on_windows(path: Path) -> int | None:
     """``path`` opened for reading on Windows, as a file descriptor, shared with every other opening - read, write and
     delete: while RustGIS reads a tile of a product, the program may replace it (``os.replace``) or delete it, which a
-    file opened as Python opens it would forbid. Never through a reparse point (a symbolic link, a junction) put where
-    the file was: refused, as ``O_NOFOLLOW`` refuses a link elsewhere. None when it cannot be opened so."""
+    file opened as Python opens it would forbid. Never through a name surrogate put where the file was (a symbolic
+    link, a junction: refused, as ``O_NOFOLLOW`` refuses a link elsewhere); the other reparse points are files
+    themselves (deduplicated, tiered, a OneDrive or Dropbox placeholder), opened again without
+    FILE_FLAG_OPEN_REPARSE_POINT - as CPython's lstat and Rust's std draw the line - and kept only when that opening is
+    the same file (volume serial number and file index). Every handle not handed to the descriptor is closed, once.
+    None when it cannot be opened so."""
     import ctypes
 
-    class Information(ctypes.Structure):  # BY_HANDLE_FILE_INFORMATION: the attributes, then 12 DWORDs more
-        _fields_ = [("attributes", ctypes.c_uint32), ("rest", ctypes.c_uint32 * 12)]
+    class TagInformation(ctypes.Structure):  # FILE_ATTRIBUTE_TAG_INFO
+        _fields_ = [("attributes", ctypes.c_uint32), ("reparse_tag", ctypes.c_uint32)]
+
+    class FileInformation(ctypes.Structure):  # BY_HANDLE_FILE_INFORMATION
+        _fields_ = [("attributes", ctypes.c_uint32), ("times", ctypes.c_uint32 * 6), ("volume", ctypes.c_uint32),
+                    ("size", ctypes.c_uint32 * 2), ("links", ctypes.c_uint32), ("index_high", ctypes.c_uint32),
+                    ("index_low", ctypes.c_uint32)]
 
     kernel32 = _kernel32()
-    handle = kernel32.CreateFileW(str(path), _WINDOWS_READ, _WINDOWS_SHARE_ALL, None, _WINDOWS_OPEN_EXISTING,
-                                  _WINDOWS_OPEN_REPARSE_POINT, None)
-    if not handle or handle == ctypes.c_void_p(-1).value:  # INVALID_HANDLE_VALUE
+
+    def opened(flags: int):
+        handle = kernel32.CreateFileW(str(path), _WINDOWS_READ, _WINDOWS_SHARE_ALL, None, _WINDOWS_OPEN_EXISTING,
+                                      flags, None)
+        return None if not handle or handle == ctypes.c_void_p(-1).value else handle  # INVALID_HANDLE_VALUE
+
+    def file_of(handle):
+        information = FileInformation()
+        if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(information)):
+            return None
+        return information.volume, information.index_high, information.index_low
+
+    first = opened(_WINDOWS_OPEN_REPARSE_POINT)
+    if first is None:
         return None
-    information = Information()
+    kept = None
     try:
-        if (kernel32.GetFileInformationByHandle(handle, ctypes.byref(information))
-                and not information.attributes & _WINDOWS_REPARSE_POINT):
-            return _osfhandle(handle)  # the descriptor owns the handle from now on
+        tag = TagInformation()
+        if kernel32.GetFileInformationByHandleEx(first, _WINDOWS_ATTRIBUTE_TAG_INFO, ctypes.byref(tag),
+                                                 ctypes.sizeof(tag)):
+            if not tag.attributes & _WINDOWS_REPARSE_POINT:
+                kept, first = first, None  # a plain file
+            elif not tag.reparse_tag & _WINDOWS_NAME_SURROGATE:  # a file itself: opened again, the same file kept
+                second = opened(0)
+                if second is not None:
+                    try:
+                        known = file_of(first)
+                        if known is not None and file_of(second) == known:
+                            kept, second = second, None
+                    finally:
+                        if second is not None:
+                            kernel32.CloseHandle(second)
+    finally:
+        if first is not None:
+            kernel32.CloseHandle(first)
+    if kept is None:
+        return None
+    try:
+        return _osfhandle(kept)  # the descriptor owns the handle from now on
     except OSError:
-        pass
-    kernel32.CloseHandle(handle)
-    return None
+        kernel32.CloseHandle(kept)
+        return None
 
 
 def _open_regular(path: Path):
@@ -1894,12 +1938,13 @@ class RustGisLink:
         range, the tiles of the overview each part of its view needs, down to full resolution - a tile layer there,
         drawn under its layers and in no group (RustGIS groups only layers); in the place of one RustGIS cannot read as
         it is, a copy it reads. Those given hidden are hidden, so that a DEM does not cover the orthophoto
-        (:meth:`_show`). Each is in :attr:`rasters`; one RustGIS refuses, a file gone, or one RustGIS cannot read
-        with no room on the disk for its copy, is left out and said in ``"refused"`` (by name; a second of the same
-        name as ``"name (2)"``). Then every table of :data:`.qgis_link.LIVE_TABLES` from the live GeoPackage (empty ones
-        too: the units are drawn in RustGIS on a chunk that has none) named as in QGIS, above the rasters, all in a
-        group named after the chunk. What RustGIS loaded is remembered right after (:meth:`remember`: its own export of
-        the two-way tables; the file as it was read for the others).
+        (:meth:`_show`). Each is in :attr:`rasters`; one RustGIS refuses, or that fails on its own (a file gone, no
+        room on the disk for the copy of one RustGIS cannot read, an error of its routing or its copy), is left out and
+        said in ``"refused"`` (by name; a second of the same name as ``"name (2)"``) - only RustGIS's own failures
+        (busy, off) end the start. Then every table of :data:`.qgis_link.LIVE_TABLES` from the live GeoPackage (empty
+        ones too: the units are drawn in RustGIS on a chunk that has none) named as in QGIS, above the rasters, all in
+        a group named after the chunk. What RustGIS loaded is remembered right after (:meth:`remember`: its own export
+        of the two-way tables; the file as it was read for the others).
 
         Returns ``{"layers": n, "rasters": n, "version": "..."}``. A start that fails (RustGIS busy, a refusal) leaves
         the link stopped (:meth:`stop`: the tile layers taken away when RustGIS answers, the raster server closed), and
@@ -1926,9 +1971,12 @@ class RustGisLink:
                     log.warning("RustGIS did not take the raster %s: %s", entry.name, exc)
                     refused[_unused(refused, entry.name)] = str(exc)
                     continue
-                except (OSError, RasterioError) as exc:  # gone since it was routed, no room or no copy, no server
-                    log.warning("The raster %s cannot be given to RustGIS: %s", entry.name, exc)
-                    refused[_unused(refused, entry.name)] = str(exc)
+                except RustGisError:  # RustGIS busy, off, or answering what no tool gives: the start fails
+                    raise
+                except Exception as exc:  # this raster alone: gone, no room or no copy, no server, an exotic raster
+                    expected = isinstance(exc, (OSError, RasterioError))
+                    log.warning("The raster %s cannot be given to RustGIS: %s", entry.name, exc, exc_info=not expected)
+                    refused[_unused(refused, entry.name)] = str(exc) or type(exc).__name__
                     continue
                 given.append(entry)
             stamp = self._fingerprint()  # what RustGIS reads now: written later, it is sent
@@ -2044,8 +2092,9 @@ class RustGisLink:
     def stop(self) -> None:
         """Forgets RustGIS's layers: after it nothing is sent or asked. RustGIS keeps them, with what they have - all
         but the tile layers it reads from the link's raster server, which would draw nothing once the server stops:
-        those are taken away first, as far as RustGIS answers in a few seconds (:meth:`_remove_tiles`; never raised),
-        then the server stops (:attr:`server`)."""
+        those are taken away first, as far as RustGIS answers (:meth:`_remove_tiles`, never raised: its lists read with
+        a wait of :data:`STOP_WAIT` seconds, its scripts with the transport's own), then the server stops
+        (:attr:`server`)."""
         server, self.server = self.server, None
         try:
             if server is not None:
@@ -2172,12 +2221,16 @@ class RustGisLink:
         adds or removes one - the user, another link stopping. So the list is read (``wait``: at most that many
         seconds, for a read harmless to repeat), each of those whose listed ``index`` is its place in the list is
         renamed by its place to :data:`TILE_MARK` and 16 random hexadecimal digits (one script, renaming only), and the
-        list is read again: a mark found on a tile layer ``wanted`` does not accept (the list changed between the two
-        readings) gives that layer back, by the mark, the name it had in the first reading (one that came meanwhile
-        keeps the mark, said in the log). Returns ``{mark: (address, name it had)}`` of the marks found on tile layers
-        ``wanted`` accepts; one of those not marked (it moved) is said in the log. :class:`RustGisError` when RustGIS
-        did not list or rename them: nothing changed then (a renaming whose answer was lost may run later: marks are
-        all it can leave)."""
+        list is read again. A mark found on a tile layer ``wanted`` does not accept (the list changed between the two
+        readings) gives that layer back the name it had: the one name the first reading has at that address and the
+        second, among the tile layers there without a mark, no longer has - when that is not one name (a layer that
+        came meanwhile, or several marked at one address with different names), the mark stays rather than a guess,
+        said in the log. Returns ``{mark: (address, name it had)}`` of the marks found on tile layers ``wanted``
+        accepts; those not marked (listed at a place other than their own, or moved meanwhile) are said in the log.
+        :class:`RustGisError` when RustGIS did not list its tile layers or refused the renaming (nothing changed: a
+        script is all or nothing), or when the renaming's answer was lost or the list could not be read again: then the
+        marks stay on the tile layers renamed, or will when the renaming runs later, said in the log with their
+        places."""
         def listed() -> list:
             with _waiting_at_most(self.transport, wait) if wait else contextlib.nullcontext():
                 listing = self.transport.call("list_layers", {})
@@ -2186,27 +2239,54 @@ class RustGisLink:
                     if isinstance(t, dict) and isinstance(t.get("url"), str)]
 
         before = listed()
-        names: dict[str, str] = {}
+        named: dict[str, list[str]] = {}  # address -> the names of its tile layers in the first reading
         for _, tile in before:
-            names.setdefault(tile["url"], str(tile.get("name") or ""))
-        chosen = {f"{TILE_MARK}-{secrets.token_hex(8)}": n for n, tile in before
-                  if wanted(tile["url"]) and not isinstance(tile.get("index"), bool) and tile.get("index") == n}
+            named.setdefault(tile["url"], []).append(str(tile.get("name") or ""))
+        ours = [(n, tile) for n, tile in before if wanted(tile["url"])]
+        chosen = {f"{TILE_MARK}-{secrets.token_hex(8)}": n for n, tile in ours
+                  if not isinstance(tile.get("index"), bool) and tile.get("index") == n}
+        unplaced = {tile["url"] for n, tile in ours if n not in chosen.values()}
+        if unplaced:
+            log.warning("RustGIS link: %d tile layers of the rasters are listed by RustGIS at a place other than "
+                        "their own: left as they are", len(unplaced))
         if not chosen:
             return {}
-        self._run([_line("map.setTiles", {"index": n, "rename": mark}) for mark, n in chosen.items()])
+        where = f"the tile layers at places {', '.join(map(str, chosen.values()))} of RustGIS's list"
+        try:
+            self._run([_line("map.setTiles", {"index": n, "rename": mark}) for mark, n in chosen.items()])
+        except RustGisBusy as exc:
+            if exc.outcome_unknown:
+                log.warning("RustGIS link: %s may be named %s when RustGIS runs the renaming whose answer was lost: "
+                            "rename them there", where, ", ".join(chosen))
+            raise
+        try:
+            after = listed()
+        except RustGisError:
+            log.warning("RustGIS link: %s are named %s now (RustGIS did not list them again): rename them there",
+                        where, ", ".join(chosen))
+            raise
         marks: dict[str, tuple[str, str]] = {}
-        back, moved = [], 0
-        for _, tile in listed():
-            name = str(tile.get("name") or "").lower()
-            mark = next((m for m in chosen if m == name), None)  # RustGIS compares names in any case
+        landed: dict[str, list[str]] = {}  # address not wanted -> the marks found there
+        unmarked: dict[str, list[str]] = {}  # address -> the names of its tile layers without a mark
+        moved = 0
+        for _, tile in after:
+            url, name = tile["url"], str(tile.get("name") or "")
+            mark = next((m for m in chosen if m == name.lower()), None)  # RustGIS compares names in any case
             if mark is None:
-                moved += bool(wanted(tile["url"]))
-            elif wanted(tile["url"]):
-                marks[mark] = (tile["url"], names.get(tile["url"], ""))
-            elif tile["url"] in names:
-                back.append(_line("map.setTiles", {"name": mark, "rename": names[tile["url"]]}))
+                unmarked.setdefault(url, []).append(name)
+                moved += bool(wanted(url)) and url not in unplaced
+            elif wanted(url):
+                marks[mark] = (url, (named.get(url) or [""])[0])
             else:
-                log.warning("RustGIS link: a tile layer added to RustGIS meanwhile is named %s: rename it there", mark)
+                landed.setdefault(url, []).append(mark)
+        back = []
+        for url, found in landed.items():
+            missing = list((Counter(named.get(url, [])) - Counter(unmarked.get(url, []))).elements())
+            if len(set(missing)) == 1 and len(missing) == len(found):
+                back += [_line("map.setTiles", {"name": mark, "rename": missing[0]}) for mark in found]
+            else:
+                log.warning("RustGIS link: %d tile layers of RustGIS are named %s, as the link marks its own, and the "
+                            "name they had cannot be told: rename them there", len(found), ", ".join(found))
         if back:
             try:
                 self._run(back)
@@ -2236,8 +2316,7 @@ class RustGisLink:
         try:
             marks = self._mark_tiles(lambda url: url.startswith(base), STOP_WAIT)
         except RustGisError as exc:
-            log.warning("RustGIS link: the tile layers of the rasters stay in RustGIS (it did not list or mark them: "
-                        "%s)", exc)
+            log.warning("RustGIS link: the tile layers of the rasters stay in RustGIS: %s", exc)
             return
         if not marks:
             return
@@ -2317,7 +2396,8 @@ class RustGisLink:
     def _copy_for(self, path: Path) -> Path:
         """A copy of the raster at ``path`` that RustGIS reads (:func:`_write_copy`), in :attr:`copies`, named after
         the raster and its place: reused while the raster is the file it was made from (device, inode, size and time of
-        modification, kept beside the copy), made again otherwise. Made only when the disk has room for it:
+        modification) and the copy was written as this version writes copies (:data:`COPY_LAYOUT`) - both noted beside
+        it -, made again otherwise. Made only when the disk has room for it:
         :data:`COPY_SPACE` times its size free - the size its pixels give (:func:`_copy_bytes`), or the raster's when
         larger - and :data:`COPY_RESERVE` left after it; else :class:`OSError` saying so, nothing written, and the
         raster, which RustGIS cannot read (that is why it is copied), is refused."""
@@ -2330,7 +2410,8 @@ class RustGisLink:
             made = json.loads(note.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             made = None
-        if copy.is_file() and isinstance(made, dict) and made.get("identity") == identity:
+        if (copy.is_file() and isinstance(made, dict) and made.get("layout") == COPY_LAYOUT
+                and made.get("identity") == identity):
             return copy
         self.copies.mkdir(parents=True, exist_ok=True)
         size = max(_copy_bytes(path), status.st_size)
@@ -2342,7 +2423,8 @@ class RustGisLink:
         note.unlink(missing_ok=True)
         log.info("RustGIS link: %s copied as RustGIS reads it, into %s", path.name, copy)
         _write_copy(path, copy)
-        note.write_text(json.dumps({"source": str(path), "identity": identity}), encoding="utf-8")
+        note.write_text(json.dumps({"layout": COPY_LAYOUT, "source": str(path), "identity": identity}),
+                        encoding="utf-8")
         return copy
 
     def _file_rows(self, table: str) -> dict:
@@ -2956,4 +3038,4 @@ __all__ = ["find_rustgis", "open_app", "settings_dir", "token_dir", "endpoint", 
            "RustGisRefused", "RustGisTooOld", "RustGisLink", "Drawn", "normalize", "MIN_VERSION", "HTTP_PORT",
            "TOKEN_FILE", "ENDPOINT_FILE", "RASTER_SAMPLES", "TOLERANCE_M", "BUSY_CODES", "SCRATCH_DIR", "SCRIPT_LINES",
            "SCRIPT_BYTES", "WHERE_CHARS", "PLACEHOLDER", "raster_route", "RasterServer", "LinkedRaster", "READ_CODECS",
-           "COPY_SPACE", "COPY_RESERVE", "FILE_DRIVERS", "STOP_WAIT", "TILE_MARK"]
+           "COPY_SPACE", "COPY_RESERVE", "COPY_LAYOUT", "STOP_WAIT", "TILE_MARK"]
