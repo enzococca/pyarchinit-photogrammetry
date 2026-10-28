@@ -292,7 +292,7 @@ def test_multispectral_and_thermal_parts(tmp_path):
     assert {"Multispettrale", "Termico", "Punti di misura"} <= set(titles[1])
     assert {"Ortofoto di riflettanza", "Indici", "Indice NDVI", "Zonizzazione di NDVI", "Parametri della misura",
             "Ortofoto termica", "Anomalie termiche"} <= set(titles[2])
-    assert not any("non e' stata letta" in n for n in _notes(report)), _notes(report)
+    assert not any("non è stata letta" in n for n in _notes(report)), _notes(report)
     ms_sec = next(s for s in rc.walk(report.sections) if s.title == "Multispettrale")
     kv = dict(ms_sec.blocks[0].rows)
     assert kv["Bande"] == "Blue, Green, Red, RedEdge, NIR" and kv["Banda di riferimento"] == "Red"
@@ -312,7 +312,7 @@ def test_multispectral_and_thermal_parts(tmp_path):
     assert rows["Decodifica"] == "TIFF di temperature" and rows["Fotogrammi termici"] == "1"
     assert rows["Scostamenti tra i fotogrammi (deviazione standard)"] == "0,42 °C"
     params = dict(next(s for s in rc.walk(report.sections) if s.title == "Parametri della misura").blocks[0].rows)
-    assert params["Emissivita'"] == "0,97" and params["Distanza"] == "altezza di volo di ogni fotogramma"
+    assert params["Emissività"] == "0,97" and params["Distanza"] == "altezza di volo di ogni fotogramma"
     ortho = next(s for s in rc.walk(report.sections) if s.title == "Ortofoto termica")
     fig = next(b for b in ortho.blocks if isinstance(b, rc.Figure))
     assert fig.colour_bar.label == "Temperatura (°C)" and (fig.colour_bar.low, fig.colour_bar.high) == (18.0, 26.0)
@@ -322,7 +322,7 @@ def test_multispectral_and_thermal_parts(tmp_path):
     data = out.read_bytes()
     text = pdf_text(data)
     for t in ("Multispettrale", "Falso colore: R = NIR, G = Red, B = Green", "(NIR - Red) / (NIR + Red)", "Zona 1",
-              "Termico", "Temperatura (°C)", "Emissivita'", "Punti di misura", "P1", "26,00", "ΔT (°C)"):
+              "Termico", "Temperatura (°C)", "Emissività", "Punti di misura", "P1", "26,00", "ΔT (°C)"):
         assert t in text, t
     english = generate_pdf_report(ct, tmp_path / "report.pdf", language="en")
     text = pdf_text(english.read_bytes())
@@ -537,7 +537,7 @@ def test_report_gnss_section(tmp_path, monkeypatch):
     assert run["Calibrazione dell'antenna della base"] == "calibrata con TRM29659.00 NONE di igs20.atx"
     assert _rows(parts["Crediti"])["Coordinate della stazione PROV00ITA"] == EPN_CITATION
     data = generate_pdf_report(doc, tmp_path / "rapporto.pdf", language="it").read_bytes()
-    assert {"Posizioni GNSS", "Qualita' per volo", "PPK rispetto alla base PROV00ITA", "Crediti"} <= set(outline(data))
+    assert {"Posizioni GNSS", "Qualità per volo", "PPK rispetto alla base PROV00ITA", "Crediti"} <= set(outline(data))
     text = pdf_text(data)
     for t in ("PROV00ITA - Stazione di prova (EPN)", "ITRF2020", "2026,82", "igs20.atx", "doi:10.24414/ROB-EUREF-C2400",
               heights.GEOID_GRID):
