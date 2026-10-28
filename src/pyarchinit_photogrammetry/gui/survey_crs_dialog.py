@@ -98,6 +98,33 @@ def drawings_text(changes: dict) -> str | None:
     return " ".join(parts)
 
 
+def parting_text(changes: dict) -> list[str]:
+    """What the new georeference does to the model and to the markers (``model_shift``, ``model_lift`` and
+    ``markers_apart`` of :func:`..gnss.heights.survey_crs_changes` and :func:`..gnss.heights.set_survey_crs`): how
+    far the model moves from the conversion of its old georeference - said when nothing was drawn on it, which would
+    say it (:func:`drawings_text`) -, and how far the references of the markers, converted from system to system,
+    come apart from it; from a millimetre and a centimetre."""
+    lines = []
+    shift, lift = changes.get("model_shift"), changes.get("model_lift")
+    if drawings_text(changes) is None and (shift is not None or lift is not None):
+        parts = []
+        if shift is not None and shift >= 0.001:
+            parts.append(tr("Nella nuova georeferenziazione il modello si scosta fino a {0} m in pianta dalla "
+                            "conversione di quella di prima.", number(shift, 3)))
+        if lift is not None and max(abs(lift[0]), abs(lift[1])) >= 0.001:
+            low, high = lift
+            parts.append(tr("Le sue quote cambiano di {0} m.", _signed((low + high) / 2)) if high - low < 0.001 else
+                         tr("Le sue quote cambiano da {0} a {1} m.", _signed(low), _signed(high)))
+        if parts:
+            lines.append(" ".join(parts))
+    apart = changes.get("markers_apart")
+    if apart and apart[1] - apart[0] >= 0.01:
+        lines.append(tr("I riferimenti dei marker si convertono da un sistema all'altro, come coordinate misurate a "
+                        "terra: nella nuova georeferenziazione sono fino a {0} m dal modello in pianta (prima fino a "
+                        "{1} m).", number(apart[1], 3), number(apart[0], 3)))
+    return lines
+
+
 def changes_text(old: str, changes: dict, redraw=()) -> str:
     """What putting a chunk from ``old`` into the system of ``changes`` (:func:`..gnss.heights.survey_crs_changes`,
     which does it and undoes it: what it says is what the change does) does: the system, the georeference fitted again
@@ -119,10 +146,16 @@ def changes_text(old: str, changes: dict, redraw=()) -> str:
     drawn = drawings_text(changes)
     if drawn:
         lines.append(drawn)
+    lines += parting_text(changes)
     names = _converted_names()
-    converted = [f"{names.get(kind, kind)} {n}" for kind, n in (changes.get("convert") or {}).items() if n]
+    counts = changes.get("convert") or {}
+    follow = changes.get("drawings") == "follow"  # what was drawn goes with the model: only the markers are converted
+    converted = [f"{names.get(kind, kind)} {n}" for kind, n in counts.items() if n and (kind == "markers" or not follow)]
+    followed = [f"{names.get(kind, kind)} {n}" for kind, n in counts.items() if n and kind != "markers" and follow]
     if converted:
         lines.append(tr("Vengono convertiti: {0}.", ", ".join(converted)))
+    if followed:
+        lines.append(tr("Seguono il modello: {0}.", ", ".join(followed)))
     products = product_names()
     if changes.get("rebuild"):
         lines.append(tr("Da costruire di nuovo dopo (sono nel sistema di prima): {0}.",

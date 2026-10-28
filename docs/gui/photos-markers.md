@@ -395,7 +395,9 @@ out, in the background, what the change does, shows it and asks *Apply?*:
   what was drawn on the products - units, spot heights, measuring points, stones, the sections of the project, the
   patches of the orthomosaic and of the texture, the region of the reconstruction, the colour chart - goes with the
   georeference, so that it stays on the model (on a chunk with nothing to follow it is converted as the markers are);
-  the polygons loaded from PyArchInit go as coordinates too;
+  the polygons loaded from PyArchInit go as coordinates too. Where the new georeference is not the conversion of the
+  old one (photos in ITRF2020 into RDN2008, a fit on other references) the window says how far the model moves from
+  that conversion and how far the references of the markers come apart from it;
 - what is to be built again in the new system: the DEM, the orthomosaic, the precision of the DEM, the coverage;
 - what stays in the old system and is to be made again if needed: the inactive versions of the DEM and of the
   orthomosaic, the elevations, the multispectral, thermal and satellite rasters, the relief and the raster

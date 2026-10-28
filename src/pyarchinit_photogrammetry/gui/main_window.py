@@ -435,7 +435,7 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.coord_label)
         self._qgis_timer = QTimer(self)
         self._qgis_timer.setSingleShot(True)
-        self._qgis_timer.timeout.connect(self._export_qgis_layers)
+        self._qgis_timer.timeout.connect(self._qgis_timer_fired)
         self.ortho_view.layers_changed.connect(self._schedule_qgis)
         self._qgis_poll = QTimer(self)  # the edits saved in QGIS, looked for once a second
         self._qgis_poll.setInterval(1000)
@@ -3455,11 +3455,13 @@ class MainWindow(QMainWindow):
                 relief = relief_text(result)
                 if relief:
                     self.log_pane.info(relief)
-            from .survey_crs_dialog import drawings_text
+            from .survey_crs_dialog import drawings_text, parting_text
 
             drawn = drawings_text(result)  # with the model, by how much: as the preview said
             if drawn:
                 self.log_pane.info(drawn)
+            for line in parting_text(result):  # the model, and the markers that part from it
+                self.log_pane.info(line)
             if redraw:
                 self.log_pane.warning(tr("Da ridisegnare nel nuovo sistema: {0}.", ", ".join(redraw)))
             if result.get("rebuild"):
@@ -8472,6 +8474,14 @@ class MainWindow(QMainWindow):
                 link.close()
             link = self._live_link = LiveLink(folder, crs)
         return link
+
+    def _qgis_timer_fired(self) -> None:
+        """The drawings written for QGIS when the timer fires - not while a step runs, which may be changing the chunk
+        (its system, its drawings): a moment later then."""
+        if self.runner.busy:
+            self._qgis_timer.start(3000)
+            return
+        self._export_qgis_layers()
 
     def _qgis_live_toggled(self, on: bool) -> None:
         """The live link with QGIS on or off: the drawings written for QGIS, its edits looked for."""

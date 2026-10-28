@@ -1160,7 +1160,8 @@ def _put(chunk, crs: str) -> dict:
     old = chunk.crs
     said = {"crs": crs, "refit": False, "method": None, "convert": dict.fromkeys(CONVERTED, 0), "rebuild": [],
             "kept": [], "drawings": None, "drawings_shift": None, "drawings_lift": None, "heights_unchanged": False,
-            "transform_rms": None, "transform_relief": None, "transform_vertical": None}
+            "transform_rms": None, "transform_relief": None, "transform_vertical": None, "markers_apart": None,
+            "model_shift": None, "model_lift": None}
     done = {"said": said, "values": {}, "sections": None, "report": None}
     if crs == old:
         return done
@@ -1173,6 +1174,7 @@ def _put(chunk, crs: str) -> dict:
         said.update(convert=_counts(chunk, False, False, sections, fate), drawings="kept")
         return done
     before, positions, extent = chunk.transform.copy(), [(m, m.position) for m in chunk.markers], []
+    apart_before = _markers_apart(chunk, before)
 
     def spread() -> np.ndarray | None:  # the extent of the chunk in the old system, read when needed, once
         if not extent:
@@ -1201,6 +1203,12 @@ def _put(chunk, crs: str) -> dict:
     if mover.mode == "follow" and chunk.meta.get("region"):
         values["region"] = _region_follows(chunk.meta["region"], before, chunk.transform)
     shift, lift = _said(mover, old, crs)
+    model_shift = model_lift = None
+    if mover.mode == "follow" and spread() is not None:  # the model itself, drawn on or not
+        probe = _Follow(mover.matrix, mover.ground)
+        probe.tall(spread())
+        model_shift, model_lift = _said(probe, old, crs)
+    apart_after = _markers_apart(chunk, chunk.transform)
     typed = any(m.reference.location for m in chunk.markers)
     said.update(refit=report is not None, method=None if report is None else report["method"],
                 convert=_counts(chunk, True, mover.mode == "follow", sections, fate), drawings=mover.mode,
@@ -1208,9 +1216,27 @@ def _put(chunk, crs: str) -> dict:
                 heights_unchanged=(height_kind(old) == NONE and height_kind(crs) != NONE
                                    and (typed or (mover.mode == "convert" and mover.heights))),
                 transform_rms=fitted.get("rms"), transform_relief=fitted.get("relief"),
-                transform_vertical=fitted.get("vertical"))
+                transform_vertical=fitted.get("vertical"), model_shift=model_shift, model_lift=model_lift,
+                markers_apart=None if apart_before is None or apart_after is None else [apart_before, apart_after])
     done.update(values=values, sections=moved, report=report)
     return done
+
+
+def _markers_apart(chunk, transform: np.ndarray) -> float | None:
+    """How far in plan (metres, the most) the references of the markers of ``chunk`` are from where the model, placed
+    by ``transform``, puts them (their triangulated positions): the typed references are converted from system to
+    system, the model follows its georeference, and the two can part. None without a marker that has both."""
+    from ..core import geometry
+
+    pairs = [(m.position, m.reference.location) for m in chunk.markers
+             if m.position is not None and m.reference.location]
+    if not pairs:
+        return None
+    model = geometry.apply(np.asarray(transform, float), np.array([p for p, _ in pairs], float).reshape(-1, 3))
+    typed = np.array([r for _, r in pairs], float).reshape(-1, 3)
+    far = np.hypot(model[:, 0] - typed[:, 0], model[:, 1] - typed[:, 1])
+    far = far[np.isfinite(far)]
+    return float(far.max()) if len(far) else None
 
 
 def survey_crs_changes(chunk, crs: str) -> dict:
@@ -1296,4 +1322,5 @@ def set_survey_crs(chunk, crs: str) -> dict:
             "rebuild": said["rebuild"], "kept": said["kept"], "converted": said["convert"],
             "drawings": said["drawings"], "drawings_shift": said["drawings_shift"],
             "drawings_lift": said["drawings_lift"], "heights_unchanged": said["heights_unchanged"],
-            "report": done["report"]}
+            "markers_apart": said["markers_apart"], "model_shift": said["model_shift"],
+            "model_lift": said["model_lift"], "report": done["report"]}

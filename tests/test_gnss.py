@@ -1363,6 +1363,21 @@ def test_undo_after_the_survey_crs_keeps_what_was_converted(gnss_window, monkeyp
     assert saved.meta["drawings"]["quote"][0]["x"] == pytest.approx(moved[0])
 
 
+def test_the_live_export_to_qgis_waits_for_a_step_that_runs(gnss_window, monkeypatch):
+    """The timer that writes the drawings for QGIS does not write while a step runs (the change of the survey system
+    changes the chunk in the background): it tries again a moment later."""
+    w, chunk, folder, mw = gnss_window
+    written = []
+    monkeypatch.setattr(w, "_export_qgis_layers", lambda force=False: written.append(force) or {})
+    monkeypatch.setattr(type(w.runner), "busy", property(lambda runner: True))
+    w._qgis_timer_fired()
+    assert written == [] and w._qgis_timer.isActive()
+    w._qgis_timer.stop()
+    monkeypatch.setattr(type(w.runner), "busy", property(lambda runner: False))
+    w._qgis_timer_fired()
+    assert written == [False]
+
+
 def test_survey_crs_changes_say_the_converted_georeference_and_the_heights():
     """What the window shows before it changes the system of a chunk says whether the georeference is fitted again (the
     preview fits it: no "if they cannot") or converted (a chunk without photos to fit it again: by how much the
@@ -1404,6 +1419,22 @@ def test_survey_crs_changes_say_the_converted_georeference_and_the_heights():
     text = changes_text("EPSG:32633", base, ["Curve di livello", "Sezione in pianta"])
     assert ("Da ridisegnare dopo: Curve di livello, Sezione in pianta (linee che sono solo nella finestra, nel "
             "sistema di prima: vengono tolte).") in text
+    # what was drawn goes with the model, the markers are converted: said apart
+    text = changes_text("EPSG:32633", {**base, "convert": {"markers": 3, "units": 2}})
+    assert "Vengono convertiti: marker 3." in text and "Seguono il modello: unità disegnate 2." in text
+    text = changes_text("EPSG:32633", converted)
+    assert "Vengono convertiti: unità disegnate 2." in text and "Seguono il modello" not in text
+    # nothing drawn: the model itself, a metre from the conversion of its old georeference; and the markers that part
+    bare = {**base, "convert": {"markers": 1}, "drawings_shift": None, "drawings_lift": None, "transform_rms": None,
+            "refit": True, "model_shift": 1.029, "model_lift": [-0.0012, -0.0012], "markers_apart": [0.0004, 1.0291]}
+    text = changes_text("EPSG:32633", bare)
+    assert ("Nella nuova georeferenziazione il modello si scosta fino a 1,029 m in pianta dalla conversione di quella "
+            "di prima. Le sue quote cambiano di -0,001 m.") in text
+    assert ("I riferimenti dei marker si convertono da un sistema all'altro, come coordinate misurate a terra: nella "
+            "nuova georeferenziazione sono fino a 1,029 m dal modello in pianta (prima fino a 0,000 m).") in text
+    quiet = {**bare, "model_shift": 0.0002, "model_lift": [0.0, 0.0], "markers_apart": [0.0004, 0.002]}
+    assert "il modello si scosta" not in changes_text("EPSG:32633", quiet)  # under a millimetre, a centimetre
+    assert "dal modello in pianta" not in changes_text("EPSG:32633", quiet)
 
 
 def test_a_missing_geoid_grid_is_offered_and_the_step_tried_again(gnss_window, monkeypatch):

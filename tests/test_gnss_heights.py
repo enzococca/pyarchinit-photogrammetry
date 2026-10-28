@@ -971,6 +971,31 @@ def test_set_survey_crs_takes_the_heights_of_a_chunk_placed_by_gnss(tmp_path):
     assert out["on_the_model"] < 0.001
 
 
+def test_the_preview_says_how_markers_and_the_model_part(tmp_path):
+    """Photos placed in ITRF2020 at their epoch put the chunk on WGS 84 / UTM; into RDN2008 / UTM its georeference is
+    fitted again on them - by the Helmert at their epoch, a metre from the conversion of the old georeference - while
+    the typed references of the markers are converted system to system: the preview says how far they come apart from
+    the model (and how far they were before), and how far the model itself moves from the conversion of its old
+    georeference, though nothing was drawn on it; the change says the same."""
+    out = _run(tmp_path, _SURVEYED + textwrap.dedent('''
+        ch = surveyed(system="EPSG:9989", frame="ITRF2020", epoch=2026.82)
+        marker = ch.add_marker("P1")  # a check point: it does not take part in the fit
+        marker.position, marker.checkpoint = np.array([1.0, 2.0, 0.5]), True
+        marker.reference = Reference(location=list(ch.to_world(marker.position)), accuracy=[0.01] * 3)
+        preview = heights.survey_crs_changes(ch, "EPSG:7792")
+        result = heights.set_survey_crs(ch, "EPSG:7792")
+        print(json.dumps({"preview": [preview["markers_apart"], preview["model_shift"], preview["model_lift"],
+                                      preview["drawings_shift"]],
+                          "result": [result["markers_apart"], result["model_shift"], result["model_lift"]],
+                          "refit": [result["updated"], result["method"]]}))
+    '''))
+    (before, after), shift, lift, drawn = out["preview"]
+    assert out["refit"] == [True, "cameras"] and drawn is None  # nothing drawn
+    assert before < 0.001 and after == pytest.approx(1.03, abs=0.01)  # the marker a metre from the model
+    assert shift == pytest.approx(1.03, abs=0.01) and max(abs(v) for v in lift) < 0.01
+    assert out["result"] == out["preview"][:3]
+
+
 # how much higher the model is, after the change of system, under a spot height drawn on it: what the rows of the
 # reviews give with a geoid of 40 m; None where it is no round number (two kinds of height in one fit, the Helmert of
 # ITRF2020 at its epoch, PROJ's own Helmert into ETRS89)

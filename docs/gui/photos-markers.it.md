@@ -400,7 +400,9 @@ finestra calcola, in background, che cosa fa il cambio, lo mostra e chiede *Appl
   stato disegnato sui prodotti - unità, quote, punti di misura, pietre, le sezioni del progetto, le patch
   dell'ortofoto e della texture, la regione della ricostruzione, la carta dei colori - va con la georeferenziazione,
   così resta sul modello (su un chunk senza niente da seguire si converte come i marker); i poligoni caricati da
-  PyArchInit si convertono anche loro come coordinate;
+  PyArchInit si convertono anche loro come coordinate. Dove la nuova georeferenziazione non è la conversione di quella
+  di prima (foto in ITRF2020 verso RDN2008, un calcolo su altri riferimenti) la finestra dice di quanto il modello si
+  scosta da quella conversione e di quanto i riferimenti dei marker si allontanano da lui;
 - che cosa va costruito di nuovo nel nuovo sistema: il DEM, l'ortofoto, la precisione del DEM, la copertura;
 - che cosa resta nel sistema di prima e va rifatto se serve: le versioni non attive di DEM e ortofoto, i prospetti, i
   raster multispettrali, termici e satellitari, i rilievi del DEM e il calcolatore raster, i proxy delle US, le

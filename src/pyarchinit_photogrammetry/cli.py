@@ -3061,9 +3061,21 @@ def gnss_crs(project: Path,
     elif result.get("drawings") == "convert" and drawn:
         typer.echo("the chunk has nothing in its internal frame to follow (model, clouds, aligned photos): what was "
                    "drawn was converted as coordinates, as the markers")
-    converted = [f"{kind} {n}" for kind, n in result["converted"].items() if n]
+    elif result.get("drawings") == "follow" and (result.get("model_shift") or 0.0) >= 0.001:
+        typer.echo(f"the model is up to {result['model_shift']:.3f} m in plan from the conversion of its old "
+                   "georeference: the new georeference is not only that conversion")
+    apart = result.get("markers_apart")
+    if apart and apart[1] - apart[0] >= 0.01:
+        typer.echo(f"the references of the markers, converted from system to system as coordinates measured on the "
+                   f"ground, are up to {apart[1]:.3f} m in plan from the model in the new georeference (up to "
+                   f"{apart[0]:.3f} m before)")
+    follow = result.get("drawings") == "follow"  # what was drawn went with the model: only the markers were converted
+    converted = [f"{kind} {n}" for kind, n in result["converted"].items() if n and (kind == "markers" or not follow)]
+    followed = [f"{kind} {n}" for kind, n in result["converted"].items() if n and kind != "markers" and follow]
     if converted:
         typer.echo(f"converted: {', '.join(converted)}")
+    if followed:
+        typer.echo(f"with the model: {', '.join(followed)}")
     if result["rebuild"]:
         typer.echo(f"to build again in the new system: {', '.join(result['rebuild'])}")
     for kept in result["kept"]:
