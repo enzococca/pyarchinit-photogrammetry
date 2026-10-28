@@ -1293,6 +1293,66 @@ def test_gnss_survey_crs_says_why_not_and_what_happened(gnss_window, monkeypatch
         chunk.crs = "EPSG:32633"
 
 
+def test_undo_after_the_survey_crs_keeps_what_was_converted(gnss_window, monkeypatch, tmp_path):
+    """Modifica > Annulla cannot cross a change of the system of the survey: what the change converted (a spot height,
+    a unit, a section, a marker) stays in the new system when an edit made after it is undone, and the edits made
+    before it go with the history (undone, they would come back in the old system, kilometres off). The units loaded
+    from PyArchInit, which the window holds only, are converted too."""
+    from PySide6.QtWidgets import QMessageBox
+    from shapely.geometry import box
+
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+    from pyarchinit_photogrammetry.gui import survey_crs_dialog
+
+    w, chunk, folder, mw = gnss_window
+    _in_italy(chunk)
+    chunk.crs = "EPSG:32633"
+    w.doc.save(tmp_path / "rilievo.ppg")
+    x, y = 438000.0, 4553000.0
+    # drawn in the window (no raster shown in this one: added to its lists, recorded as an edit)
+    w.quote.append({"x": x, "y": y, "quota_q": 120.5})
+    w._dirty(True)
+    w.units.append(UnitPolygon(box(x, y, x + 2.0, y + 2.0), us="1", area="1"))
+    w._dirty(True)
+    from_pa = UnitPolygon(box(x + 5.0, y, x + 7.0, y + 2.0), us="2", area="1",
+                          attributes={"gid": 7, "_layer": "US da PyArchInit - Saggio"})
+    w.units.append(from_pa)
+    marker = chunk.add_marker("GCP1")
+    marker.reference.location = [x, y, 100.0]
+    w.sections.append({"label": "A-A'", "p1": [x, y, 100.0], "p2": [x + 10.0, y, 100.0]})
+    w._save_sections()
+    w._dirty(True)
+    assert w.history.can_undo()
+    monkeypatch.setattr(survey_crs_dialog.SurveyCrsDialog, "ask", staticmethod(lambda *a, **k: {"crs": "EPSG:32632"}))
+    monkeypatch.setattr(mw, "message", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    errors = []
+    monkeypatch.setattr(w, "_error", lambda summary, details="", logged=True: errors.append(summary))
+    w.gnss_survey_crs()
+    w.runner.wait()
+    assert errors == [] and chunk.crs == "EPSG:32632"
+    to_32632 = Transformer.from_crs("EPSG:32633", "EPSG:32632", always_xy=True).transform
+    moved = to_32632(x, y)
+    assert (w.quote[0]["x"], w.quote[0]["y"]) == pytest.approx(moved)
+    assert not w.history.can_undo()  # the change and what came before it: not undone
+    loaded = next(u for u in w.units if (u.attributes or {}).get("_layer"))
+    corners = [to_32632(cx, cy) for cx, cy in box(x + 5.0, y, x + 7.0, y + 2.0).exterior.coords]
+    assert np.asarray(loaded.geometry.exterior.coords) == pytest.approx(np.asarray(corners), abs=1e-6)
+
+    w.quote.append({"x": moved[0] + 1.0, "y": moved[1], "quota_q": 121.0})
+    w._dirty(True)
+    assert w.a_undo.text() == "Annulla: Quote"
+    w.undo()
+    assert len(w.quote) == 1 and (w.quote[0]["x"], w.quote[0]["y"]) == pytest.approx(moved)
+    drawn = next(u for u in w.units if u.us == "1")
+    assert drawn.geometry.exterior.coords[3] == pytest.approx(moved, abs=1e-6)  # (x, y): the fourth corner of box()
+    assert w.sections[0]["p1"][:2] == pytest.approx(moved)
+    assert chunk.markers[0].reference.location[:2] == pytest.approx(moved)
+    assert not w.history.can_undo()
+    w.doc.save()
+    saved = ppg.Document.open(tmp_path / "rilievo.ppg").chunk
+    assert saved.meta["drawings"]["quote"][0]["x"] == pytest.approx(moved[0])
+
+
 def test_survey_crs_changes_say_the_converted_georeference_and_the_heights():
     """What the window shows before it changes the system of a chunk says whether the georeference is fitted again (the
     preview fits it: no "if they cannot") or converted (a chunk without photos to fit it again: by how much the

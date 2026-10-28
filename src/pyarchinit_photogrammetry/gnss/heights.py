@@ -538,9 +538,10 @@ def _finite(value) -> bool:
         return False
 
 
-def _plan(xy, old: str, new: str, chunk) -> np.ndarray:
+def plan(xy, old: str, new: str, chunk) -> np.ndarray:
     """``(N, 2)`` plan coordinates from ``old`` to ``new``: through the horizontal parts of the two systems, no height
-    needed."""
+    needed - what was drawn on a chunk with nothing to follow, and the units the window loaded from PyArchInit (in
+    the system of its layer: their coordinates, not the model)."""
     from . import frames
 
     xy = np.asarray(xy, float).reshape(-1, 2)
@@ -661,7 +662,7 @@ class _Convert:
         return crs_mod.transform_points(xyz, self.old, self.new, legacy=frames.Legacy(DRAWN, self.chunk))
 
     def flat(self, xy) -> np.ndarray:
-        return _plan(xy, self.old, self.new, self.chunk)
+        return plan(xy, self.old, self.new, self.chunk)
 
 
 def _wkt(text: str, mover) -> str:

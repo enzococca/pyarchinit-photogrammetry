@@ -3419,8 +3419,14 @@ class MainWindow(QMainWindow):
             for name in redraw:  # in the old system: away, not drawn in the wrong place
                 self.ortho_view.remove_layer(name)
                 self.line_layers.pop(name, None)
+            self._carry_pyarchinit_units(ch, old, result["crs"])
             self._reload_drawings(redraw=False)  # converted into the new system by set_survey_crs
             self._load_sections()
+            if self.history is not None:
+                # Modifica > Annulla does not cross a change of system: the snapshots before it hold what was drawn in
+                # the old system's coordinates (undone, a spot height would come back kilometres off). The change is
+                # no step to undo; the removals from the workspace stay.
+                self.history.reset(keep_document=True)
             if self.doc.path:
                 self.doc.save()
                 self._dirty(False)
@@ -3455,6 +3461,18 @@ class MainWindow(QMainWindow):
                                          ", ".join(names.get(n, n) for n in result["rebuild"])))
 
         self.run_task("Sistema del rilievo", apply, done, refresh=False, save=False)
+
+    def _carry_pyarchinit_units(self, ch, old: str, new: str) -> None:
+        """The units the window loaded from PyArchInit (not in the chunk: :func:`..gnss.heights.set_survey_crs` does not
+        see them) into the system ``new`` of ``ch``: by their coordinates, as the layer of PyArchInit has them, so that
+        what is saved back to PyArchInit lands where it was."""
+        import shapely
+
+        from ..gnss import heights
+
+        for u in self.units:
+            if str((u.attributes or {}).get("_layer") or "").startswith("US da PyArchInit - "):
+                u.geometry = shapely.transform(u.geometry, lambda xy: heights.plan(xy, old, new, ch))
 
     def add_video(self) -> None:
         """Workflow > Aggiungi video: frames chosen for the reconstruction, GPS from DJI subtitles."""
