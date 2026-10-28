@@ -6,7 +6,8 @@ An entry gives a pure-Python wheel (``-py3-none-any.whl``) by URL with its SHA-2
 it was written for, the oldest version of the program it works with and the modules it needs
 beyond those of the program. Installing downloads the wheel, checks the hash, unpacks it into
 ``<plugins>/<name>/`` (in place of an older version) and leaves the activation for the next start.
-``PPG_PLUGIN_INDEX`` points to another index (a file URL in the tests).
+A newer version can also be *staged* in ``<plugins>/.updates/<name>/`` (:mod:`.updates` puts it in
+place at the next start). ``PPG_PLUGIN_INDEX`` points to another index (a file URL in the tests).
 """
 from __future__ import annotations
 
@@ -27,6 +28,7 @@ from .manager import GROUP, plugins_dir
 
 INDEX_URL = "https://raw.githubusercontent.com/enzococca/pyarchinit-photogrammetry-plugins/main/index.json"
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+STAGING = ".updates"  # in the plugin folder: the updates downloaded, put in place at the next start
 
 
 class PluginError(Exception):
@@ -129,9 +131,33 @@ def _safe_extract(archive: zipfile.ZipFile, target: Path) -> None:
     archive.extractall(target)
 
 
-def install(entry: Entry, folder: str | os.PathLike | None = None, progress=None, timeout: float = 60.0) -> Path:
+def swap_folder(new: Path, target: Path, work: Path) -> None:
+    """Put the complete folder ``new`` in place of ``target`` by renames only: the old ``target`` goes into
+    ``work`` first and comes back if ``new`` cannot be put in place, so a plugin is never missing or half
+    written. The caller deletes ``work``, and with it the old folder."""
+    old = work / "previous"
+    replaced = target.exists()
+    if replaced:
+        target.rename(old)
+    try:
+        new.rename(target)
+    except OSError:
+        if replaced:
+            old.rename(target)
+        raise
+    importlib.invalidate_caches()  # the import system and importlib.metadata listed the folder that was there
+
+
+def install(entry: Entry, folder: str | os.PathLike | None = None, progress=None, timeout: float = 60.0, *,
+            staging: bool = False) -> Path:
     """Download, check and unpack ``entry`` into the plugin folder; returns its folder. Active
-    from the next start of the program."""
+    from the next start of the program. An older version is replaced by renames (:func:`swap_folder`),
+    so a failure leaves it as it was; an update staged for it is dropped: a plugin installed by hand
+    wins over it.
+
+    With ``staging`` the plugin is unpacked into ``<folder>/.updates/<name>/`` instead (replacing an
+    older staged one) and the one installed is not touched: :func:`.updates.apply_staged` puts it in
+    place at the next start."""
     problem = entry.problem()
     if problem:
         raise PluginError(f"{entry.name}: {problem}")
@@ -168,12 +194,14 @@ def install(entry: Entry, folder: str | os.PathLike | None = None, progress=None
         if entry.name not in names:
             raise PluginError(f"{entry.name}: the wheel declares no plugin {entry.name!r} "
                               f"(entry point group {GROUP})")
-        target = folder / entry.name
-        if target.exists():
-            shutil.rmtree(target)
-        unpacked.rename(target)
+        staged = folder / STAGING / entry.name
+        target = staged if staging else folder / entry.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        swap_folder(unpacked, target, work)
+        if not staging:
+            shutil.rmtree(staged, ignore_errors=True)
         if progress is not None:
-            progress(1.0, f"{entry.name} {entry.version} installed")
+            progress(1.0, f"{entry.name} {entry.version} {'staged' if staging else 'installed'}")
         return target
     finally:
         shutil.rmtree(work, ignore_errors=True)

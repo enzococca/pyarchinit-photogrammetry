@@ -7,7 +7,9 @@ them: the packaged application has no pip). A plugin of the folder wins over one
 in the environment. Each plugin is activated on its own: one that fails is reported and left out,
 the program goes on. ``PPG_NO_PLUGINS=1`` starts without plugins, ``PPG_PLUGINS_DIR`` moves the
 folder (the tests use one of their own), ``PPG_PLUGINS_ENVIRONMENT=0`` leaves out those of the
-environment (only the folder: the tests, a plugin checked on its own).
+environment (only the folder: the tests, a plugin checked on its own). The updates downloaded
+by an earlier session (``<folder>/.updates/``, see :mod:`.updates`) are put in place at the start,
+before any plugin is imported.
 """
 from __future__ import annotations
 
@@ -25,6 +27,7 @@ from .api import API_VERSION, Context, Plugin
 GROUP = "pyarchinit_photogrammetry.plugins"
 log = logging.getLogger(__name__)
 _ON_PATH: set[str] = set()  # folders of plugins put on sys.path: their plugins are not of the environment
+_UPDATED: set[str] = set()  # plugin folders whose staged updates this process has looked at: once per process
 
 
 def _norm(path) -> str:
@@ -80,12 +83,13 @@ def _info(ep, dist, source: str, location: Path | None) -> PluginInfo:
 class Manager:
     """The plugins of a session: :meth:`load` finds and activates them; the window and the
     command line read what they registered from :attr:`actions`, :attr:`commands` and
-    :attr:`exporters`."""
+    :attr:`exporters`; :attr:`applied` lists the staged updates the start put in place."""
 
     def __init__(self, folder: str | os.PathLike | None = None, window=None):
         self.folder = Path(folder) if folder is not None else plugins_dir()
         self.window = window
         self.plugins: list[PluginInfo] = []
+        self.applied: list[tuple[str, str, str]] = []  # (name, old version, new version), set by load()
 
     # ------------------------------------------------------------------ state
     def _state_path(self) -> Path:
@@ -135,9 +139,11 @@ class Manager:
 
     # ------------------------------------------------------------------ activation
     def load(self, window=None) -> list[PluginInfo]:
-        """Find the plugins and activate the enabled ones (none with ``PPG_NO_PLUGINS=1``)."""
+        """Find the plugins and activate the enabled ones (none with ``PPG_NO_PLUGINS=1``). The
+        updates staged earlier are put in place first (:attr:`applied`)."""
         if window is not None:
             self.window = window
+        self._apply_staged()
         self.discover()
         if os.environ.get("PPG_NO_PLUGINS", "") not in ("", "0"):
             return self.plugins
@@ -152,6 +158,20 @@ class Manager:
             if info.enabled:
                 self._activate(info)
         return self.plugins
+
+    def _apply_staged(self) -> None:
+        """Put in place the updates staged in ``<folder>/.updates/``, once per folder per process: a
+        plugin imported already is never replaced under a running session."""
+        key = _norm(self.folder)
+        if key in _UPDATED:
+            return
+        _UPDATED.add(key)
+        from .updates import apply_staged  # that module imports this one
+
+        try:
+            self.applied = apply_staged(self.folder)
+        except Exception as exc:  # an update never stops the program
+            log.warning("the staged plugin updates were not applied: %s", exc)
 
     def _activate(self, info: PluginInfo) -> None:
         try:
@@ -211,6 +231,9 @@ class Manager:
         if info.context is not None:
             info.context.release()
         shutil.rmtree(info.location)
+        from .index import STAGING  # that module imports this one
+
+        shutil.rmtree(self.folder / STAGING / name, ignore_errors=True)  # an update staged for it would bring it back
         self.plugins = [i for i in self.plugins if i.name != name]
 
     # ------------------------------------------------------------------ what the plugins added
