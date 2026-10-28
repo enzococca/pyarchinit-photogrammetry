@@ -489,6 +489,26 @@ def test_a_compress_file_cut_short_is_refused(tmp_path, gnss_folder, fake_rtklib
     assert rinex.header(COMPRESS / "nav-first300lines-b12.Z").kind == "nav"
 
 
+def test_a_damaged_navigation_file_beside_the_rover_is_named(tmp_path, gnss_folder, fake_rtklib):
+    """A navigation file beside the rover or the base that cannot be read (cut short, damaged) is named, with what is
+    wrong with it - not "no navigation file", which would send the user looking for one that is there."""
+    flight = tmp_path / "flight"
+    flight.mkdir()
+    rover = Path(shutil.copyfile(PPK_ROVER, flight / PPK_ROVER.name))
+    base = Path(shutil.copyfile(PPK_BASE, tmp_path / PPK_BASE.name))
+    # under the Unix compress, cut in the middle of its last line: the whole file has to be read to tell
+    (flight / "30400920.05n.Z").write_bytes(_literal_z(PPK_NAV.read_bytes()[:-1]))
+    with pytest.raises(ValueError) as error:
+        ppk.solve(rover, base, None, folder=tmp_path / "work")
+    said = str(error.value)
+    assert "30400920.05n.Z" in said and "cannot be read" in said and "cut short" in said, said
+    assert "no navigation file beside" not in said and fake_rtklib() == []
+    # with nothing beside them, as before
+    (flight / "30400920.05n.Z").unlink()
+    with pytest.raises(ValueError, match="no navigation file beside"):
+        ppk.solve(rover, base, None, folder=tmp_path / "work")
+
+
 def test_the_text_under_compress_has_to_end_with_a_newline(tmp_path, gnss_folder):
     """The rule exactly: RINEX text under the Unix compress that ends with a line end is read, text that stops short of
     it is cut short, and a layer that is not text (a gzip file under compress) is not asked for one."""

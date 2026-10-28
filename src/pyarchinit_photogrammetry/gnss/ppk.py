@@ -629,27 +629,31 @@ def span_text(start: datetime | float, end: datetime | float) -> str:
     return f"{text(start)} to {text(end)} GPS time"
 
 
-def navigation_info(path: str | Path, read=rinex.header) -> rinex.RinexInfo | None:
+def navigation_info(path: str | Path, read=rinex.header, problems: list | None = None) -> rinex.RinexInfo | None:
     """The header of a navigation file, None when ``path`` is not one (or cannot be read); ``read`` reads a header, as
-    :func:`rinex.header` (a caller can give one that keeps the headers it read)."""
+    :func:`rinex.header` (a caller can give one that keeps the headers it read). A file that cannot be read - cut
+    short, damaged - is added to ``problems`` with its error, ``(path, error)``, for the caller to name it."""
     try:
         info = read(Path(path))
-    except (ValueError, OSError):
+    except (ValueError, OSError) as exc:
+        if problems is not None:
+            problems.append((Path(path), exc))
         return None
     return info if info.kind == "nav" else None
 
 
-def navigation_beside(paths: Iterable[str | Path]) -> list[tuple[Path, rinex.RinexInfo]]:
+def navigation_beside(paths: Iterable[str | Path],
+                      problems: list | None = None) -> list[tuple[Path, rinex.RinexInfo]]:
     """The navigation files beside the observation files ``paths`` - their companions (:func:`rinex.find_companions`)
     that hold navigation messages (:func:`navigation_info`) - each once, in the order of ``paths``, with their
-    headers."""
+    headers; those that cannot be read go into ``problems`` (:func:`navigation_info`)."""
     found, seen = [], set()
     for obs in paths:
         for path in rinex.find_companions(obs):
             key = path.resolve()
             if key not in seen:
                 seen.add(key)
-                if info := navigation_info(path):
+                if info := navigation_info(path, problems=problems):
                     found.append((path, info))
     return found
 
@@ -672,9 +676,16 @@ def _navigation(navs, rovers: Sequence[Path], bases: Sequence[Path],
                                  f"{whose} (.nav, .##n, .##p, *_MN.rnx)")
             given.append((path, info))
         return given
-    found = navigation_beside(rovers) or navigation_beside(bases)
+    problems: list = []
+    found = navigation_beside(rovers, problems) or navigation_beside(bases, problems)
     if found:
         return found
+    if problems:  # one is there and cannot be read: named, not "no navigation file"
+        path, exc = problems[0]
+        more = f" (and {len(problems) - 1} more)" if len(problems) > 1 else ""
+        raise ValueError(f"the navigation file {path.name} beside {ROLES[roles[0]]} {_names(rovers)} or "
+                         f"{ROLES[roles[1]]} {_names(bases)} cannot be read{more}: {exc}. Download it again, or add "
+                         f"another navigation file {whose} (.nav, .##n, .##g, .##p or *_MN.rnx)")
     raise ValueError(f"no navigation file beside {ROLES[roles[0]]} {_names(rovers)} or {ROLES[roles[1]]} "
                      f"{_names(bases)}: add the navigation file {whose} (.nav, .##n, .##g, .##p or *_MN.rnx)")
 
