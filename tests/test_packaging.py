@@ -58,3 +58,20 @@ def test_the_application_carries_the_pdf_report_and_the_excel_tables(tmp_path):
     assert sample_pdf(tmp_path / "check.pdf").read_bytes().startswith(b"%PDF")
     assert read_xlsx(write_xlsx(tmp_path / "check.xlsx", {"check": (["a", "b"], [[1, 2.5]])}))["check"][1] == [1, 2.5]
 
+
+
+def test_the_libraries_of_the_engine_have_a_ceiling():
+    """pycolmap and Open3D are taken up to the versions the program was tested with, the same range wherever they are
+    named: a release of theirs reaches pip users after the weekly upstream workflow has tried it and a commit has
+    raised the ceiling (.github/workflows/upstream.yml)."""
+    tomllib = pytest.importorskip("tomllib")
+    from packaging.requirements import Requirement
+
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    named = [Requirement(r) for r in project["dependencies"]]
+    named += [Requirement(r) for extra in project["optional-dependencies"].values() for r in extra]
+    for name in ("pycolmap", "open3d"):
+        found = [r for r in named if r.name == name]
+        assert found, f"{name} is not a requirement"
+        assert len({str(r.specifier) for r in found}) == 1, f"{name} has different ranges: {found}"
+        assert any(s.operator == "<" for s in found[0].specifier), f"{name} has no ceiling: {found[0]}"

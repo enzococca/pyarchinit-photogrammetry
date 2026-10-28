@@ -86,13 +86,10 @@ def choose_backend(backend: str, chunk: Chunk | None = None) -> str:
     turntable it swelled the rim by 8 mm, so close objects and trenches keep SGBM."""
     if backend != "auto":
         return backend
-    try:
-        import pycolmap
+    from .upstream import colmap_gpu
 
-        if pycolmap.has_cuda:
-            return "colmap"
-    except Exception:  # pragma: no cover
-        pass
+    if "cuda" in colmap_gpu():  # COLMAP's PatchMatch has CUDA only
+        return "colmap"
     if shutil.which("DensifyPointCloud") and shutil.which("InterfaceCOLMAP"):
         return "openmvs"
     if patchmatch_available() and aerial_survey(chunk):
