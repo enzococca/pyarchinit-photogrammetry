@@ -417,6 +417,17 @@ def test_survey_crs(tmp_path):
         for name, (lon, lat) in places.items():
             for frame in ("WGS84", "ETRF2000"):
                 out[f"{name} {frame}"] = heights.survey_crs(lon, lat, frame)
+        # without a frame the place decides: a system of ETRF2000 in Europe, WGS 84 / UTM beyond
+        by_place = {"rome": (12.4964, 41.9028), "bern": (7.4474, 46.948), "paris": (2.3522, 48.8566),
+                    "new_york": (-74.006, 40.7128), "london": (-0.1276, 51.5072), "athens": (23.7275, 37.9838),
+                    "rhodes": (28.2225, 36.4341), "valletta": (14.5146, 35.8989), "tunis": (10.1815, 36.8065),
+                    "istanbul": (28.9784, 41.0082), "izmir": (27.1428, 38.4237), "nicosia": (33.3823, 35.1856),
+                    "aleppo": (37.1612, 36.2021), "kyiv": (30.5234, 50.4501), "lviv": (24.0297, 49.8397),
+                    "minsk": (27.5615, 53.9045), "kaliningrad": (20.5072, 54.7104), "vilnius": (25.2797, 54.6872),
+                    "chisinau": (28.8638, 47.0105), "reykjavik": (-21.9426, 64.1466), "lampedusa": (12.6, 35.5),
+                    "longyearbyen": (15.6356, 78.2232), "santiago": (-70.6693, -33.4489)}
+        out["by place"] = {name: heights.survey_crs(lon, lat) for name, (lon, lat) in by_place.items()}
+        out["in europe"] = {name: heights.in_europe(lon, lat) for name, (lon, lat) in by_place.items()}
         out["rome plain"] = heights.survey_crs(12.4964, 41.9028, "ETRF2000", geoid=False)
         out["rome itrf2020"] = heights.survey_crs(12.4964, 41.9028, "ITRF2020")
         out["refused"] = refused(lambda: heights.survey_crs(12.4964, 41.9028, "NAD83"))
@@ -440,6 +451,18 @@ def test_survey_crs(tmp_path):
     assert out["rome plain"] == "EPSG:7792"
     assert out["rome itrf2020"] == "EPSG:32633+3855"  # ITRF2020 is WGS 84 for the program
     assert "NAD83" in out["refused"] and "latitude" in out["off"]
+    assert out["by place"] == {
+        "rome": "EPSG:7792+3855", "bern": "EPSG:25832+3855", "paris": "EPSG:25831+3855", "new_york": "EPSG:32618+3855",
+        "london": "EPSG:25830+3855", "athens": "EPSG:25834+3855", "rhodes": "EPSG:25835+3855",
+        "valletta": "EPSG:25833+3855", "tunis": "EPSG:32632+3855", "istanbul": "EPSG:32635+3855",
+        "izmir": "EPSG:32635+3855", "nicosia": "EPSG:32636+3855", "aleppo": "EPSG:32637+3855",
+        "kyiv": "EPSG:32636+3855", "lviv": "EPSG:32635+3855", "minsk": "EPSG:32635+3855",
+        "kaliningrad": "EPSG:32634+3855", "vilnius": "EPSG:25835+3855", "chisinau": "EPSG:25835+3855",
+        "reykjavik": "EPSG:32627+3855", "lampedusa": "EPSG:7792+3855", "longyearbyen": "EPSG:25833+3855",
+        "santiago": "EPSG:32719+3855"}
+    assert {name for name, inside in out["in europe"].items() if inside} == {
+        "rome", "bern", "paris", "london", "athens", "rhodes", "valletta", "vilnius", "chisinau", "lampedusa",
+        "longyearbyen"}
     for place, (italy, system) in out["coast"].items():  # all in zone 33: RDN2008 / UTM 33N
         assert italy and system == "EPSG:7792+3855", place
 

@@ -179,8 +179,8 @@ def _system_text(crs: str) -> str:
 def _check_lines(chunk) -> list[str]:
     """What does not fit between the heights of the photos of ``chunk`` and those of its system
     (:func:`.heights.check`): its common cases - the grid of EGM2008 missing, a system without heights of its own,
-    heights above the sea level in a system of heights above the ellipsoid - in the words of the window, any other as
-    the engine says it."""
+    heights above the sea level in a system of heights above the ellipsoid, positions in ITRF2020 and references in a
+    European frame together on WGS 84 - in the words of the window, any other as the engine says it."""
     lines = []
     for text in heights.check(chunk):
         if heights.GEOID_GRID in text:
@@ -194,6 +194,19 @@ def _check_lines(chunk) -> list[str]:
                             "foto: ogni conversione le prende come quote ellissoidiche, 40-50 m di differenza in "
                             "Italia. Dalle in un sistema senza quote proprie (EPSG:4326) o segnale come ellissoidiche.",
                             systems, len(marked)))
+        elif heights.MIXED_FRAMES in text:
+            mixed = heights.mixed_frames(chunk)
+            if mixed is None:  # cannot be: check() said it from the same chunk
+                lines.append(text)
+                continue
+            european = [tr("{0} foto in {1}", n, frame) for frame, n in sorted(mixed["photos"].items())]
+            european += [tr("{0} marker letti in {1}", n, frame) for frame, n in sorted(mixed["markers"].items())]
+            lines.append(tr("Posizioni in ITRF2020 (stazione permanente, linea di base, PPP) per {0} foto e "
+                            "riferimenti in un sistema europeo ({1}) insieme in {2}, un sistema su WGS 84: le prime vi "
+                            "entrano come sono, i secondi attraverso ETRS89, a circa un metro in Europa; e le posizioni "
+                            "in ITRF2020 di anni diversi si spostano di 2-3 cm l'anno. Metti il chunk in un sistema di "
+                            "ETRF2000 ({3}: Sistema del rilievo...), dove arrivano tutte esatte.", mixed["itrf2020"],
+                            ", ".join(european), mixed["crs"], mixed["proposal"] or "RDN2008 / UTM, ETRS89 / UTM"))
         elif "has no heights of its own" in text:
             lines.append(tr("Le foto hanno quote ellissoidiche (GNSS) e il sistema del chunk, {0}, non ha quote "
                             "proprie: le quote del rilievo restano sull'ellissoide, 40-50 m da quelle sul livello del "
@@ -290,9 +303,10 @@ class GnssPane(QWidget):
         step(1, "ppk", tr("Correzioni (PPK)"), [self.b_ppk])
 
         self.b_survey_crs = QPushButton(icon("georef"), tr("Sistema del rilievo..."))
-        self.b_survey_crs.setToolTip(tr("Il sistema di coordinate del rilievo dove si trova, per il sistema delle sue "
-                                        "posizioni (UTM su WGS 84, RDN2008 / UTM in Italia), con le quote sul geoide "
-                                        "EGM2008 o no: marker e disegni vengono convertiti"))
+        self.b_survey_crs.setToolTip(tr("Il sistema di coordinate del rilievo dove si trova (in Europa ETRF2000: "
+                                        "RDN2008 / UTM in Italia, ETRS89 / UTM altrove; fuori UTM su WGS 84), con le "
+                                        "quote sul geoide EGM2008 o no: i riferimenti dei marker vengono convertiti, i "
+                                        "disegni seguono il modello"))
         self.b_geoid = QPushButton(icon("load"), tr("Scarica il geoide EGM2008 ({0} MB)...", GEOID_MB))
         self.b_geoid.setToolTip(tr("La griglia del geoide EGM2008 di PROJ (dominio pubblico), che serve a convertire "
                                    "le quote ellissoidiche del GNSS in quote sul livello del mare: scaricata una volta "
@@ -422,7 +436,8 @@ class GnssPane(QWidget):
                       bool(cam.reference.enabled), (cam.meta.get("gnss") or {}).get("frame"),
                       (cam.meta.get("gnss") or {}).get("epoch"), (cam.meta.get("gnss") or {}).get("height"))
                      for cam in chunk.cameras)
-        key = (id(chunk), chunk.crs, geoid, cams)
+        markers = tuple((m.label, tuple(m.reference.location or ())) for m in chunk.markers)
+        key = (id(chunk), chunk.crs, geoid, cams, markers, tuple(sorted((chunk.meta.get("marker_frames") or {}).items())))
         if self._heights is None or self._heights[0] != key:
             self._heights = (key, heights_state(chunk, geoid))
         self.states["heights"].setText(self._heights[1])

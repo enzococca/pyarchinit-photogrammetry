@@ -2944,10 +2944,19 @@ def _crs_status(ch) -> None:
         place = heights.survey_place(ch)
         if place is not None:
             lon, lat, _frame = place
+            proposed = heights.survey_crs(lon, lat, geoid=False)  # the place decides
+            if heights.in_europe(lon, lat):
+                options = ((proposed, "proposed in Europe: positions in ITRF2020 (permanent stations, PPP) and in the "
+                                      "European frames (RDN2008, network RTK) arrive exactly, nothing drifts between "
+                                      "flights"),
+                           (heights.survey_crs(lon, lat, "WGS84", geoid=False),
+                            "on WGS 84 (--frame WGS84): ITRF2020 as it is, the European frames about a metre off"))
+            else:
+                options = ((proposed, "proposed here, for positions in WGS 84 or ITRF2020"),
+                           (heights.survey_crs(lon, lat, "ETRF2000", geoid=False),
+                            "for positions in ETRF2000 (--frame ETRF2000)"))
             proposals = []
-            for frame, says in (("WGS84", "for positions in WGS 84 or ITRF2020"),
-                                ("ETRF2000", "for positions in ETRF2000 (RDN2008)")):
-                crs = heights.survey_crs(lon, lat, frame, geoid=False)
+            for crs, says in options:
                 if crs not in [c for c, _ in proposals]:
                     proposals.append((crs, f"{crs} ({crs_mod.to_pyproj(crs).name}) {says}"))
             typer.echo("a survey here: " + "; ".join(text for _crs, text in proposals))
@@ -2967,10 +2976,12 @@ def _crs_status(ch) -> None:
 @gnss_app.command("crs")
 def gnss_crs(project: Path,
              survey: bool = typer.Option(False, "--survey", help="put the chunk into the system of a survey where it "
-                                         "is, for the frame of its positions (UTM on WGS 84; RDN2008 / UTM in Italy, "
-                                         "ETRS89 / UTM in Europe for the European frames)"),
-             frame: Optional[str] = typer.Option(None, "--frame", help="with --survey: the frame the system is for, "
-                                                 "WGS84 or ETRF2000 (default: the frame of most positions)"),
+                                         "is: in Europe a system of ETRF2000 (RDN2008 / UTM in Italy, ETRS89 / UTM "
+                                         "elsewhere), where positions in ITRF2020 and in the European frames arrive "
+                                         "exactly; beyond it UTM on WGS 84"),
+             frame: Optional[str] = typer.Option(None, "--frame", help="with --survey: the system for positions in "
+                                                 "this frame instead, WGS84 (UTM on WGS 84) or ETRF2000 (default: the "
+                                                 "place decides)"),
              geoid: Optional[bool] = typer.Option(None, "--geoid/--no-geoid", help="with --survey: heights above the "
                                                   "geoid EGM2008 (+3855, its grid needed; the default), or a system "
                                                   "without heights of its own"),
@@ -3008,8 +3019,8 @@ def gnss_crs(project: Path,
             _gnss_failed(ValueError(f"where the survey of {ch.label} is could not be read ({exc}): give --set CRS"))
         if place is None:
             _gnss_failed(ValueError(f"{ch.label} has no position on the earth (photos or markers): give --set CRS"))
-        lon, lat, found = place
-        target = heights.survey_crs(lon, lat, frame or found, geoid=True if geoid is None else geoid)
+        lon, lat, _found = place
+        target = heights.survey_crs(lon, lat, frame, geoid=True if geoid is None else geoid)
     else:
         target = set_crs.strip()
     if heights.above_egm2008(target) and not heights.geoid_available():

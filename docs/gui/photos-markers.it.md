@@ -346,8 +346,11 @@ disegnato su carte in RDN2008 è sbagliato di un metro quando i sistemi non si c
 convertono senza l'epoca (PROJ da solo prende il 2015,0). Il programma converte da ITRF2020 a ETRF2000 - e quindi a
 RDN2008 e a ETRS89 / UTM - con la trasformazione di Helmert dipendente dal tempo dell'EPSG (*ITRF2020 to ETRF2000 (1)*,
 EPSG:10586) all'epoca di ogni posizione; da ITRF2020 a un sistema su WGS 84 le posizioni passano come sono (i due
-coincidono entro i centimetri). Il moto dell'Italia dentro la sua placca dal 2008 - qualche millimetro l'anno, di più
-al sud e intorno ai vulcani - non c'è: RDN2008 è ETRF2000 al 2008,0.
+coincidono entro i centimetri). Fra due sistemi europei - una base scritta in ETRF2014 o ETRF2020, un chunk in RDN2008
+o ETRS89 / UTM - le posizioni passano da ITRF2020 alla loro epoca, con le due trasformazioni di Helmert dell'EPSG (PROJ
+da solo prende una trasformazione nulla attraverso ETRS89, 8-9 cm di errore a Roma nel 2026): le foto all'epoca del
+loro scatto, i marker letti da un file all'epoca del rilievo, che il registro dice. Il moto dell'Italia dentro la sua
+placca dal 2008 - qualche millimetro l'anno, di più al sud e intorno ai vulcani - non c'è: RDN2008 è ETRF2000 al 2008,0.
 
 Il sistema e l'epoca vengono con la posizione: una base scritta i suoi (*Sistema delle coordinate scritte*, *Epoca
 delle coordinate*; `--base-frame`, `--base-epoch`); un file di posizioni in un sistema di ITRF2020 (`EPSG:9989` e i
@@ -360,7 +363,11 @@ volta. Dalli di nuovo con la loro epoca, o in ETRF2000 (RDN2008).
 Il pannello GNSS ha cinque passi: *Posizioni delle foto*, *Correzioni (PPK)*, **Sistema e quote**, *Qualità per volo*
 e *Solo le posizioni fix*. *Sistema e quote* elenca i sistemi delle posizioni con le loro epoche, il sistema del chunk
 e il tipo delle sue quote, se la griglia del geoide EGM2008 è installata e quello che non torna fra le quote delle foto
-e quelle del chunk; i suoi pulsanti sono *Sistema del rilievo...* e *Scarica il geoide EGM2008 (81 MB)...* (sotto).
+e quelle del chunk; i suoi pulsanti sono *Sistema del rilievo...* e *Scarica il geoide EGM2008 (81 MB)...* (sotto). Un
+chunk in un sistema su WGS 84 con posizioni in ITRF2020 (una stazione, una linea di base, un PPP) insieme a riferimenti
+in un sistema europeo (foto di una base scritta in RDN2008, marker letti da un file in RDN2008 come quelli di una rete
+RTK italiana) viene segnalato lì, nel rapporto PDF e da `ppg gnss crs`: in Europa in un sistema così sono a circa un
+metro fra loro, e in un sistema di ETRF2000 arrivano tutti esatti.
 
 ### Quote sul geoide e sistema del rilievo
 
@@ -374,19 +381,23 @@ passano mai per quote sul livello del mare. Una griglia tua - come **ITALGEO2005
 quote di Genova 1942, EPSG:5214) - si copia nella cartella delle griglie del programma, che `ppg gnss geoid` stampa
 (`proj` nella cartella GNSS); i sistemi con quelle quote, come `EPSG:7792+5214`, la usano allora.
 
-**Il sistema del rilievo.** *Sistema del rilievo...* propone il sistema di coordinate del rilievo dove si trova, per
-il sistema delle sue posizioni: la zona UTM su WGS 84 per posizioni in WGS 84 o ITRF2020; RDN2008 / UTM in Italia
-(EPSG:7791, 7792, 7793) ed ETRS89 / UTM altrove in Europa per posizioni in ETRF2000, ETRF2014 o ETRF2020; oppure un
-altro sistema (*Altro:*, un codice EPSG o un WKT). *Quote sul geoide EGM2008* gli dà le quote sul livello del mare
+**Il sistema del rilievo.** *Sistema del rilievo...* propone il sistema di coordinate del rilievo dove si trova. In
+Europa (dove il datum è ETRS89) un sistema di ETRF2000: RDN2008 / UTM in Italia (EPSG:7791, 7792, 7793, il datum
+nazionale) ed ETRS89 / UTM altrove, dove le posizioni in ITRF2020 (una stazione permanente, una linea di base, un PPP)
+arrivano esatte alla loro epoca, come quelle nei sistemi europei (una base scritta in RDN2008, i marker di una rete
+RTK), e niente si sposta con la placca fra voli di anni diversi; fuori dall'Europa la zona UTM su WGS 84. Si può
+scegliere anche l'altro (la zona UTM su WGS 84 in Europa, ETRS89 / UTM per posizioni in un sistema europeo fuori), o
+un altro sistema (*Altro:*, un codice EPSG o un WKT). *Quote sul geoide EGM2008* gli dà le quote sul livello del mare
 (`+3855`); quando la griglia non è installata la finestra propone di scaricarla prima (*Scarica e applica*) o di
 applicare lo stesso sistema senza quote proprie (*Applica senza quote sul geoide*). Prima che cambi qualsiasi cosa la
 finestra calcola, in background, che cosa fa il cambio, lo mostra e chiede *Applicare?*:
 
 - la georeferenziazione segue il chunk nel nuovo sistema, con il modello, le nuvole e i punti di legame;
-- si convertono i riferimenti dei marker; quello che è stato disegnato sui prodotti - unità, quote, punti di misura,
-  pietre, le sezioni del progetto, le patch dell'ortofoto e della texture, la regione della ricostruzione, la carta
-  dei colori - va con la georeferenziazione, così resta sul modello (su un chunk senza niente da seguire si converte
-  come i marker);
+- i riferimenti dei marker si convertono da un sistema all'altro, come coordinate misurate a terra; quello che è
+  stato disegnato sui prodotti - unità, quote, punti di misura, pietre, le sezioni del progetto, le patch
+  dell'ortofoto e della texture, la regione della ricostruzione, la carta dei colori - va con la georeferenziazione,
+  così resta sul modello (su un chunk senza niente da seguire si converte come i marker); i poligoni caricati da
+  PyArchInit si convertono anche loro come coordinate;
 - che cosa va costruito di nuovo nel nuovo sistema: il DEM, l'ortofoto, la precisione del DEM, la copertura;
 - che cosa resta nel sistema di prima e va rifatto se serve: le versioni non attive di DEM e ortofoto, i prospetti, i
   raster multispettrali, termici e satellitari, i rilievi del DEM e il calcolatore raster, i proxy delle US, le
@@ -394,7 +405,8 @@ finestra calcola, in background, che cosa fa il cambio, lo mostra e chiede *Appl
   di livello, piante a quota, misure) si tolgono, da ridisegnare.
 
 Un chunk in coordinate locali prende solo il sistema: i suoi marker e i suoi disegni restano dove sono, e la sua
-georeferenziazione si calcola dopo.
+georeferenziazione si calcola dopo. *Modifica > Annulla* non attraversa il cambio: quello che era stato modificato prima
+resta com'è nel nuovo sistema.
 
 Un sito troppo grande per essere convertito con una sola similitudine fra i due sistemi (sbaglierebbe la pianta di
 più di 5 mm) si rifiuta, senza cambiare nulla. Il [rapporto PDF](exports.md#rapporto-pdf) dice il sistema del chunk,
@@ -402,7 +414,7 @@ la griglia del suo geoide con il suo SHA-256 e come sono state convertite le pos
 
 ```bash
 ppg gnss crs rilievo.ppg                    # il sistema e le sue quote, i sistemi delle posizioni, quello che non torna
-ppg gnss crs rilievo.ppg --survey           # nel sistema di un rilievo dove si trova (--frame WGS84|ETRF2000, --no-geoid)
+ppg gnss crs rilievo.ppg --survey           # nel sistema di un rilievo dove si trova (--frame WGS84|ETRF2000 invece, --no-geoid)
 ppg gnss crs rilievo.ppg --set EPSG:7792+3855
 ppg gnss geoid                              # la griglia di EGM2008 installata o no, la cartella delle griglie
 ppg gnss geoid --download                   # EGM2008 (81 MB, dominio pubblico)

@@ -544,6 +544,28 @@ def test_report_gnss_section(tmp_path, monkeypatch):
     assert "GNSS positions" in page and "PPK against the base PROV00ITA" in page and "ROB-EUREF-C2400" in page
 
 
+def test_report_gnss_says_itrf2020_and_a_european_frame_together_on_wgs84(tmp_path, monkeypatch):
+    """The chunk of the PPK against a permanent station (ITRF2020) in WGS 84 / UTM with markers read from a file in
+    RDN2008 (a network RTK): a note says they are about a metre apart there, and the system of ETRF2000 to choose."""
+    from pyarchinit_photogrammetry.core import crs as crs_mod
+    from pyarchinit_photogrammetry.markers import gcp
+
+    doc, ch = gnss_project(tmp_path, monkeypatch)
+    ch.crs = "EPSG:32633"
+    lon, lat = (float(v) for v in np.median([c.reference.location[:2] for c in ch.cameras[:6]], axis=0))
+    x, y, _z = crs_mod.transform_points([[lon, lat, 0.0]], "EPSG:4979", "EPSG:7792")[0]
+    table = tmp_path / "gcp.csv"
+    table.write_text(f"GCP1,{x},{y},52.0\n")
+    assert gcp.import_reference(ch, table, crs="EPSG:7792") == 1
+    notes = _notes(rc.collect(ch, language="en"))
+    said = [n for n in notes if "about a metre apart" in n]
+    assert len(said) == 1 and "ITRF2020 positions of 6 photos and 1 references" in said[0]
+    assert "EPSG:32633" in said[0] and "(EPSG:7792)" in said[0]
+    assert any("a circa un metro fra loro" in n for n in _notes(rc.collect(ch, language="it")))
+    ch.crs = "EPSG:7792+3855"
+    assert not any("about a metre apart" in n for n in _notes(rc.collect(ch, language="en")))
+
+
 def test_report_gnss_bases_placed_in_other_ways(tmp_path, monkeypatch):
     """Three PPK runs in one chunk, each with its base: one placed by a static baseline from a station of RING (whose
     sigma is the scatter of its daily positions), one by a static PPP (its products named and their centre credited;

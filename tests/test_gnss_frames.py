@@ -263,6 +263,46 @@ def test_markers_read_in_etrf2014_take_the_epoch_of_the_survey(tmp_path, caplog)
     assert frames.survey_epoch(bare) == pytest.approx(frames.decimal_year(datetime.now(timezone.utc)), abs=0.01)
 
 
+def test_itrf2020_and_a_european_frame_together_on_wgs84_are_said(tmp_path):
+    """A chunk on WGS 84 / UTM with photos placed against a permanent station (ITRF2020) and photos of a base typed in
+    RDN2008 (ETRF2000), or markers read from a file in RDN2008: about a metre apart there, said with the system of
+    ETRF2000 to choose; nothing to say in that system, nor with one kind alone."""
+    ch = ppg.Document().add_chunk()
+    ch.crs = "EPSG:32633"
+    for key, (system, frame, epoch) in enumerate((("EPSG:9989", "ITRF2020", 2026.82),
+                                                  ("EPSG:7931", "ETRF2000", 2026.82))):
+        cam = _camera(key)
+        gnss_apply.set_camera_position(cam, list(ROME[0]), system, [0.02, 0.02, 0.04], "ppk", status="fix",
+                                       height="ellipsoidal", frame=frame, epoch=epoch)
+        ch.cameras.append(cam)
+    mixed = heights.mixed_frames(ch)
+    assert mixed == {"crs": "EPSG:32633", "itrf2020": 1, "photos": {"ETRF2000": 1}, "markers": {},
+                     "proposal": "EPSG:7792"}
+    said = [text for text in heights.check(ch) if heights.MIXED_FRAMES in text]
+    assert len(said) == 1 and "1 photo has positions in ITRF2020" in said[0] and "1 photo in ETRF2000" in said[0]
+    assert "about a metre apart" in said[0] and "EPSG:7792 here" in said[0]
+    # the ITRF2020 photos alone (no European reference): nothing to say
+    ch.cameras[1].reference.enabled = False
+    assert heights.mixed_frames(ch) is None
+    # markers read from a file in RDN2008 / UTM 33N: measured in ETRF2000
+    x, y, _z = crs.transform_points(ROME, "EPSG:4979", "EPSG:7792")[0]
+    table = tmp_path / "gcp.csv"
+    table.write_text(f"GCP1,{x},{y},52.0\nGCP2,{x + 10},{y},52.0\n")
+    assert gcp.import_reference(ch, table, crs="EPSG:7792") == 2
+    assert ch.meta["marker_frames"] == {"GCP1": "ETRF2000", "GCP2": "ETRF2000"}
+    assert heights.mixed_frames(ch)["markers"] == {"ETRF2000": 2}
+    # read again in WGS 84: no longer
+    table.write_text(f"GCP1,{ROME[0][0]},{ROME[0][1]},52.0\nGCP2,{ROME[0][0]},{ROME[0][1]},52.0\n")
+    gcp.import_reference(ch, table, crs="EPSG:4326")
+    assert "marker_frames" not in ch.meta and heights.mixed_frames(ch) is None
+    # in a system of ETRF2000 both arrive exactly: nothing to say
+    ch.cameras[1].reference.enabled = True
+    assert heights.mixed_frames(ch) is not None
+    ch.crs = "EPSG:7792"
+    assert heights.mixed_frames(ch) is None
+    assert not [text for text in heights.check(ch) if heights.MIXED_FRAMES in text]
+
+
 def _checked(src: str, dst: str, west: float, south: float, east: float, north: float):
     """The operation PROJ ranks first from ``src`` to ``dst`` among those that are no ballpark, in an area."""
     group = TransformerGroup(src, dst, always_xy=True, allow_ballpark=False,

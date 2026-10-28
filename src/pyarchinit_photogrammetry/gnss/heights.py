@@ -331,7 +331,9 @@ def check(chunk) -> list[str]:
       system of the chunk with heights above the geoid: their heights go into it as they are;
     * photos with heights marked as above the sea level (EXIF) in a system with heights above the ellipsoid
       (``EPSG:4979``, :func:`exif_heights_in_ellipsoidal_systems`): every conversion takes them as heights above the
-      ellipsoid."""
+      ellipsoid;
+    * a system on WGS 84 holding positions in ITRF2020 and references in a European frame together
+      (:func:`mixed_frames`): about a metre apart in Europe."""
     if crs_mod.is_local(chunk.crs):
         return []
     kind = height_kind(chunk.crs)
@@ -363,7 +365,58 @@ def check(chunk) -> list[str]:
                    f"heights are above the ellipsoid ({systems}): every conversion takes them as heights above the "
                    "ellipsoid, some 40-50 m off in Italy. Give them in a system without heights of its own (EPSG:4326 "
                    "for longitude, latitude and height) or mark them as heights above the ellipsoid")
+    mixed = mixed_frames(chunk)
+    if mixed is not None:
+        out.append(mixed_frames_text(mixed))
     return out
+
+
+MIXED_FRAMES = "a system on WGS 84"  # in the sentence of mixed_frames_text, which the window says in its own words
+
+
+def mixed_frames(chunk) -> dict | None:
+    """Positions in ITRF2020 and references in a European frame together in a chunk whose system is on WGS 84: the
+    photos placed against a permanent station, by a baseline or PPP (ITRF2020) go into it as they are - ITRF2020 is WGS
+    84 for the program -, those in ETRF2000 (a base typed in RDN2008), ETRF2014 or ETRF2020 by PROJ through the ETRS89
+    ensemble, about a metre apart in Europe in 2026; markers read from a file in a European system count too
+    (``meta["marker_frames"]``, :func:`..markers.gcp.import_reference`). In a system of ETRF2000 both arrive exactly.
+    ``{"crs", "itrf2020": photos, "photos": {frame: photos}, "markers": {frame: markers}, "proposal"}`` - the proposal
+    the system of ETRF2000 where the survey is (:func:`survey_crs`), None when the place cannot be told -, or None."""
+    from collections import Counter
+
+    from . import frames
+
+    if crs_mod.is_local(chunk.crs) or frames.frame_of(chunk.crs) != frames.WGS84:
+        return None
+    placed = [cam for cam in chunk.cameras if cam.reference.location and cam.reference.enabled]
+    kinds = [frames.position_frame(cam.meta.get("gnss")) for cam in placed]
+    itrf = sum(1 for frame in kinds if frame in frames.DYNAMIC)
+    photos = Counter(frame for frame in kinds if frame in frames.EUROPEAN)
+    recorded = chunk.meta.get("marker_frames") or {}
+    markers = Counter(recorded[m.label] for m in chunk.markers
+                      if m.reference.location and recorded.get(m.label) in frames.EUROPEAN)
+    if not itrf or not (photos or markers):
+        return None
+    try:
+        place = survey_place(chunk)
+        proposal = survey_crs(place[0], place[1], "ETRF2000", geoid=False) if place else None
+    except ValueError:  # the place cannot be told: no proposal
+        proposal = None
+    return {"crs": chunk.crs, "itrf2020": itrf, "photos": dict(photos), "markers": dict(markers),
+            "proposal": proposal}
+
+
+def mixed_frames_text(mixed: dict) -> str:
+    """The sentence of :func:`check` for ``mixed`` (:func:`mixed_frames`)."""
+    european = [f"{n} photo{'s' if n != 1 else ''} in {frame}" for frame, n in sorted(mixed["photos"].items())]
+    european += [f"{n} marker{'s' if n != 1 else ''} read in {frame}" for frame, n in sorted(mixed["markers"].items())]
+    advice = (f" ({mixed['proposal']} here: Sistema del rilievo, `ppg gnss crs --survey`)" if mixed["proposal"] else
+              " (Sistema del rilievo, `ppg gnss crs --survey`)")
+    return (f"{_photos(mixed['itrf2020'])} positions in ITRF2020 (a permanent station, a baseline, PPP) and "
+            f"{', '.join(european)} of a European frame, together in {mixed['crs']}, {MIXED_FRAMES}: the ITRF2020 "
+            "positions go into it as they are, the European ones through ETRS89, about a metre apart in Europe, and "
+            "positions in ITRF2020 of different years drift 2-3 cm a year apart. Put the chunk into a system of "
+            f"ETRF2000{advice}, where both arrive exactly")
 
 
 # --- the coordinate system of a survey -------------------------------------------------------------------------------
@@ -401,6 +454,49 @@ ITALY = (
     ((11.88, 36.7), (12.1, 36.7), (12.1, 36.88), (11.88, 36.88)),
     ((12.25, 35.45), (12.95, 35.45), (12.95, 35.92), (12.25, 35.92)),
 )
+# Europe where ETRS89 is the datum (the area of use of ETRS89 in the EPSG, coarsely: tens of kilometres along the land
+# borders, the coasts with their sea; longitude, latitude): the European Union without Cyprus, the EFTA, the United
+# Kingdom, the Balkans, Moldova; not Turkey, Ukraine, Belarus, Russia (Kaliningrad is a hole), Iceland, the Canary
+# Islands, Madeira, the Azores. There ITRF2020 converts exactly into the systems of ETRF2000 (the Helmert of the EPSG at
+# the epoch of each position), which move with the plate: the survey proposes them (survey_crs). Italy is in_italy.
+EUROPE = (
+    (  # the mainland with the British Isles, the islands of the Mediterranean and the Baltic, Scandinavia
+     # the Mediterranean, west to east: north of Morocco, Algeria, Tunisia and Libya, south of Malta and Crete
+     (-5.75, 35.96), (-5.35, 36.02), (-4.5, 36.1), (-2.0, 36.3), (0.0, 37.3), (3.0, 37.6), (8.0, 38.1),
+     (9.6, 37.95), (11.8, 37.55), (12.1, 36.3), (14.0, 35.45), (15.5, 35.3), (20.0, 35.4), (23.5, 34.6),
+     (26.5, 34.85), (27.5, 35.2), (28.5, 35.85),
+     # the Aegean between the Greek islands and Turkey: Rhodes, Symi, Kos, Samos, Chios, Lesbos, Lemnos, Samothrace
+     (28.45, 36.3), (28.3, 36.55), (28.0, 36.6), (27.85, 36.665), (27.35, 36.64), (27.3, 36.93), (27.18, 36.98), (27.12, 37.35),
+     (27.05, 37.69), (26.9, 37.85), (26.22, 38.15), (26.21, 38.55), (26.35, 38.75), (26.6, 38.85), (26.72, 39.05),
+     (26.65, 39.33), (26.52, 39.42), (26.07, 39.43), (25.75, 39.8), (25.55, 40.1), (25.85, 40.32), (26.04, 40.65),
+     # Greece and Bulgaria against Turkey, the Black Sea of Bulgaria and Romania, the Danube against Ukraine
+     (26.34, 40.94), (26.61, 41.33), (26.52, 41.63), (26.36, 41.71), (26.57, 41.92), (27.0, 42.08), (27.9, 42.0),
+     (28.03, 41.98), (29.5, 42.1), (30.8, 43.4), (31.2, 44.4), (30.5, 45.05), (29.75, 45.25), (29.62, 45.38),
+     (29.27, 45.43), (28.85, 45.32), (28.2, 45.47),
+     # Moldova, Romania, Hungary, Slovakia and Poland against Ukraine; Poland and Lithuania against Belarus
+     (28.5, 45.75), (28.95, 46.05), (29.6, 46.4), (30.13, 46.42), (29.9, 46.8), (29.65, 47.35), (29.2, 47.9),
+     (28.8, 48.1), (28.1, 48.25), (27.6, 48.48), (27.2, 48.38), (26.62, 48.26), (26.15, 47.98), (25.5, 47.88),
+     (24.9, 47.73), (24.0, 47.95), (23.5, 48.0), (22.9, 47.95), (22.6, 48.12), (22.15, 48.41), (22.4, 48.8),
+     (22.56, 49.08), (22.68, 49.4), (22.95, 49.8), (23.5, 50.25), (24.1, 50.85), (23.6, 51.53), (23.65, 52.05),
+     (23.9, 52.7), (23.9, 53.15), (23.5, 53.94), (24.4, 53.95), (25.0, 54.15), (25.55, 54.3), (25.75, 54.55),
+     (26.3, 55.0), (26.65, 55.2), (26.63, 55.68),
+     # Latvia against Belarus and Russia, Estonia against Russia (lake Peipus, the Narva), the gulf of Finland
+     (27.6, 55.8), (28.17, 56.15), (28.24, 56.42), (27.9, 56.85), (27.75, 57.3), (27.35, 57.52), (27.5, 57.75), (27.75, 57.9),
+     (27.5, 58.05), (27.55, 58.4), (27.7, 58.9), (28.21, 59.36), (28.05, 59.47), (27.8, 60.55),
+     # Finland and Norway against Russia
+     (29.3, 61.2), (31.3, 62.4), (31.58, 62.9), (30.0, 64.0), (29.9, 65.2), (29.1, 66.8), (29.9, 67.6),
+     (28.4, 68.5), (28.93, 69.05), (29.2, 69.3), (30.15, 69.62), (30.85, 69.78),
+     # the Arctic coast of Norway, its Atlantic coast, the Shetland, the Orkney and the Hebrides, Ireland, Cornwall,
+     # Brittany, the Bay of Biscay, Galicia and Portugal
+     (31.6, 70.35), (31.0, 70.7), (28.5, 71.35), (25.8, 71.45), (22.0, 71.0), (19.5, 70.5), (16.0, 69.6),
+     (13.5, 68.6), (11.6, 67.4), (11.0, 66.0), (9.5, 64.6), (7.5, 63.6), (5.0, 62.4), (0.5, 61.1), (-1.8, 61.0),
+     (-3.5, 59.6), (-7.5, 59.3), (-9.0, 57.8), (-11.0, 55.6), (-11.0, 51.2), (-6.8, 49.8), (-6.0, 49.6),
+     (-6.0, 47.8), (-10.0, 43.8), (-10.0, 37.0), (-9.5, 36.6), (-6.8, 36.1)),
+    ((-8.0, 61.3), (-6.0, 61.3), (-6.0, 62.5), (-8.0, 62.5)),  # the Faroe Islands
+    ((10.0, 74.0), (34.0, 74.0), (34.0, 81.0), (10.0, 81.0)),  # Svalbard and Bear Island
+    ((-9.2, 70.8), (-7.8, 70.8), (-7.8, 71.2), (-9.2, 71.2)),  # Jan Mayen
+)
+NOT_EUROPE = (((19.5, 54.43), (22.8, 54.36), (22.95, 54.75), (21.4, 55.27), (20.95, 55.27), (19.6, 54.95)),)  # Kaliningrad
 # what set_survey_crs converts into the new system, and what it lists as kept in the old one
 CONVERTED = ("markers", "units", "quote", "points", "stones", "sections", "patches", "texture_patches", "region",
              "colour_chart")
@@ -424,6 +520,22 @@ def in_italy(lon: float, lat: float) -> bool:
     return bool(_italy().covers(shapely.Point(float(lon), float(lat))))
 
 
+@functools.lru_cache(maxsize=1)
+def _europe():
+    import shapely
+
+    land = shapely.MultiPolygon([shapely.Polygon(ring) for ring in EUROPE])
+    return land.difference(shapely.MultiPolygon([shapely.Polygon(ring) for ring in NOT_EUROPE]))
+
+
+def in_europe(lon: float, lat: float) -> bool:
+    """Whether ``lon``, ``lat`` (degrees) are where ETRS89 is the datum in Europe, by a coarse outline
+    (:data:`EUROPE`), Italy included (:func:`in_italy`)."""
+    import shapely
+
+    return in_italy(lon, lat) or bool(_europe().covers(shapely.Point(float(lon), float(lat))))
+
+
 @functools.lru_cache(maxsize=64)
 def _known(crs: str) -> bool:
     from pyproj.exceptions import CRSError
@@ -435,22 +547,29 @@ def _known(crs: str) -> bool:
     return True
 
 
-def survey_crs(lon: float, lat: float, frame: str = "WGS84", geoid: bool = True) -> str:
-    """The coordinate system for a survey at ``lon``, ``lat`` (degrees) whose positions are in ``frame`` (one of
-    :data:`.frames.FRAMES`, or ``"WGS84"``): the UTM zone of the place, on WGS 84 (``EPSG:326zz``, ``EPSG:327zz`` in
-    the south) for WGS 84, a frame nobody knows and ITRF2020 (WGS 84 for the program); for the European frames
-    (ETRF2000, the frame of RDN2008 and ETRS89, ETRF2014, ETRF2020) RDN2008 / UTM in Italy (:func:`in_italy`; zones 32,
-    33 and 34, ``EPSG:7791``, ``7792``, ``7793``), ETRS89 / UTM where its zone exists (``EPSG:258zz``), else WGS 84 /
-    UTM. With ``geoid`` its heights are above EGM2008 (``+3855``), which needs the grid of the geoid
-    (:func:`download_geoid`); without, it has no heights of its own. A ``ValueError`` for a frame the program does not
-    know and for a place off the earth."""
+def survey_crs(lon: float, lat: float, frame: str | None = None, geoid: bool = True) -> str:
+    """The coordinate system for a survey at ``lon``, ``lat`` (degrees). Without ``frame``, as the place decides: in
+    Europe (:func:`in_europe`) a system of ETRF2000 - RDN2008 / UTM in Italy (:func:`in_italy`; zones 32, 33 and 34,
+    ``EPSG:7791``, ``7792``, ``7793``, the national datum), ETRS89 / UTM elsewhere (``EPSG:258zz``) -, where positions
+    in ITRF2020 (a permanent station, a baseline, PPP) arrive exactly at their epoch, as those in the European frames do
+    (a base typed in RDN2008, markers of a network RTK), and nothing drifts with the plate between flights; beyond
+    Europe the UTM zone on WGS 84 (``EPSG:326zz``, ``EPSG:327zz`` in the south).
+
+    A ``frame`` (one of :data:`.frames.FRAMES`, or ``"WGS84"``) chooses instead, as the frame of the positions would:
+    WGS 84 / UTM for WGS 84, a frame nobody knows and ITRF2020 (WGS 84 for the program); for the European frames
+    (ETRF2000, the frame of RDN2008 and ETRS89, ETRF2014, ETRF2020) RDN2008 / UTM in Italy, ETRS89 / UTM where its zone
+    exists, else WGS 84 / UTM. With ``geoid`` its heights are above EGM2008 (``+3855``), which needs the grid of the
+    geoid (:func:`download_geoid`); without, it has no heights of its own. A ``ValueError`` for a frame the program does
+    not know and for a place off the earth."""
     from . import frames
 
     lon, lat = _lonlat(lat, lon)
-    frames.crs_of(frame)  # a frame the program knows
+    if frame is not None:
+        frames.crs_of(frame)  # a frame the program knows
     zone = int((lon + 180.0) // 6.0) + 1
     system = None
-    if frame in frames.EUROPEAN:
+    european = in_europe(lon, lat) if frame is None else frame in frames.EUROPEAN
+    if european:
         if zone in RDN2008_UTM and in_italy(lon, lat):
             system = RDN2008_UTM[zone]
         elif lat >= 0.0 and _known(f"EPSG:{25800 + zone}"):

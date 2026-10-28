@@ -341,8 +341,11 @@ in RDN2008 is a metre off when the frames are not converted, and still 30 cm off
 epoch (PROJ alone takes 2015.0). The program converts from ITRF2020 to ETRF2000 - and so to RDN2008 and to ETRS89 /
 UTM - with the time-dependent Helmert transformation of the EPSG (*ITRF2020 to ETRF2000 (1)*, EPSG:10586) at the
 epoch of each position; from ITRF2020 to a system on WGS 84 the positions pass as they are (the two agree within
-centimetres). The motion of Italy within its plate since 2008 - a few millimetres a year, more in the south and
-around the volcanoes - is not in it: RDN2008 is ETRF2000 at 2008.0.
+centimetres). Between two European frames - a base typed in ETRF2014 or ETRF2020, a chunk in RDN2008 or ETRS89 /
+UTM - the positions go through ITRF2020 at their epoch, by the two Helmerts of the EPSG (PROJ alone takes a null
+through ETRS89, 8-9 cm off at Rome in 2026): the photos at the epoch of their shot, markers read from a file at the
+epoch of the survey, which the log says. The motion of Italy within its plate since 2008 - a few millimetres a year,
+more in the south and around the volcanoes - is not in it: RDN2008 is ETRF2000 at 2008.0.
 
 The frame and the epoch come with the position: a typed base its own (*Frame of the typed coordinates*, *Epoch of the
 coordinates*; `--base-frame`, `--base-epoch`); a positions file in a system of ITRF2020 (`EPSG:9989` and the systems
@@ -356,7 +359,10 @@ The GNSS pane has five steps: *Positions of the photos*, *Corrections (PPK)*, **
 flight* and *Only the fix positions*. *System and heights* lists the frames of the positions with their epochs, the
 system of the chunk and the kind of its heights, whether the grid of the geoid EGM2008 is installed and what does not
 fit between the heights of the photos and those of the chunk; its buttons are *Survey system...* and *Download the
-EGM2008 geoid (81 MB)...* (below).
+EGM2008 geoid (81 MB)...* (below). A chunk in a system on WGS 84 holding positions in ITRF2020 (a station, a baseline,
+PPP) together with references in a European frame (photos of a base typed in RDN2008, markers read from a file in
+RDN2008 such as those of an Italian network RTK) is said there, in the PDF report and by `ppg gnss crs`: in Europe the
+two are about a metre apart in such a system, and both arrive exactly in a system of ETRF2000.
 
 ### Heights above the geoid and the system of the survey
 
@@ -371,19 +377,23 @@ heights above the ellipsoid are never passed off as heights above the sea level.
 of the grids of the program, which `ppg gnss geoid` prints (`proj` in the GNSS folder); systems with those heights,
 such as `EPSG:7792+5214`, then use it.
 
-**The system of the survey.** *Survey system...* proposes the coordinate system of the survey where it is, for the
-frame of its positions: the UTM zone on WGS 84 for positions in WGS 84 or ITRF2020; RDN2008 / UTM in Italy (EPSG:7791,
-7792, 7793) and ETRS89 / UTM elsewhere in Europe for positions in ETRF2000, ETRF2014 or ETRF2020; or another system
-(*Other:*, an EPSG code or a WKT). *Heights above the EGM2008 geoid* gives it heights above the sea level (`+3855`);
+**The system of the survey.** *Survey system...* proposes the coordinate system of the survey where it is. In Europe
+(where ETRS89 is the datum) a system of ETRF2000: RDN2008 / UTM in Italy (EPSG:7791, 7792, 7793, the national datum)
+and ETRS89 / UTM elsewhere, where positions in ITRF2020 (a permanent station, a baseline, PPP) arrive exactly at their
+epoch, as those in the European frames do (a base typed in RDN2008, markers of a network RTK), and nothing drifts with
+the plate between flights of different years; beyond Europe the UTM zone on WGS 84. The other one is offered too (the
+UTM zone on WGS 84 in Europe, ETRS89 / UTM for positions in a European frame beyond it), or another system (*Other:*,
+an EPSG code or a WKT). *Heights above the EGM2008 geoid* gives it heights above the sea level (`+3855`);
 when the grid is not installed the window offers to download it first (*Download and apply*) or to apply the same
 system without heights of its own (*Apply without heights above the geoid*). Before anything changes the window works
 out, in the background, what the change does, shows it and asks *Apply?*:
 
 - the georeference follows the chunk into the new system, with the model, the clouds and the tie points;
-- the references of the markers are converted; what was drawn on the products - units, spot heights, measuring
-  points, stones, the sections of the project, the patches of the orthomosaic and of the texture, the region of the
-  reconstruction, the colour chart - goes with the georeference, so that it stays on the model (on a chunk with
-  nothing to follow it is converted as the markers are);
+- the references of the markers are converted from one system to the other, as coordinates measured on the ground;
+  what was drawn on the products - units, spot heights, measuring points, stones, the sections of the project, the
+  patches of the orthomosaic and of the texture, the region of the reconstruction, the colour chart - goes with the
+  georeference, so that it stays on the model (on a chunk with nothing to follow it is converted as the markers are);
+  the polygons loaded from PyArchInit go as coordinates too;
 - what is to be built again in the new system: the DEM, the orthomosaic, the precision of the DEM, the coverage;
 - what stays in the old system and is to be made again if needed: the inactive versions of the DEM and of the
   orthomosaic, the elevations, the multispectral, thermal and satellite rasters, the relief and the raster
@@ -391,7 +401,8 @@ out, in the background, what the change does, shows it and asks *Apply?*:
   that are only in the window (contour lines, plan slices, measures) are taken away, to draw again.
 
 A chunk in local coordinates only takes the system: its markers and drawings stay where they are, and its
-georeference is fitted afterwards.
+georeference is fitted afterwards. *Edit > Undo* does not cross the change: what was edited before it stays as it is
+in the new system.
 
 A site too large to be converted by one similarity between the two systems (it would miss the plan by more than
 5 mm) is refused, nothing changed. The [PDF report](exports.md#pdf-report) names the system of the chunk, the grid of
@@ -399,7 +410,7 @@ its geoid with its SHA-256 and how the positions in ITRF2020 were converted.
 
 ```bash
 ppg gnss crs survey.ppg                     # the system and its heights, the frames of the positions, what does not fit
-ppg gnss crs survey.ppg --survey            # into the system of a survey where it is (--frame WGS84|ETRF2000, --no-geoid)
+ppg gnss crs survey.ppg --survey            # into the system of a survey where it is (--frame WGS84|ETRF2000 instead, --no-geoid)
 ppg gnss crs survey.ppg --set EPSG:7792+3855
 ppg gnss geoid                              # the grid of EGM2008 installed or not, the folder of the grids
 ppg gnss geoid --download                   # EGM2008 (81 MB, public domain)

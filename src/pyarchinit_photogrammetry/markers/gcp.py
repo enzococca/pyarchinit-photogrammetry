@@ -292,6 +292,8 @@ def import_reference(chunk, path, crs: str | None = None, delimiter: str | None 
         if not crs_mod.is_local(src_crs):
             chunk.crs = projected_crs_for(src_crs, parsed[0][1]) if crs_mod.is_geographic(src_crs) else src_crs
     count = 0
+    frame = None if crs_mod.is_local(src_crs) else frames.frame_of(src_crs)
+    frame = frame if frame in frames.EUROPEAN else None  # recorded: the European frames (heights.mixed_frames)
     for vals, xyz in parsed:
         if not crs_mod.is_local(src_crs) and src_crs != chunk.crs:  # markers carry no frame and epoch
             xyz = crs_mod.transform_points(xyz[None], src_crs, chunk.crs, legacy=frames.Legacy(MARKERS_READ, chunk))[0]
@@ -303,6 +305,16 @@ def import_reference(chunk, path, crs: str | None = None, delimiter: str | None 
             marker = chunk.add_marker(label)
         acc = float(vals["a"]) if vals.get("a") else marker.reference.accuracy[0]
         marker.reference = Reference(location=xyz.tolist(), accuracy=[acc, acc, acc], enabled=True)
+        # the frame the marker was measured in (a European one: a network RTK in RDN2008), for heights.mixed_frames
+        recorded = chunk.meta.get("marker_frames") or {}
+        if frame:
+            recorded[marker.label] = frame
+        else:
+            recorded.pop(marker.label, None)
+        if recorded:
+            chunk.meta["marker_frames"] = recorded
+        else:
+            chunk.meta.pop("marker_frames", None)
         count += 1
     return count
 

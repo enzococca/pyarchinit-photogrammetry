@@ -1129,6 +1129,14 @@ def test_gnss_pane_frames_and_heights_step(gnss_window):
     pane.set_state(chunk)
     text = pane.states["heights"].text()
     assert "Quote sul livello del mare (EXIF) in un sistema con quote ellissoidiche (EPSG:4979) per 1 foto" in text
+    # positions in ITRF2020 and in RDN2008 together on WGS 84 / UTM: a metre apart, said with the system to choose
+    gnss_apply.set_camera_position(chunk.cameras[0], [12.5, 41.9, 120.0], "EPSG:7931", [0.02, 0.02, 0.04], "ppk",
+                                   status="fix", height="ellipsoidal", frame="ETRF2000", epoch=2026.82)
+    pane.set_state(chunk)
+    text = pane.states["heights"].text()
+    assert ("Posizioni in ITRF2020 (stazione permanente, linea di base, PPP) per 2 foto e riferimenti in un sistema "
+            "europeo (1 foto in ETRF2000) insieme in EPSG:32633, un sistema su WGS 84") in text
+    assert "(EPSG:7792: Sistema del rilievo...)" in text and "a system on WGS 84" not in text
     for cam in chunk.cameras:
         cam.reference.location = None
     pane.set_state(chunk)
@@ -1154,8 +1162,8 @@ def test_gnss_survey_crs_from_the_pane(gnss_window, monkeypatch, tmp_path):
     w.quote.append({"x": x, "y": y, "quota_q": 120.5})  # drawn in the window, not yet in the chunk
     asked, said, threads = [], [], []
 
-    def ask(parent, current, choices, *args, **kwargs):
-        asked.append((current, choices))
+    def ask(parent, current, choices, default=None, *args, **kwargs):
+        asked.append((current, choices, default))
         return {"crs": "EPSG:32632", "plain": "EPSG:32632"}
 
     def changes(ch, crs, real=heights.survey_crs_changes):
@@ -1174,8 +1182,10 @@ def test_gnss_survey_crs_from_the_pane(gnss_window, monkeypatch, tmp_path):
     w.runner.wait()
 
     assert errors == []
-    ((current, choices),) = asked
-    assert current == "EPSG:32633" and [crs for crs, _label in choices] == ["EPSG:32633", "EPSG:7792"]
+    ((current, choices, default),) = asked
+    # in Italy RDN2008 / UTM first and chosen (ITRF2020 and the European frames arrive there exactly), then WGS 84
+    assert current == "EPSG:32633" and [crs for crs, _label in choices] == ["EPSG:7792", "EPSG:32633"]
+    assert default == "EPSG:7792" and "consigliato in Europa" in choices[0][1]
     assert threads and threading.main_thread() not in threads  # the preview in the background
     ((kind, text),) = said  # the changes, confirmed
     assert kind == "question" and "EPSG:32633 → EPSG:32632" in text and "quote 1" in text
@@ -1617,17 +1627,21 @@ def test_cli_crs_survey(tmp_path):
     out = result.output
     assert "Flight: LOCAL (local coordinates)" in out
     assert "positions of the photos: frame unknown: WGS 84 3" in out
-    assert "a survey here: EPSG:32633 (WGS 84 / UTM zone 33N) for positions in WGS 84 or ITRF2020" in out
-    assert "EPSG:7792 (RDN2008 / UTM zone 33N) for positions in ETRF2000 (RDN2008)" in out
+    assert "a survey here: EPSG:7792 (RDN2008 / UTM zone 33N) proposed in Europe" in out
+    assert "EPSG:32633 (WGS 84 / UTM zone 33N) on WGS 84 (--frame WGS84)" in out
     assert "+3855" in out and "ppg gnss geoid --download" in out
+    # the place decides: RDN2008 / UTM in Italy, whatever the frame of the positions
     result = run(app, ["gnss", "crs", str(project), "--survey", "--no-geoid"])
     assert result.exit_code == 0, result.output
-    assert "Flight: LOCAL -> EPSG:32633" in result.output
-    assert ppg.Document.open(project).chunk.crs == "EPSG:32633"
+    assert "Flight: LOCAL -> EPSG:7792" in result.output
+    assert ppg.Document.open(project).chunk.crs == "EPSG:7792"
     result = run(app, ["gnss", "crs", str(project), "--survey"])  # heights above EGM2008: no grid
-    assert result.exit_code == 1 and "EPSG:32633+3855" in result.output and "ppg gnss geoid --download" in (
+    assert result.exit_code == 1 and "EPSG:7792+3855" in result.output and "ppg gnss geoid --download" in (
         result.output)
-    assert ppg.Document.open(project).chunk.crs == "EPSG:32633"
+    assert ppg.Document.open(project).chunk.crs == "EPSG:7792"
+    # --frame chooses instead: WGS 84 / UTM, then back to RDN2008
+    result = run(app, ["gnss", "crs", str(project), "--survey", "--frame", "WGS84", "--no-geoid"])
+    assert result.exit_code == 0 and "EPSG:7792 -> EPSG:32633" in result.output, result.output
     result = run(app, ["gnss", "crs", str(project), "--survey", "--frame", "ETRF2000", "--no-geoid"])
     assert result.exit_code == 0 and "EPSG:32633 -> EPSG:7792" in result.output, result.output
     result = run(app, ["gnss", "crs", str(project), "--set", "EPSG:4326"])

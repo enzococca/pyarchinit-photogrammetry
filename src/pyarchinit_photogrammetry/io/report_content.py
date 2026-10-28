@@ -330,6 +330,12 @@ TEXT: dict[str, tuple[str, str]] = {  # key: (Italian, English)
     "gnss_mixed": ("Le quote delle posizioni in uso sono di tipo diverso ({0}): vanno controllate prima di usarle "
                    "insieme.", "The heights of the positions in use are of different kinds ({0}): check them before "
                    "using them together."),
+    "gnss_mixed_frames": ("Le posizioni in ITRF2020 di {0} foto e {1} riferimenti in un sistema europeo (RDN2008, "
+                          "ETRF) sono insieme in {2}, un sistema su WGS 84: in Europa sono a circa un metro fra loro. "
+                          "In un sistema di ETRF2000{3} arrivano tutti esatti.",
+                          "The ITRF2020 positions of {0} photos and {1} references in a European frame (RDN2008, ETRF) "
+                          "are together in {2}, a system on WGS 84: in Europe they are about a metre apart. In a "
+                          "system of ETRF2000{3} all arrive exactly."),
     "gnss_crs": ("Sistema del chunk", "System of the chunk"),
     "gnss_crs_heights": ("Quote del chunk", "Heights of the chunk"),
     "kind_orthometric": ("sul geoide ({0})", "above the geoid ({0})"),
@@ -1453,7 +1459,7 @@ def _gnss(chunk, w: Words) -> Section | None:
     from collections import Counter
 
     from ..gnss import apply as gnss_apply
-    from ..gnss import quality
+    from ..gnss import heights, quality
 
     cams = [c for c in chunk.cameras if c.reference.location]
     if not cams:
@@ -1478,6 +1484,16 @@ def _gnss(chunk, w: Words) -> Section | None:
     mixed = quality.mixed_heights(chunk)
     if mixed:
         sec.blocks.append(Paragraph(w("gnss_mixed", " / ".join(w(f"height_{kind}") for kind in mixed)), note=True))
+    try:
+        apart = heights.mixed_frames(chunk)
+    except Exception as exc:  # noqa: BLE001 - a survey PROJ cannot place: nothing said of its frames
+        log.warning("report: the frames of %s: %s", chunk.label, exc)
+        apart = None
+    if apart:
+        european = sum(apart["photos"].values()) + sum(apart["markers"].values())
+        sec.blocks.append(Paragraph(w("gnss_mixed_frames", w.integer(apart["itrf2020"]), w.integer(european),
+                                      apart["crs"], f" ({apart['proposal']})" if apart["proposal"] else ""),
+                                    note=True))
     try:
         flights = quality.summary(chunk)
     except Exception as exc:  # noqa: BLE001 - the offsets in a system PROJ cannot convert to

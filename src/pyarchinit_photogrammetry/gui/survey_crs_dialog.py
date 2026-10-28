@@ -1,7 +1,7 @@
 """The coordinate system of a survey, chosen where the survey is: the systems :func:`..gnss.heights.survey_crs` proposes
-for the frames of its positions - UTM on WGS 84 for positions in WGS 84 or ITRF2020, RDN2008 / UTM in Italy (ETRS89 /
-UTM elsewhere in Europe) for the European frames - or another one written, with the heights above the geoid EGM2008 or
-without heights of their own; and what putting a chunk into a system does, in words
+there - in Europe a system of ETRF2000 (RDN2008 / UTM in Italy, ETRS89 / UTM elsewhere), where positions in ITRF2020
+and in the European frames arrive exactly, beyond it UTM on WGS 84 - or another one written, with the heights above the
+geoid EGM2008 or without heights of their own; and what putting a chunk into a system does, in words
 (:func:`..gnss.heights.survey_crs_changes`), for the window to ask before it does it."""
 from __future__ import annotations
 
@@ -155,9 +155,9 @@ class SurveyCrsDialog(QDialog):
         self.setWindowTitle(tr("Sistema del rilievo"))
         self.setMinimumWidth(520)
         lay = QVBoxLayout(self)
-        intro = QLabel(tr("Il sistema di coordinate del rilievo, dove si trova, per il sistema delle sue posizioni; il "
-                          "chunk ora è in {0}. Marker e disegni vengono convertiti, DEM e ortofoto vanno costruiti di "
-                          "nuovo.", current) + (" " + note if note else ""))
+        intro = QLabel(tr("Il sistema di coordinate del rilievo, scelto dove si trova; il chunk ora è in {0}. I "
+                          "riferimenti dei marker vengono convertiti da un sistema all'altro, i disegni seguono il "
+                          "modello; DEM e ortofoto vanno costruiti di nuovo.", current) + (" " + note if note else ""))
         intro.setWordWrap(True)
         lay.addWidget(intro)
         self.group = QButtonGroup(self)

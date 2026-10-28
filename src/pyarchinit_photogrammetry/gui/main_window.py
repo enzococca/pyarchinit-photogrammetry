@@ -3298,10 +3298,12 @@ class MainWindow(QMainWindow):
                       save=False)
 
     def gnss_survey_crs(self) -> None:
-        """*GNSS > Sistema e quote > Sistema del rilievo*: the systems :func:`..gnss.heights.survey_crs` proposes where
-        the survey is (:func:`..gnss.heights.survey_place`) for the frames of its positions, or another one, with the
-        heights above the geoid EGM2008 or not - when they are and the grid is missing, the choice between downloading
-        it first and the same system without heights of its own; then :meth:`_set_survey_crs`."""
+        """*GNSS > Sistema e quote > Sistema del rilievo*: the system :func:`..gnss.heights.survey_crs` proposes where
+        the survey is (:func:`..gnss.heights.survey_place`) - in Europe a system of ETRF2000, where positions in ITRF2020
+        and in the European frames arrive exactly, beyond it UTM on WGS 84 - first and chosen, the other one, or
+        another one written, with the heights above the geoid EGM2008 or not - when they are and the grid is missing,
+        the choice between downloading it first and the same system without heights of its own; then
+        :meth:`_set_survey_crs`."""
         if self.runner.busy:
             self.statusBar().showMessage(tr("Un'elaborazione e' gia' in corso"), 8000)
             return
@@ -3315,7 +3317,7 @@ class MainWindow(QMainWindow):
         ch = self.chunk
         try:
             place = heights.survey_place(ch)
-        except ValueError as exc:
+        except Exception as exc:  # noqa: BLE001 - a ValueError, PROJ's own (CRSError): said, never a traceback
             self._exc(tr("Il programma non sa dove è il rilievo"), exc)
             return
         if place is None:
@@ -3323,10 +3325,19 @@ class MainWindow(QMainWindow):
                           "coordinate dei marker in un sistema di coordinate."))
             return
         lon, lat, frame = place
-        choices, default = [], None
-        for of, says in (("WGS84", tr("per posizioni in WGS 84 o ITRF2020")),
-                         ("ETRF2000", tr("per posizioni in ETRF2000 (RDN2008), ETRF2014, ETRF2020"))):
-            crs = heights.survey_crs(lon, lat, of, geoid=False)
+        default = heights.survey_crs(lon, lat, geoid=False)  # the place decides: ETRF2000 in Europe, WGS 84 beyond
+        if heights.in_europe(lon, lat):
+            options = ((default, tr("consigliato in Europa: le posizioni in ITRF2020 (stazioni permanenti, PPP) e nei "
+                                    "sistemi europei (RDN2008, reti RTK) vi arrivano esatte, senza deriva fra i voli")),
+                       (heights.survey_crs(lon, lat, "WGS84", geoid=False),
+                        tr("su WGS 84: le posizioni in ITRF2020 restano come sono, quelle nei sistemi europei a circa "
+                           "un metro")))
+        else:
+            options = ((default, tr("consigliato qui, per posizioni in WGS 84 o ITRF2020")),
+                       (heights.survey_crs(lon, lat, "ETRF2000", geoid=False),
+                        tr("per posizioni in ETRF2000 (RDN2008), ETRF2014, ETRF2020")))
+        choices = []
+        for crs, says in options:
             if crs in [c for c, _label in choices]:
                 continue
             try:
@@ -3334,8 +3345,6 @@ class MainWindow(QMainWindow):
             except Exception:  # noqa: BLE001 - its code says it
                 name = crs
             choices.append((crs, f"{crs} - {name} ({says})"))
-            if (of == "ETRF2000") == (frame in ("ETRF2000", "ETRF2014", "ETRF2020")):
-                default = crs
         v = dialog.SurveyCrsDialog.ask(self, ch.crs, choices, default,
                                        tr("Le posizioni delle foto sono in {0}.", frame_text(frame)),
                                        heights.geoid_available())
