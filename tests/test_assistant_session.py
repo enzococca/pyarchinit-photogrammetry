@@ -111,8 +111,8 @@ def test_question_with_tools_and_answer(doc, fake_tools):
     assert json.loads(result.content)["coverage_percent"] == 98.0
     # the tool ran over the open project; the turn says what was read
     assert fake_tools[0][0] == "dem_statistics" and fake_tools[0][2] is doc
-    assert any("dem_statistics" in r for r in turn.read)
-    assert any("7 cm" in r and "98" in r for r in turn.read)
+    assert "strumento: dem_statistics (DEM 7 cm, copertura 98 %)" in turn.read
+    assert turn.read[0].startswith("guida: ")
     assert [t.role for t in assistant.history] == ["user", "assistant"]
     assert assistant.history[0].text == "Che risoluzione ha il DEM?"
     # the tool result left as the text of the tool message
@@ -194,7 +194,12 @@ def test_unknown_tool_and_bad_arguments_are_reported_to_the_model(doc, fake_tool
     assert json.loads(results[1].content)["error"] == "arguments were not valid JSON: {oops"
     assert [n for n, _, _ in fake_tools] == ["no_such_tool"]  # the broken call never ran
     assert turn.text == "Fatto." and turn.error is None
-    assert any("no_such_tool" in r for r in turn.read)
+    assert "strumento: no_such_tool (errore)" in turn.read
+    assert "strumento: dem_statistics (errore)" in turn.read
+    # the broken call goes back to the model as its own call with empty arguments, never as {"_invalid_json": ...}
+    resent = [m for m in fake.calls[1][0] if m.role == "assistant"][-1]
+    assert [c.arguments for c in resent.tool_calls] == [{}, {}]
+    assert "_invalid_json" not in json.dumps([m.content for m in fake.calls[1][0]])
 
 
 def test_tool_rounds_are_bounded(doc, fake_tools):
@@ -250,7 +255,17 @@ def test_script_is_extracted_from_the_last_python_block(doc):
     assert S.extract_script("niente") is None
     assert S.extract_script("```python\n```") is None
     assert S.extract_script("```python\nx = 1\n```") == "x = 1"
-    assert S.extract_script("```py\nx = 1\n```") is None
+    assert S.extract_script("```\nx = 1\n```") is None
+    assert S.extract_script("```pythonic\nx = 1\n```") is None
+    # a block indented under a list item runs as it is; CRLF, ```Python, ```py, ~~~python and an info string are fences
+    assert S.extract_script("1. Poi:\n   ```python\n   for c in doc.chunks:\n       print(c)\n   ```\n") == \
+        "for c in doc.chunks:\n    print(c)"
+    assert S.extract_script("```python\r\nx = 1\r\n```\r\n") == "x = 1"
+    assert S.extract_script("```Python\nx = 1\n```") == "x = 1"
+    assert S.extract_script("```py\nx = 1\n```") == "x = 1"
+    assert S.extract_script("~~~python\nx = 1\n~~~") == "x = 1"
+    assert S.extract_script("```python title=\"a.py\"\nx = 1\n```") == "x = 1"
+    assert S.extract_script("~~~python\nx = 1\n```") is None  # closed by another fence
 
 
 def test_question_without_a_document(fake_tools):
@@ -260,14 +275,15 @@ def test_question_without_a_document(fake_tools):
     (result,) = tool_messages(fake.calls[1][0])
     assert result.error is False and "none" in json.loads(result.content)
     assert "Dalla guida:" in fake.calls[0][0][-1].content
-    assert any(r.startswith("guida:") for r in turn.read)
+    assert turn.read and all(r.startswith("guida: ") and r.endswith(".md") for r in turn.read[:-1])
+    assert turn.read[-1] == "strumento: dem_statistics (nessun progetto aperto)"
     assert assistant.filter.active and assistant.filter.mapping == {}
     local, _ = make(None, [text("ok")], kind="local")
     assert not local.filter.active
     assert local.ask("ciao").text == "ok"
 
 
-def test_ask_about_error(doc):
+def test_ask_about_error_sends_script_and_traceback(doc):
     assistant, fake = make(doc, [text("Manca il DEM.")])
     script = "chunk.build_dem()\nprint(chunk.dem_path)"
     error = "Traceback (most recent call last):\n  File \"<script>\", line 1\nRuntimeError: nessuna nuvola"
@@ -305,25 +321,82 @@ def test_history_goes_back_to_the_model_filtered(doc):
     assert assistant.history[1].text == "Tell Sultan è a nord."
 
 
-def test_filter_follows_the_document_and_names_added_since(doc, fake_tools):
-    docs = {"doc": doc}
-    fake = FakeProvider([text("ok")])
-    assistant = S.Assistant(fake, lambda: docs["doc"], default_index("it"))
+def test_one_filter_per_conversation_learns_the_names_added_since(doc, fake_tools):
+    fake = FakeProvider([text("Sito A.")])
+    assistant = S.Assistant(fake, lambda: doc, default_index("it"))
     assistant.ask("Ciao Tell Sultan")
-    assert assistant.filter.mapping["Tell Sultan"] == "Sito A"
+    filter_ = assistant.filter
+    assert filter_.mapping["Tell Sultan"] == "Sito A"
     doc.add_chunk("Saggio Sud")  # a name added since: the same filter, the placeholders kept
-    assistant.ask("E il chunk Saggio Sud?")
-    assert assistant.filter.mapping["Tell Sultan"] == "Sito A"
+    turn = assistant.ask("E il chunk Saggio Sud?")
+    assert assistant.filter is filter_ and filter_.mapping["Tell Sultan"] == "Sito A"
     assert "chunk 2" in fake.calls[-1][0][-1].content
+    assert turn.note is None and not assistant.document_changed
+    assert len(assistant.history) == 4
+
+
+def _names_of_a(messages):
+    return [m.content for m in messages if "Tell Sultan" in m.content.split("\n\nDalla guida:")[0]
+            or "Volo 28/08" in m.content or "Rilievo Nord" in m.content]
+
+
+def test_a_project_change_starts_a_new_conversation_and_nothing_of_the_old_one_leaves(doc, fake_tools):
+    docs = {"doc": doc}
+    fake = FakeProvider([text("Sito A è a nord."), text("Qui è Sito A."), text("Nessun progetto.")])
+    assistant = S.Assistant(fake, lambda: docs["doc"], default_index("it"))
+    first = assistant.ask("Dove sta Tell Sultan?")
+    assert first.text == "Tell Sultan è a nord." and first.note is None
     other = Document()
     other.meta["sito"] = "Città di Castello"
-    docs["doc"] = other  # another project: a new filter
-    assistant.ask("E ora?")
-    assert "Tell Sultan" not in assistant.filter.mapping
-    assert assistant.filter.mapping["Città di Castello"] == "Sito A"
-    docs["doc"] = None
-    assistant.ask("E senza progetto?")
+    docs["doc"] = other  # another project opened: the conversation about the first one ends
+    turn = assistant.ask("E qui?")
+    assert turn.note == "Il progetto è cambiato: nuova conversazione"
+    assert turn.text == "Qui è Città di Castello." and turn.error is None
+    assert not assistant.document_changed
+    assert [t.role for t in assistant.history] == ["user", "assistant"]  # the history of project A is gone
+    assert assistant.history[0].text == "E qui?"
+    messages = fake.calls[1][0]
+    assert [m.role for m in messages] == ["system", "user"]
+    assert _names_of_a(messages) == []
+    assert "Tell Sultan" not in assistant.filter.mapping and assistant.filter.mapping["Città di Castello"] == "Sito A"
+    assert turn.sent[0] == privacy.WARNING  # the warning again: a new conversation
+    assert "Tell Sultan" not in "".join(assistant.sent_log).split("\n\nDalla guida:")[0]
+    docs["doc"] = None  # the project closed: again a new conversation, about no project
+    turn = assistant.ask("E senza progetto?")
+    assert turn.note == "Il progetto è cambiato: nuova conversazione"
+    assert [m.role for m in fake.calls[2][0]] == ["system", "user"]
+    assert "Città di Castello" not in json.dumps([m.content for m in fake.calls[2][0]])
     assert assistant.filter.active and assistant.filter.mapping == {}
+    assert len(assistant.history) == 2
+    assert assistant.ask("Ancora?").note is None  # still no project: the same conversation
+    assert len(assistant.history) == 4
+
+
+def test_a_project_opened_after_questions_without_one_starts_a_new_conversation(fake_tools, doc):
+    docs = {"doc": None}
+    fake = FakeProvider([text("ok")])
+    assistant = S.Assistant(fake, lambda: docs["doc"], default_index("it"), language="en")
+    assistant.ask("How are contour lines made?")
+    docs["doc"] = doc
+    turn = assistant.ask("And here?")
+    assert turn.note == "The project changed: new conversation"
+    assert len(assistant.history) == 2 and assistant.filter.mapping["Tell Sultan"] == "Sito A"
+
+
+def test_a_dead_document_counts_as_a_change_even_when_the_project_is_closed(fake_tools):
+    import gc
+
+    docs = {"doc": Document()}
+    docs["doc"].meta["sito"] = "Tell Sultan"
+    fake = FakeProvider([text("ok")])
+    assistant = S.Assistant(fake, lambda: docs["doc"], default_index("it"))
+    assistant.ask("Tell Sultan?")
+    docs["doc"] = None
+    gc.collect()
+    turn = assistant.ask("E ora?")
+    assert turn.note == "Il progetto è cambiato: nuova conversazione"
+    assert [m.role for m in fake.calls[1][0]] == ["system", "user"]
+    assert "Tell Sultan" not in fake.calls[1][0][-1].content.split("\n\nDalla guida:")[0]
 
 
 def test_placeholders_in_tool_arguments_name_the_real_chunk(doc, fake_tools):
@@ -343,6 +416,21 @@ def test_cancel_stops_between_rounds(doc, fake_tools):
     turn = assistant.ask("Che risoluzione?", cancel=stop.is_set)
     assert len(fake.calls) == 1
     assert turn.text == "Controllo..." and turn.error is None
+    assert turn.cancelled is True
+    assistant, _ = make(doc, [text("Intera.")])
+    assert assistant.ask("Ciao").cancelled is False
+
+
+def test_no_tool_rounds_means_one_message_with_the_answer_now_line(doc, fake_tools):
+    assistant, fake = make(doc, [text("Solo quello che so.")], max_tool_rounds=0)
+    turn = assistant.ask("Che risoluzione?")
+    assert len(fake.calls) == 1 and fake.calls[0][1] is None
+    messages = fake.calls[0][0]
+    assert [m.role for m in messages] == ["system", "user"]
+    assert messages[-1].content.startswith("Che risoluzione?")
+    assert messages[-1].content.endswith("\n\nRispondi ora con quello che sai.")
+    assert turn.sent == [privacy.WARNING, messages[-1].content]
+    assert turn.text == "Solo quello che so."
 
 
 def test_a_provider_error_is_the_turn_error(doc):
@@ -359,19 +447,20 @@ def test_a_provider_error_is_the_turn_error(doc):
 
 
 def test_read_labels(doc):
-    assert S.read_label("dem_statistics", DEM, "it") == "dem_statistics: DEM 7 cm, copertura 98 %"
-    assert S.read_label("dem_statistics", DEM, "en") == "dem_statistics: DEM 7 cm, coverage 98 %"
+    assert S.read_label("dem_statistics", DEM, "it") == "dem_statistics (DEM 7 cm, copertura 98 %)"
+    assert S.read_label("dem_statistics", DEM, "en") == "dem_statistics (DEM 7 cm, coverage 98 %)"
     assert S.read_label("dem_statistics", {"none": "il chunk non ha un DEM"}, "it") == \
-        "dem_statistics: il chunk non ha un DEM"
-    assert S.read_label("markers", {"error": "boom"}, "it") == "markers: errore"
-    assert S.read_label("markers", {"error": "boom"}, "en") == "markers: error"
+        "dem_statistics (il chunk non ha un DEM)"
+    assert S.read_label("markers", {"error": "boom"}, "it") == "markers (errore)"
+    assert S.read_label("markers", {"error": "boom"}, "en") == "markers (error)"
     assert S.read_label("orthomosaic_info", {"resolution": 0.0015, "width": 10, "height": 10}, "it") == \
-        "orthomosaic_info: ortofoto 1,5 mm, 10 x 10 px"
+        "orthomosaic_info (ortofoto 1,5 mm, 10 x 10 px)"
     assert S.read_label("guide_search", {"passages": [{"page": "gui/panes.md", "title": "Layer"}]}, "en") == \
-        "guide_search: 1 passage (gui/panes.md)"
-    assert S.read_label("point_cloud_info", {"points": 1234567}, "it") == "point_cloud_info: 1.234.567 punti"
+        "guide_search (1 passage (gui/panes.md))"
+    assert S.read_label("point_cloud_info", {"points": 1234567}, "it") == "point_cloud_info (1.234.567 punti)"
     assert S.read_label("alignment_report", {"aligned": 57, "photos": 57, "reprojection_error": 0.57}, "it") == \
-        "alignment_report: 57/57 foto allineate, 0,57 px"
+        "alignment_report (57/57 foto allineate, 0,57 px)"
+    assert S.read_label("model_info", {"faces": 2000}, "en") == "model_info (2,000 faces)"
     assert S.read_label("thermal_info", {"frames": 3}, "it") == "thermal_info"
 
 

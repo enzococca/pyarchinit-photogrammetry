@@ -6,6 +6,11 @@ read-only fact tools of :mod:`facts` over the project, and keeps the history. Wh
 history go out with placeholders, the answer comes back with the real names. The passages of the guide are public
 text and leave as they are.
 
+One Filter per conversation: its placeholders stay stable from the first question to the last, and the history
+is re-sent through it. When the project changes (another document opened, or the project closed) the conversation
+ends: the history is cleared, a fresh Filter is built from the new project, and the first turn after the change
+carries a ``note`` saying so.
+
 Streaming: every round of the model is streamed live through ``on_text`` (the text of a round that ends in tool
 calls - "let me check..." - and then the answer); a round that ended in tool calls is followed by one ``"\\n"``.
 The deltas are restored best-effort (a placeholder split over two deltas stays as it is): ``Turn.text`` is the
@@ -19,6 +24,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import textwrap
+import weakref
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -44,7 +51,9 @@ ERROR_QUESTION = {
           "Script:\n```python\n{script}\n```\n\nErrore:\n```\n{error}\n```",
     "en": "This script raised an error. Explain the cause and give the corrected script.\n\n"
           "Script:\n```python\n{script}\n```\n\nError:\n```\n{error}\n```"}
+PROJECT_CHANGED = {"it": "Il progetto è cambiato: nuova conversazione", "en": "The project changed: new conversation"}
 GUIDE_LABEL = {"it": "guida", "en": "guide"}
+TOOL_LABEL = {"it": "strumento", "en": "tool"}
 ERROR_LABEL = {"it": "errore", "en": "error"}
 
 _INSTRUCTIONS = {
@@ -81,29 +90,37 @@ _PLACEHOLDERS = {
 }
 _HEADINGS = {"it": ("## Script", "## Strumenti"), "en": ("## Scripts", "## Tools")}
 
-_SCRIPT = re.compile(r"^[ \t]*```python[ \t]*\n(.*?)^[ \t]*```[ \t]*$", re.MULTILINE | re.DOTALL)
+# a fenced block ```python, ```py or ~~~python (any case, an info string allowed), closed by the same fence
+_SCRIPT = re.compile(r"^[ \t]*(?P<fence>```|~~~)[ \t]*(?i:python|py)\b[^\n]*\n(?P<body>.*?)^[ \t]*(?P=fence)[ \t]*$",
+                     re.MULTILINE | re.DOTALL)
 
 
 @dataclass
 class Turn:
     """One side of the conversation. ``sent``: the exact texts that left in this turn (the composed question, each
     tool result, the final "answer now" line), marked ``NOT_SENT`` with a local model; ``read``: what the answer
-    was built on (one label per tool used and per guide passage retrieved); ``script``: the last ```python block
-    of the answer; ``error``: why there is no answer (a refusal, the provider)."""
+    was built on - "guida: <page>" for each guide page retrieved for the question (consulted, whether the model used
+    it or not) and "strumento: <name> (<what it said>)" for each tool called; ``script``: the last ```python block
+    of the answer; ``error``: why there is no answer (a refusal, the provider); ``note``: a word for the user
+    (the project changed and a new conversation began); ``cancelled``: the answer was stopped by the user and
+    ``text`` is what had arrived."""
     role: str
     text: str
     sent: list[str] = field(default_factory=list)
     read: list[str] = field(default_factory=list)
     script: str | None = None
     error: str | None = None
+    note: str | None = None
+    cancelled: bool = False
 
 
 def extract_script(text: str) -> str | None:
-    """The last ```python block of ``text``, stripped; None when there is none or it is empty."""
-    found = _SCRIPT.findall(text or "")
+    """The last ```python block of ``text`` (also ```py and ~~~python), dedented and stripped: a block indented
+    under a list item runs as it is. None when there is none or it is empty."""
+    found = [m.group("body") for m in _SCRIPT.finditer((text or "").replace("\r\n", "\n"))]
     if not found:
         return None
-    script = found[-1].strip("\n").rstrip()
+    script = textwrap.dedent(found[-1]).strip("\n").rstrip()
     return script or None
 
 
@@ -132,13 +149,14 @@ def _length(metres: float, lang: str) -> str:
 
 
 def read_label(name: str, result: Any, lang: str = "it") -> str:
-    """The label of a tool result in ``Turn.read``: the tool's name and what it said in a few words."""
+    """What a tool said in a few words, after its name: "dem_statistics (DEM 7 cm, copertura 98 %)"; the bare name
+    when there is nothing short to say."""
     if not isinstance(result, dict):
         return name
     if "error" in result:
-        return f"{name}: {ERROR_LABEL[lang]}"
+        return f"{name} ({ERROR_LABEL[lang]})"
     if "none" in result:
-        return f"{name}: {result['none']}"
+        return f"{name} ({result['none']})"
     try:
         if name == "dem_statistics" and result.get("resolution"):
             cov = result.get("coverage_percent")
@@ -146,32 +164,31 @@ def read_label(name: str, result: Any, lang: str = "it") -> str:
             detail = f"DEM {_length(float(result['resolution']), lang)}"
             if cov is not None:
                 detail += f", {word} {_number(float(cov), lang)} %"
-            return f"{name}: {detail}"
+            return f"{name} ({detail})"
         if name == "orthomosaic_info" and result.get("resolution"):
             word = "ortofoto" if lang == "it" else "orthomosaic"
             detail = f"{word} {_length(float(result['resolution']), lang)}"
             if result.get("width") and result.get("height"):
                 detail += f", {int(result['width'])} x {int(result['height'])} px"
-            return f"{name}: {detail}"
+            return f"{name} ({detail})"
         if name == "point_cloud_info" and result.get("points") is not None:
             word = "punti" if lang == "it" else "points"
-            return f"{name}: {_integer(result['points'], lang)} {word}"
+            return f"{name} ({_integer(result['points'], lang)} {word})"
         if name == "model_info" and result.get("faces") is not None:
             word = "facce" if lang == "it" else "faces"
-            return f"{name}: {_integer(result['faces'], lang)} {word}"
+            return f"{name} ({_integer(result['faces'], lang)} {word})"
         if name == "alignment_report" and result.get("photos") is not None:
             word = "foto allineate" if lang == "it" else "photos aligned"
             detail = f"{int(result.get('aligned') or 0)}/{int(result['photos'])} {word}"
             if result.get("reprojection_error") is not None:
                 detail += f", {_number(float(result['reprojection_error']), lang, 2)} px"
-            return f"{name}: {detail}"
+            return f"{name} ({detail})"
         if name == "markers" and isinstance(result.get("markers"), list):
-            word = "marker"
-            return f"{name}: {len(result['markers'])} {word}"
+            return f"{name} ({len(result['markers'])} marker)"
         if name == "project_summary" and isinstance(result.get("chunks"), list):
             n = len(result["chunks"])
             word = ("chunk" if lang == "it" else ("chunk" if n == 1 else "chunks"))
-            return f"{name}: {n} {word}"
+            return f"{name} ({n} {word})"
         if name in ("guide_search", "scripting_api") and isinstance(result.get("passages"), list):
             found = result["passages"]
             pages = sorted({p.get("page", "") for p in found if isinstance(p, dict) and p.get("page")})
@@ -180,7 +197,7 @@ def read_label(name: str, result: Any, lang: str = "it") -> str:
             detail = f"{n} {word}"
             if pages:
                 detail += f" ({', '.join(pages)})"
-            return f"{name}: {detail}"
+            return f"{name} ({detail})"
     except (TypeError, ValueError):  # a label never stops the answer
         log.debug("label of %s", name, exc_info=True)
     return name
@@ -189,9 +206,11 @@ def read_label(name: str, result: Any, lang: str = "it") -> str:
 class Assistant:
     """A conversation with ``provider`` about the project ``document()`` gives (None: no project open).
 
-    The privacy filter is built from the document when the provider is external, a passthrough when it is local,
-    and rebuilt when ``document()`` returns another object; a ``filter_`` given explicitly is kept as it is. Before
-    every question the filter learns the names that appeared in the document since.
+    One privacy filter per conversation: built from the document when the provider is external (a passthrough when
+    it is local), and only taught the names that appeared since before every question. When ``document()`` gives
+    another object than the one the conversation was about (or None once the project is closed) the conversation
+    ends by itself - history cleared, warning re-armed, fresh filter - and the next answer carries the ``note``
+    PROJECT_CHANGED; ``document_changed`` says it until that answer. A ``filter_`` given explicitly is kept.
 
     ``ask`` never raises for a provider failure: the turn carries the error. The warning that typed names and
     coordinates are not filtered is the first entry of ``sent`` of the first external turn of a conversation."""
@@ -205,10 +224,11 @@ class Assistant:
         self.max_tool_rounds = max(0, int(max_tool_rounds))
         self.history: list[Turn] = []
         self._explicit = filter_ is not None
-        self._doc_id: int | None = None
+        self._doc_ref: Any = _NO_DOCUMENT  # a weakref to the document of the conversation, None for "no project"
         self._filter: Filter = filter_ if filter_ is not None else self._new_filter(None)
         self._warned = False
         self._overview: str | None = None
+        self.document_changed = False
 
     # ------------------------------------------------------------------ state
     @property
@@ -224,18 +244,26 @@ class Assistant:
         return Filter(document) if self.external else Filter.passthrough()
 
     def _document_now(self) -> Any:
+        """The document of this question; a change of project ends the conversation (one filter per conversation)."""
         try:
             document = self._document()
         except Exception:  # a getter that fails = no project
             log.debug("document()", exc_info=True)
             document = None
-        if self._explicit:
-            self._filter.update(document)
-        elif id(document) != self._doc_id or self._doc_id is None:
-            self._filter = self._new_filter(document)
+        if self._doc_ref is _NO_DOCUMENT:  # the first question: the conversation is about this document
+            changed = False
+        elif self._doc_ref is None:  # the conversation had no project
+            changed = document is not None
         else:
-            self._filter.update(document)
-        self._doc_id = id(document)
+            known = self._doc_ref()  # None once the old document is gone: a change, whatever came after
+            changed = known is None or known is not document
+        if changed:
+            self.new_conversation()
+            if not self._explicit:
+                self._filter = self._new_filter(document)
+            self.document_changed = True
+        self._filter.update(document)
+        self._doc_ref = None if document is None else _ref(document)
         return document
 
     def new_conversation(self) -> None:
@@ -287,7 +315,7 @@ class Assistant:
             return "", []
         lang = self.language
         blocks = [f"### {p.title} ({p.page})\n{p.text.strip()}" for p in found]
-        labels = [f"{GUIDE_LABEL[lang]}: {p.title} ({p.page})" for p in found]
+        labels = list(dict.fromkeys(f"{GUIDE_LABEL[lang]}: {p.page}" for p in found))
         return f"{FROM_GUIDE[lang]}\n\n" + "\n\n".join(blocks), labels
 
     def _messages(self) -> list[Message]:
@@ -316,20 +344,30 @@ class Assistant:
             result = run_tool(call.name, arguments, document, self.index)
             if not isinstance(result, dict):
                 result = {"error": f"the tool {call.name} returned {type(result).__name__}, not an object"}
-        label = read_label(call.name, result, lang)
+        label = f"{TOOL_LABEL[lang]}: {read_label(call.name, result, lang)}"
         safe = self._filter.facts(result)
         content = json.dumps(safe, ensure_ascii=False, default=str)
         return Message("tool", content, tool_call_id=call.id, error="error" in result), label
 
     def ask(self, question: str, on_text: Callable[[str], None] | None = None,
             cancel: Callable[[], bool] | None = None) -> Turn:
-        """Asks ``question``: the answer's turn, appended to the history after the question's."""
+        """Asks ``question``: the answer's turn, appended to the history after the question's.
+
+        ``on_text`` receives the deltas of every round as they arrive (restored best-effort: a placeholder split
+        across two deltas reaches it as the model wrote it) and ``"\\n"`` after a round that ended in tool calls:
+        when the turn ends, replace what was shown with ``Turn.text``, which is the restored answer. ``cancel`` is
+        read from a watcher thread too: give a thread-safe callable (an ``Event.is_set``)."""
         lang = self.language
         document = self._document_now()
         context, labels = self._context(question)
         outgoing = self._filter.outgoing(question)
         composed = f"{outgoing}\n\n{context}" if context else outgoing
+        if self.max_tool_rounds == 0:  # no tool round: the question and the "answer now" line go together
+            composed = f"{composed}\n\n{ANSWER_NOW[lang]}"
         turn = Turn("assistant", "", read=list(labels))
+        if self.document_changed:
+            turn.note = PROJECT_CHANGED[lang]
+            self.document_changed = False
         if self.external and not self._warned:
             turn.sent.append(WARNING)
             self._warned = True
@@ -348,14 +386,14 @@ class Assistant:
         try:
             while True:
                 with_tools = rounds < self.max_tool_rounds
-                if not with_tools:
+                if not with_tools and rounds:
                     messages.append(Message("user", ANSWER_NOW[lang]))
                     turn.sent.append(self._mark(ANSWER_NOW[lang]))
                 reply = self.provider.complete(messages, TOOLS if with_tools else None, on_text=stream,
                                               cancel=cancel)
                 if not (reply.tool_calls and with_tools and reply.stop != "refusal") or _cancelled(cancel):
                     break
-                messages.append(Message("assistant", reply.text, tool_calls=list(reply.tool_calls)))
+                messages.append(Message("assistant", reply.text, tool_calls=[_as_written(c) for c in reply.tool_calls]))
                 for call in reply.tool_calls:
                     message, label = self._run_call(call, document)
                     messages.append(message)
@@ -372,6 +410,7 @@ class Assistant:
                 return turn
         if reply is None:
             return turn
+        turn.cancelled = _cancelled(cancel)
         answer = reply.text or earlier
         if reply.stop == "refusal":
             turn.error = REFUSED[lang]
@@ -386,6 +425,24 @@ class Assistant:
         """Asks why ``script`` failed with ``error`` (its traceback) and for the corrected script."""
         question = ERROR_QUESTION[self.language].format(script=(script or "").rstrip(), error=(error or "").rstrip())
         return self.ask(question, on_text=on_text, cancel=cancel)
+
+
+_NO_DOCUMENT = object()  # before the first question
+
+
+def _ref(document: Any) -> Any:
+    """A weak reference to the document, or the document itself when it cannot be referenced weakly."""
+    try:
+        return weakref.ref(document)
+    except TypeError:
+        return lambda: document
+
+
+def _as_written(call: ToolCall) -> ToolCall:
+    """The call as it goes back to the model: broken arguments are not its own writing, they go back empty."""
+    if isinstance(call.arguments, dict) and "_invalid_json" not in call.arguments:
+        return call
+    return ToolCall(call.id, call.name, {})
 
 
 def _cancelled(cancel: Callable[[], bool] | None) -> bool:
