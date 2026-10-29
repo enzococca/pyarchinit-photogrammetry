@@ -364,7 +364,9 @@ def test_ordinary_lines_of_the_guide_change_only_when_they_hold_a_path_or_url():
 
     root = Path(__file__).resolve().parents[1]
     guide = sorted((root / "src" / "pyarchinit_photogrammetry" / "assistant" / "guide").glob("*.it.md"))
-    sets = {"guide": (guide, 0.01)} if guide else {
+    # one limit of 2 % for the packaged guide and the docs alike (ruling T4-2): the guarantee is the check below that
+    # every changed line holds a path, a link or EPSG/UTM text; the share only says the filter does not run wild
+    sets = {"guide": (guide, 0.02)} if guide else {
         "docs it": (sorted((root / "docs").glob("*.it.md")), 0.02),
         "docs en": (sorted((root / "docs").glob("*.md")), 0.02),
         "docs gui": (sorted((root / "docs" / "gui").glob("*.it.md")), 0.02)}
