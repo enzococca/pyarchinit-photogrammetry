@@ -24,7 +24,10 @@ class _Fake:
     def __init__(self):
         self.requests: list[tuple[str, str, dict | None]] = []
         self.script: list = []
-        self.pause = 0.0
+        self.pause = 0.0  # between two chunks
+        self.delay = 0.0  # before the first byte (a model still thinking)
+        self.stall = 0.0  # after the last chunk, before closing (a server that hangs mid-stream)
+        self.raw: list[bytes] | None = None  # a whole answer written as is, piece by piece
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -43,7 +46,19 @@ class _Fake:
 
             def do_POST(self):
                 fake.requests.append(("POST", self.path, self._body()))
-                fake.post(self)
+                try:
+                    if fake.delay:
+                        time.sleep(fake.delay)
+                    if fake.raw is not None:
+                        for piece in fake.raw:
+                            self.wfile.write(piece)
+                            self.wfile.flush()
+                            time.sleep(fake.pause)
+                        self.close_connection = True
+                        return
+                    fake.post(self)
+                except (BrokenPipeError, ConnectionResetError):
+                    self.close_connection = True
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
@@ -71,6 +86,7 @@ class _Fake:
                 handler.wfile.flush()
                 if self.pause:
                     time.sleep(self.pause)
+            time.sleep(self.stall)
         except (BrokenPipeError, ConnectionResetError):
             pass
         handler.close_connection = True
@@ -392,3 +408,218 @@ def test_keys_with_a_failing_backend(monkeypatch):
             keys.set_key("openai", "k")
     finally:
         keyring.set_keyring(previous)
+
+
+# -- fix round 1: privacy, broken servers, cancel while thinking --------------------------------------------------
+
+def _sse_line(delta, finish=None) -> bytes:
+    chunk = {"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+    return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode()
+
+
+@pytest.fixture
+def proxy(monkeypatch):
+    """A proxy on loopback named by every proxy variable: it records the connections it receives."""
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    server.settimeout(0.1)
+    hits: list = []
+    done = threading.Event()
+
+    def accept():
+        while not done.is_set():
+            try:
+                conn, _ = server.accept()
+            except (socket.timeout, OSError):
+                continue
+            hits.append(conn.recv(4096))
+            conn.close()
+
+    thread = threading.Thread(target=accept, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.getsockname()[1]}"
+    for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"):
+        monkeypatch.setenv(name, url)
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    yield hits
+    done.set()
+    thread.join(2)
+    server.close()
+
+
+def test_local_requests_never_go_through_a_proxy(openai_fake, proxy, monkeypatch):
+    import urllib.request
+
+    assert urllib.request.getproxies().get("http")  # the environment does name the proxy
+    monkeypatch.setattr(urllib.request, "_opener", None)  # urlopen's default opener reads it again
+    openai_fake.script = [({"content": "Ciao"}, "stop")]
+    provider = OpenAICompatible(openai_fake.url, "m1", timeout=2)
+    assert provider.complete([Message("user", "Dati riservati dello scavo")]).text == "Ciao"
+    assert provider.list_models() == ["m1", "m2"]
+    monkeypatch.setattr(providers, "LOCAL_SERVERS", {"lmstudio": openai_fake.url})
+    assert probe_local(timeout=2) == [("lmstudio", openai_fake.url, ["m1", "m2"])]
+    time.sleep(0.2)
+    assert proxy == []
+
+
+def test_no_request_follows_a_redirect(openai_fake, monkeypatch):
+    def redirect(h):
+        h.send_response(302)
+        h.send_header("Location", "http://127.0.0.1:9/v1/models")
+        h.send_header("Content-Length", "0")
+        h.end_headers()
+
+    monkeypatch.setattr(openai_fake, "get", redirect)
+    with pytest.raises(ProviderError, match="302"):
+        OpenAICompatible(openai_fake.url, "m1").list_models()
+    assert len(openai_fake.requests) == 1
+
+
+def test_invalid_tool_arguments_reach_the_session(openai_fake):
+    openai_fake.script = [({"content": "Ciao"}, None),
+                          ({"tool_calls": [{"index": 0, "id": "call_1", "type": "function",
+                                            "function": {"name": "dem_statistics", "arguments": "{\"a\": "}}]},
+                           "tool_calls")]
+    received = []
+    reply = OpenAICompatible(openai_fake.url, "m1").complete([Message("user", "x")], [TOOL], on_text=received.append)
+    assert reply.text == "Ciao" and received == ["Ciao"]
+    assert reply.tool_calls == [ToolCall("call_1", "dem_statistics", {"_invalid_json": "{\"a\": "})]
+    assert reply.stop == "tool_calls"
+
+
+def test_interleaved_tool_calls_are_kept_apart(openai_fake):
+    def call(index, name=None, arguments="", id=None):
+        function = {"arguments": arguments}
+        if name:
+            function["name"] = name
+        out = {"index": index, "function": function}
+        if id:
+            out["id"] = id
+        return out
+
+    openai_fake.script = [({"tool_calls": [call(1, "list_chunks", "{", "b"), call(0, "dem_statistics", "{\"chu", "a")]},
+                           None),
+                          ({"tool_calls": [call(0, arguments="nk\": \"S1\"}"), call(1, arguments="}")]}, "tool_calls")]
+    reply = OpenAICompatible(openai_fake.url, "m1").complete([Message("user", "x")], [TOOL])
+    assert reply.tool_calls == [ToolCall("a", "dem_statistics", {"chunk": "S1"}), ToolCall("b", "list_chunks", {})]
+
+
+def test_a_character_split_across_writes_arrives_whole(openai_fake):
+    line = _sse_line({"content": "perché è così"}, "stop")
+    cut = line.index("é".encode()) + 1  # inside the two bytes of é
+    openai_fake.raw = [b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                       line[:cut], line[cut:], b"data: [DONE]\n\n"]
+    openai_fake.pause = 0.05
+    assert OpenAICompatible(openai_fake.url, "m1").complete([Message("user", "x")]).text == "perché è così"
+
+
+def test_local_kind_is_loopback_only_even_with_a_key():
+    with pytest.raises(ProviderError):
+        OpenAICompatible("http://example.com/v1", "m", api_key="k", kind="local")
+    with pytest.raises(ProviderError):
+        providers.make_provider("local", "m", "https://remote.example/v1", api_key="k")
+    assert OpenAICompatible("http://127.0.0.1:8080/v1", "m", api_key="k", kind="local").kind == "local"
+
+
+def test_only_http_addresses_of_this_computer_are_loopback():
+    for url in ("http://127.0.0.1@evil.com/v1", "http://127.0.0.1:80@evil.com/v1", "http://localhost.evil/v1",
+                "file://localhost/etc/passwd", "ftp://127.0.0.1/", "http://evil.com\\@127.0.0.1/",
+                "http://user@127.0.0.1/v1", "http://0.0.0.0:1234/v1"):
+        assert not is_loopback(url), url
+    for url in ("https://localhost/v1", "http://LOCALHOST:1234/v1", "http://127.0.0.2:8000/v1"):
+        assert is_loopback(url), url
+
+
+def test_a_server_cut_off_mid_stream_is_a_provider_error(openai_fake):
+    first = _sse_line({"content": "Ci"})
+    openai_fake.raw = [b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+                       f"{len(first):x}\r\n".encode() + first + b"\r\n",
+                       b"64\r\ndata: {\"cho"]  # a chunk of 100 bytes that never ends
+    with pytest.raises(ProviderError, match="127.0.0.1"):
+        OpenAICompatible(openai_fake.url, "m1").complete([Message("user", "x")])
+
+    openai_fake.raw = [b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n", first]
+    with pytest.raises(ProviderError, match="interrotta"):  # closed without finish_reason nor [DONE]
+        OpenAICompatible(openai_fake.url, "m1").complete([Message("user", "x")])
+
+    body = b"{not json"
+    openai_fake.raw = [b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                       + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body]
+    with pytest.raises(ProviderError, match="127.0.0.1"):
+        OpenAICompatible(openai_fake.url, "m1").complete([Message("user", "x")])
+
+
+def test_a_silent_server_fails_within_the_timeout(openai_fake):
+    openai_fake.delay = 3
+    start = time.monotonic()
+    with pytest.raises(ProviderError, match=f"127.0.0.1:{openai_fake.port}"):
+        OpenAICompatible(openai_fake.url, "m1", timeout=0.5).complete([Message("user", "x")])
+    assert time.monotonic() - start < 2
+
+
+def test_cancel_while_the_model_is_still_thinking(openai_fake):
+    openai_fake.delay = 3
+    start = time.monotonic()
+    reply = OpenAICompatible(openai_fake.url, "m1", timeout=10).complete(
+        [Message("user", "x")], cancel=lambda: time.monotonic() - start > 0.2)
+    assert time.monotonic() - start < 1
+    assert reply.stop == "end" and reply.text == "" and reply.tool_calls == []
+
+
+def test_cancel_while_the_model_pauses_mid_answer(openai_fake):
+    openai_fake.script = [({"content": "Ci"}, None)]
+    openai_fake.stall = 3
+    received = []
+    start = time.monotonic()
+    reply = OpenAICompatible(openai_fake.url, "m1", timeout=10).complete(
+        [Message("user", "x")], on_text=received.append, cancel=lambda: time.monotonic() - start > 0.3)
+    assert time.monotonic() - start < 1.2
+    assert reply.stop == "end" and reply.text == "Ci"
+
+
+def test_claude_cancel_while_thinking(claude_fake):
+    pytest.importorskip("anthropic")
+    claude_fake.delay = 3
+    claude_fake.script = _claude_events([("text", ["tardi"])], "end_turn")
+    start = time.monotonic()
+    reply = Claude(api_key="test", base_url=claude_fake.url, timeout=10).complete(
+        [Message("user", "x")], cancel=lambda: time.monotonic() - start > 0.2)
+    assert time.monotonic() - start < 1
+    assert reply.stop == "end" and reply.text == ""
+
+
+def test_claude_stalled_stream_is_a_provider_error(claude_fake):
+    pytest.importorskip("anthropic")
+    claude_fake.script = _claude_events([], "end_turn")[:1]  # message_start, then nothing
+    claude_fake.stall = 3
+    start = time.monotonic()
+    with pytest.raises(ProviderError, match=f"127.0.0.1:{claude_fake.port}"):
+        Claude(api_key="test", base_url=claude_fake.url, timeout=0.5).complete([Message("user", "x")])
+    assert time.monotonic() - start < 2.5
+
+
+def test_claude_stream_dropped_before_the_end_is_a_provider_error(claude_fake):
+    pytest.importorskip("anthropic")
+    claude_fake.script = _claude_events([("text", ["Ci"])], "end_turn")[:-2]  # no message_delta, no message_stop
+    with pytest.raises(ProviderError, match="interrotta"):
+        Claude(api_key="test", base_url=claude_fake.url).complete([Message("user", "x")])
+
+
+def test_claude_details_of_the_request_and_the_stop(claude_fake):
+    pytest.importorskip("anthropic")
+    claude_fake.script = _claude_events([("text", ["Troppo"]),
+                                         ("tool", "toolu_2", "dem_statistics", ["{\"a\": tru"])],
+                                        "model_context_window_exceeded")
+    history = [Message("user", "Statistiche?"),
+               Message("assistant", "", [ToolCall("toolu_1", "dem_statistics", {"chunk": "X"})]),
+               Message("tool", json.dumps({"errore": "chunk sconosciuto"}), tool_call_id="toolu_1", error=True),
+               Message("user", "   ")]
+    reply = Claude(api_key="test", base_url=claude_fake.url).complete(history, [TOOL])
+    assert reply.stop == "length"
+    assert reply.tool_calls == [ToolCall("toolu_2", "dem_statistics", {"_invalid_json": "{\"a\": tru"})]
+    body = claude_fake.body
+    assert [m["role"] for m in body["messages"]] == ["user", "assistant", "user"]  # the empty question is not sent
+    assert body["messages"][2]["content"] == [{"type": "tool_result", "tool_use_id": "toolu_1", "is_error": True,
+                                               "content": json.dumps({"errore": "chunk sconosciuto"})}]

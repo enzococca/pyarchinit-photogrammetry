@@ -1,15 +1,22 @@
 """Language-model providers of the assistant.
 
 Two shapes: the OpenAI chat-completions API (local servers - LM Studio, llama.cpp, Ollama, Unsloth - on this
-computer only when there is no key, or OpenAI itself with a key) and Claude through the ``anthropic`` SDK. Both
-stream: ``complete`` hands each text delta to ``on_text`` and stops reading as soon as ``cancel()`` is true.
+computer only, or OpenAI itself with a key) and Claude through the ``anthropic`` SDK. Both stream: ``complete``
+hands each text delta to ``on_text`` and, as soon as ``cancel()`` is true (checked every 0.1 s, also while the
+model is still thinking), stops and returns what was received with ``stop="end"``.
+
+Requests to this computer never go through a proxy and no request follows a redirect: the text of a local model
+never leaves the computer, and a key never reaches another host.
 """
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import json
 import logging
+import queue
 import socket
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -26,6 +33,7 @@ LOCAL_SERVERS = {"lmstudio": "http://127.0.0.1:1234/v1", "llama.cpp": "http://12
                  "ollama": "http://127.0.0.1:11434/v1", "unsloth": "http://127.0.0.1:8000/v1"}
 MAX_TOKENS = 8192  # of one Claude answer
 STOPS = ("end", "tool_calls", "length", "refusal")
+CANCEL_POLL = 0.1  # seconds between two looks at cancel()
 
 
 @dataclass
@@ -38,6 +46,7 @@ class ToolSpec:
 
 @dataclass
 class ToolCall:
+    """A call asked by the model. Arguments that are not a JSON object arrive as ``{"_invalid_json": raw}``."""
     id: str
     name: str
     arguments: dict
@@ -46,11 +55,12 @@ class ToolCall:
 @dataclass
 class Message:
     """One message of the conversation: role "system", "user", "assistant" or "tool" (a tool result: ``content``
-    is JSON text and ``tool_call_id`` names the call)."""
+    is JSON text, ``tool_call_id`` names the call and ``error`` marks a failed call)."""
     role: str
     content: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     tool_call_id: str | None = None
+    error: bool = False
 
 
 @dataclass
@@ -63,7 +73,7 @@ class Reply:
 
 
 class ProviderError(Exception):
-    """A provider cannot answer (address refused, server down, key missing or rejected)."""
+    """A provider cannot answer (address refused, server down or cut off, key missing or rejected)."""
 
 
 @runtime_checkable
@@ -82,12 +92,15 @@ class Provider(Protocol):
 
 
 def is_loopback(url: str) -> bool:
-    """True when ``url`` names this computer (localhost or a loopback address)."""
+    """True when ``url`` is an http(s) address of this computer (localhost or a loopback address)."""
     try:
-        host = urllib.parse.urlparse(url).hostname
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.hostname
     except ValueError:
         return False
-    if not host:
+    if parsed.scheme not in ("http", "https") or not host:
+        return False
+    if "@" in parsed.netloc or "\\" in parsed.netloc:  # userinfo: parsers disagree on the host
         return False
     if host.lower() == "localhost":
         return True
@@ -115,18 +128,132 @@ def _server_name(base_url: str) -> str:
     return _address(base_url)
 
 
+def _cancelled(cancel: Callable[[], bool] | None) -> bool:
+    if cancel is None:
+        return False
+    try:
+        return bool(cancel())
+    except Exception:  # a broken callback never stops the answer
+        log.debug("cancel() ha sollevato un errore", exc_info=True)
+        return False
+
+
+class _Watch:
+    """A thread that looks at ``cancel()`` every CANCEL_POLL seconds and calls ``stop()`` once when it is true."""
+
+    def __init__(self, cancel: Callable[[], bool] | None, stop: Callable[[], None]):
+        self.cancel, self.stop = cancel, stop
+        self.fired = False
+        self._done = threading.Event()
+
+    def __enter__(self) -> "_Watch":
+        if self.cancel is not None:
+            threading.Thread(target=self._run, name="assistant-cancel", daemon=True).start()
+        return self
+
+    def _run(self):
+        while not self._done.wait(CANCEL_POLL):
+            if _cancelled(self.cancel):
+                self.fired = True
+                try:
+                    self.stop()
+                except Exception:
+                    log.debug("annullamento", exc_info=True)
+                return
+
+    def __exit__(self, *exc):
+        self._done.set()
+        return False
+
+
+class _Sockets:
+    """The sockets of one request, so that a cancel can shut them down (the server sees the client gone)."""
+
+    def __init__(self):
+        self._socks: list = []
+        self._lock = threading.Lock()
+        self._shut = False
+
+    def add(self, sock):
+        with self._lock:
+            self._socks.append(sock)
+            if self._shut:
+                self._close(sock)
+
+    def shutdown(self):
+        with self._lock:
+            self._shut = True
+            for sock in self._socks:
+                self._close(sock)
+
+    @staticmethod
+    def _close(sock):
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+
+def _tracked(base, sockets: _Sockets):
+    class Tracked(base):
+        def connect(self):
+            super().connect()
+            sockets.add(self.sock)
+
+    return Tracked
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Redirects refused: the answer that redirects reaches the caller as the HTTP error it is."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+class _HTTP(urllib.request.HTTPHandler):
+    def __init__(self, sockets: _Sockets):
+        super().__init__()
+        self._sockets = sockets
+
+    def http_open(self, req):
+        return self.do_open(_tracked(http.client.HTTPConnection, self._sockets), req)
+
+
+class _HTTPS(urllib.request.HTTPSHandler):
+    def __init__(self, sockets: _Sockets):
+        super().__init__(context=_ssl_context())
+        self._sockets = sockets
+
+    def https_open(self, req):
+        return self.do_open(_tracked(http.client.HTTPSConnection, self._sockets), req, context=self._context)
+
+
+class _Partial:
+    """What an answer has received so far: kept when it is cancelled."""
+
+    def __init__(self):
+        self.text: list[str] = []
+        self.usage: dict = {}
+
+    def reply(self) -> Reply:
+        return Reply("".join(self.text), [], "end", self.usage)
+
+
 class OpenAICompatible:
-    """The chat-completions API of OpenAI: a local server (no key, loopback only) or OpenAI (with a key)."""
+    """The chat-completions API of OpenAI: a local server (loopback only, key optional) or OpenAI (with a key)."""
 
     def __init__(self, base_url: str, model: str, api_key: str | None = None, timeout: float = 120.0,
                  kind: str | None = None):
         self.base_url = base_url.rstrip("/")
-        if api_key is None and not is_loopback(self.base_url):
-            raise ProviderError("solo indirizzi di questo computer senza chiave")
+        self.kind = kind or ("local" if api_key is None else "openai")
+        if not is_loopback(self.base_url):
+            if api_key is None:
+                raise ProviderError("solo indirizzi di questo computer senza chiave")
+            if self.kind == "local":
+                raise ProviderError("un server locale deve essere su questo computer")
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
-        self.kind = kind or ("local" if api_key is None else "openai")
 
     @property
     def label(self) -> str:
@@ -135,7 +262,13 @@ class OpenAICompatible:
         return f"OpenAI · {self.model}"
 
     # HTTP
-    def _open(self, path: str, body: dict | None = None, stream: bool = False):
+    def _opener(self, sockets: _Sockets):
+        handlers = [_NoRedirect(), _HTTP(sockets), _HTTPS(sockets)]
+        if is_loopback(self.base_url):  # never through a proxy: the text stays on this computer
+            handlers.insert(0, urllib.request.ProxyHandler({}))
+        return urllib.request.build_opener(*handlers)
+
+    def _open(self, path: str, body: dict | None = None, stream: bool = False, sockets: _Sockets | None = None):
         url = f"{self.base_url}{path}"
         headers = {"Accept": "text/event-stream" if stream else "application/json"}
         data = None
@@ -145,9 +278,8 @@ class OpenAICompatible:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         request = urllib.request.Request(url, data=data, headers=headers, method="POST" if data else "GET")
-        context = _ssl_context() if url.startswith("https:") else None
         try:
-            return urllib.request.urlopen(request, timeout=self.timeout, context=context)
+            return self._opener(sockets or _Sockets()).open(request, timeout=self.timeout)
         except urllib.error.HTTPError as exc:
             try:
                 detail = exc.read().decode("utf-8", "replace").strip()[:300]
@@ -156,9 +288,15 @@ class OpenAICompatible:
             if exc.code in (401, 403):
                 raise ProviderError(f"{_address(url)}: chiave non valida o senza permesso ({exc.code})") from exc
             raise ProviderError(f"{_address(url)} ha risposto {exc.code}: {detail or exc.reason}") from exc
-        except (urllib.error.URLError, OSError) as exc:
+        except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as exc:
             reason = getattr(exc, "reason", exc)
             raise ProviderError(f"{_address(url)} non risponde: {reason}") from exc
+
+    def _broken(self, exc: Exception) -> ProviderError:
+        """A transport error after the request was sent, in the words of the engine."""
+        if isinstance(exc, (TimeoutError, socket.timeout)):
+            return ProviderError(f"{_address(self.base_url)} non risponde: {exc}")
+        return ProviderError(f"{_address(self.base_url)}: risposta interrotta ({exc})")
 
     # messages
     @staticmethod
@@ -181,33 +319,43 @@ class OpenAICompatible:
     def complete(self, messages: list[Message], tools: list[ToolSpec] | None = None,
                  on_text: Callable[[str], None] | None = None,
                  cancel: Callable[[], bool] | None = None) -> Reply:
-        body: dict = {"model": self.model, "messages": [self._message(m) for m in messages], "stream": True}
+        sent = [m for m in messages if not (m.role == "user" and not m.content.strip())]
+        body: dict = {"model": self.model, "messages": [self._message(m) for m in sent], "stream": True}
         if tools:
             body["tools"] = [self._tool(t) for t in tools]
             body["tool_choice"] = "auto"
-        response = self._open("/chat/completions", body, stream=True)
-        try:
-            if "json" in (response.headers.get("Content-Type") or ""):  # a server that does not stream
-                return self._whole(json.loads(response.read()), on_text)
-            return self._stream(response, on_text, cancel)
-        except (socket.timeout, TimeoutError, OSError) as exc:
-            raise ProviderError(f"{_address(self.base_url)} non risponde: {exc}") from exc
-        finally:
-            response.close()
+        sockets, partial = _Sockets(), _Partial()
+        with _Watch(cancel, sockets.shutdown) as watch:
+            try:
+                response = self._open("/chat/completions", body, stream=True, sockets=sockets)
+                try:
+                    if "json" in (response.headers.get("Content-Type") or ""):  # a server that does not stream
+                        return self._whole(json.loads(response.read()), on_text)
+                    return self._stream(response, on_text, cancel, partial)
+                finally:
+                    response.close()
+            except ProviderError:
+                if watch.fired:
+                    return partial.reply()
+                raise
+            except (OSError, http.client.HTTPException, ValueError) as exc:
+                if watch.fired:
+                    return partial.reply()
+                raise self._broken(exc) from exc
 
-    def _stream(self, response, on_text, cancel) -> Reply:
-        text: list[str] = []
+    def _stream(self, response, on_text, cancel, partial: _Partial) -> Reply:
         calls: dict[int, dict] = {}
         finish = None
-        usage: dict = {}
+        done = False
         for raw in response:
-            if cancel is not None and cancel():
-                return Reply("".join(text), [], "end", usage)
+            if _cancelled(cancel):
+                return partial.reply()
             line = raw.decode("utf-8", "replace").strip()
             if not line.startswith("data:"):
                 continue
             payload = line[5:].strip()
             if payload == "[DONE]":
+                done = True
                 break
             try:
                 chunk = json.loads(payload)
@@ -217,12 +365,12 @@ class OpenAICompatible:
             if chunk.get("error"):
                 raise ProviderError(f"{_address(self.base_url)}: {chunk['error']}")
             if chunk.get("usage"):
-                usage = _openai_usage(chunk["usage"])
+                partial.usage = _openai_usage(chunk["usage"])
             for choice in chunk.get("choices") or []:
                 delta = choice.get("delta") or {}
                 piece = delta.get("content")
                 if piece:
-                    text.append(piece)
+                    partial.text.append(piece)
                     if on_text is not None:
                         on_text(piece)
                 for position, call in enumerate(delta.get("tool_calls") or []):
@@ -236,10 +384,12 @@ class OpenAICompatible:
                     slot["arguments"] += arguments or ""
                 if choice.get("finish_reason"):
                     finish = choice["finish_reason"]
-            if cancel is not None and cancel():
-                return Reply("".join(text), [], "end", usage)
+            if _cancelled(cancel):
+                return partial.reply()
+        if not done and finish is None:
+            raise ProviderError(f"{_address(self.base_url)}: risposta interrotta prima della fine")
         tool_calls = [_tool_call(calls[i], i) for i in sorted(calls)]
-        return Reply("".join(text), tool_calls, _openai_stop(finish, tool_calls), usage)
+        return Reply("".join(partial.text), tool_calls, _openai_stop(finish, tool_calls), partial.usage)
 
     def _whole(self, data: dict, on_text) -> Reply:
         choice = (data.get("choices") or [{}])[0]
@@ -261,25 +411,31 @@ class OpenAICompatible:
         response = self._open("/models")
         try:
             data = json.loads(response.read())
-        except (ValueError, OSError) as exc:
+        except (ValueError, OSError, http.client.HTTPException) as exc:
             raise ProviderError(f"{_address(self.base_url)}: elenco dei modelli illeggibile ({exc})") from exc
         finally:
             response.close()
+        if not isinstance(data, dict):
+            raise ProviderError(f"{_address(self.base_url)}: elenco dei modelli illeggibile")
         return [m["id"] for m in data.get("data") or [] if isinstance(m, dict) and m.get("id")]
 
     def check(self) -> str:
         return f"ok: {len(self.list_models())} modelli"
 
 
-def _tool_call(slot: dict, position: int) -> ToolCall:
-    raw = slot["arguments"].strip() or "{}"
+def _arguments(raw: str) -> dict:
+    """The arguments of a tool call: a JSON object, else ``{"_invalid_json": raw}`` for the session to answer."""
+    if not raw.strip():
+        return {}
     try:
         arguments = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ProviderError(f"argomenti non validi per lo strumento {slot['name']}: {raw[:200]}") from exc
-    if not isinstance(arguments, dict):
-        raise ProviderError(f"argomenti non validi per lo strumento {slot['name']}: {raw[:200]}")
-    return ToolCall(slot["id"] or f"call_{position}", slot["name"], arguments)
+    except json.JSONDecodeError:
+        return {"_invalid_json": raw}
+    return arguments if isinstance(arguments, dict) else {"_invalid_json": raw}
+
+
+def _tool_call(slot: dict, position: int) -> ToolCall:
+    return ToolCall(slot["id"] or f"call_{position}", slot["name"], _arguments(slot["arguments"]))
 
 
 def _openai_stop(finish: str | None, tool_calls: list[ToolCall]) -> str:
@@ -292,8 +448,15 @@ def _openai_usage(usage: dict) -> dict:
     return {"input_tokens": usage.get("prompt_tokens", 0), "output_tokens": usage.get("completion_tokens", 0)}
 
 
+CLAUDE_STOPS = {"tool_use": "tool_calls", "max_tokens": "length", "model_context_window_exceeded": "length",
+                "refusal": "refusal"}
+
+
 class Claude:
-    """Claude through the ``anthropic`` SDK, with prompt caching on the system text and on the tools."""
+    """Claude through the ``anthropic`` SDK, with prompt caching on the system text and on the tools.
+
+    The SDK tries a failed request once more: an endpoint that never answers fails after about twice ``timeout``
+    plus its back-off."""
 
     kind = "claude"
 
@@ -328,15 +491,17 @@ class Claude:
             if message.role == "system":
                 continue
             if message.role == "tool":
-                role, blocks = "user", [{"type": "tool_result", "tool_use_id": message.tool_call_id,
-                                         "content": message.content}]
+                result = {"type": "tool_result", "tool_use_id": message.tool_call_id, "content": message.content}
+                if message.error:
+                    result["is_error"] = True
+                role, blocks = "user", [result]
             elif message.role == "assistant":
                 role = "assistant"
                 blocks = [{"type": "text", "text": message.content}] if message.content else []
                 blocks += [{"type": "tool_use", "id": c.id, "name": c.name, "input": c.arguments}
                            for c in message.tool_calls]
-            else:
-                role, blocks = "user", [{"type": "text", "text": message.content}]
+            else:  # an empty user text is refused by the API: skipped
+                role, blocks = "user", [{"type": "text", "text": message.content}] if message.content.strip() else []
             if not blocks:
                 continue
             if turns and turns[-1]["role"] == role:  # the API wants the roles to alternate
@@ -358,41 +523,99 @@ class Claude:
     def complete(self, messages: list[Message], tools: list[ToolSpec] | None = None,
                  on_text: Callable[[str], None] | None = None,
                  cancel: Callable[[], bool] | None = None) -> Reply:
+        """The SDK reads in a thread of its own; this one hands the text on and looks at ``cancel()`` meanwhile,
+        so that a cancel is honoured while Claude is still thinking."""
         request = self._request(messages, tools)
+        items: queue.Queue = queue.Queue()
+        stop = threading.Event()
+        current: dict = {}
+
+        def read():
+            try:
+                with self.client.messages.stream(model=self.model, max_tokens=self.max_tokens, **request) as stream:
+                    current["stream"] = stream
+                    if stop.is_set():
+                        return
+                    for event in stream:
+                        if stop.is_set():
+                            return
+                        items.put(("event", event))
+                    items.put(("final", stream.get_final_message()))
+            except BaseException as exc:  # handed to the caller's thread
+                if not stop.is_set():
+                    items.put(("error", exc))
+
+        threading.Thread(target=read, name="assistant-claude", daemon=True).start()
         shown: list[str] = []  # the text handed to on_text: what a cancelled answer keeps
-        try:
-            with self.client.messages.stream(model=self.model, max_tokens=self.max_tokens, **request) as stream:
-                for event in stream:
-                    if cancel is not None and cancel():
-                        return Reply("".join(shown), [], "end", {})
-                    if event.type == "text":
-                        shown.append(event.text)
-                        if on_text is not None:
-                            on_text(event.text)
-                message = stream.get_final_message()
-        except self._anthropic.AnthropicError as exc:
-            raise self._error(exc) from exc
+        raw_inputs: dict[int, str] = {}
+        finished = False
+        while True:
+            try:
+                kind, item = items.get(timeout=CANCEL_POLL)
+            except queue.Empty:
+                kind, item = "wait", None
+            if kind in ("wait", "event") and _cancelled(cancel):
+                stop.set()
+                stream = current.get("stream")
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        log.debug("chiusura dello stream", exc_info=True)
+                return Reply("".join(shown), [], "end", {})
+            if kind == "wait":
+                continue
+            if kind == "error":
+                raise self._error(item) from item
+            if kind == "final":
+                if not finished:
+                    raise ProviderError(f"{self._where()}: risposta interrotta prima della fine")
+                return self._reply(item, raw_inputs)
+            event = item
+            if event.type == "text":
+                shown.append(event.text)
+                if on_text is not None:
+                    on_text(event.text)
+            elif event.type == "content_block_delta" and getattr(event.delta, "type", "") == "input_json_delta":
+                raw_inputs[event.index] = raw_inputs.get(event.index, "") + event.delta.partial_json
+            elif event.type == "message_stop":
+                finished = True
+
+    @staticmethod
+    def _reply(message, raw_inputs: dict[int, str]) -> Reply:
         text = "".join(b.text for b in message.content if b.type == "text")
-        calls = [ToolCall(b.id, b.name, dict(b.input or {})) for b in message.content if b.type == "tool_use"]
-        stop = {"tool_use": "tool_calls", "max_tokens": "length", "refusal": "refusal"}.get(message.stop_reason or "",
-                                                                                              "end")
+        calls = []
+        for index, block in enumerate(message.content):
+            if block.type != "tool_use":
+                continue
+            raw = raw_inputs.get(index)
+            arguments = _arguments(raw) if raw is not None else dict(block.input or {})
+            calls.append(ToolCall(block.id, block.name, arguments))
+        stop = CLAUDE_STOPS.get(message.stop_reason or "", "end")
         return Reply(text, calls, stop, _claude_usage(message.usage))
 
-    def _error(self, exc: Exception) -> ProviderError:
+    def _where(self) -> str:
+        return _address(self.base_url) if self.base_url else "Claude"
+
+    def _error(self, exc: BaseException) -> ProviderError:
         anthropic = self._anthropic
-        where = _address(self.base_url) if self.base_url else "Claude"
+        where = self._where()
+        if isinstance(exc, ProviderError):
+            return exc
         if isinstance(exc, anthropic.AuthenticationError):
             return ProviderError("chiave di Claude non valida")
         if isinstance(exc, anthropic.APIConnectionError):
             return ProviderError(f"{where} non risponde: {exc}")
         if isinstance(exc, anthropic.APIStatusError):
             return ProviderError(f"{where} ha risposto {exc.status_code}: {exc.message}")
-        return ProviderError(f"{where}: {exc}")
+        if isinstance(exc, TimeoutError) or "Timeout" in type(exc).__name__:  # httpx timeouts while streaming
+            return ProviderError(f"{where} non risponde: {exc or type(exc).__name__}")
+        return ProviderError(f"{where}: risposta interrotta ({exc or type(exc).__name__})")
 
     def list_models(self) -> list[str]:
         try:
             return [m.id for m in self.client.models.list()]
-        except self._anthropic.AnthropicError as exc:
+        except Exception as exc:
             raise self._error(exc) from exc
 
     def check(self) -> str:
@@ -413,7 +636,7 @@ def probe_local(timeout: float = 0.5) -> list[tuple[str, str, list[str]]]:
     def ask(item):
         name, url = item
         try:
-            return name, url, OpenAICompatible(url, "", timeout=timeout).list_models()
+            return name, url, OpenAICompatible(url, "", timeout=timeout, kind="local").list_models()
         except ProviderError:
             return None
 
@@ -424,7 +647,8 @@ def probe_local(timeout: float = 0.5) -> list[tuple[str, str, list[str]]]:
 
 
 def make_provider(kind: str, model: str = "", base_url: str = "", api_key: str | None = None) -> Provider:
-    """A provider of ``kind`` ("local", "claude" or "openai"); keys from the environment or the keyring."""
+    """A provider of ``kind`` ("local", "claude" or "openai"); keys from the environment or the keyring.
+    A "local" provider is on this computer, with or without a key."""
     if kind == "local":
         if not base_url:
             found = probe_local()
