@@ -1149,7 +1149,9 @@ the normal facing the mean of the aligned cameras). With `extent="region"` and a
 of that region are projected on the plane and the new box takes their extent (a box projected on a
 sloping plane grows by up to its height); without a region, or with `extent="tie_points"`, the
 percentiles 1-99 of the tie points in the plane, widened by `margin`. The markers must have a
-position (aligned photos, or placed by hand); three markers on a line raise `ValueError`.
+position (aligned photos, or placed by hand); three markers on a line, or a `thickness` that is
+not greater than 0, raise `ValueError`. A marker given as a number is looked up as a target code
+first, then as a key (`markers.gcp.resolve_marker`): with targets, give keys as labels or codes.
 
 ## Normal map
 
@@ -1161,8 +1163,13 @@ position (aligned photos, or placed by hand); three markers on a line raise `Val
 **`chunk.build_normal_map(source)`**: `"dem"` resamples the DEM on the grid (bilinear) and takes the
 slopes with Horn's kernel; `"model"` casts a ray straight down on every cell centre (Open3D
 `RaycastingScene`, tiles of 1024 x 1024 rays) and takes the normal of the face it meets, every
-normal turned upwards; `"auto"` is `"model"` when the chunk has a model and Open3D is installed,
-else `"dem"`. `chunk.meta["normal_map"]["source"]` says which one was used. It is the normal map
+normal turned upwards; `"auto"` is `"model"` when the chunk has a model that Open3D can load,
+else `"dem"`. `chunk.meta["normal_map"]["source"]` says which one was used. A is 255 where the
+orthomosaic is opaque (its alpha band, or its mask: nodata, an internal mask) and there is a normal;
+R, G and B are 0 where A is 0. The grid is made and written in blocks of rows
+(`engine.normalmap.NORMAL_BLOCK_ROWS`), so a large orthomosaic needs the memory of a block only. A
+local chunk (no CRS) gives a normal map without a CRS, like its orthomosaic; an orthomosaic in
+degrees is refused. It is the normal map
 of the surface in plan (as Metashape's), to light a drawing from another side or to put the relief
 under a drawing in QGIS; the normal map in tangent space of a light model is
 `engine.normalmap.light_model`.

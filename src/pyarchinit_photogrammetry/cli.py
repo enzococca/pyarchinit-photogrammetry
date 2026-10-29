@@ -302,7 +302,10 @@ def normal_map_cmd(project: Path,
     if source not in ("auto", "dem", "model"):
         raise typer.BadParameter("--source: auto, dem or model")
     doc, ch = _open(project, chunk)
-    path = ch.build_normal_map(source, progress=print_progress)
+    try:
+        path = ch.build_normal_map(source, progress=print_progress)
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     doc.save()
     typer.echo(f"normal map from the {ch.meta.get('normal_map', {}).get('source', source)}: {path}")
 

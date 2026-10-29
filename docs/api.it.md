@@ -1184,8 +1184,10 @@ rivolta verso la media delle camere allineate). Con `extent="region"` e una regi
 quella regione vengono proiettati sul piano e la scatola nuova ne prende l'estensione (una scatola
 proiettata su un piano inclinato cresce al più della sua altezza); senza regione, o con
 `extent="tie_points"`, i percentili 1-99 dei punti di legame nel piano, allargati di `margin`. I
-marker devono avere una posizione (foto allineate, o messi a mano); tre marker su una linea danno
-`ValueError`.
+marker devono avere una posizione (foto allineate, o messi a mano); tre marker su una linea, o un
+`thickness` non maggiore di 0, danno `ValueError`. Un marker dato come numero viene cercato prima come
+codice del target, poi come chiave (`markers.gcp.resolve_marker`): con i target, indicare le chiavi
+come etichette o codici.
 
 ## Mappa delle normali
 
@@ -1197,9 +1199,13 @@ marker devono avere una posizione (foto allineate, o messi a mano); tre marker s
 **`chunk.build_normal_map(source)`**: `"dem"` ricampiona il DEM sulla griglia (bilineare) e prende le
 pendenze con il kernel di Horn; `"model"` lancia un raggio verticale verso il basso sul centro di ogni
 cella (`RaycastingScene` di Open3D, tasselli di 1024 x 1024 raggi) e prende la normale della faccia
-che incontra, ogni normale rivolta verso l'alto; `"auto"` è `"model"` quando il chunk ha un modello e
-Open3D è installato, altrimenti `"dem"`. `chunk.meta["normal_map"]["source"]` dice quale è stato
-usato. È la mappa delle normali della superficie in pianta (come quella di Metashape), per illuminare
+che incontra, ogni normale rivolta verso l'alto; `"auto"` è `"model"` quando il chunk ha un modello
+che Open3D riesce a caricare, altrimenti `"dem"`. `chunk.meta["normal_map"]["source"]` dice quale è
+stato usato. A vale 255 dove l'ortofoto è opaca (la sua banda alfa, o la sua maschera: nodata, una
+maschera interna) e c'è una normale; R, G e B valgono 0 dove A è 0. La griglia viene calcolata e
+scritta a blocchi di righe (`engine.normalmap.NORMAL_BLOCK_ROWS`), quindi un'ortofoto grande richiede
+solo la memoria di un blocco. Un chunk locale (senza CRS) dà una mappa delle normali senza CRS, come
+la sua ortofoto; un'ortofoto in gradi viene rifiutata. È la mappa delle normali della superficie in pianta (come quella di Metashape), per illuminare
 un disegno da un altro lato o mettere il rilievo sotto un disegno in QGIS; la mappa delle normali in
 spazio tangente di un modello leggero è `engine.normalmap.light_model`.
 

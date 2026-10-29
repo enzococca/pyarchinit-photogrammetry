@@ -131,6 +131,8 @@ def region_from_markers(chunk: Chunk, a, b, c, thickness: float, extent: str = "
 
     if extent not in ("region", "tie_points"):
         raise ValueError(f"extent: 'region' or 'tie_points', not {extent!r}")
+    if not float(thickness) > 0:
+        raise ValueError(f"thickness: a size in metres greater than 0, not {thickness!r}")
     markers = [resolve_marker(chunk, ref) for ref in (a, b, c)]
     if len({m.key for m in markers}) < 3:
         raise ValueError("three different markers are needed")
@@ -153,7 +155,7 @@ def region_from_markers(chunk: Chunk, a, b, c, thickness: float, extent: str = "
         pad = (hi - lo) * margin
         lo, hi = lo - pad, hi + pad
     centre = pts[0] + u * (lo[0] + hi[0]) / 2 + v * (lo[1] + hi[1]) / 2
-    size = [max(hi[0] - lo[0], 1e-6), max(hi[1] - lo[1], 1e-6), abs(float(thickness))]
+    size = [max(hi[0] - lo[0], 1e-6), max(hi[1] - lo[1], 1e-6), float(thickness)]
     region = Region(centre, size, np.column_stack([u, v, n]))
     set_region(chunk, region)
     return region

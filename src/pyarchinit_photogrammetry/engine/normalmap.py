@@ -20,6 +20,7 @@ another side or to put the relief under a drawing in QGIS.
 from __future__ import annotations
 
 import json
+import logging
 
 import cv2
 import numpy as np
@@ -27,6 +28,8 @@ import numpy as np
 from ..core.progress import Progress, as_progress
 from .texturing import _cell_layout, _fill_empty
 from .visibility import sample
+
+log = logging.getLogger(__name__)
 
 
 def decimate(verts: np.ndarray, faces: np.ndarray, target_faces: int):
@@ -251,6 +254,17 @@ def light_model(chunk, target_faces: int = 50_000, texture_size: int = 4096, fol
 
 
 NORMAL_TILE = 1024  # rays per side of a tile of the normal map cast on the model
+NORMAL_BLOCK_ROWS = 1024  # rows of the orthomosaic grid computed and written at a time
+NORMAL_BLOCK_CELLS = 16_777_216  # at most this many cells a block: a very wide grid takes fewer rows
+DEM_HALO = 3  # rows of DEM above and below a block: Horn's kernel and the nearest-height fill at its edges
+STAND_IN_CRS = "EPSG:3857"  # rasters of a local chunk: the same frame on both sides, any projected CRS does
+
+
+def _block_rows(width: int) -> int:
+    """Rows of a block of the grid: :data:`NORMAL_BLOCK_ROWS`, fewer on a grid so wide that the
+    block would pass :data:`NORMAL_BLOCK_CELLS` (whole tiles of 256 rows, at least one)."""
+    rows = max(256, NORMAL_BLOCK_CELLS // max(int(width), 1) // 256 * 256)
+    return max(1, min(NORMAL_BLOCK_ROWS, rows))
 
 
 def _grid_centres(transform, rows: np.ndarray, cols: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -259,101 +273,150 @@ def _grid_centres(transform, rows: np.ndarray, cols: np.ndarray) -> tuple[np.nda
     return (transform.c + transform.a * c + transform.b * r, transform.f + transform.d * c + transform.e * r)
 
 
-def _normals_from_dem(chunk, transform, shape: tuple[int, int], crs, progress: Progress) -> np.ndarray:
-    """Unit normals (H, W, 3; NaN without the DEM) on the grid from the DEM resampled on it
-    (bilinear), by Horn's kernel."""
-    import rasterio
-    from rasterio.warp import Resampling, reproject
-    from scipy import ndimage
+class _DemNormals:
+    """Unit normals on blocks of rows of the grid from the DEM resampled on them (bilinear), by
+    Horn's kernel; NaN where the DEM has no height. A raster without a CRS (a local chunk) is in
+    the frame of the other one; both without one, the same stand-in CRS on both sides."""
 
-    dem = chunk.product_path("dem")
-    if dem is None or not dem.exists():
-        raise RuntimeError("build the DEM first (or the model: source='model')")
-    h, w = shape
-    z = np.full((h, w), np.nan, np.float32)
-    progress(0.1, "Mappa delle normali: DEM sulla griglia dell'ortofoto")
-    with rasterio.open(dem) as d:
-        reproject(rasterio.band(d, 1), z, src_nodata=d.nodata, dst_transform=transform, dst_crs=crs,
+    def __init__(self, chunk, transform, shape: tuple[int, int], crs):
+        import rasterio
+
+        dem = chunk.product_path("dem")
+        if dem is None or not dem.exists():
+            raise RuntimeError("build the DEM first (or the model: source='model')")
+        if transform.b or transform.d:
+            raise RuntimeError("the normal map from the DEM needs a north-up orthomosaic (source='model' works)")
+        self.transform, self.shape = transform, shape
+        self.ds = rasterio.open(dem)
+        src, dst = self.ds.crs or None, crs or None
+        if src is None and dst is None:
+            src = dst = STAND_IN_CRS
+        elif src is None or dst is None:
+            src = dst = src or dst
+        self.src_crs, self.dst_crs = src, dst
+        self.any = False  # a cell of the grid with a height
+
+    def close(self):
+        self.ds.close()
+
+    def block(self, r0: int, r1: int) -> np.ndarray:
+        import rasterio
+        from rasterio.warp import Resampling, reproject
+        from rasterio.windows import Window, transform as window_transform
+        from scipy import ndimage
+
+        h, w = self.shape
+        a0, a1 = max(0, r0 - DEM_HALO), min(h, r1 + DEM_HALO)
+        z = np.full((a1 - a0, w), np.nan, np.float32)
+        reproject(rasterio.band(self.ds, 1), z, src_nodata=self.ds.nodata, src_crs=self.src_crs,
+                  dst_transform=window_transform(Window(0, a0, w, a1 - a0), self.transform), dst_crs=self.dst_crs,
                   dst_nodata=np.nan, resampling=Resampling.bilinear)
-    valid = np.isfinite(z)
-    if not valid.any():
-        raise RuntimeError("the DEM does not cover the orthomosaic")
-    progress(0.5, "Mappa delle normali: pendenze del DEM")
-    # the cells without a height take the nearest one: the kernel then reaches the edge of the surface
-    _dist, (ri, ci) = ndimage.distance_transform_edt(~valid, return_indices=True)
-    filled = z[ri, ci].astype(np.float64)
-    pad = np.pad(filled, 1, mode="edge")
-    tl, t, tr = pad[:-2, :-2], pad[:-2, 1:-1], pad[:-2, 2:]
-    l, r = pad[1:-1, :-2], pad[1:-1, 2:]
-    bl, b, br = pad[2:, :-2], pad[2:, 1:-1], pad[2:, 2:]
-    dz_col = ((tr + 2 * r + br) - (tl + 2 * l + bl)) / 8.0  # per column (east when a > 0)
-    dz_row = ((bl + 2 * b + br) - (tl + 2 * t + tr)) / 8.0  # per row (south when e < 0)
-    nx, ny = -dz_col / transform.a, -dz_row / transform.e
-    length = np.sqrt(nx * nx + ny * ny + 1.0)
-    normals = np.stack([nx / length, ny / length, 1.0 / length], axis=-1)
-    normals[~valid] = np.nan
-    return normals
+        valid = np.isfinite(z)
+        inner = slice(r0 - a0, r1 - a0)
+        if not valid[inner].any():
+            return np.full((r1 - r0, w, 3), np.nan)
+        self.any = True
+        # the cells without a height take the nearest one: the kernel then reaches the edge of the surface
+        _dist, (ri, ci) = ndimage.distance_transform_edt(~valid, return_indices=True)
+        pad = np.pad(z[ri, ci].astype(np.float64), 1, mode="edge")
+        del ri, ci, _dist
+        pad = pad[r0 - a0:r1 - a0 + 2]  # the rows of the block and one on each side
+        tl, t, tr = pad[:-2, :-2], pad[:-2, 1:-1], pad[:-2, 2:]
+        l, r = pad[1:-1, :-2], pad[1:-1, 2:]
+        bl, b, br = pad[2:, :-2], pad[2:, 1:-1], pad[2:, 2:]
+        nx = -((tr + 2 * r + br) - (tl + 2 * l + bl)) / 8.0 / self.transform.a  # per column (east when a > 0)
+        ny = -((bl + 2 * b + br) - (tl + 2 * t + tr)) / 8.0 / self.transform.e  # per row (south when e < 0)
+        length = np.sqrt(nx * nx + ny * ny + 1.0)
+        normals = np.stack([nx / length, ny / length, 1.0 / length], axis=-1)
+        normals[~valid[inner]] = np.nan
+        return normals
 
 
-def _normals_from_model(chunk, transform, shape: tuple[int, int], progress: Progress) -> np.ndarray:
-    """Unit normals (H, W, 3; NaN where no ray hits) on the grid from the model: a ray straight
-    down on every cell centre, the normal of the face it meets (Open3D), tiles of
-    ``NORMAL_TILE`` x ``NORMAL_TILE`` rays."""
-    try:
-        import open3d as o3d
-    except ImportError as exc:
-        raise RuntimeError("the normal map from the model needs Open3D (source='dem' works without it)") from exc
+class _ModelNormals:
+    """Unit normals on blocks of rows of the grid from the model: a ray straight down on every
+    cell centre, the normal of the face it meets (Open3D), tiles of at most ``NORMAL_TILE`` rays
+    a side; NaN where no ray hits."""
 
-    from ..io.mesh_ply import read_mesh
+    def __init__(self, chunk, transform, shape: tuple[int, int]):
+        try:
+            import open3d as o3d
+        except ImportError as exc:
+            raise RuntimeError("the normal map from the model needs Open3D (source='dem' works without it)") from exc
 
-    path = chunk.product_path("model")
-    if path is None or not path.exists():
-        raise RuntimeError("build the model first (or the DEM: source='dem')")
-    mesh = read_mesh(path)
-    faces = np.asarray(mesh.faces, np.int64)
-    if not len(faces):
-        raise RuntimeError("the model has no faces")
-    world = chunk.to_world(np.asarray(mesh.xyz, np.float64))
-    offset = world.mean(axis=0)  # float32 rays and vertices: around the model, not at the CRS origin
-    local = (world - offset).astype(np.float32)
-    top = float(local[:, 2].max()) + 1.0
-    scene = o3d.t.geometry.RaycastingScene()
-    scene.add_triangles(o3d.core.Tensor(local), o3d.core.Tensor(faces.astype(np.uint32)))
-    h, w = shape
-    normals = np.full((h, w, 3), np.nan, np.float32)
-    tiles = [(r0, c0) for r0 in range(0, h, NORMAL_TILE) for c0 in range(0, w, NORMAL_TILE)]
-    for k, (r0, c0) in enumerate(tiles):
-        progress(k / len(tiles), f"Mappa delle normali: {k + 1} di {len(tiles)} tasselli")
-        r1, c1 = min(r0 + NORMAL_TILE, h), min(c0 + NORMAL_TILE, w)
-        rows, cols = np.meshgrid(np.arange(r0, r1), np.arange(c0, c1), indexing="ij")
-        x, y = _grid_centres(transform, rows.ravel().astype(np.float64), cols.ravel().astype(np.float64))
-        rays = np.zeros((x.size, 6), np.float32)
-        rays[:, 0], rays[:, 1] = x - offset[0], y - offset[1]
-        rays[:, 2], rays[:, 5] = top, -1.0
-        hit = scene.cast_rays(o3d.core.Tensor(rays))
-        t_hit = hit["t_hit"].numpy()
-        n = hit["primitive_normals"].numpy()
-        ok = np.isfinite(t_hit)
-        n[n[:, 2] < 0] *= -1  # every normal upwards
-        n[~ok] = np.nan
-        normals[r0:r1, c0:c1] = n.reshape(r1 - r0, c1 - c0, 3)
-    return normals
+        from ..io.mesh_ply import read_mesh
+
+        path = chunk.product_path("model")
+        if path is None or not path.exists():
+            raise RuntimeError("build the model first (or the DEM: source='dem')")
+        mesh = read_mesh(path)
+        faces = np.asarray(mesh.faces, np.int64)
+        if not len(faces):
+            raise RuntimeError("the model has no faces")
+        world = chunk.to_world(np.asarray(mesh.xyz, np.float64))
+        self.offset = world.mean(axis=0)  # float32 rays and vertices: around the model, not at the CRS origin
+        local = (world - self.offset).astype(np.float32)
+        self.top = float(local[:, 2].max()) + 1.0
+        self.scene = o3d.t.geometry.RaycastingScene()
+        self.scene.add_triangles(o3d.core.Tensor(local), o3d.core.Tensor(faces.astype(np.uint32)))
+        self.o3d, self.transform, self.shape = o3d, transform, shape
+        self.any = False
+
+    def close(self):
+        pass
+
+    def block(self, r0: int, r1: int) -> np.ndarray:
+        w = self.shape[1]
+        normals = np.full((r1 - r0, w, 3), np.nan, np.float32)
+        step = max(1, NORMAL_TILE * NORMAL_TILE // (r1 - r0))  # columns of a tile: at most NORMAL_TILE^2 rays
+        for c0 in range(0, w, step):
+            c1 = min(c0 + step, w)
+            rows, cols = np.meshgrid(np.arange(r0, r1), np.arange(c0, c1), indexing="ij")
+            x, y = _grid_centres(self.transform, rows.ravel().astype(np.float64), cols.ravel().astype(np.float64))
+            rays = np.zeros((x.size, 6), np.float32)
+            rays[:, 0], rays[:, 1] = x - self.offset[0], y - self.offset[1]
+            rays[:, 2], rays[:, 5] = self.top, -1.0
+            hit = self.scene.cast_rays(self.o3d.core.Tensor(rays))
+            ok = np.isfinite(hit["t_hit"].numpy())
+            n = hit["primitive_normals"].numpy()
+            n[n[:, 2] < 0] *= -1  # every normal upwards
+            n[~ok] = np.nan
+            normals[:, c0:c1] = n.reshape(r1 - r0, c1 - c0, 3)
+            self.any = self.any or bool(ok.any())
+        return normals
+
+
+def _encode(normals: np.ndarray, opaque: np.ndarray) -> np.ndarray:
+    """The RGBA uint8 bands (4, rows, cols) of a block: ``(n + 1) / 2 * 255`` where the surface
+    has a normal under an opaque pixel (``opaque``), 0 elsewhere (the alpha too)."""
+    valid = np.isfinite(normals).all(axis=-1) & opaque
+    out = np.zeros((4,) + valid.shape, np.uint8)
+    for k in range(3):
+        band = normals[..., k] * 0.5 + 0.5
+        band *= 255
+        np.rint(band, out=band)
+        out[k][valid] = np.clip(band[valid], 0, 255)
+    out[3][valid] = 255
+    return out
 
 
 def normal_map_on_grid(chunk, source: str = "auto", path=None, progress: Progress | None = None):
     """The normal map of the surface on exactly the grid of the orthomosaic (width, height,
-    transform and CRS read from it): an RGBA uint8 GeoTIFF with R = east, G = north, B = up of
-    the unit normal (``(n + 1) / 2 * 255``) and A = 255 where there is a surface under an opaque
-    pixel of the orthomosaic. ``source``: ``"dem"`` (the DEM resampled on the grid, Horn's kernel),
-    ``"model"`` (a ray straight down on every cell, the normal of the face it meets; Open3D) or
-    ``"auto"`` (the model when the chunk has one and Open3D, else the DEM). Written to ``path``
-    (default the product ``normal_map`` of the chunk, ``normal_map.tif``); the path returned."""
+    transform and CRS read from it, none for a local chunk): an RGBA uint8 GeoTIFF with R = east,
+    G = north, B = up of the unit normal (``(n + 1) / 2 * 255``) and A = 255 where there is a
+    surface under an opaque pixel of the orthomosaic (its alpha band, or its mask: nodata or an
+    internal mask); RGB is 0 where A is 0. ``source``: ``"dem"`` (the DEM resampled on the grid,
+    Horn's kernel), ``"model"`` (a ray straight down on every cell, the normal of the face it
+    meets; Open3D) or ``"auto"`` (the model when the chunk has one and Open3D loads, else the DEM).
+    The grid is made and written in blocks of rows (:data:`NORMAL_BLOCK_ROWS`), so the memory is
+    the one of a block whatever the size of the orthomosaic. Written to ``path`` (default the
+    product ``normal_map`` of the chunk, ``normal_map.tif``); the path returned."""
     from pathlib import Path
 
     import rasterio
-    from rasterio.enums import ColorInterp
+    from rasterio.windows import Window
 
-    from .dem import write_geotiff
+    from ..io.files import replace_file
+    from .dem import finish_geotiff, geotiff_profile
 
     progress = as_progress(progress)
     if source not in ("auto", "dem", "model"):
@@ -363,28 +426,52 @@ def normal_map_on_grid(chunk, source: str = "auto", path=None, progress: Progres
         raise RuntimeError("build the orthomosaic first: the normal map takes its grid")
     with rasterio.open(ortho) as o:
         transform, shape, crs = o.transform, (o.height, o.width), o.crs
-        alpha = None
-        if ColorInterp.alpha in o.colorinterp:
-            alpha = o.read(list(o.colorinterp).index(ColorInterp.alpha) + 1) > 0
-    if source == "auto":
-        from importlib.util import find_spec
-
+    if crs and crs.is_geographic:
+        raise RuntimeError("the normal map needs an orthomosaic in a projected CRS (metres), not in degrees")
+    h, w = shape
+    normals = None
+    if source in ("auto", "model"):
         model = chunk.product_path("model")
-        source = "model" if model is not None and model.exists() and find_spec("open3d") else "dem"
+        if source == "model" or (model is not None and model.exists()):
+            try:
+                normals = _ModelNormals(chunk, transform, shape)
+                source = "model"
+            except RuntimeError:
+                if source == "model":
+                    raise
+                log.warning("normal map: the model cannot be used, the DEM instead", exc_info=True)
+    if normals is None:
+        source = "dem"
+        normals = _DemNormals(chunk, transform, shape, crs)
     progress(0.0, f"Mappa delle normali dal {'modello' if source == 'model' else 'DEM'}")
-    if source == "model":
-        normals = _normals_from_model(chunk, transform, shape, progress.sub(0.05, 0.8))
-    else:
-        normals = _normals_from_dem(chunk, transform, shape, crs, progress.sub(0.05, 0.8))
-    valid = np.isfinite(normals).all(axis=-1)
-    opaque = valid if alpha is None else valid & alpha
-    rgb = np.where(valid[..., None], np.round((normals * 0.5 + 0.5) * 255), 0)
-    rgba = np.concatenate([rgb.astype(np.uint8), np.where(opaque, 255, 0).astype(np.uint8)[..., None]], axis=-1)
     out = Path(path) if path is not None else chunk.own_product_path("normal_map")
-    progress(0.9, "Mappa delle normali: scrittura")
-    write_geotiff(out, np.moveaxis(rgba, -1, 0), None, 0.0, crs, photometric="RGB", transform=transform)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    part = out.with_name(out.stem + ".part" + out.suffix)
+    rows = _block_rows(w)
+    blocks = [(r0, min(r0 + rows, h)) for r0 in range(0, h, rows)]
+    opaque_cells = 0
+    try:
+        profile = geotiff_profile(h, w, 4, np.uint8, transform, crs, photometric="RGB")
+        with rasterio.open(ortho) as o, rasterio.open(part, "w", **profile) as dst:
+            for k, (r0, r1) in enumerate(blocks):
+                progress(0.05 + 0.85 * k / len(blocks), f"Mappa delle normali: {k + 1} di {len(blocks)} blocchi")
+                window = Window(0, r0, w, r1 - r0)
+                rgba = _encode(normals.block(r0, r1), o.dataset_mask(window=window) > 0)
+                dst.write(rgba, window=window)
+                opaque_cells += int(np.count_nonzero(rgba[3]))
+            if not normals.any:
+                raise RuntimeError("the DEM does not cover the orthomosaic" if source == "dem"
+                                   else "the model does not cover the orthomosaic")
+            progress(0.9, "Mappa delle normali: livelli ridotti")
+            finish_geotiff(dst)
+        replace_file(part, out)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+    finally:
+        normals.close()
     if path is None:
         chunk._set_product("normal_map", out)
         chunk.meta["normal_map"] = {"source": source}
-    progress(1.0, f"Mappa delle normali: {shape[1]} x {shape[0]} pixel, {100 * opaque.mean():.1f} % con superficie")
+    progress(1.0, f"Mappa delle normali: {w} x {h} pixel, {100 * opaque_cells / max(h * w, 1):.1f} % con superficie")
     return out

@@ -81,6 +81,9 @@ def test_region_extent_from_tie_points_when_no_region(processed, tmp_path):
         R.region_from_markers(ch, ms[0].label, ms[1].label, ms[1].label, thickness=0.2)
     with pytest.raises(KeyError):
         R.region_from_markers(ch, "nessuno", ms[1].label, ms[2].label, thickness=0.2)
+    for bad in (0, -0.2):  # a box with no thickness would leave every product empty
+        with pytest.raises(ValueError):
+            R.region_from_markers(ch, ms[0].label, ms[1].label, ms[2].label, thickness=bad)
 
 
 def _floor(ds):
@@ -129,6 +132,139 @@ def test_normal_map_has_the_orthomosaic_grid_and_up_normals(processed, tmp_path)
         assert np.array_equal(n.read(), model_rgba)
     assert "normal_map" in ch.products
     doc.save()
+
+
+def _without_crs(ch, name):
+    """The product ``name`` of the chunk rewritten without a CRS, as a local chunk has it."""
+    import rasterio
+
+    p = ch.product_path(name)
+    with rasterio.open(p) as s:
+        profile, data, interp = s.profile, s.read(), s.colorinterp
+    profile.pop("crs", None)
+    q = p.with_name("locale_" + p.name)
+    with rasterio.open(q, "w", **profile) as d:
+        d.write(data)
+        d.colorinterp = interp
+    ch._set_product(name, q)
+
+
+def test_normal_map_on_a_local_chunk(processed, tmp_path):
+    """A chunk without a CRS (a wall or an object scaled with bars): DEM and orthomosaic without a
+    CRS give a normal map without one, the same cells as the georeferenced chunk."""
+    import rasterio
+
+    from pyarchinit_photogrammetry.engine.normalmap import normal_map_on_grid
+
+    _doc, ch = _copy(processed, tmp_path)
+    sources = ["dem"]
+    try:
+        import open3d  # noqa: F401
+
+        sources.append("model")
+    except ImportError:
+        pass
+    reference = {}
+    for source in sources:
+        with rasterio.open(normal_map_on_grid(ch, source=source, path=tmp_path / f"geo_{source}.tif")) as n:
+            reference[source] = n.read()
+    for name in ("dem", "orthomosaic"):
+        _without_crs(ch, name)
+    ch.crs = "LOCAL"
+    with rasterio.open(ch.orthomosaic_path) as o:
+        assert o.crs is None
+        grid = (o.width, o.height, o.transform)
+    for source in sources:
+        out = normal_map_on_grid(ch, source=source, path=tmp_path / f"locale_{source}.tif")
+        with rasterio.open(out) as n:
+            assert n.crs is None and (n.width, n.height, n.transform) == grid
+            local = n.read()
+        assert local[3].max() == 255
+        assert np.array_equal(local, reference[source]), source
+
+
+def test_normal_map_block_by_block(processed, tmp_path, monkeypatch):
+    """The grid made and written in blocks of rows: no block larger than the rows asked, one
+    window written a block, and the same normal map as in one block (the whole grid at once)."""
+    import tracemalloc
+
+    import rasterio
+
+    from pyarchinit_photogrammetry.engine import normalmap as N
+
+    _doc, ch = _copy(processed, tmp_path)
+    with rasterio.open(ch.orthomosaic_path) as o:
+        h, w = o.height, o.width
+    assert h > 4 * 64
+    sources = ["dem"]
+    try:
+        import open3d  # noqa: F401
+
+        sources.append("model")
+    except ImportError:
+        pass
+    encode = N._encode
+    for source in sources:
+        monkeypatch.setattr(N, "NORMAL_BLOCK_ROWS", 10 ** 6)
+        whole = N.normal_map_on_grid(ch, source=source, path=tmp_path / f"intera_{source}.tif")
+        monkeypatch.setattr(N, "NORMAL_BLOCK_ROWS", 64)
+        blocks = []
+
+        def recording(normals, opaque):
+            blocks.append(normals.shape)
+            return encode(normals, opaque)
+
+        monkeypatch.setattr(N, "_encode", recording)
+        writes = []
+        real_open = rasterio.open
+
+        class Counting:
+            def __init__(self, ds):
+                self.ds = ds
+
+            def __getattr__(self, name):
+                return getattr(self.ds, name)
+
+            def __enter__(self):
+                self.ds.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self.ds.__exit__(*exc)
+
+            def write(self, arr, window=None, **kw):
+                writes.append((arr.shape, window))
+                return self.ds.write(arr, window=window, **kw)
+
+        def opening(fp, mode="r", **kw):
+            ds = real_open(fp, mode, **kw)
+            return Counting(ds) if mode == "w" else ds
+
+        monkeypatch.setattr(rasterio, "open", opening)
+        tracemalloc.start()
+        try:
+            blocky = N.normal_map_on_grid(ch, source=source, path=tmp_path / f"blocchi_{source}.tif")
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+            monkeypatch.setattr(rasterio, "open", real_open)
+            monkeypatch.setattr(N, "_encode", encode)
+        assert len(blocks) == len(writes) == -(-h // 64)
+        assert all(shape[0] <= 64 and shape[1] == w for shape in blocks)
+        assert all(arr[0] == 4 and arr[1] <= 64 and window is not None for arr, window in writes)
+        # the whole grid of float64 normals alone would be h * w * 24 bytes: the blocks take far less
+        assert peak < h * w * 24 / 2, (peak, h * w * 24)
+        with rasterio.open(whole) as a, rasterio.open(blocky) as b:
+            one, many = a.read().astype(int), b.read().astype(int)
+            assert b.overviews(1) == a.overviews(1)
+        if source == "model":
+            assert np.array_equal(one, many)  # the same rays, cast in other tiles
+        else:
+            # GDAL resamples a window of the grid with the last bit of a float32 height now and then
+            # different from the whole grid (13 cells of 3 million on the trench): a level of RGB at most
+            assert np.array_equal(one[3], many[3])
+            differ = np.abs(one[:3] - many[:3])
+            assert differ.max() <= 1 and (differ > 0).mean() < 1e-4, (differ.max(), (differ > 0).sum())
 
 
 def test_cli_region_and_normal_map(processed, tmp_path):

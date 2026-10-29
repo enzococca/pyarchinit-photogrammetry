@@ -161,23 +161,18 @@ def grid_points(pts: np.ndarray, resolution: float, bounds=None, reducer: str = 
     return arr.reshape(h, w), (xmin, ymax), (h, w)
 
 
-def write_geotiff(path: Path, array: np.ndarray, origin, resolution: float, crs, nodata=None,
-                  photometric: str | None = None, transform=None) -> Path:
-    """A GeoTIFF (deflate, tiled, BigTIFF when needed, overviews) of ``array`` (bands first) with
-    its top-left corner at ``origin`` and square cells of ``resolution``, or on ``transform`` (an
-    affine of rasterio, as read from another raster) when given; ``crs`` a string of the program
-    (``None``/``LOCAL`` = no CRS) or the CRS object of a rasterio dataset, written as it is."""
-    import rasterio
-    from rasterio.transform import from_origin
-
-    arr = array if array.ndim == 3 else array[None]
+def geotiff_profile(height: int, width: int, count: int, dtype, transform, crs, nodata=None,
+                    photometric: str | None = None) -> dict:
+    """The rasterio profile of the GeoTIFFs of the program (deflate, tiled 256, BigTIFF when
+    needed) for a raster of ``height`` x ``width`` cells and ``count`` bands on ``transform``;
+    ``crs`` a string of the program (``None``/``LOCAL`` = no CRS) or the CRS object of a rasterio
+    dataset, written as it is (an empty one = no CRS)."""
     profile = {
-        "driver": "GTiff", "height": arr.shape[1], "width": arr.shape[2], "count": arr.shape[0],
-        "dtype": str(arr.dtype),
-        "transform": from_origin(origin[0], origin[1], resolution, resolution) if transform is None else transform,
+        "driver": "GTiff", "height": height, "width": width, "count": count, "dtype": str(np.dtype(dtype)),
+        "transform": transform,
         "compress": "deflate", "tiled": True, "blockxsize": 256, "blockysize": 256, "BIGTIFF": "IF_SAFER",
     }
-    if arr.shape[1] < 256 or arr.shape[2] < 256:
+    if height < 256 or width < 256:
         profile.update(tiled=False)
         profile.pop("blockxsize")
         profile.pop("blockysize")
@@ -190,18 +185,41 @@ def write_geotiff(path: Path, array: np.ndarray, origin, resolution: float, crs,
         profile["nodata"] = nodata
     if photometric:
         profile["photometric"] = photometric
+    return profile
+
+
+def finish_geotiff(dst) -> None:
+    """What :func:`write_geotiff` does once the cells are written: RGBA colour interpretation for
+    four bands, then the overviews (average)."""
+    if dst.count == 4:
+        from rasterio.enums import ColorInterp
+
+        dst.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
+    factors = [f for f in (2, 4, 8, 16, 32) if min(dst.height, dst.width) // f >= 64]
+    if factors:
+        from rasterio.enums import Resampling
+
+        dst.build_overviews(factors, Resampling.average)
+
+
+def write_geotiff(path: Path, array: np.ndarray, origin, resolution: float, crs, nodata=None,
+                  photometric: str | None = None, transform=None) -> Path:
+    """A GeoTIFF (deflate, tiled, BigTIFF when needed, overviews) of ``array`` (bands first) with
+    its top-left corner at ``origin`` and square cells of ``resolution``, or on ``transform`` (an
+    affine of rasterio, as read from another raster) when given; ``crs`` a string of the program
+    (``None``/``LOCAL`` = no CRS) or the CRS object of a rasterio dataset, written as it is."""
+    import rasterio
+    from rasterio.transform import from_origin
+
+    arr = array if array.ndim == 3 else array[None]
+    if transform is None:
+        transform = from_origin(origin[0], origin[1], resolution, resolution)
+    profile = geotiff_profile(arr.shape[1], arr.shape[2], arr.shape[0], arr.dtype, transform, crs, nodata,
+                              photometric)
     path.parent.mkdir(parents=True, exist_ok=True)
     with rasterio.open(path, "w", **profile) as dst:
         dst.write(arr)
-        if arr.shape[0] == 4:
-            from rasterio.enums import ColorInterp
-
-            dst.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
-        factors = [f for f in (2, 4, 8, 16, 32) if min(arr.shape[1:]) // f >= 64]
-        if factors:
-            from rasterio.enums import Resampling
-
-            dst.build_overviews(factors, Resampling.average)
+        finish_geotiff(dst)
     return path
 
 
