@@ -72,6 +72,9 @@ _APOSTROPHES = {"’": "'", "‘": "'", "ʼ": "'", "`": "'", "´": "'", "′": "
 _INVISIBLE = frozenset("\u200b\u200c\u200d\u2060\ufeff\u00ad")
 _EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
 EMAIL = "indirizzo e-mail"
+# a link that is not public, whatever it ends with (ruling T2-12): a file name taken from it could carry what the link holds
+# (the coordinates of a map pin, the folders of a share)
+URL = "indirizzo"
 
 # --- paths. Only a token that starts with an anchor is a path (``/``, ``~/``, ``./``, ``../``, ``X:\\``, ``\\\\``, ``\\dir\\``,
 # ``%VAR%\\``, ``scheme://``); it holds no space, unless it ends with a known file extension (at most 200 characters)
@@ -172,17 +175,6 @@ def _is_public(url: str) -> bool:
         return False
     host = authority.rsplit(":", 1)[0].lower() if re.search(r":\d+$", authority) else authority.lower()
     return any(host == h or host.endswith("." + h) for h in PUBLIC_HOSTS)
-
-
-def _url_neutral(url: str) -> str:
-    """"indirizzo", or the neutral name of the file the URL points to when its last component ends with a known
-    extension (``.../rilievo/a.tif`` -> ``a``): a map link says nothing (``google.com/maps/@41.13,14.26,17z``)."""
-    rest = re.split(r"[?#]", url.split("://", 1)[1])[0].rstrip("/\\")
-    parts = re.split(r"[\\/]", rest)
-    last = unquote(parts[-1]) if len(parts) >= 2 else ""
-    if not last or not _ENDS_KNOWN.search(last):
-        return "indirizzo"
-    return neutral_name(last)
 
 
 def _key_tokens(key: Any) -> list[str]:
@@ -503,9 +495,10 @@ class Filter:
     @staticmethod
     def _url_end(text: str, s0: int) -> tuple[int, bool]:
         """Where the URL that starts at ``s0`` ends, and whether it is public (then it stays as it is).  A public URL
-        ends at the closing quote when it started after one, else before any quote or space.  A URL that is not public goes on
-        like a path (ruling T2-9): over the words up to the last that holds a separator, also through apostrophes and
-        ``%``-encoded text, stopped by a unit, a date, a quote or the bracket it started after."""
+        ends at the closing quote when it started after one, else before any quote or space.  A URL that is not public
+        goes on like a path (ruling T2-9): over the words up to the last that holds a separator, also through
+        apostrophes and ``%``-encoded text, stopped by a unit, a date, a quote or the bracket it started after; all of
+        it becomes "indirizzo" (ruling T2-12)."""
         opener = text[s0 - 1] if s0 else ""
         if opener == "'" and s0 >= 2 and text[s0 - 2].isalpha():
             opener = ""  # dell'https://...: an apostrophe, not a quote
@@ -522,7 +515,7 @@ class Filter:
 
     @staticmethod
     def _neutralise_paths(text: str) -> str:
-        """URLs (but the public ones) and anchored paths reduced to a neutral name; prose is left as it is."""
+        """URLs (but the public ones) become "indirizzo", anchored paths their neutral name; prose is left as it is."""
         out: list[str] = []
         pos = 0
         for m in _ANCHOR.finditer(text):
@@ -537,7 +530,7 @@ class Filter:
                 if public:  # a public URL stays as it is
                     out.append(text[s0:end])
                 else:
-                    out.append(_url_neutral(text[s0:end]))
+                    out.append(URL)
                 pos = end
                 continue
             token = _TOKEN.match(text, s0)

@@ -56,7 +56,7 @@ def test_chunk_project_and_paths_are_neutral(tmp_path):
     assert other == "guarda foto_12 e a_b ora"
     assert f.outgoing("la cartella /Users/x/Tell_Sultan_nord") == "la cartella Sito A_nord"
     assert f.outgoing("foto 12.jpg") == "foto 12.jpg"  # not a camera of the project, not a path
-    assert f.outgoing("vedi https://example.org/a/b.tif.") == "vedi b."
+    assert f.outgoing("vedi https://example.org/a/b.tif.") == "vedi indirizzo."
     assert f.outgoing("vedi https://example.org/a/b.html.") == "vedi indirizzo."
 
 
@@ -163,8 +163,8 @@ def test_accents_decomposed_and_apostrophes(tmp_path):
 
 def test_urls_unc_and_windows_paths_leak_nothing(tmp_path):
     f = Filter(make_document(tmp_path))
-    assert f.outgoing("file:///Users/enzo/Dropbox/x/a.tif") == "a"
-    assert f.outgoing("file:///Users/enzo/Dropbox/Tell%20Sultan/a.tif") == "a"
+    assert f.outgoing("file:///Users/enzo/Dropbox/x/a.tif") == "indirizzo"
+    assert f.outgoing("file:///Users/enzo/Dropbox/Tell%20Sultan/a.tif") == "indirizzo"
     assert f.outgoing("postgresql://enzo:pw@10.0.0.5:5432/db fallita") == "indirizzo fallita"
     assert f.outgoing("https://example.org") == "indirizzo"
     assert f.outgoing("\\\\server\\share\\Tell Sultan\\a.jpg") == "a"
@@ -437,7 +437,12 @@ def test_foreign_links_are_just_an_address(tmp_path):
     assert f.outgoing("vedi https://www.openstreetmap.org/#map=17/41.134/14.266 ora") == "vedi indirizzo ora"
     assert f.outgoing("[Tell Sultan](https://example.org/x)") == "[Sito A](indirizzo)"
     assert f.outgoing("https://example.org/Tell_Sultan/foto.html") == "indirizzo"
-    assert f.outgoing("https://example.org/dati/rilievo%201.tif") == "rilievo_1"
+    assert f.outgoing("https://example.org/dati/rilievo%201.tif") == "indirizzo"
+    # a foreign link is always "indirizzo" (ruling T2-12): extended over "e poi TellSultan_01.jpg" (a known extension),
+    # it gives no file name that would keep the pin
+    out = f.outgoing("https://www.google.com/maps/@41.134,14.266,17z e poi TellSultan_01.jpg")
+    assert out == "indirizzo"
+    assert not re.search(r"\d", out)
     assert f.facts({"link": "https://www.google.com/maps/@41.134,14.266,17z"}) == {"link": "indirizzo"}
 
 
@@ -466,11 +471,11 @@ PIN = "https://www.google.com/maps/place/41%C2%B008'02.4%22N+14%C2%B015'57.6%22E
 def test_foreign_links_with_spaces_or_apostrophes_are_reduced_whole(tmp_path):
     f = Filter(make_document(tmp_path))
     cases = {
-        "file:///C:/Users/Mario Rossi/Scavo Tell Halaf/foto/a.jpg": "a",
-        "file:///Users/x/Scavo Tell Halaf/foto/a.jpg": "a",
+        "file:///C:/Users/Mario Rossi/Scavo Tell Halaf/foto/a.jpg": "indirizzo",
+        "file:///Users/x/Scavo Tell Halaf/foto/a.jpg": "indirizzo",
         "smb://nas/Scavo Tell Halaf/foto": "indirizzo",
         "file://C:\\Users\\x\\Scavo Tell Halaf\\foto": "indirizzo",
-        "http://192.168.1.10/Scavo Tell Halaf/foto/a.jpg": "a",
+        "http://192.168.1.10/Scavo Tell Halaf/foto/a.jpg": "indirizzo",
         "https://example.org/Sant'Angelo/Tell%20Halaf/foto": "indirizzo",
         PIN: "indirizzo",
     }
