@@ -59,6 +59,7 @@ CRS_IN_TEXT = "sistema di coordinate"
 _SITE_ONLY = ("sito", "sito_q")
 _PLACE_FIELDS = tuple(f for f in SITE_FIELDS if f != "sito")
 _MIN_LENGTH = 2
+_GLUED_MIN = 6  # letters of the shortest name matched also glued (TellSultan, MarioRossi)
 # folders that say nothing about the project: the parent folder of the project file is not hidden when it is one of them
 _GENERIC_FOLDERS = frozenset({"dati", "data", "documents", "documenti", "desktop", "downloads", "download", "users",
                               "utenti", "home", "tmp", "temp", "dropbox", "progetti", "projects", "lavoro", "work",
@@ -82,8 +83,9 @@ _ANCHOR = re.compile("|".join([
     r"(?P<url>(?<!\w)[A-Za-z][A-Za-z0-9+.\-]*://)",
     r"(?P<win>(?<![\w\\])(?:[A-Za-z]:[\\/]|\\\\|%[A-Za-z_][A-Za-z0-9_]*%[\\/]))",
     r"(?P<rooted>(?<![\w\\.:/])\\(?=[A-Za-z0-9_$.][^\s\\]+\\))",
+    r"(?P<unc>(?<![\w\\/:])//(?=[^\s/]+/))",
     r"(?P<var>(?<![\w$\\])\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})/)",
-    r"(?P<posix>(?<![\w./:~\\<>%$)\]}*°])(?:~/|\.{1,2}/|/(?=[^\s/])))",
+    r"(?P<posix>(?<![\w./:~\\<>%$)\]}*°])(?:~/|~[A-Za-z_][\w.\-]*/|\.{1,2}/|/(?=[^\s/])))",
 ]))
 # the first token of a path: no space nor punctuation, but an apostrophe between two letters (Sant'Angelo)
 _TOKEN = re.compile(r"(?:[^\s\"'`<>|*?,;()\[\]]|(?<=[^\W\d_])'(?=[^\W\d_]))+")
@@ -91,13 +93,15 @@ _MD_TARGET = re.compile(r"(?:\.{1,2}/|#)[^\s)]*(?:\.md(?:#[^\s)]*)?|/)$")
 # the words after the first token: a path goes on over them; these characters end it (an apostrophe only when it is
 # not between two letters), and these are stripped from its end
 _STOPS = re.compile(r"[\"`<>|*?;]|'(?![^\W\d_])|(?<![^\W\d_])'")
+_URL_STOPS = re.compile(r"[\"`<>|*;]")
 _TRAILING = ".,:!)]"
 _UNIT_PART = re.compile(r"[^\W\d_]{1,3}")
 _QUOTES = {'"': '"', "'": "'", "`": "`"}
 _BRACKETS = {"(": ")", "[": "]"}
 _PATH_CAP = 200
 _ENDS_KNOWN = re.compile(_KNOWN_EXT + r"$", re.IGNORECASE)
-_URL_TOKEN = re.compile(r"[^\s\"'`<>]+")
+# a URL token: apostrophes inside it are part of it (Google Maps pins: 41%C2%B008'02.4%22N)
+_URL_TOKEN = re.compile(r"[^\s\"`<>]+")
 _HAS_EXT = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,4}$")
 
 _SYSTEMS = (
@@ -169,19 +173,11 @@ def _is_public(url: str) -> bool:
     return any(host == h or host.endswith("." + h) for h in PUBLIC_HOSTS)
 
 
-def _url_name(url: str) -> str:
-    """The neutral name of a URL, the punctuation that closes the sentence after it kept; a public URL stays."""
-    bare = url.rstrip(").,;:!?]")
-    if _is_public(bare):
-        return url
-    return _url_neutral(bare) + url[len(bare):]
-
-
 def _url_neutral(url: str) -> str:
     """"indirizzo", or the neutral name of the file the URL points to when its last component ends with a known
     extension (``.../rilievo/a.tif`` -> ``a``): a map link says nothing (``google.com/maps/@41.13,14.26,17z``)."""
-    rest = re.split(r"[?#]", url.split("://", 1)[1])[0].rstrip("/")
-    parts = rest.split("/")
+    rest = re.split(r"[?#]", url.split("://", 1)[1])[0].rstrip("/\\")
+    parts = re.split(r"[\\/]", rest)
     last = unquote(parts[-1]) if len(parts) >= 2 else ""
     if not last or not _ENDS_KNOWN.search(last):
         return "indirizzo"
@@ -278,13 +274,13 @@ def _quoted_end(text: str, start: int, opener: str) -> int | None:
     return None
 
 
-def _extend(text: str, start: int, end: int, closer: str | None = None) -> int:
+def _extend(text: str, start: int, end: int, closer: str | None = None, apostrophes: bool = False) -> int:
     """The end of the path that starts at ``start`` and whose first space-free token ends at ``end``.  Privacy first:
     the path goes on over the words that follow, as far as the last word on the line that holds a separator or ends
     with a known extension (at most 200 characters, the punctuation that closes it left outside).  It stops at a short
     unit (``5 mm/px``), at a new path, at a character that cannot be in a file name, and at a word that ends with
     ``closer`` (the bracket that closes the one the path started after).  Prose after a real path on the same line may
-    be swallowed."""
+    be swallowed.  With ``apostrophes`` (a URL) an apostrophe is part of a word, never its end."""
     last = pos = end
     cap = start + _PATH_CAP
     while text[pos:pos + 1] in (".", ":", "!"):  # "Dott. Rossi/foto": a full stop does not end the path
@@ -295,7 +291,7 @@ def _extend(text: str, start: int, end: int, closer: str | None = None) -> int:
         if word is None:
             return last
         w0, raw = word.start(), word.group(0)
-        stop = _STOPS.search(raw)
+        stop = (_URL_STOPS if apostrophes else _STOPS).search(raw)
         cut = stop.start() if stop else None
         if closer is not None:  # a word that ends with the closing bracket ends the path: "(/Users/a/b c/d)"
             head = raw[:cut].rstrip(".,:!")
@@ -330,6 +326,7 @@ class Filter:
         self._files: dict[str, str] = {}  # a bare file name (casefolded) -> its neutral name
         self._out: re.Pattern | None = None
         self._aliases: dict[str, str] = {}  # a person written surname first ("rossi, mario") -> the name's key
+        self._glued: dict[str, str] = {}  # a name written without gaps ("tellsultan") -> the name's key
         self._file_pattern: re.Pattern | None = None
         self._back: dict[str, str] = {}
         if not self.active:
@@ -433,6 +430,15 @@ class Filter:
             head, tail = alias.split(", ", 1)
             forms.setdefault(alias, _GAP.join(re.escape(t) for t in head.split(" ")) + r"\s*,\s*"
                              + _GAP.join(re.escape(t) for t in tail.split(" ")))
+        # every name also written glued, as a whole run of letters (ruling T2-10): TellSultan_001.jpg, MarioRossi; not
+        # when the glued form has fewer than 6 letters (too many false hits)
+        self._glued = {}
+        for k in self._names:
+            glued = "".join(c for c in k if c.isalnum())
+            if glued == k or glued in forms or sum(c.isalpha() for c in glued) < _GLUED_MIN:
+                continue
+            self._glued[glued] = k
+            forms[glued] = re.escape(glued)
         patterns = [forms[k] for k in sorted(forms, key=lambda n: (-len(n), n))]
         # not preceded nor followed by a letter or a digit: "_" and "-" separate (Tell_Sultan_0001.JPG)
         self._out = re.compile(r"(?<![^\W\d_])(?:" + "|".join(patterns) + r")(?![^\W\d_])") if patterns else None
@@ -458,6 +464,8 @@ class Filter:
         k = " ".join(_tokens_of(matched))
         if k in self._names:
             return self._names[k][1]
+        if matched in self._glued:
+            return self._names[self._glued[matched]][1]
         head, tail = re.split(r"\s*,\s*", matched, maxsplit=1)
         return self._names[self._aliases[" ".join(_tokens_of(head)) + ", " + " ".join(_tokens_of(tail))]][1]
 
@@ -492,6 +500,23 @@ class Filter:
         return text
 
     @staticmethod
+    def _url_end(text: str, s0: int) -> int | None:
+        """Where the URL that starts at ``s0`` ends, or ``None`` for a public URL.  A URL that is not public goes on
+        like a path (ruling T2-9): over the words up to the last that holds a separator, also through apostrophes and
+        ``%``-encoded text, stopped by a unit, a date, a quote or the bracket it started after."""
+        opener = text[s0 - 1] if s0 else ""
+        if opener == "'" and s0 >= 2 and text[s0 - 2].isalpha():
+            opener = ""  # dell'https://...: an apostrophe, not a quote
+        quoted = _quoted_end(text, s0, opener) if opener in _QUOTES else None
+        token = text[s0:quoted] if quoted is not None else _URL_TOKEN.match(text, s0).group(0)
+        bare = token.rstrip(").,;:!?]'")
+        if _is_public(bare):
+            return None
+        if quoted is not None:
+            return s0 + len(bare)  # the closing quote says where the URL ends
+        return _extend(text, s0, s0 + len(bare), _BRACKETS.get(opener), apostrophes=True)
+
+    @staticmethod
     def _neutralise_paths(text: str) -> str:
         """URLs (but the public ones) and anchored paths reduced to a neutral name; prose is left as it is."""
         out: list[str] = []
@@ -503,10 +528,13 @@ class Filter:
             if s0 and text[s0 - 1] == "`" and text[:s0].count("`") % 2 == 0:
                 continue  # `mild`/`none`: the backquote closes a word, it does not open a path
             if m.group("url"):
-                token = _URL_TOKEN.match(text, s0).group(0)
-                end = s0 + len(token)
+                end = Filter._url_end(text, s0)
                 out.append(text[pos:s0])
-                out.append(_url_name(token))
+                if end is None:  # a public URL stays as it is
+                    end = s0 + len(_URL_TOKEN.match(text, s0).group(0))
+                    out.append(text[s0:end])
+                else:
+                    out.append(_url_neutral(text[s0:end]))
                 pos = end
                 continue
             token = _TOKEN.match(text, s0)

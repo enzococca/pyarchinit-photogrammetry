@@ -116,7 +116,7 @@ def test_names_glued_to_underscores_digits_and_gaps(tmp_path):
     assert f.outgoing("Tell-Sultan, TELL.SULTAN e tell_sultan") == "Sito A, Sito A e Sito A"
     assert f.outgoing("Tell Sultan2026.JPG") == "Sito A2026.JPG"  # a digit is no part of a word
     assert f.outgoing("2026Tell-Sultan.JPG") == "2026Sito A.JPG"
-    assert f.outgoing("TellSultanX e TellSultan_01") == "TellSultanX e TellSultan_01"  # letters make another word
+    assert f.outgoing("TellSultanX e TellSultan_01") == "TellSultanX e Sito A_01"  # letters make another word
 
 
 def test_crs_fails_closed(tmp_path):
@@ -458,3 +458,51 @@ def test_email_addresses_stay_home(tmp_path):
         "scrivi a indirizzo e-mail o a indirizzo e-mail."
     assert f.outgoing("mailto:mario.rossi@uni.it") == "mailto:indirizzo e-mail"
     assert f.facts({"contatto": "anna.verdi@example.org", "n": 1}) == {"contatto": "indirizzo e-mail", "n": 1}
+
+
+PIN = "https://www.google.com/maps/place/41%C2%B008'02.4%22N+14%C2%B015'57.6%22E/@41.134,14.266,17z"
+
+
+def test_foreign_links_with_spaces_or_apostrophes_are_reduced_whole(tmp_path):
+    f = Filter(make_document(tmp_path))
+    cases = {
+        "file:///C:/Users/Mario Rossi/Scavo Tell Halaf/foto/a.jpg": "a",
+        "file:///Users/x/Scavo Tell Halaf/foto/a.jpg": "a",
+        "smb://nas/Scavo Tell Halaf/foto": "indirizzo",
+        "file://C:\\Users\\x\\Scavo Tell Halaf\\foto": "indirizzo",
+        "http://192.168.1.10/Scavo Tell Halaf/foto/a.jpg": "a",
+        "https://example.org/Sant'Angelo/Tell%20Halaf/foto": "indirizzo",
+        PIN: "indirizzo",
+    }
+    for text, name in cases.items():
+        for line, expected in ((text, name), (f"vedi {text} ora", f"vedi {name} ora"), (f"vedi {text}.", f"vedi {name}."),
+                               (f'cd "{text}" e poi', f'cd "{name}" e poi'), (f"({text}) e km/h", f"({name}) e km/h"),
+                               (f"{text} a 5 mm/px e Vista/Pannelli", f"{name} a 5 mm/px e Vista/Pannelli")):
+            out = f.outgoing(line)
+            assert out == expected, line
+    assert not re.search(r"\d", f.outgoing(PIN))  # no coordinate left
+    # public links stay whole, and the text around them too
+    assert f.outgoing("vedi https://github.com/a/b e /Users/x/c.jpg") == "vedi https://github.com/a/b e c"
+
+
+def test_names_glued_without_gaps(tmp_path):
+    f = Filter(make_document(tmp_path), people=["Anna Verdi"])
+    assert f.outgoing("TellSultan e tellsultan") == "Sito A e Sito A"
+    assert f.outgoing("/Users/x/foto/TellSultan_001.jpg") == "Sito A_001"
+    assert f.outgoing("2026TellSultan_01") == "2026Sito A_01"
+    assert f.outgoing("MarioRossi e AnnaVerdi") == "Persona 1 e Persona 2"
+    assert f.outgoing("/Users/x/mariorossi_scheda.pdf") == "Persona 1_scheda"
+    assert f.outgoing("mariorossi_scheda.pdf") == "Persona 1_scheda.pdf"
+    assert f.outgoing("TellSultanX e xTellSultan") == "TellSultanX e xTellSultan"  # a letter on a side: another word
+    g = Filter(None, people=["Li Wu"], places=["Ai Bo"])  # glued forms shorter than 6 letters are not used
+    assert g.outgoing("LiWu e AiBo, Li Wu e Ai Bo") == "LiWu e AiBo, Persona 1 e Luogo 1"
+
+
+def test_unc_like_and_user_home_anchors(tmp_path):
+    f = Filter(make_document(tmp_path))
+    assert f.outgoing("//nas/Scavo Tell Halaf/foto") == "foto"
+    assert f.outgoing("apri //nas/share/a.jpg ora") == "apri a ora"
+    assert f.outgoing("apri ~enzo/Scavo/foto ora") == "apri foto ora"
+    assert f.outgoing("~mario.rossi/Scavo Tell Halaf/foto") == "foto"
+    for line in ("// commento", "a // b", "~ 5 m", "circa ~3/4"):
+        assert f.outgoing(line) == line, line
