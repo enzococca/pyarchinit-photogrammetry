@@ -43,6 +43,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -65,6 +66,12 @@ TECHNICAL_FIELDS = (ID_FIELD, SIG_FIELD, PART_FIELD)
 # name -> value of what the file is: "chunk", the key of the chunk whose drawings it holds (an edit made there belongs
 # to that chunk, whichever is active when it is read); not a layer, not listed in gpkg_contents
 INFO_TABLE = "ppg_info"
+# (name, ppg_id, part, fid): the rows of the two-way tables as the program last wrote or read them, kept in the
+# transaction of the write or of the read - what a reader without memory (another LiveLink, the program started
+# again, a replaced file) compares the file with, so a row deleted in QGIS meanwhile is seen deleted and never written
+# back; ``INFO_TABLE`` "rows:<table>" says the record of that table was made (an empty record is not a missing one).
+# Not a layer, not listed in gpkg_contents.
+ROWS_TABLE = "ppg_rows"
 
 
 class UnreadEdits(RuntimeError):
@@ -304,7 +311,9 @@ class LiveLink:
         self.path = Path(folder) / LIVE_DB
         self.crs = crs or ""
         self._signatures: dict[str, int] = {}
-        self._known: dict[str, dict[tuple, int]] = {}  # table -> {(identity, part): fid} written or read here
+        # table -> {(identity, part): fid} written or read here: what the file is compared with when it has no record
+        # of that table (:data:`ROWS_TABLE`, written by a version before it was kept)
+        self._known: dict[str, dict[tuple, int]] = {}
         self._con: sqlite3.Connection | None = None
         self._ident = None  # the file the connection is open on
         self._data_version = None
@@ -399,6 +408,8 @@ class LiveLink:
                     raise UnreadEdits(f"the file holds edits of chunk {stored} not read yet")
                 for table, feats in todo.items():
                     known[table] = self._write_table(con, table, feats, srs[0], force, drop=drop_unread)
+                    if table in TWO_WAY_TABLES:
+                        self._record(con, table, known[table])
                 if rekey:
                     con.execute(f"CREATE TABLE IF NOT EXISTS {INFO_TABLE} (name TEXT PRIMARY KEY, value TEXT)")
                     con.execute(f"INSERT OR REPLACE INTO {INFO_TABLE} (name, value) VALUES ('chunk', ?)", (key,))
@@ -509,7 +520,7 @@ class LiveLink:
         if before and ID_FIELD not in before:
             con.execute(f"DELETE FROM {q(table)}")  # written by an earlier version: rows without identity
         two_way = table in TWO_WAY_TABLES and not drop  # the rows edited elsewhere kept until read
-        known = {} if recreated else self._known.get(table, {})
+        known = {} if recreated else self._known_rows(con, table)
         primary, others = self._sort(self._scan(con, table, cols, content=two_way or force or drop), known)
         written = [c for c in cols if c != SIG_FIELD]
         names = "".join(f", {q(c)}" for c in written)
@@ -562,9 +573,44 @@ class LiveLink:
             if any(s.external or s.key[0] is None for s in rows):
                 return True
             here = {s.key for s in rows}
-            if any(key not in here for key in self._known.get(table, {})):
+            if any(key not in here for key in self._known_rows(con, table)):
                 return True
         return False
+
+    # ------------------------------------------------------------------ the record of the rows
+    def _known_rows(self, con, table: str) -> dict[tuple, int]:
+        """``{(identity, part): fid}`` of the rows of ``table`` as the program last wrote or read them: the record the
+        file keeps (:data:`ROWS_TABLE`: the same for a link that never saw the file, after the program started again,
+        or for another link that wrote meanwhile), else what this link remembers (a file written by a version before
+        the record was kept, or a one-way table)."""
+        recorded = self._recorded(con, table)
+        return self._known.get(table, {}) if recorded is None else recorded
+
+    @staticmethod
+    def _recorded(con, table: str) -> dict[tuple, int] | None:
+        """The record of ``table`` in the file; None when the file has none of it."""
+        try:
+            row = con.execute(f"SELECT value FROM {INFO_TABLE} WHERE name = ?", (f"rows:{table}",)).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                raise
+            return None
+        if row is None:
+            return None
+        return {(pid, int(part)): int(fid) for pid, part, fid in
+                con.execute(f"SELECT ppg_id, part, fid FROM {ROWS_TABLE} WHERE name = ?", (table,))}
+
+    @staticmethod
+    def _record(con, table: str, rows: dict[tuple, int]) -> None:
+        """``rows`` (``{(identity, part): fid}``) as the record of ``table``, in the transaction under way."""
+        con.execute(f"CREATE TABLE IF NOT EXISTS {INFO_TABLE} (name TEXT PRIMARY KEY, value TEXT)")
+        con.execute(f"CREATE TABLE IF NOT EXISTS {ROWS_TABLE} (name TEXT NOT NULL, ppg_id TEXT NOT NULL, "
+                    "part INTEGER NOT NULL, fid INTEGER NOT NULL, PRIMARY KEY (name, ppg_id, part))")
+        con.execute(f"DELETE FROM {ROWS_TABLE} WHERE name = ?", (table,))
+        con.executemany(f"INSERT OR REPLACE INTO {ROWS_TABLE} (name, ppg_id, part, fid) VALUES (?, ?, ?, ?)",
+                        [(table, pid, int(part or 1), int(fid)) for (pid, part), fid in rows.items()
+                         if pid is not None])
+        con.execute(f"INSERT OR REPLACE INTO {INFO_TABLE} (name, value) VALUES (?, '1')", (f"rows:{table}",))
 
     @staticmethod
     def _stored_key(con) -> str | None:
@@ -610,15 +656,19 @@ class LiveLink:
         con = self._connection()
         return con.execute("PRAGMA data_version").fetchone()[0] != self._data_version
 
-    def read_changes(self, busy_ms: int = 250, any_srs: bool = False) -> dict[str, TableChanges]:
+    def read_changes(self, busy_ms: int = 250, any_srs: bool = False,
+                     before_commit: Callable[[dict], None] | None = None) -> dict[str, TableChanges]:
         """What another program (QGIS) changed in the two-way tables since the last write or read:
         ``{table: TableChanges}``, only the tables with changes. The rows drawn there get their
         identity and every row read its signature, in the same transaction: a change is given once.
         :attr:`read_chunk` is then the key of the chunk the file held the drawings of (read in that
         transaction: the chunk the changes belong to). A table in another system than the link's is
         refused, unread - ``any_srs``: read all the same, its features in their own system
-        (:attr:`Feature.srs_id`). :class:`sqlite3.OperationalError` (database locked) when QGIS holds
-        the file: try again."""
+        (:attr:`Feature.srs_id`). ``before_commit``: called with the changes in the read's own
+        transaction, before the rows are signed as read - what it raises rolls the read back,
+        nothing signed, the same changes at the next read (the rows kept beside the project must be
+        written before they count as read). :class:`sqlite3.OperationalError` (database locked)
+        when QGIS holds the file: try again."""
         from . import gpkg
 
         if not gpkg.is_geopackage(self.path):
@@ -642,8 +692,11 @@ class LiveLink:
                         out[table] = TableChanges(refused=(have, srs))
                         continue
                     ch, known[table] = self._read_table(con, table, cols)
+                    self._record(con, table, known[table])
                     if ch:
                         out[table] = ch
+                if before_commit is not None:
+                    before_commit(out)
                 con.execute("COMMIT")
             except BaseException:
                 if con.in_transaction:
@@ -660,7 +713,7 @@ class LiveLink:
         from . import gpkg
 
         q = gpkg.quote
-        known = self._known.get(table, {})
+        known = self._known_rows(con, table)
         primary, others = self._sort(self._scan(con, table, cols, content=True), known)
         ch = TableChanges()
         part = PART_FIELD in cols

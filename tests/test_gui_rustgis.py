@@ -516,7 +516,7 @@ def _stuck(fake):
     def hook(tool, args):
         if not stuck:
             stuck.append(args.get("command") or tool)
-            release.wait(30)
+            release.wait(120)
 
     fake.hooks.append(hook)
     return release
@@ -998,6 +998,9 @@ def test_closing_with_a_stuck_rustgis_waits_once(trench, rustgis, monkeypatch):
     monkeypatch.setattr(mw, "RUSTGIS_CLOSE_WAIT", 60.0)  # a close that waited again would take a minute
     asked = []
     monkeypatch.setattr(mw, "choice", lambda parent, kind, title, text, options, *a, **k: asked.append(options) or 1)
+    waits = []
+    real_wait = w._rustgis_wait_for
+    monkeypatch.setattr(w, "_rustgis_wait_for", lambda future: waits.append(future) or real_wait(future))
     release = _stuck(fake)
     w.setWindowModified(False)
     records = []
@@ -1011,7 +1014,7 @@ def test_closing_with_a_stuck_rustgis_waits_once(trench, rustgis, monkeypatch):
     finally:
         release.set()
         logging.getLogger("pyarchinit_photogrammetry").removeHandler(handler)
-    assert len(asked) == 1 and took < 30.0
+    assert len(asked) == 1 and len(waits) == 1 and took < 10.0
     assert any("resta in RustGIS" in r.getMessage() and "Saggio 1" in r.getMessage() for r in records)
     assert [g["name"] for g in fake.groups] == ["Saggio 1"]
 
