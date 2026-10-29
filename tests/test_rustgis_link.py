@@ -1874,15 +1874,41 @@ class FakeEngine:
                 group["layers"].append(lid)
             self.groups.append(group)
             return {"group": group["id"]}
-        if command == "layer.group":
-            lid = self._layer(p["layer"])["id"]
+        if command == "layer.group":  # with "before": just above that layer, the group where it is
+            layer = self._layer(p["layer"])
+            lid = layer["id"]
             group = next((g for g in self.groups if p["group"] in (g["id"], g["name"])), None)
             if group is None:
                 raise link.RustGisRefused(f"no group '{p['group']}'")
             for g in self.groups:
                 g["layers"] = [i for i in g["layers"] if i != lid]
             group["layers"].append(lid)
+            if p.get("before") is not None:
+                before = self._layer(p["before"])
+                self.layers.remove(layer)
+                self.layers.insert(self.layers.index(before), layer)
             return {"group": group["id"], "layer": lid}
+        if command == "layer.move":  # one layer to a place of the whole list, top first, never out of its group
+            (layer,) = [self._layer(ref) for ref in (p["layer"] if isinstance(p["layer"], list) else [p["layer"]])]
+            order = [l["id"] for l in self.layers]
+            to = min(max(0, int(p["to"])), len(order) - 1)
+            group = next((g for g in self.groups if layer["id"] in g["layers"]), None)
+            places = [order.index(i) for i in group["layers"] if i in order] if group is not None else []
+            if places and not min(places) <= to <= max(places):
+                raise link.RustGisRefused("the layer can't move out of its group (take it out of the group first)")
+            if order.index(layer["id"]) == to:
+                raise link.RustGisRefused("the layer is already there")
+            self.layers.remove(layer)
+            self.layers.insert(to, layer)
+            return {"ok": True}
+        if command == "group.remove":  # the group and its layers
+            group = next((g for g in self.groups if p["group"] in (g["id"], g["name"])), None)
+            if group is None:
+                raise link.RustGisRefused(f"no group '{p['group']}'")
+            for lid in list(group["layers"]):
+                self.remove(lid)
+            self.groups.remove(group)
+            return {"ok": True}
         if command == "select.byAttributes":
             layer = self._layer(p.get("layer"))
             rows = set(self._where(layer, p["where"]))
@@ -4871,3 +4897,233 @@ def test_a_table_over_100000_features_takes_edits_with_the_real_engine(tmp_path)
         found = engine.call("read_features", {"layer": int(rl.layers["curve"]), "where": '"quota" = 500', "limit": 5,
                                               "fields": ["quota"]})
         assert found["matched"] == 1
+
+
+# ---- what the window needs: edits listed in the linked layers, the layers taken away when RustGIS gets another chunk,
+# rasters that follow their files, and what earlier links left behind
+
+def _free_port() -> int:
+    """A port of 127.0.0.1 nothing listens at (the system gave it, and it was let go at once)."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def test_edits_listed_in_the_linked_layers(tmp_path):
+    """status_changed() keeps what RustGIS's edit status said: edited_there says whether it lists features added,
+    modified or deleted in the layer of a linked two-way table - the window pulls now and then while it does, since a
+    feature edited twice there may leave the status as it was - never for a one-way table (never pulled), and nothing
+    once stopped. RustGIS lists them until its project is saved there."""
+    one = _unit(1, GX, GY)
+    curve = {"quota": 99.5, "_geom": ("LineString", [[GX, GY], [GX + 2, GY + 2]])}
+    live, fake, rl = _started(tmp_path, _drawings([one], curves=[curve]))
+    assert not rl.edited_there  # nothing read yet
+    assert not rl.status_changed() and not rl.edited_there
+    fake.draw(fake.linked(rl, "curve"), shapely.geometry.LineString([(GX, GY + 3), (GX + 1, GY + 3)]), GB, quota=98.0)
+    assert rl.status_changed() and not rl.edited_there
+    fake.reshape(fake.linked(rl, "unita"), one[ID_FIELD], box(GX, GY, GX + 0.8, GY + 0.5), GB)
+    assert rl.status_changed() and rl.edited_there
+    assert rl.pull()["unita"] == (1, 0, 0)
+    assert not rl.status_changed() and rl.edited_there
+    fake.status.clear()  # the project saved in RustGIS
+    assert rl.status_changed() and not rl.edited_there
+    fake.status[int(rl.layers["unita"])] = [0, 2, 0]
+    assert rl.status_changed() and rl.edited_there
+    rl.stop()
+    assert not rl.edited_there
+
+
+def test_stop_can_take_the_layers_away(tmp_path, caplog):
+    """stop(withdraw=True), for when RustGIS is to show another chunk: the tables' layers that are still the link's, the
+    rasters' layers and tile layers, and the chunk's group once nothing else is in it, go from RustGIS - the layers in
+    one script; a layer of the user's stays, and so does the group when the user put one in it. Never raised: RustGIS
+    busy, the layers stay there, said in the log; the server closes all the same."""
+    dem = _small_dem(tmp_path / "dem.tif")
+    large = _header_only(tmp_path / "ortofoto.tif", 8000, 6000, 4)
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([_unit(1, GX, GY)]))
+    osm = {"name": "OSM", "url": "https://tile.example.org/{z}/{x}/{y}.png", "kind": "raster"}
+    links = []
+
+    def started():
+        fake = FakeEngine()
+        rl = link.RustGisLink(live, fake, "Saggio 1", GB)
+        links.append(rl)
+        rl.start([{"path": large, "name": "Ortofoto"}, {"path": dem, "name": "DEM", "hidden": True}])
+        fake.layers.append({"id": 999, "name": "Mio", "source": str(tmp_path / "mio.gpkg"), "table": "mio",
+                            "kind": "Polygon", "srs": 3004, "fields": {}, "features": [], "selection": set()})
+        fake.tile_layers.append(dict(osm))
+        fake.calls.clear()
+        return fake, rl
+
+    try:
+        fake, rl = started()
+        assert len(fake.layers) == 9 and len(fake.tile_layers) == 2  # 7 tables, the DEM, the user's; the orthophoto
+        server = rl.server
+        rl.stop(withdraw=True)
+        assert [l["name"] for l in fake.layers] == ["Mio"] and fake.groups == [] and fake.tile_layers == [osm]
+        assert rl.server is None and not server.thread.is_alive() and rl.layers == {} and rl.rasters == []
+        (script,) = [args["script"] for tool, args in fake.calls if tool == "run" and "layer.remove" in args["script"]]
+        assert [command for command, _ in _commands(script)] == ["layer.remove", "group.remove"]
+        fake, rl = started()  # the user put a layer of theirs in the chunk's group: the group stays, with it
+        fake.groups[0]["layers"].append(999)
+        rl.stop(withdraw=True)
+        assert [l["name"] for l in fake.layers] == ["Mio"] and [g["layers"] for g in fake.groups] == [[999]]
+        fake, rl = started()  # another project open in RustGIS under the same ids: none of its layers is touched
+        for layer in fake.layers:
+            if layer.get("table"):
+                layer["source"] = str(tmp_path / "altro.gpkg")
+        rl.stop(withdraw=True)
+        assert len(fake.layers) == 8 and "DEM" not in [l["name"] for l in fake.layers]  # read from the file given
+        assert len(fake.groups) == 1  # with the other project's layers in it
+        fake, rl = started()
+        fake.busy.append("list_layers")  # RustGIS busy: the layers stay, the tile layer goes at the next reading
+        with caplog.at_level(logging.WARNING, logger=link.__name__):
+            rl.stop(withdraw=True)
+        assert len(fake.layers) == 9 and "stay in RustGIS" in caplog.text and rl.server is None
+    finally:
+        for rl in links:
+            rl.stop()
+
+
+def test_rasters_follow_their_files(tmp_path, caplog):
+    """update_rasters: a raster whose file is another since it was given - rebuilt, patched, another version made active
+    - is taken out of RustGIS and given again: its layer into the chunk's group under the tables, hidden as asked, or
+    its tile layer read from a new address (the old one no longer answers). One no longer given is taken out, one new is
+    given; nothing is asked of RustGIS while every file is the one given, nor of one RustGIS refused until its file
+    changes."""
+    dem = _small_dem(tmp_path / "dem.tif")
+    other = _small_dem(tmp_path / "dem_2.tif")
+    broken = _small_dem(tmp_path / "rotto.tif")
+    large = _header_only(tmp_path / "ortofoto.tif", 8000, 6000, 4)
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([_unit(1, GX, GY)]))
+    fake = FakeEngine()
+    fake.rules.append(lambda command, p: "this is not a raster RustGIS can read"
+                      if command == "layer.addData" and str(p.get("path", "")).endswith("rotto.tif") else None)
+    rl = link.RustGisLink(live, fake, "Saggio 1", GB)
+    rasters = [{"path": large, "name": "Ortofoto"}, {"path": dem, "name": "DEM", "hidden": True},
+               {"path": broken, "name": "Rotto"}]
+    titles = [title for title, _ in LIVE_TABLES.values()]
+    try:
+        assert "Rotto" in rl.start(rasters)["refused"]
+        ortho, old = rl.rasters
+        fake.calls.clear()
+        assert rl.update_rasters(rasters) == {} and fake.calls == []  # the same files: nothing asked
+        later = dem.stat().st_mtime_ns + 10**9
+        _small_dem(dem)
+        os.utime(dem, ns=(later, later))  # the DEM rebuilt
+        assert rl.update_rasters(rasters) == {"given": ["DEM"], "taken": ["DEM"], "refused": {}}
+        assert rl.rasters[0] is ortho and fake.tile_layers[0]["url"] == ortho.url  # untouched
+        new = rl.rasters[1]
+        assert new.name == "DEM" and new.layer != old.layer and int(old.layer) not in [l["id"] for l in fake.layers]
+        assert fake.layer(int(new.layer))["visible"] is False and int(new.layer) in fake.groups[0]["layers"]
+        names = [l["name"] for l in fake.layers]
+        assert names.index("DEM") > max(names.index(t) for t in titles)  # under the tables
+        port = rl.server.server_address[1]
+        later += 10**9
+        os.utime(large, ns=(later, later))  # the orthophoto rebuilt: a new address, the old one gone
+        assert rl.update_rasters(rasters)["given"] == ["Ortofoto"]
+        assert [t["url"] for t in fake.tile_layers] == [rl.rasters[-1].url] and rl.rasters[-1].url != ortho.url
+        assert _http(port, urllib.parse.urlsplit(ortho.url).path)[0] == 404
+        out = rl.update_rasters([{"path": large, "name": "Ortofoto"}, {"path": other, "name": "DEM 2"},
+                                 {"path": broken, "name": "Rotto"}])
+        assert out == {"given": ["DEM 2"], "taken": ["DEM"], "refused": {}}
+        assert sorted(r.name for r in rl.rasters) == ["DEM 2", "Ortofoto"] and "DEM" not in [l["name"] for l in
+                                                                                           fake.layers]
+        later += 10**9
+        os.utime(broken, ns=(later, later))  # the raster RustGIS refused, another file now: tried again
+        with caplog.at_level(logging.WARNING, logger=link.__name__):
+            out = rl.update_rasters([{"path": large, "name": "Ortofoto"}, {"path": other, "name": "DEM 2"},
+                                     {"path": broken, "name": "Rotto"}])
+        assert list(out["refused"]) == ["Rotto"] and out["given"] == []
+        fake.busy.append("list_layers")  # RustGIS busy: raised, nothing taken; the next call does it
+        os.utime(other, ns=(later + 10**9, later + 10**9))
+        with pytest.raises(link.RustGisBusy):
+            rl.update_rasters([{"path": large, "name": "Ortofoto"}, {"path": other, "name": "DEM 2"}])
+        assert rl.update_rasters([{"path": large, "name": "Ortofoto"}, {"path": other, "name": "DEM 2"}])["given"] == [
+            "DEM 2"]
+        assert [l["name"] for l in fake.layers].count("DEM 2") == 1
+    finally:
+        rl.stop()
+
+
+def test_start_clears_what_earlier_links_left(tmp_path):
+    """What an earlier link left goes at the start. In the copies' folder: the temporary file of a copy that never ended
+    (a crash), once it is old - one being written is young -, and the copies no raster of the link reads (their raster
+    gone, or not given now), with their notes; nothing else there. In RustGIS: the tile layers of a raster server no
+    longer there (their removal failed: RustGIS busy then, or the program closed) - never one that still answers
+    (another window's link), nor one of the user's."""
+    photo = _two_tone(tmp_path / "foto.tif", 3, compress="webp", **TILED)  # RustGIS reads it as a copy
+    data_dir = tmp_path / "chunk_1"
+    copies = data_dir / "rustgis"
+    copies.mkdir(parents=True)
+    old = time.time() - 3600
+
+    def placed(name: str, text: str = "x", note: dict | None = None, age: float | None = None) -> Path:
+        path = copies / name
+        path.write_text(text, encoding="utf-8")
+        if note is not None:
+            path.with_name(name + ".json").write_text(json.dumps(note), encoding="utf-8")
+        if age is not None:
+            os.utime(path, (age, age))
+        return path
+
+    placed(".foto-k2j3h4l5.tif", age=old)  # a copy that never ended: gone
+    young = placed(".ortofoto-a1b2c3d4.tif")  # being written by another link: stays
+    placed("vecchia-0123456789ab.tif", note={"layout": 1, "source": str(tmp_path / "sparita.tif"), "identity": []})
+    placed("foto-abcdefabcdef.tif", note={"layout": 1, "source": str(photo), "identity": []})  # not given now
+    placed("foto.tif.tmp")
+    placed("leggimi.txt")
+    placed("orfana-0123456789ab.tif.json", note=None)  # a note without its copy
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([_unit(1, GX, GY)]))
+    other_window = link.RasterServer()
+    dead = f"http://127.0.0.1:{_free_port()}/{'a' * 32}/{'b' * 32}.tif"
+    alive = other_window.url(photo)
+    osm = "https://tile.example.org/{z}/{x}/{y}.png"
+    fake = FakeEngine()
+    fake.tile_layers = [{"name": "Ortofoto", "url": dead, "kind": "cog"}, {"name": "Ortofoto", "url": alive,
+                                                                          "kind": "cog"},
+                        {"name": "OSM", "url": osm, "kind": "raster"}]
+    rl = link.RustGisLink(live, fake, "Saggio 1", GB, data_dir=data_dir)
+    try:
+        rl.start([{"path": photo, "name": "Foto"}])
+        (given,) = rl.rasters
+        assert sorted(p.name for p in copies.iterdir()) == sorted(
+            [young.name, given.copy.name, given.copy.name + ".json", "foto.tif.tmp", "leggimi.txt"])
+        assert [t["url"] for t in fake.tile_layers] == [alive, osm] and [t["url"] for t in fake.removed] == [dead]
+        assert [t["name"] for t in fake.tile_layers] == ["Ortofoto", "OSM"]
+    finally:
+        rl.stop()
+        other_window.close()
+
+
+@pytest.mark.skipif(not CLI, reason="PPG_RUSTGIS_CLI does not name a rustgis-cli")
+def test_rasters_following_their_files_and_layers_taken_away_with_the_real_engine(tmp_path):
+    """update_rasters and stop(withdraw=True) with RustGIS's own engine: the DEM rebuilt is given again into the chunk's
+    group, under the tables, hidden as given; the link's layers and its group then go, a layer of the user's stays."""
+    crs, x0, y0 = "EPSG:32633", 291000.0, 4640000.0
+    dem = _small_dem(tmp_path / "dem.tif", crs=crs, x0=x0, y0=y0)
+    mine = _small_dem(tmp_path / "mio.tif", crs=crs, x0=x0, y0=y0)
+    live = LiveLink(tmp_path / "qgis", crs)
+    live.write(_drawings([_unit(1, x0, y0)]))
+    rasters = [{"path": dem, "name": "DEM", "hidden": True}]
+    with link.StdioTransport(Path(CLI), ["mcp", "--yes"]) as engine:
+        rl = link.RustGisLink(live, engine, "Saggio 1", crs, data_dir=tmp_path / "chunk_1")
+        rl.start(rasters)
+        engine.call("run_command", {"command": "layer.addData", "params": {"path": str(mine), "name": "Mio"}})
+        (old,) = rl.rasters
+        later = dem.stat().st_mtime_ns + 10**9
+        os.utime(dem, ns=(later, later))
+        assert rl.update_rasters(rasters) == {"given": ["DEM"], "taken": ["DEM"], "refused": {}}
+        (new,) = rl.rasters
+        listing = engine.call("list_layers", {})
+        layers = {str(l["id"]): l for l in listing["layers"]}
+        assert old.layer not in layers and layers[new.layer]["visible"] is False
+        (group,) = [g for g in listing["groups"] if g["name"] == "Saggio 1"]
+        assert group["layers"][-1] == int(new.layer)  # in the group, under the tables
+        assert set(group["layers"][:-1]) == {int(i) for i in rl.layers.values()}
+        rl.stop(withdraw=True)
+        listing = engine.call("list_layers", {})
+        assert [l["name"] for l in listing["layers"]] == ["Mio"] and listing["groups"] == []
