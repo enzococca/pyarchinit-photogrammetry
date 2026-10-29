@@ -1,0 +1,186 @@
+"""The fact tools of the assistant: what they say of the open project, and that they never say where it is."""
+from __future__ import annotations
+
+import json
+
+import numpy as np
+import pytest
+
+from pyarchinit_photogrammetry.assistant import facts as F
+from pyarchinit_photogrammetry.assistant.knowledge import default_index
+from pyarchinit_photogrammetry.assistant.privacy import Filter
+from pyarchinit_photogrammetry.core.document import Document
+
+PROJECT_TOOLS = [n for n in F.tool_names() if n not in ("guide_search", "scripting_api")]
+
+
+def _run(name, doc, **arguments):
+    return F.run_tool(name, arguments, doc, default_index("it"))
+
+
+def test_tool_specs_are_what_a_model_reads():
+    names = F.tool_names()
+    assert names == [t.name for t in F.TOOLS]
+    assert {"project_summary", "dem_statistics", "orthomosaic_info", "alignment_report", "markers", "thermal_info",
+            "multispectral_info", "point_cloud_info", "model_info", "guide_search", "scripting_api"} <= set(names)
+    for t in F.TOOLS:
+        assert t.description and t.parameters["type"] == "object"
+        json.dumps(t.parameters)  # a JSON schema
+        if t.name in PROJECT_TOOLS and t.name != "project_summary":
+            assert "chunk" in t.parameters["properties"]
+            assert "chunk" not in t.parameters.get("required", [])
+
+
+def test_project_summary_and_products(processed):
+    doc, ch, _ = processed
+    out = _run("project_summary", doc)
+    assert out["project"] == "project"
+    assert out["site"] is None
+    assert len(out["chunks"]) == 1
+    c = out["chunks"][0]
+    assert c["label"] == "Saggio 1" and c["key"] == ch.key and c["enabled"] is True
+    assert c["photos"] == len(ch.cameras) and c["aligned"] == len(ch.aligned_cameras) > 0
+    assert c["crs"] == ch.crs
+    assert {"dem", "orthomosaic", "model", "point_cloud", "tie_points"} <= set(c["products"])
+    # the chunk by its label or its key, else the labels are listed
+    by_label = _run("point_cloud_info", doc, chunk="Saggio 1")["points"]
+    assert by_label == _run("point_cloud_info", doc, chunk=ch.key)["points"]
+
+
+def test_dem_statistics_are_relative(processed):
+    import rasterio
+
+    doc, ch, _ = processed
+    out = _run("dem_statistics", doc)
+    with rasterio.open(ch.dem_path) as ds:
+        z = ds.read(1, masked=True)
+        z = np.ma.masked_invalid(z)
+        span = float(z.max() - z.min())
+        assert out["width"] == ds.width and out["height"] == ds.height
+        assert out["resolution"] == pytest.approx(abs(ds.res[0]), rel=1e-6)
+    h = out["height_above_lowest"]
+    assert h["min"] == 0
+    assert h["max"] == pytest.approx(span, rel=0.05)
+    assert 0 <= h["p05"] <= h["median"] <= h["p95"] <= h["max"]
+    assert 50 <= out["coverage_percent"] <= 100
+    assert out["nodata_percent"] == pytest.approx(100 - out["coverage_percent"], abs=1e-6)
+    assert out["crs"] == ch.crs
+    assert "version" in out
+    for key in out:
+        assert key not in ("bounds", "origin", "z_min", "z_max")
+
+
+def test_orthomosaic_point_cloud_and_model(processed):
+    doc, ch, _ = processed
+    ortho = _run("orthomosaic_info", doc)
+    assert ortho["width"] > 0 and ortho["height"] > 0 and ortho["bands"] in (3, 4)
+    assert ortho["resolution"] > 0 and ortho["blending"] in ("mosaic", "disabled", "average")
+    assert ortho["patches"] == 0
+    pc = _run("point_cloud_info", doc)
+    assert pc["points"] == len(ch.point_cloud)
+    assert sum(pc["classes"].values()) == pc["points"]
+    assert pc["confidence_bins"] is None or sum(pc["confidence_bins"].values()) == pc["points"]
+    model = _run("model_info", doc)
+    from pyarchinit_photogrammetry.io.mesh_ply import read_mesh
+
+    m = read_mesh(ch.product_path("model"))
+    assert model["faces"] == len(m.faces) and model["vertices"] == len(m.vertices)
+    assert model["texture_pages"] == 1 and model["textured"] is True
+    assert len(model["texture_size"]) == 2 and all(0 < v <= 2048 for v in model["texture_size"])
+
+
+def test_alignment_report_has_the_gcp_rmse(processed):
+    doc, ch, report = processed
+    out = _run("alignment_report", doc)
+    assert out["photos"] == len(ch.cameras) and out["aligned"] == len(ch.aligned_cameras)
+    assert out["tie_points"] == len(ch.tie_points)
+    assert out["reprojection_error_px"] is not None and 0 < out["reprojection_error_px"] < 3
+    assert out["matcher"] == "sift" and out["mapper"] in ("incremental", "global", "hierarchical")
+    gcp = out["gcp"]
+    assert gcp["n"] > 0 and gcp["control_rmse"] < 0.002
+    assert gcp["control_rmse"] == pytest.approx(report["control_rmse"], rel=1e-4)
+    assert gcp["check_rmse"] is None or gcp["check_rmse"] < 0.003
+    assert out["scalebars"]["n"] == 0
+    markers = _run("markers", doc)["markers"]
+    assert len(markers) == len(ch.markers)
+    for m in markers:
+        assert set(m) >= {"name", "projections", "role", "error_m"}
+        assert m["role"] in ("control", "check")
+        assert m["projections"] > 0
+        assert not {"x", "y", "z", "position", "reference"} & set(m)
+
+
+def test_results_pass_the_privacy_filter_whole(processed):
+    """Every number of a result is derived: the filter for an external model changes only the names and the CRS."""
+    doc, ch, _ = processed
+    f = Filter(doc)
+    for name in PROJECT_TOOLS:
+        out = _run(name, doc)
+        kept = f.facts(out)
+        # the keys stay (a key that is also a name of the project - "project" here - leaves as its placeholder)
+        assert set(kept) == {f.outgoing(k) for k in out}, (name, set(out) - set(kept))
+        for key, value in out.items():
+            if isinstance(value, dict):
+                assert set(f.facts(value)) == {f.outgoing(k) for k in value}, (name, key)
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        assert set(f.facts(item)) == {f.outgoing(k) for k in item}, (name, key)
+        json.dumps(kept)
+
+
+def test_thermal_and_multispectral_say_none_without_them(processed):
+    doc, _, _ = processed
+    assert "none" in _run("thermal_info", doc)
+    assert "none" in _run("multispectral_info", doc)
+
+
+def test_tools_on_an_empty_project():
+    doc = Document()
+    doc.add_chunk("Vuoto")
+    for name in PROJECT_TOOLS:
+        out = _run(name, doc)
+        assert isinstance(out, dict) and "none" in out, (name, out)
+        assert isinstance(out["none"], str) and out["none"]
+    for name in PROJECT_TOOLS:
+        out = _run(name, None)
+        assert isinstance(out, dict) and "none" in out, (name, out)
+    # a document without chunks
+    assert "none" in _run("dem_statistics", Document())
+
+
+def test_unknown_tool_and_bad_chunk(processed):
+    doc, _, _ = processed
+    assert _run("nope", doc) == {"error": "unknown tool nope"}
+    out = _run("dem_statistics", doc, chunk="Saggio 9")
+    assert "error" in out and "Saggio 9" in out["error"] and "Saggio 1" in out["error"]
+    # a tool that fails for another reason answers with the error, never raises
+    bad = Document()
+    ch = bad.add_chunk("Rotto")
+    ch.products["dem"] = "missing.tif"
+    assert "none" in _run("dem_statistics", bad)
+    ch.products["dem"] = "dem.tif"
+    (ch.data_dir / "dem.tif").write_bytes(b"not a tiff")
+    out = _run("dem_statistics", bad)
+    assert "error" in out and "Error" in out["error"]
+
+
+def test_guide_search_tool():
+    out = F.run_tool("guide_search", {"query": "come faccio le curve di livello", "k": 3}, None, default_index("it"))
+    assert len(out["passages"]) == 3
+    p = out["passages"][0]
+    assert set(p) >= {"title", "page", "text"}
+    assert "curve di livello" in (p["title"] + " " + p["text"]).lower()
+    # the language asked for wins over the index given
+    en = F.run_tool("guide_search", {"query": "how do I make contour lines", "lang": "en"}, None, default_index("it"))
+    assert en["passages"] and all(not p["page"].endswith(".it.md") for p in en["passages"])
+    assert F.run_tool("guide_search", {"query": ""}, None, default_index("it")) == {"passages": []}
+
+
+def test_scripting_api_tool_reads_only_the_two_pages():
+    out = F.run_tool("scripting_api", {"topic": "build_dem resolution"}, None, default_index("it"))
+    assert out["passages"]
+    assert {p["page"] for p in out["passages"]} <= {"scripting.it.md", "api.it.md"}
+    en = F.run_tool("scripting_api", {"topic": "build_dem resolution", "lang": "en"}, None, default_index("en"))
+    assert en["passages"] and {p["page"] for p in en["passages"]} <= {"scripting.md", "api.md"}
+    assert any("build_dem" in p["text"] for p in en["passages"])
