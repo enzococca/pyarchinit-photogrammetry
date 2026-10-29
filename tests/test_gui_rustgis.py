@@ -191,9 +191,10 @@ def test_local_chunk_and_agent_control_off(trench, rustgis, monkeypatch):
 
 def test_a_running_rustgis_is_never_started_again(trench, rustgis, monkeypatch, tmp_path):
     """Apri in RustGIS with a RustGIS that runs - its agent control unticked (its relay publishes endpoint.json with no
-    HTTP address), or not answering (minimized, hidden) -: the app is not started again (on Windows and Linux that
-    opens a second RustGIS); unticked, the window waits for the box and then says where it is; not answering, it is
-    neither waited for nor started, the window says so. No RustGIS running: the app is started."""
+    HTTP address), or not answering (minimized, hidden) -: on Windows and Linux the app is not started again (that
+    opens a second RustGIS); on macOS it is (``open -a`` only brings it to the front, where its box is); unticked, the
+    window waits for the box and then says where it is; not answering, it is neither waited for nor started on any
+    system, the window says so. No RustGIS running: the app is started."""
     from test_rustgis_link import publish_endpoint
 
     w, app, mw = trench
@@ -207,21 +208,35 @@ def test_a_running_rustgis_is_never_started_again(trench, rustgis, monkeypatch, 
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
     published = publish_endpoint(runtime, 9, tmp_path / rg.TOKEN_FILE, http_url=None, http_token_file=None)
     assert rg.running()
-    w.open_in_rustgis()
-    _settle(w, app)
-    assert opened == [] and fake.calls == [] and w._rustgis is None
-    assert len(shown) == 1 and "Let your Agents Control RustGIS" in shown[0]
+    monkeypatch.setattr(rg, "_running_on_windows", lambda pid: pid == os.getpid())  # "win32" asked without kernel32
+    for system, starts in (("win32", False), ("linux", False), ("darwin", True)):
+        monkeypatch.setattr(rg, "_platform", lambda system=system: system)
+        opened.clear()
+        shown.clear()
+        w.open_in_rustgis()
+        _settle(w, app)
+        assert opened == ([[]] if starts else []), system
+        assert fake.calls == [] and w._rustgis is None
+        assert len(shown) == 1 and "Let your Agents Control RustGIS" in shown[0], system
     real_reach = mw._rustgis_reach
     monkeypatch.setattr(mw, "_rustgis_reach", lambda timeout: asked.append(timeout) or ("busy", "not drawing"))
-    w.open_in_rustgis()
-    _settle(w, app)
-    assert opened == [] and len(asked) == 1 and w._rustgis is None  # not started, not waited for
-    assert len(shown) == 2 and "non risponde" in shown[1]
+    for system in ("win32", "linux", "darwin"):
+        monkeypatch.setattr(rg, "_platform", lambda system=system: system)
+        opened.clear()
+        shown.clear()
+        asked.clear()
+        w.open_in_rustgis()
+        _settle(w, app)
+        assert opened == [] and len(asked) == 1 and w._rustgis is None, system  # not started, not waited for
+        assert len(shown) == 1 and "non risponde" in shown[0], system
     published.unlink()  # RustGIS quit
     monkeypatch.setattr(mw, "_rustgis_reach", real_reach)
-    w.open_in_rustgis()
-    _settle(w, app)
-    assert opened == [[]] and w._rustgis is None and len(shown) == 3
+    for system in ("win32", "linux", "darwin"):
+        monkeypatch.setattr(rg, "_platform", lambda system=system: system)
+        opened.clear()
+        w.open_in_rustgis()
+        _settle(w, app)
+        assert opened == [[]] and w._rustgis is None, system
 
 
 def test_busy_says_waiting(trench, rustgis):

@@ -116,11 +116,12 @@ disegnate*), mai da RustGIS.
 
 **Accendi il controllo una volta sola.** RustGIS offre i suoi strumenti agli altri programmi solo mentre è spuntato *Let
 your Agents Control RustGIS* nelle impostazioni del suo AI Assistant. Quella casella è il tuo consenso, conservato in
-RustGIS: il programma non la cambia mai. Se è spenta, *Apri in RustGIS* avvia RustGIS (se non è già aperto) e lo aspetta
-fino a un minuto (*In attesa di RustGIS (fino a 60 secondi)*), chiedendo ogni mezzo secondo: spunta la casella entro
-quel minuto e il collegamento parte senza riprovare; dopo il minuto un messaggio dice cosa spuntare e chiede di
-riprovare. Il programma trova il RustGIS in esecuzione dal file che esso pubblica nella sua cartella delle impostazioni
-e legge da lì il suo token a ogni richiesta; il token non viene mai conservato, scritto nel log o mostrato.
+RustGIS: il programma non la cambia mai. Se è spenta, *Apri in RustGIS* avvia RustGIS se non è aperto (su macOS, se è
+già aperto, lo porta in primo piano) e lo aspetta fino a un minuto (*In attesa di RustGIS (fino a 60 secondi)*),
+chiedendo ogni mezzo secondo: spunta la casella entro quel minuto e il collegamento parte senza riprovare; dopo il
+minuto un messaggio dice cosa spuntare e chiede di riprovare. Il programma trova il RustGIS in esecuzione dal file che
+esso pubblica nella sua cartella delle impostazioni e legge da lì il suo token a ogni richiesta; il token non viene mai
+conservato, scritto nel log o mostrato.
 
 Come si comporta:
 

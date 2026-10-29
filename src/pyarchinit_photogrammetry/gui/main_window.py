@@ -154,8 +154,9 @@ def _rustgis_reach(timeout: float) -> tuple:
 
 def _rustgis_wait(progress, seconds: float) -> tuple:
     """RustGIS reached (:func:`_rustgis_reach`) in a step of the TaskRunner: when it does not let the program in, the
-    app is started - only when no RustGIS runs (:func:`.rustgis_link.running`): on Windows and Linux starting it again
-    opens a second one - and asked again every half second for ``seconds`` at most, time for the user to tick its agent
+    app is started - on Windows and Linux only when no RustGIS runs (:func:`.rustgis_link.running`): starting it again
+    there opens a second one; on macOS always (``open -a`` brings a running RustGIS to the front, where its box is) -
+    and asked again every half second for ``seconds`` at most, time for the user to tick its agent
     control. A RustGIS that does not answer (minimized, hidden, a dialog of its open) is there: neither started nor
     waited for, the window says so. The last answer."""
     from ..io import rustgis_link as rg
@@ -163,7 +164,7 @@ def _rustgis_wait(progress, seconds: float) -> tuple:
     reached = _rustgis_reach(5.0)
     if reached[0] != "off":
         return reached
-    if not rg.running():
+    if rg._platform() == "darwin" or not rg.running():
         try:
             rg.open_app()
         except (rg.RustGisError, OSError) as exc:  # not where the program looks for it: it may still start by itself

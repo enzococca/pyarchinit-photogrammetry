@@ -115,11 +115,11 @@ heights*), never from RustGIS.
 
 **Turn on the control once.** RustGIS serves its tools to other programs only while *Let your Agents Control RustGIS* is
 ticked in the settings of its AI Assistant. That box is your consent, kept in RustGIS: the program never changes it. If
-it is off, *Open in RustGIS* starts RustGIS (when it is not open already) and waits for it up to a minute (*Waiting for
-RustGIS (up to 60 seconds)*), asking every half second: tick the box within that minute and the link starts without
-trying again; after the minute a message says what to tick and asks to try again. The program finds the running RustGIS
-from the file it publishes in its settings folder and reads its token from there at every request; the token is never
-kept, logged or shown.
+it is off, *Open in RustGIS* starts RustGIS when it is not open (on macOS it brings an open one to the front) and waits
+for it up to a minute (*Waiting for RustGIS (up to 60 seconds)*), asking every half second: tick the box within that
+minute and the link starts without trying again; after the minute a message says what to tick and asks to try again. The
+program finds the running RustGIS from the file it publishes in its settings folder and reads its token from there at
+every request; the token is never kept, logged or shown.
 
 How it behaves:
 
