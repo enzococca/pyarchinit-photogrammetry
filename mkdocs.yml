@@ -89,6 +89,7 @@ plugins:
             Exports and reports: Esportazioni e rapporti
             Errors and updates: Errori e aggiornamenti
             Python API: API Python
+            Scripts: Script
             PyArchInit: PyArchInit
             QGIS, Metashape, WebODM, Photo3D: QGIS, Metashape, WebODM, Photo3D
             BIM and IFC: BIM e IFC
@@ -165,6 +166,7 @@ nav:
           - Exports and reports: gui/exports.md
           - Errors and updates: gui/help.md
       - Python API: api.md
+      - Scripts: scripting.md
       - PyArchInit: pyarchinit.md
       - QGIS, Metashape, WebODM, Photo3D: integrations.md
       - BIM and IFC: bim.md

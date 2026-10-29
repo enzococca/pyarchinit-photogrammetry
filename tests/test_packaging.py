@@ -25,6 +25,31 @@ def test_data_files_are_package_data():
     assert data and not missing, f"not declared in [tool.setuptools.package-data]: {missing}"
 
 
+
+def test_the_guide_of_the_assistant_is_in_the_wheel(monkeypatch):
+    """The assistant reads the guide from ``assistant/guide/`` when the program is installed (a wheel cannot hold
+    ``docs/``): every page of it, in its folders, is a data file setuptools puts in the wheel - resolved with the
+    package-data globs of setuptools itself, which (unlike the check above) expand ``**``."""
+    import warnings
+
+    from setuptools.config.pyprojecttoml import apply_configuration
+    from setuptools.dist import Distribution
+
+    guide = PKG / "assistant" / "guide"
+    pages = sorted(p.relative_to(PKG).as_posix() for p in guide.rglob("*.md"))
+    assert {"assistant/guide/index.md", "assistant/guide/scripting.it.md", "assistant/guide/gui/panes.md"} <= set(pages)
+    monkeypatch.chdir(ROOT)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        dist = apply_configuration(Distribution(), "pyproject.toml")
+        build_py = dist.get_command_obj("build_py")
+        build_py.ensure_finalized()
+        build_py.manifest_files = {}  # the package data alone, without running egg_info in the checkout
+        found = build_py.find_data_files("pyarchinit_photogrammetry", "src/pyarchinit_photogrammetry")
+    in_wheel = {Path(f).relative_to("src/pyarchinit_photogrammetry").as_posix() for f in found}
+    missing = [p for p in pages if p not in in_wheel]
+    assert not missing, f"guide pages not in the wheel: {missing[:5]}"
+
 def test_the_application_carries_the_figure_backends_plugins_use():
     """matplotlib loads the backend of a figure's format when it is saved (SVG, PDF, EPS): the
     program itself writes PNG only, so PyInstaller saw Agg alone and a plugin drawing its logs as
