@@ -3547,11 +3547,12 @@ def test_on_windows_a_product_read_by_rustgis_can_be_replaced(tmp_path):
 
 class FakeRenames:
     """The calls of kernel32 replace_file makes on Windows, answering as the test says: CreateFileW gives a handle
-    (INVALID_HANDLE_VALUE when ``invalid``); SetFileInformationByHandle records what it is given and, when
-    ``renames``, renames as Windows would."""
+    (INVALID_HANDLE_VALUE when ``invalid``); SetFileInformationByHandle records what it is given - the name as the
+    bytes of the FileName field - and, when ``renames`` and not among the first ``refuse`` calls, renames as Windows
+    would: to the FileNameLength bytes of FileName read as UTF-16."""
 
     def __init__(self, renames: bool = True):
-        self.renames, self.invalid = renames, False
+        self.renames, self.invalid, self.refuse = renames, False, 0
         self.opened, self.renamed, self.closed = [], [], []
 
     def CreateFileW(self, name, access, share, security, disposition, flags, template):
@@ -3562,9 +3563,13 @@ class FakeRenames:
 
     def SetFileInformationByHandle(self, handle, kind, information, size):
         given = information._obj
-        self.renamed.append((handle, kind, given.flags, given.root, given.length, given.name, size))
+        raw = bytes(given.name)
+        self.renamed.append((handle, kind, given.flags, given.root, given.length, raw, size))
+        if self.refuse:
+            self.refuse -= 1
+            return 0
         if self.renames:
-            os.replace(self.opened[-1][0], given.name)
+            os.replace(self.opened[-1][0], raw[:given.length].decode("utf-16-le", "surrogatepass"))
         return int(self.renames)
 
     def CloseHandle(self, handle):
@@ -3575,16 +3580,18 @@ class FakeRenames:
 def test_replace_file_renames_with_posix_semantics_on_windows(tmp_path, monkeypatch):
     """replace_file puts a file in the place of another in one move: os.replace, but on Windows first a rename with
     POSIX semantics - the file opened for DELETE, shared with every other opening, SetFileInformationByHandle with
-    FileRenameInfoEx, FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS and the new name whole -
-    which a handle open on the file replaced (the raster server's, while RustGIS reads a product) does not stop, as
-    it stops os.replace (MoveFileEx). Where Windows does not do that rename, os.replace, tried again after each of
-    RETRY_DELAYS while a handle refuses it, then raising its refusal."""
+    FileRenameInfoEx, FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS and the new name whole,
+    sized as Windows counts it (UTF-16 units: a character outside the BMP is two) - which a handle open on the file
+    replaced (the raster server's, while RustGIS reads a product) does not stop, as it stops os.replace (MoveFileEx).
+    Where Windows does not do that rename, os.replace; both tried again after each of RETRY_DELAYS while a handle
+    refuses them (an antivirus holding the file just written refuses the rename for a moment), then the refusal of
+    os.replace raised."""
     import ctypes
 
     from pyarchinit_photogrammetry.io import files
 
-    def written() -> tuple[Path, Path]:
-        src, dst = tmp_path / "orthomosaic.tmp.tif", tmp_path / "orthomosaic.tif"
+    def written(final: str = "orthomosaic.tif") -> tuple[Path, Path]:
+        src, dst = tmp_path / "orthomosaic.tmp.tif", tmp_path / final
         src.write_bytes(b"new")
         dst.write_bytes(b"old")
         return src, dst
@@ -3606,18 +3613,22 @@ def test_replace_file_renames_with_posix_semantics_on_windows(tmp_path, monkeypa
     monkeypatch.setattr(files, "_windows", lambda: True)
     fake = FakeRenames()
     monkeypatch.setattr(files, "_kernel32", lambda: fake)
-    src, dst = written()
-    files.replace_file(src, dst)
-    assert (dst.read_bytes(), src.exists(), slept) == (b"new", False, [])
-    # DELETE; FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE; OPEN_EXISTING; FILE_FLAG_BACKUP_SEMANTICS |
-    # FILE_FLAG_OPEN_REPARSE_POINT
-    assert fake.opened == [(str(src), 0x00010000, 0x7, None, 3, 0x02000000 | 0x00200000, None)]
-    name = os.path.abspath(dst)
-    (handle, kind, flags, root, length, given, size), = fake.renamed
-    assert (handle, kind, flags, root, length, given) == (777, 22, 0x3, None, 2 * len(name), name)
-    assert size >= 20 + 2 * (len(name) + 1) and fake.closed == [777]  # FILE_RENAME_INFO with the name and its end
-    # the rename refused (another file system, an older Windows): os.replace, tried again while a handle refuses it
-    refusals = [PermissionError(13, "held by an antivirus")] * 2
+    for final in ("orthomosaic.tif", "orto \U0001d538.tif"):  # a name with a character outside the BMP
+        src, dst = written(final)
+        files.replace_file(src, dst)
+        assert (dst.read_bytes(), src.exists(), slept) == (b"new", False, []), final
+        # DELETE; FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE; OPEN_EXISTING; FILE_FLAG_BACKUP_SEMANTICS |
+        # FILE_FLAG_OPEN_REPARSE_POINT
+        assert fake.opened[-1] == (str(src), 0x00010000, 0x7, None, 3, 0x02000000 | 0x00200000, None)
+        encoded = os.path.abspath(dst).encode("utf-16-le", "surrogatepass")
+        handle, kind, flags, root, length, raw, size = fake.renamed[-1]
+        assert (handle, kind, flags, root, length) == (777, 22, 0x3, None, len(encoded))  # the length in bytes
+        assert raw[:length] == encoded and raw[length:length + 2] == b"\0\0"  # the name whole, then its end
+        assert size >= 20 + len(encoded) + 2 and fake.closed[-1] == 777  # FILE_RENAME_INFO with the name and its end
+    assert len(fake.closed) == 2 and ctypes.sizeof(ctypes.c_uint32) == 4  # one opening per rename; DWORDs of 4
+    # the rename refused once (an antivirus holds the file just written) while os.replace cannot replace the file
+    # RustGIS holds: the rename is tried again after the first delay, and does it
+    refusals = [PermissionError(13, "held by RustGIS")] * 9
     replaced: list = []
 
     def replace(s, d):
@@ -3627,27 +3638,34 @@ def test_replace_file_renames_with_posix_semantics_on_windows(tmp_path, monkeypa
         os.replace(s, d)
 
     monkeypatch.setattr(files, "_replace", replace)
+    fake.refuse = 1
+    src, dst = written()
+    files.replace_file(src, dst)
+    assert (dst.read_bytes(), replaced, slept, len(fake.renamed)) == (b"new", [], [files.RETRY_DELAYS[0]], 4)
+    assert len(fake.closed) == 4  # the handle of the refused rename closed too
+    # the rename never done (another file system, an older Windows): os.replace, tried again while a handle refuses
+    # it, the rename tried again before each try
+    slept.clear()
+    refusals[:] = [PermissionError(13, "held by an antivirus")] * 2
     fake.renames = False
     src, dst = written()
     files.replace_file(src, dst)
     assert (dst.read_bytes(), replaced, slept) == (b"new", [(src, dst)], list(files.RETRY_DELAYS[:2]))
-    assert fake.closed == [777, 777]  # the handle of the refused rename closed too
-    # refused every time: the last refusal raised, after every delay
+    assert len(fake.renamed) == 7 and len(fake.closed) == 7
+    # refused every time: the last refusal of os.replace raised, after every delay, the rename tried each time
     slept.clear()
     refusals[:] = [PermissionError(13, "held")] * 9
     src, dst = written()
     with pytest.raises(PermissionError, match="held"):
         files.replace_file(src, dst)
-    assert (dst.read_bytes(), slept) == (b"old", list(files.RETRY_DELAYS))
+    assert (dst.read_bytes(), slept, len(fake.renamed)) == (b"old", list(files.RETRY_DELAYS), 12)
     # the file not opened (INVALID_HANDLE_VALUE): os.replace, nothing to close
     fake.invalid, fake.renames = True, True
     refusals.clear()
     slept.clear()
     src, dst = written()
     files.replace_file(src, dst)
-    assert (dst.read_bytes(), slept, fake.closed, isinstance(fake.opened[-1][0], str)) == (b"new", [], [777] * 3, True)
-    assert ctypes.sizeof(ctypes.c_uint32) == 4  # the lengths above are those of FILE_RENAME_INFO's DWORDs
-
+    assert (dst.read_bytes(), slept, len(fake.closed), len(fake.renamed)) == (b"new", [], 12, 12)
 
 def _orthophoto(path: Path, side: int, pixel: float, crs: str, x0: float, y0: float, colour=None) -> Path:
     """An orthophoto as engine/ortho.py writes one: RGBA with its alpha, Deflate, tiles of 256 pixels, BigTIFF when

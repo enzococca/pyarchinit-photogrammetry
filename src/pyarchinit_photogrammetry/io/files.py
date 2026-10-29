@@ -61,13 +61,16 @@ def _posix_rename(src: Path, dst: Path) -> bool:
     if not handle or handle == ctypes.c_void_p(-1).value:  # INVALID_HANDLE_VALUE
         return False
     try:
-        name = os.path.abspath(dst)
+        # the name as Windows counts it, in UTF-16 units (a character outside the BMP is two): sized and measured on
+        # its encoding, never on Python's characters
+        encoded = os.path.abspath(dst).encode("utf-16-le", "surrogatepass")
 
-        class RenameInformation(ctypes.Structure):  # FILE_RENAME_INFO, its FileName as long as the name
+        class RenameInformation(ctypes.Structure):  # FILE_RENAME_INFO, its FileName as long as the name and its end
             _fields_ = [("flags", ctypes.c_uint32), ("root", ctypes.c_void_p), ("length", ctypes.c_uint32),
-                        ("name", ctypes.c_wchar * (len(name) + 1))]
+                        ("name", ctypes.c_uint16 * (len(encoded) // 2 + 1))]
 
-        information = RenameInformation(_REPLACE_POSIX, None, 2 * len(name), name)  # the length in bytes of UTF-16
+        information = RenameInformation(_REPLACE_POSIX, None, len(encoded))  # FileNameLength in bytes, no end
+        ctypes.memmove(information.name, encoded, len(encoded))
         return bool(kernel32.SetFileInformationByHandle(handle, _RENAME_INFO_EX, ctypes.byref(information),
                                                         ctypes.sizeof(information)))
     finally:
@@ -77,21 +80,23 @@ def _posix_rename(src: Path, dst: Path) -> bool:
 def replace_file(src: str | Path, dst: str | Path) -> None:
     """The file at ``src`` put at ``dst``, in the place of the file there if any, in one move: ``os.replace``; on
     Windows first a rename with POSIX semantics (:func:`_posix_rename`), which a handle open on the file replaced -
-    the link's raster server reading it for RustGIS - does not stop as it stops ``os.replace``, then ``os.replace``
-    tried again after each of :data:`RETRY_DELAYS` while a handle refuses it. Raises what ``os.replace`` raises (the
-    last refusal included)."""
+    the link's raster server reading it for RustGIS - does not stop as it stops ``os.replace``, then ``os.replace``;
+    both tried again after each of :data:`RETRY_DELAYS` while a handle refuses them (an antivirus reading the file
+    just written refuses the rename for a moment, while ``os.replace`` never gets past the server's handle). Raises
+    what ``os.replace`` raises (the last refusal included)."""
     if not _windows():
         _replace(src, dst)
         return
-    if _posix_rename(Path(src), Path(dst)):
-        return
-    for delay in RETRY_DELAYS:
+    for delay in (*RETRY_DELAYS, None):
+        if _posix_rename(Path(src), Path(dst)):
+            return
         try:
             _replace(src, dst)
             return
         except PermissionError:
+            if delay is None:
+                raise
             time.sleep(delay)
-    _replace(src, dst)
 
 
 __all__ = ["replace_file", "RETRY_DELAYS"]

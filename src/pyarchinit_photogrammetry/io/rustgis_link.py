@@ -64,7 +64,6 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-import warnings
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -612,22 +611,20 @@ def raster_route(path: Path) -> str:
       :meth:`RustGisLink.start` leaves it out, saying what the file holds (:func:`_no_band`)."""
     import rasterio
     from rasterio.enums import ColorInterp
-    from rasterio.errors import NotGeoreferencedWarning, RasterioError
+    from rasterio.errors import RasterioError
 
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", NotGeoreferencedWarning)  # where it is drawn is RustGIS's business
-            with rasterio.open(path) as src:
-                if src.count == 0:  # a container of rasters (its subdatasets): no band to give
-                    return "refused"
-                samples = src.width * src.height * src.count
-                structure = src.tags(ns="IMAGE_STRUCTURE")
-                driver, tiled, types = src.driver, bool(src.profile.get("tiled")), set(src.dtypes)
-                palette = src.colorinterp[0] == ColorInterp.palette
-            internal = False
-            if driver == "GTiff" and samples > RASTER_SAMPLES:  # an .ovr beside it is not counted: never served
-                with rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR"), rasterio.open(path) as src:
-                    internal = bool(src.overviews(1))
+        with rasterio.open(path) as src:
+            if src.count == 0:  # a container of rasters (its subdatasets): no band to give
+                return "refused"
+            samples = src.width * src.height * src.count
+            structure = src.tags(ns="IMAGE_STRUCTURE")
+            driver, tiled, types = src.driver, bool(src.profile.get("tiled")), set(src.dtypes)
+            palette = src.colorinterp[0] == ColorInterp.palette
+        internal = False
+        if driver == "GTiff" and samples > RASTER_SAMPLES:  # an .ovr beside it is not counted: never served
+            with rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR"), rasterio.open(path) as src:
+                internal = bool(src.overviews(1))
     except (OSError, RasterioError):
         return "file"
     if len(types) != 1 or "complex" in next(iter(types)):  # no copy of these: RustGIS says what it makes of them
@@ -651,13 +648,10 @@ def _no_band(path: Path) -> str:
     """Why the dataset at ``path`` is refused: it has no band of its own, holding other rasters instead (its
     subdatasets, as GDAL names them, the first few) or nothing GDAL names."""
     import rasterio
-    from rasterio.errors import NotGeoreferencedWarning
 
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", NotGeoreferencedWarning)
-            with rasterio.open(path) as src:
-                inside = list(src.subdatasets)
+        with rasterio.open(path) as src:  # rasterio warns that it is not georeferenced: so be it, it is refused
+            inside = list(src.subdatasets)
     except Exception:
         inside = []
     if not inside:
