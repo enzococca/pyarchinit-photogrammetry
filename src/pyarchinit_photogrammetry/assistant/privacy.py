@@ -28,16 +28,19 @@ WARNING = "Il filtro non riconosce coordinate o nomi scritti nella domanda: non 
 # absolute elevations: the tools give the heights above the lowest point instead (``height_above_lowest``)
 ELEVATION_KEYS = ("z_min", "z_max", "z_mean", "z_median", "elevation", "elevation_min", "elevation_max",
                   "elevation_mean")
-# the tokens of a key (split on ``_``, camelCase and digits) that make the whole value absolute
-_DENY_TOKENS = frozenset(ABSOLUTE_KEYS) | {
+# a key is dropped only when ALL its tokens (split on ``_``, camelCase and digits) name a raw coordinate; a token of a
+# derived quantity (rmse, error, accuracy, status, size, resolution, ...) keeps the key: ``gps_rmse``, ``pixel_size_x``
+_COORDINATE_TOKENS = frozenset(ABSOLUTE_KEYS) - {"reference", "references"} | {
     "bbox", "extent", "geometry", "geom", "centroid", "position", "location", "coordinates", "coordinate", "coord",
-    "coords", "xy", "xyz", "quota", "elevation", "altitude", "lng", "easting", "northing"}
+    "coords", "xy", "xyz", "quota", "abs", "q", "min", "max", "point", "elevation", "altitude", "lng", "dem", "dsm", "dtm",
+    "m", "deg", "degrees", "meters", "metres", "wkt"}
+_MODIFIER_TOKENS = frozenset({"min", "max", "abs", "q", "m", "deg", "degrees", "meters", "metres"})
+_AXIS_STAT = re.compile(r"[xyz](?:min|max|mean|med|median)|(?:min|max|mean|median)[xyz]")
+_REFERENCE_TOKENS = frozenset({"reference", "references"})
 # the tokens that name a geometry: dropped when the value is a list of numbers or a WKT string
 _GEOMETRY_TOKENS = frozenset({"polygon", "polygons", "line", "lines", "points", "point", "path", "vertices", "outline",
                               "ring", "contour", "contours", "poly", "linestring"})
 _CRS_TOKENS = frozenset({"crs", "epsg", "srs", "proj", "utm"})
-_RELATIVE_HEIGHT_TOKENS = frozenset({"dem", "dsm", "dtm"})
-_STAT_TOKENS = frozenset({"min", "max", "mean", "median", "avg"})
 _WKT_GEOMETRY = re.compile(r"^\s*(?:SRID=\d+;)?\s*(?:MULTI)?(?:POINT|LINESTRING|POLYGON|CURVE|SURFACE)|"
                            r"^\s*GEOMETRYCOLLECTION", re.IGNORECASE)
 
@@ -60,16 +63,22 @@ _GAP = r"[\s_\-.]+"
 _GAP_RE = re.compile(_GAP)
 _APOSTROPHES = {"’": "'", "‘": "'", "ʼ": "'", "`": "'", "´": "'", "′": "'"}
 
-# --- paths. A directory segment starts and ends with a visible character (so it never swallows the words around a path)
-_SEG = r"[^\s/\\\n,;\"<>|?*](?:[^/\\\n,;\"<>|?*]*[^\s/\\\n,;\"<>|?*])?"
-_EXT = r"\.[A-Za-z0-9]{1,5}(?![A-Za-z0-9])"
-_URL = re.compile(r"(?<![\w])[A-Za-z][A-Za-z0-9+.\-]*://[^\s\"'<>]+")
-_WIN_FILE = re.compile(r"(?<![\w])(?:[A-Za-z]:[\\/]|\\\\)(?:" + _SEG + r"[\\/])*[^\\/\n,;\"<>|?*]*?" + _EXT)
-_WIN_PLAIN = re.compile(r"(?<![\w])(?:[A-Za-z]:[\\/]|\\\\)(?:" + _SEG + r"[\\/])*[^\\/\n,;\"<>|?*]+")
-_POSIX_FILE = re.compile(r"(?<![\w./:~\\])~?/(?:" + _SEG + r"/)*[^/\\\n,;\"<>|?*]*?" + _EXT)
-_POSIX_PLAIN = re.compile(r"(?<![\w./:~\\])~?/(?:" + _SEG + r"/)*[^\s/\\,;\"<>|?*]+")
-# a relative path: its first component has no space, the others may
-_RELATIVE = re.compile(r"(?<![\w./:~\\\-])[\w.~\-]+(?:/" + _SEG + r")+")
+# --- paths. Only a token that starts with an anchor is a path (``/``, ``~/``, ``./``, ``../``, ``X:\\``, ``\\\\``, ``\\dir\\``,
+# ``%VAR%\\``, ``scheme://``); it holds no space, unless it ends with a known file extension (at most 200 characters)
+PUBLIC_HOSTS = ("enzococca.github.io", "github.com", "pypi.org", "doi.org", "opengeos.org", "qgis.org", "wikipedia.org")
+_KNOWN_EXT = (r"\.(?:jpg|jpeg|png|tif|tiff|ppg|psx|gpkg|csv|txt|json|ply|las|laz|obj|glb|gltf|pdf|xlsx|dxf|svg|ifc|e57|"
+              r"zip)(?![A-Za-z0-9])")
+_ANCHOR = re.compile("|".join([
+    r"(?P<url>(?<!\w)[A-Za-z][A-Za-z0-9+.\-]*://)",
+    r"(?P<win>(?<![\w\\])(?:[A-Za-z]:[\\/]|\\\\|%[A-Za-z_][A-Za-z0-9_]*%[\\/]))",
+    r"(?P<rooted>(?<![\w\\.:/])\\(?=[A-Za-z0-9_$.][^\s\\]+\\))",
+    r"(?P<posix>(?<![\w./:~\\<>%$)\]}*°])(?:~/|\.{1,2}/|/(?=[^\s/])))",
+]))
+_TOKEN = re.compile(r"[^\s\"'`<>|*?,;()\[\]]+")
+_SPACED = re.compile(r"[^\n\"`<>|*?,;()\[\]]{0,200}?" + _KNOWN_EXT, re.IGNORECASE)
+_ENDS_KNOWN = re.compile(_KNOWN_EXT + r"$", re.IGNORECASE)
+_URL_TOKEN = re.compile(r"[^\s\"'`<>]+")
+_HAS_EXT = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,4}$")
 
 _SYSTEMS = (
     re.compile(r"\+proj=[^\n\"]*", re.IGNORECASE),
@@ -125,9 +134,20 @@ def neutral_name(path: Any) -> str:
     return re.sub(r"\s+", "_", stem.strip()) or "file"
 
 
+def _is_public(url: str) -> bool:
+    """Whether the host of ``url`` is one of :data:`PUBLIC_HOSTS` (or a subdomain), without credentials."""
+    authority = re.split(r"[/?#]", url.split("://", 1)[1], 1)[0]
+    if "@" in authority:
+        return False
+    host = authority.rsplit(":", 1)[0].lower() if re.search(r":\d+$", authority) else authority.lower()
+    return any(host == h or host.endswith("." + h) for h in PUBLIC_HOSTS)
+
+
 def _url_name(url: str) -> str:
-    """The neutral name of a URL, the punctuation that closes the sentence after it kept."""
+    """The neutral name of a URL, the punctuation that closes the sentence after it kept; a public URL stays."""
     bare = url.rstrip(").,;:!?]")
+    if _is_public(bare):
+        return url
     return _url_neutral(bare) + url[len(bare):]
 
 
@@ -151,6 +171,18 @@ def _numeric(v: Any) -> bool:
         return True
     if isinstance(v, (list, tuple)) and v:
         return all(_numeric(x) for x in v)
+    return False
+
+
+def _holds_numbers(v: Any) -> bool:
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, (int, float)):
+        return True
+    if isinstance(v, dict):
+        return any(_holds_numbers(x) for x in v.values())
+    if isinstance(v, (list, tuple, set, frozenset)):
+        return any(_holds_numbers(x) for x in v)
     return False
 
 
@@ -295,7 +327,7 @@ class Filter:
             tokens = k.split(" ")
             patterns.append(_GAP.join(re.escape(t) for t in tokens))
         # not preceded nor followed by a letter or a digit: "_" and "-" separate (Tell_Sultan_0001.JPG)
-        self._out = re.compile(r"(?<![^\W_])(?:" + "|".join(patterns) + r")(?![^\W_])") if patterns else None
+        self._out = re.compile(r"(?<![^\W\d_])(?:" + "|".join(patterns) + r")(?![^\W\d_])") if patterns else None
         self._back = {ph: real for real, ph in self._names.values() if ph != "progetto"}
         self._file_pattern = (re.compile(r"(?<![\w.])(?:" + "|".join(
             re.escape(n) for n in sorted(self._files, key=lambda n: (-len(n), n))) + r")(?!\w)", re.IGNORECASE)
@@ -341,30 +373,52 @@ class Filter:
 
     @staticmethod
     def _neutralise_paths(text: str) -> str:
-        for pattern in (_WIN_FILE, _WIN_PLAIN, _POSIX_FILE, _POSIX_PLAIN):
-            text = pattern.sub(lambda m: neutral_name(m.group(0)), text)
-
-        def relative(m: re.Match) -> str:
-            s = m.group(0)
-            if not re.search(r"[^\W\d_]", s.split("/", 1)[0]):
-                return s  # 2026/10/29, 28/08 e 1/0.5: a date or a ratio, not a folder
-            if s.count("/") < 2 and not re.search(_EXT + r"$", s):
-                return s  # "e/o", "28/08": one slash is not a path unless it ends in a file
-            return neutral_name(s)
-
-        return _RELATIVE.sub(relative, text)
+        """URLs (but the public ones) and anchored paths reduced to a neutral name; prose is left as it is."""
+        out: list[str] = []
+        pos = 0
+        for m in _ANCHOR.finditer(text):
+            s0 = m.start()
+            if s0 < pos:
+                continue
+            if s0 and text[s0 - 1] == "`" and text[:s0].count("`") % 2 == 0:
+                continue  # `mild`/`none`: the backquote closes a word, it does not open a path
+            if m.group("url"):
+                token = _URL_TOKEN.match(text, s0).group(0)
+                end = s0 + len(token)
+                out.append(text[pos:s0])
+                out.append(_url_name(token))
+                pos = end
+                continue
+            token = _TOKEN.match(text, s0)
+            token = token.group(0) if token else text[s0]
+            token = token.rstrip(".:!") or token  # the full stop that ends the sentence stays outside
+            if not _ENDS_KNOWN.search(token) and not _HAS_EXT.search(token):
+                run = _SPACED.match(text, s0)
+                if run is not None:
+                    parts = re.split(r"[\\/]", run.group(0))
+                    if (len(run.group(0)) <= 200 and all(len(c.split()) <= 5 for c in parts)
+                            and len(parts[-1].split()) <= 4 and not re.search(r"[:!?]\s", run.group(0))):
+                        token = run.group(0)
+            name = neutral_name(unquote(token)) if re.search(r"[^\W_]", token[len(m.group(0)):]) else None
+            if name is None:
+                continue
+            out.append(text[pos:s0])
+            out.append(name)
+            pos = s0 + len(token)
+        if not out:
+            return text
+        out.append(text[pos:])
+        return "".join(out)
 
     def outgoing(self, text: str) -> str:
         if not self.active or not isinstance(text, str) or not text:
             return text
-        text = _URL.sub(lambda m: _url_name(m.group(0)), text)
-        if "%" in text:
-            text = unquote(text)
         text = self._neutralise_known(text)
+        text = self._neutralise_paths(text)
         text = self._replace_names(text)
         for pattern in _SYSTEMS:
             text = pattern.sub(CRS_IN_TEXT, text)
-        return self._neutralise_paths(text)
+        return text
 
     def incoming(self, text: str) -> str:
         if not self.active or not isinstance(text, str) or not text or not self._back:
@@ -404,18 +458,17 @@ class Filter:
         return data
 
     def _drops(self, key: Any, value: Any) -> bool:
-        """Whether a key says the value is an absolute position, extent, height or geometry."""
+        """Whether a key says the value is a raw coordinate, extent, absolute height or geometry."""
         kl = str(key).lower()
-        if kl in ABSOLUTE_KEYS or kl in ELEVATION_KEYS or _is_wkt(value):
+        if kl in ABSOLUTE_KEYS and kl not in _REFERENCE_TOKENS or kl in ELEVATION_KEYS or _is_wkt(value):
             return True
         toks = _key_tokens(key)
         ts = set(toks)
-        if ts & _DENY_TOKENS:
-            return True
-        if any(re.fullmatch(r"[xyz](?:min|max|mean|med|median)|(?:min|max|mean|median)[xyz]", t) for t in toks):
-            return True
-        if ts & _RELATIVE_HEIGHT_TOKENS and ts & _STAT_TOKENS:
-            return True
+        if ts & _REFERENCE_TOKENS and all(t in _COORDINATE_TOKENS or t in _REFERENCE_TOKENS or t.isdigit() for t in toks):
+            return _holds_numbers(value)
+        if toks and all(t in _COORDINATE_TOKENS or t.isdigit() or _AXIS_STAT.fullmatch(t) for t in toks) \
+                and any(t not in _MODIFIER_TOKENS and not t.isdigit() for t in toks):
+            return True  # "min", "max" or "m" alone name no coordinate
         if ts & _GEOMETRY_TOKENS and (isinstance(value, (list, tuple)) and _numeric(value) or _is_wkt(value)):
             return True
         return False
