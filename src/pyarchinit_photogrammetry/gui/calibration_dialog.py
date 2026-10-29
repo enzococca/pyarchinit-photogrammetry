@@ -235,7 +235,7 @@ class CalibrationDialog(QDialog):
         except ValueError:
             from .dialogs import message
 
-            message(self, "warning", "Calibrazione", "Un valore non e' un numero.")
+            message(self, "warning", "Calibrazione", "Un valore non è un numero.")
             return False
         s = self.sensor
         if (model, [float(v) for v in s.params], bool(s.fixed)) != (s.model, params, fixed):

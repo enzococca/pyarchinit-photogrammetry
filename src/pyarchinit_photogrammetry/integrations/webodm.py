@@ -293,7 +293,7 @@ def import_task(source: str | os.PathLike, project: str | os.PathLike, label: st
             warnings.append(f"{missing} foto non presenti (servono per nuvola densa e texture; l'all.zip non le contiene)")
     elif info["images"] is not None:
         if poses and not info["crs"]:
-            warnings.append("pose delle camere non importate: il task non e' georeferenziato")
+            warnings.append("pose delle camere non importate: il task non è georeferenziato")
         progress(0.1, "Foto")
         try:
             ch.add_photos([info["images"]])

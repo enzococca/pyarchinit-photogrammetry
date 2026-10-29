@@ -133,7 +133,7 @@ def test_window_in_english(qapp, tmp_path, english):
         w.log_pane.info("SAM: tassello 1 di 4")
         assert w.log_pane.entries[-1][2] == "SAM: tile 1 of 4"
         # a dialog of fields: labels and choices in English, the values unchanged
-        d = ParamDialog(i18n.tr("Costruisci DEM"), [Field("quality", "Qualita'", "high", choices=QUALITY)], w)
+        d = ParamDialog(i18n.tr("Costruisci DEM"), [Field("quality", "Qualità", "high", choices=QUALITY)], w)
         d.show()
         qapp.processEvents()
         combo = d.findChildren(QComboBox)[0]

@@ -836,7 +836,7 @@ def test_metashape_internal_dem(tmp_path):
     before = sorted(p.name for p in (psx.with_suffix(".files") / "0" / "0" / "elevation").iterdir())
     ch = ms.import_psx(psx, tmp_path / "out" / "p.ppg", with_model=False).chunk
     warnings = " | ".join(ch.meta["import"]["warnings"])
-    assert "scavo_dem.tif e' vuoto" in warnings and "quote del DEM" not in warnings
+    assert "scavo_dem.tif è vuoto" in warnings and "quote del DEM" not in warnings
     assert ch.meta["import"]["dem"] == "DEM interno del progetto Metashape"
     assert ch.dem_path is not None and ch.dem_path.parent == ch.data_dir
     to_utm = Transformer.from_crs("EPSG:4326", "EPSG:32637", always_xy=True)

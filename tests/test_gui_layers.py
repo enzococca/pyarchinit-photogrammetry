@@ -557,7 +557,7 @@ def test_spot_heights_read_the_dem_and_go_to_pyarchinit_quote(window, qapp, pa_d
     _QuotaForm.calls = 0
     w.set_draw_mode("quota")
     w._quota_clicked(x0, y0)
-    w._quota_clicked(x0 + 0.5, y0 + 0.4)  # "non chiedere piu'": same fields, new elevation
+    w._quota_clicked(x0 + 0.5, y0 + 0.4)  # "non chiedere più": same fields, new elevation
     assert _QuotaForm.calls == 1 and len(w.quote) == 2
     assert w.quote[0]["quota_q"] == pytest.approx(z1, abs=1e-3) and w.quote[1]["quota_q"] == pytest.approx(z2, abs=1e-3)
     assert w.quote[1]["us_q"] == "2" and w.quote[1]["sito_q"] == "Saggio"

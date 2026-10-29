@@ -181,14 +181,14 @@ def test_a_unit_drawn_with_its_number_reaches_the_matrix_through_pyarchinit(pa_d
     w.propose_units()
     w.runner.wait()
     app.processEvents()
-    assert "1 unita' disegnate con il loro numero non hanno ancora la scheda" in asked[0]
+    assert "1 unità disegnate con il loro numero non hanno ancora la scheda" in asked[0]
     d = w._proposal_win
     rows = [(d.units.item(r, 1).text(), d.units.item(r, 2).text()) for r in range(d.units.rowCount())]
     assert rows == [("7", "US"), ("8", "US")]  # US 7 and the cut it fills; US 2 only for the relations
     rels = {(d.relations.item(r, 1).text(), d.relations.item(r, 2).text(), d.relations.item(r, 3).text())
             for r in range(d.relations.rowCount())}
     assert rels == {("US 7", "Riempie", "US 8"), ("US 8", "Taglia", "US 2")}
-    assert "1 US con la scheda gia' in PyArchInit" in d.status.text()
+    assert "1 US con la scheda già in PyArchInit" in d.status.text()
     d._apply(True)
     w.runner.wait()
     app.processEvents()

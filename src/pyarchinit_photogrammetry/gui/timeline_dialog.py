@@ -53,9 +53,9 @@ class TimelineDialog(QDialog):
         self.setMinimumSize(720, 460)
         self.report: dict = {}
         lay = QVBoxLayout(self)
-        intro = QLabel(tr("Ogni chunk con un DEM e' una fase dello scavo, nell'ordine delle date (dalle foto, "
-                          "oppure scritta qui). Le unita' disegnate su una fase erano in luce allora e sono state "
-                          "scavate prima della fase seguente: si misura quanto e' stato asportato e, dove si "
+        intro = QLabel(tr("Ogni chunk con un DEM è una fase dello scavo, nell'ordine delle date (dalle foto, "
+                          "oppure scritta qui). Le unità disegnate su una fase erano in luce allora e sono state "
+                          "scavate prima della fase seguente: si misura quanto è stato asportato e, dove si "
                           "sovrappongono in pianta, si propone che coprano quelle messe in luce dopo."))
         intro.setWordWrap(True)
         lay.addWidget(intro)
@@ -64,7 +64,7 @@ class TimelineDialog(QDialog):
         self.coregister.setToolTip(tr("Rilievi di giorni diversi non sono mai registrati alla perfezione: uno "
                                       "spostamento di qualche centimetro o una leggera inclinazione fra due DEM "
                                       "diventano falso scavo e riporto su ogni pendio. Ogni fase viene spostata sul "
-                                      "terreno che non e' cambiato (le unita' disegnate restano fuori); i DEM del "
+                                      "terreno che non è cambiato (le unità disegnate restano fuori); i DEM del "
                                       "progetto non cambiano. Ricalcola per applicare la scelta."))
         self.coregister_to = QComboBox()
         self.coregister_to.addItem(tr("sulla prima fase"), "first")
@@ -75,10 +75,10 @@ class TimelineDialog(QDialog):
         row.addStretch(1)
         lay.addLayout(row)
         self.tabs = QTabWidget()
-        self.phases = _table(["Fase", "Data", "Unita' disegnate"])
+        self.phases = _table(["Fase", "Data", "Unità disegnate"])
         self.phases.itemDoubleClicked.connect(self._phase_clicked)
         self.phases.itemChanged.connect(self._date_edited)
-        self.steps = _table(["Dalla fase", "Alla fase", "Unita'", "Asportato (m3)", "Riportato (m3)", "Area (m2)"])
+        self.steps = _table(["Dalla fase", "Alla fase", "Unità", "Asportato (m3)", "Riportato (m3)", "Area (m2)"])
         self.relations = _table(["Scrivi", "US sopra", "Rapporto", "US sotto", "Sovrapposizione (m2)", "Fasi"])
         self.shifts = _table(["Fase", "Coregistrata su", "dx (cm)", "dy (cm)", "dz (cm)", "Inclinazione (mm/m)",
                               "NMAD prima (cm)", "NMAD dopo (cm)", "Celle stabili", "Note"])
@@ -151,7 +151,7 @@ class TimelineDialog(QDialog):
             if not c.get("converged", True):
                 notes.append(tr("non convergente"))
             if c.get("units_excluded"):
-                notes.append(tr("unita' disegnate escluse"))
+                notes.append(tr("unità disegnate escluse"))
             self.shifts.setItem(r, 9, _item("; ".join(notes)))
 
     # ------------------------------------------------------------ content

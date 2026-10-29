@@ -338,7 +338,7 @@ def test_scale_bars_in_the_interface(two_chunks, scene, qapp_bars, monkeypatch, 
     w.runner.wait()
     qapp_bars.processEvents()
     fields, intro = seen[-1]
-    assert {fields["a"].default, fields["b"].default} == {a.key, b.key} and "unita' arbitrarie" in intro
+    assert {fields["a"].default, fields["b"].default} == {a.key, b.key} and "unità arbitrarie" in intro
     assert len(ch.scalebars) == 1 and w.last_report["method"] == "scalebars"
     assert pane.bars.rowCount() == 1 and pane.bars.item(0, 8).text()  # its error
     answers.update(a=x.key, b=y.key, distance=_true(scene, x, y), check=True)
