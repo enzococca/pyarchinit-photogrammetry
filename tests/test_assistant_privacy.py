@@ -483,6 +483,10 @@ def test_foreign_links_with_spaces_or_apostrophes_are_reduced_whole(tmp_path):
     assert not re.search(r"\d", f.outgoing(PIN))  # no coordinate left
     # public links stay whole, and the text around them too
     assert f.outgoing("vedi https://github.com/a/b e /Users/x/c.jpg") == "vedi https://github.com/a/b e c"
+    # a public link ends before a quote: the path after it is still reduced (ruling T2-11)
+    assert f.outgoing("['https://github.com/a','/Users/x/Scavo Tell Halaf/foto/a.jpg']") == "['https://github.com/a','a']"
+    assert f.outgoing("VALUES ('https://github.com/x','/Users/x/Anna Neri/a.jpg')") == "VALUES ('https://github.com/x','a')"
+    assert f.outgoing("vedi https://github.com/a'/Users/x/Anna Neri/a.jpg") == "vedi https://github.com/a'a"
 
 
 def test_names_glued_without_gaps(tmp_path):

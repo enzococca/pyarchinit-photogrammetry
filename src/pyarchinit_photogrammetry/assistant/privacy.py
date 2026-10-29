@@ -102,6 +102,7 @@ _PATH_CAP = 200
 _ENDS_KNOWN = re.compile(_KNOWN_EXT + r"$", re.IGNORECASE)
 # a URL token: apostrophes inside it are part of it (Google Maps pins: 41%C2%B008'02.4%22N)
 _URL_TOKEN = re.compile(r"[^\s\"`<>]+")
+_PUBLIC_URL_TOKEN = re.compile(r"[^\s\"'`<>]+")  # a public URL ends before a quote: ('https://github.com/x','/Users/...')
 _HAS_EXT = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,4}$")
 
 _SYSTEMS = (
@@ -500,8 +501,9 @@ class Filter:
         return text
 
     @staticmethod
-    def _url_end(text: str, s0: int) -> int | None:
-        """Where the URL that starts at ``s0`` ends, or ``None`` for a public URL.  A URL that is not public goes on
+    def _url_end(text: str, s0: int) -> tuple[int, bool]:
+        """Where the URL that starts at ``s0`` ends, and whether it is public (then it stays as it is).  A public URL
+        ends at the closing quote when it started after one, else before any quote or space.  A URL that is not public goes on
         like a path (ruling T2-9): over the words up to the last that holds a separator, also through apostrophes and
         ``%``-encoded text, stopped by a unit, a date, a quote or the bracket it started after."""
         opener = text[s0 - 1] if s0 else ""
@@ -511,10 +513,12 @@ class Filter:
         token = text[s0:quoted] if quoted is not None else _URL_TOKEN.match(text, s0).group(0)
         bare = token.rstrip(").,;:!?]'")
         if _is_public(bare):
-            return None
+            if quoted is not None:
+                return quoted, True
+            return s0 + len(_PUBLIC_URL_TOKEN.match(text, s0).group(0)), True
         if quoted is not None:
-            return s0 + len(bare)  # the closing quote says where the URL ends
-        return _extend(text, s0, s0 + len(bare), _BRACKETS.get(opener), apostrophes=True)
+            return s0 + len(bare), False  # the closing quote says where the URL ends
+        return _extend(text, s0, s0 + len(bare), _BRACKETS.get(opener), apostrophes=True), False
 
     @staticmethod
     def _neutralise_paths(text: str) -> str:
@@ -528,10 +532,9 @@ class Filter:
             if s0 and text[s0 - 1] == "`" and text[:s0].count("`") % 2 == 0:
                 continue  # `mild`/`none`: the backquote closes a word, it does not open a path
             if m.group("url"):
-                end = Filter._url_end(text, s0)
+                end, public = Filter._url_end(text, s0)
                 out.append(text[pos:s0])
-                if end is None:  # a public URL stays as it is
-                    end = s0 + len(_URL_TOKEN.match(text, s0).group(0))
+                if public:  # a public URL stays as it is
                     out.append(text[s0:end])
                 else:
                     out.append(_url_neutral(text[s0:end]))
