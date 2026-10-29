@@ -10,11 +10,12 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
 import pytest
-from shapely.geometry import Point, box
+from shapely.geometry import Point, Polygon, box
 
 from pyarchinit_photogrammetry.io import gpkg
 from pyarchinit_photogrammetry.io import rustgis_link as rg
@@ -30,14 +31,20 @@ REAL_TRANSPORT = rg.HttpTransport
 @pytest.fixture
 def rustgis(monkeypatch, tmp_path):
     """RustGIS installed and running, its agent control ticked, as the window finds it: its address published, the fake
-    engine answering behind the transport the window makes. ``opened`` gets each start of the app (none happens)."""
+    engine answering behind the transport the window makes (``fake.timeout``: the wait it was made with, as the window
+    sets it after). ``opened`` gets each start of the app (none happens)."""
     fake = FakeEngine()
     opened = []
+
+    def transport(endpoint, timeout=30.0):
+        fake.timeout = timeout
+        return fake
+
     monkeypatch.setattr(rg, "find_rustgis", lambda: rg.RustGisInstall(Path("/Applications/RustGIS.app"), None,
                                                                        "0.4.0"))
     monkeypatch.setattr(rg, "open_app", lambda paths=(): opened.append(list(paths)))
     monkeypatch.setattr(rg, "endpoint", lambda: rg.Endpoint("http://127.0.0.1:9/mcp", tmp_path / "mcp-http.token"))
-    monkeypatch.setattr(rg, "HttpTransport", lambda endpoint, timeout=30.0: fake)
+    monkeypatch.setattr(rg, "HttpTransport", transport)
     return fake, opened
 
 
@@ -91,7 +98,8 @@ def test_open_in_rustgis_starts_the_link(trench, rustgis, monkeypatch):
     given = []
     real = rg.RustGisLink.start
     monkeypatch.setattr(rg.RustGisLink, "start",
-                        lambda self, rasters=(): given.append(list(rasters)) or real(self, rasters))
+                        lambda self, rasters=(), progress=None: given.append(list(rasters)) or real(self, rasters,
+                                                                                                  progress))
     assert w.a_rustgis_open.text() == "Apri in RustGIS (collegamento dal vivo)"
     assert w.a_rustgis_live.text() == "Collegamento dal vivo con RustGIS (nei due sensi)"
     assert w.a_rustgis_live.isCheckable() and not w.a_rustgis_live.isChecked()
@@ -160,7 +168,7 @@ def test_local_chunk_and_agent_control_off(trench, rustgis, monkeypatch):
     fake, opened = rustgis
     shown, given = [], []
     monkeypatch.setattr(mw, "message", lambda parent, kind, title, text, *a, **k: shown.append(text))
-    monkeypatch.setattr(rg.RustGisLink, "start", lambda self, rasters=(): given.append(rasters))
+    monkeypatch.setattr(rg.RustGisLink, "start", lambda self, rasters=(), progress=None: given.append(rasters))
     w.chunk.crs = "LOCAL"
     w.open_in_rustgis()
     _settle(w, app)
@@ -286,9 +294,10 @@ def test_back_to_the_window_reads_rustgis(trench, rustgis):
 
 
 def test_products_rebuilt_are_given_again(trench, rustgis):
-    """The DEM rebuilt while the link is on: at the next look after the window shows the chunk again its layer in
-    RustGIS is replaced (RustGIS keeps what it loaded of a file; one read by address would no longer answer), hidden as
-    before; the orthophoto stays the layer it was."""
+    """The DEM rebuilt while the link is on: at the next look its layer in RustGIS is replaced (RustGIS keeps what it
+    loaded of a file; one read by address would no longer answer), hidden as before - its file is another, whether or
+    not the window showed the chunk again -; the orthophoto stays the layer it was. Shown again with nothing changed,
+    the chunk's rasters cost RustGIS nothing."""
     import numpy as np
 
     from pyarchinit_photogrammetry.engine.dem import write_geotiff
@@ -302,13 +311,15 @@ def test_products_rebuilt_are_given_again(trench, rustgis):
     later = path.stat().st_mtime_ns + 10**9
     os.utime(path, ns=(later, later))
     _look(w, app)
-    assert rl.rasters[1] is dem  # the window did not show the products again yet
-    w.refresh_all()
-    _look(w, app)
     assert rl.rasters[0] is ortho and rl.rasters[1] is not dem and rl.rasters[1].name == "DEM"
     assert fake.layer(int(rl.rasters[1].layer))["visible"] is False
     assert int(dem.layer) not in [layer["id"] for layer in fake.layers]
     assert any("RustGIS" in line and "DEM" in line for line in _log(w))
+    given = list(rl.rasters)
+    fake.calls.clear()
+    w.refresh_all()
+    _look(w, app)
+    assert rl.rasters == given and [args.get("command") for _, args in fake.calls] == ["edit.status"]
 
 
 def test_what_rustgis_refuses_is_said_once(trench, rustgis):
@@ -336,7 +347,8 @@ def test_what_rustgis_refuses_is_said_once(trench, rustgis):
 def test_a_start_rustgis_did_not_finish_says_so(trench, rustgis, monkeypatch):
     """RustGIS stops answering in the middle of the start (the tables and the rasters added, the group not made): the
     link does not start, the live action stays off, and the window names the layers to take away by hand if RustGIS
-    shows them twice."""
+    shows them twice. RustGIS gone in the middle of it (closed meanwhile) says that it stopped answering during the
+    start, never that its agent control is off."""
     w, app, mw = trench
     fake, _ = rustgis
     shown = []
@@ -348,6 +360,17 @@ def test_a_start_rustgis_did_not_finish_says_so(trench, rustgis, monkeypatch):
     (text,) = shown
     assert "RustGIS non rispondeva" in text and "togli a mano" in text
     assert "Unita' stratigrafiche (ppg)" in text and "Ortofoto" in text and "DEM" in text
+
+    def closed(tool, args):
+        if args.get("command") == "group.add":
+            raise rg.RustGisOff("nothing answers at http://127.0.0.1:9/mcp")
+
+    fake.hooks.append(closed)
+    w.open_in_rustgis()
+    _settle(w, app)
+    assert w._rustgis is None and not w.a_rustgis_live.isChecked() and len(shown) == 2
+    assert "ha smesso di rispondere durante l'avvio" in shown[1] and "Let your Agents" not in shown[1]
+    assert "togli a mano" in shown[1] and "Unita' stratigrafiche (ppg)" in shown[1]
 
 
 def test_a_layer_removed_in_rustgis_comes_back_and_the_others_are_read(trench, rustgis):
@@ -411,9 +434,10 @@ def test_open_again_gives_the_chunk_again(trench, rustgis):
 
 
 def test_a_refused_pull_holds_the_sends(trench, rustgis):
-    """RustGIS refusing to give its edits (an export it refuses), said once: while the pull waits (10 s) nothing is sent
-    either - RustGIS's edits are read before the program's go there - and the program's rows are kept; they go after
-    the next pull."""
+    """RustGIS refusing to give its edits (an export it refuses), said once: nothing is sent at that look, though a
+    unit was moved here before it, nor while the pull waits (10 s) - RustGIS's edits are read before the program's go
+    there (only a layer gone there is added again first) - and the program's rows are kept; they go after the next
+    pull."""
     w, app, mw = trench
     fake, _ = rustgis
     w._add_unit(_unit("6", box(GX + 1, GY + 1, GX + 2, GY + 2)))
@@ -421,14 +445,15 @@ def test_a_refused_pull_holds_the_sends(trench, rustgis):
     pid = w.units[0].attributes[ID_FIELD]
     fake.rules.append(lambda command, p: "exports are switched off" if command == "share.exportLayer" else None)
     fake.draw(fake.linked(rl, "quote"), Point(GX + 0.5, GY + 0.5), GB, quota_q=100.5, us_q="6")
-    _look(w, app)
-    refused = [line for line in _log(w) if line.startswith("RustGIS ha rifiutato")]
-    assert len(refused) == 1 and "exports are switched off" in refused[0]
     moved = box(GX + 1, GY + 1, GX + 2.5, GY + 2)
     w.units[0].geometry = moved
     w._redraw_overlays()
     w._export_qgis_layers()
     fake.scripts.clear()
+    _look(w, app)
+    refused = [line for line in _log(w) if line.startswith("RustGIS ha rifiutato")]
+    assert len(refused) == 1 and "exports are switched off" in refused[0]
+    assert fake.scripts == [] and rl.pending  # the refused pull holds the send
     _look(w, app)
     assert fake.scripts == [] and w.quote == []  # neither sent nor read
     assert [line for line in _log(w) if line.startswith("RustGIS ha rifiutato")] == refused
@@ -454,7 +479,7 @@ def test_chunk_switch_while_rustgis_does_not_answer_keeps_its_layers(trench, rus
     w._activate_chunk(second)
     _settle(w, app)
     assert sorted(g["name"] for g in fake.groups) == ["Saggio 1", "Saggio 2"] and rl.layers == {}
-    assert any(line.startswith("RustGIS non ha risposto") and "Saggio 1" in line for line in _log(w))
+    assert any(line.startswith("Le ultime modifiche fatte in RustGIS") and "Saggio 1" in line for line in _log(w))
     assert not (w.doc.chunks[0].meta.get("drawings") or {}).get("units") and w.units == []
     assert w._rustgis is not None and w._rustgis.chunk_label == "Saggio 2"
 
@@ -475,3 +500,384 @@ def test_rustgis_gone_stops_the_link(trench, rustgis, monkeypatch):
     _look(w, app)
     assert w._rustgis is None and not w.a_rustgis_live.isChecked() and rl.layers == {}
     assert len(shown) == 1 and "non risponde più" in shown[0]
+
+
+def _other_chunk(w):
+    second = w.doc.add_chunk("Saggio 2")
+    second.crs = GB
+    return second
+
+
+def _stuck(fake):
+    """RustGIS answering nothing to the next call made to it (the window's last pull) until ``release`` is set: a
+    function of the fake engine's hooks, and the event."""
+    release, stuck = threading.Event(), []
+
+    def hook(tool, args):
+        if not stuck:
+            stuck.append(args.get("command") or tool)
+            release.wait(30)
+
+    fake.hooks.append(hook)
+    return release
+
+
+def test_opening_another_project_reads_rustgis_then_asks(trench, rustgis, monkeypatch, tmp_path):
+    """Another project opened (menu, recent files, start page, demo) with a unit drawn in RustGIS and not read yet: it
+    comes in first, then the question about saving; answered "no", the project left goes as it was saved and RustGIS
+    keeps its layers, with what was drawn there - nothing is lost."""
+    import pyarchinit_photogrammetry as ppg
+    from PySide6.QtWidgets import QMessageBox
+
+    w, app, mw = trench
+    fake, _ = rustgis
+    other = ppg.Document()
+    other.add_chunk("Altro")
+    other.save(tmp_path / "altro.ppg")
+    rl = _linked(w, app)
+    layer = fake.linked(rl, "unita")
+    fake.draw(layer, box(GX + 3, GY + 1, GX + 3.5, GY + 1.5), GB, us_s="12", area_s="1")
+    asked = []
+    monkeypatch.setattr(mw, "message", lambda parent, kind, title, text, *a, **k: asked.append(
+        [u.us for u in w.units]) or QMessageBox.StandardButton.Discard)
+    w.setWindowModified(False)
+    w.open_document(str(tmp_path / "altro.ppg"))
+    _settle(w, app)
+    assert asked == [["12"]]  # read before the question
+    assert w.doc.path == tmp_path / "altro.ppg" and w._rustgis is None and rl.layers == {}
+    assert [g["name"] for g in fake.groups] == ["Saggio 1"]  # kept there: the project left was not saved with it
+    assert layer in fake.layers and "12" in [f["attrs"].get("us_s") for f in layer["features"]]
+    assert any("non è stato salvato" in line and "Saggio 1" in line for line in _log(w))
+
+
+def test_a_chunk_switch_never_waits_long_for_rustgis(trench, rustgis, monkeypatch):
+    """RustGIS not giving its last edits when the active chunk changes: the window waits RUSTGIS_LEAVE_WAIT (here half a
+    second), then asks; "Continua senza": the switch goes on at once, the link given up - what RustGIS gives later is
+    written nowhere - and the layers of the chunk left stay in RustGIS, nothing withdrawn, said in the log. The new
+    chunk comes beside them once RustGIS answers again."""
+    w, app, mw = trench
+    fake, _ = rustgis
+    first, second = w.chunk, _other_chunk(w)
+    rl = _linked(w, app)
+    fake.draw(fake.linked(rl, "unita"), box(GX + 3, GY + 1, GX + 3.5, GY + 1.5), GB, us_s="12", area_s="1")
+    monkeypatch.setattr(mw, "RUSTGIS_LEAVE_WAIT", 0.5)
+    asked = []
+    monkeypatch.setattr(mw, "choice", lambda parent, kind, title, text, options, *a, **k: asked.append(
+        (text, options)) or 1)
+    release = _stuck(fake)
+    try:
+        start = time.monotonic()
+        w._activate_chunk(second)
+        took = time.monotonic() - start
+        assert took < 5 and len(asked) == 1 and asked[0][1] == ["Aspetta ancora", "Continua senza"]
+        assert "niente si perde" in asked[0][0] and w.chunk is second and w.units == [] and rl._abandoned
+    finally:
+        release.set()
+    _settle(w, app)
+    assert not (first.meta.get("drawings") or {}).get("units")  # the late answer written nowhere
+    assert sorted(g["name"] for g in fake.groups) == ["Saggio 1", "Saggio 2"]  # the chunk left not withdrawn
+    assert any(line.startswith("Le ultime modifiche fatte in RustGIS") and "Saggio 1" in line for line in _log(w))
+    assert w._rustgis is not None and w._rustgis.chunk_label == "Saggio 2"
+
+
+def test_waiting_again_for_rustgis_reads_its_edits(trench, rustgis, monkeypatch):
+    """RustGIS slow to give its last edits when the active chunk changes: asked after RUSTGIS_LEAVE_WAIT, "Aspetta
+    ancora" waits again; RustGIS answers meanwhile: the unit drawn there goes into the chunk it was drawn on, and the
+    chunk left goes from RustGIS, as when RustGIS answers at once."""
+    w, app, mw = trench
+    fake, _ = rustgis
+    first, second = w.chunk, _other_chunk(w)
+    rl = _linked(w, app)
+    fake.draw(fake.linked(rl, "unita"), box(GX + 3, GY + 1, GX + 3.5, GY + 1.5), GB, us_s="12", area_s="1")
+    monkeypatch.setattr(mw, "RUSTGIS_LEAVE_WAIT", 0.5)
+    release, asked = _stuck(fake), []
+
+    def wait_again(parent, kind, title, text, options, *a, **k):
+        asked.append(options)
+        threading.Timer(0.1, release.set).start()  # RustGIS draws again a moment later
+        return 0
+
+    monkeypatch.setattr(mw, "choice", wait_again)
+    try:
+        w._activate_chunk(second)
+    finally:
+        release.set()
+    _settle(w, app)
+    assert len(asked) == 1 and [d["us"] for d in first.meta["drawings"]["units"]] == ["12"]
+    assert [g["name"] for g in fake.groups] == ["Saggio 2"] and rl.layers == {}
+
+
+def test_a_switch_while_rustgis_was_not_answering_does_not_wait(trench, rustgis, monkeypatch):
+    """RustGIS not answering at the last look (the status bar says so): the next change of chunk does not wait for it
+    - nothing asked, the link given up at once - and its layers stay there, with what was drawn in them; what it gives
+    later is written nowhere."""
+    w, app, mw = trench
+    fake, _ = rustgis
+    first, second = w.chunk, _other_chunk(w)
+    rl = _linked(w, app)
+    fake.draw(fake.linked(rl, "unita"), box(GX + 3, GY + 1, GX + 3.5, GY + 1.5), GB, us_s="12", area_s="1")
+    fake.busy.append("run_command:edit.status")
+    _look(w, app)
+    assert w._rustgis_waiting and "In attesa di RustGIS" in w.statusBar().currentMessage()
+    asked = []
+    monkeypatch.setattr(mw, "choice", lambda *a, **k: asked.append(a) or 1)
+    start = time.monotonic()
+    w._activate_chunk(second)
+    assert time.monotonic() - start < 2 and asked == [] and rl._abandoned and w.chunk is second
+    _settle(w, app)
+    assert not (first.meta.get("drawings") or {}).get("units")
+    assert sorted(g["name"] for g in fake.groups) == ["Saggio 1", "Saggio 2"]
+
+
+def test_the_start_waits_longer_than_a_look(trench, rustgis):
+    """The start waits RUSTGIS_START_TIMEOUT for each answer of RustGIS (it adds every layer of the chunk; only its
+    reading of the tile layers that earlier links left waits less, as at a stop); a look waits RUSTGIS_STATUS_WAIT for
+    the edit status - a RustGIS that does not draw makes a short look - and RUSTGIS_TIMEOUT for the rest."""
+    w, app, mw = trench
+    fake, _ = rustgis
+    used = []
+    fake.hooks.append(lambda tool, args: used.append((args.get("command") or tool, fake.timeout)))
+    rl = _linked(w, app)
+    assert used and {t for c, t in used if c != "list_layers"} == {mw.RUSTGIS_START_TIMEOUT}
+    used.clear()
+    fake.draw(fake.linked(rl, "unita"), box(GX + 3, GY + 1, GX + 3.5, GY + 1.5), GB, us_s="12", area_s="1")
+    _look(w, app)
+    assert used[0] == ("edit.status", mw.RUSTGIS_STATUS_WAIT) and "share.exportLayer" in [c for c, _ in used]
+    assert {t for _, t in used[1:]} == {mw.RUSTGIS_TIMEOUT} and [u.us for u in w.units] == ["12"]
+
+
+def test_a_patch_of_the_orthophoto_reaches_rustgis(trench, rustgis, monkeypatch):
+    """Aggiorna l'ortofoto (patch) writes the orthophoto again without showing the chunk anew: RustGIS gets it again
+    at the next look all the same - its tile layer read from a new address, the old one gone."""
+    import numpy as np
+
+    from pyarchinit_photogrammetry.engine import patches as P
+    from pyarchinit_photogrammetry.engine.dem import write_geotiff
+
+    w, app, mw = trench
+    fake, _ = rustgis
+    monkeypatch.setattr(rg, "RASTER_SAMPLES", 100_000)  # the trench's orthophoto read in place, by its address
+    rl = _linked(w, app)
+    ortho = rl.rasters[0]
+    assert ortho.url and [t["url"] for t in fake.tile_layers] == [ortho.url]
+    ch = w.chunk
+
+    def update_orthomosaic(progress=None, skip_unreadable=None):  # the patch painted: the file written again
+        rgb = np.full((3, 300, 300), 90, np.uint8)
+        write_geotiff(ch.orthomosaic_path, rgb, (GX, GY + 6), 0.02, GB)
+        later = ch.orthomosaic_path.stat().st_mtime_ns + 10**9
+        os.utime(ch.orthomosaic_path, ns=(later, later))
+
+    monkeypatch.setattr(P, "changed_patches", lambda chunk: [{"id": "p1"}])
+    monkeypatch.setattr(ch, "update_orthomosaic", update_orthomosaic)
+    monkeypatch.setattr(w, "_photos_to_skip", lambda step: [])
+    w.update_ortho_patches()
+    _settle(w, app)
+    _look(w, app)
+    new = next(r for r in rl.rasters if r.name == "Ortofoto")
+    assert new is not ortho and new.name == "Ortofoto" and [t["url"] for t in fake.tile_layers] == [new.url]
+    assert new.url != ortho.url
+
+
+def test_a_raster_rustgis_reads_as_a_copy_is_copied_in_a_step(trench, rustgis, monkeypatch):
+    """The DEM written again while linked, compressed as RustGIS does not decode: the look leaves its copy to a step of
+    the TaskRunner - its progress and its Annulla, never in the thread a change of chunk waits for -, the old layer
+    kept meanwhile, and the next look gives RustGIS the new copy."""
+    import rasterio
+
+    w, app, mw = trench
+    fake, _ = rustgis
+    rl = _linked(w, app)
+    ortho, dem = rl.rasters
+    path = w.chunk.dem_path
+    with rasterio.open(path) as src:
+        data, profile = src.read(), src.profile
+    profile.update(compress="lzma")
+    with rasterio.open(path, "w", **profile) as dst:
+        dst.write(data + 1)
+    assert rg.raster_route(path) == "copy"
+    steps = []
+    real = w.runner.run
+    monkeypatch.setattr(w.runner, "run", lambda label, *a, **k: steps.append(label) or real(label, *a, **k))
+    _look(w, app)
+    assert steps == ["Copie dei raster per RustGIS"] and rl.rasters[1] is dem  # the old layer, until the next look
+    _look(w, app)
+    new = rl.rasters[1]
+    assert new is not dem and new.copy is not None and new.copy.is_file() and new.name == "DEM"
+    assert int(dem.layer) not in [layer["id"] for layer in fake.layers]
+    assert fake.layer(int(new.layer))["visible"] is False
+
+
+def test_who_made_the_edits_with_both_links_on(trench, rustgis, monkeypatch):
+    """Both links on: what a look at RustGIS pulls is RustGIS's in the log, an invalid polygon of it too ("Da RustGIS:
+    la geometria ... corretta"); the look of QGIS waits while a look at RustGIS has not given its answer here (the rows
+    in the file are RustGIS's); rows a pull wrote that its answer could not apply are "Da QGIS o RustGIS" at the next
+    read, as are those a change of chunk reads in a hurry."""
+    w, app, mw = trench
+    fake, _ = rustgis
+    w._add_unit(_unit("6", box(GX + 1, GY + 1, GX + 2, GY + 2)))
+    second = _other_chunk(w)
+    rl = _linked(w, app)
+    w.a_qgis_live.setChecked(True)
+    w._qgis_poll.stop()
+    w._poll_qgis()
+    pid = w.units[0].attributes[ID_FIELD]
+    bowtie = Polygon([(GX + 1, GY + 1), (GX + 2, GY + 2), (GX + 2, GY + 1), (GX + 1, GY + 2)])
+    fake.reshape(fake.linked(rl, "unita"), pid, bowtie, GB)
+    _look(w, app)
+    assert "Da RustGIS: la geometria di US 6 non era valida ed è stata corretta" in _log(w)
+    assert "Da RustGIS: US 6 modificata" in _log(w)
+    # a look done in its thread, its answer not taken here yet: the look of QGIS waits
+    fake.draw(fake.linked(rl, "unita"), box(GX + 3, GY + 1, GX + 3.5, GY + 1.5), GB, us_s="12", area_s="1")
+    w._poll_rustgis()
+    w._rustgis_job.result(timeout=30)
+    assert w._poll_qgis() is False and [u.us for u in w.units] == ["6"]
+    _settle(w, app)
+    assert "Da RustGIS: US 12 aggiunta" in _log(w) and not any("QGIS: US 12" in line for line in _log(w))
+    # rows the answer could not apply (vertices being edited): read later, either may have made them
+    fake.draw(fake.linked(rl, "unita"), box(GX + 4, GY + 1, GX + 4.5, GY + 1.5), GB, us_s="13", area_s="1")
+    monkeypatch.setattr(w.ortho_view, "editing_vertices", lambda: True)
+    _look(w, app)
+    assert "13" not in [u.us for u in w.units]
+    monkeypatch.setattr(w.ortho_view, "editing_vertices", lambda: False)
+    assert w._poll_qgis() is True and "Da QGIS o RustGIS: US 13 aggiunta" in _log(w)
+    # a change of chunk: RustGIS's last edits read in a hurry, with both links on
+    fake.draw(fake.linked(rl, "unita"), box(GX + 5, GY + 1, GX + 5.5, GY + 1.5), GB, us_s="14", area_s="1")
+    first = w.chunk
+    w._activate_chunk(second)
+    _settle(w, app)
+    assert "Da QGIS o RustGIS: US 14 aggiunta" in _log(w)
+    assert sorted(d["us"] for d in first.meta["drawings"]["units"]) == ["12", "13", "14", "6"]
+
+
+def test_a_read_that_fails_keeps_rustgis_layers(trench, rustgis, monkeypatch):
+    """RustGIS's last edits pulled when the active chunk changes, but the live GeoPackage held by another program when
+    the window reads them: they are not in the chunk left, so its layers stay in RustGIS - nothing withdrawn, said in
+    the log."""
+    w, app, mw = trench
+    fake, _ = rustgis
+    first, second = w.chunk, _other_chunk(w)
+    rl = _linked(w, app)
+    fake.draw(fake.linked(rl, "unita"), box(GX + 3, GY + 1, GX + 3.5, GY + 1.5), GB, us_s="12", area_s="1")
+
+    def locked():
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(w._live_link, "read_changes", locked)
+    w._activate_chunk(second)
+    _settle(w, app)
+    assert not (first.meta.get("drawings") or {}).get("units") and rl.layers == {}
+    assert sorted(g["name"] for g in fake.groups) == ["Saggio 1", "Saggio 2"]
+    assert any(line.startswith("Le ultime modifiche fatte in RustGIS") and "Saggio 1" in line for line in _log(w))
+
+
+def test_the_project_remembers_its_live_links(trench, rustgis, monkeypatch):
+    """Which live links are on is kept in the project: opened again, those come back on - RustGIS's without asking,
+    with the active chunk - and only those: the live GeoPackage written for RustGIS alone does not turn QGIS's on. A
+    project of an earlier version (nothing kept) has QGIS's on when its live GeoPackage is there."""
+    from PySide6.QtWidgets import QMessageBox
+
+    w, app, mw = trench
+    fake, _ = rustgis
+    monkeypatch.setattr(mw, "message", lambda *a, **k: QMessageBox.StandardButton.Discard)
+    _linked(w, app)
+    assert w.doc.meta["live_links"] == {"qgis": False, "rustgis": True}
+    assert w.save_document()
+    path = w.doc.path
+    w.a_rustgis_live.setChecked(False)
+    _settle(w, app)
+    assert w.doc.meta["live_links"] == {"qgis": False, "rustgis": False} and w._rustgis is None
+    fake.layers.clear()  # RustGIS opened anew (it keeps the layers of a link turned off while it runs)
+    fake.groups.clear()
+    fake.tile_layers.clear()
+    w.setWindowModified(False)
+    w.open_document(str(path))  # as it was saved: RustGIS on
+    _settle(w, app)
+    assert w.a_rustgis_live.isChecked() and w._rustgis_poll.isActive()
+    _look(w, app)  # the first look (the one asked at once may find the window still opening the project)
+    assert not w.a_qgis_live.isChecked() and (w._qgis_dir() / LIVE_DB).exists()
+    assert w._rustgis is not None and w._rustgis.chunk_label == "Saggio 1"
+    assert [g["name"] for g in fake.groups] == ["Saggio 1"] and w._rustgis_poll.isActive()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    del data["meta"]["live_links"]  # as saved by an earlier version
+    path.write_text(json.dumps(data), encoding="utf-8")
+    w.setWindowModified(False)
+    w.open_document(str(path))
+    _settle(w, app)
+    assert w.a_qgis_live.isChecked() and not w.a_rustgis_live.isChecked() and w._rustgis is None
+
+
+def test_a_change_of_system_reads_rustgis_first(trench, rustgis, monkeypatch):
+    """Sistema del rilievo: RustGIS's last edits are read into the chunk, and the link stopped, before anything of the
+    change is worked out."""
+    w, app, mw = trench
+    fake, _ = rustgis
+    rl = _linked(w, app)
+    fake.draw(fake.linked(rl, "unita"), box(GX + 3, GY + 1, GX + 3.5, GY + 1.5), GB, us_s="12", area_s="1")
+    ran = []
+    monkeypatch.setattr(w, "run_task", lambda label, *a, **k: ran.append(
+        (label, [u.us for u in w.units], w._rustgis, [d["us"] for d in w.chunk.meta["drawings"]["units"]])))
+    w._set_survey_crs("EPSG:6708")
+    assert ran == [("Sistema del rilievo", ["12"], None, ["12"])]
+    _settle(w, app)
+    assert rl.layers == {}  # stopped, its layers gone from RustGIS: the chunk is to be shown in another system
+
+
+def test_new_and_import_read_rustgis_before_asking(trench, rustgis, monkeypatch):
+    """Nuovo progetto and File > Importa read RustGIS's last edits before the question about saving the project, so
+    that they are saved with it; cancelled, the project and the link stay."""
+    from PySide6.QtWidgets import QMessageBox
+
+    w, app, mw = trench
+    fake, _ = rustgis
+    rl = _linked(w, app)
+    layer = fake.linked(rl, "unita")
+    asked = []
+    monkeypatch.setattr(mw, "message", lambda parent, kind, title, text, *a, **k: asked.append(
+        sorted(u.us for u in w.units)) or QMessageBox.StandardButton.Cancel)
+    fake.draw(layer, box(GX + 3, GY + 1, GX + 3.5, GY + 1.5), GB, us_s="12", area_s="1")
+    w.setWindowModified(False)
+    w.new_document()
+    assert asked == [["12"]] and w._rustgis is rl and rl.layers
+    fake.draw(layer, box(GX + 4, GY + 1, GX + 4.5, GY + 1.5), GB, us_s="13", area_s="1")
+    w.import_external("metashape")
+    assert asked == [["12"], ["12", "13"]] and w._rustgis is rl and rl.layers
+
+
+def test_closing_ends_the_link_thread_and_its_looks(trench, rustgis):
+    """The window closed: the looks stop, the thread of RustGIS's calls ends, the link stops (RustGIS keeps its
+    layers) - and nothing of it starts again after, whatever calls come late."""
+    w, app, mw = trench
+    fake, _ = rustgis
+    rl = _linked(w, app)
+    _look(w, app)  # the thread of RustGIS's calls made
+    w._rustgis_poll.start()
+    thread = w._rustgis_thread
+    w.setWindowModified(False)
+    assert w.close()
+    assert not w._rustgis_poll.isActive() and w._rustgis_thread is None and not thread._thread.is_alive()
+    assert w._rustgis is None and rl.layers == {} and [g["name"] for g in fake.groups] == ["Saggio 1"]
+    w._poll_rustgis()
+    w._rustgis_stopped()
+    w._rustgis_resume()
+    with pytest.raises(RuntimeError):
+        w._rustgis_send(lambda: None).result(timeout=1)
+    app.processEvents()
+    assert w._rustgis_thread is None and w._rustgis is None
+
+
+def test_steps_left_waiting_at_closing_are_named(trench, caplog):
+    """Proxies to build again and sections to cut again after edits read from QGIS or RustGIS, held when those edits
+    were read in a hurry right before closing: the window closes, and the log (and its file) names them."""
+    import logging
+
+    w, app, mw = trench
+    section = {"label": "Sezione 3", "p1": [GX, GY], "p2": [GX + 1, GY]}
+    w.sections.append(section)
+    w._qgis_waiting["proxies"].append(("pid-6", "US 6", {"base": "plane"}))
+    w._qgis_waiting["sections"].append(section)
+    w.setWindowModified(False)
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
+        assert w.close()
+    assert "Alla chiusura i proxy US 6 restano com'erano" in caplog.text
+    assert "Alla chiusura le sezioni Sezione 3 restano com'erano" in caplog.text

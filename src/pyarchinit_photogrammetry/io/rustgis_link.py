@@ -71,6 +71,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .. import __version__
+from ..core.progress import Cancelled, as_progress
 from ..updates import bundle_version, version_key
 from . import gpkg
 from .files import replace_file
@@ -118,6 +119,17 @@ class RustGisBusy(RustGisError):
 class RustGisRefused(RustGisError):
     """RustGIS answered and said no: the tool or the command refused (the message is RustGIS's), or what it answered
     is not what a tool gives."""
+
+
+class RustGisLayerGone(RustGisRefused):
+    """A linked layer is no longer the link's in RustGIS: removed there, its field ``ppg_id`` deleted, or another
+    project open under its id. The next :meth:`RustGisLink.push` adds it again; the other refusals of a pull do not
+    go away by sending."""
+
+
+class RustGisAbandoned(RustGisError):
+    """The link was given up (:meth:`RustGisLink.abandon`): nothing of it is written into the live GeoPackage or sent
+    to RustGIS any more."""
 
 
 class RustGisTooOld(RustGisError):
@@ -643,6 +655,12 @@ def raster_route(path: Path) -> str:
     return "url"
 
 
+class _CopyWanted(Exception):
+    """A raster RustGIS reads only as a copy that is not written yet, left for :meth:`RustGisLink.write_copies` (in the
+    caller's thread, with its progress) by :meth:`RustGisLink.update_rasters`, which runs where nothing may take
+    long."""
+
+
 class _NothingToGive(ValueError):
     """A raster the link itself leaves out, saying why (:func:`_no_band`): :meth:`RustGisLink.start` puts the reason
     in ``"refused"``, a refusal and not an error of the program."""
@@ -708,15 +726,17 @@ def _copy_bytes(source: Path) -> int:
     return int(size / 6 if profile.get("compress") == "jpeg" else size)
 
 
-def _write_copy(source: Path, target: Path) -> None:
+def _write_copy(source: Path, target: Path, progress=None) -> None:
     """``source`` written again at ``target`` as RustGIS reads it (:func:`_copy_profile`): tiles of 512 pixels and
     internal overviews (of the nearest cell for a palette, else averaged). Block by block, never whole in memory,
     through a temporary file of its own in the same folder: no half copy is ever left, and two copies made at once do
-    not meet."""
+    not meet. ``progress`` (a :class:`..core.progress.Progress` or a callback) follows the blocks, and its cancel
+    stops the copy (:class:`..core.progress.Cancelled`, the temporary file removed)."""
     import numpy as np
     import rasterio
     from rasterio.enums import ColorInterp, Resampling
 
+    progress = as_progress(progress)
     with rasterio.open(source) as src:
         profile, masked, palette = _copy_profile(src)
         colours, dtype = list(src.colorinterp), np.dtype(profile["dtype"])
@@ -729,11 +749,16 @@ def _write_copy(source: Path, target: Path) -> None:
                     dst.write_colormap(1, palette)
                 elif ColorInterp.alpha in colours or masked:
                     dst.colorinterp = colours + [ColorInterp.alpha] * masked
-                for _, window in dst.block_windows(1):
+                windows = [window for _, window in dst.block_windows(1)]
+                for n, window in enumerate(windows):
+                    if n % 16 == 0:  # the progress window follows the copy; Annulla stops it here
+                        progress(0.9 * n / len(windows), f"{source.name}: copy for RustGIS, block {n + 1} of "
+                                                         f"{len(windows)}")
                     block = src.read(window=window).astype(dtype, copy=False)
                     if masked:
                         block = np.concatenate([block, src.read_masks(1, window=window)[None].astype(dtype)])
                     dst.write(block, window=window)
+                progress(0.9, f"{source.name}: overviews of the copy for RustGIS")
                 factors = [f for f in (2 ** n for n in range(1, 16)) if min(src.width, src.height) // f >= 64]
                 if factors:
                     dst.build_overviews(factors, Resampling.nearest if palette is not None else Resampling.average)
@@ -1756,6 +1781,10 @@ class RustGisLink:
         self._seen = None  # the edit status status_changed() last read (edited_there)
         # (raster, name) -> its file when RustGIS refused it, or it could not be given: not given again while it is so
         self._refused_rasters: dict[tuple, tuple | None] = {}
+        # raster -> (its file, why) when write_copies could not write its copy: not tried again while it is that file
+        self._copy_failed: dict[Path, tuple] = {}
+        self._abandoned = False  # abandon(): nothing written into the live GeoPackage or sent to RustGIS any more
+        self._writing = threading.Lock()  # held by a pull while it writes into the live GeoPackage (abandon waits)
         self._owed = False  # rows a send did not deliver: RustGIS busy, an answer lost, more than one script holds
         self._pushed_at = None  # the live GeoPackage as the file system saw it when RustGIS last got all of it
         self._unsure: dict[str, int] = {}  # table -> the highest id RustGIS had used when it was asked to add it again
@@ -1864,10 +1893,13 @@ class RustGisLink:
 
         A placeholder a send left there (``ppg-invio-...``) is never read. :class:`RustGisBusy` and the other errors
         of RustGIS leave the GeoPackage as it was (nothing is lost: try again) and :meth:`status_changed` true;
-        :class:`RustGisRefused` too when a linked layer is not the drawings' any more (removed there, or another project
-        open in RustGIS under its id) or an export is not in the system of the drawings, and
-        :class:`sqlite3.OperationalError` (database locked) when another program holds the file. RustGIS answers in
-        order, so by the time it answers a pull it has run a send whose answer was lost, or never will."""
+        :class:`RustGisLayerGone` too when a linked layer is not the drawings' any more (removed there, or another
+        project open in RustGIS under its id: the next push adds it again), :class:`RustGisRefused` when an export is
+        refused or not in the system of the drawings, :class:`RustGisAbandoned` once the link was given up
+        (:meth:`abandon`: nothing is written), and :class:`sqlite3.OperationalError` (database locked) when another
+        program holds the file. RustGIS answers in order, so by the time it answers a pull it has run a send whose
+        answer was lost, or never will."""
+        self._still_linked()
         tables = [t for t in TWO_WAY_TABLES if t in self.layers]
         unknown = [t for t in tables if t not in self.baseline]
         if unknown:
@@ -1883,19 +1915,21 @@ class RustGisLink:
             self._status = status
             return counts
         states = {}
-        con = gpkg.connect(self.live.path)
-        try:
-            con.execute("BEGIN IMMEDIATE")
+        with self._writing:  # abandon() waits for this write to end, and none begins after it
+            self._still_linked()
+            con = gpkg.connect(self.live.path)
             try:
-                for table, export in exports.items():
-                    counts[table], states[table] = self._pull_table(con, table, export)
-                con.execute("COMMIT")
-            except BaseException:
-                if con.in_transaction:
-                    con.execute("ROLLBACK")
-                raise
-        finally:
-            con.close()
+                con.execute("BEGIN IMMEDIATE")
+                try:
+                    for table, export in exports.items():
+                        counts[table], states[table] = self._pull_table(con, table, export)
+                    con.execute("COMMIT")
+                except BaseException:
+                    if con.in_transaction:
+                        con.execute("ROLLBACK")
+                    raise
+            finally:
+                con.close()
         for table, (had, drawn, extras) in states.items():
             self.baseline[table], self.drawn[table], self.extras[table] = had, drawn, extras
             self.in_flight.pop(table, None)  # a send whose answer was lost ran there by now, or never will
@@ -1925,8 +1959,8 @@ class RustGisLink:
         except (sqlite3.Error, ValueError, shapely.errors.ShapelyError) as exc:
             raise RustGisError(f"RustGIS's export of {table} cannot be read: {exc}") from None
         if ID_FIELD not in {c.lower() for c in columns}:  # every feature would look drawn there, every row deleted
-            raise RustGisRefused(f"RustGIS's layer of {table} has no field {ID_FIELD} (removed there, or another layer "
-                                 "under that id): its edits were not taken")
+            raise RustGisLayerGone(f"RustGIS's layer of {table} has no field {ID_FIELD} (removed there, or another "
+                                   "layer under that id): its edits were not taken")
         if left_out:
             log.warning("RustGIS left %d features of %s out of its export: none of its rows is taken for deleted",
                         left_out, table)
@@ -2055,7 +2089,7 @@ class RustGisLink:
         return (changed, added, deleted), (now, kept, extras)
 
     # ------------------------------------------------------------ the link started, and the program's edits sent
-    def start(self, rasters: Iterable[dict] = ()) -> dict:
+    def start(self, rasters: Iterable[dict] = (), progress=None) -> dict:
         """Gives RustGIS the chunk. A local frame, or a system without an EPSG code, is refused before RustGIS is asked
         anything; then RustGIS's version, and the system: a point of the chunk's system, read by RustGIS, exported in
         longitude and latitude and removed again in one step, must come back where pyproj puts it (within
@@ -2069,18 +2103,23 @@ class RustGisLink:
         it is, a copy it reads. Those given hidden are hidden, so that a DEM does not cover the orthophoto
         (:meth:`_show`). Each is in :attr:`rasters`; one RustGIS refuses, or that fails on its own (a file gone, a
         dataset without a band of its own, no room on the disk for the copy of one RustGIS cannot read, an error of
-        its routing or its copy), is left out and
-        said in ``"refused"`` (by name; a second of the same name as ``"name (2)"``) - only RustGIS's own failures
-        (busy, off) end the start. Then every table of :data:`.qgis_link.LIVE_TABLES` from the live GeoPackage (empty
-        ones too: the units are drawn in RustGIS on a chunk that has none) named as in QGIS, above the rasters, all in
-        a group named after the chunk. What RustGIS loaded is remembered right after (:meth:`remember`: its own export
-        of the two-way tables; the file as it was read for the others). Last, what earlier links left behind goes: the
-        copies no raster given reads, the temporary files of copies that never ended (:meth:`_clean_copies`), and the
-        tile layers of raster servers no longer there (:meth:`_remove_stale_tiles`).
+        its routing or its copy), is left out and said in ``"refused"`` (by name; a second of the same name as
+        ``"name (2)"``) - only RustGIS's own failures (busy, off) end the start. Then every table of
+        :data:`.qgis_link.LIVE_TABLES` from the live GeoPackage (empty ones too: the units are drawn in RustGIS on a
+        chunk that has none) named as in QGIS, above the rasters, all in a group named after the chunk. What RustGIS
+        loaded is remembered right after (:meth:`remember`: its own export of the two-way tables; the file as it was
+        read for the others). Last, what earlier links left behind goes: the copies no raster given reads, the
+        temporary files of copies that never ended (:meth:`_clean_copies`), and the tile layers of raster servers no
+        longer there (:meth:`_remove_stale_tiles`).
 
         Returns ``{"layers": n, "rasters": n, "version": "..."}``. A start that fails (RustGIS busy, a refusal) leaves
         the link stopped (:meth:`stop`: the tile layers taken away when RustGIS answers, the raster server closed), and
-        takes out of RustGIS the layers it added when RustGIS still answers."""
+        takes out of RustGIS the layers it added when RustGIS still answers. ``progress`` (a
+        :class:`..core.progress.Progress` or a callback) follows the rasters - a copy of one RustGIS cannot read may
+        take minutes, written block by block - and its cancel stops the start as a failed one
+        (:class:`..core.progress.Cancelled`, no half copy left)."""
+        progress = as_progress(progress)
+        self._still_linked()
         code = self._epsg()
         if not gpkg.is_geopackage(self.live.path):
             raise RuntimeError(f"{self.live.path} is not written yet: the drawings go to RustGIS from it")
@@ -2091,12 +2130,15 @@ class RustGisLink:
         tables: list[int] = []
         refused: dict[str, str] = {}
         try:
-            for raster in rasters:
+            rasters = list(rasters)
+            for n, raster in enumerate(rasters):
                 path = Path(raster["path"]).absolute()
                 entry = LinkedRaster(str(raster.get("name") or path.stem), path, bool(raster.get("hidden")),
                                      _opacity(raster.get("opacity")))
-                if self._given(entry, refused):
+                progress(0.8 * n / len(rasters), f"The raster {entry.name} to RustGIS")
+                if self._given(entry, refused, progress.sub(0.8 * n / len(rasters), 0.8 / len(rasters))):
                     given.append(entry)
+            progress(0.8, "The drawings to RustGIS")
             stamp = self._fingerprint()  # what RustGIS reads now: written later, it is sent
             one_way = {t: self._file_rows(t) for t in LIVE_TABLES if t not in TWO_WAY_TABLES}
             layers: dict[str, str] = {}
@@ -2151,18 +2193,22 @@ class RustGisLink:
         :meth:`status_changed` true. The errors of RustGIS (:class:`RustGisBusy`...) leave what RustGIS had as it was
         and the rows pending: the next push sends them; when the answer was lost (the script may run when RustGIS draws
         again) what it carried is kept (:attr:`in_flight`), so that a pull does not take it for edits made there.
-        :class:`RuntimeError` before :meth:`start`."""
+        :class:`RuntimeError` before :meth:`start`; :class:`RustGisAbandoned` once the link was given up
+        (:meth:`abandon`), before the live GeoPackage is read and before the script goes."""
         if not self.layers:
             raise RuntimeError("the link has not started: start() it first")
+        self._still_linked()
         stamp = self._fingerprint()  # the file as it is before it is read: written later, it is sent later
         try:
             fields, skipped = self._linked()
             for _ in range(RETRIES):
+                self._still_linked()  # the live GeoPackage may hold another chunk's drawings by now
                 send = self._send(fields)
                 answer = None
                 if not send.lines:
                     break
                 before = _status_key(self._command("edit.status", {}))  # what was edited there until now
+                self._still_linked()
                 try:
                     answer = self._run(send.lines)
                     break
@@ -2200,17 +2246,38 @@ class RustGisLink:
         where clause finds. Each was said in the log."""
         return {table: sorted(marks) for table, marks in self.aside.items() if marks}
 
-    def status_changed(self) -> bool:
+    def status_changed(self, wait: float | None = None) -> bool:
         """Whether RustGIS's edit status (``edit.status``: per layer, the features added, modified and deleted since its
         project was saved) is not what it was at the last look: one cheap call, to ask often, that changes nothing - it
         stays true until a :meth:`pull` has read what was edited (a pull that fails leaves it true). A send takes the
         status it leaves only when nothing was edited there since the last look, read right before it runs, so the
         program's own edits are not taken for RustGIS's and an edit made there just before a send is still seen. A
         feature edited twice there may leave it as it was: a pull now and then sees those (:attr:`edited_there`, which
-        tells it from what this call read)."""
-        seen = self._command("edit.status", {})
+        tells it from what this call read). ``wait``: at most that many seconds for RustGIS's answer (a read, harmless
+        to ask again: a RustGIS that does not draw is :class:`RustGisBusy` sooner)."""
+        with _waiting_at_most(self.transport, wait) if wait else contextlib.nullcontext():
+            seen = self._command("edit.status", {})
         self._seen = seen if isinstance(seen, dict) else None
         return _status_key(seen) != self._status
+
+    def abandon(self, wait: bool = True) -> None:
+        """The link given up, whatever call of it another thread is still making: from now on nothing of it is written
+        into the live GeoPackage or sent to RustGIS (:class:`RustGisAbandoned`) - a pull waiting for RustGIS's exports
+        writes nothing when they come, a send waiting for RustGIS's list of layers sends nothing. For when the window
+        stops waiting for RustGIS and shows another chunk, whose drawings the live GeoPackage soon holds: what was
+        edited in RustGIS stays in its layers. A pull writing at that moment ends first (what it wrote is then in the
+        live GeoPackage, to be read at once) - ``wait`` False: not waited for (a window that closes: the file keeps
+        the drawings of the same chunk). :meth:`stop` still takes the tile layers away and stops the server."""
+        if not wait:
+            self._abandoned = True
+            return
+        with self._writing:
+            self._abandoned = True
+
+    def _still_linked(self) -> None:
+        """:class:`RustGisAbandoned` once the link was given up (:meth:`abandon`)."""
+        if self._abandoned:
+            raise RustGisAbandoned("the link was given up: nothing is written or sent any more")
 
     @property
     def edited_there(self) -> bool:
@@ -2228,7 +2295,7 @@ class RustGisLink:
                 return True
         return False
 
-    def update_rasters(self, rasters: Iterable[dict] = ()) -> dict:
+    def update_rasters(self, rasters: Iterable[dict] = (), copies: bool = True) -> dict:
         """RustGIS's rasters brought in step with ``rasters`` - the list :meth:`start` takes, as the window has it now.
         A raster whose file is another since it was given - rebuilt, patched, cropped, another version of it made
         active, written again in place: the raster server no longer answers at the address it gave, and RustGIS keeps
@@ -2236,45 +2303,109 @@ class RustGisLink:
         (:meth:`_take_away`); one RustGIS has not got is given, as :meth:`start` gives them (:meth:`_given`): a layer
         into the chunk's group under its layers (:meth:`_regroup`), hidden or transparent as asked (:meth:`_show`).
         Nothing is asked of RustGIS while every raster is the file it was given, nor for one RustGIS refused (or that
-        could not be given) until its file changes. Returns ``{"given": [names], "taken": [names], "refused": {name:
-        why}}``, empty when nothing changed. RustGIS busy or off: raised, what was done kept - the next call does the
-        rest. :class:`RuntimeError` before :meth:`start`."""
+        could not be given) until its file changes. ``copies`` False: a raster RustGIS reads only as a copy whose copy
+        is not written yet is left for :meth:`write_copies` - which may take minutes, in a thread where that does no
+        harm -, its old layer kept meanwhile: listed in ``"copies"``. Returns ``{"given": [names], "taken": [names],
+        "refused": {name: why}, "copies": [paths]}``, empty when nothing changed. RustGIS busy or off: raised, what was
+        done kept - the next call does the rest. :class:`RuntimeError` before :meth:`start`; :class:`RustGisAbandoned`
+        once the link was given up."""
         if not self.layers:
             raise RuntimeError("the link has not started: start() it first")
+        self._still_linked()
+
+        def later(entry: LinkedRaster) -> bool:  # its copy is to be written first, by write_copies
+            if copies:
+                return False
+            try:
+                if raster_route(entry.path) != "copy" or self._copy_ready(entry.path)[1]:
+                    return False
+            except OSError:  # gone: given (and refused) as it is
+                return False
+            failed = self._copy_failed.get(entry.path)
+            return not (failed is not None and failed[0] == _file_version(entry.path))
+
         wanted = []
         for raster in rasters:
             path = Path(raster["path"]).absolute()
             wanted.append(LinkedRaster(str(raster.get("name") or path.stem), path, bool(raster.get("hidden")),
                                        _opacity(raster.get("opacity"))))
-        keep, taken = [], []
+        keep, taken, waiting = [], [], []
         for entry in self.rasters:
             same = next((w for w in wanted if (w.path, w.name) == (entry.path, entry.name)), None)
             if same is not None and entry.version is not None and _file_version(entry.path) == entry.version:
                 wanted.remove(same)
                 keep.append(entry)
+            elif same is not None and later(same):  # the old layer stays until the new copy is there
+                wanted.remove(same)
+                keep.append(entry)
+                waiting.append(same.path)
             else:
                 taken.append(entry)
         wanted = [w for w in wanted if (w.path, w.name) not in self._refused_rasters
                   or self._refused_rasters[(w.path, w.name)] != _file_version(w.path)]
-        if not taken and not wanted:
+        waiting += [w.path for w in wanted if later(w)]
+        wanted = [w for w in wanted if w.path not in waiting]
+        if not taken and not wanted and not waiting:
             return {}
-        out = {"given": [], "taken": [], "refused": {}}
+        out = {"given": [], "taken": [], "refused": {}, "copies": list(dict.fromkeys(waiting))}
         if taken:
             self._take_away(taken)
             self.rasters = keep
             out["taken"] = [r.name for r in taken]
         given = []
         for entry in wanted:
-            if self._given(entry, out["refused"]):
-                self.rasters.append(entry)
-                given.append(entry)
-                if entry.layer:
-                    self._regroup(entry)
+            try:
+                if not self._given(entry, out["refused"], copies=copies):
+                    continue
+            except _CopyWanted:  # its copy went meanwhile: for write_copies
+                out["copies"].append(entry.path)
+                continue
+            self.rasters.append(entry)
+            given.append(entry)
+            if entry.layer:
+                self._regroup(entry)
         out["given"] = [r.name for r in given]
         if given:
             self._show(given)
         self._clean_copies()
         return out
+
+    def rasters_changed(self) -> bool:
+        """Whether a raster of the link is another file than the one given - rebuilt, patched, cropped, another version
+        of it made active, written again in place, gone -, or one RustGIS refused (or that could not be given) changed
+        since: :meth:`update_rasters` has something to do then. The files' dates only: RustGIS is asked nothing. For
+        the window, which writes some products again without showing them anew (a patch of the orthophoto)."""
+        if any(_file_version(entry.path) != entry.version for entry in self.rasters):
+            return True
+        return any(_file_version(path) != version for (path, _name), version in self._refused_rasters.items())
+
+    def write_copies(self, paths: Iterable, progress=None) -> dict:
+        """The copies RustGIS reads of the rasters at ``paths`` - those :meth:`update_rasters` left for later
+        (``"copies"``) - written here, in the caller's thread (a step with its progress window: a large raster takes
+        minutes), ``progress`` following them and its cancel stopping them (:class:`..core.progress.Cancelled`, no half
+        copy left). Nothing of the link but its copies' folder is touched, so the link may look at RustGIS in another
+        thread meanwhile. Returns ``{path: why}`` of those that could not be written (no room on the disk...):
+        :meth:`update_rasters` refuses them, saying why, until their file changes - as it does those whose copies
+        were cancelled (given again by a new :meth:`start`)."""
+        from rasterio.errors import RasterioError
+
+        progress = as_progress(progress)
+        paths = [Path(p).absolute() for p in paths]
+        failed = {}
+        for n, path in enumerate(paths):
+            try:
+                self._copy_for(path, progress.sub(n / len(paths), 1 / len(paths)))
+            except Cancelled:
+                for rest in paths[n:]:  # not copied again by every look after: the user stopped them
+                    self._copy_failed[rest] = (_file_version(rest), "its copy for RustGIS was cancelled: it is made "
+                                               "when the raster changes again, or when the link starts again")
+                raise
+            except (OSError, RasterioError, ValueError) as exc:
+                why = str(exc) or type(exc).__name__
+                log.warning("RustGIS link: the copy of %s for RustGIS was not written: %s", path.name, why)
+                failed[path] = why
+                self._copy_failed[path] = (_file_version(path), why)
+        return failed
 
     def stop(self, withdraw: bool = False) -> None:
         """Forgets RustGIS's layers: after it nothing is sent or asked. RustGIS keeps them, with what they have - all
@@ -2297,7 +2428,7 @@ class RustGisLink:
             self._group = self._status = self._pushed_at = self._seen = None
             self._owed, self._unsure, self._discard, self._digests = False, {}, {}, {}
             self.aside, self._partners, self._held, self.in_flight, self._waits = {}, {}, {}, {}, set()
-            self._refused_rasters = {}
+            self._refused_rasters, self._copy_failed = {}, {}
 
     def _withdraw(self) -> None:
         """The link's layers taken out of RustGIS: those of the tables that are still the link's (:meth:`_ours`: another
@@ -2652,7 +2783,12 @@ class RustGisLink:
         def old(path: Path) -> bool:
             return now - path.stat().st_mtime > TEMPORARY_AGE
 
-        for path in folder.iterdir():
+        try:
+            found = list(folder.iterdir())
+        except OSError as exc:  # the folder cannot be read now: nothing is cleaned, the link starts all the same
+            log.warning("RustGIS link: %s not cleaned: %s", folder, exc)
+            return
+        for path in found:
             name = path.name
             try:
                 if not path.is_file() or name in used:
@@ -2671,20 +2807,21 @@ class RustGisLink:
             except OSError as exc:
                 log.debug("RustGIS link: %s left in %s: %s", name, folder, exc)
 
-    def _given(self, entry: LinkedRaster, refused: dict) -> bool:
-        """``entry`` given to RustGIS (:meth:`_give`); False when RustGIS refused it or it cannot be given on its own -
-        its file gone, a dataset without a band of its own, no room on the disk for the copy of one RustGIS cannot read,
-        an error of its routing or of its copy -, said in the log and in ``refused`` (by name; a second of the same name
-        as ``"name (2)"``), and remembered with its file: it is not given again while it is that file. RustGIS's own
-        failures (busy, off, an answer that is not a tool's) are raised."""
+    def _given(self, entry: LinkedRaster, refused: dict, progress=None, copies: bool = True) -> bool:
+        """``entry`` given to RustGIS (:meth:`_give`, ``progress`` following a copy it writes, ``copies`` as there);
+        False when RustGIS refused it or it cannot be given on its own - its file gone, a dataset without a band of its
+        own, no room on the disk for the copy of one RustGIS cannot read, an error of its routing or of its copy -, said
+        in the log and in ``refused`` (by name; a second of the same name as ``"name (2)"``), and remembered with its
+        file: it is not given again while it is that file. RustGIS's own failures (busy, off, an answer that is not a
+        tool's), a cancel and a copy left for :meth:`write_copies` are raised."""
         from rasterio.errors import RasterioError
 
         try:
-            self._give(entry)
+            self._give(entry, progress, copies)
         except RustGisRefused as exc:
             log.warning("RustGIS did not take the raster %s: %s", entry.name, exc)
             why = str(exc)
-        except RustGisError:  # RustGIS busy, off, or answering what no tool gives: the caller stops
+        except (RustGisError, Cancelled, _CopyWanted):  # RustGIS busy or off, the user's cancel, a copy for later
             raise
         except Exception as exc:  # this raster alone: gone, no room or no copy, no server, an exotic raster
             expected = isinstance(exc, (OSError, RasterioError, _NothingToGive))
@@ -2704,17 +2841,18 @@ class RustGisLink:
             self.server = RasterServer()
         return self.server.url(path)
 
-    def _give(self, entry: LinkedRaster) -> None:
+    def _give(self, entry: LinkedRaster, progress=None, copies: bool = True) -> None:
         """``entry``'s raster given to RustGIS as :func:`raster_route` says - as its file, by its address, or in the
-        place of one RustGIS cannot read a copy it reads (:meth:`_copy_for`), itself given as any raster is: as a file
-        when small or a palette, else by its address - and what RustGIS made of it written into ``entry``: its layer,
-        or the address of its tile layer, and the version of its file given (:attr:`LinkedRaster.version`)."""
+        place of one RustGIS cannot read a copy it reads (:meth:`_copy_for`, ``progress`` following it; ``copies``
+        False: a copy to write is :class:`_CopyWanted`, for :meth:`write_copies`), itself given as any raster is: as a
+        file when small or a palette, else by its address - and what RustGIS made of it written into ``entry``: its
+        layer, or the address of its tile layer, and the version of its file given (:attr:`LinkedRaster.version`)."""
         entry.version = _file_version(entry.path)
         route, given = raster_route(entry.path), entry.path
         if route == "refused":
             raise _NothingToGive(_no_band(entry.path))
         if route == "copy":
-            entry.copy = given = self._copy_for(entry.path)
+            entry.copy = given = self._copy_for(entry.path, progress, write=copies)
             route = "url" if raster_route(given) == "url" else "file"
         if route == "file":
             answer = self._command("layer.addData", {"path": str(given), "name": entry.name})
@@ -2764,26 +2902,40 @@ class RustGisLink:
                 log.warning("RustGIS link: the rasters keep the opacity and visibility RustGIS gave them: %s", exc)
                 self._rename_back(marks)
 
-    def _copy_for(self, path: Path) -> Path:
-        """A copy of the raster at ``path`` that RustGIS reads (:func:`_write_copy`), in :attr:`copies`, named after
-        the raster and its place: reused while the raster is the file it was made from (device, inode, size and time of
-        modification) and the copy was written as this version writes copies (:data:`COPY_LAYOUT`) - both noted beside
-        it -, made again otherwise. Made only when the disk has room for it:
-        :data:`COPY_SPACE` times its size free - the size its pixels give (:func:`_copy_bytes`), or the raster's when
-        larger - and :data:`COPY_RESERVE` left after it; else :class:`OSError` saying so, nothing written, and the
-        raster, which RustGIS cannot read (that is why it is copied), is refused."""
-        status = os.stat(path)
-        identity = list(_version(status))
+    def _copy_ready(self, path: Path) -> tuple[Path, bool]:
+        """Where the copy of the raster at ``path`` that RustGIS reads goes (in :attr:`copies`, named after the raster
+        and its place), and whether it is there as it should be: written from the raster as it is now (device, inode,
+        size and time of modification) and as this version writes copies (:data:`COPY_LAYOUT`) - both noted beside it.
+        :class:`OSError` when the raster is gone."""
+        identity = list(_version(os.stat(path)))
         digest = hashlib.sha1(os.fsencode(os.path.realpath(path))).hexdigest()[:12]
         copy = self.copies / f"{path.stem}-{digest}.tif"
-        note = copy.with_name(copy.name + ".json")
         try:
-            made = json.loads(note.read_text(encoding="utf-8"))
+            made = json.loads(copy.with_name(copy.name + ".json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             made = None
-        if (copy.is_file() and isinstance(made, dict) and made.get("layout") == COPY_LAYOUT
-                and made.get("identity") == identity):
+        return copy, (copy.is_file() and isinstance(made, dict) and made.get("layout") == COPY_LAYOUT
+                      and made.get("identity") == identity)
+
+    def _copy_for(self, path: Path, progress=None, write: bool = True) -> Path:
+        """A copy of the raster at ``path`` that RustGIS reads (:func:`_write_copy`, ``progress`` following it and
+        its cancel stopping it), in :attr:`copies`: reused while it is there as it should be (:meth:`_copy_ready`), made
+        again otherwise - unless ``write`` is False: then :class:`_CopyWanted` (the copy is for :meth:`write_copies`),
+        or the reason :meth:`write_copies` could not write it while the raster is the same file. Made only when the disk
+        has room for it: :data:`COPY_SPACE` times its size free - the size its pixels give (:func:`_copy_bytes`), or the
+        raster's when larger - and :data:`COPY_RESERVE` left after it; else :class:`OSError` saying so, nothing
+        written, and the raster, which RustGIS cannot read (that is why it is copied), is refused."""
+        copy, ready = self._copy_ready(path)
+        if ready:
             return copy
+        status = os.stat(path)
+        identity = list(_version(status))
+        if not write:
+            failed = self._copy_failed.get(Path(path).absolute())
+            if failed is not None and failed[0] == _version(status):
+                raise OSError(failed[1])
+            raise _CopyWanted(str(path))
+        note = copy.with_name(copy.name + ".json")
         self.copies.mkdir(parents=True, exist_ok=True)
         size = max(_copy_bytes(path), status.st_size)
         free = shutil.disk_usage(self.copies).free
@@ -2793,7 +2945,7 @@ class RustGisLink:
                           f"{free / 1e9:.2f} GB free in {self.copies}")
         note.unlink(missing_ok=True)
         log.info("RustGIS link: %s copied as RustGIS reads it, into %s", path.name, copy)
-        _write_copy(path, copy)
+        _write_copy(path, copy, progress)
         note.write_text(json.dumps({"layout": COPY_LAYOUT, "source": str(path), "identity": identity}),
                         encoding="utf-8")
         return copy
@@ -2830,14 +2982,14 @@ class RustGisLink:
                 and ID_FIELD in _fields(layer) and _same_file(layer.get("source"), self.live.path))
 
     def _require_ours(self, tables: Iterable) -> None:
-        """:class:`RustGisRefused` naming the first of ``tables`` whose layer in RustGIS is not the link's any more:
+        """:class:`RustGisLayerGone` naming the first of ``tables`` whose layer in RustGIS is not the link's any more:
         what it would export is not the drawings (a pull or :meth:`remember` that read it would delete them here)."""
         layers, _ = self._listing()
         for table in tables:
             if not self._ours(layers.get(self.layers.get(table)), table):
-                raise RustGisRefused(f"RustGIS's layer of {table} is not the drawings' any more (removed there, or "
-                                     "another project is open in RustGIS): nothing of it is read, the next send adds "
-                                     "it again")
+                raise RustGisLayerGone(f"RustGIS's layer of {table} is not the drawings' any more (removed there, or "
+                                       "another project is open in RustGIS): nothing of it is read, the next send "
+                                       "adds it again")
 
     def _linked(self) -> tuple[dict, list]:
         """The fields of RustGIS's layer of each linked table (``{table: lower-case name -> (name, type)}``), from

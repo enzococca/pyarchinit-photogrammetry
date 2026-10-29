@@ -5009,11 +5009,14 @@ def test_rasters_follow_their_files(tmp_path, caplog):
         assert "Rotto" in rl.start(rasters)["refused"]
         ortho, old = rl.rasters
         fake.calls.clear()
+        assert not rl.rasters_changed()
         assert rl.update_rasters(rasters) == {} and fake.calls == []  # the same files: nothing asked
         later = dem.stat().st_mtime_ns + 10**9
         _small_dem(dem)
         os.utime(dem, ns=(later, later))  # the DEM rebuilt
-        assert rl.update_rasters(rasters) == {"given": ["DEM"], "taken": ["DEM"], "refused": {}}
+        assert rl.rasters_changed() and fake.calls == []  # its dates only
+        assert rl.update_rasters(rasters) == {"given": ["DEM"], "taken": ["DEM"], "refused": {}, "copies": []}
+        assert not rl.rasters_changed()
         assert rl.rasters[0] is ortho and fake.tile_layers[0]["url"] == ortho.url  # untouched
         new = rl.rasters[1]
         assert new.name == "DEM" and new.layer != old.layer and int(old.layer) not in [l["id"] for l in fake.layers]
@@ -5028,11 +5031,12 @@ def test_rasters_follow_their_files(tmp_path, caplog):
         assert _http(port, urllib.parse.urlsplit(ortho.url).path)[0] == 404
         out = rl.update_rasters([{"path": large, "name": "Ortofoto"}, {"path": other, "name": "DEM 2"},
                                  {"path": broken, "name": "Rotto"}])
-        assert out == {"given": ["DEM 2"], "taken": ["DEM"], "refused": {}}
+        assert out == {"given": ["DEM 2"], "taken": ["DEM"], "refused": {}, "copies": []}
         assert sorted(r.name for r in rl.rasters) == ["DEM 2", "Ortofoto"] and "DEM" not in [l["name"] for l in
                                                                                            fake.layers]
         later += 10**9
         os.utime(broken, ns=(later, later))  # the raster RustGIS refused, another file now: tried again
+        assert rl.rasters_changed()
         with caplog.at_level(logging.WARNING, logger=link.__name__):
             out = rl.update_rasters([{"path": large, "name": "Ortofoto"}, {"path": other, "name": "DEM 2"},
                                      {"path": broken, "name": "Rotto"}])
@@ -5116,7 +5120,7 @@ def test_rasters_following_their_files_and_layers_taken_away_with_the_real_engin
         (old,) = rl.rasters
         later = dem.stat().st_mtime_ns + 10**9
         os.utime(dem, ns=(later, later))
-        assert rl.update_rasters(rasters) == {"given": ["DEM"], "taken": ["DEM"], "refused": {}}
+        assert rl.update_rasters(rasters) == {"given": ["DEM"], "taken": ["DEM"], "refused": {}, "copies": []}
         (new,) = rl.rasters
         listing = engine.call("list_layers", {})
         layers = {str(l["id"]): l for l in listing["layers"]}
@@ -5127,3 +5131,173 @@ def test_rasters_following_their_files_and_layers_taken_away_with_the_real_engin
         rl.stop(withdraw=True)
         listing = engine.call("list_layers", {})
         assert [l["name"] for l in listing["layers"]] == ["Mio"] and listing["groups"] == []
+
+
+def test_copies_left_for_a_step_of_their_own(tmp_path, monkeypatch):
+    """update_rasters(copies=False), as the window's looks call it: a raster RustGIS reads only as a copy, rebuilt,
+    keeps its old layer and is listed in "copies" - nothing written, nothing asked of RustGIS -; write_copies writes
+    the copy, its progress following it, and the next update gives it. A copy that cannot be written (no room on the
+    disk) is refused with its reason at the next update, and not tried again while the raster is that file; one whose
+    copy was cancelled the same, without a half copy left. rasters_changed says when there is something to do."""
+    from pyarchinit_photogrammetry.core.progress import Cancelled, Progress
+
+    photo = _two_tone(tmp_path / "foto.tif", 3, compress="webp", **TILED)  # RustGIS reads it as a copy
+    data_dir = tmp_path / "chunk_1"
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([_unit(1, GX, GY)]))
+    fake = FakeEngine()
+    rl = link.RustGisLink(live, fake, "Saggio 1", GB, data_dir=data_dir)
+    rasters = [{"path": photo, "name": "Foto"}]
+
+    def rebuilt():
+        later = photo.stat().st_mtime_ns + 10**9
+        os.utime(photo, ns=(later, later))
+
+    try:
+        rl.start(rasters)
+        (old,) = rl.rasters
+        made = old.copy.stat().st_mtime_ns
+        assert not rl.rasters_changed() and rl.update_rasters(rasters, copies=False) == {}
+        rebuilt()
+        assert rl.rasters_changed()
+        fake.calls.clear()
+        out = rl.update_rasters(rasters, copies=False)
+        assert out == {"given": [], "taken": [], "refused": {}, "copies": [photo]} and fake.calls == []
+        assert rl.rasters == [old] and old.copy.stat().st_mtime_ns == made  # the old layer kept, no copy written
+        seen = []
+        assert rl.write_copies(out["copies"], Progress(lambda f, m: seen.append(m))) == {}
+        assert old.copy.stat().st_mtime_ns != made and "foto.tif: copy for RustGIS, block 1 of 1" in seen
+        assert rl.update_rasters(rasters, copies=False) == {"given": ["Foto"], "taken": ["Foto"], "refused": {},
+                                                            "copies": []}
+        assert rl.rasters[0] is not old and not rl.rasters_changed()
+        # no room on the disk for the next copy: refused with its reason, not tried again while it is that file
+        rebuilt()
+        monkeypatch.setattr(link, "COPY_RESERVE", 10**18)
+        failed = rl.write_copies(rl.update_rasters(rasters, copies=False)["copies"])
+        assert list(failed) == [photo] and "free" in failed[photo]
+        out = rl.update_rasters(rasters, copies=False)
+        assert out["taken"] == ["Foto"] and out["refused"] == {"Foto": failed[photo]} and out["copies"] == []
+        assert rl.rasters == [] and not rl.rasters_changed() and rl.update_rasters(rasters, copies=False) == {}
+        # its copy cancelled: the same, and no half copy left
+        monkeypatch.setattr(link, "COPY_RESERVE", 0)
+        rebuilt()
+        assert rl.rasters_changed()
+        stopped = Progress()
+        stopped.cancel()
+        with pytest.raises(Cancelled):
+            rl.write_copies(rl.update_rasters(rasters, copies=False)["copies"], stopped)
+        assert not [p.name for p in (data_dir / "rustgis").iterdir() if p.name.startswith(".")]
+        out = rl.update_rasters(rasters, copies=False)
+        assert "cancelled" in out["refused"]["Foto"] and out["copies"] == [] and rl.rasters == []
+        rl.start(rasters)  # a new start makes it
+        assert [r.name for r in rl.rasters] == ["Foto"] and rl.rasters[0].copy.is_file()
+    finally:
+        rl.stop()
+
+
+def test_a_copy_follows_its_progress_and_stops_on_cancel(tmp_path):
+    """The copy of a raster RustGIS cannot read follows the progress it is given, block by block, then its overviews;
+    the cancel of that progress stops it - no copy and no temporary file left -, and a start so cancelled ends as one
+    that fails: the link stopped, what it added to RustGIS taken out again."""
+    from pyarchinit_photogrammetry.core.progress import Cancelled, Progress
+
+    photo = _two_tone(tmp_path / "foto.tif", 3, side=2100, compress="webp", **TILED)  # 25 blocks of 512
+    seen = []
+    link._write_copy(photo, tmp_path / "copia.tif", Progress(lambda f, m: seen.append((round(f, 3), m))))
+    assert seen == [(0.0, "foto.tif: copy for RustGIS, block 1 of 25"),
+                    (round(0.9 * 16 / 25, 3), "foto.tif: copy for RustGIS, block 17 of 25"),
+                    (0.9, "foto.tif: overviews of the copy for RustGIS")]
+    stopped = Progress(lambda f, m: stopped.cancel())  # Annulla pressed at the first report
+    with pytest.raises(Cancelled):
+        link._write_copy(photo, tmp_path / "annullata.tif", stopped)
+    assert not (tmp_path / "annullata.tif").exists() and not list(tmp_path.glob(".annullata-*"))
+    data_dir = tmp_path / "chunk_1"
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([_unit(1, GX, GY)]))
+    fake = FakeEngine()
+    rl = link.RustGisLink(live, fake, "Saggio 1", GB, data_dir=data_dir)
+    reports = []
+    started = Progress(lambda f, m: reports.append(m) or (started.cancel() if "block" in m else None))
+    with pytest.raises(Cancelled):
+        rl.start([{"path": _small_dem(tmp_path / "dem.tif"), "name": "DEM"}, {"path": photo, "name": "Foto"}],
+                 started)
+    assert reports[:2] == ["The raster DEM to RustGIS", "The raster Foto to RustGIS"]
+    assert reports[2] == "foto.tif: copy for RustGIS, block 1 of 25"
+    assert rl.layers == {} and rl.rasters == [] and rl.server is None
+    assert fake.layers == [] and fake.groups == []  # the DEM, given first, taken out again
+    assert not [p.name for p in (data_dir / "rustgis").iterdir() if p.suffix == ".tif"]
+
+
+def test_a_folder_of_copies_that_cannot_be_read_never_fails_the_start(tmp_path, caplog):
+    """The copies' folder unreadable (its permissions): nothing in it is cleaned, said in the log, and the link starts
+    all the same."""
+    copies = tmp_path / "chunk_1" / "rustgis"
+    copies.mkdir(parents=True)
+    live = LiveLink(tmp_path / "qgis", GB)
+    live.write(_drawings([_unit(1, GX, GY)]))
+    rl = link.RustGisLink(live, FakeEngine(), "Saggio 1", GB, data_dir=tmp_path / "chunk_1")
+    copies.chmod(0)
+    try:
+        if os.access(copies, os.R_OK):
+            pytest.skip("the folder stays readable (run as root)")
+        with caplog.at_level(logging.WARNING, logger=link.__name__):
+            assert rl.start([{"path": _small_dem(tmp_path / "dem.tif"), "name": "DEM"}])["rasters"] == 1
+        assert "not cleaned" in caplog.text and rl.layers
+    finally:
+        copies.chmod(0o755)
+        rl.stop()
+
+
+def test_an_abandoned_link_writes_and_sends_nothing(tmp_path):
+    """abandon(): a pull waiting for RustGIS writes nothing when its answer comes - the window shows another chunk by
+    then, whose drawings the live GeoPackage is to hold -, and no pull, send or update of the rasters starts after;
+    stop() still stops the link."""
+    one = _unit(1, GX, GY)
+    live, fake, rl = _started(tmp_path, _drawings([one]))
+    fake.reshape(fake.linked(rl, "unita"), one[ID_FIELD], box(GX + 0.3, GY, GX + 0.8, GY + 0.5), GB)
+    asked, release, caught = threading.Event(), threading.Event(), []
+
+    def slow(tool, args):  # RustGIS slow to export: the window gives up meanwhile
+        if args.get("command") == "share.exportLayer" and not release.is_set():
+            asked.set()
+            release.wait(10)
+
+    def pull():
+        try:
+            rl.pull()
+        except Exception as exc:  # noqa: BLE001 - what the pull raised, for the test
+            caught.append(exc)
+
+    fake.hooks.append(slow)
+    pulling = threading.Thread(target=pull)
+    pulling.start()
+    try:
+        assert asked.wait(10)
+        rl.abandon()
+    finally:
+        release.set()
+        pulling.join(10)
+    assert len(caught) == 1 and isinstance(caught[0], link.RustGisAbandoned)
+    assert live.read_changes() == {}  # nothing written
+    for call in (rl.pull, rl.push, lambda: rl.update_rasters([])):
+        with pytest.raises(link.RustGisAbandoned):
+            call()
+    rl.stop()
+    assert rl.layers == {}
+
+
+def test_a_layer_gone_is_told_from_the_other_refusals(tmp_path):
+    """A pull refused because a linked layer is gone (removed in RustGIS) is a RustGisLayerGone - a send adds it
+    again -; an export RustGIS refuses is a refusal of another kind, which no send makes go away."""
+    one = _unit(1, GX, GY)
+    live, fake, rl = _started(tmp_path, _drawings([one]))
+    fake.rules.append(lambda command, p: "exports are switched off" if command == "share.exportLayer" else None)
+    with pytest.raises(link.RustGisRefused) as refused:
+        rl.pull()
+    assert not isinstance(refused.value, link.RustGisLayerGone) and "switched off" in str(refused.value)
+    fake.rules.clear()
+    fake.remove(int(rl.layers["unita"]))
+    with pytest.raises(link.RustGisLayerGone):
+        rl.pull()
+    rl.push()  # the layer added again, its rows whole
+    assert rl.pull()["unita"] == (0, 0, 0)
