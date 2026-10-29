@@ -56,7 +56,8 @@ def test_chunk_project_and_paths_are_neutral(tmp_path):
     assert other == "guarda foto_12 e a_b ora"
     assert f.outgoing("la cartella /Users/x/Tell_Sultan_nord") == "la cartella Sito A_nord"
     assert f.outgoing("foto 12.jpg") == "foto 12.jpg"  # not a camera of the project, not a path
-    assert f.outgoing("vedi https://example.org/a/b.html.") == "vedi b."
+    assert f.outgoing("vedi https://example.org/a/b.tif.") == "vedi b."
+    assert f.outgoing("vedi https://example.org/a/b.html.") == "vedi indirizzo."
 
 
 def test_facts_drop_absolute_coordinates_and_the_crs(tmp_path):
@@ -164,7 +165,7 @@ def test_urls_unc_and_windows_paths_leak_nothing(tmp_path):
     f = Filter(make_document(tmp_path))
     assert f.outgoing("file:///Users/enzo/Dropbox/x/a.tif") == "a"
     assert f.outgoing("file:///Users/enzo/Dropbox/Tell%20Sultan/a.tif") == "a"
-    assert f.outgoing("postgresql://enzo:pw@10.0.0.5:5432/db fallita") == "db fallita"
+    assert f.outgoing("postgresql://enzo:pw@10.0.0.5:5432/db fallita") == "indirizzo fallita"
     assert f.outgoing("https://example.org") == "indirizzo"
     assert f.outgoing("\\\\server\\share\\Tell Sultan\\a.jpg") == "a"
     assert f.outgoing("C:\\Dati\\Archivio\\foto") == "foto"
@@ -257,11 +258,9 @@ def test_public_urls_pass_and_others_are_reduced(tmp_path):
     assert f.outgoing(md) == md
     assert f.outgoing("https://docs.github.com/a/b") == "https://docs.github.com/a/b"
     assert f.facts({"url": guide}) == {"url": guide}
-    assert f.outgoing("https://example.com/Tell Sultan/x") == "https:/Sito A/x".replace("https:/", "https://example.com/") \
-        or "example" not in f.outgoing("https://example.com/Tell%20Sultan/x")
-    assert f.outgoing("https://example.com/Tell%20Sultan/x") == "x"
-    assert f.outgoing("https://user@github.com/x/y") == "y"  # credentials: not public
-    assert f.outgoing("https://notgithub.com/x/y") == "y"
+    assert f.outgoing("https://example.com/Tell%20Sultan/x") == "indirizzo"
+    assert f.outgoing("https://user@github.com/x/y") == "indirizzo"  # credentials: not public
+    assert f.outgoing("https://notgithub.com/x/y") == "indirizzo"
 
 
 def test_percent_is_decoded_only_inside_paths(tmp_path):
@@ -319,7 +318,15 @@ def test_prose_after_a_path_does_not_continue_it(tmp_path):
     f = Filter(make_document(tmp_path))
     assert f.outgoing("apri /Users/a/b.jpg e /Users/c/d.jpg ora") == "apri b e d ora"
     assert f.outgoing("la cartella /Users/x/Scavo. Poi 12 km/h, e/o 5 mm/px") == "la cartella Scavo. Poi 12 km/h, e/o 5 mm/px"
-    assert f.outgoing("cd /Users/x/Scavo e omega/phi/kappa e 12/08/2026") == "cd Scavo e omega/phi/kappa e 12/08/2026"
+    # privacy first (ruling T2-7): after a path, a word with a separator is a piece of it, whatever its length; the
+    # prose in between goes with it
+    assert f.outgoing("cd /Users/x/Scavo e omega/phi/kappa e 12/08/2026") == "cd 2026"
+    assert f.outgoing("apri /Users/a/b e poi usa Vista/Pannelli") == "apri Pannelli"
+    # a short unit stops the path
+    assert f.outgoing("apri /Users/x/Scavo Tell Halaf/rover 5 mm/px e poi Dati/x") == "apri rover 5 mm/px e poi Dati/x"
+    for unit in ("km/h", "m/s", "e/o", "mm/px", "px/cm", "H/E/N", "and/or", "TCP/IP"):
+        assert f.outgoing(f"apri /Users/x/Dati Neri/rover poi {unit} e Vista/Pannelli") == \
+            f"apri rover poi {unit} e Vista/Pannelli", unit
 
 
 def test_relative_markdown_links_are_kept(tmp_path):
@@ -377,3 +384,71 @@ def test_ordinary_lines_of_the_guide_change_only_when_they_hold_a_path_or_url():
         for e in examples:
             print(e)
         assert changed < lines * limit, label
+
+
+def test_a_path_with_spaces_is_reduced_to_its_end(tmp_path):
+    f = Filter(make_document(tmp_path))
+    cases = {
+        "/Users/x/Scavo Tell Halaf/Dati Neri/rover": "rover",
+        "/Volumes/Extreme Pro/Tell Abu Ruwail/foto": "foto",
+        "/Users/x/Dropbox/Scavo Tell Halaf/Dati Neri/rover": "rover",
+        "$HOME/Scavo Tell Halaf/Dati Neri/rover": "rover",
+        "\\\\server\\share\\Scavo Tell Halaf\\Dati Neri\\rover": "rover",
+        "D:\\Missione Siria Nord\\Anna Neri\\foto": "foto",
+        "~/Documents/Scavo Tell Halaf/foto": "foto",
+        "/Users/x/Foto (2)/Tell Halaf/a.jpg": "a",
+        "/Users/x/Sant'Angelo/foto": "foto",
+        "/Users/x/Dott. Neri/foto": "foto",
+    }
+    for text, name in cases.items():
+        assert f.outgoing(text) == name, text
+        assert f.outgoing(f"apri {text} ora") == f"apri {name} ora", text
+        assert f.outgoing(f"apri {text}.") == f"apri {name}.", text
+        assert f.outgoing(f"apri {text}, poi") == f"apri {name}, poi", text
+        for q in ('"', "'", "`"):
+            assert f.outgoing(f"cd {q}{text}{q} e poi") == f"cd {q}{name}{q} e poi", (q, text)
+        assert f.outgoing(f"({text}) e km/h") == f"({name}) e km/h", text
+    # inside quotes the closing quote says where the path ends, also when its last folder holds spaces
+    assert f.outgoing('cd "/Users/x/Anna Neri/Scavo Tell Halaf Nord" ok') == 'cd "Scavo_Tell_Halaf_Nord" ok'
+    # a second path in the same line is a path of its own
+    assert f.outgoing("[x](/Users/a/Tell Halaf/b) e [y](/Users/c/d)") == "[x](b) e [y](d)"
+    for line in PROSE:  # no anchor: unchanged
+        assert f.outgoing(line) == line, line
+
+
+def test_a_mean_of_coordinates_is_a_coordinate(tmp_path):
+    f = Filter(make_document(tmp_path))
+    for key in ("x_mean", "lat_mean", "camera_z_mean", "easting_mean", "centroid_mean", "y_median", "mean_z", "gps_mean",
+                "pos", "camera_pos", "coords", "marker_coord"):
+        assert f.facts({key: 312345.2, "ok": 1}) == {"ok": 1}, key
+    kept = {"x_spread": 2.0, "mean": 3.0, "median": 2.0, "gps_mean_error": 0.3, "pos_accuracy": 0.02, "n_coords": 4}
+    assert f.facts(kept) == kept
+
+
+def test_foreign_links_are_just_an_address(tmp_path):
+    f = Filter(make_document(tmp_path))
+    assert f.outgoing("https://www.google.com/maps/@41.134,14.266,17z") == "indirizzo"
+    assert f.outgoing("vedi https://www.openstreetmap.org/#map=17/41.134/14.266 ora") == "vedi indirizzo ora"
+    assert f.outgoing("[Tell Sultan](https://example.org/x)") == "[Sito A](indirizzo)"
+    assert f.outgoing("https://example.org/Tell_Sultan/foto.html") == "indirizzo"
+    assert f.outgoing("https://example.org/dati/rilievo%201.tif") == "rilievo_1"
+    assert f.facts({"link": "https://www.google.com/maps/@41.134,14.266,17z"}) == {"link": "indirizzo"}
+
+
+def test_invisible_characters_and_names_written_surname_first(tmp_path):
+    f = Filter(make_document(tmp_path), people=["Anna Verdi", "Mario De Luca"])
+    assert f.outgoing("Mario\u200bRossi") == "Persona 1"
+    assert f.outgoing("Mario Ros\u200bsi e Mario\ufeff Rossi") == "Persona 1 e Persona 1"
+    assert f.outgoing("Tell\u00adSultan e Tell Sul\u00adtan e La\u200cgoi") == "Sito A e Sito A e Luogo 1"
+    assert f.outgoing("Rossi, Mario e Verdi,Anna e ROSSI , MARIO") == "Persona 1 e Persona 2 e Persona 1"
+    assert f.outgoing("De Luca, Mario") == "Persona 3"
+    assert f.outgoing("Tell, Sultan") == "Tell, Sultan"  # only people are written surname first
+    assert f.incoming("Persona 1") == "Mario Rossi"
+
+
+def test_email_addresses_stay_home(tmp_path):
+    f = Filter(make_document(tmp_path), people=["Anna Verdi"])
+    assert f.outgoing("scrivi a anna.verdi@example.org o a x+y@sub.uni.it.") == \
+        "scrivi a indirizzo e-mail o a indirizzo e-mail."
+    assert f.outgoing("mailto:mario.rossi@uni.it") == "mailto:indirizzo e-mail"
+    assert f.facts({"contatto": "anna.verdi@example.org", "n": 1}) == {"contatto": "indirizzo e-mail", "n": 1}

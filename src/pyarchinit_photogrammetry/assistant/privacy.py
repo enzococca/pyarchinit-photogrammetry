@@ -30,13 +30,14 @@ ELEVATION_KEYS = ("z_min", "z_max", "z_mean", "z_median", "elevation", "elevatio
                   "elevation_mean")
 # a key is dropped when ANY of its tokens (split on ``_``, camelCase and digits) names a raw coordinate, unless a token of a
 # derived quantity (rmse, error, accuracy, status, size, resolution, ...) is also there: ``marker_xyz``, ``camera_z``,
-# ``z_range`` go; ``gps_rmse``, ``pixel_size_x``, ``position_accuracy_m`` stay
+# ``z_range`` go; ``gps_rmse``, ``pixel_size_x``, ``position_accuracy_m`` stay.  A mean or a median of coordinates is a
+# coordinate: ``x_mean``, ``lat_mean``, ``camera_z_mean`` go
 _COORDINATE_TOKENS = frozenset(ABSOLUTE_KEYS) - {"reference", "references"} | {
     "bbox", "extent", "geometry", "geom", "centroid", "centroids", "position", "positions", "location", "locations",
-    "coordinates", "coordinate", "coord", "coords", "xy", "xyz", "quota", "elevation", "altitude", "lng", "range",
+    "coordinates", "coordinate", "coord", "coords", "pos", "xy", "xyz", "quota", "elevation", "altitude", "lng", "range",
     "corner", "wkt"}
 _DERIVED_TOKENS = frozenset({"rmse", "error", "errors", "accuracy", "precision", "status", "count", "n", "size", "resolution",
-                             "spacing", "std", "sigma", "percent", "ratio", "mean", "median", "spread", "quality", "scale"})
+                             "spacing", "std", "sigma", "percent", "ratio", "spread", "quality", "scale"})
 _DEM_TOKENS = frozenset({"dem", "dsm", "dtm"})
 _MODIFIER_TOKENS = frozenset({"min", "max", "abs", "q", "m", "deg", "degrees", "meters", "metres"})
 _AXIS_STAT = re.compile(r"[xyz](?:min|max|mean|med|median)|(?:min|max|mean|median)[xyz]")
@@ -66,6 +67,10 @@ _GENERIC_FOLDERS = frozenset({"dati", "data", "documents", "documenti", "desktop
 _GAP = r"[\s_\-.]+"
 _GAP_RE = re.compile(_GAP)
 _APOSTROPHES = {"’": "'", "‘": "'", "ʼ": "'", "`": "'", "´": "'", "′": "'"}
+# invisible characters that can sit inside a name (zero-width space, joiners, word joiner, BOM, soft hyphen)
+_INVISIBLE = frozenset("\u200b\u200c\u200d\u2060\ufeff\u00ad")
+_EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
+EMAIL = "indirizzo e-mail"
 
 # --- paths. Only a token that starts with an anchor is a path (``/``, ``~/``, ``./``, ``../``, ``X:\\``, ``\\\\``, ``\\dir\\``,
 # ``%VAR%\\``, ``scheme://``); it holds no space, unless it ends with a known file extension (at most 200 characters)
@@ -80,11 +85,16 @@ _ANCHOR = re.compile("|".join([
     r"(?P<var>(?<![\w$\\])\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})/)",
     r"(?P<posix>(?<![\w./:~\\<>%$)\]}*°])(?:~/|\.{1,2}/|/(?=[^\s/])))",
 ]))
-_TOKEN = re.compile(r"[^\s\"'`<>|*?,;()\[\]]+")
-_FORBIDDEN = frozenset("\"'`<>|*?,;()[]")
+# the first token of a path: no space nor punctuation, but an apostrophe between two letters (Sant'Angelo)
+_TOKEN = re.compile(r"(?:[^\s\"'`<>|*?,;()\[\]]|(?<=[^\W\d_])'(?=[^\W\d_]))+")
 _MD_TARGET = re.compile(r"(?:\.{1,2}/|#)[^\s)]*(?:\.md(?:#[^\s)]*)?|/)$")
-_LETTERS_ONLY = re.compile(r"[^\W\d_]{1,6}$")
-_DATE_LIKE = re.compile(r"[\d/\\.\-]+$")
+# the words after the first token: a path goes on over them; these characters end it (an apostrophe only when it is
+# not between two letters), and these are stripped from its end
+_STOPS = re.compile(r"[\"`<>|*?;]|'(?![^\W\d_])|(?<![^\W\d_])'")
+_TRAILING = ".,:!)]"
+_UNIT_PART = re.compile(r"[^\W\d_]{1,3}")
+_QUOTES = {'"': '"', "'": "'", "`": "`"}
+_BRACKETS = {"(": ")", "[": "]"}
 _PATH_CAP = 200
 _ENDS_KNOWN = re.compile(_KNOWN_EXT + r"$", re.IGNORECASE)
 _URL_TOKEN = re.compile(r"[^\s\"'`<>]+")
@@ -112,14 +122,20 @@ def _letters(n: int) -> str:
     return out
 
 
-def _fold(text: str) -> tuple[str, list[int] | None]:
-    """``text`` for matching: lower case, no accents (composed or not), plain apostrophes; and for each character of
-    the result the index of the character of ``text`` it comes from (``None``: the same index, ASCII text)."""
+def _fold(text: str, invisible: str = "") -> tuple[str, list[int] | None]:
+    """``text`` for matching: lower case, no accents (composed or not), plain apostrophes, the invisible characters
+    (zero-width, soft hyphen) replaced by ``invisible`` (``""``: dropped, ``" "``: a gap between words); and for each
+    character of the result the index of the character of ``text`` it comes from (``None``: the same index, ASCII text)."""
     if text.isascii():
         return text.lower(), None
     out: list[str] = []
     idx: list[int] = []
     for i, ch in enumerate(text):
+        if ch in _INVISIBLE:
+            if invisible:
+                out.append(invisible)
+                idx.append(i)
+            continue
         for c in unicodedata.normalize("NFKD", ch):
             if unicodedata.combining(c):
                 continue
@@ -162,11 +178,14 @@ def _url_name(url: str) -> str:
 
 
 def _url_neutral(url: str) -> str:
+    """"indirizzo", or the neutral name of the file the URL points to when its last component ends with a known
+    extension (``.../rilievo/a.tif`` -> ``a``): a map link says nothing (``google.com/maps/@41.13,14.26,17z``)."""
     rest = re.split(r"[?#]", url.split("://", 1)[1])[0].rstrip("/")
     parts = rest.split("/")
-    if len(parts) < 2 or not parts[-1]:
+    last = unquote(parts[-1]) if len(parts) >= 2 else ""
+    if not last or not _ENDS_KNOWN.search(last):
         return "indirizzo"
-    return neutral_name(unquote(parts[-1]))
+    return neutral_name(last)
 
 
 def _key_tokens(key: Any) -> list[str]:
@@ -229,45 +248,64 @@ def _crs_label(value: Any) -> Any:
     return CRS_GEOGRAPHIC if geographic else CRS_PROJECTED
 
 
-def _is_piece(word: str) -> bool:
-    """Whether a word that holds a separator is a real piece of a path (``Siria/``, ``Neri/Missione``, ``a.jpg``), and not
-    a unit, an alternative or a date (``km/h``, ``e/o``, ``omega/phi/kappa``, ``12/08/2026``)."""
-    if _ENDS_KNOWN.search(word):
-        return True
-    if word[-1] in "/\\":
-        return True
-    if _DATE_LIKE.match(word):
-        return False
-    if all(_LETTERS_ONLY.match(part) for part in re.split(r"[\\/]", word) if part):
-        return False
-    return len(word) > 8
+def _is_unit(word: str) -> bool:
+    """Whether a word that holds a separator is a short unit or an alternative (``km/h``, ``m/s``, ``mm/px``, ``e/o``,
+    ``H/E/N``, ``TCP/IP``): no known extension and every part made of 1-3 letters.  Any other such word after the
+    start of a path is a piece of it (``Halaf/Dati``, ``Vista/Pannelli``, ``omega/phi/kappa``)."""
+    return not _ENDS_KNOWN.search(word) and all(_UNIT_PART.fullmatch(part) for part in re.split(r"[\\/]", word))
 
 
-def _extend(text: str, start: int, end: int) -> int:
-    """The end of the path that starts at ``start`` and whose first space-free token ends at ``end``: it goes on over
-    the words that follow, as far as the last real piece of a path on the line (at most 200 characters), and stops
-    at a new anchor or at a character that cannot be in a name."""
+def _quoted_end(text: str, start: int, opener: str) -> int | None:
+    """The end of a path that starts at ``start`` right after the quote ``opener``: the closing quote on the same line
+    (for ``'`` one that is not between two letters), within 200 characters; ``None`` when there is none."""
+    limit = min(len(text), start + _PATH_CAP + 1)
+    for i in range(start + 1, limit):
+        c = text[i]
+        if c == "\n":
+            return None
+        if c != opener:
+            continue
+        if opener == "'" and text[i - 1:i].isalpha() and text[i + 1:i + 2].isalpha():
+            continue  # an apostrophe: Sant'Angelo
+        end = i
+        while end > start and text[end - 1].isspace():
+            end -= 1
+        return end
+    return None
+
+
+def _extend(text: str, start: int, end: int, closer: str | None = None) -> int:
+    """The end of the path that starts at ``start`` and whose first space-free token ends at ``end``.  Privacy first:
+    the path goes on over the words that follow, as far as the last word on the line that holds a separator or ends
+    with a known extension (at most 200 characters, the punctuation that closes it left outside).  It stops at a short
+    unit (``5 mm/px``), at a new path, at a character that cannot be in a file name, and at a word that ends with
+    ``closer`` (the bracket that closes the one the path started after).  Prose after a real path on the same line may
+    be swallowed."""
     last = pos = end
     cap = start + _PATH_CAP
-    if text[end:end + 1] in (".", ":", "!"):
-        return end  # the sentence ends here
-    adjacent = True  # the word follows the path directly: "Extreme Pro/missione siria/drone/tell"
+    while text[pos:pos + 1] in (".", ":", "!"):  # "Dott. Rossi/foto": a full stop does not end the path
+        pos += 1
     while True:
         gap = re.compile(r"[^\S\n]+").match(text, pos)
         word = re.compile(r"\S+").match(text, gap.end()) if gap else None
         if word is None:
             return last
         w0, raw = word.start(), word.group(0)
-        cut = next((i for i, c in enumerate(raw) if c in _FORBIDDEN), None)
-        piece = (raw if cut is None else raw[:cut]).rstrip(".:!")
-        if not piece or w0 + len(piece) > cap or _ANCHOR.match(text, w0):
-            return last
-        has_sep = bool(re.search(r"[\\/]", piece))
-        if _ENDS_KNOWN.search(piece) or has_sep and (_is_piece(piece) or adjacent and not _DATE_LIKE.match(piece)):
+        stop = _STOPS.search(raw)
+        cut = stop.start() if stop else None
+        if closer is not None:  # a word that ends with the closing bracket ends the path: "(/Users/a/b c/d)"
+            head = raw[:cut].rstrip(".,:!")
+            if head.endswith(closer):
+                cut = len(head) - 1
+        piece = (raw if cut is None else raw[:cut]).rstrip(_TRAILING)
+        if w0 + len(piece) > cap or _ANCHOR.search(text, w0, w0 + len(raw)):
+            return last  # too long, or a new path (also inside the word: "[y](/Users/...")
+        if re.search(r"[\\/]", piece) and re.search(r"[^\W_]", piece):
+            if _is_unit(piece):
+                return last
             last = w0 + len(piece)
-            adjacent = True
-        else:
-            adjacent = False
+        elif piece and _ENDS_KNOWN.search(piece):
+            last = w0 + len(piece)
         if cut is not None:
             return last
         pos = word.end()
@@ -287,6 +325,7 @@ class Filter:
         self._paths: dict[str, str] = {}  # a literal path -> its neutral name
         self._files: dict[str, str] = {}  # a bare file name (casefolded) -> its neutral name
         self._out: re.Pattern | None = None
+        self._aliases: dict[str, str] = {}  # a person written surname first ("rossi, mario") -> the name's key
         self._file_pattern: re.Pattern | None = None
         self._back: dict[str, str] = {}
         if not self.active:
@@ -376,10 +415,21 @@ class Filter:
         return len(self._names) - before
 
     def _compile(self) -> None:
-        patterns = []
-        for k in sorted(self._names, key=lambda n: (-len(n), n)):
+        # a person is also written surname first, with a comma: "Rossi, Mario" (and "De Luca, Mario" for "Mario De Luca")
+        self._aliases = {}
+        for k, (_, ph) in self._names.items():
             tokens = k.split(" ")
-            patterns.append(_GAP.join(re.escape(t) for t in tokens))
+            if not ph.startswith("Persona "):
+                continue
+            for i in range(1, len(tokens)):
+                alias = " ".join(tokens[i:]) + ", " + " ".join(tokens[:i])
+                self._aliases.setdefault(alias, k)
+        forms = {k: _GAP.join(re.escape(t) for t in k.split(" ")) for k in self._names}
+        for alias in self._aliases:
+            head, tail = alias.split(", ", 1)
+            forms.setdefault(alias, _GAP.join(re.escape(t) for t in head.split(" ")) + r"\s*,\s*"
+                             + _GAP.join(re.escape(t) for t in tail.split(" ")))
+        patterns = [forms[k] for k in sorted(forms, key=lambda n: (-len(n), n))]
         # not preceded nor followed by a letter or a digit: "_" and "-" separate (Tell_Sultan_0001.JPG)
         self._out = re.compile(r"(?<![^\W\d_])(?:" + "|".join(patterns) + r")(?![^\W\d_])") if patterns else None
         self._back = {ph: real for real, ph in self._names.values() if ph != "progetto"}
@@ -396,9 +446,21 @@ class Filter:
         return {real: ph for real, ph in self._names.values()}
 
     def _replace_names(self, text: str) -> str:
+        # first the invisible characters dropped (Ros\u200bsi), then as gaps between words (Mario\u200bRossi)
+        return self._replace_names_once(self._replace_names_once(text, ""), " ")
+
+    def _name_of(self, matched: str) -> str:
+        """The placeholder of a matched (folded) name, also when written surname first."""
+        k = " ".join(_tokens_of(matched))
+        if k in self._names:
+            return self._names[k][1]
+        head, tail = re.split(r"\s*,\s*", matched, maxsplit=1)
+        return self._names[self._aliases[" ".join(_tokens_of(head)) + ", " + " ".join(_tokens_of(tail))]][1]
+
+    def _replace_names_once(self, text: str, invisible: str) -> str:
         if self._out is None:
             return text
-        folded, idx = _fold(text)
+        folded, idx = _fold(text, invisible)
         out: list[str] = []
         last = 0
         for m in self._out.finditer(folded):
@@ -410,7 +472,7 @@ class Filter:
             if start < last:
                 continue
             out.append(text[last:start])
-            out.append(self._names[" ".join(_tokens_of(m.group(0)))][1])
+            out.append(self._name_of(m.group(0)))
             last = end
         if not out:
             return text
@@ -452,7 +514,14 @@ class Filter:
             if m.group(0) == "/" and not known and len([c for c in token.split("/") if c]) < 2:
                 continue  # /clear, /3: a command or a fraction, not a path
             if not known:
-                token = text[s0:_extend(text, s0, s0 + len(token))]
+                opener = text[s0 - 1] if s0 else ""
+                if opener == "'" and s0 >= 2 and text[s0 - 2].isalpha():
+                    opener = ""  # dell'/...: an apostrophe, not a quote
+                quoted = _quoted_end(text, s0, opener) if opener in _QUOTES else None
+                if quoted is not None:
+                    token = text[s0:quoted]  # the closing quote says where the path ends
+                else:
+                    token = text[s0:_extend(text, s0, s0 + len(token), _BRACKETS.get(opener))]
             name = neutral_name(unquote(token)) if re.search(r"[^\W_]", token[len(m.group(0)):]) else None
             if name is None:
                 continue
@@ -469,6 +538,7 @@ class Filter:
             return text
         text = self._neutralise_known(text)
         text = self._neutralise_paths(text)
+        text = _EMAIL.sub(EMAIL, text)
         text = self._replace_names(text)
         for pattern in _SYSTEMS:
             text = pattern.sub(CRS_IN_TEXT, text)
