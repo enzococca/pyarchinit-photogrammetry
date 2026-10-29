@@ -251,7 +251,27 @@ dataset pubblici WorldView-3.
 
 ## Prossimi passi
 
-Punti aperti, senza un ordine fisso:
+**1.7.0** - l'assistente (spiegazioni dei risultati, come si fanno le cose, script Python eseguiti con un clic e
+annullati in un solo passo; un modello locale di base, Claude o OpenAI in alternativa, niente di privato che esca
+dal computer), tre funzioni del programma (la regione su tre marker, la mappa delle normali sulla griglia
+dell'ortofoto, un chunk duplicato con le foto scelte) e un **TIN** nel nucleo nativo: una superficie di Delaunay
+vincolata da quote e linee di rottura (cigli, piedi di scarpata, muri), con le sue curve di livello e i volumi - la
+superficie che il topografo si aspetta accanto alla griglia del DEM.
+
+Plugin nuovi, in quest'ordine:
+
+1. **Il paesaggio nel tempo** (Landlab): erosione e deposito simulati sul DEM - come si consuma un tell, dove si
+   raccolgono i colluvi, scenari del paesaggio antico legati alle fasi della timeline.
+2. **Modello geologico 3D** (LoopStructural, nel plugin di geoarcheologia): superfici e volumi impliciti dai
+   contatti dei carotaggi, dalle tracce nelle sezioni e dai contorni delle US, con la loro incertezza; tagli e
+   riempimenti trattati come li registra lo scavo, non come strati geologici.
+3. **Elementi architettonici parametrici** (CadQuery): colonne per rivoluzione, modanature e cornici estruse lungo
+   un tracciato, archi e volte da una sezione tagliata sul modello; solidi STEP e IFC accanto alla mesh
+   fotogrammetrica nel modello HBIM.
+4. **Tomografia elettrica** (pyGIMLi, nel plugin di geofisica): inversione dei dati grezzi di un georesistivimetro,
+   pseudosezioni e sezioni di resistività collocate nel rilievo, nella vista 3D con le US e i carotaggi.
+
+Altri punti aperti, senza un ordine fisso:
 
 * **GNSS, il prossimo passo**: gli eventi di un ricevitore (i segnali di scatto che una camera lascia nelle
   osservazioni di un ricevitore proprio), i log di ArduPilot e PX4 per i droni costruiti da sé, i file grezzi dei
