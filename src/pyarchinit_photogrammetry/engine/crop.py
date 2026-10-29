@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from ..core.chunk import Chunk
+from ..io.files import replace_file
 
 
 def as_polygon(region):
@@ -123,7 +124,7 @@ def crop_raster(src, dst, region, strip: int = 2048) -> Path:
         aux = Path(str(dst) + ".aux.xml")
         if aux.exists():
             aux.unlink()
-        tmp.replace(dst)
+        replace_file(tmp, dst)  # in one move, under a program reading the raster (RustGIS through the link)
     return dst
 
 
@@ -199,7 +200,7 @@ def crop_raster_product(chunk: Chunk, product: str, region) -> Path:
     out = chunk.own_product_path(product)
     tmp = out.with_name(out.stem + "_ritaglio.tif")
     crop_raster(path, tmp, region)
-    tmp.replace(out)
+    replace_file(tmp, out)
     chunk._set_product(product, out)
     return out
 

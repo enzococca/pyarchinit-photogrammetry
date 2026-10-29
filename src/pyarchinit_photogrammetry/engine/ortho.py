@@ -38,6 +38,7 @@ import numpy as np
 from .. import _native
 from ..core.chunk import Chunk
 from ..core.progress import Progress, as_progress
+from ..io.files import replace_file
 from .dem import NODATA, ensure_level, estimate_gsd
 from .visibility import project_valid, raycaster_for_chunk, read_photo, readable_cameras, sample
 
@@ -1197,7 +1198,7 @@ def build_orthomosaic(chunk: Chunk, resolution: float | None = None, surface: st
     except BaseException:
         tmp.unlink(missing_ok=True)  # cancelled or failed: no half-written file left behind
         raise
-    tmp.replace(out_path)
+    replace_file(tmp, out_path)  # in one move, under a program reading the orthomosaic (RustGIS through the link)
     if not product:
         progress(1.0, f"Orthomosaic {w}x{h} px")
         return out_path

@@ -153,6 +153,49 @@ def open3d_gpu_check() -> Check:
                                    "runs Open3D on the CPU (fusion of the depth maps, Poisson)")
 
 
+RUSTGIS_ON = ("in RustGIS, tick \"Let your Agents Control RustGIS\" in its AI Assistant settings: programs on this "
+              "computer can then run commands in RustGIS and read its files, which is why it is yours to switch on")
+
+
+def rustgis_check() -> Check:
+    """RustGIS, the desktop GIS that the products and drawings of a chunk open in, live (:mod:`.io.rustgis_link`):
+    installed or not, its version, and whether it listens to programs - it does only while the user ticks *Let your
+    Agents Control RustGIS* in its AI Assistant settings, which the program never does for them. The token is never
+    shown."""
+    from .io import rustgis_link as link
+
+    name = "RustGIS"
+    found = link.find_rustgis()
+    if found is None or found.app is None:
+        return Check(name, OK, "not installed (the link with RustGIS is optional)",
+                     f"RustGIS {link.MIN_TEXT} or later, from {link.RELEASES_URL}, opens the products and drawings "
+                     "of a chunk and keeps them in step")
+    installed = found.version
+    update = f"update RustGIS: {link.RELEASES_URL}"
+
+    def idle() -> Check:  # installed, and nobody to talk to
+        if link.too_old(installed):
+            return Check(name, WARN, f"{installed}: older than {link.MIN_TEXT}, which the link needs", update)
+        return Check(name, OK, f"{installed or 'installed'}; agent control is off (or RustGIS is not running)",
+                     RUSTGIS_ON)
+
+    where = link.endpoint()
+    if where is None:
+        return idle()
+    try:
+        running = link.HttpTransport(where, timeout=4.0).initialize()
+    except link.RustGisTooOld as exc:
+        return Check(name, WARN, str(exc), update)
+    except link.RustGisOff:  # it published an address and nothing answers there (it just quit), or the token is not its
+        return idle()
+    except link.RustGisBusy:
+        return Check(name, OK, f"{installed or 'installed'}; agent control is on at {where.url} but RustGIS is not "
+                               "answering now (minimized, hidden or busy)")
+    except link.RustGisError as exc:
+        return Check(name, WARN, f"agent control is on at {where.url}, but {exc}")
+    return Check(name, OK, f"{running}; agent control is on, listening at {where.url}")
+
+
 PPK_HINT = ("pip install -U \"pyarchinit-photogrammetry-core>=0.5\" (the applications include it), or set PPG_RNX2RTKP "
             "to the rnx2rtkp program of RTKLIB-EX 2.5")
 
@@ -306,6 +349,7 @@ def run_checks(gui: bool = True) -> Report:
         r.add("Open3D", OK, v)
     r.checks.append(colmap_gpu_check())
     r.checks.append(open3d_gpu_check())
+    r.checks.append(rustgis_check())
     v = _version("ifcopenshell")
     r.add("IfcOpenShell", OK if v else WARN, v or "missing (IFC export disabled)",
           "" if v else "pip install \"pyarchinit-photogrammetry[bim]\"")
@@ -412,4 +456,4 @@ def main(argv: list[str] | None = None) -> int:
     return 1 if rep.failures else 0
 
 
-__all__ = ["run_checks", "ppk_check", "Report", "Check", "main", "OK", "WARN", "FAIL"]
+__all__ = ["run_checks", "ppk_check", "rustgis_check", "Report", "Check", "main", "OK", "WARN", "FAIL"]

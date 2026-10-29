@@ -19,7 +19,8 @@ and attributes): a row whose content no longer matches it was edited by another 
 signature lives in the file, so it also tells the edits made in QGIS while the program was
 closed. Of the tables in :data:`TWO_WAY_TABLES` (units, spot heights, sections) such edits come
 back (:meth:`LiveLink.read_changes`): rows changed, rows drawn in QGIS (no identity yet: they
-get one) and rows deleted; the program never overwrites them before it has read them. The
+get one; or under an identity never known here and never signed by the program, which they keep)
+and rows deleted; the program never overwrites them before it has read them. The
 other tables are computed by the program (contour lines, zones, plugin drawings) and stay
 one-way.
 
@@ -42,6 +43,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -61,6 +63,20 @@ ID_FIELD = "ppg_id"  # the identity of a feature (a UUID)
 SIG_FIELD = "ppg_sig"  # the signature of what the program last wrote in the row
 PART_FIELD = "ppg_parte"  # "unita": the part (1, 2...) of a unit drawn as several polygons
 TECHNICAL_FIELDS = (ID_FIELD, SIG_FIELD, PART_FIELD)
+# name -> value of what the file is: "chunk", the key of the chunk whose drawings it holds (an edit made there belongs
+# to that chunk, whichever is active when it is read); not a layer, not listed in gpkg_contents
+INFO_TABLE = "ppg_info"
+# (name, ppg_id, part, fid): the rows of the two-way tables as the program last wrote or read them, kept in the
+# transaction of the write or of the read - what a reader without memory (another LiveLink, the program started
+# again, a replaced file) compares the file with, so a row deleted in QGIS meanwhile is seen deleted and never written
+# back; ``INFO_TABLE`` "rows:<table>" says the record of that table was made (an empty record is not a missing one).
+# Not a layer, not listed in gpkg_contents.
+ROWS_TABLE = "ppg_rows"
+
+
+class UnreadEdits(RuntimeError):
+    """:meth:`LiveLink.write` of another chunk's drawings refused: the file holds edits another program made to the
+    drawings of the chunk before, not read yet (they belong to that chunk): read them first."""
 # the columns a two-way table always has, also before the program wrote a feature into it: a unit
 # drawn in QGIS gets the columns of pyunitastratigrafiche, a spot height those of pyarchinit_quote
 BASE_COLUMNS = {
@@ -275,7 +291,7 @@ class Feature:
 class TableChanges:
     """What another program changed in a two-way table since it was last read."""
     changed: list = field(default_factory=list)  # Feature: geometry or attributes changed
-    added: list = field(default_factory=list)  # Feature: drawn (or copied) there
+    added: list = field(default_factory=list)  # Feature: drawn (or copied) there, given an identity or with its own
     deleted: list = field(default_factory=list)  # (identity, part) of the rows gone
     rows: list = field(default_factory=list)  # Feature: every row of the table now
     refused: tuple | None = None  # (srs of the table, srs of the project): not read
@@ -295,10 +311,13 @@ class LiveLink:
         self.path = Path(folder) / LIVE_DB
         self.crs = crs or ""
         self._signatures: dict[str, int] = {}
-        self._known: dict[str, dict[tuple, int]] = {}  # table -> {(identity, part): fid} written or read here
+        # table -> {(identity, part): fid} written or read here: what the file is compared with when it has no record
+        # of that table (:data:`ROWS_TABLE`, written by a version before it was kept)
+        self._known: dict[str, dict[tuple, int]] = {}
         self._con: sqlite3.Connection | None = None
         self._ident = None  # the file the connection is open on
         self._data_version = None
+        self.read_chunk: str | None = None  # the key of the chunk of the file when its changes were last read
 
     # ------------------------------------------------------------------ connection
     def _file_ident(self):
@@ -350,14 +369,19 @@ class LiveLink:
                         tuple(sorted((str(k), str(v)) for k, v in attrs.items() if not str(k).startswith("_")))))
         return hash(tuple(sig))
 
-    def write(self, layers: dict[str, dict], force: bool = False) -> dict[str, Path]:
+    def write(self, layers: dict[str, dict], force: bool = False, chunk=None,
+              drop_unread: bool = False) -> dict[str, Path]:
         """Bring the GeoPackage up to date with the layers of the raster view
         (``{name: {"kind", "features"}}``, features as attribute dicts with ``_geom`` or the
         ``(item, label, attrs)`` triples of :class:`gui.image_views.RasterView`). Every table
         exists even when empty, so QGIS sees deletions. ``force``: every table compared row by
         row, also those whose features did not change here (an edit made in QGIS to a one-way
         table is undone). Rows of the two-way tables edited or deleted in QGIS and not read back
-        yet are left as they are."""
+        yet are left as they are. ``chunk``: the key of the chunk the drawings belong to, kept in
+        the file with them (:meth:`stored_chunk`). Another chunk's drawings go in only when the file
+        holds no edit of another program not read yet - checked in the write's own transaction, so a
+        save of QGIS a moment before is never written over: :class:`UnreadEdits` then, nothing
+        written; ``drop_unread``: those rows were kept elsewhere (they could not be read), and go."""
         from . import gpkg
 
         groups = self._group(layers)
@@ -368,15 +392,27 @@ class LiveLink:
         con = self._connection()
         if new:
             self._signatures = {}
+        key = None if chunk is None else str(chunk)
+        stored = self._stored_key(con)
+        rekey = key is not None and key != stored
+        if rekey and stored is not None:  # another chunk's drawings: every table compared row by row, whatever the
+            force = True  # window wrote last (rows read from another program belong to the chunk before)
         todo = {t: f for t, f in groups.items() if force or new or self._signatures.get(t) != self._signature(f)}
-        if todo:
+        if todo or rekey:
             srs = gpkg.srs_of(self.crs)
             known = {}
             try:
                 con.execute("BEGIN IMMEDIATE")
                 gpkg.create(con, srs)  # idempotent: the system of the chunk listed, also after it changed
+                if rekey and stored is not None and not drop_unread and self._unread(con):
+                    raise UnreadEdits(f"the file holds edits of chunk {stored} not read yet")
                 for table, feats in todo.items():
-                    known[table] = self._write_table(con, table, feats, srs[0], force)
+                    known[table] = self._write_table(con, table, feats, srs[0], force, drop=drop_unread)
+                    if table in TWO_WAY_TABLES:
+                        self._record(con, table, known[table])
+                if rekey:
+                    con.execute(f"CREATE TABLE IF NOT EXISTS {INFO_TABLE} (name TEXT PRIMARY KEY, value TEXT)")
+                    con.execute(f"INSERT OR REPLACE INTO {INFO_TABLE} (name, value) VALUES ('chunk', ?)", (key,))
                 con.execute("COMMIT")
             except BaseException:
                 if con.in_transaction:
@@ -463,8 +499,9 @@ class LiveLink:
                 others.append(s)
         return primary, others
 
-    def _write_table(self, con, table: str, feats: list, srs_id: int, force: bool) -> dict:
-        """The rows of ``table`` brought to ``feats`` one by one; returns ``{key: fid}`` of its rows."""
+    def _write_table(self, con, table: str, feats: list, srs_id: int, force: bool, drop: bool = False) -> dict:
+        """The rows of ``table`` brought to ``feats`` one by one; returns ``{key: fid}`` of its rows. ``drop``: rows
+        another program edited and nobody read are written over too (kept elsewhere: :meth:`write`)."""
         from . import gpkg
 
         q = gpkg.quote
@@ -482,9 +519,9 @@ class LiveLink:
         types = {r[1]: r[2] for r in con.execute(f"PRAGMA table_info({q(table)})")}
         if before and ID_FIELD not in before:
             con.execute(f"DELETE FROM {q(table)}")  # written by an earlier version: rows without identity
-        two_way = table in TWO_WAY_TABLES
-        known = {} if recreated else self._known.get(table, {})
-        primary, others = self._sort(self._scan(con, table, cols, content=two_way or force), known)
+        two_way = table in TWO_WAY_TABLES and not drop  # the rows edited elsewhere kept until read
+        known = {} if recreated else self._known_rows(con, table)
+        primary, others = self._sort(self._scan(con, table, cols, content=two_way or force or drop), known)
         written = [c for c in cols if c != SIG_FIELD]
         names = "".join(f", {q(c)}" for c in written)
         insert = f"INSERT INTO {q(table)} (geom{names}) VALUES ({', '.join('?' * (len(written) + 1))})"
@@ -523,6 +560,78 @@ class LiveLink:
             gpkg.set_extent(con, table, _bounds(con, table))
         return after
 
+    def _unread(self, con) -> bool:
+        """Whether a two-way table holds a row another program edited or drew and nobody read yet: its content not
+        the one signed, or no identity (a deletion is told only by what this link knows)."""
+        from . import gpkg
+
+        for table in TWO_WAY_TABLES:
+            cols = [r[1] for r in con.execute(f"PRAGMA table_info({gpkg.quote(table)})") if r[1] not in ("fid", "geom")]
+            if ID_FIELD not in cols:
+                continue
+            rows = self._scan(con, table, cols, content=True)
+            if any(s.external or s.key[0] is None for s in rows):
+                return True
+            here = {s.key for s in rows}
+            if any(key not in here for key in self._known_rows(con, table)):
+                return True
+        return False
+
+    # ------------------------------------------------------------------ the record of the rows
+    def _known_rows(self, con, table: str) -> dict[tuple, int]:
+        """``{(identity, part): fid}`` of the rows of ``table`` as the program last wrote or read them: the record the
+        file keeps (:data:`ROWS_TABLE`: the same for a link that never saw the file, after the program started again,
+        or for another link that wrote meanwhile), else what this link remembers (a file written by a version before
+        the record was kept, or a one-way table)."""
+        recorded = self._recorded(con, table)
+        return self._known.get(table, {}) if recorded is None else recorded
+
+    @staticmethod
+    def _recorded(con, table: str) -> dict[tuple, int] | None:
+        """The record of ``table`` in the file; None when the file has none of it."""
+        try:
+            row = con.execute(f"SELECT value FROM {INFO_TABLE} WHERE name = ?", (f"rows:{table}",)).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                raise
+            return None
+        if row is None:
+            return None
+        return {(pid, int(part)): int(fid) for pid, part, fid in
+                con.execute(f"SELECT ppg_id, part, fid FROM {ROWS_TABLE} WHERE name = ?", (table,))}
+
+    @staticmethod
+    def _record(con, table: str, rows: dict[tuple, int]) -> None:
+        """``rows`` (``{(identity, part): fid}``) as the record of ``table``, in the transaction under way."""
+        con.execute(f"CREATE TABLE IF NOT EXISTS {INFO_TABLE} (name TEXT PRIMARY KEY, value TEXT)")
+        con.execute(f"CREATE TABLE IF NOT EXISTS {ROWS_TABLE} (name TEXT NOT NULL, ppg_id TEXT NOT NULL, "
+                    "part INTEGER NOT NULL, fid INTEGER NOT NULL, PRIMARY KEY (name, ppg_id, part))")
+        con.execute(f"DELETE FROM {ROWS_TABLE} WHERE name = ?", (table,))
+        con.executemany(f"INSERT OR REPLACE INTO {ROWS_TABLE} (name, ppg_id, part, fid) VALUES (?, ?, ?, ?)",
+                        [(table, pid, int(part or 1), int(fid)) for (pid, part), fid in rows.items()
+                         if pid is not None])
+        con.execute(f"INSERT OR REPLACE INTO {INFO_TABLE} (name, value) VALUES (?, '1')", (f"rows:{table}",))
+
+    @staticmethod
+    def _stored_key(con) -> str | None:
+        """The key of the chunk whose drawings the file holds (:data:`INFO_TABLE`); None in a file written before it was
+        kept."""
+        try:
+            row = con.execute(f"SELECT value FROM {INFO_TABLE} WHERE name = 'chunk'").fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                raise  # the file held by another program a moment: the caller tries again
+            return None
+        return None if row is None or row[0] is None else str(row[0])
+
+    def stored_chunk(self) -> str | None:
+        """The key of the chunk whose drawings the GeoPackage holds, as the program last wrote it with them (``chunk``
+        of :meth:`write`): the chunk an edit made there belongs to. None while there is no GeoPackage, or in one
+        written by a version that did not keep it. Cheap (the connection kept open): asked before every write."""
+        if not self.path.exists():
+            return None
+        return self._stored_key(self._connection())
+
     @staticmethod
     def _sign(con, table: str, cols: list[str], fids: list[int]) -> None:
         """``ppg_sig`` of the rows just written, from what SQLite keeps of them."""
@@ -547,11 +656,19 @@ class LiveLink:
         con = self._connection()
         return con.execute("PRAGMA data_version").fetchone()[0] != self._data_version
 
-    def read_changes(self, busy_ms: int = 250) -> dict[str, TableChanges]:
+    def read_changes(self, busy_ms: int = 250, any_srs: bool = False,
+                     before_commit: Callable[[dict], None] | None = None) -> dict[str, TableChanges]:
         """What another program (QGIS) changed in the two-way tables since the last write or read:
         ``{table: TableChanges}``, only the tables with changes. The rows drawn there get their
         identity and every row read its signature, in the same transaction: a change is given once.
-        :class:`sqlite3.OperationalError` (database locked) when QGIS holds the file: try again."""
+        :attr:`read_chunk` is then the key of the chunk the file held the drawings of (read in that
+        transaction: the chunk the changes belong to). A table in another system than the link's is
+        refused, unread - ``any_srs``: read all the same, its features in their own system
+        (:attr:`Feature.srs_id`). ``before_commit``: called with the changes in the read's own
+        transaction, before the rows are signed as read - what it raises rolls the read back,
+        nothing signed, the same changes at the next read (the rows kept beside the project must be
+        written before they count as read). :class:`sqlite3.OperationalError` (database locked)
+        when QGIS holds the file: try again."""
         from . import gpkg
 
         if not gpkg.is_geopackage(self.path):
@@ -565,17 +682,21 @@ class LiveLink:
             con.execute("BEGIN IMMEDIATE")
             try:
                 version = con.execute("PRAGMA data_version").fetchone()[0]
+                owner = self._stored_key(con)
                 for table in TWO_WAY_TABLES:
                     cols = [r[1] for r in con.execute(f"PRAGMA table_info({q(table)})") if r[1] not in ("fid", "geom")]
                     if ID_FIELD not in cols:
                         continue  # not written by this version yet
                     have = gpkg.table_srs(con, table)
-                    if have is not None and have != srs:
+                    if have is not None and have != srs and not any_srs:
                         out[table] = TableChanges(refused=(have, srs))
                         continue
                     ch, known[table] = self._read_table(con, table, cols)
+                    self._record(con, table, known[table])
                     if ch:
                         out[table] = ch
+                if before_commit is not None:
+                    before_commit(out)
                 con.execute("COMMIT")
             except BaseException:
                 if con.in_transaction:
@@ -585,13 +706,14 @@ class LiveLink:
             con.execute("PRAGMA busy_timeout = 10000")
         self._data_version = version
         self._known.update(known)
+        self.read_chunk = owner
         return out
 
     def _read_table(self, con, table: str, cols: list[str]) -> tuple[TableChanges, dict]:
         from . import gpkg
 
         q = gpkg.quote
-        known = self._known.get(table, {})
+        known = self._known_rows(con, table)
         primary, others = self._sort(self._scan(con, table, cols, content=True), known)
         ch = TableChanges()
         part = PART_FIELD in cols
@@ -604,10 +726,15 @@ class LiveLink:
             if part:
                 s.values[PART_FIELD] = 1
             ch.added.append(s)
+        # an identity never known here, none of its rows signed by the program: a feature drawn there under an identity
+        # another program gave it (a unit drawn in RustGIS as several polygons, one copied from another project) is
+        # added, as it is - a new part of a unit known here is a change of it
+        seen = {key[0] for key in known}
+        signed = {s.key[0] for s in primary.values() if s.stored_sig is not None}
         for s in primary.values():
             if s.external:
                 con.execute(f"UPDATE {q(table)} SET {q(SIG_FIELD)} = ? WHERE fid = ?", (s.content_sig, s.fid))
-                ch.changed.append(s)
+                (ch.changed if s.key[0] in seen or s.key[0] in signed else ch.added).append(s)
         ch.deleted = [k for k in known if k not in primary]
         rows = list(primary.values()) + others
         ch.rows = [self._feature(s) for s in rows]
@@ -895,5 +1022,6 @@ def open_in_qgis(project_path: str | Path, qgis: QgisInstall | None = None) -> N
 
 
 __all__ = ["find_qgis", "export_layers", "build_project", "project_crs", "open_in_qgis", "classify_layer", "LiveLink", "LIVE_DB",
+           "INFO_TABLE", "UnreadEdits",
            "LIVE_TABLES", "QgisInstall", "TWO_WAY_TABLES", "ID_FIELD", "SIG_FIELD", "PART_FIELD", "Feature",
            "TableChanges", "new_id", "stable_id", "row_signature"]

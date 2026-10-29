@@ -30,6 +30,12 @@ os.environ.setdefault("PPG_PLUGINS_ENVIRONMENT", "0")  # nor those installed wit
 # the GNSS downloads and caches of the tests go to a folder of their own, never to the user's
 if "PPG_GNSS_DIR" not in os.environ:
     os.environ["PPG_GNSS_DIR"] = _folder("ppg-test-gnss-")
+# nor do they read RustGIS's settings folder of the user (its token), or the run folder where a RUNNING RustGIS
+# publishes the address of its agent interface (the doctor would then ask the app, and the link would send it its
+# token): empty folders, whatever the shell says. The test of the open app (test_rustgis_app.py) is the exception.
+if os.environ.get("PPG_RUSTGIS_LIVE") != "1":
+    os.environ["RUSTGIS_CONFIG_DIR"] = _folder("ppg-test-rustgis-")
+    os.environ["XDG_RUNTIME_DIR"] = _folder("ppg-test-run-")  # a valid, private folder: RustGIS's rule takes it
 # PROJ never goes to the network (a shell with PROJ_NETWORK=ON would have it download a geoid grid in silence, and
 # heights above the geoid would be wrong offline): forced, whatever the shell of the developer says
 os.environ["PROJ_NETWORK"] = "OFF"

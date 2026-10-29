@@ -4,6 +4,7 @@ proxy of a unit built again when its polygon changes there. QGIS is simulated by
 connection editing the file, as QGIS's GeoPackage provider does when an edit session is saved."""
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -11,8 +12,8 @@ import shapely
 from shapely.geometry import LineString, Point, Polygon, box
 
 from pyarchinit_photogrammetry.io import gpkg
-from pyarchinit_photogrammetry.io.qgis_link import (ID_FIELD, LIVE_DB, PART_FIELD, SIG_FIELD, LiveLink, new_id,
-                                                    row_signature)
+from pyarchinit_photogrammetry.io.qgis_link import (ID_FIELD, INFO_TABLE, LIVE_DB, PART_FIELD, SIG_FIELD, LiveLink,
+                                                    UnreadEdits, new_id, row_signature)
 
 CRS = "EPSG:3004"
 X0, Y0 = 2480000.0, 4500000.0  # metre coordinates as in Gauss-Boaga: float32 would round them
@@ -225,6 +226,63 @@ def test_a_copy_made_in_qgis_is_a_feature_of_its_own(tmp_path):
     got = link.read_changes()["unita"]
     assert not got.changed and len(got.added) == 1 and got.added[0].id != a["ppg_id"]
     assert got.added[0].fid != row["fid"]
+    qgis.close()
+
+
+def test_a_row_under_an_identity_never_known_here_is_added_as_it_is(tmp_path):
+    """Features pasted in QGIS from another project with their identity, never signed by this program - one unit of
+    one polygon, one of two (as a unit drawn in RustGIS as two polygons comes): added under that identity, every row of
+    it, kept and signed; a new part of a unit known here is a change of that unit, and so is a unit known here whose
+    row was replaced by an unsigned one under its identity."""
+    a, b = _unit(1, X0, Y0), _unit(2, X0 + 1, Y0)
+    link = LiveLink(tmp_path, CRS)
+    link.write(_layers([a, b]))
+    link.read_changes()
+    qgis = Qgis(link.path)
+    other, pair = new_id(), new_id()
+    qgis.save(qgis.insert("unita", box(X0 + 4, Y0, X0 + 4.5, Y0 + 0.5), us_s="5", **{ID_FIELD: other, PART_FIELD: 1}),
+              qgis.insert("unita", box(X0 + 6, Y0, X0 + 6.5, Y0 + 0.5), us_s="6", **{ID_FIELD: pair, PART_FIELD: 1}),
+              qgis.insert("unita", box(X0 + 7, Y0, X0 + 7.5, Y0 + 0.5), us_s="6", **{ID_FIELD: pair, PART_FIELD: 2}),
+              qgis.insert("unita", box(X0, Y0 + 2, X0 + 0.5, Y0 + 2.5), us_s="1",
+                          **{ID_FIELD: a["ppg_id"], PART_FIELD: 2}))
+    got = link.read_changes()["unita"]
+    assert sorted((f.id, f.part) for f in got.added) == sorted([(other, 1), (pair, 1), (pair, 2)])
+    assert [(f.id, f.part) for f in got.changed] == [(a["ppg_id"], 2)] and not got.deleted
+    stored = {r["fid"]: r for r in _rows(link.path, "unita")}
+    assert all(stored[f.fid][ID_FIELD] == f.id and stored[f.fid][SIG_FIELD] for f in got.added)
+    assert link.read_changes() == {}  # given once
+    qgis.save(qgis.move("unita", next(f.fid for f in got.added if f.id == other), box(X0 + 4, Y0, X0 + 5, Y0 + 1)))
+    assert [(f.id, f.part) for f in link.read_changes()["unita"].changed] == [(other, 1)]  # known now: a change
+    old = next(r["fid"] for r in _rows(link.path, "unita") if r[ID_FIELD] == b["ppg_id"])
+    qgis.save(qgis.delete("unita", old),
+              qgis.insert("unita", box(X0 + 1, Y0, X0 + 1.8, Y0 + 0.8), us_s="2",
+                          **{ID_FIELD: b["ppg_id"], PART_FIELD: 3}))
+    got = link.read_changes()["unita"]
+    assert [(f.id, f.part) for f in got.changed] == [(b["ppg_id"], 3)] and not got.added
+    assert got.deleted == [(b["ppg_id"], 1)]
+    qgis.close()
+
+
+def test_a_unit_pasted_in_qgis_with_its_identity_comes_into_the_window(trench):
+    """Through the window: a unit pasted with its identity as two polygons, and a spot height pasted with its own,
+    come in as one unit and one spot height, under those identities."""
+    w, app, mw = trench
+    w.a_qgis_live.setChecked(True)
+    w._export_qgis_layers()
+    path = w._qgis_dir() / LIVE_DB
+    w._poll_qgis()
+    unit, spot = new_id(), new_id()
+    qgis = Qgis(path)
+    qgis.save(qgis.insert("unita", box(X0 + 1, Y0 + 1, X0 + 2, Y0 + 2), us_s="21", area_s="1",
+                          **{ID_FIELD: unit, PART_FIELD: 1}),
+              qgis.insert("unita", box(X0 + 3, Y0 + 1, X0 + 3.5, Y0 + 1.5), us_s="21", area_s="1",
+                          **{ID_FIELD: unit, PART_FIELD: 2}),
+              qgis.insert("quote", Point(X0 + 0.5, Y0 + 0.5), quota_q=100.5, us_q="21", **{ID_FIELD: spot}))
+    w._poll_qgis()
+    (u,) = [u for u in w.units if u.us == "21"]
+    assert u.attributes[ID_FIELD] == unit and u.geometry.geom_type == "MultiPolygon" and len(u.geometry.geoms) == 2
+    assert [(q[ID_FIELD], q["quota_q"]) for q in w.quote] == [(spot, 100.5)]
+    assert sorted(_from_qgis(w)) == ["Da QGIS: US 21 aggiunta", "Da QGIS: quota 100.50 aggiunta"]
     qgis.close()
 
 
@@ -612,3 +670,463 @@ def test_a_section_moved_in_qgis_is_cut_again(processed, tmp_path):
     finally:
         w.setWindowModified(False)
         w.close()
+
+
+def test_the_file_keeps_the_key_of_its_chunk(tmp_path):
+    """The live GeoPackage keeps the key of the chunk whose drawings it holds, written with them (only when it changes:
+    the same chunk written again changes nothing for QGIS); what QGIS saved is read with the key the file had then."""
+    link = LiveLink(tmp_path, CRS)
+    assert link.stored_chunk() is None
+    six = _unit(6, X0, Y0)
+    link.write(_layers([six]), chunk=1)
+    assert link.stored_chunk() == "1"
+    other = sqlite3.connect(link.path)  # another program reading the file
+    try:
+        assert other.execute(f"SELECT value FROM {INFO_TABLE} WHERE name = 'chunk'").fetchone() == ("1",)
+        before = other.execute("PRAGMA data_version").fetchone()[0]
+        link.write(_layers([six]), chunk=1)  # the same chunk, the same drawings: nothing written
+        assert other.execute("PRAGMA data_version").fetchone()[0] == before
+        link.write(_layers([six]), chunk=2)  # only the key changes: written
+        assert other.execute("PRAGMA data_version").fetchone()[0] != before and link.stored_chunk() == "2"
+    finally:
+        other.close()
+    qgis = Qgis(link.path)
+    qgis.save(qgis.insert("unita", box(X0 + 4, Y0 + 4, X0 + 5, Y0 + 5), us_s="12"))
+    qgis.close()
+    assert link.read_changes()["unita"].added and link.read_chunk == "2"
+    link.close()
+
+
+def test_qgis_edits_of_a_chunk_left_go_to_it(trench):
+    """QGIS alone: a unit drawn in QGIS and saved right before the active chunk changes - not read yet - goes into the
+    chunk it was drawn on, never into the active one, and only then the new chunk's drawings go into the file. For a
+    chunk removed before its edits were read they go nowhere: kept in a file beside the project, said in the log."""
+    w, app, mw = trench
+    first = w.chunk
+    second = w.doc.add_chunk("Saggio 2")
+    second.crs = first.crs
+    w.a_qgis_live.setChecked(True)
+    w._qgis_poll.stop()  # the looks are the test's
+    w._export_qgis_layers()
+    w._poll_qgis()
+    path = w._qgis_dir() / LIVE_DB
+    qgis = Qgis(path)
+    qgis.save(qgis.insert("unita", box(X0 + 1, Y0 + 1, X0 + 2, Y0 + 2), us_s="12", area_s="1"))
+    w._activate_chunk(second)
+    assert w._export_qgis_layers()  # the edits read first, into their chunk
+    assert [d["us"] for d in first.meta["drawings"]["units"]] == ["12"] and w.units == []
+    assert "Da QGIS: US 12 aggiunta, nel chunk Saggio 1" in _log(w)
+    assert w._live_link.stored_chunk() == str(second.key) and _rows(path, "unita") == []
+    w._poll_qgis()
+    assert w.units == []
+    # a unit saved in QGIS for the second chunk, which is removed before the window reads it
+    qgis.save(qgis.insert("unita", box(X0 + 3, Y0 + 1, X0 + 4, Y0 + 2), us_s="13", area_s="1"))
+    assert w.remove_workspace_items([("chunk", second, None)], confirm=False)
+    w.runner.wait()
+    assert w.chunk is first and w._export_qgis_layers()
+    assert sorted(u.us for u in w.units) == ["12"]
+    kept = sorted(w.doc.path.parent.glob(f"{w.doc.path.stem}_modifiche_chunk_{second.key}_*.geojson"))
+    assert len(kept) == 1
+    features = json.loads(kept[0].read_text(encoding="utf-8"))["features"]
+    assert [(f["properties"]["us_s"], f["properties"]["modifica"]) for f in features] == [("13", "aggiunta")]
+    assert any("non è più nel progetto" in line and kept[0].name in line for line in _log(w))
+    assert w._live_link.stored_chunk() == str(first.key)
+    qgis.close()
+
+
+def test_another_chunks_drawings_never_go_over_a_save_of_qgis(tmp_path):
+    """The check and the write in one transaction: QGIS saves over the chunk before right before the drawings of
+    another chunk go in - the write refuses (UnreadEdits), nothing written, the key as it was; once read, they go in.
+    Rows that could not be read and were kept elsewhere are written over on request (drop_unread)."""
+    link = LiveLink(tmp_path, CRS)
+    link.write(_layers([_unit(6, X0, Y0)]), chunk=1)
+    qgis = Qgis(link.path)
+    qgis.save(qgis.insert("unita", box(X0 + 4, Y0 + 4, X0 + 5, Y0 + 5), us_s="12"))
+    with pytest.raises(UnreadEdits):
+        link.write(_layers([]), chunk=2)
+    assert link.stored_chunk() == "1" and len(_rows(link.path, "unita")) == 2
+    assert link.read_changes()["unita"].added
+    link.write(_layers([]), chunk=2)
+    assert link.stored_chunk() == "2" and _rows(link.path, "unita") == []
+    qgis.save(qgis.insert("unita", box(X0 + 4, Y0 + 4, X0 + 5, Y0 + 5), us_s="13"))
+    link.write(_layers([_unit(6, X0, Y0)]), chunk=3, drop_unread=True)
+    assert link.stored_chunk() == "3" and [r["us_s"] for r in _rows(link.path, "unita")] == ["6"]
+    qgis.close()
+    link.close()
+
+
+def _chunks_in_two_systems(w):
+    first = w.chunk
+    second = w.doc.add_chunk("Saggio 2")
+    second.crs = "EPSG:32633"  # another system than the trench's EPSG:3004
+    w.a_qgis_live.setChecked(True)
+    w._qgis_poll.stop()  # the looks are the test's
+    w._export_qgis_layers()
+    w._poll_qgis()
+    return first, second
+
+
+def test_qgis_edits_of_a_chunk_in_another_system_go_to_it(trench):
+    """QGIS alone, the chunk left in another system than the active one: a unit saved in QGIS on it and not read yet
+    is read in that chunk's own system and goes into it - never refused, never lost when the active chunk's drawings
+    go into the file in their system; no undo of the active chunk names it."""
+    w, app, mw = trench
+    first, second = _chunks_in_two_systems(w)
+    path = w._qgis_dir() / LIVE_DB
+    qgis = Qgis(path)
+    qgis.save(qgis.insert("unita", box(X0 + 1, Y0 + 1, X0 + 2, Y0 + 2), us_s="12", area_s="1"))
+    qgis.close()
+    w._activate_chunk(second)
+    assert w._export_qgis_layers()
+    assert [d["us"] for d in first.meta["drawings"]["units"]] == ["12"] and w.units == []
+    assert "Da QGIS: US 12 aggiunta, nel chunk Saggio 1" in _log(w)
+    assert not any("sistema di riferimento" in line for line in _log(w)) and not w.history.can_undo()
+    assert w._live_link.stored_chunk() == str(second.key) and _rows(path, "unita") == []
+    assert w._live_previous is None
+
+
+def test_rows_not_in_their_chunks_system_are_kept_aside(trench):
+    """The tables of the chunk left in a system that is not its own any more (its system changed meanwhile): its
+    unread rows cannot go into it - kept in a GeoJSON beside the project, in the system they are in, said with the
+    chunk and both systems - and the active chunk's drawings go on."""
+    w, app, mw = trench
+    first, second = _chunks_in_two_systems(w)
+    path = w._qgis_dir() / LIVE_DB
+    qgis = Qgis(path)
+    qgis.save(qgis.insert("unita", box(X0 + 1, Y0 + 1, X0 + 2, Y0 + 2), us_s="12", area_s="1"))
+    qgis.close()
+    first.crs = "EPSG:6708"  # its system changed, its tables in the file not yet
+    w._activate_chunk(second)
+    assert w._export_qgis_layers()
+    assert not (first.meta.get("drawings") or {}).get("units") and w.units == []
+    (kept,) = w.doc.path.parent.glob(f"{w.doc.path.stem}_modifiche_chunk_{first.key}_*.geojson")
+    data = json.loads(kept.read_text(encoding="utf-8"))
+    assert data["crs"]["properties"]["name"] == "EPSG:3004"
+    assert [f["properties"]["us_s"] for f in data["features"]] == ["12"]
+    assert any("Saggio 1" in line and "EPSG:3004" in line and "EPSG:6708" in line and kept.name in line
+               for line in _log(w))
+    assert w._live_link.stored_chunk() == str(second.key) and _rows(path, "unita") == []
+
+
+def test_a_chunks_edits_that_cannot_be_read_are_copied_aside(trench, monkeypatch, caplog):
+    """The edits of the chunk left fail to be read for a reason that lasts (not a lock): said once, and at the third
+    failure in a row the live file is copied beside the project - the chunk and its system named - and the active
+    chunk's drawings go on, over those rows. A lock is said once, and waits; it counts among the failures in a row."""
+    import logging
+
+    w, app, mw = trench
+    first = w.chunk
+    second = w.doc.add_chunk("Saggio 2")
+    second.crs = first.crs
+    w.a_qgis_live.setChecked(True)
+    w._qgis_poll.stop()
+    w._export_qgis_layers()
+    w._poll_qgis()
+    path = w._qgis_dir() / LIVE_DB
+    qgis = Qgis(path)
+    qgis.save(qgis.insert("unita", box(X0 + 1, Y0 + 1, X0 + 2, Y0 + 2), us_s="12", area_s="1"))
+    qgis.close()
+    cause = {"error": sqlite3.OperationalError("database is locked")}
+
+    def fails(*a, **k):
+        raise cause["error"]
+
+    monkeypatch.setattr(w._live_link, "read_changes", fails)
+    w._activate_chunk(second)
+    with caplog.at_level(logging.INFO, logger="pyarchinit_photogrammetry"):
+        assert [w._export_qgis_layers() for _ in range(4)] == [{}] * 4  # locked: waits, said once
+        assert caplog.text.count("occupato da un altro programma") == 1
+        cause["error"] = sqlite3.DatabaseError("database disk image is malformed")
+        assert w._export_qgis_layers()  # the fifth failure in a row, not a lock: the copy at once
+    assert caplog.text.count("malformed") == 1
+    (kept,) = w.doc.path.parent.glob(f"{w.doc.path.stem}_modifiche_chunk_{first.key}_*.gpkg")
+    con = sqlite3.connect(kept)
+    assert [r[0] for r in con.execute('SELECT us_s FROM "unita"')] == ["12"]
+    con.close()
+    assert any("Saggio 1" in line and kept.name in line for line in _log(w))
+    assert w._live_link.stored_chunk() == str(second.key) and _rows(path, "unita") == []
+
+
+# ---------------------------------------------------------------- the record of the rows the file holds
+def test_the_file_records_the_rows_it_holds(tmp_path):
+    """A reader without memory - another LiveLink, or the program started again - compares the file with the record
+    it keeps of the rows last written or read: a unit deleted in QGIS is seen deleted, and a write of the chunk's
+    drawings by a fresh link does not put the row back before the deletion is read. A file written by a version
+    without the record is read as before (nothing known, nothing destroyed)."""
+    a, b = _unit(1, X0, Y0), _unit(2, X0 + 1, Y0)
+    link = LiveLink(tmp_path, CRS)
+    link.write(_layers([a, b]), chunk=1)
+    link.read_changes()
+    link.close()
+    fid_b = [r["fid"] for r in _rows(link.path, "unita") if r[ID_FIELD] == b["ppg_id"]][0]
+    qgis = Qgis(link.path)
+    qgis.save(qgis.delete("unita", fid_b))
+    qgis.close()
+    fresh = LiveLink(tmp_path, CRS)
+    fresh.write(_layers([a, b]), chunk=1)  # the program started again: b is still in its drawings
+    assert [r[ID_FIELD] for r in _rows(link.path, "unita")] == [a["ppg_id"]]  # not put back
+    changes = fresh.read_changes()
+    assert changes["unita"].deleted == [(b["ppg_id"], 1)] and not changes["unita"].added
+    fresh.write(_layers([a]), chunk=1)
+    fresh.close()
+    # another reader after the write: the record follows the write
+    qgis = Qgis(link.path)
+    qgis.save(qgis.delete("unita", [r["fid"] for r in _rows(link.path, "unita")][0]))
+    qgis.close()
+    other = LiveLink(tmp_path, CRS)
+    assert other.read_changes()["unita"].deleted == [(a["ppg_id"], 1)]
+    other.close()
+    # a file of a version without the record: the fresh reader knows nothing of its rows
+    con = sqlite3.connect(link.path, isolation_level=None)
+    con.execute(f"DELETE FROM {INFO_TABLE} WHERE name LIKE 'rows:%'")
+    con.close()
+    old = LiveLink(tmp_path, CRS)
+    old.write(_layers([a]), chunk=1)
+    assert [r[ID_FIELD] for r in _rows(link.path, "unita")] == [a["ppg_id"]]
+    assert old.read_changes() == {}
+    old.close()
+
+
+def test_rows_stay_unread_when_what_runs_before_the_commit_fails(tmp_path):
+    """``read_changes(before_commit=...)``: what the caller does with the changes in the read's own transaction - the
+    rows kept beside the project - failing leaves nothing signed: the same changes come at the next read."""
+    link = LiveLink(tmp_path, CRS)
+    link.write(_layers([_unit(1, X0, Y0)]), chunk=1)
+    qgis = Qgis(link.path)
+    qgis.save(qgis.insert("unita", box(X0 + 4, Y0 + 4, X0 + 5, Y0 + 5), us_s="12"))
+    qgis.close()
+    seen = []
+
+    def fails(changes):
+        seen.append(changes)
+        raise OSError("disk full")
+
+    with pytest.raises(OSError):
+        link.read_changes(before_commit=fails)
+    assert seen and seen[0]["unita"].added
+    assert [r[SIG_FIELD] for r in _rows(link.path, "unita") if r["us_s"] == "12"] == [None]
+    assert link.external_change()
+    assert link.read_changes(before_commit=lambda ch: None)["unita"].added
+    assert [r[SIG_FIELD] for r in _rows(link.path, "unita") if r["us_s"] == "12"] != [None]
+    link.close()
+
+
+def _three_chunks(w):
+    """The trench, a chunk in another system, a third one in a third; QGIS deletes a unit of the trench."""
+    first = w.chunk
+    second = w.doc.add_chunk("Saggio 2")
+    second.crs = "EPSG:32633"
+    third = w.doc.add_chunk("Saggio 3")
+    third.crs = "EPSG:6708"
+    w.a_qgis_live.setChecked(True)
+    w._qgis_poll.stop()
+    w._qgis_timer.stop()
+    w._export_qgis_layers()
+    w._poll_qgis()
+    path = w._qgis_dir() / LIVE_DB
+    qgis = Qgis(path)
+    qgis.save(qgis.insert("unita", box(X0 + 1, Y0 + 1, X0 + 2, Y0 + 2), us_s="12", area_s="1"))
+    w._poll_qgis()
+    w._export_qgis_layers()
+    assert [u.us for u in w.units] == ["12"]
+    fid = [r["fid"] for r in _rows(path, "unita") if r["us_s"] == "12"][0]
+    qgis.save(qgis.delete("unita", fid))
+    qgis.close()
+    return first, second, third, path
+
+
+def _units_of(w, chunk):
+    if w.chunk is chunk:
+        return [u.us for u in w.units]
+    return [d["us"] for d in (chunk.meta.get("drawings") or {}).get("units", [])]
+
+
+@pytest.mark.parametrize("route", ["third", "back_again"])
+def test_a_unit_deleted_in_qgis_on_the_chunk_left_is_deleted_after_a_lock(trench, route):
+    """QGIS deletes a unit of the chunk left and holds the file while the window would read it; the active chunk
+    changes again (a third system, or back to the first) before the file is free: the deletion reaches its chunk,
+    the row is never written back. The reader of the first system is kept meanwhile (it knows the rows), and going
+    back to the first system reuses it."""
+    w, app, mw = trench
+    first, second, third, path = _three_chunks(w)
+    reader = w._live_link
+    w._activate_chunk(second)
+    holder = sqlite3.connect(path, isolation_level=None)
+    holder.execute("BEGIN EXCLUSIVE")
+    assert w._poll_qgis() is False and w._live_previous is reader
+    w._activate_chunk(third if route == "third" else first)
+    assert w._poll_qgis() is False
+    if route == "third":
+        assert w._live_previous is reader and w._live_link.crs == "EPSG:6708"
+    else:
+        assert w._live_link is reader
+    holder.execute("COMMIT")
+    holder.close()
+    assert w._export_qgis_layers()
+    w._poll_qgis()
+    assert _units_of(w, first) == [] and [r["us_s"] for r in _rows(path, "unita")] == []
+    assert any("US 12 eliminata" in line for line in _log(w))
+
+
+def test_a_unit_deleted_in_qgis_is_deleted_by_a_reader_without_memory(trench):
+    """The readers kept from before are gone (as after the program started again): the deletion made in QGIS to the
+    chunk left still reaches it - the file records the rows it holds."""
+    w, app, mw = trench
+    first, second, third, path = _three_chunks(w)
+    w._activate_chunk(second)
+    w._qgis_live_link()
+    if w._live_previous is not None:
+        w._live_previous.close()
+    w._live_previous = None
+    assert w._export_qgis_layers()
+    w._poll_qgis()
+    assert _units_of(w, first) == [] and [r["us_s"] for r in _rows(path, "unita")] == []
+    assert any("US 12 eliminata" in line and "Saggio 1" in line for line in _log(w))
+
+
+def test_a_unit_deleted_in_qgis_while_the_program_was_closed_is_deleted(trench):
+    """The program started again on the active chunk (no link remembers the file): a unit QGIS deleted meanwhile is
+    not written back by the first export, and the deletion comes into the window."""
+    w, app, mw = trench
+    first, second, third, path = _three_chunks(w)
+    w._live_link.close()
+    w._live_link = None
+    assert w._export_qgis_layers()
+    assert [r["us_s"] for r in _rows(path, "unita")] == []
+    w._poll_qgis()
+    assert w.units == [] and "Da QGIS: US 12 eliminata" in _log(w)
+
+
+def test_a_unit_drawn_here_that_never_reached_the_file_is_never_deleted(trench):
+    """A unit drawn in the program and the chunk switched before the export timer wrote it: it is not a deletion
+    (the file never held it) - it is in the chunk when it comes back, and goes into the file then."""
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+
+    w, app, mw = trench
+    first = w.chunk
+    second = w.doc.add_chunk("Saggio 2")
+    second.crs = first.crs
+    w.a_qgis_live.setChecked(True)
+    w._qgis_poll.stop()
+    w._export_qgis_layers()
+    w._poll_qgis()
+    w._add_unit(UnitPolygon(box(X0 + 1, Y0 + 1, X0 + 2, Y0 + 2), us="6", area="1", sito="Saggio"))
+    w._qgis_timer.stop()  # never written
+    w._activate_chunk(second)
+    assert w._export_qgis_layers() and w.units == []
+    w._poll_qgis()
+    w._activate_chunk(first)
+    assert w._export_qgis_layers()
+    w._poll_qgis()
+    assert [u.us for u in w.units] == ["6"]
+    assert [r["us_s"] for r in _rows(w._qgis_dir() / LIVE_DB, "unita")] == ["6"]
+    assert not any("eliminata" in line for line in _log(w))
+
+
+def test_a_write_refused_over_unread_edits_is_said_once(trench, caplog):
+    """A save of QGIS over the chunk before, right before the other chunk's drawings go in: the write is refused and
+    tried again later, said once in the log while it lasts; once the edits are read the drawings go in."""
+    import logging
+
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+
+    w, app, mw = trench
+    first = w.chunk
+    second = w.doc.add_chunk("Saggio 2")
+    second.crs = "EPSG:32633"
+    w.a_qgis_live.setChecked(True)
+    w._qgis_poll.stop()
+    w._add_unit(UnitPolygon(box(X0 + 1, Y0 + 1, X0 + 2, Y0 + 2), us="6", area="1", sito="Saggio"))
+    w._qgis_timer.stop()
+    assert w._export_qgis_layers()
+    w._poll_qgis()
+    qgis = Qgis(w._qgis_dir() / LIVE_DB)
+    qgis.save(qgis.insert("unita", box(X0 + 4, Y0 + 4, X0 + 5, Y0 + 5), us_s="12", area_s="1"))
+    qgis.close()
+    w._activate_chunk(second)
+    link = w._qgis_live_link()
+    real = link.write
+
+    def refuses(*a, **k):
+        raise UnreadEdits("test")
+
+    link.write = refuses
+    with caplog.at_level(logging.INFO, logger="pyarchinit_photogrammetry"):
+        assert [w._export_qgis_layers() for _ in range(3)] == [{}, {}, {}]
+    assert caplog.text.count("non ancora lette") == 1
+    link.write = real
+    assert w._export_qgis_layers()
+    assert [d["us"] for d in first.meta["drawings"]["units"]] == ["6", "12"]
+    assert [r["us_s"] for r in _rows(w._qgis_dir() / LIVE_DB, "unita")] == []
+
+
+def test_edits_kept_aside_stay_unread_when_their_file_cannot_be_written(trench, monkeypatch, caplog):
+    """The rows kept beside the project (another system than their chunk's) are written there BEFORE they are signed
+    as read: when the GeoJSON cannot be written they stay unread in the live file, said in the log, and are kept at the
+    next look."""
+    import logging
+    from pathlib import Path
+
+    w, app, mw = trench
+    first, second = _chunks_in_two_systems(w)
+    path = w._qgis_dir() / LIVE_DB
+    qgis = Qgis(path)
+    qgis.save(qgis.insert("unita", box(X0 + 1, Y0 + 1, X0 + 2, Y0 + 2), us_s="12", area_s="1"))
+    qgis.close()
+    first.crs = "EPSG:6708"
+    w._activate_chunk(second)
+    real = Path.write_text
+
+    def fails(self, *a, **k):
+        if "_modifiche_chunk_" in self.name:
+            raise OSError("disk full")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", fails)
+    with caplog.at_level(logging.INFO, logger="pyarchinit_photogrammetry"):
+        assert w._export_qgis_layers() == {}
+    assert "disk full" in caplog.text
+    assert [r[SIG_FIELD] for r in _rows(path, "unita") if r["us_s"] == "12"] == [None]  # unread
+    assert not list(w.doc.path.parent.glob(f"{w.doc.path.stem}_modifiche_chunk_{first.key}_*.geojson"))
+    monkeypatch.setattr(Path, "write_text", real)
+    assert w._export_qgis_layers()
+    (kept,) = w.doc.path.parent.glob(f"{w.doc.path.stem}_modifiche_chunk_{first.key}_*.geojson")
+    assert [f["properties"]["us_s"] for f in json.loads(kept.read_text(encoding="utf-8"))["features"]] == ["12"]
+    assert _rows(path, "unita") == [] and w._live_link.stored_chunk() == str(second.key)
+
+
+def test_the_live_copy_is_made_with_a_plain_copy_when_the_backup_fails(trench, monkeypatch):
+    """Failures of any cause count together towards the copy of the live file (not only alike ones), and when SQLite's
+    backup cannot be made the file is copied as it is."""
+    w, app, mw = trench
+    first = w.chunk
+    second = w.doc.add_chunk("Saggio 2")
+    second.crs = first.crs
+    w.a_qgis_live.setChecked(True)
+    w._qgis_poll.stop()
+    w._export_qgis_layers()
+    w._poll_qgis()
+    path = w._qgis_dir() / LIVE_DB
+    qgis = Qgis(path)
+    qgis.save(qgis.insert("unita", box(X0 + 1, Y0 + 1, X0 + 2, Y0 + 2), us_s="12", area_s="1"))
+    qgis.close()
+    cause = {"error": sqlite3.OperationalError("database is locked")}
+
+    def fails(*a, **k):
+        raise cause["error"]
+
+    monkeypatch.setattr(w._live_link, "read_changes", fails)
+
+    def no_backup(src, dst):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(mw, "_copy_sqlite", no_backup)
+    w._activate_chunk(second)
+    assert [w._export_qgis_layers() for _ in range(2)] == [{}, {}]
+    cause["error"] = sqlite3.DatabaseError("database disk image is malformed")
+    assert w._export_qgis_layers()  # the third failure in a row, of another cause: the copy
+    (kept,) = w.doc.path.parent.glob(f"{w.doc.path.stem}_modifiche_chunk_{first.key}_*.gpkg")
+    con = sqlite3.connect(kept)
+    assert [r[0] for r in con.execute('SELECT us_s FROM "unita"')] == ["12"]
+    con.close()
+    assert _rows(path, "unita") == []

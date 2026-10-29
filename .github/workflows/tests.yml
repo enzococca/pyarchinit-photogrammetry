@@ -31,6 +31,16 @@ jobs:
       - name: Native core (Rust; Python 3.11 keeps the numpy code, so both are tested)
         if: matrix.python-version == '3.12'
         run: pip install ./native
+      - name: RustGIS engine (rustgis-cli 0.4.0 for Linux, checked against the SHA256SUMS of the release)
+        # the tests of the live link with RustGIS (tests/test_rustgis_link.py) run against the real engine, rustgis-cli,
+        # where PPG_RUSTGIS_CLI names it; without it they skip. One job has it: Python 3.12, as for the native core.
+        if: matrix.python-version == '3.12'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cli="$(.github/scripts/get_rustgis_cli.sh v0.4.0 "$RUNNER_TEMP/rustgis")"
+          ls -l "$cli"
+          echo "PPG_RUSTGIS_CLI=$cli" >> "$GITHUB_ENV"
       - name: Tests
         shell: bash
         env:

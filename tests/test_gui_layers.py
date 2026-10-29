@@ -264,10 +264,11 @@ def test_qgis_live_export_from_view_layers(window, qapp, tmp_path):
         qapp.processEvents()
         time.sleep(0.05)
     assert w._qgis_live_link().counts()["punti"] == 2
-    w.a_qgis_live.setChecked(False)
-    w.set_document(w.doc)  # reopening a project already linked to QGIS keeps the link live
+    w.set_document(w.doc)  # reopening a project linked to QGIS keeps the link live: the project remembers it
     assert w.a_qgis_live.isChecked()
     w.a_qgis_live.setChecked(False)
+    w.set_document(w.doc)  # turned off, it stays off, its live GeoPackage still there
+    assert not w.a_qgis_live.isChecked() and (tmp_path / "disegni_ppg.gpkg").exists()
 
 
 def _units_side_by_side(w, n=4, gap_after=3):

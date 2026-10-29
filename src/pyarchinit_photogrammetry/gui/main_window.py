@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -23,7 +24,8 @@ from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QDockWid
 from .. import __version__, _native, updates
 from ..app import app as application
 from ..core.document import Document
-from ..io.qgis_link import ID_FIELD, new_id, stable_id
+from ..core.progress import Cancelled
+from ..io.qgis_link import ID_FIELD, LIVE_TABLES, PART_FIELD, UnreadEdits, new_id, stable_id
 from . import i18n, theme
 from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelectionDialog, IfcPreviewDialog,
                       ParamDialog, PatchDialog,
@@ -55,6 +57,18 @@ CROP_LAYER = "Ritaglio"  # the polygon drawn with the crop tool
 PATCH_LAYER = "Patch ortofoto"  # areas of the orthomosaic coloured from photos chosen by hand
 STONES_LAYER = "Pietre"  # stone-by-stone drawing (archaeo.stones), per raster: orthomosaic or elevation
 PROFILE_LAYER = "Profilo della sezione"  # the line where the plane of a section cuts the model
+# the live link with RustGIS (io.rustgis_link): how often the window looks at RustGIS and how long it waits for it
+RUSTGIS_POLL_MS = 2000  # a look every 2 s while the link is on
+RUSTGIS_PULL_EVERY = 10.0  # seconds: a pull at least this often while RustGIS lists edits in the linked layers
+RUSTGIS_WAIT = 60.0  # seconds QGIS > Apri in RustGIS waits for RustGIS to start and let the program in
+RUSTGIS_TIMEOUT = 10.0  # seconds the link waits for each answer of RustGIS once started
+RUSTGIS_START_TIMEOUT = 60.0  # seconds a start waits for each answer (it adds every layer of the chunk)
+RUSTGIS_STATUS_WAIT = 2.0  # seconds a look waits for RustGIS's edit status (a read): longer, RustGIS does not draw
+RUSTGIS_LEAVE_WAIT = 15.0  # seconds the window waits for RustGIS's last edits before asking whether to wait more
+RUSTGIS_CLOSE_WAIT = 10.0  # seconds a closing window waits for the link to stop, before leaving its thread behind
+RUSTGIS_READ_TRIES = 3  # reads of the live GeoPackage at a leave (another program may hold it a moment)
+LIVE_READ_FAILURES = 3  # reads of another chunk's edits failing in a row (the last not a lock) before the file is kept aside
+LIVE_COPY_WAIT = 1.0  # seconds SQLite's backup of the live file waits for the file (on the interface's thread)
 
 
 def _outlined(rgba: np.ndarray, polygon, bounds) -> np.ndarray:
@@ -100,6 +114,192 @@ def _it(value: float, decimals: int = 0) -> str:
 def _length(metres: float) -> str:
     """A distance as the interface writes it: in centimetres below a metre, else in metres."""
     return f"{_it(metres * 100.0, 1)} cm" if abs(metres) < 1.0 else f"{_it(metres, 2)} m"
+
+
+# ---------------------------------------------------------------- RustGIS: what runs outside the interface thread
+def _copy_sqlite(src: Path, dst: Path) -> None:
+    """``src`` (a SQLite file another program may hold) copied to ``dst`` with SQLite's backup, waiting for the file
+    :data:`LIVE_COPY_WAIT` at most; :class:`sqlite3.Error` when it cannot be."""
+    source = sqlite3.connect(src, timeout=LIVE_COPY_WAIT)
+    try:
+        target = sqlite3.connect(dst)
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+    finally:
+        source.close()
+
+
+def _rustgis_reach(timeout: float) -> tuple:
+    """RustGIS reached and greeted (never in the interface thread): ``("ok", transport, version)``; ``("off", why)``
+    when it publishes no address or does not let the program in (its agent control off, another token); ``("busy",
+    why)`` when it does not answer now (minimized, hidden, a dialog of its open); ``("old", why)`` when it is older than
+    the link needs."""
+    from ..io import rustgis_link as rg
+
+    found = rg.endpoint()
+    if found is None:
+        return ("off", "")
+    transport = rg.HttpTransport(found, timeout=timeout)
+    try:
+        version = transport.initialize()
+    except rg.RustGisTooOld as exc:
+        return ("old", str(exc))
+    except rg.RustGisBusy as exc:
+        return ("busy", str(exc))
+    except rg.RustGisError as exc:
+        return ("off", str(exc))
+    return ("ok", transport, version)
+
+
+def _rustgis_wait(progress, seconds: float) -> tuple:
+    """RustGIS reached (:func:`_rustgis_reach`) in a step of the TaskRunner: when it does not let the program in, the
+    app is started - on Windows and Linux only when no RustGIS runs (:func:`.rustgis_link.running`): starting it again
+    there opens a second one; on macOS always (``open -a`` brings a running RustGIS to the front, where its box is) -
+    and asked again every half second for ``seconds`` at most, time for the user to tick its agent
+    control. A RustGIS that does not answer (minimized, hidden, a dialog of its open) is there: neither started nor
+    waited for, the window says so. The last answer."""
+    from ..io import rustgis_link as rg
+
+    reached = _rustgis_reach(5.0)
+    if reached[0] != "off":
+        return reached
+    if rg._platform() == "darwin" or not rg.running():
+        try:
+            rg.open_app()
+        except (rg.RustGisError, OSError) as exc:  # not where the program looks for it: it may still start by itself
+            log.info("RustGIS non avviato: %s", exc)
+    progress(0.05, tr("In attesa di RustGIS (fino a {0} secondi)", int(seconds)))
+    end = time.monotonic() + seconds
+    while reached[0] in ("off", "busy") and time.monotonic() < end:
+        time.sleep(0.5)
+        progress.check()
+        reached = _rustgis_reach(5.0)
+    return reached
+
+
+def _rustgis_pull(link) -> dict:
+    """``link.pull()``; when a linked layer is no longer there (removed in RustGIS: :class:`RustGisLayerGone`), a
+    send first - it adds the layer again, its rows whole - and the pull again, once. Any other refusal is raised: no
+    send goes before RustGIS's edits are read."""
+    from ..io import rustgis_link as rg
+
+    try:
+        return link.pull()
+    except rg.RustGisLayerGone:
+        link.push()
+        return link.pull()
+
+
+def _rustgis_round(link, activated: bool, wrote: bool, again: bool, due: bool, pulling: bool, rasters) -> dict:
+    """One look at RustGIS, in the thread of its calls (never the interface's: the window gives what it knows, and the
+    answer goes back to it). First RustGIS's edits pulled into the live GeoPackage - when its edit status changed, when
+    the window came back to the front (``activated``), and when ``due`` (every :data:`RUSTGIS_PULL_EVERY` seconds) while
+    RustGIS lists edits in the linked layers, since a feature edited twice may leave the status as it was -, before any
+    send: a pull before a push. A pull refused because a linked layer is gone there (:class:`RustGisLayerGone`): a send
+    adds it again, then the pull again, once; any other refused pull ends the look, nothing sent. Then the program's
+    rows sent when the live GeoPackage was written since the last look (``wrote``), after a pull, and while the last
+    send did not go through or sent rows (``again``: a send larger than a script goes in pieces) - never only because
+    rows wait set aside, which no send carries until the program changes them. Then the rasters given again whose files
+    changed (``rasters``: the window's list, when it showed the products again or a file of them changed) - a copy one
+    needs is left for a step of the TaskRunner (``"copies"`` of the answer): nothing here takes long, a change of chunk
+    may be waiting for this look. ``pulling`` False: RustGIS refused a pull a moment ago - a pull wanted now waits, and
+    so does any send (``"held"``), since nothing is sent before RustGIS's edits are read. The edit status is asked with
+    a short wait (:data:`RUSTGIS_STATUS_WAIT`): a RustGIS that does not draw makes a short look. Returns what happened,
+    RustGIS's errors in ``"error"`` as ``(kind, text)``: never raised."""
+    from ..io import rustgis_link as rg
+
+    out = {"pulled": None, "pushed": None, "rasters": None, "error": None, "held": False}
+    try:
+        changed = link.status_changed(wait=RUSTGIS_STATUS_WAIT)
+        if changed or activated or (due and link.edited_there):
+            if not pulling:
+                out["held"] = True
+            else:
+                try:
+                    out["pulled"] = link.pull()
+                except rg.RustGisLayerGone:  # a linked layer RustGIS no longer has: a send adds it again, a pull
+                    out["pushed"] = link.push()
+                    out["pulled"] = link.pull()
+        if (not out["held"] and out["pushed"] is None and link.pending
+                and (wrote or again or out["pulled"] is not None)):
+            out["pushed"] = link.push()
+        if rasters is not None:
+            out["rasters"] = link.update_rasters(rasters, copies=False)
+    except rg.RustGisBusy as exc:
+        out["error"] = ("busy", str(exc))
+    except rg.RustGisOff as exc:
+        out["error"] = ("off", str(exc))
+    except rg.RustGisRefused as exc:
+        out["error"] = ("refused", str(exc))
+    except sqlite3.OperationalError as exc:  # another program holds the live GeoPackage a moment: the next look
+        out["error"] = ("locked", str(exc))
+    except Exception as exc:  # noqa: BLE001 - a look that fails never stops the window: said there, once
+        log.debug("RustGIS: %s", exc, exc_info=True)
+        out["error"] = ("error", str(exc) or type(exc).__name__)
+    out["aside"], out["pending"] = link.set_aside, link.pending
+    return out
+
+
+def _rustgis_last_stop(link, withdraw: bool) -> bool:
+    """The link stopped when the window closes, in the thread of RustGIS's calls: its layers taken out of RustGIS when
+    ``withdraw`` (everything was read, the project saved) and nothing was edited there since its last edits were read
+    - an edit made meanwhile keeps them, the edit status asked with a short wait (:data:`RUSTGIS_STATUS_WAIT`).
+    Whether they were taken out."""
+    from ..io import rustgis_link as rg
+
+    if withdraw:
+        try:
+            withdraw = not link.status_changed(wait=RUSTGIS_STATUS_WAIT)
+        except rg.RustGisError:  # RustGIS does not say: its layers stay
+            withdraw = False
+    link.stop(withdraw=withdraw)
+    return withdraw
+
+
+class _CallThread:
+    """One thread that runs the calls given to it, in order: the calls to RustGIS, never in the interface thread. A
+    daemon, so that a call RustGIS never answers does not keep the program from ending (:meth:`stop` leaves it behind
+    after a bounded wait)."""
+
+    def __init__(self, name: str):
+        import queue
+        import threading
+
+        self._jobs = queue.Queue()
+        self._thread = threading.Thread(target=self._serve, name=name, daemon=True)
+        self._thread.start()
+
+    def submit(self, call):
+        """``call()`` after those given before; its Future."""
+        from concurrent.futures import Future
+
+        future = Future()
+        self._jobs.put((call, future))
+        return future
+
+    def _serve(self) -> None:
+        while True:
+            job = self._jobs.get()
+            if job is None:
+                return
+            call, future = job
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                result = call()
+            except BaseException as exc:  # noqa: BLE001 - kept for whoever waits for it
+                future.set_exception(exc)
+            else:
+                future.set_result(result)
+
+    def stop(self, wait: float) -> bool:
+        """No call after those given; ``wait`` seconds at most for them to end. Whether the thread ended (else it is
+        left behind: a daemon, it ends with the program)."""
+        self._jobs.put(None)
+        self._thread.join(wait)
+        return not self._thread.is_alive()
 
 
 class _GuiCalls(QObject):
@@ -451,6 +651,45 @@ class MainWindow(QMainWindow):
         self._qgis_poll.setInterval(1000)
         self._qgis_poll.timeout.connect(self._poll_qgis)
         self._qgis_waiting: dict[str, list] = {"proxies": [], "sections": []}  # for when no step is running
+        self._qgis_hold = False  # edits read in a hurry (before a change of chunk...): their steps wait
+        self._live_from = "qgis"  # who made the edits being read: "qgis", "rustgis" or "both" (_from)
+        self._live_previous = None  # the reader of the live GeoPackage in the system of the chunk before (its edits)
+        self._live_cause = None  # why the live GeoPackage could not be read, as the log said it last (said once)
+        self._live_failures = 0  # reads failed in a row, of any cause
+        self._live_holds = None  # the key of the chunk whose drawings the window last wrote into the live GeoPackage
+        self._live_unread_said = False  # the write refused over unread edits of the chunk before: said in the log
+        self._live_drop = None  # the key of a chunk whose unreadable edits were kept aside: written over next
+        # the live link with RustGIS (io.rustgis_link.RustGisLink) of the active chunk, and what it needs here
+        self._rustgis = None
+        self._rustgis_chunk = None  # the chunk RustGIS shows
+        self._rustgis_thread = None  # the thread of RustGIS's calls, one at a time (made at the first: _CallThread)
+        self._rustgis_job = None  # the last call given to that thread (a Future)
+        self._rustgis_closed = False  # the window closed: nothing of the link runs again
+        self._rustgis_unread = False  # a pull wrote RustGIS's edits into the live GeoPackage: not read here yet
+        self._rustgis_unwaited = None  # the pull the user chose not to wait for (a Future): never waited for twice
+        self._rustgis_asking = False  # the window asks whether to wait for RustGIS: its windows wait for the answer
+        self._rustgis_later: list = []  # those windows, shown once the question is answered
+        self._links_quiet = 0  # > 0: the live links set by the program (a project opened), not by the user
+        self._rustgis_answers = 0  # answers of that thread not taken here yet
+        self._rustgis_starting = False  # a start of the link runs (a step of the TaskRunner)
+        self._rustgis_gen = 0  # a start asked before the link was turned off, or given another chunk, is not kept
+        self._rustgis_waiting = False  # RustGIS did not answer at the last look: "In attesa di RustGIS"
+        self._rustgis_wrote = False  # the live GeoPackage written since the last look: the program's rows to send
+        self._rustgis_stamp = None  # the live GeoPackage as the file system saw it at its last write here
+        self._rustgis_again = False  # the last send did not go through, or sent rows (more may wait)
+        self._rustgis_activated = False  # the program came back to the front: RustGIS's edits read at once
+        self._rustgis_rasters_due = False  # the window showed the chunk again: its rasters compared with RustGIS's
+        self._rustgis_last_pull = 0.0  # time.monotonic() of the last pull
+        self._rustgis_refused_at = float("-inf")  # of the last pull RustGIS refused: the next waits a while
+        self._rustgis_said: dict[str, list] = {}  # the features RustGIS set aside, as the log said them
+        self._rustgis_noted = ""  # the last error of a look said in the log (said once)
+        self._rustgis_poll = QTimer(self)  # a look at RustGIS every 2 s while the link is on
+        self._rustgis_poll.setInterval(RUSTGIS_POLL_MS)
+        self._rustgis_poll.timeout.connect(self._poll_rustgis)
+        qapp = QApplication.instance()
+        if qapp is not None:  # the user comes back from RustGIS: its edits read at once
+            qapp.applicationStateChanged.connect(self._app_state_changed)
+        self.refreshed.connect(self._rustgis_products_changed)
 
     def _act(self, menu, text: str, slot, shortcut=None, tip: str = "", processing: bool = False,
              icon_name: str | None = None) -> QAction:
@@ -950,6 +1189,15 @@ class MainWindow(QMainWindow):
         m.addAction(self.a_qgis_live)
         self._act(m, tr("Apri la cartella dei layer per QGIS"), lambda: QDesktopServices.openUrl(
             QUrl.fromLocalFile(str(self._qgis_dir()))), icon_name="folder")
+        m.addSeparator()  # RustGIS, the same drawings both ways through the same GeoPackage
+        self.a_rustgis_open = self._act(m, tr("Apri in RustGIS (collegamento dal vivo)"), self.open_in_rustgis,
+                                        icon_name="view_ortho")
+        self.a_rustgis_live = QAction(tr("Collegamento dal vivo con RustGIS (nei due sensi)"), self, checkable=True)
+        self.a_rustgis_live.setToolTip(tr("Ciò che disegni qui arriva in RustGIS da solo; ciò che disegni, cambi o "
+                                          "cancelli in RustGIS nei layer delle US, delle quote e delle sezioni torna "
+                                          "qui entro pochi secondi"))
+        self.a_rustgis_live.toggled.connect(self._rustgis_live_toggled)
+        m.addAction(self.a_rustgis_live)
         # ------------------------------------------------------------ View
         m = mb.addMenu(tr("&Vista"))
         self.panes.build_menu(m)  # each pane open or closed, the next and the previous one, the default layout
@@ -1172,6 +1420,9 @@ class MainWindow(QMainWindow):
         step = progress or (lambda *_a, **_k: None)
         shown = getattr(self, "_shown_doc", None)
         if shown is not None and shown is not doc:  # the session of the project left ends
+            # RustGIS's last edits into its drawings first, then its layers go from RustGIS - not when the project left
+            # has changes the user chose not to save: what came from RustGIS would go with them, so it stays there
+            self._rustgis_leave(unsaved_stay=True)
             self._settle_removals(shown)
         self._shown_doc = doc
         application.document = doc
@@ -1209,14 +1460,36 @@ class MainWindow(QMainWindow):
             self.history.reset()
         if doc.path:
             self._add_recent(doc.path)
-        # a project already opened in QGIS stays linked: its drawings keep updating there
+        self._restore_links(doc)
+
+    def _restore_links(self, doc) -> None:
+        """The live links ``doc`` had on when it was saved (``meta["live_links"]``), and only those, on again - those of
+        the window before go off; a project of an earlier version, QGIS's when its live GeoPackage is there (it was
+        opened in QGIS: its drawings keep updating there). RustGIS's comes back without asking
+        (:meth:`_rustgis_quietly_on`), with the active chunk of this project."""
         from ..io.qgis_link import LIVE_DB
 
-        linked = doc.path is not None and (self._qgis_dir() / LIVE_DB).exists()
-        if linked != self.a_qgis_live.isChecked():
-            self.a_qgis_live.setChecked(linked)
-        elif linked:
-            self._schedule_qgis()
+        links = doc.meta.get("live_links")
+        links = links if isinstance(links, dict) else {}
+        qgis = bool(links["qgis"]) if "qgis" in links else (doc.path is not None
+                                                             and (self._qgis_dir() / LIVE_DB).exists())
+        rustgis = bool(links.get("rustgis"))
+        self._links_quiet += 1  # what the project says: no change of it
+        try:
+            if qgis != self.a_qgis_live.isChecked():
+                self.a_qgis_live.setChecked(qgis)
+            elif qgis:
+                self._schedule_qgis()
+            if rustgis != self.a_rustgis_live.isChecked():
+                if rustgis:
+                    self._rustgis_quietly_on()
+                else:
+                    self.a_rustgis_live.setChecked(False)
+            elif rustgis:  # RustGIS follows, with the active chunk of this project
+                QTimer.singleShot(0, self._poll_rustgis)
+            self._remember_links()  # as they are now (a toggle above wrote them before the other was set)
+        finally:
+            self._links_quiet -= 1
 
     def refresh_all(self, reset_views: bool = False, progress=None) -> None:
         step = progress or (lambda *_a, **_k: None)
@@ -1240,6 +1513,7 @@ class MainWindow(QMainWindow):
         """The orthomosaic or the DEM of the chunk in the raster view (``path``: another file of
         that kind, e.g. a kept version or a difference of DEMs; ``bands``: the three to show of a
         reflectance orthomosaic) with the drawings on top."""
+        self._rustgis_check_rasters()  # a product written again (a patch...): RustGIS gets it again
         ch = self.chunk
         kind = kind or ("ortho" if ch is not None and ch.orthomosaic_path else "dem")
         if path is None:
@@ -2261,6 +2535,7 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- file
     def new_document(self) -> None:
+        self._rustgis_take_edits()  # RustGIS's last edits in the drawings before the question about saving them
         if not self._confirm_discard():
             return
         self._started = True
@@ -2272,6 +2547,9 @@ class MainWindow(QMainWindow):
             path, _ = QFileDialog.getOpenFileName(self, tr("Apri progetto"), self._last_dir(), tr("Progetti (*.ppg)"))
             if not path:
                 return
+        self._rustgis_take_edits()  # RustGIS's last edits in the drawings before the question about saving them
+        if not self._confirm_discard():
+            return
         card = self._progress_card("Apertura del progetto", Path(path).name)
         step = card.progress(0, 100) if card is not None else (lambda *_a, **_k: None)
         try:
@@ -2304,6 +2582,7 @@ class MainWindow(QMainWindow):
         return card
 
     def save_document(self, ask: bool = False) -> bool:
+        self._rustgis_take_edits()  # RustGIS's last edits in the drawings, so that they are saved with the project
         if ask or self.doc.path is None:
             path, _ = QFileDialog.getSaveFileName(self, tr("Salva progetto"), self._last_dir(), tr("Progetti (*.ppg)"))
             if not path:
@@ -2374,9 +2653,13 @@ class MainWindow(QMainWindow):
             self._warn("Attendi la fine (o annulla) l'elaborazione in corso.")
             ev.ignore()
             return
+        took = self._rustgis_take_edits()  # RustGIS's last edits in the drawings before the question about saving
         if not self._confirm_discard():
             ev.ignore()
             return
+        # the link stopped, its thread ended: RustGIS's layers taken away when everything was read and saved
+        self._rustgis_close(withdraw=took and not self.isWindowModified())
+        self._say_waiting_steps()
         self._settle_removals(self.doc)  # the files of what was removed: deleted, or back if never saved
         self._update_timer.stop()  # a window of the update flow held back is not opened for a window that is closed
         if self._update_waiting:  # the news it carried were not seen: the next start looks again, whatever the day
@@ -2387,6 +2670,9 @@ class MainWindow(QMainWindow):
         if getattr(self, "_live_link", None) is not None:
             self._live_link.close()
             self._live_link = None
+        if self._live_previous is not None:
+            self._live_previous.close()
+            self._live_previous = None
         self.photos.stop()
         self.log_pane.detach()
         self.settings.setValue("geometry", self.saveGeometry())
@@ -2844,6 +3130,7 @@ class MainWindow(QMainWindow):
 
     def import_external(self, kind: str) -> None:
         """Open a project made by Metashape, WebODM/ODM or a Photo3D capture session."""
+        self._rustgis_take_edits()  # RustGIS's last edits in the drawings before the question about saving them
         if not self._confirm_discard():
             return
         if kind == "metashape":
@@ -3423,7 +3710,9 @@ class MainWindow(QMainWindow):
         holds stored first, what changes worked out in the background (:func:`..gnss.heights.survey_crs_changes` does
         the change and undoes it - the georeference fitted again, what was drawn carried along -, which takes its time
         on a large chunk and may want the grid of a geoid: offered, then the preview again; the window waits for it,
-        as for every task), then shown and confirmed (:meth:`_confirm_survey_crs`)."""
+        as for every task), then shown and confirmed (:meth:`_confirm_survey_crs`). The live link with RustGIS stops
+        first, RustGIS's last edits read into the chunk; it starts again when the window is idle, in the system the
+        chunk has then."""
         from ..gnss import heights
 
         ch = self.chunk
@@ -3432,6 +3721,7 @@ class MainWindow(QMainWindow):
         if crs == ch.crs:
             self.statusBar().showMessage(tr("Il chunk è già in {0}.", crs), 8000)
             return
+        self._rustgis_leave()
         self._store_drawings()
         self._save_sections()
 
@@ -3515,7 +3805,7 @@ class MainWindow(QMainWindow):
                     step(tr("elementi rimossi"), r.make_final)
             self._dirty(not saved)
             step(tr("finestra"), self.refresh_all)
-            if getattr(self, "a_qgis_live", None) is not None and self.a_qgis_live.isChecked():
+            if self._live_on():
                 self._export_qgis_layers(force=True)  # the GeoPackage of QGIS in the new system at once
             text = tr("Sistema del rilievo: {0} → {1}", old, result["crs"])
             self.log_pane.info(text)
@@ -7294,19 +7584,45 @@ class MainWindow(QMainWindow):
         # Keep untouched projects unchanged, including snapshots used by Undo.
         if self.ortho_view.layer_settings or "layer_labels" in ch.meta:
             ch.meta["layer_labels"] = deepcopy(self.ortho_view.layer_settings)
-        units = [{**u.to_dict(), "layer": (u.attributes or {}).get("_layer")} for u in self.units
-                 if not str((u.attributes or {}).get("_layer") or "").startswith("US da PyArchInit - ")]
-        quote = [{k: v for k, v in q.items() if not str(k).startswith("_")} for q in self.quote]
-        points = [{k: v for k, v in q.items() if not str(k).startswith("_")} for q in self.probe_points]
-        if units or quote or points:
-            ch.meta["drawings"] = {"units": units, "quote": quote, **({"points": points} if points else {})}
-        else:
-            ch.meta.pop("drawings", None)
+        self._store_chunk_drawings(ch, self.units, self.quote, self.probe_points)
         stones = {k: [g.wkt for g in v] for k, v in self.stones.items() if v}
         if stones:
             ch.meta["stones"] = stones
         else:
             ch.meta.pop("stones", None)
+
+    @staticmethod
+    def _store_chunk_drawings(ch, units: list, quote: list, points: list) -> None:
+        """``units`` (those drawn here: not those loaded from PyArchInit), ``quote`` and the measuring ``points`` into
+        ``ch``, as the project keeps them: what comes back when it is opened again, or the chunk made active."""
+        units = [{**u.to_dict(), "layer": (u.attributes or {}).get("_layer")} for u in units
+                 if not str((u.attributes or {}).get("_layer") or "").startswith("US da PyArchInit - ")]
+        quote = [{k: v for k, v in q.items() if not str(k).startswith("_")} for q in quote]
+        points = [{k: v for k, v in q.items() if not str(k).startswith("_")} for q in points]
+        if units or quote or points:
+            ch.meta["drawings"] = {"units": units, "quote": quote, **({"points": points} if points else {})}
+        else:
+            ch.meta.pop("drawings", None)
+
+    @staticmethod
+    def _chunk_drawings(ch) -> tuple[list, list, list]:
+        """The units, spot heights and measuring points ``ch`` keeps (:meth:`_store_chunk_drawings`); a broken record
+        is left out, said in the log."""
+        from ..archaeo.stratigraphy import UnitPolygon
+
+        data = (ch.meta.get("drawings") or {}) if ch is not None else {}
+        units = []
+        for d in data.get("units", []):
+            try:
+                u = UnitPolygon.from_dict(d)
+                if d.get("layer"):
+                    u.attributes["_layer"] = d["layer"]
+                units.append(u)
+            except Exception as exc:  # a broken record must not stop the project from opening
+                log.warning("Unita' non letta dal progetto: %s", exc)
+        quote = [dict(q) for q in data.get("quote", []) if "x" in q and "y" in q]
+        points = [dict(q) for q in data.get("points", []) if "x" in q and "y" in q]
+        return units, quote, points
 
     def _activate_chunk(self, chunk) -> None:
         """Another chunk becomes the active one: the drawings of the one left stay with it (the
@@ -7319,15 +7635,24 @@ class MainWindow(QMainWindow):
 
     def _switch_chunk(self, chunk, store: bool = True) -> None:
         """``chunk`` the active one and the window on it; ``store``: the drawings of the chunk left go
-        into it first (not when it has just gone out of the project: they went with it)."""
+        into it first (not when it has just gone out of the project: they went with it). RustGIS follows,
+        as the GeoPackage of QGIS does: its edits not read yet go into the chunk left, its layers of it
+        away, and the chunk now active comes there in the background."""
         if store:
+            self._rustgis_leave()
             self._store_drawings()
+        elif self._rustgis is not None:  # the chunk left is no longer in the project: nothing goes into it now
+            self._rustgis_drop(tr("Il chunk {0} non è più nel progetto: ciò che è stato modificato in RustGIS nei suoi "
+                                  "disegni e non ancora letto resta nei suoi layer, che non sono più collegati.",
+                                  self._rustgis.chunk_label))
         self._sam_cancel()
         self.doc.chunk = chunk
         self._reload_drawings(redraw=False)
         self.proxies_pane.set_proxies(chunk.meta.get("proxies", []) if chunk is not None else [])
         self.refresh_all(reset_views=True)
         self._clear_stale_photo()
+        if self.a_rustgis_live.isChecked():
+            QTimer.singleShot(0, self._poll_rustgis)  # RustGIS gets the chunk now active
 
     def _reload_drawings(self, redraw: bool = True) -> None:
         """The drawings of the active chunk read again from the project; the units loaded from
@@ -7340,22 +7665,9 @@ class MainWindow(QMainWindow):
             self._redraw_overlays()
 
     def _restore_drawings(self) -> None:
-        from ..archaeo.stratigraphy import UnitPolygon
-
         ch = self.chunk
         self.ortho_view.restore_layer_settings(ch.meta.get("layer_labels", {}) if ch is not None else {})
-        data = (ch.meta.get("drawings") or {}) if ch is not None else {}
-        self.units, self.quote = [], []
-        for d in data.get("units", []):
-            try:
-                u = UnitPolygon.from_dict(d)
-                if d.get("layer"):
-                    u.attributes["_layer"] = d["layer"]
-                self.units.append(u)
-            except Exception as exc:  # a broken record must not stop the project from opening
-                log.warning("Unita' non letta dal progetto: %s", exc)
-        self.quote = [dict(q) for q in data.get("quote", []) if "x" in q and "y" in q]
-        self.probe_points = [dict(q) for q in data.get("points", []) if "x" in q and "y" in q]
+        self.units, self.quote, self.probe_points = self._chunk_drawings(ch)
         self._ensure_ppg_ids()
         from shapely import wkt
 
@@ -8684,22 +8996,60 @@ class MainWindow(QMainWindow):
             return self.doc.path.parent / f"{self.doc.path.stem}_qgis"
         return Path.home() / "ppg_qgis"
 
+    def _live_on(self) -> bool:
+        """Whether a live link reads the drawings from the live GeoPackage: QGIS's, RustGIS's, or both."""
+        return any(a is not None and a.isChecked() for a in (getattr(self, "a_qgis_live", None),
+                                                             getattr(self, "a_rustgis_live", None)))
+
     def _schedule_qgis(self) -> None:
-        if getattr(self, "a_qgis_live", None) is not None and self.a_qgis_live.isChecked():
+        if self._live_on():
             self._qgis_timer.start(400)
 
     def _qgis_live_link(self):
         """The GeoPackage of the drawings read by QGIS (one per project folder and CRS; it
-        remembers what it wrote, so only the changed rows are rewritten)."""
+        remembers what it wrote, so only the changed rows are rewritten). Another system than the
+        link's: the reader kept from before (:attr:`_live_previous`) is reused when it is in that
+        system, else a new link is made; of the two readers then left, the one kept is the one in the
+        system of the chunk whose drawings the file still holds (its edits not read yet are read in
+        it), else the link just left."""
         from ..io.qgis_link import LiveLink
 
-        folder, crs = self._qgis_dir(), self.chunk.crs if self.chunk else ""
+        folder, crs = self._qgis_dir(), (self.chunk.crs if self.chunk else "") or ""
         link = getattr(self, "_live_link", None)
-        if link is None or link.path.parent != folder or link.crs != (crs or ""):
-            if link is not None:
-                link.close()
+        if link is not None and link.path.parent == folder and link.crs == crs:
+            return link
+        previous = getattr(self, "_live_previous", None)
+        if link is None or link.path.parent != folder:  # another project: nothing of these readers serves
+            for old in (link, previous):
+                if old is not None:
+                    old.close()
+            self._live_previous, self._live_holds = None, None
             link = self._live_link = LiveLink(folder, crs)
+            return link
+        if previous is not None and previous.crs == crs:  # back to that system: its reader, with what it knows
+            self._live_link, self._live_previous = previous, link
+            return previous
+        keep = link
+        if previous is not None:
+            held = self._live_held_crs()
+            if held is not None and previous.crs == held and link.crs != held:
+                keep = previous  # the file still holds the drawings of the chunk that reader is of
+        for old in (link, previous):
+            if old is not None and old is not keep:
+                old.close()
+        self._live_previous = keep
+        link = self._live_link = LiveLink(folder, crs)
         return link
+
+    def _live_held_crs(self) -> str | None:
+        """The system of the chunk whose drawings the live GeoPackage holds (as the window last wrote it), when that
+        chunk is not the active one and still in the project; None otherwise, or when unknown (the file not asked: it
+        may be held by another program)."""
+        held = self._live_holds
+        if held is None or held == self._chunk_key():
+            return None
+        owner = next((c for c in self.doc.chunks if str(c.key) == held), None)
+        return (owner.crs or "") if owner is not None else None
 
     def _qgis_timer_fired(self) -> None:
         """The drawings written for QGIS when the timer fires - not while a step runs, which may be changing the chunk
@@ -8710,26 +9060,80 @@ class MainWindow(QMainWindow):
         self._export_qgis_layers()
 
     def _qgis_live_toggled(self, on: bool) -> None:
-        """The live link with QGIS on or off: the drawings written for QGIS, its edits looked for."""
+        """The live link with QGIS on or off: the drawings written for QGIS, its edits looked for (also while the one
+        with RustGIS is on: its edits come through the same GeoPackage)."""
         if on:
             self._schedule_qgis()
+        if self._live_on():
             self._qgis_poll.start()
         else:
             self._qgis_poll.stop()
+        self._remember_links()
 
     def _export_qgis_layers(self, force: bool = False) -> dict:
-        if self._ensure_ppg_ids():
-            self._redraw_overlays()  # the features carry the identities given now
-        view = self.ortho_view
-        layers = {name: {"kind": lay["kind"], "features": view.features(name)} for name, lay in view.layers.items()
-                  if name != "Marker"}  # the markers are the survey's control, not excavation drawings
+        """The drawings of the active chunk into the live GeoPackage, with the key of the chunk; never over another
+        chunk's edits not read yet (:meth:`_live_file_ours`: read first, or a moment later). The files, or {} when
+        nothing could be written."""
         try:
-            return self._qgis_live_link().write(layers, force=force)
+            link = self._qgis_live_link()
+            if not self._live_file_ours(link):
+                self._qgis_timer.start(3000)  # another chunk's edits there, not read yet: they go to it first
+                return {}
+            if self._ensure_ppg_ids():
+                self._redraw_overlays()  # the features carry the identities given now
+            view = self.ortho_view
+            layers = {name: {"kind": lay["kind"], "features": view.features(name)} for name, lay in view.layers.items()
+                      if name != "Marker"}  # the markers are the survey's control, not excavation drawings
+            files = link.write(layers, force=force, chunk=self._chunk_key(), drop_unread=self._live_drop is not None)
+            self._live_drop, self._live_holds, self._live_unread_said = None, self._chunk_key(), False
+            previous, self._live_previous = self._live_previous, None
+            if previous is not None and previous is not link:
+                previous.close()  # the file holds the active chunk's drawings: the reader before is done
+        except UnreadEdits as exc:  # saved in QGIS a moment ago, over the chunk before: read first, then written
+            if not self._live_unread_said:  # once while it lasts: the next look reads them
+                self._live_unread_said = True
+                log.info("Il file dei disegni dal vivo ha modifiche del chunk di prima non ancora lette (%s): i disegni "
+                         "del chunk attivo aspettano la prossima lettura", exc)
+            self._qgis_timer.start(1000)
+            return {}
         except Exception as exc:  # a live refresh must never interrupt drawing with an error window
             log.warning("Aggiornamento dei layer per QGIS non riuscito: %s", exc, exc_info=True)
             if "locked" in str(exc) or "busy" in str(exc):
                 self._qgis_timer.start(3000)  # QGIS or a sync client holds the file a moment: try again
             return {}
+        stamp = self._live_stamp()
+        if stamp != self._rustgis_stamp:  # rows written: RustGIS gets them at the next look
+            self._rustgis_stamp, self._rustgis_wrote = stamp, True
+        return files
+
+    def _chunk_key(self) -> str | None:
+        """The key of the active chunk as the live GeoPackage keeps it with its drawings."""
+        return str(self.chunk.key) if self.chunk is not None else None
+
+    def _live_file_ours(self, link) -> bool:
+        """Whether the active chunk's drawings may go into the live GeoPackage now: it holds them already, or nothing
+        edited there waits to be read. When it holds another chunk's drawings with edits not read yet - saved in QGIS,
+        or pulled from RustGIS, right before the active chunk changed -, those are read first and go to their chunk
+        (:meth:`_poll_qgis`): False while they cannot be read (another program holds the file a moment)."""
+        stored = link.stored_chunk()
+        if stored is None or stored == self._chunk_key():
+            return True
+        return self._poll_qgis(force=True)
+
+    def _live_stamp(self) -> tuple:
+        """The live GeoPackage as the file system sees it (identity, size, time of change of it and of a write-ahead log
+        beside it): another one says rows were written."""
+        from ..io.qgis_link import LIVE_DB
+
+        out = []
+        for suffix in ("", "-wal"):
+            try:
+                st = os.stat(f"{self._qgis_dir() / LIVE_DB}{suffix}")
+            except OSError:
+                out.append(None)
+                continue
+            out.append((st.st_ino, st.st_size, st.st_mtime_ns))
+        return tuple(out)
 
     def _ensure_ppg_ids(self) -> bool:
         """Every unit, spot height and section with an identity of its own (``ppg_id``, kept with
@@ -8767,72 +9171,280 @@ class MainWindow(QMainWindow):
         return changed
 
     # ---------------------------------------------------------------- QGIS: its edits back here
-    def _poll_qgis(self) -> None:
-        """Once a second while the live link is on: what was saved in QGIS since the last look
-        (units, spot heights, sections) comes into the window. Not while a step runs or a dialog
-        waits: it stays in the GeoPackage and comes at the next look."""
-        if not self.a_qgis_live.isChecked() or self.chunk is None or self.runner.busy:
-            return
-        if QApplication.activeModalWidget() is not None or self.ortho_view.editing_vertices():
-            return
-        self._run_qgis_waiting()
-        if self.runner.busy:
-            return
+    def _poll_qgis(self, force: bool = False, source: str | None = None) -> bool:
+        """Once a second while a live link is on (QGIS's or RustGIS's): what was saved in QGIS, or
+        pulled from RustGIS, since the last look (units, spot heights, sections) comes into the
+        window. Not while a step runs or a dialog waits: it stays in the GeoPackage and comes at the
+        next look; nor while a look at RustGIS runs, which may be writing RustGIS's edits into the
+        file: they come with its answer. ``force``: now, whatever the window is doing - RustGIS's
+        last edits, before the active chunk, its system or the project change, or the window asks
+        whether to save -, the steps they call for (proxies built again, sections cut again) left for
+        later. ``source``: the program the log and Modifica > Annulla name - "rustgis", "qgis", or
+        "both" when either may have made them; by default as :meth:`_live_source` says. The edits
+        go to the chunk whose drawings the file held when they were made (its key, kept with them):
+        another than the active one gets them into its stored drawings, one no longer in the project
+        nowhere (:meth:`_keep_chunk_changes`). Returns whether the file was read (nothing new in
+        it counts): False when the look was left for later or the file could not be read (another
+        program holds it)."""
+        if self.chunk is None or not (force or self._live_on()):
+            return False
+        if not force:
+            if source is None and self._rustgis_busy():
+                return False
+            if self.runner.busy or QApplication.activeModalWidget() is not None or self.ortho_view.editing_vertices():
+                return False
+            self._run_qgis_waiting()
+            if self.runner.busy:
+                return False
         link = self._qgis_live_link()
+        source = source or self._live_source(self._rustgis_unread)
+        stored = None
         try:
-            if not link.external_change():
-                return
-            changes = link.read_changes()
-        except sqlite3.OperationalError as exc:
-            if "locked" not in str(exc) and "busy" not in str(exc):
-                log.warning("Modifiche di QGIS non lette: %s", exc)
-            return  # QGIS is saving: read at the next look
+            stored = link.stored_chunk()
+            if stored is not None and stored != self._chunk_key():  # the drawings of the chunk before
+                reader, changes = self._read_other_chunk(link, stored, source)
+            else:
+                reader = link
+                changes = link.read_changes() if link.external_change() else {}
         except Exception as exc:  # noqa: BLE001 - the live link never stops the work with an error window
-            log.warning("Modifiche di QGIS non lette: %s", exc, exc_info=True)
-            return
+            return self._live_trouble(exc, link, stored)
+        self._live_cause, self._live_failures, self._rustgis_unread = None, 0, False
         if changes:
-            self._apply_qgis_changes(changes)
+            owner = reader.read_chunk  # the chunk whose drawings the file held: the edits are of that chunk
+            other = None if owner is None or owner == self._chunk_key() else \
+                next((c for c in self.doc.chunks if str(c.key) == owner), False)
+            held, self._qgis_hold = self._qgis_hold, self._qgis_hold or force
+            try:
+                if other is False:  # the chunk is gone (read as the active chunk's): never into another chunk
+                    with contextlib.suppress(OSError):  # said in the log; the rows are signed: nothing to wait for
+                        self._keep_chunk_changes(owner, changes, reader.crs, source)
+                else:
+                    self._apply_qgis_changes(changes, source, chunk=other)
+            finally:
+                self._qgis_hold = held
+        return True
 
-    def _apply_qgis_changes(self, changes: dict) -> list[str]:
+    def _read_other_chunk(self, link, key: str, source: str) -> tuple:
+        """The edits another program made to the drawings of the chunk ``key`` - the live GeoPackage holds them, the
+        active chunk is another -, read in that chunk's own system: by the reader kept from before the change of system
+        (:attr:`_live_previous`), else by one made for it (any reader finds in the file the record of the rows it
+        holds). ``(reader, changes)``: ``changes`` to apply to that chunk. The rows of tables in a system that is not
+        its own, or all of them when the chunk is no longer in the project, are read as they are and kept aside
+        (:meth:`_keep_chunk_changes`) in the read's own transaction, before they count as read: when they cannot be
+        kept they stay unread in the file. ``source``: the program that made them, for the log."""
+        from ..io.qgis_link import LiveLink
+
+        owner = next((c for c in self.doc.chunks if str(c.key) == key), None)
+        previous = self._live_previous if self._live_previous is not None and \
+            self._live_previous.path == link.path else None
+        crs = owner.crs if owner is not None else (previous.crs if previous is not None else link.crs)
+        if link.crs == (crs or ""):
+            reader = link
+        elif previous is not None and previous.crs == (crs or ""):
+            reader = previous
+        else:
+            reader = LiveLink(link.path.parent, crs)
+        def keep(kept: dict) -> None:  # in the read's transaction, before the rows count as read
+            self._keep_chunk_changes(key, kept, reader.crs, source, owner)
+
+        try:
+            if owner is None:
+                reader.read_changes(any_srs=True, before_commit=keep)
+                return reader, {}
+            changes = reader.read_changes()
+            if any(c.refused for c in changes.values()):
+                reader.read_changes(any_srs=True, before_commit=keep)
+            return reader, {t: c for t, c in changes.items() if not c.refused}
+        finally:
+            if reader is not link and reader is not previous:
+                reader.close()
+
+    def _live_trouble(self, exc: Exception, link, stored) -> bool:
+        """The live GeoPackage not read: the cause said in the log once, while it lasts (another program holding the
+        file a moment, or an error). The edits of the chunk before that fail to be read :data:`LIVE_READ_FAILURES`
+        times in a row, of any cause, the last not a lock (they would block the active chunk's drawings for good), are
+        kept aside - the whole file copied beside the project (:meth:`_keep_live_copy`) - and the active chunk's
+        drawings go on. Whether the file may be written now."""
+        lock = isinstance(exc, sqlite3.OperationalError) and ("locked" in str(exc) or "busy" in str(exc))
+        cause = "locked" if lock else f"{type(exc).__name__}: {exc}"
+        if cause != self._live_cause:
+            self._live_cause = cause
+            if lock:
+                log.info("Il file dei disegni dal vivo è occupato da un altro programma: lo leggo appena è libero")
+            else:
+                log.warning("Modifiche di QGIS non lette: %s", exc, exc_info=not isinstance(exc, sqlite3.Error))
+        self._live_failures += 1
+        if lock or stored is None or stored == self._chunk_key() or self._live_failures < LIVE_READ_FAILURES:
+            return False
+        return self._keep_live_copy(link, stored)
+
+    def _keep_live_copy(self, link, key: str) -> bool:
+        """The live GeoPackage, whose edits of the chunk ``key`` cannot be read, copied whole beside the project
+        (``<project>_modifiche_chunk_<key>_<time>.gpkg``, said in the log with the chunk and its system): those rows
+        go from the live file at its next write. SQLite's backup, waiting :data:`LIVE_COPY_WAIT` at most (this is the
+        interface's thread), else a plain copy of the file and of its write-ahead log. Whether the copy was made (not
+        made: tried again at the next failure)."""
+        owner = next((c for c in self.doc.chunks if str(c.key) == key), None)
+        folder = self.doc.path.parent if self.doc.path else self._qgis_dir()
+        stem = self.doc.path.stem if self.doc.path else "progetto"
+        path = folder / f"{stem}_modifiche_chunk_{key}_{time.strftime('%Y%m%d-%H%M%S')}.gpkg"
+        try:
+            try:
+                _copy_sqlite(link.path, path)
+            except sqlite3.Error as exc:
+                log.warning("Copia SQLite del file dei disegni dal vivo non riuscita (%s): copiato com'è", exc)
+                path.unlink(missing_ok=True)
+                shutil.copy2(link.path, path)
+                wal = Path(f"{link.path}-wal")
+                if wal.exists():
+                    shutil.copy2(wal, f"{path}-wal")
+        except (sqlite3.Error, OSError) as exc:
+            log.error("Modifiche del chunk %s non salvate in %s: %s", key, path, exc)
+            path.unlink(missing_ok=True)
+            return False
+        self._live_drop = key
+        self.log_pane.warning(tr("Le modifiche del chunk {0} ({1}) nel file dei disegni dal vivo non si leggono ({2}): "
+                                 "il file è copiato in {3}, e i disegni del chunk attivo vanno avanti.",
+                                 owner.label if owner is not None else key, owner.crs if owner is not None else "?",
+                                 self._live_cause, path))
+        return True
+
+    def _live_source(self, unread: bool = False) -> str:
+        """Who made the edits a read of the live GeoPackage finds, when nobody said: with ``unread`` (a pull of RustGIS
+        wrote into the file since the last read) RustGIS, or either ("both") when the link with QGIS is on too; else
+        RustGIS when its link alone is on, QGIS otherwise."""
+        qgis = self.a_qgis_live.isChecked()
+        if unread:
+            return "both" if qgis else "rustgis"
+        return "rustgis" if self.a_rustgis_live.isChecked() and not qgis else "qgis"
+
+    def _from(self, line: str) -> str:
+        """``line``, about an edit read from the live GeoPackage, with the program it came from (:attr:`_live_from`):
+        "Da QGIS", "Da RustGIS", or "Da QGIS o RustGIS" when either may have made it."""
+        if self._live_from == "rustgis":
+            return tr("Da RustGIS: {0}", line)
+        if self._live_from == "both":
+            return tr("Da QGIS o RustGIS: {0}", line)
+        return tr("Da QGIS: {0}", line)
+
+    def _apply_qgis_changes(self, changes: dict, source: str | None = None, chunk=None) -> list[str]:
         """The changes read from the GeoPackage (``LiveLink.read_changes``) into the drawings: one
         entry of Modifica > Annulla, a line of the log for each feature, the layers drawn again and
         the drawings stored in the chunk; the proxies of the units whose polygon changed are built
-        again, the sections whose trace moved cut again. Returns the lines."""
+        again, the sections whose trace moved cut again. ``source``: who made them, as
+        :meth:`_poll_qgis` says. ``chunk``: another chunk than the active one, whose drawings the
+        file held when they were made - its units and spot heights changed in its stored drawings
+        (the window shows another chunk: no undo, its proxies left as they were, said), the sections
+        (the project's) as always. Returns the lines."""
         from ..io import gpkg
 
-        srs = gpkg.srs_of(self.chunk.crs if self.chunk is not None else "")[0]
+        self._live_from = source or self._live_source()
+        other = chunk is not None and chunk is not self.chunk
+        said = self._from if not other else (lambda line: tr("{0}, nel chunk {1}", self._from(line), chunk.label))
+        had = {(u.attributes or {}).get(ID_FIELD) for u in self.units}
+        target = chunk if other else self.chunk
+        srs = gpkg.srs_of(target.crs if target is not None else "")[0]
         for table, ch in changes.items():
             if ch.refused:
-                self.log_pane.warning(tr("Da QGIS: il layer {0} è nel sistema di riferimento {1}, il progetto nel "
-                                         "{2}: le sue modifiche non sono state riprese", table, ch.refused[0],
-                                         ch.refused[1]))
+                self.log_pane.warning(said(tr("il layer {0} è nel sistema di riferimento {1}, il progetto nel {2}: "
+                                              "le sue modifiche non sono state riprese", table, ch.refused[0],
+                                              ch.refused[1])))
         proxies, recut, lines = [], [], []
-        if changes.get("unita") and not changes["unita"].refused:
-            lines += self._qgis_units(changes["unita"], srs, proxies)
-        if changes.get("quote") and not changes["quote"].refused:
-            lines += self._qgis_quote(changes["quote"], srs)
+        if other:  # its drawings, not the window's, for as long as its edits are applied
+            shown = (self.units, self.quote, self.probe_points)
+            self.units, self.quote, self.probe_points = self._chunk_drawings(chunk)
+        try:
+            if changes.get("unita") and not changes["unita"].refused:
+                lines += self._qgis_units(changes["unita"], srs, proxies)
+            if changes.get("quote") and not changes["quote"].refused:
+                lines += self._qgis_quote(changes["quote"], srs)
+        finally:
+            if other:
+                theirs = (self.units, self.quote, self.probe_points)
+                self.units, self.quote, self.probe_points = shown
+        unit_lines = len(lines)
         sections = bool(changes.get("sezioni") and not changes["sezioni"].refused)
         if sections:
             lines += self._qgis_sections(changes["sezioni"], srs, recut)
         if not lines:
             return []
-        self._store_drawings()
+        if other:
+            if unit_lines:
+                self._store_chunk_drawings(chunk, *theirs)
+            moved = [self._unit_name(u) for u, _before, polygon in proxies if polygon]
+            if moved and chunk.meta.get("proxies"):
+                self.log_pane.warning(tr("Le US {0} del chunk {1} sono cambiate: i loro proxy restano com'erano, "
+                                         "costruiscili di nuovo con il chunk attivo.", ", ".join(moved), chunk.label))
+        else:
+            self._store_drawings()
         if sections:
             self._save_sections() if self.sections else self._sections_file().unlink(missing_ok=True)
             self.sections_pane.set_sections(self.sections)
         self._update_pa_save_button()
         self._redraw_overlays()  # and the GeoPackage brought to the program's version of these rows
         self.setWindowModified(True)
-        if self.history is not None:
-            self.history.record(tr("Da QGIS: {0}", lines[0] if len(lines) == 1 else tr("{0} modifiche", len(lines))))
+        undone = lines if not other else lines[unit_lines:]  # another chunk's edits are not undone here
+        if self.history is not None and undone:
+            name = said if not other else self._from
+            self.history.record(name(undone[0] if len(undone) == 1 else tr("{0} modifiche", len(undone))))
         for line in lines:
-            self.log_pane.info(tr("Da QGIS: {0}", line))
-        added = {f.id for f in (changes.get("unita").added if changes.get("unita") else [])}
-        self._matrix_hint([u for u in self.units if (u.attributes or {}).get(ID_FIELD) in added])
-        self._follow_proxies(proxies)
+            self.log_pane.info(said(line))
+        if not other:
+            added = {f.id for f in (changes.get("unita").added if changes.get("unita") else [])} - had
+            self._matrix_hint([u for u in self.units if (u.attributes or {}).get(ID_FIELD) in added])
+            self._follow_proxies(proxies)
         self._qgis_waiting["sections"] += [s for s in recut if all(s is not o for o in self._qgis_waiting["sections"])]
         self._run_qgis_waiting()
         return lines
+
+    def _keep_chunk_changes(self, key: str, changes: dict, crs: str, source: str, chunk=None) -> None:
+        """Edits read from the live GeoPackage that cannot go into their chunk - no longer in the project (removed
+        before they were read), or ``chunk``, whose tables in the file are in another system than its own: never into
+        another chunk - every row changed or drawn there, and the identities deleted, kept in a GeoJSON file beside the
+        project (in the system of the rows, named in it), said in the log with the chunk and the system. Called in the
+        transaction of the read that found them (``before_commit`` of ``LiveLink.read_changes``): :class:`OSError`
+        when the file cannot be written, said in the log - the rows then stay unread in the live file."""
+        from shapely.geometry import mapping
+
+        systems = {f.srs_id for ch in changes.values() if not ch.refused for f in ch.changed + ch.added
+                   if f.srs_id is not None and f.srs_id > 0}
+        crs = f"EPSG:{systems.pop()}" if len(systems) == 1 else crs
+        features = []
+        for table, ch in changes.items():
+            if ch.refused:
+                continue
+            added = {id(f) for f in ch.added}
+            for f in ch.changed + ch.added:
+                values = {k: v for k, v in f.values.items() if k != "geom"}
+                features.append({"type": "Feature", "geometry": mapping(f.geometry) if f.geometry is not None else None,
+                                 "properties": {"tabella": table, "modifica": "aggiunta" if id(f) in added
+                                                else "modificata", **values}})
+            for pid, part in ch.deleted:
+                features.append({"type": "Feature", "geometry": None,
+                                 "properties": {"tabella": table, "modifica": "eliminata", ID_FIELD: pid,
+                                                PART_FIELD: part}})
+        if not features:
+            return
+        folder = self.doc.path.parent if self.doc.path else self._qgis_dir()
+        stem = self.doc.path.stem if self.doc.path else "progetto"
+        path = folder / f"{stem}_modifiche_chunk_{key}_{time.strftime('%Y%m%d-%H%M%S')}.geojson"
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"type": "FeatureCollection", "name": path.stem,
+                                        "crs": {"type": "name", "properties": {"name": crs}}, "features": features},
+                                       ensure_ascii=False, default=str), encoding="utf-8")
+        except OSError as exc:
+            log.error("Modifiche del chunk %s non salvate in %s: %s - restano nel file dei disegni dal vivo, non lette",
+                      key, path, exc)
+            raise
+        self._live_from = source
+        if chunk is None:
+            text = tr("modifiche del chunk {0}, che non è più nel progetto: non applicate a un altro chunk, salvate in "
+                      "{1}", key, path)
+        else:
+            text = tr("modifiche del chunk {0} in un sistema ({1}) che non è il suo ({2}): non applicate, salvate in "
+                      "{3}", chunk.label, crs, chunk.crs, path)
+        self.log_pane.warning(self._from(text))
 
     def _qgis_geometry(self, f, srs: int, name: str):
         """The 2D geometry of a row read back, None (said in the log) when it is in another reference
@@ -8840,12 +9452,12 @@ class MainWindow(QMainWindow):
         import shapely
 
         if f.srs_id is not None and f.srs_id != srs:
-            self.log_pane.warning(tr("Da QGIS: {0} è nel sistema di riferimento {1}, il progetto nel {2}: non ripresa",
-                                     name, f.srs_id, srs))
+            self.log_pane.warning(self._from(tr("{0} è nel sistema di riferimento {1}, il progetto nel {2}: non "
+                                                "ripresa", name, f.srs_id, srs)))
             return None
         g = f.geometry
         if g is None or g.is_empty:
-            self.log_pane.warning(tr("Da QGIS: {0} senza geometria leggibile, non ripresa", name))
+            self.log_pane.warning(self._from(tr("{0} senza geometria leggibile, non ripresa", name)))
             return None
         return shapely.force_2d(g) if g.has_z else g
 
@@ -8869,10 +9481,10 @@ class MainWindow(QMainWindow):
                 g, fixed = make_valid(g), True
             out += polygons(g)
         if not out:
-            self.log_pane.warning(tr("Da QGIS: la geometria di {0} non è valida e non è stata ripresa", name))
+            self.log_pane.warning(self._from(tr("la geometria di {0} non è valida e non è stata ripresa", name)))
             return None
         if fixed:
-            self.log_pane.info(tr("Da QGIS: la geometria di {0} non era valida ed è stata corretta", name))
+            self.log_pane.info(self._from(tr("la geometria di {0} non era valida ed è stata corretta", name)))
         return out[0] if len(out) == 1 else MultiPolygon(out)
 
     def _unit_from_row(self, u, values: dict) -> None:
@@ -8917,19 +9529,25 @@ class MainWindow(QMainWindow):
         return unit_label(u)
 
     def _qgis_units(self, ch, srs: int, proxies: list) -> list[str]:
-        """Units changed, drawn or deleted in QGIS; ``proxies`` gets ``(unit, (tipo, us, area) before,
-        polygon changed)`` of those whose proxy has to follow."""
+        """Units changed, drawn or deleted in QGIS (or RustGIS); ``proxies`` gets ``(unit, (tipo, us, area)
+        before, polygon changed)`` of those whose proxy has to follow."""
         from ..archaeo.stratigraphy import UnitPolygon
 
+        nameless = {"rustgis": tr("una US disegnata in RustGIS"),  # a unit drawn there, before it has a name
+                    "both": tr("una US disegnata in QGIS o RustGIS")}.get(self._live_from,
+                                                                          tr("una US disegnata in QGIS"))
         lines = []
         by_id = {(u.attributes or {}).get(ID_FIELD): u for u in self.units}
         parts: dict[str, list] = {}
         for f in ch.rows:
             parts.setdefault(f.id, []).append(f)
         edited = {f.fid for f in ch.changed}
-        added = [f.id for f in ch.added]
+        # an identity added there that the window holds already (the program started again, unsaved, between deleting
+        # the unit and a pull that brings it back) is a change of that unit, never a second one
+        held = [f.id for f in ch.added if f.id in by_id]
+        added = [f.id for f in ch.added if f.id not in by_id]
         gone = []
-        for pid in dict.fromkeys([f.id for f in ch.changed] + [k[0] for k in ch.deleted]):
+        for pid in dict.fromkeys([f.id for f in ch.changed] + held + [k[0] for k in ch.deleted]):
             u, rows = by_id.get(pid), sorted(parts.get(pid, []), key=lambda f: f.part)
             if u is None:  # deleted here meanwhile, changed there: it comes back
                 if rows:
@@ -8957,7 +9575,7 @@ class MainWindow(QMainWindow):
             lines.append(tr("{0} modificata", self._unit_name(u)))
         for pid in dict.fromkeys(added):
             rows = sorted(parts.get(pid, []), key=lambda f: f.part)
-            geom = self._qgis_polygon(rows, srs, tr("una US disegnata in QGIS"))
+            geom = self._qgis_polygon(rows, srs, nameless)
             if geom is None:
                 continue
             u = UnitPolygon(geom, attributes={ID_FIELD: pid}, sito=self.project_site() or None)
@@ -9032,8 +9650,8 @@ class MainWindow(QMainWindow):
             coords = list(g.coords) if g.geom_type == "LineString" else \
                 [c for part in getattr(g, "geoms", []) for c in getattr(part, "coords", [])]
             if len(coords) < 2 or coords[0][:2] == coords[-1][:2]:
-                self.log_pane.warning(tr("Da QGIS: la traccia di {0} non ha due estremi distinti, non ripresa",
-                                         s["label"] if s is not None else (label or tr("una sezione"))))
+                self.log_pane.warning(self._from(tr("la traccia di {0} non ha due estremi distinti, non ripresa",
+                                                    s["label"] if s is not None else (label or tr("una sezione")))))
                 continue
             p1, p2 = [float(coords[0][0]), float(coords[0][1])], [float(coords[-1][0]), float(coords[-1][1])]
             length = float(np.hypot(p2[0] - p1[0], p2[1] - p1[1]))
@@ -9062,8 +9680,9 @@ class MainWindow(QMainWindow):
 
     def _run_qgis_waiting(self) -> None:
         """The proxies to build again and the sections to cut again after edits made in QGIS, when no
-        step is running (one at a time: the next ones at the next look)."""
-        if self.runner.busy or self.chunk is None:
+        step is running (one at a time: the next ones at the next look) - not while edits are read in
+        a hurry (:meth:`_poll_qgis` ``force``)."""
+        if self.runner.busy or self.chunk is None or self._qgis_hold:
             return
         w = self._qgis_waiting
         if w["proxies"]:
@@ -9073,6 +9692,21 @@ class MainWindow(QMainWindow):
             items, w["sections"] = [s for s in w["sections"] if any(s is x for x in self.sections)], []
             if items:
                 self._recut_sections(items)
+
+    def _say_waiting_steps(self) -> None:
+        """The window closes: the proxies to build again and the sections to cut again after edits read from QGIS or
+        RustGIS that no step has done - held while those edits were read in a hurry, right before the question about
+        saving - named in the log (and in its file): they stay as they were."""
+        w = self._qgis_waiting
+        proxies = [str(name or pid) for pid, name, _params in w["proxies"]]
+        sections = [str(s.get("label") or "") for s in w["sections"] if any(s is x for x in self.sections)]
+        if proxies:
+            log.warning("Alla chiusura i proxy %s restano com'erano: le loro US sono cambiate con le ultime modifiche "
+                        "lette da QGIS o RustGIS. Costruiscili di nuovo alla prossima apertura.", ", ".join(proxies))
+        if sections:
+            log.warning("Alla chiusura le sezioni %s restano com'erano: le loro tracce sono cambiate con le ultime "
+                        "modifiche lette da QGIS o RustGIS. Tagliale di nuovo alla prossima apertura.",
+                        ", ".join(sections))
 
     # ---------------------------------------------------------------- proxies that follow their unit
     PROXY_BASES = ("plane", "dem", "thickness", "min")  # built by the program: built again the same way
@@ -9308,6 +9942,30 @@ class MainWindow(QMainWindow):
             return
         name = self.doc.path.stem if self.doc.path else "progetto"
         project = self._qgis_dir() / f"{name}_ppg.qgs"
+        rasters, extra_vectors = self._qgis_rasters(ch)
+
+        def job(p):
+            p(0.2, "Creazione del progetto QGIS")
+            rep = qgis_link.build_project(project, ch.crs if ch else "", files, rasters, title=name, qgis=q,
+                                          extra_vectors=extra_vectors)
+            qgis_link.open_in_qgis(project, q)
+            return rep
+
+        def done(rep):
+            self.a_qgis_live.setChecked(True)
+            bad = [v["name"] for v in rep["vectors"] + rep["rasters"] if not v["valid"]]
+            self.log_pane.info(tr("Progetto QGIS: {0} ({1} layer vettoriali aggiornati dal vivo, {2} raster)",
+                                  project, len(rep['vectors']), len(rep['rasters']))
+                               + (tr("; non validi: {0}", ', '.join(bad)) if bad else ""))
+            self.statusBar().showMessage(tr("QGIS aperto: i disegni si aggiornano in QGIS da soli, ogni secondo"),
+                                         15000)
+
+        self.run_task("Apertura in QGIS", job, done, refresh=False, save=False)
+
+    def _qgis_rasters(self, ch) -> tuple[list, list]:
+        """The rasters and the GeoPackage layers the QGIS project of ``ch`` shows: the orthophoto, the DEM
+        (shaded and plain), the multispectral and thermal products, the results of the raster calculator,
+        and those of the plugins (``qgis_providers``)."""
         rasters = []
         if ch is not None and ch.orthomosaic_path:
             rasters.append({"name": "Ortofoto", "path": str(ch.orthomosaic_path)})
@@ -9316,7 +9974,7 @@ class MainWindow(QMainWindow):
                             "opacity": 0.6, "hidden": True})
             rasters.append({"name": "DEM", "path": str(ch.dem_path), "hidden": True})
         extra_vectors = []
-        ms = self._ms_meta()
+        ms = (ch.meta.get("multispectral") if ch is not None else None) or {}
         if ch is not None and ms.get("reflectance") and (ch.data_dir / ms["reflectance"]).exists():
             names = list(ms.get("reflectance_bands") or [])
             idx = [names.index(b) + 1 for b in ("NIR", "Red", "Green") if b in names]
@@ -9356,24 +10014,746 @@ class MainWindow(QMainWindow):
                 extra_vectors += list(more_vectors or [])
             except Exception as exc:  # noqa: BLE001 - a plugin must not stop the export
                 log.warning("QGIS: layer di un plugin saltati: %s", exc)
+        return rasters, extra_vectors
+
+    # ---------------------------------------------------------------- RustGIS, both ways
+    # The drawings and products of the active chunk in the RustGIS that is open (io.rustgis_link), as with QGIS: the
+    # same live GeoPackage, RustGIS's edits pulled into it and applied by _poll_qgis. Every call to RustGIS runs in a
+    # thread of its own, one at a time (_rustgis_send), and its answer comes back here through a queued call; a start
+    # of the link, and the copies of rasters RustGIS cannot read, which may take minutes, are steps of the TaskRunner.
+    # Before the active chunk, its system or the project change, RustGIS's last edits are read into the chunk they
+    # belong to (_rustgis_leave), never waiting long without saying so and letting the user go on.
+    def _rustgis_busy(self) -> bool:
+        """Whether a call to RustGIS is under way: in the thread of its calls (or its answer not taken here yet), or a
+        start of the link."""
+        job = self._rustgis_job
+        return self._rustgis_starting or self._rustgis_answers > 0 or (job is not None and not job.done())
+
+    def _rustgis_send(self, call, done=None):
+        """``call()`` in the thread of RustGIS's calls - one at a time, never this one: an answer may take seconds, or
+        :data:`RUSTGIS_TIMEOUT` while RustGIS does not draw - then ``done(result)`` here, through a queued call (an
+        exception of ``call`` is said in the log instead). Returns the Future; once the window closed nothing runs, and
+        the Future says so."""
+        from concurrent.futures import Future
+
+        if self._rustgis_closed:
+            future = Future()
+            future.set_exception(RuntimeError("the window is closed"))
+            return future
+        if self._rustgis_thread is None:
+            self._rustgis_thread = _CallThread("rustgis")
+        future = self._rustgis_thread.submit(call)
+        self._rustgis_job = future
+        if done is not None:
+            self._rustgis_answer_to(future, done)
+        return future
+
+    def _rustgis_answer_to(self, future, done) -> None:
+        """``done(result)`` here once ``future`` (a call to RustGIS) ends, through a queued call; until then the link
+        counts as busy (:meth:`_rustgis_busy`)."""
+        self._rustgis_answers += 1
+        future.add_done_callback(lambda f: self.call_in_gui(self._rustgis_answered, f, done))
+
+    def _rustgis_answered(self, future, done) -> None:
+        from ..io import rustgis_link as rg
+
+        self._rustgis_answers -= 1
+        if self._rustgis_closed:
+            return
+        try:
+            result = future.result()
+        except rg.RustGisError as exc:  # RustGIS's own failure (a pull given up, RustGIS gone): said where it matters
+            log.debug("RustGIS: %s", exc)
+            return
+        except Exception as exc:  # noqa: BLE001 - the calls keep RustGIS's errors for done: this one is the program's
+            log.warning("RustGIS: %s", exc, exc_info=exc)
+            return
+        done(result)
+
+    def _rustgis_refusal(self, ch) -> str | None:
+        """Why RustGIS cannot show ``ch``: a local frame, or a system without an EPSG code. None when it can."""
+        from ..core import crs as crs_mod
+
+        if crs_mod.is_local(ch.crs):
+            return tr("Il chunk {0} è in un sistema locale: RustGIS mostra i layer solo in un sistema di coordinate "
+                      "con un codice EPSG. Georeferenzia il chunk, o scegli il suo sistema nel pannello GNSS, e "
+                      "riprova.", ch.label)
+        if crs_mod.epsg_code(ch.crs) is None:
+            return tr("Il sistema del chunk {0} ({1}) non ha un codice EPSG: RustGIS mostra i layer solo in un sistema "
+                      "che ne ha uno.", ch.label, ch.crs)
+        return None
+
+    def _rustgis_rasters(self, ch) -> list[dict]:
+        """The rasters the link gives RustGIS: those of the QGIS project of ``ch`` (:meth:`_qgis_rasters`), each once -
+        the shaded DEM is the way QGIS draws the DEM -, all hidden but the orthophoto (the first raster when there is
+        none): RustGIS draws a raster layer over every tile layer, and the orthophoto may be read by tiles."""
+        if ch is None:
+            return []
+        rasters, _ = self._qgis_rasters(ch)
+        out, seen = [], set()
+        for r in rasters:
+            path = str(r.get("path") or "")
+            name = str(r.get("name") or Path(path).stem)
+            if not path or r.get("hillshade") or (path, name) in seen:
+                continue
+            seen.add((path, name))
+            out.append({"path": path, "name": name, "hidden": True,
+                        **({"opacity": r["opacity"]} if r.get("opacity") is not None else {})})
+        ortho = str(ch.orthomosaic_path) if ch.orthomosaic_path else None
+        shown = next((r for r in out if r["path"] == ortho), out[0] if out else None)
+        if shown is not None:
+            shown["hidden"] = False
+        return out
+
+    def _rustgis_say(self, text: str, explicit: bool) -> None:
+        """What happened to the link: in a window when the user asked for it (``explicit``), else in the log and the
+        status bar - the link follows the active chunk by itself."""
+        if explicit:
+            self._rustgis_window(lambda: self._warn(text))
+        else:
+            self.log_pane.warning(text)
+            self.statusBar().showMessage(text, 15000)
+
+    def _rustgis_window(self, show) -> None:
+        """``show()`` - a window about the link - now, or, while the window asks whether to wait for RustGIS (an answer
+        of RustGIS taken meanwhile), once that question is answered: never on top of it."""
+        if self._rustgis_asking:
+            self._rustgis_later.append(show)
+        else:
+            show()
+
+    def _rustgis_unlinked(self) -> None:
+        """The live action with RustGIS off (its toggle stops the looks): the link went off by itself - RustGIS not
+        there, a chunk it cannot show -, which the project does not count as a change of it."""
+        if self.a_rustgis_live.isChecked():
+            self._links_quiet += 1
+            try:
+                self.a_rustgis_live.setChecked(False)
+            finally:
+                self._links_quiet -= 1
+
+    def _remember_links(self) -> None:
+        """Which live links are on, kept in the project: they are turned on again when it opens (and only they - the
+        live GeoPackage may be there for RustGIS alone). Changed by the user, the project has a change to save; set by
+        the program (a project opened, a link that went off by itself), not."""
+        if self.doc is None:
+            return
+        links = {"qgis": self.a_qgis_live.isChecked(), "rustgis": self.a_rustgis_live.isChecked()}
+        if self.doc.meta.get("live_links") != links:
+            self.doc.meta["live_links"] = links
+            if not self._links_quiet:
+                self.setWindowModified(True)
+
+    def open_in_rustgis(self) -> None:
+        """QGIS > Apri in RustGIS: the drawings and the products of the active chunk in the RustGIS that is open, and
+        what is drawn, changed or deleted there back here, as with QGIS (:mod:`..io.rustgis_link`). The live
+        GeoPackage of the QGIS link written, then, in the background, RustGIS given the chunk's tables and the rasters
+        of its QGIS project (:meth:`_rustgis_rasters`) in a group named after the chunk, and the live action checked.
+        A chunk in a local frame, or in a system without an EPSG code, is refused, said; RustGIS not on this computer,
+        where to download it. RustGIS not running, or not letting the program in, is started and waited for
+        (:data:`RUSTGIS_WAIT` seconds, in the background); still off, the window says where the box to tick is - *Let
+        your Agents Control RustGIS*, the user's consent, which the program never ticks. Linked already: given again,
+        RustGIS's edits read first."""
+        from ..io import rustgis_link as rg
+
+        ch = self.chunk
+        if ch is None or self._rustgis_closed:
+            return
+        why = self._rustgis_refusal(ch)
+        if why is not None:
+            self._rustgis_unlinked()
+            self._warn(why)
+            return
+        if self.runner.busy or self._rustgis_starting:
+            self.statusBar().showMessage(tr("Aspetta che finisca l'elaborazione in corso"), 6000)
+            if self._rustgis is None:
+                self._rustgis_unlinked()
+            return
+        if rg.endpoint() is None:
+            found = rg.find_rustgis()
+            if found is None or found.app is None:
+                self._rustgis_unlinked()
+                self._warn(tr("RustGIS non è su questo computer. Scaricalo da {0} (versione {1} o successiva), aprilo "
+                              "e spunta «Let your Agents Control RustGIS» nelle impostazioni del suo AI Assistant; poi "
+                              "riprova.", rg.RELEASES_URL, rg.MIN_TEXT))
+                return
+        if self._rustgis is not None:  # linked already: RustGIS gets the chunk again, its edits read first
+            self._rustgis_leave(then=lambda: self._rustgis_start(ch, explicit=True) if ch is self.chunk else None)
+            return
+        self._rustgis_start(ch, explicit=True)
+
+    def _rustgis_start(self, ch, explicit: bool, transport=None) -> None:
+        """The link started for ``ch``, in the background (a step of the TaskRunner, its progress following the copy of
+        a raster RustGIS cannot read, which may take minutes, and its Annulla stopping it): the live GeoPackage written
+        here first, then RustGIS reached - with ``transport`` when the window reached it already, else started and
+        waited for when it does not answer (:func:`_rustgis_wait`) - and given the chunk
+        (:meth:`..io.rustgis_link.RustGisLink.start`), every answer waited for :data:`RUSTGIS_START_TIMEOUT` seconds
+        at most; the looks after wait less (:data:`RUSTGIS_TIMEOUT`). ``explicit``: asked for by the user - the progress
+        window, and what goes wrong said in a window; else the link follows the active chunk by itself, in the status
+        bar and the log."""
+        from ..io import rustgis_link as rg
+
+        if not self._export_qgis_layers(force=True):
+            text = tr("Non riesco a scrivere i disegni per RustGIS in {0}: vedi il log.", self._qgis_dir())
+            if explicit:
+                self._rustgis_unlinked()
+                self._rustgis_say(text, explicit)
+            else:  # the file held a moment, or another chunk's edits in it read first: the next look tries again
+                self._rustgis_note(text)
+            return
+        live, rasters = self._qgis_live_link(), self._rustgis_rasters(ch)
+        label, crs, data_dir, key = ch.label, ch.crs, ch.data_dir, ch.key
+        self._rustgis_gen += 1
+        gen = self._rustgis_gen
+        self._rustgis_starting = True
 
         def job(p):
-            p(0.2, "Creazione del progetto QGIS")
-            rep = qgis_link.build_project(project, ch.crs if ch else "", files, rasters, title=name, qgis=q,
-                                          extra_vectors=extra_vectors)
-            qgis_link.open_in_qgis(project, q)
-            return rep
+            try:  # cancelled: said (the runner calls nothing back for a step cancelled)
+                reached = ("ok", transport, None) if transport is not None else _rustgis_wait(p, RUSTGIS_WAIT)
+                if reached[0] != "ok":
+                    return {"reach": reached}
+                p(0.2, tr("Il chunk {0} in RustGIS", label))
+                reached[1].timeout = RUSTGIS_START_TIMEOUT
+                link = rg.RustGisLink(live, reached[1], label, crs, data_dir=data_dir, chunk_key=key)
+                out = link.start(rasters, progress=p.sub(0.2, 0.8))
+            except Cancelled:
+                return {"cancelled": True}
+            except rg.RustGisError as exc:
+                return {"error": exc}
+            reached[1].timeout = RUSTGIS_TIMEOUT  # once it runs, a look that waits longer is RustGIS not drawing
+            return {"link": link, "out": out}
 
-        def done(rep):
-            self.a_qgis_live.setChecked(True)
-            bad = [v["name"] for v in rep["vectors"] + rep["rasters"] if not v["valid"]]
-            self.log_pane.info(tr("Progetto QGIS: {0} ({1} layer vettoriali aggiornati dal vivo, {2} raster)",
-                                  project, len(rep['vectors']), len(rep['rasters']))
-                               + (tr("; non validi: {0}", ', '.join(bad)) if bad else ""))
-            self.statusBar().showMessage(tr("QGIS aperto: i disegni si aggiornano in QGIS da soli, ogni secondo"),
-                                         15000)
+        def failed(summary: str, details: str) -> None:
+            self._rustgis_starting = False
+            self._rustgis_unlinked()
+            if explicit:
+                self._rustgis_window(lambda: self._error(summary, details))
+            else:
+                self.log_pane.warning(summary)
 
-        self.run_task("Apertura in QGIS", job, done, refresh=False, save=False)
+        if not self.runner.run("Collegamento con RustGIS", job,
+                               lambda result: self._rustgis_started(ch, gen, result, explicit), failed,
+                               quiet=not explicit):
+            self._rustgis_starting = False  # another step runs: the user asks again, or the next look starts it
+            if explicit:
+                self._rustgis_unlinked()
+
+    def _rustgis_started(self, ch, gen: int, result: dict, explicit: bool) -> None:
+        """A start of the link done: the link kept for ``ch``, the live action checked and the looks started; what
+        went wrong said. A link started for a chunk no longer active, or after the link was turned off, goes from
+        RustGIS at once."""
+        from ..io import rustgis_link as rg
+
+        self._rustgis_starting = False
+        link = result.get("link")
+        if link is not None and (self._rustgis_closed or gen != self._rustgis_gen or ch is not self.chunk
+                                 or self._rustgis is not None):
+            self._rustgis_send(lambda: link.stop(withdraw=True), lambda _r: self._rustgis_stopped())
+            return
+        if result.get("cancelled"):
+            self._rustgis_unlinked()
+            self.log_pane.info(tr("Apri in RustGIS: annullato"))
+            return
+        if result.get("reach") is not None:
+            self._rustgis_unlinked()
+            self._rustgis_unreached(result["reach"], explicit)
+            return
+        error = result.get("error")
+        if error is not None:
+            self._rustgis_unlinked()
+            if isinstance(error, rg.RustGisTooOld):
+                self._rustgis_unreached(("old", str(error)), explicit)
+                return
+            names = ", ".join([title for title, _ in LIVE_TABLES.values()]
+                              + [r["name"] for r in self._rustgis_rasters(ch)])
+            if isinstance(error, rg.RustGisOff):  # it answered the greeting, then stopped: closed meanwhile
+                text = tr("RustGIS ha smesso di rispondere durante l'avvio e il collegamento non è partito. Se in "
+                          "RustGIS i layer {0} ci sono due volte, togli a mano quelli in più; poi riprova con QGIS > "
+                          "Apri in RustGIS.", names)
+            elif isinstance(error, rg.RustGisBusy):  # what it added before it stopped answering stays there
+                text = tr("RustGIS non rispondeva e il collegamento non è partito. Se in RustGIS i layer {0} ci sono "
+                          "due volte, togli a mano quelli in più; poi riprova con QGIS > Apri in RustGIS.", names)
+            else:
+                text = tr("RustGIS non ha preso il chunk {0}: {1}", ch.label, error)
+            self._rustgis_say(text, explicit)
+            return
+        out = result["out"]
+        self._rustgis, self._rustgis_chunk = link, ch
+        # the first look sends what was drawn here while RustGIS was loading the chunk (nothing, most often)
+        self._rustgis_wrote, self._rustgis_again, self._rustgis_activated = True, False, False
+        self._rustgis_rasters_due, self._rustgis_said, self._rustgis_noted = False, {}, ""
+        self._rustgis_stamp = self._live_stamp()
+        self._rustgis_last_pull, self._rustgis_refused_at = time.monotonic(), float("-inf")
+        self._rustgis_set_waiting(False)
+        self.log_pane.info(tr("RustGIS {0}: il chunk {1} è collegato nei due sensi ({2} layer, {3} raster)",
+                              out["version"], ch.label, out["layers"], out["rasters"]))
+        for name, why in (out.get("refused") or {}).items():
+            self.log_pane.warning(tr("RustGIS non ha preso il raster {0}: {1}", name, why))
+        if not self.a_rustgis_live.isChecked():
+            self.a_rustgis_live.setChecked(True)  # the looks start
+        else:
+            self._rustgis_poll.start()
+        if explicit:
+            self.statusBar().showMessage(tr("RustGIS aperto: i disegni vanno e vengono da soli, ogni 2 secondi"), 15000)
+
+    def _rustgis_unreached(self, reached: tuple, explicit: bool) -> None:
+        """RustGIS not reached (:func:`_rustgis_reach`): said, with what to do."""
+        from ..io import rustgis_link as rg
+
+        if reached[0] == "old":
+            text = tr("RustGIS è troppo vecchio per il collegamento: serve la versione {0} o successiva ({1}).",
+                      rg.MIN_TEXT, rg.RELEASES_URL)
+        elif reached[0] == "busy":
+            text = tr("RustGIS non risponde: è ridotto a icona, nascosto, o ha una sua finestra aperta. Riportalo in "
+                      "primo piano e riprova con QGIS > Apri in RustGIS.")
+        elif explicit:
+            text = tr("RustGIS non lascia entrare il programma: nelle impostazioni del suo AI Assistant spunta «Let "
+                      "your Agents Control RustGIS» (una volta sola: è il tuo consenso, il programma non lo cambia "
+                      "mai), poi riprova con QGIS > Apri in RustGIS.")
+        else:  # the link following the active chunk, or a project opened: RustGIS closed, most often
+            text = tr("RustGIS non è aperto, o non lascia entrare il programma: il collegamento dal vivo si è spento. "
+                      "Per riprenderlo: QGIS > Apri in RustGIS.")
+        self._rustgis_say(text, explicit)
+
+    def _rustgis_live_toggled(self, on: bool) -> None:
+        """The live link with RustGIS on or off. On: the looks every 2 s, and the link started when there is none
+        (:meth:`open_in_rustgis`). Off: RustGIS's last edits read, then the link stopped - RustGIS keeps its layers.
+        The edits of the live GeoPackage are read while this link or the one with QGIS is on; the project remembers
+        which ones are on."""
+        if on:
+            self._rustgis_poll.start()
+            if self._rustgis is None and not self._rustgis_busy():
+                self.open_in_rustgis()
+        else:
+            self._rustgis_gen += 1  # a start under way is not kept
+            self._rustgis_poll.stop()
+            self._rustgis_leave(withdraw=False)
+            self._rustgis_set_waiting(False)
+        if self._live_on():
+            self._qgis_poll.start()
+            self._schedule_qgis()
+        else:
+            self._qgis_poll.stop()
+        self._remember_links()
+
+    def _rustgis_quietly_on(self) -> None:
+        """The live link with RustGIS on again for a project opened that had it on: without asking - RustGIS reached in
+        the background when the window is idle, the link turned off and said in the log when it is not there."""
+        self.a_rustgis_live.blockSignals(True)
+        self.a_rustgis_live.setChecked(True)
+        self.a_rustgis_live.blockSignals(False)
+        self._rustgis_poll.start()
+        self._qgis_poll.start()
+        self._schedule_qgis()
+        QTimer.singleShot(0, self._poll_rustgis)
+
+    def _rustgis_set_waiting(self, on: bool) -> None:
+        """*In attesa di RustGIS* in the status bar while RustGIS does not answer; taken away when it does again."""
+        text = tr("In attesa di RustGIS: non risponde (ridotto a icona, nascosto, o una sua finestra aperta); il "
+                  "collegamento riprova da solo")
+        if on:
+            self.statusBar().showMessage(text)
+        elif self._rustgis_waiting and self.statusBar().currentMessage() == text:
+            self.statusBar().clearMessage()
+        self._rustgis_waiting = on
+
+    def _app_state_changed(self, state) -> None:
+        """The program back to the front - the user comes back from RustGIS: what was edited there read at once."""
+        if state == Qt.ApplicationState.ApplicationActive and self._rustgis is not None:
+            self._rustgis_activated = True
+            QTimer.singleShot(0, self._poll_rustgis)
+
+    def _rustgis_products_changed(self) -> None:
+        """The window shows the chunk again (products built, rebuilt or changed): the rasters RustGIS has compared with
+        their files at the next look."""
+        if self._rustgis is not None:
+            self._rustgis_rasters_due = True
+
+    def _rustgis_check_rasters(self) -> None:
+        """A raster RustGIS has from the link is another file now - rebuilt, patched, a version made active, undone:
+        RustGIS gets the rasters again at the next look (:meth:`..io.rustgis_link.RustGisLink.update_rasters`, which
+        asks RustGIS nothing when nothing changed). Asked when the window shows a raster again and before each look;
+        never while a call of the link runs (it may be changing them)."""
+        link = getattr(self, "_rustgis", None)  # None too while the window is being built
+        if link is not None and not self._rustgis_busy() and link.rasters_changed():
+            self._rustgis_rasters_due = True
+
+    def _poll_rustgis(self) -> None:
+        """Every 2 s while the live link with RustGIS is on, and when the program comes back to the front: a look at
+        RustGIS in the thread of its calls (:func:`_rustgis_round`), one at a time - its edits pulled into the live
+        GeoPackage and applied here as QGIS's are, the program's rows sent, the rasters whose products changed given
+        again. Not while a step runs (it may be changing the chunk). With no link (the active chunk, its system or the
+        project changed), the link started again for the active chunk (:meth:`_rustgis_resume`); one that shows a
+        chunk the window no longer does is stopped first."""
+        if self._rustgis_closed or not self.a_rustgis_live.isChecked() or self._rustgis_busy() or self.runner.busy:
+            return
+        link, ch = self._rustgis, self.chunk
+        if link is None:
+            self._rustgis_resume()
+            return
+        if ch is None or ch is not self._rustgis_chunk or ch.crs != link.crs:
+            self._rustgis_drop(tr("Il collegamento con RustGIS riparte: il chunk, o il suo sistema, è cambiato. Ciò "
+                                  "che è stato modificato in RustGIS e non ancora letto resta nei suoi layer, che non "
+                                  "sono più collegati."))
+            return
+        self._rustgis_check_rasters()
+        now = time.monotonic()
+        ask = {"activated": self._rustgis_activated, "wrote": self._rustgis_wrote, "again": self._rustgis_again,
+               "due": now - self._rustgis_last_pull >= RUSTGIS_PULL_EVERY,
+               "pulling": now - self._rustgis_refused_at >= RUSTGIS_PULL_EVERY,
+               "rasters": self._rustgis_rasters(ch) if self._rustgis_rasters_due else None}
+        self._rustgis_activated = self._rustgis_wrote = self._rustgis_again = self._rustgis_rasters_due = False
+        self._rustgis_send(lambda: _rustgis_round(link, **ask), lambda out: self._rustgis_looked(link, ask, out))
+
+    def _rustgis_looked(self, link, ask: dict, out: dict) -> None:
+        """What a look at RustGIS brought (:func:`_rustgis_round`): its edits applied (:meth:`_poll_qgis`), what is
+        still to do kept for the next look, the copies of rasters RustGIS cannot read written in a step of their own,
+        what RustGIS did not take said once, RustGIS not answering said in the status bar, RustGIS gone the link
+        stopped."""
+        if link is not self._rustgis:
+            return  # stopped meanwhile: what it read was taken when it stopped
+        error = out["error"]
+        kind, text = error if error is not None else (None, "")
+        if out["pulled"] is not None:
+            self._rustgis_last_pull = time.monotonic()
+            if any(any(counts) for counts in out["pulled"].values()):
+                self._rustgis_unread = True  # until the live GeoPackage is read: those rows are RustGIS's
+                self._poll_qgis(source="rustgis")
+        elif ask["activated"]:
+            self._rustgis_activated = True
+        if out["pushed"]:
+            self._rustgis_again = True  # rows sent: more may wait (a send larger than a script goes in pieces)
+        elif out["pushed"] is None and (ask["wrote"] or ask["again"]) and out.get("pending"):
+            self._rustgis_wrote = True  # not sent (RustGIS did not answer, or its edits are to be read first): later
+        if out["rasters"] is None and ask["rasters"] is not None:
+            self._rustgis_rasters_due = True
+        elif out["rasters"]:
+            self._rustgis_rasters_said(out["rasters"])
+            if out["rasters"].get("copies"):
+                self._rustgis_write_copies(link, out["rasters"]["copies"])
+        self._rustgis_say_aside(out.get("aside") or {})
+        self._rustgis_set_waiting(kind == "busy")
+        if kind == "off":
+            self._rustgis_lost(text)
+        elif kind == "refused":
+            self._rustgis_refused_at = time.monotonic()
+            self._rustgis_note(tr("RustGIS ha rifiutato: {0}", text))
+        elif kind == "error":
+            self._rustgis_note(tr("Collegamento con RustGIS: {0}", text))
+
+    def _rustgis_write_copies(self, link, paths: list) -> None:
+        """The copies RustGIS reads of rasters it cannot read as they are, written in a step of the TaskRunner - its
+        progress following them, its Annulla stopping them; minutes for a large one, never in the thread a change of
+        chunk may wait for -, then given to RustGIS at the next look. Another step running: at a later look."""
+        if self.runner.busy:
+            self._rustgis_rasters_due = True
+            return
+
+        def done(failed: dict) -> None:
+            if link is self._rustgis:
+                self._rustgis_rasters_due = True  # the next look gives them, or says why it cannot
+
+        self.runner.run("Copie dei raster per RustGIS", lambda p: link.write_copies(paths, progress=p), done,
+                        lambda summary, details: self.log_pane.warning(summary), quiet=True)
+
+    def _rustgis_note(self, text: str) -> None:
+        """A problem of the link said in the log and the status bar, once while it lasts."""
+        if text != self._rustgis_noted:
+            self._rustgis_noted = text
+            self.log_pane.warning(text)
+            self.statusBar().showMessage(text, 15000)
+
+    def _feature_name(self, table: str, pid: str) -> str:
+        """A feature of a two-way table of the live GeoPackage by its name in the window (a unit, a spot height, a
+        section); its identity when the window has none."""
+        if table == "unita":
+            found = next((u for u in self.units if (u.attributes or {}).get(ID_FIELD) == pid), None)
+            if found is not None:
+                return self._unit_name(found)
+        elif table == "quote":
+            found = next((q for q in self.quote if q.get(ID_FIELD) == pid), None)
+            if found is not None:
+                return self._quota_name(found)
+        elif table == "sezioni":
+            found = next((s for s in self.sections if s.get(ID_FIELD) == pid), None)
+            if found is not None:
+                return str(found.get("label") or pid)
+        return str(pid)
+
+    def _rustgis_say_aside(self, aside: dict) -> None:
+        """The features RustGIS did not take (:attr:`..io.rustgis_link.RustGisLink.set_aside`: a rule of its layer,
+        too large for a script), said in the log once each time they change, by layer and name."""
+        for table in sorted(set(aside) | set(self._rustgis_said)):
+            now = list(aside.get(table) or [])
+            if now == self._rustgis_said.get(table, []):
+                continue
+            self._rustgis_said[table] = now
+            if not now:
+                continue
+            names = [self._feature_name(table, pid) for pid in now]
+            shown = ", ".join(names[:10]) + (tr(" e altri {0}", len(names) - 10) if len(names) > 10 else "")
+            text = tr("RustGIS non ha accettato {0} nel layer {1}: restano solo qui finché non li modifichi.", shown,
+                      LIVE_TABLES.get(table, (table,))[0])
+            self.log_pane.warning(text)
+            self.statusBar().showMessage(text, 15000)
+
+    def _rustgis_rasters_said(self, out: dict) -> None:
+        """The rasters a look gave RustGIS again, took away or could not give, in the log."""
+        names = list(dict.fromkeys([*(out.get("given") or []), *(out.get("taken") or [])]))
+        if names:
+            self.log_pane.info(tr("RustGIS: raster aggiornati ({0})", ", ".join(names)))
+        for name, why in (out.get("refused") or {}).items():
+            self.log_pane.warning(tr("RustGIS non ha preso il raster {0}: {1}", name, why))
+
+    def _rustgis_resume(self) -> None:
+        """The link started again for the active chunk without asking - it changed, or its system, or the project,
+        while the link was on: when no dialog waits, RustGIS reached in the thread of its calls, then given the chunk
+        (:meth:`_rustgis_start`). A chunk RustGIS cannot show turns the link off, said in the log; RustGIS not
+        answering waits for the next look; RustGIS gone turns the link off, said."""
+        ch = self.chunk
+        if ch is None or self._rustgis_closed or QApplication.activeModalWidget() is not None:
+            return
+        why = self._rustgis_refusal(ch)
+        if why is not None:
+            self._rustgis_unlinked()
+            self._rustgis_say(why, explicit=False)
+            return
+        gen = self._rustgis_gen
+        self._rustgis_send(lambda: _rustgis_reach(5.0), lambda reached: self._rustgis_reached(ch, gen, reached))
+
+    def _rustgis_reached(self, ch, gen: int, reached: tuple) -> None:
+        if (gen != self._rustgis_gen or ch is not self.chunk or self._rustgis is not None
+                or not self.a_rustgis_live.isChecked() or self.runner.busy):
+            return  # the next look starts it for the chunk active then
+        if reached[0] == "ok":
+            self._rustgis_start(ch, explicit=False, transport=reached[1])
+        elif reached[0] == "busy":
+            self._rustgis_set_waiting(True)
+        else:
+            self._rustgis_unlinked()
+            self._rustgis_unreached(reached, explicit=False)
+
+    def _rustgis_lost(self, why: str) -> None:
+        """RustGIS no longer answers (closed, or its agent control taken away): the link stopped, said."""
+        log.info("RustGIS: %s", why)
+        link, self._rustgis, self._rustgis_chunk = self._rustgis, None, None
+        if link is not None:
+            self._rustgis_send(link.stop, lambda _r: None)
+        self._rustgis_unlinked()
+        text = tr("RustGIS non risponde più (è stato chiuso, o il controllo degli agenti è stato tolto): il "
+                  "collegamento dal vivo si è fermato, e ciò che è stato modificato lì dopo l'ultima lettura non è "
+                  "arrivato qui. Per ripartire: QGIS > Apri in RustGIS.")
+        self._rustgis_window(lambda: self._warn(text))
+
+    def _rustgis_drop(self, why: str) -> None:
+        """The link stopped without reading RustGIS's edits - the window shows another chunk already: they could not go
+        into theirs - nor taking its layers away, so that nothing edited there is lost; given up first (a look under
+        way writes nothing), said in the log."""
+        link, self._rustgis, self._rustgis_chunk = self._rustgis, None, None
+        if link is not None:
+            link.abandon()
+            self._rustgis_send(link.stop, lambda _r: self._rustgis_stopped())
+            self.log_pane.warning(why)
+
+    def _rustgis_wait_for(self, future) -> bool:
+        """A call to RustGIS (``future``) waited for here - the window cannot change chunk, system or project before
+        RustGIS's last edits are in -, the wait cursor and a line of the status bar saying so, at most
+        :data:`RUSTGIS_LEAVE_WAIT` seconds at a time; past them a choice: wait again, or go on without them. A window
+        that an answer of RustGIS would open meanwhile (one taken by the choice's own loop) waits until the choice is
+        answered (:meth:`_rustgis_window`). Whether the call ended."""
+        from concurrent.futures import TimeoutError as Timeout
+
+        text = tr("Lettura delle ultime modifiche di RustGIS...")
+        while True:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            self.statusBar().showMessage(text)
+            self.statusBar().repaint()
+            try:
+                future.result(timeout=RUSTGIS_LEAVE_WAIT)
+                return True
+            except Timeout:
+                pass
+            except Exception:  # noqa: BLE001 - it ended; what went wrong is for the caller
+                return True
+            finally:
+                QApplication.restoreOverrideCursor()
+                if self.statusBar().currentMessage() == text:
+                    self.statusBar().clearMessage()
+            self._rustgis_asking = True
+            try:
+                answer = choice(self, "question", "RustGIS",
+                                tr("RustGIS non ha ancora dato le ultime modifiche fatte lì ({0} secondi). Aspettare "
+                                   "ancora, o continuare senza? Continuando, ciò che è stato modificato in RustGIS "
+                                   "dopo l'ultima lettura resta nei suoi layer, che non sono più collegati: niente si "
+                                   "perde.", int(RUSTGIS_LEAVE_WAIT)),
+                                [tr("Aspetta ancora"), tr("Continua senza")], cancel=None)
+            finally:
+                self._rustgis_asking = False
+                later, self._rustgis_later = self._rustgis_later, []
+                for show in later:
+                    show()
+            if answer != 0:
+                return False
+
+    def _rustgis_give_up(self, link) -> None:
+        """The window stops waiting for ``link``: given up (a pull still under way writes nothing, a send sends nothing:
+        :meth:`..io.rustgis_link.RustGisLink.abandon`), then what a pull wrote before that read at once into the active
+        chunk, whose edits they are."""
+        link.abandon()
+        self._read_live_now()
+
+    def _read_live_now(self) -> bool:
+        """The live GeoPackage read now, whatever the window is doing (:meth:`_poll_qgis` ``force``), the rows a pull of
+        RustGIS wrote in it named after RustGIS - after either program when the link with QGIS is on too -; read again a
+        moment later while another program holds the file (QGIS saving), :data:`RUSTGIS_READ_TRIES` times in all.
+        Whether it was read."""
+        source = "both" if self.a_qgis_live.isChecked() else "rustgis"
+        for attempt in range(RUSTGIS_READ_TRIES):
+            if attempt:
+                time.sleep(0.25)
+            if self._poll_qgis(force=True, source=source):
+                return True
+        return False
+
+    def _rustgis_unanswered(self) -> bool:
+        """Whether RustGIS is not to be waited for now: it did not answer at the last look or at the last pull (the
+        status bar says so), or the user chose to go on without its last edits and that pull is still under way - in
+        one action the window never waits for RustGIS, nor asks, twice."""
+        unwaited = self._rustgis_unwaited
+        if unwaited is not None and unwaited.done():
+            self._rustgis_unwaited = unwaited = None
+        return self._rustgis_waiting or unwaited is not None
+
+    def _rustgis_take_edits(self, leaving: bool = False) -> bool:
+        """RustGIS's edits not read yet brought into the active chunk now, whatever the window is doing: a pull in the
+        thread of RustGIS's calls, after the look under way, waited for (:meth:`_rustgis_wait_for`: the wait cursor, a
+        line of the status bar, a choice after :data:`RUSTGIS_LEAVE_WAIT` seconds), and what it wrote into the live
+        GeoPackage read as at every look. Before a question that may stop the action (New, Open, Import, closing the
+        window: ``leaving`` False) RustGIS is never given up - the action may be cancelled, and the link goes on, the
+        pull too when the user did not wait for it (:meth:`_rustgis_pulled_late`) -; at the leave itself
+        (``leaving``: another chunk active, another system, another project, the link off) it is given up once it is
+        not to be waited for: a pull under way then writes nothing, and RustGIS keeps what was edited there. Not
+        waited for at all when RustGIS is not to be (:meth:`_rustgis_unanswered`): a pull RustGIS did not answer, or
+        the user's choice not to wait, holds for the rest of the action. Not read when the window shows another chunk
+        than the link's already. Returns whether everything RustGIS had was read here."""
+        from ..io import rustgis_link as rg
+
+        link = self._rustgis
+        if link is None:
+            return True
+        if self.chunk is not self._rustgis_chunk:
+            if leaving:
+                link.abandon()
+            return False
+        if self._rustgis_unanswered():
+            self._rustgis_not_waited(link, leaving)
+            return False
+        pull = self._rustgis_send(lambda: _rustgis_pull(link))
+        if not self._rustgis_wait_for(pull):
+            self._rustgis_unwaited = pull
+            self._rustgis_answer_to(pull, lambda counts: self._rustgis_pulled_late(link, counts))
+            self._rustgis_set_waiting(True)
+            self._rustgis_not_waited(link, leaving)
+            return False
+        try:
+            counts = pull.result()
+        except (rg.RustGisBusy, rg.RustGisOff) as exc:  # not answering: not waited for again in this action
+            log.warning("RustGIS: ultime modifiche non lette: %s", exc)
+            self._rustgis_set_waiting(True)
+            return False
+        except Exception as exc:  # noqa: BLE001 - refusing, the file held: its edits stay there
+            log.warning("RustGIS: ultime modifiche non lette: %s", exc)
+            return False
+        if any(any(c) for c in (counts or {}).values()):
+            self._rustgis_unread = True  # until the live GeoPackage is read: those rows are RustGIS's
+        return self._read_live_now()
+
+    def _rustgis_not_waited(self, link, leaving: bool) -> None:
+        """RustGIS not waited for: at the leave (``leaving``) the link given up (:meth:`_rustgis_give_up`); before a
+        question that may stop the action, the link left as it is. Either way what a pull wrote into the live
+        GeoPackage and the window has not read yet is read now."""
+        if leaving:
+            self._rustgis_give_up(link)
+        elif self._rustgis_unread:
+            self._read_live_now()
+
+    def _rustgis_pulled_late(self, link, counts: dict) -> None:
+        """A pull the window stopped waiting for, answered at last: RustGIS is waited for again, and, when the link
+        goes on (the action that asked for its edits was cancelled), what the pull wrote into the live GeoPackage is
+        read now, named after RustGIS."""
+        if self._rustgis_unwaited is not None and self._rustgis_unwaited.done():
+            self._rustgis_unwaited = None  # that pull no longer counts
+        if link is not self._rustgis:
+            return
+        self._rustgis_set_waiting(False)
+        if any(any(c) for c in (counts or {}).values()):
+            self._rustgis_unread = True
+            self._poll_qgis(source="rustgis")
+
+    def _rustgis_leave(self, withdraw: bool = True, then=None, unsaved_stay: bool = False) -> None:
+        """Before RustGIS stops showing the active chunk as it is - another chunk active, another system, another
+        project, the link turned off: RustGIS's edits not read yet brought into this chunk now
+        (:meth:`_rustgis_take_edits`, ``leaving``), then the link stopped in the thread of its calls; ``withdraw``:
+        RustGIS is to get another chunk, so the link's layers go from it - only when everything was read, and, with
+        ``unsaved_stay`` (another project), when the project left has no changes the user chose not to save: what came
+        from RustGIS would go with the project, so it stays in RustGIS. What stays there is said in the log. Once
+        stopped, ``then()``, else the link started again for the chunk active then when it is on
+        (:meth:`_rustgis_stopped`)."""
+        link = self._rustgis
+        if link is None:
+            return
+        label = self._rustgis_chunk.label if self._rustgis_chunk is not None else link.chunk_label
+        took = self._rustgis_take_edits(leaving=True)
+        self._rustgis, self._rustgis_chunk = None, None
+        self._rustgis_set_waiting(False)
+        unsaved = unsaved_stay and self.isWindowModified()
+        if not took:
+            self.log_pane.warning(tr("Le ultime modifiche fatte in RustGIS nei disegni di {0} non sono arrivate qui: "
+                                     "restano nei suoi layer, che non sono più collegati.", label))
+        elif withdraw and unsaved:
+            self.log_pane.info(tr("Il progetto lasciato non è stato salvato: i layer di {0} restano in RustGIS, con "
+                                  "ciò che c'è stato disegnato.", label))
+        self._rustgis_send(lambda: link.stop(withdraw=withdraw and took and not unsaved),
+                           lambda _r: then() if then is not None else self._rustgis_stopped())
+
+    def _rustgis_stopped(self) -> None:
+        """A link stopped in the thread of RustGIS's calls: with the live link on, RustGIS gets the active chunk at
+        once (after the stop, never at the same time: the next look would otherwise wait for it)."""
+        if not self._rustgis_closed and self._rustgis is None and self.a_rustgis_live.isChecked():
+            QTimer.singleShot(0, self._poll_rustgis)
+
+    def _rustgis_close(self, withdraw: bool = False) -> None:
+        """The window closes: the link stopped in the thread of RustGIS's calls - their tile layers taken away, the
+        raster server stopped -, its layers taken out of RustGIS too when ``withdraw`` (everything RustGIS had was read
+        and the project is saved, as when another project opens) and nothing was edited there since
+        (:func:`_rustgis_last_stop`); else they stay there, no longer linked, said in the log (and its file). Waited for
+        :data:`RUSTGIS_CLOSE_WAIT` seconds at most - not at all when the user went on without RustGIS's last edits: the
+        pull left under way is not waited for twice -; past that the link is given up (nothing more written or sent)
+        and its thread left behind, a daemon that ends with the program. Stopped also when no call was ever made, in a
+        thread of its own. Nothing starts again after (the window is closed)."""
+        self._rustgis_poll.stop()
+        self._rustgis_gen += 1
+        self._rustgis_closed = True
+        unwaited = self._rustgis_unwaited is not None and not self._rustgis_unwaited.done()
+        link, self._rustgis, self._rustgis_chunk = self._rustgis, None, None
+        thread, self._rustgis_thread = self._rustgis_thread, None
+        if link is not None and unwaited:
+            link.abandon(wait=False)  # the user went on without RustGIS's last edits: nothing more is written
+            withdraw = False
+        if thread is None:
+            if link is None:
+                return
+            thread = _CallThread("rustgis")
+        stopped = thread.submit(lambda: _rustgis_last_stop(link, withdraw)) if link is not None else None
+        if not thread.stop(0.0 if unwaited else RUSTGIS_CLOSE_WAIT):
+            if link is not None:
+                link.abandon(wait=False)  # a pull writing at this moment ends its write: the window waits no more
+            if not unwaited:
+                log.warning("RustGIS: il collegamento non si è fermato in %d secondi: lasciato indietro",
+                            RUSTGIS_CLOSE_WAIT)
+        if stopped is not None and not (stopped.done() and stopped.exception() is None and stopped.result()):
+            log.info("Il gruppo %s resta in RustGIS e non è più collegato: ciò che vi si modifica non torna nel "
+                     "progetto.", link.chunk_label)
 
     def _feature_clicked(self, layer: str, attrs: dict) -> None:
         text = "  ".join(f"{k}: {v}" for k, v in attrs.items() if v not in (None, "") and not str(k).startswith("_"))
@@ -10546,6 +11926,8 @@ class MainWindow(QMainWindow):
         after = self._next_active(plan["chunks"]) if leaving else None
         touched = leaving or any(c is active for c, _e in plan["items"])
         kind = self.model_view.kind
+        if leaving:
+            self._rustgis_leave()  # RustGIS's edits not read yet go with the chunk, its layers away from RustGIS
         self._store_drawings()  # the drawings of the active chunk stay with it, removed or not
         if leaving and self.history is not None:
             self.history.reset(keep_document=True)  # its edits are its own: they go with it
@@ -10638,6 +12020,7 @@ class MainWindow(QMainWindow):
         touched = switching or any(current is c for c in chunks)
         kind = self.model_view.kind
         if switching:
+            self._rustgis_leave()  # RustGIS's edits not read yet into the chunk left, its layers away from RustGIS
             self._store_drawings()
             step.after = current
         if touched:
@@ -10663,6 +12046,8 @@ class MainWindow(QMainWindow):
         leaving = any(current is c for c in gone)
         touched = leaving or any(current is getattr(r, "chunk", None) for r in step.removals)
         kind = self.model_view.kind
+        if leaving:
+            self._rustgis_leave()  # RustGIS's edits not read yet go with the chunk, its layers away from RustGIS
         self._store_drawings()
         if touched:
             self._release_views()

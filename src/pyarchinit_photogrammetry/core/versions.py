@@ -9,10 +9,13 @@ versions), renamed or deleted; two DEMs can be subtracted.
 """
 from __future__ import annotations
 
+import errno
 import shutil
 import time
 from datetime import datetime
 from pathlib import Path
+
+from ..io.files import replace_file
 
 PRODUCTS = {"point_cloud": "Nuvola densa", "model": "Modello", "dem": "DEM", "orthomosaic": "Ortofoto"}
 PARAMS = {"point_cloud": "dense", "model": "model", "dem": "dem", "orthomosaic": "orthomosaic"}  # chunk.meta keys
@@ -39,6 +42,18 @@ def label(text: str, *args) -> str:
 def _check(product: str) -> None:
     if product not in PRODUCTS:
         raise ValueError(f"no versions for {product!r}: {', '.join(PRODUCTS)}")
+
+
+def _move_file(src: Path, dst: Path) -> None:
+    """A product file moved to ``dst``, in the place of the file there if any, in one move - a rename that a program
+    reading the file, RustGIS through the link's raster server, does not stop (:func:`.files.replace_file`); copied
+    and deleted only across disks."""
+    try:
+        replace_file(src, dst)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        shutil.move(str(src), str(dst))
 
 
 def _inside(path: Path, folder: Path) -> bool:
@@ -153,7 +168,10 @@ def keep_active(chunk, product: str, move: bool = False) -> dict | None:
     for role, src in files.items():
         dst = folder / src.name
         if move and _inside(src, chunk.data_dir):
-            shutil.move(str(src), str(dst))
+            if src.is_dir():
+                shutil.move(str(src), str(dst))
+            else:
+                _move_file(src, dst)
         elif src.is_dir():
             shutil.copytree(src, dst)
         else:
@@ -194,9 +212,12 @@ def _activate_files(chunk, product: str, entry: dict) -> None:
             continue
         if dst.is_dir():
             shutil.rmtree(dst)
-        elif dst.exists():
-            dst.unlink()
-        shutil.move(str(src), str(dst))
+        if src.is_dir():
+            if dst.exists():
+                dst.unlink()
+            shutil.move(str(src), str(dst))
+        else:
+            _move_file(src, dst)  # over the file there, in one move
         if role == product:
             chunk._set_product(product, dst)
         elif role == "textured" and "model_textured" in entry["files"]:
