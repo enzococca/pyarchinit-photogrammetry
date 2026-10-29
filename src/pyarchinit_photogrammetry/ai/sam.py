@@ -347,7 +347,7 @@ def auto_units(chunk, segmenter: Segmenter, max_side: int = 2048, simplify: floa
                 g = g.difference(unary_union(near)).buffer(0)
         if not g.is_empty and g.area >= min_area_m2:
             final[int(i)] = g
-    progress(1.0, f"SAM: {len(final)} unita' candidate")
+    progress(1.0, f"SAM: {len(final)} unità candidate")
     return [UnitPolygon(g) for g in sorted(final.values(), key=lambda g: -g.area)]
 
 

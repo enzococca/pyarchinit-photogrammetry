@@ -2272,7 +2272,7 @@ class PhotoView(_ZoomView):
         if near is not None:
             pr = near.projections[self.camera.key]
             if not pr.measured:
-                menu.addAction(tr("Conferma {0} dov'e' (bandierina giusta)", near.label)).triggered.connect(
+                menu.addAction(tr("Conferma {0} dov'è (bandierina giusta)", near.label)).triggered.connect(
                     lambda: self._place(near, pr.x, pr.y))
             menu.addAction(tr("Sposta {0} qui", near.label)).triggered.connect(lambda: self._place(near, x, y))
         place = menu.addMenu(tr("Posiziona marker qui"))
@@ -2283,7 +2283,7 @@ class PhotoView(_ZoomView):
         if near is not None:
             menu.addAction(tr("Rimuovi proiezione di {0}", near.label)).triggered.connect(lambda: self._remove(near))
         menu.addSeparator()
-        menu.addAction(tr("Foto successiva (Pagina giu')")).triggered.connect(lambda: self.navigate.emit(1))
+        menu.addAction(tr("Foto successiva (Pagina giù)")).triggered.connect(lambda: self.navigate.emit(1))
         menu.addAction(tr("Foto precedente (Pagina su)")).triggered.connect(lambda: self.navigate.emit(-1))
         menu.exec(ev.globalPos())
 

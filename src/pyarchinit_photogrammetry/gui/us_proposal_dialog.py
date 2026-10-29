@@ -50,14 +50,14 @@ def reason(rel: dict, names: dict) -> str:
     step = rel.get("step_m")
     contact = number(rel.get("contact_m") or 0.0, 2)
     if rel["why"] == "higher":
-        return tr("piu' alta di {0} cm lungo {1} m di contatto", number(abs(step or 0.0) * 100, 1), contact)
+        return tr("più alta di {0} cm lungo {1} m di contatto", number(abs(step or 0.0) * 100, 1), contact)
     if rel["why"] == "fill":
-        return tr("dentro {0} e non piu' alta: riempimento di un taglio", names.get(rel.get("around"), "?"))
+        return tr("dentro {0} e non più alta: riempimento di un taglio", names.get(rel.get("around"), "?"))
     if rel["why"] == "cut":
         return tr("il taglio attraversa {0}", names.get(rel["lower"], "?"))
     if step is None:
         return tr("contro il muro")
-    return tr("contro il muro, piu' bassa della sua cima di {0} cm", number(abs(step) * 100, 1))
+    return tr("contro il muro, più bassa della sua cima di {0} cm", number(abs(step) * 100, 1))
 
 
 class UsProposalDialog(QDialog):
@@ -72,12 +72,12 @@ class UsProposalDialog(QDialog):
         self.setMinimumSize(820, 520)
         self.proposal = proposal
         lay = QVBoxLayout(self)
-        intro = QLabel(tr("Ogni unita' senza numero riceve una US: le piu' alte per prime, USM dove la nuvola "
+        intro = QLabel(tr("Ogni unità senza numero riceve una US: le più alte per prime, USM dove la nuvola "
                           "classificata dice muratura, con area, quote e colore misurati. I rapporti vengono dai "
-                          "contatti: chi e' piu' alta lungo il contatto copre l'altra, un'unita' chiusa in un'altra e "
-                          "non piu' alta e' il riempimento di un taglio (proposto anch'esso), gli strati si "
+                          "contatti: chi è più alta lungo il contatto copre l'altra, un'unità chiusa in un'altra e "
+                          "non più alta è il riempimento di un taglio (proposto anch'esso), gli strati si "
                           "appoggiano ai muri. Numero, tipo e definizione si correggono nella tabella; doppio clic "
-                          "per vedere l'unita' sull'ortofoto. Le unita' disegnate con il loro numero ma senza scheda "
+                          "per vedere l'unità sull'ortofoto. Le unità disegnate con il loro numero ma senza scheda "
                           "in PyArchInit lo tengono; quelle che la scheda ce l'hanno contano solo per i rapporti."))
         intro.setWordWrap(True)
         lay.addWidget(intro)
@@ -88,9 +88,9 @@ class UsProposalDialog(QDialog):
         self.relations = _table(RELATION_HEADERS)
         from .table_export import install_excel_menu
 
-        install_excel_menu(self.units, tr("Unita'"))
+        install_excel_menu(self.units, tr("Unità"))
         install_excel_menu(self.relations, tr("Rapporti"))
-        self.tabs.addTab(self.units, tr("Unita'"))
+        self.tabs.addTab(self.units, tr("Unità"))
         self.tabs.addTab(self.relations, tr("Rapporti"))
         lay.addWidget(self.tabs, 1)
         self.status = QLabel("")
@@ -152,9 +152,9 @@ class UsProposalDialog(QDialog):
         n_units = sum(1 for it in self.proposal["units"] if it["kind"] == "unit" and not it.get("context"))
         n_context = sum(1 for it in self.proposal["units"] if it.get("context"))
         n_cuts = len(self.proposal["units"]) - n_units - n_context
-        text = tr("{0} unita', {1} tagli proposti, {2} rapporti", n_units, n_cuts, len(self.proposal["relations"]))
+        text = tr("{0} unità, {1} tagli proposti, {2} rapporti", n_units, n_cuts, len(self.proposal["relations"]))
         if n_context:
-            text += tr("; {0} US con la scheda gia' in PyArchInit, per i rapporti", n_context)
+            text += tr("; {0} US con la scheda già in PyArchInit, per i rapporti", n_context)
         self.status.setText(text)
 
     def _edited(self, item) -> None:
@@ -188,7 +188,7 @@ class UsProposalDialog(QDialog):
         missing = [k for k, n in zip(keys, numbers) if not n]
         twice = sorted({n for n in numbers if n and numbers.count(n) > 1})
         if missing or twice:
-            self.status.setText(tr("Ogni unita' scelta vuole un numero di US diverso: {0}",
+            self.status.setText(tr("Ogni unità scelta vuole un numero di US diverso: {0}",
                                    ", ".join(twice) if twice else tr("manca un numero")))
             return
         self.apply_requested.emit(keys, rels, write)

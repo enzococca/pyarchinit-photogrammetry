@@ -200,7 +200,7 @@ def apply_scale(ch, scale: dict, log=print) -> dict | None:
     factor = float(scale["lengthMM"]) / 1000.0 / dist
     ch.transform = np.diag([factor, factor, factor, 1.0])
     ch.crs = "LOCAL"
-    log(f"INFO scala: {scale['lengthMM']} mm = {dist:.4f} unita' -> fattore {factor:.6f}")
+    log(f"INFO scala: {scale['lengthMM']} mm = {dist:.4f} unità -> fattore {factor:.6f}")
     return {"factor": factor, "lengthMM": float(scale["lengthMM"]), "method": scale.get("method", "tap")}
 
 

@@ -179,7 +179,7 @@ _METHODS = {
 
         def done(stats):
             if not stats.get("cells"):
-                text = t("Il DEM e' vuoto.", "The DEM is empty.")
+                text = t("Il DEM è vuoto.", "The DEM is empty.")
             else:
                 text = (f"{t('celle', 'cells')}: {stats['cells']}\\nmin {stats['min']:.3f} m\\n"
                         f"max {stats['max']:.3f} m\\n{t('media', 'mean')} {stats['mean']:.3f} m")

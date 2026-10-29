@@ -600,7 +600,7 @@ class ModelView(QWidget):
         self.exag_spin.setValue(1.0)
         self.exag_spin.setPrefix("x")
         self.exag_spin.setKeyboardTracking(False)
-        self.exag_spin.setToolTip(tr("Esagerazione verticale: le quote di cio' che si vede moltiplicate intorno al "
+        self.exag_spin.setToolTip(tr("Esagerazione verticale: le quote di ciò che si vede moltiplicate intorno al "
                                      "centro della scena, per leggere il rilievo di un terreno quasi piatto. Cambia "
                                      "solo la vista: marker, sezioni, tagli e lazo usano le coordinate vere"))
         self._exag_timer = QTimer(self)  # one rebuild of the view when the arrows are held down
@@ -614,7 +614,7 @@ class ModelView(QWidget):
         self._fill_color_combo("point_cloud")
         self.color_combo.setToolTip(tr("Colori: quelli delle foto, le classi (con la legenda per nasconderle), la "
                                        "quota "
-                                       "o la confidenza (quante mappe di profondita' confermano ogni punto o vertice)"))
+                                       "o la confidenza (quante mappe di profondità confermano ogni punto o vertice)"))
         self.color_combo.currentIndexChanged.connect(self._color_chosen)
         self.point_spin = QSpinBox()
         self.point_spin.setRange(1, 8)
@@ -651,7 +651,7 @@ class ModelView(QWidget):
         cut_menu.addAction(tr("Con i valori..."), lambda: self.cut_requested.emit("values", []))
         self.b_cut.setMenu(cut_menu)
         self.b_elevation = QPushButton(tr("Prospetto"))
-        self.b_elevation.setToolTip(tr("Ortofoto e rilievo del modello su un piano: quello della vista com'e' ora, o "
+        self.b_elevation.setToolTip(tr("Ortofoto e rilievo del modello su un piano: quello della vista com'è ora, o "
                                        "quello di tre punti cliccati; un prospetto o una sezione"))
         elev_menu = QMenu(self.b_elevation)
         elev_menu.addAction(tr("Ortofoto da questa vista"), self._elevation_from_view)
