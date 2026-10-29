@@ -855,12 +855,13 @@ def _file_version(path: Path) -> tuple | None:
 def _listening(url: str) -> bool:
     """Whether a program listens at the port of ``url``, an address of a raster server (:data:`SERVED_ADDRESS`): one of
     another window of the program, or a server that stopped. Only a refused connection says nobody does - one that
-    answers, is slow or closes at once is somebody there."""
+    answers, is slow or closes at once is somebody there. Windows refuses a connection to a port of 127.0.0.1 nobody
+    listens at only after trying again for about two seconds: the wait is longer there."""
     port = int(SERVED_ADDRESS.fullmatch(url).group(1))
     if not 0 < port < 65536:
         return False
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=1.0):
+        with socket.create_connection(("127.0.0.1", port), timeout=5.0 if sys.platform == "win32" else 1.0):
             return True
     except ConnectionRefusedError:
         return False
@@ -1762,12 +1763,16 @@ class RustGisLink:
     (:attr:`server`).
 
     ``data_dir``: the chunk's data folder, where the copies of rasters RustGIS cannot read as they are go (its
-    ``rustgis`` folder, :attr:`copies`); without it, a folder of :attr:`scratch`."""
+    ``rustgis`` folder, :attr:`copies`); without it, a folder of :attr:`scratch`. ``chunk_key``: the key of the chunk
+    (as the live GeoPackage keeps it with its drawings: :meth:`.qgis_link.LiveLink.stored_chunk`): a pull writes
+    nothing into a file that holds another chunk's drawings."""
 
-    def __init__(self, live: LiveLink, transport, chunk_label: str, crs: str, data_dir: Path | None = None):
+    def __init__(self, live: LiveLink, transport, chunk_label: str, crs: str, data_dir: Path | None = None,
+                 chunk_key=None):
         self.live = live
         self.transport = transport  # HttpTransport (the app) or StdioTransport (the engine): call(tool, args)
         self.chunk_label = chunk_label
+        self.chunk_key = None if chunk_key is None else str(chunk_key)
         self.crs = crs
         self.copies = Path(data_dir) / SCRATCH_DIR if data_dir is not None else self.scratch / "rasters"
         self.layers: dict[str, str] = {}  # table of the live GeoPackage -> the id of RustGIS's layer that holds it
@@ -1922,6 +1927,10 @@ class RustGisLink:
             try:
                 con.execute("BEGIN IMMEDIATE")
                 try:
+                    held = LiveLink._stored_key(con)  # in this transaction: the window writes no other chunk meanwhile
+                    if self.chunk_key is not None and held is not None and held != self.chunk_key:
+                        raise RustGisAbandoned(f"the live GeoPackage holds the drawings of chunk {held}, not of "
+                                               f"{self.chunk_label}: RustGIS's edits were not written there")
                     for table, export in exports.items():
                         counts[table], states[table] = self._pull_table(con, table, export)
                     con.execute("COMMIT")

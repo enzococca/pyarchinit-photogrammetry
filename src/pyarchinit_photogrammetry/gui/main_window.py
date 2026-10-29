@@ -25,7 +25,7 @@ from .. import __version__, _native, updates
 from ..app import app as application
 from ..core.document import Document
 from ..core.progress import Cancelled
-from ..io.qgis_link import ID_FIELD, LIVE_TABLES, PART_FIELD, new_id, stable_id
+from ..io.qgis_link import ID_FIELD, LIVE_TABLES, PART_FIELD, UnreadEdits, new_id, stable_id
 from . import i18n, theme
 from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelectionDialog, IfcPreviewDialog,
                       ParamDialog, PatchDialog,
@@ -66,6 +66,7 @@ RUSTGIS_STATUS_WAIT = 2.0  # seconds a look waits for RustGIS's edit status (a r
 RUSTGIS_LEAVE_WAIT = 15.0  # seconds the window waits for RustGIS's last edits before asking whether to wait more
 RUSTGIS_CLOSE_WAIT = 10.0  # seconds a closing window waits for the link to stop, before leaving its thread behind
 RUSTGIS_READ_TRIES = 3  # reads of the live GeoPackage at a leave (another program may hold it a moment)
+LIVE_READ_FAILURES = 3  # reads of another chunk's edits failing alike (not a lock) before the file is kept aside
 
 
 def _outlined(rgba: np.ndarray, polygon, bounds) -> np.ndarray:
@@ -623,6 +624,10 @@ class MainWindow(QMainWindow):
         self._qgis_waiting: dict[str, list] = {"proxies": [], "sections": []}  # for when no step is running
         self._qgis_hold = False  # edits read in a hurry (before a change of chunk...): their steps wait
         self._live_from = "qgis"  # who made the edits being read: "qgis", "rustgis" or "both" (_from)
+        self._live_previous = None  # the reader of the live GeoPackage in the system of the chunk before (its edits)
+        self._live_cause = None  # why the live GeoPackage could not be read, as the log said it last (said once)
+        self._live_failures = 0  # reads failed in a row for that cause
+        self._live_drop = None  # the key of a chunk whose unreadable edits were kept aside: written over next
         # the live link with RustGIS (io.rustgis_link.RustGisLink) of the active chunk, and what it needs here
         self._rustgis = None
         self._rustgis_chunk = None  # the chunk RustGIS shows
@@ -2614,6 +2619,9 @@ class MainWindow(QMainWindow):
         if getattr(self, "_live_link", None) is not None:
             self._live_link.close()
             self._live_link = None
+        if self._live_previous is not None:
+            self._live_previous.close()
+            self._live_previous = None
         self.photos.stop()
         self.log_pane.detach()
         self.settings.setValue("geometry", self.saveGeometry())
@@ -8827,7 +8835,13 @@ class MainWindow(QMainWindow):
         folder, crs = self._qgis_dir(), self.chunk.crs if self.chunk else ""
         link = getattr(self, "_live_link", None)
         if link is None or link.path.parent != folder or link.crs != (crs or ""):
-            if link is not None:
+            previous = getattr(self, "_live_previous", None)
+            if previous is not None and previous is not link:
+                previous.close()
+            self._live_previous = None
+            if link is not None and link.path.parent == folder:
+                self._live_previous = link  # another system: kept to read the edits of the chunk before in it
+            elif link is not None:
                 link.close()
             link = self._live_link = LiveLink(folder, crs)
         return link
@@ -8865,7 +8879,14 @@ class MainWindow(QMainWindow):
             view = self.ortho_view
             layers = {name: {"kind": lay["kind"], "features": view.features(name)} for name, lay in view.layers.items()
                       if name != "Marker"}  # the markers are the survey's control, not excavation drawings
-            files = link.write(layers, force=force, chunk=self._chunk_key())
+            files = link.write(layers, force=force, chunk=self._chunk_key(), drop_unread=self._live_drop is not None)
+            self._live_drop = None
+            previous, self._live_previous = self._live_previous, None
+            if previous is not None and previous is not link:
+                previous.close()  # the file holds the active chunk's drawings: the reader before is done
+        except UnreadEdits:  # saved in QGIS a moment ago, over the chunk before: read first, then written
+            self._qgis_timer.start(1000)
+            return {}
         except Exception as exc:  # a live refresh must never interrupt drawing with an error window
             log.warning("Aggiornamento dei layer per QGIS non riuscito: %s", exc, exc_info=True)
             if "locked" in str(exc) or "busy" in str(exc):
@@ -8886,7 +8907,7 @@ class MainWindow(QMainWindow):
         or pulled from RustGIS, right before the active chunk changed -, those are read first and go to their chunk
         (:meth:`_poll_qgis`): False while they cannot be read (another program holds the file a moment)."""
         stored = link.stored_chunk()
-        if stored is None or stored == self._chunk_key() or not link.external_change():
+        if stored is None or stored == self._chunk_key():
             return True
         return self._poll_qgis(force=True)
 
@@ -8953,7 +8974,7 @@ class MainWindow(QMainWindow):
         "both" when either may have made them; by default as :meth:`_live_source` says. The edits
         go to the chunk whose drawings the file held when they were made (its key, kept with them):
         another than the active one gets them into its stored drawings, one no longer in the project
-        nowhere (:meth:`_keep_gone_chunk_changes`). Returns whether the file was read (nothing new in
+        nowhere (:meth:`_keep_chunk_changes`). Returns whether the file was read (nothing new in
         it counts): False when the look was left for later or the file could not be read (another
         program holds it)."""
         if self.chunk is None or not (force or self._live_on()):
@@ -8967,29 +8988,109 @@ class MainWindow(QMainWindow):
             if self.runner.busy:
                 return False
         link = self._qgis_live_link()
+        stored = None
         try:
-            changes = link.read_changes() if link.external_change() else {}
-        except sqlite3.OperationalError as exc:
-            if "locked" not in str(exc) and "busy" not in str(exc):
-                log.warning("Modifiche di QGIS non lette: %s", exc)
-            return False  # QGIS is saving: read at the next look
+            stored = link.stored_chunk()
+            if stored is not None and stored != self._chunk_key():  # the drawings of the chunk before
+                reader, changes, kept = self._read_other_chunk(link, stored)
+            else:
+                reader, kept = link, {}
+                changes = link.read_changes() if link.external_change() else {}
         except Exception as exc:  # noqa: BLE001 - the live link never stops the work with an error window
-            log.warning("Modifiche di QGIS non lette: %s", exc, exc_info=True)
-            return False
+            return self._live_trouble(exc, link, stored)
+        self._live_cause, self._live_failures = None, 0
         unread, self._rustgis_unread = self._rustgis_unread, False
-        if changes:
+        if changes or kept:
             source = source or self._live_source(unread)
-            owner = link.read_chunk  # the chunk whose drawings the file held: the edits are of that chunk
+            owner = reader.read_chunk  # the chunk whose drawings the file held: the edits are of that chunk
             other = None if owner is None or owner == self._chunk_key() else \
                 next((c for c in self.doc.chunks if str(c.key) == owner), False)
             held, self._qgis_hold = self._qgis_hold, self._qgis_hold or force
             try:
-                if other is False:  # removed meanwhile: never into another chunk
-                    self._keep_gone_chunk_changes(owner, changes, link.crs, source)
-                else:
+                if kept:  # not readable in the chunk's system, or the chunk is gone: never into another chunk
+                    self._keep_chunk_changes(owner, kept, reader.crs, source, other or None)
+                if changes and other is False:
+                    self._keep_chunk_changes(owner, changes, reader.crs, source)
+                elif changes:
                     self._apply_qgis_changes(changes, source, chunk=other)
             finally:
                 self._qgis_hold = held
+        return True
+
+    def _read_other_chunk(self, link, key: str) -> tuple:
+        """The edits another program made to the drawings of the chunk ``key`` - the live GeoPackage holds them, the
+        active chunk is another -, read in that chunk's own system: by the reader kept from before the change of system
+        (:attr:`_live_previous`, which knows the rows it wrote), else by one made for it. ``(reader, changes,
+        kept)``: ``changes`` to apply to that chunk; ``kept`` - the rows of tables in a system that is not its own, or
+        all of them when the chunk is no longer in the project - read as they are, to keep aside."""
+        from ..io.qgis_link import LiveLink
+
+        owner = next((c for c in self.doc.chunks if str(c.key) == key), None)
+        previous = self._live_previous if self._live_previous is not None and \
+            self._live_previous.path == link.path else None
+        crs = owner.crs if owner is not None else (previous.crs if previous is not None else link.crs)
+        if link.crs == (crs or ""):
+            reader = link
+        elif previous is not None and previous.crs == (crs or ""):
+            reader = previous
+        else:
+            reader = LiveLink(link.path.parent, crs)
+        try:
+            if owner is None:
+                return reader, {}, reader.read_changes(any_srs=True)
+            changes = reader.read_changes()
+            refused = any(c.refused for c in changes.values())
+            kept = reader.read_changes(any_srs=True) if refused else {}
+            return reader, {t: c for t, c in changes.items() if not c.refused}, kept
+        finally:
+            if reader is not link and reader is not previous:
+                reader.close()
+
+    def _live_trouble(self, exc: Exception, link, stored) -> bool:
+        """The live GeoPackage not read: the cause said in the log once, while it lasts (another program holding the
+        file a moment, or an error). The edits of the chunk before that fail to be read alike
+        :data:`LIVE_READ_FAILURES` times in a row (not a lock: they would block the active chunk's drawings for good)
+        are kept aside - the whole file copied beside the project (:meth:`_keep_live_copy`) - and the active chunk's
+        drawings go on. Whether the file may be written now."""
+        lock = isinstance(exc, sqlite3.OperationalError) and ("locked" in str(exc) or "busy" in str(exc))
+        cause = "locked" if lock else f"{type(exc).__name__}: {exc}"
+        if cause != self._live_cause:
+            self._live_cause, self._live_failures = cause, 0
+            if lock:
+                log.info("Il file dei disegni dal vivo è occupato da un altro programma: lo leggo appena è libero")
+            else:
+                log.warning("Modifiche di QGIS non lette: %s", exc, exc_info=not isinstance(exc, sqlite3.Error))
+        self._live_failures += 1
+        if lock or stored is None or stored == self._chunk_key() or self._live_failures < LIVE_READ_FAILURES:
+            return False
+        return self._keep_live_copy(link, stored)
+
+    def _keep_live_copy(self, link, key: str) -> bool:
+        """The live GeoPackage, whose edits of the chunk ``key`` cannot be read, copied whole beside the project
+        (``<project>_modifiche_chunk_<key>_<time>.gpkg``, said in the log with the chunk and its system): those rows
+        go from the live file at its next write. Whether the copy was made."""
+        owner = next((c for c in self.doc.chunks if str(c.key) == key), None)
+        folder = self.doc.path.parent if self.doc.path else self._qgis_dir()
+        stem = self.doc.path.stem if self.doc.path else "progetto"
+        path = folder / f"{stem}_modifiche_chunk_{key}_{time.strftime('%Y%m%d-%H%M%S')}.gpkg"
+        try:
+            source = sqlite3.connect(link.path, timeout=10)
+            try:
+                target = sqlite3.connect(path)
+                try:
+                    source.backup(target)
+                finally:
+                    target.close()
+            finally:
+                source.close()
+        except (sqlite3.Error, OSError) as exc:
+            log.error("Modifiche del chunk %s non salvate in %s: %s", key, path, exc)
+            return False
+        self._live_drop = key
+        self.log_pane.warning(tr("Le modifiche del chunk {0} ({1}) nel file dei disegni dal vivo non si leggono ({2}): "
+                                 "il file è copiato in {3}, e i disegni del chunk attivo vanno avanti.",
+                                 owner.label if owner is not None else key, owner.crs if owner is not None else "?",
+                                 self._live_cause, path))
         return True
 
     def _live_source(self, unread: bool = False) -> str:
@@ -9066,8 +9167,10 @@ class MainWindow(QMainWindow):
         self._update_pa_save_button()
         self._redraw_overlays()  # and the GeoPackage brought to the program's version of these rows
         self.setWindowModified(True)
-        if self.history is not None and (not other or sections):  # another chunk's edits are not undone here
-            self.history.record(said(lines[0] if len(lines) == 1 else tr("{0} modifiche", len(lines))))
+        undone = lines if not other else lines[unit_lines:]  # another chunk's edits are not undone here
+        if self.history is not None and undone:
+            name = said if not other else self._from
+            self.history.record(name(undone[0] if len(undone) == 1 else tr("{0} modifiche", len(undone))))
         for line in lines:
             self.log_pane.info(said(line))
         if not other:
@@ -9078,12 +9181,16 @@ class MainWindow(QMainWindow):
         self._run_qgis_waiting()
         return lines
 
-    def _keep_gone_chunk_changes(self, key: str, changes: dict, crs: str, source: str) -> None:
-        """Edits read from the live GeoPackage for a chunk no longer in the project (removed before they were read):
-        never into another chunk - every row changed or drawn there, and the identities deleted, kept in a GeoJSON
-        file beside the project (in the system of the file, named in it), said in the log."""
+    def _keep_chunk_changes(self, key: str, changes: dict, crs: str, source: str, chunk=None) -> None:
+        """Edits read from the live GeoPackage that cannot go into their chunk - no longer in the project (removed
+        before they were read), or ``chunk``, whose tables in the file are in another system than its own: never into
+        another chunk - every row changed or drawn there, and the identities deleted, kept in a GeoJSON file beside the
+        project (in the system of the rows, named in it), said in the log with the chunk and the system."""
         from shapely.geometry import mapping
 
+        systems = {f.srs_id for ch in changes.values() if not ch.refused for f in ch.changed + ch.added
+                   if f.srs_id is not None and f.srs_id > 0}
+        crs = f"EPSG:{systems.pop()}" if len(systems) == 1 else crs
         features = []
         for table, ch in changes.items():
             if ch.refused:
@@ -9112,8 +9219,13 @@ class MainWindow(QMainWindow):
             log.error("Modifiche del chunk %s non salvate in %s: %s", key, path, exc)
             return
         self._live_from = source
-        self.log_pane.warning(self._from(tr("modifiche del chunk {0}, che non è più nel progetto: non applicate a un "
-                                            "altro chunk, salvate in {1}", key, path)))
+        if chunk is None:
+            text = tr("modifiche del chunk {0}, che non è più nel progetto: non applicate a un altro chunk, salvate in "
+                      "{1}", key, path)
+        else:
+            text = tr("modifiche del chunk {0} in un sistema ({1}) che non è il suo ({2}): non applicate, salvate in "
+                      "{3}", chunk.label, crs, chunk.crs, path)
+        self.log_pane.warning(self._from(text))
 
     def _qgis_geometry(self, f, srs: int, name: str):
         """The 2D geometry of a row read back, None (said in the log) when it is in another reference
@@ -9871,7 +9983,7 @@ class MainWindow(QMainWindow):
                 self._rustgis_note(text)
             return
         live, rasters = self._qgis_live_link(), self._rustgis_rasters(ch)
-        label, crs, data_dir = ch.label, ch.crs, ch.data_dir
+        label, crs, data_dir, key = ch.label, ch.crs, ch.data_dir, ch.key
         self._rustgis_gen += 1
         gen = self._rustgis_gen
         self._rustgis_starting = True
@@ -9883,7 +9995,7 @@ class MainWindow(QMainWindow):
                     return {"reach": reached}
                 p(0.2, tr("Il chunk {0} in RustGIS", label))
                 reached[1].timeout = RUSTGIS_START_TIMEOUT
-                link = rg.RustGisLink(live, reached[1], label, crs, data_dir=data_dir)
+                link = rg.RustGisLink(live, reached[1], label, crs, data_dir=data_dir, chunk_key=key)
                 out = link.start(rasters, progress=p.sub(0.2, 0.8))
             except Cancelled:
                 return {"cancelled": True}

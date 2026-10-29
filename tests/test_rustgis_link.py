@@ -5332,3 +5332,17 @@ def test_a_push_in_flight_when_the_link_is_given_up_sends_nothing(tmp_path):
         rl.push()
     sent = [args.get("command") or tool for tool, args in fake.calls]
     assert "layer.addData" not in sent and "run" not in sent and fake.scripts == []
+
+
+def test_a_pull_writes_nothing_into_another_chunks_file(tmp_path):
+    """The link knows its chunk: when the live GeoPackage holds another chunk's drawings - checked in the pull's own
+    write transaction -, RustGIS's edits are written nowhere (RustGisAbandoned)."""
+    one = _unit(1, GX, GY)
+    live, fake, rl = _started(tmp_path, _drawings([one]))
+    rl.chunk_key = "1"
+    live.write(_drawings([one]), chunk=1)
+    fake.reshape(fake.linked(rl, "unita"), one[ID_FIELD], box(GX + 0.3, GY, GX + 0.8, GY + 0.5), GB)
+    live.write(_drawings([one]), chunk=2)  # the window shows another chunk
+    with pytest.raises(link.RustGisAbandoned):
+        rl.pull()
+    assert live.read_changes() == {} and live.stored_chunk() == "2"

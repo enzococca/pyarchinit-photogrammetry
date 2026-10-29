@@ -569,7 +569,7 @@ def test_a_chunk_switch_never_waits_long_for_rustgis(trench, rustgis, monkeypatc
         start = time.monotonic()
         w._activate_chunk(second)
         took = time.monotonic() - start
-        assert took < 5 and len(asked) == 1 and asked[0][1] == ["Aspetta ancora", "Continua senza"]
+        assert took < 20 and len(asked) == 1 and asked[0][1] == ["Aspetta ancora", "Continua senza"]
         assert "niente si perde" in asked[0][0] and w.chunk is second and w.units == [] and rl._abandoned
     finally:
         release.set()
@@ -594,7 +594,8 @@ def test_waiting_again_for_rustgis_reads_its_edits(trench, rustgis, monkeypatch)
 
     def wait_again(parent, kind, title, text, options, *a, **k):
         asked.append(options)
-        threading.Timer(0.1, release.set).start()  # RustGIS draws again a moment later
+        monkeypatch.setattr(mw, "RUSTGIS_LEAVE_WAIT", 60.0)  # the wait again long enough for any runner
+        release.set()  # RustGIS draws again
         return 0
 
     monkeypatch.setattr(mw, "choice", wait_again)
@@ -623,7 +624,7 @@ def test_a_switch_while_rustgis_was_not_answering_does_not_wait(trench, rustgis,
     monkeypatch.setattr(mw, "choice", lambda *a, **k: asked.append(a) or 1)
     start = time.monotonic()
     w._activate_chunk(second)
-    assert time.monotonic() - start < 2 and asked == [] and rl._abandoned and w.chunk is second
+    assert time.monotonic() - start < 10 and asked == [] and rl._abandoned and w.chunk is second  # no 15 s wait
     _settle(w, app)
     assert not (first.meta.get("drawings") or {}).get("units")
     assert sorted(g["name"] for g in fake.groups) == ["Saggio 1", "Saggio 2"]
@@ -972,15 +973,16 @@ def test_open_with_a_stuck_rustgis_waits_and_asks_once(trench, rustgis, monkeypa
     asked = []
     monkeypatch.setattr(mw, "choice", lambda parent, kind, title, text, options, *a, **k: asked.append(options) or 1)
     monkeypatch.setattr(mw, "message", lambda *a, **k: QMessageBox.StandardButton.Discard)
+    waits = []
+    real_wait = w._rustgis_wait_for
+    monkeypatch.setattr(w, "_rustgis_wait_for", lambda future: waits.append(future) or real_wait(future))
     release = _stuck(fake)
     try:
-        start = time.monotonic()
         w.open_document(str(tmp_path / "altro.ppg"))
-        took = time.monotonic() - start
     finally:
         release.set()
     _settle(w, app)
-    assert len(asked) == 1 and took < 0.5 + 2.0 and rl._abandoned and w.doc.path == tmp_path / "altro.ppg"
+    assert len(asked) == 1 and len(waits) == 1 and rl._abandoned and w.doc.path == tmp_path / "altro.ppg"
     assert [g["name"] for g in fake.groups] == ["Saggio 1"]
 
 
@@ -993,7 +995,7 @@ def test_closing_with_a_stuck_rustgis_waits_once(trench, rustgis, monkeypatch):
     fake, _ = rustgis
     _linked(w, app)
     monkeypatch.setattr(mw, "RUSTGIS_LEAVE_WAIT", 0.5)
-    monkeypatch.setattr(mw, "RUSTGIS_CLOSE_WAIT", 2.0)
+    monkeypatch.setattr(mw, "RUSTGIS_CLOSE_WAIT", 60.0)  # a close that waited again would take a minute
     asked = []
     monkeypatch.setattr(mw, "choice", lambda parent, kind, title, text, options, *a, **k: asked.append(options) or 1)
     release = _stuck(fake)
@@ -1009,7 +1011,7 @@ def test_closing_with_a_stuck_rustgis_waits_once(trench, rustgis, monkeypatch):
     finally:
         release.set()
         logging.getLogger("pyarchinit_photogrammetry").removeHandler(handler)
-    assert len(asked) == 1 and took < 1.5
+    assert len(asked) == 1 and took < 30.0
     assert any("resta in RustGIS" in r.getMessage() and "Saggio 1" in r.getMessage() for r in records)
     assert [g["name"] for g in fake.groups] == ["Saggio 1"]
 
@@ -1093,3 +1095,34 @@ def test_windows_of_rustgis_wait_for_the_question(trench, rustgis, monkeypatch):
         release.set()
     _settle(w, app)
     assert order[0] == "question" and len(order) == 2 and "non risponde più" in order[1]
+
+
+def test_rustgis_edits_of_a_chunk_in_another_system_go_to_it(trench, rustgis, monkeypatch):
+    """RustGIS's last edits pulled when the active chunk - in another system - takes the place of the chunk left, the
+    live file held a moment: once free, they are read in the system of the chunk left and go into it, never into the
+    active one; then the new chunk goes to RustGIS."""
+    w, app, mw = trench
+    fake, _ = rustgis
+    first, second = w.chunk, _other_chunk(w)
+    second.crs = "EPSG:32633"
+    rl = _linked(w, app)
+    fake.draw(fake.linked(rl, "unita"), box(GX + 3, GY + 1, GX + 3.5, GY + 1.5), GB, us_s="12", area_s="1")
+    live = w._live_link
+    real, state = live.read_changes, {"locked": True}
+
+    def read_changes(*a, **k):
+        if state["locked"]:
+            raise sqlite3.OperationalError("database is locked")
+        return real(*a, **k)
+
+    monkeypatch.setattr(live, "read_changes", read_changes)
+    w._activate_chunk(second)
+    _settle(w, app)
+    assert w._rustgis is None and not (first.meta.get("drawings") or {}).get("units")
+    state["locked"] = False
+    _look(w, app)
+    assert w.chunk is second and w.units == []
+    assert [d["us"] for d in first.meta["drawings"]["units"]] == ["12"]
+    assert "Da RustGIS: US 12 aggiunta, nel chunk Saggio 1" in _log(w)
+    assert w._rustgis is not None and w._rustgis.chunk_label == "Saggio 2" and w._rustgis.chunk_key == str(second.key)
+    assert w._live_link.stored_chunk() == str(second.key)
