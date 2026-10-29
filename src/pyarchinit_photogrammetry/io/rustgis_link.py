@@ -62,6 +62,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from collections import Counter
@@ -309,27 +310,86 @@ def _process_runs(pid: int) -> bool:
     return True
 
 
-def endpoint() -> Endpoint | None:
-    """Where a running RustGIS's MCP over HTTP listens, as RustGIS publishes it: the ``http_url`` and
-    ``http_token_file`` of its ``endpoint.json`` in :func:`token_dir`, taken only while its ``pid`` runs. None when
-    there is no such file, it cannot be read or is not what RustGIS writes, its ``pid`` does not run (a RustGIS that
-    crashed leaves its file behind), or it names no HTTP address (the relay runs, agent control is off).
+LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")  # the only hosts the token is ever sent to
 
-    There is no default address to fall back on: RustGIS keeps its token for good, and any program of any account may be
-    listening at 127.0.0.1:8768 when RustGIS is not, so the token goes only to the address of a RustGIS that was seen
-    running. Nothing is asked of the network: whether it still answers is for the first request to find out."""
+
+def _private(path: Path, kind) -> bool:
+    """Whether ``path`` is what RustGIS itself makes for its run files (POSIX): a ``kind`` (``stat.S_ISDIR`` or
+    ``stat.S_ISREG``) - not a link to one -, owned by this user, that no group or other user can write. On Windows
+    always (the folder is in the user's own profile)."""
+    if _platform() == "win32" or not hasattr(os, "getuid"):
+        return True
     try:
-        info = json.loads((token_dir() / ENDPOINT_FILE).read_text(encoding="utf-8"))
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return kind(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+
+
+def _published() -> dict | None:
+    """What a running RustGIS published in ``endpoint.json`` (:func:`token_dir`), its ``pid`` checked as a pid (not
+    whether it runs); None when there is no such file, it cannot be read or is not what RustGIS writes, or - on POSIX
+    - it or its folder is not this user's alone (owned by another user, writable by others, a link): another account
+    could have planted it, to have the token sent to an address of its own (said in the log)."""
+    folder = token_dir()
+    file = folder / ENDPOINT_FILE
+    try:
+        info = json.loads(file.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(info, dict):
         return None
-    pid, url, token_file = info.get("pid"), info.get("http_url"), info.get("http_token_file")
+    if not (_private(folder, stat.S_ISDIR) and _private(file, stat.S_ISREG)):
+        log.warning("RustGIS: %s is not this user's alone (another owner, or writable by others): not used, as if "
+                    "its agent control were off", file)
+        return None
+    pid = info.get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return None
+    return info
+
+
+def _settings_file(path: Path) -> bool:
+    """Whether ``path`` lies in RustGIS's settings folder (:func:`settings_dir`), where RustGIS keeps its token."""
+    folder = settings_dir()
+    if folder is None or not path.is_absolute():
+        return False
+    try:
+        return path.resolve().is_relative_to(folder.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def endpoint() -> Endpoint | None:
+    """Where a running RustGIS's MCP over HTTP listens, as RustGIS publishes it: the ``http_url`` and
+    ``http_token_file`` of its ``endpoint.json`` in :func:`token_dir`, taken only while its ``pid`` runs. None when
+    there is no such file, it cannot be read or is not what RustGIS writes, it or its folder is not this user's alone
+    (:func:`_published`), its ``pid`` does not run (a RustGIS that crashed leaves its file behind), or it names no HTTP
+    address (the relay runs, agent control is off) - or one the token must not go to: an address that is not this
+    computer's loopback, a token file outside RustGIS's settings folder (said in the log).
+
+    There is no default address to fall back on: RustGIS keeps its token for good, and any program of any account may be
+    listening at 127.0.0.1:8768 when RustGIS is not, so the token goes only to the address of a RustGIS that was seen
+    running. Nothing is asked of the network: whether it still answers is for the first request to find out."""
+    info = _published()
+    if info is None:
+        return None
+    url, token_file = info.get("http_url"), info.get("http_token_file")
     if not all(isinstance(value, str) and value for value in (url, token_file)):
         return None
-    return Endpoint(url, Path(token_file)) if _process_runs(pid) else None
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        parts, host = None, None
+    if parts is None or parts.scheme != "http" or host not in LOOPBACK_HOSTS:
+        log.warning("RustGIS: endpoint.json names an address that is not this computer's (%s): not used", url[:200])
+        return None
+    if not _settings_file(Path(token_file)):
+        log.warning("RustGIS: endpoint.json names a token file outside RustGIS's settings folder (%s): not used",
+                    token_file[:300])
+        return None
+    return Endpoint(url, Path(token_file)) if _process_runs(info["pid"]) else None
 
 
 def _result_of(reply: object) -> dict:
@@ -400,6 +460,14 @@ class _Transport:
         return answer
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Redirects refused: the answer that redirects reaches the caller as the HTTP error it is (a status of its own,
+    :meth:`HttpTransport._refusal`), and the request - its token with it - goes nowhere else."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class HttpTransport(_Transport):
     """RustGIS's MCP over HTTP: the app of this computer, while its agent control is ticked. Stateless (no session to
     open), one connection per request. ``timeout`` (seconds) bounds the wait for each answer; a short one suits what
@@ -410,8 +478,8 @@ class HttpTransport(_Transport):
         self.endpoint = endpoint
         self.timeout = timeout
         # this computer is reached directly, never through a proxy of the shell or of the system (urllib's default
-        # opener would ask one for 127.0.0.1 too)
-        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        # opener would ask one for 127.0.0.1 too), and a redirect is never followed: it would take the token elsewhere
+        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
     def _token(self) -> str:
         path = self.endpoint.token_file

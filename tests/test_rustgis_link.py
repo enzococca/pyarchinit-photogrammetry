@@ -60,7 +60,8 @@ class FakeRustGis:
     is noted in ``refused`` (a wrong token is the test's doing, not noted). It answers from ``tools`` (a tool -> the
     dict its text carries) unless ``replies`` has the tool: a JSON-RPC body (``{"result": ...}`` or ``{"error": ...}``),
     a function of the recorded request that gives one, or ``(status, text)`` for an HTTP status of its own. ``delays``
-    holds a tool back for some seconds."""
+    holds a tool back for some seconds. ``redirect``: every request answered 302 to that address. ``seen``: the headers
+    (lower case) of every request that reached it, whatever its method and whether it got through."""
 
     def __init__(self, token: str = TOKEN, version: str = "0.4.0"):
         self.token, self.version = token, version
@@ -69,6 +70,8 @@ class FakeRustGis:
         self.delays: dict[str, float] = {}
         self.requests: list[dict] = []  # path, headers (lower case) and message of each request that got through
         self.refused: list[str] = []
+        self.redirect: str | None = None
+        self.seen: list[dict] = []
         self.folder: Path | None = None  # the settings folder the fixture makes for it, with the token in it
         self.runtime: Path | None = None  # the run folder (XDG_RUNTIME_DIR) where it publishes its endpoint.json
         fake = self
@@ -78,6 +81,10 @@ class FakeRustGis:
 
             def do_POST(self):
                 fake._serve(self)
+
+            def do_GET(self):  # what urllib would make of a POST it follows through a redirect
+                fake.seen.append({k.lower(): v for k, v in self.headers.items()})
+                self.send_error(405)
 
             def log_message(self, *args):
                 pass
@@ -94,7 +101,15 @@ class FakeRustGis:
 
     def _serve(self, handler) -> None:
         headers = {k.lower(): v for k, v in handler.headers.items()}
+        self.seen.append(headers)
         raw = handler.rfile.read(int(headers.get("content-length") or 0))
+        if self.redirect:
+            handler.send_response(302)
+            handler.send_header("Location", self.redirect)
+            handler.send_header("Content-Length", "0")
+            handler.send_header("Connection", "close")
+            handler.end_headers()
+            return
         status, text = self._answer(handler.path, headers, raw)
         data = text.encode("utf-8")
         handler.send_response(status)
@@ -167,10 +182,11 @@ def dead_pid() -> int:
 def fake_rustgis(tmp_path, monkeypatch):
     """A fake RustGIS on a free port that publishes itself as the real one does: an endpoint.json in the run folder
     XDG_RUNTIME_DIR names, for this process (which runs), whose http_token_file is the token file in its settings
-    folder (``fake.folder``). The program finds it only so."""
+    folder (``fake.folder``, the one RUSTGIS_CONFIG_DIR names). The program finds it only so."""
     fake = FakeRustGis()
     fake.folder = tmp_path / "RustGIS"
     fake.folder.mkdir()
+    monkeypatch.setenv("RUSTGIS_CONFIG_DIR", str(fake.folder))
     (fake.folder / link.TOKEN_FILE).write_text(TOKEN + "\n", encoding="utf-8")
     fake.runtime = tmp_path / "run"
     fake.runtime.mkdir()
@@ -224,6 +240,7 @@ def test_endpoint_json_is_found_in_the_temporary_folder_without_a_run_folder(tmp
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
     monkeypatch.setenv("USER", "enzo")
+    monkeypatch.setenv("RUSTGIS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "tmp").mkdir()
     publish_endpoint(tmp_path / "tmp", 9123, tmp_path / link.TOKEN_FILE)  # makes tmp/rustgis ...
     assert link.endpoint() is None  # ... which is not the folder RustGIS uses here
@@ -271,6 +288,85 @@ def test_a_file_that_is_not_what_rustgis_writes_gives_nothing(fake_rustgis, cont
     published.unlink()
     published.mkdir()  # a folder in its place
     assert link.endpoint() is None
+
+
+@pytest.mark.parametrize("url", ["http://192.168.1.20:9123/mcp", "http://example.org:9123/mcp",
+                                 "https://127.0.0.1:9123/mcp", "http://127.0.0.1.example.org/mcp",
+                                 "http://user@evil.example:9123/mcp", "file:///etc/passwd", "http://[::1", "mcp"])
+def test_an_address_that_is_not_this_computers_is_refused(fake_rustgis, caplog, url):
+    """The token goes only to this computer's loopback: an endpoint.json naming another host (planted by another
+    account, or anything else) gives no address, said in the log; 127.0.0.1, ::1 and localhost are taken."""
+    caplog.set_level(logging.WARNING, logger=link.__name__)
+    token = fake_rustgis.folder / link.TOKEN_FILE
+    publish_endpoint(fake_rustgis.runtime, fake_rustgis.port, token, http_url=url)
+    assert link.endpoint() is None
+    assert any("not this computer" in r.getMessage() for r in caplog.records) or url == "http://[::1"
+    for host in ("127.0.0.1", "[::1]", "localhost"):
+        publish_endpoint(fake_rustgis.runtime, fake_rustgis.port, token, http_url=f"http://{host}:9123/mcp")
+        assert link.endpoint() is not None, host
+
+
+def test_a_token_file_outside_rustgis_settings_folder_is_refused(fake_rustgis, tmp_path, caplog):
+    """The token file named must lie in RustGIS's settings folder (settings_dir): a planted endpoint.json naming some
+    other file of the user is not followed."""
+    caplog.set_level(logging.WARNING, logger=link.__name__)
+    elsewhere = tmp_path / "elsewhere" / link.TOKEN_FILE
+    elsewhere.parent.mkdir()
+    elsewhere.write_text(TOKEN)
+    for token_file in (elsewhere, fake_rustgis.folder / ".." / "elsewhere" / link.TOKEN_FILE,
+                       Path(link.TOKEN_FILE)):
+        publish_endpoint(fake_rustgis.runtime, fake_rustgis.port, token_file)
+        assert link.endpoint() is None, token_file
+    assert any("outside RustGIS's settings folder" in r.getMessage() for r in caplog.records)
+    publish_endpoint(fake_rustgis.runtime, fake_rustgis.port, fake_rustgis.folder / link.TOKEN_FILE)
+    assert link.endpoint() is not None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="owners and modes of POSIX")
+def test_run_files_that_are_not_this_users_alone_are_refused(fake_rustgis, monkeypatch, caplog):
+    """On POSIX endpoint.json and its folder must be this user's and writable by nobody else (what RustGIS itself
+    checks): a folder in a shared /tmp made by another account, or open to others, gives no address - as if agent
+    control were off -, said in the log; the file must not be a link."""
+    caplog.set_level(logging.WARNING, logger=link.__name__)
+    folder = fake_rustgis.runtime / "rustgis"
+    published = folder / "endpoint.json"
+    assert link.endpoint() is not None
+    for target, mode in ((folder, 0o777), (folder, 0o775), (published, 0o666), (published, 0o646)):
+        original = target.stat().st_mode & 0o777
+        target.chmod(mode)
+        try:
+            assert link.endpoint() is None, (target.name, oct(mode))
+        finally:
+            target.chmod(original)
+        assert link.endpoint() is not None
+    assert any("not this user's alone" in r.getMessage() for r in caplog.records)
+    real_getuid = os.getuid
+    monkeypatch.setattr(os, "getuid", lambda: real_getuid() + 1)  # owned by another account
+    assert link.endpoint() is None
+    monkeypatch.setattr(os, "getuid", real_getuid)
+    moved = folder / "planted.json"
+    published.rename(moved)
+    published.symlink_to(moved)  # a link in place of the file
+    assert link.endpoint() is None
+    published.unlink()
+    moved.rename(published)
+    assert link.endpoint() is not None
+
+
+def test_a_redirect_is_refused_and_the_token_goes_nowhere_else(fake_rustgis):
+    """An answer that redirects (302, to another port of this computer) is not followed: RustGisRefused, and the second
+    address never sees a request - the token never goes there."""
+    other = FakeRustGis()
+    try:
+        fake_rustgis.redirect = f"http://127.0.0.1:{other.port}/mcp"
+        transport = link.HttpTransport(link.endpoint())
+        with pytest.raises(link.RustGisRefused, match="302"):
+            transport.initialize()
+        assert len(fake_rustgis.seen) == 1 and fake_rustgis.seen[0]["authorization"] == f"Bearer {TOKEN}"
+        assert other.seen == [] and other.requests == []
+        assert all("authorization" not in headers for headers in other.seen)
+    finally:
+        other.close()
 
 
 def test_the_run_folder_follows_rustgis(tmp_path, monkeypatch):
