@@ -269,6 +269,44 @@ def elevation_cmd(project: Path,
     typer.echo(f"{ortho}\n{relief}")
 
 
+@app.command("region-markers")
+def region_markers_cmd(project: Path,
+                       a: str = typer.Argument(..., help="first marker (label, key or target code): u from A to B"),
+                       b: str = typer.Argument(..., help="second marker"),
+                       c: str = typer.Argument(..., help="third marker"),
+                       thickness: float = typer.Option(..., help="metres of region along the normal of the "
+                                                       "plane, centred on it"),
+                       extent: str = typer.Option("region", help="size in the plane: 'region' (the region there "
+                                                  "was, else the tie points) or 'tie_points'"),
+                       chunk: Optional[str] = None):
+    """The reconstruction region as a thin box on the plane of three markers (an object, a wall):
+    the axes of the plane and its normal towards the photos."""
+    if extent not in ("region", "tie_points"):
+        raise typer.BadParameter("--extent: region or tie_points")
+    doc, ch = _open(project, chunk)
+    try:
+        region = ch.region_from_markers(a, b, c, thickness, extent)
+    except (KeyError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    doc.save()
+    typer.echo("region on the plane of %s, %s, %s: %.3f x %.3f x %.3f m, centre %.3f %.3f %.3f"
+               % (a, b, c, *region.size, *region.center))
+
+
+@app.command("normal-map")
+def normal_map_cmd(project: Path,
+                   source: str = typer.Option("auto", help="model, dem or auto (the model when there is one)"),
+                   chunk: Optional[str] = None):
+    """The normal map on the grid of the orthomosaic (same pixels, same coordinates): an RGBA
+    GeoTIFF, red east, green north, blue up; the product normal_map of the chunk."""
+    if source not in ("auto", "dem", "model"):
+        raise typer.BadParameter("--source: auto, dem or model")
+    doc, ch = _open(project, chunk)
+    path = ch.build_normal_map(source, progress=print_progress)
+    doc.save()
+    typer.echo(f"normal map from the {ch.meta.get('normal_map', {}).get('source', source)}: {path}")
+
+
 @app.command("colour-scan")
 def colour_scan(project: Path, scan: str = typer.Option(..., help="label of the chunk to colour"),
                 photos: str = typer.Option(..., help="label of the chunk with the aligned photos")):

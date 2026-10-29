@@ -69,7 +69,7 @@ class Chunk:
         orthomosaic exported by Metashape - is never overwritten: the changed copy replaces
         it in the project only."""
         files = {"point_cloud": "point_cloud.ply", "model": "model.ply", "dem": "dem.tif",
-                 "orthomosaic": "orthomosaic.tif"}
+                 "orthomosaic": "orthomosaic.tif", "normal_map": "normal_map.tif"}
         return self.data_dir / files.get(name, f"{name}.dat")
 
     # ------------------------------------------------------------ properties
@@ -751,6 +751,24 @@ class Chunk:
         from ..engine.region import reset_region
 
         return reset_region(self, source, margin, angle_deg)
+
+    def region_from_markers(self, a, b, c, thickness: float, extent: str = "region"):
+        """A thin box on the plane of three markers (label, key or target code): the axes of the
+        plane and its normal towards the photos, ``thickness`` along the normal centred on the
+        plane; the extent in the plane from the region there was (``extent="region"``) or from
+        the tie points (``"tie_points"``). Stored and returned."""
+        from ..engine.region import region_from_markers
+
+        return region_from_markers(self, a, b, c, thickness, extent)
+
+    def build_normal_map(self, source: str = "auto", progress: ProgressCallback | None = None) -> Path:
+        """The normal map on the grid of the orthomosaic (same pixels, same coordinates): an RGBA
+        GeoTIFF, red east, green north, blue up, from the model (``source="model"``, rays cast
+        straight down), the DEM (``"dem"``) or the model when there is one (``"auto"``); the
+        product ``normal_map`` of the chunk."""
+        from ..engine.normalmap import normal_map_on_grid
+
+        return normal_map_on_grid(self, source, progress=progress)
 
     def edit_dem(self, polygon, method: str = "plane", value: float | None = None, breaklines=None,
                  keep_version: bool = True, version_name: str | None = None,

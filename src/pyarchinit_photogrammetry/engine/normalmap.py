@@ -12,6 +12,10 @@ into the normal map (RGB = (n + 1) / 2, the OpenGL convention: green up, as glTF
 :func:`light_model` writes ``<data>/light/``: ``light.glb`` (both textures, a PBR material, local
 coordinates around the centre as :func:`io.web.export_glb`), ``light.obj`` + ``.mtl`` (world
 coordinates; ``map_Kd`` and ``norm``), ``light_color.jpg`` and ``light_normal.png``.
+
+:func:`normal_map_on_grid` is the other normal map: the one of the surface in plan, on the very
+grid of the orthomosaic (red east, green north, blue up, as Metashape's), to light a drawing from
+another side or to put the relief under a drawing in QGIS.
 """
 from __future__ import annotations
 
@@ -244,3 +248,143 @@ def light_model(chunk, target_faces: int = 50_000, texture_size: int = 4096, fol
     progress(1.0, f"Light model: {len(lf):,} faces, textures {colour.shape[0]} px")
     return {"glb": out / "light.glb", "obj": out / "light.obj", "color": out / "light_color.jpg",
             "normal": out / "light_normal.png", "faces": int(len(lf)), "hits": share}
+
+
+NORMAL_TILE = 1024  # rays per side of a tile of the normal map cast on the model
+
+
+def _grid_centres(transform, rows: np.ndarray, cols: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """World x, y of the centres of the cells (rows, cols) of a raster with ``transform``."""
+    c, r = cols + 0.5, rows + 0.5
+    return (transform.c + transform.a * c + transform.b * r, transform.f + transform.d * c + transform.e * r)
+
+
+def _normals_from_dem(chunk, transform, shape: tuple[int, int], crs, progress: Progress) -> np.ndarray:
+    """Unit normals (H, W, 3; NaN without the DEM) on the grid from the DEM resampled on it
+    (bilinear), by Horn's kernel."""
+    import rasterio
+    from rasterio.warp import Resampling, reproject
+    from scipy import ndimage
+
+    dem = chunk.product_path("dem")
+    if dem is None or not dem.exists():
+        raise RuntimeError("build the DEM first (or the model: source='model')")
+    h, w = shape
+    z = np.full((h, w), np.nan, np.float32)
+    progress(0.1, "Mappa delle normali: DEM sulla griglia dell'ortofoto")
+    with rasterio.open(dem) as d:
+        reproject(rasterio.band(d, 1), z, src_nodata=d.nodata, dst_transform=transform, dst_crs=crs,
+                  dst_nodata=np.nan, resampling=Resampling.bilinear)
+    valid = np.isfinite(z)
+    if not valid.any():
+        raise RuntimeError("the DEM does not cover the orthomosaic")
+    progress(0.5, "Mappa delle normali: pendenze del DEM")
+    # the cells without a height take the nearest one: the kernel then reaches the edge of the surface
+    _dist, (ri, ci) = ndimage.distance_transform_edt(~valid, return_indices=True)
+    filled = z[ri, ci].astype(np.float64)
+    pad = np.pad(filled, 1, mode="edge")
+    tl, t, tr = pad[:-2, :-2], pad[:-2, 1:-1], pad[:-2, 2:]
+    l, r = pad[1:-1, :-2], pad[1:-1, 2:]
+    bl, b, br = pad[2:, :-2], pad[2:, 1:-1], pad[2:, 2:]
+    dz_col = ((tr + 2 * r + br) - (tl + 2 * l + bl)) / 8.0  # per column (east when a > 0)
+    dz_row = ((bl + 2 * b + br) - (tl + 2 * t + tr)) / 8.0  # per row (south when e < 0)
+    nx, ny = -dz_col / transform.a, -dz_row / transform.e
+    length = np.sqrt(nx * nx + ny * ny + 1.0)
+    normals = np.stack([nx / length, ny / length, 1.0 / length], axis=-1)
+    normals[~valid] = np.nan
+    return normals
+
+
+def _normals_from_model(chunk, transform, shape: tuple[int, int], progress: Progress) -> np.ndarray:
+    """Unit normals (H, W, 3; NaN where no ray hits) on the grid from the model: a ray straight
+    down on every cell centre, the normal of the face it meets (Open3D), tiles of
+    ``NORMAL_TILE`` x ``NORMAL_TILE`` rays."""
+    try:
+        import open3d as o3d
+    except ImportError as exc:
+        raise RuntimeError("the normal map from the model needs Open3D (source='dem' works without it)") from exc
+
+    from ..io.mesh_ply import read_mesh
+
+    path = chunk.product_path("model")
+    if path is None or not path.exists():
+        raise RuntimeError("build the model first (or the DEM: source='dem')")
+    mesh = read_mesh(path)
+    faces = np.asarray(mesh.faces, np.int64)
+    if not len(faces):
+        raise RuntimeError("the model has no faces")
+    world = chunk.to_world(np.asarray(mesh.xyz, np.float64))
+    offset = world.mean(axis=0)  # float32 rays and vertices: around the model, not at the CRS origin
+    local = (world - offset).astype(np.float32)
+    top = float(local[:, 2].max()) + 1.0
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(o3d.core.Tensor(local), o3d.core.Tensor(faces.astype(np.uint32)))
+    h, w = shape
+    normals = np.full((h, w, 3), np.nan, np.float32)
+    tiles = [(r0, c0) for r0 in range(0, h, NORMAL_TILE) for c0 in range(0, w, NORMAL_TILE)]
+    for k, (r0, c0) in enumerate(tiles):
+        progress(k / len(tiles), f"Mappa delle normali: {k + 1} di {len(tiles)} tasselli")
+        r1, c1 = min(r0 + NORMAL_TILE, h), min(c0 + NORMAL_TILE, w)
+        rows, cols = np.meshgrid(np.arange(r0, r1), np.arange(c0, c1), indexing="ij")
+        x, y = _grid_centres(transform, rows.ravel().astype(np.float64), cols.ravel().astype(np.float64))
+        rays = np.zeros((x.size, 6), np.float32)
+        rays[:, 0], rays[:, 1] = x - offset[0], y - offset[1]
+        rays[:, 2], rays[:, 5] = top, -1.0
+        hit = scene.cast_rays(o3d.core.Tensor(rays))
+        t_hit = hit["t_hit"].numpy()
+        n = hit["primitive_normals"].numpy()
+        ok = np.isfinite(t_hit)
+        n[n[:, 2] < 0] *= -1  # every normal upwards
+        n[~ok] = np.nan
+        normals[r0:r1, c0:c1] = n.reshape(r1 - r0, c1 - c0, 3)
+    return normals
+
+
+def normal_map_on_grid(chunk, source: str = "auto", path=None, progress: Progress | None = None):
+    """The normal map of the surface on exactly the grid of the orthomosaic (width, height,
+    transform and CRS read from it): an RGBA uint8 GeoTIFF with R = east, G = north, B = up of
+    the unit normal (``(n + 1) / 2 * 255``) and A = 255 where there is a surface under an opaque
+    pixel of the orthomosaic. ``source``: ``"dem"`` (the DEM resampled on the grid, Horn's kernel),
+    ``"model"`` (a ray straight down on every cell, the normal of the face it meets; Open3D) or
+    ``"auto"`` (the model when the chunk has one and Open3D, else the DEM). Written to ``path``
+    (default the product ``normal_map`` of the chunk, ``normal_map.tif``); the path returned."""
+    from pathlib import Path
+
+    import rasterio
+    from rasterio.enums import ColorInterp
+
+    from .dem import write_geotiff
+
+    progress = as_progress(progress)
+    if source not in ("auto", "dem", "model"):
+        raise ValueError(f"source: 'auto', 'dem' or 'model', not {source!r}")
+    ortho = chunk.orthomosaic_path
+    if ortho is None or not ortho.exists():
+        raise RuntimeError("build the orthomosaic first: the normal map takes its grid")
+    with rasterio.open(ortho) as o:
+        transform, shape, crs = o.transform, (o.height, o.width), o.crs
+        alpha = None
+        if ColorInterp.alpha in o.colorinterp:
+            alpha = o.read(list(o.colorinterp).index(ColorInterp.alpha) + 1) > 0
+    if source == "auto":
+        from importlib.util import find_spec
+
+        model = chunk.product_path("model")
+        source = "model" if model is not None and model.exists() and find_spec("open3d") else "dem"
+    progress(0.0, f"Mappa delle normali dal {'modello' if source == 'model' else 'DEM'}")
+    if source == "model":
+        normals = _normals_from_model(chunk, transform, shape, progress.sub(0.05, 0.8))
+    else:
+        normals = _normals_from_dem(chunk, transform, shape, crs, progress.sub(0.05, 0.8))
+    valid = np.isfinite(normals).all(axis=-1)
+    opaque = valid if alpha is None else valid & alpha
+    rgb = np.where(valid[..., None], np.round((normals * 0.5 + 0.5) * 255), 0)
+    rgba = np.concatenate([rgb.astype(np.uint8), np.where(opaque, 255, 0).astype(np.uint8)[..., None]], axis=-1)
+    out = Path(path) if path is not None else chunk.own_product_path("normal_map")
+    progress(0.9, "Mappa delle normali: scrittura")
+    write_geotiff(out, np.moveaxis(rgba, -1, 0), None, 0.0, crs, photometric="RGB", transform=transform)
+    if path is None:
+        chunk._set_product("normal_map", out)
+        chunk.meta["normal_map"] = {"source": source}
+    progress(1.0, f"Mappa delle normali: {shape[1]} x {shape[0]} pixel, {100 * opaque.mean():.1f} % con superficie")
+    return out

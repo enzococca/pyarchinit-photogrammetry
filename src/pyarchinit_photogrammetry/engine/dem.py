@@ -161,22 +161,30 @@ def grid_points(pts: np.ndarray, resolution: float, bounds=None, reducer: str = 
     return arr.reshape(h, w), (xmin, ymax), (h, w)
 
 
-def write_geotiff(path: Path, array: np.ndarray, origin, resolution: float, crs: str | None, nodata=None,
-                  photometric: str | None = None) -> Path:
+def write_geotiff(path: Path, array: np.ndarray, origin, resolution: float, crs, nodata=None,
+                  photometric: str | None = None, transform=None) -> Path:
+    """A GeoTIFF (deflate, tiled, BigTIFF when needed, overviews) of ``array`` (bands first) with
+    its top-left corner at ``origin`` and square cells of ``resolution``, or on ``transform`` (an
+    affine of rasterio, as read from another raster) when given; ``crs`` a string of the program
+    (``None``/``LOCAL`` = no CRS) or the CRS object of a rasterio dataset, written as it is."""
     import rasterio
     from rasterio.transform import from_origin
 
     arr = array if array.ndim == 3 else array[None]
     profile = {
         "driver": "GTiff", "height": arr.shape[1], "width": arr.shape[2], "count": arr.shape[0],
-        "dtype": str(arr.dtype), "transform": from_origin(origin[0], origin[1], resolution, resolution),
+        "dtype": str(arr.dtype),
+        "transform": from_origin(origin[0], origin[1], resolution, resolution) if transform is None else transform,
         "compress": "deflate", "tiled": True, "blockxsize": 256, "blockysize": 256, "BIGTIFF": "IF_SAFER",
     }
     if arr.shape[1] < 256 or arr.shape[2] < 256:
         profile.update(tiled=False)
         profile.pop("blockxsize")
         profile.pop("blockysize")
-    if not crs_mod.is_local(crs):
+    if crs is not None and not isinstance(crs, str):
+        if crs:  # a CRS object of rasterio (an empty one = no CRS)
+            profile["crs"] = crs
+    elif not crs_mod.is_local(crs):
         profile["crs"] = crs_mod.to_pyproj(crs).to_wkt()
     if nodata is not None:
         profile["nodata"] = nodata

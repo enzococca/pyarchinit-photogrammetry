@@ -116,6 +116,49 @@ def region_from_box(chunk: Chunk, box, zmin: float | None = None, zmax: float | 
     return region
 
 
+def region_from_markers(chunk: Chunk, a, b, c, thickness: float, extent: str = "region",
+                        margin: float = 0.05) -> Region:
+    """A thin box lying on the plane of three markers (``a``, ``b``, ``c``: a label, a key or a
+    target code, :func:`markers.gcp.resolve_marker`) - the region of an object or of a wall. The
+    axes of the box are the two directions of the plane (:func:`engine.elevation.plane_from_markers`:
+    ``u`` from ``a`` towards ``b``) and its normal, which faces the photos; ``thickness`` is the
+    size along the normal, centred on the plane. The extent in the plane is the one of the region
+    there was, projected on the plane (``extent="region"``), else - or with
+    ``extent="tie_points"`` - the middle of the tie points (percentiles 1-99) widened by ``margin``
+    of its size. Stored and returned."""
+    from ..markers.gcp import resolve_marker
+    from .elevation import plane_from_markers
+
+    if extent not in ("region", "tie_points"):
+        raise ValueError(f"extent: 'region' or 'tie_points', not {extent!r}")
+    markers = [resolve_marker(chunk, ref) for ref in (a, b, c)]
+    if len({m.key for m in markers}) < 3:
+        raise ValueError("three different markers are needed")
+    missing = [m.label for m in markers if m.position is None]
+    if missing:
+        raise ValueError(f"markers without a position (align the photos or place them): {', '.join(missing)}")
+    pts = chunk.to_world(np.array([m.position for m in markers], np.float64))
+    cams = [cam.center for cam in chunk.aligned_cameras if cam.center is not None]
+    toward = chunk.to_world(np.array(cams, np.float64)).mean(axis=0) if cams else None
+    plane = plane_from_markers(pts, pts[0], pts[1], toward=toward, heights=False)
+    u, v = plane.u_axis, plane.v_axis
+    n = np.cross(u, v)  # towards the photos
+    previous = get_region(chunk) if extent == "region" else None
+    if previous is not None:
+        uv = (previous.corners() - pts[0]) @ np.column_stack([u, v])
+        lo, hi = uv.min(axis=0), uv.max(axis=0)
+    else:
+        uv = (_world_points(chunk, "tie_points") - pts[0]) @ np.column_stack([u, v])
+        lo, hi = np.percentile(uv, 1, axis=0), np.percentile(uv, 99, axis=0)
+        pad = (hi - lo) * margin
+        lo, hi = lo - pad, hi + pad
+    centre = pts[0] + u * (lo[0] + hi[0]) / 2 + v * (lo[1] + hi[1]) / 2
+    size = [max(hi[0] - lo[0], 1e-6), max(hi[1] - lo[1], 1e-6), abs(float(thickness))]
+    region = Region(centre, size, np.column_stack([u, v, n]))
+    set_region(chunk, region)
+    return region
+
+
 def inside_internal(chunk: Chunk, pts: np.ndarray, region: Region | None = None) -> np.ndarray:
     """Which internal-frame points lie inside the region (all of them without one)."""
     region = region or get_region(chunk)

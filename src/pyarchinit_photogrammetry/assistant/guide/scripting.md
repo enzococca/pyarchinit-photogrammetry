@@ -103,13 +103,13 @@ aligned are used. In the window the same calls are in the *Workflow* menu.
 ## Examples
 
 The three scripts below are written for the Python console, where `window` is the window itself. They use the
-functions the program has from 1.7.0 on.
+functions the program has from 1.7.0 on: `chunk.region_from_markers(...)` and `chunk.build_normal_map(...)` (the
+first two examples, one call each; `ppg region-markers` and `ppg normal-map` on the command line).
 
 !!! note "Coming in 1.7.0"
-    `chunk.region_from_markers(...)` and `chunk.build_normal_map(...)` become functions of the program (the first two
-    examples), `doc.duplicate_chunk(...)` and `chunk.set_cameras_enabled(...)` are the functions of the third, and
+    `doc.duplicate_chunk(...)` and `chunk.set_cameras_enabled(...)` are the functions of the third example, and
     `window.selected_polygon()` becomes the public name of the selection of the 2D view (in a script run with
-    *Run Python script...* the same area is the name `polygon`). The scripts are written as they will be: they do
+    *Run Python script...* the same area is the name `polygon`). That script is written as it will be: it does
     not run in the versions before 1.7.0.
 
 ### The region on the plane of three markers

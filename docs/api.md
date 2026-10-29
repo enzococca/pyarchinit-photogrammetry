@@ -1130,6 +1130,8 @@ PyArchInit has no column for it).
 | `chunk.region = None` | no region |
 | `chunk.reset_region(source="tie_points", margin=0.05, angle_deg=0)` | around the middle 98 % of the tie points (or the dense cloud), turned about the vertical |
 | `engine.region.region_from_box(chunk, (xmin, ymin, xmax, ymax), zmin=None, zmax=None)` | over a plan rectangle, the heights from the points inside |
+| `chunk.region_from_markers(a, b, c, thickness, extent="region")` | a thin box on the plane of three markers (label, key or target code): the axes of the plane and its normal towards the photos, `thickness` along the normal centred on the plane; the size in the plane from the region there was (`"region"`) or from the tie points (`"tie_points"`); CLI `ppg region-markers` |
+| `engine.region.region_from_markers(chunk, a, b, c, thickness, extent="region", margin=0.05)` | the same as a module function; `margin` widens the extent taken from the tie points |
 | `Region.contains(world)` | which world points lie inside the box |
 | `Region.corners()` | the 8 corners of the box |
 | `Region.footprint()` | the extent of the box in plan |
@@ -1140,6 +1142,30 @@ PyArchInit has no column for it).
 **`chunk.region = engine.region.Region(...)`**: depth maps (CPU and, afterwards, COLMAP's) have no
 depth outside it, the dense cloud and the mesh are cut to it (a Poisson surface no longer balloons
 beyond the object), so DEM and orthomosaic cover it only.
+
+**`chunk.region_from_markers(a, b, c, thickness)`**: the plane is the one of
+`engine.elevation.plane_from_markers` (`u` from `a` towards `b`, `v` perpendicular in the plane,
+the normal facing the mean of the aligned cameras). With `extent="region"` and a region, the corners
+of that region are projected on the plane and the new box takes their extent (a box projected on a
+sloping plane grows by up to its height); without a region, or with `extent="tie_points"`, the
+percentiles 1-99 of the tie points in the plane, widened by `margin`. The markers must have a
+position (aligned photos, or placed by hand); three markers on a line raise `ValueError`.
+
+## Normal map
+
+| Call | Description |
+| --- | --- |
+| `chunk.build_normal_map(source="auto")` | the normal map on the grid of the orthomosaic (same width, height, transform and CRS): an RGBA uint8 GeoTIFF, R east, G north, B up (`(n + 1) / 2 * 255`), A 255 where there is a surface under an opaque pixel; the product `normal_map` (`normal_map.tif`); CLI `ppg normal-map` |
+| `engine.normalmap.normal_map_on_grid(chunk, source="auto", path=None)` | the same as a module function, to `path` (then not a product of the chunk) |
+
+**`chunk.build_normal_map(source)`**: `"dem"` resamples the DEM on the grid (bilinear) and takes the
+slopes with Horn's kernel; `"model"` casts a ray straight down on every cell centre (Open3D
+`RaycastingScene`, tiles of 1024 x 1024 rays) and takes the normal of the face it meets, every
+normal turned upwards; `"auto"` is `"model"` when the chunk has a model and Open3D is installed,
+else `"dem"`. `chunk.meta["normal_map"]["source"]` says which one was used. It is the normal map
+of the surface in plan (as Metashape's), to light a drawing from another side or to put the relief
+under a drawing in QGIS; the normal map in tangent space of a light model is
+`engine.normalmap.light_model`.
 
 ## Editing the DEM
 

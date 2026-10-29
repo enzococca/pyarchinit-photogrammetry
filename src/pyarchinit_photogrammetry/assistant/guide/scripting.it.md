@@ -104,14 +104,14 @@ finestra le stesse chiamate stanno nel menu *Flusso di lavoro*.
 ## Esempi
 
 I tre script qui sotto sono scritti per la console Python, dove `window` è la finestra stessa. Usano le funzioni che
-il programma ha dalla 1.7.0.
+il programma ha dalla 1.7.0: `chunk.region_from_markers(...)` e `chunk.build_normal_map(...)` (i primi due esempi, una
+chiamata ciascuno; `ppg region-markers` e `ppg normal-map` dalla riga di comando).
 
 !!! note "In arrivo nella 1.7.0"
-    `chunk.region_from_markers(...)` e `chunk.build_normal_map(...)` diventano funzioni del programma (i primi due
-    esempi), `doc.duplicate_chunk(...)` e `chunk.set_cameras_enabled(...)` sono le funzioni del terzo, e
+    `doc.duplicate_chunk(...)` e `chunk.set_cameras_enabled(...)` sono le funzioni del terzo esempio, e
     `window.selected_polygon()` diventa il nome pubblico della selezione della vista 2D (in uno script lanciato con
-    *Esegui script Python...* la stessa area è il nome `polygon`). Gli script sono scritti come saranno: nelle
-    versioni prima della 1.7.0 non girano.
+    *Esegui script Python...* la stessa area è il nome `polygon`). Quello script è scritto come sarà: nelle versioni
+    prima della 1.7.0 non gira.
 
 ### La regione sul piano di tre marker
 

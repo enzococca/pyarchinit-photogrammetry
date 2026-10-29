@@ -1165,6 +1165,8 @@ PyArchInit non ha una colonna apposita).
 | `chunk.region = None` | nessuna regione |
 | `chunk.reset_region(source="tie_points", margin=0.05, angle_deg=0)` | attorno al 98 % centrale dei punti di legame (o della nuvola densa), girata attorno alla verticale |
 | `engine.region.region_from_box(chunk, (xmin, ymin, xmax, ymax), zmin=None, zmax=None)` | sopra un rettangolo in pianta, le quote dai punti al suo interno |
+| `chunk.region_from_markers(a, b, c, thickness, extent="region")` | una scatola sottile sul piano di tre marker (etichetta, chiave o codice del target): gli assi del piano e la sua normale verso le foto, `thickness` lungo la normale centrato sul piano; l'estensione nel piano dalla regione che c'era (`"region"`) o dai punti di legame (`"tie_points"`); CLI `ppg region-markers` |
+| `engine.region.region_from_markers(chunk, a, b, c, thickness, extent="region", margin=0.05)` | lo stesso come funzione del modulo; `margin` allarga l'estensione presa dai punti di legame |
 | `Region.contains(world)` | quali punti mondo stanno dentro la scatola |
 | `Region.corners()` | gli 8 spigoli della scatola |
 | `Region.footprint()` | l'estensione della scatola in pianta |
@@ -1175,6 +1177,31 @@ PyArchInit non ha una colonna apposita).
 **`chunk.region = engine.region.Region(...)`**: le mappe di profondità (CPU e, dopo, quelle di COLMAP)
 non hanno profondità fuori di essa, la nuvola densa e la mesh vengono tagliate su di essa (una
 superficie Poisson non si gonfia più oltre l'oggetto), così DEM e ortofoto coprono solo quella.
+
+**`chunk.region_from_markers(a, b, c, thickness)`**: il piano è quello di
+`engine.elevation.plane_from_markers` (`u` da `a` verso `b`, `v` perpendicolare nel piano, la normale
+rivolta verso la media delle camere allineate). Con `extent="region"` e una regione, gli spigoli di
+quella regione vengono proiettati sul piano e la scatola nuova ne prende l'estensione (una scatola
+proiettata su un piano inclinato cresce al più della sua altezza); senza regione, o con
+`extent="tie_points"`, i percentili 1-99 dei punti di legame nel piano, allargati di `margin`. I
+marker devono avere una posizione (foto allineate, o messi a mano); tre marker su una linea danno
+`ValueError`.
+
+## Mappa delle normali
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `chunk.build_normal_map(source="auto")` | la mappa delle normali sulla griglia dell'ortofoto (stessi larghezza, altezza, trasformazione e CRS): un GeoTIFF RGBA uint8, R verso est, G verso nord, B verso l'alto (`(n + 1) / 2 * 255`), A 255 dove c'è una superficie sotto un pixel opaco; il prodotto `normal_map` (`normal_map.tif`); CLI `ppg normal-map` |
+| `engine.normalmap.normal_map_on_grid(chunk, source="auto", path=None)` | lo stesso come funzione del modulo, in `path` (allora non è un prodotto del chunk) |
+
+**`chunk.build_normal_map(source)`**: `"dem"` ricampiona il DEM sulla griglia (bilineare) e prende le
+pendenze con il kernel di Horn; `"model"` lancia un raggio verticale verso il basso sul centro di ogni
+cella (`RaycastingScene` di Open3D, tasselli di 1024 x 1024 raggi) e prende la normale della faccia
+che incontra, ogni normale rivolta verso l'alto; `"auto"` è `"model"` quando il chunk ha un modello e
+Open3D è installato, altrimenti `"dem"`. `chunk.meta["normal_map"]["source"]` dice quale è stato
+usato. È la mappa delle normali della superficie in pianta (come quella di Metashape), per illuminare
+un disegno da un altro lato o mettere il rilievo sotto un disegno in QGIS; la mappa delle normali in
+spazio tangente di un modello leggero è `engine.normalmap.light_model`.
 
 ## Modifica del DEM
 
