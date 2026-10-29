@@ -320,7 +320,13 @@ def test_prose_after_a_path_does_not_continue_it(tmp_path):
     assert f.outgoing("la cartella /Users/x/Scavo. Poi 12 km/h, e/o 5 mm/px") == "la cartella Scavo. Poi 12 km/h, e/o 5 mm/px"
     # privacy first (ruling T2-7): after a path, a word with a separator is a piece of it, whatever its length; the
     # prose in between goes with it
-    assert f.outgoing("cd /Users/x/Scavo e omega/phi/kappa e 12/08/2026") == "cd 2026"
+    assert f.outgoing("cd /Users/x/Scavo e omega/phi/kappa e Dati") == "cd kappa e Dati"
+    # a date or a fraction stops the path like a unit (ruling T2-8)
+    assert f.outgoing("cd /Users/x/Scavo e omega/phi/kappa e 12/08/2026") == "cd kappa e 12/08/2026"
+    assert f.outgoing("cd /Users/x/Scavo e 12/08/2026") == "cd Scavo e 12/08/2026"
+    assert f.outgoing("apri /Users/x/Dati Neri/rover del 2026/08/12 e Vista/Pannelli") == \
+        "apri rover del 2026/08/12 e Vista/Pannelli"
+    assert f.outgoing("apri /Users/x/Dati Neri/rover a 1/2 e Vista/Pannelli") == "apri rover a 1/2 e Vista/Pannelli"
     assert f.outgoing("apri /Users/a/b e poi usa Vista/Pannelli") == "apri Pannelli"
     # a short unit stops the path
     assert f.outgoing("apri /Users/x/Scavo Tell Halaf/rover 5 mm/px e poi Dati/x") == "apri rover 5 mm/px e poi Dati/x"

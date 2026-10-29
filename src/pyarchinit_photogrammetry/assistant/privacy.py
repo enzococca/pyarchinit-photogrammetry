@@ -250,9 +250,13 @@ def _crs_label(value: Any) -> Any:
 
 def _is_unit(word: str) -> bool:
     """Whether a word that holds a separator is a short unit or an alternative (``km/h``, ``m/s``, ``mm/px``, ``e/o``,
-    ``H/E/N``, ``TCP/IP``): no known extension and every part made of 1-3 letters.  Any other such word after the
-    start of a path is a piece of it (``Halaf/Dati``, ``Vista/Pannelli``, ``omega/phi/kappa``)."""
-    return not _ENDS_KNOWN.search(word) and all(_UNIT_PART.fullmatch(part) for part in re.split(r"[\\/]", word))
+    ``H/E/N``, ``TCP/IP``): no known extension and every part made of 1-3 letters; or a date or a fraction, every
+    part made of digits (``12/08/2026``, ``1/2``).  Any other such word after the start of a path is a piece of it
+    (``Halaf/Dati``, ``Vista/Pannelli``, ``omega/phi/kappa``)."""
+    if _ENDS_KNOWN.search(word):
+        return False
+    parts = re.split(r"[\\/]", word)
+    return all(_UNIT_PART.fullmatch(part) for part in parts) or all(part.isdigit() for part in parts)
 
 
 def _quoted_end(text: str, start: int, opener: str) -> int | None:
