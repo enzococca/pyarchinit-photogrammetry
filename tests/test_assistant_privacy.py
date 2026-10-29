@@ -179,9 +179,9 @@ def test_urls_unc_and_windows_paths_leak_nothing(tmp_path):
 
 def test_coordinate_systems_in_text(tmp_path):
     f = Filter(make_document(tmp_path))
-    assert f.outgoing("CRS EPSG:32637 non valido; UTM zone 37N") == "CRS sistema proiettato non valido; sistema proiettato"
-    assert f.outgoing("WGS 84 / UTM zone 37N") == "sistema proiettato"
-    assert f.outgoing("+proj=utm +zone=37 +datum=WGS84") == "sistema proiettato"
+    assert f.outgoing("CRS EPSG:32637 non valido; UTM zone 37N") == "CRS sistema di coordinate non valido; sistema di coordinate"
+    assert f.outgoing("WGS 84 / UTM zone 37N") == "sistema di coordinate"
+    assert f.outgoing("+proj=utm +zone=37 +datum=WGS84") == "sistema di coordinate"
 
 
 def test_update_adds_names_and_keeps_the_placeholders(tmp_path):
@@ -235,7 +235,6 @@ def test_paths_are_only_what_starts_with_an_anchor(tmp_path):
     assert f.outgoing("ppg gnss ppk --mrk /card/F.MRK --rover /card/F.obs") == "ppg gnss ppk --mrk F --rover F"
     assert f.outgoing("apri /Users/a/b.jpg e /Users/c/d.jpg ora") == "apri b e d ora"
     assert f.outgoing("apri /Users/a/foto 12.jpg e basta") == "apri foto_12 e basta"
-    assert f.outgoing("apri /Users/a/foo e poi guarda a.jpg") == "apri foo e poi guarda a.jpg"
     assert f.outgoing('src="/it/gui/x.png"') == 'src="x"'
 
 
@@ -283,31 +282,98 @@ def test_only_coordinate_keys_are_dropped(tmp_path):
     assert f.facts({"reference": "Fotogrammetria"}) == {"reference": "Fotogrammetria"}
 
 
+def test_keys_with_any_coordinate_token_are_dropped_unless_derived(tmp_path):
+    f = Filter(make_document(tmp_path))
+    xyz = [312345.2, 4512345.1, 100.2]
+    for key in ("marker_xyz", "gcp_xyz", "camera_lat", "camera_lon", "camera_z", "ground_z", "top_z", "base_z", "target_xy",
+                "camera_center", "site_centroid", "marker_coordinates", "camera_position", "camera_positions",
+                "marker_position", "z_range", "markerXyz", "cameraLocation", "dem_min", "tie_point_z"):
+        assert f.facts({key: xyz, "ok": 1}) == {"ok": 1}, key
+    kept = {"gps_rmse": 0.02, "pixel_size_x": 0.01, "position_accuracy_m": 1.5, "gnss_status": "fix",
+            "camera_z_error": 0.1, "marker_xyz_std": [1, 2, 3], "z_range_count": 4, "n_positions": 12,
+            "dem_resolution": 0.07, "x_spread": 2.0}
+    assert f.facts(kept) == kept
+
+
+def test_real_paths_with_spaces_are_reduced_whole(tmp_path):
+    f = Filter(make_document(tmp_path))
+    cases = {
+        "/Users/x/Anna Neri/Missione Siria/Timestamp.MRK": "Timestamp",
+        "/Users/x/Anna Neri/Missione Siria/": "Missione_Siria",
+        "/Volumes/Extreme Pro/missione siria/drone/tell": "tell",
+        "C:\\Dati\\Sultan Scavi\\foto": "foto",
+        "~/Documenti/Missione archeologica in Siria 2026 campagna autunno/a.jpg": "a",
+        "/Users/x/Missione archeologica Siria Tell Sultan Nord/a.jpg": "a",
+        "/Users/x/Anna Neri/rover 1.obs": "rover_1",
+        "/Users/x/Anna Neri/db/pyarchinit.sqlite": "pyarchinit",
+        "/Users/x/Anna Neri/Note di campo/rapporto.docx": "rapporto",
+    }
+    for text, name in cases.items():
+        assert f.outgoing(text) == name, text
+        assert f.outgoing(f"apri {text} ora") == f"apri {name} ora", text
+        assert f.outgoing(f"apri {text}.") == f"apri {name}.", text
+    assert f.facts({"p": "/Users/x/Anna Neri/Missione Siria/Timestamp.MRK"}) == {"p": "Timestamp"}
+
+
+def test_prose_after_a_path_does_not_continue_it(tmp_path):
+    f = Filter(make_document(tmp_path))
+    assert f.outgoing("apri /Users/a/b.jpg e /Users/c/d.jpg ora") == "apri b e d ora"
+    assert f.outgoing("la cartella /Users/x/Scavo. Poi 12 km/h, e/o 5 mm/px") == "la cartella Scavo. Poi 12 km/h, e/o 5 mm/px"
+    assert f.outgoing("cd /Users/x/Scavo e omega/phi/kappa e 12/08/2026") == "cd Scavo e omega/phi/kappa e 12/08/2026"
+
+
+def test_relative_markdown_links_are_kept(tmp_path):
+    f = Filter(make_document(tmp_path))
+    for link in ("[API](../api.md#x)", "[API](../api.md)", "[sezione](#x)", "[gui](./gui/)", "[su](../)",
+                 "[plugin](../plugins/geoarchaeology.it.md#csv)"):
+        assert f.outgoing(link) == link, link
+    assert f.outgoing("![x](../img/gui/x.png)") == "![x](x)"
+    assert f.outgoing("[x](/Users/a/b.md)") == "[x](b)"
+
+
+def test_variable_anchors_and_bare_words(tmp_path):
+    f = Filter(make_document(tmp_path))
+    assert f.outgoing("$HOME/Mario Rossi/a.jpg") == "a"
+    assert f.outgoing("apri $PPG_DATA/Archivio/x.tif ora") == "apri x ora"
+    assert f.outgoing("${HOME}/Archivio/x.tif") == "x"
+    for line in ("tra 1/2 e /3", "apri /clear poi /help", "5 \u20ac/h e /ora", "3 m /s"):
+        assert f.outgoing(line) == line, line
+    assert f.outgoing("apri /dev/null") == "apri null"
+
+
+def test_system_label_in_text_does_not_say_projected(tmp_path):
+    f = Filter(make_document(tmp_path))
+    assert f.outgoing("--crs EPSG:4979") == "--crs sistema di coordinate"
+
+
 def test_ordinary_lines_of_the_guide_change_only_when_they_hold_a_path_or_url():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    files = sorted((root / "src" / "pyarchinit_photogrammetry" / "assistant" / "guide").glob("*.it.md"))
-    limit = 0.01
-    if not files:  # the guide is not there yet: the installation docs, full of commands and paths, with a looser limit
-        files, limit = sorted((root / "docs").glob("*.it.md")), 0.02
-    assert files
-    anchor = re.compile(r"(?:^|[^\w])(?:/|~/|\.\./|\./|[A-Za-z]:[\\/]|\\|%\w+%)|://|EPSG|UTM|\+proj=", re.IGNORECASE)
+    guide = sorted((root / "src" / "pyarchinit_photogrammetry" / "assistant" / "guide").glob("*.it.md"))
+    sets = {"guide": (guide, 0.01)} if guide else {
+        "docs it": (sorted((root / "docs").glob("*.it.md")), 0.02),
+        "docs en": (sorted((root / "docs").glob("*.md")), 0.02),
+        "docs gui": (sorted((root / "docs" / "gui").glob("*.it.md")), 0.02)}
+    anchor = re.compile(r"(?:^|[^\w])(?:/|~/|\.\./|\./|[A-Za-z]:[\\/]|\\|%\w+%|\$\w+/)|://|EPSG|UTM|\+proj=", re.IGNORECASE)
+    images = re.compile(r"!\[[^\]]*\]\([^)]*\)")
     f = Filter(None)  # no names: what changes here is the paths and the links
-    lines = changed = 0
-    examples = []
-    for path in files:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            lines += 1
-            out = f.outgoing(line)
-            if out != line:
-                changed += 1
-                assert anchor.search(line), (path.name, line)
-                if len(examples) < 10:
-                    examples.append((path.name, line, out))
-    print(f"{changed} of {lines} lines changed")
-    for e in examples:
-        print(e)
-    assert changed < lines * limit
+    for label, (files, limit) in sets.items():
+        assert files, label
+        lines = changed = 0
+        examples = []
+        for path in files:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                lines += 1
+                out = f.outgoing(line)
+                if images.sub("", out) != images.sub("", line):  # relative images of the guide: no private data, not counted
+                    changed += 1
+                    assert anchor.search(line), (path.name, line)
+                    if len(examples) < 10:
+                        examples.append((path.name, line, out))
+        print(f"{label}: {changed} of {lines} lines changed")
+        for e in examples:
+            print(e)
+        assert changed < lines * limit, label

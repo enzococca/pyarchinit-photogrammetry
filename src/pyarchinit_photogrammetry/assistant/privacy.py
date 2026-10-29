@@ -28,12 +28,16 @@ WARNING = "Il filtro non riconosce coordinate o nomi scritti nella domanda: non 
 # absolute elevations: the tools give the heights above the lowest point instead (``height_above_lowest``)
 ELEVATION_KEYS = ("z_min", "z_max", "z_mean", "z_median", "elevation", "elevation_min", "elevation_max",
                   "elevation_mean")
-# a key is dropped only when ALL its tokens (split on ``_``, camelCase and digits) name a raw coordinate; a token of a
-# derived quantity (rmse, error, accuracy, status, size, resolution, ...) keeps the key: ``gps_rmse``, ``pixel_size_x``
+# a key is dropped when ANY of its tokens (split on ``_``, camelCase and digits) names a raw coordinate, unless a token of a
+# derived quantity (rmse, error, accuracy, status, size, resolution, ...) is also there: ``marker_xyz``, ``camera_z``,
+# ``z_range`` go; ``gps_rmse``, ``pixel_size_x``, ``position_accuracy_m`` stay
 _COORDINATE_TOKENS = frozenset(ABSOLUTE_KEYS) - {"reference", "references"} | {
-    "bbox", "extent", "geometry", "geom", "centroid", "position", "location", "coordinates", "coordinate", "coord",
-    "coords", "xy", "xyz", "quota", "abs", "q", "min", "max", "point", "elevation", "altitude", "lng", "dem", "dsm", "dtm",
-    "m", "deg", "degrees", "meters", "metres", "wkt"}
+    "bbox", "extent", "geometry", "geom", "centroid", "centroids", "position", "positions", "location", "locations",
+    "coordinates", "coordinate", "coord", "coords", "xy", "xyz", "quota", "elevation", "altitude", "lng", "range",
+    "corner", "wkt"}
+_DERIVED_TOKENS = frozenset({"rmse", "error", "errors", "accuracy", "precision", "status", "count", "n", "size", "resolution",
+                             "spacing", "std", "sigma", "percent", "ratio", "mean", "median", "spread", "quality", "scale"})
+_DEM_TOKENS = frozenset({"dem", "dsm", "dtm"})
 _MODIFIER_TOKENS = frozenset({"min", "max", "abs", "q", "m", "deg", "degrees", "meters", "metres"})
 _AXIS_STAT = re.compile(r"[xyz](?:min|max|mean|med|median)|(?:min|max|mean|median)[xyz]")
 _REFERENCE_TOKENS = frozenset({"reference", "references"})
@@ -48,7 +52,7 @@ CRS_PROJECTED = "proiettato, in metri"
 CRS_GEOGRAPHIC = "geografico (gradi)"
 CRS_LOCAL = "locale"
 CRS_UNKNOWN = "sistema non detto"
-CRS_IN_TEXT = "sistema proiettato"
+CRS_IN_TEXT = "sistema di coordinate"
 
 # the site fields: the first kind names the site ("Sito A"), the others are places ("Luogo 1")
 _SITE_ONLY = ("sito", "sito_q")
@@ -67,15 +71,21 @@ _APOSTROPHES = {"’": "'", "‘": "'", "ʼ": "'", "`": "'", "´": "'", "′": "
 # ``%VAR%\\``, ``scheme://``); it holds no space, unless it ends with a known file extension (at most 200 characters)
 PUBLIC_HOSTS = ("enzococca.github.io", "github.com", "pypi.org", "doi.org", "opengeos.org", "qgis.org", "wikipedia.org")
 _KNOWN_EXT = (r"\.(?:jpg|jpeg|png|tif|tiff|ppg|psx|gpkg|csv|txt|json|ply|las|laz|obj|glb|gltf|pdf|xlsx|dxf|svg|ifc|e57|"
-              r"zip)(?![A-Za-z0-9])")
+              r"zip|mrk|obs|nav|rnx|crx|sqlite|db|cfg|md|docx|doc|xls|kml|kmz|shp|dbf|geojson|mp4|mov|srt|log|yaml|yml|"
+              r"toml|ini)(?![A-Za-z0-9])")
 _ANCHOR = re.compile("|".join([
     r"(?P<url>(?<!\w)[A-Za-z][A-Za-z0-9+.\-]*://)",
     r"(?P<win>(?<![\w\\])(?:[A-Za-z]:[\\/]|\\\\|%[A-Za-z_][A-Za-z0-9_]*%[\\/]))",
     r"(?P<rooted>(?<![\w\\.:/])\\(?=[A-Za-z0-9_$.][^\s\\]+\\))",
+    r"(?P<var>(?<![\w$\\])\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})/)",
     r"(?P<posix>(?<![\w./:~\\<>%$)\]}*°])(?:~/|\.{1,2}/|/(?=[^\s/])))",
 ]))
 _TOKEN = re.compile(r"[^\s\"'`<>|*?,;()\[\]]+")
-_SPACED = re.compile(r"[^\n\"`<>|*?,;()\[\]]{0,200}?" + _KNOWN_EXT, re.IGNORECASE)
+_FORBIDDEN = frozenset("\"'`<>|*?,;()[]")
+_MD_TARGET = re.compile(r"(?:\.{1,2}/|#)[^\s)]*(?:\.md(?:#[^\s)]*)?|/)$")
+_LETTERS_ONLY = re.compile(r"[^\W\d_]{1,6}$")
+_DATE_LIKE = re.compile(r"[\d/\\.\-]+$")
+_PATH_CAP = 200
 _ENDS_KNOWN = re.compile(_KNOWN_EXT + r"$", re.IGNORECASE)
 _URL_TOKEN = re.compile(r"[^\s\"'`<>]+")
 _HAS_EXT = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,4}$")
@@ -217,6 +227,50 @@ def _crs_label(value: Any) -> Any:
         except Exception:
             return CRS_UNKNOWN
     return CRS_GEOGRAPHIC if geographic else CRS_PROJECTED
+
+
+def _is_piece(word: str) -> bool:
+    """Whether a word that holds a separator is a real piece of a path (``Siria/``, ``Neri/Missione``, ``a.jpg``), and not
+    a unit, an alternative or a date (``km/h``, ``e/o``, ``omega/phi/kappa``, ``12/08/2026``)."""
+    if _ENDS_KNOWN.search(word):
+        return True
+    if word[-1] in "/\\":
+        return True
+    if _DATE_LIKE.match(word):
+        return False
+    if all(_LETTERS_ONLY.match(part) for part in re.split(r"[\\/]", word) if part):
+        return False
+    return len(word) > 8
+
+
+def _extend(text: str, start: int, end: int) -> int:
+    """The end of the path that starts at ``start`` and whose first space-free token ends at ``end``: it goes on over
+    the words that follow, as far as the last real piece of a path on the line (at most 200 characters), and stops
+    at a new anchor or at a character that cannot be in a name."""
+    last = pos = end
+    cap = start + _PATH_CAP
+    if text[end:end + 1] in (".", ":", "!"):
+        return end  # the sentence ends here
+    adjacent = True  # the word follows the path directly: "Extreme Pro/missione siria/drone/tell"
+    while True:
+        gap = re.compile(r"[^\S\n]+").match(text, pos)
+        word = re.compile(r"\S+").match(text, gap.end()) if gap else None
+        if word is None:
+            return last
+        w0, raw = word.start(), word.group(0)
+        cut = next((i for i, c in enumerate(raw) if c in _FORBIDDEN), None)
+        piece = (raw if cut is None else raw[:cut]).rstrip(".:!")
+        if not piece or w0 + len(piece) > cap or _ANCHOR.match(text, w0):
+            return last
+        has_sep = bool(re.search(r"[\\/]", piece))
+        if _ENDS_KNOWN.search(piece) or has_sep and (_is_piece(piece) or adjacent and not _DATE_LIKE.match(piece)):
+            last = w0 + len(piece)
+            adjacent = True
+        else:
+            adjacent = False
+        if cut is not None:
+            return last
+        pos = word.end()
 
 
 class Filter:
@@ -392,13 +446,13 @@ class Filter:
             token = _TOKEN.match(text, s0)
             token = token.group(0) if token else text[s0]
             token = token.rstrip(".:!") or token  # the full stop that ends the sentence stays outside
-            if not _ENDS_KNOWN.search(token) and not _HAS_EXT.search(token):
-                run = _SPACED.match(text, s0)
-                if run is not None:
-                    parts = re.split(r"[\\/]", run.group(0))
-                    if (len(run.group(0)) <= 200 and all(len(c.split()) <= 5 for c in parts)
-                            and len(parts[-1].split()) <= 4 and not re.search(r"[:!?]\s", run.group(0))):
-                        token = run.group(0)
+            if s0 >= 2 and text[s0 - 2:s0] == "](" and _MD_TARGET.match(token):
+                continue  # a relative link of the guide (../api.md#x, ./, #): no private data
+            known = bool(_ENDS_KNOWN.search(token) or _HAS_EXT.search(token))
+            if m.group(0) == "/" and not known and len([c for c in token.split("/") if c]) < 2:
+                continue  # /clear, /3: a command or a fraction, not a path
+            if not known:
+                token = text[s0:_extend(text, s0, s0 + len(token))]
             name = neutral_name(unquote(token)) if re.search(r"[^\W_]", token[len(m.group(0)):]) else None
             if name is None:
                 continue
@@ -464,11 +518,12 @@ class Filter:
             return True
         toks = _key_tokens(key)
         ts = set(toks)
-        if ts & _REFERENCE_TOKENS and all(t in _COORDINATE_TOKENS or t in _REFERENCE_TOKENS or t.isdigit() for t in toks):
+        derived = bool(ts & _DERIVED_TOKENS)
+        if ts & _REFERENCE_TOKENS and not derived and not (ts & _COORDINATE_TOKENS):
             return _holds_numbers(value)
-        if toks and all(t in _COORDINATE_TOKENS or t.isdigit() or _AXIS_STAT.fullmatch(t) for t in toks) \
-                and any(t not in _MODIFIER_TOKENS and not t.isdigit() for t in toks):
-            return True  # "min", "max" or "m" alone name no coordinate
+        if not derived and (ts & _COORDINATE_TOKENS or any(_AXIS_STAT.fullmatch(t) for t in toks)
+                            or (ts & _DEM_TOKENS and ts & {"min", "max"})):
+            return True
         if ts & _GEOMETRY_TOKENS and (isinstance(value, (list, tuple)) and _numeric(value) or _is_wkt(value)):
             return True
         return False
