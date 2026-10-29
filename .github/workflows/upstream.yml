@@ -6,8 +6,10 @@ name: upstream
 # "!=" left out), compares their public API with the installed ones, and runs the tests with them, the failed ones a
 # second time. The summary of the run says what they remove that the program uses, what they add (a GPU back-end
 # among it), and what to do: raise the ceiling, adapt the program first, or exclude a version pip users already get
-# (.github/scripts/upstream_check.py). A week with nothing newer ends at the plan. A failing run is red: GitHub writes
-# to whoever last changed the schedule.
+# (.github/scripts/upstream_check.py). A week with nothing newer ends at the plan. The newest release of RustGIS (the
+# desktop GIS the live link talks to) is tried apart: its rustgis-cli is taken from the release and the tests of the
+# link run against it; the outcome is one section of the summary. A failing run is red: GitHub writes to whoever last
+# changed the schedule.
 on:
   schedule:
     - cron: "17 4 * * 1"  # Mondays, 04:17 UTC
@@ -49,6 +51,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[all,dev]"
           pip install ./native
+      - name: The newest RustGIS, and the tests of the live link with its rustgis-cli
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QT_QPA_PLATFORM: offscreen
+          PPG_RENDERER: software
+          GLOG_minloglevel: "2"
+        run: |
+          set +e
+          tag="$(gh release view -R opengeos/RustGIS --json tagName --jq .tagName)"
+          [ -n "$tag" ] || tag=unknown
+          echo "The newest release of RustGIS: $tag"
+          cli="$(.github/scripts/get_rustgis_cli.sh "$tag" "$RUNNER_TEMP/rustgis")"
+          if [ $? -ne 0 ] || [ -z "$cli" ]; then
+            python .github/scripts/upstream_check.py rustgis --tag "$tag" --stage fetch --status 1 --out rustgis.json
+            exit 0
+          fi
+          PPG_RUSTGIS_CLI="$cli" python -m pytest -q --tb=short -rfE --capture=sys -o faulthandler_timeout=1200 \
+            -o faulthandler_exit_on_timeout=true tests/test_rustgis_link.py 2>&1 | tee rustgis.log
+          status=${PIPESTATUS[0]}
+          python .github/scripts/upstream_check.py rustgis --tag "$tag" --stage tests --status "$status" \
+            --log rustgis.log --out rustgis.json
       - name: The newest versions to try
         id: plan
         env:
@@ -105,6 +129,7 @@ jobs:
             if [ -f "api-$f.json" ]; then args+=(--"$f" "api-$f.json"); fi
           done
           if [ -f tests.json ]; then args+=(--tests tests.json); fi
+          if [ -f rustgis.json ]; then args+=(--rustgis rustgis.json); fi
           python .github/scripts/upstream_check.py report "${args[@]}" > summary.md
           status=$?
           cat summary.md >> "$GITHUB_STEP_SUMMARY"

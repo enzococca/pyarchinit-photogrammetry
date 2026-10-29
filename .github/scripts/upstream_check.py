@@ -8,13 +8,17 @@ tries the newest ones before pip users get them.
     upstream_check.py api --plan plan.json --out api-after.json
     pytest ...; upstream_check.py failures pytest.log                 # the failed tests, run once more
     upstream_check.py tests --status 1 --log pytest.log [--rerun-log ... --rerun-status 0] --out tests.json
-    upstream_check.py report --plan plan.json --before ... --after ... --tests tests.json --src src
+    upstream_check.py rustgis --tag v0.4.1 --stage tests --status 1 --log rustgis.log --out rustgis.json
+    upstream_check.py report --plan plan.json --before ... --after ... --tests tests.json --rustgis rustgis.json --src src
 
 The plan takes, for each library, the newest version on PyPI beyond the installed one that has a wheel for the
 runner, pre-releases included (the warning comes before the release); the versions the program excludes (``!=``, a
 known crash) are left out. The report says what the new versions remove that the program uses (by name, where), what
 they add - a GPU back-end among it - how the tests went with them, and what to do: raise the ceiling, adapt the
-program first, or exclude a version pip users already get."""
+program first, or exclude a version pip users already get.
+
+RustGIS (the desktop GIS the live link talks to) is not a library of the engine: its newest release is tried apart, with
+the tests of the link against its ``rustgis-cli`` (``rustgis`` command), and its outcome is one section of the report."""
 from __future__ import annotations
 
 import argparse
@@ -211,8 +215,37 @@ def _listed(names: list[str]) -> list[str]:
     return shown
 
 
-def report(plan: list[dict], before: dict, after: dict, tests: dict | None, src: Path) -> str:
-    """The summary of the run (Markdown): the versions tried, what they remove and add, the tests, what to do."""
+def rustgis_result(tag: str, stage: str, status: int, log: str) -> dict:
+    """What the run found with the newest RustGIS: ``stage`` is where it ended, "fetch" (its ``rustgis-cli`` could not be
+    taken from the release) or "tests" (the tests of the live link ran, ``status`` their exit code)."""
+    return {"tag": tag, "stage": stage, "status": status, "failed": failures(log) if stage == "tests" else []}
+
+
+def rustgis_section(result: dict | None) -> list[str]:
+    """The lines of the report about RustGIS: one line of the outcome, and the tests that failed."""
+    if result is None:
+        return []
+    tag = result["tag"]
+    out = ["", "## RustGIS", ""]
+    if result["stage"] == "fetch":
+        out.append(f"- RustGIS {tag}: its `rustgis-cli` could not be taken from the release (see the step), so the "
+                   "live link was not tried with it.")
+    elif result["status"] == 0:
+        out.append(f"- RustGIS {tag}: the tests of the live link pass with its `rustgis-cli`.")
+    elif result["failed"]:
+        out.append(f"- RustGIS {tag}: {len(result['failed'])} tests of the live link fail with its `rustgis-cli`; "
+                   "adapt the link (io/rustgis_link.py) to what changed before the program asks for it:")
+        out += [f"  - `{t}`" for t in result["failed"]]
+    else:
+        out.append(f"- RustGIS {tag}: the tests of the live link stopped (exit {result['status']}) before the summary "
+                   "of pytest: see the log.")
+    return out
+
+
+def report(plan: list[dict], before: dict, after: dict, tests: dict | None, src: Path,
+           rustgis: dict | None = None) -> str:
+    """The summary of the run (Markdown): the versions tried, what they remove and add, the tests, what to do, and how
+    the newest RustGIS did."""
     out = ["## The libraries of the engine: pycolmap and Open3D", "",
            "| library | the program asks for | installed | tried | |", "|---|---|---|---|---|"]
     for e in plan:
@@ -227,7 +260,7 @@ def report(plan: list[dict], before: dict, after: dict, tests: dict | None, src:
     tried = [e for e in plan if e["candidate"]]
     if not tried:
         out += ["", "Nothing newer to try this week: the program has the newest versions it can take."]
-        return "\n".join(out) + "\n"
+        return "\n".join(out + rustgis_section(rustgis)) + "\n"
     for e in tried:
         old, new = set(before.get(e["name"], [])), set(after.get(e["name"], []))
         removed, added = sorted(old - new), sorted(new - old)
@@ -282,7 +315,7 @@ def report(plan: list[dict], before: dict, after: dict, tests: dict | None, src:
         else:
             out.append(f"- {name} {version}: the ceiling keeps it away from pip users; adapt the program (the names "
                        "removed above, the failed tests) before raising it.")
-    return "\n".join(out) + "\n"
+    return "\n".join(out + rustgis_section(rustgis)) + "\n"
 
 
 # ---------------------------------------------------------------------------------------------- command line
@@ -308,11 +341,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--rerun-log", type=Path)
     p.add_argument("--rerun-status", type=int)
     p.add_argument("--out", type=Path, required=True)
+    p = sub.add_parser("rustgis")
+    p.add_argument("--tag", required=True)
+    p.add_argument("--stage", choices=["fetch", "tests"], required=True)
+    p.add_argument("--status", type=int, required=True)
+    p.add_argument("--log", type=Path)
+    p.add_argument("--out", type=Path, required=True)
     p = sub.add_parser("report")
     p.add_argument("--plan", type=Path, required=True)
     p.add_argument("--before", type=Path)
     p.add_argument("--after", type=Path)
     p.add_argument("--tests", type=Path)
+    p.add_argument("--rustgis", type=Path)
     p.add_argument("--src", type=Path, default=Path("src"))
     args = ap.parse_args(argv)
 
@@ -347,10 +387,17 @@ def main(argv: list[str] | None = None) -> int:
         else:
             result = {"status": args.status, "failed": first, "flaky": []}
         args.out.write_text(json.dumps(result, indent=1), encoding="utf-8")
+    elif args.command == "rustgis":
+        log = args.log.read_text(encoding="utf-8", errors="replace") if args.log and args.log.exists() else ""
+        args.out.write_text(json.dumps(rustgis_result(args.tag, args.stage, args.status, log), indent=1),
+                            encoding="utf-8")
     elif args.command == "report":
-        tests = read(args.tests)
-        print(report(read(args.plan), read(args.before) or {}, read(args.after) or {}, tests, args.src), end="")
-        return 1 if tests is not None and tests["status"] != 0 else 0
+        tests, rustgis = read(args.tests), read(args.rustgis)
+        print(report(read(args.plan), read(args.before) or {}, read(args.after) or {}, tests, args.src, rustgis),
+              end="")
+        red = (tests is not None and tests["status"] != 0) or (rustgis is not None and (
+            rustgis["stage"] == "fetch" or rustgis["status"] != 0))
+        return 1 if red else 0
     return 0
 
 
