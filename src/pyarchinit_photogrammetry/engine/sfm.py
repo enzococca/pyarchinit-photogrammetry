@@ -1538,6 +1538,8 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = 
     else:
         info.pop("adaptive_fitting", None)
     _restore_sensor_models(chunk, best)
+    best.update_point_3d_errors()
+    info["reprojection_error"] = float(best.compute_mean_reprojection_error())  # px, as optimize_cameras stores it
     shutil.rmtree(model_dir, ignore_errors=True)
     model_dir.mkdir()
     best.write(str(model_dir))
