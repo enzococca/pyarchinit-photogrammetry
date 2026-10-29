@@ -92,28 +92,34 @@ naturalmente, anche nei layer PyArchInit di QGIS.
 pilotare. *QGIS > Apri in RustGIS (collegamento dal vivo)* lo apre con il chunk attivo, e la voce con la casella
 *QGIS > Collegamento dal vivo con RustGIS (nei due sensi)* lo tiene collegato: ciò che disegni qui arriva in RustGIS da
 solo, e ciò che lì disegni, cambi o cancelli torna qui, come con QGIS. Il collegamento richiede **RustGIS 0.4.0 o
-successivo** (uno più vecchio viene rifiutato, con la sua versione).
+successivo** (uno più vecchio viene rifiutato, con la versione che serve).
 
 Cosa va a RustGIS:
 
 * le tabelle dei disegni del chunk, lo stesso GeoPackage del collegamento con QGIS (`disegni_ppg.gpkg`: `unita`,
   `poligoni`, `sezioni`, `curve`, `linee`, `punti`, `quote`), come layer in un gruppo con il nome del chunk;
-* i raster del chunk, nascosti tranne l'ortofoto: l'ortofoto, il DEM e la sua ombreggiatura. Un raster che RustGIS
-  aprirebbe da una piramide a risoluzione ridotta viene servito da questo computer e letto sul posto, a piena
-  risoluzione dove la vista lo richiede; uno che RustGIS non sa leggere così com'è va come copia leggibile (fatta una
-  volta, con una finestra di avanzamento per i più grandi).
+* i raster del progetto QGIS del chunk, ognuno una volta e nascosti tranne l'ortofoto: l'ortofoto, il DEM (i suoi
+  valori), i prodotti multispettrali (riflettanza in falso colore, indici, raster delle zone), l'ortofoto termica e le
+  sue anomalie, i risultati del calcolatore di raster e i raster dei plugin. L'ombreggiatura è il modo in cui QGIS
+  disegna il DEM e non viene inviata. Un grande GeoTIFF a tasselli con piramidi interne, che RustGIS aprirebbe da una
+  piramide, viene servito da questo computer e letto sul posto, a piena risoluzione dove la vista lo richiede; gli
+  altri vanno come file, e uno che RustGIS non sa leggere così com'è va come copia leggibile (fatta una volta, con una
+  finestra di avanzamento per i più grandi).
 
 Cosa torna, nei due sensi: le **unità** (contorno e colonne di `pyunitastratigrafiche`), le **quote** e le **sezioni**
 (nome e traccia; una sezione con la traccia spostata viene tagliata di nuovo). Curve di livello, zone, pietre, patch,
 punti di misura e i disegni dei plugin li calcola il programma: una modifica fatta loro in RustGIS non viene ripresa.
 Ogni gruppo di modifiche è una voce di *Modifica > Annulla* ("Da RustGIS: ..."), come per QGIS, e la finestra guarda
 RustGIS ogni due secondi finché il collegamento è acceso. PyArchInit resta dalla parte del programma: le unità
-disegnate in RustGIS ci arrivano dalla finestra (*Salva modifiche in PyArchInit*, *Pubblica unita' e quote disegnate*), mai da RustGIS.
+disegnate in RustGIS ci arrivano dalla finestra (*Salva modifiche in PyArchInit*, *Pubblica unita' e quote
+disegnate*), mai da RustGIS.
 
 **Accendi il controllo una volta sola.** RustGIS offre i suoi strumenti agli altri programmi solo mentre è spuntato
 *Let your Agents Control RustGIS* nelle impostazioni del suo AI Assistant. Quella casella è il tuo consenso, conservato
-in RustGIS: il programma non la cambia mai. Se è spenta, *Apri in RustGIS* avvia RustGIS e dice cosa spuntare; spuntala
-una volta e riprova. Il programma trova il RustGIS in esecuzione dal file che esso pubblica nella sua cartella delle
+in RustGIS: il programma non la cambia mai. Se è spenta, *Apri in RustGIS* avvia RustGIS e lo aspetta fino a un minuto
+(*In attesa di RustGIS (fino a 60 secondi)*), chiedendo ogni mezzo secondo: spunta la casella entro quel minuto e il
+collegamento parte senza riprovare; dopo il minuto un messaggio dice cosa spuntare e chiede di riprovare. Il programma
+trova il RustGIS in esecuzione dal file che esso pubblica nella sua cartella delle
 impostazioni e legge da lì il suo token a ogni richiesta; il token non viene mai conservato, scritto nel log o mostrato.
 
 Come si comporta:

@@ -88,30 +88,36 @@ so styles and labels are native QGIS ones. Units published to PyArchInit
 ## RustGIS
 
 [RustGIS](https://github.com/opengeos/RustGIS) is a desktop GIS that can be driven by other programs on the same
-computer. *QGIS > Apri in RustGIS (collegamento dal vivo)* opens it with the active chunk, and the checkable
-*QGIS > Collegamento dal vivo con RustGIS (nei due sensi)* keeps it linked: what you draw here reaches RustGIS by
+computer. *QGIS > Open in RustGIS (live link)* opens it with the active chunk, and the checkable
+*QGIS > Live link with RustGIS (both ways)* keeps it linked: what you draw here reaches RustGIS by
 itself, and what you draw, change or delete there comes back, as with QGIS. The link needs **RustGIS 0.4.0 or later**
-(an older one is refused with its version).
+(an older one is refused, saying which version it needs).
 
 What goes to RustGIS:
 
 * the drawing tables of the chunk, the same GeoPackage as the QGIS link (`disegni_ppg.gpkg`: `unita`, `poligoni`,
   `sezioni`, `curve`, `linee`, `punti`, `quote`), as layers in a group named after the chunk;
-* the rasters of the chunk, hidden but the orthomosaic: the orthomosaic, the DEM and its shaded relief. A raster that
-  RustGIS would open from a lower-resolution overview is served from this computer and read in place, at full
-  resolution where the view needs it; one RustGIS cannot read as it is goes as a copy it can read (made once, with a
+* the rasters of the chunk's QGIS project, each once and hidden except the orthomosaic: the orthomosaic, the DEM
+  (its values), the multispectral products (reflectance in false colour, indices, zone rasters), the thermal
+  orthomosaic and its anomalies, the results of the raster calculator and the rasters of plugins. The shaded relief is
+  QGIS's way of drawing the DEM and is not sent. A large tiled GeoTIFF with internal overviews, which RustGIS would
+  open from an overview, is served from this computer and read in place, at full resolution where the view needs it;
+  the others go as their files, and one RustGIS cannot read as it is goes as a copy it can read (made once, with a
   progress window for the large ones).
 
 What comes back, both ways: the **units** (outline and the columns of `pyunitastratigrafiche`), the **spot heights**
 and the **sections** (name and trace; a section whose trace moved is cut again). The contour lines, zones, stones,
 patches, measuring points and the drawings of plugins are computed by the program: an edit made to them in RustGIS is
-not read back. Each batch of edits is one entry of *Modifica > Annulla* ("From RustGIS: ..."), exactly as for QGIS, and
+not read back. Each batch of edits is one entry of *Edit > Undo* (*Undo: From RustGIS: ...*), exactly as for QGIS, and
 the window looks at RustGIS every two seconds while the link is on. PyArchInit stays on the side of the program: the
-units drawn in RustGIS reach it from the window (*Salva modifiche in PyArchInit*, *Pubblica unita' e quote disegnate*), never from RustGIS.
+units drawn in RustGIS reach it from the window (*Save changes in PyArchInit*, *Publish the drawn units and spot
+heights*), never from RustGIS.
 
 **Turn on the control once.** RustGIS serves its tools to other programs only while *Let your Agents Control RustGIS*
 is ticked in the settings of its AI Assistant. That box is your consent, kept in RustGIS: the program never changes it.
-If it is off, *Apri in RustGIS* starts RustGIS and says what to tick; tick it once and try again. The program finds the
+If it is off, *Open in RustGIS* starts RustGIS and waits for it up to a minute (*Waiting for RustGIS (up to 60
+seconds)*), asking every half second: tick the box within that minute and the link starts without trying again; after
+the minute a message says what to tick and asks to try again. The program finds the
 running RustGIS from the file it publishes in its settings folder and reads its token from there at every request; the
 token is never kept, logged or shown.
 
@@ -124,7 +130,7 @@ How it behaves:
 * **Waiting for RustGIS**: a RustGIS that is minimized, hidden or has a dialog of its own open does not answer. The
   window says *Waiting for RustGIS: it does not answer (minimized, hidden, or a window of its own open); the link tries
   again by itself* and goes on by itself when RustGIS is back. If RustGIS is closed, or its agent control is turned off,
-  the link stops and says so; *Apri in RustGIS* starts it again.
+  the link stops and says so; *Open in RustGIS* starts it again.
 * **Local chunks are excluded**: RustGIS shows layers only in a coordinate system with an EPSG code. A chunk in a local
   frame (or in a system without a code) is refused with a message that says so: georeference it, or choose its system
   in the GNSS pane.
@@ -133,9 +139,9 @@ How it behaves:
   such systems with a sub-millimetre offset (0.46 mm measured on Monte Mario): below 1 mm the link accepts it, and a
   feature that comes back moved by less than that counts as untouched, never as an edit. A system RustGIS places more
   than 1 mm away is refused, because the drawings would move there.
-* **Changing the chunk or its system** (*Sistema e quote*) takes the old layers out of RustGIS and links the new ones;
-  what was edited in RustGIS and not read yet is read first. Layers that cannot be taken away stay in RustGIS, no longer
-  linked, with a message.
+* **Changing the chunk or its system** (*System and heights*) takes the old layers out of RustGIS and links the new
+  ones; what was edited in RustGIS and not read yet is read first. Layers that cannot be taken away stay in RustGIS, no
+  longer linked, with a message.
 
 QGIS and RustGIS can be linked at the same time: both read and write the same GeoPackage, and the edits of either
 come in through it.
