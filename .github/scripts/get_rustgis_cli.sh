@@ -16,7 +16,17 @@ archive="RustGIS-${version}-linux-x86_64.tar.gz"
 
 mkdir -p "$dest"
 dest="$(cd "$dest" && pwd)"
-gh release download "$tag" -R opengeos/RustGIS -p SHA256SUMS -p "$archive" --dir "$dest" --clobber >&2
+# a transient error of github.com is no news about RustGIS: three tries before the run is red
+for attempt in 1 2 3; do
+  if gh release download "$tag" -R opengeos/RustGIS -p SHA256SUMS -p "$archive" --dir "$dest" --clobber >&2; then
+    break
+  fi
+  if [ "$attempt" -eq 3 ]; then
+    echo "$archive of $tag could not be downloaded after $attempt tries" >&2
+    exit 1
+  fi
+  sleep $((attempt * 10))
+done
 
 expected="$(awk -v f="$archive" '$2 == f || $2 == "*" f {print $1}' "$dest/SHA256SUMS")"
 if [ -z "$expected" ]; then

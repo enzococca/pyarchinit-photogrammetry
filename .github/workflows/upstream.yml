@@ -122,6 +122,9 @@ jobs:
           set +e
           if [ ! -f plan.json ]; then
             echo "The plan was not made: see the step above." >> "$GITHUB_STEP_SUMMARY"
+            if [ -f rustgis.json ]; then  # what RustGIS did is known all the same
+              python .github/scripts/upstream_check.py rustgis-report rustgis.json >> "$GITHUB_STEP_SUMMARY"
+            fi
             exit 1
           fi
           args=(--plan plan.json --src src)

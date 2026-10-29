@@ -9,6 +9,7 @@ tries the newest ones before pip users get them.
     pytest ...; upstream_check.py failures pytest.log                 # the failed tests, run once more
     upstream_check.py tests --status 1 --log pytest.log [--rerun-log ... --rerun-status 0] --out tests.json
     upstream_check.py rustgis --tag v0.4.1 --stage tests --status 1 --log rustgis.log --out rustgis.json
+    upstream_check.py rustgis-report rustgis.json                    # that section alone (no plan was made)
     upstream_check.py report --plan plan.json --before ... --after ... --tests tests.json --rustgis rustgis.json --src src
 
 The plan takes, for each library, the newest version on PyPI beyond the installed one that has a wheel for the
@@ -233,8 +234,10 @@ def rustgis_section(result: dict | None) -> list[str]:
     elif result["status"] == 0:
         out.append(f"- RustGIS {tag}: the tests of the live link pass with its `rustgis-cli`.")
     elif result["failed"]:
-        out.append(f"- RustGIS {tag}: {len(result['failed'])} tests of the live link fail with its `rustgis-cli`; "
-                   "adapt the link (io/rustgis_link.py) to what changed before the program asks for it:")
+        n = len(result["failed"])
+        out.append(f"- RustGIS {tag}: {n} {'test' if n == 1 else 'tests'} of the live link "
+                   f"{'fails' if n == 1 else 'fail'} with its `rustgis-cli`; adapt the link (io/rustgis_link.py) to "
+                   "what changed before the program asks for it:")
         out += [f"  - `{t}`" for t in result["failed"]]
     else:
         out.append(f"- RustGIS {tag}: the tests of the live link stopped (exit {result['status']}) before the summary "
@@ -347,6 +350,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--status", type=int, required=True)
     p.add_argument("--log", type=Path)
     p.add_argument("--out", type=Path, required=True)
+    p = sub.add_parser("rustgis-report", help="the RustGIS section alone, when the plan of the run was not made")
+    p.add_argument("rustgis", type=Path)
     p = sub.add_parser("report")
     p.add_argument("--plan", type=Path, required=True)
     p.add_argument("--before", type=Path)
@@ -391,6 +396,10 @@ def main(argv: list[str] | None = None) -> int:
         log = args.log.read_text(encoding="utf-8", errors="replace") if args.log and args.log.exists() else ""
         args.out.write_text(json.dumps(rustgis_result(args.tag, args.stage, args.status, log), indent=1),
                             encoding="utf-8")
+    elif args.command == "rustgis-report":
+        rustgis = read(args.rustgis)
+        print("\n".join(rustgis_section(rustgis)).lstrip("\n"))
+        return 1 if rustgis is not None and (rustgis["stage"] == "fetch" or rustgis["status"] != 0) else 0
     elif args.command == "report":
         tests, rustgis = read(args.tests), read(args.rustgis)
         print(report(read(args.plan), read(args.before) or {}, read(args.after) or {}, tests, args.src, rustgis),

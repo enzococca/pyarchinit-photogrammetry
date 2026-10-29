@@ -180,8 +180,10 @@ def test_the_newest_rustgis_is_one_section_of_the_report(tmp_path, capsys):
     assert failed["failed"] == ["tests/test_rustgis_link.py::test_real_engine_round_trip"]
     text = check.report(plan, {}, {}, None, tmp_path, failed)
     assert "nothing newer" in text.lower()  # the section is there when the libraries have nothing to try too
-    assert "## RustGIS" in text and "RustGIS v0.4.1: 1 tests of the live link fail" in text
+    assert "## RustGIS" in text and "RustGIS v0.4.1: 1 test of the live link fails" in text
     assert "test_real_engine_round_trip" in text
+    two = check.rustgis_result("v0.4.1", "tests", 1, log + "ERROR tests/test_rustgis_link.py::test_other - boom\n")
+    assert "2 tests of the live link fail with" in check.report(plan, {}, {}, None, tmp_path, two)
     ok = check.report(plan, {}, {}, None, tmp_path, check.rustgis_result("v0.4.1", "tests", 0, ""))
     assert "pass with its `rustgis-cli`" in ok
     fetch = check.report(plan, {}, {}, None, tmp_path, check.rustgis_result("v0.5.0", "fetch", 1, "ignored"))
@@ -196,3 +198,5 @@ def test_the_newest_rustgis_is_one_section_of_the_report(tmp_path, capsys):
                            "--log", str(tmp_path / "rg.log"), "--out", str(out)]) == 0
         assert check.main(["report", "--plan", str(tmp_path / "plan.json"), "--rustgis", str(out)]) == red
         capsys.readouterr()
+        assert check.main(["rustgis-report", str(out)]) == red  # when the plan was not made: that section alone
+        assert capsys.readouterr().out.startswith("## RustGIS")
