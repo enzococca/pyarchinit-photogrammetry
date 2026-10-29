@@ -37,7 +37,9 @@ print(chunk.label, len(chunk.cameras), "foto")
     Lo script lanciato con *Esegui script Python...* girerà in secondo piano, così la finestra resta viva, e
     *Modifica > Annulla* lo riprenderà in un solo passo. Tra i suoi nomi ci saranno anche `polygon` (l'area
     selezionata nella vista 2D), `cameras` (le foto selezionate nel pannello *Foto*) e `progress` (per dire a che punto
-    è uno script lungo). La console eseguirà un blocco di più righe incollato in una volta.
+    è uno script lungo). La console eseguirà un blocco di più righe incollato in una volta. Tutti e due prenderanno
+    anche `SystemExit`: uno script scritto per `ppg run` che si ferma con `raise SystemExit(...)` chiuderà lo script,
+    non il programma.
 
 ## Il chunk attivo e i suoi prodotti
 
@@ -160,25 +162,25 @@ from pyarchinit_photogrammetry.engine.patches import photos_for_area
 
 area = window.selected_polygon()                      # il poligono selezionato nella vista 2D, oppure None
 if area is None:
-    raise SystemExit("Seleziona prima un poligono nella vista 2D.")
-
-if area.geom_type == "MultiPolygon":                  # più poligoni selezionati: il più grande
-    area = max(area.geoms, key=lambda g: g.area)
-anello = np.asarray(area.exterior.coords)             # il contorno (i buchi non contano)
-righe = photos_for_area(chunk, anello, limit=100_000) # le foto, con quanta area copre ciascuna
-chiavi = {r["key"] for r in righe if r.get("coverage", 0) > 0}
-utili = [c for c in chunk.cameras if c.key in chiavi]
-print(len(utili), "foto su", len(chunk.cameras), "inquadrano l'area")
-
-CHUNK_NUOVO = True
-if CHUNK_NUOVO:
-    nuovo = doc.duplicate_chunk(chunk, cameras=utili, label=chunk.label + " - area")
-    print("Chunk nuovo:", nuovo.label, "con", len(nuovo.cameras), "foto")
+    print("Seleziona prima un poligono nella vista 2D.")
 else:
-    altre = [c for c in chunk.cameras if c.key not in chiavi]
-    n = chunk.set_cameras_enabled(altre, False)        # le foto restano, i passi le saltano
-    print("Disattivate:", n)
-window.mark_modified()
+    if area.geom_type == "MultiPolygon":              # più poligoni selezionati: il più grande
+        area = max(area.geoms, key=lambda g: g.area)
+    anello = np.asarray(area.exterior.coords)         # il contorno (i buchi non contano)
+    righe = photos_for_area(chunk, anello, limit=100_000)   # le foto, con quanta area copre ciascuna
+    chiavi = {r["key"] for r in righe if r.get("coverage", 0) > 0}
+    utili = [c for c in chunk.cameras if c.key in chiavi]
+    print(len(utili), "foto su", len(chunk.cameras), "inquadrano l'area")
+
+    CHUNK_NUOVO = True
+    if CHUNK_NUOVO:
+        nuovo = doc.duplicate_chunk(chunk, cameras=utili, label=chunk.label + " - area")
+        print("Chunk nuovo:", nuovo.label, "con", len(nuovo.cameras), "foto")
+    else:
+        altre = [c for c in chunk.cameras if c.key not in chiavi]
+        n = chunk.set_cameras_enabled(altre, False)    # le foto restano, i passi le saltano
+        print("Disattivate:", n)
+    window.mark_modified()
 ```
 
 Con le foto disattivate, `chunk.build_orthomosaic(...)` usa solo le altre; per riattivarle,

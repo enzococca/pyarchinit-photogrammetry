@@ -16,6 +16,7 @@ import argparse
 import math
 import re
 import shutil
+import sys
 import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -43,6 +44,10 @@ _FENCE = re.compile(r"^\s*(```|~~~)")
 _HEADING = re.compile(r"^(#{1,3})\s+(.*?)\s*#*\s*$")
 _IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)(\{[^}]*\})?")
 _ATTR_ID = re.compile(r"\{[^}]*#([\w-]+)[^}]*\}\s*$")  # "## Title { #anchor }" of attr_list
+_CODE_SPAN = re.compile(r"`([^`]*)`")
+# the marks of emphasis: `*` touching text, `_` only at a word boundary (inside a word, as in selected_polygon, it is
+# a letter: Python-Markdown's smart underscores)
+_EMPHASIS = re.compile(r"\*{1,3}(?=\S)|(?<=\S)\*{1,3}|(?<!\w)_{1,3}(?=\S)|(?<=\S)_{1,3}(?!\w)")
 
 
 @dataclass
@@ -97,11 +102,13 @@ def slug(heading: str) -> str:
 
 
 def _plain(heading: str) -> str:
-    """A heading without its Markdown: links, emphasis, code marks, HTML."""
+    """A heading without its Markdown: links, emphasis, code marks, HTML.  The text of a code span stays as it
+    is (``window.selected_polygon()`` keeps its underscore, as the site's anchor does)."""
     heading = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", heading)
     heading = re.sub(r"<[^>]+>", "", heading)
     heading = re.sub(r"\{[^}]*\}\s*$", "", heading)  # {#id} of attr_list
-    return re.sub(r"[`*_]{1,3}(?=\S)|(?<=\S)[`*_]{1,3}", "", heading).strip()
+    heading = _CODE_SPAN.sub(r"\1", heading)  # the backticks only
+    return _EMPHASIS.sub("", heading).strip()
 
 
 # ------------------------------------------------------------------ pages
@@ -254,8 +261,15 @@ def _guide_files(folder: Path) -> list[Path]:
 
 def sync_guide(src: Path = REPO / "docs", dst: Path = PACKAGE / "guide") -> int:
     """Copy the Markdown of ``src`` (not the images, not the development plans) to ``dst`` with its folders, and
-    remove what ``src`` no longer has.  Returns the number of pages copied."""
+    remove what ``src`` no longer has.  Returns the number of pages copied.
+
+    ``src`` must be the guide (it has an ``index.md``): run from an installed program, where ``docs/`` does not
+    exist, it refuses with :class:`RuntimeError` and leaves ``dst`` as it is, instead of emptying the packaged guide.
+    """
     src, dst = Path(src), Path(dst)
+    if not (src / "index.md").is_file():
+        raise RuntimeError(f"{src} is not the guide (no index.md there): run the sync from a source checkout, "
+                           f"where docs/ is beside src/; {dst} is left as it is")
     files = _guide_files(src)
     wanted = {p.relative_to(src) for p in files}
     dst.mkdir(parents=True, exist_ok=True)
@@ -292,7 +306,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lang", default="it", choices=LANGUAGES)
     args = parser.parse_args(argv)
     if args.sync:
-        print(f"{sync_guide()} pages copied to {PACKAGE / 'guide'}")
+        try:
+            print(f"{sync_guide(REPO / 'docs', PACKAGE / 'guide')} pages copied to {PACKAGE / 'guide'}")
+        except RuntimeError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
     if args.query:
         for p in default_index(args.lang).search(" ".join(args.query)):
             print(f"{p.score:7.2f}  {p.page}#{p.anchor}  {p.title}")

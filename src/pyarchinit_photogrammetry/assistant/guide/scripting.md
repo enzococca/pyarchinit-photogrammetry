@@ -37,7 +37,8 @@ print(chunk.label, len(chunk.cameras), "photos")
     The script run by *Run Python script...* will work in the background, so that the window stays alive, and
     *Edit > Undo* will take it back as one step. Its names will then include `polygon` (the area selected in the 2D
     view), `cameras` (the photos selected in the *Photos* pane) and `progress` (to report how far a long script has
-    got). The console will run a block of several lines pasted at once.
+    got). The console will run a block of several lines pasted at once. Both will catch `SystemExit` as well: a script
+    written for `ppg run` that stops with `raise SystemExit(...)` will end the script, not the program.
 
 ## The active chunk and its products
 
@@ -159,25 +160,25 @@ from pyarchinit_photogrammetry.engine.patches import photos_for_area
 
 area = window.selected_polygon()                      # the polygon selected on the 2D view, or None
 if area is None:
-    raise SystemExit("Select a polygon on the 2D view first.")
-
-if area.geom_type == "MultiPolygon":                  # several polygons selected: the largest
-    area = max(area.geoms, key=lambda g: g.area)
-ring = np.asarray(area.exterior.coords)               # the outline (holes are not considered)
-rows = photos_for_area(chunk, ring, limit=100_000)    # the photos, with how much of the area each covers
-keys = {r["key"] for r in rows if r.get("coverage", 0) > 0}
-useful = [c for c in chunk.cameras if c.key in keys]
-print(len(useful), "photos out of", len(chunk.cameras), "see the area")
-
-NEW_CHUNK = True
-if NEW_CHUNK:
-    new = doc.duplicate_chunk(chunk, cameras=useful, label=chunk.label + " - area")
-    print("New chunk:", new.label, "with", len(new.cameras), "photos")
+    print("Select a polygon on the 2D view first.")
 else:
-    others = [c for c in chunk.cameras if c.key not in keys]
-    n = chunk.set_cameras_enabled(others, False)       # the photos are kept, the steps skip them
-    print("Switched off:", n)
-window.mark_modified()
+    if area.geom_type == "MultiPolygon":              # several polygons selected: the largest
+        area = max(area.geoms, key=lambda g: g.area)
+    ring = np.asarray(area.exterior.coords)           # the outline (holes are not considered)
+    rows = photos_for_area(chunk, ring, limit=100_000)   # the photos, with how much of the area each covers
+    keys = {r["key"] for r in rows if r.get("coverage", 0) > 0}
+    useful = [c for c in chunk.cameras if c.key in keys]
+    print(len(useful), "photos out of", len(chunk.cameras), "see the area")
+
+    NEW_CHUNK = True
+    if NEW_CHUNK:
+        new = doc.duplicate_chunk(chunk, cameras=useful, label=chunk.label + " - area")
+        print("New chunk:", new.label, "with", len(new.cameras), "photos")
+    else:
+        others = [c for c in chunk.cameras if c.key not in keys]
+        n = chunk.set_cameras_enabled(others, False)   # the photos are kept, the steps skip them
+        print("Switched off:", n)
+    window.mark_modified()
 ```
 
 With the photos switched off, `chunk.build_orthomosaic(...)` uses only the others; to use them again,

@@ -66,6 +66,21 @@ def test_headings_inside_code_are_comments_and_long_sections_are_cut():
     assert [(p.title, p.anchor) for p in given] == [("Che cosa serve prima", "before")]
 
 
+def test_underscores_inside_words_stay_in_titles_and_anchors():
+    # a code span keeps its text; an underscore inside a word is a letter to MkDocs (ids checked with Python-Markdown's
+    # toc: `windowselected_polygon`, `using-chunkbuild_dem`), emphasis marks are only those at a word boundary
+    code = K.split_page("## `window.selected_polygon()`\n\nx\n", "s.md", "en")
+    assert [(p.title, p.anchor) for p in code] == [("window.selected_polygon()", "windowselected_polygon")]
+    using = K.split_page("## Using `chunk.build_dem`\n\nx\n", "s.md", "en")
+    assert [(p.title, p.anchor) for p in using] == [("Using chunk.build_dem", "using-chunkbuild_dem")]
+    assert K._plain("*emph* and _under_ and snake_case word") == "emph and under and snake_case word"
+    assert K._plain("**bold** and __dunder__ `a_b` ***x***") == "bold and dunder a_b x"
+    assert K._plain("snake_case_word _it_") == "snake_case_word it"
+    # the heading words (the identifier whole and in parts) match a query with the identifier
+    heading, query = K.tokens("window.selected_polygon()", "en"), K.tokens("selected_polygon", "en")
+    assert "window.selected_polygon" in heading and {"selected", "polygon"} <= set(heading) & set(query)
+
+
 def test_accents_and_case_do_not_matter():
     index = K.default_index("it")
     plain = index.search("qualita")
@@ -111,7 +126,7 @@ def test_sync_copies_pages_and_removes_what_is_gone(tmp_path):
     (src / "gui").mkdir(parents=True)
     (src / "superpowers").mkdir()
     (src / "releases").mkdir()
-    (src / "a.md").write_text("# A\n")
+    (src / "index.md").write_text("# A\n")
     (src / "gui" / "b.it.md").write_text("# B\n")
     (src / "image.png").write_bytes(b"x")
     (src / "superpowers" / "plan.md").write_text("# no\n")
@@ -119,6 +134,28 @@ def test_sync_copies_pages_and_removes_what_is_gone(tmp_path):
     (dst / "old").mkdir(parents=True)
     (dst / "old" / "gone.md").write_text("# gone\n")
     assert K.sync_guide(src, dst) == 2
-    assert sorted(p.relative_to(dst).as_posix() for p in dst.rglob("*") if p.is_file()) == ["a.md", "gui/b.it.md"]
+    assert sorted(p.relative_to(dst).as_posix() for p in dst.rglob("*") if p.is_file()) == ["gui/b.it.md", "index.md"]
     assert not (dst / "old").exists()
     assert K.sync_guide(src, dst) == 2  # again: nothing changes
+
+
+def test_sync_refuses_a_source_that_is_not_the_guide_and_keeps_the_copy(tmp_path, monkeypatch, capsys):
+    # an installed program has no docs/: the sync must not empty the packaged guide
+    src, dst = tmp_path / "lib" / "docs", tmp_path / "guide"
+    (dst / "gui").mkdir(parents=True)
+    (dst / "index.md").write_text("# kept\n")
+    (dst / "gui" / "b.it.md").write_text("# kept\n")
+    before = {p.relative_to(dst).as_posix(): p.read_bytes() for p in dst.rglob("*") if p.is_file()}
+    with pytest.raises(RuntimeError, match="not the guide"):
+        K.sync_guide(src, dst)
+    src.mkdir(parents=True)  # a folder without index.md is not the guide either
+    (src / "stray.md").write_text("# no\n")
+    with pytest.raises(RuntimeError, match="index.md"):
+        K.sync_guide(src, dst)
+    assert {p.relative_to(dst).as_posix(): p.read_bytes() for p in dst.rglob("*") if p.is_file()} == before
+    # the command: exit code 1, a clear message, the copy untouched
+    monkeypatch.setattr(K, "REPO", tmp_path / "lib")
+    monkeypatch.setattr(K, "PACKAGE", tmp_path)
+    assert K.main(["--sync"]) == 1
+    assert "not the guide" in capsys.readouterr().err
+    assert {p.relative_to(dst).as_posix(): p.read_bytes() for p in dst.rglob("*") if p.is_file()} == before
