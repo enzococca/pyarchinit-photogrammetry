@@ -5166,7 +5166,7 @@ def test_copies_left_for_a_step_of_their_own(tmp_path, monkeypatch):
         assert rl.rasters == [old] and old.copy.stat().st_mtime_ns == made  # the old layer kept, no copy written
         seen = []
         assert rl.write_copies(out["copies"], Progress(lambda f, m: seen.append(m))) == {}
-        assert old.copy.stat().st_mtime_ns != made and "foto.tif: copy for RustGIS, block 1 of 1" in seen
+        assert old.copy.stat().st_mtime_ns != made and "foto.tif: copia per RustGIS, blocco 1 di 1" in seen
         assert rl.update_rasters(rasters, copies=False) == {"given": ["Foto"], "taken": ["Foto"], "refused": {},
                                                             "copies": []}
         assert rl.rasters[0] is not old and not rl.rasters_changed()
@@ -5196,17 +5196,26 @@ def test_copies_left_for_a_step_of_their_own(tmp_path, monkeypatch):
 
 
 def test_a_copy_follows_its_progress_and_stops_on_cancel(tmp_path):
-    """The copy of a raster RustGIS cannot read follows the progress it is given, block by block, then its overviews;
-    the cancel of that progress stops it - no copy and no temporary file left -, and a start so cancelled ends as one
-    that fails: the link stopped, what it added to RustGIS taken out again."""
+    """The copy of a raster RustGIS cannot read follows the progress it is given, block by block, then its overviews,
+    in the language of the interface; the cancel of that progress stops it - no copy and no temporary file left -, and
+    a start so cancelled ends as one that fails: the link stopped, what it added to RustGIS taken out again."""
     from pyarchinit_photogrammetry.core.progress import Cancelled, Progress
+    from pyarchinit_photogrammetry.gui import i18n
 
     photo = _two_tone(tmp_path / "foto.tif", 3, side=2100, compress="webp", **TILED)  # 25 blocks of 512
     seen = []
     link._write_copy(photo, tmp_path / "copia.tif", Progress(lambda f, m: seen.append((round(f, 3), m))))
-    assert seen == [(0.0, "foto.tif: copy for RustGIS, block 1 of 25"),
-                    (round(0.9 * 16 / 25, 3), "foto.tif: copy for RustGIS, block 17 of 25"),
-                    (0.9, "foto.tif: overviews of the copy for RustGIS")]
+    assert seen == [(0.0, "foto.tif: copia per RustGIS, blocco 1 di 25"),
+                    (round(0.9 * 16 / 25, 3), "foto.tif: copia per RustGIS, blocco 17 di 25"),
+                    (0.9, "foto.tif: piramidi della copia per RustGIS")]
+    i18n.set_current("en")
+    try:
+        english = []
+        link._write_copy(photo, tmp_path / "copia.tif", Progress(lambda f, m: english.append(m)))
+    finally:
+        i18n.set_current("it")
+    assert english[0] == "foto.tif: copy for RustGIS, block 1 of 25"
+    assert english[-1] == "foto.tif: overviews of the copy for RustGIS"
     stopped = Progress(lambda f, m: stopped.cancel())  # Annulla pressed at the first report
     with pytest.raises(Cancelled):
         link._write_copy(photo, tmp_path / "annullata.tif", stopped)
@@ -5217,12 +5226,12 @@ def test_a_copy_follows_its_progress_and_stops_on_cancel(tmp_path):
     fake = FakeEngine()
     rl = link.RustGisLink(live, fake, "Saggio 1", GB, data_dir=data_dir)
     reports = []
-    started = Progress(lambda f, m: reports.append(m) or (started.cancel() if "block" in m else None))
+    started = Progress(lambda f, m: reports.append(m) or (started.cancel() if "blocco" in m else None))
     with pytest.raises(Cancelled):
         rl.start([{"path": _small_dem(tmp_path / "dem.tif"), "name": "DEM"}, {"path": photo, "name": "Foto"}],
                  started)
-    assert reports[:2] == ["The raster DEM to RustGIS", "The raster Foto to RustGIS"]
-    assert reports[2] == "foto.tif: copy for RustGIS, block 1 of 25"
+    assert reports[:2] == ["Il raster DEM a RustGIS", "Il raster Foto a RustGIS"]
+    assert reports[2] == "foto.tif: copia per RustGIS, blocco 1 di 25"
     assert rl.layers == {} and rl.rasters == [] and rl.server is None
     assert fake.layers == [] and fake.groups == []  # the DEM, given first, taken out again
     assert not [p.name for p in (data_dir / "rustgis").iterdir() if p.suffix == ".tif"]
@@ -5301,3 +5310,25 @@ def test_a_layer_gone_is_told_from_the_other_refusals(tmp_path):
         rl.pull()
     rl.push()  # the layer added again, its rows whole
     assert rl.pull()["unita"] == (0, 0, 0)
+
+
+def test_a_push_in_flight_when_the_link_is_given_up_sends_nothing(tmp_path):
+    """A push that finds a linked layer removed in RustGIS adds it again before its script - from the live GeoPackage,
+    which may hold another chunk's drawings by then: given up (abandon) while that push reads RustGIS's layers, it adds
+    nothing and sends nothing."""
+    one = _unit(1, GX, GY)
+    live, fake, rl = _started(tmp_path, _drawings([one]))
+    fake.remove(int(rl.layers["unita"]))
+    live.write(_drawings([dict(one, _geom=_square(GX + 0.2, GY))]))
+
+    def given_up(tool, args):  # the window gives the link up while the push lists RustGIS's layers
+        if tool == "list_layers" and not rl._abandoned:
+            rl.abandon(wait=False)
+
+    fake.hooks.append(given_up)
+    fake.calls.clear()
+    fake.scripts.clear()
+    with pytest.raises(link.RustGisAbandoned):
+        rl.push()
+    sent = [args.get("command") or tool for tool, args in fake.calls]
+    assert "layer.addData" not in sent and "run" not in sent and fake.scripts == []

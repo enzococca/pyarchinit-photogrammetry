@@ -4,6 +4,7 @@ proxy of a unit built again when its polygon changes there. QGIS is simulated by
 connection editing the file, as QGIS's GeoPackage provider does when an edit session is saved."""
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -11,8 +12,8 @@ import shapely
 from shapely.geometry import LineString, Point, Polygon, box
 
 from pyarchinit_photogrammetry.io import gpkg
-from pyarchinit_photogrammetry.io.qgis_link import (ID_FIELD, LIVE_DB, PART_FIELD, SIG_FIELD, LiveLink, new_id,
-                                                    row_signature)
+from pyarchinit_photogrammetry.io.qgis_link import (ID_FIELD, INFO_TABLE, LIVE_DB, PART_FIELD, SIG_FIELD, LiveLink,
+                                                    new_id, row_signature)
 
 CRS = "EPSG:3004"
 X0, Y0 = 2480000.0, 4500000.0  # metre coordinates as in Gauss-Boaga: float32 would round them
@@ -669,3 +670,65 @@ def test_a_section_moved_in_qgis_is_cut_again(processed, tmp_path):
     finally:
         w.setWindowModified(False)
         w.close()
+
+
+def test_the_file_keeps_the_key_of_its_chunk(tmp_path):
+    """The live GeoPackage keeps the key of the chunk whose drawings it holds, written with them (only when it changes:
+    the same chunk written again changes nothing for QGIS); what QGIS saved is read with the key the file had then."""
+    link = LiveLink(tmp_path, CRS)
+    assert link.stored_chunk() is None
+    six = _unit(6, X0, Y0)
+    link.write(_layers([six]), chunk=1)
+    assert link.stored_chunk() == "1"
+    other = sqlite3.connect(link.path)  # another program reading the file
+    try:
+        assert other.execute(f"SELECT value FROM {INFO_TABLE} WHERE name = 'chunk'").fetchone() == ("1",)
+        before = other.execute("PRAGMA data_version").fetchone()[0]
+        link.write(_layers([six]), chunk=1)  # the same chunk, the same drawings: nothing written
+        assert other.execute("PRAGMA data_version").fetchone()[0] == before
+        link.write(_layers([six]), chunk=2)  # only the key changes: written
+        assert other.execute("PRAGMA data_version").fetchone()[0] != before and link.stored_chunk() == "2"
+    finally:
+        other.close()
+    qgis = Qgis(link.path)
+    qgis.save(qgis.insert("unita", box(X0 + 4, Y0 + 4, X0 + 5, Y0 + 5), us_s="12"))
+    qgis.close()
+    assert link.read_changes()["unita"].added and link.read_chunk == "2"
+    link.close()
+
+
+def test_qgis_edits_of_a_chunk_left_go_to_it(trench):
+    """QGIS alone: a unit drawn in QGIS and saved right before the active chunk changes - not read yet - goes into the
+    chunk it was drawn on, never into the active one, and only then the new chunk's drawings go into the file. For a
+    chunk removed before its edits were read they go nowhere: kept in a file beside the project, said in the log."""
+    w, app, mw = trench
+    first = w.chunk
+    second = w.doc.add_chunk("Saggio 2")
+    second.crs = first.crs
+    w.a_qgis_live.setChecked(True)
+    w._qgis_poll.stop()  # the looks are the test's
+    w._export_qgis_layers()
+    w._poll_qgis()
+    path = w._qgis_dir() / LIVE_DB
+    qgis = Qgis(path)
+    qgis.save(qgis.insert("unita", box(X0 + 1, Y0 + 1, X0 + 2, Y0 + 2), us_s="12", area_s="1"))
+    w._activate_chunk(second)
+    assert w._export_qgis_layers()  # the edits read first, into their chunk
+    assert [d["us"] for d in first.meta["drawings"]["units"]] == ["12"] and w.units == []
+    assert "Da QGIS: US 12 aggiunta, nel chunk Saggio 1" in _log(w)
+    assert w._live_link.stored_chunk() == str(second.key) and _rows(path, "unita") == []
+    w._poll_qgis()
+    assert w.units == []
+    # a unit saved in QGIS for the second chunk, which is removed before the window reads it
+    qgis.save(qgis.insert("unita", box(X0 + 3, Y0 + 1, X0 + 4, Y0 + 2), us_s="13", area_s="1"))
+    assert w.remove_workspace_items([("chunk", second, None)], confirm=False)
+    w.runner.wait()
+    assert w.chunk is first and w._export_qgis_layers()
+    assert sorted(u.us for u in w.units) == ["12"]
+    kept = sorted(w.doc.path.parent.glob(f"{w.doc.path.stem}_modifiche_chunk_{second.key}_*.geojson"))
+    assert len(kept) == 1
+    features = json.loads(kept[0].read_text(encoding="utf-8"))["features"]
+    assert [(f["properties"]["us_s"], f["properties"]["modifica"]) for f in features] == [("13", "aggiunta")]
+    assert any("non è più nel progetto" in line and kept[0].name in line for line in _log(w))
+    assert w._live_link.stored_chunk() == str(first.key)
+    qgis.close()

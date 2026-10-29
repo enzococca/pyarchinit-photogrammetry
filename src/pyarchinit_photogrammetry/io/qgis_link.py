@@ -62,6 +62,9 @@ ID_FIELD = "ppg_id"  # the identity of a feature (a UUID)
 SIG_FIELD = "ppg_sig"  # the signature of what the program last wrote in the row
 PART_FIELD = "ppg_parte"  # "unita": the part (1, 2...) of a unit drawn as several polygons
 TECHNICAL_FIELDS = (ID_FIELD, SIG_FIELD, PART_FIELD)
+# name -> value of what the file is: "chunk", the key of the chunk whose drawings it holds (an edit made there belongs
+# to that chunk, whichever is active when it is read); not a layer, not listed in gpkg_contents
+INFO_TABLE = "ppg_info"
 # the columns a two-way table always has, also before the program wrote a feature into it: a unit
 # drawn in QGIS gets the columns of pyunitastratigrafiche, a spot height those of pyarchinit_quote
 BASE_COLUMNS = {
@@ -300,6 +303,7 @@ class LiveLink:
         self._con: sqlite3.Connection | None = None
         self._ident = None  # the file the connection is open on
         self._data_version = None
+        self.read_chunk: str | None = None  # the key of the chunk of the file when its changes were last read
 
     # ------------------------------------------------------------------ connection
     def _file_ident(self):
@@ -351,14 +355,16 @@ class LiveLink:
                         tuple(sorted((str(k), str(v)) for k, v in attrs.items() if not str(k).startswith("_")))))
         return hash(tuple(sig))
 
-    def write(self, layers: dict[str, dict], force: bool = False) -> dict[str, Path]:
+    def write(self, layers: dict[str, dict], force: bool = False, chunk=None) -> dict[str, Path]:
         """Bring the GeoPackage up to date with the layers of the raster view
         (``{name: {"kind", "features"}}``, features as attribute dicts with ``_geom`` or the
         ``(item, label, attrs)`` triples of :class:`gui.image_views.RasterView`). Every table
         exists even when empty, so QGIS sees deletions. ``force``: every table compared row by
         row, also those whose features did not change here (an edit made in QGIS to a one-way
         table is undone). Rows of the two-way tables edited or deleted in QGIS and not read back
-        yet are left as they are."""
+        yet are left as they are. ``chunk``: the key of the chunk the drawings belong to, kept in
+        the file with them (:meth:`stored_chunk`) - write another chunk's drawings only once the
+        edits made there are read (:meth:`external_change`), they belong to the chunk before."""
         from . import gpkg
 
         groups = self._group(layers)
@@ -369,8 +375,13 @@ class LiveLink:
         con = self._connection()
         if new:
             self._signatures = {}
+        key = None if chunk is None else str(chunk)
+        stored = self._stored_key(con)
+        rekey = key is not None and key != stored
+        if rekey and stored is not None:  # another chunk's drawings: every table compared row by row, whatever the
+            force = True  # window wrote last (rows read from another program belong to the chunk before)
         todo = {t: f for t, f in groups.items() if force or new or self._signatures.get(t) != self._signature(f)}
-        if todo:
+        if todo or rekey:
             srs = gpkg.srs_of(self.crs)
             known = {}
             try:
@@ -378,6 +389,9 @@ class LiveLink:
                 gpkg.create(con, srs)  # idempotent: the system of the chunk listed, also after it changed
                 for table, feats in todo.items():
                     known[table] = self._write_table(con, table, feats, srs[0], force)
+                if rekey:
+                    con.execute(f"CREATE TABLE IF NOT EXISTS {INFO_TABLE} (name TEXT PRIMARY KEY, value TEXT)")
+                    con.execute(f"INSERT OR REPLACE INTO {INFO_TABLE} (name, value) VALUES ('chunk', ?)", (key,))
                 con.execute("COMMIT")
             except BaseException:
                 if con.in_transaction:
@@ -525,6 +539,26 @@ class LiveLink:
         return after
 
     @staticmethod
+    def _stored_key(con) -> str | None:
+        """The key of the chunk whose drawings the file holds (:data:`INFO_TABLE`); None in a file written before it was
+        kept."""
+        try:
+            row = con.execute(f"SELECT value FROM {INFO_TABLE} WHERE name = 'chunk'").fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                raise  # the file held by another program a moment: the caller tries again
+            return None
+        return None if row is None or row[0] is None else str(row[0])
+
+    def stored_chunk(self) -> str | None:
+        """The key of the chunk whose drawings the GeoPackage holds, as the program last wrote it with them (``chunk``
+        of :meth:`write`): the chunk an edit made there belongs to. None while there is no GeoPackage, or in one
+        written by a version that did not keep it. Cheap (the connection kept open): asked before every write."""
+        if not self.path.exists():
+            return None
+        return self._stored_key(self._connection())
+
+    @staticmethod
     def _sign(con, table: str, cols: list[str], fids: list[int]) -> None:
         """``ppg_sig`` of the rows just written, from what SQLite keeps of them."""
         from . import gpkg
@@ -552,7 +586,9 @@ class LiveLink:
         """What another program (QGIS) changed in the two-way tables since the last write or read:
         ``{table: TableChanges}``, only the tables with changes. The rows drawn there get their
         identity and every row read its signature, in the same transaction: a change is given once.
-        :class:`sqlite3.OperationalError` (database locked) when QGIS holds the file: try again."""
+        :attr:`read_chunk` is then the key of the chunk the file held the drawings of (read in that
+        transaction: the chunk the changes belong to). :class:`sqlite3.OperationalError` (database
+        locked) when QGIS holds the file: try again."""
         from . import gpkg
 
         if not gpkg.is_geopackage(self.path):
@@ -566,6 +602,7 @@ class LiveLink:
             con.execute("BEGIN IMMEDIATE")
             try:
                 version = con.execute("PRAGMA data_version").fetchone()[0]
+                owner = self._stored_key(con)
                 for table in TWO_WAY_TABLES:
                     cols = [r[1] for r in con.execute(f"PRAGMA table_info({q(table)})") if r[1] not in ("fid", "geom")]
                     if ID_FIELD not in cols:
@@ -586,6 +623,7 @@ class LiveLink:
             con.execute("PRAGMA busy_timeout = 10000")
         self._data_version = version
         self._known.update(known)
+        self.read_chunk = owner
         return out
 
     def _read_table(self, con, table: str, cols: list[str]) -> tuple[TableChanges, dict]:
@@ -901,5 +939,6 @@ def open_in_qgis(project_path: str | Path, qgis: QgisInstall | None = None) -> N
 
 
 __all__ = ["find_qgis", "export_layers", "build_project", "project_crs", "open_in_qgis", "classify_layer", "LiveLink", "LIVE_DB",
+           "INFO_TABLE",
            "LIVE_TABLES", "QgisInstall", "TWO_WAY_TABLES", "ID_FIELD", "SIG_FIELD", "PART_FIELD", "Feature",
            "TableChanges", "new_id", "stable_id", "row_signature"]

@@ -750,25 +750,40 @@ def test_who_made_the_edits_with_both_links_on(trench, rustgis, monkeypatch):
     assert sorted(d["us"] for d in first.meta["drawings"]["units"]) == ["12", "13", "14", "6"]
 
 
-def test_a_read_that_fails_keeps_rustgis_layers(trench, rustgis, monkeypatch):
+def test_edits_of_the_chunk_left_never_reach_the_next(trench, rustgis, monkeypatch):
     """RustGIS's last edits pulled when the active chunk changes, but the live GeoPackage held by another program when
-    the window reads them: they are not in the chunk left, so its layers stay in RustGIS - nothing withdrawn, said in
-    the log."""
+    the window reads them: they are not read, so RustGIS keeps the layers of the chunk left - nothing withdrawn, said in
+    the log - and the drawings of the new chunk do not go into the file over them. Once the file is free again they go
+    into the chunk they were drawn on (the file keeps its key), never into the active one; then the new chunk goes to
+    RustGIS."""
     w, app, mw = trench
     fake, _ = rustgis
     first, second = w.chunk, _other_chunk(w)
     rl = _linked(w, app)
     fake.draw(fake.linked(rl, "unita"), box(GX + 3, GY + 1, GX + 3.5, GY + 1.5), GB, us_s="12", area_s="1")
+    live = w._live_link
+    real, state = live.read_changes, {"locked": True}
 
-    def locked():
-        raise sqlite3.OperationalError("database is locked")
+    def read_changes(*a, **k):
+        if state["locked"]:
+            raise sqlite3.OperationalError("database is locked")
+        return real(*a, **k)
 
-    monkeypatch.setattr(w._live_link, "read_changes", locked)
+    monkeypatch.setattr(live, "read_changes", read_changes)
     w._activate_chunk(second)
     _settle(w, app)
-    assert not (first.meta.get("drawings") or {}).get("units") and rl.layers == {}
-    assert sorted(g["name"] for g in fake.groups) == ["Saggio 1", "Saggio 2"]
+    assert not (first.meta.get("drawings") or {}).get("units") and rl.layers == {} and w.chunk is second
+    assert [g["name"] for g in fake.groups] == ["Saggio 1"] and w._rustgis is None  # the file holds Saggio 1's edits
+    assert live.stored_chunk() == str(first.key)
     assert any(line.startswith("Le ultime modifiche fatte in RustGIS") and "Saggio 1" in line for line in _log(w))
+    state["locked"] = False  # the other program lets the file go
+    _look(w, app)
+    assert w.chunk is second and "12" not in [u.us for u in w.units]
+    assert [d["us"] for d in first.meta["drawings"]["units"]] == ["12"]
+    assert "Da RustGIS: US 12 aggiunta, nel chunk Saggio 1" in _log(w)
+    assert live.stored_chunk() == str(second.key) and w._rustgis is not None and w._rustgis.chunk_label == "Saggio 2"
+    assert sorted(g["name"] for g in fake.groups) == ["Saggio 1", "Saggio 2"]
+    assert fake.identities(fake.linked(w._rustgis, "unita")) == []
 
 
 def test_the_project_remembers_its_live_links(trench, rustgis, monkeypatch):
@@ -780,13 +795,15 @@ def test_the_project_remembers_its_live_links(trench, rustgis, monkeypatch):
     w, app, mw = trench
     fake, _ = rustgis
     monkeypatch.setattr(mw, "message", lambda *a, **k: QMessageBox.StandardButton.Discard)
+    w.setWindowModified(False)
     _linked(w, app)
-    assert w.doc.meta["live_links"] == {"qgis": False, "rustgis": True}
+    assert w.doc.meta["live_links"] == {"qgis": False, "rustgis": True} and w.isWindowModified()  # a change to save
     assert w.save_document()
     path = w.doc.path
     w.a_rustgis_live.setChecked(False)
     _settle(w, app)
     assert w.doc.meta["live_links"] == {"qgis": False, "rustgis": False} and w._rustgis is None
+    assert w.isWindowModified()
     fake.layers.clear()  # RustGIS opened anew (it keeps the layers of a link turned off while it runs)
     fake.groups.clear()
     fake.tile_layers.clear()
@@ -798,6 +815,7 @@ def test_the_project_remembers_its_live_links(trench, rustgis, monkeypatch):
     assert not w.a_qgis_live.isChecked() and (w._qgis_dir() / LIVE_DB).exists()
     assert w._rustgis is not None and w._rustgis.chunk_label == "Saggio 1"
     assert [g["name"] for g in fake.groups] == ["Saggio 1"] and w._rustgis_poll.isActive()
+    assert not w.isWindowModified()  # the links the project says: no change of it
     data = json.loads(path.read_text(encoding="utf-8"))
     del data["meta"]["live_links"]  # as saved by an earlier version
     path.write_text(json.dumps(data), encoding="utf-8")
@@ -805,6 +823,7 @@ def test_the_project_remembers_its_live_links(trench, rustgis, monkeypatch):
     w.open_document(str(path))
     _settle(w, app)
     assert w.a_qgis_live.isChecked() and not w.a_rustgis_live.isChecked() and w._rustgis is None
+    assert not w.isWindowModified()
 
 
 def test_a_change_of_system_reads_rustgis_first(trench, rustgis, monkeypatch):
@@ -845,8 +864,9 @@ def test_new_and_import_read_rustgis_before_asking(trench, rustgis, monkeypatch)
 
 
 def test_closing_ends_the_link_thread_and_its_looks(trench, rustgis):
-    """The window closed: the looks stop, the thread of RustGIS's calls ends, the link stops (RustGIS keeps its
-    layers) - and nothing of it starts again after, whatever calls come late."""
+    """The window closed: the looks stop, the thread of RustGIS's calls ends, the link stops - everything was read and
+    the project is saved, so its layers go from RustGIS, as when another project opens - and nothing of it starts again
+    after, whatever calls come late."""
     w, app, mw = trench
     fake, _ = rustgis
     rl = _linked(w, app)
@@ -856,7 +876,7 @@ def test_closing_ends_the_link_thread_and_its_looks(trench, rustgis):
     w.setWindowModified(False)
     assert w.close()
     assert not w._rustgis_poll.isActive() and w._rustgis_thread is None and not thread._thread.is_alive()
-    assert w._rustgis is None and rl.layers == {} and [g["name"] for g in fake.groups] == ["Saggio 1"]
+    assert w._rustgis is None and rl.layers == {} and fake.groups == [] and fake.layers == []
     w._poll_rustgis()
     w._rustgis_stopped()
     w._rustgis_resume()
@@ -881,3 +901,195 @@ def test_steps_left_waiting_at_closing_are_named(trench, caplog):
         assert w.close()
     assert "Alla chiusura i proxy US 6 restano com'erano" in caplog.text
     assert "Alla chiusura le sezioni Sezione 3 restano com'erano" in caplog.text
+
+
+def test_a_cancelled_action_keeps_a_working_link(trench, rustgis, monkeypatch):
+    """RustGIS not answering at the last look (minimized), then Nuovo progetto answered Annulla at the question about
+    saving: the window stays on its project and the link with it, alive - the read before the question never gives it
+    up -; RustGIS back to the front, a unit drawn there comes in."""
+    from PySide6.QtWidgets import QMessageBox
+
+    w, app, mw = trench
+    fake, _ = rustgis
+    rl = _linked(w, app)
+    fake.busy.append("run_command:edit.status")
+    _look(w, app)
+    assert w._rustgis_waiting
+    monkeypatch.setattr(mw, "message", lambda *a, **k: QMessageBox.StandardButton.Cancel)
+    w.setWindowModified(True)
+    w.new_document()
+    assert w._rustgis is rl and not rl._abandoned and w.a_rustgis_live.isChecked()
+    fake.draw(fake.linked(rl, "unita"), box(GX + 3, GY + 1, GX + 3.5, GY + 1.5), GB, us_s="12", area_s="1")
+    _look(w, app)
+    _look(w, app)
+    assert [u.us for u in w.units] == ["12"] and not w._rustgis_waiting
+    w.setWindowModified(False)
+
+
+def test_a_cancelled_action_after_going_on_without_rustgis_keeps_the_link(trench, rustgis, monkeypatch):
+    """RustGIS stuck when Nuovo progetto reads its last edits: "Continua senza", then Annulla at the question about
+    saving - the link stays, the pull left under way too; when RustGIS answers at last, what it brings comes in, and the
+    looks go on."""
+    from PySide6.QtWidgets import QMessageBox
+
+    w, app, mw = trench
+    fake, _ = rustgis
+    rl = _linked(w, app)
+    fake.draw(fake.linked(rl, "unita"), box(GX + 3, GY + 1, GX + 3.5, GY + 1.5), GB, us_s="12", area_s="1")
+    monkeypatch.setattr(mw, "RUSTGIS_LEAVE_WAIT", 0.3)
+    monkeypatch.setattr(mw, "choice", lambda *a, **k: 1)
+    monkeypatch.setattr(mw, "message", lambda *a, **k: QMessageBox.StandardButton.Cancel)
+    release = _stuck(fake)
+    w.setWindowModified(True)
+    try:
+        w.new_document()
+        assert w._rustgis is rl and not rl._abandoned and w._rustgis_waiting and w.units == []
+    finally:
+        release.set()
+    _settle(w, app)
+    assert [u.us for u in w.units] == ["12"] and "Da RustGIS: US 12 aggiunta" in _log(w)
+    assert not w._rustgis_waiting and w._rustgis is rl
+    fake.draw(fake.linked(rl, "unita"), box(GX + 4, GY + 1, GX + 4.5, GY + 1.5), GB, us_s="13", area_s="1")
+    _look(w, app)
+    assert sorted(u.us for u in w.units) == ["12", "13"]
+    w.setWindowModified(False)
+
+
+def test_open_with_a_stuck_rustgis_waits_and_asks_once(trench, rustgis, monkeypatch, tmp_path):
+    """Another project opened while RustGIS gives nothing: the read before the question waits RUSTGIS_LEAVE_WAIT and
+    asks; "Continua senza" holds for the whole action - the leave that follows neither waits nor asks again - and the
+    layers of the project left stay in RustGIS."""
+    import pyarchinit_photogrammetry as ppg
+    from PySide6.QtWidgets import QMessageBox
+
+    w, app, mw = trench
+    fake, _ = rustgis
+    other = ppg.Document()
+    other.add_chunk("Altro")
+    other.save(tmp_path / "altro.ppg")
+    rl = _linked(w, app)
+    monkeypatch.setattr(mw, "RUSTGIS_LEAVE_WAIT", 0.5)
+    asked = []
+    monkeypatch.setattr(mw, "choice", lambda parent, kind, title, text, options, *a, **k: asked.append(options) or 1)
+    monkeypatch.setattr(mw, "message", lambda *a, **k: QMessageBox.StandardButton.Discard)
+    release = _stuck(fake)
+    try:
+        start = time.monotonic()
+        w.open_document(str(tmp_path / "altro.ppg"))
+        took = time.monotonic() - start
+    finally:
+        release.set()
+    _settle(w, app)
+    assert len(asked) == 1 and took < 0.5 + 2.0 and rl._abandoned and w.doc.path == tmp_path / "altro.ppg"
+    assert [g["name"] for g in fake.groups] == ["Saggio 1"]
+
+
+def test_closing_with_a_stuck_rustgis_waits_once(trench, rustgis, monkeypatch):
+    """Closing while RustGIS gives nothing: asked once; "Continua senza" - the close does not wait again for the call
+    left under way (the link given up, its thread left behind), and the group stays in RustGIS, said in the log."""
+    import logging
+
+    w, app, mw = trench
+    fake, _ = rustgis
+    _linked(w, app)
+    monkeypatch.setattr(mw, "RUSTGIS_LEAVE_WAIT", 0.5)
+    monkeypatch.setattr(mw, "RUSTGIS_CLOSE_WAIT", 2.0)
+    asked = []
+    monkeypatch.setattr(mw, "choice", lambda parent, kind, title, text, options, *a, **k: asked.append(options) or 1)
+    release = _stuck(fake)
+    w.setWindowModified(False)
+    records = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    logging.getLogger("pyarchinit_photogrammetry").addHandler(handler)
+    try:
+        start = time.monotonic()
+        assert w.close()
+        took = time.monotonic() - start
+    finally:
+        release.set()
+        logging.getLogger("pyarchinit_photogrammetry").removeHandler(handler)
+    assert len(asked) == 1 and took < 1.5
+    assert any("resta in RustGIS" in r.getMessage() and "Saggio 1" in r.getMessage() for r in records)
+    assert [g["name"] for g in fake.groups] == ["Saggio 1"]
+
+
+def test_closing_stops_a_link_that_made_no_call(trench, rustgis):
+    """A link started and never looked at (no thread of its calls yet) when the window closes without a call to
+    RustGIS (it did not answer at the last look, say): the link is stopped all the same, in a thread of its own."""
+    w, app, mw = trench
+    fake, _ = rustgis
+    rl = _linked(w, app)
+    assert w._rustgis_thread is None and rl.layers
+    w._rustgis_close()
+    assert rl.layers == {} and rl.server is None and w._rustgis is None and w._rustgis_closed
+
+
+def test_closing_keeps_the_group_while_something_is_not_saved(trench, rustgis, monkeypatch):
+    """Closing withdraws RustGIS's layers only when everything was read and saved: the project not saved ("no" at the
+    question), or a unit drawn in RustGIS while the question is open, keeps them there - said in the log, never
+    lost."""
+    from PySide6.QtWidgets import QMessageBox
+
+    w, app, mw = trench
+    fake, _ = rustgis
+    rl = _linked(w, app)
+    monkeypatch.setattr(mw, "message", lambda *a, **k: QMessageBox.StandardButton.Discard)
+    w.setWindowModified(True)
+    assert w.close()
+    assert rl.layers == {} and [g["name"] for g in fake.groups] == ["Saggio 1"]
+
+
+def test_closing_keeps_the_group_when_rustgis_is_edited_meanwhile(trench, rustgis, monkeypatch):
+    """A unit drawn in RustGIS while the window asks whether to save (saved): RustGIS's edit status changed since the
+    last read, so its layers stay there."""
+    from PySide6.QtWidgets import QMessageBox
+
+    w, app, mw = trench
+    fake, _ = rustgis
+    rl = _linked(w, app)
+    layer = fake.linked(rl, "unita")
+
+    def drawn_meanwhile(*a, **k):
+        fake.draw(layer, box(GX + 3, GY + 1, GX + 3.5, GY + 1.5), GB, us_s="12", area_s="1")
+        return QMessageBox.StandardButton.Save
+
+    monkeypatch.setattr(mw, "message", drawn_meanwhile)
+    w.setWindowModified(True)
+    assert w.close()
+    assert rl.layers == {} and [g["name"] for g in fake.groups] == ["Saggio 1"] and layer in fake.layers
+
+
+def test_windows_of_rustgis_wait_for_the_question(trench, rustgis, monkeypatch):
+    """An answer of RustGIS taken while the window asks whether to wait for it (the question's own loop) never puts a
+    window on top of the question: RustGIS gone, said once the question is answered."""
+    w, app, mw = trench
+    fake, _ = rustgis
+    second = _other_chunk(w)
+    _linked(w, app)
+
+    def gone(tool, args):  # the look sees RustGIS gone, once
+        if args.get("command") == "edit.status":
+            fake.hooks.remove(gone)
+            raise rg.RustGisOff("nothing answers at http://127.0.0.1:9/mcp")
+
+    fake.hooks.append(gone)
+    w._poll_rustgis()
+    w._rustgis_job.result(timeout=30)  # its answer waits in the window's queue
+    release = _stuck(fake)  # the leave's pull: no answer
+    monkeypatch.setattr(mw, "RUSTGIS_LEAVE_WAIT", 0.3)
+    order = []
+
+    def asked(*a, **k):
+        app.processEvents()  # the question's own loop: queued answers come in
+        order.append("question")
+        return 1
+
+    monkeypatch.setattr(mw, "choice", asked)
+    monkeypatch.setattr(mw, "message", lambda parent, kind, title, text, *a, **k: order.append(text))
+    try:
+        w._activate_chunk(second)
+    finally:
+        release.set()
+    _settle(w, app)
+    assert order[0] == "question" and len(order) == 2 and "non risponde più" in order[1]

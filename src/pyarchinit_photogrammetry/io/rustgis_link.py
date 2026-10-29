@@ -72,6 +72,7 @@ from pathlib import Path
 
 from .. import __version__
 from ..core.progress import Cancelled, as_progress
+from ..gui.i18n import tr  # pure Python (no Qt): the texts the progress window shows, in the interface's language
 from ..updates import bundle_version, version_key
 from . import gpkg
 from .files import replace_file
@@ -752,13 +753,13 @@ def _write_copy(source: Path, target: Path, progress=None) -> None:
                 windows = [window for _, window in dst.block_windows(1)]
                 for n, window in enumerate(windows):
                     if n % 16 == 0:  # the progress window follows the copy; Annulla stops it here
-                        progress(0.9 * n / len(windows), f"{source.name}: copy for RustGIS, block {n + 1} of "
-                                                         f"{len(windows)}")
+                        progress(0.9 * n / len(windows), tr("{0}: copia per RustGIS, blocco {1} di {2}", source.name,
+                                                            n + 1, len(windows)))
                     block = src.read(window=window).astype(dtype, copy=False)
                     if masked:
                         block = np.concatenate([block, src.read_masks(1, window=window)[None].astype(dtype)])
                     dst.write(block, window=window)
-                progress(0.9, f"{source.name}: overviews of the copy for RustGIS")
+                progress(0.9, tr("{0}: piramidi della copia per RustGIS", source.name))
                 factors = [f for f in (2 ** n for n in range(1, 16)) if min(src.width, src.height) // f >= 64]
                 if factors:
                     dst.build_overviews(factors, Resampling.nearest if palette is not None else Resampling.average)
@@ -2135,10 +2136,10 @@ class RustGisLink:
                 path = Path(raster["path"]).absolute()
                 entry = LinkedRaster(str(raster.get("name") or path.stem), path, bool(raster.get("hidden")),
                                      _opacity(raster.get("opacity")))
-                progress(0.8 * n / len(rasters), f"The raster {entry.name} to RustGIS")
+                progress(0.8 * n / len(rasters), tr("Il raster {0} a RustGIS", entry.name))
                 if self._given(entry, refused, progress.sub(0.8 * n / len(rasters), 0.8 / len(rasters))):
                     given.append(entry)
-            progress(0.8, "The drawings to RustGIS")
+            progress(0.8, tr("I disegni a RustGIS"))
             stamp = self._fingerprint()  # what RustGIS reads now: written later, it is sent
             one_way = {t: self._file_rows(t) for t in LIVE_TABLES if t not in TWO_WAY_TABLES}
             layers: dict[str, str] = {}
@@ -2263,10 +2264,11 @@ class RustGisLink:
     def abandon(self, wait: bool = True) -> None:
         """The link given up, whatever call of it another thread is still making: from now on nothing of it is written
         into the live GeoPackage or sent to RustGIS (:class:`RustGisAbandoned`) - a pull waiting for RustGIS's exports
-        writes nothing when they come, a send waiting for RustGIS's list of layers sends nothing. For when the window
-        stops waiting for RustGIS and shows another chunk, whose drawings the live GeoPackage soon holds: what was
-        edited in RustGIS stays in its layers. A pull writing at that moment ends first (what it wrote is then in the
-        live GeoPackage, to be read at once) - ``wait`` False: not waited for (a window that closes: the file keeps
+        writes nothing when they come; a send in flight sends nothing more from its next step on: neither a layer of
+        the live GeoPackage added again nor its script (a command RustGIS is running at that moment ends). For when the
+        window stops waiting for RustGIS and shows another chunk, whose drawings the live GeoPackage soon holds: what
+        was edited in RustGIS stays in its layers. A pull writing at that moment ends first (what it wrote is then in
+        the live GeoPackage, to be read at once) - ``wait`` False: not waited for (a window that closes: the file keeps
         the drawings of the same chunk). :meth:`stop` still takes the tile layers away and stops the server."""
         if not wait:
             self._abandoned = True
@@ -3017,7 +3019,10 @@ class RustGisLink:
         ``layers``), what it loaded remembered from its own export at once, one-way tables included - never from the
         file, which may have changed since RustGIS read it - and put in the chunk's group. When that export cannot be
         read the layer is removed and added again at the next send (:attr:`_discard`); while RustGIS refuses to remove
-        it the table waits, and nothing is sent to that layer."""
+        it the table waits, and nothing is sent to that layer. :class:`RustGisAbandoned` once the link was given up
+        (:meth:`abandon`), right before anything goes to RustGIS: the live GeoPackage may hold another chunk's
+        drawings by then."""
+        self._still_linked()
         title = LIVE_TABLES[table][0]
         doomed = self._discard.get(table)
         if doomed is not None:
@@ -3031,6 +3036,7 @@ class RustGisLink:
             del self._discard[table]
         lid = self._adopted(table, layers)
         if lid is None:
+            self._still_linked()
             try:
                 lid = _added_layer(self._command("layer.addData", self._loading(table, title)))
             except RustGisBusy as exc:
