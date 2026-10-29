@@ -153,18 +153,21 @@ def _rustgis_reach(timeout: float) -> tuple:
 
 
 def _rustgis_wait(progress, seconds: float) -> tuple:
-    """RustGIS reached (:func:`_rustgis_reach`) in a step of the TaskRunner: when it does not answer, or does not let
-    the program in, the app is started - or brought to the front - and asked again every half second for ``seconds``
-    at most, time for the user to tick its agent control. The last answer."""
+    """RustGIS reached (:func:`_rustgis_reach`) in a step of the TaskRunner: when it does not let the program in, the
+    app is started - only when no RustGIS runs (:func:`.rustgis_link.running`): on Windows and Linux starting it again
+    opens a second one - and asked again every half second for ``seconds`` at most, time for the user to tick its agent
+    control. A RustGIS that does not answer (minimized, hidden, a dialog of its open) is there: neither started nor
+    waited for, the window says so. The last answer."""
     from ..io import rustgis_link as rg
 
     reached = _rustgis_reach(5.0)
-    if reached[0] not in ("off", "busy"):
+    if reached[0] != "off":
         return reached
-    try:
-        rg.open_app()
-    except (rg.RustGisError, OSError) as exc:  # not where the program looks for it: it may still start by itself
-        log.info("RustGIS non avviato: %s", exc)
+    if not rg.running():
+        try:
+            rg.open_app()
+        except (rg.RustGisError, OSError) as exc:  # not where the program looks for it: it may still start by itself
+            log.info("RustGIS non avviato: %s", exc)
     progress(0.05, tr("In attesa di RustGIS (fino a {0} secondi)", int(seconds)))
     end = time.monotonic() + seconds
     while reached[0] in ("off", "busy") and time.monotonic() < end:

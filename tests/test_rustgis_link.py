@@ -330,12 +330,12 @@ def test_run_files_that_are_not_this_users_alone_are_refused(fake_rustgis, monke
     caplog.set_level(logging.WARNING, logger=link.__name__)
     folder = fake_rustgis.runtime / "rustgis"
     published = folder / "endpoint.json"
-    assert link.endpoint() is not None
+    assert link.endpoint() is not None and link.running()
     for target, mode in ((folder, 0o777), (folder, 0o775), (published, 0o666), (published, 0o646)):
         original = target.stat().st_mode & 0o777
         target.chmod(mode)
         try:
-            assert link.endpoint() is None, (target.name, oct(mode))
+            assert link.endpoint() is None and not link.running(), (target.name, oct(mode))
         finally:
             target.chmod(original)
         assert link.endpoint() is not None
@@ -351,6 +351,19 @@ def test_run_files_that_are_not_this_users_alone_are_refused(fake_rustgis, monke
     published.unlink()
     moved.rename(published)
     assert link.endpoint() is not None
+
+
+def test_running_says_whether_a_rustgis_runs_whatever_its_agent_control(fake_rustgis):
+    """running(): an endpoint.json whose pid runs - with agent control off too (the relay publishes no http_url) -; a
+    file left by a RustGIS that died, or none, is not one."""
+    token = fake_rustgis.folder / link.TOKEN_FILE
+    assert link.running()
+    publish_endpoint(fake_rustgis.runtime, fake_rustgis.port, token, http_url=None, http_token_file=None)
+    assert link.running() and link.endpoint() is None
+    publish_endpoint(fake_rustgis.runtime, fake_rustgis.port, token, pid=dead_pid())
+    assert not link.running()
+    (fake_rustgis.runtime / "rustgis" / "endpoint.json").unlink()
+    assert not link.running()
 
 
 def test_a_redirect_is_refused_and_the_token_goes_nowhere_else(fake_rustgis):

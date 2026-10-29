@@ -349,6 +349,13 @@ def _published() -> dict | None:
     return info
 
 
+def running() -> bool:
+    """Whether a RustGIS runs on this computer as far as its run files tell: an ``endpoint.json`` (:func:`_published`)
+    whose ``pid`` runs, whatever its agent control (the relay publishes it with the box unticked too)."""
+    info = _published()
+    return info is not None and _process_runs(info["pid"])
+
+
 def _settings_file(path: Path) -> bool:
     """Whether ``path`` lies in RustGIS's settings folder (:func:`settings_dir`), where RustGIS keeps its token."""
     folder = settings_dir()

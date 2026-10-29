@@ -189,6 +189,41 @@ def test_local_chunk_and_agent_control_off(trench, rustgis, monkeypatch):
     assert len(shown) == 3 and rg.RELEASES_URL in shown[2] and opened == [[]]
 
 
+def test_a_running_rustgis_is_never_started_again(trench, rustgis, monkeypatch, tmp_path):
+    """Apri in RustGIS with a RustGIS that runs - its agent control unticked (its relay publishes endpoint.json with no
+    HTTP address), or not answering (minimized, hidden) -: the app is not started again (on Windows and Linux that
+    opens a second RustGIS); unticked, the window waits for the box and then says where it is; not answering, it is
+    neither waited for nor started, the window says so. No RustGIS running: the app is started."""
+    from test_rustgis_link import publish_endpoint
+
+    w, app, mw = trench
+    fake, opened = rustgis
+    shown, asked = [], []
+    monkeypatch.setattr(mw, "message", lambda parent, kind, title, text, *a, **k: shown.append(text))
+    monkeypatch.setattr(mw, "RUSTGIS_WAIT", 0.3)
+    monkeypatch.setattr(rg, "endpoint", lambda: None)  # nothing to talk to: agent control off
+    runtime = tmp_path / "run"
+    runtime.mkdir()
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    published = publish_endpoint(runtime, 9, tmp_path / rg.TOKEN_FILE, http_url=None, http_token_file=None)
+    assert rg.running()
+    w.open_in_rustgis()
+    _settle(w, app)
+    assert opened == [] and fake.calls == [] and w._rustgis is None
+    assert len(shown) == 1 and "Let your Agents Control RustGIS" in shown[0]
+    real_reach = mw._rustgis_reach
+    monkeypatch.setattr(mw, "_rustgis_reach", lambda timeout: asked.append(timeout) or ("busy", "not drawing"))
+    w.open_in_rustgis()
+    _settle(w, app)
+    assert opened == [] and len(asked) == 1 and w._rustgis is None  # not started, not waited for
+    assert len(shown) == 2 and "non risponde" in shown[1]
+    published.unlink()  # RustGIS quit
+    monkeypatch.setattr(mw, "_rustgis_reach", real_reach)
+    w.open_in_rustgis()
+    _settle(w, app)
+    assert opened == [[]] and w._rustgis is None and len(shown) == 3
+
+
 def test_busy_says_waiting(trench, rustgis):
     """RustGIS not drawing (minimized, hidden) when the program sends a unit moved here: the status bar says it waits
     for RustGIS, nothing is lost; the next look sends it, once."""
