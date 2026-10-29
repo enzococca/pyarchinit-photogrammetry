@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from .knowledge import Index, default_index
+from .knowledge import LANGUAGES, Index, default_index, guide_folder
 from .providers import ToolSpec
 
 log = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ MAX_SAMPLES = 2000  # cells on a side of the overview the raster statistics read
 API_PAGES = ("scripting", "api")  # the pages scripting_api searches (without language suffix)
 _CHUNK_PARAM = {"type": ["string", "integer"],
                 "description": "The chunk, by its label or its key; the active chunk when left out."}
-# the surface a DEM came from, in words: the filter takes a value that starts with "point" for a WKT geometry
+# the surface a DEM came from, in words
 _SOURCES = {"point_cloud": "dense cloud", "model": "mesh", "tie_points": "tie points", "depth_maps": "depth maps"}
 _LANG_PARAM = {"type": "string", "enum": ["it", "en"],
                "description": "The language of the guide to search: 'it' (default) or 'en'."}
@@ -142,6 +142,16 @@ def _ply_counts(path: Path) -> dict[str, int]:
     return {e["name"]: int(e["count"]) for e in elements}
 
 
+def _resolution(ds):
+    """The cell size of a dataset: one number for square cells, ``[x, y]`` when they differ."""
+    x, y = abs(float(ds.res[0])), abs(float(ds.res[1]))
+    return _num(x, 10) if abs(x - y) <= 1e-9 else [_num(x, 10), _num(y, 10)]
+
+
+def _raster_info(ds) -> dict:
+    return {"width": int(ds.width), "height": int(ds.height), "bands": int(ds.count), "resolution": _resolution(ds)}
+
+
 def _raster_sample(path: Path, band: int = 1):
     """The dataset size and resolution and a masked overview of one band with at most :data:`MAX_SAMPLES` cells
     on a side (nodata and non-finite values masked)."""
@@ -152,8 +162,7 @@ def _raster_sample(path: Path, band: int = 1):
         h = max(1, int(round(ds.height / scale))) if scale > 1 else ds.height
         w = max(1, int(round(ds.width / scale))) if scale > 1 else ds.width
         data = ds.read(band, masked=True, out_shape=(h, w))
-        info = {"width": int(ds.width), "height": int(ds.height), "bands": int(ds.count),
-                "resolution": _num(abs(ds.res[0]), 10)}
+        info = _raster_info(ds)
     data = np.ma.masked_invalid(np.ma.asarray(data, dtype=np.float64))
     return info, data
 
@@ -162,12 +171,18 @@ def _resolve_chunk(document, arguments: dict):
     """The chunk the arguments name (label or key) or the active one; ``(chunk, None)`` or ``(None, answer)``."""
     if document is None:
         return None, {"none": "nessun progetto aperto"}
+    labels = ", ".join(f"{c.label!r} (key {c.key})" for c in document.chunks) or "none"
     wanted = arguments.get("chunk")
     if wanted in (None, ""):
         chunk = document.chunk
         if chunk is None:
+            if document.chunks:
+                return None, {"none": f"nessun chunk attivo (sono tutti disattivati): i chunk sono {labels}"}
             return None, {"none": "il progetto non ha chunk"}
         return chunk, None
+    if isinstance(wanted, bool) or not isinstance(wanted, (str, int)):
+        return None, {"error": f"chunk must be a label or a key, not {wanted!r}: "
+                               f"the chunks of the project are {labels}"}
     for c in document.chunks:
         if c.label == str(wanted):
             return c, None
@@ -178,7 +193,6 @@ def _resolve_chunk(document, arguments: dict):
     for c in document.chunks:
         if key is not None and c.key == key:
             return c, None
-    labels = ", ".join(f"{c.label!r} (key {c.key})" for c in document.chunks) or "none"
     return None, {"error": f"unknown chunk {wanted!r}: the chunks of the project are {labels}"}
 
 
@@ -237,8 +251,7 @@ def orthomosaic_info(chunk, arguments: dict, index: Index) -> dict:
     import rasterio
 
     with rasterio.open(path) as ds:
-        info = {"width": int(ds.width), "height": int(ds.height), "bands": int(ds.count),
-                "resolution": _num(abs(ds.res[0]), 10)}
+        info = _raster_info(ds)
     meta = chunk.meta.get("orthomosaic") or {}
     blending, sigma = stored_blending(meta)
     return {"resolution": info["resolution"], "width": info["width"], "height": info["height"],
@@ -262,18 +275,33 @@ def _rmse(errors: list) -> float | None:
     return _sig(np.sqrt(np.mean(np.square(e)))) if e else None
 
 
-def _reprojection_error(chunk) -> float | None:
+_REPROJECTION_CACHE: dict[tuple[str, int], float] = {}  # (reconstruction folder, mtime_ns of points3D.bin) -> px
+
+
+def _reprojection_error(chunk) -> tuple[float | None, str | None]:
+    """The mean reprojection error in pixels and where it came from: ``"stored"`` (the alignment or the
+    optimisation wrote it in ``meta["sfm"]``) or ``"computed"`` from the COLMAP model, once per model file (a
+    block of a thousand photos takes seconds to load: the value is kept until the file changes)."""
     sfm = chunk.meta.get("sfm") or {}
     err = sfm.get("reprojection_error")
     if err is None:
         err = (sfm.get("optimize") or {}).get("reprojection_error")
-    if err is None and _existing(chunk, "reconstruction") is not None:
+    if err is not None:
+        return _num(err, 4), "stored"
+    folder = _existing(chunk, "reconstruction")
+    if folder is None:
+        return None, None
+    points = folder / "points3D.bin"
+    stamp = (points if points.exists() else folder).stat().st_mtime_ns
+    key = (str(folder), stamp)
+    if key not in _REPROJECTION_CACHE:
         from ..engine.sfm import load_reconstruction
 
         rec = load_reconstruction(chunk)
         rec.update_point_3d_errors()
-        err = rec.compute_mean_reprojection_error()
-    return _num(err, 4)
+        _REPROJECTION_CACHE.clear()  # one entry is enough: the open project
+        _REPROJECTION_CACHE[key] = float(rec.compute_mean_reprojection_error())
+    return _num(_REPROJECTION_CACHE[key], 4), "computed"
 
 
 def alignment_report(chunk, arguments: dict, index: Index) -> dict:
@@ -289,9 +317,10 @@ def alignment_report(chunk, arguments: dict, index: Index) -> dict:
     rows = gcp.marker_errors(chunk)
     bars = [r for r in gcp.scalebar_errors(chunk) if r["enabled"]]
     optimize = sfm.get("optimize") or {}
+    err, err_source = _reprojection_error(chunk) if aligned else (None, None)
     out = {"photos": len(chunk.cameras), "aligned": len(aligned),
            "tie_points": _ply_counts(tie).get("vertex") if tie is not None else None,
-           "reprojection_error_px": _reprojection_error(chunk) if aligned else None,
+           "reprojection_error_px": err, "reprojection_error_source": err_source,
            "matcher": sfm.get("matcher"), "mapper": sfm.get("mapper"), "features": sfm.get("features"),
            "quality": sfm.get("quality"), "pairs": sfm.get("pairs"),
            "gcp": {"control_rmse": _rmse([r["error"] for r in rows if r["type"] == "control"]),
@@ -357,9 +386,11 @@ def thermal_info(chunk, arguments: dict, index: Index) -> dict:
     out["balance"] = ({"frames": sum(1 for k in offsets if k != "spread"),
                        "offset_spread_celsius": _num(offsets.get("spread"), 3)} if offsets else None)
     reg = meta.get("registration") or {}
-    if isinstance(reg, dict) and reg:
-        out["registration"] = {k: _num(v, 3) if isinstance(v, (int, float)) else v for k, v in reg.items()
-                               if k in ("cover", "correlation", "cc", "method", "per_capture")}
+    if isinstance(reg, dict) and reg:  # thermal.registrations: factor, cover, fixed (homography), fixed_cc, captures
+        caps = reg.get("captures") or {}
+        out["registration"] = {"cover": _num(reg.get("cover"), 3), "correlation": _num(reg.get("fixed_cc"), 3),
+                               "captures": len(caps),
+                               "refined": sum(1 for c in caps.values() if isinstance(c, dict) and c.get("refined"))}
     return out
 
 
@@ -443,7 +474,10 @@ def _passages(found) -> dict:
 
 
 def _index_for(arguments: dict, index: Index | None) -> Index:
-    lang = arguments.get("lang") or (index.lang if index is not None else "it")
+    """The index of the language asked (``lang``; unknown or missing: that of the index given, else Italian)."""
+    lang = arguments.get("lang")
+    if lang not in LANGUAGES:
+        lang = index.lang if index is not None and index.lang in LANGUAGES else "it"
     if index is not None and index.lang == lang:
         return index
     return default_index(lang)
@@ -457,15 +491,17 @@ def guide_search(document, arguments: dict, index: Index) -> dict:
     return _passages(_index_for(arguments, index).search(query, k=max(1, min(20, k))))
 
 
-_API_INDEXES: dict[str, Index] = {}
+_API_INDEXES: dict[tuple, tuple[Index, Index]] = {}  # (lang, guide folder, index) -> (the index, its sub-index)
 
 
 def _api_index(full: Index) -> Index:
-    """An index over the scripting and API pages of ``full`` only."""
-    if full.lang not in _API_INDEXES:
+    """An index over the scripting and API pages of ``full`` only, built once per index (the key names the
+    language, the guide folder and the index itself, which the value keeps alive so the key stays its own)."""
+    key = (full.lang, str(guide_folder()), id(full))
+    if key not in _API_INDEXES:
         wanted = {f"{p}.it.md" if full.lang == "it" else f"{p}.md" for p in API_PAGES}
-        _API_INDEXES[full.lang] = Index([p for p in full.passages if p.page in wanted], full.lang)
-    return _API_INDEXES[full.lang]
+        _API_INDEXES[key] = (full, Index([p for p in full.passages if p.page in wanted], full.lang))
+    return _API_INDEXES[key][1]
 
 
 def scripting_api(document, arguments: dict, index: Index) -> dict:
@@ -488,8 +524,12 @@ _DOCUMENT_TOOLS: dict[str, Callable] = {"project_summary": project_summary, "gui
 
 def run_tool(name: str, arguments: dict | None, document, index: Index | None) -> dict:
     """Run the tool ``name`` with its JSON ``arguments`` over ``document`` (None: no project open). Never raises."""
-    arguments = dict(arguments or {})
+    if arguments is None:
+        arguments = {}
+    if not isinstance(arguments, dict):
+        return {"error": f"arguments must be a JSON object, not {type(arguments).__name__}"}
     try:
+        arguments = dict(arguments)
         if name in _DOCUMENT_TOOLS:
             return _DOCUMENT_TOOLS[name](document, arguments, index)
         if name in _CHUNK_TOOLS:

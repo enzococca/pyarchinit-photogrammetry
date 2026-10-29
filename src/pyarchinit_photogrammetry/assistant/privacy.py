@@ -46,8 +46,10 @@ _REFERENCE_TOKENS = frozenset({"reference", "references"})
 _GEOMETRY_TOKENS = frozenset({"polygon", "polygons", "line", "lines", "points", "point", "path", "vertices", "outline",
                               "ring", "contour", "contours", "poly", "linestring"})
 _CRS_TOKENS = frozenset({"crs", "epsg", "srs", "proj", "utm"})
-_WKT_GEOMETRY = re.compile(r"^\s*(?:SRID=\d+;)?\s*(?:MULTI)?(?:POINT|LINESTRING|POLYGON|CURVE|SURFACE)|"
-                           r"^\s*GEOMETRYCOLLECTION", re.IGNORECASE)
+# a WKT geometry: the word (optionally Z/M/ZM), then "(" or EMPTY - never a text that merely starts with it
+# ("point_cloud", "Polygon of the trench", "Curve di livello")
+_WKT_GEOMETRY = re.compile(r"^\s*(?:SRID=\d+;)?\s*(?:MULTI)?(?:POINT|LINESTRING|POLYGON|CURVE|SURFACE|GEOMETRYCOLLECTION)"
+                           r"[A-Z]*\s*(?:ZM?|M)?\s*(?:\(|EMPTY\b)", re.IGNORECASE)
 
 CRS_PROJECTED = "proiettato, in metri"
 CRS_GEOGRAPHIC = "geografico (gradi)"

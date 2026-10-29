@@ -2,7 +2,7 @@ import re
 
 import numpy as np
 
-from pyarchinit_photogrammetry.assistant.privacy import ABSOLUTE_KEYS, WARNING, Filter
+from pyarchinit_photogrammetry.assistant.privacy import ABSOLUTE_KEYS, WARNING, Filter, _is_wkt
 from pyarchinit_photogrammetry.core.camera import Camera
 from pyarchinit_photogrammetry.core.document import Document
 
@@ -515,3 +515,18 @@ def test_unc_like_and_user_home_anchors(tmp_path):
     assert f.outgoing("~mario.rossi/Scavo Tell Halaf/foto") == "foto"
     for line in ("// commento", "a // b", "~ 5 m", "circa ~3/4"):
         assert f.outgoing(line) == line, line
+
+
+def test_is_wkt_takes_a_geometry_and_not_a_word_that_starts_like_one():
+    # ruling T4-1: a WKT geometry is the word, optionally Z/M/ZM, then "(" or EMPTY
+    for wkt in ("POINT (1 2)", "POINT(1 2)", "POINT Z (1 2 3)", "POINT ZM(1 2 3 4)", "MULTIPOLYGON (((0 0, 1 0, 1 1, 0 0)))",
+                "SRID=4326;POINT(1 2)", "POINT EMPTY", "GEOMETRYCOLLECTION (POINT (1 2))", "GEOMETRYCOLLECTION EMPTY",
+                " polygon ((0 0, 1 0, 1 1, 0 0))", "LINESTRING (0 0, 1 1)", "CURVEPOLYGON ((0 0, 1 0, 1 1, 0 0))",
+                "MULTISURFACE (((0 0, 1 0, 1 1, 0 0)))"):
+        assert _is_wkt(wkt), wkt
+    for text in ("point_cloud", "polygons", "surface", "pointer", "Polygon of the trench", "Curve di livello e volumi",
+                 "tie points (sparse)", 12):
+        assert not _is_wkt(text), text
+    f = Filter(None)
+    assert f.facts({"source": "point_cloud", "title": "Curve di livello e volumi", "wkt": "POINT (1 2)"}) == {
+        "source": "point_cloud", "title": "Curve di livello e volumi"}
