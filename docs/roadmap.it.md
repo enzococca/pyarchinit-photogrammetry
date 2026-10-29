@@ -243,16 +243,15 @@ dataset pubblici WorldView-3.
   sistema del rilievo con l'anteprima di quello che cambia; *Ottimizza camere* tenuto dalle posizioni GNSS
   accurate, con una rete di sicurezza; la parte GNSS del rapporto PDF, con i crediti dei dati usati; `ppg gnss
   stations`, `baseline`, `ppp`, `atx`, `geoid`, `crs`.
+* **RustGIS nei due sensi** (1.6.2): i disegni e i prodotti di un chunk nel [RustGIS](https://github.com/opengeos/RustGIS)
+  aperto (0.4.0 o successivo), nel sistema del chunk, e quello che lì viene disegnato, modificato o cancellato di nuovo
+  nella finestra, come con QGIS; attraverso l'interfaccia di RustGIS per gli altri programmi (accesa una volta in
+  RustGIS: *Let your Agents Control RustGIS*), con lo stesso GeoPackage dal vivo del collegamento con QGIS. Le unità
+  disegnate lì arrivano in PyArchInit dalla finestra. Vedi [Integrazioni](integrations.md#rustgis).
 
 ## Prossimi passi
 
 Punti aperti, senza un ordine fisso:
-
-* **RustGIS nei due sensi** (previsto per la 1.6.2): i disegni e i prodotti di un chunk nel
-  [RustGIS](https://github.com/opengeos/RustGIS) aperto, nel sistema del chunk, e quello che lì viene disegnato,
-  modificato o cancellato di nuovo nella finestra, come con QGIS; attraverso l'interfaccia di RustGIS per gli altri
-  programmi (va accesa in RustGIS: *Let your Agents Control RustGIS*). PyArchInit resta dalla parte del programma:
-  le US disegnate in RustGIS ci arrivano dalla finestra.
 
 * **GNSS, il prossimo passo**: gli eventi di un ricevitore (i segnali di scatto che una camera lascia nelle
   osservazioni di un ricevitore proprio), i log di ArduPilot e PX4 per i droni costruiti da sé, i file grezzi dei

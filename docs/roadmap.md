@@ -243,16 +243,15 @@ on the public WorldView-3 datasets.
   system of the survey with a preview of what changes; *Optimise cameras* held by the accurate GNSS positions,
   with a safety net; the GNSS part of the PDF report, with the credits of the data used; `ppg gnss stations`,
   `baseline`, `ppp`, `atx`, `geoid`, `crs`.
+* **RustGIS both ways** (1.6.2): the drawings and the products of a chunk in the
+  [RustGIS](https://github.com/opengeos/RustGIS) that is open (0.4.0 or later), in the system of the chunk, and
+  what is drawn, changed or deleted there back into the window, as with QGIS; through RustGIS's own interface for other
+  programs (turned on once in RustGIS: *Let your Agents Control RustGIS*), with the same live GeoPackage as the QGIS
+  link. The units drawn there reach PyArchInit from the window. See [Integrations](integrations.md#rustgis).
 
 ## Next
 
 Open points, in no fixed order:
-
-* **RustGIS both ways** (planned for 1.6.2): the drawings and the products of a chunk in the
-  [RustGIS](https://github.com/opengeos/RustGIS) that is open, in the system of the chunk, and what is drawn, changed
-  or deleted there back into the window, as with QGIS; through RustGIS's own interface for other programs (it
-  has to be turned on in RustGIS: *Let your Agents Control RustGIS*). PyArchInit stays on the side of the program:
-  the units drawn in RustGIS reach it from the window.
 
 * **GNSS, the next step**: the events of a receiver (the time marks a camera leaves in the observations of a
   receiver of one's own), the logs of ArduPilot and PX4 for drones built by hand, the raw files of u-blox and Emlid

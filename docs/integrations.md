@@ -1,4 +1,4 @@
-# Integrations: QGIS, Metashape, WebODM, Photo3D
+# Integrations: QGIS, RustGIS, Metashape, WebODM, Photo3D
 
 ## QGIS, live
 
@@ -84,6 +84,61 @@ QGIS* again. The project is created by QGIS's own
 Python (`/Applications/QGIS*.app`, `C:\Program Files\QGIS*`, `/usr/bin/qgis`, or `PPG_QGIS`),
 so styles and labels are native QGIS ones. Units published to PyArchInit
 (`pyunitastratigrafiche`) are of course visible in the PyArchInit layers of QGIS too.
+
+## RustGIS
+
+[RustGIS](https://github.com/opengeos/RustGIS) is a desktop GIS that can be driven by other programs on the same
+computer. *QGIS > Apri in RustGIS (collegamento dal vivo)* opens it with the active chunk, and the checkable
+*QGIS > Collegamento dal vivo con RustGIS (nei due sensi)* keeps it linked: what you draw here reaches RustGIS by
+itself, and what you draw, change or delete there comes back, as with QGIS. The link needs **RustGIS 0.4.0 or later**
+(an older one is refused with its version).
+
+What goes to RustGIS:
+
+* the drawing tables of the chunk, the same GeoPackage as the QGIS link (`disegni_ppg.gpkg`: `unita`, `poligoni`,
+  `sezioni`, `curve`, `linee`, `punti`, `quote`), as layers in a group named after the chunk;
+* the rasters of the chunk, hidden but the orthomosaic: the orthomosaic, the DEM and its shaded relief. A raster that
+  RustGIS would open from a lower-resolution overview is served from this computer and read in place, at full
+  resolution where the view needs it; one RustGIS cannot read as it is goes as a copy it can read (made once, with a
+  progress window for the large ones).
+
+What comes back, both ways: the **units** (outline and the columns of `pyunitastratigrafiche`), the **spot heights**
+and the **sections** (name and trace; a section whose trace moved is cut again). The contour lines, zones, stones,
+patches, measuring points and the drawings of plugins are computed by the program: an edit made to them in RustGIS is
+not read back. Each batch of edits is one entry of *Modifica > Annulla* ("From RustGIS: ..."), exactly as for QGIS, and
+the window looks at RustGIS every two seconds while the link is on. PyArchInit stays on the side of the program: the
+units drawn in RustGIS reach it from the window (*Salva modifiche in PyArchInit*, *Pubblica unita' e quote disegnate*), never from RustGIS.
+
+**Turn on the control once.** RustGIS serves its tools to other programs only while *Let your Agents Control RustGIS*
+is ticked in the settings of its AI Assistant. That box is your consent, kept in RustGIS: the program never changes it.
+If it is off, *Apri in RustGIS* starts RustGIS and says what to tick; tick it once and try again. The program finds the
+running RustGIS from the file it publishes in its settings folder and reads its token from there at every request; the
+token is never kept, logged or shown.
+
+How it behaves:
+
+* **Timing**: RustGIS never writes its edits to a file, so the window asks it for the layers every few seconds
+  (when it lists edits in the linked layers, at least every ten seconds) and straight away when you come back to the
+  window from RustGIS, when you save, close the project or change the active chunk. The edits made there come back
+  within seconds and when the window is activated; the last ones are read before the question about saving.
+* **Waiting for RustGIS**: a RustGIS that is minimized, hidden or has a dialog of its own open does not answer. The
+  window says *Waiting for RustGIS: it does not answer (minimized, hidden, or a window of its own open); the link tries
+  again by itself* and goes on by itself when RustGIS is back. If RustGIS is closed, or its agent control is turned off,
+  the link stops and says so; *Apri in RustGIS* starts it again.
+* **Local chunks are excluded**: RustGIS shows layers only in a coordinate system with an EPSG code. A chunk in a local
+  frame (or in a system without a code) is refused with a message that says so: georeference it, or choose its system
+  in the GNSS pane.
+* **Systems with a datum shift** (Monte Mario, for instance): the link checks at the start that RustGIS places the
+  chunk's system where the program does, with a point written, read by RustGIS and exported again. RustGIS converts
+  such systems with a sub-millimetre offset (0.46 mm measured on Monte Mario): below 1 mm the link accepts it, and a
+  feature that comes back moved by less than that counts as untouched, never as an edit. A system RustGIS places more
+  than 1 mm away is refused, because the drawings would move there.
+* **Changing the chunk or its system** (*Sistema e quote*) takes the old layers out of RustGIS and links the new ones;
+  what was edited in RustGIS and not read yet is read first. Layers that cannot be taken away stay in RustGIS, no longer
+  linked, with a message.
+
+QGIS and RustGIS can be linked at the same time: both read and write the same GeoPackage, and the edits of either
+come in through it.
 
 ## Metashape (`.psx`)
 

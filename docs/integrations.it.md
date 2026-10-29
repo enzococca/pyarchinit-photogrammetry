@@ -1,4 +1,4 @@
-# Integrazioni: QGIS, Metashape, WebODM, Photo3D
+# Integrazioni: QGIS, RustGIS, Metashape, WebODM, Photo3D
 
 ## QGIS, dal vivo
 
@@ -85,6 +85,61 @@ in QGIS*. Il progetto è creato dal Python di QGIS stesso (`/Applications/QGIS*.
 `C:\Program Files\QGIS*`, `/usr/bin/qgis`, o `PPG_QGIS`), così stili ed etichette sono quelli
 nativi di QGIS. Le unità pubblicate in PyArchInit (`pyunitastratigrafiche`) sono visibili,
 naturalmente, anche nei layer PyArchInit di QGIS.
+
+## RustGIS
+
+[RustGIS](https://github.com/opengeos/RustGIS) è un GIS desktop che altri programmi dello stesso computer possono
+pilotare. *QGIS > Apri in RustGIS (collegamento dal vivo)* lo apre con il chunk attivo, e la voce con la casella
+*QGIS > Collegamento dal vivo con RustGIS (nei due sensi)* lo tiene collegato: ciò che disegni qui arriva in RustGIS da
+solo, e ciò che lì disegni, cambi o cancelli torna qui, come con QGIS. Il collegamento richiede **RustGIS 0.4.0 o
+successivo** (uno più vecchio viene rifiutato, con la sua versione).
+
+Cosa va a RustGIS:
+
+* le tabelle dei disegni del chunk, lo stesso GeoPackage del collegamento con QGIS (`disegni_ppg.gpkg`: `unita`,
+  `poligoni`, `sezioni`, `curve`, `linee`, `punti`, `quote`), come layer in un gruppo con il nome del chunk;
+* i raster del chunk, nascosti tranne l'ortofoto: l'ortofoto, il DEM e la sua ombreggiatura. Un raster che RustGIS
+  aprirebbe da una piramide a risoluzione ridotta viene servito da questo computer e letto sul posto, a piena
+  risoluzione dove la vista lo richiede; uno che RustGIS non sa leggere così com'è va come copia leggibile (fatta una
+  volta, con una finestra di avanzamento per i più grandi).
+
+Cosa torna, nei due sensi: le **unità** (contorno e colonne di `pyunitastratigrafiche`), le **quote** e le **sezioni**
+(nome e traccia; una sezione con la traccia spostata viene tagliata di nuovo). Curve di livello, zone, pietre, patch,
+punti di misura e i disegni dei plugin li calcola il programma: una modifica fatta loro in RustGIS non viene ripresa.
+Ogni gruppo di modifiche è una voce di *Modifica > Annulla* ("Da RustGIS: ..."), come per QGIS, e la finestra guarda
+RustGIS ogni due secondi finché il collegamento è acceso. PyArchInit resta dalla parte del programma: le unità
+disegnate in RustGIS ci arrivano dalla finestra (*Salva modifiche in PyArchInit*, *Pubblica unita' e quote disegnate*), mai da RustGIS.
+
+**Accendi il controllo una volta sola.** RustGIS offre i suoi strumenti agli altri programmi solo mentre è spuntato
+*Let your Agents Control RustGIS* nelle impostazioni del suo AI Assistant. Quella casella è il tuo consenso, conservato
+in RustGIS: il programma non la cambia mai. Se è spenta, *Apri in RustGIS* avvia RustGIS e dice cosa spuntare; spuntala
+una volta e riprova. Il programma trova il RustGIS in esecuzione dal file che esso pubblica nella sua cartella delle
+impostazioni e legge da lì il suo token a ogni richiesta; il token non viene mai conservato, scritto nel log o mostrato.
+
+Come si comporta:
+
+* **Tempi**: RustGIS non scrive mai le sue modifiche in un file, così la finestra gli chiede i layer ogni pochi
+  secondi (quando elenca modifiche nei layer collegati, almeno ogni dieci secondi) e subito quando torni alla finestra
+  da RustGIS, quando salvi, chiudi il progetto o cambi il chunk attivo. Le modifiche fatte lì tornano entro pochi
+  secondi e quando la finestra viene attivata; le ultime vengono lette prima della domanda sul salvataggio.
+* **In attesa di RustGIS**: un RustGIS ridotto a icona, nascosto o con una finestra sua aperta non risponde. La
+  finestra dice *In attesa di RustGIS: non risponde (ridotto a icona, nascosto, o una sua finestra aperta); il
+  collegamento riprova da solo* e riparte da sola quando RustGIS è di nuovo disponibile. Se RustGIS viene chiuso, o il
+  controllo degli agenti viene tolto, il collegamento si ferma e lo dice; *Apri in RustGIS* lo fa ripartire.
+* **I chunk locali sono esclusi**: RustGIS mostra i layer solo in un sistema di coordinate con un codice EPSG. Un chunk
+  in un sistema locale (o in un sistema senza codice) viene rifiutato con un messaggio che lo dice: georeferenzialo, o
+  scegli il suo sistema nel pannello GNSS.
+* **Sistemi con uno spostamento di datum** (Monte Mario, per esempio): all'avvio il collegamento controlla che RustGIS
+  collochi il sistema del chunk dove lo colloca il programma, con un punto scritto, letto da RustGIS ed esportato di
+  nuovo. RustGIS converte questi sistemi con uno scarto sub-millimetrico (0,46 mm misurati su Monte Mario): sotto 1 mm
+  il collegamento lo accetta, e un elemento che torna spostato di meno vale come non toccato, mai come una modifica.
+  Un sistema che RustGIS colloca a più di 1 mm viene rifiutato, perché i disegni si sposterebbero.
+* **Cambiare il chunk o il suo sistema** (*Sistema e quote*) toglie da RustGIS i vecchi layer e collega i nuovi; ciò che
+  è stato modificato in RustGIS e non ancora letto viene letto prima. I layer che non si riescono a togliere restano in
+  RustGIS, non più collegati, con un messaggio.
+
+QGIS e RustGIS possono essere collegati insieme: entrambi leggono e scrivono lo stesso GeoPackage, e le modifiche
+dell'uno e dell'altro arrivano da lì.
 
 ## Metashape (`.psx`)
 
