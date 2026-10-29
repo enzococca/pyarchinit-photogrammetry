@@ -294,6 +294,25 @@ def test_closing_reads_rustgis_last_edits_first(trench, rustgis, monkeypatch):
     assert w._rustgis is rl and rl.layers
 
 
+def test_saving_reads_rustgis_last_edits_first(trench, rustgis, monkeypatch):
+    """File > Salva with a unit drawn in RustGIS and not read yet (within the 2 s between two looks): it comes in
+    first, so that the project is saved with it; the link goes on."""
+    import pyarchinit_photogrammetry as ppg
+    from PySide6.QtWidgets import QMessageBox
+
+    w, app, mw = trench
+    fake, _ = rustgis
+    monkeypatch.setattr(mw, "message", lambda *a, **k: QMessageBox.StandardButton.Discard)  # no window waits
+    rl = _linked(w, app)
+    fake.draw(fake.linked(rl, "unita"), box(GX + 3, GY + 1, GX + 3.5, GY + 1.5), GB, us_s="12", area_s="1")
+    assert w.units == []
+    assert w.save_document()
+    assert [u.us for u in w.units] == ["12"] and not w.isWindowModified()
+    saved = ppg.Document.open(w.doc.path)
+    assert [d["us"] for d in saved.chunks[0].meta["drawings"]["units"]] == ["12"]
+    assert w._rustgis is rl and rl.layers
+
+
 def test_back_to_the_window_reads_rustgis(trench, rustgis):
     """What is edited in RustGIS without changing its edit status (a feature edited twice): read when the program
     comes back to the front, and every 10 s while RustGIS lists edits in the linked layers."""
@@ -1081,8 +1100,10 @@ def test_closing_keeps_the_group_while_something_is_not_saved(trench, rustgis, m
 
 
 def test_closing_keeps_the_group_when_rustgis_is_edited_meanwhile(trench, rustgis, monkeypatch):
-    """A unit drawn in RustGIS while the window asks whether to save (saved): RustGIS's edit status changed since the
-    last read, so its layers stay there."""
+    """A unit drawn in RustGIS while the window asks whether to save (saved): the save reads it first, so the project
+    is saved with it. One drawn after that read, before the link stops: RustGIS's edit status changed since the last
+    read, so its layers stay there."""
+    import pyarchinit_photogrammetry as ppg
     from PySide6.QtWidgets import QMessageBox
 
     w, app, mw = trench
@@ -1094,9 +1115,18 @@ def test_closing_keeps_the_group_when_rustgis_is_edited_meanwhile(trench, rustgi
         fake.draw(layer, box(GX + 3, GY + 1, GX + 3.5, GY + 1.5), GB, us_s="12", area_s="1")
         return QMessageBox.StandardButton.Save
 
+    real_save = w.save_document
+
+    def save(ask=False):
+        saved = real_save(ask)
+        fake.draw(layer, box(GX + 4, GY + 1, GX + 4.5, GY + 1.5), GB, us_s="13", area_s="1")
+        return saved
+
     monkeypatch.setattr(mw, "message", drawn_meanwhile)
+    monkeypatch.setattr(w, "save_document", save)
     w.setWindowModified(True)
     assert w.close()
+    assert [d["us"] for d in ppg.Document.open(w.doc.path).chunks[0].meta["drawings"]["units"]] == ["12"]
     assert rl.layers == {} and [g["name"] for g in fake.groups] == ["Saggio 1"] and layer in fake.layers
 
 

@@ -2556,6 +2556,7 @@ class MainWindow(QMainWindow):
         return card
 
     def save_document(self, ask: bool = False) -> bool:
+        self._rustgis_take_edits()  # RustGIS's last edits in the drawings, so that they are saved with the project
         if ask or self.doc.path is None:
             path, _ = QFileDialog.getSaveFileName(self, tr("Salva progetto"), self._last_dir(), tr("Progetti (*.ppg)"))
             if not path:
