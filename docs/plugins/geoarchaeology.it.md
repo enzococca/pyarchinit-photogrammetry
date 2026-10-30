@@ -696,7 +696,7 @@ richiesta, accanto al kriging, che resta il metodo predefinito. È una novità d
 |---|---|
 | Strati visti nella maggior parte dei sondaggi, uno sull'altro | **kriging**: buono come l'implicito o migliore, in pochi secondi |
 | Una fossa, un fossato, una trincea di spoliazione, con i riempimenti | **implicito** |
-| Un contatto visto in pochi sondaggi, che deve prendere la forma dagli strati intorno | **implicito**, e guarda il volume di quell'unità (più avanti) |
+| Un contatto visto in pochi sondaggi, che deve prendere la forma dagli strati intorno | **implicito** |
 | Una giacitura misurata su una sezione, contatti visti su una parete | **implicito**: il kriging non sa usarli |
 | Il volume di un deposito semplice da riportare | **kriging** |
 
@@ -712,8 +712,8 @@ il modello implicito lascia fuori 12 gruppi di sondaggi e conta quelli che vedon
 | US 5, naturale | 13 | **0,27** / 0,31 m | 0,35 / **0,31** m |
 
 Sugli strati semplici il kriging resta migliore; il modello implicito vince sul contatto raro. Con la fossa il kriging peggiora sul
-naturale perché tre sondaggi lo trovano più in basso e non sa perché. Il prezzo del modello implicito su un'unità rara è più avanti, in
-[Volumi](#implicit-volumes).
+naturale perché tre sondaggi lo trovano più in basso e non sa perché. Il voto che ferma un'unità rara, più avanti in
+[Unità rare e volumi](#implicit-volumes), agisce sui solidi e non su questi errori, che sono uguali con e senza.
 
 ### Installazione { #implicit-install }
 
@@ -803,24 +803,29 @@ fondo misurato solo accanto al bordo non dice nulla del centro (`floor_unmeasure
   sondaggi per uno strato e lo stende su 1.800 m² con 2.004 m³, venti volte troppo.</figcaption>
 </figure>
 
-### I volumi, e il prezzo di un'unità rara { #implicit-volumes }
+### Unità rare e volumi { #implicit-volumes }
 
-`volumi.csv` ha il volume del kriging accanto a quello implicito, ma **non coprono la stessa area**: il kriging si ferma al margine intorno ai
-sondaggi, il modello implicito copre ogni cella con il DEM sulla sua griglia. Confrontali solo dopo averli ritagliati sulla stessa area. Contati
-sulle stesse celle nella dimostrazione:
+Un campo tiene uno spessore ovunque, quindi un'unità vista in pochi sondaggi si allargherebbe su tutto il sito. Il modello applica la regola del
+kriging: i sondaggi votano per l'unità per inverso della distanza, quelli che la attraversano senza trovarla contro, e dove prevalgono quelli senza l'unità non c'è, con un
+bordo verticale; uno spessore che il kriging distingue da zero resta. Un sondaggio dentro un taglio non vota contro quello che il taglio ha portato via.
+Dove un'unità non c'è, i suoi voxel passano allo strato sotto, e il riepilogo dice da quante celle è stata tolta. Non c'è un avviso: è il funzionamento normale del
+modello. Nella dimostrazione US 3, vista in 5 sondaggi su 21, copre 10.368 m² contro i 9.647 del kriging; senza questa regola ne copriva 59.600.
 
-| Unità | Kriging | Implicito |
-|---|---:|---:|
-| US 1 | 22.950 m³ | 21.784 m³ |
-| US 2 | 75.621 m³ | 45.638 m³ |
-| US 3, rara | 25.341 m³ | 67.986 m³ |
-| US 4 | 181.697 m³ | 167.194 m³ |
-| US 5, fino alla base | 280.739 m³ | 268.113 m³ |
+`volumi.csv` ha `kriging_m3` e `same_cells_m3`: il volume di ciascun metodo sulle celle che hanno entrambi. Il kriging si ferma al margine intorno ai
+sondaggi, il modello implicito copre ogni cella con il DEM sulla sua griglia, quindi `volume_m3` copre di più; confronta `same_cells_m3` con `kriging_m3`, come fa il
+riepilogo. Sui 73.834 m² della dimostrazione:
 
-US 3 è il punto debole. Vista in 5 sondaggi su 21, si allarga su 46.800 m² contro 9.650, perché un campo tiene uno spessore anche dove l'unità
-manca: i sondaggi che non la vedono non la tolgono, come fanno nel kriging. Il suo errore leave-one-out è quindi il migliore e il suo volume non
-è affidabile: **l'errore di un contatto dice dov'è il contatto dove esiste, non fin dove arriva l'unità**. US 2 + US 3 insieme fanno 113.600
-contro 101.000 m³. Per limitare un'unità, disegnane la US e leggi accanto il volume del kriging.
+| Unità | Kriging | Implicito, stesse celle | Implicito, tutto (`volume_m3`) |
+|---|---:|---:|---:|
+| US 1 | 22.974 m³ | 21.793 m³ | 28.102 m³ |
+| US 2 | 75.705 m³ | 45.465 m³ | 60.602 m³ |
+| US 3, rara | 25.341 m³ | 20.466 m³ | 20.466 m³ |
+| US 4 | 181.703 m³ | 208.931 m³ | 217.052 m³ |
+| US 5, fino alla base del modello | 263.288 m³ | 274.179 m³ | 378.837 m³ |
+
+Tutto il deposito sopra il naturale differisce del 3 % (305.723 contro 296.655 m³), le singole unità molto di più. Dove US 3 non c'è, il suo spazio passa allo strato
+sotto, così US 4 prende quello che i sondaggi danno a US 2: US 2 è il 40 % sotto il kriging e US 4 il 15 % sopra. Fidati del volume del deposito prima che di quelli delle
+sue unità, e dell'errore leave-one-out per dov'è un contatto dove esiste, non per fin dove arriva l'unità.
 
 <figure markdown="span">
   ![I solidi attorno alla fossa, tagliati lungo la sezione](../img/plugins/geoarchaeology/implicit-solids.jpg)
@@ -883,7 +888,7 @@ lo hanno spostato solo di una frazione. Per cambiare la forma di un contatto ser
 * **Un contatto non viene rispettato esattamente**, come sopra: un campo liscio ci si appoggia.
 * **Un bordo stimato è grossolano**, nei due sensi: +125 % e -54 % nelle prove.
 * **Un fondo misurato solo al bordo** (`floor_unmeasured`) non è una misura del centro: un sondaggio sul bordo di una conca ha dato meno di un terzo del volume.
-* **Un'unità rara si allarga**, come sopra.
+* **Un'unità rara finisce con un bordo verticale** a metà fra i sondaggi, come nel kriging, e gli strati intorno si dividono il suo spazio in modo diseguale, come sopra.
 * **La forma del fondo è ipotizzata.** Un fondo piatto viene arrotondato nel primo quarto della mezza larghezza: una parete davvero verticale sta fuori dall'intervallo.
 * **La griglia**: al massimo 120.000 celle e 200 livelli di base. Una fossa deve essere larga almeno diverse celle; qui 9 celle, voxel da 0,13 m.
 * **Non fatto**: faglie, pieghe, intrusioni, modifica a mano del modello, insiemi di modelli.
@@ -1063,7 +1068,7 @@ aprono con lui.
 * `model/<unità>.ply`, `model/unita.obj` con `unita.mtl`, `model/volumi.csv`: i solidi e i loro volumi;
   `volumi.csv` ha unità, descrizione, volume, area, spessore medio e massimo, tetto e base minimi e
   massimi, celle, ritagliata, fino al fondo, volume e area dove manca il DEM.
-* `implicit/top_<k>_<unità>.tif`: le superfici del modello implicito, float32, banda 1 la quota (m), banda 2 la varianza jackknife (m²), banda 3 implicito meno kriging (m); `implicit/data/` i file di contatti e giaciture. `model/` è allora quello del modello implicito, e `volumi.csv` ha anche `method`, `kriging_m3`, `range_min`, `range_max`.
+* `implicit/top_<k>_<unità>.tif`: le superfici del modello implicito, float32, banda 1 la quota (m), banda 2 la varianza jackknife (m²), banda 3 implicito meno kriging (m); `implicit/data/` i file di contatti e giaciture. `model/` è allora quello del modello implicito, e `volumi.csv` ha anche `absent_cells`, `same_cells_m3`, `method`, `kriging_m3`, `range_min`, `range_max`.
 * `model/unita_vista.ply`: tutte le unità in un PLY solo per la vista 3D del programma, nel sistema
   interno del chunk (per un modello grande il programma ne scrive accanto una copia più leggera,
   `model_preview.ply`).

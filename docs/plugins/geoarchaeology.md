@@ -689,7 +689,7 @@ the kriging, which stays the default. It is new in version 0.2.0.
 |---|---|
 | Layers seen in most boreholes, one on the other | **kriging**: as good or better, in seconds |
 | A pit, a ditch, a robber trench, with its fills | **implicit** |
-| A contact seen in a few boreholes, whose shape should come from the layers around it | **implicit**, and look at the volume of that unit (below) |
+| A contact seen in a few boreholes, whose shape should come from the layers around it | **implicit** |
 | A dip measured on a section, contacts seen on a wall | **implicit**: kriging cannot use them |
 | A volume of a plain deposit to report | **kriging** |
 
@@ -705,8 +705,8 @@ unit is missing; the implicit model leaves out 12 groups of boreholes and counts
 | US 5, natural | 13 | **0.27** / 0.31 m | 0.35 / **0.31** m |
 
 Kriging stays better on the plain layers; the implicit model wins on the rare contact. With the pit, kriging gets worse on the natural
-because three boreholes find it lower down and it does not know why. The price of the implicit model on a rare unit is below, under
-[Volumes](#implicit-volumes).
+because three boreholes find it lower down and it does not know why. The vote that stops a rare unit, below under
+[Rare units and volumes](#implicit-volumes), acts on the solids and not on these errors, which are the same with and without it.
 
 ### Installing it { #implicit-install }
 
@@ -795,24 +795,29 @@ measured only beside the edge says nothing of the middle (`floor_unmeasured`), a
   layer and spreads it over 1,800 m² with 2,004 m³, twenty times too much.</figcaption>
 </figure>
 
-### Volumes, and the price of a rare unit { #implicit-volumes }
+### Rare units and volumes { #implicit-volumes }
 
-`volumi.csv` has the kriging's volume beside the implicit one, but **they do not cover the same area**: the kriging stops at the margin around the
-boreholes, the implicit model covers every cell with a DEM on its grid. Compare them only after clipping to the same area. Counted on the same
-cells in the demonstration:
+A field keeps a thickness everywhere, so a unit seen in a few boreholes would spread over the whole site. The model applies the rule of the
+kriging: the boreholes vote for the unit by inverse distance, those that pass it by against, and where those without it win it is not
+there, with a vertical edge; a thickness the kriging can tell from none stays. A borehole inside a cut does not vote against what the cut took away.
+Where a unit is not, its voxels go to the layer under it, and the summary says from how many cells it was taken. There is no warning: it is the normal
+working of the model. In the demonstration US 3, seen in 5 boreholes of 21, covers 10,368 m² against the kriging's 9,647; without this rule it covered 59,600 m².
 
-| Unit | Kriging | Implicit |
-|---|---:|---:|
-| US 1 | 22,950 m³ | 21,784 m³ |
-| US 2 | 75,621 m³ | 45,638 m³ |
-| US 3, rare | 25,341 m³ | 67,986 m³ |
-| US 4 | 181,697 m³ | 167,194 m³ |
-| US 5, down to the floor | 280,739 m³ | 268,113 m³ |
+`volumi.csv` has `kriging_m3` and `same_cells_m3`: the volume of each method on the cells both have. The kriging stops at the margin around the
+boreholes, the implicit model covers every cell with a DEM on its grid, so `volume_m3` covers more; compare `same_cells_m3` with `kriging_m3`, as the summary does. On the
+73,834 m² of the demonstration:
 
-US 3 is the weak point. Seen in 5 boreholes of 21, it spreads over 46,800 m² against 9,650, because a field keeps a thickness where the unit is
-missing: the boreholes that do not see a unit do not take it away, as they do in the kriging. So its leave-one-out error is the better one and its volume
-is not to be trusted: **the error of a contact says where the contact is where it exists, not how far the unit goes**. US 2 + US 3 together are 113,600 against
-101,000 m³. To limit a unit, draw its US and read the volume of the kriging beside it.
+| Unit | Kriging | Implicit, same cells | Implicit, all of it (`volume_m3`) |
+|---|---:|---:|---:|
+| US 1 | 22,974 m³ | 21,793 m³ | 28,102 m³ |
+| US 2 | 75,705 m³ | 45,465 m³ | 60,602 m³ |
+| US 3, rare | 25,341 m³ | 20,466 m³ | 20,466 m³ |
+| US 4 | 181,703 m³ | 208,931 m³ | 217,052 m³ |
+| US 5, down to the base of the model | 263,288 m³ | 274,179 m³ | 378,837 m³ |
+
+The whole deposit above the natural differs by 3 % (305,723 against 296,655 m³), single units by much more. Where US 3 is not, its space goes to the layer under
+it, so US 4 takes what the boreholes give to US 2: US 2 is 40 % under the kriging and US 4 15 % over. Trust the volume of the deposit before those of its units, and a leave-one-out error
+for where a contact is where it exists, not for how far the unit goes.
 
 <figure markdown="span">
   ![The solids around the pit, cut along the section](../img/plugins/geoarchaeology/implicit-solids.jpg)
@@ -875,7 +880,7 @@ a fraction of that. To change the shape of a contact, give it several points or 
 * **A contact is not honoured exactly**, as above: a smooth field leans on it.
 * **An estimated edge is rough**, either way: +125 % and -54 % in tests.
 * **A floor measured at the edge only** (`floor_unmeasured`) is not a measure of the middle: a borehole at the rim of a bowl gave less than a third of the volume.
-* **A rare unit spreads**, as above.
+* **A rare unit ends at a vertical edge** halfway between the boreholes, as in the kriging, and the layers around it share out its space unevenly, as above.
 * **The shape of a floor is assumed.** A flat floor comes out rounded at the first quarter of its half width: a truly vertical wall is outside the range.
 * **The grid**: at most 120,000 cells and 200 levels by default. A pit should be at least several cells wide; here 9 cells, voxels of 0.13 m.
 * **Not done**: faults, folds, intrusions, editing the model by hand, ensembles.
@@ -1054,7 +1059,7 @@ itself and open with it.
 * `model/<unit>.ply`, `model/unita.obj` with `unita.mtl`, `model/volumi.csv`: the solids and their
   volumes; `volumi.csv` has unit, description, volume, area, mean and largest thickness, lowest and
   highest top and base, cells, clipped, down to the floor, volume and area where there is no DEM.
-* `implicit/top_<k>_<unit>.tif`: the surfaces of the implicit model, float32, band 1 the elevation (m), band 2 the jackknife variance (m²), band 3 implicit minus kriging (m); `implicit/data/` the files of contacts and orientations. `model/` is then that of the implicit model, and `volumi.csv` has also `method`, `kriging_m3`, `range_min`, `range_max`.
+* `implicit/top_<k>_<unit>.tif`: the surfaces of the implicit model, float32, band 1 the elevation (m), band 2 the jackknife variance (m²), band 3 implicit minus kriging (m); `implicit/data/` the files of contacts and orientations. `model/` is then that of the implicit model, and `volumi.csv` has also `absent_cells`, `same_cells_m3`, `method`, `kriging_m3`, `range_min`, `range_max`.
 * `model/unita_vista.ply`: all the units in one PLY for the program's 3D view, in the internal frame
   of the chunk (for a large model the program writes a lighter copy beside it, `model_preview.ply`).
 
