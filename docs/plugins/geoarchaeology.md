@@ -754,17 +754,15 @@ A cut has no material: the logs show its fill. So the cut is not a layer, nor a 
 
 * **The plan** is the US drawn for the cut, or for its fills. Without a drawing it is estimated, the cells nearer to the boreholes
   inside than to those outside, with a warning; in the demonstration this gave 53-92 m³ for a fill of 76 m³.
-* **The floor** hangs from where the cut opens: `opening - s(x, y) P(t)`. The opening is the ground, or under a cover the top of the youngest fill,
-  so a sealed pit keeps its whole plan. `t` is the distance from the edge over the local half width, `P` the shape chosen, `s` the
-  measured depths divided by P and spread over the plan, a borehole weighing `P²`. No floor goes deeper than the deepest measure of its cut when a
-  borehole stands away from the edge. Between the boreholes it is an assumption.
+* **The floor** hangs from where the cut opens: `opening - s(x, y) P(t)`. The opening is the ground or, under a cover, the top of the first fill each borehole meets,
+  whichever fill it is, and the same surface is the top of the youngest fill: so a sealed pit keeps its whole plan and the cover takes none of its space. `t` is the distance from the edge over the local half width, `P` the shape chosen, `s` the
+  measured depths divided by P and spread over the plan, a borehole weighing `P²`. No floor goes deeper than a borehole away from the edge implies: its depth over the shape at its place. Between the boreholes it is an assumption.
 * **Near the edge** (`t` under 0.25) a measure tells how steep the wall is, not how deep the middle goes: it is left out of `s` when another one stands
-  further in. If it is deeper than the shape, the floor is brought down to it around that borehole; if it is shallower it is not used. So the floor
+  further in. If it is deeper than the shape, the floor comes down towards it only as far as the boreholes that count allow, and the measure is met at its own cell: deeper than all of those it is a local sump in the model, and `rim_deeper` says so. If it is shallower it is not used. So the floor
   passes through every base measured, except those shallower than the shape next to the edge (`base_near_edge`).
 * **The fills** have tops as depths under the ground, spread from the boreholes that saw them: they follow the ground unless
   the boreholes say otherwise. A deeper fill stays under the one above it. A layer can cover the pit, as the topsoil does
-  in the demonstration. **Fills are a stack, one over the other**: fills side by side, tip lines, a lens seen in one borehole are not modelled. The total of the
-  cut stays right, the volume of each fill does not, and `fill_thinned` says so when a borehole logged twice what the model has.
+  in the demonstration. **Fills are a stack, one over the other**: fills side by side, tip lines, a lens seen in one borehole are not modelled. The volume of each such fill is wrong and that of the cut may be too; `fill_thinned` says so when a borehole logged twice what the model has.
 * **Pits that cut pits** are read from the logs: each fill stays with its cut, and the pit seen higher in a borehole through both is the younger.
 * **An undercut** (a bottle pit, a ditch with an overhanging side) needs measures on the wall: rows of the kind `wall` in the contacts file.
   Only such a cut uses a field of LoopStructural, and few points smooth it away: only a bottle pit with wall points all round has been tried.
@@ -783,7 +781,7 @@ the fill**: from the floor up to the top of the youngest fill, without what cove
 
 | Invented pit | Flat floor | Bowl (chosen) | V | True |
 |---|---:|---:|---:|---:|
-| Fill | 118.2 m³ | **97.2 m³** | 79.4 m³ | 76.4 m³ |
+| Fill | 118.2 m³ | **97.2 m³** | 79.7 m³ | 76.4 m³ |
 
 The true volume is known here because the pit is invented, with a floor between the V and the bowl of the plugin. It lies 4 % *below*
 the range, and the bowl is 27 % too much: three boreholes nearly in a line say little. The range tells how much the
@@ -883,6 +881,7 @@ a fraction of that. To change the shape of a contact, give it several points or 
 | *nobody drew the outline* | the plan is estimated, the volume may be over or under | draw the US of the cut |
 | *all the boreholes are near the edge* (`floor_unmeasured`) | the depth of the floor was not measured | a borehole near the middle; until then the volume is a guess |
 | *measures of the floor next to the edge were not used* (`base_near_edge`) | the edge does not tell how deep the middle goes; a height on the edge is left out | nothing for a height on the edge; for a borehole, check it and the outline |
+| *a measure next to the edge reaches ... m, more than any measure away from the edge* (`rim_deeper`) | that depth stands at one place only, a local sump; the rest follows the other boreholes | if it is the wall, a borehole further in; check the log |
 | *the floor reaches ... m, the deepest measure is ... m* (`floor_past_measure`) | with all measures by the edge nothing stops the floor | a borehole near the middle |
 | *separate parts of the outline have no measure of the floor* (`plan_part_unmeasured`) | their depth comes from boreholes far away | a borehole in each part, or a cut for each |
 | *in borehole ... the logs give ... m, the model ... m* (`fill_thinned`) | fills are a stack, and this one has lost its place | read the fill volumes as one; give the fills side by side as one unit |
@@ -903,7 +902,7 @@ a fraction of that. To change the shape of a contact, give it several points or 
 
 * **Narrow necks are not warned.** A neck under 5 % of the plan gives no warning (a 1.2 m neck in a 6 m ditch with a 1 m cell): look at the plan.
 * **A contact is not honoured exactly**, as above: a smooth field leans on it. In the demonstration the top of US 4 stays 1.35 m from its logs (rmse), 4.36 m at worst.
-* **Fills are a stack**: fills side by side and tip lines are not modelled, only their sum is.
+* **Fills are a stack**: fills side by side and tip lines are not modelled.
 * **An estimated edge is rough**, either way: +125 % and -54 % in tests.
 * **A floor measured at the edge only** (`floor_unmeasured`) is not a measure of the middle: a borehole at the rim of a bowl gave less than a third of the volume.
 * **A rare unit ends at a vertical edge** halfway between the boreholes, as in the kriging, and the layers around it share out its space unevenly, as above.

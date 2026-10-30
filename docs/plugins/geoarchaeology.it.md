@@ -761,17 +761,15 @@ Un taglio non ha materiale: nei log si vede il riempimento. Il taglio quindi non
 
 * **La pianta** è la US disegnata per il taglio, o per i riempimenti. Senza disegno viene stimata, le celle più vicine ai sondaggi dentro che
   a quelli fuori, con un avviso; nella dimostrazione ha dato 53-92 m³ per un riempimento di 76 m³.
-* **Il fondo** parte da dove il taglio si apre: `apertura - s(x, y) P(t)`. L'apertura è il terreno o, sotto una copertura, il tetto del riempimento più recente,
-  così una fossa sigillata conserva tutta la sua pianta. `t` è la distanza dal bordo divisa per la mezza larghezza locale, `P` la forma scelta, `s` le
-  profondità misurate divise per P e distribuite sulla pianta, con ogni sondaggio che pesa `P²`. Nessun fondo scende oltre la misura più profonda del suo taglio quando un
-  sondaggio sta lontano dal bordo. Fra i sondaggi è un'ipotesi.
+* **Il fondo** parte da dove il taglio si apre: `apertura - s(x, y) P(t)`. L'apertura è il terreno o, sotto una copertura, il tetto del primo riempimento che ogni sondaggio incontra,
+  qualunque esso sia, e la stessa superficie è il tetto del riempimento più recente: così una fossa sigillata conserva tutta la sua pianta e la copertura non le toglie spazio. `t` è la distanza dal bordo divisa per la mezza larghezza locale, `P` la forma scelta, `s` le
+  profondità misurate divise per P e distribuite sulla pianta, con ogni sondaggio che pesa `P²`. Nessun fondo scende oltre quanto implica un sondaggio lontano dal bordo: la sua profondità divisa per la forma in quel punto. Fra i sondaggi è un'ipotesi.
 * **Vicino al bordo** (`t` sotto 0,25) una misura dice quanto è ripida la parete, non quanto scende il centro: resta fuori da `s` quando un'altra sta più
-  all'interno. Se è più profonda della forma, il fondo viene portato fino a lei intorno a quel sondaggio; se è meno profonda non viene usata. Così il fondo
+  all'interno. Se è più profonda della forma, il fondo scende verso di lei solo quanto permettono i sondaggi che contano, e la misura è rispettata nella sua cella: più profonda di tutti quelli, nel modello è una buca locale, e `rim_deeper` lo dice. Se è meno profonda non viene usata. Così il fondo
   passa per ogni base misurata, tranne quelle accanto al bordo meno profonde della forma (`base_near_edge`).
 * **I riempimenti** hanno i tetti come profondità sotto il terreno, distribuite dai sondaggi che li hanno visti: seguono il terreno salvo
   che i sondaggi dicano altro. Un riempimento più profondo resta sotto quello sopra. Uno strato può coprire la fossa, come l'humus
-  nella dimostrazione. **I riempimenti sono una pila, uno sull'altro**: riempimenti affiancati, linee di scarico, una lente vista in un sondaggio non sono modellati. Il totale del
-  taglio resta giusto, il volume di ciascun riempimento no, e `fill_thinned` lo dice quando un sondaggio ha registrato il doppio di quello che ha il modello.
+  nella dimostrazione. **I riempimenti sono una pila, uno sull'altro**: riempimenti affiancati, linee di scarico, una lente vista in un sondaggio non sono modellati. Il volume di ciascuno di questi riempimenti è sbagliato e può esserlo anche quello del taglio; `fill_thinned` lo dice quando un sondaggio ha registrato il doppio di quello che ha il modello.
 * **Le fosse che tagliano fosse** si leggono dai log: ogni riempimento resta con il suo taglio, e la fossa che sta più in alto in un sondaggio che le attraversa entrambe è la più recente.
 * **Un sottosquadro** (una fossa a campana, un fossato con un fianco aggettante) ha bisogno di misure sulla parete: righe di tipo `wall` nel file
   dei contatti. Solo un taglio così usa un campo di LoopStructural, e pochi punti lo cancellano: è stata provata solo una fossa a campana
@@ -791,7 +789,7 @@ riempimento**: dal fondo al tetto del riempimento più recente, senza quello che
 
 | Fossa inventata | Fondo piatto | A conca (scelta) | A V | Vero |
 |---|---:|---:|---:|---:|
-| Riempimento | 118,2 m³ | **97,2 m³** | 79,4 m³ | 76,4 m³ |
+| Riempimento | 118,2 m³ | **97,2 m³** | 79,7 m³ | 76,4 m³ |
 
 Il volume vero qui si conosce perché la fossa è inventata, con un fondo fra la V e la conca del plugin. Sta il 4 % *sotto* l'intervallo, e la conca è
 il 27 % di troppo: tre sondaggi quasi in fila dicono poco. L'intervallo dice quanto conta la forma; non contiene sempre il vero.
@@ -892,6 +890,7 @@ lo hanno spostato solo di una frazione. Per cambiare la forma di un contatto ser
 | *nessuno ha disegnato il contorno* | la pianta è stimata, il volume può essere sopra o sotto | disegna la US del taglio |
 | *tutti i sondaggi sono vicino al bordo* (`floor_unmeasured`) | la profondità del fondo non è stata misurata | un sondaggio vicino al centro; fino ad allora il volume è un'ipotesi |
 | *misure del fondo vicino al bordo non sono usate* (`base_near_edge`) | il bordo non dice quanto scende il centro; una quota sul bordo resta fuori | nulla per una quota sul bordo; per un sondaggio, controlla lui e il contorno |
+| *una misura accanto al bordo arriva a ... m, più di ogni misura lontana dal bordo* (`rim_deeper`) | quella profondità sta in un punto solo, una buca locale; il resto segue gli altri sondaggi | se è la parete, un sondaggio più all'interno; controlla il log |
 | *il fondo arriva a ... m, la misura più profonda è ... m* (`floor_past_measure`) | con tutte le misure sul bordo nulla ferma il fondo | un sondaggio vicino al centro |
 | *parti separate del contorno non hanno alcuna misura del fondo* (`plan_part_unmeasured`) | la loro profondità viene da sondaggi lontani | un sondaggio in ogni parte, o un taglio per ciascuna |
 | *nel sondaggio ... i log danno ... m, il modello ... m* (`fill_thinned`) | i riempimenti sono una pila, e questo ha perso il suo posto | leggi i volumi dei riempimenti come uno solo; dai i riempimenti affiancati come una sola unità |
@@ -912,7 +911,7 @@ lo hanno spostato solo di una frazione. Per cambiare la forma di un contatto ser
 
 * **Le strozzature non vengono segnalate.** Una strozzatura sotto il 5 % della pianta non dà avviso (1,2 m in un fossato di 6 m con celle da 1 m): guarda la pianta.
 * **Un contatto non viene rispettato esattamente**, come sopra: un campo liscio ci si appoggia. Nella dimostrazione il tetto di US 4 resta a 1,35 m dai suoi log (rmse), 4,36 m nel caso peggiore.
-* **I riempimenti sono una pila**: riempimenti affiancati e linee di scarico non sono modellati, solo la loro somma.
+* **I riempimenti sono una pila**: riempimenti affiancati e linee di scarico non sono modellati.
 * **Un bordo stimato è grossolano**, nei due sensi: +125 % e -54 % nelle prove.
 * **Un fondo misurato solo al bordo** (`floor_unmeasured`) non è una misura del centro: un sondaggio sul bordo di una conca ha dato meno di un terzo del volume.
 * **Un'unità rara finisce con un bordo verticale** a metà fra i sondaggi, come nel kriging, e gli strati intorno si dividono il suo spazio in modo diseguale, come sopra.
