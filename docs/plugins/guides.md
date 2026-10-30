@@ -55,6 +55,7 @@ them with pip in a Python environment, see [Plugins](../plugins.md).
 | Samgeo (`samgeo`) | text search with Grounding DINO + SAM 2.1 or optional SAM 3; reviewable proposals, bulk identifiers/names, freehand-selected groups and survey UT under Topographic units in the TOC | [Samgeo](samgeo.md) |
 | GeoAI (`geoai`) | train from reviewed drawings with RGB and optional DEM, multispectral or thermal inputs, alone or combined; apply models as proposals to review | [GeoAI](geoai.md) |
 | Underwater (`underwater`) | surveys under water: blurred, hazy and flat photos flagged and excluded, sharp frames from videos and fast ROV sequences, colours restored with the range of every pixel (after Sea-thru) or a quick correction before the alignment, depth logs of ROVs and dive computers that level and scale the chunk | [Underwater](underwater.md) |
+| Landscape through time (`landscape`) | how the surface changes over the years with Landlab: soil creep and running water (erosion and deposition) simulated on the DEM, presets for a mudbrick tell, an earth slope and an exposed excavation, final surface, erosion and deposition, drainage area, the balance of the volumes, a version of the DEM, the comparison with a later phase; scenarios, not predictions | [Landscape through time](landscape.md) |
 
 ## Number and group many units
 
