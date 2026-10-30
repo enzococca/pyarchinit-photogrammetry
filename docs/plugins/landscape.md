@@ -89,7 +89,8 @@ water. It is not a model of a single storm, nor of a landslide.
 * **A chunk with a DEM** (*Workflow > Build DEM...*), or a kept version of it. The plugin needs nothing
   else: neither photos nor cloud.
 * **Metres.** A projected reference system, or a local system in metres: the parameters are in metres
-  and years. The comparison with another chunk needs both in the same system.
+  and years, and a DEM in degrees is refused. The comparison with another chunk needs both in the same
+  system.
 
 ## The DEM { #dem }
 
@@ -130,8 +131,11 @@ Cells without a value are outside the simulation. At the edge of the data you ch
 On Tell Sultan, *Versante in terra* (earth slope) for 1,000 years with a closed edge on cells of 2 m
 (274 x 194) kept 8 outlets - the main one and seven for islands and necks - and took 59 s; 4,971 m³ of
 solid material left through them. A hole inside the data (a pool, a tarpaulin left out of the cloud) is
-closed: water does not leave through it. Should Landlab still meet a lake without a way out, the run is
-stopped with a message (it would never end) and nothing is written.
+closed: water does not leave through it. A few cells with a value inside such a hole - an island, common
+on a coarse simulation grid - would be a lake without a way out: with either edge they keep their own
+outlet, their lowest cell beside the hole, and what leaves there counts as out. Should Landlab still
+meet a lake without a way out, the run is stopped with a message (it would never end) that says what to
+try, and nothing is written.
 
 ### How long it takes { #time }
 
@@ -141,6 +145,10 @@ four times the steps); the steps of the running water are an upper bound, from t
 possible, and the real run is usually much shorter. Above 10 minutes the line turns orange; above 2 hours
 *Run* is disabled (`--force` on the command line). On Tell Sultan the preset *Tell in mattoni crudi*
 for 1,000 years on 480 x 339 cells was estimated at 9 minutes and took 46 s, with 184 steps.
+
+The DEM itself is never held whole in memory: it is read in windows to make the simulation grid, and
+the results come back onto it block by block of rows, so a DEM of 100 million cells needs about the
+memory of a block. Writing them takes time, though: above 50 million cells the estimate says so.
 
 ## Step by step in the program { #program }
 
@@ -334,14 +342,20 @@ not as a measure.
 
 Under the table, and in `balance.json`, a run gives:
 
-* **eroded**, **deposited** and **net** volume from dz, m³ - the volumes the map shows, pores included;
+* **eroded**, **deposited** and **net** volume from dz, m³, pores included, on the simulation grid:
+  summing `dz.tif` on the grid of the DEM gives eroded and deposited volumes a few per cent smaller,
+  because the interpolation smooths the peaks (on Tell Sultan 6,459 / 5,174 m³ against 6,816 / 5,525),
+  while the net is the same;
 * the **solid** volumes: the soil is porous (phi), the material below is not, so a cubic metre of
   mudbrick eroded becomes more than a cubic metre of deposit; the solid volumes count only the material;
 * what **left the survey**: with the water as bedload and as fine wash load, and by creep across an
   open edge (negative when creep brought soil in from outside, where the edge is higher than the
-  inside);
+  inside); the solid figure of creep also holds the pores gained where creep eats into the substrate
+  and turns it into soil;
 * the **closure**: solid eroded - solid deposited - everything that left. It is about zero when the books
-  close, and they are checked in the tests in every combination of edge, fines and porosity.
+  close, and they are checked in the tests in every combination of edge, fines and porosity. Creep's
+  share of what left is measured as the solid change of its own steps, so for creep the closure holds
+  by construction: what it checks are the books of the running water.
 
 On Tell Sultan, *Tell in mattoni crudi* for 1,000 years (open edge, 480 x 339 cells of 1.14 m):
 
@@ -350,7 +364,7 @@ On Tell Sultan, *Tell in mattoni crudi* for 1,000 years (open edge, 480 x 339 ce
 | Eroded / deposited (bulk) | 6,816 / 5,525 |
 | Eroded / deposited (solid) | 5,169 / 3,807 |
 | Left with the water (bedload + fines) | 1,418 (1,043 + 375) |
-| Creep across the edge (solid) | -56 (brought in) |
+| Creep across the edge, and pores gained (solid) | -56 (brought in) |
 | Closure | 0.0000 |
 
 The typical change is small - the NMAD of dz over the DEM is 8 cm - while 2 % of the cells went down

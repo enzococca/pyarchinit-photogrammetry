@@ -91,7 +91,8 @@ un singolo temporale, né di una frana.
 * **Un chunk con un DEM** (*Flusso di lavoro > Costruisci DEM...*), o una sua versione conservata. Al
   plugin non serve altro: né foto né nuvola.
 * **Metri.** Un sistema di riferimento proiettato, o un sistema locale in metri: i parametri sono in
-  metri e anni. Il confronto con un altro chunk vuole i due chunk nello stesso sistema.
+  metri e anni, e un DEM in gradi viene rifiutato. Il confronto con un altro chunk vuole i due chunk
+  nello stesso sistema.
 
 ## Il DEM { #dem }
 
@@ -134,8 +135,11 @@ Le celle senza valore stanno fuori dalla simulazione. Al bordo dei dati scegli:
 Su Tell Sultan, *Versante in terra* per 1.000 anni con il bordo chiuso su celle di 2 m (274 x 194) ha
 tenuto 8 sbocchi - quello principale e sette per isole e strozzature - e ha richiesto 59 s; ne sono
 usciti 4.971 m³ di materiale solido. Un buco dentro i dati (una pozza, un telo rimasto fuori dalla
-nuvola) è chiuso: l'acqua non esce di lì. Se Landlab trovasse comunque un lago senza uscita, la
-simulazione viene fermata con un messaggio (non finirebbe mai) e non scrive niente.
+nuvola) è chiuso: l'acqua non esce di lì. Poche celle con un valore dentro un buco così - un'isola,
+frequente su una griglia di simulazione grossolana - sarebbero un lago senza uscita: con tutti e due i
+bordi tengono un loro sbocco, la cella più bassa accanto al buco, e quello che esce da lì conta fra le
+uscite. Se Landlab trovasse comunque un lago senza uscita, la simulazione viene fermata con un messaggio
+(non finirebbe mai) che dice che cosa provare, e non scrive niente.
 
 ### Quanto dura { #time }
 
@@ -146,6 +150,10 @@ più rapida possibile, e la simulazione vera di solito è molto più breve. Oltr
 arancione; oltre 2 ore *Avvia la simulazione* è disattivato (`--force` dalla riga di comando). Su Tell
 Sultan lo scenario *Tell in mattoni crudi* per 1.000 anni su 480 x 339 celle aveva una stima di 9 minuti
 e ha richiesto 46 s, con 184 passi.
+
+Il DEM non è mai tutto in memoria: viene letto a finestre per fare la griglia della simulazione, e i
+risultati tornano sulla sua griglia a blocchi di righe, così un DEM di 100 milioni di celle chiede circa
+la memoria di un blocco. Scriverli però richiede tempo: oltre 50 milioni di celle la stima lo dice.
 
 ## Passo per passo nel programma { #program }
 
@@ -342,15 +350,20 @@ come "questo margine non resta", non come una misura.
 
 Sotto la tabella, e in `balance.json`, una simulazione dà:
 
-* il volume **eroso**, **depositato** e **netto** da dz, m³ - i volumi che mostra la mappa, vuoti
-  compresi;
+* il volume **eroso**, **depositato** e **netto** da dz, m³, vuoti compresi, sulla griglia della
+  simulazione: sommando `dz.tif` sulla griglia del DEM eroso e depositato vengono più piccoli di qualche
+  per cento, perché l'interpolazione smussa i picchi (su Tell Sultan 6.459 / 5.174 m³ contro
+  6.816 / 5.525), mentre il netto è lo stesso;
 * i volumi **solidi**: il suolo è poroso (phi), il materiale sotto no, quindi un metro cubo di mattoni
   crudi eroso diventa più di un metro cubo di deposito; i volumi solidi contano solo il materiale;
 * quello che è **uscito dal rilievo**: con l'acqua come carico di fondo e come fini in sospensione, e con
   il creep attraverso un bordo aperto (negativo quando il creep ha portato dentro suolo da fuori, dove il
-  bordo è più alto dell'interno);
+  bordo è più alto dell'interno); la cifra solida del creep comprende anche i vuoti che si formano dove
+  il creep intacca il substrato e lo trasforma in suolo;
 * la **chiusura**: solido eroso - solido depositato - tutto quello che è uscito. È circa zero quando i
-  conti tornano, e i test lo controllano in ogni combinazione di bordo, frazione fine e porosità.
+  conti tornano, e i test lo controllano in ogni combinazione di bordo, frazione fine e porosità. La
+  parte del creep è misurata come cambiamento solido dei suoi passi, quindi per il creep la chiusura
+  torna per costruzione: quello che controlla sono i conti dell'acqua che scorre.
 
 Su Tell Sultan, *Tell in mattoni crudi* per 1.000 anni (bordo aperto, 480 x 339 celle di 1,14 m):
 
@@ -359,7 +372,7 @@ Su Tell Sultan, *Tell in mattoni crudi* per 1.000 anni (bordo aperto, 480 x 339 
 | Eroso / depositato (apparente) | 6.816 / 5.525 |
 | Eroso / depositato (solido) | 5.169 / 3.807 |
 | Uscito con l'acqua (fondo + fini) | 1.418 (1.043 + 375) |
-| Creep attraverso il bordo (solido) | -56 (entrato) |
+| Creep attraverso il bordo, e vuoti formati (solido) | -56 (entrato) |
 | Chiusura | 0,0000 |
 
 Il cambiamento tipico è piccolo - la NMAD del dz sul DEM è 8 cm - mentre il 2 % delle celle si è
