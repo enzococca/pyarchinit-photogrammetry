@@ -56,6 +56,7 @@ installarli con pip in un ambiente Python, vedi [Plugin](../plugins.md).
 | GeoAI (`geoai`) | addestramento dai disegni verificati con RGB e input opzionali DEM, multispettrali o termici, da soli o combinati; modelli da applicare come proposte da controllare | [GeoAI](geoai.md) |
 | Subacqueo (`underwater`) | rilievi sott'acqua: foto mosse, velate e piatte segnalate ed escluse, fotogrammi nitidi da video e sequenze veloci dei ROV, colori ripristinati con la distanza di ogni pixel (sul modello di Sea-thru) o una correzione rapida prima dell'allineamento, registri di profondità di ROV e computer subacquei che mettono in bolla e in scala il chunk | [Subacqueo](underwater.md) |
 | Paesaggio nel tempo (`landscape`) | come cambia la superficie negli anni con Landlab: creep del suolo e acqua che scorre (erosione e deposito) simulati sul DEM, scenari per un tell in mattoni crudi, un versante in terra e uno scavo esposto, superficie finale, erosione e deposito, area drenata, il bilancio dei volumi, una versione del DEM, il confronto con una fase successiva; scenari, non previsioni | [Paesaggio nel tempo](landscape.md) |
+| Relitto (`shipwreck`) | il disegno tecnico di uno scafo scavato dal suo modello 3D: sistema della nave, stazioni, sezioni, longitudinali e orizzontali, una correzione dell'acqua dichiarata, piano di costruzione, piano delle linee d'acqua, profilo, pianta sull'ortofoto, catalogo dei legni con le misure; misura, non ricostruisce | [Relitto](shipwreck.md) |
 
 ## Numerare e raggruppare molte unità
 
