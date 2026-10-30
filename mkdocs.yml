@@ -77,6 +77,7 @@ plugins:
             Samgeo: Samgeo
             GeoAI: GeoAI
             Underwater: Subacqueo
+            Landscape through time: Paesaggio nel tempo
             Guide: Guida
             Desktop interface: Interfaccia
             Menus: Menu
@@ -152,6 +153,7 @@ nav:
       - Samgeo: plugins/samgeo.md
       - GeoAI: plugins/geoai.md
       - Underwater: plugins/underwater.md
+      - Landscape through time: plugins/landscape.md
   - Guide:
       - Desktop interface:
           - gui/index.md
