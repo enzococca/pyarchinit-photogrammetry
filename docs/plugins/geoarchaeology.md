@@ -6,7 +6,7 @@ the column of every borehole, the surface where each unit begins, the thickness 
 each unit, sections along any line and a 3D model with one solid per unit. Everything lies on the DEM
 and the orthophoto of the project, in its reference system.
 
-This page describes version 0.1.3 of the plugin, which needs pyarchinit-photogrammetry 1.3.3 or later.
+This page describes version 0.2.0 of the plugin, which needs pyarchinit-photogrammetry 1.3.3 or later.
 Its README and source code are in the
 [plugin repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/geoarchaeology).
 
@@ -37,6 +37,7 @@ Its README and source code are in the
 5. Look at the surfaces over the orthophoto, draw sections and stratigraphic columns, build the 3D
    model and look at it in the 3D view.
 6. Export to GeoPackage, GeoTIFF, DXF, PLY/OBJ and CSV, or open everything in QGIS.
+7. For pits, ditches and their fills, or a contact seen in few boreholes, build the [implicit model](#implicit).
 
 ## What it does
 
@@ -47,6 +48,7 @@ Its README and source code are in the
 | Thicknesses and volumes | the thickness of every unit (isopach) and its volume | how deep the deposits are, volumes to excavate, how a mound grew |
 | Sections | the ground, the contacts and the units along a line, with the nearby boreholes drawn on it, to scale | plates for the report, checking a correlation |
 | 3D model | a closed solid per unit, with its volume | QGIS 3D, Blender, MeshLab, teaching |
+| Implicit model | on request, with LoopStructural: cuts and fills, undercuts, sparse contacts, dips | a pit or a ditch and the volume of its fill, as a range |
 
 It helps wherever a few holes have to tell what lies under a surface you have surveyed: a coring
 campaign on a tell, a grid of augers across a field before an excavation, the sections of separate
@@ -669,6 +671,215 @@ boreholes, make their chunk the active one again in the workspace: the pane foll
 * *Remove*: on the *Surfaces* tab all the surfaces and thicknesses (they form one stack); on the
   *Sections* tab the selected section and its drawings; on the *Boreholes* tab the selected boreholes.
 
+## The implicit model { #implicit }
+
+The surfaces of the steps above are one height per point, z(x, y), between the boreholes. That cannot draw what you dig:
+a pit that cuts the layers and is then filled, a ditch with an undercut side, a contact seen in three boreholes that should take
+its shape from the layers around it, a dip measured on a section. The implicit model describes the ground as scalar fields in 3D
+with [LoopStructural](https://github.com/Loop3D/LoopStructural), so these things exist in it. It is built on request, beside
+the kriging, which stays the default. It is new in version 0.2.0.
+
+!!! warning "An interpretation of the data, not a measure"
+    Away from the boreholes the model says what the data suggest. Pane and figures say so, and a number from
+    the model should be reported as a number from a model.
+
+### When to use it, and when kriging { #implicit-when }
+
+| Your data | Use |
+|---|---|
+| Layers seen in most boreholes, one on the other | **kriging**: as good or better, in seconds |
+| A pit, a ditch, a robber trench, with its fills | **implicit** |
+| A contact seen in a few boreholes, whose shape should come from the layers around it | **implicit**, and look at the volume of that unit (below) |
+| A dip measured on a section, contacts seen on a wall | **implicit**: kriging cannot use them |
+| A volume of a plain deposit to report | **kriging** |
+
+The leave-one-out errors of both are shown side by side after each build. These are from the demonstration below: 21 boreholes on
+Tell Sultan, 18 of them without a pit. Kriging leaves out one borehole at a time and counts the boreholes where the
+unit is missing; the implicit model leaves out 12 groups of boreholes and counts those that see the contact.
+
+| Contact | Boreholes that see it | Without the pit: kriging / implicit | With the pit: kriging / implicit |
+|---|---:|---:|---:|
+| US 2, follows the ground | 16 | **0.03** / 0.10 m | **0.03** / 0.09 m |
+| US 3, rare | 5 | 0.94 / **0.31** m | 0.87 / **0.31** m |
+| US 4 | 12 | **1.33** / 1.61 m | **1.28** / 1.62 m |
+| US 5, natural | 13 | **0.27** / 0.31 m | 0.35 / **0.31** m |
+
+Kriging stays better on the plain layers; the implicit model wins on the rare contact. With the pit, kriging gets worse on the natural
+because three boreholes find it lower down and it does not know why. The price of the implicit model on a rare unit is below, under
+[Volumes](#implicit-volumes).
+
+### Installing it { #implicit-install }
+
+LoopStructural does not come with the plugin. *Install LoopStructural* in the *Implicit* tab (or
+`ppg plugin geoarchaeology implicit-install`) puts it in an environment of its own, about 300 MB, in the folder of the plugin's data. It
+needs the internet once and takes a few minutes; `uv` is fetched if missing. The program never loads LoopStructural: every
+model runs in a separate process, and a failure or a cancel leaves the present model as it was. If LoopStructural is already installed
+in the Python of the program, the plugin uses that; `PPG_GEOARCH_LOOP_ENV` puts the environment elsewhere.
+
+### The steps { #implicit-steps }
+
+1. Import the boreholes and build the surfaces as usual: the model takes its grid and the series from them.
+2. In the program, draw the US of the cut (or of its fill) with its number. Do this first: the outline counts more than
+   anything else.
+3. In the *Implicit* tab, *Mark a fill...*: the fill, as in the logs; the cut, its US number or a name; the shape of the floor.
+   Repeat for every fill of the cut.
+4. *Contacts and orientations from a file...*, if you have them.
+5. *Build...*: 2 minutes on the demonstration, with 12 groups for the leave-one-out. Set the groups to 0 to try things out.
+6. The model becomes the model of the chunk, with its surfaces listed as *Top of US n (implicit)* in the *Surfaces* tab. A
+   kriging *3D model...* afterwards replaces it; the implicit surfaces stay. Sections use the implicit surfaces when the
+   implicit model is the active one.
+
+<figure markdown="span">
+  ![The Implicit tab with the table of the cuts and the last result](../img/plugins/geoarchaeology/pane-implicit.png)
+  <figcaption>The <em>Implicit</em> tab: where LoopStructural runs, the buttons, the cuts with the shape of
+  their floor, the text of the last build.</figcaption>
+</figure>
+
+| Field of *Build...* | What it does |
+|---|---|
+| *Cell* | empty: that of the surfaces, larger when more than 120,000 cells would be needed; it can be finer than the surfaces |
+| *Groups of boreholes for the leave-one-out check* | at most 12; 0 for none |
+| *By unit* | `US 2=depth, US 5=elevation`; empty: as the surfaces |
+| *In the 3D view, units set apart vertically by* | as in the 3D model |
+
+### Series { #implicit-series }
+
+A *series* is one scalar field. As for the kriging [modes](#surfaces), the contacts that follow the ground go together in one series in
+depth under the DEM, and each contact by elevation is a series of its own. In the demonstration: US 1 to US 4 in depth, the natural US 5 by
+elevation. *By unit* changes it.
+
+### Cuts and fills { #implicit-cuts }
+
+A cut has no material: the logs show its fill. So the cut is not a layer, nor a field: it is an excavation record.
+
+* **The plan** is the US drawn for the cut, or for its fills. Without a drawing it is estimated, the cells nearer to the boreholes
+  inside than to those outside, with a warning; in the demonstration this gave 38-68 m³ for a fill of 76 m³.
+* **The floor** is `ground - s(x, y) P(t)`: `t` the distance from the edge over the local half width, `P` the shape chosen, `s` the
+  measured depths divided by P and spread over the plan. It passes through every base measured. Between the boreholes it is an assumption.
+* **The fills** have tops as depths under the ground, spread from the boreholes that saw them: they follow the ground unless
+  the boreholes say otherwise. A deeper fill stays under the one above it. A layer can cover the pit, as the topsoil does
+  in the demonstration.
+* **An undercut** (a bottle pit, a ditch with an overhanging side) needs measures on the wall: rows of the kind `wall` in the contacts file.
+  Only such a cut uses a field of LoopStructural, and few points smooth it away: only a bottle pit with wall points all round has been tried.
+
+<figure markdown="span">
+  ![Section through the pit at true scale, with the three boreholes](../img/plugins/geoarchaeology/implicit-section.jpg)
+  <figcaption>Section through the invented pit at true scale: it cuts US 2 and goes into the natural, its two fills under the topsoil, the
+  boreholes P1, P2, P3 projected onto the line. The floor passes through each of their bases.</figcaption>
+</figure>
+
+### The volume of a cut is a range { #implicit-range }
+
+A few boreholes cannot tell the shape of a floor. So the plugin computes the fill for all three shapes, and the row of the cut in
+`volumi.csv`, the pane and the text gives the range; the chosen shape only sets the value in the middle and the solid. **The range is of
+the fill**: from the floor up to the top of the youngest fill, without what covers it. The empty cut, from the ground, is in the registry as `cut_range`.
+
+| Invented pit | Flat floor | Bowl (chosen) | V | True |
+|---|---:|---:|---:|---:|
+| Fill | 103.7 m³ | **98.3 m³** | 80.7 m³ | 76.4 m³ |
+| Cut, from the ground | 130.0 m³ | 124.2 m³ | 106.9 m³ | 103.8 m³ |
+
+The true volume is known here because the pit is invented, with a floor between the V and the bowl of the plugin. It lies 5 % *below*
+the range, and the bowl is 29 % too much: three boreholes nearly in a line say little. The range tells how much the
+shape matters; it does not always hold the truth. More boreholes across the pit, and at least one near the middle, are what narrows it.
+
+### What a fill volume means { #implicit-fill }
+
+It is the space between the assumed floor and the top of the fill, within the drawn plan, in the cells of the grid. Here the plan has 58 cells of
+1.14 m, 75.5 m² against 76.2 m² drawn. It is not a measured amount of material: give it as a range, with the number of boreholes. A floor
+measured only beside the edge says nothing of the middle (`floor_unmeasured`), and then the volume is a guess whatever the range says.
+
+<figure markdown="span">
+  ![Thickness of the fills in plan, implicit model and kriging](../img/plugins/geoarchaeology/implicit-fill-thickness.jpg)
+  <figcaption>The thickness of the fills. Left, the implicit model stays in the drawn outline. Right, kriging takes the three boreholes for a
+  layer and spreads it over 1,800 m² with 2,004 m³, twenty times too much.</figcaption>
+</figure>
+
+### Volumes, and the price of a rare unit { #implicit-volumes }
+
+`volumi.csv` has the kriging's volume beside the implicit one, but **they do not cover the same area**: the kriging stops at the margin around the
+boreholes, the implicit model covers every cell with a DEM on its grid. Compare them only after clipping to the same area. Counted on the same
+cells in the demonstration:
+
+| Unit | Kriging | Implicit |
+|---|---:|---:|
+| US 1 | 22,950 m³ | 21,784 m³ |
+| US 2 | 75,621 m³ | 45,638 m³ |
+| US 3, rare | 25,341 m³ | 67,986 m³ |
+| US 4 | 181,697 m³ | 167,194 m³ |
+| US 5, down to the floor | 280,739 m³ | 268,113 m³ |
+
+US 3 is the weak point. Seen in 5 boreholes of 21, it spreads over 46,800 m² against 9,650, because a field keeps a thickness where the unit is
+missing: the boreholes that do not see a unit do not take it away, as they do in the kriging. So its leave-one-out error is the better one and its volume
+is not to be trusted: **the error of a contact says where the contact is where it exists, not how far the unit goes**. US 2 + US 3 together are 113,600 against
+101,000 m³. To limit a unit, draw its US and read the volume of the kriging beside it.
+
+<figure markdown="span">
+  ![The solids around the pit, cut along the section](../img/plugins/geoarchaeology/implicit-solids.jpg)
+  <figcaption>The solids around the invented pit, trimmed and cut along the section, each unit closed on the cut. Vertical exaggeration x3.</figcaption>
+</figure>
+
+### More data { #implicit-data }
+
+*Contacts and orientations from a file...* reads CSV tables as the logs are read: comma, semicolon or tab, decimal point or comma, names
+in Italian or English. A new file of a kind replaces the old one.
+
+**Contacts**: a point where a unit begins, seen on a section or on the surface.
+
+```text
+unita;x;y;quota;tipo
+US 3;588,20;741,50;286,15;
+US 9;591,00;713,00;285,10;parete
+```
+
+The kind is empty, or `wall` (`parete`, `muro`, `side`) for a point of the wall of a cut. A contact of a cut is a point of its floor.
+
+**Orientations**: a dip measured.
+
+```text
+unita;x;y;z;inclinazione;immersione
+US 5;560,00;700,00;285,50;4,0;220
+```
+
+Dip in degrees from the horizontal (`dip`, `inclinazione`, `angolo`, `pendenza`), dip direction in degrees clockwise from north
+(`dip_direction`, `immersione`, `azimut`). A dip against what the boreholes say gives way to them, or is dropped with a warning; on a fill, or on a cut
+without walls, it is of no use and is left out.
+
+**Spot heights** of the program with the number of a US are contacts of that unit, without any file.
+
+A contact is not honoured exactly: the field is smooth, and it leans on contacts and spot heights. In a test two points 0.8 m under a contact seen by 16 boreholes moved it by
+a fraction of that. To change the shape of a contact, give it several points or a dip.
+
+### Warnings, and what to do { #implicit-warnings }
+
+| The text says | Meaning | What to do |
+|---|---|---|
+| *nobody drew the outline* | the plan is estimated, the volume may be over or under | draw the US of the cut |
+| *all the boreholes are near the edge* (`floor_unmeasured`) | the depth of the floor was not measured | a borehole near the middle; until then the volume is a guess |
+| *measures of the floor next to the edge are not reached* | a deep measure on a rim would dig too much in the middle | check that borehole and the outline |
+| *a measure of the floor ... is outside the outline* | it counts as if on the edge | check the position of the borehole, or the drawing |
+| *the outline is only ... m wide* | the cell is too large for that shape | build with the cell it gives |
+| *the outline measures ..., ... are left on the grid* | it leaves the grid, or the cell is large for it | a smaller cell, or surfaces with a larger margin |
+| *the boreholes ... end inside the fill* | the floor is deeper and the volume understated | deepen a borehole, or say so |
+| *fill ... with no measured top* | how far the fill reaches is not known | a borehole through it, a contact |
+| *Voxels of ... m instead of ...* | at most 200 levels; thin units are poorly drawn | a `--floor` nearer to the surface, a smaller range of heights |
+| *the contact leaves the range of heights* | it has no top in part of the grid | none needed if that part is far from your interest |
+| *no borehole has this contact with the others* | its distance from them is estimated | a borehole that sees it with the others |
+| *the boreholes do not make a plane* | across the line the contact is level | a borehole off the line, or a dip |
+| *boreholes have two units in the order opposite to the column* | the order or the logs are wrong | *Order of the units...*, the logs |
+| *the orientation ... contradicts the contact* | it would have turned the model over; left out | check its direction |
+
+### Limits { #implicit-limits }
+
+* **Narrow necks are not warned.** A neck under 5 % of the plan gives no warning (a 1.2 m neck in a 6 m ditch with a 1 m cell): look at the plan.
+* **A contact is not honoured exactly**, as above: a smooth field leans on it.
+* **An estimated edge is rough**, either way: +125 % and -54 % in tests.
+* **A floor measured at the edge only** (`floor_unmeasured`) is not a measure of the middle: a borehole at the rim of a bowl gave less than a third of the volume.
+* **A rare unit spreads**, as above.
+* **The shape of a floor is assumed.** A flat floor comes out rounded at the first quarter of its half width: a truly vertical wall is outside the range.
+* **The grid**: at most 120,000 cells and 200 levels by default. A pit should be at least several cells wide; here 9 cells, voxels of 0.13 m.
+* **Not done**: faults, folds, intrusions, editing the model by hand, ensembles.
+
 ## From the command line { #cli }
 
 The same steps with `ppg plugin geoarchaeology WHAT PROJECT ...`. Every command works on the active
@@ -690,6 +901,9 @@ ppg plugin geoarchaeology logs scavo.ppg S5 S4 S3 S2 S1 --out colonne_ns.pdf
 ppg plugin geoarchaeology model scavo.ppg --offset 600,800,0
 ppg plugin geoarchaeology model-chunk scavo.ppg --label "Units to cut"
 ppg cut-model scavo.ppg --chunk "Units to cut" --vertical 455,800,760,800 --keep both --out cut.ply
+ppg plugin geoarchaeology implicit-install
+ppg plugin geoarchaeology implicit-data scavo.ppg --contacts contatti.csv --orientations giaciture.csv
+ppg plugin geoarchaeology implicit scavo.ppg --fill "US 7=US 9" --fill "US 8=US 9" --cut "US 9=bowl"
 ppg plugin geoarchaeology export scavo.ppg geoarcheologia.gpkg
 ppg plugin geoarchaeology export scavo.ppg naturale.tif --id top_4_US_5
 ppg plugin geoarchaeology remove scavo.ppg surfaces
@@ -706,8 +920,12 @@ ppg plugin geoarchaeology remove scavo.ppg surfaces
 | `logs PROJECT [CODES...]` | the boreholes (all when none is given); `--out` an `.svg`, `.png` or `.pdf` file, otherwise `logs/<borehole>` for one borehole and `logs/colonne_<boreholes>` for a panel; `--vertical` auto, elevation, depth; `--scale` |
 | `model PROJECT` | `--cell` m; `--no-clip`; `--floor` elevation; `--no-last` leaves the last unit out; `--offset X,Y,Z` subtracted from the coordinates of the OBJ (written in its header and in `unita.obj.offset.txt`); `--explode` m, the units set apart vertically in `unita_vista.ply`, the file of the 3D view |
 | `model-chunk PROJECT` | the units of the model as the model of a new chunk of the project, in the reference system of the chunk (the offset of the OBJ added back); `--label` the label of the new chunk (default *Geoarchaeological units - <chunk>*, in the language of the interface, numbered when taken); the active chunk stays the same. `ppg cut-model PROJECT --chunk LABEL ...` cuts it, every unit closed on the cut in its colour |
+| `implicit PROJECT` | the implicit model; `--cut UNIT=PROFILE` (flat, bowl, v), `--fill FILL=CUT`, both repeated; `--cell` m; `--folds` (12, at most; 0 none); `--series "US 2=depth,US 5=elevation"`; `--floor` elevation; `--explode` m |
+| `implicit-data PROJECT` | `--contacts` and `--orientations`, CSV files |
+| `implicit-status [PROJECT]` | where LoopStructural runs; with a project, the last implicit model |
+| `implicit-install` | LoopStructural in an environment of the plugin; `--force` also when this Python has it, or again |
 | `export PROJECT OUT` | a GeoPackage with the GeoTIFFs and the volumes beside it; with `--id` (an id shown by `list`, such as `top_4_US_5` or `thickness_US_2`) one surface as GeoTIFF |
-| `remove PROJECT [WHAT]` | `all` (the default) or `boreholes`: everything of the plugin in the chunk; `surfaces`, `sections`, `model`; the code of a borehole or the name of a section |
+| `remove PROJECT [WHAT]` | `all` (the default) or `boreholes`: everything of the plugin in the chunk; `surfaces`, `sections`, `model`, `implicit`; the code of a borehole or the name of a section |
 
 Large coordinates (UTM) lose precision in some 3D programs: `--offset` with round numbers near the
 site keeps those of the OBJ small; the PLY files keep the true coordinates.
@@ -804,7 +1022,7 @@ DEM*). The last unit has no thickness. The 3D model gives the same volumes on it
   even where the unit may still be there: no other borehole says otherwise.
 * **Wide spacing.** With boreholes 30-60 m apart, the tops of the units inside the mound of the
   demonstration were 1-2 m off (95 % of the errors).
-* **A stack of layers.** Units side by side, pits and walls are not modelled as such.
+* **A stack of layers.** Units side by side, pits and walls are not modelled as such: pits and ditches are the [implicit model](#implicit).
 * **No extrapolation.** The surfaces stop at the margin around the boreholes.
 * **Few boreholes.** Under five boreholes (or the number set) a contact is interpolated by inverse
   distance, without an uncertainty.
@@ -836,6 +1054,7 @@ itself and open with it.
 * `model/<unit>.ply`, `model/unita.obj` with `unita.mtl`, `model/volumi.csv`: the solids and their
   volumes; `volumi.csv` has unit, description, volume, area, mean and largest thickness, lowest and
   highest top and base, cells, clipped, down to the floor, volume and area where there is no DEM.
+* `implicit/top_<k>_<unit>.tif`: the surfaces of the implicit model, float32, band 1 the elevation (m), band 2 the jackknife variance (m²), band 3 implicit minus kriging (m); `implicit/data/` the files of contacts and orientations. `model/` is then that of the implicit model, and `volumi.csv` has also `method`, `kriging_m3`, `range_min`, `range_max`.
 * `model/unita_vista.ply`: all the units in one PLY for the program's 3D view, in the internal frame
   of the chunk (for a large model the program writes a lighter copy beside it, `model_preview.ply`).
 
