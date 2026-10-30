@@ -800,7 +800,7 @@ measured only beside the edge says nothing of the middle (`floor_unmeasured`), a
 A field keeps a thickness everywhere, so a unit seen in a few boreholes would spread over the whole site. The model applies the rule of the
 kriging: the boreholes vote for the unit by inverse distance, those that pass it by against, and where those without it win it is not
 there, with a vertical edge; a thickness the kriging can tell from none stays. A borehole inside a cut does not vote against what the cut took away.
-Where a unit is not, its voxels go to the layer under it, and the summary says from how many cells it was taken. There is no warning: it is the normal
+Where a unit is not, its voxels go to the nearest layer above it in its series that is there, so the top of the layer under it stays where its own boreholes put it; with no layer above in the series they go to the layer under it. Fills and the inside of cuts neither give nor take. The summary says from how many cells a unit was taken. There is no warning: it is the normal
 working of the model. In the demonstration US 3, seen in 5 boreholes of 21, covers 10,368 m² against the kriging's 9,647; without this rule it covered 59,600 m².
 
 `volumi.csv` has `kriging_m3` and `same_cells_m3`: the volume of each method on the cells both have. The kriging stops at the margin around the
@@ -809,14 +809,14 @@ boreholes, the implicit model covers every cell with a DEM on its grid, so `volu
 
 | Unit | Kriging | Implicit, same cells | Implicit, all of it (`volume_m3`) |
 |---|---:|---:|---:|
-| US 1 | 22,974 m³ | 21,793 m³ | 28,102 m³ |
-| US 2 | 75,705 m³ | 45,465 m³ | 60,602 m³ |
+| US 1 | 22,974 m³ | 21,981 m³ | 28,321 m³ |
+| US 2 | 75,705 m³ | 93,071 m³ | 117,297 m³ |
 | US 3, rare | 25,341 m³ | 20,466 m³ | 20,466 m³ |
-| US 4 | 181,703 m³ | 208,931 m³ | 217,052 m³ |
-| US 5, down to the base of the model | 263,288 m³ | 274,179 m³ | 378,837 m³ |
+| US 4 | 181,703 m³ | 167,112 m³ | 167,133 m³ |
+| US 5, down to the base of the model | 263,288 m³ | 268,203 m³ | 371,841 m³ |
 
-The whole deposit above the natural differs by 3 % (305,723 against 296,655 m³), single units by much more. Where US 3 is not, its space goes to the layer under
-it, so US 4 takes what the boreholes give to US 2: US 2 is 40 % under the kriging and US 4 15 % over. Trust the volume of the deposit before those of its units, and a leave-one-out error
+The whole deposit above the natural differs by 1 % (305,723 against 302,630 m³), single units by up to 23 %: where US 3 is not, US 2 takes its space, and it is 23 % over the
+kriging, US 3 19 % under, US 4 8 % under. Trust the volume of the deposit before those of its units, and a leave-one-out error
 for where a contact is where it exists, not for how far the unit goes.
 
 <figure markdown="span">

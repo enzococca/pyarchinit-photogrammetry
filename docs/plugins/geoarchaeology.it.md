@@ -808,7 +808,7 @@ fondo misurato solo accanto al bordo non dice nulla del centro (`floor_unmeasure
 Un campo tiene uno spessore ovunque, quindi un'unità vista in pochi sondaggi si allargherebbe su tutto il sito. Il modello applica la regola del
 kriging: i sondaggi votano per l'unità per inverso della distanza, quelli che la attraversano senza trovarla contro, e dove prevalgono quelli senza l'unità non c'è, con un
 bordo verticale; uno spessore che il kriging distingue da zero resta. Un sondaggio dentro un taglio non vota contro quello che il taglio ha portato via.
-Dove un'unità non c'è, i suoi voxel passano allo strato sotto, e il riepilogo dice da quante celle è stata tolta. Non c'è un avviso: è il funzionamento normale del
+Dove un'unità non c'è, i suoi voxel passano allo strato più vicino sopra di lei nella sua serie che lì c'è, così il tetto dello strato sotto resta dove lo hanno messo i suoi sondaggi; senza uno strato sopra nella serie passano allo strato sotto. Riempimenti e interno dei tagli non danno e non prendono. Il riepilogo dice da quante celle un'unità è stata tolta. Non c'è un avviso: è il funzionamento normale del
 modello. Nella dimostrazione US 3, vista in 5 sondaggi su 21, copre 10.368 m² contro i 9.647 del kriging; senza questa regola ne copriva 59.600.
 
 `volumi.csv` ha `kriging_m3` e `same_cells_m3`: il volume di ciascun metodo sulle celle che hanno entrambi. Il kriging si ferma al margine intorno ai
@@ -817,14 +817,14 @@ riepilogo. Sui 73.834 m² della dimostrazione:
 
 | Unità | Kriging | Implicito, stesse celle | Implicito, tutto (`volume_m3`) |
 |---|---:|---:|---:|
-| US 1 | 22.974 m³ | 21.793 m³ | 28.102 m³ |
-| US 2 | 75.705 m³ | 45.465 m³ | 60.602 m³ |
+| US 1 | 22.974 m³ | 21.981 m³ | 28.321 m³ |
+| US 2 | 75.705 m³ | 93.071 m³ | 117.297 m³ |
 | US 3, rara | 25.341 m³ | 20.466 m³ | 20.466 m³ |
-| US 4 | 181.703 m³ | 208.931 m³ | 217.052 m³ |
-| US 5, fino alla base del modello | 263.288 m³ | 274.179 m³ | 378.837 m³ |
+| US 4 | 181.703 m³ | 167.112 m³ | 167.133 m³ |
+| US 5, fino alla base del modello | 263.288 m³ | 268.203 m³ | 371.841 m³ |
 
-Tutto il deposito sopra il naturale differisce del 3 % (305.723 contro 296.655 m³), le singole unità molto di più. Dove US 3 non c'è, il suo spazio passa allo strato
-sotto, così US 4 prende quello che i sondaggi danno a US 2: US 2 è il 40 % sotto il kriging e US 4 il 15 % sopra. Fidati del volume del deposito prima che di quelli delle
+Tutto il deposito sopra il naturale differisce dell'1 % (305.723 contro 302.630 m³), le singole unità fino al 23 %: dove US 3 non c'è, il suo spazio passa a US 2, che è il
+23 % sopra il kriging, US 3 il 19 % sotto, US 4 l'8 % sotto. Fidati del volume del deposito prima che di quelli delle
 sue unità, e dell'errore leave-one-out per dov'è un contatto dove esiste, non per fin dove arriva l'unità.
 
 <figure markdown="span">
