@@ -123,7 +123,12 @@ punti). Rimuovere una faccia la toglie dal muro. Il suo prospetto resta nel prog
   cercato intorno all'asse a quella quota. L'asse che passa per i loro centri dà inclinazione, direzione e cm/m; ogni
   quota dà il suo raggio, l'arco coperto e il fuori tondo (l'escursione del raggio fra il 0,5° e il 99,5°
   percentile). La sezione orizzontale di un cilindro inclinato è un'ellisse: a 8° di inclinazione il fuori tondo vale
-  circa l'1 % del raggio per sola geometria.
+  circa l'1 % del raggio per sola geometria. Un anello resta fuori dall'asse quando non è della torre: fuori tondo
+  molto più degli altri (oltre il 15 % del raggio o tre volte l'anello più tondo), o con un raggio che si scosta di
+  più del 20 % dagli altri (il terreno, un crollo, una terrazza tagliati da quella sezione). Con meno di due anelli
+  rimasti, o quando i centri scivolano di più di tan 10° per metro di altezza (anelli tirati di lato da un crollo),
+  l'asse non viene dato: la sintesi dice perché ed elenca le quote da evitare, così tagli più in alto, e la tabella
+  del raggio per quota resta.
 - **Due rilievi**: la superficie del modello dell'altro chunk sulla stessa griglia della faccia. La differenza viene
   scritta come raster (cm, positiva dove l'altro rilievo sta verso chi guarda), con la mediana e il 90° percentile del
   suo valore assoluto.
@@ -248,7 +253,9 @@ attesa: *USM 2 copre USM 1*.
 
 - **Tavola...**: SVG e PDF alla scala normalizzata più dettagliata in cui la faccia sta in un foglio A3 (o alla scala
   che scegli). Mostra ortofoto, pietre, filari, USM con il numero, linee delle sezioni e quote, con le curve dello
-  spanciamento (lisciate su 5 cm) se le vuoi. Ha la barra di scala e il cartiglio con faccia, muro, scala, data e
+  spanciamento (lisciate su 5 cm) se le vuoi: lo spanciamento è disegnato al 45 % sopra l'ortofoto e il passo delle
+  curve è scelto perché ci siano al massimo 12 livelli nel suo intervallo (la legenda dice il passo). Si numerano solo
+  i filari veri. Ha la barra di scala e il cartiglio con faccia, muro, scala, data e
   misure.
 - **Esporta tutto...**, in una sola cartella:
   - la tavola;
@@ -313,7 +320,9 @@ ppg plugin masonry list|remove PROGETTO ["Muro nord" [FACCIA]] [--elevations]
   copre più celle del muro diventa lui la faccia: disegna la faccia intorno.
 - Due archi che stanno sullo stesso cerchio non si distinguono per geometria: una struttura che condivide il cerchio
   dell'anello (un tratto crollato, un muro posteriore sulla stessa linea) conta come anello nel cerchio e nell'arco
-  coperto. L'asse di una torre è protetto dall'anello trovato alla quota sotto.
+  coperto. Vi si unisce anche una curva del terreno che corre lungo l'anello dentro la sua fascia (una terrazza, un
+  piede più largo): è la stessa geometria di una torre a scarpa, quindi il raggio a livello del suolo può essere
+  quello della terrazza. Taglia sopra il terreno e il crollo.
 - Due facce si accoppiano in un muro IFC solo dove il modello fra loro è pieno a metà altezza. Una faccia non ancora
   misurata prende la superficie dal rilievo del prospetto; dove il rilievo non ha un valore nel punto campionato si
   usa il piano della faccia, e un muro a scarpa molto inclinato può venire rifiutato finché non ci lanci **Forma**.

@@ -119,7 +119,12 @@ points). Removing a face takes it out of the wall. Its elevation stays in the pr
   and looked for around the axis at that height. The axis through their centres gives its inclination, direction
   and cm/m; each height gives its radius, the arc covered and the out-of-round (the spread of the radius, 0.5th to
   99.5th percentile). A horizontal slice of a leaning cylinder is an ellipse: at 8° of lean the out-of-round reads
-  about 1 % of the radius by geometry alone.
+  about 1 % of the radius by geometry alone. A ring is left out of the axis when it is not the tower's: out of
+  round far beyond the other rings (more than 15 % of the radius or three times the roundest ring), or with a
+  radius more than 20 % from the others' (the ground, a collapse, a terrace cut by that slice). With fewer than two
+  rings left, or when the centres drift by more than tan 10° per metre of height (rings pulled sideways by a
+  collapse), no axis is given: the summary says why and lists the heights to avoid, so you can slice higher, and
+  the table of radius by height is kept.
 - **Two surveys**: the surface of the other chunk's model on the same face grid. The difference is written as a raster
   (cm, positive where the other survey stands towards the viewer), with its median and the 90th percentile of its
   size.
@@ -242,7 +247,9 @@ In the example the two units, the coursed wall and the rubble lying on its whole
 
 - **Plate...**: SVG and PDF at the most detailed standard scale at which the face fits an A3 sheet (or the scale you
   choose). It shows the orthophoto, stones, courses, USM with their numbers, section lines and spot heights, with
-  bulge contours (smoothed over 5 cm) if you want them. It has a scale bar and a title block with the face, the wall,
+  bulge contours (smoothed over 5 cm) if you want them: the bulge is drawn at 45 % over the orthophoto and the
+  contour step is chosen so that there are at most 12 levels over its range (the legend says the step). Only real
+  courses are numbered. It has a scale bar and a title block with the face, the wall,
   the scale, the date and the measures.
 - **Export all...**, into one folder:
   - the plate;
@@ -305,8 +312,9 @@ ppg plugin masonry list|remove PROJECT ["North wall" [FACE]] [--elevations]
   takes fewer cells than the face; a set-back closer than that is part of the face and shows in the bulge, and an
   obstacle that covers more of the face than the wall becomes the face: draw the face around it.
 - Two arcs that lie on one circle cannot be told apart by geometry: a structure that shares the ring's circle (a
-  collapsed stretch, a later wall on the same line) counts as ring in the circle and in the arc covered. The axis of
-  a tower is guarded by the ring found at the height below.
+  collapsed stretch, a later wall on the same line) counts as ring in the circle and in the arc covered. A ground
+  contour that runs along the ring within its band (a terrace, a wider foot) joins it too: that is the same geometry
+  as a battered tower, so the radius at ground level may be the terrace's. Slice above the ground and the collapse.
 - Two faces are paired into one IFC wall only where the model between them is solid at mid-height. A face not yet
   measured takes its surface from the elevation's relief; where the relief has no value at the sampled point the
   face's plane is used, and a heavily battered wall may be refused until **Shape** has run on it.
