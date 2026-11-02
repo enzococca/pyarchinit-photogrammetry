@@ -72,7 +72,13 @@ tools work on it: stones, US drawing, QGIS, exports.
 - **On a plane**: the vertical plane through the two points you trace on the plan, limited to the stretch between
   them, seen from the side of the photos (or the side you choose). On this face `v` is the height.
 - **On a cylinder**: through three or more points of the plan, or the circle fitted to the horizontal slice of the
-  model at a height. You see it from outside (a round tower) or from inside (a well, an apse).
+  model at a height. The circle is fitted to every piece of the slice (a ruined ring comes in several arcs): the
+  circle that covers the widest arc wins, then the fit is refined on the whole ring, so an oval tower gives its mean
+  circle. The summary gives the arc covered and the number of pieces; an arc under 90° is refused. You see the face
+  from outside (a round tower) or from inside (a well, an apse). Its depth band is 15 % of the radius on each side
+  (0.5 m at least), so a battered tower stays within it; the resolution proposed is the model's own (its median
+  edge, never finer than 1 mm) and a face that would exceed 20 000 px on a side is refused with the resolution that
+  fits (`--force` on the command line builds it anyway).
 - **Polygonal tower**: the outline of the slice at a height is simplified into a polygon. Each side longer than the
   minimum (0.5 m by default) becomes a face on its own plane, seen from outside.
 
@@ -92,6 +98,12 @@ points). Removing a face takes it out of the wall. Its elevation stays in the pr
 
 - **Fit**: the plane (or, on a cylinder, the cylinder) is fitted by least squares with Huber's weight to the model's
   surface within the face. A lamp, a pole or a patch of plants counts less than the wall without being thrown away.
+  The summary says when the surface is not what was fitted: a plane whose residual (rms) exceeds 5 cm or 2 % of
+  the face's height "is not plane"; a cylinder whose rms exceeds 10 cm or 2 % of the radius, or whose rings (five
+  slices over the face) are out of round by more than 10 cm or 5 % of the radius, "is not a cylinder (oval or
+  battered)", with the radius and the out-of-round by height; a cylinder whose radius disagrees with its rings by
+  that much was fitted to something else in the band (narrow it). In those cases the lean is marked **not
+  reliable** in the summary, on the plate and in the IFC, and the bulge is the distance from the best surface.
 - **Lean**: the tilt of the fitted plane from the vertical, in degrees and in cm/m. It comes with the azimuth the top
   goes towards, and whether that is towards the viewer (overhang) or away from them.
 - **Bulge**: a raster on the face's grid (`bulge.tif`, cm). It is the distance of the surface from the fit, positive
@@ -101,10 +113,13 @@ points). Removing a face takes it out of the wall. Its elevation stays in the pr
   one SVG (drawn along the face, with the depth exaggerated). The offsets between them are measured at stations along
   the face, towards the viewer, from the lowest section that meets the face (the text says which when it is not the
   lowest). At each station the plugin takes the surface the face sees, never the back of a thick wall: a trace
-  clicked on the wall's axis gives the same offsets, and the summary says that the trace is not on the face.
-- **Axis of a round tower**: the circles fitted to the slices at several heights. The axis through their centres gives
-  its inclination, direction and cm/m; each height gives its radius and out-of-round (the spread of the radius,
-  0.5th to 99.5th percentile).
+  clicked on the wall's axis gives the same offsets, and the summary says that the trace is not on the face. The
+  sections look for the face as far as its depth band (1 m at least), so a battered wall is met at every height.
+- **Axis of a round tower**: the circles fitted to the slices at several heights, each on every piece of its ring
+  and looked for around the axis at that height. The axis through their centres gives its inclination, direction
+  and cm/m; each height gives its radius, the arc covered and the out-of-round (the spread of the radius, 0.5th to
+  99.5th percentile). A horizontal slice of a leaning cylinder is an ellipse: at 8° of lean the out-of-round reads
+  about 1 % of the radius by geometry alone.
 - **Two surveys**: the surface of the other chunk's model on the same face grid. The difference is written as a raster
   (cm, positive where the other survey stands towards the viewer), with its median and the 90th percentile of its
   size.
@@ -289,6 +304,9 @@ ppg plugin masonry list|remove PROJECT ["North wall" [FACE]] [--elevations]
 - A second surface, behind the face or in front of it, is set aside when it is more than 10 cm from the face and
   takes fewer cells than the face; a set-back closer than that is part of the face and shows in the bulge, and an
   obstacle that covers more of the face than the wall becomes the face: draw the face around it.
+- Two arcs that lie on one circle cannot be told apart by geometry: a structure that shares the ring's circle (a
+  collapsed stretch, a later wall on the same line) counts as ring in the circle and in the arc covered. The axis of
+  a tower is guarded by the ring found at the height below.
 - Two faces are paired into one IFC wall only where the model between them is solid at mid-height. A face not yet
   measured takes its surface from the elevation's relief; where the relief has no value at the sampled point the
   face's plane is used, and a heavily battered wall may be refused until **Shape** has run on it.

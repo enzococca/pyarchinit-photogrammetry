@@ -73,7 +73,13 @@ sopra funzionano gli strumenti del programma: pietre, disegno delle US, QGIS, es
 - **Su un piano**: il piano verticale per i due punti tracciati in pianta, limitato al tratto fra i due punti, visto
   dalla parte delle foto (o dalla parte che scegli). Su questa faccia `v` è la quota.
 - **Su un cilindro**: per tre o più punti in pianta, o il cerchio adattato alla sezione orizzontale del modello a una
-  quota. Lo vedi da fuori (una torre tonda) o da dentro (un pozzo, un'abside).
+  quota. Il cerchio si adatta a tutti i pezzi della sezione (un anello in rovina arriva in più archi): vince il
+  cerchio che copre l'arco più ampio, poi l'adattamento si rifinisce sull'anello intero, così una torre ovale dà il
+  suo cerchio medio. La sintesi dà l'arco coperto e il numero dei pezzi; un arco sotto i 90° viene rifiutato. La
+  faccia la vedi da fuori (una torre tonda) o da dentro (un pozzo, un'abside). La sua fascia di profondità è il 15 %
+  del raggio per parte (almeno 0,5 m), così una torre a scarpa ci sta dentro; la risoluzione proposta è quella del
+  modello (il suo lato mediano, mai sotto 1 mm) e una faccia che supererebbe i 20 000 px su un lato viene rifiutata
+  con la risoluzione che ci sta (`--force` da riga di comando la costruisce lo stesso).
 - **Torre poligonale**: il contorno della sezione a una quota viene semplificato in un poligono. Ogni lato più lungo
   del minimo (0,5 m di base) diventa una faccia sul suo piano, vista da fuori.
 
@@ -94,7 +100,13 @@ punti). Rimuovere una faccia la toglie dal muro. Il suo prospetto resta nel prog
 
 - **Adattamento**: il piano (o, su un cilindro, il cilindro) viene adattato ai minimi quadrati con il peso di Huber
   alla superficie del modello dentro la faccia. Un lampione, un palo o un ciuffo d'erba contano meno del muro senza
-  essere buttati via.
+  essere buttati via. La sintesi dice quando la superficie non è quella adattata: un piano con residuo (rms) oltre
+  5 cm o il 2 % dell'altezza della faccia "non è piano"; un cilindro con rms oltre 10 cm o il 2 % del raggio, o i
+  cui anelli (cinque sezioni lungo la faccia) sono fuori tondo di più di 10 cm o del 5 % del raggio, "non è un
+  cilindro (ovale o a scarpa)", con raggio e fuori tondo per quota; un cilindro il cui raggio non concorda con i suoi
+  anelli di altrettanto è stato adattato ad altro dentro la fascia (restringila). In questi casi lo strapiombo è
+  segnato **non affidabile** nella sintesi, sulla tavola e nell'IFC, e lo spanciamento è la distanza dalla superficie
+  migliore.
 - **Strapiombo**: l'inclinazione del piano adattato rispetto alla verticale, in gradi e in cm/m. Viene con l'azimut
   verso cui va la sommità, e con il verso: verso chi guarda (strapiombo) o all'indietro.
 - **Spanciamento**: un raster sulla griglia della faccia (`bulge.tif`, cm). È la distanza della superficie dalla
@@ -104,10 +116,14 @@ punti). Rimuovere una faccia la toglie dal muro. Il suo prospetto resta nel prog
   un SVG (disegnato lungo la faccia, con la profondità esagerata). Gli scarti fra loro si misurano a stazioni lungo la
   faccia, verso chi guarda, dalla sezione più bassa che incontra la faccia (il testo dice quale se non è la più
   bassa). A ogni stazione il plugin prende la superficie che la faccia vede, mai il retro di un muro spesso: una
-  traccia cliccata sull'asse del muro dà gli stessi scarti, e la sintesi dice che la traccia non è sulla faccia.
-- **Asse di una torre tonda**: i cerchi adattati alle sezioni a più quote. L'asse che passa per i loro centri dà
-  inclinazione, direzione e cm/m; ogni quota dà il suo raggio e il fuori tondo (l'escursione del raggio fra il 0,5° e
-  il 99,5° percentile).
+  traccia cliccata sull'asse del muro dà gli stessi scarti, e la sintesi dice che la traccia non è sulla faccia. Le
+  sezioni cercano la faccia fin dove arriva la sua fascia di profondità (almeno 1 m), così un muro a scarpa viene
+  incontrato a ogni quota.
+- **Asse di una torre tonda**: i cerchi adattati alle sezioni a più quote, ognuno su tutti i pezzi del suo anello e
+  cercato intorno all'asse a quella quota. L'asse che passa per i loro centri dà inclinazione, direzione e cm/m; ogni
+  quota dà il suo raggio, l'arco coperto e il fuori tondo (l'escursione del raggio fra il 0,5° e il 99,5°
+  percentile). La sezione orizzontale di un cilindro inclinato è un'ellisse: a 8° di inclinazione il fuori tondo vale
+  circa l'1 % del raggio per sola geometria.
 - **Due rilievi**: la superficie del modello dell'altro chunk sulla stessa griglia della faccia. La differenza viene
   scritta come raster (cm, positiva dove l'altro rilievo sta verso chi guarda), con la mediana e il 90° percentile del
   suo valore assoluto.
@@ -295,6 +311,9 @@ ppg plugin masonry list|remove PROGETTO ["Muro nord" [FACCIA]] [--elevations]
 - Una seconda superficie, dietro la faccia o davanti, si mette da parte se sta a più di 10 cm dalla faccia e prende
   meno celle di lei; un arretramento minore fa parte della faccia e si vede nello spanciamento, e un ostacolo che
   copre più celle del muro diventa lui la faccia: disegna la faccia intorno.
+- Due archi che stanno sullo stesso cerchio non si distinguono per geometria: una struttura che condivide il cerchio
+  dell'anello (un tratto crollato, un muro posteriore sulla stessa linea) conta come anello nel cerchio e nell'arco
+  coperto. L'asse di una torre è protetto dall'anello trovato alla quota sotto.
 - Due facce si accoppiano in un muro IFC solo dove il modello fra loro è pieno a metà altezza. Una faccia non ancora
   misurata prende la superficie dal rilievo del prospetto; dove il rilievo non ha un valore nel punto campionato si
   usa il piano della faccia, e un muro a scarpa molto inclinato può venire rifiutato finché non ci lanci **Forma**.
