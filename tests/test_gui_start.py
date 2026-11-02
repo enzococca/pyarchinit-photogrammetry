@@ -279,3 +279,37 @@ def test_numbers_stay_in_the_c_locale(qapp):
     assert locale.localeconv()["decimal_point"] == ","
     ppg_launcher.c_numbers()
     assert locale.localeconv()["decimal_point"] == "."
+
+
+def test_the_check_says_what_the_assistant_finds(monkeypatch):
+    """``--check`` names the Claude SDK, the backend of the keyring and the guide of the assistant: a keyring without
+    a backend is no failure, the SDK missing fails only the packaged application, the guide missing always."""
+    import builtins
+
+    import keyring
+
+    from pyarchinit_photogrammetry.assistant import knowledge
+    from pyarchinit_photogrammetry.gui import check_assistant
+
+    text, ok = check_assistant(frozen=True)
+    assert ok and "anthropic" in text and "keyring" in text and "guide" in text
+
+    def no_backend():
+        raise RuntimeError("No recommended backend was available")
+
+    monkeypatch.setattr(keyring, "get_keyring", no_backend)
+    text, ok = check_assistant(frozen=True)
+    assert ok and "keyring no backend" in text
+    real_import = builtins.__import__
+
+    def without_anthropic(name, *args, **kwargs):
+        if name == "anthropic":
+            raise ImportError("No module named 'anthropic'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_anthropic)
+    assert check_assistant(frozen=True)[1] is False and check_assistant(frozen=False)[1] is True
+    monkeypatch.setattr(builtins, "__import__", real_import)
+    monkeypatch.setattr(knowledge, "default_index", lambda lang: knowledge.Index([], lang))
+    text, ok = check_assistant(frozen=False)
+    assert not ok and "guide missing" in text
